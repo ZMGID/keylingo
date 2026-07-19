@@ -3162,6 +3162,11 @@ body {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .kv-input::placeholder { color: var(--text-faint); }
+/* 隐藏 Edge/WebView2 原生密码可见性按钮，避免与自定义 Eye 按钮重复 */
+.kv-input[type="password"]::-ms-reveal,
+.kv-input[type="password"]::-ms-clear {
+  display: none;
+}
 .kv-input.mono,
 .kv-textarea.mono {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
