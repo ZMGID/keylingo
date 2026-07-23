@@ -804,30 +804,16 @@ pub async fn call_vision_api(
         let result =
             stream_with_chat_provider(state.inner(), provider, retry_attempts, request, &mut sink)
                 .await;
-        let full = sink.full_text().trim().to_string();
-        let emit_done = |reason: &str| {
-            let _ = app.emit(
-                event_name,
-                serde_json::json!({
-                  "imageId": image_id,
-                  "kind": stream_kind,
-                  "delta": "",
-                  "done": true,
-                  "reason": reason,
-                  "full": full,
-                }),
-            );
-        };
         return match result {
             // 正常结束：done 事件已由 sink 的 Finish 分支发出。
             Ok(output) => Ok(output.text.trim().to_string()),
             // 取消不是错误：emit done("cancelled")，返回已累积的部分文本。
             Err(err) if err.is_cancelled() => {
-                emit_done("cancelled");
-                Ok(full)
+                sink.emit_done("cancelled");
+                Ok(sink.full_text().trim().to_string())
             }
             Err(err) => {
-                emit_done("error");
+                sink.emit_done("error");
                 Err(err.to_string())
             }
         };
@@ -890,29 +876,15 @@ pub async fn stream_chat_call(
     let result =
         stream_with_chat_provider(state.inner(), provider, retry_attempts, request, &mut sink)
             .await;
-    let full = sink.full_text().trim().to_string();
-    let emit_done = |reason: &str| {
-        let _ = app.emit(
-            event_name,
-            serde_json::json!({
-              "imageId": image_id,
-              "kind": kind,
-              "delta": "",
-              "done": true,
-              "reason": reason,
-              "full": full,
-            }),
-        );
-    };
     match result {
         // 正常结束：done 事件已由 sink 的 Finish 分支发出。
         Ok(output) => Ok(output.text.trim().to_string()),
         Err(err) if err.is_cancelled() => {
-            emit_done("cancelled");
-            Ok(full)
+            sink.emit_done("cancelled");
+            Ok(sink.full_text().trim().to_string())
         }
         Err(err) => {
-            emit_done("error");
+            sink.emit_done("error");
             Err(err.to_string())
         }
     }
@@ -1043,6 +1015,18 @@ impl<'a, F: FnMut(serde_json::Value) + Send> LensEventSink<'a, F> {
         &self.full
     }
 
+    /// 发出 done 事件（reason: "done"/"cancelled"/"error"）。Finish 分支与调用方收尾共用。
+    pub(crate) fn emit_done(&mut self, reason: &str) {
+        (self.emit_event)(serde_json::json!({
+          "imageId": self.image_id,
+          "kind": self.kind,
+          "delta": "",
+          "done": true,
+          "reason": reason,
+          "full": self.full.trim(),
+        }));
+    }
+
     fn is_stale(&self) -> bool {
         self.generation_atom.load(Ordering::SeqCst) != self.my_generation
     }
@@ -1075,14 +1059,7 @@ impl<F: FnMut(serde_json::Value) + Send> StreamSink for LensEventSink<'_, F> {
                 }));
             }
             StreamPart::Finish { .. } => {
-                (self.emit_event)(serde_json::json!({
-                  "imageId": self.image_id,
-                  "kind": self.kind,
-                  "delta": "",
-                  "done": true,
-                  "reason": "done",
-                  "full": self.full.trim(),
-                }));
+                self.emit_done("done");
             }
             StreamPart::Error { message } => return Err(ModelError::new(message)),
             // 不传 tools，ToolCall* 不会出现。
