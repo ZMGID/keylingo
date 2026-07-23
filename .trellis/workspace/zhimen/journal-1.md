@@ -445,3 +445,37 @@ Fixed child, Worker, OCR helper, Preview server, cache, knowledge-base lock, Mes
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: 截图标注收尾 + LaTeX \[...\] 分隔符修复
+
+**Date**: 2026-07-23
+**Task**: 截图标注收尾 + LaTeX \[...\] 分隔符修复
+**Branch**: `main`
+
+### Summary
+
+修复 issue #19：chat/Lens 的 markdown 渲染不支持 \[...\] / \(...\) LaTeX 分隔符——在 normalizeMarkdownForRender 里转成 $$/$（跳过代码块，非贪婪配对不误伤流式未闭合），补测试，实机验证四类公式渲染正常。收尾 07-20-screenshot-annotate：质量门全绿（lint/typecheck/test 310/cargo 1066 passed 0 failed，优于 baseline，0 回归），PRD 验收全满足；补 CLAUDE.md 的 lens screenshot 模式说明；归档任务。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `233c5b8` | (see git log) |
+| `615e4c1` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
