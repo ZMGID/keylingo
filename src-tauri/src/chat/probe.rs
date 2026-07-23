@@ -46,6 +46,10 @@ struct ProbeRequest {
     /// （dev 通常是仓库根），使文件工具开箱即用。
     #[serde(default)]
     cwd: Option<String>,
+    /// 会话级联网搜索模式（off/builtin/third_party），省略 = 跟随全局。
+    /// 用于无头验证内置搜索链路（任务 07-23）。
+    #[serde(default)]
+    web_search_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +180,7 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
         req.skill_id,
         req.mode,
         cwd,
+        req.web_search_mode,
     );
 
     let finished_at = chrono::Local::now().timestamp();

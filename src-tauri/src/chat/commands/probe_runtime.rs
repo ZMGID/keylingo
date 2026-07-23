@@ -22,6 +22,7 @@ pub(crate) async fn run_chat_probe(
     skill_id: Option<String>,
     mode: Option<String>,
     cwd: Option<String>,
+    web_search_mode: Option<String>,
 ) -> Result<ChatMessage, String> {
     const PROBE_PROJECT_ID: &str = "proj_kivio_probe";
     // cwd → 固定复用的「Chat Probe」项目：根设为 cwd，使文件工具（read/glob/grep）相对路径
@@ -86,6 +87,20 @@ pub(crate) async fn run_chat_probe(
         let mode = crate::chat::plan::mode_from_str(mode)?;
         conversation.agent_plan_state =
             crate::chat::plan::with_mode(&conversation.agent_plan_state, mode);
+    }
+    // 可选会话级联网搜索模式（off/builtin/third_party）：验证内置搜索链路用（任务 07-23）。
+    if let Some(ws) = web_search_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        use crate::chat::types::WebSearchMode;
+        conversation.web_search_mode = Some(match ws {
+            "off" => WebSearchMode::Off,
+            "builtin" => WebSearchMode::Builtin,
+            "third_party" => WebSearchMode::ThirdParty,
+            other => return Err(format!("invalid webSearchMode: {other}")),
+        });
     }
     let user_message = ChatMessage {
         id: format!("msg_{}", Uuid::new_v4()),

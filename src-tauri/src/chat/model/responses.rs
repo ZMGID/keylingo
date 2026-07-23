@@ -532,6 +532,11 @@ struct ResponsesStreamState {
     usage: Option<ModelUsage>,
     /// 内置搜索引用：在 `response.completed` 事件里从完整 `response.output` 一次性解析。
     web_search: Option<BuiltinWebSearch>,
+    /// grok(xAI) 特有:`web_search_call.action.sources[]` 是检索命中的 URL 列表。
+    /// 质量低于正文 `url_citation`(模型逐句引用),故只收集不直接入 citations;
+    /// `finish()` 时若整轮没有任何 url_citation(grok 搜完常直接岔去客户端 web_fetch、
+    /// 该轮不产正文注解)才把 sources 转正为 citations 兜底,保证搜索卡有来源可显示。
+    sources_fallback: Vec<WebCitation>,
 }
 
 impl ResponsesStreamState {
@@ -626,6 +631,24 @@ impl ResponsesStreamState {
             reason: reason.clone(),
             full: self.text.clone(),
         })?;
+        // grok sources 兜底:整轮没有任何正文 url_citation(grok 搜完常直接岔去客户端
+        // web_fetch,该轮不产注解)时,把检索命中的 sources URL 转正为来源,并补发一帧
+        // 快照让实时卡带上;有 url_citation 时以注解为准,sources 丢弃。
+        let citations_empty = self
+            .web_search
+            .as_ref()
+            .map(|ws| ws.citations.is_empty())
+            .unwrap_or(true);
+        if citations_empty && !self.sources_fallback.is_empty() {
+            let ws = self
+                .web_search
+                .get_or_insert_with(BuiltinWebSearch::default);
+            ws.citations = std::mem::take(&mut self.sources_fallback);
+            sink.emit(StreamPart::WebSearch {
+                queries: ws.queries.clone(),
+                citations: ws.citations.clone(),
+            })?;
+        }
         Ok(GenerateOutput {
             text: self.text,
             reasoning: non_empty(self.reasoning),
@@ -756,6 +779,27 @@ fn handle_responses_stream_event(
                             if let Some(list) = action.get("queries").and_then(Value::as_array) {
                                 for q in list.iter().filter_map(Value::as_str) {
                                     state.push_web_search_query(q);
+                                }
+                            }
+                            // grok(xAI) 特有:action.sources[] 是检索命中的 URL,先收集,
+                            // finish() 时无 url_citation 才转正为兜底来源。
+                            if let Some(sources) = action.get("sources").and_then(Value::as_array)
+                            {
+                                for source in sources {
+                                    let Some(url) = source
+                                        .get("url")
+                                        .and_then(Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|u| !u.is_empty())
+                                    else {
+                                        continue;
+                                    };
+                                    if !state.sources_fallback.iter().any(|c| c.url == url) {
+                                        state.sources_fallback.push(WebCitation {
+                                            title: String::new(),
+                                            url: url.to_string(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -991,6 +1035,9 @@ pub fn output_from_responses(
 fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch> {
     let mut result = BuiltinWebSearch::default();
     let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // grok(xAI) 特有:web_search_call.action.sources[](检索命中 URL)。仅当整个输出
+    // 没有任何正文 url_citation 时才转正为兜底来源(注解质量更高,优先)。
+    let mut sources_fallback: Vec<WebCitation> = Vec::new();
     for item in output {
         match item.get("type").and_then(Value::as_str) {
             Some("web_search_call") => {
@@ -1005,6 +1052,28 @@ fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch
                 if let Some(query) = query {
                     if !result.queries.iter().any(|existing| existing == query) {
                         result.queries.push(query.to_string());
+                    }
+                }
+                if let Some(sources) = item
+                    .get("action")
+                    .and_then(|action| action.get("sources"))
+                    .and_then(Value::as_array)
+                {
+                    for source in sources {
+                        let Some(url) = source
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|u| !u.is_empty())
+                        else {
+                            continue;
+                        };
+                        if !sources_fallback.iter().any(|c| c.url == url) {
+                            sources_fallback.push(WebCitation {
+                                title: String::new(),
+                                url: url.to_string(),
+                            });
+                        }
                     }
                 }
             }
@@ -1050,6 +1119,10 @@ fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch
             }
             _ => {}
         }
+    }
+    // 无正文注解时才用 sources 兜底(有注解则丢弃 sources,注解更准)。
+    if result.citations.is_empty() && !sources_fallback.is_empty() {
+        result.citations = sources_fallback;
     }
     if result.is_empty() {
         None
@@ -1266,6 +1339,53 @@ mod tests {
             { "type": "message", "content": [{ "type": "output_text", "text": "无搜索" }] }
         ]);
         assert!(web_search_from_responses_output(output.as_array().unwrap()).is_none());
+    }
+
+    #[test]
+    fn web_search_sources_fallback_only_without_citations() {
+        // grok(xAI):action.sources[] 是检索命中 URL。无正文 url_citation 时兜底转正;
+        // 有注解时以注解为准、sources 丢弃。
+        let sources_only = serde_json::json!([
+            { "type": "web_search_call", "action": { "type": "search", "query": "nvda close",
+                "sources": [
+                    { "type": "url", "url": "https://finance.yahoo.com/quote/NVDA/" },
+                    { "type": "url", "url": "https://finance.yahoo.com/quote/NVDA/" },
+                    { "type": "url", "url": "https://www.wsj.com/market-data/quotes/NVDA" }
+                ] } },
+            { "type": "message", "content": [{ "type": "output_text", "text": "无注解正文" }] }
+        ]);
+        let parsed = web_search_from_responses_output(sources_only.as_array().unwrap())
+            .expect("web_search present");
+        assert_eq!(parsed.citations.len(), 2, "sources 去重后兜底转正");
+        assert_eq!(parsed.citations[0].url, "https://finance.yahoo.com/quote/NVDA/");
+
+        // 有 url_citation ⇒ 注解优先,sources 不混入。
+        let with_annotation = serde_json::json!([
+            { "type": "web_search_call", "action": { "type": "search", "query": "q",
+                "sources": [ { "type": "url", "url": "https://ignored.example.com" } ] } },
+            { "type": "message", "content": [{ "type": "output_text", "text": "见[1]",
+                "annotations": [ { "type": "url_citation", "url": "https://cited.example.com", "title": "Cited" } ] }] }
+        ]);
+        let parsed = web_search_from_responses_output(with_annotation.as_array().unwrap())
+            .expect("web_search present");
+        assert_eq!(parsed.citations.len(), 1);
+        assert_eq!(parsed.citations[0].url, "https://cited.example.com");
+    }
+
+    #[test]
+    fn sse_stream_sources_fallback_when_no_citation_arrives() {
+        // 流式:web_search_call(带 sources)到达但整轮无 url_citation(grok 岔去客户端
+        // fetch 的典型形态)⇒ finish 时 sources 兜底进 citations。
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"nvda close\",\"sources\":[{\"type\":\"url\",\"url\":\"https://finance.yahoo.com/quote/NVDA/\"},{\"type\":\"url\",\"url\":\"https://www.cnbc.com/quotes/NVDA\"}]}}}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n",
+            "data: [DONE]\n",
+        );
+        let output = output_from_sse_body(body).expect("sse output");
+        let ws = output.web_search.expect("web_search present");
+        assert_eq!(ws.queries, vec!["nvda close".to_string()]);
+        assert_eq!(ws.citations.len(), 2, "无注解时 sources 兜底");
+        assert_eq!(ws.citations[0].url, "https://finance.yahoo.com/quote/NVDA/");
     }
 
     #[test]
