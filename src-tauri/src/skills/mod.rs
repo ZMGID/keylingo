@@ -247,6 +247,12 @@ pub async fn chat_skills_install_from_url(app: AppHandle, url: String) -> SkillI
 
 async fn install_skill_from_url(app: &AppHandle, url: &str) -> Result<SkillMeta, String> {
     let skills_dir = user_skills_dir(app)?;
+    download_skill_zip_into(url, &skills_dir).await
+}
+
+/// 从 GitHub 仓库 / 直链 zip 下载一个 Skill 到指定 skills 目录（解压 zip 内首个 SKILL.md 所在
+/// 文件夹到 `{skills_dir}/{id}`）。技能市场安装、URL 导入、插件自带 Skill 下载共用。
+pub async fn download_skill_zip_into(url: &str, skills_dir: &Path) -> Result<SkillMeta, String> {
     let download_url = normalize_skill_download_url(url);
     let client = crate::api::build_http_client();
     let response = client
@@ -271,7 +277,7 @@ async fn install_skill_from_url(app: &AppHandle, url: &str) -> Result<SkillMeta,
     if bytes.len() as u64 > MAX_SKILL_DOWNLOAD_BYTES {
         return Err("Skill package too large (over 50MB)".to_string());
     }
-    install_skill_zip_bytes(bytes.to_vec(), &skills_dir)
+    install_skill_zip_bytes(bytes.to_vec(), skills_dir)
 }
 
 pub fn read_skill_detail(
