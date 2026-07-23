@@ -377,6 +377,19 @@ export type ChatMcpServer = {
   }
 }
 
+/** 单个 CLI 的 MCP 扫描分组。available = 该 CLI 配置文件存在（与是否解析出 server 无关）。 */
+export type CliMcpGroup = {
+  available: boolean
+  servers: ChatMcpServer[]
+}
+
+/** 从本地 CLI 导入 MCP 的扫描结果（Claude Code / Codex / OpenCode 三组）。 */
+export type CliImportScan = {
+  claude: CliMcpGroup
+  codex: CliMcpGroup
+  opencode: CliMcpGroup
+}
+
 /** MCP 持久连接状态，与后端 McpServerState（serde tag="kind"）一一对应。 */
 export type McpServerState =
   | { kind: 'connecting' }
@@ -1800,6 +1813,8 @@ export const api = {
       'chat_mcp_import_json',
       { path },
     ),
+  /** 扫描本机已安装 CLI（Claude Code / Codex / OpenCode）的 MCP 配置，按 CLI 分组返回可导入项。 */
+  chatCliImportScan: () => invoke<CliImportScan>('chat_cli_import_scan'),
   chatMcpServerStatus: (serverId: string) =>
     invoke<McpServerStatus>('chat_mcp_server_status', { serverId }),
   chatMcpListToolDefs: (serverId: string) =>

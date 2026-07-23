@@ -48,6 +48,9 @@ ignore = "0.4"
 # 跨平台 app-data 目录定位。
 directories = "5"
 
+# 解析 Codex 的 config.toml（从本地 CLI 导入 MCP）。
+toml = "0.8"
+
 unicode-normalization = "0.1"
 
 # 工具库

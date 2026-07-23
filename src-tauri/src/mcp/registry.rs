@@ -365,6 +365,238 @@ pub fn chat_mcp_import_json(path: String) -> McpImportResult {
     }
 }
 
+/// 一个 CLI 的 MCP 扫描结果。`available` = 该 CLI 的配置文件存在（与是否解析出
+/// server 无关）；解析失败降级为 `available:true, servers:[]`，不炸整个扫描。
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CliMcpGroup {
+    available: bool,
+    servers: Vec<ChatMcpServer>,
+}
+
+/// 三个本地 CLI（Claude Code / Codex / OpenCode）的 MCP 扫描结果。
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CliImportScan {
+    claude: CliMcpGroup,
+    codex: CliMcpGroup,
+    opencode: CliMcpGroup,
+}
+
+/// Codex `~/.codex/config.toml` 的 `[mcp_servers.<name>]` 子表（全 stdio）。
+/// 忽略 `enabled` / `startup_timeout_sec` 等字段。
+#[derive(Debug, Deserialize)]
+struct CodexMcpServer {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexConfig {
+    #[serde(default)]
+    mcp_servers: HashMap<String, CodexMcpServer>,
+}
+
+/// OpenCode `~/.config/opencode/opencode.json` 的 `mcp.<name>`。
+/// `type:"local"` → stdio（`command` 是 `[cmd, ...args]` 数组）；
+/// `type:"remote"` → streamable_http（`url` + `headers`）。
+#[derive(Debug, Deserialize)]
+struct OpencodeMcpServer {
+    #[serde(default, rename = "type")]
+    server_type: Option<String>,
+    #[serde(default)]
+    command: Vec<String>,
+    #[serde(default)]
+    environment: HashMap<String, String>,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpencodeConfig {
+    #[serde(default)]
+    mcp: HashMap<String, OpencodeMcpServer>,
+}
+
+/// 组装一条导入用的 `ChatMcpServer`：新 uuid、默认停用、无连接器/认证。
+fn imported_mcp_server(
+    name: String,
+    transport: String,
+    url: String,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    headers: HashMap<String, String>,
+    cwd: Option<String>,
+) -> ChatMcpServer {
+    ChatMcpServer {
+        id: format!("mcp-{}", uuid::Uuid::new_v4()),
+        name,
+        enabled: false,
+        transport,
+        url,
+        command,
+        args,
+        env,
+        headers,
+        cwd,
+        enabled_tools: Vec::new(),
+        connector_id: None,
+        auth: None,
+    }
+}
+
+/// 读 `~/.claude.json` 顶层 `mcpServers`（schema 同 Cursor mcp.json）。跳过
+/// `projects[*].mcpServers`。文件缺失 → `available:false`；解析失败 → 空组。
+fn parse_claude_mcp(home: &Path) -> CliMcpGroup {
+    let path = home.join(".claude.json");
+    if !path.exists() {
+        return CliMcpGroup::default();
+    }
+    let servers = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<CursorMcpJson>(&raw).ok())
+        .map(|parsed| {
+            parsed
+                .mcp_servers
+                .into_iter()
+                .map(|(name, server)| {
+                    imported_mcp_server(
+                        name,
+                        normalize_imported_transport(&server),
+                        server.url,
+                        server.command,
+                        server.args,
+                        server.env,
+                        server.headers,
+                        server.cwd,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CliMcpGroup {
+        available: true,
+        servers,
+    }
+}
+
+/// 读 `~/.codex/config.toml` 的 `[mcp_servers.*]`（全 stdio）。
+fn parse_codex_mcp(home: &Path) -> CliMcpGroup {
+    let path = home.join(".codex").join("config.toml");
+    if !path.exists() {
+        return CliMcpGroup::default();
+    }
+    let servers = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| toml::from_str::<CodexConfig>(&raw).ok())
+        .map(|parsed| {
+            parsed
+                .mcp_servers
+                .into_iter()
+                .map(|(name, server)| {
+                    imported_mcp_server(
+                        name,
+                        "stdio".to_string(),
+                        String::new(),
+                        server.command,
+                        server.args,
+                        server.env,
+                        HashMap::new(),
+                        server.cwd,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CliMcpGroup {
+        available: true,
+        servers,
+    }
+}
+
+/// 读 `~/.config/opencode/opencode.json` 的 `mcp.*`（local→stdio / remote→http）。
+fn parse_opencode_mcp(home: &Path) -> CliMcpGroup {
+    let path = home
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    if !path.exists() {
+        return CliMcpGroup::default();
+    }
+    let servers = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<OpencodeConfig>(&raw).ok())
+        .map(|parsed| {
+            parsed
+                .mcp
+                .into_iter()
+                .map(|(name, server)| {
+                    let is_remote = server
+                        .server_type
+                        .as_deref()
+                        .map(|kind| kind.eq_ignore_ascii_case("remote"))
+                        .unwrap_or(false);
+                    if is_remote {
+                        imported_mcp_server(
+                            name,
+                            "streamable_http".to_string(),
+                            server.url,
+                            String::new(),
+                            Vec::new(),
+                            HashMap::new(),
+                            server.headers,
+                            None,
+                        )
+                    } else {
+                        let mut parts = server.command.into_iter();
+                        let command = parts.next().unwrap_or_default();
+                        let args = parts.collect::<Vec<_>>();
+                        imported_mcp_server(
+                            name,
+                            "stdio".to_string(),
+                            String::new(),
+                            command,
+                            args,
+                            server.environment,
+                            HashMap::new(),
+                            None,
+                        )
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CliMcpGroup {
+        available: true,
+        servers,
+    }
+}
+
+/// 扫描本机已安装的 Claude Code / Codex / OpenCode 配置，解析出可导入的 MCP
+/// 服务器（按 CLI 分组）。缺配置文件 = 该组 `available:false`；单个 CLI 解析
+/// 失败降级为空组，绝不 panic、绝不返回 Err。
+#[tauri::command]
+pub fn chat_cli_import_scan() -> CliImportScan {
+    let Some(base) = directories::BaseDirs::new() else {
+        return CliImportScan::default();
+    };
+    let home = base.home_dir();
+    CliImportScan {
+        claude: parse_claude_mcp(home),
+        codex: parse_codex_mcp(home),
+        opencode: parse_opencode_mcp(home),
+    }
+}
+
 /// 单个连接器工具的元信息（名称 + 描述），给连接器详情面板的工具列表用。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1127,5 +1359,165 @@ mod tests {
             output.content,
             "src/big.txt — lines 10-11 of 100 (truncated; continue with offset=12)\n    10\tline ten\n    11\tline eleven"
         );
+    }
+
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kivio-cli-import-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create temp home");
+        dir
+    }
+
+    #[test]
+    fn parse_claude_mcp_reads_top_level_servers() {
+        let home = temp_home("claude");
+        fs::write(
+            home.join(".claude.json"),
+            r#"{
+              "mcpServers": {
+                "codegraph": {
+                  "command": "codegraph",
+                  "args": ["mcp"],
+                  "env": { "CODEGRAPH_DB": "/tmp/cg.db" }
+                }
+              },
+              "projects": {
+                "/some/path": { "mcpServers": { "should-skip": { "command": "nope" } } }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let group = parse_claude_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 1);
+        let server = &group.servers[0];
+        assert_eq!(server.name, "codegraph");
+        assert_eq!(server.transport, "stdio");
+        assert_eq!(server.command, "codegraph");
+        assert_eq!(server.args, vec!["mcp".to_string()]);
+        assert_eq!(server.env.get("CODEGRAPH_DB").map(String::as_str), Some("/tmp/cg.db"));
+        assert!(!server.enabled);
+        assert!(server.connector_id.is_none());
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_codex_mcp_reads_toml_env_subtable() {
+        let home = temp_home("codex");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex").join("config.toml"),
+            r#"
+[mcp_servers.node_repl]
+command = "node"
+args = ["--experimental-repl-await"]
+startup_timeout_sec = 20
+
+[mcp_servers.node_repl.env]
+NODE_ENV = "development"
+FOO = "bar"
+"#,
+        )
+        .unwrap();
+
+        let group = parse_codex_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 1);
+        let server = &group.servers[0];
+        assert_eq!(server.name, "node_repl");
+        assert_eq!(server.transport, "stdio");
+        assert_eq!(server.command, "node");
+        assert_eq!(server.args, vec!["--experimental-repl-await".to_string()]);
+        assert_eq!(server.env.get("NODE_ENV").map(String::as_str), Some("development"));
+        assert_eq!(server.env.get("FOO").map(String::as_str), Some("bar"));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_opencode_mcp_splits_local_command_array() {
+        let home = temp_home("opencode");
+        fs::create_dir_all(home.join(".config").join("opencode")).unwrap();
+        fs::write(
+            home.join(".config").join("opencode").join("opencode.json"),
+            r#"{
+              "mcp": {
+                "local-fs": {
+                  "type": "local",
+                  "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                  "environment": { "DEBUG": "1" }
+                },
+                "remote-svc": {
+                  "type": "remote",
+                  "url": "https://mcp.example.com/mcp",
+                  "headers": { "Authorization": "Bearer x" }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let group = parse_opencode_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 2);
+
+        let local = group.servers.iter().find(|s| s.name == "local-fs").unwrap();
+        assert_eq!(local.transport, "stdio");
+        assert_eq!(local.command, "npx");
+        assert_eq!(
+            local.args,
+            vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                "/tmp".to_string()
+            ]
+        );
+        assert_eq!(local.env.get("DEBUG").map(String::as_str), Some("1"));
+
+        let remote = group.servers.iter().find(|s| s.name == "remote-svc").unwrap();
+        assert_eq!(remote.transport, "streamable_http");
+        assert_eq!(remote.url, "https://mcp.example.com/mcp");
+        assert_eq!(remote.headers.get("Authorization").map(String::as_str), Some("Bearer x"));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parsers_return_unavailable_group_when_config_missing() {
+        let home = temp_home("missing");
+        assert!(!parse_claude_mcp(&home).available);
+        assert!(!parse_codex_mcp(&home).available);
+        assert!(!parse_opencode_mcp(&home).available);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parsers_degrade_to_empty_group_on_corrupt_config() {
+        let home = temp_home("corrupt");
+        fs::write(home.join(".claude.json"), "{ not valid json").unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(home.join(".codex").join("config.toml"), "= broken toml =").unwrap();
+        fs::create_dir_all(home.join(".config").join("opencode")).unwrap();
+        fs::write(
+            home.join(".config").join("opencode").join("opencode.json"),
+            "not json at all",
+        )
+        .unwrap();
+
+        let claude = parse_claude_mcp(&home);
+        assert!(claude.available);
+        assert!(claude.servers.is_empty());
+        let codex = parse_codex_mcp(&home);
+        assert!(codex.available);
+        assert!(codex.servers.is_empty());
+        let opencode = parse_opencode_mcp(&home);
+        assert!(opencode.available);
+        assert!(opencode.servers.is_empty());
+
+        fs::remove_dir_all(&home).ok();
     }
 }

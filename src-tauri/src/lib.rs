@@ -552,6 +552,7 @@ pub fn run() {
             mcp::registry::chat_mcp_list_tools,
             mcp::registry::chat_mcp_test_server,
             mcp::registry::chat_mcp_import_json,
+            mcp::registry::chat_cli_import_scan,
             mcp::registry::chat_mcp_server_status,
             mcp::registry::chat_mcp_list_tool_defs,
             mcp::registry::chat_mcp_reload_server,

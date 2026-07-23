@@ -3,7 +3,7 @@
 // 高级设置（Kivio 内置工具 + 工具运行参数）。取代原「设置 → MCP」页。
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { ChevronDown, FolderOpen, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { ChevronDown, FolderOpen, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { McpIcon } from '../settings/NavIcons'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
@@ -12,6 +12,7 @@ import {
   type ChatMcpServer,
   type ChatNativeToolsConfig,
   type ChatToolsConfig,
+  type CliImportScan,
   type McpServerState,
   type Settings,
 } from '../api/tauri'
@@ -79,6 +80,10 @@ export function McpCenter() {
   const [testingId, setTestingId] = useState<string | null>(null)
   const [oauthId, setOauthId] = useState<string | null>(null)
   const [testFeedback, setTestFeedback] = useState<Record<string, TestFeedback>>({})
+  const [cliScan, setCliScan] = useState<CliImportScan | null>(null)
+  const [cliScanning, setCliScanning] = useState(false)
+  const [cliSelected, setCliSelected] = useState<Set<string>>(new Set())
+  const [cliImportDone, setCliImportDone] = useState('')
   const settingsRef = useRef<Settings | null>(null)
 
   const chatTools = settings?.chatTools ?? defaultChatTools()
@@ -189,6 +194,49 @@ export function McpCenter() {
       setError(err instanceof Error ? err.message : String(err))
     }
   }, [mutateServers])
+
+  // 从本地 CLI（Claude Code / Codex / OpenCode）扫描已配置的 MCP 服务器。
+  const handleCliScan = useCallback(async () => {
+    setCliScanning(true)
+    setCliImportDone('')
+    setError('')
+    try {
+      const scan = await api.chatCliImportScan()
+      setCliScan(scan)
+      // 默认全勾。
+      const ids = new Set<string>()
+      for (const group of [scan.claude, scan.codex, scan.opencode]) {
+        for (const server of group.servers) ids.add(server.id)
+      }
+      setCliSelected(ids)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCliScanning(false)
+    }
+  }, [])
+
+  const toggleCliSelected = useCallback((id: string) => {
+    setCliSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  // 导入选中项 = 复制成 Kivio 自己的 ChatMcpServer（enabled:false，走现有安装流程）。
+  const handleCliImportSelected = useCallback(async () => {
+    if (!cliScan) return
+    const all = [...cliScan.claude.servers, ...cliScan.codex.servers, ...cliScan.opencode.servers]
+    const chosen = all.filter((server) => cliSelected.has(server.id))
+    if (chosen.length === 0) return
+    await mutateServers((list) => [...list, ...chosen])
+    setCliImportDone(`已导入 ${chosen.length} 个服务器到「已安装」。`)
+    setCliScan(null)
+    setCliSelected(new Set())
+    setView('installed')
+  }, [cliScan, cliSelected, mutateServers])
 
   const handleTest = useCallback(async (server: ChatMcpServer) => {
     setTestingId(server.id)
@@ -301,7 +349,7 @@ export function McpCenter() {
               <McpRegistryBrowser existingServers={servers} onInstall={handleInstall} />
             </div>
           ) : view === 'import' ? (
-            <div key="import" className="chat-motion-tab-in mt-5">
+            <div key="import" className="chat-motion-tab-in mt-5 space-y-4">
               <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
                 <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">导入 mcp.json</div>
                 <p className="mb-2 text-[12px] text-neutral-500 dark:text-neutral-400">从标准 mcp.json 文件批量导入服务器配置。</p>
@@ -309,6 +357,80 @@ export function McpCenter() {
                   <FolderOpen size={14} />
                   选择 mcp.json
                 </Button>
+              </div>
+
+              <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">从本地 CLI 导入</div>
+                    <p className="text-[12px] text-neutral-500 dark:text-neutral-400">
+                      扫描本机已安装的 Claude Code / Codex / OpenCode，勾选其已配置的 MCP 服务器复制到 Kivio（默认停用，可再启用）。
+                    </p>
+                  </div>
+                  <Button onClick={() => void handleCliScan()} disabled={cliScanning} data-tauri-drag-region="false">
+                    {cliScanning ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                    扫描
+                  </Button>
+                </div>
+
+                {cliScan && (
+                  <div className="mt-3 space-y-3">
+                    {([['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode']] as const).map(([key, label]) => {
+                      const group = cliScan[key]
+                      return (
+                        <div key={key}>
+                          <div className="mb-1.5 flex items-center gap-2 text-[12px] font-medium text-neutral-600 dark:text-neutral-300">
+                            {label}
+                            {!group.available && <span className="text-[11px] font-normal text-neutral-400">未检测到配置</span>}
+                          </div>
+                          {group.available && (
+                            group.servers.length === 0 ? (
+                              <div className="rounded-md border border-dashed border-neutral-200 px-3 py-2 text-[11.5px] text-neutral-400 dark:border-neutral-800">
+                                无已配置的 MCP 服务器
+                              </div>
+                            ) : (
+                              <div className="overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800 [&>*+*]:border-t [&>*+*]:border-neutral-100 dark:[&>*+*]:border-neutral-800/70">
+                                {group.servers.map((server) => {
+                                  const isHttp = server.transport === 'streamable_http'
+                                  return (
+                                    <label
+                                      key={server.id}
+                                      className="flex cursor-pointer items-center gap-2.5 px-3 py-2"
+                                      data-tauri-drag-region="false"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={cliSelected.has(server.id)}
+                                        onChange={() => toggleCliSelected(server.id)}
+                                        className="size-3.5 shrink-0 accent-[#C56646]"
+                                      />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-2">
+                                          <span className="truncate text-[12.5px] font-medium text-neutral-800 dark:text-neutral-100">{server.name}</span>
+                                          <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">{isHttp ? 'http' : 'stdio'}</span>
+                                        </div>
+                                        <div className="truncate font-mono text-[10.5px] text-neutral-400">
+                                          {isHttp ? server.url : [server.command, ...server.args].filter(Boolean).join(' ')}
+                                        </div>
+                                      </div>
+                                    </label>
+                                  )
+                                })}
+                              </div>
+                            )
+                          )}
+                        </div>
+                      )
+                    })}
+                    <Button onClick={() => void handleCliImportSelected()} disabled={cliSelected.size === 0} data-tauri-drag-region="false">
+                      导入选中 ({cliSelected.size})
+                    </Button>
+                  </div>
+                )}
+
+                {cliImportDone && (
+                  <div className="mt-2 text-[12px] text-emerald-600 dark:text-emerald-400">{cliImportDone}</div>
+                )}
               </div>
             </div>
           ) : view === 'advanced' ? (
