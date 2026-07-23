@@ -250,4 +250,34 @@ describe('ToolCallBlock', () => {
     const pre = container.querySelector('pre')
     expect(pre?.textContent).toBe(code)
   })
+
+  it('renders the built-in web search card with clickable source links', async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'web_search',
+          source: 'native',
+          status: 'success',
+          structured_content: {
+            type: 'builtin_web_search',
+            provider: 'OpenAI',
+            queries: ['kivio release'],
+            citations: [
+              { title: 'A 站', url: 'https://a.com' },
+              { title: '', url: 'https://b.com' },
+            ],
+          },
+        })}
+      />,
+    )
+    const button = screen.getByRole('button', { name: /WEB SEARCH/ })
+    expect(within(button).getByText('OpenAI')).toBeInTheDocument()
+    await user.click(button)
+    const linkA = screen.getByRole('link', { name: /A 站/ })
+    expect(linkA).toHaveAttribute('href', 'https://a.com')
+    // 缺 title 的来源回退用 url 作标题。
+    const linkB = screen.getByRole('link', { name: /b\.com/ })
+    expect(linkB).toHaveAttribute('href', 'https://b.com')
+  })
 })

@@ -10,9 +10,9 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, stream_read_error, GenerateOutput, GenerateRequest,
+    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GenerateRequest,
     LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage, ModelRole,
-    ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink,
+    ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -173,6 +173,8 @@ impl AnthropicMessagesProvider<'_> {
         let mut current_tool_input_parts: Vec<String> = Vec::new();
         let mut finish_reason = "stop".to_string();
         let mut usage: Option<ModelUsage> = None;
+        // 内置搜索引用（服务端块尽力收集，随 content_block_start 完整到达）。
+        let mut web_search: Option<BuiltinWebSearch> = None;
 
         loop {
             let chunk = response.chunk().await.map_err(|err| {
@@ -242,13 +244,17 @@ impl AnthropicMessagesProvider<'_> {
                         current_tool_name.clear();
                         current_tool_input_parts.clear();
                     }
+                    Some(AnthropicSseEvent::WebSearch(ws)) => {
+                        merge_anthropic_web_search(&mut web_search, ws);
+                    }
                     Some(AnthropicSseEvent::MessageStop) => {
                         sink.emit(StreamPart::Finish {
                             reason: finish_reason.clone(),
                             full: full.clone(),
                         })?;
-                        let output =
+                        let mut output =
                             stream_output(full, reasoning_full, tool_calls, finish_reason, usage);
+                        output.web_search = web_search;
                         self.record_usage_success(
                             &request,
                             &label,
@@ -278,8 +284,9 @@ impl AnthropicMessagesProvider<'_> {
                             reason: finish_reason.clone(),
                             full: full.clone(),
                         })?;
-                        let output =
+                        let mut output =
                             stream_output(full, reasoning_full, tool_calls, finish_reason, usage);
+                        output.web_search = web_search;
                         self.record_usage_success(
                             &request,
                             &label,
@@ -312,13 +319,15 @@ impl AnthropicMessagesProvider<'_> {
             reason: finish_reason.clone(),
             full: full.clone(),
         })?;
-        Ok(stream_output(
+        let mut output = stream_output(
             full,
             reasoning_full,
             tool_calls,
             finish_reason,
             usage,
-        ))
+        );
+        output.web_search = web_search;
+        Ok(output)
     }
 
     fn messages_url(&self) -> String {
@@ -344,20 +353,25 @@ impl AnthropicMessagesProvider<'_> {
         if stream {
             body["stream"] = Value::Bool(true);
         }
-        let tools = anthropic_tools_from_model_tools(&request.tools);
+        let mut tools = anthropic_tools_from_model_tools(&request.tools);
+        // 模型原生内置联网搜索（任务 07-23）：Anthropic 服务端工具，需组织在 Console 开启。
+        if request.options.builtin_web_search {
+            tools.push(serde_json::json!({
+                "type": "web_search_20250305",
+                "name": "web_search",
+            }));
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
-        // 思考等级（仅在用户显式选了等级时注入）。Claude 4.6+/4.7/4.8/Fable5 用
-        // adaptive thinking + output_config.effort；budget_tokens 已被移除（发了 400）。
-        if let Some(level) = request
-            .options
-            .thinking_level
-            .as_deref()
-            .filter(|l| !l.is_empty())
-        {
+        // 思考等级 → adaptive thinking + `output_config.effort`（统一走 model_metadata 单一映射源）。
+        // Claude 4.6+/4.7/4.8/Fable5;budget_tokens 已被移除（发了 400）。
+        if let Some(effort) = crate::chat::model_metadata::reasoning_effort_wire(
+            crate::settings::ProviderApiFormat::AnthropicMessages,
+            request.options.thinking_level.as_deref(),
+        ) {
             body["thinking"] = serde_json::json!({ "type": "adaptive" });
-            body["output_config"] = serde_json::json!({ "effort": level });
+            body["output_config"] = serde_json::json!({ "effort": effort });
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {
@@ -702,6 +716,7 @@ pub fn output_from_anthropic_message(
         finish_reason: Some(finish_reason),
         provider_messages: vec![provider_message],
         cancelled: false,
+        web_search: parsed.web_search,
     })
 }
 
@@ -710,12 +725,46 @@ struct AnthropicParsedResponse {
     reasoning: Option<String>,
     tool_calls: Vec<PendingToolCall>,
     finish_reason: String,
+    web_search: Option<BuiltinWebSearch>,
+}
+
+/// 从一个 `web_search_tool_result` block 的 `content[]` 收集来源到累积值（去重按 url）。
+/// 每项形如 `{type:"web_search_result", url, title}`。尽力而为，缺字段即跳过。
+fn collect_anthropic_web_search_results(block: &Value, acc: &mut BuiltinWebSearch) {
+    let Some(results) = block.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    for item in results {
+        let Some(url) = item
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if acc.citations.iter().any(|c| c.url == url) {
+            continue;
+        }
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(url)
+            .to_string();
+        acc.citations.push(WebCitation {
+            title,
+            url: url.to_string(),
+        });
+    }
 }
 
 fn parse_anthropic_response(response: &Value) -> AnthropicParsedResponse {
     let mut content_parts = Vec::new();
     let mut reasoning_parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut web_search = BuiltinWebSearch::default();
 
     if let Some(blocks) = response.get("content").and_then(|value| value.as_array()) {
         for block in blocks {
@@ -741,6 +790,27 @@ fn parse_anthropic_response(response: &Value) -> AnthropicParsedResponse {
                     {
                         reasoning_parts.push(thinking.to_string());
                     }
+                }
+                // 内置搜索：服务端工具调用（`server_tool_use`）带查询词，结果块
+                // （`web_search_tool_result`）带来源。二者都由 Anthropic 服务端产生，
+                // 不进 tool_calls（那是客户端函数工具），只收进 web_search 供卡片可视化。
+                "server_tool_use" => {
+                    if block.get("name").and_then(Value::as_str) == Some("web_search") {
+                        if let Some(query) = block
+                            .get("input")
+                            .and_then(|input| input.get("query"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                        {
+                            if !web_search.queries.iter().any(|q| q == query) {
+                                web_search.queries.push(query.to_string());
+                            }
+                        }
+                    }
+                }
+                "web_search_tool_result" => {
+                    collect_anthropic_web_search_results(block, &mut web_search);
                 }
                 "tool_use" => {
                     let id = block
@@ -791,6 +861,11 @@ fn parse_anthropic_response(response: &Value) -> AnthropicParsedResponse {
         },
         tool_calls,
         finish_reason: finish_reason_from_anthropic_stop_reason(stop_reason),
+        web_search: if web_search.is_empty() {
+            None
+        } else {
+            Some(web_search)
+        },
     }
 }
 
@@ -803,6 +878,9 @@ enum AnthropicSseEvent {
     },
     ToolInputDelta(String),
     ContentBlockStop,
+    /// 内置搜索的服务端块（`server_tool_use` 查询 / `web_search_tool_result` 结果），
+    /// 完整随 `content_block_start` 到达，尽力收集来源；解析不到即无此事件。
+    WebSearch(BuiltinWebSearch),
     MessageStop,
     MessageStopWithReason {
         reason: String,
@@ -828,21 +906,46 @@ fn parse_anthropic_sse_event(line: &str) -> Option<AnthropicSseEvent> {
     {
         "content_block_start" => {
             let block = value.get("content_block")?;
-            if block.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
-                return None;
+            match block.get("type").and_then(|value| value.as_str()) {
+                Some("tool_use") => Some(AnthropicSseEvent::ToolUseStart {
+                    id: block
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: block
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                }),
+                // 内置搜索服务端块：查询词（server_tool_use.input.query）或结果（web_search_tool_result）。
+                Some("server_tool_use") => {
+                    if block.get("name").and_then(Value::as_str) != Some("web_search") {
+                        return None;
+                    }
+                    let query = block
+                        .get("input")
+                        .and_then(|input| input.get("query"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    Some(AnthropicSseEvent::WebSearch(BuiltinWebSearch {
+                        queries: vec![query.to_string()],
+                        citations: Vec::new(),
+                    }))
+                }
+                Some("web_search_tool_result") => {
+                    let mut web_search = BuiltinWebSearch::default();
+                    collect_anthropic_web_search_results(block, &mut web_search);
+                    if web_search.is_empty() {
+                        None
+                    } else {
+                        Some(AnthropicSseEvent::WebSearch(web_search))
+                    }
+                }
+                _ => None,
             }
-            Some(AnthropicSseEvent::ToolUseStart {
-                id: block
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                name: block
-                    .get("name")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            })
         }
         "content_block_delta" => {
             let delta = value.get("delta")?;
@@ -1135,6 +1238,22 @@ fn stream_output(
         finish_reason: Some(finish_reason),
         provider_messages: vec![provider_message],
         cancelled: false,
+        web_search: None,
+    }
+}
+
+/// 把流式逐块解析出的内置搜索片段合并进累积值（去重按 url / query 文本）。
+fn merge_anthropic_web_search(acc: &mut Option<BuiltinWebSearch>, next: BuiltinWebSearch) {
+    let target = acc.get_or_insert_with(BuiltinWebSearch::default);
+    for query in next.queries {
+        if !target.queries.iter().any(|existing| *existing == query) {
+            target.queries.push(query);
+        }
+    }
+    for citation in next.citations {
+        if !target.citations.iter().any(|c| c.url == citation.url) {
+            target.citations.push(citation);
+        }
     }
 }
 
@@ -1421,6 +1540,89 @@ mod tests {
 
         let explicit_body = build_anthropic_body(None, Some(0.4), Some(1.2));
         assert_eq!(explicit_body["temperature"], serde_json::json!(1.2));
+    }
+
+    #[test]
+    fn builtin_web_search_appends_server_tool() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = crate::settings::ModelProvider {
+            id: "test".into(),
+            name: "Test".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            base_url: "https://api.anthropic.com".into(),
+            available_models: vec!["claude-opus-4-8".into()],
+            enabled_models: vec!["claude-opus-4-8".into()],
+            enabled: true,
+            api_format: "anthropic_messages".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+        };
+        let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
+        let base = GenerateRequest {
+            model: "claude-opus-4-8".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        };
+        // 默认（off）：无客户端工具且未开内置 ⇒ 不发 tools。
+        let off = adapter.request_body(&base, false);
+        assert!(off.get("tools").is_none(), "body: {off}");
+        // 开内置 ⇒ tools 含 web_search_20250305 服务端工具。
+        let mut req = base.clone();
+        req.options.builtin_web_search = true;
+        let on = adapter.request_body(&req, false);
+        let tools = on["tools"].as_array().expect("tools array present");
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["type"] == "web_search_20250305" && t["name"] == "web_search"),
+            "body: {on}"
+        );
+    }
+
+    #[test]
+    fn web_search_parsed_from_content_blocks() {
+        // server_tool_use(web_search) → 查询；web_search_tool_result.content[] → 来源（去重）。
+        let response = serde_json::json!({
+            "content": [
+                { "type": "server_tool_use", "name": "web_search", "input": { "query": "kivio" } },
+                {
+                    "type": "web_search_tool_result",
+                    "content": [
+                        { "type": "web_search_result", "url": "https://a.com", "title": "A 站" },
+                        { "type": "web_search_result", "url": "https://a.com", "title": "dup" },
+                        { "type": "web_search_result", "url": "https://b.com" }
+                    ]
+                },
+                { "type": "text", "text": "见来源。" }
+            ],
+            "stop_reason": "end_turn"
+        });
+        let parsed = parse_anthropic_response(&response);
+        let web_search = parsed.web_search.expect("web_search present");
+        assert_eq!(web_search.queries, vec!["kivio".to_string()]);
+        assert_eq!(web_search.citations.len(), 2);
+        assert_eq!(web_search.citations[0].title, "A 站");
+        assert_eq!(web_search.citations[1].title, "https://b.com");
+        assert_eq!(parsed.content, "见来源。");
+    }
+
+    #[test]
+    fn web_search_none_without_server_blocks() {
+        let response = serde_json::json!({
+            "content": [{ "type": "text", "text": "无搜索" }],
+            "stop_reason": "end_turn"
+        });
+        assert!(parse_anthropic_response(&response).web_search.is_none());
     }
 
     #[test]

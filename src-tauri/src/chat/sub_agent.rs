@@ -745,6 +745,8 @@ async fn run_sub_agent(app: AppHandle, req: SubAgentRequest) -> Result<AgentRunR
             language: req.language.clone(),
             thinking_enabled,
             thinking_level: None,
+            // 子代理不做联网搜索（父代理的搜索结果已在上下文里）。
+            web_search_mode: crate::chat::types::WebSearchMode::Off,
             stream_enabled,
             max_output_tokens,
             retry_attempts,
@@ -2152,6 +2154,8 @@ mod tests {
             language: "zh-CN".to_string(),
             thinking_enabled: false,
             thinking_level: None,
+            // 子代理不做联网搜索（父代理的搜索结果已在上下文里）。
+            web_search_mode: crate::chat::types::WebSearchMode::Off,
             stream_enabled: false,
             max_output_tokens: 1024,
             retry_attempts: 1,

@@ -8,6 +8,13 @@ import { McpIcon } from '../settings/NavIcons'
 import { kbListLibraries, onKbIndex, type KnowledgeLibrary } from './knowledgeBase'
 import { IconButton } from '../components/Button'
 import type { ChatMcpServer } from '../api/tauri'
+import type { WebSearchMode } from './types'
+
+const WEB_SEARCH_OPTIONS: { value: WebSearchMode; label: string; hint?: string }[] = [
+  { value: 'off', label: '关闭' },
+  { value: 'builtin', label: '内置', hint: '使用模型自带的联网搜索' },
+  { value: 'third_party', label: '第三方', hint: '使用已配置的搜索服务（Tavily / Exa 等）' },
+]
 
 function Switch({ checked }: { checked: boolean }) {
   return (
@@ -59,8 +66,9 @@ export function SourcesButton({
   onToggleForceKnowledgeSearch,
   mcpServers,
   onToggleMcpServer,
-  webSearchEnabled,
-  onToggleWebSearch,
+  webSearchMode,
+  onSetWebSearchMode,
+  builtinWebSearchSupported = false,
   onOpenSettings,
   disabled,
   layout = 'footer',
@@ -72,8 +80,10 @@ export function SourcesButton({
   onToggleForceKnowledgeSearch?: () => void | Promise<void>
   mcpServers: ChatMcpServer[]
   onToggleMcpServer: (serverId: string) => void | Promise<void>
-  webSearchEnabled: boolean
-  onToggleWebSearch: () => void | Promise<void>
+  webSearchMode: WebSearchMode
+  onSetWebSearchMode: (mode: WebSearchMode) => void | Promise<void>
+  /** 当前模型是否支持内置搜索（否则「内置」置灰）。 */
+  builtinWebSearchSupported?: boolean
   onOpenSettings?: () => void
   disabled?: boolean
   layout?: 'footer' | 'inline'
@@ -130,7 +140,7 @@ export function SourcesButton({
 
   const mountedKbCount = knowledgeBaseIds.length
   const enabledMcpCount = mcpServers.filter((s) => s.enabled).length
-  const anyActive = mountedKbCount > 0 || enabledMcpCount > 0 || webSearchEnabled
+  const anyActive = mountedKbCount > 0 || enabledMcpCount > 0 || webSearchMode !== 'off'
 
   const toggleKb = (id: string) => {
     void onChangeKnowledgeBaseIds(
@@ -201,12 +211,38 @@ export function SourcesButton({
             <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
               网络
             </div>
-            <SourceRow
-              icon={<Globe size={13} strokeWidth={1.75} />}
-              label="网络搜索"
-              checked={webSearchEnabled}
-              onClick={() => void onToggleWebSearch()}
-            />
+            <div className="px-2 py-1">
+              <div className="mb-1.5 flex items-center gap-2 text-[12px] text-neutral-700 dark:text-neutral-200">
+                <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
+                  <Globe size={13} strokeWidth={1.75} />
+                </span>
+                <span className="min-w-0 flex-1 truncate">网络搜索</span>
+              </div>
+              <div className="flex gap-1">
+                {WEB_SEARCH_OPTIONS.map((opt) => {
+                  const active = webSearchMode === opt.value
+                  const dim = opt.value === 'builtin' && !builtinWebSearchSupported
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      disabled={dim}
+                      title={dim ? '当前模型不支持内置搜索' : opt.hint}
+                      onClick={() => void onSetWebSearchMode(opt.value)}
+                      className={`flex-1 rounded-md px-2 py-1 text-[11.5px] transition-colors ${
+                        active
+                          ? 'bg-emerald-500/15 font-medium text-emerald-700 dark:text-emerald-300'
+                          : dim
+                            ? 'cursor-not-allowed text-neutral-300 dark:text-neutral-600'
+                            : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
 
             {onOpenSettings && (
               <>

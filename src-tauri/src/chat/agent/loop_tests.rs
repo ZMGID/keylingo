@@ -537,6 +537,7 @@ fn test_run_config<'a>(
         language: "zh-CN".to_string(),
         thinking_enabled: false,
         thinking_level: None,
+        web_search_mode: crate::chat::types::WebSearchMode::Off,
         stream_enabled,
         max_output_tokens: 1024,
         retry_attempts: 1,

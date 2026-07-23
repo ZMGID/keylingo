@@ -16,7 +16,7 @@ import type {
   DetectedExternalAgent,
   PendingAttachment,
 } from './types'
-import type { ThinkingLevel, ModelRef } from './types'
+import type { ThinkingLevel, WebSearchMode, ModelRef } from './types'
 
 export type { DetectedExternalAgent, AgentRuntimeConfig }
 
@@ -1236,6 +1236,7 @@ export const chatApi = {
       knowledgeBaseIds?: string[]
       forceKnowledgeSearch?: boolean
       thinkingLevel?: ThinkingLevel | null
+      webSearchMode?: WebSearchMode | null
       replyModels?: ModelRef[]
     }
   ): Promise<Conversation> {
@@ -1244,6 +1245,7 @@ export const chatApi = {
     const hasProjectUpdate = 'projectId' in updates
     const hasSetUpdate = 'setId' in updates
     const hasThinkingUpdate = 'thinkingLevel' in updates
+    const hasWebSearchUpdate = 'webSearchMode' in updates
     const result = await invoke<{ success: boolean; conversation: Conversation }>(
       'chat_update_conversation',
       {
@@ -1261,6 +1263,8 @@ export const chatApi = {
         forceKnowledgeSearch: updates.forceKnowledgeSearch,
         // null/未知 → 空串，后端解析为 None（回到「跟随全局」）。
         thinkingLevel: hasThinkingUpdate ? updates.thinkingLevel ?? '' : undefined,
+        // 会话级三态联网搜索（任务 07-23）：null/未知 → 空串，后端回退全局开关。
+        webSearchMode: hasWebSearchUpdate ? updates.webSearchMode ?? '' : undefined,
         // 多模型一问多答（任务 06-30）：持久化会话级多答模型集（决策 D2/D4）。
         replyModels: updates.replyModels,
       }

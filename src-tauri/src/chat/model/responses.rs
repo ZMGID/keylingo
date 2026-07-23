@@ -23,9 +23,9 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, responses_input_from_model_messages, stream_read_error, GenerateOutput,
-    GenerateRequest, LanguageModelProvider, ModelError, ModelFuture, ModelUsage, PendingToolCall,
-    StreamPart, StreamSink,
+    parse_tool_arguments, responses_input_from_model_messages, stream_read_error,
+    BuiltinWebSearch, GenerateOutput, GenerateRequest, LanguageModelProvider, ModelError,
+    ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
 pub struct OpenAiResponsesProvider<'a> {
@@ -323,15 +323,28 @@ impl OpenAiResponsesProvider<'_> {
         if stream {
             body["stream"] = Value::Bool(true);
         }
-        if !request.tools.is_empty() {
-            body["tools"] = Value::Array(
-                request
-                    .tools
-                    .iter()
-                    .map(|tool| tool.to_openai_responses_tool())
-                    .collect(),
-            );
+        // 工具 = 客户端函数工具 +（可选）模型原生内置联网搜索（任务 07-23）。
+        // 内置搜索仅 Responses 端点支持；`builtin_web_search` 由会话 Builtin 模式驱动。
+        let mut tools_arr: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|tool| tool.to_openai_responses_tool())
+            .collect();
+        if request.options.builtin_web_search {
+            tools_arr.push(serde_json::json!({ "type": "web_search" }));
+        }
+        if !tools_arr.is_empty() {
+            body["tools"] = Value::Array(tools_arr);
             body["tool_choice"] = Value::String("auto".to_string());
+        }
+        // 思考等级 → Responses `reasoning.effort`（统一走 model_metadata 单一映射源）。
+        // 关键：gpt-5 系列在 minimal reasoning 下不执行 hosted web_search；resolve_thinking
+        // 已把「未显式设档」默认成 high，故内置搜索天然拿到非 minimal，无需在此另做兜底。
+        if let Some(effort) = crate::chat::model_metadata::reasoning_effort_wire(
+            crate::settings::ProviderApiFormat::OpenAiResponses,
+            request.options.thinking_level.as_deref(),
+        ) {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {
@@ -517,6 +530,8 @@ struct ResponsesStreamState {
     tool_calls: Vec<ResponsesToolPartial>,
     finish_reason: Option<String>,
     usage: Option<ModelUsage>,
+    /// 内置搜索引用：在 `response.completed` 事件里从完整 `response.output` 一次性解析。
+    web_search: Option<BuiltinWebSearch>,
 }
 
 impl ResponsesStreamState {
@@ -577,6 +592,7 @@ impl ResponsesStreamState {
             finish_reason: Some(reason),
             provider_messages: Vec::new(),
             cancelled: false,
+            web_search: self.web_search,
         })
     }
 }
@@ -690,6 +706,12 @@ fn handle_responses_stream_event(
                 }
                 if let Some(status) = response.get("status").and_then(Value::as_str) {
                     state.finish_reason = Some(responses_finish_reason(status, state));
+                }
+                // 完整 output 数组此时才齐全，一次性解析内置搜索引用（流式增量拿不全）。
+                if let Some(output) = response.get("output").and_then(Value::as_array) {
+                    if let Some(web_search) = web_search_from_responses_output(output) {
+                        state.web_search = Some(web_search);
+                    }
                 }
             }
         }
@@ -870,7 +892,81 @@ pub fn output_from_responses(
         finish_reason,
         provider_messages: Vec::new(),
         cancelled: false,
+        web_search: web_search_from_responses_output(output),
     })
+}
+
+/// 从 Responses `output[]` 数组解析内置搜索痕迹：`web_search_call` 项取查询词、
+/// `message` 项内容的 `annotations[type=url_citation]` 取来源。任一为空则整体可能为空，
+/// 全空时返回 None（视作没发生可见的内置搜索）。解析尽力而为，绝不 panic。
+fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch> {
+    let mut result = BuiltinWebSearch::default();
+    let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in output {
+        match item.get("type").and_then(Value::as_str) {
+            Some("web_search_call") => {
+                // 查询词可能在 action.query 或顶层 query（wire 随版本略有差异，两处都试）。
+                let query = item
+                    .get("action")
+                    .and_then(|action| action.get("query"))
+                    .or_else(|| item.get("query"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if let Some(query) = query {
+                    if !result.queries.iter().any(|existing| existing == query) {
+                        result.queries.push(query.to_string());
+                    }
+                }
+            }
+            Some("message") => {
+                if let Some(content) = item.get("content").and_then(Value::as_array) {
+                    for part in content {
+                        let Some(annotations) =
+                            part.get("annotations").and_then(Value::as_array)
+                        else {
+                            continue;
+                        };
+                        for annotation in annotations {
+                            if annotation.get("type").and_then(Value::as_str)
+                                != Some("url_citation")
+                            {
+                                continue;
+                            }
+                            let Some(url) = annotation
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                            else {
+                                continue;
+                            };
+                            if !seen_urls.insert(url.to_string()) {
+                                continue;
+                            }
+                            let title = annotation
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or(url)
+                                .to_string();
+                            result.citations.push(WebCitation {
+                                title,
+                                url: url.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 fn responses_finish_reason(status: &str, state: &ResponsesStreamState) -> String {
@@ -984,6 +1080,103 @@ mod tests {
             metadata: Default::default(),
         };
         OpenAiResponsesProvider::new(&state, &provider, 1).request_body(&request, false)
+    }
+
+    #[test]
+    fn builtin_web_search_appends_responses_tool() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = ModelProvider {
+            id: "test".into(),
+            name: "Test".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            base_url: "https://api.openai.com/v1".into(),
+            available_models: vec!["gpt-5.5".into()],
+            enabled_models: vec!["gpt-5.5".into()],
+            enabled: true,
+            api_format: "openai_responses".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+        };
+        let base = GenerateRequest {
+            model: "gpt-5.5".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        };
+        let adapter = OpenAiResponsesProvider::new(&state, &provider, 1);
+        // off ⇒ 无 tools。
+        let off = adapter.request_body(&base, false);
+        assert!(off.get("tools").is_none(), "body: {off}");
+        // on ⇒ tools 含 {"type":"web_search"} + tool_choice=auto。
+        let mut req = base.clone();
+        req.options.builtin_web_search = true;
+        let on = adapter.request_body(&req, false);
+        let tools = on["tools"].as_array().expect("tools array present");
+        assert!(
+            tools.iter().any(|t| t["type"] == "web_search"),
+            "body: {on}"
+        );
+        assert_eq!(on["tool_choice"], "auto");
+        // 无思考档 ⇒ 不发 reasoning（effort 由 resolve_thinking 在上游决定，适配器不兜底）。
+        assert!(on.get("reasoning").is_none(), "body: {on}");
+        // 显式设 high ⇒ reasoning.effort=high。
+        let mut req_high = base.clone();
+        req_high.options.builtin_web_search = true;
+        req_high.options.thinking_level = Some("high".into());
+        let high = adapter.request_body(&req_high, false);
+        assert_eq!(high["reasoning"]["effort"], "high", "body: {high}");
+        // xhigh 在 OpenAI 收敛到 high。
+        let mut req_x = base.clone();
+        req_x.options.thinking_level = Some("xhigh".into());
+        let xh = adapter.request_body(&req_x, false);
+        assert_eq!(xh["reasoning"]["effort"], "high", "body: {xh}");
+        // 纯对话（无内置、无思考档）⇒ 不发 reasoning。
+        assert!(off.get("reasoning").is_none(), "body: {off}");
+    }
+
+    #[test]
+    fn web_search_parsed_from_responses_output() {
+        // web_search_call → query；message.content.annotations[url_citation] → 来源（去重）。
+        let output = serde_json::json!([
+            { "type": "web_search_call", "action": { "type": "search", "query": "kivio release" } },
+            {
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "见来源。",
+                    "annotations": [
+                        { "type": "url_citation", "url": "https://a.com", "title": "A 站" },
+                        { "type": "url_citation", "url": "https://a.com", "title": "重复应去掉" },
+                        { "type": "url_citation", "url": "https://b.com" }
+                    ]
+                }]
+            }
+        ]);
+        let parsed = web_search_from_responses_output(output.as_array().unwrap())
+            .expect("web_search present");
+        assert_eq!(parsed.queries, vec!["kivio release".to_string()]);
+        assert_eq!(parsed.citations.len(), 2);
+        assert_eq!(parsed.citations[0].title, "A 站");
+        assert_eq!(parsed.citations[0].url, "https://a.com");
+        // 缺 title 时回退用 url。
+        assert_eq!(parsed.citations[1].title, "https://b.com");
+    }
+
+    #[test]
+    fn web_search_none_without_search_traces() {
+        let output = serde_json::json!([
+            { "type": "message", "content": [{ "type": "output_text", "text": "无搜索" }] }
+        ]);
+        assert!(web_search_from_responses_output(output.as_array().unwrap()).is_none());
     }
 
     #[test]

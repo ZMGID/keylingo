@@ -1,8 +1,9 @@
 use serde_json::Value;
 
-use crate::chat::model::PendingToolCall;
+use crate::chat::model::{BuiltinWebSearch, PendingToolCall};
 use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
+    ToolCallStatus,
 };
 
 use super::host::AgentHost;
@@ -511,4 +512,75 @@ pub(crate) fn cancelled_run_result_from_state(
         std::mem::take(&mut state.segment_builder).all(),
         std::mem::take(&mut state.generated_api_messages),
     )
+}
+
+/// 把 provider 服务端托管的**内置联网搜索**可视化成一张工具卡（复用 `ToolCallRecord` +
+/// 前端 `ToolCallBlock`）。内置搜索不进 agent 工具循环（服务端直接执行、无客户端工具调用），
+/// 故这里在拿到含引用的答案后**合成**一条 Success 记录 + 一个 Tool 段，追加在末尾——
+/// 分配到的 `order` 高于早先 reserve 的正文段，故渲染成答案下方的「来源」脚注（PRD R6）。
+/// 无查询也无引用则跳过。emit 事件 + 入 `state`，随本轮 finalize 落盘。
+pub(crate) fn emit_builtin_web_search_card(
+    host: &dyn AgentHost,
+    ids: RunIds<'_>,
+    state: &mut RunState,
+    web_search: &BuiltinWebSearch,
+    provider_label: &str,
+    phase: ChatMessageSegmentPhase,
+    round: Option<u32>,
+) {
+    if web_search.is_empty() {
+        return;
+    }
+    let id = format!("websearch_{}", uuid::Uuid::new_v4());
+    // structured_content 对齐前端内置搜索来源卡读取的形状（type 作路由标记）。
+    let structured = serde_json::json!({
+        "type": "builtin_web_search",
+        "provider": provider_label,
+        "queries": web_search.queries,
+        "citations": web_search.citations,
+    });
+    // 折叠行「目标」显示查询词：ToolCallBlock 从 arguments.query 取。
+    let arguments = serde_json::json!({ "query": web_search.queries.join("; ") }).to_string();
+    // 纯文本兜底：前端旧版本不识别 structured 时仍能看到来源列表。
+    let mut preview = String::new();
+    for citation in &web_search.citations {
+        preview.push_str(&format!("- {} — {}\n", citation.title, citation.url));
+    }
+    let record = ToolCallRecord {
+        id: id.clone(),
+        name: "web_search".to_string(),
+        source: "native".to_string(),
+        server_id: None,
+        arguments,
+        status: ToolCallStatus::Success,
+        result_preview: if preview.trim().is_empty() {
+            None
+        } else {
+            Some(preview.trim().to_string())
+        },
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: round.unwrap_or(0),
+        sensitive: false,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: Some(structured),
+    };
+    host.emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
+    let order = state.segment_builder.next_order();
+    let segment = ChatMessageSegment {
+        id: format!("seg_{}_tool_{}", order, id),
+        kind: ChatMessageSegmentKind::Tool,
+        phase,
+        order,
+        step_number: None,
+        round,
+        text: None,
+        tool_call_id: Some(id.clone()),
+    };
+    state.segment_builder.append_existing_segments(vec![segment]);
+    state.tool_records.push(record);
 }

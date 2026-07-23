@@ -478,6 +478,9 @@ export interface Conversation {
   forceKnowledgeSearch?: boolean
   thinking_level?: ThinkingLevel | null
   thinkingLevel?: ThinkingLevel | null
+  /** 会话级三态联网搜索（任务 07-23）。缺省/null = 跟随全局 nativeTools.webSearch。 */
+  web_search_mode?: WebSearchMode | null
+  webSearchMode?: WebSearchMode | null
   /** 多模型一问多答（D2）：会话级持久化的多答模型集合（上限 4）。空或单元素 = 单模型现状。 */
   reply_models?: ModelRef[]
   replyModels?: ModelRef[]
@@ -505,6 +508,9 @@ export interface ModelRef {
 }
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+/** 会话级三态联网搜索模式（任务 07-23）。off=不联网；builtin=模型原生内置搜索；third_party=search_web 工具。 */
+export type WebSearchMode = 'off' | 'builtin' | 'third_party'
 
 export interface ConversationListItem {
   id: string

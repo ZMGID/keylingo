@@ -790,7 +790,7 @@ pub fn unavailable_mcp_servers_note(names: &[String]) -> Option<String> {
     ))
 }
 
-fn web_search_configured(settings: &crate::settings::Settings) -> bool {
+pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> bool {
     match settings.lens.web_search.provider {
         WebSearchProvider::Tavily => !settings.lens.web_search.tavily_api_key.trim().is_empty(),
         WebSearchProvider::Exa => !settings.lens.web_search.exa_api_key.trim().is_empty(),

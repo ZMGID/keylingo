@@ -414,6 +414,39 @@ impl AgentRuntimeConfig {
     }
 }
 
+/// 会话级联网搜索模式（任务 07-23）。
+/// - `Off`：不联网。
+/// - `Builtin`：模型原生内置搜索（仅部分 provider 支持，按 `api_format` 判定）。
+/// - `ThirdParty`：既有 `search_web` 工具（复用 Lens 第三方配置 Tavily/Exa/…）。
+///
+/// `Conversation.web_search_mode` 为 `None` 时运行时回退全局 `nativeTools.webSearch`
+/// （on ⇒ ThirdParty，off ⇒ Off），保证旧对话行为逐字节不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchMode {
+    Off,
+    Builtin,
+    ThirdParty,
+}
+
+impl WebSearchMode {
+    /// 解析会话的**有效**联网搜索模式（任务 07-23）。
+    /// 会话未显式设置（`None`）时回退全局 `native_tools.web_search`：
+    /// on ⇒ `ThirdParty`，off ⇒ `Off`，保证旧对话行为逐字节不变。
+    pub fn resolve(
+        conv_mode: Option<WebSearchMode>,
+        settings: &crate::settings::Settings,
+    ) -> WebSearchMode {
+        conv_mode.unwrap_or({
+            if settings.chat_tools.native_tools.web_search {
+                WebSearchMode::ThirdParty
+            } else {
+                WebSearchMode::Off
+            }
+        })
+    }
+}
+
 /// 完整对话数据（存储在 conversations/{id}.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
@@ -456,6 +489,9 @@ pub struct Conversation {
     /// 每对话「思考等级」：`"off"|"low"|"medium"|"high"`，`None` = 跟随全局思考开关。
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// 会话级联网搜索模式（任务 07-23）。`None` = 未设置，运行时回退全局 `nativeTools.webSearch`。
+    #[serde(default)]
+    pub web_search_mode: Option<WebSearchMode>,
     /// 多模型一问多答（任务 06-30，决策 D2）：会话级持久化的多答模型集合（上限 4）。
     /// 空或单元素 = 单模型现状。一条 user 消息会 fan-out 给这些模型并发回答。
     #[serde(default)]
@@ -714,6 +750,52 @@ mod tests {
         assert!(msg.group_id.is_none());
         assert!(msg.provider_id.is_none());
         assert!(msg.model.is_none());
+    }
+
+    // 会话级三态联网搜索（任务 07-23，R1）：老会话 web_search_mode 缺字段反序列化为 None，
+    // 且有效模式回退全局 nativeTools.webSearch，保证旧对话行为逐字节不变。
+    #[test]
+    fn conversation_deserializes_without_web_search_mode_field() {
+        // 只给必需字段的最小老会话 JSON（无 web_search_mode）。
+        let json = r#"{
+            "id": "conv_old",
+            "title": "old",
+            "provider_id": "openai",
+            "model": "gpt-4o",
+            "messages": [],
+            "created_at": 1,
+            "updated_at": 1
+        }"#;
+        let conv: Conversation =
+            serde_json::from_str(json).expect("legacy Conversation parses without web_search_mode");
+        assert!(conv.web_search_mode.is_none());
+    }
+
+    #[test]
+    fn web_search_mode_resolve_falls_back_to_global() {
+        let mut settings = crate::settings::Settings::default();
+        // None（老会话/未设置）→ 依全局开关：on ⇒ ThirdParty，off ⇒ Off。
+        settings.chat_tools.native_tools.web_search = true;
+        assert_eq!(
+            WebSearchMode::resolve(None, &settings),
+            WebSearchMode::ThirdParty
+        );
+        settings.chat_tools.native_tools.web_search = false;
+        assert_eq!(WebSearchMode::resolve(None, &settings), WebSearchMode::Off);
+        // 显式设过 ⇒ 无视全局，原样返回（即便全局 off 也保留会话选择）。
+        assert_eq!(
+            WebSearchMode::resolve(Some(WebSearchMode::Builtin), &settings),
+            WebSearchMode::Builtin
+        );
+        assert_eq!(
+            WebSearchMode::resolve(Some(WebSearchMode::Off), &settings),
+            WebSearchMode::Off
+        );
+        settings.chat_tools.native_tools.web_search = true;
+        assert_eq!(
+            WebSearchMode::resolve(Some(WebSearchMode::Off), &settings),
+            WebSearchMode::Off
+        );
     }
 
     #[test]

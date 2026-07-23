@@ -145,6 +145,12 @@ pub struct GenerateOptions {
     /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`。
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// 是否请求模型的**原生内置联网搜索**（任务 07-23）。仅在会话为 Builtin 模式且当前
+    /// provider 支持（`builtin_web_search_supported`）时置 true；各适配器据此往请求体
+    /// 追加各家原生搜索工具（OpenAI Responses `web_search` / Gemini `google_search` /
+    /// Anthropic `web_search_20250305`）。默认 false，不支持的适配器忽略。
+    #[serde(default)]
+    pub builtin_web_search: bool,
     #[serde(default)]
     pub provider_options: Value,
 }
@@ -156,6 +162,7 @@ impl Default for GenerateOptions {
             max_tokens: 8192,
             thinking_enabled: true,
             thinking_level: None,
+            builtin_web_search: false,
             provider_options: Value::Object(Default::default()),
         }
     }
@@ -226,6 +233,33 @@ pub struct PendingToolCall {
     pub signature: Option<String>,
 }
 
+/// 单条内置搜索引用（服务端托管的原生联网搜索返回的来源）。仅取 {title,url}，
+/// 前端渲染成可点来源脚注（任务 07-23，MVP 只做来源列表、不做正文 `[n]` 锚定）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebCitation {
+    pub title: String,
+    pub url: String,
+}
+
+/// 模型**原生内置联网搜索**的解析产物：模型执行的搜索词 + 来源引用。
+/// 内置搜索由 provider 服务端执行，agent 循环看不到工具调用，故适配器从响应里
+/// 尽力解析出查询/引用，循环据此合成一张「网络搜索」工具卡可视化给用户。
+/// 任一项解析不到即为空；整体解析不到则 `GenerateOutput.web_search` 为 None。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuiltinWebSearch {
+    #[serde(default)]
+    pub queries: Vec<String>,
+    #[serde(default)]
+    pub citations: Vec<WebCitation>,
+}
+
+impl BuiltinWebSearch {
+    /// 无查询也无引用视为「没发生可见的内置搜索」，不合成卡片。
+    pub fn is_empty(&self) -> bool {
+        self.queries.is_empty() && self.citations.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateOutput {
     pub text: String,
@@ -235,6 +269,10 @@ pub struct GenerateOutput {
     pub finish_reason: Option<String>,
     pub provider_messages: Vec<Value>,
     pub cancelled: bool,
+    /// 模型原生内置联网搜索的解析结果（仅 provider 服务端执行了内置搜索时为 Some）。
+    /// 默认 None：绝大多数调用不开内置搜索，解析失败也降级为 None，不阻断答案。
+    #[serde(default)]
+    pub web_search: Option<BuiltinWebSearch>,
 }
 
 impl GenerateOutput {
@@ -247,6 +285,7 @@ impl GenerateOutput {
             finish_reason: None,
             provider_messages: vec![provider_message],
             cancelled: false,
+            web_search: None,
         }
     }
 
@@ -259,6 +298,7 @@ impl GenerateOutput {
             finish_reason: Some("cancelled".to_string()),
             provider_messages: Vec::new(),
             cancelled: true,
+            web_search: None,
         }
     }
 

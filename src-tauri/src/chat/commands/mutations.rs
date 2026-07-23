@@ -339,6 +339,7 @@ pub(crate) fn chat_fork_conversation(
         knowledge_base_ids: source.knowledge_base_ids.clone(),
         force_knowledge_search: source.force_knowledge_search,
         thinking_level: source.thinking_level.clone(),
+        web_search_mode: source.web_search_mode,
         reply_models: source.reply_models.clone(),
         group_selections,
         forked_from: Some(ForkOrigin {
@@ -459,6 +460,7 @@ pub(crate) fn chat_update_conversation(
     knowledge_base_ids: Option<Vec<String>>,
     force_knowledge_search: Option<bool>,
     thinking_level: Option<String>,
+    web_search_mode: Option<String>,
     reply_models: Option<Vec<crate::chat::ModelRef>>,
 ) -> Result<serde_json::Value, String> {
     let mut conversation = load_conversation(&app, &conversation_id)?;
@@ -549,6 +551,16 @@ pub(crate) fn chat_update_conversation(
         // 仅接受已知值；空串/未知 → 清除（回到「跟随全局」）。
         conversation.thinking_level = match level.trim() {
             "off" | "low" | "medium" | "high" | "xhigh" | "max" => Some(level.trim().to_string()),
+            _ => None,
+        };
+    }
+    if let Some(mode) = web_search_mode {
+        // 会话级三态联网搜索（任务 07-23）。空/未知 → 清除（回退全局 nativeTools.webSearch）。
+        use crate::chat::types::WebSearchMode;
+        conversation.web_search_mode = match mode.trim() {
+            "off" => Some(WebSearchMode::Off),
+            "builtin" => Some(WebSearchMode::Builtin),
+            "third_party" => Some(WebSearchMode::ThirdParty),
             _ => None,
         };
     }

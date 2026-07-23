@@ -1,14 +1,16 @@
 use serde_json::{json, Value};
 
+use crate::chat::model::BuiltinWebSearch;
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ToolCallStatus};
 
 use super::finalize::{
-    empty_synthesis_fallback_response, segment_phase_for_agent_phase, stopped_generation_content,
-    synthesis_failed_fallback_response, RunResultBuilder,
+    emit_builtin_web_search_card, empty_synthesis_fallback_response, segment_phase_for_agent_phase,
+    stopped_generation_content, synthesis_failed_fallback_response, RunResultBuilder,
 };
 use super::loop_::{LoopEnv, RunState};
 use super::planning::{
-    call_chat_completion_message_with_usage, stream_scoped_chat_completion_inner,
+    call_chat_completion_message_with_usage, call_chat_completion_output_with_usage,
+    stream_scoped_chat_completion_inner,
 };
 use super::recovery::{self, RecoveryAction};
 use super::stop::{
@@ -67,6 +69,10 @@ pub(crate) async fn synthesis_step(
         &format!("step_{step_number}_text"),
     );
 
+    // 内置搜索引用（若开且模型支持）：从合成模型输出捕获，稍后合成来源卡。
+    // 两条分支（流式/非流式）都会在读取前赋值，初值仅为满足声明。
+    #[allow(unused_assignments)]
+    let mut synth_web_search: Option<BuiltinWebSearch> = None;
     let (response, reasoning, response_reasoning) = if config.stream_enabled {
         let stream = stream_scoped_chat_completion_inner(
             config.state,
@@ -78,6 +84,7 @@ pub(crate) async fn synthesis_step(
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.run_id,
@@ -159,6 +166,7 @@ pub(crate) async fn synthesis_step(
             ));
         }
         state.merge_usage(stream.usage.clone());
+        synth_web_search = stream.web_search.clone();
         let final_reasoning_for_api = stream.reasoning.clone();
         let reasoning = merge_reasoning(&state.planning_reasoning_parts, stream.reasoning.clone());
         let response = sanitize_assistant_text_response(&stream.content);
@@ -197,7 +205,7 @@ pub(crate) async fn synthesis_step(
         // 保证两条合成路径在超限场景行为一致。
         let runtime_messages = send_messages.clone();
         let message_result = tokio::select! {
-            result = call_chat_completion_message_with_usage(
+            result = call_chat_completion_output_with_usage(
                 config.state,
                 &config.provider,
                 &config.model,
@@ -206,6 +214,7 @@ pub(crate) async fn synthesis_step(
                 config.retry_attempts,
                 config.thinking_enabled,
                 config.thinking_level.clone(),
+                config.builtin_web_search_active(),
                 config.max_output_tokens,
                 &config.conversation_id,
                 &config.message_id,
@@ -223,8 +232,9 @@ pub(crate) async fn synthesis_step(
             }
         };
         let message = match message_result {
-            Ok((message, usage)) => {
+            Ok((message, usage, web_search)) => {
                 state.merge_usage(usage);
+                synth_web_search = web_search;
                 message
             }
             Err(err) if !state.tool_records.is_empty() => {
@@ -318,6 +328,19 @@ pub(crate) async fn synthesis_step(
             (response, reasoning, response_reasoning)
         }
     };
+
+    // 内置搜索（服务端托管）发生过 ⇒ 合成来源卡（末尾 order → 答案下方脚注）。
+    if let Some(web_search) = synth_web_search.as_ref() {
+        emit_builtin_web_search_card(
+            host,
+            env.ids(),
+            state,
+            web_search,
+            &config.provider.name,
+            response_phase.clone(),
+            None,
+        );
+    }
 
     Ok(SynthesisFlow::Completed(SynthesisCompleted {
         response,
@@ -415,6 +438,7 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.message_id,
@@ -471,6 +495,7 @@ async fn recover_remediate(
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.message_id,

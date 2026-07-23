@@ -41,7 +41,8 @@ use super::reply_runtime::{ArmReplyOutcome, ChatReplyGuard, ReplyArm};
 use super::resolve_thinking;
 use super::tooling::{
     append_agent_ask_user_tools, append_agent_todo_tools, apply_agent_plan_tool_filter,
-    apply_inline_code_request_tool_filter, list_tools_for_chat, resolve_forced_skill_id,
+    apply_inline_code_request_tool_filter, apply_web_search_mode_tool_filter, list_tools_for_chat,
+    resolve_forced_skill_id,
 };
 
 pub(super) async fn complete_assistant_reply(
@@ -373,6 +374,14 @@ pub(super) async fn complete_assistant_reply_inner(
     }
     apply_inline_code_request_tool_filter(&mut tools, last_user_api_content);
     let blocked_tool_calls = apply_agent_plan_tool_filter(&mut tools, plan_mode);
+    // 会话级三态联网搜索（任务 07-23）：按有效模式收敛第三方 `search_web` 的暴露；
+    // 内置搜索走 `config.web_search_mode` → 各适配器请求体注入，不在工具列表里。
+    // builder 会话已清空工具（只留 save_assistant），不参与搜索门控。
+    let web_search_mode =
+        crate::chat::types::WebSearchMode::resolve(conversation.web_search_mode, &settings);
+    if !builder_mode {
+        apply_web_search_mode_tool_filter(&mut tools, web_search_mode, &settings);
+    }
     let user_tools_available = tools_capable && !tools.is_empty();
     agent_prepare::apply_skill_fallback_when_tools_unavailable(
         &mut effective_chat_tools,
@@ -557,6 +566,7 @@ pub(super) async fn complete_assistant_reply_inner(
             language,
             thinking_enabled,
             thinking_level,
+            web_search_mode,
             stream_enabled,
             max_output_tokens,
             retry_attempts,

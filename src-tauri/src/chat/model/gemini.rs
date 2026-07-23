@@ -10,9 +10,9 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, stream_read_error, GenerateOutput, GenerateRequest,
+    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GenerateRequest,
     LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage, ModelRole,
-    ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink,
+    ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
 /// Google Gemini **原生** `generateContent` adapter（peer of openai/anthropic）。
@@ -176,6 +176,8 @@ impl GeminiProvider<'_> {
         let mut carry_sig: Option<String> = None;
         let mut finish_reason = "stop".to_string();
         let mut usage: Option<ModelUsage> = None;
+        // 内置搜索引用：groundingMetadata 通常在末段 chunk，逐段合并兜底。
+        let mut web_search: Option<BuiltinWebSearch> = None;
 
         loop {
             let chunk = response.chunk().await.map_err(|err| {
@@ -259,6 +261,7 @@ impl GeminiProvider<'_> {
                 if let Some(next_usage) = gemini_usage(&value) {
                     usage = Some(next_usage);
                 }
+                merge_gemini_web_search(&mut web_search, web_search_from_gemini_value(&value));
             }
         }
 
@@ -268,7 +271,8 @@ impl GeminiProvider<'_> {
             reason: finish_reason.clone(),
             full: full.clone(),
         })?;
-        let output = stream_output(full, reasoning_full, tool_calls, finish_reason, usage);
+        let mut output = stream_output(full, reasoning_full, tool_calls, finish_reason, usage);
+        output.web_search = web_search;
         self.record_usage_success(
             &request,
             &label,
@@ -312,23 +316,34 @@ impl GeminiProvider<'_> {
             });
         }
         let declarations = gemini_function_declarations(&request.tools);
+        let mut tools_arr: Vec<Value> = Vec::new();
         if !declarations.is_empty() {
-            body["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
+            tools_arr.push(serde_json::json!({ "functionDeclarations": declarations }));
             // 显式声明工具调用模式（对齐 opencode 真实流量）。
             body["toolConfig"] = serde_json::json!({
                 "functionCallingConfig": { "mode": "AUTO" }
             });
         }
-        // 思维：仅在用户显式选了等级时请求思维输出（字段名跨版本有漂移，保守只置 includeThoughts）。
-        if request
-            .options
-            .thinking_level
-            .as_deref()
-            .filter(|l| !l.is_empty())
-            .is_some()
-        {
-            body["generationConfig"]["thinkingConfig"] =
-                serde_json::json!({ "includeThoughts": true });
+        // 模型原生内置联网搜索（任务 07-23）：Gemini grounding，作为并列 tool 对象加入。
+        if request.options.builtin_web_search {
+            tools_arr.push(serde_json::json!({ "google_search": {} }));
+        }
+        if !tools_arr.is_empty() {
+            body["tools"] = Value::Array(tools_arr);
+        }
+        // 思考等级 → thinkingConfig（统一走 model_metadata 单一映射源）。
+        // 版本分叉:Gemini 3.x 用 `thinkingLevel`(字符串档位),2.5 系只认 `thinkingBudget`(数值),
+        // 两者互斥、传错会 400。故 thinkingLevel 只对 3.x 下发;其余(2.5/未知)回退到仅 `includeThoughts`
+        // (开思维输出、不强加档位)——保持改动前对 2.5 的非回归行为。includeThoughts 两条路都带,拿摘要。
+        if let Some(level) = crate::chat::model_metadata::reasoning_effort_wire(
+            crate::settings::ProviderApiFormat::Gemini,
+            request.options.thinking_level.as_deref(),
+        ) {
+            let mut thinking = serde_json::json!({ "includeThoughts": true });
+            if gemini_supports_thinking_level(&request.model) {
+                thinking["thinkingLevel"] = Value::String(level);
+            }
+            body["generationConfig"]["thinkingConfig"] = thinking;
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {
@@ -513,6 +528,18 @@ fn gemini_url(base_url: &str, model: &str, stream: bool) -> String {
     } else {
         format!("{base}/models/{model}:generateContent")
     }
+}
+
+/// Gemini 3.x+ 才支持 `thinkingConfig.thinkingLevel`（字符串档位）；2.5 及更早只认
+/// `thinkingBudget`（数值），传错会 400。保守解析模型名里 `gemini-<major>` 的主版本号，
+/// 取不到（未知/非 gemini 命名）则视为不支持，回退仅 `includeThoughts`。
+fn gemini_supports_thinking_level(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    let Some(rest) = lower.split("gemini-").nth(1) else {
+        return false;
+    };
+    let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    major.parse::<u32>().map(|v| v >= 3).unwrap_or(false)
 }
 
 /// canonical messages → Gemini `contents[]`。Tool 结果按函数名关联（Gemini 无 call id），
@@ -787,7 +814,85 @@ pub fn output_from_gemini_response(
         finish_reason: Some(finish_reason),
         provider_messages: vec![provider_message],
         cancelled: false,
+        web_search: web_search_from_gemini_value(value),
     })
+}
+
+/// 从 Gemini 响应 `candidates[0].groundingMetadata` 解析内置搜索痕迹：
+/// `webSearchQueries[]` → 查询词；`groundingChunks[].web.{uri,title}` → 来源。
+/// 全空则 None。片段响应亦同结构（末段带 groundingMetadata），故流式逐段调用累积。
+fn web_search_from_gemini_value(value: &Value) -> Option<BuiltinWebSearch> {
+    let grounding = value
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|cand| cand.get("groundingMetadata"))?;
+    let mut result = BuiltinWebSearch::default();
+    if let Some(queries) = grounding.get("webSearchQueries").and_then(Value::as_array) {
+        for query in queries {
+            if let Some(query) = query
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !result.queries.iter().any(|existing| existing == query) {
+                    result.queries.push(query.to_string());
+                }
+            }
+        }
+    }
+    if let Some(chunks) = grounding.get("groundingChunks").and_then(Value::as_array) {
+        for chunk in chunks {
+            let Some(web) = chunk.get("web") else {
+                continue;
+            };
+            let Some(url) = web
+                .get("uri")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if result.citations.iter().any(|c| c.url == url) {
+                continue;
+            }
+            let title = web
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(url)
+                .to_string();
+            result.citations.push(WebCitation {
+                title,
+                url: url.to_string(),
+            });
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// 把新解析出的内置搜索片段合并进累积值（流式逐段调用；去重按 url / query 文本）。
+fn merge_gemini_web_search(acc: &mut Option<BuiltinWebSearch>, next: Option<BuiltinWebSearch>) {
+    let Some(next) = next else {
+        return;
+    };
+    let target = acc.get_or_insert_with(BuiltinWebSearch::default);
+    for query in next.queries {
+        if !target.queries.iter().any(|existing| *existing == query) {
+            target.queries.push(query);
+        }
+    }
+    for citation in next.citations {
+        if !target.citations.iter().any(|c| c.url == citation.url) {
+            target.citations.push(citation);
+        }
+    }
 }
 
 /// 取 `candidates[0].content.parts[]`（片段响应亦同）。
@@ -957,6 +1062,7 @@ fn stream_output(
         finish_reason: Some(finish_reason),
         provider_messages: vec![provider_message],
         cancelled: false,
+        web_search: None,
     }
 }
 
@@ -1008,6 +1114,159 @@ mod tests {
         );
         let p = provider();
         GeminiProvider::new(&state, &p, 1).request_body(request, stream)
+    }
+
+    #[test]
+    fn thinking_level_maps_to_thinking_level_field() {
+        let base = GenerateRequest {
+            model: "gemini-3.1-flash-lite".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        };
+        // 无档位 ⇒ 不发 thinkingConfig。
+        let none = body_for(&base, false);
+        assert!(
+            none["generationConfig"].get("thinkingConfig").is_none(),
+            "body: {none}"
+        );
+        // 设 medium ⇒ thinkingConfig.thinkingLevel=medium。
+        let mut req = base.clone();
+        req.options.thinking_level = Some("medium".into());
+        let med = body_for(&req, false);
+        assert_eq!(
+            med["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "medium",
+            "body: {med}"
+        );
+        // max 在 Gemini 收敛到 high。
+        let mut req_max = base.clone();
+        req_max.options.thinking_level = Some("max".into());
+        let mx = body_for(&req_max, false);
+        assert_eq!(
+            mx["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "high",
+            "body: {mx}"
+        );
+        // Gemini 2.5：thinkingLevel 会 400，回退到仅 includeThoughts（非回归）。
+        let mut req_25 = base.clone();
+        req_25.model = "gemini-2.5-flash".into();
+        req_25.options.thinking_level = Some("high".into());
+        let g25 = body_for(&req_25, false);
+        assert!(
+            g25["generationConfig"]["thinkingConfig"]
+                .get("thinkingLevel")
+                .is_none(),
+            "2.5 不应带 thinkingLevel: {g25}"
+        );
+        assert_eq!(
+            g25["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true,
+            "body: {g25}"
+        );
+    }
+
+    #[test]
+    fn builtin_web_search_appends_google_search_tool() {
+        let base = GenerateRequest {
+            model: "gemini-3.1-flash-lite".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        };
+        // off ⇒ 无 tools。
+        let off = body_for(&base, false);
+        assert!(off.get("tools").is_none(), "body: {off}");
+        // on ⇒ tools 数组含 {"google_search":{}}。
+        let mut req = base.clone();
+        req.options.builtin_web_search = true;
+        let on = body_for(&req, false);
+        let tools = on["tools"].as_array().expect("tools array present");
+        assert!(
+            tools.iter().any(|t| t.get("google_search").is_some()),
+            "body: {on}"
+        );
+    }
+
+    #[test]
+    fn web_search_parsed_from_grounding_metadata() {
+        // groundingMetadata.webSearchQueries → 查询；groundingChunks[].web → 来源（去重）。
+        let value = serde_json::json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "见来源" }] },
+                "groundingMetadata": {
+                    "webSearchQueries": ["吉林 天气", "吉林 天气"],
+                    "groundingChunks": [
+                        { "web": { "uri": "https://a.com", "title": "A 站" } },
+                        { "web": { "uri": "https://a.com", "title": "dup" } },
+                        { "web": { "uri": "https://b.com" } }
+                    ]
+                }
+            }]
+        });
+        let parsed = web_search_from_gemini_value(&value).expect("web_search present");
+        assert_eq!(parsed.queries, vec!["吉林 天气".to_string()]);
+        assert_eq!(parsed.citations.len(), 2);
+        assert_eq!(parsed.citations[0].url, "https://a.com");
+        assert_eq!(parsed.citations[1].title, "https://b.com");
+    }
+
+    #[test]
+    fn web_search_none_without_grounding() {
+        let value = serde_json::json!({
+            "candidates": [{ "content": { "parts": [{ "text": "无搜索" }] } }]
+        });
+        assert!(web_search_from_gemini_value(&value).is_none());
+    }
+
+    #[test]
+    fn merge_gemini_web_search_accumulates_and_dedups_across_chunks() {
+        // 流式逐段调用 merge：query/url 去重，跨片段累积。
+        let mut acc: Option<BuiltinWebSearch> = None;
+        merge_gemini_web_search(&mut acc, None); // 无 grounding 片段不建结构。
+        assert!(acc.is_none());
+        merge_gemini_web_search(
+            &mut acc,
+            Some(BuiltinWebSearch {
+                queries: vec!["q1".into()],
+                citations: vec![WebCitation {
+                    title: "A".into(),
+                    url: "https://a.com".into(),
+                }],
+            }),
+        );
+        // 第二段带重复 url + 重复 query + 新来源。
+        merge_gemini_web_search(
+            &mut acc,
+            Some(BuiltinWebSearch {
+                queries: vec!["q1".into(), "q2".into()],
+                citations: vec![
+                    WebCitation {
+                        title: "A-dup".into(),
+                        url: "https://a.com".into(),
+                    },
+                    WebCitation {
+                        title: "B".into(),
+                        url: "https://b.com".into(),
+                    },
+                ],
+            }),
+        );
+        let merged = acc.expect("accumulated");
+        assert_eq!(merged.queries, vec!["q1".to_string(), "q2".to_string()]);
+        assert_eq!(merged.citations.len(), 2);
+        assert_eq!(merged.citations[0].url, "https://a.com");
+        assert_eq!(merged.citations[1].url, "https://b.com");
     }
 
     fn temperature_body(

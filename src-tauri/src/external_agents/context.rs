@@ -279,6 +279,7 @@ mod tests {
             knowledge_base_ids: Vec::new(),
             force_knowledge_search: false,
             thinking_level: None,
+            web_search_mode: None,
             reply_models: Vec::new(),
             group_selections: std::collections::HashMap::new(),
             forked_from: None,

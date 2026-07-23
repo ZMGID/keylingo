@@ -177,6 +177,40 @@ pub fn reasoning_efforts_for_model(model: &str, api_format: &str) -> Vec<String>
     vec!["low".into(), "medium".into(), "high".into()]
 }
 
+/// 把「每对话思考等级」规范成各家 wire 接受的 **reasoning effort 值**（任务 07-23 统一）。
+///
+/// 输入是 `resolve_thinking` 产出的规范等级：`off` 已在上游转为 `None`（关思考），故这里
+/// 只会见到 `None` 或 `low|medium|high|xhigh|max`。这是**四个适配器共用的单一事实源**，
+/// 避免各家各写一份映射而漂移（此前 openai/anthropic 原样透传、responses 各映一套、
+/// gemini 干脆忽略等级）。各适配器仍各自负责把返回值塞进自己的 wire 字段
+/// （openai `reasoning_effort` / responses `reasoning.effort` / anthropic
+/// `output_config.effort` / gemini `thinkingConfig.thinkingLevel`）。
+///
+/// `None` = 不发 effort（关思考或未设且调用方不兜底）。
+pub(crate) fn reasoning_effort_wire(
+    kind: crate::settings::ProviderApiFormat,
+    level: Option<&str>,
+) -> Option<String> {
+    use crate::settings::ProviderApiFormat::{
+        AnthropicMessages, Gemini, OpenAiChat, OpenAiResponses,
+    };
+    let level = level.map(str::trim).filter(|l| !l.is_empty())?;
+    let mapped = match kind {
+        // OpenAI（Chat/Responses）、Gemini 3.x thinkingLevel：官方档 minimal/low/medium/high。
+        // 我们的规范集无 minimal（off 已转 None）；xhigh/max 这两档它们不认，收敛到 high。
+        OpenAiChat | OpenAiResponses | Gemini => match level {
+            "low" | "medium" | "high" => level,
+            _ => "high", // xhigh/max/未知 → high
+        },
+        // Anthropic output_config.effort：支持全档，原样透传（前端已按模型库 reasoningEfforts 门控）。
+        AnthropicMessages => match level {
+            "low" | "medium" | "high" | "xhigh" | "max" => level,
+            _ => "high",
+        },
+    };
+    Some(mapped.to_string())
+}
+
 fn model_pricing_from_model_info(info: Option<&ModelInfo>) -> Option<ModelPricing> {
     info.and_then(|info| info.pricing.clone())
 }
@@ -209,6 +243,17 @@ pub(crate) fn model_supports_image_generation(
 pub(crate) fn model_can_generate_images_directly(provider: &ModelProvider, model: &str) -> bool {
     model_supports_image_generation(Some(provider), model) == Some(true)
         && crate::chat::image_generation::has_known_direct_image_generation_route(provider, model)
+}
+
+/// 当前 provider 是否支持模型**原生内置联网搜索**（任务 07-23）。
+/// 依 `api_format`：OpenAI Responses / Gemini / Anthropic Messages 支持；OpenAI Chat
+/// Completions 不支持（gpt-5 在其上开 `web_search` 会 400）。前端据此把「内置」选项置灰。
+pub(crate) fn builtin_web_search_supported(provider: &ModelProvider) -> bool {
+    use crate::settings::ProviderApiFormat::{AnthropicMessages, Gemini, OpenAiResponses};
+    matches!(
+        provider.api_format_kind(),
+        OpenAiResponses | Gemini | AnthropicMessages
+    )
 }
 
 pub(crate) fn image_generation_model_for_session(
@@ -420,6 +465,73 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides,
             compress_request_body: false,
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_wire_maps_per_family() {
+        use crate::settings::ProviderApiFormat::{
+            AnthropicMessages, Gemini, OpenAiChat, OpenAiResponses,
+        };
+        // None / 空 ⇒ 不发。
+        assert_eq!(reasoning_effort_wire(OpenAiChat, None), None);
+        assert_eq!(reasoning_effort_wire(OpenAiResponses, Some("  ")), None);
+        // OpenAI（Chat/Responses）+ Gemini：low/medium/high 透传，xhigh/max 收敛到 high。
+        for kind in [OpenAiChat, OpenAiResponses, Gemini] {
+            assert_eq!(
+                reasoning_effort_wire(kind, Some("low")).as_deref(),
+                Some("low")
+            );
+            assert_eq!(
+                reasoning_effort_wire(kind, Some("high")).as_deref(),
+                Some("high")
+            );
+            assert_eq!(
+                reasoning_effort_wire(kind, Some("xhigh")).as_deref(),
+                Some("high"),
+                "xhigh 应收敛到 high: {kind:?}"
+            );
+            assert_eq!(
+                reasoning_effort_wire(kind, Some("max")).as_deref(),
+                Some("high")
+            );
+        }
+        // Anthropic：全档原样透传。
+        assert_eq!(
+            reasoning_effort_wire(AnthropicMessages, Some("xhigh")).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            reasoning_effort_wire(AnthropicMessages, Some("max")).as_deref(),
+            Some("max")
+        );
+    }
+
+    #[test]
+    fn builtin_web_search_supported_by_api_format() {
+        let mut p = test_provider_with_overrides(HashMap::new());
+        // Chat Completions（含别名/空）⇒ 不支持内置搜索（gpt-5 在其上会 400）。
+        for fmt in ["openai_chat", "openai", ""] {
+            p.api_format = fmt.into();
+            assert!(
+                !builtin_web_search_supported(&p),
+                "should be unsupported: {fmt:?}"
+            );
+        }
+        // Responses / Gemini / Anthropic（含各别名）⇒ 支持。
+        for fmt in [
+            "openai_responses",
+            "responses",
+            "gemini",
+            "google",
+            "anthropic",
+            "anthropic_messages",
+        ] {
+            p.api_format = fmt.into();
+            assert!(
+                builtin_web_search_supported(&p),
+                "should be supported: {fmt:?}"
+            );
         }
     }
 

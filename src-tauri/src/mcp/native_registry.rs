@@ -712,6 +712,7 @@ fn call_advisor(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
                 retry_attempts,
                 false,
                 None,
+                false,
                 max_output_tokens,
                 &conversation_id,
                 &message_id,

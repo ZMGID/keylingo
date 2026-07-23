@@ -35,7 +35,7 @@ import { MultiModelSelector } from './MultiModelSelector'
 import { Button, IconButton } from '../components/Button'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
-import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ModelRef, PendingAttachment } from './types'
+import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ModelRef, PendingAttachment, WebSearchMode } from './types'
 import {
   buildSlashCommands,
   commandMatches,
@@ -408,8 +408,9 @@ interface InputBarProps {
   mcpServers?: ChatMcpServer[]
   onToggleMcpServer?: (serverId: string) => void | Promise<void>
   /** 网络搜索全局开关（nativeTools.webSearch）；在「来源」弹层内切换 */
-  webSearchEnabled?: boolean
-  onToggleWebSearch?: () => void | Promise<void>
+  webSearchMode?: WebSearchMode
+  onSetWebSearchMode?: (mode: WebSearchMode) => void | Promise<void>
+  builtinWebSearchSupported?: boolean
   /** 多答模型集（会话级 reply_models / replyModels；0/1 个=单模型，≥2=一问多答） */
   replyModels?: ModelRef[]
   onChangeReplyModels?: (models: ModelRef[]) => void | Promise<void>
@@ -454,8 +455,9 @@ export function InputBar({
   onToggleForceKnowledgeSearch,
   mcpServers = [],
   onToggleMcpServer,
-  webSearchEnabled = true,
-  onToggleWebSearch,
+  webSearchMode = 'off',
+  onSetWebSearchMode,
+  builtinWebSearchSupported = false,
   replyModels = [],
   onChangeReplyModels,
   contextSlot,
@@ -1668,7 +1670,7 @@ export function InputBar({
               <Plus size={18} strokeWidth={1.75} />
             </IconButton>
 
-            {onChangeKnowledgeBaseIds && onToggleWebSearch && (
+            {onChangeKnowledgeBaseIds && onSetWebSearchMode && (
               <SourcesButton
                 knowledgeBaseIds={knowledgeBaseIds}
                 onChangeKnowledgeBaseIds={onChangeKnowledgeBaseIds}
@@ -1676,8 +1678,9 @@ export function InputBar({
                 onToggleForceKnowledgeSearch={onToggleForceKnowledgeSearch}
                 mcpServers={mcpServers}
                 onToggleMcpServer={onToggleMcpServer ?? (() => {})}
-                webSearchEnabled={webSearchEnabled}
-                onToggleWebSearch={onToggleWebSearch}
+                webSearchMode={webSearchMode}
+                onSetWebSearchMode={onSetWebSearchMode}
+                builtinWebSearchSupported={builtinWebSearchSupported}
                 onOpenSettings={onOpenSettings}
                 disabled={disabled}
                 layout={layout}

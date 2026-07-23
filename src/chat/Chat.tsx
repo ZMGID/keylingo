@@ -43,9 +43,11 @@ import type {
   ToolCallRecord,
   ThinkingLevel,
   ModelRef,
+  WebSearchMode,
 } from './types'
 import {
   api,
+  builtinWebSearchSupported,
   type ChatExternalSendRequest,
   type ChatSessionConsentPayload,
   type ChatStreamPayload,
@@ -739,6 +741,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [draftForceKnowledgeSearch, setDraftForceKnowledgeSearch] = useState(false)
   // 欢迎页思考等级草稿；首次发送建会话时落到会话上。null=跟随全局。
   const [draftThinkingLevel, setDraftThinkingLevel] = useState<ThinkingLevel | null>(loadLastThinkingLevel)
+  // 欢迎页联网搜索模式草稿（任务 07-23）；首次发送建会话时落到会话上。undefined=跟随全局。
+  const [draftWebSearchMode, setDraftWebSearchMode] = useState<WebSearchMode | undefined>(undefined)
   // 多模型一问多答（任务 06-30）：欢迎页（尚无会话）时的多答模型草稿；首次发送建会话时落到会话上。
   const [draftReplyModels, setDraftReplyModels] = useState<ModelRef[]>([])
   const [draftAgentRuntime, setDraftAgentRuntime] = useState<AgentRuntimeConfig>(
@@ -752,6 +756,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [enabledTools, setEnabledTools] = useState<ChatToolDefinition[]>([])
   const [mcpServers, setMcpServers] = useState<ChatMcpServer[]>([])
   const [webSearchEnabled, setWebSearchEnabled] = useState(true)
+  // provider id → apiFormat（任务 07-23）：用于判断当前模型是否支持内置搜索。
+  const [providerApiFormats, setProviderApiFormats] = useState<Record<string, string>>({})
   const [enabledToolCount, setEnabledToolCount] = useState<number | null>(null)
   const [toolsDisabledReason, setToolsDisabledReason] = useState('')
   const [toolsRequested, setToolsRequested] = useState(false)
@@ -1062,6 +1068,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const activeModel = currentConversation && !currentConversationIsBlank
     ? currentConversation.model
     : draftModel
+  // 会话级三态联网搜索（任务 07-23）：会话显式模式优先，否则回退全局 webSearchEnabled。
+  const activeWebSearchMode = useMemo<WebSearchMode>(() => {
+    if (currentConversation && !currentConversationIsBlank) {
+      const explicit = currentConversation.webSearchMode ?? currentConversation.web_search_mode
+      if (explicit) return explicit
+    } else if (draftWebSearchMode) {
+      return draftWebSearchMode
+    }
+    return webSearchEnabled ? 'third_party' : 'off'
+  }, [currentConversation, currentConversationIsBlank, draftWebSearchMode, webSearchEnabled])
+  const activeBuiltinWebSearchSupported = useMemo(
+    () => builtinWebSearchSupported(providerApiFormats[activeProviderId ?? '']),
+    [providerApiFormats, activeProviderId],
+  )
   // 多模型一问多答（任务 06-30）：当前生效的多答模型集（会话级持久 reply_models，欢迎页用草稿）。
   const activeReplyModels = useMemo<ModelRef[]>(
     () => (currentConversation && !currentConversationIsBlank
@@ -1134,6 +1154,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const chatTools = settings.chatTools
       setMcpServers(chatTools?.servers ?? [])
       setWebSearchEnabled(chatTools?.nativeTools?.webSearch !== false)
+      setProviderApiFormats(
+        Object.fromEntries((settings.providers ?? []).map((p) => [p.id, p.apiFormat ?? ''])),
+      )
       setApprovalPolicy(chatTools?.approvalPolicy || 'readonly_auto_sensitive_confirm')
       const nextDisabledSkillIds = chatTools?.disabledSkillIds ?? []
       setDisabledSkillIds((prev) =>
@@ -1214,27 +1237,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       await refreshToolIndicator()
     } catch (err) {
       console.error('Failed to toggle MCP server:', err)
-      void refreshToolIndicator()
-    }
-  }, [onSettingsChange, refreshToolIndicator])
-
-  const handleToggleWebSearch = useCallback(async () => {
-    try {
-      const settings = await refreshSettings()
-      const nativeTools = settings.chatTools?.nativeTools
-      const next = !(nativeTools?.webSearch !== false)
-      setWebSearchEnabled(next)
-      await saveSettingsCached({
-        ...settings,
-        chatTools: {
-          ...settings.chatTools,
-          nativeTools: { ...(nativeTools ?? {}), webSearch: next },
-        },
-      })
-      onSettingsChange()
-      await refreshToolIndicator()
-    } catch (err) {
-      console.error('Failed to toggle web search:', err)
       void refreshToolIndicator()
     }
   }, [onSettingsChange, refreshToolIndicator])
@@ -2752,6 +2754,22 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     }
 
+    // 会话级三态联网搜索（任务 07-23）：把欢迎页选好的模式草稿落到新会话上
+    // （仅当会话尚未显式设过模式时）。
+    if (draftWebSearchMode) {
+      const convMode = conversation.web_search_mode ?? conversation.webSearchMode ?? null
+      if (convMode === null) {
+        try {
+          conversation = await chatApi.updateConversation(conversation.id, {
+            webSearchMode: draftWebSearchMode,
+          })
+          applyConversation(conversation)
+        } catch (err) {
+          console.error('Failed to apply web search mode draft before send:', err)
+        }
+      }
+    }
+
     // 多模型一问多答（任务 06-30）：把欢迎页选好的多答模型草稿落到新会话上。
     {
       const convReplyModels = conversation.reply_models ?? conversation.replyModels ?? []
@@ -2918,6 +2936,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     draftForceKnowledgeSearch,
     draftThinkingLevel,
     draftReplyModels,
+    draftWebSearchMode,
     effectiveSkillId,
     enabledSkills,
     ensureStreamSnapshot,
@@ -3459,6 +3478,21 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [applyConversationMeta, currentConversation])
 
+  // 会话级三态联网搜索（任务 07-23）：设置模式，持久化到会话（欢迎页先存草稿）。
+  const handleSetWebSearchMode = useCallback(async (mode: WebSearchMode) => {
+    setDraftWebSearchMode(mode)
+    if (!currentConversation) return
+    try {
+      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+        webSearchMode: mode,
+      })
+      applyConversationMeta(updatedConv)
+    } catch (err) {
+      console.error('Failed to change web search mode:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '联网搜索模式切换失败')
+    }
+  }, [applyConversationMeta, currentConversation])
+
   // 多模型一问多答（任务 06-30 / D2）：变更多答模型集，持久化到会话（欢迎页先存草稿）。
   // 上限 4 由 UI 侧约束；这里直落 chatApi.updateConversation({ replyModels })。
   const handleChangeReplyModels = useCallback(async (models: ModelRef[]) => {
@@ -3938,8 +3972,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
                       mcpServers={mcpServers}
                       onToggleMcpServer={handleToggleMcpServer}
-                      webSearchEnabled={webSearchEnabled}
-                      onToggleWebSearch={handleToggleWebSearch}
+                      webSearchMode={activeWebSearchMode}
+                      onSetWebSearchMode={handleSetWebSearchMode}
+                      builtinWebSearchSupported={activeBuiltinWebSearchSupported}
                       replyModels={activeReplyModels}
                       onChangeReplyModels={handleChangeReplyModels}
                       contextSlot={
@@ -4038,8 +4073,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
                     mcpServers={mcpServers}
                     onToggleMcpServer={handleToggleMcpServer}
-                    webSearchEnabled={webSearchEnabled}
-                    onToggleWebSearch={handleToggleWebSearch}
+                    webSearchMode={activeWebSearchMode}
+                    onSetWebSearchMode={handleSetWebSearchMode}
+                    builtinWebSearchSupported={activeBuiltinWebSearchSupported}
                     replyModels={activeReplyModels}
                     onChangeReplyModels={handleChangeReplyModels}
                     contextSlot={

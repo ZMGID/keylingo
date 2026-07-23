@@ -2,15 +2,15 @@ use serde_json::Value;
 
 use crate::chat::model::{
     generate_request_from_openai_messages, generate_with_chat_provider, stream_with_chat_provider,
-    GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext, ModelError,
-    PendingToolCall, StreamPart, StreamSink,
+    BuiltinWebSearch, GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext,
+    ModelError, PendingToolCall, StreamPart, StreamSink,
 };
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase};
 use crate::mcp::ChatToolDefinition;
 
 use super::finalize::{
     cancelled_run_result_from_state, cancelled_tool_round_run_result,
-    tool_planning_failed_run_result, RunResultBuilder,
+    emit_builtin_web_search_card, tool_planning_failed_run_result, RunResultBuilder,
 };
 use super::host::AgentHost;
 use super::loop_::{LoopEnv, RunState};
@@ -139,6 +139,8 @@ pub(crate) async fn planning_step(
         Some(step_number),
         state.segment_builder.next_order(),
     );
+    // 本轮内置搜索引用（若开且模型支持）：从模型输出捕获，稍后合成一张来源卡。
+    let mut planning_web_search: Option<BuiltinWebSearch> = None;
     let planning_result = if config.stream_enabled {
         match stream_scoped_chat_completion_inner(
             config.state,
@@ -150,6 +152,7 @@ pub(crate) async fn planning_step(
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.run_id,
@@ -221,6 +224,7 @@ pub(crate) async fn planning_step(
                     ));
                 }
                 state.merge_usage(stream.usage.clone());
+                planning_web_search = stream.web_search.clone();
                 Ok(ChatPlanningStep {
                     message: stream.to_openai_compatible_message(),
                     streamed: true,
@@ -252,7 +256,7 @@ pub(crate) async fn planning_step(
                 // 与下方非流式路径同款 select：降级重试内部有 send_with_retry 的多次退避
                 // （每次 60s 超时），不接取消的话，用户点停止后会卡在这里直到重试耗尽。
                 tokio::select! {
-                    result = call_chat_completion_message_with_usage(
+                    result = call_chat_completion_output_with_usage(
                         config.state,
                         &config.provider,
                         &config.model,
@@ -261,12 +265,14 @@ pub(crate) async fn planning_step(
                         config.retry_attempts,
                         config.thinking_enabled,
                         config.thinking_level.clone(),
+                        config.builtin_web_search_active(),
                         config.max_output_tokens,
                         &config.conversation_id,
                         &config.message_id,
                         "Chat tools planning",
-                    ) => result.map(|(message, usage)| {
+                    ) => result.map(|(message, usage, web_search)| {
                         state.merge_usage(usage);
+                        planning_web_search = web_search;
                         ChatPlanningStep {
                             message,
                             streamed: false,
@@ -283,7 +289,7 @@ pub(crate) async fn planning_step(
         }
     } else {
         tokio::select! {
-            result = call_chat_completion_message_with_usage(
+            result = call_chat_completion_output_with_usage(
                 config.state,
                 &config.provider,
                 &config.model,
@@ -292,12 +298,14 @@ pub(crate) async fn planning_step(
                 config.retry_attempts,
                 config.thinking_enabled,
                 config.thinking_level.clone(),
+                config.builtin_web_search_active(),
                 config.max_output_tokens,
                 &config.conversation_id,
                 &config.message_id,
                 "Chat tools planning",
-            ) => result.map(|(message, usage)| {
+            ) => result.map(|(message, usage, web_search)| {
                 state.merge_usage(usage);
+                planning_web_search = web_search;
                 ChatPlanningStep {
                     message,
                     streamed: false,
@@ -370,6 +378,18 @@ pub(crate) async fn planning_step(
             return Err(err);
         }
     };
+    // 内置搜索（服务端托管）发生过 ⇒ 合成一张「网络搜索」来源卡（追加在末尾 = 答案下方脚注）。
+    if let Some(web_search) = planning_web_search.as_ref() {
+        emit_builtin_web_search_card(
+            host,
+            env.ids(),
+            state,
+            web_search,
+            &config.provider.name,
+            ChatMessageSegmentPhase::ToolLoop,
+            Some(round),
+        );
+    }
     let tool_calls = extract_tool_calls(&message);
     if tool_calls.is_empty() {
         let response =
@@ -487,11 +507,56 @@ pub(crate) async fn call_chat_completion_message_with_usage(
     retry_attempts: usize,
     thinking_enabled: bool,
     thinking_level: Option<String>,
+    builtin_web_search: bool,
     max_output_tokens: u32,
     conversation_id: &str,
     message_id: &str,
     label: &str,
 ) -> Result<(Value, Option<crate::chat::model::ModelUsage>), String> {
+    let (message, usage, _web_search) = call_chat_completion_output_with_usage(
+        state,
+        provider,
+        model,
+        messages,
+        tools,
+        retry_attempts,
+        thinking_enabled,
+        thinking_level,
+        builtin_web_search,
+        max_output_tokens,
+        conversation_id,
+        message_id,
+        label,
+    )
+    .await?;
+    Ok((message, usage))
+}
+
+/// 同 `call_chat_completion_message_with_usage`，但额外回传适配器解析出的内置搜索引用
+/// （`GenerateOutput.web_search`）。非流式答案路径用它把内置搜索可视化成工具卡（任务 07-23）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_chat_completion_output_with_usage(
+    state: &crate::state::AppState,
+    provider: &crate::settings::ModelProvider,
+    model: &str,
+    messages: Vec<Value>,
+    tools: Option<&[ChatToolDefinition]>,
+    retry_attempts: usize,
+    thinking_enabled: bool,
+    thinking_level: Option<String>,
+    builtin_web_search: bool,
+    max_output_tokens: u32,
+    conversation_id: &str,
+    message_id: &str,
+    label: &str,
+) -> Result<
+    (
+        Value,
+        Option<crate::chat::model::ModelUsage>,
+        Option<crate::chat::model::BuiltinWebSearch>,
+    ),
+    String,
+> {
     let request = generate_request_from_openai_messages(
         model,
         messages,
@@ -499,6 +564,7 @@ pub(crate) async fn call_chat_completion_message_with_usage(
         GenerateOptions {
             thinking_enabled,
             thinking_level,
+            builtin_web_search,
             max_tokens: max_output_tokens,
             ..GenerateOptions::default()
         },
@@ -509,7 +575,8 @@ pub(crate) async fn call_chat_completion_message_with_usage(
         .await
         .map_err(|err| err.to_string())?;
     let usage = output.usage.clone();
-    Ok((output.to_openai_compatible_message(), usage))
+    let web_search = output.web_search.clone();
+    Ok((output.to_openai_compatible_message(), usage, web_search))
 }
 
 /// 与 `call_chat_completion_message_with_usage` 同形（返回 `to_openai_compatible_message()` Value），
@@ -594,6 +661,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
     retry_attempts: usize,
     thinking_enabled: bool,
     thinking_level: Option<String>,
+    builtin_web_search: bool,
     max_output_tokens: u32,
     conversation_id: &str,
     run_id: &str,
@@ -612,6 +680,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         GenerateOptions {
             thinking_enabled,
             thinking_level,
+            builtin_web_search,
             max_tokens: max_output_tokens,
             ..GenerateOptions::default()
         },

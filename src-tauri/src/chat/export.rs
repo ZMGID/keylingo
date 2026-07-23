@@ -223,6 +223,7 @@ mod tests {
             knowledge_base_ids: vec![],
             force_knowledge_search: false,
             thinking_level: None,
+            web_search_mode: None,
             reply_models: vec![],
             group_selections: HashMap::new(),
             forked_from: None,

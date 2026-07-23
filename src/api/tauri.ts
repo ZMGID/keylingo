@@ -1333,6 +1333,17 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
   return 'openai_chat'
 }
 
+/**
+ * 当前 provider 是否支持模型原生内置联网搜索（任务 07-23）。
+ * OpenAI Responses / Gemini / Anthropic Messages 支持；Chat Completions 不支持
+ * （gpt-5 在其上开 web_search 会 400）。前端据此把「内置」选项置灰。
+ * 与 Rust 侧 `model_metadata::builtin_web_search_supported` 保持一致。
+ */
+export function builtinWebSearchSupported(apiFormat?: string): boolean {
+  const kind = normalizeProviderApiFormat(apiFormat)
+  return kind === 'openai_responses' || kind === 'gemini' || kind === 'anthropic_messages'
+}
+
 const CHAT_TOOL_DEFAULT_ROUNDS = 20
 const CHAT_TOOL_MIN_ROUNDS = 1
 const CHAT_TOOL_MAX_ROUNDS = 100

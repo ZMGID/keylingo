@@ -496,6 +496,9 @@ pub struct ChatStreamOutput {
     /// Provider-reported usage for this single model call (None when the
     /// provider does not report usage or the stream was cancelled mid-flight).
     pub usage: Option<crate::chat::model::ModelUsage>,
+    /// 模型原生内置联网搜索的解析结果（仅内置搜索发生时为 Some）。循环据此合成一张
+    /// 「网络搜索」工具卡（任务 07-23）。
+    pub web_search: Option<crate::chat::model::BuiltinWebSearch>,
 }
 
 impl ChatStreamOutput {
@@ -530,6 +533,7 @@ impl ChatStreamOutput {
             finish_reason,
             cancelled,
             usage: None,
+            web_search: None,
         }
     }
 
@@ -545,6 +549,7 @@ impl ChatStreamOutput {
         };
         let cleaned = sanitize_assistant_text_response(raw_content.trim());
         let reasoning = output.reasoning.unwrap_or(snapshot_reasoning);
+        let web_search = output.web_search;
         let mut result = Self::from_generate_output(
             cleaned,
             raw_content,
@@ -554,6 +559,7 @@ impl ChatStreamOutput {
             false,
         );
         result.usage = output.usage;
+        result.web_search = web_search;
         result
     }
 
