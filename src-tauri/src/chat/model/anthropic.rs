@@ -245,6 +245,12 @@ impl AnthropicMessagesProvider<'_> {
                         current_tool_input_parts.clear();
                     }
                     Some(AnthropicSseEvent::WebSearch(ws)) => {
+                        // 实时卡（任务 07-23）：发本次增量（server_tool_use 查询 /
+                        // web_search_tool_result 来源），sink 去重累加并原地更新卡。
+                        sink.emit(StreamPart::WebSearch {
+                            queries: ws.queries.clone(),
+                            citations: ws.citations.clone(),
+                        })?;
                         merge_anthropic_web_search(&mut web_search, ws);
                     }
                     Some(AnthropicSseEvent::MessageStop) => {
@@ -1623,6 +1629,30 @@ mod tests {
             "stop_reason": "end_turn"
         });
         assert!(parse_anthropic_response(&response).web_search.is_none());
+    }
+
+    /// 内置搜索实时卡（任务 07-23）：流式 `content_block_start` 的 `server_tool_use`（查询）
+    /// 与 `web_search_tool_result`（来源）各解析成一个 `WebSearch` 增量事件——正是流循环里
+    /// 逐帧 `emit` 成 `StreamPart::WebSearch` 的来源。此测试钉住这条 wire → 增量的映射。
+    #[test]
+    fn stream_web_search_events_parse_query_then_results_increments() {
+        let query_line = "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"server_tool_use\",\"name\":\"web_search\",\"input\":{\"query\":\"kivio\"}}}";
+        match parse_anthropic_sse_event(query_line) {
+            Some(AnthropicSseEvent::WebSearch(ws)) => {
+                assert_eq!(ws.queries, vec!["kivio".to_string()]);
+                assert!(ws.citations.is_empty());
+            }
+            _ => panic!("expected WebSearch query increment"),
+        }
+        let result_line = "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"type\":\"web_search_result\",\"url\":\"https://a.com\",\"title\":\"A 站\"}]}}";
+        match parse_anthropic_sse_event(result_line) {
+            Some(AnthropicSseEvent::WebSearch(ws)) => {
+                assert!(ws.queries.is_empty());
+                assert_eq!(ws.citations.len(), 1);
+                assert_eq!(ws.citations[0].url, "https://a.com");
+            }
+            _ => panic!("expected WebSearch result increment"),
+        }
     }
 
     #[test]

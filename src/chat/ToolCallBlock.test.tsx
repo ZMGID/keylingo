@@ -251,33 +251,25 @@ describe('ToolCallBlock', () => {
     expect(pre?.textContent).toBe(code)
   })
 
-  it('renders the built-in web search card with clickable source links', async () => {
-    const user = userEvent.setup()
+  it('renders the built-in web search record via the default compact card (Web search · provider)', () => {
+    // 任务 07-23:内置搜索复用默认 web_search 工具卡渲染(不再单独做卡片),
+    // 头部显示「Web search · <provider>」,provider 取自 structured_content.provider。
     render(
       <ToolCallBlock
         toolCall={buildToolCall({
           toolName: 'web_search',
           source: 'native',
           status: 'success',
+          arguments: JSON.stringify({ query: 'kivio release' }),
           structured_content: {
             type: 'builtin_web_search',
             provider: 'OpenAI',
             queries: ['kivio release'],
-            citations: [
-              { title: 'A 站', url: 'https://a.com' },
-              { title: '', url: 'https://b.com' },
-            ],
+            citations: [{ title: 'A 站', url: 'https://a.com' }],
           },
         })}
       />,
     )
-    const button = screen.getByRole('button', { name: /WEB SEARCH/ })
-    expect(within(button).getByText('OpenAI')).toBeInTheDocument()
-    await user.click(button)
-    const linkA = screen.getByRole('link', { name: /A 站/ })
-    expect(linkA).toHaveAttribute('href', 'https://a.com')
-    // 缺 title 的来源回退用 url 作标题。
-    const linkB = screen.getByRole('link', { name: /b\.com/ })
-    expect(linkB).toHaveAttribute('href', 'https://b.com')
+    expect(screen.getByText(/Web search · OpenAI/)).toBeInTheDocument()
   })
 })

@@ -756,97 +756,6 @@ function isPythonRecord(toolCall: ToolCallRecord): boolean {
   return toolCall.source === 'native' && toolRawName(toolCall) === 'run_python'
 }
 
-interface BuiltinWebSearchView {
-  provider?: string
-  queries: string[]
-  citations: { title: string; url: string }[]
-}
-
-/** Parse the synthesized built-in (provider-native) web-search record's
- *  structured_content ({type:"builtin_web_search", provider, queries, citations}).
- *  Returns null for any other record. */
-function builtinWebSearchView(toolCall: ToolCallRecord): BuiltinWebSearchView | null {
-  const structured = objectValue(toolCall.structured_content ?? toolCall.structuredContent)
-  if (!structured || structured.type !== 'builtin_web_search') return null
-  const queries = Array.isArray(structured.queries)
-    ? structured.queries.map((q) => stringValue(q)).filter(Boolean)
-    : []
-  const citations = Array.isArray(structured.citations)
-    ? structured.citations
-        .map((c) => {
-          const item = objectValue(c)
-          const url = stringValue(item?.url)
-          if (!url) return null
-          return { title: stringValue(item?.title) || url, url }
-        })
-        .filter((c): c is { title: string; url: string } => Boolean(c))
-    : []
-  return { provider: stringValue(structured.provider) || undefined, queries, citations }
-}
-
-function isBuiltinWebSearchRecord(toolCall: ToolCallRecord): boolean {
-  return builtinWebSearchView(toolCall) !== null
-}
-
-/** Dedicated card for the model's server-side built-in web search (task 07-23):
- *  内置搜索由 provider 服务端执行、不进工具循环，故循环合成这条记录把「搜索发生了 +
- *  来源列表」可视化。复用 ConsultCard 外壳，来源渲染成可点链接（PRD R6：来源脚注）。 */
-function WebSearchSourcesCard({ toolCall }: ToolCallBlockProps) {
-  const status = normalizeToolCallStatus(toolCall.status)
-  const view = useMemo(() => builtinWebSearchView(toolCall), [toolCall])
-  const query = view?.queries.join('  ·  ') || ''
-  const citations = view?.citations ?? []
-  const count = citations.length
-  const identityChips = view?.provider ? <CardChip>{view.provider}</CardChip> : undefined
-  const hasBody = Boolean(query || count > 0)
-  return (
-    <ConsultCard
-      label="WEB SEARCH"
-      status={status}
-      identityChips={identityChips}
-      metricChips={count > 0 ? <CardChip tabular>{count} 来源</CardChip> : undefined}
-      statusLine={status === 'running' ? '搜索中…' : ''}
-    >
-      {hasBody && (
-        <>
-          {query && (
-            <CardSection label="Query">
-              <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
-                {compactText(query, 300)}
-              </div>
-            </CardSection>
-          )}
-          {count > 0 && (
-            <div className="space-y-1">
-              {citations.map((citation, idx) => (
-                <a
-                  key={`${citation.url}-${idx}`}
-                  href={citation.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-start gap-1.5 rounded-md px-1 py-0.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                >
-                  <span className="shrink-0 rounded bg-indigo-500/15 px-1 text-[10.5px] text-indigo-500">
-                    {idx + 1}
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block truncate text-neutral-700 dark:text-neutral-200">
-                      {citation.title}
-                    </span>
-                    <span className="block truncate text-[10.5px] text-neutral-400 dark:text-neutral-500">
-                      {citation.url}
-                    </span>
-                  </span>
-                </a>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </ConsultCard>
-  )
-}
-
 /** Dedicated card for `run_python`: same consult-card shell as SUBAGENT/ADVISOR.
  *  Body shows the executed code and stdout/stderr. Generated files/images are
  *  rendered separately at the message level (GeneratedImageArtifacts /
@@ -1591,9 +1500,6 @@ function ToolCallBlockComponent(props: ToolCallBlockProps) {
   }
   if (isKnowledgeSearchRecord(props.toolCall)) {
     return <KnowledgeCard {...props} />
-  }
-  if (isBuiltinWebSearchRecord(props.toolCall)) {
-    return <WebSearchSourcesCard {...props} />
   }
   if (isPythonRecord(props.toolCall)) {
     return <PythonCard {...props} />

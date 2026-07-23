@@ -21,7 +21,7 @@ use super::stop::{
 };
 use super::stream::{
     should_emit_done, validate_stream_output, AgentStreamSink, ChatStreamOutput,
-    ToolCallDraftTracker,
+    ToolCallDraftTracker, WebSearchCardTracker,
 };
 use super::types::{AgentRunResult, AgentStreamPolicy};
 
@@ -126,6 +126,9 @@ pub(crate) async fn planning_step(
         Some(round),
         &format!("step_{step_number}_reasoning"),
     );
+    // 在 reasoning 与正文之间预留内置搜索实时卡的 order 槽（任务 07-23）：搜索发生时卡插到
+    // 这里 → 渲染在答案文本之前；未搜索则该 order 留空洞无害。
+    let web_search_order = state.segment_builder.reserve_order();
     let planning_text_segment = state.segment_builder.reserve(
         ChatMessageSegmentKind::Text,
         ChatMessageSegmentPhase::ToolLoop,
@@ -139,7 +142,19 @@ pub(crate) async fn planning_step(
         Some(step_number),
         state.segment_builder.next_order(),
     );
-    // 本轮内置搜索引用（若开且模型支持）：从模型输出捕获，稍后合成一张来源卡。
+    // 内置搜索实时卡追踪器：仅在会话 Builtin 模式且模型支持时建（否则 None，走现状路径）。
+    let planning_web_search_tracker = if config.builtin_web_search_active() {
+        Some(WebSearchCardTracker::new(
+            web_search_order,
+            Some(round),
+            ChatMessageSegmentPhase::ToolLoop,
+            config.provider.name.clone(),
+        ))
+    } else {
+        None
+    };
+    // 本轮内置搜索引用（**仅非流式路径**会有值）：流式路径由实时卡追踪器边流边合成，
+    // 故此处只承接非流式 `generate` 的解析结果，稍后与 take_card 二选一落盘（不双卡）。
     let mut planning_web_search: Option<BuiltinWebSearch> = None;
     let planning_result = if config.stream_enabled {
         match stream_scoped_chat_completion_inner(
@@ -163,6 +178,7 @@ pub(crate) async fn planning_step(
             Some(planning_text_segment.clone()),
             Some(planning_reasoning_segment.clone()),
             Some(planning_tool_drafts.clone()),
+            planning_web_search_tracker.clone(),
         )
         .await
         {
@@ -224,7 +240,6 @@ pub(crate) async fn planning_step(
                     ));
                 }
                 state.merge_usage(stream.usage.clone());
-                planning_web_search = stream.web_search.clone();
                 Ok(ChatPlanningStep {
                     message: stream.to_openai_compatible_message(),
                     streamed: true,
@@ -378,7 +393,15 @@ pub(crate) async fn planning_step(
             return Err(err);
         }
     };
-    // 内置搜索（服务端托管）发生过 ⇒ 合成一张「网络搜索」来源卡（追加在末尾 = 答案下方脚注）。
+    // 内置搜索（服务端托管）发生过 ⇒ 一张「网络搜索」卡落盘（预留槽 = 答案文本之前）。
+    // 两条路径互斥：流式由实时卡追踪器边流边合成（take_card 落 Success 终态卡）；
+    // 非流式只在拿到完整答案后合成（planning_web_search 才有值）。绝不双卡。
+    if let Some(tracker) = planning_web_search_tracker.as_ref() {
+        if let Some((record, segment)) = tracker.take_card() {
+            state.segment_builder.append_existing_segments(vec![segment]);
+            state.tool_records.push(record);
+        }
+    }
     if let Some(web_search) = planning_web_search.as_ref() {
         emit_builtin_web_search_card(
             host,
@@ -388,6 +411,7 @@ pub(crate) async fn planning_step(
             &config.provider.name,
             ChatMessageSegmentPhase::ToolLoop,
             Some(round),
+            Some(web_search_order),
         );
     }
     let tool_calls = extract_tool_calls(&message);
@@ -672,6 +696,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
     text_segment: Option<ChatMessageSegment>,
     reasoning_segment: Option<ChatMessageSegment>,
     tool_draft_tracker: Option<ToolCallDraftTracker>,
+    web_search_tracker: Option<WebSearchCardTracker>,
 ) -> Result<ChatStreamOutput, ModelError> {
     let request = generate_request_from_openai_messages(
         model,
@@ -696,6 +721,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         text_segment,
         reasoning_segment,
         tool_draft_tracker.clone(),
+        web_search_tracker,
     );
     let output = tokio::select! {
         result = stream_with_chat_provider(
@@ -722,6 +748,11 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         }
     };
     sink.flush_pending_text();
+    // 内置搜索实时卡定稿：流成功结束 ⇒ 翻 Success 并发终态记录（取消路径已在上面的
+    // select 分支 return，不会到这里，故取消时实时卡不落 Success，与 draft 行为一致）。
+    if let Some(record) = sink.finish_web_search_card() {
+        host.emit_tool_record(conversation_id, run_id, message_id, &record);
+    }
     let (snapshot_content, snapshot_reasoning) = sink.snapshot();
     let stream_output = ChatStreamOutput::from_generate_output_with_snapshot(
         output,

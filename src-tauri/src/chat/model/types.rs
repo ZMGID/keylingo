@@ -346,6 +346,15 @@ pub enum StreamPart {
     ToolCallStart { id: String, name: String },
     ToolCallDelta { id: String, delta: String },
     ToolCallDone { call: PendingToolCall },
+    /// 模型**原生内置联网搜索**的实时进度（任务 07-23）。适配器在服务端执行搜索的
+    /// 过程中逐帧发射：首帧可为空（= 开牌 Running），随后带查询词/来源增量。为什么单变体
+    /// 而非拆 Start/Update——sink 把「首次收到」当开牌、后续当增量累加，对三家适配器最省事。
+    /// 仅 `AgentStreamSink` 消费（合成一张实时「网络搜索」卡置于答案文本之前）；Lens/丢弃
+    /// 等其它 sink 走兜底 `_ => {}`，不受影响。
+    WebSearch {
+        queries: Vec<String>,
+        citations: Vec<WebCitation>,
+    },
     Finish { reason: String, full: String },
     Error { message: String },
 }

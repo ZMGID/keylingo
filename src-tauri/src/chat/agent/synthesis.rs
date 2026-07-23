@@ -17,7 +17,7 @@ use super::stop::{
     empty_assistant_response_error, extract_reasoning_content, final_assistant_api_message,
     merge_reasoning, sanitize_assistant_text_response,
 };
-use super::stream::ChatStreamOutput;
+use super::stream::{ChatStreamOutput, WebSearchCardTracker};
 use super::types::{AgentPhase, AgentRunConfig, AgentRunResult, AgentStreamPolicy};
 
 pub(crate) struct SynthesisCompleted {
@@ -61,6 +61,8 @@ pub(crate) async fn synthesis_step(
         None,
         &format!("step_{step_number}_reasoning"),
     );
+    // reasoning 与正文之间预留内置搜索实时卡的 order 槽（任务 07-23，与 planning 同款）。
+    let web_search_order = state.segment_builder.reserve_order();
     let response_segment = state.segment_builder.reserve(
         ChatMessageSegmentKind::Text,
         response_phase.clone(),
@@ -68,9 +70,20 @@ pub(crate) async fn synthesis_step(
         None,
         &format!("step_{step_number}_text"),
     );
+    // 内置搜索实时卡追踪器：仅 Builtin 模式且模型支持时建（否则 None，走现状路径）。
+    let synth_web_search_tracker = if config.builtin_web_search_active() {
+        Some(WebSearchCardTracker::new(
+            web_search_order,
+            None,
+            response_phase.clone(),
+            config.provider.name.clone(),
+        ))
+    } else {
+        None
+    };
 
-    // 内置搜索引用（若开且模型支持）：从合成模型输出捕获，稍后合成来源卡。
-    // 两条分支（流式/非流式）都会在读取前赋值，初值仅为满足声明。
+    // 内置搜索引用（**仅非流式路径**会有值）：流式路径由实时卡追踪器边流边合成，
+    // 此处只承接非流式 `generate` 的解析结果。初值 None 仅为满足声明（流式分支不赋值）。
     #[allow(unused_assignments)]
     let mut synth_web_search: Option<BuiltinWebSearch> = None;
     let (response, reasoning, response_reasoning) = if config.stream_enabled {
@@ -95,6 +108,7 @@ pub(crate) async fn synthesis_step(
             Some(response_segment.clone()),
             Some(response_reasoning_segment.clone()),
             None,
+            synth_web_search_tracker.clone(),
         )
         .await
         .map_err(|err| err.to_string());
@@ -166,7 +180,6 @@ pub(crate) async fn synthesis_step(
             ));
         }
         state.merge_usage(stream.usage.clone());
-        synth_web_search = stream.web_search.clone();
         let final_reasoning_for_api = stream.reasoning.clone();
         let reasoning = merge_reasoning(&state.planning_reasoning_parts, stream.reasoning.clone());
         let response = sanitize_assistant_text_response(&stream.content);
@@ -329,7 +342,14 @@ pub(crate) async fn synthesis_step(
         }
     };
 
-    // 内置搜索（服务端托管）发生过 ⇒ 合成来源卡（末尾 order → 答案下方脚注）。
+    // 内置搜索（服务端托管）发生过 ⇒ 一张来源卡落盘（预留槽 = 答案文本之前）。
+    // 与 planning 同款互斥：流式 take_card 落 Success 终态卡；非流式才用 synth_web_search 合成。
+    if let Some(tracker) = synth_web_search_tracker.as_ref() {
+        if let Some((record, segment)) = tracker.take_card() {
+            state.segment_builder.append_existing_segments(vec![segment]);
+            state.tool_records.push(record);
+        }
+    }
     if let Some(web_search) = synth_web_search.as_ref() {
         emit_builtin_web_search_card(
             host,
@@ -339,6 +359,7 @@ pub(crate) async fn synthesis_step(
             &config.provider.name,
             response_phase.clone(),
             None,
+            Some(web_search_order),
         );
     }
 

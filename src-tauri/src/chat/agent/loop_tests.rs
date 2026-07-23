@@ -1389,6 +1389,7 @@ fn tool_planning_failed_run_result_marks_drafts_error_and_emits_fallback() {
         None,
         None,
         Some(tracker.clone()),
+        None,
     );
     sink.emit(StreamPart::ToolCallStart {
         id: "call_write".to_string(),
@@ -2689,5 +2690,128 @@ async fn run_loop_nonstream_synthesis_empty_output_uses_fallback() {
             .get("reasoning_content")
             .and_then(Value::as_str),
         Some("synthesis reasoning")
+    );
+}
+
+/// Responses 格式的一段内置搜索 SSE（web_search_call 查询 + 正文 + url_citation 来源），
+/// 供内置搜索实时卡端到端集成测试用（任务 07-23）。无 function_call → planning 直接终答。
+fn responses_web_search_sse_events() -> Vec<String> {
+    vec![
+        r#"{"type":"response.output_item.added","item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}"#.to_string(),
+        r#"{"type":"response.output_item.done","item":{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"kivio latest release"}}}"#.to_string(),
+        r#"{"type":"response.output_text.delta","delta":"Kivio 最新版本信息。"}"#.to_string(),
+        r#"{"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","title":"Kivio Release","url":"https://kivio.dev/releases"}}"#.to_string(),
+        r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Kivio 最新版本信息。"}]}]}}"#.to_string(),
+        "[DONE]".to_string(),
+    ]
+}
+
+/// 收集本条 assistant 消息里的内置搜索卡段（tool_call_id 以 `websearch_` 打头）。
+fn web_search_card_segments(result: &AgentRunResult) -> Vec<&ChatMessageSegment> {
+    result
+        .segments
+        .iter()
+        .filter(|segment| {
+            segment.kind == ChatMessageSegmentKind::Tool
+                && segment
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("websearch_"))
+        })
+        .collect()
+}
+
+/// 集成（流式）：内置模式 + 支持内置搜索的 Responses provider，模型执行 hosted web_search。
+/// 期望——**单张** web_search 卡，落在答案文本**之前**（预留槽 order < 正文段 order），
+/// 终态 Success；不双卡；FinalAnswer 路径不丢卡（任务 07-23）。
+#[tokio::test]
+async fn run_loop_stream_builtin_web_search_card_precedes_answer_single_card() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(responses_web_search_sse_events())]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    // Responses provider（支持内置搜索）+ 会话内置模式。
+    config.provider.api_format = "openai_responses".to_string();
+    config.web_search_mode = crate::chat::types::WebSearchMode::Builtin;
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("builtin web search run completes");
+
+    assert_eq!(result.stream_outcome, "completed");
+    assert_eq!(result.content, "Kivio 最新版本信息。");
+
+    // 落盘工具记录：恰好一条 web_search，终态 Success。
+    let web_records: Vec<_> = result
+        .tool_records
+        .iter()
+        .filter(|record| record.name == "web_search")
+        .collect();
+    assert_eq!(web_records.len(), 1, "exactly one persisted web_search card");
+    assert!(matches!(web_records[0].status, ToolCallStatus::Success));
+
+    // 卡段唯一（不双卡），且 order 落在答案文本段之前。
+    let cards = web_search_card_segments(&result);
+    assert_eq!(cards.len(), 1, "no double card");
+    let answer = result
+        .segments
+        .iter()
+        .find(|segment| {
+            segment.kind == ChatMessageSegmentKind::Text
+                && segment.text.as_deref() == Some("Kivio 最新版本信息。")
+        })
+        .expect("answer text segment persisted");
+    assert!(
+        cards[0].order < answer.order,
+        "web search card (order {}) must precede the answer text (order {})",
+        cards[0].order,
+        answer.order,
+    );
+}
+
+/// 集成（非流式）：内置模式 + Responses provider 的非流式答案路径。内置搜索引用只能在拿到
+/// 完整答案后合成，走 `emit_builtin_web_search_card(order=预留槽)`——同样落在答案之前、单卡。
+#[tokio::test]
+async fn run_loop_nonstream_builtin_web_search_card_uses_reserved_slot() {
+    let body = r#"{"status":"completed","output":[{"type":"web_search_call","action":{"type":"search","query":"kivio latest release"}},{"type":"message","content":[{"type":"output_text","text":"Kivio 最新版本信息。","annotations":[{"type":"url_citation","title":"Kivio Release","url":"https://kivio.dev/releases"}]}]}]}"#;
+    let server = MockModelServer::start(vec![MockResponse::Json(body.to_string())]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, false);
+    config.provider.api_format = "openai_responses".to_string();
+    config.web_search_mode = crate::chat::types::WebSearchMode::Builtin;
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("non-stream builtin web search run completes");
+
+    assert_eq!(result.stream_outcome, "completed");
+    assert_eq!(result.content, "Kivio 最新版本信息。");
+
+    let web_records: Vec<_> = result
+        .tool_records
+        .iter()
+        .filter(|record| record.name == "web_search")
+        .collect();
+    assert_eq!(web_records.len(), 1);
+    assert!(matches!(web_records[0].status, ToolCallStatus::Success));
+
+    let cards = web_search_card_segments(&result);
+    assert_eq!(cards.len(), 1, "single card");
+    let answer = result
+        .segments
+        .iter()
+        .find(|segment| {
+            segment.kind == ChatMessageSegmentKind::Text
+                && segment.text.as_deref() == Some("Kivio 最新版本信息。")
+        })
+        .expect("answer text segment persisted");
+    assert!(
+        cards[0].order < answer.order,
+        "reserved-slot card (order {}) must precede answer (order {})",
+        cards[0].order,
+        answer.order,
     );
 }

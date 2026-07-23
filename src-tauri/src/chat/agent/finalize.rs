@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::chat::model::{BuiltinWebSearch, PendingToolCall};
+use crate::chat::model::{BuiltinWebSearch, PendingToolCall, WebCitation};
 use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
     ToolCallStatus,
@@ -252,6 +252,15 @@ impl SegmentBuilder {
 
     pub(crate) fn next_order(&self) -> u32 {
         self.next_order
+    }
+
+    /// 只吞一个 order 号、不造段——给流式实时卡（内置 web_search）在 reasoning 与正文之间
+    /// 预留位置槽（任务 07-23）。未搜索时该 order 号留空洞无害：前端按 order sort、后端按
+    /// `max()` 取下一个，均不要求 order 连续。
+    pub(crate) fn reserve_order(&mut self) -> u32 {
+        let order = self.next_order;
+        self.next_order = self.next_order.saturating_add(1);
+        order
     }
 
     /// Borrow the segments accumulated so far without consuming the builder.
@@ -516,8 +525,10 @@ pub(crate) fn cancelled_run_result_from_state(
 
 /// 把 provider 服务端托管的**内置联网搜索**可视化成一张工具卡（复用 `ToolCallRecord` +
 /// 前端 `ToolCallBlock`）。内置搜索不进 agent 工具循环（服务端直接执行、无客户端工具调用），
-/// 故这里在拿到含引用的答案后**合成**一条 Success 记录 + 一个 Tool 段，追加在末尾——
-/// 分配到的 `order` 高于早先 reserve 的正文段，故渲染成答案下方的「来源」脚注（PRD R6）。
+/// 故这里在拿到含引用的答案后**合成**一条 Success 记录 + 一个 Tool 段。
+///
+/// `order`：`Some` = 用调用方在 reasoning 与正文之间预留的槽位（任务 07-23 实时卡定位），
+/// 使卡渲染在答案文本**之前**；`None` = 向后兼容旧行为，取 `next_order()`（答案下方脚注）。
 /// 无查询也无引用则跳过。emit 事件 + 入 `state`，随本轮 finalize 落盘。
 pub(crate) fn emit_builtin_web_search_card(
     host: &dyn AgentHost,
@@ -527,32 +538,60 @@ pub(crate) fn emit_builtin_web_search_card(
     provider_label: &str,
     phase: ChatMessageSegmentPhase,
     round: Option<u32>,
+    order: Option<u32>,
 ) {
     if web_search.is_empty() {
         return;
     }
     let id = format!("websearch_{}", uuid::Uuid::new_v4());
+    let record = build_web_search_record(
+        &id,
+        provider_label,
+        &web_search.queries,
+        &web_search.citations,
+        ToolCallStatus::Success,
+        round,
+    );
+    host.emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
+    let order = order.unwrap_or_else(|| state.segment_builder.next_order());
+    let segment = build_web_search_segment(order, &id, phase, round);
+    state.segment_builder.append_existing_segments(vec![segment]);
+    state.tool_records.push(record);
+}
+
+/// 构造一张「内置联网搜索」工具卡的 `ToolCallRecord`。流式实时卡（Running）与流结束合成卡
+/// （Success / 非流式路径）共用此构造，保证 `structured_content` 形状一致——前端按
+/// `type == "builtin_web_search"` 路由、按 record id 幂等 merge（先 Running 后 Success 原地翻牌）。
+/// `status` 参数化即为此：同一 id、同一形状，只切状态。
+pub(crate) fn build_web_search_record(
+    id: &str,
+    provider_label: &str,
+    queries: &[String],
+    citations: &[WebCitation],
+    status: ToolCallStatus,
+    round: Option<u32>,
+) -> ToolCallRecord {
     // structured_content 对齐前端内置搜索来源卡读取的形状（type 作路由标记）。
     let structured = serde_json::json!({
         "type": "builtin_web_search",
         "provider": provider_label,
-        "queries": web_search.queries,
-        "citations": web_search.citations,
+        "queries": queries,
+        "citations": citations,
     });
     // 折叠行「目标」显示查询词：ToolCallBlock 从 arguments.query 取。
-    let arguments = serde_json::json!({ "query": web_search.queries.join("; ") }).to_string();
+    let arguments = serde_json::json!({ "query": queries.join("; ") }).to_string();
     // 纯文本兜底：前端旧版本不识别 structured 时仍能看到来源列表。
     let mut preview = String::new();
-    for citation in &web_search.citations {
+    for citation in citations {
         preview.push_str(&format!("- {} — {}\n", citation.title, citation.url));
     }
-    let record = ToolCallRecord {
-        id: id.clone(),
+    ToolCallRecord {
+        id: id.to_string(),
         name: "web_search".to_string(),
         source: "native".to_string(),
         server_id: None,
         arguments,
-        status: ToolCallStatus::Success,
+        status,
         result_preview: if preview.trim().is_empty() {
             None
         } else {
@@ -568,10 +607,18 @@ pub(crate) fn emit_builtin_web_search_card(
         trace_id: None,
         span_id: None,
         structured_content: Some(structured),
-    };
-    host.emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
-    let order = state.segment_builder.next_order();
-    let segment = ChatMessageSegment {
+    }
+}
+
+/// 构造内置搜索卡对应的 Tool 段。`order` 决定它在 transcript 里的位置（实时卡用预留槽 →
+/// 答案之前）；`step_number=None` 让前端与正文段纯按 order 排序（见 `compareTimelineSegments`）。
+pub(crate) fn build_web_search_segment(
+    order: u32,
+    id: &str,
+    phase: ChatMessageSegmentPhase,
+    round: Option<u32>,
+) -> ChatMessageSegment {
+    ChatMessageSegment {
         id: format!("seg_{}_tool_{}", order, id),
         kind: ChatMessageSegmentKind::Tool,
         phase,
@@ -579,8 +626,6 @@ pub(crate) fn emit_builtin_web_search_card(
         step_number: None,
         round,
         text: None,
-        tool_call_id: Some(id.clone()),
-    };
-    state.segment_builder.append_existing_segments(vec![segment]);
-    state.tool_records.push(record);
+        tool_call_id: Some(id.to_string()),
+    }
 }

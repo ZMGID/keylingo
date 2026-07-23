@@ -2,13 +2,16 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::chat::model::{GenerateOutput, ModelError, PendingToolCall, StreamPart, StreamSink};
+use crate::chat::model::{
+    GenerateOutput, ModelError, PendingToolCall, StreamPart, StreamSink, WebCitation,
+};
 use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
     ToolCallStatus,
 };
 use crate::mcp::ChatToolDefinition;
 
+use super::finalize::{build_web_search_record, build_web_search_segment};
 use super::host::AgentHost;
 use super::prepare::disabled_builtin_tool_feedback;
 use super::stop::{
@@ -123,6 +126,127 @@ impl ToolCallDraftTracker {
     }
 }
 
+/// 模型**原生内置联网搜索**的实时卡追踪器（任务 07-23）。镜像 `ToolCallDraftTracker`
+/// 的「sink 持 tracker 边流边累加 → 流后 caller 读回落盘」模式：`Arc<Mutex>` 让 sink 与
+/// 调用方（planning/synthesis）共享同一状态。稳定 id + reasoning/正文之间预留的 order 槽
+/// 使卡渲染在答案文本**之前**；去重累加 queries/citations；`started` 保证段只发一次。
+#[derive(Clone)]
+pub struct WebSearchCardTracker {
+    inner: Arc<Mutex<WebSearchCardState>>,
+}
+
+struct WebSearchCardState {
+    id: String,
+    order: u32,
+    round: Option<u32>,
+    phase: ChatMessageSegmentPhase,
+    provider_label: String,
+    queries: Vec<String>,
+    citations: Vec<WebCitation>,
+    started: bool,
+    record: Option<ToolCallRecord>,
+    segment: Option<ChatMessageSegment>,
+}
+
+/// 一次 `note` 的产物：`segment` 仅首帧为 `Some`（段只发一次），`record` 每帧都发
+/// （同 id 幂等 merge → 前端原地更新 Running 卡）。
+pub(crate) struct WebSearchCardUpdate {
+    pub(crate) segment: Option<ChatMessageSegment>,
+    pub(crate) record: ToolCallRecord,
+}
+
+impl WebSearchCardTracker {
+    pub(crate) fn new(
+        order: u32,
+        round: Option<u32>,
+        phase: ChatMessageSegmentPhase,
+        provider_label: String,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(WebSearchCardState {
+                id: format!("websearch_{}", uuid::Uuid::new_v4()),
+                order,
+                round,
+                phase,
+                provider_label,
+                queries: Vec::new(),
+                citations: Vec::new(),
+                started: false,
+                record: None,
+                segment: None,
+            })),
+        }
+    }
+
+    /// 收到一帧内置搜索增量：去重累加查询/来源，回传本帧要 emit 的段（仅首帧）+ Running 记录。
+    pub(crate) fn note(
+        &self,
+        queries: &[String],
+        citations: &[WebCitation],
+    ) -> WebSearchCardUpdate {
+        let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        for query in queries {
+            let query = query.trim();
+            if !query.is_empty() && !guard.queries.iter().any(|existing| existing == query) {
+                guard.queries.push(query.to_string());
+            }
+        }
+        for citation in citations {
+            let url = citation.url.trim();
+            if !url.is_empty() && !guard.citations.iter().any(|existing| existing.url == url) {
+                guard.citations.push(citation.clone());
+            }
+        }
+        let record = build_web_search_record(
+            &guard.id,
+            &guard.provider_label,
+            &guard.queries,
+            &guard.citations,
+            ToolCallStatus::Running,
+            guard.round,
+        );
+        guard.record = Some(record.clone());
+        let segment = if guard.started {
+            None
+        } else {
+            guard.started = true;
+            let segment =
+                build_web_search_segment(guard.order, &guard.id, guard.phase.clone(), guard.round);
+            guard.segment = Some(segment.clone());
+            Some(segment)
+        };
+        WebSearchCardUpdate { segment, record }
+    }
+
+    /// 流成功结束 ⇒ 把卡翻 Success 并回传终态记录（供 caller emit）。从未开牌则 `None`。
+    pub(crate) fn finalize_success(&self) -> Option<ToolCallRecord> {
+        let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        if !guard.started {
+            return None;
+        }
+        let record = build_web_search_record(
+            &guard.id,
+            &guard.provider_label,
+            &guard.queries,
+            &guard.citations,
+            ToolCallStatus::Success,
+            guard.round,
+        );
+        guard.record = Some(record.clone());
+        Some(record)
+    }
+
+    /// 取回卡的（记录, 段）供落盘。已 `finalize_success` 则记录为 Success。从未开牌则 `None`
+    /// （取消中途 kill / 未发生搜索：实时卡不落盘，与 draft tracker 现状一致）。
+    pub(crate) fn take_card(&self) -> Option<(ToolCallRecord, ChatMessageSegment)> {
+        let guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        match (guard.record.clone(), guard.segment.clone()) {
+            (Some(record), Some(segment)) => Some((record, segment)),
+            _ => None,
+        }
+    }
+}
+
 fn chat_stream_snapshot(accumulator: &Arc<Mutex<ChatStreamAccumulator>>) -> ChatStreamSnapshot {
     let guard = accumulator.lock().unwrap_or_else(|err| err.into_inner());
     ChatStreamSnapshot {
@@ -141,11 +265,13 @@ pub struct AgentStreamSink<'a> {
     text_segment: Option<ChatMessageSegment>,
     reasoning_segment: Option<ChatMessageSegment>,
     tool_draft_tracker: Option<ToolCallDraftTracker>,
+    web_search_tracker: Option<WebSearchCardTracker>,
     text_buffer: String,
     text_suppressed: bool,
 }
 
 impl<'a> AgentStreamSink<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: &'a dyn AgentHost,
         conversation_id: &str,
@@ -155,6 +281,7 @@ impl<'a> AgentStreamSink<'a> {
         text_segment: Option<ChatMessageSegment>,
         reasoning_segment: Option<ChatMessageSegment>,
         tool_draft_tracker: Option<ToolCallDraftTracker>,
+        web_search_tracker: Option<WebSearchCardTracker>,
     ) -> Self {
         Self {
             host,
@@ -166,6 +293,7 @@ impl<'a> AgentStreamSink<'a> {
             text_segment,
             reasoning_segment,
             tool_draft_tracker,
+            web_search_tracker,
             text_buffer: String::new(),
             text_suppressed: false,
         }
@@ -384,6 +512,40 @@ impl<'a> AgentStreamSink<'a> {
             );
         }
     }
+
+    /// 消费一帧内置搜索增量（任务 07-23）：无 tracker（非内置模式）直接忽略——保证
+    /// `web_search_tracker=None` 时行为与现状逐字节一致。首帧 emit 段（把卡插入答案之前的
+    /// 预留槽），每帧 emit Running 记录（同 id 幂等 → 前端原地更新）。
+    fn handle_web_search(&mut self, queries: Vec<String>, citations: Vec<WebCitation>) {
+        let Some(tracker) = self.web_search_tracker.as_ref() else {
+            return;
+        };
+        let update = tracker.note(&queries, &citations);
+        if let Some(segment) = update.segment.as_ref() {
+            self.host.emit_stream_delta(
+                &self.conversation_id,
+                &self.run_id,
+                &self.message_id,
+                "",
+                None,
+                Some(segment),
+            );
+        }
+        self.host.emit_tool_record(
+            &self.conversation_id,
+            &self.run_id,
+            &self.message_id,
+            &update.record,
+        );
+    }
+
+    /// 流成功结束时把内置搜索实时卡翻 Success，回传终态记录供 caller emit。转发到 tracker
+    /// （与 caller 共享同一 `Arc`，故 caller 随后 `take_card()` 读到的即是 Success）。
+    pub fn finish_web_search_card(&self) -> Option<ToolCallRecord> {
+        self.web_search_tracker
+            .as_ref()
+            .and_then(|tracker| tracker.finalize_success())
+    }
 }
 
 impl StreamSink for AgentStreamSink<'_> {
@@ -411,6 +573,9 @@ impl StreamSink for AgentStreamSink<'_> {
             StreamPart::ToolCallStart { id, name } => self.emit_tool_call_start(id, name),
             StreamPart::ToolCallDelta { id, delta } => self.emit_tool_call_delta(id, delta),
             StreamPart::ToolCallDone { call } => self.emit_tool_call_done(&call),
+            StreamPart::WebSearch { queries, citations } => {
+                self.handle_web_search(queries, citations)
+            }
             StreamPart::Finish { .. } => {}
         }
         Ok(())
@@ -760,6 +925,7 @@ mod tests {
             None,
             None,
             Some(tracker.clone()),
+            None,
         );
 
         sink.emit(StreamPart::ToolCallStart {
@@ -831,6 +997,7 @@ mod tests {
             None,
             None,
             Some(tracker.clone()),
+            None,
         );
 
         sink.emit(StreamPart::ToolCallStart {
@@ -933,5 +1100,151 @@ mod tests {
             &output,
         )
         .expect("non-empty synthesis should validate");
+    }
+
+    /// 内置搜索实时卡（任务 07-23）：首帧开牌 order 落在正文段之前的预留槽、同 id 增量原地
+    /// 合并（段只发一次、queries/citations 去重累加）、finalize 翻 Success、take_card 返回终态。
+    #[test]
+    fn web_search_card_streams_running_before_text_and_merges_by_id() {
+        let host = TestHost::default();
+        // 预留槽：reasoning=1000 → web_search 卡=1001 → 正文=1002。
+        let tracker = WebSearchCardTracker::new(
+            1001,
+            Some(2),
+            ChatMessageSegmentPhase::ToolLoop,
+            "Test Provider".to_string(),
+        );
+        let text_segment = ChatMessageSegment {
+            id: "seg_1002_text".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::ToolLoop,
+            order: 1002,
+            step_number: Some(1),
+            round: Some(2),
+            text: None,
+            tool_call_id: None,
+        };
+        let mut sink = AgentStreamSink::new(
+            &host,
+            "conversation",
+            "run",
+            "message",
+            true,
+            Some(text_segment.clone()),
+            None,
+            None,
+            Some(tracker.clone()),
+        );
+
+        // 首帧空 = 开牌；随后带查询词；再带来源（含重复 url，应去重）。
+        sink.emit(StreamPart::WebSearch {
+            queries: Vec::new(),
+            citations: Vec::new(),
+        })
+        .expect("open card");
+        sink.emit(StreamPart::WebSearch {
+            queries: vec!["kivio release".to_string()],
+            citations: Vec::new(),
+        })
+        .expect("query frame");
+        sink.emit(StreamPart::WebSearch {
+            queries: vec!["kivio release".to_string()],
+            citations: vec![
+                WebCitation {
+                    title: "A".to_string(),
+                    url: "https://a.com".to_string(),
+                },
+                WebCitation {
+                    title: "dup".to_string(),
+                    url: "https://a.com".to_string(),
+                },
+            ],
+        })
+        .expect("citation frame");
+
+        let segments = host.segments.lock().unwrap_or_else(|err| err.into_inner());
+        // 段只发一次，order 落预留槽且在正文段之前。
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].order, 1001);
+        assert!(segments[0].order < text_segment.order);
+        assert_eq!(segments[0].kind, ChatMessageSegmentKind::Tool);
+        let card_id = segments[0].tool_call_id.clone().expect("card id");
+        drop(segments);
+
+        let records = host.records.lock().unwrap_or_else(|err| err.into_inner());
+        // 三帧 → 三条 Running 记录，同 id（前端原地翻牌）。
+        assert_eq!(records.len(), 3);
+        for record in records.iter() {
+            assert_eq!(record.id, card_id);
+            assert_eq!(record.name, "web_search");
+            assert!(matches!(record.status, ToolCallStatus::Running));
+        }
+        let last = records.last().expect("last record");
+        let structured = last.structured_content.as_ref().expect("structured");
+        // 去重后仅 1 条来源。
+        assert_eq!(
+            structured
+                .get("citations")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            structured
+                .get("queries")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        drop(records);
+
+        // 流成功结束 → 翻 Success。
+        let success = sink.finish_web_search_card().expect("started card finalizes");
+        assert!(matches!(success.status, ToolCallStatus::Success));
+        assert_eq!(success.id, card_id);
+        // take_card 返回 Success 终态 + 预留槽段。
+        let (record, segment) = tracker.take_card().expect("card present after start");
+        assert!(matches!(record.status, ToolCallStatus::Success));
+        assert_eq!(record.id, card_id);
+        assert_eq!(segment.order, 1001);
+    }
+
+    /// 从未开牌（未发生内置搜索 / 取消中途）：take_card 与 finalize_success 均为 None，
+    /// 不落卡——保证「web_search_tracker=None 或未搜索」时行为与现状一致。
+    #[test]
+    fn web_search_card_absent_before_first_frame() {
+        let tracker = WebSearchCardTracker::new(
+            1001,
+            None,
+            ChatMessageSegmentPhase::Synthesis,
+            "P".to_string(),
+        );
+        assert!(tracker.take_card().is_none());
+        assert!(tracker.finalize_success().is_none());
+    }
+
+    /// 无 tracker（非内置模式）：WebSearch part 被静默忽略，不发任何段/记录——逐字节
+    /// 兼容现状。
+    #[test]
+    fn web_search_part_without_tracker_is_ignored() {
+        let host = TestHost::default();
+        let mut sink = AgentStreamSink::new(
+            &host, "c", "r", "m", true, None, None, None, None,
+        );
+        sink.emit(StreamPart::WebSearch {
+            queries: vec!["q".to_string()],
+            citations: Vec::new(),
+        })
+        .expect("ignored");
+        assert!(host
+            .segments
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty());
+        assert!(host
+            .records
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty());
     }
 }

@@ -261,7 +261,18 @@ impl GeminiProvider<'_> {
                 if let Some(next_usage) = gemini_usage(&value) {
                     usage = Some(next_usage);
                 }
-                merge_gemini_web_search(&mut web_search, web_search_from_gemini_value(&value));
+                // 实时卡（任务 07-23）：grounding 通常在末段到达，实时性打折但答案前定位
+                // 收益照拿；仅当本 chunk 真有新数据才发（避免空帧），随后并入累加值。
+                let chunk_ws = web_search_from_gemini_value(&value);
+                if let Some(ws) = chunk_ws.as_ref() {
+                    if !ws.is_empty() {
+                        sink.emit(StreamPart::WebSearch {
+                            queries: ws.queries.clone(),
+                            citations: ws.citations.clone(),
+                        })?;
+                    }
+                }
+                merge_gemini_web_search(&mut web_search, chunk_ws);
             }
         }
 

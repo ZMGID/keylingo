@@ -541,6 +541,48 @@ impl ResponsesStreamState {
             .find(|partial| partial.item_id == item_id)
     }
 
+    /// 累加一个内置搜索查询词（去重）。流式下 web_search_call 走 `output_item.done` 事件，
+    /// 且不重现在 `response.completed` 的 output 里，故必须边流边收。
+    fn push_web_search_query(&mut self, query: &str) {
+        let query = query.trim();
+        if query.is_empty() {
+            return;
+        }
+        let ws = self.web_search.get_or_insert_with(BuiltinWebSearch::default);
+        if !ws.queries.iter().any(|q| q == query) {
+            ws.queries.push(query.to_string());
+        }
+    }
+
+    /// 累加一条内置搜索来源（按 url 去重）。流式下走 `output_text.annotation.added` 事件。
+    fn push_web_search_citation(&mut self, url: &str, title: &str) {
+        let url = url.trim();
+        if url.is_empty() {
+            return;
+        }
+        let ws = self.web_search.get_or_insert_with(BuiltinWebSearch::default);
+        if !ws.citations.iter().any(|c| c.url == url) {
+            ws.citations.push(WebCitation {
+                title: title.trim().to_string(),
+                url: url.to_string(),
+            });
+        }
+    }
+
+    /// 发一帧内置搜索实时进度（任务 07-23）：把当前累加的查询/来源快照发给 sink，sink 据此
+    /// 实时开牌 / 更新「网络搜索」卡（置于答案文本之前）。首帧（web_search 尚为 None）发空快照
+    /// = 开牌 Running。无头 sink（非流式 SSE 兜底）忽略此 part，行为不变。
+    fn emit_web_search_snapshot(
+        &self,
+        sink: &mut (dyn StreamSink + Send),
+    ) -> Result<(), ModelError> {
+        let (queries, citations) = match &self.web_search {
+            Some(ws) => (ws.queries.clone(), ws.citations.clone()),
+            None => (Vec::new(), Vec::new()),
+        };
+        sink.emit(StreamPart::WebSearch { queries, citations })
+    }
+
     fn finalize_tool_call(
         &mut self,
         item_id: &str,
@@ -632,33 +674,40 @@ fn handle_responses_stream_event(
         }
         "response.output_item.added" => {
             if let Some(item) = value.get("item") {
-                if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                    let item_id = item
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&item_id)
-                        .to_string();
-                    let name = item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    sink.emit(StreamPart::ToolCallStart {
-                        id: call_id.clone(),
-                        name: name.clone(),
-                    })?;
-                    state.tool_calls.push(ResponsesToolPartial {
-                        item_id,
-                        call_id,
-                        name,
-                        arguments: String::new(),
-                        done: false,
-                    });
+                match item.get("type").and_then(Value::as_str) {
+                    Some("function_call") => {
+                        let item_id = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&item_id)
+                            .to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        sink.emit(StreamPart::ToolCallStart {
+                            id: call_id.clone(),
+                            name: name.clone(),
+                        })?;
+                        state.tool_calls.push(ResponsesToolPartial {
+                            item_id,
+                            call_id,
+                            name,
+                            arguments: String::new(),
+                            done: false,
+                        });
+                    }
+                    // 内置搜索开始：查询词此刻还没到，发一帧空快照 = 立即开一张 Running 卡。
+                    Some("web_search_call") => {
+                        state.emit_web_search_snapshot(sink)?;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -686,16 +735,50 @@ fn handle_responses_stream_event(
         }
         "response.output_item.done" => {
             if let Some(item) = value.get("item") {
-                if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                    let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
-                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
-                        if let Some(partial) = state.partial_mut(item_id) {
-                            if !arguments.is_empty() {
-                                partial.arguments = arguments.to_string();
+                match item.get("type").and_then(Value::as_str) {
+                    Some("function_call") => {
+                        let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
+                        if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                            if let Some(partial) = state.partial_mut(item_id) {
+                                if !arguments.is_empty() {
+                                    partial.arguments = arguments.to_string();
+                                }
                             }
                         }
+                        state.finalize_tool_call(item_id, sink)?;
                     }
-                    state.finalize_tool_call(item_id, sink)?;
+                    // 内置搜索：hosted web_search 的查询词在此事件到达（completed 的 output 里不重现）。
+                    Some("web_search_call") => {
+                        if let Some(action) = item.get("action") {
+                            if let Some(q) = action.get("query").and_then(Value::as_str) {
+                                state.push_web_search_query(q);
+                            }
+                            if let Some(list) = action.get("queries").and_then(Value::as_array) {
+                                for q in list.iter().filter_map(Value::as_str) {
+                                    state.push_web_search_query(q);
+                                }
+                            }
+                        }
+                        // push 完 emit 当前累加快照 → 实时更新卡（带查询词）。
+                        state.emit_web_search_snapshot(sink)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // 内置搜索来源:url_citation 注解随正文流式到达。
+        "response.output_text.annotation.added" => {
+            if let Some(annotation) = value.get("annotation") {
+                if annotation.get("type").and_then(Value::as_str) == Some("url_citation") {
+                    if let Some(url) = annotation.get("url").and_then(Value::as_str) {
+                        let title = annotation
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        state.push_web_search_citation(url, title);
+                        // push 完 emit 当前累加快照 → 实时更新卡（带来源）。
+                        state.emit_web_search_snapshot(sink)?;
+                    }
                 }
             }
         }
@@ -707,10 +790,16 @@ fn handle_responses_stream_event(
                 if let Some(status) = response.get("status").and_then(Value::as_str) {
                     state.finish_reason = Some(responses_finish_reason(status, state));
                 }
-                // 完整 output 数组此时才齐全，一次性解析内置搜索引用（流式增量拿不全）。
+                // 完整 output 里若还带 web_search_call / message 注解，合并进已流式累加的结果
+                // （不覆盖：hosted web_search_call 通常只在 output_item.done 里出现，不重现在此）。
                 if let Some(output) = response.get("output").and_then(Value::as_array) {
-                    if let Some(web_search) = web_search_from_responses_output(output) {
-                        state.web_search = Some(web_search);
+                    if let Some(extra) = web_search_from_responses_output(output) {
+                        for q in extra.queries {
+                            state.push_web_search_query(&q);
+                        }
+                        for c in extra.citations {
+                            state.push_web_search_citation(&c.url, &c.title);
+                        }
                     }
                 }
             }
@@ -1325,6 +1414,79 @@ mod tests {
         assert!(call.arguments_parse_error.is_none());
         assert_eq!(output.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(output.usage.and_then(|u| u.total_tokens), Some(15));
+    }
+
+    /// 内置搜索(hosted web_search)流式捕获:web_search_call 走 output_item.done、
+    /// 来源走 output_text.annotation.added——都不重现在 response.completed 的 output 里
+    /// (completed 只剩 message),故必须边流边收。此测试钉住这条真实 wire 行为。
+    #[test]
+    fn sse_stream_captures_builtin_web_search_from_events() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"queries\":[\"TSLA latest close\"],\"query\":\"TSLA latest close\"}}}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n",
+            "data: {\"type\":\"response.output_text.annotation.added\",\"annotation\":{\"type\":\"url_citation\",\"title\":\"ChartExchange\",\"url\":\"https://chartexchange.com/x\"}}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n",
+            "data: [DONE]\n",
+        );
+        let output = output_from_sse_body(body).expect("sse output");
+        let ws = output.web_search.expect("web_search captured from stream events");
+        assert_eq!(ws.queries, vec!["TSLA latest close".to_string()]);
+        assert_eq!(ws.citations.len(), 1);
+        assert_eq!(ws.citations[0].url, "https://chartexchange.com/x");
+        assert_eq!(ws.citations[0].title, "ChartExchange");
+    }
+
+    /// 内置搜索实时卡（任务 07-23）：流式过程中逐帧发 `StreamPart::WebSearch`——
+    /// `output_item.added(web_search_call)` 开牌（空快照）、`output_item.done` 带查询、
+    /// `annotation.added` 带来源；`response.completed` 合并块**不**再发（避免重复）。
+    #[test]
+    fn sse_stream_emits_web_search_parts_for_realtime_card() {
+        #[derive(Default)]
+        struct CapturingSink {
+            parts: Vec<StreamPart>,
+        }
+        impl StreamSink for CapturingSink {
+            fn emit(&mut self, part: StreamPart) -> Result<(), ModelError> {
+                self.parts.push(part);
+                Ok(())
+            }
+        }
+
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"status\":\"in_progress\"}}\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"queries\":[\"TSLA latest close\"],\"query\":\"TSLA latest close\"}}}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n",
+            "data: {\"type\":\"response.output_text.annotation.added\",\"annotation\":{\"type\":\"url_citation\",\"title\":\"ChartExchange\",\"url\":\"https://chartexchange.com/x\"}}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n",
+            "data: [DONE]\n",
+        );
+        let mut state = ResponsesStreamState::default();
+        let mut sink = CapturingSink::default();
+        for line in body.split('\n') {
+            process_sse_line(line, &mut state, &mut sink).expect("process line");
+        }
+        state.finish(&mut sink).expect("finish");
+
+        let web_search_parts: Vec<(Vec<String>, Vec<WebCitation>)> = sink
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                StreamPart::WebSearch {
+                    queries,
+                    citations,
+                } => Some((queries.clone(), citations.clone())),
+                _ => None,
+            })
+            .collect();
+        // 开牌 + 查询 + 来源 = 3 帧（completed 不发）。
+        assert_eq!(web_search_parts.len(), 3);
+        // 首帧空快照 = 开牌。
+        assert!(web_search_parts[0].0.is_empty() && web_search_parts[0].1.is_empty());
+        // 末帧累加了查询与来源。
+        let last = web_search_parts.last().expect("last frame");
+        assert_eq!(last.0, vec!["TSLA latest close".to_string()]);
+        assert_eq!(last.1.len(), 1);
+        assert_eq!(last.1[0].url, "https://chartexchange.com/x");
     }
 
     /// SSE body carrying only text deltas accumulates the same as the live stream path.
