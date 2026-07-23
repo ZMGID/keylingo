@@ -205,6 +205,28 @@ const VALID_THINKING_LEVELS: ReadonlySet<string> = new Set([
   'max',
 ])
 
+// 网络搜索模式全局默认（任务 07-23，与思考等级同款「记住上次选择」模式）：
+// 选一次即成为新会话/未显式设置会话的默认，免去每个对话重复切换。
+const LAST_WEB_SEARCH_MODE_KEY = 'kivio.chat.lastWebSearchMode'
+const VALID_WEB_SEARCH_MODES: ReadonlySet<string> = new Set(['off', 'builtin', 'third_party'])
+
+function loadLastWebSearchMode(): WebSearchMode | undefined {
+  try {
+    const raw = window.localStorage.getItem(LAST_WEB_SEARCH_MODE_KEY)
+    return raw && VALID_WEB_SEARCH_MODES.has(raw) ? (raw as WebSearchMode) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function saveLastWebSearchMode(mode: WebSearchMode): void {
+  try {
+    window.localStorage.setItem(LAST_WEB_SEARCH_MODE_KEY, mode)
+  } catch {
+    /* ignore */
+  }
+}
+
 function loadLastThinkingLevel(): ThinkingLevel | null {
   try {
     const raw = window.localStorage.getItem(LAST_THINKING_KEY)
@@ -1068,7 +1090,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const activeModel = currentConversation && !currentConversationIsBlank
     ? currentConversation.model
     : draftModel
-  // 会话级三态联网搜索（任务 07-23）：会话显式模式优先，否则回退全局 webSearchEnabled。
+  // 会话级三态联网搜索（任务 07-23）：会话显式模式优先 → 记住的全局默认（上次选择）
+  // → 全局 nativeTools.webSearch 开关。这样选一次内置即成为所有新对话的默认。
   const activeWebSearchMode = useMemo<WebSearchMode>(() => {
     if (currentConversation && !currentConversationIsBlank) {
       const explicit = currentConversation.webSearchMode ?? currentConversation.web_search_mode
@@ -1076,6 +1099,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     } else if (draftWebSearchMode) {
       return draftWebSearchMode
     }
+    const remembered = loadLastWebSearchMode()
+    if (remembered) return remembered
     return webSearchEnabled ? 'third_party' : 'off'
   }, [currentConversation, currentConversationIsBlank, draftWebSearchMode, webSearchEnabled])
   const activeBuiltinWebSearchSupported = useMemo(
@@ -2754,14 +2779,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     }
 
-    // 会话级三态联网搜索（任务 07-23）：把欢迎页选好的模式草稿落到新会话上
-    // （仅当会话尚未显式设过模式时）。
-    if (draftWebSearchMode) {
+    // 会话级三态联网搜索（任务 07-23）：把欢迎页草稿或记住的全局默认落到新会话上
+    // （仅当会话尚未显式设过模式时），后端 Builtin 注入依赖会话字段而非前端展示值。
+    {
+      const desiredMode = draftWebSearchMode ?? loadLastWebSearchMode()
       const convMode = conversation.web_search_mode ?? conversation.webSearchMode ?? null
-      if (convMode === null) {
+      if (desiredMode && convMode === null) {
         try {
           conversation = await chatApi.updateConversation(conversation.id, {
-            webSearchMode: draftWebSearchMode,
+            webSearchMode: desiredMode,
           })
           applyConversation(conversation)
         } catch (err) {
@@ -3478,9 +3504,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [applyConversationMeta, currentConversation])
 
-  // 会话级三态联网搜索（任务 07-23）：设置模式，持久化到会话（欢迎页先存草稿）。
+  // 会话级三态联网搜索（任务 07-23）：设置模式,持久化到会话(欢迎页先存草稿),
+  // 并记住为全局默认——之后所有新会话/未显式设置的会话自动沿用(与思考等级同款)。
   const handleSetWebSearchMode = useCallback(async (mode: WebSearchMode) => {
     setDraftWebSearchMode(mode)
+    saveLastWebSearchMode(mode)
     if (!currentConversation) return
     try {
       const updatedConv = await chatApi.updateConversation(currentConversation.id, {
