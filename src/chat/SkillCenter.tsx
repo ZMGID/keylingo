@@ -553,7 +553,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
         if (source) groups[source.key].push(skill)
       }
       setCliSkills(groups)
-      setCliSelected(new Set(scanned.map((skill) => skill.id)))
+      setCliSelected(new Set())
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     } finally {

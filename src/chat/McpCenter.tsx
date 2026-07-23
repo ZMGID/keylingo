@@ -203,12 +203,8 @@ export function McpCenter() {
     try {
       const scan = await api.chatCliImportScan()
       setCliScan(scan)
-      // 默认全勾。
-      const ids = new Set<string>()
-      for (const group of [scan.claude, scan.codex, scan.opencode]) {
-        for (const server of group.servers) ids.add(server.id)
-      }
-      setCliSelected(ids)
+      // 默认不勾，由用户自己选。
+      setCliSelected(new Set())
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
