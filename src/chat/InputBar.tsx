@@ -464,10 +464,9 @@ export function InputBar({
   contextSlot,
 }: InputBarProps) {
   const draftKeyValue = draftKey(conversationId)
-  const initialDraft = getComposerDraft(draftKeyValue)
-  const [input, setInput] = useState(() => initialDraft?.input ?? '')
-  const [quotes, setQuotes] = useState<string[]>(() => initialDraft?.quotes ?? [])
-  const [attachments, setAttachments] = useState<PendingAttachment[]>(() => initialDraft?.attachments ?? [])
+  const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
+  const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
+  const [attachments, setAttachments] = useState<PendingAttachment[]>(() => getComposerDraft(draftKeyValue)?.attachments ?? [])
   const [attachmentError, setAttachmentError] = useState('')
   const [dragActive, setDragActive] = useState(false)
   const [toolPanelOpen, setToolPanelOpen] = useState(false)
