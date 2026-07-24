@@ -678,7 +678,7 @@ pub(crate) async fn lens_capture_region(
         }
     };
 
-    let result = capture_region_from_freeze_frame(
+    let result = match capture_region_from_freeze_frame(
         &app,
         freeze_frame_image_id.as_deref(),
         x,
@@ -686,19 +686,37 @@ pub(crate) async fn lens_capture_region(
         width,
         height,
         scale_factor,
-    )
-    .unwrap_or_else(|| {
-        capture_region_image(
-            absolute_x,
-            absolute_y,
-            x,
-            y,
-            width,
-            height,
-            scale_factor,
-            exclude_self_pid,
-        )
-    });
+    ) {
+        Some(result) => result,
+        None => {
+            // 冻结帧缺失/过期（会话内二次截图、开屏抓帧失败）→ 现场截屏兜底。
+            // Windows xcap 不能像 macOS SCK 那样按 PID 排除自身，必须先藏浮窗
+            // （等 DWM 合成一帧生效）再截，否则会把 lens 遮罩/对话框截进图里。
+            #[cfg(target_os = "windows")]
+            let overlay = active_overlay_window(&app);
+            #[cfg(target_os = "windows")]
+            if let Some(w) = overlay.as_ref() {
+                let _ = w.hide();
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            let live = capture_region_image(
+                absolute_x,
+                absolute_y,
+                x,
+                y,
+                width,
+                height,
+                scale_factor,
+                exclude_self_pid,
+            );
+            #[cfg(target_os = "windows")]
+            if let Some(w) = overlay.as_ref() {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            live
+        }
+    };
     match result {
         Ok(path) => {
             let image_id = Uuid::new_v4().to_string();
