@@ -951,6 +951,9 @@ function MessageBubbleComponent({
                 onChange={(e) => setDraft(e.target.value)}
                 rows={4}
                 autoFocus
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 className="w-full resize-y rounded-[20px] border border-neutral-200/90 bg-neutral-50 px-4 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-500"
               />
               <div className="flex items-center justify-end gap-2">
@@ -1120,6 +1123,9 @@ function MessageBubbleComponent({
               onChange={(e) => setDraft(e.target.value)}
               rows={6}
               disabled={saving}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
               className="w-full resize-y rounded-xl border border-neutral-200/90 bg-white px-3 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-500"
             />
             <div className="flex items-center gap-2">

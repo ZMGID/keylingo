@@ -2540,6 +2540,10 @@ export default function Lens() {
             <input
               ref={inputRef}
               autoFocus
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {

@@ -476,6 +476,10 @@ export function AskUserBlock({ toolCall }: AskUserBlockProps) {
             {allowCustom(currentQuestion) && (
               <input
                 value={currentAnswer.customText}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck={false}
                 onChange={(event) => setCustomText(currentQuestion.id, event.target.value)}
                 placeholder="其他"
                 className="mt-1.5 h-7 w-full rounded-md border border-neutral-200/80 bg-transparent px-2.5 text-[12px] outline-none transition-colors placeholder:text-neutral-400 focus:border-neutral-400 focus:bg-white dark:border-neutral-700 dark:placeholder:text-neutral-500 dark:focus:border-neutral-500 dark:focus:bg-neutral-950"

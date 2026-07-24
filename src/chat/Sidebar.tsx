@@ -335,6 +335,10 @@ function SearchDialog({
             ref={inputRef}
             type="text"
             value={query}
+            autoCapitalize="off"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
             onChange={(event) => onQueryChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && results[0]) {

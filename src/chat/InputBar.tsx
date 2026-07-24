@@ -1649,6 +1649,10 @@ export function InputBar({
             onPaste={(e) => void handlePaste(e)}
             onKeyDown={handleKeyDown}
             onSelect={handleSelect}
+            autoCapitalize="off"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
             placeholder={
               usesExternalRuntime
                 ? `${cliAgentLabel} 命令，输入 / 补全`
