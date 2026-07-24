@@ -479,3 +479,39 @@ Fixed child, Worker, OCR helper, Preview server, cache, knowledge-base lock, Mes
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: UI 开关统一 + 输入框草稿保留 + HTTP 连接池诊断修复
+
+**Date**: 2026-07-24
+**Task**: UI 开关统一 + 输入框草稿保留 + HTTP 连接池诊断修复
+**Branch**: `main`
+
+### Summary
+
+统一技能/插件页开关到共享 Toggle 并修 MCP off 态可见性；新建/切换对话时输入框草稿(文字+附件)内存保留、恢复后光标落末尾；针对长时间运行后陈旧连接导致 error sending request(statusCode=null)，给共享 reqwest client 加 tcp/http2 keepalive+缩短 pool_idle_timeout，并新增 format_reqwest_error 展开 .source() 链让下次故障可定位层级(A+B；C 放宽重试分类待真实错误链后再做)。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3a686aa` | (see git log) |
+| `1ff8567` | (see git log) |
+| `eefa6f3` | (see git log) |
+| `ac6ca55` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
-- **Last Active**: 2026-07-23
+- **Total Sessions**: 15
+- **Last Active**: 2026-07-24
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~481 | Active |
+| `journal-1.md` | ~517 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-07-24 | UI 开关统一 + 输入框草稿保留 + HTTP 连接池诊断修复 | `3a686aa`, `1ff8567`, `eefa6f3`, `ac6ca55` | `main` |
 | 14 | 2026-07-23 | 截图标注收尾 + LaTeX \[...\] 分隔符修复 | `233c5b8`, `615e4c1` | `main` |
 | 13 | 2026-07-20 | 删除 Kivio Code 终端 agent 功能 | `aa6995a` | `main` |
 | 12 | 2026-07-19 | Resource lifecycle and performance hardening | `48e6f3a` | `main` |
