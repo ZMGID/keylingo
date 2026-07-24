@@ -115,6 +115,16 @@ pub const STANDARD_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 流式响应的读空闲超时：持续有 SSE chunk 到达时不会触发。
 const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// 空闲连接在池中最多保留多久后被淘汰。默认(reqwest 90s)偏长；缩短以更快丢弃可能已被
+/// 服务端/NAT 静默关闭的连接，降低长时间运行后复用陈旧连接的概率。
+const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// TCP keepalive：让内核定期探活，及时发现对端已消失的连接。
+const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+/// HTTP/2 keepalive PING 间隔：h2 单连接多路复用，一条半死连接会拖垮该 host 的全部请求；
+/// 定期 PING 让 hyper 主动探测并丢弃死连接（配合 while_idle 覆盖空闲期）。
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// HTTP/2 keepalive PING 超时：PING 无响应超过此值即判定连接死亡。
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 为非流式请求设置总超时。流式请求不要用它，否则长回答会被总时长切断。
 pub fn with_standard_request_timeout(request: RequestBuilder) -> RequestBuilder {
@@ -147,10 +157,17 @@ pub fn attach_json_body(
 }
 
 /// 构建 HTTP 客户端：不设置 total timeout，避免活跃 SSE 流在 60 秒处被砍掉。
+/// 连接池加保活 + 缩短空闲淘汰：长时间运行后不再复用被对端静默关闭的陈旧连接
+/// （见任务 07-24-http-connection-pool-diagnosis）。
 pub fn build_http_client() -> Client {
     Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+        .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(HTTP_TCP_KEEPALIVE)
+        .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
         .build()
         .unwrap_or_else(|err| {
             eprintln!("Failed to build HTTP client: {err}");
@@ -232,6 +249,47 @@ fn is_immediate_failover_status(status: StatusCode) -> bool {
 /// 包括超时和连接错误
 fn is_retryable_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect()
+}
+
+/// 把 reqwest 错误展开成完整 source 链文本。reqwest 的 `Display` 常年只有一句
+/// `error sending request`，真正的原因（DNS 解析 / TCP connect / TLS handshake /
+/// connection closed / h2 reset）都在 `std::error::Error::source()` 链里。诊断长时间
+/// 运行后的 `statusCode=null` 网络故障必须看到这条链（见任务 07-24-http-connection-pool-diagnosis）。
+pub fn format_reqwest_error(error: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut parts = vec![error.to_string()];
+    let mut src = error.source();
+    while let Some(err) = src {
+        let text = err.to_string();
+        // 跳过与上一层完全重复的文案，避免链条里堆叠同一句。
+        if parts.last().map(|p| p != &text).unwrap_or(true) {
+            parts.push(text);
+        }
+        src = err.source();
+    }
+    // 附带 reqwest 的错误类别标记，便于区分是 connect / timeout / body / decode。
+    let mut kind = Vec::new();
+    if error.is_connect() {
+        kind.push("connect");
+    }
+    if error.is_timeout() {
+        kind.push("timeout");
+    }
+    if error.is_request() {
+        kind.push("request");
+    }
+    if error.is_body() {
+        kind.push("body");
+    }
+    if error.is_decode() {
+        kind.push("decode");
+    }
+    let chain = parts.join(" → ");
+    if kind.is_empty() {
+        chain
+    } else {
+        format!("{chain} [{}]", kind.join(","))
+    }
 }
 
 /// 计算重试延迟
@@ -541,7 +599,7 @@ where
                 return Err(format!("{} (attempt {}/{})", err_msg, attempt, shown_max));
             }
             Err(err) => {
-                let err_msg = format!("{} Error: {}", label, err);
+                let err_msg = format!("{} Error: {}", label, format_reqwest_error(&err));
                 if is_retryable_error(&err) && attempt < attempts {
                     last_error = Some(err_msg);
                     let delay = retry_delay_ms(attempt, None);
@@ -1281,6 +1339,22 @@ impl<F: FnMut(serde_json::Value) + Send> StreamSink for CombinedTranslateEventSi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_client_builder_config_is_valid() {
+        // build_http_client 内部 unwrap_or_else 会在 builder 非法时静默退回 Client::new()，
+        // 掩盖配置错误。这里直接断言相同的 builder 链能 build 成功（keepalive/pool 参数合法）。
+        let built = Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+            .tcp_keepalive(HTTP_TCP_KEEPALIVE)
+            .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+            .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+            .http2_keep_alive_while_idle(true)
+            .build();
+        assert!(built.is_ok(), "http client builder rejected config: {built:?}");
+    }
 
     #[test]
     fn utf8_decoder_reassembles_split_multibyte() {
