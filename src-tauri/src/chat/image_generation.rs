@@ -694,7 +694,7 @@ fn uses_openrouter_chat_image_generation(provider: &ModelProvider, model: &str) 
         return false;
     }
     let lower = model.trim().to_ascii_lowercase();
-    [
+    if [
         "black-forest-labs/",
         "bytedance-seed/",
         "google/",
@@ -706,6 +706,17 @@ fn uses_openrouter_chat_image_generation(provider: &ModelProvider, model: &str) 
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix))
+    {
+        return true;
+    }
+    // 裸名出图模型（通用 /v1 代理不带 vendor 前缀，如 cpa.xb1520.com/v1 暴露
+    // `gemini-3.1-flash-image` / `grok-imagine-image`）：这些代理不支持
+    // /images/generations 出这些图，必须走 chat/completions 仿 OpenRouter 出图。
+    // api.openai.com / api.x.ai 已在上面早退排除（gpt-image/dall-e/grok-imagine 仍走各自 images API）。
+    (lower.contains("gemini") && lower.contains("image"))
+        || lower.contains("nano-banana")
+        || lower.contains("grok-imagine-image")
+        || lower.starts_with("imagen")
 }
 
 fn openrouter_aspect_ratio(size: &str) -> Option<&'static str> {
@@ -788,6 +799,70 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, "image/png");
         assert_eq!(images[0].base64, "aGVsbG8=");
+    }
+
+    #[test]
+    fn openrouter_bare_gemini_image_uses_image_text_modality() {
+        // 裸名 gemini-3.1-flash-image 含 "image" 但不在 image_only 列表 → ["image","text"]。
+        assert_eq!(
+            openrouter_modalities("gemini-3.1-flash-image"),
+            serde_json::json!(["image", "text"])
+        );
+    }
+
+    #[test]
+    fn bare_image_model_names_route_through_chat_on_generic_proxy() {
+        // 通用 /v1 代理（非 openrouter.ai / 非 api.openai.com / 非 api.x.ai）暴露的裸名出图模型
+        // 必须走 chat/completions 仿 OpenRouter 出图，而非 /images/generations。
+        let proxy = ModelProvider {
+            id: "proxy".to_string(),
+            name: "Proxy".to_string(),
+            api_keys: vec!["k".to_string()],
+            api_key_legacy: None,
+            base_url: "https://cpa.xb1520.com/v1".to_string(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "openai_chat".to_string(),
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        };
+
+        assert!(uses_openrouter_chat_image_generation(
+            &proxy,
+            "gemini-3.1-flash-image"
+        ));
+        assert!(uses_openrouter_chat_image_generation(
+            &proxy,
+            "grok-imagine-image"
+        ));
+        assert!(uses_openrouter_chat_image_generation(&proxy, "nano-banana"));
+        assert!(uses_openrouter_chat_image_generation(&proxy, "imagen-4.0"));
+        // 也走已知直连路由总闸（OpenAiChat + chat 出图）。
+        assert!(has_known_direct_image_generation_route(
+            &proxy,
+            "gemini-3.1-flash-image"
+        ));
+        // 普通文本模型不误判。
+        assert!(!uses_openrouter_chat_image_generation(&proxy, "gpt-4o"));
+
+        // api.openai.com / api.x.ai 上的裸名仍被早退排除（gpt-image/dall-e/grok-imagine 走各自 images API）。
+        let openai = ModelProvider {
+            base_url: "https://api.openai.com/v1".to_string(),
+            ..proxy.clone()
+        };
+        assert!(!uses_openrouter_chat_image_generation(
+            &openai,
+            "gemini-3.1-flash-image"
+        ));
+        let xai = ModelProvider {
+            base_url: "https://api.x.ai/v1".to_string(),
+            ..proxy.clone()
+        };
+        assert!(!uses_openrouter_chat_image_generation(
+            &xai,
+            "grok-imagine-image"
+        ));
     }
 
     #[test]

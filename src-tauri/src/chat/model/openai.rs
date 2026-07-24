@@ -12,8 +12,8 @@ use crate::utils;
 
 use super::{
     openai_messages_from_generate_request, pending_tool_calls_from_openai_message,
-    stream_read_error, GenerateOutput, GenerateRequest, LanguageModelProvider, ModelError,
-    ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink,
+    stream_read_error, GenerateOutput, GeneratedImageData, GenerateRequest, LanguageModelProvider,
+    ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink,
 };
 
 pub struct OpenAiChatProvider<'a> {
@@ -214,6 +214,8 @@ impl OpenAiChatProvider<'_> {
         let mut tool_partials: Vec<PartialToolCall> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut usage: Option<ModelUsage> = None;
+        // 代理仿 OpenRouter 出图：流式 chunk 的 `delta.images` 逐帧累积，finish 后并入 output。
+        let mut images: Vec<GeneratedImageData> = Vec::new();
 
         loop {
             let chunk = response.chunk().await.map_err(|err| {
@@ -265,7 +267,7 @@ impl OpenAiChatProvider<'_> {
                         provider_messages: Vec::new(),
                         cancelled: false,
                         web_search: None,
-                        images: Vec::new(),
+                        images,
                     };
                     self.record_usage_success(
                         &request,
@@ -307,6 +309,13 @@ impl OpenAiChatProvider<'_> {
                         sink.emit(StreamPart::TextDelta { delta })?;
                     }
                 }
+                for image in extract_chat_stream_images(&value) {
+                    sink.emit(StreamPart::ImageData {
+                        mime_type: image.mime_type.clone(),
+                        data: image.data.clone(),
+                    })?;
+                    images.push(image);
+                }
             }
         }
 
@@ -325,7 +334,7 @@ impl OpenAiChatProvider<'_> {
             provider_messages: Vec::new(),
             cancelled: false,
             web_search: None,
-            images: Vec::new(),
+            images,
         };
         self.record_usage_success(
             &request,
@@ -635,6 +644,11 @@ pub fn output_from_chat_completion(
         .and_then(|value| value.as_str())
         .map(str::to_string);
     let usage = model_usage_from_openai_response(value);
+    // 代理仿 OpenRouter 出图：非流式在 message.images 携带图片数组，解析为协议无关 images。
+    let images = message
+        .get("images")
+        .map(generated_images_from_openai_images)
+        .unwrap_or_default();
 
     Ok(GenerateOutput {
         text,
@@ -645,7 +659,7 @@ pub fn output_from_chat_completion(
         provider_messages: vec![message],
         cancelled: false,
         web_search: None,
-        images: Vec::new(),
+        images,
     })
 }
 
@@ -949,6 +963,71 @@ fn finish_tool_call_partials(
         calls.push(call);
     }
     Ok(calls)
+}
+
+/// 从 OpenRouter 风格的 `images` 数组解析出模型生成的图片（协议无关形态）。
+/// 形如 `[{type:"image_url", image_url:{url:"data:image/png;base64,..."}}]`（这些代理仿
+/// OpenRouter 出图）。仅收 data URL；http(s) 直链或格式异常项静默跳过（不报错，保持无图
+/// 响应字节等价——绝大多数普通 chat 无该字段，行为完全不变）。
+fn generated_images_from_openai_images(images: &Value) -> Vec<GeneratedImageData> {
+    let Some(array) = images.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in array {
+        let Some(url) = item
+            .get("image_url")
+            .or_else(|| item.get("imageUrl"))
+            .and_then(|value| value.get("url"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        if let Some(image) = parse_openai_image_data_url(url) {
+            out.push(image);
+        }
+    }
+    out
+}
+
+/// 解析 data URL 为 GeneratedImageData（mime + 纯 base64）。非 data URL（含 http(s) 直链）
+/// 或非 base64 编码返回 None 静默跳过——现阶段不下载远程直链，只避免误伤正常 chat。
+fn parse_openai_image_data_url(url: &str) -> Option<GeneratedImageData> {
+    let trimmed = url.trim();
+    let rest = trimmed.strip_prefix("data:")?;
+    let (metadata, payload) = rest.split_once(',')?;
+    if !metadata
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        return None;
+    }
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return None;
+    }
+    let mime_type = metadata
+        .split(';')
+        .next()
+        .map(str::trim)
+        .filter(|value| value.starts_with("image/"))
+        .unwrap_or("image/png")
+        .to_string();
+    Some(GeneratedImageData {
+        mime_type,
+        data: payload.to_string(),
+    })
+}
+
+/// 流式 chunk 的 `choices[0].delta.images` → 协议无关 images（形状同非流式 message.images）。
+fn extract_chat_stream_images(value: &Value) -> Vec<GeneratedImageData> {
+    value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("images"))
+        .map(generated_images_from_openai_images)
+        .unwrap_or_default()
 }
 
 fn openai_stream_finish_reason(value: &Value) -> Option<&str> {
@@ -1433,6 +1512,108 @@ mod tests {
         assert_eq!(calls[0].function_name, "web_search");
         assert_eq!(calls[0].arguments["query"], "吉林市 明天 天气");
         assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn parses_message_images_from_openrouter_style_response() {
+        // 代理仿 OpenRouter：非流式 message.images 携带 data URL 图片数组。
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "here is your image",
+                    "images": [{
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/png;base64,aGVsbG8=" }
+                    }]
+                }
+            }]
+        });
+
+        let output = output_from_chat_completion(&value, "{}", "test").expect("output");
+        assert_eq!(output.text, "here is your image");
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].mime_type, "image/png");
+        assert_eq!(output.images[0].data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn response_without_images_has_empty_images() {
+        // 无 images 字段：行为字节等价，images 为空（普通 chat 非回归）。
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "plain text" }
+            }]
+        });
+        let output = output_from_chat_completion(&value, "{}", "test").expect("output");
+        assert!(output.images.is_empty());
+    }
+
+    #[test]
+    fn stream_delta_images_emit_image_data_and_aggregate() {
+        // 流式 delta.images：解析出图 → 发 StreamPart::ImageData 且累积进最终 images。
+        // 复刻 stream_inner 每 chunk 的 emit + push 逻辑（无需真实 HTTP）。
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "images": [{
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/webp;base64,d29ybGQ=" }
+                    }]
+                }
+            }]
+        });
+
+        let mut parts = Vec::new();
+        let mut images: Vec<GeneratedImageData> = Vec::new();
+        {
+            let mut sink = |part| {
+                parts.push(part);
+                Ok::<(), ModelError>(())
+            };
+            for image in extract_chat_stream_images(&chunk) {
+                sink.emit(StreamPart::ImageData {
+                    mime_type: image.mime_type.clone(),
+                    data: image.data.clone(),
+                })
+                .expect("emit");
+                images.push(image);
+            }
+        }
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/webp");
+        assert_eq!(images[0].data, "d29ybGQ=");
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            StreamPart::ImageData { mime_type, data } => {
+                assert_eq!(mime_type, "image/webp");
+                assert_eq!(data, "d29ybGQ=");
+            }
+            other => panic!("expected ImageData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_delta_without_images_yields_nothing() {
+        // delta 无 images：解析为空（普通流式 chat 非回归）。
+        let chunk = serde_json::json!({
+            "choices": [{ "delta": { "content": "hi" } }]
+        });
+        assert!(extract_chat_stream_images(&chunk).is_empty());
+    }
+
+    #[test]
+    fn parse_openai_image_data_url_skips_http_and_non_base64() {
+        // http(s) 直链、非 base64 data URL、非 data URL 均静默跳过（返回 None，不报错）。
+        assert!(parse_openai_image_data_url("https://example.com/a.png").is_none());
+        assert!(parse_openai_image_data_url("data:image/png,notbase64").is_none());
+        assert!(parse_openai_image_data_url("not-a-url").is_none());
+        let ok = parse_openai_image_data_url("data:image/jpeg;base64,aGVsbG8=").expect("parsed");
+        assert_eq!(ok.mime_type, "image/jpeg");
+        assert_eq!(ok.data, "aGVsbG8=");
     }
 
     #[test]
