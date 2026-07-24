@@ -2815,3 +2815,40 @@ async fn run_loop_nonstream_builtin_web_search_card_uses_reserved_slot() {
         answer.order,
     );
 }
+
+/// Gemini 原生出图（任务 07-24）：模型在流式答案里返回 inlineData 图片 →
+/// `GenerateOutput.images` → 循环跨阶段累积进 `RunState.generated_images` →
+/// `attach_usage` 挂到 `AgentRunResult.images`。reply 侧据此落成 assistant 消息级
+/// artifacts（data_url + size_bytes 断言见 commands::reply 的转换单测）。
+#[tokio::test]
+async fn run_loop_gemini_native_image_lands_in_run_result_images() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(vec![
+        r#"{"candidates":[{"content":{"parts":[{"text":"这是为你生成的图片。"},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}}]}"#
+            .to_string(),
+        r#"{"candidates":[{"finishReason":"STOP"}]}"#.to_string(),
+    ])]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.provider.api_format = "gemini".to_string();
+    // 出图模型不调工具：给纯文本任务，模型直接以「文本 + 图片」作答（无 tool call）→ FinalAnswer。
+    config.tools = Vec::new();
+    config.runtime_messages = vec![
+        serde_json::json!({ "role": "system", "content": "system prompt" }),
+        serde_json::json!({ "role": "user", "content": "画一只猫" }),
+    ];
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("gemini image-gen answer must not bubble Err");
+
+    assert_eq!(
+        result.images.len(),
+        1,
+        "the single native image reaches the run result"
+    );
+    assert_eq!(result.images[0].mime_type, "image/png");
+    assert_eq!(result.images[0].data, "aGVsbG8=");
+    assert!(result.content.contains("这是为你生成的图片。"));
+}

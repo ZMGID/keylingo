@@ -152,6 +152,7 @@ impl<'a> RunResultBuilder<'a> {
             compacted_history: None,
             compaction_boundary: None,
             compaction_summary: None,
+            images: Vec::new(),
         }
     }
 }
@@ -325,6 +326,7 @@ pub(crate) fn finalize_planning_final(
         compacted_history: None,
         compaction_boundary: None,
         compaction_summary: None,
+        images: Vec::new(),
     })
 }
 
@@ -369,6 +371,7 @@ pub(crate) fn finalize_completed(
         compacted_history: None,
         compaction_boundary: None,
         compaction_summary: None,
+        images: Vec::new(),
     }
 }
 
@@ -492,6 +495,7 @@ pub(crate) fn cancelled_tool_round_run_result(
         compacted_history: None,
         compaction_boundary: None,
         compaction_summary: None,
+        images: Vec::new(),
     }
 }
 

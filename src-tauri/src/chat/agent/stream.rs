@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::chat::model::{
-    GenerateOutput, ModelError, PendingToolCall, StreamPart, StreamSink, WebCitation,
+    GenerateOutput, GeneratedImageData, ModelError, PendingToolCall, StreamPart, StreamSink,
+    WebCitation,
 };
 use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
@@ -666,6 +667,9 @@ pub struct ChatStreamOutput {
     /// 模型原生内置联网搜索的解析结果（仅内置搜索发生时为 Some）。循环据此合成一张
     /// 「网络搜索」工具卡（任务 07-23）。
     pub web_search: Option<crate::chat::model::BuiltinWebSearch>,
+    /// 模型原生生成的图片（Gemini native image gen，任务 07-24）：finish 时聚合到
+    /// `GenerateOutput.images`，循环据此落成 assistant 消息级 artifacts。空 = 未出图。
+    pub images: Vec<GeneratedImageData>,
 }
 
 impl ChatStreamOutput {
@@ -701,6 +705,7 @@ impl ChatStreamOutput {
             cancelled,
             usage: None,
             web_search: None,
+            images: Vec::new(),
         }
     }
 
@@ -717,6 +722,7 @@ impl ChatStreamOutput {
         let cleaned = sanitize_assistant_text_response(raw_content.trim());
         let reasoning = output.reasoning.unwrap_or(snapshot_reasoning);
         let web_search = output.web_search;
+        let images = output.images;
         let mut result = Self::from_generate_output(
             cleaned,
             raw_content,
@@ -727,6 +733,7 @@ impl ChatStreamOutput {
         );
         result.usage = output.usage;
         result.web_search = web_search;
+        result.images = images;
         result
     }
 

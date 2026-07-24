@@ -594,6 +594,9 @@ pub(super) async fn complete_assistant_reply_inner(
     segments.extend(result.segments);
     let mut tool_records = auxiliary_tool_records;
     tool_records.extend(result.tool_records);
+    // 模型原生生成的图片（Gemini native image gen，任务 07-24）→ assistant 消息级 artifacts，
+    // 前端答案下方图片画廊直接展示（消费 message.artifacts）。空则无开销。
+    let artifacts = generated_image_artifacts(&result.images);
     let run_entry = agent_run_entry_label(entry);
     if let Some(arm) = arm {
         // 多模型臂：构造 assistant 消息但**不落盘**，交协调者统一合并 + 一次性 save。
@@ -601,7 +604,7 @@ pub(super) async fn complete_assistant_reply_inner(
             assistant_message_id,
             result.content,
             result.reasoning,
-            Vec::new(),
+            artifacts,
             tool_records,
             result.api_messages,
             segments,
@@ -665,7 +668,7 @@ pub(super) async fn complete_assistant_reply_inner(
         assistant_message_id,
         result.content,
         result.reasoning,
-        Vec::new(),
+        artifacts,
         tool_records,
         result.api_messages,
         segments,
@@ -685,5 +688,73 @@ pub(super) fn agent_run_entry_label(entry: crate::chat::agent::AgentRunEntry) ->
     match entry {
         crate::chat::agent::AgentRunEntry::Send => "send",
         crate::chat::agent::AgentRunEntry::Regenerate => "regenerate",
+    }
+}
+
+/// 把模型原生生成的图片（`GenerateOutput.images`，任务 07-24）转成 assistant 消息级
+/// `ChatToolArtifact`：`data:{mime};base64,{data}` 内联，name `generated-image-{i}.{ext}`
+/// （1 基）。复用 image_generation 的 `extension_for_mime` / `decoded_base64_len`，与 Mixer
+/// 出图工具的 artifact 形态保持一致。空输入 → 空 Vec（无开销）。
+fn generated_image_artifacts(
+    images: &[crate::chat::model::GeneratedImageData],
+) -> Vec<crate::mcp::types::ChatToolArtifact> {
+    use crate::chat::image_generation::{decoded_base64_len, extension_for_mime};
+    images
+        .iter()
+        .enumerate()
+        .map(|(idx, image)| {
+            let extension = extension_for_mime(&image.mime_type);
+            crate::mcp::types::ChatToolArtifact {
+                id: None,
+                name: format!("generated-image-{}.{}", idx + 1, extension),
+                mime_type: image.mime_type.clone(),
+                data_url: format!("data:{};base64,{}", image.mime_type, image.data),
+                size_bytes: decoded_base64_len(&image.data),
+                path: None,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::model::GeneratedImageData;
+
+    /// 任务 07-24：Gemini 原生出图 → assistant 消息级 artifacts。转换产出 data_url 前缀 +
+    /// size_bytes，穿过 build_assistant_message 后落在 ChatMessage.artifacts。
+    #[test]
+    fn native_image_becomes_assistant_message_artifact() {
+        let images = vec![GeneratedImageData {
+            mime_type: "image/png".to_string(),
+            // base64("hello") = "aGVsbG8=" → 解码 5 字节。
+            data: "aGVsbG8=".to_string(),
+        }];
+        let artifacts = generated_image_artifacts(&images);
+
+        let message = build_assistant_message(
+            "msg_test".to_string(),
+            "这是图片。".to_string(),
+            None,
+            artifacts,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some("send"),
+            Some("completed"),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(message.artifacts.len(), 1);
+        let artifact = &message.artifacts[0];
+        assert_eq!(artifact.name, "generated-image-1.png");
+        assert_eq!(artifact.mime_type, "image/png");
+        assert!(artifact.data_url.starts_with("data:image/png;base64,"));
+        assert!(artifact.data_url.ends_with("aGVsbG8="));
+        assert_eq!(artifact.size_bytes, Some(5));
     }
 }

@@ -112,7 +112,7 @@ pub(crate) async fn synthesis_step(
         )
         .await
         .map_err(|err| err.to_string());
-        let stream = match stream {
+        let mut stream = match stream {
             Ok(stream) => stream,
             Err(err) if !state.tool_records.is_empty() => {
                 eprintln!("Chat synthesis stream failed after tool records; recovering: {err}");
@@ -180,6 +180,7 @@ pub(crate) async fn synthesis_step(
             ));
         }
         state.merge_usage(stream.usage.clone());
+        state.generated_images.append(&mut stream.images);
         let final_reasoning_for_api = stream.reasoning.clone();
         let reasoning = merge_reasoning(&state.planning_reasoning_parts, stream.reasoning.clone());
         let response = sanitize_assistant_text_response(&stream.content);
@@ -245,9 +246,10 @@ pub(crate) async fn synthesis_step(
             }
         };
         let message = match message_result {
-            Ok((message, usage, web_search)) => {
+            Ok((message, usage, web_search, images)) => {
                 state.merge_usage(usage);
                 synth_web_search = web_search;
+                state.generated_images.extend(images);
                 message
             }
             Err(err) if !state.tool_records.is_empty() => {

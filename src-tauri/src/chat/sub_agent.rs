@@ -1600,6 +1600,7 @@ mod tests {
             compacted_history: None,
             compaction_boundary: None,
             compaction_summary: None,
+            images: Vec::new(),
         })
     }
 
@@ -1621,6 +1622,7 @@ mod tests {
             compacted_history: None,
             compaction_boundary: None,
             compaction_summary: None,
+            images: Vec::new(),
         })
     }
 

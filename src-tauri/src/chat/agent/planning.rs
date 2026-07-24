@@ -182,7 +182,7 @@ pub(crate) async fn planning_step(
         )
         .await
         {
-            Ok(stream) => {
+            Ok(mut stream) => {
                 if stream.cancelled {
                     let partial = sanitize_assistant_text_response(&stream.content);
                     if partial.trim().is_empty() || planning_tool_drafts.has_started() {
@@ -240,6 +240,7 @@ pub(crate) async fn planning_step(
                     ));
                 }
                 state.merge_usage(stream.usage.clone());
+                state.generated_images.append(&mut stream.images);
                 Ok(ChatPlanningStep {
                     message: stream.to_openai_compatible_message(),
                     streamed: true,
@@ -285,9 +286,10 @@ pub(crate) async fn planning_step(
                         &config.conversation_id,
                         &config.message_id,
                         "Chat tools planning",
-                    ) => result.map(|(message, usage, web_search)| {
+                    ) => result.map(|(message, usage, web_search, images)| {
                         state.merge_usage(usage);
                         planning_web_search = web_search;
+                        state.generated_images.extend(images);
                         ChatPlanningStep {
                             message,
                             streamed: false,
@@ -318,9 +320,10 @@ pub(crate) async fn planning_step(
                 &config.conversation_id,
                 &config.message_id,
                 "Chat tools planning",
-            ) => result.map(|(message, usage, web_search)| {
+            ) => result.map(|(message, usage, web_search, images)| {
                 state.merge_usage(usage);
                 planning_web_search = web_search;
+                state.generated_images.extend(images);
                 ChatPlanningStep {
                     message,
                     streamed: false,
@@ -537,7 +540,7 @@ pub(crate) async fn call_chat_completion_message_with_usage(
     message_id: &str,
     label: &str,
 ) -> Result<(Value, Option<crate::chat::model::ModelUsage>), String> {
-    let (message, usage, _web_search) = call_chat_completion_output_with_usage(
+    let (message, usage, _web_search, _images) = call_chat_completion_output_with_usage(
         state,
         provider,
         model,
@@ -578,6 +581,7 @@ pub(crate) async fn call_chat_completion_output_with_usage(
         Value,
         Option<crate::chat::model::ModelUsage>,
         Option<crate::chat::model::BuiltinWebSearch>,
+        Vec<crate::chat::model::GeneratedImageData>,
     ),
     String,
 > {
@@ -600,7 +604,8 @@ pub(crate) async fn call_chat_completion_output_with_usage(
         .map_err(|err| err.to_string())?;
     let usage = output.usage.clone();
     let web_search = output.web_search.clone();
-    Ok((output.to_openai_compatible_message(), usage, web_search))
+    let images = output.images.clone();
+    Ok((output.to_openai_compatible_message(), usage, web_search, images))
 }
 
 /// 与 `call_chat_completion_message_with_usage` 同形（返回 `to_openai_compatible_message()` Value），

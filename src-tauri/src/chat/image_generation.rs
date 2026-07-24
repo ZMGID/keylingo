@@ -78,7 +78,10 @@ pub async fn generate_image_with_provider(
     let request = parse_request(arguments)?;
     validate_provider(provider)?;
 
-    let images = if uses_openrouter_chat_image_generation(provider, model) {
+    let images = if provider.api_format_kind() == ProviderApiFormat::Gemini {
+        generate_with_gemini_native(state, provider, model, &request, retry_attempts, operation)
+            .await?
+    } else if uses_openrouter_chat_image_generation(provider, model) {
         generate_with_openrouter_chat(state, provider, model, &request, retry_attempts, operation)
             .await?
     } else {
@@ -194,8 +197,11 @@ fn parse_request(arguments: &Value) -> Result<ImageGenerationRequest, String> {
 
 fn validate_provider(provider: &ModelProvider) -> Result<(), String> {
     match provider.api_format_kind() {
-        ProviderApiFormat::OpenAiChat | ProviderApiFormat::OpenAiResponses => {}
-        ProviderApiFormat::AnthropicMessages | ProviderApiFormat::Gemini => {
+        // Gemini 原生走 generateContent 出图路径；OpenAI 系走 images/chat 路径。
+        ProviderApiFormat::OpenAiChat
+        | ProviderApiFormat::OpenAiResponses
+        | ProviderApiFormat::Gemini => {}
+        ProviderApiFormat::AnthropicMessages => {
             return Err("Mixer image generation requires an OpenAI-compatible provider".to_string())
         }
     }
@@ -414,8 +420,161 @@ fn parse_openrouter_response(value: &Value) -> Result<Vec<GeneratedImage>, Strin
     Ok(images)
 }
 
-async fn fetch_image_url(state: &AppState, url: &str) -> Result<(String, String), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+/// Gemini 原生 `generateContent` 出图路径（api_format = gemini）。
+/// n>1 时顺序多次调用；首次失败则透传错误，若已有成功图则返回已收集的图。
+async fn generate_with_gemini_native(
+    state: &AppState,
+    provider: &ModelProvider,
+    model: &str,
+    request: &ImageGenerationRequest,
+    retry_attempts: usize,
+    operation: &str,
+) -> Result<Vec<GeneratedImage>, String> {
+    let url = gemini_generate_content_url(&provider.base_url, model);
+    let body = build_gemini_native_body(request);
+
+    let mut images = Vec::new();
+    for idx in 0..request.n {
+        let response = send_with_failover(
+            state,
+            operation,
+            retry_attempts,
+            &provider.id,
+            &provider.api_keys,
+            |key| {
+                state
+                    .http
+                    .post(&url)
+                    .header("x-goog-api-key", key)
+                    .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                if images.is_empty() {
+                    return Err(err);
+                }
+                eprintln!("Mixer image generation gemini call #{} failed: {err}", idx + 1);
+                break;
+            }
+        };
+        let raw = match response.text().await {
+            Ok(raw) => raw,
+            Err(err) => {
+                if images.is_empty() {
+                    return Err(format!("Mixer image generation read body: {err}"));
+                }
+                eprintln!("Mixer image generation gemini read body #{} failed: {err}", idx + 1);
+                break;
+            }
+        };
+        let value: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(err) => {
+                let message = format!(
+                    "Mixer image generation parse JSON: {} (body: {})",
+                    err,
+                    raw.chars().take(500).collect::<String>()
+                );
+                if images.is_empty() {
+                    return Err(message);
+                }
+                eprintln!("{message}");
+                break;
+            }
+        };
+        match parse_gemini_native_response(&value) {
+            Ok(mut parsed) => images.append(&mut parsed),
+            Err(err) => {
+                if images.is_empty() {
+                    return Err(err);
+                }
+                eprintln!("Mixer image generation gemini parse #{} failed: {err}", idx + 1);
+                break;
+            }
+        }
+    }
+    Ok(images)
+}
+
+/// 复刻 gemini.rs 的 `gemini_url`（私有，未编辑该文件）：base_url 去尾斜杠，
+/// model 去重 "models/" 前缀，避免 "models/models/"。
+fn gemini_generate_content_url(base_url: &str, model: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let model = model.trim_start_matches("models/");
+    format!("{base}/models/{model}:generateContent")
+}
+
+fn build_gemini_native_body(request: &ImageGenerationRequest) -> Value {
+    let mut generation_config = serde_json::json!({
+        "responseModalities": ["TEXT", "IMAGE"],
+    });
+    if let Some(aspect_ratio) = size_aspect_ratio(&request.size) {
+        generation_config["imageConfig"] = serde_json::json!({ "aspectRatio": aspect_ratio });
+    }
+    serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{ "text": request.prompt.as_str() }],
+            }
+        ],
+        "generationConfig": generation_config,
+    })
+}
+
+fn parse_gemini_native_response(value: &Value) -> Result<Vec<GeneratedImage>, String> {
+    let candidates = value
+        .get("candidates")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Gemini image response missing candidates array".to_string())?;
+    let mut images = Vec::new();
+    for candidate in candidates {
+        let Some(parts) = candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(|parts| parts.as_array())
+        else {
+            continue;
+        };
+        for part in parts {
+            let Some(inline_data) = part
+                .get("inlineData")
+                .or_else(|| part.get("inline_data"))
+            else {
+                continue;
+            };
+            let Some(base64) = inline_data
+                .get("data")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let mime_type = inline_data
+                .get("mimeType")
+                .or_else(|| inline_data.get("mime_type"))
+                .and_then(|value| value.as_str())
+                .filter(|value| value.starts_with("image/"))
+                .unwrap_or("image/png")
+                .to_string();
+            validate_base64_image(base64)?;
+            images.push(GeneratedImage {
+                mime_type,
+                base64: base64.to_string(),
+                revised_prompt: None,
+            });
+        }
+    }
+    Ok(images)
+}
+
+async fn fetch_image_url(state: &AppState, url: &str) -> Result<(String, String), String> {    if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Image generation returned a non-http image URL".to_string());
     }
     let response = state
@@ -494,7 +653,7 @@ fn validate_base64_image(value: &str) -> Result<(), String> {
     }
 }
 
-fn decoded_base64_len(value: &str) -> Option<u64> {
+pub(crate) fn decoded_base64_len(value: &str) -> Option<u64> {
     let compact_len = value.chars().filter(|ch| !ch.is_whitespace()).count();
     if compact_len == 0 {
         return Some(0);
@@ -509,7 +668,7 @@ fn decoded_base64_len(value: &str) -> Option<u64> {
     Some(((compact_len * 3) / 4).saturating_sub(padding) as u64)
 }
 
-fn extension_for_mime(mime_type: &str) -> &'static str {
+pub(crate) fn extension_for_mime(mime_type: &str) -> &'static str {
     match mime_type {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/webp" => "webp",
@@ -739,5 +898,103 @@ mod tests {
             &openai,
             "openai/gpt-5-image"
         ));
+    }
+
+    fn gemini_provider() -> ModelProvider {
+        ModelProvider {
+            id: "gemini".to_string(),
+            name: "Gemini".to_string(),
+            api_keys: vec!["k".to_string()],
+            api_key_legacy: None,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "gemini".to_string(),
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        }
+    }
+
+    #[test]
+    fn gemini_native_body_shape() {
+        let request = ImageGenerationRequest {
+            prompt: "draw a cat".to_string(),
+            size: "1024x1024".to_string(),
+            quality: "auto".to_string(),
+            n: 1,
+        };
+        let body = build_gemini_native_body(&request);
+        assert_eq!(
+            body["generationConfig"]["responseModalities"],
+            serde_json::json!(["TEXT", "IMAGE"])
+        );
+        assert_eq!(
+            body["generationConfig"]["imageConfig"]["aspectRatio"],
+            serde_json::json!("1:1")
+        );
+        assert_eq!(body["contents"][0]["parts"][0]["text"], "draw a cat");
+
+        let auto = ImageGenerationRequest {
+            size: "auto".to_string(),
+            ..request
+        };
+        let auto_body = build_gemini_native_body(&auto);
+        assert!(auto_body["generationConfig"].get("imageConfig").is_none());
+    }
+
+    #[test]
+    fn gemini_native_url_dedupes_models_prefix() {
+        assert_eq!(
+            gemini_generate_content_url(
+                "https://generativelanguage.googleapis.com/v1beta/",
+                "gemini-3.1-flash-image"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent"
+        );
+        assert_eq!(
+            gemini_generate_content_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "models/gemini-3.1-flash-image"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent"
+        );
+    }
+
+    #[test]
+    fn gemini_native_parses_inline_data() {
+        let value = serde_json::json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "text": "here is your image" },
+                            {
+                                "inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": "aGVsbG8="
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+        let images = parse_gemini_native_response(&value).expect("image should parse");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].base64, "aGVsbG8=");
+        assert!(images[0].revised_prompt.is_none());
+    }
+
+    #[test]
+    fn validate_provider_accepts_gemini_rejects_anthropic() {
+        assert!(validate_provider(&gemini_provider()).is_ok());
+
+        let anthropic = ModelProvider {
+            api_format: "anthropic_messages".to_string(),
+            ..gemini_provider()
+        };
+        assert!(validate_provider(&anthropic).is_err());
     }
 }

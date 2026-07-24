@@ -103,4 +103,7 @@ pub struct AgentRunResult {
     /// Agent-loop L2 compaction summary for `context_state.summary` persistence
     /// (L2 不再只 push boundary，run 结束时由 commands.rs 写回 summary + compression_count）。
     pub compaction_summary: Option<crate::chat::types::ConversationContextSummary>,
+    /// 模型原生生成的图片（Gemini native image gen，任务 07-24）：跨轮累积的
+    /// `GenerateOutput.images`，reply 侧落成 assistant 消息级 artifacts。空 = 未出图。
+    pub images: Vec<crate::chat::model::GeneratedImageData>,
 }
