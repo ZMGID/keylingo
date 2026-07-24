@@ -265,6 +265,7 @@ impl OpenAiChatProvider<'_> {
                         provider_messages: Vec::new(),
                         cancelled: false,
                         web_search: None,
+                        images: Vec::new(),
                     };
                     self.record_usage_success(
                         &request,
@@ -324,6 +325,7 @@ impl OpenAiChatProvider<'_> {
             provider_messages: Vec::new(),
             cancelled: false,
             web_search: None,
+            images: Vec::new(),
         };
         self.record_usage_success(
             &request,
@@ -643,6 +645,7 @@ pub fn output_from_chat_completion(
         provider_messages: vec![message],
         cancelled: false,
         web_search: None,
+        images: Vec::new(),
     })
 }
 

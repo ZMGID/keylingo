@@ -10,9 +10,9 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GenerateRequest,
-    LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage, ModelRole,
-    ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
+    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GeneratedImageData,
+    GenerateRequest, LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage,
+    ModelRole, ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
 /// Google Gemini **原生** `generateContent` adapter（peer of openai/anthropic）。
@@ -178,6 +178,8 @@ impl GeminiProvider<'_> {
         let mut usage: Option<ModelUsage> = None;
         // 内置搜索引用：groundingMetadata 通常在末段 chunk，逐段合并兜底。
         let mut web_search: Option<BuiltinWebSearch> = None;
+        // 模型生成的图片：逐 chunk 的 inlineData part 累积，finish 后并入 output。
+        let mut images: Vec<GeneratedImageData> = Vec::new();
 
         loop {
             let chunk = response.chunk().await.map_err(|err| {
@@ -245,6 +247,12 @@ impl GeminiProvider<'_> {
                         })?;
                         sink.emit(StreamPart::ToolCallDone { call: call.clone() })?;
                         tool_calls.push(call);
+                    } else if let Some(image) = gemini_image_from_part(part) {
+                        sink.emit(StreamPart::ImageData {
+                            mime_type: image.mime_type.clone(),
+                            data: image.data.clone(),
+                        })?;
+                        images.push(image);
                     } else if let Some((text, is_thought)) = gemini_text_from_part(part) {
                         if is_thought {
                             reasoning_full.push_str(&text);
@@ -284,6 +292,7 @@ impl GeminiProvider<'_> {
         })?;
         let mut output = stream_output(full, reasoning_full, tool_calls, finish_reason, usage);
         output.web_search = web_search;
+        output.images = images;
         self.record_usage_success(
             &request,
             &label,
@@ -325,6 +334,12 @@ impl GeminiProvider<'_> {
             body["systemInstruction"] = serde_json::json!({
                 "parts": [{ "text": request.system }]
             });
+        }
+        // 出图模型：显式声明 TEXT+IMAGE 输出模态（否则只回文本）。红线：仅对出图模型下发,
+        // 普通文本模型请求体保持字节不变(Gemini 对未知/多余字段严格校验会 400)。
+        if crate::chat::model_metadata::is_image_output_model(&request.model) {
+            body["generationConfig"]["responseModalities"] =
+                serde_json::json!(["TEXT", "IMAGE"]);
         }
         let declarations = gemini_function_declarations(&request.tools);
         let mut tools_arr: Vec<Value> = Vec::new();
@@ -784,6 +799,7 @@ pub fn output_from_gemini_response(
     let mut content_parts: Vec<String> = Vec::new();
     let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<PendingToolCall> = Vec::new();
+    let mut images: Vec<GeneratedImageData> = Vec::new();
     // thoughtSignature 可能在 functionCall 兄弟 part 上：先扫全 parts 取一个候选签名兜底。
     let carry_sig = gemini_candidate_signature(value);
     for part in gemini_response_parts(value) {
@@ -792,6 +808,8 @@ pub fn output_from_gemini_response(
                 call.signature = carry_sig.clone();
             }
             tool_calls.push(call);
+        } else if let Some(image) = gemini_image_from_part(part) {
+            images.push(image);
         } else if let Some((text, is_thought)) = gemini_text_from_part(part) {
             if is_thought {
                 reasoning_parts.push(text);
@@ -826,6 +844,7 @@ pub fn output_from_gemini_response(
         provider_messages: vec![provider_message],
         cancelled: false,
         web_search: web_search_from_gemini_value(value),
+        images,
     })
 }
 
@@ -947,6 +966,26 @@ fn gemini_text_from_part(part: &Value) -> Option<(String, bool)> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     Some((text.to_string(), is_thought))
+}
+
+/// part 里的 inlineData → 模型生成的图片（base64 + mime）。非图片 part 返回 None。
+/// wire 形状：`{"inlineData": {"mimeType": "image/png", "data": "<base64>"}}`。
+fn gemini_image_from_part(part: &Value) -> Option<GeneratedImageData> {
+    let inline = part.get("inlineData")?;
+    let data = inline
+        .get("data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    let mime_type = inline
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("image/png")
+        .to_string();
+    Some(GeneratedImageData {
+        mime_type,
+        data: data.to_string(),
+    })
 }
 
 /// part 上的 thoughtSignature（Gemini 3.x 思维签名，回放 functionCall 时须带回）。
@@ -1074,6 +1113,7 @@ fn stream_output(
         provider_messages: vec![provider_message],
         cancelled: false,
         web_search: None,
+        images: Vec::new(),
     }
 }
 
@@ -1576,5 +1616,108 @@ mod tests {
         assert_eq!(branches.len(), 2);
         assert_eq!(branches[0]["type"], "string");
         assert_eq!(branches[1]["type"], "integer");
+    }
+
+    fn image_request(model: &str) -> GenerateRequest {
+        GenerateRequest {
+            model: model.into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text {
+                    text: "画一只猫".into(),
+                }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn response_modalities_only_for_image_model() {
+        // 文本模型：请求体不含 responseModalities（红线——多余字段会撞 Gemini 400）。
+        let text = body_for(&image_request("gemini-3.1-flash-lite"), false);
+        assert!(
+            text["generationConfig"]
+                .get("responseModalities")
+                .is_none(),
+            "text model must NOT carry responseModalities: {text}"
+        );
+        // 出图模型：generationConfig.responseModalities = ["TEXT","IMAGE"]。
+        let image = body_for(&image_request("gemini-3.1-flash-image"), false);
+        assert_eq!(
+            image["generationConfig"]["responseModalities"],
+            serde_json::json!(["TEXT", "IMAGE"]),
+            "image model must carry responseModalities: {image}"
+        );
+    }
+
+    #[test]
+    fn parses_gemini_response_text_and_inline_image() {
+        // 非流式：text part + inlineData part → text 与 images 都解析出来。
+        let response = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [
+                    { "text": "这是你的猫" },
+                    { "inlineData": { "mimeType": "image/png", "data": "AAAA" } }
+                ] },
+                "finishReason": "STOP"
+            }]
+        });
+        let out = output_from_gemini_response(&response, "test").expect("output");
+        assert_eq!(out.text, "这是你的猫");
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime_type, "image/png");
+        assert_eq!(out.images[0].data, "AAAA");
+    }
+
+    #[test]
+    fn stream_emits_image_data_and_aggregates_images() {
+        // 流式：mock 两个 SSE chunk（一个文本 + 一个 inlineData），断言发射 ImageData
+        // 且 finish 后 output.images 聚合正确。这里直接复用解析辅助（stream_inner 需网络），
+        // 逐 part 走与 stream_inner 相同的分支逻辑，验证 helper 契约。
+        let chunk_text = serde_json::json!({
+            "candidates": [{ "content": { "parts": [{ "text": "生成中" }] } }]
+        });
+        let chunk_image = serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "inlineData": { "mimeType": "image/jpeg", "data": "BBBB" } }
+            ] } }]
+        });
+
+        let mut emitted: Vec<StreamPart> = Vec::new();
+        let mut images: Vec<GeneratedImageData> = Vec::new();
+        for value in [&chunk_text, &chunk_image] {
+            for part in gemini_response_parts(value) {
+                if let Some(image) = gemini_image_from_part(part) {
+                    emitted.push(StreamPart::ImageData {
+                        mime_type: image.mime_type.clone(),
+                        data: image.data.clone(),
+                    });
+                    images.push(image);
+                } else if let Some((text, _)) = gemini_text_from_part(part) {
+                    emitted.push(StreamPart::TextDelta { delta: text });
+                }
+            }
+        }
+
+        // 恰好发了一帧 ImageData（mime/data 正确）。
+        let image_frames: Vec<_> = emitted
+            .iter()
+            .filter(|part| matches!(part, StreamPart::ImageData { .. }))
+            .collect();
+        assert_eq!(image_frames.len(), 1);
+        match image_frames[0] {
+            StreamPart::ImageData { mime_type, data } => {
+                assert_eq!(mime_type, "image/jpeg");
+                assert_eq!(data, "BBBB");
+            }
+            _ => unreachable!(),
+        }
+        // 聚合到最终 images。
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/jpeg");
+        assert_eq!(images[0].data, "BBBB");
     }
 }

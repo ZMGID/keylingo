@@ -319,6 +319,17 @@ fn image_generation_model_name_heuristic(provider: &ModelProvider, model: &str) 
     }
 }
 
+/// 判定一个模型是否为**出图**模型（其响应会带图片）。用于 Gemini 原生 `generateContent`：
+/// 生图模型才追加 `responseModalities:["TEXT","IMAGE"]`（普通文本模型加了会 400）。
+/// 判据轻量：模型名（去掉可选 `models/` 前缀后）含 `image` 或以 `imagen` 开头，大小写不敏感。
+pub fn is_image_output_model(model: &str) -> bool {
+    let name = model
+        .strip_prefix("models/")
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    name.contains("image") || name.starts_with("imagen")
+}
+
 pub(crate) fn context_window_for_model(
     provider: Option<&ModelProvider>,
     model: &str,
@@ -551,6 +562,18 @@ mod tests {
             context_window_for_model(Some(&provider), "deepseek-v4-flash"),
             (1_048_576, false)
         );
+    }
+
+    #[test]
+    fn is_image_output_model_matches_image_and_imagen() {
+        assert!(is_image_output_model("gemini-3.1-flash-image"));
+        assert!(is_image_output_model("models/gemini-2.5-flash-image"));
+        assert!(is_image_output_model("Imagen-4"));
+        assert!(is_image_output_model("models/imagen-3.0"));
+        // 普通文本模型不判为出图（红线：非出图模型不会追加 responseModalities）。
+        assert!(!is_image_output_model("gemini-3.1-flash-lite"));
+        assert!(!is_image_output_model("models/gemini-2.5-pro"));
+        assert!(!is_image_output_model("gpt-5"));
     }
 
     #[test]

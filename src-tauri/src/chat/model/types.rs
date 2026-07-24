@@ -260,6 +260,16 @@ impl BuiltinWebSearch {
     }
 }
 
+/// 模型**生成**的一张图片（协议无关形态）。适配器把各家 wire 格式（Gemini
+/// `inlineData` 等）解析成 base64 + mime，穿过契约层交给 runtime 落地为 artifact。
+/// 与 `MessagePart::Image`（用户上行的图）区分：这是模型的输出图。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedImageData {
+    pub mime_type: String,
+    /// base64 编码的图片字节（不含 data: 前缀）。
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateOutput {
     pub text: String,
@@ -273,6 +283,10 @@ pub struct GenerateOutput {
     /// 默认 None：绝大多数调用不开内置搜索，解析失败也降级为 None，不阻断答案。
     #[serde(default)]
     pub web_search: Option<BuiltinWebSearch>,
+    /// 模型**生成的图片**（协议无关）。适配器解析各家 wire 出图格式填充；默认空，
+    /// 绝大多数调用不出图。runtime 据此把图落地为 assistant 消息 artifact。
+    #[serde(default)]
+    pub images: Vec<GeneratedImageData>,
 }
 
 impl GenerateOutput {
@@ -286,6 +300,7 @@ impl GenerateOutput {
             provider_messages: vec![provider_message],
             cancelled: false,
             web_search: None,
+            images: Vec::new(),
         }
     }
 
@@ -299,6 +314,7 @@ impl GenerateOutput {
             provider_messages: Vec::new(),
             cancelled: true,
             web_search: None,
+            images: Vec::new(),
         }
     }
 
@@ -354,6 +370,13 @@ pub enum StreamPart {
     WebSearch {
         queries: Vec<String>,
         citations: Vec<WebCitation>,
+    },
+    /// 模型**生成的一张图片**的流式帧（协议无关）。适配器解析各家 wire 出图（Gemini
+    /// `inlineData` 等）逐张发射；`AgentStreamSink` 收集并落地为 artifact。其它 sink
+    /// （Lens/丢弃/planning）走各自兜底，不受影响。
+    ImageData {
+        mime_type: String,
+        data: String,
     },
     Finish { reason: String, full: String },
     Error { message: String },

@@ -723,6 +723,7 @@ pub fn output_from_anthropic_message(
         provider_messages: vec![provider_message],
         cancelled: false,
         web_search: parsed.web_search,
+        images: Vec::new(),
     })
 }
 
@@ -1245,6 +1246,7 @@ fn stream_output(
         provider_messages: vec![provider_message],
         cancelled: false,
         web_search: None,
+        images: Vec::new(),
     }
 }
 

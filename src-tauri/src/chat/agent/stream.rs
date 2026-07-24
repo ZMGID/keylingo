@@ -576,6 +576,8 @@ impl StreamSink for AgentStreamSink<'_> {
             StreamPart::WebSearch { queries, citations } => {
                 self.handle_web_search(queries, citations)
             }
+            // 出图数据帧：Step 3 才落地为 artifact，此处先占位不处理。
+            StreamPart::ImageData { .. } => {}
             StreamPart::Finish { .. } => {}
         }
         Ok(())

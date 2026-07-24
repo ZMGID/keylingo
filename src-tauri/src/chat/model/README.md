@@ -16,3 +16,6 @@ Rules:
   prefer canonical model messages when available.
 - Tauri event payloads remain stable: `chat-stream`, `chat-tool`, and `chat-context`
   are UI contracts, not provider contracts.
+- Model-generated images are protocol-agnostic on the contract: adapters parse each
+  wire format's output-image shape (Gemini `inlineData`, …) into `GenerateOutput.images`
+  (and stream `StreamPart::ImageData`); runtime never inspects provider image JSON.

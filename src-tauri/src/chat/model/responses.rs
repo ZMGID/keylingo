@@ -663,6 +663,7 @@ impl ResponsesStreamState {
             provider_messages: Vec::new(),
             cancelled: false,
             web_search: self.web_search,
+            images: Vec::new(),
         })
     }
 }
@@ -1031,6 +1032,7 @@ pub fn output_from_responses(
         provider_messages: Vec::new(),
         cancelled: false,
         web_search: web_search_from_responses_output(output),
+        images: Vec::new(),
     })
 }
 
