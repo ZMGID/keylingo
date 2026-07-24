@@ -55,17 +55,29 @@ export function buildContextBarSlices(
   const window = contextWindowTokens ?? 0
   const denominator = window > 0 ? window : Math.max(estimatedInputTokens, 1)
 
-  const slices: ContextBarSlice[] = active.map((segment) => {
+  // Agent 的计划/ask_user/待办段都很碎，合并成一行「Agent」，保留首段颜色与出现位置。
+  const slices: ContextBarSlice[] = []
+  let agentAgg: ContextBarSlice | null = null
+  for (const segment of active) {
     const tokens = segmentTokens(segment)
-    return {
+    const widthPercent = Math.max(0, (tokens / denominator) * 100)
+    if (segment.id.startsWith('agent_')) {
+      if (!agentAgg) {
+        agentAgg = { id: 'agent', label: 'Agent', tokens: 0, color: segment.color || '#7A7A7A', widthPercent: 0 }
+        slices.push(agentAgg)
+      }
+      agentAgg.tokens += tokens
+      agentAgg.widthPercent += widthPercent
+      continue
+    }
+    slices.push({
       id: segment.id,
       label: localizedSegmentLabel(segment, t),
       tokens,
       color: segment.color || '#7A7A7A',
-      widthPercent: Math.max(0, (tokens / denominator) * 100),
-    }
-  })
-
+      widthPercent,
+    })
+  }
   if (window > 0) {
     const freeTokens = Math.max(0, window - estimatedInputTokens)
     if (freeTokens > 0) {
