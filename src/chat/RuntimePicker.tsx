@@ -47,6 +47,11 @@ function stripProviderPrefix(label: string): string {
   return slash >= 0 ? label.slice(slash + 1) : label
 }
 
+// 胶囊隐藏模型名里的括号补充（"kimi (kimi-for-coding)" → "kimi"），下拉列表仍保留完整名。
+function stripParenthetical(label: string): string {
+  return label.replace(/\s*\([^)]*\)\s*$/, '').trim() || label
+}
+
 function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, locked = false }: RuntimePickerProps) {
   const [open, setOpen] = useState(false)
   const [agents, setAgents] = useState<DetectedExternalAgent[]>([])
@@ -356,12 +361,12 @@ function ExternalModelSelectorBase({
     // 显式选择：显示所选模型 label（探测中列表未到时退回原始 id）。
     if (explicit) {
       const selected = models.find((item) => item.id === currentId)
-      return stripProviderPrefix(mapDefaultLabel(selected?.label ?? currentId))
+      return stripProviderPrefix(stripParenthetical(mapDefaultLabel(selected?.label ?? currentId)))
     }
     // 未显式选择：优先显示 CLI 当前配置模型的真实名字；探测中显示「获取中…」；都没有则「自动」。
     if (currentModel) {
       const inList = models.find((item) => item.id === currentModel)
-      return stripProviderPrefix(mapDefaultLabel(inList?.label ?? currentModel))
+      return stripProviderPrefix(stripParenthetical(mapDefaultLabel(inList?.label ?? currentModel)))
     }
     if (loading) return '获取中…'
     return 'Auto'
