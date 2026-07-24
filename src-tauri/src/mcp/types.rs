@@ -568,10 +568,8 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
                     "maxLength": 300
                 }
             },
-            "anyOf": [
-                { "required": ["artifact_ids"] },
-                { "required": ["paths"] }
-            ],
+            // 不用顶层 anyOf 表达“二选一必填”：grok/Vertex/Anthropic 都会拒或需剥离，
+            // call_present_artifacts 在运行时校验，模型侧靠 description 提示即可。
             "additionalProperties": false
         }),
         sensitive: false,
