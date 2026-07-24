@@ -25,7 +25,7 @@ import {
   type SkillMeta,
 } from '../api/tauri'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
-import { Select } from '../settings/components'
+import { Select, Toggle } from '../settings/components'
 import { Button, IconButton } from '../components/Button'
 import { SkillStoreBrowser } from './SkillStoreBrowser'
 import { SkillIcon } from '../settings/NavIcons'
@@ -85,38 +85,6 @@ function skillMatches(skill: SkillMeta, query: string): boolean {
 }
 
 /** 自带样式的开关：明暗对比清晰，不依赖设置面板的 CSS 变量作用域 */
-function Switch({
-  checked,
-  onChange,
-  ariaLabel,
-}: {
-  checked: boolean
-  onChange: (value: boolean) => void
-  ariaLabel?: string
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={ariaLabel}
-      onClick={() => onChange(!checked)}
-      data-tauri-drag-region="false"
-      className={`relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors focus:outline-none ${
-        checked
-          ? 'bg-emerald-500 hover:bg-emerald-600'
-          : 'bg-neutral-300 hover:bg-neutral-400 dark:bg-neutral-600 dark:hover:bg-neutral-500'
-      }`}
-    >
-      <span
-        className={`inline-block size-[18px] rounded-full bg-white shadow-sm transition-transform ${
-          checked ? 'translate-x-[18px]' : 'translate-x-0.5'
-        }`}
-      />
-    </button>
-  )
-}
-
 function SkillCard({
   skill,
   enabled,
@@ -180,7 +148,7 @@ function SkillCard({
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
           >
-            <Switch checked={enabled} onChange={(next) => onToggleEnabled(skill.id, next)} ariaLabel={`启用 ${skill.name}`} />
+            <Toggle checked={enabled} onChange={(next) => onToggleEnabled(skill.id, next)} ariaLabel={`启用 ${skill.name}`} />
           </span>
         )}
       </div>
@@ -809,7 +777,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                       允许模型根据 description 自动 activate skill
                     </p>
                   </div>
-                  <Switch
+                  <Toggle
                     checked={chatTools.skillAutoMatch !== false}
                     onChange={(skillAutoMatch) => persistChatTools({ skillAutoMatch })}
                     ariaLabel="自动匹配 Skill"

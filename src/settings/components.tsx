@@ -51,11 +51,13 @@ function useSelectMenuRect(
 /**
  * 开关切换组件 — on 态用 brand 蓝，slider 加双层阴影
  */
-export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+export function Toggle({ checked, onChange, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; ariaLabel?: string }) {
   return (
     <button
       type="button"
-      onClick={() => onChange(!checked)}
+      onClick={() => !disabled && onChange(!checked)}
+      disabled={disabled}
+      aria-label={ariaLabel}
       role="switch"
       aria-checked={checked}
       className={`kv-toggle ${checked ? 'on' : ''}`}
