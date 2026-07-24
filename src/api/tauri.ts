@@ -1231,12 +1231,19 @@ export type RequestDebugRecord = {
     toolCalls?: unknown
     finishReason?: string | null
     usage?: {
+      // 后端 ModelUsage 无 rename_all，实际落盘是 snake_case；camelCase 字段保留以防未来统一。
       inputTokens?: number | null
       outputTokens?: number | null
       totalTokens?: number | null
       cachedInputTokens?: number | null
       cacheCreationInputTokens?: number | null
       reasoningTokens?: number | null
+      input_tokens?: number | null
+      output_tokens?: number | null
+      total_tokens?: number | null
+      cached_input_tokens?: number | null
+      cache_creation_input_tokens?: number | null
+      reasoning_tokens?: number | null
     } | null
     error?: string | null
   }

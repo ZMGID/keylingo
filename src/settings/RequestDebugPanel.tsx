@@ -45,10 +45,11 @@ function formatGap(seconds: number, lang: string): string {
 function totalTokens(record: RequestDebugRecord) {
   const usage = record.response.usage
   if (!usage) return null
-  return (
-    usage.totalTokens ??
-    ((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) || null)
-  )
+  // 后端 ModelUsage 序列化为 snake_case（外层 record 才是 camelCase），双读兼容。
+  const total = usage.total_tokens ?? usage.totalTokens
+  const input = usage.input_tokens ?? usage.inputTokens ?? 0
+  const output = usage.output_tokens ?? usage.outputTokens ?? 0
+  return total ?? (input + output || null)
 }
 
 /** 从完整 URL 抽出 `METHOD /path`，解析失败时退回原串。 */
@@ -573,22 +574,31 @@ function MessagesView({ messages }: { messages: unknown[] }) {
 }
 
 const USAGE_ITEMS: Array<{
-  key: keyof NonNullable<NonNullable<RequestDebugRecord['response']['usage']>>
+  key: string
   zh: string
   en: string
   dot: string
 }> = [
-  { key: 'inputTokens', zh: '输入', en: 'Input', dot: 'bg-sky-500' },
-  { key: 'outputTokens', zh: '输出', en: 'Output', dot: 'bg-emerald-500' },
-  { key: 'cachedInputTokens', zh: '缓存读取', en: 'Cache read', dot: 'bg-amber-500' },
-  { key: 'cacheCreationInputTokens', zh: '缓存创建', en: 'Cache write', dot: 'bg-violet-500' },
-  { key: 'reasoningTokens', zh: '推理', en: 'Reasoning', dot: 'bg-rose-500' },
+  { key: 'input_tokens', zh: '输入', en: 'Input', dot: 'bg-sky-500' },
+  { key: 'output_tokens', zh: '输出', en: 'Output', dot: 'bg-emerald-500' },
+  { key: 'cached_input_tokens', zh: '缓存读取', en: 'Cache read', dot: 'bg-amber-500' },
+  { key: 'cache_creation_input_tokens', zh: '缓存创建', en: 'Cache write', dot: 'bg-violet-500' },
+  { key: 'reasoning_tokens', zh: '推理', en: 'Reasoning', dot: 'bg-rose-500' },
 ]
 
+/** snake_case 优先、camelCase 兜底读一个 usage 数值（后端 ModelUsage 是 snake_case）。 */
+function usageValue(usage: Record<string, unknown>, snakeKey: string): number | null {
+  const camelKey = snakeKey.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+  const v = usage[snakeKey] ?? usage[camelKey]
+  return typeof v === 'number' ? v : null
+}
+
 function UsageBar({ record, lang }: { record: RequestDebugRecord; lang: string }) {
-  const usage = record.response.usage
+  const usage = record.response.usage as Record<string, unknown> | null | undefined
   if (!usage) return null
-  const items = USAGE_ITEMS.filter((item) => usage[item.key] != null)
+  const items = USAGE_ITEMS
+    .map((item) => ({ ...item, value: usageValue(usage, item.key) }))
+    .filter((item) => item.value != null)
   if (items.length === 0) return null
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
@@ -597,7 +607,7 @@ function UsageBar({ record, lang }: { record: RequestDebugRecord; lang: string }
           <span className={`size-1.5 rounded-full ${item.dot}`} />
           <span className="text-neutral-500 dark:text-neutral-400">{lang === 'zh' ? item.zh : item.en}</span>
           <span className="tabular-nums font-medium text-neutral-700 dark:text-neutral-200">
-            {(usage[item.key] as number).toLocaleString()}
+            {(item.value as number).toLocaleString()}
           </span>
         </span>
       ))}
