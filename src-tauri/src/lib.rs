@@ -556,6 +556,7 @@ pub fn run() {
             mcp::registry::chat_mcp_server_status,
             mcp::registry::chat_mcp_list_tool_defs,
             mcp::registry::chat_mcp_reload_server,
+            mcp::registry::chat_mcp_warmup,
             connectors::connector_oauth_connect,
             connectors::obsidian::list_obsidian_vaults_cmd,
             connectors::himalaya::list_email_provider_presets,

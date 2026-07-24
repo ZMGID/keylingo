@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, path::Path, time::Duration};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -241,6 +241,9 @@ pub async fn list_enabled_tool_catalog(app: &AppHandle, state: &AppState) -> Ena
 /// There is deliberately no aggregate tool-list cache: connected sessions
 /// already retain their schema, and failed sessions already have reconnect
 /// backoff, so another cache only creates stale-state invalidation paths.
+///
+/// 每个 server 的现场 listing 有 [`WARM_TOOL_LIST_TIMEOUT`] 的等待上限：慢/坏 server
+/// 不再拖住整轮工具收集，超时与失败同路降级到落盘快照 / unavailable。
 pub(crate) async fn collect_enabled_mcp_tool_defs(
     state: &AppState,
     sink: &impl super::manager::McpEventSink,
@@ -248,7 +251,7 @@ pub(crate) async fn collect_enabled_mcp_tool_defs(
 ) -> (Vec<ChatToolDefinition>, Vec<String>) {
     let servers = eligible_mcp_servers(settings);
     let listings = servers.iter().map(|server| async move {
-        let result = state.mcp_list_tools(sink, server).await;
+        let result = list_tools_bounded(state, sink, server).await;
         (*server, result)
     });
 
@@ -273,6 +276,83 @@ pub(crate) async fn collect_enabled_mcp_tool_defs(
         }
     }
     (tools, unavailable)
+}
+
+/// 单个 server 现场 tools/list 的等待上限。已连接的 server 走池命中微秒级返回，不受影响；
+/// 未连上的 server 最多等这么久，之后本轮转入快照兜底 / unavailable。
+pub(crate) const WARM_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 有界等待的现场 listing。生产路径（sink 带 AppHandle）把 listing spawn 成独立后台任务，
+/// 超时只**放弃等待、不取消任务**——慢 server 后台继续连完，成功后 `remember_mcp_tools`
+/// 写快照 + emit Connected，下一轮直接可用。无 AppHandle（单测 / headless sink）拿不到
+/// `'static` 的状态引用，退化为对 future 本体 timeout（超时即取消，对测试语义足够）。
+async fn list_tools_bounded(
+    state: &AppState,
+    sink: &impl super::manager::McpEventSink,
+    server: &ChatMcpServer,
+) -> Result<Vec<crate::mcp::types::McpTool>, String> {
+    match sink.app_handle() {
+        Some(app) => {
+            let app = app.clone();
+            let owned = server.clone();
+            let task = tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                state.mcp_list_tools(&app, &owned).await
+            });
+            match tokio::time::timeout(WARM_TOOL_LIST_TIMEOUT, task).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(join_err)) => Err(format!("MCP listing task failed: {join_err}")),
+                Err(_) => Err(format!(
+                    "tools/list did not answer within {}s; connection keeps warming in the background",
+                    WARM_TOOL_LIST_TIMEOUT.as_secs()
+                )),
+            }
+        }
+        None => tokio::time::timeout(WARM_TOOL_LIST_TIMEOUT, state.mcp_list_tools(sink, server))
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "tools/list did not answer within {}s",
+                    WARM_TOOL_LIST_TIMEOUT.as_secs()
+                ))
+            }),
+    }
+}
+
+/// 预热目标筛选：None = 全部 runtime-eligible 的 server；Some = 其中 id 命中的子集。
+/// 停用 / 全局工具开关关闭的 server 一律不预热。
+fn select_warmup_servers(
+    settings: &crate::settings::Settings,
+    server_ids: Option<&[String]>,
+) -> Vec<ChatMcpServer> {
+    eligible_mcp_servers(settings)
+        .into_iter()
+        .filter(|server| server_ids.is_none_or(|ids| ids.iter().any(|id| id == &server.id)))
+        .cloned()
+        .collect()
+}
+
+/// 后台预热 MCP 连接：对指定（None = 全部启用）的 server 各自发起一次「连接 + tools/list」。
+/// fire-and-forget：立即返回 Ok，结果经 `mcp-server-state` 事件推送呈现（连接中 → 已连接/错误）；
+/// 成功的 tools/list 会顺手写内存 + 落盘快照。连接池单飞门闩保证与手动「测试连接」/
+/// 对话触发的连接并发无害；单个 server 失败只打日志 + emit Error，不影响其他 server。
+#[tauri::command]
+pub async fn chat_mcp_warmup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    let settings = state.settings_read().clone();
+    for server in select_warmup_servers(&settings, server_ids.as_deref()) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            if let Err(err) = state.mcp_list_tools(&app, &server).await {
+                eprintln!("MCP warmup for {} failed: {err}", server.name);
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Apply the server's explicit per-tool setting. An empty list means all tools.
@@ -1333,6 +1413,189 @@ mod tests {
 
         server.enabled = true;
         assert!(mcp_server_is_runtime_eligible(&server));
+    }
+
+    fn enabled_server(id: &str) -> ChatMcpServer {
+        ChatMcpServer {
+            id: id.to_string(),
+            name: format!("{id} server"),
+            enabled: true,
+            transport: "stdio".to_string(),
+            command: "true".to_string(),
+            ..ChatMcpServer::default()
+        }
+    }
+
+    fn settings_with_servers(servers: Vec<ChatMcpServer>) -> crate::settings::Settings {
+        let mut settings = crate::settings::Settings::default();
+        settings.chat_tools.enabled = true;
+        settings.chat_tools.servers = servers;
+        settings
+    }
+
+    #[test]
+    fn warmup_selection_covers_all_eligible_or_the_requested_subset() {
+        let mut disabled = enabled_server("off");
+        disabled.enabled = false;
+        let settings = settings_with_servers(vec![
+            enabled_server("a"),
+            enabled_server("b"),
+            disabled,
+        ]);
+
+        // None = 全部 eligible（停用的不预热）
+        let all = select_warmup_servers(&settings, None);
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // Some = 指定 id 子集；未知 id / 停用 server 被忽略
+        let subset = select_warmup_servers(
+            &settings,
+            Some(&["b".to_string(), "off".to_string(), "ghost".to_string()]),
+        );
+        assert_eq!(
+            subset.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn warmup_selection_is_empty_when_chat_tools_disabled() {
+        let mut settings = settings_with_servers(vec![enabled_server("a")]);
+        settings.chat_tools.enabled = false;
+        assert!(select_warmup_servers(&settings, None).is_empty());
+    }
+
+    /// 一快一慢（慢 = 永不应答握手）的工具收集：慢 server 不把整轮拖到全局 60s 超时，
+    /// 快 server 工具照常返回。unix-gated：依赖 python3 + sleep 起 stdio 假 server。
+    #[cfg(unix)]
+    mod warm_timeout {
+        use super::*;
+        use crate::state::test_app_state;
+        use std::io::Write;
+
+        fn write_fast_fake_server() -> std::path::PathBuf {
+            let script = r#"#!/usr/bin/env python3
+import sys, json
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1.0.0"}}}
+    elif method == "tools/list":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}}
+    else:
+        resp = {"jsonrpc":"2.0","id":mid,"result":{}}
+    sys.stdout.write(json.dumps(resp)+"\n")
+    sys.stdout.flush()
+"#;
+            let mut path = std::env::temp_dir();
+            path.push(format!("kivio-fake-mcp-warm-{}.py", uuid::Uuid::new_v4()));
+            let mut file = std::fs::File::create(&path).expect("create fake server");
+            file.write_all(script.as_bytes())
+                .expect("write fake server");
+            path
+        }
+
+        fn fast_server(script: &std::path::Path) -> ChatMcpServer {
+            ChatMcpServer {
+                id: "fast".to_string(),
+                name: "fast server".to_string(),
+                enabled: true,
+                transport: "stdio".to_string(),
+                command: "python3".to_string(),
+                args: vec!["-u".to_string(), script.to_str().unwrap().to_string()],
+                ..ChatMcpServer::default()
+            }
+        }
+
+        /// 进程能起但永不应答 initialize：没有本地超时时会等满全局 tool timeout（默认 60s）。
+        fn hanging_server() -> ChatMcpServer {
+            ChatMcpServer {
+                id: "hang".to_string(),
+                name: "hang server".to_string(),
+                enabled: true,
+                transport: "stdio".to_string(),
+                command: "sleep".to_string(),
+                args: vec!["120".to_string()],
+                ..ChatMcpServer::default()
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn slow_server_is_bounded_and_fast_server_tools_survive() {
+            let script = write_fast_fake_server();
+            let state = test_app_state();
+            let settings =
+                settings_with_servers(vec![fast_server(&script), hanging_server()]);
+
+            let started = std::time::Instant::now();
+            let (tools, unavailable) =
+                collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
+            let elapsed = started.elapsed();
+
+            assert!(
+                elapsed < Duration::from_secs(WARM_TOOL_LIST_TIMEOUT.as_secs() + 7),
+                "collection must be bounded by the per-server timeout, took {elapsed:?}"
+            );
+            assert!(
+                tools.iter().any(|tool| tool.id == "mcp__fast__echo"),
+                "fast server tools must survive the slow sibling: {tools:?}"
+            );
+            assert_eq!(
+                unavailable,
+                vec!["hang server".to_string()],
+                "the hanging server has no snapshot, so it is unavailable this round"
+            );
+
+            state.mcp_disconnect_all().await;
+            let _ = std::fs::remove_file(&script);
+            let _ = std::fs::remove_dir_all(&state.usage_dir);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn slow_server_with_snapshot_degrades_to_last_known_schema() {
+            let state = test_app_state();
+            let server = hanging_server();
+            state.set_mcp_tool_snapshot(
+                server.id.clone(),
+                crate::mcp::manager::config_fingerprint(&server),
+                vec![crate::mcp::types::McpTool {
+                    name: "cached_tool".to_string(),
+                    description: "from snapshot".to_string(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    output_schema: None,
+                    annotations: None,
+                }],
+            );
+            let settings = settings_with_servers(vec![server]);
+
+            let (tools, unavailable) =
+                collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
+
+            assert!(
+                tools.iter().any(|tool| tool.id == "mcp__hang__cached_tool"),
+                "timeout with a matching snapshot must degrade to last-known schema: {tools:?}"
+            );
+            assert!(unavailable.is_empty());
+
+            state.mcp_disconnect_all().await;
+            let _ = std::fs::remove_dir_all(&state.usage_dir);
+        }
     }
 
     #[test]

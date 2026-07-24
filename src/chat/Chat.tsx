@@ -1434,6 +1434,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }, 1500)
   }, [refreshToolIndicator])
 
+  // 开窗预热：后台把所有启用的 MCP server 连接并抓一次工具清单（fire-and-forget，
+  // 连接池单飞保证幂等），首轮对话的工具收集不再现场握手。
+  useEffect(() => {
+    void api.chatMcpWarmup()
+  }, [])
+
   // 空闲预取各中心页 chunk，避免首次切到设置/专家/技能/插件时才触发 lazy import 而转圈；
   // 预取后切换时 Suspense 不再挂起，chat-motion-view-in 动画得以播在真实内容上（而非 spinner）。
   useEffect(() => {

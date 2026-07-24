@@ -176,6 +176,14 @@ export function McpCenter() {
     void mutateServers((list) => list.map((s) => (s.id === id ? { ...s, ...updates } : s)))
   }, [mutateServers])
 
+  // 启用即连：先落设置（后端按 settings 判定 eligible），再后台预热该 server。
+  // 状态点随 onMcpServerState 推送变绿/红，无需手动「测试连接」或发起对话。
+  const toggleServerEnabled = useCallback((id: string, enabled: boolean) => {
+    void mutateServers((list) => list.map((s) => (s.id === id ? { ...s, enabled } : s))).then(() => {
+      if (enabled) void api.chatMcpWarmup([id])
+    })
+  }, [mutateServers])
+
   const handleInstall = useCallback((server: ChatMcpServer) => {
     void mutateServers((list) => [...list, server])
   }, [mutateServers])
@@ -539,7 +547,7 @@ export function McpCenter() {
                               </div>
                             </div>
                           </button>
-                          <Toggle checked={server.enabled} onChange={(enabled) => updateServer(server.id, { enabled })} />
+                          <Toggle checked={server.enabled} onChange={(enabled) => toggleServerEnabled(server.id, enabled)} />
                           <IconButton size="sm" variant="danger" label="删除" onClick={() => void mutateServers((list) => list.filter((s) => s.id !== server.id))} data-tauri-drag-region="false">
                             <Trash2 size={14} />
                           </IconButton>

@@ -1162,6 +1162,96 @@ mod tests {
         assert!(cache.lock().unwrap().len() <= 16);
     }
 
+    fn sample_mcp_tool(name: &str) -> McpTool {
+        McpTool {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            input_schema: serde_json::json!({ "type": "object" }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_persists_across_state_restart() {
+        let st = test_state();
+        let usage_dir = st.usage_dir.clone();
+        st.set_mcp_tool_snapshot("srv".into(), "fp-1".into(), vec![sample_mcp_tool("echo")]);
+
+        // 内存命中
+        let hit = st.get_mcp_tool_snapshot("srv", "fp-1").expect("in-memory hit");
+        assert_eq!(hit[0].name, "echo");
+
+        // 模拟重启：新 AppState 从同一 usage_dir 灌入落盘快照
+        let restarted = AppState::new_headless(Settings::default(), usage_dir.clone());
+        let reloaded = restarted
+            .get_mcp_tool_snapshot("srv", "fp-1")
+            .expect("snapshot reloads from disk after restart");
+        assert_eq!(reloaded[0].name, "echo");
+        assert_eq!(reloaded[0].description, "echo tool");
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_fingerprint_mismatch_misses() {
+        let st = test_state();
+        let usage_dir = st.usage_dir.clone();
+        st.set_mcp_tool_snapshot("srv".into(), "fp-old".into(), vec![sample_mcp_tool("echo")]);
+
+        assert!(st.get_mcp_tool_snapshot("srv", "fp-new").is_none());
+        // 落盘后重启同样不命中改配置的旧快照
+        let restarted = AppState::new_headless(Settings::default(), usage_dir.clone());
+        assert!(restarted.get_mcp_tool_snapshot("srv", "fp-new").is_none());
+        assert!(restarted.get_mcp_tool_snapshot("srv", "fp-old").is_some());
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_ignores_corrupt_disk_file() {
+        let usage_dir =
+            std::env::temp_dir().join(format!("kivio-test-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&usage_dir).expect("create usage dir");
+        std::fs::write(mcp_tool_snapshot_path(&usage_dir), "{ not json !!")
+            .expect("write corrupt snapshot file");
+
+        // 损坏文件 = 视为无缓存，不 panic
+        let st = AppState::new_headless(Settings::default(), usage_dir.clone());
+        assert!(st.get_mcp_tool_snapshot("srv", "fp").is_none());
+
+        // 后续写入照常覆盖损坏文件
+        st.set_mcp_tool_snapshot("srv".into(), "fp".into(), vec![sample_mcp_tool("echo")]);
+        let restarted = AppState::new_headless(Settings::default(), usage_dir.clone());
+        assert!(restarted.get_mcp_tool_snapshot("srv", "fp").is_some());
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_file_contains_no_secrets_and_empty_tools_are_not_stored() {
+        let st = test_state();
+        let usage_dir = st.usage_dir.clone();
+        // 空工具列表不入缓存（也不落盘）
+        st.set_mcp_tool_snapshot("empty".into(), "fp".into(), Vec::new());
+        assert!(st.get_mcp_tool_snapshot("empty", "fp").is_none());
+
+        st.set_mcp_tool_snapshot("srv".into(), "fp".into(), vec![sample_mcp_tool("echo")]);
+        let raw = std::fs::read_to_string(mcp_tool_snapshot_path(&usage_dir))
+            .expect("snapshot file exists");
+        // 落盘内容只有工具 schema + 指纹哈希：不该出现 headers/env/token 之类的键
+        assert!(raw.contains("config_fingerprint"));
+        assert!(raw.contains("echo"));
+        for secret_marker in ["Authorization", "Bearer", "headers", "api_key"] {
+            assert!(
+                !raw.contains(secret_marker),
+                "snapshot file must not contain {secret_marker}: {raw}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
     #[test]
     fn pick_active_key_starts_at_idx_zero_when_no_active_recorded() {
         let st = test_state();
