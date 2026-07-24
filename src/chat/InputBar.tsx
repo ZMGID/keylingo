@@ -30,6 +30,7 @@ import {
 import { ChatAttachments } from './ChatAttachments'
 import { SourcesButton } from './SourcesButton'
 import { onComposerInsert } from './composerInsert'
+import { draftKey, getComposerDraft, setComposerDraft } from './composerDraft'
 import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
 import { Button, IconButton } from '../components/Button'
@@ -462,9 +463,11 @@ export function InputBar({
   onChangeReplyModels,
   contextSlot,
 }: InputBarProps) {
-  const [input, setInput] = useState('')
-  const [quotes, setQuotes] = useState<string[]>([])
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  const draftKeyValue = draftKey(conversationId)
+  const initialDraft = getComposerDraft(draftKeyValue)
+  const [input, setInput] = useState(() => initialDraft?.input ?? '')
+  const [quotes, setQuotes] = useState<string[]>(() => initialDraft?.quotes ?? [])
+  const [attachments, setAttachments] = useState<PendingAttachment[]>(() => initialDraft?.attachments ?? [])
   const [attachmentError, setAttachmentError] = useState('')
   const [dragActive, setDragActive] = useState(false)
   const [toolPanelOpen, setToolPanelOpen] = useState(false)
@@ -485,6 +488,20 @@ export function InputBar({
   const [slashPanelLeft, setSlashPanelLeft] = useState(0)
   const innerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // 草稿持久化：会话 key 变化（切对话且未卸载）时载入对应草稿；每次内容变化写回内存 store。
+  // keyRef 保证写回落到当前会话，不串到刚切走的会话。
+  const draftKeyRef = useRef(draftKeyValue)
+  useEffect(() => {
+    if (draftKeyRef.current === draftKeyValue) return
+    draftKeyRef.current = draftKeyValue
+    const d = getComposerDraft(draftKeyValue)
+    setInput(d?.input ?? '')
+    setQuotes(d?.quotes ?? [])
+    setAttachments(d?.attachments ?? [])
+  }, [draftKeyValue])
+  useEffect(() => {
+    setComposerDraft(draftKeyRef.current, { input, quotes, attachments })
+  }, [input, quotes, attachments])
   const agentPlanMode = agentPlanState?.mode ?? 'act'
   const agentPlanActive = agentPlanMode === 'plan'
   const agentOrchestrateActive = agentPlanMode === 'orchestrate'
@@ -1148,7 +1165,10 @@ export function InputBar({
     if (!autoFocus || disabled) return
     requestAnimationFrame(() => {
       if (shouldComposerAutoFocus(document.activeElement)) {
-        textareaRef.current?.focus({ preventScroll: true })
+        const el = textareaRef.current
+        el?.focus({ preventScroll: true })
+        // 恢复草稿后光标应落到末尾，而非开头，省得每次手动移到最后再输入。
+        if (el) el.selectionStart = el.selectionEnd = el.value.length
       }
     })
   }, [autoFocus, disabled])
