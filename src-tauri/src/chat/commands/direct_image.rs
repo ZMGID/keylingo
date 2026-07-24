@@ -79,7 +79,12 @@ pub(super) async fn complete_direct_image_generation_reply(
 
     match result {
         Ok(output) if !output.is_error => {
-            let content = direct_image_generation_content(&output.artifacts);
+            // 有图 → 渲染图片；模型只回文字（澄清/拒绝）无图 → 展示那段文字。
+            let content = if output.artifacts.is_empty() {
+                output.content.clone()
+            } else {
+                direct_image_generation_content(&output.artifacts)
+            };
             emit_chat_stream_done(
                 app,
                 &conversation.id,

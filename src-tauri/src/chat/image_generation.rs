@@ -78,18 +78,38 @@ pub async fn generate_image_with_provider(
     let request = parse_request(arguments)?;
     validate_provider(provider)?;
 
-    let images = if provider.api_format_kind() == ProviderApiFormat::Gemini {
+    // fallback_text: 模型有时返回纯文字（澄清/拒绝）而不出图——把这段文字透出，
+    // 而不是丢弃后抛硬错误。
+    let (images, fallback_text) = if provider.api_format_kind() == ProviderApiFormat::Gemini {
         generate_with_gemini_native(state, provider, model, &request, retry_attempts, operation)
             .await?
     } else if uses_openrouter_chat_image_generation(provider, model) {
         generate_with_openrouter_chat(state, provider, model, &request, retry_attempts, operation)
             .await?
     } else {
-        generate_with_images_api(state, provider, model, &request, retry_attempts, operation)
-            .await?
+        (
+            generate_with_images_api(state, provider, model, &request, retry_attempts, operation)
+                .await?,
+            None,
+        )
     };
 
     if images.is_empty() {
+        if let Some(text) = fallback_text.filter(|value| !value.trim().is_empty()) {
+            return Ok(McpToolCallResult {
+                content: text,
+                is_error: false,
+                raw: serde_json::json!({
+                    "providerId": provider.id,
+                    "providerName": provider.name,
+                    "model": model,
+                    "count": 0,
+                }),
+                artifacts: Vec::new(),
+                structured_content: None,
+                follow_up_user_messages: Vec::new(),
+            });
+        }
         return Err("Image generation response did not include an image".to_string());
     }
 
@@ -336,7 +356,7 @@ async fn generate_with_openrouter_chat(
     request: &ImageGenerationRequest,
     retry_attempts: usize,
     operation: &str,
-) -> Result<Vec<GeneratedImage>, String> {
+) -> Result<(Vec<GeneratedImage>, Option<String>), String> {
     let url = format!(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
@@ -384,7 +404,17 @@ async fn generate_with_openrouter_chat(
             raw.chars().take(500).collect::<String>()
         )
     })?;
-    parse_openrouter_response(&value)
+    let images = parse_openrouter_response(&value)?;
+    let text = value
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    Ok((images, text))
 }
 
 fn parse_openrouter_response(value: &Value) -> Result<Vec<GeneratedImage>, String> {
@@ -429,11 +459,12 @@ async fn generate_with_gemini_native(
     request: &ImageGenerationRequest,
     retry_attempts: usize,
     operation: &str,
-) -> Result<Vec<GeneratedImage>, String> {
+) -> Result<(Vec<GeneratedImage>, Option<String>), String> {
     let url = gemini_generate_content_url(&provider.base_url, model);
     let body = build_gemini_native_body(request);
 
     let mut images = Vec::new();
+    let mut fallback_text: Option<String> = None;
     for idx in 0..request.n {
         let response = send_with_failover(
             state,
@@ -497,8 +528,36 @@ async fn generate_with_gemini_native(
                 break;
             }
         }
+        if fallback_text.is_none() {
+            fallback_text = gemini_native_response_text(&value);
+        }
     }
-    Ok(images)
+    Ok((images, fallback_text))
+}
+
+/// 从 Gemini 原生响应里拼出 candidates[*].content.parts[*].text（无图时透出的文字）。
+fn gemini_native_response_text(value: &Value) -> Option<String> {
+    let text = value
+        .get("candidates")
+        .and_then(|value| value.as_array())?
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array())
+        })
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// 复刻 gemini.rs 的 `gemini_url`（私有，未编辑该文件）：base_url 去尾斜杠，
@@ -710,12 +769,12 @@ fn uses_openrouter_chat_image_generation(provider: &ModelProvider, model: &str) 
         return true;
     }
     // 裸名出图模型（通用 /v1 代理不带 vendor 前缀，如 cpa.xb1520.com/v1 暴露
-    // `gemini-3.1-flash-image` / `grok-imagine-image`）：这些代理不支持
-    // /images/generations 出这些图，必须走 chat/completions 仿 OpenRouter 出图。
-    // api.openai.com / api.x.ai 已在上面早退排除（gpt-image/dall-e/grok-imagine 仍走各自 images API）。
+    // `gemini-3.1-flash-image`）：这些代理不支持 /images/generations 出这些图，
+    // 必须走 chat/completions 仿 OpenRouter 出图。
+    // 注意：grok-imagine-image 相反——通用代理明确只支持 /v1/images/generations，
+    // 故不在此列，交给 generate_with_images_api（uses_xai_images_api 命中，走 b64_json）。
     (lower.contains("gemini") && lower.contains("image"))
         || lower.contains("nano-banana")
-        || lower.contains("grok-imagine-image")
         || lower.starts_with("imagen")
 }
 
@@ -811,6 +870,38 @@ mod tests {
     }
 
     #[test]
+    fn text_only_image_response_yields_no_image_but_has_text() {
+        // 模型对笼统提示返回纯文字（澄清），无 images → 解析出空图 + 文字透出。
+        let value = serde_json::json!({
+            "candidates": [
+                { "content": { "parts": [
+                    { "text": "请提供更多细节，" },
+                    { "text": "例如性别、发色。" }
+                ] } }
+            ]
+        });
+        assert!(
+            parse_gemini_native_response(&value)
+                .expect("parse ok")
+                .is_empty()
+        );
+        assert_eq!(
+            gemini_native_response_text(&value).as_deref(),
+            Some("请提供更多细节，例如性别、发色。")
+        );
+
+        // 真出图时不误判为文字-only。
+        let with_image = serde_json::json!({
+            "candidates": [
+                { "content": { "parts": [
+                    { "inlineData": { "mimeType": "image/png", "data": "aGVsbG8=" } }
+                ] } }
+            ]
+        });
+        assert_eq!(gemini_native_response_text(&with_image), None);
+    }
+
+    #[test]
     fn bare_image_model_names_route_through_chat_on_generic_proxy() {
         // 通用 /v1 代理（非 openrouter.ai / 非 api.openai.com / 非 api.x.ai）暴露的裸名出图模型
         // 必须走 chat/completions 仿 OpenRouter 出图，而非 /images/generations。
@@ -832,10 +923,13 @@ mod tests {
             &proxy,
             "gemini-3.1-flash-image"
         ));
-        assert!(uses_openrouter_chat_image_generation(
+        // grok-imagine-image 相反：通用代理只支持 /images/generations，
+        // 故 NOT 走 chat，交给 images_api（uses_xai_images_api 命中）。
+        assert!(!uses_openrouter_chat_image_generation(
             &proxy,
             "grok-imagine-image"
         ));
+        assert!(uses_xai_images_api(&proxy, "grok-imagine-image"));
         assert!(uses_openrouter_chat_image_generation(&proxy, "nano-banana"));
         assert!(uses_openrouter_chat_image_generation(&proxy, "imagen-4.0"));
         // 也走已知直连路由总闸（OpenAiChat + chat 出图）。
