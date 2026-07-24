@@ -632,8 +632,8 @@ impl ResponsesStreamState {
             full: self.text.clone(),
         })?;
         // grok sources 兜底:整轮没有任何正文 url_citation(grok 搜完常直接岔去客户端
-        // web_fetch,该轮不产注解)时,把检索命中的 sources URL 转正为来源,并补发一帧
-        // 快照让实时卡带上;有 url_citation 时以注解为准,sources 丢弃。
+        // web_fetch,该轮不产注解)时,把检索命中的 sources URL 转正为来源;有 url_citation
+        // 时以注解为准,sources 丢弃。
         let citations_empty = self
             .web_search
             .as_ref()
@@ -644,6 +644,11 @@ impl ResponsesStreamState {
                 .web_search
                 .get_or_insert_with(BuiltinWebSearch::default);
             ws.citations = std::mem::take(&mut self.sources_fallback);
+        }
+        // 终帧同步:部分网关(如 loki)在 response.completed 里重现 web_search_call,
+        // completed 合并只更新 state.web_search、不发帧(防重复),实时卡会漏掉这些来源。
+        // 结束前无条件发一帧最终快照,保证实时卡与 GenerateOutput 一致(tracker 去重,幂等)。
+        if let Some(ws) = self.web_search.as_ref().filter(|ws| !ws.is_empty()) {
             sink.emit(StreamPart::WebSearch {
                 queries: ws.queries.clone(),
                 citations: ws.citations.clone(),
@@ -1598,8 +1603,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // 开牌 + 查询 + 来源 = 3 帧（completed 不发）。
-        assert_eq!(web_search_parts.len(), 3);
+        // 开牌 + 查询 + 来源 + finish 终帧同步 = 4 帧(completed 合并不发,finish 无条件发终帧)。
+        assert_eq!(web_search_parts.len(), 4);
         // 首帧空快照 = 开牌。
         assert!(web_search_parts[0].0.is_empty() && web_search_parts[0].1.is_empty());
         // 末帧累加了查询与来源。
