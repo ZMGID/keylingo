@@ -79,8 +79,8 @@ pub(crate) fn chat_get_conversations(
     }))
 }
 
-/// 全量索引搜索对话（不止侧栏默认加载的前 N 个）。仅读 index.json 元数据，按标题/预览/
-/// 文件夹匹配，与对话总数无关地廉价。让搜索能找到掉出"最近"列表的老对话。
+/// 全量搜索对话（不止侧栏默认加载的前 N 个）。先按标题/预览/文件夹匹配元数据，
+/// 未命中再全文扫消息正文（content + reasoning），让搜索能找到深埋在对话中间的内容。
 #[tauri::command]
 pub(crate) fn chat_search_conversations(
     app: AppHandle,

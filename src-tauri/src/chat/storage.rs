@@ -667,20 +667,44 @@ pub fn search_conversations(
     if needle.is_empty() {
         return Ok(vec![]);
     }
-    let mut index = load_index_or_scan(app)?;
-    index.conversations.retain(|c| {
-        c.title.to_lowercase().contains(&needle)
+    let index = load_index_or_scan(app)?;
+    let mut hits: Vec<ConversationListItem> = Vec::new();
+    for c in index.conversations {
+        let meta_hit = c.title.to_lowercase().contains(&needle)
             || c.preview.to_lowercase().contains(&needle)
             || c.folder
                 .as_deref()
                 .map(|f| f.to_lowercase().contains(&needle))
+                .unwrap_or(false);
+        // 元数据没命中再全文扫消息正文（用户/助手 content + reasoning）。
+        // ponytail: 逐文件线性扫，几百个会话是几十毫秒级；会话上千再换 FTS 索引。
+        let hit = meta_hit || conversation_content_matches(app, &c.id, &needle);
+        if hit {
+            hits.push(c);
+        }
+    }
+    hits.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// 全文匹配：读会话文件，扫所有消息的 content 与 reasoning（大小写不敏感）。
+/// 读/解析失败按不匹配处理，不让单个坏文件毁掉整次搜索。
+fn conversation_content_matches(app: &AppHandle, id: &str, needle: &str) -> bool {
+    let Ok(conv) = load_conversation(app, id) else {
+        return false;
+    };
+    messages_match(&conv, needle)
+}
+
+fn messages_match(conv: &Conversation, needle: &str) -> bool {
+    conv.messages.iter().any(|m| {
+        m.content.to_lowercase().contains(needle)
+            || m.reasoning
+                .as_deref()
+                .map(|r| r.to_lowercase().contains(needle))
                 .unwrap_or(false)
-    });
-    index
-        .conversations
-        .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    index.conversations.truncate(limit);
-    Ok(index.conversations)
+    })
 }
 
 pub fn find_reusable_blank_conversation(
@@ -1543,6 +1567,22 @@ fn move_project_conversations(
 #[cfg(test)]
 mod conversation_workspace_tests {
     use super::*;
+
+    #[test]
+    fn messages_match_scans_content_and_reasoning() {
+        let conv: Conversation = serde_json::from_value(serde_json::json!({
+            "id": "conv_s", "title": "t", "provider_id": "p", "model": "m",
+            "created_at": 1, "updated_at": 1,
+            "messages": [
+                {"id": "m1", "role": "user", "content": "帮我看看 Pyodide 沙箱", "timestamp": 1},
+                {"id": "m2", "role": "assistant", "content": "好的", "reasoning": "需要检查 WASM 加载", "timestamp": 2}
+            ]
+        }))
+        .expect("conversation");
+        assert!(messages_match(&conv, "pyodide")); // content，大小写不敏感
+        assert!(messages_match(&conv, "wasm 加载")); // reasoning
+        assert!(!messages_match(&conv, "不存在的词"));
+    }
 
     fn artifact(path: &Path) -> serde_json::Value {
         serde_json::json!({
