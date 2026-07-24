@@ -7,6 +7,7 @@ import { chatApi } from './api'
 import { api } from '../api/tauri'
 import { builtinAssistantGlyph } from './assistantIcons'
 import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { ChatAssistant } from './types'
 
 export function AssistantPicker({
@@ -73,6 +74,7 @@ export function AssistantPicker({
 
   const placement = layout === 'inline' ? 'top-full mt-1.5' : 'bottom-full mb-1.5'
   const origin = layout === 'inline' ? 'top left' : 'bottom left'
+  const maxH = usePopoverMaxHeight(open, popoverRef, layout === 'inline' ? 'down' : 'up')
 
   const pick = (assistant: ChatAssistant | null) => {
     setOpen(false)
@@ -84,8 +86,8 @@ export function AssistantPicker({
       ? createPortal(
           <div
             ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 max-h-[52vh] overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
-            style={{ ['--chat-popover-origin' as string]: origin }}
+            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
+            style={{ ['--chat-popover-origin' as string]: origin, maxHeight: maxH }}
             data-tauri-drag-region="false"
             role="menu"
           >

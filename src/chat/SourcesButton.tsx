@@ -4,9 +4,9 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { SlidersHorizontal, Library, Globe, SearchCheck } from 'lucide-react'
-import { McpIcon } from '../settings/NavIcons'
 import { kbListLibraries, onKbIndex, type KnowledgeLibrary } from './knowledgeBase'
 import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { ChatMcpServer } from '../api/tauri'
 import type { WebSearchMode } from './types'
 
@@ -64,8 +64,6 @@ export function SourcesButton({
   onChangeKnowledgeBaseIds,
   forceKnowledgeSearch = false,
   onToggleForceKnowledgeSearch,
-  mcpServers,
-  onToggleMcpServer,
   webSearchMode,
   onSetWebSearchMode,
   builtinWebSearchSupported = false,
@@ -139,8 +137,7 @@ export function SourcesButton({
   }, [open])
 
   const mountedKbCount = knowledgeBaseIds.length
-  const enabledMcpCount = mcpServers.filter((s) => s.enabled).length
-  const anyActive = mountedKbCount > 0 || enabledMcpCount > 0 || webSearchMode !== 'off'
+  const anyActive = mountedKbCount > 0 || webSearchMode !== 'off'
 
   const toggleKb = (id: string) => {
     void onChangeKnowledgeBaseIds(
@@ -152,17 +149,49 @@ export function SourcesButton({
 
   const placement = layout === 'inline' ? 'top-full mt-1.5' : 'bottom-full mb-1.5'
   const origin = layout === 'inline' ? 'top left' : 'bottom left'
+  const maxH = usePopoverMaxHeight(open, popoverRef, layout === 'inline' ? 'down' : 'up')
 
   const panel =
     open && anchorRef?.current
       ? createPortal(
           <div
             ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 max-h-[52vh] overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
-            style={{ ['--chat-popover-origin' as string]: origin }}
+            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
+            style={{ ['--chat-popover-origin' as string]: origin, maxHeight: maxH }}
             data-tauri-drag-region="false"
             role="menu"
           >
+            <div className="flex items-center gap-2 px-2 py-1 text-[12px] text-neutral-700 dark:text-neutral-200">
+              <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
+                <Globe size={13} strokeWidth={1.75} />
+              </span>
+              <span className="min-w-0 flex-1 truncate">网络搜索</span>
+              <div className="flex shrink-0 gap-1">
+                {WEB_SEARCH_OPTIONS.map((opt) => {
+                  const active = webSearchMode === opt.value
+                  const dim = opt.value === 'builtin' && !builtinWebSearchSupported
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      disabled={dim}
+                      title={dim ? '当前模型不支持内置搜索' : opt.hint}
+                      onClick={() => void onSetWebSearchMode(opt.value)}
+                      className={`rounded-md px-2 py-0.5 text-[11.5px] transition-colors ${
+                        active
+                          ? 'bg-emerald-500/15 font-medium text-emerald-700 dark:text-emerald-300'
+                          : dim
+                            ? 'cursor-not-allowed text-neutral-300 dark:text-neutral-600'
+                            : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
             {libraries.length > 0 && (
               <>
                 <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
@@ -189,60 +218,6 @@ export function SourcesButton({
                 )}
               </>
             )}
-
-            {mcpServers.length > 0 && (
-              <>
-                <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-                  连接器
-                </div>
-                {mcpServers.map((server) => (
-                  <SourceRow
-                    key={server.id}
-                    icon={<McpIcon size={13} />}
-                    label={server.name}
-                    meta={server.transport === 'stdio' ? 'stdio' : 'http'}
-                    checked={server.enabled}
-                    onClick={() => void onToggleMcpServer(server.id)}
-                  />
-                ))}
-              </>
-            )}
-
-            <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-              网络
-            </div>
-            <div className="px-2 py-1">
-              <div className="mb-1.5 flex items-center gap-2 text-[12px] text-neutral-700 dark:text-neutral-200">
-                <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
-                  <Globe size={13} strokeWidth={1.75} />
-                </span>
-                <span className="min-w-0 flex-1 truncate">网络搜索</span>
-              </div>
-              <div className="flex gap-1">
-                {WEB_SEARCH_OPTIONS.map((opt) => {
-                  const active = webSearchMode === opt.value
-                  const dim = opt.value === 'builtin' && !builtinWebSearchSupported
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      disabled={dim}
-                      title={dim ? '当前模型不支持内置搜索' : opt.hint}
-                      onClick={() => void onSetWebSearchMode(opt.value)}
-                      className={`flex-1 rounded-md px-2 py-1 text-[11.5px] transition-colors ${
-                        active
-                          ? 'bg-emerald-500/15 font-medium text-emerald-700 dark:text-emerald-300'
-                          : dim
-                            ? 'cursor-not-allowed text-neutral-300 dark:text-neutral-600'
-                            : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
 
             {onOpenSettings && (
               <>

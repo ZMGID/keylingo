@@ -25,7 +25,7 @@ function formatElapsed(secs: number): string {
 export function BackgroundJobsIndicator() {
   const [jobs, setJobs] = useState<BackgroundCommandInfo[]>([])
   const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [pos, setPos] = useState<{ top: number; left: number; maxH: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const killing = useRef<Set<string>>(new Set())
 
@@ -50,7 +50,10 @@ export function BackgroundJobsIndicator() {
 
   const place = useCallback(() => {
     const rect = btnRef.current?.getBoundingClientRect()
-    if (rect) setPos({ top: rect.bottom + 6, left: rect.left })
+    if (rect) {
+      const top = rect.bottom + 6
+      setPos({ top, left: rect.left, maxH: Math.max(160, Math.min(360, window.innerHeight - top - 8)) })
+    }
   }, [])
 
   // Nothing running → don't show, and don't keep a stale popover open.
@@ -112,8 +115,8 @@ export function BackgroundJobsIndicator() {
           <>
             <div className="fixed inset-0 z-[2000]" onClick={() => setOpen(false)} aria-hidden />
             <div
-              className="chat-motion-popover chat-popover-scroll fixed z-[2001] max-h-[min(360px,55vh)] w-[320px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white p-1.5 shadow-xl dark:border-neutral-700 dark:bg-neutral-900"
-              style={{ top: pos.top, left: pos.left }}
+              className="chat-motion-popover chat-popover-scroll fixed z-[2001] w-[320px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white p-1.5 shadow-xl dark:border-neutral-700 dark:bg-neutral-900"
+              style={{ top: pos.top, left: pos.left, maxHeight: pos.maxH }}
             >
               <div className="px-2 py-1.5 text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
                 后台命令 · {jobs.length}

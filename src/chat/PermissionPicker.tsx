@@ -1,8 +1,9 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Eye, FilePen, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { APPROVAL_POLICY_OPTIONS } from './approvalPolicies'
 import { chatApi, type DetectedExternalAgent } from './api'
 import { chatTitlebarIconButtonClass } from './platform'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { AgentRuntimeConfig } from './types'
 
 interface Option {
@@ -46,6 +47,8 @@ function PermissionPickerBase({
 }: PermissionPickerProps) {
   const [open, setOpen] = useState(false)
   const [agents, setAgents] = useState<DetectedExternalAgent[]>([])
+  const menuRef = useRef<HTMLDivElement>(null)
+  const maxH = usePopoverMaxHeight(open, menuRef, 'down', 320)
 
   useEffect(() => {
     let active = true
@@ -118,7 +121,7 @@ function PermissionPickerBase({
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-          <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 max-h-[min(320px,50vh)] min-w-[180px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+          <div ref={menuRef} style={{ maxHeight: maxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[180px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
             {options.map((option) => {
               const active = option.value === current
               return (

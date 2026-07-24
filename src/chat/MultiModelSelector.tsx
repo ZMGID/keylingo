@@ -6,6 +6,7 @@ import { getSettingsCached } from '../api/settingsCache'
 import { isProviderEnabled } from '../settings/utils'
 import { ModelIcon } from './ModelIcon'
 import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { ModelRef } from './types'
 
 const MAX_REPLY_MODELS = 4
@@ -29,6 +30,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const triggerRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const maxH = usePopoverMaxHeight(open, popoverRef, placement === 'down' ? 'down' : 'up', 420)
 
   const loadProviders = useCallback(async () => {
     try {
@@ -109,8 +111,8 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
       ? createPortal(
           <div
             ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 max-h-[min(420px,60vh)] overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placementClass}`}
-            style={{ ['--chat-popover-origin' as string]: popoverOrigin }}
+            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placementClass}`}
+            style={{ ['--chat-popover-origin' as string]: popoverOrigin, maxHeight: maxH }}
             data-tauri-drag-region="false"
             role="menu"
           >

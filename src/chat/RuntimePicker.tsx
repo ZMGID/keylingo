@@ -4,6 +4,7 @@ import { AgentIcon } from './AgentIcon'
 import { chatApi, type DetectedExternalAgent } from './api'
 import { chatTitlebarPillButtonClass } from './platform'
 import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { AgentRuntimeConfig } from './types'
 import './runtimePicker.css'
 
@@ -50,6 +51,8 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
   const [open, setOpen] = useState(false)
   const [agents, setAgents] = useState<DetectedExternalAgent[]>([])
   const [refreshing, setRefreshing] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuMaxH = usePopoverMaxHeight(open, menuRef, 'down', 460)
   // 请求代际：conversationId 切换 / 手动刷新会并发发起检测，只让最新一次的结果落地
   // （也兜住卸载后 setState）。
   const agentsReqIdRef = useRef(0)
@@ -154,6 +157,8 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
           <div
+            ref={menuRef}
+            style={{ maxHeight: menuMaxH, overflowY: 'auto' }}
             className="kv-runtime-picker__popover chat-motion-popover"
             role="menu"
           >
@@ -252,6 +257,8 @@ function ExternalModelSelectorBase({
 }: ExternalModelSelectorProps) {
   const [open, setOpen] = useState(false)
   const [reasoningOpen, setReasoningOpen] = useState(false)
+  const modelMenuRef = useRef<HTMLDivElement>(null)
+  const modelMenuMaxH = usePopoverMaxHeight(open, modelMenuRef, 'down', 320)
   // 懒查：只探选中 agent 的模型（cwd-scoped），不再拉全量列表。保留上次结果，不清空闪。
   const [models, setModels] = useState<DetectedExternalAgent['models']>([])
   const [reasoningOptions, setReasoningOptions] = useState<
@@ -387,7 +394,7 @@ function ExternalModelSelectorBase({
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-            <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 max-h-[min(320px,50vh)] min-w-[200px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+            <div ref={modelMenuRef} style={{ maxHeight: modelMenuMaxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[200px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
               {source === 'fallback' && (
                 <div className="kv-runtime-picker__fallback mx-1 my-1">
                   <span>探测失败，显示默认列表</span>

@@ -1,6 +1,7 @@
 import { Archive, RefreshCw, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import {
   buildContextBarSlices,
   CONTEXT_AUTO_COMPRESS_PERCENT,
@@ -115,6 +116,7 @@ export function ContextIndicator({
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const maxH = usePopoverMaxHeight(open, popoverRef, placement === 'up' ? 'up' : 'down', 360)
 
   useEffect(() => {
     if (!open) return
@@ -220,8 +222,8 @@ export function ContextIndicator({
       {open && anchorRef?.current && createPortal(
         <div
           ref={popoverRef}
-          className={`chat-motion-popover absolute inset-x-0 z-40 flex max-h-[min(52vh,360px)] flex-col overflow-hidden rounded-xl border border-neutral-200/90 bg-white p-3 shadow-[0_12px_32px_-10px_rgba(0,0,0,0.16)] dark:border-neutral-700/90 dark:bg-neutral-900 ${placement === 'up' ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
-          style={{ ['--chat-popover-origin' as string]: placement === 'up' ? 'bottom right' : 'top right' }}
+          className={`chat-motion-popover absolute inset-x-0 z-40 flex flex-col overflow-hidden rounded-xl border border-neutral-200/90 bg-white p-3 shadow-[0_12px_32px_-10px_rgba(0,0,0,0.16)] dark:border-neutral-700/90 dark:bg-neutral-900 ${placement === 'up' ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
+          style={{ ['--chat-popover-origin' as string]: placement === 'up' ? 'bottom right' : 'top right', maxHeight: maxH }}
           data-tauri-drag-region="false"
         >
           <div className="mb-2 flex items-baseline justify-between gap-2">
