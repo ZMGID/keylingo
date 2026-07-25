@@ -293,10 +293,12 @@ pub fn format_reqwest_error(error: &reqwest::Error) -> String {
 }
 
 /// 计算重试延迟
-/// 优先使用服务器返回的 Retry-After 头；否则使用指数退避策略
+/// 优先使用服务器返回的 Retry-After 头；否则使用指数退避策略。
+/// Retry-After 同样受 `RETRY_MAX_DELAY_MS` 封顶：上游（或中转）偶尔返回
+/// `Retry-After: 86400` 之类的巨值，照睡会把整次请求挂死一天（只能靠取消轮询打断）。
 fn retry_delay_ms(attempt: usize, retry_after: Option<u64>) -> u64 {
     if let Some(seconds) = retry_after {
-        return seconds.saturating_mul(1000);
+        return seconds.saturating_mul(1000).min(RETRY_MAX_DELAY_MS);
     }
 
     let delay = RETRY_BASE_DELAY_MS.saturating_mul(2u64.saturating_pow((attempt - 1) as u32));
@@ -1339,6 +1341,20 @@ impl<F: FnMut(serde_json::Value) + Send> StreamSink for CombinedTranslateEventSi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_is_capped_at_max_delay() {
+        // 上游/中转返回的巨值 Retry-After 不得被照单全收：否则单次重试会挂死数小时，
+        // 只能靠取消轮询打断（B2）。
+        assert_eq!(retry_delay_ms(1, Some(86_400)), RETRY_MAX_DELAY_MS);
+        assert_eq!(retry_delay_ms(1, Some(u64::MAX)), RETRY_MAX_DELAY_MS);
+        // 合理值仍原样生效（未被 clamp 抹平）。
+        let small = 2u64;
+        assert!(small * 1000 < RETRY_MAX_DELAY_MS, "测试前提：2s 应小于上限");
+        assert_eq!(retry_delay_ms(1, Some(small)), small * 1000);
+        // 无 Retry-After → 指数退避，同样受上限约束。
+        assert!(retry_delay_ms(99, None) <= RETRY_MAX_DELAY_MS);
+    }
 
     #[test]
     fn http_client_builder_config_is_valid() {

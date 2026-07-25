@@ -82,6 +82,10 @@ const MAX_SUB_AGENT_TASKS: usize = 128;
 /// `run_agent_loop` surfaces as `Err`. Top-level chat recovers via user resend;
 /// a sub-agent has no resend loop, so we retry the run once before giving up.
 const SUB_AGENT_MAX_ATTEMPTS: usize = 2;
+/// Substring identifying the "model returned an empty assistant message" error
+/// produced by `run_agent_loop`. Single source of truth for both the retry
+/// predicate (`should_retry_sub_agent`) and the user-facing error mapping.
+const EMPTY_RESPONSE_MARKER: &str = "empty assistant response";
 /// Outer per-tool-call timeout for the `agent` spawn tool. The sub-agent run
 /// itself has no inner wall-clock cap (it finishes naturally or via cascade
 /// cancel); the default generic tool timeout (120s) is far shorter and would
@@ -105,16 +109,22 @@ pub fn depth_allows_spawn(depth: u8) -> bool {
     depth < MAX_SUB_AGENT_DEPTH
 }
 
-/// Whether a failed sub-agent run should be retried. Retry only when the outcome
-/// is an error that is NOT a cancellation, there are attempts remaining, and the
-/// parent generation is still active (so we never retry after a cascade cancel).
-/// A cancellation (own stop or parent cascade) must never be retried.
+/// Whether a failed sub-agent run should be retried. Retry ONLY the empty
+/// assistant response case (reasoning models intermittently return an empty
+/// planning message and a sub-agent has no user resend loop), with attempts
+/// remaining and the parent generation still active.
+///
+/// Deliberately narrow: a retry re-runs the whole agent loop from scratch, so
+/// any other error class would re-execute side effects already performed in the
+/// failed attempt (e.g. a run that wrote files over several rounds and only then
+/// hit a fatal provider error would write them twice). A cancellation (own stop
+/// or parent cascade) is never retried.
 fn should_retry_sub_agent(
     outcome: &Result<AgentRunResult, String>,
     attempt: usize,
     parent_active: bool,
 ) -> bool {
-    matches!(outcome, Err(err) if err != "cancelled")
+    matches!(outcome, Err(err) if err.contains(EMPTY_RESPONSE_MARKER))
         && attempt + 1 < SUB_AGENT_MAX_ATTEMPTS
         && parent_active
 }
@@ -1284,7 +1294,7 @@ fn compute_sub_agent_finalization(
             // internal error string. The empty-assistant-response case (a
             // reasoning model returning nothing in planning) is the common
             // failure; other errors keep their original text.
-            let display_err = if err.contains("empty assistant response") {
+            let display_err = if err.contains(EMPTY_RESPONSE_MARKER) {
                 "Subagent 运行失败：模型返回了空响应（可重试）。".to_string()
             } else {
                 err.clone()
@@ -1729,6 +1739,21 @@ mod tests {
         // Cancellation is not a recoverable error → never retry.
         let cancelled: Result<AgentRunResult, String> = Err("cancelled".to_string());
         assert!(!should_retry_sub_agent(&cancelled, 0, true));
+
+        // Any OTHER fatal error must NOT retry: a retry re-runs the whole loop, so
+        // a run that already wrote files over several rounds before failing would
+        // repeat those side effects. Only the empty-response class is retryable.
+        for other in [
+            "provider request failed: 500 Internal Server Error",
+            "context length exceeded",
+            "tool execution failed: write_file denied",
+        ] {
+            let fatal: Result<AgentRunResult, String> = Err(other.to_string());
+            assert!(
+                !should_retry_sub_agent(&fatal, 0, true),
+                "must not retry (side-effect replay): {other}"
+            );
+        }
 
         // Success → never retry.
         assert!(!should_retry_sub_agent(&ok_run_result(), 0, true));

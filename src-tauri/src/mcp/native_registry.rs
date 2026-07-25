@@ -779,6 +779,7 @@ fn call_run_command(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             ctx.settings.chat_tools.tool_timeout_ms,
             ctx.arguments,
             Some(ctx.state),
+            ctx.native_ctx.map(|c| c.conversation_id.as_str()),
         )
         .await?;
         Ok(text_tool_result(content))
@@ -794,10 +795,11 @@ fn call_bash_output(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             .and_then(|value| value.as_str())
             .map(|id| !id.trim().is_empty())
             .unwrap_or(false);
+        let conversation_id = ctx.native_ctx.map(|c| c.conversation_id.as_str());
         let content = if has_job {
-            crate::native_tools::bash_output(ctx.state, ctx.arguments)?
+            crate::native_tools::bash_output(ctx.state, ctx.arguments, conversation_id)?
         } else {
-            crate::native_tools::list_background(ctx.state, ctx.arguments)?
+            crate::native_tools::list_background(ctx.state, ctx.arguments, conversation_id)?
         };
         Ok(text_tool_result(content))
     })
@@ -805,7 +807,11 @@ fn call_bash_output(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
 
 fn call_kill_background(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     Box::pin(async move {
-        let content = crate::native_tools::kill_background(ctx.state, ctx.arguments)?;
+        let content = crate::native_tools::kill_background(
+            ctx.state,
+            ctx.arguments,
+            ctx.native_ctx.map(|c| c.conversation_id.as_str()),
+        )?;
         Ok(text_tool_result(content))
     })
 }

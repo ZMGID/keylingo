@@ -272,7 +272,9 @@ function MessageGroupBase({
   onSaveMessageToNote,
 }: MessageGroupProps) {
   // 订阅 group store 版本号：流式列内容更新时驱动重渲。
-  useGroupsVersion()
+  // 版本号还必须进下面 columns 的 memo deps —— store 是原地 mutate 列对象，
+  // liveGroup 引用永不变，只靠 [live, liveGroup, messages] 会让 memo 冻结在首帧。
+  const groupsVersion = useGroupsVersion()
   const liveGroup = conversationId ? getActiveGroup(conversationId) : undefined
   const live = Boolean(liveGroup && liveGroup.groupId === groupId)
 
@@ -292,7 +294,9 @@ function MessageGroupBase({
       }))
     }
     return messages.map((message) => ({ message, streaming: false }))
-  }, [live, liveGroup, messages])
+    // groupsVersion：流式列被原地 mutate，靠版本号让 memo 重算（见上方注释）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, liveGroup, messages, groupsVersion])
 
   if (columns.length === 0) return null
 

@@ -176,12 +176,13 @@ pub(crate) fn chat_list_background_commands(state: State<AppState>) -> Vec<serde
 }
 
 /// 从 UI 终止一个后台命令。复用 agent 的 `kill_background`（整组杀 + 标记 Killed）。
+/// 用户从 UI 面板显式操作，可跨会话（面板列的是全部作业），故不传会话过滤。
 #[tauri::command]
 pub(crate) fn chat_kill_background_command(
     state: State<AppState>,
     job_id: String,
 ) -> Result<(), String> {
-    crate::native_tools::kill_background(&state, &serde_json::json!({ "job_id": job_id }))
+    crate::native_tools::kill_background(&state, &serde_json::json!({ "job_id": job_id }), None)
         .map(|_| ())
 }
 

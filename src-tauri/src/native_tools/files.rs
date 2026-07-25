@@ -1638,7 +1638,8 @@ mod tests {
                 "command": "for i in $(seq 1 4000); do echo \"line $i ----------------------------------------------------------------\"; done"
             }),
             None,
-        )
+            None,
+            )
         .await
         .expect("bash large output");
         let first_line = bash.lines().next().unwrap_or("");

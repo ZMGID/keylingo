@@ -292,6 +292,7 @@ pub async fn run_command(
     default_timeout_ms: u64,
     arguments: &Value,
     state: Option<&AppState>,
+    conversation_id: Option<&str>,
 ) -> Result<String, String> {
     let command = arguments
         .get("command")
@@ -361,7 +362,7 @@ pub async fn run_command(
         .and_then(|v| v.as_bool())
         .unwrap_or_else(|| is_long_running_dev_command(&command));
     if background {
-        return run_shell_command_background(&command, cwd, state).await;
+        return run_shell_command_background(&command, cwd, state, conversation_id).await;
     }
 
     let timeout_ms = arguments
@@ -581,6 +582,10 @@ impl BackgroundCommandStatus {
 #[derive(Debug)]
 pub struct BackgroundCommand {
     pub job_id: String,
+    /// 发起该作业的会话 id。`bash_output`（列表模式）/`kill_background` 只看本会话的
+    /// 作业，避免 A 会话列出、甚至 kill 掉 B 会话起的进程。`None` = 无会话上下文
+    /// （测试里种的作业 / 非 agent 路径），此时不参与会话过滤。
+    pub conversation_id: Option<String>,
     pub pid: Option<u32>,
     pub command: String,
     pub cwd: String,
@@ -630,6 +635,7 @@ async fn run_shell_command_background(
     command: &str,
     cwd: PathBuf,
     state: Option<&AppState>,
+    conversation_id: Option<&str>,
 ) -> Result<String, String> {
     let job_id = uuid::Uuid::new_v4().to_string();
     let log_path = std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
@@ -695,6 +701,7 @@ async fn run_shell_command_background(
 
     state.register_background_command(BackgroundCommand {
         job_id: job_id.clone(),
+        conversation_id: conversation_id.map(str::to_string),
         pid,
         command: command.to_string(),
         cwd: cwd.display().to_string(),
@@ -746,7 +753,20 @@ async fn run_shell_command_background(
 
 /// `bash_output` tool: incremental read of a tracked background job's captured
 /// output since `since_offset`, plus current status and exit code.
-pub fn bash_output(state: &AppState, arguments: &Value) -> Result<String, String> {
+/// 该作业是否属于调用方会话。调用方无会话上下文（`None`）时不设限（headless /
+/// 测试路径）；作业本身无会话归属时同样放行（旧作业 / 测试种入）。
+fn job_visible_to(job: &BackgroundCommand, caller: Option<&str>) -> bool {
+    match (caller, job.conversation_id.as_deref()) {
+        (Some(caller), Some(owner)) => caller == owner,
+        _ => true,
+    }
+}
+
+pub fn bash_output(
+    state: &AppState,
+    arguments: &Value,
+    conversation_id: Option<&str>,
+) -> Result<String, String> {
     let job_id = arguments
         .get("job_id")
         .and_then(|v| v.as_str())
@@ -763,6 +783,7 @@ pub fn bash_output(state: &AppState, arguments: &Value) -> Result<String, String
         let map = map.lock().unwrap_or_else(|e| e.into_inner());
         let job = map
             .get(job_id)
+            .filter(|job| job_visible_to(job, conversation_id))
             .ok_or_else(|| format!("No background job with job_id {job_id}"))?;
         (
             job.status.clone(),
@@ -800,14 +821,21 @@ pub fn bash_output(state: &AppState, arguments: &Value) -> Result<String, String
     Ok(format!("{header}\n{body}"))
 }
 
-/// `list_background` tool: list all tracked background jobs with status.
-pub fn list_background(state: &AppState, _arguments: &Value) -> Result<String, String> {
+/// `list_background` tool: list this conversation's tracked background jobs.
+pub fn list_background(
+    state: &AppState,
+    _arguments: &Value,
+    conversation_id: Option<&str>,
+) -> Result<String, String> {
     let map = state.background_commands_handle();
     let map = map.lock().unwrap_or_else(|e| e.into_inner());
-    if map.is_empty() {
+    let mut jobs: Vec<&BackgroundCommand> = map
+        .values()
+        .filter(|job| job_visible_to(job, conversation_id))
+        .collect();
+    if jobs.is_empty() {
         return Ok("(no background jobs)".to_string());
     }
-    let mut jobs: Vec<&BackgroundCommand> = map.values().collect();
     jobs.sort_by_key(|j| j.started_at);
     let mut out = String::new();
     for job in jobs {
@@ -830,7 +858,12 @@ pub fn list_background(state: &AppState, _arguments: &Value) -> Result<String, S
 }
 
 /// `kill_background` tool: kill a tracked job's process group and mark it Killed.
-pub fn kill_background(state: &AppState, arguments: &Value) -> Result<String, String> {
+/// Only the owning conversation's jobs are addressable.
+pub fn kill_background(
+    state: &AppState,
+    arguments: &Value,
+    conversation_id: Option<&str>,
+) -> Result<String, String> {
     let job_id = arguments
         .get("job_id")
         .and_then(|v| v.as_str())
@@ -842,6 +875,7 @@ pub fn kill_background(state: &AppState, arguments: &Value) -> Result<String, St
     let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
     let job = map
         .get_mut(job_id)
+        .filter(|job| job_visible_to(job, conversation_id))
         .ok_or_else(|| format!("No background job with job_id {job_id}"))?;
     if job.status.is_terminal() {
         return Ok(format!(
@@ -1076,7 +1110,7 @@ mod tests {
 
     async fn poll_until_terminal(state: &AppState, args: &Value) -> String {
         for _ in 0..100 {
-            let out = bash_output(state, args).expect("bash_output should succeed");
+            let out = bash_output(state, args, None).expect("bash_output should succeed");
             if !out.contains("status: running") {
                 return out;
             }
@@ -1099,7 +1133,8 @@ mod tests {
                 "background": true,
             }),
             Some(&state),
-        )
+            None,
+            )
         .await
         .expect("background run_command should return immediately");
 
@@ -1116,7 +1151,7 @@ mod tests {
         assert!(started.contains("bash_output"));
 
         // Registry insert is observable immediately.
-        let listed = list_background(&state, &serde_json::json!({})).expect("list_background");
+        let listed = list_background(&state, &serde_json::json!({}), None).expect("list_background");
         assert!(listed.contains(&job_id), "job not listed: {listed}");
 
         // Poll bash_output until the process exits; assert captured output + code.
@@ -1138,6 +1173,7 @@ mod tests {
         std::fs::write(&log_path, b"hello").expect("seed log");
         state.register_background_command(BackgroundCommand {
             job_id: job_id.clone(),
+            conversation_id: None,
             pid: None,
             command: "seed".to_string(),
             cwd: ".".to_string(),
@@ -1148,7 +1184,7 @@ mod tests {
         });
 
         // First read from offset 0 sees all bytes and reports next_offset = 5.
-        let first = bash_output(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+        let first = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(first.contains("hello"), "{first}");
         assert!(first.contains("next_offset: 5"), "{first}");
 
@@ -1157,6 +1193,7 @@ mod tests {
         let second = bash_output(
             &state,
             &serde_json::json!({ "job_id": job_id, "since_offset": 5 }),
+            None,
         )
         .unwrap();
         assert!(second.contains("WORLD"), "{second}");
@@ -1167,6 +1204,82 @@ mod tests {
         assert!(second.contains("next_offset: 10"), "{second}");
 
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    /// B3: 后台作业按会话隔离 —— A 会话不得列出/读取/kill B 会话起的作业。
+    #[test]
+    fn background_jobs_are_scoped_to_their_conversation() {
+        let state = bg_test_state();
+        let seed = |job_id: &str, conv: Option<&str>| {
+            let log_path =
+                std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
+            std::fs::write(&log_path, b"x").expect("seed log");
+            state.register_background_command(BackgroundCommand {
+                job_id: job_id.to_string(),
+                conversation_id: conv.map(str::to_string),
+                pid: None,
+                command: format!("cmd-{job_id}"),
+                cwd: ".".to_string(),
+                log_path,
+                status: BackgroundCommandStatus::Running,
+                started_at: SystemTime::now(),
+                kill_tx: None,
+            });
+        };
+        let job_a = format!("conv-a-{}", uuid::Uuid::new_v4());
+        let job_b = format!("conv-b-{}", uuid::Uuid::new_v4());
+        let job_legacy = format!("legacy-{}", uuid::Uuid::new_v4());
+        seed(&job_a, Some("conv-a"));
+        seed(&job_b, Some("conv-b"));
+        seed(&job_legacy, None);
+
+        // 列表：只看到本会话的 + 无归属的旧作业，看不到别的会话。
+        let listed = list_background(&state, &serde_json::json!({}), Some("conv-a")).unwrap();
+        assert!(listed.contains(&job_a), "own job missing: {listed}");
+        assert!(
+            !listed.contains(&job_b),
+            "other conversation's job leaked: {listed}"
+        );
+        assert!(
+            listed.contains(&job_legacy),
+            "unowned job should stay visible: {listed}"
+        );
+
+        // 读取输出：跨会话按「不存在」处理。
+        assert!(bash_output(
+            &state,
+            &serde_json::json!({ "job_id": job_b }),
+            Some("conv-a")
+        )
+        .is_err());
+        assert!(bash_output(
+            &state,
+            &serde_json::json!({ "job_id": job_a }),
+            Some("conv-a")
+        )
+        .is_ok());
+
+        // kill：跨会话拒绝，本会话放行。
+        assert!(kill_background(
+            &state,
+            &serde_json::json!({ "job_id": job_b }),
+            Some("conv-a")
+        )
+        .is_err());
+        assert!(kill_background(
+            &state,
+            &serde_json::json!({ "job_id": job_a }),
+            Some("conv-a")
+        )
+        .is_ok());
+        // 无会话上下文（UI / headless）不设限：仍能操作任意作业。
+        assert!(kill_background(&state, &serde_json::json!({ "job_id": job_b }), None).is_ok());
+
+        for id in [&job_a, &job_b, &job_legacy] {
+            let _ = std::fs::remove_file(
+                std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{id}.log")),
+            );
+        }
     }
 
     #[tokio::test]
@@ -1195,7 +1308,8 @@ mod tests {
                 "background": true,
             }),
             Some(&state),
-        )
+            None,
+            )
         .await
         .expect("background spawn");
         let job_id = started
@@ -1204,19 +1318,19 @@ mod tests {
             .map(str::to_string)
             .expect("job_id");
 
-        let killed = kill_background(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+        let killed = kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(killed.contains("killed"), "{killed}");
 
         // Status is Killed and stays Killed even after the waiter reaps the child.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let out = bash_output(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+        let out = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(
             out.contains("status: killed"),
             "expected killed status: {out}"
         );
 
         // Killing an already-terminal job is a no-op (no error).
-        let again = kill_background(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+        let again = kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(again.contains("already finished"), "{again}");
     }
 
@@ -1254,7 +1368,8 @@ mod tests {
                 "background": true,
             }),
             Some(&state),
-        )
+            None,
+            )
         .await
         .expect("background spawn");
         let job_id = started
@@ -1274,7 +1389,7 @@ mod tests {
             "sleeper should be alive before kill"
         );
 
-        kill_background(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+        kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(
             wait_until_pid_dead(pid, 100).await,
             "kill_background must actually terminate the process (pid {pid} still alive)"
@@ -1302,7 +1417,8 @@ mod tests {
                 "background": true,
             }),
             Some(&state),
-        )
+            None,
+            )
         .await
         .expect("background spawn");
         let job_id = started
@@ -1314,7 +1430,7 @@ mod tests {
         // Poll bash_output until the grandchild pid appears in the captured log.
         let mut grandchild_pid: Option<u32> = None;
         for _ in 0..100 {
-            let out = bash_output(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+            let out = bash_output(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
             if let Some(pid) = out
                 .lines()
                 .find_map(|l| l.trim().strip_prefix("GRANDCHILD_PID="))
@@ -1331,7 +1447,7 @@ mod tests {
             "grandchild should be alive before kill"
         );
 
-        kill_background(&state, &serde_json::json!({ "job_id": job_id })).unwrap();
+        kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(
             wait_until_pid_dead(grandchild_pid, 100).await,
             "the whole group must die: grandchild pid {grandchild_pid} still alive after kill"
@@ -1341,7 +1457,7 @@ mod tests {
     #[tokio::test]
     async fn bash_output_unknown_job_errors() {
         let state = bg_test_state();
-        let err = bash_output(&state, &serde_json::json!({ "job_id": "nope" }))
+        let err = bash_output(&state, &serde_json::json!({ "job_id": "nope" }), None)
             .expect_err("unknown job should error");
         assert!(err.contains("No background job"), "{err}");
     }
@@ -1354,6 +1470,7 @@ mod tests {
         std::fs::write(&log_path, b"x").expect("seed log");
         state.register_background_command(BackgroundCommand {
             job_id: job_id.clone(),
+            conversation_id: None,
             pid: None, // no real process → no kill, just registry/log cleanup
             command: "seed".to_string(),
             cwd: ".".to_string(),
@@ -1364,7 +1481,7 @@ mod tests {
         });
         let _ = state.kill_all_background_commands();
         // Registry cleared and the per-job log removed.
-        let listed = list_background(&state, &serde_json::json!({})).unwrap();
+        let listed = list_background(&state, &serde_json::json!({}), None).unwrap();
         assert!(listed.contains("no background jobs"), "{listed}");
         assert!(!log_path.exists(), "log should be removed on sweep");
     }
@@ -1568,7 +1685,8 @@ mod tests {
             1_000,
             &serde_json::json!({ "command": "python3 -m pip install matplotlib" }),
             None,
-        )
+            None,
+            )
         .await
         .expect_err("pip installs should be blocked");
 
@@ -1597,7 +1715,8 @@ mod tests {
                 2_000,
                 &serde_json::json!({ "command": "cat" }),
                 None,
-            ),
+                None,
+                ),
         )
         .await
         .expect("cat should return promptly because stdin is null (EOF), not hang");
