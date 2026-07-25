@@ -85,7 +85,12 @@ function EmbeddingModelPicker({
     options.unshift({ value: providerId, label })
   }
 
-  const configuredModels = selected?.enabledModels ?? []
+  // 只列具备 embedding 能力的模型（capabilities.embedding 或有 dimensions，与下方 isEmbedding 同源）；
+  // 当前已选模型即使不符也由下方回退保留可见。
+  const configuredModels = (selected?.enabledModels ?? []).filter((m) => {
+    const mi = resolveModelInfo(m.trim(), selected?.modelOverrides)
+    return Boolean(mi.capabilities?.embedding || mi.dimensions)
+  })
   const modelOptions = [
     { value: '', label: '选择 embedding 模型…' },
     ...configuredModels.map((m) => ({ value: m, label: m })),
