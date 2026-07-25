@@ -37,11 +37,10 @@ import {
 } from './NavIcons'
 import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, stableStringify } from './utils'
 import { PROVIDER_PRESETS, type ProviderPreset } from './providerPresets'
-import { ModelPairSelect } from './ModelPairSelect'
 import { ProviderModelsPicker } from './ProviderModelsPicker'
 import { ModelIcon } from '../chat/ModelIcon'
 import { ProviderSortableList } from './ProviderSortableList'
-import { PromptField, ScreenshotTranslationSettings } from './ScreenshotTranslationSettings'
+import { ScreenshotTranslationSettings } from './ScreenshotTranslationSettings'
 import { initialReplacePackProgressState, reduceReplacePackProgress } from './replacePackProgress'
 import { UsageStatsPanel } from './UsageStatsPanel'
 import { RequestDebugPanel } from './RequestDebugPanel'
@@ -49,6 +48,7 @@ import { ExternalAgentsSettings } from './ExternalAgentsSettings'
 import { HotkeysTab } from './tabs/HotkeysTab'
 import { LensTab } from './tabs/LensTab'
 import { MixerTab } from './tabs/MixerTab'
+import { TranslateTab } from './tabs/TranslateTab'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
 import { Button, IconButton } from '../components/Button'
@@ -2258,50 +2258,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {/* ===== 翻译设置标签页 ===== */}
             {activeTab === 'translate' && (
               <>
-                <div className="kv-section-title">{t.tabTranslate}</div>
-                <SettingsGroup title={lang === 'zh' ? '输出' : 'Output'}>
-                  <SettingRow label={t.targetLang}>
-                    <Select
-                      className="w-40"
-                      value={settings.targetLang || 'auto'}
-                      onChange={(v) => updateSettings({ targetLang: v })}
-                      options={[
-                        { value: 'auto', label: t.langAuto },
-                        { value: 'en', label: t.langEn },
-                        { value: 'zh', label: t.langZh },
-                        { value: 'zh-Hant', label: t.langZhTw },
-                        { value: 'ja', label: t.langJa },
-                        { value: 'ko', label: t.langKo },
-                        { value: 'fr', label: t.langFr },
-                        { value: 'de', label: t.langDe },
-                      ]}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.sectionModel}>
-                  <SettingRow label={t.selectModelPair}>
-                    <ModelPairSelect
-                      providerId={settings.translatorProviderId}
-                      model={settings.translatorModel}
-                      providers={settings.providers}
-                      onChange={(providerId, model) => {
-                        updateSettings({ translatorProviderId: providerId, translatorModel: model })
-                      }}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.sectionPrompt}>
-                  <PromptField
-                    label={t.translatorPrompt}
-                    description={t.translatorPromptHint}
-                    value={settings.translatorPrompt || ''}
-                    defaultText={defaultPrompts?.translationTemplate || ''}
-                    restoreLabel={t.restoreDefaultPrompt}
-                    onChange={(v) => updateSettings({ translatorPrompt: v })}
-                  />
-                </SettingsGroup>
+                <TranslateTab
+                  settings={settings}
+                  t={t}
+                  lang={lang}
+                  defaultPrompts={defaultPrompts}
+                  onUpdateSettings={updateSettings}
+                />
 
                 <div className="kv-section-title">{t.tabScreenshot}</div>
                 <ScreenshotTranslationSettings
