@@ -230,14 +230,41 @@ pub(crate) fn model_supports_vision(provider: Option<&ModelProvider>, model: &st
         .or_else(|| model_database_vision(model))
 }
 
+/// 归一化模型名：小写 + 去 `models/` 前缀 + trim。出图路由 / override 生图能力判定 /
+/// `is_image_output_model` / 名字启发式统一走这里，消除「换大小写/加 `models/` 前缀就路由错、
+/// override 精确匹配静默失效」三类脆弱。
+pub(crate) fn normalize_model_name(model: &str) -> String {
+    let lower = model.trim().to_ascii_lowercase();
+    lower
+        .strip_prefix("models/")
+        .unwrap_or(&lower)
+        .trim()
+        .to_string()
+}
+
 pub(crate) fn model_supports_image_generation(
     provider: Option<&ModelProvider>,
     model: &str,
 ) -> Option<bool> {
     let provider = provider?;
-    model_image_generation_from_model_info(provider.model_overrides.get(model))
+    override_image_generation(provider, model)
         .or_else(|| model_database_image_generation(model))
         .or_else(|| image_generation_model_name_heuristic(provider, model))
+}
+
+/// 读 `model_overrides` 的生图能力：先精确 `get(model)`，未命中再按**归一化名**遍历匹配
+/// （小 HashMap，O(n) 可接受），消除大小写 / `models/` 前缀导致 override 静默失效。
+fn override_image_generation(provider: &ModelProvider, model: &str) -> Option<bool> {
+    if let Some(value) = model_image_generation_from_model_info(provider.model_overrides.get(model))
+    {
+        return Some(value);
+    }
+    let normalized = normalize_model_name(model);
+    provider
+        .model_overrides
+        .iter()
+        .find(|(key, _)| normalize_model_name(key) == normalized)
+        .and_then(|(_, info)| model_image_generation_from_model_info(Some(info)))
 }
 
 pub(crate) fn model_can_generate_images_directly(provider: &ModelProvider, model: &str) -> bool {
@@ -290,7 +317,10 @@ pub(crate) fn image_generation_model_for_session(
 fn image_generation_model_name_heuristic(provider: &ModelProvider, model: &str) -> Option<bool> {
     let descriptor = format!(
         "{} {} {} {}",
-        provider.name, provider.base_url, provider.api_format, model
+        provider.name,
+        provider.base_url,
+        provider.api_format,
+        normalize_model_name(model)
     )
     .to_ascii_lowercase();
     let known_image_model = [
@@ -321,12 +351,9 @@ fn image_generation_model_name_heuristic(provider: &ModelProvider, model: &str) 
 
 /// 判定一个模型是否为**出图**模型（其响应会带图片）。用于 Gemini 原生 `generateContent`：
 /// 生图模型才追加 `responseModalities:["TEXT","IMAGE"]`（普通文本模型加了会 400）。
-/// 判据轻量：模型名（去掉可选 `models/` 前缀后）含 `image` 或以 `imagen` 开头，大小写不敏感。
+/// 判据轻量：归一化名（小写 + 去可选 `models/` 前缀）含 `image` 或以 `imagen` 开头。
 pub fn is_image_output_model(model: &str) -> bool {
-    let name = model
-        .strip_prefix("models/")
-        .unwrap_or(model)
-        .to_ascii_lowercase();
+    let name = normalize_model_name(model);
     name.contains("image") || name.starts_with("imagen")
 }
 
@@ -574,6 +601,52 @@ mod tests {
         assert!(!is_image_output_model("gemini-3.1-flash-lite"));
         assert!(!is_image_output_model("models/gemini-2.5-pro"));
         assert!(!is_image_output_model("gpt-5"));
+    }
+
+    #[test]
+    fn normalize_model_name_lowercases_strips_models_prefix_and_trims() {
+        assert_eq!(normalize_model_name("Gemini-3.1-Flash-Image"), "gemini-3.1-flash-image");
+        assert_eq!(
+            normalize_model_name("models/Gemini-3.1-Flash-Image"),
+            "gemini-3.1-flash-image"
+        );
+        assert_eq!(normalize_model_name("  MODELS/imagen-4  "), "imagen-4");
+        // 裸名与带前缀 / 大小写归一到同一结果。
+        assert_eq!(
+            normalize_model_name("gemini-3.1-flash-image"),
+            normalize_model_name("models/Gemini-3.1-Flash-Image")
+        );
+    }
+
+    #[test]
+    fn override_image_generation_matches_by_normalized_name() {
+        // override key 用带前缀 + 大小写变体，仍应命中查询的裸名（此前精确匹配会静默失效）。
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "models/Gemini-3.1-Flash-Image".to_string(),
+            ModelInfo {
+                capabilities: Some(crate::settings::ModelCapabilities {
+                    image_generation: Some(true),
+                    ..Default::default()
+                }),
+                ..ModelInfo::default()
+            },
+        );
+        let provider = test_provider_with_overrides(overrides);
+
+        // 归一化后命中 override 的生图开关。
+        assert_eq!(
+            override_image_generation(&provider, "gemini-3.1-flash-image"),
+            Some(true)
+        );
+        assert_eq!(
+            override_image_generation(&provider, "GEMINI-3.1-FLASH-IMAGE"),
+            Some(true)
+        );
+        assert_eq!(
+            model_supports_image_generation(Some(&provider), "gemini-3.1-flash-image"),
+            Some(true)
+        );
     }
 
     #[test]

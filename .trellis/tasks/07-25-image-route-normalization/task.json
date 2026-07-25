@@ -1,7 +1,7 @@
 {
-  "id": "gemini-native-image-gen",
-  "name": "gemini-native-image-gen",
-  "title": "Gemini 原生接口生图接入",
+  "id": "image-route-normalization",
+  "name": "image-route-normalization",
+  "title": "出图接口路由规范化",
   "description": "",
   "status": "in_progress",
   "dev_type": null,
@@ -10,7 +10,7 @@
   "priority": "P2",
   "creator": "zhimen",
   "assignee": "zhimen",
-  "createdAt": "2026-07-24",
+  "createdAt": "2026-07-25",
   "completedAt": null,
   "branch": null,
   "base_branch": "main",
@@ -18,10 +18,8 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "07-25-image-route-normalization"
-  ],
-  "parent": null,
+  "children": [],
+  "parent": "07-24-gemini-native-image-gen",
   "relatedFiles": [],
   "notes": "",
   "meta": {}

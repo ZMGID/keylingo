@@ -5,6 +5,7 @@ use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::api::send_with_failover;
+use crate::chat::model_metadata::normalize_model_name;
 use crate::mcp::types::{ChatToolArtifact, McpToolCallResult};
 use crate::settings::{ModelProvider, ProviderApiFormat};
 use crate::state::AppState;
@@ -15,6 +16,28 @@ const MAX_PROMPT_CHARS: usize = 8_000;
 const MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 pub const IMAGE_GENERATION_TIMEOUT_MS: u64 = 300_000;
 const IMAGE_GENERATION_HTTP_TIMEOUT: Duration = Duration::from_millis(IMAGE_GENERATION_TIMEOUT_MS);
+
+/// 出图**端点选择**的唯一运行时枚举（不持久化，不进配置）。`resolve_image_route` 是端点
+/// 判定的单一事实源，收敛此前散落的 `uses_*` 子串表；`generate_image_with_provider` 按此三分支
+/// 调对应 `generate_with_*`。自愈只在 `Chat` ↔ `ImagesApi` 间摆动，`GeminiNative` 由 api_format 决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageRoute {
+    GeminiNative,
+    Chat,
+    ImagesApi,
+}
+
+/// 归一化名字若命中这些 vendor 前缀（OpenRouter 风格 `vendor/model`），走 chat/completions 出图。
+const OPENROUTER_CHAT_VENDOR_PREFIXES: [&str; 8] = [
+    "black-forest-labs/",
+    "bytedance-seed/",
+    "google/",
+    "microsoft/",
+    "openai/gpt-5",
+    "recraft/",
+    "sourceful/",
+    "x-ai/",
+];
 
 #[derive(Debug, Clone)]
 struct ImageGenerationRequest {
@@ -78,20 +101,51 @@ pub async fn generate_image_with_provider(
     let request = parse_request(arguments)?;
     validate_provider(provider)?;
 
+    // 端点选择：先查会话缓存（自愈学到的纠正结果），否则用单一解析器。
+    let normalized_model = normalize_model_name(model);
+    let cache_key = (provider.id.clone(), normalized_model);
+    let cached_route = state
+        .image_route_cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).copied());
+    let route = cached_route.unwrap_or_else(|| resolve_image_route(provider, model));
+
     // fallback_text: 模型有时返回纯文字（澄清/拒绝）而不出图——把这段文字透出，
     // 而不是丢弃后抛硬错误。
-    let (images, fallback_text) = if provider.api_format_kind() == ProviderApiFormat::Gemini {
-        generate_with_gemini_native(state, provider, model, &request, retry_attempts, operation)
-            .await?
-    } else if uses_openrouter_chat_image_generation(provider, model) {
-        generate_with_openrouter_chat(state, provider, model, &request, retry_attempts, operation)
-            .await?
-    } else {
-        (
-            generate_with_images_api(state, provider, model, &request, retry_attempts, operation)
-                .await?,
-            None,
-        )
+    let (images, fallback_text) = match call_image_route(
+        state,
+        provider,
+        model,
+        &request,
+        retry_attempts,
+        operation,
+        route,
+    )
+    .await
+    {
+        Ok(result) => result,
+        // 猜错自愈：选定 route 返回端点错配错误 → 换另一端点（Chat↔ImagesApi）重试一次；
+        // 成功则记 (provider_id, normalized_model)→route 到会话缓存，下次同模型直达。
+        // GeminiNative 无 alternate，不参与摆动。
+        Err(err) if is_endpoint_mismatch_error(&err) && alternate_route(route).is_some() => {
+            let alt = alternate_route(route).expect("checked by guard");
+            let result = call_image_route(
+                state,
+                provider,
+                model,
+                &request,
+                retry_attempts,
+                operation,
+                alt,
+            )
+            .await?;
+            if let Ok(mut cache) = state.image_route_cache.lock() {
+                cache.insert(cache_key, alt);
+            }
+            result
+        }
+        Err(err) => return Err(err),
     };
 
     if images.is_empty() {
@@ -161,6 +215,92 @@ pub async fn generate_image_with_provider(
     })
 }
 
+/// 按选定 route 调对应 `generate_with_*`，统一返回 (图, 无图时的兜底文字)。
+/// `ImagesApi` 无文字兜底（其响应体固定含图或报错）。
+async fn call_image_route(
+    state: &AppState,
+    provider: &ModelProvider,
+    model: &str,
+    request: &ImageGenerationRequest,
+    retry_attempts: usize,
+    operation: &str,
+    route: ImageRoute,
+) -> Result<(Vec<GeneratedImage>, Option<String>), String> {
+    match route {
+        ImageRoute::GeminiNative => {
+            generate_with_gemini_native(state, provider, model, request, retry_attempts, operation)
+                .await
+        }
+        ImageRoute::Chat => {
+            generate_with_openrouter_chat(state, provider, model, request, retry_attempts, operation)
+                .await
+        }
+        ImageRoute::ImagesApi => Ok((
+            generate_with_images_api(state, provider, model, request, retry_attempts, operation)
+                .await?,
+            None,
+        )),
+    }
+}
+
+/// **端点选择的单一事实源**。优先级：① `api_format==Gemini` → GeminiNative；
+/// ② base_url 含 `openrouter.ai` → Chat；③ 归一化名字启发式 → Chat | ImagesApi。
+/// 收敛了旧 `uses_openrouter_chat_image_generation` 的全部判据（openrouter base、
+/// api.openai.com / api.x.ai 早退、vendor 前缀表 + 裸名子串表合并为一处，均走归一化名）。
+pub(crate) fn resolve_image_route(provider: &ModelProvider, model: &str) -> ImageRoute {
+    if provider.api_format_kind() == ProviderApiFormat::Gemini {
+        return ImageRoute::GeminiNative;
+    }
+    if is_openrouter_base_url(&provider.base_url) {
+        return ImageRoute::Chat;
+    }
+    // 官方直连端点（OpenAI / xAI）不走 chat 仿 OpenRouter 出图，交给各自 images API。
+    let base_url = provider.base_url.to_ascii_lowercase();
+    if base_url.contains("api.openai.com") || base_url.contains("api.x.ai") {
+        return ImageRoute::ImagesApi;
+    }
+    let normalized = normalize_model_name(model);
+    if OPENROUTER_CHAT_VENDOR_PREFIXES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        return ImageRoute::Chat;
+    }
+    // 裸名出图模型（通用 /v1 代理不带 vendor 前缀，如 `gemini-3.1-flash-image`）：这些代理
+    // 不支持 /images/generations 出这些图，必须走 chat/completions 仿 OpenRouter 出图。
+    // 注意：grok-imagine-image 相反——通用代理明确只支持 /v1/images/generations，故不在此列，
+    // 交给 ImagesApi（body 变体由 uses_xai_images_api 命中，走 b64_json）。
+    if (normalized.contains("gemini") && normalized.contains("image"))
+        || normalized.contains("nano-banana")
+        || normalized.starts_with("imagen")
+    {
+        return ImageRoute::Chat;
+    }
+    ImageRoute::ImagesApi
+}
+
+/// 自愈时的另一端点：Chat↔ImagesApi 互为备选；GeminiNative 由 api_format 决定，无备选。
+fn alternate_route(route: ImageRoute) -> Option<ImageRoute> {
+    match route {
+        ImageRoute::Chat => Some(ImageRoute::ImagesApi),
+        ImageRoute::ImagesApi => Some(ImageRoute::Chat),
+        ImageRoute::GeminiNative => None,
+    }
+}
+
+/// 端点错配错误识别：provider 明确报「此模型/端点用错」时的短语。命中即触发换端点自愈。
+/// 错误串来自 `send_with_failover`（格式 `... Error: {status} - {body}`），故 body 里的短语可见。
+fn is_endpoint_mismatch_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    // 覆盖两向真实代理错配错误：
+    //   Chat 走错 → "only supported on /v1/images/generations and /v1/images/edits"
+    //   ImagesApi 走错 → "... is not supported on /v1/images/generations or /v1/images/edits"
+    // 用 "supported on /v1/images/" 同时匹配 only/not 两种措辞。
+    lower.contains("supported on /v1/images/")
+        || lower.contains("/chat/completions")
+        || lower.contains("must be used with")
+}
+
 pub(crate) fn has_known_direct_image_generation_route(
     provider: &ModelProvider,
     model: &str,
@@ -168,9 +308,16 @@ pub(crate) fn has_known_direct_image_generation_route(
     if !matches!(provider.api_format_kind(), ProviderApiFormat::OpenAiChat) {
         return false;
     }
-    uses_openrouter_chat_image_generation(provider, model)
-        || uses_xai_images_api(provider, model)
-        || uses_openai_images_api_model(model)
+    // 判据来源换成单一 resolver，但**不扩大直连范围**：Chat route 恒为已知直连；ImagesApi route
+    // 仅当命中已知 images API 模型（xai grok-imagine / gpt-image / dall-e）才算已知直连，
+    // 与旧 `openrouter_chat || xai_images || openai_images_model` 逐例等价。
+    match resolve_image_route(provider, model) {
+        ImageRoute::Chat => true,
+        ImageRoute::ImagesApi => {
+            uses_xai_images_api(provider, model) || uses_openai_images_api_model(model)
+        }
+        ImageRoute::GeminiNative => false,
+    }
 }
 
 fn parse_request(arguments: &Value) -> Result<ImageGenerationRequest, String> {
@@ -744,40 +891,6 @@ fn is_openrouter_base_url(base_url: &str) -> bool {
         .contains("openrouter.ai")
 }
 
-fn uses_openrouter_chat_image_generation(provider: &ModelProvider, model: &str) -> bool {
-    if is_openrouter_base_url(&provider.base_url) {
-        return true;
-    }
-    let base_url = provider.base_url.to_ascii_lowercase();
-    if base_url.contains("api.openai.com") || base_url.contains("api.x.ai") {
-        return false;
-    }
-    let lower = model.trim().to_ascii_lowercase();
-    if [
-        "black-forest-labs/",
-        "bytedance-seed/",
-        "google/",
-        "microsoft/",
-        "openai/gpt-5",
-        "recraft/",
-        "sourceful/",
-        "x-ai/",
-    ]
-    .iter()
-    .any(|prefix| lower.starts_with(prefix))
-    {
-        return true;
-    }
-    // 裸名出图模型（通用 /v1 代理不带 vendor 前缀，如 cpa.xb1520.com/v1 暴露
-    // `gemini-3.1-flash-image`）：这些代理不支持 /images/generations 出这些图，
-    // 必须走 chat/completions 仿 OpenRouter 出图。
-    // 注意：grok-imagine-image 相反——通用代理明确只支持 /v1/images/generations，
-    // 故不在此列，交给 generate_with_images_api（uses_xai_images_api 命中，走 b64_json）。
-    (lower.contains("gemini") && lower.contains("image"))
-        || lower.contains("nano-banana")
-        || lower.starts_with("imagen")
-}
-
 fn openrouter_aspect_ratio(size: &str) -> Option<&'static str> {
     size_aspect_ratio(size)
 }
@@ -919,44 +1032,131 @@ mod tests {
             compress_request_body: false,
         };
 
-        assert!(uses_openrouter_chat_image_generation(
-            &proxy,
-            "gemini-3.1-flash-image"
-        ));
+        assert_eq!(
+            resolve_image_route(&proxy, "gemini-3.1-flash-image"),
+            ImageRoute::Chat
+        );
         // grok-imagine-image 相反：通用代理只支持 /images/generations，
-        // 故 NOT 走 chat，交给 images_api（uses_xai_images_api 命中）。
-        assert!(!uses_openrouter_chat_image_generation(
-            &proxy,
-            "grok-imagine-image"
-        ));
+        // 故走 ImagesApi（uses_xai_images_api body 变体命中）。
+        assert_eq!(
+            resolve_image_route(&proxy, "grok-imagine-image"),
+            ImageRoute::ImagesApi
+        );
         assert!(uses_xai_images_api(&proxy, "grok-imagine-image"));
-        assert!(uses_openrouter_chat_image_generation(&proxy, "nano-banana"));
-        assert!(uses_openrouter_chat_image_generation(&proxy, "imagen-4.0"));
+        assert_eq!(resolve_image_route(&proxy, "nano-banana"), ImageRoute::Chat);
+        assert_eq!(resolve_image_route(&proxy, "imagen-4.0"), ImageRoute::Chat);
+        // 改名 / 加前缀 / 大小写变体仍正确路由（归一化）。
+        assert_eq!(
+            resolve_image_route(&proxy, "Gemini-3.1-Flash-Image"),
+            ImageRoute::Chat
+        );
+        assert_eq!(
+            resolve_image_route(&proxy, "models/gemini-3.1-flash-image"),
+            ImageRoute::Chat
+        );
         // 也走已知直连路由总闸（OpenAiChat + chat 出图）。
         assert!(has_known_direct_image_generation_route(
             &proxy,
             "gemini-3.1-flash-image"
         ));
         // 普通文本模型不误判。
-        assert!(!uses_openrouter_chat_image_generation(&proxy, "gpt-4o"));
+        assert_eq!(resolve_image_route(&proxy, "gpt-4o"), ImageRoute::ImagesApi);
 
-        // api.openai.com / api.x.ai 上的裸名仍被早退排除（gpt-image/dall-e/grok-imagine 走各自 images API）。
+        // api.openai.com / api.x.ai 上的裸名仍被早退排除（走各自 images API，不走 chat）。
         let openai = ModelProvider {
             base_url: "https://api.openai.com/v1".to_string(),
             ..proxy.clone()
         };
-        assert!(!uses_openrouter_chat_image_generation(
-            &openai,
-            "gemini-3.1-flash-image"
-        ));
+        assert_eq!(
+            resolve_image_route(&openai, "gemini-3.1-flash-image"),
+            ImageRoute::ImagesApi
+        );
         let xai = ModelProvider {
             base_url: "https://api.x.ai/v1".to_string(),
             ..proxy.clone()
         };
-        assert!(!uses_openrouter_chat_image_generation(
-            &xai,
-            "grok-imagine-image"
+        assert_eq!(
+            resolve_image_route(&xai, "grok-imagine-image"),
+            ImageRoute::ImagesApi
+        );
+    }
+
+    #[test]
+    fn resolve_image_route_gemini_provider_uses_native() {
+        assert_eq!(
+            resolve_image_route(&gemini_provider(), "gemini-3.1-flash-image"),
+            ImageRoute::GeminiNative
+        );
+        // Gemini api_format 恒 GeminiNative，即便名字看似普通文本模型。
+        assert_eq!(
+            resolve_image_route(&gemini_provider(), "gemini-2.5-pro"),
+            ImageRoute::GeminiNative
+        );
+    }
+
+    #[test]
+    fn resolve_image_route_openrouter_base_uses_chat() {
+        let openrouter = ModelProvider {
+            id: "or".to_string(),
+            name: "OpenRouter".to_string(),
+            api_keys: vec!["k".to_string()],
+            api_key_legacy: None,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "openai_chat".to_string(),
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+        };
+        assert_eq!(
+            resolve_image_route(&openrouter, "google/gemini-3.1-flash-image-preview"),
+            ImageRoute::Chat
+        );
+        assert_eq!(
+            resolve_image_route(&openrouter, "grok-imagine-image"),
+            ImageRoute::Chat
+        );
+    }
+
+    #[test]
+    fn endpoint_mismatch_error_matches_provider_phrases_not_generic_errors() {
+        assert!(is_endpoint_mismatch_error(
+            "Mixer image generation Error: 400 - {\"error\":{\"message\":\"This model is only supported on /v1/images/generations\"}}"
         ));
+        assert!(is_endpoint_mismatch_error(
+            "Error: 400 - only supported on /v1/images/edits"
+        ));
+        assert!(is_endpoint_mismatch_error(
+            "Error: 404 - This model must be used with the chat endpoint"
+        ));
+        assert!(is_endpoint_mismatch_error(
+            "Error: 400 - image models require the /chat/completions endpoint"
+        ));
+        // 真实代理错误串（两向,由真机测试捕获）：
+        //   grok 走错 chat/completions（Chat→ImagesApi 方向）
+        assert!(is_endpoint_mismatch_error(
+            "Chat image generation Error: 503 Service Unavailable - {\"error\":{\"message\":\"model grok-imagine-image is only supported on /v1/images/generations and /v1/images/edits\"}}"
+        ));
+        //   gemini-image 走错 /v1/images/generations（ImagesApi→Chat 方向，措辞是 "not supported on"）
+        assert!(is_endpoint_mismatch_error(
+            "Mixer image generation Error: 400 - {\"error\":{\"message\":\"Model gemini-3.1-flash-image is not supported on /v1/images/generations or /v1/images/edits. Use gpt-image-1.5\"}}"
+        ));
+        // 普通错误不触发换端点。
+        assert!(!is_endpoint_mismatch_error(
+            "Image generation response missing data array"
+        ));
+        assert!(!is_endpoint_mismatch_error(
+            "Mixer image generation Error: 500 - internal server error"
+        ));
+        assert!(!is_endpoint_mismatch_error("connection reset by peer"));
+    }
+
+    #[test]
+    fn alternate_route_swings_chat_and_images_only() {
+        assert_eq!(alternate_route(ImageRoute::Chat), Some(ImageRoute::ImagesApi));
+        assert_eq!(alternate_route(ImageRoute::ImagesApi), Some(ImageRoute::Chat));
+        assert_eq!(alternate_route(ImageRoute::GeminiNative), None);
     }
 
     #[test]

@@ -24,6 +24,7 @@ These guides help you **ask the right questions before coding**.
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
 | [External CLI Agents 执行契约](./external-cli-agents.md) | external_agents 子系统的硬约定（消息链路/会话生命周期/探测缓存） | Touching `src-tauri/src/external_agents/**` or its frontend surface |
+| [出图接口路由执行契约](./image-generation-routing.md) | 出图端点路由单一事实源 resolve_image_route + 归一化 + 自愈 + 文字兜底；红线：不按模型名猜端点 | Touching `image_generation.rs` / 生图判定 / 新增出图 provider |
 
 ---
 
