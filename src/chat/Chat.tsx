@@ -2349,6 +2349,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         restoreStreamingPreview(null)
         return
       }
+      // 已是当前会话：说明这次 hash 变化来自点击/创建/分支等「先加载并 apply、再同步路由」的
+      // 路径，数据刚落进 state，此处再 force 重载只会让同一对话白读一遍盘（双重 IPC）。
+      // 真正的路由导航（前进/后退/启动恢复/外部改 hash）ref 必然不同，照常加载。
+      if (currentConversationIdRef.current === conversationId) return
       void reloadConversation(conversationId, { force: true })
     }
     loadFromRoute()
@@ -2379,9 +2383,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     api.onChatOpenConversation((payload) => {
       if (cancelled || !payload.conversationId) return
       setChatView('conversation')
-      syncConversationRoute(payload.conversationId)
-      if (payload.reload !== false) {
-        void reloadConversation(payload.conversationId, { force: true })
+      if (getRouteConversationId() === payload.conversationId) {
+        // hash 不变、不会触发 hashchange，按需显式重载。
+        if (payload.reload !== false) {
+          void reloadConversation(payload.conversationId, { force: true })
+        }
+      } else {
+        // hash 变化统一走 loadFromRoute 加载；这里再显式 reload 会让同一对话读两遍。
+        syncConversationRoute(payload.conversationId)
       }
       refreshSidebar()
     }).then((dispose) => {
@@ -2393,7 +2402,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       cancelled = true
       unlisten?.()
     }
-  }, [refreshSidebar, reloadConversation, syncConversationRoute])
+  }, [getRouteConversationId, refreshSidebar, reloadConversation, syncConversationRoute])
 
   const handleSelectConversation = useCallback(async (conversationId: string) => {
     setAssistantStreamStatsByMessageId({})
