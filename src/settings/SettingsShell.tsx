@@ -1,10 +1,9 @@
 import { forwardRef, useImperativeHandle, useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react'
 import {
   X, Check, RefreshCw,
-  ExternalLink, Download, Upload, ArrowLeft,
+  Download, Upload, ArrowLeft,
 } from 'lucide-react'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { ChatMarkdown } from '../chat/ChatMarkdown'
 import {
   api,
   type Settings as SettingsType,
@@ -48,6 +47,7 @@ import { MemoryTab } from './tabs/MemoryTab'
 import { ChatTab } from './tabs/ChatTab'
 import { ProvidersTab } from './tabs/ProvidersTab'
 import { AppearanceGroup, BehaviorGroup, PermissionsGroup } from './tabs/GeneralTab'
+import { AppInfoGroup, UpdateGroup } from './tabs/AboutTab'
 import { MEMORY_L1_MAX_BYTES, utf8ByteLength, type MemoryLayerKey } from './memoryLayers'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
@@ -58,7 +58,6 @@ import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/ch
 import { normalizeThemeColorId } from '../themeColors'
 import { UI_FONT_PX_MIN, UI_FONT_PX_MAX } from './uiFont'
 import {
-  Toggle,
   SettingRow,
   SettingsGroup, FieldBlock,
 } from './components'
@@ -2104,164 +2103,31 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {/* ===== 关于标签页 ===== */}
             {activeTab === 'about' && (
               <>
-                <SettingsGroup title={lang === 'zh' ? '应用' : 'Application'}>
-                  <div className="kv-panel mb-2">
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-[10px] overflow-hidden shrink-0">
-                        <img src="/icon.png" alt="Kivio Desktop" className="w-full h-full object-contain" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="kv-page-title">Kivio Desktop</div>
-                        <div className="kv-panel-body">{lang === 'zh' ? '屏幕级 AI 助手' : 'Screen-level AI Assistant'}</div>
-                      </div>
-                    </div>
-                  </div>
-                  <SettingRow label={t.currentVersion}>
-                    <span className="kv-tag">v{appVersion}</span>
-                  </SettingRow>
-                  <SettingRow label={lang === 'zh' ? '开发者' : 'Developer'}>
-                    <span className="kv-row-desc">ZM</span>
-                  </SettingRow>
-                </SettingsGroup>
+                <AppInfoGroup t={t} lang={lang} appVersion={appVersion} />
 
-                <SettingsGroup title={t.checkUpdate}>
-                  <SettingRow label={t.autoCheckUpdate}>
-                    <Toggle
-                      checked={settings?.autoCheckUpdate ?? true}
-                      onChange={(v) => updateSettings({ autoCheckUpdate: v })}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.checkUpdate}
-                    description={updateStatus === 'up-to-date' ? t.upToDate : undefined}
-                  >
-                    <Button
-                      size="sm"
-                      onClick={handleCheckUpdate}
-                      disabled={updateStatus === 'checking'}
-                      data-tauri-drag-region="false"
-                    >
-                      <RefreshCw size={11} className={updateStatus === 'checking' ? 'animate-spin' : ''} />
-                      {updateStatus === 'checking' ? t.checkingUpdate : t.checkUpdate}
-                    </Button>
-                  </SettingRow>
-
-                  {updateStatus === 'check-failed' && (
-                    <div className="kv-panel mt-2">
-                      <div className="kv-panel-body mb-2 text-amber-700 dark:text-amber-400">
-                        {t.updateCheckFailed}
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={handleOpenGithubReleases}
-                        data-tauri-drag-region="false"
-                      >
-                        {t.downloadFromGithub}
-                      </Button>
-                    </div>
-                  )}
-
-                  {updateStatus === 'available' && updateInfo && (
-                    <div className="kv-panel info mt-2">
-                      <div className="kv-panel-title">
-                        {t.updateAvailable}
-                        <span className="kv-tag accent ml-auto">v{updateInfo.version}</span>
-                      </div>
-                      {updateInfo.body && (
-                        <div className="custom-scrollbar mb-3 max-h-40 overflow-y-auto text-[12px] leading-relaxed">
-                          <ChatMarkdown content={updateInfo.body} />
-                        </div>
-                      )}
-
-                      {downloadState === 'downloading' && (
-                        <div className="mb-3">
-                          <div className="flex items-center justify-between kv-panel-body mb-1">
-                            <span>{t.downloading}</span>
-                            <span className="font-mono tabular-nums">{downloadPercent}%</span>
-                          </div>
-                          <div className="kv-progress">
-                            <div style={{ width: `${downloadPercent}%` }} />
-                          </div>
-                        </div>
-                      )}
-
-                      {downloadState === 'failed' && downloadError && (
-                        <div className="kv-inline-error mb-3">
-                          {t.downloadFailed}: {downloadError}
-                        </div>
-                      )}
-
-                      <div className="flex gap-2 flex-wrap">
-                        {downloadState === 'idle' && (
-                          <>
-                            <Button
-                              variant="primary"
-                              onClick={handleDownloadAndInstall}
-                              data-tauri-drag-region="false"
-                            >
-                              <Download size={12} />
-                              {t.downloadAndInstall}
-                            </Button>
-                            <Button
-                              onClick={handleOpenReleasePage}
-                              data-tauri-drag-region="false"
-                            >
-                              <ExternalLink size={12} />
-                              {t.downloadFromGithub}
-                            </Button>
-                          </>
-                        )}
-                        {downloadState === 'downloading' && (
-                          <Button disabled>
-                            <RefreshCw size={12} className="animate-spin" />
-                            {t.downloading}
-                          </Button>
-                        )}
-                        {downloadState === 'downloaded' && (
-                          <Button
-                            variant="primary"
-                            onClick={handleInstall}
-                            data-tauri-drag-region="false"
-                          >
-                            <Download size={12} />
-                            {t.installAndRestart}
-                          </Button>
-                        )}
-                        {downloadState === 'failed' && (
-                          <>
-                            <Button
-                              variant="primary"
-                              onClick={handleDownloadAndInstall}
-                              data-tauri-drag-region="false"
-                            >
-                              <RefreshCw size={12} />
-                              {t.retryDownload}
-                            </Button>
-                            <Button
-                              onClick={handleOpenReleasePage}
-                              data-tauri-drag-region="false"
-                            >
-                              <ExternalLink size={12} />
-                              {t.downloadFromGithub}
-                            </Button>
-                          </>
-                        )}
-                        <Button
-                          variant="ghost"
-                          onClick={() => {
-                            setUpdateStatus('idle')
-                            setDownloadState('idle')
-                            setDownloadPercent(0)
-                            setDownloadError('')
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          {t.updateLater}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </SettingsGroup>
+                <UpdateGroup
+                  settings={settings}
+                  t={t}
+                  update={{
+                    status: updateStatus,
+                    info: updateInfo,
+                    downloadState,
+                    downloadPercent,
+                    downloadError,
+                  }}
+                  onUpdateSettings={updateSettings}
+                  onCheck={handleCheckUpdate}
+                  onDownloadAndInstall={handleDownloadAndInstall}
+                  onInstall={handleInstall}
+                  onOpenReleasePage={handleOpenReleasePage}
+                  onOpenGithubReleases={handleOpenGithubReleases}
+                  onDismiss={() => {
+                    setUpdateStatus('idle')
+                    setDownloadState('idle')
+                    setDownloadPercent(0)
+                    setDownloadError('')
+                  }}
+                />
               </>
             )}
           </div>
