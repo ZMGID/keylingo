@@ -2954,6 +2954,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                       model={settings.defaultModels.imageGeneration.model || ''}
                       providers={settings.providers}
                       inheritLabel={t.mixerNoImageGenerationModel}
+                      filterModel={(provider, model) =>
+                        resolveModelInfo(model, provider.modelOverrides).capabilities?.imageGeneration === true
+                      }
                       onChange={(providerId, model) => {
                         updateDefaultModel('imageGeneration', providerId, model)
                       }}

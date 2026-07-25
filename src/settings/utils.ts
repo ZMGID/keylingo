@@ -126,15 +126,20 @@ export const parseModelPairValue = (value: string): [string, string] => {
 
 export const isProviderEnabled = (provider: ModelProvider) => provider.enabled !== false
 
-export const buildModelPairOptions = (providers: ModelProvider[]): SelectOption[] =>
+export const buildModelPairOptions = (
+  providers: ModelProvider[],
+  filterModel?: (provider: ModelProvider, model: string) => boolean,
+): SelectOption[] =>
   providers
     .filter(provider => isProviderEnabled(provider))
     .flatMap(provider =>
-      provider.enabledModels.map(model => ({
-        value: modelPairValue(provider.id, model),
-        label: `${provider.name} - ${model}`,
-        title: `${provider.name} - ${model}`,
-      })),
+      provider.enabledModels
+        .filter(model => !filterModel || filterModel(provider, model))
+        .map(model => ({
+          value: modelPairValue(provider.id, model),
+          label: `${provider.name} - ${model}`,
+          title: `${provider.name} - ${model}`,
+        })),
     )
 
 /**
