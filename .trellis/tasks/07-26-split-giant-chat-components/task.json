@@ -1,0 +1,29 @@
+{
+  "id": "split-giant-chat-components",
+  "name": "split-giant-chat-components",
+  "title": "拆分 SettingsShell.tsx 与 Chat.tsx 巨型组件",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "zhimen",
+  "assignee": "zhimen",
+  "createdAt": "2026-07-26",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-26-split-settings-shell-tabs",
+    "07-26-extract-chat-hooks"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

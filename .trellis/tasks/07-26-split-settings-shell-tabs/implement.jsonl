@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "组件 props / 组合模式约定，抽 tab 展示组件时必须遵循"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "判断 9 个 tab 之间哪些是真重复、哪些不该强行抽公共抽象"}

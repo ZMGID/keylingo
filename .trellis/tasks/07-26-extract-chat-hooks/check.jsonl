@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/resource-lifecycle.md", "reason": "检查 hook 内订阅 / RAF 是否都有对应 cleanup"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "核对事件处理顺序与拆分前一致"}
