@@ -515,3 +515,37 @@ Fixed child, Worker, OCR helper, Preview server, cache, knowledge-base lock, Mes
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: 出图接口路由规范化 + Gemini/grok 生图打通
+
+**Date**: 2026-07-25
+**Task**: 出图接口路由规范化 + Gemini/grok 生图打通
+**Branch**: `main`
+
+### Summary
+
+修复图片模型无图返回纯文字时的硬错误(透出文字),grok-imagine-image 改走 /images/generations;把出图端点选择从 6+ 函数 3 张模型名子串表收敛为单一 resolve_image_route + 模型名归一化(修 override 精确匹配静默失效)+ 猜错自动换端点重试并写会话缓存;真机测试通道验证 gemini→Chat/grok→ImagesApi 出图并逮到修复自愈错误串两向措辞缺口;沉淀 spec/guides/image-generation-routing.md。cargo test --lib 1132 passed。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dccb37a` | (see git log) |
+| `d16356e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
