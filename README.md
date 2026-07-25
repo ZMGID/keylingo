@@ -172,13 +172,15 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.2
+## 新版本 —— v2.8.3
 
-- **笔记中心升级** —— 笔记中心加入文件夹式管理和 Milkdown 实时预览编辑器，可把卡片移动到文件夹、用内联弹框管理文件夹。
-- **消息区交互增强** —— 划词可「添加到聊天」直接引用进输入框，内置右键菜单支持复制选中/复制整条消息，并重构了跟随滚动，修复流式不跟随与钉底闪动。
-- **界面更个性化** —— 可自定义 UI 字号、界面字体与代码字体；头像改为本地图片上传；记住上次使用的模型与思考等级作为默认（移除「默认模型」设置），并精简翻译/资料设置。
-- **连接测试更可靠** —— 测试连接按供应商 api_format 分派正确协议，改为模型批量测试，密码框去掉重复的原生眼睛图标。
-- **外部 Agent 与体验细节** —— 本地 CLI 可接收图片/文件附件，可用性与模型探测拆分（不再频繁重复检测），移除 Kivio Code 终端 agent；修复暗色模式可见性；优化检索面板与知识库 tab；Lens 输入栏置于截图选区之上。
+- **内置联网搜索** —— 每个会话可独立选择「关闭 / 内置 / 第三方」三态联网搜索，内置模式直接调用供应商自带的搜索能力（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片展示在答案上方，最后一次选择会记为新会话默认。
+- **Gemini 原生生图** —— 聊天里可直接用 Gemini 原生协议出图，生成结果挂到 artifacts；OpenAI 兼容中转的出图也已打通，出图端点路由收敛为单一解析并在猜错时自愈。
+- **外部 CLI 原生会话** —— 全部外部 CLI 改用各自的原生会话机制，不再重放历史消息；kimi 迁到 ACP，pi 用 `--session-id`，会话与 CLI 绑定；可用性探测与模型探测分离并加缓存，新会话不再必然冷探测。
+- **从本地 CLI 导入 MCP 与 Skill** —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置，勾选后把它们的 MCP 服务器和 Skill 导入 Kivio。
+- **截图标注模式** —— 新增独立截图标注：箭头、矩形、马赛克，支持撤销后复制或保存；冻结帧改为双端常开，截图不再带鼠标指针。
+- **模型下拉按能力筛选** —— 生图、视觉、embedding 三处模型下拉分别只列具备对应能力的模型；新增模型级 `extra_body` 透传，可给单个模型附加自定义请求体字段。
+- **稳定性与体验修复** —— MCP 服务器预热连接与首轮工具收集短超时兜底；HTTP 连接池加保活；输入框草稿跨对话保留；对话搜索支持全文匹配正文；修复切换/新建会话重复加载、多模型并答流式栏冻结、`Retry-After` 巨值长时挂起、后台命令未按会话隔离、知识库检索 rerank 分被覆盖与结果静默截断。
 
 完整历史:[GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
@@ -375,13 +377,15 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.2
+## What's New — v2.8.3
 
-- **Notes center upgrade** — the notes center gains folder-based organization and a Milkdown live-preview editor; move cards into folders and manage folders from an inline popover.
-- **Richer message interactions** — select text to "add to chat" as a quote in the input, a built-in right-click menu copies the selection or the whole message, and follow-scroll was rebuilt to fix streaming-not-following and pin-to-bottom flicker.
-- **More personalization** — customize UI font size, interface font, and code font; upload a local avatar image; the last-used model and reasoning level are remembered as the default (the "default model" setting is gone), and translate/profile settings were trimmed.
-- **More reliable connection testing** — test connection now dispatches the correct protocol per provider api_format, tests models in batch, and password fields no longer show a duplicate native reveal icon.
-- **External agents & polish** — local CLIs accept image/file attachments, availability and model probing are split (no more constant re-detection), and the Kivio Code terminal agent was removed; dark-mode visibility fixes; a polished retrieval panel and knowledge-base tab; the Lens input bar sits above the capture selection.
+- **Built-in web search** — each conversation picks its own web-search mode: off, built-in, or third-party. Built-in mode calls the provider's own hosted search (OpenAI Responses, Gemini, Anthropic) and streams the search as a live card above the answer; your last pick becomes the default for new conversations.
+- **Native Gemini image generation** — generate images in chat over Gemini's native protocol with results attached as artifacts; image generation through OpenAI-compatible relays now works too, with endpoint routing consolidated into one resolver that self-heals when it guesses wrong.
+- **Native sessions for external CLIs** — all external CLIs now use their own native session mechanism instead of replaying history: kimi moved to ACP, pi uses `--session-id`, and sessions bind to their CLI. Availability and model probing are split and cached, so a new conversation no longer forces a cold probe.
+- **Import MCP servers and Skills from local CLIs** — the Extensions page can scan your installed Claude Code / Codex / OpenCode configs and import their MCP servers and Skills into Kivio.
+- **Standalone screenshot annotation** — a new annotation mode adds arrows, rectangles, and mosaic with undo, then copy or save; frozen-frame capture is now on for both platforms and screenshots no longer include the mouse cursor.
+- **Capability-filtered model pickers** — the image, vision, and embedding model pickers each list only models with that capability; a new per-model `extra_body` passes custom request-body fields to a single model.
+- **Stability and polish** — MCP servers warm up their connection with a short timeout fallback for the first tool listing; the HTTP connection pool gained keep-alive; composer drafts survive switching conversations; conversation search matches message bodies. Fixes include duplicate loading when switching or creating conversations, the streaming column freezing during multi-model answers, long hangs from an oversized `Retry-After`, background commands not being isolated per conversation, and knowledge-base retrieval losing rerank scores or silently truncating results.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 

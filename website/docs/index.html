@@ -195,7 +195,7 @@
 
 <div class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">≡</button>
-  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.8.2</span></a>
+  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.8.3</span></a>
   <div class="spacer"></div>
   <a class="top-link" href="../index.html">← 官网</a>
   <a class="icon-link" href="https://github.com/ZMGID/kivio" target="_blank" rel="noopener" aria-label="GitHub">
@@ -284,9 +284,9 @@
     <article data-page="install" class="hidden">
       <div class="crumb">开始</div>
       <h1>安装</h1>
-      <p class="lead">当前稳定版为 v2.8.2，从 GitHub Releases 获取对应平台安装包。</p>
+      <p class="lead">当前稳定版为 v2.8.3，从 GitHub Releases 获取对应平台安装包。</p>
       <h2 id="install-mac">macOS</h2>
-      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.8.2_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
+      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.8.3_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
       <pre><code>xattr -cr "/Applications/Kivio Desktop.app"</code></pre>
       <p>首次使用以下功能时，系统会请求相应的隐私权限：</p>
       <table>
@@ -298,7 +298,7 @@
       </table>
       <p>在「系统设置 → 隐私与安全性」中为 Kivio Desktop 打开对应开关即可，无需重启应用。</p>
       <h2 id="install-win">Windows</h2>
-      <p>下载并运行 <code>Kivio.Desktop_2.8.2_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
+      <p>下载并运行 <code>Kivio.Desktop_2.8.3_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
       <h2 id="install-update">更新</h2>
       <p>应用启动时会静默检查一次 GitHub Releases 是否有新版本（<code>autoCheckUpdate</code>，默认开启）。也可以在「设置 → 关于」手动检查；发现新版本后可直接在应用内下载安装包并启动安装。若 GitHub API 检查失败，界面会提供 Releases 页面作为手动下载兜底。</p>
     </article>
@@ -306,7 +306,7 @@
     <article data-page="quickstart" class="hidden">
       <div class="crumb">开始</div>
       <h1>快速上手</h1>
-      <p class="lead">从安装 v2.8.2 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
+      <p class="lead">从安装 v2.8.3 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
       <h2 id="qs-install">第一步 · 安装并启动</h2>
       <p>从 <a href="https://github.com/ZMGID/kivio/releases/latest" target="_blank" rel="noopener">GitHub Releases ↗</a> 下载最新版：macOS Apple Silicon 使用 <code>.dmg</code>，Windows x64 使用 NSIS <code>-setup.exe</code>。macOS DMG 未签名，首次启动需要右键 →「打开」。详细权限与更新说明见 <a href="#/install">安装</a>。</p>
       <h2 id="qs-key">第二步 · 完成首次引导</h2>
@@ -693,6 +693,17 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <div class="crumb">更多</div>
       <h1>更新日志</h1>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
+      <h2 id="changelog-283">v2.8.3 · 2026-07-25</h2>
+      <ul>
+        <li><b>内置联网搜索</b> —— 每个会话可独立选择「关闭 / 内置 / 第三方」三态联网搜索，内置模式直接调用供应商自带搜索（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片展示在答案上方，最后一次选择记为新会话默认。</li>
+        <li><b>Gemini 原生生图</b> —— 聊天里可用 Gemini 原生协议出图并挂到 artifacts；OpenAI 兼容中转出图也已打通，出图端点路由收敛为单一解析并在猜错时自愈。</li>
+        <li><b>外部 CLI 原生会话</b> —— 全部外部 CLI 改用各自原生会话机制，不再重放历史；kimi 迁 ACP，pi 用 <code>--session-id</code>，会话与 CLI 绑定；可用性与模型探测分离并加缓存。</li>
+        <li><b>从本地 CLI 导入 MCP 与 Skill</b> —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置，勾选后导入其 MCP 服务器与 Skill。</li>
+        <li><b>截图标注模式</b> —— 新增独立截图标注：箭头、矩形、马赛克，支持撤销后复制或保存；冻结帧双端常开，截图不再带鼠标指针。</li>
+        <li><b>模型下拉按能力筛选</b> —— 生图、视觉、embedding 三处下拉仅列具备对应能力的模型；新增模型级 <code>extra_body</code> 透传。</li>
+        <li><b>稳定性修复</b> —— MCP 预热连接与首轮工具短超时兜底；HTTP 连接池加保活；输入框草稿跨对话保留；对话搜索匹配正文；修复会话重复加载、多模型并答流式栏冻结、<code>Retry-After</code> 巨值长时挂起、后台命令未按会话隔离、检索 rerank 分被覆盖与结果静默截断。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.3" target="_blank" rel="noopener">查看 v2.8.3 Release notes ↗</a></p>
       <h2 id="changelog-282">v2.8.2 · 2026-07-20</h2>
       <ul>
         <li><b>笔记中心升级</b> —— 加入文件夹式管理与 Milkdown 实时预览编辑器，可把卡片移动到文件夹、用内联弹框管理文件夹。</li>
