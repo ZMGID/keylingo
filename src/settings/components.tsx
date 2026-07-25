@@ -266,6 +266,32 @@ export function SettingRow({ label, description, children, className = '', stack
   )
 }
 
+/**
+ * 纵向字段块：标签 + 说明在上，控件在下。
+ * 原在 SettingsShell 内部，抽 tab 组件后需跨模块共享，移到这里。
+ */
+export function FieldBlock({
+  label,
+  description,
+  children,
+  className = '',
+}: {
+  label: ReactNode
+  description?: string
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <div className={`py-2 ${className}`}>
+      <div className="mb-2">
+        <div className="kv-row-label">{label}</div>
+        {description && <p className="kv-row-desc">{description}</p>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
 export function SettingsGroup({ title, children, className = '' }: {
   title?: ReactNode
   children: ReactNode

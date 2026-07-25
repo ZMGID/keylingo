@@ -1,11 +1,10 @@
 import { forwardRef, useImperativeHandle, useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react'
 import {
   X, Check, Plus, Minus, Trash2, RefreshCw,
-  ExternalLink, Download, Upload, Wrench, FolderOpen, Eye, EyeOff, Info,
+  ExternalLink, Download, Upload, Wrench, Eye, EyeOff, Info,
   Brain, Image as ImageIcon, ArrowLeft,
 } from 'lucide-react'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { homeDir, join } from '@tauri-apps/api/path'
 import { ChatMarkdown } from '../chat/ChatMarkdown'
 import {
   api,
@@ -50,6 +49,7 @@ import { LensTab } from './tabs/LensTab'
 import { MixerTab } from './tabs/MixerTab'
 import { TranslateTab } from './tabs/TranslateTab'
 import { MemoryTab } from './tabs/MemoryTab'
+import { ChatTab } from './tabs/ChatTab'
 import { MEMORY_L1_MAX_BYTES, utf8ByteLength, type MemoryLayerKey } from './memoryLayers'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
@@ -59,9 +59,9 @@ import { useWindowInteractionFocus } from '../utils/windowFocus'
 import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/chatTools'
 import { THEME_COLOR_PRESETS, normalizeThemeColorId } from '../themeColors'
 import {
-  Toggle, Select, Input, TextArea,
+  Toggle, Select, Input,
   SettingRow, PermissionItem,
-  SettingsGroup,
+  SettingsGroup, FieldBlock,
 } from './components'
 import { ConnectorsPanel } from './ConnectorsPanel'
 import { WebSearchPanel } from './WebSearchPanel'
@@ -70,7 +70,6 @@ import { defaultChatTools } from './chatToolsShared'
 export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'webSearch' | 'connectors' | 'usage' | 'providers' | 'about'
 
 type SettingsData = SettingsType
-const CHAT_MAX_OUTPUT_TOKEN_OPTIONS = [2048, 8192, 16384, 32768]
 // UI 字号：以 px 展示、以整体缩放（zoom）实现。CSS 全是 px 硬编码，做不了真正的 rem 基准字号，
 // 故 14px 锚定为 100%，输入 px → scale = px/14。ponytail: zoom 代理，若将来全量 rem 化可换真基准。
 const UI_FONT_BASE_PX = 14
@@ -159,28 +158,6 @@ export type HotkeyScopeKey =
   | 'screenshotAnnotate'
   | 'lens'
 
-function FieldBlock({
-  label,
-  description,
-  children,
-  className = '',
-}: {
-  label: React.ReactNode
-  description?: string
-  children: React.ReactNode
-  className?: string
-}) {
-  return (
-    <div className={`py-2 ${className}`}>
-      <div className="mb-2">
-        <div className="kv-row-label">{label}</div>
-        {description && <p className="kv-row-desc">{description}</p>}
-      </div>
-      {children}
-    </div>
-  )
-}
-
 function defaultChatConfig(): NonNullable<SettingsData['chat']> {
   return {
     streamEnabled: true,
@@ -204,11 +181,6 @@ function defaultChatMemory(): ChatMemoryConfig {
     enabled: false,
     toolWriteConfirm: false,
   }
-}
-
-function formatTokenCount(tokens?: number): string {
-  if (!tokens || !Number.isFinite(tokens)) return ''
-  return `${tokens.toLocaleString()} tokens`
 }
 
 function resolveEffectiveChatModel(settings: SettingsData): { provider?: ModelProvider, model: string } {
@@ -302,83 +274,6 @@ function resolveDefaultModelsAfterModelRemoval(
   }
 }
 
-/**
- * 头像：可点击的圆形头像，点击=选本地图片 → canvas 缩到 256px → 存 data URL
- * （避免把大图 base64 塞进 settings.json）。空时显示应用默认 logo。value 仍是字符串，
- * 可直接当 <img src>，与旧的 URL 值兼容。
- */
-function AvatarField({
-  value,
-  onChange,
-  zh,
-}: {
-  value: string
-  onChange: (v: string) => void
-  zh: boolean
-}) {
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = '' // 允许再次选同一文件
-    if (!file || !file.type.startsWith('image/')) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      const img = new Image()
-      img.onload = () => {
-        const max = 256
-        const scale = Math.min(1, max / Math.max(img.width, img.height))
-        const w = Math.max(1, Math.round(img.width * scale))
-        const h = Math.max(1, Math.round(img.height * scale))
-        const canvas = document.createElement('canvas')
-        canvas.width = w
-        canvas.height = h
-        const ctx = canvas.getContext('2d')
-        if (!ctx) {
-          onChange(String(reader.result))
-          return
-        }
-        ctx.drawImage(img, 0, 0, w, h)
-        onChange(canvas.toDataURL('image/jpeg', 0.85))
-      }
-      img.src = String(reader.result)
-    }
-    reader.readAsDataURL(file)
-  }
-
-  return (
-    <div className="relative shrink-0">
-      <button
-        type="button"
-        onClick={() => inputRef.current?.click()}
-        title={zh ? '点击上传头像' : 'Click to upload avatar'}
-        data-tauri-drag-region="false"
-        className="group relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-white ring-1 ring-black/[0.05] transition dark:bg-neutral-900 dark:ring-white/[0.08]"
-      >
-        {value ? (
-          <img src={value} alt="" className="h-full w-full object-cover" />
-        ) : (
-          <img src="/icon.png" alt="" className="h-[82%] w-[82%] object-contain" draggable={false} />
-        )}
-        <span className="absolute inset-0 hidden items-center justify-center bg-black/45 text-white group-hover:flex">
-          <Upload size={14} />
-        </span>
-      </button>
-      {value && (
-        <button
-          type="button"
-          onClick={() => onChange('')}
-          title={zh ? '移除头像' : 'Remove avatar'}
-          data-tauri-drag-region="false"
-          className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-neutral-700 text-white ring-2 ring-white hover:bg-neutral-900 dark:bg-neutral-500 dark:ring-neutral-900"
-        >
-          <X size={10} />
-        </button>
-      )}
-      <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
-    </div>
-  )
-}
 
 /**
  * 设置面板主组件（standalone / embedded 双宿主）
@@ -2227,229 +2122,27 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
             {/* ===== AI 客户端标签页 ===== */}
             {activeTab === 'chat' && (
-              <>
-                <SettingsGroup title={lang === 'zh' ? '个人资料' : 'Profile'}>
-                  <div className="flex items-center gap-3 py-1">
-                    <AvatarField
-                      value={chatConfig.userAvatar || ''}
-                      onChange={(userAvatar) => updateChat({ userAvatar })}
-                      zh={lang === 'zh'}
-                    />
-                    <Input
-                      className="min-w-0 flex-1"
-                      value={chatConfig.userDisplayName || ''}
-                      onChange={(userDisplayName) => updateChat({ userDisplayName })}
-                      placeholder={lang === 'zh' ? '用户名（选填）' : 'Display name (optional)'}
-                    />
-                  </div>
-                </SettingsGroup>
-
-                <SettingsGroup title={lang === 'zh' ? '工作目录' : 'Workspace'}>
-                  <SettingRow label={lang === 'zh' ? '普通对话工作目录' : 'Conversation workspace'} stack>
-                    <div className="flex w-full flex-col gap-2">
-                      <div className="flex gap-2">
-                        <Input
-                          className="min-w-0 flex-1"
-                          value={chatTools.nativeTools?.workingDirectory ?? ''}
-                          placeholder={lang === 'zh' ? '默认：~/Kivio/workspace' : 'Default: ~/Kivio/workspace'}
-                          onChange={(workingDirectory) => updateNativeTools({ workingDirectory })}
-                        />
-                        <Button
-                          size="sm"
-                          className="shrink-0"
-                          onClick={async () => {
-                            const selected = await open({ directory: true, multiple: false })
-                            if (!selected || typeof selected !== 'string') return
-                            updateNativeTools({ workingDirectory: selected })
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          <FolderOpen size={11} />
-                          {lang === 'zh' ? '选择' : 'Choose'}
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="shrink-0"
-                          onClick={async () => {
-                            const defaultPath = await join(await homeDir(), 'Kivio', 'workspace')
-                            updateNativeTools({ workingDirectory: defaultPath })
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          <RefreshCw size={11} />
-                          {lang === 'zh' ? '恢复默认' : 'Reset'}
-                        </Button>
-                      </div>
-                      <p className="kv-row-desc">
-                        {lang === 'zh'
-                          ? '未绑定项目的普通对话会在此目录下按对话 ID 使用独立工作台；用户明确指定的其他路径不受限制。'
-                          : 'Ordinary chats get a per-conversation workbench here. Explicit paths chosen by the user remain unrestricted.'}
-                      </p>
-                    </div>
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={lang === 'zh' ? '响应' : 'Response'}>
-                  <SettingRow label={t.chatStreamEnabled}>
-                    <Toggle
-                      checked={chatConfig.streamEnabled !== false}
-                      onChange={(streamEnabled) => updateChat({ streamEnabled })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.chatThinkingEnabled} description={t.chatThinkingHint}>
-                    <Toggle
-                      checked={chatConfig.thinkingEnabled !== false}
-                      onChange={(thinkingEnabled) => updateChat({ thinkingEnabled })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.chatMaxOutputTokens} stack>
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[15px] font-medium text-neutral-900 dark:text-neutral-50">
-                            {formatTokenCount(effectiveChatMaxOutput.maxOutput)}
-                          </span>
-                          <span className={`kv-tag ${effectiveChatMaxOutput.source === 'fallback' ? 'warn' : 'ok'}`}>
-                            {chatMaxOutputSourceLabel}
-                          </span>
-                        </div>
-                        <p className="kv-row-desc mt-1 min-w-0 break-all">
-                          {lang === 'zh' ? '当前聊天模型：' : 'Current chat model: '}
-                          {chatMaxOutputModelLabel}
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="kv-row-desc whitespace-nowrap">
-                          {lang === 'zh' ? '兜底' : 'Fallback'}
-                        </span>
-                        <Select
-                          className="w-44"
-                          value={String(chatFallbackMaxOutputTokens)}
-                          onChange={(maxOutputTokens) => updateChat({ maxOutputTokens: Number(maxOutputTokens) })}
-                          options={CHAT_MAX_OUTPUT_TOKEN_OPTIONS.map((tokens) => ({
-                            value: String(tokens),
-                            label: formatTokenCount(tokens),
-                          }))}
-                        />
-                      </div>
-                    </div>
-                  </SettingRow>
-                  <SettingRow label={t.chatDefaultLanguage}>
-                    <Select
-                      className="w-44"
-                      value={chatConfig.defaultLanguage || ''}
-                      onChange={(defaultLanguage) => updateChat({ defaultLanguage })}
-                      options={[
-                        { value: '', label: t.lensLanguageInherit },
-                        { value: 'zh', label: '中文' },
-                        { value: 'zh-Hant', label: '繁體中文' },
-                        { value: 'en', label: 'English' },
-                      ]}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.customPrompts}>
-                  <FieldBlock label={t.chatSystemPrompt} description={t.chatSystemPromptHint}>
-                    <div className="mb-2 flex justify-end">
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          setChatSystemPromptInteracted(false)
-                          updateChat({ systemPrompt: '' })
-                        }}
-                        disabled={!chatDefaults || (!chatConfig.systemPrompt && !chatSystemPromptInteracted)}
-                        data-tauri-drag-region="false"
-                      >
-                        <RefreshCw size={10} />
-                        {t.restoreDefaultPrompt}
-                      </Button>
-                    </div>
-                    <TextArea
-                      value={chatSystemPromptValue}
-                      onChange={(systemPrompt) => {
-                        setChatSystemPromptInteracted(true)
-                        updateChat({ systemPrompt })
-                      }}
-                      rows={4}
-                    />
-                  </FieldBlock>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.chatToolsSection}>
-                  <div className="flex flex-wrap gap-2 pb-2">
-                    <Button
-                      size="sm"
-                      onClick={() => setActiveTab('memory')}
-                      data-tauri-drag-region="false"
-                    >
-                      <MemoryIcon size={11} />
-                      {t.tabMemory}
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => setActiveTab('externalAgents')}
-                      data-tauri-drag-region="false"
-                    >
-                      <AgentIcon size={11} />
-                      {t.chatOpenExternalAgents}
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => setActiveTab('providers')}
-                      data-tauri-drag-region="false"
-                    >
-                      <ProvidersIcon size={11} />
-                      {t.chatOpenProviders}
-                    </Button>
-                  </div>
-                  <SettingRow
-                    label={lang === 'zh' ? 'MCP 工具' : 'MCP tools'}
-                  >
-                    <span className={`kv-tag ${chatTools.enabled ? 'ok' : ''}`}>
-                      {chatTools.enabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? 'Skill 运行时' : 'Skill runtime'}
-                  >
-                    <span className={`kv-tag ${skillRuntimeEnabled ? 'ok' : ''}`}>
-                      {skillRuntimeEnabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? '内置工具' : 'Native tools'}
-                  >
-                    <span className={`kv-tag ${nativeBuiltinToolsEnabled ? 'ok' : ''}`}>
-                      {nativeBuiltinToolsEnabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={t.tabMemory}
-                  >
-                    <span className={`kv-tag ${chatMemory.enabled ? 'ok' : ''}`}>
-                      {chatMemory.enabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? '联网搜索' : 'Web search'}
-                  >
-                    <span className={`kv-tag ${(settings.lens?.webSearch?.enabled || chatTools.nativeTools?.webSearch) ? 'ok' : ''}`}>
-                      {(settings.lens?.webSearch?.enabled || chatTools.nativeTools?.webSearch)
-                        ? (lang === 'zh' ? '部分启用' : 'Partially on')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                </SettingsGroup>
-              </>
+              <ChatTab
+                settings={settings}
+                t={t}
+                lang={lang}
+                chatConfig={chatConfig}
+                chatTools={chatTools}
+                chatMemory={chatMemory}
+                chatDefaults={chatDefaults}
+                chatSystemPromptValue={chatSystemPromptValue}
+                chatSystemPromptInteracted={chatSystemPromptInteracted}
+                chatFallbackMaxOutputTokens={chatFallbackMaxOutputTokens}
+                effectiveChatMaxOutput={effectiveChatMaxOutput}
+                chatMaxOutputSourceLabel={chatMaxOutputSourceLabel}
+                chatMaxOutputModelLabel={chatMaxOutputModelLabel}
+                skillRuntimeEnabled={skillRuntimeEnabled}
+                nativeBuiltinToolsEnabled={nativeBuiltinToolsEnabled}
+                onUpdateChat={updateChat}
+                onUpdateNativeTools={updateNativeTools}
+                onSystemPromptInteractedChange={setChatSystemPromptInteracted}
+                onNavigateTab={setActiveTab}
+              />
             )}
 
             {/* ===== 记忆标签页 ===== */}
