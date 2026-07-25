@@ -3,7 +3,7 @@
   "name": "split-settings-shell-tabs",
   "title": "拆分 SettingsShell.tsx 的 tab 面板",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

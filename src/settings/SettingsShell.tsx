@@ -46,6 +46,7 @@ import { initialReplacePackProgressState, reduceReplacePackProgress } from './re
 import { UsageStatsPanel } from './UsageStatsPanel'
 import { RequestDebugPanel } from './RequestDebugPanel'
 import { ExternalAgentsSettings } from './ExternalAgentsSettings'
+import { HotkeysTab } from './tabs/HotkeysTab'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
 import { Button, IconButton } from '../components/Button'
@@ -55,7 +56,7 @@ import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/ch
 import { THEME_COLOR_PRESETS, normalizeThemeColorId } from '../themeColors'
 import {
   Toggle, Select, Input, TextArea,
-  SettingRow, PermissionItem, HotkeyInput,
+  SettingRow, PermissionItem,
   SettingsGroup,
 } from './components'
 import { ConnectorsPanel } from './ConnectorsPanel'
@@ -151,6 +152,16 @@ export interface SettingsShellProps {
 export interface SettingsShellHandle {
   requestClose: () => void
 }
+
+/** 快捷键作用域。原本是组件体内的局部 type，抽 HotkeysTab 后需要跨模块共享，提到模块作用域。 */
+export type HotkeyScopeKey =
+  | 'main'
+  | 'chat'
+  | 'screenshotTranslation'
+  | 'screenshotTranslationText'
+  | 'screenshotTranslationReplace'
+  | 'screenshotAnnotate'
+  | 'lens'
 
 function FieldBlock({
   label,
@@ -552,7 +563,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   // OS 层面的冲突(Spotlight 占用 Cmd+Space 等)仍需保存后从后端拿到结果。
   // 返回每个 scope 对应的"和谁冲突"——前端各 HotkeyInput 拿到对应 scope 的伙伴名后,
   // 用 hotkeyScope* 模板自己拼本地化字符串。
-  type HotkeyScopeKey = 'main' | 'chat' | 'screenshotTranslation' | 'screenshotTranslationText' | 'screenshotTranslationReplace' | 'screenshotAnnotate' | 'lens'
   const hotkeyConflicts = useMemo<Partial<Record<HotkeyScopeKey, HotkeyScopeKey>>>(() => {
     if (!settings) return {}
     const slots: Array<{ scope: HotkeyScopeKey; hotkey: string; enabled: boolean }> = [
@@ -2316,113 +2326,17 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
             {/* ===== 快捷键标签页：集中所有全局热键 ===== */}
             {activeTab === 'hotkeys' && (
-              <SettingsGroup title={t.tabHotkeys} className="kv-hotkey-list">
-                <SettingRow label={t.tabTranslate}>
-                  <HotkeyInput
-                    inline
-                    value={settings.hotkey}
-                    placeholder={t.hotkeyPlaceholder}
-                    recording={recordingTarget === 'main'}
-                    onToggleRecording={() => toggleRecording('main')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateSettings({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('main')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.chatHotkeyLabel}>
-                  <HotkeyInput
-                    inline
-                    value={settings.chatHotkey}
-                    placeholder={t.hotkeyPlaceholder}
-                    recording={recordingTarget === 'chat'}
-                    onToggleRecording={() => toggleRecording('chat')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateSettings({ chatHotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('chat')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.screenshotHotkey}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotTranslation?.hotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+A"
-                    recording={recordingTarget === 'screenshotTranslation'}
-                    onToggleRecording={() => toggleRecording('screenshotTranslation')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotTranslation({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotTranslation')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.screenshotTextHotkey}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotTranslation?.textHotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+T"
-                    recording={recordingTarget === 'screenshotTranslationText'}
-                    onToggleRecording={() => toggleRecording('screenshotTranslationText')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotTranslation({ textHotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotTranslationText')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.replaceTranslateHotkey}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotTranslation?.replaceHotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+R"
-                    recording={recordingTarget === 'screenshotTranslationReplace'}
-                    onToggleRecording={() => toggleRecording('screenshotTranslationReplace')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotTranslation({ replaceHotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotTranslationReplace')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.annotateHotkeyLabel}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotAnnotate?.hotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+S"
-                    recording={recordingTarget === 'screenshotAnnotate'}
-                    onToggleRecording={() => toggleRecording('screenshotAnnotate')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotAnnotate({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotAnnotate')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.lensTabLabel}>
-                  <HotkeyInput
-                    inline
-                    value={settings.lens?.hotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+G"
-                    recording={recordingTarget === 'lens'}
-                    onToggleRecording={() => toggleRecording('lens')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateLens({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('lens')}
-                  />
-                </SettingRow>
-              </SettingsGroup>
+              <HotkeysTab
+                settings={settings}
+                t={t}
+                recordingTarget={recordingTarget}
+                onToggleRecording={toggleRecording}
+                conflictMessageFor={conflictMessageFor}
+                onUpdateSettings={updateSettings}
+                onUpdateScreenshotTranslation={updateScreenshotTranslation}
+                onUpdateScreenshotAnnotate={updateScreenshotAnnotate}
+                onUpdateLens={updateLens}
+              />
             )}
 
             {/* ===== Lens 标签页 ===== */}
