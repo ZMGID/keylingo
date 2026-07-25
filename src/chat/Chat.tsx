@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { GitBranch, Wrench, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { ChatImageViewer } from './ChatImageViewer'
@@ -163,6 +163,41 @@ interface ChatProps {
 
 function hashPath(): string {
   return window.location.hash.replace('#', '').split('?')[0]
+}
+
+/**
+ * 设置页入场容器：先静态铺好起始态（下移 + 半透明），首帧绘制之后再加 --entered 触发过渡。
+ *
+ * 为什么不能直接用 CSS animation：animation 走墙钟时间，而 SettingsShell 那棵树很大，
+ * 挂载帧的布局/绘制常吃掉上百毫秒 —— 等首帧真正画出来，动画已经跑完大半，体感就是"没有动画"
+ * （退场没这问题，它作用于已绘制的元素）。双 rAF 把起点钉在首帧之后，整段位移必定可见。
+ * 同款模式见 CompactionDivider。
+ */
+function SettingsEnterPane({ exiting, className, children }: {
+  exiting: boolean
+  className: string
+  children: ReactNode
+}) {
+  const [entered, setEntered] = useState(false)
+
+  useLayoutEffect(() => {
+    let cancelled = false
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!cancelled) setEntered(true)
+      })
+    })
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  const motion = exiting
+    ? 'chat-motion-settings-out'
+    : `chat-motion-settings-in${entered ? ' chat-motion-settings-in--entered' : ''}`
+
+  return <div className={`${motion} ${className}`}>{children}</div>
 }
 
 /**
@@ -1542,7 +1577,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const pending = pendingAfterSettingsCloseRef.current
       pendingAfterSettingsCloseRef.current = null
       pending?.()
-    }, 150)
+    }, 220)
   }, [loadSkills, refreshToolIndicator, syncConversationRoute])
 
   // 中心页（技能/MCP/插件/专家）没有自己的返回按钮，离开靠侧栏选会话/新建等任意路径。
@@ -3709,6 +3744,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     dropConversationLocally(id)
   }, [dropConversationLocally])
 
+  const settingsPanelActive = chatView === 'settings' && extensionsNavItem === null
+
+  const handleSidebarOpenExtensionsItem = useCallback((item: ExtensionsNavItem) => {
+    // 设置页开着时点扩展项：先走退场（含未保存改动确认），否则设置页被硬切走、动画不播。
+    // 侧栏在设置页下常驻可点（见下方 collapsed 注释）后这条路径才可达。
+    runAfterLeavingSettings(() => openExtensionsItem(item))
+  }, [openExtensionsItem, runAfterLeavingSettings])
+
   const handleSidebarOpenSettings = useCallback(() => {
     const settingsPanelOpen = chatView === 'settings' && extensionsNavItem === null
     if (settingsPanelOpen) {
@@ -3765,7 +3808,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     >
       {!usesNativeTitlebar && <WindowControls />}
       <div className="flex h-full min-h-0 w-full">
-        {chatView !== 'onboarding' && !(chatView === 'settings' && extensionsNavItem === null) ? (
+        {chatView !== 'onboarding' ? (
+        /* 设置页自带 200px 导航栏，聊天侧栏此时借用已有的折叠过渡整体滑出（不再直接卸载，
+           否则左列会先空一帧、且关闭时侧栏是瞬间 pop 回来的）。退场期保持折叠，
+           等视图真正切回会话后再滑入，与会话页入场同时发生 —— 否则侧栏会在设置页
+           淡出的同时把它挤窄。 */
         <Sidebar
           lang={uiLang}
           currentConversationId={currentConversation?.id}
@@ -3779,11 +3826,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           onNewConversation={handleSidebarNewConversation}
           onConversationDeleted={handleSidebarConversationDeleted}
           onForceDropConversation={handleSidebarForceDropConversation}
-          onOpenExtensionsItem={openExtensionsItem}
+          onOpenExtensionsItem={handleSidebarOpenExtensionsItem}
           onOpenSettings={handleSidebarOpenSettings}
-          settingsActive={chatView === 'settings' && extensionsNavItem === null}
+          settingsActive={settingsPanelActive}
           extensionsActive={extensionsActive}
-          collapsed={sidebarCollapsed}
+          collapsed={sidebarCollapsed || settingsPanelActive}
           onToggleCollapsed={handleCollapseSidebar}
           refreshKey={sidebarRefreshKey}
           profileRefreshKey={sidebarProfileRefreshKey}
@@ -3801,8 +3848,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             />
           </div>
         ) : chatView === 'settings' ? (
-          <div key="settings" className={`${settingsExiting ? 'chat-motion-settings-out' : 'chat-motion-settings-in'} chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col`}>
-            <Suspense fallback={null}>
+          /* Suspense 必须包在动画容器外面：放在里面时 fallback=null 会让容器先带着空白挂载、
+             动画播在空白上，lazy 内容晚几帧才 pop 进来（进场看起来"没有动画"）。
+             包在外面则容器与内容一起挂载，动画全程播在真实内容上。 */
+          <Suspense fallback={null}>
+            <SettingsEnterPane
+              key="settings"
+              exiting={settingsExiting}
+              className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col"
+            >
               <SettingsShell
                 ref={settingsRef}
                 variant="embedded"
@@ -3812,8 +3866,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                 onSettingsChange={handleSettingsChange}
                 onReady={emitContentReady}
               />
-            </Suspense>
-          </div>
+            </SettingsEnterPane>
+          </Suspense>
         ) : chatView === 'assistants' ? (
           <div key="assistants" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
             {centerPageTopStrip}
@@ -3863,7 +3917,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </Suspense>
           </div>
         ) : (
-          <div className="chat-main-pane relative flex min-w-0 flex-1 flex-col">
+          <div className="chat-motion-pane-in chat-main-pane relative flex min-w-0 flex-1 flex-col">
             {/* 图片查看器为浮层(见下方 overlay),不替换主面板 —— 否则会卸载 InputBar,
                 丢掉待发送附件 / 草稿。here 起正常内容,始终挂载。 */}
             <>
