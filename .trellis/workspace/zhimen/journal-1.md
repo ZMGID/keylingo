@@ -549,3 +549,37 @@ Fixed child, Worker, OCR helper, Preview server, cache, knowledge-base lock, Mes
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: 修复审查发现的正确性 Bug + 会话重复加载
+
+**Date**: 2026-07-25
+**Task**: 修复审查发现的正确性 Bug + 会话重复加载
+**Branch**: `main`
+
+### Summary
+
+全项目审查后收拢的 6 个正确性 Bug 全部修复：B1 多答流式列 memo 冻结（version 纳入 deps）、B2 Retry-After 巨值封顶、B3 后台作业按 conversation_id 隔离、B4a rerank 分被 fused 分覆盖、B4b 阈值把结果静默截到 rerank_top_k、B5 子任务重试谓词收窄到空响应。审查另报的多库候选池上限经核实为刻意设计，已在 prd 撤下。另修 Chat.tsx 会话重复加载：点击/新建/分支走「先 apply 再 sync 路由」，随后 hashchange 会对同一对话再 force reload 一遍；loadFromRoute 加 ref 相等短路，onChatOpenConversation 按 hash 是否变化二选一。验证 cargo test --lib 1135 passed、vitest 315/315、tsc + eslint 干净。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `520bfe6` | (see git log) |
+| `a336dde` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
