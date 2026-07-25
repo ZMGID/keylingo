@@ -49,6 +49,8 @@ import { HotkeysTab } from './tabs/HotkeysTab'
 import { LensTab } from './tabs/LensTab'
 import { MixerTab } from './tabs/MixerTab'
 import { TranslateTab } from './tabs/TranslateTab'
+import { MemoryTab } from './tabs/MemoryTab'
+import { MEMORY_L1_MAX_BYTES, utf8ByteLength, type MemoryLayerKey } from './memoryLayers'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
 import { Button, IconButton } from '../components/Button'
@@ -68,9 +70,6 @@ import { defaultChatTools } from './chatToolsShared'
 export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'webSearch' | 'connectors' | 'usage' | 'providers' | 'about'
 
 type SettingsData = SettingsType
-type MemoryLayerKey = 'l1' | 'l2'
-
-const MEMORY_L1_MAX_BYTES = 5_000
 const CHAT_MAX_OUTPUT_TOKEN_OPTIONS = [2048, 8192, 16384, 32768]
 // UI 字号：以 px 展示、以整体缩放（zoom）实现。CSS 全是 px 硬编码，做不了真正的 rem 基准字号，
 // 故 14px 锚定为 100%，输入 px → scale = px/14。ponytail: zoom 代理，若将来全量 rem 化可换真基准。
@@ -133,11 +132,6 @@ function FontPicker({ value, systemFonts, placeholder, defaultLabel, emptyText, 
     </div>
   )
 }
-const textEncoder = new TextEncoder()
-
-function utf8ByteLength(value: string): number {
-  return textEncoder.encode(value).length
-}
 
 export interface SettingsShellProps {
   variant: 'standalone' | 'embedded'
@@ -183,91 +177,6 @@ function FieldBlock({
         {description && <p className="kv-row-desc">{description}</p>}
       </div>
       {children}
-    </div>
-  )
-}
-
-function MemoryEditor({
-  layer,
-  title,
-  description,
-  value,
-  savedValue,
-  maxBytes,
-  rows,
-  loading,
-  saving,
-  lang,
-  onChange,
-  onSave,
-  onReload,
-}: {
-  layer: MemoryLayerKey
-  title: string
-  description: string
-  value: string
-  savedValue: string
-  maxBytes?: number
-  rows: number
-  loading: boolean
-  saving: boolean
-  lang: string
-  onChange: (value: string) => void
-  onSave: () => void
-  onReload: () => void
-}) {
-  const bytes = utf8ByteLength(value)
-  const overLimit = maxBytes !== undefined && bytes > maxBytes
-  const dirty = value !== savedValue
-  return (
-    <div className="kv-panel">
-      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="kv-panel-title !mb-1">
-            {title}
-            <span className={`kv-tag ${overLimit ? 'danger' : dirty ? 'warn' : 'ok'}`}>
-              {maxBytes ? `${bytes} / ${maxBytes} bytes` : `${bytes} bytes`}
-            </span>
-          </div>
-          <div className="kv-panel-body">{description}</div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button
-            size="sm"
-            onClick={onReload}
-            disabled={loading || saving}
-            data-tauri-drag-region="false"
-          >
-            <RefreshCw size={10} className={loading ? 'animate-spin' : ''} />
-            {lang === 'zh' ? '重载' : 'Reload'}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={onSave}
-            disabled={loading || saving || !dirty || overLimit}
-            data-tauri-drag-region="false"
-          >
-            {saving ? (lang === 'zh' ? '保存中' : 'Saving') : (lang === 'zh' ? '保存' : 'Save')}
-          </Button>
-        </div>
-      </div>
-      <textarea
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        rows={rows}
-        className="kv-textarea mono custom-scrollbar min-h-[160px]"
-        spellCheck={false}
-        data-tauri-drag-region="false"
-        aria-label={title}
-      />
-      {overLimit && (
-        <p className="mt-1.5 text-[11px] leading-snug text-red-500 dark:text-red-400">
-          {lang === 'zh'
-            ? `${layer.toUpperCase()} 超出字节上限，保存前需要精简。`
-            : `${layer.toUpperCase()} is over its byte limit.`}
-        </p>
-      )}
     </div>
   )
 }
@@ -2545,94 +2454,25 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
             {/* ===== 记忆标签页 ===== */}
             {activeTab === 'memory' && (
-              <>
-                <SettingsGroup title={lang === 'zh' ? '记忆运行' : 'Memory runtime'}>
-                  <SettingRow
-                    label={lang === 'zh' ? '启用记忆' : 'Enable memory'}
-                    description={lang === 'zh'
-                      ? '开启后注入 L1，并暴露 memory 工具。'
-                      : 'Injects L1 and exposes memory tools.'}
-                  >
-                    <Toggle
-                      checked={chatMemory.enabled}
-                      onChange={(enabled) => updateChatMemory({ enabled })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={lang === 'zh' ? '记忆文件夹' : 'Memory folder'} stack>
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <Button
-                        size="sm"
-                        onClick={() => void refreshChatMemory()}
-                        disabled={memoryLoading}
-                        data-tauri-drag-region="false"
-                      >
-                        <RefreshCw size={10} className={memoryLoading ? 'animate-spin' : ''} />
-                        {lang === 'zh' ? '刷新' : 'Refresh'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => void handleOpenMemoryFolder()}
-                        data-tauri-drag-region="false"
-                      >
-                        <FolderOpen size={11} />
-                        {lang === 'zh' ? '打开文件夹' : 'Open folder'}
-                      </Button>
-                      {memoryDir && <span className="kv-row-desc min-w-0 break-all">{memoryDir}</span>}
-                    </div>
-                  </SettingRow>
-                  {memoryError && <div className="kv-inline-error">{memoryError}</div>}
-                  {memorySuccess && (
-                    <div className="kv-panel info">
-                      <div className="kv-panel-body">{memorySuccess}</div>
-                    </div>
-                  )}
-                </SettingsGroup>
-
-                <SettingsGroup title="L1">
-                  <MemoryEditor
-                    layer="l1"
-                    title={lang === 'zh' ? 'L1 在线记忆' : 'L1 Online Memory'}
-                    description={lang === 'zh'
-                      ? '每次回答都会参考的偏好与约束。'
-                      : 'Preferences and constraints applied to every reply.'}
-                    value={memoryDrafts.l1}
-                    savedValue={memorySnapshots.l1}
-                    maxBytes={MEMORY_L1_MAX_BYTES}
-                    rows={9}
-                    loading={memoryLoading}
-                    saving={memorySavingLayer === 'l1'}
-                    lang={lang}
-                    onChange={(value) => {
-                      setMemoryDrafts((prev) => ({ ...prev, l1: value }))
-                      setMemorySuccess('')
-                    }}
-                    onSave={() => void handleSaveMemoryLayer('l1')}
-                    onReload={() => void refreshChatMemory()}
-                  />
-                </SettingsGroup>
-
-                <SettingsGroup title="L2">
-                  <MemoryEditor
-                    layer="l2"
-                    title={lang === 'zh' ? 'L2 长期记忆' : 'L2 Long-Term Memory'}
-                    description={lang === 'zh'
-                      ? '长期记录，按需通过 memory 工具读取。'
-                      : 'Long-term notes, read on demand via memory tools.'}
-                    value={memoryDrafts.l2}
-                    savedValue={memorySnapshots.l2}
-                    rows={13}
-                    loading={memoryLoading}
-                    saving={memorySavingLayer === 'l2'}
-                    lang={lang}
-                    onChange={(value) => {
-                      setMemoryDrafts((prev) => ({ ...prev, l2: value }))
-                      setMemorySuccess('')
-                    }}
-                    onSave={() => void handleSaveMemoryLayer('l2')}
-                    onReload={() => void refreshChatMemory()}
-                  />
-                </SettingsGroup>
-              </>
+              <MemoryTab
+                lang={lang}
+                chatMemory={chatMemory}
+                memoryDir={memoryDir}
+                memoryError={memoryError}
+                memorySuccess={memorySuccess}
+                memoryLoading={memoryLoading}
+                memorySavingLayer={memorySavingLayer}
+                memoryDrafts={memoryDrafts}
+                memorySnapshots={memorySnapshots}
+                onUpdateChatMemory={updateChatMemory}
+                onRefresh={() => void refreshChatMemory()}
+                onOpenFolder={() => void handleOpenMemoryFolder()}
+                onDraftChange={(layer, value) => {
+                  setMemoryDrafts((prev) => ({ ...prev, [layer]: value }))
+                  setMemorySuccess('')
+                }}
+                onSaveLayer={(layer) => void handleSaveMemoryLayer(layer)}
+              />
             )}
 
             {/* ===== 混音器标签页 ===== */}
