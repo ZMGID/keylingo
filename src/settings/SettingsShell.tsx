@@ -48,6 +48,7 @@ import { RequestDebugPanel } from './RequestDebugPanel'
 import { ExternalAgentsSettings } from './ExternalAgentsSettings'
 import { HotkeysTab } from './tabs/HotkeysTab'
 import { LensTab } from './tabs/LensTab'
+import { MixerTab } from './tabs/MixerTab'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
 import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
 import { Button, IconButton } from '../components/Button'
@@ -2673,145 +2674,15 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
             {/* ===== 混音器标签页 ===== */}
             {activeTab === 'mixer' && (
-              <>
-                <SettingsGroup title={t.mixerSection}>
-                  <div className="mb-3 flex items-start justify-between gap-3">
-                    {t.mixerSectionHint ? (
-                      <p className="kv-row-desc max-w-[560px]">{t.mixerSectionHint}</p>
-                    ) : <span />}
-                    <Button
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() => {
-                        updateDefaultModel('vision', '', '')
-                        updateDefaultModel('titleSummary', '', '')
-                        updateDefaultModel('compression', '', '')
-                        updateDefaultModel('imageGeneration', '', '')
-                      }}
-                      data-tauri-drag-region="false"
-                    >
-                      {t.mixerResetAuto}
-                    </Button>
-                  </div>
-                  <SettingRow
-                    label={t.auxiliaryVisionModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.vision.providerId || ''}
-                      model={settings.defaultModels.vision.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerAutoVisionModel}
-                      filterModel={(provider, model) =>
-                        resolveModelInfo(model, provider.modelOverrides).capabilities?.vision === true
-                      }
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('vision', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.defaultTitleSummaryModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.titleSummary.providerId || ''}
-                      model={settings.defaultModels.titleSummary.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerAutoModel}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('titleSummary', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.defaultCompressionModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.compression.providerId || ''}
-                      model={settings.defaultModels.compression.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerAutoModel}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('compression', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.defaultImageGenerationModel}
-                    description={t.defaultImageGenerationModelHint}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.imageGeneration.providerId || ''}
-                      model={settings.defaultModels.imageGeneration.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerNoImageGenerationModel}
-                      filterModel={(provider, model) =>
-                        resolveModelInfo(model, provider.modelOverrides).capabilities?.imageGeneration === true
-                      }
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('imageGeneration', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  {!chatProvider && (
-                    <p className="kv-row-desc px-0 pb-2">
-                      {lang === 'zh' ? '请先在「模型」中添加并配置供应商。' : 'Add and configure a provider under Models first.'}
-                    </p>
-                  )}
-                </SettingsGroup>
-
-                <SettingsGroup title={t.mixerSubAgentSection}>
-                  <SettingRow
-                    label={t.defaultSubAgentModel}
-                    description={t.defaultSubAgentModelHint}
-                  >
-                    <ModelPairSelect
-                      providerId={chatTools.subAgentProviderId || ''}
-                      model={chatTools.subAgentModel || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerFollowChatModel}
-                      onChange={(providerId, model) => {
-                        updateChatTools({ subAgentProviderId: providerId, subAgentModel: model })
-                      }}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.mixerAdvisorSection}>
-                  <SettingRow
-                    label={t.defaultAdvisorModel}
-                    description={t.defaultAdvisorModelHint}
-                  >
-                    <Toggle
-                      checked={Boolean(settings.defaultModels.advisor.providerId)}
-                      onChange={(on) => {
-                        if (on) {
-                          // 开启：若尚未选过模型，默认落到第一个可用供应商的首个模型，用户可再改。
-                          if (!settings.defaultModels.advisor.providerId) {
-                            const p = settings.providers.find(
-                              (pp) => pp.enabled && (pp.enabledModels?.length ?? 0) > 0,
-                            )
-                            updateDefaultModel('advisor', p?.id ?? '', p?.enabledModels[0] ?? '')
-                          }
-                        } else {
-                          updateDefaultModel('advisor', '', '')
-                        }
-                      }}
-                    />
-                  </SettingRow>
-                  {Boolean(settings.defaultModels.advisor.providerId) && (
-                    <SettingRow label={lang === 'zh' ? '顾问模型' : 'Advisor model'}>
-                      <ModelPairSelect
-                        providerId={settings.defaultModels.advisor.providerId || ''}
-                        model={settings.defaultModels.advisor.model || ''}
-                        providers={settings.providers}
-                        onChange={(providerId, model) => {
-                          updateDefaultModel('advisor', providerId, model)
-                        }}
-                      />
-                    </SettingRow>
-                  )}
-                </SettingsGroup>
-              </>
+              <MixerTab
+                settings={settings}
+                t={t}
+                lang={lang}
+                chatTools={chatTools}
+                hasChatProvider={Boolean(chatProvider)}
+                onUpdateDefaultModel={updateDefaultModel}
+                onUpdateChatTools={updateChatTools}
+              />
             )}
 
             {activeTab === 'externalAgents' && (
