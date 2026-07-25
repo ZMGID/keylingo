@@ -3,7 +3,7 @@
   "name": "extract-chat-hooks",
   "title": "抽取 Chat.tsx 的领域 hooks",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

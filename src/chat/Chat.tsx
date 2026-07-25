@@ -1,6 +1,19 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { GitBranch, Wrench, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
+import { useChatRouting } from './hooks/useChatRouting'
+import {
+  getRouteConversationId,
+  hashPath,
+  isChatAssistantCenterPath,
+  isChatKnowledgeCenterPath,
+  isChatMcpCenterPath,
+  isChatNotesPath,
+  isChatOnboardingRoute,
+  isChatPluginCenterPath,
+  isChatSettingsPath,
+  isChatSkillCenterPath,
+} from './chatRoutes'
 import { ChatImageViewer } from './ChatImageViewer'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
@@ -67,7 +80,6 @@ import {
   CHAT_MIN_SIZE_EXPANDED,
   forgetRememberedChatRoute,
   getRememberedChatSidebarCollapsed,
-  isChatOnboardingPath,
   rememberChatSidebarCollapsed,
   rememberChatSize,
 } from './persistence'
@@ -159,10 +171,6 @@ interface ChatProps {
    * SettingsShell 的 onReady；其余视图挂载后即视为骨架就绪。
    */
   onContentReady?: () => void
-}
-
-function hashPath(): string {
-  return window.location.hash.replace('#', '').split('?')[0]
 }
 
 /**
@@ -280,37 +288,13 @@ function saveLastThinkingLevel(level: ThinkingLevel | null): void {
   }
 }
 
-function isChatSettingsPath(path: string): boolean {
-  return path === 'chat/settings' || path.startsWith('chat/settings/')
-}
 
-function isChatAssistantCenterPath(path: string): boolean {
-  return path === 'chat/assistants' || path.startsWith('chat/assistants/')
-}
 
-function isChatOnboardingRoute(path: string): boolean {
-  return isChatOnboardingPath(path)
-}
 
-function isChatSkillCenterPath(path: string): boolean {
-  return path === 'chat/skill' || path.startsWith('chat/skill/')
-}
 
-function isChatPluginCenterPath(path: string): boolean {
-  return path === 'chat/plugins' || path.startsWith('chat/plugins/')
-}
 
-function isChatMcpCenterPath(path: string): boolean {
-  return path === 'chat/mcp' || path.startsWith('chat/mcp/')
-}
 
-function isChatKnowledgeCenterPath(path: string): boolean {
-  return path === 'chat/knowledge' || path.startsWith('chat/knowledge/')
-}
 
-function isChatNotesPath(path: string): boolean {
-  return path === 'chat/notes' || path.startsWith('chat/notes/')
-}
 
 function scheduleIdleTask(callback: () => void, timeout = 1200): () => void {
   const idleWindow = window as Window & {
@@ -1329,77 +1313,41 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const sendDisabledReason = effectiveSkillRecommendedTools.length > 0 ? toolStatusHint : ''
 
-  const getRouteConversationId = useCallback(() => {
-    const path = hashPath()
-    if (!path.startsWith('chat/')) return null
-    const rest = path.slice('chat/'.length)
-    if (rest === 'settings' || rest.startsWith('settings/')) return null
-    if (rest === 'assistants' || rest.startsWith('assistants/')) return null
-    if (rest === 'skill' || rest.startsWith('skill/')) return null
-    if (rest === 'knowledge' || rest.startsWith('knowledge/')) return null
-    if (rest === 'onboarding' || rest.startsWith('onboarding/')) return null
-    return decodeURIComponent(rest)
+
+  // 路由簇抽成 useChatRouting（见 hooks/useChatRouting.ts）。
+  // reloadConversation 定义在下方且自身依赖 syncConversationRoute（循环依赖），
+  // 故经 ref 间接调用：hook 只读 ref.current，ref 在其定义后赋值。
+  const reloadConversationRef = useRef<((id: string) => void) | null>(null)
+  const handleRouteResetConversation = useCallback(() => {
+    currentConversationIdRef.current = null
+    applyConversation(null)
+    restoreStreamingPreview(null)
+  }, [applyConversation, restoreStreamingPreview])
+  const handleRouteLoadConversation = useCallback((conversationId: string) => {
+    reloadConversationRef.current?.(conversationId)
   }, [])
 
-  const syncConversationRoute = useCallback((conversationId: string | null) => {
-    const nextHash = conversationId ? `#chat/${encodeURIComponent(conversationId)}` : '#chat'
-    if (window.location.hash !== nextHash) {
-      window.location.hash = nextHash
-    }
-  }, [])
-
-  const syncSettingsRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/settings') {
-      window.location.hash = '#chat/settings'
-    }
-  }, [])
-
-  const syncOnboardingRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/onboarding') {
-      window.location.hash = '#chat/onboarding'
-    }
-  }, [])
+  const {
+    syncConversationRoute,
+    syncSettingsRoute,
+    syncOnboardingRoute,
+    syncAssistantCenterRoute,
+    syncSkillCenterRoute,
+    syncPluginCenterRoute,
+    syncMcpCenterRoute,
+    syncKnowledgeCenterRoute,
+    syncNotesRoute,
+  } = useChatRouting({
+    onViewChange: setChatView,
+    onLoadConversation: handleRouteLoadConversation,
+    onResetConversation: handleRouteResetConversation,
+    currentConversationIdRef,
+  })
 
   const handleOnboardingExit = useCallback(() => {
     setChatView('conversation')
     syncConversationRoute(null)
   }, [syncConversationRoute])
-
-  const syncAssistantCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/assistants') {
-      window.location.hash = '#chat/assistants'
-    }
-  }, [])
-
-  const syncSkillCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/skill') {
-      window.location.hash = '#chat/skill'
-    }
-  }, [])
-
-  const syncPluginCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/plugins') {
-      window.location.hash = '#chat/plugins'
-    }
-  }, [])
-
-  const syncMcpCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/mcp') {
-      window.location.hash = '#chat/mcp'
-    }
-  }, [])
-
-  const syncKnowledgeCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/knowledge') {
-      window.location.hash = '#chat/knowledge'
-    }
-  }, [])
-
-  const syncNotesRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/notes') {
-      window.location.hash = '#chat/notes'
-    }
-  }, [])
 
   const refreshSidebar = useCallback(() => {
     setSidebarRefreshKey((key) => key + 1)
@@ -1641,6 +1589,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
     }
   }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
+
+  // 填充上面 useChatRouting 用来打破循环依赖的间接层。
+  reloadConversationRef.current = (id: string) => { void reloadConversation(id, { force: true }) }
 
   const refreshContextStats = useCallback(async (conversationId?: string) => {
     const targetConversationId = conversationId ?? currentConversationIdRef.current
@@ -2341,59 +2292,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [openEmbeddedSettings])
 
-  useEffect(() => {
-    const loadFromRoute = () => {
-      const path = hashPath()
-      if (isChatOnboardingRoute(path)) {
-        setChatView('onboarding')
-        return
-      }
-      if (isChatSettingsPath(path)) {
-        setChatView('settings')
-        return
-      }
-      if (isChatAssistantCenterPath(path)) {
-        setChatView('assistants')
-        return
-      }
-      if (isChatSkillCenterPath(path)) {
-        setChatView('skill')
-        return
-      }
-      if (isChatMcpCenterPath(path)) {
-        setChatView('mcp')
-        return
-      }
-      if (isChatKnowledgeCenterPath(path)) {
-        setChatView('knowledge')
-        return
-      }
-      if (isChatNotesPath(path)) {
-        setChatView('notes')
-        return
-      }
-      if (isChatPluginCenterPath(path)) {
-        setChatView('plugins')
-        return
-      }
-      setChatView('conversation')
-      const conversationId = getRouteConversationId()
-      if (!conversationId) {
-        currentConversationIdRef.current = null
-        applyConversation(null)
-        restoreStreamingPreview(null)
-        return
-      }
-      // 已是当前会话：说明这次 hash 变化来自点击/创建/分支等「先加载并 apply、再同步路由」的
-      // 路径，数据刚落进 state，此处再 force 重载只会让同一对话白读一遍盘（双重 IPC）。
-      // 真正的路由导航（前进/后退/启动恢复/外部改 hash）ref 必然不同，照常加载。
-      if (currentConversationIdRef.current === conversationId) return
-      void reloadConversation(conversationId, { force: true })
-    }
-    loadFromRoute()
-    window.addEventListener('hashchange', loadFromRoute)
-    return () => window.removeEventListener('hashchange', loadFromRoute)
-  }, [applyConversation, getRouteConversationId, reloadConversation, restoreStreamingPreview])
 
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -2437,7 +2335,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       cancelled = true
       unlisten?.()
     }
-  }, [getRouteConversationId, refreshSidebar, reloadConversation, syncConversationRoute])
+  }, [refreshSidebar, reloadConversation, syncConversationRoute])
 
   const handleSelectConversation = useCallback(async (conversationId: string) => {
     setAssistantStreamStatsByMessageId({})
