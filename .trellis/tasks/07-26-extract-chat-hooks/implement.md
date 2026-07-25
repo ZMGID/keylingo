@@ -27,26 +27,39 @@ npm run typecheck && npm run lint && npm test
 - [ ] 1.3 搬 `loadFromRoute` effect（2345 起，~76 行）
 - [ ] 1.4 冒烟：改 hash 前进/后退，确认各视图路由恢复；打开设置再关闭，确认路由回到会话
 
-### 步骤 2：`useToolConfirm`
+### 步骤 2：`useToolConfirm` — **放弃（边界划错）**
 
-- [ ] 2.1 搬 `pendingToolConfirmsRef` + `onChatToolConfirm` effect（2204 起）
-- [ ] 2.2 冒烟：触发工具审批弹窗，批准一次 + 拒绝一次
+实测 `pendingToolConfirmsRef` 有 12 处引用，其中 7 处与 `streamSnapshotsRef`、
+`pendingSessionConsentsRef` **成组出现**（`dropConversationLocally`、
+`clearStreamSnapshot`、取消流、finishStreamingRun 等），是同一套「按会话清理」
+逻辑的三个分量。
+
+单独抽它会把这 7 个点全变成跨模块调用，且「清理一个会话的所有本地状态」这件事
+被拆到两个文件 —— 比留在原处更难维护。按 PRD 的停止条件放弃。
+
+真要拆，单位应该是「会话生命周期」（in-flight + snapshot + toolConfirm +
+sessionConsent 一起），那是另一次重构。
 
 ### 步骤 3：`useExternalSendQueue`
 
 - [ ] 3.1 搬 `externalSendQueueRef` / `externalSendDrainRequestedRef` / `externalSendDrainProcessingRef` + drain 逻辑
 - [ ] 3.2 冒烟：切到外部 CLI runtime（claude 或 codex）发一条消息；连发两条确认队列不乱
 
-### 步骤 4：`useChatStream`（最后，最微妙）
+### 步骤 4：`useChatStream` — **部分完成：只抽出合帧子簇**
 
-- [ ] 4.1 搬 8 个 stream ref 声明
-- [ ] 4.2 搬 `onChatStream` effect（1783 起）—— **逐字搬迁，不重排语句、不改依赖数组**
-- [ ] 4.3 搬 `onChatContext` effect（1912 起）
-- [ ] 4.4 冒烟（全部）：
-      - 发带工具调用的消息，流式逐字出现、工具卡片状态流转正常
-      - 中途点停止，确认取消生效、无 ghost
-      - 连切 3 个会话，无重复加载、无内容错位
-      - 上下文压缩分隔线仍正常显示（`chat-context` 事件）
+原计划「8 个 stream ref + 两个 effect 整体搬出」不成立。实测 84 处引用横跨
+3000 行，且与 `inFlightConversationsRef` / `pendingToolConfirmsRef` /
+`pendingSessionConsentsRef` 深度交织（同步骤 2 的发现）。
+
+**已抽出**：合帧子簇 `useStreamRenderFrame`（`streamRenderRafRef` +
+`pendingStreamRenderRef`）。这两个 ref 的全部 24 处引用都落在 837-1055 行内，
+是真边界；顺带把 5 处重复的「取消挂起帧」内联逻辑收敛成两个出口。
+
+**未抽出**：其余 6 个 stream ref（snapshot / content / reasoning / startedAt /
+errors / pendingDone）。它们与会话生命周期状态成组出现，抽出会制造跨模块的
+状态撕裂。同样按停止条件放弃。
+
+前提是先把「会话生命周期」整体抽成一个 hook，这超出本任务范围。
 
 ### 步骤 5：收尾
 
