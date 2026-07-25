@@ -3,6 +3,7 @@ import { GitBranch, Wrench, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
+import { useStreamRenderFrame } from './hooks/useStreamRenderFrame'
 import {
   getRouteConversationId,
   hashPath,
@@ -834,8 +835,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const pendingAfterSettingsCloseRef = useRef<(() => void) | null>(null)
   // A 合帧（render coalescing）：高频 stream/tool/subagent/userprompt 事件不再每条都同步
   // setState 重渲，而是把"待显示的快照"记到 ref，用 requestAnimationFrame 每帧最多 flush 一次。
-  const pendingStreamRenderRef = useRef<{ conversationId: string; snapshot: ConversationStreamSnapshot } | null>(null)
-  const streamRenderRafRef = useRef<number | null>(null)
 
   useEffect(() => onChatImageViewerOpen(setImageViewerItem), [])
 
@@ -857,6 +856,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncGeneratingConversationIds()
   }, [syncGeneratingConversationIds])
 
+  // 合帧抽成 useStreamRenderFrame。applyStreamSnapshotToState 定义在下方
+  // （它依赖此处之后才声明的 setter），故经 ref 间接调用。
+  const applyStreamSnapshotToStateRef = useRef<((s: ConversationStreamSnapshot) => void) | null>(null)
+  const {
+    cancelPendingFrame,
+    cancelPendingFrameFor,
+    showStreamSnapshotIfCurrent,
+  } = useStreamRenderFrame({
+    applySnapshot: (snapshot) => applyStreamSnapshotToStateRef.current?.(snapshot),
+    currentConversationIdRef,
+  })
+
   // B：彻底把一个会话从所有本地乐观/in-flight/快照状态中剔除（ghost 清理）。
   // 不触碰 currentConversation/route，由调用方按场景决定。
   const dropConversationLocally = useCallback((conversationId: string) => {
@@ -867,16 +878,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     delete pendingStreamDoneRef.current[conversationId]
     delete streamErrorsRef.current[conversationId]
     // 若该会话还挂着待刷新的合帧，连带取消，避免被剔除的 ghost 还闪一帧。
-    if (pendingStreamRenderRef.current?.conversationId === conversationId) {
-      if (streamRenderRafRef.current != null) {
-        cancelAnimationFrame(streamRenderRafRef.current)
-        streamRenderRafRef.current = null
-      }
-      pendingStreamRenderRef.current = null
-    }
+    cancelPendingFrameFor(conversationId)
     setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
     syncGeneratingConversationIds()
-  }, [syncGeneratingConversationIds])
+  }, [cancelPendingFrameFor, syncGeneratingConversationIds])
 
   const setStreamErrorForConversation = useCallback((conversationId: string, error: string) => {
     if (error) {
@@ -948,18 +953,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const clearStreamingPreview = useCallback(() => {
     // 取消挂起的合帧，避免旧快照在清空后又被刷回来产生空帧/串帧。
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    pendingStreamRenderRef.current = null
+    cancelPendingFrame()
     // 内容回空闲 + streaming/frozen/cancelling 归位；streamError 不动（与原语义一致）。
     resetStreamStore()
     activeRunIdRef.current = null
     streamStartedAtRef.current = null
     streamingContentRef.current = ''
     streamingReasoningRef.current = ''
-  }, [])
+  }, [cancelPendingFrame])
 
   const ensureStreamSnapshot = useCallback((conversationId: string) => {
     const existing = streamSnapshotsRef.current[conversationId]
@@ -972,11 +973,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const restoreStreamingPreview = useCallback((conversationId: string | null) => {
     // 切换会话/恢复预览前取消任何挂起的合帧，避免上一个会话的快照被刷到当前视图。
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    pendingStreamRenderRef.current = null
+    cancelPendingFrame()
     if (!conversationId) {
       clearStreamingPreview()
       setPendingToolConfirm(null)
@@ -998,7 +995,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setStreamCoarse({ streamError: streamErrorsRef.current[conversationId] ?? '' })
     setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId] ?? null)
     setPendingSessionConsent(pendingSessionConsentsRef.current[conversationId] ?? null)
-  }, [clearStreamingPreview])
+  }, [cancelPendingFrame, clearStreamingPreview])
 
   const applyStreamSnapshotToState = useCallback((snapshot: ConversationStreamSnapshot) => {
     setStreamSnapshot(snapshot)
@@ -1009,52 +1006,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     streamingReasoningRef.current = snapshot.reasoning
   }, [])
 
-  // 立即把挂起帧刷出去（done/结束、卸载、切换会话前调用），保证不丢最后一帧。
-  const flushStreamRender = useCallback(() => {
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    const pending = pendingStreamRenderRef.current
-    pendingStreamRenderRef.current = null
-    if (!pending) return
-    if (currentConversationIdRef.current !== pending.conversationId) return
-    applyStreamSnapshotToState(pending.snapshot)
-  }, [applyStreamSnapshotToState])
-
-  // 取消挂起帧而不应用（切换会话/卸载时调用，避免把旧会话快照刷到新会话）。
-  // 注：clearStreamingPreview / restoreStreamingPreview 已内联同样的取消逻辑。
-
-  // A 合帧：事件本身仍即时累积到 snapshot 对象，这里只把"渲染"节流到每帧一次。
-  // immediate=true（done 等终止帧）立即 flush，不再等下一帧。
-  const showStreamSnapshotIfCurrent = useCallback((
-    conversationId: string,
-    snapshot: ConversationStreamSnapshot,
-    immediate = false,
-  ) => {
-    if (currentConversationIdRef.current !== conversationId) return
-    pendingStreamRenderRef.current = { conversationId, snapshot }
-    if (immediate) {
-      flushStreamRender()
-      return
-    }
-    if (streamRenderRafRef.current != null) return
-    streamRenderRafRef.current = requestAnimationFrame(() => {
-      streamRenderRafRef.current = null
-      const pending = pendingStreamRenderRef.current
-      pendingStreamRenderRef.current = null
-      if (!pending) return
-      if (currentConversationIdRef.current !== pending.conversationId) return
-      applyStreamSnapshotToState(pending.snapshot)
-    })
-  }, [applyStreamSnapshotToState, flushStreamRender])
+  // 填充上面 useStreamRenderFrame 用来打破声明顺序依赖的间接层。
+  applyStreamSnapshotToStateRef.current = applyStreamSnapshotToState
 
   useEffect(() => () => {
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    // 卸载时清掉所有活跃多答组，避免遗留列快照。
+    // 卸载时清掉所有活跃多答组，避免遗留列快照。（挂起帧的取消已在 useStreamRenderFrame 内）
     resetGroups()
   }, [])
 
