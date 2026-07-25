@@ -7,16 +7,9 @@ use crate::chat::model::ModelUsage;
 #[serde(rename_all = "snake_case")]
 pub enum StreamFormat {
     ClaudeStreamJson,
-    JsonEventStream,
     PiRpc,
     AcpJsonRpc,
     CodexAppServer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum JsonEventParser {
-    Kimi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,7 +137,6 @@ pub struct RuntimeAgentDef {
     pub prompt_via_stdin: bool,
     pub prompt_input_format: PromptInputFormat,
     pub stream_format: StreamFormat,
-    pub json_event_parser: Option<JsonEventParser>,
     pub resumes_session_via_cli: bool,
     /// 该 CLI 是否能通过其协议原生接收图片（Claude base64 / ACP image / Codex localImage）。
     /// false（pi/kimi）时图片降级为在 prompt 文本里写出路径。

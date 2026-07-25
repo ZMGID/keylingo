@@ -80,7 +80,6 @@ pub const PI_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     prompt_via_stdin: true,
     prompt_input_format: PromptInputFormat::Text,
     stream_format: StreamFormat::PiRpc,
-    json_event_parser: None,
     resumes_session_via_cli: true,
     supports_native_image: false,
     image_mime_whitelist: &[],

@@ -1,22 +1,13 @@
 use serde_json::Value;
 
 use crate::chat::model::ModelUsage;
-use crate::external_agents::types::{JsonEventParser, StreamFormat, UnifiedAgentEvent};
+use crate::external_agents::types::{StreamFormat, UnifiedAgentEvent};
 
 pub mod claude;
-pub mod json_events;
 
-pub fn create_stream_handler(
-    format: StreamFormat,
-    parser: Option<JsonEventParser>,
-) -> StreamHandler {
+pub fn create_stream_handler(format: StreamFormat) -> StreamHandler {
     match format {
-        StreamFormat::ClaudeStreamJson => {
-            StreamHandler::Claude(claude::ClaudeStreamState::default())
-        }
-        StreamFormat::JsonEventStream => StreamHandler::Json(
-            json_events::JsonEventStreamState::new(parser.unwrap_or(JsonEventParser::Kimi)),
-        ),
+        StreamFormat::ClaudeStreamJson => StreamHandler(claude::ClaudeStreamState::default()),
         // PiRpc / AcpJsonRpc / CodexAppServer are driven by dedicated session runners in run.rs and
         // never reach this factory.
         StreamFormat::PiRpc | StreamFormat::AcpJsonRpc | StreamFormat::CodexAppServer => {
@@ -25,10 +16,7 @@ pub fn create_stream_handler(
     }
 }
 
-pub enum StreamHandler {
-    Claude(claude::ClaudeStreamState),
-    Json(json_events::JsonEventStreamState),
-}
+pub struct StreamHandler(claude::ClaudeStreamState);
 
 impl StreamHandler {
     pub fn handle_line(&mut self, line: &str, sink: &mut dyn FnMut(UnifiedAgentEvent)) {
@@ -43,10 +31,7 @@ impl StreamHandler {
                 return;
             }
         };
-        match self {
-            StreamHandler::Claude(state) => state.handle_value(&value, sink),
-            StreamHandler::Json(state) => state.handle_value(&value, sink),
-        }
+        self.0.handle_value(&value, sink);
     }
 }
 

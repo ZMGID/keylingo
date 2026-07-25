@@ -792,21 +792,6 @@ fn kill_named_processes(name: &str) {
     }
 }
 
-fn bundle_summary(catalog: &CatalogPlugin) -> String {
-    let mut parts = Vec::new();
-    if !catalog.skill_ids.is_empty() {
-        parts.push(format!("Skill×{}", catalog.skill_ids.len()));
-    }
-    if catalog.mcp.is_some() {
-        parts.push("MCP".to_string());
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" · {}", parts.join(" + "))
-    }
-}
-
 /// 将插件附属 Skill 落到 `plugins/<id>/skills/`。
 /// - 若 `skill_md` 非空：写入每个 skill_id（旧路径 / 简单插件）
 /// - OfficeCLI：`skill_md` 为空 → 从**官方二进制**同步 base + 领域 skill（禁止 Kivio 手写 stub）

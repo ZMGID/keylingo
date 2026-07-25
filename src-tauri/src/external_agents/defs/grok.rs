@@ -81,7 +81,6 @@ pub const GROK_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     // Cross-turn resume goes through the ACP live-session registry (session/load;
     // grok advertises loadSession: true), same as the other ACP agents.
     resumes_session_via_cli: false,
-    json_event_parser: None,
     supports_native_image: true,
     image_mime_whitelist: &[],
     build_args: build_grok_args,

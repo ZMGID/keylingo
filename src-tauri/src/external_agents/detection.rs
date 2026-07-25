@@ -278,25 +278,6 @@ fn parse_kimi_config(text: &str) -> (Option<String>, Option<String>) {
     (default_model, reasoning)
 }
 
-pub async fn detect_all_agents(cwd: &Path) -> Vec<DetectedAgent> {
-    // ponytail: 全量含模型的一次性检测。普通列表已改走 detect_availability_all + 懒查模型；
-    // 保留此函数供潜在的"诊断/一键全量"用途，无调用方时不产生警告（pub 视为对外 API）。
-    let handles: Vec<_> = AGENT_DEFS
-        .iter()
-        .map(|def| {
-            let cwd = cwd.to_path_buf();
-            tokio::spawn(async move { detect_single_agent(def, &cwd).await })
-        })
-        .collect();
-    let mut out = Vec::with_capacity(handles.len());
-    for handle in handles {
-        if let Ok(agent) = handle.await {
-            out.push(agent);
-        }
-    }
-    out
-}
-
 pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedAgent {
     let path = super::spawn::resolve_binary(def).await;
     let available = path.is_some();

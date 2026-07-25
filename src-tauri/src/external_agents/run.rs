@@ -389,7 +389,7 @@ pub async fn run_external_cli_reply(
                     )
                     .await?;
                 }
-                let mut handler = create_stream_handler(def.stream_format, def.json_event_parser);
+                let mut handler = create_stream_handler(def.stream_format);
                 read_stdout_lines(
                     &mut spawned.child,
                     |line| {

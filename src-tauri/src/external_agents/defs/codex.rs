@@ -50,7 +50,6 @@ pub const CODEX_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     prompt_via_stdin: false,
     prompt_input_format: PromptInputFormat::Text,
     stream_format: StreamFormat::CodexAppServer,
-    json_event_parser: None,
     resumes_session_via_cli: false,
     supports_native_image: true,
     image_mime_whitelist: &[],
