@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { GitBranch, Wrench, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
+import { useExternalSendQueue } from './hooks/useExternalSendQueue'
 import {
   getRouteConversationId,
   hashPath,
@@ -61,7 +62,6 @@ import type {
 import {
   api,
   builtinWebSearchSupported,
-  type ChatExternalSendRequest,
   type ChatSessionConsentPayload,
   type ChatStreamPayload,
   type ChatToolConfirmPayload,
@@ -822,9 +822,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const locallyCancelledConversationIdRef = useRef<string | null>(null)
   const locallyCancelledRunIdRef = useRef<string | null>(null)
   const inFlightConversationsRef = useRef<Set<string>>(new Set())
-  const externalSendQueueRef = useRef<ChatExternalSendRequest[]>([])
-  const externalSendDrainProcessingRef = useRef(false)
-  const externalSendDrainRequestedRef = useRef(false)
   const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
@@ -3012,6 +3009,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const importExternalConversationRef = useRef(importExternalConversation)
   importExternalConversationRef.current = importExternalConversation
 
+  const { drainExternalSends, hasPendingDrainRequest } = useExternalSendQueue({
+    onEnterConversationView: () => setChatView('conversation'),
+    onImportConversation: (messages, attachmentPaths) =>
+      importExternalConversationRef.current(messages, attachmentPaths),
+    onSendMessage: (content, attachments, options) =>
+      handleSendMessageRef.current(content, attachments, options),
+    onError: setStreamError,
+  })
+
   const handleExecuteAgentPlan = useCallback(async (messageId: string) => {
     const conversation = currentConversation
     if (!conversation) return
@@ -3061,76 +3067,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setStreamErrorForConversation,
   ])
 
-  const drainExternalSends = useCallback(async () => {
-    if (externalSendDrainProcessingRef.current) {
-      externalSendDrainRequestedRef.current = true
-      return
-    }
-
-    externalSendDrainProcessingRef.current = true
-    try {
-      do {
-        externalSendDrainRequestedRef.current = false
-
-        const result = await api.chatTakeExternalSends()
-        if (!result.success) {
-          const error = 'error' in result && typeof result.error === 'string'
-            ? result.error
-            : ''
-          throw new Error(error || 'Failed to take external Chat messages')
-        }
-        const requests = result.requests ?? []
-        if (requests.length > 0) {
-          externalSendQueueRef.current.push(...requests)
-        }
-
-        const request = externalSendQueueRef.current[0]
-        if (!request) continue
-        setChatView('conversation')
-        const attachmentPaths = (request.attachments ?? [])
-          .map((attachment) => attachment.path)
-          .filter((path): path is string => !!path)
-
-        // 历史预置分支：把 Lens 完整多轮历史 + 截图搬成一个新会话（不发消息、不触发回复），落地末尾可续聊。
-        if (request.messages && request.messages.length > 0) {
-          await importExternalConversationRef.current(request.messages, attachmentPaths)
-          externalSendQueueRef.current.shift()
-          continue
-        }
-
-        const attachments = (request.attachments ?? [])
-          .filter((attachment) => attachment.path)
-          .map<PendingAttachment>((attachment, index) => ({
-            id: attachment.id || `external-${request.id}-${index}`,
-            type: attachment.type === 'file' ? 'file' : 'image',
-            name: attachment.name || (attachment.type === 'file' ? 'Attachment' : 'Image'),
-            path: attachment.path,
-          }))
-        const accepted = await handleSendMessageRef.current(
-          request.content ?? '',
-          attachments,
-          { forceNewConversation: true },
-        )
-        if (accepted) {
-          externalSendQueueRef.current.shift()
-        } else {
-          externalSendDrainRequestedRef.current = true
-          break
-        }
-      } while (externalSendDrainRequestedRef.current || externalSendQueueRef.current.length > 0)
-    } catch (err) {
-      console.error('Failed to process external Chat message:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '外部消息发送失败')
-    } finally {
-      externalSendDrainProcessingRef.current = false
-      if (externalSendDrainRequestedRef.current) {
-        window.setTimeout(() => {
-          void drainExternalSends()
-        }, 0)
-      }
-    }
-  }, [])
-
   useEffect(() => {
     let cancelled = false
     const disposers: Array<() => void> = []
@@ -3165,10 +3101,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [drainExternalSends])
 
   useEffect(() => {
-    if (!streamCoarse.streaming && externalSendDrainRequestedRef.current) {
+    if (!streamCoarse.streaming && hasPendingDrainRequest()) {
       void drainExternalSends()
     }
-  }, [drainExternalSends, streamCoarse.streaming])
+  }, [drainExternalSends, hasPendingDrainRequest, streamCoarse.streaming])
 
   const handleUpdateMessage = useCallback(
     async (messageId: string, content: string) => {
