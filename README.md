@@ -174,13 +174,17 @@ Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），�
 
 ## 新版本 —— v2.8.3
 
-- **内置联网搜索** —— 每个会话可独立选择「关闭 / 内置 / 第三方」三态联网搜索，内置模式直接调用供应商自带的搜索能力（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片展示在答案上方，最后一次选择会记为新会话默认。
-- **Gemini 原生生图** —— 聊天里可直接用 Gemini 原生协议出图，生成结果挂到 artifacts；OpenAI 兼容中转的出图也已打通，出图端点路由收敛为单一解析并在猜错时自愈。
-- **外部 CLI 原生会话** —— 全部外部 CLI 改用各自的原生会话机制，不再重放历史消息；kimi 迁到 ACP，pi 用 `--session-id`，会话与 CLI 绑定；可用性探测与模型探测分离并加缓存，新会话不再必然冷探测。
-- **从本地 CLI 导入 MCP 与 Skill** —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置，勾选后把它们的 MCP 服务器和 Skill 导入 Kivio。
-- **截图标注模式** —— 新增独立截图标注：箭头、矩形、马赛克，支持撤销后复制或保存；冻结帧改为双端常开，截图不再带鼠标指针。
-- **模型下拉按能力筛选** —— 生图、视觉、embedding 三处模型下拉分别只列具备对应能力的模型；新增模型级 `extra_body` 透传，可给单个模型附加自定义请求体字段。
-- **稳定性与体验修复** —— MCP 服务器预热连接与首轮工具收集短超时兜底；HTTP 连接池加保活；输入框草稿跨对话保留；对话搜索支持全文匹配正文；修复切换/新建会话重复加载、多模型并答流式栏冻结、`Retry-After` 巨值长时挂起、后台命令未按会话隔离、知识库检索 rerank 分被覆盖与结果静默截断。
+- **翻译 / 截图 / Lens 支持全部模型协议** —— 这三个功能此前把请求硬编码成 OpenAI 的 `chat/completions` 格式，配置成 Gemini、Anthropic 或 OpenAI Responses 协议的供应商一用就 404。现在与聊天共用同一套模型适配层，四种协议都能用。
+- **修复 Gemini / Vertex 与 grok 拒绝工具调用** —— 内置工具 schema 中分支未标注类型的 `anyOf` 会让 Vertex 整请求驳回、grok 拒收工具定义，这些模型此前在 Kivio 里用不了工具；现已剥离并由运行时校验兜底。
+- **内置联网搜索** —— 每个会话可选「关闭 / 内置 / 第三方」三态，内置模式直接调用供应商自带搜索（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片显示在答案上方，最后一次选择记为新会话默认。
+- **外部 CLI 全面重做** —— 全部 CLI 改用原生会话机制不再重放历史（kimi 迁 ACP，pi 用 `--session-id`）；错误分类并给出可操作引导；可用性与模型探测分离加缓存，第 2 轮起前置开销从 10–25 秒降到 500 毫秒内。
+- **Gemini 原生生图** —— 聊天里可用 Gemini 原生协议出图并挂到 artifacts；OpenAI 兼容中转出图也已打通，端点路由收敛为单一解析并在猜错时自愈。
+- **LaTeX 公式显示修复** —— 模型常用的 `\[...\]` 块级与 `\(...\)` 行内分隔符此前完全渲染不出来（#19），现已支持。
+- **从本地 CLI 导入 MCP 与 Skill** —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置并导入；MCP 改为启用与开窗时预热连接，首轮工具收集加短超时兜底。
+- **独立截图标注** —— 新增箭头、矩形、马赛克标注，支持撤销后复制或保存；冻结帧双端常开；截图不再带鼠标指针。
+- **新增 ego lite 插件** —— 启用时自动从仓库下载配套的 ego-browser Skill，随上游更新。
+- **输入与界面修复** —— 所有输入框关闭 WebKit 智能输入（修自动大写与 autocorrect 插空格）；模型下拉按能力筛选（生图/视觉/embedding）；弹层与右键菜单按视口边缘自适应；对话搜索可全文匹配正文；输入框草稿跨对话保留；新增模型级 `extra_body` 透传。
+- **稳定性修复** —— HTTP 连接池加保活（修长时运行后 `error sending request`）；请求调试 token 不再恒为 0；修复会话重复加载、多模型并答流式栏冻结、`Retry-After` 巨值长时挂起、后台命令未按会话隔离、检索 rerank 分被覆盖与结果静默截断。
 
 完整历史:[GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
@@ -379,13 +383,17 @@ Kivio Desktop checks GitHub Releases for updates shortly after launch (can be di
 
 ## What's New — v2.8.3
 
-- **Built-in web search** — each conversation picks its own web-search mode: off, built-in, or third-party. Built-in mode calls the provider's own hosted search (OpenAI Responses, Gemini, Anthropic) and streams the search as a live card above the answer; your last pick becomes the default for new conversations.
-- **Native Gemini image generation** — generate images in chat over Gemini's native protocol with results attached as artifacts; image generation through OpenAI-compatible relays now works too, with endpoint routing consolidated into one resolver that self-heals when it guesses wrong.
-- **Native sessions for external CLIs** — all external CLIs now use their own native session mechanism instead of replaying history: kimi moved to ACP, pi uses `--session-id`, and sessions bind to their CLI. Availability and model probing are split and cached, so a new conversation no longer forces a cold probe.
-- **Import MCP servers and Skills from local CLIs** — the Extensions page can scan your installed Claude Code / Codex / OpenCode configs and import their MCP servers and Skills into Kivio.
-- **Standalone screenshot annotation** — a new annotation mode adds arrows, rectangles, and mosaic with undo, then copy or save; frozen-frame capture is now on for both platforms and screenshots no longer include the mouse cursor.
-- **Capability-filtered model pickers** — the image, vision, and embedding model pickers each list only models with that capability; a new per-model `extra_body` passes custom request-body fields to a single model.
-- **Stability and polish** — MCP servers warm up their connection with a short timeout fallback for the first tool listing; the HTTP connection pool gained keep-alive; composer drafts survive switching conversations; conversation search matches message bodies. Fixes include duplicate loading when switching or creating conversations, the streaming column freezing during multi-model answers, long hangs from an oversized `Retry-After`, background commands not being isolated per conversation, and knowledge-base retrieval losing rerank scores or silently truncating results.
+- **Translator, screenshot, and Lens now speak every model protocol** — these three features used to hard-code OpenAI's `chat/completions` shape, so any provider configured for Gemini, Anthropic, or OpenAI Responses returned a 404. They now share the same model adapter layer as chat, so all four protocols work.
+- **Fixed Gemini / Vertex and grok rejecting tool calls** — a built-in tool schema carried an `anyOf` whose branches had no declared type; Vertex rejected the whole request and grok refused the tool definition, leaving those models unable to use tools. The construct is stripped, with runtime validation covering the constraint.
+- **Built-in web search** — each conversation picks off, built-in, or third-party. Built-in mode calls the provider's own hosted search (OpenAI Responses, Gemini, Anthropic) and streams it as a live card above the answer; your last pick becomes the default for new conversations.
+- **External CLIs reworked** — all CLIs use their own native session mechanism instead of replaying history (kimi moved to ACP, pi uses `--session-id`); errors are classified with actionable guidance; availability and model probing are split and cached, cutting per-turn overhead from 10–25s to under 500ms from the second turn on.
+- **Native Gemini image generation** — generate images in chat over Gemini's native protocol with results attached as artifacts; generation through OpenAI-compatible relays works too, with endpoint routing consolidated into one self-healing resolver.
+- **LaTeX rendering fix** — the `\[...\]` block and `\(...\)` inline delimiters that many models emit didn't render at all (#19); they now do.
+- **Import MCP servers and Skills from local CLIs** — the Extensions page scans your installed Claude Code / Codex / OpenCode configs and imports them; MCP servers warm up on enable and on opening the chat window, with a short timeout for the first tool listing.
+- **Standalone screenshot annotation** — arrows, rectangles, and mosaic with undo, then copy or save; frozen-frame capture is on for both platforms and screenshots no longer include the mouse cursor.
+- **New ego lite plugin** — downloads its companion ego-browser Skill from the repo on enable and tracks upstream.
+- **Input and UI fixes** — all inputs disable WebKit smart input (fixing auto-capitalization and autocorrect inserting spaces); model pickers filter by capability (image / vision / embedding); popovers and context menus adapt to the viewport edge; conversation search matches message bodies; composer drafts survive switching conversations; a new per-model `extra_body` passes custom request-body fields.
+- **Stability fixes** — the HTTP connection pool gained keep-alive (fixing `error sending request` after long runs); request-debug token counts are no longer stuck at 0; fixes for duplicate conversation loading, the streaming column freezing during multi-model answers, long hangs from an oversized `Retry-After`, background commands not being isolated per conversation, and knowledge-base retrieval losing rerank scores or silently truncating results.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 

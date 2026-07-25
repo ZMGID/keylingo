@@ -695,13 +695,17 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
       <h2 id="changelog-283">v2.8.3 · 2026-07-25</h2>
       <ul>
-        <li><b>内置联网搜索</b> —— 每个会话可独立选择「关闭 / 内置 / 第三方」三态联网搜索，内置模式直接调用供应商自带搜索（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片展示在答案上方，最后一次选择记为新会话默认。</li>
-        <li><b>Gemini 原生生图</b> —— 聊天里可用 Gemini 原生协议出图并挂到 artifacts；OpenAI 兼容中转出图也已打通，出图端点路由收敛为单一解析并在猜错时自愈。</li>
-        <li><b>外部 CLI 原生会话</b> —— 全部外部 CLI 改用各自原生会话机制，不再重放历史；kimi 迁 ACP，pi 用 <code>--session-id</code>，会话与 CLI 绑定；可用性与模型探测分离并加缓存。</li>
-        <li><b>从本地 CLI 导入 MCP 与 Skill</b> —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置，勾选后导入其 MCP 服务器与 Skill。</li>
-        <li><b>截图标注模式</b> —— 新增独立截图标注：箭头、矩形、马赛克，支持撤销后复制或保存；冻结帧双端常开，截图不再带鼠标指针。</li>
-        <li><b>模型下拉按能力筛选</b> —— 生图、视觉、embedding 三处下拉仅列具备对应能力的模型；新增模型级 <code>extra_body</code> 透传。</li>
-        <li><b>稳定性修复</b> —— MCP 预热连接与首轮工具短超时兜底；HTTP 连接池加保活；输入框草稿跨对话保留；对话搜索匹配正文；修复会话重复加载、多模型并答流式栏冻结、<code>Retry-After</code> 巨值长时挂起、后台命令未按会话隔离、检索 rerank 分被覆盖与结果静默截断。</li>
+        <li><b>翻译 / 截图 / Lens 支持全部模型协议</b> —— 这三个功能此前把请求硬编码成 OpenAI 的 <code>chat/completions</code> 格式，配置成 Gemini、Anthropic 或 OpenAI Responses 协议的供应商一用就 404。现在与聊天共用同一套模型适配层，四种协议都能用。</li>
+        <li><b>修复 Gemini / Vertex 与 grok 拒绝工具调用</b> —— 内置工具 schema 中分支未标注类型的 <code>anyOf</code> 会让 Vertex 整请求驳回、grok 拒收工具定义，这些模型此前用不了工具；现已剥离并由运行时校验兜底。</li>
+        <li><b>内置联网搜索</b> —— 每个会话可选「关闭 / 内置 / 第三方」三态，内置模式直接调用供应商自带搜索（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片显示在答案上方，最后一次选择记为新会话默认。</li>
+        <li><b>外部 CLI 全面重做</b> —— 全部 CLI 改用原生会话机制不再重放历史（kimi 迁 ACP，pi 用 <code>--session-id</code>）；错误分类并给出可操作引导；可用性与模型探测分离加缓存，第 2 轮起前置开销从 10–25 秒降到 500 毫秒内。</li>
+        <li><b>Gemini 原生生图</b> —— 聊天里可用 Gemini 原生协议出图并挂到 artifacts；OpenAI 兼容中转出图也已打通，端点路由收敛为单一解析并在猜错时自愈。</li>
+        <li><b>LaTeX 公式显示修复</b> —— 模型常用的 <code>\[...\]</code> 块级与 <code>\(...\)</code> 行内分隔符此前完全渲染不出来，现已支持。</li>
+        <li><b>从本地 CLI 导入 MCP 与 Skill</b> —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置并导入；MCP 改为启用与开窗时预热连接，首轮工具收集加短超时兜底。</li>
+        <li><b>独立截图标注</b> —— 新增箭头、矩形、马赛克标注，支持撤销后复制或保存；冻结帧双端常开，截图不再带鼠标指针。</li>
+        <li><b>新增 ego lite 插件</b> —— 启用时自动从仓库下载配套的 ego-browser Skill，随上游更新。</li>
+        <li><b>输入与界面修复</b> —— 所有输入框关闭 WebKit 智能输入（修自动大写与 autocorrect 插空格）；模型下拉按能力筛选（生图/视觉/embedding）；弹层与右键菜单按视口边缘自适应；对话搜索可全文匹配正文；输入框草稿跨对话保留；新增模型级 <code>extra_body</code> 透传。</li>
+        <li><b>稳定性修复</b> —— HTTP 连接池加保活（修长时运行后 <code>error sending request</code>）；请求调试 token 不再恒为 0；修复会话重复加载、多模型并答流式栏冻结、<code>Retry-After</code> 巨值长时挂起、后台命令未按会话隔离、检索 rerank 分被覆盖与结果静默截断。</li>
       </ul>
       <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.3" target="_blank" rel="noopener">查看 v2.8.3 Release notes ↗</a></p>
       <h2 id="changelog-282">v2.8.2 · 2026-07-20</h2>
