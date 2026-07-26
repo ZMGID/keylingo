@@ -583,3 +583,53 @@ Fixed child, Worker, OCR helper, Preview server, cache, knowledge-base lock, Mes
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: 拆分 SettingsShell.tsx / Chat.tsx 巨型组件 + 修聊天设置切换动画
+
+**Date**: 2026-07-26
+**Task**: 拆分 SettingsShell.tsx / Chat.tsx 巨型组件 + 修聊天设置切换动画
+**Branch**: `main`
+
+### Summary
+
+SettingsShell.tsx 3824→2371（抽 12 个 tab 组件），Chat.tsx 4298→3924（抽 useChatRouting / useExternalSendQueue / useStreamRenderFrame / useTauriEvent，收敛 10 处订阅样板与 5 处按会话清理块）。测试 315→464，全部配变异验证。关键教训：ref 数量不等于内聚度——按此规划的 useToolConfirm / useChatStream 整体抽取被迫放弃，改按共现分析定边界后，同一批 ref 的写入侧（6 处重复删除块）可收敛、读取侧（30 处语义各异）不可搬。另修好聊天↔设置切换动画：CSS animation 走墙钟时间，大组件树挂载帧吃掉上百毫秒导致进场动画在首帧前已跑完，改 pre-enter + 双 rAF；顺带修 fill:both 残留 transform 使 fixed 遮罩失效。实测结论已填入 spec/frontend 的 hook-guidelines 与 quality-guidelines。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6050733` | (see git log) |
+| `65c008f` | (see git log) |
+| `f39887a` | (see git log) |
+| `6bec239` | (see git log) |
+| `d855523` | (see git log) |
+| `624e2b5` | (see git log) |
+| `789bf7a` | (see git log) |
+| `3930d57` | (see git log) |
+| `dbedcdd` | (see git log) |
+| `e171c21` | (see git log) |
+| `2ee81b1` | (see git log) |
+| `2707e3b` | (see git log) |
+| `ceb1d1c` | (see git log) |
+| `dd87bed` | (see git log) |
+| `c1e80a5` | (see git log) |
+| `ceb37c2` | (see git log) |
+| `8965c63` | (see git log) |
+| `a886f6a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

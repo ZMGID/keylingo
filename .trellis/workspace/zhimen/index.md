@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 17
-- **Last Active**: 2026-07-25
+- **Total Sessions**: 18
+- **Last Active**: 2026-07-26
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~585 | Active |
+| `journal-1.md` | ~635 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 18 | 2026-07-26 | 拆分 SettingsShell.tsx / Chat.tsx 巨型组件 + 修聊天设置切换动画 | `6050733`, `65c008f`, `f39887a`, `6bec239`, `d855523`, `624e2b5`, `789bf7a`, `3930d57`, `dbedcdd`, `e171c21`, `2ee81b1`, `2707e3b`, `ceb1d1c`, `dd87bed`, `c1e80a5`, `ceb37c2`, `8965c63`, `a886f6a` | `main` |
 | 17 | 2026-07-25 | 修复审查发现的正确性 Bug + 会话重复加载 | `520bfe6`, `a336dde` | `main` |
 | 16 | 2026-07-25 | 出图接口路由规范化 + Gemini/grok 生图打通 | `dccb37a`, `d16356e` | `main` |
 | 15 | 2026-07-24 | UI 开关统一 + 输入框草稿保留 + HTTP 连接池诊断修复 | `3a686aa`, `1ff8567`, `eefa6f3`, `ac6ca55` | `main` |
