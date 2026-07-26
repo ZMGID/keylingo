@@ -4,6 +4,7 @@ import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
 import { useStreamRenderFrame } from './hooks/useStreamRenderFrame'
+import { useTauriEvent } from './hooks/useTauriEvent'
 import {
   getRouteConversationId,
   hashPath,
@@ -1679,449 +1680,296 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [applyConversation, clearStreamingPreview, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatStream((payload) => {
-        if (cancelled) return
-        if (isLocallyCancelledPayload(
-          payload,
-          locallyCancelledConversationIdRef.current,
-          locallyCancelledRunIdRef.current,
-        )) {
-          return
-        }
-        if (!streamSnapshotsRef.current[payload.conversationId]) {
-          if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
-            if (payload.done) {
-              void finishStreamingRun(payload)
-            }
-            return
-          }
-        }
-        // 多答组分支（任务 06-30）：该会话处于多模型并发流时，按 messageId 路由到对应列，
-        // 不动会话级单流快照（单模型路径零回归）。
-        if (hasActiveGroup(payload.conversationId) && payload.messageId) {
-          const column = ensureGroupColumn(
-            payload.conversationId,
-            payload.messageId,
-          )
-          if (!column) return
-          const segment = streamPayloadToSegment(payload)
-          applyStreamDeltaToSnapshot(column, payload, segment)
+  useTauriEvent(api.onChatStream, (payload) => {
+      if (isLocallyCancelledPayload(
+        payload,
+        locallyCancelledConversationIdRef.current,
+        locallyCancelledRunIdRef.current,
+      )) {
+        return
+      }
+      if (!streamSnapshotsRef.current[payload.conversationId]) {
+        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
           if (payload.done) {
-            finalizeReasoningDurationOnDone(column)
-            column.streaming = false
-            // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
-            flushGroups()
-          } else {
-            // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
-            touchGroup()
+            void finishStreamingRun(payload)
           }
-          // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
           return
         }
-        const snapshot = ensureStreamSnapshot(payload.conversationId)
-        if (payload.runId) {
-          if (snapshot.runId && snapshot.runId !== payload.runId) return
-          snapshot.runId = payload.runId
-        }
+      }
+      // 多答组分支（任务 06-30）：该会话处于多模型并发流时，按 messageId 路由到对应列，
+      // 不动会话级单流快照（单模型路径零回归）。
+      if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+        const column = ensureGroupColumn(
+          payload.conversationId,
+          payload.messageId,
+        )
+        if (!column) return
         const segment = streamPayloadToSegment(payload)
-        if (segment) {
-          snapshot.segments = upsertStreamSegment(
-            snapshot.segments,
-            segment,
-            segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
-          )
+        applyStreamDeltaToSnapshot(column, payload, segment)
+        if (payload.done) {
+          finalizeReasoningDurationOnDone(column)
+          column.streaming = false
+          // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
+          flushGroups()
+        } else {
+          // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
+          touchGroup()
         }
-        if (payload.reasoningDelta) {
-          const now = Date.now()
-          if (snapshot.reasoningStartedAt == null) {
-            snapshot.reasoningStartedAt = now
-          }
-          if (segment?.kind === 'reasoning') {
-            const segmentStartedAt = snapshot.reasoningStartedAtBySegmentId[segment.id] ?? now
-            snapshot.reasoningStartedAtBySegmentId[segment.id] = segmentStartedAt
-            updateReasoningSegmentDuration(snapshot, segment.id, now)
-          }
-          snapshot.streaming = true
-          snapshot.reasoningStreaming = true
-          snapshot.reasoning += payload.reasoningDelta
+        // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
+        return
+      }
+      const snapshot = ensureStreamSnapshot(payload.conversationId)
+      if (payload.runId) {
+        if (snapshot.runId && snapshot.runId !== payload.runId) return
+        snapshot.runId = payload.runId
+      }
+      const segment = streamPayloadToSegment(payload)
+      if (segment) {
+        snapshot.segments = upsertStreamSegment(
+          snapshot.segments,
+          segment,
+          segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+        )
+      }
+      if (payload.reasoningDelta) {
+        const now = Date.now()
+        if (snapshot.reasoningStartedAt == null) {
+          snapshot.reasoningStartedAt = now
+        }
+        if (segment?.kind === 'reasoning') {
+          const segmentStartedAt = snapshot.reasoningStartedAtBySegmentId[segment.id] ?? now
+          snapshot.reasoningStartedAtBySegmentId[segment.id] = segmentStartedAt
+          updateReasoningSegmentDuration(snapshot, segment.id, now)
+        }
+        snapshot.streaming = true
+        snapshot.reasoningStreaming = true
+        snapshot.reasoning += payload.reasoningDelta
+        snapshot.reasoningDurationMs = Math.max(
+          snapshot.reasoningDurationMs ?? 0,
+          now - snapshot.reasoningStartedAt,
+        )
+      }
+      if (payload.delta) {
+        if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
           snapshot.reasoningDurationMs = Math.max(
             snapshot.reasoningDurationMs ?? 0,
-            now - snapshot.reasoningStartedAt,
+            Date.now() - snapshot.reasoningStartedAt,
           )
         }
-        if (payload.delta) {
-          if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
-            snapshot.reasoningDurationMs = Math.max(
-              snapshot.reasoningDurationMs ?? 0,
-              Date.now() - snapshot.reasoningStartedAt,
-            )
+        if (segment?.kind === 'text') {
+          const activeReasoningSegment = findReasoningSegmentForText(snapshot.segments, segment)
+          if (activeReasoningSegment) {
+            updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
           }
-          if (segment?.kind === 'text') {
-            const activeReasoningSegment = findReasoningSegmentForText(snapshot.segments, segment)
-            if (activeReasoningSegment) {
-              updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
-            }
-          }
-          snapshot.streaming = true
-          snapshot.reasoningStreaming = false
-          snapshot.content += payload.delta
         }
-        syncGeneratingConversationIds()
-        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-        if (payload.done) {
-          if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
-            snapshot.reasoningDurationMs = Math.max(
-              snapshot.reasoningDurationMs ?? 0,
-              Date.now() - snapshot.reasoningStartedAt,
-            )
-            const activeReasoningSegment = [...snapshot.segments]
-              .reverse()
-              .find((item) => item.kind === 'reasoning')
-            if (activeReasoningSegment) {
-              updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
-            }
-          }
-          // done：立即 flush 最后一帧，别让合帧吞掉收尾内容。
-          showStreamSnapshotIfCurrent(payload.conversationId, snapshot, true)
-          // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
-          if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
-            pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(payload)
-            return
-          }
-          void finishStreamingRun(payload)
-        }
-      })
-      if (cancelled) {
-        unlisten()
+        snapshot.streaming = true
+        snapshot.reasoningStreaming = false
+        snapshot.content += payload.delta
       }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+      syncGeneratingConversationIds()
+      showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
+      if (payload.done) {
+        if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
+          snapshot.reasoningDurationMs = Math.max(
+            snapshot.reasoningDurationMs ?? 0,
+            Date.now() - snapshot.reasoningStartedAt,
+          )
+          const activeReasoningSegment = [...snapshot.segments]
+            .reverse()
+            .find((item) => item.kind === 'reasoning')
+          if (activeReasoningSegment) {
+            updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+          }
+        }
+        // done：立即 flush 最后一帧，别让合帧吞掉收尾内容。
+        showStreamSnapshotIfCurrent(payload.conversationId, snapshot, true)
+        // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
+        if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+          pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(payload)
+          return
+        }
+        void finishStreamingRun(payload)
+      }
   }, [ensureStreamSnapshot, finishStreamingRun, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatContext((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        patchContextState(payload.contextState)
-        setContextError('')
-      })
-      if (cancelled) {
-        unlisten()
-      }
+  useTauriEvent(api.onChatContext, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
     }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+    patchContextState(payload.contextState)
+    setContextError('')
   }, [patchContextState])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatCompaction((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        if (payload.phase === 'started') {
-          if (payload.trigger !== 'manual') {
-            setAgentLoopCompacting(true)
-          }
-          return
-        }
-        if (payload.trigger !== 'manual') {
-          setAgentLoopCompacting(false)
-        }
-        const boundary = payload.boundary
-        if (boundary?.id) {
-          setAnimateCompactionBoundaryId(boundary.id)
-          window.setTimeout(() => {
-            setAnimateCompactionBoundaryId((current) => (current === boundary.id ? null : current))
-          }, 1800)
-        }
-        if (boundary && payload.phase === 'completed') {
-          setCurrentConversation((conversation) => {
-            if (!conversation) return conversation
-            const prevState = conversation.context_state ?? conversation.contextState
-            const existing = prevState?.compaction_boundaries ?? prevState?.compactionBoundaries ?? []
-            if (existing.some((item) => item.id === boundary.id)) return conversation
-            const nextBoundaries = [...existing, boundary]
-            const nextState = {
-              ...(prevState ?? {}),
-              compaction_boundaries: nextBoundaries,
-              compactionBoundaries: nextBoundaries,
-            }
-            setContextState(nextState)
-            return { ...conversation, context_state: nextState, contextState: nextState }
-          })
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
+  useTauriEvent(api.onChatCompaction, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
     }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
+    if (payload.phase === 'started') {
+      if (payload.trigger !== 'manual') {
+        setAgentLoopCompacting(true)
+      }
+      return
+    }
+    if (payload.trigger !== 'manual') {
+      setAgentLoopCompacting(false)
+    }
+    const boundary = payload.boundary
+    if (boundary?.id) {
+      setAnimateCompactionBoundaryId(boundary.id)
+      window.setTimeout(() => {
+        setAnimateCompactionBoundaryId((current) => (current === boundary.id ? null : current))
+      }, 1800)
+    }
+    if (boundary && payload.phase === 'completed') {
+      setCurrentConversation((conversation) => {
+        if (!conversation) return conversation
+        const prevState = conversation.context_state ?? conversation.contextState
+        const existing = prevState?.compaction_boundaries ?? prevState?.compactionBoundaries ?? []
+        if (existing.some((item) => item.id === boundary.id)) return conversation
+        const nextBoundaries = [...existing, boundary]
+        const nextState = {
+          ...(prevState ?? {}),
+          compaction_boundaries: nextBoundaries,
+          compactionBoundaries: nextBoundaries,
+        }
+        setContextState(nextState)
+        return { ...conversation, context_state: nextState, contextState: nextState }
+      })
     }
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatTodo((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        patchAgentTodoState(payload.todoState)
-      })
-      if (cancelled) {
-        unlisten()
-      }
+  useTauriEvent(api.onChatTodo, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
     }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+    patchAgentTodoState(payload.todoState)
   }, [patchAgentTodoState])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatPlan((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        patchAgentPlanState(payload.planState)
-      })
-      if (cancelled) {
-        unlisten()
-      }
+  useTauriEvent(api.onChatPlan, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
     }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+    patchAgentPlanState(payload.planState)
   }, [patchAgentPlanState])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatTool((payload) => {
-        if (cancelled) return
-        if (isLocallyCancelledPayload(
-          payload,
-          locallyCancelledConversationIdRef.current,
-          locallyCancelledRunIdRef.current,
-        )) {
-          return
-        }
-        // 忽略 invoke 结束后的迟到 tool 事件，否则会重新 setStreaming(true) 卡死输入栏。
-        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
-        // 多答组分支：按 messageId 路由到对应列。
-        if (hasActiveGroup(payload.conversationId) && payload.messageId) {
-          const column = ensureGroupColumn(payload.conversationId, payload.messageId)
-          if (!column) return
-          const record = toolEventToRecord(payload)
-          applyToolRecordToSnapshot(column, record)
-          touchGroup()
-          return
-        }
-        const snapshot = ensureStreamSnapshot(payload.conversationId)
-        if (payload.runId) {
-          if (snapshot.runId && snapshot.runId !== payload.runId) return
-          snapshot.runId = payload.runId
-        }
-        const record = toolEventToRecord(payload)
-        snapshot.streaming = true
-        snapshot.reasoningStreaming = false
-        const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
-        snapshot.toolCalls = index < 0
-          ? [...snapshot.toolCalls, record]
-          : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
-        snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
-        syncGeneratingConversationIds()
-        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-      })
-      if (cancelled) {
-        unlisten()
+  useTauriEvent(api.onChatTool, (payload) => {
+      if (isLocallyCancelledPayload(
+        payload,
+        locallyCancelledConversationIdRef.current,
+        locallyCancelledRunIdRef.current,
+      )) {
+        return
       }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+      // 忽略 invoke 结束后的迟到 tool 事件，否则会重新 setStreaming(true) 卡死输入栏。
+      if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
+      // 多答组分支：按 messageId 路由到对应列。
+      if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+        const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+        if (!column) return
+        const record = toolEventToRecord(payload)
+        applyToolRecordToSnapshot(column, record)
+        touchGroup()
+        return
+      }
+      const snapshot = ensureStreamSnapshot(payload.conversationId)
+      if (payload.runId) {
+        if (snapshot.runId && snapshot.runId !== payload.runId) return
+        snapshot.runId = payload.runId
+      }
+      const record = toolEventToRecord(payload)
+      snapshot.streaming = true
+      snapshot.reasoningStreaming = false
+      const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+      snapshot.toolCalls = index < 0
+        ? [...snapshot.toolCalls, record]
+        : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+      snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
+      syncGeneratingConversationIds()
+      showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
   // Live nested sub-agent progress (P3): merge onto the parent tool card's
   // structuredContent.subagentProgress, addressed by parentToolCallId.
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatSubagent((payload) => {
-        if (cancelled) return
-        // A `chat-subagent` progress event must address an existing snapshot for
-        // the parent conversation (do NOT create one — that would resurrect a
-        // finalized conversation). Accept whenever the conversation is in-flight
-        // or a snapshot already exists.
-        const existingSnapshot = streamSnapshotsRef.current[payload.parentConversationId]
-        const inFlight = isConversationInFlight(
-          inFlightConversationsRef.current,
-          payload.parentConversationId,
-        )
-        if (!inFlight && !existingSnapshot) return
-        const snapshot = ensureStreamSnapshot(payload.parentConversationId)
-        // Match the active run when known; only drop when both ids are set and differ.
-        if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
-        const index = snapshot.toolCalls.findIndex((item) => item.id === payload.parentToolCallId)
-        if (index < 0) return
-        const progress = {
-          taskId: payload.taskId,
-          name: payload.name,
-          model: payload.model ?? '',
-          depth: payload.depth,
-          status: payload.status,
-          preview: payload.preview ?? '',
-          steps: payload.steps ?? [],
-        }
-        // Sub-agents run blocking + single-result: the parent tool card transitions
-        // running→done via the `chat-tool` flow (the inline result), while these
-        // `chat-subagent` events drive the live nested progress (steps/preview).
-        snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
-          if (i !== index) return item
-          const existing =
-            item.structuredContent && typeof item.structuredContent === 'object'
-              ? (item.structuredContent as Record<string, unknown>)
-              : {}
-          const nextStructured: Record<string, unknown> = {
-            ...existing,
-            subagentProgress: progress,
-          }
-          return {
-            ...item,
-            structuredContent: nextStructured,
-          }
-        })
-        showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
-      })
-      if (cancelled) {
-        unlisten()
+  useTauriEvent(api.onChatSubagent, (payload) => {
+      // A `chat-subagent` progress event must address an existing snapshot for
+      // the parent conversation (do NOT create one — that would resurrect a
+      // finalized conversation). Accept whenever the conversation is in-flight
+      // or a snapshot already exists.
+      const existingSnapshot = streamSnapshotsRef.current[payload.parentConversationId]
+      const inFlight = isConversationInFlight(
+        inFlightConversationsRef.current,
+        payload.parentConversationId,
+      )
+      if (!inFlight && !existingSnapshot) return
+      const snapshot = ensureStreamSnapshot(payload.parentConversationId)
+      // Match the active run when known; only drop when both ids are set and differ.
+      if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
+      const index = snapshot.toolCalls.findIndex((item) => item.id === payload.parentToolCallId)
+      if (index < 0) return
+      const progress = {
+        taskId: payload.taskId,
+        name: payload.name,
+        model: payload.model ?? '',
+        depth: payload.depth,
+        status: payload.status,
+        preview: payload.preview ?? '',
+        steps: payload.steps ?? [],
       }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+      // Sub-agents run blocking + single-result: the parent tool card transitions
+      // running→done via the `chat-tool` flow (the inline result), while these
+      // `chat-subagent` events drive the live nested progress (steps/preview).
+      snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
+        if (i !== index) return item
+        const existing =
+          item.structuredContent && typeof item.structuredContent === 'object'
+            ? (item.structuredContent as Record<string, unknown>)
+            : {}
+        const nextStructured: Record<string, unknown> = {
+          ...existing,
+          subagentProgress: progress,
+        }
+        return {
+          ...item,
+          structuredContent: nextStructured,
+        }
+      })
+      showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatUserPrompt((payload) => {
-        if (cancelled) return
-        if (isLocallyCancelledPayload(
-          payload,
-          locallyCancelledConversationIdRef.current,
-          locallyCancelledRunIdRef.current,
-        )) {
-          return
-        }
-        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
-        const snapshot = ensureStreamSnapshot(payload.conversationId)
-        if (payload.runId) {
-          if (snapshot.runId && snapshot.runId !== payload.runId) return
-          snapshot.runId = payload.runId
-        }
-        const record = userPromptEventToRecord(payload)
-        snapshot.streaming = true
-        snapshot.reasoningStreaming = false
-        const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
-        snapshot.toolCalls = index < 0
-          ? [...snapshot.toolCalls, record]
-          : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
-        syncGeneratingConversationIds()
-        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-      })
-      if (cancelled) {
-        unlisten()
+  useTauriEvent(api.onChatUserPrompt, (payload) => {
+      if (isLocallyCancelledPayload(
+        payload,
+        locallyCancelledConversationIdRef.current,
+        locallyCancelledRunIdRef.current,
+      )) {
+        return
       }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+      if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
+      const snapshot = ensureStreamSnapshot(payload.conversationId)
+      if (payload.runId) {
+        if (snapshot.runId && snapshot.runId !== payload.runId) return
+        snapshot.runId = payload.runId
+      }
+      const record = userPromptEventToRecord(payload)
+      snapshot.streaming = true
+      snapshot.reasoningStreaming = false
+      const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+      snapshot.toolCalls = index < 0
+        ? [...snapshot.toolCalls, record]
+        : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+      syncGeneratingConversationIds()
+      showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatToolConfirm((payload) => {
-        if (cancelled) return
-        pendingToolConfirmsRef.current[payload.conversationId] = payload
-        syncGeneratingConversationIds()
-        if (currentConversationIdRef.current === payload.conversationId) {
-          setPendingToolConfirm(payload)
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
+  useTauriEvent(api.onChatToolConfirm, (payload) => {
+    pendingToolConfirmsRef.current[payload.conversationId] = payload
+    syncGeneratingConversationIds()
+    if (currentConversationIdRef.current === payload.conversationId) {
+      setPendingToolConfirm(payload)
     }
   }, [syncGeneratingConversationIds])
 
@@ -2133,27 +1981,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setPendingToolConfirm(null)
   }, [pendingToolConfirm, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatSessionConsent((payload) => {
-        if (cancelled) return
-        pendingSessionConsentsRef.current[payload.conversationId] = payload
-        if (currentConversationIdRef.current === payload.conversationId) {
-          setPendingSessionConsent(payload)
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
+  useTauriEvent(api.onChatSessionConsent, (payload) => {
+    pendingSessionConsentsRef.current[payload.conversationId] = payload
+    if (currentConversationIdRef.current === payload.conversationId) {
+      setPendingSessionConsent(payload)
     }
   }, [])
 
