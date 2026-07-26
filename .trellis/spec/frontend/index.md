@@ -16,9 +16,9 @@ This directory contains guidelines for frontend development. Fill in each file w
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition, and virtualized-row motion | Active |
-| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
+| [Hook Guidelines](./hook-guidelines.md) | 抽 hook 的共现分析判据、ref 间接层、聚合视图 getter、稳定身份契约 | Active |
 | [State Management](./state-management.md) | Local state, global state, server state | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
+| [Quality Guidelines](./quality-guidelines.md) | 无 e2e 下的三层验证、变异验证硬要求、断言陷阱、重构审阅清单 | Active |
 | [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
 | [Conversation Export](./conversation-export.md) | Markdown export command, privacy boundary, and validation contract | Active |
 | [Replace Translation](./replace-translation.md) | Offline pack, MI-GAN mask, stable-ID event, and natural-size Canvas contract | Active |
