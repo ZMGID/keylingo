@@ -22,6 +22,9 @@ pub struct AcpModelsProbe {
     pub models: Vec<RuntimeModelOption>,
     pub current_model: Option<String>,
     pub current_reasoning: Option<String>,
+    /// CLI 在 `configOptions` 里自报的推理档位选项（如 kimi 的 `thinking`：low/high/max）。
+    /// 空 = 该 CLI 不暴露档位，前端退回 `def.reasoning_options` 静态表。
+    pub reasoning_options: Vec<RuntimeModelOption>,
 }
 
 /// Handshake timeouts (缺陷 4 / R3): Paseo uses 60s; desktop starts at 30s. `initialize` and
@@ -302,6 +305,79 @@ fn collect_acp_models_from_lines(lines: &[&str]) -> Option<Vec<RuntimeModelOptio
 /// 从一个 ACP `result`/`update` 里抽取 CLI 当前配置：`models.currentModelId` 作为当前模型，
 /// 当前模型条目的 `_meta.reasoningEfforts` 里 `default=true` 的 id 作为当前推理等级（grok 实测 high）。
 /// 结构未知时保守返回 None（不破坏 default 富化路径）。
+/// 从 ACP `configOptions` 里抽出**推理档位**那一项的选项列表 + 当前值。
+///
+/// kimi 实测形态（`session/new` 的 result）：
+/// ```json
+/// {"type":"select","id":"thinking","category":"thought_level","currentValue":"high",
+///  "options":[{"value":"low","name":"Low"},{"value":"high","name":"High"},
+///             {"value":"max","name":"Max"}]}
+/// ```
+/// 此前只有「设置」侧认这个（`acp_config_ids` 能发 set_config_option），
+/// **发现侧完全没读** —— 于是胶囊上没有档位可选。
+///
+/// 识别口径与 `acp_config_ids` 保持一致（id 含 reasoning/thought/thinking/effort，
+/// 或 category 为 reasoning/thought/thought_level），避免两处判据分叉。
+fn extract_acp_reasoning(value: &Value) -> (Vec<RuntimeModelOption>, Option<String>) {
+    let Some(config_options) = value.get("configOptions").and_then(|v| v.as_array()) else {
+        return (Vec::new(), None);
+    };
+    for raw in config_options {
+        let Some(option) = raw.as_object() else {
+            continue;
+        };
+        let id_l = option
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let category = option
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let is_reasoning = id_l.contains("reasoning")
+            || id_l.contains("thought")
+            || id_l.contains("thinking")
+            || id_l.contains("effort")
+            || category == "reasoning"
+            || category == "thought"
+            || category == "thought_level";
+        if !is_reasoning {
+            continue;
+        }
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for raw_value in option.get("options").and_then(|v| v.as_array()).into_iter().flatten() {
+            let Some(entry) = raw_value.as_object() else {
+                continue;
+            };
+            let id = entry
+                .get("value")
+                .or_else(|| entry.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                continue;
+            }
+            let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+            out.push(RuntimeModelOption {
+                id: id.to_string(),
+                label: name.to_string(),
+                context_window_tokens: None,
+            });
+        }
+        let current = option
+            .get("currentValue")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        return (out, current);
+    }
+    (Vec::new(), None)
+}
+
 fn extract_acp_current(value: &Value) -> (Option<String>, Option<String>) {
     let models = value.get("models");
     let current_id = models
@@ -376,6 +452,7 @@ pub async fn detect_acp_models(
     let mut seen: HashSet<String> = HashSet::new();
     let mut current_model: Option<String> = None;
     let mut current_reasoning: Option<String> = None;
+    let mut reasoning_options: Vec<RuntimeModelOption> = Vec::new();
     let deadline = Duration::from_secs(timeout_secs);
 
     write_rpc(
@@ -465,6 +542,13 @@ pub async fn detect_acp_models(
             let (cm, cr) = extract_acp_current(result);
             current_model = current_model.or(cm);
             current_reasoning = current_reasoning.or(cr);
+            // configOptions 里的推理档位（kimi 的 `thinking`）——与 models._meta 那条
+            // 并列，两种形态各占一家 CLI，都要认。
+            let (opts, cur) = extract_acp_reasoning(result);
+            if !opts.is_empty() && reasoning_options.is_empty() {
+                reasoning_options = opts;
+            }
+            current_reasoning = current_reasoning.or(cur);
             // 不立即退出：再留 1.5s 收异步推送的模型。若此后无推送则窗口到点结束。
             post_window = Some(std::time::Instant::now());
             continue;
@@ -480,6 +564,7 @@ pub async fn detect_acp_models(
         models: out,
         current_model,
         current_reasoning,
+        reasoning_options,
     })
 }
 
@@ -1765,6 +1850,65 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
 mod tests {
     use super::*;
 
+    /// kimi 的 ACP 确实暴露推理档位——`configOptions` 里 `id="thinking"` /
+    /// `category="thought_level"`。此前发现侧完全没读，胶囊上没有档位可选。
+    /// 样本为本机 `kimi acp` 的 session/new 原样输出。
+    #[test]
+    fn reasoning_options_come_from_config_options() {
+        let result = json!({
+            "sessionId": "s1",
+            "configOptions": [
+                { "type": "select", "id": "model", "category": "model",
+                  "currentValue": "kimi-code/k3-256k",
+                  "options": [{ "value": "kimi-code/k3", "name": "K3" }] },
+                { "type": "select", "id": "thinking", "category": "thought_level",
+                  "currentValue": "high",
+                  "options": [
+                    { "value": "low", "name": "Low" },
+                    { "value": "high", "name": "High" },
+                    { "value": "max", "name": "Max" }
+                  ] },
+                { "type": "select", "id": "mode", "category": "mode",
+                  "currentValue": "default",
+                  "options": [{ "value": "default", "name": "Default" }] }
+            ]
+        });
+        let (options, current) = extract_acp_reasoning(&result);
+        assert_eq!(
+            options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            vec!["low", "high", "max"]
+        );
+        assert_eq!(options[1].label, "High");
+        assert_eq!(current.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn reasoning_options_are_empty_when_the_cli_exposes_none() {
+        // cursor/grok 那种只给 model+mode 的形态：不得凭空造出档位。
+        let result = json!({
+            "configOptions": [
+                { "id": "model", "category": "model", "options": [] },
+                { "id": "mode", "category": "mode", "options": [] }
+            ]
+        });
+        let (options, current) = extract_acp_reasoning(&result);
+        assert!(options.is_empty(), "不该造出档位：{options:?}");
+        assert!(current.is_none());
+    }
+
+    #[test]
+    fn reasoning_options_survive_a_missing_options_array() {
+        // 结构变形（有 currentValue 但没 options 列表）时不 panic，当前值仍要能读出来。
+        let result = json!({
+            "configOptions": [
+                { "id": "effort", "category": "reasoning", "currentValue": "medium" }
+            ]
+        });
+        let (options, current) = extract_acp_reasoning(&result);
+        assert!(options.is_empty());
+        assert_eq!(current.as_deref(), Some("medium"));
+    }
+
     #[test]
     fn acp_models_skip_banner_and_parse_json() {
         // 首行 banner（非 JSON）后跟 session/new 结果，仍应解析出模型。
@@ -2737,6 +2881,51 @@ mod tests {
         assert!(
             counts_cache,
             "no usage report counted cache tokens into total; usages={usages:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_reasoning_tests {
+    use super::*;
+
+    /// 真机跑 `kimi acp`，确认档位选项与当前值都能探到。
+    /// 单测喂构造样本，这条证明真实 CLI 也给 —— 而且是 defs 静态表拿不到的
+    /// （`acp_def` 把 reasoning_options 写死成空，所有 ACP CLI 共用）。
+    #[tokio::test]
+    #[ignore = "requires a real kimi CLI on this machine"]
+    async fn live_kimi_exposes_reasoning_options() {
+        // kimi 常装在 ~/.kimi-code/bin（不一定在 PATH 上），两处都找。
+        let bin = crate::external_agents::spawn::resolve_binary(
+            crate::external_agents::registry::get_agent_def("kimi").expect("kimi def"),
+        )
+        .await
+        .or_else(|| {
+            let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+            let p = home.join(".kimi-code").join("bin").join("kimi");
+            p.exists().then_some(p)
+        })
+        .expect("kimi on PATH or in ~/.kimi-code/bin");
+        let probe = detect_acp_models(&bin, &["acp"], &std::env::temp_dir(), 60)
+            .await
+            .expect("kimi acp probe");
+        eprintln!("current_model     = {:?}", probe.current_model);
+        eprintln!("current_reasoning = {:?}", probe.current_reasoning);
+        eprintln!(
+            "reasoning_options = {:?}",
+            probe
+                .reasoning_options
+                .iter()
+                .map(|o| format!("{}/{}", o.id, o.label))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !probe.reasoning_options.is_empty(),
+            "kimi 应上报推理档位（实测 low/high/max），拿到空说明发现侧回归了"
+        );
+        assert!(
+            probe.current_reasoning.is_some(),
+            "kimi 的 configOptions 带 currentValue，当前档位不该是 None"
         );
     }
 }

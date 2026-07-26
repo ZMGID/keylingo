@@ -23,13 +23,26 @@ pub struct SpawnedAgent {
 /// 本机实测：从 Claude Code 环境跑 `env | grep CLAUDE` 确实能看到
 /// `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_AGENT_SDK_VERSION` 都是 set 的。
 ///
-/// 只清这几个**会话身份**变量，不动 `ANTHROPIC_*` 等凭据类变量——那些是用户配置，
-/// 子进程需要它们来认证。
+/// **后两个是「宿主代管凭据」标记，比会话身份更致命**（真机验收时才发现）：
+/// 宿主（Claude Code 桌面端）用 `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1` 告诉 claude
+/// 「你的凭据由我在运行时注入」，并用 `CLAUDE_CODE_HOST_AUTH_ENV_VAR` 指明注入到哪个
+/// 变量名（实测值 `ANTHROPIC_AUTH_TOKEN`）。子进程继承了这两个标记、却**拿不到宿主
+/// 真正注入的那个 token**（它只存在于宿主进程内），于是 claude 认为自己处于代管模式、
+/// 不再回退去读 `~/.claude/settings.json` 的 `env` 块 ⇒ 报 "Not logged in · Please run /login"。
+///
+/// 剥掉这两个后 claude 恢复自主认证，会自己读 settings.json 的 `env`（含用户配置的
+/// `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`）。实测二分定位：单独清任何一个都无效，
+/// 两个**必须一起**清；清掉后 `is_error=false`。
+///
+/// 只清这些**会话身份 / 代管标记**变量，绝不动 `ANTHROPIC_*` 本身——那些是用户配置的
+/// 凭据与端点，子进程需要它们来认证。
 const PARENT_SESSION_ENV_VARS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SSE_PORT",
     "CLAUDE_AGENT_SDK_VERSION",
+    "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
 ];
 
 /// 所有拉起外部 CLI 的地方都必须先过这一手，把父会话身份变量剥掉。
@@ -416,8 +429,13 @@ mod tests {
         std::env::set_var("CLAUDECODE", "1");
         std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
         std::env::set_var("CLAUDE_AGENT_SDK_VERSION", "0.0.0");
-        // 同时设一个**不该**被剥的变量作对照——只清会话身份，不碰凭据/用户配置。
+        // 宿主代管凭据标记：真机验收时正是这两个让 claude 报 "Not logged in"。
+        std::env::set_var("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "1");
+        std::env::set_var("CLAUDE_CODE_HOST_AUTH_ENV_VAR", "ANTHROPIC_AUTH_TOKEN");
+        // 对照组：这两个**不该**被剥——前者是用户配置的凭据、后者是自定义端点，
+        // 剥了子进程就真的没法认证了。剥得过头与剥得不够同样是 bug。
         std::env::set_var("KIVIO_SPAWN_TEST_KEEP", "keep-me");
+        std::env::set_var("ANTHROPIC_AUTH_TOKEN", "sk-test-token");
 
         let out = cli_command("/usr/bin/env")
             .output()
@@ -432,15 +450,32 @@ mod tests {
         assert!(!has("CLAUDECODE"), "CLAUDECODE 泄漏给了子进程");
         assert!(!has("CLAUDE_CODE_ENTRYPOINT"), "CLAUDE_CODE_ENTRYPOINT 泄漏");
         assert!(!has("CLAUDE_AGENT_SDK_VERSION"), "CLAUDE_AGENT_SDK_VERSION 泄漏");
+        // 这两条是真机回归的锚点：泄漏它们会让 claude 以为凭据由宿主代管、
+        // 从而不去读 ~/.claude/settings.json 的 env，报 "Not logged in"。
+        assert!(
+            !has("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"),
+            "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST 泄漏 → claude 会报 Not logged in"
+        );
+        assert!(
+            !has("CLAUDE_CODE_HOST_AUTH_ENV_VAR"),
+            "CLAUDE_CODE_HOST_AUTH_ENV_VAR 泄漏 → claude 会报 Not logged in"
+        );
         assert!(
             has("KIVIO_SPAWN_TEST_KEEP"),
             "剥得过头了：非会话身份的变量也被清掉，子进程会丢失凭据/用户配置"
+        );
+        assert!(
+            has("ANTHROPIC_AUTH_TOKEN"),
+            "ANTHROPIC_AUTH_TOKEN 被误剥——那是用户配置的凭据，子进程要用它认证"
         );
 
         std::env::remove_var("CLAUDECODE");
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
         std::env::remove_var("CLAUDE_AGENT_SDK_VERSION");
+        std::env::remove_var("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST");
+        std::env::remove_var("CLAUDE_CODE_HOST_AUTH_ENV_VAR");
         std::env::remove_var("KIVIO_SPAWN_TEST_KEEP");
+        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
     }
 
     #[test]

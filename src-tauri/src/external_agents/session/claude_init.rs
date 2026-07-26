@@ -284,8 +284,37 @@ fn claude_config_models() -> Vec<String> {
     out
 }
 
-pub fn parse_claude_init_info(value: &Value) -> Option<ClaudeInitInfo> {
-    if !is_claude_init(value) {
+/// 用户在 Claude Code 里配的推理档位（`settings.json` 的 `effortLevel`，
+/// 或进程环境的 `CLAUDE_EFFORT`）。
+///
+/// 与 codex/pi/kimi 的「读本地配置回填当前档位」是同一件事——claude 此前漏了这条，
+/// 于是胶囊上恒显示「自动」，哪怕用户明明配了 `effortLevel: "high"`。
+///
+/// 优先级：`CLAUDE_EFFORT` 环境变量 > `settings.json` 的 `effortLevel`。
+/// 环境变量更贴近「本次启动实际生效的值」（CLI 自身也是这个优先级）。
+///
+/// 返回值必须落在 `defs/claude.rs` 的 `REASONING` 选项 id 集合内，否则前端选不中；
+/// 认不出的值一律 `None`（显示「自动」），不猜、不 panic。
+pub fn claude_config_effort() -> Option<String> {
+    const KNOWN: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    let normalize = |raw: &str| -> Option<String> {
+        let value = raw.trim().to_ascii_lowercase();
+        KNOWN.contains(&value.as_str()).then_some(value)
+    };
+
+    if let Ok(raw) = std::env::var("CLAUDE_EFFORT") {
+        if let Some(effort) = normalize(&raw) {
+            return Some(effort);
+        }
+    }
+
+    let text = claude_config_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    normalize(value.get("effortLevel")?.as_str()?)
+}
+
+pub fn parse_claude_init_info(value: &Value) -> Option<ClaudeInitInfo> {    if !is_claude_init(value) {
         return None;
     }
     let resolved_model = value.get("model").and_then(|v| v.as_str())?.trim();
@@ -468,5 +497,89 @@ mod tests {
             Some(1_000_000),
             "sonnet[1m] should be 1M"
         );
+    }
+
+    /// `effortLevel` 必须能被读出来并落在 `defs/claude.rs` 的 REASONING id 集合内，
+    /// 否则前端选不中、胶囊恒显示「自动」——这正是修复前的症状。
+    #[test]
+    fn reads_effort_level_from_settings_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "kivio-claude-effort-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 复刻本机真实 settings.json 的相关片段。
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"effortLevel":"high","model":"opus","env":{"ANTHROPIC_AUTH_TOKEN":"sk-x"}}"#,
+        )
+        .unwrap();
+
+        let prev_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        let prev_effort = std::env::var("CLAUDE_EFFORT").ok();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        std::env::remove_var("CLAUDE_EFFORT");
+
+        assert_eq!(claude_config_effort().as_deref(), Some("high"));
+
+        // 环境变量优先于 settings.json（与 CLI 自身的优先级一致）。
+        std::env::set_var("CLAUDE_EFFORT", "max");
+        assert_eq!(claude_config_effort().as_deref(), Some("max"));
+
+        // 认不出的值一律 None（显示「自动」），不猜。
+        std::env::set_var("CLAUDE_EFFORT", "turbo");
+        assert_eq!(
+            claude_config_effort().as_deref(),
+            Some("high"),
+            "环境变量非法时应回落 settings.json，而不是整个放弃"
+        );
+
+        std::fs::write(dir.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        std::env::remove_var("CLAUDE_EFFORT");
+        assert_eq!(
+            claude_config_effort(),
+            None,
+            "没配 effortLevel 时不得编一个出来"
+        );
+
+        match prev_dir {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match prev_effort {
+            Some(v) => std::env::set_var("CLAUDE_EFFORT", v),
+            None => std::env::remove_var("CLAUDE_EFFORT"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+}
+
+#[cfg(test)]
+mod live_effort_tests {
+    use super::*;
+
+    /// 读本机真实 `~/.claude/settings.json`，打印实际解析出的档位。
+    /// 单测喂的是构造样本，这条证明真实配置也能读到（本机 effortLevel = "high"）。
+    #[test]
+    #[ignore = "reads the real ~/.claude/settings.json on this machine"]
+    fn live_reads_real_effort_level() {
+        // 清掉环境变量，专门验证 settings.json 这条路（本机 CLAUDE_EFFORT 也是 high，
+        // 不清的话分不清读到的是哪一个）。
+        let prev = std::env::var("CLAUDE_EFFORT").ok();
+        std::env::remove_var("CLAUDE_EFFORT");
+        let from_file = claude_config_effort();
+        match prev.clone() {
+            Some(v) => std::env::set_var("CLAUDE_EFFORT", v),
+            None => std::env::remove_var("CLAUDE_EFFORT"),
+        }
+        let with_env = claude_config_effort();
+        eprintln!("settings.json 的 effortLevel -> {from_file:?}");
+        eprintln!("含 CLAUDE_EFFORT 环境变量   -> {with_env:?}");
+        eprintln!("（None 表示会显示「自动」）");
     }
 }

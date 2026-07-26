@@ -94,7 +94,7 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
         };
     };
     match probe_models(def, path.as_deref(), cwd).await {
-        Ok((models, mut current_model, mut current_reasoning)) => {
+        Ok((models, mut current_model, mut current_reasoning, probed_reasoning)) => {
             // codex 的当前模型/推理不来自 `debug models`（其输出仅供列表），而是读 config.toml 顶层键。
             if def.id == "codex" {
                 let (cm, cr) = read_codex_current_config();
@@ -109,10 +109,22 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
                 let (cm, cr) = read_kimi_current_config();
                 current_model = cm;
                 current_reasoning = current_reasoning.or(cr);
+            } else if def.id == "claude" {
+                // claude 的 system/init 只报模型、不报推理档位 → 读 settings.json 的
+                // `effortLevel`（或 CLAUDE_EFFORT 环境变量）。此前漏了这条，胶囊上
+                // 恒显示「自动」，哪怕用户明明配了 effortLevel: "high"。
+                current_reasoning = current_reasoning
+                    .or_else(crate::external_agents::session::claude_init::claude_config_effort);
             }
             AgentModelsResult {
                 models,
-                reasoning_options: reasoning,
+                // CLI 自报的档位优先于 defs 静态表：kimi 的 ACP 会给 low/high/max，
+                // 而 acp_def 里 reasoning_options 是空的（所有 ACP CLI 共用那个构造器）。
+                reasoning_options: if probed_reasoning.is_empty() {
+                    reasoning
+                } else {
+                    probed_reasoning
+                },
                 source: ModelSource::Probed,
                 probe_error: None,
                 current_model,
@@ -294,7 +306,7 @@ pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedA
     let models = if available {
         probe_models(def, path.as_deref(), cwd)
             .await
-            .map(|(models, _, _)| models)
+            .map(|(models, _, _, _)| models)
             .unwrap_or_else(|_| fallback_models_from_pairs(def.fallback_models))
     } else {
         fallback_models_from_pairs(def.fallback_models)
@@ -380,10 +392,19 @@ async fn probe_auth(def: &RuntimeAgentDef, path: Option<&std::path::Path>) -> Op
     }
 }
 
-/// 探测模型列表 + CLI 当前配置。返回 `(models, current_model, current_reasoning)`。
+/// 探测模型列表 + CLI 当前配置。返回
+/// `(models, current_model, current_reasoning, probed_reasoning_options)`。
 /// current_* 仅 ACP（currentModelId）与 claude（resolved model）路径能给出；其余为 None
 /// （codex 的当前配置由上层 detect_agent_models 从 config.toml 补齐）。
-type ProbeModelsOutput = (Vec<RuntimeModelOption>, Option<String>, Option<String>);
+///
+/// 最后一项是 CLI **自报**的推理档位选项（kimi 的 ACP `thinking`：low/high/max）。
+/// 空 = 该 CLI 不暴露，回落 `def.reasoning_options` 静态表。
+type ProbeModelsOutput = (
+    Vec<RuntimeModelOption>,
+    Option<String>,
+    Option<String>,
+    Vec<RuntimeModelOption>,
+);
 
 async fn probe_models(
     def: &RuntimeAgentDef,
@@ -397,7 +418,7 @@ async fn probe_models(
     if def.id == "opencode" {
         let timeout_secs = def.list_models_timeout_secs.unwrap_or(15);
         if let Some(models) = probe_opencode_models(bin, cwd, timeout_secs).await {
-            return Ok((models, None, None));
+            return Ok((models, None, None, Vec::new()));
         }
     }
 
@@ -411,7 +432,14 @@ async fn probe_models(
         let timeout_secs = def.list_models_timeout_secs.unwrap_or(15);
         return detect_acp_models(bin, &args, cwd, timeout_secs)
             .await
-            .map(|probe| (probe.models, probe.current_model, probe.current_reasoning))
+            .map(|probe| {
+                (
+                    probe.models,
+                    probe.current_model,
+                    probe.current_reasoning,
+                    probe.reasoning_options,
+                )
+            })
             .ok_or_else(|| "ACP 模型探测未返回模型（可能未登录或握手失败）".to_string());
     }
 
@@ -423,7 +451,7 @@ async fn probe_models(
         )
         .await
         {
-            Ok(Some((models, current_model))) => Ok((models, current_model, None)),
+            Ok(Some((models, current_model))) => Ok((models, current_model, None, Vec::new())),
             Ok(None) => Err("Claude 初始化未上报模型".to_string()),
             Err(_) => Err(format!("Claude 模型探测超时（{timeout_secs}s）")),
         };
@@ -456,7 +484,7 @@ async fn probe_models(
             stderr
         };
         return parse_pi_models(text.as_ref())
-            .map(|models| (models, None, None))
+            .map(|models| (models, None, None, Vec::new()))
             .ok_or_else(|| "未从 pi 输出解析出模型".to_string());
     }
 
@@ -468,7 +496,7 @@ async fn probe_models(
     }
     let text = String::from_utf8_lossy(&output.stdout);
     parse_models_list(def.id, text.as_ref())
-        .map(|models| (models, None, None))
+        .map(|models| (models, None, None, Vec::new()))
         .ok_or_else(|| "未从列模型输出解析出模型".to_string())
 }
 
