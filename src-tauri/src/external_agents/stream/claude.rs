@@ -73,11 +73,34 @@ impl ClaudeStreamState {
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match kind {
             "system" => {
-                if obj.get("subtype").and_then(|v| v.as_str()) == Some("init") {
-                    let commands = parse_slash_commands_from_init(value);
-                    if !commands.is_empty() {
-                        sink(UnifiedAgentEvent::SlashCommands { commands });
+                match obj.get("subtype").and_then(|v| v.as_str()) {
+                    Some("init") => {
+                        let commands = parse_slash_commands_from_init(value);
+                        if !commands.is_empty() {
+                            sink(UnifiedAgentEvent::SlashCommands { commands });
+                        }
                     }
+                    // claude 自己触发的上下文压缩。官方 SDK 类型
+                    // `SDKCompactBoundaryMessage.compact_metadata` 只有 `trigger` 与
+                    // `pre_tokens`——**没有 post_tokens**，别去读一个不存在的字段。
+                    // 压缩后的真实占用会由紧随其后的 `message_start.message.usage`
+                    // 上报（服务端算的），用量条靠那条自愈，这里只负责让压缩这件事**可见**。
+                    Some("compact_boundary") => {
+                        let metadata = obj.get("compact_metadata");
+                        let trigger = metadata
+                            .and_then(|m| m.get("trigger"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("auto")
+                            .to_string();
+                        let pre_tokens = metadata
+                            .and_then(|m| m.get("pre_tokens"))
+                            .and_then(|v| v.as_u64());
+                        sink(UnifiedAgentEvent::CliCompacted {
+                            trigger,
+                            pre_tokens,
+                        });
+                    }
+                    _ => {}
                 }
             }
             "stream_event" => {
@@ -383,6 +406,84 @@ mod tests {
             UnifiedAgentEvent::SlashCommands { commands }
                 if commands.len() == 2 && commands.iter().any(|c| c.slash == "/compact")
         )));
+    }
+
+    /// CLI 自己触发的压缩必须被看见：否则用户只见「对话突然变短」而无任何解释。
+    /// 字段按官方 SDK 的 `SDKCompactBoundaryMessage.compact_metadata` 构造
+    /// （`@anthropic-ai/claude-agent-sdk` 的 sdk.d.ts：只有 trigger + pre_tokens）。
+    #[test]
+    fn parses_cli_triggered_compaction() {
+        let raw = r#"{"type":"system","subtype":"compact_boundary",
+            "compact_metadata":{"trigger":"auto","pre_tokens":152340},
+            "uuid":"u-1","session_id":"s-1"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                UnifiedAgentEvent::CliCompacted { trigger, pre_tokens }
+                    if trigger == "auto" && *pre_tokens == Some(152_340)
+            )),
+            "compact_boundary 未产出 CliCompacted：{events:?}"
+        );
+    }
+
+    #[test]
+    fn compaction_without_metadata_still_reports_the_event() {
+        // 元数据缺失（字段可选/未来变形）时也不能把压缩这件事整个丢掉——
+        // trigger 退 auto、pre_tokens 留 None，事件照发。
+        let raw = r#"{"type":"system","subtype":"compact_boundary"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::CliCompacted { trigger, pre_tokens }
+                if trigger == "auto" && pre_tokens.is_none()
+        )));
+    }
+
+    #[test]
+    fn other_system_subtypes_do_not_look_like_compaction() {
+        // `system` 下还有 turn_duration / stop_hook_summary 等一堆 subtype
+        // （本机 claude 历史里实测到 7 种），不得被误判成压缩。
+        for raw in [
+            r#"{"type":"system","subtype":"turn_duration","ms":12}"#,
+            r#"{"type":"system","subtype":"stop_hook_summary"}"#,
+            r#"{"type":"system","subtype":"api_error"}"#,
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            let mut events = Vec::new();
+            ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, UnifiedAgentEvent::CliCompacted { .. })),
+                "{raw} 被误判为压缩"
+            );
+        }
+    }
+
+    /// 压缩后用量条的自愈路径：`compact_boundary` **不带** post_tokens
+    /// （官方 SDK 只给 pre_tokens），压缩后的真实占用靠紧随其后的
+    /// `message_start.message.usage` 上报。这条钉住「压缩后能拿到新数字」。
+    #[test]
+    fn usage_recovers_from_message_start_after_compaction() {
+        let events = run(&[
+            r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":152340}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-2","usage":{"input_tokens":900,"cache_read_input_tokens":8000,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#,
+        ]);
+        let usage = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .expect("压缩后应有新的用量上报");
+        // 900 + 8000 = 8900，远低于压缩前的 152340 —— 说明分母/分子已跟上压缩。
+        assert_eq!(usage.total_tokens, Some(8_900));
     }
 
     // ---- usage：cache 计入 + iterations 末项 + message_start 实时上报 ----

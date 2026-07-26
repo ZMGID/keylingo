@@ -52,6 +52,16 @@
 
 14f. **窗口来源是 per-CLI 的，别假设统一形态**：codex 走 `debug models` 的 `context_window`（**不是** app-server 的 `model/list`，实测那里没有窗口字段）；grok 走 ACP `_meta.totalContextTokens`；pi 走 `--list-models` 定宽表第 3 列；**cursor 把窗口写在 modelId 的方括号里**（`claude-opus-5[thinking=true,context=300k,effort=high]`，实测 33 个模型 14 个带 `context=`，且**全都没有** `_meta`），且它的模型走 **`configOptions` 分支**而不是 `models.availableModels`——那条分支命中后会提前 return，只给 availableModels 加解析在生产里等于没做（实测 0/33，单测却是绿的，只有真机 `#[ignore]` 测试才抓到）。kimi 的 ACP 上游什么都不给（`session/new` 无 token 字段、`session/prompt` 无 usage、不发 `usage_update`），只能静态映射 + 读其 `wire.jsonl`；后者按 **workDir** 关联（kimi `session_index.jsonl` 的 `workDir` 恰等于 `resolve_effective_cwd()`，**不能**用 session id——kimi 走 ACP，id 由它自己生成，Kivio 根本没存），且必须**跳过空壳会话**（实测某 workDir 下 53 个 session 有 52 个是第 11b 条所述的 slash 探测残渣，判据：存在 `type=="usage.record"` 且 `usageScope=="turn"`）。
 
+## 子进程启动与二进制解析
+
+> 来源：任务 07-26-local-cli-context-usage 的 G3 对齐。数字均为本机实测。
+
+16. **拉起外部 CLI 一律走 `spawn::cli_command`，不要用 `Command::new`**。它会剥掉父会话身份变量（`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SSE_PORT` / `CLAUDE_AGENT_SDK_VERSION`）。Kivio 若从 Claude Code 内启动（开发时 `npm run dev`，或用户把 Kivio 挂在某个 agent 下），这些变量会**继承**进 Kivio 再泄漏给 CLI 子进程，让子进程以为自己嵌套在另一个会话里而拒绝启动（claude 报 "cannot be launched inside another session"）。本机实测这三个变量在 Claude Code 环境下确实都是 set 的。**探测路径同样要剥**——探测也是子进程，且失败会被 `AVAILABILITY_CACHE_TTL`(600s) 缓存，一次误判要 10 分钟才自愈。只清会话身份变量，**不动** `ANTHROPIC_*` 等凭据（子进程要用它们认证）；忘记剥不会编译报错、也不会立刻出错，只在特定启动场景炸，极难排查。
+
+17. **二进制解析要遍历全部同名候选并逐个探活，且「能启动」就算存在**。`which` 的第一行可能是坏 shim（版本管理器切换残留、断链、丢执行权限），选中它不会立刻失败而是**等到跑轮次时**才炸，用户看到运行时报错而非「未安装」。故用 `which -a` 取全部候选、逐个探活取第一个能起来的。判据刻意宽松：**只有 spawn 阶段失败才算不存在**。本机实测的失败分类：丢执行权限 → `EACCES`（不存在）；断链/文件缺失 → `ENOENT`（不存在）；**装了但未登录 → spawn 成功、exit 非零（算存在）**；**空文件挂执行位 → spawn 成功、内核回退 `/bin/sh` exit 0（算存在）**；超时 → 算存在（进程都起来了）。只认零退出码会把未登录的 CLI 误判成未安装，**比原来的 bug 更糟**。（注：用 Python `subprocess` 试空文件会看到 `ENOEXEC`，那是 CPython 自己先拦的，内核/Rust 行为以 `probe_*` 单测为准。）
+
+18. **探活结果必须缓存，key 用「路径 + mtime + size」**。`resolve_binary` 是回复热路径上唯一允许的前置调用，`run.rs` 的预算是**第 2+ 轮 <500ms**。单次 `--version` 实测开销差异极大：grok 6.6ms、claude 40ms，但 **kimi 328ms、pi 302ms**（Node 包装脚本冷启动）——不缓存的话 kimi 单这一步就 538ms，直接击穿预算。实测加缓存后 warm 路径全部 ≤4ms。用文件身份而非 TTL 做 key：换版本/重装/切版本管理器都会改 mtime 或 size ⇒ 自动失效重探，既没有「刚装好却要等」也没有「删了还认为在」的窗口。
+
 ## 测试约定
 
 13. external_agents 的行为修复必须带可红→绿的单测（本轮新增 ~40 组均遵守）；持久路径优先抽纯函数测（assembler / classify / failure_action / build_*_params），live 测试一律 `#[ignore]` 门控。

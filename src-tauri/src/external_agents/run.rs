@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use chrono::Local;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::chat::agent::AgentRunEntry;
@@ -1084,6 +1084,43 @@ fn push_tool_segment(
     segment
 }
 
+/// 发 `chat-compaction` 通知前端「CLI 自己压了一次上下文」，payload 与内置路径
+/// （`chat/commands/context.rs::emit_chat_compaction_state`）保持同形，前端
+/// `Chat.tsx` 的 `onChatCompaction` 才能复用同一套分隔线逻辑。
+///
+/// `boundary.token_estimate_after` 填 0：官方 SDK 的 `compact_metadata` 只给
+/// `pre_tokens`，压缩后的占用要等下一条 `message_start.message.usage`（服务端算），
+/// 这里编一个数只会让分隔线上显示假数字。前端渲染时 after 为 0 即不显示「→ N」。
+fn emit_cli_compaction(
+    app: &AppHandle,
+    conversation_id: &str,
+    trigger: &str,
+    pre_tokens: Option<u64>,
+    now: i64,
+) {
+    let boundary = serde_json::json!({
+        "id": Uuid::new_v4().to_string(),
+        "source_until_message_id": "",
+        "display_after_message_id": null,
+        "token_estimate_before": pre_tokens.unwrap_or(0),
+        "token_estimate_after": 0,
+        "summary_content": "",
+        // CLI 自压统一记 `auto`/`manual`（沿用 CLI 自报的 trigger），与内置的
+        // `agent_loop` 区分开——排查时能看出压缩是谁触发的。
+        "trigger": trigger,
+        "created_at": now,
+    });
+    let _ = app.emit(
+        "chat-compaction",
+        serde_json::json!({
+            "conversationId": conversation_id,
+            "phase": "completed",
+            "trigger": trigger,
+            "boundary": boundary,
+        }),
+    );
+}
+
 fn apply_unified_event(
     app: &AppHandle,
     conversation_id: &str,
@@ -1210,6 +1247,20 @@ fn apply_unified_event(
             if raw_output.chars().count() > 8192 {
                 *raw_output = tail_chars(raw_output, 8192);
             }
+        }
+        UnifiedAgentEvent::CliCompacted {
+            trigger,
+            pre_tokens,
+        } => {
+            // CLI **自己**压缩了上下文（claude 的 compact_boundary）。Kivio 并没有发
+            // `/compact`，所以不能走 `external_agents::compact` 那条路；这里只做两件事：
+            //   1. 记一次压缩（让 footer 的「已压缩 N 次」与实际相符）
+            //   2. 发 `chat-compaction` 让前端插入分隔线——否则用户只会看到
+            //      「对话突然变短了」而没有任何解释。
+            // 用量数字**不在这里改**：压缩后的真实占用由紧随其后的
+            // `message_start.message.usage` 上报（服务端算的），比任何本地推算都准。
+            // 官方 SDK 的 compact_metadata 也确实只给 pre_tokens、没有 post_tokens。
+            emit_cli_compaction(app, conversation_id, &trigger, pre_tokens, now);
         }
         _ => {}
     }

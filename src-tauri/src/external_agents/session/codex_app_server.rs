@@ -119,6 +119,16 @@ fn map_codex_notification(
             //   total = 整个 thread 的累计消耗 → 计费口径，随轮次单调增长
             // 用 total 当「已用上下文」会持续虚高，最终把进度条推满而实际远未满。
             // `last` 缺失时才退回 `total`（兼容旧版 codex）。
+            //
+            // 同层还有 `modelContextWindow`（与 last/total 平级）：codex 自报的**本轮真实窗口**。
+            // 本机实测 258400，而静态表（`codex debug models` 的 context_window）是 272000，
+            // 偏高 5.3%。CLI 实报优先于任何静态表（模型可能中途切换），走
+            // `ModelUsage::context_window_tokens` 这条 L9 最高优先级通道。
+            let model_context_window = params
+                .get("tokenUsage")
+                .and_then(|v| v.get("modelContextWindow"))
+                .and_then(|v| v.as_u64())
+                .filter(|tokens| *tokens > 0);
             if let Some(usage) = params
                 .get("tokenUsage")
                 .and_then(|v| v.get("last").or_else(|| v.get("total")))
@@ -139,12 +149,16 @@ fn map_codex_notification(
                     cache_included_in_input: true,
                     // 刻意**不读** `reasoningOutputTokens`：同一样本里它是 0 而
                     // input+output 已恰好等于 totalTokens，说明推理 token 已含在 outputTokens 内。
+                    context_window: model_context_window,
                     ..Default::default()
                 };
                 if parts.input > 0
                     || parts.output > 0
                     || parts.cache_read > 0
                     || parts.cache_creation > 0
+                    // 窗口本身也是有效信息：一轮还没产生 token 时先把分母立起来，
+                    // 好过让用量条继续吃静态表的近似值。
+                    || parts.context_window.is_some()
                 {
                     sink(UnifiedAgentEvent::Usage {
                         usage: usage_from_parts(parts),
@@ -470,7 +484,7 @@ impl CodexAppServerSession {
         sandbox: Option<&str>,
         resume_thread: Option<&str>,
     ) -> Result<Self, String> {
-        let mut child = tokio::process::Command::new(resolved_bin)
+        let mut child = crate::external_agents::spawn::cli_command(resolved_bin)
             .args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
@@ -782,7 +796,7 @@ pub async fn detect_codex_commands(
         .collect();
 
     // Best-effort: pull skills via the app-server. Failure leaves just the built-ins.
-    if let Ok(mut child) = tokio::process::Command::new(resolved_bin)
+    if let Ok(mut child) = crate::external_agents::spawn::cli_command(resolved_bin)
         .arg("app-server")
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
@@ -1121,6 +1135,36 @@ mod tests {
         // 必须与 codex 自报的 totalTokens 完全一致——这是「口径对了」的唯一硬判据。
         assert_eq!(usage.total_tokens, Some(16_872));
         assert_eq!(usage.cached_input_tokens, Some(3_456));
+        // 分母也来自同一条 payload：codex 自报 258400，而静态表（`codex debug models`
+        // 的 context_window）是 272000，偏高 5.3%。实报优先。
+        assert_eq!(usage.context_window_tokens, Some(258_400));
+    }
+
+    #[test]
+    fn token_usage_reports_window_even_before_any_token_is_spent() {
+        // 一轮开头 token 还是 0，但窗口已知——此时也要把分母立起来，
+        // 否则用量条会先吃一段静态表的近似值再跳变。
+        let (events, _) = collect(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"t","turnId":"u","tokenUsage":{
+                 "last":{"cachedInputTokens":0,"inputTokens":0,"outputTokens":0,"totalTokens":0},
+                 "modelContextWindow":258400,
+                 "total":{"cachedInputTokens":0,"inputTokens":0,"outputTokens":0,"totalTokens":0}}}"#,
+        );
+        let usage = only_usage(&events);
+        assert_eq!(usage.context_window_tokens, Some(258_400));
+    }
+
+    #[test]
+    fn token_usage_without_model_context_window_leaves_denominator_unset() {
+        // 旧版 codex 不报 modelContextWindow：不得凭空造一个，交给 L9 的静态表兜。
+        let (events, _) = collect(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"t","turnId":"u","tokenUsage":{
+                 "last":{"cachedInputTokens":0,"inputTokens":16,"outputTokens":7,"totalTokens":23}}}"#,
+        );
+        let usage = only_usage(&events);
+        assert_eq!(usage.context_window_tokens, None);
     }
 
     #[test]
@@ -1190,6 +1234,7 @@ mod tests {
             UnifiedAgentEvent::Error { .. } => "Error",
             UnifiedAgentEvent::Raw { .. } => "Raw",
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
+            UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
         }
     }
 
@@ -1303,8 +1348,12 @@ mod tests {
         let usages = one_turn("Reply with exactly the token USAGE_OK and nothing else.").await;
         for u in &usages {
             eprintln!(
-                "codex usage: input={:?} output={:?} cache_read={:?} total={:?}",
-                u.input_tokens, u.output_tokens, u.cached_input_tokens, u.total_tokens
+                "codex usage: input={:?} output={:?} cache_read={:?} total={:?} window={:?}",
+                u.input_tokens,
+                u.output_tokens,
+                u.cached_input_tokens,
+                u.total_tokens,
+                u.context_window_tokens
             );
         }
         assert!(

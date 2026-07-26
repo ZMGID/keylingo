@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::time::timeout;
 
 use crate::external_agents::context::parse_context_window_label;
@@ -27,7 +27,7 @@ pub async fn detect_pi_commands(
     cwd: &Path,
     timeout_secs: u64,
 ) -> Option<Vec<ExternalCliSlashCommand>> {
-    let mut child = Command::new(bin)
+    let mut child = crate::external_agents::spawn::cli_command(bin)
         .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
@@ -515,11 +515,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live pi CLI on PATH + login"]
     async fn pi_usage_counts_cache_tokens() {
-        use tokio::process::Command;
         use tokio::time::{timeout, Duration};
 
         let cwd = std::env::temp_dir();
-        let mut child = Command::new("pi")
+        let mut child = crate::external_agents::spawn::cli_command("pi")
             .args(["--mode", "rpc"])
             .current_dir(&cwd)
             .stdin(std::process::Stdio::piped())

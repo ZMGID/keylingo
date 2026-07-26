@@ -192,6 +192,23 @@ pub enum UnifiedAgentEvent {
     SlashCommands {
         commands: Vec<ExternalCliSlashCommand>,
     },
+    /// CLI 在**自己内部**完成了一次上下文压缩（claude 的
+    /// `{"type":"system","subtype":"compact_boundary"}`）。
+    ///
+    /// 与 Kivio 主动发 `/compact`（`external_agents/compact.rs`）不同：那是用户点的、
+    /// Kivio 知情；这条是 CLI 自动触发的，Kivio 只能被动收到通知。不接的话
+    /// 用户会看到「对话突然变短了但没有任何提示」。
+    ///
+    /// 字段取自官方 SDK 的 `SDKCompactBoundaryMessage.compact_metadata`
+    /// （`@anthropic-ai/claude-agent-sdk` 的 sdk.d.ts）：**只有** `trigger` 与
+    /// `pre_tokens`，**没有** post_tokens——压缩后的真实占用由下一条
+    /// `message_start.message.usage` 上报（服务端算的），不需要也不该猜。
+    CliCompacted {
+        /// `manual`（CLI 内用户敲的 /compact）| `auto`（CLI 自动触发）
+        trigger: String,
+        /// 压缩**前**的上下文占用；CLI 未提供时为 `None`。
+        pre_tokens: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -354,7 +354,7 @@ pub async fn detect_acp_models(
     cwd: &Path,
     timeout_secs: u64,
 ) -> Option<AcpModelsProbe> {
-    let mut child = Command::new(bin)
+    let mut child = crate::external_agents::spawn::cli_command(bin)
         .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
@@ -532,7 +532,7 @@ pub async fn detect_acp_commands(
     cwd: &Path,
     timeout_secs: u64,
 ) -> Option<Vec<ExternalCliSlashCommand>> {
-    let mut child = Command::new(bin)
+    let mut child = crate::external_agents::spawn::cli_command(bin)
         .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
@@ -1343,7 +1343,7 @@ impl AcpSession {
         mcp_servers: &[AcpMcpServer],
         resume_session: Option<&str>,
     ) -> Result<Self, String> {
-        let mut child = Command::new(resolved_bin)
+        let mut child = crate::external_agents::spawn::cli_command(resolved_bin)
             .args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::piped())
@@ -2545,6 +2545,7 @@ mod tests {
             UnifiedAgentEvent::Error { .. } => "Error",
             UnifiedAgentEvent::Raw { .. } => "Raw",
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
+            UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
         }
     }
 
@@ -2552,7 +2553,7 @@ mod tests {
     #[ignore = "requires live cursor-agent login + network"]
     async fn cursor_acp_smoke() {
         let cwd = std::env::temp_dir();
-        let mut child = Command::new("cursor-agent")
+        let mut child = crate::external_agents::spawn::cli_command("cursor-agent")
             .arg("acp")
             .current_dir(&cwd)
             .stdin(std::process::Stdio::piped())
@@ -2658,7 +2659,7 @@ mod tests {
     #[ignore = "requires live opencode login + network"]
     async fn opencode_acp_reports_usage_and_context_window() {
         let cwd = std::env::temp_dir();
-        let mut child = Command::new("opencode")
+        let mut child = crate::external_agents::spawn::cli_command("opencode")
             .arg("acp")
             .current_dir(&cwd)
             .stdin(std::process::Stdio::piped())

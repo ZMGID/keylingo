@@ -342,7 +342,7 @@ pub fn sandbox_options_for(agent_id: &str) -> Vec<RuntimeModelOption> {
 
 async fn probe_version(def: &RuntimeAgentDef, path: Option<&std::path::Path>) -> Option<String> {
     let bin = path?;
-    let output = tokio::process::Command::new(bin)
+    let output = crate::external_agents::spawn::cli_command(bin)
         .args(def.version_args)
         .no_console_window()
         .output()
@@ -365,7 +365,7 @@ async fn probe_auth(def: &RuntimeAgentDef, path: Option<&std::path::Path>) -> Op
     let bin = path?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(bin)
+        crate::external_agents::spawn::cli_command(bin)
             .args(args)
             .no_console_window()
             .output(),
@@ -435,7 +435,7 @@ async fn probe_models(
     let timeout_secs = def.list_models_timeout_secs.unwrap_or(5);
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        tokio::process::Command::new(bin)
+        crate::external_agents::spawn::cli_command(bin)
             .args(args)
             .current_dir(cwd)
             .no_console_window()
@@ -479,7 +479,7 @@ async fn probe_opencode_models(
 ) -> Option<Vec<RuntimeModelOption>> {
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        tokio::process::Command::new(bin)
+        crate::external_agents::spawn::cli_command(bin)
             .arg("models")
             .current_dir(cwd)
             .no_console_window()
