@@ -268,6 +268,10 @@ pub async fn run_external_cli_reply(
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut tool_map: HashMap<String, usize> = HashMap::new();
     let mut usage: Option<ModelUsage> = None;
+    // 协议层自报的失败（claude `result.is_error` / codex `turn/completed failed` / pi
+    // `stopReason:error` …）。读流本身常常**正常** Ok 返回，失败只体现在这条消息里，
+    // 故单独记下来在出口与 `read_result` 一起判（见 `resolve_turn_error`）。
+    let mut stream_error: Option<String> = None;
     let mut stream_outcome = "completed".to_string();
     let mut segment_order = 0u32;
     let mut segments: Vec<ChatMessageSegment> = Vec::new();
@@ -297,6 +301,7 @@ pub async fn run_external_cli_reply(
             &mut tool_calls,
             &mut tool_map,
             &mut usage,
+            &mut stream_error,
             &mut segments,
             &mut segment_order,
             &mut segment_tracker,
@@ -434,8 +439,9 @@ pub async fn run_external_cli_reply(
     }
     // R2: a read error (non-cancel) becomes a classified, actionable bubble — the raw error goes
     // into a collapsible `<details>` rather than being shown verbatim as the bubble body.
+    let turn_error = resolve_turn_error(read_result.as_ref().err(), stream_error.as_ref());
     let mut error_rendered = false;
-    if let Err(err) = &read_result {
+    if let Some(err) = turn_error {
         if err == "cancelled" {
             stream_outcome = "cancelled".to_string();
         } else {
@@ -1132,6 +1138,7 @@ fn apply_unified_event(
     tool_calls: &mut Vec<ToolCallRecord>,
     tool_map: &mut HashMap<String, usize>,
     usage: &mut Option<ModelUsage>,
+    stream_error: &mut Option<String>,
     segments: &mut Vec<ChatMessageSegment>,
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
@@ -1236,6 +1243,13 @@ fn apply_unified_event(
         }
         UnifiedAgentEvent::Error { message, .. } => {
             eprintln!("[external-agent] stream error: {message}");
+            // 协议层报的失败必须能走到出口的 `errors::classify`（spec 第 5 条）：只打日志的话，
+            // 一条「CLI 明确说本轮失败了」的消息会被整个吞掉——claude 未登录时的
+            // `{"subtype":"success","is_error":true}` 正是这样被当成成功轮次的。
+            // 首条为准（后续多为同一失败的连带回声），不覆盖。
+            if stream_error.is_none() {
+                *stream_error = Some(message);
+            }
         }
         UnifiedAgentEvent::Raw { line } => {
             // Unparsed stdout line — accumulate (capped) as a fallback surfaced only if the run
@@ -1266,6 +1280,23 @@ fn apply_unified_event(
     }
 }
 
+/// 本轮的失败判据：读流错误与**协议层自报的失败**（`UnifiedAgentEvent::Error`）共用
+/// 同一个出口，从而都能走到 `errors::classify`（spec 第 5 条）。
+///
+/// 为什么不能只看 `read_result`：读流经常**正常** `Ok` 返回（CLI 完整输出后 exit 0），
+/// 失败只体现在流里的一条消息里。claude 未登录的真实样本
+/// `{"type":"result","subtype":"success","is_error":true,"result":"Not logged in …"}`
+/// 就是这样：进程干净退出、stdout 全是合法 JSON，于是整轮被判为「已完成」，
+/// 用户拿到一个空气泡且零提示。
+///
+/// `read_result` 的错误优先：进程级失败带退出码与 stderr，`classify` 能给出更准的分类。
+fn resolve_turn_error<'a>(
+    read_error: Option<&'a String>,
+    stream_error: Option<&'a String>,
+) -> Option<&'a String> {
+    read_error.or(stream_error)
+}
+
 /// 合并一轮内先后到达的多次 CLI 用量上报：**后到覆盖先到**（取最新快照），
 /// 但 `context_window_tokens` **粘滞**——新值为 `None` 时保留旧值。
 ///
@@ -1291,6 +1322,74 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 协议层自报的失败必须能到出口——修复前这里只打了一条日志，于是
+    /// 「CLI 明确说本轮失败了」被整个吞掉（claude 未登录 ⇒ 空气泡 + 零提示）。
+    #[test]
+    fn protocol_reported_failure_reaches_the_error_exit() {
+        let stream_error = "Not logged in · Please run /login".to_string();
+        let resolved = resolve_turn_error(None, Some(&stream_error));
+        assert_eq!(
+            resolved,
+            Some(&stream_error),
+            "读流 Ok 时，协议层自报的失败仍必须成为本轮错误"
+        );
+    }
+
+    /// 读流错误优先于协议层消息：进程级失败带退出码/stderr，`classify` 分得更准。
+    #[test]
+    fn read_error_wins_over_protocol_reported_failure() {
+        let read_error = "session-new: timed out".to_string();
+        let stream_error = "some protocol complaint".to_string();
+        assert_eq!(
+            resolve_turn_error(Some(&read_error), Some(&stream_error)),
+            Some(&read_error)
+        );
+    }
+
+    /// 两者都没有 ⇒ 本轮成功，不得凭空造出错误（正常轮次不能被新逻辑误判）。
+    #[test]
+    fn clean_turn_has_no_error() {
+        assert_eq!(resolve_turn_error(None, None), None);
+    }
+
+    /// 端到端：claude 未登录的**真实样本**从流解析一路走到气泡文案。
+    /// 这条把 `stream/claude.rs` 的解析与 `run.rs` 的出口接在一起——两边各自正确
+    /// 但没接上，正是上一轮 `collect_external_session_usage` 那类空转 bug 的形态。
+    #[test]
+    fn real_not_logged_in_payload_renders_an_actionable_bubble() {
+        let raw = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","stop_reason":"stop_sequence","total_cost_usd":0,"permission_denials":[],"usage":{"input_tokens":0,"output_tokens":0,"iterations":[]}}"#;
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+
+        // 1) 解析：produce 一条 Error。
+        let mut stream_error: Option<String> = None;
+        crate::external_agents::stream::claude::ClaudeStreamState::default().handle_value(
+            &value,
+            &mut |event| {
+                if let UnifiedAgentEvent::Error { message } = event {
+                    if stream_error.is_none() {
+                        stream_error = Some(message);
+                    }
+                }
+            },
+        );
+        assert!(stream_error.is_some(), "未登录样本应产出 Error");
+
+        // 2) 出口：读流 Ok + exit 0（CLI 干净退出）时仍判为本轮失败。
+        let turn_error = resolve_turn_error(None, stream_error.as_ref()).expect("应判定为本轮失败");
+
+        // 3) 气泡：可操作的中文提示，裸英文只进 <details>。
+        let bubble = crate::external_agents::errors::classify(turn_error, Some(0), "", "claude")
+            .render_bubble();
+        assert!(
+            bubble.contains("claude /login"),
+            "气泡应给出可操作的登录命令：{bubble}"
+        );
+        assert!(
+            !bubble.trim().is_empty(),
+            "气泡不得为空——这正是修复前的症状"
+        );
+    }
 
     #[test]
     fn cli_usage_merge_keeps_latest_numbers() {

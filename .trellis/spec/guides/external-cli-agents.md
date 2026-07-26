@@ -52,6 +52,16 @@
 
 14f. **窗口来源是 per-CLI 的，别假设统一形态**：codex 走 `debug models` 的 `context_window`（**不是** app-server 的 `model/list`，实测那里没有窗口字段）；grok 走 ACP `_meta.totalContextTokens`；pi 走 `--list-models` 定宽表第 3 列；**cursor 把窗口写在 modelId 的方括号里**（`claude-opus-5[thinking=true,context=300k,effort=high]`，实测 33 个模型 14 个带 `context=`，且**全都没有** `_meta`），且它的模型走 **`configOptions` 分支**而不是 `models.availableModels`——那条分支命中后会提前 return，只给 availableModels 加解析在生产里等于没做（实测 0/33，单测却是绿的，只有真机 `#[ignore]` 测试才抓到）。kimi 的 ACP 上游什么都不给（`session/new` 无 token 字段、`session/prompt` 无 usage、不发 `usage_update`），只能静态映射 + 读其 `wire.jsonl`；后者按 **workDir** 关联（kimi `session_index.jsonl` 的 `workDir` 恰等于 `resolve_effective_cwd()`，**不能**用 session id——kimi 走 ACP，id 由它自己生成，Kivio 根本没存），且必须**跳过空壳会话**（实测某 workDir 下 53 个 session 有 52 个是第 11b 条所述的 slash 探测残渣，判据：存在 `type=="usage.record"` 且 `usageScope=="turn"`）。
 
+## CLI 协议失败必须走错误出口
+
+> 来源：任务 07-27-claude-stream-json-parity。
+
+19. **`UnifiedAgentEvent::Error` 必须真的落到用户可见的出口，不能只 `eprintln!`**。改动前 `run.rs` 对该变体只打一行 debug 日志 —— 于是 claude 的 `result.is_error`、codex 的 `turn/completed status=failed`、pi 的 `stopReason:error` **全部被静默吞掉**，用户拿到一个空回复、没有任何提示。这与第 5 条（错误统一走 `errors::classify`）名义上不冲突却实际架空了它。判据：**读流成功 ≠ 本轮成功**。CLI 干净退出、stdout 全是合法 JSON 时读流照样返回 `Ok`，失败只存在于流里那一条消息中；`resolve_turn_error(read_error, stream_error)` 把两种来源并到同一出口，读流错误优先（它更接近传输层根因）。
+
+20. **判 `result` 是否失败要同时看 `subtype` 与 `is_error`，只看一个会漏**。官方 `SDKResultError.subtype` 有四种（`error_during_execution` / `error_max_turns` / `error_max_budget_usd` / `error_max_structured_output_retries`，带 `errors: string[]`），但**未登录时的真实样本是 `subtype: "success"` + `is_error: true`**，错误文案落在 `result` 字段里（本机实测原样本见该任务 research）。文案优先级：`errors[]` > `result` > subtype 兜底。裸英文只进 `<details>`，主文案由 `errors::classify` 给可操作中文。
+
+21. **claude 的 stream-json 与官方 Agent SDK 是同一条协议，`sdk.d.ts` 当文档用而非依赖**。实测反编 SDK 的 `sdk.mjs`：它 spawn 的命令行是 `--output-format stream-json --verbose --input-format stream-json`，与 Kivio 的 `build_claude_args` 完全一致（paseo 的 `query.ts` 也只是劫持其 spawn 钩子换可执行文件）。**不要为了「对齐参考实现」引入 Node/SDK 依赖**：语言边界代价不成比例（打包 Node 运行时 +40MB，或 Rust→Node→claude 三层套壳），且直接解析原始流是**超集** —— `usage.iterations[]` 末项就是 SDK 抽象层拿不到、而修对用量口径必需的字段。`sdk.d.ts`（MIT）作为 `SDKMessage` 变体的权威清单查阅即可。刻意不接的变体（如 `hook_started`/`hook_response`，其 `stdout` 会把整个 SessionStart 注入内容搬进流里刷屏）**必须写注释说明「有意不接」**，别让后人分不清是漏了还是故意的。
+
 ## 子进程启动与二进制解析
 
 > 来源：任务 07-26-local-cli-context-usage 的 G3 对齐。数字均为本机实测。
