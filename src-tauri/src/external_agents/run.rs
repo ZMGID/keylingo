@@ -1195,7 +1195,7 @@ fn apply_unified_event(
             }
         }
         UnifiedAgentEvent::Usage { usage: u } => {
-            *usage = Some(u);
+            *usage = Some(merge_cli_usage(usage.as_ref(), u));
         }
         UnifiedAgentEvent::Error { message, .. } => {
             eprintln!("[external-agent] stream error: {message}");
@@ -1215,6 +1215,20 @@ fn apply_unified_event(
     }
 }
 
+/// 合并一轮内先后到达的多次 CLI 用量上报：**后到覆盖先到**（取最新快照），
+/// 但 `context_window_tokens` **粘滞**——新值为 `None` 时保留旧值。
+///
+/// 为什么需要粘滞：ACP 一轮里会到两次用量。`session/update` 的 `usage_update`
+/// 带 `size`（窗口）先到，`session/prompt` 的 `PromptResponse.usage` 不带窗口后到；
+/// 若直接整体覆盖，分母会被后一条冲成 `None`，用量条退回"窗口未知"。
+/// 分子本身仍取最新的那条（这正是"当前上下文占用"想要的语义）。
+fn merge_cli_usage(previous: Option<&ModelUsage>, mut incoming: ModelUsage) -> ModelUsage {
+    if incoming.context_window_tokens.is_none() {
+        incoming.context_window_tokens = previous.and_then(|prev| prev.context_window_tokens);
+    }
+    incoming
+}
+
 fn truncate_for_preview(value: &str, max_chars: usize) -> String {
     let mut out: String = value.chars().take(max_chars).collect();
     if value.chars().count() > max_chars {
@@ -1226,6 +1240,72 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_usage_merge_keeps_latest_numbers() {
+        let first = ModelUsage {
+            input_tokens: Some(100),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&first),
+            ModelUsage {
+                input_tokens: Some(250),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.input_tokens, Some(250));
+    }
+
+    #[test]
+    fn cli_usage_merge_keeps_window_when_later_report_omits_it() {
+        // ACP 实际时序：usage_update(带 size) 先到，PromptResponse.usage(无 size) 后到。
+        let with_window = ModelUsage {
+            input_tokens: Some(13_477),
+            context_window_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&with_window),
+            ModelUsage {
+                input_tokens: Some(11_685),
+                output_tokens: Some(4),
+                context_window_tokens: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.context_window_tokens, Some(200_000));
+        assert_eq!(merged.input_tokens, Some(11_685));
+    }
+
+    #[test]
+    fn cli_usage_merge_lets_newer_window_win() {
+        let old = ModelUsage {
+            context_window_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&old),
+            ModelUsage {
+                context_window_tokens: Some(1_048_576),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.context_window_tokens, Some(1_048_576));
+    }
+
+    #[test]
+    fn cli_usage_merge_without_previous_is_identity() {
+        let merged = merge_cli_usage(
+            None,
+            ModelUsage {
+                input_tokens: Some(7),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.input_tokens, Some(7));
+        assert_eq!(merged.context_window_tokens, None);
+    }
 
     #[test]
     fn stream_segment_tracker_reuses_text_segment_for_deltas() {

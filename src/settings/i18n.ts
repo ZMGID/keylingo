@@ -392,6 +392,10 @@ export const i18n = {
     contextCompressionCount: '已压缩 {count} 次',
     contextFullnessEstimated: '估算中',
     contextFullnessCliPending: 'CLI 待上报',
+    // 窗口拿不到时的满度文案。与 `contextFullnessCliPending` 的区别：那个是「等一下就有」，
+    // 这个是「永远没有」——外部 CLI 若既不报 usage_update.size、模型名也匹配不到任何静态表
+    // （如 cursor 选了不带 `context=` 的模型），分母就是未知，不该暗示用户再等。
+    contextFullnessWindowUnknown: '满度未知',
     contextFullnessPercentFull: '{percent}% 已满',
     contextTokens: 'Token',
     contextTokensUnknown: '? Token',
@@ -922,6 +926,7 @@ export const i18n = {
     contextCompressionCount: 'Compressed {count}×',
     contextFullnessEstimated: 'Estimating',
     contextFullnessCliPending: 'CLI pending',
+    contextFullnessWindowUnknown: 'Fullness unknown',
     contextFullnessPercentFull: '{percent}% Full',
     contextTokens: 'Tokens',
     contextTokensUnknown: '? Tokens',

@@ -27,6 +27,33 @@
 11b. **探测 cwd 统一走 `resolve_detection_cwd`**（非项目会话 = `chat-workspaces/__global__`，绑定项目的会话 = 项目根）：模型探测、斜杠命令探测，以及**所有读写探测缓存的 key**（`slash::cache_key(agent_id, detection_cwd)`）必须用同一 cwd——run.rs 运行时学到的斜杠列表写入、context.rs 的模型缓存读取都曾因 key 用执行 cwd 而与探测 key 分叉（恒 miss / 永远覆盖不了）。执行 cwd（`resolve_effective_cwd`，每会话独立 workspace）只用于真正跑轮次，不得用于缓存 key。斜杠探测本身也用 `detect_availability_single`（不连带 `probe_models`），探测残渣（CLI 落盘的空壳会话）只进 `__global__`。
 12. **defs 静态表只是 fallback**：`fallback_models` 首项恒为 `default`（前端 `agent.models[0]` 依赖此契约）；运行时探测到的才是模型事实源。给 CLI 传 flag 前先 `--help` 核实语义（audit N5：pi 曾把目录塞进 `--append-system-prompt`）。**CLI 当前配置（current_model/current_reasoning）的本地配置读取**（codex `~/.codex/config.toml`、pi `~/.pi/agent/settings.json`、kimi `~/.kimi-code/config.toml`）只允许挂在 `detect_agent_models`（懒查模型探测路径，probe 成功分支），禁止进回复热路径；配置缺失/解析失败一律 `None`（前端显示「自动」），解析器必须有非法输入不 panic 的单测。
 
+## 上下文用量口径（分子/分母）
+
+> 来源：任务 07-26-local-cli-context-usage。全部数字为 2026-07-26 本机实测，复现命令见该任务的 `research/cli-wire-facts.md`。起因：kimi 会话在 Kivio 显示 `~24 / 200.0K`，而 kimi CLI 自报 `0/256k`——分子分母**各错各的**。
+
+14. **cache token 照样占上下文窗口，任何只读 `input + output` 的口径都会低估一个数量级**。实测 cache 占输入侧比例：kimi 97.6%（23040/23605）、pi 62%（4096/6571）、opencode 13%。这与计费口径无关——缓存命中不重复**计费**，但它**依然在窗口里**。`stream/mod.rs::usage_from_parts` 是所有外部 CLI 唯一的 usage 构造入口，旧签名 `usage_from_numbers(input, output)` 从签名上就把 cache 挡在门外，四个调用点（claude / codex / pi / acp）全部受害——这是本轮的共同根因。
+
+14a. **各 CLI 的 cache 包含关系不同，必须逐个用真实 payload 做加法对账**。这是本轮最隐蔽的坑：
+   - **Anthropic 口径**（claude / pi / ACP）：`cache_read` 与 `input` **不相交**，须相加。pi 实测 `6571 + 1578 + 4096 = 12245 = totalTokens` ✓。
+   - **OpenAI 口径**（codex）：`cachedInputTokens` 是 `inputTokens` 的**子集**，再加一遍就是双算。codex-cli 0.145.0 实测 `inputTokens 16865 + outputTokens 7 = 16872 = totalTokens`，其中 `cachedInputTokens` 3456 已含在 16865 内；错加会得到 20328，**虚高 20%**。
+
+   由 `CliUsageParts::cache_included_in_input` 表达。**新增 CLI 前先取一条真实 payload 做加法对账**（看 `input + output (+cache?)` 哪个等于其自报的 `totalTokens`）再决定该标志——不要照抄邻近 CLI。这与内置路径 `chat::agent::context_estimate::anchor_total_tokens` 按 `api_format` 分家族消歧是同一件事，别在任何一侧「统一」，会算错一整类 provider。
+
+14b. **分子取 `total_tokens`，不是 `input_tokens`**。`external_agents/context.rs::cli_reported_context_tokens` 是唯一出口。Anthropic 口径下 `input_tokens` 只是**非缓存**部分，只读它等于把 14/14a 补的 cache 全丢在显示前最后一层——本轮真实发生过：L0–L7 全部正确，`collect_external_session_usage` 一句 `usage.input_tokens` 让整个修复空转（45300 cache token 的会话显示 1200 而非 47300）。`total_tokens` 缺失时才退回 `input + output`（改动前落盘的旧会话没有 total，它们要到下一轮才准）。
+
+14c. **多次上报要取「当前上下文快照」，不是累计**：
+   - codex `thread/tokenUsage/updated` 读 `tokenUsage.last`（最近一次请求的快照），**不是** `total`（整个 thread 的累计计费口径，随轮次单调增长，当已用上下文会持续虚高直至把进度条推满）。`last` 缺失才退 `total`（旧版兼容）。
+   - claude `result.usage.iterations[]` 取**末项**，不累加：一轮内多次 LLM 往返，每项是独立快照，累加得到的是本轮计费总量。数组为空/无该键才用 `usage` 顶层。
+   - 推理 token 通常**已含在 output 内**（codex `5+7=12`、pi `6571+1578+4096=12245` 均已对账），再计一次会重复；只有 ACP 的 `thoughtTokens` 与 output 并列（opencode 实测 `11685+4+11+1792=13492=totalTokens`）。
+
+14d. **ACP 有官方 `usage_update` 通道，同时给分子和分母**（ACP RFD「Session Usage and Context Status」）。形如 `{"sessionUpdate":"usage_update","used":13477,"size":200000,"cost":{...}}`——字段**平铺在 `update` 下**，不嵌套在 `usage` 对象里。实测 opencode 在发，kimi / cursor 不发。**它不是消息边界**：在 `acp_apply_session_update` 里必须**先单独匹配**，绝不能落进 `_` 分支——那条会委托 `apply_acp_session_update` 并在返回 true 时触发 `text/thought.on_boundary()`，正在流式的正文游标被重置后累积快照的 `starts_with` 判断失效，**整段正文重复发一遍**。两处分发共用同一个 `parse_acp_usage_update`（第 2 条：禁止两份拷贝）。另有 `PromptResponse.usage`（ACP 标记 UNSTABLE，缺失不得报错）带 `cachedReadTokens` / `cachedWriteTokens` / `thoughtTokens`；它**不带** `size`，而 `usage_update` 通常先到，所以 `run.rs::merge_cli_usage` 要做**窗口字段粘滞**（新值窗口为 `None` 时保留旧值），否则分母会被后到的上报冲掉。
+
+14e. **窗口拿不到时外部 CLI 路径返回 `None`，不得兜底 200K**。`context_window_for_external_model` 的优先级链：CLI 本轮实报（`usage_update.size`，最高——模型可能中途切换，比任何静态表都准）> 探测上报（`RuntimeModelOption.context_window_tokens`）> claude 别名表 > kimi 静态映射 > 数据库/关键词 > `None`。假分母比没有分母更有害：它让 `usage_ratio` 算出假百分比，进而在**错误的点**触发压缩阈值。`context_window_for_model` 自带的 200K 兜底对**内置**路径是合理的（那里 provider 元数据可靠）——**只在外部 CLI 这条路剥掉**，内置分支保持不变。前端 `ContextIndicator` 已能渲染窗口未知（`? Token` + `满度未知`，不显示百分比与阈值刻度）；注意区分「窗口永远拿不到」与「用量待上报」两种文案，前者用 `contextFullnessWindowUnknown`。
+
+14f. **窗口来源是 per-CLI 的，别假设统一形态**：codex 走 `debug models` 的 `context_window`（**不是** app-server 的 `model/list`，实测那里没有窗口字段）；grok 走 ACP `_meta.totalContextTokens`；pi 走 `--list-models` 定宽表第 3 列；**cursor 把窗口写在 modelId 的方括号里**（`claude-opus-5[thinking=true,context=300k,effort=high]`，实测 33 个模型 14 个带 `context=`，且**全都没有** `_meta`），且它的模型走 **`configOptions` 分支**而不是 `models.availableModels`——那条分支命中后会提前 return，只给 availableModels 加解析在生产里等于没做（实测 0/33，单测却是绿的，只有真机 `#[ignore]` 测试才抓到）。kimi 的 ACP 上游什么都不给（`session/new` 无 token 字段、`session/prompt` 无 usage、不发 `usage_update`），只能静态映射 + 读其 `wire.jsonl`；后者按 **workDir** 关联（kimi `session_index.jsonl` 的 `workDir` 恰等于 `resolve_effective_cwd()`，**不能**用 session id——kimi 走 ACP，id 由它自己生成，Kivio 根本没存），且必须**跳过空壳会话**（实测某 workDir 下 53 个 session 有 52 个是第 11b 条所述的 slash 探测残渣，判据：存在 `type=="usage.record"` 且 `usageScope=="turn"`）。
+
 ## 测试约定
 
 13. external_agents 的行为修复必须带可红→绿的单测（本轮新增 ~40 组均遵守）；持久路径优先抽纯函数测（assembler / classify / failure_action / build_*_params），live 测试一律 `#[ignore]` 门控。
+
+15. **用量/窗口这类「数字对不对」的修复，单测挡不住形态错配——必须补真机 `#[ignore]` 测试**。本轮 cursor 的窗口解析单测全绿、生产 0/33，就是因为单测喂的是 `models.availableModels` 形态而真实 cursor 走 `configOptions`（见 14f）。真机测试要断言**可证伪的量**（如「cache 计入后 total > input+output」「窗口非空」），不要只断言「没崩」。CLI 认证失效/网络挂起属**环境**问题，应诚实 skip 并打印排查提示（如 `opencode run hi` 先自检），不要 fail——否则一个过期的 API key 会伪装成代码回归。

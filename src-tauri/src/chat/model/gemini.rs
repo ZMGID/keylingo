@@ -10,8 +10,8 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GeneratedImageData,
-    GenerateRequest, LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage,
+    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GenerateRequest,
+    GeneratedImageData, LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage,
     ModelRole, ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
@@ -338,8 +338,7 @@ impl GeminiProvider<'_> {
         // 出图模型：显式声明 TEXT+IMAGE 输出模态（否则只回文本）。红线：仅对出图模型下发,
         // 普通文本模型请求体保持字节不变(Gemini 对未知/多余字段严格校验会 400)。
         if crate::chat::model_metadata::is_image_output_model(&request.model) {
-            body["generationConfig"]["responseModalities"] =
-                serde_json::json!(["TEXT", "IMAGE"]);
+            body["generationConfig"]["responseModalities"] = serde_json::json!(["TEXT", "IMAGE"]);
         }
         let declarations = gemini_function_declarations(&request.tools);
         let mut tools_arr: Vec<Value> = Vec::new();
@@ -1041,6 +1040,8 @@ fn gemini_usage(value: &Value) -> Option<ModelUsage> {
         cached_input_tokens: get("cachedContentTokenCount"),
         cache_creation_input_tokens: None,
         reasoning_tokens: get("thoughtsTokenCount"),
+        // 内置 provider 路径：窗口来自 model_metadata，不由响应携带。
+        context_window_tokens: None,
     })
 }
 
@@ -1191,8 +1192,7 @@ mod tests {
         req.options.thinking_level = Some("medium".into());
         let med = body_for(&req, false);
         assert_eq!(
-            med["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-            "medium",
+            med["generationConfig"]["thinkingConfig"]["thinkingLevel"], "medium",
             "body: {med}"
         );
         // max 在 Gemini 收敛到 high。
@@ -1200,8 +1200,7 @@ mod tests {
         req_max.options.thinking_level = Some("max".into());
         let mx = body_for(&req_max, false);
         assert_eq!(
-            mx["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-            "high",
+            mx["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high",
             "body: {mx}"
         );
         // Gemini 2.5：thinkingLevel 会 400，回退到仅 includeThoughts（非回归）。
@@ -1216,8 +1215,7 @@ mod tests {
             "2.5 不应带 thinkingLevel: {g25}"
         );
         assert_eq!(
-            g25["generationConfig"]["thinkingConfig"]["includeThoughts"],
-            true,
+            g25["generationConfig"]["thinkingConfig"]["includeThoughts"], true,
             "body: {g25}"
         );
     }
@@ -1639,9 +1637,7 @@ mod tests {
         // 文本模型：请求体不含 responseModalities（红线——多余字段会撞 Gemini 400）。
         let text = body_for(&image_request("gemini-3.1-flash-lite"), false);
         assert!(
-            text["generationConfig"]
-                .get("responseModalities")
-                .is_none(),
+            text["generationConfig"].get("responseModalities").is_none(),
             "text model must NOT carry responseModalities: {text}"
         );
         // 出图模型：generationConfig.responseModalities = ["TEXT","IMAGE"]。

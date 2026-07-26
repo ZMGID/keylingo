@@ -5,6 +5,7 @@ pub mod context;
 pub mod defs;
 pub mod detection;
 pub mod errors;
+pub mod kimi_usage;
 pub mod prompt;
 pub mod registry;
 pub mod run;

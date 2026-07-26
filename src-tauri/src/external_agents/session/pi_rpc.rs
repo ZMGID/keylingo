@@ -7,7 +7,7 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 use crate::external_agents::context::parse_context_window_label;
-use crate::external_agents::stream::usage_from_numbers;
+use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{
     default_model_option, ExternalCliSlashCommand, RuntimeModelOption, UnifiedAgentEvent,
 };
@@ -164,11 +164,30 @@ pub fn map_pi_rpc_event(value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) 
         "turn_end" => {
             if let Some(message) = obj.get("message").and_then(|v| v.as_object()) {
                 if let Some(usage) = message.get("usage").and_then(|v| v.as_object()) {
-                    let input = usage.get("input").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let output = usage.get("output").and_then(|v| v.as_u64()).unwrap_or(0);
-                    if input > 0 || output > 0 {
+                    let field = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+                    // 实测 pi 的 usage 形状：
+                    //   {"input":6571,"output":1578,"cacheRead":4096,"cacheWrite":0,
+                    //    "reasoning":26,"totalTokens":12245}
+                    // 对账 6571 + 1578 + 4096 = 12245 = totalTokens，说明：
+                    //   * cacheRead/cacheWrite 与 input 并列，**必须**计入（实测 cacheRead 占 62%）
+                    //   * `reasoning` 已含在 output 内，刻意**不读**，否则重复计数
+                    let parts = CliUsageParts {
+                        input: field("input"),
+                        output: field("output"),
+                        cache_read: field("cacheRead"),
+                        cache_creation: field("cacheWrite"),
+                        // cacheRead/cacheWrite 与 input **不相交**（上面的对账已证明：
+                        // 三者相加恰等于 pi 自报的 totalTokens）。codex 相反，别照抄。
+                        cache_included_in_input: false,
+                        ..Default::default()
+                    };
+                    if parts.input > 0
+                        || parts.output > 0
+                        || parts.cache_read > 0
+                        || parts.cache_creation > 0
+                    {
                         sink(UnifiedAgentEvent::Usage {
-                            usage: usage_from_numbers(input, output),
+                            usage: usage_from_parts(parts),
                         });
                     }
                 }
@@ -488,6 +507,83 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
+    /// Live proof that L5 counts pi's cache tokens.
+    ///
+    /// 单测证明「给定这样的 JSON 会算上 cacheRead」；这条证明真实 pi 确实**发** cacheRead，
+    /// 且它计入了 total。实测 pi 的 cacheRead 可占 input 的 62% —— 旧代码只读 input/output，
+    /// 这部分被整段丢弃。
+    #[tokio::test]
+    #[ignore = "requires live pi CLI on PATH + login"]
+    async fn pi_usage_counts_cache_tokens() {
+        use tokio::process::Command;
+        use tokio::time::{timeout, Duration};
+
+        let cwd = std::env::temp_dir();
+        let mut child = Command::new("pi")
+            .args(["--mode", "rpc"])
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn pi --mode rpc");
+
+        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
+        let result = timeout(
+            Duration::from_secs(120),
+            run_pi_rpc_session(
+                &mut child,
+                "Reply with exactly the token USAGE_OK and nothing else.",
+                None,
+                |event| events.borrow_mut().push(event),
+                || false,
+            ),
+        )
+        .await;
+        let _ = child.start_kill();
+        assert!(result.is_ok(), "pi rpc session HUNG past 120s guard");
+
+        let usages: Vec<crate::chat::model::ModelUsage> = events
+            .into_inner()
+            .into_iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .collect();
+        for u in &usages {
+            eprintln!(
+                "pi usage: input={:?} output={:?} cache_read={:?} cache_write={:?} total={:?}",
+                u.input_tokens,
+                u.output_tokens,
+                u.cached_input_tokens,
+                u.cache_creation_input_tokens,
+                u.total_tokens
+            );
+        }
+        assert!(
+            !usages.is_empty(),
+            "pi reported no usage — turn_end usage parsing regressed"
+        );
+        // total 必须 >= input+output；有 cache 时必须严格大于（否则就是旧的丢弃口径）。
+        for u in &usages {
+            let plain = u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0);
+            let cache =
+                u.cached_input_tokens.unwrap_or(0) + u.cache_creation_input_tokens.unwrap_or(0);
+            assert!(
+                u.total_tokens.unwrap_or(0) >= plain,
+                "total must not be below input+output: {u:?}"
+            );
+            if cache > 0 {
+                assert!(
+                    u.total_tokens.unwrap_or(0) > plain,
+                    "cache tokens were reported but not counted into total: {u:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn parse_pi_models_from_tsv() {
         let stderr = "provider model context\nanthropic claude-sonnet-4-5 200K\nopenai gpt-5 128K";
@@ -521,6 +617,53 @@ mod tests {
             map_pi_rpc_event(&value, &mut |_| {}),
             PiRpcOutcome::AgentEnd
         );
+    }
+
+    fn pi_usage(raw: &str) -> crate::chat::model::ModelUsage {
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |e| events.push(e));
+        events
+            .into_iter()
+            .find_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .expect("turn_end 应产出 Usage")
+    }
+
+    #[test]
+    fn turn_end_usage_counts_cache_and_skips_reasoning() {
+        // 本机实测的真实数字：6571 + 1578 + 4096 = 12245 = pi 自报的 totalTokens。
+        let usage = pi_usage(
+            r#"{"type":"turn_end","message":{"usage":{"input":6571,"output":1578,
+                "cacheRead":4096,"cacheWrite":0,"reasoning":26,"totalTokens":12245}}}"#,
+        );
+        assert_eq!(usage.input_tokens, Some(6571));
+        assert_eq!(usage.output_tokens, Some(1578));
+        assert_eq!(usage.cached_input_tokens, Some(4096));
+        // 漏掉 cacheRead 只会得到 8149（低估 33%，cacheRead 占 input 侧的 62%）；
+        // 若再把 reasoning 加进去会变成 12271（重复计数）。
+        assert_eq!(usage.total_tokens, Some(12_245));
+    }
+
+    #[test]
+    fn turn_end_usage_counts_cache_write() {
+        let usage = pi_usage(
+            r#"{"type":"turn_end","message":{"usage":{"input":10,"output":5,
+                "cacheRead":0,"cacheWrite":2048}}}"#,
+        );
+        assert_eq!(usage.cache_creation_input_tokens, Some(2048));
+        assert_eq!(usage.total_tokens, Some(2063));
+    }
+
+    #[test]
+    fn turn_end_usage_emits_when_only_cache_is_nonzero() {
+        // 全缓存命中的一轮：input/output 都是 0 但上下文实占 4096，不能静默丢弃。
+        let usage = pi_usage(
+            r#"{"type":"turn_end","message":{"usage":{"input":0,"output":0,"cacheRead":4096}}}"#,
+        );
+        assert_eq!(usage.total_tokens, Some(4096));
     }
 
     #[tokio::test]

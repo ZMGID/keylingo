@@ -8,6 +8,7 @@ import {
   CONTEXT_CRITICAL_PERCENT,
   CONTEXT_FREE_SEGMENT_ID,
   CONTEXT_WARNING_PERCENT,
+  fullnessLabel,
   segmentTokens,
 } from './contextPanel'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
@@ -32,11 +33,6 @@ function valueFrom<T>(snake: T | undefined, camel: T | undefined, fallback: T): 
   return snake ?? camel ?? fallback
 }
 
-function compactPercent(ratio: number | null): string {
-  if (ratio == null || !Number.isFinite(ratio)) return '--'
-  return `${Math.max(0, Math.min(999, Math.round(ratio * 100)))}`
-}
-
 function statusColor(status: string, ratio: number | null): string {
   if (status === 'stale') return '#A15C2F'
   if (status === 'compressed') return '#3E8B60'
@@ -48,17 +44,6 @@ function statusColor(status: string, ratio: number | null): string {
 function formatTokenTotal(tokens: number, exact = false, approximatePrefix = '~'): string {
   const formatted = formatTokens(tokens).replace('k', 'K')
   return exact ? formatted : `${approximatePrefix}${formatted}`
-}
-
-function fullnessLabel(
-  usageRatio: number | null,
-  isExternalContext: boolean,
-  t: I18n,
-): string {
-  if (usageRatio == null) {
-    return isExternalContext ? t.contextFullnessCliPending : t.contextFullnessEstimated
-  }
-  return t.contextFullnessPercentFull.replace('{percent}', compactPercent(usageRatio))
 }
 
 function windowLabel(contextWindowTokens: number | null, t: I18n): string {
@@ -180,7 +165,7 @@ export function ContextIndicator({
         .sort((a, b) => Number(b.id === 'conversation') - Number(a.id === 'conversation')),
     [barSlices],
   )
-  const fullness = fullnessLabel(usageRatio, isExternalContext, t)
+  const fullness = fullnessLabel(usageRatio, isExternalContext, contextWindowTokens, t)
   const tokenLine = `${formatTokenTotal(estimatedInputTokens, isReportedExact, approximatePrefix)} / ${windowLabel(contextWindowTokens, t)}`
   const sourceLabel = isExternalContext
     ? (isCliReported ? t.contextSourceCliReported : t.contextSourceCliEstimated)

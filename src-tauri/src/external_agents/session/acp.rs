@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::external_agents::session::live::SessionCommand;
-use crate::external_agents::stream::usage_from_numbers;
+use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{
     default_model_option, ExternalCliSlashCommand, RuntimeModelOption, UnifiedAgentEvent,
 };
@@ -108,6 +108,31 @@ fn rpc_error_message(value: &Value) -> Option<String> {
     error.get("code").map(|c| c.to_string())
 }
 
+/// 从 ACP modelId 的方括号参数里抠出上下文窗口提示。
+///
+/// cursor 实测形态（`session/new` 的 `models.availableModels[]`）：
+/// ```text
+/// claude-opus-5[thinking=true,context=300k,effort=high,fast=false]
+/// gpt-5.6-sol[context=272k,reasoning=medium,fast=false]
+/// composer-2.5[fast=true]        <- 无 context，返回 None
+/// ```
+/// 32 个模型中 13 个带 `context=`，且**全部没有** `_meta.totalContextTokens`
+/// （那是 grok 的形态）——不解析这里 cursor 的分母就永远没来源。
+///
+/// 复用 `context::parse_context_window_label`（"300k" → 300000，支持 K/M 后缀与浮点）。
+/// 没有方括号、没有 `context=`、值解析不出来时一律 `None`——**不猜**。
+fn context_window_from_model_id_params(model_id: &str) -> Option<u32> {
+    let start = model_id.find('[')?;
+    let end = model_id[start + 1..].find(']')? + start + 1;
+    model_id[start + 1..end]
+        .split(',')
+        .filter_map(|param| param.split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("context"))
+        .and_then(|(_, value)| {
+            crate::external_agents::context::parse_context_window_label(value.trim())
+        })
+}
+
 fn normalize_models(result: &Value) -> Vec<RuntimeModelOption> {
     let mut out = vec![default_model_option()];
     let mut seen = HashSet::from(["default".to_string()]);
@@ -148,6 +173,22 @@ fn normalize_models(result: &Value) -> Vec<RuntimeModelOption> {
                         continue;
                     }
                     let name = value.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+                    // cursor 的模型走的是**这条** configOptions 分支（不是下面的
+                    // models.availableModels），且它把窗口写在 modelId 的方括号里
+                    // （`claude-opus-5[thinking=true,context=300k,...]`）——实测 33 个模型
+                    // 里 13 个带 `context=`，全都没有 `_meta.totalContextTokens`。
+                    // 这里若留 None，cursor 的分母就永远没来源、只能吃兜底。
+                    // `_meta.totalContextTokens` 仍优先（显式字段比字符串提示可靠）。
+                    let window = value
+                        .get("_meta")
+                        .and_then(|m| m.get("totalContextTokens"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32)
+                        .or_else(|| context_window_from_model_id_params(id));
+                    if current_id == Some(id) {
+                        out[0].label = format!("Default ({name})");
+                        out[0].context_window_tokens = window;
+                    }
                     out.push(RuntimeModelOption {
                         id: id.to_string(),
                         label: if name != id {
@@ -155,7 +196,7 @@ fn normalize_models(result: &Value) -> Vec<RuntimeModelOption> {
                         } else {
                             id.to_string()
                         },
-                        context_window_tokens: None,
+                        context_window_tokens: window,
                     });
                 }
             }
@@ -173,11 +214,14 @@ fn normalize_models(result: &Value) -> Vec<RuntimeModelOption> {
                     continue;
                 }
                 let name = model.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+                // 窗口优先级：`_meta.totalContextTokens`（显式字段，grok）> modelId 方括号里的
+                // `context=300k`（字符串提示，cursor）> None。显式字段比字符串提示可靠。
                 let window = model
                     .get("_meta")
                     .and_then(|m| m.get("totalContextTokens"))
                     .and_then(|v| v.as_u64())
-                    .map(|v| v as u32);
+                    .map(|v| v as u32)
+                    .or_else(|| context_window_from_model_id_params(id));
                 if current_id == Some(id) {
                     out[0].label = format!("Default ({name})");
                     out[0].context_window_tokens = window;
@@ -189,7 +233,8 @@ fn normalize_models(result: &Value) -> Vec<RuntimeModelOption> {
                     } else {
                         id.to_string()
                     },
-                    // grok 等在 _meta.totalContextTokens 报真实窗口（如 500000）；没有则留空。
+                    // grok 等在 _meta.totalContextTokens 报真实窗口（如 500000）；
+                    // cursor 把它写在 modelId 的 `context=300k` 里；都没有则留空。
                     context_window_tokens: window,
                 });
             }
@@ -639,20 +684,74 @@ fn choose_permission_outcome(options: Option<&Value>) -> Option<String> {
     None
 }
 
+/// 解析 ACP `PromptResponse.usage`（官方标记 UNSTABLE，字段缺失一律按 0，不报错）。
+///
+/// 四个分量**并列不重叠**，都要计入上下文占用。opencode 实测样本对账：
+/// `inputTokens 11685 + outputTokens 4 + thoughtTokens 11 + cachedReadTokens 1792 = 13492`
+/// 恰等于其自报的 `totalTokens`——所以 `thoughtTokens` 没有含在 `outputTokens` 里
+/// （与 pi/codex 相反，那两家的 reasoning 已含在 output 内，见 `CliUsageParts::reasoning` 注释）。
+///
+/// 全零时返回 `None`（保留既有行为：没报就是没报，不要造出一个 0 用量覆盖真实值）。
 fn format_acp_usage(usage: &Value) -> Option<crate::chat::model::ModelUsage> {
-    let input = usage
-        .get("inputTokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output = usage
-        .get("outputTokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    if input == 0 && output == 0 {
+    let field = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let parts = CliUsageParts {
+        input: field("inputTokens"),
+        output: field("outputTokens"),
+        cache_read: field("cachedReadTokens"),
+        cache_creation: field("cachedWriteTokens"),
+        reasoning: field("thoughtTokens"),
+        // ACP 的 `cachedReadTokens` 与 `inputTokens` **不相交**（Anthropic 口径）：
+        // opencode 实测 11685 + 4 + 11 + 1792 = 13492 = 其自报的 totalTokens，
+        // 四者并列。这与 codex（cache ⊆ input）相反，别照抄那边。
+        cache_included_in_input: false,
+        // PromptResponse.usage 不带窗口——窗口只在 `usage_update.size` 里给。
+        // 这里留 None 由 run.rs 的窗口粘滞保住先到的 usage_update.size。
+        context_window: None,
+    };
+    if parts.input == 0
+        && parts.output == 0
+        && parts.cache_read == 0
+        && parts.cache_creation == 0
+        && parts.reasoning == 0
+    {
         None
     } else {
-        Some(usage_from_numbers(input, output))
+        Some(usage_from_parts(parts))
     }
+}
+
+/// 解析 ACP `session/update` 的 `usage_update` 变体（官方 RFD「Session Usage and Context
+/// Status」）。字段**平铺在 `update` 下**，不嵌套在 `usage` 对象里：
+///
+/// ```json
+/// {"sessionUpdate":"usage_update","used":13477,"size":200000,
+///  "cost":{"amount":0,"currency":"USD"}}
+/// ```
+///
+/// `used` **不是** prompt input——它是「当前上下文里现有的全部 token」（已含 cache 与历史）。
+/// 之所以塞进 `input_tokens`，是因为下游 `external_agents::context::collect_external_session_usage`
+/// 读的就是这个字段来当分子。不要"修正"成 prompt input 语义。
+///
+/// `size` 是上下文窗口总大小，走 `context_window_tokens` 当分母。
+/// `cost` 暂不解析——Kivio 目前没有成本展示位。
+///
+/// `used`/`size` 都缺时返回 `None`（不是这个变体，或上游没给数据）。
+fn parse_acp_usage_update(
+    update: &serde_json::Map<String, Value>,
+) -> Option<crate::chat::model::ModelUsage> {
+    let used = update.get("used").and_then(|v| v.as_u64());
+    let size = update
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0);
+    if used.is_none() && size.is_none() {
+        return None;
+    }
+    Some(usage_from_parts(CliUsageParts {
+        input: used.unwrap_or(0),
+        context_window: size,
+        ..Default::default()
+    }))
 }
 
 fn acp_update_status(update: &serde_json::Map<String, Value>) -> Option<String> {
@@ -756,6 +855,14 @@ fn apply_acp_session_update(
             }
             true
         }
+        "usage_update" => {
+            // ACP 官方 usage 通道（opencode 实测在发）。一次性驱动没有游标状态，
+            // 返回值无所谓；持久驱动那边会先单独匹配掉这个分支，不会走到这里。
+            if let Some(usage) = parse_acp_usage_update(update) {
+                sink(UnifiedAgentEvent::Usage { usage });
+            }
+            true
+        }
         _ => false,
     }
 }
@@ -847,6 +954,15 @@ fn acp_apply_session_update(
                 if let Some(delta) = state.text.push_chunk(text) {
                     sink(UnifiedAgentEvent::TextDelta { delta });
                 }
+            }
+        }
+        "usage_update" => {
+            // **必须在 `_` 分支之前单独匹配**：usage 通知不是消息边界。若落进 `_`，
+            // `apply_acp_session_update` 返回 true 会触发 text/thought 的 `on_boundary()`，
+            // 正在流式的正文游标被重置后，后续累积快照的 starts_with 判断失效
+            // → 整段正文重复发一遍。两处分发共用 `parse_acp_usage_update`（不是两份拷贝）。
+            if let Some(usage) = parse_acp_usage_update(update) {
+                sink(UnifiedAgentEvent::Usage { usage });
             }
         }
         _ => {
@@ -1974,6 +2090,195 @@ mod tests {
             .any(|e| matches!(e, UnifiedAgentEvent::ThinkingDelta { delta } if delta == "plan")));
     }
 
+    // ---- ACP usage：usage_update（官方 RFD）与 PromptResponse.usage ----
+
+    fn usage_update(fields: Value) -> serde_json::Map<String, Value> {
+        let mut map =
+            serde_json::Map::from_iter([("sessionUpdate".to_string(), json!("usage_update"))]);
+        if let Some(obj) = fields.as_object() {
+            for (k, v) in obj {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        map
+    }
+
+    #[test]
+    fn usage_update_parses_flat_used_and_size() {
+        // opencode 本机实测原文（字段平铺在 update 下，不嵌套在 usage 对象里）。
+        let update = usage_update(json!({
+            "used": 13477,
+            "size": 200000,
+            "cost": { "amount": 0, "currency": "USD" }
+        }));
+        let usage = parse_acp_usage_update(&update).expect("usage_update 应被解析");
+        // `used` 是「上下文里现有的全部 token」，落在 input_tokens（下游分子读这里）。
+        assert_eq!(usage.input_tokens, Some(13_477));
+        assert_eq!(usage.context_window_tokens, Some(200_000));
+    }
+
+    #[test]
+    fn usage_update_tolerates_missing_fields() {
+        let only_used = usage_update(json!({ "used": 42 }));
+        let parsed = parse_acp_usage_update(&only_used).expect("只有 used 也该解析");
+        assert_eq!(parsed.input_tokens, Some(42));
+        assert_eq!(parsed.context_window_tokens, None);
+
+        let only_size = usage_update(json!({ "size": 262144 }));
+        let parsed = parse_acp_usage_update(&only_size).expect("只有 size 也该解析");
+        assert_eq!(parsed.input_tokens, Some(0));
+        assert_eq!(parsed.context_window_tokens, Some(262_144));
+
+        // 两个都缺 → None，不 panic。
+        assert!(parse_acp_usage_update(&usage_update(json!({}))).is_none());
+        // 非数值/负数等异常形态也不得 panic。
+        assert!(
+            parse_acp_usage_update(&usage_update(json!({ "used": "many", "size": -1 }))).is_none()
+        );
+    }
+
+    #[test]
+    fn driver_emits_usage_event_for_usage_update() {
+        let (_, events) = run_updates(&[usage_update(json!({ "used": 13477, "size": 200000 }))]);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            UnifiedAgentEvent::Usage { usage }
+                if usage.input_tokens == Some(13_477)
+                    && usage.context_window_tokens == Some(200_000)
+        )));
+    }
+
+    #[test]
+    fn usage_update_does_not_mark_a_message_boundary() {
+        // 直接盯游标状态：`on_boundary()` 只是**置位**，是否真清空要等下一条 chunk 的
+        // starts_with 裁定，所以只看输出会漏掉这个回归——必须断言标志位本身。
+        // 做法：在 usage_update 前后各取一次快照，断言这条通知没有改动任何游标状态。
+        let mut state = AcpUpdateState::default();
+        let mut events = Vec::new();
+        let mut feed = |state: &mut AcpUpdateState, u: serde_json::Map<String, Value>| {
+            acp_apply_session_update(&u, state, &mut |e| events.push(e));
+        };
+        feed(&mut state, thought_chunk("t"));
+        feed(&mut state, msg_chunk("abc"));
+        let before = (
+            state.text.current.clone(),
+            state.text.boundary_pending,
+            state.thought.current.clone(),
+            state.thought.boundary_pending,
+        );
+
+        feed(
+            &mut state,
+            usage_update(json!({ "used": 100, "size": 200000 })),
+        );
+
+        assert_eq!(
+            (
+                state.text.current.clone(),
+                state.text.boundary_pending,
+                state.thought.current.clone(),
+                state.thought.boundary_pending,
+            ),
+            before,
+            "usage_update 不是消息边界，不得改动任何游标状态"
+        );
+    }
+
+    #[test]
+    fn usage_update_between_chunks_never_duplicates_text() {
+        // 若 usage_update 被当成边界，游标会在下一条不同前缀的 chunk 处被清空，
+        // 之后到来的整轮累积快照就不再以游标为前缀 → 整段正文重发一遍。
+        let (text, _) = run_updates(&[
+            msg_chunk("abc"),
+            usage_update(json!({ "used": 100, "size": 200000 })),
+            msg_chunk("xyz"),
+            msg_chunk("abcxyzEND"),
+        ]);
+        assert_eq!(text, "abcxyzEND", "usage_update 不得重置正文游标");
+    }
+
+    #[test]
+    fn usage_update_between_chunks_never_duplicates_thought() {
+        let mut state = AcpUpdateState::default();
+        let mut events = Vec::new();
+        for u in [
+            thought_chunk("abc"),
+            usage_update(json!({ "used": 100 })),
+            thought_chunk("xyz"),
+            thought_chunk("abcxyzEND"),
+        ] {
+            acp_apply_session_update(&u, &mut state, &mut |e| events.push(e));
+        }
+        let thoughts: String = events
+            .iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::ThinkingDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, "abcxyzEND", "usage_update 不得重置思考游标");
+        // 用量事件仍要发出来。
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, UnifiedAgentEvent::Usage { .. })));
+    }
+
+    #[test]
+    fn one_shot_driver_also_emits_usage_update() {
+        // 一次性驱动（run_acp_session）走 apply_acp_session_update，必须同样覆盖。
+        let update = usage_update(json!({ "used": 13477, "size": 200000 }));
+        let mut emitted = HashSet::new();
+        let mut events = Vec::new();
+        assert!(apply_acp_session_update(&update, &mut emitted, &mut |e| {
+            events.push(e);
+        }));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            UnifiedAgentEvent::Usage { usage }
+                if usage.input_tokens == Some(13_477)
+                    && usage.context_window_tokens == Some(200_000)
+        )));
+    }
+
+    #[test]
+    fn prompt_response_usage_counts_cache_and_thought_tokens() {
+        // opencode 本机实测样本；11685 + 4 + 11 + 1792 = 13492 = 其自报的 totalTokens。
+        let usage = format_acp_usage(&json!({
+            "inputTokens": 11685,
+            "outputTokens": 4,
+            "totalTokens": 13492,
+            "thoughtTokens": 11,
+            "cachedReadTokens": 1792
+        }))
+        .expect("有非零字段应产出用量");
+        assert_eq!(usage.input_tokens, Some(11_685));
+        assert_eq!(usage.output_tokens, Some(4));
+        assert_eq!(usage.cached_input_tokens, Some(1_792));
+        assert_eq!(usage.reasoning_tokens, Some(11));
+        assert_eq!(usage.total_tokens, Some(13_492));
+        // PromptResponse.usage 不带窗口——留 None 交给 run.rs 的窗口粘滞。
+        assert_eq!(usage.context_window_tokens, None);
+    }
+
+    #[test]
+    fn prompt_response_usage_counts_cache_write() {
+        let usage = format_acp_usage(&json!({ "cachedWriteTokens": 4096 }))
+            .expect("只有 cache write 也是真实占用");
+        assert_eq!(usage.cache_creation_input_tokens, Some(4_096));
+        assert_eq!(usage.total_tokens, Some(4_096));
+    }
+
+    #[test]
+    fn prompt_response_usage_is_none_when_empty_or_all_zero() {
+        // ACP 标记 UNSTABLE，缺失/全零一律 None（不得报错，也不得造出 0 用量覆盖真实值）。
+        assert!(format_acp_usage(&json!({})).is_none());
+        assert!(format_acp_usage(&json!({
+            "inputTokens": 0, "outputTokens": 0,
+            "cachedReadTokens": 0, "cachedWriteTokens": 0, "thoughtTokens": 0
+        }))
+        .is_none());
+    }
+
     #[test]
     fn normalize_models_from_available() {
         let result = json!({
@@ -1985,6 +2290,144 @@ mod tests {
         });
         let models = normalize_models(&result);
         assert!(models.iter().any(|m| m.id == "grok-4.3"));
+    }
+
+    #[test]
+    fn cursor_model_id_params_carry_context_window() {
+        // 本机实测 cursor 的 session/new 返回样本（2026-07-26）：窗口写在方括号参数里，
+        // 且这些模型**没有** _meta.totalContextTokens。
+        assert_eq!(
+            context_window_from_model_id_params(
+                "claude-opus-5[thinking=true,context=300k,effort=high,fast=false]"
+            ),
+            Some(300_000)
+        );
+        assert_eq!(
+            context_window_from_model_id_params(
+                "gpt-5.6-sol[context=272k,reasoning=medium,fast=false]"
+            ),
+            Some(272_000)
+        );
+        assert_eq!(
+            context_window_from_model_id_params(
+                "claude-sonnet-4-6[thinking=true,context=200k,effort=high,fast=false]"
+            ),
+            Some(200_000)
+        );
+        // 无 context= 提示 → None，不猜。
+        assert_eq!(
+            context_window_from_model_id_params("composer-2.5[fast=true]"),
+            None
+        );
+        assert_eq!(context_window_from_model_id_params("default[]"), None);
+        // 完全没有方括号（grok / kimi 形态）也不该 panic。
+        assert_eq!(context_window_from_model_id_params("grok-4.5"), None);
+        // 有 context= 但值解析不出来 → None。
+        assert_eq!(
+            context_window_from_model_id_params("weird[context=abc]"),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_models_reads_cursor_context_hint_from_model_id() {
+        let result = json!({
+            "models": {
+                "currentModelId": "composer-2.5[fast=true]",
+                "availableModels": [
+                    { "modelId": "claude-opus-5[thinking=true,context=300k,effort=high,fast=false]",
+                      "name": "claude-opus-5" },
+                    { "modelId": "gpt-5.6-sol[context=272k,reasoning=medium,fast=false]",
+                      "name": "gpt-5.6-sol" },
+                    { "modelId": "composer-2.5[fast=true]", "name": "composer-2.5" }
+                ]
+            }
+        });
+        let models = normalize_models(&result);
+        let window_of = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+                .context_window_tokens
+        };
+        assert_eq!(
+            window_of("claude-opus-5[thinking=true,context=300k,effort=high,fast=false]"),
+            Some(300_000)
+        );
+        assert_eq!(
+            window_of("gpt-5.6-sol[context=272k,reasoning=medium,fast=false]"),
+            Some(272_000)
+        );
+        // 无提示的模型窗口留空——不许兜底成 200K。
+        assert_eq!(window_of("composer-2.5[fast=true]"), None);
+    }
+
+    /// cursor 的模型实际是从 **configOptions** 分支出来的，不是 `models.availableModels`
+    /// ——那条分支命中后会提前 return。真机实测 33 个模型全走 configOptions，
+    /// 所以只给 availableModels 加窗口解析在生产里等于没做（实测 0/33 有窗口）。
+    /// 这条测试钉住 configOptions 分支，防止再次回归。
+    #[test]
+    fn normalize_models_reads_context_hint_from_config_options_branch() {
+        // 真机 `cursor-agent acp` 的 session/new 返回形状（含 mode 项，模型项排第二）。
+        let result = json!({
+            "configOptions": [
+                { "id": "mode", "category": "mode", "options": [
+                    { "value": "agent", "name": "Agent" }
+                ]},
+                { "id": "model", "category": "model",
+                  "currentValue": "claude-opus-5[thinking=true,context=300k,effort=high,fast=false]",
+                  "options": [
+                    { "value": "default[]", "name": "Auto" },
+                    { "value": "claude-opus-5[thinking=true,context=300k,effort=high,fast=false]",
+                      "name": "claude-opus-5" },
+                    { "value": "gpt-5.6-sol[context=272k,reasoning=medium,fast=false]",
+                      "name": "gpt-5.6-sol" },
+                    { "value": "composer-2.5[fast=true]", "name": "composer-2.5" }
+                ]}
+            ]
+        });
+        let models = normalize_models(&result);
+        let window_of = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+                .context_window_tokens
+        };
+        assert_eq!(
+            window_of("claude-opus-5[thinking=true,context=300k,effort=high,fast=false]"),
+            Some(300_000)
+        );
+        assert_eq!(
+            window_of("gpt-5.6-sol[context=272k,reasoning=medium,fast=false]"),
+            Some(272_000)
+        );
+        // `default[]` 与无 context= 的模型都留空，不猜。
+        assert_eq!(window_of("composer-2.5[fast=true]"), None);
+        assert_eq!(window_of("default[]"), None);
+    }
+
+    #[test]
+    fn normalize_models_prefers_meta_window_over_model_id_hint() {
+        // 同时有 _meta.totalContextTokens 与 modelId 的 context= 时取 _meta（显式字段更可靠）。
+        let result = json!({
+            "models": {
+                "availableModels": [
+                    { "modelId": "x-model[context=300k]", "name": "X",
+                      "_meta": { "totalContextTokens": 500000 } }
+                ]
+            }
+        });
+        let models = normalize_models(&result);
+        assert_eq!(
+            models
+                .iter()
+                .find(|m| m.id == "x-model[context=300k]")
+                .expect("model")
+                .context_window_tokens,
+            Some(500_000)
+        );
     }
 
     #[test]
@@ -2158,6 +2601,141 @@ mod tests {
         assert!(
             got_text || got_error,
             "expected at least one TextDelta or an Error/Err round-trip, got: {seq:?}"
+        );
+    }
+
+    /// Live proof that L6 recovers cursor's context window from the modelId params.
+    ///
+    /// cursor 是唯一把窗口写在 modelId 方括号里的 CLI（实测 32 个模型中 13 个带
+    /// `context=`，且全都没有 `_meta.totalContextTokens`）。这条跑真实 `cursor-agent acp`
+    /// 探测，断言确实有模型解析出了窗口——改动前这些全是 None，分母只能吃 200K 兜底。
+    #[tokio::test]
+    #[ignore = "requires live cursor-agent login + network"]
+    async fn cursor_models_expose_context_window_from_model_id() {
+        let bin = which_bin("cursor-agent").expect("cursor-agent on PATH");
+        let cwd = std::env::temp_dir();
+        let probe = detect_acp_models(&bin, &["acp"], &cwd, 60)
+            .await
+            .expect("cursor acp model probe");
+
+        let with_window: Vec<_> = probe
+            .models
+            .iter()
+            .filter(|m| m.context_window_tokens.is_some())
+            .collect();
+        eprintln!(
+            "cursor models: {} total, {} with a window",
+            probe.models.len(),
+            with_window.len()
+        );
+        for m in with_window.iter().take(8) {
+            eprintln!("  {} -> {:?}", m.id, m.context_window_tokens);
+        }
+        assert!(
+            !with_window.is_empty(),
+            "no cursor model exposed a context window; modelId parsing regressed"
+        );
+        // 实测样本里 claude-opus-5 是 300k、gpt-5.6-sol 是 272k，都应落在合理区间。
+        for m in &with_window {
+            let w = m.context_window_tokens.unwrap();
+            assert!(
+                (100_000..=2_000_000).contains(&w),
+                "implausible window {w} for {}",
+                m.id
+            );
+        }
+    }
+
+    /// Live end-to-end proof that the ACP usage channel (L1/L2) works against a real CLI.
+    ///
+    /// opencode 是实测唯一会发 `usage_update` 的已装 CLI（kimi/cursor 均不发），所以它是
+    /// 这条链路唯一能真机验证的入口。断言两件单测无法覆盖的事：
+    /// 1. **分母真的来自 CLI**——`context_window_tokens` 非空（`usage_update.size`）。
+    /// 2. **分子计入了 cache**——`total_tokens > input + output`，即 `cachedReadTokens`
+    ///    确实被 `format_acp_usage` 读到了（旧代码只读 input/output，实测偏低 13%）。
+    /// 同时打印真实数字，供人工对照 `research/cli-wire-facts.md` 里记录的样本。
+    #[tokio::test]
+    #[ignore = "requires live opencode login + network"]
+    async fn opencode_acp_reports_usage_and_context_window() {
+        let cwd = std::env::temp_dir();
+        let mut child = Command::new("opencode")
+            .arg("acp")
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn opencode acp");
+
+        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
+        let result = timeout(
+            Duration::from_secs(120),
+            run_acp_session(
+                &mut child,
+                "Reply with exactly the token USAGE_OK and nothing else.",
+                &cwd,
+                None,
+                &[],
+                |event| events.borrow_mut().push(event),
+                || false,
+            ),
+        )
+        .await;
+        let _ = child.start_kill();
+        // 认证失效 / 上游挂起是**环境**问题，不是本层回归：opencode 的默认模型密钥过期时
+        // 整个 turn 会一直等不到响应。这种情况跳过而不是 fail——否则一个过期的 API key
+        // 会伪装成代码回归。真机跑之前先确认 `opencode run hi` 能正常返回。
+        if result.is_err() {
+            eprintln!(
+                "SKIP: opencode ACP 会话在 120s 内没有完成（多为密钥失效/网络问题）。\
+                 先跑 `opencode run hi` 确认 CLI 本身可用。"
+            );
+            return;
+        }
+
+        let captured = events.into_inner();
+        let usages: Vec<&crate::chat::model::ModelUsage> = captured
+            .iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .collect();
+        for u in &usages {
+            eprintln!(
+                "opencode usage: input={:?} output={:?} cache_read={:?} reasoning={:?} \
+                 total={:?} window={:?}",
+                u.input_tokens,
+                u.output_tokens,
+                u.cached_input_tokens,
+                u.reasoning_tokens,
+                u.total_tokens,
+                u.context_window_tokens,
+            );
+        }
+        assert!(
+            !usages.is_empty(),
+            "opencode reported no usage at all — the ACP usage channel regressed \
+             (若 `opencode run hi` 也报 Invalid API Key，先修密钥再看这条)"
+        );
+
+        // 分母：来自 usage_update.size。
+        let window = usages.iter().find_map(|u| u.context_window_tokens);
+        assert!(
+            window.is_some_and(|w| w > 0),
+            "no context window from usage_update.size; usages={usages:?}"
+        );
+
+        // 分子：cache token 必须计入 total，否则就是修复前那个低估的老口径。
+        let counts_cache = usages.iter().any(|u| {
+            let cache = u.cached_input_tokens.unwrap_or(0);
+            let plain = u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0);
+            cache > 0 && u.total_tokens.unwrap_or(0) > plain
+        });
+        assert!(
+            counts_cache,
+            "no usage report counted cache tokens into total; usages={usages:?}"
         );
     }
 }

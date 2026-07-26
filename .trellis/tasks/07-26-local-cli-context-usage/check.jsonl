@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/07-26-local-cli-context-usage/research/cli-wire-facts.md", "reason": "校验解析逻辑是否与各 CLI 实际字段一致（尤其 codex 的 last vs total、claude 的 iterations 取末项、cache token 必须计入）。"}
+{"file": ".trellis/tasks/07-26-local-cli-context-usage/implement.md", "reason": "逐层 checklist 与收尾验证清单，含改动前的测试基线 1135 passed / 0 failed —— 不得新增失败。"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "质量门槛：前端无 e2e 兜底，typecheck + lint + Vitest 三层叠加。Rust 侧改动同样要求单测覆盖。"}
+{"file": ".trellis/spec/guides/external-cli-agents.md", "reason": "校验是否违反外部 CLI 既有约定（错误出口统一走 errors::classify、探测 cwd 用 resolve_detection_cwd 而非执行 cwd）。"}

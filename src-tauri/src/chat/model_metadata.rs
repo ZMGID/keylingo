@@ -373,6 +373,9 @@ pub(crate) fn context_window_for_model(
     let lower = model.to_ascii_lowercase();
     let known = [
         ("1m", 1_000_000usize),
+        // 256k：`kimi-code/k3-256k` 这类名字里明写窗口的模型，缺这一项会一路掉到
+        // FALLBACK_CONTEXT_WINDOW_TOKENS(200K)。值取 2^18（对齐 modelDatabase 里 kimi 系列）。
+        ("256k", 262_144usize),
         ("200k", 200_000usize),
         ("128k", 128_000usize),
         ("100k", 100_000usize),
@@ -605,7 +608,10 @@ mod tests {
 
     #[test]
     fn normalize_model_name_lowercases_strips_models_prefix_and_trims() {
-        assert_eq!(normalize_model_name("Gemini-3.1-Flash-Image"), "gemini-3.1-flash-image");
+        assert_eq!(
+            normalize_model_name("Gemini-3.1-Flash-Image"),
+            "gemini-3.1-flash-image"
+        );
         assert_eq!(
             normalize_model_name("models/Gemini-3.1-Flash-Image"),
             "gemini-3.1-flash-image"
@@ -785,6 +791,19 @@ mod tests {
         assert_eq!(
             context_window_for_model(None, "custom-deepseek-model"),
             (128_000, true)
+        );
+    }
+
+    #[test]
+    fn context_window_recognizes_256k_in_model_name() {
+        // 关键词表缺 256k 时这两个会掉到 200K 兜底（kimi k3-256k 的真实症状）。
+        assert_eq!(
+            context_window_for_model(None, "kimi-code/k3-256k"),
+            (262_144, false)
+        );
+        assert_eq!(
+            context_window_for_model(None, "some-model-256K"),
+            (262_144, false)
         );
     }
 }

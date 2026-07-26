@@ -217,6 +217,15 @@ pub struct ModelUsage {
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
+    /// CLI 自报的**上下文窗口总大小**（不是用量）。来源：ACP `usage_update.size`
+    /// （官方 RFD「Session Usage and Context Status」，字段平铺在 `update` 下）。
+    ///
+    /// 只有外部 CLI 会话填；内置 provider 恒 `None`——内置路径的窗口来自
+    /// `model_metadata::context_window_for_model`，与本字段无关。放在 `ModelUsage` 里
+    /// 是因为窗口与用量由 CLI 在同一次上报中给出，随消息一起持久化后
+    /// `collect_external_session_usage` 能一并读到，无需为分母另开事件通道。
+    #[serde(default)]
+    pub context_window_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,11 +366,23 @@ impl GenerateOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamPart {
-    TextDelta { delta: String },
-    ReasoningDelta { delta: String },
-    ToolCallStart { id: String, name: String },
-    ToolCallDelta { id: String, delta: String },
-    ToolCallDone { call: PendingToolCall },
+    TextDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        id: String,
+        delta: String,
+    },
+    ToolCallDone {
+        call: PendingToolCall,
+    },
     /// 模型**原生内置联网搜索**的实时进度（任务 07-23）。适配器在服务端执行搜索的
     /// 过程中逐帧发射：首帧可为空（= 开牌 Running），随后带查询词/来源增量。为什么单变体
     /// 而非拆 Start/Update——sink 把「首次收到」当开牌、后续当增量累加，对三家适配器最省事。
@@ -378,8 +399,13 @@ pub enum StreamPart {
         mime_type: String,
         data: String,
     },
-    Finish { reason: String, full: String },
-    Error { message: String },
+    Finish {
+        reason: String,
+        full: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -47,8 +47,15 @@ pub async fn request_external_compaction(
     conversation.context_state.warning = None;
 
     let cwd = resolve_effective_cwd(app, &conversation.id, conversation.project_id.as_deref())?;
-    conversation.context_state =
-        compute_external_context_state_with_probe(conversation, true, None, None, Some(&cwd)).await;
+    conversation.context_state = compute_external_context_state_with_probe(
+        conversation,
+        true,
+        None,
+        None,
+        Some(&cwd),
+        Some(&cwd),
+    )
+    .await;
 
     Ok(())
 }

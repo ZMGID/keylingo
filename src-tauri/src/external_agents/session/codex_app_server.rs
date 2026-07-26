@@ -10,7 +10,7 @@ use tokio::time::timeout;
 
 use crate::external_agents::session::live::SessionCommand;
 use crate::external_agents::spawn::{fold_stderr, join_stderr_tail};
-use crate::external_agents::stream::usage_from_numbers;
+use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{ExternalCliSlashCommand, UnifiedAgentEvent};
 use crate::proc::NoConsoleWindow;
 
@@ -114,22 +114,40 @@ fn map_codex_notification(
             }
         }
         "thread/tokenUsage/updated" => {
+            // `tokenUsage` 有 `last` 与 `total` 两份：
+            //   last  = 最近一次请求的快照 → **上下文占用**口径，是用量条要的分子
+            //   total = 整个 thread 的累计消耗 → 计费口径，随轮次单调增长
+            // 用 total 当「已用上下文」会持续虚高，最终把进度条推满而实际远未满。
+            // `last` 缺失时才退回 `total`（兼容旧版 codex）。
             if let Some(usage) = params
                 .get("tokenUsage")
-                .and_then(|v| v.get("total"))
+                .and_then(|v| v.get("last").or_else(|| v.get("total")))
                 .and_then(|v| v.as_object())
             {
-                let input = usage
-                    .get("inputTokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let output = usage
-                    .get("outputTokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                if input > 0 || output > 0 {
+                let field = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+                let parts = CliUsageParts {
+                    input: field("inputTokens"),
+                    output: field("outputTokens"),
+                    cache_read: field("cachedInputTokens"),
+                    cache_creation: field("cacheWriteInputTokens"),
+                    // **codex 的 cache 已含在 inputTokens 里**（OpenAI 口径），不能再加一遍。
+                    // 本机实测原文（codex-cli 0.145.0, 2026-07-26）：
+                    //   {"cacheWriteInputTokens":0,"cachedInputTokens":3456,"inputTokens":16865,
+                    //    "outputTokens":7,"reasoningOutputTokens":0,"totalTokens":16872}
+                    // 对账 16865 + 7 = 16872 = totalTokens ⇒ 3456 是 inputTokens 的子集。
+                    // 当成不相交去加会得到 20328，虚高 20%。
+                    cache_included_in_input: true,
+                    // 刻意**不读** `reasoningOutputTokens`：同一样本里它是 0 而
+                    // input+output 已恰好等于 totalTokens，说明推理 token 已含在 outputTokens 内。
+                    ..Default::default()
+                };
+                if parts.input > 0
+                    || parts.output > 0
+                    || parts.cache_read > 0
+                    || parts.cache_creation > 0
+                {
                     sink(UnifiedAgentEvent::Usage {
-                        usage: usage_from_numbers(input, output),
+                        usage: usage_from_parts(parts),
                     });
                 }
             }
@@ -1056,6 +1074,80 @@ mod tests {
             .any(|event| matches!(event, UnifiedAgentEvent::Usage { .. })));
     }
 
+    fn only_usage(events: &[UnifiedAgentEvent]) -> crate::chat::model::ModelUsage {
+        events
+            .iter()
+            .find_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("应产出 Usage 事件")
+    }
+
+    #[test]
+    fn token_usage_prefers_last_snapshot_over_cumulative_total() {
+        // 第三轮时 total 已累计到远高于本轮实际上下文占用的量级。用量条要的是 last。
+        let (events, _) = collect(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"t","turnId":"u","tokenUsage":{
+                 "last":{"cacheWriteInputTokens":0,"cachedInputTokens":40000,"inputTokens":41200,"outputTokens":300,"reasoningOutputTokens":250,"totalTokens":41500},
+                 "total":{"cacheWriteInputTokens":0,"cachedInputTokens":180000,"inputTokens":189000,"outputTokens":2400,"reasoningOutputTokens":1800,"totalTokens":191400}}}"#,
+        );
+        let usage = only_usage(&events);
+        assert_eq!(
+            usage.input_tokens,
+            Some(41_200),
+            "取 last，不是 total(189000)"
+        );
+        assert_eq!(usage.output_tokens, Some(300));
+        assert_eq!(usage.cached_input_tokens, Some(40_000));
+        // codex 的 cachedInputTokens 是 inputTokens 的子集（实测对账见解析处注释）：
+        // 41200 + 300 = 41500，不得把 40000 再加一遍变成 81500，也不得加 reasoning 的 250。
+        assert_eq!(usage.total_tokens, Some(41_500));
+    }
+
+    /// 钉住 codex 的 cache 包含关系。这条直接复刻本机实测原文（codex-cli 0.145.0,
+    /// 2026-07-26），任何人把 `cache_included_in_input` 改回 false 都会让它变红。
+    #[test]
+    fn token_usage_matches_live_codex_total_exactly() {
+        let (events, _) = collect(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"t","turnId":"u","tokenUsage":{
+                 "last":{"cacheWriteInputTokens":0,"cachedInputTokens":3456,"inputTokens":16865,"outputTokens":7,"reasoningOutputTokens":0,"totalTokens":16872},
+                 "modelContextWindow":258400,
+                 "total":{"cacheWriteInputTokens":0,"cachedInputTokens":3456,"inputTokens":16865,"outputTokens":7,"reasoningOutputTokens":0,"totalTokens":16872}}}"#,
+        );
+        let usage = only_usage(&events);
+        // 必须与 codex 自报的 totalTokens 完全一致——这是「口径对了」的唯一硬判据。
+        assert_eq!(usage.total_tokens, Some(16_872));
+        assert_eq!(usage.cached_input_tokens, Some(3_456));
+    }
+
+    #[test]
+    fn token_usage_falls_back_to_total_when_last_absent() {
+        let (events, _) = collect(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"t","turnId":"u","tokenUsage":{
+                 "total":{"cachedInputTokens":11,"inputTokens":16,"outputTokens":7,"totalTokens":23}}}"#,
+        );
+        let usage = only_usage(&events);
+        assert_eq!(usage.input_tokens, Some(16));
+        assert_eq!(usage.cached_input_tokens, Some(11));
+        assert_eq!(usage.total_tokens, Some(23));
+    }
+
+    #[test]
+    fn token_usage_emits_when_only_cache_is_nonzero() {
+        // 极端形态防御：只有 cache 字段非零（inputTokens 为 0）时仍要上报，不能静默丢弃。
+        // 注意 codex 实测不会出现这种形态（cache ⊆ input），这里纯粹是解析层的健壮性。
+        let (events, _) = collect(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"t","turnId":"u","tokenUsage":{
+                 "last":{"cachedInputTokens":52000,"inputTokens":0,"outputTokens":0,"totalTokens":52000}}}"#,
+        );
+        assert!(only_usage(&events).cached_input_tokens == Some(52_000));
+    }
+
     #[test]
     fn turn_completed_ends_loop() {
         let (_, ended) = collect(
@@ -1158,6 +1250,100 @@ mod tests {
             got_text || got_error,
             "expected at least one TextDelta or a clean Error, got: {seq:?}"
         );
+    }
+
+    /// Live proof that L4 reads the `last` snapshot, not the cumulative `total`.
+    ///
+    /// 单测只能证明「给定这样的 JSON 会取 last」；这条证明真实 codex 确实**发**了
+    /// `last` 且它与 `total` 在多轮下会分叉。跑两轮同一 thread：
+    /// `total` 单调累加，`last` 只反映最近一次请求 —— 若 Kivio 读回 total，
+    /// 第二轮的用量会包含第一轮，进度条持续虚高。
+    #[tokio::test]
+    #[ignore = "requires live codex login + network"]
+    async fn codex_usage_uses_last_snapshot_not_cumulative_total() {
+        use tokio::process::Command;
+        use tokio::time::{timeout, Duration};
+
+        async fn one_turn(prompt: &str) -> Vec<crate::chat::model::ModelUsage> {
+            let cwd = std::env::temp_dir();
+            let mut child = Command::new("codex")
+                .arg("app-server")
+                .current_dir(&cwd)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn codex app-server");
+            let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
+            let _ = timeout(
+                Duration::from_secs(120),
+                run_codex_app_server_session(
+                    &mut child,
+                    prompt,
+                    None,
+                    None,
+                    &cwd,
+                    |event| events.borrow_mut().push(event),
+                    || false,
+                ),
+            )
+            .await;
+            let _ = child.start_kill();
+            events
+                .into_inner()
+                .into_iter()
+                .filter_map(|e| match e {
+                    UnifiedAgentEvent::Usage { usage } => Some(usage),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let usages = one_turn("Reply with exactly the token USAGE_OK and nothing else.").await;
+        for u in &usages {
+            eprintln!(
+                "codex usage: input={:?} output={:?} cache_read={:?} total={:?}",
+                u.input_tokens, u.output_tokens, u.cached_input_tokens, u.total_tokens
+            );
+        }
+        assert!(
+            !usages.is_empty(),
+            "codex reported no usage — thread/tokenUsage/updated parsing regressed"
+        );
+
+        // **口径硬判据**：codex 的 `cachedInputTokens` 是 `inputTokens` 的子集
+        // （实测 16865 + 7 = 16872 = 其自报的 totalTokens），所以 Kivio 算出的
+        // total 必须恰好等于 input + output。把 cache 再加一遍会让这条变红——
+        // 那正是曾经真实发生过的 bug（20328 vs 16872，虚高 20%）。
+        for u in &usages {
+            let input = u.input_tokens.unwrap_or(0);
+            let output = u.output_tokens.unwrap_or(0);
+            let cache = u.cached_input_tokens.unwrap_or(0);
+            assert_eq!(
+                u.total_tokens,
+                Some(input + output),
+                "codex total must equal input+output (cache is a subset of input): {u:?}"
+            );
+            assert!(
+                cache <= input,
+                "cachedInputTokens should never exceed inputTokens: {u:?}"
+            );
+        }
+
+        // `last` 是快照不是累计：多条上报时最后一条不应等于各条之和（读回 total 时会）。
+        if usages.len() > 1 {
+            let sum: u64 = usages.iter().filter_map(|u| u.input_tokens).sum();
+            let last = usages.last().and_then(|u| u.input_tokens).unwrap_or(0);
+            eprintln!(
+                "codex usage reports={} sum_input={sum} last_input={last}",
+                usages.len()
+            );
+            assert!(
+                last < sum,
+                "last snapshot must be strictly below the sum of all reports (else it is cumulative)"
+            );
+        }
     }
 
     #[test]

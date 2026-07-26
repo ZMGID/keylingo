@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/07-26-local-cli-context-usage/research/cli-wire-facts.md", "reason": "各 CLI 实测吐出的 usage/窗口字段结构与可复现命令。所有解析改动必须以此为准，不要凭记忆猜字段名。含许可边界说明（参考项目 paseo 是 AGPL-3.0，不可并入 GPL-3.0 的 Kivio）。"}
+{"file": ".trellis/spec/guides/external-cli-agents.md", "reason": "外部 CLI 的既有硬约定，改 detection.rs / 流解析前必读。第 11b 条解释了探测残渣（CLI 落盘的空壳会话）的来源——L7 必须跳过空壳会话的依据。"}
+{"file": ".trellis/spec/frontend/external-agent-integration.md", "reason": "外部 CLI 与前端的事件/状态契约。L9 把 context_window_tokens 改成 Option（窗口未知不再编造 200K）时需确认不破坏该契约。"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "质量门槛：前端无 e2e 兜底。L0-L9 每层都要带可红→绿单测（spec external-cli-agents 第 13 条同样要求）。"}

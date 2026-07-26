@@ -93,3 +93,31 @@ export function buildContextBarSlices(
 
   return slices
 }
+
+export function compactPercent(ratio: number | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) return '--'
+  return `${Math.max(0, Math.min(999, Math.round(ratio * 100)))}`
+}
+
+/**
+ * 上下文用量条的「满度」文案。
+ *
+ * 三种 usageRatio 为空的情形要分开说，否则会误导：
+ * - 窗口未知：CLI 既不报 `usage_update.size`、模型名也匹配不到任何静态表
+ *   （如 cursor 选了不带 `context=` 的模型）。百分比**永远**算不出来，
+ *   不能用「CLI 待上报」让用户空等。
+ * - 窗口已知但用量还没到：外部 CLI 的正常中间态，「CLI 待上报」准确。
+ * - 内置路径：走估算，「估算中」。
+ */
+export function fullnessLabel(
+  usageRatio: number | null,
+  isExternalContext: boolean,
+  contextWindowTokens: number | null,
+  t: I18n,
+): string {
+  if (usageRatio == null) {
+    if (!contextWindowTokens) return t.contextFullnessWindowUnknown
+    return isExternalContext ? t.contextFullnessCliPending : t.contextFullnessEstimated
+  }
+  return t.contextFullnessPercentFull.replace('{percent}', compactPercent(usageRatio))
+}

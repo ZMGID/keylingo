@@ -770,6 +770,8 @@ pub fn model_usage_from_openai_value(value: &Value) -> Option<ModelUsage> {
         reasoning_tokens: completion_details
             .and_then(|details| details.get("reasoning_tokens"))
             .and_then(Value::as_u64),
+        // 内置 provider 路径：窗口来自 model_metadata，不由响应携带。
+        context_window_tokens: None,
     })
 }
 
@@ -788,6 +790,8 @@ pub fn model_usage_from_anthropic_value(value: &Value) -> Option<ModelUsage> {
         cached_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation,
         reasoning_tokens: None,
+        // 内置 provider 路径：窗口来自 model_metadata，不由响应携带。
+        context_window_tokens: None,
     })
 }
 

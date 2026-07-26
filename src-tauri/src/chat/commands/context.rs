@@ -51,6 +51,7 @@ pub(crate) async fn chat_get_context_stats(
             None,
             None,
             Some(&cwd),
+            Some(&cwd),
         )
         .await
     } else {
@@ -538,6 +539,14 @@ pub(super) async fn compute_context_state(
                 EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
             )
         });
+        // 执行 cwd（resolve_effective_cwd，每会话独立 workspace）与上面的探测 cwd 是两回事：
+        // 它只用于按 workDir 关联 kimi 落盘的 wire.jsonl（见 kimi_usage 模块）。拿不到不影响其余。
+        let work_dir = crate::external_agents::workspace::resolve_effective_cwd(
+            app,
+            &conversation.id,
+            conversation.project_id.as_deref(),
+        )
+        .ok();
         return Ok(
             crate::external_agents::context::compute_external_context_state_with_probe(
                 conversation,
@@ -545,6 +554,7 @@ pub(super) async fn compute_context_state(
                 None,
                 cached_models.as_ref().map(|c| c.models.as_slice()),
                 None,
+                work_dir.as_deref(),
             )
             .await,
         );
