@@ -6,6 +6,10 @@ import { useExternalSendQueue } from './hooks/useExternalSendQueue'
 import { useStreamRenderFrame } from './hooks/useStreamRenderFrame'
 import { useTauriEvent } from './hooks/useTauriEvent'
 import {
+  clearConversationLocalState,
+  type ConversationLocalState,
+} from './conversationLocalState'
+import {
   getRouteConversationId,
   hashPath,
   isChatAssistantCenterPath,
@@ -839,6 +843,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   useEffect(() => onChatImageViewerOpen(setImageViewerItem), [])
 
+  // 会话本地运行态的聚合视图：6 处「按会话清理」共用（见 conversationLocalState.ts）。
+  // ref 仍各自独立持有 —— 读取侧有 30 处、语义各异，不适合一并打包。
+  // 每次现取 .current 而非快照：flushPendingStreamDone 会整体替换
+  // pendingStreamDoneRef.current，快照会指向旧对象。
+  const localState = useCallback((): ConversationLocalState => ({
+    inFlight: inFlightConversationsRef.current,
+    pendingStreamDone: pendingStreamDoneRef.current,
+    streamSnapshots: streamSnapshotsRef.current,
+    streamErrors: streamErrorsRef.current,
+    pendingToolConfirms: pendingToolConfirmsRef.current,
+    pendingSessionConsents: pendingSessionConsentsRef.current,
+  }), [])
+
   const syncGeneratingConversationIds = useCallback(() => {
     setGeneratingConversationIds(collectGeneratingConversationIds(
       inFlightConversationsRef.current,
@@ -872,17 +889,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // B：彻底把一个会话从所有本地乐观/in-flight/快照状态中剔除（ghost 清理）。
   // 不触碰 currentConversation/route，由调用方按场景决定。
   const dropConversationLocally = useCallback((conversationId: string) => {
-    inFlightConversationsRef.current.delete(conversationId)
-    delete streamSnapshotsRef.current[conversationId]
-    delete pendingToolConfirmsRef.current[conversationId]
-    delete pendingSessionConsentsRef.current[conversationId]
-    delete pendingStreamDoneRef.current[conversationId]
-    delete streamErrorsRef.current[conversationId]
+    clearConversationLocalState(localState(), conversationId, {
+      inFlight: true, pendingStreamDone: true, streamErrors: true,
+    })
     // 若该会话还挂着待刷新的合帧，连带取消，避免被剔除的 ghost 还闪一帧。
     cancelPendingFrameFor(conversationId)
     setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
     syncGeneratingConversationIds()
-  }, [cancelPendingFrameFor, syncGeneratingConversationIds])
+  }, [cancelPendingFrameFor, localState, syncGeneratingConversationIds])
 
   const setStreamErrorForConversation = useCallback((conversationId: string, error: string) => {
     if (error) {
@@ -1017,16 +1031,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const clearStreamSnapshot = useCallback((conversationId: string | null) => {
     if (!conversationId) return
-    delete streamSnapshotsRef.current[conversationId]
-    delete pendingToolConfirmsRef.current[conversationId]
-    delete pendingSessionConsentsRef.current[conversationId]
+    clearConversationLocalState(localState(), conversationId)
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === conversationId) {
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
       clearStreamingPreview()
     }
-  }, [clearStreamingPreview, syncGeneratingConversationIds])
+  }, [clearStreamingPreview, localState, syncGeneratingConversationIds])
 
   const cancelCurrentRunLocally = useCallback(() => {
     locallyCancelledConversationIdRef.current = currentConversationIdRef.current
@@ -1630,9 +1642,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         refreshSidebar()
       }
       if (conversationId) {
-        delete streamSnapshotsRef.current[conversationId]
-        delete pendingToolConfirmsRef.current[conversationId]
-        delete pendingSessionConsentsRef.current[conversationId]
+        clearConversationLocalState(localState(), conversationId)
         syncGeneratingConversationIds()
       }
       if (conversationId && currentConversationIdRef.current === conversationId) {
@@ -1641,7 +1651,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         clearStreamingPreview()
       }
     },
-    [clearStreamingPreview, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+    [clearStreamingPreview, localState, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
   )
 
   const flushPendingStreamDone = useCallback(async (conversationId?: string): Promise<boolean> => {
@@ -1671,14 +1681,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
     }
-    delete streamSnapshotsRef.current[conversationId]
-    delete pendingToolConfirmsRef.current[conversationId]
-    delete pendingSessionConsentsRef.current[conversationId]
+    clearConversationLocalState(localState(), conversationId)
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === conversationId) {
       clearStreamingPreview()
     }
-  }, [applyConversation, clearStreamingPreview, syncGeneratingConversationIds])
+  }, [applyConversation, clearStreamingPreview, localState, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatStream, (payload) => {
       if (isLocallyCancelledPayload(
@@ -2203,10 +2211,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (isConversationInFlight(inFlightConversationsRef.current, conversationId)) {
         await chatApi.cancelStream(conversationId)
       }
-      delete streamSnapshotsRef.current[conversationId]
-      delete pendingToolConfirmsRef.current[conversationId]
-      delete pendingSessionConsentsRef.current[conversationId]
-      delete streamErrorsRef.current[conversationId]
+      clearConversationLocalState(localState(), conversationId, { streamErrors: true })
       clearConversationInFlight(conversationId)
       forgetRememberedChatRoute()
       currentConversationIdRef.current = null
@@ -2224,7 +2229,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       console.error('Failed to clear chat:', err)
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '清空对话失败')
     }
-  }, [applyConversation, clearConversationInFlight, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute])
+  }, [applyConversation, clearConversationInFlight, localState, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute])
 
   const handleStartAssistantChat = useCallback(async (assistant: ChatAssistant) => {
     setAssistantStreamStatsByMessageId({})
