@@ -345,6 +345,18 @@ impl OpenAiResponsesProvider<'_> {
             request.options.thinking_level.as_deref(),
         ) {
             body["reasoning"] = serde_json::json!({ "effort": effort });
+            // 无状态模式：Responses 的 `store` 默认 true（服务端保存会话状态并按
+            // response id 串联轮次）。我们每轮都自带完整 input，不依赖服务端状态，
+            // 让服务端白存一份没有意义；代理渠道多半也没真正实现存储。
+            //
+            // 与 Codex 官方客户端对齐：同一模型/同一渠道，它发的就是 store:false +
+            // include:["reasoning.encrypted_content"]（见抓包 trace_dd26cbe7）——
+            // 思考链靠 encrypted_content 随响应回传，不依赖服务端存储。
+            //
+            // 注意：这不能修复该渠道对大请求的间歇性 502（同一 payload 重打 5 次 2 失败，
+            // 与本字段无关，见 commit message）。此处只是对齐官方客户端的正确用法。
+            body["store"] = Value::Bool(false);
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {
@@ -1360,6 +1372,18 @@ mod tests {
         assert_eq!(xh["reasoning"]["effort"], "high", "body: {xh}");
         // 纯对话（无内置、无思考档）⇒ 不发 reasoning。
         assert!(off.get("reasoning").is_none(), "body: {off}");
+
+        // 发 reasoning 时同时发 store:false + include（与 Codex 官方客户端一致）：
+        // 我们每轮自带完整 input，不依赖服务端会话状态，思考链走 encrypted_content。
+        assert_eq!(high["store"], false, "body: {high}");
+        assert_eq!(
+            high["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "body: {high}"
+        );
+        // 不发 reasoning 时不该无故附带这两项（保持与既有纯对话请求字节兼容）。
+        assert!(off.get("store").is_none(), "body: {off}");
+        assert!(off.get("include").is_none(), "body: {off}");
     }
 
     #[test]
