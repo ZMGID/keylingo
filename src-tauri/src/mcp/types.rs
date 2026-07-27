@@ -541,7 +541,7 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__present_artifacts".to_string(),
         name: "present_artifacts".to_string(),
-        description: "Show files or images in the chat. You must call this when the user asks to show, preview, attach, or send a file; reading or describing a file does not display it. Use artifact_ids for generated files or paths for existing local files. Unselected files remain hidden.".to_string(),
+        description: "Show files or images in the chat. You must call this when the user asks to show, preview, attach, or send a file; reading or describing a file does not display it. Pass artifact_ids for files this conversation generated, or paths for files that already exist on disk — never both for the same file, and never invent a path for a generated file. Unselected files remain hidden.".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -550,14 +550,14 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
             "properties": {
                 "artifact_ids": {
                     "type": "array",
-                    "description": "Generated artifact IDs to display",
+                    "description": "IDs of files generated in this conversation (e.g. images from mixer_generate_image). These have no filesystem path — do not also list them in paths.",
                     "items": { "type": "string", "minLength": 1 },
                     "minItems": 1,
                     "maxItems": 16
                 },
                 "paths": {
                     "type": "array",
-                    "description": "Existing local file paths to display",
+                    "description": "Paths of files that already exist on disk. Only for files you read or wrote yourself; never for generated artifacts.",
                     "items": { "type": "string", "minLength": 1 },
                     "minItems": 1,
                     "maxItems": 16
