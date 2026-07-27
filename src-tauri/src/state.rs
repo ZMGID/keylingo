@@ -1185,7 +1185,9 @@ mod tests {
         st.set_mcp_tool_snapshot("srv".into(), "fp-1".into(), vec![sample_mcp_tool("echo")]);
 
         // 内存命中
-        let hit = st.get_mcp_tool_snapshot("srv", "fp-1").expect("in-memory hit");
+        let hit = st
+            .get_mcp_tool_snapshot("srv", "fp-1")
+            .expect("in-memory hit");
         assert_eq!(hit[0].name, "echo");
 
         // 模拟重启：新 AppState 从同一 usage_dir 灌入落盘快照

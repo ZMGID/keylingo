@@ -279,9 +279,10 @@ pub async fn retrieve(
                     .map(|c| c.fused.chunk.text.clone())
                     .collect();
                 let t = Instant::now();
-                let result =
-                    super::rerank::rerank(state, &rp, &rc.model, &req.query, &docs, send_n, attempts)
-                        .await;
+                let result = super::rerank::rerank(
+                    state, &rp, &rc.model, &req.query, &docs, send_n, attempts,
+                )
+                .await;
                 rerank_ms = t.elapsed().as_millis() as u64;
                 match result {
                     Ok(scored) if !scored.is_empty() => {
@@ -349,7 +350,11 @@ pub async fn retrieve(
                 chunk: c.fused.chunk.clone(),
             });
         }
-        candidates.push(candidate_diag(c, decision, (rank < context_n).then_some(rank)));
+        candidates.push(candidate_diag(
+            c,
+            decision,
+            (rank < context_n).then_some(rank),
+        ));
     }
     for c in &below {
         candidates.push(candidate_diag(c, Decision::BelowThreshold, None));
@@ -439,7 +444,11 @@ fn passes_threshold(c: &KbCandidate, rerank_on: bool, min_score: f32) -> bool {
         .unwrap_or(false)
 }
 
-fn candidate_diag(c: &KbCandidate, decision: Decision, final_rank: Option<usize>) -> RetrievalCandidate {
+fn candidate_diag(
+    c: &KbCandidate,
+    decision: Decision,
+    final_rank: Option<usize>,
+) -> RetrievalCandidate {
     RetrievalCandidate {
         kb_id: c.kb_id.clone(),
         doc_id: c.fused.chunk.doc_id.clone(),
@@ -461,10 +470,14 @@ fn candidate_diag(c: &KbCandidate, decision: Decision, final_rank: Option<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::knowledge_base::KnowledgeChunk;
     use crate::chat::knowledge_base::store::FusedCandidate;
+    use crate::chat::knowledge_base::KnowledgeChunk;
 
-    fn cand(rerank_score: Option<f32>, keyword_rank: Option<usize>, vector_distance: Option<f32>) -> KbCandidate {
+    fn cand(
+        rerank_score: Option<f32>,
+        keyword_rank: Option<usize>,
+        vector_distance: Option<f32>,
+    ) -> KbCandidate {
         KbCandidate {
             kb_id: "k".into(),
             fused: FusedCandidate {
@@ -568,8 +581,14 @@ mod tests {
         let a = chunk("d1", 0, "退款需要在七天内申请并提供订单编号");
         let b = chunk("d1", 1, "退款需要在七天内申请并提供订单编号（续）"); // adjacent
         let c = chunk("d2", 5, "完全不同文档的另一段内容"); // other doc
-        assert!(is_near_duplicate(&a, &b), "adjacent same-doc chunks are dupes");
-        assert!(!is_near_duplicate(&a, &c), "different docs must never be merged");
+        assert!(
+            is_near_duplicate(&a, &b),
+            "adjacent same-doc chunks are dupes"
+        );
+        assert!(
+            !is_near_duplicate(&a, &c),
+            "different docs must never be merged"
+        );
     }
 
     #[test]
@@ -582,8 +601,17 @@ mod tests {
         let c0 = chunk("d", 0, boiler);
         let c1 = chunk("d", 1, "退款必须在购买后七天内提出，逾期不予受理。"); // unique answer
         let c2 = chunk("d", 2, boiler); // duplicate of c0 by text
-        assert!(is_near_duplicate(&c0, &c2), "high-overlap boilerplate = dupe");
-        assert!(!is_near_duplicate(&c0, &c1), "unique answer is not a dupe of boilerplate");
-        assert!(!is_near_duplicate(&c1, &c2), "unique answer is not a dupe of boilerplate");
+        assert!(
+            is_near_duplicate(&c0, &c2),
+            "high-overlap boilerplate = dupe"
+        );
+        assert!(
+            !is_near_duplicate(&c0, &c1),
+            "unique answer is not a dupe of boilerplate"
+        );
+        assert!(
+            !is_near_duplicate(&c1, &c2),
+            "unique answer is not a dupe of boilerplate"
+        );
     }
 }

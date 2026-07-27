@@ -265,7 +265,11 @@ pub fn notes_folder_create(app: AppHandle, name: String) -> Result<Vec<String>, 
 }
 
 #[tauri::command]
-pub fn notes_folder_rename(app: AppHandle, old: String, new: String) -> Result<Vec<String>, String> {
+pub fn notes_folder_rename(
+    app: AppHandle,
+    old: String,
+    new: String,
+) -> Result<Vec<String>, String> {
     let new = sanitize_line(&new);
     if new.is_empty() {
         return Err("folder name empty".to_string());
@@ -335,7 +339,8 @@ pub fn notes_create(
         updated_at: now,
     };
     let path = note_path(&app, &note.id)?;
-    std::fs::write(&path, serialize_note(&note)).map_err(|err| format!("write note failed: {err}"))?;
+    std::fs::write(&path, serialize_note(&note))
+        .map_err(|err| format!("write note failed: {err}"))?;
     Ok(note)
 }
 
@@ -359,7 +364,8 @@ pub fn notes_update(
         created_at: existing.created_at,
         updated_at: now_iso(),
     };
-    std::fs::write(&path, serialize_note(&note)).map_err(|err| format!("write note failed: {err}"))?;
+    std::fs::write(&path, serialize_note(&note))
+        .map_err(|err| format!("write note failed: {err}"))?;
     Ok(note)
 }
 

@@ -314,7 +314,8 @@ pub fn claude_config_effort() -> Option<String> {
     normalize(value.get("effortLevel")?.as_str()?)
 }
 
-pub fn parse_claude_init_info(value: &Value) -> Option<ClaudeInitInfo> {    if !is_claude_init(value) {
+pub fn parse_claude_init_info(value: &Value) -> Option<ClaudeInitInfo> {
+    if !is_claude_init(value) {
         return None;
     }
     let resolved_model = value.get("model").and_then(|v| v.as_str())?.trim();
@@ -556,7 +557,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }
 
 #[cfg(test)]

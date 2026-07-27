@@ -24,7 +24,7 @@ use crate::usage::{
 
 use super::{
     parse_tool_arguments, responses_input_from_model_messages, stream_read_error, BuiltinWebSearch,
-    GenerateOutput, GeneratedImageData, GenerateRequest, LanguageModelProvider, ModelError,
+    GenerateOutput, GenerateRequest, GeneratedImageData, LanguageModelProvider, ModelError,
     ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
@@ -824,7 +824,8 @@ fn handle_responses_stream_event(
                         state.finalize_tool_call(item_id, sink)?;
                     }
                     // 内置搜索：hosted web_search 的查询词在此事件到达（completed 的 output 里不重现）。
-                    Some("web_search_call") => {                        if let Some(action) = item.get("action") {
+                    Some("web_search_call") => {
+                        if let Some(action) = item.get("action") {
                             if let Some(q) = action.get("query").and_then(Value::as_str) {
                                 state.push_web_search_query(q);
                             }

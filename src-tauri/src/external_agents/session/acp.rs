@@ -347,7 +347,12 @@ fn extract_acp_reasoning(value: &Value) -> (Vec<RuntimeModelOption>, Option<Stri
         }
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        for raw_value in option.get("options").and_then(|v| v.as_array()).into_iter().flatten() {
+        for raw_value in option
+            .get("options")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let Some(entry) = raw_value.as_object() else {
                 continue;
             };

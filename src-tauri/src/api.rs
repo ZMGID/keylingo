@@ -1369,7 +1369,10 @@ mod tests {
             .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
             .http2_keep_alive_while_idle(true)
             .build();
-        assert!(built.is_ok(), "http client builder rejected config: {built:?}");
+        assert!(
+            built.is_ok(),
+            "http client builder rejected config: {built:?}"
+        );
     }
 
     #[test]

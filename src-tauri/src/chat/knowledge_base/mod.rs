@@ -38,9 +38,9 @@ pub mod retrieval;
 pub mod store;
 
 #[cfg(test)]
-mod live_e2e_tests;
-#[cfg(test)]
 mod eval_tests;
+#[cfg(test)]
+mod live_e2e_tests;
 
 /// A knowledge library. `embedding_dim` is 0 until the first chunk is indexed
 /// (the dimension is learned from the first embedding response).

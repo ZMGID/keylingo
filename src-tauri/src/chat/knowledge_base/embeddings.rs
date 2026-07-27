@@ -269,8 +269,12 @@ mod tests {
     #[test]
     fn voyage_gets_asymmetric_input_type() {
         let inp = vec!["hello".to_string()];
-        let (q_in, q_extra) =
-            apply_retrieval_role("https://api.voyageai.com/v1", "voyage-3", EmbeddingRole::Query, &inp);
+        let (q_in, q_extra) = apply_retrieval_role(
+            "https://api.voyageai.com/v1",
+            "voyage-3",
+            EmbeddingRole::Query,
+            &inp,
+        );
         assert_eq!(q_in, inp); // no prefix
         assert_eq!(q_extra.get("input_type").unwrap(), "query");
         let (_, d_extra) = apply_retrieval_role(
@@ -285,10 +289,19 @@ mod tests {
     #[test]
     fn jina_uses_task_and_e5_uses_prefix() {
         let inp = vec!["x".to_string()];
-        let (_, jina) = apply_retrieval_role("https://api.jina.ai/v1", "jina-embeddings-v3", EmbeddingRole::Query, &inp);
+        let (_, jina) = apply_retrieval_role(
+            "https://api.jina.ai/v1",
+            "jina-embeddings-v3",
+            EmbeddingRole::Query,
+            &inp,
+        );
         assert_eq!(jina.get("task").unwrap(), "retrieval.query");
-        let (e5_in, e5_extra) =
-            apply_retrieval_role("http://localhost:1234/v1", "multilingual-e5-large", EmbeddingRole::Document, &inp);
+        let (e5_in, e5_extra) = apply_retrieval_role(
+            "http://localhost:1234/v1",
+            "multilingual-e5-large",
+            EmbeddingRole::Document,
+            &inp,
+        );
         assert_eq!(e5_in, vec!["passage: x".to_string()]);
         assert!(e5_extra.is_empty()); // prefix only, no body field
     }
@@ -298,14 +311,30 @@ mod tests {
         // OpenAI / BGE-M3 / Gemini / local: no prefix, no extra body — a request
         // byte-identical to the pre-D3 behavior (Gemini 400s on unknown fields).
         let inp = vec!["hello".to_string()];
-        for model in ["text-embedding-3-small", "bge-m3", "gemini-embedding-001", "nomic-embed"] {
-            let (q_in, q_extra) =
-                apply_retrieval_role("https://api.openai.com/v1", model, EmbeddingRole::Query, &inp);
-            let (d_in, d_extra) =
-                apply_retrieval_role("https://api.openai.com/v1", model, EmbeddingRole::Document, &inp);
+        for model in [
+            "text-embedding-3-small",
+            "bge-m3",
+            "gemini-embedding-001",
+            "nomic-embed",
+        ] {
+            let (q_in, q_extra) = apply_retrieval_role(
+                "https://api.openai.com/v1",
+                model,
+                EmbeddingRole::Query,
+                &inp,
+            );
+            let (d_in, d_extra) = apply_retrieval_role(
+                "https://api.openai.com/v1",
+                model,
+                EmbeddingRole::Document,
+                &inp,
+            );
             assert_eq!(q_in, inp, "{model} query prefixed");
             assert_eq!(d_in, inp, "{model} doc prefixed");
-            assert!(q_extra.is_empty() && d_extra.is_empty(), "{model} added body fields");
+            assert!(
+                q_extra.is_empty() && d_extra.is_empty(),
+                "{model} added body fields"
+            );
         }
     }
 }

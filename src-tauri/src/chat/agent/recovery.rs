@@ -533,8 +533,16 @@ mod tests {
         // 结构化版本是错误卡片的数据源：kind 供前端选图标（不解析文案）、
         // reason 是人读原因、tool_summaries 让用户知道哪些工作没白做。
         let records = vec![
-            rec("mixer_generate_image", ToolCallStatus::Success, Some("Generated 1 image.")),
-            rec("present_artifacts", ToolCallStatus::Success, Some("Displayed 1 file.")),
+            rec(
+                "mixer_generate_image",
+                ToolCallStatus::Success,
+                Some("Generated 1 image."),
+            ),
+            rec(
+                "present_artifacts",
+                ToolCallStatus::Success,
+                Some("Displayed 1 file."),
+            ),
             rec("failed_tool", ToolCallStatus::Error, Some("不该出现")),
         ];
         let d = assemble_degraded_answer(&records, "zh-CN", FailureKind::Exhausted)

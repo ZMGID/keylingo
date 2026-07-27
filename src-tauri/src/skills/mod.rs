@@ -207,11 +207,7 @@ fn normalize_skill_download_url(url: &str) -> String {
     let trimmed = url.trim();
     if let Ok(parsed) = reqwest::Url::parse(trimmed) {
         if parsed.host_str() == Some("github.com") {
-            let segs: Vec<&str> = parsed
-                .path()
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
+            let segs: Vec<&str> = parsed.path().split('/').filter(|s| !s.is_empty()).collect();
             if segs.len() >= 2 {
                 let owner = segs[0];
                 let repo = segs[1].trim_end_matches(".git");

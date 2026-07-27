@@ -232,8 +232,15 @@ async fn call_image_route(
                 .await
         }
         ImageRoute::Chat => {
-            generate_with_openrouter_chat(state, provider, model, request, retry_attempts, operation)
-                .await
+            generate_with_openrouter_chat(
+                state,
+                provider,
+                model,
+                request,
+                retry_attempts,
+                operation,
+            )
+            .await
         }
         ImageRoute::ImagesApi => Ok((
             generate_with_images_api(state, provider, model, request, retry_attempts, operation)
@@ -636,7 +643,10 @@ async fn generate_with_gemini_native(
                 if images.is_empty() {
                     return Err(err);
                 }
-                eprintln!("Mixer image generation gemini call #{} failed: {err}", idx + 1);
+                eprintln!(
+                    "Mixer image generation gemini call #{} failed: {err}",
+                    idx + 1
+                );
                 break;
             }
         };
@@ -646,7 +656,10 @@ async fn generate_with_gemini_native(
                 if images.is_empty() {
                     return Err(format!("Mixer image generation read body: {err}"));
                 }
-                eprintln!("Mixer image generation gemini read body #{} failed: {err}", idx + 1);
+                eprintln!(
+                    "Mixer image generation gemini read body #{} failed: {err}",
+                    idx + 1
+                );
                 break;
             }
         };
@@ -671,7 +684,10 @@ async fn generate_with_gemini_native(
                 if images.is_empty() {
                     return Err(err);
                 }
-                eprintln!("Mixer image generation gemini parse #{} failed: {err}", idx + 1);
+                eprintln!(
+                    "Mixer image generation gemini parse #{} failed: {err}",
+                    idx + 1
+                );
                 break;
             }
         }
@@ -748,9 +764,7 @@ fn parse_gemini_native_response(value: &Value) -> Result<Vec<GeneratedImage>, St
             continue;
         };
         for part in parts {
-            let Some(inline_data) = part
-                .get("inlineData")
-                .or_else(|| part.get("inline_data"))
+            let Some(inline_data) = part.get("inlineData").or_else(|| part.get("inline_data"))
             else {
                 continue;
             };
@@ -780,7 +794,8 @@ fn parse_gemini_native_response(value: &Value) -> Result<Vec<GeneratedImage>, St
     Ok(images)
 }
 
-async fn fetch_image_url(state: &AppState, url: &str) -> Result<(String, String), String> {    if !(url.starts_with("https://") || url.starts_with("http://")) {
+async fn fetch_image_url(state: &AppState, url: &str) -> Result<(String, String), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Image generation returned a non-http image URL".to_string());
     }
     let response = state
@@ -993,11 +1008,9 @@ mod tests {
                 ] } }
             ]
         });
-        assert!(
-            parse_gemini_native_response(&value)
-                .expect("parse ok")
-                .is_empty()
-        );
+        assert!(parse_gemini_native_response(&value)
+            .expect("parse ok")
+            .is_empty());
         assert_eq!(
             gemini_native_response_text(&value).as_deref(),
             Some("请提供更多细节，例如性别、发色。")
@@ -1154,8 +1167,14 @@ mod tests {
 
     #[test]
     fn alternate_route_swings_chat_and_images_only() {
-        assert_eq!(alternate_route(ImageRoute::Chat), Some(ImageRoute::ImagesApi));
-        assert_eq!(alternate_route(ImageRoute::ImagesApi), Some(ImageRoute::Chat));
+        assert_eq!(
+            alternate_route(ImageRoute::Chat),
+            Some(ImageRoute::ImagesApi)
+        );
+        assert_eq!(
+            alternate_route(ImageRoute::ImagesApi),
+            Some(ImageRoute::Chat)
+        );
         assert_eq!(alternate_route(ImageRoute::GeminiNative), None);
     }
 

@@ -425,7 +425,8 @@ mod tests {
     /// 这里断言的是**实际子进程看到的 env**（跑一个 `env` / `printenv` 子进程读回来），
     /// 而不是 `Command` 的内部状态——后者测了等于没测。
     #[tokio::test]
-    async fn cli_command_strips_parent_session_env_from_the_child() {        // 先在本进程设上，模拟「Kivio 被 Claude Code 拉起」。
+    async fn cli_command_strips_parent_session_env_from_the_child() {
+        // 先在本进程设上，模拟「Kivio 被 Claude Code 拉起」。
         std::env::set_var("CLAUDECODE", "1");
         std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "cli");
         std::env::set_var("CLAUDE_AGENT_SDK_VERSION", "0.0.0");
@@ -437,10 +438,7 @@ mod tests {
         std::env::set_var("KIVIO_SPAWN_TEST_KEEP", "keep-me");
         std::env::set_var("ANTHROPIC_AUTH_TOKEN", "sk-test-token");
 
-        let out = cli_command("/usr/bin/env")
-            .output()
-            .await
-            .expect("run env");
+        let out = cli_command("/usr/bin/env").output().await.expect("run env");
         let text = String::from_utf8_lossy(&out.stdout);
         let has = |key: &str| {
             text.lines()
@@ -448,8 +446,14 @@ mod tests {
         };
 
         assert!(!has("CLAUDECODE"), "CLAUDECODE 泄漏给了子进程");
-        assert!(!has("CLAUDE_CODE_ENTRYPOINT"), "CLAUDE_CODE_ENTRYPOINT 泄漏");
-        assert!(!has("CLAUDE_AGENT_SDK_VERSION"), "CLAUDE_AGENT_SDK_VERSION 泄漏");
+        assert!(
+            !has("CLAUDE_CODE_ENTRYPOINT"),
+            "CLAUDE_CODE_ENTRYPOINT 泄漏"
+        );
+        assert!(
+            !has("CLAUDE_AGENT_SDK_VERSION"),
+            "CLAUDE_AGENT_SDK_VERSION 泄漏"
+        );
         // 这两条是真机回归的锚点：泄漏它们会让 claude 以为凭据由宿主代管、
         // 从而不去读 ~/.claude/settings.json 的 env，报 "Not logged in"。
         assert!(
@@ -593,10 +597,7 @@ mod probe_tests {
 
     impl Drop for Fixtures {
         fn drop(&mut self) {
-            let _ = fs::set_permissions(
-                self.0.join("noexec"),
-                fs::Permissions::from_mode(0o755),
-            );
+            let _ = fs::set_permissions(self.0.join("noexec"), fs::Permissions::from_mode(0o755));
             let _ = fs::remove_dir_all(&self.0);
         }
     }
@@ -767,26 +768,26 @@ mod probe_tests {
     async fn resolve_binary_probes_real_clis() {
         // 第二遍走缓存，必须显著快于第一遍——这是 <500ms 热路径预算的依据。
         for round in ["cold", "warm"] {
-        eprintln!("--- {round} ---");
-        for def in crate::external_agents::registry::AGENT_DEFS {
-            let started = std::time::Instant::now();
-            let resolved = resolve_binary(def).await;
-            // 打印 bin + 全部 fallback 的候选总数（只打 def.bin 会误导：
-            // 如 opencode 的 def.bin 是 `opencode-cli`，实际命中的是 fallback `opencode`）。
-            let mut candidates = 0usize;
-            for name in std::iter::once(def.bin).chain(def.fallback_bins.iter().copied()) {
-                candidates += which_all(name).await.len();
+            eprintln!("--- {round} ---");
+            for def in crate::external_agents::registry::AGENT_DEFS {
+                let started = std::time::Instant::now();
+                let resolved = resolve_binary(def).await;
+                // 打印 bin + 全部 fallback 的候选总数（只打 def.bin 会误导：
+                // 如 opencode 的 def.bin 是 `opencode-cli`，实际命中的是 fallback `opencode`）。
+                let mut candidates = 0usize;
+                for name in std::iter::once(def.bin).chain(def.fallback_bins.iter().copied()) {
+                    candidates += which_all(name).await.len();
+                }
+                eprintln!(
+                    "{:10} candidates={candidates} {:>5}ms -> {}",
+                    def.id,
+                    started.elapsed().as_millis(),
+                    resolved
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(not installed)".to_string()),
+                );
             }
-            eprintln!(
-                "{:10} candidates={candidates} {:>5}ms -> {}",
-                def.id,
-                started.elapsed().as_millis(),
-                resolved
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(not installed)".to_string()),
-            );
-        }
         }
     }
 }

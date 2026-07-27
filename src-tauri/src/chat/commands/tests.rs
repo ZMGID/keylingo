@@ -784,7 +784,10 @@ fn normalize_segments_does_not_duplicate_toolloop_only_answer_text() {
         1,
         "answer text must not be duplicated into a second segment"
     );
-    assert_eq!(content_from_segments(&segments).as_deref(), Some(&*recovered));
+    assert_eq!(
+        content_from_segments(&segments).as_deref(),
+        Some(&*recovered)
+    );
 }
 
 #[test]

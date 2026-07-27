@@ -1134,7 +1134,7 @@ mod tests {
             }),
             Some(&state),
             None,
-            )
+        )
         .await
         .expect("background run_command should return immediately");
 
@@ -1151,7 +1151,8 @@ mod tests {
         assert!(started.contains("bash_output"));
 
         // Registry insert is observable immediately.
-        let listed = list_background(&state, &serde_json::json!({}), None).expect("list_background");
+        let listed =
+            list_background(&state, &serde_json::json!({}), None).expect("list_background");
         assert!(listed.contains(&job_id), "job not listed: {listed}");
 
         // Poll bash_output until the process exits; assert captured output + code.
@@ -1211,8 +1212,7 @@ mod tests {
     fn background_jobs_are_scoped_to_their_conversation() {
         let state = bg_test_state();
         let seed = |job_id: &str, conv: Option<&str>| {
-            let log_path =
-                std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
+            let log_path = std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
             std::fs::write(&log_path, b"x").expect("seed log");
             state.register_background_command(BackgroundCommand {
                 job_id: job_id.to_string(),
@@ -1309,7 +1309,7 @@ mod tests {
             }),
             Some(&state),
             None,
-            )
+        )
         .await
         .expect("background spawn");
         let job_id = started
@@ -1318,7 +1318,8 @@ mod tests {
             .map(str::to_string)
             .expect("job_id");
 
-        let killed = kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
+        let killed =
+            kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(killed.contains("killed"), "{killed}");
 
         // Status is Killed and stays Killed even after the waiter reaps the child.
@@ -1330,7 +1331,8 @@ mod tests {
         );
 
         // Killing an already-terminal job is a no-op (no error).
-        let again = kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
+        let again =
+            kill_background(&state, &serde_json::json!({ "job_id": job_id }), None).unwrap();
         assert!(again.contains("already finished"), "{again}");
     }
 
@@ -1369,7 +1371,7 @@ mod tests {
             }),
             Some(&state),
             None,
-            )
+        )
         .await
         .expect("background spawn");
         let job_id = started
@@ -1418,7 +1420,7 @@ mod tests {
             }),
             Some(&state),
             None,
-            )
+        )
         .await
         .expect("background spawn");
         let job_id = started
@@ -1686,7 +1688,7 @@ mod tests {
             &serde_json::json!({ "command": "python3 -m pip install matplotlib" }),
             None,
             None,
-            )
+        )
         .await
         .expect_err("pip installs should be blocked");
 
@@ -1716,7 +1718,7 @@ mod tests {
                 &serde_json::json!({ "command": "cat" }),
                 None,
                 None,
-                ),
+            ),
         )
         .await
         .expect("cat should return promptly because stdin is null (EOF), not hang");

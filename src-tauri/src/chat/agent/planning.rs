@@ -389,7 +389,7 @@ pub(crate) async fn planning_step(
                             .segment(&segment)
                             .emit_done("done")
                             .outcome("recovered")
-                    .degraded(state.degraded.take())
+                            .degraded(state.degraded.take())
                             .finish(
                                 std::mem::take(&mut state.segment_builder),
                                 &state.planning_reasoning_parts,

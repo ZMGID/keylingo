@@ -605,10 +605,7 @@ fn parse_codex_mcp(home: &Path) -> CliMcpGroup {
 
 /// 读 `~/.config/opencode/opencode.json` 的 `mcp.*`（local→stdio / remote→http）。
 fn parse_opencode_mcp(home: &Path) -> CliMcpGroup {
-    let path = home
-        .join(".config")
-        .join("opencode")
-        .join("opencode.json");
+    let path = home.join(".config").join("opencode").join("opencode.json");
     if !path.exists() {
         return CliMcpGroup::default();
     }
@@ -1437,11 +1434,8 @@ mod tests {
     fn warmup_selection_covers_all_eligible_or_the_requested_subset() {
         let mut disabled = enabled_server("off");
         disabled.enabled = false;
-        let settings = settings_with_servers(vec![
-            enabled_server("a"),
-            enabled_server("b"),
-            disabled,
-        ]);
+        let settings =
+            settings_with_servers(vec![enabled_server("a"), enabled_server("b"), disabled]);
 
         // None = 全部 eligible（停用的不预热）
         let all = select_warmup_servers(&settings, None);
@@ -1540,12 +1534,10 @@ while True:
         async fn slow_server_is_bounded_and_fast_server_tools_survive() {
             let script = write_fast_fake_server();
             let state = test_app_state();
-            let settings =
-                settings_with_servers(vec![fast_server(&script), hanging_server()]);
+            let settings = settings_with_servers(vec![fast_server(&script), hanging_server()]);
 
             let started = std::time::Instant::now();
-            let (tools, unavailable) =
-                collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
+            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
             let elapsed = started.elapsed();
 
             assert!(
@@ -1584,8 +1576,7 @@ while True:
             );
             let settings = settings_with_servers(vec![server]);
 
-            let (tools, unavailable) =
-                collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
+            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
 
             assert!(
                 tools.iter().any(|tool| tool.id == "mcp__hang__cached_tool"),
@@ -1625,10 +1616,8 @@ while True:
     }
 
     fn temp_home(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kivio-cli-import-{tag}-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kivio-cli-import-{tag}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("create temp home");
         dir
     }
@@ -1661,7 +1650,10 @@ while True:
         assert_eq!(server.transport, "stdio");
         assert_eq!(server.command, "codegraph");
         assert_eq!(server.args, vec!["mcp".to_string()]);
-        assert_eq!(server.env.get("CODEGRAPH_DB").map(String::as_str), Some("/tmp/cg.db"));
+        assert_eq!(
+            server.env.get("CODEGRAPH_DB").map(String::as_str),
+            Some("/tmp/cg.db")
+        );
         assert!(!server.enabled);
         assert!(server.connector_id.is_none());
 
@@ -1695,7 +1687,10 @@ FOO = "bar"
         assert_eq!(server.transport, "stdio");
         assert_eq!(server.command, "node");
         assert_eq!(server.args, vec!["--experimental-repl-await".to_string()]);
-        assert_eq!(server.env.get("NODE_ENV").map(String::as_str), Some("development"));
+        assert_eq!(
+            server.env.get("NODE_ENV").map(String::as_str),
+            Some("development")
+        );
         assert_eq!(server.env.get("FOO").map(String::as_str), Some("bar"));
 
         fs::remove_dir_all(&home).ok();
@@ -1741,10 +1736,17 @@ FOO = "bar"
         );
         assert_eq!(local.env.get("DEBUG").map(String::as_str), Some("1"));
 
-        let remote = group.servers.iter().find(|s| s.name == "remote-svc").unwrap();
+        let remote = group
+            .servers
+            .iter()
+            .find(|s| s.name == "remote-svc")
+            .unwrap();
         assert_eq!(remote.transport, "streamable_http");
         assert_eq!(remote.url, "https://mcp.example.com/mcp");
-        assert_eq!(remote.headers.get("Authorization").map(String::as_str), Some("Bearer x"));
+        assert_eq!(
+            remote.headers.get("Authorization").map(String::as_str),
+            Some("Bearer x")
+        );
 
         fs::remove_dir_all(&home).ok();
     }

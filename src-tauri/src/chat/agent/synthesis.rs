@@ -440,12 +440,12 @@ pub(crate) async fn recover_synthesis(
         RecoveryAction::DegradeToGathered => {
             // 结构化留存一份供前端渲染成独立卡片；返回值仍是同样的纯文本，
             // 兼容旧前端 / 外部 CLI（它们只读 content）。
-            let degraded = recovery::assemble_degraded_answer(
-                &state.tool_records,
-                &config.language,
-                kind,
-            );
-            let text = degraded.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+            let degraded =
+                recovery::assemble_degraded_answer(&state.tool_records, &config.language, kind);
+            let text = degraded
+                .as_ref()
+                .map(|d| d.text.clone())
+                .unwrap_or_default();
             state.degraded = degraded;
             text
         }
@@ -506,7 +506,10 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
             &config.language,
             recovery::FailureKind::ContextOverflow,
         );
-        let text = degraded.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+        let text = degraded
+            .as_ref()
+            .map(|d| d.text.clone())
+            .unwrap_or_default();
         state.degraded = degraded;
         text
     }
@@ -560,7 +563,10 @@ async fn recover_remediate(
         // 去敏重试仍失败 → 确定性兜底(decide 的 already_remediated 臂)。
         let degraded =
             recovery::assemble_degraded_answer(&state.tool_records, &config.language, kind);
-        let text = degraded.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+        let text = degraded
+            .as_ref()
+            .map(|d| d.text.clone())
+            .unwrap_or_default();
         state.degraded = degraded;
         text
     }

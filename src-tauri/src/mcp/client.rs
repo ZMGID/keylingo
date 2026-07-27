@@ -348,7 +348,12 @@ impl StreamableHttpMcpClient {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
             let text = response.text().await.unwrap_or_default();
-            return Err(classify_http_error("notify", status, www_auth.as_deref(), &text));
+            return Err(classify_http_error(
+                "notify",
+                status,
+                www_auth.as_deref(),
+                &text,
+            ));
         }
         Ok(())
     }
@@ -893,8 +898,10 @@ mod tests {
         // 401 且无质询头 → 仍视为需要授权（部分服务器省略该头）
         assert!(classify_http_error("request", 401, None, "body").starts_with("OAUTH_REQUIRED:"));
         // 401 但非 Bearer 质询（Basic）→ 不触发
-        assert!(!classify_http_error("notify", 401, Some("Basic realm=x"), "body")
-            .starts_with("OAUTH_REQUIRED:"));
+        assert!(
+            !classify_http_error("notify", 401, Some("Basic realm=x"), "body")
+                .starts_with("OAUTH_REQUIRED:")
+        );
         // 非 401 即使带 Bearer 也不触发
         assert!(!classify_http_error("request", 500, Some("Bearer"), "oops")
             .starts_with("OAUTH_REQUIRED:"));

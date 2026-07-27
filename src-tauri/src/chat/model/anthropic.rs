@@ -325,13 +325,7 @@ impl AnthropicMessagesProvider<'_> {
             reason: finish_reason.clone(),
             full: full.clone(),
         })?;
-        let mut output = stream_output(
-            full,
-            reasoning_full,
-            tool_calls,
-            finish_reason,
-            usage,
-        );
+        let mut output = stream_output(full, reasoning_full, tool_calls, finish_reason, usage);
         output.web_search = web_search;
         Ok(output)
     }
@@ -631,7 +625,10 @@ fn ensure_tool_result_pairing(messages: &mut Vec<Value>) {
         if messages.get(i + 1).map(|m| is_role(m, "user")) != Some(true) {
             // 下一条不存在或不是 user:插入一条含全部合成结果的 user 消息。
             let blocks: Vec<Value> = tool_use_ids.iter().map(|id| synthetic(id)).collect();
-            messages.insert(i + 1, serde_json::json!({ "role": "user", "content": blocks }));
+            messages.insert(
+                i + 1,
+                serde_json::json!({ "role": "user", "content": blocks }),
+            );
             i += 2;
             continue;
         }
@@ -642,7 +639,8 @@ fn ensure_tool_result_pairing(messages: &mut Vec<Value>) {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let is_tool_result = |b: &Value| b.get("type").and_then(Value::as_str) == Some("tool_result");
+        let is_tool_result =
+            |b: &Value| b.get("type").and_then(Value::as_str) == Some("tool_result");
         let matched_ids: std::collections::HashSet<&str> = existing
             .iter()
             .filter(|b| is_tool_result(b))
@@ -1175,7 +1173,8 @@ fn normalize_anthropic_schema(schema: Value) -> Value {
             obj.remove("allOf");
             obj.remove("anyOf");
             // Anthropic requires a properties map even when empty.
-            obj.entry("properties").or_insert_with(|| serde_json::json!({}));
+            obj.entry("properties")
+                .or_insert_with(|| serde_json::json!({}));
         }
         return result;
     }
@@ -1311,7 +1310,10 @@ mod tests {
             "additionalProperties": false
         });
         let out = normalize_anthropic_schema(schema);
-        assert!(out.get("anyOf").is_none(), "top-level anyOf must be dropped");
+        assert!(
+            out.get("anyOf").is_none(),
+            "top-level anyOf must be dropped"
+        );
         assert!(out.get("oneOf").is_none());
         assert!(out.get("allOf").is_none());
         assert!(out.get("properties").is_some());
@@ -1371,7 +1373,10 @@ mod tests {
         assert_eq!(injected[0]["type"], "tool_result");
         assert_eq!(injected[0]["tool_use_id"], "toolu_x");
         assert_eq!(injected[0]["is_error"], true);
-        assert!(injected.iter().any(|b| b["type"] == "text"), "user text preserved");
+        assert!(
+            injected.iter().any(|b| b["type"] == "text"),
+            "user text preserved"
+        );
     }
 
     #[test]
@@ -1453,14 +1458,18 @@ mod tests {
 
         // Every tool_use id must have a tool_result in the immediately following turn.
         for (i, msg) in wire.iter().enumerate() {
-            let Some(blocks) = msg["content"].as_array() else { continue };
+            let Some(blocks) = msg["content"].as_array() else {
+                continue;
+            };
             for block in blocks {
                 if block["type"] == "tool_use" {
                     let id = block["id"].as_str().unwrap();
                     let next = &wire[i + 1]["content"];
-                    let paired = next.as_array().unwrap().iter().any(|b| {
-                        b["type"] == "tool_result" && b["tool_use_id"] == id
-                    });
+                    let paired = next
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|b| b["type"] == "tool_result" && b["tool_use_id"] == id);
                     assert!(paired, "tool_use {id} must be paired in the next turn");
                 }
             }

@@ -124,8 +124,8 @@ async fn live_retrieval_stack_e2e() {
         1,
     )
     .await
-        .unwrap()
-        .remove(0);
+    .unwrap()
+    .remove(0);
 
     let hits = super::store::hybrid_search(&conn, &qvec, &query, 5, 1.0, 1.0).unwrap();
     assert!(!hits.is_empty(), "hybrid search returned no hits");

@@ -67,13 +67,7 @@ fn enumerate_system_fonts() -> Vec<String> {
         let hdc = GetDC(None);
         let mut lf = LOGFONTW::default();
         lf.lfCharSet = DEFAULT_CHARSET;
-        EnumFontFamiliesExW(
-            hdc,
-            &lf,
-            Some(cb),
-            LPARAM(&mut set as *mut _ as isize),
-            0,
-        );
+        EnumFontFamiliesExW(hdc, &lf, Some(cb), LPARAM(&mut set as *mut _ as isize), 0);
         ReleaseDC(None, hdc);
     }
     set.into_iter().collect()

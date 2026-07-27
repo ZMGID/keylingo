@@ -96,7 +96,11 @@ pub fn provider_label(provider: WebSearchProvider) -> &'static str {
 /// 已给默认值，这里兜「用户手动清空输入框」的情况）。
 fn normalized_base_url<'a>(configured: &'a str, fallback: &'a str) -> &'a str {
     let trimmed = configured.trim().trim_end_matches('/');
-    if trimmed.is_empty() { fallback } else { trimmed }
+    if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    }
 }
 
 pub async fn search_web(
@@ -145,14 +149,7 @@ async fn search_ollama(
     let base = normalized_base_url(&config.ollama_base_url, "https://ollama.com");
     let url = format!("{base}/api/web_search");
     let response = send_with_retry("Ollama search", retry_attempts, || {
-        with_standard_request_timeout(
-            state
-                .http
-                .post(&url)
-                .bearer_auth(api_key)
-                .json(&body),
-        )
-        .send()
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
     })
     .await?;
 
@@ -357,14 +354,7 @@ async fn search_tavily(
     let base = normalized_base_url(&config.tavily_base_url, "https://api.tavily.com");
     let url = format!("{base}/search");
     let response = send_with_retry("Tavily search", retry_attempts, || {
-        with_standard_request_timeout(
-            state
-                .http
-                .post(&url)
-                .bearer_auth(api_key)
-                .json(&body),
-        )
-        .send()
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
     })
     .await?;
 

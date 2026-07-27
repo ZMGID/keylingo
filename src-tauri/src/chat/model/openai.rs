@@ -12,7 +12,7 @@ use crate::utils;
 
 use super::{
     openai_messages_from_generate_request, pending_tool_calls_from_openai_message,
-    stream_read_error, GenerateOutput, GeneratedImageData, GenerateRequest, LanguageModelProvider,
+    stream_read_error, GenerateOutput, GenerateRequest, GeneratedImageData, LanguageModelProvider,
     ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink,
 };
 
