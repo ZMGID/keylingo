@@ -14,7 +14,7 @@ import { artifactDataUrl } from './artifacts'
 import { loadArtifactDataUrl } from './attachmentPreview'
 import type { KbHitView } from './knowledgeBaseHits'
 import { remarkCitations } from './citations'
-import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageContextMenu'
+import { ChatInlineImage } from './ChatInlineImage'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -756,7 +756,6 @@ function MarkdownArtifactImage({
     inline ||
     (isExternalOrAbsoluteImageSrc(rawSrc) ? rawSrc : '')
   const [src, setSrc] = useState(initial)
-  const [menuAnchor, setMenuAnchor] = useState<ChatImageMenuAnchor | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -782,34 +781,13 @@ function MarkdownArtifactImage({
   if (!src) return null
   const openViewer = () => onImageClick?.(src, alt, rawSrc)
   return (
-    <>
-      <button
-        type="button"
-        className="my-3 block max-w-full cursor-zoom-in rounded-md p-0 text-left"
-        onClick={openViewer}
-        onContextMenu={(event) => {
-          event.preventDefault()
-          setMenuAnchor({ left: event.clientX, top: event.clientY })
-        }}
-        aria-label="预览图片"
-      >
-        <img
-          src={src}
-          alt={alt}
-          loading="lazy"
-          className="max-h-[420px] max-w-full rounded-md border border-neutral-200/90 bg-white object-contain dark:border-neutral-700 dark:bg-neutral-900"
-        />
-      </button>
-      {menuAnchor ? (
-        <ChatImageContextMenu
-          anchor={menuAnchor}
-          src={src}
-          name={artifact?.name ?? rawSrc}
-          onOpenViewer={openViewer}
-          onClose={() => setMenuAnchor(null)}
-        />
-      ) : null}
-    </>
+    <ChatInlineImage
+      src={src}
+      alt={alt}
+      name={artifact?.name ?? rawSrc}
+      onOpenViewer={openViewer}
+      className="my-3"
+    />
   )
 }
 

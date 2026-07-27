@@ -38,7 +38,7 @@ import { isExecutableAgentPlanText } from './agentPlan'
 import { artifactDataUrl, isImageArtifact } from './artifacts'
 import { loadArtifactDataUrl } from './attachmentPreview'
 import { openChatImageViewer } from './imageViewer'
-import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageContextMenu'
+import { ChatInlineImage } from './ChatInlineImage'
 import { ReasoningBlock } from './ReasoningBlock'
 import { ModelIcon } from './ModelIcon'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -136,7 +136,6 @@ function ArtifactImage({
   const path = (artifact.path ?? '').trim()
   // 有 path 时 data_url 通常是 256px 缩略图（落盘外置后）；聊天区应显示整图，缩略图仅作秒显占位。
   const [src, setSrc] = useState<string>(inline)
-  const [menuAnchor, setMenuAnchor] = useState<ChatImageMenuAnchor | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -171,32 +170,12 @@ function ArtifactImage({
     })
   return (
     <figure className="m-0">
-      <button
-        type="button"
-        className="block max-w-full cursor-zoom-in rounded-md p-0 text-left"
-        onClick={openViewer}
-        onContextMenu={(event) => {
-          event.preventDefault()
-          setMenuAnchor({ left: event.clientX, top: event.clientY })
-        }}
-        aria-label="预览图片"
-      >
-        <img
-          src={src}
-          alt={label || name}
-          loading="lazy"
-          className="max-h-[420px] max-w-full rounded-md border border-neutral-200/90 bg-white object-contain dark:border-neutral-700 dark:bg-neutral-900"
-        />
-      </button>
-      {menuAnchor ? (
-        <ChatImageContextMenu
-          anchor={menuAnchor}
-          src={src}
-          name={artifact.name}
-          onOpenViewer={openViewer}
-          onClose={() => setMenuAnchor(null)}
-        />
-      ) : null}
+      <ChatInlineImage
+        src={src}
+        alt={label || name}
+        name={artifact.name}
+        onOpenViewer={openViewer}
+      />
       {label ? (
         <figcaption className="mt-1 text-[11px] text-neutral-400 dark:text-neutral-500">
           {label}
