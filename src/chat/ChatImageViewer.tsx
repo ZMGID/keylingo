@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, ImageIcon, Minus, Plus, RotateCcw } from 'lucide-react'
+import { save } from '@tauri-apps/plugin-dialog'
+import { ArrowLeft, Check, Clipboard, Download, ImageIcon, Minus, Plus, RotateCcw } from 'lucide-react'
 import type { ChatImageViewerItem } from './imageViewer'
 import { loadArtifactDataUrl } from './attachmentPreview'
+import { base64FromDataUrl, imageExtension } from './imageData'
+import { api } from '../api/tauri'
 import { IconButton } from '../components/Button'
 
 type ChatImageViewerProps = {
@@ -13,7 +16,34 @@ export function ChatImageViewer({ item, onClose }: ChatImageViewerProps) {
   const [zoom, setZoom] = useState(1)
   // 先显示缩略图(item.src),若有 path 则懒加载全分辨率原图并替换。
   const [fullSrc, setFullSrc] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
   const title = item.name || item.alt || '图片附件'
+  // 复制/另存都用当前实际显示的图（有原图就用原图，别复制成缩略图）。
+  const activeSrc = fullSrc ?? item.src
+  const base64 = base64FromDataUrl(activeSrc)
+
+  const handleCopy = async () => {
+    if (!base64) return
+    const result = await api.lensCopyImageToClipboard(base64)
+    if (!result.success) {
+      window.alert(`复制失败：${result.error ?? '未知错误'}`)
+      return
+    }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1200)
+  }
+
+  const handleSave = async () => {
+    if (!base64) return
+    const ext = imageExtension(activeSrc, item.name)
+    const path = await save({
+      defaultPath: item.name || `image.${ext}`,
+      filters: [{ name: 'Image', extensions: [ext] }],
+    })
+    if (!path) return
+    const result = await api.lensSaveAnnotatedPng(base64, path)
+    if (!result.success) window.alert(`保存失败：${result.error ?? '未知错误'}`)
+  }
 
   useEffect(() => {
     setZoom(1)
@@ -66,6 +96,21 @@ export function ChatImageViewer({ item, onClose }: ChatImageViewerProps) {
           <div className="truncate text-[11px] text-neutral-400 dark:text-neutral-500">
             Esc 返回对话
           </div>
+        </div>
+        <div
+          className="flex items-center gap-1"
+          data-tauri-drag-region="false"
+        >
+          <IconButton size="md" onClick={() => void handleCopy()} disabled={!base64} label="复制图片">
+            {copied ? (
+              <Check size={17} strokeWidth={2} className="chat-motion-pop" />
+            ) : (
+              <Clipboard size={17} strokeWidth={1.85} />
+            )}
+          </IconButton>
+          <IconButton size="md" onClick={() => void handleSave()} disabled={!base64} label="图片另存为">
+            <Download size={17} strokeWidth={1.85} />
+          </IconButton>
         </div>
         <div
           className="flex items-center gap-1 rounded-full border border-neutral-200 bg-neutral-50 p-1 dark:border-neutral-700 dark:bg-neutral-900"
