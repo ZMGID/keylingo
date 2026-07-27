@@ -1610,7 +1610,8 @@ async fn compact_conversation_inner(
     let compressed_message_count = source_message_ids.len();
 
     // Deterministic files-touched ledger over the covered history (see file_ledger).
-    let file_ledger = super::file_ledger::build_for_boundary(conversation, &source_until_message_id);
+    let file_ledger =
+        super::file_ledger::build_for_boundary(conversation, &source_until_message_id);
 
     conversation.context_state.summary = Some(ConversationContextSummary {
         id: format!("ctxsum_{}", uuid::Uuid::new_v4()),
@@ -1748,6 +1749,7 @@ mod tests {
             provider_id: None,
             model: None,
             timestamp: 0,
+            degraded: None,
         }
     }
 

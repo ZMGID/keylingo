@@ -127,6 +127,7 @@ pub(crate) async fn synthesis_step(
                         .segment(&response_segment)
                         .emit_done("done")
                         .outcome("recovered")
+                        .degraded(state.degraded.take())
                         .finish(
                             std::mem::take(&mut state.segment_builder),
                             &state.planning_reasoning_parts,
@@ -265,6 +266,7 @@ pub(crate) async fn synthesis_step(
                         .segment(&response_segment)
                         .emit_done("done")
                         .outcome("recovered")
+                        .degraded(state.degraded.take())
                         .finish(
                             std::mem::take(&mut state.segment_builder),
                             &state.planning_reasoning_parts,
@@ -348,7 +350,9 @@ pub(crate) async fn synthesis_step(
     // 与 planning 同款互斥：流式 take_card 落 Success 终态卡；非流式才用 synth_web_search 合成。
     if let Some(tracker) = synth_web_search_tracker.as_ref() {
         if let Some((record, segment)) = tracker.take_card() {
-            state.segment_builder.append_existing_segments(vec![segment]);
+            state
+                .segment_builder
+                .append_existing_segments(vec![segment]);
             state.tool_records.push(record);
         }
     }
@@ -433,11 +437,18 @@ pub(crate) async fn recover_synthesis(
     // 都从 false 起算;真正的「只重试一次」守门在各分支内部用本地标志实现。
     match recovery::decide(kind, has_results, false, false) {
         RecoveryAction::Surface => String::new(),
-        RecoveryAction::DegradeToGathered => recovery::assemble_results_from_tool_records(
-            &state.tool_records,
-            &config.language,
-            kind,
-        ),
+        RecoveryAction::DegradeToGathered => {
+            // 结构化留存一份供前端渲染成独立卡片；返回值仍是同样的纯文本，
+            // 兼容旧前端 / 外部 CLI（它们只读 content）。
+            let degraded = recovery::assemble_degraded_answer(
+                &state.tool_records,
+                &config.language,
+                kind,
+            );
+            let text = degraded.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+            state.degraded = degraded;
+            text
+        }
         RecoveryAction::CompactAndRetry => recover_overflow_compact_and_retry(env, state).await,
         RecoveryAction::Remediate => recover_remediate(env, state, kind).await,
     }
@@ -490,11 +501,14 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
         text
     } else {
         // 压缩重试仍失败 → 确定性兜底(decide 的 overflow_recovery_attempted=true 臂)。
-        recovery::assemble_results_from_tool_records(
+        let degraded = recovery::assemble_degraded_answer(
             &state.tool_records,
             &config.language,
             recovery::FailureKind::ContextOverflow,
-        )
+        );
+        let text = degraded.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+        state.degraded = degraded;
+        text
     }
 }
 
@@ -544,7 +558,11 @@ async fn recover_remediate(
         text
     } else {
         // 去敏重试仍失败 → 确定性兜底(decide 的 already_remediated 臂)。
-        recovery::assemble_results_from_tool_records(&state.tool_records, &config.language, kind)
+        let degraded =
+            recovery::assemble_degraded_answer(&state.tool_records, &config.language, kind);
+        let text = degraded.as_ref().map(|d| d.text.clone()).unwrap_or_default();
+        state.degraded = degraded;
+        text
     }
 }
 

@@ -90,6 +90,9 @@ pub(crate) struct RunState {
     /// （planning/synthesis）产出的 `GenerateOutput.images`，run 结束时由 `attach_usage`
     /// 挂到 `AgentRunResult.images` → reply 落成 assistant 消息级 artifacts。
     pub(crate) generated_images: Vec<crate::chat::model::GeneratedImageData>,
+    /// 本轮若走了降级兜底（模型失败但已有工具结果），这里带结构化描述，
+    /// 最终落到 `ChatMessage.degraded` 让前端渲染成独立卡片而非混进正文。
+    pub(crate) degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
 }
 
 /// 连续「需要压缩但压不下去」多少轮后停止工具循环、优雅收尾（Gap 2，Layer 3 anti-thrashing）。
@@ -155,6 +158,7 @@ pub async fn run_agent_loop(
         pending_compaction_boundary: None,
         pending_compaction_summary: None,
         generated_images: Vec::new(),
+        degraded: None,
     };
     // 把助手的技能白名单冻结进 skill_cache,作为 skill_activate 执行派发的硬 gate。
     // 无助手 = None = 不限(全局行为)。

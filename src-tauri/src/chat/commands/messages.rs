@@ -186,6 +186,7 @@ pub(super) fn build_assistant_message(
         provider_id,
         model,
         timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
     }
 }
 
@@ -237,6 +238,8 @@ pub(crate) async fn push_assistant_message(
     usage: Option<crate::chat::model::ModelUsage>,
     anchor_usage: Option<crate::chat::model::ModelUsage>,
     agent_plan: Option<AgentPlanState>,
+    // 降级兜底的结构化描述；Some 时前端渲染成独立错误卡片。
+    degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
 ) -> Result<(), String> {
     let message = build_assistant_message(
         message_id,
@@ -255,6 +258,8 @@ pub(crate) async fn push_assistant_message(
         // 单模型落盘路径不带 group 信息（行为不变）。
         None,
     );
+    let mut message = message;
+    message.degraded = degraded;
     let stored_content = message.content.clone();
     let generated_title = if let Some(user_content) = title_from_first_user {
         if conversation.messages.len() == 1 && conversation.title == "新对话" {
@@ -376,6 +381,7 @@ pub(super) fn persist_partial_assistant_snapshot(
         provider_id: None,
         model: None,
         timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
     };
     upsert_assistant_message(&mut conversation, draft);
     conversation.updated_at = chrono::Local::now().timestamp();

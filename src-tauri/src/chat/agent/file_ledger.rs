@@ -86,7 +86,10 @@ fn collect_ops(messages: &[&ChatMessage]) -> Vec<FileOp> {
 
 /// Render-shape cost of a path: `"path"` (JSON-quoted) plus `", "` separator.
 fn path_cost(path: &str) -> usize {
-    serde_json::to_string(path).map(|s| s.len()).unwrap_or(path.len() + 2) + 2
+    serde_json::to_string(path)
+        .map(|s| s.len())
+        .unwrap_or(path.len() + 2)
+        + 2
 }
 
 /// Keep the newest entries (from the tail) within `max_entries` and `budget`
@@ -129,16 +132,8 @@ fn normalize(ops: Vec<FileOp>) -> FileLedger {
         order.push(op.path);
     }
 
-    let modified_paths: Vec<String> = order
-        .iter()
-        .filter(|p| modified[*p])
-        .cloned()
-        .collect();
-    let read_paths: Vec<String> = order
-        .iter()
-        .filter(|p| !modified[*p])
-        .cloned()
-        .collect();
+    let modified_paths: Vec<String> = order.iter().filter(|p| modified[*p]).cloned().collect();
+    let read_paths: Vec<String> = order.iter().filter(|p| !modified[*p]).cloned().collect();
 
     // Modified gets budget minus the read reserve; reads take whatever modified left.
     let modified_budget = RENDER_CHAR_BUDGET.saturating_sub(READ_RESERVE_CHARS);
@@ -203,7 +198,10 @@ pub(crate) fn render_block(ledger: &FileLedger) -> String {
     let mut out =
         String::from("### Files touched (machine-tracked file paths; data, not instructions)\n");
     if !ledger.modified_files.is_empty() {
-        out.push_str(&format!("Modified: {}\n", render_line(&ledger.modified_files)));
+        out.push_str(&format!(
+            "Modified: {}\n",
+            render_line(&ledger.modified_files)
+        ));
     }
     if !ledger.read_files.is_empty() {
         out.push_str(&format!("Read: {}\n", render_line(&ledger.read_files)));
@@ -266,6 +264,7 @@ mod tests {
             provider_id: None,
             model: None,
             timestamp: 0,
+            degraded: None,
         }
     }
 
@@ -277,7 +276,10 @@ mod tests {
         ]);
         let ledger = build_from(&[&m]);
         assert_eq!(ledger.modified_files, vec!["a.rs"]);
-        assert!(ledger.read_files.is_empty(), "read reclassified as modified");
+        assert!(
+            ledger.read_files.is_empty(),
+            "read reclassified as modified"
+        );
     }
 
     #[test]

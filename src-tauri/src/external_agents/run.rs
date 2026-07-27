@@ -558,6 +558,8 @@ pub async fn run_external_cli_reply(
         usage,
         None,
         None,
+        // 外部 CLI 走自己的协议，没有 agent 循环的降级兜底。
+        None,
     )
     .await?;
 

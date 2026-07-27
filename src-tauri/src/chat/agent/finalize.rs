@@ -30,6 +30,8 @@ pub(crate) struct RunResultBuilder<'a> {
     emit_done_reason: Option<&'static str>,
     push_api_always: bool,
     outcome: &'static str,
+    /// 降级兜底的结构化描述（仅降级路径设置）。透传到 `AgentRunResult.degraded`。
+    degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
 }
 
 impl<'a> RunResultBuilder<'a> {
@@ -45,6 +47,7 @@ impl<'a> RunResultBuilder<'a> {
             emit_done_reason: None,
             push_api_always: false,
             outcome: "completed",
+            degraded: None,
         }
     }
 
@@ -85,6 +88,15 @@ impl<'a> RunResultBuilder<'a> {
 
     pub(crate) fn outcome(mut self, outcome: &'static str) -> Self {
         self.outcome = outcome;
+        self
+    }
+
+    /// 挂上降级兜底的结构化描述，让前端渲染成独立错误卡片。
+    pub(crate) fn degraded(
+        mut self,
+        degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
+    ) -> Self {
+        self.degraded = degraded;
         self
     }
 
@@ -153,6 +165,7 @@ impl<'a> RunResultBuilder<'a> {
             compaction_boundary: None,
             compaction_summary: None,
             images: Vec::new(),
+            degraded: self.degraded,
         }
     }
 }
@@ -330,6 +343,7 @@ pub(crate) fn finalize_planning_final(
         compaction_boundary: None,
         compaction_summary: None,
         images: Vec::new(),
+        degraded: state.degraded.take(),
     })
 }
 
@@ -375,6 +389,7 @@ pub(crate) fn finalize_completed(
         compaction_boundary: None,
         compaction_summary: None,
         images: Vec::new(),
+        degraded: state.degraded.take(),
     }
 }
 
@@ -499,6 +514,7 @@ pub(crate) fn cancelled_tool_round_run_result(
         compaction_boundary: None,
         compaction_summary: None,
         images: Vec::new(),
+        degraded: None,
     }
 }
 

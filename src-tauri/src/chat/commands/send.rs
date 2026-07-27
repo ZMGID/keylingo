@@ -118,6 +118,7 @@ pub(crate) async fn chat_send_message(
         provider_id: None,
         model: None,
         timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
     };
 
     conversation.messages.push(user_message.clone());

@@ -910,6 +910,7 @@ fn editing_assistant_reply_replaces_final_text_segments_only() {
         provider_id: None,
         model: None,
         timestamp: 1,
+        degraded: None,
     };
 
     replace_final_text_segments_for_edit(&mut message, "new final");
@@ -1012,6 +1013,7 @@ fn editing_assistant_reply_rewrites_replay_to_edited_final_answer() {
         provider_id: None,
         model: None,
         timestamp: 1,
+        degraded: None,
     };
 
     replace_final_text_segments_for_edit(&mut message, "new final");
@@ -1048,6 +1050,7 @@ fn test_chat_message(id: &str, role: &str, content: &str, timestamp: i64) -> Cha
         provider_id: None,
         model: None,
         timestamp,
+        degraded: None,
     }
 }
 
@@ -1586,6 +1589,7 @@ fn build_chat_api_messages_replays_hidden_tool_transcript() {
                 provider_id: None,
                 model: None,
                 timestamp: 1,
+                degraded: None,
             },
             ChatMessage {
                 id: "msg_assistant_1".to_string(),
@@ -1632,6 +1636,7 @@ fn build_chat_api_messages_replays_hidden_tool_transcript() {
                 provider_id: None,
                 model: None,
                 timestamp: 2,
+                degraded: None,
             },
         ],
         active_skill_id: Some("doc".to_string()),
@@ -1758,6 +1763,7 @@ fn build_chat_api_messages_sanitizes_image_payloads_in_replayed_history() {
                     provider_id: None,
                     model: None,
                     timestamp: 2,
+                    degraded: None,
                 },
             ],
             active_skill_id: None,

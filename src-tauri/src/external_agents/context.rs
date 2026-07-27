@@ -433,6 +433,7 @@ mod tests {
             provider_id: None,
             model: None,
             timestamp: 1,
+            degraded: None,
         }
     }
 

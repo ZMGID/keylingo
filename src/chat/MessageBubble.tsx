@@ -31,6 +31,7 @@ import { AssistantMessageMeta } from './AssistantMessageMeta'
 import { ChatAttachments } from './ChatAttachments'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
 import { ChatMarkdown } from './ChatMarkdown'
+import { DegradedAnswerCard } from './DegradedAnswerCard'
 import { GeneratedFileArtifacts } from './GeneratedFileArtifacts'
 import { artifactId, artifactPresentationFromToolCall, isArtifactPresentationToolCall } from './artifactPresentation'
 import { isExecutableAgentPlanText } from './agentPlan'
@@ -894,7 +895,14 @@ function MessageBubbleComponent({
   )
   const generatedFileArtifacts = [...legacyMessageArtifacts, ...legacyToolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])]
     .filter((artifact) => !isImageArtifact(artifact))
-  const hasAnswerContent = !isDirectImageGenerationPending && message.content.trim().length > 0
+  // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → undefined → 不渲染卡片。
+  const degraded = message.degraded ?? null
+  // content 仍保留同一段文本（旧前端 / 外部 CLI 只读 content），但卡片已经完整表达了
+  // 同样的信息 —— 这里不再把它当正文渲染，避免一模一样的内容出现两遍。
+  const hasAnswerContent =
+    !isDirectImageGenerationPending &&
+    message.content.trim().length > 0 &&
+    !(degraded && message.content.trim() === degraded.text.trim())
   const hasGeneratedImages = galleryImageArtifacts.length > 0
   const hasGeneratedFiles = generatedFileArtifacts.length > 0
   const [draft, setDraft] = useState(message.content)
@@ -1211,6 +1219,9 @@ function MessageBubbleComponent({
             </section>
           )
         )}
+
+        {/* 降级兜底渲染成独立卡片：故障不混进正文，也不会被复制/回灌给模型。 */}
+        {!isEditing && degraded && <DegradedAnswerCard degraded={degraded} />}
 
         {!isEditing && isAgentPlanMessage && !isDirectImageGenerationPending && (
           <AgentPlanAction

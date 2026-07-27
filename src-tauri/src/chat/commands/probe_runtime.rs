@@ -123,6 +123,7 @@ pub(crate) async fn run_chat_probe(
         provider_id: None,
         model: None,
         timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
     };
     conversation.messages.push(user_message);
     conversation.updated_at = chrono::Local::now().timestamp();

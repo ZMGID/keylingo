@@ -408,6 +408,7 @@ pub(crate) fn chat_import_external_conversation(
             provider_id: None,
             model: None,
             timestamp: now,
+            degraded: None,
         });
     }
 

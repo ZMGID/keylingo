@@ -331,6 +331,10 @@ pub struct ChatMessage {
     /// Final stream outcome for this assistant message: `completed`, `cancelled`, or `error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_outcome: Option<String>,
+    /// 降级兜底的结构化描述：模型调用失败、但本轮已有工具结果时填充。
+    /// 前端渲染成独立错误卡片；正文 `content` 不再混入故障文案。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
     /// Provider-reported usage accumulated across all model calls of this reply
     /// (planning/synthesis/compaction). None when the provider reports no usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]

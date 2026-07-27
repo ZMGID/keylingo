@@ -1611,6 +1611,7 @@ mod tests {
             compaction_boundary: None,
             compaction_summary: None,
             images: Vec::new(),
+            degraded: None,
         })
     }
 
@@ -1633,6 +1634,7 @@ mod tests {
             compaction_boundary: None,
             compaction_summary: None,
             images: Vec::new(),
+            degraded: None,
         })
     }
 

@@ -98,9 +98,7 @@ pub(super) async fn complete_assistant_reply_inner(
             .iter()
             .rev()
             .find(|m| m.role == "user");
-        let latest_user_text = latest_user
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
+        let latest_user_text = latest_user.map(|m| m.content.clone()).unwrap_or_default();
         // 外部 CLI 也要带附件：图片走各协议原生块 / 降级，文件走路径说明。图片路径已由调用方
         // 算好（last_user_image_paths）；文件路径从最后一条 user 消息现解析（best-effort）。
         let latest_user_file_paths = latest_user
@@ -620,6 +618,9 @@ pub(super) async fn complete_assistant_reply_inner(
                 resolved_model.clone(),
             )),
         );
+        // 降级兜底的结构化描述挂到消息上，前端渲染成独立错误卡片（正文不再混故障文案）。
+        let mut message = message;
+        message.degraded = result.degraded;
         return Ok(ArmReplyOutcome {
             message: Some(message),
         });
@@ -679,6 +680,7 @@ pub(super) async fn complete_assistant_reply_inner(
         result.usage,
         result.last_step_usage,
         message_plan,
+        result.degraded,
     )
     .await?;
     Ok(ArmReplyOutcome { message: None })

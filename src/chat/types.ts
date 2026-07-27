@@ -147,6 +147,18 @@ export type ChatMessageSegmentKind = 'text' | 'reasoning' | 'tool'
 
 export type ChatMessageSegmentPhase = 'auxiliary' | 'plain' | 'tool_loop' | 'synthesis'
 
+/** 降级兜底的结构化描述（后端 recovery.rs 产出）。 */
+export interface DegradedAnswer {
+  /** 稳定标识，前端据此选图标/措辞，不解析文案。 */
+  kind: 'rate_limited' | 'context_overflow' | 'moderation' | 'empty_response' | 'unknown' | string
+  /** 一行人读的失败原因。 */
+  reason: string
+  /** 本轮已完成的工具调用摘要。 */
+  toolSummaries?: { name: string; preview: string }[]
+  /** 纯文本版本，供不渲染卡片的场景回落。 */
+  text: string
+}
+
 export interface ChatMessageSegment {
   id: string
   kind: ChatMessageSegmentKind
@@ -182,6 +194,11 @@ export interface ChatMessage {
   runEntry?: 'send' | 'regenerate' | string | null
   stream_outcome?: 'completed' | 'cancelled' | 'error' | 'interrupted' | string | null
   streamOutcome?: 'completed' | 'cancelled' | 'error' | 'interrupted' | string | null
+  /**
+   * 降级兜底：模型调用失败、但本轮已有工具结果时由后端填充。
+   * 渲染成独立错误卡片 —— 正文 content 不再混入故障文案。
+   */
+  degraded?: DegradedAnswer | null
   /** Provider 报告的本条回复真实 token 用量（规划/合成/压缩累计）；不报告时缺省。 */
   usage?: MessageUsage | null
   /** 多模型一问多答：同一条 user 消息 fan-out 出的 N 条 assistant 共享同一个 group id；单模型为空。 */

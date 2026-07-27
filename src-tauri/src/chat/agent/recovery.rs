@@ -17,6 +17,46 @@
 
 use crate::chat::types::{ToolCallRecord, ToolCallStatus};
 
+/// 降级回答的结构化描述，落到 `ChatMessage.degraded` 供前端渲染成独立卡片。
+///
+/// 为什么不只发拼好的文本：降级信息此前是一段纯文本塞进 assistant 正文，看起来和
+/// 模型的真实回答一模一样，会被复制、会进对话历史再发回模型。结构化后正文归正文、
+/// 故障归卡片。`text` 保留同样的纯文本，供旧前端与外部 CLI 回落。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradedAnswer {
+    /// 失败归类的稳定标识（`rate_limited` / `context_overflow` / `moderation` /
+    /// `empty_response` / `unknown`），前端据此选图标与措辞，不解析文案。
+    pub kind: String,
+    /// 一行人读的失败原因（已按 kind 精确化，不再笼统说"可能上下文过长"）。
+    pub reason: String,
+    /// 本轮已完成的工具调用摘要（名称 + 结果首行），让用户知道哪些工作没白做。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_summaries: Vec<DegradedToolSummary>,
+    /// 与 `tool_summaries` 同源的纯文本版本；旧前端 / 外部 CLI 直接显示这个。
+    pub text: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradedToolSummary {
+    pub name: String,
+    pub preview: String,
+}
+
+impl FailureKind {
+    /// 稳定的 wire 标识。前端按它分支，不依赖本地化文案。
+    pub(crate) fn wire_kind(self) -> &'static str {
+        match self {
+            FailureKind::ContentModeration => "moderation",
+            FailureKind::ContextOverflow => "context_overflow",
+            FailureKind::Empty => "empty_response",
+            FailureKind::Exhausted => "rate_limited",
+            FailureKind::Other => "unknown",
+        }
+    }
+}
+
 /// 模型调用失败的归类(只列出我们会**区别处置**的类型)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailureKind {
@@ -193,6 +233,19 @@ pub(crate) fn assemble_results_from_tool_records(
     language: &str,
     kind: FailureKind,
 ) -> String {
+    assemble_degraded_answer(records, language, kind)
+        .map(|d| d.text)
+        .unwrap_or_default()
+}
+
+/// 结构化版本：同一套裁剪规则，但把「原因 / 工具摘要 / 纯文本」分开返回，
+/// 让前端能渲染成独立卡片而不是把故障混进 assistant 正文。
+/// 没有任何成功 preview → None（调用方退回静态文案，与文本版语义一致）。
+pub(crate) fn assemble_degraded_answer(
+    records: &[ToolCallRecord],
+    language: &str,
+    kind: FailureKind,
+) -> Option<DegradedAnswer> {
     /// 摘要里最多列几条工具结果(其余折叠为计数)。
     const MAX_BLOCKS: usize = 8;
     /// 每条工具结果保留的最大字符数(只取首行)。
@@ -200,6 +253,7 @@ pub(crate) fn assemble_results_from_tool_records(
 
     let zh = language.starts_with("zh");
     let mut blocks: Vec<String> = Vec::new();
+    let mut summaries: Vec<DegradedToolSummary> = Vec::new();
     let mut overflow = 0usize;
     for record in records {
         if record.status != ToolCallStatus::Success {
@@ -234,10 +288,14 @@ pub(crate) fn assemble_results_from_tool_records(
         } else {
             first_line.to_string()
         };
+        summaries.push(DegradedToolSummary {
+            name: record.name.clone(),
+            preview: clipped.clone(),
+        });
         blocks.push(format!("• {} — {}", record.name, clipped));
     }
     if blocks.is_empty() {
-        return String::new();
+        return None;
     }
     let reason = failure_reason_line(kind, zh);
     let note = if zh {
@@ -259,7 +317,12 @@ pub(crate) fn assemble_results_from_tool_records(
             format!("\n… ({overflow} more above)")
         });
     }
-    out
+    Some(DegradedAnswer {
+        kind: kind.wire_kind().to_string(),
+        reason: reason.to_string(),
+        tool_summaries: summaries,
+        text: out,
+    })
 }
 
 /// 上下文超长的静态说明文案（Gap 2 anti-thrashing 兜底用）：当压缩反复失败、且没有任何
@@ -463,6 +526,57 @@ mod tests {
         assert!(
             assemble_results_from_tool_records(&[], "zh-CN", FailureKind::Exhausted).is_empty()
         );
+    }
+
+    #[test]
+    fn structured_degraded_answer_carries_kind_reason_and_summaries() {
+        // 结构化版本是错误卡片的数据源：kind 供前端选图标（不解析文案）、
+        // reason 是人读原因、tool_summaries 让用户知道哪些工作没白做。
+        let records = vec![
+            rec("mixer_generate_image", ToolCallStatus::Success, Some("Generated 1 image.")),
+            rec("present_artifacts", ToolCallStatus::Success, Some("Displayed 1 file.")),
+            rec("failed_tool", ToolCallStatus::Error, Some("不该出现")),
+        ];
+        let d = assemble_degraded_answer(&records, "zh-CN", FailureKind::Exhausted)
+            .expect("有成功工具结果 ⇒ 应产出结构化降级描述");
+        assert_eq!(d.kind, "rate_limited");
+        assert!(d.reason.contains("限流") || d.reason.contains("配额"));
+        assert_eq!(d.tool_summaries.len(), 2, "失败的工具不进摘要");
+        assert_eq!(d.tool_summaries[0].name, "mixer_generate_image");
+        assert_eq!(d.tool_summaries[0].preview, "Generated 1 image.");
+        // text 仍是同一段纯文本，供旧前端 / 外部 CLI 回落。
+        assert!(d.text.contains("mixer_generate_image"));
+        assert!(!d.text.contains("不该出现"));
+
+        // 无成功结果 ⇒ None（调用方退回静态文案），与文本版 is_empty 语义一致。
+        assert!(assemble_degraded_answer(&[], "zh-CN", FailureKind::Exhausted).is_none());
+    }
+
+    #[test]
+    fn wire_kind_is_stable_per_failure_kind() {
+        // 前端按这些字符串分支，改动即破坏契约。
+        assert_eq!(FailureKind::Exhausted.wire_kind(), "rate_limited");
+        assert_eq!(FailureKind::ContextOverflow.wire_kind(), "context_overflow");
+        assert_eq!(FailureKind::ContentModeration.wire_kind(), "moderation");
+        assert_eq!(FailureKind::Empty.wire_kind(), "empty_response");
+        assert_eq!(FailureKind::Other.wire_kind(), "unknown");
+    }
+
+    #[test]
+    fn text_and_structured_stay_in_sync() {
+        // 文本版是结构化版的投影，二者不能漂移（文本版仍被旧路径调用）。
+        let records = vec![rec("t", ToolCallStatus::Success, Some("preview"))];
+        for kind in [
+            FailureKind::Exhausted,
+            FailureKind::ContextOverflow,
+            FailureKind::ContentModeration,
+            FailureKind::Empty,
+            FailureKind::Other,
+        ] {
+            let text = assemble_results_from_tool_records(&records, "zh-CN", kind);
+            let structured = assemble_degraded_answer(&records, "zh-CN", kind).expect("some");
+            assert_eq!(text, structured.text, "kind={kind:?}");
+        }
     }
 
     #[test]
