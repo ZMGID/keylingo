@@ -840,12 +840,16 @@ body {
   border-right-color: rgba(255, 255, 255, 0.07);
 }
 
-.chat-window-host--native-effect .chat-sidebar-shell {
+.chat-window-host--native-effect:not(.chat-window-host--win) .chat-sidebar-shell {
   background: rgb(var(--chat-sidebar-surface) / 0.72);
 }
 
-.dark .chat-window-host--native-effect .chat-sidebar-shell {
+.dark .chat-window-host--native-effect:not(.chat-window-host--win) .chat-sidebar-shell {
   background: rgb(var(--chat-sidebar-surface) / 0.66);
+}
+
+.chat-window-host--win.chat-window-host--native-effect .chat-sidebar-shell {
+  background: transparent;
 }
 
 .dark .chat-composer-shell {

@@ -79,10 +79,17 @@ describe('chat theme surfaces', () => {
     expect(variables.get('--chat-sidebar-surface')).toBe(sidebar.join(' '))
   })
 
-  it('uses one sidebar RGB source for opaque fallback and native material alpha', () => {
+  it('keeps macOS material tint while exposing successful Windows Mica directly', () => {
     expect(css).toContain('background: rgb(var(--chat-sidebar-surface));')
-    expect(css).toContain('background: rgb(var(--chat-sidebar-surface) / 0.72);')
-    expect(css).toContain('background: rgb(var(--chat-sidebar-surface) / 0.66);')
+    expect(css).toMatch(
+      /\.chat-window-host--native-effect:not\(\.chat-window-host--win\) \.chat-sidebar-shell\s*{[^}]*background: rgb\(var\(--chat-sidebar-surface\) \/ 0\.72\);/s,
+    )
+    expect(css).toMatch(
+      /\.dark \.chat-window-host--native-effect:not\(\.chat-window-host--win\) \.chat-sidebar-shell\s*{[^}]*background: rgb\(var\(--chat-sidebar-surface\) \/ 0\.66\);/s,
+    )
+    expect(css).toMatch(
+      /\.chat-window-host--win\.chat-window-host--native-effect \.chat-sidebar-shell\s*{[^}]*background: transparent;/s,
+    )
     expect(css).not.toMatch(/\.chat-sidebar-shell\s*{[^}]*backdrop-filter/s)
   })
 })

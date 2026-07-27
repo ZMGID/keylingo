@@ -23,8 +23,10 @@ to enabled on both the Rust and TypeScript sides.
 ## Rendering Contract
 
 macOS and Windows use a transparent native/WebView background. While the native effect is active,
-the chat shell is transparent and the sidebar adds only a readable color overlay. The neutral
-colors are brightness baselines, not replacements for the configured theme hue.
+the chat shell is transparent. macOS adds a readable color overlay to the sidebar; Windows leaves
+the sidebar fully transparent after Mica is applied successfully so the system material remains
+unobstructed. The neutral colors are brightness baselines, not replacements for the configured
+theme hue.
 
 For warm/cool themes, preserve the source surface's HSV hue and saturation and replace only its
 value:
@@ -39,9 +41,10 @@ value:
 | Warm | `#fffbf2` | `#f9f2e0` | `#171716` | `#141312` |
 | Cool | `#f3f8ff` | `#e4eff9` | `#161617` | `#121314` |
 
-The sidebar uses its derived RGB channels at `72%` opacity in light mode and `66%` in dark mode.
-The main pane remains opaque. When the effect is inactive or fails, the shell and sidebar use the
-same derived colors opaquely.
+On macOS, the sidebar uses its derived RGB channels at `72%` opacity in light mode and `66%` in
+dark mode. On Windows, an active Mica effect makes the sidebar background fully transparent. The
+main pane remains opaque. When the effect is inactive or fails, the shell and sidebar use the same
+derived colors opaquely.
 
 The sidebar must not use CSS blur or `backdrop-filter`. The platform compositor owns the blur.
 
@@ -55,4 +58,6 @@ Tests must cover:
 - disabled preference and unsupported Linux fallback;
 - failed Mica application followed by `clearEffects`.
 - each declared theme surface matching the HSV value calculation;
-- opaque and native-material sidebar states sharing the same RGB source.
+- macOS native material using the theme RGB source at the declared alpha;
+- successful Windows Mica using a transparent sidebar while inactive/failed Mica keeps the opaque
+  theme fallback.
