@@ -34,6 +34,8 @@ body {
   --theme-surface-titlebar: #ececef;
   --theme-surface-border: #e4e4e7;
   --theme-surface-border-strong: #d4d4d8;
+  --chat-main-surface: #ffffff;
+  --chat-sidebar-surface: 249 249 249;
 }
 
 /* ===== 全局按钮/组件语义 token（kv-btn / kv-icon-btn 依赖）=====
@@ -122,6 +124,8 @@ body {
   --theme-surface-titlebar: #e9e1d1;
   --theme-surface-border: #ddd3c0;
   --theme-surface-border-strong: #cbbda4;
+  --chat-main-surface: #fffbf2;
+  --chat-sidebar-surface: 249 242 224;
 }
 
 :root[data-theme-color="cool"] {
@@ -133,6 +137,23 @@ body {
   --theme-surface-titlebar: #e0e9f4;
   --theme-surface-border: #d2def0;
   --theme-surface-border-strong: #bccfe6;
+  --chat-main-surface: #f3f8ff;
+  --chat-sidebar-surface: 228 239 249;
+}
+
+:root.dark {
+  --chat-main-surface: #171717;
+  --chat-sidebar-surface: 20 20 20;
+}
+
+:root.dark[data-theme-color="warm"] {
+  --chat-main-surface: #171716;
+  --chat-sidebar-surface: 20 19 18;
+}
+
+:root.dark[data-theme-color="cool"] {
+  --chat-main-surface: #161617;
+  --chat-sidebar-surface: 18 19 20;
 }
 
 #root {
@@ -534,7 +555,7 @@ body {
   overflow: hidden;
   border-radius: 14px;
   border: 1px solid rgba(0, 0, 0, 0.06);
-  background: var(--theme-surface);
+  background: var(--chat-main-surface);
   box-shadow:
     inset 0 0 0 0.5px rgba(255, 255, 255, 0.55),
     0 0 0 0.5px rgba(0, 0, 0, 0.08),
@@ -543,7 +564,6 @@ body {
 
 .dark .chat-window-shell {
   border-color: rgba(255, 255, 255, 0.08);
-  background: #212121;
   box-shadow:
     inset 0 0 0 0.5px rgba(255, 255, 255, 0.04),
     0 0 0 0.5px rgba(255, 255, 255, 0.05),
@@ -587,21 +607,24 @@ body {
   box-shadow: none;
 }
 
+.chat-window-host--native-effect .chat-window-shell {
+  background: transparent;
+}
+
 .chat-main-pane {
   container-type: size;
   container-name: chat-main;
   overflow: hidden;
-  background: var(--theme-surface);
+  background: var(--chat-main-surface);
 }
 
 .chat-themed-surface,
 .assistant-center-root {
-  background: var(--theme-surface);
+  background: var(--chat-main-surface);
 }
 
 .chat-sidebar-shell {
-  /* 表面层级第 3 层（最深）：比主区再低一档，三套浅色主题各自从 --theme-surface-muted 派生，保持色相 */
-  background: color-mix(in srgb, var(--theme-surface-muted) 92%, #000);
+  background: rgb(var(--chat-sidebar-surface));
   /* 注意：--border 变量只在 settings-embedded 作用域定义，这里必须直接引用主题变量 */
   border-right: 1px solid var(--theme-surface-border);
   /* 折叠动画：负 margin 把固定宽度（240px，与 w-[240px] 同步）的侧栏整体滑出左侧，
@@ -813,18 +836,16 @@ body {
   }
 }
 
-.dark .chat-main-pane {
-  background: #212121;
-}
-
-.dark .chat-themed-surface,
-.dark .assistant-center-root {
-  background: #212121;
-}
-
 .dark .chat-sidebar-shell {
-  background: #1c1c1e;
   border-right-color: rgba(255, 255, 255, 0.07);
+}
+
+.chat-window-host--native-effect .chat-sidebar-shell {
+  background: rgb(var(--chat-sidebar-surface) / 0.72);
+}
+
+.dark .chat-window-host--native-effect .chat-sidebar-shell {
+  background: rgb(var(--chat-sidebar-surface) / 0.66);
 }
 
 .dark .chat-composer-shell {

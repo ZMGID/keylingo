@@ -882,6 +882,7 @@ export type Settings = {
   chatHotkey: string
   theme: 'system' | 'light' | 'dark'
   themeColor: string
+  translucentSidebar: boolean
   uiFontScale?: number
   uiFontFamily?: string
   uiFontMono?: string
@@ -1479,6 +1480,7 @@ function normalizeSettings(settings: Settings): Settings {
     chatHotkey: current.chatHotkey ?? 'CommandOrControl+Shift+K',
     theme: current.theme ?? 'system',
     themeColor: normalizeThemeColorId(current.themeColor),
+    translucentSidebar: current.translucentSidebar ?? true,
     uiFontScale: current.uiFontScale ?? 1,
     uiFontFamily: current.uiFontFamily ?? '',
     uiFontMono: current.uiFontMono ?? '',

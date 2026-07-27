@@ -44,6 +44,12 @@ describe('AppearanceGroup', () => {
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ theme: 'light' })
   })
 
+  it('半透明侧边栏开关写 translucentSidebar', async () => {
+    const props = renderGroup()
+    await userEvent.click(screen.getByRole('switch', { name: '半透明侧边栏' }))
+    expect(props.onUpdateSettings).toHaveBeenCalledWith({ translucentSidebar: false })
+  })
+
   it('字号输入时 commit=false（边打字不 clamp）', async () => {
     const props = renderGroup()
     await userEvent.type(screen.getByDisplayValue('14'), '5')

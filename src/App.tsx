@@ -232,6 +232,7 @@ function App() {
 
   const [mode, setMode] = useState(getMode)
   const [themeMode, setThemeMode] = useState<'system' | 'light' | 'dark'>('system')
+  const [translucentSidebar, setTranslucentSidebar] = useState(false)
   const [translateSource, setTranslateSource] = useState<string>('')
   const [lang, setLang] = useState<Lang>('zh')
 
@@ -255,6 +256,7 @@ function App() {
     const settings = await getSettingsCached()
     const nextMode = (settings.theme || 'system') as 'system' | 'light' | 'dark'
     setThemeMode(nextMode)
+    setTranslucentSidebar(settings.translucentSidebar)
     const isDark = nextMode === 'dark' || (nextMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
     if (isDark) {
       document.documentElement.classList.add('dark')
@@ -507,7 +509,7 @@ function App() {
   }
   if (mode === 'chat') {
     return (
-      <ChatWindowHost>
+      <ChatWindowHost translucentSidebar={translucentSidebar}>
         <Suspense
           fallback={
             <div className="flex h-full w-full items-center justify-center bg-transparent">

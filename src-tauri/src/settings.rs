@@ -1197,6 +1197,8 @@ pub struct Settings {
     pub theme: String,
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
+    #[serde(default = "default_true")]
+    pub translucent_sidebar: bool,
     /// UI 整体缩放（作用于聊天窗口根元素 zoom），范围 0.8–1.4，1.0 为默认。
     #[serde(default = "default_ui_font_scale")]
     pub ui_font_scale: f32,
@@ -1383,6 +1385,7 @@ impl Default for Settings {
             chat_hotkey: "CommandOrControl+Shift+K".to_string(),
             theme: "system".to_string(),
             theme_color: default_theme_color(),
+            translucent_sidebar: true,
             ui_font_scale: default_ui_font_scale(),
             ui_font_family: String::new(),
             ui_font_mono: String::new(),
@@ -2628,6 +2631,13 @@ fn normalize_hotkey(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_settings_enable_translucent_sidebar_by_default() {
+        let settings: Settings =
+            serde_json::from_str("{}").expect("legacy settings should deserialize");
+        assert!(settings.translucent_sidebar);
+    }
 
     #[test]
     fn legacy_model_info_without_temperature_deserializes_as_absent() {
