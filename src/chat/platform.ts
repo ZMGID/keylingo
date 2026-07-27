@@ -12,7 +12,12 @@ export const chatTitlebarRowClass = usesNativeTitlebar
   ? 'flex h-[52px] shrink-0 items-center gap-2'
   : 'flex h-[52px] shrink-0 items-center gap-2 px-3 pt-2'
 
-/** 窗口左缘交通灯留白（仅侧栏顶栏、收起态主顶栏；约 66px 灯区 + 间距） */
+/**
+ * 窗口左缘交通灯留白（仅侧栏顶栏、收起态主顶栏；约 66px 灯区 + 间距）。
+ * 侧栏顶栏在悬浮卡片内部，坐标原点已随卡片右移 8px，而灯的 x 也 +8（windows.rs），
+ * 两者抵消 → 这里保持 92px。收起态主顶栏原点是窗口左缘，额外 8px 由
+ * `.chat-titlebar-row--collapsed-mac` 补。
+ */
 export const chatTitlebarMacInsetClass = usesNativeTitlebar ? 'pl-[92px]' : ''
 
 /**

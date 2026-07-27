@@ -38,7 +38,7 @@ export function SetContextMenu({ anchor, onRename, onDelete, onClose: onClosePro
   return createPortal(
     <div
       ref={menuRef}
-      className={`${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[180px] rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]`}
+      className={`kv-menu ${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px]`}
       style={{ left: pos.left, top: pos.top }}
       role="menu"
       onAnimationEnd={onAnimationEnd}
@@ -46,26 +46,26 @@ export function SetContextMenu({ anchor, onRename, onDelete, onClose: onClosePro
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onRename()
           onClose()
         }}
       >
-        <Pencil size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+        <Pencil strokeWidth={1.75} />
         重命名 / 设置
       </button>
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+        className="kv-menu-item kv-menu-item--danger"
         onClick={() => {
           onDelete()
           onClose()
         }}
       >
-        <Trash2 size={16} strokeWidth={1.75} className="shrink-0" />
+        <Trash2 strokeWidth={1.75} />
         删除集
       </button>
     </div>,

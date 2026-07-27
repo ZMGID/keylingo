@@ -7,9 +7,25 @@ type ChatWindowHostProps = {
   children: ReactNode
 }
 
-/** Chat 专用窗口外壳：Windows 自绘圆角边缘，最大化时收起圆角。 */
+/**
+ * Chat 专用窗口外壳：Windows 自绘圆角边缘，最大化时收起圆角；
+ * macOS 全屏时系统隐藏交通灯，撤掉顶栏为灯预留的左缩进（否则空一大块）。
+ */
 export function ChatWindowHost({ children }: ChatWindowHostProps) {
   const [maximized, setMaximized] = useState(false)
+  // mac 全屏：不走 Tauri 的 isFullscreen()（IPC 往返，只能节流查 → 灯已画回来缩进还没恢复，
+  // 退出全屏时图标和灯要重叠一拍）。全屏时 webview 高度 == 屏幕高度，非全屏一定被菜单栏切掉；
+  // DOM resize 与布局同帧、读 innerHeight 同步，所以缩进和窗口逐帧同步，零 IPC。
+  // ponytail: 靠高度判定，与「窗口手动拉到正好等于屏高」不可区分 —— 但那也需要盖住菜单栏，做不到。
+  const [macFullscreen, setMacFullscreen] = useState(false)
+
+  useEffect(() => {
+    if (!usesNativeTitlebar) return
+    const sync = () => setMacFullscreen(window.innerHeight >= window.screen.height)
+    sync()
+    window.addEventListener('resize', sync)
+    return () => window.removeEventListener('resize', sync)
+  }, [])
 
   useEffect(() => {
     if (!isTauriRuntime() || usesNativeTitlebar) return
@@ -53,7 +69,11 @@ export function ChatWindowHost({ children }: ChatWindowHostProps) {
   }, [])
 
   if (usesNativeTitlebar) {
-    return <div className="h-full w-full">{children}</div>
+    return (
+      <div className={`h-full w-full${macFullscreen ? ' chat-window-host--mac-fullscreen' : ''}`}>
+        {children}
+      </div>
+    )
   }
 
   const hostClassName = [

@@ -49,7 +49,7 @@ function SourceRow({
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-neutral-700 transition-colors hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800"
+      className="kv-menu-item"
     >
       <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -156,7 +156,7 @@ export function SourcesButton({
       ? createPortal(
           <div
             ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
+            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto kv-menu ${placement}`}
             style={{ ['--chat-popover-origin' as string]: origin, maxHeight: maxH }}
             data-tauri-drag-region="false"
             role="menu"
@@ -228,7 +228,7 @@ export function SourcesButton({
                     setOpen(false)
                     onOpenSettings()
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+                  className="kv-menu-item"
                 >
                   <span className="grid size-4 shrink-0 place-items-center">
                     <SlidersHorizontal size={13} strokeWidth={1.75} />

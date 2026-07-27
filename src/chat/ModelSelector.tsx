@@ -117,7 +117,7 @@ function ModelSelectorBase({
             onModelChange(providerId, model)
             setOpen(false)
           }}
-          className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] ${
+          className={`kv-menu-row min-w-0 flex-1 ${
             selected
               ? 'font-medium text-neutral-900 dark:text-neutral-100'
               : 'text-neutral-700 dark:text-neutral-300'
@@ -167,7 +167,7 @@ function ModelSelectorBase({
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-          <div ref={menuRef} style={{ maxHeight: maxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[240px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+          <div ref={menuRef} style={{ maxHeight: maxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[240px] overflow-y-auto kv-menu">
             {favoriteEntries.length > 0 && (
               <div className="px-1 py-1">
                 <div className="flex items-center gap-1 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-500">

@@ -77,13 +77,13 @@ export function ChatImageContextMenu({
   }
 
   const itemClass =
-    'flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-100 dark:hover:bg-white/[0.06]'
-  const iconClass = 'shrink-0 text-neutral-500'
+    'kv-menu-item'
+  const iconClass = ''
 
   const menu = (
     <div
       ref={menuRef}
-      className={`${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px] rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]`}
+      className={`kv-menu ${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px]`}
       style={{ left: pos.left, top: pos.top }}
       role="menu"
       onAnimationEnd={onAnimationEnd}

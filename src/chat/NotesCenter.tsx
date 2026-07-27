@@ -682,12 +682,12 @@ export function NotesCenter() {
                                     }}
                                   />
                                   <div
-                                    className="absolute right-0 z-50 mt-1 max-h-64 w-44 overflow-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900"
+                                    className="absolute right-0 z-50 mt-1 max-h-64 w-44 overflow-auto kv-menu"
                                     onClick={(e) => e.stopPropagation()}
                                   >
                                     <button
                                       type="button"
-                                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-neutral-700 hover:bg-black/[0.05] dark:text-neutral-300 dark:hover:bg-white/[0.08]"
+                                      className="kv-menu-item"
                                       onClick={() => void moveNoteToFolder(note.id, '')}
                                     >
                                       {note.folder.trim() === '' && <Check size={12} className="text-[#C56646]" />}
@@ -697,7 +697,7 @@ export function NotesCenter() {
                                       <button
                                         key={f}
                                         type="button"
-                                        className="flex w-full items-center gap-2 truncate px-3 py-1.5 text-left text-[12.5px] text-neutral-700 hover:bg-black/[0.05] dark:text-neutral-300 dark:hover:bg-white/[0.08]"
+                                        className="kv-menu-item truncate"
                                         onClick={() => void moveNoteToFolder(note.id, f)}
                                       >
                                         {note.folder.trim() === f && <Check size={12} className="text-[#C56646]" />}
@@ -707,7 +707,7 @@ export function NotesCenter() {
                                     <div className="my-1 border-t border-neutral-100 dark:border-neutral-800" />
                                     <button
                                       type="button"
-                                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-neutral-600 hover:bg-black/[0.05] dark:text-neutral-400 dark:hover:bg-white/[0.08]"
+                                      className="kv-menu-item"
                                       onClick={() => {
                                         setMoveMenuFor(null)
                                         setFolderDialog({ mode: 'create', assignNoteId: note.id })

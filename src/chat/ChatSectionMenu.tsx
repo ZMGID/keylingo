@@ -50,7 +50,7 @@ export function ChatSectionMenu({
   const menu = (
     <div
       ref={menuRef}
-      className={`${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[200px] rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]`}
+      className={`kv-menu ${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px]`}
       style={{ left: anchor.left, top: anchor.top }}
       role="menu"
       onAnimationEnd={onAnimationEnd}
@@ -58,25 +58,25 @@ export function ChatSectionMenu({
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onNewConversation()
           onClose()
         }}
       >
-        <SquarePen size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+        <SquarePen strokeWidth={1.75} />
         新建聊天
       </button>
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onOpenSearch()
           onClose()
         }}
       >
-        <Search size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+        <Search strokeWidth={1.75} />
         搜索对话
       </button>
 
@@ -86,13 +86,13 @@ export function ChatSectionMenu({
         type="button"
         role="menuitem"
         disabled={!hasConversations}
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50 disabled:cursor-default disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-500/10"
+        className="kv-menu-item kv-menu-item--danger"
         onClick={() => {
           onClearAll()
           onClose()
         }}
       >
-        <Trash2 size={16} strokeWidth={1.75} className="shrink-0" />
+        <Trash2 strokeWidth={1.75} />
         清空全部对话
       </button>
     </div>

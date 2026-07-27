@@ -68,7 +68,7 @@ export function ConversationContextMenu({
   const menu = (
     <div
       ref={menuRef}
-      className={`${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[200px] rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]`}
+      className={`kv-menu ${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px]`}
       style={{ left: pos.left, top: pos.top }}
       role="menu"
       onAnimationEnd={onAnimationEnd}
@@ -76,13 +76,13 @@ export function ConversationContextMenu({
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onRename()
           onClose()
         }}
       >
-        <Pencil size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+        <Pencil strokeWidth={1.75} />
         重命名
       </button>
 
@@ -90,17 +90,17 @@ export function ConversationContextMenu({
         <button
           type="button"
           role="menuitem"
-          className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+          className="kv-menu-item"
         >
-          <Folder size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+          <Folder strokeWidth={1.75} />
           <span className="min-w-0 flex-1">添加到项目</span>
           <ChevronRight size={16} className="shrink-0 text-neutral-400" />
         </button>
 
         <div className="pointer-events-none absolute left-full top-0 z-[201] min-w-[168px] pl-1 opacity-0 transition-opacity group-hover/sub:pointer-events-auto group-hover/sub:opacity-100">
-          <div className="rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]">
+          <div className="kv-menu">
             {projects.length === 0 ? (
-              <div className="px-3.5 py-2 text-[13px] text-neutral-400">暂无项目</div>
+              <div className="kv-menu-item">暂无项目</div>
             ) : (
               projects.map((project) => {
                 const active = conversationProjectId
@@ -110,7 +110,7 @@ export function ConversationContextMenu({
                 <button
                   key={project.id}
                   type="button"
-                  className={`flex w-full px-3.5 py-2 text-left text-[13px] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+                  className={`kv-menu-item ${
                     active
                       ? 'font-medium text-neutral-900 dark:text-neutral-50'
                       : 'text-neutral-800 dark:text-neutral-100'
@@ -130,7 +130,7 @@ export function ConversationContextMenu({
                 <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
                 <button
                   type="button"
-                  className="flex w-full px-3.5 py-2 text-left text-[13px] text-neutral-600 transition-colors hover:bg-black/[0.04] dark:text-neutral-300 dark:hover:bg-white/[0.06]"
+                  className="kv-menu-item"
                   onClick={() => {
                     onMoveToProject(undefined)
                     onClose()
@@ -148,17 +148,17 @@ export function ConversationContextMenu({
         <button
           type="button"
           role="menuitem"
-          className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+          className="kv-menu-item"
         >
-          <Layers size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+          <Layers strokeWidth={1.75} />
           <span className="min-w-0 flex-1">移动到集</span>
           <ChevronRight size={16} className="shrink-0 text-neutral-400" />
         </button>
 
         <div className="pointer-events-none absolute left-full top-0 z-[201] min-w-[168px] pl-1 opacity-0 transition-opacity group-hover/subset:pointer-events-auto group-hover/subset:opacity-100">
-          <div className="rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]">
+          <div className="kv-menu">
             {sets.length === 0 ? (
-              <div className="px-3.5 py-2 text-[13px] text-neutral-400">暂无集</div>
+              <div className="kv-menu-item">暂无集</div>
             ) : (
               sets.map((set) => {
                 const active = conversationSetId === set.id
@@ -166,7 +166,7 @@ export function ConversationContextMenu({
                   <button
                     key={set.id}
                     type="button"
-                    className={`flex w-full px-3.5 py-2 text-left text-[13px] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+                    className={`kv-menu-item ${
                       active
                         ? 'font-medium text-neutral-900 dark:text-neutral-50'
                         : 'text-neutral-800 dark:text-neutral-100'
@@ -186,7 +186,7 @@ export function ConversationContextMenu({
                 <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
                 <button
                   type="button"
-                  className="flex w-full px-3.5 py-2 text-left text-[13px] text-neutral-600 transition-colors hover:bg-black/[0.04] dark:text-neutral-300 dark:hover:bg-white/[0.06]"
+                  className="kv-menu-item"
                   onClick={() => {
                     onMoveToSet(undefined)
                     onClose()
@@ -203,13 +203,13 @@ export function ConversationContextMenu({
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onExport()
           onClose()
         }}
       >
-        <Download size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+        <Download strokeWidth={1.75} />
         {lang === 'zh' ? '导出' : 'Export'}
       </button>
 
@@ -218,13 +218,13 @@ export function ConversationContextMenu({
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+        className="kv-menu-item kv-menu-item--danger"
         onClick={() => {
           onDelete()
           onClose()
         }}
       >
-        <Trash2 size={16} strokeWidth={1.75} className="shrink-0" />
+        <Trash2 strokeWidth={1.75} />
         删除
       </button>
     </div>

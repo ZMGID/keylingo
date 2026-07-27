@@ -2,9 +2,10 @@
 // 排序/搜索/翻页 + 一键安装（下载走后端 chat_skills_install_from_url）。数据层见 ../settings/skillMarket.ts。
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { Check, ChevronDown, Download, ExternalLink, Loader2, Search, Star } from 'lucide-react'
+import { Check, Download, ExternalLink, Loader2, Search, Star } from 'lucide-react'
 import { api } from '../api/tauri'
 import { Button, IconButton } from '../components/Button'
+import { Select } from '../settings/components'
 import {
   buildClawHubDownloadUrl,
   CLAWHUB_SORT_OPTIONS,
@@ -124,21 +125,17 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
             data-tauri-drag-region="false"
           />
         </div>
-        <div className="relative shrink-0">
-          <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as ClawHubSort)}
-            disabled={Boolean(query)}
-            data-tauri-drag-region="false"
-            className="h-10 cursor-pointer appearance-none rounded-md border border-neutral-200 bg-white pl-3 pr-8 text-[13px] text-neutral-700 outline-none transition-colors duration-[var(--kv-dur-fast)] hover:border-neutral-300 focus:border-neutral-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200"
-            title={query ? (zh ? '搜索时按相关度排序' : 'Search results are sorted by relevance') : undefined}
-          >
-            {sortOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-          <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400" />
-        </div>
+        {/* 排序：用共享 Select（自绘菜单）而非原生 <select> —— 原生弹层由系统绘制，
+            样式无法统一，跟应用里其他所有下拉长得完全不同。
+            [&_button]:h-10 是为了跟左边 h-10 的搜索框对齐（Select 默认 30px）。 */}
+        <Select
+          className="w-[132px] shrink-0 [&_button]:h-10"
+          value={sort}
+          onChange={(value) => setSort(value as ClawHubSort)}
+          disabled={Boolean(query)}
+          options={sortOptions}
+          title={query ? (zh ? '搜索时按相关度排序' : 'Search results are sorted by relevance') : undefined}
+        />
       </div>
 
       {error && (

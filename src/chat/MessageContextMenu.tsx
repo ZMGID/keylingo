@@ -47,12 +47,12 @@ export function MessageContextMenu({
   }, [onClose])
 
   const itemClass =
-    'flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]'
+    'kv-menu-item'
 
   const menu = (
     <div
       ref={menuRef}
-      className={`${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[168px] rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]`}
+      className={`kv-menu ${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px]`}
       style={{ left: anchor.left, top: anchor.top }}
       role="menu"
       onAnimationEnd={onAnimationEnd}
@@ -67,7 +67,7 @@ export function MessageContextMenu({
             onClose()
           }}
         >
-          <Copy size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+          <Copy strokeWidth={1.75} />
           复制
         </button>
       )}
@@ -81,7 +81,7 @@ export function MessageContextMenu({
             onClose()
           }}
         >
-          <ClipboardCopy size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
+          <ClipboardCopy strokeWidth={1.75} />
           复制整条消息
         </button>
       )}

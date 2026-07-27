@@ -111,7 +111,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
       ? createPortal(
           <div
             ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placementClass}`}
+            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto kv-menu ${placementClass}`}
             style={{ ['--chat-popover-origin' as string]: popoverOrigin, maxHeight: maxH }}
             data-tauri-drag-region="false"
             role="menu"
@@ -133,7 +133,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
                       type="button"
                       disabled={disabled}
                       onClick={() => toggle(provider.id, model)}
-                      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px] transition-colors ${
+                      className={`kv-menu-row transition-colors ${
                         checked
                           ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
                           : disabled

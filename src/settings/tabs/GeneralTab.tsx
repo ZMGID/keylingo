@@ -38,10 +38,10 @@ function FontPicker({ value, systemFonts, placeholder, defaultLabel, emptyText, 
         placeholder={placeholder}
       />
       {open && (
-        <div className="absolute right-0 z-50 mt-1 max-h-64 w-full overflow-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+        <div className="absolute right-0 z-50 mt-1 max-h-64 w-full overflow-auto kv-menu">
           <button
             type="button"
-            className={`block w-full truncate px-3 py-1.5 text-left text-[13px] hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${value === '' ? 'font-semibold text-neutral-900 dark:text-neutral-100' : 'text-neutral-700 dark:text-neutral-300'}`}
+            className={`kv-menu-row truncate hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${value === '' ? 'font-semibold text-neutral-900 dark:text-neutral-100' : 'text-neutral-700 dark:text-neutral-300'}`}
             onMouseDown={(e) => { e.preventDefault(); select('') }}
           >
             {defaultLabel}
@@ -50,7 +50,7 @@ function FontPicker({ value, systemFonts, placeholder, defaultLabel, emptyText, 
             <button
               key={f}
               type="button"
-              className={`block w-full truncate px-3 py-1.5 text-left text-[13px] hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${value === f ? 'bg-black/[0.04] font-semibold dark:bg-white/[0.06]' : 'text-neutral-700 dark:text-neutral-300'}`}
+              className={`kv-menu-row truncate hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${value === f ? 'bg-black/[0.04] font-semibold dark:bg-white/[0.06]' : 'text-neutral-700 dark:text-neutral-300'}`}
               style={{ fontFamily: `"${f}"` }}
               onMouseDown={(e) => { e.preventDefault(); select(f) }}
             >

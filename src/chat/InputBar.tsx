@@ -12,6 +12,7 @@ import {
   Eraser,
   Folder,
   FolderPlus,
+  Library,
   ListChecks,
   MessageSquarePlus,
   Network,
@@ -512,6 +513,12 @@ export function InputBar({
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
   const modeEntryEnabled = Boolean(onAgentPlanModeChange)
+  // 状态条只由「真正的上下文」决定是否出现（项目 / 知识库）。
+  // contextSlot（上下文占用）刻意不算进来 —— 它是常驻的，算进来状态条就永不消失，
+  // 空条只挂一个圆点。它归工具栏右侧（与模型信息同列）。
+  const statusBarVisible = Boolean(
+    (projectEntryEnabled && effectiveProject) || knowledgeBaseIds.length > 0,
+  )
   const activeModeOption = AGENT_MODE_OPTIONS.find((option) => option.mode === agentPlanMode)
     ?? AGENT_MODE_OPTIONS[0]
   const activeModePillClass = AGENT_MODE_PILL_CLASS[agentPlanMode]
@@ -1367,7 +1374,7 @@ export function InputBar({
           <>
             <div className="fixed inset-0 z-30" onClick={() => setToolPanelOpen(false)} aria-hidden />
             <div
-              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-hidden rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] shadow-[0_10px_28px_rgba(0,0,0,0.14)] dark:border-neutral-700 dark:bg-neutral-900 ${projectPanelPlacementClass}`}
+              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-hidden kv-menu ${projectPanelPlacementClass}`}
               style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
               data-tauri-drag-region="false"
             >
@@ -1418,7 +1425,7 @@ export function InputBar({
         )}
         {slashPanelOpen && (
           <div
-            className={`chat-motion-popover absolute z-40 overflow-hidden rounded-lg border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-0.5 font-sans shadow-[0_6px_18px_-16px_rgba(0,0,0,0.2),0_1px_4px_rgba(0,0,0,0.05)] dark:border-neutral-700 dark:bg-neutral-900 ${slashPanelPlacementClass}`}
+            className={`chat-motion-popover absolute z-40 overflow-hidden kv-menu font-sans ${slashPanelPlacementClass}`}
             style={{
               ['--chat-popover-origin' as string]: slashPanelOrigin,
               ['--chat-popover-start-y' as string]: '0px',
@@ -1486,7 +1493,7 @@ export function InputBar({
               aria-hidden
             />
             <div
-              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-visible rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${projectPanelPlacementClass}`}
+              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-visible kv-menu ${projectPanelPlacementClass}`}
               style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
               data-tauri-drag-region="false"
             >
@@ -1578,7 +1585,7 @@ export function InputBar({
                   </button>
                   {projectCreateMenuOpen && (
                     <div
-                      className="absolute left-0 top-full z-50 mt-1 w-[152px] rounded-lg border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 sm:bottom-0 sm:left-full sm:top-auto sm:mt-0 sm:ml-1"
+                      className="absolute left-0 top-full z-50 mt-1 w-[152px] kv-menu sm:bottom-0 sm:left-full sm:top-auto sm:mt-0 sm:ml-1"
                       role="menu"
                     >
                       <button
@@ -1606,9 +1613,43 @@ export function InputBar({
             </div>
           </>
         )}
+        {/* ① 状态条：当前生效的上下文（项目 + 知识库），对齐 Claude Code 的
+            「kivio · main」那一层 —— 放的是「你在哪」，不是动作。
+            没有项目也没挂知识库时整条不渲染（不留空条）。 */}
+        {statusBarVisible && (
+          <div className="chat-composer-status" data-tauri-drag-region="false">
+            {effectiveProject && (
+              <button
+                type="button"
+                onClick={toggleProjectMenu}
+                disabled={disabled}
+                className="chat-composer-status-item"
+                title={`项目 · ${effectiveProject.name}`}
+                aria-haspopup="menu"
+                aria-expanded={projectMenuOpen}
+              >
+                <Folder strokeWidth={1.75} />
+                <span className="min-w-0 truncate">{effectiveProject.name}</span>
+              </button>
+            )}
+            {knowledgeBaseIds.length > 0 && (
+              <>
+                {effectiveProject && <span className="chat-composer-status-sep">·</span>}
+                <span
+                  className="chat-composer-status-item"
+                  title={`已挂载 ${knowledgeBaseIds.length} 个知识库`}
+                >
+                  <Library strokeWidth={1.75} />
+                  {knowledgeBaseIds.length}
+                </span>
+              </>
+            )}
+          </div>
+        )}
+
         <div
           data-chat-composer="true"
-          className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-[28px] border px-3 py-2.5 transition-[box-shadow,border-color] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
+          className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-xl border px-3 py-2 transition-[box-shadow,border-color] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
             dragActive
               ? 'border-[#e8a090] shadow-[0_2px_12px_rgba(0,0,0,0.06)] ring-2 ring-[#e8a090]/25 dark:border-[#e8a090] dark:shadow-none'
               : agentPlanActive
@@ -1678,9 +1719,51 @@ export function InputBar({
                 : 'Ask me anything...'
             }
             rows={1}
-            className="block max-h-40 min-h-[28px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent px-1 py-1.5 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
+            className="block max-h-40 min-h-[28px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-10 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
           />
-          <div className="mt-1.5 flex items-center gap-1">
+
+          {/* 发送 / 停止：绝对定位在输入框右侧。用 inset-y-0 + my-auto 让浏览器按容器
+              实际高度算垂直居中（别手数 py/border 的格子，容器内距在容器查询里还会变）。
+              两按钮共存于同一槽位，按 cancelVisible 做 opacity+scale crossfade。 */}
+          <div className="chat-composer-send-slot absolute inset-y-0 right-2 my-auto h-7 w-7">
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!canSend}
+              tabIndex={-1}
+              title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
+              aria-label={sendDisabledReason || '发送'}
+              aria-hidden={cancelVisible && !!onCancel}
+              className={`chat-composer-send absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
+                cancelVisible && onCancel
+                  ? 'pointer-events-none scale-90 opacity-0'
+                  : 'opacity-100'
+              } ${canSend ? 'is-ready' : ''}`}
+            >
+              <ArrowUp size={16} strokeWidth={2.25} />
+            </button>
+            {onCancel ? (
+              <button
+                type="button"
+                onClick={onCancel}
+                disabled={cancelling}
+                tabIndex={cancelVisible ? undefined : -1}
+                aria-hidden={!cancelVisible}
+                className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
+                  cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
+                }`}
+                title={cancelling ? '正在停止' : '停止生成'}
+                aria-label={cancelling ? '正在停止' : '停止生成'}
+              >
+                <Square size={12} strokeWidth={2.4} fill="currentColor" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {/* ③ 功能栏：移出输入框，裸露坐在窗口底色上（无背景无边框）。
+            这样输入框高度只由文本决定，能收到单行 —— 原来图标在盒内，盒子被撑到 ~100px。 */}
+        <div className="chat-composer-tools" data-tauri-drag-region="false">
             <IconButton
               size="sm"
               shape="circle"
@@ -1710,11 +1793,13 @@ export function InputBar({
                 anchorRef={innerRef}
               />
             )}
-            {projectEntryEnabled && (
+            {/* 已选项目时这个入口移到状态条（那里是「当前上下文」的位置），
+                工具栏只在未选项目时保留「进入项目」这个动作。 */}
+            {projectEntryEnabled && !effectiveProject && (
               <IconButton
                 size="sm"
                 shape="circle"
-                label={effectiveProject ? `项目 · ${effectiveProject.name}` : '进入项目工作'}
+                label="进入项目工作"
                 onClick={toggleProjectMenu}
                 disabled={disabled}
                 aria-expanded={projectMenuOpen}
@@ -1722,16 +1807,10 @@ export function InputBar({
                 className={`shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 disabled:opacity-50 dark:focus-visible:ring-neutral-600 ${
                   projectMenuOpen
                     ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-100'
-                    : effectiveProject
-                      ? 'text-indigo-500! dark:text-indigo-300!'
-                      : ''
+                    : ''
                 }`}
               >
-                {effectiveProject ? (
-                  <Folder size={18} strokeWidth={1.75} />
-                ) : (
-                  <FolderPlus size={18} strokeWidth={1.75} />
-                )}
+                <FolderPlus size={18} strokeWidth={1.75} />
               </IconButton>
             )}
             {showAssistantEntry && onOpenAssistantCenter && (
@@ -1798,7 +1877,7 @@ export function InputBar({
                   <>
                     <div className="fixed inset-0 z-30" onClick={closeModeMenu} aria-hidden />
                     <div
-                      className={`chat-motion-popover absolute right-0 z-40 w-[min(236px,calc(100vw-32px))] overflow-visible rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${projectPanelPlacementClass}`}
+                      className={`chat-motion-popover absolute right-0 z-40 w-[min(236px,calc(100vw-32px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
                       style={{ ['--chat-popover-origin' as string]: modePanelOrigin }}
                       data-tauri-drag-region="false"
                       role="menu"
@@ -1813,7 +1892,7 @@ export function InputBar({
                             role="menuitemradio"
                             aria-checked={active}
                             onClick={() => void setAgentPlanMode(option.mode)}
-                            className={`flex min-h-[30px] w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors ${
+                            className={`kv-menu-row transition-colors ${
                               active
                                 ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
                                 : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
@@ -1842,50 +1921,9 @@ export function InputBar({
               </div>
             )}
 
-            {/* 发送 / 停止：两按钮共存于同一槽位，按 cancelVisible 做 opacity+scale crossfade */}
-            <div className="relative h-9 w-9 shrink-0">
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!canSend}
-                tabIndex={-1}
-                title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
-                aria-label={sendDisabledReason || '发送'}
-                aria-hidden={cancelVisible && !!onCancel}
-                className={`absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-spring)] ${
-                  cancelVisible && onCancel
-                    ? 'pointer-events-none scale-90 opacity-0'
-                    : 'opacity-100'
-                } ${
-                  canSend
-                    ? `bg-[#e8a090] text-white shadow-sm hover:bg-[#df9585] active:scale-90${
-                        cancelVisible && onCancel ? '' : ' chat-motion-soft-pulse'
-                      }`
-                    : 'bg-neutral-200 text-neutral-400 dark:bg-neutral-700 dark:text-neutral-500'
-                }`}
-              >
-                <ArrowUp size={18} strokeWidth={2.25} />
-              </button>
-              {onCancel ? (
-                <button
-                  type="button"
-                  onClick={onCancel}
-                  disabled={cancelling}
-                  tabIndex={cancelVisible ? undefined : -1}
-                  aria-hidden={!cancelVisible}
-                  className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white shadow-sm transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
-                    cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
-                  }`}
-                  title={cancelling ? '正在停止' : '停止生成'}
-                  aria-label={cancelling ? '正在停止' : '停止生成'}
-                >
-                  <Square size={13} strokeWidth={2.4} fill="currentColor" />
-                </button>
-              ) : null}
-            </div>
+            {/* 发送 / 停止已移进输入框右端（见 textarea 同级的 chat-composer-send-slot）。 */}
             </div>
           </div>
-        </div>
       </div>
     </div>
   )

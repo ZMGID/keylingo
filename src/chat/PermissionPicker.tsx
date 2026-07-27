@@ -121,7 +121,7 @@ function PermissionPickerBase({
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-          <div ref={menuRef} style={{ maxHeight: maxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[180px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+          <div ref={menuRef} style={{ maxHeight: maxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[180px] overflow-y-auto kv-menu">
             {options.map((option) => {
               const active = option.value === current
               return (
@@ -129,7 +129,7 @@ function PermissionPickerBase({
                   key={option.value}
                   type="button"
                   onClick={() => pick(option.value)}
-                  className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors ${
+                  className={`kv-menu-row justify-between transition-colors ${
                     active
                       ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
                       : 'text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:hover:bg-neutral-800/80'

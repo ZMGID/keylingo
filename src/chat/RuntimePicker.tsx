@@ -399,7 +399,7 @@ function ExternalModelSelectorBase({
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-            <div ref={modelMenuRef} style={{ maxHeight: modelMenuMaxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[200px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+            <div ref={modelMenuRef} style={{ maxHeight: modelMenuMaxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[200px] overflow-y-auto kv-menu">
               {source === 'fallback' && (
                 <div className="kv-runtime-picker__fallback mx-1 my-1">
                   <span>探测失败，显示默认列表</span>
@@ -417,7 +417,7 @@ function ExternalModelSelectorBase({
                 </div>
               )}
               {models.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-neutral-500 dark:text-neutral-400">
+                <div className="kv-menu-row text-neutral-500 dark:text-neutral-400">
                   {loading ? '正在探测模型…' : '该 CLI 未上报可用模型'}
                 </div>
               ) : (
@@ -429,7 +429,7 @@ function ExternalModelSelectorBase({
                       onModelChange(model.id)
                       setOpen(false)
                     }}
-                    className={`block w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800 ${
+                    className={`kv-menu-row text-neutral-700 hover:bg-black/[0.05] dark:text-neutral-200 dark:hover:bg-white/[0.07] ${
                       agentRuntime.externalModel === model.id ? 'font-semibold' : ''
                     }`}
                   >
@@ -468,7 +468,7 @@ function ExternalModelSelectorBase({
                 onClick={() => setReasoningOpen(false)}
                 aria-hidden
               />
-              <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[160px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+              <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[160px] overflow-y-auto kv-menu">
                 {reasoningOptions.map((option) => {
                   const active = option.id === reasoningPillValue
                   return (
@@ -479,7 +479,7 @@ function ExternalModelSelectorBase({
                         onModelChange(agentRuntime.externalModel ?? 'default', option.id)
                         setReasoningOpen(false)
                       }}
-                      className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors ${
+                      className={`kv-menu-row justify-between transition-colors ${
                         active
                           ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
                           : 'text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:hover:bg-neutral-800/80'

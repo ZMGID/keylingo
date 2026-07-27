@@ -600,11 +600,20 @@ body {
 }
 
 .chat-sidebar-shell {
-  /* 表面层级第 3 层（最深）：比主区再低一档，三套浅色主题各自从 --theme-surface-muted 派生，保持色相 */
-  background: color-mix(in srgb, var(--theme-surface-muted) 92%, #000);
-  /* 注意：--border 变量只在 settings-embedded 作用域定义，这里必须直接引用主题变量 */
-  border-right: 1px solid var(--theme-surface-border);
-  /* 折叠动画：负 margin 把固定宽度（240px，与 w-[240px] 同步）的侧栏整体滑出左侧，
+  /* 悬浮卡片式侧栏：四周留 8px，缝隙透出 .chat-window-shell 的 --theme-surface（= 主区底色）。
+     色彩对齐 Claude Code：侧栏与主区几乎同亮度（差 ~2%），分离感几乎全部来自那道缝 +
+     一条极淡的 hairline。反直觉但关键 —— 灰阶差一旦超过 4%，就从「一张纸浮起来」
+     退回「两块拼在一起的板」。所以用 --theme-surface-soft（≈2% 差）而不是 muted（3.5%，偏重），
+     描边也不能用 border-strong（近白卡片上会读成一条灰线）。
+     高度由 flex align-items:stretch 减掉上下 margin 得出（所以 aside 上不能再挂 h-full）。 */
+  margin: 8px;
+  border-radius: 12px;
+  background: var(--theme-surface-soft);
+  border: 1px solid rgba(24, 24, 27, 0.07);
+  box-shadow:
+    0 1px 2px rgba(24, 24, 27, 0.04),
+    0 5px 14px -8px rgba(24, 24, 27, 0.10);
+  /* 折叠动画：负 margin 把整张卡片（240px 宽 + 8px 左 margin，与 w-[240px] 同步）滑出左侧，
      由 .chat-window-shell 的 overflow:hidden 裁剪；width 不变 → 内容不被压缩。 */
   transition:
     margin-left var(--kv-dur-slow) var(--kv-ease-standard),
@@ -612,13 +621,130 @@ body {
 }
 
 .chat-sidebar-shell.is-collapsed {
-  margin-left: -240px;
+  margin-left: -248px;
   opacity: 0;
   pointer-events: none;
 }
 
 .chat-composer-shell {
   background: var(--theme-surface);
+}
+
+/* ===== 输入区三层结构 =====
+   原来是「一个 28px 大圆角盒子，图标全塞在里面」→ 盒子被撑到 ~100px 高。
+   改为三条独立横条（对齐 Claude Code）：
+     ① .chat-composer-status  上下文状态条（项目/集/知识库 + 上下文占用），灰底，仅在有内容时渲染
+     ② .chat-composer-shell   纯输入框，白底描边，高度只由文本决定
+     ③ .chat-composer-tools   功能栏，完全裸露坐在窗口底色上，无背景无边框
+   三层各自决定高度，输入框因此能收到单行。 */
+.chat-composer-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background: var(--theme-surface-muted);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.dark .chat-composer-status {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* 状态条内的一格（项目、集、知识库…）：图标 + 文字，可点则有 hover */
+.chat-composer-status-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--text);
+  transition: background-color var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+button.chat-composer-status-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark button.chat-composer-status-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.chat-composer-status-item > svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.chat-composer-status-sep {
+  flex-shrink: 0;
+  color: var(--theme-surface-border-strong);
+}
+
+.chat-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  padding: 0 2px;
+}
+
+/* 裸露工具栏上的图标钮：原来是极浅的细线图标，飘在点阵背景上立不住。
+   加深到 --text-faint 之上一档，并让 hover 有明确的底，读作「可按」。 */
+.chat-composer-tools .kv-icon-btn {
+  color: #71717a;
+}
+
+.dark .chat-composer-tools .kv-icon-btn {
+  color: #a1a1aa;
+}
+
+.chat-composer-tools .kv-icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.dark .chat-composer-tools .kv-icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* 图标统一 16px：各调用点传的是 18（原来在高盒子里合适），裸栏里偏大。
+   在这里统一压一档，省得逐个改 size=。 */
+.chat-composer-tools .kv-icon-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 输入框内的发送键：28px 圆形，贴框内右下角。
+   空输入时是一枚安静的浅灰圆（不抢文本注意力），有内容时才上强调色 —— 强调只在
+   「真的可以发」这一刻出现，比常驻橙色大圆克制。 */
+.chat-composer-send {
+  color: var(--text-faint);
+  background: var(--theme-surface-muted);
+}
+
+.dark .chat-composer-send {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.chat-composer-send.is-ready {
+  color: #fff;
+  background: #e8a090;
+}
+
+.chat-composer-send.is-ready:hover {
+  background: #df9585;
+}
+
+.chat-composer-send.is-ready:active {
+  transform: scale(0.9);
 }
 
 .chat-message-navigator {
@@ -823,8 +949,13 @@ body {
 }
 
 .dark .chat-sidebar-shell {
-  background: #1c1c1e;
-  border-right-color: rgba(255, 255, 255, 0.07);
+  /* 暗色同理：主区 #212121，侧栏只比它亮一点点（不是压深 —— 暗色里「浮起」= 更亮，
+     压深读作凹陷）。 */
+  background: #262629;
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    0 5px 16px -8px rgba(0, 0, 0, 0.45);
 }
 
 .dark .chat-composer-shell {
@@ -899,15 +1030,14 @@ body {
   }
 
   .chat-composer-shell {
-    border-radius: 22px;
-    padding-top: 0.5rem;
-    padding-bottom: 0.5rem;
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
   }
 }
 
 @container chat-main (max-width: 440px) {
   .chat-titlebar-row--collapsed-mac {
-    padding-left: 72px;
+    padding-left: 80px;
   }
 
   .chat-titlebar-row {
@@ -980,6 +1110,13 @@ body {
   .chat-composer-shell {
     padding-top: 0.375rem;
     padding-bottom: 0.375rem;
+  }
+
+  /* 窄容器：状态条压扁一档，长项目名靠 min-width:0 + truncate 自行收缩 */
+  .chat-composer-status {
+    min-height: 28px;
+    padding: 0 6px;
+    font-size: 11.5px;
   }
 
   .chat-composer-footer {
@@ -1117,6 +1254,120 @@ body {
 .chat-motion-menu-cascade > *:nth-child(3) { animation-delay: 68ms; }
 .chat-motion-menu-cascade > *:nth-child(4) { animation-delay: 92ms; }
 .chat-motion-menu-cascade > *:nth-child(n + 5) { animation-delay: 112ms; }
+
+/* ===== 弹出菜单统一规格 =====
+   之前 12 个文件各自手搓（px-3.5 py-2 / px-2.5 py-2 / gap-3 / gap-2.5 …），
+   行高和内距都不一致、整体偏大。这里定一套：菜单项 26px 行高、12px 字、
+   10px 横内距、图标 14px。改这里 = 全站菜单一起变。
+   注意：不含定位/入场动画（那些留在各自的 fixed + chat-motion-* 上）。 */
+.kv-menu {
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--theme-surface-border);
+  background: var(--theme-surface);
+  box-shadow:
+    0 0 0 0.5px rgba(24, 24, 27, 0.04),
+    0 4px 12px -4px rgba(24, 24, 27, 0.12),
+    0 12px 28px -12px rgba(24, 24, 27, 0.18);
+}
+
+.dark .kv-menu {
+  border-color: rgba(255, 255, 255, 0.09);
+  background: #2a2a2c;
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.05),
+    0 4px 14px -4px rgba(0, 0, 0, 0.5),
+    0 14px 32px -14px rgba(0, 0, 0, 0.6);
+}
+
+.kv-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text);
+  transition: background-color var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+.kv-menu-item:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .kv-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.kv-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 菜单项内的 lucide 图标：统一压到 14px 且不参与 flex 收缩 */
+.kv-menu-item > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+/* 只管尺寸的变体：给那些自带选中态/hover 条件类的选择器项用（picker 里的模板字符串），
+   套上它统一行高与内距，颜色和 hover 仍归调用方。 */
+.kv-menu-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  min-height: 28px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.kv-menu-item--danger {
+  color: var(--danger);
+}
+
+.kv-menu-item--danger > svg {
+  color: currentColor;
+}
+
+.kv-menu-item--danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* 右侧从属信息（快捷键、当前值） */
+.kv-menu-hint {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.kv-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--theme-surface-border);
+}
+
+.dark .kv-menu-sep {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 分组小标题 */
+.kv-menu-label {
+  padding: 6px 8px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
 
 .chat-motion-soft-pulse {
   animation: chat-motion-soft-pulse 1.8s ease-in-out infinite;
@@ -2054,8 +2305,9 @@ body {
   overflow: hidden;
 }
 
+/* 设置页自带导航栏顶掉聊天侧栏时，导航栏贴窗口顶 → 也要多留卡片那 8px 才不压到灯 */
 .settings-embedded--traffic-safe .settings-embedded-nav {
-  padding-top: 52px;
+  padding-top: 60px;
 }
 
 .dark .chat-window-shell .settings-embedded-nav {
@@ -2630,6 +2882,28 @@ body {
   }
 }
 
+/* 侧栏收起时顶栏行回到主区（主区贴窗口顶/左，没有侧栏卡片那 8px 外边距），
+   但交通灯是窗口级的、位置按「卡片内顶栏」算过（windows.rs 里 x/y 都 +8）。
+   这里把收起态的行整体下压 + 右推同样的 8px，灯与图标才继续同心。 */
+.chat-titlebar-row--collapsed-mac {
+  padding-top: 8px;
+  padding-left: 100px;
+}
+
+/* macOS 全屏：系统隐藏交通灯，所有为灯预留的缩进都要撤掉，否则顶栏左边空一大块。
+   `pl-[92px]` 是 Tailwind 工具类（`chatTitlebarMacInsetClass`），只能靠 !important 覆盖。 */
+.chat-window-host--mac-fullscreen .chat-titlebar-row {
+  padding-left: 0.75rem !important;
+}
+
+.chat-window-host--mac-fullscreen .chat-titlebar-row--collapsed-mac {
+  padding-top: 0;
+}
+
+.chat-window-host--mac-fullscreen .settings-embedded--traffic-safe .settings-embedded-nav {
+  padding-top: 16px;
+}
+
 .chat-traffic {
   display: flex;
   align-items: center;
@@ -3198,16 +3472,69 @@ body {
 }
 .kv-select-button { line-height: 1.35; }
 .kv-select-menu {
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--theme-surface-border);
+  background: var(--theme-surface);
+  box-shadow:
+    0 0 0 0.5px rgba(24, 24, 27, 0.04),
+    0 4px 12px -4px rgba(24, 24, 27, 0.12),
+    0 12px 28px -12px rgba(24, 24, 27, 0.18);
 }
 .dark .kv-select-menu {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(29, 29, 31, 0.96);
+  border-color: rgba(255, 255, 255, 0.09);
+  background: #2a2a2c;
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.05),
+    0 4px 14px -4px rgba(0, 0, 0, 0.5),
+    0 14px 32px -14px rgba(0, 0, 0, 0.6);
+}
+
+/* 选项行：与 .kv-menu-item 同规格（28px / 12.5px）。
+   勾常驻左侧但未选中时 visibility:hidden —— 这样标签起点始终对齐，
+   且不必给右侧留 32px 空位（原来 pr-8 把标签提前截断成「白山智算 - DeepSeek-…」）。 */
+.kv-select-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text);
+  transition: background-color var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+.kv-select-option:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .kv-select-option:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 选中态：macOS 原生下拉是「勾 + 轻底」，不是实心蓝条（那是 Win98 观感）。 */
+.kv-select-option.is-active {
+  font-weight: 500;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .kv-select-option.is-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.kv-select-option-check {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  visibility: hidden;
+  color: var(--accent);
+}
+
+.kv-select-option.is-active .kv-select-option-check {
+  visibility: visible;
 }
 
 .kv-input {

@@ -86,7 +86,7 @@ export function AssistantPicker({
       ? createPortal(
           <div
             ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
+            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 overflow-y-auto kv-menu ${placement}`}
             style={{ ['--chat-popover-origin' as string]: origin, maxHeight: maxH }}
             data-tauri-drag-region="false"
             role="menu"
@@ -95,7 +95,7 @@ export function AssistantPicker({
               <button
                 type="button"
                 onClick={() => pick(null)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-neutral-500 transition-colors hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800"
+                className="kv-menu-item"
               >
                 <span className="grid size-4 shrink-0 place-items-center">
                   <Bot size={13} strokeWidth={1.75} />
@@ -113,7 +113,7 @@ export function AssistantPicker({
                     key={assistant.id}
                     type="button"
                     onClick={() => pick(assistant)}
-                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors ${
+                    className={`kv-menu-row transition-colors ${
                       active
                         ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
                         : 'text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
@@ -135,7 +135,7 @@ export function AssistantPicker({
                 setOpen(false)
                 onOpenCenter()
               }}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+              className="kv-menu-item"
             >
               <span className="grid size-4 shrink-0 place-items-center">
                 <Settings2 size={13} strokeWidth={1.75} />
