@@ -9,8 +9,8 @@ use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ChatMessage
 use crate::mcp::ChatToolDefinition;
 
 use super::finalize::{
-    cancelled_run_result_from_state, cancelled_tool_round_run_result,
-    emit_builtin_web_search_card, tool_planning_failed_run_result, RunResultBuilder,
+    cancelled_run_result_from_state, cancelled_tool_round_run_result, emit_builtin_web_search_card,
+    tool_planning_failed_run_result, RunResultBuilder,
 };
 use super::host::AgentHost;
 use super::loop_::{LoopEnv, RunState};
@@ -379,9 +379,14 @@ pub(crate) async fn planning_step(
                 let content = super::synthesis::recover_synthesis(env, state, &err).await;
                 if !content.trim().is_empty() {
                     eprintln!("Chat planning call failed mid-run; recovered: {err}");
+                    // 降级文案是本轮的**正文**，段 phase 必须是 Synthesis（不能留 ToolLoop）：
+                    // content_from_segments 只认 Plain|Synthesis，留 ToolLoop 会让
+                    // normalize_assistant_segments 以为正文没落段而再补一条，正文渲染两遍。
+                    let mut segment = planning_text_segment.clone();
+                    segment.phase = ChatMessageSegmentPhase::Synthesis;
                     return Ok(PlanningStepOutcome::Recovered(
                         RunResultBuilder::new(host, env.ids(), content)
-                            .segment(&planning_text_segment)
+                            .segment(&segment)
                             .emit_done("done")
                             .outcome("recovered")
                             .finish(
@@ -401,7 +406,9 @@ pub(crate) async fn planning_step(
     // 非流式只在拿到完整答案后合成（planning_web_search 才有值）。绝不双卡。
     if let Some(tracker) = planning_web_search_tracker.as_ref() {
         if let Some((record, segment)) = tracker.take_card() {
-            state.segment_builder.append_existing_segments(vec![segment]);
+            state
+                .segment_builder
+                .append_existing_segments(vec![segment]);
             state.tool_records.push(record);
         }
     }
@@ -424,7 +431,12 @@ pub(crate) async fn planning_step(
         // 空响应重试（一次）：正文空 + 无工具调用 = 抽风网关的典型症状（HTTP 200 但
         // 正文什么都没给，可能残留一段 reasoning）。这种消息走到 finalize 必报
         // "empty assistant response"——与其断轮不如原地重试一次；再空则照旧报错。
-        if response.trim().is_empty() && !state.planning_empty_retried {
+        // 例外：本轮出了图（hosted image generation，如 Responses 的 image_generation_call）
+        // 时正文本就是空串——图即答案，重试只会再生成一张，必须放行。
+        if response.trim().is_empty()
+            && state.generated_images.is_empty()
+            && !state.planning_empty_retried
+        {
             state.planning_empty_retried = true;
             eprintln!("Chat tools planning returned an empty response; retrying once");
             return Ok(PlanningStepOutcome::RetryEmptyResponse);
@@ -605,7 +617,12 @@ pub(crate) async fn call_chat_completion_output_with_usage(
     let usage = output.usage.clone();
     let web_search = output.web_search.clone();
     let images = output.images.clone();
-    Ok((output.to_openai_compatible_message(), usage, web_search, images))
+    Ok((
+        output.to_openai_compatible_message(),
+        usage,
+        web_search,
+        images,
+    ))
 }
 
 /// 与 `call_chat_completion_message_with_usage` 同形（返回 `to_openai_compatible_message()` Value），

@@ -870,10 +870,19 @@ fn call_present_artifacts(
         return Err("present_artifacts accepts at most 16 files".to_string());
     }
 
-    let artifacts = paths
-        .iter()
-        .map(|path| local_file_artifact(workspace, path))
-        .collect::<Result<Vec<_>, _>>()?;
+    // 模型常把生成图的 artifact 名（generated-image-1.png）当成 path 一起传进来。
+    // 单个 path 读不到不能废掉整次调用，否则同一调用里的 artifact_ids 也一起丢，图就不显示了。
+    let mut artifacts = Vec::new();
+    let mut skipped = Vec::new();
+    for path in &paths {
+        match local_file_artifact(workspace, path) {
+            Ok(artifact) => artifacts.push(artifact),
+            Err(err) => skipped.push(err),
+        }
+    }
+    if artifacts.is_empty() && artifact_ids.is_empty() {
+        return Err(skipped.join("; "));
+    }
     let caption = arguments
         .get("caption")
         .and_then(Value::as_str)
@@ -887,8 +896,15 @@ fn call_present_artifacts(
     if let Some(caption) = caption {
         structured["caption"] = Value::String(caption);
     }
+    let mut content = "Selected files will be displayed at this point in the response.".to_string();
+    if !skipped.is_empty() {
+        content.push_str(&format!(
+            "\n\nSkipped (artifact IDs, not file paths, identify generated files): {}",
+            skipped.join("; ")
+        ));
+    }
     Ok(McpToolCallResult {
-        content: "Selected files will be displayed at this point in the response.".to_string(),
+        content,
         is_error: false,
         raw: structured.clone(),
         artifacts,
@@ -1244,6 +1260,33 @@ mod tests {
             }))
         );
         assert!(result.artifacts.is_empty());
+    }
+
+    #[test]
+    fn present_artifacts_keeps_ids_when_a_path_is_unreadable() {
+        // 模型把生成图的 artifact 名当 path 传进来时，artifact_ids 仍须生效。
+        let workspace = NativeToolWorkspace::standalone();
+        let result = call_present_artifacts(
+            &workspace,
+            &serde_json::json!({
+                "artifact_ids": ["art_a"],
+                "paths": ["generated-image-1.png"]
+            }),
+        )
+        .expect("presentation survives an unreadable path");
+        assert!(result.artifacts.is_empty());
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["artifactIds"],
+            serde_json::json!(["art_a"])
+        );
+        assert!(result.content.contains("generated-image-1.png"));
+
+        // 全部无效时仍报错。
+        assert!(call_present_artifacts(
+            &workspace,
+            &serde_json::json!({ "paths": ["generated-image-1.png"] })
+        )
+        .is_err());
     }
 
     #[test]

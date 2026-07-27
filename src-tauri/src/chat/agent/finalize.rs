@@ -9,7 +9,7 @@ use crate::chat::types::{
 use super::host::AgentHost;
 use super::loop_::{LoopEnv, RunIds, RunState};
 use super::stop::{
-    final_assistant_api_message, final_response_from_planning_message, merge_reasoning,
+    final_assistant_api_message, final_response_from_planning_message_with_images, merge_reasoning,
 };
 use super::stream::ToolCallDraftTracker;
 use super::synthesis::SynthesisCompleted;
@@ -292,8 +292,11 @@ pub(crate) fn finalize_planning_final(
     message: Value,
 ) -> Result<AgentRunResult, String> {
     let config = env.config;
-    let (response, reasoning) =
-        final_response_from_planning_message(&message, &state.planning_reasoning_parts)?;
+    let (response, reasoning) = final_response_from_planning_message_with_images(
+        &message,
+        &state.planning_reasoning_parts,
+        !state.generated_images.is_empty(),
+    )?;
     if !state.planning_final_streamed {
         env.host.emit_stream_delta(
             &config.conversation_id,
@@ -559,7 +562,9 @@ pub(crate) fn emit_builtin_web_search_card(
     host.emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
     let order = order.unwrap_or_else(|| state.segment_builder.next_order());
     let segment = build_web_search_segment(order, &id, phase, round);
-    state.segment_builder.append_existing_segments(vec![segment]);
+    state
+        .segment_builder
+        .append_existing_segments(vec![segment]);
     state.tool_records.push(record);
 }
 

@@ -2748,7 +2748,11 @@ async fn run_loop_stream_builtin_web_search_card_precedes_answer_single_card() {
         .iter()
         .filter(|record| record.name == "web_search")
         .collect();
-    assert_eq!(web_records.len(), 1, "exactly one persisted web_search card");
+    assert_eq!(
+        web_records.len(),
+        1,
+        "exactly one persisted web_search card"
+    );
     assert!(matches!(web_records[0].status, ToolCallStatus::Success));
 
     // 卡段唯一（不双卡），且 order 落在答案文本段之前。

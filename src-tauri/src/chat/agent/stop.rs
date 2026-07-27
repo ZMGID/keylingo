@@ -57,8 +57,18 @@ pub fn final_response_from_planning_message(
     message: &Value,
     planning_reasoning_parts: &[String],
 ) -> Result<(String, Option<String>), String> {
+    final_response_from_planning_message_with_images(message, planning_reasoning_parts, false)
+}
+
+/// 同上，但允许「本轮出了图」时正文为空：hosted image generation（Responses
+/// `image_generation_call`）的正文本就是空串——图即答案，此时空正文不是失败。
+pub fn final_response_from_planning_message_with_images(
+    message: &Value,
+    planning_reasoning_parts: &[String],
+    has_images: bool,
+) -> Result<(String, Option<String>), String> {
     let response = sanitize_assistant_text_response(&assistant_content_from_api_message(message));
-    if response.trim().is_empty() {
+    if response.trim().is_empty() && !has_images {
         return Err(empty_assistant_response_error("Chat tools planning"));
     }
     let reasoning = merge_reasoning(planning_reasoning_parts, extract_reasoning_content(message));

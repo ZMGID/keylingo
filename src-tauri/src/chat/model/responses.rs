@@ -23,8 +23,8 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, responses_input_from_model_messages, stream_read_error,
-    BuiltinWebSearch, GenerateOutput, GenerateRequest, LanguageModelProvider, ModelError,
+    parse_tool_arguments, responses_input_from_model_messages, stream_read_error, BuiltinWebSearch,
+    GenerateOutput, GeneratedImageData, GenerateRequest, LanguageModelProvider, ModelError,
     ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
@@ -537,6 +537,10 @@ struct ResponsesStreamState {
     /// `finish()` 时若整轮没有任何 url_citation(grok 搜完常直接岔去客户端 web_fetch、
     /// 该轮不产正文注解)才把 sources 转正为 citations 兜底,保证搜索卡有来源可显示。
     sources_fallback: Vec<WebCitation>,
+    /// hosted image generation（`image_generation_call`）产出的图。gpt-5.x 在
+    /// Responses 上可自行决定用托管出图回答，此时 `message.output_text` 是空串
+    /// ——图就是答案。不收这些图会让整轮变成「空助手响应」而报错。
+    images: Vec<GeneratedImageData>,
 }
 
 impl ResponsesStreamState {
@@ -553,7 +557,9 @@ impl ResponsesStreamState {
         if query.is_empty() {
             return;
         }
-        let ws = self.web_search.get_or_insert_with(BuiltinWebSearch::default);
+        let ws = self
+            .web_search
+            .get_or_insert_with(BuiltinWebSearch::default);
         if !ws.queries.iter().any(|q| q == query) {
             ws.queries.push(query.to_string());
         }
@@ -565,7 +571,9 @@ impl ResponsesStreamState {
         if url.is_empty() {
             return;
         }
-        let ws = self.web_search.get_or_insert_with(BuiltinWebSearch::default);
+        let ws = self
+            .web_search
+            .get_or_insert_with(BuiltinWebSearch::default);
         if !ws.citations.iter().any(|c| c.url == url) {
             ws.citations.push(WebCitation {
                 title: title.trim().to_string(),
@@ -663,9 +671,36 @@ impl ResponsesStreamState {
             provider_messages: Vec::new(),
             cancelled: false,
             web_search: self.web_search,
-            images: Vec::new(),
+            images: self.images,
         })
     }
+}
+
+/// 从一个 `image_generation_call` output item 取出生成的图。`result` 是裸 base64
+/// （无 `data:` 前缀），mime 由 `output_format`（png/jpeg/webp）推出，缺省 png。
+/// 解析尽力而为：没有 `result` 就返回 None，绝不 panic。
+fn responses_image_from_item(item: &Value) -> Option<GeneratedImageData> {
+    let data = item
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let format = item
+        .get("output_format")
+        .and_then(Value::as_str)
+        .unwrap_or("png")
+        .trim()
+        .to_ascii_lowercase();
+    let mime_type = match format.as_str() {
+        "jpeg" | "jpg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/png",
+    };
+    Some(GeneratedImageData {
+        mime_type: mime_type.to_string(),
+        data: data.to_string(),
+    })
 }
 
 /// Dispatch a single streaming Responses event into the accumulating state, emitting
@@ -777,8 +812,7 @@ fn handle_responses_stream_event(
                         state.finalize_tool_call(item_id, sink)?;
                     }
                     // 内置搜索：hosted web_search 的查询词在此事件到达（completed 的 output 里不重现）。
-                    Some("web_search_call") => {
-                        if let Some(action) = item.get("action") {
+                    Some("web_search_call") => {                        if let Some(action) = item.get("action") {
                             if let Some(q) = action.get("query").and_then(Value::as_str) {
                                 state.push_web_search_query(q);
                             }
@@ -789,8 +823,7 @@ fn handle_responses_stream_event(
                             }
                             // grok(xAI) 特有:action.sources[] 是检索命中的 URL,先收集,
                             // finish() 时无 url_citation 才转正为兜底来源。
-                            if let Some(sources) = action.get("sources").and_then(Value::as_array)
-                            {
+                            if let Some(sources) = action.get("sources").and_then(Value::as_array) {
                                 for source in sources {
                                     let Some(url) = source
                                         .get("url")
@@ -811,6 +844,17 @@ fn handle_responses_stream_event(
                         }
                         // push 完 emit 当前累加快照 → 实时更新卡（带查询词）。
                         state.emit_web_search_snapshot(sink)?;
+                    }
+                    // hosted 出图：完整 base64 在 item.result。message 的 output_text 常为
+                    // 空串（图就是答案），不收这张图整轮会被判成空助手响应。
+                    Some("image_generation_call") => {
+                        if let Some(image) = responses_image_from_item(item) {
+                            sink.emit(StreamPart::ImageData {
+                                mime_type: image.mime_type.clone(),
+                                data: image.data.clone(),
+                            })?;
+                            state.images.push(image);
+                        }
                     }
                     _ => {}
                 }
@@ -967,6 +1011,7 @@ pub fn output_from_responses(
 
     let mut text = String::new();
     let mut tool_calls = Vec::new();
+    let mut images = Vec::new();
     for item in output {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
@@ -1008,6 +1053,12 @@ pub fn output_from_responses(
                     signature: None,
                 });
             }
+            // hosted 出图：与流式 `output_item.done` 同一形态，走同一提取器。
+            Some("image_generation_call") => {
+                if let Some(image) = responses_image_from_item(item) {
+                    images.push(image);
+                }
+            }
             _ => {}
         }
     }
@@ -1032,7 +1083,7 @@ pub fn output_from_responses(
         provider_messages: Vec::new(),
         cancelled: false,
         web_search: web_search_from_responses_output(output),
-        images: Vec::new(),
+        images,
     })
 }
 
@@ -1087,8 +1138,7 @@ fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch
             Some("message") => {
                 if let Some(content) = item.get("content").and_then(Value::as_array) {
                     for part in content {
-                        let Some(annotations) =
-                            part.get("annotations").and_then(Value::as_array)
+                        let Some(annotations) = part.get("annotations").and_then(Value::as_array)
                         else {
                             continue;
                         };
@@ -1364,7 +1414,10 @@ mod tests {
         let parsed = web_search_from_responses_output(sources_only.as_array().unwrap())
             .expect("web_search present");
         assert_eq!(parsed.citations.len(), 2, "sources 去重后兜底转正");
-        assert_eq!(parsed.citations[0].url, "https://finance.yahoo.com/quote/NVDA/");
+        assert_eq!(
+            parsed.citations[0].url,
+            "https://finance.yahoo.com/quote/NVDA/"
+        );
 
         // 有 url_citation ⇒ 注解优先,sources 不混入。
         let with_annotation = serde_json::json!([
@@ -1377,6 +1430,39 @@ mod tests {
             .expect("web_search present");
         assert_eq!(parsed.citations.len(), 1);
         assert_eq!(parsed.citations[0].url, "https://cited.example.com");
+    }
+
+    #[test]
+    fn sse_stream_hosted_image_generation_is_captured_with_empty_text() {
+        // 真机形态（xb1520 网关 + gpt-5.6）：模型自行走 hosted image_generation_call 回答，
+        // message 的 output_text 是空串（图即答案），且没有任何 output_text.delta。
+        // 不收 image_generation_call.result 会让整轮变成「空助手响应」而报错。
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"ig_1\",\"type\":\"image_generation_call\",\"status\":\"completed\",\"action\":\"generate\",\"output_format\":\"png\",\"result\":\"aGVsbG8=\"}}\n",
+            "data: {\"type\":\"response.output_text.done\",\"output_index\":2,\"text\":\"\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\"}]}]}}\n",
+            "data: [DONE]\n",
+        );
+        let output = output_from_sse_body(body).expect("sse output");
+        assert!(output.text.trim().is_empty(), "正文确实是空的");
+        assert_eq!(output.images.len(), 1, "hosted 出图必须被收下");
+        assert_eq!(output.images[0].mime_type, "image/png");
+        assert_eq!(output.images[0].data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn nonstream_hosted_image_generation_is_captured() {
+        // 非流式同形态：output[] 里的 image_generation_call 也要出图，mime 按 output_format。
+        let value = serde_json::json!({
+            "status": "completed",
+            "output": [
+                { "type": "image_generation_call", "output_format": "jpeg", "result": "aGVsbG8=" },
+                { "type": "message", "content": [{ "type": "output_text", "text": "" }] }
+            ]
+        });
+        let output = output_from_responses(&value, "{}", "test").expect("output");
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].mime_type, "image/jpeg");
     }
 
     #[test]
@@ -1556,7 +1642,9 @@ mod tests {
             "data: [DONE]\n",
         );
         let output = output_from_sse_body(body).expect("sse output");
-        let ws = output.web_search.expect("web_search captured from stream events");
+        let ws = output
+            .web_search
+            .expect("web_search captured from stream events");
         assert_eq!(ws.queries, vec!["TSLA latest close".to_string()]);
         assert_eq!(ws.citations.len(), 1);
         assert_eq!(ws.citations[0].url, "https://chartexchange.com/x");
@@ -1598,10 +1686,9 @@ mod tests {
             .parts
             .iter()
             .filter_map(|part| match part {
-                StreamPart::WebSearch {
-                    queries,
-                    citations,
-                } => Some((queries.clone(), citations.clone())),
+                StreamPart::WebSearch { queries, citations } => {
+                    Some((queries.clone(), citations.clone()))
+                }
                 _ => None,
             })
             .collect();

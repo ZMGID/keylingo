@@ -797,6 +797,11 @@ pub fn validate_stream_output(
 ) -> Result<(), String> {
     let tool_calls_from_stream = !output.tool_calls.is_empty()
         || !pending_tool_calls_from_dsml(&output.raw_content).is_empty();
+    // hosted 出图（Responses `image_generation_call` / Gemini inlineData）时正文本就是
+    // 空串——图即答案。此时空正文不是失败，否则整轮报「空助手响应」而图被丢掉。
+    if output.content.trim().is_empty() && !output.images.is_empty() {
+        return Ok(());
+    }
     if output.content.trim().is_empty() {
         match policy {
             AgentStreamPolicy::SynthesisAlwaysDone => {
@@ -1089,6 +1094,45 @@ mod tests {
     }
 
     #[test]
+    fn image_only_output_validates_despite_empty_text() {
+        // 真机形态（xb1520 + gpt-5.6 走 Responses hosted image_generation_call）：正文空串、
+        // 无工具调用，但出了图——图即答案。此前 planning 策略会判成「空助手响应」把图丢掉。
+        let mut output = ChatStreamOutput::from_generate_output(
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            Some("stop".to_string()),
+            false,
+        );
+        output.images = vec![GeneratedImageData {
+            mime_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        }];
+
+        validate_stream_output(
+            "Chat tools planning",
+            AgentStreamPolicy::PlanningNoDoneUntilNoTools,
+            &output,
+        )
+        .expect("image-only planning output must validate");
+        // 出图也要真的收尾发 done（否则前端一直转圈）。
+        assert!(should_emit_done(
+            AgentStreamPolicy::PlanningNoDoneUntilNoTools,
+            &output
+        ));
+
+        // 没图时仍照旧报错（不放宽既有守门）。
+        output.images.clear();
+        assert!(validate_stream_output(
+            "Chat tools planning",
+            AgentStreamPolicy::PlanningNoDoneUntilNoTools,
+            &output
+        )
+        .is_err());
+    }
+
+    #[test]
     fn synthesis_defer_empty_emits_done_for_non_empty_output() {
         let output = ChatStreamOutput::from_generate_output(
             "final".to_string(),
@@ -1208,7 +1252,9 @@ mod tests {
         drop(records);
 
         // 流成功结束 → 翻 Success。
-        let success = sink.finish_web_search_card().expect("started card finalizes");
+        let success = sink
+            .finish_web_search_card()
+            .expect("started card finalizes");
         assert!(matches!(success.status, ToolCallStatus::Success));
         assert_eq!(success.id, card_id);
         // take_card 返回 Success 终态 + 预留槽段。
@@ -1237,9 +1283,7 @@ mod tests {
     #[test]
     fn web_search_part_without_tracker_is_ignored() {
         let host = TestHost::default();
-        let mut sink = AgentStreamSink::new(
-            &host, "c", "r", "m", true, None, None, None, None,
-        );
+        let mut sink = AgentStreamSink::new(&host, "c", "r", "m", true, None, None, None, None);
         sink.emit(StreamPart::WebSearch {
             queries: vec!["q".to_string()],
             citations: Vec::new(),

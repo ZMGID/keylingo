@@ -756,6 +756,38 @@ fn normalize_segments_adds_auxiliary_and_skipped_tool_segments() {
 }
 
 #[test]
+fn normalize_segments_does_not_duplicate_toolloop_only_answer_text() {
+    // 回归：正文只落在 ToolLoop-phase 文本段时（planning 中途失败的降级路径曾如此），
+    // content_from_segments 看不见它 → 这里会再补一条同文本的 Synthesis 段，
+    // 前端遂把同一段文案渲染两遍。正文段必须是 Plain|Synthesis，本用例守住这条不变式。
+    let recovered = "⚠️ 模型调用失败。请重试。".to_string();
+    let segments = normalize_assistant_segments(
+        &recovered,
+        None,
+        &[],
+        vec![ChatMessageSegment {
+            id: "seg_1002_step_2_text".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::Synthesis,
+            order: 1002,
+            step_number: Some(2),
+            round: Some(2),
+            text: Some(recovered.clone()),
+            tool_call_id: None,
+        }],
+    );
+    assert_eq!(
+        segments
+            .iter()
+            .filter(|segment| segment.text.as_deref() == Some(recovered.as_str()))
+            .count(),
+        1,
+        "answer text must not be duplicated into a second segment"
+    );
+    assert_eq!(content_from_segments(&segments).as_deref(), Some(&*recovered));
+}
+
+#[test]
 fn normalize_segments_inserts_tool_segments_before_synthesis_text() {
     let tool_calls = vec![test_tool_record(
         "call_read",
@@ -2350,9 +2382,15 @@ fn file_ledger_flows_into_replayed_summary_message() {
 
     // Recompute the ledger over the covered history and store it (mirrors both
     // compaction persist sites).
-    let ledger = crate::chat::agent::file_ledger::build_for_boundary(&conversation, "msg_assistant_1");
+    let ledger =
+        crate::chat::agent::file_ledger::build_for_boundary(&conversation, "msg_assistant_1");
     assert!(!ledger.is_empty(), "ledger should capture the two ops");
-    conversation.context_state.summary.as_mut().unwrap().file_ledger = Some(ledger);
+    conversation
+        .context_state
+        .summary
+        .as_mut()
+        .unwrap()
+        .file_ledger = Some(ledger);
 
     let messages =
         build_chat_api_messages("system prompt", &conversation, Some(2), None, &[]).unwrap();
@@ -2369,9 +2407,14 @@ fn file_ledger_flows_into_replayed_summary_message() {
         })
         .expect("a system message carries the Files touched block");
     let content = summary_sys["content"].as_str().unwrap();
-    assert!(content.contains(r#"Modified: "src/main.rs""#), "modified path: {content}");
-    assert!(content.contains(r#"Read: "src/lib.rs""#), "read path: {content}");
+    assert!(
+        content.contains(r#"Modified: "src/main.rs""#),
+        "modified path: {content}"
+    );
+    assert!(
+        content.contains(r#"Read: "src/lib.rs""#),
+        "read path: {content}"
+    );
     // The summary text itself is still present above the ledger.
     assert!(content.contains("summary of older messages"));
 }
-
