@@ -22,6 +22,7 @@ import {
   isChatSkillCenterPath,
 } from './chatRoutes'
 import { ChatImageViewer } from './ChatImageViewer'
+import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
 import { InputBar } from './InputBar'
@@ -30,7 +31,6 @@ import { ThinkingLevelSelector } from './ThinkingLevelSelector'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
 import { PermissionPicker } from './PermissionPicker'
 import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
-import { WindowControls } from './WindowControls'
 import { ContextIndicator } from './ContextIndicator'
 import { AgentTodoIndicator } from './AgentTodoIndicator'
 import { isExecutableAgentPlanText } from './agentPlan'
@@ -3543,15 +3543,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 带高 24px（低于各中心页 pt-7/py-6 的内容起点），不遮挡任何可交互内容；
   // 收起态按钮行复用会话页收起态顶栏的同一套行高/缩进类（52px 行 + mac 交通灯缩进），
   // 保证收起/展开、中心页/会话页之间按钮位置完全不跳。
-  const centerPageTopStrip = (
+  //
+  // 仅 macOS 需要：Windows / Linux 的 ChatTitlebar 是一条常驻全宽带，
+  // 拖拽区与那两枚按钮本就在带里且不随侧栏收展移动，这条兜底带纯属重复。
+  const centerPageTopStrip = usesNativeTitlebar ? (
     <div className="absolute inset-x-0 top-0 z-20 h-6" data-tauri-drag-region>
       {sidebarCollapsed && (
         <div
-          className={`chat-titlebar-row ${chatTitlebarRowClass} ${
-            usesNativeTitlebar
-              ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`
-              : 'px-3'
-          }`}
+          className={`chat-titlebar-row ${chatTitlebarRowClass} ${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`}
           data-tauri-drag-region
         >
           <ChatTitlebarActions
@@ -3562,14 +3561,113 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         </div>
       )}
     </div>
+  ) : null
+
+  // 中心页为上方那条收起态按钮行让出的高度（Windows / Linux 无此行，见 centerPageTopStrip）。
+  const centerPagePadTop = usesNativeTitlebar && sidebarCollapsed ? 'pt-12' : ''
+
+  // 会话页顶栏控件。非 mac 渲染进全宽标题栏带（单行 chrome），mac 仍留在主区 52px 顶栏。
+  // 抽成变量而非组件：依赖十余个 Chat 局部状态与回调，拆组件只会换来一长串 props。
+  const conversationTitlebarControls = (
+    <>
+      <div className="flex min-w-0 items-center gap-1">
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <RuntimePicker
+            agentRuntime={activeAgentRuntime}
+            onRuntimeChange={handleRuntimeChange}
+            conversationId={currentConversation?.id}
+            locked={
+              !!currentConversation &&
+              (currentConversation.messages?.length ?? 0) > 0 &&
+              usesExternalRuntime
+            }
+          />
+        </div>
+        <div className="min-w-0 max-w-full shrink" data-tauri-drag-region="false">
+          {usesExternalRuntime ? (
+            <ExternalModelSelector
+              agentRuntime={activeAgentRuntime}
+              onModelChange={handleExternalModelChange}
+              conversationId={currentConversation?.id}
+            />
+          ) : (
+            <ModelSelector
+              currentProviderId={activeProviderId}
+              currentModel={activeModel}
+              onModelChange={handleModelChange}
+            />
+          )}
+        </div>
+        {!usesExternalRuntime && (
+          <div className="shrink-0 chat-thinking-pill-wrap" data-tauri-drag-region="false">
+            <ThinkingLevelSelector
+              currentProviderId={activeProviderId}
+              currentModel={activeModel}
+              value={
+                currentConversation
+                  ? (currentConversation.thinking_level
+                      ?? currentConversation.thinkingLevel
+                      ?? draftThinkingLevel)
+                  : draftThinkingLevel
+              }
+              onChange={handleThinkingLevelChange}
+            />
+          </div>
+        )}
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <PermissionPicker
+            agentRuntime={activeAgentRuntime}
+            conversationId={currentConversation?.id}
+            onSandboxChange={handleExternalSandboxChange}
+            approvalPolicy={approvalPolicy}
+            onApprovalPolicyChange={handleApprovalPolicyChange}
+          />
+        </div>
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <BackgroundJobsIndicator />
+        </div>
+      </div>
+      <div className="min-w-5 flex-1" data-tauri-drag-region />
+      <div className="flex min-w-0 shrink items-center justify-end gap-1">
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <IconButton
+            label={i18n[uiLang].dockToggle}
+            size="sm"
+            variant="ghost"
+            className={dockOpen ? 'bg-black/5 text-neutral-800 dark:bg-white/10 dark:text-neutral-100' : ''}
+            onClick={handleToggleDock}
+          >
+            <PanelRight size={15} />
+          </IconButton>
+        </div>
+        <AgentTodoIndicator todoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null} />
+      </div>
+    </>
   )
 
   return (
     <div
       className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
     >
-      {!usesNativeTitlebar && <WindowControls />}
-      <div className="flex h-full min-h-0 w-full">
+      {!usesNativeTitlebar && (
+        <ChatTitlebar
+          sidebarExpanded={!sidebarCollapsed}
+          /* 与下方 <Sidebar collapsed> 取反同源：设置页里侧栏也是收起的，
+             只看 sidebarCollapsed 会在设置页多留 240px 空档。 */
+          sidebarVisible={!(sidebarCollapsed || settingsPanelActive)}
+          settingsMode={settingsPanelActive}
+          onToggleSidebar={() => {
+            if (sidebarCollapsed) setSidebarCollapsedPersisted(false)
+            else handleCollapseSidebar()
+          }}
+          onNewConversation={() => {
+            runAfterLeavingSettings(() => void handleNewConversation())
+          }}
+        >
+          {chatView === 'conversation' ? conversationTitlebarControls : null}
+        </ChatTitlebar>
+      )}
+      <div className="flex min-h-0 w-full flex-1">
         {chatView !== 'onboarding' ? (
         /* 设置页自带 200px 导航栏，聊天侧栏此时借用已有的折叠过渡整体滑出（不再直接卸载，
            否则左列会先空一帧、且关闭时侧栏是瞬间 pop 回来的）。退场期保持折叠，
@@ -3604,7 +3702,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         ) : null}
 
         {chatView === 'onboarding' ? (
-          <div className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <OnboardingShell
               onComplete={handleOnboardingExit}
               onSkip={handleOnboardingExit}
@@ -3619,7 +3717,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             <SettingsEnterPane
               key="settings"
               exiting={settingsExiting}
-              className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col"
+              className={`flex min-h-0 min-w-0 flex-1 flex-col${
+                !usesNativeTitlebar && settingsPanelActive ? ' settings-embedded-under-strip' : ''
+              }`}
             >
               <SettingsShell
                 ref={settingsRef}
@@ -3633,7 +3733,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </SettingsEnterPane>
           </Suspense>
         ) : chatView === 'assistants' ? (
-          <div key="assistants" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="assistants" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <AssistantCenter
@@ -3646,35 +3746,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </Suspense>
           </div>
         ) : chatView === 'skill' ? (
-          <div key="skill" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="skill" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <SkillCenter onSkillsChanged={() => void loadSkills()} />
             </Suspense>
           </div>
         ) : chatView === 'mcp' ? (
-          <div key="mcp" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="mcp" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <McpCenter />
             </Suspense>
           </div>
         ) : chatView === 'knowledge' ? (
-          <div key="knowledge" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="knowledge" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <KnowledgeCenter />
             </Suspense>
           </div>
         ) : chatView === 'notes' ? (
-          <div key="notes" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="notes" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <NotesCenter />
             </Suspense>
           </div>
         ) : chatView === 'plugins' ? (
-          <div key="plugins" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="plugins" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <PluginCenter onRequestAiInstall={handleRequestPluginAiInstall} />
@@ -3685,14 +3785,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             {/* 图片查看器为浮层(见下方 overlay),不替换主面板 —— 否则会卸载 InputBar,
                 丢掉待发送附件 / 草稿。here 起正常内容,始终挂载。 */}
             <>
+                {/* 非 mac 的顶栏控件已并进全宽标题栏带（见上方 ChatTitlebar），此行只 mac 渲染。 */}
+                {usesNativeTitlebar && (
                 <header
               className={`chat-titlebar-row ${chatTitlebarRowClass} min-w-0 gap-2 ${
-                sidebarCollapsed && usesNativeTitlebar
-                  ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`
+                sidebarCollapsed
+                  ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac pr-3`
                   : 'px-6'
-              } ${sidebarCollapsed ? 'pr-3' : ''} ${!usesNativeTitlebar ? 'chat-win-titlebar-safe' : ''}`}
+              }`}
               data-tauri-drag-region
             >
+              {/* mac 收起态把这两枚按钮借到主区顶栏、给交通灯让位。 */}
               {sidebarCollapsed && (
                 <ChatTitlebarActions
                   sidebarExpanded={false}
@@ -3702,79 +3805,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                   }}
                 />
               )}
-              <div className="flex min-w-0 items-center gap-1">
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <RuntimePicker
-                    agentRuntime={activeAgentRuntime}
-                    onRuntimeChange={handleRuntimeChange}
-                    conversationId={currentConversation?.id}
-                    locked={
-                      !!currentConversation &&
-                      (currentConversation.messages?.length ?? 0) > 0 &&
-                      usesExternalRuntime
-                    }
-                  />
-                </div>
-                <div className="min-w-0 max-w-full shrink" data-tauri-drag-region="false">
-                  {usesExternalRuntime ? (
-                    <ExternalModelSelector
-                      agentRuntime={activeAgentRuntime}
-                      onModelChange={handleExternalModelChange}
-                      conversationId={currentConversation?.id}
-                    />
-                  ) : (
-                    <ModelSelector
-                      currentProviderId={activeProviderId}
-                      currentModel={activeModel}
-                      onModelChange={handleModelChange}
-                    />
-                  )}
-                </div>
-                {!usesExternalRuntime && (
-                  <div className="shrink-0 chat-thinking-pill-wrap" data-tauri-drag-region="false">
-                    <ThinkingLevelSelector
-                      currentProviderId={activeProviderId}
-                      currentModel={activeModel}
-                      value={
-                        currentConversation
-                          ? (currentConversation.thinking_level
-                              ?? currentConversation.thinkingLevel
-                              ?? draftThinkingLevel)
-                          : draftThinkingLevel
-                      }
-                      onChange={handleThinkingLevelChange}
-                    />
-                  </div>
-                )}
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <PermissionPicker
-                    agentRuntime={activeAgentRuntime}
-                    conversationId={currentConversation?.id}
-                    onSandboxChange={handleExternalSandboxChange}
-                    approvalPolicy={approvalPolicy}
-                    onApprovalPolicyChange={handleApprovalPolicyChange}
-                  />
-                </div>
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <BackgroundJobsIndicator />
-                </div>
-              </div>
-              <div className="min-w-5 flex-1" data-tauri-drag-region />
-              <div className="flex min-w-0 shrink items-center justify-end gap-1">
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <IconButton
-                    label={i18n[uiLang].dockToggle}
-                    size="sm"
-                    variant="ghost"
-                    className={dockOpen ? 'bg-black/5 text-neutral-800 dark:bg-white/10 dark:text-neutral-100' : ''}
-                    onClick={handleToggleDock}
-                  >
-                    <PanelRight size={15} />
-                  </IconButton>
-                </div>
-                <AgentTodoIndicator todoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null} />
-              </div>
+              {conversationTitlebarControls}
                 </header>
+                )}
 
                 <div className="flex min-h-0 flex-1 flex-col">
                   {showEmptyHero ? (
