@@ -16,8 +16,17 @@ pub const CHAT_MIN_INNER_HEIGHT: f64 = 400.0;
 const CHAT_DEFAULT_INNER_WIDTH: f64 = 1280.0;
 const CHAT_DEFAULT_INNER_HEIGHT: f64 = 800.0;
 
+/// Windows / Linux 的自绘全宽标题栏带高度（与 index.css `.chat-titlebar-strip { height: 44px }` 同步）。
+/// macOS 用系统 Overlay 标题栏、不占额外内容高度，故为 0。
+#[cfg(target_os = "macos")]
+const CHAT_TITLEBAR_STRIP_HEIGHT: f64 = 0.0;
+#[cfg(not(target_os = "macos"))]
+const CHAT_TITLEBAR_STRIP_HEIGHT: f64 = 44.0;
+
+/// 把「可见内容所需尺寸」换算成窗口 inner 尺寸：非 macOS 要额外容纳那条标题栏带，
+/// 否则小窗下带会吃掉 44px 内容高度，把输入框挤出可视区。
 fn chat_window_size_for_visible_content(width: f64, height: f64) -> (f64, f64) {
-    (width, height)
+    (width, height + CHAT_TITLEBAR_STRIP_HEIGHT)
 }
 
 pub fn apply_chat_window_min_size(window: &WebviewWindow, sidebar_expanded: bool) {

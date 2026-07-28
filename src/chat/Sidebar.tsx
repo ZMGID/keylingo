@@ -28,7 +28,7 @@ import { getSettingsCached } from '../api/settingsCache'
 import { IconButton } from '../components/Button'
 import { chatApi } from './api'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
-import { chatTitlebarMacInsetClass, isMac } from './platform'
+import { chatTitlebarMacInsetClass, isMac, usesNativeTitlebar } from './platform'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
@@ -934,19 +934,26 @@ export const Sidebar = memo(function Sidebar({
         }`}
         aria-hidden={collapsed}
       >
-        <div
-          className={`chat-titlebar-row chat-sidebar-titlebar-row flex shrink-0 gap-2 ${chatTitlebarMacInsetClass} pr-3`}
-          data-tauri-drag-region
-        >
-          <ChatTitlebarActions
-            sidebarExpanded
-            onToggleSidebar={onToggleCollapsed}
-            onNewConversation={onNewConversation}
-          />
-          <div className="min-w-0 flex-1" data-tauri-drag-region />
-        </div>
+        {/* 侧栏内顶栏行只在 macOS 存在：那两枚按钮要贴着系统交通灯排。
+            Windows / Linux 已把它们常驻到全宽标题栏带（见 ChatTitlebar），此处渲染会重复。 */}
+        {usesNativeTitlebar && (
+          <div
+            className={`chat-titlebar-row chat-sidebar-titlebar-row flex shrink-0 gap-2 ${chatTitlebarMacInsetClass} pr-3`}
+            data-tauri-drag-region
+          >
+            <ChatTitlebarActions
+              sidebarExpanded
+              onToggleSidebar={onToggleCollapsed}
+              onNewConversation={onNewConversation}
+            />
+            <div className="min-w-0 flex-1" data-tauri-drag-region />
+          </div>
+        )}
 
-      <nav className="shrink-0 space-y-0.5 px-3 pb-2" data-tauri-drag-region="false">
+      <nav
+        className={`shrink-0 space-y-0.5 px-3 pb-2 ${usesNativeTitlebar ? '' : 'pt-2'}`}
+        data-tauri-drag-region="false"
+      >
         <NavRow
           icon={<SquarePen size={17} strokeWidth={1.75} />}
           label="新建聊天"
