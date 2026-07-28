@@ -28,7 +28,7 @@ import { getSettingsCached } from '../api/settingsCache'
 import { IconButton } from '../components/Button'
 import { chatApi } from './api'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
-import { chatTitlebarMacInsetClass, chatTitlebarRowClass, isMac } from './platform'
+import { chatTitlebarMacInsetClass, isMac } from './platform'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
@@ -935,7 +935,7 @@ export const Sidebar = memo(function Sidebar({
         aria-hidden={collapsed}
       >
         <div
-          className={`chat-titlebar-row ${chatTitlebarRowClass} ${chatTitlebarMacInsetClass} pr-3`}
+          className={`chat-titlebar-row chat-sidebar-titlebar-row flex shrink-0 gap-2 ${chatTitlebarMacInsetClass} pr-3`}
           data-tauri-drag-region
         >
           <ChatTitlebarActions

@@ -31,7 +31,7 @@ pub fn apply_chat_window_min_size(window: &WebviewWindow, sidebar_expanded: bool
 }
 
 /// 悬浮卡片式侧栏的外边距（与 index.css `.chat-sidebar-shell { margin: 8px }` 同步）。
-/// 灯要落在卡片内部的顶栏行上，故 x/y 都要跟着卡片一起偏移这个量。
+/// 灯 x 随卡片左缘 +8；y 跟随侧栏顶栏图标（图标在卡片内上提后，窗口坐标中心仍约 26px，与主区顶栏齐）。
 #[cfg(target_os = "macos")]
 const CHAT_SIDEBAR_CARD_INSET: f64 = 8.0;
 
@@ -40,13 +40,10 @@ const CHAT_SIDEBAR_CARD_INSET: f64 = 8.0;
 const CHAT_TRAFFIC_LIGHT_X: f64 = 14.0 + CHAT_SIDEBAR_CARD_INSET;
 
 /// 交给 tao `traffic_light_inset` 的 y。tao 会在每次内容视图 `drawRect` 重新应用这个 inset
-/// （见 tao 源 view.rs::draw_rect → inset_traffic_lights），故窗口拖动/缩放/移动全程都保持对齐，
-/// 无需我们再手动重排。tao 容器高度 = close 按钮高度 + y；实测 close_h=14、y=28 → 灯中心=26px，
-/// 正好落在顶栏图标中心（`chatTitlebarRowClass` = `h-[52px] items-center`，中心 26px）。
-/// 侧栏改悬浮卡片后顶栏行整体下移 CHAT_SIDEBAR_CARD_INSET，灯中心随之 +8 → 34px。
-/// 反向对齐：灯跟随图标固定位置，而非移动图标。
+/// （见 tao 源 view.rs::draw_rect → inset_traffic_lights），故窗口拖动/缩放/移动全程都保持对齐。
+/// close_h=14、y=28 → 灯中心=26px，对齐主区顶栏 / 侧栏上提后的那俩图标（不跟卡片顶缘走）。
 #[cfg(target_os = "macos")]
-const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 28.0 + CHAT_SIDEBAR_CARD_INSET;
+const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 28.0;
 
 /// 隐藏 Overlay 标题栏的窗口标题文字。交通灯位置本身由 builder 的 `traffic_light_position`
 /// （= tao `traffic_light_inset`，tao 每次 drawRect 自动重新应用）负责并持久保持，这里不再手动重排。

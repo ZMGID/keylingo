@@ -1699,6 +1699,28 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     ?? settings.providers.find((provider) => provider.id === settings.lens?.providerId)
     ?? settings.providers.find((provider) => provider.id === settings.translatorProviderId)
 
+  const aboutNavButton = (embedded: boolean) => (
+    <button
+      type="button"
+      onClick={() => setActiveTab('about')}
+      className={
+        embedded
+          ? `settings-embedded-nav-item ${activeTab === 'about' ? 'active' : ''}`
+          : `kv-nav-item ${activeTab === 'about' ? 'active' : ''}`
+      }
+      data-tauri-drag-region="false"
+    >
+      {embedded ? (
+        <span className="settings-embedded-nav-icon">
+          <AboutIcon size={17} strokeWidth={1.75} />
+        </span>
+      ) : (
+        <AboutIcon strokeWidth={1.7} />
+      )}
+      <span>{lang === 'zh' ? '关于' : 'About'}</span>
+    </button>
+  )
+
   const categoryNav =
     variant === 'embedded' ? (
       <>
@@ -1720,19 +1742,22 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
               </button>
             )
           })}
+          {/* 关于紧跟模型，作为分类列表最后一项（不再被 spacer 顶到物理底） */}
+          {aboutNavButton(true)}
         </nav>
         <div className="min-h-0 flex-1" />
         <nav className="settings-embedded-nav-list settings-embedded-nav-list--footer">
           <button
             type="button"
-            onClick={() => setActiveTab('about')}
-            className={`settings-embedded-nav-item ${activeTab === 'about' ? 'active' : ''}`}
+            onClick={handleCloseRequest}
+            className="settings-embedded-back"
+            title={lang === 'zh' ? '返回对话' : 'Back to chat'}
             data-tauri-drag-region="false"
           >
             <span className="settings-embedded-nav-icon">
-              <AboutIcon size={17} strokeWidth={1.75} />
+              <ArrowLeft size={17} strokeWidth={1.75} />
             </span>
-            <span>{lang === 'zh' ? '关于' : 'About'}</span>
+            <span>{lang === 'zh' ? '返回对话' : 'Back to chat'}</span>
           </button>
         </nav>
       </>
@@ -1754,21 +1779,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
               </button>
             )
           })}
+          {aboutNavButton(false)}
         </nav>
 
         <div className="kv-nav-spacer" />
-
-        <nav className="kv-nav">
-          <button
-            type="button"
-            onClick={() => setActiveTab('about')}
-            className={`kv-nav-item ${activeTab === 'about' ? 'active' : ''}`}
-            data-tauri-drag-region="false"
-          >
-            <AboutIcon strokeWidth={1.7} />
-            <span>{lang === 'zh' ? '关于' : 'About'}</span>
-          </button>
-        </nav>
       </>
     )
 
@@ -2316,16 +2330,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       >
         {!hideNav && (
           <aside className="settings-embedded-nav">
-            <button
-              type="button"
-              onClick={handleCloseRequest}
-              className="settings-embedded-back"
-              title={lang === 'zh' ? '返回对话' : 'Back to chat'}
-              data-tauri-drag-region="false"
-            >
-              <ArrowLeft size={16} strokeWidth={1.9} />
-              <span>{lang === 'zh' ? '返回对话' : 'Back to chat'}</span>
-            </button>
             <h2 className="settings-embedded-nav-title">{t.settings}</h2>
             {categoryNav}
           </aside>

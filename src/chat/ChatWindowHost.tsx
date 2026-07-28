@@ -13,18 +13,71 @@ type ChatWindowHostProps = {
  */
 export function ChatWindowHost({ children }: ChatWindowHostProps) {
   const [maximized, setMaximized] = useState(false)
-  // mac 全屏：不走 Tauri 的 isFullscreen()（IPC 往返，只能节流查 → 灯已画回来缩进还没恢复，
-  // 退出全屏时图标和灯要重叠一拍）。全屏时 webview 高度 == 屏幕高度，非全屏一定被菜单栏切掉；
-  // DOM resize 与布局同帧、读 innerHeight 同步，所以缩进和窗口逐帧同步，零 IPC。
-  // ponytail: 靠高度判定，与「窗口手动拉到正好等于屏高」不可区分 —— 但那也需要盖住菜单栏，做不到。
+  // mac 全屏：以 isFullscreen() 为权威（菜单栏「始终显示」时 innerHeight 到不了 screen.height，
+  // 纯几何判定会漏判，顶栏 pl-[92px] 留出空块）。
+  //
+  // 几何只允许「关」全屏态，绝不单靠贴屏「开」——否则取消最小化 / 窗口动画贴屏的末帧
+  // 会误撤缩进，和已显示的交通灯重叠闪一下；随后 IPC 回 false 又恢复，就是用户看到的闪烁。
+  // 退出动画中段 isFullscreen 仍可能 true，但尺寸已离开全屏、灯已画回，同样必须立刻恢复缩进。
+  // IPC 用 generation 丢弃过期响应，避免先发出的 true 在后发出的 false 之后才回来把状态打脏。
   const [macFullscreen, setMacFullscreen] = useState(false)
 
   useEffect(() => {
     if (!usesNativeTitlebar) return
-    const sync = () => setMacFullscreen(window.innerHeight >= window.screen.height)
-    sync()
-    window.addEventListener('resize', sync)
-    return () => window.removeEventListener('resize', sync)
+
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    let generation = 0
+
+    /** 尺寸已明显不是全屏（含退出动画中段）。用 availHeight：菜单栏常显的稳定全屏仍 ≥ availHeight。 */
+    const clearlyNotFullscreen = () =>
+      window.innerWidth < window.screen.width - 2 ||
+      window.innerHeight < window.screen.availHeight - 2
+
+    const syncIpc = async () => {
+      if (!isTauriRuntime()) {
+        // 浏览器预览无 IPC：只能用严格贴 screen 的几何。
+        const full =
+          window.innerWidth >= window.screen.width - 2 &&
+          window.innerHeight >= window.screen.height - 2
+        if (!cancelled) setMacFullscreen(full)
+        return
+      }
+      const gen = ++generation
+      try {
+        const fs = await getCurrentWindow().isFullscreen()
+        if (cancelled || gen !== generation) return
+        // fs 但已离开全屏尺寸 = 退出动画：灯已显，保持缩进。
+        setMacFullscreen(fs && !clearlyNotFullscreen())
+      } catch {
+        if (!cancelled && gen === generation) setMacFullscreen(false)
+      }
+    }
+
+    const onResize = () => {
+      if (clearlyNotFullscreen()) setMacFullscreen(false)
+      void syncIpc()
+    }
+
+    void syncIpc()
+    window.addEventListener('resize', onResize)
+
+    void (async () => {
+      if (!isTauriRuntime()) return
+      try {
+        unlisten = await getCurrentWindow().onResized(() => {
+          void syncIpc()
+        })
+      } catch {
+        // ignore
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('resize', onResize)
+      unlisten?.()
+    }
   }, [])
 
   useEffect(() => {
