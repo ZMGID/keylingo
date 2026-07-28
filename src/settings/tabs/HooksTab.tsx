@@ -181,7 +181,7 @@ export function HooksTab({ lang, hooks, onChange }: {
             <div className="text-[13px] font-semibold">{eventLabel(t, activeEvent)}</div>
             <p className="kv-row-desc">{eventDescription(t, activeEvent)}</p>
           </div>
-          <Button size="sm" onClick={() => setModal({ editing: null })} data-tauri-drag-region="false">
+          <Button size="sm" className="shrink-0" onClick={() => setModal({ editing: null })} data-tauri-drag-region="false">
             <Plus size={11} />
             {t.hooksAdd}
           </Button>
@@ -191,6 +191,12 @@ export function HooksTab({ lang, hooks, onChange }: {
           <div className="kv-panel px-4 py-8 text-center">
             <div className="text-[13px] font-medium">{t.hooksEmptyTitle}</div>
             <p className="kv-row-desc mx-auto mt-1 max-w-sm">{t.hooksEmptyDesc}</p>
+            <div className="mt-3 flex justify-center">
+              <Button size="sm" onClick={() => setModal({ editing: null })} data-tauri-drag-region="false">
+                <Plus size={11} />
+                {t.hooksAdd}
+              </Button>
+            </div>
           </div>
         ) : (
           <div className="space-y-2">

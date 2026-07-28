@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { HooksTab } from './HooksTab'
+import { i18n } from '../i18n'
 import type { HookDef } from '../../api/tauri'
 
 function hook(overrides: Partial<HookDef> = {}): HookDef {
@@ -33,7 +34,8 @@ describe('HooksTab', () => {
     // 8 个事件都在导轨里；默认选中第一个（对话开始）。
     expect(screen.getAllByText('对话开始')).toHaveLength(2) // 导轨 + 右侧标题
     expect(screen.getByText('工具执行前')).toBeTruthy()
-    expect(screen.getByText('agent loop 进入时触发一次。')).toBeTruthy()
+    // 描述取 i18n 而非硬编码文案：改文案不该让这条测试失败（它验的是「选中事件的描述被渲染」）。
+    expect(screen.getByText(i18n.zh.hookEventDescAgentStart)).toBeTruthy()
   })
 
   it('未选中事件的 Hook 不显示；切换事件后显示', async () => {
@@ -58,7 +60,7 @@ describe('HooksTab', () => {
 
   it('新建 Hook 保存后回调带绑定当前事件的新条目', async () => {
     const { onChange } = renderTab()
-    await userEvent.click(screen.getByRole('button', { name: /新建 Hook/ }))
+    await userEvent.click(screen.getAllByRole('button', { name: /新建 Hook/ })[0])
     await userEvent.type(screen.getByPlaceholderText('lint-guard'), 'probe')
     await userEvent.type(screen.getByPlaceholderText('echo done >> /tmp/kivio-hook.log'), 'true')
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -80,7 +82,7 @@ describe('HooksTab', () => {
 
   it('缺少名称时不保存，显示校验提示', async () => {
     const { onChange } = renderTab()
-    await userEvent.click(screen.getByRole('button', { name: /新建 Hook/ }))
+    await userEvent.click(screen.getAllByRole('button', { name: /新建 Hook/ })[0])
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.getByText('请填写名称。')).toBeTruthy()
@@ -88,7 +90,7 @@ describe('HooksTab', () => {
 
   it('http 类型改用 URL 校验', async () => {
     const { onChange } = renderTab()
-    await userEvent.click(screen.getByRole('button', { name: /新建 Hook/ }))
+    await userEvent.click(screen.getAllByRole('button', { name: /新建 Hook/ })[0])
     await userEvent.type(screen.getByPlaceholderText('lint-guard'), 'webhook')
     await userEvent.click(screen.getByRole('button', { name: 'HTTP 请求' }))
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
