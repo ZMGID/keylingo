@@ -1,14 +1,14 @@
 import { useMemo, useState } from 'react'
-import { Bot, ChevronDown, Globe, MessageSquare, Pencil, Plus, RefreshCw, Terminal, Trash2, Wrench } from 'lucide-react'
+import { Bot, Globe, MessageSquare, Pencil, Plus, RefreshCw, Terminal, Trash2, Wrench, Zap } from 'lucide-react'
 import { HOOK_EVENTS, type HookDef, type HookEvent } from '../../api/tauri'
 import { i18n, type I18n, type Lang } from '../i18n'
-import { Toggle } from '../components'
+import { SettingsGroup, Toggle } from '../components'
 import { Button, IconButton } from '../../components/Button'
 import { HookModal } from '../HookModal'
 
 type PhaseKey = 'agent' | 'turn' | 'message' | 'tool'
 
-/** 事件流按对话顺序排列；生命周期导轨的唯一数据源（对齐 Rust `HookEvent`）。 */
+/** 事件 → 所属阶段。仅用于给列表行和新建菜单打分组标签。 */
 const EVENT_PHASES: Record<HookEvent, PhaseKey> = {
   agent_start: 'agent',
   turn_start: 'turn',
@@ -27,16 +27,7 @@ const PHASE_ICONS = {
   tool: Wrench,
 } as const
 
-type Strings = I18n
-
-function phaseLabel(t: Strings, phase: PhaseKey): string {
-  return phase === 'agent' ? t.hooksPhaseAgent
-    : phase === 'turn' ? t.hooksPhaseTurn
-      : phase === 'message' ? t.hooksPhaseMessage
-        : t.hooksPhaseTool
-}
-
-function eventLabel(t: Strings, event: HookEvent): string {
+function eventLabel(t: I18n, event: HookEvent): string {
   switch (event) {
     case 'agent_start': return t.hookEventAgentStart
     case 'agent_end': return t.hookEventAgentEnd
@@ -49,7 +40,7 @@ function eventLabel(t: Strings, event: HookEvent): string {
   }
 }
 
-function eventDescription(t: Strings, event: HookEvent): string {
+function eventDescription(t: I18n, event: HookEvent): string {
   switch (event) {
     case 'agent_start': return t.hookEventDescAgentStart
     case 'agent_end': return t.hookEventDescAgentEnd
@@ -62,16 +53,10 @@ function eventDescription(t: Strings, event: HookEvent): string {
   }
 }
 
-/** 相邻同阶段的事件合成一组（AGENT 首尾各一组，与参考实现一致）。 */
-function buildPhaseGroups(): { key: string; phase: PhaseKey; events: HookEvent[] }[] {
-  const groups: { key: string; phase: PhaseKey; events: HookEvent[] }[] = []
-  for (const event of HOOK_EVENTS) {
-    const phase = EVENT_PHASES[event]
-    const last = groups[groups.length - 1]
-    if (last && last.phase === phase) last.events.push(event)
-    else groups.push({ key: `${phase}-${groups.length}`, phase, events: [event] })
-  }
-  return groups
+/** 单个 Hook 的摘要行。命令取首行、HTTP 取「方法 URL」。 */
+function hookSummary(hook: HookDef): string {
+  if (hook.type === 'http') return `${hook.method} ${hook.url}`
+  return hook.script.split('\n').find((line) => line.trim()) ?? ''
 }
 
 export function HooksTab({ lang, hooks, onChange }: {
@@ -80,27 +65,15 @@ export function HooksTab({ lang, hooks, onChange }: {
   onChange: (hooks: HookDef[]) => void
 }) {
   const t = i18n[lang]
-  const [activeEvent, setActiveEvent] = useState<HookEvent>(HOOK_EVENTS[0])
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  const [modal, setModal] = useState<{ editing: HookDef | null } | null>(null)
+  const [modal, setModal] = useState<{ editing: HookDef | null; event: HookEvent } | null>(null)
+  const [picking, setPicking] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
-  const groups = useMemo(buildPhaseGroups, [])
-  const countByEvent = useMemo(() => {
-    const counts: Partial<Record<string, number>> = {}
-    for (const hook of hooks) counts[hook.event] = (counts[hook.event] ?? 0) + 1
-    return counts
+  // 按生命周期顺序排，而不是按创建顺序——读列表时「什么时候触发」比「什么时候加的」重要。
+  const ordered = useMemo(() => {
+    const rank = new Map(HOOK_EVENTS.map((event, index) => [event as string, index]))
+    return [...hooks].sort((a, b) => (rank.get(a.event) ?? 99) - (rank.get(b.event) ?? 99))
   }, [hooks])
-  const activeHooks = hooks.filter((hook) => hook.event === activeEvent)
-
-  const togglePhase = (key: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
 
   const saveHook = (hook: HookDef) => {
     const exists = hooks.some((item) => item.id === hook.id)
@@ -108,111 +81,45 @@ export function HooksTab({ lang, hooks, onChange }: {
     setModal(null)
   }
 
-  return (
-    <div className="flex min-h-0 gap-3">
-      <aside className="kv-panel w-[230px] shrink-0 space-y-1 p-2">
-        <div className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
-          {t.hooksLifecycle}
-        </div>
-        {groups.map((group) => {
-          const Icon = PHASE_ICONS[group.phase]
-          const phaseCount = group.events.reduce((sum, event) => sum + (countByEvent[event] ?? 0), 0)
-          const isCollapsed = collapsed.has(group.key)
-          return (
-            <div key={group.key}>
-              <button
-                type="button"
-                onClick={() => togglePhase(group.key)}
-                aria-expanded={!isCollapsed}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide text-neutral-500 transition-colors hover:bg-black/5 dark:text-neutral-400 dark:hover:bg-white/5"
-                data-tauri-drag-region="false"
-              >
-                <Icon size={13} strokeWidth={1.9} className="shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{phaseLabel(t, group.phase)}</span>
-                {phaseCount > 0 && (
-                  <span className="rounded-full bg-black/5 px-1.5 text-[10px] font-semibold dark:bg-white/10">{phaseCount}</span>
-                )}
-                <ChevronDown size={13} className={`shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
-              </button>
-              {!isCollapsed && (
-                <ul className="ml-2 border-l border-black/5 pl-1 dark:border-white/10">
-                  {group.events.map((event) => {
-                    const count = countByEvent[event] ?? 0
-                    const selected = activeEvent === event
-                    return (
-                      <li key={event}>
-                        <button
-                          type="button"
-                          onClick={() => setActiveEvent(event)}
-                          aria-current={selected}
-                          className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors ${
-                            selected
-                              ? 'bg-black/[0.06] font-medium text-neutral-900 dark:bg-white/10 dark:text-neutral-100'
-                              : 'text-neutral-600 hover:bg-black/[0.04] dark:text-neutral-400 dark:hover:bg-white/5'
-                          }`}
-                          data-tauri-drag-region="false"
-                        >
-                          <span
-                            aria-hidden
-                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                              selected || count > 0
-                                ? 'bg-[var(--accent)]'
-                                : 'border border-neutral-300 dark:border-neutral-600'
-                            }`}
-                          />
-                          <span className="min-w-0 flex-1 truncate">{eventLabel(t, event)}</span>
-                          {count > 0 && (
-                            <span className="rounded-full bg-black/5 px-1.5 text-[10px] font-semibold dark:bg-white/10">{count}</span>
-                          )}
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </div>
-          )
-        })}
-      </aside>
+  const enabledCount = hooks.filter((hook) => hook.enabled).length
 
-      <section className="min-w-0 flex-1 space-y-3">
-        <div className="flex items-start gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-semibold">{eventLabel(t, activeEvent)}</div>
-            <p className="kv-row-desc">{eventDescription(t, activeEvent)}</p>
-          </div>
-          <Button size="sm" className="shrink-0" onClick={() => setModal({ editing: null })} data-tauri-drag-region="false">
+  return (
+    <>
+      <SettingsGroup title={t.hooksSectionTitle}>
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <p className="kv-row-desc max-w-[560px]">{t.hooksSectionHint}</p>
+          <Button size="sm" className="shrink-0" onClick={() => setPicking(true)} data-tauri-drag-region="false">
             <Plus size={11} />
             {t.hooksAdd}
           </Button>
         </div>
 
-        {activeHooks.length === 0 ? (
-          <div className="kv-panel px-4 py-8 text-center">
-            <div className="text-[13px] font-medium">{t.hooksEmptyTitle}</div>
-            <p className="kv-row-desc mx-auto mt-1 max-w-sm">{t.hooksEmptyDesc}</p>
-            <div className="mt-3 flex justify-center">
-              <Button size="sm" onClick={() => setModal({ editing: null })} data-tauri-drag-region="false">
-                <Plus size={11} />
-                {t.hooksAdd}
-              </Button>
-            </div>
+        {ordered.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-8 text-center">
+            <Zap size={18} className="text-neutral-300 dark:text-neutral-600" strokeWidth={1.8} />
+            <div className="text-[12.5px] text-neutral-500 dark:text-neutral-400">{t.hooksEmptyTitle}</div>
+            <p className="kv-row-desc max-w-[420px]">{t.hooksEmptyDesc}</p>
           </div>
         ) : (
-          <div className="space-y-2">
-            {activeHooks.map((hook) => (
-              <div key={hook.id} className={`kv-panel flex items-start gap-3 p-3 ${hook.enabled ? '' : 'opacity-60'}`}>
-                <span className="mt-0.5 shrink-0 text-neutral-400 dark:text-neutral-500">
-                  {hook.type === 'http' ? <Globe size={15} /> : <Terminal size={15} />}
+          ordered.map((hook) => {
+            const event = hook.event as HookEvent
+            const Icon = PHASE_ICONS[EVENT_PHASES[event] ?? 'agent'] ?? Bot
+            return (
+              <div key={hook.id} className="kv-row">
+                <span className="shrink-0 text-neutral-400 dark:text-neutral-500">
+                  {hook.type === 'http' ? <Globe size={15} strokeWidth={1.8} /> : <Terminal size={15} strokeWidth={1.8} />}
                 </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-medium">{hook.name}</div>
-                  <p className="kv-row-desc truncate">{hook.description || t.hooksNoDescription}</p>
-                  <p className="kv-row-desc mt-0.5 truncate font-mono text-[11px] opacity-70">
-                    {hook.type === 'http' ? `${hook.method} ${hook.url}` : hook.script.split('\n')[0]}
-                  </p>
+                <div className="kv-row-text">
+                  <span className="kv-row-label flex items-center gap-1.5">
+                    {hook.name}
+                    <span className="inline-flex items-center gap-1 rounded bg-black/[0.05] px-1.5 py-px text-[10.5px] font-normal text-neutral-500 dark:bg-white/10 dark:text-neutral-400">
+                      <Icon size={10} strokeWidth={2} />
+                      {eventLabel(t, event)}
+                    </span>
+                  </span>
+                  <p className="kv-row-desc truncate font-mono">{hookSummary(hook)}</p>
                 </div>
-                <div className="flex shrink-0 items-center gap-1.5">
+                <div className="kv-row-control">
                   <Toggle
                     checked={hook.enabled}
                     ariaLabel={hook.name}
@@ -220,7 +127,7 @@ export function HooksTab({ lang, hooks, onChange }: {
                       item.id === hook.id ? { ...item, enabled } : item
                     )))}
                   />
-                  <IconButton size="xs" label={t.hooksEdit} onClick={() => setModal({ editing: hook })}>
+                  <IconButton size="xs" label={t.hooksEdit} onClick={() => setModal({ editing: hook, event })}>
                     <Pencil size={13} />
                   </IconButton>
                   <IconButton
@@ -233,16 +140,76 @@ export function HooksTab({ lang, hooks, onChange }: {
                   </IconButton>
                 </div>
               </div>
-            ))}
-          </div>
+            )
+          })
         )}
-      </section>
+
+        {hooks.length > 0 && (
+          <p className="kv-row-desc mt-2">
+            {t.hooksCountSummary.replace('{total}', String(hooks.length)).replace('{enabled}', String(enabledCount))}
+          </p>
+        )}
+      </SettingsGroup>
+
+      {/* 事件选择：新建时才出现，8 个事件一次看全（不再常驻一根侧栏） */}
+      {picking && (
+        <div
+          className="kv-modal-backdrop"
+          data-tauri-drag-region="false"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setPicking(false)
+          }}
+        >
+          <div className="kv-modal max-w-lg space-y-3" role="dialog" aria-modal="true" aria-label={t.hooksPickEvent}>
+            <div>
+              <h3 className="text-[14px] font-semibold">{t.hooksPickEvent}</h3>
+              <p className="kv-row-desc">{t.hooksPickEventHint}</p>
+            </div>
+            <div className="custom-scrollbar max-h-[52vh] overflow-y-auto">
+              {HOOK_EVENTS.map((event) => {
+                const Icon = PHASE_ICONS[EVENT_PHASES[event]]
+                const count = hooks.filter((hook) => hook.event === event).length
+                return (
+                  <button
+                    key={event}
+                    type="button"
+                    onClick={() => {
+                      setPicking(false)
+                      setModal({ editing: null, event })
+                    }}
+                    className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-black/[0.04] dark:hover:bg-white/5"
+                    data-tauri-drag-region="false"
+                  >
+                    <span className="shrink-0 text-neutral-400 dark:text-neutral-500">
+                      <Icon size={14} strokeWidth={1.8} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5 text-[13px]">
+                        {eventLabel(t, event)}
+                        {count > 0 && (
+                          <span className="rounded bg-black/[0.05] px-1.5 text-[10.5px] text-neutral-500 dark:bg-white/10 dark:text-neutral-400">
+                            {count}
+                          </span>
+                        )}
+                      </span>
+                      <span className="kv-row-desc block">{eventDescription(t, event)}</span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex justify-end pt-1">
+              <Button onClick={() => setPicking(false)} data-tauri-drag-region="false">{t.cancel}</Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {modal && (
         <HookModal
           lang={lang}
-          event={activeEvent}
-          eventLabel={eventLabel(t, (modal.editing?.event as HookEvent) ?? activeEvent)}
+          event={modal.event}
+          eventLabel={eventLabel(t, (modal.editing?.event as HookEvent) ?? modal.event)}
           initial={modal.editing}
           onSave={saveHook}
           onClose={() => setModal(null)}
@@ -269,6 +236,6 @@ export function HooksTab({ lang, hooks, onChange }: {
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
