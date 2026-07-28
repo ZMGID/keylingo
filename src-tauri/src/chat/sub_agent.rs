@@ -44,6 +44,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
+use crate::agents::AgentDefinition;
 use crate::chat::agent::prepare::{available_builtin_tool_names, build_chat_system_prompt};
 use crate::chat::agent::types::AgentRunResult;
 use crate::chat::agent::{
@@ -805,7 +806,38 @@ pub struct SubAgentCallCtx<'a> {
     pub arguments: &'a Value,
 }
 
-pub fn agent_tool() -> ChatToolDefinition {
+/// Compose the `subagent_type` parameter description from the ACTUALLY loaded
+/// definitions (built-in + user + project), so the model discovers user-authored
+/// roles without being told they exist. Deliberately no JSON-Schema `enum`: a
+/// role file created mid-run would be rejected provider-side, and inline ad-hoc
+/// roles omit the field entirely — a soft failure listing the available roles is
+/// more useful.
+fn subagent_type_description(defs: &[AgentDefinition]) -> String {
+    let available = defs
+        .iter()
+        .map(|d| {
+            let description = d.description.trim();
+            if description.is_empty() {
+                d.name.clone()
+            } else {
+                format!("{} — {}", d.name, description)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut out = String::from("Named agent role.");
+    if !available.is_empty() {
+        out.push_str(" Available: ");
+        out.push_str(&available);
+        out.push('.');
+    }
+    out.push_str(
+        " Omit to use general-purpose, or omit it and pass system_prompt/tools to define an ad-hoc role inline.",
+    );
+    out
+}
+
+pub fn agent_tool(defs: &[AgentDefinition]) -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__agent".to_string(),
         name: AGENT_TOOL_NAME.to_string(),
@@ -823,12 +855,26 @@ pub fn agent_tool() -> ChatToolDefinition {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "Agent type: general-purpose (default), researcher, coder, reviewer, or a user/project-defined type."
+                    "description": subagent_type_description(defs)
                 },
                 "name": {
                     "type": "string",
                     "maxLength": 80,
                     "description": "Optional short label for this sub-agent run."
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "description": "Ad-hoc persona for this run. Replaces the named role's prompt."
+                },
+                "tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Ad-hoc tool allow-list, replacing the named role's. Supports `mcp__<server>__*`, `mcp__*`, `*`. Empty means inherit every tool."
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Ad-hoc tool deny-list, replacing the named role's. Applied BEFORE `tools`."
                 }
             },
             "required": ["prompt"],
@@ -844,15 +890,19 @@ pub fn agent_tool() -> ChatToolDefinition {
     }
 }
 
-pub fn tool_definitions() -> Vec<ChatToolDefinition> {
-    vec![agent_tool()]
+pub fn tool_definitions(defs: &[AgentDefinition]) -> Vec<ChatToolDefinition> {
+    vec![agent_tool(defs)]
 }
 
 /// Append sub-agent management tools (model-facing), skipping the `agent`
 /// spawn tool when `allow_spawn` is false (i.e. inside a sub-agent — second
 /// guard against recursion alongside the depth check).
-pub fn append_tool_definitions(tools: &mut Vec<ChatToolDefinition>, allow_spawn: bool) {
-    for tool in tool_definitions() {
+pub fn append_tool_definitions(
+    tools: &mut Vec<ChatToolDefinition>,
+    allow_spawn: bool,
+    defs: &[AgentDefinition],
+) {
+    for tool in tool_definitions(defs) {
         if tool.name == AGENT_TOOL_NAME && !allow_spawn {
             continue;
         }
@@ -863,6 +913,42 @@ pub fn append_tool_definitions(tools: &mut Vec<ChatToolDefinition>, allow_spawn:
             tools.push(tool);
         }
     }
+}
+
+/// Apply the `agent` call's inline role fields onto `def`. Each field is a WHOLE
+/// REPLACEMENT, not a merge: merging could not express "researcher, but without
+/// web_fetch", while replacement expresses any combination under one rule.
+/// Empty strings / empty arrays count as "not provided".
+fn apply_inline_overrides(def: &mut AgentDefinition, arguments: &Value) {
+    if let Some(prompt) = arguments
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        def.system_prompt = prompt.to_string();
+    }
+    if let Some(tools) = inline_string_list(arguments, "tools") {
+        def.tools = tools;
+    }
+    if let Some(denied) = inline_string_list(arguments, "disallowed_tools") {
+        def.disallowed_tools = denied;
+    }
+}
+
+/// Read an inline `Vec<String>` argument, returning `None` when absent or empty
+/// (so an empty array never turns into a narrowing that blocks everything).
+fn inline_string_list(arguments: &Value, key: &str) -> Option<Vec<String>> {
+    let items: Vec<String> = arguments
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!items.is_empty()).then_some(items)
 }
 
 fn err_result(message: impl Into<String>) -> McpToolCallResult {
@@ -945,7 +1031,10 @@ pub fn handle_agent_spawn<'a>(
                     .join(", ")
             )));
         };
-        let def = def.clone();
+        // The named role is the BASE; inline `system_prompt`/`tools`/
+        // `disallowed_tools` replace their counterparts for this run only (R2).
+        let mut def = def.clone();
+        apply_inline_overrides(&mut def, ctx.arguments);
 
         // Provider/model resolution, three tiers:
         //   1. agent definition `model` field — highest, resolved against the
@@ -981,7 +1070,30 @@ pub fn handle_agent_spawn<'a>(
         let mut tools = crate::mcp::registry::list_enabled_tool_catalog(ctx.app, ctx.state)
             .await
             .tools;
+        // Computed on the UNFILTERED catalog (before narrowing) so the refusal
+        // below can name the entries that matched nothing.
+        let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&tools, &def);
         crate::chat::agent::filter::filter_tools_for_agent(&mut tools, &def);
+        // Spec: an allow-list that resolves to the empty set must REFUSE to
+        // launch and report the unresolved entries, not silently start a
+        // zero-tool worker. Skill tools are kept unconditionally by the filter,
+        // so they don't count as a resolved allow-list.
+        if !def.tools.is_empty()
+            && tools.iter().all(|tool| {
+                tool.source == "skill"
+                    || crate::chat::agent::prepare::is_native_skill_tool_name(&tool.name)
+            })
+        {
+            return Ok(err_result(format!(
+                "Sub-agent '{}' would launch with zero tools. Unresolved entries: {}.",
+                def.name,
+                if unresolved.is_empty() {
+                    def.tools.join(", ")
+                } else {
+                    unresolved.join(", ")
+                }
+            )));
+        }
         let available_builtin_tools = available_builtin_tool_names(&tools);
 
         // Compose the sub-agent system prompt: persona prefix + base chat
@@ -995,11 +1107,23 @@ pub fn handle_agent_spawn<'a>(
             &settings.email_accounts,
             himalaya_binary.as_deref(),
         );
+        // Real skill registry (was `SkillRegistry::default()` — an empty catalog,
+        // so the skill tools the filter deliberately keeps had nothing to find).
+        // Always the FULL registry: `def.skills` is a preload list, not a
+        // visibility narrowing, so the sub-agent can still activate other skills.
+        let skill_registry =
+            crate::skills::build_registry(ctx.app, &settings.chat_tools.skill_scan_paths)
+                .unwrap_or_default();
+        let persona = compose_persona_with_preloaded_skills(
+            &def.system_prompt,
+            &skill_registry,
+            &def.skills,
+        );
         let system_prompt = build_chat_system_prompt(
             &language,
             false,
             settings.chat.thinking_enabled,
-            &SkillRegistry::default(),
+            &skill_registry,
             &settings.chat_tools,
             true,
             &available_builtin_tools,
@@ -1007,7 +1131,7 @@ pub fn handle_agent_spawn<'a>(
             None,
             None,
             None,
-            &compose_persona(&def.system_prompt),
+            &persona,
             None,
             None,
             None,
@@ -1343,6 +1467,33 @@ fn compose_persona(persona: &str) -> String {
     }
 }
 
+/// Persona + `skills:` PRELOAD (industry semantics): the listed skills' full
+/// bodies are injected into the launch context so the sub-agent starts with that
+/// knowledge instead of having to activate them first. It does NOT restrict which
+/// skills it may activate later — the registry stays full.
+///
+/// Rides on `custom_system_prompt` (the persona channel) rather than
+/// `active_skill_detail`: that channel only injects under the
+/// `skill_md_only`/`legacy_full_body` fallback modes, so on the default
+/// `progressive` mode a preload through it would silently do nothing.
+fn compose_persona_with_preloaded_skills(
+    persona: &str,
+    registry: &SkillRegistry,
+    skills: &[String],
+) -> String {
+    let base = compose_persona(persona);
+    let bodies: Vec<String> = skills
+        .iter()
+        .filter_map(|id| registry.find(id))
+        .filter(|record| !record.body.trim().is_empty())
+        .map(|record| format!("Preloaded Skill ({}):\n{}", record.meta.name, record.body))
+        .collect();
+    if bodies.is_empty() {
+        return base;
+    }
+    format!("{base}\n\n{}", bodies.join("\n\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,7 +1562,7 @@ mod tests {
     #[test]
     fn append_tools_strips_spawn_when_not_allowed() {
         let mut tools = Vec::new();
-        append_tool_definitions(&mut tools, false);
+        append_tool_definitions(&mut tools, false, &[]);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(
             !names.contains(&"agent"),
@@ -1422,9 +1573,220 @@ mod tests {
     #[test]
     fn append_tools_includes_spawn_when_allowed() {
         let mut tools = Vec::new();
-        append_tool_definitions(&mut tools, true);
+        append_tool_definitions(&mut tools, true, &[]);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"agent"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic role schema (R1) + inline ad-hoc roles (R2)
+    // -----------------------------------------------------------------------
+
+    fn test_def(id: &str, description: &str) -> AgentDefinition {
+        AgentDefinition {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: description.to_string(),
+            system_prompt: "base persona".to_string(),
+            model: None,
+            tools: vec!["read".to_string()],
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
+            source: "user".to_string(),
+        }
+    }
+
+    /// The `subagent_type` description must name EVERY loaded role (including
+    /// user/project `.md` roles) — that is how the model discovers them.
+    #[test]
+    fn schema_description_lists_every_loaded_role() {
+        let defs = [
+            crate::agents::builtin_agent_definitions(),
+            vec![test_def("my-analyst", "财报结构化分析")],
+        ]
+        .concat();
+        let tool = agent_tool(&defs);
+        let description = tool.input_schema["properties"]["subagent_type"]["description"]
+            .as_str()
+            .expect("subagent_type description");
+        for def in &defs {
+            assert!(
+                description.contains(&def.name),
+                "role {} must be listed in the schema",
+                def.name
+            );
+        }
+        assert!(description.contains("财报结构化分析"));
+        // No `enum`: an inline ad-hoc role omits the field, and a role file
+        // created mid-run must not be rejected provider-side.
+        assert!(tool.input_schema["properties"]["subagent_type"]
+            .get("enum")
+            .is_none());
+    }
+
+    /// The inline ad-hoc fields are declared even though `additionalProperties`
+    /// stays false — otherwise a strict provider rejects the call.
+    #[test]
+    fn schema_declares_inline_role_fields() {
+        let tool = agent_tool(&[]);
+        let properties = &tool.input_schema["properties"];
+        for key in ["system_prompt", "tools", "disallowed_tools"] {
+            assert!(properties.get(key).is_some(), "{key} must be declared");
+        }
+        assert_eq!(tool.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn inline_overrides_replace_the_named_role_fields() {
+        let mut def = test_def("researcher", "Read-only research");
+        def.disallowed_tools = vec!["bash".to_string()];
+        apply_inline_overrides(
+            &mut def,
+            &serde_json::json!({
+                "system_prompt": "  You only read Notion.  ",
+                "tools": ["mcp__notion__*", " "],
+                "disallowed_tools": ["write"]
+            }),
+        );
+        assert_eq!(def.system_prompt, "You only read Notion.");
+        // Whole replacement, not a merge (blank entries dropped).
+        assert_eq!(def.tools, vec!["mcp__notion__*".to_string()]);
+        assert_eq!(def.disallowed_tools, vec!["write".to_string()]);
+    }
+
+    #[test]
+    fn inline_overrides_absent_or_empty_leave_the_role_untouched() {
+        let base = test_def("researcher", "Read-only research");
+        // Nothing inline.
+        let mut def = base.clone();
+        apply_inline_overrides(&mut def, &serde_json::json!({ "prompt": "go" }));
+        assert_eq!(def.system_prompt, base.system_prompt);
+        assert_eq!(def.tools, base.tools);
+        assert_eq!(def.disallowed_tools, base.disallowed_tools);
+        // Blank string / empty arrays count as "not provided" — an empty allow
+        // list must not become a narrowing that blocks everything.
+        let mut def = base.clone();
+        apply_inline_overrides(
+            &mut def,
+            &serde_json::json!({ "system_prompt": "   ", "tools": [], "disallowed_tools": [] }),
+        );
+        assert_eq!(def.system_prompt, base.system_prompt);
+        assert_eq!(def.tools, base.tools);
+        assert_eq!(def.disallowed_tools, base.disallowed_tools);
+    }
+
+    /// Pure-inline role: no `subagent_type`, so `general-purpose` is the base and
+    /// the inline fields fill it in completely (no special-case branch needed).
+    #[test]
+    fn inline_only_role_builds_on_general_purpose() {
+        let defs = crate::agents::builtin_agent_definitions();
+        let mut def = crate::agents::find_definition(&defs, "general-purpose")
+            .expect("general-purpose")
+            .clone();
+        apply_inline_overrides(
+            &mut def,
+            &serde_json::json!({
+                "prompt": "audit the config",
+                "system_prompt": "You audit configuration files.",
+                "tools": ["read", "grep"]
+            }),
+        );
+        assert_eq!(def.system_prompt, "You audit configuration files.");
+        assert_eq!(
+            def.tools,
+            vec!["read".to_string(), "grep".to_string()],
+            "inline allow-list must narrow a general-purpose base"
+        );
+    }
+
+    /// The spawn refusal message must name the entries that resolved to nothing,
+    /// which is exactly what `unresolved_allow_entries` reports.
+    #[test]
+    fn zero_tool_refusal_names_the_unresolved_entries() {
+        let pool = vec![agent_tool(&[]), crate::mcp::types::native_read_file_tool()];
+        let mut def = test_def("typo-agent", "");
+        def.tools = vec!["reed_file".to_string(), "mcp__notionn__*".to_string()];
+        let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&pool, &def);
+        assert_eq!(
+            unresolved,
+            vec!["reed_file".to_string(), "mcp__notionn__*".to_string()]
+        );
+        let message = format!(
+            "Sub-agent '{}' would launch with zero tools. Unresolved entries: {}.",
+            def.name,
+            unresolved.join(", ")
+        );
+        assert!(message.contains("reed_file"));
+        assert!(message.contains("mcp__notionn__*"));
+        // And the tool table really is empty after filtering.
+        let mut filtered = pool.clone();
+        crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
+        assert!(filtered.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Skills preload (R4)
+    // -----------------------------------------------------------------------
+
+    fn skill_record(id: &str, body: &str) -> crate::skills::SkillRecord {
+        crate::skills::SkillRecord {
+            meta: crate::skills::SkillMeta {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: String::new(),
+                source: "builtin".to_string(),
+                path: None,
+                recommended_tools: Vec::new(),
+                disable_model_invocation: false,
+                files: Vec::new(),
+                triggers: Vec::new(),
+                argument_hint: None,
+                arguments: Vec::new(),
+            },
+            location: std::path::PathBuf::new(),
+            base_dir: std::path::PathBuf::new(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn preloaded_skills_inject_full_bodies_into_the_persona() {
+        let registry = SkillRegistry {
+            records: vec![
+                skill_record("pdf", "PDF STEPS BODY"),
+                skill_record("docx", "DOCX STEPS BODY"),
+            ],
+            warnings: Vec::new(),
+        };
+        let persona = compose_persona_with_preloaded_skills(
+            "You analyse documents.",
+            &registry,
+            &["pdf".to_string(), "docx".to_string()],
+        );
+        assert!(persona.contains("You analyse documents."));
+        assert!(persona.contains("PDF STEPS BODY"));
+        assert!(persona.contains("DOCX STEPS BODY"));
+    }
+
+    #[test]
+    fn no_preload_leaves_the_persona_identical_and_unknown_ids_are_skipped() {
+        let registry = SkillRegistry {
+            records: vec![skill_record("pdf", "PDF STEPS BODY")],
+            warnings: Vec::new(),
+        };
+        let plain = compose_persona("You analyse documents.");
+        assert_eq!(
+            compose_persona_with_preloaded_skills("You analyse documents.", &registry, &[]),
+            plain
+        );
+        assert_eq!(
+            compose_persona_with_preloaded_skills(
+                "You analyse documents.",
+                &registry,
+                &["nope".to_string()]
+            ),
+            plain
+        );
     }
 
     #[test]
@@ -2173,7 +2535,7 @@ mod tests {
                 serde_json::json!({ "role": "system", "content": "you orchestrate workers" }),
                 serde_json::json!({ "role": "user", "content": "research three topics in parallel" }),
             ],
-            tools: vec![agent_tool()],
+            tools: vec![agent_tool(&[])],
             blocked_tool_calls: Vec::new(),
             settings: Settings::default(),
             effective_chat_tools: ChatToolsConfig {

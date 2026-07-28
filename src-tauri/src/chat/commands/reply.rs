@@ -388,11 +388,23 @@ pub(super) async fn complete_assistant_reply_inner(
     );
     let ask_user_tools_available = append_agent_ask_user_tools(&mut tools);
     let todo_tools_available = append_agent_todo_tools(&mut tools);
+    // Resolved here (rather than further down with the other prompt context) so
+    // the sub-agent role registry below can reuse the project root instead of
+    // resolving the conversation's project a second time.
+    let project_prompt_context = project_prompt_context_for(app, conversation);
     // Multi-agent spawn tool (P3): exposure is mode-controlled. Act and
     // Orchestrate both expose the `agent` tool; Plan mode excludes it (spawn is a
     // side-effecting, non-read-only capability).
     if !plan_mode && !builder_mode {
-        crate::chat::sub_agent::append_tool_definitions(&mut tools, true);
+        // Load the role registry (built-in + user + project) so the `agent`
+        // tool's schema lists the roles that actually exist for this
+        // conversation — the model must not have to guess role names.
+        let project_root = project_prompt_context
+            .as_ref()
+            .and_then(|context| context.root_path.as_deref())
+            .map(std::path::Path::new);
+        let agent_defs = crate::agents::load_agent_definitions(app, project_root);
+        crate::chat::sub_agent::append_tool_definitions(&mut tools, true, &agent_defs);
     }
     // Orchestrate mode raises the autonomy budget: a single user message may
     // need more tool rounds to plan, fan out sub-agents, and aggregate. We lift
@@ -409,7 +421,6 @@ pub(super) async fn complete_assistant_reply_inner(
         crate::chat::todo::format_prompt(&conversation.agent_todo_state, todo_tools_available);
     let agent_ask_user_prompt = crate::chat::ask_user::format_prompt(ask_user_tools_available);
     let agent_plan_prompt = crate::chat::plan::format_prompt(&conversation.agent_plan_state);
-    let project_prompt_context = project_prompt_context_for(app, conversation);
     // Default workbench surfaced to the model. It is an ergonomic default, not
     // a sandbox; explicit user paths continue to take precedence.
     let workbench_dir = crate::chat::storage::resolve_conversation_working_directory(

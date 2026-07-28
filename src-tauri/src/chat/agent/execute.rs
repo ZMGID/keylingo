@@ -1397,7 +1397,7 @@ mod tests {
         // outer 120s default does not mis-kill a long sub-agent run.
         let mut settings = Settings::default();
         settings.chat_tools.tool_timeout_ms = 120_000;
-        let tool = crate::chat::sub_agent::agent_tool();
+        let tool = crate::chat::sub_agent::agent_tool(&[]);
         let arguments = serde_json::json!({ "prompt": "do a focused sub-task" });
 
         assert_eq!(
@@ -1415,7 +1415,7 @@ mod tests {
         // If the user configured an even larger generic timeout, honor it.
         let mut settings = Settings::default();
         settings.chat_tools.tool_timeout_ms = crate::chat::sub_agent::SUB_AGENT_TOOL_TIMEOUT_MS + 1;
-        let tool = crate::chat::sub_agent::agent_tool();
+        let tool = crate::chat::sub_agent::agent_tool(&[]);
         let arguments = serde_json::json!({ "prompt": "do a focused sub-task" });
 
         assert_eq!(

@@ -6,6 +6,8 @@
 //! name: research-agent
 //! description: Deep-dive research and source synthesis
 //! tools: read_file, web_search, web_fetch
+//! disallowedTools: write, edit
+//! skills: pdf
 //! model: gpt-4o
 //! ---
 //!
@@ -46,6 +48,13 @@ pub fn parse_agent_markdown(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let tools = parse_list_value(frontmatter.get("tools"));
+    // Industry convention spells the denylist `disallowedTools` (camelCase);
+    // Kivio's own frontmatter style is snake_case, so accept both (camelCase wins).
+    let disallowed_tools = match frontmatter.get("disallowedTools") {
+        Some(value) => parse_list_value(Some(value)),
+        None => parse_list_value(frontmatter.get("disallowed_tools")),
+    };
+    let skills = parse_list_value(frontmatter.get("skills"));
     let system_prompt = body.trim().to_string();
 
     let _ = path; // reserved for future "open definition" UX; kept for symmetry with skills
@@ -56,6 +65,8 @@ pub fn parse_agent_markdown(
         system_prompt,
         model,
         tools,
+        disallowed_tools,
+        skills,
         source: source.to_string(),
     })
 }
@@ -101,5 +112,39 @@ mod tests {
             def.tools,
             vec!["read_file".to_string(), "edit_file".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_skills_preload_list() {
+        let raw = "---\nname: x\nskills: pdf, docx\n---\nbody";
+        let def = parse_agent_markdown("x", raw, "user", None).unwrap();
+        assert_eq!(def.skills, vec!["pdf".to_string(), "docx".to_string()]);
+    }
+
+    #[test]
+    fn parses_disallowed_tools_both_key_spellings() {
+        // Industry-standard camelCase.
+        let camel = "---\nname: x\ndisallowedTools: write, edit\n---\nbody";
+        let def = parse_agent_markdown("x", camel, "user", None).unwrap();
+        assert_eq!(
+            def.disallowed_tools,
+            vec!["write".to_string(), "edit".to_string()]
+        );
+        // Kivio-style snake_case.
+        let snake = "---\nname: x\ndisallowed_tools: bash\n---\nbody";
+        let def = parse_agent_markdown("x", snake, "user", None).unwrap();
+        assert_eq!(def.disallowed_tools, vec!["bash".to_string()]);
+        // Both present ⇒ camelCase wins.
+        let both = "---\nname: x\ndisallowedTools: write\ndisallowed_tools: bash\n---\nbody";
+        let def = parse_agent_markdown("x", both, "user", None).unwrap();
+        assert_eq!(def.disallowed_tools, vec!["write".to_string()]);
+    }
+
+    #[test]
+    fn new_fields_default_to_empty() {
+        let raw = "---\nname: x\ntools: read_file\n---\nbody";
+        let def = parse_agent_markdown("x", raw, "user", None).unwrap();
+        assert!(def.disallowed_tools.is_empty());
+        assert!(def.skills.is_empty());
     }
 }

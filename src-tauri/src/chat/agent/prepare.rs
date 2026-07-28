@@ -480,6 +480,22 @@ pub fn build_chat_system_prompt_with_segments(
                 "Native tools",
                 background_prompt,
             );
+            // Roles are data, not code: the available ones are listed in the
+            // `agent` tool's `subagent_type` description, and a new permanent
+            // role is just a `.md` file the model can write with its own tools.
+            let agents_dir = crate::app_data::app_data_dir()
+                .map(|dir| dir.join("agents").display().to_string())
+                .unwrap_or_else(|| "<app_data>/agents".to_string());
+            let roles_prompt = format!(
+                "Sub-agent roles: the roles available right now are listed in the agent tool's subagent_type description. For a one-off role, skip subagent_type and pass system_prompt/tools inline. To add a PERMANENT role, write a Markdown file to {agents_dir} with YAML frontmatter (name, description, tools, disallowedTools, skills, model) whose body is the role's system prompt; tools/disallowedTools accept `mcp__<server>__*`, `mcp__*` and `*`, and disallowedTools is applied before tools."
+            );
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "native_tools",
+                "Native tools",
+                &roles_prompt,
+            );
         }
         // Generic tool-hygiene rules (all conversations with tools enabled, not
         // a plugin-specific hint): keep disposable intermediates out of the workbench,

@@ -6,6 +6,12 @@ use serde::Serialize;
 /// prompt; `model` empty means inherit the parent's model; `tools` empty means
 /// "all tools available to the parent except the `agent` tool" (the allow-list
 /// is enforced at spawn time, see `chat::agent::filter::filter_tools_for_agent`).
+///
+/// `disallowed_tools` is the denylist counterpart (industry convention:
+/// `disallowedTools`), applied BEFORE `tools` so "inherit everything except X"
+/// is expressible. `skills` is a preload list: the listed skills' full bodies
+/// are injected into the sub-agent's launch context — it does NOT narrow which
+/// skills the sub-agent may activate later.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
@@ -17,6 +23,10 @@ pub struct AgentDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub tools: Vec<String>,
+    #[serde(default)]
+    pub disallowed_tools: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
     pub source: String,
 }
 
@@ -33,6 +43,8 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             system_prompt: String::new(),
             model: None,
             tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
             source: "builtin".to_string(),
         },
         AgentDefinition {
@@ -48,6 +60,8 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
                 "web_search".to_string(),
                 "web_fetch".to_string(),
             ],
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
             source: "builtin".to_string(),
         },
         AgentDefinition {
@@ -63,6 +77,8 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
                 "edit".to_string(),
                 "write".to_string(),
             ],
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
             source: "builtin".to_string(),
         },
         AgentDefinition {
@@ -76,6 +92,8 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
                 "grep".to_string(),
                 "glob".to_string(),
             ],
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
             source: "builtin".to_string(),
         },
     ]
