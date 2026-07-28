@@ -19,7 +19,9 @@ use super::prepare::tool_matches_recommended_name;
 
 /// Whether one allow/deny entry matches `tool`. Suffix `*` only — the spec's
 /// wildcard forms are all prefixes, so a glob engine would be dead weight.
-fn entry_matches(tool: &ChatToolDefinition, entry: &str) -> bool {
+/// Public so the spawn path can tell "the denylist emptied the pool" apart from
+/// "an allow entry was misspelled" when refusing a zero-tool launch.
+pub fn entry_matches(tool: &ChatToolDefinition, entry: &str) -> bool {
     let entry = entry.trim();
     if entry.is_empty() {
         return false;

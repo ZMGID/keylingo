@@ -951,6 +951,35 @@ fn inline_string_list(arguments: &Value, key: &str) -> Option<Vec<String>> {
     (!items.is_empty()).then_some(items)
 }
 
+/// Message for a spawn refused because its narrowing left no tools. The two
+/// causes need different wording: a denylist that emptied the pool is NOT a
+/// spelling problem, and reporting correctly-spelled allow entries as
+/// "unresolved" sends the model off fixing names that were never wrong.
+///
+/// `deny_emptied_pool` must be computed on the pre-narrowing catalog, because
+/// `unresolved_allow_entries` skips denied tools and therefore reports every
+/// allow entry as unresolved under a deny-all — exactly the misleading case.
+fn zero_tool_refusal(
+    def: &AgentDefinition,
+    unresolved: &[String],
+    deny_emptied_pool: bool,
+) -> String {
+    let prefix = format!("Sub-agent '{}' would launch with zero tools", def.name);
+    if deny_emptied_pool {
+        return format!(
+            "{prefix}: disallowed_tools ({}) removed every tool. Narrow the deny-list, or use `tools` to allow-list what the sub-agent needs.",
+            def.disallowed_tools.join(", ")
+        );
+    }
+    if !unresolved.is_empty() {
+        return format!(
+            "{prefix}. These entries matched no available tool: {}.",
+            unresolved.join(", ")
+        );
+    }
+    format!("{prefix}. Check its tools / disallowedTools configuration.")
+}
+
 fn err_result(message: impl Into<String>) -> McpToolCallResult {
     McpToolCallResult {
         content: message.into(),
@@ -1073,25 +1102,33 @@ pub fn handle_agent_spawn<'a>(
         // Computed on the UNFILTERED catalog (before narrowing) so the refusal
         // below can name the entries that matched nothing.
         let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&tools, &def);
+        // Whether the DENYLIST alone leaves nothing behind, measured before the
+        // allow-list narrows anything. Drives the refusal wording below.
+        let deny_emptied_pool = !def.disallowed_tools.is_empty()
+            && !tools.is_empty()
+            && tools.iter().all(|tool| {
+                def.disallowed_tools
+                    .iter()
+                    .any(|entry| crate::chat::agent::filter::entry_matches(tool, entry))
+                    || is_sub_agent_tool_name(&tool.name)
+            });
         crate::chat::agent::filter::filter_tools_for_agent(&mut tools, &def);
-        // Spec: an allow-list that resolves to the empty set must REFUSE to
-        // launch and report the unresolved entries, not silently start a
-        // zero-tool worker. Skill tools are kept unconditionally by the filter,
-        // so they don't count as a resolved allow-list.
-        if !def.tools.is_empty()
+        // Spec: a narrowing that resolves to the empty set must REFUSE to launch
+        // rather than silently start a zero-tool worker. Skill tools are kept
+        // unconditionally by the filter, so they don't count as resolved.
+        // Both lists are checked: a deny-all (`disallowed_tools: ["*"]`) empties
+        // the pool even when `tools` is empty, which the allow-only guard missed.
+        let narrowing_requested = !def.tools.is_empty() || !def.disallowed_tools.is_empty();
+        if narrowing_requested
             && tools.iter().all(|tool| {
                 tool.source == "skill"
                     || crate::chat::agent::prepare::is_native_skill_tool_name(&tool.name)
             })
         {
-            return Ok(err_result(format!(
-                "Sub-agent '{}' would launch with zero tools. Unresolved entries: {}.",
-                def.name,
-                if unresolved.is_empty() {
-                    def.tools.join(", ")
-                } else {
-                    unresolved.join(", ")
-                }
+            return Ok(err_result(zero_tool_refusal(
+                &def,
+                &unresolved,
+                deny_emptied_pool,
             )));
         }
         let available_builtin_tools = available_builtin_tool_names(&tools);
@@ -1711,17 +1748,72 @@ mod tests {
             unresolved,
             vec!["reed_file".to_string(), "mcp__notionn__*".to_string()]
         );
-        let message = format!(
-            "Sub-agent '{}' would launch with zero tools. Unresolved entries: {}.",
-            def.name,
-            unresolved.join(", ")
-        );
+        let message = zero_tool_refusal(&def, &unresolved, false);
         assert!(message.contains("reed_file"));
         assert!(message.contains("mcp__notionn__*"));
+        assert!(message.contains("matched no available tool"));
         // And the tool table really is empty after filtering.
         let mut filtered = pool.clone();
         crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
         assert!(filtered.is_empty());
+    }
+
+    /// Mirror of the spawn path's `deny_emptied_pool` computation, so the tests
+    /// exercise the same predicate the runtime uses.
+    fn deny_emptied_pool(pool: &[ChatToolDefinition], def: &AgentDefinition) -> bool {
+        !def.disallowed_tools.is_empty()
+            && !pool.is_empty()
+            && pool.iter().all(|tool| {
+                def.disallowed_tools
+                    .iter()
+                    .any(|entry| crate::chat::agent::filter::entry_matches(tool, entry))
+                    || is_sub_agent_tool_name(&tool.name)
+            })
+    }
+
+    #[test]
+    fn deny_all_refusal_blames_the_denylist_not_the_allow_entries() {
+        // Observed in the wild: the model sent `disallowed_tools: ["*"]` with the
+        // built-in `coder` role. Every allow entry was spelled correctly, yet
+        // `unresolved_allow_entries` reports them all (it skips denied tools), so
+        // the message must key on the denylist instead — otherwise the model goes
+        // off "fixing" names that were never wrong.
+        let pool = vec![agent_tool(&[]), crate::mcp::types::native_read_file_tool()];
+        let mut def = test_def("coder", "");
+        def.tools = vec!["read".to_string(), "grep".to_string()];
+        def.disallowed_tools = vec!["*".to_string()];
+
+        assert!(deny_emptied_pool(&pool, &def));
+        let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&pool, &def);
+        let message = zero_tool_refusal(&def, &unresolved, true);
+        assert!(message.contains("disallowed_tools"), "{message}");
+        assert!(
+            !message.contains("matched no available tool"),
+            "correctly-spelled entries must not be blamed: {message}"
+        );
+
+        // A deny-all really does empty the table even though `tools` is non-empty.
+        let mut filtered = pool.clone();
+        crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn deny_all_is_caught_even_when_no_allow_list_is_set() {
+        // The refusal guard must key on EITHER list: with `tools` empty, an
+        // allow-only guard would let a zero-tool sub-agent launch silently.
+        let pool = vec![crate::mcp::types::native_read_file_tool()];
+        let mut def = test_def("general-purpose", "");
+        def.tools = Vec::new();
+        def.disallowed_tools = vec!["*".to_string()];
+
+        let mut filtered = pool.clone();
+        crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
+        assert!(filtered.is_empty(), "deny-all empties the pool");
+
+        let narrowing_requested = !def.tools.is_empty() || !def.disallowed_tools.is_empty();
+        assert!(narrowing_requested, "the denylist alone must trip the guard");
+        assert!(deny_emptied_pool(&pool, &def));
     }
 
     // -----------------------------------------------------------------------
