@@ -1,18 +1,26 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import { isWindows, usesNativeTitlebar } from './platform'
+import { getCurrentWindow, type PhysicalSize } from '@tauri-apps/api/window'
+import { isMac, isWindows, usesNativeTitlebar } from './platform'
 import { isTauriRuntime } from './utils'
+import { syncChatWindowEffect, type ChatEffectPlatform } from './chatWindowEffects'
 
 type ChatWindowHostProps = {
   children: ReactNode
+  translucentSidebar: boolean
 }
+
+const effectPlatform: ChatEffectPlatform = isMac ? 'macos' : isWindows ? 'windows' : 'linux'
 
 /**
  * Chat 专用窗口外壳：Windows 自绘圆角边缘，最大化时收起圆角；
- * macOS 全屏时系统隐藏交通灯，撤掉顶栏为灯预留的左缩进（否则空一大块）。
+ * macOS 全屏时系统隐藏交通灯，撤掉顶栏为灯预留的左缩进（否则空一大块）；
+ * 并驱动系统窗口材质（macOS Menu / Windows Mica）的开关。
  */
-export function ChatWindowHost({ children }: ChatWindowHostProps) {
+export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostProps) {
   const [maximized, setMaximized] = useState(false)
+  const [nativeEffectActive, setNativeEffectActive] = useState(false)
+  // 材质输入（焦点 + 物理尺寸）存 state，让 React 自己收敛重复渲染，不手搓 pending/ready 标志。
+  const [effectInput, setEffectInput] = useState<{ focused: boolean; size: PhysicalSize } | null>(null)
   // mac 全屏：以 isFullscreen() 为权威（菜单栏「始终显示」时 innerHeight 到不了 screen.height，
   // 纯几何判定会漏判，顶栏 pl-[92px] 留出空块）。
   //
@@ -121,9 +129,75 @@ export function ChatWindowHost({ children }: ChatWindowHostProps) {
     }
   }, [])
 
+  // 系统窗口材质的输入采集：焦点 + 物理尺寸。resize 同样按 150ms 收敛（理由见上方
+  // syncMaximized —— setEffects 也是一次 IPC，不能每帧发）。
+  useEffect(() => {
+    if (!isTauriRuntime() || effectPlatform === 'linux') return
+
+    const win = getCurrentWindow()
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stops: Array<() => void> = []
+
+    // prev 为 null = 初始快照还没落地，事件直接丢（紧随其后的 setEffectInput 会带上完整状态）。
+    const push = (next: Partial<{ focused: boolean; size: PhysicalSize }>) => {
+      if (!cancelled) setEffectInput(prev => (prev ? { ...prev, ...next } : prev))
+    }
+
+    void (async () => {
+      try {
+        const [focused, size] = await Promise.all([win.isFocused(), win.innerSize()])
+        if (cancelled) return
+        setEffectInput({ focused, size })
+
+        const stopResize = await win.onResized(({ payload }) => {
+          if (timer !== undefined) clearTimeout(timer)
+          timer = setTimeout(() => push({ size: payload }), 150)
+        })
+        cancelled ? stopResize() : stops.push(stopResize)
+
+        // macOS 的 Menu 材质要跟随焦点；Windows 的 Mica 失焦不变，不必订阅。
+        if (effectPlatform === 'macos') {
+          const stopFocus = await win.onFocusChanged(({ payload }) => push({ focused: payload }))
+          cancelled ? stopFocus() : stops.push(stopFocus)
+        }
+      } catch {
+        if (!cancelled) setNativeEffectActive(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) clearTimeout(timer)
+      stops.forEach(stop => stop())
+    }
+  }, [])
+
+  // 材质应用：输入或设置一变就重跑，React 负责收敛；晚到的结果由 cancelled 丢弃。
+  useEffect(() => {
+    if (!isTauriRuntime() || effectPlatform === 'linux' || !effectInput) return
+    let cancelled = false
+    void syncChatWindowEffect(
+      getCurrentWindow(),
+      effectPlatform,
+      translucentSidebar,
+      effectInput.focused,
+      effectInput.size,
+    ).then(active => {
+      if (!cancelled) setNativeEffectActive(active)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [translucentSidebar, effectInput])
+
+  const nativeEffectClass = nativeEffectActive ? ' chat-window-host--native-effect' : ''
+
   if (usesNativeTitlebar) {
     return (
-      <div className={`h-full w-full${macFullscreen ? ' chat-window-host--mac-fullscreen' : ''}`}>
+      <div
+        className={`chat-window-host h-full w-full${macFullscreen ? ' chat-window-host--mac-fullscreen' : ''}${nativeEffectClass}`}
+      >
         {children}
       </div>
     )
@@ -133,6 +207,7 @@ export function ChatWindowHost({ children }: ChatWindowHostProps) {
     'chat-window-host h-full w-full',
     isWindows ? 'chat-window-host--win' : '',
     maximized ? 'chat-window-host--maximized' : '',
+    nativeEffectActive ? 'chat-window-host--native-effect' : '',
   ].filter(Boolean).join(' ')
 
   return (

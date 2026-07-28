@@ -28,6 +28,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Built-in Web Search](./builtin-web-search.md) | Session web-search mode, hosted-search injection/citation wire contracts, realtime card, effort mapping | Active |
 | [External Agent Integration](./external-agent-integration.md) | Project-scoped CLI discovery, cache keys, and process shutdown contracts | Active |
 | [Resource Lifecycle](./resource-lifecycle.md) | Child/Worker/server shutdown, idle cleanup, weak registries, and bounded runtime caches | Active |
+| [Native Chat Window Material](./native-chat-window-material.md) | macOS Menu / Windows Mica lifecycle, physical-size cutoff, and opaque fallback contract | Active |
 
 ---
 

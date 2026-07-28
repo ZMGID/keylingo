@@ -13,6 +13,7 @@ export function makeSettings(overrides: Partial<SettingsData> = {}): SettingsDat
     chatHotkey: 'CommandOrControl+Shift+J',
     theme: 'system',
     themeColor: 'default',
+    translucentSidebar: true,
     targetLang: 'auto',
     autoPaste: false,
     launchAtStartup: false,

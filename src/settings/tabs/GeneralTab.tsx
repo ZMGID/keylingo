@@ -66,7 +66,7 @@ function FontPicker({ value, systemFonts, placeholder, defaultLabel, emptyText, 
   )
 }
 
-/** 外观：语言 / 主题 / 主题色 / 界面字号 / 界面字体 / 代码字体。 */
+/** 外观：语言 / 主题 / 侧边栏材质 / 主题色 / 界面字号 / 界面字体 / 代码字体。 */
 export function AppearanceGroup({
   settings,
   t,
@@ -119,6 +119,16 @@ export function AppearanceGroup({
             </button>
           ))}
         </div>
+      </SettingRow>
+      <SettingRow
+        label={lang === 'zh' ? '半透明侧边栏' : 'Translucent sidebar'}
+        description={lang === 'zh' ? '使用系统窗口材质呈现侧边栏' : 'Use the system window material for the sidebar'}
+      >
+        <Toggle
+          checked={settings.translucentSidebar}
+          onChange={(value) => onUpdateSettings({ translucentSidebar: value })}
+          ariaLabel={lang === 'zh' ? '半透明侧边栏' : 'Translucent sidebar'}
+        />
       </SettingRow>
       <SettingRow label={t.themeColor}>
         <div className="kv-seg" role="radiogroup" aria-label={t.themeColor}>

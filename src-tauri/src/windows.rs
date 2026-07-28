@@ -96,10 +96,9 @@ pub fn apply_chat_window_chrome(window: &WebviewWindow) {
         let _ = window.set_decorations(false);
         #[cfg(target_os = "windows")]
         {
-            // 不透明窗口：原生背景随主题（暗色 #212121 / 浅色白）。这是 WebView 之下的原生清屏色，
-            // 伸缩时新暴露区域会先用它绘制，必须与主题一致，否则暗色下会先闪一下白。
-            // 圆角 / 描边 / 阴影交给 DWM；前端 shell 仍会铺满覆盖。
-            apply_chat_window_theme_background(window, chat_window_is_dark(window));
+            // Mica 需要透明 WebView 背景（见 ensure_chat_window_with_hash）；不支持 Mica 时
+            // 由前端不透明 shell 完整覆盖回退。所以这里不再设主题清屏色。
+            let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
             let _ = window.set_shadow(true);
             apply_windows_chat_window_frame(window);
         }
@@ -108,38 +107,6 @@ pub fn apply_chat_window_chrome(window: &WebviewWindow) {
             let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
             let _ = window.set_shadow(false);
         }
-    }
-}
-
-/// 让 Windows 不透明 chat 窗口的原生背景随主题：暗色用 #212121、浅色用白。
-/// 这是 WebView 之下的原生清屏色——伸缩时新暴露区域会先用它绘制，故必须与主题一致，
-/// 否则暗色下会先闪一下白。macOS / Linux 为透明窗口，保持透明、不在此设置。
-pub fn apply_chat_window_theme_background(window: &WebviewWindow, is_dark: bool) {
-    #[cfg(target_os = "windows")]
-    {
-        let color = if is_dark {
-            Color(33, 33, 33, 255)
-        } else {
-            Color(255, 255, 255, 255)
-        };
-        let _ = window.set_background_color(Some(color));
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (window, is_dark);
-    }
-}
-
-/// 解析 chat 窗口当前是否深色：settings.theme 为 light/dark 直接取，system 跟随窗口的 OS 主题。
-#[cfg(target_os = "windows")]
-fn chat_window_is_dark(window: &WebviewWindow) -> bool {
-    let app = window.app_handle();
-    let state = app.state::<crate::state::AppState>();
-    let mode = state.settings_read().theme.clone();
-    match mode.as_str() {
-        "dark" => true,
-        "light" => false,
-        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
     }
 }
 
@@ -262,29 +229,28 @@ pub fn ensure_chat_window_with_hash(app: &AppHandle, hash: &str) -> Result<Webvi
                 CHAT_TRAFFIC_LIGHT_X,
                 CHAT_TRAFFIC_LIGHT_INSET_Y,
             ))
-            .transparent(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .shadow(true);
     }
 
     #[cfg(target_os = "windows")]
     {
-        // Windows：不透明无边框窗口，圆角 / 描边 / 阴影全部交给 DWM
-        // （见 apply_windows_chat_window_frame）。刻意不用透明分层窗口，
-        // 否则 Win11 在分层表面上绘制系统边框时会出现一条二次接缝（顶部“叠了一层”）。
+        // Windows：透明无边框窗口让 Mica 穿过 WebView，圆角 / 描边 / 阴影交给 DWM。
         builder = builder
             .decorations(false)
-            .transparent(false)
-            .background_color(Color(255, 255, 255, 255))
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .shadow(true);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        // Linux：透明无边框壳，由前端 CSS 自绘圆角 / 边框 / 阴影。
+        // Linux：不支持系统窗口材质，始终使用不透明回退。
         builder = builder
             .decorations(false)
-            .transparent(true)
-            .background_color(Color(0, 0, 0, 0))
+            .transparent(false)
+            .background_color(Color(255, 255, 255, 255))
             .shadow(false);
     }
 

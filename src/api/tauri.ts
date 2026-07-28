@@ -924,6 +924,7 @@ export type Settings = {
   chatHotkey: string
   theme: 'system' | 'light' | 'dark'
   themeColor: string
+  translucentSidebar: boolean
   uiFontScale?: number
   uiFontFamily?: string
   uiFontMono?: string
@@ -1527,6 +1528,7 @@ function normalizeSettings(settings: Settings): Settings {
     chatHotkey: current.chatHotkey ?? 'CommandOrControl+Shift+K',
     theme: current.theme ?? 'system',
     themeColor: normalizeThemeColorId(current.themeColor),
+    translucentSidebar: current.translucentSidebar ?? true,
     uiFontScale: current.uiFontScale ?? 1,
     uiFontFamily: current.uiFontFamily ?? '',
     uiFontMono: current.uiFontMono ?? '',
@@ -1666,9 +1668,6 @@ export const api = {
   // 某模型支持的思考等级列表（数据来自模型库 reasoningEfforts）。
   reasoningEffortsForModel: (model: string, apiFormat?: string) =>
     invoke<string[]>('chat_reasoning_efforts_for_model', { model, apiFormat }),
-  // 把（Windows 不透明）chat 窗口的原生背景设为当前主题色，避免伸缩时闪白。其他窗口/平台为 no-op。
-  setChatWindowBackground: (isDark: boolean) =>
-    invoke('set_chat_window_background', { isDark }).catch(() => {}),
   getDefaultPromptTemplates: () => invoke<DefaultPromptTemplates>('get_default_prompt_templates'),
   listSystemFonts: () => invoke<string[]>('list_system_fonts').catch(() => [] as string[]),
   saveSettings: async (settings: Settings) =>

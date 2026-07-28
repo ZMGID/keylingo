@@ -1006,6 +1006,22 @@ button.chat-composer-status-item:hover {
     0 5px 16px -8px rgba(0, 0, 0, 0.45);
 }
 
+/* 系统窗口材质（macOS Menu / Windows Mica）激活：外壳让开，材质从侧栏卡片四周那道 8px
+   缝里透出来；卡片本身只留一层 scrim 保证文字对比度 —— Mica 是壁纸取色，不保证可读性，
+   所以两端都要留，不能像纯透明那样把字直接放到壁纸上。
+   模糊由系统合成器负责，这里绝不加 backdrop-filter。 */
+.chat-window-host--native-effect .chat-window-shell {
+  background: transparent;
+}
+
+.chat-window-host--native-effect .chat-sidebar-shell {
+  background: color-mix(in srgb, var(--theme-surface-soft) 72%, transparent);
+}
+
+.dark .chat-window-host--native-effect .chat-sidebar-shell {
+  background: color-mix(in srgb, #262629 66%, transparent);
+}
+
 .dark .chat-composer-shell {
   background: rgb(23, 23, 23);
 }

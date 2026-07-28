@@ -450,7 +450,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             fonts::list_system_fonts,
-            commands::set_chat_window_background,
             commands::get_default_prompt_templates,
             commands::save_settings,
             commands::set_favorite_models,

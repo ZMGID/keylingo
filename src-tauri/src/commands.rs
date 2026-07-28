@@ -48,16 +48,6 @@ pub(crate) fn get_settings(state: State<AppState>) -> Settings {
     state.settings_read().clone()
 }
 
-/// 前端解析好主题（含 system）后调用：把 chat 窗口的原生背景设为对应主题色，
-/// 避免伸缩时露出白色清屏底色导致暗色下闪白。仅对 label=="chat" 生效；
-/// macOS/Linux 透明窗口在 windows 模块内为 no-op。
-#[tauri::command]
-pub(crate) fn set_chat_window_background(window: tauri::WebviewWindow, is_dark: bool) {
-    if window.label() == "chat" {
-        crate::windows::apply_chat_window_theme_background(&window, is_dark);
-    }
-}
-
 /// 获取默认提示词模板
 /// 返回翻译模板、截图翻译模板，以及 lens 视觉对话用的系统/提问提示词
 #[tauri::command]

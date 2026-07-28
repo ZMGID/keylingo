@@ -232,6 +232,7 @@ function App() {
 
   const [mode, setMode] = useState(getMode)
   const [themeMode, setThemeMode] = useState<'system' | 'light' | 'dark'>('system')
+  const [translucentSidebar, setTranslucentSidebar] = useState(false)
   const [translateSource, setTranslateSource] = useState<string>('')
   const [lang, setLang] = useState<Lang>('zh')
 
@@ -255,14 +256,13 @@ function App() {
     const settings = await getSettingsCached()
     const nextMode = (settings.theme || 'system') as 'system' | 'light' | 'dark'
     setThemeMode(nextMode)
+    setTranslucentSidebar(settings.translucentSidebar)
     const isDark = nextMode === 'dark' || (nextMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
     if (isDark) {
       document.documentElement.classList.add('dark')
     } else {
       document.documentElement.classList.remove('dark')
     }
-    // 同步 chat 窗口原生背景（Windows 不透明窗口），避免伸缩时露白底闪烁。其他窗口/平台 no-op。
-    void api.setChatWindowBackground(isDark)
     document.documentElement.dataset.themeColor = normalizeThemeColorId(settings.themeColor)
     // UI 字号（整体缩放）+ 自定义字体：仅作用于聊天窗口，翻译窗/Lens 保持原始几何与布局。
     // 直接读 hash（稳定的 import）而非 mode state，避免让 applyTheme 变成不稳定依赖。
@@ -507,7 +507,7 @@ function App() {
   }
   if (mode === 'chat') {
     return (
-      <ChatWindowHost>
+      <ChatWindowHost translucentSidebar={translucentSidebar}>
         <Suspense
           fallback={
             <div className="flex h-full w-full items-center justify-center bg-transparent">
