@@ -98,6 +98,84 @@ export function rememberChatSidebarCollapsed(collapsed: boolean) {
   setLocalStorageItem(CHAT_SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0')
 }
 
+// ---------- Right Dock 持久化 ----------
+
+const CHAT_DOCK_OPEN_KEY = 'kivio-chat-dock-open'
+const CHAT_DOCK_WIDTH_KEY = 'kivio-chat-dock-width'
+const CHAT_DOCK_TAB_KEY = 'kivio-chat-dock-tab'
+const CHAT_DOCK_TREE_EXPANDED_KEY = 'kivio-chat-dock-tree-expanded'
+/** 每项目展开状态 map 的最大项目键数（超出时丢弃最旧的键）。 */
+const DOCK_TREE_EXPANDED_MAX_KEYS = 50
+
+export type RememberedDockTab = 'files' | 'git' | 'terminal'
+
+export function getRememberedDockOpen(): boolean {
+  return getLocalStorageItem(CHAT_DOCK_OPEN_KEY) === '1'
+}
+
+export function rememberDockOpen(open: boolean) {
+  setLocalStorageItem(CHAT_DOCK_OPEN_KEY, open ? '1' : '0')
+}
+
+export function getRememberedDockWidth(): number {
+  const parsed = Number(getLocalStorageItem(CHAT_DOCK_WIDTH_KEY))
+  if (!Number.isFinite(parsed) || parsed <= 0) return 360
+  return Math.min(560, Math.max(320, Math.round(parsed)))
+}
+
+export function rememberDockWidth(width: number) {
+  if (!Number.isFinite(width) || width <= 0) return
+  setLocalStorageItem(CHAT_DOCK_WIDTH_KEY, String(Math.round(width)))
+}
+
+export function getRememberedDockTab(): RememberedDockTab {
+  const raw = getLocalStorageItem(CHAT_DOCK_TAB_KEY)
+  return raw === 'git' || raw === 'terminal' ? raw : 'files'
+}
+
+export function rememberDockTab(tab: RememberedDockTab) {
+  setLocalStorageItem(CHAT_DOCK_TAB_KEY, tab)
+}
+
+function loadTreeExpandedMap(): Record<string, string[]> {
+  try {
+    const raw = getLocalStorageItem(CHAT_DOCK_TREE_EXPANDED_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const map: Record<string, string[]> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (Array.isArray(value)) {
+        map[key] = value.filter((item): item is string => typeof item === 'string')
+      }
+    }
+    return map
+  } catch {
+    return {}
+  }
+}
+
+/** 文件树展开路径按项目键（workdir 归一化串）存一张 JSON map。 */
+export function getRememberedTreeExpanded(projectKey: string): string[] {
+  if (!projectKey) return []
+  return loadTreeExpandedMap()[projectKey] ?? []
+}
+
+export function rememberTreeExpanded(projectKey: string, paths: string[]) {
+  if (!projectKey) return
+  const map = loadTreeExpandedMap()
+  if (paths.length === 0) delete map[projectKey]
+  else map[projectKey] = paths
+  // cap：超出时按插入序丢最旧的键。
+  const keys = Object.keys(map)
+  while (keys.length > DOCK_TREE_EXPANDED_MAX_KEYS) {
+    const oldest = keys.shift()
+    if (oldest === undefined) break
+    delete map[oldest]
+  }
+  setLocalStorageItem(CHAT_DOCK_TREE_EXPANDED_KEY, JSON.stringify(map))
+}
+
 function normalizeChatWindowGeometry(
   parsed: Partial<ChatWindowGeometry>,
 ): ChatWindowGeometry | null {

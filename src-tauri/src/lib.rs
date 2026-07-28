@@ -7,6 +7,7 @@ pub mod capture_geometry;
 pub mod chat;
 pub mod commands;
 pub mod connectors;
+pub mod dock;
 pub mod external_agents;
 pub mod fonts;
 pub mod inpainting;
@@ -303,6 +304,14 @@ pub fn run() {
                 rapidocr::RapidOcrClient::new(offline_models),
                 inpainting,
             ));
+            // Dock 的 workspace 文件监听服务（文件树 / Git 面板的秒级刷新源）。
+            app.manage(std::sync::Arc::new(dock::watch::WorkspaceWatchService::new(
+                app.handle().clone(),
+            )));
+            // Dock 终端面板的 PTY 会话登记表（会话 drop 时兜底 kill 子进程）。
+            app.manage(std::sync::Arc::new(dock::terminal::TerminalService::new(
+                app.handle().clone(),
+            )));
 
             // Apply the stored sub-agent concurrency cap (default sizes the gate
             // to DEFAULT_SUB_AGENT_CONCURRENCY; reconcile to the user's setting).
@@ -595,6 +604,36 @@ pub fn run() {
             chat::knowledge_base::ingest::kb_reindex_library,
             chat::knowledge_base::ingest::kb_update_embedding,
             chat::knowledge_base::ingest::kb_set_embed_batch_size,
+            // Dock 模块命令（右侧文件树 + Git 面板 + 终端面板 + workspace 监听）
+            dock::dock_resolve_cwd,
+            dock::fs::dock_fs_list,
+            dock::fs::dock_fs_search,
+            dock::fs::dock_fs_create,
+            dock::fs::dock_fs_rename,
+            dock::fs::dock_fs_delete,
+            dock::fs::dock_fs_open_path,
+            dock::git::dock_git_status,
+            dock::git::dock_git_diff,
+            dock::git::dock_git_log,
+            dock::git::dock_git_commit_diff,
+            dock::git::dock_git_branches,
+            dock::git::dock_git_stage,
+            dock::git::dock_git_stage_all,
+            dock::git::dock_git_unstage,
+            dock::git::dock_git_unstage_all,
+            dock::git::dock_git_discard,
+            dock::git::dock_git_discard_all,
+            dock::git::dock_git_commit,
+            dock::git::dock_git_switch_branch,
+            dock::git::dock_git_create_branch,
+            dock::git::dock_git_init,
+            dock::git::dock_git_diff_stat,
+            dock::git::dock_git_add_to_gitignore,
+            dock::watch::dock_workspace_watch_set,
+            dock::terminal::dock_terminal_create,
+            dock::terminal::dock_terminal_write,
+            dock::terminal::dock_terminal_resize,
+            dock::terminal::dock_terminal_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

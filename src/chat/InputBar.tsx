@@ -12,7 +12,6 @@ import {
   Eraser,
   Folder,
   FolderPlus,
-  Library,
   ListChecks,
   MessageSquarePlus,
   Network,
@@ -30,11 +29,14 @@ import {
 } from 'lucide-react'
 import { ChatAttachments } from './ChatAttachments'
 import { SourcesButton } from './SourcesButton'
-import { onComposerInsert } from './composerInsert'
+import { onComposerInsert, onComposerTextInsert } from './composerInsert'
 import { draftKey, getComposerDraft, setComposerDraft } from './composerDraft'
 import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
+import { GitStatusPill } from './dock/GitStatusPill'
+import { GitDiffChip } from './dock/GitDiffChip'
 import { Button, IconButton } from '../components/Button'
+import type { Lang } from '../settings/i18n'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
 import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ModelRef, PendingAttachment, WebSearchMode } from './types'
@@ -418,6 +420,11 @@ interface InputBarProps {
   onChangeReplyModels?: (models: ModelRef[]) => void | Promise<void>
   /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 左边 */
   contextSlot?: ReactNode
+  /** Git 状态胶囊：Dock 解析出的工作目录；空则不渲染 */
+  gitWorkdir?: string | null
+  gitLang?: Lang
+  /** 胶囊卡片里「在 Git 面板中打开」：打开 Dock 并切到 Git 页 */
+  onOpenGitPanel?: () => void
 }
 
 export function InputBar({
@@ -463,6 +470,9 @@ export function InputBar({
   replyModels = [],
   onChangeReplyModels,
   contextSlot,
+  gitWorkdir = null,
+  gitLang,
+  onOpenGitPanel,
 }: InputBarProps) {
   const draftKeyValue = draftKey(conversationId)
   const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
@@ -513,12 +523,10 @@ export function InputBar({
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
   const modeEntryEnabled = Boolean(onAgentPlanModeChange)
-  // 状态条只由「真正的上下文」决定是否出现（项目 / 知识库）。
-  // contextSlot（上下文占用）刻意不算进来 —— 它是常驻的，算进来状态条就永不消失，
-  // 空条只挂一个圆点。它归工具栏右侧（与模型信息同列）。
-  const statusBarVisible = Boolean(
-    (projectEntryEnabled && effectiveProject) || knowledgeBaseIds.length > 0,
-  )
+  // 状态条只放「你在哪」—— 当前项目。Git 分支/diff 归下面的工具栏（状态类信息
+  // 但用户要求贴着动作区）；知识库挂载数在来源弹层里管理，不上条。
+  const gitStatusEnabled = Boolean(gitWorkdir && gitLang && onOpenGitPanel)
+  const statusBarVisible = Boolean(projectEntryEnabled && effectiveProject)
   const activeModeOption = AGENT_MODE_OPTIONS.find((option) => option.mode === agentPlanMode)
     ?? AGENT_MODE_OPTIONS[0]
   const activeModePillClass = AGENT_MODE_PILL_CLASS[agentPlanMode]
@@ -652,6 +660,26 @@ export function InputBar({
   }, [])
 
   useEffect(() => onComposerInsert(insertQuoteFromSelection), [insertQuoteFromSelection])
+
+  // Right Dock「插入 @ 引用」等：文本直接追加到输入框正文（与引用卡片信道并列）。
+  const insertTextAtEnd = useCallback((text: string) => {
+    if (!text) return
+    setInput((prev) => {
+      const needsSpace = prev.length > 0 && !prev.endsWith(' ') && !prev.endsWith('\n')
+      return `${prev}${needsSpace ? ' ' : ''}${text}`
+    })
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (textarea) {
+        textarea.focus({ preventScroll: true })
+        textarea.selectionStart = textarea.value.length
+        textarea.selectionEnd = textarea.value.length
+      }
+      updateTextareaHeight()
+    })
+  }, [updateTextareaHeight])
+
+  useEffect(() => onComposerTextInsert(insertTextAtEnd), [insertTextAtEnd])
 
   const syncSlashToken = useCallback((value: string, cursor: number) => {
     const token = findActiveSlashToken(value, cursor)
@@ -1613,12 +1641,11 @@ export function InputBar({
             </div>
           </>
         )}
-        {/* ① 状态条：当前生效的上下文（项目 + 知识库），对齐 Claude Code 的
-            「kivio · main」那一层 —— 放的是「你在哪」，不是动作。
-            没有项目也没挂知识库时整条不渲染（不留空条）。 */}
-        {statusBarVisible && (
+        {/* ① 状态条：「你在哪 + 改了多少」—— 左侧当前项目，右侧 diff 徽标（无改动时
+            徽标自身不渲染；项目也没有时整条由 .chat-composer-status:empty 隐藏）。 */}
+        {(statusBarVisible || gitStatusEnabled) && (
           <div className="chat-composer-status" data-tauri-drag-region="false">
-            {effectiveProject && (
+            {statusBarVisible && effectiveProject && (
               <button
                 type="button"
                 onClick={toggleProjectMenu}
@@ -1632,17 +1659,12 @@ export function InputBar({
                 <span className="min-w-0 truncate">{effectiveProject.name}</span>
               </button>
             )}
-            {knowledgeBaseIds.length > 0 && (
-              <>
-                {effectiveProject && <span className="chat-composer-status-sep">·</span>}
-                <span
-                  className="chat-composer-status-item"
-                  title={`已挂载 ${knowledgeBaseIds.length} 个知识库`}
-                >
-                  <Library strokeWidth={1.75} />
-                  {knowledgeBaseIds.length}
-                </span>
-              </>
+            {gitStatusEnabled && gitWorkdir && gitLang && onOpenGitPanel && (
+              <GitDiffChip
+                workdir={gitWorkdir}
+                lang={gitLang}
+                onOpenGitPanel={onOpenGitPanel}
+              />
             )}
           </div>
         )}
@@ -1833,6 +1855,16 @@ export function InputBar({
                   anchorRef={innerRef}
                 />
               </div>
+            )}
+
+            {/* Git 分支胶囊 + diff 徽标（ml-auto 把徽标顶到右侧、挨着上下文指示器）。 */}
+            {gitStatusEnabled && gitWorkdir && gitLang && onOpenGitPanel && (
+              <GitStatusPill
+                workdir={gitWorkdir}
+                lang={gitLang}
+                disabled={disabled}
+                onOpenGitPanel={onOpenGitPanel}
+              />
             )}
 
             <div className="ml-auto flex items-center gap-1.5">

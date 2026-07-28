@@ -44,6 +44,11 @@ scraper = "0.23"
 html-escape = "0.2"
 regex = "1"
 ignore = "0.4"
+# Dock：workspace 文件监听（notify）+ git 命令超时杀进程树（wait-timeout）。
+notify = "7"
+wait-timeout = "0.2"
+# Dock 终端面板：跨平台 PTY（macOS/Linux forkpty，Windows ConPTY）。
+portable-pty = "0.8"
 
 # 跨平台 app-data 目录定位。
 directories = "5"

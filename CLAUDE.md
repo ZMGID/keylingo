@@ -13,6 +13,8 @@ Kivio (formerly KeyLingo through v2.4.4) is a desktop **AI assistant** built wit
 
 Plus **connectors** (`connectors/`) — one-click OAuth onboarding for remote MCP data sources (Notion, Obsidian, Himalaya). Keep this "one loop, many hosts" abstraction intact when touching the agent runtime — a change to the loop affects all three surfaces.
 
+**Binding contracts live in `.trellis/spec/`, not here.** This file is the map; the spec dir holds the enforceable details. Start from `.trellis/spec/guides/index.md` and `.trellis/spec/frontend/index.md`, and read the relevant doc before editing that area — notably `guides/external-cli-agents.md` (required before touching `external_agents/`), `frontend/builtin-web-search.md`, `frontend/state-management.md`, `frontend/resource-lifecycle.md`, and `frontend/component-guidelines.md`.
+
 ## Common Commands
 
 Use `npm` (lockfile is `package-lock.json`). Rust tooling is managed by Tauri.
@@ -152,6 +154,17 @@ Lets a chat conversation be backed by an **externally-installed coding CLI** ins
 - **Stream protocols (`types.rs::StreamFormat` + `session/`).** Each CLI speaks a different wire format: `ClaudeStreamJson` (`stream/claude.rs`), `PiRpc` (`session/pi_rpc.rs`), `AcpJsonRpc` (Agent Client Protocol, `session/acp.rs`), `CodexAppServer` (`session/codex_app_server.rs`). Slash-command discovery is per-CLI (`SlashStrategy`: probe Claude `system/init`, or ACP `initialize`→`session/new`→`available_commands_update`).
 - **Sessions** persist per conversation at `<app_data>/external-agent-sessions/<conversation_id>.json` (`session/mod.rs`); `resolve_agent_resume_context` lets a CLI resume its native session. `workspace.rs` resolves the effective cwd + extra allowed dirs; `skill_stage.rs` stages an active Kivio Skill into the CLI's cwd; `compact.rs`/`context.rs` handle context assembly.
 
+### Right Dock (`src-tauri/src/dock/` + `src/chat/dock/`)
+
+The chat window's right-hand IDE dock: file tree, Git panel, and a real PTY terminal, all scoped to one **workdir**.
+
+- **`dock::dock_resolve_cwd` is the contract.** The dock must show the directory the agent actually writes to, and that differs by runtime: external CLI agents resolve via `external_agents::workspace::resolve_effective_cwd` (project root, else `chat-workspaces/<conversation_id>`), the built-in runtime via `resolve_conversation_working_directory` (project root, else `<nativeTools.workingDirectory>/<conversation_id>`). Using one path for both leaves built-in no-project conversations staring at an empty tree.
+- **`git.rs` shells out to the `git` binary** (deliberately no `git2`), with a 60s timeout that kills the process tree (`wait-timeout`) and a 3× retry on transient `index.lock` conflicts. Diffs cap at 512KB.
+- **`fs.rs`** — single-level listing + `ignore`-crate search, with the same path-escape guards as `native_tools` (paths are validated against the workdir root).
+- **`terminal.rs`** — `portable-pty` sessions (forkpty / ConPTY) registered in a managed `TerminalService`; output streams over `dock:terminal-output`, exit over `dock:terminal-exit`. Sessions kill their child on Drop.
+- **`watch.rs`** — recursive `notify` watcher per workdir, 250ms debounce + 2s poll fallback, emitting `workspace:activity` with a **monotonic per-directory `revision`**. The frontend treats a revision going backwards as "force invalidate", so don't reset it when rebuilding a watcher.
+- Frontend: `RightDock.tsx` (tabs + drag-resize writing `--chat-dock-width` directly, so dragging doesn't re-render React), `useFileTree`/`useGitReview`/`useGitBadge` hooks over `dock/api.ts` (which mocks empty tree / `not_repo` outside Tauri so `npm run dev:ui` still works). Pure model logic (`diffParse`, `fileTreeModel`, `gitReviewModel`) is unit-tested — keep those green. Dock UI state (open/width/tab, per-project expanded paths) persists in `localStorage` via `persistence.ts`.
+
 ### Connectors (`connectors/`)
 
 One-click OAuth onboarding for remote MCP data sources. Phase A (token-type) is pure frontend (writes an `Authorization`-header `ChatMcpServer` into `settings.chat_tools.servers`). Phase B (`oauth.rs`) implements **remote-MCP OAuth: PKCE + dynamic client registration (DCR) + loopback callback + token refresh**, enabling Notion (built-in catalog) and any DCR-capable remote MCP. `connector_oauth_connect` runs the flow and **returns** a materialized `ChatMcpServer` to the frontend (it does not write settings itself — the frontend merges + saves, matching the existing settings flow). `obsidian.rs` (local vault listing) and `himalaya.rs` (email CLI) are non-OAuth local connectors. Frontend catalog is `connectorCatalog.ts` + `ConnectorsPanel.tsx`.
@@ -175,6 +188,7 @@ One-click OAuth onboarding for remote MCP data sources. Phase A (token-type) is 
 - **`chat/`** — the agentic chat subsystem (see Chat / Agent Runtime): `agent/` (loop phases), `model/` (provider adapters), plus `storage`, `memory`, `todo`, `plan`, `ask_user`, `attachments`, `image_generation`, `sub_agent`, `request_debug`, `commands`, etc.
 - **`external_agents/`** — drive externally-installed coding CLIs as chat backends (see External CLI agents section).
 - **`connectors/`** — one-click OAuth onboarding for remote MCP data sources (see Connectors section).
+- **`dock/`** — right-dock backend: fs / git / PTY terminal / workspace watcher (see Right Dock section).
 - **`app_data.rs`** — resolves the per-app data dir (`com.zmair.kivio` via the `directories` crate) without a Tauri `AppHandle`, for modules that run outside a Tauri context (`connectors/himalaya`, `plugins`, headless skill discovery).
 - **`path_env.rs`** — one-shot startup `PATH` enrichment so GUI launches can find user-installed CLIs (macOS `.app` gets a minimal `PATH`; Windows `explorer.exe` env is a stale login snapshot). Read-only, never panics/blocks; every downstream subprocess inherits the fix.
 - **`proc.rs`** — `NoConsoleWindow` extension trait applying `CREATE_NO_WINDOW` to `std`/`tokio` `Command`s on Windows (no-op elsewhere), so spawning external CLIs / MCP stdio servers / probes doesn't flash console windows.

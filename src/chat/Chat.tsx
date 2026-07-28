@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { GitBranch, Wrench, X } from 'lucide-react'
+import { GitBranch, PanelRight, Wrench, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
@@ -79,17 +79,29 @@ import {
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
 import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
-import type { Lang } from '../settings/i18n'
+import { i18n, type Lang } from '../settings/i18n'
 import { estimateTokens } from '../utils/tokens'
 import {
   CHAT_MIN_SIZE_COLLAPSED,
   CHAT_MIN_SIZE_EXPANDED,
   forgetRememberedChatRoute,
   getRememberedChatSidebarCollapsed,
+  getRememberedDockOpen,
+  getRememberedDockTab,
+  getRememberedDockWidth,
+  getRememberedTreeExpanded,
   rememberChatSidebarCollapsed,
   rememberChatSize,
+  rememberDockOpen,
+  rememberDockTab,
+  rememberDockWidth,
+  rememberTreeExpanded,
 } from './persistence'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
+import { RightDock, type DockRevealRequest, type DockTab } from './dock/RightDock'
+import { dockApi } from './dock/api'
+import { insertTextIntoComposer } from './composerInsert'
+import { IconButton } from '../components/Button'
 import { normalizeToolCallStatus } from './toolStatus'
 import { TypewriterText } from './TypewriterText'
 import { pickRandomChatEmptyGreeting, isTauriRuntime } from './utils'
@@ -3302,6 +3314,94 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     rememberChatSidebarCollapsed(collapsed)
   }, [])
 
+  // ---------- Right Dock ----------
+  const [dockOpen, setDockOpen] = useState(() => getRememberedDockOpen())
+  const [dockWidth, setDockWidth] = useState(() => getRememberedDockWidth())
+  const [dockTab, setDockTab] = useState<DockTab>(() => getRememberedDockTab())
+  const [dockWorkdir, setDockWorkdir] = useState('')
+  const [treeExpanded, setTreeExpanded] = useState<string[]>([])
+  const [dockReveal, setDockReveal] = useState<DockRevealRequest>(null)
+
+  // 工作目录跟随当前会话 / 选中项目 / agent runtime 变化，由后端 dock_resolve_cwd 解析
+  // （外部 agent 与内置 runtime 的实际写入目录不同，runtime 切换必须重解析）。
+  useEffect(() => {
+    const conversationId = currentConversation?.id ?? null
+    const projectId = selectedProject?.id ?? null
+    if (!conversationId && !projectId) {
+      setDockWorkdir('')
+      return
+    }
+    let cancelled = false
+    dockApi
+      .resolveCwd(conversationId, projectId)
+      .then((cwd) => {
+        if (!cancelled) setDockWorkdir(cwd)
+      })
+      .catch(() => {
+        if (!cancelled) setDockWorkdir('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentConversation?.id, selectedProject?.id, activeAgentRuntime.kind])
+
+  // 文件树展开状态按 workdir 持久化，workdir 切换时重新载入。
+  useEffect(() => {
+    setTreeExpanded(dockWorkdir ? getRememberedTreeExpanded(dockWorkdir) : [])
+  }, [dockWorkdir])
+
+  const handleToggleDock = useCallback(() => {
+    setDockOpen((prev) => {
+      rememberDockOpen(!prev)
+      return !prev
+    })
+  }, [])
+
+  const handleCloseDock = useCallback(() => {
+    setDockOpen(false)
+    rememberDockOpen(false)
+  }, [])
+
+  // 输入栏 Git 胶囊「在 Git 面板中打开」：展开 Dock 并切到 Git 页。
+  const handleOpenDockGit = useCallback(() => {
+    setDockTab('git')
+    rememberDockTab('git')
+    setDockOpen(true)
+    rememberDockOpen(true)
+  }, [])
+
+  const handleDockWidthChange = useCallback((nextWidth: number) => {
+    setDockWidth(nextWidth)
+    rememberDockWidth(nextWidth)
+  }, [])
+
+  const handleDockTabChange = useCallback((tab: DockTab) => {
+    setDockTab(tab)
+    rememberDockTab(tab)
+  }, [])
+
+  const handleTreeExpandedChange = useCallback(
+    (paths: string[]) => {
+      setTreeExpanded(paths)
+      if (dockWorkdir) rememberTreeExpanded(dockWorkdir, paths)
+    },
+    [dockWorkdir],
+  )
+
+  // Git 面板「在文件树中定位」：切到文件 tab 并展开定位。
+  const handleDockRevealInTree = useCallback((path: string) => {
+    setDockTab('files')
+    rememberDockTab('files')
+    setDockOpen(true)
+    rememberDockOpen(true)
+    setDockReveal((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+
+  // 文件树「插入 @ 引用」：经 composerInsert 文本信道注入输入框正文。
+  const handleInsertFileMention = useCallback((path: string) => {
+    insertTextIntoComposer(`@${path} `)
+  }, [])
+
   const handleCollapseSidebar = useCallback(() => {
     setSidebarCollapsedPersisted(true)
   }, [setSidebarCollapsedPersisted])
@@ -3646,6 +3746,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               </div>
               <div className="min-w-5 flex-1" data-tauri-drag-region />
               <div className="flex min-w-0 shrink items-center justify-end gap-1">
+                <div className="shrink-0" data-tauri-drag-region="false">
+                  <IconButton
+                    label={i18n[uiLang].dockToggle}
+                    size="sm"
+                    variant="ghost"
+                    className={dockOpen ? 'bg-black/5 text-neutral-800 dark:bg-white/10 dark:text-neutral-100' : ''}
+                    onClick={handleToggleDock}
+                  >
+                    <PanelRight size={15} />
+                  </IconButton>
+                </div>
                 <AgentTodoIndicator todoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null} />
               </div>
                 </header>
@@ -3736,6 +3847,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                           lang={uiLang}
                         />
                       }
+                      gitWorkdir={dockWorkdir || null}
+                      gitLang={uiLang}
+                      onOpenGitPanel={handleOpenDockGit}
                     />
                     </div>
                   </div>
@@ -3837,6 +3951,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                         lang={uiLang}
                       />
                     }
+                    gitWorkdir={dockWorkdir || null}
+                    gitLang={uiLang}
+                    onOpenGitPanel={handleOpenDockGit}
                   />
                     </>
                   )}
@@ -3851,6 +3968,23 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               </div>
             )}
           </div>
+        )}
+        {chatView === 'conversation' && (
+          <RightDock
+            open={dockOpen}
+            width={dockWidth}
+            activeTab={dockTab}
+            workdir={dockWorkdir}
+            lang={uiLang}
+            treeExpanded={treeExpanded}
+            revealRequest={dockReveal}
+            onToggleTab={handleDockTabChange}
+            onWidthChange={handleDockWidthChange}
+            onClose={handleCloseDock}
+            onTreeExpandedChange={handleTreeExpandedChange}
+            onInsertMention={handleInsertFileMention}
+            onRevealInTree={handleDockRevealInTree}
+          />
         )}
       </div>
       {pendingToolConfirm && (
