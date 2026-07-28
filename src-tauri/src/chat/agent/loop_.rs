@@ -132,11 +132,29 @@ impl RunState {
 
 /// `agent_end` 的 RAII 触发器。loop 有 8 条 return 路径，逐条加一行等于迟早漏一条；
 /// 挂在 Drop 上则「无论怎么退出（成功 / 失败 / 取消 / `?` 早返回）都恰好发一次」。
-struct HookRunGuard<'a>(Option<&'a HookDispatcher>);
+///
+/// 兼作**取消的兜底**：loop 里显式 `cancel()` 的只有三处工具轮分支，而 synthesis 阶段的
+/// 取消（`SynthesisFlow::Early` outcome=cancelled、以及 `Err("cancelled")` 经 `?` 传播）
+/// 一处都不经过它们 —— 偏偏那是流式最长的阶段，也是「工具全关」会话**唯一**的阶段。
+/// 漏掉就等于「停止」之后排队的 Hook 照跑、在跑的 `sleep 600` 没人杀。这里按同一条
+/// RAII 纪律统一收口：Drop 时若本 run 的 generation 已失效即先 `cancel()`，再发 `agent_end`
+/// （取消是世代而非闭锁，所以这个顺序下 `agent_end` 仍会执行）。
+struct HookRunGuard<'a> {
+    hooks: Option<&'a HookDispatcher>,
+    host: &'a dyn AgentHost,
+    conversation_id: &'a str,
+    generation: u64,
+}
 
 impl Drop for HookRunGuard<'_> {
     fn drop(&mut self) {
-        if let Some(hooks) = self.0 {
+        if let Some(hooks) = self.hooks {
+            if !self
+                .host
+                .is_generation_active(self.conversation_id, self.generation)
+            {
+                hooks.cancel();
+            }
             hooks.dispatch(HookEvent::AgentEnd, None, None);
         }
     }
@@ -242,7 +260,12 @@ pub async fn run_agent_loop(
     if let Some(hooks) = hooks {
         hooks.dispatch(HookEvent::AgentStart, None, None);
     }
-    let _hook_guard = HookRunGuard(hooks);
+    let _hook_guard = HookRunGuard {
+        hooks,
+        host,
+        conversation_id: &config.conversation_id,
+        generation: config.generation,
+    };
 
     let tool_loop_ran = !state.tools.is_empty();
     if tool_loop_ran {

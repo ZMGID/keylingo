@@ -222,6 +222,13 @@ impl HookDispatcher {
             .clone()
     }
 
+    /// 取消世代。>0 即「本 run 期间至少 `cancel()` 过一次」，`loop_tests` 用它断言
+    /// 取消真的传到了调度器（光看事件流水看不出来：取消路径的事件序列与正常路径同形）。
+    #[cfg(test)]
+    pub(crate) fn cancel_epoch(&self) -> u64 {
+        self.shared.epoch.load(Ordering::SeqCst)
+    }
+
     fn build(
         hooks: &[HookDef],
         mut ctx: RunContext,
@@ -727,7 +734,10 @@ mod tests {
         dispatcher.dispatch(HookEvent::AgentEnd, None, None);
         dispatcher.drain().await;
 
-        assert!(marker.exists(), "hook never ran: spawn failed on missing cwd");
+        assert!(
+            marker.exists(),
+            "hook never ran: spawn failed on missing cwd"
+        );
         assert!(failures.try_recv().is_err(), "hook should not have failed");
     }
 
@@ -749,7 +759,10 @@ mod tests {
         // 不等脚本起来就立刻取消，尽量落进 spawn 与 pid 登记之间的窗口。
         dispatcher.cancel();
         dispatcher.drain().await;
-        assert!(!finished.exists(), "script outlived a cancel racing its spawn");
+        assert!(
+            !finished.exists(),
+            "script outlived a cancel racing its spawn"
+        );
     }
 
     /// 生产路径不是 `drain()`（那是单测特权），而是 **Drop**：`ChatAgentHost` 随
@@ -773,6 +786,9 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        assert!(marker.exists(), "agent_end was lost when the dispatcher dropped");
+        assert!(
+            marker.exists(),
+            "agent_end was lost when the dispatcher dropped"
+        );
     }
 }

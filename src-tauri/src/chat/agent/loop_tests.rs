@@ -2917,7 +2917,10 @@ fn assert_hook_events_well_formed(events: &[&str]) {
                 message_open = true;
             }
             "message_end" => {
-                assert!(message_open, "message_end without message_start: {events:?}");
+                assert!(
+                    message_open,
+                    "message_end without message_start: {events:?}"
+                );
                 message_open = false;
             }
             "tool_execution_start" => tool_start += 1,
@@ -3092,13 +3095,82 @@ async fn hook_events_pair_up_when_cancelled() {
         MockResponse::Sse(planning_tool_call_sse_events()),
     ]);
     let state = test_app_state();
-    let config = test_run_config(&state, &server.base_url, true);
+    let mut config = test_run_config(&state, &server.base_url, true);
+    // 必须放行第二轮：默认 max_tool_rounds=Some(1) 会让第一轮后直接撞 RoundLimit
+    // break，`cancelling_on_persist` 翻的旗子根本没有循环顶部再去读它 —— 这条测试
+    // 就会挂着「when_cancelled」的名字实际走正常路径。
+    config.effective_chat_tools.max_tool_rounds = Some(2);
     let host = HookedHost::new(TestHost::cancelling_on_persist());
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("cancellation must not bubble Err");
+    assert_eq!(
+        result.stream_outcome, "cancelled",
+        "this test is only meaningful if the run really was cancelled"
+    );
+
+    assert_hook_events_well_formed(&host.events());
+    // 事件流水看不出取消（取消路径与正常路径同形），得直接查世代。
+    assert!(
+        host.hooks.cancel_epoch() > 0,
+        "the loop must tell the dispatcher it was cancelled"
+    );
+}
+
+/// 回归：**synthesis 阶段**的取消也必须传到调度器。loop 里显式 `cancel()` 的三处
+/// 全在工具轮分支上，而用户点「停止」最常落在流式最长的 synthesis 阶段——那条路
+/// 走的是 `SynthesisFlow::Early(outcome=cancelled)`，一处 `cancel()` 都不经过。
+/// 漏掉的后果不是少发个事件，而是「停止」之后排队的 Hook 照跑、在跑的脚本没人杀。
+#[tokio::test]
+async fn cancelling_during_synthesis_still_cancels_hooks() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::SseThenHang(vec![
+            r#"{"choices":[{"delta":{"content":"部分回答"}}]}"#.to_string()
+        ]),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::cancelling_on_first_text_delta());
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("cancelled synthesis must not bubble Err");
+    assert_eq!(result.stream_outcome, "cancelled");
+
+    assert_hook_events_well_formed(&host.events());
+    assert!(
+        host.hooks.cancel_epoch() > 0,
+        "a stop during synthesis must cancel queued/running hooks, not just emit agent_end"
+    );
+}
+
+/// 正常完成的 run **不能**取消 Hook —— 兜底判的是 generation 而非「有没有出错」，
+/// 判错了就会把成功路径上排队的 `agent_end` 之前的 Hook 静默丢掉。
+#[tokio::test]
+async fn a_successful_run_never_cancels_hooks() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"好了"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::default());
     let executor = RecordingExecutor::default();
 
     run_agent_loop(config, &host, &executor)
         .await
-        .expect("cancellation must not bubble Err");
+        .expect("loop must succeed");
 
-    assert_hook_events_well_formed(&host.events());
+    assert_eq!(
+        host.hooks.cancel_epoch(),
+        0,
+        "a clean run must not cancel hooks"
+    );
 }

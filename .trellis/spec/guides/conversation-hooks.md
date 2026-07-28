@@ -41,6 +41,16 @@ loop 有 8 条 return 路径，planning 有 7 个 outcome（含两条 retry `con
 - 被 cancel 杀掉的脚本以失败返回，**世代已变则静默**，不要把它当成用户脚本的错误报上去。
 - `spawn` 后登记 pid，登记完**必须复检世代**：cancel 可能恰好落在「worker 检查过世代」与「pid 登记」之间，那次 cancel 看到的是空槽位，于是刚起来的进程谁也不杀（脚本是 `sleep 600` 就泄漏到 run 结束之后）。`cancel_racing_the_spawn_does_not_leak_the_process` 锁住这一点。
 
+### `cancel()` 也归 RAII，不能只挂在取消分支上
+
+loop 里显式 `hooks.cancel()` 的三处全在**工具轮**分支（loop 顶部世代检查 / `PlanningStepOutcome::Cancelled` / `ToolRoundOutcome::Cancelled`）。但 synthesis 阶段的取消一处都不经过它们：那条路走 `SynthesisFlow::Early(outcome="cancelled")`，或者 `Err("cancelled")` 经 `?` 传播。偏偏 synthesis 是流式最长的阶段，也是**工具全关会话唯一的阶段** —— 用户点「停止」最常落在这里。
+
+只在取消分支手写 `cancel()` 的后果不是少发一个事件，而是**停止之后排队的 Hook 照跑、在跑的 `sleep 600` 没人杀**，正好违反验收 5。
+
+因此 `HookRunGuard` 的 Drop 兼作兜底：generation 已失效 → 先 `cancel()`，再发 `agent_end`（取消是世代不是闭锁，这个顺序下 `agent_end` 仍会执行）。守卫是 `cancelling_during_synthesis_still_cancels_hooks` + `a_successful_run_never_cancels_hooks`（兜底判的是 generation，不是「有没有出错」——判错就会把成功路径上的 Hook 也丢掉）。
+
+新增取消路径时同样别手写 `cancel()`：问「这条路上 generation 失效了吗」，失效就已经被 guard 兜住了。
+
 ## 工作目录：解析不出就落临时目录，不 mkdir
 
 会话工作目录是**懒创建**的（只有原生工具真的用到才 mkdir），所以一个从没用过工具的普通会话，`resolve_conversation_working_directory` 给出的路径可能根本不存在。直接拿去当 `current_dir` 会让 spawn 以 ENOENT 失败，用户看到「hook 启动失败」而非自己脚本的输出。

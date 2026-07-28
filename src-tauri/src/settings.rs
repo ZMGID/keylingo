@@ -3246,7 +3246,10 @@ mod tests {
         let round_tripped: HookDef = serde_json::from_value(value).expect("deserialize");
         assert_eq!(round_tripped.kind, "http");
         assert_eq!(round_tripped.timeout_ms, 60_000);
-        assert_eq!(round_tripped.headers.get("X-A").map(String::as_str), Some("1"));
+        assert_eq!(
+            round_tripped.headers.get("X-A").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
@@ -4215,7 +4218,6 @@ mod tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod hooks_disk_compat_tests {
