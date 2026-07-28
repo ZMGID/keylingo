@@ -751,5 +751,28 @@ mod tests {
         dispatcher.drain().await;
         assert!(!finished.exists(), "script outlived a cancel racing its spawn");
     }
-}
 
+    /// 生产路径不是 `drain()`（那是单测特权），而是 **Drop**：`ChatAgentHost` 随
+    /// `complete_assistant_reply_inner` 返回而落地，带走 dispatcher。这条验证
+    /// 「dispatch(agent_end) 后立刻 drop，脚本仍然跑完」——之前所有测试都 drain，
+    /// 等于从没测过真实的收尾路径。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_end_survives_drop_without_drain() {
+        let dir = TempDir::new();
+        let marker = dir.path().join("dropped");
+        let hook = command_hook(&format!("touch {}", marker.display()));
+        let (dispatcher, _failures) =
+            dispatcher(&[hook], dir.path().to_path_buf()).expect("dispatcher");
+        dispatcher.dispatch(HookEvent::AgentEnd, None, None);
+        drop(dispatcher);
+        // 给 detached worker 时间跑完（生产里 app 一直活着，这里模拟那段时间）。
+        for _ in 0..100 {
+            if marker.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(marker.exists(), "agent_end was lost when the dispatcher dropped");
+    }
+}
