@@ -752,3 +752,4 @@ mod tests {
         assert!(!finished.exists(), "script outlived a cancel racing its spawn");
     }
 }
+

@@ -941,6 +941,17 @@ impl Default for HookDef {
 
 /// 归一 Hook 列表：丢弃事件名/类型非法或目标为空的条目，补空 id，钳制超时。
 /// 无效条目直接丢弃而非修正——一个 event 打错字的 Hook 没有合理的「就近」事件可猜。
+/// 把 JSON `null` 当成空 `Vec` 收下，而不是报类型错误。
+/// 见 `ChatToolsConfig::hooks` 上的注释：一个字段被前端漏传就会在磁盘上留下 null，
+/// 而 serde 的 `default` 兜不住 null，会让整个父结构解析失败。
+fn null_tolerant_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 fn sanitize_hooks(hooks: &mut Vec<HookDef>) {
     hooks.retain_mut(|hook| {
         hook.event = hook.event.trim().to_string();
@@ -1016,7 +1027,12 @@ pub struct ChatToolsConfig {
     #[serde(default)]
     pub request_debug_enabled: bool,
     /// 对话生命周期 Hooks（07-28-hooks）。空数组 = 无 Hook = agent loop 零开销。
-    #[serde(default)]
+    ///
+    /// `deserialize_with` 而非光 `default`：字段刚上线时前端漏传，`invoke` 把缺失字段
+    /// 序列化成 **null** 落进了 settings.json，而 `default` 只兜「键不存在」，遇到
+    /// null 会以 `invalid type: null, expected a sequence` 让**整个 chatTools 解析失败**
+    /// （连 MCP 服务器、原生工具开关一起丢）。null 归一到空数组。
+    #[serde(default, deserialize_with = "null_tolerant_vec")]
     pub hooks: Vec<HookDef>,
     pub native_tools: ChatNativeToolsConfig,
 }
@@ -4200,3 +4216,35 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod hooks_disk_compat_tests {
+    use super::*;
+
+    /// 回归：hooks 字段刚上线时前端漏传，`invoke` 把它序列化成 null 写进了
+    /// settings.json。serde 的 `default` 只兜「键不存在」，遇到 null 会报
+    /// `invalid type: null, expected a sequence` —— 整个 chatTools 解析失败，
+    /// 连 MCP 服务器和原生工具开关一起丢。
+    #[test]
+    fn null_hooks_on_disk_does_not_break_chat_tools() {
+        let json = serde_json::json!({
+            "enabled": true,
+            "hooks": null,
+            "servers": [{ "id": "s1", "name": "srv" }],
+        });
+        let config: ChatToolsConfig =
+            serde_json::from_value(json).expect("null hooks must not break chatTools");
+        assert!(config.hooks.is_empty());
+        assert!(config.enabled, "sibling fields must survive");
+        assert_eq!(config.servers.len(), 1, "sibling fields must survive");
+    }
+
+    /// 键完全不存在（更旧的磁盘文件）同样要能读。
+    #[test]
+    fn missing_hooks_key_defaults_to_empty() {
+        let config: ChatToolsConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true }))
+                .expect("missing hooks key must parse");
+        assert!(config.hooks.is_empty());
+    }
+}

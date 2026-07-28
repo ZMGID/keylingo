@@ -597,7 +597,7 @@ export const i18n = {
 
     // ===== 对话生命周期 Hooks =====
     tabHooks: 'Hooks',
-    hooksPageSubtitle: '在对话生命周期的 8 个事件点执行脚本或 HTTP 请求。',
+    hooksPageSubtitle: '在对话生命周期的 8 个事件点执行脚本或 HTTP 请求。仅内置模型对话生效，外部 CLI Agent（Claude/Codex/Kimi 等）不触发。',
     hooksLifecycle: '生命周期',
     hooksPhaseAgent: 'AGENT',
     hooksPhaseTurn: 'TURN',
@@ -1241,7 +1241,7 @@ export const i18n = {
 
     // ===== Conversation lifecycle hooks =====
     tabHooks: 'Hooks',
-    hooksPageSubtitle: 'Run a script or HTTP request at the 8 conversation lifecycle events.',
+    hooksPageSubtitle: 'Run a script or HTTP request at the 8 conversation lifecycle events. Built-in model chats only — external CLI agents (Claude/Codex/Kimi…) do not fire hooks.',
     hooksLifecycle: 'Lifecycle',
     hooksPhaseAgent: 'AGENT',
     hooksPhaseTurn: 'TURN',
