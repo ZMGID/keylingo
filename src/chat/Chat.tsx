@@ -69,6 +69,7 @@ import {
   api,
   builtinWebSearchSupported,
   type ChatSessionConsentPayload,
+  type ChatHookPayload,
   type ChatStreamPayload,
   type ChatToolConfirmPayload,
   type ChatToolDefinition,
@@ -829,6 +830,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [agentLoopCompacting, setAgentLoopCompacting] = useState(false)
   const [animateCompactionBoundaryId, setAnimateCompactionBoundaryId] = useState<string | null>(null)
   const [contextError, setContextError] = useState('')
+  // Hook 执行失败（chat-hook）：非阻断警告条。ponytail: 只留最新一条 —— Hook 是旁路观测，
+  // 堆一个可滚动的失败列表没有对应的用户动作。
+  const [hookWarning, setHookWarning] = useState<ChatHookPayload | null>(null)
   const [imageViewerItem, setImageViewerItem] = useState<ChatImageViewerItem | null>(null)
   const currentConversationIdRef = useRef<string | null>(null)
   // 始终指向最新 currentConversation。消息操作 handler（编辑/删除/重发）借此读取最新会话，
@@ -1876,6 +1880,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     patchAgentPlanState(payload.planState)
   }, [patchAgentPlanState])
 
+  useTauriEvent(api.onChatHook, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
+    }
+    setHookWarning(payload)
+  }, [])
+
   useTauriEvent(api.onChatTool, (payload) => {
       if (isLocallyCancelledPayload(
         payload,
@@ -2143,6 +2155,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const handleSelectConversation = useCallback(async (conversationId: string) => {
     setAssistantStreamStatsByMessageId({})
+    setHookWarning(null)
     try {
       const conv = await chatApi.getConversation(conversationId)
       currentConversationIdRef.current = conversationId
@@ -2611,6 +2624,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       resetStreamStore()
       setStreamCoarse({ streaming: true })
       setStreamErrorForConversation(conversationId, '')
+      // 上一轮的 Hook 失败警告不该跨轮挂着——它描述的是已经结束的那次运行。
+      setHookWarning(null)
       activeRunIdRef.current = null
       streamStartedAtRef.current = startedAt
       streamingContentRef.current = ''
@@ -3856,6 +3871,26 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                 </div>
                   ) : (
                     <>
+                  {hookWarning && hookWarning.conversationId === currentConversation?.id && (
+                    <div className="flex items-start gap-2 px-4 pt-2">
+                      <div className="flex min-w-0 flex-1 items-start gap-2 rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] leading-4 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200">
+                        <span className="min-w-0 flex-1">
+                          {i18n[uiLang].chatHookFailed
+                            .replace('{name}', hookWarning.hookName || hookWarning.event)
+                            .replace('{event}', hookWarning.event)}
+                          {` — ${hookWarning.message}`}
+                        </span>
+                        <IconButton
+                          size="xs"
+                          variant="ghost"
+                          label={i18n[uiLang].chatHookDismiss}
+                          onClick={() => setHookWarning(null)}
+                        >
+                          <X size={12} />
+                        </IconButton>
+                      </div>
+                    </div>
+                  )}
                   {(() => {
                     const origin = currentConversation?.forked_from ?? currentConversation?.forkedFrom
                     if (!origin) return null

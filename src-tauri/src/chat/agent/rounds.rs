@@ -478,6 +478,16 @@ async fn execute_tool_call_result(
         tool_conversation_id: round_ctx.tool_conversation_id,
         tool_call_id: &tool_call_id,
     };
+    // 单点：串行与并行两条路径都经过这里，所以 start/end 一定成对。并行 chunk 里多个
+    // 工具的事件会交错——那是真实语义，脚本靠 toolName 自己配对，不做重排。
+    let hooks = host.hooks();
+    if let Some(hooks) = hooks {
+        hooks.dispatch(
+            crate::chat::hooks::HookEvent::ToolExecutionStart,
+            Some(tool.name.as_str()),
+            Some(round_ctx.round),
+        );
+    }
     let (record, tool_content, follow_up_messages) = execute_tool_call(
         host,
         executor,
@@ -488,6 +498,13 @@ async fn execute_tool_call_result(
         skill_cache,
     )
     .await;
+    if let Some(hooks) = hooks {
+        hooks.dispatch(
+            crate::chat::hooks::HookEvent::ToolExecutionEnd,
+            Some(tool.name.as_str()),
+            Some(round_ctx.round),
+        );
+    }
     let cancelled = matches!(record.status, ToolCallStatus::Cancelled);
     ToolExecutionResult {
         response_message: tool_message(tool_call_id, tool_content),

@@ -2856,3 +2856,249 @@ async fn run_loop_gemini_native_image_lands_in_run_result_images() {
     assert_eq!(result.images[0].data, "aGVsbG8=");
     assert!(result.content.contains("这是为你生成的图片。"));
 }
+
+// ===== 生命周期 Hooks 的事件配对（任务 07-28-hooks）=====
+//
+// 手点 GUI 只能验一条路径，而 loop 有 8 条 return。这里用「只记流水、不真执行」的
+// 调度器，把每条路径的派发序列钉死：每个 turn_start 必配一个 turn_end，
+// 每个 message_start 必配一个 message_end，agent_end 恰好一次且永远收尾。
+
+/// 挂了 recording 调度器的 TestHost。
+struct HookedHost {
+    inner: TestHost,
+    hooks: crate::chat::hooks::HookDispatcher,
+}
+
+impl HookedHost {
+    fn new(inner: TestHost) -> Self {
+        Self {
+            inner,
+            hooks: crate::chat::hooks::HookDispatcher::recording(),
+        }
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.hooks
+            .recorded()
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect()
+    }
+}
+
+/// 事件流水的自洽断言：首尾是 agent_start/agent_end 且各恰好一次；
+/// turn/message 严格配对且不嵌套；tool 的 start/end 数量相等。
+fn assert_hook_events_well_formed(events: &[&str]) {
+    assert_eq!(events.first(), Some(&"agent_start"), "{events:?}");
+    assert_eq!(events.last(), Some(&"agent_end"), "{events:?}");
+    for name in ["agent_start", "agent_end"] {
+        assert_eq!(
+            events.iter().filter(|event| **event == name).count(),
+            1,
+            "{name} must fire exactly once: {events:?}"
+        );
+    }
+    let (mut turn_open, mut message_open) = (false, false);
+    let (mut tool_start, mut tool_end) = (0, 0);
+    for event in events {
+        match *event {
+            "turn_start" => {
+                assert!(!turn_open, "nested turn_start: {events:?}");
+                turn_open = true;
+            }
+            "turn_end" => {
+                assert!(turn_open, "turn_end without turn_start: {events:?}");
+                assert!(!message_open, "turn_end before message_end: {events:?}");
+                turn_open = false;
+            }
+            "message_start" => {
+                assert!(!message_open, "nested message_start: {events:?}");
+                assert!(turn_open, "message_start outside a turn: {events:?}");
+                message_open = true;
+            }
+            "message_end" => {
+                assert!(message_open, "message_end without message_start: {events:?}");
+                message_open = false;
+            }
+            "tool_execution_start" => tool_start += 1,
+            "tool_execution_end" => tool_end += 1,
+            _ => {}
+        }
+    }
+    assert!(!turn_open, "turn never closed: {events:?}");
+    assert!(!message_open, "message never closed: {events:?}");
+    assert_eq!(tool_start, tool_end, "unpaired tool events: {events:?}");
+}
+
+impl AgentHost for HookedHost {
+    fn emit_stream_delta(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        message_id: &str,
+        delta: &str,
+        reasoning_delta: Option<&str>,
+        segment: Option<&ChatMessageSegment>,
+    ) {
+        self.inner.emit_stream_delta(
+            conversation_id,
+            run_id,
+            message_id,
+            delta,
+            reasoning_delta,
+            segment,
+        );
+    }
+
+    fn emit_stream_done(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        message_id: &str,
+        reason: &str,
+        full: &str,
+    ) {
+        self.inner
+            .emit_stream_done(conversation_id, run_id, message_id, reason, full);
+    }
+
+    fn emit_tool_record(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        message_id: &str,
+        record: &ToolCallRecord,
+    ) {
+        self.inner
+            .emit_tool_record(conversation_id, run_id, message_id, record);
+    }
+
+    fn request_tool_approval<'a>(
+        &'a self,
+        ctx: &'a ToolExecutionContext<'a>,
+        record: &'a ToolCallRecord,
+    ) -> super::super::host::AgentHostFuture<'a, bool> {
+        self.inner.request_tool_approval(ctx, record)
+    }
+
+    fn request_session_consent<'a>(
+        &'a self,
+        ctx: &'a ToolExecutionContext<'a>,
+    ) -> super::super::host::AgentHostFuture<'a, bool> {
+        self.inner.request_session_consent(ctx)
+    }
+
+    fn request_user_response<'a>(
+        &'a self,
+        ctx: &'a ToolExecutionContext<'a>,
+        record: &'a ToolCallRecord,
+        prompt: crate::chat::ask_user::AskUserPromptPayload,
+    ) -> super::super::host::AgentHostFuture<'a, crate::chat::ask_user::AskUserResponseResult> {
+        self.inner.request_user_response(ctx, record, prompt)
+    }
+
+    fn is_generation_active(&self, conversation_id: &str, generation: u64) -> bool {
+        self.inner.is_generation_active(conversation_id, generation)
+    }
+
+    fn wait_for_generation_inactive<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        generation: u64,
+    ) -> super::super::host::AgentHostFuture<'a, ()> {
+        self.inner
+            .wait_for_generation_inactive(conversation_id, generation)
+    }
+
+    fn persist_partial_assistant(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        tool_records: &[ToolCallRecord],
+        segments: &[ChatMessageSegment],
+        api_messages: &[Value],
+    ) {
+        self.inner.persist_partial_assistant(
+            conversation_id,
+            message_id,
+            tool_records,
+            segments,
+            api_messages,
+        );
+    }
+
+    fn hooks(&self) -> Option<&crate::chat::hooks::HookDispatcher> {
+        Some(&self.hooks)
+    }
+}
+
+/// 正常路径：一轮工具调用 + 合成。
+#[tokio::test]
+async fn hook_events_pair_up_on_the_tool_round_path() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"好了"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::default());
+    let executor = RecordingExecutor::default();
+
+    run_agent_loop(config, &host, &executor)
+        .await
+        .expect("loop must succeed");
+
+    let events = host.events();
+    assert_hook_events_well_formed(&events);
+    assert!(
+        events.contains(&"tool_execution_start"),
+        "tool round must emit tool events: {events:?}"
+    );
+}
+
+/// 无工具会话：整段跳过工具循环，此前一个 turn/message 事件都不发（回归守卫）。
+#[tokio::test]
+async fn hook_events_pair_up_on_the_no_tools_path() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(vec![
+        r#"{"choices":[{"delta":{"content":"直接回答"}}]}"#.to_string(),
+        "[DONE]".to_string(),
+    ])]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.tools = Vec::new();
+    let host = HookedHost::new(TestHost::default());
+    let executor = RecordingExecutor::default();
+
+    run_agent_loop(config, &host, &executor)
+        .await
+        .expect("loop must succeed");
+
+    let events = host.events();
+    assert_hook_events_well_formed(&events);
+    assert!(
+        events.contains(&"turn_start") && events.contains(&"message_end"),
+        "a tool-less conversation is still one turn: {events:?}"
+    );
+}
+
+/// 取消路径：用户在工具轮后停止，收尾事件仍须闭合。
+#[tokio::test]
+async fn hook_events_pair_up_when_cancelled() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(planning_tool_call_sse_events()),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::cancelling_on_persist());
+    let executor = RecordingExecutor::default();
+
+    run_agent_loop(config, &host, &executor)
+        .await
+        .expect("cancellation must not bubble Err");
+
+    assert_hook_events_well_formed(&host.events());
+}

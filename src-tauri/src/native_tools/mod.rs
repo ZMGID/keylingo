@@ -17,6 +17,7 @@ pub use sandbox_exports::{
     remove_sandbox_exports_for_conversation, resolve_sandbox_export_file_path,
     SandboxExportContext,
 };
+pub(crate) use shell::build_shell_command;
 pub use shell::run_command;
 pub use shell::{
     bash_output, kill_background, kill_process_group, list_background, run_command_shell_hint,
