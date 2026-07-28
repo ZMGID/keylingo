@@ -266,7 +266,7 @@ fn build_windows_powershell_command(command: &str) -> Command {
 /// other platform uses `sh -c`. Callers still set cwd/stdio/env/creation
 /// flags/kill_on_drop themselves — this only owns the program + argument shape so
 /// the foreground and background paths cannot drift apart.
-fn build_shell_command(command: &str) -> Command {
+pub(crate) fn build_shell_command(command: &str) -> Command {
     #[cfg(target_os = "windows")]
     {
         if let Some(bash) = find_git_bash() {

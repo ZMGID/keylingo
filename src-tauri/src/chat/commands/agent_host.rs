@@ -17,6 +17,8 @@ pub(super) struct ChatAgentHost<'a> {
     pub(super) state: &'a AppState,
     /// 多模型臂置 true：抑制 mid-run 部分快照落盘（协调者统一落盘）。默认 false（现状）。
     pub(super) suppress_partial_persist: bool,
+    /// 用户配置的生命周期 Hooks。无启用 Hook 时为 `None`，loop 零开销。
+    pub(super) hooks: Option<crate::chat::hooks::HookDispatcher>,
 }
 
 impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
@@ -165,6 +167,10 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         Box::pin(async move {
             wait_for_chat_cancel(self.state, conversation_id, generation).await;
         })
+    }
+
+    fn hooks(&self) -> Option<&crate::chat::hooks::HookDispatcher> {
+        self.hooks.as_ref()
     }
 }
 

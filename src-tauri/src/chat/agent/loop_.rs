@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::chat::hooks::{HookDispatcher, HookEvent};
 use crate::chat::types::ToolCallRecord;
 use crate::mcp::ChatToolDefinition;
 use crate::skills;
@@ -129,6 +130,86 @@ impl RunState {
     }
 }
 
+/// `agent_end` 的 RAII 触发器。loop 有 8 条 return 路径，逐条加一行等于迟早漏一条；
+/// 挂在 Drop 上则「无论怎么退出（成功 / 失败 / 取消 / `?` 早返回）都恰好发一次」。
+///
+/// 兼作**取消的兜底**：loop 里显式 `cancel()` 的只有三处工具轮分支，而 synthesis 阶段的
+/// 取消（`SynthesisFlow::Early` outcome=cancelled、以及 `Err("cancelled")` 经 `?` 传播）
+/// 一处都不经过它们 —— 偏偏那是流式最长的阶段，也是「工具全关」会话**唯一**的阶段。
+/// 漏掉就等于「停止」之后排队的 Hook 照跑、在跑的 `sleep 600` 没人杀。这里按同一条
+/// RAII 纪律统一收口：Drop 时若本 run 的 generation 已失效即先 `cancel()`，再发 `agent_end`
+/// （取消是世代而非闭锁，所以这个顺序下 `agent_end` 仍会执行）。
+struct HookRunGuard<'a> {
+    hooks: Option<&'a HookDispatcher>,
+    host: &'a dyn AgentHost,
+    conversation_id: &'a str,
+    generation: u64,
+}
+
+impl Drop for HookRunGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(hooks) = self.hooks {
+            if !self
+                .host
+                .is_generation_active(self.conversation_id, self.generation)
+            {
+                hooks.cancel();
+            }
+            hooks.dispatch(HookEvent::AgentEnd, None, None);
+        }
+    }
+}
+
+/// 一轮（planning step）的 RAII 触发器：构造发 `turn_start` + `message_start`，
+/// Drop 发 `message_end`（若还没发过）+ `turn_end`。
+///
+/// 同样是「逐条 return 加一行必漏一条」——planning 有 7 个 outcome，其中 4 个
+/// （两条 retry `continue` / `DraftFailed` / `Recovered`）加上 `planning_step(..)?`
+/// 的错误传播都会绕开手写的收尾，留下永不闭合的 `turn_start`。挂 Drop 则每个
+/// `turn_start`/`message_start` 在任何路径上都恰好配一个 `turn_end`/`message_end`。
+struct HookTurnGuard<'a> {
+    hooks: Option<&'a HookDispatcher>,
+    round: u32,
+    /// `message_end` 是否还欠着。取工具调用那条路上消息先于本轮结束，需提前闭合。
+    message_open: bool,
+}
+
+impl<'a> HookTurnGuard<'a> {
+    fn new(hooks: Option<&'a HookDispatcher>, round: u32) -> Self {
+        // LiveAgent 的 startTurn 同时发这两个：一次 planning step 既是一「轮」的开始，
+        // 也是该轮助手消息开始产出的时刻。
+        if let Some(hooks) = hooks {
+            hooks.dispatch(HookEvent::TurnStart, None, Some(round));
+            hooks.dispatch(HookEvent::MessageStart, None, Some(round));
+        }
+        Self {
+            hooks,
+            round,
+            message_open: true,
+        }
+    }
+
+    /// 助手消息产出完毕（含工具调用决策）。工具还要接着跑，所以本轮尚未结束。
+    fn end_message(&mut self) {
+        if !self.message_open {
+            return;
+        }
+        self.message_open = false;
+        if let Some(hooks) = self.hooks {
+            hooks.dispatch(HookEvent::MessageEnd, None, Some(self.round));
+        }
+    }
+}
+
+impl Drop for HookTurnGuard<'_> {
+    fn drop(&mut self) {
+        self.end_message();
+        if let Some(hooks) = self.hooks {
+            hooks.dispatch(HookEvent::TurnEnd, None, Some(self.round));
+        }
+    }
+}
+
 pub async fn run_agent_loop(
     mut config: AgentRunConfig<'_>,
     host: &dyn AgentHost,
@@ -174,7 +255,20 @@ pub async fn run_agent_loop(
         executor,
     };
 
-    if !state.tools.is_empty() {
+    let hooks = host.hooks();
+    // agent_start 在 guard 之前发：guard 的 Drop 负责成对的 agent_end。
+    if let Some(hooks) = hooks {
+        hooks.dispatch(HookEvent::AgentStart, None, None);
+    }
+    let _hook_guard = HookRunGuard {
+        hooks,
+        host,
+        conversation_id: &config.conversation_id,
+        generation: config.generation,
+    };
+
+    let tool_loop_ran = !state.tools.is_empty();
+    if tool_loop_ran {
         let mut round = 0u32;
         loop {
             round = round.saturating_add(1);
@@ -185,9 +279,16 @@ pub async fn run_agent_loop(
                 // (tool_records / segments / api_messages) by ending with
                 // Ok(cancelled_result) instead of a bare Err("cancelled") — the
                 // latter skipped persistence and dropped the whole turn.
+                if let Some(hooks) = hooks {
+                    hooks.cancel();
+                }
                 let result = cancelled_run_result_from_state(&env, &mut state);
                 return Ok(attach_usage(result, &mut state));
             }
+
+            // 本轮的 turn_start / message_start 由 guard 构造时发；turn_end / message_end
+            // 由它的 Drop 补齐，所以下面任何一条 return / continue / `?` 都不会漏配对。
+            let mut turn = HookTurnGuard::new(hooks, round);
 
             let planned = match planning_step(&env, &mut state, round).await? {
                 PlanningStepOutcome::FinalAnswer => break,
@@ -201,16 +302,28 @@ pub async fn run_agent_loop(
                     return Ok(attach_usage(result, &mut state))
                 }
                 PlanningStepOutcome::Cancelled(result) => {
-                    return Ok(attach_usage(result, &mut state))
+                    if let Some(hooks) = hooks {
+                        hooks.cancel();
+                    }
+                    return Ok(attach_usage(result, &mut state));
                 }
                 PlanningStepOutcome::ToolCalls(planned) => planned,
             };
+            // 消息（含工具调用决策）到此产出完毕，但本轮要等工具跑完才算结束。
+            turn.end_message();
 
             match run_tool_round(&env, &mut state, round, planned).await {
                 ToolRoundOutcome::Continue => {}
                 ToolRoundOutcome::RoundLimit => break,
-                ToolRoundOutcome::Cancelled(result) => return Ok(attach_usage(result, &mut state)),
+                ToolRoundOutcome::Cancelled(result) => {
+                    if let Some(hooks) = hooks {
+                        hooks.cancel();
+                    }
+                    return Ok(attach_usage(result, &mut state));
+                }
             }
+            // 本轮到此完整结束（turn_end 随 guard 落地），再落盘快照。
+            drop(turn);
             // Crash-safety checkpoint: persist a best-effort snapshot of the
             // partial assistant message after each completed tool round. The
             // final assistant message is otherwise written only once, after this
@@ -240,6 +353,12 @@ pub async fn run_agent_loop(
         return finalize_planning_final(&env, &mut state, message)
             .map(|result| attach_usage(result, &mut state));
     }
+
+    // 无工具会话（工具全关 / provider 不支持）整段跳过上面的循环，一个 turn/message 事件
+    // 都不会发——只剩 agent_start/agent_end。这里的 synthesis 就是那一「轮」，补上配对
+    // （对齐 LiveAgent 的 runTextConversationTurn 也走 startTurn/endTurn）。工具循环跑过
+    // 的情况下它自己的 guard 已经配好了，不能再发一次。
+    let _text_turn = (!tool_loop_ran).then(|| HookTurnGuard::new(hooks, 1));
 
     match synthesis_step(&env, &mut state).await? {
         SynthesisFlow::Early(result) => Ok(attach_usage(result, &mut state)),

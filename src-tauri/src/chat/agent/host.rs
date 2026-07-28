@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin};
 
 use crate::chat::ask_user::{AskUserPromptPayload, AskUserResponseResult};
+use crate::chat::hooks::HookDispatcher;
 use crate::chat::types::{ChatMessageSegment, CompactionBoundaryRecord, ToolCallRecord};
 
 use super::execute::ToolExecutionContext;
@@ -96,4 +97,11 @@ pub trait AgentHost: Send + Sync {
         conversation_id: &'a str,
         generation: u64,
     ) -> AgentHostFuture<'a, ()>;
+
+    /// User-configured lifecycle hooks for this run, or `None` when the host has
+    /// none (sub-agents, probe, tests) or the user configured zero enabled hooks.
+    /// `None` is the whole zero-cost path: the loop never builds a payload.
+    fn hooks(&self) -> Option<&HookDispatcher> {
+        None
+    }
 }

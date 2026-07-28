@@ -516,9 +516,51 @@ export type ChatMemoryState = {
   dir: string
 }
 
+/** 对话生命周期 Hook 事件（对齐 Rust `chat::hooks::HookEvent`，8 个，顺序即对话流）。 */
+export const HOOK_EVENTS = [
+  'agent_start',
+  'turn_start',
+  'message_start',
+  'message_end',
+  'tool_execution_start',
+  'tool_execution_end',
+  'turn_end',
+  'agent_end',
+] as const
+
+export type HookEvent = typeof HOOK_EVENTS[number]
+
+/** 镜像 Rust `settings::HookDef`（camelCase 序列化）。 */
+export type HookDef = {
+  id: string
+  name: string
+  description: string
+  event: HookEvent | string
+  enabled: boolean
+  type: 'command' | 'http'
+  /** type === 'command' 时的脚本正文。 */
+  script: string
+  /** type === 'http' 时的目标。 */
+  url: string
+  method: string
+  headers: Record<string, string>
+  timeoutMs: number
+}
+
+/** Hook 执行失败上报（事件名 chat-hook）。fire-and-forget，只展示警告不打断对话。 */
+export type ChatHookPayload = {
+  conversationId: string
+  runId: string
+  hookName: string
+  event: string
+  message: string
+}
+
 export type ChatToolsConfig = {
   enabled: boolean
   servers: ChatMcpServer[]
+  /** 对话生命周期 Hooks。空数组 = 无 Hook = agent loop 零开销。 */
+  hooks?: HookDef[]
   skillScanPaths: string[]
   skillAutoMatch?: boolean
   skillFallbackMode?: 'progressive' | 'skill_md_only' | 'legacy_full_body' | string
@@ -1362,11 +1404,17 @@ function normalizeMaxToolRounds(value: unknown): number | null {
   return Math.min(CHAT_TOOL_MAX_ROUNDS, Math.max(CHAT_TOOL_MIN_ROUNDS, Math.round(parsed)))
 }
 
-function normalizeChatTools(config?: Partial<ChatToolsConfig> | null): ChatToolsConfig {
+/**
+ * 归一化 chatTools。**白名单重建**：这里逐字段列举，漏掉一个字段 = 该字段每次
+ * 保存/读取都被静默丢弃（hooks 就这样丢过一次）。新增 ChatToolsConfig 字段时
+ * 必须同步加到这里，`normalize_chat_tools_keeps_every_field` 会守门。
+ */
+export function normalizeChatTools(config?: Partial<ChatToolsConfig> | null): ChatToolsConfig {
   const current = config ?? {}
   return {
     enabled: current.enabled ?? false,
     servers: Array.isArray(current.servers) ? current.servers : [],
+    hooks: Array.isArray(current.hooks) ? current.hooks : [],
     skillScanPaths: Array.isArray(current.skillScanPaths) ? current.skillScanPaths : [],
     skillAutoMatch: current.skillAutoMatch ?? true,
     skillFallbackMode: current.skillFallbackMode || 'progressive',
@@ -1779,6 +1827,11 @@ export const api = {
   onChatTool: (listener: (payload: ChatToolProgressPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<ChatToolProgressPayload>('chat-tool', (payload) => listener(payload))
+  },
+  /** 生命周期 Hook 执行失败（脚本非零退出 / 超时 / HTTP 非 2xx）。对话本身不受影响。 */
+  onChatHook: (listener: (payload: ChatHookPayload) => void) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return on<ChatHookPayload>('chat-hook', (payload) => listener(payload))
   },
   onChatSubagent: (listener: (payload: ChatSubagentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})

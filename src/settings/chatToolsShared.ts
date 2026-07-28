@@ -61,6 +61,7 @@ export function defaultChatTools(): ChatToolsConfig {
   return {
     enabled: false,
     servers: [],
+    hooks: [],
     skillScanPaths: [],
     skillAutoMatch: true,
     skillFallbackMode: 'progressive',

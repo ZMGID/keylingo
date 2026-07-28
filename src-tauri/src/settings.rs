@@ -883,6 +883,109 @@ fn default_chat_approval_policy() -> String {
 /// string, so a user who deliberately chose another policy is never stomped.
 const LEGACY_DEFAULT_APPROVAL_POLICY: &str = "readonly_auto_sensitive_confirm";
 
+/// Hook 超时的合法区间与默认值。
+pub const HOOK_MIN_TIMEOUT_MS: u64 = 1_000;
+pub const HOOK_MAX_TIMEOUT_MS: u64 = 600_000;
+pub const HOOK_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+
+fn default_hook_timeout_ms() -> u64 {
+    HOOK_DEFAULT_TIMEOUT_MS
+}
+
+fn default_hook_method() -> String {
+    "POST".to_string()
+}
+
+/// 对话生命周期 Hook：在 agent loop 的某个事件点执行 Shell 脚本或发一个 HTTP 请求。
+/// 一律 fire-and-forget —— 不阻断、不改写工具调用（见 07-28-hooks PRD 的「非目标」）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HookDef {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// 8 个生命周期事件之一（见 `chat::hooks::HookEvent`）。未知值在 sanitize 时丢弃。
+    pub event: String,
+    pub enabled: bool,
+    /// "command" | "http"
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// kind == "command" 时的脚本正文。
+    pub script: String,
+    /// kind == "http" 时的目标。
+    pub url: String,
+    #[serde(default = "default_hook_method")]
+    pub method: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for HookDef {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: String::new(),
+            event: String::new(),
+            enabled: false,
+            kind: "command".to_string(),
+            script: String::new(),
+            url: String::new(),
+            method: default_hook_method(),
+            headers: std::collections::BTreeMap::new(),
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+/// 归一 Hook 列表：丢弃事件名/类型非法或目标为空的条目，补空 id，钳制超时。
+/// 无效条目直接丢弃而非修正——一个 event 打错字的 Hook 没有合理的「就近」事件可猜。
+/// 把 JSON `null` 当成空 `Vec` 收下，而不是报类型错误。
+/// 见 `ChatToolsConfig::hooks` 上的注释：一个字段被前端漏传就会在磁盘上留下 null，
+/// 而 serde 的 `default` 兜不住 null，会让整个父结构解析失败。
+fn null_tolerant_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn sanitize_hooks(hooks: &mut Vec<HookDef>) {
+    hooks.retain_mut(|hook| {
+        hook.event = hook.event.trim().to_string();
+        hook.kind = hook.kind.trim().to_lowercase();
+        if crate::chat::hooks::HookEvent::parse(&hook.event).is_none() {
+            return false;
+        }
+        match hook.kind.as_str() {
+            "command" => {
+                if hook.script.trim().is_empty() {
+                    return false;
+                }
+            }
+            "http" => {
+                if hook.url.trim().is_empty() {
+                    return false;
+                }
+                hook.method = hook.method.trim().to_uppercase();
+                if hook.method.is_empty() {
+                    hook.method = default_hook_method();
+                }
+            }
+            _ => return false,
+        }
+        if hook.id.trim().is_empty() {
+            hook.id = uuid::Uuid::new_v4().to_string();
+        }
+        hook.timeout_ms = hook
+            .timeout_ms
+            .clamp(HOOK_MIN_TIMEOUT_MS, HOOK_MAX_TIMEOUT_MS);
+        true
+    });
+}
+
 /**
  * Chat 工具与 Skill 配置。
  */
@@ -923,6 +1026,14 @@ pub struct ChatToolsConfig {
     /// 默认关闭；关闭时 adapter 零开销（不构造记录）。仅内存、不落盘。
     #[serde(default)]
     pub request_debug_enabled: bool,
+    /// 对话生命周期 Hooks（07-28-hooks）。空数组 = 无 Hook = agent loop 零开销。
+    ///
+    /// `deserialize_with` 而非光 `default`：字段刚上线时前端漏传，`invoke` 把缺失字段
+    /// 序列化成 **null** 落进了 settings.json，而 `default` 只兜「键不存在」，遇到
+    /// null 会以 `invalid type: null, expected a sequence` 让**整个 chatTools 解析失败**
+    /// （连 MCP 服务器、原生工具开关一起丢）。null 归一到空数组。
+    #[serde(default, deserialize_with = "null_tolerant_vec")]
+    pub hooks: Vec<HookDef>,
     pub native_tools: ChatNativeToolsConfig,
 }
 
@@ -944,6 +1055,7 @@ impl Default for ChatToolsConfig {
             sub_agent_provider_id: String::new(),
             sub_agent_model: String::new(),
             request_debug_enabled: false,
+            hooks: Vec::new(),
             native_tools: ChatNativeToolsConfig::default(),
         }
     }
@@ -2050,6 +2162,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     ) {
         settings.chat_tools.approval_policy = default_chat_approval_policy();
     }
+    sanitize_hooks(&mut settings.chat_tools.hooks);
     // One-shot green-light migration: bring a pre-green-light install (native
     // tools defaulted OFF + old approval_policy) to the new baseline. Idempotent
     // via `chat_tools_greenlit_v1` so a user who later turns a tool back off, or
@@ -3080,6 +3193,129 @@ mod tests {
     }
 
     #[test]
+    fn hooks_default_to_empty_and_survive_legacy_settings() {
+        // 纯新增字段：旧 settings.json 缺 hooks → 空数组，行为与现状一致。
+        let cfg: ChatToolsConfig =
+            serde_json::from_str("{}").expect("ChatToolsConfig defaults from empty object");
+        assert!(cfg.hooks.is_empty());
+    }
+
+    #[test]
+    fn hook_def_wire_shape_matches_the_frontend_type() {
+        // 前端 `HookDef`（src/api/tauri.ts）逐字段镜像这个结构。字段名/大小写漂移了，
+        // 保存时会静默丢字段（serde default 兜住，用户只看到「配了但没生效」）。
+        let hook = HookDef {
+            id: "h1".to_string(),
+            name: "lint-guard".to_string(),
+            description: "d".to_string(),
+            event: "tool_execution_start".to_string(),
+            enabled: true,
+            kind: "http".to_string(),
+            script: String::new(),
+            url: "https://example.test/h".to_string(),
+            method: "POST".to_string(),
+            headers: [("X-A".to_string(), "1".to_string())].into_iter().collect(),
+            timeout_ms: 60_000,
+        };
+        let value = serde_json::to_value(&hook).expect("serialize");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "description",
+                "enabled",
+                "event",
+                "headers",
+                "id",
+                "method",
+                "name",
+                "script",
+                "timeoutMs",
+                "type",
+                "url",
+            ],
+            "wire field names drifted from the TS HookDef"
+        );
+
+        // 前端写回的 JSON 也必须原样读回来。
+        let round_tripped: HookDef = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(round_tripped.kind, "http");
+        assert_eq!(round_tripped.timeout_ms, 60_000);
+        assert_eq!(
+            round_tripped.headers.get("X-A").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn sanitize_hooks_drops_invalid_entries_and_clamps_timeout() {
+        let mut settings = Settings::default();
+        settings.chat_tools.hooks = vec![
+            // 合法 command：补 id、钳制超时下限。
+            HookDef {
+                name: "log".to_string(),
+                event: " agent_end ".to_string(),
+                enabled: true,
+                kind: "Command".to_string(),
+                script: "echo hi".to_string(),
+                timeout_ms: 1,
+                ..Default::default()
+            },
+            // 合法 http：方法归一到大写。
+            HookDef {
+                id: "http-1".to_string(),
+                event: "turn_start".to_string(),
+                kind: "http".to_string(),
+                url: "https://example.test/hook".to_string(),
+                method: "post".to_string(),
+                timeout_ms: 10_000_000,
+                ..Default::default()
+            },
+            // 事件名非法 → 丢弃（没有合理的「就近」事件可猜）。
+            HookDef {
+                event: "agent_started".to_string(),
+                kind: "command".to_string(),
+                script: "echo x".to_string(),
+                ..Default::default()
+            },
+            // 类型非法 → 丢弃。
+            HookDef {
+                event: "agent_end".to_string(),
+                kind: "webhook".to_string(),
+                ..Default::default()
+            },
+            // command 但脚本为空 / http 但 url 为空 → 丢弃。
+            HookDef {
+                event: "agent_end".to_string(),
+                kind: "command".to_string(),
+                script: "   ".to_string(),
+                ..Default::default()
+            },
+            HookDef {
+                event: "agent_end".to_string(),
+                kind: "http".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let settings = sanitize_settings(settings);
+        let hooks = &settings.chat_tools.hooks;
+
+        assert_eq!(hooks.len(), 2, "only the two valid hooks survive");
+        assert_eq!(hooks[0].event, "agent_end", "event is trimmed");
+        assert_eq!(hooks[0].kind, "command", "kind is lowercased");
+        assert!(!hooks[0].id.is_empty(), "blank id is filled in");
+        assert_eq!(hooks[0].timeout_ms, HOOK_MIN_TIMEOUT_MS);
+        assert_eq!(hooks[1].method, "POST", "method is uppercased");
+        assert_eq!(hooks[1].timeout_ms, HOOK_MAX_TIMEOUT_MS);
+    }
+
+    #[test]
     fn greenlight_migration_does_not_stomp_explicit_policy_on_first_run() {
         // Pre-green-light flag, but the user had explicitly chosen always_confirm.
         let mut settings = Settings::default();
@@ -3980,5 +4216,37 @@ mod tests {
             settings.chat_tools.native_tools.working_directory,
             default_chat_working_directory()
         );
+    }
+}
+
+#[cfg(test)]
+mod hooks_disk_compat_tests {
+    use super::*;
+
+    /// 回归：hooks 字段刚上线时前端漏传，`invoke` 把它序列化成 null 写进了
+    /// settings.json。serde 的 `default` 只兜「键不存在」，遇到 null 会报
+    /// `invalid type: null, expected a sequence` —— 整个 chatTools 解析失败，
+    /// 连 MCP 服务器和原生工具开关一起丢。
+    #[test]
+    fn null_hooks_on_disk_does_not_break_chat_tools() {
+        let json = serde_json::json!({
+            "enabled": true,
+            "hooks": null,
+            "servers": [{ "id": "s1", "name": "srv" }],
+        });
+        let config: ChatToolsConfig =
+            serde_json::from_value(json).expect("null hooks must not break chatTools");
+        assert!(config.hooks.is_empty());
+        assert!(config.enabled, "sibling fields must survive");
+        assert_eq!(config.servers.len(), 1, "sibling fields must survive");
+    }
+
+    /// 键完全不存在（更旧的磁盘文件）同样要能读。
+    #[test]
+    fn missing_hooks_key_defaults_to_empty() {
+        let config: ChatToolsConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true }))
+                .expect("missing hooks key must parse");
+        assert!(config.hooks.is_empty());
     }
 }

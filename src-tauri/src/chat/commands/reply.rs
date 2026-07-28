@@ -510,6 +510,24 @@ pub(super) async fn complete_assistant_reply_inner(
         // 多模型臂不直接落盘（最终由协调者统一 upsert + save），因此抑制 loop 的
         // mid-run 部分快照写盘，避免 N 条并发 run 同写 conversations/{id}.json 的竞态。
         suppress_partial_persist: arm.is_some(),
+        // 生命周期 Hooks：无启用条目时为 None，loop 完全不感知。先用 `any_enabled`
+        // 短路，没配 Hook 时连下面这几个 id / model 字符串都不分配（验收 6）。
+        hooks: crate::chat::hooks::HookDispatcher::any_enabled(&settings.chat_tools.hooks)
+            .then(|| {
+                crate::chat::hooks::HookDispatcher::new(
+                    app.clone(),
+                    &settings.chat_tools.hooks,
+                    conversation.id.clone(),
+                    run_id.clone(),
+                    assistant_message_id.clone(),
+                    workbench_dir
+                        .as_deref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(std::env::temp_dir),
+                    format!("{}:{}", provider.id, resolved_model),
+                )
+            })
+            .flatten(),
     };
     // probe（无头测试通道，仅 debug）：换用自动放行审批/consent/ask_user 的 host，
     // 否则模型调用敏感工具或 ask_user 会 await GUI 应答而永久挂起。
