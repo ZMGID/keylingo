@@ -318,10 +318,26 @@ fn collect_acp_models_from_lines(lines: &[&str]) -> Option<Vec<RuntimeModelOptio
 ///
 /// 识别口径与 `acp_config_ids` 保持一致（id 含 reasoning/thought/thinking/effort，
 /// 或 category 为 reasoning/thought/thought_level），避免两处判据分叉。
+/// 是否是无意义的开关型档位（kimi always_thinking 模型：options 只有 `On`）。
+/// 这种不能当 effort 胶囊用——用户会看到莫名其妙的「On」。
+fn is_boolean_toggle_efforts(options: &[RuntimeModelOption]) -> bool {
+    if options.is_empty() {
+        return false;
+    }
+    options.iter().all(|o| {
+        matches!(
+            o.id.to_lowercase().as_str(),
+            "on" | "off" | "true" | "false" | "enabled" | "disabled" | "1" | "0" | "yes" | "no"
+        )
+    })
+}
+
 fn extract_acp_reasoning(value: &Value) -> (Vec<RuntimeModelOption>, Option<String>) {
     let Some(config_options) = value.get("configOptions").and_then(|v| v.as_array()) else {
         return (Vec::new(), None);
     };
+    // 先收集所有候选，优先取多档 effort（low/high/max），跳过只有 On/Off 的开关。
+    let mut best: Option<(Vec<RuntimeModelOption>, Option<String>)> = None;
     for raw in config_options {
         let Some(option) = raw.as_object() else {
             continue;
@@ -378,9 +394,20 @@ fn extract_acp_reasoning(value: &Value) -> (Vec<RuntimeModelOption>, Option<Stri
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        return (out, current);
+        // 只有 On/Off 的开关：不当作 effort 档位（kimi K2.7 always_thinking）。
+        if is_boolean_toggle_efforts(&out) {
+            continue;
+        }
+        // 多档优先；同档数取先出现的。
+        let take = match &best {
+            None => true,
+            Some((prev, _)) => out.len() > prev.len(),
+        };
+        if take {
+            best = Some((out, current));
+        }
     }
-    (Vec::new(), None)
+    best.unwrap_or((Vec::new(), None))
 }
 
 fn extract_acp_current(value: &Value) -> (Option<String>, Option<String>) {
@@ -1885,6 +1912,21 @@ mod tests {
         );
         assert_eq!(options[1].label, "High");
         assert_eq!(current.as_deref(), Some("high"));
+    }
+
+    /// kimi always_thinking 模型（K2.7 Coding）ACP 只给 `options:[{on,On}]`——不能当 effort 显示。
+    #[test]
+    fn reasoning_options_skip_boolean_on_only_toggle() {
+        let result = json!({
+            "configOptions": [
+                { "type": "select", "id": "thinking", "category": "thought_level",
+                  "currentValue": "on",
+                  "options": [{ "value": "on", "name": "On" }] }
+            ]
+        });
+        let (options, current) = extract_acp_reasoning(&result);
+        assert!(options.is_empty(), "On-only 不应成为 effort 档位: {options:?}");
+        assert!(current.is_none(), "On 当前值也不该回填: {current:?}");
     }
 
     #[test]

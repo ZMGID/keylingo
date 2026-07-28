@@ -1446,6 +1446,8 @@ export const chatApi = {
   ): Promise<{
     models: DetectedExternalAgent['models']
     reasoningOptions: NonNullable<DetectedExternalAgent['reasoningOptions']>
+    /** 按模型的 effort 档位（kimi：K3 有 low/high/max，always_thinking 模型无）。 */
+    reasoningByModel: Record<string, NonNullable<DetectedExternalAgent['reasoningOptions']>>
     source: 'probed' | 'fallback'
     probeError?: string
     // CLI 自己当前配置的模型/推理等级（用于胶囊自动同步「同步 CLI 当前配置」）。null = 无当前概念。
@@ -1453,12 +1455,13 @@ export const chatApi = {
     currentReasoning?: string | null
   }> {
     if (!isTauriRuntime()) {
-      return { models: [], reasoningOptions: [], source: 'probed' }
+      return { models: [], reasoningOptions: [], reasoningByModel: {}, source: 'probed' }
     }
     const result = await invoke<{
       success: boolean
       models?: DetectedExternalAgent['models']
       reasoningOptions?: NonNullable<DetectedExternalAgent['reasoningOptions']>
+      reasoningByModel?: Record<string, NonNullable<DetectedExternalAgent['reasoningOptions']>>
       source?: 'probed' | 'fallback'
       probeError?: string
       currentModel?: string | null
@@ -1467,6 +1470,7 @@ export const chatApi = {
     return {
       models: result.models ?? [],
       reasoningOptions: result.reasoningOptions ?? [],
+      reasoningByModel: result.reasoningByModel ?? {},
       // 向后兼容：旧后端不返回 source 时视为 probed（不显示降级角标）。
       source: result.source ?? 'probed',
       probeError: result.probeError,

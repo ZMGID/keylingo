@@ -269,6 +269,10 @@ function ExternalModelSelectorBase({
   const [reasoningOptions, setReasoningOptions] = useState<
     NonNullable<DetectedExternalAgent['reasoningOptions']>
   >([])
+  // kimi 等：档位随模型变（K3=low/high/max，K2.7 always_thinking=无）。按所选模型取。
+  const [reasoningByModel, setReasoningByModel] = useState<
+    Record<string, NonNullable<DetectedExternalAgent['reasoningOptions']>>
+  >({})
   const [loading, setLoading] = useState(false)
   // source: probed=真实探测 / fallback=探测失败降级静态表（显示"默认列表"角标 + 重试）。
   const [source, setSource] = useState<'probed' | 'fallback'>('probed')
@@ -296,6 +300,7 @@ function ExternalModelSelectorBase({
           if (modelsReqIdRef.current !== reqId) return
           setModels(result.models)
           setReasoningOptions(result.reasoningOptions)
+          setReasoningByModel(result.reasoningByModel ?? {})
           setSource(result.source)
           setCurrentModel(result.currentModel ?? null)
           // 自动同步 CLI 当前配置：仅当用户未显式选择（externalModel 空 / 'default'）时。
@@ -309,10 +314,18 @@ function ExternalModelSelectorBase({
           const nextModel = selectable ? (cur as string) : rt.externalModel ?? 'default'
           const explicitReasoning =
             !!rt.externalReasoning && rt.externalReasoning !== 'default'
-          const nextReasoning =
-            !explicitReasoning && result.currentReasoning
-              ? result.currentReasoning
-              : rt.externalReasoning ?? null
+          // 拒绝 ACP 残留的 on/off 开关值——那不是 effort 档位。
+          const probedReasoning = result.currentReasoning
+          const saneReasoning =
+            probedReasoning &&
+            !['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(
+              probedReasoning.toLowerCase(),
+            )
+              ? probedReasoning
+              : null
+          const nextReasoning = !explicitReasoning && saneReasoning
+            ? saneReasoning
+            : rt.externalReasoning ?? null
           if (nextModel !== (rt.externalModel ?? 'default') || nextReasoning !== (rt.externalReasoning ?? null)) {
             onModelChangeRef.current(nextModel, nextReasoning)
           }
@@ -335,12 +348,14 @@ function ExternalModelSelectorBase({
       lastAgentIdRef.current = agentId
       // 换 agent：旧 CLI 的 currentModel 立刻失效（探测中显示「获取中…」而非上个 CLI 的模型名）。
       setCurrentModel(null)
+      setReasoningByModel({})
     }
     if (!agentId) {
       // 失效在途请求，防止旧结果落到已清空的状态上。
       modelsReqIdRef.current++
       setModels([])
       setReasoningOptions([])
+      setReasoningByModel({})
       setSource('probed')
       return
     }
@@ -348,13 +363,46 @@ function ExternalModelSelectorBase({
     void loadModels(agentId)
   }, [agentRuntime.externalAgentId, loadModels])
 
+  // 当前展示用的 effort 列表：优先按所选/当前模型从 reasoningByModel 取（kimi 按模型变档）。
+  const activeReasoningOptions = useMemo(() => {
+    const modelId =
+      agentRuntime.externalModel && agentRuntime.externalModel !== 'default'
+        ? agentRuntime.externalModel
+        : currentModel
+    if (modelId && Object.prototype.hasOwnProperty.call(reasoningByModel, modelId)) {
+      return reasoningByModel[modelId] ?? []
+    }
+    // 过滤 ACP 误报的 On-only 开关，避免胶囊显示「On」。
+    const filtered = reasoningOptions.filter(
+      (o) => !['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(o.id.toLowerCase()),
+    )
+    // 若过滤后只剩空、或原来就只有开关——不显示档位。
+    if (
+      reasoningOptions.length > 0 &&
+      reasoningOptions.every((o) =>
+        ['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(o.id.toLowerCase()),
+      )
+    ) {
+      return []
+    }
+    return filtered.length > 0 ? filtered : reasoningOptions
+  }, [agentRuntime.externalModel, currentModel, reasoningByModel, reasoningOptions])
+
   const reasoningPillValue = agentRuntime.externalReasoning ?? 'default'
   const currentReasoningLabel = useMemo(() => {
-    const opt = reasoningOptions.find((o) => o.id === reasoningPillValue)
+    const opt = activeReasoningOptions.find((o) => o.id === reasoningPillValue)
     const raw = opt?.label ?? reasoningPillValue
     // 未显式选择推理等级（default）时显示「自动」，不再暴露裸 "Default"。
-    return raw === 'Default' || reasoningPillValue === 'default' ? 'Auto' : raw
-  }, [reasoningOptions, reasoningPillValue])
+    // 残留的 on/off 也当自动（不是档位名）。
+    if (
+      raw === 'Default' ||
+      reasoningPillValue === 'default' ||
+      ['on', 'off', 'true', 'false'].includes(String(reasoningPillValue).toLowerCase())
+    ) {
+      return 'Auto'
+    }
+    return raw
+  }, [activeReasoningOptions, reasoningPillValue])
   const displayName = useMemo(() => {
     const currentId = agentRuntime.externalModel
     const explicit = !!currentId && currentId !== 'default'
@@ -426,7 +474,22 @@ function ExternalModelSelectorBase({
                     key={model.id}
                     type="button"
                     onClick={() => {
-                      onModelChange(model.id)
+                      // 换模型时 effort 可能变（kimi K3 有 low/high/max，K2.7 无）。
+                      // 旧值是 on/off 或不在新列表里 → 清掉或落到 high。
+                      const efforts = reasoningByModel[model.id]
+                      const cur = agentRuntime.externalReasoning
+                      const curOk =
+                        !!cur &&
+                        cur !== 'default' &&
+                        !['on', 'off'].includes(cur.toLowerCase()) &&
+                        (!efforts || efforts.some((o) => o.id === cur))
+                      let nextReasoning: string | null = curOk ? (cur as string) : null
+                      if (!curOk && efforts && efforts.length > 0) {
+                        nextReasoning =
+                          efforts.find((o) => o.id === 'high')?.id ?? efforts[0]?.id ?? null
+                      }
+                      if (efforts && efforts.length === 0) nextReasoning = null
+                      onModelChange(model.id, nextReasoning)
                       setOpen(false)
                     }}
                     className={`kv-menu-row text-neutral-700 hover:bg-black/[0.05] dark:text-neutral-200 dark:hover:bg-white/[0.07] ${
@@ -443,7 +506,7 @@ function ExternalModelSelectorBase({
       </div>
 
       {/* Standalone thinking-level pill, mirroring the builtin ThinkingLevelSelector. */}
-      {reasoningOptions.length > 0 && (
+      {activeReasoningOptions.length > 0 && (
         <div className="relative shrink-0" data-tauri-drag-region="false">
           <button
             type="button"
@@ -469,7 +532,7 @@ function ExternalModelSelectorBase({
                 aria-hidden
               />
               <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[160px] overflow-y-auto kv-menu">
-                {reasoningOptions.map((option) => {
+                {activeReasoningOptions.map((option) => {
                   const active = option.id === reasoningPillValue
                   return (
                     <button

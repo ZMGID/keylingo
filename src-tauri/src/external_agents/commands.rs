@@ -95,57 +95,88 @@ pub async fn chat_detect_external_agent_models(
     let probe = detect_agent_models(def, &cwd).await;
     if !probe.models.is_empty() {
         // probed 长 TTL，fallback 短 TTL 负缓存——由 get 侧按 source 分别裁定过期。
+        // reasoning_options 必须一并写入：ACP/kimi 档位只来自探测，def 静态表为空。
         state.set_cached_external_agent_models(
             key,
             CachedAgentModels {
                 models: probe.models.clone(),
                 source: probe.source,
+                reasoning_options: probe.reasoning_options.clone(),
+                reasoning_by_model: probe.reasoning_by_model.clone(),
                 current_model: probe.current_model.clone(),
                 current_reasoning: probe.current_reasoning.clone(),
             },
         );
     }
-    let mut payload = serde_json::json!({
-        "success": true,
-        "models": probe.models,
-        "reasoningOptions": probe.reasoning_options,
-        "source": probe.source.as_str(),
-        "cached": false,
-    });
-    if let Some(model) = probe.current_model {
-        payload["currentModel"] = serde_json::Value::String(model);
-    }
-    if let Some(reasoning) = probe.current_reasoning {
-        payload["currentReasoning"] = serde_json::Value::String(reasoning);
-    }
-    if probe.source == ModelSource::Fallback {
-        if let Some(err) = probe.probe_error {
-            payload["probeError"] = serde_json::Value::String(err);
-        }
-    }
-    Ok(payload)
+    Ok(models_payload(
+        &probe.models,
+        &probe.reasoning_options,
+        &probe.reasoning_by_model,
+        probe.source,
+        probe.current_model.as_deref(),
+        probe.current_reasoning.as_deref(),
+        false,
+        probe.probe_error.as_deref(),
+    ))
 }
 
-/// 组装缓存命中的返回 JSON：模型 + reasoning 选项（从 def 静态表）+ 来源 + CLI 当前配置。
+fn models_payload(
+    models: &[crate::external_agents::types::RuntimeModelOption],
+    reasoning_options: &[crate::external_agents::types::RuntimeModelOption],
+    reasoning_by_model: &std::collections::HashMap<
+        String,
+        Vec<crate::external_agents::types::RuntimeModelOption>,
+    >,
+    source: ModelSource,
+    current_model: Option<&str>,
+    current_reasoning: Option<&str>,
+    cached_flag: bool,
+    probe_error: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "success": true,
+        "models": models,
+        "reasoningOptions": reasoning_options,
+        "reasoningByModel": reasoning_by_model,
+        "source": source.as_str(),
+        "cached": cached_flag,
+    });
+    if let Some(model) = current_model {
+        payload["currentModel"] = serde_json::Value::String(model.to_string());
+    }
+    if let Some(reasoning) = current_reasoning {
+        payload["currentReasoning"] = serde_json::Value::String(reasoning.to_string());
+    }
+    if source == ModelSource::Fallback {
+        if let Some(err) = probe_error {
+            payload["probeError"] = serde_json::Value::String(err.to_string());
+        }
+    }
+    payload
+}
+
+/// 组装缓存命中的返回 JSON：模型 + 缓存的 reasoning 选项 + 来源 + CLI 当前配置。
+/// 缓存里档位为空时回落 def 静态表（claude/codex/pi/grok 有表；ACP 系仍为空）。
 fn cached_models_payload(
     def: &crate::external_agents::types::RuntimeAgentDef,
     cached: &CachedAgentModels,
     cached_flag: bool,
 ) -> serde_json::Value {
-    let mut payload = serde_json::json!({
-        "success": true,
-        "models": cached.models,
-        "reasoningOptions": crate::external_agents::types::reasoning_options_from_pairs(def.reasoning_options),
-        "source": cached.source.as_str(),
-        "cached": cached_flag,
-    });
-    if let Some(model) = &cached.current_model {
-        payload["currentModel"] = serde_json::Value::String(model.clone());
-    }
-    if let Some(reasoning) = &cached.current_reasoning {
-        payload["currentReasoning"] = serde_json::Value::String(reasoning.clone());
-    }
-    payload
+    let reasoning_options = if cached.reasoning_options.is_empty() {
+        crate::external_agents::types::reasoning_options_from_pairs(def.reasoning_options)
+    } else {
+        cached.reasoning_options.clone()
+    };
+    models_payload(
+        &cached.models,
+        &reasoning_options,
+        &cached.reasoning_by_model,
+        cached.source,
+        cached.current_model.as_deref(),
+        cached.current_reasoning.as_deref(),
+        cached_flag,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -276,5 +307,58 @@ mod tests {
         let current = AgentRuntimeConfig::default(); // builtin
         let to_external = external("claude", "default");
         assert!(check_runtime_switch_allowed(&current, false, &to_external).is_ok());
+    }
+
+    /// 回归：缓存命中必须带回探测到的 reasoning_options。
+    /// kimi 等 ACP CLI 的 def.reasoning_options 是空的；若命中时只回落 def 表，
+    /// effort 胶囊在第二次打开时消失（bac8f53 漏的那步）。
+    #[test]
+    fn cached_payload_preserves_probed_reasoning_options() {
+        use crate::external_agents::registry::get_agent_def;
+        use crate::external_agents::types::{CachedAgentModels, ModelSource, RuntimeModelOption};
+
+        let def = get_agent_def("kimi").expect("kimi def");
+        assert!(
+            def.reasoning_options.is_empty(),
+            "precondition: acp_def 静态档位表为空"
+        );
+
+        let cached = CachedAgentModels {
+            models: vec![RuntimeModelOption {
+                id: "kimi-code/kimi-for-coding".into(),
+                label: "K2.7 Coding".into(),
+                context_window_tokens: None,
+            }],
+            source: ModelSource::Probed,
+            reasoning_options: vec![
+                RuntimeModelOption {
+                    id: "low".into(),
+                    label: "Low".into(),
+                    context_window_tokens: None,
+                },
+                RuntimeModelOption {
+                    id: "high".into(),
+                    label: "High".into(),
+                    context_window_tokens: None,
+                },
+                RuntimeModelOption {
+                    id: "max".into(),
+                    label: "Max".into(),
+                    context_window_tokens: None,
+                },
+            ],
+            reasoning_by_model: Default::default(),
+            current_model: Some("kimi-code/kimi-for-coding".into()),
+            current_reasoning: Some("high".into()),
+        };
+
+        let payload = cached_models_payload(def, &cached, true);
+        let opts = payload["reasoningOptions"]
+            .as_array()
+            .expect("reasoningOptions array");
+        assert_eq!(opts.len(), 3, "缓存命中应保留探测档位，不能回落空 def 表");
+        assert_eq!(opts[0]["id"], "low");
+        assert_eq!(opts[2]["id"], "max");
+        assert_eq!(payload["currentReasoning"], "high");
     }
 }

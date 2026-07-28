@@ -73,11 +73,19 @@ impl ModelSource {
 }
 
 /// 模型探测缓存条目：带来源，供 state 层按来源应用不同 TTL（probed 长、fallback 短负缓存）。
-/// 同时缓存 CLI 当前配置的模型/推理等级（current_*），使缓存命中也能回填胶囊。
+/// 同时缓存 CLI 当前配置的模型/推理等级（current_*）与**推理档位列表**，使缓存命中也能回填胶囊。
+///
+/// `reasoning_options` 必须一起缓存：kimi 等 ACP CLI 的档位来自探测（`configOptions`），
+/// `acp_def` 静态表是空的。若缓存只存 models 而命中时回落 def 表，effort 胶囊会在第二次
+/// 打开时消失（bac8f53 修了探测路径，但漏了这一步）。
 #[derive(Debug, Clone)]
 pub struct CachedAgentModels {
     pub models: Vec<RuntimeModelOption>,
     pub source: ModelSource,
+    /// 探测得到的推理档位列表（kimi ACP thinking: low/high/max 等）。空 = 无档位或回落 def。
+    pub reasoning_options: Vec<RuntimeModelOption>,
+    /// 按模型的 effort 列表（kimi support_efforts）。缓存命中时前端按所选模型切换档位。
+    pub reasoning_by_model: std::collections::HashMap<String, Vec<RuntimeModelOption>>,
     /// CLI 自己当前配置的模型 id（codex config.toml / ACP currentModelId / claude resolved model）。
     /// None = 该 CLI 无「当前模型」概念，前端显示「自动」。
     pub current_model: Option<String>,

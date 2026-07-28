@@ -1015,6 +1015,8 @@ mod tests {
             CachedAgentModels {
                 models: vec![one("gpt-5")],
                 source: ModelSource::Probed,
+                reasoning_options: vec![],
+                reasoning_by_model: Default::default(),
                 current_model: None,
                 current_reasoning: None,
             },
@@ -1029,6 +1031,8 @@ mod tests {
             CachedAgentModels {
                 models: vec![one("default")],
                 source: ModelSource::Fallback,
+                reasoning_options: vec![],
+                reasoning_by_model: Default::default(),
                 current_model: None,
                 current_reasoning: None,
             },
@@ -1042,6 +1046,8 @@ mod tests {
             CachedAgentModels {
                 models: vec![one("default")],
                 source: ModelSource::Fallback,
+                reasoning_options: vec![],
+                reasoning_by_model: Default::default(),
                 current_model: None,
                 current_reasoning: None,
             },

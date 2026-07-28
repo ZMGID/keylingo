@@ -76,6 +76,9 @@ pub struct AgentModelsResult {
     pub probe_error: Option<String>,
     pub current_model: Option<String>,
     pub current_reasoning: Option<String>,
+    /// 按模型区分的 effort 档位（kimi：K3 有 low/high/max，K2.7 always_thinking 无）。
+    /// 空 = 不按模型区分，前端只用 `reasoning_options`。
+    pub reasoning_by_model: std::collections::HashMap<String, Vec<RuntimeModelOption>>,
 }
 
 /// 只探单个 agent 的模型（cwd-scoped），供懒查命令用。返回模型、reasoning 选项，以及来源
@@ -91,10 +94,12 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             probe_error: Some("CLI 未安装或不在 PATH".to_string()),
             current_model: None,
             current_reasoning: None,
+            reasoning_by_model: std::collections::HashMap::new(),
         };
     };
     match probe_models(def, path.as_deref(), cwd).await {
         Ok((models, mut current_model, mut current_reasoning, probed_reasoning)) => {
+            let mut reasoning_by_model = std::collections::HashMap::new();
             // codex 的当前模型/推理不来自 `debug models`（其输出仅供列表），而是读 config.toml 顶层键。
             if def.id == "codex" {
                 let (cm, cr) = read_codex_current_config();
@@ -104,11 +109,24 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
                 // pi 的当前模型来自 ~/.pi/agent/settings.json（defaultProvider/defaultModel）。
                 // reasoning 是每次调用参数，不从配置读。
                 current_model = current_model.or_else(read_pi_current_config);
-            } else if def.id == "kimi" && current_model.is_none() {
-                // kimi 走 ACP 但 session/new 不上报 currentModelId → 降级读 ~/.kimi-code/config.toml。
+            } else if def.id == "kimi" {
+                // kimi 走 ACP 但 session/new 常不上报 currentModelId → 降级读 config.toml。
+                // ACP 对 always_thinking 模型只给 options=[{on}]（已在 extract 里滤掉）；
+                // 真实 low/high/max 在 config 的 per-model support_efforts 里。
                 let (cm, cr) = read_kimi_current_config();
-                current_model = cm;
+                if current_model.is_none() {
+                    current_model = cm;
+                }
                 current_reasoning = current_reasoning.or(cr);
+                let efforts_map = read_kimi_model_efforts();
+                for (model_id, (opts, default_effort)) in efforts_map {
+                    if current_reasoning.is_none()
+                        && current_model.as_deref() == Some(model_id.as_str())
+                    {
+                        current_reasoning = default_effort;
+                    }
+                    reasoning_by_model.insert(model_id, opts);
+                }
             } else if def.id == "claude" {
                 // claude 的 system/init 只报模型、不报推理档位 → 读 settings.json 的
                 // `effortLevel`（或 CLAUDE_EFFORT 环境变量）。此前漏了这条，胶囊上
@@ -116,19 +134,48 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
                 current_reasoning = current_reasoning
                     .or_else(crate::external_agents::session::claude_init::claude_config_effort);
             }
+            // CLI 自报的多档优先；空（或已被滤掉的 On-only）回落 def 静态表。
+            let mut reasoning_options = if probed_reasoning.is_empty() {
+                reasoning
+            } else {
+                probed_reasoning
+            };
+            // kimi：当前模型若在 config 里有 support_efforts，用它覆盖（session/new 总是默认模型的档位）。
+            if def.id == "kimi" {
+                if let Some(model) = current_model.as_deref() {
+                    if let Some(opts) = reasoning_by_model.get(model) {
+                        if !opts.is_empty() {
+                            reasoning_options = opts.clone();
+                        }
+                    } else {
+                        // always_thinking 模型：明确无档位
+                        reasoning_options = Vec::new();
+                    }
+                }
+            }
+            // 当前档位若不在可选列表里（比如残留的 "on"），清掉以免胶囊显示 On。
+            if let Some(cur) = current_reasoning.as_deref() {
+                let known = reasoning_options.iter().any(|o| o.id == cur)
+                    || reasoning_by_model
+                        .values()
+                        .any(|opts| opts.iter().any(|o| o.id == cur));
+                if !known
+                    && matches!(
+                        cur.to_lowercase().as_str(),
+                        "on" | "off" | "true" | "false" | "enabled" | "disabled"
+                    )
+                {
+                    current_reasoning = None;
+                }
+            }
             AgentModelsResult {
                 models,
-                // CLI 自报的档位优先于 defs 静态表：kimi 的 ACP 会给 low/high/max，
-                // 而 acp_def 里 reasoning_options 是空的（所有 ACP CLI 共用那个构造器）。
-                reasoning_options: if probed_reasoning.is_empty() {
-                    reasoning
-                } else {
-                    probed_reasoning
-                },
+                reasoning_options,
                 source: ModelSource::Probed,
                 probe_error: None,
                 current_model,
                 current_reasoning,
+                reasoning_by_model,
             }
         }
         Err(err) => AgentModelsResult {
@@ -138,6 +185,7 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             probe_error: Some(err),
             current_model: None,
             current_reasoning: None,
+            reasoning_by_model: std::collections::HashMap::new(),
         },
     }
 }
@@ -288,6 +336,114 @@ fn parse_kimi_config(text: &str) -> (Option<String>, Option<String>) {
         None
     };
     (default_model, reasoning)
+}
+
+/// 解析 kimi config 里每个模型的 `support_efforts` / `default_effort`。
+/// always_thinking 模型（K2.7）没有 support_efforts → 不进 map → 前端不显示 effort 胶囊。
+/// K3 有 `support_efforts = ["low","high","max"]` → 按模型给出真实档位。
+fn parse_kimi_model_efforts(
+    text: &str,
+) -> std::collections::HashMap<String, (Vec<RuntimeModelOption>, Option<String>)> {
+    let mut out: std::collections::HashMap<String, (Vec<RuntimeModelOption>, Option<String>)> =
+        std::collections::HashMap::new();
+    let mut section: Option<String> = None;
+    let mut efforts: Vec<String> = Vec::new();
+    let mut default_effort: Option<String> = None;
+
+    let flush = |section: &Option<String>,
+                 efforts: &mut Vec<String>,
+                 default_effort: &mut Option<String>,
+                 out: &mut std::collections::HashMap<
+        String,
+        (Vec<RuntimeModelOption>, Option<String>),
+    >| {
+        let Some(sec) = section.as_deref() else {
+            return;
+        };
+        // [models."kimi-code/k3"] 或 [models.kimi-code/k3]
+        let Some(model_id) = sec
+            .strip_prefix("models.")
+            .map(|s| s.trim().trim_matches('"').to_string())
+        else {
+            return;
+        };
+        if efforts.is_empty() {
+            *default_effort = None;
+            return;
+        }
+        let opts: Vec<RuntimeModelOption> = efforts
+            .iter()
+            .map(|id| {
+                let label = match id.as_str() {
+                    "low" => "Low",
+                    "medium" | "med" => "Medium",
+                    "high" => "High",
+                    "max" | "xhigh" => "Max",
+                    other => other,
+                };
+                RuntimeModelOption {
+                    id: id.clone(),
+                    label: label.to_string(),
+                    context_window_tokens: None,
+                }
+            })
+            .collect();
+        out.insert(model_id, (opts, default_effort.take()));
+        efforts.clear();
+    };
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            flush(&section, &mut efforts, &mut default_effort, &mut out);
+            section = Some(rest.split(']').next().unwrap_or("").trim().to_string());
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if !section
+            .as_deref()
+            .is_some_and(|s| s.starts_with("models."))
+        {
+            continue;
+        }
+        match key {
+            "support_efforts" => {
+                // support_efforts = [ "low", "high", "max" ]
+                let body = value.trim().trim_start_matches('[').trim_end_matches(']');
+                for part in body.split(',') {
+                    if let Some(id) = unquote_toml_scalar(part) {
+                        if !id.is_empty() {
+                            efforts.push(id);
+                        }
+                    }
+                }
+            }
+            "default_effort" if default_effort.is_none() => {
+                default_effort = unquote_toml_scalar(value);
+            }
+            _ => {}
+        }
+    }
+    flush(&section, &mut efforts, &mut default_effort, &mut out);
+    out
+}
+
+fn read_kimi_model_efforts() -> std::collections::HashMap<String, (Vec<RuntimeModelOption>, Option<String>)>
+{
+    let Some(base) = directories::BaseDirs::new() else {
+        return std::collections::HashMap::new();
+    };
+    let path = base.home_dir().join(".kimi-code").join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_kimi_model_efforts(&text),
+        Err(_) => std::collections::HashMap::new(),
+    }
 }
 
 pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedAgent {
@@ -715,6 +871,33 @@ mod tests {
         assert!(parse_pi_current_model("{}").is_none());
         // 非法 JSON 也不 panic → None。
         assert!(parse_pi_current_model("not json").is_none());
+    }
+
+    #[test]
+    fn kimi_model_efforts_from_support_efforts() {
+        let text = r#"
+default_model = "kimi-code/kimi-for-coding"
+
+[models."kimi-code/kimi-for-coding"]
+display_name = "K2.7 Coding"
+capabilities = [ "thinking", "always_thinking" ]
+
+[models."kimi-code/k3"]
+display_name = "K3"
+support_efforts = [ "low", "high", "max" ]
+default_effort = "high"
+"#;
+        let map = parse_kimi_model_efforts(text);
+        assert!(
+            !map.contains_key("kimi-code/kimi-for-coding"),
+            "always_thinking 无 support_efforts → 不进 map"
+        );
+        let (opts, default) = map.get("kimi-code/k3").expect("k3 efforts");
+        assert_eq!(
+            opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            vec!["low", "high", "max"]
+        );
+        assert_eq!(default.as_deref(), Some("high"));
     }
 
     #[test]
