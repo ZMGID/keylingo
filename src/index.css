@@ -532,6 +532,9 @@ body {
   height: 100%;
   width: 100%;
   display: flex;
+  /* Windows / Linux：第一行是全宽标题栏带，第二行才是侧栏 + 主区（见 .chat-titlebar-strip）。
+     macOS 用系统 Overlay 标题栏、不渲染那条带，此时只有内容一行，column 与 row 等价。 */
+  flex-direction: column;
   overflow: hidden;
   border-radius: 14px;
   border: 1px solid rgba(0, 0, 0, 0.06);
@@ -570,11 +573,6 @@ body {
   border: none;
   border-radius: 0;
   box-shadow: none;
-}
-
-.chat-window-host--maximized .chat-win-controls--win {
-  top: 8px;
-  right: 8px;
 }
 
 /* macOS 原生 Overlay 标题栏：去掉自绘圆角边框，交给系统窗口壳 */
@@ -3012,6 +3010,66 @@ button.chat-composer-status-item:hover {
   background: #28c840;
 }
 
+/* Windows / Linux 全宽标题栏带：无独立底色（透出窗口底色）、无底边框，整条可拖拽。
+   会话页的业务控件也在这一条里 —— 非 mac 没有主区 52px 顶栏，chrome 只此一行，
+   所以高度按 32px 胶囊控件取 44（38 只够放三键，装不下控件）。
+   侧栏卡片 / Dock / 主区都在带下方，故三键可贴角、不必让各视图 padding-right 躲开。
+   左 8px 与侧栏卡片 margin:8 对齐，两枚图标钮与卡片左缘同一条垂线。 */
+.chat-titlebar-strip {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  height: 44px;
+  padding-left: 8px;
+}
+
+/* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，
+   把业务控件推到主内容左缘 —— 否则控件压在侧栏卡片上方，读作错位。
+   宽度 = 侧栏 240 + 卡片左 margin 8 − 带自身 padding-left 8 = 240，
+   与 `.chat-sidebar-shell` 的 w-[240px] + margin:8 同步（改一处必改另一处）。
+   用 min-width 而非 width 做过渡：width 的收起态是 auto（按钮自然宽），auto 不可插值、
+   动画会直接跳；min-width 两端都是具体值，且 max(内容宽, min-width) 天然贴合按钮宽度，
+   不必把「两枚 28px 钮 + 2px 间距」这种数字硬编码进来。
+   曲线与时长同侧栏折叠（--kv-dur-slow / --kv-ease-standard），两者才像一起移动。 */
+.chat-titlebar-strip-nav {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  transition: min-width var(--kv-dur-slow) var(--kv-ease-standard);
+}
+
+.chat-titlebar-strip-nav--reserve {
+  min-width: 240px;
+}
+
+/* 设置页：带浮起、不占行高，让 200/52px 灰导航栏自己从 y=0 画起（见 ChatTitlebar 注释）。
+   带保持全宽且透明 —— 全宽才留住窗口拖拽区，透明才让导航栏的灰透上来。
+   只有右端三键是实体，故 z-index 压在内容上层。 */
+.chat-titlebar-strip--settings {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  padding-left: 0;
+}
+
+/* 带浮起后导航栏顶到 y=0：为带让出 44px（+ 原 16px 内边距 = 60），
+   否则窄栏（52px 图标轨，标题被隐藏）第一枚图标会钻到带底下点不到。
+   宽栏里标题也靠这 60 回到与「带占一行」时相同的视觉高度。 */
+.settings-embedded-under-strip .settings-embedded-nav {
+  padding-top: 60px;
+}
+
+/* 页头右侧为三键让位（三键 3×46=138 + 呼吸 12）。只此一处需要 ——
+   下方 .kv-scroll 在页头之下，不会钻到带里。 */
+.settings-embedded-under-strip .settings-embedded-header {
+  padding-right: 150px;
+}
+
 .chat-win-controls {
   display: flex;
   align-items: center;
@@ -3019,54 +3077,37 @@ button.chat-composer-status-item:hover {
   flex-shrink: 0;
 }
 
+/* Windows caption 键规格：46 宽、方角、无容器（无描边 / 无阴影 / 无毛玻璃）。
+   高度撑满整条带并贴住窗口顶边 —— 原生 caption 键的命中区就是顶到窗口边缘的
+   （最大化后鼠标甩到屏幕顶角仍能点中）。刻意不做垂直居中：带 38 − 键 32 的那 6px
+   会在 hover 填色时露成「红块上下各缺一条」。 */
 .chat-win-controls--win {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 40;
-  height: 34px;
-  padding: 0 5px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 8px 24px rgba(0, 0, 0, 0.08);
-  backdrop-filter: blur(18px);
-}
-
-.dark .chat-win-controls--win {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(33, 33, 33, 0.92);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.22),
-    0 8px 24px rgba(0, 0, 0, 0.3);
+  gap: 0;
+  align-self: stretch;
 }
 
 .chat-win-btn {
   display: grid;
-  width: 32px;
-  height: 24px;
+  width: 46px;
+  height: 100%;
   place-items: center;
   border: none;
   background: transparent;
-  color: #606068;
-  border-radius: 9999px;
+  color: #1f1f23;
+  border-radius: 0;
   line-height: 1;
   cursor: default;
   transition:
     background-color 0.14s ease,
-    color 0.14s ease,
-    transform 0.14s ease;
+    color 0.14s ease;
 }
 
 .chat-win-btn:hover {
   background: rgba(0, 0, 0, 0.055);
-  color: #1f1f23;
 }
 
 .chat-win-btn:active {
-  transform: scale(0.94);
+  background: rgba(0, 0, 0, 0.09);
 }
 
 .chat-win-btn--close:hover {
@@ -3074,13 +3115,21 @@ button.chat-composer-status-item:hover {
   color: #fff;
 }
 
+.chat-win-btn--close:active {
+  background: #f1707a;
+  color: #fff;
+}
+
 .dark .chat-win-btn {
-  color: #a3a3aa;
+  color: #e8e8ea;
 }
 
 .dark .chat-win-btn:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: #f5f5f5;
+}
+
+.dark .chat-win-btn:active {
+  background: rgba(255, 255, 255, 0.13);
 }
 
 .dark .chat-win-btn--close:hover {
@@ -3088,12 +3137,9 @@ button.chat-composer-status-item:hover {
   color: #fff;
 }
 
-.chat-win-titlebar-safe .chat-titlebar-row,
-.chat-titlebar-row.chat-win-titlebar-safe,
-.chat-win-titlebar-safe .settings-embedded-header,
-.chat-win-titlebar-safe .assistant-center-header,
-.chat-win-titlebar-safe .onboarding-topbar {
-  padding-right: 132px;
+.dark .chat-win-btn--close:active {
+  background: #f1707a;
+  color: #fff;
 }
 
 @container chat-window (max-width: 520px) {
