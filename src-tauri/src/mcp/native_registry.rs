@@ -356,7 +356,10 @@ pub static NATIVE_TOOLS: &[NativeToolEntry] = &[
     // governed by depth + concurrency caps, not per-call approval prompts.
     NativeToolEntry {
         name: crate::chat::sub_agent::AGENT_TOOL_NAME,
-        def: crate::chat::sub_agent::agent_tool,
+        // The real schema is built per-request with the loaded role registry
+        // (`sub_agent::append_tool_definitions`); the registry only needs the
+        // name/shape here, so an empty role list is correct.
+        def: || crate::chat::sub_agent::agent_tool(&[]),
         enabled: |_, _, _| false,
         // parallel_safe = true: each `agent` spawn runs in isolation (its own
         // synthetic conversation/generation/message history), bypasses approval,
