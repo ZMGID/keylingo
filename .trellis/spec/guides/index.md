@@ -26,6 +26,7 @@ These guides help you **ask the right questions before coding**.
 | [External CLI Agents 执行契约](./external-cli-agents.md) | external_agents 子系统的硬约定（消息链路/会话生命周期/探测缓存/上下文用量口径） | Touching `src-tauri/src/external_agents/**` or its frontend surface |
 | [出图接口路由执行契约](./image-generation-routing.md) | 出图端点路由单一事实源 resolve_image_route + 归一化 + 自愈 + 文字兜底；红线：不按模型名猜端点 | Touching `image_generation.rs` / 生图判定 / 新增出图 provider |
 | [对话生命周期 Hooks 执行契约](./conversation-hooks.md) | 调度在 Rust、fire-and-forget、零 Hook 零开销、RAII 事件配对、epoch 取消 | Touching `chat/hooks.rs`、loop/rounds 的 Hook 派发点、`HookDef`、Hooks 设置页 |
+| [子代理角色定义执行契约](./subagent-role-definitions.md) | 字段名照抄业界 `.md` 规范（禁自创方言）、先 deny 后 allow、零工具拒绝的两种归因、角色清单动态可见、skills 是 preload | Touching `agents/**`、`chat/agent/filter.rs`、`chat/sub_agent.rs` 的角色解析 / 工具收窄 / spawn 校验 |
 
 ---
 
