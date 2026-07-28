@@ -1404,11 +1404,17 @@ function normalizeMaxToolRounds(value: unknown): number | null {
   return Math.min(CHAT_TOOL_MAX_ROUNDS, Math.max(CHAT_TOOL_MIN_ROUNDS, Math.round(parsed)))
 }
 
-function normalizeChatTools(config?: Partial<ChatToolsConfig> | null): ChatToolsConfig {
+/**
+ * 归一化 chatTools。**白名单重建**：这里逐字段列举，漏掉一个字段 = 该字段每次
+ * 保存/读取都被静默丢弃（hooks 就这样丢过一次）。新增 ChatToolsConfig 字段时
+ * 必须同步加到这里，`normalize_chat_tools_keeps_every_field` 会守门。
+ */
+export function normalizeChatTools(config?: Partial<ChatToolsConfig> | null): ChatToolsConfig {
   const current = config ?? {}
   return {
     enabled: current.enabled ?? false,
     servers: Array.isArray(current.servers) ? current.servers : [],
+    hooks: Array.isArray(current.hooks) ? current.hooks : [],
     skillScanPaths: Array.isArray(current.skillScanPaths) ? current.skillScanPaths : [],
     skillAutoMatch: current.skillAutoMatch ?? true,
     skillFallbackMode: current.skillFallbackMode || 'progressive',
