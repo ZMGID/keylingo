@@ -340,6 +340,8 @@ export type ChatToolConfirmPayload = {
   name: string
   source: string
   serverId?: string | null
+  /** 这次操作的对象（文件完整路径 / 命令首行），后端认得出时才有。用于拼自然语言标题。 */
+  target?: string | null
   argumentsPreview?: string
   sensitivity?: string
 }
@@ -1956,8 +1958,8 @@ export const api = {
     invoke<ChatPastedImageResult>('chat_save_pasted_attachment', { name, dataBase64 }),
   chatReadClipboardFiles: () =>
     invoke<ChatClipboardFilesResult>('chat_read_clipboard_files'),
-  chatConfirmToolCall: (toolCallId: string, approved: boolean) =>
-    invoke<void>('chat_confirm_tool_call', { toolCallId, approved }),
+  chatConfirmToolCall: (toolCallId: string, approved: boolean, always = false) =>
+    invoke<void>('chat_confirm_tool_call', { toolCallId, approved, always }),
   chatRespondSessionConsent: (conversationId: string, granted: boolean) =>
     invoke<void>('chat_respond_session_consent', { conversationId, granted }),
   chatSubmitUserChoice: (

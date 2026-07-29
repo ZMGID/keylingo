@@ -442,9 +442,12 @@ fn format_tool_approval_summary_highlights_run_command() {
     };
 
     let summary = format_tool_approval_summary(&record);
-    assert!(summary.contains("Command: npm test"));
-    assert!(summary.contains("Working directory: /tmp/project"));
-    assert!(summary.contains("Raw arguments"));
+    assert_eq!(summary.target.as_deref(), Some("npm test"));
+    assert!(summary.detail.contains("npm test"));
+    assert!(summary.detail.contains("Working directory: /tmp/project"));
+    // 认出操作对象后不再拖一坨原始 JSON。
+    assert!(!summary.detail.contains("Raw arguments"));
+    assert!(!summary.detail.contains("\"command\""));
 }
 
 #[test]
@@ -470,8 +473,37 @@ fn format_tool_approval_summary_highlights_file_path() {
     };
 
     let summary = format_tool_approval_summary(&record);
-    assert!(summary.contains("Path: /tmp/project/out.txt"));
-    assert!(summary.contains("Raw arguments"));
+    assert_eq!(summary.target.as_deref(), Some("/tmp/project/out.txt"));
+    assert_eq!(summary.detail, "/tmp/project/out.txt");
+    // 正文里不该再出现 `content` 那一大坨。
+    assert!(!summary.detail.contains("hello"));
+}
+
+#[test]
+fn format_tool_approval_summary_falls_back_to_raw_arguments() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "some_mcp_tool".to_string(),
+        source: "mcp".to_string(),
+        server_id: Some("srv".to_string()),
+        arguments: r#"{"foo":"bar"}"#.to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert!(summary.target.is_none());
+    assert_eq!(summary.detail, r#"{"foo":"bar"}"#);
 }
 
 #[test]

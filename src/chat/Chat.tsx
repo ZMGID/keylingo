@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { GitBranch, PanelRight, Wrench, X } from 'lucide-react'
+import { GitBranch, PanelRight, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
@@ -22,6 +22,7 @@ import {
   isChatSkillCenterPath,
 } from './chatRoutes'
 import { ChatImageViewer } from './ChatImageViewer'
+import { ApprovalCard } from './ApprovalCard'
 import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
@@ -382,6 +383,31 @@ function userPromptEventToRecord(payload: ChatUserPromptPayload): ToolCallRecord
       },
     },
   }
+}
+
+/** 工具名 → 自然语言动词。`path` 表示操作对象是文件路径（标题里只显示文件名）。 */
+const TOOL_APPROVAL_VERBS: Record<string, { verb: string; path?: boolean }> = {
+  write: { verb: '写入', path: true },
+  write_file: { verb: '写入', path: true },
+  edit: { verb: '修改', path: true },
+  edit_file: { verb: '修改', path: true },
+  notebookedit: { verb: '修改', path: true },
+  read: { verb: '读取', path: true },
+  read_file: { verb: '读取', path: true },
+  bash: { verb: '执行' },
+  run_command: { verb: '执行' },
+}
+
+/**
+ * 审批卡标题。后端认出操作对象（`target`）时拼「允许写入 xxx.md？」，认不出就退回工具名。
+ * 工具名小写后匹配：内置 agent 报 `write`，外部 CLI 报自己的原名（claude 的 `Write`）。
+ */
+function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
+  const spec = TOOL_APPROVAL_VERBS[(payload.name || '').toLowerCase()]
+  const target = payload.target?.trim()
+  if (!spec || !target) return `允许调用工具 ${payload.name}？`
+  const shown = spec.path ? target.split(/[\\/]/).filter(Boolean).pop() || target : target
+  return `允许${spec.verb} ${shown}？`
 }
 
 function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment | null {
@@ -2020,11 +2046,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [syncGeneratingConversationIds])
 
-  const resolvePendingToolConfirm = useCallback((approved: boolean) => {
+  const resolvePendingToolConfirm = useCallback((approved: boolean, always = false) => {
     if (!pendingToolConfirm) return
     delete pendingToolConfirmsRef.current[pendingToolConfirm.conversationId]
     syncGeneratingConversationIds()
-    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved)
+    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved, always)
     setPendingToolConfirm(null)
   }, [pendingToolConfirm, syncGeneratingConversationIds])
 
@@ -3982,6 +4008,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       lang={uiLang}
                     />
                   </Suspense>
+                  {/* ponytail: 只挂在有消息的分支。审批必然发生在一次 run 里，此时至少已有一条用户消息，空态 hero 不可能出卡。 */}
+                  {(pendingToolConfirm || pendingSessionConsent) && (
+                    <div className="shrink-0 px-6">
+                      <div className="mx-auto w-full max-w-4xl">
+                        {pendingToolConfirm && (
+                          <ApprovalCard
+                            title={toolApprovalTitle(pendingToolConfirm)}
+                            subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
+                            detail={pendingToolConfirm.argumentsPreview}
+                            actions={[
+                              { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
+                              { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
+                              { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
+                            ]}
+                          />
+                        )}
+                        {pendingSessionConsent && (
+                          <ApprovalCard
+                            title="允许本次会话使用文件和命令工具？"
+                            subtitle="授权后，本会话内 Kivio 可读写、删除磁盘上的任意文件并执行任意终端命令（包括项目目录之外）。仅本次会话有效，重启后需重新授权。"
+                            actions={[
+                              { label: '拒绝', onSelect: () => resolvePendingSessionConsent(false) },
+                              { label: '允许本次会话', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingSessionConsent(true) },
+                            ]}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )}
                   <InputBar
                     onSend={(content, attachments) => void handleSendMessage(content, attachments)}
                     disabled={isCurrentConversationBusy()}
@@ -4072,95 +4127,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           />
         )}
       </div>
-      {pendingToolConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" data-tauri-drag-region="false">
-          <div className="w-full max-w-md rounded-lg border border-neutral-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
-            <div className="mb-3 flex items-start gap-2">
-              <Wrench size={17} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100">
-                  允许调用工具 {pendingToolConfirm.name}？
-                </div>
-                <div className="mt-1 text-[12px] text-neutral-500 dark:text-neutral-400">
-                  {pendingToolConfirm.source}
-                  {pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}
-                  {pendingToolConfirm.sensitivity ? ` · ${pendingToolConfirm.sensitivity}` : ''}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="rounded-md p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                aria-label="拒绝"
-                onClick={() => resolvePendingToolConfirm(false)}
-              >
-                <X size={14} />
-              </button>
-            </div>
-            {pendingToolConfirm.argumentsPreview && (
-              <pre className="custom-scrollbar mb-3 max-h-40 overflow-auto rounded-md bg-neutral-100 p-3 text-[11px] leading-relaxed text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
-                {pendingToolConfirm.argumentsPreview}
-              </pre>
-            )}
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
-                onClick={() => resolvePendingToolConfirm(false)}
-              >
-                拒绝
-              </button>
-              <button
-                type="button"
-                className="rounded-md bg-neutral-900 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200"
-                onClick={() => resolvePendingToolConfirm(true)}
-              >
-                允许
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      {pendingSessionConsent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" data-tauri-drag-region="false">
-          <div className="w-full max-w-md rounded-lg border border-neutral-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
-            <div className="mb-3 flex items-start gap-2">
-              <Wrench size={17} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100">
-                  允许本次会话使用文件和命令工具？
-                </div>
-                <div className="mt-1 text-[12px] text-neutral-500 dark:text-neutral-400">
-                  授权后，本会话内 Kivio 可读取、写入、删除磁盘上的任意文件，并执行任意终端命令（包括项目目录之外的位置）。仅本次会话有效，应用重启后需重新授权。
-                </div>
-              </div>
-              <button
-                type="button"
-                className="rounded-md p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                aria-label="拒绝"
-                onClick={() => resolvePendingSessionConsent(false)}
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
-                onClick={() => resolvePendingSessionConsent(false)}
-              >
-                拒绝
-              </button>
-              <button
-                type="button"
-                className="rounded-md bg-neutral-900 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200"
-                onClick={() => resolvePendingSessionConsent(true)}
-              >
-                允许本次会话
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

@@ -777,8 +777,22 @@ pub async fn detect_acp_commands(
     })
 }
 
+/// 选一个「批准」选项回给 ACP agent。
+///
+/// **优先挑 `allow_once`**：审批卡上的「允许一次」必须名副其实。以前优先挑
+/// `approve_for_session` / `allow_always`，等于用户点「允许」就被静默升级成永久放行。
+/// 「总是允许」由 Kivio 自己那张 `chat_tool_always_allow` 表兜住（后续同名工具不再弹卡，
+/// 每次照样以 allow_once 回给 CLI），不需要把三态透传下来。
+/// 只在 CLI 压根没给 once 选项时才退回 session/always（否则这一轮就卡死了）。
 fn choose_permission_outcome(options: Option<&Value>) -> Option<String> {
     let list = options.and_then(|v| v.as_array())?;
+    for item in list {
+        if item.get("kind").and_then(|v| v.as_str()) == Some("allow_once") {
+            if let Some(id) = item.get("optionId").and_then(|v| v.as_str()) {
+                return Some(id.to_string());
+            }
+        }
+    }
     for item in list {
         if item.get("optionId").and_then(|v| v.as_str()) == Some("approve_for_session") {
             return Some("approve_for_session".to_string());
@@ -786,13 +800,6 @@ fn choose_permission_outcome(options: Option<&Value>) -> Option<String> {
     }
     for item in list {
         if item.get("kind").and_then(|v| v.as_str()) == Some("allow_always") {
-            if let Some(id) = item.get("optionId").and_then(|v| v.as_str()) {
-                return Some(id.to_string());
-            }
-        }
-    }
-    for item in list {
-        if item.get("kind").and_then(|v| v.as_str()) == Some("allow_once") {
             if let Some(id) = item.get("optionId").and_then(|v| v.as_str()) {
                 return Some(id.to_string());
             }

@@ -114,20 +114,25 @@ pub(crate) fn chat_cancel_stream(
     Ok(())
 }
 
-/// 响应敏感工具调用确认。
+/// 响应敏感工具调用确认。`always=true` 时额外把「本对话内该工具不再询问」落进
+/// `chat_tool_always_allow`——决策通道本身仍是 bool，三态只存在于这一层。
 #[tauri::command]
 pub(crate) fn chat_confirm_tool_call(
     state: State<AppState>,
     tool_call_id: String,
     approved: bool,
+    always: Option<bool>,
 ) -> Result<(), String> {
-    let sender = state
+    let pending = state
         .pending_chat_tool_approvals
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&tool_call_id);
-    if let Some(sender) = sender {
-        let _ = sender.send(approved);
+    if let Some(pending) = pending {
+        if approved && always.unwrap_or(false) {
+            state.grant_tool_always_allow(&pending.conversation_id, &pending.tool_name);
+        }
+        let _ = pending.sender.send(approved);
     }
     Ok(())
 }
@@ -355,14 +360,27 @@ pub(crate) async fn request_tool_approval(
     generation: u64,
     record: &ToolCallRecord,
 ) -> bool {
+    // 用户此前对该工具按过「总是允许」→ 本对话内直接放行，不弹卡、不占挂起表。
+    // 内置 agent 与外部 CLI 都走这个函数，所以一处判断两条路同时生效。
+    if state.has_tool_always_allow(conversation_id, &record.name) {
+        return true;
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         let mut pending = state
             .pending_chat_tool_approvals
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        pending.insert(record.id.clone(), tx);
+        pending.insert(
+            record.id.clone(),
+            crate::state::PendingToolApproval {
+                conversation_id: conversation_id.to_string(),
+                tool_name: record.name.clone(),
+                sender: tx,
+            },
+        );
     }
+    let summary = format_tool_approval_summary(record);
     let _ = app.emit(
         "chat-tool-confirm",
         serde_json::json!({
@@ -373,7 +391,8 @@ pub(crate) async fn request_tool_approval(
             "name": record.name,
             "source": record.source,
             "serverId": record.server_id,
-            "argumentsPreview": format_tool_approval_summary(record),
+            "target": summary.target,
+            "argumentsPreview": summary.detail,
             "sensitivity": "sensitive",
         }),
     );
@@ -575,7 +594,14 @@ pub(crate) fn emit_chat_stream_done(
     );
 }
 
-pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
+/// 审批卡要展示的两样东西：`target` 是这次操作的对象（文件路径 / 命令），用来在前端拼
+/// 「允许写入 xxx.md？」这种自然语言标题；`detail` 是代码块正文。
+pub(super) struct ToolApprovalSummary {
+    pub target: Option<String>,
+    pub detail: String,
+}
+
+pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> ToolApprovalSummary {
     let parsed = serde_json::from_str::<Value>(&record.arguments).ok();
     let field = |names: &[&str]| -> Option<String> {
         names.iter().find_map(|name| {
@@ -588,6 +614,7 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
                 .map(str::to_string)
         })
     };
+    let mut target = None;
     let mut lines = Vec::new();
     // 工具名归一化：内置 agent 用小写 snake_case（`bash` / `write`），而**外部 CLI 报的是
     // 自己的原名**（claude 的 `Bash` / `Write` / `Edit` / `Read` 是 PascalCase）。不归一化
@@ -596,7 +623,8 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
     match record.name.to_ascii_lowercase().as_str() {
         "bash" | "run_command" => {
             if let Some(command) = field(&["command"]) {
-                lines.push(format!("Command: {command}"));
+                target = Some(truncate_chars(command.lines().next().unwrap_or(&command), 120));
+                lines.push(command);
             }
             if let Some(cwd) = field(&["cwd", "working_directory"]) {
                 lines.push(format!("Working directory: {cwd}"));
@@ -604,7 +632,8 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
         }
         "write" | "edit" | "read" | "write_file" | "edit_file" | "read_file" | "notebookedit" => {
             if let Some(path) = field(&["path", "file_path", "notebook_path"]) {
-                lines.push(format!("Path: {path}"));
+                target = Some(path.clone());
+                lines.push(path);
             }
             if record.name.eq_ignore_ascii_case("edit")
                 || record.name.eq_ignore_ascii_case("edit_file")
@@ -630,12 +659,17 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
         _ => {}
     }
 
+    // ponytail: 只有认不出操作对象时才退回裸 JSON。认出来了还把 `Raw arguments:` 追在后面，
+    // 卡片就退化成一坨截断的 JSON（旧版本正是如此），用户看不出自己在批准什么。
     if lines.is_empty() {
-        truncate_chars(&record.arguments, 800)
+        ToolApprovalSummary {
+            target: None,
+            detail: truncate_chars(&record.arguments, 800),
+        }
     } else {
-        let mut summary = lines.join("\n");
-        summary.push_str("\n\nRaw arguments:\n");
-        summary.push_str(&truncate_chars(&record.arguments, 800));
-        summary
+        ToolApprovalSummary {
+            target,
+            detail: lines.join("\n"),
+        }
     }
 }

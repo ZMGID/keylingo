@@ -37,6 +37,15 @@ pub struct PendingPythonRun {
     pub export_ctx: SandboxExportContext,
 }
 
+/// 一条挂起的敏感工具审批。除 sender 外还带上 conversation_id + 工具名，因为
+/// 「总是允许」是在响应命令（只拿到 tool_call_id）里落表的，得知道往哪条键上记。
+#[derive(Debug)]
+pub struct PendingToolApproval {
+    pub conversation_id: String,
+    pub tool_name: String,
+    pub sender: oneshot::Sender<bool>,
+}
+
 #[derive(Debug)]
 pub struct TimedCacheEntry<V> {
     created_at: Instant,
@@ -120,8 +129,11 @@ pub struct AppState {
     /// 正在进行 assistant 回复生成的 (conversation_id → run_id 集合)，防止同对话同一 run 重复，
     /// 但允许同一会话多条 run 并存（多模型一问多答）。
     pub chat_active_replies: Mutex<HashMap<String, HashSet<String>>>,
-    /// 等待用户确认的敏感 Chat tool 调用。
-    pub pending_chat_tool_approvals: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    /// 等待用户确认的敏感 Chat tool 调用（key = tool_call_id）。
+    pub pending_chat_tool_approvals: Mutex<HashMap<String, PendingToolApproval>>,
+    /// 本对话已按工具名授予的「总是允许」集合：`(conversation_id, 小写工具名)`。
+    /// 仅内存、不持久化，重启后重新询问（同 `chat_session_consent` 的取舍）。
+    pub chat_tool_always_allow: Mutex<HashSet<(String, String)>>,
     /// 本会话(conversation_id)已授予「文件/命令」工具的会话级授权集合。
     /// 仅内存、不持久化:重启后重新授权(也是一道轻量安全属性)。
     pub chat_session_consent: Mutex<HashSet<String>>,
@@ -303,6 +315,7 @@ impl AppState {
             chat_active_generations: Mutex::new(HashMap::new()),
             chat_active_replies: Mutex::new(HashMap::new()),
             pending_chat_tool_approvals: Mutex::new(HashMap::new()),
+            chat_tool_always_allow: Mutex::new(HashSet::new()),
             chat_session_consent: Mutex::new(HashSet::new()),
             pending_chat_session_consents: Mutex::new(HashMap::new()),
             chat_consent_prompt_lock: tokio::sync::Mutex::new(()),
@@ -490,6 +503,29 @@ impl AppState {
             .insert(conversation_id.to_string());
     }
 
+    /// 该对话是否已对某个工具按下过「总是允许」。工具名统一小写后比较：内置 agent 报的是
+    /// `write`，外部 CLI 报的是自己的原名（claude 的 `Write`），不归一化两边对不上。
+    pub fn has_tool_always_allow(&self, conversation_id: &str, tool_name: &str) -> bool {
+        self.chat_tool_always_allow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(
+                conversation_id.to_string(),
+                tool_name.to_ascii_lowercase(),
+            ))
+    }
+
+    /// 记录「本对话内该工具不再询问」(本进程内有效)。
+    pub fn grant_tool_always_allow(&self, conversation_id: &str, tool_name: &str) {
+        self.chat_tool_always_allow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((
+                conversation_id.to_string(),
+                tool_name.to_ascii_lowercase(),
+            ));
+    }
+
     /// 判断指定 conversation 的某条 Chat 运行是否仍然有效（其 generation 仍在活跃集合内）。
     pub fn is_chat_generation_active(&self, conversation_id: &str, generation: u64) -> bool {
         self.chat_active_generations
@@ -500,8 +536,8 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// 对话被删除时清理其按 conversation_id 累积的运行态痕迹：活跃 generation 集合与
-    /// 会话级工具同意标记。两者都严格按 conversation_id 取键，对话删除后再不会被
+    /// 对话被删除时清理其按 conversation_id 累积的运行态痕迹：活跃 generation 集合、
+    /// 会话级工具同意标记、按工具名的「总是允许」集合。三者都严格按 conversation_id 取键，对话删除后再不会被
     /// 引用，是最无歧义的有界清理点（不影响其它活跃对话）。generation 号本身来自进程级
     /// 全局计数器（不分桶），无需在此清理。
     pub fn forget_chat_conversation_runtime(&self, conversation_id: &str) {
@@ -513,6 +549,10 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(conversation_id);
+        self.chat_tool_always_allow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(conv, _)| conv != conversation_id);
     }
 
     /// 尝试占用某个对话的某条 run 回复槽位。同会话允许多条 run 并存（多模型一问多答）；
@@ -1362,6 +1402,22 @@ mod tests {
         assert!(st.has_chat_consent("conv-1"));
         // Consent is scoped to a single conversation, not global.
         assert!(!st.has_chat_consent("conv-2"));
+    }
+
+    #[test]
+    fn chat_tool_always_allow_is_per_conversation_and_tool() {
+        let st = test_state();
+        assert!(!st.has_tool_always_allow("conv-1", "write"));
+        st.grant_tool_always_allow("conv-1", "write");
+        assert!(st.has_tool_always_allow("conv-1", "write"));
+        // 外部 CLI 报 PascalCase，必须命中同一条。
+        assert!(st.has_tool_always_allow("conv-1", "Write"));
+        // 只放行按下的那个工具，不是整会话放行。
+        assert!(!st.has_tool_always_allow("conv-1", "read"));
+        // 不跨对话。
+        assert!(!st.has_tool_always_allow("conv-2", "write"));
+        st.forget_chat_conversation_runtime("conv-1");
+        assert!(!st.has_tool_always_allow("conv-1", "write"));
     }
 
     // --- 多模型一问多答：并发护栏 per-run 化（任务 06-30 步骤 1） ---
