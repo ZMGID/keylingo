@@ -26,14 +26,19 @@ body {
 }
 
 :root {
-  --theme-surface: #ffffff;
-  --theme-surface-soft: #fbfbfc;
-  --theme-surface-muted: #f6f6f7;
-  --theme-surface-hover: #f0f0f2;
-  --theme-surface-active: #e9e9ec;
-  --theme-surface-titlebar: #ececef;
-  --theme-surface-border: #e4e4e7;
-  --theme-surface-border-strong: #d4d4d8;
+  /* neutral = 象牙白 / 蛋壳白（off-white，极淡奶油调）。
+     暖偏移固定为 (R, R−1, R−3)：顶层 253 → #fdfcfa。
+     亮度台阶沿用原冷灰坡道的差值（−4 / −9 / −15 / −22 / −19 / −27 / −43），
+     所以对比关系一个没变，只是色相从偏蓝转成偏黄 —— 半路改色相会让悬停底色
+     在大面积相邻时读出色相翻转，坡道必须整条同向。 */
+  --theme-surface: #fdfcfa;
+  --theme-surface-soft: #f9f8f6;
+  --theme-surface-muted: #f4f3f1;
+  --theme-surface-hover: #eeedeb;
+  --theme-surface-active: #e7e6e4;
+  --theme-surface-titlebar: #eae9e7;
+  --theme-surface-border: #e2e1df;
+  --theme-surface-border-strong: #d2d1cf;
 }
 
 /* ===== 全局按钮/组件语义 token（kv-btn / kv-icon-btn 依赖）=====
@@ -586,34 +591,47 @@ body {
   box-shadow: none;
 }
 
-.chat-main-pane {
-  container-type: size;
-  container-name: chat-main;
-  overflow: hidden;
-  background: var(--theme-surface);
-}
-
-.chat-themed-surface,
-.assistant-center-root {
-  background: var(--theme-surface);
-}
-
-.chat-sidebar-shell {
-  /* 悬浮卡片式侧栏：四周留 8px，缝隙透出 .chat-window-shell 的 --theme-surface（= 主区底色）。
-     色彩对齐 Claude Code：侧栏与主区几乎同亮度（差 ~2%），分离感几乎全部来自那道缝 +
-     一条极淡的 hairline。反直觉但关键 —— 灰阶差一旦超过 4%，就从「一张纸浮起来」
-     退回「两块拼在一起的板」。所以用 --theme-surface-soft（≈2% 差）而不是 muted（3.5%，偏重），
-     描边也不能用 border-strong（近白卡片上会读成一条灰线）。
-     高度由 flex align-items:stretch 减掉上下 margin 得出（所以 aside 上不能再挂 h-full）。 */
-  margin: 8px;
+/* ===== 三张悬浮卡片（侧栏 / 主区 / 右 Dock）的共同外观 =====
+   四周留 8px，缝隙透出 .chat-window-shell 的 --theme-surface。
+   色彩对齐 Claude Code：卡片与外壳几乎同亮度（差 ~2%），分离感几乎全部来自那道缝 +
+   一条极淡的 hairline。反直觉但关键 —— 灰阶差一旦超过 4%，就从「一张纸浮起来」
+   退回「几块拼在一起的板」。所以用 --theme-surface-soft（≈2% 差）而不是 muted（3.5%，偏重），
+   描边也不能用 border-strong（近白卡片上会读成一条灰线）。
+   高度由 flex align-items:stretch 减掉上下 margin 得出（所以三者都不能再挂 h-full）。 */
+.chat-sidebar-shell,
+.chat-main-pane,
+.chat-dock-shell {
   border-radius: 12px;
   background: var(--theme-surface-soft);
   border: 1px solid rgba(24, 24, 27, 0.07);
   box-shadow:
     0 1px 2px rgba(24, 24, 27, 0.04),
     0 5px 14px -8px rgba(24, 24, 27, 0.10);
-  /* 折叠动画：负 margin 把整张卡片（240px 宽 + 8px 左 margin，与 w-[240px] 同步）滑出左侧，
-     由 .chat-window-shell 的 overflow:hidden 裁剪；width 不变 → 内容不被压缩。 */
+}
+
+.chat-main-pane {
+  container-type: size;
+  container-name: chat-main;
+  overflow: hidden;
+  /* 左右不留 margin：缝隙由侧栏的 margin-right:8 与 Dock 的 margin-left:8 提供。
+     若这里也写 8，相邻处会叠成 16px 双倍缝。两侧收起时各自补 8px（见 .is-collapsed）。 */
+  margin: 8px 0;
+}
+
+/* 主区内的 MessageList 加载占位（Chat.tsx 的 MessageListLoading）跟主区卡片同色。
+   .assistant-center-root 不在主区卡片内（助手中心是独立分支，齐边铺满），故不并进来。 */
+.chat-themed-surface {
+  background: var(--theme-surface-soft);
+}
+
+.assistant-center-root {
+  background: var(--theme-surface);
+}
+
+.chat-sidebar-shell {
+  margin: 8px;
+  /* 折叠动画：负 margin 把整张卡片滑出左侧，由 .chat-window-shell 的 overflow:hidden 裁剪；
+     width 不变 → 内容不被压缩。 */
   transition:
     margin-left var(--kv-dur-slow) var(--kv-ease-standard),
     opacity var(--kv-dur-normal) var(--kv-ease-out);
@@ -629,30 +647,34 @@ body {
 }
 
 .chat-sidebar-shell.is-collapsed {
-  margin-left: -248px;
+  /* -240 而非 -(240+8)：卡片 border box 落在 [-240, 0] 已完全出屏，同时布局推进
+     = -240 + 240 + margin-right 8 = 8，把那 8px 留给主区卡片当左缝。 */
+  margin-left: -240px;
   opacity: 0;
   pointer-events: none;
 }
 
+/* 设置页齐边铺满、没有主区卡片，上面那 8px 左缝会露成一条裸 .chat-window-shell ——
+   native-effect 下它是 transparent，于是 Mica 直接透出来，读作一条无来由的竖条
+   （设计意图是卡片间的缝，这里没有卡片）。收起态没有过渡观感成本，直接抹掉。 */
+.chat-window-shell:has(.settings-embedded) .chat-sidebar-shell.is-collapsed {
+  margin-right: 0;
+}
+
 .chat-dock-shell {
-  /* 右侧 Dock：镜像 .chat-sidebar-shell 的悬浮卡片做法（见上方注释）。
-     宽度由内联 CSS 变量 --chat-dock-width 驱动（拖拽时 rAF 直写，不经 React）。 */
+  /* 宽度由内联 CSS 变量 --chat-dock-width 驱动（拖拽时 rAF 直写，不经 React）。 */
   width: var(--chat-dock-width, 360px);
   margin: 8px;
-  border-radius: 12px;
-  background: var(--theme-surface-soft);
-  border: 1px solid rgba(24, 24, 27, 0.07);
-  box-shadow:
-    0 1px 2px rgba(24, 24, 27, 0.04),
-    0 5px 14px -8px rgba(24, 24, 27, 0.10);
-  /* 折叠：负 margin-right 把整张卡片（宽度 + 8px 右 margin）滑出右侧，宽度不变内容不被压缩。 */
+  /* 折叠：负 margin-right 把整张卡片滑出右侧，宽度不变内容不被压缩。 */
   transition:
     margin-right var(--kv-dur-slow) var(--kv-ease-standard),
     opacity var(--kv-dur-normal) var(--kv-ease-out);
 }
 
 .chat-dock-shell.is-collapsed {
-  margin-right: calc(-1 * var(--chat-dock-width, 360px) - 8px);
+  /* 不再减那 8px：布局推进 = margin-left 8 + W - W = 8，留给主区卡片当右缝；
+     卡片 border box 从行右缘起算，仍完全出屏。 */
+  margin-right: calc(-1 * var(--chat-dock-width, 360px));
   opacity: 0;
   pointer-events: none;
 }
@@ -977,46 +999,45 @@ button.chat-composer-status-item:hover {
   }
 }
 
-.dark .chat-main-pane {
-  background: #212121;
+/* 暗色同理：外壳 #212121，三张卡片只比它亮一点点（不是压深 —— 暗色里「浮起」= 更亮，
+   压深读作凹陷）。 */
+.dark .chat-sidebar-shell,
+.dark .chat-main-pane,
+.dark .chat-dock-shell,
+.dark .chat-themed-surface {
+  background: #262629;
 }
 
-.dark .chat-themed-surface,
+.dark .chat-sidebar-shell,
+.dark .chat-main-pane,
+.dark .chat-dock-shell {
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    0 5px 16px -8px rgba(0, 0, 0, 0.45);
+}
+
 .dark .assistant-center-root {
   background: #212121;
 }
 
-.dark .chat-sidebar-shell {
-  /* 暗色同理：主区 #212121，侧栏只比它亮一点点（不是压深 —— 暗色里「浮起」= 更亮，
-     压深读作凹陷）。 */
-  background: #262629;
-  border-color: rgba(255, 255, 255, 0.07);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.35),
-    0 5px 16px -8px rgba(0, 0, 0, 0.45);
-}
-
-.dark .chat-dock-shell {
-  background: #262629;
-  border-color: rgba(255, 255, 255, 0.07);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.35),
-    0 5px 16px -8px rgba(0, 0, 0, 0.45);
-}
-
-/* 系统窗口材质（macOS Menu / Windows Mica）激活：外壳让开，材质从侧栏卡片四周那道 8px
-   缝里透出来；卡片本身只留一层 scrim 保证文字对比度 —— Mica 是壁纸取色，不保证可读性，
+/* 系统窗口材质（macOS Menu / Windows Mica）激活：外壳让开，材质从卡片四周那道 8px
+   缝里透出来；侧栏 / Dock 只留一层 scrim 保证文字对比度 —— Mica 是壁纸取色，不保证可读性，
    所以两端都要留，不能像纯透明那样把字直接放到壁纸上。
+   主区卡片刻意不透：那是长文本阅读面，正文压在壁纸取色上会掉可读性。
    模糊由系统合成器负责，这里绝不加 backdrop-filter。 */
 .chat-window-host--native-effect .chat-window-shell {
   background: transparent;
 }
 
-.chat-window-host--native-effect .chat-sidebar-shell {
+.chat-window-host--native-effect .chat-sidebar-shell,
+.chat-window-host--native-effect .chat-dock-shell {
   background: color-mix(in srgb, var(--theme-surface-soft) 72%, transparent);
 }
 
-.dark .chat-window-host--native-effect .chat-sidebar-shell {
+/* 暗色 scrim 略薄（66% vs 72%）：深底上壁纸取色本身更暗，透多一点仍压得住文字。 */
+.dark .chat-window-host--native-effect .chat-sidebar-shell,
+.dark .chat-window-host--native-effect .chat-dock-shell {
   background: color-mix(in srgb, #262629 66%, transparent);
 }
 
@@ -1209,11 +1230,12 @@ button.chat-composer-status-item:hover {
   position: relative;
   overflow: hidden;
   isolation: isolate;
-  background-color: var(--theme-surface);
+  /* 主区卡片的满幅子元素，底色必须与卡片一致（点阵 canvas 是透明叠在上面的）。 */
+  background-color: var(--theme-surface-soft);
 }
 
 .dark .chat-empty-hero {
-  background-color: #212121;
+  background-color: #262629;
 }
 
 .chat-empty-hero-dot-canvas {
@@ -3014,19 +3036,25 @@ button.chat-composer-status-item:hover {
    会话页的业务控件也在这一条里 —— 非 mac 没有主区 52px 顶栏，chrome 只此一行，
    所以高度按 32px 胶囊控件取 44（38 只够放三键，装不下控件）。
    侧栏卡片 / Dock / 主区都在带下方，故三键可贴角、不必让各视图 padding-right 躲开。
-   左 8px 与侧栏卡片 margin:8 对齐，两枚图标钮与卡片左缘同一条垂线。 */
+
+   padding-left 对齐的是侧栏 NavRow 的**图标列**，不是卡片左缘。按钮盒子透明不可见，
+   眼睛跟的是 glyph —— 早先按盒子对到 8px，结果顶栏铅笔与侧栏「新建聊天」铅笔（同一动作）
+   上下错开 9px，读作坏版。推导：
+     侧栏 glyph 中心 = 卡片 margin 8 + border 1 + nav px-3 12 + NavRow px-3 12 + 图标格半宽 10 = 43
+     顶栏 glyph 中心 = padding-left P + 按钮半宽 14（h-7 w-7）
+   → P = 29。改 Sidebar 的 nav/NavRow 内距或按钮尺寸时必须重算这个数。 */
 .chat-titlebar-strip {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 2px;
   height: 44px;
-  padding-left: 8px;
+  padding-left: 29px;
 }
 
 /* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，
-   把业务控件推到主内容左缘 —— 否则控件压在侧栏卡片上方，读作错位。
-   宽度 = 侧栏 240 + 卡片左 margin 8 − 带自身 padding-left 8 = 240，
+   把业务控件推到主区卡片左缘 —— 否则控件压在侧栏卡片上方，读作错位。
+   宽度 = 主区卡片左缘 256（侧栏 margin 8 + w-[240px] + margin 8）− 带自身 padding-left 29 = 227，
    与 `.chat-sidebar-shell` 的 w-[240px] + margin:8 同步（改一处必改另一处）。
    用 min-width 而非 width 做过渡：width 的收起态是 auto（按钮自然宽），auto 不可插值、
    动画会直接跳；min-width 两端都是具体值，且 max(内容宽, min-width) 天然贴合按钮宽度，
@@ -3042,7 +3070,7 @@ button.chat-composer-status-item:hover {
 }
 
 .chat-titlebar-strip-nav--reserve {
-  min-width: 240px;
+  min-width: 227px;
 }
 
 /* 设置页：带浮起、不占行高，让 200/52px 灰导航栏自己从 y=0 画起（见 ChatTitlebar 注释）。
@@ -3189,38 +3217,11 @@ button.chat-composer-status-item:hover {
   text-rendering: optimizeLegibility;
 }
 
-.kv[data-theme-color="neutral"] {
-  --theme-surface: #ffffff;
-  --theme-surface-soft: #fbfbfc;
-  --theme-surface-muted: #f6f6f7;
-  --theme-surface-hover: #f0f0f2;
-  --theme-surface-active: #e9e9ec;
-  --theme-surface-titlebar: #ececef;
-  --theme-surface-border: #e4e4e7;
-  --theme-surface-border-strong: #d4d4d8;
-}
-
-.kv[data-theme-color="warm"] {
-  --theme-surface: #f7f3ea;
-  --theme-surface-soft: #f2ece0;
-  --theme-surface-muted: #ece5d4;
-  --theme-surface-hover: #e4dbc8;
-  --theme-surface-active: #dbd0ba;
-  --theme-surface-titlebar: #e9e1d1;
-  --theme-surface-border: #ddd3c0;
-  --theme-surface-border-strong: #cbbda4;
-}
-
-.kv[data-theme-color="cool"] {
-  --theme-surface: #eef3fa;
-  --theme-surface-soft: #e7eef7;
-  --theme-surface-muted: #dee8f2;
-  --theme-surface-hover: #d4e0ee;
-  --theme-surface-active: #c8d7e8;
-  --theme-surface-titlebar: #e0e9f4;
-  --theme-surface-border: #d2def0;
-  --theme-surface-border-strong: #bccfe6;
-}
+/* 主题色令牌不在此重复定义：--theme-surface* 是自定义属性，会从 :root 继承进本作用域，
+   而 .kv 的 data-theme-color 与 documentElement 同源（都来自 settings.themeColor，
+   见 App.tsx applyTheme 与 SettingsShell）。
+   早先这里抄了 neutral/warm/cool 三份完全相同的值，是纯复制品；且没有暗色限定，
+   一旦给 --theme-surface* 加暗色态就会被它盖回亮色。删掉，靠继承。 */
 
 .dark .kv,
 .kv[data-theme="dark"] {

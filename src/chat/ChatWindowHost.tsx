@@ -11,6 +11,19 @@ type ChatWindowHostProps = {
 
 const effectPlatform: ChatEffectPlatform = isMac ? 'macos' : isWindows ? 'windows' : 'linux'
 
+/** Mica 变体要跟应用主题走（见 chatWindowEffects）。主题由 App.tsx 切 html.dark 类，
+ *  没有事件可订阅，只能观察 class。 */
+function useDocumentDark(): boolean {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
+  useEffect(() => {
+    const root = document.documentElement
+    const observer = new MutationObserver(() => setDark(root.classList.contains('dark')))
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] })
+    return () => observer.disconnect()
+  }, [])
+  return dark
+}
+
 /**
  * Chat 专用窗口外壳：Windows 自绘圆角边缘，最大化时收起圆角；
  * macOS 全屏时系统隐藏交通灯，撤掉顶栏为灯预留的左缩进（否则空一大块）；
@@ -29,6 +42,7 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
   // 退出动画中段 isFullscreen 仍可能 true，但尺寸已离开全屏、灯已画回，同样必须立刻恢复缩进。
   // IPC 用 generation 丢弃过期响应，避免先发出的 true 在后发出的 false 之后才回来把状态打脏。
   const [macFullscreen, setMacFullscreen] = useState(false)
+  const dark = useDocumentDark()
 
   useEffect(() => {
     if (!usesNativeTitlebar) return
@@ -183,13 +197,14 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
       translucentSidebar,
       effectInput.focused,
       effectInput.size,
+      dark,
     ).then(active => {
       if (!cancelled) setNativeEffectActive(active)
     })
     return () => {
       cancelled = true
     }
-  }, [translucentSidebar, effectInput])
+  }, [translucentSidebar, effectInput, dark])
 
   const nativeEffectClass = nativeEffectActive ? ' chat-window-host--native-effect' : ''
 
