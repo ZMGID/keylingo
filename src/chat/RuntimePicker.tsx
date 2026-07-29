@@ -314,13 +314,14 @@ function ExternalModelSelectorBase({
           const nextModel = selectable ? (cur as string) : rt.externalModel ?? 'default'
           const explicitReasoning =
             !!rt.externalReasoning && rt.externalReasoning !== 'default'
-          // 拒绝 ACP 残留的 on/off 开关值——那不是 effort 档位。
+          // 回填当前档位：只认「确实在该模型档位列表里」的值。改前是硬编码 on/off 黑名单——
+          // 判据和真相源分了岔（真相源是 reasoningByModel / reasoningOptions），
+          // 将来哪个 CLI 真把 On/Off 当合法档位就会被误杀成「自动」。按列表判即可。
           const probedReasoning = result.currentReasoning
+          const activeOpts =
+            (cur && result.reasoningByModel?.[cur]) || result.reasoningOptions
           const saneReasoning =
-            probedReasoning &&
-            !['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(
-              probedReasoning.toLowerCase(),
-            )
+            probedReasoning && activeOpts.some((o) => o.id === probedReasoning)
               ? probedReasoning
               : null
           const nextReasoning = !explicitReasoning && saneReasoning
@@ -478,10 +479,10 @@ function ExternalModelSelectorBase({
                       // 旧值是 on/off 或不在新列表里 → 清掉或落到 high。
                       const efforts = reasoningByModel[model.id]
                       const cur = agentRuntime.externalReasoning
+                      // 同上：只看「在不在新模型的档位列表里」，不再额外拉黑 on/off。
                       const curOk =
                         !!cur &&
                         cur !== 'default' &&
-                        !['on', 'off'].includes(cur.toLowerCase()) &&
                         (!efforts || efforts.some((o) => o.id === cur))
                       let nextReasoning: string | null = curOk ? (cur as string) : null
                       if (!curOk && efforts && efforts.length > 0) {

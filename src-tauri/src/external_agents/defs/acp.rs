@@ -181,6 +181,9 @@ pub const KIMI_AGENT_DEF: RuntimeAgentDef = acp_def(
     "kimi",
     "Kimi CLI",
     "kimi",
+    // 刻意不加 `kimi-cli` 别名：那是已停止维护的旧 Python 版（版本号 1.4x），协议与模型列表
+    // 都和现在的 TypeScript 版 Kimi Code（0.x，命令名就是 `kimi`）不同。回退过去会静默跑错
+    // 目标，不如老实报「未安装」。
     &[],
     None,
     KIMI_MODELS,

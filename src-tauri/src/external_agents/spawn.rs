@@ -549,7 +549,10 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// 整模块只在 unix 下编译：每个用例都靠写 shell 脚本 + chmod 造「能跑的 / 坏掉的」二进制，
+// Windows 上 `std::os::unix` 与 `Permissions::from_mode` 都不存在 —— 不 gate 会让整个
+// lib test 目标在 Windows 编译失败，连带其它模块的单测一个都跑不了。
+#[cfg(all(test, unix))]
 mod probe_tests {
     use super::*;
     use std::fs;

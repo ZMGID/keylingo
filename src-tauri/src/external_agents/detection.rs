@@ -140,16 +140,12 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             } else {
                 probed_reasoning
             };
-            // kimi：当前模型若在 config 里有 support_efforts，用它覆盖（session/new 总是默认模型的档位）。
+            // kimi：当前模型若在 config 里列了，以 config 为准（session/new 报的总是默认模型的
+            // 档位）。空列表 = always_thinking，明确无档位。模型不在 config 里才保留探测结果。
             if def.id == "kimi" {
                 if let Some(model) = current_model.as_deref() {
                     if let Some(opts) = reasoning_by_model.get(model) {
-                        if !opts.is_empty() {
-                            reasoning_options = opts.clone();
-                        }
-                    } else {
-                        // always_thinking 模型：明确无档位
-                        reasoning_options = Vec::new();
+                        reasoning_options = opts.clone();
                     }
                 }
             }
@@ -368,7 +364,12 @@ fn parse_kimi_model_efforts(
             return;
         };
         if efforts.is_empty() {
+            // always_thinking 模型（K2.7 Coding）在 config 里就没有 support_efforts —— 这不是
+            // 「没读到」，是「明确没有档位」。必须落一个空条目：前端 activeReasoningOptions 靠
+            // **键是否存在**区分二者，键缺失会退回 agent 级列表，把 K3 的 low/high/max 显示
+            // 在 K2.7 上（用户实测到的就是这个）。
             *default_effort = None;
+            out.insert(model_id, (Vec::new(), None));
             return;
         }
         let opts: Vec<RuntimeModelOption> = efforts
@@ -888,10 +889,13 @@ support_efforts = [ "low", "high", "max" ]
 default_effort = "high"
 "#;
         let map = parse_kimi_model_efforts(text);
-        assert!(
-            !map.contains_key("kimi-code/kimi-for-coding"),
-            "always_thinking 无 support_efforts → 不进 map"
-        );
+        // 键必须在、且为空 —— 前端靠「键存在」判定「这个模型明确没有档位」；
+        // 键缺失会被当成「没读到」而退回 agent 级列表（= K3 的 low/high/max）。
+        let (opts, default) = map
+            .get("kimi-code/kimi-for-coding")
+            .expect("always_thinking 模型也要进 map");
+        assert!(opts.is_empty(), "always_thinking 无档位: {opts:?}");
+        assert!(default.is_none());
         let (opts, default) = map.get("kimi-code/k3").expect("k3 efforts");
         assert_eq!(
             opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
