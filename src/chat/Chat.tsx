@@ -134,6 +134,7 @@ import {
 } from './groupStreamingStore'
 import { compareTimelineSegments, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
+import { applyLiveContextUsage } from './contextPanel'
 
 const AssistantCenter = lazy(() => import('./AssistantCenter').then((module) => ({
   default: module.AssistantCenter,
@@ -1821,6 +1822,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (!currentConversationId || payload.conversationId !== currentConversationId) {
       return
     }
+    // 生成过程中的活数：只有分子 + 分母，就地补进现有状态（分段/压缩计数/来源标签留给
+    // 轮末的权威快照）。不能走 patchContextState —— 那条要求一份完整的上下文状态对象。
+    if (payload.live) {
+      setContextState((prev) => {
+        const next = applyLiveContextUsage(prev, payload.live!)
+        if (!next || next === prev) return prev
+        setCurrentConversation((conversation) => conversation
+          ? { ...conversation, context_state: next, contextState: next }
+          : conversation)
+        return next
+      })
+      return
+    }
+    if (!payload.contextState) return
     patchContextState(payload.contextState)
     setContextError('')
   }, [patchContextState])

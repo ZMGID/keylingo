@@ -1,5 +1,5 @@
 import type { I18n } from '../settings/i18n'
-import type { ContextUsageSegment } from './types'
+import type { ContextUsageSegment, ConversationContextState } from './types'
 
 /** 与 `chat/agent/compaction.rs` 中 `AUTO_COMPACT_RATIO`（0.90）保持一致 */
 export const CONTEXT_AUTO_COMPRESS_PERCENT = 90
@@ -92,6 +92,60 @@ export function buildContextBarSlices(
   }
 
   return slices
+}
+
+/**
+ * 生成过程中的「上下文占用活数」就地补进已有的上下文状态。
+ *
+ * 后端在回答生成过程中通过 `chat-context` 的 `live` 载荷推来两个数（分子 + 分母）；
+ * 轮末仍会有一次权威计算覆盖它（那次还带分段明细、压缩计数、来源标签）。这里只动能由
+ * 这两个数直接推出的字段，其余一律沿用旧值——尤其 `status` / `token_count_source`：
+ * 它们的判定阈值与口径在 Rust 侧（`external_agents/context.rs`），在前端再写一套就是两份口径。
+ * 环形进度与「满度 N%」都读 `usage_ratio`，所以更新比例就够了。
+ *
+ * **分母粘滞**：`contextWindowTokens` 为 `null`/`undefined` 时保留已知的旧窗口。claude 只在
+ * 轮末那条 `result` 里带窗口，中途的上报不带——冲掉旧值会让用量条在生成过程中退回「满度未知」。
+ *
+ * 分段按比例缩放（构成不变、只有总量涨）：分段的真实明细只有轮末那次权威计算算得出，
+ * 但把它原样留在旧总量上会让进度条里出现一条对不上的缝。
+ */
+export function applyLiveContextUsage(
+  prev: ConversationContextState | null | undefined,
+  live: { usedTokens: number; contextWindowTokens?: number | null },
+): ConversationContextState | null {
+  if (!prev) return prev ?? null
+  const used = Math.max(0, Math.round(live.usedTokens))
+  const knownWindow = prev.context_window_tokens ?? prev.contextWindowTokens ?? null
+  const window = live.contextWindowTokens ?? knownWindow
+  const ratio = window && window > 0 ? used / window : null
+  const previousUsed = prev.estimated_input_tokens ?? prev.estimatedInputTokens ?? 0
+  const segments = scaleContextSegments(prev.segments ?? [], previousUsed, used)
+  return {
+    ...prev,
+    estimated_input_tokens: used,
+    estimatedInputTokens: used,
+    context_window_tokens: window,
+    contextWindowTokens: window,
+    usage_ratio: ratio,
+    usageRatio: ratio,
+    segments,
+  }
+}
+
+function scaleContextSegments(
+  segments: ContextUsageSegment[],
+  previousTotal: number,
+  nextTotal: number,
+): ContextUsageSegment[] {
+  if (segments.length === 0) return segments
+  const sum = segments.reduce((total, segment) => total + segmentTokens(segment), 0)
+  const base = previousTotal > 0 ? previousTotal : sum
+  if (base <= 0 || nextTotal === base) return segments
+  const factor = nextTotal / base
+  return segments.map((segment) => {
+    const tokens = Math.max(0, Math.round(segmentTokens(segment) * factor))
+    return { ...segment, estimated_tokens: tokens, estimatedTokens: tokens }
+  })
 }
 
 export function compactPercent(ratio: number | null): string {

@@ -20,6 +20,7 @@
     "test:replace-visual": "node scripts/generate-replace-visual-fixtures.mjs --check && vitest run src/lens/replaceVisualBenchmark.test.ts",
     "fixtures:replace-visual": "node scripts/generate-replace-visual-fixtures.mjs",
     "test:watch": "vitest",
+    "probe:e2e": "node scripts/probe-e2e.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

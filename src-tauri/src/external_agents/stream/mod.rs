@@ -31,7 +31,17 @@ impl StreamHandler {
                 return;
             }
         };
-        self.0.handle_value(&value, sink);
+        self.handle_value(&value, sink);
+    }
+
+    /// 喂一帧**已解析**的 JSON。
+    ///
+    /// 常驻会话（`session/claude_stream.rs`）必须先看一眼帧类型才能决定这一帧是「交给解析器」
+    /// 还是「控制通道的事，要回一条 `control_response`」，所以它在读循环里就已经把这一行解析成
+    /// `Value` 了。给它一个入口比让它把同一行 JSON 再交给 `handle_line` 解析第二遍好（spec 第 2
+    /// 条：不要出现两份），也避免把控制帧误喂给流解析器。
+    pub fn handle_value(&mut self, value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) {
+        self.0.handle_value(value, sink);
     }
 
     /// 本轮是否读到了协议层明确的**完成标志**（claude 的 `result` 帧）。

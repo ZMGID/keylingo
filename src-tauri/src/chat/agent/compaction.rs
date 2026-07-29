@@ -1214,6 +1214,14 @@ pub(crate) async fn maybe_compact_send_view(env: &LoopEnv<'_>, state: &mut RunSt
     };
     let (estimated, _anchored) =
         super::context_estimate::effective_context_tokens(anchor_prompt, trailing, estimate_full);
+    // **内置路径的实时用量通道**：本函数每个 planning 轮都跑一次，且这两个数就是权威口径
+    // （`compute_context_state` 用的是同一对函数 `anchor_total_tokens` +
+    // `effective_context_tokens`，分母同样是 `context_window_for_model`）—— 白捡的实时来源，
+    // 零额外计算。粒度是「每轮一次」而不是每个 token：内置路径的分子来自 provider 的
+    // usage，只有一次模型调用结束才有新数，中途没有更细的真实来源。
+    // 子 agent 的 host 走默认 no-op，用量不会混进主对话。
+    env.host
+        .emit_context_usage_live(&config.conversation_id, estimated as u64, Some(window as u64));
     if estimated <= budget {
         // 未超预算：本步无需压缩。重置 anti-thrashing 计数（Gap 2）——上下文已回到预算内。
         state.compaction_unresolved_rounds = 0;

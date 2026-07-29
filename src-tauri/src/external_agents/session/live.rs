@@ -84,6 +84,12 @@ pub struct LiveSession {
     pub launch_config: LaunchConfig,
     /// Last time a turn was sent/started; drives idle reclamation + LRU eviction.
     pub last_activity: Instant,
+    /// 常驻子进程的 pid。**纯元数据**，注册表不拿它做任何决策（关停一律走 actor 的
+    /// `Close`，绝不按 pid 杀）。存它是因为「这两轮是不是同一个进程」在别处根本没有
+    /// 可观测信号——不记就只能去数系统进程表。
+    pub child_pid: Option<u32>,
+    /// 这个进程已经服过几轮（注册即 1，之后每次被复用 +1）。同样是纯元数据。
+    pub turns_served: u32,
 }
 
 impl LiveSession {
@@ -117,6 +123,8 @@ mod tests {
                 cwd: cwd.to_string(),
                 launch_config: LaunchConfig::default(),
                 last_activity: Instant::now(),
+                child_pid: None,
+                turns_served: 1,
             },
             rx,
         )

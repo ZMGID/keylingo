@@ -1587,6 +1587,12 @@ impl AcpSession {
         &self.session_id
     }
 
+    /// 常驻子进程的 pid。只作为注册表元数据（诊断 / 「两轮是不是同一个进程」），
+    /// 关停一律走 actor 的 `Close`，绝不按 pid 杀。
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     /// Run one prompt turn over the live session. Emits events into `events`; an incoming
     /// `Cancel` on `control` sends `session/cancel` without killing the process.
     ///

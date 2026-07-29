@@ -6,7 +6,7 @@ use crate::mcp::{self, ChatToolDefinition};
 use crate::skills;
 use crate::state::AppState;
 
-use super::context::emit_chat_compaction_state;
+use super::context::{emit_chat_compaction_state, emit_chat_context_usage_live};
 use super::interaction::{
     emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, request_session_consent,
     request_tool_approval, request_user_response, wait_for_chat_cancel,
@@ -71,6 +71,15 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         boundary: Option<&CompactionBoundaryRecord>,
     ) {
         emit_chat_compaction_state(&self.app, conversation_id, phase, trigger, boundary);
+    }
+
+    fn emit_context_usage_live(
+        &self,
+        conversation_id: &str,
+        used_tokens: u64,
+        context_window_tokens: Option<u64>,
+    ) {
+        emit_chat_context_usage_live(&self.app, conversation_id, used_tokens, context_window_tokens);
     }
 
     fn persist_partial_assistant(

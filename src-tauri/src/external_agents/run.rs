@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use tauri::{AppHandle, Emitter, State};
@@ -367,6 +367,32 @@ pub async fn run_external_cli_reply(
         crate::external_agents::workspace::resolve_detection_cwd(app, Some(&conversation.id))
             .map(|detection_cwd| slash::cache_key(&agent_id, &detection_cwd.to_string_lossy()))
             .unwrap_or_else(|_| slash::cache_key(&agent_id, &cwd.to_string_lossy()));
+    // 实时用量推送的分母兜底：在**读流之前**算好一次（模型探测缓存的内存读 + 纯查表，
+    // 不起任何子进程 —— spec 第 9 条）。CLI 本轮实报优先级最高，只有它缺失时才用这个值，
+    // 与轮末 `context_window_for_external_model` 的优先级链一致（否则 codex/pi/opencode
+    // 这些窗口来自探测上报的 CLI 会在轮末看到分母凭空出现）。
+    let mut usage_ticker = {
+        let cached_models = state.get_cached_external_agent_models(
+            &slash_cache_key,
+            crate::external_agents::detection::EXTERNAL_AGENT_MODELS_CACHE_TTL,
+            crate::external_agents::detection::EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+        );
+        let model_for_window = conversation
+            .agent_runtime
+            .external_model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("default");
+        let fallback_window = crate::external_agents::context::context_window_for_external_model(
+            &agent_id,
+            model_for_window,
+            cached_models.as_ref().map(|cache| cache.models.as_slice()),
+            None,
+        )
+        .0
+        .map(|window| window as u64);
+        ContextUsageTicker::new(fallback_window)
+    };
 
     let mut emit_event = |event: UnifiedAgentEvent| {
         if let Some(commands) = slash::slash_commands_from_event(&event) {
@@ -389,6 +415,7 @@ pub async fn run_external_cli_reply(
             &mut segment_order,
             &mut segment_tracker,
             &mut cli_compactions,
+            &mut usage_ticker,
             event,
         );
     };
@@ -787,6 +814,12 @@ where
     let cwd_str = cwd.to_string_lossy().to_string();
     let protocol_tag = persistent_protocol_tag(protocol);
 
+    // 本轮实际使用的启动参数。resume 失效时会被改写成「开新会话」（见
+    // `drop_resume_for_fresh_session`），所以不能直接用调用方那份不可变的 `args`。
+    let mut turn_args: Vec<String> = args.to_vec();
+    // resume 已经被摘掉过一次了吗。降级恰好一次（第二次仍失败说明原因不是 resume）。
+    let mut dropped_resume = false;
+
     // Establish the control channel: 1. reuse a live session in the registry; 2. resume a
     // persisted one; 3. connect fresh.
     //
@@ -808,18 +841,57 @@ where
             // persisted. If the resume then fails and we fall back to fresh, the prior context
             // is lost and the user must be told (R4) rather than silently getting a blank slate.
             let intended_resume = resume_native.is_some();
-            let (control, native_id, resumed) = connect_persistent_session(
+            let connected = match connect_persistent_session(
                 protocol,
                 resolved_bin,
-                args,
+                &turn_args,
                 cwd,
                 model.as_deref(),
                 reasoning.as_deref(),
                 sandbox.as_deref(),
                 &mcp_servers,
-                resume_native,
+                resume_native.clone(),
             )
-            .await?;
+            .await
+            {
+                Ok(connected) => connected,
+                // resume 失效也可能在**启动**阶段就暴露：claude 的 `--resume <不存在的 id>`
+                // 会把同一句话写到 stderr 然后 `exit 1`，被 `connect()` 的即时 `try_wait`
+                // 抓成 `claude-init: …` 带 stderr 尾部（实测 2.2s 才退，所以这条更少见 ——
+                // 但只处理流里那条会漏掉这个场景）。降级方式与轮内失败完全一致。
+                Err(err)
+                    if !dropped_resume
+                        && crate::external_agents::stream::claude::is_missing_session_error(&err) =>
+                {
+                    dropped_resume = true;
+                    turn_args = drop_resume_for_fresh_session(
+                        app,
+                        conversation_id,
+                        agent_id,
+                        protocol,
+                        &turn_args,
+                    );
+                    connect_persistent_session(
+                        protocol,
+                        resolved_bin,
+                        &turn_args,
+                        cwd,
+                        model.as_deref(),
+                        reasoning.as_deref(),
+                        sandbox.as_deref(),
+                        &mcp_servers,
+                        None,
+                    )
+                    .await?
+                }
+                Err(err) => return Err(err),
+            };
+            let PersistentConnection {
+                control,
+                native_id,
+                resumed,
+                child_pid,
+            } = connected;
             let _ = save_live_handle(
                 app,
                 conversation_id,
@@ -838,6 +910,8 @@ where
                     cwd: cwd_str.clone(),
                     launch_config: launch_config.clone(),
                     last_activity: std::time::Instant::now(),
+                    child_pid,
+                    turns_served: 1,
                 },
             );
             // A resumed session already holds history → send only the latest message.
@@ -847,7 +921,10 @@ where
                 first_prompt.to_string()
             };
             // Intended to resume but ended up fresh → warn about the lost context.
-            if intended_resume && !resumed {
+            // `dropped_resume` 走的也是这一条：resume 的目标会话被 claude 清理掉了，我们换了个
+            // 新会话继续 —— 用户该看到的正是这条**已有的**「上下文已重置」提示，
+            // 而不是 claude 那句英文原文（别为它新写一条文案，spec 第 2 条）。
+            if !resumed && (intended_resume || dropped_resume) {
                 emit(context_reset_notice_event());
             }
             (control, prompt)
@@ -888,6 +965,7 @@ where
             agent_id,
             retried_after_failure,
             reconnected_for_config,
+            dropped_resume,
         ) {
             // Cancelled keeps the persisted handle so a later turn can resume the native session.
             PersistentFailureAction::Cancelled => return Err(err),
@@ -899,6 +977,18 @@ where
             // Launch-flag config change (reasoning) → relaunch fresh with the new `args`.
             PersistentFailureAction::ReconnectConfig => {
                 reconnected_for_config = true;
+            }
+            // resume 的目标会话在 CLI 那边没了 → 换个新会话 id、不带 resume 重连一次。
+            // 这里**不重置** `retried_after_failure`：降级本身有独立闸门（`dropped_resume`）。
+            PersistentFailureAction::ReconnectWithoutResume => {
+                dropped_resume = true;
+                turn_args = drop_resume_for_fresh_session(
+                    app,
+                    conversation_id,
+                    agent_id,
+                    protocol,
+                    &turn_args,
+                );
             }
             // Transient failure → drop the stale handle and reconnect fresh once.
             PersistentFailureAction::RetryFresh => {
@@ -915,7 +1005,7 @@ where
             protocol,
             protocol_tag,
             resolved_bin,
-            args,
+            &turn_args,
             cwd,
             &cwd_str,
             model.as_deref(),
@@ -972,7 +1062,12 @@ async fn reconnect_fresh(
     use crate::external_agents::session::live::LiveSession;
     use crate::external_agents::session::{save_live_handle, LiveSessionHandle};
 
-    let (control, native_id, resumed) = connect_persistent_session(
+    let PersistentConnection {
+        control,
+        native_id,
+        resumed,
+        child_pid,
+    } = connect_persistent_session(
         protocol,
         resolved_bin,
         args,
@@ -1002,6 +1097,8 @@ async fn reconnect_fresh(
             cwd: cwd_str.to_string(),
             launch_config: launch_config.clone(),
             last_activity: std::time::Instant::now(),
+            child_pid,
+            turns_served: 1,
         },
     );
     Ok((control, resumed))
@@ -1088,6 +1185,12 @@ enum PersistentFailureAction {
     Cancelled,
     /// Relaunch fresh to apply a launch-flag config change (reasoning without a config option).
     ReconnectConfig,
+    /// `--resume` 的目标会话在 CLI 那边已经不存在了 —— 摘掉 resume、换个新会话 id 重连一次。
+    ///
+    /// 与 `RetryFresh` 的区别不是「重不重连」而是**带不带 resume**：claude 的会话 flag 在
+    /// argv 里，`RetryFresh` 会拿同一份 argv 再连一次 ⇒ 同一个死 id 再 `--resume` 一次 ⇒
+    /// 必然再失败一次，然后用户拿到一句英文原文。
+    ReconnectWithoutResume,
     /// Transient failure — reconnect fresh once and re-send the prompt.
     RetryFresh,
     /// Auth failure or exhausted retries — give up and surface the error.
@@ -1099,6 +1202,7 @@ fn persistent_failure_action(
     agent_id: &str,
     retried_after_failure: bool,
     reconnected_for_config: bool,
+    dropped_resume: bool,
 ) -> PersistentFailureAction {
     if is_cancellation(err) {
         return PersistentFailureAction::Cancelled;
@@ -1111,6 +1215,16 @@ fn persistent_failure_action(
             PersistentFailureAction::ReconnectConfig
         };
     }
+    // resume 失效：**必须排在下面那条 auth / retried 之前**。它不是瞬时故障（重连同一份 argv
+    // 一定再失败），也不是认证问题，而是一个有确定处置的状态：换个新会话继续。
+    // 同样只降级一次 —— 摘掉 resume 之后还失败说明是别的原因。
+    if crate::external_agents::stream::claude::is_missing_session_error(err) {
+        return if dropped_resume {
+            PersistentFailureAction::Fatal
+        } else {
+            PersistentFailureAction::ReconnectWithoutResume
+        };
+    }
     // Auth is never auto-retried (a doomed retry could trigger a login storm).
     if crate::external_agents::errors::is_auth_error(err, agent_id) {
         return PersistentFailureAction::Fatal;
@@ -1120,6 +1234,33 @@ fn persistent_failure_action(
     } else {
         PersistentFailureAction::RetryFresh
     }
+}
+
+/// resume 失效的降级：换一个新的原生会话 id，把它写进落盘记录，并返回改写后的启动参数。
+///
+/// 三件事必须一起做，少一件就会留一个坑：
+/// 1. **argv**：`--resume <死 id>` → `--session-id <新 id>`（`claude_args_fresh_session`）；
+/// 2. **会话记录**：`--resume` 的来源是它，不改的话下一轮又拿死 id 去 resume（每轮降级一次）；
+/// 3. **live handle**：它的 `native_id` 也指着那个死会话，留着会在别处兜底成 `--resume`。
+///
+/// 只对 claude 有意义（会话 flag 在 argv 里）。其余协议的判据文案根本不会命中，
+/// 这里仍按协议分流，免得哪天有人给别的 CLI 复用这条路时静默改错参数。
+fn drop_resume_for_fresh_session(
+    app: &AppHandle,
+    conversation_id: &str,
+    agent_id: &str,
+    protocol: StreamFormat,
+    args: &[String],
+) -> Vec<String> {
+    use crate::external_agents::session::{clear_live_handle, replace_stored_session_id};
+
+    if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
+        return args.to_vec();
+    }
+    let fresh_id = uuid::Uuid::new_v4().to_string();
+    replace_stored_session_id(app, conversation_id, agent_id, &fresh_id);
+    clear_live_handle(app, conversation_id);
+    crate::external_agents::defs::claude::claude_args_fresh_session(args, &fresh_id)
 }
 
 /// True when a cancel was requested (`cancel_at` set) and the grace period has elapsed without the
@@ -1220,6 +1361,17 @@ fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
     }
 }
 
+/// 一次「建立常驻会话」的产物。
+///
+/// `child_pid` 是纯元数据（写进注册表条目供诊断 / 判定「两轮是不是同一个进程」），
+/// 任何关停路径都走 actor 的 `Close`，绝不按 pid 杀。
+struct PersistentConnection {
+    control: tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
+    native_id: String,
+    resumed: bool,
+    child_pid: Option<u32>,
+}
+
 /// Connect (or resume) a persistent protocol session, returning its control channel, native id,
 /// and whether a resume actually succeeded. Falls back to a fresh session if resume fails.
 #[allow(clippy::too_many_arguments)]
@@ -1233,14 +1385,7 @@ async fn connect_persistent_session(
     sandbox: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     resume_native: Option<String>,
-) -> Result<
-    (
-        tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
-        String,
-        bool,
-    ),
-    String,
-> {
+) -> Result<PersistentConnection, String> {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
     use crate::external_agents::session::claude_stream::{
         spawn_claude_stream_session_actor, ClaudeStreamJsonSession,
@@ -1255,10 +1400,14 @@ async fn connect_persistent_session(
             // 所以这里要看/改 argv 而不是传参。
             //
             // **参数说了算**：`build_claude_args` 已按 `resolve_agent_resume_context` 放好
-            // `--resume <id>`（续接）或 `--session-id <new>`（开新会话）。后者的典型场景是
-            // **换了模型** —— claude 的 resume 会话钉死在旧模型上，所以那条既有契约刻意开新会话
-            // （代价是丢上下文，由 `intended_resume && !resumed` 的可见提示交代）。用 live
-            // handle 的 native id 去覆盖它会让「换模型要生效」这条契约静默失效。
+            // `--resume <id>`（续接已有会话）或 `--session-id <new>`（这个对话还没有会话）。
+            // 参数里的会话标记是**本轮的真实决定**；live handle 只是「上一个进程最后报的那个
+            // id」。让 handle 压过参数，会把一个全新对话接到某个旧会话上 —— 用户会在新对话里
+            // 看到别人的上下文。
+            //
+            // （历史：这里曾解释成「换模型要开新会话」。2026-07-29 本机实测 claude 2.1.220
+            // 推翻了那个前提 —— `--resume` 带另一个 `--model` 既切得动模型、也保住上下文，
+            // 所以换模型现在照常续接。优先级本身不变，只是理由换了。见 spec 第 8 / 25 条。）
             //
             // live handle 只在参数里**没有**任何会话 flag 时兜底，且必须改写成 `--resume`：
             // 同一个 id 再 `--session-id` 一次会被 claude 以「id 已存在」拒绝启动。
@@ -1281,7 +1430,13 @@ async fn connect_persistent_session(
             let session =
                 ClaudeStreamJsonSession::connect(resolved_bin, &effective_args, cwd).await?;
             let id = session.session_id().to_string();
-            Ok((spawn_claude_stream_session_actor(session), id, resumed))
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_claude_stream_session_actor(session),
+                native_id: id,
+                resumed,
+                child_pid,
+            })
         }
         StreamFormat::CodexAppServer => {
             if let Some(tid) = resume_native.as_deref() {
@@ -1296,7 +1451,13 @@ async fn connect_persistent_session(
                 .await
                 {
                     let id = session.thread_id().to_string();
-                    return Ok((spawn_codex_session_actor(session), id, true));
+                    let child_pid = session.child_pid();
+                    return Ok(PersistentConnection {
+                        control: spawn_codex_session_actor(session),
+                        native_id: id,
+                        resumed: true,
+                        child_pid,
+                    });
                 }
                 // C3: resume failed → fall through to fresh so the caller overwrites the stale
                 // live handle (whose native_id is dead) instead of retrying a doomed resume.
@@ -1306,7 +1467,13 @@ async fn connect_persistent_session(
                 CodexAppServerSession::connect(resolved_bin, args, cwd, model, sandbox, None)
                     .await?;
             let id = session.thread_id().to_string();
-            Ok((spawn_codex_session_actor(session), id, false))
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_codex_session_actor(session),
+                native_id: id,
+                resumed: false,
+                child_pid,
+            })
         }
         StreamFormat::AcpJsonRpc => {
             if let Some(sid) = resume_native.as_deref() {
@@ -1322,7 +1489,13 @@ async fn connect_persistent_session(
                 .await
                 {
                     let id = session.session_id().to_string();
-                    return Ok((spawn_acp_session_actor(session), id, true));
+                    let child_pid = session.child_pid();
+                    return Ok(PersistentConnection {
+                        control: spawn_acp_session_actor(session),
+                        native_id: id,
+                        resumed: true,
+                        child_pid,
+                    });
                 }
                 // C3: resume failed → connect fresh; the caller's save_live_handle overwrites the
                 // stale handle so the next turn won't attempt the dead native_id again.
@@ -1332,7 +1505,13 @@ async fn connect_persistent_session(
                 AcpSession::connect(resolved_bin, args, cwd, model, reasoning, mcp_servers, None)
                     .await?;
             let id = session.session_id().to_string();
-            Ok((spawn_acp_session_actor(session), id, false))
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_acp_session_actor(session),
+                native_id: id,
+                resumed: false,
+                child_pid,
+            })
         }
         _ => Err("protocol does not support persistent sessions".to_string()),
     }
@@ -1432,6 +1611,87 @@ fn nonzero_exit_is_a_failure(exit_code: Option<i32>, protocol_completed: bool) -
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 生成过程中往前端推「上下文占用活数」的节流器。
+///
+/// 为什么需要它：分子的上报频率由 CLI 决定（claude 的输出侧是边生成边报），一条一推等于
+/// 每个 token 都过一次 IPC。节流量级对齐仓库里子 agent 进度卡的 ~350ms。
+///
+/// **只带两个数**（分子 + 分母）：轮末那次权威计算要读磁盘（会话文件、kimi 的 wire.jsonl、
+/// 模型探测缓存），放在每个增量上就是热路径灾难（spec 第 9 条的精神）。
+struct ContextUsageTicker {
+    /// 分母的**非实报**兜底（探测上报 / 静态表 / 数据库），在读流**之前**算好一次。
+    ///
+    /// 必须预先算：`context_window_for_external_model` 要读模型探测缓存，虽然只是内存读，
+    /// 但把它放进每个增量里就等于在热路径上重算窗口链。CLI 本轮实报优先级最高（spec 14e），
+    /// 所以实报存在时它不参与。
+    fallback_window: Option<u64>,
+    /// 上一次真正推出去的 `(分子, 分母)`。数字没变就不推。
+    last: Option<(u64, Option<u64>)>,
+    last_emit: Option<Instant>,
+}
+
+/// 节流间隔。与子 agent 进度卡（~350ms）同量级：肉眼连续，又不至于每 token 一次 IPC。
+const CONTEXT_USAGE_TICK_INTERVAL: Duration = Duration::from_millis(350);
+
+/// 要不要推这一次活数。抽成纯函数以便单测（spec 第 13 条）。
+///
+/// 三条判据：
+/// 1. 分子为 0 不推——没有分子的上报（未登录 / 斜杠命令那种零用量轮）只带分母，
+///    推出去会让用量条闪一下 0。
+/// 2. 与上次推出去的完全相同不推（CLI 一轮里会重复报同一个快照）。
+/// 3. 距上次推不足 [`CONTEXT_USAGE_TICK_INTERVAL`] 不推，**但本轮第一次总是推**——
+///    否则一轮很短时用户什么都看不到。
+fn should_emit_usage_tick(
+    last: Option<(u64, Option<u64>)>,
+    since_last_emit: Option<Duration>,
+    next: (u64, Option<u64>),
+) -> bool {
+    if next.0 == 0 {
+        return false;
+    }
+    if last == Some(next) {
+        return false;
+    }
+    match since_last_emit {
+        Some(elapsed) => elapsed >= CONTEXT_USAGE_TICK_INTERVAL,
+        None => true,
+    }
+}
+
+impl ContextUsageTicker {
+    fn new(fallback_window: Option<u64>) -> Self {
+        Self {
+            fallback_window,
+            last: None,
+            last_emit: None,
+        }
+    }
+
+    /// 由合并后的 CLI 用量算出 `(分子, 分母)`。
+    ///
+    /// 分子走 `context::cli_reported_context_tokens` —— 与轮末权威计算**同一个函数**，
+    /// 否则用户会在轮末看到数字跳一下（spec 14b 那类「最后一层把前面全丢掉」的形态）。
+    /// 分母：CLI 本轮实报优先，缺失时用预算好的兜底（`merge_cli_usage` 已保证实报窗口
+    /// 在一轮内粘滞，不会被后到的不带窗口上报冲掉）。
+    fn values(&self, usage: &ModelUsage) -> (u64, Option<u64>) {
+        let used = crate::external_agents::context::cli_reported_context_tokens(usage) as u64;
+        let window = usage.context_window_tokens.or(self.fallback_window);
+        (used, window)
+    }
+
+    /// 到点就推：返回 `Some((分子, 分母))` 表示调用方应该发事件。
+    fn tick(&mut self, usage: &ModelUsage, now: Instant) -> Option<(u64, Option<u64>)> {
+        let next = self.values(usage);
+        let since = self.last_emit.map(|at| now.duration_since(at));
+        if !should_emit_usage_tick(self.last, since, next) {
+            return None;
+        }
+        self.last = Some(next);
+        self.last_emit = Some(now);
+        Some(next)
+    }
+}
+
 fn apply_unified_event(
     app: &AppHandle,
     conversation_id: &str,
@@ -1449,6 +1709,7 @@ fn apply_unified_event(
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
     cli_compactions: &mut Vec<CompactionBoundaryRecord>,
+    usage_ticker: &mut ContextUsageTicker,
     event: UnifiedAgentEvent,
 ) {
     let now = Local::now().timestamp();
@@ -1546,7 +1807,27 @@ fn apply_unified_event(
             }
         }
         UnifiedAgentEvent::Usage { usage: u } => {
-            *usage = Some(merge_cli_usage(usage.as_ref(), u));
+            let merged = merge_cli_usage(usage.as_ref(), u);
+            // **实时通道**：生成过程中就把占用推给前端，别等轮末。
+            //
+            // 建在这一层（而不是 claude 的解析器里）是为了让全部外部 CLI 一起受益：
+            // ACP 的 `usage_update`、codex 的 `thread/tokenUsage/updated`、pi 的用量通知
+            // 都已在各自解析层归一成 `UnifiedAgentEvent::Usage`，这里是它们唯一的汇合点。
+            //
+            // **分流已在上游完成**：子会话（claude 的 sidechain / 子 agent）的用量根本不会
+            // 变成 `Usage` 事件（`stream/claude.rs` 在 `message_start` / `message_delta` 里
+            // 按 `parent_tool_use_id` 提前 return），所以实时通道天然走在分流之后 ——
+            // 顺序反了的话，派子任务的那几秒用量条会跳到一个与主对话无关的数字（子 agent
+            // 常用便宜小模型，窗口小 5 倍）再跳回来。
+            if let Some((used, window)) = usage_ticker.tick(&merged, Instant::now()) {
+                crate::chat::commands::context::emit_chat_context_usage_live(
+                    app,
+                    conversation_id,
+                    used,
+                    window,
+                );
+            }
+            *usage = Some(merged);
         }
         UnifiedAgentEvent::Error { message, .. } => {
             eprintln!("[external-agent] stream error: {message}");
@@ -1734,6 +2015,113 @@ mod tests {
         assert!(
             !bubble.trim().is_empty(),
             "气泡不得为空——这正是修复前的症状"
+        );
+    }
+
+    // ---- 生成过程中的用量实时推送（分子/分母 + 节流）----
+
+    fn tick_usage(input: u64, output: u64, cache_read: u64, window: Option<u64>) -> ModelUsage {
+        crate::external_agents::stream::usage_from_parts(
+            crate::external_agents::stream::CliUsageParts {
+                input,
+                output,
+                cache_read,
+                context_window: window,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// 实时值的分子必须与轮末权威值同口径（都走 `cli_reported_context_tokens`）。
+    /// 只读 `input_tokens` 会把 cache 丢在最后一层（spec 14b 踩过的形态），
+    /// 表现为用户在轮末看到数字猛跳一下。
+    #[test]
+    fn usage_tick_numerator_uses_the_same_formula_as_the_authoritative_value() {
+        let ticker = ContextUsageTicker::new(None);
+        let usage = tick_usage(1_200, 800, 45_000, Some(1_000_000));
+        let (used, window) = ticker.values(&usage);
+        assert_eq!(used, 47_000, "cache 必须计入分子");
+        assert_eq!(
+            used as usize,
+            crate::external_agents::context::cli_reported_context_tokens(&usage),
+            "实时分子与轮末权威分子必须是同一个函数算出来的"
+        );
+        assert_eq!(window, Some(1_000_000));
+    }
+
+    /// **分母粘滞**：中途的上报不带窗口（claude 只在轮末那条 `result` 里带）时，
+    /// 不许把已知的窗口冲掉变成「满度未知」。
+    ///
+    /// 一轮内的粘滞由 `merge_cli_usage` 负责（既有逻辑）；跨轮/首轮由预算好的兜底承担。
+    #[test]
+    fn usage_tick_denominator_survives_reports_that_omit_the_window() {
+        // 一轮内：先来一条带窗口的，再来一条不带窗口的。
+        let with_window = tick_usage(1_000, 0, 0, Some(1_000_000));
+        let without_window = tick_usage(1_000, 500, 0, None);
+        let merged = merge_cli_usage(Some(&with_window), without_window);
+        let ticker = ContextUsageTicker::new(None);
+        assert_eq!(
+            ticker.values(&merged).1,
+            Some(1_000_000),
+            "不带窗口的后到上报把已知分母冲成了未知"
+        );
+
+        // 首轮尚无实报窗口时用预算好的兜底（探测上报 / 静态表），而不是「未知」。
+        let fallback_ticker = ContextUsageTicker::new(Some(272_000));
+        assert_eq!(
+            fallback_ticker.values(&tick_usage(1_000, 0, 0, None)).1,
+            Some(272_000)
+        );
+        // 但 CLI 本轮实报永远优先（模型可能中途切换，spec 14e）。
+        assert_eq!(
+            fallback_ticker
+                .values(&tick_usage(1_000, 0, 0, Some(400_000)))
+                .1,
+            Some(400_000)
+        );
+    }
+
+    #[test]
+    fn usage_tick_throttle_rules() {
+        // 本轮第一次总是推（一轮很短时也要看得见）。
+        assert!(should_emit_usage_tick(None, None, (100, Some(200_000))));
+        // 数字没变不推（CLI 会重复报同一个快照）。
+        assert!(!should_emit_usage_tick(
+            Some((100, Some(200_000))),
+            Some(Duration::from_secs(5)),
+            (100, Some(200_000)),
+        ));
+        // 变了但还没到节流间隔 ⇒ 不推（否则每个 token 一次 IPC）。
+        assert!(!should_emit_usage_tick(
+            Some((100, Some(200_000))),
+            Some(Duration::from_millis(40)),
+            (180, Some(200_000)),
+        ));
+        // 变了且到点 ⇒ 推。
+        assert!(should_emit_usage_tick(
+            Some((100, Some(200_000))),
+            Some(CONTEXT_USAGE_TICK_INTERVAL),
+            (180, Some(200_000)),
+        ));
+        // 分子为 0 的上报（未登录 / 零用量的斜杠命令轮，只带分母）不推：会让用量条闪一下 0。
+        assert!(!should_emit_usage_tick(None, None, (0, Some(200_000))));
+    }
+
+    /// 零用量的上报不得把已经推出去的活数清零（spec 14h 的同一条规则在实时通道上的体现）。
+    #[test]
+    fn zero_usage_report_does_not_reset_the_live_value() {
+        let real = tick_usage(1_200, 800, 45_000, None);
+        let mut ticker = ContextUsageTicker::new(None);
+        let now = Instant::now();
+        assert_eq!(ticker.tick(&real, now), Some((47_000, None)));
+        // `/help` 那种没有 LLM 往返的 result：四个字段全 0，但带窗口。
+        let zero_with_window = tick_usage(0, 0, 0, Some(1_000_000));
+        let merged = merge_cli_usage(Some(&real), zero_with_window);
+        let later = now + Duration::from_secs(1);
+        assert_eq!(
+            ticker.tick(&merged, later),
+            Some((47_000, Some(1_000_000))),
+            "分子必须保持 47000（只采纳零值上报带来的窗口）"
         );
     }
 
@@ -1945,7 +2333,7 @@ mod tests {
     #[test]
     fn cancelled_failure_is_surfaced_as_is() {
         assert_eq!(
-            persistent_failure_action("cancelled", "grok", false, false),
+            persistent_failure_action("cancelled", "grok", false, false, false),
             PersistentFailureAction::Cancelled
         );
     }
@@ -1953,7 +2341,7 @@ mod tests {
     #[test]
     fn auth_failure_is_never_retried() {
         assert_eq!(
-            persistent_failure_action("Authentication required", "grok", false, false),
+            persistent_failure_action("Authentication required", "grok", false, false, false),
             PersistentFailureAction::Fatal
         );
     }
@@ -1961,12 +2349,12 @@ mod tests {
     #[test]
     fn transient_failure_retries_fresh_once() {
         assert_eq!(
-            persistent_failure_action("ACP session exited mid-turn", "cursor-agent", false, false),
+            persistent_failure_action("ACP session exited mid-turn", "cursor-agent", false, false, false),
             PersistentFailureAction::RetryFresh
         );
         // Already retried → give up.
         assert_eq!(
-            persistent_failure_action("ACP session exited mid-turn", "cursor-agent", true, false),
+            persistent_failure_action("ACP session exited mid-turn", "cursor-agent", true, false, false),
             PersistentFailureAction::Fatal
         );
     }
@@ -1974,13 +2362,109 @@ mod tests {
     #[test]
     fn needs_reconnect_relaunches_once_then_gives_up() {
         assert_eq!(
-            persistent_failure_action(NEEDS_RECONNECT, "grok", false, false),
+            persistent_failure_action(NEEDS_RECONNECT, "grok", false, false, false),
             PersistentFailureAction::ReconnectConfig
         );
         assert_eq!(
-            persistent_failure_action(NEEDS_RECONNECT, "grok", false, true),
+            persistent_failure_action(NEEDS_RECONNECT, "grok", false, true, false),
             PersistentFailureAction::Fatal
         );
+    }
+
+    // ---- resume 失效必须降级，而不是把 CLI 的英文原句甩给用户 ----
+
+    /// 本机实测原样本（claude 2.1.220，`-p --output-format stream-json --resume <随机 uuid>`）：
+    /// stdout 一条 `result`，`errors[]` 里就是这句话；stderr 同一句话，然后 `exit 1`。
+    const REAL_MISSING_SESSION_ERROR: &str =
+        "No conversation found with session ID: d85724b7-59e4-4690-8984-1f31ca9a3414";
+
+    /// 认出来 ⇒ 摘掉 resume 换新会话重连一次；再失败才算真失败。
+    ///
+    /// 反面（改动前的行为）：这条文案落进 `RetryFresh`，而 `RetryFresh` 拿的是**同一份 argv**
+    /// ——同一个死 id 再 `--resume` 一次，必然再失败一次，然后用户拿到一句看不懂的英文。
+    #[test]
+    fn a_missing_resume_target_reconnects_without_resume_exactly_once() {
+        assert_eq!(
+            persistent_failure_action(REAL_MISSING_SESSION_ERROR, "claude", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+        // 已经降级过一次还失败 ⇒ 原因不是 resume，别再兜圈子。
+        assert_eq!(
+            persistent_failure_action(REAL_MISSING_SESSION_ERROR, "claude", false, false, true),
+            PersistentFailureAction::Fatal
+        );
+    }
+
+    /// 启动阶段暴露的那条（`connect()` 的 `try_wait` 抓到「立刻退出」+ stderr 尾部）
+    /// 必须命中同一条判据 —— 判据是 `contains`，不是全等。
+    #[test]
+    fn the_startup_flavour_of_the_same_failure_is_recognized_too() {
+        let from_connect = format!(
+            "claude-init: 进程启动后立刻退出（exit code: 1）\n\n<details>\n{REAL_MISSING_SESSION_ERROR}\n</details>"
+        );
+        assert_eq!(
+            persistent_failure_action(&from_connect, "claude", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+    }
+
+    /// 判据不能宽到把别的失败也拽进来：那会让真实的认证 / 瞬时故障走错分支。
+    #[test]
+    fn unrelated_failures_do_not_look_like_a_missing_resume_target() {
+        for err in [
+            "Not logged in · Please run /login",
+            "claude 常驻会话在轮次中退出",
+            "No message found with message.uuid of: abc",
+            "Session not found: abc",
+            "",
+        ] {
+            assert_ne!(
+                persistent_failure_action(err, "claude", false, false, false),
+                PersistentFailureAction::ReconnectWithoutResume,
+                "{err:?} 被误判成 resume 失效"
+            );
+        }
+    }
+
+    /// 取消永远优先：用户刚点了停止，不该被解读成任何一种重连。
+    #[test]
+    fn cancellation_still_wins_over_the_resume_downgrade() {
+        assert_eq!(
+            persistent_failure_action("cancelled", "claude", false, false, false),
+            PersistentFailureAction::Cancelled
+        );
+    }
+
+    /// 降级后的 argv 必须是「开新会话」而不是「换个 id 继续 resume」：
+    /// 死会话的 id 不存在，`--resume` 无论换成谁都续不上。
+    #[test]
+    fn the_downgraded_args_open_a_brand_new_session() {
+        use crate::external_agents::defs::claude::{
+            claude_args_fresh_session, claude_session_id_from_args,
+        };
+        let dead = vec![
+            "-p".to_string(),
+            "--resume".to_string(),
+            "dead-id".to_string(),
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+        ];
+        let fresh = claude_args_fresh_session(&dead, "brand-new-id");
+        assert!(
+            !fresh.contains(&"--resume".to_string()),
+            "还带着 --resume ⇒ 必然再失败一次：{fresh:?}"
+        );
+        assert!(
+            !fresh.contains(&"dead-id".to_string()),
+            "死 id 的值没被一起摘掉（会变成非法位置参数）：{fresh:?}"
+        );
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "brand-new-id"]));
+        assert_eq!(
+            claude_session_id_from_args(&fresh).as_deref(),
+            Some("brand-new-id")
+        );
+        // 其余参数原样保留。
+        assert!(fresh.windows(2).any(|w| w == ["--permission-mode", "bypassPermissions"]));
     }
 
     #[test]
@@ -2010,7 +2494,7 @@ mod tests {
         assert!(!is_cancellation("ACP session exited mid-turn"));
         assert!(!is_cancellation(""));
         assert_eq!(
-            persistent_failure_action(CANCELLED_SESSION_LOST, "claude", false, false),
+            persistent_failure_action(CANCELLED_SESSION_LOST, "claude", false, false, false),
             PersistentFailureAction::Cancelled
         );
     }

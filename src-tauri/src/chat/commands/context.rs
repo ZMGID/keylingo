@@ -903,6 +903,33 @@ pub(super) fn emit_chat_context_state(
     );
 }
 
+/// **生成过程中**的上下文占用活数（分子 + 分母）。
+///
+/// 复用 `chat-context` 这一条既有通道（不新造事件）：同一个主题、同一个订阅者、同一套
+/// conversationId 路由。载荷用 `live` 与权威快照 `contextState` 区分——权威快照那条要读磁盘、
+/// 连 MCP 列工具、算分段，绝不能放在每个增量上（spec 第 9 条的精神）；实时这条只带两个数，
+/// 前端就地更新分子/分母与比例，其余字段（分段、压缩计数、来源标签）留给轮末的权威计算。
+///
+/// `context_window_tokens` 为 `None` = 本次上报没带窗口，**前端必须保留已知的旧值**
+/// （分母粘滞，见 `applyLiveContextUsage`）：claude 的窗口只在轮末那条 `result` 里带。
+pub(crate) fn emit_chat_context_usage_live(
+    app: &AppHandle,
+    conversation_id: &str,
+    used_tokens: u64,
+    context_window_tokens: Option<u64>,
+) {
+    let _ = app.emit(
+        "chat-context",
+        serde_json::json!({
+            "conversationId": conversation_id,
+            "live": {
+                "usedTokens": used_tokens,
+                "contextWindowTokens": context_window_tokens,
+            },
+        }),
+    );
+}
+
 pub(super) fn emit_chat_compaction_state(
     app: &AppHandle,
     conversation_id: &str,

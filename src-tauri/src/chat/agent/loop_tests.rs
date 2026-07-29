@@ -32,6 +32,8 @@ struct TestHost {
     /// Per-call snapshot sizes from `persist_partial_assistant`:
     /// `(message_id, tool_records_len, segments_len, api_messages_len)`.
     persists: Mutex<Vec<(String, usize, usize, usize)>>,
+    /// 生成过程中推给前端的上下文占用活数：`(分子, 分母)`，每轮一条。
+    context_ticks: Mutex<Vec<(u64, Option<u64>)>>,
     cancel_after: Option<Duration>,
     cancel_flag: Arc<AtomicBool>,
     cancel_on_first_text_delta: bool,
@@ -98,6 +100,13 @@ impl TestHost {
             .unwrap_or_else(|err| err.into_inner())
             .clone()
     }
+
+    fn recorded_context_ticks(&self) -> Vec<(u64, Option<u64>)> {
+        self.context_ticks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
 }
 
 impl AgentHost for TestHost {
@@ -148,6 +157,18 @@ impl AgentHost for TestHost {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .push(record.clone());
+    }
+
+    fn emit_context_usage_live(
+        &self,
+        _conversation_id: &str,
+        used_tokens: u64,
+        context_window_tokens: Option<u64>,
+    ) {
+        self.context_ticks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((used_tokens, context_window_tokens));
     }
 
     fn persist_partial_assistant(
@@ -2079,6 +2100,64 @@ async fn run_loop_no_anchor_skips_compaction_when_estimate_below_budget() {
     assert!(
         !bodies[0].contains("tasked with summarizing conversations"),
         "without an anchor, an under-budget estimate must NOT trigger compaction"
+    );
+}
+
+/// **内置路径的实时用量**：上下文占用要在生成过程中就推给前端，而不是等一轮完全结束。
+///
+/// 内置路径唯一的等价实时来源是 `maybe_compact_send_view` —— 它每个 planning 轮都跑一次，
+/// 且已经按权威口径算出了分子（`effective_context_tokens`）与分母
+/// （`context_window_for_model`），所以实时通道零额外计算。这条断言两件事：
+/// 一轮里**多次**上报（多次工具往返 ⇒ 多轮 ⇒ 多次上报），且数字单调不减。
+#[tokio::test]
+async fn run_loop_reports_live_context_usage_each_round() {
+    let server = MockModelServer::start(vec![
+        // 第 1 轮：调一次工具。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+        // 第 2 轮：给最终答案收尾。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"读完了。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.provider.model_overrides.insert(
+        "test-model".to_string(),
+        crate::settings::ModelInfo {
+            context_window: Some(200_000),
+            ..Default::default()
+        },
+    );
+    config.tools = vec![native_read_file_tool()];
+    config.runtime_messages = vec![
+        serde_json::json!({ "role": "system", "content": "system prompt" }),
+        serde_json::json!({ "role": "user", "content": "a".repeat(4_000) }),
+    ];
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run completes");
+    assert_eq!(result.content, "读完了。");
+
+    let ticks = host.recorded_context_ticks();
+    assert!(
+        ticks.len() >= 2,
+        "多轮的 run 必须在过程中多次上报占用（修复前一次都没有）：{ticks:?}"
+    );
+    assert!(
+        ticks.iter().all(|(used, window)| *used > 0 && *window == Some(200_000)),
+        "分子必须非零、分母必须是模型窗口：{ticks:?}"
+    );
+    // 单调不减：工具结果进入历史后占用只会涨（压缩才会降，本例不触发）。
+    assert!(
+        ticks.windows(2).all(|pair| pair[1].0 >= pair[0].0),
+        "过程中的占用不该往回跳：{ticks:?}"
     );
 }
 

@@ -161,7 +161,10 @@ pub struct ExternalSessionUsage {
 /// cache 全丢在半路（实测 kimi cache 占 97.6%、pi 62%、opencode 13%）。
 ///
 /// `total_tokens` 缺失时退回 `input + output`（改动前落盘的旧会话没有 total）。
-fn cli_reported_context_tokens(usage: &ModelUsage) -> usize {
+///
+/// **实时通道也必须走这里**（`run.rs` 的用量 tick）：分子口径只有这一个真源，
+/// 在事件层另算一套会让生成过程中的数字与轮末的权威值不一致，用户看到的是轮末跳一下。
+pub(crate) fn cli_reported_context_tokens(usage: &ModelUsage) -> usize {
     usage
         .total_tokens
         .unwrap_or_else(|| {

@@ -762,6 +762,7 @@ impl AppState {
         if let Some(session) = map.get_mut(conversation_id) {
             if session.is_reusable(agent_id, cwd, launch_config) {
                 session.last_activity = Instant::now();
+                session.turns_served = session.turns_served.saturating_add(1);
                 return Some(session.control.clone());
             }
         }

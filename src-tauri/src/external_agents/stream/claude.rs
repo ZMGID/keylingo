@@ -29,6 +29,34 @@ fn claude_usage_parts(usage: &Value) -> CliUsageParts {
     }
 }
 
+/// 把 `message_delta` 的**输出侧**快照接到本次请求的**输入侧**快照上，得到「此刻已用」。
+///
+/// **为什么必须相加而不能直接采纳 `message_delta` 这一条**：claude 的
+/// `message_delta.usage` 实测只带 `output_tokens`（输入侧字段缺失或为 0），
+/// 而 `run.rs::merge_cli_usage` 是「后到覆盖先到」——直接把它当一份完整快照上报，
+/// 会把 `message_start` 报来的输入侧（含全历史 + cache，常是几万 token）整体冲掉，
+/// 用量条会在生成过程中从 47K 掉到几十。
+///
+/// `request_input` 由本车道最近一次 `message_start` 落下（见 `LaneState::request_input`），
+/// 因此这里天然是「当前这次请求」的输入侧，不会累加到上一轮/上一条消息的数上（spec 第 3 条）。
+///
+/// 输入侧字段若在 `message_delta` 里给了非零值（未来版本可能补全），以它为准——它是更新的快照。
+fn message_delta_usage(
+    request_input: Option<&CliUsageParts>,
+    delta_usage: &Value,
+) -> Option<CliUsageParts> {
+    let field = |key: &str| delta_usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let newer = |incoming: u64, base: u64| if incoming > 0 { incoming } else { base };
+    let mut parts = request_input.cloned().unwrap_or_default();
+    parts.input = newer(field("input_tokens"), parts.input);
+    parts.cache_read = newer(field("cache_read_input_tokens"), parts.cache_read);
+    parts.cache_creation = newer(field("cache_creation_input_tokens"), parts.cache_creation);
+    parts.output = field("output_tokens");
+    // 口径固定为 Anthropic 家族（cache 与 input 不相交）——与 `claude_usage_parts` 一致。
+    parts.cache_included_in_input = false;
+    (!usage_parts_all_zero(&parts)).then_some(parts)
+}
+
 fn usage_parts_all_zero(parts: &CliUsageParts) -> bool {
     parts.input == 0 && parts.output == 0 && parts.cache_read == 0 && parts.cache_creation == 0
 }
@@ -208,6 +236,27 @@ pub fn result_is_user_abort(value: &Value) -> bool {
         == Some("aborted_streaming")
 }
 
+/// `--resume <id>` 指向的会话在 claude 那边**已经不存在了**。
+///
+/// **协议事实**（claude 2.1.220，本机实测 + 二进制核实，2026-07-29）：
+/// `-p --output-format stream-json --resume <不存在的 id>` 的失败**同时**落在两条通道上：
+/// - stdout 一条 `result`：`subtype:"error_during_execution"` / `is_error:true` /
+///   `errors:["No conversation found with session ID: <id>"]`（无 `terminal_reason`，
+///   所以不会被 `result_is_user_abort` 误判成取消）；
+/// - stderr 同一句话，然后进程 `exit 1`（本机实测约 2.2s —— 比 `connect()` 那次
+///   `try_wait()` 晚得多，所以这条失败**通常走流**，只有偶发才走「启动即退出」那条）。
+///
+/// 判据只认这一句。二进制里 print 模式（我们用的就是它）只有这一处 resume 失败出口
+/// （`a1r("No conversation found with session ID: ${s.sessionId}", outputFormat)` 紧跟 `exit(1)`）；
+/// `Failed to resume session <id>` / `--resume session load failed` 那几句属于**交互式** UI
+/// 分支（走 Ink 渲染 + `J6`），我们这条路走不到。
+///
+/// 为什么要专门认它：认不出来的话，用户看到的是一句英文原文的错误气泡，而正确处置是
+/// **丢掉那个已经不存在的会话 id、开个新会话继续聊**，并告诉他上下文已重置。
+pub fn is_missing_session_error(text: &str) -> bool {
+    text.contains("No conversation found with session ID")
+}
+
 /// `result.permission_denials[]` → 一条 markdown 引用块提示。
 ///
 /// 被权限规则拒掉的工具调用在流里**没有** tool_use/tool_result 帧，不接的话对用户完全
@@ -336,18 +385,87 @@ struct PendingContentBlock {
     input_value: Option<Value>,
 }
 
+/// 一条帧属于哪条**消息流**（"车道"）：主线，或某个 `Task` 子会话（sidechain）。
+///
+/// **协议事实**（claude 2.1.220，`grep -a` 反查本机二进制核实）：子 agent 的消息与主线消息
+/// 混在**同一条 stdout 流**里，唯一的区分是帧顶层的 `parent_tool_use_id`
+/// （schema `v.string().nullable()`）：非空 = 属于那个 `Task` 调用内部的子会话。CLI 自己也是
+/// 这么分的 —— 二进制里多处形如 `if(...parent_tool_use_id!==null)return;` /
+/// `parent_tool_use_id===null&&…message.model!==…`（连"当前模型"都只从主线读）。
+///
+/// 实测承载该字段的帧：`assistant`（附带 `subagent_type` / `task_description`）、`user`、
+/// `tool_progress`。**`stream_event` 的九处构造点全是 `parent_tool_use_id:null`** ——
+/// 2.1.220 的子会话内容以**整块** assistant / user 帧到达，不走增量通道；但 schema 允许非空，
+/// 所以解析侧按"任何帧都可能带"处理（见 `ClaudeStreamState::lanes`）。
+///
+/// 空串与缺失都算主线：真实样本里主线写的是 `"parent_tool_use_id": null`。
+fn frame_lane(obj: &serde_json::Map<String, Value>) -> Option<&str> {
+    obj.get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// **per-车道**的消息级状态。主线一条，每个 sidechain 一条。
+///
+/// 拆开的理由不是洁癖：这几个字段原先是**全局单值**，而 sidechain 的整块 assistant 帧会去读
+/// `text_streamed`（"这条消息已经流式发过了吗"）—— 读的却是**主线**的标志。于是"子 agent 的
+/// 自述要不要印进主气泡"这个决定，取决于主线此刻流到哪儿了，纯属巧合。同理 `blocks` 的寻址
+/// key 由「当前消息 id + 块序号」拼成，而"当前消息 id"只有一个：两条车道各自从 index 0 开始
+/// 编号时就会撞车（2.1.220 因为 sidechain 不发 `stream_event` 而侥幸没撞上，schema 允许它发）。
+#[derive(Default)]
+struct LaneState {
+    /// 本条消息是否已经**流式**发过正文（`content_block_delta` 的 `text_delta`）。
+    ///
+    /// 复位点是「新消息开始」（`message_start`）。spec 第 3 条要求的就是这个语义 ——
+    /// 注意在 sidechain 场景下「新 message id」不再等价于「新逻辑消息」（并行子会话各有
+    /// 自己的 id 序列），所以复位必须落在**本车道**上，而不是一个全局 bool。
+    text_streamed: bool,
+    /// 本车道最近一条消息的 id，参与 `blocks` 的寻址 key。
+    current_message_id: Option<String>,
+    /// 本车道进行中的内容块（`{message_id}:{index}` → 累积状态）。
+    blocks: HashMap<String, PendingContentBlock>,
+    /// **当前这次请求**的输入侧用量快照（`message_start.message.usage`）。
+    ///
+    /// 输出侧是边生成边报的（`message_delta.usage.output_tokens`），而它**只带输出**——
+    /// 要得到「此刻已用」必须把它接到这份输入侧快照上（见 `message_delta_usage`）。
+    ///
+    /// 复位语义（spec 第 3 条）：常驻进程下解析器跨轮存活，所以这份快照必须在**新一次请求
+    /// 开始**（`message_start`）时整体替换、而不是累加；轮次边界（`result`）清空整条车道时
+    /// 一并消失，不会把上一轮的输入侧带进下一轮。
+    request_input: Option<CliUsageParts>,
+}
+
+impl LaneState {
+    fn block_key(&self, index: &Value) -> String {
+        format!(
+            "{}:{}",
+            self.current_message_id.as_deref().unwrap_or("anon"),
+            index.as_u64().unwrap_or(0)
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct ClaudeStreamState {
-    text_streamed: bool,
+    /// 按车道分家的消息级状态（键：主线 = `""`，sidechain = 其 `parent_tool_use_id`）。
+    ///
+    /// 在 `result`（轮次边界）整体清空：sidechain 属于单轮，留着只会在常驻会话里无界增长。
+    lanes: HashMap<String, LaneState>,
     /// **per-turn**：本轮是否已经发出过任何「正文」（模型回答 / 本地命令输出）。
     ///
-    /// 与 `text_streamed` **不是一回事**，别复用（spec 第 3 条）：后者是 **per-message** 的
-    /// 「这条消息已流式发过」标志，在 `message_start` 复位；本标志跨消息累积、在 `result`
-    /// （轮次边界）复位，用来判断「本轮到底有没有给用户任何正文」——A4 的 `result.result`
-    /// 兜底就靠它，否则一轮里流过正文之后再兜底一次会把回答重复一遍。
+    /// 与 `LaneState::text_streamed` **不是一回事**，别复用（spec 第 3 条）：后者是
+    /// **per-车道、per-message** 的「这条消息已流式发过」标志，在 `message_start` 复位；
+    /// 本标志跨消息累积、在 `result`（轮次边界）复位，用来判断「本轮到底有没有给**用户**
+    /// 任何正文」——A4 的 `result.result` 兜底就靠它，否则一轮里流过正文之后再兜底一次
+    /// 会把回答重复一遍。
     ///
     /// 只有真正的正文置位；系统提示（压缩中 / 权限被拒 / 任务失败等 blockquote）不算，
     /// 否则一条「正在压缩」提示就会把 `/cost` 的报告吞掉。
+    ///
+    /// **子 agent 的正文同样不算**：它根本没发给用户（sidechain 的正文不进主气泡），
+    /// 把它计入就会让「派过子任务的那一轮」永久失去 `result.result` 兜底。
+    /// 这条由 `emit_text` 只在主线路径被调用来保证。
     any_text_emitted: bool,
     /// 本会话已经收完的 `result` 轮次数。给 `claude_result_usage_snapshot` 的顶层回退开闸门。
     completed_result_turns: u32,
@@ -363,12 +481,15 @@ pub struct ClaudeStreamState {
     /// 本轮已经报过的 assistant 错误值，用于去重：同一次失败常在多条 assistant 帧上
     /// 重复出现，且 `result` 往往还会再报一次。
     reported_assistant_errors: HashSet<String>,
-    current_message_id: Option<String>,
-    blocks: HashMap<String, PendingContentBlock>,
     streamed_tool_use_ids: HashSet<String>,
 }
 
 impl ClaudeStreamState {
+    /// 取（或建）某条车道的消息级状态。`None` = 主线。
+    fn lane(&mut self, lane: Option<&str>) -> &mut LaneState {
+        self.lanes.entry(lane.unwrap_or_default().to_string()).or_default()
+    }
+
     /// 发一段**正文**（模型回答 / 本地命令输出），并置位 per-turn 的 `any_text_emitted`。
     /// 系统提示类的 blockquote 不要走这里——它们不该抑制 A4 的 `result.result` 兜底。
     fn emit_text(&mut self, sink: &mut dyn FnMut(UnifiedAgentEvent), delta: String) {
@@ -389,12 +510,23 @@ impl ClaudeStreamState {
         self.last_result_aborted
     }
 
-    pub fn handle_value(&mut self, value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) {        let obj = match value.as_object() {
+    pub fn handle_value(&mut self, value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) {
+        let obj = match value.as_object() {
             Some(o) => o,
             None => return,
         };
+        // 这一帧属于主线还是某个 `Task` 子会话（见 `frame_lane`）。子会话的内容**一律不进主线**：
+        // 它的正文不是给用户看的回答，它的工具调用也不是主时间线上的动作（一个 Task 里跑 20 个
+        // Read，平铺出来就是 20 张看不出层级的平级卡片）。子 agent 的产出由那个 `Task` 工具
+        // 自己的 `tool_result` 承载 —— 那条是主线帧，照常渲染。
+        let lane = frame_lane(obj);
+        let sidechain = lane.is_some();
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match kind {
+            // `system` 帧实测恒为主线。真要出现带 parent 的（子会话自己的 init / 压缩 /
+            // 本地命令输出），也**不能**照主线处理：`resolved_model` 会被子 agent 的模型
+            // （常是 haiku）覆盖，A8 的分母就会从当前模型的窗口跳到子 agent 的窗口。
+            "system" if sidechain => {}
             "system" => {
                 match obj.get("subtype").and_then(|v| v.as_str()) {
                     Some("init") => {
@@ -510,13 +642,19 @@ impl ClaudeStreamState {
             }
             "stream_event" => {
                 if let Some(event) = obj.get("event").and_then(|v| v.as_object()) {
-                    self.handle_stream_event(event, sink);
+                    self.handle_stream_event(lane, event, sink);
                 }
             }
             "assistant" => {
                 // A5：`error` / `aborted` 挂在**帧的顶层**（与 `message` 平级），不在
                 // `message` 里面。先处理它们——`max_output_tokens` 这类会让下面的正文
                 // 只是**半截回答**，提示必须跟着这一条一起出去。
+                //
+                // **sidechain 的错误照样上报**：子 agent 撞上认证失效 / 计费问题 / 上游故障
+                // 是真实失败（这一轮的 `Task` 也一定跟着废掉），静默是最坏的结果。截断 /
+                // 中止那两条是 blockquote 提示、按定义不算正文（不置位 `any_text_emitted`），
+                // 所以不会污染主回答的语义。per-turn 去重表两条车道共用：同一次上游故障在
+                // 主线和子会话上各报一次时，用户只需要看到一次。
                 let error_kind = obj
                     .get("error")
                     .and_then(|v| v.as_str())
@@ -549,7 +687,11 @@ impl ClaudeStreamState {
                             };
                             match block.get("type").and_then(|v| v.as_str()) {
                                 Some("text") => {
-                                    if !self.text_streamed {
+                                    // 子 agent 的自述不是主回答的一部分。
+                                    if sidechain {
+                                        continue;
+                                    }
+                                    if !self.lane(lane).text_streamed {
                                         if let Some(text) =
                                             block.get("text").and_then(|v| v.as_str())
                                         {
@@ -558,6 +700,10 @@ impl ClaudeStreamState {
                                     }
                                 }
                                 Some("tool_use") => {
+                                    // 子 agent 的工具调用不是主时间线上的动作。
+                                    if sidechain {
+                                        continue;
+                                    }
                                     let id = block
                                         .get("id")
                                         .and_then(|v| v.as_str())
@@ -583,6 +729,9 @@ impl ClaudeStreamState {
                     }
                 }
             }
+            // 子会话内部的 tool_result 属于子 agent 的时间线，主线没有对应的工具卡可更新
+            // （那些 tool_use 我们本来就没发）。放进来只会凭 id 撞上一张不相干的卡片。
+            "user" if sidechain => {}
             "user" => {
                 if let Some(message) = obj.get("message").and_then(|v| v.as_object()) {
                     if let Some(content) = message.get("content").and_then(|v| v.as_array()) {
@@ -619,6 +768,12 @@ impl ClaudeStreamState {
                 }
             }
             "result" => {
+                // 子会话不产出 `result`（实测每轮恰好一条，且恒为主线）。真出现了也不能当轮次
+                // 边界：那会把 per-turn 状态在本轮中途清掉，还会让 `completed_result_turns`
+                // （常驻会话的轮次边界信号）提前跳数，`run_turn` 会误判本轮已结束。
+                if sidechain {
+                    return;
+                }
                 // 用户中断的收尾必须**先**豁免：被打断的轮次同样带 `is_error: true`
                 // （见 `result_is_user_abort` 的实测形态），不豁免就会在「已取消」之后
                 // 再叠一个假错误气泡。豁免只看 `terminal_reason`，不削弱 spec 第 20 条。
@@ -695,6 +850,10 @@ impl ClaudeStreamState {
                 self.completed_result_turns = self.completed_result_turns.saturating_add(1);
                 self.any_text_emitted = false;
                 self.reported_assistant_errors.clear();
+                // 车道是 per-turn 的：sidechain 随它的 `Task` 一起结束，主线的消息状态也会由
+                // 下一轮的 `message_start` 重建。不清的话常驻会话里每派一次子任务就多一条
+                // 永不回收的车道。
+                self.lanes.clear();
             }
             "error" => {
                 sink(UnifiedAgentEvent::Error {
@@ -730,41 +889,73 @@ impl ClaudeStreamState {
         }
     }
 
-    fn block_key(&self, index: &Value) -> String {
-        format!(
-            "{}:{}",
-            self.current_message_id.as_deref().unwrap_or("anon"),
-            index.as_u64().unwrap_or(0)
-        )
-    }
-
+    /// 处理一条增量事件。`lane` 来自**外层帧**的 `parent_tool_use_id`（`None` = 主线）。
+    ///
+    /// claude 2.1.220 的 `stream_event` 恒为主线（九处构造点全写死 `parent_tool_use_id:null`，
+    /// 子会话内容以整块 assistant/user 帧到达），但 schema 是 `nullable()` 而非 `null` ——
+    /// 一次 CLI 升级把子会话的增量也放进来，全局单值的消息状态就会当场散架：并行子会话的
+    /// `message_start` 会互相复位「已流式发过」标志（主线正文重发一遍），块序号又都从 0 起
+    /// （工具参数串到别的卡上）。按车道寻址后这两件事在结构上不可能发生，代价是一个 HashMap。
     fn handle_stream_event(
         &mut self,
+        lane: Option<&str>,
         event: &serde_json::Map<String, Value>,
         sink: &mut dyn FnMut(UnifiedAgentEvent),
     ) {
+        let sidechain = lane.is_some();
         let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match event_type {
             "message_start" => {
-                // 新 assistant 消息开始:复位 `text_streamed`(N7)。否则上一条消息经 delta
-                // 流式发出后此标志一直为真,导致后续整块交付的 assistant 消息正文被永久跳过。
-                self.text_streamed = false;
-                self.current_message_id = event
+                // 新 assistant 消息开始:复位**本车道**的 `text_streamed`(N7)。否则上一条消息经
+                // delta 流式发出后此标志一直为真,导致后续整块交付的 assistant 消息正文被永久跳过。
+                let message_id = event
                     .get("message")
                     .and_then(|v| v.get("id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let state = self.lane(lane);
+                state.text_streamed = false;
+                state.current_message_id = message_id;
+                // 新一次请求 ⇒ 输入侧快照整体替换（不累加到上一次的数上，spec 第 3 条）。
+                state.request_input = None;
                 // `message.usage` 是服务端算出的本次请求真实上下文占用（系统提示 + 工具定义 +
                 // 全历史 + cache），且在**回答开始前**就到——用它让用量条在生成过程中就准确,
                 // 而不是等 turn 结束的 `result`。一轮内会多次 message_start,
                 // `run.rs` 后到覆盖先到 = 取最新快照,正是所需语义。
+                //
+                // **子会话的用量不是主线的用量**：子 agent 有自己独立的上下文窗口，把它的占用
+                // 报上来会让用量条在派子任务时跳到一个与主对话无关的数字。
+                if sidechain {
+                    return;
+                }
                 if let Some(usage) = event.get("message").and_then(|v| v.get("usage")) {
                     let parts = claude_usage_parts(usage);
+                    // 存下输入侧快照供 `message_delta` 的输出侧接上（见 `message_delta_usage`）。
+                    self.lane(lane).request_input = Some(parts.clone());
                     if !usage_parts_all_zero(&parts) {
                         sink(UnifiedAgentEvent::Usage {
                             usage: usage_from_parts(parts),
                         });
                     }
+                }
+            }
+            // **输出侧的实时通道**：claude 边生成边报本条消息已产出的 token
+            // （Anthropic 流协议的 `message_delta.usage`）。此前完全没接 ⇒ 一轮里分子只在
+            // 每次请求**开始**时跳一下，中间连着调十几次工具的漫长过程中数字一动不动。
+            //
+            // 与输入侧快照相加得到「此刻已用」；子会话同样不进主线（它有自己的上下文窗口）。
+            "message_delta" => {
+                if sidechain {
+                    return;
+                }
+                let Some(usage) = event.get("usage") else {
+                    return;
+                };
+                let request_input = self.lane(lane).request_input.clone();
+                if let Some(parts) = message_delta_usage(request_input.as_ref(), usage) {
+                    sink(UnifiedAgentEvent::Usage {
+                        usage: usage_from_parts(parts),
+                    });
                 }
             }
             "content_block_start" => {
@@ -776,31 +967,37 @@ impl ClaudeStreamState {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let key = self.block_key(event.get("index").unwrap_or(&Value::Null));
-                self.blocks.insert(
-                    key,
-                    PendingContentBlock {
-                        block_type,
-                        id: block.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                        name: block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        input_json: String::new(),
-                        input_value: block.get("input").cloned(),
-                    },
-                );
+                let pending = PendingContentBlock {
+                    block_type,
+                    id: block.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                    name: block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    input_json: String::new(),
+                    input_value: block.get("input").cloned(),
+                };
+                // sidechain 的块也照常记账（而不是丢弃）：不然它后续的 `input_json_delta`
+                // 会找不到宿主，一旦哪天要把子 agent 的动作渲染出来还得重来一遍。
+                let state = self.lane(lane);
+                let key = state.block_key(event.get("index").unwrap_or(&Value::Null));
+                state.blocks.insert(key, pending);
             }
             "content_block_delta" => {
                 if let Some(delta) = event.get("delta").and_then(|v| v.as_object()) {
                     match delta.get("type").and_then(|v| v.as_str()) {
                         Some("text_delta") => {
                             if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                                self.text_streamed = true;
-                                self.emit_text(sink, text.to_string());
+                                self.lane(lane).text_streamed = true;
+                                if !sidechain {
+                                    self.emit_text(sink, text.to_string());
+                                }
                             }
                         }
                         Some("thinking_delta") => {
+                            if sidechain {
+                                return;
+                            }
                             if let Some(text) = delta.get("thinking").and_then(|v| v.as_str()) {
                                 sink(UnifiedAgentEvent::ThinkingDelta {
                                     delta: text.to_string(),
@@ -808,12 +1005,14 @@ impl ClaudeStreamState {
                             }
                         }
                         Some("input_json_delta") => {
-                            let key = self.block_key(event.get("index").unwrap_or(&Value::Null));
-                            if let Some(state) = self.blocks.get_mut(&key) {
+                            let index = event.get("index").unwrap_or(&Value::Null).clone();
+                            let state = self.lane(lane);
+                            let key = state.block_key(&index);
+                            if let Some(block) = state.blocks.get_mut(&key) {
                                 if let Some(partial) =
                                     delta.get("partial_json").and_then(|v| v.as_str())
                                 {
-                                    state.input_json.push_str(partial);
+                                    block.input_json.push_str(partial);
                                 }
                             }
                         }
@@ -822,11 +1021,17 @@ impl ClaudeStreamState {
                 }
             }
             "content_block_stop" => {
-                let key = self.block_key(event.get("index").unwrap_or(&Value::Null));
-                let Some(state) = self.blocks.remove(&key) else {
+                let removed = {
+                    let index = event.get("index").unwrap_or(&Value::Null).clone();
+                    let state = self.lane(lane);
+                    let key = state.block_key(&index);
+                    state.blocks.remove(&key)
+                };
+                let Some(state) = removed else {
                     return;
                 };
-                if state.block_type != "tool_use" {
+                // 子会话的工具调用不进主时间线（块已从本车道摘掉，不泄漏）。
+                if sidechain || state.block_type != "tool_use" {
                     return;
                 }
                 let id = state.id.unwrap_or_else(|| "tool".to_string());
@@ -1045,6 +1250,81 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // ---- 输出侧的实时通道（`message_delta.usage`）----
+
+    /// claude 边生成边报输出量，而 `message_delta.usage` **只带 output**。
+    /// 必须与本次请求的输入侧快照相加；直接把它当完整快照上报会把输入侧（含 cache）冲掉。
+    #[test]
+    fn message_delta_output_is_added_to_the_request_input_snapshot() {
+        let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-1","usage":{"input_tokens":1200,"cache_read_input_tokens":45000,"cache_creation_input_tokens":300,"output_tokens":0}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":128}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":640}}}"#,
+        ]);
+        let reported = usages(&events);
+        assert_eq!(reported.len(), 3, "message_start 一条 + 两条 message_delta");
+        // 输入侧：1200 + 45000 + 300 = 46500（cache 计入，spec 第 14 条）。
+        assert_eq!(reported[0].total_tokens, Some(46_500));
+        // 输出侧接上去：46500 + 128 / 46500 + 640，且输入侧一个 token 都没丢。
+        assert_eq!(reported[1].total_tokens, Some(46_628));
+        assert_eq!(reported[1].input_tokens, Some(1_200));
+        assert_eq!(reported[1].cached_input_tokens, Some(45_000));
+        assert_eq!(reported[2].total_tokens, Some(47_140));
+        assert_eq!(reported[2].output_tokens, Some(640));
+        // 单调不减：这正是用户在长轮次里看到的「数字跟着涨」。
+        assert!(reported[2].total_tokens > reported[1].total_tokens);
+    }
+
+    /// 一轮里有多次 LLM 往返（每调一次工具就再来一次请求）。输入侧快照必须在**新一次请求
+    /// 开始**时整体替换，不能累加到上一次的数上（spec 第 3 条的复位语义）。
+    #[test]
+    fn a_new_request_replaces_the_input_snapshot_instead_of_accumulating() {
+        let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-1","usage":{"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":50}}}"#,
+            // 第二次请求：服务端报的 input 已含第一条消息的输出（1000 + 50 + 工具结果）。
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-2","usage":{"input_tokens":1200,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":20}}}"#,
+        ]);
+        let reported = usages(&events);
+        // 1220，不是 1000+50+1200+20 的累加值 2270。
+        assert_eq!(reported.last().unwrap().total_tokens, Some(1_220));
+    }
+
+    /// **子任务的用量绝不能混进主对话**：子 agent 有自己独立的上下文窗口，且常用便宜的小模型
+    /// （窗口小 5 倍）。分流（按帧上的 `parent_tool_use_id` 分车道）必须在实时通道**之前**，
+    /// 否则派子任务的那几秒用量条会跳到一个与主对话无关的数字再跳回来。
+    #[test]
+    fn sidechain_usage_never_reaches_the_main_conversation_realtime_value() {
+        let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-1","usage":{"input_tokens":40000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":100}}}"#,
+            // 子会话（Task 内部）的请求与增量：帧顶层带 parent_tool_use_id。
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub_1","event":{"type":"message_start","message":{"id":"s-1","usage":{"input_tokens":800,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub_1","event":{"type":"message_delta","usage":{"output_tokens":5000}}}"#,
+        ]);
+        let reported = usages(&events);
+        assert_eq!(reported.len(), 2, "子会话的两条上报都不该产出 Usage 事件");
+        assert_eq!(reported[0].total_tokens, Some(40_000));
+        assert_eq!(reported[1].total_tokens, Some(40_100));
+        // 子会话那条若漏进来，最后一个值会是 5800（或 45100），用量条当场乱跳。
+        assert!(
+            reported
+                .iter()
+                .all(|usage| usage.total_tokens.unwrap_or(0) >= 40_000),
+            "主对话的分子不得被子任务的小数字盖掉：{reported:?}"
+        );
+    }
+
+    /// 全零的 `message_delta`（刚开始生成、还没产出 token）不产出上报——推出去会让用量条闪 0。
+    #[test]
+    fn message_delta_without_any_tokens_reports_nothing() {
+        let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":0}}}"#,
+        ]);
+        assert!(usages(&events).is_empty());
     }
 
     #[test]
@@ -1946,6 +2226,258 @@ mod tests {
                 "{raw} 不应产出用户可见文本：{events:?}"
             );
         }
+    }
+
+    // ---- sidechain：`Task` 子会话的消息不得混进主线 ----
+
+    fn tool_uses(events: &[UnifiedAgentEvent]) -> Vec<(String, String, Value)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_result_ids(events: &[UnifiedAgentEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **本轮修复的核心场景（实测线形）**：主线派两个 `Task` 并行跑，两个子会话的消息在同一条
+    /// stdout 上交错到达。claude 2.1.220 实测子会话内容以**整块** assistant / user 帧到达
+    /// （`stream_event` 的九处构造点全是 `parent_tool_use_id:null`），帧顶层带
+    /// `parent_tool_use_id` + `subagent_type`。
+    ///
+    /// 修复前的三处可证伪症状（本例把三处一次性钉住）：
+    ///   1. 派 `Task` 的那条主线消息没有正文 ⇒ `text_streamed` 为假 ⇒ **每一条**子 agent 的
+    ///      自述都被当成主回答的增量吐出去，用户读到的「回答」里夹着子 agent 的独白；
+    ///   2. 子 agent 的 `Read` 成为**顶层**工具卡，与主线的 `Task` 平级排在一起（一个 Task 里
+    ///      跑 20 个 Read 就是 20 张看不出层级的卡）；
+    ///   3. 子 agent 的 `tool_result` 也进主线，凭 id 去撞主线的工具卡。
+    #[test]
+    fn parallel_sidechains_do_not_leak_into_the_main_answer_or_timeline() {
+        let events = run(&[
+            // 主线消息：**没有**正文，直接并排派两个 Task（modelled after a real turn）。
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m-main"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu-task-a","name":"Task"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"subagent_type\":\"Explore\",\"prompt\":\"查 A\"}"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu-task-b","name":"Task"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"subagent_type\":\"Explore\",\"prompt\":\"查 B\"}"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":1}}"#,
+            // 两个子会话交错。
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-task-a","subagent_type":"Explore","message":{"id":"m-a1","role":"assistant","content":[{"type":"text","text":"我是子 agent A，先读一下文件。"}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-task-b","subagent_type":"Explore","message":{"id":"m-b1","role":"assistant","content":[{"type":"tool_use","id":"toolu-b-read","name":"Read","input":{"file_path":"b.txt"}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-task-a","message":{"id":"m-a2","role":"assistant","content":[{"type":"tool_use","id":"toolu-a-read","name":"Read","input":{"file_path":"a.txt"}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu-task-b","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-b-read","content":"b 的内容"}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu-task-a","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-a-read","content":"a 的内容"}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-task-b","message":{"id":"m-b2","role":"assistant","content":[{"type":"text","text":"我是子 agent B，结论是 42。"}]}}"#,
+            // 两个 Task 的结果回到主线（这两条才是用户该看到的工具卡收尾）。
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-task-a","content":"A 的结论"}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-task-b","content":"B 的结论"}]}}"#,
+            // 主线据此给出真正的回答。
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m-main2"}}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m-main2","role":"assistant","content":[{"type":"text","text":"两个子任务都完成了，答案是 42。"}]}}"#,
+        ]);
+
+        // 1）主回答里只有主线自己的正文：既没夹带子 agent 的自述，也没有重复。
+        assert_eq!(
+            texts(&events),
+            "两个子任务都完成了，答案是 42。",
+            "子 agent 的正文混进了主回答（或主回答被重发）：{events:?}"
+        );
+        // 2）顶层工具卡只有主线的两个 Task，子 agent 的 Read 不占主时间线。
+        let uses: Vec<String> = tool_uses(&events).into_iter().map(|(id, _, _)| id).collect();
+        assert_eq!(
+            uses,
+            vec!["toolu-task-a".to_string(), "toolu-task-b".to_string()],
+            "子 agent 的工具调用成了顶层工具卡：{uses:?}"
+        );
+        // 3）只有 Task 自己的 tool_result 更新主线的卡片。
+        assert_eq!(
+            tool_result_ids(&events),
+            vec!["toolu-task-a".to_string(), "toolu-task-b".to_string()],
+            "子 agent 的 tool_result 进了主线：{events:?}"
+        );
+    }
+
+    /// **状态机层的防线**：把子会话的**增量**帧也放进来（并行两条），断言两件可证伪的事——
+    /// 主线正文不重复、工具参数不串卡。
+    ///
+    /// claude 2.1.220 的 `stream_event` 恒为主线，但其 schema 是
+    /// `parent_tool_use_id: v.string().nullable()`；一次 CLI 升级把子会话的增量放进来，
+    /// 全局单值的「当前消息 id / 已流式发过」就会当场散架：
+    ///   - A 的 `message_start` → B 的 `message_start` → A 的整块 assistant 帧到达时，
+    ///     「已流式发过」已被 B 复位 ⇒ **A 已经流式发出的正文被完整重发一遍**；
+    ///   - 并行车道的块序号都从 0 开始而「当前消息 id」只有一个 ⇒ 块寻址撞车 ⇒
+    ///     **主线的工具参数被追加到子会话的块上**，最后连工具名和 id 都换成了别人的。
+    #[test]
+    fn interleaved_sidechain_stream_events_neither_duplicate_text_nor_cross_tool_arguments() {
+        let events = run(&[
+            // 主线开始流式回答。
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m-main"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"主线答案"}}}"#,
+            // 主线开一个工具块（index 0 —— 两条子车道也会用 index 0）。
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu-main","name":"Grep"}}}"#,
+            // 两条子会话各自开始一条新消息 + 一个 index 相同的工具块。
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-a","event":{"type":"message_start","message":{"id":"m-a"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-a","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu-a-read","name":"Read"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-b","event":{"type":"message_start","message":{"id":"m-b"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-b","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu-b-bash","name":"Bash"}}}"#,
+            // 三条车道的参数增量交错到达。
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"needle\"}"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-a","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"a.txt\"}"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-b","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls\"}"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-a","event":{"type":"content_block_stop","index":1}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":1}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-b","event":{"type":"content_block_stop","index":1}}"#,
+            // 主线那条消息的整块 twin 帧（claude 每条流式消息都会再整块发一次）。
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m-main","role":"assistant","content":[{"type":"text","text":"主线答案"}]}}"#,
+        ]);
+
+        assert_eq!(
+            texts(&events),
+            "主线答案",
+            "并行子会话把主线正文重发了一遍：{events:?}"
+        );
+        let uses = tool_uses(&events);
+        assert_eq!(uses.len(), 1, "顶层只该有主线那一个工具：{uses:?}");
+        assert_eq!(uses[0].0, "toolu-main", "工具卡的 id 串到了子会话上");
+        assert_eq!(uses[0].1, "Grep", "工具卡的名字串到了子会话上");
+        assert_eq!(
+            uses[0].2,
+            serde_json::json!({"pattern": "needle"}),
+            "工具参数串到了别的卡上"
+        );
+    }
+
+    /// 子 agent 的正文**不算**「本轮已经给过用户正文」——它压根没发给用户。
+    /// 算进去的话，派过子任务的那一轮就永久失去 `result.result` 兜底
+    /// （`/cost` 这类客户端斜杠命令的唯一输出通道）。
+    #[test]
+    fn sidechain_text_does_not_consume_this_turns_result_fallback() {
+        let events = run(&[
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-task-a","message":{"id":"m-a","role":"assistant","content":[{"type":"text","text":"子 agent 的一大段自述"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Total cost: $1.23","usage":{"input_tokens":0,"output_tokens":0,"iterations":[]}}"#,
+        ]);
+        assert_eq!(
+            texts(&events),
+            "Total cost: $1.23",
+            "子 agent 的正文既不该露出，也不该吞掉本轮的 result 兜底：{events:?}"
+        );
+    }
+
+    /// 子会话有**自己独立的上下文窗口**：把它的 `message_start.usage` 报上来，用量条会在
+    /// 派子任务的瞬间跳到一个与主对话无关的数字。
+    #[test]
+    fn sidechain_usage_does_not_move_the_main_context_bar() {
+        let events = run(&[
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m-main","usage":{"input_tokens":1200,"cache_read_input_tokens":45000,"cache_creation_input_tokens":300,"output_tokens":0}}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-a","event":{"type":"message_start","message":{"id":"m-a","usage":{"input_tokens":900,"cache_read_input_tokens":8000,"cache_creation_input_tokens":0,"output_tokens":0}}}}"#,
+        ]);
+        let all = usages(&events);
+        assert_eq!(all.len(), 1, "子会话的用量被当成主线上报了：{events:?}");
+        assert_eq!(all[0].total_tokens, Some(46_500));
+    }
+
+    /// `system` 帧实测恒为主线；真出现带 parent 的也不能照主线处理——子 agent 常跑 haiku，
+    /// 让它覆盖 `resolved_model` 会把 A8 的分母换成子 agent 的窗口（本例：1M → 200K，
+    /// 压缩阈值会在真实占用 20% 时就触发）。
+    #[test]
+    fn sidechain_system_init_does_not_hijack_the_resolved_model() {
+        // 会话累计 map 里同时有主线模型与子 agent 的 haiku —— 认错模型就会拿到 200K。
+        let model_usage = serde_json::json!({
+            "claude-opus-4-8[1M]": {"contextWindow": 1_000_000, "canonicalModel": "claude-opus-4-8"},
+            "claude-haiku-4-5": {"contextWindow": 200_000, "canonicalModel": "claude-haiku-4-5"},
+        });
+        let events = run(&[
+            r#"{"type":"system","subtype":"init","model":"claude-opus-4-8[1M]","slash_commands":[]}"#,
+            r#"{"type":"system","subtype":"init","parent_tool_use_id":"toolu-task-a","model":"claude-haiku-4-5","slash_commands":[]}"#,
+            &format!(
+                r#"{{"type":"result","subtype":"success","is_error":false,
+                   "modelUsage":{model_usage},
+                   "usage":{{"input_tokens":7037,"output_tokens":4,
+                     "cache_read_input_tokens":31792,"cache_creation_input_tokens":182,
+                     "iterations":[]}}}}"#
+            ),
+        ]);
+        let usage = usages(&events).pop().expect("result 应产出 Usage");
+        assert_eq!(
+            usage.context_window_tokens,
+            Some(1_000_000),
+            "分母被子 agent 的模型带偏了：{events:?}"
+        );
+    }
+
+    /// 主线的判据必须认 `null` 与缺失两种写法：真实样本里主线写的是
+    /// `"parent_tool_use_id": null`，把它错判成 sidechain 会让整条主线消失。
+    #[test]
+    fn explicit_null_or_missing_parent_id_is_the_main_line() {
+        for raw in [
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            // 形状异常（空串 / 非字符串）一律当主线：宁可多显示，也不要整轮回答凭空消失。
+            r#"{"type":"assistant","parent_tool_use_id":"","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":42,"message":{"id":"m","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+        ] {
+            assert_eq!(texts(&run(&[raw])), "hi", "{raw} 被误判成了 sidechain");
+        }
+    }
+
+    /// 子会话不发 `result`。真发了也不能当轮次边界：会在本轮中途清掉 per-turn 状态，
+    /// 还会让 `completed_result_turns`（常驻会话的轮次边界信号）提前跳数 ⇒ `run_turn`
+    /// 误判本轮已结束，把后半截回答留在流里。
+    #[test]
+    fn sidechain_result_is_not_a_turn_boundary() {
+        let mut state = ClaudeStreamState::default();
+        let feed = |state: &mut ClaudeStreamState, raw: &str| {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            state.handle_value(&value, &mut |_| {});
+        };
+        feed(
+            &mut state,
+            r#"{"type":"result","parent_tool_use_id":"toolu-task-a","subtype":"success","usage":{"input_tokens":5,"output_tokens":1}}"#,
+        );
+        assert_eq!(state.completed_result_turns(), 0, "子会话的 result 被当成了轮次边界");
+        feed(
+            &mut state,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":1}}"#,
+        );
+        assert_eq!(state.completed_result_turns(), 1);
+    }
+
+    /// 车道是 per-turn 的：常驻会话里每派一次子任务就多一条车道，不在轮次边界回收就是
+    /// 一个随对话长度单调增长的 map。
+    #[test]
+    fn lanes_are_reclaimed_at_the_turn_boundary() {
+        let mut state = ClaudeStreamState::default();
+        let feed = |state: &mut ClaudeStreamState, raw: &str| {
+            let value: Value = serde_json::from_str(raw).unwrap();
+            state.handle_value(&value, &mut |_| {});
+        };
+        feed(
+            &mut state,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-main"}}}"#,
+        );
+        feed(
+            &mut state,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu-task-a","event":{"type":"message_start","message":{"id":"m-a"}}}"#,
+        );
+        assert_eq!(state.lanes.len(), 2);
+        feed(
+            &mut state,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":1}}"#,
+        );
+        assert!(state.lanes.is_empty(), "轮次结束后车道没回收");
     }
 
     /// 真机（AC8）：本机嵌套 claude 未登录，跑一次真实 CLI，断言**可证伪的量**——

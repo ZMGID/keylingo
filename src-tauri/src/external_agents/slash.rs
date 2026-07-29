@@ -179,7 +179,9 @@ pub async fn list_external_cli_slash_commands(
             let resolved_bin = resolve_binary(def)
                 .await
                 .ok_or_else(|| format!("无法定位 {} 可执行文件", def.bin))?;
-            let args = (def.build_args)(&runtime_ctx, &build_options, None);
+            let args = crate::external_agents::defs::claude::ephemeral_probe_args(
+                &(def.build_args)(&runtime_ctx, &build_options, None),
+            );
             probe_claude_slash_commands(&resolved_bin, Path::new(&cwd), &args).await?
         }
         SlashStrategy::Acp => {

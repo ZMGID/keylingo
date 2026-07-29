@@ -173,8 +173,20 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// **失效策略**：key 用「路径 + mtime + size」。用户换版本、重装、切版本管理器
 /// 都会改变其中之一 ⇒ 自动失效重探；不需要 TTL，也就不会有「刚装好却要等 N 秒」
 /// 或「删了还认为在」的窗口。文件读不到 metadata 时不写缓存（下次重探）。
-static PROBE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, bool>>> =
+///
+/// **顺带存下版本号**：探活本来就跑了 `--version`，此前把 stdout 丢进 `/dev/null`。
+/// 把它接住存进同一条缓存，列表阶段就能做版本门控（如「当前 CLI 太老，不提供新模型」）
+/// 而**不新起任何进程** —— spec 第 9 条要求回复热路径零探测，另起一次 `--version`
+/// 会违反它。缓存 key 已含文件身份，换版本自然失效。
+static PROBE_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, ProbeOutcome>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// 一次探活的结果：能否启动 + `--version` 首行（拿不到则 `None`）。
+#[derive(Debug, Clone)]
+struct ProbeOutcome {
+    executable: bool,
+    version: Option<String>,
+}
 
 /// 缓存 key：把文件身份（mtime + size）编进去，文件一变就自然 miss。
 fn probe_cache_key(path: &Path) -> Option<String> {
@@ -203,16 +215,22 @@ pub async fn resolve_binary(def: &RuntimeAgentDef) -> Option<PathBuf> {
         for path in which_all(candidate).await {
             let key = probe_cache_key(&path);
             if let Some(key) = key.as_deref() {
-                if let Some(cached) = PROBE_CACHE.lock().ok().and_then(|c| c.get(key).copied()) {
-                    if cached {
+                if let Some(cached) = PROBE_CACHE.lock().ok().and_then(|c| c.get(key).cloned()) {
+                    if cached.executable {
                         return Some(path);
                     }
                     continue;
                 }
             }
-            let ok = probe_executable(&path, def.version_args).await;
+            let (ok, version) = probe_executable(&path, def.version_args).await;
             if let (Some(key), Ok(mut cache)) = (key, PROBE_CACHE.lock()) {
-                cache.insert(key, ok);
+                cache.insert(
+                    key,
+                    ProbeOutcome {
+                        executable: ok,
+                        version,
+                    },
+                );
             }
             if ok {
                 return Some(path);
@@ -220,6 +238,23 @@ pub async fn resolve_binary(def: &RuntimeAgentDef) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 探活时顺手记下的 CLI 版本号（`--version` 首行），**不起任何新进程**。
+///
+/// 由 `resolve_binary` 的探活填充；缓存 key 含文件身份（路径 + mtime + size），
+/// 换版本/重装自动失效。返回 `None` 的情况：这个路径还没被探活过、`--version`
+/// 没有可用输出、或者拿不到文件 metadata（不写缓存那一路）。
+///
+/// 调用方拿 `None` 时**不得**因此禁用功能（spec 第 9 条：不许为补版本号再起进程）；
+/// 语义应是「未知 ⇒ 不做版本门控」。
+pub fn cached_cli_version(path: &Path) -> Option<String> {
+    let key = probe_cache_key(path)?;
+    PROBE_CACHE
+        .lock()
+        .ok()?
+        .get(&key)
+        .and_then(|entry| entry.version.clone())
 }
 
 /// 一个候选是否**可执行**（不是「是否可用」）。
@@ -236,28 +271,55 @@ pub async fn resolve_binary(def: &RuntimeAgentDef) -> Option<PathBuf> {
 /// - 装了但未登录（exit 1）→ **spawn 成功**，视为存在
 ///
 /// 超时也算存在：进程都起来了，说明文件确实是可执行的，只是这个 CLI 的 `--version` 慢。
-async fn probe_executable(path: &Path, version_args: &[&str]) -> bool {
+///
+/// 返回 `(能否启动, --version 首行)`。第二项**只是搭便车**：这次子进程本来就要跑，
+/// 顺手把 stdout 接住给版本门控用（此前是 `Stdio::null()` 直接丢掉）。它拿不到时一律
+/// `None`，绝不影响第一项的判定 —— 未登录的 CLI 完全可能既非零退出又没有版本输出。
+async fn probe_executable(path: &Path, version_args: &[&str]) -> (bool, Option<String>) {
     let mut command = cli_command(path);
     command
         .args(version_args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .no_console_window()
         .kill_on_drop(true);
-    let mut child = match command.spawn() {
+    let child = match command.spawn() {
         Ok(child) => child,
         // spawn 失败 = 这个候选不是个能跑的可执行文件（EACCES / ENOEXEC / ENOENT）。
-        Err(_) => return false,
+        Err(_) => return (false, None),
     };
-    match timeout(PROBE_TIMEOUT, child.wait()).await {
+    // 超时时这个 future 被丢弃 ⇒ 连带丢弃 Child ⇒ `kill_on_drop(true)` 收尾，
+    // 与改动前的显式 `start_kill()` 等价。
+    match timeout(PROBE_TIMEOUT, child.wait_with_output()).await {
         // 起来了就算存在，**不看退出码**（见上方注释）。
-        Ok(_) => true,
-        Err(_) => {
-            let _ = child.start_kill();
-            true
-        }
+        Ok(Ok(output)) => (
+            true,
+            first_version_line(&String::from_utf8_lossy(&output.stdout)),
+        ),
+        Ok(Err(_)) => (true, None),
+        Err(_) => (true, None),
     }
+}
+
+/// `--version` 输出里的版本行：首个非空行，裁到 `VERSION_LINE_CAP` 字符。
+///
+/// 刻意不解析结构（不同 CLI 形态差异极大：claude 是 `2.1.220 (Claude Code)`、
+/// codex 是 `codex-cli 0.145.0`）——比较语义留给使用方，这里只负责「原样记一行」。
+fn first_version_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| tail_chars_head(line, VERSION_LINE_CAP))
+}
+
+const VERSION_LINE_CAP: usize = 200;
+
+/// 取前 `max_chars` 个字符（char 边界安全）。与 `tail_chars` 对称，用于给版本行封顶：
+/// 坏 shim 可能把一整篇日志打在一行里。
+fn tail_chars_head(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 /// PATH 上某个名字的**全部**同名候选，按 PATH 顺序。
@@ -581,6 +643,31 @@ mod tests {
         let tail = accumulate_tail("\n\nhello\n\nworld\n".as_bytes(), 8192).await;
         assert_eq!(tail, "hello\nworld");
     }
+
+    /// 版本行提取：首个非空行、原样保留（不解析结构）、超长封顶。
+    /// 各 CLI 的 `--version` 形态差异极大，任何「解析成 semver」的尝试都会在某家上错。
+    #[test]
+    fn version_line_is_the_first_non_empty_line_verbatim() {
+        // claude 2.1.220 本机实测输出。
+        assert_eq!(
+            first_version_line("2.1.220 (Claude Code)\n").as_deref(),
+            Some("2.1.220 (Claude Code)")
+        );
+        // 前导空行 / banner 换行不影响。
+        assert_eq!(
+            first_version_line("\n\n  codex-cli 0.145.0  \nextra\n").as_deref(),
+            Some("codex-cli 0.145.0")
+        );
+        // 没有输出（未登录的 CLI 把话都说在 stderr 上）→ None。
+        assert_eq!(first_version_line(""), None);
+        assert_eq!(first_version_line("\n \n"), None);
+        // 坏 shim 可能把一整篇日志打在一行里 → 封顶，不把缓存撑爆。
+        let long = "x".repeat(5000);
+        assert_eq!(
+            first_version_line(&long).map(|v| v.chars().count()),
+            Some(VERSION_LINE_CAP)
+        );
+    }
 }
 
 // 整模块只在 unix 下编译：每个用例都靠写 shell 脚本 + chmod 造「能跑的 / 坏掉的」二进制，
@@ -643,7 +730,10 @@ mod probe_tests {
     async fn probe_accepts_a_working_binary() {
         let f = Fixtures::new("ok");
         let good = f.script("good", "#!/bin/sh\necho v1.2.3\n");
-        assert!(probe_executable(&good, &["--version"]).await);
+        let (ok, version) = probe_executable(&good, &["--version"]).await;
+        assert!(ok);
+        // 探活顺手把版本行接住了（此前 stdout 丢进 null，版本门控只能另起一次进程）。
+        assert_eq!(version.as_deref(), Some("v1.2.3"));
     }
 
     /// **最重要的一条**：装了但没登录的 CLI，`--version` 非零退出——
@@ -653,19 +743,19 @@ mod probe_tests {
     async fn probe_accepts_nonzero_exit_because_unauthenticated_clis_exit_nonzero() {
         let f = Fixtures::new("notauth");
         let notauth = f.script("notauth", "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n");
-        assert!(
-            probe_executable(&notauth, &["--version"]).await,
-            "非零退出被当成不存在——未登录的 CLI 会被误判为未安装"
-        );
+        let (ok, version) = probe_executable(&notauth, &["--version"]).await;
+        assert!(ok, "非零退出被当成不存在——未登录的 CLI 会被误判为未安装");
+        // 版本拿不到（输出全在 stderr）时必须是 None，且**不影响**「存在」的判定。
+        assert_eq!(version, None);
     }
 
     #[tokio::test]
     async fn probe_rejects_broken_shims() {
         let f = Fixtures::new("broken");
         // EACCES：丢了执行权限
-        assert!(!probe_executable(&f.unreadable("noexec"), &["--version"]).await);
+        assert!(!probe_executable(&f.unreadable("noexec"), &["--version"]).await.0);
         // ENOENT：路径根本不存在（等价于断掉的 symlink）
-        assert!(!probe_executable(&f.0.join("missing"), &["--version"]).await);
+        assert!(!probe_executable(&f.0.join("missing"), &["--version"]).await.0);
     }
 
     /// 挂了执行位的**空文件**在 unix 上是能跑的：内核回退到 `/bin/sh`，
@@ -678,7 +768,7 @@ mod probe_tests {
     #[tokio::test]
     async fn probe_accepts_empty_executable_because_the_kernel_runs_it() {
         let f = Fixtures::new("emptyexec");
-        assert!(probe_executable(&f.empty_exec("empty"), &["--version"]).await);
+        assert!(probe_executable(&f.empty_exec("empty"), &["--version"]).await.0);
     }
 
     #[tokio::test]
@@ -687,7 +777,7 @@ mod probe_tests {
         let f = Fixtures::new("slow");
         let slow = f.script("slow", "#!/bin/sh\nsleep 30\n");
         let started = std::time::Instant::now();
-        assert!(probe_executable(&slow, &["--version"]).await);
+        assert!(probe_executable(&slow, &["--version"]).await.0);
         assert!(
             started.elapsed() < PROBE_TIMEOUT + Duration::from_secs(2),
             "超时守卫没生效，探活被挂死"
@@ -786,18 +876,31 @@ mod probe_tests {
                 .unwrap_or(0)
         };
 
-        assert!(probe_executable(&bin, &["--version"]).await);
+        assert!(probe_executable(&bin, &["--version"]).await.0);
         assert_eq!(count(), 1, "第一次应真的启动一次");
 
         // 走 resolve_binary 的缓存路径：同一个 key 命中后不得再起进程。
         let key = probe_cache_key(&bin).expect("metadata");
-        PROBE_CACHE.lock().unwrap().insert(key.clone(), true);
+        PROBE_CACHE.lock().unwrap().insert(
+            key.clone(),
+            ProbeOutcome {
+                executable: true,
+                version: Some("9.9.9".to_string()),
+            },
+        );
         assert_eq!(
-            PROBE_CACHE.lock().unwrap().get(&key).copied(),
+            PROBE_CACHE
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|entry| entry.executable),
             Some(true),
             "缓存未写入"
         );
         assert_eq!(count(), 1, "缓存命中后不应再启动子进程");
+        // 版本号也要能从同一条缓存读回来——版本门控靠它，且**不得**为此再起进程。
+        assert_eq!(cached_cli_version(&bin).as_deref(), Some("9.9.9"));
+        assert_eq!(count(), 1, "读版本号不应启动子进程");
     }
 
     #[tokio::test]

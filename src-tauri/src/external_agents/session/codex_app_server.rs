@@ -582,6 +582,12 @@ impl CodexAppServerSession {
         &self.thread_id
     }
 
+    /// 常驻子进程的 pid。只作为注册表元数据（诊断 / 「两轮是不是同一个进程」），
+    /// 关停一律走 actor 的 `Close`，绝不按 pid 杀。
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     /// Run one turn over the live thread. Emits events into `events`; polls `control` so an
     /// incoming `Cancel` sends `turn/interrupt` (without killing the process). Does NOT close stdin.
     pub async fn run_turn(

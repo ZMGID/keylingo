@@ -23,7 +23,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
@@ -47,6 +47,14 @@ const CLAUDE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_POLL: Duration = Duration::from_millis(200);
 /// 连续可恢复读错误的上限：防止一个反复报错的 pipe 把读循环变成忙等。
 const MAX_RECOVERABLE_READ_ERRORS: u32 = 32;
+
+/// 取消之后，最多把多少帧当成「上一轮的残帧」丢掉（见 `stale_frames_left`）。
+///
+/// 窗口的**正常**关闭条件是下一轮的 `system/init`（实测每轮都发、且在本轮任何正文之前），
+/// 这个数字只是「init 万一不来」时的兜底闸门 —— 少了它，一次取消就可能把后面所有输出
+/// 永久吞掉，那比原来的 bug 更糟。实测一轮取消后的残帧最多也就 assistant + result 两三条，
+/// 64 有两个数量级的余量。
+const STALE_FRAME_BUDGET: u32 = 64;
 
 /// Windows `ERROR_OPERATION_ABORTED`：中断/取消会让挂起的 pipe 读以这个 errno 返回。
 const WINDOWS_ERROR_OPERATION_ABORTED: i32 = 995;
@@ -101,6 +109,174 @@ enum ReadStep {
     Fatal(String),
 }
 
+/// stdout 上这一帧该怎么处理。
+///
+/// 常驻之后 stdout 上不只有「本轮的内容」：控制通道（`control_request` /
+/// `control_response` / `control_cancel_request`）和心跳（`keep_alive`）与内容帧混在同一条流里。
+/// 白名单分流，剩下的交给流解析器 —— 但**绝不能对一条在等回复的 `control_request` 保持沉默**。
+enum InboundFrame {
+    /// 交给流解析器（正文 / 工具 / usage / 轮次边界）。
+    Stream,
+    /// 控制通道的帧，**有意不接**且不需要回复。
+    Ignore,
+    /// claude 在等我们回复：把这一整行写回 stdin。
+    Reply(String),
+}
+
+/// claude 在 stream-json 下能**向我们**发出的、需要回复的 `control_request` 子型。
+///
+/// **协议事实**（claude 2.1.220，`grep -a` 读本机二进制里的 zod schema 与 `sendRequest` 构造处）：
+/// CLI→客户端的 `control_request.request` 是一个 12 成员 union
+/// （`can_use_tool` / `request_user_dialog` / `elicitation` / `set_cwd` / `message_rated` /
+/// `oauth_token_refresh` / `host_auth_token_refresh` / `stop_task` / `background_tasks` /
+/// `apply_flag_settings` / `get_settings` / `submit_feedback`），全都是「问我们、等我们答」。
+///
+/// 我们一种都没实现，所以这里**不列白名单**：任何 `control_request` 一律回一条 error。
+/// 下一个任务实现权限问答时，在 `classify_inbound_frame` 里给 `can_use_tool` 加一条分支即可
+/// （请求侧字段形状是 snake_case：`tool_name` / `input` / `tool_use_id` / `permission_suggestions`
+/// / `blocked_path` / `decision_reason`；而**成功响应**的载荷是 camelCase 的
+/// `{behavior, updatedInput?, updatedPermissions?, message?}` —— 这条协议两套命名混用，
+/// 已从二进制核实，别照一侧推另一侧），其余仍走这条 fail-closed 的兜底。
+const UNSUPPORTED_CONTROL_REQUEST: &str = "Kivio 尚不支持这个控制请求";
+
+/// 分流一帧 stdout JSON。
+fn classify_inbound_frame(value: &Value) -> InboundFrame {
+    let Some(obj) = value.as_object() else {
+        return InboundFrame::Stream;
+    };
+    match obj.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        // **必须回复**：claude 发出 `control_request` 之后就挂在那儿等 `control_response`
+        // （它自己那侧是 `pendingRequests` 里的一个 Promise，**没有超时**）。我们不回 ⇒ 那个
+        // 工具调用永远不返回 ⇒ 本轮的 `result` 永远不来 ⇒ 轮次读循环永久挂死。
+        //
+        // **claude 2.1.220 在我们这套 argv 下实测不会发**（两条独立证据，别把这条当成
+        // 「修了一个正在发生的挂死」）：
+        //   1. 真机：`--permission-mode default` + 让它写文件，权限被**直接拒**
+        //      （result 里是「The write needs your permission to proceed」），stdout 上
+        //      一条 `control_request` 都没有；
+        //   2. 二进制：`can_use_tool` / `request_user_dialog` 的发送端（`qHS` / `zHS`）
+        //      只挂在 **REPL / remote bridge** 那条传输上（`replBridgePermissionCallbacks`），
+        //      纯 stdio 的 `-p` 走的是 `--permission-prompt-tool` 或直接拒。
+        //
+        // 那为什么还要写这一手：这是**保障**而不是绕过。整套机制在这个二进制里是完整的
+        // （`can_use_tool` 出现 35 次、`control_cancel_request` 33 次），schema 里 CLI→客户端
+        // 的 `control_request` 是个 12 成员 union；哪天它开始走 stdio、或用户装了别的版本 /
+        // 换了权限档位，沉默的代价是**那一轮永久挂死**（读循环没有超时）。回一条 error 的
+        // 代价只是「这一次工具用不了」。
+        "control_request" => match request_id_of(obj) {
+            Some(request_id) => {
+                let subtype = obj
+                    .get("request")
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                InboundFrame::Reply(control_error_response_line(&request_id, &subtype))
+            }
+            // 没有 `request_id` 就无从回复（CLI 自己的校验也会把这种帧判成
+            // `Error: Missing request on control_request`）。只能丢掉。
+            None => InboundFrame::Ignore,
+        },
+        // 我们**发出**的 `interrupt` 的应答。**有意不接**：取消的权威信号是那一轮的 `result`
+        // （实测被中断的轮次一定有一条，`terminal_reason:"aborted_streaming"`），
+        // 而这条 ack 可能在我们已经返回之后才到。读它没有任何决策价值。
+        "control_response" => InboundFrame::Ignore,
+        // claude 撤回它先前发给我们的某个 `control_request`（例如权限询问已在别处被答掉）。
+        // **有意不接**：实测 CLI 自己收到这条时也只是 abort 掉在飞的请求、**不回任何东西**
+        // （二进制里 `case "control_cancel_request"` 分支只有 `Hn?.abort(...)`），所以静默忽略
+        // 是对的。等实现了权限问答，这里要改成「取消那条待答的询问」。
+        "control_cancel_request" => InboundFrame::Ignore,
+        // 心跳。schema 是 `{type:"keep_alive"}`（无字段、无 request_id），CLI 自己的两个读取点
+        // 都是直接 `continue` / `return` —— **没有任何需要回应的语义**，静默忽略即正确处理。
+        "keep_alive" => InboundFrame::Ignore,
+        _ => InboundFrame::Stream,
+    }
+}
+
+fn request_id_of(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    obj.get("request_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 一条 fail-closed 的 `control_response`（含结尾换行）。
+///
+/// **协议形状**（claude 2.1.220，从本机二进制核实，两处互相印证）：
+/// 1. CLI 自己构造错误响应的地方 ——
+///    `{type:"control_response",response:{subtype:"error",request_id:<回显>,error:<字符串>}}`；
+/// 2. zod schema —— `control_response.response` 是 success | error 的 union，
+///    error 分支是 `{subtype:"error", request_id: string, error: string}`。
+///
+/// 两个容易踩的点：
+/// - **`request_id` 嵌在 `response` 里面**，不是帧顶层（顶层只有 `type`；远程 bridge 会再挂一个
+///   `session_id`，stdio 这条路不需要）。放错层级 = CLI 匹配不到，等于没回；
+/// - 这条协议**两套命名混用**：请求侧与这三个字段是 snake_case，而 `can_use_tool` 的**成功**
+///   载荷是 camelCase（`behavior` / `updatedInput` / `updatedPermissions`）。错误分支只用
+///   snake_case 三件套，别顺手写成 camelCase。
+///
+/// 真机核实（2026-07-29）：往 stdin 写一条这样的响应（`request_id` 是 CLI 从没问过的），
+/// CLI 照常处理紧随其后的 user 消息（init → assistant → result），stderr 零字节、流不受污染。
+/// 而对一条**真实**的询问回 error 时，CLI 那侧是 `pendingRequests` 的 promise 被 reject
+/// （二进制：`if(t.response.subtype==="error"){o.reject(Error(t.response.error))}`）
+/// ⇒ 那次工具调用按失败收场、本轮照常收尾 —— 正是 fail-closed 想要的：宁可这一次工具用不了，
+/// 也不要整轮挂死。
+fn control_error_response_line(request_id: &str, subtype: &str) -> String {
+    let detail = if subtype.is_empty() {
+        UNSUPPORTED_CONTROL_REQUEST.to_string()
+    } else {
+        format!("{UNSUPPORTED_CONTROL_REQUEST}: {subtype}")
+    };
+    format!(
+        "{}\n",
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "error",
+                "request_id": request_id,
+                "error": detail,
+            },
+        })
+    )
+}
+
+/// 这一帧是不是**新一轮的开始**（`system/init`）。
+///
+/// 用来关闭取消之后的残帧抑制窗口。判据可自证：claude 的 `system/init` **每轮都发**，
+/// 而且**只在收到那一轮的 user 消息之后**才发（spec 第 24 条；本机两轮探针实测帧序为
+/// `init → status → assistant → result → init → status → assistant → result`）。
+/// 因此「本轮真正的输出」一定排在本轮的 init 之后，而上一轮的残帧一定排在它之前 ——
+/// claude 的轮次循环是串行的，它必须先把上一轮收尾才会开始下一轮。
+///
+/// 子会话（sidechain）的 init 不算：它属于某个 `Task` 内部，不是主线新一轮的开始。
+fn frame_starts_a_turn(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let is_sidechain = obj
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| !id.trim().is_empty());
+    !is_sidechain
+        && obj.get("type").and_then(|v| v.as_str()) == Some("system")
+        && obj.get("subtype").and_then(|v| v.as_str()) == Some("init")
+}
+
+/// 残帧窗口对这一帧的裁定。返回 `(是否丢弃, 更新后的预算)`；`budget == 0` = 不在窗口里。
+///
+/// 两条关闭条件都必不可少：
+/// - **`system/init`**（正常出口）：新一轮的第一帧，窗口立刻关闭，这一帧本身照常处理。
+///   本轮真正的输出全部排在它之后 ⇒ 结构上不可能被这层抑制吞掉。
+/// - **预算耗尽**（兜底）：init 万一不来（CLI 变形 / 我们判据看漏），到点必须停止抑制。
+///   一直抑制会把下一轮的真实回答整段吞掉 —— 那比「上一轮残帧漏一帧」糟得多。
+fn stale_frame_verdict(budget: u32, value: &Value) -> (bool, u32) {
+    if budget == 0 || frame_starts_a_turn(value) {
+        return (false, 0);
+    }
+    (true, budget - 1)
+}
+
 /// 一个活着的 claude stream-json 会话：一个进程服完整个对话。由它自己的 actor 任务独占。
 pub struct ClaudeStreamJsonSession {
     child: Child,
@@ -121,6 +297,23 @@ pub struct ClaudeStreamJsonSession {
     /// 后者读到 EOF 才返回，长活进程下 `await` 会永久挂死（spec 第 4 条）。
     /// 出错路径 `take()` 走它取尾部折进诊断，`close()` 收尾时 join。
     stderr_tail: Option<tokio::task::JoinHandle<String>>,
+    /// **跨轮**的残帧抑制窗口：上一轮是被取消收尾的，接下来最多这么多帧仍可能属于它。
+    ///
+    /// 为什么需要跨轮：取消之后我们在**本轮的 `result`** 上就返回了，而 claude 侧的收尾
+    /// （以及我们那条 `interrupt` 的 ack）可能还有几帧在路上。它们会被**下一轮**的读循环读到，
+    /// 于是上一轮的半截正文漏进新回答里，更糟的是上一轮迟到的 `result` 被当成新一轮的结束信号
+    /// ——新回答还在流就被判定「本轮结束」。
+    ///
+    /// 窗口靠下一轮的 `system/init` 关闭（见 `frame_starts_a_turn`：那是新一轮的第一帧，
+    /// 本轮任何真实输出都排在它之后），`STALE_FRAME_BUDGET` 只是 init 不来时的兜底闸门。
+    /// **一直抑制会把下一轮真正的输出也吞掉，那比原 bug 更糟**，所以两道关闭条件都要有。
+    ///
+    /// **这一层覆盖不到的残留竞态**（有意留给下一个任务，不要以为是漏了）：我们那条
+    /// `interrupt` 是异步写进 stdin 的，如果它到达 claude 的时刻恰好晚于上一轮的收尾，
+    /// 中断就会落在**下一轮**头上 —— 那时新一轮的 `init` 已经过去、窗口早已关闭，帧序推断
+    /// 无从分辨。`result` 帧上的 `user_message_uuid` 能直接回答「这条 result 属于哪条用户
+    /// 消息」，那才是这个竞态的根治办法；它落地之后这一层可以简化掉。
+    stale_frames_left: u32,
 }
 
 impl ClaudeStreamJsonSession {
@@ -181,6 +374,7 @@ impl ClaudeStreamJsonSession {
                 session_id: crate::external_agents::defs::claude::claude_session_id_from_args(args)
                     .unwrap_or_default(),
                 stderr_tail: Some(stderr_tail),
+                stale_frames_left: 0,
             }),
             (pipes, exited) => {
                 let msg = exited
@@ -197,12 +391,31 @@ impl ClaudeStreamJsonSession {
         &self.session_id
     }
 
+    /// 常驻子进程的 pid。只作为注册表元数据（诊断 / 「两轮是不是同一个进程」），
+    /// 关停一律走 `close()`（关 stdin + `wait`），绝不按 pid 杀。
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     /// 跑一轮：往 stdin 写一行 stream-json user 消息 → 读 stdout 直到本轮的 `result` → 返回。
     /// **不关 stdin**（关了进程就退出了）。
     ///
     /// `SessionCommand::RunTurn` 携带的 model / reasoning 在这里**有意忽略**：claude 的模型与
     /// effort 是**启动 flag**，会话内无法切换。中途换配置由注册表的 `LaunchConfig` 指纹拦下
     /// 并重连一个新进程（见 `session/live.rs::LaunchConfig`），而不是在这里假装切换成功。
+    ///
+    /// **这个读循环有意没有轮次超时**（不是漏了）：
+    /// - 一轮**合法地**可以跑很久（连着调几十个工具、一个 `Bash` 跑十分钟），所以任何「总时长
+    ///   上限」都会在正常使用里误杀，代价是用户丢掉整轮工作 + 会话被丢弃（上下文一起没）。
+    /// - 「完全没有帧到达」的**静默超时**判据是成立的（claude 每 30s 会给在跑的工具发一条
+    ///   `tool_progress` 心跳 —— 二进制里 `setInterval(…, 30000)` 发 `tool_heartbeat`），
+    ///   但它换来的收益在本次修复之后基本归零：唯一已知的「会永久等下去」的成因是
+    ///   **不回复 `control_request`**，而上面的分流已经让那件事在结构上不可能发生。
+    /// - 而且用户始终有一条**有界的**逃生通道：点「停止」→ 协议级 interrupt，10 秒内没收尾
+    ///   就升级到硬 `Close`（`run.rs::cancel_should_escalate`）。它由用户触发，没有误判。
+    ///
+    /// 真要加静默超时，判据必须是「距上一帧超过 N 分钟」（N 远大于 30s 心跳周期）且**不能**
+    /// 顺手丢掉会话 —— 否则就是把一个罕见的挂死换成一个常见的误杀。
     pub async fn run_turn(
         &mut self,
         prompt: &str,
@@ -220,6 +433,10 @@ impl ClaudeStreamJsonSession {
 
         let mut cancelled = false;
         let mut recoverable_errors = 0u32;
+        // `--resume` 的会话在 claude 那边已经不存在了（见 `stream::claude::is_missing_session_error`）。
+        // 记下原始文案在轮末返回，让 `run.rs` 的重连策略把它降级成「换个新会话重连 + 上下文已重置
+        // 提示」，而不是把一句英文原文甩给用户。
+        let mut missing_session: Option<String> = None;
         loop {
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => {
@@ -270,22 +487,70 @@ impl ClaudeStreamJsonSession {
                 continue;
             }
 
+            // 解析一次，然后按帧类型分流（控制通道 vs 内容）。非 JSON 行交给解析器唯一那条
+            // `Raw` 出口，别在这里另开一份（spec 第 2 / 10 条）。
+            let value = match serde_json::from_str::<Value>(line.trim()) {
+                Ok(value) => value,
+                Err(_) => {
+                    let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
+                    self.handler.handle_line(&line, &mut |event| buf.push(event));
+                    for event in buf {
+                        let _ = events.send(event).await;
+                    }
+                    continue;
+                }
+            };
+            match classify_inbound_frame(&value) {
+                // **fail-closed**：认不出来的控制请求也必须回一条 error 响应。沉默会让 claude
+                // 永远等下去（它那侧没有超时），而本轮的读循环也没有超时 —— 那一轮就永久挂死。
+                InboundFrame::Reply(reply) => {
+                    let _ = self.stdin.write_all(reply.as_bytes()).await;
+                    let _ = self.stdin.flush().await;
+                    continue;
+                }
+                InboundFrame::Ignore => continue,
+                InboundFrame::Stream => {}
+            }
+
+            // 上一轮取消后的残帧窗口。窗口内的帧**整帧丢弃**（不喂解析器、不发事件、更不当
+            // 轮次边界）：它们属于一个我们这边已经收尾的轮次，喂进去只会把本轮的 per-turn
+            // 状态在中途清掉、并让上一轮迟到的 `result` 把本轮当场判定为结束。
+            let (drop_stale, next_budget) = stale_frame_verdict(self.stale_frames_left, &value);
+            self.stale_frames_left = next_budget;
+            if drop_stale {
+                continue;
+            }
+
             // 轮次边界靠解析器的 `result` 计数判定：喂一行前后各取一次。这样既复用了唯一
             // 那份解析逻辑（spec 第 2 条），又不用为了找边界把同一行 JSON 再解析一遍。
             let before = self.handler.completed_result_turns();
             let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
-            self.handler.handle_line(&line, &mut |event| buf.push(event));
+            self.handler.handle_value(&value, &mut |event| buf.push(event));
             for event in buf {
                 if suppress_after_cancel(cancelled, &event) {
                     continue;
+                }
+                // `--resume` 的目标会话不存在：这条错误由本函数的返回值上报，**不进气泡**。
+                // 用户该看到的是「上下文已重置」，不是 claude 的英文原句。
+                if let UnifiedAgentEvent::Error { message } = &event {
+                    if crate::external_agents::stream::claude::is_missing_session_error(message) {
+                        missing_session = Some(message.clone());
+                        continue;
+                    }
                 }
                 let _ = events.send(event).await;
             }
 
             if self.handler.completed_result_turns() > before {
+                if let Some(message) = missing_session {
+                    return Err(message);
+                }
                 // 被中断的轮次同样有 `result`（形态见 `stream::claude::result_is_user_abort`）：
                 // 走「已取消」出口而不是错误出口，否则每点一次停止都弹一个假错误气泡。
                 if cancelled || self.handler.last_result_aborted() {
+                    // 取消是在**本轮的 result** 上收尾的，claude 侧的收尾帧与 interrupt 的 ack
+                    // 可能还有几帧在路上 —— 开一个窗口，别让它们漏进下一轮（见 `stale_frames_left`）。
+                    self.stale_frames_left = STALE_FRAME_BUDGET;
                     return Err("cancelled".to_string());
                 }
                 return Ok(());
@@ -405,6 +670,10 @@ mod tests {
     }
 
     /// 只吞 `Error`：已经流出来的正文、以及「本轮回答被中止」这类提示仍要发出去。
+    ///
+    /// 注意这一层只管**本轮内**迟到的错误回声。「上一轮的残帧漏进下一轮」是另一件事，
+    /// 由跨轮的 `stale_frame_verdict` 窗口负责（见下面那组单测）—— 两层的作用域不同，
+    /// 别想着合并成一个判据。
     #[test]
     fn cancel_suppression_only_touches_the_error_channel() {
         for event in [
@@ -474,6 +743,223 @@ mod tests {
         let b = interrupt_request_line(&format!("kivio-interrupt-{}", Uuid::new_v4()));
         assert_ne!(a, b);
     }
+
+    // ---- 帧分流：对不认识的控制请求必须回复（fail-closed）----
+
+    fn frame(raw: &str) -> Value {
+        serde_json::from_str(raw).expect("test fixture is valid json")
+    }
+
+    fn reply_for(raw: &str) -> Option<String> {
+        match classify_inbound_frame(&frame(raw)) {
+            InboundFrame::Reply(line) => Some(line),
+            _ => None,
+        }
+    }
+
+    /// **本项修复的核心断言**：喂一个我们不认识的 `control_request`，必须产生一条**带同一个
+    /// `request_id`** 的 error 响应。
+    ///
+    /// 不回复的后果不是「少个功能」而是**永久挂死**：claude 那侧的 `pendingRequests` 没有超时，
+    /// 我们的轮次读循环也没有超时 —— 那一轮再也不会结束。
+    #[test]
+    fn an_unknown_control_request_gets_an_error_response_with_the_same_request_id() {
+        // `can_use_tool` 的真实形状（claude 2.1.220 二进制里的 zod schema + sendRequest 构造处）。
+        let line = reply_for(
+            r#"{"type":"control_request","request_id":"req-42",
+                "request":{"subtype":"can_use_tool","tool_name":"Bash",
+                           "display_name":"Bash","input":{"command":"rm -rf /"},
+                           "tool_use_id":"toolu-1"}}"#,
+        )
+        .expect("必须回复，不能沉默");
+        assert!(line.ends_with('\n'), "必须是一整行");
+        let value = frame(line.trim());
+        assert_eq!(value["type"], serde_json::json!("control_response"));
+        assert_eq!(value["response"]["subtype"], serde_json::json!("error"));
+        // **`request_id` 嵌在 `response` 里**，不是帧顶层（实测形状）。放错层级 = CLI 匹配不到
+        // 这条响应，等于没回。
+        assert_eq!(value["response"]["request_id"], serde_json::json!("req-42"));
+        assert!(value.get("request_id").is_none(), "顶层不该有 request_id：{value}");
+        // 错误文案要能让人看出是哪个子型没实现（会进 CLI 的 tool_result / 诊断）。
+        let error = value["response"]["error"].as_str().unwrap_or_default();
+        assert!(error.contains("can_use_tool"), "错误文案应带上子型：{error}");
+        // 三个字段一律 snake_case —— 这条协议两套命名混用（`can_use_tool` 的**成功**载荷是
+        // camelCase 的 `behavior`/`updatedInput`），error 分支千万别顺手写成 camelCase。
+        assert!(value["response"].get("requestId").is_none());
+    }
+
+    /// 完全没见过的子型（未来新增）同样要回复 —— fail-closed 的意义就在于不认识也不能沉默。
+    #[test]
+    fn a_never_seen_control_request_subtype_still_gets_answered() {
+        for raw in [
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"request_user_dialog","dialog_kind":"x"}}"#,
+            r#"{"type":"control_request","request_id":"r2","request":{"subtype":"elicitation","mcp_server_name":"s","message":"m"}}"#,
+            r#"{"type":"control_request","request_id":"r3","request":{"subtype":"totally_new_in_a_future_cli"}}"#,
+            // `request` 缺失（CLI 自己会把这种判成 `Missing request on control_request`）：
+            // 仍要回复，否则同样挂死。
+            r#"{"type":"control_request","request_id":"r4"}"#,
+        ] {
+            let line = reply_for(raw).unwrap_or_else(|| panic!("没有回复：{raw}"));
+            let value = frame(line.trim());
+            assert_eq!(value["response"]["subtype"], serde_json::json!("error"));
+            assert!(value["response"]["request_id"].is_string());
+        }
+    }
+
+    /// 连 `request_id` 都没有 ⇒ 无从回复，只能丢（回一条没有 id 的响应对端也匹配不到）。
+    #[test]
+    fn a_control_request_without_a_request_id_is_dropped_not_answered() {
+        assert!(matches!(
+            classify_inbound_frame(&frame(
+                r#"{"type":"control_request","request":{"subtype":"can_use_tool"}}"#
+            )),
+            InboundFrame::Ignore
+        ));
+    }
+
+    /// `keep_alive` / `control_cancel_request` / `control_response`：**有意不接、也不需要回复**。
+    ///
+    /// 核实依据（claude 2.1.220 二进制）：`keep_alive` 的 schema 是 `{type:"keep_alive"}`
+    /// ——无字段、无 request_id，CLI 自己的两个读取点都是直接跳过，没有任何需要回应的语义；
+    /// `control_cancel_request` 在 CLI 自己那侧的处理只是 abort 掉在飞的请求、**不回任何东西**。
+    #[test]
+    fn control_channel_noise_is_ignored_without_a_reply() {
+        for raw in [
+            r#"{"type":"keep_alive"}"#,
+            r#"{"type":"control_cancel_request","request_id":"req-42"}"#,
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"kivio-interrupt-1","response":{"still_queued":[]}}}"#,
+        ] {
+            assert!(
+                matches!(classify_inbound_frame(&frame(raw)), InboundFrame::Ignore),
+                "{raw} 应被安全忽略"
+            );
+        }
+    }
+
+    /// 内容帧照旧全部交给流解析器 —— 分流不能顺手把正文挡在门外。
+    #[test]
+    fn content_frames_still_go_to_the_stream_parser() {
+        for raw in [
+            r#"{"type":"system","subtype":"init","model":"claude-opus-4-8[1M]"}"#,
+            r#"{"type":"assistant","message":{"id":"m","role":"assistant","content":[]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[]}}"#,
+            r#"{"type":"result","subtype":"success"}"#,
+            r#"{"type":"error","error":"boom"}"#,
+            // 未来新增的顶层 type：交给解析器，由它的兜底分支安全忽略（spec 第 10 条）。
+            r#"{"type":"some_future_frame"}"#,
+        ] {
+            assert!(
+                matches!(classify_inbound_frame(&frame(raw)), InboundFrame::Stream),
+                "{raw} 不该被分流挡掉"
+            );
+        }
+    }
+
+    // ---- 取消之后的跨轮残帧窗口 ----
+
+    /// `system/init` 是新一轮的第一帧（实测每轮都发，且排在本轮任何输出之前）——
+    /// 它就是窗口的关闭信号。
+    #[test]
+    fn only_a_main_line_init_marks_a_new_turn() {
+        assert!(frame_starts_a_turn(&frame(
+            r#"{"type":"system","subtype":"init","model":"m","session_id":"s"}"#
+        )));
+        // 子会话（Task 内部）的 init 不是主线新一轮的开始。
+        assert!(!frame_starts_a_turn(&frame(
+            r#"{"type":"system","subtype":"init","parent_tool_use_id":"toolu_sub_1"}"#
+        )));
+        for raw in [
+            r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+            r#"{"type":"result","subtype":"success"}"#,
+            r#"{"type":"assistant","message":{"id":"m","content":[]}}"#,
+        ] {
+            assert!(!frame_starts_a_turn(&frame(raw)), "{raw}");
+        }
+    }
+
+    /// **本项修复的核心断言（第一半）**：取消之后迟到的帧不进下一轮 ——
+    /// 既不把上一轮的半截正文漏进新回答，也不拿上一轮迟到的 `result` 当新一轮的结束信号。
+    ///
+    /// **（第二半，同样必须成立）**：窗口在新一轮的 `init` 上关闭，下一轮**真正的**输出
+    /// 一帧都不能被吞。一直抑制比原 bug 更糟。
+    #[test]
+    fn stale_frames_are_dropped_until_the_next_turn_starts_and_not_after() {
+        /// 走一帧，返回「是否被丢掉」并推进预算。
+        fn step(budget: &mut u32, raw: &str) -> bool {
+            let (dropped, next) = stale_frame_verdict(*budget, &frame(raw));
+            *budget = next;
+            dropped
+        }
+        let mut budget = STALE_FRAME_BUDGET;
+
+        // 上一轮（被取消那一轮）的收尾残帧：正文 + 迟到的 result，两条都必须丢。
+        assert!(
+            step(&mut budget, r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"上一轮的半截话"}}}"#),
+            "上一轮的正文漏进了下一轮的回答"
+        );
+        assert!(
+            step(&mut budget, r#"{"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"}"#),
+            "上一轮迟到的 result 会被当成下一轮的结束信号"
+        );
+
+        // 新一轮开始：init 本身照常处理，窗口同时关闭。
+        assert!(!step(
+            &mut budget,
+            r#"{"type":"system","subtype":"init","model":"m"}"#
+        ));
+        assert_eq!(budget, 0, "init 之后窗口必须彻底关闭");
+
+        // 下一轮真正的输出一帧都不能被吞。
+        assert!(!step(
+            &mut budget,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"新回答"}}}"#
+        ));
+        assert!(!step(&mut budget, r#"{"type":"result","subtype":"success"}"#));
+    }
+
+    /// 兜底闸门：`init` 万一不来，抑制到点必须停 —— 否则一次取消能把后面所有输出永久吞掉。
+    #[test]
+    fn the_stale_window_gives_up_after_its_budget() {
+        let noise = frame(r#"{"type":"assistant","message":{"id":"m","content":[]}}"#);
+        let mut budget = STALE_FRAME_BUDGET;
+        for i in 0..STALE_FRAME_BUDGET {
+            let (dropped, next) = stale_frame_verdict(budget, &noise);
+            assert!(dropped, "第 {i} 帧应仍在窗口内");
+            budget = next;
+        }
+        assert_eq!(budget, 0);
+        let (dropped, _) = stale_frame_verdict(budget, &noise);
+        assert!(!dropped, "预算耗尽后必须停止抑制");
+    }
+
+    /// 没取消过（`budget == 0`）时这层完全透明 —— 包括 `init`。
+    #[test]
+    fn the_stale_window_is_transparent_when_no_cancel_happened() {
+        for raw in [
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"result","subtype":"success"}"#,
+            r#"{"type":"assistant","message":{"id":"m","content":[]}}"#,
+        ] {
+            assert_eq!(stale_frame_verdict(0, &frame(raw)), (false, 0), "{raw}");
+        }
+    }
+
+    // ---- resume 失效的判据（降级动作在 `run.rs::persistent_failure_action`）----
+
+    /// 本机实测原样本的 `errors[]` 文案必须被认出来：认不出 ⇒ 用户拿到一句英文原文，
+    /// 而正确处置是丢掉那个已不存在的会话 id、开新会话继续，并提示上下文已重置。
+    #[test]
+    fn the_missing_session_error_text_is_recognized() {
+        use crate::external_agents::stream::claude::is_missing_session_error;
+        assert!(is_missing_session_error(
+            "No conversation found with session ID: d85724b7-59e4-4690-8984-1f31ca9a3414"
+        ));
+        assert!(!is_missing_session_error("Not logged in · Please run /login"));
+        assert!(!is_missing_session_error(
+            "No message found with message.uuid of: abc"
+        ));
+    }
 }
 
 /// 真机验收（spec 第 15 条）。全部 `#[ignore]`；认证失效 / 网络问题一律**诚实 skip 并打印
@@ -506,6 +992,14 @@ mod live_tests {
                 sandbox: None,
             },
             None,
+        )
+    }
+
+    /// 同上，但把会话 flag 换成 `--resume <session_id>`（用来构造「resume 一个不存在的会话」）。
+    fn live_resume_args(session_id: &str) -> Vec<String> {
+        crate::external_agents::defs::claude::claude_args_resuming(
+            &live_args(session_id, None),
+            session_id,
         )
     }
 
@@ -777,6 +1271,81 @@ mod live_tests {
             "重连（--resume）没续上原会话（回答：{:?}）",
             after.text
         );
+
+        close_and_cleanup(control, &workdir).await;
+    }
+
+    /// **resume 失效必须降级，不是甩个报错给用户**（真机验收）。
+    ///
+    /// 这条属于「效果对不对」类：单测能证明判据认得那句话、也能证明降级动作算得对，但**证明不了
+    /// 真实的 CLI 确实会那样报、以及换新会话之后它真的起得来**。所以这里拿一个**不存在**的
+    /// 会话 id 去 `--resume`，对真实二进制断言两件事：
+    ///
+    /// 1. 失败文案就是 `No conversation found with session ID`（判据的唯一依据），
+    ///    并且我们的判据 `is_missing_session_error` 认得它；
+    /// 2. 按降级动作改写 argv（摘掉 `--resume`、换一个新 `--session-id`）之后**同一个进程能起来
+    ///    并跑到轮次收尾**，而且那一轮的失败（如果有）**不再是** resume 失效 ——
+    ///    也就是说降级真的把用户从这个死胡同里救出来了。
+    ///
+    /// 这条**不需要登录**（resume 的加载发生在认证之前），所以在未登录的机器上也是有效验证；
+    /// 第 2 步在未登录时会以「Not logged in」收尾，那不影响本条的判据。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "real-machine: spawns the installed claude CLI"]
+    async fn live_resuming_a_missing_session_degrades_to_a_fresh_session() {
+        use crate::external_agents::defs::claude::claude_args_fresh_session;
+        use crate::external_agents::stream::claude::is_missing_session_error;
+
+        let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
+            eprintln!("SKIP: 本机没有可用的 claude CLI");
+            return;
+        };
+        // 一个从没存在过的会话 id —— 模拟「claude 那边的会话记录被清理掉了」。
+        let dead_id = Uuid::new_v4().to_string();
+        let workdir = std::env::temp_dir().join(format!("kivio-claude-deadresume-{dead_id}"));
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+
+        // ---- 第 1 步：确认真实 CLI 的失败形态与我们的判据一致 ----
+        let dead_args = live_resume_args(&dead_id);
+        assert!(dead_args.windows(2).any(|w| w == ["--resume", dead_id.as_str()]));
+        let failure = match ClaudeStreamJsonSession::connect(&bin, &dead_args, &workdir).await {
+            // 实测进程约 2.2s 才退出，所以 `connect` 的即时 `try_wait` 通常抓不到 ——
+            // 失败以流里那条 `result` 的形式到达 `run_turn`。两条路都要能认出来。
+            Ok(session) => {
+                let control = spawn_claude_stream_session_actor(session);
+                let turn = one_turn(&control, "say hi", false).await;
+                let _ = control.send(SessionCommand::Close).await;
+                let _ = timeout(CLAUDE_SHUTDOWN_TIMEOUT, control.closed()).await;
+                turn.result.err().unwrap_or_default()
+            }
+            Err(err) => err,
+        };
+        eprintln!("dead-resume failure: {failure}");
+        assert!(
+            is_missing_session_error(&failure),
+            "真机的 resume 失效文案与判据不符（判据会漏掉这个场景，用户拿到裸报错）：{failure}"
+        );
+
+        // ---- 第 2 步：按降级动作改写 argv，确认真的能继续 ----
+        let fresh_id = Uuid::new_v4().to_string();
+        let fresh_args = claude_args_fresh_session(&dead_args, &fresh_id);
+        let session = match ClaudeStreamJsonSession::connect(&bin, &fresh_args, &workdir).await {
+            Ok(session) => session,
+            Err(err) => panic!("降级后仍然起不来（降级没救到用户）：{err}"),
+        };
+        assert_eq!(session.session_id(), fresh_id, "降级后应使用新的会话 id");
+        let control = spawn_claude_stream_session_actor(session);
+        let turn = one_turn(&control, "Reply with just the word OK.", false).await;
+        let outcome = turn.result.as_ref().err().cloned().unwrap_or_default();
+        eprintln!("after downgrade: result={outcome:?} text={:?}", turn.text.trim());
+        assert!(
+            !is_missing_session_error(&outcome),
+            "降级之后还在报 resume 失效：{outcome}"
+        );
+        if turn.result.is_err() {
+            eprintln!(
+                "NOTE: 降级后的这一轮没成功（未登录 / 网络？）——本条的判据是「不再是 resume 失效」，仍然成立"
+            );
+        }
 
         close_and_cleanup(control, &workdir).await;
     }
