@@ -422,6 +422,18 @@ pub async fn run_external_cli_reply(
 
     let cancel_check = || !state.is_chat_generation_active(&conversation_id, run_generation);
 
+    // 本轮接不接工具审批。**判据取自即将启动的 argv 本身**，而不是再抄一遍「哪些档位会询问」
+    // 的规则：真正决定 CLI 会不会问的就是那个 flag（`--permission-prompt-tool stdio`），
+    // 从 argv 读回来就不可能与 `build_args` 的决定分叉（spec 第 2 条）。
+    let approval_host = turn_asks_for_permission(&args).then(|| ApprovalHost {
+        app,
+        state,
+        conversation_id: &conversation_id,
+        run_id: &run_id,
+        message_id: &assistant_message_id,
+        generation: run_generation,
+    });
+
     // Drain stderr concurrently with the stdout read below: keeps a full stderr pipe from
     // blocking the child, and captures failure text a silent (non-JSON, empty-stdout) run would
     // otherwise lose. Persistent protocols manage their own process, so there's no child here.
@@ -466,6 +478,7 @@ pub async fn run_external_cli_reply(
             &image_blocks,
             &mut emit_event,
             &cancel_check,
+            approval_host.as_ref(),
         )
         .await
     } else {
@@ -801,6 +814,9 @@ async fn run_persistent_turn<E, C>(
     images: &[crate::external_agents::attachments::ImageBlock],
     emit: &mut E,
     cancel: &C,
+    // 本轮的工具审批出口。`None` = 不接（协议不支持 / 用户没选会询问的权限档位）——
+    // 会话侧仍对 `can_use_tool` 回 error 兜底，绝不沉默。
+    approvals: Option<&ApprovalHost<'_>>,
 ) -> Result<(), String>
 where
     E: FnMut(UnifiedAgentEvent),
@@ -945,6 +961,7 @@ where
             images,
             emit,
             cancel,
+            approvals,
         )
         .await;
 
@@ -1273,6 +1290,16 @@ fn cancel_should_escalate(
     matches!(cancel_at, Some(t) if now.saturating_duration_since(t) >= grace)
 }
 
+/// 本轮的 argv 是否让 CLI 走「问宿主要权限」那条路。
+///
+/// 判据只有一条：argv 里带 `--permission-prompt-tool`。这是**真正**决定 CLI 会不会发
+/// `can_use_tool` 的那个开关（本机 2.1.220 对照实测：带 ⇒ 收到询问；不带 ⇒ 一条都没有、
+/// 权限被 CLI 直接拒），所以从 argv 读回来比在这里重抄一份「哪些权限档位会询问」的规则
+/// 更不容易分叉 —— 那份规则的唯一副本在 `defs::claude::claude_permission_prompt_args`。
+fn turn_asks_for_permission(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--permission-prompt-tool")
+}
+
 /// Send one `RunTurn` on `control` and pump its events/terminal result. On user cancel, send a
 /// protocol-level `Cancel`; if the turn doesn't wind down within `CANCEL_ESCALATE_GRACE`, escalate
 /// to `Close` (A5) so a hung session can't block cancellation indefinitely.
@@ -1284,18 +1311,37 @@ async fn drive_persistent_turn<E, C>(
     images: &[crate::external_agents::attachments::ImageBlock],
     emit: &mut E,
     cancel: &C,
+    approvals: Option<&ApprovalHost<'_>>,
 ) -> Result<(), String>
 where
     E: FnMut(UnifiedAgentEvent),
     C: Fn() -> bool,
 {
-    use crate::external_agents::session::live::SessionCommand;
+    use crate::external_agents::session::live::{ApprovalBridge, SessionCommand};
+    use futures::stream::{FuturesUnordered, StreamExt};
     use tokio::sync::{mpsc, oneshot};
 
     const CANCEL_ESCALATE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
     let (events_tx, mut events_rx) = mpsc::channel::<UnifiedAgentEvent>(64);
     let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+    // 审批通道只在宿主接得住时才建。会话侧据此决定 `can_use_tool` 是「问用户」还是走那条
+    // fail-closed 的 error 兜底 —— 两种都绝不沉默（沉默 = 那一轮永久挂死）。
+    let (bridge, mut ask_rx, decision_tx) = match approvals {
+        Some(_) => {
+            let (ask_tx, ask_rx) = mpsc::channel(8);
+            let (decision_tx, decision_rx) = mpsc::channel(8);
+            (
+                Some(ApprovalBridge {
+                    requests: ask_tx,
+                    decisions: decision_rx,
+                }),
+                Some(ask_rx),
+                Some(decision_tx),
+            )
+        }
+        None => (None, None, None),
+    };
     if control
         .send(SessionCommand::RunTurn {
             prompt,
@@ -1304,6 +1350,7 @@ where
             images: images.to_vec(),
             events: events_tx,
             done: done_tx,
+            approvals: bridge,
         })
         .await
         .is_err()
@@ -1311,11 +1358,18 @@ where
         return Err("外部 CLI 会话已结束，请重试".to_string());
     }
 
+    // 在飞的审批（可以有多条：claude 会并行调工具）。放 `FuturesUnordered` 而不是 spawn：
+    // 借用 `app`/`state` 就够，不需要 `'static`，而且本函数返回时它们自然被丢弃。
+    let mut in_flight = FuturesUnordered::new();
+    // 本轮问过的 toolCallId。返回前必须把 `pending_chat_tool_approvals` 里可能残留的条目扫掉
+    // ——那张表按 id 存 oneshot sender，走了异常出口（EOF / 硬 Close）不扫就是一条永久泄漏。
+    let mut asked_ids: Vec<String> = Vec::new();
+
     let mut done_rx = done_rx;
     let mut events_open = true;
     let mut cancel_sent = false;
     let mut cancel_at: Option<std::time::Instant> = None;
-    loop {
+    let outcome = loop {
         tokio::select! {
             biased;
             result = &mut done_rx => {
@@ -1324,12 +1378,32 @@ where
                 while let Ok(event) = events_rx.try_recv() {
                     emit(event);
                 }
-                return result.unwrap_or_else(|_| Err("session actor dropped".to_string()));
+                break result.unwrap_or_else(|_| Err("session actor dropped".to_string()));
             }
             maybe_event = events_rx.recv(), if events_open => {
                 match maybe_event {
                     Some(event) => emit(event),
                     None => events_open = false,
+                }
+            }
+            // 会话侧送来一条「这个工具能用吗」⇒ 复用内置 agent 那条审批链路去问用户
+            // （`chat-tool-confirm` 事件 + `chat_confirm_tool_call` 命令 + 同一张挂起表），
+            // 不另建一套 UI（spec 第 2 条）。
+            Some(ask) = async {
+                match ask_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => None,
+                }
+            }, if ask_rx.is_some() => {
+                if let Some(host) = approvals {
+                    asked_ids.push(ask.tool_call_id.clone());
+                    in_flight.push(host.ask(ask));
+                }
+            }
+            // 用户答了 ⇒ 把答复送回会话，由它写 `control_response`。
+            Some(decision) = in_flight.next(), if !in_flight.is_empty() => {
+                if let Some(tx) = decision_tx.as_ref() {
+                    let _: Result<_, _> = tx.send(decision).await;
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
@@ -1345,9 +1419,96 @@ where
             // 用 `CANCELLED_SESSION_LOST` 而不是 `"cancelled"`：出口仍按取消呈现，但会话
             // 已经被硬 Close 掉了，注册表条目**必须**丢弃 —— 否则 claude 的「取消后保留常驻
             // 会话」会把一个死 actor 留到下一轮才发现。
-            return Err(
-                crate::external_agents::session::live::CANCELLED_SESSION_LOST.to_string(),
-            );
+            break Err(crate::external_agents::session::live::CANCELLED_SESSION_LOST.to_string());
+        }
+    };
+    // 会话侧那张挂起表由 `claude_stream::reject_pending` 负责整批拒掉（它才是欠 CLI 响应的
+    // 一方）；这里只扫宿主侧的残留条目 + 让在飞的 future 随本函数一起丢弃。
+    if let Some(host) = approvals {
+        host.forget(&asked_ids);
+    }
+    // 未消费的答复对应的询问已经被会话侧拒掉了，丢弃即可。
+    drop(decision_tx);
+    outcome
+}
+
+/// 宿主侧回答工具审批询问所需的一切。
+///
+/// 存在的意义只有一个：**把外部 CLI 的权限询问接到 Kivio 已有的那条审批链路上**
+/// （`chat-tool-confirm` 事件 → 前端确认卡 → `chat_confirm_tool_call` → 同一张
+/// `pending_chat_tool_approvals` 挂起表）。内置 agent 用的就是这一套，不许再造第二套
+/// （spec 第 2 条）。唯一需要的适配是 **id 映射**：Kivio 那侧按「工具调用 id」寻址，
+/// 而 CLI 给的是它自己的 `request_id` —— 所以卡片用 claude 的 `tool_use_id`（与工具卡同一个
+/// id），回程按 `request_id` 路由，两者在 `ApprovalAsk` 里成对携带。
+struct ApprovalHost<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+    conversation_id: &'a str,
+    run_id: &'a str,
+    message_id: &'a str,
+    generation: u64,
+}
+
+impl ApprovalHost<'_> {
+    /// 问用户一次。返回的 `ApprovalDecision` 带回 `request_id`，会话据它回 `control_response`。
+    ///
+    /// 超时 / 用户点停止时 `request_tool_approval` 自己会返回 false 并清掉挂起条目
+    /// —— 也就是**默认拒**，这正是 fail-closed 想要的。
+    async fn ask(
+        &self,
+        ask: crate::external_agents::session::live::ApprovalAsk,
+    ) -> crate::external_agents::session::live::ApprovalDecision {
+        // 复用 `ToolCallRecord` 作为审批卡的载体：`request_tool_approval` 的入参就是它，
+        // 而它的 `format_tool_approval_summary` 已经会把 claude 的 `Write`/`file_path`
+        // 摘成人看得懂的一两行。只填审批需要的字段，其余留默认。
+        let record = ToolCallRecord {
+            id: ask.tool_call_id.clone(),
+            name: ask.tool_name.clone(),
+            source: "external_cli".to_string(),
+            server_id: None,
+            arguments: serde_json::to_string(&ask.input).unwrap_or_else(|_| "{}".to_string()),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: None,
+            completed_at: None,
+            round: 1,
+            sensitive: true,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: None,
+        };
+        let approved = crate::chat::commands::interaction::request_tool_approval(
+            self.app,
+            self.state,
+            self.conversation_id,
+            self.run_id,
+            self.message_id,
+            self.generation,
+            &record,
+        )
+        .await;
+        crate::external_agents::session::live::ApprovalDecision {
+            request_id: ask.request_id,
+            approved,
+        }
+    }
+
+    /// 扫掉本轮问过的挂起条目。异常出口（EOF / 硬 Close）下 `ask` 的 future 会被直接丢弃，
+    /// 它没机会自己清理，不扫就在这张进程级的表里永久留一条。
+    fn forget(&self, tool_call_ids: &[String]) {
+        if tool_call_ids.is_empty() {
+            return;
+        }
+        let mut pending = self
+            .state
+            .pending_chat_tool_approvals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for id in tool_call_ids {
+            pending.remove(id);
         }
     }
 }
@@ -2256,9 +2417,51 @@ mod tests {
         assert!(!nonzero_exit_is_a_failure(None, false));
     }
 
+    // ---- 工具审批：本轮接不接询问 ----
+
+    /// 判据取自 argv 本身：带 `--permission-prompt-tool` 才建审批通道。
+    /// 这样就不可能与 `defs::claude::claude_permission_prompt_args` 的决定分叉。
     #[test]
-    fn stream_segment_tracker_reuses_text_segment_for_deltas() {
-        let mut segments = Vec::new();
+    fn the_approval_bridge_follows_the_launch_flag() {
+        let asking = crate::external_agents::defs::claude::build_claude_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                resume_session_id: None,
+                new_session_id: None,
+                include_partial_messages: true,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: Some("default".to_string()),
+            },
+            None,
+        );
+        assert!(turn_asks_for_permission(&asking));
+
+        // 默认档（全自动放行）与其它 CLI 的 argv 一律不接 —— 既有行为不变。
+        let silent = crate::external_agents::defs::claude::build_claude_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                resume_session_id: None,
+                new_session_id: None,
+                include_partial_messages: true,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: None,
+            },
+            None,
+        );
+        assert!(!turn_asks_for_permission(&silent));
+        assert!(!turn_asks_for_permission(&[]));
+        // 值出现在别处（比如某个 prompt 里）不算 —— 判据只认 flag 本身。
+        assert!(!turn_asks_for_permission(&["stdio".to_string()]));
+    }
+
+    #[test]
+    fn stream_segment_tracker_reuses_text_segment_for_deltas() {        let mut segments = Vec::new();
         let mut order = 0u32;
         let mut tracker = StreamSegmentTracker::default();
 

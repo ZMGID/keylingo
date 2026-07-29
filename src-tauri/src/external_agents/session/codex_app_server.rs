@@ -888,6 +888,10 @@ pub fn spawn_codex_session_actor(
                     images,
                     events,
                     done,
+                    // codex 侧还没有权限审批（目前只有 claude 走 stdio 控制通道），忽略即可 ——
+                    // 通道从来不会被建起来（`run.rs::turn_asks_for_permission` 只对带
+                    // `--permission-prompt-tool` 的 argv 为真，那是 claude 专属 flag）。
+                    approvals: _,
                 } => {
                     // Invariant (A4): `run_turn` sends every `event` before returning, and mpsc
                     // preserves order, so the caller's post-`done` drain sees them all. `done.send`
@@ -964,6 +968,7 @@ mod tests {
                     images: vec![],
                     events: etx,
                     done: dtx,
+                    approvals: None,
                 })
                 .await
                 .unwrap();

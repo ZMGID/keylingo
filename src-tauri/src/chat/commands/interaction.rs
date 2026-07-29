@@ -346,7 +346,7 @@ pub(super) async fn request_session_consent(
     }
 }
 
-pub(super) async fn request_tool_approval(
+pub(crate) async fn request_tool_approval(
     app: &AppHandle,
     state: &AppState,
     conversation_id: &str,
@@ -577,39 +577,38 @@ pub(crate) fn emit_chat_stream_done(
 
 pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
     let parsed = serde_json::from_str::<Value>(&record.arguments).ok();
-    let mut lines = Vec::new();
-    match record.name.as_str() {
-        "bash" => {
-            if let Some(command) = parsed
+    let field = |names: &[&str]| -> Option<String> {
+        names.iter().find_map(|name| {
+            parsed
                 .as_ref()
-                .and_then(|value| value.get("command"))
+                .and_then(|value| value.get(*name))
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-            {
+                .map(str::to_string)
+        })
+    };
+    let mut lines = Vec::new();
+    // 工具名归一化：内置 agent 用小写 snake_case（`bash` / `write`），而**外部 CLI 报的是
+    // 自己的原名**（claude 的 `Bash` / `Write` / `Edit` / `Read` 是 PascalCase）。不归一化
+    // 的话外部 CLI 的审批卡永远落进 `_` 分支、只剩一坨截断的 JSON（与 spec 第 23 条前端
+    // 工具卡踩过的是同一个坑）。字段名同理：claude 用 `file_path`，我们用 `path`。
+    match record.name.to_ascii_lowercase().as_str() {
+        "bash" | "run_command" => {
+            if let Some(command) = field(&["command"]) {
                 lines.push(format!("Command: {command}"));
             }
-            if let Some(cwd) = parsed
-                .as_ref()
-                .and_then(|value| value.get("cwd"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+            if let Some(cwd) = field(&["cwd", "working_directory"]) {
                 lines.push(format!("Working directory: {cwd}"));
             }
         }
-        "write" | "edit" | "read" => {
-            if let Some(path) = parsed
-                .as_ref()
-                .and_then(|value| value.get("path"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+        "write" | "edit" | "read" | "write_file" | "edit_file" | "read_file" | "notebookedit" => {
+            if let Some(path) = field(&["path", "file_path", "notebook_path"]) {
                 lines.push(format!("Path: {path}"));
             }
-            if record.name == "edit" {
+            if record.name.eq_ignore_ascii_case("edit")
+                || record.name.eq_ignore_ascii_case("edit_file")
+            {
                 // Current shape: edits: [{old_string, new_string}, ...]. Preview the
                 // first edit's old_string; fall back to the legacy single-edit field.
                 let first_old = parsed
@@ -619,16 +618,12 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
                     .and_then(|edits| edits.first())
                     .and_then(|edit| edit.get("old_string"))
                     .and_then(|value| value.as_str())
-                    .or_else(|| {
-                        parsed
-                            .as_ref()
-                            .and_then(|value| value.get("old_string").or_else(|| value.get("old")))
-                            .and_then(|value| value.as_str())
-                    })
                     .map(str::trim)
-                    .filter(|value| !value.is_empty());
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| field(&["old_string", "old"]));
                 if let Some(old) = first_old {
-                    lines.push(format!("Replace: {}", truncate_chars(old, 180)));
+                    lines.push(format!("Replace: {}", truncate_chars(&old, 180)));
                 }
             }
         }

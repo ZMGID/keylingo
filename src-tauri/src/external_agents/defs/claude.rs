@@ -133,16 +133,52 @@ pub fn build_claude_args(
         args.push("--session-id".to_string());
         args.push(session_id.clone());
     }
+    let permission_mode = options
+        .sandbox
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_PERMISSION_MODE)
+        .to_string();
     args.push("--permission-mode".to_string());
-    args.push(
-        options
-            .sandbox
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("bypassPermissions")
-            .to_string(),
-    );
+    args.push(permission_mode.clone());
+    // 追加在**档位值之后**：`--permission-mode` 与它的值必须相邻，中间插一个 flag 会让
+    // 档位变成 `--permission-prompt-tool` 而真正的档位沦为裸位置参数。
+    args.extend(claude_permission_prompt_args(&permission_mode));
     args
+}
+
+/// claude 的默认权限档位。**故意仍是 `bypassPermissions`（全自动放行）**：接上审批之后
+/// 把它改成 `default` 会让所有既有用户的对话突然开始弹卡片，那是行为回退而非功能。
+/// 想要审批的用户在权限胶囊里选「每次确认」（= `default` 档，见
+/// `detection::sandbox_options_for`）。
+pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
+
+/// 走 stdio 控制通道问用户要权限的档位。目前只有 `default`。
+///
+/// 判据（`claude_permission_prompt_args`）刻意只认这**一个**档位，理由是「不改既有行为」：
+/// - `bypassPermissions`（默认档）：CLI 在咨询回调**之前**就放行一切，加了 flag 等于空转，
+///   但会顺带把 `AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode` 塞进工具表
+///   （本机实测：带 flag 的 init 有这三个，不带的没有）——那三个我们还答不了；
+/// - `plan` / `acceptEdits`：今天的行为是「越权的操作被 CLI 直接拒」，加了 flag 会变成
+///   「开始弹卡片」。那是**好**的改动，但属于产品决策，等定了默认档一起放开。
+///
+/// 值就是字面量 `stdio`（不是某个 MCP 工具名）。两条独立证据：
+/// 1. 二进制里 `ekm(mode, …)`：`if(mode==="stdio") return t.createCanUseTool(n)`，
+///    否则才去 MCP 工具表里查名字（查不到报
+///    `Error: MCP tool … (passed via --permission-prompt-tool) not found. Available MCP tools: …`）；
+/// 2. 官方 Agent SDK 在用户提供 `canUseTool` 回调时 push 的正是
+///    `["--permission-prompt-tool","stdio"]`（同一处还会拒绝同时传 `permissionPromptToolName`）。
+///
+/// 真机核实（claude 2.1.220，2026-07-29）：带 flag + `--permission-mode default` 让它写文件
+/// ⇒ stdout 收到 `control_request` / `can_use_tool`，回 `{behavior:"allow"}` 文件真的建了、
+/// 回 `{behavior:"deny",message}` 文件没建且 message 原样成为 `tool_result`；**不带 flag 的
+/// 对照组一条 `control_request` 都没有**，权限被 CLI 直接拒（"…but you haven't granted it yet"）。
+pub fn claude_permission_prompt_args(permission_mode: &str) -> Vec<String> {
+    if permission_mode == "default" {
+        vec!["--permission-prompt-tool".to_string(), "stdio".to_string()]
+    } else {
+        vec![]
+    }
 }
 
 /// `--append-system-prompt-file <path>`：把 Kivio 的会话级系统指令**追加**到 claude 原生
@@ -489,6 +525,64 @@ mod tests {
         assert!(mk(None)
             .windows(2)
             .any(|w| w == ["--permission-mode", "bypassPermissions"]));
+    }
+
+    // ---- 工具审批：--permission-prompt-tool stdio 的门控 ----
+
+    /// **接上审批之后默认行为必须一字不变**：默认档仍是 `bypassPermissions`，且不带
+    /// `--permission-prompt-tool` —— 否则所有既有用户的对话会突然开始弹卡片。
+    #[test]
+    fn the_default_permission_mode_still_asks_for_nothing() {
+        assert_eq!(DEFAULT_PERMISSION_MODE, "bypassPermissions");
+        for mode in ["bypassPermissions", "acceptEdits", "plan", ""] {
+            assert!(
+                claude_permission_prompt_args(mode).is_empty(),
+                "{mode} 档不该带审批 flag（会改变既有行为）"
+            );
+        }
+    }
+
+    /// 只有 `default` 档走 stdio 控制通道问用户。值是字面量 `stdio`（不是某个 MCP 工具名）。
+    #[test]
+    fn the_ask_mode_routes_permissions_over_the_stdio_control_channel() {
+        assert_eq!(
+            claude_permission_prompt_args("default"),
+            vec!["--permission-prompt-tool".to_string(), "stdio".to_string()]
+        );
+    }
+
+    /// argv 层面：选了「每次确认」⇒ flag 与档位成对出现；其余档位一个都没有。
+    #[test]
+    fn build_args_carries_the_prompt_tool_only_for_the_ask_mode() {
+        let mk = |sandbox: Option<&str>| {
+            build_claude_args(
+                &RuntimeContext {
+                    extra_allowed_dirs: vec![],
+                    resume_session_id: None,
+                    new_session_id: None,
+                    include_partial_messages: false,
+                },
+                &RuntimeBuildOptions {
+                    model: None,
+                    reasoning: None,
+                    sandbox: sandbox.map(str::to_string),
+                },
+                None,
+            )
+        };
+        let asking = mk(Some("default"));
+        assert!(asking
+            .windows(2)
+            .any(|w| w == ["--permission-prompt-tool", "stdio"]));
+        assert!(asking
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "default"]));
+        for mode in [None, Some("plan"), Some("acceptEdits"), Some("bypassPermissions")] {
+            assert!(
+                !mk(mode).contains(&"--permission-prompt-tool".to_string()),
+                "{mode:?} 不该带审批 flag"
+            );
+        }
     }
 
     // ---- B1：常驻会话的重连参数改写 ----

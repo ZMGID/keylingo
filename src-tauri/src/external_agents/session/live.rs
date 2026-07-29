@@ -11,6 +11,46 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::external_agents::types::UnifiedAgentEvent;
 
+/// 一条待用户答复的工具审批询问（claude 的 `control_request` / `can_use_tool`）。
+///
+/// 会话侧只负责把它送出去、并在收到 `ApprovalDecision` 后回一条 `control_response`；
+/// 「弹卡片给谁看」是宿主（app 层）的事，会话里没有 `AppHandle` 也不该有。
+#[derive(Debug, Clone)]
+pub struct ApprovalAsk {
+    /// CLI 的 `control_request.request_id`。**回复时必须原样回显**，否则对端匹配不到。
+    pub request_id: String,
+    /// claude 的 `toolu_…`。用作 Kivio 侧的 `toolCallId`，这样审批卡和工具卡指向同一个 id。
+    /// CLI 偶尔不给（schema 里是 optional），缺失时回落到 `request_id`。
+    pub tool_call_id: String,
+    /// CLI 报的工具原名（`Write` / `Bash` / `mcp__server__tool`，PascalCase 有意义，不归一化）。
+    pub tool_name: String,
+    /// 工具入参原文，用于卡片上的摘要。
+    pub input: serde_json::Value,
+    /// CLI 标记「这个工具要用户在卡片上直接作答」（`AskUserQuestion` / `ExitPlanMode`）。
+    /// 那类工具批准之后还会再发一条我们尚未实现的 `request_user_dialog`，所以一律直接拒
+    /// （见 `claude_stream::approval_verdict`）。
+    pub requires_user_interaction: bool,
+}
+
+/// 用户对某条询问的答复。`request_id` 是路由键，与 `ApprovalAsk` 一一对应。
+#[derive(Debug, Clone)]
+pub struct ApprovalDecision {
+    pub request_id: String,
+    pub approved: bool,
+}
+
+/// 一轮的权限审批通道。宿主持 `requests` 的接收端与 `decisions` 的发送端；会话持另一半。
+///
+/// 为什么不用 `oneshot` 挂在 `ApprovalAsk` 里：一轮里可以有**多条**并发的询问
+/// （claude 会并行调工具），共用一条回程通道比给每条询问单独管一个 future 简单得多，
+/// 而 `request_id` 已经是天然的路由键。
+pub struct ApprovalBridge {
+    /// 会话 → 宿主。
+    pub requests: mpsc::Sender<ApprovalAsk>,
+    /// 宿主 → 会话。
+    pub decisions: mpsc::Receiver<ApprovalDecision>,
+}
+
 /// A command sent to a live session's actor task.
 pub enum SessionCommand {
     /// Run one turn: write the prompt, stream `UnifiedAgentEvent`s into `events`, and report the
@@ -23,6 +63,9 @@ pub enum SessionCommand {
         images: Vec<crate::external_agents::attachments::ImageBlock>,
         events: mpsc::Sender<UnifiedAgentEvent>,
         done: oneshot::Sender<Result<(), String>>,
+        /// 本轮的权限审批通道。`None` = 宿主不接权限询问（未启用 / 协议不支持）⇒ 会话对
+        /// `can_use_tool` 仍走那条 fail-closed 的 error 兜底，绝不沉默（spec 第 29 条）。
+        approvals: Option<ApprovalBridge>,
     },
     /// Interrupt the in-flight turn without killing the process (protocol-level interrupt).
     Cancel,

@@ -489,6 +489,11 @@ pub fn sandbox_options_for(agent_id: &str) -> Vec<RuntimeModelOption> {
     let pairs: &[(&str, &str)] = match agent_id {
         "claude" => &[
             ("plan", "计划 (只读)"),
+            // `default` 档 = 写文件 / 跑命令前弹卡片问用户（走 stdio 控制通道的
+            // `can_use_tool`，见 `defs::claude::claude_permission_prompt_args`）。
+            // **不是默认选中项** —— 默认仍是下面的 `bypassPermissions`，否则既有用户的
+            // 对话会突然开始弹卡片。
+            ("default", "每次确认"),
             ("acceptEdits", "接受编辑"),
             ("bypassPermissions", "完全 (默认)"),
         ],

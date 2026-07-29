@@ -31,7 +31,9 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::external_agents::attachments::ImageBlock;
-use crate::external_agents::session::live::{SessionCommand, CANCELLED_SESSION_LOST};
+use crate::external_agents::session::live::{
+    ApprovalAsk, ApprovalBridge, SessionCommand, CANCELLED_SESSION_LOST,
+};
 use crate::external_agents::spawn::{
     cli_command, fold_stderr, kill_agent_process_tree, spawn_stderr_tail, stream_json_user_line,
 };
@@ -121,6 +123,11 @@ enum InboundFrame {
     Ignore,
     /// claude 在等我们回复：把这一整行写回 stdin。
     Reply(String),
+    /// claude 在问「这个工具能用吗」，且本轮有宿主可问 ⇒ 挂起，等用户答复。
+    Ask(ApprovalAsk),
+    /// claude 撤回了先前那条询问（已在别处答掉）⇒ 把挂起表里那条删掉，**不回任何东西**
+    /// （CLI 自己收到这条时也只 `abort()` 在飞的请求）。
+    CancelAsk(String),
 }
 
 /// claude 在 stream-json 下能**向我们**发出的、需要回复的 `control_request` 子型。
@@ -131,47 +138,161 @@ enum InboundFrame {
 /// `oauth_token_refresh` / `host_auth_token_refresh` / `stop_task` / `background_tasks` /
 /// `apply_flag_settings` / `get_settings` / `submit_feedback`），全都是「问我们、等我们答」。
 ///
-/// 我们一种都没实现，所以这里**不列白名单**：任何 `control_request` 一律回一条 error。
-/// 下一个任务实现权限问答时，在 `classify_inbound_frame` 里给 `can_use_tool` 加一条分支即可
-/// （请求侧字段形状是 snake_case：`tool_name` / `input` / `tool_use_id` / `permission_suggestions`
-/// / `blocked_path` / `decision_reason`；而**成功响应**的载荷是 camelCase 的
-/// `{behavior, updatedInput?, updatedPermissions?, message?}` —— 这条协议两套命名混用，
-/// 已从二进制核实，别照一侧推另一侧），其余仍走这条 fail-closed 的兜底。
+/// 我们只实现了 `can_use_tool`（工具审批），其余一律回一条 error —— 沉默的代价是整轮永久挂死。
 const UNSUPPORTED_CONTROL_REQUEST: &str = "Kivio 尚不支持这个控制请求";
 
+/// 用户点「拒绝」时回给 CLI 的话。它会原样变成那次工具调用的 `tool_result`（实测），
+/// 所以要写成模型看得懂、且能据此改变计划的一句中文。
+pub const APPROVAL_DENIED_MESSAGE: &str = "用户拒绝了这次操作。不要重试这个调用；请说明你原本想做什么，并等待用户的进一步指示。";
+/// 取消 / 关会话 / 进程消失时，批量拒掉所有挂起询问用的话。
+const APPROVAL_ABORTED_MESSAGE: &str = "用户中止了本轮，这次操作未被批准。";
+/// 需要用户在卡片上直接作答的工具（`AskUserQuestion` / `ExitPlanMode`）。
+/// 批准它们只会让 CLI 紧接着发一条我们还没实现的 `request_user_dialog`，那条会被 fail-closed
+/// 回 error、工具照样失败 —— 与其给用户一张点了也没用的卡片，不如当场诚实拒掉。
+const APPROVAL_INTERACTIVE_UNSUPPORTED: &str =
+    "Kivio 暂不支持这个需要在卡片上直接作答的工具，请改用普通回复继续。";
+
+/// 一条已经送去问用户、还在等答复的询问。
+///
+/// **存在的理由是「必须回复」**：CLI 那侧的 `pendingRequests` 是个**没有超时**的 Promise，
+/// 我们的轮次读循环也没有超时 —— 一条永远不被回复的询问在结构上就是一次永久挂死。
+/// 所以取消 / 关会话 / 轮次收尾时这张表必须被**整批**拒掉（`reject_pending_lines`）。
+///
+/// **诚实的边界**（2026-07-29 本机 claude 2.1.220 实测，别把这一手当成「修了一个正在发生的
+/// 死锁」）：把批量拒绝**注释掉**之后，`live_cancelling_with_a_pending_approval_leaves_the_session_usable`
+/// **仍然通过** —— 因为我们那条 `interrupt` 会让 CLI 自己 abort 掉在飞的权限请求
+/// （二进制里那个 promise 挂在本轮的 `AbortController` 上，`u.abort()` 会带走它）。
+/// 也就是说：**今天可观测的死锁并不存在**，批量拒绝是 fail-closed 的兜底 ——
+/// 它把「不挂死」从「依赖 CLI 内部恰好会 abort」变成「我们自己保证」，代价为零
+/// （几条 JSON 行）。真正的红→绿判据在单测 `cancelling_rejects_every_pending_approval_exactly_once`，
+/// 不是那条真机测试。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingApproval {
+    request_id: String,
+    tool_name: String,
+}
+
+/// 挂起表 → 一批 deny 响应行（每条询问恰好一行，顺序与挂起顺序一致）。
+///
+/// 抽成纯函数是因为它承载了本项最不能出错的一条不变量：**一条都不能漏**。
+/// 单测直接断言「每个挂起的 request_id 都出现且只出现一次、且一律是 deny」。
+fn reject_pending_lines(pending: &[PendingApproval], reason: &str) -> Vec<String> {
+    pending
+        .iter()
+        .map(|entry| approval_response_line(&entry.request_id, false, reason))
+        .collect()
+}
+
+/// 一条 `can_use_tool` 的答复行（含结尾换行）。
+///
+/// **协议形状**（claude 2.1.220，二进制里的 zod union `UdE | BdE` + 本机真机对照）：
+/// - 允许：`{"behavior":"allow"}`（可选 `updatedInput` / `updatedPermissions`；我们不改入参，
+///   所以只发 `behavior`——CLI 会把原入参当作 `updatedInput`）；
+/// - 拒绝：`{"behavior":"deny","message":<必填>,"interrupt":false}`，`message` 会原样成为
+///   那次工具调用的 `tool_result`（实测）。`interrupt:true` 会让 CLI abort 整轮，我们不要
+///   ——拒一个工具不等于停掉整轮，用户想停有「停止」按钮。
+///
+/// **注意载荷这一层是 camelCase，而外面三件套是 snake_case**：这条协议两套命名混用
+/// （`subtype` / `request_id` / `error` 是 snake_case，`behavior` / `updatedInput` /
+/// `updatedPermissions` 是 camelCase）。而 `request_id` 嵌在 `response` **里面**、不在帧顶层
+/// —— 放错层级 = CLI 匹配不到 = 等于没回。
+fn approval_response_line(request_id: &str, approved: bool, deny_message: &str) -> String {
+    let payload = if approved {
+        json!({ "behavior": "allow" })
+    } else {
+        json!({ "behavior": "deny", "message": deny_message, "interrupt": false })
+    };
+    format!(
+        "{}\n",
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": payload,
+            },
+        })
+    )
+}
+
+/// 这条询问该问用户，还是当场就能定？返回 `Err(理由)` = 直接拒，不打扰用户。
+///
+/// 目前只有一条当场拒的规则：`requires_user_interaction`（见
+/// `APPROVAL_INTERACTIVE_UNSUPPORTED`）。抽成纯函数是为了让「哪些不问用户」有单测可证。
+fn approval_verdict(ask: &ApprovalAsk) -> Result<(), &'static str> {
+    if ask.requires_user_interaction {
+        return Err(APPROVAL_INTERACTIVE_UNSUPPORTED);
+    }
+    Ok(())
+}
+
+/// 从一条 `can_use_tool` 请求里读出问用户所需的字段。
+///
+/// 字段形状（请求侧全是 **snake_case**，二进制核实 + 真机样本对照）：
+/// `tool_name` / `display_name` / `input` / `tool_use_id` / `description` /
+/// `permission_suggestions` / `requires_user_interaction` / …
+///
+/// `tool_use_id` 在 schema 里是 optional：缺失时回落 `request_id` 当 Kivio 侧的卡片 id
+/// —— 卡片必须有个稳定 id 才能被答复，宁可与工具卡对不上也不能没有。
+fn approval_ask_from_request(request_id: &str, request: &Value) -> ApprovalAsk {
+    let tool_call_id = request
+        .get("tool_use_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(request_id)
+        .to_string();
+    ApprovalAsk {
+        request_id: request_id.to_string(),
+        tool_call_id,
+        tool_name: request
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        input: request.get("input").cloned().unwrap_or(Value::Null),
+        requires_user_interaction: request
+            .get("requires_user_interaction")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
 /// 分流一帧 stdout JSON。
-fn classify_inbound_frame(value: &Value) -> InboundFrame {
+///
+/// `can_ask` = 本轮有没有宿主可问（`SessionCommand::RunTurn.approvals`）。没有时
+/// `can_use_tool` 仍走那条 fail-closed 的 error 兜底 —— 沉默的代价是整轮永久挂死。
+fn classify_inbound_frame(value: &Value, can_ask: bool) -> InboundFrame {
     let Some(obj) = value.as_object() else {
         return InboundFrame::Stream;
     };
     match obj.get("type").and_then(|v| v.as_str()).unwrap_or("") {
         // **必须回复**：claude 发出 `control_request` 之后就挂在那儿等 `control_response`
-        // （它自己那侧是 `pendingRequests` 里的一个 Promise，**没有超时**）。我们不回 ⇒ 那个
+        // （它那侧是 `pendingRequests` 里的一个 Promise，**没有超时**）。我们不回 ⇒ 那个
         // 工具调用永远不返回 ⇒ 本轮的 `result` 永远不来 ⇒ 轮次读循环永久挂死。
         //
-        // **claude 2.1.220 在我们这套 argv 下实测不会发**（两条独立证据，别把这条当成
-        // 「修了一个正在发生的挂死」）：
-        //   1. 真机：`--permission-mode default` + 让它写文件，权限被**直接拒**
-        //      （result 里是「The write needs your permission to proceed」），stdout 上
-        //      一条 `control_request` 都没有；
-        //   2. 二进制：`can_use_tool` / `request_user_dialog` 的发送端（`qHS` / `zHS`）
-        //      只挂在 **REPL / remote bridge** 那条传输上（`replBridgePermissionCallbacks`），
-        //      纯 stdio 的 `-p` 走的是 `--permission-prompt-tool` 或直接拒。
+        // **`can_use_tool` 是我们唯一实现的子型**：它只在 argv 带
+        // `--permission-prompt-tool stdio` 时才会到达（见 `defs::claude::claude_permission_prompt_args`；
+        // 本机 2.1.220 实测：带这个 flag + `--permission-mode default` 让它写文件 ⇒ 收到
+        // `can_use_tool`；不带 flag 的对照组一条都没有，权限被 CLI 直接拒）。
+        // 二进制侧同一结论：`ekm(mode)` 里 `if(mode==="stdio") return createCanUseTool(...)`，
+        // 官方 SDK 在用户提供 `canUseTool` 回调时也正是 push 这个 flag 值。
         //
-        // 那为什么还要写这一手：这是**保障**而不是绕过。整套机制在这个二进制里是完整的
-        // （`can_use_tool` 出现 35 次、`control_cancel_request` 33 次），schema 里 CLI→客户端
-        // 的 `control_request` 是个 12 成员 union；哪天它开始走 stdio、或用户装了别的版本 /
-        // 换了权限档位，沉默的代价是**那一轮永久挂死**（读循环没有超时）。回一条 error 的
-        // 代价只是「这一次工具用不了」。
+        // 其余 11 个子型仍回 error（fail-closed）：宁可一次工具用不了，也不要整轮挂死。
         "control_request" => match request_id_of(obj) {
             Some(request_id) => {
-                let subtype = obj
-                    .get("request")
+                let request = obj.get("request");
+                let subtype = request
                     .and_then(|r| r.get("subtype"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                InboundFrame::Reply(control_error_response_line(&request_id, &subtype))
+                if can_ask && subtype == "can_use_tool" {
+                    let request = request.cloned().unwrap_or(Value::Null);
+                    InboundFrame::Ask(approval_ask_from_request(&request_id, &request))
+                } else {
+                    InboundFrame::Reply(control_error_response_line(&request_id, &subtype))
+                }
             }
             // 没有 `request_id` 就无从回复（CLI 自己的校验也会把这种帧判成
             // `Error: Missing request on control_request`）。只能丢掉。
@@ -182,10 +303,13 @@ fn classify_inbound_frame(value: &Value) -> InboundFrame {
         // 而这条 ack 可能在我们已经返回之后才到。读它没有任何决策价值。
         "control_response" => InboundFrame::Ignore,
         // claude 撤回它先前发给我们的某个 `control_request`（例如权限询问已在别处被答掉）。
-        // **有意不接**：实测 CLI 自己收到这条时也只是 abort 掉在飞的请求、**不回任何东西**
-        // （二进制里 `case "control_cancel_request"` 分支只有 `Hn?.abort(...)`），所以静默忽略
-        // 是对的。等实现了权限问答，这里要改成「取消那条待答的询问」。
-        "control_cancel_request" => InboundFrame::Ignore,
+        // **不回任何东西**（二进制里 CLI 自己收到这条时也只有 `Hn?.abort(...)`），但**必须把
+        // 挂起表里那条删掉** —— 留着它，取消时的批量拒绝会对一条早已作废的询问回响应，
+        // 而更糟的是它会让「本轮还有人在等」这个判断永久为真。
+        "control_cancel_request" => match request_id_of(obj) {
+            Some(request_id) => InboundFrame::CancelAsk(request_id),
+            None => InboundFrame::Ignore,
+        },
         // 心跳。schema 是 `{type:"keep_alive"}`（无字段、无 request_id），CLI 自己的两个读取点
         // 都是直接 `continue` / `return` —— **没有任何需要回应的语义**，静默忽略即正确处理。
         "keep_alive" => InboundFrame::Ignore,
@@ -422,6 +546,7 @@ impl ClaudeStreamJsonSession {
         images: &[ImageBlock],
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
+        approvals: Option<ApprovalBridge>,
     ) -> Result<(), String> {
         let payload = stream_json_user_line(prompt, images)?;
         if let Err(err) = self.stdin.write_all(payload.as_bytes()).await {
@@ -430,6 +555,18 @@ impl ClaudeStreamJsonSession {
         if let Err(err) = self.stdin.flush().await {
             return Err(self.fold_tail(format!("刷新 claude stdin 失败: {err}")).await);
         }
+
+        let (ask_tx, mut decisions) = match approvals {
+            Some(ApprovalBridge {
+                requests,
+                decisions,
+            }) => (Some(requests), Some(decisions)),
+            None => (None, None),
+        };
+        // 已送去问用户、还在等答复的询问。**这张表的每一条都欠 CLI 一个 `control_response`**：
+        // 漏一条 = 那一轮永久挂死（CLI 侧的 promise 没有超时，我们的读循环也没有）。
+        // 所以下面每一条 `return` 之前都要先把它整批拒掉。
+        let mut pending: Vec<PendingApproval> = Vec::new();
 
         let mut cancelled = false;
         let mut recoverable_errors = 0u32;
@@ -442,6 +579,11 @@ impl ClaudeStreamJsonSession {
                 Ok(SessionCommand::Cancel) => {
                     if !cancelled {
                         cancelled = true;
+                        // **顺序不能反：先拒掉挂起的权限询问，再发中断。**
+                        // 反过来的话 CLI 可能在还挂着一条没答复的询问时就开始收尾，那条询问
+                        // 永远等不到回复 —— 而中断本身也就永远收不了尾。
+                        self.reject_pending(&mut pending, APPROVAL_ABORTED_MESSAGE)
+                            .await;
                         // 协议级中断，**不 kill**：进程要留给下一轮（常驻的核心收益）。
                         // 写失败也不立刻放弃 —— 继续读，`result` 可能已经在路上。
                         let line = interrupt_request_line(&format!("kivio-interrupt-{}", Uuid::new_v4()));
@@ -449,13 +591,41 @@ impl ClaudeStreamJsonSession {
                         let _ = self.stdin.flush().await;
                     }
                 }
-                Ok(SessionCommand::Close) => return Err("closed".to_string()),
+                Ok(SessionCommand::Close) => {
+                    self.reject_pending(&mut pending, APPROVAL_ABORTED_MESSAGE)
+                        .await;
+                    return Err("closed".to_string());
+                }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    return Err("control channel closed".to_string())
+                    self.reject_pending(&mut pending, APPROVAL_ABORTED_MESSAGE)
+                        .await;
+                    return Err("control channel closed".to_string());
+                }
+            }
+
+            // 用户答复了某条询问 ⇒ 回一条 `control_response` 并从挂起表里摘掉。
+            // 与 control 通道同一个 200ms 轮询粒度：审批本来就是人的反应时间，够快。
+            if let Some(rx) = decisions.as_mut() {
+                while let Ok(decision) = rx.try_recv() {
+                    let Some(index) = pending
+                        .iter()
+                        .position(|entry| entry.request_id == decision.request_id)
+                    else {
+                        // 已经被 `control_cancel_request` 撤回、或已在别处答过：不能重复回复。
+                        continue;
+                    };
+                    pending.remove(index);
+                    let line = approval_response_line(
+                        &decision.request_id,
+                        decision.approved,
+                        APPROVAL_DENIED_MESSAGE,
+                    );
+                    let _ = self.stdin.write_all(line.as_bytes()).await;
+                    let _ = self.stdin.flush().await;
                 }
             }
 
@@ -466,8 +636,10 @@ impl ClaudeStreamJsonSession {
                 }
                 ReadStep::Idle => continue,
                 ReadStep::Eof => {
-                    // 进程在轮次中间没了。取消途中遇到这个：按「已取消但会话作废」上报，
-                    // 否则重试逻辑会把用户刚刚停掉的这一轮原样重发一遍。
+                    // 进程在轮次中间没了 ⇒ 挂起的询问再也回不掉了（管道已断），但表要清空，
+                    // 免得下一轮误以为还有人在等。取消途中遇到这个：按「已取消但会话作废」
+                    // 上报，否则重试逻辑会把用户刚刚停掉的这一轮原样重发一遍。
+                    pending.clear();
                     return Err(if cancelled {
                         CANCELLED_SESSION_LOST.to_string()
                     } else {
@@ -478,6 +650,7 @@ impl ClaudeStreamJsonSession {
                 ReadStep::Fatal(err) => {
                     recoverable_errors += 1;
                     if recoverable_errors >= MAX_RECOVERABLE_READ_ERRORS {
+                        pending.clear();
                         return Err(self.fold_tail(err).await);
                     }
                     continue;
@@ -500,12 +673,44 @@ impl ClaudeStreamJsonSession {
                     continue;
                 }
             };
-            match classify_inbound_frame(&value) {
+            match classify_inbound_frame(&value, ask_tx.is_some()) {
                 // **fail-closed**：认不出来的控制请求也必须回一条 error 响应。沉默会让 claude
                 // 永远等下去（它那侧没有超时），而本轮的读循环也没有超时 —— 那一轮就永久挂死。
                 InboundFrame::Reply(reply) => {
                     let _ = self.stdin.write_all(reply.as_bytes()).await;
                     let _ = self.stdin.flush().await;
+                    continue;
+                }
+                // 「这个工具能用吗」——送去问用户，挂起等答复。
+                InboundFrame::Ask(ask) => {
+                    let request_id = ask.request_id.clone();
+                    let tool_name = ask.tool_name.clone();
+                    // 当场就能定的（需要在卡片上作答的交互式工具）直接拒，不打扰用户。
+                    let immediate_deny = match approval_verdict(&ask) {
+                        Err(reason) => Some(reason),
+                        // 宿主那边的通道满了 / 已经没人接了 ⇒ 同样当场拒。
+                        // **绝不能在这里静默**：那一轮会永久挂死。
+                        Ok(()) => match ask_tx.as_ref().map(|tx| tx.try_send(ask)) {
+                            Some(Ok(())) => None,
+                            _ => Some(APPROVAL_ABORTED_MESSAGE),
+                        },
+                    };
+                    match immediate_deny {
+                        Some(reason) => {
+                            let line = approval_response_line(&request_id, false, reason);
+                            let _ = self.stdin.write_all(line.as_bytes()).await;
+                            let _ = self.stdin.flush().await;
+                        }
+                        None => pending.push(PendingApproval {
+                            request_id,
+                            tool_name,
+                        }),
+                    }
+                    continue;
+                }
+                // CLI 撤回了那条询问：从挂起表摘掉，**不回任何东西**。
+                InboundFrame::CancelAsk(request_id) => {
+                    pending.retain(|entry| entry.request_id != request_id);
                     continue;
                 }
                 InboundFrame::Ignore => continue,
@@ -542,6 +747,11 @@ impl ClaudeStreamJsonSession {
             }
 
             if self.handler.completed_result_turns() > before {
+                // 本轮收尾了 ⇒ 任何还挂着的询问都不会再被 CLI 用到，但**仍要回掉**：
+                // 一条没回的询问会跨轮留在 CLI 的 `pendingRequests` 里，而下一轮的读循环
+                // 同样没有超时。正常路径下这张表在这里已经是空的（收尾意味着工具都定了）。
+                self.reject_pending(&mut pending, APPROVAL_ABORTED_MESSAGE)
+                    .await;
                 if let Some(message) = missing_session {
                     return Err(message);
                 }
@@ -556,6 +766,23 @@ impl ClaudeStreamJsonSession {
                 return Ok(());
             }
         }
+    }
+
+    /// 把挂起表**整批**拒掉并清空。取消 / 关会话 / 轮次收尾都要过这一手。
+    ///
+    /// 不变量：**一条都不能漏**。一条永远不被回复的询问在结构上就是一次永久挂死
+    /// （CLI 侧的 promise 没有超时，我们的读循环也没有）。
+    /// 边界说明（实测过、别误读成「修了一个正在发生的死锁」）见 `PendingApproval` 的注释。
+    /// 写失败（管道已断）不影响清空：那种情况下 CLI 也已经不在了。
+    async fn reject_pending(&mut self, pending: &mut Vec<PendingApproval>, reason: &str) {
+        if pending.is_empty() {
+            return;
+        }
+        for line in reject_pending_lines(pending, reason) {
+            let _ = self.stdin.write_all(line.as_bytes()).await;
+        }
+        let _ = self.stdin.flush().await;
+        pending.clear();
     }
 
     /// 读一行 stdout，把「瞬时可恢复」与「真的结束了」分开（见 `read_error_is_recoverable`）。
@@ -631,11 +858,14 @@ pub fn spawn_claude_stream_session_actor(
                     images,
                     events,
                     done,
+                    approvals,
                     ..
                 } => {
                     // Invariant (A4)：`run_turn` 在返回前发完所有 `event`，mpsc 保序，
                     // 所以调用方在 `done` 之后的 drain 能看到全部事件。`done.send` 永远最后。
-                    let result = session.run_turn(&prompt, &images, &events, &mut rx).await;
+                    let result = session
+                        .run_turn(&prompt, &images, &events, &mut rx, approvals)
+                        .await;
                     let _ = done.send(result);
                 }
                 SessionCommand::Cancel => {} // 轮次之间没有在跑的轮次
@@ -751,8 +981,17 @@ mod tests {
     }
 
     fn reply_for(raw: &str) -> Option<String> {
-        match classify_inbound_frame(&frame(raw)) {
+        // `can_ask=false` = 本轮没有宿主可问 ⇒ 一切控制请求都走 fail-closed 的 error 兜底。
+        match classify_inbound_frame(&frame(raw), false) {
             InboundFrame::Reply(line) => Some(line),
+            _ => None,
+        }
+    }
+
+    /// 带宿主时的分流结果（用于权限审批那组断言）。
+    fn ask_for(raw: &str) -> Option<ApprovalAsk> {
+        match classify_inbound_frame(&frame(raw), true) {
+            InboundFrame::Ask(ask) => Some(ask),
             _ => None,
         }
     }
@@ -810,30 +1049,208 @@ mod tests {
     #[test]
     fn a_control_request_without_a_request_id_is_dropped_not_answered() {
         assert!(matches!(
-            classify_inbound_frame(&frame(
-                r#"{"type":"control_request","request":{"subtype":"can_use_tool"}}"#
-            )),
+            classify_inbound_frame(
+                &frame(r#"{"type":"control_request","request":{"subtype":"can_use_tool"}}"#),
+                true
+            ),
             InboundFrame::Ignore
         ));
     }
 
-    /// `keep_alive` / `control_cancel_request` / `control_response`：**有意不接、也不需要回复**。
+    /// `keep_alive` / `control_response`：**有意不接、也不需要回复**。
     ///
     /// 核实依据（claude 2.1.220 二进制）：`keep_alive` 的 schema 是 `{type:"keep_alive"}`
-    /// ——无字段、无 request_id，CLI 自己的两个读取点都是直接跳过，没有任何需要回应的语义；
-    /// `control_cancel_request` 在 CLI 自己那侧的处理只是 abort 掉在飞的请求、**不回任何东西**。
+    /// ——无字段、无 request_id，CLI 自己的两个读取点都是直接跳过，没有任何需要回应的语义。
     #[test]
     fn control_channel_noise_is_ignored_without_a_reply() {
         for raw in [
             r#"{"type":"keep_alive"}"#,
-            r#"{"type":"control_cancel_request","request_id":"req-42"}"#,
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"kivio-interrupt-1","response":{"still_queued":[]}}}"#,
         ] {
             assert!(
-                matches!(classify_inbound_frame(&frame(raw)), InboundFrame::Ignore),
+                matches!(classify_inbound_frame(&frame(raw), true), InboundFrame::Ignore),
                 "{raw} 应被安全忽略"
             );
         }
+    }
+
+    /// `control_cancel_request` = CLI 撤回它先前那条询问。**不回任何东西**（CLI 自己收到这条
+    /// 时也只 `abort()`），但必须能把挂起表里那条摘掉 —— 否则取消时的批量拒绝会对一条早已
+    /// 作废的询问回响应，而「本轮还有人在等」会永久为真。
+    #[test]
+    fn a_cancelled_control_request_is_routed_to_the_pending_table_not_answered() {
+        match classify_inbound_frame(
+            &frame(r#"{"type":"control_cancel_request","request_id":"req-42"}"#),
+            true,
+        ) {
+            InboundFrame::CancelAsk(id) => assert_eq!(id, "req-42"),
+            other => panic!("应路由成 CancelAsk，实际是 {:?}", frame_kind(&other)),
+        }
+        // 没有 id 就无从对应，安全忽略。
+        assert!(matches!(
+            classify_inbound_frame(&frame(r#"{"type":"control_cancel_request"}"#), true),
+            InboundFrame::Ignore
+        ));
+    }
+
+    fn frame_kind(frame: &InboundFrame) -> &'static str {
+        match frame {
+            InboundFrame::Stream => "Stream",
+            InboundFrame::Ignore => "Ignore",
+            InboundFrame::Reply(_) => "Reply",
+            InboundFrame::Ask(_) => "Ask",
+            InboundFrame::CancelAsk(_) => "CancelAsk",
+        }
+    }
+
+    // ---- 工具审批：can_use_tool 的问答 ----
+
+    /// **本项功能的核心分流断言**：有宿主可问时，`can_use_tool` 不再回 error，而是变成一条
+    /// 待用户答复的询问，且带齐问用户所需的字段。
+    ///
+    /// fixture 是**真机原文**（claude 2.1.220，`--permission-prompt-tool stdio`
+    /// + `--permission-mode default` 让它写文件，2026-07-29 本机实测）。
+    #[test]
+    fn a_can_use_tool_request_becomes_a_pending_ask_when_a_host_can_answer() {
+        let ask = ask_for(
+            r#"{"type":"control_request","request_id":"f4d4ddfd-1be4-4630-baec-2b764030870c",
+                "request":{"subtype":"can_use_tool","tool_name":"Write","display_name":"Write",
+                           "input":{"file_path":"C:\\tmp\\probe.txt","content":"HELLO42"},
+                           "description":"probe.txt",
+                           "permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],
+                           "tool_use_id":"toolu_015Jc1MjkwjbJL6rsCoaG3q8"}}"#,
+        )
+        .expect("有宿主时必须变成待答的询问");
+        // 回复时要原样回显的那个 id。
+        assert_eq!(ask.request_id, "f4d4ddfd-1be4-4630-baec-2b764030870c");
+        // 卡片 id 用 claude 的 tool_use_id ⇒ 审批卡与工具卡指向同一次调用。
+        assert_eq!(ask.tool_call_id, "toolu_015Jc1MjkwjbJL6rsCoaG3q8");
+        // 工具原名**不归一化**：`Write` 是 PascalCase，前端展示要的就是本名。
+        assert_eq!(ask.tool_name, "Write");
+        assert_eq!(ask.input["file_path"], serde_json::json!("C:\\tmp\\probe.txt"));
+        assert!(!ask.requires_user_interaction);
+    }
+
+    /// 没有宿主（用户没开审批 / 别的协议）时**必须**退回 fail-closed 的 error 兜底，
+    /// 绝不能变成「挂起但没人答」—— 那就是永久挂死。
+    #[test]
+    fn a_can_use_tool_request_without_a_host_still_gets_the_fail_closed_error() {
+        let line = reply_for(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}}"#,
+        )
+        .expect("没有宿主也必须回复");
+        let value = frame(line.trim());
+        assert_eq!(value["response"]["subtype"], serde_json::json!("error"));
+        assert_eq!(value["response"]["request_id"], serde_json::json!("r1"));
+    }
+
+    /// `tool_use_id` 在 schema 里是 optional：缺失时卡片 id 回落 `request_id`。
+    /// 卡片必须有个稳定 id 才能被答复，宁可与工具卡对不上也不能没有。
+    #[test]
+    fn a_missing_tool_use_id_falls_back_to_the_request_id() {
+        let ask = ask_for(
+            r#"{"type":"control_request","request_id":"r7","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
+        )
+        .expect("ask");
+        assert_eq!(ask.tool_call_id, "r7");
+    }
+
+    /// 允许 / 拒绝的线上形态必须与真机实测一致。
+    ///
+    /// 实测（2026-07-29，claude 2.1.220）：回 `{behavior:"allow"}` 文件真的被创建；
+    /// 回 `{behavior:"deny",message}` 文件没建，且 `message` **原样**成为那次调用的
+    /// `tool_result`（`is_error:true`），模型据此改口说「写入被拒绝，我没有成功」。
+    #[test]
+    fn approval_responses_match_the_measured_wire_shape() {
+        for (approved, expected_behavior) in [(true, "allow"), (false, "deny")] {
+            let line = approval_response_line("req-9", approved, "拒了");
+            assert!(line.ends_with('\n'), "必须是一整行");
+            let value = frame(line.trim());
+            assert_eq!(value["type"], serde_json::json!("control_response"));
+            // 三件套是 **snake_case**，且 `request_id` 嵌在 `response` 里、不在帧顶层 ——
+            // 放错层级 = CLI 匹配不到 = 等于没回。
+            assert_eq!(value["response"]["subtype"], serde_json::json!("success"));
+            assert_eq!(value["response"]["request_id"], serde_json::json!("req-9"));
+            assert!(value.get("request_id").is_none(), "顶层不该有 request_id");
+            // 而载荷这一层是 **camelCase**（同一条协议两套命名混用）。
+            let payload = &value["response"]["response"];
+            assert_eq!(payload["behavior"], serde_json::json!(expected_behavior));
+            if approved {
+                // 我们不改入参 ⇒ 不发 `updatedInput`，CLI 会沿用原入参。
+                assert!(payload.get("message").is_none());
+            } else {
+                // deny 分支的 `message` 是**必填**（schema `BdE`），而且会变成 tool_result。
+                assert_eq!(payload["message"], serde_json::json!("拒了"));
+                // `interrupt:true` 会让 CLI abort 整轮 —— 拒一个工具不等于停掉整轮。
+                assert_eq!(payload["interrupt"], serde_json::json!(false));
+            }
+        }
+    }
+
+    /// **本项最不能出错的一条断言**：取消时挂起表里的每一条询问都必须被拒掉，一条都不能漏。
+    ///
+    /// 一条永远不被回复的询问在结构上就是一次永久挂死（CLI 侧的 `pendingRequests` 是个没有
+    /// 超时的 Promise，我们的轮次读循环也没有超时）。**这条单测就是那个不变量的红→绿判据**
+    /// —— 真机测试证明不了它（见 `PendingApproval` 注释里那段实测边界：注释掉批量拒绝之后
+    /// 真机测试仍然通过，因为 CLI 自己的 interrupt 会 abort 掉在飞的请求）。
+    #[test]
+    fn cancelling_rejects_every_pending_approval_exactly_once() {
+        let pending: Vec<PendingApproval> = ["r1", "r2", "r3", "r4", "r5"]
+            .iter()
+            .map(|id| PendingApproval {
+                request_id: (*id).to_string(),
+                tool_name: "Bash".to_string(),
+            })
+            .collect();
+        let lines = reject_pending_lines(&pending, "用户中止了本轮");
+        assert_eq!(lines.len(), pending.len(), "每条挂起的询问都要有一行答复");
+
+        let mut answered: Vec<String> = Vec::new();
+        for line in &lines {
+            assert!(line.ends_with('\n'));
+            let value = frame(line.trim());
+            assert_eq!(value["response"]["subtype"], serde_json::json!("success"));
+            assert_eq!(
+                value["response"]["response"]["behavior"],
+                serde_json::json!("deny"),
+                "批量收尾一律拒绝（fail-closed），绝不能默认放行"
+            );
+            answered.push(
+                value["response"]["request_id"]
+                    .as_str()
+                    .expect("request_id 必须是字符串")
+                    .to_string(),
+            );
+        }
+        answered.sort();
+        let mut expected: Vec<String> =
+            pending.iter().map(|p| p.request_id.clone()).collect();
+        expected.sort();
+        assert_eq!(answered, expected, "有询问被漏掉或被重复回复 ⇒ 会永久挂死");
+    }
+
+    /// 空表不产生任何写入（避免往 stdin 灌无意义的行）。
+    #[test]
+    fn rejecting_an_empty_pending_table_writes_nothing() {
+        assert!(reject_pending_lines(&[], "x").is_empty());
+    }
+
+    /// 需要在卡片上直接作答的工具（`AskUserQuestion` / `ExitPlanMode`）当场拒，不打扰用户：
+    /// 批准它们只会让 CLI 紧接着发一条我们还没实现的 `request_user_dialog`，那条会被
+    /// fail-closed 回 error、工具照样失败 —— 给用户一张点了也没用的卡片更糟。
+    #[test]
+    fn interactive_tools_are_denied_without_bothering_the_user() {
+        let interactive = ask_for(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{},"requires_user_interaction":true}}"#,
+        )
+        .expect("ask");
+        assert!(approval_verdict(&interactive).is_err());
+
+        let ordinary = ask_for(
+            r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
+        )
+        .expect("ask");
+        assert!(approval_verdict(&ordinary).is_ok(), "普通工具必须问用户");
     }
 
     /// 内容帧照旧全部交给流解析器 —— 分流不能顺手把正文挡在门外。
@@ -850,7 +1267,7 @@ mod tests {
             r#"{"type":"some_future_frame"}"#,
         ] {
             assert!(
-                matches!(classify_inbound_frame(&frame(raw)), InboundFrame::Stream),
+                matches!(classify_inbound_frame(&frame(raw), true), InboundFrame::Stream),
                 "{raw} 不该被分流挡掉"
             );
         }
@@ -979,6 +1396,17 @@ mod live_tests {
 
     /// 生产 argv，直接取自出货用的 builder —— 测一条简化命令行等于没测。
     fn live_args(session_id: &str, model: Option<&str>) -> Vec<String> {
+        live_args_with_sandbox(session_id, model, None)
+    }
+
+    /// 同上，但指定权限档位。`Some("default")` = 用户在权限胶囊里选了「每次确认」，
+    /// argv 会带上 `--permission-prompt-tool stdio`（见
+    /// `defs::claude::claude_permission_prompt_args`）。
+    fn live_args_with_sandbox(
+        session_id: &str,
+        model: Option<&str>,
+        sandbox: Option<&str>,
+    ) -> Vec<String> {
         build_claude_args(
             &RuntimeContext {
                 extra_allowed_dirs: vec![],
@@ -989,7 +1417,7 @@ mod live_tests {
             &RuntimeBuildOptions {
                 model: model.map(str::to_string),
                 reasoning: None,
-                sandbox: None,
+                sandbox: sandbox.map(str::to_string),
             },
             None,
         )
@@ -1014,6 +1442,16 @@ mod live_tests {
         prompt: &str,
         cancel_after_text: bool,
     ) -> TurnOutput {
+        one_turn_with_approvals(control, prompt, cancel_after_text, None).await
+    }
+
+    /// 同上，但带一条审批通道。`approvals` 的另一半（询问接收端 + 答复发送端）由调用方持有。
+    async fn one_turn_with_approvals(
+        control: &mpsc::Sender<SessionCommand>,
+        prompt: &str,
+        cancel_after_text: bool,
+        approvals: Option<ApprovalBridge>,
+    ) -> TurnOutput {
         let (etx, mut erx) = mpsc::channel::<UnifiedAgentEvent>(256);
         let (dtx, drx) = oneshot::channel();
         control
@@ -1024,6 +1462,7 @@ mod live_tests {
                 images: vec![],
                 events: etx,
                 done: dtx,
+                approvals,
             })
             .await
             .expect("actor alive");
@@ -1346,6 +1785,232 @@ mod live_tests {
                 "NOTE: 降级后的这一轮没成功（未登录 / 网络？）——本条的判据是「不再是 resume 失效」，仍然成立"
             );
         }
+
+        close_and_cleanup(control, &workdir).await;
+    }
+
+    // ---- 工具审批的真机验收 ----
+
+    /// 开一条审批通道，并把它的宿主半边（询问接收端 + 答复发送端）返给调用方。
+    fn live_approval_bridge() -> (
+        ApprovalBridge,
+        mpsc::Receiver<ApprovalAsk>,
+        mpsc::Sender<crate::external_agents::session::live::ApprovalDecision>,
+    ) {
+        let (ask_tx, ask_rx) = mpsc::channel::<ApprovalAsk>(8);
+        let (dec_tx, dec_rx) = mpsc::channel(8);
+        (
+            ApprovalBridge {
+                requests: ask_tx,
+                decisions: dec_rx,
+            },
+            ask_rx,
+            dec_tx,
+        )
+    }
+
+    /// 跑一轮，并对收到的每条权限询问按 `approve` 作答。返回 (正文, 终态, 被问过的工具名)。
+    async fn one_turn_answering(
+        control: &mpsc::Sender<SessionCommand>,
+        prompt: &str,
+        approve: bool,
+    ) -> (TurnOutput, Vec<String>) {
+        let (bridge, mut ask_rx, dec_tx) = live_approval_bridge();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let asked_for_task = asked.clone();
+        // 独立任务扮演「宿主 + 用户」：收到询问立刻按 `approve` 回话。
+        let answerer = tokio::spawn(async move {
+            while let Some(ask) = ask_rx.recv().await {
+                eprintln!(
+                    "  ask: tool={} request_id={} tool_use_id={} input={}",
+                    ask.tool_name, ask.request_id, ask.tool_call_id, ask.input
+                );
+                asked_for_task
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(ask.tool_name.clone());
+                let sent = dec_tx
+                    .send(crate::external_agents::session::live::ApprovalDecision {
+                        request_id: ask.request_id,
+                        approved: approve,
+                    })
+                    .await;
+                if sent.is_err() {
+                    break;
+                }
+            }
+        });
+        let out = one_turn_with_approvals(control, prompt, false, Some(bridge)).await;
+        answerer.abort();
+        let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (out, asked)
+    }
+
+    /// **工具审批的核心验收**：单测只能证明我们拼对了 JSON —— 证明不了**真实的 CLI 会照做**。
+    /// 所以这条对真实二进制断言两件事，每件都用一个可证伪的文件系统事实：
+    ///
+    /// 1. 答 `allow` ⇒ 文件**真的被创建**且内容正确；
+    /// 2. 答 `deny`  ⇒ 文件**没有**被创建，且 claude 的回答里说明了它被拒。
+    ///
+    /// 前置条件（缺一条这个功能就是死的，所以每条都断言而不是假设）：
+    /// - argv 必须带 `--permission-prompt-tool stdio` —— 不带的话 CLI 一条 `control_request`
+    ///   都不发，权限被它自己直接拒（2026-07-29 本机对照实测）；
+    /// - 权限档位必须是 `default` —— `bypassPermissions` 会在咨询我们**之前**就放行一切。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "real-machine: spawns the installed claude CLI, needs login, costs tokens"]
+    async fn live_tool_approval_allow_really_runs_the_tool_and_deny_really_blocks_it() {
+        let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
+            eprintln!("SKIP: 本机没有可用的 claude CLI");
+            return;
+        };
+
+        for (approve, label) in [(true, "allow"), (false, "deny")] {
+            let session_id = Uuid::new_v4().to_string();
+            let workdir = std::env::temp_dir().join(format!("kivio-claude-approve-{session_id}"));
+            std::fs::create_dir_all(&workdir).expect("create workdir");
+            let target = workdir.join("approved.txt");
+
+            // 「每次确认」档位 ⇒ argv 带审批 flag。这两条是功能的前提，直接断在这里。
+            let args = live_args_with_sandbox(&session_id, None, Some("default"));
+            assert!(
+                args.windows(2)
+                    .any(|w| w == ["--permission-prompt-tool", "stdio"]),
+                "argv 没带 --permission-prompt-tool stdio ⇒ CLI 根本不会来问：{args:?}"
+            );
+            assert!(
+                args.windows(2).any(|w| w == ["--permission-mode", "default"]),
+                "bypassPermissions 会在咨询我们之前就放行一切：{args:?}"
+            );
+
+            let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &args, &workdir).await else {
+                eprintln!("SKIP: 连接失败（未登录 / 网络？）");
+                let _ = std::fs::remove_dir_all(&workdir);
+                return;
+            };
+            let control = spawn_claude_stream_session_actor(session);
+            let (out, asked) = one_turn_answering(
+                &control,
+                "Create a file named approved.txt in the current working directory whose entire \
+                 content is exactly PERMITTED. Then say in one short sentence whether the write \
+                 succeeded.",
+                approve,
+            )
+            .await;
+            eprintln!("[{label}] result={:?}", out.result);
+            eprintln!("[{label}] asked={asked:?}");
+            eprintln!("[{label}] text={}", out.text.trim());
+
+            if out.result.is_err() {
+                eprintln!("SKIP[{label}]: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
+                close_and_cleanup(control, &workdir).await;
+                return;
+            }
+            // 没被问过 ⇒ 整条链路是死的（要么 flag 没生效，要么分流没把 can_use_tool 接住）。
+            assert!(
+                !asked.is_empty(),
+                "[{label}] CLI 一次都没来问权限 ⇒ 审批链路没接通"
+            );
+
+            let exists = target.exists();
+            if approve {
+                assert!(exists, "[{label}] 答了 allow，但文件没被创建 ⇒ CLI 没照做");
+                let content = std::fs::read_to_string(&target).unwrap_or_default();
+                assert!(
+                    content.contains("PERMITTED"),
+                    "[{label}] 文件内容不对：{content:?}"
+                );
+            } else {
+                assert!(!exists, "[{label}] 答了 deny，文件却还是被创建了 ⇒ 拒绝没生效");
+                // 拒绝的 message 会原样成为 tool_result，模型应据此改口。
+                let text = out.text.to_lowercase();
+                assert!(
+                    text.contains("deny")
+                        || text.contains("denied")
+                        || text.contains("not")
+                        || text.contains("fail")
+                        || out.text.contains("拒"),
+                    "[{label}] 被拒之后模型没说明失败，回答是：{:?}",
+                    out.text
+                );
+            }
+
+            close_and_cleanup(control, &workdir).await;
+        }
+    }
+
+    /// **取消路径的真机回归闸门**：一轮里挂着一条没答的权限询问时点「停止」——
+    /// 出口必须是「已取消」，而且**同一个会话下一轮仍然正常返回**。
+    ///
+    /// **这条测不出批量拒绝**（诚实说明，别把它当那件事的判据）：实测把
+    /// `reject_pending` 从 Cancel 分支注释掉之后本条**仍然通过** —— 我们那条 `interrupt`
+    /// 会让 CLI 自己 abort 掉在飞的权限请求。它真正守住的是「取消 + 挂起询问」这个组合
+    /// 不会把常驻会话搞坏（比如把一条迟到的答复漏进下一轮、或让会话卡在等答复上）。
+    /// 批量拒绝那条不变量的判据是单测 `cancelling_rejects_every_pending_approval_exactly_once`。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "real-machine: spawns the installed claude CLI, needs login, costs tokens"]
+    async fn live_cancelling_with_a_pending_approval_leaves_the_session_usable() {
+        let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
+            eprintln!("SKIP: 本机没有可用的 claude CLI");
+            return;
+        };
+        let session_id = Uuid::new_v4().to_string();
+        let workdir = std::env::temp_dir().join(format!("kivio-claude-approvecancel-{session_id}"));
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+        let args = live_args_with_sandbox(&session_id, None, Some("default"));
+
+        let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &args, &workdir).await else {
+            eprintln!("SKIP: 连接失败（未登录 / 网络？）");
+            let _ = std::fs::remove_dir_all(&workdir);
+            return;
+        };
+        let control = spawn_claude_stream_session_actor(session);
+
+        // 第一轮：故意**不答**那条权限询问，等它挂上来之后点「停止」。
+        let (bridge, mut ask_rx, _dec_tx) = live_approval_bridge();
+        let control_for_cancel = control.clone();
+        let canceller = tokio::spawn(async move {
+            // 收到询问 ⇒ 挂着不答 ⇒ 直接取消。这正是最容易死锁的时刻。
+            if let Some(ask) = ask_rx.recv().await {
+                eprintln!("  got ask (deliberately unanswered): {}", ask.tool_name);
+                let _ = control_for_cancel.send(SessionCommand::Cancel).await;
+                true
+            } else {
+                false
+            }
+        });
+        let aborted = one_turn_with_approvals(
+            &control,
+            "Create a file named never.txt containing NOPE in the current working directory.",
+            false,
+            Some(bridge),
+        )
+        .await;
+        let asked = canceller.await.unwrap_or(false);
+        eprintln!("cancelled-with-pending-approval -> {:?}", aborted.result);
+        if !asked {
+            eprintln!("SKIP: CLI 没来问权限（未登录 / 网络？）：{:?}", aborted.result);
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        let cancel_outcome = aborted.result.as_ref().err().map(String::as_str).unwrap_or("");
+        assert!(
+            cancel_outcome == "cancelled" || cancel_outcome == CANCELLED_SESSION_LOST,
+            "挂着权限询问时取消，出口不是「取消」：{cancel_outcome:?}"
+        );
+
+        // **验收点**：会话没被那条未答的询问卡死，下一轮照常回话。
+        let after = one_turn(&control, "Reply with exactly the word ALIVE.", false).await;
+        eprintln!("post-cancel turn: {}", after.text.trim());
+        assert!(
+            after.result.is_ok(),
+            "取消时有挂起的权限询问 ⇒ 会话死锁了（这就是漏掉批量拒绝的症状）：{:?}",
+            after.result
+        );
+        assert!(
+            after.text.to_uppercase().contains("ALIVE"),
+            "下一轮没正常回答：{:?}",
+            after.text
+        );
 
         close_and_cleanup(control, &workdir).await;
     }
