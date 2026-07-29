@@ -1,11 +1,16 @@
 //! 无头测试通道（probe）——仅 debug 构建。
 //!
-//! 自动化写 `<app_data>/chat_probe/request.json` `{prompt, provider?, model?, skillId?}`；
+//! 自动化写 `<app_data>/chat_probe/request.json`
+//! `{prompt, provider?, model?, skillId?, mode?, cwd?, webSearchMode?, conversationId?, externalAgentId?}`；
 //! 运行中的 app 轮询到后，走**与聊天窗口完全相同的生成路径**
 //! （`commands::run_chat_probe` → `complete_assistant_reply_inner(probe=true)` →
-//! `run_agent_loop` + 全量工具集，ProbeAgentHost 自动放行），把结果写到
+//! `run_agent_loop` + 全量工具集，ProbeAgentHost 自动放行；会话若绑外部 CLI 运行时则走
+//! `run_external_cli_reply`），把结果写到
 //! `<app_data>/chat_probe/result.json`（带 `id` 时另写 `result-<id>.json`）：
 //! `{id?, conversationId, answer, toolCalls:[{name,arguments,status}], streamOutcome, error?, finishedAt}`。
+//!
+//! **多轮**：把 result 里的 `conversationId` 填回下一次请求，即续聊同一会话——跨轮记忆、
+//! 外部 CLI 常驻进程复用、压缩边界这些只有多轮才能验的场景靠它。
 //!
 //! 用途：自动化 / CI 真实验证 GUI 客户端的工具调用（如工具改名后模型是否还能调对），
 //! 免手测。整模块 `#[cfg(debug_assertions)]`，release 不含。
@@ -50,6 +55,14 @@ struct ProbeRequest {
     /// 用于无头验证内置搜索链路（任务 07-23）。
     #[serde(default)]
     web_search_mode: Option<String>,
+    /// 续聊已有会话（用上一次 result 回传的 `conversationId`）。省略 = 新建会话。
+    /// **多轮场景只能靠它**：跨轮记忆、外部 CLI 常驻会话复用、压缩边界，都要同一会话连发多轮。
+    #[serde(default)]
+    conversation_id: Option<String>,
+    /// 把**新建**的会话钉到外部 CLI 运行时（`claude` / `codex` / …）。省略 = 跟随
+    /// `settings.chat.defaultAgentRuntime`。续聊时忽略（有消息的外部会话禁切运行时）。
+    #[serde(default)]
+    external_agent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,13 +194,16 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
         req.mode,
         cwd,
         req.web_search_mode,
+        req.conversation_id,
+        req.external_agent_id,
     );
 
     let finished_at = chrono::Local::now().timestamp();
     match tokio::time::timeout(PROBE_TIMEOUT, run).await {
-        Ok(Ok(message)) => ProbeResult {
+        Ok(Ok((conversation_id, message))) => ProbeResult {
             id,
-            conversation_id: None, // scratch 会话已删除，不回传（可加但意义不大）
+            // 回传会话 id：下一次请求带上它就续聊同一会话（多轮验证的入口）。
+            conversation_id: Some(conversation_id),
             answer: message.content.clone(),
             tool_calls: message
                 .tool_calls
