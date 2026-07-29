@@ -3565,6 +3565,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   // 中心页为上方那条收起态按钮行让出的高度（Windows / Linux 无此行，见 centerPageTopStrip）。
   const centerPagePadTop = usesNativeTitlebar && sidebarCollapsed ? 'pt-12' : ''
+  // 扩展中心页共用的外壳：与会话主区同款浮起卡片（见 .chat-center-page）。
+  const centerPageClass = `chat-motion-view-in chat-center-page relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`
 
   // 会话页顶栏控件。非 mac 渲染进全宽标题栏带（单行 chrome），mac 仍留在主区 52px 顶栏。
   // 抽成变量而非组件：依赖十余个 Chat 局部状态与回调，拆组件只会换来一长串 props。
@@ -3733,7 +3735,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </SettingsEnterPane>
           </Suspense>
         ) : chatView === 'assistants' ? (
-          <div key="assistants" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
+          <div key="assistants" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <AssistantCenter
@@ -3746,35 +3748,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </Suspense>
           </div>
         ) : chatView === 'skill' ? (
-          <div key="skill" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
+          <div key="skill" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <SkillCenter onSkillsChanged={() => void loadSkills()} />
             </Suspense>
           </div>
         ) : chatView === 'mcp' ? (
-          <div key="mcp" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
+          <div key="mcp" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <McpCenter />
             </Suspense>
           </div>
         ) : chatView === 'knowledge' ? (
-          <div key="knowledge" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
+          <div key="knowledge" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <KnowledgeCenter />
             </Suspense>
           </div>
         ) : chatView === 'notes' ? (
-          <div key="notes" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
+          <div key="notes" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <NotesCenter />
             </Suspense>
           </div>
         ) : chatView === 'plugins' ? (
-          <div key="plugins" className={`chat-motion-view-in relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`}>
+          <div key="plugins" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <PluginCenter onRequestAiInstall={handleRequestPluginAiInstall} />

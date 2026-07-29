@@ -2345,7 +2345,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       >
         {!hideNav && (
           <aside className="settings-embedded-nav">
-            <h2 className="settings-embedded-nav-title">{t.settings}</h2>
+            <h2 className="settings-embedded-nav-title" onMouseDown={handleSettingsDragMouseDown}>
+              {t.settings}
+            </h2>
             {categoryNav}
           </aside>
         )}

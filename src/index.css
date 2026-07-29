@@ -102,7 +102,7 @@ body {
 .theme-transitions-ready .chat-window-shell,
 .theme-transitions-ready .chat-main-pane,
 .theme-transitions-ready .chat-themed-surface,
-.theme-transitions-ready .assistant-center-root {
+.theme-transitions-ready .chat-center-page {
   transition:
     background-color var(--kv-dur-normal) var(--kv-ease-out),
     border-color var(--kv-dur-normal) var(--kv-ease-out);
@@ -598,8 +598,19 @@ body {
    退回「几块拼在一起的板」。所以用 --theme-surface-soft（≈2% 差）而不是 muted（3.5%，偏重），
    描边也不能用 border-strong（近白卡片上会读成一条灰线）。
    高度由 flex align-items:stretch 减掉上下 margin 得出（所以三者都不能再挂 h-full）。 */
+/* 卡片上缝。有全宽顶栏带时收窄：带高 44、内容 28，带自身已经在卡片上方留了 8px 光学
+   留白，再叠 8px 就读成两段。侧/下缝保持 8。 */
+:root {
+  --chat-card-top: 8px;
+}
+
+.chat-window-shell:has(> .chat-titlebar-strip) {
+  --chat-card-top: 2px;
+}
+
 .chat-sidebar-shell,
 .chat-main-pane,
+.chat-center-page,
 .chat-dock-shell {
   border-radius: 12px;
   background: var(--theme-surface-soft);
@@ -615,21 +626,38 @@ body {
   overflow: hidden;
   /* 左右不留 margin：缝隙由侧栏的 margin-right:8 与 Dock 的 margin-left:8 提供。
      若这里也写 8，相邻处会叠成 16px 双倍缝。两侧收起时各自补 8px（见 .is-collapsed）。 */
-  margin: 8px 0;
+  margin: var(--chat-card-top) 0 8px;
 }
 
-/* 主区内的 MessageList 加载占位（Chat.tsx 的 MessageListLoading）跟主区卡片同色。
-   .assistant-center-root 不在主区卡片内（助手中心是独立分支，齐边铺满），故不并进来。 */
+/* 扩展中心页（助手 / Skill / MCP / 知识库 / 笔记 / 插件）：与会话主区同一张浮起的纸。
+   刻意不复用 .chat-main-pane —— 那个带 container-name: chat-main，会把会话布局的容器
+   查询接到中心页宽度上。右缝也得自己补：会话页那 8px 由收起态 Dock 的 margin-left 提供，
+   中心页不渲染 Dock（见 Chat.tsx 的 `chatView === 'conversation' && <RightDock>`）。 */
+.chat-center-page {
+  margin: var(--chat-card-top) 8px 8px 0;
+  overflow: hidden;
+}
+
+/* 用户气泡：底色得从主区卡片上「站起来」。原先写死 neutral-100 / neutral-800，是照旧底色
+   （亮 #ffffff、暗 #212121）挑的；卡片改成 --theme-surface-soft (#f9f8f6) / #262629 之后，
+   亮色只差 1.6% 且冷暖相反，暗色 #262626 vs #262629 几乎同色 —— 气泡直接读不出来。
+   跟卡片-外壳那 ~2% 的「同一张纸」原则不同：气泡是小面积前景块，要的是能一眼框出边界。 */
+.chat-user-bubble {
+  background: var(--theme-surface-hover);
+}
+
+/* 暗色里「浮起」= 更亮（压深读作凹陷），与三张卡片同一套判断。 */
+.dark .chat-user-bubble {
+  background: #313134;
+}
+
+/* 主区内的 MessageList 加载占位（Chat.tsx 的 MessageListLoading）跟主区卡片同色。 */
 .chat-themed-surface {
   background: var(--theme-surface-soft);
 }
 
-.assistant-center-root {
-  background: var(--theme-surface);
-}
-
 .chat-sidebar-shell {
-  margin: 8px;
+  margin: var(--chat-card-top) 8px 8px;
   /* 折叠动画：负 margin 把整张卡片滑出左侧，由 .chat-window-shell 的 overflow:hidden 裁剪；
      width 不变 → 内容不被压缩。 */
   transition:
@@ -664,7 +692,7 @@ body {
 .chat-dock-shell {
   /* 宽度由内联 CSS 变量 --chat-dock-width 驱动（拖拽时 rAF 直写，不经 React）。 */
   width: var(--chat-dock-width, 360px);
-  margin: 8px;
+  margin: var(--chat-card-top) 8px 8px;
   /* 折叠：负 margin-right 把整张卡片滑出右侧，宽度不变内容不被压缩。 */
   transition:
     margin-right var(--kv-dur-slow) var(--kv-ease-standard),
@@ -1003,6 +1031,7 @@ button.chat-composer-status-item:hover {
    压深读作凹陷）。 */
 .dark .chat-sidebar-shell,
 .dark .chat-main-pane,
+.dark .chat-center-page,
 .dark .chat-dock-shell,
 .dark .chat-themed-surface {
   background: #262629;
@@ -1010,15 +1039,12 @@ button.chat-composer-status-item:hover {
 
 .dark .chat-sidebar-shell,
 .dark .chat-main-pane,
+.dark .chat-center-page,
 .dark .chat-dock-shell {
   border-color: rgba(255, 255, 255, 0.07);
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.35),
     0 5px 16px -8px rgba(0, 0, 0, 0.45);
-}
-
-.dark .assistant-center-root {
-  background: #212121;
 }
 
 /* 系统窗口材质（macOS Menu / Windows Mica）激活：外壳让开，材质从卡片四周那道 8px
@@ -3085,11 +3111,13 @@ button.chat-composer-status-item:hover {
   padding-left: 0;
 }
 
-/* 带浮起后导航栏顶到 y=0：为带让出 44px（+ 原 16px 内边距 = 60），
-   否则窄栏（52px 图标轨，标题被隐藏）第一枚图标会钻到带底下点不到。
-   宽栏里标题也靠这 60 回到与「带占一行」时相同的视觉高度。 */
+/* 带在设置页是透明浮层（见上）。导航栏不再为它留 44px，改为抬到带之上：标题因此回到
+   与页头同一条水平线，窄栏（52px 图标轨）第一枚图标也不会被带吃掉点击。
+   代价是带在导航栏这一列的拖拽区被盖住 —— 由「设置」标题自己接管拖拽（见 SettingsShell）。
+   macOS 走 .settings-embedded--traffic-safe 那条，不受影响。 */
 .settings-embedded-under-strip .settings-embedded-nav {
-  padding-top: 60px;
+  position: relative;
+  z-index: 31;
 }
 
 /* 页头右侧为三键让位（三键 3×46=138 + 呼吸 12）。只此一处需要 ——
