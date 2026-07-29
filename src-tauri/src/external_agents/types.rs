@@ -207,15 +207,25 @@ pub enum UnifiedAgentEvent {
     /// Kivio 知情；这条是 CLI 自动触发的，Kivio 只能被动收到通知。不接的话
     /// 用户会看到「对话突然变短了但没有任何提示」。
     ///
-    /// 字段取自官方 SDK 的 `SDKCompactBoundaryMessage.compact_metadata`
-    /// （`@anthropic-ai/claude-agent-sdk` 的 sdk.d.ts）：**只有** `trigger` 与
-    /// `pre_tokens`，**没有** post_tokens——压缩后的真实占用由下一条
-    /// `message_start.message.usage` 上报（服务端算的），不需要也不该猜。
+    /// 字段取自 `compact_metadata`，claude 2.1.220 反查二进制核实的构造处为
+    /// `{ trigger, pre_tokens, post_tokens?, cumulative_dropped_tokens?, duration_ms?,
+    ///    user_context?, messages_summarized? }`。
+    ///
+    /// **历史注记**：此处曾写「**没有** post_tokens，压缩后的占用由下一条
+    /// `message_start.message.usage` 上报，不需要也不该猜」——那是错的，`post_tokens`
+    /// 确实存在。照那条注释走的结果是 `run.rs::emit_cli_compaction` 把
+    /// `token_estimate_after` 硬编码 0，前端分隔线上的「→ N」永远不显示。
     CliCompacted {
         /// `manual`（CLI 内用户敲的 /compact）| `auto`（CLI 自动触发）
         trigger: String,
         /// 压缩**前**的上下文占用；CLI 未提供时为 `None`。
         pre_tokens: Option<u64>,
+        /// 压缩**后**的上下文占用；CLI 未提供时为 `None`（此时前端不显示「→ N」）。
+        post_tokens: Option<u64>,
+        /// 本会话累计被丢弃的 token（`cumulative_dropped_tokens`），仅用于诊断日志。
+        dropped_tokens: Option<u64>,
+        /// 压缩耗时，仅用于诊断日志。
+        duration_ms: Option<u64>,
     },
 }
 

@@ -30,20 +30,71 @@ pub enum SessionCommand {
     Close,
 }
 
+/// 「用户已取消，但这个会话本身已经不能再用了」的哨兵。
+///
+/// 出口按**取消**呈现（不弹错误气泡、不发上下文重置提示、更不重发本轮 prompt——用户刚刚
+/// 才把它停掉），但注册表条目必须**丢弃**：进程已经死了，或者协议级取消超时后被硬 `Close`
+/// 掉了。用普通的 `"cancelled"` 会让 claude 的「取消后保留常驻会话」把一个死 actor 留下来，
+/// 下一轮才发现。
+pub const CANCELLED_SESSION_LOST: &str = "__cancelled_session_lost__";
+
+/// 影响 CLI **启动参数**的配置指纹。
+///
+/// 常驻打破了一个此前白捡的便宜：换模型 / 换 sandbox 档位 / 换 reasoning 档位 / 改系统提示
+/// 或 Memory，靠的是「下一轮换个新进程带新 flag」自动生效。进程一常驻就不生效了 ——
+/// 界面显示一套、会话实际跑另一套，这**违反 spec 第 8 条**（UI 所见必须与会话实际配置一致），
+/// 是功能退步而不是缺功能。指纹变了就换个进程。
+///
+/// 只有把这些配置放在**启动参数**里的 CLI 需要它（目前只有 claude：`--model` / `--effort` /
+/// `--permission-mode` / `--append-system-prompt-file` 全是启动 flag）。ACP / codex 能在会话内
+/// 改模型与推理档位，指纹恒为 `default()`，永不触发重连，行为不变。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchConfig {
+    /// `model|reasoning|sandbox`，恒可知。
+    pub flags: String,
+    /// 启动时注入的会话级系统指令哈希。`None` = 本轮不注入（斜杠命令走 passthrough，
+    /// 不带 `--append-system-prompt-file`），**不参与判定**——否则一条斜杠命令会把常驻进程
+    /// 重启一次、紧跟的普通消息再重启一次，来回抖。
+    pub instructions: Option<String>,
+}
+
+impl LaunchConfig {
+    /// 已建立的会话（`self`，注册时的配置）能否服务配置为 `incoming` 的这一轮。
+    pub fn accepts(&self, incoming: &LaunchConfig) -> bool {
+        if self.flags != incoming.flags {
+            return false;
+        }
+        match incoming.instructions.as_deref() {
+            // 本轮不注入指令 ⇒ 不据此判定（见字段注释）。
+            None => true,
+            // 本轮要注入 ⇒ 会话必须是带着**同一份**指令启动的。注册时为 `None`
+            // （例如会话是被一条斜杠命令拉起来的）同样算不匹配，否则用户配置的系统提示
+            // 与 Memory 会在这个会话里静默失效。
+            Some(hash) => self.instructions.as_deref() == Some(hash),
+        }
+    }
+}
+
 /// Registry entry: the control channel plus metadata used to decide reuse.
 pub struct LiveSession {
     pub control: mpsc::Sender<SessionCommand>,
     pub agent_id: String,
     pub cwd: String,
+    /// 会话建立时生效的启动配置。与本轮的指纹不符 ⇒ 不可复用（见 `LaunchConfig`）。
+    pub launch_config: LaunchConfig,
     /// Last time a turn was sent/started; drives idle reclamation + LRU eviction.
     pub last_activity: Instant,
 }
 
 impl LiveSession {
-    /// A session is reusable only if its actor is still listening and it targets the same
-    /// agent + working directory as the incoming turn.
-    pub fn is_reusable(&self, agent_id: &str, cwd: &str) -> bool {
-        !self.control.is_closed() && self.agent_id == agent_id && self.cwd == cwd
+    /// A session is reusable only if its actor is still listening, it targets the same
+    /// agent + working directory as the incoming turn, and it was launched with a
+    /// configuration that still matches what the UI currently shows.
+    pub fn is_reusable(&self, agent_id: &str, cwd: &str, launch_config: &LaunchConfig) -> bool {
+        !self.control.is_closed()
+            && self.agent_id == agent_id
+            && self.cwd == cwd
+            && self.launch_config.accepts(launch_config)
     }
 
     /// Reclaimable: the actor already exited, or the session has been idle past `ttl`.
@@ -64,6 +115,7 @@ mod tests {
                 control: tx,
                 agent_id: agent.to_string(),
                 cwd: cwd.to_string(),
+                launch_config: LaunchConfig::default(),
                 last_activity: Instant::now(),
             },
             rx,
@@ -73,16 +125,68 @@ mod tests {
     #[test]
     fn reusable_when_agent_and_cwd_match_and_actor_alive() {
         let (session, _rx) = make("codex", "/proj");
-        assert!(session.is_reusable("codex", "/proj"));
-        assert!(!session.is_reusable("codex", "/other"));
-        assert!(!session.is_reusable("claude", "/proj"));
+        let any = LaunchConfig::default();
+        assert!(session.is_reusable("codex", "/proj", &any));
+        assert!(!session.is_reusable("codex", "/other", &any));
+        assert!(!session.is_reusable("claude", "/proj", &any));
     }
 
     #[test]
     fn not_reusable_when_actor_dropped() {
         let (session, rx) = make("codex", "/proj");
         drop(rx); // actor gone → control channel closed
-        assert!(!session.is_reusable("codex", "/proj"));
+        assert!(!session.is_reusable("codex", "/proj", &LaunchConfig::default()));
+    }
+
+    // ---- B1: 启动配置变更必须换进程（spec 第 8 条）----
+
+    fn cfg(flags: &str, instructions: Option<&str>) -> LaunchConfig {
+        LaunchConfig {
+            flags: flags.to_string(),
+            instructions: instructions.map(str::to_string),
+        }
+    }
+
+    /// 换模型 / 换档位 / 换 sandbox：这些是启动 flag，常驻进程只能靠重连生效。
+    #[test]
+    fn a_flag_change_rejects_the_existing_session() {
+        let established = cfg("opus|high|bypassPermissions", Some("h1"));
+        assert!(established.accepts(&cfg("opus|high|bypassPermissions", Some("h1"))));
+        assert!(!established.accepts(&cfg("sonnet|high|bypassPermissions", Some("h1"))));
+        assert!(!established.accepts(&cfg("opus|low|bypassPermissions", Some("h1"))));
+        assert!(!established.accepts(&cfg("opus|high|plan", Some("h1"))));
+    }
+
+    /// 改系统提示 / Memory：`--append-system-prompt-file` 的内容变了，而常驻进程只在启动时
+    /// 读一遍那个文件 ⇒ 不重连就静默失效，无任何可观测信号。
+    #[test]
+    fn changed_instructions_reject_the_existing_session() {
+        let established = cfg("opus||", Some("hash-old"));
+        assert!(!established.accepts(&cfg("opus||", Some("hash-new"))));
+    }
+
+    /// 斜杠命令那一轮不注入指令 ⇒ 不据此重连（否则「斜杠 → 普通消息」会来回重启两次）。
+    #[test]
+    fn a_slash_turn_reuses_the_session_regardless_of_instructions() {
+        let established = cfg("opus||", Some("hash-old"));
+        assert!(established.accepts(&cfg("opus||", None)));
+        // 但 flag 变了仍要重连——斜杠命令也是在这个进程里跑的。
+        assert!(!established.accepts(&cfg("sonnet||", None)));
+    }
+
+    /// 会话是被一条斜杠命令拉起来的（注册时 instructions = None）：紧跟的普通消息必须重连，
+    /// 否则用户配置的系统提示与 Memory 在这个会话里永远不生效。
+    #[test]
+    fn a_session_launched_without_instructions_cannot_serve_a_turn_that_needs_them() {
+        let established = cfg("opus||", None);
+        assert!(!established.accepts(&cfg("opus||", Some("hash-1"))));
+        assert!(established.accepts(&cfg("opus||", None)));
+    }
+
+    /// 非 claude 协议指纹恒为默认值 ⇒ 永不触发重连，既有行为不变。
+    #[test]
+    fn default_launch_config_always_accepts() {
+        assert!(LaunchConfig::default().accepts(&LaunchConfig::default()));
     }
 
     #[test]

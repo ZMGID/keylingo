@@ -12,6 +12,11 @@ use crate::external_agents::types::ExternalAgentSession;
 
 pub mod acp;
 pub mod claude_init;
+/// 常驻 `claude` 会话（B1）：一个会话一个进程。
+pub mod claude_stream;
+/// Real-machine probe for the persistent-session redesign (B1). `#[ignore]`d; see the module docs.
+#[cfg(test)]
+mod claude_persist_probe_tests;
 pub mod codex_app_server;
 pub mod live;
 pub mod pi_rpc;
@@ -212,9 +217,9 @@ mod tests {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveSessionHandle {
     pub agent_id: String,
-    /// `"codex_app_server"` | `"acp_json_rpc"`.
+    /// `"codex_app_server"` | `"acp_json_rpc"` | `"claude_stream_json"`.
     pub protocol: String,
-    /// Native thread id (codex) / session id (ACP).
+    /// Native thread id (codex) / session id (ACP / claude)。
     pub native_id: String,
     pub cwd: String,
 }

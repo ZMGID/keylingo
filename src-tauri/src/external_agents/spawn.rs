@@ -67,6 +67,27 @@ pub fn cli_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
+/// 结束一个外部 CLI 子进程**及其整棵进程树**。
+///
+/// 只 `start_kill()` 杀的是**直接子进程**：claude 会按用户的 `~/.claude.json` 把 MCP
+/// 服务器作为自己的子进程拉起来，每轮取消一次就可能漏一批孤儿 MCP 进程留在系统里。
+///
+/// 复用 `native_tools::kill_process_group`（unix `killpg` SIGTERM→SIGKILL、
+/// Windows `taskkill /T /F`），不写第二份（spec 第 2 条）。两步都做，缺一不可：
+/// - Windows 的 `taskkill /T` 按父子关系遍历整棵树，能覆盖子进程；
+/// - unix 的 `killpg(-pid)` 要求目标是**进程组组长**，而 `spawn_agent` 没有 `setsid`，
+///   命中不了时只是无害的 ESRCH —— 所以仍要 `start_kill()` 兜住直接子进程本身。
+///
+/// 副作用提醒：杀进程导致的退出码在 Windows 上恒为 1（`TerminateProcess`），
+/// 出口的「非零退出 = 失败」规则必须靠协议层完成标志豁免（spec 第 8b 条），
+/// 否则会凭空造出失败气泡。
+pub fn kill_agent_process_tree(child: &mut Child) {
+    if let Some(pid) = child.id() {
+        crate::native_tools::kill_process_group(pid);
+    }
+    let _ = child.start_kill();
+}
+
 /// Concurrently drain the child's stderr into a JoinHandle so a CLI that reports failures on
 /// stderr doesn't (a) block on a full pipe while we read stdout, and (b) fail silently. Blank
 /// lines are dropped and the buffer is capped at `STDERR_CAP_CHARS` (keeping the tail — the last
@@ -312,17 +333,7 @@ pub async fn write_prompt_stdin(
             stdin.shutdown().await.map_err(|e| e.to_string())?;
         }
         PromptInputFormat::StreamJson => {
-            let content = stream_json_user_content(prompt, images);
-            let line = serde_json::json!({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": content
-                },
-                "parent_tool_use_id": null
-            });
-            let mut payload = serde_json::to_string(&line).map_err(|e| e.to_string())?;
-            payload.push('\n');
+            let payload = stream_json_user_line(prompt, images)?;
             stdin
                 .write_all(payload.as_bytes())
                 .await
@@ -330,6 +341,28 @@ pub async fn write_prompt_stdin(
         }
     }
     Ok(())
+}
+
+/// 一行 claude stream-json `user` 消息（含结尾换行）。
+///
+/// 一次性路径（`write_prompt_stdin`）与常驻会话（`session/claude_stream.rs`）共用同一份构造，
+/// 不写第二份（spec 第 2 条）：「slash 命令走裸字符串」与「图片块的白名单/形状」这两条语义
+/// 一旦分叉，两条路的行为差异会极难查。
+pub fn stream_json_user_line(
+    prompt: &str,
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> Result<String, String> {
+    let line = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": stream_json_user_content(prompt, images)
+        },
+        "parent_tool_use_id": null
+    });
+    let mut payload = serde_json::to_string(&line).map_err(|e| e.to_string())?;
+    payload.push('\n');
+    Ok(payload)
 }
 
 /// Minimal stdin write to elicit Claude `system/init` during slash-command probing.
@@ -394,7 +427,8 @@ where
     let mut reader = BufReader::new(stdout).lines();
     loop {
         if cancel_check() {
-            let _ = child.start_kill();
+            // 杀**整棵树**：CLI 拉起的 MCP 服务器是它的子进程，只 start_kill 会留下孤儿。
+            kill_agent_process_tree(child);
             return Err("cancelled".to_string());
         }
         let line = match timeout(Duration::from_millis(200), reader.next_line()).await {

@@ -173,6 +173,19 @@ fn cli_reported_context_tokens(usage: &ModelUsage) -> usize {
         .min(usize::MAX as u64) as usize
 }
 
+/// 这条 CLI 上报是否**真的带了分子**（任一 token 数 > 0）。
+///
+/// 判据不能是 `input_tokens.is_some()`：全零上报（未登录 / `/help` / 未知斜杠命令 /
+/// Kivio 自己发的 `/compact` —— 这些轮次没有 LLM 往返）落盘的是 `Some(0)`，
+/// `is_some()` 会命中它并把用量条清零。
+fn usage_has_token_numbers(usage: &ModelUsage) -> bool {
+    usage.total_tokens.unwrap_or(0) > 0
+        || usage.input_tokens.unwrap_or(0) > 0
+        || usage.output_tokens.unwrap_or(0) > 0
+        || usage.cached_input_tokens.unwrap_or(0) > 0
+        || usage.cache_creation_input_tokens.unwrap_or(0) > 0
+}
+
 pub fn collect_external_session_usage(
     conversation: &Conversation,
     agent_id: &str,
@@ -184,7 +197,11 @@ pub fn collect_external_session_usage(
             continue;
         }
         if let Some(usage) = message.usage.as_ref() {
-            if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
+            // **跳过全零上报**：没有 LLM 往返的轮次（未登录 / `/help` / 未知斜杠命令 /
+            // 我们自己发的 `/compact`）会落下 `Some(0)` 的用量。判据若只看 `is_some()`，
+            // `Some(0)` 会命中 ⇒ 挑到这条 ⇒ 用量条从 47K 掉到 0，直到下一轮真实回复才恢复。
+            // 窗口（分母）不参与这个判断——它是静态属性，缺分子的那条上报不该被当分子来源。
+            if usage_has_token_numbers(usage) {
                 latest = Some(usage);
                 break;
             }
@@ -504,9 +521,9 @@ mod tests {
 
     #[test]
     fn cli_reported_window_outranks_static_tables() {
-        // claude 别名表会给 200K；CLI 本轮实报 300K 必须赢——模型可能中途切换。
+        // 别名表给 1M（`sonnet[1m]`）；CLI 本轮实报 300K 必须赢——模型可能中途切换。
         let (window, estimated) =
-            context_window_for_external_model("claude", "sonnet", None, Some(300_000));
+            context_window_for_external_model("claude", "sonnet[1m]", None, Some(300_000));
         assert_eq!(window, Some(300_000));
         assert!(!estimated);
         // 探测上报也必须让位给实报。
@@ -530,9 +547,14 @@ mod tests {
 
     #[test]
     fn agents_with_window_sources_are_unaffected() {
-        // claude 别名表
-        let (window, _) = context_window_for_external_model("claude", "sonnet", None, None);
-        assert_eq!(window, Some(200_000));
+        // claude 别名表：只有显式带 `[1m]` 标记的别名给窗口。裸别名（sonnet / opus / …）
+        // 解析成什么模型由 CLI 版本决定（本机实测 3/4 是 1M），编一个 200K 会让分母小 5 倍
+        // ⇒ 一律 None，靠 CLI 实报的 `modelUsage.contextWindow` 补上（见下一条）。
+        let (window, _) = context_window_for_external_model("claude", "sonnet[1m]", None, None);
+        assert_eq!(window, Some(1_000_000));
+        let (window, estimated) = context_window_for_external_model("claude", "sonnet", None, None);
+        assert_eq!(window, None, "裸别名不得编造 200K 分母");
+        assert!(estimated);
         // codex：探测上报（debug models 的 context_window）
         let detected = vec![RuntimeModelOption {
             id: "gpt-5-codex".to_string(),
@@ -789,11 +811,80 @@ mod tests {
         assert_eq!(usage.reported_context_window, Some(200_000));
     }
 
+    /// **零用量的上报不许把分子清零**（A2 的第三道防线）。
+    ///
+    /// 没有 LLM 往返的轮次（未登录 / `/help` / 未知斜杠命令 / Kivio 自己发的 `/compact`）
+    /// 会落下一条全 0 的 usage。判据若是 `input_tokens.is_some()`，`Some(0)` 会命中它 ⇒
+    /// 用量条从 47K 掉到 0，直到下一轮真实回复才恢复。必须跳过它、继续往前找。
+    #[test]
+    fn all_zero_usage_is_skipped_so_the_numerator_does_not_drop_to_zero() {
+        let mut conversation = empty_conversation();
+        conversation.agent_runtime.external_agent_id = Some("claude".to_string());
+        conversation.messages.push(message(
+            "a1",
+            "assistant",
+            "真实回复",
+            Some(ModelUsage {
+                input_tokens: Some(1_200),
+                output_tokens: Some(800),
+                cached_input_tokens: Some(45_000),
+                cache_creation_input_tokens: Some(300),
+                total_tokens: Some(47_300),
+                ..Default::default()
+            }),
+        ));
+        conversation
+            .messages
+            .push(message("u2", "user", "/help", None));
+        // `/help` 这轮：全零 usage（但可能带着窗口）。
+        conversation.messages.push(message(
+            "a2",
+            "assistant",
+            "claude 命令已执行",
+            Some(ModelUsage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                total_tokens: Some(0),
+                context_window_tokens: Some(1_000_000),
+                ..Default::default()
+            }),
+        ));
+
+        let usage = collect_external_session_usage(&conversation, "claude", None);
+        assert_eq!(
+            usage.input_tokens, 47_300,
+            "全零上报把分子清零了（修复前的症状）"
+        );
+        assert_eq!(usage.token_count_source, TOKEN_COUNT_CLI);
+    }
+
+    /// 只有全零上报时也不能把它当分子——退到字符估算（而不是显示 0）。
+    #[test]
+    fn only_zero_usage_falls_back_to_the_character_estimate() {
+        let mut conversation = empty_conversation();
+        conversation
+            .messages
+            .push(message("u1", "user", "/help 这是一段足够长的用户消息", None));
+        conversation.messages.push(message(
+            "a1",
+            "assistant",
+            "claude 命令已执行",
+            Some(ModelUsage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                total_tokens: Some(0),
+                ..Default::default()
+            }),
+        ));
+        let usage = collect_external_session_usage(&conversation, "claude", None);
+        assert_eq!(usage.token_count_source, TOKEN_COUNT_ESTIMATED);
+        assert!(usage.input_tokens > 0);
+    }
+
     /// 旧会话（改动前落盘）的 `usage` 只有 input/output，没有 `total_tokens`。
     /// 必须退回 input+output，不能因为 total 缺失就显示 0。
     #[test]
-    fn legacy_usage_without_total_falls_back_to_input_plus_output() {
-        let mut conversation = empty_conversation();
+    fn legacy_usage_without_total_falls_back_to_input_plus_output() {        let mut conversation = empty_conversation();
         conversation.messages.push(message(
             "a1",
             "assistant",

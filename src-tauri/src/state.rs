@@ -741,12 +741,18 @@ impl AppState {
     }
 
     /// Phase 2: return the control channel of a reusable live session for this conversation
-    /// (same agent + cwd, actor still alive). Removes a stale/mismatched entry as a side effect.
+    /// (same agent + cwd + launch configuration, actor still alive). Removes a stale/mismatched
+    /// entry as a side effect.
+    ///
+    /// `launch_config` 让「配置变了 ⇒ 换进程」不需要额外的控制通道：不匹配就当成不可复用，
+    /// 丢弃条目（actor 收到通道关闭后自行关停子进程），调用方走连接分支并原生 resume
+    /// ⇒ 新 flag 生效且上下文不丢（spec 第 8 条）。
     pub fn external_live_session_control(
         &self,
         conversation_id: &str,
         agent_id: &str,
         cwd: &str,
+        launch_config: &crate::external_agents::session::live::LaunchConfig,
     ) -> Option<tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>>
     {
         let mut map = self
@@ -754,7 +760,7 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(session) = map.get_mut(conversation_id) {
-            if session.is_reusable(agent_id, cwd) {
+            if session.is_reusable(agent_id, cwd, launch_config) {
                 session.last_activity = Instant::now();
                 return Some(session.control.clone());
             }

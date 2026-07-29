@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::Local;
@@ -13,22 +14,28 @@ use crate::chat::memory::l1_prompt_block;
 use crate::chat::model::ModelUsage;
 use crate::chat::storage::save_conversation;
 use crate::chat::types::{
-    ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
-    ToolCallStatus,
+    ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, CompactionBoundaryRecord,
+    ToolCallRecord, ToolCallStatus,
 };
 use crate::chat::Conversation;
+use crate::external_agents::defs::claude::append_system_prompt_file_args;
 use crate::external_agents::prompt::{
     compose_external_prompt, compose_external_prompt_passthrough, cwd_hint, is_cli_slash_input,
+    instructions_via_launch_flag,
 };
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::session::acp::{run_acp_session, AcpMcpServer};
 use crate::external_agents::session::codex_app_server::run_codex_app_server_session;
+use crate::external_agents::session::live::LaunchConfig;
 use crate::external_agents::session::pi_rpc::run_pi_rpc_session;
-use crate::external_agents::session::{persist_delivered_session, resolve_agent_resume_context};
+use crate::external_agents::session::{
+    persist_delivered_session, resolve_agent_resume_context, stable_prompt_hash,
+};
 use crate::external_agents::skill_stage::{skill_cwd_alias_segment, stage_active_skill};
 use crate::external_agents::slash::{self};
 use crate::external_agents::spawn::{
-    drain_stderr, read_stdout_lines, resolve_binary, spawn_agent, tail_chars, write_prompt_stdin,
+    drain_stderr, kill_agent_process_tree, read_stdout_lines, resolve_binary, spawn_agent,
+    tail_chars, write_prompt_stdin,
 };
 use crate::external_agents::stream::create_stream_handler;
 use crate::external_agents::types::{
@@ -52,6 +59,28 @@ fn context_reset_notice_event() -> UnifiedAgentEvent {
     UnifiedAgentEvent::TextDelta {
         delta: CONTEXT_RESET_NOTICE.to_string(),
     }
+}
+
+/// 系统提示落盘文件的前缀。启动 GC 也认这个前缀（`screenshot::cleanup_orphan_temp_files`），
+/// 崩溃留下的残渣 24h 后被回收。
+const SYSTEM_PROMPT_FILE_PREFIX: &str = "kivio-extsys-";
+
+/// 把会话级系统指令（用户系统提示 + Memory + cwd 提示）写到一个文件，供 CLI 用
+/// `--append-system-prompt-file` 读取（A1）。
+///
+/// **为什么是 file 而不是内联字符串**：Windows 命令行有 32767 字符上限，而含 Memory 块的
+/// instructions 可能超；npm 安装的用户拿到的是 `claude.cmd`，长参数在批处理转义那层还有风险。
+///
+/// 路径按 conversation_id 固定 ⇒ **每轮覆写同一个文件**，不会随轮次累积（每个会话最多一个）。
+fn write_system_prompt_file(conversation_id: &str, instructions: &str) -> Result<PathBuf, String> {
+    // conversation_id 来自内部 uuid，但仍做一次保守净化——它要拼进文件名。
+    let safe_id: String = conversation_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+        .collect();
+    let path = std::env::temp_dir().join(format!("{SYSTEM_PROMPT_FILE_PREFIX}{safe_id}.md"));
+    std::fs::write(&path, instructions).map_err(|e| format!("write system prompt file: {e}"))?;
+    Ok(path)
 }
 
 pub async fn run_external_cli_slash_command(
@@ -145,6 +174,26 @@ pub async fn run_external_cli_reply(
     }
     daemon_instructions.push_str(&cwd_hint(cwd.to_string_lossy().as_ref()));
 
+    // A1：部分 CLI（目前只有 claude）的系统指令走**启动 flag** 而不是 prompt 正文。
+    //
+    // 为什么改：塞进正文的那条消息会被 CLI 自己的上下文压缩摘要掉甚至丢弃，而
+    // `skip_instructions`（内容没变就不重发）保证了**永远不会补发** ⇒ 长会话跑一阵子后
+    // 用户配置的系统提示与 Memory 静默失效，没有任何可观测信号。
+    // 启动 flag 每次进程启动都重新注入，与对话历史无关，压缩影响不到。
+    let instructions_via_flag = instructions_via_launch_flag(def.id);
+    let system_prompt_file = if instructions_via_flag && !is_slash {
+        match write_system_prompt_file(&conversation.id, daemon_instructions.trim()) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                // 写不出文件不该让整轮失败：退回正文注入（旧行为）而不是没有系统提示。
+                eprintln!("[external-agent] {err}，本轮退回正文注入");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let resume_ctx = resolve_agent_resume_context(
         app,
         &conversation.id,
@@ -169,7 +218,13 @@ pub async fn run_external_cli_reply(
         compose_external_prompt_passthrough(latest_user_message)
     } else {
         compose_external_prompt(
-            &daemon_instructions,
+            // 走启动 flag 的 CLI 不再把 instructions 拼进正文（否则同一份内容发两遍）。
+            // 其余 8 个 CLI 仍是正文注入 + `skip_instructions` 去重（spec 第 1 条）。
+            if system_prompt_file.is_some() {
+                ""
+            } else {
+                &daemon_instructions
+            },
             skill_body.as_deref(),
             skill_dir.as_deref(),
             skill_folder.as_deref(),
@@ -244,6 +299,16 @@ pub async fn run_external_cli_reply(
         Some(composed.full_prompt.as_str())
     };
     let args = (def.build_args)(&runtime_ctx, &build_options, prompt_for_args);
+    // A1：系统指令以 flag 追加（不改 `build_args` 的形状，也不动 `RuntimeContext` ——
+    // 那两处是所有 CLI 共用的，为一个 claude 专属 flag 加字段要牵动全部 def 与其单测）。
+    let args = match system_prompt_file.as_deref() {
+        Some(path) => {
+            let mut args = args;
+            args.extend(append_system_prompt_file_args(path));
+            args
+        }
+        None => args,
+    };
 
     let extra_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
@@ -251,11 +316,11 @@ pub async fn run_external_cli_reply(
     let run_id = format!("ext-run-{}-{}", run_generation, Uuid::new_v4());
     let assistant_message_id = format!("msg_{}", Uuid::new_v4());
 
-    // Phase 2: codex app-server and ACP-family agents keep the process alive across turns via
-    // the live-session registry. Other protocols still spawn one child per turn.
+    // Phase 2 / B1: claude、codex app-server 与 ACP 家族都通过 live-session 注册表把进程跨轮
+    // 保活。只剩 `PiRpc` 每轮起一个新子进程（见下面 `_ =>` 分支的注释）。
     let persistent = matches!(
         def.stream_format,
-        StreamFormat::CodexAppServer | StreamFormat::AcpJsonRpc
+        StreamFormat::ClaudeStreamJson | StreamFormat::CodexAppServer | StreamFormat::AcpJsonRpc
     );
     let mut spawned_opt = if persistent {
         None
@@ -273,6 +338,23 @@ pub async fn run_external_cli_reply(
     // 故单独记下来在出口与 `read_result` 一起判（见 `resolve_turn_error`）。
     let mut stream_error: Option<String> = None;
     let mut stream_outcome = "completed".to_string();
+    // A7：CLI **自己**压缩上下文时产生的边界记录。不能在事件回调里直接改 `conversation`
+    // （闭包已可变借走了一批局部变量，而 `conversation` 在读流之后还要用），
+    // 所以先攒起来，读流结束后一次性落到 `context_state`。
+    let mut cli_compactions: Vec<CompactionBoundaryRecord> = Vec::new();
+    // 分隔线的时间线锚点 = 触发时刻的最后一条消息（与内置路径 `compaction.rs` 同语义）。
+    // **必须是个能解析到的 id**：前端 `resolveCompactionBoundaries` 对空锚点直接 `continue`
+    // ——此前这里发的是空串，于是 CLI 自压的分隔线一次都没渲染过。
+    let compaction_anchor_id = conversation
+        .messages
+        .last()
+        .map(|message| message.id.clone())
+        .unwrap_or_else(|| assistant_message_id.clone());
+    // 协议层完成标志：本轮是否读到了 CLI 明确的「本轮结束」帧（claude 的 `result`）。
+    // 用于豁免出口的「非零退出码 = 失败」规则（spec 第 8b 条）——杀整棵进程树后
+    // 拿到非零退出码的路径变多（Windows `TerminateProcess` 退出码恒为 1），
+    // 不豁免会凭空造出失败气泡。
+    let mut protocol_completed = false;
     let mut segment_order = 0u32;
     let mut segments: Vec<ChatMessageSegment> = Vec::new();
     let mut segment_tracker = StreamSegmentTracker::default();
@@ -295,6 +377,7 @@ pub async fn run_external_cli_reply(
             &conversation_id,
             &run_id,
             &assistant_message_id,
+            &compaction_anchor_id,
             &mut content,
             &mut reasoning,
             &mut raw_output,
@@ -305,6 +388,7 @@ pub async fn run_external_cli_reply(
             &mut segments,
             &mut segment_order,
             &mut segment_tracker,
+            &mut cli_compactions,
             event,
         );
     };
@@ -320,6 +404,18 @@ pub async fn run_external_cli_reply(
 
     let read_result = if persistent {
         let persistent_mcp: Vec<AcpMcpServer> = vec![];
+        // 本轮的启动配置指纹：变了就换进程（spec 第 8 条）。指令哈希只在**真的注入了**
+        // `--append-system-prompt-file` 时才有值——斜杠命令那一轮不注入，不参与判定。
+        let launch_config = launch_config_for_turn(
+            def.stream_format,
+            conversation.agent_runtime.external_model.as_deref(),
+            conversation.agent_runtime.external_reasoning.as_deref(),
+            conversation.agent_runtime.external_sandbox.as_deref(),
+            system_prompt_file
+                .as_ref()
+                .map(|_| stable_prompt_hash(daemon_instructions.trim()))
+                .as_deref(),
+        );
         run_persistent_turn(
             app,
             state,
@@ -333,8 +429,13 @@ pub async fn run_external_cli_reply(
             conversation.agent_runtime.external_reasoning.clone(),
             conversation.agent_runtime.external_sandbox.clone(),
             persistent_mcp,
+            &launch_config,
             &composed.full_prompt,
-            latest_user_message,
+            persistent_turn_prompt(
+                def.stream_format,
+                &composed.full_prompt,
+                latest_user_message,
+            ),
             &image_blocks,
             &mut emit_event,
             &cancel_check,
@@ -384,6 +485,14 @@ pub async fn run_external_cli_reply(
                 )
                 .await
             }
+            // 现状（B1 之后）：这条「非持久 + `write_prompt_stdin` + `read_stdout_lines` +
+            // `create_stream_handler`」的路**已经没有 CLI 走了** —— claude 是最后一个，
+            // 现在也常驻了；`PiRpc` 走上面的 `run_pi_rpc_session`，codex / ACP 走持久分支。
+            //
+            // **刻意保留**：`create_stream_handler` / `write_probe_stdin` / `read_stdout_lines`
+            // 还有探测路径在用（`slash.rs`、`session/claude_init.rs`），且 claude 的解析器
+            // 单测与真机测试也从这里进入；删掉这条分支等于把「逐行喂解析器」这个入口一起删了。
+            // 新增走行式 stdout 协议的 CLI 时，这里是现成的落点。
             _ => {
                 if def.prompt_via_stdin {
                     write_prompt_stdin(
@@ -395,7 +504,7 @@ pub async fn run_external_cli_reply(
                     .await?;
                 }
                 let mut handler = create_stream_handler(def.stream_format);
-                read_stdout_lines(
+                let outcome = read_stdout_lines(
                     &mut spawned.child,
                     |line| {
                         handler.handle_line(line, &mut |event| emit_event(event));
@@ -403,7 +512,9 @@ pub async fn run_external_cli_reply(
                     },
                     cancel_check,
                 )
-                .await
+                .await;
+                protocol_completed = handler.saw_protocol_completion();
+                outcome
             }
         }
     };
@@ -413,9 +524,10 @@ pub async fn run_external_cli_reply(
     let exit_code: Option<i32> = match spawned_opt {
         Some(mut spawned) => {
             // A6: on a read error the child may still be running (e.g. an I/O error that didn't
-            // kill it) — kill first so `wait()` can't block on a live process.
+            // kill it) — kill first so `wait()` can't block on a live process. 杀**整棵树**
+            // 而不只是直接子进程：CLI 会按用户配置拉起自己的 MCP 服务器作为子进程。
             if read_result.is_err() {
-                let _ = spawned.child.start_kill();
+                kill_agent_process_tree(&mut spawned.child);
             }
             let status = spawned.child.wait().await.map_err(|e| e.to_string())?;
             status.code()
@@ -442,7 +554,7 @@ pub async fn run_external_cli_reply(
     let turn_error = resolve_turn_error(read_result.as_ref().err(), stream_error.as_ref());
     let mut error_rendered = false;
     if let Some(err) = turn_error {
-        if err == "cancelled" {
+        if is_cancellation(err) {
             stream_outcome = "cancelled".to_string();
         } else {
             stream_outcome = "error".to_string();
@@ -457,7 +569,7 @@ pub async fn run_external_cli_reply(
             }
             error_rendered = true;
         }
-    } else if exit_code.map(|code| code != 0).unwrap_or(false) {
+    } else if nonzero_exit_is_a_failure(exit_code, protocol_completed) {
         if content.trim().is_empty() {
             stream_outcome = "error".to_string();
         }
@@ -492,9 +604,10 @@ pub async fn run_external_cli_reply(
 
     // A nonzero exit with stderr is a failure even if the CLI also produced some stdout — append
     // the stderr (unless it's already the content) so the error is visible, not swallowed. Skipped
-    // when a classified error bubble already folded the stderr into its `<details>`.
+    // when a classified error bubble already folded the stderr into its `<details>`, and when the
+    // protocol already said this turn completed (spec 8b).
     if !error_rendered
-        && exit_code.map(|code| code != 0).unwrap_or(false)
+        && nonzero_exit_is_a_failure(exit_code, protocol_completed)
         && !stderr_output.trim().is_empty()
     {
         stream_outcome = "error".to_string();
@@ -524,13 +637,28 @@ pub async fn run_external_cli_reply(
         &conversation_id,
         def.id,
         &resume_ctx,
-        if composed.instructions_block.is_empty() {
-            &daemon_instructions
-        } else {
-            &composed.instructions_block
-        },
+        // 哈希只覆盖**会话级常量**（系统提示 + Memory + cwd 提示）。skill 正文是 per-turn 的，
+        // 不进哈希——否则换 skill 会被当成「instructions 变了」而重发一遍会话级指令。
+        &daemon_instructions,
         is_slash,
     )?;
+
+    // A7：把 CLI 自压的边界落到会话上。此前只发了 `chat-compaction` 事件、从不落盘，
+    // 于是「已压缩 N 次」永远不涨、刷新或重开会话后分隔线消失（那条注释说要记一次压缩，
+    // 但代码并没有做）。写在 `push_assistant_message` **之前**：它会用
+    // `compute_context_state` 整体重算 `context_state`，而外部路径的重算会把
+    // `compression_count` / `compaction_boundaries` / `last_compressed_at` 原样带过去。
+    for boundary in &cli_compactions {
+        conversation.context_state.compression_count = conversation
+            .context_state
+            .compression_count
+            .saturating_add(1);
+        conversation.context_state.last_compressed_at = Some(boundary.created_at);
+        conversation
+            .context_state
+            .compaction_boundaries
+            .push(boundary.clone());
+    }
 
     push_assistant_message(
         app,
@@ -640,6 +768,7 @@ async fn run_persistent_turn<E, C>(
     reasoning: Option<String>,
     sandbox: Option<String>,
     mcp_servers: Vec<AcpMcpServer>,
+    launch_config: &LaunchConfig,
     first_prompt: &str,
     reuse_prompt: &str,
     images: &[crate::external_agents::attachments::ImageBlock],
@@ -660,63 +789,70 @@ where
 
     // Establish the control channel: 1. reuse a live session in the registry; 2. resume a
     // persisted one; 3. connect fresh.
-    let (mut control, mut prompt) =
-        match state.external_live_session_control(conversation_id, agent_id, &cwd_str) {
-            Some(control) => (control, reuse_prompt.to_string()),
-            None => {
-                let resume_native = load_live_handle(app, conversation_id)
-                    .filter(|h| {
-                        h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag
-                    })
-                    .map(|h| h.native_id);
-                // We intended to continue an existing native session iff a matching handle was
-                // persisted. If the resume then fails and we fall back to fresh, the prior context
-                // is lost and the user must be told (R4) rather than silently getting a blank slate.
-                let intended_resume = resume_native.is_some();
-                let (control, native_id, resumed) = connect_persistent_session(
-                    protocol,
-                    resolved_bin,
-                    args,
-                    cwd,
-                    model.as_deref(),
-                    reasoning.as_deref(),
-                    sandbox.as_deref(),
-                    &mcp_servers,
-                    resume_native,
-                )
-                .await?;
-                let _ = save_live_handle(
-                    app,
-                    conversation_id,
-                    &LiveSessionHandle {
-                        agent_id: agent_id.to_string(),
-                        protocol: protocol_tag.to_string(),
-                        native_id,
-                        cwd: cwd_str.clone(),
-                    },
-                );
-                state.register_external_live_session(
-                    conversation_id.to_string(),
-                    LiveSession {
-                        control: control.clone(),
-                        agent_id: agent_id.to_string(),
-                        cwd: cwd_str.clone(),
-                        last_activity: std::time::Instant::now(),
-                    },
-                );
-                // A resumed session already holds history → send only the latest message.
-                let prompt = if resumed {
-                    reuse_prompt.to_string()
-                } else {
-                    first_prompt.to_string()
-                };
-                // Intended to resume but ended up fresh → warn about the lost context.
-                if intended_resume && !resumed {
-                    emit(context_reset_notice_event());
-                }
-                (control, prompt)
+    //
+    // 复用判据里含 `launch_config`：模型 / reasoning / sandbox / 系统指令任一变化 ⇒ 不可复用
+    // ⇒ 丢弃条目（actor 自行关停旧进程）并走下面的连接分支**带原生 resume**，于是新 flag
+    // 生效而上下文不丢（spec 第 8 条：UI 所见必须与会话实际配置一致）。
+    let (mut control, mut prompt) = match state.external_live_session_control(
+        conversation_id,
+        agent_id,
+        &cwd_str,
+        launch_config,
+    ) {
+        Some(control) => (control, reuse_prompt.to_string()),
+        None => {
+            let resume_native = load_live_handle(app, conversation_id)
+                .filter(|h| h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag)
+                .map(|h| h.native_id);
+            // We intended to continue an existing native session iff a matching handle was
+            // persisted. If the resume then fails and we fall back to fresh, the prior context
+            // is lost and the user must be told (R4) rather than silently getting a blank slate.
+            let intended_resume = resume_native.is_some();
+            let (control, native_id, resumed) = connect_persistent_session(
+                protocol,
+                resolved_bin,
+                args,
+                cwd,
+                model.as_deref(),
+                reasoning.as_deref(),
+                sandbox.as_deref(),
+                &mcp_servers,
+                resume_native,
+            )
+            .await?;
+            let _ = save_live_handle(
+                app,
+                conversation_id,
+                &LiveSessionHandle {
+                    agent_id: agent_id.to_string(),
+                    protocol: protocol_tag.to_string(),
+                    native_id,
+                    cwd: cwd_str.clone(),
+                },
+            );
+            state.register_external_live_session(
+                conversation_id.to_string(),
+                LiveSession {
+                    control: control.clone(),
+                    agent_id: agent_id.to_string(),
+                    cwd: cwd_str.clone(),
+                    launch_config: launch_config.clone(),
+                    last_activity: std::time::Instant::now(),
+                },
+            );
+            // A resumed session already holds history → send only the latest message.
+            let prompt = if resumed {
+                reuse_prompt.to_string()
+            } else {
+                first_prompt.to_string()
+            };
+            // Intended to resume but ended up fresh → warn about the lost context.
+            if intended_resume && !resumed {
+                emit(context_reset_notice_event());
             }
-        };
+            (control, prompt)
+        }
+    };
 
     // At most one automatic fresh reconnect after a non-cancel / non-auth failure (R3), plus one
     // reconnect for a config change that only a relaunch can apply (R4 NeedsReconnect). Each is
@@ -740,8 +876,12 @@ where
             Err(e) => e,
         };
 
-        // The turn's session is no longer usable — drop it from the registry.
-        state.remove_external_live_session(conversation_id);
+        // 会话是否还能留在注册表里。默认丢弃（entry 落地 ⇒ control sender 关闭 ⇒ actor 关停
+        // 子进程）；只有「协议级取消之后会话仍可用」的协议例外 —— 否则用户点一次「停止」
+        // 就把常驻进程连带杀掉，上下文延续与 0.1s 冷启动全部作废（见 `cancel_keeps_live_session`）。
+        if !cancel_keeps_live_session(&err, protocol) {
+            state.remove_external_live_session(conversation_id);
+        }
 
         match persistent_failure_action(
             &err,
@@ -767,7 +907,7 @@ where
             }
         }
 
-        control = reconnect_fresh(
+        let (next_control, resumed) = reconnect_fresh(
             app,
             state,
             conversation_id,
@@ -782,17 +922,29 @@ where
             reasoning.as_deref(),
             sandbox.as_deref(),
             &mcp_servers,
+            launch_config,
         )
         .await?;
-        prompt = first_prompt.to_string();
+        control = next_control;
+        prompt = if resumed {
+            reuse_prompt.to_string()
+        } else {
+            first_prompt.to_string()
+        };
         // A fresh reconnect after an in-run session failure drops whatever context that session
         // had accumulated this run — surface it rather than silently continuing on a blank slate.
-        emit(context_reset_notice_event());
+        // 但**真的续上了**原生会话时不能发这条（claude 的 argv 仍带 `--resume` 就属于这种）：
+        // 一条假的「上下文已重置」本身就是 bug。
+        if !resumed {
+            emit(context_reset_notice_event());
+        }
     }
 }
 
-/// Connect a FRESH persistent session (no resume), persist its handle, and register it. Used by
-/// `run_persistent_turn`'s auto-reconnect / config-reconnect paths.
+/// Connect a persistent session for the reconnect paths (no live handle to resume from), persist
+/// its handle, and register it. Returns the control channel plus **whether the CLI actually
+/// continued its native session** — for claude that happens when `args` still carry `--resume`,
+/// and in that case the caller must NOT claim the context was reset (a false alarm is its own bug).
 #[allow(clippy::too_many_arguments)]
 async fn reconnect_fresh(
     app: &AppHandle,
@@ -809,12 +961,18 @@ async fn reconnect_fresh(
     reasoning: Option<&str>,
     sandbox: Option<&str>,
     mcp_servers: &[AcpMcpServer],
-) -> Result<tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>, String>
-{
+    launch_config: &LaunchConfig,
+) -> Result<
+    (
+        tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
+        bool,
+    ),
+    String,
+> {
     use crate::external_agents::session::live::LiveSession;
     use crate::external_agents::session::{save_live_handle, LiveSessionHandle};
 
-    let (control, native_id, _resumed) = connect_persistent_session(
+    let (control, native_id, resumed) = connect_persistent_session(
         protocol,
         resolved_bin,
         args,
@@ -842,10 +1000,84 @@ async fn reconnect_fresh(
             control: control.clone(),
             agent_id: agent_id.to_string(),
             cwd: cwd_str.to_string(),
+            launch_config: launch_config.clone(),
             last_activity: std::time::Instant::now(),
         },
     );
-    Ok(control)
+    Ok((control, resumed))
+}
+
+/// 本轮的启动配置指纹。
+///
+/// 只有 claude 需要它：它的 `--model` / `--effort` / `--permission-mode` /
+/// `--append-system-prompt-file` **全是启动参数**，常驻之后只能靠换进程生效。改动前每轮
+/// spawn 新进程，换配置是「下一轮自动带上新 flag」白捡的；常驻打破了这个便宜，不补上就会
+/// 出现「界面显示一套、会话实际跑另一套」（违反 spec 第 8 条，是功能退步而非缺功能）。
+///
+/// ACP / codex 能在会话内改模型与推理档位（`session/set_config_option` / 每轮 `turn/start`
+/// 带 model），指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。
+fn launch_config_for_turn(
+    protocol: StreamFormat,
+    model: Option<&str>,
+    reasoning: Option<&str>,
+    sandbox: Option<&str>,
+    instructions_hash: Option<&str>,
+) -> LaunchConfig {
+    if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
+        return LaunchConfig::default();
+    }
+    LaunchConfig {
+        flags: format!(
+            "{}|{}|{}",
+            model.unwrap_or_default(),
+            reasoning.unwrap_or_default(),
+            sandbox.unwrap_or_default()
+        ),
+        instructions: instructions_hash.map(str::to_string),
+    }
+}
+
+/// 持久会话「复用 / resume 轮」要发的正文。
+///
+/// claude 的 `composed.full_prompt` **本身就不含**会话级指令（它们走
+/// `--append-system-prompt-file` 启动 flag，spec 第 1 条），剩下的全是 **per-turn** 内容：
+/// active skill 正文 + 降级附件说明 + 用户消息。这些每轮都必须整份发出去 —— 只发最新用户
+/// 消息会让 skill 正文与附件说明从第 2 轮起静默消失（active skill 是用户可以中途换的
+/// per-turn 选择）。
+///
+/// 其余持久协议（codex / ACP）的 full_prompt 首轮**含**指令，复用轮只发最新用户消息，
+/// 保持现有行为。
+fn persistent_turn_prompt<'a>(
+    protocol: StreamFormat,
+    composed_prompt: &'a str,
+    latest_user_message: &'a str,
+) -> &'a str {
+    match protocol {
+        StreamFormat::ClaudeStreamJson => composed_prompt,
+        _ => latest_user_message,
+    }
+}
+
+/// 本轮错误是否代表「用户取消」——出口走 cancelled（不弹错误气泡、不发上下文重置提示、
+/// 更不会重发这一轮 prompt）。
+fn is_cancellation(err: &str) -> bool {
+    err == "cancelled" || err == crate::external_agents::session::live::CANCELLED_SESSION_LOST
+}
+
+/// 这次失败之后，常驻会话能不能留在注册表里继续服下一轮。
+///
+/// **claude**：`run_turn` 发出协议级 `interrupt` 后**一直读到本轮的 `result` 才返回**
+/// （实测被中断的轮次一定有 result），流位置回到轮次边界、进程完好 ⇒ 可以直接继续用。
+/// 这是常驻改造的核心收益：点一次「停止」不该让用户丢掉整个会话上下文，也不该再花 3.2 秒
+/// 重新拉起进程。
+///
+/// **ACP / codex**：`session/cancel` / `turn/interrupt` 发出后立刻返回，reader 停在流中间
+/// （未消费的 prompt 响应 + 后续 update），复用会读到上一轮的残帧 ⇒ 保持原行为（丢弃会话，
+/// 下一轮从落盘 handle 原生 resume）。
+///
+/// `CANCELLED_SESSION_LOST`（进程死了 / 取消超时被硬 Close）任何协议都不保留。
+fn cancel_keeps_live_session(err: &str, protocol: StreamFormat) -> bool {
+    err == "cancelled" && matches!(protocol, StreamFormat::ClaudeStreamJson)
 }
 
 /// What `run_persistent_turn` should do after a turn fails. Pure so the retry policy is unit
@@ -868,7 +1100,7 @@ fn persistent_failure_action(
     retried_after_failure: bool,
     reconnected_for_config: bool,
 ) -> PersistentFailureAction {
-    if err == "cancelled" {
+    if is_cancellation(err) {
         return PersistentFailureAction::Cancelled;
     }
     if err == crate::external_agents::session::acp::NEEDS_RECONNECT {
@@ -969,13 +1201,19 @@ where
         // A5: protocol-level cancel didn't wind the turn down in time → escalate to a hard Close.
         if cancel_should_escalate(cancel_at, std::time::Instant::now(), CANCEL_ESCALATE_GRACE) {
             let _ = control.send(SessionCommand::Close).await;
-            return Err("cancelled".to_string());
+            // 用 `CANCELLED_SESSION_LOST` 而不是 `"cancelled"`：出口仍按取消呈现，但会话
+            // 已经被硬 Close 掉了，注册表条目**必须**丢弃 —— 否则 claude 的「取消后保留常驻
+            // 会话」会把一个死 actor 留到下一轮才发现。
+            return Err(
+                crate::external_agents::session::live::CANCELLED_SESSION_LOST.to_string(),
+            );
         }
     }
 }
 
 fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
     match protocol {
+        StreamFormat::ClaudeStreamJson => "claude_stream_json",
         StreamFormat::CodexAppServer => "codex_app_server",
         StreamFormat::AcpJsonRpc => "acp_json_rpc",
         _ => "unknown",
@@ -1004,11 +1242,47 @@ async fn connect_persistent_session(
     String,
 > {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
+    use crate::external_agents::session::claude_stream::{
+        spawn_claude_stream_session_actor, ClaudeStreamJsonSession,
+    };
     use crate::external_agents::session::codex_app_server::{
         spawn_codex_session_actor, CodexAppServerSession,
     };
 
     match protocol {
+        StreamFormat::ClaudeStreamJson => {
+            // claude 的会话 id 走**启动参数**，不像 codex / ACP 在握手 RPC 里传 ——
+            // 所以这里要看/改 argv 而不是传参。
+            //
+            // **参数说了算**：`build_claude_args` 已按 `resolve_agent_resume_context` 放好
+            // `--resume <id>`（续接）或 `--session-id <new>`（开新会话）。后者的典型场景是
+            // **换了模型** —— claude 的 resume 会话钉死在旧模型上，所以那条既有契约刻意开新会话
+            // （代价是丢上下文，由 `intended_resume && !resumed` 的可见提示交代）。用 live
+            // handle 的 native id 去覆盖它会让「换模型要生效」这条契约静默失效。
+            //
+            // live handle 只在参数里**没有**任何会话 flag 时兜底，且必须改写成 `--resume`：
+            // 同一个 id 再 `--session-id` 一次会被 claude 以「id 已存在」拒绝启动。
+            let (effective_args, resumed) = if args.iter().any(|arg| arg == "--resume") {
+                (args.to_vec(), true)
+            } else if args.iter().any(|arg| arg == "--session-id") {
+                (args.to_vec(), false)
+            } else if let Some(id) = resume_native
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                (
+                    crate::external_agents::defs::claude::claude_args_resuming(args, id),
+                    true,
+                )
+            } else {
+                (args.to_vec(), false)
+            };
+            let session =
+                ClaudeStreamJsonSession::connect(resolved_bin, &effective_args, cwd).await?;
+            let id = session.session_id().to_string();
+            Ok((spawn_claude_stream_session_actor(session), id, resumed))
+        }
         StreamFormat::CodexAppServer => {
             if let Some(tid) = resume_native.as_deref() {
                 if let Ok(session) = CodexAppServerSession::connect(
@@ -1092,48 +1366,78 @@ fn push_tool_segment(
     segment
 }
 
-/// 发 `chat-compaction` 通知前端「CLI 自己压了一次上下文」，payload 与内置路径
-/// （`chat/commands/context.rs::emit_chat_compaction_state`）保持同形，前端
-/// `Chat.tsx` 的 `onChatCompaction` 才能复用同一套分隔线逻辑。
+/// 构造一条 CLI 自压的边界记录，并发 `chat-compaction` 通知前端插分隔线。
 ///
-/// `boundary.token_estimate_after` 填 0：官方 SDK 的 `compact_metadata` 只给
-/// `pre_tokens`，压缩后的占用要等下一条 `message_start.message.usage`（服务端算），
-/// 这里编一个数只会让分隔线上显示假数字。前端渲染时 after 为 0 即不显示「→ N」。
+/// payload 与内置路径（`chat/agent/compaction.rs::emit_compaction_event` /
+/// `chat/commands/context.rs::emit_chat_compaction_state`）同形，且**直接复用
+/// `CompactionBoundaryRecord`** 而不是手写一份 json——两份形状迟早分叉（spec 第 2 条）。
+///
+/// 返回记录供调用方落盘：live 事件与持久化必须是**同一条记录**（同一个 id），
+/// 否则刷新后会出现两条分隔线。
+///
+/// `token_estimate_after` 取 `compact_metadata.post_tokens`（claude 2.1.220 确实有这个字段）；
+/// 缺失时为 0，前端此时不显示「→ N」。
 fn emit_cli_compaction(
     app: &AppHandle,
     conversation_id: &str,
+    anchor_message_id: &str,
     trigger: &str,
     pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
     now: i64,
-) {
-    let boundary = serde_json::json!({
-        "id": Uuid::new_v4().to_string(),
-        "source_until_message_id": "",
-        "display_after_message_id": null,
-        "token_estimate_before": pre_tokens.unwrap_or(0),
-        "token_estimate_after": 0,
-        "summary_content": "",
-        // CLI 自压统一记 `auto`/`manual`（沿用 CLI 自报的 trigger），与内置的
-        // `agent_loop` 区分开——排查时能看出压缩是谁触发的。
-        "trigger": trigger,
-        "created_at": now,
-    });
+) -> CompactionBoundaryRecord {
+    let boundary = CompactionBoundaryRecord {
+        id: format!("ctxbd_{}", Uuid::new_v4()),
+        // CLI 内部压缩，Kivio 拿不到「摘要覆盖到哪条消息」——这是 CLI 自己的上下文切分点，
+        // 协议里也不上报。留空并靠 `display_after_message_id` 做时间线锚点。
+        source_until_message_id: String::new(),
+        display_after_message_id: Some(anchor_message_id.to_string()),
+        token_estimate_before: pre_tokens.unwrap_or(0) as usize,
+        token_estimate_after: post_tokens.unwrap_or(0) as usize,
+        // 摘要正文只存在于 CLI 自己的会话里，协议不上报。
+        summary_content: String::new(),
+        // CLI 自压沿用 CLI 自报的 trigger（`auto` / `manual`），与内置的 `agent_loop`
+        // 区分开——排查时能看出压缩是谁触发的。
+        trigger: trigger.to_string(),
+        created_at: now,
+    };
     let _ = app.emit(
         "chat-compaction",
         serde_json::json!({
             "conversationId": conversation_id,
             "phase": "completed",
             "trigger": trigger,
-            "boundary": boundary,
+            "boundary": &boundary,
         }),
     );
+    boundary
 }
 
+/// 非零退出码是否应判定为本轮失败。
+///
+/// `protocol_completed`（读到了 CLI 明确的本轮结束帧）时**一律豁免**：spec 第 8b 条记的
+/// 已知坑是 Windows `TerminateProcess` 退出码恒为 1，配合「非零退出 + 有 stderr = error」
+/// 会把正常收尾的轮次误判成失败；杀整棵进程树后中招面进一步变大。判据改为**协议层完成标志**
+/// 而不是退出码形态——真实的协议层失败（`result.is_error` 等）走 `resolve_turn_error`
+/// 那条路，不依赖退出码。
+///
+/// **常驻路径上这条规则天然不适用**（B1 起）：进程不再每轮退出，`exit_code` 恒为 `None`
+/// （只有非持久分支才 `wait()` 子进程），所以本函数在 claude / codex / ACP 上恒返回 false。
+/// 退出码该归给哪一轮的问题于是不存在了 —— 常驻进程的退出发生在**会话关闭**时（idle 回收 /
+/// LRU 淘汰 / 配置变更重连 / 应用退出），与任何单轮都无关，那条路径上也没有气泡可污染。
+/// 目前只有 `PiRpc` 还走非持久分支，而它不上报协议层完成标志（`protocol_completed` 恒 false），
+/// 所以对它规则照旧生效。
+fn nonzero_exit_is_a_failure(exit_code: Option<i32>, protocol_completed: bool) -> bool {
+    !protocol_completed && exit_code.map(|code| code != 0).unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_unified_event(
     app: &AppHandle,
     conversation_id: &str,
     run_id: &str,
     message_id: &str,
+    compaction_anchor_id: &str,
     content: &mut String,
     reasoning: &mut String,
     raw_output: &mut String,
@@ -1144,6 +1448,7 @@ fn apply_unified_event(
     segments: &mut Vec<ChatMessageSegment>,
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
+    cli_compactions: &mut Vec<CompactionBoundaryRecord>,
     event: UnifiedAgentEvent,
 ) {
     let now = Local::now().timestamp();
@@ -1267,16 +1572,32 @@ fn apply_unified_event(
         UnifiedAgentEvent::CliCompacted {
             trigger,
             pre_tokens,
+            post_tokens,
+            dropped_tokens,
+            duration_ms,
         } => {
             // CLI **自己**压缩了上下文（claude 的 compact_boundary）。Kivio 并没有发
-            // `/compact`，所以不能走 `external_agents::compact` 那条路；这里只做两件事：
-            //   1. 记一次压缩（让 footer 的「已压缩 N 次」与实际相符）
-            //   2. 发 `chat-compaction` 让前端插入分隔线——否则用户只会看到
-            //      「对话突然变短了」而没有任何解释。
-            // 用量数字**不在这里改**：压缩后的真实占用由紧随其后的
-            // `message_start.message.usage` 上报（服务端算的），比任何本地推算都准。
-            // 官方 SDK 的 compact_metadata 也确实只给 pre_tokens、没有 post_tokens。
-            emit_cli_compaction(app, conversation_id, &trigger, pre_tokens, now);
+            // `/compact`，所以不能走 `external_agents::compact` 那条路；这里做两件事：
+            //   1. 发 `chat-compaction` 让前端**立刻**插入分隔线——否则用户只会看到
+            //      「对话突然变短了」而没有任何解释；
+            //   2. 把同一条记录攒起来，读流结束后落到 `context_state`
+            //      （计数 + 边界持久化，见调用方注释）。
+            // 分子仍由 `message_start.message.usage` / `result` 上报（服务端算的），
+            // 这里不推算用量。
+            if cfg!(debug_assertions) {
+                eprintln!(
+                    "[external-agent] cli compaction trigger={trigger} pre={pre_tokens:?} post={post_tokens:?} dropped={dropped_tokens:?} duration_ms={duration_ms:?}"
+                );
+            }
+            cli_compactions.push(emit_cli_compaction(
+                app,
+                conversation_id,
+                compaction_anchor_id,
+                &trigger,
+                pre_tokens,
+                post_tokens,
+                now,
+            ));
         }
         _ => {}
     }
@@ -1300,17 +1621,40 @@ fn resolve_turn_error<'a>(
 }
 
 /// 合并一轮内先后到达的多次 CLI 用量上报：**后到覆盖先到**（取最新快照），
-/// 但 `context_window_tokens` **粘滞**——新值为 `None` 时保留旧值。
+/// 但两处例外：
 ///
-/// 为什么需要粘滞：ACP 一轮里会到两次用量。`session/update` 的 `usage_update`
-/// 带 `size`（窗口）先到，`session/prompt` 的 `PromptResponse.usage` 不带窗口后到；
-/// 若直接整体覆盖，分母会被后一条冲成 `None`，用量条退回"窗口未知"。
-/// 分子本身仍取最新的那条（这正是"当前上下文占用"想要的语义）。
+/// 1. `context_window_tokens` **粘滞**——新值为 `None` 时保留旧值。
+///    ACP 一轮里会到两次用量：`session/update` 的 `usage_update` 带 `size`（窗口）先到，
+///    `session/prompt` 的 `PromptResponse.usage` 不带窗口后到；直接整体覆盖会让分母被后一条
+///    冲成 `None`，用量条退回「窗口未知」。claude 侧方向相同：`message_start` 的 usage 不带
+///    窗口、`result` 的带（`modelUsage.contextWindow`），后到覆盖正好把窗口补上。
+/// 2. **全零的 token 数不覆盖非零的**。没有 LLM 往返的 `result`（未登录 / `/help` /
+///    未知斜杠命令 / 我们自己发的 `/compact`）四个字段全 0，但它仍可能携带窗口。
+///    若让它整体覆盖，本轮 `message_start` 报的真实占用会被清零 ⇒ 用量条从 47K 掉到 0
+///    （`context.rs` 挑「最近一条 usage」的判据是 `is_some()`，`Some(0)` 会命中）。
+///    这一条与 `stream/claude.rs` 的全零守卫是同一条规则的两道防线。
 fn merge_cli_usage(previous: Option<&ModelUsage>, mut incoming: ModelUsage) -> ModelUsage {
     if incoming.context_window_tokens.is_none() {
         incoming.context_window_tokens = previous.and_then(|prev| prev.context_window_tokens);
     }
+    if let Some(prev) = previous {
+        if usage_tokens_all_zero(&incoming) && !usage_tokens_all_zero(prev) {
+            let window = incoming.context_window_tokens;
+            incoming = prev.clone();
+            incoming.context_window_tokens = window;
+        }
+    }
     incoming
+}
+
+/// 一次上报里所有 token 数是否都是 0 / 缺失（= 这条上报没有任何分子信息）。
+fn usage_tokens_all_zero(usage: &ModelUsage) -> bool {
+    usage.input_tokens.unwrap_or(0) == 0
+        && usage.output_tokens.unwrap_or(0) == 0
+        && usage.total_tokens.unwrap_or(0) == 0
+        && usage.cached_input_tokens.unwrap_or(0) == 0
+        && usage.cache_creation_input_tokens.unwrap_or(0) == 0
+        && usage.reasoning_tokens.unwrap_or(0) == 0
 }
 
 fn truncate_for_preview(value: &str, max_chars: usize) -> String {
@@ -1459,6 +1803,71 @@ mod tests {
         assert_eq!(merged.context_window_tokens, None);
     }
 
+    /// **零用量的 result 不许把分子清零**（A2）。claude 在没有 LLM 往返的轮次
+    /// （未登录 / `/help` / 未知斜杠命令 / Kivio 自己发的 `/compact`）会报一条全 0 的 usage，
+    /// 但它仍可能带着 `modelUsage.contextWindow`。直接整体覆盖会把本轮 `message_start`
+    /// 报的真实占用清零 ⇒ 用量条从 47K 掉到 0。
+    #[test]
+    fn cli_usage_merge_keeps_real_numbers_when_a_zero_report_arrives_later() {
+        let realtime = ModelUsage {
+            input_tokens: Some(1_200),
+            output_tokens: Some(800),
+            cached_input_tokens: Some(45_000),
+            cache_creation_input_tokens: Some(300),
+            total_tokens: Some(47_300),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&realtime),
+            ModelUsage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                total_tokens: Some(0),
+                context_window_tokens: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.total_tokens, Some(47_300), "分子被清零了");
+        assert_eq!(merged.input_tokens, Some(1_200));
+        // 但窗口（分母）要采纳——它是静态属性，与本轮有没有用量无关。
+        assert_eq!(merged.context_window_tokens, Some(1_000_000));
+    }
+
+    /// 反向不成立：真实数字仍要能覆盖先到的另一份真实数字（取最新快照的语义不变）。
+    #[test]
+    fn cli_usage_merge_still_takes_the_latest_nonzero_snapshot() {
+        let first = ModelUsage {
+            input_tokens: Some(100),
+            total_tokens: Some(100),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&first),
+            ModelUsage {
+                input_tokens: Some(900),
+                total_tokens: Some(900),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.total_tokens, Some(900));
+    }
+
+    // ---- 非零退出码的豁免（spec 第 8b 条 + A9 杀整棵进程树）----
+
+    /// 读到协议层完成标志（claude 的 `result` 帧）后，非零退出码不得再把这一轮标成失败。
+    /// Windows `TerminateProcess` 退出码恒为 1，而杀整棵进程树让这条路径变常见——
+    /// 不豁免就会凭空造出失败气泡。
+    #[test]
+    fn protocol_completion_exempts_a_nonzero_exit() {
+        assert!(!nonzero_exit_is_a_failure(Some(1), true));
+        assert!(!nonzero_exit_is_a_failure(Some(-1), true));
+        // 没有完成标志时仍按老规则判失败。
+        assert!(nonzero_exit_is_a_failure(Some(1), false));
+        // 正常退出 / 退出码未知（信号退出，unix 下 code() = None）都不是失败。
+        assert!(!nonzero_exit_is_a_failure(Some(0), false));
+        assert!(!nonzero_exit_is_a_failure(None, false));
+    }
+
     #[test]
     fn stream_segment_tracker_reuses_text_segment_for_deltas() {
         let mut segments = Vec::new();
@@ -1587,5 +1996,134 @@ mod tests {
             .checked_sub(std::time::Duration::from_secs(11))
             .expect("instant in range");
         assert!(cancel_should_escalate(Some(past), now, grace));
+    }
+
+    // ---- B1：常驻 claude（取消存活 / 配置变更重连 / 每轮正文）----
+
+    use crate::external_agents::session::live::CANCELLED_SESSION_LOST;
+
+    /// 两种取消都走 cancelled 出口：不弹错误气泡、不发上下文重置提示、更不重发本轮 prompt。
+    #[test]
+    fn both_cancel_flavours_are_cancellations() {
+        assert!(is_cancellation("cancelled"));
+        assert!(is_cancellation(CANCELLED_SESSION_LOST));
+        assert!(!is_cancellation("ACP session exited mid-turn"));
+        assert!(!is_cancellation(""));
+        assert_eq!(
+            persistent_failure_action(CANCELLED_SESSION_LOST, "claude", false, false),
+            PersistentFailureAction::Cancelled
+        );
+    }
+
+    /// **整个改造的验收点之一**：claude 协议级取消之后常驻会话必须留在注册表里。
+    /// 丢弃条目 ⇒ control sender 落地 ⇒ actor 收到通道关闭 ⇒ 子进程被关停，
+    /// 于是点一次「停止」就等于把会话上下文和 0.1s 冷启动一起扔掉。
+    #[test]
+    fn a_claude_cancel_keeps_the_live_session() {
+        assert!(cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::ClaudeStreamJson
+        ));
+        // 硬 Close / 进程已死：任何协议都不保留（留着就是个死 actor）。
+        assert!(!cancel_keeps_live_session(
+            CANCELLED_SESSION_LOST,
+            StreamFormat::ClaudeStreamJson
+        ));
+        // ACP / codex 的 reader 在取消后停在流中间，复用会读到残帧 ⇒ 保持原行为。
+        assert!(!cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::AcpJsonRpc
+        ));
+        assert!(!cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::CodexAppServer
+        ));
+        // 真实失败一律丢弃。
+        assert!(!cancel_keeps_live_session(
+            "claude 常驻会话在轮次中退出",
+            StreamFormat::ClaudeStreamJson
+        ));
+    }
+
+    /// 指纹只对 claude 生效（它的 model/effort/permission-mode/系统提示全是启动 flag）；
+    /// ACP / codex 恒为默认值 ⇒ 永不触发重连，既有行为不变。
+    #[test]
+    fn launch_config_only_fingerprints_claude() {
+        let claude = launch_config_for_turn(
+            StreamFormat::ClaudeStreamJson,
+            Some("opus"),
+            Some("high"),
+            Some("plan"),
+            Some("hash-1"),
+        );
+        assert_eq!(claude.flags, "opus|high|plan");
+        assert_eq!(claude.instructions.as_deref(), Some("hash-1"));
+
+        for protocol in [
+            StreamFormat::AcpJsonRpc,
+            StreamFormat::CodexAppServer,
+            StreamFormat::PiRpc,
+        ] {
+            assert_eq!(
+                launch_config_for_turn(protocol, Some("opus"), Some("high"), Some("plan"), Some("h")),
+                LaunchConfig::default(),
+                "{protocol:?} 不该参与启动指纹判定"
+            );
+        }
+    }
+
+    /// 四项任一变化都要触发重连（`accepts` 为 false）；全都没变则复用。
+    #[test]
+    fn every_launch_flag_change_forces_a_reconnect() {
+        let base = |model, reasoning, sandbox, hash| {
+            launch_config_for_turn(
+                StreamFormat::ClaudeStreamJson,
+                model,
+                reasoning,
+                sandbox,
+                hash,
+            )
+        };
+        let established = base(Some("opus"), Some("high"), Some("plan"), Some("h1"));
+        assert!(established.accepts(&base(Some("opus"), Some("high"), Some("plan"), Some("h1"))));
+        assert!(!established.accepts(&base(Some("sonnet"), Some("high"), Some("plan"), Some("h1"))));
+        assert!(!established.accepts(&base(Some("opus"), Some("low"), Some("plan"), Some("h1"))));
+        assert!(!established.accepts(&base(
+            Some("opus"),
+            Some("high"),
+            Some("bypassPermissions"),
+            Some("h1")
+        )));
+        // 系统提示 / Memory 改了：文件内容变了，而常驻进程只在启动时读一遍。
+        assert!(!established.accepts(&base(Some("opus"), Some("high"), Some("plan"), Some("h2"))));
+    }
+
+    /// claude 每轮都发整份 composed prompt：会话级指令走启动 flag、不在正文里，剩下的
+    /// skill 正文 + 附件说明是 per-turn 的，只发最新用户消息会让它们从第 2 轮起静默消失。
+    #[test]
+    fn claude_sends_the_full_composed_prompt_every_turn() {
+        let composed = "## Skill: pdf\n<body>\n\n用户消息";
+        let latest = "用户消息";
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::ClaudeStreamJson, composed, latest),
+            composed
+        );
+        // codex / ACP 的 full_prompt 首轮含指令，复用轮只发最新消息（保持原行为）。
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::CodexAppServer, composed, latest),
+            latest
+        );
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::AcpJsonRpc, composed, latest),
+            latest
+        );
+    }
+
+    /// 常驻路径上 `exit_code` 恒为 `None`（只有非持久分支才 `wait()` 子进程），
+    /// 所以「非零退出 = 失败」这条规则在常驻会话上天然不触发。
+    #[test]
+    fn the_nonzero_exit_rule_does_not_apply_to_persistent_sessions() {
+        assert!(!nonzero_exit_is_a_failure(None, false));
+        assert!(!nonzero_exit_is_a_failure(None, true));
     }
 }

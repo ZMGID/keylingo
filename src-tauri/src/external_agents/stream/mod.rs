@@ -33,6 +33,30 @@ impl StreamHandler {
         };
         self.0.handle_value(&value, sink);
     }
+
+    /// 本轮是否读到了协议层明确的**完成标志**（claude 的 `result` 帧）。
+    ///
+    /// 出口用它豁免「非零退出码 = 失败」规则（spec 第 8b 条）：进程被我们主动杀掉时
+    /// 退出码不可信（Windows `TerminateProcess` 恒为 1），而「CLI 说本轮结束了」是可信的。
+    /// 真实的协议层失败走 `result.is_error` → `UnifiedAgentEvent::Error`，不受此豁免影响。
+    pub fn saw_protocol_completion(&self) -> bool {
+        self.0.completed_result_turns() > 0
+    }
+
+    /// 本会话（= 常驻进程下的整个对话）已经收完的 `result` 轮次数。
+    ///
+    /// 常驻会话用它做**轮次边界检测**：喂一行前后各取一次，数字涨了就说明本轮结束
+    /// （claude 每轮恰好一个 `result`，被中断的轮次也有）。这样就不用为了找边界把
+    /// 同一行 JSON 再解析一遍。
+    pub fn completed_result_turns(&self) -> u32 {
+        self.0.completed_result_turns()
+    }
+
+    /// 最近一个 `result` 是不是用户中断的收尾（`terminal_reason == "aborted_streaming"`）。
+    /// 常驻会话据此把这一轮送去「已取消」出口而不是错误出口。
+    pub fn last_result_aborted(&self) -> bool {
+        self.0.last_result_aborted()
+    }
 }
 
 /// 一次 CLI 用量上报的原始分量。各 CLI 只填其中几项，其余走 `..Default::default()`。

@@ -34,7 +34,7 @@ import type { LucideIcon } from 'lucide-react'
 import type { AgentTodoItem, AgentTodoState, AgentTodoStatus, ToolCallRecord, ToolCallStatus } from './types'
 import { normalizeToolCallStatus } from './toolStatus'
 import { formatToolResultPreview } from './toolResultPreview'
-import { toolRecordRawName as toolRawName } from './segments'
+import { toolRecordRawName } from './segments'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
 import { AskUserBlock } from './AskUserBlock'
 import { ChatMarkdown } from './ChatMarkdown'
@@ -102,6 +102,52 @@ function parsedArguments(toolCall: ToolCallRecord): Record<string, unknown> | nu
   } catch {
     return null
   }
+}
+
+/** 外部 CLI 的内置工具名 → 本文件各 switch 使用的规范名（Kivio 原生工具的 snake_case）。
+ *
+ *  key 是「小写 + 去掉下划线/连字符/空格」后的形态，所以 `WebFetch` 与 `web_fetch` 归到
+ *  同一个 key。表里**只列本文件确实有对应分支**的工具；其余（`Task` / `Skill` 的独有语义等）
+ *  保持原名走 default —— 显示工具本名，比映射到一个语义不符的分支好。 */
+const CLI_TOOL_NAME_ALIASES: Record<string, string> = {
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  todowrite: 'todo_write',
+  // claude 的 MultiEdit 用 `edits[]`，正是 `fileToolArgumentPreview` 的 edit 分支已支持的形状。
+  multiedit: 'edit',
+  // NotebookEdit 的目标路径在 `notebook_path`，见 `toolPathArgument`。
+  notebookedit: 'edit',
+}
+
+/** 展示映射用的规范工具名。
+ *
+ *  `toolRecordRawName` 原样返回工具名、不做归一化，而下面所有 switch 分支写的都是小写
+ *  snake_case —— claude Code 的内置工具是 PascalCase 的 `Read` / `Bash` / `Grep` / `Glob` /
+ *  `Edit` / `WebFetch` / `TodoWrite`，于是**全部落进 default**：`getToolTarget` 返回 ''，
+ *  折叠行退到 `previewValue(arguments)`，显示一坨 220 字符截断的 JSON，完全不可扫读。
+ *
+ *  **只用于 switch 匹配，不要拿它当显示文案**：MCP 工具名（`mcp__server__toolName`）的
+ *  大小写有意义，`getToolName` 的 default 分支必须回落 `toolRecordRawName` 的原名。 */
+function toolRawName(toolCall: ToolCallRecord): string {
+  const lower = toolRecordRawName(toolCall).toLowerCase()
+  return CLI_TOOL_NAME_ALIASES[lower.replace(/[_\-\s]/g, '')] ?? lower
+}
+
+/** 文件类工具的目标路径。
+ *
+ *  claude Code 的内置工具用 `file_path`（NotebookEdit 用 `notebook_path`），Kivio 原生工具
+ *  用 `path`。只读 `path` 的话，即便工具名归一化对上了，claude 的 Read/Write/Edit 依然拿不到
+ *  目标 —— 名字和字段名是两处**各自独立**的错配。 */
+function toolPathArgument(args: Record<string, unknown> | null): string {
+  return firstString(
+    args?.path,
+    args?.file_path,
+    args?.filePath,
+    args?.notebook_path,
+    args?.notebookPath,
+    args?.relative_path,
+    args?.relativePath,
+  )
 }
 
 function toolGlyph(toolCall: ToolCallRecord): LucideIcon | ComponentType<{ size?: number; strokeWidth?: number; className?: string }> {
@@ -960,7 +1006,7 @@ function fileOperationLabel(operation: string): string {
 
 function fileToolArgumentPreview(toolCall: ToolCallRecord, args: Record<string, unknown> | null): string {
   const rawName = toolRawName(toolCall)
-  const path = typeof args?.path === 'string' ? args.path.trim() : ''
+  const path = toolPathArgument(args)
   const query = typeof args?.query === 'string'
     ? args.query.trim()
     : typeof args?.pattern === 'string'
@@ -1013,6 +1059,8 @@ function getDuration(toolCall: ToolCallRecord): number | undefined {
 
 function getToolName(toolCall: ToolCallRecord): string {
   const raw = toolRawName(toolCall) || 'Tool'
+  // default 分支要回落的**原始**名（MCP 工具名大小写有意义，归一化后的名字不能拿来显示）。
+  const displayName = toolRecordRawName(toolCall) || 'Tool'
 
   if (raw === 'skill' || raw === 'skill_activate') return 'Activate skill'
   // 全英文、原形动词（不加 -ed）：直接用工具本名的动词形式，如 Read / Run / Grep / Glob。
@@ -1066,7 +1114,7 @@ function getToolName(toolCall: ToolCallRecord): string {
   if (raw === 'mixer_vision') return 'Vision'
   if (raw === 'mixer_generate_image') return 'Generate image'
   if (raw === 'todo_write' || raw === 'todo_update') return 'Update todos'
-  return raw
+  return displayName
 }
 
 function firstString(...values: unknown[]): string {
@@ -1101,7 +1149,7 @@ function readLineLabel(toolCall: ToolCallRecord, args: Record<string, unknown> |
 function getToolTarget(toolCall: ToolCallRecord): string {
   const raw = toolRawName(toolCall)
   const args = parsedArguments(toolCall)
-  const path = firstString(args?.path, args?.relative_path, args?.relativePath)
+  const path = toolPathArgument(args)
   const primary = ((): string => {
     switch (raw) {
       case 'read':

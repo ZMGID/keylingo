@@ -94,6 +94,11 @@ fn detect_kind(raw: &str, exit_code: Option<i32>, stderr_tail: &str) -> External
         || hay.contains("please log in")
         || hay.contains("please login")
         || hay.contains("login required")
+        // claude 在 assistant 帧的 `error` 字段上用的是这两个机器码（不是自然语言），
+        // 见 `stream/claude.rs::assistant_error_report`。不认它们的话这类失败会落进
+        // Protocol，用户拿不到 `claude /login` 这条可操作提示。
+        || hay.contains("authentication_failed")
+        || hay.contains("oauth_org_not_allowed")
         || contains_token(&hay, "401")
     {
         ExternalAgentErrorKind::Auth
@@ -179,6 +184,25 @@ pub fn is_auth_error(raw: &str, agent_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// claude 的 assistant 帧用机器码而不是自然语言报认证失败——必须也归到 Auth，
+    /// 否则用户拿到的是无从下手的 Protocol 提示，而不是 `claude /login`。
+    #[test]
+    fn classifies_claude_machine_auth_codes_as_auth() {
+        for raw in [
+            "claude 报告错误：authentication_failed",
+            "claude 报告错误：oauth_org_not_allowed",
+        ] {
+            let classified = classify(raw, None, "", "claude");
+            assert_eq!(classified.kind, ExternalAgentErrorKind::Auth, "{raw}");
+            assert!(classified.user_message.contains("claude /login"), "{raw}");
+        }
+        // 计费错误不是认证错误，不得被顺手归进 Auth。
+        assert_ne!(
+            classify("claude 报告错误：billing_error", None, "", "claude").kind,
+            ExternalAgentErrorKind::Auth
+        );
+    }
 
     #[test]
     fn classifies_auth_from_rpc_message() {

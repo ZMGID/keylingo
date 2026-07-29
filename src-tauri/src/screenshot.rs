@@ -58,6 +58,9 @@ pub fn cleanup_orphan_temp_files() {
             && name.ends_with(".png"))
             || name.starts_with("kivio-mcpimg-")
             || name.starts_with("kivio-ext-img-")
+            // 外部 CLI 的系统提示文件（`--append-system-prompt-file` 的载体）。正常路径下
+            // 按 conversation_id 覆写、每会话最多一个，删掉的会话会留下残渣 —— 一并 GC。
+            || (name.starts_with("kivio-extsys-") && name.ends_with(".md"))
             || (name.starts_with("kivio-bash-") && name.ends_with(".log"))
             || (name.starts_with(crate::native_tools::BG_CMD_LOG_PREFIX) && name.ends_with(".log"));
         if !is_orphan {

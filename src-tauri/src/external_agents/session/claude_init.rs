@@ -61,6 +61,28 @@ pub fn context_window_from_claude_resolved_model(resolved: &str) -> Option<u32> 
     None
 }
 
+/// 某个 `--model` **别名**对应的上下文窗口。
+///
+/// **只有带 `[1m]` / `[1M]` 标记的别名能给出窗口**；裸别名（`opus` / `sonnet` / `haiku` /
+/// `fable`）一律 `None`。
+///
+/// 改动原因（claude 2.1.220 本机 init 探测实测，2026-07-29）：
+/// ```text
+/// --model opus   -> claude-opus-4-8[1M]
+/// --model sonnet -> claude-sonnet-5[1M]
+/// --model fable  -> claude-fable-5[1M]
+/// --model haiku  -> claude-sonnet-5
+/// ```
+/// 即**裸别名解析出什么模型完全由 CLI 当时的版本决定**，4 个里有 3 个是 1M。
+/// 旧规则「在别名白名单里 ⇒ 200K」于是给出的是**小 5 倍的假分母**：`usage_ratio` 虚高 5 倍，
+/// 压缩阈值在真实占用只有 20% 时就触发。spec 第 14e 条：假分母比没有分母更有害。
+///
+/// **为什么不改成硬编码「opus/sonnet/fable = 1M」**：那只是把同一张会过期的表换个值——
+/// 下一个模型代次、`CLAUDE_CODE_MAX_CONTEXT_TOKENS` 环境覆盖、第三方 router 模型都会让它再错。
+/// 真正的分母来源是 CLI 自己实报的 `result.modelUsage[model].contextWindow`
+/// （见 `stream/claude.rs::context_window_from_model_usage`），它在**第一条回复之后**
+/// 就成为 `context_window_for_external_model` 的最高优先级来源。首轮之前显示「满度未知」
+/// 是诚实的代价，比一个错 5 倍的百分比好。
 pub fn context_window_from_claude_model_alias(alias: &str) -> Option<u32> {
     let alias = alias.trim();
     if alias.is_empty() || alias == "default" {
@@ -68,9 +90,6 @@ pub fn context_window_from_claude_model_alias(alias: &str) -> Option<u32> {
     }
     if alias.to_ascii_lowercase().contains("[1m]") {
         return Some(1_000_000);
-    }
-    if CLAUDE_MODEL_ALIASES.contains(&alias) {
-        return Some(200_000);
     }
     None
 }
@@ -378,11 +397,21 @@ mod tests {
             context_window_from_claude_model_alias("sonnet[1m]"),
             Some(1_000_000)
         );
-        assert_eq!(
-            context_window_from_claude_model_alias("sonnet"),
-            Some(200_000)
-        );
+        // 裸别名一律 None。本机实测（claude 2.1.220）`--model sonnet` 解析为
+        // `claude-sonnet-5[1M]`、`opus` → `claude-opus-4-8[1M]`、`fable` → `claude-fable-5[1M]`，
+        // 只有 `haiku` → `claude-sonnet-5`。旧规则「白名单里 ⇒ 200K」于是 4 个里错 3 个，
+        // 且是**小 5 倍的假分母**（压缩阈值在 20% 就触发）。真正的分母走 CLI 实报的
+        // `result.modelUsage[model].contextWindow`。
+        assert_eq!(context_window_from_claude_model_alias("sonnet"), None);
+        assert_eq!(context_window_from_claude_model_alias("opus"), None);
+        assert_eq!(context_window_from_claude_model_alias("haiku"), None);
+        assert_eq!(context_window_from_claude_model_alias("fable"), None);
         assert_eq!(context_window_from_claude_model_alias("default"), None);
+        // 大写 `[1M]`（CLI 实际输出的形态）同样要认。
+        assert_eq!(
+            context_window_from_claude_model_alias("opus[1M]"),
+            Some(1_000_000)
+        );
     }
 
     #[test]
@@ -390,7 +419,9 @@ mod tests {
         let opus = catalog_model_option("opus");
         assert_eq!(opus.id, "opus");
         assert_eq!(opus.label, "Opus");
-        assert_eq!(opus.context_window_tokens, Some(200_000));
+        // 裸别名的窗口未知（见 context_window_from_claude_model_alias 的实测说明）：
+        // 编一个 200K 会让 `usage_ratio` 虚高 5 倍。
+        assert_eq!(opus.context_window_tokens, None);
 
         let sonnet_1m = catalog_model_option("sonnet[1m]");
         assert_eq!(sonnet_1m.id, "sonnet[1m]");
@@ -401,11 +432,16 @@ mod tests {
     #[test]
     fn full_catalog_covers_every_alias_without_spawn() {
         // Every alias must yield a catalog entry — discovery no longer probes per alias.
+        // 窗口**不强制有值**：裸别名的窗口只有 CLI 自己知道（首轮 result 的 modelUsage 才报）。
         for &alias in CLAUDE_MODEL_ALIASES {
             let option = catalog_model_option(alias);
             assert_eq!(option.id, alias);
             assert!(!option.label.is_empty());
-            assert!(option.context_window_tokens.is_some());
+            if alias.to_ascii_lowercase().contains("[1m]") {
+                assert_eq!(option.context_window_tokens, Some(1_000_000), "{alias}");
+            } else {
+                assert_eq!(option.context_window_tokens, None, "{alias}");
+            }
         }
     }
 
