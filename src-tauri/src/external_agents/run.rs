@@ -601,12 +601,13 @@ pub async fn run_external_cli_reply(
             let classified =
                 crate::external_agents::errors::classify(err, exit_code, &stderr_output, &agent_id);
             let bubble = classified.render_bubble();
-            if content.trim().is_empty() {
-                content = bubble;
-            } else {
-                content.push_str("\n\n");
-                content.push_str(&bubble);
-            }
+            append_final_text(
+                &mut content,
+                &mut segments,
+                &mut segment_order,
+                tool_calls.len(),
+                &bubble,
+            );
             error_rendered = true;
         }
     } else if nonzero_exit_is_a_failure(exit_code, protocol_completed) {
@@ -618,28 +619,37 @@ pub async fn run_external_cli_reply(
     // Fill empty content from the richest available fallback: captured raw stdout lines first,
     // then stderr (as an explicit failure), then the slash / no-output placeholders.
     if !error_rendered && content.trim().is_empty() {
-        if !raw_output.trim().is_empty() {
-            content = raw_output.trim().to_string();
+        let fallback = if !raw_output.trim().is_empty() {
+            raw_output.trim().to_string()
         } else if !stderr_output.trim().is_empty() {
             stream_outcome = "error".to_string();
-            content = format!(
+            format!(
                 "{} 执行失败：\n\n{}",
                 def.name,
                 truncate_for_preview(stderr_output.trim(), 4000)
-            );
+            )
         } else if stream_outcome == "completed" {
             if is_slash {
-                content = format!("{} 命令已执行", def.name);
+                format!("{} 命令已执行", def.name)
             } else {
                 stream_outcome = "error".to_string();
-                content = format!(
+                format!(
                     "{} 未产生输出（exit={:?}，耗时 {}ms）",
                     def.name,
                     exit_code,
                     started_at.elapsed().as_millis()
-                );
+                )
             }
-        }
+        } else {
+            String::new()
+        };
+        append_final_text(
+            &mut content,
+            &mut segments,
+            &mut segment_order,
+            tool_calls.len(),
+            &fallback,
+        );
     }
 
     // A nonzero exit with stderr is a failure even if the CLI also produced some stdout — append
@@ -652,14 +662,18 @@ pub async fn run_external_cli_reply(
     {
         stream_outcome = "error".to_string();
         if !content.contains(stderr_output.trim()) {
-            if !content.trim().is_empty() {
-                content.push_str("\n\n");
-            }
-            content.push_str(&format!(
+            let tail = format!(
                 "{} stderr：\n\n{}",
                 def.name,
                 truncate_for_preview(stderr_output.trim(), 4000)
-            ));
+            );
+            append_final_text(
+                &mut content,
+                &mut segments,
+                &mut segment_order,
+                tool_calls.len(),
+                &tail,
+            );
         }
     }
 
@@ -758,7 +772,7 @@ impl StreamSegmentTracker {
         tool_calls_len: usize,
         delta: &str,
     ) -> ChatMessageSegment {
-        let phase = text_phase_for_tool_count(tool_calls_len);
+        let phase = segment_phase_for_tool_count(&kind, tool_calls_len);
         let active = match kind {
             ChatMessageSegmentKind::Reasoning => &mut self.active_reasoning_idx,
             _ => &mut self.active_text_idx,
@@ -1678,12 +1692,59 @@ async fn connect_persistent_session(
     }
 }
 
-fn text_phase_for_tool_count(tool_calls_len: usize) -> ChatMessageSegmentPhase {
+/// 文本 / 推理分段的 phase。
+///
+/// **文本段绝不能标 ToolLoop。** 落库时 `message.content` 是由
+/// `chat::commands::messages::content_from_segments` 从分段反算出来的，而那把尺只认
+/// `Plain | Synthesis` 的文本段；外部 CLI 这边的 `content` 却是**所有** `TextDelta` 的累加。
+/// 一旦工具之后的正文被标成 ToolLoop，那把尺就看不见它 → `normalize_assistant_segments`
+/// 判定「有正文但没有任何分段覆盖」→ 再补一条同文案的 Synthesis 段 → 气泡里正文渲染两遍。
+/// 所以调过工具之后的正文标 `Synthesis`（语义也对：那就是工具跑完后的汇报），与内置路径
+/// `chat/agent/planning.rs` 里「正文段必须是 Plain|Synthesis」的约定一致。
+///
+/// 推理段不受这条约束（`reasoning_from_segments` 不看 phase），保持原有 ToolLoop 语义。
+pub(crate) fn segment_phase_for_tool_count(
+    kind: &ChatMessageSegmentKind,
+    tool_calls_len: usize,
+) -> ChatMessageSegmentPhase {
     if tool_calls_len == 0 {
-        ChatMessageSegmentPhase::Plain
-    } else {
-        ChatMessageSegmentPhase::ToolLoop
+        return ChatMessageSegmentPhase::Plain;
     }
+    match kind {
+        ChatMessageSegmentKind::Reasoning => ChatMessageSegmentPhase::ToolLoop,
+        _ => ChatMessageSegmentPhase::Synthesis,
+    }
+}
+
+/// 把一段「轮末补充文案」（分类错误气泡 / stderr / 占位文案）**同时**写进 `content` 和
+/// `segments`。两者必须一起长：读流结束后单独往 `content` 上拼字符串，会让
+/// 「正文」与「被 `content_from_segments` 认可的分段文字」对不上——落库时要么正文被
+/// 渲染两遍（正文一条分段都没覆盖时），要么这段补充文案被整段丢掉（已有分段覆盖时）。
+fn append_final_text(
+    content: &mut String,
+    segments: &mut Vec<ChatMessageSegment>,
+    segment_order: &mut u32,
+    tool_calls_len: usize,
+    text: &str,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if !content.trim().is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str(text);
+    *segment_order += 1;
+    segments.push(ChatMessageSegment {
+        id: format!("seg_{}", Uuid::new_v4()),
+        kind: ChatMessageSegmentKind::Text,
+        phase: segment_phase_for_tool_count(&ChatMessageSegmentKind::Text, tool_calls_len),
+        order: *segment_order,
+        step_number: None,
+        round: None,
+        text: Some(text.to_string()),
+        tool_call_id: None,
+    });
 }
 
 fn push_tool_segment(
@@ -2526,7 +2587,81 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].text.as_deref(), Some("before"));
         assert_eq!(segments[1].text.as_deref(), Some("after"));
-        assert_eq!(after.phase, ChatMessageSegmentPhase::ToolLoop);
+        // 工具之后的**正文**必须是 Synthesis：`content` 累加了所有 TextDelta，正文段标
+        // ToolLoop 会让落库的 normalize 以为正文没落段而再补一条 → 气泡显示两遍。
+        assert_eq!(after.phase, ChatMessageSegmentPhase::Synthesis);
+    }
+
+    #[test]
+    fn stream_segment_tracker_keeps_reasoning_in_tool_loop_phase() {
+        // 推理段不参与正文口径（reasoning_from_segments 不看 phase），保持 ToolLoop 语义。
+        let mut segments = Vec::new();
+        let mut order = 0u32;
+        let mut tracker = StreamSegmentTracker::default();
+
+        let thinking = tracker.append(
+            ChatMessageSegmentKind::Reasoning,
+            &mut segments,
+            &mut order,
+            2,
+            "还得再看一眼",
+        );
+
+        assert_eq!(thinking.phase, ChatMessageSegmentPhase::ToolLoop);
+    }
+
+    #[test]
+    fn append_final_text_grows_content_and_segments_together() {
+        // 轮末补充文案（错误气泡 / stderr / 占位）必须同时进 `content` 和 `segments`：
+        // 只拼 `content` 的话，落库时要么正文重复、要么这段补充文案被整段丢掉。
+        let mut content = String::from("已创建 dup.md。");
+        let mut segments = vec![ChatMessageSegment {
+            id: "seg_answer".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::Synthesis,
+            order: 3,
+            step_number: None,
+            round: Some(1),
+            text: Some("已创建 dup.md。".to_string()),
+            tool_call_id: None,
+        }];
+        let mut order = 3u32;
+
+        append_final_text(&mut content, &mut segments, &mut order, 1, "claude stderr：boom");
+
+        assert_eq!(content, "已创建 dup.md。\n\nclaude stderr：boom");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].text.as_deref(), Some("claude stderr：boom"));
+        assert_eq!(segments[1].kind, ChatMessageSegmentKind::Text);
+        assert_eq!(segments[1].phase, ChatMessageSegmentPhase::Synthesis);
+        assert_eq!(segments[1].order, 4);
+    }
+
+    #[test]
+    fn append_final_text_ignores_blank_text() {
+        let mut content = String::new();
+        let mut segments = Vec::new();
+        let mut order = 0u32;
+
+        append_final_text(&mut content, &mut segments, &mut order, 0, "   \n ");
+
+        assert!(content.is_empty());
+        assert!(segments.is_empty());
+        assert_eq!(order, 0);
+    }
+
+    #[test]
+    fn append_final_text_on_empty_content_starts_a_plain_segment() {
+        // 没有工具的一轮（例如斜杠命令占位文案）：正文段是 Plain，同样被正文口径认可。
+        let mut content = String::new();
+        let mut segments = Vec::new();
+        let mut order = 0u32;
+
+        append_final_text(&mut content, &mut segments, &mut order, 0, "claude 命令已执行");
+
+        assert_eq!(content, "claude 命令已执行");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].phase, ChatMessageSegmentPhase::Plain);
     }
 
     // ---- Persistent-session retry policy (R3 / R4) ----

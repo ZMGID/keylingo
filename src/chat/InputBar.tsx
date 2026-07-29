@@ -25,12 +25,11 @@ import {
   TextQuote,
   Wrench,
   X,
-  Zap,
 } from 'lucide-react'
 import { ChatAttachments } from './ChatAttachments'
 import { SourcesButton } from './SourcesButton'
 import { onComposerInsert, onComposerTextInsert } from './composerInsert'
-import { draftKey, getComposerDraft, setComposerDraft } from './composerDraft'
+import { draftKey, getComposerDraft, migrateNewChatDraft, setComposerDraft } from './composerDraft'
 import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
 import { GitStatusPill } from './dock/GitStatusPill'
@@ -48,6 +47,7 @@ import {
   type SlashSkill,
 } from './slashCommands'
 import { mapExternalCliSlashCommands, externalCliAgentLabel } from './externalCliSlashCommands'
+import type { ModeOption, ModeTone } from './permissionModes'
 import { isTauriRuntime } from './utils'
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif']
@@ -269,43 +269,18 @@ function slashCommandIcon(command: SlashCommandDefinition) {
   }
 }
 
-const AGENT_MODE_OPTIONS: {
-  mode: AgentPlanMode
-  label: string
-  description: string
-  icon: typeof Zap
-}[] = [
-  {
-    mode: 'act',
-    label: 'Act',
-    description: '普通模式 · Normal',
-    icon: Zap,
-  },
-  {
-    mode: 'plan',
-    label: 'Plan',
-    description: '计划模式 · Enter plan mode',
-    icon: ListChecks,
-  },
-  {
-    mode: 'orchestrate',
-    label: 'Orchestrate',
-    description: '主动派 Subagent · Proactive subagents',
-    icon: Network,
-  },
-]
-
-// pill 颜色呼应输入框边框：Act=neutral、Plan=emerald、Orchestrate=violet
-const AGENT_MODE_PILL_CLASS: Record<AgentPlanMode, { idle: string; iconColor: string }> = {
-  act: {
+// pill 颜色呼应输入框边框：Act=neutral、Plan=emerald、Orchestrate=violet。
+// 档位表由 Chat 传入（内置三档 / 本地 CLI 档位），这里只按 tone 取样式。
+const MODE_PILL_CLASS: Record<ModeTone, { idle: string; iconColor: string }> = {
+  neutral: {
     idle: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-300 dark:hover:bg-neutral-700/55',
     iconColor: 'text-neutral-500 dark:text-neutral-300',
   },
-  plan: {
+  emerald: {
     idle: 'text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-400/10',
     iconColor: 'text-emerald-500 dark:text-emerald-400',
   },
-  orchestrate: {
+  violet: {
     idle: 'text-violet-600 hover:bg-violet-500/10 dark:text-violet-400 dark:hover:bg-violet-400/10',
     iconColor: 'text-violet-500 dark:text-violet-400',
   },
@@ -418,8 +393,13 @@ interface InputBarProps {
   /** 多答模型集（会话级 reply_models / replyModels；0/1 个=单模型，≥2=一问多答） */
   replyModels?: ModelRef[]
   onChangeReplyModels?: (models: ModelRef[]) => void | Promise<void>
-  /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 左边 */
+  /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 右边 */
   contextSlot?: ReactNode
+  /** 底栏模式胶囊的档位表，由 Chat 算好传入（内置会话 = Kivio 三档；本地 CLI 会话 =
+   *  该 CLI 自己的沙盒/权限档位）。空表 = 无档位可选，胶囊整个不渲染。 */
+  modeOptions?: ModeOption[]
+  modeValue?: string
+  onModeChange?: (value: string) => void | Promise<void>
   /** Git 状态胶囊：Dock 解析出的工作目录；空则不渲染 */
   gitWorkdir?: string | null
   gitLang?: Lang
@@ -470,6 +450,9 @@ export function InputBar({
   replyModels = [],
   onChangeReplyModels,
   contextSlot,
+  modeOptions = [],
+  modeValue = '',
+  onModeChange,
   gitWorkdir = null,
   gitLang,
   onOpenGitPanel,
@@ -503,7 +486,11 @@ export function InputBar({
   const draftKeyRef = useRef(draftKeyValue)
   useEffect(() => {
     if (draftKeyRef.current === draftKeyValue) return
+    const prevKey = draftKeyRef.current
     draftKeyRef.current = draftKeyValue
+    // 新建会话刚落库拿到 id（切 plan/orchestrate 模式等会触发）：草稿跟着搬过去，
+    // 本地 state 已经是那份内容，直接返回，别当成「切到了另一条会话」把字清掉。
+    if (migrateNewChatDraft(prevKey, draftKeyValue)) return
     const d = getComposerDraft(draftKeyValue)
     setInput(d?.input ?? '')
     setQuotes(d?.quotes ?? [])
@@ -522,14 +509,13 @@ export function InputBar({
     selectedProject ?? (conversationProject?.name ? conversationProject : null)
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
-  const modeEntryEnabled = Boolean(onAgentPlanModeChange)
+  const modeEntryEnabled = Boolean(onModeChange) && modeOptions.length > 0
   // 状态条只放「你在哪」—— 当前项目。Git 分支/diff 归下面的工具栏（状态类信息
   // 但用户要求贴着动作区）；知识库挂载数在来源弹层里管理，不上条。
   const gitStatusEnabled = Boolean(gitWorkdir && gitLang && onOpenGitPanel)
   const statusBarVisible = Boolean(projectEntryEnabled && effectiveProject)
-  const activeModeOption = AGENT_MODE_OPTIONS.find((option) => option.mode === agentPlanMode)
-    ?? AGENT_MODE_OPTIONS[0]
-  const activeModePillClass = AGENT_MODE_PILL_CLASS[agentPlanMode]
+  const activeModeOption = modeOptions.find((option) => option.value === modeValue) ?? modeOptions[0]
+  const activeModePillClass = MODE_PILL_CLASS[activeModeOption?.tone ?? 'neutral']
 
   const closeProjectMenu = useCallback(() => {
     setProjectMenuOpen(false)
@@ -651,6 +637,12 @@ export function InputBar({
     textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden'
   }, [])
 
+  // 高度/滚动条是 input 的纯函数，统一在这里跟。原来每条改 input 的路径各自补一次
+  // requestAnimationFrame(updateTextareaHeight)，草稿回填那条（见上方 draftKeyValue effect）
+  // 漏了 —— 切走再切回时框子还留着上一条会话的高度且 overflowY:hidden，下半截文本看不到也滚不动。
+  // 用 layout effect 而非 rAF：DOM 提交后、绘制前跑完，不闪；也不必在每个 setInput 后手动记得调。
+  useLayoutEffect(updateTextareaHeight, [input, updateTextareaHeight])
+
   // 消息区「添加到聊天」：把选中文字作为引用卡片挂到输入框上方（发送时才拼进正文）。
   const insertQuoteFromSelection = useCallback((text: string) => {
     const trimmed = text.trim()
@@ -675,9 +667,8 @@ export function InputBar({
         textarea.selectionStart = textarea.value.length
         textarea.selectionEnd = textarea.value.length
       }
-      updateTextareaHeight()
     })
-  }, [updateTextareaHeight])
+  }, [])
 
   useEffect(() => onComposerTextInsert(insertTextAtEnd), [insertTextAtEnd])
 
@@ -755,7 +746,6 @@ export function InputBar({
     const token = activeSlashToken
     if (!token) {
       setInput('')
-      requestAnimationFrame(updateTextareaHeight)
       return
     }
 
@@ -766,11 +756,10 @@ export function InputBar({
         if (!textarea) return
         textarea.selectionStart = Math.min(token.start, next.length)
         textarea.selectionEnd = Math.min(token.start, next.length)
-        updateTextareaHeight()
       })
       return next
     })
-  }, [activeSlashToken, updateTextareaHeight])
+  }, [activeSlashToken])
 
   const completeActiveSlashToken = useCallback((command: SlashCommandDefinition) => {
     const token = activeSlashToken
@@ -785,7 +774,6 @@ export function InputBar({
         textarea.focus({ preventScroll: true })
         textarea.selectionStart = cursor
         textarea.selectionEnd = cursor
-        updateTextareaHeight()
       })
       return next
     })
@@ -795,7 +783,7 @@ export function InputBar({
       query: command.slash.slice(1),
     })
     setSlashPanelOpen(true)
-  }, [activeSlashToken, updateTextareaHeight])
+  }, [activeSlashToken])
 
   // Skill commands complete to `/name ` (trailing space) and close the popover
   // so the user types arguments; the whole string is sent on Enter and parsed
@@ -814,13 +802,12 @@ export function InputBar({
         textarea.focus({ preventScroll: true })
         textarea.selectionStart = cursor
         textarea.selectionEnd = cursor
-        updateTextareaHeight()
       })
       return next
     })
     setActiveSlashToken(null)
     setSlashPanelOpen(false)
-  }, [activeSlashToken, updateTextareaHeight])
+  }, [activeSlashToken])
 
   const selectedSlashCommand = filteredSlashCommands[slashSelectedIndex]
     ?? filteredSlashCommands[0]
@@ -868,19 +855,36 @@ export function InputBar({
     })
   }, [agentPlanMode, closeModeMenu, closeProjectMenu, disabled, onAgentPlanModeChange])
 
+  // 模式胶囊选档：档位表由 Chat 决定（内置三档 / 本地 CLI 档位），这里只回传选中的 value。
+  const pickMode = useCallback(async (value: string) => {
+    if (disabled || !onModeChange) return
+    setSlashPanelOpen(false)
+    setToolPanelOpen(false)
+    closeProjectMenu()
+    closeModeMenu()
+    if (value !== modeValue) {
+      await onModeChange(value)
+    }
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true })
+    })
+  }, [closeModeMenu, closeProjectMenu, disabled, modeValue, onModeChange])
+
   const toggleModeMenu = useCallback(() => {
-    if (disabled || !onAgentPlanModeChange) return
+    if (disabled || !modeEntryEnabled) return
     setSlashPanelOpen(false)
     setToolPanelOpen(false)
     closeProjectMenu()
     setModeMenuOpen((open) => !open)
-  }, [closeProjectMenu, disabled, onAgentPlanModeChange])
+  }, [closeProjectMenu, disabled, modeEntryEnabled])
 
-  const toggleAgentPlanMode = useCallback(async () => {
-    const next: AgentPlanMode =
-      agentPlanMode === 'act' ? 'plan' : agentPlanMode === 'plan' ? 'orchestrate' : 'act'
-    await setAgentPlanMode(next)
-  }, [agentPlanMode, setAgentPlanMode])
+  // Shift+Tab 在胶囊当前那套档位里循环，跟看得见的控件保持一致。
+  const cycleMode = useCallback(async () => {
+    if (modeOptions.length === 0) return
+    const index = modeOptions.findIndex((option) => option.value === modeValue)
+    const next = modeOptions[(index + 1) % modeOptions.length]
+    await pickMode(next.value)
+  }, [modeOptions, modeValue, pickMode])
 
   const openAttachmentPicker = useCallback(async () => {
     if (disabled) return
@@ -926,7 +930,6 @@ export function InputBar({
         textarea.focus({ preventScroll: true })
         textarea.selectionStart = 1
         textarea.selectionEnd = 1
-        updateTextareaHeight()
       })
       return
     }
@@ -945,7 +948,6 @@ export function InputBar({
         setInput('')
         setAttachments([])
         setAttachmentError('')
-        requestAnimationFrame(updateTextareaHeight)
         await onNewChat?.()
         return
       case 'compact':
@@ -955,7 +957,6 @@ export function InputBar({
         setInput('')
         setAttachments([])
         setAttachmentError('')
-        requestAnimationFrame(updateTextareaHeight)
         await onClearChat?.()
         return
       case 'settings':
@@ -985,7 +986,6 @@ export function InputBar({
     removeActiveSlashToken,
     setAgentPlanMode,
     closeProjectMenu,
-    updateTextareaHeight,
   ])
 
   const handleSend = () => {
@@ -1014,9 +1014,9 @@ export function InputBar({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return
 
-    if (e.key === 'Tab' && e.shiftKey && onAgentPlanModeChange && !disabled) {
+    if (e.key === 'Tab' && e.shiftKey && modeEntryEnabled && !disabled) {
       e.preventDefault()
-      void toggleAgentPlanMode()
+      void cycleMode()
       return
     }
 
@@ -1070,11 +1070,8 @@ export function InputBar({
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const nextValue = e.target.value
     setInput(nextValue)
-    const el = e.target
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
-    el.style.overflowY = el.scrollHeight > 160 ? 'auto' : 'hidden'
-    syncSlashToken(nextValue, el.selectionStart)
+    // 高度/滚动条由 input 的 layout effect 统一跟，这里不再内联量一遍。
+    syncSlashToken(nextValue, e.target.selectionStart)
   }
 
   const handleSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
@@ -1741,7 +1738,12 @@ export function InputBar({
                 : 'Ask me anything...'
             }
             rows={1}
-            className="block max-h-40 min-h-[28px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-10 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
+            /* 宽度用 calc 收 28px（= 发送键 28 宽 + right-2 的 8 − 与滚动条留的 4px 呼吸）而不是
+               w-full + pr-*：滚动条长在**盒子右边缘**，padding 挡不住它，只有把盒子本身收窄
+               才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
+               不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
+               custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
+            className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
           />
 
           {/* 发送 / 停止：绝对定位在输入框右侧。用 inset-y-0 + my-auto 让浏览器按容器
@@ -1868,14 +1870,7 @@ export function InputBar({
             )}
 
             <div className="ml-auto flex items-center gap-1.5">
-            {/* 注入 anchorRef/placement：上下文弹层与项目/知识库/MCP 共用容器锚点与翻转方向 */}
-            {isValidElement<{ anchorRef?: RefObject<HTMLDivElement | null>; placement?: 'up' | 'down' }>(contextSlot)
-              ? cloneElement(contextSlot, {
-                  anchorRef: innerRef,
-                  placement: layout === 'inline' ? 'down' : 'up',
-                })
-              : contextSlot}
-            {modeEntryEnabled && (
+            {modeEntryEnabled && activeModeOption && (
               <div className="relative shrink-0 self-center">
                 <button
                   type="button"
@@ -1914,16 +1909,16 @@ export function InputBar({
                       data-tauri-drag-region="false"
                       role="menu"
                     >
-                      {AGENT_MODE_OPTIONS.map((option) => {
-                        const active = option.mode === agentPlanMode
+                      {modeOptions.map((option) => {
+                        const active = option.value === modeValue
                         const Icon = option.icon
                         return (
                           <button
-                            key={option.mode}
+                            key={option.value}
                             type="button"
                             role="menuitemradio"
                             aria-checked={active}
-                            onClick={() => void setAgentPlanMode(option.mode)}
+                            onClick={() => void pickMode(option.value)}
                             className={`kv-menu-row transition-colors ${
                               active
                                 ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
@@ -1933,13 +1928,15 @@ export function InputBar({
                             <Icon
                               size={14}
                               strokeWidth={1.8}
-                              className={`shrink-0 ${AGENT_MODE_PILL_CLASS[option.mode].iconColor}`}
+                              className={`shrink-0 ${MODE_PILL_CLASS[option.tone].iconColor}`}
                             />
                             <span className="min-w-0 flex-1 leading-tight">
                               <span className="block truncate text-[12px] font-semibold">{option.label}</span>
-                              <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
-                                {option.description}
-                              </span>
+                              {option.description && (
+                                <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
+                                  {option.description}
+                                </span>
+                              )}
                             </span>
                             {active && (
                               <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />
@@ -1952,6 +1949,14 @@ export function InputBar({
                 )}
               </div>
             )}
+
+            {/* 注入 anchorRef/placement：上下文弹层与项目/知识库/MCP 共用容器锚点与翻转方向 */}
+            {isValidElement<{ anchorRef?: RefObject<HTMLDivElement | null>; placement?: 'up' | 'down' }>(contextSlot)
+              ? cloneElement(contextSlot, {
+                  anchorRef: innerRef,
+                  placement: layout === 'inline' ? 'down' : 'up',
+                })
+              : contextSlot}
 
             {/* 发送 / 停止已移进输入框右端（见 textarea 同级的 chat-composer-send-slot）。 */}
             </div>

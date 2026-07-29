@@ -31,6 +31,7 @@ import { ModelSelector } from './ModelSelector'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
 import { PermissionPicker } from './PermissionPicker'
+import { derivePermissionModes, useDetectedExternalAgents } from './permissionModes'
 import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
 import { ContextIndicator } from './ContextIndicator'
 import { AgentTodoIndicator } from './AgentTodoIndicator'
@@ -1111,6 +1112,21 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [currentConversation, draftAgentRuntime],
   )
   const usesExternalRuntime = activeAgentRuntime.kind === 'external' && !!activeAgentRuntime.externalAgentId
+  // 底栏模式胶囊的档位表：内置会话 = Kivio 的 Act/Plan/Orchestrate；本地 CLI 会话 = 该 CLI
+  // 自己的沙盒/权限档位（Kivio 三档对外部 CLI 不生效）。CLI 没有档位时返回空表 → 胶囊隐藏。
+  const detectedExternalAgents = useDetectedExternalAgents(currentConversation?.id ?? null)
+  const activeAgentPlanMode = currentConversation?.agent_plan_state?.mode
+    ?? currentConversation?.agentPlanState?.mode
+    ?? 'act'
+  const composerModes = useMemo(
+    () => derivePermissionModes({
+      target: 'composer',
+      agentRuntime: activeAgentRuntime,
+      agents: detectedExternalAgents,
+      agentPlanMode: activeAgentPlanMode,
+    }),
+    [activeAgentRuntime, detectedExternalAgents, activeAgentPlanMode],
+  )
   const currentConversationIsBlank = isPlainBlankConversation(currentConversation)
   const activeProviderId = currentConversation && !currentConversationIsBlank
     ? currentConversation.provider_id
@@ -3214,6 +3230,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     await handleRuntimeChange(next)
   }, [activeAgentRuntime, handleRuntimeChange])
 
+  // 底栏胶囊选档：本地 CLI 会话写该 CLI 的沙盒档位，内置会话写 Kivio 的 Act/Plan/Orchestrate。
+  const handleComposerModeChange = useCallback(async (value: string) => {
+    if (usesExternalRuntime) {
+      await handleExternalSandboxChange(value)
+      return
+    }
+    await handleAgentPlanModeChange(value as AgentPlanMode)
+  }, [handleAgentPlanModeChange, handleExternalSandboxChange, usesExternalRuntime])
+
   const handleModelChange = useCallback(async (providerId: string, model: string) => {
     setDraftProviderId(providerId)
     setDraftModel(model)
@@ -3660,8 +3685,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         <div className="shrink-0" data-tauri-drag-region="false">
           <PermissionPicker
             agentRuntime={activeAgentRuntime}
-            conversationId={currentConversation?.id}
-            onSandboxChange={handleExternalSandboxChange}
             approvalPolicy={approvalPolicy}
             onApprovalPolicyChange={handleApprovalPolicyChange}
           />
@@ -3941,6 +3964,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       gitWorkdir={dockWorkdir || null}
                       gitLang={uiLang}
                       onOpenGitPanel={handleOpenDockGit}
+                      modeOptions={composerModes.options}
+                      modeValue={composerModes.current}
+                      onModeChange={handleComposerModeChange}
                     />
                     </div>
                   </div>
@@ -4094,6 +4120,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     gitWorkdir={dockWorkdir || null}
                     gitLang={uiLang}
                     onOpenGitPanel={handleOpenDockGit}
+                    modeOptions={composerModes.options}
+                    modeValue={composerModes.current}
+                    onModeChange={handleComposerModeChange}
                   />
                     </>
                   )}
