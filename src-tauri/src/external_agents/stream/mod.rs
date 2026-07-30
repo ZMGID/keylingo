@@ -129,28 +129,17 @@ pub fn usage_from_parts(parts: CliUsageParts) -> ModelUsage {
     }
 }
 
-/// 只有 input/output 两个数时的便捷构造（无 cache 概念的上报路径）。
-///
-/// 本轮修复后**生产代码已无调用点**——四个 CLI（claude/codex/pi/ACP）全部改走
-/// `usage_from_parts` 以带上 cache。保留它是因为「某 CLI 只报两个数」是完全合理的
-/// 未来形态，届时不该再手写一遍 `CliUsageParts`；同时它也是 `usage_from_parts`
-/// 在无 cache 输入下的行为锚点（见下方单测）。
-#[allow(dead_code)]
-pub fn usage_from_numbers(input: u64, output: u64) -> ModelUsage {
-    usage_from_parts(CliUsageParts {
-        input,
-        output,
-        ..Default::default()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn usage_from_numbers_totals_input_and_output() {
-        let usage = usage_from_numbers(5, 7);
+        let usage = usage_from_parts(CliUsageParts {
+            input: 5,
+            output: 7,
+            ..Default::default()
+        });
         assert_eq!(usage.input_tokens, Some(5));
         assert_eq!(usage.output_tokens, Some(7));
         assert_eq!(usage.total_tokens, Some(12));

@@ -30,9 +30,6 @@ use crate::state::AppState;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(360);
 /// 轮询间隔——调试用途，延迟无所谓。
 const POLL_INTERVAL: Duration = Duration::from_millis(700);
-/// result 里每个 segment 回传的正文上限：分段用来断言**顺序与阶段**，不需要全文
-/// （全文已经在 `answer` / `reasoning` 里）。
-const SEGMENT_TEXT_PREVIEW_CHARS: usize = 600;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,8 +98,9 @@ struct ProbeToolCall {
     status: ToolCallStatus,
 }
 
-/// 消息分段投影：断言的是**顺序与阶段**（正文 / 推理 / 工具卡的相对位置），
-/// 正文只给前 [`SEGMENT_TEXT_PREVIEW_CHARS`] 个字符（全文在 `answer` / `reasoning` 里）。
+/// 消息分段投影：只给**顺序与阶段**（正文 / 推理 / 工具卡的相对位置）。
+/// 不带正文也不带长度——全文在 `answer` 里，而「正文有没有重复」由
+/// `chat::commands::tests` 的单测守着，不必在这条通道上再保一遍。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProbeSegment {
@@ -111,8 +109,6 @@ struct ProbeSegment {
     order: u32,
     round: Option<u32>,
     tool_call_id: Option<String>,
-    text_length: usize,
-    text: Option<String>,
 }
 
 /// assistant 消息的 provider/CLI 实报用量，**全部字段**。
@@ -177,10 +173,6 @@ struct ProbeLiveSession {
     child_pid: Option<u32>,
     /// 这个进程已服过几轮（注册即 1，每次被复用 +1）。
     turns_served: Option<u32>,
-    /// 距上次活动的毫秒数（空闲回收判据 `is_idle` 用的就是它）。
-    idle_ms: Option<u64>,
-    agent_id: Option<String>,
-    cwd: Option<String>,
     /// 注册表里一共几个会话（每会话一个进程 + LRU 上限的观察点）。
     registry_size: usize,
 }
@@ -193,8 +185,6 @@ struct ProbeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     conversation_id: Option<String>,
     answer: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<String>,
     tool_calls: Vec<ProbeToolCall>,
     segments: Vec<ProbeSegment>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,7 +338,6 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
                 // 回传会话 id：下一次请求带上它就续聊同一会话（多轮验证的入口）。
                 conversation_id: Some(run.conversation_id.clone()),
                 answer: message.content.clone(),
-                reasoning: message.reasoning.clone(),
                 tool_calls: message
                     .tool_calls
                     .iter()
@@ -409,7 +398,6 @@ fn failed_result(
         id,
         conversation_id,
         answer: String::new(),
-        reasoning: None,
         tool_calls: Vec::new(),
         segments: Vec::new(),
         stream_outcome: None,
@@ -430,9 +418,6 @@ impl ProbeLiveSession {
             alive: false,
             child_pid: None,
             turns_served: None,
-            idle_ms: None,
-            agent_id: None,
-            cwd: None,
             registry_size: 0,
         }
     }
@@ -452,9 +437,6 @@ fn live_session_snapshot(state: &AppState, conversation_id: &str) -> ProbeLiveSe
             alive: !session.control.is_closed(),
             child_pid: session.child_pid,
             turns_served: Some(session.turns_served),
-            idle_ms: Some(session.last_activity.elapsed().as_millis() as u64),
-            agent_id: Some(session.agent_id.clone()),
-            cwd: Some(session.cwd.clone()),
             registry_size,
         },
         None => ProbeLiveSession {
@@ -472,12 +454,6 @@ fn probe_segment(segment: &ChatMessageSegment) -> ProbeSegment {
         order: segment.order,
         round: segment.round,
         tool_call_id: segment.tool_call_id.clone(),
-        text_length: text.chars().count(),
-        text: segment.text.as_ref().map(|_| {
-            text.chars()
-                .take(SEGMENT_TEXT_PREVIEW_CHARS)
-                .collect::<String>()
-        }),
     }
 }
 
@@ -569,7 +545,6 @@ mod tests {
             id: Some("t1".to_string()),
             conversation_id: None,
             answer: "ok".to_string(),
-            reasoning: None,
             tool_calls: vec![ProbeToolCall {
                 name: "glob".to_string(),
                 arguments: r#"{"pattern":"*.rs"}"#.to_string(),
@@ -651,7 +626,7 @@ mod tests {
             order: 7,
             step_number: None,
             round: Some(2),
-            text: Some("x".repeat(SEGMENT_TEXT_PREVIEW_CHARS + 50)),
+            text: Some("x".repeat(650)),
             tool_call_id: None,
         };
         let v = serde_json::to_value(probe_segment(&segment)).unwrap();
@@ -659,12 +634,7 @@ mod tests {
         assert_eq!(v["phase"], "tool_loop");
         assert_eq!(v["order"], 7);
         assert_eq!(v["round"], 2);
-        // 全长照实上报，正文本身截断。
-        assert_eq!(v["textLength"], SEGMENT_TEXT_PREVIEW_CHARS + 50);
-        assert_eq!(
-            v["text"].as_str().map(|s| s.chars().count()),
-            Some(SEGMENT_TEXT_PREVIEW_CHARS)
-        );
+        assert!(v.get("text").is_none());
     }
 
     #[test]

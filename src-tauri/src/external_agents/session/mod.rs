@@ -14,9 +14,6 @@ pub mod acp;
 pub mod claude_init;
 /// 常驻 `claude` 会话（B1）：一个会话一个进程。
 pub mod claude_stream;
-/// Real-machine probe for the persistent-session redesign (B1). `#[ignore]`d; see the module docs.
-#[cfg(test)]
-mod claude_persist_probe_tests;
 pub mod codex_app_server;
 pub mod live;
 pub mod pi_rpc;
@@ -82,10 +79,6 @@ pub fn resolve_agent_resume_context(
     resumes_via_cli: bool,
     instructions: &str,
     current_model: Option<&str>,
-    // 斜杠命令曾经要在这里特殊处理：换模型会丢弃会话，而 `/compact` 这类是对**当前**会话的元
-    // 操作，丢弃它等于把 slash 打进空上下文。既然换模型不再丢弃会话，这个参数就没有决策作用
-    // 了。保留形参只为不动调用点签名；下次动 run.rs 时可以一并删掉。
-    _is_slash: bool,
 ) -> AgentResumeContext {
     let delivered_model = normalize_model(current_model);
     if !resumes_via_cli {

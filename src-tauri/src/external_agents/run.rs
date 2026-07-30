@@ -201,7 +201,6 @@ pub async fn run_external_cli_reply(
         def.resumes_session_via_cli,
         &daemon_instructions,
         conversation.agent_runtime.external_model.as_deref(),
-        is_slash,
     );
 
     let skill_dir = skill_detail.as_ref().and_then(|d| d.meta.path.clone());

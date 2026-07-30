@@ -1578,6 +1578,42 @@ mod live_tests {
         close_and_cleanup(control, &workdir).await;
     }
 
+    /// 空闲不会把进程弄死：35s 没有任何输入之后，同一个会话仍然响应。
+    ///
+    /// 若这条红了，说明 CLI 会自行超时退出 ⇒ 常驻方案需要心跳（目前刻意没有心跳）。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "real-machine: spawns the installed claude CLI, needs login, costs tokens"]
+    async fn live_persistent_session_survives_an_idle_gap() {
+        let session_id = Uuid::new_v4().to_string();
+        let Some((control, workdir)) = connect_live(&session_id, None).await else {
+            return;
+        };
+
+        let warmup = one_turn(&control, "Reply with just the word READY.", false).await;
+        if warmup.result.is_err() {
+            eprintln!("SKIP: 热身轮失败（未登录 / 网络？）：{:?}", warmup.result);
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_secs(35)).await;
+
+        let after = one_turn(&control, "Reply with just the word DONE.", false).await;
+        eprintln!("post-idle: {}", after.text.trim());
+        assert!(
+            after.result.is_ok(),
+            "空闲 35s 后这一轮失败 ⇒ 进程自己超时退出了：{:?}",
+            after.result
+        );
+        assert!(
+            after.text.to_uppercase().contains("DONE"),
+            "空闲后回答是 {:?}",
+            after.text
+        );
+
+        close_and_cleanup(control, &workdir).await;
+    }
+
     /// **核心验收 2（整个改造的验收点）**：取消一轮之后，**同一个会话**下一轮仍然正常返回，
     /// 而且还记得取消之前那一轮建立的上下文。取消一次就废掉会话 ⇒ 常驻白做。
     #[tokio::test(flavor = "multi_thread")]
