@@ -67,19 +67,25 @@ fn usage_parts_all_zero(parts: &CliUsageParts) -> bool {
 /// 当前上下文占用 = **末项**。累加各项得到的是本轮的计费总量，不是窗口占用，
 /// 用它当分子会让进度条持续虚高。取首项则会漏掉本轮后续往返累积的上下文。
 ///
+/// **但 `iterations` 在 claude 2.1.220 上恒为 `[]`** —— 2026-07-30 本机实测，连
+/// **带工具调用的两次往返**那一轮也是空的（早前注释说「只在不调工具的轮次为空」，不成立）。
+/// 所以上面这条分支目前**跑不到**，留着只是为了这个字段哪天回来时口径仍然正确；
+/// 真正在干活的是下面的顶层回退 + 闸门。
+///
 /// **顶层回退带闸门**（`completed_result_turns == 0`，即本会话的第一个 `result`）：
-/// `usage` 顶层是本轮的**计费总量**（= 各 iteration 之和）。第一轮只有一次往返时它恰好
+/// `usage` 顶层是本轮的**计费总量**（= 各次往返之和）。第一轮只有一次往返时它恰好
 /// 等于上下文占用；从第二轮起（同一进程内）它既不是快照、也漏掉前面轮次已在窗口里的历史，
-/// 拿来当分子会持续虚高。实测 `iterations` 在**不调工具的轮次里恒为 `[]`**
-/// （claude 2.1.220），所以这个回退很常走 —— 正因为常走，才必须只在第一轮放行。
-/// 闸门关上时返回 `None`：那一轮的真实占用由 `message_start.message.usage` 上报
-/// （服务端算的、每次请求都有），比顶层计费总量准。
+/// 拿来当分子会持续虚高。实测第二轮（一次 Bash 工具调用 ⇒ 两次往返）顶层
+/// `cache_creation 41939 = 41791 + 148`（两次相加），据此算出 83,849，而真实占用
+/// 只有 ~42,054 —— **接近翻倍**。闸门关上时返回 `None`：那一轮的真实占用由
+/// `message_start.message.usage` 上报（服务端算的、每次请求都有），比顶层计费总量准。
 ///
 /// 注：B1（一个会话一个常驻进程）落地后这个闸门**真正开始生效** —— 同一个
 /// `ClaudeStreamState` 跨轮存活（`session/claude_stream.rs` 持有它），计数会真的往上涨。
 /// 也正因如此，`--include-partial-messages` 必须**始终开着**（`run.rs` 传
-/// `include_partial_messages: true`）：第 2 轮起 `iterations` 恒为 `[]` + 顶层被闸门拦住
-/// ⇒ 分子**完全依赖** `message_start.message.usage`，关掉那个 flag 用量条就没有分子了。
+/// `include_partial_messages: true`）：`iterations` 恒空 + 顶层被闸门拦住
+/// ⇒ 第 2 轮起分子**完全依赖** `message_start.message.usage`，关掉那个 flag
+/// 用量条就没有分子了。这个耦合比写下第一版注释时更硬，改 flag 前先看这里。
 fn claude_result_usage_snapshot(usage: &Value, completed_result_turns: u32) -> Option<&Value> {
     if let Some(last) = usage
         .get("iterations")
@@ -1981,6 +1987,47 @@ mod tests {
         let all = usages(&events);
         assert_eq!(all.len(), 1, "第二个 result 不该再报顶层用量：{events:?}");
         assert_eq!(all[0].total_tokens, Some(105));
+    }
+
+    /// **本机实测原文**（claude 2.1.220，2026-07-30）：第二轮调了一次 Bash ⇒ 两次模型往返，
+    /// `iterations` 依然是 `[]`，而顶层是两次相加的**计费总量**
+    /// （`cache_creation 41939 = 41791 + 148`）。
+    ///
+    /// 这条钉住的是**数量级**：顶层若被当成分子 ⇒ 4+115+41939+41791 = 83,849，
+    /// 而真实占用只有最后一次往返的 ~42,054，接近翻倍。所以两轮下来只能有一条 usage
+    /// （来自最后一条 `message_start`），且必须是 4 万量级、不是 8 万。
+    #[test]
+    fn tool_calling_second_turn_never_reports_the_billing_total() {
+        let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-1",
+               "usage":{"input_tokens":2,"cache_creation_input_tokens":39010,
+                        "cache_read_input_tokens":0,"output_tokens":1}}}}"#,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":7,
+               "cache_read_input_tokens":39010,"cache_creation_input_tokens":0,"iterations":[]}}"#,
+            // 第二轮第一次往返（发工具调用）
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-2",
+               "usage":{"input_tokens":2,"cache_creation_input_tokens":41791,
+                        "cache_read_input_tokens":0,"output_tokens":2}}}}"#,
+            // 第二轮第二次往返（读工具结果后作答）—— 这才是本轮结束时的真实占用
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-3",
+               "usage":{"input_tokens":2,"cache_creation_input_tokens":148,
+                        "cache_read_input_tokens":41791,"output_tokens":1}}}}"#,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":4,"output_tokens":115,
+               "cache_read_input_tokens":41791,"cache_creation_input_tokens":41939,
+               "iterations":[]}}"#,
+        ]);
+        let all = usages(&events);
+        let totals: Vec<_> = all.iter().filter_map(|u| u.total_tokens).collect();
+        // 第一轮：message_start 先到（39013），result 顶层回退放行再精修一次
+        // （2+7+39010 = 39019，首个 result 且只有一次往返，两者一致）。
+        // 第二轮：两次往返各一条 message_start，而 result 顶层被闸门拦住 ⇒ 不产出第五条。
+        assert_eq!(totals, vec![39_013, 39_019, 41_795, 41_942], "得到：{all:?}");
+        // 收尾值必须是最后一次往返的占用，而不是两次相加的计费总量。
+        assert_eq!(totals.last(), Some(&41_942));
+        assert!(
+            !totals.contains(&83_849),
+            "顶层计费总量泄漏成了分子（会让进度条接近翻倍）：{all:?}"
+        );
     }
 
     // ---- A8：分母来自 CLI 实报的 modelUsage.contextWindow ----
