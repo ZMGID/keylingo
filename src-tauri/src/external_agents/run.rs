@@ -905,7 +905,10 @@ where
     // 开始时写一次。不标的话清扫器/LRU 会在轮中把这条会话回收掉 —— 这一轮不会断，但轮末
     // 最后一个 sender 落地就把进程关了，下一轮白付一次冷启动（越重度使用越吃不到常驻）。
     // guard 落地即清，覆盖下面每条 `return`。
-    let _busy = state.mark_external_live_session_busy(conversation_id);
+    // guard 落地即清，覆盖下面每条 `return`。**轮内重连之后必须重挂**：`reconnect_fresh`
+    // 会往注册表塞一条全新的 `LiveSession`（`busy: false`），旧 guard 还指着旧会话的 Arc
+    // —— 不重挂的话，恰好是刚付过冷启动的那条路反而不受保护。
+    let mut busy = state.mark_external_live_session_busy(conversation_id);
 
     // At most one automatic fresh reconnect after a non-cancel / non-auth failure (R3), plus one
     // reconnect for a config change that only a relaunch can apply (R4 NeedsReconnect). Each is
@@ -992,6 +995,8 @@ where
             launch_config,
         )
         .await?;
+        // 新会话进了注册表 ⇒ 旧 guard 已经指不到它了，重挂一个（旧的在赋值时落地）。
+        busy = state.mark_external_live_session_busy(conversation_id);
         control = next_control;
         prompt = if resumed {
             reuse_prompt.to_string()
@@ -1498,17 +1503,30 @@ impl ApprovalHost<'_> {
 
     /// 扫掉本轮问过的挂起条目。异常出口（EOF / 硬 Close）下 `ask` 的 future 会被直接丢弃，
     /// 它没机会自己清理，不扫就在这张进程级的表里永久留一条。
+    ///
+    /// **同时要撤掉前端卡片**：`request_tool_approval` 只在自己的超时 / 取消分支里发撤回，
+    /// 而 future 被丢弃时那两条分支根本不执行。少了这一手，卡片会留在屏幕上，用户点
+    /// 「允许」是静默空操作（挂起条目已经被下面删掉了）—— 正是撤回事件本来要消灭的那个现象。
     fn forget(&self, tool_call_ids: &[String]) {
         if tool_call_ids.is_empty() {
             return;
         }
-        let mut pending = self
-            .state
-            .pending_chat_tool_approvals
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        {
+            let mut pending = self
+                .state
+                .pending_chat_tool_approvals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for id in tool_call_ids {
+                pending.remove(id);
+            }
+        }
         for id in tool_call_ids {
-            pending.remove(id);
+            crate::chat::commands::interaction::withdraw_tool_confirm(
+                self.app,
+                self.conversation_id,
+                id,
+            );
         }
     }
 }

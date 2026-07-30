@@ -651,7 +651,13 @@ pub fn run() {
                         state.mcp_disconnect_all(),
                     ));
                     if drained.is_err() {
-                        eprintln!("MCP disconnect timed out on exit; falling back to process kill.");
+                        // 超时说明某个会话锁拿不到（多半卡在握手里）。优雅关停这条路已经走不通，
+                        // 按 pid 杀进程树兜底 —— 否则那句「falling back to process kill」就是空话，
+                        // stdio 子进程（及它自己拉起的孙子）会留在系统里。
+                        let killed = state.kill_mcp_children_now();
+                        eprintln!(
+                            "MCP disconnect timed out on exit; killed {killed} stdio child process tree(s)."
+                        );
                     }
                     // 外部 CLI 会话：必须**同步**等它们关完。只 clear 掉 sender 是不够的
                     // —— actor 要等下一次被 poll 才会走 close()，而运行时马上就随进程走了，

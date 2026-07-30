@@ -223,6 +223,8 @@ fn make_session_id() -> String {
 
 /// 校验 workdir：必须存在且是目录；canonicalize 顺带解掉符号链接与相对分量，
 /// 保证 PTY 子进程的 cwd 与文件树 / Git 面板看到的目录一致。
+/// Windows 上 canonicalize 会带 `\\?\` 扩展长度前缀，CreateProcess 的
+/// lpCurrentDirectory 不认它（PowerShell 起来后 $PWD 变成 FileSystem:: 怪路径），必须摘掉。
 fn validate_workdir(workdir: &str) -> Result<std::path::PathBuf, String> {
     let trimmed = workdir.trim();
     if trimmed.is_empty() {
@@ -232,6 +234,15 @@ fn validate_workdir(workdir: &str) -> Result<std::path::PathBuf, String> {
     if !path.is_dir() {
         return Err(format!("workdir is not a directory: {}", path.display()));
     }
+    #[cfg(target_os = "windows")]
+    let path = {
+        let text = path.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            // UNC 形式 `\\?\UNC\server\share` 摘前缀会变成非法路径，保持原样。
+            Some(rest) if !rest.starts_with("UNC\\") => std::path::PathBuf::from(rest),
+            _ => path.clone(),
+        }
+    };
     Ok(path)
 }
 
@@ -271,6 +282,9 @@ fn create_session(
 
     let shell = resolve_shell(std::env::var("SHELL").ok().as_deref());
     let mut cmd = CommandBuilder::new(&shell);
+    // Windows 的 shell 一定是 pwsh/powershell：吞掉版权横幅，第一屏直接是提示符。
+    #[cfg(target_os = "windows")]
+    cmd.arg("-NoLogo");
     cmd.cwd(&cwd);
     // portable-pty 默认 TERM=dumb，starship 等提示符框架会直接罢工；
     // xterm.js 的能力对齐 xterm-256color。
@@ -496,6 +510,13 @@ mod tests {
         assert!(validate_workdir(file.to_string_lossy().as_ref()).is_err());
         let resolved = validate_workdir(dir.to_string_lossy().as_ref()).expect("dir valid");
         assert!(resolved.is_dir());
+        // Windows: CreateProcess 不认 `\\?\` 前缀，canonicalize 的结果必须已摘除。
+        #[cfg(target_os = "windows")]
+        assert!(
+            !resolved.to_string_lossy().starts_with(r"\\?\"),
+            "workdir leaked extended-length prefix: {}",
+            resolved.display()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

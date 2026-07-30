@@ -284,6 +284,32 @@ mod tests {
         assert!(LaunchConfig::default().accepts(&LaunchConfig::default()));
     }
 
+    /// 轮内重连之后，guard 必须重新挂到**新**会话上。
+    ///
+    /// `reconnect_fresh` 会往注册表塞一条全新的 `LiveSession`（`busy: false`），旧 guard 指着
+    /// 旧会话的 Arc。不重挂的话，恰好是刚付过一次冷启动的那条路反而会被清扫器/LRU 拆掉。
+    #[test]
+    fn a_new_session_needs_its_own_busy_guard() {
+        let (old_session, _rx1) = make("claude", "/proj");
+        let (new_session, _rx2) = make("claude", "/proj");
+
+        let old_guard = TurnBusyGuard::new(old_session.busy.clone());
+        assert!(!old_session.is_idle(Duration::from_secs(0)), "旧会话在飞");
+        // 新会话没被标记 ⇒ 立刻可回收。这正是重连后的真实状态。
+        assert!(
+            new_session.is_idle(Duration::from_secs(0)),
+            "新会话默认不 busy"
+        );
+
+        // 重挂之后新会话受保护；旧 guard 在赋值时落地，旧会话回到可回收。
+        let new_guard = TurnBusyGuard::new(new_session.busy.clone());
+        drop(old_guard);
+        assert!(old_session.is_idle(Duration::from_secs(0)), "旧 guard 落地即清");
+        assert!(!new_session.is_idle(Duration::from_secs(0)), "新会话现在在飞");
+        drop(new_guard);
+        assert!(new_session.is_idle(Duration::from_secs(0)), "guard 落地即清");
+    }
+
     #[test]
     fn is_idle_on_age_or_closed_channel() {
         // Fresh + open → not idle.

@@ -427,8 +427,8 @@ pub(crate) async fn request_tool_approval(
     }
 }
 
-/// 通知前端撤掉某条审批卡（已超时/已取消，答复不再有意义）。
-fn withdraw_tool_confirm(app: &AppHandle, conversation_id: &str, tool_call_id: &str) {
+/// 通知前端撤掉某条审批卡（已超时 / 已取消 / 询问方已经不在了，答复不再有意义）。
+pub(crate) fn withdraw_tool_confirm(app: &AppHandle, conversation_id: &str, tool_call_id: &str) {
     let _ = app.emit(
         "chat-tool-confirm-withdraw",
         serde_json::json!({

@@ -762,6 +762,34 @@ impl AppState {
     }
 }
 
+impl AppState {
+    /// 退出兜底：按 pid 杀掉所有 stdio MCP 子进程**及其进程树**，返回杀掉的条数。
+    ///
+    /// 只在 `mcp_disconnect_all` 超时后用（某个会话锁拿不到，优雅关停这条路走不通）。
+    /// 用 `try_lock`：此刻正是「锁拿不到」的场景，再等一次锁等于把退出继续挂住 ——
+    /// 拿不到锁的那条会话恰恰是最需要被杀的那条，所以退回读它的 pid 也不行，只能跳过。
+    ///
+    /// 杀树而不只杀直接子进程：MCP server 自己也可能拉起子进程（`npx` → node），
+    /// `kill_on_drop` 够不到孙子。
+    pub fn kill_mcp_children_now(&self) -> usize {
+        let sessions: Vec<Arc<Mutex<McpSession>>> = match self.mcp_sessions.try_lock() {
+            Ok(pool) => pool.values().cloned().collect(),
+            Err(_) => return 0,
+        };
+        let mut killed = 0;
+        for session in sessions {
+            let Ok(guard) = session.try_lock() else {
+                continue;
+            };
+            if let Some(pid) = guard.child_pid {
+                crate::native_tools::kill_process_group(pid);
+                killed += 1;
+            }
+        }
+        killed
+    }
+}
+
 /// 把一条已经从池里摘掉的会话关干净：标 Disconnected、摘 transport、关连接。
 async fn shutdown_session(session: &Arc<Mutex<McpSession>>) {
     let transport = {
