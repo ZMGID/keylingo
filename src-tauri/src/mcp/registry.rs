@@ -15,12 +15,9 @@ use crate::{
     state::AppState,
 };
 
-use super::{
-    client::{StdioMcpClient, StreamableHttpMcpClient},
-    types::{
-        list_native_builtin_tool_defs, mixer_generate_image_tool, native_skill_tools,
-        tool_definition_from_mcp, ChatToolDefinition, McpToolCallResult,
-    },
+use super::types::{
+    list_native_builtin_tool_defs, mixer_generate_image_tool, native_skill_tools,
+    tool_definition_from_mcp, ChatToolDefinition, McpToolCallResult,
 };
 
 #[derive(Debug, Clone)]
@@ -792,23 +789,22 @@ pub async fn call_tool(
     Ok(result)
 }
 
+/// 一次性列出某个 server 的工具。给设置页的「测试连接」按钮用 —— 测的是**还没保存**
+/// 的草稿配置，所以刻意不进连接池。
+///
+/// 整体套一层超时：rmcp 的握手本身不带超时，死服务器会把设置页挂死。这里取消 future
+/// 是安全的（连接建完就拆，握手和 tools/list 都是幂等读），和 `tools/call` 不同。
 async fn list_server_tools(
     http: &reqwest::Client,
     server: &ChatMcpServer,
     timeout_ms: u64,
 ) -> Result<Vec<ChatToolDefinition>, String> {
-    let tools = match server.transport.as_str() {
-        "streamable_http" => {
-            StreamableHttpMcpClient::new(server.clone(), timeout_ms, http.clone())
-                .list_tools()
-                .await?
-        }
-        _ => {
-            StdioMcpClient::new(server.clone(), timeout_ms)
-                .list_tools()
-                .await?
-        }
-    };
+    let tools = tokio::time::timeout(
+        Duration::from_millis(timeout_ms.max(1_000)),
+        super::conn::list_tools_once(server, http),
+    )
+    .await
+    .map_err(|_| format!("MCP connection to {} timed out", server.name))??;
     Ok(tools_from_mcp(server, tools))
 }
 

@@ -27,6 +27,7 @@ These guides help you **ask the right questions before coding**.
 | [出图接口路由执行契约](./image-generation-routing.md) | 出图端点路由单一事实源 resolve_image_route + 归一化 + 自愈 + 文字兜底；红线：不按模型名猜端点 | Touching `image_generation.rs` / 生图判定 / 新增出图 provider |
 | [对话生命周期 Hooks 执行契约](./conversation-hooks.md) | 调度在 Rust、fire-and-forget、零 Hook 零开销、RAII 事件配对、epoch 取消 | Touching `chat/hooks.rs`、loop/rounds 的 Hook 派发点、`HookDef`、Hooks 设置页 |
 | [子代理角色定义执行契约](./subagent-role-definitions.md) | 字段名照抄业界 `.md` 规范（禁自创方言）、先 deny 后 allow、零工具拒绝的两种归因、角色清单动态可见、skills 是 preload | Touching `agents/**`、`chat/agent/filter.rs`、`chat/sub_agent.rs` 的角色解析 / 工具收窄 / spawn 校验 |
+| [MCP 客户端执行契约](./mcp-client.md) | wire 层由官方 rmcp 独占（禁手写 JSON-RPC/SSE/协议协商）、`OAUTH_REQUIRED:` 前缀、超时必须走 rmcp 的取消路径、锁顺序、一次性连接的两个正当用途、依赖的 rmcp 默认值清单 | Touching `mcp/conn.rs`、`mcp/manager.rs`、`mcp/result.rs`，或升级 `rmcp` 版本 |
 
 ---
 

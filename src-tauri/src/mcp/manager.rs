@@ -5,47 +5,47 @@
 //! `AppState.mcp_sessions` 连接池里。生命周期相关的 reaper / warmup / 退出杀进程
 //! 由 main.rs 调度。
 //!
+//! wire 协议本身不在这里 —— 那是 `super::conn`（官方 rmcp SDK）的活。本文件只管
+//! 连接池、配置指纹、状态事件、退避、空闲回收、工具快照这些运维逻辑，stdio 与
+//! HTTP 共用同一个 `RunningService`，不再分叉。
+//!
 //! 关键约束（见 prd 风险段）：
 //! - 绝不跨握手 / RPC await 持 `mcp_sessions` 外层池锁；命中即克隆 per-session
 //!   `Arc<Mutex<McpSession>>` 后立即释放外层锁。
-//! - stdio 子进程 `kill_on_drop(true)`，`StdioConn::Drop` abort reader/stderr task
-//!   并 `start_kill()`，退出时再走一遍 `disconnect_all` 兜底，避免孤儿进程。
+//! - 会话锁只保护生命周期状态迁移；等 RPC 响应前必须先克隆 `Arc<McpService>`
+//!   并释放会话锁，否则一次丢响应就会 head-of-line 阻塞后续每个请求。
+//! - stdio 子进程 `kill_on_drop(true)`，`RunningService` 的 DropGuard 会取消服务
+//!   循环并走 `transport.close()`（stdio = graceful_shutdown 杀子进程），退出时再走
+//!   一遍 `disconnect_all` 兜底，避免孤儿进程。
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    process::Stdio,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex as StdMutex,
-    },
+    collections::VecDeque,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use reqwest::{
-    header::{HeaderName, HeaderValue, ACCEPT},
-    Client,
-};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, Command},
-    sync::{oneshot, Mutex},
-    task::JoinHandle,
-    time::timeout,
+    io::{AsyncBufReadExt, BufReader},
+    process::ChildStderr,
+    sync::Mutex,
 };
 
-use crate::proc::NoConsoleWindow;
 use crate::settings::ChatMcpServer;
 use crate::state::AppState;
 
-use super::client;
+use super::conn::{self, McpService};
+use super::result;
 use super::types::{McpTool, McpToolCallResult};
 
 const MCP_DISCOVERY_RETRY_BASE: Duration = Duration::from_secs(2);
 const MCP_DISCOVERY_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// 关连接时最多等多久（rmcp 内部 stdio graceful_shutdown 自己有 3s 上限）。
+const TRANSPORT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// stderr 尾巴最多保留多少行（用于状态面板诊断）。
 pub const STDERR_TAIL_LINES: usize = 20;
@@ -111,7 +111,7 @@ pub struct McpSession {
     pub config_fingerprint: String,
     pub state: McpServerState,
     pub tools: Vec<McpTool>,
-    /// Last stdio tools/list revision materialized into `tools`.
+    /// 上一次物化进 `tools` 时的 `tools/list_changed` 计数。
     pub tools_revision: u64,
     /// stderr 尾巴（最近 STDERR_TAIL_LINES 行），用于状态面板。
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
@@ -120,7 +120,21 @@ pub struct McpSession {
     /// Discovery reconnect failures are throttled so a dead server cannot delay every chat turn.
     pub consecutive_connect_failures: u32,
     pub discovery_retry_after: Option<Instant>,
-    pub transport: McpTransport,
+    /// 活着的 rmcp 服务句柄；`None` 表示占位/已断开。stdio 与 HTTP 同一个类型。
+    pub transport: Option<Arc<McpService>>,
+    /// 服务器侧 `tools/list_changed` 计数器（由 `conn::KivioClientHandler` 递增）。
+    /// 和 `transport` 一起换，`None` 时不参与比较。
+    revision_source: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// stderr 尾巴任务，换连接时 abort 掉旧的。
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+    }
 }
 
 impl McpSession {
@@ -136,7 +150,9 @@ impl McpSession {
             handshake_count: 0,
             consecutive_connect_failures: 0,
             discovery_retry_after: None,
-            transport: McpTransport::None,
+            transport: None,
+            revision_source: None,
+            stderr_task: None,
         }
     }
 
@@ -145,140 +161,41 @@ impl McpSession {
         let tail = self.stderr_tail.lock().await;
         tail.iter().cloned().collect::<Vec<_>>().join("\n")
     }
-}
 
-/// 传输层：stdio 持久子进程 or HTTP（按 session_id 复用）。
-pub enum McpTransport {
-    Stdio(Arc<StdioConn>),
-    Http {
-        session_id: Option<String>,
-        protocol_version: String,
-        server: ChatMcpServer,
-    },
-    /// 占位态：插入连接池但尚未/失败完成握手时使用，避免并发重复握手。
-    None,
-}
+    /// 服务器当前上报的 tools 版本；没有连接时退回已物化的版本（⇒ 不触发重列）。
+    fn live_tools_revision(&self) -> u64 {
+        match &self.revision_source {
+            Some(source) => source.load(std::sync::atomic::Ordering::Acquire),
+            None => self.tools_revision,
+        }
+    }
 
-type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
-
-/// 持久 stdio 连接：子进程 + 写端 + 后台 reader/stderr task。
-/// reader task 循环读 stdout，按 JSON-RPC id 把响应投递给在途请求的 oneshot；
-/// 支持并发在途请求。
-pub struct StdioConn {
-    child: StdMutex<tokio::process::Child>,
-    /// Only the physical stdin write is serialized. Waiting for a response must not hold this lock,
-    /// otherwise one server-side lost response would head-of-line block every later request.
-    stdin: Arc<Mutex<ChildStdin>>,
-    next_id: AtomicU64,
-    pending: PendingMap,
-    tools_revision: Arc<AtomicU64>,
-    reader_task: JoinHandle<()>,
-    stderr_task: JoinHandle<()>,
-}
-
-impl Drop for StdioConn {
-    fn drop(&mut self) {
-        self.reader_task.abort();
-        self.stderr_task.abort();
-        // kill_on_drop(true) is the fallback; explicitly request termination as well.
-        let child = self.child.get_mut().unwrap_or_else(|err| err.into_inner());
-        let _ = child.start_kill();
+    /// 摘下当前 transport（换连接 / 断开时用），顺手 abort stderr 任务。
+    fn take_transport(&mut self) -> Option<Arc<McpService>> {
+        self.revision_source = None;
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+        self.transport.take()
     }
 }
 
-impl StdioConn {
-    /// Liveness probe: an exited child means the connection is dead.
-    fn is_dead(&self) -> bool {
-        let mut child = self.child.lock().unwrap_or_else(|err| err.into_inner());
-        matches!(child.try_wait(), Ok(Some(_)) | Err(_))
-    }
-
-    #[cfg(all(test, unix))]
-    fn child_id(&self) -> Option<u32> {
-        self.child
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .id()
-    }
-
-    /// Send one JSON-RPC request and wait for the response with the matching id.
-    /// Multiple requests may be in flight concurrently; only stdin writes are serialized.
-    async fn request(
-        &self,
-        method: &str,
-        params: Value,
-        timeout_dur: Duration,
-    ) -> Result<Value, String> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id.to_string(), tx);
-        }
-        let mut message = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id.clone(),
-            "method": method,
-        });
-        if !params.is_null() {
-            message["params"] = params;
-        }
-        if let Err(err) = self.write_message(&message, timeout_dur).await {
-            self.pending.lock().await.remove(&id.to_string());
-            return Err(err);
-        }
-        match timeout(timeout_dur, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                // The reader task ended (the child closed stdout), dropping the sender.
-                self.pending.lock().await.remove(&id.to_string());
-                Err("MCP server closed stdout".to_string())
+/// 把子进程 stderr 折进会话的环形尾巴（最多 `STDERR_TAIL_LINES` 行），
+/// 连接失败时贴进错误信息给用户看。
+fn spawn_stderr_tail(
+    stderr: ChildStderr,
+    tail: Arc<Mutex<VecDeque<String>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut tail = tail.lock().await;
+            if tail.len() >= STDERR_TAIL_LINES {
+                tail.pop_front();
             }
-            Err(_) => {
-                self.pending.lock().await.remove(&id.to_string());
-                if method != "initialize" {
-                    let _ = self
-                        .notify(
-                            "notifications/cancelled",
-                            serde_json::json!({
-                                "requestId": id,
-                                "reason": "Client request timed out",
-                            }),
-                            timeout_dur.min(Duration::from_secs(1)),
-                        )
-                        .await;
-                }
-                Err(
-                    "MCP stdio read timed out; request outcome is unknown and was not retried"
-                        .to_string(),
-                )
-            }
+            tail.push_back(line);
         }
-    }
-
-    fn tools_revision(&self) -> u64 {
-        self.tools_revision.load(Ordering::Acquire)
-    }
-
-    async fn notify(
-        &self,
-        method: &str,
-        params: Value,
-        timeout_dur: Duration,
-    ) -> Result<(), String> {
-        let mut message = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        });
-        if !params.is_null() {
-            message["params"] = params;
-        }
-        self.write_message(&message, timeout_dur).await
-    }
-
-    async fn write_message(&self, message: &Value, timeout_dur: Duration) -> Result<(), String> {
-        write_stdio_message(&self.stdin, message, timeout_dur).await
-    }
+    })
 }
 
 impl AppState {
@@ -359,9 +276,9 @@ impl AppState {
                     guard.tools_revision = 0;
                     guard.consecutive_connect_failures = 0;
                     guard.discovery_retry_after = None;
-                    let old_transport = std::mem::replace(&mut guard.transport, McpTransport::None);
+                    let old_transport = guard.take_transport();
                     guard.state = McpServerState::Connecting;
-                    close_transport(&self.http, old_transport, self.mcp_tool_timeout()).await;
+                    close_transport(old_transport).await;
                 } else if respect_discovery_backoff {
                     if let (McpServerState::Error { message }, Some(retry_after)) =
                         (&guard.state, guard.discovery_retry_after)
@@ -507,7 +424,7 @@ impl AppState {
                 guard.discovery_retry_after = Some(
                     Instant::now() + discovery_retry_backoff(guard.consecutive_connect_failures),
                 );
-                guard.transport = McpTransport::None;
+                guard.take_transport();
                 sink.emit_server_state(
                     server,
                     &McpServerState::Error {
@@ -520,55 +437,39 @@ impl AppState {
     }
 
     /// 建立 transport 并完成握手，把元数据写入会话（不改 state）。
+    /// stdio 与 HTTP 走同一条路：`conn::connect` 出 `RunningService`，然后列一次工具。
     async fn mcp_connect_into(
         &self,
         server: &ChatMcpServer,
         session: &mut McpSession,
     ) -> Result<(), String> {
-        let timeout_dur = self.mcp_tool_timeout();
-        match server.transport.as_str() {
-            "streamable_http" => {
-                let init = http_initialize(&self.http, server, timeout_dur).await?;
-                let tools = http_list_tools(
-                    &self.http,
-                    server,
-                    timeout_dur,
-                    init.session_id.as_deref(),
-                    &init.protocol_version,
-                )
-                .await?;
-                session.tools = tools;
-                session.tools_revision = 0;
-                session.transport = McpTransport::Http {
-                    session_id: init.session_id,
-                    protocol_version: init.protocol_version,
-                    server: server.clone(),
-                };
-                Ok(())
-            }
-            _ => {
-                let conn = Arc::new(spawn_stdio(
-                    server,
-                    timeout_dur,
-                    session.stderr_tail.clone(),
-                )?);
-                let initialize_result = conn
-                    .request("initialize", client::initialize_params(), timeout_dur)
-                    .await?;
-                client::negotiated_protocol_version(&initialize_result, false)?;
-                conn.notify("notifications/initialized", Value::Null, timeout_dur)
-                    .await?;
-                let revision_before = conn.tools_revision();
-                session.tools = stdio_list_tools(&conn, timeout_dur).await?;
-                session.tools_revision = revision_before;
-                session.transport = McpTransport::Stdio(conn);
-                Ok(())
-            }
+        // 换连接前先摘掉旧的（含 abort 旧 stderr 任务），旧 Arc 落地即取消服务循环。
+        let old = session.take_transport();
+        drop(old);
+
+        let established = conn::connect(server, &self.http).await?;
+        if let Some(stderr) = established.stderr {
+            session.stderr_task = Some(spawn_stderr_tail(stderr, session.stderr_tail.clone()));
         }
+
+        // 先读版本号再列工具：列表期间来的 list_changed 会让 revision 前进，
+        // 下一次 mcp_list_tools 就会重列，不会把变更吃掉。
+        let revision_before = established
+            .tools_revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        session.tools = conn::list_tools(&established.service, conn::LIST_TOOLS_TIMEOUT).await?;
+        session.tools_revision = revision_before;
+        session.revision_source = Some(established.tools_revision);
+        session.transport = Some(established.service);
+        Ok(())
     }
 
-    /// 调用某个 MCP server 的工具：get-or-connect → 锁会话 → liveness 探活 →
-    /// 死则重连一次重试。HTTP 仅 404 / session-not-found 时清 session_id 重试一次。
+    /// 调用某个 MCP server 的工具：get-or-connect → 锁会话判活 → 释放锁再发请求；
+    /// 连接确实死了才重连一次重试。
+    ///
+    /// HTTP 的 404 session 过期由 rmcp 内部单次 best-effort 重握手处理
+    /// （`reinit_on_expired_session`，默认开，且只对 `SessionExpired` 生效 ——
+    /// 500 不会触发重连），所以这里不再有 stdio / HTTP 两条分支。
     pub async fn mcp_call_tool(
         &self,
         sink: &impl McpEventSink,
@@ -577,141 +478,87 @@ impl AppState {
         arguments: Value,
     ) -> Result<McpToolCallResult, String> {
         let session = self.mcp_get_or_connect(sink, server).await?;
-        let params = serde_json::json!({ "name": name, "arguments": arguments });
         let timeout_dur = self.mcp_tool_timeout();
 
-        // Session locking protects lifecycle transitions only. For stdio, clone the connection and
-        // release the session lock before awaiting the JSON-RPC response. StdioConn routes responses
-        // by id and serializes only physical stdin writes, so one lost response cannot block later
-        // requests to an otherwise healthy server.
-        let stdio_conn = {
+        // 会话锁只保护生命周期状态迁移：拿到 Arc 后必须先释放锁再 await 响应。
+        // rmcp 按 JSON-RPC id 路由响应，所以一次丢响应不会阻塞后面对同一个健康
+        // 服务器的请求。
+        let service = {
             let mut guard = session.lock().await;
-            let dead = match &guard.transport {
-                McpTransport::Stdio(conn) => conn.is_dead(),
-                McpTransport::None => true,
-                McpTransport::Http { .. } => false,
-            };
+            let dead = guard
+                .transport
+                .as_ref()
+                .map(|service| service.is_closed())
+                .unwrap_or(true);
             if dead {
-                guard.transport = McpTransport::None;
+                guard.take_transport();
                 guard.state = McpServerState::Connecting;
                 sink.emit_server_state(server, &McpServerState::Connecting);
                 self.connect_session(sink, server, &mut guard).await?;
             }
-            // Touch at request start as well as success so the idle reaper cannot mistake an active
-            // long-running request for an unused session under normal timeout settings.
+            // 请求开始时也刷一次 last_used，否则空闲回收器会把一个正在跑的长请求
+            // 误判成闲置会话。
             guard.last_used = Instant::now();
-            match &guard.transport {
-                McpTransport::Stdio(conn) => Some(conn.clone()),
-                _ => None,
-            }
+            guard.transport.clone()
+        };
+        let Some(service) = service else {
+            return Err("MCP transport unavailable".to_string());
         };
 
-        if let Some(conn) = stdio_conn {
-            let first = conn
-                .request("tools/call", params.clone(), timeout_dur)
-                .await;
-            let result = match first {
-                Ok(value) => Ok(client::parse_tool_result(value)),
-                Err(err) => {
-                    // A timeout has an unknown execution outcome. Never kill the healthy server or
-                    // silently replay a potentially non-idempotent tool call. Only a genuinely dead
-                    // transport keeps the existing reconnect-and-retry behavior.
-                    let connection_dead = conn.is_dead() || is_connection_closed_error(&err);
-                    if !connection_dead {
-                        Err(err)
-                    } else {
-                        let retry_conn = {
-                            let mut guard = session.lock().await;
-                            let must_reconnect = match &guard.transport {
-                                McpTransport::Stdio(current) => Arc::ptr_eq(current, &conn),
-                                McpTransport::None => true,
-                                McpTransport::Http { .. } => false,
-                            };
-                            if must_reconnect {
-                                guard.transport = McpTransport::None;
-                                guard.state = McpServerState::Connecting;
-                                sink.emit_server_state(server, &McpServerState::Connecting);
-                                self.connect_session(sink, server, &mut guard).await?;
-                            }
-                            match &guard.transport {
-                                McpTransport::Stdio(current) => Some(current.clone()),
-                                _ => None,
-                            }
-                        };
-                        match retry_conn {
-                            Some(retry_conn) => {
-                                let value = retry_conn
-                                    .request("tools/call", params, self.mcp_tool_timeout())
-                                    .await?;
-                                Ok(client::parse_tool_result(value))
-                            }
-                            None => Err(err),
+        let first = conn::call_tool(&service, name, arguments.clone(), timeout_dur).await;
+        let result = match first {
+            Ok(value) => Ok(result::parse_tool_result(
+                serde_json::to_value(&value).map_err(|err| err.to_string())?,
+            )),
+            Err(err) => {
+                // 超时的执行结果是未知的。绝不因此杀掉健康的服务器，也绝不静默重放
+                // 一个可能非幂等的工具调用。只有传输真的死了才走重连重试。
+                if !conn::connection_is_gone(&service, &err) {
+                    Err(err)
+                } else {
+                    let retry_service = {
+                        let mut guard = session.lock().await;
+                        let must_reconnect = guard
+                            .transport
+                            .as_ref()
+                            .map(|current| Arc::ptr_eq(current, &service))
+                            .unwrap_or(true);
+                        if must_reconnect {
+                            guard.take_transport();
+                            guard.state = McpServerState::Connecting;
+                            sink.emit_server_state(server, &McpServerState::Connecting);
+                            self.connect_session(sink, server, &mut guard).await?;
                         }
+                        guard.transport.clone()
+                    };
+                    match retry_service {
+                        Some(retry_service) => {
+                            let value = conn::call_tool(
+                                &retry_service,
+                                name,
+                                arguments,
+                                self.mcp_tool_timeout(),
+                            )
+                            .await?;
+                            Ok(result::parse_tool_result(
+                                serde_json::to_value(&value).map_err(|err| err.to_string())?,
+                            ))
+                        }
+                        None => Err(err),
                     }
                 }
-            };
-            if result.is_ok() {
-                session.lock().await.last_used = Instant::now();
             }
-            return result;
-        }
-
-        // Streamable HTTP keeps its existing per-session serialization because the mutable session
-        // id and re-initialize-on-404 transition are a separate transport contract.
-        let mut guard = session.lock().await;
-        let result = match &mut guard.transport {
-            McpTransport::Http {
-                session_id,
-                protocol_version,
-                ..
-            } => {
-                let current = session_id.clone();
-                match http_request(
-                    &self.http,
-                    server,
-                    timeout_dur,
-                    "tools/call",
-                    params.clone(),
-                    current.as_deref(),
-                    protocol_version,
-                )
-                .await
-                {
-                    Ok((value, next_session)) => {
-                        *session_id = next_session;
-                        Ok(client::parse_tool_result(value))
-                    }
-                    Err(err) if is_session_expired(&err) => {
-                        let init = http_initialize(&self.http, server, timeout_dur).await?;
-                        let (value, next_session) = http_request(
-                            &self.http,
-                            server,
-                            timeout_dur,
-                            "tools/call",
-                            params,
-                            init.session_id.as_deref(),
-                            &init.protocol_version,
-                        )
-                        .await?;
-                        *session_id = next_session.or(init.session_id);
-                        *protocol_version = init.protocol_version;
-                        Ok(client::parse_tool_result(value))
-                    }
-                    Err(err) => Err(err),
-                }
-            }
-            McpTransport::Stdio(_) => {
-                Err("MCP stdio transport changed during tool dispatch".to_string())
-            }
-            McpTransport::None => Err("MCP transport unavailable".to_string()),
         };
         if result.is_ok() {
-            guard.last_used = Instant::now();
+            session.lock().await.last_used = Instant::now();
         }
         result
     }
 
     /// 返回某个 server 的工具列表（持久会话）。供 list_enabled_tool_catalog 复用。
+    ///
+    /// 只在服务器发过 `tools/list_changed` 时重列。手写版这条只对 stdio 生效，
+    /// 现在 HTTP 也一样 —— rmcp 的 `ClientHandler` 两种传输都收得到通知。
     pub async fn mcp_list_tools(
         &self,
         sink: &impl McpEventSink,
@@ -719,11 +566,10 @@ impl AppState {
     ) -> Result<Vec<McpTool>, String> {
         let session = self.mcp_get_or_connect_inner(sink, server, true).await?;
         let mut guard = session.lock().await;
-        if let McpTransport::Stdio(conn) = &guard.transport {
-            let conn = conn.clone();
-            let revision = conn.tools_revision();
-            if revision != guard.tools_revision {
-                let tools = stdio_list_tools(&conn, self.mcp_tool_timeout()).await?;
+        let revision = guard.live_tools_revision();
+        if revision != guard.tools_revision {
+            if let Some(service) = guard.transport.clone() {
+                let tools = conn::list_tools(&service, conn::LIST_TOOLS_TIMEOUT).await?;
                 guard.tools = tools;
                 guard.tools_revision = revision;
                 self.remember_mcp_tools(server, &guard.tools);
@@ -802,9 +648,9 @@ impl AppState {
             let transport = {
                 let mut guard = session.lock().await;
                 guard.state = McpServerState::Disconnected;
-                std::mem::replace(&mut guard.transport, McpTransport::None)
+                guard.take_transport()
             };
-            close_transport(&self.http, transport, self.mcp_tool_timeout()).await;
+            close_transport(transport).await;
         }
         sink.emit_disconnected(server_id);
     }
@@ -845,9 +691,9 @@ impl AppState {
             let transport = {
                 let mut guard = session.lock().await;
                 guard.state = McpServerState::Disconnected;
-                std::mem::replace(&mut guard.transport, McpTransport::None)
+                guard.take_transport()
             };
-            close_transport(&self.http, transport, self.mcp_tool_timeout()).await;
+            close_transport(transport).await;
         }
         evicted
     }
@@ -862,9 +708,9 @@ impl AppState {
             let transport = {
                 let mut guard = session.lock().await;
                 guard.state = McpServerState::Disconnected;
-                std::mem::replace(&mut guard.transport, McpTransport::None)
+                guard.take_transport()
             };
-            close_transport(&self.http, transport, self.mcp_tool_timeout()).await;
+            close_transport(transport).await;
         }
     }
 
@@ -878,69 +724,29 @@ impl AppState {
             let transport = {
                 let mut guard = session.lock().await;
                 guard.state = McpServerState::Disconnected;
-                std::mem::replace(&mut guard.transport, McpTransport::None)
+                guard.take_transport()
             };
-            close_transport(&self.http, transport, self.mcp_tool_timeout()).await;
+            close_transport(transport).await;
         }
     }
 }
 
-/// 状态命令返回给前端的快照。
-async fn close_transport(http: &Client, transport: McpTransport, timeout_dur: Duration) {
-    if let McpTransport::Http {
-        session_id: Some(session_id),
-        protocol_version,
-        server,
-    } = transport
-    {
-        let _ = http_delete_session(
-            http,
-            &server,
-            timeout_dur.min(Duration::from_secs(5)),
-            &session_id,
-            &protocol_version,
-        )
-        .await;
+/// 关掉一条 MCP 连接。
+///
+/// 取消 rmcp 的服务循环即触发 `transport.close()`：stdio 走 `graceful_shutdown`
+/// （关管道 → 等 3s → kill），HTTP 发 `DELETE` 释放 session。能独占 Arc 时带超时
+/// 等它跑完，这样退出钩子能真正收掉子进程而不是留孤儿；还有别人持着 Arc（在途
+/// 工具调用）就只发取消信号，等对方 drop 时收尾。
+async fn close_transport(transport: Option<Arc<McpService>>) {
+    let Some(transport) = transport else {
+        return;
+    };
+    transport.cancellation_token().cancel();
+    if let Some(mut owned) = Arc::into_inner(transport) {
+        let _ = owned.close_with_timeout(TRANSPORT_CLOSE_TIMEOUT).await;
     }
 }
 
-async fn http_delete_session(
-    http: &Client,
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-    session_id: &str,
-    protocol_version: &str,
-) -> Result<(), String> {
-    if server.url.trim().is_empty() {
-        return Ok(());
-    }
-    let mut headers = client::http_headers(&server.headers)?;
-    headers.insert(
-        HeaderName::from_static("mcp-session-id"),
-        HeaderValue::from_str(session_id)
-            .map_err(|err| format!("Invalid MCP session id header: {err}"))?,
-    );
-    headers.insert(
-        HeaderName::from_static("mcp-protocol-version"),
-        HeaderValue::from_str(protocol_version)
-            .map_err(|err| format!("Invalid MCP protocol version header: {err}"))?,
-    );
-    let response = timeout(
-        timeout_dur,
-        http.delete(server.url.clone()).headers(headers).send(),
-    )
-    .await
-    .map_err(|_| "MCP HTTP session DELETE timed out".to_string())?
-    .map_err(|err| format!("MCP HTTP session DELETE failed: {err}"))?;
-    if response.status().is_success() || response.status().as_u16() == 404 {
-        Ok(())
-    } else {
-        Err(format!(
-            "MCP HTTP session DELETE failed {}",
-            response.status().as_u16()
-        ))
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -974,468 +780,6 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-fn is_session_expired(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    err.contains("404")
-        || lower.contains("session not found")
-        || lower.contains("session-not-found")
-}
-
-/// stdio request 错误是否表示连接已关闭（reader task 结束、子进程关 stdout）。
-/// 用于区分「连接死了应重连」与「慢但健康的工具读/写超时应透传」。
-fn is_connection_closed_error(err: &str) -> bool {
-    err.contains("MCP server closed stdout")
-}
-
-fn parse_tools_page(value: &Value) -> Result<(Vec<McpTool>, Option<String>), String> {
-    client::parse_tools_page(value, "MCP")
-}
-
-fn json_rpc_id_key(id: &Value) -> Option<String> {
-    match id {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-async fn write_stdio_message(
-    stdin: &Arc<Mutex<ChildStdin>>,
-    message: &Value,
-    timeout_dur: Duration,
-) -> Result<(), String> {
-    let line = serde_json::to_string(message).map_err(|err| err.to_string())?;
-    let mut stdin = stdin.lock().await;
-    timeout(timeout_dur, async {
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await
-    })
-    .await
-    .map_err(|_| "MCP stdio write timed out".to_string())?
-    .map_err(|err| format!("MCP stdio write failed: {err}"))
-}
-
-async fn stdio_list_tools(conn: &StdioConn, timeout_dur: Duration) -> Result<Vec<McpTool>, String> {
-    let mut tools = Vec::new();
-    let mut cursor: Option<String> = None;
-    let mut seen = HashSet::new();
-    for _ in 0..client::MAX_TOOL_LIST_PAGES {
-        let params = cursor
-            .as_ref()
-            .map(|cursor| serde_json::json!({ "cursor": cursor }))
-            .unwrap_or(Value::Null);
-        let value = conn.request("tools/list", params, timeout_dur).await?;
-        let (page, next_cursor) = parse_tools_page(&value)?;
-        tools.extend(page);
-        let Some(next_cursor) = next_cursor else {
-            return Ok(tools);
-        };
-        if !seen.insert(next_cursor.clone()) {
-            return Err("MCP tools/list returned a repeated nextCursor".to_string());
-        }
-        cursor = Some(next_cursor);
-    }
-    Err(format!(
-        "MCP tools/list exceeded {} pages",
-        client::MAX_TOOL_LIST_PAGES
-    ))
-}
-
-/// spawn stdio ?????? reader / stderr ?? task?
-fn spawn_stdio(
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-    stderr_tail: Arc<Mutex<VecDeque<String>>>,
-) -> Result<StdioConn, String> {
-    if server.command.trim().is_empty() {
-        return Err("MCP server command is empty".to_string());
-    }
-    let mut command = Command::new(&server.command);
-    command.args(&server.args);
-    if let Some(cwd) = server.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
-        command.current_dir(cwd);
-    }
-    command.envs(client::clean_env(&server.env));
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.kill_on_drop(true);
-    command.no_console_window();
-
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("Failed to start MCP server {}: {err}", server.name))?;
-    let stdin = Arc::new(Mutex::new(
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| "MCP server stdin unavailable".to_string())?,
-    ));
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "MCP server stdout unavailable".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "MCP server stderr unavailable".to_string())?;
-
-    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-    let tools_revision = Arc::new(AtomicU64::new(0));
-
-    // JSON-RPC messages with a method are server requests/notifications, never responses.
-    // Handle server ping inline and route only method-less messages into the pending map.
-    let reader_pending = pending.clone();
-    let reader_stdin = stdin.clone();
-    let reader_tools_revision = tools_revision.clone();
-    let reader_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    let value: Value = match serde_json::from_str(&line) {
-                        Ok(value) => value,
-                        Err(_) => continue,
-                    };
-                    if let Some(method) = value.get("method").and_then(Value::as_str) {
-                        if let Some(id) = value.get("id").cloned() {
-                            let response = if method == "ping" {
-                                serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id,
-                                    "result": {},
-                                })
-                            } else {
-                                serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id,
-                                    "error": {
-                                        "code": -32601,
-                                        "message": "Method not found",
-                                    },
-                                })
-                            };
-                            let _ =
-                                write_stdio_message(&reader_stdin, &response, timeout_dur).await;
-                        } else if method == "notifications/tools/list_changed" {
-                            reader_tools_revision.fetch_add(1, Ordering::AcqRel);
-                        }
-                        continue;
-                    }
-
-                    let Some(id) = value.get("id").and_then(json_rpc_id_key) else {
-                        continue;
-                    };
-                    let sender = reader_pending.lock().await.remove(&id);
-                    if let Some(sender) = sender {
-                        let outcome = if let Some(error) = value.get("error") {
-                            Err(format!("MCP error: {}", client::compact_json(error, 500)))
-                        } else {
-                            Ok(value.get("result").cloned().unwrap_or(Value::Null))
-                        };
-                        let _ = sender.send(outcome);
-                    }
-                }
-                Ok(None) | Err(_) => break,
-            }
-        }
-        let pending = {
-            let mut pending = reader_pending.lock().await;
-            std::mem::take(&mut *pending)
-        };
-        for (_, sender) in pending {
-            let _ = sender.send(Err("MCP server closed stdout".to_string()));
-        }
-    });
-
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let mut tail = stderr_tail.lock().await;
-            if tail.len() >= STDERR_TAIL_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
-        }
-    });
-
-    Ok(StdioConn {
-        child: StdMutex::new(child),
-        stdin,
-        next_id: AtomicU64::new(1),
-        pending,
-        tools_revision,
-        reader_task,
-        stderr_task,
-    })
-}
-
-struct HttpSessionInit {
-    session_id: Option<String>,
-    protocol_version: String,
-}
-
-async fn http_initialize(
-    http: &Client,
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-) -> Result<HttpSessionInit, String> {
-    let (value, session_id) = http_request(
-        http,
-        server,
-        timeout_dur,
-        "initialize",
-        client::initialize_params(),
-        None,
-        client::MCP_PROTOCOL_VERSION,
-    )
-    .await?;
-    let protocol_version = client::negotiated_protocol_version(&value, true)?;
-    http_notify(
-        http,
-        server,
-        timeout_dur,
-        "notifications/initialized",
-        Value::Null,
-        session_id.as_deref(),
-        &protocol_version,
-    )
-    .await?;
-    Ok(HttpSessionInit {
-        session_id,
-        protocol_version,
-    })
-}
-
-async fn http_list_tools(
-    http: &Client,
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-    session_id: Option<&str>,
-    protocol_version: &str,
-) -> Result<Vec<McpTool>, String> {
-    let mut tools = Vec::new();
-    let mut cursor: Option<String> = None;
-    let mut seen = HashSet::new();
-    for _ in 0..client::MAX_TOOL_LIST_PAGES {
-        let params = cursor
-            .as_ref()
-            .map(|cursor| serde_json::json!({ "cursor": cursor }))
-            .unwrap_or(Value::Null);
-        let (value, _) = http_request(
-            http,
-            server,
-            timeout_dur,
-            "tools/list",
-            params,
-            session_id,
-            protocol_version,
-        )
-        .await?;
-        let (page, next_cursor) = parse_tools_page(&value)?;
-        tools.extend(page);
-        let Some(next_cursor) = next_cursor else {
-            return Ok(tools);
-        };
-        if !seen.insert(next_cursor.clone()) {
-            return Err("MCP HTTP tools/list returned a repeated nextCursor".to_string());
-        }
-        cursor = Some(next_cursor);
-    }
-    Err(format!(
-        "MCP HTTP tools/list exceeded {} pages",
-        client::MAX_TOOL_LIST_PAGES
-    ))
-}
-
-async fn http_notify(
-    http: &Client,
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-    method: &str,
-    params: Value,
-    session_id: Option<&str>,
-    protocol_version: &str,
-) -> Result<(), String> {
-    let mut message = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": method,
-    });
-    if !params.is_null() {
-        message["params"] = params;
-    }
-    let response = http_post(
-        http,
-        server,
-        timeout_dur,
-        message,
-        session_id,
-        protocol_version,
-    )
-    .await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "MCP HTTP notify failed {}: {}",
-            status.as_u16(),
-            text.chars().take(500).collect::<String>()
-        ));
-    }
-    Ok(())
-}
-
-/// Single HTTP JSON-RPC request; returns (result, next_session_id).
-async fn http_request(
-    http: &Client,
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-    method: &str,
-    params: Value,
-    session_id: Option<&str>,
-    protocol_version: &str,
-) -> Result<(Value, Option<String>), String> {
-    let id = uuid::Uuid::new_v4().to_string();
-    let outcome = async {
-        let mut message = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id.clone(),
-            "method": method,
-        });
-        if !params.is_null() {
-            message["params"] = params;
-        }
-        let response = http_post(
-            http,
-            server,
-            timeout_dur,
-            message,
-            session_id,
-            protocol_version,
-        )
-        .await?;
-        let next_session_id = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_string())
-            .or_else(|| session_id.map(|value| value.to_string()));
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(format!(
-                "MCP HTTP request failed {}: {}",
-                status.as_u16(),
-                text.chars().take(500).collect::<String>()
-            ));
-        }
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let value = if content_type.contains("text/event-stream") {
-            timeout(
-                timeout_dur,
-                client::read_sse_json_rpc_response(response, &id),
-            )
-            .await
-            .map_err(|_| "MCP HTTP SSE read timed out".to_string())??
-        } else {
-            let text = timeout(timeout_dur, response.text())
-                .await
-                .map_err(|_| "MCP HTTP read body timed out".to_string())?
-                .map_err(|err| format!("MCP HTTP read body failed: {err}"))?;
-            if text.trim_start().starts_with("event:") || text.trim_start().starts_with("data:") {
-                client::parse_sse_json_rpc(&text, &id)?
-            } else if text.trim().is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_str(&text).map_err(|err| {
-                    format!(
-                        "MCP HTTP parse JSON failed: {} (body: {})",
-                        err,
-                        text.chars().take(500).collect::<String>()
-                    )
-                })?
-            }
-        };
-        if let Some(error) = value.get("error") {
-            return Err(format!(
-                "MCP HTTP error: {}",
-                client::compact_json(error, 500)
-            ));
-        }
-        Ok((
-            value.get("result").cloned().unwrap_or(Value::Null),
-            next_session_id,
-        ))
-    }
-    .await;
-
-    if method != "initialize"
-        && outcome
-            .as_ref()
-            .err()
-            .is_some_and(|err| err.contains("timed out"))
-    {
-        let _ = http_notify(
-            http,
-            server,
-            timeout_dur.min(Duration::from_secs(1)),
-            "notifications/cancelled",
-            serde_json::json!({
-                "requestId": id,
-                "reason": "Client request timed out",
-            }),
-            session_id,
-            protocol_version,
-        )
-        .await;
-    }
-    outcome
-}
-
-async fn http_post(
-    http: &Client,
-    server: &ChatMcpServer,
-    timeout_dur: Duration,
-    message: Value,
-    session_id: Option<&str>,
-    protocol_version: &str,
-) -> Result<reqwest::Response, String> {
-    if server.url.trim().is_empty() {
-        return Err("MCP HTTP server URL is empty".to_string());
-    }
-    let mut headers = client::http_headers(&server.headers)?;
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static("application/json, text/event-stream"),
-    );
-    headers.insert(
-        HeaderName::from_static("mcp-protocol-version"),
-        HeaderValue::from_str(protocol_version)
-            .map_err(|err| format!("Invalid MCP protocol version header: {err}"))?,
-    );
-    if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
-        let value = HeaderValue::from_str(session_id)
-            .map_err(|err| format!("Invalid MCP session id header: {err}"))?;
-        headers.insert(HeaderName::from_static("mcp-session-id"), value);
-    }
-    timeout(
-        timeout_dur,
-        http.post(server.url.clone())
-            .headers(headers)
-            .json(&message)
-            .send(),
-    )
-    .await
-    .map_err(|_| "MCP HTTP request timed out".to_string())?
-    .map_err(|err| format!("MCP HTTP request failed: {err}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1459,10 +803,15 @@ mod tests {
     }
 
     #[test]
-    fn is_session_expired_matches_404_and_session_not_found() {
-        assert!(is_session_expired("MCP HTTP request failed 404: not found"));
-        assert!(is_session_expired("error: Session not found"));
-        assert!(!is_session_expired("MCP HTTP request failed 500: boom"));
+    fn rmcp_reinitializes_only_on_expired_session() {
+        // 手写版靠 `is_session_expired()` 匹配错误串来决定 404 重连；现在这件事归
+        // rmcp 的 `SessionExpired` + `reinit_on_expired_session` 管。它默认必须是开的，
+        // 否则远程 MCP 的 session 过期后就再也连不回来了 —— 这是我们依赖的默认值，
+        // 钉在这里，rmcp 哪天改默认会让测试红。
+        // 「404 重连、500 不重连」的端到端行为由下面 http_reconnect_only_on_404 /
+        // http_500_does_not_reconnect 两个假服务器测试覆盖。
+        let config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri("http://localhost/mcp");
+        assert!(config.reinit_on_expired_session);
     }
 
     fn stdio_server(command: &str, args: &[&str]) -> ChatMcpServer {
@@ -1627,6 +976,49 @@ mod tests {
             .expect_err("500 should surface as error");
         assert!(err.contains("500"), "got: {err}");
         state.mcp_disconnect_all().await;
+    }
+
+    #[tokio::test]
+    async fn connect_once_lists_tools_without_touching_the_pool() {
+        // 设置页的「测试连接」测的是还没保存的草稿配置，绝不能进连接池 ——
+        // 否则一个用户还在编辑的半成品配置会被当成常驻服务器缓存下来。
+        let url = spawn_test_http_mcp_server(200).await;
+        let state = test_app_state();
+        let server = http_server(url);
+
+        let tools = conn::list_tools_once(&server, &state.http)
+            .await
+            .expect("one-shot list should work");
+        assert_eq!(
+            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["echo"]
+        );
+        assert!(
+            state.mcp_sessions.lock().await.is_empty(),
+            "一次性连接不得进连接池"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_once_works_and_stays_out_of_the_pool() {
+        // web_search 的 exa server 是临时合成的（api key 在 URL 里），同样不该进池。
+        let url = spawn_test_http_mcp_server(200).await;
+        let state = test_app_state();
+        let server = http_server(url);
+
+        let raw = conn::call_tool_once(
+            &server,
+            &state.http,
+            "echo",
+            serde_json::json!({}),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("one-shot call should work");
+        let parsed =
+            result::parse_tool_result(serde_json::to_value(&raw).expect("serialize"));
+        assert_eq!(parsed.content, "echo: ok");
+        assert!(state.mcp_sessions.lock().await.is_empty());
     }
 
     /// fake HTTP MCP server：始终 200，计数收到的 initialize 次数（用于断言会话复用）。

@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{send_with_retry, with_standard_request_timeout},
-    mcp::client::StreamableHttpMcpClient,
     settings::{ChatMcpServer, LensWebSearchConfig, WebSearchProvider},
     state::AppState,
 };
@@ -208,15 +207,20 @@ async fn search_exa_mcp(
         url,
         ..ChatMcpServer::default()
     };
-    let client = StreamableHttpMcpClient::new(server, 30_000, state.http.clone());
-
+    // 一次性连接，不进 MCP 连接池：这个 server 是临时合成的（api key 就在 URL 里），
+    // 不该被当成用户配置的常驻服务器缓存起来。
     let max_results = config.max_results.clamp(1, 10);
-    let result = client
-        .call_tool(
-            "web_search_exa",
-            serde_json::json!({ "query": query, "numResults": max_results }),
-        )
-        .await?;
+    let raw = crate::mcp::conn::call_tool_once(
+        &server,
+        &state.http,
+        "web_search_exa",
+        serde_json::json!({ "query": query, "numResults": max_results }),
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    let result = crate::mcp::result::parse_tool_result(
+        serde_json::to_value(&raw).map_err(|err| err.to_string())?,
+    );
     if result.is_error {
         return Err(format!("Exa MCP search failed: {}", result.content));
     }
