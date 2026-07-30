@@ -563,7 +563,7 @@ const SCENARIOS = [
       check(read.status === 'success', 'Read 应执行成功', read)
       check(answerOf(r).includes(SENTINEL_TEXT), '回答里没有文件内容 ⇒ 工具结果没回到模型', r.answer)
       // 工具卡应在分段里占一个位置，且顺序在正文分段之前/之间可见。
-      const kinds = (r.segments || []).map((s) => s.kind)
+      const kinds = r.segments || []
       check(kinds.includes('tool'), '分段里应有一个 tool 段（工具卡的顺序锚点）', r.segments)
     },
   },

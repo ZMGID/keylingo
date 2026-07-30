@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Listener, Manager};
 
-use crate::chat::types::{ChatMessageSegment, ConversationContextState, ToolCallStatus};
+use crate::chat::types::{ConversationContextState, ToolCallStatus};
 use crate::state::AppState;
 
 /// 单次生成超时（无 GUI 应答，靠这个兜底避免 watcher 永久卡住）。
@@ -98,18 +98,6 @@ struct ProbeToolCall {
     status: ToolCallStatus,
 }
 
-/// 消息分段投影：只给**顺序与阶段**（正文 / 推理 / 工具卡的相对位置）。
-/// 不带正文也不带长度——全文在 `answer` 里，而「正文有没有重复」由
-/// `chat::commands::tests` 的单测守着，不必在这条通道上再保一遍。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProbeSegment {
-    kind: String,
-    phase: String,
-    order: u32,
-    round: Option<u32>,
-    tool_call_id: Option<String>,
-}
 
 /// assistant 消息的 provider/CLI 实报用量，**全部字段**。
 ///
@@ -186,7 +174,12 @@ struct ProbeResult {
     conversation_id: Option<String>,
     answer: String,
     tool_calls: Vec<ProbeToolCall>,
-    segments: Vec<ProbeSegment>,
+    /// 分段的 kind 序列（按顺序），如 `["reasoning","text","tool","text"]`。
+    ///
+    /// 只给**相对顺序**，因为消费方只看这个：`phase` / `order` / `round` / `toolCallId`
+    /// 四个字段一个都没人读过（order 本来就是数组下标），正文与长度也刻意不带 ——
+    /// 全文在 `answer` 里，「正文有没有重复」由 `chat::commands::tests` 的单测守着。
+    segments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_outcome: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -347,7 +340,11 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
                         status: r.status.clone(),
                     })
                     .collect(),
-                segments: message.segments.iter().map(probe_segment).collect(),
+                segments: message
+                    .segments
+                    .iter()
+                    .map(|segment| serde_variant_name(&segment.kind))
+                    .collect(),
                 stream_outcome: message.stream_outcome.clone(),
                 usage: message.usage.as_ref().map(probe_usage),
                 context_state: run.context_state.as_ref().map(probe_context_state),
@@ -446,16 +443,6 @@ fn live_session_snapshot(state: &AppState, conversation_id: &str) -> ProbeLiveSe
     }
 }
 
-fn probe_segment(segment: &ChatMessageSegment) -> ProbeSegment {
-    let text = segment.text.as_deref().unwrap_or_default();
-    ProbeSegment {
-        kind: serde_variant_name(&segment.kind),
-        phase: serde_variant_name(&segment.phase),
-        order: segment.order,
-        round: segment.round,
-        tool_call_id: segment.tool_call_id.clone(),
-    }
-}
 
 /// 枚举的线上名字（`snake_case`，与前端事件同一套口径）。走 serde 而不是手写 match：
 /// 手写的第二份映射迟早跟 `#[serde(rename_all)]` 分叉（spec 第 2 条）。
@@ -508,7 +495,7 @@ fn write_result(dir: &std::path::Path, result: &ProbeResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::types::{ChatMessageSegmentKind, ChatMessageSegmentPhase};
+    use crate::chat::types::ChatMessageSegmentKind;
 
     #[test]
     fn probe_request_parses_camelcase_and_defaults() {
@@ -617,24 +604,15 @@ mod tests {
         assert!(v["output"].is_null());
     }
 
+    /// 分段投影只出 kind 的线上名字（`snake_case`，与前端事件同一套口径）。
+    /// 手写第二份枚举映射迟早和 `#[serde(rename_all)]` 分叉，所以走 serde。
     #[test]
-    fn segment_projection_reports_kind_phase_and_order() {
-        let segment = ChatMessageSegment {
-            id: "seg_1".to_string(),
-            kind: ChatMessageSegmentKind::Reasoning,
-            phase: ChatMessageSegmentPhase::ToolLoop,
-            order: 7,
-            step_number: None,
-            round: Some(2),
-            text: Some("x".repeat(650)),
-            tool_call_id: None,
-        };
-        let v = serde_json::to_value(probe_segment(&segment)).unwrap();
-        assert_eq!(v["kind"], "reasoning");
-        assert_eq!(v["phase"], "tool_loop");
-        assert_eq!(v["order"], 7);
-        assert_eq!(v["round"], 2);
-        assert!(v.get("text").is_none());
+    fn segment_projection_uses_the_wire_kind_name() {
+        assert_eq!(
+            serde_variant_name(&ChatMessageSegmentKind::Reasoning),
+            "reasoning"
+        );
+        assert_eq!(serde_variant_name(&ChatMessageSegmentKind::Text), "text");
     }
 
     #[test]
