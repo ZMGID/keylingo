@@ -223,7 +223,7 @@ pub async fn list_enabled_tool_catalog(app: &AppHandle, state: &AppState) -> Ena
     }
 
     let (mcp_tools, unavailable_mcp_servers) =
-        collect_enabled_mcp_tool_defs(state, app, &settings).await;
+        collect_enabled_mcp_tool_defs(state, Some(app), &settings).await;
     tools.extend(mcp_tools);
     tools.extend(list_skill_tool_defs(&settings));
 
@@ -243,7 +243,7 @@ pub async fn list_enabled_tool_catalog(app: &AppHandle, state: &AppState) -> Ena
 /// 不再拖住整轮工具收集，超时与失败同路降级到落盘快照 / unavailable。
 pub(crate) async fn collect_enabled_mcp_tool_defs(
     state: &AppState,
-    sink: &impl super::manager::McpEventSink,
+    sink: super::manager::McpEventSink<'_>,
     settings: &crate::settings::Settings,
 ) -> (Vec<ChatToolDefinition>, Vec<String>) {
     let servers = eligible_mcp_servers(settings);
@@ -285,16 +285,16 @@ pub(crate) const WARM_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 /// `'static` 的状态引用，退化为对 future 本体 timeout（超时即取消，对测试语义足够）。
 async fn list_tools_bounded(
     state: &AppState,
-    sink: &impl super::manager::McpEventSink,
+    sink: super::manager::McpEventSink<'_>,
     server: &ChatMcpServer,
 ) -> Result<Vec<crate::mcp::types::McpTool>, String> {
-    match sink.app_handle() {
+    match sink {
         Some(app) => {
             let app = app.clone();
             let owned = server.clone();
             let task = tauri::async_runtime::spawn(async move {
                 let state = app.state::<AppState>();
-                state.mcp_list_tools(&app, &owned).await
+                state.mcp_list_tools(Some(&app), &owned).await
             });
             match tokio::time::timeout(WARM_TOOL_LIST_TIMEOUT, task).await {
                 Ok(Ok(result)) => result,
@@ -344,7 +344,7 @@ pub async fn chat_mcp_warmup(
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            if let Err(err) = state.mcp_list_tools(&app, &server).await {
+            if let Err(err) = state.mcp_list_tools(Some(&app), &server).await {
                 eprintln!("MCP warmup for {} failed: {err}", server.name);
             }
         });
@@ -696,7 +696,7 @@ pub async fn chat_mcp_list_tool_defs(
         .find(|server| server.id == server_id)
         .cloned()
         .ok_or_else(|| "MCP server is missing".to_string())?;
-    let tools = state.mcp_list_tools(&app, &server).await?;
+    let tools = state.mcp_list_tools(Some(&app), &server).await?;
     Ok(tools
         .into_iter()
         .map(|tool| ConnectorToolInfo {
@@ -722,7 +722,7 @@ pub async fn chat_mcp_reload_server(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<(), String> {
-    state.mcp_reload_server(&app, &server_id).await;
+    state.mcp_reload_server(Some(&app), &server_id).await;
     Ok(())
 }
 
@@ -760,7 +760,7 @@ pub async fn call_tool(
         .ok_or_else(|| "MCP server is disabled or missing".to_string())?;
     // 走持久连接池：复用长连接、liveness 探活 + 透明重连、按 server_id 隔离。
     let mut result = state
-        .mcp_call_tool(app, &server, &tool.name, arguments.clone())
+        .mcp_call_tool(Some(app), &server, &tool.name, arguments.clone())
         .await?;
     // R1：MCP 工具结果里的图片 artifact 直达模型——vision 主模型直喂原图，
     // 纯文本主模型走辅助视觉模型审查向分析（R2）。通用于所有 MCP server，非
@@ -1533,7 +1533,7 @@ while True:
             let settings = settings_with_servers(vec![fast_server(&script), hanging_server()]);
 
             let started = std::time::Instant::now();
-            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
+            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, None, &settings).await;
             let elapsed = started.elapsed();
 
             assert!(
@@ -1572,7 +1572,7 @@ while True:
             );
             let settings = settings_with_servers(vec![server]);
 
-            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, &(), &settings).await;
+            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, None, &settings).await;
 
             assert!(
                 tools.iter().any(|tool| tool.id == "mcp__hang__cached_tool"),

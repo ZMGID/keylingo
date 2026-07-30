@@ -39,7 +39,7 @@ chrono = "0.4"
 # MCP 官方 Rust SDK：唯一的 MCP wire 实现（stdio 子进程 + Streamable HTTP）。
 # 版本写死不用 caret —— 3.x 仍在破坏性演进，升版本当独立任务做。
 # 关掉 default features（含 server，我们只做 client）。
-rmcp = { version = "3.0.0", default-features = false, features = [
+rmcp = { version = "3.0.1", default-features = false, features = [
   "client",
   "client-side-sse",
   "reqwest",

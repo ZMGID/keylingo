@@ -47,7 +47,9 @@ rmcp 的超时错误只说 `request timeout after PT1S`。用户真正需要知�
 手写版有、rmcp 没有,已经补回来了 —— 别在重构中再把它们弄丢:
 
 1. **`tools/list` 的页数上限。** rmcp 的 `list_all_tools` 跟着 `nextCursor` 一直翻页,**没有页数上限**(手写版有 `MAX_TOOL_LIST_PAGES = 100` + 重复游标检测)。游标坏掉的服务器会让它永远转下去,而 `tools/list` 在聊天热路径上。所有列工具都必须走 `conn::list_tools`(带 `LIST_TOOLS_TIMEOUT`),**不要直接调 `service.list_all_tools()`**。
-2. **子进程刚死时的判活时间窗。** `RunningService::is_closed()` 看的是服务循环有没有结束,子进程刚死时它可能还没反应过来;手写版是直接 `try_wait()` 子进程 + 匹配「closed stdout」错误串。判「该不该重连」一律用 `conn::connection_is_gone(service, err)`,它同时看 `is_closed()` 和错误串。
+2. **判活只能靠错误串,`is_closed()` 是恒假的。** 已读源码核实:`is_closed() = handle.is_none() || cancellation_token.is_cancelled()`,而服务循环在传输关闭时是 `break QuitReason::Closed`(`service.rs:1313`)—— **不 cancel token**,`handle` 也只被 `waiting()` / `close()` / `cancel()` 拿走。所以对连接池里握着的 `RunningService`,子进程死了、循环也退了,`is_closed()` **永远不会变 true**。判「该不该重连」一律用 `conn::connection_is_gone(service, err)`,里面那条 `err.contains("Transport closed")` **不是冗余、是唯一有用的那一路**,别当成时间窗兜底删掉。
+3. **握手超时。** rmcp 的 `legacy_startup` 等 `initialize` 响应是**裸 await**,没有内建超时;手写版一直是带超时的。少了它,一个「进程起来了但不回 initialize」的 server 会永久占住会话锁,连带让退出钩子里的 `mcp_disconnect_all` 拿不到锁 ⇒ 应用关不掉。见 `conn::HANDSHAKE_TIMEOUT`。
+4. **握手失败时的 stderr。** `spawn_stderr_tail` 只在握手**成功后**才挂上,所以 `conn::connect` 的失败路径必须自己 `peek_stderr` 一段 —— 「服务器起不来 / 缺依赖 / 认证失败」这类故障只在 stderr 上说话。
 
 ## 契约五:`McpToolCallResult` 的形状靠 serde 命名撑着
 
@@ -79,7 +81,9 @@ rmcp 的超时错误只说 `request timeout after PT1S`。用户真正需要知�
 
 - `.serve()` 默认 `ClientLifecycleMode::Initialize`(legacy 握手),**不做协议版本校验**,`ProtocolVersion` 的 Deserialize 对未知字符串也放行。所以老服务器(2024-11-05 之类)照样连得上 —— 比我们原来的白名单更宽松。
 - `reinit_on_expired_session = true`,且**只对** `SessionExpired`(404 + 已附 session)生效。「404 重连、500 不重连」靠它。有 `http_reconnect_only_on_404` / `http_500_does_not_reconnect` 两个假服务器测试。
-- `ClientCacheConfig::default()`:`enabled = true` 但 `default_ttl = ZERO`(服务器不给 `ttlMs` 就立刻过期),`serve_stale_on_error = true`(重取失败回落上次结果)。默认值对我们有利,不要动。
+- `ClientCacheConfig::default()`:`enabled = true` 但 `default_ttl = ZERO`(服务器不给 `ttlMs` 就立刻过期),`serve_stale_on_error = true`。**后者不是纯利好**:`tools/list` 失败时 rmcp 会返回上一次的陈旧工具列表并当成 `Ok`,而不是报错(`service/client.rs:1556`)。叠上上面那条「`is_closed()` 恒假」,一个刚死的 stdio server 会「看起来还健康、工具列表还在」,直到真的调用工具才炸。这是刻意的 SEP-2549 行为,不是 bug,但别把它记成「默认值对我们有利」。
+- `max_sse_event_size = 16MB`:单个 SSE 事件超过就被拒。MCP 工具返回大 base64 图片时可能踩到。
+- `retry_config = ExponentialBackoff::default()` 即 `max_times: None` ⇒ **SSE 重连次数无上限**(间隔 1s×2^n)。它和 `manager.rs` 的发现退避 / 空闲回收是两套独立退避,叠加行为没人验证过。
 - `CommandWrap::from(Command)` 是**空 wrapper 集合**,`spawn()` 直接调 `command.spawn()`。我们的 `no_console_window()`(`CREATE_NO_WINDOW`)因此原样生效。Windows 上一旦闪控制台窗口,先查这里。
 - `RunningService` 的 DropGuard:Arc 落地即取消服务循环,循环退出时走 `transport.close()`(stdio = `graceful_shutdown`,3s 后 kill;HTTP = 发 `DELETE` 释放 session)。`close_transport` 在能独占 Arc 时带超时等它跑完,这样退出钩子能真收掉子进程。
 
@@ -97,7 +101,8 @@ rmcp = { version = "3.0.0", default-features = false, features = [...] }
 
 ## 顺带的既有事实
 
-- 我们向服务器宣称的协议版本是 `conn.rs::ADVERTISED_PROTOCOL_VERSION`,当前仍是 `2025-06-18`(重构时刻意在 wire 上零变化)。要升就改这一行。
+- 我们向服务器宣称的协议版本是 `conn.rs::ADVERTISED_PROTOCOL_VERSION`,当前仍是 `2025-06-18`(重构时刻意在 wire 上零变化)。**但这已经不只是版本号问题了**:规范最新 revision 是 **2026-07-28**,它把 `initialize` / `notifications/initialized` 握手**整个删掉**、改成 `server/discover`(服务器 MUST 实现)。只实现新规范的 server 不认 `initialize` ⇒ **连不上**,不是降级。rmcp 3.0.0 已经给了 `ClientLifecycleMode::Auto { preferred_versions, legacy_version }`(先探 `server/discover`,证明对端是 legacy 才回落),改动量约等于把 `.serve(t)` 换成 `.serve_with_lifecycle(t, Auto{..})`,并顺手升到 3.0.1(#1080 正是这块)。**这是本文件里唯一一条「以后会真连不上」的欠账。**
 - OAuth token 由 `connectors/oauth.rs` 写进 `ChatMcpServer.headers["Authorization"]`,`conn.rs` 整体映射成 rmcp 的 `custom_headers`,**不用** `auth_header`,只有一条路径。rmcp 的保留头只有 `accept` / `Mcp-Session-Id` / `Last-Event-Id`,`Authorization` 不在里面。
-- `connectors/oauth.rs` 那套 PKCE + DCR 是刻意保留的,**没有**换成 rmcp 的 `OAuthState`(它没有文档化的「注入已有 token」入口)。
+- `connectors/oauth.rs` 那套 PKCE + DCR 是刻意保留的,**没有**换成 rmcp 的 `AuthorizationManager`。**注意此处原先的理由(「rmcp 没有文档化的注入已有 token 入口」)是错的**:rmcp 有 `CredentialStore` trait + `set_credential_store` + `initialize_from_store()`(`transport/auth.rs`,带 doc comment)。保留手写版现在只剩「不想在这次重构里动授权流程」这一个理由,重新评估时别再引用那个错前提。
+- RFC 8707 `resource` 参数已补齐(authorize / code 换 token / refresh 三处,见 `oauth::canonical_resource_indicator`)。这是 2025-06-18 规范的 **MUST**,而且要求「不管授权服务器支持不支持都必须发」。rmcp 自己的 auth 模块也是这么做的。仍**缺**的两个小口子:DCR 请求体没带 `application_type`(2026-07-28 minor #8),授权响应没校验 `iss`(RFC 9207,只校验了 `state`)。
 - `which-command` feature 顺手修了 Windows 上 `npx.cmd` 这类 shim 找不到的老 bug(`conn::build_stdio` 先 `which_command`,失败退回 `Command::new`)。

@@ -61,21 +61,17 @@ pub enum McpServerState {
     Disconnected,
 }
 
-/// 状态事件发射器。生产代码用 `AppHandle` 发 `mcp-server-state`；测试用 `()` 空实现，
-/// 这样核心连接逻辑无需真实 Tauri AppHandle 即可单测。
-pub trait McpEventSink {
-    fn emit_server_state(&self, server: &ChatMcpServer, state: &McpServerState);
-    /// 仅靠 server_id 发 Disconnected（reload / reap 用，可能拿不到完整 server）。
-    fn emit_disconnected(&self, server_id: &str);
-    /// 供 token 刷新钩子持久化新 token 用的 AppHandle。测试用 `()` 返回 None。
-    fn app_handle(&self) -> Option<&AppHandle> {
-        None
-    }
-}
+/// 状态事件发射器：就是一个可空的 `AppHandle`。
+///
+/// 这里原本是个 `McpEventSink` trait，两个实现分别是 `AppHandle`（生产）和 `()`（只在测试里），
+/// 而 trait 自己就把全部状态暴露成了 `fn app_handle(&self) -> Option<&AppHandle>` —— 也就是说
+/// 它从头到尾等价于 `Option<&AppHandle>`，代价是一个泛型参数穿过约 8 个方法。`None` = 不发事件
+/// （headless / 单测）。
+pub type McpEventSink<'a> = Option<&'a AppHandle>;
 
-impl McpEventSink for AppHandle {
-    fn emit_server_state(&self, server: &ChatMcpServer, state: &McpServerState) {
-        let _ = self.emit(
+fn emit_server_state(sink: McpEventSink<'_>, server: &ChatMcpServer, state: &McpServerState) {
+    if let Some(app) = sink {
+        let _ = app.emit(
             "mcp-server-state",
             serde_json::json!({
                 "serverId": server.id,
@@ -84,9 +80,12 @@ impl McpEventSink for AppHandle {
             }),
         );
     }
+}
 
-    fn emit_disconnected(&self, server_id: &str) {
-        let _ = self.emit(
+/// 仅靠 server_id 发 Disconnected（reload / reap 用，可能拿不到完整 server）。
+fn emit_disconnected(sink: McpEventSink<'_>, server_id: &str) {
+    if let Some(app) = sink {
+        let _ = app.emit(
             "mcp-server-state",
             serde_json::json!({
                 "serverId": server_id,
@@ -94,15 +93,6 @@ impl McpEventSink for AppHandle {
             }),
         );
     }
-
-    fn app_handle(&self) -> Option<&AppHandle> {
-        Some(self)
-    }
-}
-
-impl McpEventSink for () {
-    fn emit_server_state(&self, _server: &ChatMcpServer, _state: &McpServerState) {}
-    fn emit_disconnected(&self, _server_id: &str) {}
 }
 
 /// 单个 MCP 服务器的持久会话。
@@ -122,6 +112,9 @@ pub struct McpSession {
     pub discovery_retry_after: Option<Instant>,
     /// 活着的 rmcp 服务句柄；`None` 表示占位/已断开。stdio 与 HTTP 同一个类型。
     pub transport: Option<Arc<McpService>>,
+    /// stdio 子进程 pid（HTTP 为 `None`）。`RunningService` 之后拿不到子进程句柄，
+    /// 而「超时没杀掉健康子进程」「退出不留孤儿」这两条契约得靠 pid 才能断言。
+    pub child_pid: Option<u32>,
     /// 服务器侧 `tools/list_changed` 计数器（由 `conn::KivioClientHandler` 递增）。
     /// 和 `transport` 一起换，`None` 时不参与比较。
     revision_source: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -151,6 +144,7 @@ impl McpSession {
             consecutive_connect_failures: 0,
             discovery_retry_after: None,
             transport: None,
+            child_pid: None,
             revision_source: None,
             stderr_task: None,
         }
@@ -173,6 +167,7 @@ impl McpSession {
     /// 摘下当前 transport（换连接 / 断开时用），顺手 abort stderr 任务。
     fn take_transport(&mut self) -> Option<Arc<McpService>> {
         self.revision_source = None;
+        self.child_pid = None;
         if let Some(task) = self.stderr_task.take() {
             task.abort();
         }
@@ -188,7 +183,15 @@ fn spawn_stderr_tail(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                // 非法 UTF-8 只丢这一行，reader 仍可用。停下来的代价是 stderr 再没人读 ⇒
+                // 管道写满后子进程阻塞在写 stderr 上。其余错误是持续性的，继续会空转。
+                Err(err) if err.kind() == std::io::ErrorKind::InvalidData => continue,
+                Err(_) => break,
+            };
             let mut tail = tail.lock().await;
             if tail.len() >= STDERR_TAIL_LINES {
                 tail.pop_front();
@@ -217,7 +220,7 @@ impl AppState {
     /// Connecting 占位、**立即释放外层锁**，再 spawn + initialize（不跨外层锁 await）。
     pub async fn mcp_get_or_connect(
         &self,
-        sink: &impl McpEventSink,
+        sink: McpEventSink<'_>,
         server: &ChatMcpServer,
     ) -> Result<Arc<Mutex<McpSession>>, String> {
         self.mcp_get_or_connect_inner(sink, server, false).await
@@ -225,7 +228,7 @@ impl AppState {
 
     async fn mcp_get_or_connect_inner(
         &self,
-        sink: &impl McpEventSink,
+        sink: McpEventSink<'_>,
         server: &ChatMcpServer,
         respect_discovery_backoff: bool,
     ) -> Result<Arc<Mutex<McpSession>>, String> {
@@ -298,7 +301,7 @@ impl AppState {
                 Ok(session)
             }
             Resolved::Fresh(session) => {
-                sink.emit_server_state(server, &McpServerState::Connecting);
+                emit_server_state(sink, server, &McpServerState::Connecting);
                 let mut guard = session.lock().await;
                 self.connect_session(sink, server, &mut guard).await?;
                 drop(guard);
@@ -312,7 +315,7 @@ impl AppState {
     /// 失败则返回 None（调用方用原 server 继续）。成功刷新时把新 token 持久化回 settings。
     async fn refresh_oauth_if_needed(
         &self,
-        sink: &impl McpEventSink,
+        sink: McpEventSink<'_>,
         server: &ChatMcpServer,
     ) -> Option<ChatMcpServer> {
         let auth = server.auth.as_ref()?;
@@ -333,6 +336,8 @@ impl AppState {
             &token_endpoint,
             &refresh_token,
             client_id.as_deref(),
+            // RFC 8707：刷新也要带 resource，否则新 token 又丢了 audience 绑定。
+            Some(server.url.as_str()),
         )
         .await
         {
@@ -352,7 +357,7 @@ impl AppState {
                     format!("Bearer {}", token.access_token),
                 );
                 // 持久化新 token：仅在拿得到 AppHandle 时（生产路径）。
-                if let Some(app) = sink.app_handle() {
+                if let Some(app) = sink {
                     self.persist_refreshed_server(app, &updated);
                 }
                 Some(updated)
@@ -394,7 +399,7 @@ impl AppState {
     /// 在持有会话锁的前提下完成一次握手（不持外层池锁）。失败时写 Error 状态并返回错误。
     async fn connect_session(
         &self,
-        sink: &impl McpEventSink,
+        sink: McpEventSink<'_>,
         server: &ChatMcpServer,
         guard: &mut McpSession,
     ) -> Result<(), String> {
@@ -406,7 +411,7 @@ impl AppState {
                 guard.discovery_retry_after = None;
                 guard.last_used = Instant::now();
                 self.remember_mcp_tools(server, &guard.tools);
-                sink.emit_server_state(server, &McpServerState::Connected);
+                emit_server_state(sink, server, &McpServerState::Connected);
                 Ok(())
             }
             Err(err) => {
@@ -425,7 +430,8 @@ impl AppState {
                     Instant::now() + discovery_retry_backoff(guard.consecutive_connect_failures),
                 );
                 guard.take_transport();
-                sink.emit_server_state(
+                emit_server_state(
+                    sink,
                     server,
                     &McpServerState::Error {
                         message: message.clone(),
@@ -448,7 +454,10 @@ impl AppState {
         drop(old);
 
         let established = conn::connect(server, &self.http).await?;
+        session.child_pid = established.child_pid;
         if let Some(stderr) = established.stderr {
+            // 尾巴跨重连复用，不清就会把**上一次**连接的 stderr 当成这次的原因贴出来。
+            session.stderr_tail.lock().await.clear();
             session.stderr_task = Some(spawn_stderr_tail(stderr, session.stderr_tail.clone()));
         }
 
@@ -472,7 +481,7 @@ impl AppState {
     /// 500 不会触发重连），所以这里不再有 stdio / HTTP 两条分支。
     pub async fn mcp_call_tool(
         &self,
-        sink: &impl McpEventSink,
+        sink: McpEventSink<'_>,
         server: &ChatMcpServer,
         name: &str,
         arguments: Value,
@@ -493,7 +502,7 @@ impl AppState {
             if dead {
                 guard.take_transport();
                 guard.state = McpServerState::Connecting;
-                sink.emit_server_state(server, &McpServerState::Connecting);
+                emit_server_state(sink, server, &McpServerState::Connecting);
                 self.connect_session(sink, server, &mut guard).await?;
             }
             // 请求开始时也刷一次 last_used，否则空闲回收器会把一个正在跑的长请求
@@ -510,11 +519,17 @@ impl AppState {
             Ok(value) => Ok(result::parse_tool_result(
                 serde_json::to_value(&value).map_err(|err| err.to_string())?,
             )),
-            Err(err) => {
+            Err(failure) => {
                 // 超时的执行结果是未知的。绝不因此杀掉健康的服务器，也绝不静默重放
-                // 一个可能非幂等的工具调用。只有传输真的死了才走重连重试。
-                if !conn::connection_is_gone(&service, &err) {
-                    Err(err)
+                // 一个可能非幂等的工具调用。
+                //
+                // `replay_safe` 才是能不能重发的唯一依据：请求在**发送阶段**就失败
+                // （连接早就死了，`tx.send` 没成功）时重发是安全的；一旦进了等响应阶段，
+                // 服务器可能已经执行完了，`ServiceError::TransportClosed` 这时同样会出现
+                // —— 用户点「重连」或空闲回收把连接掐掉就是这条路，光看错误串分不出来。
+                // 只靠 `connection_is_gone` 判断的话，这里会把写文件 / 发消息跑两遍。
+                if !failure.replay_safe || !conn::connection_is_gone(&service, &failure.message) {
+                    Err(failure.message)
                 } else {
                     let retry_service = {
                         let mut guard = session.lock().await;
@@ -526,8 +541,16 @@ impl AppState {
                         if must_reconnect {
                             guard.take_transport();
                             guard.state = McpServerState::Connecting;
-                            sink.emit_server_state(server, &McpServerState::Connecting);
-                            self.connect_session(sink, server, &mut guard).await?;
+                            emit_server_state(sink, server, &McpServerState::Connecting);
+                            // 重连失败时别把「工具为什么挂了」换成「重连为什么失败」。
+                            if let Err(reconnect_err) =
+                                self.connect_session(sink, server, &mut guard).await
+                            {
+                                return Err(format!(
+                                    "{} (reconnect also failed: {reconnect_err})",
+                                    failure.message
+                                ));
+                            }
                         }
                         guard.transport.clone()
                     };
@@ -539,12 +562,13 @@ impl AppState {
                                 arguments,
                                 self.mcp_tool_timeout(),
                             )
-                            .await?;
+                            .await
+                            .map_err(|retry_failure| retry_failure.message)?;
                             Ok(result::parse_tool_result(
                                 serde_json::to_value(&value).map_err(|err| err.to_string())?,
                             ))
                         }
-                        None => Err(err),
+                        None => Err(failure.message),
                     }
                 }
             }
@@ -561,20 +585,41 @@ impl AppState {
     /// 现在 HTTP 也一样 —— rmcp 的 `ClientHandler` 两种传输都收得到通知。
     pub async fn mcp_list_tools(
         &self,
-        sink: &impl McpEventSink,
+        sink: McpEventSink<'_>,
         server: &ChatMcpServer,
     ) -> Result<Vec<McpTool>, String> {
         let session = self.mcp_get_or_connect_inner(sink, server, true).await?;
-        let mut guard = session.lock().await;
-        let revision = guard.live_tools_revision();
-        if revision != guard.tools_revision {
-            if let Some(service) = guard.transport.clone() {
-                let tools = conn::list_tools(&service, conn::LIST_TOOLS_TIMEOUT).await?;
+        // 会话锁只保护状态迁移：`tools/list` 最长要等 30s，绝不能揣着锁去等
+        // （spec 六.2）。装死的服务器会把同一个 server 的工具调用、状态查询、空闲回收
+        // 全堵在锁上 —— 一轮对话就这么卡住。克隆 Arc → 放锁 → 请求 → 重新锁回写。
+        let (service, revision) = {
+            let guard = session.lock().await;
+            let revision = guard.live_tools_revision();
+            if revision == guard.tools_revision {
+                let tools = guard.tools.clone();
+                drop(guard);
+                session.lock().await.last_used = Instant::now();
+                return Ok(tools);
+            }
+            (guard.transport.clone(), revision)
+        };
+        if let Some(service) = service {
+            let tools = conn::list_tools(&service, conn::LIST_TOOLS_TIMEOUT).await?;
+            let mut guard = session.lock().await;
+            // 放锁期间可能已经换过连接（重连 / 配置变更）。只在还是同一条连接时回写，
+            // 否则这批工具属于一个已经不存在的会话。
+            let same_connection = guard
+                .transport
+                .as_ref()
+                .map(|current| Arc::ptr_eq(current, &service))
+                .unwrap_or(false);
+            if same_connection {
                 guard.tools = tools;
                 guard.tools_revision = revision;
                 self.remember_mcp_tools(server, &guard.tools);
             }
         }
+        let mut guard = session.lock().await;
         guard.last_used = Instant::now();
         Ok(guard.tools.clone())
     }
@@ -639,20 +684,15 @@ impl AppState {
     }
 
     /// 主动丢弃某个 server 的会话（重连按钮用），下次调用透明重连。
-    pub async fn mcp_reload_server(&self, sink: &impl McpEventSink, server_id: &str) {
+    pub async fn mcp_reload_server(&self, sink: McpEventSink<'_>, server_id: &str) {
         let removed = {
             let mut pool = self.mcp_sessions.lock().await;
             pool.remove(server_id)
         };
         if let Some(session) = removed {
-            let transport = {
-                let mut guard = session.lock().await;
-                guard.state = McpServerState::Disconnected;
-                guard.take_transport()
-            };
-            close_transport(transport).await;
+            shutdown_session(&session).await;
         }
-        sink.emit_disconnected(server_id);
+        emit_disconnected(sink, server_id);
     }
 
     /// 空闲回收：移除 last_used 超过 idle_timeout 的会话。锁内只收集+移除，无 await。
@@ -688,30 +728,26 @@ impl AppState {
             }
         }
         for (_, session) in &evicted {
-            let transport = {
-                let mut guard = session.lock().await;
-                guard.state = McpServerState::Disconnected;
-                guard.take_transport()
-            };
-            close_transport(transport).await;
+            shutdown_session(session).await;
         }
         evicted
     }
 
     /// 排干连接池：每个会话 Drop transport 触发 abort task + kill 子进程。退出钩子用。
+    ///
+    /// 并发关，不逐个串行等 —— 每条最多等 `TRANSPORT_CLOSE_TIMEOUT`，N 个装死的
+    /// server 串起来能把退出拖到 5N 秒。
     pub async fn mcp_disconnect_all(&self) {
         let drained: Vec<(String, Arc<Mutex<McpSession>>)> = {
             let mut pool = self.mcp_sessions.lock().await;
             pool.drain().collect()
         };
-        for (_, session) in drained {
-            let transport = {
-                let mut guard = session.lock().await;
-                guard.state = McpServerState::Disconnected;
-                guard.take_transport()
-            };
-            close_transport(transport).await;
-        }
+        futures::future::join_all(
+            drained
+                .iter()
+                .map(|(_, session)| async move { shutdown_session(session).await }),
+        )
+        .await;
     }
 
     /// 断开并移除单个 server 的持久会话（插件关闭 / 卸载时用）。
@@ -721,14 +757,19 @@ impl AppState {
             pool.remove(server_id)
         };
         if let Some(session) = session {
-            let transport = {
-                let mut guard = session.lock().await;
-                guard.state = McpServerState::Disconnected;
-                guard.take_transport()
-            };
-            close_transport(transport).await;
+            shutdown_session(&session).await;
         }
     }
+}
+
+/// 把一条已经从池里摘掉的会话关干净：标 Disconnected、摘 transport、关连接。
+async fn shutdown_session(session: &Arc<Mutex<McpSession>>) {
+    let transport = {
+        let mut guard = session.lock().await;
+        guard.state = McpServerState::Disconnected;
+        guard.take_transport()
+    };
+    close_transport(transport).await;
 }
 
 /// 关掉一条 MCP 连接。
@@ -957,7 +998,7 @@ mod tests {
         let state = test_app_state();
         let server = http_server(url);
         let result = state
-            .mcp_call_tool(&(), &server, "echo", serde_json::json!({}))
+            .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
             .await
             .expect("404 should transparently reconnect and retry");
         assert_eq!(result.content, "echo: ok");
@@ -971,7 +1012,7 @@ mod tests {
         let state = test_app_state();
         let server = http_server(url);
         let err = state
-            .mcp_call_tool(&(), &server, "echo", serde_json::json!({}))
+            .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
             .await
             .expect_err("500 should surface as error");
         assert!(err.contains("500"), "got: {err}");
@@ -1170,12 +1211,12 @@ mod tests {
         let server = http_server(url);
 
         let first = state
-            .mcp_call_tool(&(), &server, "echo", serde_json::json!({}))
+            .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
             .await
             .expect("first call ok");
         assert_eq!(first.content, "echo: ok");
         let second = state
-            .mcp_call_tool(&(), &server, "echo", serde_json::json!({}))
+            .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
             .await
             .expect("second call ok");
         assert_eq!(second.content, "echo: ok");
@@ -1198,10 +1239,27 @@ mod tests {
         );
     }
 
+    /// stdio 真机用例：起一个 python fake server。
+    ///
+    /// `#[cfg(unix)]` 是刻意的（脚本 + `kill -0` 都吃 unix），**代价是 Windows 上
+    /// `cargo test` 完全不编译这个模块** —— 本地全绿不代表这里绿。CI 在 macOS runner 上
+    /// 跑 `cargo test` 就是为了守住这块；改动本模块引用的类型时别只看本地结果。
     #[cfg(unix)]
     mod stdio {
         use super::*;
         use std::io::Write;
+
+        /// 进程还活着吗。`kill -0`：进程不存在则失败。
+        ///
+        /// 不能用 `service.is_closed()` 代替 —— rmcp 的服务循环退出时不 cancel token，
+        /// 那个方法对池里的连接永远返回 false。
+        fn process_alive(pid: u32) -> bool {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
 
         /// 写一个 fake stdio MCP server python 脚本到临时文件，返回脚本路径。
         /// 协议：逐行读 JSON-RPC；initialize/tools/list/tools/call 各自回包；
@@ -1282,7 +1340,7 @@ while True:
 
             for i in 0..10 {
                 let result = state
-                    .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": i }))
+                    .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": i }))
                     .await
                     .expect("call should succeed");
                 assert_eq!(result.content, format!("echo: {i}"));
@@ -1326,7 +1384,7 @@ while True:
             );
 
             let err = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "slow" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "slow" }))
                 .await
                 .expect_err("slow healthy tool should surface a timeout error");
             assert!(
@@ -1339,16 +1397,15 @@ while True:
                 let pool = state.mcp_sessions.lock().await;
                 let session = pool.get(&server.id).expect("session present").clone();
                 drop(pool);
-                let mut guard = session.lock().await;
-                let alive = match &mut guard.transport {
-                    McpTransport::Stdio(conn) => !conn.is_dead() && conn.child_id().is_some(),
-                    _ => false,
-                };
-                assert!(alive, "healthy child must not be killed by a timeout");
-                let pid = match &guard.transport {
-                    McpTransport::Stdio(conn) => conn.child_id(),
-                    _ => None,
-                };
+                let guard = session.lock().await;
+                // 注意不能用 `service.is_closed()` 判活：rmcp 的服务循环退出时并不 cancel
+                // token，它对池里的连接永远返回 false（见 `conn::connection_is_gone`）。
+                // 真正判活得看子进程本身。
+                let pid = guard.child_pid;
+                assert!(
+                    pid.map(process_alive).unwrap_or(false),
+                    "healthy child must not be killed by a timeout"
+                );
                 (guard.handshake_count, pid)
             };
             assert_eq!(
@@ -1384,9 +1441,9 @@ while True:
             let s2 = state.clone();
             let srv2 = server.clone();
             let h1 =
-                tokio::spawn(async move { s1.mcp_get_or_connect(&(), &srv1).await.map(|_| ()) });
+                tokio::spawn(async move { s1.mcp_get_or_connect(None, &srv1).await.map(|_| ()) });
             let h2 =
-                tokio::spawn(async move { s2.mcp_get_or_connect(&(), &srv2).await.map(|_| ()) });
+                tokio::spawn(async move { s2.mcp_get_or_connect(None, &srv2).await.map(|_| ()) });
             let (r1, r2) = tokio::join!(h1, h2);
             r1.unwrap().expect("connect one ok");
             r2.unwrap().expect("connect two ok");
@@ -1420,7 +1477,7 @@ while True:
                 .insert("KIVIO_DIE_AFTER_CALL".to_string(), "1".to_string());
 
             let first = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "a" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "a" }))
                 .await
                 .expect("first call ok");
             assert_eq!(first.content, "echo: a");
@@ -1429,7 +1486,7 @@ while True:
             tokio::time::sleep(Duration::from_millis(200)).await;
 
             let second = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "b" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "b" }))
                 .await
                 .expect("second call should transparently reconnect");
             assert_eq!(second.content, "echo: b");
@@ -1459,7 +1516,7 @@ while True:
             let server = python_server(&script);
 
             state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "warm" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "warm" }))
                 .await
                 .expect("warmup ok");
 
@@ -1468,7 +1525,7 @@ while True:
             let first = tokio::spawn(async move {
                 first_state
                     .mcp_call_tool(
-                        &(),
+                        None,
                         &first_server,
                         "echo",
                         serde_json::json!({ "text": "hang" }),
@@ -1483,7 +1540,7 @@ while True:
             let second = tokio::time::timeout(Duration::from_millis(500), async move {
                 second_state
                     .mcp_call_tool(
-                        &(),
+                        None,
                         &second_server,
                         "echo",
                         serde_json::json!({ "text": "two" }),
@@ -1513,7 +1570,7 @@ while True:
             let server = python_server(&script);
 
             state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "x" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "x" }))
                 .await
                 .expect("call ok");
             {
@@ -1532,7 +1589,7 @@ while True:
 
             // 回收后下次调用透明重连。
             let again = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "y" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "y" }))
                 .await
                 .expect("reconnect after reap ok");
             assert_eq!(again.content, "echo: y");
@@ -1563,7 +1620,7 @@ while True:
             let server = python_server(&script);
 
             state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "x" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "x" }))
                 .await
                 .expect("call ok");
             // 记录子进程 pid。
@@ -1572,10 +1629,8 @@ while True:
                 let session = pool.get(&server.id).unwrap().clone();
                 drop(pool);
                 let guard = session.lock().await;
-                match &guard.transport {
-                    McpTransport::Stdio(conn) => conn.child_id(),
-                    _ => panic!("expected stdio transport"),
-                }
+                assert!(guard.transport.is_some(), "expected a live stdio transport");
+                guard.child_pid
             };
             assert!(pid.is_some());
 
@@ -1587,13 +1642,7 @@ while True:
             // 给 kill 一点时间生效后确认进程不再存活。
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Some(pid) = pid {
-                // kill -0：进程不存在则失败。
-                let alive = std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                assert!(!alive, "child process should be killed");
+                assert!(!process_alive(pid), "child process should be killed");
             }
             let _ = std::fs::remove_file(&script);
         }
@@ -1605,7 +1654,7 @@ while True:
             let mut server = python_server(&script);
 
             state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "x" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "x" }))
                 .await
                 .expect("call ok");
             let first_fp = {
@@ -1619,7 +1668,7 @@ while True:
             // 改配置（新增 arg）→ fingerprint 变化 → get_or_connect 重建会话。
             server.env.insert("EXTRA".to_string(), "1".to_string());
             state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "y" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "y" }))
                 .await
                 .expect("call ok after config change");
             let second_fp = {
@@ -1740,6 +1789,95 @@ while True:
             stdio_server(python_command(), &["-u", script.to_str().unwrap()])
         }
 
+        /// 一个**只实现 2026-07-28** 的假服务器：对 `initialize` 回 `-32601`
+        /// （规范把这个方法删掉了），只认 `server/discover`。
+        ///
+        /// 现实中这种服务器还不存在，所以这条路只能这么验 —— 而它正是本次改动要防的那件事：
+        /// 不做的话，将来第一台这样的服务器出现时 Kivio 是**连不上**，不是降级。
+        fn write_discover_only_server() -> std::path::PathBuf {
+            let script = r#"#!/usr/bin/env python3
+import sys, json
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        # 规范 2026-07-28 删掉了 initialize：按 JSON-RPC 就该回「没这个方法」。
+        resp = {"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}}
+    elif method == "server/discover":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"public"}}
+    elif method == "tools/list":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}}
+    elif method == "tools/call":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":"echo: new-protocol"}]}}
+    else:
+        resp = {"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}}
+    sys.stdout.write(json.dumps(resp)+"\n")
+    sys.stdout.flush()
+"#;
+            let mut path = std::env::temp_dir();
+            path.push(format!("kivio-fake-mcp-discover-{}.py", uuid::Uuid::new_v4()));
+            let mut file = std::fs::File::create(&path).expect("create discover-only server");
+            file.write_all(script.as_bytes())
+                .expect("write discover-only server");
+            path
+        }
+
+        /// 只支持新协议的服务器必须能连上、能列工具、能调工具。
+        ///
+        /// 判据是 `-32601`：`conn::connect` 先发 `initialize`（现存服务器全走这条，保持零变化），
+        /// 被以「没这个方法」拒掉之后才换 `server/discover` 重试。
+        #[tokio::test]
+        async fn discover_only_server_connects_after_initialize_is_rejected() {
+            let script = write_discover_only_server();
+            let state = test_app_state();
+            let server = python_server(&script);
+
+            let tools = state
+                .mcp_list_tools(None, &server)
+                .await
+                .expect("只支持 2026-07-28 的服务器必须能连上");
+            assert!(
+                tools.iter().any(|tool| tool.name == "echo"),
+                "工具没列出来: {tools:?}"
+            );
+
+            let result = state
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
+                .await
+                .expect("新协议下的 tools/call 必须能用");
+            assert!(result.content.contains("new-protocol"), "{result:?}");
+
+            state.mcp_disconnect_all().await;
+            let _ = std::fs::remove_file(&script);
+        }
+
+        /// 反面：普通失败（服务器起不来）**不该**触发第二次握手 —— 那会白起一个子进程。
+        /// 判据只认 `-32601`，由 `conn::only_method_not_found_suggests_the_new_protocol` 钉住；
+        /// 这条从 app 层确认它确实只握手一次。
+        #[tokio::test]
+        async fn a_server_that_cannot_start_is_not_retried_with_the_new_protocol() {
+            let state = test_app_state();
+            let server = stdio_server("kivio-definitely-not-a-real-binary", &[]);
+            let err = state
+                .mcp_list_tools(None, &server)
+                .await
+                .expect_err("起不来的服务器必须失败");
+            // 报的是启动失败，而不是 discover 那一路的错误。
+            assert!(err.contains("Failed to start MCP server"), "{err}");
+        }
+
         #[tokio::test]
         async fn lost_response_does_not_block_later_request() {
             let script = write_fake_server();
@@ -1754,7 +1892,7 @@ while True:
             );
 
             state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "warm" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "warm" }))
                 .await
                 .expect("warmup ok");
 
@@ -1763,7 +1901,7 @@ while True:
             let first = tokio::spawn(async move {
                 first_state
                     .mcp_call_tool(
-                        &(),
+                        None,
                         &first_server,
                         "echo",
                         serde_json::json!({ "text": "hang" }),
@@ -1774,7 +1912,7 @@ while True:
 
             let second = tokio::time::timeout(
                 Duration::from_millis(500),
-                state.mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "two" })),
+                state.mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "two" })),
             )
             .await
             .expect("later request must bypass the lost response")
@@ -1824,7 +1962,7 @@ while True:
             );
 
             let result = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "ping" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "ping" }))
                 .await
                 .expect("server ping should be answered and string response id accepted");
             assert_eq!(result.content, "echo: ping");
@@ -1844,7 +1982,7 @@ while True:
             let server = python_server(&script);
 
             let first = state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect("initial paginated tools/list");
             assert_eq!(
@@ -1857,7 +1995,7 @@ while True:
 
             state
                 .mcp_call_tool(
-                    &(),
+                    None,
                     &server,
                     "echo",
                     serde_json::json!({ "text": "change" }),
@@ -1865,7 +2003,7 @@ while True:
                 .await
                 .expect("change notification call");
             let refreshed = state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect("tools/list should refresh after list_changed");
             assert!(refreshed.iter().any(|tool| tool.name == "dynamic"));
@@ -1882,7 +2020,7 @@ while True:
             let server = python_server(&script);
 
             let tools = state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect("initial list ok");
             assert!(tools.iter().any(|tool| tool.name == "echo"));
@@ -1917,14 +2055,14 @@ while True:
             let server = python_server(&script);
 
             state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect("initial list ok");
             state.mcp_disconnect_all().await;
             std::fs::remove_file(&script).expect("remove fake server to force same-config failure");
 
             state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect_err("same config should now fail to reconnect");
             assert!(state
@@ -1941,7 +2079,7 @@ while True:
             let mut changed = server.clone();
             changed.command = "kivio-definitely-missing-cmd".to_string();
             state
-                .mcp_list_tools(&(), &changed)
+                .mcp_list_tools(None, &changed)
                 .await
                 .expect_err("changed config must fail independently");
             assert!(
@@ -1963,7 +2101,7 @@ while True:
             let server = stdio_server("kivio-definitely-missing-cmd", &[]);
 
             state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect_err("first discovery connect must fail");
             let session = {
@@ -1975,7 +2113,7 @@ while True:
             assert_eq!(session.lock().await.consecutive_connect_failures, 1);
 
             let second = state
-                .mcp_list_tools(&(), &server)
+                .mcp_list_tools(None, &server)
                 .await
                 .expect_err("second discovery should honor cooldown");
             assert!(
@@ -1989,7 +2127,7 @@ while True:
             );
 
             assert!(
-                state.mcp_get_or_connect(&(), &server).await.is_err(),
+                state.mcp_get_or_connect(None, &server).await.is_err(),
                 "explicit path retries immediately and still fails"
             );
             assert_eq!(
@@ -2007,7 +2145,7 @@ while True:
             let state = test_app_state();
             let server = stdio_server("kivio-definitely-missing-cmd", &[]);
             assert!(
-                state.mcp_get_or_connect(&(), &server).await.is_err(),
+                state.mcp_get_or_connect(None, &server).await.is_err(),
                 "missing command must fail"
             );
             assert!(state.mcp_cached_tools(&server).await.is_none());
@@ -2040,7 +2178,7 @@ while True:
                 .insert("KIVIO_DELAY_CALL_MS".to_string(), "2500".to_string());
 
             let err = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "slow" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "slow" }))
                 .await
                 .expect_err("1s timeout should fail on a 2.5s tool");
             assert!(
@@ -2050,7 +2188,7 @@ while True:
 
             state.settings_write().chat_tools.tool_timeout_ms = 5_000;
             let result = state
-                .mcp_call_tool(&(), &server, "echo", serde_json::json!({ "text": "slow" }))
+                .mcp_call_tool(None, &server, "echo", serde_json::json!({ "text": "slow" }))
                 .await
                 .expect("5s timeout should succeed on the same reused session");
             assert_eq!(result.content, "echo: slow");
