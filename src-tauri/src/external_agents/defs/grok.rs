@@ -198,7 +198,9 @@ mod tests {
             .send(SessionCommand::RunTurn {
                 prompt: "Reply with exactly the token GROK_SMOKE_OK and nothing else.".to_string(),
                 model: None,
-                reasoning: None,
+                // 必须与 connect 时的 reasoning 一致：grok 的 reasoning 是启动参数，
+                // 不一致会走 ReasoningAction::Reconnect 直接返回 NEEDS_RECONNECT，一轮都跑不到。
+                reasoning: Some("low".to_string()),
                 images: Vec::new(),
                 events: events_tx,
                 done: done_tx,
@@ -226,5 +228,21 @@ mod tests {
         eprintln!("grok smoke text: {text:?}");
         assert!(matches!(result, Ok(Ok(Ok(())))), "ACP turn failed: {result:?}");
         assert!(text.contains("GROK_SMOKE_OK"), "got: {text:?}");
+        // 分子必须真的到手：grok 既不发 `usage_update` 也不填 `result.usage`，用量只在
+        // `result._meta` 里（见 `acp::usage_from_prompt_result`）。少了那条路这里恒为空，
+        // 上下文条会掉到字符估算兜底 —— 空会话第一轮实测 14.8K，估算差一个数量级。
+        let usage = captured
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .expect("grok 未上报用量：_meta 读取路径断了");
+        eprintln!("grok smoke usage: {usage:?}");
+        assert!(
+            usage.total_tokens.unwrap_or(0) > 0,
+            "用量事件到了但分子是 0: {usage:?}"
+        );
     }
 }

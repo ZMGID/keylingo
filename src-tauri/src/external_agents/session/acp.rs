@@ -841,6 +841,41 @@ fn format_acp_usage(usage: &Value) -> Option<crate::chat::model::ModelUsage> {
     }
 }
 
+/// 从 `session/prompt` 的 result 里取用量，两条路依次试：
+///
+/// 1. `result.usage` —— ACP 官方（UNSTABLE）字段，opencode 在发。
+/// 2. `result._meta` —— grok 私有位置。**grok 既不发 `usage_update`，也不填 `result.usage`**，
+///    只在 `_meta` 里给（2026-07-30 本机 grok 0.2.114 实测），所以少了这一路 grok 的分子
+///    恒为 0，用量条一路掉到字符估算兜底 —— 而 grok 空会话第一轮就是 14.8K（内置提示很长），
+///    估算差一个数量级。
+///
+/// 走 `_meta` 时用它显式给的 `totalTokens` 作上下文占用，**不自己按分量累加**：grok 的
+/// `cachedReadTokens` 是 `inputTokens` 的子集（实测 14870 含 128 cache，`totalTokens 14893
+/// = 14870 + 23 output`），与 `format_acp_usage` 假设的 opencode「四项并列」口径相反，
+/// 用那套 parser 会把 cache 双算。信它自报的 total 就绕开了整个口径分歧。
+///
+/// 取 `_meta` **顶层**而非 `_meta.usage`：带工具调用的一轮里顶层是**最后一次模型往返**
+/// （实测 15137），`_meta.usage` 是本 prompt 内所有往返的**累计**（30113 / `numTurns: 2`）。
+/// 上下文占用要前者，用累计值会随轮数虚涨。
+fn usage_from_prompt_result(result: &Value) -> Option<crate::chat::model::ModelUsage> {
+    if let Some(usage) = result.get("usage").and_then(format_acp_usage) {
+        return Some(usage);
+    }
+    let meta = result.get("_meta")?;
+    let field = |key: &str| meta.get(key).and_then(|v| v.as_u64());
+    let total = field("totalTokens").filter(|v| *v > 0)?;
+    Some(crate::chat::model::ModelUsage {
+        input_tokens: field("inputTokens"),
+        output_tokens: field("outputTokens"),
+        total_tokens: Some(total),
+        cached_input_tokens: field("cachedReadTokens").filter(|v| *v > 0),
+        cache_creation_input_tokens: field("cachedWriteTokens").filter(|v| *v > 0),
+        reasoning_tokens: field("reasoningTokens").filter(|v| *v > 0),
+        // 窗口不在这里给（grok 在 session/new 的 `_meta.totalContextTokens`，已由模型探测读走）。
+        context_window_tokens: None,
+    })
+}
+
 /// 解析 ACP `session/update` 的 `usage_update` 变体（官方 RFD「Session Usage and Context
 /// Status」）。字段**平铺在 `update` 下**，不嵌套在 `usage` 对象里：
 ///
@@ -1516,11 +1551,7 @@ impl AcpSession {
             }
 
             if value.get("id").and_then(|v| v.as_u64()) == Some(prompt_id) {
-                if let Some(usage) = value
-                    .get("result")
-                    .and_then(|r| r.get("usage"))
-                    .and_then(format_acp_usage)
-                {
+                if let Some(usage) = value.get("result").and_then(usage_from_prompt_result) {
                     let _ = events.send(UnifiedAgentEvent::Usage { usage }).await;
                 }
                 return Ok(());
@@ -2243,6 +2274,69 @@ mod tests {
             "cachedReadTokens": 0, "cachedWriteTokens": 0, "thoughtTokens": 0
         }))
         .is_none());
+    }
+
+    /// grok 0.2.114 本机实测原文（2026-07-30）：`result` 里**没有** `usage`，用量全在 `_meta`。
+    #[test]
+    fn prompt_result_reads_grok_meta_usage() {
+        let result = json!({
+            "stopReason": "end_turn",
+            "_meta": {
+                "sessionId": "019fb3a1-b5d8-7a30-9a49-56c47a1c8df6",
+                "totalTokens": 14893, "modelId": "grok-4.5",
+                "inputTokens": 14870, "outputTokens": 23,
+                "cachedReadTokens": 128, "reasoningTokens": 21,
+                "usage": { "inputTokens": 14870, "outputTokens": 23, "totalTokens": 14893,
+                           "cachedReadTokens": 128, "reasoningTokens": 21, "numTurns": 1 }
+            }
+        });
+        let usage = usage_from_prompt_result(&result).expect("grok 的 _meta 必须被读到");
+        // 信 grok 自报的 total：它的 cachedRead ⊆ input（14870 + 23 = 14893），
+        // 按 opencode 那套并列口径累加会变成 15021（cache 双算）。
+        assert_eq!(usage.total_tokens, Some(14_893));
+        assert_eq!(usage.input_tokens, Some(14_870));
+        assert_eq!(usage.cached_input_tokens, Some(128));
+    }
+
+    /// 带工具调用的一轮：`_meta` 顶层 = 最后一次模型往返，`_meta.usage` = 本 prompt 累计。
+    /// 上下文占用取前者，取后者会随 `numTurns` 虚涨（实测 15137 vs 30113）。
+    #[test]
+    fn prompt_result_prefers_last_call_over_cumulative_usage() {
+        let result = json!({
+            "stopReason": "end_turn",
+            "_meta": {
+                "totalTokens": 15137, "inputTokens": 15108, "outputTokens": 29,
+                "cachedReadTokens": 14848, "reasoningTokens": 24,
+                "usage": { "inputTokens": 30034, "outputTokens": 79, "totalTokens": 30113,
+                           "cachedReadTokens": 29696, "modelCalls": 2, "numTurns": 2 }
+            }
+        });
+        let usage = usage_from_prompt_result(&result).expect("应读到用量");
+        assert_eq!(usage.total_tokens, Some(15_137));
+    }
+
+    /// 官方 `result.usage` 优先于 `_meta`：opencode 那条路不能被 grok 分支改口径。
+    #[test]
+    fn prompt_result_prefers_official_usage_field() {
+        let result = json!({
+            "usage": { "inputTokens": 11685, "outputTokens": 4,
+                       "thoughtTokens": 11, "cachedReadTokens": 1792 },
+            "_meta": { "totalTokens": 999_999 }
+        });
+        let usage = usage_from_prompt_result(&result).expect("应读官方字段");
+        assert_eq!(usage.total_tokens, Some(13_492)); // 四项并列相加，不是 _meta 的 999999
+    }
+
+    #[test]
+    fn prompt_result_without_usage_anywhere_is_none() {
+        assert!(usage_from_prompt_result(&json!({ "stopReason": "end_turn" })).is_none());
+        // `_meta` 存在但只有非用量字段（cursor/opencode 的 result 形状）——不得造出假用量。
+        assert!(usage_from_prompt_result(&json!({
+            "stopReason": "end_turn", "_meta": { "sessionId": "s1" }
+        }))
+        .is_none());
+        // totalTokens 为 0 的空轮（斜杠命令）：不得覆盖真实值。
+        assert!(usage_from_prompt_result(&json!({ "_meta": { "totalTokens": 0 } })).is_none());
     }
 
     #[test]
