@@ -19,7 +19,12 @@ export interface ConversationLocalState {
   pendingStreamDone: Record<string, () => Promise<void>>
   streamSnapshots: Record<string, ConversationStreamSnapshot>
   streamErrors: Record<string, string>
-  pendingToolConfirms: Record<string, ChatToolConfirmPayload>
+  /**
+   * 每会话一条待审批队列（不是单个）。claude 会在一条消息里并行调多个工具，
+   * 后端也是按 request_id 并发挂着等的；这里若只留一个槽位，第二条询问会覆盖第一条，
+   * 用户没看见的那条会在后端超时后被判成「用户拒绝」。
+   */
+  pendingToolConfirms: Record<string, ChatToolConfirmPayload[]>
   pendingSessionConsents: Record<string, ChatSessionConsentPayload>
 }
 

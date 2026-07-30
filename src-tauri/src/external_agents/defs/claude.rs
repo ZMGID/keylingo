@@ -159,8 +159,14 @@ pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 /// - `bypassPermissions`（默认档）：CLI 在咨询回调**之前**就放行一切，加了 flag 等于空转，
 ///   但会顺带把 `AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode` 塞进工具表
 ///   （本机实测：带 flag 的 init 有这三个，不带的没有）——那三个我们还答不了；
-/// - `plan` / `acceptEdits`：今天的行为是「越权的操作被 CLI 直接拒」，加了 flag 会变成
-///   「开始弹卡片」。那是**好**的改动，但属于产品决策，等定了默认档一起放开。
+/// - `auto` / `dontAsk`：CLI 自己那套分类器 / 白名单就是这两档的全部意义，加 flag 会把
+///   它们变成「每次问」，等于抹掉档位差异；
+/// - `plan` / `acceptEdits`：**代价比这里原先写的大**。官方 headless 文档原文是
+///   「Other shell commands and network requests still need an `--allowedTools` entry or a
+///   `permissions.allow` rule, otherwise **the run aborts** when one is attempted」——
+///   越权操作不是「那一次调用被拒」，是**整轮崩掉**（用户选了「接受编辑」、claude 跑一句
+///   `npm test` 就没了）。按官方语义这两档其实**必须**带上这个 flag 才完整；今天不带是
+///   已知的半残状态，等默认档的产品决策一起放开。
 ///
 /// 值就是字面量 `stdio`（不是某个 MCP 工具名）。两条独立证据：
 /// 1. 二进制里 `ekm(mode, …)`：`if(mode==="stdio") return t.createCanUseTool(n)`，
@@ -260,6 +266,17 @@ pub fn claude_session_id_from_args(args: &[String]) -> Option<String> {
         .find(|pair| pair[0] == "--session-id" || pair[0] == "--resume")
         .map(|pair| pair[1].clone())
         .filter(|id| !id.is_empty())
+}
+
+/// 从启动参数读回 `--model` 的值。
+///
+/// 常驻会话要知道「这个进程现在跑的是哪个模型」才能判断本轮要不要发 `set_model`；
+/// 和 session id 一样，这个事实只存在于我们自己拼的 argv 里。
+pub fn claude_model_from_args(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == "--model")
+        .map(|pair| pair[1].clone())
+        .filter(|model| !model.is_empty())
 }
 
 pub const CLAUDE_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {

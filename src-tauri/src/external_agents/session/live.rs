@@ -5,6 +5,10 @@
 //! reachable only through an `mpsc::Sender<SessionCommand>` — the registry never holds the
 //! `Child` or any lock across a turn await, only the cheap clonable control sender.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
@@ -27,8 +31,10 @@ pub struct ApprovalAsk {
     /// 工具入参原文，用于卡片上的摘要。
     pub input: serde_json::Value,
     /// CLI 标记「这个工具要用户在卡片上直接作答」（`AskUserQuestion` / `ExitPlanMode`）。
-    /// 那类工具批准之后还会再发一条我们尚未实现的 `request_user_dialog`，所以一律直接拒
-    /// （见 `claude_stream::approval_verdict`）。
+    /// 官方答法是从**同一条** `can_use_tool` 通道回 `allow + updatedInput.answers`。
+    /// `AskUserQuestion` 已经走通（宿主侧转成 Kivio 自己的问用户卡片，答复经
+    /// `ApprovalDecision::updated_input` 回去）；其余仍当场拒
+    /// （见 `claude_stream::APPROVAL_INTERACTIVE_UNSUPPORTED`）。
     pub requires_user_interaction: bool,
 }
 
@@ -37,6 +43,12 @@ pub struct ApprovalAsk {
 pub struct ApprovalDecision {
     pub request_id: String,
     pub approved: bool,
+    /// 批准时要**改写**给 CLI 的工具入参（官方 `PermissionResult.updatedInput`）。
+    ///
+    /// 存在的唯一理由是 `AskUserQuestion`：官方答法就是从这条通道回
+    /// `allow + updatedInput.answers`（见 `claude_stream::APPROVAL_INTERACTIVE_UNSUPPORTED`），
+    /// 没有第二条控制请求。`None` = 不改入参，CLI 用原入参。
+    pub updated_input: Option<serde_json::Value>,
 }
 
 /// 一轮的权限审批通道。宿主持 `requests` 的接收端与 `decisions` 的发送端；会话持另一半。
@@ -133,6 +145,30 @@ pub struct LiveSession {
     pub child_pid: Option<u32>,
     /// 这个进程已经服过几轮（注册即 1，之后每次被复用 +1）。同样是纯元数据。
     pub turns_served: u32,
+    /// 本会话当前有没有在飞的轮次。
+    ///
+    /// `last_activity` 只在轮**开始**时写一次，轮内的帧不刷新它 —— 而一轮跑十几分钟是
+    /// 合法的（没有轮内超时）。少了这一位，清扫器和 LRU 会把正在干活的会话回收掉：
+    /// 这一轮不会断（调用方自己持着 `control` 克隆），但轮末最后一个 sender 落地 ⇒ actor
+    /// 关掉进程 ⇒ 下一轮白付一次冷启动。结果是**越重度使用的会话越吃不到常驻**，而且
+    /// 没有任何可观测信号。
+    pub busy: Arc<AtomicBool>,
+}
+
+/// 轮次期间把会话标成 busy，任何退出路径（含 `?` 与 panic）都会清掉。
+pub struct TurnBusyGuard(Arc<AtomicBool>);
+
+impl TurnBusyGuard {
+    pub fn new(busy: Arc<AtomicBool>) -> Self {
+        busy.store(true, Ordering::Release);
+        Self(busy)
+    }
+}
+
+impl Drop for TurnBusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl LiveSession {
@@ -147,9 +183,16 @@ impl LiveSession {
     }
 
     /// Reclaimable: the actor already exited, or the session has been idle past `ttl`.
+    ///
+    /// 有在飞轮次时永不可回收 —— 见 `busy`。
     pub fn is_idle(&self, ttl: Duration) -> bool {
-        self.control.is_closed()
-            || Instant::now().saturating_duration_since(self.last_activity) >= ttl
+        if self.control.is_closed() {
+            return true;
+        }
+        if self.busy.load(Ordering::Acquire) {
+            return false;
+        }
+        Instant::now().saturating_duration_since(self.last_activity) >= ttl
     }
 }
 
@@ -168,6 +211,7 @@ mod tests {
                 last_activity: Instant::now(),
                 child_pid: None,
                 turns_served: 1,
+                busy: Arc::new(AtomicBool::new(false)),
             },
             rx,
         )

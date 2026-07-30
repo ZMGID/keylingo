@@ -811,6 +811,23 @@ impl AppState {
         None
     }
 
+    /// 把这条会话标成「有在飞轮次」，返回的 guard 落地时自动清掉。
+    ///
+    /// 轮次开始后调一次即可（复用与新建两条路都走得到），清扫器与 LRU 在此期间会跳过它。
+    /// 不存在（刚被回收）时返回 `None` —— 那种情况下这一轮自己持着 `control`，照样跑完。
+    pub fn mark_external_live_session_busy(
+        &self,
+        conversation_id: &str,
+    ) -> Option<crate::external_agents::session::live::TurnBusyGuard> {
+        let map = self
+            .external_live_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.get(conversation_id).map(|session| {
+            crate::external_agents::session::live::TurnBusyGuard::new(session.busy.clone())
+        })
+    }
+
     pub fn register_external_live_session(
         &self,
         conversation_id: String,
@@ -823,12 +840,14 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Reclaim idle sessions (dropping each entry closes its actor + child) and any whose
-        // actor already exited.
+        // actor already exited. 有在飞轮次的会话不参与回收（见 `LiveSession::busy`）。
         map.retain(|_, s| !s.is_idle(IDLE_TTL));
         // Bound concurrent live processes: evict least-recently-used until under the cap.
+        // 同样跳过在飞的 —— 正在跑长轮次的那条恰好 `last_activity` 最旧，不排除就一定被它选中。
         while map.len() >= MAX_LIVE_SESSIONS {
             let Some(oldest) = map
                 .iter()
+                .filter(|(_, s)| !s.busy.load(std::sync::atomic::Ordering::Acquire))
                 .min_by_key(|(_, s)| s.last_activity)
                 .map(|(k, _)| k.clone())
             else {
@@ -858,12 +877,41 @@ impl AppState {
         before - map.len()
     }
 
-    /// Drop all live sessions (e.g. on app shutdown). Each actor closes its child process.
-    pub fn close_all_external_live_sessions(&self) {
-        self.external_live_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+    /// 关停所有活的外部 CLI 会话（退出钩子用），**等它们真的退出**。
+    ///
+    /// 只 `clear()` 掉 sender 是不够的：那只是让 actor 在**下一次被 poll 时**才走
+    /// `close()`，而退出钩子后面运行时就随进程走了，actor 永远等不到那一次 poll。
+    /// `kill_on_drop(true)` 同理不触发 —— `Child` 就在那个永不 drop 的 actor 栈帧里。
+    /// 结果是每次退出留下最多 `MAX_LIVE_SESSIONS` 个 CLI 进程，各自还挂着自己拉起的
+    /// MCP stdio 子进程（`kill_on_drop` 也只杀直接子进程，够不到孙子）。
+    ///
+    /// 所以这里显式发 `Close` 并等通道关闭；超时没退的按 pid 杀进程树。按 pid 杀是
+    /// `LiveSession::child_pid` 那条「绝不按 pid 杀」规则的**唯一例外** —— 那条规则防的是
+    /// 把进程从一个还活着的 actor 底下抽走，而进程退出时这个顾虑已经不存在了。
+    pub async fn close_all_external_live_sessions(&self) {
+        const PER_SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(1_500);
+        let sessions: Vec<crate::external_agents::session::live::LiveSession> = {
+            let mut map = self
+                .external_live_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.drain().map(|(_, session)| session).collect()
+        };
+        futures::future::join_all(sessions.into_iter().map(|session| async move {
+            let _ = session
+                .control
+                .send(crate::external_agents::session::live::SessionCommand::Close)
+                .await;
+            if tokio::time::timeout(PER_SESSION_CLOSE_TIMEOUT, session.control.closed())
+                .await
+                .is_err()
+            {
+                if let Some(pid) = session.child_pid {
+                    crate::native_tools::kill_process_group(pid);
+                }
+            }
+        }))
+        .await;
     }
 
     /// Shared handle to the background-command registry. Returned as a cloned

@@ -155,9 +155,11 @@ mod tests {
     #[ignore = "requires live grok login + network"]
     async fn grok_live_smoke() {
         use crate::external_agents::detection::detect_single_agent;
-        use crate::external_agents::session::acp::run_acp_session;
-        use crate::external_agents::spawn::{resolve_binary, spawn_agent};
+        use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
+        use crate::external_agents::session::live::SessionCommand;
+        use crate::external_agents::spawn::resolve_binary;
         use crate::external_agents::types::UnifiedAgentEvent;
+        use tokio::sync::{mpsc, oneshot};
 
         let cwd = std::env::temp_dir();
         let detected = detect_single_agent(&GROK_AGENT_DEF, &cwd).await;
@@ -185,25 +187,34 @@ mod tests {
             },
             None,
         );
-        let mut spawned = spawn_agent(&GROK_AGENT_DEF, &bin, &args, &cwd, &Default::default())
+        // 走生产用的常驻 actor（此前这里驱动的是只被真机测试吊着命的一次性 `run_acp_session`）。
+        let session = AcpSession::connect(&bin, &args, &cwd, None, Some("low"), &[], None)
             .await
-            .expect("spawn grok");
-        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            run_acp_session(
-                &mut spawned.child,
-                "Reply with exactly the token GROK_SMOKE_OK and nothing else.",
-                &cwd,
-                None,
-                &[],
-                |event| events.borrow_mut().push(event),
-                || false,
-            ),
-        )
-        .await;
-        let _ = spawned.child.start_kill();
-        let captured = events.into_inner();
+            .expect("connect grok acp session");
+        let control = spawn_acp_session_actor(session);
+        let (events_tx, mut events_rx) = mpsc::channel::<UnifiedAgentEvent>(256);
+        let (done_tx, done_rx) = oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                prompt: "Reply with exactly the token GROK_SMOKE_OK and nothing else.".to_string(),
+                model: None,
+                reasoning: None,
+                images: Vec::new(),
+                events: events_tx,
+                done: done_tx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                out.push(event);
+            }
+            out
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), done_rx).await;
+        let captured = collector.await.expect("collector task");
         eprintln!("grok smoke: {} events, result={result:?}", captured.len());
         let text: String = captured
             .iter()
@@ -213,7 +224,7 @@ mod tests {
             })
             .collect();
         eprintln!("grok smoke text: {text:?}");
-        assert!(matches!(result, Ok(Ok(()))), "ACP turn failed: {result:?}");
+        assert!(matches!(result, Ok(Ok(Ok(())))), "ACP turn failed: {result:?}");
         assert!(text.contains("GROK_SMOKE_OK"), "got: {text:?}");
     }
 }

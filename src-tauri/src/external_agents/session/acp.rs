@@ -31,9 +31,6 @@ pub struct AcpModelsProbe {
 /// `session/new` each get their own budget so a slow one doesn't starve the other.
 const ACP_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const ACP_SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(30);
-/// Wall-clock guard for the one-shot `run_acp_session` prompt phase (A3): external CLIs run long
-/// legitimate tasks, so this only trips on a truly hung stdout — not a normal long turn.
-const ACP_ONESHOT_WALL_CLOCK: Duration = Duration::from_secs(600);
 
 use crate::external_agents::spawn::{fold_stderr, join_stderr_tail as join_tail};
 
@@ -1098,246 +1095,6 @@ fn acp_apply_session_update(
             }
         }
     }
-}
-
-pub async fn run_acp_session(
-    child: &mut Child,
-    prompt: &str,
-    cwd: &Path,
-    model: Option<&str>,
-    mcp_servers: &[AcpMcpServer],
-    mut sink: impl FnMut(UnifiedAgentEvent),
-    cancel_check: impl Fn() -> bool,
-) -> Result<(), String> {
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "stdin unavailable".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "stdout unavailable".to_string())?;
-
-    let mut expected_id: u64 = 1;
-    let mut next_id: u64 = 2;
-    let mut session_id: Option<String> = None;
-    let mut prompt_request_id: Option<u64> = None;
-    let mut set_model_request_id: Option<u64> = None;
-    let mut model_config_id: Option<String> = None;
-    let mut update_state = AcpUpdateState::default();
-    let mut finished = false;
-
-    write_rpc(
-        &mut stdin,
-        1,
-        "initialize",
-        json!({
-            "protocolVersion": ACP_PROTOCOL_VERSION,
-            "clientCapabilities": { "terminal": false },
-            "clientInfo": { "name": "kivio", "version": "external-agents" },
-        }),
-    )
-    .await?;
-
-    let mut reader = BufReader::new(stdout).lines();
-
-    // A3: wall-clock guard so a hung stdout (prompt response never arrives / EOF never comes)
-    // can't spin the loop forever and later block `child.wait()`.
-    let wall_clock_start = std::time::Instant::now();
-
-    while !finished {
-        if cancel_check() {
-            if let Some(ref sid) = session_id {
-                let _ = write_rpc(
-                    &mut stdin,
-                    next_id,
-                    "session/cancel",
-                    json!({ "sessionId": sid }),
-                )
-                .await;
-            }
-            let _ = stdin.shutdown().await;
-            let _ = child.start_kill();
-            return Err("cancelled".to_string());
-        }
-
-        if wall_clock_start.elapsed() > ACP_ONESHOT_WALL_CLOCK {
-            let _ = stdin.shutdown().await;
-            let _ = child.start_kill();
-            return Err("ACP session timed out (wall-clock)".to_string());
-        }
-
-        let line = match timeout(Duration::from_millis(200), reader.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => {
-                if !finished {
-                    return Err("ACP session exited before completion".to_string());
-                }
-                break;
-            }
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => continue,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let value: Value =
-            serde_json::from_str(line.trim()).map_err(|e| format!("invalid ACP json: {e}"))?;
-
-        if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
-            if method == "session/request_permission" {
-                let option_id =
-                    choose_permission_outcome(value.get("params").and_then(|p| p.get("options")));
-                if let (Some(id), Some(option_id)) = (value.get("id"), option_id) {
-                    write_rpc_result(
-                        &mut stdin,
-                        id,
-                        json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
-                    )
-                    .await?;
-                }
-                continue;
-            }
-            if method == "session/update" {
-                if let Some(update) = value
-                    .get("params")
-                    .and_then(|p| p.get("update"))
-                    .and_then(|v| v.as_object())
-                {
-                    acp_apply_session_update(update, &mut update_state, &mut sink);
-                }
-                continue;
-            }
-        }
-
-        if let Some(err) = rpc_error_message(&value) {
-            if value.get("id").and_then(|v| v.as_u64()) != Some(expected_id) {
-                continue;
-            }
-            return Err(err);
-        }
-
-        if value.get("id").and_then(|v| v.as_u64()) != Some(expected_id) {
-            continue;
-        }
-
-        let result = match value.get("result") {
-            Some(r) => r,
-            None => continue,
-        };
-
-        if expected_id == 1 {
-            expected_id = next_id;
-            write_rpc(
-                &mut stdin,
-                next_id,
-                "session/new",
-                build_session_new_params(cwd, mcp_servers),
-            )
-            .await?;
-            next_id += 1;
-            continue;
-        }
-
-        if expected_id == 2 {
-            session_id = result
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            if let Some(config_options) = result.get("configOptions").and_then(|v| v.as_array()) {
-                for raw_option in config_options {
-                    if let Some(option) = raw_option.as_object() {
-                        let id = option.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if id == "model"
-                            || option.get("category").and_then(|v| v.as_str()) == Some("model")
-                        {
-                            model_config_id = Some(id.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            let chosen = model.filter(|m| !m.is_empty() && *m != "default");
-            if session_id.is_some() && chosen.is_some() {
-                set_model_request_id = Some(next_id);
-                expected_id = next_id;
-                let sid = session_id.clone().unwrap();
-                let chosen = chosen.unwrap();
-                if model_config_id.is_some() {
-                    write_rpc(
-                        &mut stdin,
-                        next_id,
-                        "session/set_config_option",
-                        json!({ "sessionId": sid, "configId": model_config_id, "value": chosen }),
-                    )
-                    .await?;
-                } else {
-                    write_rpc(
-                        &mut stdin,
-                        next_id,
-                        "session/set_model",
-                        json!({ "sessionId": sid, "modelId": chosen }),
-                    )
-                    .await?;
-                }
-                next_id += 1;
-                continue;
-            }
-
-            if session_id.is_none() {
-                return Err("invalid session/new response".to_string());
-            }
-
-            prompt_request_id = Some(next_id);
-            expected_id = next_id;
-            write_rpc(
-                &mut stdin,
-                next_id,
-                "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": [{ "type": "text", "text": prompt }],
-                }),
-            )
-            .await?;
-            next_id += 1;
-            continue;
-        }
-
-        if set_model_request_id.is_some()
-            && value.get("id").and_then(|v| v.as_u64()) == set_model_request_id
-        {
-            set_model_request_id = None;
-            prompt_request_id = Some(next_id);
-            expected_id = next_id;
-            write_rpc(
-                &mut stdin,
-                next_id,
-                "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": [{ "type": "text", "text": prompt }],
-                }),
-            )
-            .await?;
-            next_id += 1;
-            continue;
-        }
-
-        if prompt_request_id.is_some()
-            && value.get("id").and_then(|v| v.as_u64()) == prompt_request_id
-        {
-            if let Some(usage) = result.get("usage").and_then(format_acp_usage) {
-                sink(UnifiedAgentEvent::Usage { usage });
-            }
-            finished = true;
-            let _ = stdin.shutdown().await;
-        }
-    }
-
-    Ok(())
 }
 
 // ===========================================================================================
@@ -2758,60 +2515,95 @@ mod tests {
         }
     }
 
+    /// 一轮真机 ACP 对话，**走生产用的常驻 actor**（`AcpSession::connect` +
+    /// `spawn_acp_session_actor`）。
+    ///
+    /// 此前这条测试驱动的是 `run_acp_session` —— 一个只被它自己吊着命的一次性驱动，
+    /// 也就是同一个协议的第二份实现。改成驱动生产代码后那份实现被删掉了。
     #[tokio::test]
     #[ignore = "requires live cursor-agent login + network"]
     async fn cursor_acp_smoke() {
+        let Some(bin) = which_bin("cursor-agent") else {
+            eprintln!("SKIP: cursor-agent 不在 PATH 上");
+            return;
+        };
         let cwd = std::env::temp_dir();
-        let mut child = crate::external_agents::spawn::cli_command("cursor-agent")
-            .arg("acp")
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn cursor-agent acp");
-
-        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
-        let result = timeout(
-            Duration::from_secs(90),
-            run_acp_session(
-                &mut child,
-                "Reply with exactly the token SMOKE_OK and nothing else.",
-                &cwd,
-                None,
-                &[],
-                |event| events.borrow_mut().push(event),
-                || false,
-            ),
+        let session = match AcpSession::connect(
+            &bin,
+            &["acp".to_string()],
+            &cwd,
+            None,
+            None,
+            &[],
+            None,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
+                return;
+            }
+        };
+        let control = spawn_acp_session_actor(session);
+        let captured = run_one_live_turn(
+            &control,
+            "Reply with exactly the token SMOKE_OK and nothing else.",
         )
         .await;
 
-        let _ = child.start_kill();
-        let captured = events.into_inner();
         eprintln!("=== cursor ACP smoke: {} events ===", captured.len());
         for (i, ev) in captured.iter().enumerate() {
             eprintln!("[{i}] {ev:?}");
         }
         let seq: Vec<&str> = captured.iter().map(event_variant).collect();
         eprintln!("cursor sequence: {seq:?}");
-        match &result {
-            Ok(Ok(())) => eprintln!("cursor run_acp_session: Ok"),
-            Ok(Err(e)) => eprintln!("cursor run_acp_session: Err({e})"),
-            Err(_) => panic!("cursor ACP session HUNG past 90s wall-clock guard"),
-        }
 
         let got_text = captured
             .iter()
             .any(|e| matches!(e, UnifiedAgentEvent::TextDelta { .. }));
         let got_error = captured
             .iter()
-            .any(|e| matches!(e, UnifiedAgentEvent::Error { .. }))
-            || matches!(&result, Ok(Err(_)));
+            .any(|e| matches!(e, UnifiedAgentEvent::Error { .. }));
         assert!(
             got_text || got_error,
-            "expected at least one TextDelta or an Error/Err round-trip, got: {seq:?}"
+            "expected at least one TextDelta or an Error, got: {seq:?}"
         );
+    }
+
+    /// 把一轮跑完并收齐事件。90s 墙钟上限 —— 挂住就是失败，不是慢。
+    async fn run_one_live_turn(
+        control: &tokio::sync::mpsc::Sender<SessionCommand>,
+        prompt: &str,
+    ) -> Vec<UnifiedAgentEvent> {
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<UnifiedAgentEvent>(256);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                prompt: prompt.to_string(),
+                model: None,
+                reasoning: None,
+                images: Vec::new(),
+                events: events_tx,
+                done: done_tx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                out.push(event);
+            }
+            out
+        });
+        match timeout(Duration::from_secs(90), done_rx).await {
+            Ok(Ok(Ok(()))) => eprintln!("turn: Ok"),
+            Ok(Ok(Err(err))) => eprintln!("turn: Err({err})"),
+            Ok(Err(_)) => eprintln!("turn: actor dropped the done channel"),
+            Err(_) => panic!("session HUNG past the 90s wall-clock guard"),
+        }
+        collector.await.expect("collector task")
     }
 
     /// Live proof that L6 recovers cursor's context window from the modelId params.
@@ -2867,44 +2659,50 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live opencode login + network"]
     async fn opencode_acp_reports_usage_and_context_window() {
+        let Some(bin) = which_bin("opencode") else {
+            eprintln!("SKIP: opencode 不在 PATH 上");
+            return;
+        };
         let cwd = std::env::temp_dir();
-        let mut child = crate::external_agents::spawn::cli_command("opencode")
-            .arg("acp")
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn opencode acp");
-
-        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
-        let result = timeout(
-            Duration::from_secs(120),
-            run_acp_session(
-                &mut child,
-                "Reply with exactly the token USAGE_OK and nothing else.",
-                &cwd,
-                None,
-                &[],
-                |event| events.borrow_mut().push(event),
-                || false,
-            ),
-        )
-        .await;
-        let _ = child.start_kill();
-        // 认证失效 / 上游挂起是**环境**问题，不是本层回归：opencode 的默认模型密钥过期时
-        // 整个 turn 会一直等不到响应。这种情况跳过而不是 fail——否则一个过期的 API key
-        // 会伪装成代码回归。真机跑之前先确认 `opencode run hi` 能正常返回。
+        // 走生产用的常驻 actor（此前驱动的是只被真机测试吊着命的一次性 `run_acp_session`）。
+        let session = match AcpSession::connect(&bin, &["acp".to_string()], &cwd, None, None, &[], None).await {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
+                return;
+            }
+        };
+        let control = spawn_acp_session_actor(session);
+        // 这里不用 `run_one_live_turn`：它的墙钟超时是 panic，而 opencode 密钥失效导致的
+        // 挂起是**环境**问题不是本层回归，必须按 SKIP 处理。
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<UnifiedAgentEvent>(256);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                prompt: "Reply with exactly the token USAGE_OK and nothing else.".to_string(),
+                model: None,
+                reasoning: None,
+                images: Vec::new(),
+                events: events_tx,
+                done: done_tx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                out.push(event);
+            }
+            out
+        });
+        let result = timeout(Duration::from_secs(120), done_rx).await;
+        let captured = collector.await.expect("collector task");
         if result.is_err() {
-            eprintln!(
-                "SKIP: opencode ACP 会话在 120s 内没有完成（多为密钥失效/网络问题）。\
-                 先跑 `opencode run hi` 确认 CLI 本身可用。"
-            );
+            eprintln!("SKIP: opencode ACP 会话在 120s 内没有完成（多为密钥失效/网络问题）。先跑 `opencode run hi` 确认 CLI 本身可用。");
             return;
         }
 
-        let captured = events.into_inner();
         let usages: Vec<&crate::chat::model::ModelUsage> = captured
             .iter()
             .filter_map(|e| match e {

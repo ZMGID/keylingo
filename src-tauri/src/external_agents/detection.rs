@@ -495,6 +495,14 @@ pub fn sandbox_options_for(agent_id: &str) -> Vec<RuntimeModelOption> {
             // 对话会突然开始弹卡片。
             ("default", "每次确认"),
             ("acceptEdits", "接受编辑"),
+            // 官方 `--permission-mode` 的另外两档。缺了它们，用户只能在「每次都问」和
+            // 「完全放行」之间跳，中间地带整个拿不到：
+            // - `auto`：带分类器的自动模式，连拒 3 次 / 累计 20 次后自动回落到询问。
+            // - `dontAsk`：只放行 permissions.allow 规则与只读命令集，其余一律拒、不打扰。
+            //   官方为 headless 点名推荐的就是这一档。
+            // （`manual` 是 `default` 的别名，不重复列。）
+            ("auto", "自动"),
+            ("dontAsk", "不打扰 (只放行安全操作)"),
             ("bypassPermissions", "完全 (默认)"),
         ],
         "codex" => &[

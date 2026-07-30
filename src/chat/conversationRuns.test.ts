@@ -46,7 +46,7 @@ describe('collectGeneratingConversationIds', () => {
         'conv-b': { ...createEmptyStreamSnapshot(), streaming: true },
         'conv-c': { ...createEmptyStreamSnapshot(), streaming: false },
       },
-      { 'conv-d': {} },
+      { 'conv-d': [{}], 'conv-e': [] },
     )
     expect(Array.from(ids).sort()).toEqual(['conv-a', 'conv-b', 'conv-d'])
   })

@@ -254,171 +254,6 @@ fn emit_command_execution(
     });
 }
 
-/// Drive a single Codex turn over the app-server JSON-RPC protocol:
-/// `initialize` → `thread/start` (capture threadId) → `turn/start` → consume notifications until
-/// the turn completes/fails. Approval requests are auto-approved; cancellation sends
-/// `turn/interrupt` and returns `Err`.
-pub async fn run_codex_app_server_session(
-    child: &mut Child,
-    prompt: &str,
-    model: Option<&str>,
-    reasoning: Option<&str>,
-    cwd: &Path,
-    mut sink: impl FnMut(UnifiedAgentEvent),
-    cancel_check: impl Fn() -> bool,
-) -> Result<(), String> {
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "stdin unavailable".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "stdout unavailable".to_string())?;
-
-    let cwd_str = cwd.to_string_lossy().to_string();
-    let chosen_model = model.filter(|m| !m.is_empty() && *m != "default");
-    let chosen_effort = reasoning.filter(|r| !r.is_empty() && *r != "default");
-
-    write_rpc(
-        &mut stdin,
-        1,
-        "initialize",
-        json!({
-            "clientInfo": { "name": "kivio", "title": "kivio", "version": "0" },
-        }),
-    )
-    .await?;
-
-    let mut reader = BufReader::new(stdout).lines();
-
-    // Request IDs: 1=initialize, 2=thread/start, 3=turn/start.
-    let thread_start_id: u64 = 2;
-    let turn_start_id: u64 = 3;
-    let interrupt_id: u64 = 4;
-    let mut thread_id: Option<String> = None;
-    let mut turn_started = false;
-    let mut emitted_tools: HashSet<String> = HashSet::new();
-    let mut finished = false;
-
-    while !finished {
-        if cancel_check() {
-            if let Some(ref tid) = thread_id {
-                let _ = write_rpc(
-                    &mut stdin,
-                    interrupt_id,
-                    "turn/interrupt",
-                    json!({ "threadId": tid }),
-                )
-                .await;
-            }
-            let _ = stdin.shutdown().await;
-            let _ = child.start_kill();
-            return Err("cancelled".to_string());
-        }
-
-        let line = match timeout(Duration::from_millis(200), reader.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => {
-                if turn_started {
-                    break;
-                }
-                return Err("codex app-server exited before completion".to_string());
-            }
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => continue,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let value: Value = match serde_json::from_str(line.trim()) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // Server → client request (approval). Identified by having both `method` and `id`.
-        if let (Some(method), Some(id)) = (
-            value.get("method").and_then(|v| v.as_str()),
-            value.get("id"),
-        ) {
-            if let Some(result) = approval_response(method) {
-                write_rpc_result(&mut stdin, id, result).await?;
-                continue;
-            }
-            // Unknown server request: nothing actionable.
-            continue;
-        }
-
-        // Server → client notification (no id, has method).
-        if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
-            let params = value.get("params").cloned().unwrap_or(Value::Null);
-            if map_codex_notification(method, &params, &mut emitted_tools, &mut sink) {
-                finished = true;
-                let _ = stdin.shutdown().await;
-            }
-            continue;
-        }
-
-        // Response to one of our requests.
-        if let Some(err) = value.get("error") {
-            let message = err
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| err.to_string());
-            return Err(message);
-        }
-
-        let id = value.get("id").and_then(|v| v.as_u64());
-        let result = value.get("result");
-        if id == Some(thread_start_id) {
-            thread_id = result
-                .and_then(|r| r.get("thread"))
-                .and_then(|t| t.get("id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let tid = match thread_id.clone() {
-                Some(tid) => tid,
-                None => return Err("invalid thread/start response".to_string()),
-            };
-            let mut turn_params = json!({
-                "threadId": tid,
-                "input": [{ "type": "text", "text": prompt }],
-                "cwd": cwd_str,
-                "approvalPolicy": "never",
-            });
-            if let Some(effort) = chosen_effort {
-                turn_params["effort"] = json!(effort);
-            }
-            if let Some(model) = chosen_model {
-                turn_params["model"] = json!(model);
-            }
-            write_rpc(&mut stdin, turn_start_id, "turn/start", turn_params).await?;
-            continue;
-        }
-        if id == Some(turn_start_id) {
-            turn_started = true;
-            continue;
-        }
-        // id == initialize: send thread/start.
-        if id == Some(1) {
-            let mut params = json!({
-                "cwd": cwd_str,
-                "sandbox": "workspace-write",
-                "approvalPolicy": "never",
-            });
-            if let Some(model) = chosen_model {
-                params["model"] = json!(model);
-            }
-            write_rpc(&mut stdin, thread_start_id, "thread/start", params).await?;
-            continue;
-        }
-    }
-
-    Ok(())
-}
-
 // ===========================================================================================
 // Persistent session (Phase 2): keep the app-server process alive across turns.
 // ===========================================================================================
@@ -1249,59 +1084,89 @@ mod tests {
         }
     }
 
+    /// 起一个真机 codex 常驻会话（生产路径：`connect` + `spawn_codex_session_actor`），
+    /// 跑一轮并收齐事件。`None` = 本机没有可用的 codex，调用方 skip。
+    ///
+    /// 此前这两条真机测试驱动的是 `run_codex_app_server_session` —— 一个只被它们自己吊着命的
+    /// 一次性驱动，即同一协议的第二份实现。改成驱动生产代码后那份实现被删掉了。
+    async fn live_codex_turn(prompt: &str, wall_clock: Duration) -> Option<Vec<UnifiedAgentEvent>> {
+        let bin = match crate::external_agents::spawn::resolve_binary(&crate::external_agents::defs::codex::CODEX_AGENT_DEF).await {
+            Some(bin) => bin,
+            None => {
+                eprintln!("SKIP: 本机没有可用的 codex CLI");
+                return None;
+            }
+        };
+        let cwd = std::env::temp_dir();
+        let session = match CodexAppServerSession::connect(
+            &bin,
+            &["app-server".to_string()],
+            &cwd,
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
+                return None;
+            }
+        };
+        let control = spawn_codex_session_actor(session);
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<UnifiedAgentEvent>(256);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                prompt: prompt.to_string(),
+                model: None,
+                reasoning: None,
+                images: Vec::new(),
+                events: events_tx,
+                done: done_tx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                out.push(event);
+            }
+            out
+        });
+        match tokio::time::timeout(wall_clock, done_rx).await {
+            Ok(Ok(Ok(()))) => eprintln!("turn: Ok"),
+            Ok(Ok(Err(err))) => eprintln!("turn: Err({err})"),
+            Ok(Err(_)) => eprintln!("turn: actor dropped the done channel"),
+            Err(_) => panic!("codex app-server session HUNG past the {wall_clock:?} guard"),
+        }
+        Some(collector.await.expect("collector task"))
+    }
+
     #[tokio::test]
     #[ignore = "requires live codex login + network"]
     async fn codex_app_server_smoke() {
-        use tokio::process::Command;
-        use tokio::time::{timeout, Duration};
-
-        let cwd = std::env::temp_dir();
-        let mut child = Command::new("codex")
-            .arg("app-server")
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn codex app-server");
-
-        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
-        let result = timeout(
-            Duration::from_secs(90),
-            run_codex_app_server_session(
-                &mut child,
-                "Reply with exactly the token SMOKE_OK and nothing else.",
-                None,
-                None,
-                &cwd,
-                |event| events.borrow_mut().push(event),
-                || false,
-            ),
-        )
-        .await;
-
-        let _ = child.start_kill();
-        let captured = events.into_inner();
+        let Some(captured) =
+            live_codex_turn("Reply with exactly the token SMOKE_OK and nothing else.", Duration::from_secs(90))
+                .await
+        else {
+            return;
+        };
         eprintln!("=== codex app-server smoke: {} events ===", captured.len());
         for (i, ev) in captured.iter().enumerate() {
             eprintln!("[{i}] {ev:?}");
         }
         let seq: Vec<&str> = captured.iter().map(event_variant).collect();
         eprintln!("codex sequence: {seq:?}");
-        match &result {
-            Ok(Ok(())) => eprintln!("codex run_codex_app_server_session: Ok"),
-            Ok(Err(e)) => eprintln!("codex run_codex_app_server_session: Err({e})"),
-            Err(_) => panic!("codex app-server session HUNG past 90s wall-clock guard"),
-        }
 
         let got_text = captured
             .iter()
             .any(|e| matches!(e, UnifiedAgentEvent::TextDelta { .. }));
         let got_error = captured
             .iter()
-            .any(|e| matches!(e, UnifiedAgentEvent::Error { .. }))
-            || matches!(&result, Ok(Err(_)));
+            .any(|e| matches!(e, UnifiedAgentEvent::Error { .. }));
         assert!(
             got_text || got_error,
             "expected at least one TextDelta or a clean Error, got: {seq:?}"
@@ -1317,46 +1182,21 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live codex login + network"]
     async fn codex_usage_uses_last_snapshot_not_cumulative_total() {
-        use tokio::process::Command;
-        use tokio::time::{timeout, Duration};
-
-        async fn one_turn(prompt: &str) -> Vec<crate::chat::model::ModelUsage> {
-            let cwd = std::env::temp_dir();
-            let mut child = Command::new("codex")
-                .arg("app-server")
-                .current_dir(&cwd)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .expect("spawn codex app-server");
-            let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
-            let _ = timeout(
-                Duration::from_secs(120),
-                run_codex_app_server_session(
-                    &mut child,
-                    prompt,
-                    None,
-                    None,
-                    &cwd,
-                    |event| events.borrow_mut().push(event),
-                    || false,
-                ),
-            )
-            .await;
-            let _ = child.start_kill();
-            events
-                .into_inner()
-                .into_iter()
-                .filter_map(|e| match e {
-                    UnifiedAgentEvent::Usage { usage } => Some(usage),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        let usages = one_turn("Reply with exactly the token USAGE_OK and nothing else.").await;
+        let Some(captured) = live_codex_turn(
+            "Reply with exactly the token USAGE_OK and nothing else.",
+            Duration::from_secs(120),
+        )
+        .await
+        else {
+            return;
+        };
+        let usages: Vec<crate::chat::model::ModelUsage> = captured
+            .into_iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .collect();
         for u in &usages {
             eprintln!(
                 "codex usage: input={:?} output={:?} cache_read={:?} total={:?} window={:?}",

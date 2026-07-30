@@ -24,8 +24,7 @@ use crate::external_agents::prompt::{
     instructions_via_launch_flag,
 };
 use crate::external_agents::registry::get_agent_def;
-use crate::external_agents::session::acp::{run_acp_session, AcpMcpServer};
-use crate::external_agents::session::codex_app_server::run_codex_app_server_session;
+use crate::external_agents::session::acp::AcpMcpServer;
 use crate::external_agents::session::live::LaunchConfig;
 use crate::external_agents::session::pi_rpc::run_pi_rpc_session;
 use crate::external_agents::session::{
@@ -34,10 +33,8 @@ use crate::external_agents::session::{
 use crate::external_agents::skill_stage::{skill_cwd_alias_segment, stage_active_skill};
 use crate::external_agents::slash::{self};
 use crate::external_agents::spawn::{
-    drain_stderr, kill_agent_process_tree, read_stdout_lines, resolve_binary, spawn_agent,
-    tail_chars, write_prompt_stdin,
+    drain_stderr, kill_agent_process_tree, resolve_binary, spawn_agent, tail_chars,
 };
-use crate::external_agents::stream::create_stream_handler;
 use crate::external_agents::types::{
     RuntimeBuildOptions, RuntimeContext, StreamFormat, UnifiedAgentEvent,
 };
@@ -353,7 +350,7 @@ pub async fn run_external_cli_reply(
     // 用于豁免出口的「非零退出码 = 失败」规则（spec 第 8b 条）——杀整棵进程树后
     // 拿到非零退出码的路径变多（Windows `TerminateProcess` 退出码恒为 1），
     // 不豁免会凭空造出失败气泡。
-    let mut protocol_completed = false;
+    let protocol_completed = false;
     let mut segment_order = 0u32;
     let mut segments: Vec<ChatMessageSegment> = Vec::new();
     let mut segment_tracker = StreamSegmentTracker::default();
@@ -481,81 +478,24 @@ pub async fn run_external_cli_reply(
         )
         .await
     } else {
+        // 常驻改造（B1）之后，非常驻路径**只剩 `PiRpc`** —— 上面的 `persistent` 谓词把
+        // claude / codex / ACP 全收走了，而 `StreamFormat` 一共就这四个变体。此前这里还留着
+        // `CodexAppServer` / `AcpJsonRpc` / `_` 三条臂（连带 `run_acp_session` 与
+        // `run_codex_app_server_session` 两个一次性驱动，共约 470 行），全部不可达 ——
+        // 那正是 rmcp 那次重构刚在 MCP 上消灭掉的「同一个协议两份实现」。
+        debug_assert_eq!(def.stream_format, StreamFormat::PiRpc);
         let spawned = spawned_opt
             .as_mut()
             .expect("non-persistent path spawns a child");
-        match def.stream_format {
-            StreamFormat::PiRpc => {
-                let model = conversation.agent_runtime.external_model.as_deref();
-                run_pi_rpc_session(
-                    &mut spawned.child,
-                    &composed.full_prompt,
-                    model,
-                    |event| emit_event(event),
-                    cancel_check,
-                )
-                .await
-            }
-            StreamFormat::CodexAppServer => {
-                let model = conversation.agent_runtime.external_model.as_deref();
-                let reasoning = conversation.agent_runtime.external_reasoning.as_deref();
-                run_codex_app_server_session(
-                    &mut spawned.child,
-                    &composed.full_prompt,
-                    model,
-                    reasoning,
-                    &cwd,
-                    |event| emit_event(event),
-                    cancel_check,
-                )
-                .await
-            }
-            StreamFormat::AcpJsonRpc => {
-                let model = conversation.agent_runtime.external_model.as_deref();
-                let mcp_servers: Vec<AcpMcpServer> = vec![];
-                run_acp_session(
-                    &mut spawned.child,
-                    &composed.full_prompt,
-                    &cwd,
-                    model,
-                    &mcp_servers,
-                    |event| emit_event(event),
-                    cancel_check,
-                )
-                .await
-            }
-            // 现状（B1 之后）：这条「非持久 + `write_prompt_stdin` + `read_stdout_lines` +
-            // `create_stream_handler`」的路**已经没有 CLI 走了** —— claude 是最后一个，
-            // 现在也常驻了；`PiRpc` 走上面的 `run_pi_rpc_session`，codex / ACP 走持久分支。
-            //
-            // **刻意保留**：`create_stream_handler` / `write_probe_stdin` / `read_stdout_lines`
-            // 还有探测路径在用（`slash.rs`、`session/claude_init.rs`），且 claude 的解析器
-            // 单测与真机测试也从这里进入；删掉这条分支等于把「逐行喂解析器」这个入口一起删了。
-            // 新增走行式 stdout 协议的 CLI 时，这里是现成的落点。
-            _ => {
-                if def.prompt_via_stdin {
-                    write_prompt_stdin(
-                        &mut spawned.child,
-                        def,
-                        &composed.full_prompt,
-                        &image_blocks,
-                    )
-                    .await?;
-                }
-                let mut handler = create_stream_handler(def.stream_format);
-                let outcome = read_stdout_lines(
-                    &mut spawned.child,
-                    |line| {
-                        handler.handle_line(line, &mut |event| emit_event(event));
-                        Ok(())
-                    },
-                    cancel_check,
-                )
-                .await;
-                protocol_completed = handler.saw_protocol_completion();
-                outcome
-            }
-        }
+        let model = conversation.agent_runtime.external_model.as_deref();
+        run_pi_rpc_session(
+            &mut spawned.child,
+            &composed.full_prompt,
+            model,
+            |event| emit_event(event),
+            cancel_check,
+        )
+        .await
     };
 
     // Non-persistent path waits on (and drops/kills) the per-turn child. Persistent sessions
@@ -941,6 +881,7 @@ where
                     last_activity: std::time::Instant::now(),
                     child_pid,
                     turns_served: 1,
+                    busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 },
             );
             // A resumed session already holds history → send only the latest message.
@@ -959,6 +900,12 @@ where
             (control, prompt)
         }
     };
+
+    // 标记「有在飞轮次」：一轮可以跑十几分钟（没有轮内超时），而 `last_activity` 只在轮
+    // 开始时写一次。不标的话清扫器/LRU 会在轮中把这条会话回收掉 —— 这一轮不会断，但轮末
+    // 最后一个 sender 落地就把进程关了，下一轮白付一次冷启动（越重度使用越吃不到常驻）。
+    // guard 落地即清，覆盖下面每条 `return`。
+    let _busy = state.mark_external_live_session_busy(conversation_id);
 
     // At most one automatic fresh reconnect after a non-cancel / non-auth failure (R3), plus one
     // reconnect for a config change that only a relaunch can apply (R4 NeedsReconnect). Each is
@@ -1129,6 +1076,7 @@ async fn reconnect_fresh(
             last_activity: std::time::Instant::now(),
             child_pid,
             turns_served: 1,
+            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     );
     Ok((control, resumed))
@@ -1145,7 +1093,7 @@ async fn reconnect_fresh(
 /// 带 model），指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。
 fn launch_config_for_turn(
     protocol: StreamFormat,
-    model: Option<&str>,
+    _model: Option<&str>,
     reasoning: Option<&str>,
     sandbox: Option<&str>,
     instructions_hash: Option<&str>,
@@ -1154,9 +1102,18 @@ fn launch_config_for_turn(
         return LaunchConfig::default();
     }
     LaunchConfig {
+        // **model 不在指纹里**：它能在会话内换（`claude_stream::apply_model_change` 发
+        // `set_model` 控制请求，官方 `Query.setModel()` 在 streaming input mode 下可用）。
+        // 换模型是用户最频繁的操作，把它留在指纹里等于每换一次就付一次 3.2s 冷启动 +
+        // 一整段历史重放。会话内切换失败时 `run_turn` 返回 `NEEDS_RECONNECT`，走既有的
+        // ReconnectConfig 那条路 —— 也就是退回本次改动之前的行为，没有静默失效的可能。
+        //
+        // reasoning / sandbox 仍在指纹里：`--effort` 对应的官方入口是
+        // `applyFlagSettings({effortLevel})`，wire 形状**没有核实过**；`--permission-mode`
+        // 更换还会改变要不要带 `--permission-prompt-tool stdio`（见
+        // `defs::claude::claude_permission_prompt_args`），那是启动参数的事，会话内切不了。
         flags: format!(
-            "{}|{}|{}",
-            model.unwrap_or_default(),
+            "{}|{}",
             reasoning.unwrap_or_default(),
             sandbox.unwrap_or_default()
         ),
@@ -1493,6 +1450,35 @@ impl ApprovalHost<'_> {
             span_id: None,
             structured_content: None,
         };
+        // `AskUserQuestion` 不是「要不要放行这个工具」，而是「claude 在问用户一个问题」。
+        // 官方答法是从**同一条** `can_use_tool` 通道回 `allow + updatedInput.answers`
+        // （没有第二条控制请求）。宿主这边把它转成 Kivio 已有的问用户卡片 —— 那套 UI 的
+        // 形状（问题 + 选项 + 单选/多选 + 自定义文本）与 claude 的入参一一对得上，
+        // 不该为它再造第二套卡片（spec 第 2 条）。
+        if crate::external_agents::session::claude_stream::is_ask_user_question(&ask.tool_name) {
+            if let Some(prompt) = ask_user_prompt_from_claude_input(&ask.input) {
+                let answered = crate::chat::commands::interaction::request_user_response(
+                    self.app,
+                    self.state,
+                    self.conversation_id,
+                    self.run_id,
+                    self.message_id,
+                    self.generation,
+                    &record,
+                    prompt,
+                )
+                .await;
+                let approved =
+                    answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
+                return crate::external_agents::session::live::ApprovalDecision {
+                    request_id: ask.request_id,
+                    approved,
+                    updated_input: approved
+                        .then(|| claude_ask_user_updated_input(&ask.input, &answered)),
+                };
+            }
+            // 入参形状不认识（CLI 改了 schema）：退回普通审批卡，别静默吞掉这次询问。
+        }
         let approved = crate::chat::commands::interaction::request_tool_approval(
             self.app,
             self.state,
@@ -1506,6 +1492,7 @@ impl ApprovalHost<'_> {
         crate::external_agents::session::live::ApprovalDecision {
             request_id: ask.request_id,
             approved,
+            updated_input: None,
         }
     }
 
@@ -1524,6 +1511,132 @@ impl ApprovalHost<'_> {
             pending.remove(id);
         }
     }
+}
+
+/// claude `AskUserQuestion` 的入参 → Kivio 的问用户卡片载荷。
+///
+/// 入参形状（官方工具 schema）：
+/// `{"questions":[{"question":"…","header":"…","multiSelect":bool,
+///   "options":[{"label":"…","description":"…"}]}]}`
+///
+/// 映射到 Kivio 的 `AskUserQuestion` 时，选项 id 用**下标**（claude 的选项没有 id，
+/// 只有 label），答复时再按同一个下标翻回 label —— 见 `claude_ask_user_updated_input`。
+/// 形状不认识（CLI 改了 schema）返回 `None`，调用方退回普通审批卡。
+fn ask_user_prompt_from_claude_input(
+    input: &serde_json::Value,
+) -> Option<crate::chat::ask_user::AskUserPromptPayload> {
+    let raw = input.get("questions")?.as_array()?;
+    let questions: Vec<crate::chat::ask_user::AskUserQuestion> = raw
+        .iter()
+        .enumerate()
+        .filter_map(|(qi, question)| {
+            let text = question.get("question")?.as_str()?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            let options: Vec<crate::chat::ask_user::AskUserOption> = question
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|options| {
+                    options
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(oi, option)| {
+                            let label = option.get("label")?.as_str()?.trim().to_string();
+                            if label.is_empty() {
+                                return None;
+                            }
+                            Some(crate::chat::ask_user::AskUserOption {
+                                id: oi.to_string(),
+                                label,
+                                description: option
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if options.is_empty() {
+                return None;
+            }
+            Some(crate::chat::ask_user::AskUserQuestion {
+                id: qi.to_string(),
+                prompt: text,
+                options,
+                allow_multiple: question
+                    .get("multiSelect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                // claude 的 schema 里没有「自定义文本」这一档，但用户总该能不选任何预设项
+                // 直接说自己的想法 —— 这是 Kivio 卡片本来就有的能力，白给。
+                allow_custom: true,
+            })
+        })
+        .collect();
+    (!questions.is_empty()).then_some(crate::chat::ask_user::AskUserPromptPayload {
+        title: None,
+        questions,
+    })
+}
+
+/// 用户的选择 → claude 要的 `updatedInput`。
+///
+/// 官方形状：`{"questions": <原样回传>, "answers": {"<问题文本>": "<选中的 label>"}}`。
+/// 多选时把多个 label 用 `, ` 拼起来（官方文档只给了单选的例子，多选的分隔符**未核实**；
+/// 拼串至少保证 claude 拿到的是它认识的字符串类型，而不是一个它可能不接受的数组）。
+/// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
+fn claude_ask_user_updated_input(
+    original_input: &serde_json::Value,
+    answered: &crate::chat::ask_user::AskUserResponseResult,
+) -> serde_json::Value {
+    let mut answers = serde_json::Map::new();
+    let raw = original_input
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for (qi, question) in raw.iter().enumerate() {
+        let Some(text) = question.get("question").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(answer) = answered.answers.get(&qi.to_string()) else {
+            continue;
+        };
+        if let Some(custom) = answer
+            .custom_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            answers.insert(text.to_string(), serde_json::Value::String(custom.to_string()));
+            continue;
+        }
+        let labels: Vec<String> = answer
+            .selected_option_ids
+            .iter()
+            .filter_map(|id| {
+                let index: usize = id.parse().ok()?;
+                question
+                    .get("options")?
+                    .as_array()?
+                    .get(index)?
+                    .get("label")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        if !labels.is_empty() {
+            answers.insert(
+                text.to_string(),
+                serde_json::Value::String(labels.join(", ")),
+            );
+        }
+    }
+    serde_json::json!({ "questions": raw, "answers": answers })
 }
 
 fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
@@ -2150,7 +2263,9 @@ fn merge_cli_usage(previous: Option<&ModelUsage>, mut incoming: ModelUsage) -> M
 }
 
 /// 一次上报里所有 token 数是否都是 0 / 缺失（= 这条上报没有任何分子信息）。
-fn usage_tokens_all_zero(usage: &ModelUsage) -> bool {
+/// 这条用量上报有没有任何非零 token。`context.rs::usage_has_token_numbers` 是它的反面，
+/// 两处必须共用同一个判据（此前 `reasoning_tokens` 只有这边算，见那里的注释）。
+pub(crate) fn usage_tokens_all_zero(usage: &ModelUsage) -> bool {
     usage.input_tokens.unwrap_or(0) == 0
         && usage.output_tokens.unwrap_or(0) == 0
         && usage.total_tokens.unwrap_or(0) == 0
@@ -2866,7 +2981,96 @@ mod tests {
         ));
     }
 
-    /// 指纹只对 claude 生效（它的 model/effort/permission-mode/系统提示全是启动 flag）；
+    /// claude 的 `AskUserQuestion` 入参必须能映射成 Kivio 的问用户卡片，否则这个功能
+    /// 就退回到「当场拒」——claude 在 Kivio 里从此不能反问用户。
+    #[test]
+    fn claude_ask_user_input_maps_to_the_ask_user_card() {
+        let input = serde_json::json!({
+            "questions": [{
+                "question": "用哪种缓存？",
+                "header": "Cache",
+                "multiSelect": false,
+                "options": [
+                    { "label": "Redis", "description": "跨进程共享" },
+                    { "label": "内存", "description": null },
+                ],
+            }],
+        });
+        let prompt = ask_user_prompt_from_claude_input(&input).expect("必须能映射");
+        assert_eq!(prompt.questions.len(), 1);
+        let question = &prompt.questions[0];
+        assert_eq!(question.prompt, "用哪种缓存？");
+        assert!(!question.allow_multiple);
+        // 选项 id 是**下标**（claude 的选项没有 id），答复时按同一个下标翻回 label。
+        assert_eq!(question.options[0].id, "0");
+        assert_eq!(question.options[0].label, "Redis");
+        assert_eq!(question.options[0].description.as_deref(), Some("跨进程共享"));
+        assert_eq!(question.options[1].id, "1");
+        assert!(question.options[1].description.is_none());
+    }
+
+    /// 形状不认识时必须返回 `None` —— 调用方据此退回普通审批卡，而不是静默吞掉询问
+    /// （吞掉 = CLI 那条 promise 永远等不到回复 = 整轮挂死）。
+    #[test]
+    fn unknown_ask_user_shapes_degrade_to_none() {
+        assert!(ask_user_prompt_from_claude_input(&serde_json::json!({})).is_none());
+        // 没有选项的问题不成卡片。
+        assert!(ask_user_prompt_from_claude_input(&serde_json::json!({
+            "questions": [{ "question": "空的", "options": [] }],
+        }))
+        .is_none());
+    }
+
+    /// 答复必须按官方形状回：`{questions: <原样>, answers: {"<问题文本>": "<label>"}}`。
+    /// 键是**问题文本**而不是下标 —— 用错就等于没答，claude 会当成没选。
+    #[test]
+    fn ask_user_answers_use_the_question_text_as_key() {
+        let input = serde_json::json!({
+            "questions": [{
+                "question": "用哪种缓存？",
+                "options": [{ "label": "Redis" }, { "label": "内存" }],
+            }],
+        });
+        let answered = crate::chat::ask_user::AskUserResponseResult {
+            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: std::collections::HashMap::from([(
+                "0".to_string(),
+                crate::chat::ask_user::AskUserAnswer {
+                    selected_option_ids: vec!["1".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        let updated = claude_ask_user_updated_input(&input, &answered);
+        assert_eq!(updated["answers"]["用哪种缓存？"], serde_json::json!("内存"));
+        // 原问题必须原样回传（官方要求）。
+        assert_eq!(updated["questions"], input["questions"]);
+    }
+
+    /// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
+    #[test]
+    fn custom_text_wins_over_selected_options() {
+        let input = serde_json::json!({
+            "questions": [{ "question": "怎么做？", "options": [{ "label": "A" }] }],
+        });
+        let answered = crate::chat::ask_user::AskUserResponseResult {
+            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: std::collections::HashMap::from([(
+                "0".to_string(),
+                crate::chat::ask_user::AskUserAnswer {
+                    selected_option_ids: vec!["0".to_string()],
+                    custom_text: Some("都不要，换个思路".to_string()),
+                },
+            )]),
+        };
+        let updated = claude_ask_user_updated_input(&input, &answered);
+        assert_eq!(
+            updated["answers"]["怎么做？"],
+            serde_json::json!("都不要，换个思路")
+        );
+    }
+
+    /// 指纹只对 claude 生效（它的 effort / permission-mode / 系统提示是启动 flag）；
     /// ACP / codex 恒为默认值 ⇒ 永不触发重连，既有行为不变。
     #[test]
     fn launch_config_only_fingerprints_claude() {
@@ -2877,7 +3081,8 @@ mod tests {
             Some("plan"),
             Some("hash-1"),
         );
-        assert_eq!(claude.flags, "opus|high|plan");
+        // model **不进指纹**：它能在会话内换（`set_model`），不需要换进程。
+        assert_eq!(claude.flags, "high|plan");
         assert_eq!(claude.instructions.as_deref(), Some("hash-1"));
 
         for protocol in [
@@ -2893,7 +3098,8 @@ mod tests {
         }
     }
 
-    /// 四项任一变化都要触发重连（`accepts` 为 false）；全都没变则复用。
+    /// 真正的启动 flag 任一变化都要触发重连（`accepts` 为 false）；全都没变则复用。
+    /// **换模型是例外** —— 见下一条测试。
     #[test]
     fn every_launch_flag_change_forces_a_reconnect() {
         let base = |model, reasoning, sandbox, hash| {
@@ -2907,7 +3113,6 @@ mod tests {
         };
         let established = base(Some("opus"), Some("high"), Some("plan"), Some("h1"));
         assert!(established.accepts(&base(Some("opus"), Some("high"), Some("plan"), Some("h1"))));
-        assert!(!established.accepts(&base(Some("sonnet"), Some("high"), Some("plan"), Some("h1"))));
         assert!(!established.accepts(&base(Some("opus"), Some("low"), Some("plan"), Some("h1"))));
         assert!(!established.accepts(&base(
             Some("opus"),
@@ -2917,6 +3122,25 @@ mod tests {
         )));
         // 系统提示 / Memory 改了：文件内容变了，而常驻进程只在启动时读一遍。
         assert!(!established.accepts(&base(Some("opus"), Some("high"), Some("plan"), Some("h2"))));
+    }
+
+    /// **换模型不再换进程**。官方 `Query.setModel()` 在 streaming input mode 下可用，
+    /// 所以模型走会话内的 `set_model` 控制请求；把它留在指纹里等于用户每换一次模型都付
+    /// 一次冷启动 + 一整段历史重放。会话内切换失败时 `run_turn` 返回 `NEEDS_RECONNECT`，
+    /// 退回换进程 —— 所以摘掉它不会让「换了却没生效」变成静默失败。
+    #[test]
+    fn changing_only_the_model_reuses_the_process() {
+        let with = |model| {
+            launch_config_for_turn(
+                StreamFormat::ClaudeStreamJson,
+                model,
+                Some("high"),
+                Some("plan"),
+                Some("h1"),
+            )
+        };
+        assert!(with(Some("opus")).accepts(&with(Some("sonnet"))));
+        assert!(with(Some("sonnet")).accepts(&with(None)));
     }
 
     /// claude 每轮都发整份 composed prompt：会话级指令走启动 flag、不在正文里，剩下的

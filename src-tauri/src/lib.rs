@@ -428,7 +428,7 @@ pub fn run() {
                                 let Some(state) = app_handle.try_state::<AppState>() else {
                                     return;
                                 };
-                                let _ = state.mcp_get_or_connect(&app_handle, &server).await;
+                                let _ = state.mcp_get_or_connect(Some(&app_handle), &server).await;
                             }
                         })
                         .await;
@@ -643,9 +643,27 @@ pub fn run() {
                 } else {
                     // 真正退出：同步排干 MCP 连接池，杀掉所有持久子进程，避免孤儿进程。
                     let state: State<AppState> = app_handle.state();
-                    tauri::async_runtime::block_on(state.mcp_disconnect_all());
-                    // 丢弃所有活的外部 CLI 会话；每个 actor 关闭其子进程（kill_on_drop 兜底）。
-                    state.close_all_external_live_sessions();
+                    // 带超时：一个卡在握手里的 server 会占着会话锁不放，没有这层
+                    // 上限的话退出钩子会永久阻塞在主线程上 —— 表现是「点关闭没反应、
+                    // 进程不退」，连带其余所有 MCP 子进程全留在系统里。
+                    let drained = tauri::async_runtime::block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        state.mcp_disconnect_all(),
+                    ));
+                    if drained.is_err() {
+                        eprintln!("MCP disconnect timed out on exit; falling back to process kill.");
+                    }
+                    // 外部 CLI 会话：必须**同步**等它们关完。只 clear 掉 sender 是不够的
+                    // —— actor 要等下一次被 poll 才会走 close()，而运行时马上就随进程走了，
+                    // `kill_on_drop` 也因此不会触发（Child 在那个永不 drop 的帧里）。
+                    // 结果是每次退出留下一批 CLI 进程，各自还挂着自己拉起的 MCP 子进程。
+                    let closed = tauri::async_runtime::block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        state.close_all_external_live_sessions(),
+                    ));
+                    if closed.is_err() {
+                        eprintln!("External CLI sessions did not close in time on exit.");
+                    }
                     // 杀掉所有跟踪中的后台 run_command 进程组（跨 turn 存活，只在这里或
                     // 显式 kill_background 才清理），删除其 per-job 日志，避免孤儿进程/文件。
                     let killed = state.kill_all_background_commands();

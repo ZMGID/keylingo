@@ -182,11 +182,11 @@ pub(crate) fn cli_reported_context_tokens(usage: &ModelUsage) -> usize {
 /// Kivio 自己发的 `/compact` —— 这些轮次没有 LLM 往返）落盘的是 `Some(0)`，
 /// `is_some()` 会命中它并把用量条清零。
 fn usage_has_token_numbers(usage: &ModelUsage) -> bool {
-    usage.total_tokens.unwrap_or(0) > 0
-        || usage.input_tokens.unwrap_or(0) > 0
-        || usage.output_tokens.unwrap_or(0) > 0
-        || usage.cached_input_tokens.unwrap_or(0) > 0
-        || usage.cache_creation_input_tokens.unwrap_or(0) > 0
+    // 必须与 `run.rs::usage_tokens_all_zero` **完全互为反面**（含 `reasoning_tokens`）。
+    // 不一致的后果：只报 reasoning tokens 的那一轮，`merge_cli_usage` 认为它是真数据、
+    // 拿它替换上一条好数据，而这里的分子挑选器认为它是空的、继续往前找更旧的消息 ⇒
+    // 分子与落库用量描述的是**不同轮次**。
+    !crate::external_agents::run::usage_tokens_all_zero(usage)
 }
 
 pub fn collect_external_session_usage(
@@ -195,7 +195,8 @@ pub fn collect_external_session_usage(
     work_dir: Option<&Path>,
 ) -> ExternalSessionUsage {
     let mut latest: Option<&ModelUsage> = None;
-    for message in conversation.messages.iter().rev() {
+    let mut latest_index: Option<usize> = None;
+    for (index, message) in conversation.messages.iter().enumerate().rev() {
         if message.role != "assistant" {
             continue;
         }
@@ -206,8 +207,57 @@ pub fn collect_external_session_usage(
             // 窗口（分母）不参与这个判断——它是静态属性，缺分子的那条上报不该被当分子来源。
             if usage_has_token_numbers(usage) {
                 latest = Some(usage);
+                latest_index = Some(index);
                 break;
             }
+        }
+    }
+
+    // 分母单独找：一条「token 数全零但带 context_window_tokens」的上报（斜杠命令、被中断的
+    // 轮次）对分子无用，但它的窗口是**最新**的权威值。跟着分子一起跳过会白丢分母 ——
+    // 换到小窗口模型后进度条会一直按旧模型的分母算。
+    let reported_window = conversation
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == "assistant")
+        .filter_map(|message| message.usage.as_ref())
+        .find_map(|usage| usage.context_window_tokens);
+
+    // 压缩之后的真实占用**只在 boundary 的 post_tokens 上**：用量上报里的数字是压缩
+    // **前**的。不看它的话，压完进度条还钉在 95%，用户会接着压第二次、第三次，直到
+    // 下一轮真实生成才纠正。
+    //
+    // 只有当这条 boundary 比挑中的用量更新时才用它 —— 锚点消息在用量消息之后（或压根
+    // 没挑到用量）才算新。
+    let newest_boundary = conversation
+        .context_state
+        .compaction_boundaries
+        .iter()
+        .filter(|boundary| boundary.token_estimate_after > 0)
+        .max_by_key(|boundary| boundary.created_at);
+    if let Some(boundary) = newest_boundary {
+        let anchor_index = boundary
+            .display_after_message_id
+            .as_deref()
+            .and_then(|anchor| {
+                conversation
+                    .messages
+                    .iter()
+                    .position(|message| message.id == anchor)
+            });
+        let boundary_is_newer = match (anchor_index, latest_index) {
+            (Some(anchor), Some(usage_at)) => anchor >= usage_at,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        };
+        if boundary_is_newer {
+            return ExternalSessionUsage {
+                input_tokens: boundary.token_estimate_after,
+                output_tokens: 0,
+                token_count_source: TOKEN_COUNT_CLI,
+                reported_context_window: reported_window,
+            };
         }
     }
 
@@ -216,7 +266,7 @@ pub fn collect_external_session_usage(
             input_tokens: cli_reported_context_tokens(usage),
             output_tokens: usage.output_tokens.unwrap_or(0) as usize,
             token_count_source: TOKEN_COUNT_CLI,
-            reported_context_window: usage.context_window_tokens,
+            reported_context_window: reported_window.or(usage.context_window_tokens),
         };
     }
 

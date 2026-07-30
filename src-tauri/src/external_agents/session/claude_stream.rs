@@ -47,6 +47,11 @@ use crate::proc::NoConsoleWindow;
 const CLAUDE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// 单次 stdout 读的轮询步长——用它把 control 通道的 poll 夹进读循环（与 acp / codex 一致）。
 const READ_POLL: Duration = Duration::from_millis(200);
+
+/// 等 `set_model` 的 `control_response` 最多多久。超时按「CLI 不认这条请求」处理，
+/// 退回换进程 —— 宁可白跑一次重连，也不能让用户换了模型却静默跑旧的。
+/// 这不是模型推理时间，只是一次本地控制往返，3s 已经很宽松。
+const SET_MODEL_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// 连续可恢复读错误的上限：防止一个反复报错的 pipe 把读循环变成忙等。
 const MAX_RECOVERABLE_READ_ERRORS: u32 = 32;
 
@@ -70,7 +75,13 @@ const WINDOWS_ERROR_OPERATION_ABORTED: i32 = 995;
 fn read_error_is_recoverable(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
-        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            // 非法 UTF-8：tokio 的 `read_line` 会把这一行的字节丢掉、**reader 仍然可用**
+            // （见 `read_line.rs::finish_string_read`）。判成不可恢复的话，一个完好的进程
+            // 会被当成「常驻会话在轮次中退出」⇒ 整轮 prompt 重发一次（工具副作用可能重跑）。
+            | std::io::ErrorKind::InvalidData
     ) || err.raw_os_error() == Some(WINDOWS_ERROR_OPERATION_ABORTED)
 }
 
@@ -147,8 +158,20 @@ pub const APPROVAL_DENIED_MESSAGE: &str = "用户拒绝了这次操作。不要�
 /// 取消 / 关会话 / 进程消失时，批量拒掉所有挂起询问用的话。
 const APPROVAL_ABORTED_MESSAGE: &str = "用户中止了本轮，这次操作未被批准。";
 /// 需要用户在卡片上直接作答的工具（`AskUserQuestion` / `ExitPlanMode`）。
-/// 批准它们只会让 CLI 紧接着发一条我们还没实现的 `request_user_dialog`，那条会被 fail-closed
-/// 回 error、工具照样失败 —— 与其给用户一张点了也没用的卡片，不如当场诚实拒掉。
+///
+/// **官方机制**（[Agent SDK · user-input](https://code.claude.com/docs/en/agent-sdk/user-input)）：
+/// 这类工具**就是从同一条 `can_use_tool` 通道**答的 ——
+/// `{"behavior":"allow","updatedInput":{"questions":<原样回传>,"answers":{"<问题文本>":"<选中的 label>"}}}`。
+/// 没有第二条控制请求。此前这里的注释说「批准后 CLI 会紧接着发一条我们还没实现的
+/// `request_user_dialog`」是**错的**，`request_user_dialog` 与这条路无关。
+///
+/// 之所以今天仍然拒：答复要带用户**选了哪个选项**，而会话层拿不到 `AppHandle`
+/// （审批是宿主的事），`ApprovalDecision` 现在只有一个 bool，装不下选项。要放开得先让
+/// 审批通道能回载荷 —— 那是一件独立的功能，不是这里改个判据能顺手带上的。
+///
+/// 另外 `--permission-prompt-tool` 那条「allow 会被转成 deny」的官方限制，作用域是
+/// **MCP 工具**；`AskUserQuestion` / `ExitPlanMode` 是内置工具，不在其中 —— 所以放开之后
+/// 不会撞上那条。
 const APPROVAL_INTERACTIVE_UNSUPPORTED: &str =
     "Kivio 暂不支持这个需要在卡片上直接作答的工具，请改用普通回复继续。";
 
@@ -179,7 +202,7 @@ struct PendingApproval {
 fn reject_pending_lines(pending: &[PendingApproval], reason: &str) -> Vec<String> {
     pending
         .iter()
-        .map(|entry| approval_response_line(&entry.request_id, false, reason))
+        .map(|entry| approval_response_line(&entry.request_id, false, reason, None))
         .collect()
 }
 
@@ -196,9 +219,18 @@ fn reject_pending_lines(pending: &[PendingApproval], reason: &str) -> Vec<String
 /// （`subtype` / `request_id` / `error` 是 snake_case，`behavior` / `updatedInput` /
 /// `updatedPermissions` 是 camelCase）。而 `request_id` 嵌在 `response` **里面**、不在帧顶层
 /// —— 放错层级 = CLI 匹配不到 = 等于没回。
-fn approval_response_line(request_id: &str, approved: bool, deny_message: &str) -> String {
+fn approval_response_line(
+    request_id: &str,
+    approved: bool,
+    deny_message: &str,
+    updated_input: Option<&Value>,
+) -> String {
     let payload = if approved {
-        json!({ "behavior": "allow" })
+        match updated_input {
+            // `AskUserQuestion` 的答复就走这里：`updatedInput` 带回 `{questions, answers}`。
+            Some(input) => json!({ "behavior": "allow", "updatedInput": input }),
+            None => json!({ "behavior": "allow" }),
+        }
     } else {
         json!({ "behavior": "deny", "message": deny_message, "interrupt": false })
     };
@@ -215,15 +247,61 @@ fn approval_response_line(request_id: &str, approved: bool, deny_message: &str) 
     )
 }
 
+/// 一行 `set_model` 控制请求（含结尾换行）。
+///
+/// **官方依据**：Agent SDK 的 `Query.setModel(model?)`，限制是 "only available in **streaming
+/// input mode**" —— `--input-format stream-json` 就是 streaming input mode。changelog 2.1.212
+/// 起中途切换还能在**当前轮**生效（此前要等下一轮）；2.1.208 修的是「非字符串 `set_model`
+/// 载荷让会话永久挂死」，也就是说这条通道在 CLI 侧一直是实现了的。
+///
+/// **wire 字段名没有官方文档，是推断的**（`interrupt` 的形状 + `setModel(model)` 的签名）。
+/// 所以调用方**必须**读回 `control_response` 再决定信不信：认不出来时 CLI 会回一条 error
+/// （2.1.208 之后不再挂死），我们据此退回「换进程 + 新 `--model`」那条老路。
+/// 猜错的代价因此是「白跑一次重连」，不是「用户换了模型却静默没生效」。
+fn set_model_request_line(request_id: &str, model: &str) -> String {
+    format!(
+        "{}
+",
+        json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "set_model", "model": model },
+        })
+    )
+}
+
+/// 一条 `control_response` 是不是在答我们那个 request_id；是的话返回它成功了没有。
+///
+/// 形状与我们**发出去**的答复同构（`response.subtype` 为 `success` / `error`，
+/// `response.request_id` 回显）。
+fn control_response_verdict(frame: &Value, request_id: &str) -> Option<bool> {
+    if frame.get("type").and_then(|v| v.as_str()) != Some("control_response") {
+        return None;
+    }
+    let response = frame.get("response")?;
+    if response.get("request_id").and_then(|v| v.as_str()) != Some(request_id) {
+        return None;
+    }
+    Some(response.get("subtype").and_then(|v| v.as_str()) == Some("success"))
+}
+
 /// 这条询问该问用户，还是当场就能定？返回 `Err(理由)` = 直接拒，不打扰用户。
 ///
 /// 目前只有一条当场拒的规则：`requires_user_interaction`（见
 /// `APPROVAL_INTERACTIVE_UNSUPPORTED`）。抽成纯函数是为了让「哪些不问用户」有单测可证。
 fn approval_verdict(ask: &ApprovalAsk) -> Result<(), &'static str> {
-    if ask.requires_user_interaction {
+    // `AskUserQuestion` 现在答得了：宿主把它转成 Kivio 自己的问用户卡片，选项经
+    // `ApprovalDecision::updated_input` 回给 CLI（官方 `allow + updatedInput.answers`）。
+    if ask.requires_user_interaction && !is_ask_user_question(&ask.tool_name) {
         return Err(APPROVAL_INTERACTIVE_UNSUPPORTED);
     }
     Ok(())
+}
+
+/// claude 内置的「反问用户」工具名。大小写按 CLI 原样（`PascalCase` 有意义，不归一化），
+/// 但比对时放宽 —— 名字是 CLI 给的，不值得为大小写差异丢掉整个功能。
+pub fn is_ask_user_question(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("AskUserQuestion")
 }
 
 /// 从一条 `can_use_tool` 请求里读出问用户所需的字段。
@@ -417,6 +495,9 @@ pub struct ClaudeStreamJsonSession {
     /// claude 原生 session id：启动参数里的 `--session-id` / `--resume` 值，第一轮被
     /// `system/init` / `result` 实报的 `session_id` 覆盖（实测两者一致，覆盖只是求稳）。
     session_id: String,
+    /// 这个进程当前跑的模型（启动时来自 argv 的 `--model`，之后由 `set_model` 更新）。
+    /// `None` = 启动时没指定（CLI 用它自己的默认）。用来判断「本轮要不要发 `set_model`」。
+    active_model: Option<String>,
     /// stderr 环形尾部（8KB）。**必须**是 `spawn_stderr_tail` 而不是 `drain_stderr`：
     /// 后者读到 EOF 才返回，长活进程下 `await` 会永久挂死（spec 第 4 条）。
     /// 出错路径 `take()` 走它取尾部折进诊断，`close()` 收尾时 join。
@@ -497,6 +578,7 @@ impl ClaudeStreamJsonSession {
                 handler: create_stream_handler(StreamFormat::ClaudeStreamJson),
                 session_id: crate::external_agents::defs::claude::claude_session_id_from_args(args)
                     .unwrap_or_default(),
+                active_model: crate::external_agents::defs::claude::claude_model_from_args(args),
                 stderr_tail: Some(stderr_tail),
                 stale_frames_left: 0,
             }),
@@ -540,14 +622,77 @@ impl ClaudeStreamJsonSession {
     ///
     /// 真要加静默超时，判据必须是「距上一帧超过 N 分钟」（N 远大于 30s 心跳周期）且**不能**
     /// 顺手丢掉会话 —— 否则就是把一个罕见的挂死换成一个常见的误杀。
+    /// 本轮要换模型的话，在会话内发一条 `set_model` 并**等它的 ack**。
+    ///
+    /// 为什么要等 ack 而不是 fire-and-forget：wire 字段名没有官方文档（见
+    /// `set_model_request_line`）。不等的话猜错就是「用户换了模型、界面显示新模型、
+    /// 实际还在跑旧模型」—— 静默且没有任何可观测信号，是最坏的失败方式。
+    /// 等到 ack 是 error / 超时 ⇒ 返回 `NEEDS_RECONNECT`，`run.rs` 走既有的
+    /// 「换进程 + 新 `--model`」那条路，也就是这次改动之前的行为。
+    ///
+    /// 这段读到的非 ack 帧一律丢弃：prompt 还没写出去，此刻能来的只有上一轮取消后
+    /// 的残帧（本来就归 `stale_frame_verdict` 管）。`system/init` 不在其中 ——
+    /// 它排在本轮第一条 user 消息之后。
+    async fn apply_model_change(&mut self, model: Option<&str>) -> Result<(), String> {
+        let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
+            return Ok(());
+        };
+        if self.active_model.as_deref() == Some(model) {
+            return Ok(());
+        }
+        let request_id = format!("kivio-set-model-{}", Uuid::new_v4());
+        let line = set_model_request_line(&request_id, model);
+        if self.stdin.write_all(line.as_bytes()).await.is_err() || self.stdin.flush().await.is_err()
+        {
+            return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string());
+        }
+
+        let deadline = tokio::time::Instant::now() + SET_MODEL_ACK_TIMEOUT;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string());
+            }
+            match self.next_line().await {
+                ReadStep::Line(line) => {
+                    let Some(frame) = crate::external_agents::spawn::parse_json_line(&line) else {
+                        continue;
+                    };
+                    match control_response_verdict(&frame, &request_id) {
+                        Some(true) => {
+                            self.active_model = Some(model.to_string());
+                            return Ok(());
+                        }
+                        // CLI 不认这个控制请求（或拒绝了）⇒ 退回换进程。
+                        Some(false) => {
+                            return Err(
+                                crate::external_agents::session::acp::NEEDS_RECONNECT.to_string()
+                            )
+                        }
+                        None => continue,
+                    }
+                }
+                ReadStep::Idle => continue,
+                // 进程没了 / 读挂了：交给既有的重连路径，别在这里自己发明处置。
+                ReadStep::Eof | ReadStep::Fatal(_) => {
+                    return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string())
+                }
+            }
+        }
+    }
+
     pub async fn run_turn(
         &mut self,
         prompt: &str,
+        model: Option<&str>,
         images: &[ImageBlock],
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
         approvals: Option<ApprovalBridge>,
     ) -> Result<(), String> {
+        // 换模型：先在**会话内**试一次 `set_model`，不行才退回换进程。
+        // 必须排在写 prompt 之前 —— 否则这一轮的问题已经喂给旧模型了。
+        self.apply_model_change(model).await?;
+
         let payload = stream_json_user_line(prompt, images)?;
         if let Err(err) = self.stdin.write_all(payload.as_bytes()).await {
             return Err(self.fold_tail(format!("写入 claude stdin 失败: {err}")).await);
@@ -623,6 +768,7 @@ impl ClaudeStreamJsonSession {
                         &decision.request_id,
                         decision.approved,
                         APPROVAL_DENIED_MESSAGE,
+                        decision.updated_input.as_ref(),
                     );
                     let _ = self.stdin.write_all(line.as_bytes()).await;
                     let _ = self.stdin.flush().await;
@@ -697,7 +843,7 @@ impl ClaudeStreamJsonSession {
                     };
                     match immediate_deny {
                         Some(reason) => {
-                            let line = approval_response_line(&request_id, false, reason);
+                            let line = approval_response_line(&request_id, false, reason, None);
                             let _ = self.stdin.write_all(line.as_bytes()).await;
                             let _ = self.stdin.flush().await;
                         }
@@ -855,6 +1001,7 @@ pub fn spawn_claude_stream_session_actor(
             match cmd {
                 SessionCommand::RunTurn {
                     prompt,
+                    model,
                     images,
                     events,
                     done,
@@ -864,7 +1011,14 @@ pub fn spawn_claude_stream_session_actor(
                     // Invariant (A4)：`run_turn` 在返回前发完所有 `event`，mpsc 保序，
                     // 所以调用方在 `done` 之后的 drain 能看到全部事件。`done.send` 永远最后。
                     let result = session
-                        .run_turn(&prompt, &images, &events, &mut rx, approvals)
+                        .run_turn(
+                            &prompt,
+                            model.as_deref(),
+                            &images,
+                            &events,
+                            &mut rx,
+                            approvals,
+                        )
                         .await;
                     let _ = done.send(result);
                 }
@@ -936,6 +1090,9 @@ mod tests {
         assert!(read_error_is_recoverable(&Error::from_raw_os_error(
             WINDOWS_ERROR_OPERATION_ABORTED
         )));
+        // 非法 UTF-8：tokio 丢掉这一行后 reader 仍可用，进程完好。判成致命的话，一次坏字节
+        // 就会把整轮 prompt 重发一遍（工具副作用可能重跑）。
+        assert!(read_error_is_recoverable(&Error::from(ErrorKind::InvalidData)));
     }
 
     /// 真正的致命错误不得被当成「再试一次」，否则读循环会在一个死掉的 pipe 上空转。
@@ -946,13 +1103,50 @@ mod tests {
             ErrorKind::BrokenPipe,
             ErrorKind::UnexpectedEof,
             ErrorKind::PermissionDenied,
-            ErrorKind::InvalidData,
         ] {
             assert!(
                 !read_error_is_recoverable(&Error::from(kind)),
                 "{kind:?} 不该判为可恢复"
             );
         }
+    }
+
+    #[test]
+    fn set_model_request_shape_matches_the_control_request_envelope() {
+        let line = set_model_request_line("req-9", "opus");
+        assert!(line.ends_with('\n'), "必须是一整行");
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["type"], serde_json::json!("control_request"));
+        // request_id 在**帧顶层**（与 `interrupt` 一致）；放错层级 = CLI 匹配不到 = 等于没发。
+        assert_eq!(value["request_id"], serde_json::json!("req-9"));
+        assert_eq!(value["request"]["subtype"], serde_json::json!("set_model"));
+        // 载荷必须是**字符串**：changelog 2.1.208 说非字符串的 `set_model` 载荷曾让会话永久挂死。
+        assert_eq!(value["request"]["model"], serde_json::json!("opus"));
+        assert!(value["request"]["model"].is_string());
+    }
+
+    /// ack 只认自己那条 request_id，且必须能区分 success / error ——
+    /// 认错了就会把「CLI 不支持」当成「切换成功」，于是用户换了模型却静默跑旧的。
+    #[test]
+    fn control_response_verdict_matches_only_our_request_id() {
+        let ok: Value = serde_json::from_str(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"a"}}"#,
+        )
+        .unwrap();
+        assert_eq!(control_response_verdict(&ok, "a"), Some(true));
+        // 别人的 request_id：不是在答我们。
+        assert_eq!(control_response_verdict(&ok, "b"), None);
+
+        let err: Value = serde_json::from_str(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"a","error":"unknown subtype"}}"#,
+        )
+        .unwrap();
+        assert_eq!(control_response_verdict(&err, "a"), Some(false));
+
+        // 不是 control_response 的帧一律 None（正文帧不能被当成 ack）。
+        let text: Value =
+            serde_json::from_str(r#"{"type":"assistant","message":{"content":[]}}"#).unwrap();
+        assert_eq!(control_response_verdict(&text, "a"), None);
     }
 
     /// 中断请求的线上形态必须与实测样本一致（多一个 `request_id` 都会拿不到
@@ -1163,7 +1357,7 @@ mod tests {
     #[test]
     fn approval_responses_match_the_measured_wire_shape() {
         for (approved, expected_behavior) in [(true, "allow"), (false, "deny")] {
-            let line = approval_response_line("req-9", approved, "拒了");
+            let line = approval_response_line("req-9", approved, "拒了", None);
             assert!(line.ends_with('\n'), "必须是一整行");
             let value = frame(line.trim());
             assert_eq!(value["type"], serde_json::json!("control_response"));
@@ -1240,11 +1434,24 @@ mod tests {
     /// fail-closed 回 error、工具照样失败 —— 给用户一张点了也没用的卡片更糟。
     #[test]
     fn interactive_tools_are_denied_without_bothering_the_user() {
-        let interactive = ask_for(
+        // `AskUserQuestion` 现在**要问用户**：宿主把它转成 Kivio 的问用户卡片，
+        // 选项经 `ApprovalDecision::updated_input` 回给 CLI（官方 `allow + updatedInput`）。
+        let ask_user = ask_for(
             r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{},"requires_user_interaction":true}}"#,
         )
         .expect("ask");
-        assert!(approval_verdict(&interactive).is_err());
+        assert!(
+            approval_verdict(&ask_user).is_ok(),
+            "AskUserQuestion 必须问用户，不能当场拒"
+        );
+
+        // 其余需要卡片内作答的工具仍当场拒：`ExitPlanMode` 的批准要先发切档位的控制帧，
+        // 那条路还没核实过，给一张点了没用的卡片比诚实拒掉更糟。
+        let plan = ask_for(
+            r#"{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{},"requires_user_interaction":true}}"#,
+        )
+        .expect("ask");
+        assert!(approval_verdict(&plan).is_err());
 
         let ordinary = ask_for(
             r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
@@ -1518,10 +1725,217 @@ mod live_tests {
 
     /// 关停并**等 actor 真正结束**（进程退出、cwd 释放）再删测试目录。
     /// 不等的话 Windows 会因为子进程还占着 cwd 拒绝删除，在用户 temp 里留一堆残渣。
+    ///
+    /// 关停**必须在超时内完成**，这条是断言不是尽力而为：`close()` 少一行 `drop(stdin)`
+    /// 就会让每次关停白等满 `CLAUDE_SHUTDOWN_TIMEOUT` 再被杀。那个 bug 犯过一次，当初是靠
+    /// 「测试耗时 53s → 169s」发现的 —— 被删掉的 `claude_persist_probe_tests` 里有条真断言，
+    /// 搬过来时退化成了 `let _ =`，回归会重新变成静默通过。
     async fn close_and_cleanup(control: mpsc::Sender<SessionCommand>, workdir: &std::path::Path) {
         let _ = control.send(SessionCommand::Close).await;
-        let _ = timeout(CLAUDE_SHUTDOWN_TIMEOUT, control.closed()).await;
+        let closed = timeout(CLAUDE_SHUTDOWN_TIMEOUT, control.closed()).await;
         let _ = std::fs::remove_dir_all(workdir);
+        assert!(
+            closed.is_ok(),
+            "会话必须在 {CLAUDE_SHUTDOWN_TIMEOUT:?} 内关停（关 stdin 后 claude 自己退出）；\
+             超时通常意味着关停路径漏了 drop(stdin)，只能靠 kill 兜底"
+        );
+    }
+
+    /// 跑一轮并**指定模型**（走 `set_model` 那条路）。
+    async fn one_turn_with_model(
+        control: &mpsc::Sender<SessionCommand>,
+        prompt: &str,
+        model: &str,
+    ) -> TurnOutput {
+        let (etx, mut erx) = mpsc::channel::<UnifiedAgentEvent>(256);
+        let (dtx, drx) = oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                prompt: prompt.to_string(),
+                model: Some(model.to_string()),
+                reasoning: None,
+                images: vec![],
+                events: etx,
+                done: dtx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+        let mut text = String::new();
+        let result = drx.await.unwrap_or_else(|_| Err("actor dropped".to_string()));
+        while let Ok(event) = erx.try_recv() {
+            if let UnifiedAgentEvent::TextDelta { delta } = event {
+                text.push_str(&delta);
+            }
+        }
+        TurnOutput { text, result }
+    }
+
+    /// **`allow + updatedInput` 的真机判据**：claude 用 `AskUserQuestion` 反问，我们把用户
+    /// 选的选项从**同一条** `can_use_tool` 通道回过去，它得能接受并据此继续。
+    ///
+    /// 这条测试是 `updatedInput` 那个形状唯一能证伪的地方（官方文档给了单选的例子，多选的
+    /// 分隔符是我们自己定的）。形状不对的表现：CLI 把这次调用当失败 / 那一轮报错。
+    #[tokio::test]
+    #[ignore = "requires live claude login + network"]
+    async fn live_ask_user_question_accepts_our_updated_input() {
+        let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
+            eprintln!("SKIP: 本机没有可用的 claude CLI");
+            return;
+        };
+        let session_id = Uuid::new_v4().to_string();
+        let workdir = std::env::temp_dir().join(format!("kivio-claude-askuser-{session_id}"));
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+
+        // 「每次确认」档位：只有带 `--permission-prompt-tool stdio` 时 `AskUserQuestion`
+        // 才会出现在工具表里（本机实测：带 flag 的 init 有它，不带的没有）。
+        let args = live_args_with_sandbox(&session_id, None, Some("default"));
+        let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &args, &workdir).await else {
+            eprintln!("SKIP: 连接失败（未登录 / 网络？）");
+            let _ = std::fs::remove_dir_all(&workdir);
+            return;
+        };
+        let control = spawn_claude_stream_session_actor(session);
+
+        let (ask_tx, mut ask_rx) = mpsc::channel::<ApprovalAsk>(8);
+        let (dec_tx, dec_rx) = mpsc::channel(8);
+        let bridge = ApprovalBridge {
+            requests: ask_tx,
+            decisions: dec_rx,
+        };
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let picked = std::sync::Arc::new(std::sync::Mutex::new(Option::<String>::None));
+        let asked_for_task = asked.clone();
+        let picked_for_task = picked.clone();
+        // 扮演宿主 + 用户：`AskUserQuestion` 一律选**第一个选项**，其余工具照常放行。
+        let answerer = tokio::spawn(async move {
+            while let Some(ask) = ask_rx.recv().await {
+                eprintln!("  ask: tool={} input={}", ask.tool_name, ask.input);
+                asked_for_task
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(ask.tool_name.clone());
+                let updated_input = if is_ask_user_question(&ask.tool_name) {
+                    let questions = ask
+                        .input
+                        .get("questions")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut answers = serde_json::Map::new();
+                    for question in &questions {
+                        let Some(text) = question.get("question").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let Some(label) = question
+                            .get("options")
+                            .and_then(|v| v.as_array())
+                            .and_then(|options| options.first())
+                            .and_then(|option| option.get("label"))
+                            .and_then(|v| v.as_str())
+                        else {
+                            continue;
+                        };
+                        *picked_for_task.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(label.to_string());
+                        answers.insert(text.to_string(), json!(label));
+                    }
+                    Some(json!({ "questions": questions, "answers": answers }))
+                } else {
+                    None
+                };
+                let sent = dec_tx
+                    .send(crate::external_agents::session::live::ApprovalDecision {
+                        request_id: ask.request_id,
+                        approved: true,
+                        updated_input,
+                    })
+                    .await;
+                if sent.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let out = one_turn_with_approvals(
+            &control,
+            "Use the AskUserQuestion tool to ask me whether I prefer tea or coffee              (exactly two options, single select). After I answer, reply with one short              sentence naming the drink I picked.",
+            false,
+            Some(bridge),
+        )
+        .await;
+        answerer.abort();
+        let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let picked = picked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        eprintln!("result={:?}
+asked={asked:?}
+picked={picked:?}
+text={}", out.result, out.text.trim());
+
+        if out.result.is_err() {
+            eprintln!("SKIP: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        if !asked.iter().any(|name| is_ask_user_question(name)) {
+            eprintln!(
+                "SKIP: 这一轮模型没有用 AskUserQuestion（提示词没引导住，不是形状问题）：{asked:?}"
+            );
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        let picked = picked.expect("既然问了，就该解析出选项 label");
+        assert!(
+            out.text.to_lowercase().contains(&picked.to_lowercase()),
+            "claude 没有采纳我们回的 updatedInput（选的是 {picked:?}）—— 形状多半不对，             回答是：{:?}",
+            out.text
+        );
+
+        close_and_cleanup(control, &workdir).await;
+    }
+
+    /// **`set_model` 的真机判据**：同一个常驻进程里换模型，既换得动、又不丢上下文。
+    ///
+    /// 这条测试是这批改动里唯一能证伪 `set_model` wire 形状的地方 —— 字段名是推断的
+    /// （见 `set_model_request_line`）。形状错的话 `apply_model_change` 会拿到 error/超时
+    /// 并返回 `NEEDS_RECONNECT`，这里表现为**第二轮直接失败**（本测试直接驱动会话，
+    /// 没有 `run.rs` 那层换进程兜底）—— 也就是说它红就是形状错了。
+    #[tokio::test]
+    #[ignore = "requires live claude login + network"]
+    async fn live_switching_the_model_mid_session_keeps_the_context() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let Some((control, workdir)) = connect_live(&session_id, Some("sonnet")).await else {
+            return;
+        };
+
+        let first = one_turn(
+            &control,
+            "Answer with one word only. Remember the number 4242.",
+            false,
+        )
+        .await;
+        assert!(first.result.is_ok(), "第 1 轮应正常完成: {:?}", first.result);
+
+        // 换模型 —— 走会话内 `set_model`，同一个进程。
+        let second = one_turn_with_model(
+            &control,
+            "What number did I ask you to remember? Reply with just the number.",
+            "opus",
+        )
+        .await;
+        eprintln!("switch-model turn: result={:?} text={:?}", second.result, second.text);
+        assert!(
+            second.result.is_ok(),
+            "换模型那一轮失败了 —— 多半是 `set_model` 的 wire 形状猜错了（见              `set_model_request_line` 的注释）。修法：读 ack 的 error 文案，按它改字段名: {:?}",
+            second.result
+        );
+        assert!(
+            second.text.contains("4242"),
+            "换模型把上下文弄丢了（应该是同一个常驻进程、同一个会话）: {:?}",
+            second.text
+        );
+
+        close_and_cleanup(control, &workdir).await;
     }
 
     /// **核心验收 1**：同一个常驻会话连服三轮，第 2 / 3 轮记得前面轮次的内容。
@@ -1869,6 +2283,7 @@ mod live_tests {
                     .send(crate::external_agents::session::live::ApprovalDecision {
                         request_id: ask.request_id,
                         approved: approve,
+                        updated_input: None,
                     })
                     .await;
                 if sent.is_err() {

@@ -6,7 +6,7 @@
 ## 消息链路（prompt.rs / session/acp.rs）
 
 1. **只发最新消息，历史归 CLI 原生会话**（3456997 起）：`compose_external_prompt` 不重放 transcript。全部 9 个 CLI 均有原生会话（claude `--resume` / codex thread / ACP `session/load` 含 kimi / pi `--session-id`）。禁止任何形式的历史重放回归；fresh 重连丢上下文时必须发可见提示（TextDelta blockquote，cancelled 不发）。
-   - **claude 的会话级系统指令走启动 flag，不进正文**（07-29 起）：`--append-system-prompt-file <path>`（**隐藏 flag**，`--help` 里没有；claude 2.1.220 零副作用探针确认存在——不给值报 `option '--append-system-prompt-file <file>' argument missing`，胡编的 flag 报 `unknown option`）。语义是**追加**到 claude 原生系统提示之后，不替换。改动前塞进 prompt 正文的那条消息会被 CLI 自己的上下文压缩摘要掉甚至丢弃，而 `skip_instructions`（内容没变就不重发）保证了**永远不补发** ⇒ 长会话跑一阵子后用户配置的系统提示与 Memory 静默失效，无任何可观测信号。启动 flag 每次进程启动都重新注入，与对话历史无关。**必须用 file 而非内联字符串**：Windows 命令行 32767 字符上限，含 Memory 块可能超；npm 装的用户拿到 `claude.cmd`，长参数还有批处理转义风险。文件按 conversation_id 覆写在 temp（`kivio-extsys-<id>.md`，进 `cleanup_orphan_temp_files` 的启动 GC）。判据是纯函数 `prompt::instructions_via_launch_flag`；**其余 8 个 CLI 仍是正文注入**（没有核实过的等价 flag —— audit N5 记着 pi 曾把目录塞进 `--append-system-prompt`），给任何 CLI 加这条路之前先按第 12 条核实语义。真机验收：`live_append_system_prompt_file_still_applies_on_the_second_turn`（第二轮仍能取回注入的哨兵串）。
+   - **claude 的会话级系统指令走启动 flag，不进正文**（07-29 起）：`--append-system-prompt-file <path>`（此前记作**隐藏 flag**，实际它在官方 cli-reference 里**有条目**；claude 2.1.220 零副作用探针也确认存在——不给值报 `option '--append-system-prompt-file <file>' argument missing`，胡编的 flag 报 `unknown option`）。语义是**追加**到 claude 原生系统提示之后，不替换。改动前塞进 prompt 正文的那条消息会被 CLI 自己的上下文压缩摘要掉甚至丢弃，而 `skip_instructions`（内容没变就不重发）保证了**永远不补发** ⇒ 长会话跑一阵子后用户配置的系统提示与 Memory 静默失效，无任何可观测信号。启动 flag 每次进程启动都重新注入，与对话历史无关。**必须用 file 而非内联字符串**：Windows 命令行 32767 字符上限，含 Memory 块可能超；npm 装的用户拿到 `claude.cmd`，长参数还有批处理转义风险。文件按 conversation_id 覆写在 temp（`kivio-extsys-<id>.md`，进 `cleanup_orphan_temp_files` 的启动 GC）。判据是纯函数 `prompt::instructions_via_launch_flag`；**其余 8 个 CLI 仍是正文注入**（没有核实过的等价 flag —— audit N5 记着 pi 曾把目录塞进 `--append-system-prompt`），给任何 CLI 加这条路之前先按第 12 条核实语义。真机验收：`live_append_system_prompt_file_still_applies_on_the_second_turn`（第二轮仍能取回注入的哨兵串）。
      - **B1 常驻之后这个文件只在进程启动时被读一次**（它仍每轮覆写，但进程不再每轮重启）⇒ 中途改系统提示 / Memory **不重连就静默失效**。这条由第 24 条的 `LaunchConfig` 指纹（含 instructions 哈希）负责触发重连，别在正文里补发。
    - **claude 的 per-turn 正文每轮整份发送**（B1 起）：常驻会话的「复用轮」默认只发最新用户消息（历史归 CLI 原生会话），但 claude 的 `composed.full_prompt` 里**没有**会话级指令（它们走启动 flag），剩下的全是 per-turn 内容 —— active skill 正文 + 降级附件说明 + 用户消息。判据是纯函数 `run::persistent_turn_prompt`；改成「只发最新消息」会让 skill 正文与附件说明从第 2 轮起静默消失。
    - **skill 正文永远留在 prompt 正文里**，不受 `skip_instructions` 抑制：active skill 是 **per-turn** 的选择（用户可中途换 skill），跟会话级常量一起被抑制的话，resume 轮新激活的 skill 正文根本发不出去。
@@ -23,9 +23,9 @@
    - **取消有两种**：`"cancelled"`（会话仍可用）与 `session::live::CANCELLED_SESSION_LOST`（进程已死 / 协议级取消超时被硬 `Close`）。两者在出口都按取消呈现（判据 `run::is_cancellation`：不弹错误气泡、不发上下文重置提示、**不重发本轮 prompt**），但后者一律丢弃注册表条目 —— 留着就是个死 actor，下一轮才发现。
 7. **handshake 错误带阶段前缀**（`spawn:`/`initialize:`/`session-new:`/`claude-init:`），超时常量 30s 起步，集中在文件顶部。
 8. **中途换模型**：ACP 会话轮前 `session/set_config_option`/`set_model`（best-effort ack）；无对应 config 项的（reasoning 为启动 flag，如 grok）走 NEEDS_RECONNECT 重连。UI 所见必须与会话实际配置一致。
-   - **claude 走 `LaunchConfig` 指纹**（B1 起，见第 24 条）而不是 NEEDS_RECONNECT：它的 model / effort / permission-mode / 系统指令**全是启动参数**，会话内无从切换。指纹在**轮前**比对（注册表复用判据），不匹配就换进程并原生 `--resume` ⇒ 新 flag 生效且上下文不丢；NEEDS_RECONNECT 那条路是**轮后**失败重连、走 fresh 会丢上下文，不适合这个场景。`SessionCommand::RunTurn` 携带的 model / reasoning 在 claude 的 `run_turn` 里**有意忽略** —— 不要为它加「会话内切换」的假实现。
+   - **claude 走 `LaunchConfig` 指纹**（B1 起，见第 24 条）而不是 NEEDS_RECONNECT：其中只有 `--append-system-prompt-file` 是真正只能靠启动参数的；**model / effort / permission-mode 三个的「会话内无从切换」是错的**，官方 `setModel` / `setPermissionMode` / `applyFlagSettings` 在 streaming input mode 下都可用（见第 62 条的更正）。指纹在**轮前**比对（注册表复用判据），不匹配就换进程并原生 `--resume` ⇒ 新 flag 生效且上下文不丢；NEEDS_RECONNECT 那条路是**轮后**失败重连、走 fresh 会丢上下文，不适合这个场景。`SessionCommand::RunTurn` 携带的 model / reasoning 在 claude 的 `run_turn` 里**有意忽略** —— 不要为它加「会话内切换」的假实现。
    - **换模型不丢会话**（07-29 实测推翻旧结论）。此前 `resolve_agent_resume_context` 在「模型变了」时刻意生成一个**新** session id（`--session-id <new>`），依据是一句没有实测支撑的注释：「CLI 在 `--resume` 上会忽略 `--model`，会话钉死在旧模型」。**claude 2.1.220 本机实测推翻了它**：先 `--session-id X --model sonnet` 让它记住一个数字，再 `--resume X --model opus` 起来 —— 它**既报自己是 Opus、又记得那个数字**，切换生效且上下文没丢。所以换模型现在照常 `--resume`（`session/mod.rs`），进程侧由本条上一点的启动参数指纹接管（指纹不匹配 ⇒ 换进程，但带 `--resume <同一个 id>`）。**不要凭想象把「换模型 ⇒ 开新会话」加回来**：那是纯损失（用户换个模型就丢掉整段对话），要加回来先给出能证伪的实测。
-   - **claude 的思考档位有两个不走 `--effort` 的取值**（07-29，均按第 12 条核实自 2.1.220，判据是纯函数 `defs::claude::claude_thinking_args`）：**关闭思考 = `--thinking disabled`**（**隐藏 flag**，`--help` 里没有；不给值报 `option '--thinking <mode>' argument missing`，二进制里的 commander 定义是 `.choices(["enabled","adaptive","disabled"]).hideHelp()`，官方 Agent SDK 的 `{type:"disabled"}` 也是拼成这个）—— 这一档**不叠 `--effort`**；**ultracode = `--effort ultracode`**，它**不是**独立 flag（`--ultracode` 不存在）而是 `--effort` 的一个取值（二进制里 `cUc={ultracode:"xhigh"}` 映射强度，`ultracode:_Jn(cli.effort)` 用同一字符串置位会话的 ultracode 编排状态；CLI 自己的 `/effort` 用法串就是 `<low|medium|high|xhigh|max|ultracode|auto>`）。**不要为 ultracode 引入 `--settings`**：那要落临时配置文件、还要论证不会污染用户 `~/.claude/settings.json` 的配置层，而 `--effort ultracode` 是 CLI 自己认的同义写法。真机验收：`live_thinking_off_really_stops_thinking`（同一 prompt，high 有 thinking 块 / off 为 0）、`live_ultracode_is_a_recognized_effort_value`（判据可证伪：胡编的 `--effort` 会在 stderr 打 `Warning: Unknown --effort value …`，`ultracode` 不打）。
+   - **claude 的思考档位有两个不走 `--effort` 的取值**（07-29，均按第 12 条核实自 2.1.220，判据是纯函数 `defs::claude::claude_thinking_args`）：**关闭思考 = `--thinking disabled`**（此前记作隐藏 flag，实际 changelog 2.1.166 明写了它；`--help` 里确实没有；不给值报 `option '--thinking <mode>' argument missing`，二进制里的 commander 定义是 `.choices(["enabled","adaptive","disabled"]).hideHelp()`，官方 Agent SDK 的 `{type:"disabled"}` 也是拼成这个）—— 这一档**不叠 `--effort`**；**ultracode = `--effort ultracode`**，它**不是**独立 flag（`--ultracode` 不存在）而是 `--effort` 的一个取值（二进制里 `cUc={ultracode:"xhigh"}` 映射强度，`ultracode:_Jn(cli.effort)` 用同一字符串置位会话的 ultracode 编排状态；CLI 自己的 `/effort` 用法串就是 `<low|medium|high|xhigh|max|ultracode|auto>`）。**不要为 ultracode 引入 `--settings`**：那要落临时配置文件、还要论证不会污染用户 `~/.claude/settings.json` 的配置层，而 `--effort ultracode` 是 CLI 自己认的同义写法。真机验收：`live_thinking_off_really_stops_thinking`（同一 prompt，high 有 thinking 块 / off 为 0）、`live_ultracode_is_a_recognized_effort_value`（判据可证伪：胡编的 `--effort` 会在 stderr 打 `Warning: Unknown --effort value …`，`ultracode` 不打）。
    - **CLI 对超出模型能力的档位是静默降级，不报错**（同批实测）：未知 `--effort` 只打一句 stderr warning 后按默认档跑；`--thinking disabled` 撞上 catalog 里标着 `rejects_disabled_thinking` 的 Fable 5 时被直接忽略（仍产出 thinking 块、`is_error=false`）。所以**不要**为「哪个模型支持哪些档位」再建一张能力表 —— 门控纯属观感，代价是又一张会过期的表。
 8b. **pi 轮次收尾（07-22 真机验收修复）**：`agent_end` 后进入 3s 宽限排空（到点主动 break，不无限等 EOF——pi 带 `--session-id` 收尾落盘时可能不因 stdin EOF 退出）；drain 返回 Ok 即 `start_kill` 子进程——pi 的会话落盘发生在每条 `message_end` 时（同步 `appendFileSync`），严格先于 `agent_end` 上线，kill 不丢会话、不影响下轮 resume。Unix 下信号退出 `status.code()=None`，不触发出口「非零退出+stderr」规则。
 
@@ -60,6 +60,21 @@
    - 指纹 = `flags`（`model|reasoning|sandbox`，恒可知）+ `instructions`（`Option<系统指令哈希>`）。判定在**轮前**（注册表 `LiveSession::is_reusable` 的一部分）：不匹配 ⇒ 丢弃条目（actor 收到通道关闭后自行关停进程）⇒ 走连接分支**带原生 resume** ⇒ 新 flag 生效且上下文不丢。
    - **`instructions` 为 `None`（斜杠命令那一轮不注入指令）时不参与判定**。否则「斜杠命令 → 普通消息」会把进程来回重启两次。但反向必须成立：会话是被斜杠命令拉起来的（注册时 `None`）时，紧跟的普通消息**必须**重连，否则用户配置的系统提示与 Memory 在这个会话里永远不生效。这条不对称写在 `LaunchConfig::accepts` 里，配 6 组单测。
    - 非 claude 协议指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。**不要**为此新建控制通道（`set_model` / `set_permission_mode` 之类留作以后的优化）。
+   - **✅ 已重做（2026-07-30）：model 走会话内 `set_model`，不再换进程。** `LaunchConfig.flags`
+     现在只含 `reasoning|sandbox` —— model 不进指纹，换模型直接复用常驻进程。
+     `claude_stream::apply_model_change` 在写 prompt **之前**发一条 `set_model` 控制请求，
+     并**等它的 `control_response`**：wire 字段名没有官方文档（是从 `interrupt` 的形状 +
+     `setModel(model)` 的签名推断的），不等 ack 的话猜错就是「界面显示新模型、实际跑旧模型」
+     —— 静默且无可观测信号，最坏的失败方式。ack 是 error / 3s 超时 ⇒ 返回 `NEEDS_RECONNECT`，
+     走既有的 ReconnectConfig（换进程 + 新 `--model`），即改动前的行为。**猜错的代价是白跑一次
+     重连，不是静默失效。** 形状由 `set_model_request_shape_matches_the_control_request_envelope`
+     与 `control_response_verdict_matches_only_our_request_id` 两条单测钉住。
+   - **reasoning / permission-mode 仍在指纹里，这是有理由的**：`--effort` 的官方入口是
+     `applyFlagSettings({effortLevel})`，wire 形状**没有核实过**；而 `--permission-mode` 更换
+     还会改变要不要带 `--permission-prompt-tool stdio`（见
+     `defs::claude::claude_permission_prompt_args`）—— 那是启动参数的事，会话内切不了。
+   - 下面这段是被推翻的旧结论，留作记录： 官方 Agent SDK 明写 `Query.setModel()` / `setPermissionMode()` / `applyFlagSettings()`（后者接受任意 settings 子集，含 `effortLevel`），限制只有一条：**only available in streaming input mode** —— 而 `--input-format stream-json` 就是 streaming input mode。changelog 2.1.212 还进一步支持 `set_model` **轮内**生效（此前要等下一轮）；2.1.208 修的是「非字符串 `set_model` 载荷让会话永久挂死」，也就是说这条通道在 CLI 侧一直是实现了的。
+   - 代价：现在用户每换一次模型 / 思考档 / 权限档，都要杀进程 + 重启 + `--resume` 重放整段历史（实测 3.2s 冷启动 + 一次完整历史的 token）。官方路径是往 stdin 写一行 JSON。`LaunchConfig` 指纹那一整层因此是可以拿掉的（`--append-system-prompt-file` 仍是真启动参数，它得留）。
 
 27. **常驻会话的两道取消防御**，都抽成纯函数配单测（第 13 条）：
    - **迟到的 `Error` 回声要吞掉**（`suppress_after_cancel`）：中断会在流里留下一串「本轮失败」的回声（assistant 帧的 `aborted`、`result` 的 `errors:["[ede_diagnostic] …"]`）。只吞 `Error` —— 已经流出来的正文与「本轮回答被中止」这类提示仍要发出去。
@@ -107,7 +122,22 @@
    - **诚实的边界（实测）**：把批量拒绝从 Cancel 分支注释掉之后，真机测试 `live_cancelling_with_a_pending_approval_leaves_the_session_usable` **仍然通过** —— 我们那条 `interrupt` 会让 CLI 自己 abort 掉在飞的权限请求（那个 promise 挂在本轮的 `AbortController` 上）。所以今天**没有**可观测的死锁；批量拒绝是 fail-closed 的兜底，把「不挂死」从「依赖 CLI 内部恰好会 abort」变成「我们自己保证」，代价是几行 JSON。**红→绿判据是单测 `cancelling_rejects_every_pending_approval_exactly_once`（断言每个 request_id 出现且只出现一次、且一律 deny），不是那条真机测试。**
    - **`control_cancel_request` 从「静默忽略」改成「从挂起表摘掉」**（仍然**不回任何东西** —— CLI 自己收到这条时也只 `abort()`）。留着那条作废的询问会让批量拒绝对它回一条多余的响应，更糟的是让「本轮还有人在等」永久为真。
    - **答复的线上形状**：`{"type":"control_response","response":{"subtype":"success","request_id":"<回显>","response":{…}}}`，载荷是 `{"behavior":"allow"}` 或 `{"behavior":"deny","message":<必填>,"interrupt":false}`。**三件套 snake_case、载荷 camelCase**（同一条协议两套命名混用），`request_id` 嵌在 `response` **里面**、不在帧顶层。`interrupt:true` 会让 CLI abort 整轮 —— 拒一个工具不等于停掉整轮，别顺手带上。
-   - **`requires_user_interaction` 的工具当场拒、不打扰用户**（`approval_verdict`）：`AskUserQuestion` / `ExitPlanMode` 那类要用户在卡片上直接作答，批准之后 CLI 会紧接着发一条我们**还没实现**的 `request_user_dialog`，那条被 fail-closed 回 error、工具照样失败 —— 给用户一张点了也没用的卡片比诚实拒掉更糟。**实现 plan 模式 / 反问用户时从这里入手**：它们不单独分帧，就是工具名为 `ExitPlanMode` / `AskUserQuestion` 的普通权限询问，按工具名分类处理；plan 批准要**先发切换权限档位的控制帧、再回 allow**，顺序不能反（print 模式的 stdin 确实收 `set_permission_mode` 控制请求，二进制核实）。
+   - **`requires_user_interaction` 的工具当场拒、不打扰用户**（`approval_verdict`）。**注意此处原先给的理由是错的**：原文说「批准之后 CLI 会紧接着发一条我们还没实现的 `request_user_dialog`」—— 官方文档（Agent SDK · user-input）写的恰好相反，`AskUserQuestion` **就是从同一条 `can_use_tool` 通道**答的：`{"behavior":"allow","updatedInput":{"questions":<原样回传>,"answers":{"<问题文本>":"<选中的 label>"}}}`，没有第二条控制请求，`request_user_dialog` 与这条路无关。另外 `--permission-prompt-tool` 那条「allow 被转成 deny」的官方限制作用域是 **MCP 工具**，`AskUserQuestion` / `ExitPlanMode` 是内置工具、不在其中。
+   - **✅ `AskUserQuestion` 已放开（2026-07-30）。** `ApprovalDecision` 加了
+     `updated_input: Option<Value>`，`approval_response_line` 的 allow 分支据此带上 `updatedInput`。
+     宿主侧（`run.rs::ApprovalHost::ask`）识别出 `AskUserQuestion` 后**转成 Kivio 已有的问用户
+     卡片**（`request_user_response` + `chat-user-prompt`）—— 那套 UI 的形状（问题 + 选项 +
+     单选/多选 + 自定义文本）与 claude 的入参一一对得上，不该为它再造第二套（spec 第 2 条）。
+     两个映射纯函数 + 4 条单测：`ask_user_prompt_from_claude_input`（claude 入参 → 卡片，选项 id
+     用**下标**，因为 claude 的选项只有 label 没有 id）、`claude_ask_user_updated_input`
+     （用户选择 → `{questions: <原样回传>, answers: {"<问题文本>": "<label>"}}`，键是**问题文本**
+     不是下标，用错等于没答）。入参形状不认识时返回 `None` ⇒ 退回普通审批卡，**绝不静默吞掉**
+     （吞掉 = CLI 那条 promise 永远等不到回复 = 整轮挂死）。
+   - **两处仍是猜的**：多选的分隔符（官方只给了单选的例子，我们用 `, ` 拼串，至少保证类型是
+     它认识的字符串而不是可能不接受的数组）；`allow_custom` 恒为 true（claude 的 schema 里没有
+     这一档，但让用户能不选预设项直接说自己的想法是 Kivio 卡片白给的能力）。
+   - **`ExitPlanMode` 仍当场拒**：它的批准按 spec 要求得**先发切换权限档位的控制帧、再回 allow**，
+     顺序不能反，而那条路没核实过 —— 给一张点了没用的卡片比诚实拒掉更糟。**实现 plan 模式 / 反问用户时从这里入手**：它们不单独分帧，就是工具名为 `ExitPlanMode` / `AskUserQuestion` 的普通权限询问，按工具名分类处理；plan 批准要**先发切换权限档位的控制帧、再回 allow**，顺序不能反（print 模式的 stdin 确实收 `set_permission_mode` 控制请求，二进制核实）。
 
    - **`keep_alive` 静默忽略即正确处理**：schema 是 `{type:"keep_alive"}`（无字段、无 `request_id`，描述原文 "Keep-alive message to maintain WebSocket connection"），CLI 自己的两个读取点都是直接 `continue`/`return`，**没有任何需要回应的语义**。它在某些传输上按 30s 间隔发（`setInterval(...,30000)`），我们这条路实测不出现 —— 但按「可能出现」处理，代价为零。
    - **`control_cancel_request` 不回任何东西，但要从挂起表里摘掉那条询问**（07-29 权限审批落地后改的，见第 32 条；此前这里写的是「静默忽略即正确」，那在有挂起表之后就不对了）。它是 CLI 撤回自己先前发出的某个 `control_request`（权限询问已在别处答掉）；CLI 自己收到这条时也只 `abort()` 在飞的请求、**不回任何东西**，所以「不回复」这一半仍然成立。`control_response`（我们那条 `interrupt` 的 ack）是真的有意不接：取消的权威信号是那一轮的 `result`，ack 可能在我们已经返回之后才到，读它没有决策价值。
@@ -221,3 +251,21 @@
    - **不要加「注入合成流帧」的能力**：那测的是解析器，解析器已有单测，加了只是维护负担。
    - probe 相关代码全部 `#[cfg(debug_assertions)]`，release 不含；probe 概念不得泄进生产路径。
 
+
+## 未接的官方协议信号（2026-07-30 审查补记）
+
+按官方文档核对后确认**已接**的：`result` 四种错误子型、`is_error` + `subtype` 双判据、`terminal_reason: "aborted_streaming"`、`permission_denials`、`parent_tool_use_id` 分流、审批响应的 `{behavior, updatedInput?, updatedPermissions?}` / `{behavior, message, interrupt?}` 形状 —— 全部与官方类型定义逐字相符。
+
+本次已补：
+- `system/api_retry`（上游 429 / overloaded 时 CLI 在静默重试，此前界面一个字都没有 —— 这是「怎么卡住了」的头号成因，而我们刻意不加轮次超时，更依赖这条信号）。
+- `result.origin.kind == "task-notification"` 过滤（后台任务完成时 CLI 注入一个**合成轮次**，自带一条 `result`。不滤掉会让 `completed_result_turns` 提前跳数 ⇒ `run_turn` 误判本轮已结束）。
+- `--permission-mode` 补上官方的 `auto` / `dontAsk` 两档（`manual` 只是 `default` 别名，不列）。`dontAsk` 是官方为 headless 点名推荐的那一档；缺了这两个，用户只能在「每次都问」和「完全放行」之间跳。
+
+仍未接、按价值排序：
+1. **`user_message_uuid`（2.1.216+）+ `--replay-user-messages`** —— 官方已收录（`SDKResultMessage` success 分支）。配上它能把「这条 result 属于哪条用户消息」钉死，`STALE_FRAME_BUDGET = 64` 那套帧数窗口可以整段删掉。
+2. **`system/init` 的 `capabilities` 数组（2.1.205+）** —— 官方原话是「Check it to feature-detect **instead of comparing version strings**」。现在 `interrupt_receipt_v1` 是当既定事实写在注释里的，代码并没有真的检测；模型目录那条只能靠版本号（capabilities 描述协议行为、不是模型表），但 interrupt / cancel_queued 该按能力分支。
+3. **`interrupt` 的回执 + `cancel_queued: true`（2.1.219+）** —— 官方明确「回执在被中断那轮的 `result` **之前**到达，**读回执而不是在 result 之后去看队列**」，也就是官方反对我们现在的做法。今天一轮只写一条用户消息、队列通常是空的，危害有限；但 scheduled task 触发器也会进这个队列。
+4. **`get_context_usage` 控制请求** —— 一次请求返回 `{totalTokens, maxTokens, categories[], …}`，即 `/context` 的原始数据。**不建议推翻现有那套流式实时值**（那是 14i 的核心收益），但轮末那个「权威快照」可以改成问一次，把最脆的那段逻辑降级成校验。
+5. `--fork-session`（我们手搓了「摘 `--resume` + 换新 `--session-id`」，官方有带历史开新 id 的 flag）、`--max-turns` / `--max-budget-usd`（跑飞的会话目前既不限轮次也不限钱）、`--tools` / `--allowedTools` / `--disallowedTools` / `--agents`（Kivio 自己的工具约束与 sub-agent 角色在外部 CLI 会话里**完全不生效**）、`--mcp-config`（用户在 Kivio 装的 MCP 在 claude 会话里看不见）、`--bare`（探测专用，能省掉首轮那 4 条 hook 帧和 28→35 的工具表抖动；**绝不能用在真实回复路径**）。
+
+方法论订正：spec 第 12 / 21 条把真相源定成了本机二进制 + 零副作用探针，于是**系统性跳过了官方 changelog** —— 而上面 `set_model`、`--thinking disabled`、`api_retry` 三条的出处都是 changelog 或官方文档，比 `grep -a` 便宜也稳。核实流程里把 changelog 加成第一站。

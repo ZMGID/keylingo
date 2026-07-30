@@ -316,6 +316,41 @@ fn task_notification_note(obj: &serde_json::Map<String, Value>) -> Option<String
     })
 }
 
+/// `{type:"system", subtype:"api_retry", attempt, max_retries, retry_delay_ms, error_status?,
+/// error?}` → 一条给用户看的提示。
+///
+/// **为什么必须接**：上游 429 / overloaded 时 CLI 在**静默重试**，界面上一个字都没有 ——
+/// 这正是「怎么卡住了」的头号成因。而我们刻意不给轮次加超时（spec 第 114 条），反而更依赖
+/// 这条可见信号。官方字段表见 headless 文档 "Handle API retries"。
+fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    let attempt = obj.get("attempt").and_then(|v| v.as_u64())?;
+    let max_retries = obj.get("max_retries").and_then(|v| v.as_u64());
+    let delay = obj
+        .get("retry_delay_ms")
+        .and_then(|v| v.as_u64())
+        .map(|ms| format!("，{:.1}s 后重试", ms as f64 / 1000.0))
+        .unwrap_or_default();
+    let cause = obj
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            obj.get("error_status")
+                .and_then(|v| v.as_u64())
+                .map(|code| format!("HTTP {code}"))
+        });
+    let of_max = match max_retries {
+        Some(max) => format!("/{max}"),
+        None => String::new(),
+    };
+    Some(match cause {
+        Some(text) => format!("> ⏳ 上游请求失败（{text}），第 {attempt}{of_max} 次重试中{delay}。\n\n"),
+        None => format!("> ⏳ 上游请求重试中（第 {attempt}{of_max} 次）{delay}。\n\n"),
+    })
+}
+
 /// `assistant` 帧上的 `error` 值 → (是否算「本轮失败」, 提示文案)。
 ///
 /// **协议事实**（claude 2.1.220 反查二进制核实）：`error` 与 `aborted` 挂在 assistant 帧的
@@ -624,6 +659,12 @@ impl ClaudeStreamState {
                             sink(UnifiedAgentEvent::TextDelta { delta: note });
                         }
                     }
+                    // 上游重试（429 / overloaded）。不接的话用户只看到「卡住了」。
+                    Some("api_retry") => {
+                        if let Some(note) = api_retry_note(obj) {
+                            sink(UnifiedAgentEvent::TextDelta { delta: note });
+                        }
+                    }
                     // ---- 以下 subtype **有意不接**（不是漏了）----
                     //
                     // `hook_started` / `hook_progress` / `hook_response`：hook 是**用户自己**
@@ -772,6 +813,20 @@ impl ClaudeStreamState {
                 // 边界：那会把 per-turn 状态在本轮中途清掉，还会让 `completed_result_turns`
                 // （常驻会话的轮次边界信号）提前跳数，`run_turn` 会误判本轮已结束。
                 if sidechain {
+                    return;
+                }
+                // 后台任务完成时 CLI 会注入一个**合成的后续轮次**，它自带一条 `result`，
+                // 靠 `origin.kind == "task-notification"` 区分（官方 `SDKResultMessage`
+                // 原话：check this field 以便 route or suppress the latter）。
+                // 不滤掉的话，跑过后台 Bash / 后台 subagent / scheduled task 之后，这条
+                // 合成 result 会让 `completed_result_turns` 提前跳数 ⇒ `run_turn` 误判
+                // 本轮已结束（提前收尾，或把下一轮的开头吃掉）。
+                if obj
+                    .get("origin")
+                    .and_then(|origin| origin.get("kind"))
+                    .and_then(|kind| kind.as_str())
+                    == Some("task-notification")
+                {
                     return;
                 }
                 // 用户中断的收尾必须**先**豁免：被打断的轮次同样带 `is_error: true`

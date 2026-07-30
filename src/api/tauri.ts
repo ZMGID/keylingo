@@ -1860,6 +1860,16 @@ export const api = {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<ChatToolConfirmPayload>('chat-tool-confirm', (payload) => listener(payload))
   },
+  /** 后端已按超时/取消处理掉某条审批 ⇒ 撤掉卡片，别让用户答一个没人听的问题。 */
+  onChatToolConfirmWithdraw: (
+    listener: (payload: { conversationId: string; toolCallId: string }) => void,
+  ) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return on<{ conversationId: string; toolCallId: string }>(
+      'chat-tool-confirm-withdraw',
+      (payload) => listener(payload),
+    )
+  },
   onChatSessionConsent: (listener: (payload: ChatSessionConsentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<ChatSessionConsentPayload>('chat-session-consent', (payload) => listener(payload))

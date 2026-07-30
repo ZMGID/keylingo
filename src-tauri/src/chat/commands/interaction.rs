@@ -404,6 +404,8 @@ pub(crate) async fn request_tool_approval(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
+            drop(pending);
+            withdraw_tool_confirm(app, conversation_id, &record.id);
             return false;
         }
     };
@@ -415,12 +417,28 @@ pub(crate) async fn request_tool_approval(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
+            drop(pending);
+            // 超时/通道断开 ⇒ 这条已经按拒绝处理了。必须把卡片撤掉，否则用户回来点
+            // 「允许」是个静默空操作（`chat_confirm_tool_call` 找不到条目就直接 Ok），
+            // 他会以为自己批准了，而工具早就被拒了。
+            withdraw_tool_confirm(app, conversation_id, &record.id);
             false
         }
     }
 }
 
-pub(super) async fn request_user_response(
+/// 通知前端撤掉某条审批卡（已超时/已取消，答复不再有意义）。
+fn withdraw_tool_confirm(app: &AppHandle, conversation_id: &str, tool_call_id: &str) {
+    let _ = app.emit(
+        "chat-tool-confirm-withdraw",
+        serde_json::json!({
+            "conversationId": conversation_id,
+            "toolCallId": tool_call_id,
+        }),
+    );
+}
+
+pub(crate) async fn request_user_response(
     app: &AppHandle,
     state: &AppState,
     conversation_id: &str,

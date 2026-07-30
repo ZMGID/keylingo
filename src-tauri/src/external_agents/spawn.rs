@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
 use tokio::time::timeout;
 
-use crate::external_agents::types::{PromptInputFormat, RuntimeAgentDef};
+use crate::external_agents::types::RuntimeAgentDef;
 use crate::proc::NoConsoleWindow;
 
 pub struct SpawnedAgent {
@@ -136,7 +136,17 @@ pub fn fold_stderr(msg: String, stderr_tail: &str) -> String {
 async fn accumulate_tail<R: AsyncRead + Unpin>(reader: R, cap: usize) -> String {
     let mut lines = BufReader::new(reader).lines();
     let mut out = String::new();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            // 一行非法 UTF-8 不能让排空停下来：常驻进程的 stderr 从此再没人读，管道写满
+            // （4–64KB）后子进程会阻塞在写 stderr 上 —— 正是这个任务要避免的那个死锁。
+            // tokio 丢掉这一行后 reader 仍可用，接着读。**只对 InvalidData 继续**：其余
+            // 错误（管道断了之类）是持续性的，continue 会变成空转。
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(_) => break,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -375,36 +385,6 @@ pub async fn spawn_agent(
     })
 }
 
-pub async fn write_prompt_stdin(
-    child: &mut Child,
-    def: &RuntimeAgentDef,
-    prompt: &str,
-    images: &[crate::external_agents::attachments::ImageBlock],
-) -> Result<(), String> {
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "stdin unavailable".to_string())?;
-    let mut stdin = stdin;
-    match def.prompt_input_format {
-        PromptInputFormat::Text => {
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-            stdin.shutdown().await.map_err(|e| e.to_string())?;
-        }
-        PromptInputFormat::StreamJson => {
-            let payload = stream_json_user_line(prompt, images)?;
-            stdin
-                .write_all(payload.as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
 /// 一行 claude stream-json `user` 消息（含结尾换行）。
 ///
 /// 一次性路径（`write_prompt_stdin`）与常驻会话（`session/claude_stream.rs`）共用同一份构造，
@@ -472,39 +452,6 @@ fn stream_json_user_content(
         }
         serde_json::Value::Array(content)
     }
-}
-
-pub async fn read_stdout_lines<F>(
-    child: &mut Child,
-    mut on_line: F,
-    cancel_check: impl Fn() -> bool,
-) -> Result<(), String>
-where
-    F: FnMut(&str) -> Result<(), String>,
-{
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "stdout unavailable".to_string())?;
-    let mut reader = BufReader::new(stdout).lines();
-    loop {
-        if cancel_check() {
-            // 杀**整棵树**：CLI 拉起的 MCP 服务器是它的子进程，只 start_kill 会留下孤儿。
-            kill_agent_process_tree(child);
-            return Err("cancelled".to_string());
-        }
-        let line = match timeout(Duration::from_millis(200), reader.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => continue,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        on_line(&line)?;
-    }
-    Ok(())
 }
 
 pub fn parse_json_line(line: &str) -> Option<serde_json::Value> {

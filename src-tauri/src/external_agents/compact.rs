@@ -39,10 +39,10 @@ pub async fn request_external_compaction(
     run_external_cli_slash_command(app, state, conversation, compact_prompt).await?;
 
     conversation.context_state.summary = None;
-    conversation.context_state.compression_count = conversation
-        .context_state
-        .compression_count
-        .saturating_add(1);
+    // **不在这里自增 compression_count**：`/compact` 走的是 `run_external_cli_slash_command`
+    // → `run_external_cli_reply`，CLI 回的 `system/compact_boundary` 已经在那里逐条计了数
+    // （claude 的手动压缩 trigger 是 `manual`）。两处都加会让计数永远比
+    // `compaction_boundaries` 多一，从第一次压缩起就对不上。boundary 帧是唯一来源。
     conversation.context_state.last_compressed_at = Some(chrono::Local::now().timestamp());
     conversation.context_state.warning = None;
 

@@ -875,7 +875,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
-  const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload>>({})
+  const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload[]>>({})
   const pendingSessionConsentsRef = useRef<Record<string, ChatSessionConsentPayload>>({})
   const streamStartedAtRef = useRef<number | null>(null)
   const streamingContentRef = useRef('')
@@ -1052,7 +1052,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       streamingReasoningRef.current = snapshot.reasoning
     }
     setStreamCoarse({ streamError: streamErrorsRef.current[conversationId] ?? '' })
-    setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId] ?? null)
+    setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId]?.[0] ?? null)
     setPendingSessionConsent(pendingSessionConsentsRef.current[conversationId] ?? null)
   }, [cancelPendingFrame, clearStreamingPreview])
 
@@ -2055,19 +2055,48 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatToolConfirm, (payload) => {
-    pendingToolConfirmsRef.current[payload.conversationId] = payload
+    // 排队而不是覆盖：一条消息里并行调多个工具时，后端会同时挂着多条询问等答复
+    // （按 request_id 路由）。覆盖会让用户没看见的那条静默超时 ⇒ 模型收到「用户拒绝」。
+    const queue = pendingToolConfirmsRef.current[payload.conversationId] ?? []
+    if (!queue.some((item) => item.toolCallId === payload.toolCallId)) {
+      queue.push(payload)
+    }
+    pendingToolConfirmsRef.current[payload.conversationId] = queue
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === payload.conversationId) {
-      setPendingToolConfirm(payload)
+      setPendingToolConfirm(queue[0] ?? null)
+    }
+  }, [syncGeneratingConversationIds])
+
+  useTauriEvent(api.onChatToolConfirmWithdraw, (payload) => {
+    const rest = (pendingToolConfirmsRef.current[payload.conversationId] ?? [])
+      .filter((item) => item.toolCallId !== payload.toolCallId)
+    if (rest.length > 0) {
+      pendingToolConfirmsRef.current[payload.conversationId] = rest
+    } else {
+      delete pendingToolConfirmsRef.current[payload.conversationId]
+    }
+    syncGeneratingConversationIds()
+    if (currentConversationIdRef.current === payload.conversationId) {
+      setPendingToolConfirm((current) =>
+        current?.toolCallId === payload.toolCallId ? rest[0] ?? null : current)
     }
   }, [syncGeneratingConversationIds])
 
   const resolvePendingToolConfirm = useCallback((approved: boolean, always = false) => {
     if (!pendingToolConfirm) return
-    delete pendingToolConfirmsRef.current[pendingToolConfirm.conversationId]
+    const conversationId = pendingToolConfirm.conversationId
+    const rest = (pendingToolConfirmsRef.current[conversationId] ?? [])
+      .filter((item) => item.toolCallId !== pendingToolConfirm.toolCallId)
+    if (rest.length > 0) {
+      pendingToolConfirmsRef.current[conversationId] = rest
+    } else {
+      delete pendingToolConfirmsRef.current[conversationId]
+    }
     syncGeneratingConversationIds()
     void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved, always)
-    setPendingToolConfirm(null)
+    // 队列里还有下一条就接着弹，别让它在后台等到超时。
+    setPendingToolConfirm(rest[0] ?? null)
   }, [pendingToolConfirm, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatSessionConsent, (payload) => {
