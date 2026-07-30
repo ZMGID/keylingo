@@ -606,9 +606,16 @@ impl ClaudeStreamJsonSession {
     /// 跑一轮：往 stdin 写一行 stream-json user 消息 → 读 stdout 直到本轮的 `result` → 返回。
     /// **不关 stdin**（关了进程就退出了）。
     ///
-    /// `SessionCommand::RunTurn` 携带的 model / reasoning 在这里**有意忽略**：claude 的模型与
-    /// effort 是**启动 flag**，会话内无法切换。中途换配置由注册表的 `LaunchConfig` 指纹拦下
-    /// 并重连一个新进程（见 `session/live.rs::LaunchConfig`），而不是在这里假装切换成功。
+    /// **model 在会话内切换**（2026-07-30 起）：`apply_model_change` 在写 prompt 之前发一条
+    /// `set_model` 控制请求并等 ack，失败退回 `NEEDS_RECONNECT`（换进程 + 新 `--model`）。
+    /// 官方依据是 Agent SDK 的 `Query.setModel()`，限制只有「streaming input mode」这一条，
+    /// 而 `--input-format stream-json` 正是它。**别把 model 加回 `LaunchConfig` 指纹**——
+    /// 那等于让用户每换一次模型都付一次冷启动 + 一整段历史重放。
+    ///
+    /// `reasoning` 仍然在这里**有意忽略**：`--effort` 的官方入口是
+    /// `applyFlagSettings({effortLevel})`，wire 形状没核实过，所以它（连同 permission-mode）
+    /// 继续由注册表的 `LaunchConfig` 指纹拦下、换进程生效（见 `session/live.rs::LaunchConfig`），
+    /// 而不是在这里假装切换成功。
     ///
     /// **这个读循环有意没有轮次超时**（不是漏了）：
     /// - 一轮**合法地**可以跑很久（连着调几十个工具、一个 `Bash` 跑十分钟），所以任何「总时长
@@ -633,7 +640,11 @@ impl ClaudeStreamJsonSession {
     /// 这段读到的非 ack 帧一律丢弃：prompt 还没写出去，此刻能来的只有上一轮取消后
     /// 的残帧（本来就归 `stale_frame_verdict` 管）。`system/init` 不在其中 ——
     /// 它排在本轮第一条 user 消息之后。
-    async fn apply_model_change(&mut self, model: Option<&str>) -> Result<(), String> {
+    async fn apply_model_change(
+        &mut self,
+        model: Option<&str>,
+        control: &mut mpsc::Receiver<SessionCommand>,
+    ) -> Result<(), String> {
         let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
             return Ok(());
         };
@@ -652,6 +663,18 @@ impl ClaudeStreamJsonSession {
             if tokio::time::Instant::now() >= deadline {
                 return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string());
             }
+            // 用户在这 3s 里点了停止 / 关会话：立刻按取消收场，别让他多等一个握手。
+            match control.try_recv() {
+                Ok(SessionCommand::Cancel) => return Err("cancelled".to_string()),
+                Ok(SessionCommand::Close) => return Err("closed".to_string()),
+                Ok(SessionCommand::RunTurn { done, .. }) => {
+                    let _ = done.send(Err("session busy".to_string()));
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return Err("control channel closed".to_string())
+                }
+            }
             match self.next_line().await {
                 ReadStep::Line(line) => {
                     let Some(frame) = crate::external_agents::spawn::parse_json_line(&line) else {
@@ -668,7 +691,18 @@ impl ClaudeStreamJsonSession {
                                 crate::external_agents::session::acp::NEEDS_RECONNECT.to_string()
                             )
                         }
-                        None => continue,
+                        None => {
+                            // **不能无脑丢**：这一窗口里若来了别的 `control_request`（上一轮
+                            // 没收干净的残留），不回复就是让 CLI 那条没有超时的 promise 永远挂着
+                            // —— 正是 `classify_inbound_frame` 那套 fail-closed 要消灭的死法。
+                            // `can_ask=false`：此刻还没有审批通道，一律回 error 而不是问用户。
+                            if let InboundFrame::Reply(line) = classify_inbound_frame(&frame, false)
+                            {
+                                let _ = self.stdin.write_all(line.as_bytes()).await;
+                                let _ = self.stdin.flush().await;
+                            }
+                            continue;
+                        }
                     }
                 }
                 ReadStep::Idle => continue,
@@ -691,7 +725,7 @@ impl ClaudeStreamJsonSession {
     ) -> Result<(), String> {
         // 换模型：先在**会话内**试一次 `set_model`，不行才退回换进程。
         // 必须排在写 prompt 之前 —— 否则这一轮的问题已经喂给旧模型了。
-        self.apply_model_change(model).await?;
+        self.apply_model_change(model, control).await?;
 
         let payload = stream_json_user_line(prompt, images)?;
         if let Err(err) = self.stdin.write_all(payload.as_bytes()).await {
@@ -1888,6 +1922,143 @@ text={}", out.result, out.text.trim());
         assert!(
             out.text.to_lowercase().contains(&picked.to_lowercase()),
             "claude 没有采纳我们回的 updatedInput（选的是 {picked:?}）—— 形状多半不对，             回答是：{:?}",
+            out.text
+        );
+
+        close_and_cleanup(control, &workdir).await;
+    }
+
+    /// **多选答案的分隔符判据**（Issue 5）：官方文档只给了单选的例子，我们用 `", "` 拼串。
+    ///
+    /// 这条真机测试就是为了不再靠猜：让 claude 发一个 `multiSelect` 的问题，我们把**两个**
+    /// 选项拼成一个字符串回过去，看它认不认。它若不认，表现是那次调用失败 / 模型答不出我们
+    /// 选的两项 —— 那就说明该换成数组或别的分隔符。
+    #[tokio::test]
+    #[ignore = "requires live claude login + network"]
+    async fn live_ask_user_question_accepts_a_multi_select_answer() {
+        let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
+            eprintln!("SKIP: 本机没有可用的 claude CLI");
+            return;
+        };
+        let session_id = Uuid::new_v4().to_string();
+        let workdir = std::env::temp_dir().join(format!("kivio-claude-multi-{session_id}"));
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+        let args = live_args_with_sandbox(&session_id, None, Some("default"));
+        let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &args, &workdir).await else {
+            eprintln!("SKIP: 连接失败（未登录 / 网络？）");
+            let _ = std::fs::remove_dir_all(&workdir);
+            return;
+        };
+        let control = spawn_claude_stream_session_actor(session);
+
+        let (ask_tx, mut ask_rx) = mpsc::channel::<ApprovalAsk>(8);
+        let (dec_tx, dec_rx) = mpsc::channel(8);
+        let bridge = ApprovalBridge {
+            requests: ask_tx,
+            decisions: dec_rx,
+        };
+        let saw_multi = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let picked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let saw_multi_task = saw_multi.clone();
+        let picked_task = picked.clone();
+        let answerer = tokio::spawn(async move {
+            while let Some(ask) = ask_rx.recv().await {
+                eprintln!("  ask: tool={} input={}", ask.tool_name, ask.input);
+                let updated_input = if is_ask_user_question(&ask.tool_name) {
+                    let questions = ask
+                        .input
+                        .get("questions")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut answers = serde_json::Map::new();
+                    for question in &questions {
+                        let Some(text) = question.get("question").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        if question
+                            .get("multiSelect")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            *saw_multi_task.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                        }
+                        // 取前两个选项 —— 这正是生产代码 `claude_ask_user_updated_input` 的拼法。
+                        let labels: Vec<String> = question
+                            .get("options")
+                            .and_then(|v| v.as_array())
+                            .map(|options| {
+                                options
+                                    .iter()
+                                    .take(2)
+                                    .filter_map(|o| {
+                                        o.get("label").and_then(|v| v.as_str()).map(str::to_string)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if labels.is_empty() {
+                            continue;
+                        }
+                        *picked_task.lock().unwrap_or_else(|e| e.into_inner()) = labels.clone();
+                        answers.insert(text.to_string(), json!(labels.join(", ")));
+                    }
+                    Some(json!({ "questions": questions, "answers": answers }))
+                } else {
+                    None
+                };
+                let sent = dec_tx
+                    .send(crate::external_agents::session::live::ApprovalDecision {
+                        request_id: ask.request_id,
+                        approved: true,
+                        updated_input,
+                    })
+                    .await;
+                if sent.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let out = one_turn_with_approvals(
+            &control,
+            "Use the AskUserQuestion tool to ask me which programming languages I like,              with multiSelect enabled and at least three options (Rust, Python, Go).              After I answer, list back every language I picked, separated by commas.",
+            false,
+            Some(bridge),
+        )
+        .await;
+        answerer.abort();
+        let saw_multi = *saw_multi.lock().unwrap_or_else(|e| e.into_inner());
+        let picked = picked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        eprintln!(
+            "result={:?}
+multiSelect={saw_multi}
+picked={picked:?}
+text={}",
+            out.result,
+            out.text.trim()
+        );
+
+        if out.result.is_err() {
+            eprintln!("SKIP: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        if !saw_multi || picked.len() < 2 {
+            eprintln!(
+                "SKIP: 模型没发出 multiSelect 的问题（提示词没引导住，不是分隔符问题）：                 multi={saw_multi} picked={picked:?}"
+            );
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        let text = out.text.to_lowercase();
+        let missing: Vec<&String> = picked
+            .iter()
+            .filter(|label| !text.contains(&label.to_lowercase()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "claude 没把我们回的多选项全部认下来（缺 {missing:?}）—— `\", \"` 这个分隔符多半不对，             该改成数组或别的形状。回答是：{:?}",
             out.text
         );
 

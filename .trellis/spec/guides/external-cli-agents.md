@@ -133,9 +133,12 @@
      （用户选择 → `{questions: <原样回传>, answers: {"<问题文本>": "<label>"}}`，键是**问题文本**
      不是下标，用错等于没答）。入参形状不认识时返回 `None` ⇒ 退回普通审批卡，**绝不静默吞掉**
      （吞掉 = CLI 那条 promise 永远等不到回复 = 整轮挂死）。
-   - **两处仍是猜的**：多选的分隔符（官方只给了单选的例子，我们用 `, ` 拼串，至少保证类型是
-     它认识的字符串而不是可能不接受的数组）；`allow_custom` 恒为 true（claude 的 schema 里没有
-     这一档，但让用户能不选预设项直接说自己的想法是 Kivio 卡片白给的能力）。
+   - **多选分隔符已实测**（2026-07-30，claude 2.1.220）：`multiSelect: true` 的问题回
+     `"Rust, Python"` 这种逗号拼串，claude 接受并原样认下两项（"You picked: Rust, Python."）。
+     真机测试 `live_ask_user_question_accepts_a_multi_select_answer` 守着 —— 换成数组或别的
+     分隔符之前先跑它。
+   - `allow_custom` 恒为 true 是我们自己加的：claude 的 schema 里没有这一档，但让用户能不选
+     预设项直接说自己的想法是 Kivio 卡片白给的能力。
    - **`ExitPlanMode` 仍当场拒**：它的批准按 spec 要求得**先发切换权限档位的控制帧、再回 allow**，
      顺序不能反，而那条路没核实过 —— 给一张点了没用的卡片比诚实拒掉更糟。**实现 plan 模式 / 反问用户时从这里入手**：它们不单独分帧，就是工具名为 `ExitPlanMode` / `AskUserQuestion` 的普通权限询问，按工具名分类处理；plan 批准要**先发切换权限档位的控制帧、再回 allow**，顺序不能反（print 模式的 stdin 确实收 `set_permission_mode` 控制请求，二进制核实）。
 

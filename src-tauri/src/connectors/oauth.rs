@@ -167,11 +167,17 @@ pub fn auth_server_well_known_urls(auth_server: &str) -> Vec<String> {
 /// 不发的代价不只是「不合规」：拿到的 token 没有 audience 绑定，规范专门有一节
 /// *Access Token Privilege Restriction* 讲这正是跨服务重用 token 的攻击面。
 ///
-/// 规范化按 RFC 9728：去掉 fragment（规范明确禁止），host 小写，其余原样保留。
+/// 规范化：**显式**去掉 fragment（RFC 9728 明确禁止）并把 host 转小写，其余原样保留。
+/// host 小写其实 `url` crate 解析时就顺手做了，这里再做一次是为了**不依赖那个顺带行为**
+/// —— 哪天有人把这里换成纯字符串处理，规范化就会静默丢掉。
 pub fn canonical_resource_indicator(resource_url: &str) -> Result<String, String> {
     let mut url = url::Url::parse(resource_url.trim())
         .map_err(|err| format!("Invalid MCP resource URL: {err}"))?;
     url.set_fragment(None);
+    if let Some(host) = url.host_str().map(str::to_ascii_lowercase) {
+        url.set_host(Some(&host))
+            .map_err(|err| format!("Invalid MCP resource host: {err}"))?;
+    }
     Ok(url.to_string())
 }
 
@@ -1050,6 +1056,12 @@ mod tests {
         assert_eq!(
             canonical_resource_indicator("https://mcp.example.com/mcp#frag").unwrap(),
             "https://mcp.example.com/mcp"
+        );
+        // host 小写是**显式**做的，不靠 url crate 顺带（注释与实现必须对得上）。
+        assert_eq!(
+            canonical_resource_indicator("https://MCP.Example.COM/MCP").unwrap(),
+            "https://mcp.example.com/MCP",
+            "host 要小写，path 不能动"
         );
         assert!(canonical_resource_indicator("not a url").is_err());
     }
