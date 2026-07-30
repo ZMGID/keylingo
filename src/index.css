@@ -7,6 +7,9 @@
 @theme {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
   --font-serif: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  /* mono 栈补 CJK 无衬线回退：Windows 上 Consolas 等没有中文字形，
+     缺了这段会掉进浏览器默认的宋体（衬线），代码/diff 里的中文很难看。 */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", monospace;
 }
 
 /* 自定义 dark 变体：通过 .dark 类启用深色模式 */
@@ -810,29 +813,31 @@ button.chat-composer-status-item:hover {
   height: 16px;
 }
 
-/* 输入框内的发送键：28px 圆形，贴框内右下角。
-   空输入时是一枚安静的浅灰圆（不抢文本注意力），有内容时才上强调色 —— 强调只在
-   「真的可以发」这一刻出现，比常驻橙色大圆克制。 */
+/* 输入框内的发送键：只有箭头，没有底圆（28px 仍是点击热区，视觉上不占面积）。
+   空输入时是淡灰箭头，有内容时才上强调色 —— 强调只在「真的可以发」这一刻出现。
+   去掉填充后箭头是细描边，颜色比原来的圆底加深一档才够看清。 */
 .chat-composer-send {
   color: var(--text-faint);
-  background: var(--theme-surface-muted);
-}
-
-.dark .chat-composer-send {
-  background: rgba(255, 255, 255, 0.07);
 }
 
 .chat-composer-send.is-ready {
-  color: #fff;
-  background: #e8a090;
+  color: #d2755f;
 }
 
 .chat-composer-send.is-ready:hover {
-  background: #df9585;
+  color: #c06249;
 }
 
 .chat-composer-send.is-ready:active {
   transform: scale(0.9);
+}
+
+.dark .chat-composer-send.is-ready {
+  color: #e8a090;
+}
+
+.dark .chat-composer-send.is-ready:hover {
+  color: #f0b3a5;
 }
 
 .chat-message-navigator {
@@ -2116,16 +2121,9 @@ button.chat-composer-status-item:hover {
   color: var(--color-neutral-300, #d4d4d4);
 }
 
-.chat-compaction-summary-chevron {
-  transition: transform var(--kv-dur-fast) var(--kv-ease-standard);
-}
-
-.chat-compaction-summary-chevron.is-open {
-  transform: rotate(180deg);
-}
-
 .chat-compaction-summary-body {
-  margin-left: 18px;
+  /* 原来是 18px，用来和已删掉的 14px 折叠箭头对齐；现在标题左侧没有图标了。 */
+  margin-left: 0;
   padding-bottom: 8px;
   font-size: 12px;
   color: var(--color-neutral-600, #525252);

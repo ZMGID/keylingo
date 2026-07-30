@@ -93,9 +93,27 @@ export const dockApi = {
     return invoke<DockFsMutationResult>('dock_fs_create', { workdir, path, kind })
   },
 
+  /** 读取文本文件内容（查看器；后端限 1MiB、拒绝二进制）。 */
+  async fsRead(workdir: string, path: string): Promise<{ path: string; content: string; size: number }> {
+    if (!isTauriRuntime()) throw new Error('Dock requires the desktop app')
+    return invoke<{ path: string; content: string; size: number }>('dock_fs_read', { workdir, path })
+  },
+
+  /** 覆写已存在的文本文件（查看器编辑保存）。 */
+  async fsWrite(workdir: string, path: string, content: string): Promise<DockFsMutationResult> {
+    if (!isTauriRuntime()) throw new Error('Dock requires the desktop app')
+    return invoke<DockFsMutationResult>('dock_fs_write', { workdir, path, content })
+  },
+
   async fsRename(workdir: string, fromPath: string, toPath: string): Promise<DockFsMutationResult> {
     if (!isTauriRuntime()) throw new Error('Dock requires the desktop app')
     return invoke<DockFsMutationResult>('dock_fs_rename', { workdir, fromPath, toPath })
+  },
+
+  /** 拖拽移动：条目移入另一目录（toDir 空串 = 根），文件名不变。 */
+  async fsMove(workdir: string, fromPath: string, toDir: string): Promise<{ path: string; kind: string }> {
+    if (!isTauriRuntime()) throw new Error('Dock requires the desktop app')
+    return invoke<{ path: string; kind: string }>('dock_fs_move', { workdir, fromPath, toDir })
   },
 
   async fsDelete(workdir: string, path: string): Promise<DockFsMutationResult> {

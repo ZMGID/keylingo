@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countDiffStats, parseDiff } from './diffParse'
+import { countDiffStats, intralineRanges, parseDiff } from './diffParse'
 
 const MULTI_FILE_PATCH = `diff --git a/src/a.ts b/src/a.ts
 index 1111111..2222222 100644
@@ -133,5 +133,31 @@ index 1111111..2222222 100644
 `
     const files = parseDiff(patch)
     expect(files[0].hunks[0].lines).toHaveLength(2)
+  })
+
+  it('numbers lines from the @@ header', () => {
+    const files = parseDiff(MULTI_FILE_PATCH)
+    const lines = files[0].hunks[0].lines
+    // @@ -1,3 +1,4 @@：context / del / add / add / context
+    expect(lines.map((l) => [l.oldNo ?? null, l.newNo ?? null])).toEqual([
+      [1, 1],
+      [2, null],
+      [null, 2],
+      [null, 3],
+      [3, 4],
+    ])
+  })
+})
+
+describe('intralineRanges', () => {
+  it('marks the differing middle of paired del/add lines', () => {
+    const files = parseDiff(MULTI_FILE_PATCH)
+    const lines = files[0].hunks[0].lines
+    // "old line" → "new line"：公共后缀 " line"，中段 old/new 高亮。
+    const ranges = intralineRanges(lines)
+    expect(ranges.get(1)).toEqual([0, 3])
+    expect(ranges.get(2)).toEqual([0, 3])
+    // 无配对的第二条 add（"another line"）不标。
+    expect(ranges.has(3)).toBe(false)
   })
 })

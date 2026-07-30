@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown } from 'lucide-react'
 
 type ReasoningBlockProps = {
   reasoning: string
@@ -88,7 +87,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
   }, [reasoning, streaming, hideBody, open])
 
   const titleClass =
-    'mb-1 flex w-full items-center gap-1 text-left text-[12.5px] font-medium text-neutral-700 transition-colors dark:text-neutral-200'
+    'mb-1 flex w-full items-center gap-1 text-left text-[11.5px] font-medium text-neutral-700 transition-colors dark:text-neutral-200'
   const bodyClass = [
     'chat-motion-reasoning-body',
     streaming ? 'opacity-95' : 'opacity-90',
@@ -114,7 +113,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
       className={`mb-3 border-l pl-3 transition-colors duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
         streaming
           ? 'border-neutral-300 dark:border-neutral-600'
-          : 'border-neutral-200 dark:border-neutral-700'
+          : 'border-[var(--border-input)]'
       }`}
     >
       {collapsible ? (
@@ -137,11 +136,6 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
               </span>
             )}
           </span>
-          <ChevronDown
-            size={12}
-            strokeWidth={2}
-            className={`shrink-0 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] ${open ? 'rotate-180' : ''}`}
-          />
         </button>
       ) : (
         <div className={titleClass}>

@@ -1,9 +1,10 @@
-// 轻量 Diff 渲染：文件分组卡片 + hunk 行级着色。大 patch 按文件默认折叠（点击展开），
-// 不做 IntersectionObserver —— 折叠态本来就不渲染 hunk 行，成本已可控。
+// 轻量 Diff 渲染：文件分组卡片 + hunk 行级着色 + 行号 + 词级差异高亮。
+// 大 patch 按文件默认折叠（点击展开），不做 IntersectionObserver ——
+// 折叠态本来就不渲染 hunk 行，成本已可控。
 import { useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, FileCode } from 'lucide-react'
 import { i18n, type Lang } from '../../settings/i18n'
-import { countDiffStats, parseDiff, type DiffFile } from './diffParse'
+import { countDiffStats, intralineRanges, parseDiff, type DiffFile, type DiffLine } from './diffParse'
 
 type DiffViewProps = {
   patch: string
@@ -13,10 +14,25 @@ type DiffViewProps = {
   emptyText?: string
 }
 
+/** 行内容：有词级差异区间时中段加深色底。 */
+function LineContent({ line, range }: { line: DiffLine; range?: [number, number] }) {
+  if (!range) return <>{line.content || ' '}</>
+  const [start, end] = range
+  const mark = line.type === 'add' ? 'rounded-[2px] bg-emerald-500/25' : 'rounded-[2px] bg-red-500/25'
+  return (
+    <>
+      {line.content.slice(0, start)}
+      <span className={mark}>{line.content.slice(start, end)}</span>
+      {line.content.slice(end) || ' '}
+    </>
+  )
+}
+
 function DiffFileCard({ file, defaultOpen, lang }: { file: DiffFile; defaultOpen: boolean; lang: Lang }) {
   const t = i18n[lang]
   const [open, setOpen] = useState(defaultOpen)
   const { adds, dels } = useMemo(() => countDiffStats(file), [file])
+  const hunkRanges = useMemo(() => file.hunks.map((hunk) => intralineRanges(hunk.lines)), [file])
   const displayPath = file.newPath || file.oldPath
 
   return (
@@ -60,25 +76,39 @@ function DiffFileCard({ file, defaultOpen, lang }: { file: DiffFile; defaultOpen
         <div className="custom-scrollbar overflow-x-auto">
           {file.hunks.map((hunk, hunkIndex) => (
             <div key={hunkIndex}>
-              <div className="bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:text-sky-300">
-                {hunk.header}
-              </div>
-              <pre className="font-mono text-[11px] leading-[1.5]">
+              {/* 自合成的伪 diff 头（@@ @@）没信息量，只有真 @@ -a +b 头才显示分隔条。 */}
+              {/^@@ -\d/.test(hunk.header) && hunkIndex > 0 && (
+                <div className="bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:text-sky-300">
+                  {hunk.header}
+                </div>
+              )}
+              {/* w-max + min-w-full：横向滚动时行底色跟着最长行铺满，不然短行右侧缺色。 */}
+              <pre className="w-max min-w-full font-mono text-[11px] leading-[1.6]">
                 {hunk.lines.map((line, lineIndex) => (
                   <div
                     key={lineIndex}
                     className={
                       line.type === 'add'
-                        ? 'bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+                        ? 'flex bg-emerald-500/10 text-emerald-900 dark:text-emerald-100'
                         : line.type === 'del'
-                          ? 'bg-red-500/10 text-red-800 dark:text-red-200'
-                          : 'text-neutral-600 dark:text-neutral-400'
+                          ? 'flex bg-red-500/10 text-red-900 dark:text-red-100'
+                          : 'flex text-neutral-600 dark:text-neutral-400'
                     }
                   >
-                    <span className="inline-block w-4 shrink-0 select-none text-center opacity-50">
-                      {line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' '}
+                    <span
+                      className={`w-9 shrink-0 select-none border-r pr-1.5 text-right tabular-nums ${
+                        line.type === 'add'
+                          ? 'border-emerald-500/20 text-emerald-700/60 dark:text-emerald-300/50'
+                          : line.type === 'del'
+                            ? 'border-red-500/20 text-red-700/60 dark:text-red-300/50'
+                            : 'border-neutral-500/15 text-neutral-400/80 dark:text-neutral-500/80'
+                      }`}
+                    >
+                      {(line.type === 'del' ? line.oldNo : line.newNo) ?? ''}
                     </span>
-                    {line.content}
+                    <span className="min-w-0 flex-1 whitespace-pre pl-2">
+                      <LineContent line={line} range={hunkRanges[hunkIndex]?.get(lineIndex)} />
+                    </span>
                   </div>
                 ))}
               </pre>

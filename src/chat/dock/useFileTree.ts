@@ -245,6 +245,19 @@ export function useFileTree({ workdir, active, showHidden, expandedPaths }: UseF
     [loadChildren],
   )
 
+  /** 拖拽移动：移入 toDir（ROOT_PATH = 根）。源/目标两个父目录都要刷新。 */
+  const moveEntry = useCallback(
+    async (path: string, toDir: string): Promise<string> => {
+      const result = await dockApi.fsMove(workdirRef.current, path, toDir === ROOT_PATH ? '' : toDir)
+      await Promise.all([
+        loadChildren(parentDirOf(path), { force: true, silent: true }),
+        loadChildren(toDir, { force: true, silent: true }),
+      ])
+      return result.path
+    },
+    [loadChildren],
+  )
+
   const openEntry = useCallback(async (path: string, mode: 'open' | 'reveal') => {
     await dockApi.fsOpenPath(workdirRef.current, path, mode)
   }, [])
@@ -261,6 +274,7 @@ export function useFileTree({ workdir, active, showHidden, expandedPaths }: UseF
     createEntry,
     renameEntry,
     deleteEntry,
+    moveEntry,
     openEntry,
   }
 }

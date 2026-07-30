@@ -130,7 +130,7 @@ function recordTotalTokens(record: UsageRecord) {
 
 function SummaryTile({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="rounded-md border border-neutral-200 bg-white px-3 py-2.5 dark:border-neutral-800 dark:bg-neutral-950/35">
+    <div className="rounded-md border border-[var(--border)] bg-[var(--bg-input)] px-3 py-2.5">
       <div className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">{label}</div>
       <div className="mt-1 truncate text-[19px] font-semibold leading-6 text-neutral-950 dark:text-neutral-50">{value}</div>
       {sub && <div className="mt-1 truncate text-[10.5px] text-neutral-500 dark:text-neutral-500">{sub}</div>}
@@ -272,7 +272,7 @@ function TrendChart({ points, lang }: { points: UsageTrendPoint[]; lang: string 
 
   if (points.length === 0) {
     return (
-      <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-neutral-200 text-[12px] text-neutral-500 dark:border-neutral-800 dark:text-neutral-400">
+      <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-[var(--border)] text-[12px] text-[var(--text-muted)]">
         {lang === 'zh' ? '暂无趋势数据' : 'No trend data'}
       </div>
     )
@@ -297,8 +297,8 @@ function TrendChart({ points, lang }: { points: UsageTrendPoint[]; lang: string 
             data-tauri-drag-region="false"
             className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] transition-opacity ${
               hidden.has(series.key)
-                ? 'border-neutral-200 text-neutral-400 opacity-55 dark:border-neutral-800 dark:text-neutral-600'
-                : 'border-neutral-200 text-neutral-600 dark:border-neutral-800 dark:text-neutral-300'
+                ? 'border-[var(--border)] text-[var(--text-faint)] opacity-55'
+                : 'border-[var(--border)] text-[var(--text-muted)]'
             }`}
           >
             <span
@@ -314,8 +314,8 @@ function TrendChart({ points, lang }: { points: UsageTrendPoint[]; lang: string 
           data-tauri-drag-region="false"
           className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] transition-opacity ${
             rateHidden
-              ? 'border-neutral-200 text-neutral-400 opacity-55 dark:border-neutral-800 dark:text-neutral-600'
-              : 'border-neutral-200 text-neutral-600 dark:border-neutral-800 dark:text-neutral-300'
+              ? 'border-[var(--border)] text-[var(--text-faint)] opacity-55'
+              : 'border-[var(--border)] text-[var(--text-muted)]'
           }`}
         >
           <span
@@ -434,7 +434,7 @@ function TrendChart({ points, lang }: { points: UsageTrendPoint[]; lang: string 
         </svg>
         {hoverPoint && (
           <div
-            className="pointer-events-none absolute top-1 z-10 min-w-36 rounded-md border border-neutral-200 bg-white/95 px-2.5 py-2 text-[11px] shadow-sm dark:border-neutral-700 dark:bg-neutral-900/95"
+            className="pointer-events-none absolute top-1 z-10 min-w-36 rounded-md border border-[var(--border)] bg-[var(--bg-input)] px-2.5 py-2 text-[11px] shadow-sm"
             style={tooltipFlip ? { right: `${100 - tooltipLeftPct + 2}%` } : { left: `${tooltipLeftPct + 2}%` }}
           >
             <div className="mb-1 font-medium text-neutral-800 dark:text-neutral-100">
@@ -453,7 +453,7 @@ function TrendChart({ points, lang }: { points: UsageTrendPoint[]; lang: string 
               <span>{lang === 'zh' ? '命中率' : 'Hit rate'}</span>
               <span className="tabular-nums">{hoverRate == null ? '--' : formatPercent(hoverRate)}</span>
             </div>
-            <div className="mt-0.5 flex items-center justify-between gap-3 border-t border-neutral-100 pt-0.5 text-neutral-500 dark:border-neutral-800 dark:text-neutral-400">
+            <div className="mt-0.5 flex items-center justify-between gap-3 border-t border-[var(--divider)] pt-0.5 text-[var(--text-muted)]">
               <span>{lang === 'zh' ? '成本' : 'Cost'}</span>
               <span className="tabular-nums">{formatCost(hoverPoint.costUsd)}</span>
             </div>
@@ -539,7 +539,7 @@ function ModelDonut({ rows, lang }: { rows: UsageGroupStats[]; lang: string }) {
 
   if (slices.length === 0) {
     return (
-      <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-neutral-200 text-[12px] text-neutral-500 dark:border-neutral-800 dark:text-neutral-400">
+      <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-[var(--border)] text-[12px] text-[var(--text-muted)]">
         {lang === 'zh' ? '暂无模型数据' : 'No model data'}
       </div>
     )
@@ -611,7 +611,7 @@ function ModelDonut({ rows, lang }: { rows: UsageGroupStats[]; lang: string }) {
             {slices.map((slice, index) => (
               <tr
                 key={`${slice.label}-${index}`}
-                className={`text-neutral-800 dark:text-neutral-100 ${hover === index ? 'bg-neutral-50 dark:bg-neutral-900/60' : ''}`}
+                className={`text-neutral-800 dark:text-neutral-100 ${hover === index ? 'bg-[var(--bg-hover)]' : ''}`}
                 onMouseEnter={() => setHover(index)}
                 onMouseLeave={() => setHover(null)}
               >
@@ -646,9 +646,9 @@ function GroupTable({ rows, lang, type }: { rows: UsageGroupStats[]; lang: strin
     )
   }
   return (
-    <div className="custom-scrollbar overflow-x-auto rounded-md border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950/35">
+    <div className="custom-scrollbar overflow-x-auto rounded-md border border-[var(--border)] bg-[var(--bg-input)]">
       <table className="min-w-[720px] w-full text-left text-[12px]">
-        <thead className="border-b border-neutral-200 text-[10.5px] uppercase tracking-wide text-neutral-500 dark:border-neutral-800 dark:text-neutral-500">
+        <thead className="border-b border-[var(--border)] text-[10.5px] uppercase tracking-wide text-[var(--text-muted)]">
           <tr>
             <th className="px-3 py-2 font-semibold">{type === 'provider' ? 'Provider' : 'Model'}</th>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '请求' : 'Req'}</th>
@@ -696,9 +696,9 @@ function LogsTable({ logs, lang }: { logs: UsageRecord[]; lang: string }) {
     )
   }
   return (
-    <div className="custom-scrollbar overflow-x-auto rounded-md border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950/35">
+    <div className="custom-scrollbar overflow-x-auto rounded-md border border-[var(--border)] bg-[var(--bg-input)]">
       <table className="min-w-[920px] w-full text-left text-[12px]">
-        <thead className="border-b border-neutral-200 text-[10.5px] uppercase tracking-wide text-neutral-500 dark:border-neutral-800 dark:text-neutral-500">
+        <thead className="border-b border-[var(--border)] text-[10.5px] uppercase tracking-wide text-[var(--text-muted)]">
           <tr>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '时间' : 'Time'}</th>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '来源' : 'Source'}</th>

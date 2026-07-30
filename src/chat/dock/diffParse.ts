@@ -6,6 +6,10 @@ export type DiffLineType = 'add' | 'del' | 'context'
 export type DiffLine = {
   type: DiffLineType
   content: string
+  /** 旧文件行号（add 行没有）。来自 @@ 头计数；头不可解析时缺省。 */
+  oldNo?: number
+  /** 新文件行号（del 行没有）。 */
+  newNo?: number
 }
 
 export type DiffHunk = {
@@ -47,6 +51,9 @@ export function parseDiff(patch: string): DiffFile[] {
 
   let currentFile: DiffFile | null = null
   let currentHunk: DiffHunk | null = null
+  // @@ 头里的行号计数器（头不可解析时为 null，行不带行号）。
+  let oldNo: number | null = null
+  let newNo: number | null = null
 
   // 去掉结尾换行产生的空串行，避免被当成 context 行收进最后一个 hunk。
   const lines = patch.split('\n')
@@ -111,6 +118,9 @@ export function parseDiff(patch: string): DiffFile[] {
     if (line.startsWith('@@')) {
       currentHunk = { header: line, lines: [] }
       file.hunks.push(currentHunk)
+      const nums = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+      oldNo = nums ? Number(nums[1]) : null
+      newNo = nums ? Number(nums[2]) : null
       continue
     }
     if (line.startsWith('\\')) {
@@ -119,9 +129,22 @@ export function parseDiff(patch: string): DiffFile[] {
     }
     if (!currentHunk) continue
     const first = line[0]
-    if (first === '+') currentHunk.lines.push({ type: 'add', content: line.slice(1) })
-    else if (first === '-') currentHunk.lines.push({ type: 'del', content: line.slice(1) })
-    else if (first === ' ' || line === '') currentHunk.lines.push({ type: 'context', content: line.slice(1) })
+    if (first === '+') {
+      currentHunk.lines.push({ type: 'add', content: line.slice(1), newNo: newNo ?? undefined })
+      if (newNo != null) newNo += 1
+    } else if (first === '-') {
+      currentHunk.lines.push({ type: 'del', content: line.slice(1), oldNo: oldNo ?? undefined })
+      if (oldNo != null) oldNo += 1
+    } else if (first === ' ' || line === '') {
+      currentHunk.lines.push({
+        type: 'context',
+        content: line.slice(1),
+        oldNo: oldNo ?? undefined,
+        newNo: newNo ?? undefined,
+      })
+      if (oldNo != null) oldNo += 1
+      if (newNo != null) newNo += 1
+    }
     // 其他行（截断尾部垃圾）跳过。
   }
 
@@ -140,4 +163,37 @@ export function countDiffStats(file: DiffFile): { adds: number; dels: number } {
     }
   }
   return { adds, dels }
+}
+
+/** 词级差异：相邻的 del 段和 add 段按位成对，找公共前后缀，中段返回高亮区间。
+ *  key = 行在 lines 里的下标，值 = [start, end)。整行都不同（无公共前后缀）不标——
+ *  整行底色已经表达了。ponytail: 纯前后缀比较，无 LCS；乱序改动标不出词级差异，够用。 */
+export function intralineRanges(lines: DiffLine[]): Map<number, [number, number]> {
+  const ranges = new Map<number, [number, number]>()
+  let i = 0
+  while (i < lines.length) {
+    if (lines[i].type !== 'del') {
+      i += 1
+      continue
+    }
+    const delStart = i
+    while (i < lines.length && lines[i].type === 'del') i += 1
+    const addStart = i
+    while (i < lines.length && lines[i].type === 'add') i += 1
+    const pairs = Math.min(addStart - delStart, i - addStart)
+    for (let k = 0; k < pairs; k += 1) {
+      const a = lines[delStart + k].content
+      const b = lines[addStart + k].content
+      if (!a || !b || a === b) continue
+      const max = Math.min(a.length, b.length)
+      let prefix = 0
+      while (prefix < max && a[prefix] === b[prefix]) prefix += 1
+      let suffix = 0
+      while (suffix < max - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix += 1
+      if (prefix === 0 && suffix === 0) continue
+      ranges.set(delStart + k, [prefix, a.length - suffix])
+      ranges.set(addStart + k, [prefix, b.length - suffix])
+    }
+  }
+  return ranges
 }

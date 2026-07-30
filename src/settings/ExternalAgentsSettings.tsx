@@ -74,7 +74,7 @@ export function ExternalAgentsSettings({ lang }: ExternalAgentsSettingsProps) {
         </div>
 
         {agents.length === 0 && !scanning ? (
-          <div className="rounded-xl border border-dashed border-neutral-200 px-4 py-6 text-center dark:border-neutral-700">
+          <div className="rounded-xl border border-dashed border-[var(--border)] px-4 py-6 text-center">
             <p className="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">
               {t.externalAgentsNoAvailable}
             </p>
@@ -91,7 +91,7 @@ export function ExternalAgentsSettings({ lang }: ExternalAgentsSettingsProps) {
               return (
                 <div
                   key={agent.id}
-                  className="rounded-xl border border-neutral-200/90 bg-white px-3 py-3 dark:border-neutral-700 dark:bg-neutral-950/40"
+                  className="rounded-xl border border-[var(--border)] bg-[var(--bg-input)] px-3 py-3"
                 >
                   <button
                     type="button"
@@ -130,7 +130,7 @@ export function ExternalAgentsSettings({ lang }: ExternalAgentsSettingsProps) {
                     </div>
                   </button>
                   {expanded && (
-                    <div className="mt-3 border-t border-neutral-100 pt-3 text-[12px] text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+                    <div className="mt-3 border-t border-[var(--divider)] pt-3 text-[12px] text-[var(--text-muted)]">
                       {agent.path && (
                         <p className="break-all">
                           <span className="font-medium">{t.externalAgentsPath}: </span>

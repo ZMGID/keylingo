@@ -19,6 +19,13 @@ export type DockRevealRequest = {
   nonce: number
 } | null
 
+/** 工具卡片 → 右侧栏预览：点文件名预览文件（workdir 可以不同于文件树，如写到桌面的
+ *  文件用其所在目录）；点 +N -N 徽标预览整份带色 diff。 */
+export type DockPreviewRequest =
+  | { kind: 'file'; workdir: string; path: string; nonce: number }
+  | { kind: 'diff'; title: string; patch: string; nonce: number }
+  | null
+
 type RightDockProps = {
   open: boolean
   width: number
@@ -27,6 +34,7 @@ type RightDockProps = {
   lang: Lang
   treeExpanded: string[]
   revealRequest: DockRevealRequest
+  previewRequest: DockPreviewRequest
   onToggleTab: (tab: DockTab) => void
   onWidthChange: (width: number) => void
   onClose: () => void
@@ -43,6 +51,7 @@ export function RightDock({
   lang,
   treeExpanded,
   revealRequest,
+  previewRequest,
   onToggleTab,
   onWidthChange,
   onClose,
@@ -150,6 +159,7 @@ export function RightDock({
           onExpandedChange={onTreeExpandedChange}
           revealPath={revealRequest?.path ?? null}
           revealNonce={revealRequest?.nonce ?? 0}
+          previewRequest={previewRequest}
           onInsertMention={onInsertMention}
         />
       </div>

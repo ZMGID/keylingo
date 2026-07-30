@@ -107,7 +107,7 @@ export function GitStatusPill({ workdir, lang, disabled, onOpenGitPanel }: GitSt
             {!isRepo ? (
               <div className="p-1.5">
                 <div className="px-1.5 py-2 text-[12px] text-neutral-500 dark:text-neutral-400">
-                  {state === null ? t.dockLoading : t.dockGitNotRepo}
+                  {!workdir ? t.dockNoWorkdir : state === null ? t.dockLoading : t.dockGitNotRepo}
                 </div>
                 <button
                   type="button"

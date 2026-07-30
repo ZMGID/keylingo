@@ -308,7 +308,8 @@ export function GitPanel({ workdir, active, lang, onRevealInTree }: GitPanelProp
 
   // ---------- 空态 / 错误态 ----------
 
-  if (!workdir || (!status && review.statusLoading)) {
+  // ponytail: 没有 workdir 就永远不会发起 gitStatus，别转圈；只有真在请求时才是加载中。
+  if (workdir && !status && review.statusLoading) {
     return (
       <div className="flex flex-1 items-center justify-center gap-2 text-[12px] text-neutral-400">
         <Loader2 size={14} className="animate-spin" />
@@ -317,11 +318,13 @@ export function GitPanel({ workdir, active, lang, onRevealInTree }: GitPanelProp
     )
   }
 
-  if (status && status.status === 'not_repo') {
+  if (!workdir || (status && status.status === 'not_repo')) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
         <GitBranch size={20} strokeWidth={1.5} className="text-neutral-300 dark:text-neutral-600" />
-        <div className="text-[12px] text-neutral-400 dark:text-neutral-500">{t.dockGitNotRepo}</div>
+        <div className="text-[12px] text-neutral-400 dark:text-neutral-500">
+          {workdir ? t.dockGitNotRepo : t.dockNoWorkdir}
+        </div>
       </div>
     )
   }

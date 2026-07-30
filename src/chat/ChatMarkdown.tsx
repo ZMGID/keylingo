@@ -30,20 +30,23 @@ interface ChatMarkdownProps {
   citations?: Map<number, KbHitView>
 }
 
+/* 代码块 / 行内码的底色走 `--bg-hover`：它在亮色下映射 `--theme-surface-hover`
+   （跟着暖/冷/象牙主题走），在 `.dark` 里被显式覆盖成 #2c2c30。
+   **不要直接用 `--theme-surface-*`** —— 那批没有暗色态，直接用会让暗色模式变成亮色底。 */
 const CODE_PROSE =
-  'prose-pre:bg-neutral-100 prose-pre:text-neutral-800 dark:prose-pre:bg-neutral-800 dark:prose-pre:text-neutral-100'
+  'prose-pre:bg-[var(--bg-hover)] prose-pre:text-[var(--text)]'
 
 const proseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-100 ${CODE_PROSE}`
+  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
 
 const reasoningProseClass =
-  `chat-markdown chat-reasoning-markdown prose prose-sm dark:prose-invert max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500 prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-500 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-400 ${CODE_PROSE}`
+  `chat-markdown chat-reasoning-markdown prose prose-sm dark:prose-invert max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500 prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-500 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
 
 const lensProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-100 ${CODE_PROSE}`
+  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
 
 const lensMutedProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400 prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-600 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-400 ${CODE_PROSE}`
+  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400 prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-600 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
 
 function markdownProseClass(variant: ChatMarkdownProps['variant']): string {
   switch (variant) {
@@ -276,7 +279,9 @@ function rulesForLanguage(language: string, code = ''): TokenRule[] {
   ]
 }
 
-function highlightCode(code: string, language: string) {
+// 导出给 dock 文件查看器复用（逐行调用，块注释跨行会降级——查看器场景可接受）。
+// eslint-disable-next-line react-refresh/only-export-components -- 纯函数 helper，热更新损失可接受
+export function highlightCode(code: string, language: string) {
   return scanTokens(code, rulesForLanguage(language, code)).map((token, index) => (
     token.className
       ? <span key={index} className={token.className}>{token.text}</span>
@@ -331,7 +336,7 @@ function mermaidThemeVariables(dark: boolean) {
   }
 }
 
-function CodeBlock({ code, language }: { code: string; language: string }) {
+function CodeBlock({ code, language, actions }: { code: string; language: string; actions?: ReactNode }) {
   const normalizedCode = useMemo(() => normalizeCodeBlockText(code), [code])
   const highlighted = useMemo(
     () => highlightCode(normalizedCode, language),
@@ -346,23 +351,23 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
     window.setTimeout(() => setCopied(false), 1600)
   }
 
+  // 无独立头栏：语言标签放在右上角复制按钮旁边，代码直接从卡片顶部开始。
   return (
-    <figure className="not-prose my-3 overflow-hidden rounded-lg border border-neutral-200/80 bg-neutral-50 text-neutral-950 shadow-sm dark:border-neutral-700/80 dark:bg-neutral-900 dark:text-neutral-100">
-      <div className="flex items-center gap-2 border-b border-neutral-200/70 px-4 py-2.5 dark:border-neutral-800">
-        <Code2 size={15} strokeWidth={2.4} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
-        <figcaption className="text-[13px] font-semibold leading-5 text-neutral-800 dark:text-neutral-100">
+    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+      <div className="absolute right-2 top-1.5 flex items-center gap-1.5">
+        <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">
           {codeLanguageLabel(language)}
-        </figcaption>
+        </span>
+        {actions}
         <IconButton
           size="sm"
-          className="-mr-1 ml-auto"
           onClick={() => void handleCopy()}
           label={copied ? '已复制' : '复制代码'}
         >
-          {copied ? <Check size={17} strokeWidth={2.2} className="chat-motion-pop" /> : <Copy size={17} strokeWidth={2.2} />}
+          {copied ? <Check size={15} strokeWidth={2.2} className="chat-motion-pop" /> : <Copy size={15} strokeWidth={2.2} />}
         </IconButton>
       </div>
-      <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-2 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
+      <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-3 pr-28 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
         <code className="font-mono">{highlighted}</code>
       </pre>
     </figure>
@@ -468,41 +473,48 @@ function MermaidBlock({ code }: { code: string }) {
     }
   }, [cacheKey, isDark, normalizedCode])
 
-  return (
-    <figure className="not-prose my-3 overflow-hidden rounded-lg border border-neutral-200/80 bg-white text-neutral-950 shadow-sm dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100">
-      <div className="flex items-center gap-2 border-b border-neutral-200/70 px-4 py-2.5 dark:border-neutral-800">
-        <Code2 size={15} strokeWidth={2.4} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
-        <figcaption className="text-[13px] font-semibold leading-5">
-          Mermaid
-        </figcaption>
-        {!error && (
-          <IconButton
-            size="sm"
-            className="-mr-1 ml-auto"
-            onClick={() => setView((current) => (current === 'diagram' ? 'source' : 'diagram'))}
-            label={view === 'diagram' ? '查看源码' : '查看图表'}
-          >
-            {view === 'diagram' ? <Code2 size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
-          </IconButton>
-        )}
-      </div>
-      {view === 'source' ? (
+  // 与 CodeBlock 同风格：无独立头栏，"Mermaid" 标签 + 切换按钮悬浮在右上角。
+  const toggle = (
+    <IconButton
+      size="sm"
+      onClick={() => setView((current) => (current === 'diagram' ? 'source' : 'diagram'))}
+      label={view === 'diagram' ? '查看源码' : '查看图表'}
+    >
+      {view === 'diagram' ? <Code2 size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
+    </IconButton>
+  )
+
+  // 源码视图直接复用 CodeBlock（自带卡片 + Mermaid 标签 + 复制），切换按钮塞进它的角标行，
+  // 不再套外层卡片（套了会读成「卡片里还有个卡片」）。
+  if (view === 'source') {
+    return <CodeBlock code={normalizedCode} language="mermaid" actions={toggle} />
+  }
+
+  if (error) {
+    return (
+      <>
+        <div className="my-3 -mb-1 rounded-lg border border-red-100 bg-red-50 px-4 py-2 text-[12px] leading-5 text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          Mermaid 渲染失败：{error}
+        </div>
         <CodeBlock code={normalizedCode} language="mermaid" />
-      ) : loading ? (
+      </>
+    )
+  }
+
+  return (
+    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+      <div className="absolute right-2 top-1.5 z-10 flex items-center gap-1.5">
+        <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">Mermaid</span>
+        {toggle}
+      </div>
+      {loading ? (
         <div className="flex min-h-28 items-center justify-center gap-2 px-4 py-8 text-[13px] text-neutral-400 dark:text-neutral-500">
           <Loader2 size={15} className="animate-spin" />
           正在渲染图表
         </div>
-      ) : error ? (
-        <>
-          <div className="border-b border-red-100 bg-red-50 px-4 py-2 text-[12px] leading-5 text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
-            Mermaid 渲染失败：{error}
-          </div>
-          <CodeBlock code={normalizedCode} language="mermaid" />
-        </>
       ) : (
         <div
-          className="custom-scrollbar max-w-full overflow-x-auto overflow-y-hidden [contain:content] bg-white px-4 py-4 dark:bg-neutral-950 [&>svg]:mx-auto [&>svg]:max-w-none"
+          className="custom-scrollbar max-w-full overflow-x-auto overflow-y-hidden [contain:content] bg-white px-4 pb-4 pt-10 dark:bg-neutral-950 [&>svg]:mx-auto [&>svg]:max-w-none"
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       )}
@@ -550,7 +562,7 @@ function HtmlCodePreview({ html }: { html: string }) {
   return (
     <>
       {view === 'preview' ? (
-        <div className="my-3 overflow-hidden rounded-lg border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-950">
+        <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
           <iframe
             title="HTML 预览"
             srcDoc={previewHtml}
@@ -592,23 +604,31 @@ const markdownComponents: Components = {
     }
     return <CodeBlock code={codeChildrenToString(children)} language="" />
   },
+  // 表格：**每个单元格一个独立圆角块**，横竖都靠 border-spacing 的空隙分隔。
+  // **没有任何边框线**，别加 border，也别给容器加外框。
   table: ({ children }) => (
     <div className="custom-scrollbar my-3 max-w-full overflow-x-auto">
-      <table className="w-full min-w-[240px] border-collapse text-[13px] leading-snug">
+      <table className="w-full min-w-[240px] border-separate [border-spacing:3px] text-[13px] leading-snug">
         {children}
       </table>
     </div>
   ),
-  thead: ({ children }) => (
-    <thead className="bg-neutral-50 dark:bg-neutral-800/90">{children}</thead>
-  ),
-  th: ({ children }) => (
-    <th className="border border-neutral-200/90 px-3 py-2 text-left font-semibold text-neutral-800 dark:border-neutral-700 dark:text-neutral-100">
+  // `style` **必须透传**：markdown 的列对齐（`:---:` / `---:`）由 remark-gfm 转成单元格上的
+  // `text-align` 内联样式。原来只接 `children`，对齐被整个丢掉 —— 声明了居中/右对齐的表格
+  // 全部渲染成左对齐。内联样式优先级高于下面的 `text-left`，两者不冲突。
+  th: ({ children, style }) => (
+    <th
+      style={style}
+      className="rounded-md bg-[var(--bg-hover)] px-3 py-2 text-left font-semibold text-neutral-800 dark:text-neutral-100"
+    >
       {children}
     </th>
   ),
-  td: ({ children }) => (
-    <td className="border border-neutral-200/90 px-3 py-2 align-top text-neutral-700 dark:border-neutral-700 dark:text-neutral-300">
+  td: ({ children, style }) => (
+    <td
+      style={style}
+      className="rounded-md bg-neutral-500/[0.09] px-3 py-2 align-top text-neutral-700 dark:bg-neutral-400/[0.1] dark:text-neutral-300"
+    >
       {children}
     </td>
   ),
@@ -660,7 +680,7 @@ function CitationChip({ n, hit }: { n: number; hit?: KbHitView }) {
         [{n}]
       </button>
       {open && (
-        <span className="absolute left-0 top-full z-30 mt-1 block w-80 max-w-[80vw] rounded-lg border border-black/[0.08] bg-white p-2.5 text-left text-xs shadow-lg dark:border-white/[0.12] dark:bg-neutral-900">
+        <span className="absolute left-0 top-full z-30 mt-1 block w-80 max-w-[80vw] rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] p-2.5 text-left text-xs shadow-lg">
           {hit ? (
             <>
               <span className="mb-1 flex items-center gap-1 font-medium text-neutral-700 dark:text-neutral-200">

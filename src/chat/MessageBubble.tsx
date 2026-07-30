@@ -4,7 +4,6 @@ import {
   Bot,
   Brain,
   Check,
-  ChevronDown,
   Copy,
   FileCode2,
   FilePen,
@@ -629,7 +628,7 @@ function TimelineGroupBlock({
         onClick={handleToggle}
         aria-expanded={open}
         data-tauri-drag-region="false"
-        className="mb-1 flex w-full items-center gap-1.5 text-left text-[15px] leading-relaxed font-medium text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
+        className="mb-1 flex w-full items-center gap-1.5 text-left text-[12px] leading-relaxed font-medium text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
       >
         {generating ? (
           <TimelineSpinner size={16} className="shrink-0 text-neutral-400 dark:text-neutral-500" />
@@ -644,6 +643,12 @@ function TimelineGroupBlock({
           >
             {summary.text}
           </span>
+          {summary.diffStats && (
+            <span className="shrink-0 font-mono text-[11px] tabular-nums">
+              <span className="text-emerald-600 dark:text-emerald-400">+{summary.diffStats.additions}</span>
+              <span className="ml-1 text-red-500/80 dark:text-red-400/80">-{summary.diffStats.removals}</span>
+            </span>
+          )}
           {summary.categories.length > 1 && (
             <span className="flex shrink-0 items-center gap-1" aria-hidden="true">
               {summary.categories.map((category) => {
@@ -653,11 +658,6 @@ function TimelineGroupBlock({
             </span>
           )}
         </div>
-        <ChevronDown
-          size={16}
-          strokeWidth={2}
-          className={`shrink-0 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] ${open ? 'rotate-180' : ''}`}
-        />
       </button>
       {open && (
         <div className="chat-motion-reveal is-open" aria-hidden={false}>
@@ -956,7 +956,7 @@ function MessageBubbleComponent({
                 autoCapitalize="off"
                 autoCorrect="off"
                 spellCheck={false}
-                className="w-full resize-y rounded-[20px] border border-neutral-200/90 bg-neutral-50 px-4 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-500"
+                className="w-full resize-y rounded-[20px] border border-[var(--border-input)] bg-[var(--bg-hover)] px-4 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:text-neutral-100 dark:focus:border-neutral-500"
               />
               <div className="flex items-center justify-end gap-2">
                 <Button
@@ -1088,11 +1088,6 @@ function MessageBubbleComponent({
                   工具调用 · {toolCalls.length} 个
                   {!toolsExpanded ? ` · 显示最新 ${RECENT_TOOL_COUNT} 个` : ''}
                 </span>
-                <ChevronDown
-                  size={12}
-                  strokeWidth={2}
-                  className={`ml-auto shrink-0 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] ${toolsExpanded ? 'rotate-180' : ''}`}
-                />
               </button>
             ) : (
               <div className="mb-1 text-[11px] font-medium text-neutral-400 dark:text-neutral-500">
@@ -1128,7 +1123,7 @@ function MessageBubbleComponent({
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
-              className="w-full resize-y rounded-xl border border-neutral-200/90 bg-white px-3 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:focus:border-neutral-500"
+              className="w-full resize-y rounded-xl border border-[var(--border-input)] bg-[var(--bg-input)] px-3 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:text-neutral-100 dark:focus:border-neutral-500"
             />
             <div className="flex items-center gap-2">
               <Button

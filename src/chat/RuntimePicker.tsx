@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, Check, Brain, RefreshCw, Loader2 } from 'lucide-react'
+import { ChevronDown, Check, Brain, RefreshCw } from 'lucide-react'
 import { AgentIcon } from './AgentIcon'
 import { chatApi, type DetectedExternalAgent } from './api'
 import { chatTitlebarPillButtonClass } from './platform'
@@ -433,17 +433,16 @@ function ExternalModelSelectorBase({
           onClick={() => setOpen(!open)}
           className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
         >
-          <span className="max-w-[140px] truncate font-medium text-neutral-800 dark:text-neutral-200">
+          {/* ponytail: 探测中复用已有的 shimmer 文字动画，不再转圈；chevron 常驻避免宽度跳动 */}
+          <span
+            className={`max-w-[140px] truncate font-medium ${loading ? 'reasoning-shimmer-text' : 'text-neutral-800 dark:text-neutral-200'}`}
+          >
             {displayName}
           </span>
-          {loading ? (
-            <Loader2 size={14} className="shrink-0 animate-spin text-neutral-400" />
-          ) : (
-            <ChevronDown
-              size={15}
-              className={`shrink-0 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`}
-            />
-          )}
+          <ChevronDown
+            size={15}
+            className={`shrink-0 transition-transform ${loading ? 'text-neutral-300 dark:text-neutral-600' : 'text-neutral-400'} ${open ? 'rotate-180' : ''}`}
+          />
         </button>
         {open && (
           <>
@@ -466,7 +465,9 @@ function ExternalModelSelectorBase({
                 </div>
               )}
               {models.length === 0 ? (
-                <div className="kv-menu-row text-neutral-500 dark:text-neutral-400">
+                <div
+                  className={`kv-menu-row ${loading ? 'reasoning-shimmer-text' : 'text-neutral-500 dark:text-neutral-400'}`}
+                >
                   {loading ? '正在探测模型…' : '该 CLI 未上报可用模型'}
                 </div>
               ) : (

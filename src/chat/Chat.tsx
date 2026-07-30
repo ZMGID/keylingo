@@ -101,9 +101,10 @@ import {
   rememberTreeExpanded,
 } from './persistence'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
-import { RightDock, type DockRevealRequest, type DockTab } from './dock/RightDock'
+import { RightDock, type DockPreviewRequest, type DockRevealRequest, type DockTab } from './dock/RightDock'
 import { dockApi } from './dock/api'
 import { insertTextIntoComposer } from './composerInsert'
+import { onDockDiffPreviewRequest, onDockPreviewRequest } from './dock/dockPreview'
 import { IconButton } from '../components/Button'
 import { normalizeToolCallStatus } from './toolStatus'
 import { TypewriterText } from './TypewriterText'
@@ -3431,6 +3432,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [dockWorkdir, setDockWorkdir] = useState('')
   const [treeExpanded, setTreeExpanded] = useState<string[]>([])
   const [dockReveal, setDockReveal] = useState<DockRevealRequest>(null)
+  const [dockPreview, setDockPreview] = useState<DockPreviewRequest>(null)
 
   // 工作目录跟随当前会话 / 选中项目 / agent runtime 变化，由后端 dock_resolve_cwd 解析
   // （外部 agent 与内置 runtime 的实际写入目录不同，runtime 切换必须重解析）。
@@ -3506,6 +3508,55 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     rememberDockOpen(true)
     setDockReveal((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
+
+  // 工具卡片点文件名 → dock 查看器预览。workdir 内的路径同时在树里定位；
+  // workdir 外的绝对路径（如写到桌面的文件）用其所在目录作查看器根。
+  useEffect(
+    () =>
+      onDockPreviewRequest((rawPath) => {
+        const normalize = (value: string) => value.replace(/\\/g, '/').replace(/^\/\/\?\//, '')
+        const target = normalize(rawPath.trim())
+        if (!target) return
+        const wd = normalize(dockWorkdir)
+        const isAbsolute = /^(?:[a-zA-Z]:)?\//.test(target)
+        let request: { workdir: string; path: string } | null = null
+        let revealRel: string | null = null
+        if (isAbsolute) {
+          if (wd && target.toLowerCase().startsWith(`${wd.toLowerCase()}/`)) {
+            revealRel = target.slice(wd.length + 1)
+            request = { workdir: dockWorkdir, path: revealRel }
+          } else {
+            const idx = target.lastIndexOf('/')
+            if (idx > 0) request = { workdir: target.slice(0, idx), path: target.slice(idx + 1) }
+          }
+        } else if (dockWorkdir) {
+          revealRel = target.replace(/^\.\//, '')
+          request = { workdir: dockWorkdir, path: revealRel }
+        }
+        if (!request) return
+        setDockTab('files')
+        rememberDockTab('files')
+        setDockOpen(true)
+        rememberDockOpen(true)
+        if (revealRel) setDockReveal((prev) => ({ path: revealRel, nonce: (prev?.nonce ?? 0) + 1 }))
+        const next = request
+        setDockPreview((prev) => ({ kind: 'file', ...next, nonce: (prev?.nonce ?? 0) + 1 }))
+      }),
+    [dockWorkdir],
+  )
+
+  // 工具卡片点 +N -N 徽标 → dock 侧栏渲染整份带色 diff。
+  useEffect(
+    () =>
+      onDockDiffPreviewRequest((payload) => {
+        setDockTab('files')
+        rememberDockTab('files')
+        setDockOpen(true)
+        rememberDockOpen(true)
+        setDockPreview((prev) => ({ kind: 'diff', ...payload, nonce: (prev?.nonce ?? 0) + 1 }))
+      }),
+    [],
+  )
 
   // 文件树「插入 @ 引用」：经 composerInsert 文本信道注入输入框正文。
   const handleInsertFileMention = useCallback((path: string) => {
@@ -4176,6 +4227,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             lang={uiLang}
             treeExpanded={treeExpanded}
             revealRequest={dockReveal}
+            previewRequest={dockPreview}
             onToggleTab={handleDockTabChange}
             onWidthChange={handleDockWidthChange}
             onClose={handleCloseDock}

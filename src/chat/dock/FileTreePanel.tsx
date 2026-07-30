@@ -46,7 +46,10 @@ import {
   type FileTreeNode,
 } from './fileTreeModel'
 import { useFileTree } from './useFileTree'
+import { FileViewer } from './FileViewer'
+import { DiffView } from './DiffView'
 import type { DockFsEntry } from './types'
+import type { DockPreviewRequest } from './RightDock'
 
 const ROW_HEIGHT = 28
 
@@ -155,6 +158,8 @@ type FileTreePanelProps = {
   /** 外部「定位到此文件」请求；nonce 变化才触发（同一路径可重复 reveal）。 */
   revealPath?: string | null
   revealNonce?: number
+  /** 工具卡片点文件名 → 查看器预览（workdir 可以不同于文件树）。 */
+  previewRequest?: DockPreviewRequest
   onInsertMention?: (path: string) => void
 }
 
@@ -166,6 +171,7 @@ export function FileTreePanel({
   onExpandedChange,
   revealPath = null,
   revealNonce = 0,
+  previewRequest = null,
   onInsertMention,
 }: FileTreePanelProps) {
   const t = i18n[lang]
@@ -173,13 +179,34 @@ export function FileTreePanel({
   const expandedSet = useMemo(() => new Set(expandedPaths), [expandedPaths])
   const tree = useFileTree({ workdir, active, showHidden, expandedPaths: expandedSet })
 
-  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  /** 多选集合（框选 / Ctrl / Shift）；单击 = 单选。 */
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  /** Shift 范围选择的锚点（最近一次非 Shift 的点选）。 */
+  const selectionAnchorRef = useRef<string | null>(null)
   const [editing, setEditing] = useState<EditingState | null>(null)
+  /** 就地查看器：点树里的文件 / 工具卡片文件预览（workdir 任意）/ 工具卡片 diff 预览。 */
+  const [viewer, setViewer] = useState<
+    | { kind: 'file'; workdir: string; path: string }
+    | { kind: 'diff'; title: string; patch: string }
+    | null
+  >(null)
+  /** 拖拽悬停中的目标目录（ROOT_PATH = 根）。 */
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
+  /** 框选矩形（树容器视口坐标，仅显示用；选中集在 mousemove 里按内容坐标算）。 */
+  const [marqueeRect, setMarqueeRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+  const treeAreaRef = useRef<HTMLDivElement>(null)
   const [menu, setMenu] = useState<{ anchor: DockMenuAnchor; path: string | null } | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<FileTreeNode | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<FileTreeNode[] | null>(null)
   const [deleting, setDeleting] = useState(false)
   const vlistRef = useRef<VListHandle>(null)
   const editInputRef = useRef<HTMLInputElement>(null)
+  // 提交/取消要读「最新」编辑态：Enter→blur、Escape→blur 这类连发事件里，闭包里的
+  // editing 是旧渲染的快照，会把已经关闭的编辑器再提交一次。
+  const editingRef = useRef(editing)
+  editingRef.current = editing
+  // 提交进行中标记：挡住双击回车/回车后紧跟的 blur 造成的重复创建（第二次会报
+  // 「目标已存在」并把已关闭的输入行带着错误复活）。
+  const submittingRef = useRef(false)
 
   const emitExpanded = useCallback(
     (next: ReadonlySet<string>) => onExpandedChange([...next]),
@@ -187,10 +214,14 @@ export function FileTreePanel({
   )
 
   useEffect(() => {
-    setSelectedPath(null)
+    setSelected(new Set())
+    selectionAnchorRef.current = null
     setEditing(null)
     setMenu(null)
     setDeleteTarget(null)
+    setViewer(null)
+    setDropTarget(null)
+    dropTargetRef.current = null
   }, [workdir])
 
   // ---------- 行数据 ----------
@@ -245,9 +276,21 @@ export function FileTreePanel({
     const index = rows.findIndex((row) => row.kind === 'node' && row.path === target)
     if (index < 0) return
     pendingRevealRef.current = null
-    setSelectedPath(target)
+    setSelected(new Set([target]))
+    selectionAnchorRef.current = target
     vlistRef.current?.scrollToIndex(index, { align: 'center' })
   }, [rows, tree.searchResults])
+
+  // 工具卡片预览请求：nonce 变化直接开查看器（workdir 由请求携带，可以在树外）。
+  useEffect(() => {
+    if (!previewRequest || previewRequest.nonce === 0) return
+    setViewer(
+      previewRequest.kind === 'file'
+        ? { kind: 'file', workdir: previewRequest.workdir, path: previewRequest.path }
+        : { kind: 'diff', title: previewRequest.title, patch: previewRequest.patch },
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewRequest?.nonce])
 
   // ---------- 操作 ----------
 
@@ -276,54 +319,246 @@ export function FileTreePanel({
     setEditing({ mode: kind === 'file' ? 'create-file' : 'create-dir', dirPath, value: '' })
   }
 
+  // 进入重命名时预选中不含扩展名的部分（VS Code 行为）；只在编辑会话开启时跑一次。
+  useEffect(() => {
+    if (editing?.mode !== 'rename') return
+    const input = editInputRef.current
+    if (!input) return
+    const dot = input.value.lastIndexOf('.')
+    input.setSelectionRange(0, dot > 0 ? dot : input.value.length)
+  }, [editing?.mode, editing?.path])
+
   const confirmEditing = async () => {
-    if (!editing) return
-    const name = editing.value.trim()
+    const current = editingRef.current
+    if (!current || submittingRef.current) return
+    const name = current.value.trim()
     if (!name) {
       setEditing(null)
       return
     }
     if (name.includes('/') || name.includes('\\')) {
-      setEditing({ ...editing, error: t.dockNameInvalid })
+      setEditing({ ...current, error: t.dockNameInvalid })
       return
     }
+    submittingRef.current = true
     try {
-      if (editing.mode === 'rename' && editing.path) {
-        const target = editing.path
+      if (current.mode === 'rename' && current.path) {
+        const target = current.path
         const isDir = tree.nodes[target]?.kind === 'dir'
         const toPath = await tree.renameEntry(target, name)
         if (isDir) emitExpanded(remapExpandedForRename(expandedSet, target, toPath))
-        if (selectedPath === target) setSelectedPath(toPath)
+        setSelected(new Set([toPath]))
+        selectionAnchorRef.current = toPath
+        pendingRevealRef.current = toPath
       } else {
-        const kind = editing.mode === 'create-file' ? 'file' : 'dir'
-        await tree.createEntry(editing.dirPath, name, kind)
+        const kind = current.mode === 'create-file' ? 'file' : 'dir'
+        const newPath = await tree.createEntry(current.dirPath, name, kind)
+        // 建完选中并滚动到新条目（复用 reveal 定位：树刷新出该行时自动定位）。
+        setSelected(new Set([newPath]))
+        selectionAnchorRef.current = newPath
+        pendingRevealRef.current = newPath
       }
       setEditing(null)
     } catch (err) {
-      setEditing({ ...editing, error: err instanceof Error ? err.message : String(err) })
+      // 函数式更新：只给「还开着的」编辑器挂错误，不把已关闭的输入行复活。
+      const message = err instanceof Error ? err.message : String(err)
+      setEditing((value) => (value ? { ...value, error: message } : value))
+    } finally {
+      submittingRef.current = false
     }
   }
 
+  const cancelOrConfirmOnBlur = () => {
+    // 失焦：有内容按确认处理（VS Code 行为），空内容取消。提交中/已关闭则不动——
+    // Enter 或 Escape 都会紧跟一次 blur。
+    if (submittingRef.current) return
+    const current = editingRef.current
+    if (!current) return
+    if (current.value.trim()) void confirmEditing()
+    else setEditing(null)
+  }
+
   const handleDeleteConfirm = async () => {
-    const target = deleteTarget
-    if (!target) return
+    const targets = deleteTarget
+    if (!targets?.length) return
     setDeleting(true)
     try {
-      await tree.deleteEntry(target.path)
-      if (target.kind === 'dir') {
-        // 删掉展开的目录时同步清理展开集合里的该子树。
-        const prefix = `${target.path}/`
-        emitExpanded(
-          new Set([...expandedSet].filter((path) => path !== target.path && !path.startsWith(prefix))),
-        )
+      for (const target of targets) {
+        await tree.deleteEntry(target.path)
+        if (target.kind === 'dir') {
+          // 删掉展开的目录时同步清理展开集合里的该子树。
+          const prefix = `${target.path}/`
+          emitExpanded(
+            new Set([...expandedSet].filter((path) => path !== target.path && !path.startsWith(prefix))),
+          )
+        }
       }
-      if (selectedPath === target.path) setSelectedPath(null)
+      const removed = new Set(targets.map((target) => target.path))
+      setSelected((prev) => new Set([...prev].filter((path) => !removed.has(path))))
       setDeleteTarget(null)
     } catch {
       // 删除失败保持对话框打开，用户可取消；错误由下一次刷新兜底呈现。
     } finally {
       setDeleting(false)
     }
+  }
+
+  // ---------- 框选 / 拖拽 ----------
+  // 拖拽用鼠标事件自绘（ghost + elementFromPoint 命中），不用 HTML5 DnD——
+  // Tauri 窗口开着原生 dragDrop 拦截（InputBar/知识库靠它接收外部文件拖入），
+  // WebView 内的 HTML5 拖拽在 Windows 上会整个失效。
+
+  /** 拖拽悬停目标的 ref 镜像：mouseup 闭包里读 state 是旧值。 */
+  const dropTargetRef = useRef<string | null>(null)
+  const setDrop = (value: string | null) => {
+    dropTargetRef.current = value
+    setDropTarget(value)
+  }
+  const dragStateRef = useRef<{ paths: string[]; startX: number; startY: number; active: boolean } | null>(null)
+  const [dragGhost, setDragGhost] = useState<{ x: number; y: number; label: string } | null>(null)
+  /** 刚完成一次拖拽时吞掉紧随的 click（否则松手会触发选中/打开查看器）。 */
+  const suppressClickRef = useRef(false)
+
+  /** 内容坐标 y 区间 → 命中的 node 行路径（行高固定 ROW_HEIGHT）。
+   *  ponytail: 编辑行报错时高度会撑开、索引换算会偏一行；框选与内联编辑并发场景可忽略。 */
+  const nodePathsInContentRange = (y1: number, y2: number): string[] => {
+    const lo = Math.min(y1, y2)
+    const hi = Math.max(y1, y2)
+    const paths: string[] = []
+    for (let i = Math.max(0, Math.floor(lo / ROW_HEIGHT)); i <= Math.floor(hi / ROW_HEIGHT) && i < rows.length; i += 1) {
+      const row = rows[i]
+      if (row.kind === 'node') paths.push(row.path)
+    }
+    return paths
+  }
+
+  const startMarquee = (e: React.MouseEvent) => {
+    if (e.button !== 0) return
+    if ((e.target as HTMLElement).closest('[role="button"],input')) return
+    const area = treeAreaRef.current
+    if (!area) return
+    const areaRect = area.getBoundingClientRect()
+    const startX = e.clientX - areaRect.left
+    const startContentY = e.clientY - areaRect.top + (vlistRef.current?.scrollOffset ?? 0)
+    // 点空白即清空选择；拖起来才画框。
+    setSelected(new Set())
+    selectionAnchorRef.current = null
+    const onMove = (ev: MouseEvent) => {
+      const rect = area.getBoundingClientRect()
+      const scroll = vlistRef.current?.scrollOffset ?? 0
+      const x = Math.min(Math.max(ev.clientX - rect.left, 0), rect.width)
+      const y = Math.min(Math.max(ev.clientY - rect.top, 0), rect.height)
+      const contentY = y + scroll
+      setMarqueeRect({
+        left: Math.min(startX, x),
+        top: Math.min(startContentY - scroll, y),
+        width: Math.abs(x - startX),
+        height: Math.abs(y - (startContentY - scroll)),
+      })
+      setSelected(new Set(nodePathsInContentRange(startContentY, contentY)))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      setMarqueeRect(null)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp, { once: true })
+  }
+
+  /** 行点击：Ctrl 切换 / Shift 范围（按可见行序）/ 普通单选（目录展开、文件开查看器）。 */
+  const handleRowSelect = (
+    e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean },
+    path: string,
+    node: FileTreeNode,
+  ) => {
+    if (e.ctrlKey || e.metaKey) {
+      setSelected((prev) => {
+        const next = new Set(prev)
+        if (next.has(path)) next.delete(path)
+        else next.add(path)
+        return next
+      })
+      selectionAnchorRef.current = path
+      return
+    }
+    if (e.shiftKey && selectionAnchorRef.current) {
+      const order = rows.filter((row) => row.kind === 'node').map((row) => (row as { path: string }).path)
+      const a = order.indexOf(selectionAnchorRef.current)
+      const b = order.indexOf(path)
+      if (a >= 0 && b >= 0) {
+        setSelected(new Set(order.slice(Math.min(a, b), Math.max(a, b) + 1)))
+        return
+      }
+    }
+    setSelected(new Set([path]))
+    selectionAnchorRef.current = path
+    if (node.kind === 'dir') handleToggleDir(node)
+    else setViewer({ kind: 'file', workdir, path })
+  }
+
+  const handleDropPaths = async (targetDir: string, paths: string[]) => {
+    const moved: string[] = []
+    for (const src of paths) {
+      // 守卫：移动到原目录 / 自身 / 自身后代都跳过。
+      if (!src || src === targetDir || parentDirOf(src) === targetDir) continue
+      if (targetDir !== ROOT_PATH && targetDir.startsWith(`${src}/`)) continue
+      try {
+        moved.push(await tree.moveEntry(src, targetDir))
+      } catch {
+        // 单项失败（如目标重名）跳过，其余继续；树刷新呈现实际结果。
+      }
+    }
+    if (moved.length) {
+      setSelected(new Set(moved))
+      selectionAnchorRef.current = moved[moved.length - 1]
+    }
+  }
+
+  /** 行上按下左键：超过 6px 位移进入拖拽（ghost 跟随、elementFromPoint 命中投放目录），
+   *  松手落到目标目录；没动过就交还给 click（选中/展开/打开查看器）。 */
+  const startRowDrag = (e: React.MouseEvent, path: string) => {
+    if (e.button !== 0) return
+    const paths = selected.has(path) ? [...selected] : [path]
+    dragStateRef.current = { paths, startX: e.clientX, startY: e.clientY, active: false }
+    const onMove = (ev: MouseEvent) => {
+      const st = dragStateRef.current
+      if (!st) return
+      if (!st.active) {
+        if (Math.abs(ev.clientX - st.startX) + Math.abs(ev.clientY - st.startY) < 6) return
+        st.active = true
+        if (!selected.has(path)) {
+          setSelected(new Set([path]))
+          selectionAnchorRef.current = path
+        }
+      }
+      setDragGhost({
+        x: ev.clientX,
+        y: ev.clientY,
+        label: st.paths.length > 1 ? `${st.paths.length} 项` : basenameOf(st.paths[0]),
+      })
+      const el = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null
+      const rowEl = el?.closest('[data-drop-dir]') as HTMLElement | null
+      if (rowEl) setDrop(rowEl.dataset.dropDir ?? null)
+      else if (el && treeAreaRef.current?.contains(el)) setDrop(ROOT_PATH)
+      else setDrop(null)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      const st = dragStateRef.current
+      dragStateRef.current = null
+      setDragGhost(null)
+      const target = dropTargetRef.current
+      setDrop(null)
+      if (st?.active) {
+        suppressClickRef.current = true
+        window.setTimeout(() => {
+          suppressClickRef.current = false
+        }, 0)
+        if (target !== null) void handleDropPaths(target, st.paths)
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp, { once: true })
   }
 
   const menuItems = (path: string | null): DockMenuItem[] => {
@@ -380,10 +615,19 @@ export function FileTreePanel({
       }
       items.push({
         key: 'delete',
-        label: t.dockDelete,
+        label:
+          selected.has(node.path) && selected.size > 1
+            ? t.dockDeleteMany.replace('{n}', String(selected.size))
+            : t.dockDelete,
         icon: <Trash2 strokeWidth={1.75} />,
         danger: true,
-        onSelect: () => setDeleteTarget(node),
+        onSelect: () => {
+          const nodes =
+            selected.has(node.path) && selected.size > 1
+              ? [...selected].map((p) => tree.nodes[p]).filter((n): n is FileTreeNode => Boolean(n))
+              : [node]
+          setDeleteTarget(nodes)
+        },
       })
     }
     if (!node) {
@@ -406,35 +650,50 @@ export function FileTreePanel({
     const expanded = expandedSet.has(path)
     const DirIcon = expanded ? FolderOpen : Folder
     const fileVisual = isDir ? null : fileVisualFor(node.name)
+    // 拖到文件行 = 拖进它所在的目录（Finder 行为）。
+    const rowDropDir = isDir ? path : parentDirOf(path)
     return (
       <div
         role="button"
         tabIndex={0}
-        className={`flex h-full cursor-default items-center gap-1 pr-2 ${
-          selectedPath === path
-            ? 'bg-neutral-500/15 dark:bg-neutral-400/15'
-            : 'hover:bg-neutral-500/8 dark:hover:bg-neutral-400/8'
+        data-drop-dir={rowDropDir}
+        className={`relative mx-1 flex h-full cursor-default items-center gap-1 rounded-md pr-2 ${
+          dropTarget !== null && dropTarget === rowDropDir && isDir
+            ? 'bg-[var(--accent-soft)]'
+            : selected.has(path)
+              ? 'bg-neutral-500/12 dark:bg-neutral-400/12'
+              : 'hover:bg-neutral-500/8 dark:hover:bg-neutral-400/8'
         } ${node.hidden ? 'opacity-55' : ''}`}
-        style={{ paddingLeft: 6 + depth * 14 }}
-        onClick={() => {
-          setSelectedPath(path)
-          if (isDir) handleToggleDir(node)
+        style={{ paddingLeft: 2 + depth * 14 }}
+        onMouseDown={(e) => startRowDrag(e, path)}
+        onClick={(e) => {
+          if (suppressClickRef.current) return
+          handleRowSelect(e, path, node)
         }}
         onDoubleClick={() => {
           if (!isDir) handleOpenEntry(path, 'open')
         }}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            setSelectedPath(path)
-            if (isDir) handleToggleDir(node)
-          }
+          if (e.key === 'Enter') handleRowSelect(e, path, node)
         }}
         onContextMenu={(e) => {
           e.preventDefault()
-          setSelectedPath(path)
+          if (!selected.has(path)) {
+            setSelected(new Set([path]))
+            selectionAnchorRef.current = path
+          }
           setMenu({ anchor: { left: e.clientX, top: e.clientY }, path })
         }}
       >
+        {/* 缩进参考线：每层祖先一条竖线（对齐该层 chevron 中心），行行相接连成整线。 */}
+        {Array.from({ length: depth }, (_, level) => (
+          <span
+            key={level}
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-0 top-0 w-px bg-black/[0.08] dark:bg-white/[0.1]"
+            style={{ left: 2 + level * 14 + 6 }}
+          />
+        ))}
         {isDir ? (
           node.loading ? (
             <Loader2 size={12} className="shrink-0 animate-spin text-neutral-400" />
@@ -470,36 +729,39 @@ export function FileTreePanel({
     if (!editing) return null
     const Icon = editing.mode === 'create-dir' ? Folder : editing.mode === 'rename' ? Pencil : File
     return (
-      <div className="flex h-full items-center gap-1 pr-2" style={{ paddingLeft: 6 + depth * 14 }}>
-        <span className="w-3 shrink-0" />
-        <Icon size={13} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
-        <input
-          ref={editInputRef}
-          autoFocus
-          value={editing.value}
-          placeholder={t.dockNamePlaceholder}
-          className={`min-w-0 flex-1 rounded border bg-transparent px-1 py-0.5 text-[12px] outline-none ${
-            editing.error
-              ? 'border-red-400 dark:border-red-500'
-              : 'border-neutral-300 focus:border-neutral-500 dark:border-neutral-600 dark:focus:border-neutral-400'
-          }`}
-          title={editing.error}
-          onChange={(e) => setEditing({ ...editing, value: e.target.value, error: undefined })}
-          onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return
-            if (e.key === 'Enter') {
-              e.preventDefault()
-              void confirmEditing()
-            } else if (e.key === 'Escape') {
-              e.preventDefault()
-              setEditing(null)
-            }
-          }}
-          onBlur={() => {
-            // 点击别处视为取消（已有输入内容时保留一次，避免误触丢名）。
-            if (!editing.value.trim()) setEditing(null)
-          }}
-        />
+      <div className="flex flex-col pr-2" style={{ paddingLeft: 6 + depth * 14 }}>
+        <div className="flex h-[28px] items-center gap-1">
+          <span className="w-3 shrink-0" />
+          <Icon size={13} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
+          <input
+            ref={editInputRef}
+            autoFocus
+            value={editing.value}
+            placeholder={t.dockNamePlaceholder}
+            className={`min-w-0 flex-1 rounded border bg-transparent px-1 py-0.5 text-[12px] outline-none ${
+              editing.error
+                ? 'border-red-400 dark:border-red-500'
+                : 'border-neutral-300 focus:border-neutral-500 dark:border-neutral-600 dark:focus:border-neutral-400'
+            }`}
+            onChange={(e) => setEditing({ ...editing, value: e.target.value, error: undefined })}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void confirmEditing()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                setEditing(null)
+              }
+            }}
+            onBlur={cancelOrConfirmOnBlur}
+          />
+        </div>
+        {editing.error && (
+          <div className="pl-[34px] pb-1 text-[11px] leading-4 text-red-500 dark:text-red-400">
+            {editing.error}
+          </div>
+        )}
       </div>
     )
   }
@@ -507,7 +769,7 @@ export function FileTreePanel({
   const searching = tree.searchResults !== null
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       {/* 工具栏 */}
       <div className="flex items-center gap-1 border-b border-neutral-200/70 px-2 py-1.5 dark:border-neutral-700/50">
         <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md bg-neutral-500/10 px-1.5">
@@ -558,7 +820,11 @@ export function FileTreePanel({
 
       {/* 树 / 搜索结果 */}
       <div
-        className="min-h-0 flex-1"
+        ref={treeAreaRef}
+        className="relative min-h-0 flex-1 select-none"
+        onMouseDown={(e) => {
+          if (!searching) startMarquee(e)
+        }}
         onContextMenu={(e) => {
           // 空白区域右键 → 根目录菜单（行内右键已 stopPropagation 不到这里——
           // 行自身的 onContextMenu preventDefault 但未 stopPropagation，这里用 target 判断）。
@@ -589,19 +855,28 @@ export function FileTreePanel({
                   key={entry.path}
                   role="button"
                   tabIndex={0}
-                  className={`flex h-[28px] cursor-default items-center gap-1.5 px-2 ${
-                    selectedPath === entry.path
-                      ? 'bg-neutral-500/15 dark:bg-neutral-400/15'
+                  className={`mx-1 flex h-[28px] cursor-default items-center gap-1.5 rounded-md px-1.5 ${
+                    selected.has(entry.path)
+                      ? 'bg-neutral-500/12 dark:bg-neutral-400/12'
                       : 'hover:bg-neutral-500/8 dark:hover:bg-neutral-400/8'
                   } ${entry.hidden ? 'opacity-55' : ''}`}
-                  onClick={() => setSelectedPath(entry.path)}
+                  onClick={() => {
+                    setSelected(new Set([entry.path]))
+                    selectionAnchorRef.current = entry.path
+                    if (entry.kind !== 'dir') setViewer({ kind: 'file', workdir, path: entry.path })
+                  }}
                   onDoubleClick={() => handleOpenEntry(entry.path, 'open')}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') setSelectedPath(entry.path)
+                    if (e.key === 'Enter') {
+                      setSelected(new Set([entry.path]))
+                      selectionAnchorRef.current = entry.path
+                      if (entry.kind !== 'dir') setViewer({ kind: 'file', workdir, path: entry.path })
+                    }
                   }}
                   onContextMenu={(e) => {
                     e.preventDefault()
-                    setSelectedPath(entry.path)
+                    setSelected(new Set([entry.path]))
+                    selectionAnchorRef.current = entry.path
                     setMenu({ anchor: { left: e.clientX, top: e.clientY }, path: entry.path })
                   }}
                 >
@@ -623,7 +898,10 @@ export function FileTreePanel({
         ) : (
           <VList ref={vlistRef} className="custom-scrollbar h-full">
             {rows.map((row, index) => (
-              <div key={row.kind === 'edit' ? `edit-${index}` : `${row.kind}-${row.path}`} style={{ height: ROW_HEIGHT }}>
+              <div
+                key={row.kind === 'edit' ? `edit-${index}` : `${row.kind}-${row.path}`}
+                style={{ height: row.kind === 'edit' && editing?.error ? undefined : ROW_HEIGHT }}
+              >
                 {row.kind === 'node' ? (
                   renderNodeRow(row.path, row.depth)
                 ) : row.kind === 'error' ? (
@@ -642,16 +920,62 @@ export function FileTreePanel({
             ))}
           </VList>
         )}
+        {marqueeRect && (
+          <div
+            className="pointer-events-none absolute z-10 rounded-sm border border-[var(--accent)] bg-[var(--accent-soft)] opacity-50"
+            style={marqueeRect}
+          />
+        )}
       </div>
+
+      {dragGhost && (
+        <div
+          className="pointer-events-none fixed z-50 rounded-md border border-neutral-300 bg-[var(--theme-surface-soft)] px-2 py-0.5 text-[11px] text-neutral-700 shadow-sm dark:border-neutral-600 dark:bg-[#262629] dark:text-neutral-200"
+          style={{ left: dragGhost.x + 10, top: dragGhost.y + 12 }}
+        >
+          {dragGhost.label}
+        </div>
+      )}
 
       {menu && (
         <DockContextMenu anchor={menu.anchor} items={menuItems(menu.path)} onClose={() => setMenu(null)} />
       )}
+      {viewer?.kind === 'file' && (
+        <FileViewer
+          workdir={viewer.workdir}
+          path={viewer.path}
+          lang={lang}
+          onClose={() => setViewer(null)}
+        />
+      )}
+      {viewer?.kind === 'diff' && (
+        <div className="absolute inset-0 z-10 flex flex-col bg-[var(--theme-surface-soft)] dark:bg-[#262629]">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-neutral-200/70 px-2 py-1.5 dark:border-neutral-700/50">
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-neutral-800 dark:text-neutral-100">
+              {viewer.title}
+            </span>
+            <IconButton label={t.dockViewerClose} size="sm" variant="ghost" onClick={() => setViewer(null)}>
+              <X size={13} />
+            </IconButton>
+          </div>
+          <div className="custom-scrollbar min-h-0 flex-1 overflow-auto p-2">
+            <DiffView patch={viewer.patch} lang={lang} />
+          </div>
+        </div>
+      )}
       {deleteTarget && (
         <ConfirmDialog
           lang={lang}
-          title={t.dockDeleteTitle}
-          message={deleteTarget.path}
+          title={
+            deleteTarget.length > 1
+              ? t.dockDeleteMany.replace('{n}', String(deleteTarget.length))
+              : t.dockDeleteTitle
+          }
+          message={
+            deleteTarget.length > 1
+              ? `${deleteTarget.slice(0, 5).map((node) => node.path).join('、')}${deleteTarget.length > 5 ? '…' : ''}`
+              : deleteTarget[0].path
+          }
           confirmLabel={t.dockDeleteConfirm}
           busy={deleting}
           onConfirm={() => void handleDeleteConfirm()}

@@ -556,7 +556,7 @@ function MessageListBase({
         case 'thinking':
           return (
             <div className="chat-motion-fade-up flex justify-start py-3">
-              <span className="reasoning-shimmer-text text-sm font-medium">正在思考…</span>
+              <span className="reasoning-shimmer-text text-sm font-medium">正在思考</span>
             </div>
           )
         case 'compaction-divider':
@@ -586,7 +586,7 @@ function MessageListBase({
                 <button
                   type="button"
                   onClick={() => onRetryLastUser(item.retryMessageId!)}
-                  className="inline-flex items-center gap-1 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-50 active:scale-95 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
+                  className="inline-flex items-center gap-1 rounded-full border border-[var(--border-input)] bg-[var(--bg-input)] px-3 py-1 text-xs font-medium text-neutral-700 transition-colors hover:bg-neutral-50 active:scale-95 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
                 >
                   <RotateCw size={13} strokeWidth={2} />
                   重试
@@ -676,7 +676,7 @@ function MessageListBase({
           onClick={handleJumpToBottom}
           aria-label="回到底部"
           title="回到底部"
-          className="chat-motion-pop absolute bottom-4 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-neutral-200 bg-white/95 text-neutral-600 shadow-md backdrop-blur transition-transform duration-[var(--kv-dur-instant)] ease-[var(--kv-ease-spring)] hover:text-neutral-900 active:scale-90 dark:border-neutral-700 dark:bg-neutral-900/95 dark:text-neutral-300 dark:hover:text-neutral-100"
+          className="chat-motion-pop absolute bottom-4 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-600 shadow-md backdrop-blur transition-transform duration-[var(--kv-dur-instant)] ease-[var(--kv-ease-spring)] hover:text-neutral-900 active:scale-90 dark:text-neutral-300 dark:hover:text-neutral-100"
         >
           <ChevronDown size={18} strokeWidth={2} />
         </button>

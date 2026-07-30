@@ -109,8 +109,12 @@ export function TerminalPanel({ workdir, active, lang }: TerminalPanelProps) {
     term.loadAddon(fit)
     term.open(container)
     // WebGL 渲染（更平滑、高分屏更清晰），失败自动退回默认 canvas。
+    // ponytail: WebView2 里 GPU 掉线会让 WebGL 画布变全白（xterm 不会自救），
+    // 所以 onContextLoss 必须 dispose 让它退回 DOM renderer。
     try {
-      term.loadAddon(new WebglAddon())
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => webgl.dispose())
+      term.loadAddon(webgl)
     } catch (error) {
       console.warn('[dock] webgl addon unavailable, fallback to canvas:', error)
     }
@@ -210,6 +214,15 @@ export function TerminalPanel({ workdir, active, lang }: TerminalPanelProps) {
     return (
       <div className="flex flex-1 items-center justify-center p-4 text-center text-[12px] text-neutral-400 dark:text-neutral-500">
         {t.dockTerminalUnavailable}
+      </div>
+    )
+  }
+
+  // 没有工作目录时 PTY 根本不会创建，别留一块空白面板。
+  if (!workdir) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-4 text-center text-[12px] text-neutral-400 dark:text-neutral-500">
+        {t.dockNoWorkdir}
       </div>
     )
   }
