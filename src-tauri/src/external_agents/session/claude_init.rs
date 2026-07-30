@@ -37,6 +37,26 @@ const CLAUDE_MODEL_ALIASES: &[&str] = &[
 /// 共 17 条），原样抄出 `id` + `display_name`，一个字没编。spec 第 21 条认可这种「把本机
 /// 二进制当文档查」的做法。
 ///
+/// **但目录 ≠ 可用**（2026-07-30 修正）。同一个二进制里还烘着一张官方状态表
+/// （「Legacy / Deprecated / Retired Models」），照它 + 真机实测，那 17 条里有 6 条不能给用户：
+///
+/// | 条目 | 真实情况 |
+/// |---|---|
+/// | `claude-3-5-sonnet` | 2025-10-28 已退役 |
+/// | `claude-3-7-sonnet` | 2026-02-19 已退役；实测只打一句 `⚠ … was retired on …` 后无回答 |
+/// | `claude-3-5-haiku`  | 2026-02-19 已退役 |
+/// | `claude-sonnet-4-0` | 实测 `⚠ Claude Sonnet 4 was retired on June 15, 2026` |
+/// | `claude-opus-4-1`   | 实测 `⚠ … automatically remapped to Opus 4.8`，且 2026-08-05 退役 |
+/// | `claude-opus-4-0`   | 同上，实测 `modelUsage` 里回报的是 `claude-opus-4-8` |
+///
+/// 后两条最该删：**选了不报错，给的是另一个模型**（除非用户自己设了
+/// `CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP=1`）。一个「点了得到别的东西」的选项比没有更糟。
+///
+/// **刻意不做「按退役日期自动过滤」**：官方表里一半的日期是 `TBD`（`claude-opus-4-0` /
+/// `claude-sonnet-4-0` 就是），而实际退役是 CLI 运行时才告知的 —— 日期过滤既拦不住 TBD 那批，
+/// 又要多养一张会过期的日期表。这里就是一张需要人工对账的白名单：**升级 CLI 后
+/// 重新对一遍二进制里那张状态表**（搜字符串 `Retired Models (no longer available)`）。
+///
 /// **有意不带上下文窗口**：catalog 里确实有 `context:{window,…}`，但那正是 spec 第 14g 条
 /// 明令不许再建的那张表 —— 窗口会被 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`、1M beta、第三方 router
 /// 改写，只有 CLI 自己每轮实报的 `result.modelUsage[model].contextWindow` 准。这里只回答
@@ -54,18 +74,12 @@ const CLAUDE_CONCRETE_MODELS: &[(&str, &str)] = &[
     ("claude-opus-4-7", "Opus 4.7"),
     ("claude-opus-4-6", "Opus 4.6"),
     ("claude-opus-4-5", "Opus 4.5"),
-    ("claude-opus-4-1", "Opus 4.1"),
-    ("claude-opus-4-0", "Opus 4"),
     ("claude-sonnet-5", "Sonnet 5"),
     ("claude-sonnet-4-6", "Sonnet 4.6"),
     ("claude-sonnet-4-5", "Sonnet 4.5"),
-    ("claude-sonnet-4-0", "Sonnet 4"),
-    ("claude-3-7-sonnet", "Sonnet 3.7"),
-    ("claude-3-5-sonnet", "Sonnet 3.5"),
     ("claude-fable-5", "Fable 5"),
     ("claude-mythos-5", "Mythos 5"),
     ("claude-haiku-4-5", "Haiku 4.5"),
-    ("claude-3-5-haiku", "Haiku 3.5"),
 ];
 
 /// 上面那张具体版本表是从**哪个** CLI 版本的二进制里读出来的。
@@ -850,6 +864,34 @@ mod tests {
         // 版本读不到 ⇒ 不做门控。未知不该等于功能消失。
         assert!(!concrete_model_options(None).is_empty());
         assert!(!concrete_model_options(Some("weird output")).is_empty());
+    }
+
+    /// 已退役 / 被静默重映射的模型不得出现在选单里（见 `CLAUDE_CONCRETE_MODELS` 上方的对账表）。
+    ///
+    /// 前三个选了会得到一句 `⚠ … was retired on …` 加一个空回复；后三个更坏 ——
+    /// 不报错，直接把请求换成 Opus 4.8 跑，用户以为自己在用 4.1 其实不是。
+    /// 二进制目录里确实有这些 id，所以「照抄目录」这个动作本身会把它们带回来 —— 这条挡住。
+    #[test]
+    fn retired_and_silently_remapped_models_are_not_offered() {
+        const DEAD: &[&str] = &[
+            "claude-3-5-sonnet",  // retired 2025-10-28
+            "claude-3-7-sonnet",  // retired 2026-02-19
+            "claude-3-5-haiku",   // retired 2026-02-19
+            "claude-sonnet-4-0",  // retired 2026-06-15（实测 CLI 原话）
+            "claude-opus-4-1",    // 静默重映射到 Opus 4.8；2026-08-05 退役
+            "claude-opus-4-0",    // 静默重映射到 Opus 4.8
+        ];
+        for dead in DEAD {
+            assert!(
+                !CLAUDE_CONCRETE_MODELS.iter().any(|(id, _)| id == dead),
+                "{dead} 已退役/会被静默换成别的模型，不能出现在选单里"
+            );
+        }
+        // 白名单本身不能被清空 —— 上面那条断言在空表上恒真。
+        assert!(CLAUDE_CONCRETE_MODELS.len() >= 8);
+        assert!(CLAUDE_CONCRETE_MODELS
+            .iter()
+            .any(|(id, _)| *id == "claude-opus-4-8"));
     }
 
     /// 具体版本表本身的卫生：id 唯一、不与别名冲突、形态是 `claude-…`（会被原样当
