@@ -50,10 +50,75 @@ const CHAT_TRAFFIC_LIGHT_X: f64 = 14.0 + CHAT_SIDEBAR_CARD_INSET;
 
 /// 交给 tao `traffic_light_inset` 的 y。tao 会在每次内容视图 `drawRect` 重新应用这个 inset
 /// （见 tao 源 view.rs::draw_rect → inset_traffic_lights），故窗口拖动/缩放/移动全程都保持对齐。
-/// close_h=14、实测灯中心 = y − 2：y=32 → 中心 30，与整条顶栏线同高
-/// （侧栏图标 / 主区顶栏的模型·思考强度·审批都在 30，见 index.css `.chat-titlebar-row`）。
+///
+/// 这个 y **不等于**灯中心。tao 只写按钮的 `origin.x`，`origin.y` 始终是 AppKit 布局出来的值：
+///   容器高 = 按钮高 + y，灯中心距顶 = y − button.origin.y + button.height / 2
+/// 而 `button.origin.y` / `button.height` 随 macOS 版本变（标题栏容器自然高度不同），
+/// 所以「y=32 → 中心 30」只在某些系统上成立 —— 早先几次「统一到 30」的修复就是栽在这里。
+/// 现在不再假设：前端用 `chat_traffic_light_center_y` 量出真实中心，顶栏那条线跟着灯走
+/// （见 index.css `--chat-traffic-center-y`）。这个常数只决定灯大致落在哪，不需要精确。
 #[cfg(target_os = "macos")]
 const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 32.0;
+
+/// 交通灯中心距 WebView 内容顶缘的距离（CSS px / AppKit point，同一单位）。
+///
+/// 前端据此把侧栏顶栏图标、主区顶栏控件摆到同一条线上。非 macOS / 取不到 / 数值离谱都返回
+/// `None`，前端退回 CSS 里的默认 30px。
+#[tauri::command]
+pub async fn chat_traffic_light_center_y(window: WebviewWindow) -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        // NSView 几何只能在主线程读，命令本身在 worker 线程，用 channel 取回。
+        let (tx, rx) = std::sync::mpsc::channel();
+        let window_for_main = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let measured = window_for_main
+                    .ns_window()
+                    .ok()
+                    .filter(|ptr| !ptr.is_null())
+                    .and_then(|ptr| unsafe {
+                        measure_traffic_light_center_y(ptr as cocoa::base::id)
+                    });
+                let _ = tx.send(measured);
+            })
+            .ok()?;
+        rx.recv_timeout(std::time::Duration::from_millis(500))
+            .ok()
+            .flatten()
+            // 灯只可能在标题栏那一带；离谱值当没量到，别把 padding 算成负数。
+            .filter(|y| (8.0..=80.0).contains(y))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// 把 close 按钮的 bounds 转到 contentView 坐标系，换算成「距内容顶缘」。
+/// contentView 未翻转（y 自下而上），故距顶 = 内容高 − (y + 高/2)。
+/// Overlay 标题栏下 contentView 铺满整个窗口 frame，所以这就是 CSS 的 y。
+#[cfg(target_os = "macos")]
+unsafe fn measure_traffic_light_center_y(window: cocoa::base::id) -> Option<f64> {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSRect;
+    use objc::{msg_send, sel, sel_impl};
+
+    const NS_WINDOW_CLOSE_BUTTON: u64 = 0;
+    let close: id = msg_send![window, standardWindowButton: NS_WINDOW_CLOSE_BUTTON];
+    let content: id = msg_send![window, contentView];
+    if close == nil || content == nil {
+        return None;
+    }
+    let bounds: NSRect = msg_send![close, bounds];
+    let in_content: NSRect = msg_send![close, convertRect: bounds toView: content];
+    let content_bounds: NSRect = msg_send![content, bounds];
+    if content_bounds.size.height <= 0.0 || in_content.size.height <= 0.0 {
+        return None;
+    }
+    Some(content_bounds.size.height - (in_content.origin.y + in_content.size.height / 2.0))
+}
 
 /// 隐藏 Overlay 标题栏的窗口标题文字。交通灯位置本身由 builder 的 `traffic_light_position`
 /// （= tao `traffic_light_inset`，tao 每次 drawRect 自动重新应用）负责并持久保持，这里不再手动重排。

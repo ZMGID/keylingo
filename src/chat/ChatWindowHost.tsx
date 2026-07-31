@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { getCurrentWindow, type PhysicalSize } from '@tauri-apps/api/window'
+import { api } from '../api/tauri'
 import { isMac, isWindows, usesNativeTitlebar } from './platform'
 import { isTauriRuntime } from './utils'
 import { syncChatWindowEffect, type ChatEffectPlatform } from './chatWindowEffects'
@@ -99,6 +100,33 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
       cancelled = true
       window.removeEventListener('resize', onResize)
       unlisten?.()
+    }
+  }, [])
+
+  // 顶栏那条线对齐交通灯。灯的 y 由 AppKit 布局决定、随 macOS 版本变（见 windows.rs
+  // CHAT_TRAFFIC_LIGHT_INSET_Y 注释），写死常数必然「这台对了那台错」—— 所以量一次真值，
+  // 让 CSS 跟着灯走（index.css --chat-traffic-center-y）。
+  // 窗口刚建出来时 contentView 可能还没尺寸，量不到就隔一会儿再试，别永远卡在默认值。
+  useEffect(() => {
+    if (!usesNativeTitlebar || !isTauriRuntime()) return
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const measure = async (attempt: number) => {
+      const y = await api.chatTrafficLightCenterY().catch(() => null)
+      if (cancelled) return
+      if (y != null) {
+        document.documentElement.style.setProperty('--chat-traffic-center-y', `${y}px`)
+      } else if (attempt < 3) {
+        timer = setTimeout(() => void measure(attempt + 1), 250)
+      }
+    }
+
+    void measure(0)
+    return () => {
+      cancelled = true
+      if (timer !== undefined) clearTimeout(timer)
     }
   }, [])
 

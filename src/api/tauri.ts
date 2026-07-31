@@ -1790,6 +1790,9 @@ export const api = {
    *  路走后端而不是 window.setEffects()，因为 tauri 把 apply_mica 的失败静默吞掉了。 */
   chatWindowApplyMica: (dark: boolean): Promise<boolean> =>
     invoke('chat_window_apply_mica', { dark }),
+  /** macOS 交通灯中心距内容顶缘的真实距离（CSS px）。取不到返回 null，前端退回默认值。 */
+  chatTrafficLightCenterY: (): Promise<number | null> =>
+    invoke('chat_traffic_light_center_y'),
   resizeWindow: async (width: number, height: number) => {
     const win = getCurrentWindow()
     await win.setSize(new LogicalSize(width, height))
