@@ -33,8 +33,9 @@ function useDocumentDark(): boolean {
 export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostProps) {
   const [maximized, setMaximized] = useState(false)
   const [nativeEffectActive, setNativeEffectActive] = useState(false)
-  // 材质输入（焦点 + 物理尺寸）存 state，让 React 自己收敛重复渲染，不手搓 pending/ready 标志。
-  const [effectInput, setEffectInput] = useState<{ focused: boolean; size: PhysicalSize } | null>(null)
+  // 材质输入只有物理尺寸（焦点跟随交给 AppKit，见 chatWindowEffects）。
+  // resize 按 150ms 收敛（理由见上方 syncMaximized —— setEffects 也是一次 IPC，不能每帧发）。
+  const [effectSize, setEffectSize] = useState<PhysicalSize | null>(null)
   // mac 全屏：以 isFullscreen() 为权威（菜单栏「始终显示」时 innerHeight 到不了 screen.height，
   // 纯几何判定会漏判，顶栏 pl-[92px] 留出空块）。
   //
@@ -171,38 +172,28 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
     }
   }, [])
 
-  // 系统窗口材质的输入采集：焦点 + 物理尺寸。resize 同样按 150ms 收敛（理由见上方
-  // syncMaximized —— setEffects 也是一次 IPC，不能每帧发）。
+  // 系统窗口材质的输入采集：物理尺寸。
   useEffect(() => {
     if (!isTauriRuntime() || effectPlatform === 'linux') return
 
     const win = getCurrentWindow()
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const stops: Array<() => void> = []
-
-    // prev 为 null = 初始快照还没落地，事件直接丢（紧随其后的 setEffectInput 会带上完整状态）。
-    const push = (next: Partial<{ focused: boolean; size: PhysicalSize }>) => {
-      if (!cancelled) setEffectInput(prev => (prev ? { ...prev, ...next } : prev))
-    }
+    let stopResize: (() => void) | undefined
 
     void (async () => {
       try {
-        const [focused, size] = await Promise.all([win.isFocused(), win.innerSize()])
+        const size = await win.innerSize()
         if (cancelled) return
-        setEffectInput({ focused, size })
+        setEffectSize(size)
 
-        const stopResize = await win.onResized(({ payload }) => {
+        const stop = await win.onResized(({ payload }) => {
           if (timer !== undefined) clearTimeout(timer)
-          timer = setTimeout(() => push({ size: payload }), 150)
+          timer = setTimeout(() => {
+            if (!cancelled) setEffectSize(payload)
+          }, 150)
         })
-        cancelled ? stopResize() : stops.push(stopResize)
-
-        // macOS 的 Menu 材质要跟随焦点；Windows 的 Mica 失焦不变，不必订阅。
-        if (effectPlatform === 'macos') {
-          const stopFocus = await win.onFocusChanged(({ payload }) => push({ focused: payload }))
-          cancelled ? stopFocus() : stops.push(stopFocus)
-        }
+        cancelled ? stop() : (stopResize = stop)
       } catch {
         if (!cancelled) setNativeEffectActive(false)
       }
@@ -211,35 +202,38 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
     return () => {
       cancelled = true
       if (timer !== undefined) clearTimeout(timer)
-      stops.forEach(stop => stop())
+      stopResize?.()
     }
   }, [])
 
   // 材质应用：输入或设置一变就重跑，React 负责收敛；晚到的结果由 cancelled 丢弃。
   useEffect(() => {
-    if (!isTauriRuntime() || effectPlatform === 'linux' || !effectInput) return
+    if (!isTauriRuntime() || effectPlatform === 'linux' || !effectSize) return
     let cancelled = false
     void syncChatWindowEffect(
       getCurrentWindow(),
       effectPlatform,
       translucentSidebar,
-      effectInput.focused,
-      effectInput.size,
+      effectSize,
       dark,
     ).then(active => {
-      if (!cancelled) setNativeEffectActive(active)
+      if (cancelled) return
+      setNativeEffectActive(active)
+      // 材质没上就把窗口设回 opaque：内容本来铺满整窗，非 opaque 只是白付合成开销
+      // （台前调度缩放整窗时掉帧）。macOS 专属，其他平台后端 no-op。
+      if (effectPlatform === 'macos') void api.chatWindowSetOpaque(!active)
     })
     return () => {
       cancelled = true
     }
-  }, [translucentSidebar, effectInput, dark])
+  }, [translucentSidebar, effectSize, dark])
 
   const nativeEffectClass = nativeEffectActive ? ' chat-window-host--native-effect' : ''
 
   if (usesNativeTitlebar) {
     return (
       <div
-        className={`chat-window-host h-full w-full${macFullscreen ? ' chat-window-host--mac-fullscreen' : ''}${nativeEffectClass}`}
+        className={`chat-window-host chat-window-host--mac-titlebar h-full w-full${macFullscreen ? ' chat-window-host--mac-fullscreen' : ''}${nativeEffectClass}`}
       >
         {children}
       </div>

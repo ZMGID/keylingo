@@ -1790,6 +1790,10 @@ export const api = {
    *  路走后端而不是 window.setEffects()，因为 tauri 把 apply_mica 的失败静默吞掉了。 */
   chatWindowApplyMica: (dark: boolean): Promise<boolean> =>
     invoke('chat_window_apply_mica', { dark }),
+  /** macOS：材质没上时把 NSWindow 设回 opaque，换回合成器的不透明快路径（台前调度不掉帧）。
+   *  材质上了必须传 false，否则 Menu 材质被实色背景挡死。非 macOS 是 no-op。 */
+  chatWindowSetOpaque: (opaque: boolean): Promise<void> =>
+    invoke('chat_window_set_opaque', { opaque }),
   /** macOS 交通灯中心距内容顶缘的真实距离（CSS px）。取不到返回 null，前端退回默认值。 */
   chatTrafficLightCenterY: (): Promise<number | null> =>
     invoke('chat_traffic_light_center_y'),

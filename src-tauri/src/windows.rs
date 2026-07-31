@@ -238,6 +238,47 @@ pub fn chat_window_apply_mica(window: WebviewWindow, dark: bool) -> bool {
     }
 }
 
+/// macOS chat 窗口：材质没上时把 NSWindow 设回 opaque。
+///
+/// 建窗时写死 `transparent(true)`（Menu 材质要透过 WebView 才看得见），但材质关掉后内容
+/// 本来就是铺满整窗的不透明外壳 —— 非 opaque 的 NSWindow 白拿不到合成器的不透明快路径，
+/// 阴影还要每帧从 alpha 反推。台前调度 / Mission Control 缩放整窗时这笔开销肉眼可见掉帧。
+/// 所以按「材质是否激活」来回切：材质上了必须 NO，没上就 YES。
+#[tauri::command]
+pub fn chat_window_set_opaque(window: WebviewWindow, opaque: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use cocoa::base::id;
+        let window_for_main = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            let Ok(ptr) = window_for_main.ns_window() else {
+                return;
+            };
+            if ptr.is_null() {
+                return;
+            }
+            unsafe {
+                use objc::{class, msg_send, sel, sel_impl};
+                let ns_window = ptr as id;
+                // opaque 窗口的 backgroundColor 必须是实色：clearColor + setOpaque:YES
+                // 会让页面还没画到的地方读到未定义内容。windowBackgroundColor 跟 NSAppearance，
+                // 首帧之后整窗都被外壳盖住，用户看不到它。
+                let color: id = if opaque {
+                    msg_send![class!(NSColor), windowBackgroundColor]
+                } else {
+                    msg_send![class!(NSColor), clearColor]
+                };
+                let _: () = msg_send![ns_window, setBackgroundColor: color];
+                let _: () = msg_send![ns_window, setOpaque: opaque];
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, opaque);
+    }
+}
+
 /// 翻译器 / 设置等悬浮小窗：无边框透明壳。
 pub fn apply_frameless_window_chrome(window: &WebviewWindow) {
     let _ = window.set_decorations(false);

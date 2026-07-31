@@ -22,25 +22,22 @@ type EffectWindow = {
 export function chatWindowEffectEligible(
   platform: ChatEffectPlatform,
   enabled: boolean,
-  focused: boolean,
   size: Pick<PhysicalSize, 'width' | 'height'>,
 ): boolean {
   if (platform === 'linux' || !enabled) return false
-  if (size.width >= CHAT_EFFECT_MAX_WIDTH && size.height >= CHAT_EFFECT_MAX_HEIGHT) return false
-  return platform !== 'macos' || focused
+  return size.width < CHAT_EFFECT_MAX_WIDTH || size.height < CHAT_EFFECT_MAX_HEIGHT
 }
 
 export async function syncChatWindowEffect(
   window: EffectWindow,
   platform: ChatEffectPlatform,
   enabled: boolean,
-  focused: boolean,
   size: Pick<PhysicalSize, 'width' | 'height'>,
   dark: boolean,
   applyMica: ApplyMica = api.chatWindowApplyMica,
 ): Promise<boolean> {
   if (platform === 'linux') return false
-  if (!chatWindowEffectEligible(platform, enabled, focused, size)) {
+  if (!chatWindowEffectEligible(platform, enabled, size)) {
     await window.clearEffects().catch(() => {})
     return false
   }
@@ -55,6 +52,9 @@ export async function syncChatWindowEffect(
   }
 
   try {
+    // 材质常驻，焦点变化交给 AppKit 的 FollowsWindowActiveState 自己跟。
+    // 别按 onFocusChanged 手动 clear/set —— 那是在切窗动画中途增删 NSVisualEffectView，
+    // 台前调度下整窗重绘 + 实时模糊重算，肉眼可见掉帧。
     await window.setEffects({ effects: [Effect.Menu], state: EffectState.FollowsWindowActiveState })
     return true
   } catch {
