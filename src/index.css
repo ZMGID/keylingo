@@ -2406,12 +2406,14 @@ button.chat-composer-status-item:hover {
 
 .settings-embedded-nav {
   width: 200px;
+  /* 侧栏左右内边距抽成变量：底部「返回对话」要用负边距抵掉它，才能让分隔线通栏。 */
+  --nav-pad-x: 8px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: var(--bg-sidebar);
-  padding: 16px 8px 12px;
+  padding: 16px var(--nav-pad-x) 0;
   overflow: hidden;
 }
 
@@ -2478,11 +2480,20 @@ button.chat-composer-status-item:hover {
   padding: 0 4px;
 }
 
+/* 窗口变矮时分类列表自己滚，否则它撑满高度 + 外层 overflow:hidden 会把底部「返回对话」裁掉。 */
+.settings-embedded-nav-list:not(.settings-embedded-nav-list--footer) {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 底部「返回对话」与右侧 savebar 同高（.kv-savebar 48px）、同基线，负边距抵掉 aside 内边距 → 两条分隔线连成通栏一条 */
 .settings-embedded-nav-list--footer {
-  padding-top: 6px;
-  padding-bottom: 4px;
+  flex-shrink: 0;
+  height: 48px;
+  justify-content: center;
+  margin: 0 calc(-1 * var(--nav-pad-x));
+  padding: 0 calc(var(--nav-pad-x) + 4px);
   border-top: 1px solid var(--border, rgba(0, 0, 0, 0.06));
-  margin-top: 4px;
 }
 .dark .chat-window-shell .settings-embedded-nav-list--footer {
   border-top-color: rgba(255, 255, 255, 0.08);
@@ -2647,7 +2658,7 @@ button.chat-composer-status-item:hover {
 }
 
 .settings-embedded-savebar {
-  height: 52px;
+  /* 高度由 .kv-savebar（48px）决定，这里别再写，否则和左栏 footer 高度会各自漂。 */
   padding: 0 24px;
   background: var(--bg-savebar);
   border-top: 1px solid var(--border);
@@ -2846,8 +2857,7 @@ button.chat-composer-status-item:hover {
 @container settings-shell (max-width: 820px) {
   .settings-embedded-nav {
     width: 52px;
-    padding-left: 6px;
-    padding-right: 6px;
+    --nav-pad-x: 6px;
   }
 
   .settings-embedded-nav-title {
