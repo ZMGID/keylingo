@@ -618,6 +618,7 @@ body {
 .chat-sidebar-shell,
 .chat-main-pane,
 .chat-center-page,
+.settings-embedded,
 .chat-dock-shell {
   border-radius: 12px;
   background: var(--theme-surface-soft);
@@ -643,6 +644,12 @@ body {
 .chat-center-page {
   margin: var(--chat-card-top) 8px 8px 0;
   overflow: hidden;
+}
+
+/* 内嵌设置页同样是那张纸（原先齐边铺满，和其余中心页不是一套语言）。左缝同 .chat-center-page
+   由侧栏的 margin-right 提供；背景不跟卡片组走 —— 它自己分左导航 muted / 右主区 surface 两半。 */
+.chat-window-shell .settings-embedded {
+  margin: var(--chat-card-top) 8px 8px 0;
 }
 
 /* 用户气泡：底色得从主区卡片上「站起来」。原先写死 neutral-100 / neutral-800，是照旧底色
@@ -695,13 +702,6 @@ body {
   margin-left: -240px;
   opacity: 0;
   pointer-events: none;
-}
-
-/* 设置页齐边铺满、没有主区卡片，上面那 8px 左缝会露成一条裸 .chat-window-shell ——
-   native-effect 下它是 transparent，于是 Mica 直接透出来，读作一条无来由的竖条
-   （设计意图是卡片间的缝，这里没有卡片）。收起态没有过渡观感成本，直接抹掉。 */
-.chat-window-shell:has(.settings-embedded) .chat-sidebar-shell.is-collapsed {
-  margin-right: 0;
 }
 
 .chat-dock-shell {
@@ -5008,6 +5008,9 @@ input[type="password"]::-ms-clear {
 }
 
 .chat-window-shell .onboarding-shell.settings-embedded {
+  /* 卡片外观继承 .settings-embedded；引导页不渲染聊天侧栏（见 Chat.tsx `chatView !== 'onboarding'`），
+     那 8px 左缝没人提供，自己补。 */
+  margin-left: 8px;
   --bg: var(--theme-surface);
   --bg-sidebar: var(--theme-surface-muted);
   --bg-savebar: var(--theme-surface-soft);
