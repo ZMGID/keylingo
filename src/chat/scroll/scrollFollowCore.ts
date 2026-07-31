@@ -1,45 +1,44 @@
-// 底部钉住的滚动跟随核心（移植自参考实现 LiveAgent scrollFollowCore）。
+// 底部钉住的滚动跟随核心。
 //
-// 放弃"猜这次滚动是不是用户"的思路，改成：
-// - 只在明确的用户输入时解除跟随（滚轮上滚、触摸拖动、历史键、真实指针拖动）；
-//   裸滚动帧（程序钉底回声、virtua 重测量、DPR 取整）永不解除跟随。
-// - 靠位置驱动重新贴底：落到物理底部、或在手势 latch 内向下到达重排区，才重新跟随。
-// - 跟随中出现 gap 用"再钉一次"纠正，而不是判定为离开。
-// - ResizeObserver（contentGrowth）不改变跟随状态，只在跟随时钉底 —— 内容增长会撑开
-//   gap 但没有用户输入，若当成"滚走"会在流式刷新时撕掉刚恢复的跟随。
+// 架构对齐 Paseo web（strategy-web.tsx）+ 部分虚拟化（近底实挂载）：
+// - 只在明确用户输入时解除跟随（滚轮上滚、触摸拖动、历史键、指针拖动）。
+// - 重新跟随：仅当用户向下滚且已贴物理底（小阈值），不从 192px 外硬拽。
+// - 跟随中的内容增长 → pin；跟随中的滚动噪声 gap 不 pin（避免与列表 remeasure 互抢）。
+// - ResizeObserver（contentGrowth）不改变跟随状态，只在跟随时钉底。
 //
-// 纯函数、无 DOM 依赖：useScrollFollow 收集每次事件的事实并执行 pin 效果。
-//
-// 相比参考实现新增 "release" 事件：Kivio 的消息导航器点击跳转到上方消息时，需要主动
-// 脱离跟随，否则跟随中的纠正器会把视口又钉回底部。
+// 纯函数、无 DOM：useScrollFollow 收集事实并执行 pin。
+// "release"：消息导航器跳到上方时主动脱离，否则纠正器会钉回底部。
 
-// "在底部"的容差。分数 devicePixelRatio（Windows 125%/150% 缩放、缩放的 webview）会把
-// scrollTop 钉在 scrollHeight - clientHeight 前 1-3px，2px 阈值正好卡在边界上永远无法重贴。
-export const BOTTOM_ATTACH_THRESHOLD_PX = 8
+// "在底部"的容差。分数 devicePixelRatio 会把 scrollTop 留在 max 前 1–3px。
+export const BOTTOM_ATTACH_THRESHOLD_PX = 12
 
-// 底部预留空白带：用户自然停在"底部"时会距物理底部几十 px，手势 latch 内向下到达此区即算回到底部。
-export const BOTTOM_REATTACH_ZONE_PX = 192
+// 拖滚动条到底部附近松手 → 恢复跟随。**只用于 pointerRelease**：滚动路径已改成只认真正贴底
+// （大 reattach 区在滚动路径上会从 192px 外硬拽，是底部抽搐主因之一）。
+export const POINTER_RELEASE_ZONE_PX = 192
 
-// gap 在此 slop 内的抖动是布局噪声（虚拟列表测量补偿、DPR 取整），不算滚动方向。
+// gap 在此 slop 内的抖动是布局噪声，不算滚动方向。
 export const DIRECTION_SLOP_PX = 1
 
-// 指针按下移动超过此距离才算拖动 —— 静态点击加一次布局回声不会被读成"拖离底部"。
+// 跟随中「滚动纠正再钉底」的最小 gap。更小的是测量噪声。
+export const CORRECTION_MIN_PX = 32
+
 export const POINTER_DRAG_SLOP_PX = 4
 
-// 贴底侧手势 latch。仅由朝底部的滚轮/触摸/键输入武装，可被连续向下滚动帧延长（触屏惯性无输入事件）。
 export const GESTURE_LATCH_MS = 500
 
 export type FollowConfig = {
   attachThresholdPx: number
-  reattachZonePx: number
+  releaseZonePx: number
   directionSlopPx: number
+  correctionMinPx: number
   latchMs: number
 }
 
 export const DEFAULT_FOLLOW_CONFIG: FollowConfig = {
   attachThresholdPx: BOTTOM_ATTACH_THRESHOLD_PX,
-  reattachZonePx: BOTTOM_REATTACH_ZONE_PX,
+  releaseZonePx: POINTER_RELEASE_ZONE_PX,
   directionSlopPx: DIRECTION_SLOP_PX,
+  correctionMinPx: CORRECTION_MIN_PX,
   latchMs: GESTURE_LATCH_MS,
 }
 
@@ -165,18 +164,18 @@ export function reduceFollowEvent(
       }
 
       if (state.following) {
-        // 纠正器：跟随中任何撑开 gap 但未在上面解除的滚动，用再钉一次撤销。
-        return { state: next, pin: true }
+        // 显著 gap 才 pin；小 gap 交给 contentGrowth / 下一帧，避免与 remeasure 互抢。
+        return { state: next, pin: gap > config.correctionMinPx }
       }
 
       if (movedTowardBottom) {
         next.dragTowardBottom = true
         if (now <= state.latchUntil) {
           next.latchUntil = now + config.latchMs
-          if (!state.pointerHeld && gap <= config.reattachZonePx) {
-            next.following = true
-            return { state: next, pin: true }
-          }
+        }
+        // Paseo：仅「向下滚且已贴底」才重跟随；不 pin（由 contentGrowth / forceFollow 钉）。
+        if (!state.pointerHeld && isAtBottom(gap, config)) {
+          next.following = true
         }
       } else if (movedAway) {
         next.dragTowardBottom = false
@@ -205,7 +204,7 @@ export function reduceFollowEvent(
         pointerDragging: false,
         dragTowardBottom: null,
       }
-      const releaseZonePx = Math.max(config.reattachZonePx, config.attachThresholdPx)
+      const releaseZonePx = Math.max(config.releaseZonePx, config.attachThresholdPx)
       if (state.dragTowardBottom === true && event.gap <= releaseZonePx) {
         next.following = true
         return { state: next, pin: true }

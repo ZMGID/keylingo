@@ -23,6 +23,7 @@ import {
 import { useStreamCoarse, useStreamSnapshot } from './streamingStore'
 import { getActiveGroup, useGroupsVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
+import { splitHistoryForVirtualization, type HistorySplit } from './messageListVirtualization'
 import { prefersReducedMotion } from './utils'
 import type { Lang } from '../settings/i18n'
 
@@ -152,9 +153,7 @@ function MessageListBase({
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
   >(null)
 
-  // 底部跟随：ResizeObserver 驱动钉底 + 只在明确用户手势时解除（见 scroll/scrollFollowCore）。
-  // 流式气泡渲染在虚拟列表「之外」（正常流式 DOM，见下方），故钉底用默认 scrollTop=scrollHeight
-  // 即精确，不会因 virtua 对增长中那条消息的估算→测量校正而闪动。
+  // 底部跟随：contentGrowth 钉底 + 近底历史实挂载，避免与 virtua remeasure 互抢。
   const { handle: followHandle, following } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
@@ -371,7 +370,23 @@ function MessageListBase({
   // 只有历史项进虚拟列表。流式气泡/错误/底部留白渲染在虚拟列表之外（正常流式 DOM），
   // 这样增长中的那条消息按真实高度测量，钉底精确、不闪。
 
+  // Paseo 式部分虚拟化：长列表只虚拟化更早历史，最近一段始终实挂载。
+  // 读 isFollowing() 而不是 following state：脱离跟随时冻结边界，且不为跟随状态翻转多渲一次。
+  const lastSplitRef = useRef<HistorySplit<RenderItem> | null>(null)
+  const historySplit = useMemo(
+    () => splitHistoryForVirtualization(historyItems, {
+      frozenStart: followHandle.isFollowing()
+        ? undefined
+        : lastSplitRef.current?.mountedStartIndex,
+    }),
+    [followHandle, historyItems],
+  )
+  lastSplitRef.current = historySplit
+  const mountedStartIndexRef = useRef(0)
+  mountedStartIndexRef.current = historySplit.mountedStartIndex
+
   const navigatorNodes = useMemo(() => {
+    // targetRenderIndex 仍是「全历史逻辑下标」，导航时用 data-chat-row-index 查找。
     const renderIndexByKey = new Map(historyItems.map((item, index) => [item.key, index]))
     return buildMessageNavigatorNodes({ folded, boundaries, renderIndexByKey })
   }, [boundaries, folded, historyItems])
@@ -395,16 +410,33 @@ function MessageListBase({
   }, [])
 
   const navigateToNavigatorNode = useCallback((node: MessageNavigatorNode) => {
-    const handle = virtualizerRef.current
-    if (!handle) return
     // 跳到上方消息：先脱离跟随，否则跟随纠正器会把视口又钉回底部。
     followHandle.releaseFollow()
     updateActiveNavigatorNode(node.id)
-    handle.scrollToIndex(node.targetRenderIndex, {
-      align: 'start',
-      smooth: !prefersReducedMotion(),
-    })
-  }, [followHandle, updateActiveNavigatorNode])
+
+    const el = scrollRef.current
+    // data-chat-row-index = 全历史逻辑下标（与 navigator targetRenderIndex 一致）
+    const row = contentEl?.querySelector(
+      `[data-chat-row-index="${node.targetRenderIndex}"]`,
+    ) as HTMLElement | null
+    if (row && el) {
+      // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
+      const top = row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+      if (prefersReducedMotion()) el.scrollTop = top
+      else el.scrollTo({ top, behavior: 'smooth' })
+      return
+    }
+
+    // 仅对「上方虚拟段」走 scrollToIndex。mounted 段若 DOM 查询失败不要 clamp 到虚拟末项。
+    const mountedStart = mountedStartIndexRef.current
+    const handle = virtualizerRef.current
+    if (handle && node.targetRenderIndex >= 0 && node.targetRenderIndex < mountedStart) {
+      handle.scrollToIndex(node.targetRenderIndex, {
+        align: 'start',
+        smooth: !prefersReducedMotion(),
+      })
+    }
+  }, [contentEl, followHandle, updateActiveNavigatorNode])
 
   const handleNavigatorStep = useCallback((direction: -1 | 1) => {
     const nodes = navigatorNodesRef.current
@@ -419,34 +451,55 @@ function MessageListBase({
     followHandle.jumpToBottom()
   }, [followHandle])
 
-  // 滚动监听：只更新消息导航器的可见/激活项。跟随钉底由 useScrollFollow 独立处理，不在此判断。
-  const handleScroll = useCallback((nextOffset: number) => {
+  // 滚动监听：用 DOM 行几何更新导航器（兼容「上方虚拟 + 底部实挂载」）。
+  // 跟随钉底由 useScrollFollow 独立处理。
+  const syncNavigatorFromDom = useCallback(() => {
     const el = scrollRef.current
-    const handle = virtualizerRef.current
-    const offset = handle?.scrollOffset ?? nextOffset
-    const scrollSize = handle?.scrollSize ?? el?.scrollHeight ?? 0
-    const viewportSize = handle?.viewportSize ?? el?.clientHeight ?? 0
-
-    if (handle) {
-      const readingOffset = Math.min(
-        Math.max(0, scrollSize - 1),
-        offset + viewportSize * 0.3,
+    if (!el) return
+    const viewportTop = el.getBoundingClientRect().top
+    const viewportBottom = viewportTop + el.clientHeight
+    const readingY = viewportTop + el.clientHeight * 0.3
+    const rows = el.querySelectorAll<HTMLElement>('[data-chat-row-index]')
+    let activeIndex: number | null = null
+    let firstVisible = Number.POSITIVE_INFINITY
+    let lastVisible = -1
+    rows.forEach((row) => {
+      const index = Number(row.dataset.chatRowIndex)
+      if (!Number.isFinite(index)) return
+      const rect = row.getBoundingClientRect()
+      if (rect.bottom > viewportTop && rect.top < viewportBottom) {
+        firstVisible = Math.min(firstVisible, index)
+        lastVisible = Math.max(lastVisible, index)
+      }
+      if (rect.top <= readingY && rect.bottom >= readingY) {
+        activeIndex = index
+      }
+    })
+    if (activeIndex == null && lastVisible >= 0) activeIndex = lastVisible
+    if (activeIndex != null) {
+      updateActiveNavigatorNode(
+        activeMessageNavigatorNodeId(navigatorNodesRef.current, activeIndex),
       )
-      const renderIndex = handle.findItemIndex(readingOffset)
-      updateActiveNavigatorNode(activeMessageNavigatorNodeId(navigatorNodesRef.current, renderIndex))
-      const firstVisibleIndex = handle.findItemIndex(offset)
-      const lastVisibleOffset = Math.min(
-        Math.max(0, scrollSize - 1),
-        Math.max(offset, offset + viewportSize - 1),
-      )
-      const lastVisibleIndex = handle.findItemIndex(lastVisibleOffset)
+    }
+    if (lastVisible >= 0) {
       updateVisibleNavigatorNodes(visibleMessageNavigatorNodeIds(
         navigatorNodesRef.current,
-        firstVisibleIndex,
-        lastVisibleIndex,
+        firstVisible,
+        lastVisible,
       ))
     }
   }, [updateActiveNavigatorNode, updateVisibleNavigatorNodes])
+
+  // 每帧最多量一次：上面那趟是 querySelectorAll + 逐行 getBoundingClientRect，
+  // 不节流的话每个滚动事件都强制一次布局读取。
+  const navigatorSyncRafRef = useRef<number | null>(null)
+  const scheduleNavigatorSync = useCallback(() => {
+    if (navigatorSyncRafRef.current !== null) return
+    navigatorSyncRafRef.current = requestAnimationFrame(() => {
+      navigatorSyncRafRef.current = null
+      syncNavigatorFromDom()
+    })
+  }, [syncNavigatorFromDom])
 
   // 消息区右键：读取当前选中文本 + 命中的消息，弹内置菜单。两者都空则不弹（放行给全局屏蔽）。
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -618,13 +671,15 @@ function MessageListBase({
     ],
   )
 
-  const renderHistoryRow = useCallback((item: RenderItem) => {
+  const renderHistoryRow = useCallback((item: RenderItem, logicalIndex: number) => {
     const messageId = item.kind === 'message' ? item.message.id : undefined
     return (
       <div
+        key={item.key}
         className={item.kind === 'spacer' ? undefined : 'pb-0.5'}
         data-chat-message-list-item={item.kind}
         data-message-id={messageId}
+        data-chat-row-index={logicalIndex}
       >
         {renderItem(item)}
       </div>
@@ -645,18 +700,31 @@ function MessageListBase({
       <div
         ref={setScrollEl}
         onContextMenu={handleContextMenu}
+        onScroll={scheduleNavigatorSync}
         className="chat-motion-view-in custom-scrollbar flex-1 overflow-y-auto"
       >
         <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
-          <Virtualizer
-            ref={virtualizerRef}
-            scrollRef={scrollRef}
-            onScroll={handleScroll}
-            data={historyItems}
-          >
-            {renderHistoryRow}
-          </Virtualizer>
-          {/* 流式气泡/错误/底部留白在虚拟列表之外正常流式渲染，保证钉底不闪 */}
+          {/*
+            部分虚拟化（Paseo web）：
+            - 上方 virtualized：屏外历史，virtua 管（下标从 0 起 = 逻辑下标）
+            - 下方 mounted：近底实 DOM，高度真实，贴底不抖
+            - 再下方：流式气泡 / 错误（始终实挂载）
+            滚动监听只挂在外层容器上，virtua 不再重复回调（否则每次滚动量两遍 DOM）。
+          */}
+          {historySplit.useVirtual ? (
+            <Virtualizer
+              ref={virtualizerRef}
+              scrollRef={scrollRef}
+              data={historySplit.virtualized}
+              bufferSize={400}
+            >
+              {renderHistoryRow}
+            </Virtualizer>
+          ) : null}
+          {historySplit.mounted.map((item, i) => (
+            renderHistoryRow(item, historySplit.mountedStartIndex + i)
+          ))}
+          {/* 流式气泡/错误/底部留白在列表尾部实挂载，增长高度可精确测量 */}
           {dynamicItem && (
             <div className="pb-0.5" data-chat-message-list-item={dynamicItem.kind} data-message-id="streaming-assistant">
               {renderItem(dynamicItem)}

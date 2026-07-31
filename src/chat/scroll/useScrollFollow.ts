@@ -73,9 +73,6 @@ export type UseScrollFollowArgs = {
   enabled?: boolean
   trackKeys?: boolean
   config?: Partial<FollowConfig>
-  // 钉底覆写：默认 scrollTop = scrollHeight。虚拟列表（virtua）应传入库感知的对齐（如
-  // scrollToIndex(last, align:end)），否则裸 scrollHeight 会读到估算高度、先偏低再校正闪一下。
-  pin?: () => void
 }
 
 export function useScrollFollow(args: UseScrollFollowArgs): {
@@ -88,11 +85,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   const boundViewportRef = useRef<HTMLElement | null>(null)
   const configRef = useRef<FollowConfig>(DEFAULT_FOLLOW_CONFIG)
   configRef.current = { ...DEFAULT_FOLLOW_CONFIG, ...args.config }
-  // 每次渲染更新，不触发监听重绑。
-  const pinOverrideRef = useRef<(() => void) | undefined>(args.pin)
-  pinOverrideRef.current = args.pin
   const [following, setFollowing] = useState(true)
   const jumpRafRef = useRef<number | null>(null)
+  const pinRafRef = useRef<number | null>(null)
 
   const cancelJumpAnimation = useCallback(() => {
     if (jumpRafRef.current !== null) {
@@ -103,14 +98,20 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
 
   const pinToBottom = useCallback(() => {
     cancelJumpAnimation()
-    if (pinOverrideRef.current) {
-      pinOverrideRef.current()
-      return
-    }
     const el = boundViewportRef.current
-    if (el) {
-      el.scrollTop = el.scrollHeight
-    }
+    if (!el) return
+    // 双帧钉底：virtua 估算→实测常在下一帧才把 scrollHeight 写准；
+    // 只钉一次会先钉在偏低高度，下一帧再被纠正 → 底部弹一下。
+    el.scrollTop = el.scrollHeight
+    // 第二帧必须重新问一次「现在还在跟随吗」：流式中 contentGrowth 几乎每帧都钉，
+    // 用户在这一帧里滚轮上滚会先解除跟随、再被这个待执行的 rAF 拽回底部 —— 滚动被抢走。
+    // 同时合并同帧内的多次钉底请求。
+    if (pinRafRef.current !== null) return
+    pinRafRef.current = requestAnimationFrame(() => {
+      pinRafRef.current = null
+      const viewport = boundViewportRef.current
+      if (viewport && stateRef.current.following) viewport.scrollTop = viewport.scrollHeight
+    })
   }, [cancelJumpAnimation])
 
   const dispatch = useCallback(

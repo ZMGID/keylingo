@@ -37,9 +37,53 @@ describe('scrollFollowCore', () => {
     expect(state.following).toBe(true)
   })
 
-  it('裸滚动帧（程序钉底回声/测量抖动）永不解除跟随，而是再钉一次纠正', () => {
+  it('裸滚动帧显著 gap 再钉一次纠正，永不解除跟随', () => {
     // 跟随中出现一个撑开的 gap（非用户手势）→ 应 pin 纠正，仍保持 following。
     const { state, pin } = run([scroll(120, 100)])
+    expect(state.following).toBe(true)
+    expect(pin).toBe(true)
+  })
+
+  it('跟随中的小 gap（virtua/DPR 测量噪声）不 pin，避免底部抽搐', () => {
+    const { state, pin } = run([scroll(12, 100)])
+    expect(state.following).toBe(true)
+    expect(pin).toBe(false)
+  })
+
+  it('向下滚但未贴底时不重跟随（避免 192px 硬拽）', () => {
+    const detached = run([wheelUp({ gap: 400, now: 0 })]).state
+    const { state, pin } = run([scroll(100, 80)], {
+      ...detached,
+      latchUntil: 600,
+      following: false,
+      lastGap: 150,
+    })
+    expect(state.following).toBe(false)
+    expect(pin).toBe(false)
+  })
+
+  it('向下滚且贴底时重跟随但不 pin（由 contentGrowth 钉）', () => {
+    const detached = run([wheelUp({ gap: 400, now: 0 })]).state
+    const { state, pin } = run([scroll(4, 80)], {
+      ...detached,
+      latchUntil: 600,
+      following: false,
+      lastGap: 40,
+    })
+    // isAtBottom(4) → following；scroll 路径不 pin
+    expect(state.following).toBe(true)
+    expect(pin).toBe(false)
+  })
+
+  it('拖滚动条到底部附近松手 → 恢复跟随（release 区仍是 192，不受滚动路径收紧影响）', () => {
+    const { state, pin } = run([{ type: 'pointerRelease', gap: 50 }], {
+      ...createFollowState(),
+      following: false,
+      pointerHeld: true,
+      pointerDragging: true,
+      dragTowardBottom: true,
+      lastGap: 300,
+    })
     expect(state.following).toBe(true)
     expect(pin).toBe(true)
   })
