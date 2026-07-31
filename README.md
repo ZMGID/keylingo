@@ -172,19 +172,19 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.3
+## 新版本 —— v2.8.4
 
-- **翻译 / 截图 / Lens 支持全部模型协议** —— 这三个功能此前把请求硬编码成 OpenAI 的 `chat/completions` 格式，配置成 Gemini、Anthropic 或 OpenAI Responses 协议的供应商一用就 404。现在与聊天共用同一套模型适配层，四种协议都能用。
-- **修复 Gemini / Vertex 与 grok 拒绝工具调用** —— 内置工具 schema 中分支未标注类型的 `anyOf` 会让 Vertex 整请求驳回、grok 拒收工具定义，这些模型此前在 Kivio 里用不了工具；现已剥离并由运行时校验兜底。
-- **内置联网搜索** —— 每个会话可选「关闭 / 内置 / 第三方」三态，内置模式直接调用供应商自带搜索（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片显示在答案上方，最后一次选择记为新会话默认。
-- **外部 CLI 全面重做** —— 全部 CLI 改用原生会话机制不再重放历史（kimi 迁 ACP，pi 用 `--session-id`）；错误分类并给出可操作引导；可用性与模型探测分离加缓存，第 2 轮起前置开销从 10–25 秒降到 500 毫秒内。
-- **Gemini 原生生图** —— 聊天里可用 Gemini 原生协议出图并挂到 artifacts；OpenAI 兼容中转出图也已打通，端点路由收敛为单一解析并在猜错时自愈。
-- **LaTeX 公式显示修复** —— 模型常用的 `\[...\]` 块级与 `\(...\)` 行内分隔符此前完全渲染不出来（#19），现已支持。
-- **从本地 CLI 导入 MCP 与 Skill** —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置并导入；MCP 改为启用与开窗时预热连接，首轮工具收集加短超时兜底。
-- **独立截图标注** —— 新增箭头、矩形、马赛克标注，支持撤销后复制或保存；冻结帧双端常开；截图不再带鼠标指针。
-- **新增 ego lite 插件** —— 启用时自动从仓库下载配套的 ego-browser Skill，随上游更新。
-- **输入与界面修复** —— 所有输入框关闭 WebKit 智能输入（修自动大写与 autocorrect 插空格）；模型下拉按能力筛选（生图/视觉/embedding）；弹层与右键菜单按视口边缘自适应；对话搜索可全文匹配正文；输入框草稿跨对话保留；新增模型级 `extra_body` 透传。
-- **稳定性修复** —— HTTP 连接池加保活（修长时运行后 `error sending request`）；请求调试 token 不再恒为 0；修复会话重复加载、多模型并答流式栏冻结、`Retry-After` 巨值长时挂起、后台命令未按会话隔离、检索 rerank 分被覆盖与结果静默截断。
+- **右侧 Dock：文件树、Git 审查、真实终端** —— 聊天窗右侧新增按工作目录绑定的 IDE 侧栏。文件树支持框选多选、拖拽移动、批量删除、内联新建/重命名与就地查看编辑；Git 面板看改动与 diff；终端是真正的 PTY（forkpty / ConPTY）。工具卡片的 Write/Edit 显示 `+N -N`，展开是带行号列与词级高亮的 diff，点文件名即在右侧预览。
+- **claude CLI 改为一会话一常驻进程** —— 不再每轮重开子进程：首轮约 3.2 秒，之后每轮约 0.1 秒。换模型不再丢上下文；子会话（Task）不再把自述印进主回答、不再污染用量与压缩分母；停止改用 `interrupt` 控制请求而非杀进程。
+- **上下文用量终于是准的** —— 所有外部 CLI 都漏算了 cache token（实测 kimi 97.6%、pi 62%、opencode 13%），且各家 cache 包含关系不同（codex 已含在 input 内，claude/pi/ACP 须相加）。分母也修了：claude 裸别名实测都是 100 万上下文，旧表一律按 20 万算，压缩在真实占用 20% 就触发。用量现在实时更新。
+- **MCP 改用官方 rmcp SDK** —— 两套手写 JSON-RPC 合成一条通路，净删约 2270 行，「设置页测试连接」与「聊天里调用」不再表现不一致。顺带修好：远程 HTTP MCP 加了工具无需重启即可见；Windows 上 `npx.cmd` 这类 shim 不再找不到；装了企业 TLS 中间证书的用户从「连不上」变「能连」。
+- **工具审批改为内联卡片，claude CLI 也会来问** —— 输入框上方的内联卡片：自然语言标题、只放路径或命令的代码块、带数字快捷键的三个动作，新增本对话「总是允许」。外部 claude CLI 接进同一条审批链路。并发审批不再只留最后一张卡（此前另外两张会静默超时被拒）。
+- **对话生命周期 Hooks** —— 内置 agent 的 8 个生命周期事件可挂 Shell 脚本或 HTTP Hook，载荷走 stdin JSON + `KIVIO_*` 环境变量。fire-and-forget，不阻断工具调用；没配 Hook 时零开销。设置新增 Hooks 页。
+- **子代理角色通用化** —— 角色列表在运行时生成进 `agent` 工具描述（内置/用户/项目三层），不必再猜名字；字段照 Claude Code / Cursor 的 `.md` + frontmatter 事实标准，拷来的角色文件直接可用。支持工具通配、`disallowedTools` 继承减法与调用内临时角色。
+- **界面：悬浮卡片式侧栏与 Windows 全宽标题栏** —— 侧栏/主区/Dock 改为三张浮起的卡片，侧栏支持系统级模糊材质（Windows Mica 跟应用主题）。Windows 三键改为贯穿全宽的 44px 标题栏带，内容不再留 132px 躲它。全站下拉栏统一规格、输入区拆三层、表格与代码块重做、等宽字体补 CJK 回退、macOS 顶栏那条线统一到同一基线。
+- **图片右键菜单** —— 新增复制图片 / 图片另存为… / 查看大图（内嵌图与生成图两条路径都挂上）；大图查看器的复制与另存取原图而非缩略图。
+- **claude 模型清单剔掉 6 个退役 / 会被静默换掉的模型** —— 目录不等于可用：4 个已退役（选了只回退役警告），`opus-4-1` / `opus-4-0` 更糟——不报错，直接给你 Opus 4.8。
+- **稳定性与正确性修复** —— 退出不再留孤儿 claude 进程及其 MCP 子孙；外部 CLI 调过工具的回答不再渲染两遍；grok 的 token 用量在 `_meta` 里，此前一路读空；系统提示改走 `--append-system-prompt-file`，长会话压缩后不再静默失效；`/cost` 等客户端斜杠命令输出不再被吞；被截断的回答不再标成「完成」；探测不再堆空壳会话；流式思考不再逐帧抖动。
 
 完整历史:[GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
@@ -381,19 +381,19 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.3
+## What's New — v2.8.4
 
-- **Translator, screenshot, and Lens now speak every model protocol** — these three features used to hard-code OpenAI's `chat/completions` shape, so any provider configured for Gemini, Anthropic, or OpenAI Responses returned a 404. They now share the same model adapter layer as chat, so all four protocols work.
-- **Fixed Gemini / Vertex and grok rejecting tool calls** — a built-in tool schema carried an `anyOf` whose branches had no declared type; Vertex rejected the whole request and grok refused the tool definition, leaving those models unable to use tools. The construct is stripped, with runtime validation covering the constraint.
-- **Built-in web search** — each conversation picks off, built-in, or third-party. Built-in mode calls the provider's own hosted search (OpenAI Responses, Gemini, Anthropic) and streams it as a live card above the answer; your last pick becomes the default for new conversations.
-- **External CLIs reworked** — all CLIs use their own native session mechanism instead of replaying history (kimi moved to ACP, pi uses `--session-id`); errors are classified with actionable guidance; availability and model probing are split and cached, cutting per-turn overhead from 10–25s to under 500ms from the second turn on.
-- **Native Gemini image generation** — generate images in chat over Gemini's native protocol with results attached as artifacts; generation through OpenAI-compatible relays works too, with endpoint routing consolidated into one self-healing resolver.
-- **LaTeX rendering fix** — the `\[...\]` block and `\(...\)` inline delimiters that many models emit didn't render at all (#19); they now do.
-- **Import MCP servers and Skills from local CLIs** — the Extensions page scans your installed Claude Code / Codex / OpenCode configs and imports them; MCP servers warm up on enable and on opening the chat window, with a short timeout for the first tool listing.
-- **Standalone screenshot annotation** — arrows, rectangles, and mosaic with undo, then copy or save; frozen-frame capture is on for both platforms and screenshots no longer include the mouse cursor.
-- **New ego lite plugin** — downloads its companion ego-browser Skill from the repo on enable and tracks upstream.
-- **Input and UI fixes** — all inputs disable WebKit smart input (fixing auto-capitalization and autocorrect inserting spaces); model pickers filter by capability (image / vision / embedding); popovers and context menus adapt to the viewport edge; conversation search matches message bodies; composer drafts survive switching conversations; a new per-model `extra_body` passes custom request-body fields.
-- **Stability fixes** — the HTTP connection pool gained keep-alive (fixing `error sending request` after long runs); request-debug token counts are no longer stuck at 0; fixes for duplicate conversation loading, the streaming column freezing during multi-model answers, long hangs from an oversized `Retry-After`, background commands not being isolated per conversation, and knowledge-base retrieval losing rerank scores or silently truncating results.
+- **Right dock: file tree, Git review, real terminal** — an IDE-style dock bound to the conversation's working directory. The file tree has marquee/Ctrl/Shift multi-select, drag-to-move, batch delete, inline create/rename, and an in-place viewer/editor; the Git panel shows changes and diffs; the terminal is a real PTY (forkpty / ConPTY). Write/Edit tool cards show `+N -N` and expand into a diff with line-number gutters and word-level highlighting — click a filename to preview it in the dock.
+- **The claude CLI now keeps one process per conversation** — no more respawning every turn: ~3.2s for the first turn, ~0.1s after. Switching models no longer drops context; sub-agent (Task) sidechains no longer leak their narration into the main answer or pollute usage and the compaction denominator; stopping sends an `interrupt` control request instead of killing the process.
+- **Context usage numbers are finally correct** — every external CLI was dropping cache tokens (measured at 97.6% of the total for kimi, 62% for pi, 13% for opencode), and each CLI nests cache differently (codex has it inside input; claude/pi/ACP must add it). The denominator is fixed too: claude's bare aliases all resolve to 1M-context models, but the old table assumed 200K, so compaction fired at 20% of real usage. Usage now updates live.
+- **MCP now runs on the official rmcp SDK** — two hand-written JSON-RPC implementations collapsed into one path, ~2270 lines deleted, and "test connection" in settings no longer behaves differently from an actual tool call in chat. Side effects: remote HTTP MCP servers surface newly added tools without a restart; Windows shims like `npx.cmd` resolve correctly; users behind a corporate TLS middlebox go from "cannot connect" to "connects".
+- **Inline tool approval, and the claude CLI now asks too** — an inline card above the composer: plain-language title, a code block holding only the path or command, three number-keyed actions, plus a new per-conversation "always allow". The external claude CLI feeds the same approval chain. Concurrent approvals no longer collapse to just the last card (the others used to silently time out as denied).
+- **Conversation lifecycle hooks** — eight lifecycle events of the built-in agent can trigger shell scripts or HTTP hooks, with the payload delivered as stdin JSON plus `KIVIO_*` env vars. Fire-and-forget, never blocking a tool call, and zero cost with no hooks configured. Settings gains a Hooks page.
+- **Sub-agent roles are now user-definable** — the role list is generated into the `agent` tool's description at runtime across all three layers (built-in / user / project), so the model no longer has to guess names; fields follow the Claude Code / Cursor `.md`-plus-frontmatter standard, so copied role files work as-is. Adds tool wildcards, subtractive `disallowedTools`, and one-off roles defined inline at the call site.
+- **UI: floating-card sidebar and a full-width Windows titlebar** — sidebar, main area, and dock became three floating cards, with system blur materials on the sidebar (Windows Mica follows the app theme). On Windows the three window buttons moved to a full-width 44px titlebar, so views no longer reserve 132px to dodge them. Also: one dropdown spec across the app, a three-tier composer, reworked tables and code blocks, a CJK fallback in the monospace stack, and macOS titlebar items sharing one baseline.
+- **Image context menu** — Copy image / Save image as… / View full size on both rendering paths (markdown-embedded and generated-image gallery); the full-size viewer's copy and save operate on the original, not the thumbnail.
+- **Six retired or silently-remapped models removed from the claude picker** — catalog ≠ available: four are retired (picking one returns only a retirement warning), and `opus-4-1` / `opus-4-0` are worse — no error, you silently get Opus 4.8.
+- **Stability and correctness fixes** — quitting no longer leaves orphaned claude processes and their MCP grandchildren behind; external-CLI answers that used tools no longer render twice; grok's token usage lives under `_meta` and was read as empty all along; the system prompt moved to `--append-system-prompt-file` so it survives compaction; output from client-side slash commands like `/cost` is no longer swallowed; answers truncated at the output limit are no longer marked complete; probing no longer piles up empty shell sessions; streaming reasoning no longer janks frame by frame.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 
