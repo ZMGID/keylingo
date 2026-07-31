@@ -1305,6 +1305,9 @@ pub struct Settings {
     /// 打开 AI 客户端（chat 窗口）的全局热键。
     #[serde(default = "default_chat_hotkey")]
     pub chat_hotkey: String,
+    /// 关闭 AI 客户端（chat 窗口）的全局热键。
+    #[serde(default = "default_close_chat_hotkey")]
+    pub close_chat_hotkey: String,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_theme_color")]
@@ -1495,6 +1498,7 @@ impl Default for Settings {
         Self {
             hotkey: "CommandOrControl+Alt+T".to_string(),
             chat_hotkey: "CommandOrControl+Shift+K".to_string(),
+            close_chat_hotkey: default_close_chat_hotkey(),
             theme: "system".to_string(),
             theme_color: default_theme_color(),
             translucent_sidebar: true,
@@ -2023,6 +2027,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     // 4. 规范化快捷键字符串
     settings.hotkey = normalize_hotkey(&settings.hotkey);
     settings.chat_hotkey = normalize_hotkey(&settings.chat_hotkey);
+    settings.close_chat_hotkey = normalize_hotkey(&settings.close_chat_hotkey);
     settings.screenshot_translation.hotkey =
         normalize_hotkey(&settings.screenshot_translation.hotkey);
     settings.screenshot_translation.text_hotkey =
@@ -2643,6 +2648,10 @@ fn default_chat_hotkey() -> String {
     "CommandOrControl+Shift+K".to_string()
 }
 
+fn default_close_chat_hotkey() -> String {
+    "CommandOrControl+Shift+W".to_string()
+}
+
 fn default_screenshot_translation_hotkey() -> String {
     "CommandOrControl+Shift+A".to_string()
 }
@@ -2860,12 +2869,14 @@ mod tests {
         let mut s = Settings::default();
         s.hotkey = "cmd+alt+T".to_string();
         s.chat_hotkey = "cmd+shift+K".to_string();
+        s.close_chat_hotkey = "cmd+shift+W".to_string();
         s.screenshot_translation.hotkey = "ctrl+shift+A".to_string();
         s.screenshot_translation.text_hotkey = "cmd+shift+T".to_string();
         s.lens.hotkey = "cmd+shift+G".to_string();
         let s = sanitize_settings(s);
         assert_eq!(s.hotkey, "CommandOrControl+Alt+T");
         assert_eq!(s.chat_hotkey, "CommandOrControl+Shift+K");
+        assert_eq!(s.close_chat_hotkey, "CommandOrControl+Shift+W");
         assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+A");
         assert_eq!(
             s.screenshot_translation.text_hotkey,

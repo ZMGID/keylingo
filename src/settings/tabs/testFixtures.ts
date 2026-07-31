@@ -11,6 +11,7 @@ export function makeSettings(overrides: Partial<SettingsData> = {}): SettingsDat
   return {
     hotkey: 'CommandOrControl+Shift+K',
     chatHotkey: 'CommandOrControl+Shift+J',
+    closeChatHotkey: 'CommandOrControl+Shift+W',
     theme: 'system',
     themeColor: 'default',
     translucentSidebar: true,

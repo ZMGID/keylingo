@@ -912,10 +912,19 @@ pub fn archive_assistant(app: &AppHandle, assistant_id: &str) -> Result<(), Stri
     save_assistant_index(app, &index)
 }
 
-pub fn create_project(app: &AppHandle, mut project: ChatProject) -> Result<ChatProject, String> {
+pub fn create_project(app: &AppHandle, project: ChatProject) -> Result<ChatProject, String> {
+    create_project_with_options(app, project, false)
+}
+
+/// `ensure_root_dir`：root_path 尚不存在时，在父目录下创建该文件夹（「新建空白项目」用）。
+pub fn create_project_with_options(
+    app: &AppHandle,
+    mut project: ChatProject,
+    ensure_root_dir: bool,
+) -> Result<ChatProject, String> {
     validate_project_id(&project.id)?;
     project.name = normalize_project_name(&project.name)?;
-    project.root_path = normalize_project_root_path(project.root_path)?;
+    project.root_path = normalize_project_root_path(project.root_path, ensure_root_dir)?;
     let mut index = load_project_index(app)?;
     if index.projects.iter().any(|item| item.name == project.name) {
         return Err("项目名称已存在".to_string());
@@ -970,7 +979,7 @@ pub fn update_project(
         project_index.projects[pos].color = color;
     }
     if root_path_set {
-        project_index.projects[pos].root_path = normalize_project_root_path(root_path)?;
+        project_index.projects[pos].root_path = normalize_project_root_path(root_path, false)?;
     }
     project_index.projects[pos].updated_at = chrono::Local::now().timestamp();
     let project = project_index.projects[pos].clone();
@@ -1009,7 +1018,10 @@ fn normalize_project_name(name: &str) -> Result<String, String> {
     Ok(normalized.to_string())
 }
 
-fn normalize_project_root_path(root_path: Option<String>) -> Result<Option<String>, String> {
+fn normalize_project_root_path(
+    root_path: Option<String>,
+    ensure_dir: bool,
+) -> Result<Option<String>, String> {
     let Some(root_path) = root_path else {
         return Ok(None);
     };
@@ -1022,7 +1034,21 @@ fn normalize_project_root_path(root_path: Option<String>) -> Result<Option<Strin
     if !path.is_absolute() {
         return Err("项目文件夹必须是绝对路径。".to_string());
     }
-    if !path.is_dir() {
+    if path.is_dir() {
+        // ok
+    } else if path.exists() {
+        return Err("项目路径已存在，但不是文件夹。".to_string());
+    } else if ensure_dir {
+        // 空白项目：在已存在的父目录下创建新文件夹。
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| "无法解析项目文件夹的父目录。".to_string())?;
+        if !parent.is_dir() {
+            return Err("项目文件夹的父目录不存在。".to_string());
+        }
+        fs::create_dir(path).map_err(|err| format!("创建项目文件夹失败：{err}"))?;
+    } else {
         return Err("项目文件夹不存在或不是文件夹。".to_string());
     }
     fs::canonicalize(path)

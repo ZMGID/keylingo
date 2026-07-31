@@ -3495,6 +3495,13 @@ button.chat-composer-status-item:hover {
   color: var(--text-faint);
   margin-bottom: 4px;
 }
+/* 组标题里的操作按钮（如快捷键「恢复默认 / 检查冲突」）不受 uppercase 影响 */
+.kv-group-title .kv-btn {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  font-size: 12px;
+}
 /* 分区大标题：合并页里区隔「输入翻译 / 快速翻译」等顶层板块 */
 .kv-section-title {
   font-size: 13px;
@@ -3751,7 +3758,10 @@ input[type="password"]::-ms-clear {
   border: 1px solid var(--border-input);
   border-radius: 6px;
   padding: 3px 5px 3px 8px;
-  min-width: 130px;
+  /* 固定宽度：空态长 placeholder 与已配置键帽同宽，避免列表里一长一短 */
+  box-sizing: border-box;
+  width: 11.75rem;
+  min-width: 11.75rem;
   min-height: 30px;
   cursor: default;
   box-shadow: var(--shadow-sm);
@@ -3838,9 +3848,12 @@ input[type="password"]::-ms-clear {
   color: var(--accent);
   font-weight: 500;
 }
-/* 快捷键列表：紧凑两栏 + 行间细分隔线 */
+/* 快捷键列表：紧凑两栏 + 行间细分隔线；右侧热键框右对齐内容 */
 .kv-hotkey-list .kv-row + .kv-row {
   border-top: 1px solid var(--border-subtle);
+}
+.kv-hotkey-list .kv-hotkey {
+  justify-content: flex-end;
 }
 
 .kv-btn {

@@ -938,6 +938,8 @@ export type KnowledgeBaseConfig = {
 export type Settings = {
   hotkey: string
   chatHotkey: string
+  /** 关闭 AI 客户端（chat 窗口）的全局热键。 */
+  closeChatHotkey: string
   theme: 'system' | 'light' | 'dark'
   themeColor: string
   translucentSidebar: boolean
@@ -1542,6 +1544,7 @@ function normalizeSettings(settings: Settings): Settings {
     ...settings,
     hotkey: current.hotkey ?? 'CommandOrControl+Alt+T',
     chatHotkey: current.chatHotkey ?? 'CommandOrControl+Shift+K',
+    closeChatHotkey: current.closeChatHotkey ?? 'CommandOrControl+Shift+W',
     theme: current.theme ?? 'system',
     themeColor: normalizeThemeColorId(current.themeColor),
     translucentSidebar: current.translucentSidebar ?? true,

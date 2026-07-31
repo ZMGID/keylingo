@@ -93,6 +93,7 @@ export interface SettingsShellHandle {
 export type HotkeyScopeKey =
   | 'main'
   | 'chat'
+  | 'closeChat'
   | 'screenshotTranslation'
   | 'screenshotTranslationText'
   | 'screenshotTranslationReplace'
@@ -240,7 +241,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [confirmDeleteProviderId, setConfirmDeleteProviderId] = useState<string | null>(null)
-  const [recordingTarget, setRecordingTarget] = useState<null | 'main' | 'chat' | 'screenshotTranslation' | 'screenshotTranslationText' | 'screenshotTranslationReplace' | 'screenshotAnnotate' | 'lens'>(null)
+  const [recordingTarget, setRecordingTarget] = useState<HotkeyScopeKey | null>(null)
   const [defaultPrompts, setDefaultPrompts] = useState<DefaultPromptTemplates | null>(null)
   const [chatSystemPromptInteracted, setChatSystemPromptInteracted] = useState(false)
   const [retryAttemptsInput, setRetryAttemptsInput] = useState('')
@@ -316,6 +317,11 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       { scope: 'main', hotkey: settings.hotkey || '', enabled: !!(settings.hotkey || '').trim() },
       { scope: 'chat', hotkey: settings.chatHotkey || '', enabled: !!(settings.chatHotkey || '').trim() },
       {
+        scope: 'closeChat',
+        hotkey: settings.closeChatHotkey || '',
+        enabled: !!(settings.closeChatHotkey || '').trim(),
+      },
+      {
         scope: 'screenshotTranslation',
         hotkey: settings.screenshotTranslation?.hotkey || '',
         enabled: settings.screenshotTranslation?.enabled !== false,
@@ -353,9 +359,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     return out
   }, [settings])
 
-  const SCOPE_I18N_KEY: Record<HotkeyScopeKey, 'hotkeyScopeTranslator' | 'hotkeyScopeChat' | 'hotkeyScopeScreenshot' | 'hotkeyScopeScreenshotText' | 'hotkeyScopeScreenshotReplace' | 'annotateHotkeyLabel' | 'hotkeyScopeLens'> = {
+  const SCOPE_I18N_KEY: Record<HotkeyScopeKey, 'hotkeyScopeTranslator' | 'hotkeyScopeChat' | 'hotkeyScopeCloseChat' | 'hotkeyScopeScreenshot' | 'hotkeyScopeScreenshotText' | 'hotkeyScopeScreenshotReplace' | 'annotateHotkeyLabel' | 'hotkeyScopeLens'> = {
     main: 'hotkeyScopeTranslator',
     chat: 'hotkeyScopeChat',
+    closeChat: 'hotkeyScopeCloseChat',
     screenshotTranslation: 'hotkeyScopeScreenshot',
     screenshotTranslationText: 'hotkeyScopeScreenshotText',
     screenshotTranslationReplace: 'hotkeyScopeScreenshotReplace',
@@ -1504,7 +1511,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   /**
    * 切换快捷键录制状态
    */
-  const toggleRecording = (target: 'main' | 'chat' | 'screenshotTranslation' | 'screenshotTranslationText' | 'screenshotTranslationReplace' | 'screenshotAnnotate' | 'lens') => {
+  const toggleRecording = (target: HotkeyScopeKey) => {
     setRecordingTarget((current) => (current === target ? null : target))
   }
 
@@ -1548,6 +1555,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
         updateSettings({ hotkey })
       } else if (recordingTarget === 'chat') {
         updateSettings({ chatHotkey: hotkey })
+      } else if (recordingTarget === 'closeChat') {
+        updateSettings({ closeChatHotkey: hotkey })
       } else if (recordingTarget === 'screenshotTranslation') {
         updateScreenshotTranslation({ hotkey })
       } else if (recordingTarget === 'screenshotTranslationText') {
@@ -1936,6 +1945,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 recordingTarget={recordingTarget}
                 onToggleRecording={toggleRecording}
                 conflictMessageFor={conflictMessageFor}
+                hotkeyConflicts={hotkeyConflicts}
                 onUpdateSettings={updateSettings}
                 onUpdateScreenshotTranslation={updateScreenshotTranslation}
                 onUpdateScreenshotAnnotate={updateScreenshotAnnotate}

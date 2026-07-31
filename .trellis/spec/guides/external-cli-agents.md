@@ -12,7 +12,7 @@
    - **skill 正文永远留在 prompt 正文里**，不受 `skip_instructions` 抑制：active skill 是 **per-turn** 的选择（用户可中途换 skill），跟会话级常量一起被抑制的话，resume 轮新激活的 skill 正文根本发不出去。
 2. **禁止全局文本前缀去重**：ACP assistant/thought 输出的去重走 `AcpTextAssembler`（按消息边界维护累积游标，`on_boundary` 只置位、`push_chunk` 的 starts_with 决定是否重置）。一次性驱动 `run_acp_session` 与持久驱动 `AcpSession::run_turn` 必须共用 `acp_apply_session_update`——不要再出现两份拷贝。同理：CLI 自压的边界记录必须复用 `chat::types::CompactionBoundaryRecord`（内置压缩路径同一个类型），不要手写一份 json —— 两份形状迟早分叉。
 3. **流 parser 的 per-message 状态**：类似 `text_streamed` 的"已流式"标志必须在新消息开始（message_start / 新 message id）时复位，不能是整轮全局 bool。**per-turn 状态是另一码事，不要复用同一个字段**：`ClaudeStreamState::any_text_emitted`（本轮有没有给过用户任何正文，A4 的 `result.result` 兜底靠它）在 `result` 帧复位；`completed_result_turns` 是 per-session 计数，从不复位。只有真正的正文置位 `any_text_emitted`，系统提示（压缩中 / 权限被拒 / 任务失败）不算——否则一条「正在压缩」提示就能把 `/cost` 的报告吞掉。
-3b. **会话-CLI 绑定**：有消息的外部会话禁切 kind/external_agent_id（后端 `check_runtime_switch_allowed` 纯函数 + 前端 locked）；model/reasoning/sandbox 放行。前端任何"回写运行时"的路径（如 draft 落地）必须与后端放行条件一致——只对空会话生效，否则被校验拒绝卡死发送。
+3b. **一 agent 一对话**：有消息的会话（**含内置 Kivio 与本地 CLI**）禁切 kind/external_agent_id（后端 `check_runtime_switch_allowed` 纯函数 + 前端 RuntimePicker `locked`）；同 agent 的 model/reasoning/sandbox 放行。前端任何"回写运行时"的路径（如 draft 落地）必须与后端放行条件一致——只对空会话生效，否则被校验拒绝卡死发送。
 
 ## 会话生命周期（session/*、run.rs、errors.rs）
 

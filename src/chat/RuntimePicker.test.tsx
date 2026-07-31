@@ -199,7 +199,7 @@ describe('ExternalModelSelector', () => {
   })
 })
 
-describe('RuntimePicker（会话-CLI 绑定锁）', () => {
+describe('RuntimePicker（一 agent 一对话绑定锁）', () => {
   beforeEach(() => {
     detectAgents.mockReset()
     detectAgents.mockResolvedValue([
@@ -223,7 +223,7 @@ describe('RuntimePicker（会话-CLI 绑定锁）', () => {
     act(() => {
       fireEvent.click(screen.getAllByRole('button')[0])
     })
-    expect(screen.getByText('会话已绑定当前 CLI，新建会话可切换')).toBeInTheDocument()
+    expect(screen.getByText('会话已绑定当前 Agent，新建会话可切换')).toBeInTheDocument()
     // 模式切换按钮禁用。
     expect(screen.getByRole('tab', { name: '内置 Agent' })).toBeDisabled()
     expect(screen.getByRole('tab', { name: '本地 CLI' })).toBeDisabled()
@@ -249,7 +249,7 @@ describe('RuntimePicker（会话-CLI 绑定锁）', () => {
     act(() => {
       fireEvent.click(screen.getAllByRole('button')[0])
     })
-    expect(screen.queryByText('会话已绑定当前 CLI，新建会话可切换')).not.toBeInTheDocument()
+    expect(screen.queryByText('会话已绑定当前 Agent，新建会话可切换')).not.toBeInTheDocument()
     expect(screen.getByRole('tab', { name: '内置 Agent' })).not.toBeDisabled()
     act(() => {
       fireEvent.click(screen.getByRole('tab', { name: '内置 Agent' }))

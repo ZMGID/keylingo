@@ -474,6 +474,7 @@ enum HotkeyErrorKind {
 enum HotkeyScope {
     Translator,
     Chat,
+    CloseChat,
     Screenshot,
     ScreenshotText,
     ScreenshotReplace,
@@ -594,6 +595,31 @@ pub(crate) fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
         {
             errors.push(classify_hotkey_error(
                 HotkeyScope::Chat,
+                hotkey,
+                err.to_string(),
+            ));
+        }
+    }
+
+    if !settings.close_chat_hotkey.trim().is_empty() {
+        let hotkey = settings.close_chat_hotkey.trim().to_string();
+        let hotkey_key = hotkey.to_lowercase();
+        if !registered.insert(hotkey_key) {
+            errors.push(HotkeyError {
+                kind: HotkeyErrorKind::Duplicate,
+                scope: HotkeyScope::CloseChat,
+                hotkey: hotkey.clone(),
+                raw: None,
+            });
+        } else if let Err(err) =
+            shortcut_manager.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    close_chat_window(app);
+                }
+            })
+        {
+            errors.push(classify_hotkey_error(
+                HotkeyScope::CloseChat,
                 hotkey,
                 err.to_string(),
             ));
@@ -1063,6 +1089,13 @@ fn restore_macos_development_app_icon() {
             let _: () = msg_send![ns_app, setApplicationIconImage: image];
             let _: () = msg_send![image, release];
         }
+    }
+}
+
+/// 关闭独立 AI 客户端窗口（销毁 chat WebView，与点右上角 × 一致）。
+pub(crate) fn close_chat_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("chat") {
+        let _ = window.close();
     }
 }
 

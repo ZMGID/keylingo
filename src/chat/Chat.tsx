@@ -2562,10 +2562,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     }
 
-    // 草稿运行时只落到「尚无消息」的会话（欢迎页选好 CLI → 首次发送建会话的场景）。已有消息的
+    // 草稿运行时只落到「尚无消息」的会话（欢迎页选好 Agent → 首次发送建会话的场景）。已有消息的
     // 会话以其自身运行时为准：draft 在切换会话/重启后可能是陈旧的（如初始 BUILTIN），无条件回写
-    // 会被后端会话-CLI 绑定校验（R3 check_runtime_switch_allowed）拒绝，把正常发送直接卡死；
-    // 旧行为则是静默把外部会话重置回 draft，同样错误。空会话判定与后端放行条件一致。
+    // 会被后端「一 agent 一对话」绑定校验（check_runtime_switch_allowed）拒绝，把正常发送卡死。
+    // 空会话判定与后端放行条件一致。
     if (
       (conversation.messages?.length ?? 0) === 0
       && !agentRuntimesEqual(normalizeAgentRuntime(conversation), draftAgentRuntime)
@@ -3725,9 +3725,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             onRuntimeChange={handleRuntimeChange}
             conversationId={currentConversation?.id}
             locked={
+              // 一 agent 一对话：有消息后锁死 kind/agent（内置 Kivio 与本地 CLI 一律）。
               !!currentConversation &&
-              (currentConversation.messages?.length ?? 0) > 0 &&
-              usesExternalRuntime
+              (currentConversation.messages?.length ?? 0) > 0
             }
           />
         </div>
@@ -3967,13 +3967,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                           ? currentAssistantSnapshot.name
                           : selectedProject
                             ? `Start in “${selectedProject.name}”`
-                            : emptyHeroGreeting.text
+                            : selectedSet
+                              ? `Start in “${selectedSet.name}”`
+                              : emptyHeroGreeting.text
                       }
                     >
                       {currentAssistantSnapshot ? (
                         currentAssistantSnapshot.name
                       ) : selectedProject ? (
                         `Start in “${selectedProject.name}”`
+                      ) : selectedSet ? (
+                        `Start in “${selectedSet.name}”`
                       ) : (
                         <TypewriterText
                           key={emptyHeroGreeting.key}
@@ -4010,6 +4014,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       conversationProject={conversationProject}
                       onSelectProject={handleSidebarSelectProject}
                       showProjectEntry
+                      selectedSet={selectedSet}
+                      onSelectSet={handleSidebarSelectSet}
                       currentAssistant={currentAssistantSnapshot ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name } : null}
                       onOpenAssistantCenter={openAssistantCenter}
                       onSelectAssistant={handleSelectAssistant}
@@ -4166,6 +4172,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     conversationProject={conversationProject}
                     onSelectProject={handleSidebarSelectProject}
                     showProjectEntry
+                    selectedSet={selectedSet}
+                    onSelectSet={handleSidebarSelectSet}
                     currentAssistant={currentAssistantSnapshot ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name } : null}
                     onOpenAssistantCenter={openAssistantCenter}
                     onSelectAssistant={handleSelectAssistant}

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::attachments::{save_message_attachments, title_source_for_user_message};
 use crate::chat::storage::{
-    archive_assistant, assistant_snapshot, create_assistant, create_project, create_set,
+    archive_assistant, assistant_snapshot, create_assistant, create_set,
     delete_project, delete_set, duplicate_assistant, find_project_by_id, find_project_by_name,
     find_reusable_blank_conversation, find_set_by_id, get_assistants,
     get_conversations as get_convs, get_projects, get_sets, load_conversation, save_conversation,
@@ -711,9 +711,11 @@ pub(crate) fn chat_create_project(
     description: Option<String>,
     color: Option<String>,
     root_path: Option<String>,
+    // 为 true 时：root_path 不存在则在父目录下创建该文件夹（新建空白项目）。
+    ensure_root_dir: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let now = chrono::Local::now().timestamp();
-    let project = create_project(
+    let project = crate::chat::storage::create_project_with_options(
         &app,
         crate::chat::ChatProject {
             id: format!("proj_{}", Uuid::new_v4()),
@@ -724,6 +726,7 @@ pub(crate) fn chat_create_project(
             created_at: now,
             updated_at: now,
         },
+        ensure_root_dir.unwrap_or(false),
     )?;
 
     Ok(serde_json::json!({

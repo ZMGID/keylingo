@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -7,11 +7,11 @@ import {
   Archive,
   Check,
   ChevronDown,
-  ChevronRight,
   CircleHelp,
   Eraser,
   Folder,
   FolderPlus,
+  Layers,
   ListChecks,
   MessageSquarePlus,
   Network,
@@ -38,7 +38,7 @@ import { Button, IconButton } from '../components/Button'
 import type { Lang } from '../settings/i18n'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
-import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ModelRef, PendingAttachment, WebSearchMode } from './types'
+import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
 import {
   buildSlashCommands,
   commandMatches,
@@ -119,6 +119,11 @@ function projectPathLabel(project: ChatProject): string {
 function pathTail(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   return normalized.split('/').filter(Boolean).pop() ?? path
+}
+
+function joinPath(parent: string, name: string): string {
+  const sep = parent.includes('\\') && !parent.includes('/') ? '\\' : '/'
+  return `${parent.replace(/[\\/]+$/, '')}${sep}${name}`
 }
 
 function projectUpdatedAt(project: ChatProject): number {
@@ -365,6 +370,9 @@ interface InputBarProps {
   conversationProject?: { id: string; name: string } | null
   onSelectProject?: (project: ChatProject | null) => void | Promise<void>
   showProjectEntry?: boolean
+  /** 导航态选中的集；与项目互斥。空对话时显示 Start in / 状态条。 */
+  selectedSet?: ChatSet | null
+  onSelectSet?: (set: ChatSet | null) => void | Promise<void>
   /** 当前生效的专家(无则为空);显示在底部栏 */
   currentAssistant?: { id: string; name: string } | null
   onOpenAssistantCenter?: () => void
@@ -430,6 +438,8 @@ export function InputBar({
   conversationProject = null,
   onSelectProject,
   showProjectEntry = false,
+  selectedSet = null,
+  onSelectSet,
   currentAssistant = null,
   onOpenAssistantCenter,
   onSelectAssistant,
@@ -471,7 +481,6 @@ export function InputBar({
   const [projectOptionsError, setProjectOptionsError] = useState('')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
   const [projectCreating, setProjectCreating] = useState(false)
-  const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false)
   const [slashPanelOpen, setSlashPanelOpen] = useState(false)
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [activeSlashToken, setActiveSlashToken] = useState<ActiveSlashToken | null>(null)
@@ -507,19 +516,22 @@ export function InputBar({
   // 这样从「最近」打开一条属于项目的对话时，按钮仍能显示该项目。
   const effectiveProject: { id: string; name: string } | null =
     selectedProject ?? (conversationProject?.name ? conversationProject : null)
+  // 集：导航态选中的集（项目优先；两者在侧栏互斥）。
+  const effectiveSet: { id: string; name: string } | null =
+    effectiveProject ? null : (selectedSet ? { id: selectedSet.id, name: selectedSet.name } : null)
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
   const modeEntryEnabled = Boolean(onModeChange) && modeOptions.length > 0
-  // 状态条只放「你在哪」—— 当前项目。Git 分支/diff 归下面的工具栏（状态类信息
-  // 但用户要求贴着动作区）；知识库挂载数在来源弹层里管理，不上条。
+  // 状态条只放「你在哪」—— 当前项目或集。Git 分支/diff 归下面的工具栏。
   const gitStatusEnabled = Boolean(gitWorkdir && gitLang && onOpenGitPanel)
-  const statusBarVisible = Boolean(projectEntryEnabled && effectiveProject)
+  const statusBarVisible = Boolean(
+    (projectEntryEnabled && effectiveProject) || effectiveSet,
+  )
   const activeModeOption = modeOptions.find((option) => option.value === modeValue) ?? modeOptions[0]
   const activeModePillClass = MODE_PILL_CLASS[activeModeOption?.tone ?? 'neutral']
 
   const closeProjectMenu = useCallback(() => {
     setProjectMenuOpen(false)
-    setProjectCreateMenuOpen(false)
   }, [])
 
   const closeModeMenu = useCallback(() => {
@@ -564,7 +576,6 @@ export function InputBar({
     setModeMenuOpen(false)
     setProjectMenuOpen((open) => {
       const nextOpen = !open
-      setProjectCreateMenuOpen(false)
       if (nextOpen) {
         setProjectSearchQuery('')
         void loadProjectOptions()
@@ -585,7 +596,18 @@ export function InputBar({
     setProjectOptionsError('')
     setProjectCreating(true)
     try {
-      const project = await chatApi.createProject(nextBlankProjectName(projectOptions), null, null, null)
+      // 空白项目必须落到真实文件夹：先选父目录，再在其中 mkdir 并登记项目。
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: '选择空白项目创建位置',
+      })
+      const parentPath = Array.isArray(picked) ? picked[0] : picked
+      if (!parentPath) return
+
+      const name = nextBlankProjectName(projectOptions)
+      const rootPath = joinPath(parentPath, name)
+      const project = await chatApi.createProject(name, null, null, rootPath, { ensureRootDir: true })
       setProjectOptions((prev) => [
         project,
         ...prev.filter((item) => item.id !== project.id),
@@ -1391,6 +1413,99 @@ export function InputBar({
   const mcpStatusLine = toolsDisabledReason
     || (externalMcpTools.length > 0 ? `MCP ${externalMcpTools.length}` : '')
 
+  // 项目菜单内容：贴按钮紧凑宽度，状态条 / 工具栏入口共用同一 body。
+  const projectMenuBody = (
+    <>
+      <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-neutral-500 dark:text-neutral-400">
+        <Search size={14} strokeWidth={1.8} className="shrink-0" />
+        <input
+          value={projectSearchQuery}
+          onChange={(event) => setProjectSearchQuery(event.target.value)}
+          placeholder="搜索项目"
+          className="min-w-0 flex-1 border-0 bg-transparent text-[12px] font-semibold text-neutral-800 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
+        />
+      </div>
+
+      <div className="chat-popover-scroll mt-0.5 max-h-48 overflow-y-auto">
+        {projectOptionsLoading ? (
+          <div className="px-2 py-2.5 text-[12px] text-neutral-400 dark:text-neutral-500">
+            正在加载项目…
+          </div>
+        ) : projectOptionsError ? (
+          <div className="px-2 py-2 text-[12px] text-red-500 dark:text-red-400">
+            {projectOptionsError}
+          </div>
+        ) : visibleProjectOptions.length > 0 ? (
+          <div className="py-1">
+            {visibleProjectOptions.map((project) => {
+              const active = selectedProject?.id === project.id
+              const pathLabel = projectPathLabel(project)
+              return (
+                <button
+                  key={project.id}
+                  type="button"
+                  onClick={() => void selectProject(project)}
+                  className={`flex min-h-[34px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left transition-colors ${
+                    active
+                      ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
+                      : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                  }`}
+                >
+                  <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[12px] font-semibold">{project.name}</span>
+                    {pathLabel && (
+                      <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
+                        {pathLabel}
+                      </span>
+                    )}
+                  </span>
+                  {active && <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="px-2 py-2.5 text-[12px] leading-5 text-neutral-400 dark:text-neutral-500">
+            {projectSearchQuery.trim() ? '没有匹配的项目' : '还没有最近项目'}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-0.5 border-t border-neutral-200/80 pt-0.5 dark:border-neutral-800">
+        {selectedProject && (
+          <button
+            type="button"
+            onClick={() => void selectProject(null)}
+            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+          >
+            <Folder size={14} strokeWidth={1.75} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">退出项目工作</span>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => void createBlankProject()}
+          disabled={projectCreating}
+          className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
+        >
+          <Plus size={14} strokeWidth={1.8} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
+          <span className="min-w-0 flex-1 truncate">
+            {projectCreating ? '正在添加…' : '新建空白项目'}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => void createProjectFromFolder()}
+          disabled={projectCreating}
+          className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
+        >
+          <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
+          <span className="min-w-0 flex-1 truncate">使用现有文件夹</span>
+        </button>
+      </div>
+    </>
+  )
 
   return (
     <div className={wrapperClass}>
@@ -1510,150 +1625,54 @@ export function InputBar({
             </div>
           </div>
         )}
-        {projectMenuOpen && projectEntryEnabled && (
-          <>
-            <div
-              className="fixed inset-0 z-30"
-              onClick={closeProjectMenu}
-              aria-hidden
-            />
-            <div
-              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-visible kv-menu ${projectPanelPlacementClass}`}
-              style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
-              data-tauri-drag-region="false"
-            >
-              <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-neutral-500 dark:text-neutral-400">
-                <Search size={14} strokeWidth={1.8} className="shrink-0" />
-                <input
-                  value={projectSearchQuery}
-                  onChange={(event) => setProjectSearchQuery(event.target.value)}
-                  placeholder="搜索项目"
-                  className="min-w-0 flex-1 border-0 bg-transparent text-[12px] font-semibold text-neutral-800 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
-                />
-              </div>
-
-              <div className="chat-popover-scroll mt-0.5 max-h-48 overflow-y-auto">
-                {projectOptionsLoading ? (
-                  <div className="px-2 py-2.5 text-[12px] text-neutral-400 dark:text-neutral-500">
-                    正在加载项目…
-                  </div>
-                ) : projectOptionsError ? (
-                  <div className="px-2 py-2 text-[12px] text-red-500 dark:text-red-400">
-                    {projectOptionsError}
-                  </div>
-                ) : visibleProjectOptions.length > 0 ? (
-                  <div className="py-1">
-                    {visibleProjectOptions.map((project) => {
-                      const active = selectedProject?.id === project.id
-                      const pathLabel = projectPathLabel(project)
-                      return (
-                        <button
-                          key={project.id}
-                          type="button"
-                          onClick={() => void selectProject(project)}
-                          className={`flex min-h-[34px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left transition-colors ${
-                            active
-                              ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
-                              : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-                          }`}
-                        >
-                          <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[12px] font-semibold">{project.name}</span>
-                            {pathLabel && (
-                              <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
-                                {pathLabel}
-                              </span>
-                            )}
-                          </span>
-                          {active && <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />}
-                        </button>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-2 py-2.5 text-[12px] leading-5 text-neutral-400 dark:text-neutral-500">
-                    {projectSearchQuery.trim() ? '没有匹配的项目' : '还没有最近项目'}
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-0.5 border-t border-neutral-200/80 pt-0.5 dark:border-neutral-800">
-                {selectedProject && (
-                  <button
-                    type="button"
-                    onClick={() => void selectProject(null)}
-                    className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
-                  >
-                    <Folder size={14} strokeWidth={1.75} className="shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">退出项目工作</span>
-                  </button>
-                )}
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setProjectCreateMenuOpen((open) => !open)}
-                    disabled={projectCreating}
-                    className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold transition-colors disabled:cursor-default disabled:opacity-50 ${
-                      projectCreateMenuOpen
-                        ? 'bg-neutral-100 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
-                        : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-100 dark:hover:bg-neutral-800'
-                    }`}
-                    aria-haspopup="menu"
-                    aria-expanded={projectCreateMenuOpen}
-                  >
-                    <FolderPlus size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {projectCreating ? '正在添加…' : '添加新项目'}
-                    </span>
-                    <ChevronRight size={13} strokeWidth={1.9} className="shrink-0 text-neutral-400" />
-                  </button>
-                  {projectCreateMenuOpen && (
-                    <div
-                      className="absolute left-0 top-full z-50 mt-1 w-[152px] kv-menu sm:bottom-0 sm:left-full sm:top-auto sm:mt-0 sm:ml-1"
-                      role="menu"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => void createBlankProject()}
-                        disabled={projectCreating}
-                        className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
-                      >
-                        <Plus size={14} strokeWidth={1.8} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-                        <span className="min-w-0 flex-1 truncate">新建空白项目</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void createProjectFromFolder()}
-                        disabled={projectCreating}
-                        className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
-                      >
-                        <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-                        <span className="min-w-0 flex-1 truncate">使用现有文件夹</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-        {/* ① 状态条：「你在哪 + 改了多少」—— 左侧当前项目，右侧 diff 徽标（无改动时
-            徽标自身不渲染；项目也没有时整条由 .chat-composer-status:empty 隐藏）。 */}
+        {/* ① 状态条：「你在哪 + 改了多少」—— 左侧当前项目/集，右侧 diff 徽标。 */}
         {(statusBarVisible || gitStatusEnabled) && (
           <div className="chat-composer-status" data-tauri-drag-region="false">
             {statusBarVisible && effectiveProject && (
+              <div className="relative min-w-0">
+                <button
+                  type="button"
+                  onClick={toggleProjectMenu}
+                  disabled={disabled}
+                  className="chat-composer-status-item"
+                  title={`项目 · ${effectiveProject.name}`}
+                  aria-haspopup="menu"
+                  aria-expanded={projectMenuOpen}
+                >
+                  <Folder strokeWidth={1.75} />
+                  <span className="min-w-0 truncate">{effectiveProject.name}</span>
+                </button>
+                {projectMenuOpen && projectEntryEnabled && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-30"
+                      onClick={closeProjectMenu}
+                      aria-hidden
+                    />
+                    <div
+                      className={`chat-motion-popover absolute left-0 z-50 w-[min(260px,calc(100vw-24px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
+                      style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
+                      data-tauri-drag-region="false"
+                    >
+                      {projectMenuBody}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            {statusBarVisible && effectiveSet && (
               <button
                 type="button"
-                onClick={toggleProjectMenu}
-                disabled={disabled}
+                onClick={() => {
+                  if (disabled || !onSelectSet) return
+                  void onSelectSet(null)
+                }}
+                disabled={disabled || !onSelectSet}
                 className="chat-composer-status-item"
-                title={`项目 · ${effectiveProject.name}`}
-                aria-haspopup="menu"
-                aria-expanded={projectMenuOpen}
+                title={`集 · ${effectiveSet.name}（点击退出）`}
               >
-                <Folder strokeWidth={1.75} />
-                <span className="min-w-0 truncate">{effectiveProject.name}</span>
+                <Layers strokeWidth={1.75} />
+                <span className="min-w-0 truncate">{effectiveSet.name}</span>
               </button>
             )}
             {gitStatusEnabled && gitWorkdir && gitLang && onOpenGitPanel && (
@@ -1814,28 +1833,45 @@ export function InputBar({
                 onOpenSettings={onOpenSettings}
                 disabled={disabled}
                 layout={layout}
-                anchorRef={innerRef}
               />
             )}
             {/* 已选项目时这个入口移到状态条（那里是「当前上下文」的位置），
                 工具栏只在未选项目时保留「进入项目」这个动作。 */}
             {projectEntryEnabled && !effectiveProject && (
-              <IconButton
-                size="sm"
-                shape="circle"
-                label="进入项目工作"
-                onClick={toggleProjectMenu}
-                disabled={disabled}
-                aria-expanded={projectMenuOpen}
-                aria-haspopup="menu"
-                className={`shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 disabled:opacity-50 dark:focus-visible:ring-neutral-600 ${
-                  projectMenuOpen
-                    ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-100'
-                    : ''
-                }`}
-              >
-                <FolderPlus size={18} strokeWidth={1.75} />
-              </IconButton>
+              <div className="relative shrink-0">
+                <IconButton
+                  size="sm"
+                  shape="circle"
+                  label="进入项目工作"
+                  onClick={toggleProjectMenu}
+                  disabled={disabled}
+                  aria-expanded={projectMenuOpen}
+                  aria-haspopup="menu"
+                  className={`shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 disabled:opacity-50 dark:focus-visible:ring-neutral-600 ${
+                    projectMenuOpen
+                      ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-100'
+                      : ''
+                  }`}
+                >
+                  <FolderPlus size={18} strokeWidth={1.75} />
+                </IconButton>
+                {projectMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-30"
+                      onClick={closeProjectMenu}
+                      aria-hidden
+                    />
+                    <div
+                      className={`chat-motion-popover absolute left-0 z-50 w-[min(260px,calc(100vw-24px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
+                      style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
+                      data-tauri-drag-region="false"
+                    >
+                      {projectMenuBody}
+                    </div>
+                  </>
+                )}
+              </div>
             )}
             {showAssistantEntry && onOpenAssistantCenter && (
               <AssistantPicker
@@ -1844,7 +1880,6 @@ export function InputBar({
                 onOpenCenter={onOpenAssistantCenter}
                 disabled={disabled}
                 layout={layout}
-                anchorRef={innerRef}
               />
             )}
 
@@ -1854,7 +1889,6 @@ export function InputBar({
                   value={replyModels}
                   onChange={(models) => void onChangeReplyModels(models)}
                   placement={layout === 'inline' ? 'down' : 'up'}
-                  anchorRef={innerRef}
                 />
               </div>
             )}
@@ -1950,10 +1984,9 @@ export function InputBar({
               </div>
             )}
 
-            {/* 注入 anchorRef/placement：上下文弹层与项目/知识库/MCP 共用容器锚点与翻转方向 */}
-            {isValidElement<{ anchorRef?: RefObject<HTMLDivElement | null>; placement?: 'up' | 'down' }>(contextSlot)
+            {/* 注入 placement：上下文弹层贴按钮紧凑展开，仅翻转方向随 layout */}
+            {isValidElement<{ placement?: 'up' | 'down' }>(contextSlot)
               ? cloneElement(contextSlot, {
-                  anchorRef: innerRef,
                   placement: layout === 'inline' ? 'down' : 'up',
                 })
               : contextSlot}

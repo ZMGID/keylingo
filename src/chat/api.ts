@@ -1064,11 +1064,18 @@ export const chatApi = {
     description?: string | null,
     color?: string | null,
     rootPath?: string | null,
+    options?: { ensureRootDir?: boolean },
   ): Promise<ChatProject> {
     if (!isTauriRuntime()) return mockChatApi.createProject(name, description, color, rootPath)
     const result = await invoke<{ success: boolean; project: ChatProject }>(
       'chat_create_project',
-      { name, description, color, rootPath },
+      {
+        name,
+        description,
+        color,
+        rootPath,
+        ensureRootDir: options?.ensureRootDir ?? false,
+      },
     )
     if (!result.success) {
       throw new Error('Failed to create project')

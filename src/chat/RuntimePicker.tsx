@@ -14,7 +14,7 @@ interface RuntimePickerProps {
   agentRuntime: AgentRuntimeConfig
   onRuntimeChange: (runtime: AgentRuntimeConfig) => void
   conversationId?: string | null
-  // 会话-CLI 绑定（R3）：已产生消息的外部会话锁定运行时来源——不可换 CLI / 不可切回内置。
+  // 一 agent 一对话：已有消息的会话锁定运行时来源（内置 / 本地 CLI 均不可换）。
   // 锁定时 popover 仍可展开查看，但所有切换项 disabled 并显示提示行。
   locked?: boolean
 }
@@ -169,7 +169,7 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
           >
             {locked && (
               <div className="kv-runtime-picker__locked-hint">
-                会话已绑定当前 CLI，新建会话可切换
+                会话已绑定当前 Agent，新建会话可切换
               </div>
             )}
             <div className="kv-runtime-picker__row">

@@ -351,11 +351,12 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
     window.setTimeout(() => setCopied(false), 1600)
   }
 
-  // 无独立头栏：语言标签放在右上角复制按钮旁边，代码直接从卡片顶部开始。
+  // 无独立头栏：语言 + 复制浮在右上。长行横向滚动时会从按钮下穿过，
+  // 所以控件要有不透明底；首行用 pt 让开控件高度，避免和 "Code / 复制" 叠字。
   return (
     <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
-      <div className="absolute right-2 top-1.5 flex items-center gap-1.5">
-        <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">
+      <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2">
+        <span className="max-w-[7rem] truncate text-[12px] leading-none text-neutral-400 dark:text-neutral-500">
           {codeLanguageLabel(language)}
         </span>
         {actions}
@@ -367,7 +368,7 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
           {copied ? <Check size={15} strokeWidth={2.2} className="chat-motion-pop" /> : <Copy size={15} strokeWidth={2.2} />}
         </IconButton>
       </div>
-      <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-3 pr-28 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
+      <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-10 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
         <code className="font-mono">{highlighted}</code>
       </pre>
     </figure>
@@ -503,7 +504,7 @@ function MermaidBlock({ code }: { code: string }) {
 
   return (
     <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
-      <div className="absolute right-2 top-1.5 z-10 flex items-center gap-1.5">
+      <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2">
         <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">Mermaid</span>
         {toggle}
       </div>

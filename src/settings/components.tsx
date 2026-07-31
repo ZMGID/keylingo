@@ -448,13 +448,16 @@ export function HotkeyInput({
       <div className="flex items-center gap-2">
         <div
           className={`kv-hotkey ${inline ? '' : 'flex-1'} ${recording ? 'recording' : ''} ${error ? 'error' : ''}`}
+          title={!value && !recording ? placeholder : undefined}
         >
           {recording ? (
             <span className="kv-hotkey-record-label animate-pulse">{recordingPlaceholder}</span>
           ) : value ? (
             <HotkeyDisplay hotkey={value} />
           ) : (
-            <span className="text-[12px] text-neutral-400 dark:text-neutral-500">{placeholder}</span>
+            <span className="min-w-0 truncate text-[12px] leading-[19px] text-neutral-400 dark:text-neutral-500">
+              {placeholder}
+            </span>
           )}
           {showClear && (
             <button
