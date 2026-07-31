@@ -669,12 +669,13 @@ body {
 }
 
 /* 侧栏顶栏：只上移那俩图标（交通灯随它们对齐），卡片本身仍四周 margin:8 悬浮。
-   卡片顶在窗口 y=8；主区顶栏图标中心 26 → 侧栏图标中心须在卡片内 ≈18。
-   h-8 按钮 + padding-top 2px → 中心 2+16=18（不用主区那套 h-[52px] items-center）。 */
+   卡片顶在窗口 y=8；整条顶栏线统一在窗口 30（见 `.chat-titlebar-row` 那条注释）
+   → 侧栏图标中心须在卡片内 22。h-8 按钮 + padding-top 5px → 中心 5+16=21≈22
+   （不用主区那套 h-[52px] items-center）。padding-bottom 收 3px，行总高 40 不变。 */
 .chat-sidebar-shell > .chat-sidebar-titlebar-row {
   align-items: flex-start;
-  padding-top: 2px;
-  padding-bottom: 6px;
+  padding-top: 5px;
+  padding-bottom: 3px;
 }
 
 .chat-sidebar-shell.is-collapsed {
@@ -1150,8 +1151,9 @@ button.chat-composer-status-item:hover {
 }
 
 @container chat-main (max-width: 440px) {
+  /* 窄窗口收紧灯与图标的间距。跟上面的 92px 同源，同样不再补那多余的 8px。 */
   .chat-titlebar-row--collapsed-mac {
-    padding-left: 80px;
+    padding-left: 72px;
   }
 
   .chat-titlebar-row {
@@ -2997,14 +2999,25 @@ button.chat-composer-status-item:hover {
   }
 }
 
-/* 侧栏收起时顶栏行回到主区（主区贴窗口顶/左，没有侧栏卡片那 8px 左外边距），
-   但交通灯 x 按「卡片内」算过（windows.rs 里 x +8）。垂直灯 y=28 已与主区顶栏同心，只补左缩进。 */
+/* 垂直：整条顶栏线（灯 / 那两枚图标 / 模型 / 思考强度 / 审批）统一到窗口 y=30。
+   来源：52px 行居中原本落在 35，灯原本 26，取中 30 —— 两边各让一半。
+   这里用 padding-bottom 而非改行高：行仍占 52px（下方内容不位移），内容盒 42px 居中 → 9+21=30。
+   排除侧栏那行：它不是 52px 居中行，自己用 padding-top 走到同一个 30（见 .chat-sidebar-titlebar-row）。
+   灯的 30 在 windows.rs（inset y=32，实测 center = y − 2）；三处改一处必改另两处。 */
+.chat-titlebar-row:not(.chat-sidebar-titlebar-row) {
+  padding-bottom: 10px;
+}
+
+/* 侧栏收起时顶栏行回到主区。收起态主区卡片左缘也在 x=8（`.is-collapsed` 用 -240px 而非
+   -248px，刻意把那 8px 留成左缝），与展开态侧栏卡片的左缘同位；灯 x 也按「卡片内」算过
+   （windows.rs 里 x = 14 + 8）。所以两态用同一个 92px，收起态不再额外 +8 ——
+   多补的话图标就比展开态右移 8px（历史回归：-248 → -240 时这里没跟着减）。 */
 .chat-titlebar-row--collapsed-mac {
-  padding-left: 100px;
+  padding-left: 92px;
 }
 
 /* macOS 全屏：系统隐藏交通灯，所有为灯预留的缩进都要撤掉，否则顶栏左边空一大块。
-   `pl-[92px]` / collapsed 的 `padding-left: 100px` 都要盖掉；Tailwind 工具类靠 !important。 */
+   `pl-[92px]` 与 collapsed 的 `padding-left` 都要盖掉；Tailwind 工具类靠 !important。 */
 .chat-window-host--mac-fullscreen .chat-titlebar-row {
   padding-left: 0.75rem !important;
 }
@@ -3012,6 +3025,8 @@ button.chat-composer-status-item:hover {
 .chat-window-host--mac-fullscreen .chat-titlebar-row--collapsed-mac {
   padding-left: 0.75rem !important;
 }
+
+/* 全屏没有灯可对，缩进撤掉即可；垂直仍沿用上面那条统一的 30，行内保持一致。 */
 
 .chat-window-host--mac-fullscreen .settings-embedded--traffic-safe .settings-embedded-nav {
   padding-top: 16px;

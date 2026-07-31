@@ -50,9 +50,10 @@ const CHAT_TRAFFIC_LIGHT_X: f64 = 14.0 + CHAT_SIDEBAR_CARD_INSET;
 
 /// 交给 tao `traffic_light_inset` 的 y。tao 会在每次内容视图 `drawRect` 重新应用这个 inset
 /// （见 tao 源 view.rs::draw_rect → inset_traffic_lights），故窗口拖动/缩放/移动全程都保持对齐。
-/// close_h=14、y=28 → 灯中心=26px，对齐主区顶栏 / 侧栏上提后的那俩图标（不跟卡片顶缘走）。
+/// close_h=14、实测灯中心 = y − 2：y=32 → 中心 30，与整条顶栏线同高
+/// （侧栏图标 / 主区顶栏的模型·思考强度·审批都在 30，见 index.css `.chat-titlebar-row`）。
 #[cfg(target_os = "macos")]
-const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 28.0;
+const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 32.0;
 
 /// 隐藏 Overlay 标题栏的窗口标题文字。交通灯位置本身由 builder 的 `traffic_light_position`
 /// （= tao `traffic_light_inset`，tao 每次 drawRect 自动重新应用）负责并持久保持，这里不再手动重排。

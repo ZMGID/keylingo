@@ -15,8 +15,9 @@ export const chatTitlebarRowClass = usesNativeTitlebar
 /**
  * 窗口左缘交通灯留白（仅侧栏顶栏、收起态主顶栏；约 66px 灯区 + 间距）。
  * 侧栏顶栏在悬浮卡片内部，坐标原点已随卡片右移 8px，而灯的 x 也 +8（windows.rs），
- * 两者抵消 → 这里保持 92px。收起态主顶栏原点是窗口左缘，额外 8px 由
- * `.chat-titlebar-row--collapsed-mac` 的 padding-left 补。
+ * 两者抵消 → 这里保持 92px。收起态主顶栏在主区卡片内，而收起时主区卡片左缘同样在 x=8
+ * （`.chat-sidebar-shell.is-collapsed` 的 -240px 留出那道左缝），所以收起态也是 92px，
+ * `.chat-titlebar-row--collapsed-mac` 不再补 8px。
  * 垂直：侧栏只上移顶栏图标（见 `.chat-sidebar-shell > .chat-titlebar-row`），灯 y=28 跟随，
  * 与主区顶栏中心同在 ~26px，收起态不必再补 padding-top。
  */
