@@ -10,7 +10,13 @@ settings window materials are unchanged.
 - macOS uses `Effect.Menu` with `EffectState.FollowsWindowActiveState`.
 - macOS clears the effect when the preference is off, the window is unfocused, or the physical
   window size is at least `3840 x 2160` on both axes.
-- Windows uses `Effect.Mica`. Focus changes do not affect Mica.
+- Windows uses Mica. Focus changes do not affect Mica.
+- Windows must apply Mica through the `chat_window_apply_mica` command, not `window.setEffects()`.
+  Tauri discards the `apply_mica` result (`vibrancy/windows.rs` ignores it, `set_effects` wraps it in
+  `let _ =`), so on Windows 10 — where Mica does not exist below build 22000 — `setEffects` resolves
+  successfully and the shell would go transparent over nothing, showing the desktop through the
+  window. The command returns whether the material actually applied; only `true` may make the shell
+  transparent.
 - Windows clears the effect when the preference is off, the physical window size reaches the same
   two-axis threshold, or applying Mica fails.
 - Linux does not call the native-effects API and uses an opaque window.
@@ -56,7 +62,7 @@ Tests must cover:
 - macOS focus loss and Menu state;
 - Windows focus independence and Mica selection;
 - disabled preference and unsupported Linux fallback;
-- failed Mica application followed by `clearEffects`.
+- Mica reported as not applied (Windows 10) falling back to the opaque shell plus `clearEffects`.
 - each declared theme surface matching the HSV value calculation;
 - macOS native material using the theme RGB source at the declared alpha;
 - successful Windows Mica using a transparent sidebar while inactive/failed Mica keeps the opaque

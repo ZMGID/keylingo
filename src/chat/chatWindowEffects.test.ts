@@ -1,15 +1,16 @@
 import { Effect, EffectState } from '@tauri-apps/api/window'
 import { describe, expect, it, vi } from 'vitest'
-import { chatWindowEffectEligible, MICA_DARK, MICA_LIGHT, syncChatWindowEffect } from './chatWindowEffects'
+import { chatWindowEffectEligible, syncChatWindowEffect } from './chatWindowEffects'
 
-function effectWindow(failSet = false) {
+function effectWindow() {
   return {
-    setEffects: failSet
-      ? vi.fn().mockRejectedValue(new Error('unsupported'))
-      : vi.fn().mockResolvedValue(undefined),
+    setEffects: vi.fn().mockResolvedValue(undefined),
     clearEffects: vi.fn().mockResolvedValue(undefined),
   }
 }
+
+/** 后端 chat_window_apply_mica 的替身：Win11 上 true，Win10（没有 Mica）上 false。 */
+const mica = (applied: boolean) => vi.fn().mockResolvedValue(applied)
 
 describe('chat window native effects', () => {
   it('uses the physical resize payload with an inclusive two-axis 4K cutoff', () => {
@@ -30,23 +31,35 @@ describe('chat window native effects', () => {
     expect(window.clearEffects).toHaveBeenCalledTimes(1)
   })
 
+  it('clears the macOS effect when applying it throws', async () => {
+    const window = effectWindow()
+    window.setEffects.mockRejectedValue(new Error('unsupported'))
+    expect(await syncChatWindowEffect(window, 'macos', true, true, { width: 1280, height: 800 }, true)).toBe(false)
+    expect(window.clearEffects).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps Windows Mica while unfocused', async () => {
     const window = effectWindow()
-    expect(await syncChatWindowEffect(window, 'windows', true, false, { width: 1280, height: 800 }, true)).toBe(true)
-    expect(window.setEffects).toHaveBeenCalledWith({ effects: [MICA_DARK] })
+    const applyMica = mica(true)
+    expect(await syncChatWindowEffect(window, 'windows', true, false, { width: 1280, height: 800 }, true, applyMica)).toBe(true)
+    expect(applyMica).toHaveBeenCalledWith(true)
+    // setEffects 不能用：tauri 会吞掉 apply_mica 的失败，Win10 上也 resolve。
+    expect(window.setEffects).not.toHaveBeenCalled()
     expect(window.clearEffects).not.toHaveBeenCalled()
   })
 
   // 裸 Mica 跟系统主题：亮色系统 + 暗色应用会从卡片缝里透出白条，所以必须显式选变体。
   it('picks the Mica variant from the app theme, not the system theme', async () => {
-    const window = effectWindow()
-    await syncChatWindowEffect(window, 'windows', true, true, { width: 1280, height: 800 }, false)
-    expect(window.setEffects).toHaveBeenCalledWith({ effects: [MICA_LIGHT] })
+    const applyMica = mica(true)
+    await syncChatWindowEffect(effectWindow(), 'windows', true, true, { width: 1280, height: 800 }, false, applyMica)
+    expect(applyMica).toHaveBeenCalledWith(false)
   })
 
   it('clears effects when disabled or unsupported', async () => {
     const disabledWindow = effectWindow()
-    expect(await syncChatWindowEffect(disabledWindow, 'windows', false, true, { width: 1280, height: 800 }, true)).toBe(false)
+    const applyMica = mica(true)
+    expect(await syncChatWindowEffect(disabledWindow, 'windows', false, true, { width: 1280, height: 800 }, true, applyMica)).toBe(false)
+    expect(applyMica).not.toHaveBeenCalled()
     expect(disabledWindow.clearEffects).toHaveBeenCalledTimes(1)
 
     const linuxWindow = effectWindow()
@@ -55,9 +68,15 @@ describe('chat window native effects', () => {
     expect(linuxWindow.clearEffects).not.toHaveBeenCalled()
   })
 
-  it('clears the effect when Mica application fails', async () => {
-    const window = effectWindow(true)
-    expect(await syncChatWindowEffect(window, 'windows', true, true, { width: 1280, height: 800 }, true)).toBe(false)
+  // Win10 没有 Mica → 后端返回 false → 外壳必须回到不透明，否则透明窗口透出桌面。
+  it('falls back to the opaque shell when Mica did not apply', async () => {
+    const window = effectWindow()
+    expect(await syncChatWindowEffect(window, 'windows', true, true, { width: 1280, height: 800 }, true, mica(false))).toBe(false)
     expect(window.clearEffects).toHaveBeenCalledTimes(1)
+
+    const rejected = effectWindow()
+    const failing = vi.fn().mockRejectedValue(new Error('ipc failed'))
+    expect(await syncChatWindowEffect(rejected, 'windows', true, true, { width: 1280, height: 800 }, true, failing)).toBe(false)
+    expect(rejected.clearEffects).toHaveBeenCalledTimes(1)
   })
 })

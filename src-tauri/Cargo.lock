@@ -3257,6 +3257,7 @@ dependencies = [
  "url",
  "uuid",
  "wait-timeout",
+ "window-vibrancy",
  "windows 0.61.3",
  "xcap",
  "zip",

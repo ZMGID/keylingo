@@ -154,6 +154,25 @@ fn apply_windows_chat_window_frame(window: &WebviewWindow) {
     }
 }
 
+/// 给 chat 窗口上 Mica，返回「材质是否真的生效」。
+///
+/// 不能用 `window.set_effects()`：tauri 的 `vibrancy::apply_effects` 直接丢弃
+/// `apply_mica` 的 Result，`set_effects` 又是 `let _ =`，于是 Win10（build < 22000，
+/// 根本没有 Mica）上前端也会收到 resolve，误判「材质已生效」把外壳设成 transparent
+/// —— 透明窗口 + 没有材质 = 直接透出后面的桌面和别的窗口。
+#[tauri::command]
+pub fn chat_window_apply_mica(window: WebviewWindow, dark: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        window_vibrancy::apply_mica(&window, Some(dark)).is_ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, dark);
+        false
+    }
+}
+
 /// 翻译器 / 设置等悬浮小窗：无边框透明壳。
 pub fn apply_frameless_window_chrome(window: &WebviewWindow) {
     let _ = window.set_decorations(false);

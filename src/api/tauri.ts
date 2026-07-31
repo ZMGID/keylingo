@@ -1780,6 +1780,10 @@ export const api = {
     invoke<string>('test_himalaya_email_cmd', { account, existingAccounts }),
 
   // 窗口控制
+  /** 给当前（chat）窗口上 Mica，返回材质是否真的生效。Win10 没有 Mica 时为 false —— 这条
+   *  路走后端而不是 window.setEffects()，因为 tauri 把 apply_mica 的失败静默吞掉了。 */
+  chatWindowApplyMica: (dark: boolean): Promise<boolean> =>
+    invoke('chat_window_apply_mica', { dark }),
   resizeWindow: async (width: number, height: number) => {
     const win = getCurrentWindow()
     await win.setSize(new LogicalSize(width, height))

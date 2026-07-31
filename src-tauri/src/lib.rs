@@ -449,6 +449,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
+            windows::chat_window_apply_mica,
             fonts::list_system_fonts,
             commands::get_default_prompt_templates,
             commands::save_settings,

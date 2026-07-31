@@ -120,6 +120,9 @@ libc = "0.2"
 # Windows 平台特有依赖（屏幕截图、选中文本捕获）
 [target.'cfg(target_os = "windows")'.dependencies]
 xcap = "0.8"
+# tauri 的 set_effects 会丢掉 apply_mica 的返回值（vibrancy/windows.rs 里 `let _ =`），
+# Win10 上「没有 Mica」因此传不到前端。直接调这个 crate（已在依赖树里）才拿得到真话。
+window-vibrancy = "0.6"
 windows = { version = "0.61.3", features = [
   "Foundation",
   "Graphics_Imaging",
