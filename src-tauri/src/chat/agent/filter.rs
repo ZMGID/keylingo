@@ -327,7 +327,11 @@ mod tests {
 
     #[test]
     fn unresolved_allow_entries_lists_only_misses() {
-        let pool = vec![native("agent"), native("read_file"), mcp("notion", "search")];
+        let pool = vec![
+            native("agent"),
+            native("read_file"),
+            mcp("notion", "search"),
+        ];
         let d = def(vec!["read_file", "reed_file", "mcp__notionn__*"]);
         assert_eq!(
             unresolved_allow_entries(&pool, &d),

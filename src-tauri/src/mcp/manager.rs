@@ -816,7 +816,6 @@ async fn close_transport(transport: Option<Arc<McpService>>) {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerStatusSnapshot {
@@ -879,7 +878,10 @@ mod tests {
         // 钉在这里，rmcp 哪天改默认会让测试红。
         // 「404 重连、500 不重连」的端到端行为由下面 http_reconnect_only_on_404 /
         // http_500_does_not_reconnect 两个假服务器测试覆盖。
-        let config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri("http://localhost/mcp");
+        let config =
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                "http://localhost/mcp",
+            );
         assert!(config.reinit_on_expired_session);
     }
 
@@ -1084,8 +1086,7 @@ mod tests {
         )
         .await
         .expect("one-shot call should work");
-        let parsed =
-            result::parse_tool_result(serde_json::to_value(&raw).expect("serialize"));
+        let parsed = result::parse_tool_result(serde_json::to_value(&raw).expect("serialize"));
         assert_eq!(parsed.content, "echo: ok");
         assert!(state.mcp_sessions.lock().await.is_empty());
     }
@@ -1855,7 +1856,10 @@ while True:
     sys.stdout.flush()
 "#;
             let mut path = std::env::temp_dir();
-            path.push(format!("kivio-fake-mcp-discover-{}.py", uuid::Uuid::new_v4()));
+            path.push(format!(
+                "kivio-fake-mcp-discover-{}.py",
+                uuid::Uuid::new_v4()
+            ));
             let mut file = std::fs::File::create(&path).expect("create discover-only server");
             file.write_all(script.as_bytes())
                 .expect("write discover-only server");

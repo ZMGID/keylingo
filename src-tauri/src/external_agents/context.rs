@@ -915,9 +915,12 @@ mod tests {
     #[test]
     fn only_zero_usage_falls_back_to_the_character_estimate() {
         let mut conversation = empty_conversation();
-        conversation
-            .messages
-            .push(message("u1", "user", "/help 这是一段足够长的用户消息", None));
+        conversation.messages.push(message(
+            "u1",
+            "user",
+            "/help 这是一段足够长的用户消息",
+            None,
+        ));
         conversation.messages.push(message(
             "a1",
             "assistant",
@@ -937,7 +940,8 @@ mod tests {
     /// 旧会话（改动前落盘）的 `usage` 只有 input/output，没有 `total_tokens`。
     /// 必须退回 input+output，不能因为 total 缺失就显示 0。
     #[test]
-    fn legacy_usage_without_total_falls_back_to_input_plus_output() {        let mut conversation = empty_conversation();
+    fn legacy_usage_without_total_falls_back_to_input_plus_output() {
+        let mut conversation = empty_conversation();
         conversation.messages.push(message(
             "a1",
             "assistant",

@@ -176,9 +176,8 @@ mod tests {
 
     #[test]
     fn rmcp_call_tool_result_text_matches_wire_shape() {
-        let result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-            "summary",
-        )]);
+        let result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("summary")]);
         let parsed = parse_tool_result(serde_json::to_value(&result).expect("serialize"));
 
         assert_eq!(parsed.content, "summary");
@@ -187,9 +186,8 @@ mod tests {
 
     #[test]
     fn rmcp_call_tool_result_error_flag_survives() {
-        let result = rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
-            "boom",
-        )]);
+        let result =
+            rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("boom")]);
         let parsed = parse_tool_result(serde_json::to_value(&result).expect("serialize"));
 
         assert_eq!(parsed.content, "boom");
@@ -205,7 +203,10 @@ mod tests {
         let parsed = parse_tool_result(serde_json::to_value(&result).expect("serialize"));
 
         assert_eq!(parsed.artifacts.len(), 1, "mimeType 必须是 camelCase");
-        assert_eq!(parsed.artifacts[0].data_url, "data:image/png;base64,aGVsbG8=");
+        assert_eq!(
+            parsed.artifacts[0].data_url,
+            "data:image/png;base64,aGVsbG8="
+        );
         assert_eq!(parsed.content, "[image: image/png]");
     }
 

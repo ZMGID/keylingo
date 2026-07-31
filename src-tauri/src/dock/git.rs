@@ -249,7 +249,10 @@ fn discover_repo(workdir: &str) -> Result<Option<String>, String> {
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let output = run_git(trimmed, &["rev-parse", "--show-toplevel", "--is-inside-work-tree"])?;
+    let output = run_git(
+        trimmed,
+        &["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+    )?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -516,7 +519,8 @@ fn build_untracked_file_patch(repo_root: &str, path: &str) -> Result<Option<Stri
     if !metadata.is_file() || metadata.len() > GIT_UNTRACKED_FILE_MAX_BYTES {
         return Ok(None);
     }
-    let bytes = fs::read(&absolute_path).map_err(|e| format!("无法读取未跟踪文件 {clean_path}：{e}"))?;
+    let bytes =
+        fs::read(&absolute_path).map_err(|e| format!("无法读取未跟踪文件 {clean_path}：{e}"))?;
     if bytes.contains(&0) {
         return Ok(None);
     }
@@ -580,14 +584,22 @@ fn resolve_review_base(state: &GitRepoState) -> String {
     String::new()
 }
 
-fn git_diff_sync(workdir: &str, mode: Option<&str>, path: Option<&str>) -> Result<GitDiffResponse, String> {
+fn git_diff_sync(
+    workdir: &str,
+    mode: Option<&str>,
+    path: Option<&str>,
+) -> Result<GitDiffResponse, String> {
     let state = ensure_ready_state(workdir)?;
     let mode = mode.unwrap_or("branch").to_string();
     if mode != "branch" && mode != "working_tree" {
         return Err(format!("mode 只支持 branch/working_tree，收到：{mode}"));
     }
     let clean_path = path.map(validate_repo_relative_path).transpose()?;
-    let files: Vec<String> = state.entries.iter().map(|entry| entry.path.clone()).collect();
+    let files: Vec<String> = state
+        .entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
 
     // 仓库还没有任何提交（unborn HEAD）：diff HEAD 必然失败，退化为全部文件
     // 的新增 patch（等价于初始提交的 working_tree 视图）。
@@ -623,13 +635,19 @@ fn git_diff_sync(workdir: &str, mode: Option<&str>, path: Option<&str>) -> Resul
 
     let mut base_ref = String::new();
     let mut head_ref = "HEAD".to_string();
-    let mut args: Vec<String> = vec!["diff".to_string(), "--patch".to_string(), "--stat".to_string()];
+    let mut args: Vec<String> = vec![
+        "diff".to_string(),
+        "--patch".to_string(),
+        "--stat".to_string(),
+    ];
     if mode == "working_tree" {
         args.push("HEAD".to_string());
     } else {
         base_ref = resolve_review_base(&state);
         if base_ref.is_empty() {
-            return Err("找不到可用于审查的基线分支。请先设置 upstream 或 fetch 主分支。".to_string());
+            return Err(
+                "找不到可用于审查的基线分支。请先设置 upstream 或 fetch 主分支。".to_string(),
+            );
         }
         args.push(format!("{base_ref}...HEAD"));
     }
@@ -671,9 +689,11 @@ pub async fn dock_git_diff(
     mode: Option<String>,
     path: Option<String>,
 ) -> Result<GitDiffResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || git_diff_sync(&workdir, mode.as_deref(), path.as_deref()))
-        .await
-        .map_err(|e| format!("dock_git_diff join: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        git_diff_sync(&workdir, mode.as_deref(), path.as_deref())
+    })
+    .await
+    .map_err(|e| format!("dock_git_diff join: {e}"))?
 }
 
 fn validate_commit(repo_root: &str, value: &str) -> Result<String, String> {
@@ -683,12 +703,21 @@ fn validate_commit(repo_root: &str, value: &str) -> Result<String, String> {
     }
     git_success(
         repo_root,
-        &["rev-parse", "--verify", "--quiet", &format!("{commit}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
     )?;
     Ok(commit.to_string())
 }
 
-fn git_commit_diff_sync(workdir: &str, commit: &str, path: Option<&str>) -> Result<GitDiffResponse, String> {
+fn git_commit_diff_sync(
+    workdir: &str,
+    commit: &str,
+    path: Option<&str>,
+) -> Result<GitDiffResponse, String> {
     let state = ensure_ready_state(workdir)?;
     let commit = validate_commit(&state.repo_root, commit)?;
     let clean_path = path.map(validate_repo_relative_path).transpose()?;
@@ -749,9 +778,11 @@ pub async fn dock_git_commit_diff(
     commit: String,
     path: Option<String>,
 ) -> Result<GitDiffResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || git_commit_diff_sync(&workdir, &commit, path.as_deref()))
-        .await
-        .map_err(|e| format!("dock_git_commit_diff join: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        git_commit_diff_sync(&workdir, &commit, path.as_deref())
+    })
+    .await
+    .map_err(|e| format!("dock_git_commit_diff join: {e}"))?
 }
 
 // ---- log ----
@@ -798,7 +829,11 @@ fn parse_git_log(raw: &str) -> Vec<GitCommitItem> {
         .collect()
 }
 
-fn git_log_sync(workdir: &str, limit: Option<usize>, skip: Option<usize>) -> Result<GitLogResponse, String> {
+fn git_log_sync(
+    workdir: &str,
+    limit: Option<usize>,
+    skip: Option<usize>,
+) -> Result<GitLogResponse, String> {
     let state = ensure_ready_state(workdir)?;
     if !ref_exists(&state.repo_root, "HEAD") {
         return Ok(GitLogResponse {
@@ -806,7 +841,9 @@ fn git_log_sync(workdir: &str, limit: Option<usize>, skip: Option<usize>) -> Res
             has_more: false,
         });
     }
-    let limit = limit.unwrap_or(GIT_LOG_DEFAULT_LIMIT).clamp(1, GIT_LOG_MAX_LIMIT);
+    let limit = limit
+        .unwrap_or(GIT_LOG_DEFAULT_LIMIT)
+        .clamp(1, GIT_LOG_MAX_LIMIT);
     let skip = skip.unwrap_or(0);
     // 多取一条判断 hasMore，避免再来一次 rev-list 计数。
     let mut args = vec![
@@ -980,7 +1017,10 @@ fn git_unstage_sync(workdir: &str, path: String) -> Result<GitOperationResponse,
     let result = if staged_without_head {
         git_success(&state.repo_root, &["rm", "--cached", "--", path.as_str()])
     } else {
-        git_success(&state.repo_root, &["restore", "--staged", "--", path.as_str()])
+        git_success(
+            &state.repo_root,
+            &["restore", "--staged", "--", path.as_str()],
+        )
     };
     operation_response(workdir, result, "文件已取消暂存。")
 }
@@ -1060,23 +1100,29 @@ fn git_discard_all_sync(workdir: &str) -> Result<GitOperationResponse, String> {
             })
         };
         remove_result.and_then(|remove_output| {
-            git_success(&state.repo_root, &["clean", "-fd", "--", "."]).map(|clean_output| GitOutput {
-                stdout: [remove_output.stdout, clean_output.stdout]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                stderr: [remove_output.stderr, clean_output.stderr]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+            git_success(&state.repo_root, &["clean", "-fd", "--", "."]).map(|clean_output| {
+                GitOutput {
+                    stdout: [remove_output.stdout, clean_output.stdout]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    stderr: [remove_output.stderr, clean_output.stderr]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }
             })
         })
     } else {
-        git_success(&state.repo_root, &["restore", "--staged", "--worktree", "--", "."])
-            .and_then(|restore_output| {
-                git_success(&state.repo_root, &["clean", "-fd", "--", "."]).map(|clean_output| GitOutput {
+        git_success(
+            &state.repo_root,
+            &["restore", "--staged", "--worktree", "--", "."],
+        )
+        .and_then(|restore_output| {
+            git_success(&state.repo_root, &["clean", "-fd", "--", "."]).map(|clean_output| {
+                GitOutput {
                     stdout: [restore_output.stdout, clean_output.stdout]
                         .into_iter()
                         .filter(|s| !s.is_empty())
@@ -1087,8 +1133,9 @@ fn git_discard_all_sync(workdir: &str) -> Result<GitOperationResponse, String> {
                         .filter(|s| !s.is_empty())
                         .collect::<Vec<_>>()
                         .join("\n"),
-                })
+                }
             })
+        })
     };
     operation_response(workdir, result, "所有改动已放弃。")
 }
@@ -1142,8 +1189,11 @@ fn git_create_branch_sync(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            git_success(&state.repo_root, &["rev-parse", "--verify", "--quiet", value])
-                .map(|_| value.to_string())
+            git_success(
+                &state.repo_root,
+                &["rev-parse", "--verify", "--quiet", value],
+            )
+            .map(|_| value.to_string())
         })
         .transpose()?;
     let mut args = vec!["switch", "-c", branch.as_str()];
@@ -1162,8 +1212,8 @@ dock_git_mutation!(dock_git_create_branch, git_create_branch_sync, (branch: Stri
 fn git_init_sync(workdir: &str, branch: Option<String>) -> Result<GitOperationResponse, String> {
     // init 是唯一不要求「已是仓库」的操作：目标目录本身必须存在（与 fs 命令同一约定）。
     // git init 幂等（已是仓库时输出 Reinitialized），无需前置检查。
-    let root = std::fs::canonicalize(workdir)
-        .map_err(|e| format!("工作目录不存在或不可访问：{e}"))?;
+    let root =
+        std::fs::canonicalize(workdir).map_err(|e| format!("工作目录不存在或不可访问：{e}"))?;
     if !root.is_dir() {
         return Err("工作目录不是目录。".to_string());
     }
@@ -1235,8 +1285,7 @@ fn git_diff_stat_sync(workdir: &str) -> Result<GitDiffStatResponse, String> {
     let mut deletions = 0usize;
     for line in output.stdout.lines() {
         let mut cols = line.split('\t');
-        let (Some(adds), Some(dels), Some(path)) = (cols.next(), cols.next(), cols.next())
-        else {
+        let (Some(adds), Some(dels), Some(path)) = (cols.next(), cols.next(), cols.next()) else {
             continue;
         };
         // 二进制行是 "-\t-"，numstat 不计入行数但算一个改动文件。
@@ -1345,7 +1394,8 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kivio-dock-git-{tag}-{}-{id}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kivio-dock-git-{tag}-{}-{id}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp dir");
         fs::canonicalize(&dir).expect("canonicalize temp dir")
     }
@@ -1363,7 +1413,9 @@ mod tests {
         raw.extend_from_slice(b"1 .D N... 100644 000000 000000 abc 000 deleted.txt\0");
         raw.extend_from_slice(b"2 R. N... 100644 100644 100644 abc def R100 new-name.txt\0");
         raw.extend_from_slice(b"old-name.txt\0");
-        raw.extend_from_slice(b"u UU N... 100644 100644 100644 100644 abc def ghi conflicted.txt\0");
+        raw.extend_from_slice(
+            b"u UU N... 100644 100644 100644 100644 abc def ghi conflicted.txt\0",
+        );
         raw.extend_from_slice(b"? fresh.txt\0");
 
         let (head, upstream, ahead, behind, stash, entries) = parse_status_porcelain_v2(&raw);
@@ -1373,7 +1425,12 @@ mod tests {
         assert_eq!(stash, 3);
         assert_eq!(entries.len(), 6);
 
-        let by_path = |p: &str| entries.iter().find(|e| e.path == p).unwrap_or_else(|| panic!("missing {p}"));
+        let by_path = |p: &str| {
+            entries
+                .iter()
+                .find(|e| e.path == p)
+                .unwrap_or_else(|| panic!("missing {p}"))
+        };
         let modified = by_path("modified.txt");
         assert_eq!(modified.kind, "modified");
         assert!(!modified.staged && !modified.conflicted && !modified.untracked);
@@ -1414,7 +1471,11 @@ mod tests {
         assert_eq!(commits[0].author_date, "2026-07-27T10:00:00+08:00");
         assert_eq!(
             commits[0].refs,
-            vec!["HEAD -> main".to_string(), "v1.0".to_string(), "origin/main".to_string()]
+            vec![
+                "HEAD -> main".to_string(),
+                "v1.0".to_string(),
+                "origin/main".to_string()
+            ]
         );
         assert!(commits[1].refs.is_empty());
     }
@@ -1514,9 +1575,17 @@ mod tests {
         assert_eq!(dirty.additions, 3);
         assert_eq!(dirty.deletions, 1);
         // 逐文件明细：a.txt +1 −1，b.txt +2 −0。
-        let a = dirty.files.iter().find(|f| f.path == "a.txt").expect("a.txt stat");
+        let a = dirty
+            .files
+            .iter()
+            .find(|f| f.path == "a.txt")
+            .expect("a.txt stat");
         assert_eq!((a.additions, a.deletions), (1, 1));
-        let b = dirty.files.iter().find(|f| f.path == "b.txt").expect("b.txt stat");
+        let b = dirty
+            .files
+            .iter()
+            .find(|f| f.path == "b.txt")
+            .expect("b.txt stat");
         assert_eq!((b.additions, b.deletions), (2, 0));
         fs::remove_dir_all(&dir).ok();
     }

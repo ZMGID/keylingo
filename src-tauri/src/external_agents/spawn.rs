@@ -700,9 +700,17 @@ mod probe_tests {
     async fn probe_rejects_broken_shims() {
         let f = Fixtures::new("broken");
         // EACCES：丢了执行权限
-        assert!(!probe_executable(&f.unreadable("noexec"), &["--version"]).await.0);
+        assert!(
+            !probe_executable(&f.unreadable("noexec"), &["--version"])
+                .await
+                .0
+        );
         // ENOENT：路径根本不存在（等价于断掉的 symlink）
-        assert!(!probe_executable(&f.0.join("missing"), &["--version"]).await.0);
+        assert!(
+            !probe_executable(&f.0.join("missing"), &["--version"])
+                .await
+                .0
+        );
     }
 
     /// 挂了执行位的**空文件**在 unix 上是能跑的：内核回退到 `/bin/sh`，
@@ -715,7 +723,11 @@ mod probe_tests {
     #[tokio::test]
     async fn probe_accepts_empty_executable_because_the_kernel_runs_it() {
         let f = Fixtures::new("emptyexec");
-        assert!(probe_executable(&f.empty_exec("empty"), &["--version"]).await.0);
+        assert!(
+            probe_executable(&f.empty_exec("empty"), &["--version"])
+                .await
+                .0
+        );
     }
 
     #[tokio::test]

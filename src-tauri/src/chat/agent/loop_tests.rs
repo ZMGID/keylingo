@@ -2151,7 +2151,9 @@ async fn run_loop_reports_live_context_usage_each_round() {
         "多轮的 run 必须在过程中多次上报占用（修复前一次都没有）：{ticks:?}"
     );
     assert!(
-        ticks.iter().all(|(used, window)| *used > 0 && *window == Some(200_000)),
+        ticks
+            .iter()
+            .all(|(used, window)| *used > 0 && *window == Some(200_000)),
         "分子必须非零、分母必须是模型窗口：{ticks:?}"
     );
     // 单调不减：工具结果进入历史后占用只会涨（压缩才会降，本例不触发）。

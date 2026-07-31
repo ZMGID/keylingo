@@ -162,7 +162,8 @@ pub(crate) async fn run_chat_probe(
         .cloned();
 
     gen_result.map_err(&fail)?;
-    let message = assistant.ok_or_else(|| fail("probe: no assistant message produced".to_string()))?;
+    let message =
+        assistant.ok_or_else(|| fail("probe: no assistant message produced".to_string()))?;
 
     let context_state = if req.compute_context_stats {
         compute_context_state_for_probe(app, &conversation.id).await
@@ -212,17 +213,14 @@ async fn compute_context_state_for_probe(
     conversation_id: &str,
 ) -> Option<ConversationContextState> {
     let state = app.state::<AppState>();
-    let value = super::context::chat_get_context_stats(
-        app.clone(),
-        state,
-        conversation_id.to_string(),
-    )
-    .await
-    .map_err(|err| {
-        eprintln!("[chat-probe] computeContextStats failed: {err}");
-        err
-    })
-    .ok()?;
+    let value =
+        super::context::chat_get_context_stats(app.clone(), state, conversation_id.to_string())
+            .await
+            .map_err(|err| {
+                eprintln!("[chat-probe] computeContextStats failed: {err}");
+                err
+            })
+            .ok()?;
     serde_json::from_value(value.get("contextState")?.clone()).ok()
 }
 
@@ -361,7 +359,11 @@ fn new_probe_conversation(
 mod tests {
     use super::*;
 
-    fn req_with(model: Option<&str>, reasoning: Option<&str>, sandbox: Option<&str>) -> ProbeRequest {
+    fn req_with(
+        model: Option<&str>,
+        reasoning: Option<&str>,
+        sandbox: Option<&str>,
+    ) -> ProbeRequest {
         ProbeRequest {
             external_model: model.map(str::to_string),
             external_reasoning: reasoning.map(str::to_string),

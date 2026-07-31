@@ -304,10 +304,19 @@ mod tests {
         // 重挂之后新会话受保护；旧 guard 在赋值时落地，旧会话回到可回收。
         let new_guard = TurnBusyGuard::new(new_session.busy.clone());
         drop(old_guard);
-        assert!(old_session.is_idle(Duration::from_secs(0)), "旧 guard 落地即清");
-        assert!(!new_session.is_idle(Duration::from_secs(0)), "新会话现在在飞");
+        assert!(
+            old_session.is_idle(Duration::from_secs(0)),
+            "旧 guard 落地即清"
+        );
+        assert!(
+            !new_session.is_idle(Duration::from_secs(0)),
+            "新会话现在在飞"
+        );
         drop(new_guard);
-        assert!(new_session.is_idle(Duration::from_secs(0)), "guard 落地即清");
+        assert!(
+            new_session.is_idle(Duration::from_secs(0)),
+            "guard 落地即清"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::attachments::{save_message_attachments, title_source_for_user_message};
 use crate::chat::storage::{
-    archive_assistant, assistant_snapshot, create_assistant, create_set,
-    delete_project, delete_set, duplicate_assistant, find_project_by_id, find_project_by_name,
+    archive_assistant, assistant_snapshot, create_assistant, create_set, delete_project,
+    delete_set, duplicate_assistant, find_project_by_id, find_project_by_name,
     find_reusable_blank_conversation, find_set_by_id, get_assistants,
     get_conversations as get_convs, get_projects, get_sets, load_conversation, save_conversation,
     update_assistant, update_project, update_set,

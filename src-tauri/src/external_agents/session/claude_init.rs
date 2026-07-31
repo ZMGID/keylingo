@@ -874,12 +874,12 @@ mod tests {
     #[test]
     fn retired_and_silently_remapped_models_are_not_offered() {
         const DEAD: &[&str] = &[
-            "claude-3-5-sonnet",  // retired 2025-10-28
-            "claude-3-7-sonnet",  // retired 2026-02-19
-            "claude-3-5-haiku",   // retired 2026-02-19
-            "claude-sonnet-4-0",  // retired 2026-06-15（实测 CLI 原话）
-            "claude-opus-4-1",    // 静默重映射到 Opus 4.8；2026-08-05 退役
-            "claude-opus-4-0",    // 静默重映射到 Opus 4.8
+            "claude-3-5-sonnet", // retired 2025-10-28
+            "claude-3-7-sonnet", // retired 2026-02-19
+            "claude-3-5-haiku",  // retired 2026-02-19
+            "claude-sonnet-4-0", // retired 2026-06-15（实测 CLI 原话）
+            "claude-opus-4-1",   // 静默重映射到 Opus 4.8；2026-08-05 退役
+            "claude-opus-4-0",   // 静默重映射到 Opus 4.8
         ];
         for dead in DEAD {
             assert!(
@@ -1052,7 +1052,9 @@ mod live_probe_hygiene_tests {
 
         // 对照组：不带 --no-session-persistence。
         if !probe_once(&bin, &cwd, false).await {
-            eprintln!("skip: 探测没能拿到 system/init（未登录 / 网络问题？先手动跑一次 `claude -p hi`）");
+            eprintln!(
+                "skip: 探测没能拿到 system/init（未登录 / 网络问题？先手动跑一次 `claude -p hi`）"
+            );
             let _ = std::fs::remove_dir_all(&cwd);
             return;
         }
@@ -1121,7 +1123,8 @@ mod live_probe_hygiene_tests {
         let mut ok = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
         while tokio::time::Instant::now() < deadline {
-            let line = match tokio::time::timeout(Duration::from_secs(5), reader.next_line()).await {
+            let line = match tokio::time::timeout(Duration::from_secs(5), reader.next_line()).await
+            {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) | Ok(Err(_)) => break,
                 Err(_) => continue,
@@ -1131,9 +1134,8 @@ mod live_probe_hygiene_tests {
             };
             match value.get("type").and_then(|v| v.as_str()) {
                 Some("assistant") => {
-                    if let Some(blocks) = value
-                        .pointer("/message/content")
-                        .and_then(|v| v.as_array())
+                    if let Some(blocks) =
+                        value.pointer("/message/content").and_then(|v| v.as_array())
                     {
                         thinking += blocks
                             .iter()
@@ -1144,7 +1146,10 @@ mod live_probe_hygiene_tests {
                 Some("result") => {
                     ok = value.get("is_error").and_then(|v| v.as_bool()) != Some(true);
                     if !ok {
-                        eprintln!("  result 报错：{}", value.get("result").unwrap_or(&Value::Null));
+                        eprintln!(
+                            "  result 报错：{}",
+                            value.get("result").unwrap_or(&Value::Null)
+                        );
                     }
                     break;
                 }

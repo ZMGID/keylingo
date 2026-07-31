@@ -68,7 +68,9 @@ impl WorkspaceWatchService {
         inner.desired = desired.clone();
         // drop handle 即停 watcher：native watcher 断开聚合线程 channel，
         // 轮询兜底线程观察到 stop 标志退出。
-        inner.watchers.retain(|workdir, _| desired.contains(workdir));
+        inner
+            .watchers
+            .retain(|workdir, _| desired.contains(workdir));
         for workdir in &desired {
             if !inner.watchers.contains_key(workdir) {
                 let handle = spawn_workdir_watcher(workdir.clone(), Arc::downgrade(self));
@@ -179,7 +181,10 @@ fn push_root(watch_roots: &mut Vec<PathBuf>, class_roots: &mut Vec<PathBuf>, roo
         }
     }
     // 已被其他 root 覆盖（嵌套）时不重复挂监听。
-    if watch_roots.iter().any(|existing| root.starts_with(existing)) {
+    if watch_roots
+        .iter()
+        .any(|existing| root.starts_with(existing))
+    {
         return;
     }
     watch_roots.retain(|existing| !existing.starts_with(&root));
@@ -256,7 +261,9 @@ fn spawn_workdir_watcher(workdir: String, service: Weak<WorkspaceWatchService>) 
             }
         }
         Err(error) => {
-            eprintln!("workspace watcher for {workdir} failed ({error}); falling back to 2s sampling");
+            eprintln!(
+                "workspace watcher for {workdir} failed ({error}); falling back to 2s sampling"
+            );
             let poll_stop = Arc::clone(&stop);
             let git_dir = meta.git_dir;
             let spawned = thread::Builder::new()
@@ -297,7 +304,13 @@ impl ActivityBatch {
     }
 
     /// 分类规则：`.git/` 下或外部 gitdir 下的变更置 git；其余置 fs。
-    fn absorb(&mut self, workdir: &Path, canonical_workdir: Option<&Path>, class_roots: &[PathBuf], event: notify::Result<Event>) {
+    fn absorb(
+        &mut self,
+        workdir: &Path,
+        canonical_workdir: Option<&Path>,
+        class_roots: &[PathBuf],
+        event: notify::Result<Event>,
+    ) {
         let event = match event {
             Ok(event) => event,
             Err(_) => {
@@ -364,7 +377,12 @@ fn run_aggregator(
             Err(_) => return,
         };
         let mut batch = ActivityBatch::default();
-        batch.absorb(&workdir_path, canonical.as_deref(), &meta.class_roots, first);
+        batch.absorb(
+            &workdir_path,
+            canonical.as_deref(),
+            &meta.class_roots,
+            first,
+        );
         let window_end = Instant::now() + DEBOUNCE_WINDOW;
         let mut disconnected = false;
         loop {
@@ -373,7 +391,12 @@ fn run_aggregator(
                 break;
             }
             match rx.recv_timeout(window_end - now) {
-                Ok(event) => batch.absorb(&workdir_path, canonical.as_deref(), &meta.class_roots, event),
+                Ok(event) => batch.absorb(
+                    &workdir_path,
+                    canonical.as_deref(),
+                    &meta.class_roots,
+                    event,
+                ),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
                     disconnected = true;
@@ -450,7 +473,8 @@ fn run_poll_fallback(
             continue;
         }
         let fs_changed = current.workdir_mtime != last.workdir_mtime;
-        let git_changed = current.head_mtime != last.head_mtime || current.index_mtime != last.index_mtime;
+        let git_changed =
+            current.head_mtime != last.head_mtime || current.index_mtime != last.index_mtime;
         let mut changed_paths = Vec::new();
         if current.head_mtime != last.head_mtime {
             changed_paths.push(".git/HEAD".to_string());
@@ -459,7 +483,13 @@ fn run_poll_fallback(
             changed_paths.push(".git/index".to_string());
         }
         // 采样无法枚举工作区路径：workdir 变更时置 truncated。
-        service.emit_activity(&workdir, fs_changed, git_changed || fs_changed, changed_paths, fs_changed);
+        service.emit_activity(
+            &workdir,
+            fs_changed,
+            git_changed || fs_changed,
+            changed_paths,
+            fs_changed,
+        );
         last = current;
     }
 }
@@ -473,7 +503,10 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kivio-dock-watch-{tag}-{}-{id}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "kivio-dock-watch-{tag}-{}-{id}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::canonicalize(&dir).expect("canonicalize temp dir")
     }
@@ -517,7 +550,11 @@ mod tests {
         std::fs::create_dir_all(&git_dir).expect("create gitdir");
         let workdir = dir.join("feat-worktree");
         std::fs::create_dir_all(&workdir).expect("create workdir");
-        std::fs::write(workdir.join(".git"), format!("gitdir: {}\n", git_dir.display())).expect("write .git");
+        std::fs::write(
+            workdir.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .expect("write .git");
         std::fs::write(git_dir.join("commondir"), "../..\n").expect("write commondir");
 
         let meta = resolve_git_meta(&workdir);
@@ -527,8 +564,16 @@ mod tests {
         // gitdir 嵌套在 commondir 内：一个监听 root 覆盖两者。
         assert_eq!(meta.watch_roots, vec![canonical_common.clone()]);
         // 分类前缀长的（gitdir）在前。
-        let gitdir_pos = meta.class_roots.iter().position(|r| *r == canonical_git_dir).expect("gitdir in class roots");
-        let common_pos = meta.class_roots.iter().position(|r| *r == canonical_common).expect("commondir in class roots");
+        let gitdir_pos = meta
+            .class_roots
+            .iter()
+            .position(|r| *r == canonical_git_dir)
+            .expect("gitdir in class roots");
+        let common_pos = meta
+            .class_roots
+            .iter()
+            .position(|r| *r == canonical_common)
+            .expect("commondir in class roots");
         assert!(gitdir_pos < common_pos);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -551,7 +596,12 @@ mod tests {
         assert!(batch.fs && !batch.git);
         batch.absorb(&workdir, None, &class_roots, mk(&["/repo/.git/HEAD"]));
         assert!(batch.git);
-        batch.absorb(&workdir, None, &class_roots, mk(&["/external/gitdir/index"]));
+        batch.absorb(
+            &workdir,
+            None,
+            &class_roots,
+            mk(&["/external/gitdir/index"]),
+        );
         assert!(batch.git);
         assert!(batch
             .changed

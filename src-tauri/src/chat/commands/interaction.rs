@@ -641,7 +641,10 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> ToolAppro
     match record.name.to_ascii_lowercase().as_str() {
         "bash" | "run_command" => {
             if let Some(command) = field(&["command"]) {
-                target = Some(truncate_chars(command.lines().next().unwrap_or(&command), 120));
+                target = Some(truncate_chars(
+                    command.lines().next().unwrap_or(&command),
+                    120,
+                ));
                 lines.push(command);
             }
             if let Some(cwd) = field(&["cwd", "working_directory"]) {

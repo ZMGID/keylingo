@@ -1730,7 +1730,10 @@ mod tests {
             ]
         });
         let (options, current) = extract_acp_reasoning(&result);
-        assert!(options.is_empty(), "On-only 不应成为 effort 档位: {options:?}");
+        assert!(
+            options.is_empty(),
+            "On-only 不应成为 effort 档位: {options:?}"
+        );
         assert!(current.is_none(), "On 当前值也不该回填: {current:?}");
     }
 
@@ -2759,7 +2762,17 @@ mod tests {
         };
         let cwd = std::env::temp_dir();
         // 走生产用的常驻 actor（此前驱动的是只被真机测试吊着命的一次性 `run_acp_session`）。
-        let session = match AcpSession::connect(&bin, &["acp".to_string()], &cwd, None, None, &[], None).await {
+        let session = match AcpSession::connect(
+            &bin,
+            &["acp".to_string()],
+            &cwd,
+            None,
+            None,
+            &[],
+            None,
+        )
+        .await
+        {
             Ok(session) => session,
             Err(err) => {
                 eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");

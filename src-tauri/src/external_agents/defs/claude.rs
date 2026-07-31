@@ -92,7 +92,8 @@ pub fn build_claude_args(
     ctx: &RuntimeContext,
     options: &RuntimeBuildOptions,
     _prompt: Option<&str>,
-) -> Vec<String> {    let mut args = vec![
+) -> Vec<String> {
+    let mut args = vec![
         "-p".to_string(),
         "--input-format".to_string(),
         "stream-json".to_string(),
@@ -516,11 +517,16 @@ mod tests {
         let args = append_system_prompt_file_args(std::path::Path::new(
             r"C:\Users\a b\AppData\Local\Temp\kivio-extsys-c1.md",
         ));
-        assert_eq!(args[1], r"C:\Users\a b\AppData\Local\Temp\kivio-extsys-c1.md");
+        assert_eq!(
+            args[1],
+            r"C:\Users\a b\AppData\Local\Temp\kivio-extsys-c1.md"
+        );
     }
 
     #[test]
-    fn claude_build_args_permission_mode_from_sandbox() {        let mk = |sandbox: Option<&str>| {            build_claude_args(
+    fn claude_build_args_permission_mode_from_sandbox() {
+        let mk = |sandbox: Option<&str>| {
+            build_claude_args(
                 &RuntimeContext {
                     extra_allowed_dirs: vec![],
                     resume_session_id: None,
@@ -594,7 +600,12 @@ mod tests {
         assert!(asking
             .windows(2)
             .any(|w| w == ["--permission-mode", "default"]));
-        for mode in [None, Some("plan"), Some("acceptEdits"), Some("bypassPermissions")] {
+        for mode in [
+            None,
+            Some("plan"),
+            Some("acceptEdits"),
+            Some("bypassPermissions"),
+        ] {
             assert!(
                 !mk(mode).contains(&"--permission-prompt-tool".to_string()),
                 "{mode:?} 不该带审批 flag"

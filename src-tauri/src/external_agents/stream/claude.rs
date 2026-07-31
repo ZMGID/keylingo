@@ -125,7 +125,10 @@ fn claude_result_usage_snapshot(usage: &Value, completed_result_turns: u32) -> O
 /// 子 agent 时，最大值可能是历史上那个更大的窗口而不是当前模型的。
 ///
 /// 被中断的轮次 `modelUsage` 实测为 `{}` —— 一律当「可能缺失」处理，返回 `None`。
-fn context_window_from_model_usage(model_usage: &Value, resolved_model: Option<&str>) -> Option<u64> {
+fn context_window_from_model_usage(
+    model_usage: &Value,
+    resolved_model: Option<&str>,
+) -> Option<u64> {
     let entries = model_usage.as_object()?;
     let window_of = |entry: &Value| {
         entry
@@ -139,9 +142,7 @@ fn context_window_from_model_usage(model_usage: &Value, resolved_model: Option<&
         }
         if let Some(window) = entries
             .values()
-            .filter(|entry| {
-                entry.get("canonicalModel").and_then(|v| v.as_str()) == Some(model)
-            })
+            .filter(|entry| entry.get("canonicalModel").and_then(|v| v.as_str()) == Some(model))
             .find_map(window_of)
         {
             return Some(window);
@@ -352,7 +353,9 @@ fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
         None => String::new(),
     };
     Some(match cause {
-        Some(text) => format!("> ⏳ 上游请求失败（{text}），第 {attempt}{of_max} 次重试中{delay}。\n\n"),
+        Some(text) => {
+            format!("> ⏳ 上游请求失败（{text}），第 {attempt}{of_max} 次重试中{delay}。\n\n")
+        }
         None => format!("> ⏳ 上游请求重试中（第 {attempt}{of_max} 次）{delay}。\n\n"),
     })
 }
@@ -380,10 +383,14 @@ fn assistant_error_report(kind: &str) -> Option<(bool, String)> {
         "max_output_tokens" => note("回答达到模型的输出上限被截断，内容可能不完整。"),
         "aborted" => note("本轮回答被中止。"),
         // 认证 / 计费 / 上游故障：交给 errors::classify 出可操作中文（Auth 附登录命令）。
-        "authentication_failed" | "oauth_org_not_allowed" | "billing_error" | "rate_limit"
-        | "overloaded" | "invalid_request" | "model_not_found" | "server_error" => {
-            Some((true, format!("claude 报告错误：{kind}")))
-        }
+        "authentication_failed"
+        | "oauth_org_not_allowed"
+        | "billing_error"
+        | "rate_limit"
+        | "overloaded"
+        | "invalid_request"
+        | "model_not_found"
+        | "server_error" => Some((true, format!("claude 报告错误：{kind}"))),
         // `unknown` 与未来新增值：仍要可见（静默是最坏的），但不足以判定整轮失败。
         "" => None,
         other => note(&format!("claude 报告了一个错误：{other}。")),
@@ -528,7 +535,9 @@ pub struct ClaudeStreamState {
 impl ClaudeStreamState {
     /// 取（或建）某条车道的消息级状态。`None` = 主线。
     fn lane(&mut self, lane: Option<&str>) -> &mut LaneState {
-        self.lanes.entry(lane.unwrap_or_default().to_string()).or_default()
+        self.lanes
+            .entry(lane.unwrap_or_default().to_string())
+            .or_default()
     }
 
     /// 发一段**正文**（模型回答 / 本地命令输出），并置位 per-turn 的 `any_text_emitted`。
@@ -598,11 +607,8 @@ impl ClaudeStreamState {
                     // 三个数字都是可选的：缺失时留 `None`，压缩这件事本身照发。
                     Some("compact_boundary") => {
                         let metadata = obj.get("compact_metadata");
-                        let number = |key: &str| {
-                            metadata
-                                .and_then(|m| m.get(key))
-                                .and_then(|v| v.as_u64())
-                        };
+                        let number =
+                            |key: &str| metadata.and_then(|m| m.get(key)).and_then(|v| v.as_u64());
                         let trigger = metadata
                             .and_then(|m| m.get("trigger"))
                             .and_then(|v| v.as_str())
@@ -845,9 +851,9 @@ impl ClaudeStreamState {
                 // 分子：`iterations` 末项（多次往返的独立快照），顶层回退带「仅第一个 result」
                 // 闸门（见 `claude_result_usage_snapshot`）。
                 // 分母：`modelUsage[当前模型].contextWindow`（CLI 唯一权威的窗口来源，A8）。
-                let context_window = obj
-                    .get("modelUsage")
-                    .and_then(|mu| context_window_from_model_usage(mu, self.resolved_model.as_deref()));
+                let context_window = obj.get("modelUsage").and_then(|mu| {
+                    context_window_from_model_usage(mu, self.resolved_model.as_deref())
+                });
                 let mut parts = obj
                     .get("usage")
                     .and_then(|usage| {
@@ -1754,10 +1760,8 @@ mod tests {
     /// 「claude 命令已执行」，报告内容 100% 丢失。
     #[test]
     fn local_command_output_becomes_answer_text() {
-        let events = run(&[
-            r#"{"type":"system","subtype":"local_command_output",
-               "content":"Total cost: $1.23\nTotal duration: 5m 12s","uuid":"u","session_id":"s"}"#,
-        ]);
+        let events = run(&[r#"{"type":"system","subtype":"local_command_output",
+               "content":"Total cost: $1.23\nTotal duration: 5m 12s","uuid":"u","session_id":"s"}"#]);
         let text = texts(&events);
         assert!(text.contains("Total cost: $1.23"), "{text}");
         assert!(text.contains("Total duration"), "{text}");
@@ -1766,12 +1770,10 @@ mod tests {
     /// 另一条通道：报告正文落在 `result.result` 上（成功 + `output_tokens == 0`）。
     #[test]
     fn zero_output_result_text_is_surfaced_when_no_body_was_streamed() {
-        let events = run(&[
-            r#"{"type":"result","subtype":"success","is_error":false,
+        let events = run(&[r#"{"type":"result","subtype":"success","is_error":false,
                "result":"Context usage: 42k/1M tokens",
                "usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,
-                        "cache_creation_input_tokens":0,"iterations":[]}}"#,
-        ]);
+                        "cache_creation_input_tokens":0,"iterations":[]}}"#]);
         assert!(
             texts(&events).contains("Context usage: 42k/1M tokens"),
             "{events:?}"
@@ -1847,14 +1849,11 @@ mod tests {
     /// 认证 / 计费 / 上游故障类走 Error 通道，由 `errors::classify` 给可操作中文（spec 第 5 条）。
     #[test]
     fn assistant_auth_error_goes_to_the_error_channel() {
-        let events = run(&[
-            r#"{"type":"assistant","error":"authentication_failed",
-               "message":{"id":"m-1","role":"assistant","content":[]}}"#,
-        ]);
+        let events = run(&[r#"{"type":"assistant","error":"authentication_failed",
+               "message":{"id":"m-1","role":"assistant","content":[]}}"#]);
         let messages = errors(&events);
         assert_eq!(messages.len(), 1, "{events:?}");
-        let classified =
-            crate::external_agents::errors::classify(&messages[0], None, "", "claude");
+        let classified = crate::external_agents::errors::classify(&messages[0], None, "", "claude");
         assert_eq!(
             classified.kind,
             crate::external_agents::errors::ExternalAgentErrorKind::Auth
@@ -1887,10 +1886,8 @@ mod tests {
 
     #[test]
     fn aborted_assistant_message_is_surfaced() {
-        let events = run(&[
-            r#"{"type":"assistant","aborted":true,
-               "message":{"id":"m-1","role":"assistant","content":[{"type":"text","text":"partial"}]}}"#,
-        ]);
+        let events = run(&[r#"{"type":"assistant","aborted":true,
+               "message":{"id":"m-1","role":"assistant","content":[{"type":"text","text":"partial"}]}}"#]);
         assert!(texts(&events).contains("被中止"), "{events:?}");
     }
 
@@ -1970,8 +1967,7 @@ mod tests {
             "iterations": [{"input_tokens": 900, "output_tokens": 30}]
         });
         assert_eq!(
-            claude_result_usage_snapshot(&with_iterations, 5)
-                .and_then(|v| v.get("input_tokens")),
+            claude_result_usage_snapshot(&with_iterations, 5).and_then(|v| v.get("input_tokens")),
             Some(&serde_json::json!(900))
         );
     }
@@ -2021,7 +2017,11 @@ mod tests {
         // 第一轮：message_start 先到（39013），result 顶层回退放行再精修一次
         // （2+7+39010 = 39019，首个 result 且只有一次往返，两者一致）。
         // 第二轮：两次往返各一条 message_start，而 result 顶层被闸门拦住 ⇒ 不产出第五条。
-        assert_eq!(totals, vec![39_013, 39_019, 41_795, 41_942], "得到：{all:?}");
+        assert_eq!(
+            totals,
+            vec![39_013, 39_019, 41_795, 41_942],
+            "得到：{all:?}"
+        );
         // 收尾值必须是最后一次往返的占用，而不是两次相加的计费总量。
         assert_eq!(totals.last(), Some(&41_942));
         assert!(
@@ -2086,7 +2086,10 @@ mod tests {
             "m-a": {"contextWindow": 0},
             "m-b": {"contextWindow": 0},
         });
-        assert_eq!(context_window_from_model_usage(&model_usage, Some("m-a")), None);
+        assert_eq!(
+            context_window_from_model_usage(&model_usage, Some("m-a")),
+            None
+        );
         assert_eq!(context_window_from_model_usage(&model_usage, None), None);
         // 空 map（被中断的轮次实测就是 `{}`）同样是 None。
         assert_eq!(
@@ -2099,7 +2102,10 @@ mod tests {
             None
         );
         assert_eq!(
-            context_window_from_model_usage(&serde_json::json!({"m": {"contextWindow": "1M"}}), None),
+            context_window_from_model_usage(
+                &serde_json::json!({"m": {"contextWindow": "1M"}}),
+                None
+            ),
             None
         );
     }
@@ -2263,7 +2269,8 @@ mod tests {
     }
 
     #[test]
-    fn task_notification_reports_only_failure_and_stop() {        let failed = run(&[
+    fn task_notification_reports_only_failure_and_stop() {
+        let failed = run(&[
             r#"{"type":"system","subtype":"task_notification","task_id":"t-1","status":"failed",
                "output_file":"/tmp/t1.log","summary":"build 脚本退出码 2"}"#,
         ]);
@@ -2398,7 +2405,10 @@ mod tests {
             "子 agent 的正文混进了主回答（或主回答被重发）：{events:?}"
         );
         // 2）顶层工具卡只有主线的两个 Task，子 agent 的 Read 不占主时间线。
-        let uses: Vec<String> = tool_uses(&events).into_iter().map(|(id, _, _)| id).collect();
+        let uses: Vec<String> = tool_uses(&events)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
         assert_eq!(
             uses,
             vec!["toolu-task-a".to_string(), "toolu-task-b".to_string()],
@@ -2549,7 +2559,11 @@ mod tests {
             &mut state,
             r#"{"type":"result","parent_tool_use_id":"toolu-task-a","subtype":"success","usage":{"input_tokens":5,"output_tokens":1}}"#,
         );
-        assert_eq!(state.completed_result_turns(), 0, "子会话的 result 被当成了轮次边界");
+        assert_eq!(
+            state.completed_result_turns(),
+            0,
+            "子会话的 result 被当成了轮次边界"
+        );
         feed(
             &mut state,
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":1}}"#,
@@ -2905,7 +2919,10 @@ mod live_tests {
         };
         let model_usage = result.get("modelUsage").cloned().unwrap_or(Value::Null);
         eprintln!("modelUsage = {model_usage}");
-        eprintln!("usage      = {}", result.get("usage").cloned().unwrap_or(Value::Null));
+        eprintln!(
+            "usage      = {}",
+            result.get("usage").cloned().unwrap_or(Value::Null)
+        );
 
         let entries = match model_usage.as_object() {
             Some(map) if !map.is_empty() => map,
@@ -2945,9 +2962,6 @@ mod live_tests {
             .filter_map(|entry| entry.get("inputTokens").and_then(|v| v.as_u64()))
             .sum();
         eprintln!("分子={numerator} 窗口={window} modelUsage 累计 input={cumulative}");
-        assert!(
-            numerator < window,
-            "分子 {numerator} 不该 >= 窗口 {window}"
-        );
+        assert!(numerator < window, "分子 {numerator} 不该 >= 窗口 {window}");
     }
 }

@@ -84,9 +84,8 @@ pub async fn dock_resolve_cwd(
         let conv_id = conversation_id.unwrap_or_else(|| "__global__".to_string());
         // conversation_workspace_directory 只接受 conv_ 前缀 id；其余（如 __global__）
         // 手动拼到工作根下。
-        let path =
-            crate::native_tools::conversation_workspace_directory(&working_root, &conv_id)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&working_root).join(&conv_id));
+        let path = crate::native_tools::conversation_workspace_directory(&working_root, &conv_id)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&working_root).join(&conv_id));
         std::fs::create_dir_all(&path).map_err(|e| format!("create dock workspace: {e}"))?;
         Ok(path.to_string_lossy().to_string())
     })

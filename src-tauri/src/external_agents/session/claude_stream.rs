@@ -154,7 +154,8 @@ const UNSUPPORTED_CONTROL_REQUEST: &str = "Kivio 尚不支持这个控制请求"
 
 /// 用户点「拒绝」时回给 CLI 的话。它会原样变成那次工具调用的 `tool_result`（实测），
 /// 所以要写成模型看得懂、且能据此改变计划的一句中文。
-pub const APPROVAL_DENIED_MESSAGE: &str = "用户拒绝了这次操作。不要重试这个调用；请说明你原本想做什么，并等待用户的进一步指示。";
+pub const APPROVAL_DENIED_MESSAGE: &str =
+    "用户拒绝了这次操作。不要重试这个调用；请说明你原本想做什么，并等待用户的进一步指示。";
 /// 取消 / 关会话 / 进程消失时，批量拒掉所有挂起询问用的话。
 const APPROVAL_ABORTED_MESSAGE: &str = "用户中止了本轮，这次操作未被批准。";
 /// 需要用户在卡片上直接作答的工具（`AskUserQuestion` / `ExitPlanMode`）。
@@ -531,11 +532,7 @@ impl ClaudeStreamJsonSession {
     ///
     /// 会话 id 不单独传参：claude 的会话 flag 由 `build_claude_args` 放进 `args`
     /// （`--session-id` 首次 / `--resume` 重连），不像 codex/ACP 在握手 RPC 里传。
-    pub async fn connect(
-        resolved_bin: &Path,
-        args: &[String],
-        cwd: &Path,
-    ) -> Result<Self, String> {
+    pub async fn connect(resolved_bin: &Path, args: &[String], cwd: &Path) -> Result<Self, String> {
         // spec 第 16 条：必须走 `cli_command` 剥掉父会话身份/宿主代管凭据标记，
         // 否则 Kivio 从某个 CLI 会话里启动时子进程会拒绝启动或报「未登录」。
         let mut child = cli_command(resolved_bin)
@@ -729,10 +726,14 @@ impl ClaudeStreamJsonSession {
 
         let payload = stream_json_user_line(prompt, images)?;
         if let Err(err) = self.stdin.write_all(payload.as_bytes()).await {
-            return Err(self.fold_tail(format!("写入 claude stdin 失败: {err}")).await);
+            return Err(self
+                .fold_tail(format!("写入 claude stdin 失败: {err}"))
+                .await);
         }
         if let Err(err) = self.stdin.flush().await {
-            return Err(self.fold_tail(format!("刷新 claude stdin 失败: {err}")).await);
+            return Err(self
+                .fold_tail(format!("刷新 claude stdin 失败: {err}"))
+                .await);
         }
 
         let (ask_tx, mut decisions) = match approvals {
@@ -765,7 +766,8 @@ impl ClaudeStreamJsonSession {
                             .await;
                         // 协议级中断，**不 kill**：进程要留给下一轮（常驻的核心收益）。
                         // 写失败也不立刻放弃 —— 继续读，`result` 可能已经在路上。
-                        let line = interrupt_request_line(&format!("kivio-interrupt-{}", Uuid::new_v4()));
+                        let line =
+                            interrupt_request_line(&format!("kivio-interrupt-{}", Uuid::new_v4()));
                         let _ = self.stdin.write_all(line.as_bytes()).await;
                         let _ = self.stdin.flush().await;
                     }
@@ -846,7 +848,8 @@ impl ClaudeStreamJsonSession {
                 Ok(value) => value,
                 Err(_) => {
                     let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
-                    self.handler.handle_line(&line, &mut |event| buf.push(event));
+                    self.handler
+                        .handle_line(&line, &mut |event| buf.push(event));
                     for event in buf {
                         let _ = events.send(event).await;
                     }
@@ -910,7 +913,8 @@ impl ClaudeStreamJsonSession {
             // 那份解析逻辑（spec 第 2 条），又不用为了找边界把同一行 JSON 再解析一遍。
             let before = self.handler.completed_result_turns();
             let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
-            self.handler.handle_value(&value, &mut |event| buf.push(event));
+            self.handler
+                .handle_value(&value, &mut |event| buf.push(event));
             for event in buf {
                 if suppress_after_cancel(cancelled, &event) {
                     continue;
@@ -1015,7 +1019,10 @@ impl ClaudeStreamJsonSession {
         } = self;
         let _ = stdin.shutdown().await;
         drop(stdin);
-        if timeout(CLAUDE_SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
+        if timeout(CLAUDE_SHUTDOWN_TIMEOUT, child.wait())
+            .await
+            .is_err()
+        {
             kill_agent_process_tree(&mut child);
             let _ = child.wait().await;
         }
@@ -1117,8 +1124,12 @@ mod tests {
     #[test]
     fn abort_style_read_errors_are_recoverable() {
         use std::io::{Error, ErrorKind};
-        assert!(read_error_is_recoverable(&Error::from(ErrorKind::Interrupted)));
-        assert!(read_error_is_recoverable(&Error::from(ErrorKind::WouldBlock)));
+        assert!(read_error_is_recoverable(&Error::from(
+            ErrorKind::Interrupted
+        )));
+        assert!(read_error_is_recoverable(&Error::from(
+            ErrorKind::WouldBlock
+        )));
         assert!(read_error_is_recoverable(&Error::from(ErrorKind::TimedOut)));
         // Windows 的 ERROR_OPERATION_ABORTED（995）——中断挂起的 pipe 读就是这个。
         assert!(read_error_is_recoverable(&Error::from_raw_os_error(
@@ -1126,7 +1137,9 @@ mod tests {
         )));
         // 非法 UTF-8：tokio 丢掉这一行后 reader 仍可用，进程完好。判成致命的话，一次坏字节
         // 就会把整轮 prompt 重发一遍（工具副作用可能重跑）。
-        assert!(read_error_is_recoverable(&Error::from(ErrorKind::InvalidData)));
+        assert!(read_error_is_recoverable(&Error::from(
+            ErrorKind::InvalidData
+        )));
     }
 
     /// 真正的致命错误不得被当成「再试一次」，否则读循环会在一个死掉的 pipe 上空转。
@@ -1246,10 +1259,16 @@ mod tests {
         // **`request_id` 嵌在 `response` 里**，不是帧顶层（实测形状）。放错层级 = CLI 匹配不到
         // 这条响应，等于没回。
         assert_eq!(value["response"]["request_id"], serde_json::json!("req-42"));
-        assert!(value.get("request_id").is_none(), "顶层不该有 request_id：{value}");
+        assert!(
+            value.get("request_id").is_none(),
+            "顶层不该有 request_id：{value}"
+        );
         // 错误文案要能让人看出是哪个子型没实现（会进 CLI 的 tool_result / 诊断）。
         let error = value["response"]["error"].as_str().unwrap_or_default();
-        assert!(error.contains("can_use_tool"), "错误文案应带上子型：{error}");
+        assert!(
+            error.contains("can_use_tool"),
+            "错误文案应带上子型：{error}"
+        );
         // 三个字段一律 snake_case —— 这条协议两套命名混用（`can_use_tool` 的**成功**载荷是
         // camelCase 的 `behavior`/`updatedInput`），error 分支千万别顺手写成 camelCase。
         assert!(value["response"].get("requestId").is_none());
@@ -1296,7 +1315,10 @@ mod tests {
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"kivio-interrupt-1","response":{"still_queued":[]}}}"#,
         ] {
             assert!(
-                matches!(classify_inbound_frame(&frame(raw), true), InboundFrame::Ignore),
+                matches!(
+                    classify_inbound_frame(&frame(raw), true),
+                    InboundFrame::Ignore
+                ),
                 "{raw} 应被安全忽略"
             );
         }
@@ -1355,7 +1377,10 @@ mod tests {
         assert_eq!(ask.tool_call_id, "toolu_015Jc1MjkwjbJL6rsCoaG3q8");
         // 工具原名**不归一化**：`Write` 是 PascalCase，前端展示要的就是本名。
         assert_eq!(ask.tool_name, "Write");
-        assert_eq!(ask.input["file_path"], serde_json::json!("C:\\tmp\\probe.txt"));
+        assert_eq!(
+            ask.input["file_path"],
+            serde_json::json!("C:\\tmp\\probe.txt")
+        );
         assert!(!ask.requires_user_interaction);
     }
 
@@ -1451,8 +1476,7 @@ mod tests {
             );
         }
         answered.sort();
-        let mut expected: Vec<String> =
-            pending.iter().map(|p| p.request_id.clone()).collect();
+        let mut expected: Vec<String> = pending.iter().map(|p| p.request_id.clone()).collect();
         expected.sort();
         assert_eq!(answered, expected, "有询问被漏掉或被重复回复 ⇒ 会永久挂死");
     }
@@ -1508,7 +1532,10 @@ mod tests {
             r#"{"type":"some_future_frame"}"#,
         ] {
             assert!(
-                matches!(classify_inbound_frame(&frame(raw), true), InboundFrame::Stream),
+                matches!(
+                    classify_inbound_frame(&frame(raw), true),
+                    InboundFrame::Stream
+                ),
                 "{raw} 不该被分流挡掉"
             );
         }
@@ -1553,11 +1580,17 @@ mod tests {
 
         // 上一轮（被取消那一轮）的收尾残帧：正文 + 迟到的 result，两条都必须丢。
         assert!(
-            step(&mut budget, r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"上一轮的半截话"}}}"#),
+            step(
+                &mut budget,
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"上一轮的半截话"}}}"#
+            ),
             "上一轮的正文漏进了下一轮的回答"
         );
         assert!(
-            step(&mut budget, r#"{"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"}"#),
+            step(
+                &mut budget,
+                r#"{"type":"result","subtype":"error_during_execution","terminal_reason":"aborted_streaming"}"#
+            ),
             "上一轮迟到的 result 会被当成下一轮的结束信号"
         );
 
@@ -1573,7 +1606,10 @@ mod tests {
             &mut budget,
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"新回答"}}}"#
         ));
-        assert!(!step(&mut budget, r#"{"type":"result","subtype":"success"}"#));
+        assert!(!step(
+            &mut budget,
+            r#"{"type":"result","subtype":"success"}"#
+        ));
     }
 
     /// 兜底闸门：`init` 万一不来，抑制到点必须停 —— 否则一次取消能把后面所有输出永久吞掉。
@@ -1613,7 +1649,9 @@ mod tests {
         assert!(is_missing_session_error(
             "No conversation found with session ID: d85724b7-59e4-4690-8984-1f31ca9a3414"
         ));
-        assert!(!is_missing_session_error("Not logged in · Please run /login"));
+        assert!(!is_missing_session_error(
+            "Not logged in · Please run /login"
+        ));
         assert!(!is_missing_session_error(
             "No message found with message.uuid of: abc"
         ));
@@ -1746,7 +1784,8 @@ mod live_tests {
         };
         let workdir = std::env::temp_dir().join(format!("kivio-claude-live-{session_id}"));
         std::fs::create_dir_all(&workdir).expect("create workdir");
-        match ClaudeStreamJsonSession::connect(&bin, &live_args(session_id, model), &workdir).await {
+        match ClaudeStreamJsonSession::connect(&bin, &live_args(session_id, model), &workdir).await
+        {
             Ok(session) => Some((spawn_claude_stream_session_actor(session), workdir)),
             Err(err) => {
                 eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
@@ -1796,7 +1835,9 @@ mod live_tests {
             .await
             .expect("actor alive");
         let mut text = String::new();
-        let result = drx.await.unwrap_or_else(|_| Err("actor dropped".to_string()));
+        let result = drx
+            .await
+            .unwrap_or_else(|_| Err("actor dropped".to_string()));
         while let Ok(event) = erx.try_recv() {
             if let UnifiedAgentEvent::TextDelta { delta } = event {
                 text.push_str(&delta);
@@ -1901,10 +1942,14 @@ mod live_tests {
         answerer.abort();
         let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let picked = picked.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        eprintln!("result={:?}
+        eprintln!(
+            "result={:?}
 asked={asked:?}
 picked={picked:?}
-text={}", out.result, out.text.trim());
+text={}",
+            out.result,
+            out.text.trim()
+        );
 
         if out.result.is_err() {
             eprintln!("SKIP: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
@@ -2085,7 +2130,11 @@ text={}",
             false,
         )
         .await;
-        assert!(first.result.is_ok(), "第 1 轮应正常完成: {:?}", first.result);
+        assert!(
+            first.result.is_ok(),
+            "第 1 轮应正常完成: {:?}",
+            first.result
+        );
 
         // 换模型 —— 走会话内 `set_model`，同一个进程。
         let second = one_turn_with_model(
@@ -2094,7 +2143,10 @@ text={}",
             "opus",
         )
         .await;
-        eprintln!("switch-model turn: result={:?} text={:?}", second.result, second.text);
+        eprintln!(
+            "switch-model turn: result={:?} text={:?}",
+            second.result, second.text
+        );
         assert!(
             second.result.is_ok(),
             "换模型那一轮失败了 —— 多半是 `set_model` 的 wire 形状猜错了（见              `set_model_request_line` 的注释）。修法：读 ack 的 error 文案，按它改字段名: {:?}",
@@ -2281,7 +2333,8 @@ text={}",
 
         // 第一个进程：sonnet，建立会话并记一个数字。
         let first_args = live_args(&session_id, Some("sonnet"));
-        let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &first_args, &workdir).await else {
+        let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &first_args, &workdir).await
+        else {
             eprintln!("SKIP: 首次连接失败（未登录 / 网络？）");
             let _ = std::fs::remove_dir_all(&workdir);
             return;
@@ -2321,11 +2374,7 @@ text={}",
         )
         .await;
         eprintln!("post-reconnect: {}", after.text.trim());
-        assert!(
-            after.result.is_ok(),
-            "重连后无法回复：{:?}",
-            after.result
-        );
+        assert!(after.result.is_ok(), "重连后无法回复：{:?}", after.result);
         assert!(
             after.text.contains("55"),
             "重连（--resume）没续上原会话（回答：{:?}）",
@@ -2366,7 +2415,9 @@ text={}",
 
         // ---- 第 1 步：确认真实 CLI 的失败形态与我们的判据一致 ----
         let dead_args = live_resume_args(&dead_id);
-        assert!(dead_args.windows(2).any(|w| w == ["--resume", dead_id.as_str()]));
+        assert!(dead_args
+            .windows(2)
+            .any(|w| w == ["--resume", dead_id.as_str()]));
         let failure = match ClaudeStreamJsonSession::connect(&bin, &dead_args, &workdir).await {
             // 实测进程约 2.2s 才退出，所以 `connect` 的即时 `try_wait` 通常抓不到 ——
             // 失败以流里那条 `result` 的形式到达 `run_turn`。两条路都要能认出来。
@@ -2396,7 +2447,10 @@ text={}",
         let control = spawn_claude_stream_session_actor(session);
         let turn = one_turn(&control, "Reply with just the word OK.", false).await;
         let outcome = turn.result.as_ref().err().cloned().unwrap_or_default();
-        eprintln!("after downgrade: result={outcome:?} text={:?}", turn.text.trim());
+        eprintln!(
+            "after downgrade: result={outcome:?} text={:?}",
+            turn.text.trim()
+        );
         assert!(
             !is_missing_session_error(&outcome),
             "降级之后还在报 resume 失效：{outcome}"
@@ -2500,7 +2554,8 @@ text={}",
                 "argv 没带 --permission-prompt-tool stdio ⇒ CLI 根本不会来问：{args:?}"
             );
             assert!(
-                args.windows(2).any(|w| w == ["--permission-mode", "default"]),
+                args.windows(2)
+                    .any(|w| w == ["--permission-mode", "default"]),
                 "bypassPermissions 会在咨询我们之前就放行一切：{args:?}"
             );
 
@@ -2523,7 +2578,10 @@ text={}",
             eprintln!("[{label}] text={}", out.text.trim());
 
             if out.result.is_err() {
-                eprintln!("SKIP[{label}]: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
+                eprintln!(
+                    "SKIP[{label}]: 这一轮失败（未登录 / 网络？）：{:?}",
+                    out.result
+                );
                 close_and_cleanup(control, &workdir).await;
                 return;
             }
@@ -2542,7 +2600,10 @@ text={}",
                     "[{label}] 文件内容不对：{content:?}"
                 );
             } else {
-                assert!(!exists, "[{label}] 答了 deny，文件却还是被创建了 ⇒ 拒绝没生效");
+                assert!(
+                    !exists,
+                    "[{label}] 答了 deny，文件却还是被创建了 ⇒ 拒绝没生效"
+                );
                 // 拒绝的 message 会原样成为 tool_result，模型应据此改口。
                 let text = out.text.to_lowercase();
                 assert!(
@@ -2610,11 +2671,19 @@ text={}",
         let asked = canceller.await.unwrap_or(false);
         eprintln!("cancelled-with-pending-approval -> {:?}", aborted.result);
         if !asked {
-            eprintln!("SKIP: CLI 没来问权限（未登录 / 网络？）：{:?}", aborted.result);
+            eprintln!(
+                "SKIP: CLI 没来问权限（未登录 / 网络？）：{:?}",
+                aborted.result
+            );
             close_and_cleanup(control, &workdir).await;
             return;
         }
-        let cancel_outcome = aborted.result.as_ref().err().map(String::as_str).unwrap_or("");
+        let cancel_outcome = aborted
+            .result
+            .as_ref()
+            .err()
+            .map(String::as_str)
+            .unwrap_or("");
         assert!(
             cancel_outcome == "cancelled" || cancel_outcome == CANCELLED_SESSION_LOST,
             "挂着权限询问时取消，出口不是「取消」：{cancel_outcome:?}"

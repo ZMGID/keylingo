@@ -1035,7 +1035,11 @@ mod tests {
 
     #[test]
     fn builds_refresh_form() {
-        let form = build_refresh_form("rt-1", Some("client-1"), Some("https://mcp.example.com/mcp"));
+        let form = build_refresh_form(
+            "rt-1",
+            Some("client-1"),
+            Some("https://mcp.example.com/mcp"),
+        );
         assert!(form.contains(&("grant_type".to_string(), "refresh_token".to_string())));
         assert!(form.contains(&("refresh_token".to_string(), "rt-1".to_string())));
         assert!(form.contains(&("client_id".to_string(), "client-1".to_string())));

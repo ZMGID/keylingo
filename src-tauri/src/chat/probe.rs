@@ -98,7 +98,6 @@ struct ProbeToolCall {
     status: ToolCallStatus,
 }
 
-
 /// assistant 消息的 provider/CLI 实报用量，**全部字段**。
 ///
 /// 之前只能去翻磁盘上的会话 JSON 才能看到，于是「cache 有没有计进分子」「零用量的轮次有没有
@@ -315,11 +314,8 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
     let run = crate::chat::commands::run_chat_probe(app, &state, &req);
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, run).await;
     app.unlisten(tick_listener);
-    let live_usage_ticks = std::mem::take(
-        &mut *live_ticks
-            .lock()
-            .unwrap_or_else(|err| err.into_inner()),
-    );
+    let live_usage_ticks =
+        std::mem::take(&mut *live_ticks.lock().unwrap_or_else(|err| err.into_inner()));
     let duration_ms = started.elapsed().as_millis() as u64;
     let finished_at = chrono::Local::now().timestamp();
 
@@ -442,7 +438,6 @@ fn live_session_snapshot(state: &AppState, conversation_id: &str) -> ProbeLiveSe
         },
     }
 }
-
 
 /// 枚举的线上名字（`snake_case`，与前端事件同一套口径）。走 serde 而不是手写 match：
 /// 手写的第二份映射迟早跟 `#[serde(rename_all)]` 分叉（spec 第 2 条）。

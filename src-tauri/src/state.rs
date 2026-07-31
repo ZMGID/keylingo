@@ -509,10 +509,7 @@ impl AppState {
         self.chat_tool_always_allow
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains(&(
-                conversation_id.to_string(),
-                tool_name.to_ascii_lowercase(),
-            ))
+            .contains(&(conversation_id.to_string(), tool_name.to_ascii_lowercase()))
     }
 
     /// 记录「本对话内该工具不再询问」(本进程内有效)。
@@ -520,10 +517,7 @@ impl AppState {
         self.chat_tool_always_allow
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert((
-                conversation_id.to_string(),
-                tool_name.to_ascii_lowercase(),
-            ));
+            .insert((conversation_id.to_string(), tool_name.to_ascii_lowercase()));
     }
 
     /// 判断指定 conversation 的某条 Chat 运行是否仍然有效（其 generation 仍在活跃集合内）。

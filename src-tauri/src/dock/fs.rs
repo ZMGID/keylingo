@@ -153,8 +153,8 @@ fn sanitize_optional_rel_path(input: Option<String>) -> Result<Option<PathBuf>, 
 /// 解析已存在的目标：canonicalize 后必须仍在 workdir 内（防 symlink 逃逸）。
 fn resolve_target(workdir: &Path, rel: &Path) -> Result<PathBuf, String> {
     let target = workdir.join(rel);
-    let canon = fs::canonicalize(&target)
-        .map_err(|e| format!("路径不存在：{}（{e}）", rel.display()))?;
+    let canon =
+        fs::canonicalize(&target).map_err(|e| format!("路径不存在：{}（{e}）", rel.display()))?;
     if !canon.starts_with(workdir) {
         return Err(format!("路径越出工作目录：{}", rel.display()));
     }
@@ -162,7 +162,10 @@ fn resolve_target(workdir: &Path, rel: &Path) -> Result<PathBuf, String> {
 }
 
 /// 写入类操作校验父目录（目标本身尚不存在，无法 canonicalize）。
-fn resolve_parent_for_write(workdir: &Path, rel: &Path) -> Result<(PathBuf, std::ffi::OsString), String> {
+fn resolve_parent_for_write(
+    workdir: &Path,
+    rel: &Path,
+) -> Result<(PathBuf, std::ffi::OsString), String> {
     let name = rel
         .file_name()
         .ok_or_else(|| "目标路径不合法。".to_string())?
@@ -224,7 +227,9 @@ fn fs_list_impl(
         Some(rel) => resolve_target(workdir, rel)?,
     };
     let show_hidden = show_hidden.unwrap_or(false);
-    let max_results = max_results.unwrap_or(FS_LIST_MAX_ENTRIES).clamp(1, FS_LIST_MAX_ENTRIES);
+    let max_results = max_results
+        .unwrap_or(FS_LIST_MAX_ENTRIES)
+        .clamp(1, FS_LIST_MAX_ENTRIES);
 
     let meta = fs::metadata(&base).map_err(|e| format!("读取路径失败：{e}"))?;
     if meta.is_file() {
@@ -290,7 +295,10 @@ pub async fn dock_fs_list(
 
 fn search_sort_key(path: &str, query: &str) -> (usize, usize, String) {
     let normalized_path = path.to_lowercase();
-    let name = normalized_path.rsplit('/').next().unwrap_or(&normalized_path);
+    let name = normalized_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized_path);
     let rank = if name.starts_with(query) {
         0
     } else if normalized_path.starts_with(query) {
@@ -300,7 +308,11 @@ fn search_sort_key(path: &str, query: &str) -> (usize, usize, String) {
     } else {
         3
     };
-    (rank, path.bytes().filter(|b| *b == b'/').count(), normalized_path)
+    (
+        rank,
+        path.bytes().filter(|b| *b == b'/').count(),
+        normalized_path,
+    )
 }
 
 fn fs_search_impl(
@@ -367,9 +379,8 @@ fn fs_search_impl(
         });
     }
 
-    candidates.sort_by(|a, b| {
-        search_sort_key(&a.path, &query).cmp(&search_sort_key(&b.path, &query))
-    });
+    candidates
+        .sort_by(|a, b| search_sort_key(&a.path, &query).cmp(&search_sort_key(&b.path, &query)));
     if candidates.len() > max_results {
         truncated = true;
         candidates.truncate(max_results);
@@ -462,7 +473,8 @@ pub async fn dock_fs_write(
     .map_err(|e| format!("dock_fs_write join: {e}"))?
 }
 
-fn fs_create_impl(workdir: &Path, path: String, kind: String) -> Result<FsWriteResponse, String> {    let rel = sanitize_rel_path(&path)?;
+fn fs_create_impl(workdir: &Path, path: String, kind: String) -> Result<FsWriteResponse, String> {
+    let rel = sanitize_rel_path(&path)?;
     let logical = rel.to_string_lossy().replace('\\', "/");
     let (parent, name) = resolve_parent_for_write(workdir, &rel)?;
     let target = parent.join(&name);
@@ -558,7 +570,11 @@ pub async fn dock_fs_rename(
 
 /// 拖拽移动：把条目移入另一目录（文件名不变）。与 rename 分开——rename 有意只支持
 /// 同目录改名；移动的自嵌套/越界守卫在这里。`to_dir` 为空串表示根目录。
-fn fs_move_impl(workdir: &Path, from_path: String, to_dir: String) -> Result<FsWriteResponse, String> {
+fn fs_move_impl(
+    workdir: &Path,
+    from_path: String,
+    to_dir: String,
+) -> Result<FsWriteResponse, String> {
     let from_rel = sanitize_rel_path(&from_path)?;
     let source = resolve_target(workdir, &from_rel)?;
     let target_dir = match sanitize_optional_rel_path(Some(to_dir))? {
@@ -590,7 +606,12 @@ fn fs_move_impl(workdir: &Path, from_path: String, to_dir: String) -> Result<FsW
         return Err("只支持移动常规文件、目录或符号链接。".to_string());
     };
     match fs::symlink_metadata(&target) {
-        Ok(_) => return Err(format!("目标已存在：{}", rel_to_workdir_str(workdir, &target))),
+        Ok(_) => {
+            return Err(format!(
+                "目标已存在：{}",
+                rel_to_workdir_str(workdir, &target)
+            ))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("检查目标失败：{e}")),
     }
@@ -723,7 +744,13 @@ fn fs_open_path_impl(
     } else {
         return Err("只支持打开常规文件或目录。".to_string());
     };
-    let mode = match mode.as_deref().unwrap_or("open").trim().to_ascii_lowercase().as_str() {
+    let mode = match mode
+        .as_deref()
+        .unwrap_or("open")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "" | "open" => "open",
         "reveal" => "reveal",
         other => return Err(format!("mode 只支持 open/reveal，收到：{other}")),
@@ -759,18 +786,34 @@ mod tests {
     /// 无 tempfile 依赖（不新增 crate），用进程 id + 自增序号造唯一临时目录。
     fn temp_workdir(tag: &str) -> PathBuf {
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kivio-dock-fs-{tag}-{}-{id}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kivio-dock-fs-{tag}-{}-{id}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp workdir");
         fs::canonicalize(&dir).expect("canonicalize temp workdir")
     }
 
     #[test]
     fn sanitize_rejects_parent_absolute_and_reserved() {
-        for input in ["../evil", "a/../../b", "/etc/passwd", "C:/windows", "a:b", "CON", "com1.txt", "lpt9"] {
-            assert!(sanitize_rel_path(input).is_err(), "{input} should be rejected");
+        for input in [
+            "../evil",
+            "a/../../b",
+            "/etc/passwd",
+            "C:/windows",
+            "a:b",
+            "CON",
+            "com1.txt",
+            "lpt9",
+        ] {
+            assert!(
+                sanitize_rel_path(input).is_err(),
+                "{input} should be rejected"
+            );
         }
         for input in ["src/main.rs", "a/./b.txt", "console.log"] {
-            assert!(sanitize_rel_path(input).is_ok(), "{input} should be accepted");
+            assert!(
+                sanitize_rel_path(input).is_ok(),
+                "{input} should be accepted"
+            );
         }
     }
 
@@ -790,7 +833,9 @@ mod tests {
         assert!(fs_move_impl(&workdir, "a.txt".into(), String::new()).is_err());
         assert!(fs_move_impl(&workdir, "sub".into(), "sub".into()).is_err());
         fs::write(workdir.join("sub/a.txt"), "y").expect("write dup");
-        assert!(fs_move_impl(&workdir, "a.txt".into(), "sub".into()).unwrap_err().contains("已存在"));
+        assert!(fs_move_impl(&workdir, "a.txt".into(), "sub".into())
+            .unwrap_err()
+            .contains("已存在"));
         fs::remove_dir_all(&workdir).ok();
     }
 
@@ -804,12 +849,15 @@ mod tests {
         assert_eq!(read.content, "hello");
         assert_eq!(read.path, "a.txt");
 
-        fs_write_impl(&workdir, "a.txt".to_string(), "changed 中文".to_string()).expect("write back");
+        fs_write_impl(&workdir, "a.txt".to_string(), "changed 中文".to_string())
+            .expect("write back");
         let read = fs_read_impl(&workdir, "a.txt".to_string()).expect("re-read");
         assert_eq!(read.content, "changed 中文");
 
         // 二进制（含 NUL）拒绝预览；写入不存在的文件拒绝（新建走 create）。
-        assert!(fs_read_impl(&workdir, "bin.dat".to_string()).unwrap_err().contains("二进制"));
+        assert!(fs_read_impl(&workdir, "bin.dat".to_string())
+            .unwrap_err()
+            .contains("二进制"));
         assert!(fs_write_impl(&workdir, "missing.txt".to_string(), String::new()).is_err());
         fs::remove_dir_all(&workdir).ok();
     }
@@ -837,15 +885,24 @@ mod tests {
         let visible = fs_list_impl(&workdir, None, None, Some(false)).expect("list visible");
         let paths: Vec<&str> = visible.entries.iter().map(|e| e.path.as_str()).collect();
         assert!(paths.contains(&"visible.txt"));
-        assert!(!paths.contains(&".gitignore"), "dotfiles filtered when show_hidden=false");
+        assert!(
+            !paths.contains(&".gitignore"),
+            "dotfiles filtered when show_hidden=false"
+        );
         assert!(!paths.contains(&"ignored.txt"));
         assert!(visible.entries.iter().all(|e| !e.hidden));
 
         let all = fs_list_impl(&workdir, None, None, Some(true)).expect("list all");
         let by_path = |p: &str| all.entries.iter().find(|e| e.path == p);
         assert!(by_path("visible.txt").is_some_and(|e| !e.hidden));
-        assert!(by_path("ignored.txt").is_some_and(|e| e.hidden), "gitignored entry marked hidden");
-        assert!(by_path(".secret").is_some_and(|e| e.hidden), "dotfile marked hidden");
+        assert!(
+            by_path("ignored.txt").is_some_and(|e| e.hidden),
+            "gitignored entry marked hidden"
+        );
+        assert!(
+            by_path(".secret").is_some_and(|e| e.hidden),
+            "dotfile marked hidden"
+        );
         fs::remove_dir_all(&workdir).ok();
     }
 
@@ -854,9 +911,11 @@ mod tests {
         let workdir = temp_workdir("rename");
         fs::create_dir(workdir.join("sub")).expect("create sub");
         fs::write(workdir.join("a.txt"), "x").expect("write a.txt");
-        let err = fs_rename_impl(&workdir, "a.txt".to_string(), "sub/a.txt".to_string()).unwrap_err();
+        let err =
+            fs_rename_impl(&workdir, "a.txt".to_string(), "sub/a.txt".to_string()).unwrap_err();
         assert!(err.contains("同目录"), "unexpected error: {err}");
-        fs_rename_impl(&workdir, "a.txt".to_string(), "b.txt".to_string()).expect("same-dir rename");
+        fs_rename_impl(&workdir, "a.txt".to_string(), "b.txt".to_string())
+            .expect("same-dir rename");
         assert!(workdir.join("b.txt").exists());
         fs::remove_dir_all(&workdir).ok();
     }
@@ -870,13 +929,26 @@ mod tests {
         fs::write(workdir.join("src/app.ts"), "x").expect("write src/app.ts");
         fs::write(workdir.join("my-app-notes.md"), "x").expect("write notes");
 
-        let result = fs_search_impl(&workdir, "app".to_string(), None, Some(false)).expect("search");
+        let result =
+            fs_search_impl(&workdir, "app".to_string(), None, Some(false)).expect("search");
         let paths: Vec<&str> = result.entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(!paths.iter().any(|p| p.contains("node_modules")), "node_modules skipped: {paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules")),
+            "node_modules skipped: {paths:?}"
+        );
         // 名称前缀匹配（app.ts）排在名称包含（my-app-notes.md）之前。
-        let pos_app = paths.iter().position(|p| *p == "src/app.ts").expect("app.ts ranked");
-        let pos_notes = paths.iter().position(|p| *p == "my-app-notes.md").expect("notes ranked");
-        assert!(pos_app < pos_notes, "basename-prefix should rank first: {paths:?}");
+        let pos_app = paths
+            .iter()
+            .position(|p| *p == "src/app.ts")
+            .expect("app.ts ranked");
+        let pos_notes = paths
+            .iter()
+            .position(|p| *p == "my-app-notes.md")
+            .expect("notes ranked");
+        assert!(
+            pos_app < pos_notes,
+            "basename-prefix should rank first: {paths:?}"
+        );
         fs::remove_dir_all(&workdir).ok();
     }
 }

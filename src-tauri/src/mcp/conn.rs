@@ -53,10 +53,7 @@ const LEGACY_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_06_18;
 fn discover_lifecycle() -> ClientLifecycleMode {
     ClientLifecycleMode::Discover {
         // 只有这两版有 `server/discover`；顺序即偏好。
-        preferred_versions: vec![
-            ProtocolVersion::V_2026_07_28,
-            ProtocolVersion::V_2025_11_25,
-        ],
+        preferred_versions: vec![ProtocolVersion::V_2026_07_28, ProtocolVersion::V_2025_11_25],
     }
 }
 
@@ -201,8 +198,10 @@ async fn connect_with(
                     return Err(if detail.is_empty() {
                         err
                     } else {
-                        format!("{err}
-{detail}")
+                        format!(
+                            "{err}
+{detail}"
+                        )
                     });
                 }
             };
@@ -431,9 +430,7 @@ pub async fn list_tools(
 ) -> Result<Vec<crate::mcp::types::McpTool>, String> {
     let tools = tokio::time::timeout(timeout, service.list_all_tools())
         .await
-        .map_err(|_| {
-            "MCP tools/list timed out (server may be paginating without end)".to_string()
-        })?
+        .map_err(|_| "MCP tools/list timed out (server may be paginating without end)".to_string())?
         .map_err(|err| classify_error("tools/list", &err))?;
     tools.into_iter().map(tool_from_rmcp).collect()
 }
@@ -570,12 +567,11 @@ mod tests {
 
     #[test]
     fn oauth_prefix_on_403_insufficient_scope() {
-        let err: TestHttpError = StreamableHttpError::InsufficientScope(
-            InsufficientScopeError::new(
+        let err: TestHttpError =
+            StreamableHttpError::InsufficientScope(InsufficientScopeError::new(
                 "Bearer error=\"insufficient_scope\", scope=\"files:read\"".to_string(),
                 Some("files:read".to_string()),
-            ),
-        );
+            ));
         assert!(classify_error("connect", &err).starts_with("OAUTH_REQUIRED: "));
     }
 
@@ -644,14 +640,18 @@ mod tests {
         assert!(suggests_new_protocol("server said: Method Not Found"));
 
         // 这些都不该触发重试。
-        assert!(!suggests_new_protocol("Failed to start MCP server X: No such file"));
+        assert!(!suggests_new_protocol(
+            "Failed to start MCP server X: No such file"
+        ));
         assert!(!suggests_new_protocol(
             "OAUTH_REQUIRED: MCP connect failed: authorization required: Bearer"
         ));
         assert!(!suggests_new_protocol(
             "MCP connect failed: request timeout after PT30S"
         ));
-        assert!(!suggests_new_protocol("code -32600, message Invalid request"));
+        assert!(!suggests_new_protocol(
+            "code -32600, message Invalid request"
+        ));
     }
 
     /// legacy 路径宣称的版本不能被顺手改掉：所有现存服务器走的都是这条路，
@@ -761,7 +761,10 @@ mod tests {
         let Err(err) = connect(&server, &http).await else {
             panic!("handshake must fail for a non-MCP process");
         };
-        assert!(err.contains("missing-dependency"), "错误里必须带上 stderr: {err}");
+        assert!(
+            err.contains("missing-dependency"),
+            "错误里必须带上 stderr: {err}"
+        );
     }
 
     #[test]
@@ -771,7 +774,10 @@ mod tests {
             "Bearer abc".to_string(),
         )]))
         .expect("Authorization 不是 rmcp 的保留头，必须能过");
-        assert_eq!(ok.get(&HeaderName::from_static("authorization")).unwrap(), "Bearer abc");
+        assert_eq!(
+            ok.get(&HeaderName::from_static("authorization")).unwrap(),
+            "Bearer abc"
+        );
 
         assert!(custom_headers(&HashMap::from([(
             "bad header".to_string(),

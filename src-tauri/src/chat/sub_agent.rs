@@ -1151,11 +1151,8 @@ pub fn handle_agent_spawn<'a>(
         let skill_registry =
             crate::skills::build_registry(ctx.app, &settings.chat_tools.skill_scan_paths)
                 .unwrap_or_default();
-        let persona = compose_persona_with_preloaded_skills(
-            &def.system_prompt,
-            &skill_registry,
-            &def.skills,
-        );
+        let persona =
+            compose_persona_with_preloaded_skills(&def.system_prompt, &skill_registry, &def.skills);
         let system_prompt = build_chat_system_prompt(
             &language,
             false,
@@ -1812,7 +1809,10 @@ mod tests {
         assert!(filtered.is_empty(), "deny-all empties the pool");
 
         let narrowing_requested = !def.tools.is_empty() || !def.disallowed_tools.is_empty();
-        assert!(narrowing_requested, "the denylist alone must trip the guard");
+        assert!(
+            narrowing_requested,
+            "the denylist alone must trip the guard"
+        );
         assert!(deny_emptied_pool(&pool, &def));
     }
 

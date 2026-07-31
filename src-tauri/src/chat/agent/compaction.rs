@@ -1220,8 +1220,11 @@ pub(crate) async fn maybe_compact_send_view(env: &LoopEnv<'_>, state: &mut RunSt
     // 零额外计算。粒度是「每轮一次」而不是每个 token：内置路径的分子来自 provider 的
     // usage，只有一次模型调用结束才有新数，中途没有更细的真实来源。
     // 子 agent 的 host 走默认 no-op，用量不会混进主对话。
-    env.host
-        .emit_context_usage_live(&config.conversation_id, estimated as u64, Some(window as u64));
+    env.host.emit_context_usage_live(
+        &config.conversation_id,
+        estimated as u64,
+        Some(window as u64),
+    );
     if estimated <= budget {
         // 未超预算：本步无需压缩。重置 anti-thrashing 计数（Gap 2）——上下文已回到预算内。
         state.compaction_unresolved_rounds = 0;

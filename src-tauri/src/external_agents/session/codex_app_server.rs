@@ -1090,7 +1090,11 @@ mod tests {
     /// 此前这两条真机测试驱动的是 `run_codex_app_server_session` —— 一个只被它们自己吊着命的
     /// 一次性驱动，即同一协议的第二份实现。改成驱动生产代码后那份实现被删掉了。
     async fn live_codex_turn(prompt: &str, wall_clock: Duration) -> Option<Vec<UnifiedAgentEvent>> {
-        let bin = match crate::external_agents::spawn::resolve_binary(&crate::external_agents::defs::codex::CODEX_AGENT_DEF).await {
+        let bin = match crate::external_agents::spawn::resolve_binary(
+            &crate::external_agents::defs::codex::CODEX_AGENT_DEF,
+        )
+        .await
+        {
             Some(bin) => bin,
             None => {
                 eprintln!("SKIP: 本机没有可用的 codex CLI");
@@ -1148,9 +1152,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live codex login + network"]
     async fn codex_app_server_smoke() {
-        let Some(captured) =
-            live_codex_turn("Reply with exactly the token SMOKE_OK and nothing else.", Duration::from_secs(90))
-                .await
+        let Some(captured) = live_codex_turn(
+            "Reply with exactly the token SMOKE_OK and nothing else.",
+            Duration::from_secs(90),
+        )
+        .await
         else {
             return;
         };

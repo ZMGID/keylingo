@@ -171,8 +171,16 @@ mod tests {
     #[test]
     fn instructions_via_launch_flag_only_claude() {
         assert!(instructions_via_launch_flag("claude"));
-        for other in ["codex", "pi", "kimi", "opencode", "cursor-agent", "grok", "gemini", "hermes"]
-        {
+        for other in [
+            "codex",
+            "pi",
+            "kimi",
+            "opencode",
+            "cursor-agent",
+            "grok",
+            "gemini",
+            "hermes",
+        ] {
             assert!(
                 !instructions_via_launch_flag(other),
                 "{other} 没有核实过等价 flag，必须仍走正文注入（spec 第 12 条）"

@@ -407,10 +407,7 @@ fn parse_kimi_model_efforts(
             continue;
         };
         let key = key.trim();
-        if !section
-            .as_deref()
-            .is_some_and(|s| s.starts_with("models."))
-        {
+        if !section.as_deref().is_some_and(|s| s.starts_with("models.")) {
             continue;
         }
         match key {
@@ -435,8 +432,8 @@ fn parse_kimi_model_efforts(
     out
 }
 
-fn read_kimi_model_efforts() -> std::collections::HashMap<String, (Vec<RuntimeModelOption>, Option<String>)>
-{
+fn read_kimi_model_efforts(
+) -> std::collections::HashMap<String, (Vec<RuntimeModelOption>, Option<String>)> {
     let Some(base) = directories::BaseDirs::new() else {
         return std::collections::HashMap::new();
     };

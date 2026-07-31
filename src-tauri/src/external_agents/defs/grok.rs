@@ -226,7 +226,10 @@ mod tests {
             })
             .collect();
         eprintln!("grok smoke text: {text:?}");
-        assert!(matches!(result, Ok(Ok(Ok(())))), "ACP turn failed: {result:?}");
+        assert!(
+            matches!(result, Ok(Ok(Ok(())))),
+            "ACP turn failed: {result:?}"
+        );
         assert!(text.contains("GROK_SMOKE_OK"), "got: {text:?}");
         // 分子必须真的到手：grok 既不发 `usage_update` 也不填 `result.usage`，用量只在
         // `result._meta` 里（见 `acp::usage_from_prompt_result`）。少了那条路这里恒为空，

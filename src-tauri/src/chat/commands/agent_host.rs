@@ -79,7 +79,12 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         used_tokens: u64,
         context_window_tokens: Option<u64>,
     ) {
-        emit_chat_context_usage_live(&self.app, conversation_id, used_tokens, context_window_tokens);
+        emit_chat_context_usage_live(
+            &self.app,
+            conversation_id,
+            used_tokens,
+            context_window_tokens,
+        );
     }
 
     fn persist_partial_assistant(

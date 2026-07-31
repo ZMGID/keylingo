@@ -20,8 +20,8 @@ use crate::chat::types::{
 use crate::chat::Conversation;
 use crate::external_agents::defs::claude::append_system_prompt_file_args;
 use crate::external_agents::prompt::{
-    compose_external_prompt, compose_external_prompt_passthrough, cwd_hint, is_cli_slash_input,
-    instructions_via_launch_flag,
+    compose_external_prompt, compose_external_prompt_passthrough, cwd_hint,
+    instructions_via_launch_flag, is_cli_slash_input,
 };
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::session::acp::AcpMcpServer;
@@ -73,7 +73,13 @@ fn write_system_prompt_file(conversation_id: &str, instructions: &str) -> Result
     // conversation_id 来自内部 uuid，但仍做一次保守净化——它要拼进文件名。
     let safe_id: String = conversation_id
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
     let path = std::env::temp_dir().join(format!("{SYSTEM_PROMPT_FILE_PREFIX}{safe_id}.md"));
     std::fs::write(&path, instructions).map_err(|e| format!("write system prompt file: {e}"))?;
@@ -804,7 +810,9 @@ where
         Some(control) => (control, reuse_prompt.to_string()),
         None => {
             let resume_native = load_live_handle(app, conversation_id)
-                .filter(|h| h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag)
+                .filter(|h| {
+                    h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag
+                })
                 .map(|h| h.native_id);
             // We intended to continue an existing native session iff a matching handle was
             // persisted. If the resume then fails and we fall back to fresh, the prior context
@@ -830,7 +838,9 @@ where
                 // 但只处理流里那条会漏掉这个场景）。降级方式与轮内失败完全一致。
                 Err(err)
                     if !dropped_resume
-                        && crate::external_agents::stream::claude::is_missing_session_error(&err) =>
+                        && crate::external_agents::stream::claude::is_missing_session_error(
+                            &err,
+                        ) =>
                 {
                     dropped_resume = true;
                     turn_args = drop_resume_for_fresh_session(
@@ -1473,8 +1483,7 @@ impl ApprovalHost<'_> {
                     prompt,
                 )
                 .await;
-                let approved =
-                    answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
+                let approved = answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
                 return crate::external_agents::session::live::ApprovalDecision {
                     request_id: ask.request_id,
                     approved,
@@ -1630,7 +1639,10 @@ fn claude_ask_user_updated_input(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            answers.insert(text.to_string(), serde_json::Value::String(custom.to_string()));
+            answers.insert(
+                text.to_string(),
+                serde_json::Value::String(custom.to_string()),
+            );
             continue;
         }
         let labels: Vec<String> = answer
@@ -2654,7 +2666,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_segment_tracker_reuses_text_segment_for_deltas() {        let mut segments = Vec::new();
+    fn stream_segment_tracker_reuses_text_segment_for_deltas() {
+        let mut segments = Vec::new();
         let mut order = 0u32;
         let mut tracker = StreamSegmentTracker::default();
 
@@ -2759,7 +2772,13 @@ mod tests {
         }];
         let mut order = 3u32;
 
-        append_final_text(&mut content, &mut segments, &mut order, 1, "claude stderr：boom");
+        append_final_text(
+            &mut content,
+            &mut segments,
+            &mut order,
+            1,
+            "claude stderr：boom",
+        );
 
         assert_eq!(content, "已创建 dup.md。\n\nclaude stderr：boom");
         assert_eq!(segments.len(), 2);
@@ -2789,7 +2808,13 @@ mod tests {
         let mut segments = Vec::new();
         let mut order = 0u32;
 
-        append_final_text(&mut content, &mut segments, &mut order, 0, "claude 命令已执行");
+        append_final_text(
+            &mut content,
+            &mut segments,
+            &mut order,
+            0,
+            "claude 命令已执行",
+        );
 
         assert_eq!(content, "claude 命令已执行");
         assert_eq!(segments.len(), 1);
@@ -2819,12 +2844,24 @@ mod tests {
     #[test]
     fn transient_failure_retries_fresh_once() {
         assert_eq!(
-            persistent_failure_action("ACP session exited mid-turn", "cursor-agent", false, false, false),
+            persistent_failure_action(
+                "ACP session exited mid-turn",
+                "cursor-agent",
+                false,
+                false,
+                false
+            ),
             PersistentFailureAction::RetryFresh
         );
         // Already retried → give up.
         assert_eq!(
-            persistent_failure_action("ACP session exited mid-turn", "cursor-agent", true, false, false),
+            persistent_failure_action(
+                "ACP session exited mid-turn",
+                "cursor-agent",
+                true,
+                false,
+                false
+            ),
             PersistentFailureAction::Fatal
         );
     }
@@ -2928,13 +2965,17 @@ mod tests {
             !fresh.contains(&"dead-id".to_string()),
             "死 id 的值没被一起摘掉（会变成非法位置参数）：{fresh:?}"
         );
-        assert!(fresh.windows(2).any(|w| w == ["--session-id", "brand-new-id"]));
+        assert!(fresh
+            .windows(2)
+            .any(|w| w == ["--session-id", "brand-new-id"]));
         assert_eq!(
             claude_session_id_from_args(&fresh).as_deref(),
             Some("brand-new-id")
         );
         // 其余参数原样保留。
-        assert!(fresh.windows(2).any(|w| w == ["--permission-mode", "bypassPermissions"]));
+        assert!(fresh
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "bypassPermissions"]));
     }
 
     #[test]
@@ -3022,7 +3063,10 @@ mod tests {
         // 选项 id 是**下标**（claude 的选项没有 id），答复时按同一个下标翻回 label。
         assert_eq!(question.options[0].id, "0");
         assert_eq!(question.options[0].label, "Redis");
-        assert_eq!(question.options[0].description.as_deref(), Some("跨进程共享"));
+        assert_eq!(
+            question.options[0].description.as_deref(),
+            Some("跨进程共享")
+        );
         assert_eq!(question.options[1].id, "1");
         assert!(question.options[1].description.is_none());
     }
@@ -3060,7 +3104,10 @@ mod tests {
             )]),
         };
         let updated = claude_ask_user_updated_input(&input, &answered);
-        assert_eq!(updated["answers"]["用哪种缓存？"], serde_json::json!("内存"));
+        assert_eq!(
+            updated["answers"]["用哪种缓存？"],
+            serde_json::json!("内存")
+        );
         // 原问题必须原样回传（官方要求）。
         assert_eq!(updated["questions"], input["questions"]);
     }
@@ -3109,7 +3156,13 @@ mod tests {
             StreamFormat::PiRpc,
         ] {
             assert_eq!(
-                launch_config_for_turn(protocol, Some("opus"), Some("high"), Some("plan"), Some("h")),
+                launch_config_for_turn(
+                    protocol,
+                    Some("opus"),
+                    Some("high"),
+                    Some("plan"),
+                    Some("h")
+                ),
                 LaunchConfig::default(),
                 "{protocol:?} 不该参与启动指纹判定"
             );
