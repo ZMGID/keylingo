@@ -3076,24 +3076,22 @@ button.chat-composer-status-item:hover {
    所以高度按 32px 胶囊控件取 44（38 只够放三键，装不下控件）。
    侧栏卡片 / Dock / 主区都在带下方，故三键可贴角、不必让各视图 padding-right 躲开。
 
-   padding-left 对齐的是侧栏 NavRow 的**图标列**，不是卡片左缘。按钮盒子透明不可见，
-   眼睛跟的是 glyph —— 早先按盒子对到 8px，结果顶栏铅笔与侧栏「新建聊天」铅笔（同一动作）
-   上下错开 9px，读作坏版。推导：
-     侧栏 glyph 中心 = 卡片 margin 8 + border 1 + nav px-3 12 + NavRow px-3 12 + 图标格半宽 10 = 43
-     顶栏 glyph 中心 = padding-left P + 按钮半宽 14（h-7 w-7）
-   → P = 29。改 Sidebar 的 nav/NavRow 内距或按钮尺寸时必须重算这个数。 */
+   padding-left 按**盒子左缘**对齐窗口内容左缘：侧栏卡片 margin-left 8，所以第一枚按钮的
+   盒子左缘也放 8 —— 顶栏钮与下方侧栏卡片共一条竖直边。
+   （曾按 glyph 对到侧栏 NavRow 图标列 P=29；那让按钮离窗口边太远，改回按边对齐。
+   代价：顶栏铅笔 glyph 比侧栏「新建聊天」铅笔靠左 ~21px，这是有意的取舍。） */
 .chat-titlebar-strip {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 2px;
   height: 44px;
-  padding-left: 29px;
+  padding-left: 8px;
 }
 
 /* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，
    把业务控件推到主区卡片左缘 —— 否则控件压在侧栏卡片上方，读作错位。
-   宽度 = 主区卡片左缘 256（侧栏 margin 8 + w-[240px] + margin 8）− 带自身 padding-left 29 = 227，
+   宽度 = 主区卡片左缘 256（侧栏 margin 8 + w-[240px] + margin 8）− 带自身 padding-left 8 = 248，
    与 `.chat-sidebar-shell` 的 w-[240px] + margin:8 同步（改一处必改另一处）。
    用 min-width 而非 width 做过渡：width 的收起态是 auto（按钮自然宽），auto 不可插值、
    动画会直接跳；min-width 两端都是具体值，且 max(内容宽, min-width) 天然贴合按钮宽度，
@@ -3109,7 +3107,7 @@ button.chat-composer-status-item:hover {
 }
 
 .chat-titlebar-strip-nav--reserve {
-  min-width: 227px;
+  min-width: 248px;
 }
 
 /* 设置页：带浮起、不占行高，让 200/52px 灰导航栏自己从 y=0 画起（见 ChatTitlebar 注释）。

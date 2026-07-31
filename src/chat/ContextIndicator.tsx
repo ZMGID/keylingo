@@ -19,6 +19,9 @@ const PANEL_GAP = 8
 const VIEW_MARGIN = 8
 // 弹层尽量贴底栏，限制高度，少盖住上方对话消息。
 const PANEL_MAX_H = 220
+// 圆环：viewBox 20×20 里留 1.5px 描边半宽 + 1px 余量。
+const RING_RADIUS = 7.5
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
 
 interface ContextIndicatorProps {
   contextState?: ConversationContextState | null
@@ -154,7 +157,7 @@ export function ContextIndicator({
   const sourceLabel = isExternalContext
     ? (isCliReported ? t.contextSourceCliReported : t.contextSourceCliEstimated)
     : (isProviderReported ? t.contextSourceProviderReported : t.contextSourceKivio)
-  const ringDegrees = usageRatio == null ? 0 : Math.max(0, Math.min(1, usageRatio)) * 360
+  const ringRatio = usageRatio == null ? 0 : Math.max(0, Math.min(1, usageRatio))
   const canCompress = Boolean(onCompress) && !compressing && !loading && messageCount > 2
   const compressLabel = isExternalContext
     ? (compressing ? t.contextCliCompacting : t.contextCliCompact)
@@ -340,14 +343,32 @@ export function ContextIndicator({
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span
-          className="grid size-5 place-items-center rounded-full"
-          style={{
-            background: `conic-gradient(${color} ${ringDegrees}deg, rgba(120,120,120,.22) 0deg)`,
-          }}
-        >
-          <span className="size-3 rounded-full bg-white dark:bg-[#212121]" />
-        </span>
+        {/* SVG 描边环，不用 conic-gradient + 白心盖中间：白心在点阵/半透底上就是一坨实白，
+            且 conic 的边缘是锯齿。stroke 的圆心天然透空，底色直接透上来。 */}
+        <svg viewBox="0 0 20 20" className="size-5 -rotate-90" aria-hidden="true">
+          <circle
+            cx="10"
+            cy="10"
+            r={RING_RADIUS}
+            fill="none"
+            strokeWidth="3"
+            className="stroke-black/[0.16] dark:stroke-white/[0.20]"
+          />
+          {ringRatio > 0 && (
+            <circle
+              cx="10"
+              cy="10"
+              r={RING_RADIUS}
+              fill="none"
+              stroke={color}
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeDasharray={RING_CIRCUMFERENCE}
+              strokeDashoffset={RING_CIRCUMFERENCE * (1 - ringRatio)}
+              className="transition-[stroke-dashoffset,stroke] duration-500 ease-out"
+            />
+          )}
+        </svg>
       </button>
       {panel}
     </div>
