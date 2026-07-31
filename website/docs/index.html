@@ -223,6 +223,8 @@
       <a class="item" href="#/local-agents" data-page="local-agents">Kivio Code 与外部 Agent</a>
       <a class="item" href="#/knowledge" data-page="knowledge">知识库</a>
       <a class="item" href="#/sandbox" data-page="sandbox">代码沙箱</a>
+      <a class="item" href="#/dock" data-page="dock">右侧 Dock</a>
+      <a class="item" href="#/hooks" data-page="hooks">生命周期 Hooks</a>
     </div>
     <div class="group">
       <div class="group-label">屏幕工具</div>
@@ -274,6 +276,8 @@
           <tr><td><a href="#/local-agents">Kivio Code 与外部 Agent</a></td><td>终端编码 Agent，以及 Claude Code、Codex、OpenCode、Pi 等本地 CLI 接管</td></tr>
           <tr><td><a href="#/knowledge">知识库</a></td><td>向量 + 全文混合检索 RAG，全部本地索引</td></tr>
           <tr><td><a href="#/sandbox">代码沙箱</a></td><td>Pyodide 本地运行 Python，图表/文档产物自动交付</td></tr>
+          <tr><td><a href="#/dock">右侧 Dock</a></td><td>文件树、Git 审查与真实 PTY 终端，绑定对话工作目录</td></tr>
+          <tr><td><a href="#/hooks">生命周期 Hooks</a></td><td>在对话的 8 个时点跑脚本或发 HTTP 请求</td></tr>
           <tr><td><a href="#/translate">划词翻译</a></td><td>全局热键，流式翻译，提交即回填原应用</td></tr>
           <tr><td><a href="#/lens">Lens 取景</a></td><td>圈选屏幕任意区域或窗口，直接进入视觉对话</td></tr>
           <tr><td><a href="#/ocr">截图翻译与 OCR</a></td><td>Apple Vision / Windows OCR / 离线 RapidOCR 三引擎</td></tr>
@@ -530,6 +534,60 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <h2 id="sandbox-artifacts">产物导出</h2>
       <p>没有单独的「导出」工具 —— 沙箱运行前后会自动扫描虚拟文件系统里新增/变化的文件（图片、表格、CSV、HTML、Markdown 等），把它们作为产物提取出来，写入这次对话专属的交付目录（<code>~/Kivio/outputs/&lt;对话ID&gt;/</code>），并在聊天界面里渲染成可下载的文件卡片。</p>
       <p>每次对话最多累计 16 个交付文件，超出时按最旧优先淘汰；这些文件会一直保留，直到对话本身被删除。</p>
+    </article>
+
+    <article data-page="dock" class="hidden">
+      <div class="crumb">智能体</div>
+      <h1>右侧 Dock</h1>
+      <p class="lead">文件树、Git 审查、真实终端 —— 看着智能体改你的文件，而不是猜它改了什么。</p>
+      <p>聊天窗右侧可以拉出一条 IDE 式侧栏，绑定<b>当前对话的工作目录</b>：项目对话是项目根目录，非项目对话是该对话专属的工作区目录。内置运行时与外部 CLI 代理各自解析各自的目录，Dock 显示的始终是这一轮真正会被写入的那个。</p>
+      <p>宽度可拖拽调整，开合状态、宽度、当前页签与每个项目展开过的目录都会记住。</p>
+      <h2 id="dock-files">文件树</h2>
+      <ul>
+        <li>框选、Ctrl / Shift 多选，鼠标拖拽移动文件，批量删除。</li>
+        <li>内联新建与重命名：失焦即确认，出错时错误文字直接显示在行内；新建完成后自动选中并定位。</li>
+        <li>就地查看器：点文件即可查看，带行号，可编辑保存。二进制文件与超过 1MiB 的文件会被拒绝打开。</li>
+        <li>目录变动由文件系统监听器推送，不需要手动刷新。</li>
+      </ul>
+      <h2 id="dock-git">Git 审查</h2>
+      <p>工作目录是 Git 仓库时，这个页签列出改动文件并显示 diff。未跟踪文件的状态徽章用 <code>A</code>（新增）而不是 <code>?</code>，免得读成未知错误。单个 diff 超过 512KB 会被截断。</p>
+      <p>Git 操作直接调用系统的 <code>git</code> 命令，遇到 <code>index.lock</code> 冲突会自动重试。</p>
+      <h2 id="dock-terminal">终端</h2>
+      <p>真正的 PTY 终端（macOS 用 forkpty，Windows 用 ConPTY），不是命令输出的模拟回显 —— 交互式程序、颜色、光标控制都正常工作。工作目录与 Dock 一致。关闭会话时其子进程一并结束。</p>
+      <h2 id="dock-diff">与工具卡片联动</h2>
+      <p>智能体调用 <code>write</code> / <code>edit</code> 时，聊天里的工具卡片折叠行会直接显示 <code>+N -N</code>（增绿删红）。展开是富渲染 diff：带 <code>@@</code> 行号列、词级差异高亮、整行铺色。</p>
+      <p>点卡片上的文件名会在右侧 Dock 里预览这个文件（<code>write</code> / <code>edit</code> 看 diff，<code>read</code> 看文件内容）。文件在工作目录之外时，用它所在的目录作为临时根目录打开。</p>
+    </article>
+
+    <article data-page="hooks" class="hidden">
+      <div class="crumb">智能体</div>
+      <h1>生命周期 Hooks</h1>
+      <p class="lead">在对话的 8 个时点自动跑一段脚本或发一个 HTTP 请求。</p>
+      <p>内置智能体运行时会在固定的生命周期事件上派发 Hook，用来做通知、埋点、外部联动这类事情。在设置的 <b>Hooks</b> 页添加、启停与编辑。</p>
+      <h2 id="hooks-events">事件</h2>
+      <table>
+        <thead><tr><th>事件</th><th>时机</th></tr></thead>
+        <tbody>
+          <tr><td><code>agent_start</code> / <code>agent_end</code></td><td>整轮智能体运行的开始与结束</td></tr>
+          <tr><td><code>turn_start</code> / <code>turn_end</code></td><td>每一轮工具循环的开始与结束</td></tr>
+          <tr><td><code>message_start</code> / <code>message_end</code></td><td>每条模型消息的开始与结束</td></tr>
+          <tr><td><code>tool_execution_start</code> / <code>tool_execution_end</code></td><td>每次工具调用的开始与结束</td></tr>
+        </tbody>
+      </table>
+      <h2 id="hooks-types">两种 Hook</h2>
+      <ul>
+        <li><b>命令</b> —— 执行一段 Shell 脚本，事件载荷以 JSON 从 stdin 传入。</li>
+        <li><b>HTTP</b> —— 向指定 URL 发请求，可自定义方法与请求头，载荷为 JSON 请求体。</li>
+      </ul>
+      <p>两种都可设置超时。除 stdin / 请求体外，命令 Hook 还能读到这些环境变量（与 Claude Code、Codex 的事实标准对齐）：</p>
+      <p><code>KIVIO_HOOK_EVENT</code> · <code>KIVIO_HOOK_NAME</code> · <code>KIVIO_CONVERSATION_ID</code> · <code>KIVIO_RUN_ID</code> · <code>KIVIO_WORKDIR</code> · <code>KIVIO_TOOL_NAME</code></p>
+      <h2 id="hooks-semantics">行为约定</h2>
+      <ul>
+        <li><b>fire-and-forget</b> —— Hook 不会阻断工具调用，也不能改写工具参数或拦截执行。失败只在界面上报一条警告，不影响这一轮对话。</li>
+        <li><b>零 Hook 零开销</b> —— 一条 Hook 都没启用时，运行时完全不会走这条链路。</li>
+        <li><b>作用范围</b> —— 只对 Kivio Desktop 内置的智能体运行时生效；外部 CLI 代理（claude、codex 等）由各自的 CLI 驱动，不触发这些事件。</li>
+        <li>取消对话时，已经派发出去的 Hook 仍会正常收到结束事件，不会被吞掉。</li>
+      </ul>
     </article>
 
     <article data-page="translate" class="hidden">
