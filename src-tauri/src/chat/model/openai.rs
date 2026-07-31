@@ -516,13 +516,10 @@ impl OpenAiChatProvider<'_> {
         {
             body["thinking"] = serde_json::json!({ "type": "disabled" });
         }
-        // 思考等级 → OpenAI Chat `reasoning_effort`（统一走 model_metadata 单一映射源）。
+        // 思考等级 → OpenAI Chat `reasoning_effort`，原样下发（档位由模型库 reasoningEfforts 门控）。
         // 代理普遍接受;不发 Qwen/vLLM 私有的 enable_thinking / chat_template_kwargs。
-        if let Some(effort) = crate::chat::model_metadata::reasoning_effort_wire(
-            crate::settings::ProviderApiFormat::OpenAiChat,
-            request.options.thinking_level.as_deref(),
-        ) {
-            body["reasoning_effort"] = Value::String(effort);
+        if let Some(effort) = request.options.thinking_level.as_deref() {
+            body["reasoning_effort"] = Value::String(effort.to_string());
         }
         // 模型级额外请求体字段（model_overrides[model].extra_body）：原样 merge 进 body 根部，
         // 给严格端点塞标准 schema 外的私有旋钮（NVIDIA NIM / vLLM `chat_template_kwargs` 等）。

@@ -150,8 +150,10 @@ fn model_database_image_generation(model: &str) -> Option<bool> {
 }
 
 /// 某模型支持的「思考等级」(reasoning effort) 列表，供前端的等级选择器决定显示哪些档。
-/// 优先取模型库 `reasoningEfforts` 显式列表（各家支持不构成单调子集，故逐模型列举，便于维护）；
-/// 库里没有时：Anthropic 家族给全档(low..max)，其余给通用安全子集 low/medium/high。
+/// 取模型库 `reasoningEfforts` 显式列表（各家支持不构成单调子集，故逐模型列举，便于维护）；
+/// **显式空数组 = 该模型没有 effort 旋钮**（Anthropic 4.6 以下、GLM-4.7、Kimi K2.x、通义……），
+/// 上游 `resolve_thinking` 据此不下发任何等级字段。库里没这个 key 时才兜底：
+/// Anthropic 家族给全档(low..max)，其余给通用安全子集 low/medium/high。
 /// 始终只保留已知合法值并去重，避免脏数据进入请求。
 pub fn reasoning_efforts_for_model(model: &str, api_format: &str) -> Vec<String> {
     const KNOWN: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -167,49 +169,25 @@ pub fn reasoning_efforts_for_model(model: &str, api_format: &str) -> Vec<String>
                 }
             }
         }
-        if !out.is_empty() {
-            return out;
-        }
+        return out;
     }
-    if api_format == "anthropic_messages" {
+    // 兜底按家族分。api_format 先归一化：设置里存的是 "anthropic" 这类原始别名，
+    // 直接比 "anthropic_messages" 永远不相等（旧写法的 bug）。
+    if crate::settings::ProviderApiFormat::from_raw(api_format)
+        == crate::settings::ProviderApiFormat::AnthropicMessages
+    {
         return KNOWN.iter().map(|s| s.to_string()).collect();
     }
     vec!["low".into(), "medium".into(), "high".into()]
 }
 
-/// 把「每对话思考等级」规范成各家 wire 接受的 **reasoning effort 值**（任务 07-23 统一）。
-///
-/// 输入是 `resolve_thinking` 产出的规范等级：`off` 已在上游转为 `None`（关思考），故这里
-/// 只会见到 `None` 或 `low|medium|high|xhigh|max`。这是**四个适配器共用的单一事实源**，
-/// 避免各家各写一份映射而漂移（此前 openai/anthropic 原样透传、responses 各映一套、
-/// gemini 干脆忽略等级）。各适配器仍各自负责把返回值塞进自己的 wire 字段
-/// （openai `reasoning_effort` / responses `reasoning.effort` / anthropic
-/// `output_config.effort` / gemini `thinkingConfig.thinkingLevel`）。
-///
-/// `None` = 不发 effort（关思考或未设且调用方不兜底）。
-pub(crate) fn reasoning_effort_wire(
-    kind: crate::settings::ProviderApiFormat,
-    level: Option<&str>,
-) -> Option<String> {
-    use crate::settings::ProviderApiFormat::{
-        AnthropicMessages, Gemini, OpenAiChat, OpenAiResponses,
-    };
-    let level = level.map(str::trim).filter(|l| !l.is_empty())?;
-    let mapped = match kind {
-        // OpenAI（Chat/Responses）、Gemini 3.x thinkingLevel：官方档 minimal/low/medium/high。
-        // 我们的规范集无 minimal（off 已转 None）；xhigh/max 这两档它们不认，收敛到 high。
-        OpenAiChat | OpenAiResponses | Gemini => match level {
-            "low" | "medium" | "high" => level,
-            _ => "high", // xhigh/max/未知 → high
-        },
-        // Anthropic output_config.effort：支持全档，原样透传（前端已按模型库 reasoningEfforts 门控）。
-        AnthropicMessages => match level {
-            "low" | "medium" | "high" | "xhigh" | "max" => level,
-            _ => "high",
-        },
-    };
-    Some(mapped.to_string())
-}
+// 思考等级不再在此做「协议级白名单 → 收敛」的二次映射。哪个模型认哪几档是**逐模型**的
+// （xhigh 在 Chat Completions 和 Responses 两个端点都收，但 gpt-5-codex 传了就 400），
+// 用 api_format 粒度去卡必然错，且静默改档会让用户在 UI 选了 xhigh 却发出 high，毫无信号。
+// 唯一判据是模型库的 `reasoningEfforts`（见 `reasoning_efforts_for_model`），前端选择器只
+// 渲染这个列表；值本身已被校验两遍（落盘 `update_conversation_settings` + 取用
+// `resolve_thinking`），到适配器手上必是 `low|medium|high|xhigh|max`。选错档就吃 provider
+// 的 400 —— 那是正确的报错，不是需要兜底的异常。
 
 fn model_pricing_from_model_info(info: Option<&ModelInfo>) -> Option<ModelPricing> {
     info.and_then(|info| info.pricing.clone())
@@ -466,12 +444,20 @@ mod tests {
             ds.contains(&"max".to_string()) && ds.contains(&"xhigh".to_string()),
             "{ds:?}"
         );
-        // GPT-5：有 xhigh、无 max。
+        // GPT-5：有 xhigh、无 max（max 是 5.6 一代才加的）。
         let gpt = reasoning_efforts_for_model("gpt-5.5", "openai_chat");
         assert!(
             gpt.contains(&"xhigh".to_string()) && !gpt.contains(&"max".to_string()),
             "{gpt:?}"
         );
+        // gpt-5.6 全家（含 sol/terra/luna）的 reasoning_options 含 max。
+        for model in ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert_eq!(
+                reasoning_efforts_for_model(model, "openai_responses"),
+                vec!["low", "medium", "high", "xhigh", "max"],
+                "{model}"
+            );
+        }
         // Gemma：有 max、无 xhigh（非单调子集）。
         let gemma = reasoning_efforts_for_model("gemma4:31b", "openai_chat");
         assert!(
@@ -481,15 +467,74 @@ mod tests {
         // 库里没有 + 非 Anthropic → 安全子集 low/medium/high。
         let unknown = reasoning_efforts_for_model("some-random-model", "openai_chat");
         assert_eq!(unknown, vec!["low", "medium", "high"]);
-        // Anthropic 家族兜底 → 全档。
-        let anth = reasoning_efforts_for_model("whatever", "anthropic_messages");
-        assert!(
-            anth.contains(&"xhigh".to_string()) && anth.contains(&"max".to_string()),
-            "{anth:?}"
-        );
+        // Anthropic 家族兜底 → 全档。api_format 用设置里真实存的别名 "anthropic"（不是
+        // 规范名），归一化后同样命中。
+        for raw in ["anthropic", "anthropic_messages"] {
+            let anth = reasoning_efforts_for_model("whatever", raw);
+            assert!(
+                anth.contains(&"xhigh".to_string()) && anth.contains(&"max".to_string()),
+                "{raw}: {anth:?}"
+            );
+        }
+        // Kimi K3：reasoning_effort 只认 low/high/max（无 medium/xhigh）。
         assert_eq!(
             reasoning_efforts_for_model("kimi-k3", "openai_chat"),
-            vec!["max"]
+            vec!["low", "high", "max"]
+        );
+    }
+
+    #[test]
+    fn explicit_empty_list_means_no_effort_knob() {
+        // 显式 `[]` 必须原样返回空，不能掉进家族兜底 —— 上游 `resolve_thinking` 靠它判定
+        // 「这个模型没有 effort 旋钮」。Claude 4.5 及更早传 output_config.effort 会 400。
+        for (model, raw_format) in [
+            ("claude-sonnet-4.5", "anthropic"),
+            ("claude-opus-4", "anthropic"),
+            ("claude-haiku-4.5", "anthropic"),
+            ("claude-3.5-haiku", "anthropic"),
+            ("glm-4.7", "openai_chat"),   // 思考是模式控制，没有 effort
+            ("kimi-k2.7", "openai_chat"), // 思考强制开，无 effort
+            ("qwen3.7-max", "openai_chat"), // 用 thinking_budget 数值预算
+            ("minimax-m3", "openai_chat"),
+        ] {
+            assert!(
+                reasoning_efforts_for_model(model, raw_format).is_empty(),
+                "{model} 应为空档位"
+            );
+        }
+        // 4.6 与 4.7 的分界：4.6 止步 max，没有 xhigh。
+        assert_eq!(
+            reasoning_efforts_for_model("claude-opus-4.6", "anthropic"),
+            vec!["low", "medium", "high", "max"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model("claude-opus-4.7", "anthropic"),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+    }
+
+    #[test]
+    fn xhigh_gated_per_model_not_per_protocol() {
+        // 删掉 reasoning_effort_wire 的协议级白名单后，模型库是**唯一**门控：适配器原样下发
+        // 用户所选档位，选错就吃 provider 的 400。所以这份数据必须准，尤其是 xhigh 这一档
+        // ——它随 gpt-5.1-codex-max 引入，之前的 gpt-5 / gpt-5-codex 传了会 400。
+        for model in ["gpt-5", "gpt-5-pro", "gpt-5-codex"] {
+            assert!(
+                !reasoning_efforts_for_model(model, "openai_chat").contains(&"xhigh".to_string()),
+                "{model} 不支持 xhigh，不能出现在选择器里"
+            );
+        }
+        for model in ["gpt-5.4", "gpt-5.6"] {
+            assert!(
+                reasoning_efforts_for_model(model, "openai_chat").contains(&"xhigh".to_string()),
+                "{model} 支持 xhigh"
+            );
+        }
+        // Gemini thinkingLevel 只有 minimal/low/medium/high，无 xhigh/max；库里无条目，
+        // 走非 Anthropic 兜底 low/medium/high 即正确。
+        assert_eq!(
+            reasoning_efforts_for_model("gemini-3.2-pro", "gemini"),
+            vec!["low", "medium", "high"]
         );
     }
 
@@ -507,45 +552,6 @@ mod tests {
             model_overrides,
             compress_request_body: false,
         }
-    }
-
-    #[test]
-    fn reasoning_effort_wire_maps_per_family() {
-        use crate::settings::ProviderApiFormat::{
-            AnthropicMessages, Gemini, OpenAiChat, OpenAiResponses,
-        };
-        // None / 空 ⇒ 不发。
-        assert_eq!(reasoning_effort_wire(OpenAiChat, None), None);
-        assert_eq!(reasoning_effort_wire(OpenAiResponses, Some("  ")), None);
-        // OpenAI（Chat/Responses）+ Gemini：low/medium/high 透传，xhigh/max 收敛到 high。
-        for kind in [OpenAiChat, OpenAiResponses, Gemini] {
-            assert_eq!(
-                reasoning_effort_wire(kind, Some("low")).as_deref(),
-                Some("low")
-            );
-            assert_eq!(
-                reasoning_effort_wire(kind, Some("high")).as_deref(),
-                Some("high")
-            );
-            assert_eq!(
-                reasoning_effort_wire(kind, Some("xhigh")).as_deref(),
-                Some("high"),
-                "xhigh 应收敛到 high: {kind:?}"
-            );
-            assert_eq!(
-                reasoning_effort_wire(kind, Some("max")).as_deref(),
-                Some("high")
-            );
-        }
-        // Anthropic：全档原样透传。
-        assert_eq!(
-            reasoning_effort_wire(AnthropicMessages, Some("xhigh")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            reasoning_effort_wire(AnthropicMessages, Some("max")).as_deref(),
-            Some("max")
-        );
     }
 
     #[test]

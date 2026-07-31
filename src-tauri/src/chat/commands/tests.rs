@@ -35,39 +35,43 @@ use super::*;
 
 #[test]
 fn resolve_thinking_maps_levels_and_defaults_to_high() {
+    // 有 effort 旋钮的模型（gpt-5.6 支持 low/medium/high/xhigh）。
+    let r = |level: Option<&str>, global: bool| resolve_thinking(level, global, "gpt-5.6", "openai");
     // 未设置 → 默认档 high，不再跟随全局（全局只服务 lens / 翻译）。
-    assert_eq!(
-        resolve_thinking(None, true),
-        (true, Some("high".to_string()))
-    );
-    assert_eq!(
-        resolve_thinking(None, false),
-        (true, Some("high".to_string()))
-    );
+    assert_eq!(r(None, true), (true, Some("high".to_string())));
+    assert_eq!(r(None, false), (true, Some("high".to_string())));
     // off → 强制关。
-    assert_eq!(resolve_thinking(Some("off"), true), (false, None));
+    assert_eq!(r(Some("off"), true), (false, None));
     // 具体等级 → 开 + 带等级。
+    assert_eq!(r(Some("low"), false), (true, Some("low".to_string())));
+    assert_eq!(r(Some("high"), false), (true, Some("high".to_string())));
+    // xhigh / max 原样放行（该模型认不认由模型库门控，不在这里收敛）。
+    assert_eq!(r(Some("xhigh"), false), (true, Some("xhigh".to_string())));
+    assert_eq!(r(Some("max"), false), (true, Some("max".to_string())));
+    // 未知值 → 当作未设置，落默认档 high。
+    assert_eq!(r(Some("ultra"), true), (true, Some("high".to_string())));
+}
+
+#[test]
+fn resolve_thinking_drops_level_for_models_without_effort_knob() {
+    // 模型库里 `reasoningEfforts: []` = 没有 effort 旋钮。Claude 4.5 及更早不认
+    // `output_config.effort`（传了 400），这里就得把等级抹成 None，适配器自然不发。
+    for model in ["claude-sonnet-4.5", "claude-opus-4", "claude-haiku-4.5"] {
+        assert_eq!(
+            resolve_thinking(Some("high"), true, model, "anthropic"),
+            (true, None),
+            "{model} 不该带 effort"
+        );
+    }
+    // 4.6+ 反过来必须带上。
     assert_eq!(
-        resolve_thinking(Some("low"), false),
-        (true, Some("low".to_string()))
-    );
-    assert_eq!(
-        resolve_thinking(Some("high"), false),
-        (true, Some("high".to_string()))
-    );
-    // xhigh / max 也放行（是否被模型接受由前端按模型门控）。
-    assert_eq!(
-        resolve_thinking(Some("xhigh"), false),
-        (true, Some("xhigh".to_string()))
-    );
-    assert_eq!(
-        resolve_thinking(Some("max"), false),
+        resolve_thinking(Some("max"), true, "claude-opus-4.7", "anthropic"),
         (true, Some("max".to_string()))
     );
-    // 未知值 → 当作未设置，落默认档 high。
+    // off 仍然优先：关思考就是关思考。
     assert_eq!(
-        resolve_thinking(Some("ultra"), true),
-        (true, Some("high".to_string()))
+        resolve_thinking(Some("off"), true, "claude-opus-4.7", "anthropic"),
+        (false, None)
     );
 }
 

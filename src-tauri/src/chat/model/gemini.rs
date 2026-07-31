@@ -356,17 +356,14 @@ impl GeminiProvider<'_> {
         if !tools_arr.is_empty() {
             body["tools"] = Value::Array(tools_arr);
         }
-        // 思考等级 → thinkingConfig（统一走 model_metadata 单一映射源）。
+        // 思考等级 → thinkingConfig，原样下发（档位由模型库 reasoningEfforts 门控）。
         // 版本分叉:Gemini 3.x 用 `thinkingLevel`(字符串档位),2.5 系只认 `thinkingBudget`(数值),
         // 两者互斥、传错会 400。故 thinkingLevel 只对 3.x 下发;其余(2.5/未知)回退到仅 `includeThoughts`
         // (开思维输出、不强加档位)——保持改动前对 2.5 的非回归行为。includeThoughts 两条路都带,拿摘要。
-        if let Some(level) = crate::chat::model_metadata::reasoning_effort_wire(
-            crate::settings::ProviderApiFormat::Gemini,
-            request.options.thinking_level.as_deref(),
-        ) {
+        if let Some(level) = request.options.thinking_level.as_deref() {
             let mut thinking = serde_json::json!({ "includeThoughts": true });
             if gemini_supports_thinking_level(&request.model) {
-                thinking["thinkingLevel"] = Value::String(level);
+                thinking["thinkingLevel"] = Value::String(level.to_string());
             }
             body["generationConfig"]["thinkingConfig"] = thinking;
         }
@@ -1195,12 +1192,14 @@ mod tests {
             med["generationConfig"]["thinkingConfig"]["thinkingLevel"], "medium",
             "body: {med}"
         );
-        // max 在 Gemini 收敛到 high。
+        // 档位原样下发，适配器不再做协议级收敛：Gemini 的 thinkingLevel 只有 low/medium/high，
+        // 传 max 就吃 400 —— 该不该出现 max 由模型库 `reasoningEfforts` 门控（Gemini 条目均无
+        // 此字段，走 low/medium/high 兜底，故实际取不到 max）。
         let mut req_max = base.clone();
         req_max.options.thinking_level = Some("max".into());
         let mx = body_for(&req_max, false);
         assert_eq!(
-            mx["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high",
+            mx["generationConfig"]["thinkingConfig"]["thinkingLevel"], "max",
             "body: {mx}"
         );
         // Gemini 2.5：thinkingLevel 会 400，回退到仅 includeThoughts（非回归）。

@@ -337,13 +337,10 @@ impl OpenAiResponsesProvider<'_> {
             body["tools"] = Value::Array(tools_arr);
             body["tool_choice"] = Value::String("auto".to_string());
         }
-        // 思考等级 → Responses `reasoning.effort`（统一走 model_metadata 单一映射源）。
+        // 思考等级 → Responses `reasoning.effort`，原样下发（档位由模型库 reasoningEfforts 门控）。
         // 关键：gpt-5 系列在 minimal reasoning 下不执行 hosted web_search；resolve_thinking
-        // 已把「未显式设档」默认成 high，故内置搜索天然拿到非 minimal，无需在此另做兜底。
-        if let Some(effort) = crate::chat::model_metadata::reasoning_effort_wire(
-            crate::settings::ProviderApiFormat::OpenAiResponses,
-            request.options.thinking_level.as_deref(),
-        ) {
+        // 已把「未显式设档」默认成 high，故内置搜索天然拿到非 minimal。
+        if let Some(effort) = request.options.thinking_level.as_deref() {
             body["reasoning"] = serde_json::json!({ "effort": effort });
             // 无状态模式：Responses 的 `store` 默认 true（服务端保存会话状态并按
             // response id 串联轮次）。我们每轮都自带完整 input，不依赖服务端状态，
@@ -1366,11 +1363,12 @@ mod tests {
         req_high.options.thinking_level = Some("high".into());
         let high = adapter.request_body(&req_high, false);
         assert_eq!(high["reasoning"]["effort"], "high", "body: {high}");
-        // xhigh 在 OpenAI 收敛到 high。
+        // xhigh 原样下发（gpt-5.1-codex-max 起支持；哪些模型认由模型库 reasoningEfforts 门控，
+        // 适配器不再按协议收敛成 high）。
         let mut req_x = base.clone();
         req_x.options.thinking_level = Some("xhigh".into());
         let xh = adapter.request_body(&req_x, false);
-        assert_eq!(xh["reasoning"]["effort"], "high", "body: {xh}");
+        assert_eq!(xh["reasoning"]["effort"], "xhigh", "body: {xh}");
         // 纯对话（无内置、无思考档）⇒ 不发 reasoning。
         assert!(off.get("reasoning").is_none(), "body: {off}");
 

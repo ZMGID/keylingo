@@ -364,12 +364,12 @@ impl AnthropicMessagesProvider<'_> {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
-        // 思考等级 → adaptive thinking + `output_config.effort`（统一走 model_metadata 单一映射源）。
-        // Claude 4.6+/4.7/4.8/Fable5;budget_tokens 已被移除（发了 400）。
-        if let Some(effort) = crate::chat::model_metadata::reasoning_effort_wire(
-            crate::settings::ProviderApiFormat::AnthropicMessages,
-            request.options.thinking_level.as_deref(),
-        ) {
+        // 思考等级 → adaptive thinking + `output_config.effort`，原样下发。
+        // `output_config.effort` 只有 4.6+ / 5 代（Fable5、Sonnet5、Opus 4.6/4.7/4.8…）认，
+        // 4.5 及更早传了会 400 —— 这些模型在模型库里是 `reasoningEfforts: []`，
+        // 上游 `resolve_thinking` 已把等级抹成 None，故这里的 `if let` 自然不成立。
+        // budget_tokens 已被移除（发了 400）。
+        if let Some(effort) = request.options.thinking_level.as_deref() {
             body["thinking"] = serde_json::json!({ "type": "adaptive" });
             body["output_config"] = serde_json::json!({ "effort": effort });
         }

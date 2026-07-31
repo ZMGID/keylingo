@@ -55,7 +55,8 @@ function ThinkingLevelSelectorBase({
           .filter(isProviderEnabled)
           .find((p) => p.id === currentProviderId)?.apiFormat
         const got = await api.reasoningEffortsForModel(currentModel, apiFormat)
-        if (alive) setLevels(got.length > 0 ? got : FALLBACK_LEVELS)
+        // 空列表是有意义的答案（该模型没有 effort 旋钮），不能再兜底成 FALLBACK_LEVELS。
+        if (alive) setLevels(got)
       } catch {
         if (alive) setLevels(FALLBACK_LEVELS)
       }
@@ -65,8 +66,19 @@ function ThinkingLevelSelectorBase({
     }
   }, [currentProviderId, currentModel])
 
-  // null（未显式设置）按默认档处理，UI 永远高亮一个具体等级。
-  const effective: ThinkingLevel = value ?? DEFAULT_LEVEL
+  // null（未显式设置）按默认档处理；存的档若不在当前模型的支持列表里（换模型最常见：
+  // 在 gpt-5.6 选了 xhigh 再切回 gpt-5）就地收敛，UI 永远高亮一个真实存在的等级。
+  const effective = useMemo<ThinkingLevel>(() => {
+    const current = value ?? DEFAULT_LEVEL
+    if (current === 'off' || levels.length === 0 || levels.includes(current)) return current
+    const fixed = levels.includes(DEFAULT_LEVEL) ? DEFAULT_LEVEL : levels[levels.length - 1]
+    return fixed as ThinkingLevel
+  }, [value, levels])
+
+  // 收敛结果要落盘，否则按钮显示 High、请求却仍按存着的 xhigh 发出去，直接吃 provider 的 400。
+  useEffect(() => {
+    if (levels.length > 0 && effective !== (value ?? DEFAULT_LEVEL)) onChange(effective)
+  }, [effective, value, levels, onChange])
 
   const options = useMemo<Array<{ value: ThinkingLevel; label: string }>>(
     () => [
@@ -75,6 +87,9 @@ function ThinkingLevelSelectorBase({
     ],
     [levels],
   )
+
+  // 该模型没有思考等级可调（Claude 4.5 及更早、GLM-4.7、Kimi K2.x…）→ 不显示这个旋钮。
+  if (levels.length === 0) return null
 
   return (
     <div className="relative max-w-full min-w-0" data-tauri-drag-region="false">
