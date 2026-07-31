@@ -224,16 +224,14 @@ describe('RuntimePicker（一 agent 一对话绑定锁）', () => {
       fireEvent.click(screen.getAllByRole('button')[0])
     })
     expect(screen.getByText('会话已绑定当前 Agent，新建会话可切换')).toBeInTheDocument()
-    // 模式切换按钮禁用。
-    expect(screen.getByRole('tab', { name: '内置 Agent' })).toBeDisabled()
-    expect(screen.getByRole('tab', { name: '本地 CLI' })).toBeDisabled()
-    // 点内置 Agent 不触发切换。
+    // 非当前代理全部禁用：Kivio Agent 与 claude；当前 agent（cursor）保持可选。
+    expect(screen.getByRole('radio', { name: 'Kivio Agent' })).toBeDisabled()
     act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: '内置 Agent' }))
+      fireEvent.click(screen.getByRole('radio', { name: 'Kivio Agent' }))
     })
     expect(onRuntimeChange).not.toHaveBeenCalled()
-    // 非当前 agent 的代理按钮禁用（claude），当前 agent（cursor）保持可选。
     expect(screen.getByRole('radio', { name: /Claude Code/ })).toBeDisabled()
+    expect(screen.getByRole('radio', { name: /Cursor Agent/ })).not.toBeDisabled()
   })
 
   it('未 locked 时切换项可用', async () => {
@@ -250,9 +248,9 @@ describe('RuntimePicker（一 agent 一对话绑定锁）', () => {
       fireEvent.click(screen.getAllByRole('button')[0])
     })
     expect(screen.queryByText('会话已绑定当前 Agent，新建会话可切换')).not.toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: '内置 Agent' })).not.toBeDisabled()
+    expect(screen.getByRole('radio', { name: 'Kivio Agent' })).not.toBeDisabled()
     act(() => {
-      fireEvent.click(screen.getByRole('tab', { name: '内置 Agent' }))
+      fireEvent.click(screen.getByRole('radio', { name: 'Kivio Agent' }))
     })
     expect(onRuntimeChange).toHaveBeenCalled()
   })

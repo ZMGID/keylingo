@@ -164,49 +164,6 @@
   color: rgb(163 163 163);
 }
 
-.kv-runtime-picker__seg {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid rgb(245 245 245);
-  border-radius: 10px;
-  background: rgb(250 250 250);
-}
-
-.dark .kv-runtime-picker__seg {
-  border-color: rgb(38 38 38);
-  background: rgb(38 38 38);
-}
-
-.kv-runtime-picker__seg-btn {
-  appearance: none;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  color: rgb(115 115 115);
-  cursor: pointer;
-}
-
-.kv-runtime-picker__seg-btn.is-active {
-  background: white;
-  color: rgb(23 23 23);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
-}
-
-.kv-runtime-picker__seg-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.dark .kv-runtime-picker__seg-btn.is-active {
-  background: rgb(23 23 23);
-  color: rgb(245 245 245);
-}
-
 .kv-runtime-picker__agent-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -256,6 +213,12 @@
 .kv-runtime-picker__agent:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+/* 列表里的 Kivio 图标跟 AgentIcon 一样 20px（胶囊上是 18px）。 */
+.kv-runtime-picker__agent .kv-runtime-picker__builtin-logo {
+  width: 20px;
+  height: 20px;
 }
 
 .kv-runtime-picker__agent-name {

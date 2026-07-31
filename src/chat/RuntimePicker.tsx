@@ -100,7 +100,7 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
   const currentAgent = agents.find((item) => item.id === agentRuntime.externalAgentId)
 
   const label = useMemo(() => {
-    if (!usesExternal) return '内置 Agent'
+    if (!usesExternal) return 'Kivio Agent'
     return currentAgent?.name ?? agentRuntime.externalAgentId ?? '本地 CLI'
   }, [agentRuntime.externalAgentId, currentAgent?.name, usesExternal])
 
@@ -118,15 +118,6 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
     const defaultModel = agent.models[0]?.id ?? 'default'
     onRuntimeChange(externalRuntime(agent.id, defaultModel))
     setOpen(false)
-  }
-
-  const selectLocalCliMode = () => {
-    if (locked) return
-    if (usesExternal && currentAgent?.available) return
-    const firstAvailable = availableAgents[0]
-    if (firstAvailable) {
-      selectExternal(firstAvailable)
-    }
   }
 
   return (
@@ -173,32 +164,6 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
               </div>
             )}
             <div className="kv-runtime-picker__row">
-              <span className="kv-runtime-picker__label">模式</span>
-              <div className="kv-runtime-picker__seg" role="tablist">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={!usesExternal}
-                  disabled={locked}
-                  className={`kv-runtime-picker__seg-btn${!usesExternal ? ' is-active' : ''}`}
-                  onClick={selectBuiltin}
-                >
-                  内置 Agent
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={usesExternal}
-                  disabled={locked || availableAgents.length === 0}
-                  className={`kv-runtime-picker__seg-btn${usesExternal ? ' is-active' : ''}`}
-                  onClick={selectLocalCliMode}
-                >
-                  本地 CLI
-                </button>
-              </div>
-            </div>
-
-            <div className="kv-runtime-picker__row">
               <div className="kv-runtime-picker__agents-head">
                 <span className="kv-runtime-picker__label">代理</span>
                 <IconButton
@@ -213,33 +178,51 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
                   <RefreshCw size={13} className={refreshing ? 'animate-spin' : undefined} />
                 </IconButton>
               </div>
-              {agents.length === 0 ? (
+              {/* Kivio 自己就是一个代理，和本机 CLI 同列平铺（原先上面还有一行「模式」分段器，
+                  内置/本地 CLI 二选一 —— 两级选择表达的是同一件事，去掉一级）。 */}
+              <div className="kv-runtime-picker__agent-grid" role="radiogroup">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!usesExternal}
+                  disabled={locked && usesExternal}
+                  onClick={selectBuiltin}
+                  className={`kv-runtime-picker__agent${!usesExternal ? ' is-active' : ''}`}
+                >
+                  <img
+                    src={KIVIO_LOGO_SRC}
+                    alt=""
+                    aria-hidden="true"
+                    className="kv-runtime-picker__builtin-logo"
+                    width={20}
+                    height={20}
+                    draggable={false}
+                  />
+                  <span className="kv-runtime-picker__agent-name">Kivio Agent</span>
+                </button>
+                {availableAgents.map((agent) => {
+                  const active = usesExternal && agentRuntime.externalAgentId === agent.id
+                  return (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      disabled={locked && !active}
+                      title={agent.version ?? undefined}
+                      onClick={() => selectExternal(agent)}
+                      className={`kv-runtime-picker__agent${active ? ' is-active' : ''}`}
+                    >
+                      <AgentIcon id={agent.id} size={20} />
+                      <span className="kv-runtime-picker__agent-name">{agent.name}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              {availableAgents.length === 0 && (
                 <span className="kv-runtime-picker__hint">
                   {refreshing ? '正在检测本机 CLI…' : 'PATH 中未发现可用 CLI'}
                 </span>
-              ) : availableAgents.length === 0 ? (
-                <span className="kv-runtime-picker__hint">PATH 中未发现可用 CLI</span>
-              ) : (
-                <div className="kv-runtime-picker__agent-grid" role="radiogroup">
-                  {availableAgents.map((agent) => {
-                    const active = usesExternal && agentRuntime.externalAgentId === agent.id
-                    return (
-                      <button
-                        key={agent.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        disabled={locked && !active}
-                        title={agent.version ?? undefined}
-                        onClick={() => selectExternal(agent)}
-                        className={`kv-runtime-picker__agent${active ? ' is-active' : ''}`}
-                      >
-                        <AgentIcon id={agent.id} size={20} />
-                        <span className="kv-runtime-picker__agent-name">{agent.name}</span>
-                      </button>
-                    )
-                  })}
-                </div>
               )}
             </div>
           </div>
