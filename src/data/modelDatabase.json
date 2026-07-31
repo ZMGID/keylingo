@@ -466,7 +466,7 @@
     "contextWindow": 1048576,
     "maxOutput": 131072,
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": false, "streaming": true, "webSearch": false },
-    "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"],
+    "reasoningEfforts": ["low", "high", "xhigh", "max"],
     "pricing": { "input": 0.10, "output": 0.20, "cachedInput": 0.003 }
   },
   "deepseek-v4-pro": {
@@ -474,7 +474,7 @@
     "contextWindow": 1048576,
     "maxOutput": 384000,
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
-    "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"],
+    "reasoningEfforts": ["low", "high", "xhigh", "max"],
     "pricing": { "input": 0.43, "output": 0.87 }
   },
   "gemma4": {

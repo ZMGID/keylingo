@@ -39,12 +39,62 @@ fn model_image_generation_from_model_info(info: Option<&ModelInfo>) -> Option<bo
         .and_then(|capabilities| capabilities.image_generation)
 }
 
+/// 用户模型库覆盖文件名，放在 app data 目录下（与 `settings.json` 同级）。
+const USER_MODEL_DATABASE_FILE: &str = "modelDatabase.json";
+
+/// 把用户覆盖逐 key 合并进内置基线：新 key 直接新增，已有 key **按顶层字段合并**
+/// （只写 `reasoningEfforts` 不会把 `pricing` 抹掉；但 `capabilities` 这类嵌套对象是整块替换）。
+/// key 统一小写，否则 `model_database_entry` 用小写模型名永远匹配不到，改了像没生效。
+/// `_meta` 只是出处记录，不接受覆盖。
+fn merge_user_entries(
+    base: &mut serde_json::Map<String, Value>,
+    user: serde_json::Map<String, Value>,
+) {
+    for (key, value) in user {
+        let key = key.trim().to_ascii_lowercase();
+        if key.is_empty() || key == "_meta" {
+            continue;
+        }
+        match (base.get_mut(&key).and_then(Value::as_object_mut), value) {
+            (Some(existing), Value::Object(fields)) => existing.extend(fields),
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
+}
+
+fn load_user_model_database(path: &std::path::Path) -> Option<serde_json::Map<String, Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(map)) => Some(map),
+        // 手写 JSON 打错了不能让整个模型库瘫掉，只警告并退回内置基线。
+        _ => {
+            eprintln!("[model_metadata] 忽略无效的用户模型库 {}", path.display());
+            None
+        }
+    }
+}
+
 fn model_database_entries() -> Option<&'static serde_json::Map<String, Value>> {
     static MODEL_DATABASE: OnceLock<Value> = OnceLock::new();
     MODEL_DATABASE
         .get_or_init(|| {
-            serde_json::from_str(include_str!("../../../src/data/modelDatabase.json"))
-                .unwrap_or(Value::Null)
+            let mut base: Value =
+                serde_json::from_str(include_str!("../../../src/data/modelDatabase.json"))
+                    .unwrap_or(Value::Null);
+            // 内置那份是编译期 `include_str!` 进二进制的基线；补新模型 / 改某个字段不必重编译，
+            // 写 `<app_data>/modelDatabase.json` 即可（进程内只读一次，改完重启应用生效）。
+            if let Some(map) = base.as_object_mut() {
+                if let Some(user) = crate::app_data::app_data_dir()
+                    .map(|dir| dir.join(USER_MODEL_DATABASE_FILE))
+                    .filter(|path| path.exists())
+                    .and_then(|path| load_user_model_database(&path))
+                {
+                    merge_user_entries(map, user);
+                }
+            }
+            base
         })
         .as_object()
 }
@@ -150,35 +200,45 @@ fn model_database_image_generation(model: &str) -> Option<bool> {
 }
 
 /// 某模型支持的「思考等级」(reasoning effort) 列表，供前端的等级选择器决定显示哪些档。
-/// 取模型库 `reasoningEfforts` 显式列表（各家支持不构成单调子集，故逐模型列举，便于维护）；
-/// **显式空数组 = 该模型没有 effort 旋钮**（Anthropic 4.6 以下、GLM-4.7、Kimi K2.x、通义……），
-/// 上游 `resolve_thinking` 据此不下发任何等级字段。库里没这个 key 时才兜底：
-/// Anthropic 家族给全档(low..max)，其余给通用安全子集 low/medium/high。
+/// 三层优先级：
+/// 1. provider 的 `model_overrides[model].reasoningEfforts`（模型详情抽屉里手填，改完即生效）；
+/// 2. 模型库 `reasoningEfforts` 显式列表（各家支持不构成单调子集，故逐模型列举）；
+/// 3. 都没有才按家族兜底：Anthropic 给全档(low..max)，其余给通用安全子集 low/medium/high。
+///
+/// 前两层的**显式空数组 = 该模型没有 effort 旋钮**（Anthropic 4.6 以下、GLM-4.7、Kimi K2.x、
+/// 通义……），上游 `resolve_thinking` 据此不下发任何等级字段。
 /// 始终只保留已知合法值并去重，避免脏数据进入请求。
-pub fn reasoning_efforts_for_model(model: &str, api_format: &str) -> Vec<String> {
-    const KNOWN: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub fn reasoning_efforts_for_model(provider: Option<&ModelProvider>, model: &str) -> Vec<String> {
+    if let Some(list) = provider
+        .and_then(|provider| override_model_info(provider, model))
+        .and_then(|info| info.reasoning_efforts.as_deref())
+    {
+        return sanitize_efforts(list.iter().map(String::as_str));
+    }
     if let Some(list) = model_database_entry(model)
         .and_then(|entry| entry.get("reasoningEfforts"))
         .and_then(Value::as_array)
     {
-        let mut out: Vec<String> = Vec::new();
-        for v in list {
-            if let Some(s) = v.as_str() {
-                if KNOWN.contains(&s) && !out.iter().any(|x| x == s) {
-                    out.push(s.to_string());
-                }
-            }
-        }
-        return out;
+        return sanitize_efforts(list.iter().filter_map(Value::as_str));
     }
-    // 兜底按家族分。api_format 先归一化：设置里存的是 "anthropic" 这类原始别名，
-    // 直接比 "anthropic_messages" 永远不相等（旧写法的 bug）。
-    if crate::settings::ProviderApiFormat::from_raw(api_format)
-        == crate::settings::ProviderApiFormat::AnthropicMessages
+    if provider.map(ModelProvider::api_format_kind)
+        == Some(crate::settings::ProviderApiFormat::AnthropicMessages)
     {
-        return KNOWN.iter().map(|s| s.to_string()).collect();
+        return REASONING_EFFORT_LEVELS.iter().map(|s| s.to_string()).collect();
     }
     vec!["low".into(), "medium".into(), "high".into()]
+}
+
+const REASONING_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn sanitize_efforts<'a>(items: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        if REASONING_EFFORT_LEVELS.contains(&item) && !out.iter().any(|kept| kept == item) {
+            out.push(item.to_string());
+        }
+    }
+    out
 }
 
 // 思考等级不再在此做「协议级白名单 → 收敛」的二次映射。哪个模型认哪几档是**逐模型**的
@@ -233,16 +293,21 @@ pub(crate) fn model_supports_image_generation(
 /// 读 `model_overrides` 的生图能力：先精确 `get(model)`，未命中再按**归一化名**遍历匹配
 /// （小 HashMap，O(n) 可接受），消除大小写 / `models/` 前缀导致 override 静默失效。
 fn override_image_generation(provider: &ModelProvider, model: &str) -> Option<bool> {
-    if let Some(value) = model_image_generation_from_model_info(provider.model_overrides.get(model))
-    {
-        return Some(value);
+    model_image_generation_from_model_info(override_model_info(provider, model))
+}
+
+/// 取该模型的用户覆盖：先精确 `get(model)`，未命中再按**归一化名**遍历匹配
+/// （小 HashMap，O(n) 可接受），消除大小写 / `models/` 前缀导致 override 静默失效。
+fn override_model_info<'a>(provider: &'a ModelProvider, model: &str) -> Option<&'a ModelInfo> {
+    if let Some(info) = provider.model_overrides.get(model) {
+        return Some(info);
     }
     let normalized = normalize_model_name(model);
     provider
         .model_overrides
         .iter()
         .find(|(key, _)| normalize_model_name(key) == normalized)
-        .and_then(|(_, info)| model_image_generation_from_model_info(Some(info)))
+        .map(|(_, info)| info)
 }
 
 pub(crate) fn model_can_generate_images_directly(provider: &ModelProvider, model: &str) -> bool {
@@ -437,15 +502,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn user_model_database_overlay_merges_fields_and_normalizes_keys() {
+        let mut base = serde_json::json!({
+            "_meta": { "version": "builtin" },
+            "gpt-5.6": { "contextWindow": 256000, "pricing": { "input": 5.0 } },
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let user = serde_json::json!({
+            "_meta": { "version": "user" },
+            "GPT-5.6": { "reasoningEfforts": ["max"] },
+            "My-New-Model": { "contextWindow": 999 },
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        merge_user_entries(&mut base, user);
+
+        // 已有 key：按顶层字段合并，pricing 不被抹掉；key 大小写归一。
+        let gpt = &base["gpt-5.6"];
+        assert_eq!(gpt["pricing"]["input"], 5.0);
+        assert_eq!(gpt["contextWindow"], 256000);
+        assert_eq!(gpt["reasoningEfforts"], serde_json::json!(["max"]));
+        // 新 key 直接新增，且键名已小写（否则匹配不到）。
+        assert_eq!(base["my-new-model"]["contextWindow"], 999);
+        // _meta 不接受覆盖。
+        assert_eq!(base["_meta"]["version"], "builtin");
+    }
+
+    #[test]
     fn reasoning_efforts_resolve_from_db_family_and_default() {
         // 模型库显式列表：DeepSeek V4 含 xhigh+max（含用户的代理别名变体，靠前缀匹配）。
-        let ds = reasoning_efforts_for_model("DeepSeek-V4-Flash", "openai_chat");
+        // 库里能查到时 provider 无关，传 None。
+        let ds = reasoning_efforts_for_model(None, "DeepSeek-V4-Flash");
         assert!(
             ds.contains(&"max".to_string()) && ds.contains(&"xhigh".to_string()),
             "{ds:?}"
         );
         // GPT-5：有 xhigh、无 max（max 是 5.6 一代才加的）。
-        let gpt = reasoning_efforts_for_model("gpt-5.5", "openai_chat");
+        let gpt = reasoning_efforts_for_model(None, "gpt-5.5");
         assert!(
             gpt.contains(&"xhigh".to_string()) && !gpt.contains(&"max".to_string()),
             "{gpt:?}"
@@ -453,24 +550,26 @@ mod tests {
         // gpt-5.6 全家（含 sol/terra/luna）的 reasoning_options 含 max。
         for model in ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
             assert_eq!(
-                reasoning_efforts_for_model(model, "openai_responses"),
+                reasoning_efforts_for_model(None, model),
                 vec!["low", "medium", "high", "xhigh", "max"],
                 "{model}"
             );
         }
         // Gemma：有 max、无 xhigh（非单调子集）。
-        let gemma = reasoning_efforts_for_model("gemma4:31b", "openai_chat");
+        let gemma = reasoning_efforts_for_model(None, "gemma4:31b");
         assert!(
             gemma.contains(&"max".to_string()) && !gemma.contains(&"xhigh".to_string()),
             "{gemma:?}"
         );
         // 库里没有 + 非 Anthropic → 安全子集 low/medium/high。
-        let unknown = reasoning_efforts_for_model("some-random-model", "openai_chat");
+        let unknown = reasoning_efforts_for_model(None, "some-random-model");
         assert_eq!(unknown, vec!["low", "medium", "high"]);
         // Anthropic 家族兜底 → 全档。api_format 用设置里真实存的别名 "anthropic"（不是
         // 规范名），归一化后同样命中。
+        let mut anthropic = test_provider_with_overrides(HashMap::new());
         for raw in ["anthropic", "anthropic_messages"] {
-            let anth = reasoning_efforts_for_model("whatever", raw);
+            anthropic.api_format = raw.to_string();
+            let anth = reasoning_efforts_for_model(Some(&anthropic), "whatever");
             assert!(
                 anth.contains(&"xhigh".to_string()) && anth.contains(&"max".to_string()),
                 "{raw}: {anth:?}"
@@ -478,8 +577,54 @@ mod tests {
         }
         // Kimi K3：reasoning_effort 只认 low/high/max（无 medium/xhigh）。
         assert_eq!(
-            reasoning_efforts_for_model("kimi-k3", "openai_chat"),
+            reasoning_efforts_for_model(None, "kimi-k3"),
             vec!["low", "high", "max"]
+        );
+    }
+
+    #[test]
+    fn model_override_reasoning_efforts_wins_over_database() {
+        // 模型详情抽屉里手填的档位优先于模型库；脏值被过滤、重复被去掉；
+        // 大小写 / `models/` 前缀不同也要命中（走 normalize_model_name）。
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "GPT-5.6".to_string(),
+            ModelInfo {
+                reasoning_efforts: Some(vec![
+                    "low".into(),
+                    "low".into(),
+                    "bogus".into(),
+                    "max".into(),
+                ]),
+                ..Default::default()
+            },
+        );
+        let provider = test_provider_with_overrides(overrides);
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&provider), "gpt-5.6"),
+            vec!["low", "max"]
+        );
+        // 未被覆盖的模型仍走模型库。
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&provider), "kimi-k3"),
+            vec!["low", "high", "max"]
+        );
+
+        // 显式空数组 = 用户宣布这个模型没有 effort 旋钮，压过模型库的非空列表。
+        let mut muted = HashMap::new();
+        muted.insert(
+            "gpt-5.6".to_string(),
+            ModelInfo {
+                reasoning_efforts: Some(Vec::new()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            reasoning_efforts_for_model(
+                Some(&test_provider_with_overrides(muted)),
+                "models/GPT-5.6"
+            )
+            .is_empty()
         );
     }
 
@@ -487,28 +632,30 @@ mod tests {
     fn explicit_empty_list_means_no_effort_knob() {
         // 显式 `[]` 必须原样返回空，不能掉进家族兜底 —— 上游 `resolve_thinking` 靠它判定
         // 「这个模型没有 effort 旋钮」。Claude 4.5 及更早传 output_config.effort 会 400。
-        for (model, raw_format) in [
-            ("claude-sonnet-4.5", "anthropic"),
-            ("claude-opus-4", "anthropic"),
-            ("claude-haiku-4.5", "anthropic"),
-            ("claude-3.5-haiku", "anthropic"),
-            ("glm-4.7", "openai_chat"),   // 思考是模式控制，没有 effort
-            ("kimi-k2.7", "openai_chat"), // 思考强制开，无 effort
-            ("qwen3.7-max", "openai_chat"), // 用 thinking_budget 数值预算
-            ("minimax-m3", "openai_chat"),
+        let mut anthropic = test_provider_with_overrides(HashMap::new());
+        anthropic.api_format = "anthropic".to_string();
+        for model in [
+            "claude-sonnet-4.5",
+            "claude-opus-4",
+            "claude-haiku-4.5",
+            "claude-3.5-haiku",
+            "glm-4.7",     // 思考是模式控制，没有 effort
+            "kimi-k2.7",   // 思考强制开，无 effort
+            "qwen3.7-max", // 用 thinking_budget 数值预算
+            "minimax-m3",
         ] {
             assert!(
-                reasoning_efforts_for_model(model, raw_format).is_empty(),
+                reasoning_efforts_for_model(Some(&anthropic), model).is_empty(),
                 "{model} 应为空档位"
             );
         }
         // 4.6 与 4.7 的分界：4.6 止步 max，没有 xhigh。
         assert_eq!(
-            reasoning_efforts_for_model("claude-opus-4.6", "anthropic"),
+            reasoning_efforts_for_model(Some(&anthropic), "claude-opus-4.6"),
             vec!["low", "medium", "high", "max"]
         );
         assert_eq!(
-            reasoning_efforts_for_model("claude-opus-4.7", "anthropic"),
+            reasoning_efforts_for_model(Some(&anthropic), "claude-opus-4.7"),
             vec!["low", "medium", "high", "xhigh", "max"]
         );
     }
@@ -520,20 +667,22 @@ mod tests {
         // ——它随 gpt-5.1-codex-max 引入，之前的 gpt-5 / gpt-5-codex 传了会 400。
         for model in ["gpt-5", "gpt-5-pro", "gpt-5-codex"] {
             assert!(
-                !reasoning_efforts_for_model(model, "openai_chat").contains(&"xhigh".to_string()),
+                !reasoning_efforts_for_model(None, model).contains(&"xhigh".to_string()),
                 "{model} 不支持 xhigh，不能出现在选择器里"
             );
         }
         for model in ["gpt-5.4", "gpt-5.6"] {
             assert!(
-                reasoning_efforts_for_model(model, "openai_chat").contains(&"xhigh".to_string()),
+                reasoning_efforts_for_model(None, model).contains(&"xhigh".to_string()),
                 "{model} 支持 xhigh"
             );
         }
         // Gemini thinkingLevel 只有 minimal/low/medium/high，无 xhigh/max；库里无条目，
         // 走非 Anthropic 兜底 low/medium/high 即正确。
+        let mut gemini = test_provider_with_overrides(HashMap::new());
+        gemini.api_format = "gemini".to_string();
         assert_eq!(
-            reasoning_efforts_for_model("gemini-3.2-pro", "gemini"),
+            reasoning_efforts_for_model(Some(&gemini), "gemini-3.2-pro"),
             vec!["low", "medium", "high"]
         );
     }

@@ -7,6 +7,9 @@ import { Button, IconButton } from './Button'
 
 type Lang = 'zh' | 'en'
 
+/** 与 Rust `REASONING_EFFORT_LEVELS` 一致，顺序即展示顺序。 */
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
 type ModelDetailDrawerProps = {
   modelName: string
   overrides?: Record<string, ModelInfo>
@@ -64,6 +67,18 @@ export function ModelDetailDrawer({
       ...prev,
       pricing: { ...prev.pricing, [key]: num },
     }))
+  }, [])
+
+  // 思考等级白名单：undefined=跟随模型库/家族兜底；[]=该模型不发送等级字段；否则只这几档。
+  const toggleEffort = useCallback((level: string) => {
+    setForm(prev => {
+      const current = prev.reasoningEfforts
+      if (!current) return { ...prev, reasoningEfforts: [level] }
+      const next = current.includes(level)
+        ? current.filter(item => item !== level)
+        : EFFORT_LEVELS.filter(item => item === level || current.includes(item))
+      return { ...prev, reasoningEfforts: [...next] }
+    })
   }, [])
 
   const updateTemperature = useCallback((value: string) => {
@@ -154,6 +169,17 @@ export function ModelDetailDrawer({
     streaming: lang === 'zh' ? '流式输出' : 'Streaming',
     webSearch: lang === 'zh' ? '网络搜索' : 'Web Search',
     imageGeneration: lang === 'zh' ? '生图' : 'Image Generation',
+    efforts: lang === 'zh' ? '思考等级' : 'Reasoning Effort',
+    effortsFollow: lang === 'zh' ? '跟随模型库' : 'Follow database',
+    effortsFollowHint: lang === 'zh'
+      ? '跟随模型库；模型库也没列时按家族兜底（Anthropic 全档，其余 low/medium/high）。'
+      : 'Follows the model database; falls back per family (Anthropic all levels, others low/medium/high).',
+    effortsEmptyHint: lang === 'zh'
+      ? '全部取消 = 该模型没有思考等级旋钮，请求不发送等级字段，工具栏也不显示选择器。'
+      : 'None selected = no effort knob: requests omit the level and the picker is hidden.',
+    effortsHint: lang === 'zh'
+      ? '只有勾选的等级可选、可下发。发错等级会被上游直接 400，不做静默降级。'
+      : 'Only checked levels are selectable and sent. A wrong level 400s upstream; no silent downgrade.',
     pricing: lang === 'zh' ? '定价 (per 1M tokens, USD)' : 'Pricing (per 1M tokens, USD)',
     input: lang === 'zh' ? '输入' : 'Input',
     output: lang === 'zh' ? '输出' : 'Output',
@@ -251,6 +277,49 @@ export function ModelDetailDrawer({
               <CapabilityToggle label={t.webSearch} checked={form.capabilities?.webSearch ?? false} onChange={(v) => updateCapability('webSearch', v)} />
               <CapabilityToggle label={t.imageGeneration} checked={form.capabilities?.imageGeneration ?? false} onChange={(v) => updateCapability('imageGeneration', v)} />
             </div>
+          </div>
+
+          <div className="kv-drawer-section">
+            <label className="kv-drawer-label">{t.efforts}</label>
+            <div className="kv-drawer-toggles">
+              <div className="kv-drawer-toggle-row">
+                <span className="kv-drawer-toggle-label">{t.effortsFollow}</span>
+                <Toggle
+                  checked={!form.reasoningEfforts}
+                  onChange={(v) =>
+                    updateField(
+                      'reasoningEfforts',
+                      // 关掉「跟随」时从当前生效档起步，而不是空/全档，免得一关就改了行为。
+                      v ? undefined : (dbDefaults?.reasoningEfforts ?? ['low', 'medium', 'high']),
+                    )
+                  }
+                />
+              </div>
+              {form.reasoningEfforts && (
+                <div className="kv-drawer-toggle-row">
+                  <div className="kv-seg">
+                    {EFFORT_LEVELS.map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`shrink-0 ${form.reasoningEfforts?.includes(level) ? 'active' : ''}`}
+                        onClick={() => toggleEffort(level)}
+                        data-tauri-drag-region="false"
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
+              {!form.reasoningEfforts
+                ? t.effortsFollowHint
+                : form.reasoningEfforts.length === 0
+                  ? t.effortsEmptyHint
+                  : t.effortsHint}
+            </p>
           </div>
 
           <div className="kv-drawer-section">

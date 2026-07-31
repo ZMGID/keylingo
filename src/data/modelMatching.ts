@@ -17,6 +17,7 @@ type DbEntry = {
   }
   dimensions?: number
   multilingual?: boolean
+  reasoningEfforts?: string[]
   pricing?: {
     input: number
     output: number
@@ -169,6 +170,7 @@ export function resolveModelInfo(
       output: override.pricing?.output ?? defaults.pricing?.output,
       cachedInput: override.pricing?.cachedInput ?? defaults.pricing?.cachedInput,
     },
+    reasoningEfforts: override.reasoningEfforts ?? defaults.reasoningEfforts,
     // extraBody 只来自用户 override（模型库无此字段）。
     extraBody: override.extraBody ?? defaults.extraBody,
   }
@@ -191,6 +193,7 @@ function toModelInfo(entry: DbEntry): ModelInfo {
     },
     dimensions: entry.dimensions,
     multilingual: entry.multilingual,
+    reasoningEfforts: entry.reasoningEfforts,
     pricing: {
       input: entry.pricing?.input,
       output: entry.pricing?.output,

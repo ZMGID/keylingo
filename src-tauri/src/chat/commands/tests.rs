@@ -35,8 +35,9 @@ use super::*;
 
 #[test]
 fn resolve_thinking_maps_levels_and_defaults_to_high() {
-    // 有 effort 旋钮的模型（gpt-5.6 支持 low/medium/high/xhigh）。
-    let r = |level: Option<&str>, global: bool| resolve_thinking(level, global, "gpt-5.6", "openai");
+    // 有 effort 旋钮的模型（gpt-5.6 支持 low/medium/high/xhigh/max）。模型库里查得到，
+    // 不需要 provider（provider 只用于读 model_overrides + Anthropic 家族兜底）。
+    let r = |level: Option<&str>, global: bool| resolve_thinking(level, global, None, "gpt-5.6");
     // 未设置 → 默认档 high，不再跟随全局（全局只服务 lens / 翻译）。
     assert_eq!(r(None, true), (true, Some("high".to_string())));
     assert_eq!(r(None, false), (true, Some("high".to_string())));
@@ -58,19 +59,19 @@ fn resolve_thinking_drops_level_for_models_without_effort_knob() {
     // `output_config.effort`（传了 400），这里就得把等级抹成 None，适配器自然不发。
     for model in ["claude-sonnet-4.5", "claude-opus-4", "claude-haiku-4.5"] {
         assert_eq!(
-            resolve_thinking(Some("high"), true, model, "anthropic"),
+            resolve_thinking(Some("high"), true, None, model),
             (true, None),
             "{model} 不该带 effort"
         );
     }
     // 4.6+ 反过来必须带上。
     assert_eq!(
-        resolve_thinking(Some("max"), true, "claude-opus-4.7", "anthropic"),
+        resolve_thinking(Some("max"), true, None, "claude-opus-4.7"),
         (true, Some("max".to_string()))
     );
     // off 仍然优先：关思考就是关思考。
     assert_eq!(
-        resolve_thinking(Some("off"), true, "claude-opus-4.7", "anthropic"),
+        resolve_thinking(Some("off"), true, None, "claude-opus-4.7"),
         (false, None)
     );
 }

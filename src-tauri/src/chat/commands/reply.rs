@@ -153,8 +153,8 @@ pub(super) async fn complete_assistant_reply_inner(
     let (thinking_enabled, thinking_level) = resolve_thinking(
         conversation.thinking_level.as_deref(),
         settings.chat.thinking_enabled,
+        Some(&provider),
         &resolved_model,
-        &provider.api_format,
     );
     let retry_attempts = if settings.retry_enabled {
         settings.retry_attempts as usize

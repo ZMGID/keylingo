@@ -1,8 +1,6 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { Brain, Check, ChevronDown } from 'lucide-react'
 import { api } from '../api/tauri'
-import { getSettingsCached } from '../api/settingsCache'
-import { isProviderEnabled } from '../settings/utils'
 import { chatTitlebarPillButtonClass } from './platform'
 import type { ThinkingLevel } from './types'
 
@@ -41,7 +39,7 @@ function ThinkingLevelSelectorBase({
   const [open, setOpen] = useState(false)
   const [levels, setLevels] = useState<string[]>(FALLBACK_LEVELS)
 
-  // 思考等级清单来自后端模型库（reasoningEfforts），按 (model, apiFormat) 解析。
+  // 思考等级清单来自后端（用户在模型详情里的覆盖 → 模型库 reasoningEfforts → 家族兜底）。
   useEffect(() => {
     let alive = true
     void (async () => {
@@ -50,11 +48,7 @@ function ThinkingLevelSelectorBase({
         return
       }
       try {
-        const settings = await getSettingsCached()
-        const apiFormat = (settings.providers || [])
-          .filter(isProviderEnabled)
-          .find((p) => p.id === currentProviderId)?.apiFormat
-        const got = await api.reasoningEffortsForModel(currentModel, apiFormat)
+        const got = await api.reasoningEffortsForModel(currentModel, currentProviderId)
         // 空列表是有意义的答案（该模型没有 effort 旋钮），不能再兜底成 FALLBACK_LEVELS。
         if (alive) setLevels(got)
       } catch {

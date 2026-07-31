@@ -843,6 +843,9 @@ export type ModelInfo = {
   /** 每模型额外请求体字段（原样 merge 进 chat/completions body 根部）。用于给严格 OpenAI-compat
    *  端点塞标准 schema 之外的私有旋钮，如 NVIDIA NIM / vLLM 的 chat_template_kwargs。仅用于 modelOverrides。 */
   extraBody?: Record<string, unknown>
+  /** 该模型可选的思考等级（reasoning effort）。undefined=跟随模型库；`[]`=没有等级旋钮（请求不带
+   *  等级字段）；否则只这几档可选可下发。模型库条目也用这个字段，用户覆盖优先。 */
+  reasoningEfforts?: string[]
 }
 
 // AI 模型提供商配置
@@ -1684,9 +1687,9 @@ async function on<T>(event: string, handler: (payload: T) => void): Promise<Unli
 export const api = {
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),
-  // 某模型支持的思考等级列表（数据来自模型库 reasoningEfforts）。
-  reasoningEffortsForModel: (model: string, apiFormat?: string) =>
-    invoke<string[]>('chat_reasoning_efforts_for_model', { model, apiFormat }),
+  // 某模型可选的思考等级列表（用户覆盖 modelOverrides → 模型库 reasoningEfforts → 家族兜底）。
+  reasoningEffortsForModel: (model: string, providerId?: string) =>
+    invoke<string[]>('chat_reasoning_efforts_for_model', { model, providerId }),
   getDefaultPromptTemplates: () => invoke<DefaultPromptTemplates>('get_default_prompt_templates'),
   listSystemFonts: () => invoke<string[]>('list_system_fonts').catch(() => [] as string[]),
   saveSettings: async (settings: Settings) =>

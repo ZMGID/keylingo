@@ -1,4 +1,8 @@
+use tauri::State;
+
 use crate::chat::model_metadata::reasoning_efforts_for_model;
+use crate::settings::ModelProvider;
+use crate::state::AppState;
 
 /// 由「每对话思考等级」解析出实际下发给模型的 `(thinking_enabled, thinking_level)`。
 /// chat 不再跟随全局思考开关（全局开关只服务 lens / 快速翻译），未显式选档时落到默认档「high」。
@@ -7,20 +11,21 @@ use crate::chat::model_metadata::reasoning_efforts_for_model;
 ///   reasoning_effort / reasoning.effort / output_config.effort / thinkingLevel）。
 /// - `None` 或其它未知值 → 默认档「high」（与前端 `ThinkingLevelSelector` 的 DEFAULT_LEVEL 一致）。
 ///
-/// **这里是「模型有没有 effort 旋钮」的唯一门控**：模型库 `reasoningEfforts` 为显式空数组时
-/// （Anthropic 4.6 以下不认 `output_config.effort`、GLM-4.7 / Kimi K2.x / 通义走别的机制），
-/// 开思考但不带等级，四个适配器的 `if let Some(effort)` 自然全部跳过。等级**是否被这个模型接受**
-/// 同样只看这份数据（前端选择器渲染的就是它），选错档直接吃 provider 的 400，不做静默收敛。
+/// **这里是「模型有没有 effort 旋钮」的唯一门控**：`reasoning_efforts_for_model` 解析出空列表时
+/// （用户在模型详情里清空，或模型库标了空数组：Anthropic 4.6 以下不认 `output_config.effort`、
+/// GLM-4.7 / Kimi K2.x / 通义走别的机制），开思考但不带等级，四个适配器的 `if let Some(effort)`
+/// 自然全部跳过。等级**是否被这个模型接受**同样只看这份数据（前端选择器渲染的就是它），
+/// 选错档直接吃 provider 的 400，不做静默收敛。
 pub(crate) fn resolve_thinking(
     conv_level: Option<&str>,
     _global_enabled: bool,
+    provider: Option<&ModelProvider>,
     model: &str,
-    api_format: &str,
 ) -> (bool, Option<String>) {
     if conv_level == Some("off") {
         return (false, None);
     }
-    if reasoning_efforts_for_model(model, api_format).is_empty() {
+    if reasoning_efforts_for_model(provider, model).is_empty() {
         return (true, None);
     }
     let level = match conv_level {
@@ -30,11 +35,17 @@ pub(crate) fn resolve_thinking(
     (true, Some(level.to_string()))
 }
 
-/// 返回某模型支持的思考等级列表（数据来自模型库 `reasoningEfforts`）。供前端等级选择器决定显示哪些档。
+/// 返回某模型支持的思考等级列表（用户覆盖 → 模型库 → 家族兜底）。供前端等级选择器决定显示哪些档。
+/// 传 `provider_id` 而不是 api_format：override 挂在 provider 上，api_format 也能就地取到。
 #[tauri::command]
 pub(crate) fn chat_reasoning_efforts_for_model(
+    state: State<'_, AppState>,
     model: String,
-    api_format: Option<String>,
+    provider_id: Option<String>,
 ) -> Vec<String> {
-    reasoning_efforts_for_model(&model, api_format.as_deref().unwrap_or(""))
+    let settings = state.settings_read();
+    let provider = provider_id
+        .as_deref()
+        .and_then(|id| settings.get_provider(id));
+    reasoning_efforts_for_model(provider, &model)
 }
