@@ -172,19 +172,16 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.4
+## 新版本 —— v2.8.5
 
-- **右侧 Dock：文件树、Git 审查、真实终端** —— 聊天窗右侧新增按工作目录绑定的 IDE 侧栏。文件树支持框选多选、拖拽移动、批量删除、内联新建/重命名与就地查看编辑；Git 面板看改动与 diff；终端是真正的 PTY（forkpty / ConPTY）。工具卡片的 Write/Edit 显示 `+N -N`，展开是带行号列与词级高亮的 diff，点文件名即在右侧预览。
-- **claude CLI 改为一会话一常驻进程** —— 不再每轮重开子进程：首轮约 3.2 秒，之后每轮约 0.1 秒。换模型不再丢上下文；子会话（Task）不再把自述印进主回答、不再污染用量与压缩分母；停止改用 `interrupt` 控制请求而非杀进程。
-- **上下文用量终于是准的** —— 所有外部 CLI 都漏算了 cache token（实测 kimi 97.6%、pi 62%、opencode 13%），且各家 cache 包含关系不同（codex 已含在 input 内，claude/pi/ACP 须相加）。分母也修了：claude 裸别名实测都是 100 万上下文，旧表一律按 20 万算，压缩在真实占用 20% 就触发。用量现在实时更新。
-- **MCP 改用官方 rmcp SDK** —— 两套手写 JSON-RPC 合成一条通路，净删约 2270 行，「设置页测试连接」与「聊天里调用」不再表现不一致。顺带修好：远程 HTTP MCP 加了工具无需重启即可见；Windows 上 `npx.cmd` 这类 shim 不再找不到；装了企业 TLS 中间证书的用户从「连不上」变「能连」。
-- **工具审批改为内联卡片，claude CLI 也会来问** —— 输入框上方的内联卡片：自然语言标题、只放路径或命令的代码块、带数字快捷键的三个动作，新增本对话「总是允许」。外部 claude CLI 接进同一条审批链路。并发审批不再只留最后一张卡（此前另外两张会静默超时被拒）。
-- **对话生命周期 Hooks** —— 内置 agent 的 8 个生命周期事件可挂 Shell 脚本或 HTTP Hook，载荷走 stdin JSON + `KIVIO_*` 环境变量。fire-and-forget，不阻断工具调用；没配 Hook 时零开销。设置新增 Hooks 页。
-- **子代理角色通用化** —— 角色列表在运行时生成进 `agent` 工具描述（内置/用户/项目三层），不必再猜名字；字段照 Claude Code / Cursor 的 `.md` + frontmatter 事实标准，拷来的角色文件直接可用。支持工具通配、`disallowedTools` 继承减法与调用内临时角色。
-- **界面：悬浮卡片式侧栏与 Windows 全宽标题栏** —— 侧栏/主区/Dock 改为三张浮起的卡片，侧栏支持系统级模糊材质（Windows Mica 跟应用主题）。Windows 三键改为贯穿全宽的 44px 标题栏带，内容不再留 132px 躲它。全站下拉栏统一规格、输入区拆三层、表格与代码块重做、等宽字体补 CJK 回退、macOS 顶栏那条线统一到同一基线。
-- **图片右键菜单** —— 新增复制图片 / 图片另存为… / 查看大图（内嵌图与生成图两条路径都挂上）；大图查看器的复制与另存取原图而非缩略图。
-- **claude 模型清单剔掉 6 个退役 / 会被静默换掉的模型** —— 目录不等于可用：4 个已退役（选了只回退役警告），`opus-4-1` / `opus-4-0` 更糟——不报错，直接给你 Opus 4.8。
-- **稳定性与正确性修复** —— 退出不再留孤儿 claude 进程及其 MCP 子孙；外部 CLI 调过工具的回答不再渲染两遍；grok 的 token 用量在 `_meta` 里，此前一路读空；系统提示改走 `--append-system-prompt-file`，长会话压缩后不再静默失效；`/cost` 等客户端斜杠命令输出不再被吞；被截断的回答不再标成「完成」；探测不再堆空壳会话；流式思考不再逐帧抖动。
+- **输入区、快捷键与「一 agent 一对话」** —— 输入框上的选择器改为紧凑、按钮锚定的弹层（助手 / 多模型 / 来源三处统一），上下文指示器与代码块外框重做；快捷键页新增「关闭聊天窗」并补上恢复默认与占用检测；set context 现在像项目一样显示。内置 Agent 的会话一旦有消息就锁定 agent 切换 —— 此前只有本地 CLI 这么锁，内置的换完等于换个大脑接着同一段上下文。顺带修掉空项目建文件夹失败与 Windows caption 关闭字形。
+- **思考等级：不再被协议静默降档，可逐模型覆盖** —— 选 xhigh 却发出 high 的根因是按 api_format 做的第二层白名单，但「认哪几档」是逐模型的（同一个 OpenAI 端点，xhigh 在 gpt-5.6 上可用、传给 gpt-5-codex 就 400）。现在四个适配器原样下发所选档位，选错就吃 provider 的 400；能选哪几档由模型库逐模型门控并按各家文档补齐。模型详情抽屉里可逐模型覆盖，全关即不下发等级字段。
+- **消息列表部分虚拟化，底部跟随不再抢滚动** —— 只虚拟化更早的历史，最近一段始终实挂载，流式气泡与落库消息高度一致。钉底在第二帧前重新确认跟随状态（此前上滚会被排队的 rAF 拽回底部）；脱离跟随时冻结虚实边界，读历史时脚下不再跳。
+- **macOS 图标适配系统外观** —— 感谢 @HappyDIY（[#22](https://github.com/ZMGID/kivio/pull/22)）。
+- **界面细节** —— macOS 顶栏分隔线改为量一次交通灯真实中心（灯的 y 随系统版本变，写死必然「这台对了那台错」）；顶栏第一枚按钮与侧栏卡片对齐同一条竖线；上下文圆环换 SVG 描边；内嵌设置页与首次引导也变成浮起卡片；扩展中心页互切与弹层展开的第一帧不再闪；矮窗口下设置左栏底部按钮不再被裁。
+- **窗口材质与帧率** —— 台前调度切窗掉帧修好（macOS Menu 材质改为常驻，焦点交给 AppKit；材质没生效时窗口设回 opaque）。Win10 没有 Mica，但 tauri 的 `set_effects` 丢掉了失败结果，前端误判把外壳设成透明、直接透出桌面 —— 现在由后端回报真实结果，只有成功才允许透明。
+- **运行时选择：Kivio Agent 与本机 CLI 同列** —— 「内置 / 本地 CLI」分段器和下面的代理网格表达的是同一件事，去掉一级，Kivio 作为第一张卡片直接排进列表。
+- **引导与文档** —— 首次引导功能卡按现在的产品面貌重写；官网补上「右侧 Dock」与「生命周期 Hooks」两页。
 
 完整历史:[GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
@@ -381,19 +378,16 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.4
+## What's New — v2.8.5
 
-- **Right dock: file tree, Git review, real terminal** — an IDE-style dock bound to the conversation's working directory. The file tree has marquee/Ctrl/Shift multi-select, drag-to-move, batch delete, inline create/rename, and an in-place viewer/editor; the Git panel shows changes and diffs; the terminal is a real PTY (forkpty / ConPTY). Write/Edit tool cards show `+N -N` and expand into a diff with line-number gutters and word-level highlighting — click a filename to preview it in the dock.
-- **The claude CLI now keeps one process per conversation** — no more respawning every turn: ~3.2s for the first turn, ~0.1s after. Switching models no longer drops context; sub-agent (Task) sidechains no longer leak their narration into the main answer or pollute usage and the compaction denominator; stopping sends an `interrupt` control request instead of killing the process.
-- **Context usage numbers are finally correct** — every external CLI was dropping cache tokens (measured at 97.6% of the total for kimi, 62% for pi, 13% for opencode), and each CLI nests cache differently (codex has it inside input; claude/pi/ACP must add it). The denominator is fixed too: claude's bare aliases all resolve to 1M-context models, but the old table assumed 200K, so compaction fired at 20% of real usage. Usage now updates live.
-- **MCP now runs on the official rmcp SDK** — two hand-written JSON-RPC implementations collapsed into one path, ~2270 lines deleted, and "test connection" in settings no longer behaves differently from an actual tool call in chat. Side effects: remote HTTP MCP servers surface newly added tools without a restart; Windows shims like `npx.cmd` resolve correctly; users behind a corporate TLS middlebox go from "cannot connect" to "connects".
-- **Inline tool approval, and the claude CLI now asks too** — an inline card above the composer: plain-language title, a code block holding only the path or command, three number-keyed actions, plus a new per-conversation "always allow". The external claude CLI feeds the same approval chain. Concurrent approvals no longer collapse to just the last card (the others used to silently time out as denied).
-- **Conversation lifecycle hooks** — eight lifecycle events of the built-in agent can trigger shell scripts or HTTP hooks, with the payload delivered as stdin JSON plus `KIVIO_*` env vars. Fire-and-forget, never blocking a tool call, and zero cost with no hooks configured. Settings gains a Hooks page.
-- **Sub-agent roles are now user-definable** — the role list is generated into the `agent` tool's description at runtime across all three layers (built-in / user / project), so the model no longer has to guess names; fields follow the Claude Code / Cursor `.md`-plus-frontmatter standard, so copied role files work as-is. Adds tool wildcards, subtractive `disallowedTools`, and one-off roles defined inline at the call site.
-- **UI: floating-card sidebar and a full-width Windows titlebar** — sidebar, main area, and dock became three floating cards, with system blur materials on the sidebar (Windows Mica follows the app theme). On Windows the three window buttons moved to a full-width 44px titlebar, so views no longer reserve 132px to dodge them. Also: one dropdown spec across the app, a three-tier composer, reworked tables and code blocks, a CJK fallback in the monospace stack, and macOS titlebar items sharing one baseline.
-- **Image context menu** — Copy image / Save image as… / View full size on both rendering paths (markdown-embedded and generated-image gallery); the full-size viewer's copy and save operate on the original, not the thumbnail.
-- **Six retired or silently-remapped models removed from the claude picker** — catalog ≠ available: four are retired (picking one returns only a retirement warning), and `opus-4-1` / `opus-4-0` are worse — no error, you silently get Opus 4.8.
-- **Stability and correctness fixes** — quitting no longer leaves orphaned claude processes and their MCP grandchildren behind; external-CLI answers that used tools no longer render twice; grok's token usage lives under `_meta` and was read as empty all along; the system prompt moved to `--append-system-prompt-file` so it survives compaction; output from client-side slash commands like `/cost` is no longer swallowed; answers truncated at the output limit are no longer marked complete; probing no longer piles up empty shell sessions; streaming reasoning no longer janks frame by frame.
+- **Composer, hotkeys, and one-agent-per-conversation** — the pickers above the composer are now compact, button-anchored popovers (assistant / multi-model / sources share one spec), and the context indicator and code-block chrome were reworked. The hotkeys page gains "close chat window" plus restore-defaults and conflict detection, and set context is displayed like projects are. A built-in-agent conversation locks its agent once it has messages — previously only local CLIs did, so switching mid-conversation swapped brains under one context. Also fixes folder creation in an empty project and the Windows caption close glyph.
+- **Reasoning effort: no more silent protocol-level downgrade, and per-model overrides** — picking xhigh but sending high came from a second whitelist keyed on api_format, but which levels a model accepts is per-model (on the same OpenAI endpoint, xhigh works on gpt-5.6 and 400s on gpt-5-codex). All four adapters now send exactly what you picked and let the provider's 400 speak; the model database is the only gate, filled in per vendor docs. The model-detail drawer can override the list per model, and clearing it drops the field entirely.
+- **Partially virtualized message list that no longer fights your scroll** — only older history is virtualized; the recent window stays really mounted, so streaming bubbles and persisted messages measure the same. Pin-to-bottom re-checks follow state before its second frame (scrolling up used to get yanked back by a queued rAF), and leaving follow mode freezes the virtual/mounted boundary so the ground stops shifting while you read.
+- **macOS icon follows the system appearance** — thanks to @HappyDIY ([#22](https://github.com/ZMGID/kivio/pull/22)).
+- **UI details** — the macOS titlebar divider measures the real traffic-light center once (that y moves between OS versions, so any constant is right on one machine and wrong on the next); the first titlebar button lines up with the sidebar card; the context ring moved to an SVG stroke; embedded settings and first-run onboarding became floating cards; switching between extension pages and opening any popover no longer flashes on the first frame; and in short windows the settings sidebar's bottom button is no longer clipped.
+- **Window materials and frame rate** — Stage Manager no longer drops frames (the macOS Menu material is permanent with focus left to AppKit, and the window goes back to opaque when no material is active). Windows 10 has no Mica, but tauri's `set_effects` discarded the failure, so the frontend made the shell transparent and you saw straight through to the desktop; the backend now reports the real result and only success unlocks transparency.
+- **Runtime picker: Kivio Agent sits with the local CLIs** — the built-in/local-CLI segmented control and the agent grid below it said the same thing twice; the control is gone and Kivio is simply the first card in the list.
+- **Onboarding and docs** — the first-run feature cards were rewritten to match what the app is today, and the website gained pages for the right dock and lifecycle hooks.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 
