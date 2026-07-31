@@ -1,12 +1,12 @@
 import { Fragment } from 'react'
 import {
+  Blocks,
   BookOpen,
   ChevronRight,
-  Globe,
-  Layers,
+  FolderGit2,
   MessageSquare,
-  ScanLine,
   ScanSearch,
+  Terminal,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { I18n } from '../../settings/i18n'
@@ -24,12 +24,12 @@ type FeatureCard = {
 
 export function WelcomeStep({ t }: WelcomeStepProps) {
   const features: FeatureCard[] = [
-    { icon: ScanLine, title: t.onboardingWelcomeQuickTranslateTitle, desc: t.onboardingWelcomeQuickTranslateDesc },
-    { icon: ScanSearch, title: t.onboardingWelcomeLensTitle, desc: t.onboardingWelcomeLensDesc },
     { icon: MessageSquare, title: t.onboardingWelcomeChatTitle, desc: t.onboardingWelcomeChatDesc },
-    { icon: Globe, title: t.onboardingWelcomeWebSearchTitle, desc: t.onboardingWelcomeWebSearchDesc },
+    { icon: Terminal, title: t.onboardingWelcomeCliAgentTitle, desc: t.onboardingWelcomeCliAgentDesc },
+    { icon: Blocks, title: t.onboardingWelcomeExtensionsTitle, desc: t.onboardingWelcomeExtensionsDesc },
     { icon: BookOpen, title: t.onboardingWelcomeKnowledgeTitle, desc: t.onboardingWelcomeKnowledgeDesc },
-    { icon: Layers, title: t.onboardingWelcomeMultiProviderTitle, desc: t.onboardingWelcomeMultiProviderDesc },
+    { icon: ScanSearch, title: t.onboardingWelcomeLensTitle, desc: t.onboardingWelcomeLensDesc },
+    { icon: FolderGit2, title: t.onboardingWelcomeWorkspaceTitle, desc: t.onboardingWelcomeWorkspaceDesc },
   ]
 
   const setupSteps = [
