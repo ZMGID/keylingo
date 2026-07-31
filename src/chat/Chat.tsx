@@ -3712,6 +3712,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 中心页为上方那条收起态按钮行让出的高度（Windows / Linux 无此行，见 centerPageTopStrip）。
   const centerPagePadTop = usesNativeTitlebar && sidebarCollapsed ? 'pt-12' : ''
   // 扩展中心页共用的外壳：与会话主区同款浮起卡片（见 .chat-center-page）。
+  // 六个中心页共用 key="center"：React 复用同一个 div，入场动画只在「从会话页进来」时跑一次。
+  // 各页各自 key 的话每次互切都是新节点 → 重播 opacity 0→1，中间几帧透出背景，就是那下闪。
   const centerPageClass = `chat-motion-view-in chat-center-page relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`
 
   // 会话页顶栏控件。非 mac 渲染进全宽标题栏带（单行 chrome），mac 仍留在主区 52px 顶栏。
@@ -3879,7 +3881,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </SettingsEnterPane>
           </Suspense>
         ) : chatView === 'assistants' ? (
-          <div key="assistants" className={centerPageClass}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <AssistantCenter
@@ -3892,35 +3894,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </Suspense>
           </div>
         ) : chatView === 'skill' ? (
-          <div key="skill" className={centerPageClass}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <SkillCenter onSkillsChanged={() => void loadSkills()} />
             </Suspense>
           </div>
         ) : chatView === 'mcp' ? (
-          <div key="mcp" className={centerPageClass}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <McpCenter />
             </Suspense>
           </div>
         ) : chatView === 'knowledge' ? (
-          <div key="knowledge" className={centerPageClass}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <KnowledgeCenter />
             </Suspense>
           </div>
         ) : chatView === 'notes' ? (
-          <div key="notes" className={centerPageClass}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <NotesCenter />
             </Suspense>
           </div>
         ) : chatView === 'plugins' ? (
-          <div key="plugins" className={centerPageClass}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <PluginCenter onRequestAiInstall={handleRequestPluginAiInstall} />
