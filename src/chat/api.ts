@@ -800,6 +800,28 @@ const mockChatApi = {
     return conversation
   },
 
+  async rewindToMessage(
+    conversationId: string,
+    messageId: string,
+  ): Promise<{ conversation: Conversation; content: string }> {
+    const conversations = loadMockConversations()
+    const index = conversations.findIndex((item) => item.id === conversationId)
+    if (index < 0) throw new Error('Conversation not found')
+    const conversation = { ...conversations[index] }
+    const messageIndex = conversation.messages.findIndex((message) => message.id === messageId)
+    if (messageIndex < 0) throw new Error('Message not found')
+    const target = conversation.messages[messageIndex]
+    if (target.role !== 'user') throw new Error('仅支持回到用户提问')
+    conversation.messages = conversation.messages.slice(0, messageIndex)
+    conversation.updated_at = nowSeconds()
+    const contextState = estimateMockContext(conversation)
+    conversation.context_state = contextState
+    conversation.contextState = contextState
+    conversations[index] = conversation
+    saveMockConversations(conversations)
+    return { conversation, content: target.content }
+  },
+
   async getContextStats(conversationId: string): Promise<{ contextState: ConversationContextState; conversation: Conversation }> {
     const conversations = loadMockConversations()
     const index = conversations.findIndex((item) => item.id === conversationId)
@@ -1216,15 +1238,21 @@ export const chatApi = {
     return result.conversation
   },
 
-  // 删除对话
-  async deleteConversation(conversationId: string): Promise<void> {
-    if (!isTauriRuntime()) return mockChatApi.deleteConversation(conversationId)
-    const result = await invoke<{ success: boolean }>('chat_delete_conversation', {
-      conversationId,
-    })
+  // 删除对话。返回未能清理的副产物说明（工作区被占用等）——对话本身一定已经删掉了，
+  // 后端只有在「对话文件 / 索引」这两步失败时才抛错。
+  async deleteConversation(conversationId: string): Promise<string[]> {
+    if (!isTauriRuntime()) {
+      await mockChatApi.deleteConversation(conversationId)
+      return []
+    }
+    const result = await invoke<{ success: boolean; warnings?: string[] }>(
+      'chat_delete_conversation',
+      { conversationId },
+    )
     if (!result.success) {
       throw new Error('Failed to delete conversation')
     }
+    return result.warnings ?? []
   },
 
   // 更新对话
@@ -1349,6 +1377,26 @@ export const chatApi = {
       throw new Error(result.error || 'Failed to regenerate message')
     }
     return result.conversation
+  },
+
+  // 一键 rewind：删掉该用户提问及其之后的消息，返回新会话 + 被删掉的原文（前端塞回输入框）。
+  async rewindToMessage(
+    conversationId: string,
+    messageId: string,
+  ): Promise<{ conversation: Conversation; content: string }> {
+    if (!isTauriRuntime()) {
+      return mockChatApi.rewindToMessage(conversationId, messageId)
+    }
+    const result = await invoke<{
+      success: boolean
+      conversation?: Conversation
+      content?: string
+      error?: string
+    }>('chat_rewind_to_message', { conversationId, messageId })
+    if (!result.success || !result.conversation) {
+      throw new Error(result.error || 'Failed to rewind conversation')
+    }
+    return { conversation: result.conversation, content: result.content ?? '' }
   },
 
   // 对话分支（方案 B）：把源对话某消息及其之前的消息复制进一个新对话，返回新对话。不自动发送。

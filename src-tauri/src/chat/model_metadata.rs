@@ -224,7 +224,10 @@ pub fn reasoning_efforts_for_model(provider: Option<&ModelProvider>, model: &str
     if provider.map(ModelProvider::api_format_kind)
         == Some(crate::settings::ProviderApiFormat::AnthropicMessages)
     {
-        return REASONING_EFFORT_LEVELS.iter().map(|s| s.to_string()).collect();
+        return REASONING_EFFORT_LEVELS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     }
     vec!["low".into(), "medium".into(), "high".into()]
 }
@@ -619,13 +622,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(
-            reasoning_efforts_for_model(
-                Some(&test_provider_with_overrides(muted)),
-                "models/GPT-5.6"
-            )
-            .is_empty()
-        );
+        assert!(reasoning_efforts_for_model(
+            Some(&test_provider_with_overrides(muted)),
+            "models/GPT-5.6"
+        )
+        .is_empty());
     }
 
     #[test]

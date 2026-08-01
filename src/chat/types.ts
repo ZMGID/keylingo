@@ -150,9 +150,18 @@ export type ChatMessageSegmentPhase = 'auxiliary' | 'plain' | 'tool_loop' | 'syn
 /** 降级兜底的结构化描述（后端 recovery.rs 产出）。 */
 export interface DegradedAnswer {
   /** 稳定标识，前端据此选图标/措辞，不解析文案。 */
-  kind: 'rate_limited' | 'context_overflow' | 'moderation' | 'empty_response' | 'unknown' | string
+  kind:
+    | 'rate_limited'
+    | 'context_overflow'
+    | 'timeout'
+    | 'moderation'
+    | 'empty_response'
+    | 'unknown'
+    | string
   /** 一行人读的失败原因。 */
   reason: string
+  /** 供应商返回的原始报错（已剥壳裁剪）——真正能排查的那一句。 */
+  detail?: string | null
   /** 本轮已完成的工具调用摘要。 */
   toolSummaries?: { name: string; preview: string }[]
   /** 纯文本版本，供不渲染卡片的场景回落。 */

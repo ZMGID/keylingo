@@ -1596,6 +1596,17 @@ async fn run_loop_stream_synthesis_failure_preserves_tool_records_with_fallback(
     let segment = fallback_delta.segment.expect("fallback delta has segment");
     assert_eq!(segment.kind, ChatMessageSegmentKind::Text);
     assert_eq!(segment.phase, ChatMessageSegmentPhase::Synthesis);
+
+    // 错误卡片要拿到**供应商的原话**，而不是只有"模型调用失败"这句分类话术。
+    let degraded = result
+        .degraded
+        .expect("degrade path must attach a card payload");
+    assert_eq!(degraded.kind, "unknown");
+    assert_eq!(
+        degraded.detail.as_deref(),
+        Some("400 Bad Request - mock synthesis failure (attempt 1/1)"),
+        "raw provider error must survive into the card"
+    );
 }
 
 /// Fallback C: streamed synthesis is cancelled after tool results exist; the run

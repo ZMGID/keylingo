@@ -813,9 +813,6 @@ export function UsageStatsPanel({ lang }: UsageStatsPanelProps) {
   }, [lang, loadStats])
 
   const summary = stats?.summary
-  const reportedRatio = summary && summary.totalRequests > 0
-    ? Math.round((summary.providerReportedRequests / summary.totalRequests) * 100)
-    : 0
   const totalLogs = stats?.totalLogs ?? 0
   const pageCount = Math.max(1, Math.ceil(totalLogs / LOG_PAGE_SIZE))
   const canGoPrev = logPageIndex > 0 && !loading
@@ -881,15 +878,19 @@ export function UsageStatsPanel({ lang }: UsageStatsPanelProps) {
           <SummaryTile label={lang === 'zh' ? '总 Token' : 'Total tokens'} value={formatTokens(summary?.totalTokens)} sub={`${formatCount(summary?.totalRequests)} ${lang === 'zh' ? '次请求' : 'requests'}`} />
           <SummaryTile label={lang === 'zh' ? '估算成本' : 'Estimated cost'} value={formatCost(summary?.totalCostUsd)} sub={lang === 'zh' ? '按本地模型价格估算' : 'From local model pricing'} />
           <SummaryTile label={lang === 'zh' ? '输入 / 输出' : 'Input / Output'} value={`${formatTokens(summary?.inputTokens)} / ${formatTokens(summary?.outputTokens)}`} sub={lang === 'zh' ? 'provider 返回 usage 时统计' : 'Provider usage only'} />
-          <SummaryTile label={lang === 'zh' ? '可信度' : 'Coverage'} value={`${reportedRatio}%`} sub={`${formatCount(summary?.missingUsageRequests)} ${lang === 'zh' ? '条缺少 usage' : 'missing usage'}`} />
+          {/* 命中率提到独立卡，下面「缓存命中」那张就只报 token 数，不再重复同一个百分比。 */}
+          <SummaryTile
+            label={lang === 'zh' ? '缓存命中率' : 'Cache hit rate'}
+            value={
+              summary && summary.inputTokens > 0
+                ? formatPercent(summary.cachedInputTokens / summary.inputTokens)
+                : '0%'
+            }
+            sub={lang === 'zh' ? '命中缓存的输入 token 占比' : 'Share of input tokens served from cache'}
+          />
           <SummaryTile
             label={lang === 'zh' ? '缓存命中' : 'Cached input'}
             value={formatTokens(summary?.cachedInputTokens)}
-            sub={
-              summary && summary.inputTokens > 0
-                ? `${lang === 'zh' ? '命中率' : 'hit rate'} ${formatPercent(summary.cachedInputTokens / summary.inputTokens)}`
-                : undefined
-            }
           />
           <SummaryTile label={lang === 'zh' ? '缓存创建' : 'Cache creation'} value={formatTokens(summary?.cacheCreationInputTokens)} />
           <SummaryTile label={lang === 'zh' ? '推理 Token' : 'Reasoning'} value={formatTokens(summary?.reasoningTokens)} />

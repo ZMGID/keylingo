@@ -4,6 +4,8 @@ import type { AgentTodoItem, AgentTodoState } from './types'
 
 interface AgentTodoIndicatorProps {
   todoState?: AgentTodoState | null
+  /** status = 输入框上方的状态条：整行铺开显示完整任务，弹层向上开。 */
+  placement?: 'titlebar' | 'status'
 }
 
 const EMPTY_TODO_ITEMS: AgentTodoItem[] = []
@@ -56,8 +58,9 @@ function formatUpdatedAt(todoState?: AgentTodoState | null): string {
   })
 }
 
-export function AgentTodoIndicator({ todoState }: AgentTodoIndicatorProps) {
+export function AgentTodoIndicator({ todoState, placement = 'titlebar' }: AgentTodoIndicatorProps) {
   const [open, setOpen] = useState(false)
+  const inStatusBar = placement === 'status'
   const items = todoState?.items ?? EMPTY_TODO_ITEMS
   const completedCount = items.filter((item) => item.status === 'completed').length
   const currentItem = useMemo(
@@ -74,15 +77,20 @@ export function AgentTodoIndicator({ todoState }: AgentTodoIndicatorProps) {
   if (items.length === 0) return null
 
   return (
-    <div className="relative min-w-0" data-tauri-drag-region="false">
+    <div className="relative min-w-0 shrink-0" data-tauri-drag-region="false">
       <button
         type="button"
-        className={`flex h-8 min-w-0 max-w-[18rem] shrink items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition duration-[var(--kv-dur-instant)] active:scale-[0.97] ${
-          allDone
-            ? 'text-neutral-500 hover:bg-black/[0.05] hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/[0.07] dark:hover:text-neutral-100'
-            : 'text-neutral-700 hover:bg-black/[0.05] hover:text-neutral-950 dark:text-neutral-200 dark:hover:bg-white/[0.07] dark:hover:text-neutral-50'
-        }`}
+        className={
+          inStatusBar
+            ? 'flex h-[22px] shrink-0 items-center gap-1.5 rounded-[5px] px-1.5 text-[12px] font-medium text-neutral-700 transition-colors duration-[var(--kv-dur-instant)] hover:bg-black/[0.05] dark:text-neutral-200 dark:hover:bg-white/[0.07]'
+            : `flex h-8 min-w-0 max-w-[18rem] shrink items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition duration-[var(--kv-dur-instant)] active:scale-[0.97] ${
+                allDone
+                  ? 'text-neutral-500 hover:bg-black/[0.05] hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-white/[0.07] dark:hover:text-neutral-100'
+                  : 'text-neutral-700 hover:bg-black/[0.05] hover:text-neutral-950 dark:text-neutral-200 dark:hover:bg-white/[0.07] dark:hover:text-neutral-50'
+              }`
+        }
         aria-label="Agent todo"
+        title={inStatusBar && !allDone && currentItem ? currentItem.content : undefined}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
@@ -94,15 +102,22 @@ export function AgentTodoIndicator({ todoState }: AgentTodoIndicatorProps) {
         <span className="shrink-0 tabular-nums">
           {allDone ? 'Done' : 'Todo'} {completedCount}/{items.length}
         </span>
-        {!allDone && currentItem && (
-          <span className="chat-titlebar-todo-current min-w-0 truncate text-neutral-400 dark:text-neutral-500">
+        {/* ponytail: 状态条只放计数，当前任务文本点开弹层看 —— 铺满整行读起来是噪音。 */}
+        {!inStatusBar && !allDone && currentItem && (
+          <span
+            className="chat-titlebar-todo-current min-w-0 truncate text-neutral-400 dark:text-neutral-500"
+          >
             · {currentItem.content}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="chat-motion-popover absolute right-0 top-9 z-40 w-[21rem] max-w-[calc(100vw-2rem)] rounded-xl border border-neutral-200/90 bg-white p-3 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
+        <div
+          className={`chat-motion-popover absolute z-40 w-[21rem] max-w-[calc(100vw-2rem)] rounded-xl border border-neutral-200/90 bg-white p-3 shadow-xl dark:border-neutral-700 dark:bg-neutral-900 ${
+            inStatusBar ? 'bottom-8 left-0' : 'right-0 top-9'
+          }`}
+        >
           <div className="mb-3 flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex min-w-0 items-center gap-2">

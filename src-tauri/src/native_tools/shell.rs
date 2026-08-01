@@ -1488,6 +1488,45 @@ mod tests {
         assert!(!log_path.exists(), "log should be removed on sweep");
     }
 
+    /// 删对话时只收本对话的后台作业：别的对话（和无归属的测试作业）必须原样留着。
+    /// 这条挂了意味着删一个对话会连带杀掉另一个对话正在跑的 dev server。
+    #[test]
+    fn kill_background_commands_for_conversation_only_touches_its_own_jobs() {
+        let state = bg_test_state();
+        let seed = |conversation_id: Option<&str>| {
+            let job_id = uuid::Uuid::new_v4().to_string();
+            let log_path = std::env::temp_dir().join(format!("{BG_CMD_LOG_PREFIX}{job_id}.log"));
+            std::fs::write(&log_path, b"x").expect("seed log");
+            state.register_background_command(BackgroundCommand {
+                job_id: job_id.clone(),
+                conversation_id: conversation_id.map(str::to_string),
+                pid: None, // 无真实进程：只验注册表与日志的清理
+                command: "seed".to_string(),
+                cwd: ".".to_string(),
+                log_path: log_path.clone(),
+                status: BackgroundCommandStatus::Running,
+                started_at: SystemTime::now(),
+                kill_tx: None,
+            });
+            (job_id, log_path)
+        };
+        let (doomed, doomed_log) = seed(Some("conv_doomed"));
+        let (other, other_log) = seed(Some("conv_other"));
+        let (orphan, orphan_log) = seed(None);
+
+        state.kill_background_commands_for_conversation("conv_doomed");
+
+        let listed = list_background(&state, &serde_json::json!({}), None).unwrap();
+        assert!(!listed.contains(&doomed), "本对话的作业应被摘除：{listed}");
+        assert!(listed.contains(&other), "别的对话的作业必须留着：{listed}");
+        assert!(listed.contains(&orphan), "无归属的作业不该被误杀：{listed}");
+        assert!(!doomed_log.exists(), "本对话的日志应被清掉");
+        assert!(other_log.exists() && orphan_log.exists(), "其它日志不该动");
+
+        let _ = std::fs::remove_file(&other_log);
+        let _ = std::fs::remove_file(&orphan_log);
+    }
+
     #[test]
     fn offload_large_output_writes_temp_file_and_notes_path() {
         let big = "x".repeat(MAX_INLINE_COMMAND_OUTPUT_BYTES + 1);

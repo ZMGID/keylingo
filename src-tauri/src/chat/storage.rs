@@ -544,8 +544,19 @@ pub fn save_conversation_without_index(
     atomic_write(&path, &content, "conversation")
 }
 
-/// 删除对话
-pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<(), String> {
+/// 删除对话。
+///
+/// **顺序即契约**：先摘掉「决定它还在不在侧栏」的两样东西——对话文件和索引条目——
+/// 再清工作区 / 附件 / sandbox 导出这些副产物，且副产物删不掉只记警告、绝不中止。
+///
+/// 原来是反着来的（先 `remove_dir_all` 工作区，`?` 一路上抛），于是 Windows 上
+/// 一个还在跑的 `npm run dev` 把 cwd 钉在 `chat-workspaces/<id>` 里，目录删不掉 →
+/// 整个删除中止 → 对话文件和索引条目原封不动。而 `load_index_or_scan` 认「磁盘文件
+/// 才是真相源」，下次刷新侧栏就把它重建回来了：用户看到的就是"删了又回来，点好几次
+/// 才掉"。副产物残留顶多占点磁盘，比这个轻得多。
+///
+/// 返回未能清理的副产物说明（供上层提示用户），空 = 全清干净。
+pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<Vec<String>, String> {
     validate_conversation_id(id)?;
     let path = conversation_file_path(app, id)?;
     let mut index = load_index_or_scan(app)?;
@@ -554,48 +565,78 @@ pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<(), String> {
     // A missing conversation file must not prevent removing its stale index entry.
     // When metadata is also missing, stay conservative and leave any workbench alone.
     let remove_workspace = if path.exists() {
-        let conversation = load_conversation(app, id)?;
-        !conversation_has_project_binding(app, &conversation)?
+        // 文件读坏也不该拦住删除——读不出来就按「没绑项目」保守处理：不碰工作区。
+        match load_conversation(app, id) {
+            Ok(conversation) => !conversation_has_project_binding(app, &conversation)?,
+            Err(_) => false,
+        }
     } else if let Some(item) = indexed_item {
         !conversation_list_item_has_project_binding(app, item)?
     } else {
         false
     };
-
-    if remove_workspace {
+    // 工作区路径要在删文件之前解析（解析只读 settings，不碰磁盘），失败也只是不清工作区。
+    let workspace = if remove_workspace {
         let state = app.state::<crate::state::AppState>();
         let settings = state.settings_read();
-        let workspace = crate::native_tools::conversation_workspace_directory(
+        let resolved = crate::native_tools::conversation_workspace_directory(
             &settings.chat_tools.native_tools.working_directory,
             id,
-        )?;
+        );
         drop(settings);
-        if workspace.exists() {
-            if !workspace.is_dir() {
-                return Err(format!(
-                    "Conversation workspace is not a directory: {}",
-                    workspace.display()
-                ));
-            }
-            fs::remove_dir_all(&workspace)
-                .map_err(|e| format!("delete conversation workspace: {e}"))?;
-        }
-    }
+        resolved.ok()
+    } else {
+        None
+    };
 
+    // ① 先断可见性：对话文件 + 索引条目。这两步失败才算删除失败。
     if path.exists() {
         fs::remove_file(&path).map_err(|e| format!("delete conversation file: {e}"))?;
     }
+    index.conversations.retain(|c| c.id != id);
+    save_index(app, &index)?;
 
-    let attachments_dir = conversations_dir(app)?.join(format!("{}_attachments", id));
-    if attachments_dir.exists() {
-        fs::remove_dir_all(&attachments_dir).map_err(|e| format!("delete attachments dir: {e}"))?;
-    }
+    // ② 副产物尽力清，失败只记账。
+    let attachments_dir = match conversations_dir(app) {
+        Ok(dir) => Some(dir.join(format!("{}_attachments", id))),
+        Err(e) => {
+            eprintln!("delete conversation {id}: attachments dir unavailable: {e}");
+            None
+        }
+    };
+    let warnings =
+        remove_conversation_side_artifacts(workspace.as_deref(), attachments_dir.as_deref());
 
     // Sweep legacy outputs/runs left by older versions. This never touches a project root.
     crate::native_tools::remove_sandbox_exports_for_conversation(id);
 
-    index.conversations.retain(|c| c.id != id);
-    save_index(app, &index)
+    Ok(warnings)
+}
+
+/// 删除对话的副产物目录（工作区 / 附件），**只回警告不回错**。
+///
+/// 单独抽出来是为了能脱离 `AppHandle` 单测这条不变式：任何一个目录删不掉，都不能
+/// 变成整个删除失败——对话文件和索引已经在调用方那里先摘掉了，这里再抛错只会让
+/// 上层以为删除没成功。
+fn remove_conversation_side_artifacts(
+    workspace: Option<&Path>,
+    attachments_dir: Option<&Path>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (label, dir) in [("工作区", workspace), ("附件目录", attachments_dir)] {
+        let Some(dir) = dir else { continue };
+        if !dir.exists() {
+            continue;
+        }
+        if !dir.is_dir() {
+            warnings.push(format!("{label}不是目录，已跳过：{}", dir.display()));
+            continue;
+        }
+        if let Err(e) = fs::remove_dir_all(dir) {
+            warnings.push(format!("{label}未能清理（{}）：{e}", dir.display()));
+        }
+    }
+    warnings
 }
 
 /// 获取对话列表（分页）
@@ -1872,5 +1913,54 @@ mod index_self_heal_tests {
         // 有文件(conv_c)不在索引 → 需重建
         let files_diverged = ["conv_a", "conv_c"];
         assert!(!files_diverged.iter().all(|id| indexed.contains(*id)));
+    }
+}
+
+#[cfg(test)]
+mod delete_side_artifact_tests {
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kivio_del_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 不变式：副产物清理只回警告，绝不回错。
+    ///
+    /// 这条挂了就意味着「一个删不掉的工作区能中止整个删除」那个 bug 回来了：对话文件
+    /// 和索引条目留在磁盘上，而 `load_index_or_scan` 认文件是真相源，下次刷新侧栏对话
+    /// 就原样冒回来——用户看到的是「删了又回来，点好几次才掉」。
+    #[test]
+    fn side_artifact_cleanup_reports_warnings_instead_of_failing() {
+        let root = temp_dir();
+
+        // 正常目录：清掉，不报警。
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join("node_modules")).unwrap();
+        fs::write(workspace.join("node_modules/x.js"), "x").unwrap();
+        let attachments = root.join("conv_x_attachments");
+        fs::create_dir_all(&attachments).unwrap();
+
+        let warnings = remove_conversation_side_artifacts(Some(&workspace), Some(&attachments));
+        assert!(warnings.is_empty(), "干净情况不该有警告：{warnings:?}");
+        assert!(!workspace.exists());
+        assert!(!attachments.exists());
+
+        // 路径存在但不是目录（删不掉的一种确定性替身）：出警告，不 panic、不中止。
+        let bogus = root.join("workspace-is-a-file");
+        fs::write(&bogus, "not a dir").unwrap();
+        let warnings = remove_conversation_side_artifacts(Some(&bogus), None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("工作区"), "{warnings:?}");
+
+        // 不存在的路径：静默跳过。
+        assert!(remove_conversation_side_artifacts(
+            Some(&root.join("gone")),
+            Some(&root.join("nope"))
+        )
+        .is_empty());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

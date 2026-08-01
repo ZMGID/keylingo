@@ -259,6 +259,62 @@ pub(crate) async fn chat_delete_message(
     }))
 }
 
+/// 一键 rewind（「回到这里」）：删掉这条用户提问**及其之后**的所有消息，把原文回传给前端塞进输入框。
+/// 与 `chat_regenerate_message` 的区别：不自动重生成，用户可以改完再自己发。
+/// ponytail: 被删消息的附件文件留在会话附件目录里（孤儿）—— 原文回输入框但附件不回，
+/// 清理留给会话删除时的整目录清空。要连附件一起回填再单独做。
+#[tauri::command]
+pub(crate) async fn chat_rewind_to_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    message_id: String,
+) -> Result<serde_json::Value, String> {
+    // 与 regenerate 同一把哨兵：会话里还有 run 在跑时不许截历史。
+    let Some(_send_reservation) = ChatSendReservation::try_acquire(state.inner(), &conversation_id)
+    else {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": CHAT_REPLY_BUSY_ERROR,
+        }));
+    };
+
+    let mut conversation = load_conversation(&app, &conversation_id)?;
+    let idx = find_message_index(&conversation, &message_id)?;
+    if conversation.messages[idx].role != "user" {
+        return Err("仅支持回到用户提问".to_string());
+    }
+    let content = conversation.messages[idx].content.clone();
+
+    mark_summary_stale_if_needed(&mut conversation, idx);
+    conversation.messages.truncate(idx);
+    // 与 chat_regenerate_message 同理：truncate 可能删掉某组的「选中条」，悬空引用会让
+    // group_answer_excluded_from_context 把整组答案排除出上下文。
+    if !conversation.group_selections.is_empty() {
+        let existing_ids: std::collections::HashSet<&str> = conversation
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        conversation
+            .group_selections
+            .retain(|_, msg_id| existing_ids.contains(msg_id.as_str()));
+    }
+
+    // ponytail: 故意不在这里跑 compute_context_state —— 它要列 MCP 工具/扫技能，能拖几秒，
+    // 而 rewind 只是删消息。前端拿到结果立刻更新，随后 fire-and-forget 调 chat_get_context_stats
+    // 补算上下文用量。
+    conversation.updated_at = chrono::Local::now().timestamp();
+    save_conversation(&app, &conversation)?;
+
+    strip_transcripts_for_frontend(&mut conversation);
+    Ok(serde_json::json!({
+        "success": true,
+        "conversation": conversation,
+        "content": content,
+    }))
+}
+
 /// 组装分叉分支的消息前缀（纯函数，便于单测）：
 /// - 取 `messages[0..=anchor_idx]`（含锚点）。
 /// - 若锚点属于某多模型多答组（`group_id = Some(g)`，决策 Q2）：只保留锚点那一列，
@@ -434,12 +490,20 @@ pub(crate) fn chat_delete_conversation(
     // 删对话即终止其持久外部 CLI 会话（actor 关闭子进程）并清掉跨重启 resume 句柄。
     state.remove_external_live_session(&conversation_id);
     crate::external_agents::session::clear_live_handle(&app, &conversation_id);
+    // 该对话起的后台命令也一并收掉。它们本来只在退出应用时统一清（跨轮存活是有意的），
+    // 但一个还在跑的 dev server 会把 cwd 钉在对话工作区里，Windows 上直接导致工作区
+    // 删不掉。删对话时这些进程已经没有归属，先杀掉再清目录。
+    let killed = state.kill_background_commands_for_conversation(&conversation_id);
+    if killed > 0 {
+        eprintln!("Deleted conversation {conversation_id}: killed {killed} background command(s)");
+    }
     // 顺手清掉该对话在内存里按 conversation_id 累积的运行态小 map（stream 代际计数 /
     // 会话级工具同意），它们只插不删、严格无界——对话删了便永远不会再被引用。
     state.forget_chat_conversation_runtime(&conversation_id);
-    delete_conv(&app, &conversation_id)?;
+    let warnings = delete_conv(&app, &conversation_id)?;
     Ok(serde_json::json!({
         "success": true,
+        "warnings": warnings,
     }))
 }
 

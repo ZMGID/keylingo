@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, Gauge, MessageSquareOff, Scissors } from 'lucide-react'
+import { AlertTriangle, Ban, Gauge, MessageSquareOff, PlugZap, Scissors } from 'lucide-react'
 import type { DegradedAnswer } from './types'
 
 /**
@@ -15,6 +15,7 @@ const KIND_META: Record<
 > = {
   rate_limited: { Icon: Gauge, label: '限流 / 配额', tone: 'amber' },
   context_overflow: { Icon: Scissors, label: '上下文超长', tone: 'amber' },
+  timeout: { Icon: PlugZap, label: '超时 / 连接中断', tone: 'amber' },
   moderation: { Icon: Ban, label: '内容审核拦截', tone: 'red' },
   empty_response: { Icon: MessageSquareOff, label: '空响应', tone: 'amber' },
   unknown: { Icon: AlertTriangle, label: '调用失败', tone: 'red' },
@@ -38,6 +39,7 @@ export function DegradedAnswerCard({ degraded }: { degraded: DegradedAnswer }) {
   const tone = TONE_CLASS[meta.tone] ?? TONE_CLASS.red
   const { Icon } = meta
   const summaries = degraded.toolSummaries ?? []
+  const detail = degraded.detail?.trim()
 
   return (
     <div
@@ -53,26 +55,16 @@ export function DegradedAnswerCard({ degraded }: { degraded: DegradedAnswer }) {
             {degraded.reason}
           </p>
 
+          {detail && (
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/[0.04] px-2.5 py-1.5 font-mono text-[11.5px] leading-relaxed text-neutral-600 dark:bg-white/[0.06] dark:text-neutral-400">
+              {detail}
+            </pre>
+          )}
+
+          {/* 工具结果本身已在上方的工具卡片里，这里只给一句计数指路，不再复述一遍列表。 */}
           {summaries.length > 0 && (
-            <div className="mt-2.5 border-t border-black/[0.06] pt-2 dark:border-white/[0.08]">
-              <div className="text-[11.5px] text-neutral-500 dark:text-neutral-500">
-                本轮已完成 {summaries.length} 个工具调用，结果见上方卡片
-              </div>
-              <ul className="mt-1.5 space-y-1">
-                {summaries.map((s, i) => (
-                  <li
-                    key={`${s.name}-${i}`}
-                    className="flex min-w-0 gap-1.5 text-[12px] text-neutral-600 dark:text-neutral-400"
-                  >
-                    <span className="shrink-0 font-mono text-[11.5px] text-neutral-500 dark:text-neutral-500">
-                      {s.name}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate" title={s.preview}>
-                      {s.preview}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+            <div className="mt-2 text-[11.5px] text-neutral-500 dark:text-neutral-500">
+              本轮已完成 {summaries.length} 个工具调用，结果见上方卡片
             </div>
           )}
         </div>

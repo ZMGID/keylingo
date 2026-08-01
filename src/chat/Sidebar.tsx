@@ -604,9 +604,20 @@ export const Sidebar = memo(function Sidebar({
       }
     }
     try {
-      await chatApi.deleteConversation(id)
+      const warnings = await chatApi.deleteConversation(id)
+      // 对话本身已删掉，只是副产物没清干净（典型：工作区里还有进程占着目录）。
+      // 以前这类情况整个删除会中止、对话又冒回来，现在只提示一句。
+      if (warnings.length > 0) {
+        window.alert(
+          (lang === 'zh'
+            ? '对话已删除，但以下内容未能清理：\n\n'
+            : 'Conversation deleted, but this could not be cleaned up:\n\n') + warnings.join('\n'),
+        )
+      }
     } catch (err) {
       console.error('Failed to delete conversation:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      window.alert((lang === 'zh' ? '删除对话失败：' : 'Failed to delete conversation: ') + message)
     } finally {
       // 无论后端删除成功或抛错，都本地剔除该 id 并刷新侧栏，确保 ghost 立即消失。
       setConversations((items) => items.filter((item) => item.id !== id))

@@ -14,7 +14,7 @@
 use reqwest::header::ACCEPT_ENCODING;
 use serde_json::Value;
 
-use crate::api::{send_with_failover, with_standard_request_timeout};
+use crate::api::{send_with_failover, with_chat_request_timeout};
 use crate::settings::ModelProvider;
 use crate::state::AppState;
 use crate::usage::{
@@ -71,7 +71,7 @@ impl OpenAiResponsesProvider<'_> {
             &self.provider.id,
             &self.provider.api_keys,
             |key| {
-                with_standard_request_timeout(crate::api::attach_json_body(
+                with_chat_request_timeout(crate::api::attach_json_body(
                     self.state
                         .http
                         .post(self.responses_url())

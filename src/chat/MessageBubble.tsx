@@ -15,13 +15,12 @@ import {
   GitBranch,
   ImagePlus,
   ListChecks,
-  Pencil,
   Play,
   Plug,
+  RotateCcw,
   ScrollText,
   Search,
   SquareTerminal,
-  Trash2,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { Button, IconButton } from '../components/Button'
@@ -68,6 +67,8 @@ interface MessageBubbleProps {
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
   onRegenerateMessage?: (messageId: string, newContent?: string) => Promise<void>
   onForkMessage?: (messageId: string) => Promise<void>
+  /** 一键 rewind：截掉这条提问及其之后的消息，原文回输入框（仅 user 气泡）。 */
+  onRewindMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
   onSaveMessageToNote?: (messageId: string) => Promise<boolean>
   agentPlanOverride?: AgentPlanState | null
@@ -836,6 +837,7 @@ function MessageBubbleComponent({
   onUpdateMessage,
   onRegenerateMessage,
   onForkMessage,
+  onRewindMessage,
   onDeleteMessage,
   onSaveMessageToNote,
   agentPlanOverride = null,
@@ -849,7 +851,15 @@ function MessageBubbleComponent({
   const attachments = message.attachments ?? []
   const toolCalls = message.tool_calls ?? message.toolCalls ?? []
   const [isEditing, setIsEditing] = useState(false)
-  const timelineSegments = orderedSegments(message.segments)
+  // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → null → 不渲染卡片。
+  const degraded = message.degraded ?? null
+  // 降级文案同时走三条路：content、时间线 text 分段、以及这张卡片。卡片已完整表达，
+  // 另外两条都要按文本相等剔掉，否则同一段话在气泡里出现两遍（正是用户看到的样子）。
+  const degradedText = degraded?.text.trim() ?? ''
+  const timelineSegments = orderedSegments(message.segments).filter(
+    (segment) =>
+      !degradedText || segment.kind !== 'text' || segmentText(segment).trim() !== degradedText,
+  )
   const hasTimelineSegments = !isEditing && timelineSegments.length > 0
   const messageArtifacts = message.artifacts ?? []
   const toolArtifacts = toolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])
@@ -875,13 +885,12 @@ function MessageBubbleComponent({
   const generatedFileArtifacts = [...legacyMessageArtifacts, ...legacyToolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])]
     .filter((artifact) => !isImageArtifact(artifact))
   // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → undefined → 不渲染卡片。
-  const degraded = message.degraded ?? null
   // content 仍保留同一段文本（旧前端 / 外部 CLI 只读 content），但卡片已经完整表达了
   // 同样的信息 —— 这里不再把它当正文渲染，避免一模一样的内容出现两遍。
   const hasAnswerContent =
     !isDirectImageGenerationPending &&
     message.content.trim().length > 0 &&
-    !(degraded && message.content.trim() === degraded.text.trim())
+    message.content.trim() !== degradedText
   const hasGeneratedImages = galleryImageArtifacts.length > 0
   const hasGeneratedFiles = generatedFileArtifacts.length > 0
   const [draft, setDraft] = useState(message.content)
@@ -907,24 +916,13 @@ function MessageBubbleComponent({
 
   if (isUser) {
     const hasText = message.content.trim().length > 0
-    const canEditUser = Boolean(onRegenerateMessage)
-    const handleEditAndRegenerate = () => {
-      const trimmed = draft.trim()
-      if (!trimmed || !onRegenerateMessage) return
-      // regenerate 的 Promise 要等整个生成结束才 resolve（agent run 可能数分钟），编辑框不陪跑：
-      // 乐观关闭编辑态（handleRegenerateMessage 的乐观截断会同步重渲本气泡）。失败时它内部
-      // 会 reload 会话恢复原文，并在线程里展示错误 + 重试。
-      // 内容没变 → 纯重新生成；变了 → 编辑并重新生成（后端原子替换+截断）。
-      setIsEditing(false)
-      void onRegenerateMessage(message.id, trimmed === message.content ? undefined : trimmed)
-    }
     // R8（多模型一问多答）：本问发给 ≥2 个模型时，在 user 气泡顶部渲染模型标签行（如 @deepseek @qwen）。
     // 单模型不显示这行（sentModels 缺省或 <2）。
     const replyModelTags = (sentModels ?? []).filter((m) => (m.model ?? '').trim().length > 0)
     const showModelTags = replyModelTags.length >= 2
     return (
       <div className={`group flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
-        <div className={`flex min-w-0 flex-col items-end gap-1 ${isEditing ? 'w-full max-w-full' : 'max-w-[85%]'}`}>
+        <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
           {showModelTags && (
             <div className="flex flex-wrap items-center justify-end gap-1.5 pr-0.5">
               {replyModelTags.map((tag, index) => (
@@ -946,50 +944,14 @@ function MessageBubbleComponent({
               variant="user"
             />
           )}
-          {isEditing ? (
-            <div className="w-full space-y-2">
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                rows={4}
-                autoFocus
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                className="w-full resize-y rounded-[20px] border border-[var(--border-input)] bg-[var(--bg-hover)] px-4 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:text-neutral-100 dark:focus:border-neutral-500"
-              />
-              <div className="flex items-center justify-end gap-2">
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setDraft(message.content)
-                    setIsEditing(false)
-                  }}
-                >
-                  取消
-                </Button>
-                <Button
-                  variant="primary"
-                  // 编辑中若本会话起了新 run（如输入栏又发了一条），回调被 MessageList 收走
-                  // （canEditUser 变 false）→ 禁用保存避免静默 no-op；取消仍可退出。
-                  disabled={!draft.trim() || !canEditUser}
-                  onClick={handleEditAndRegenerate}
-                  title="替换这条提问，并丢弃其后的回复重新生成"
-                >
-                  保存并重新生成
-                </Button>
+          {hasText && (
+            <div className="chat-user-bubble rounded-[20px] px-4 py-2.5 text-neutral-900 dark:text-neutral-100">
+              <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-relaxed">
+                {message.content}
               </div>
             </div>
-          ) : (
-            hasText && (
-              <div className="chat-user-bubble rounded-[20px] px-4 py-2.5 text-neutral-900 dark:text-neutral-100">
-                <div className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-relaxed">
-                  {message.content}
-                </div>
-              </div>
-            )
           )}
-          {hasText && !isEditing && (
+          {hasText && (
             <div className="flex items-center gap-0.5 pr-0.5 opacity-0 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 group-hover:opacity-100">
               <IconButton
                 size="sm"
@@ -998,13 +960,14 @@ function MessageBubbleComponent({
               >
                 {copied ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <Copy size={14} strokeWidth={2} />}
               </IconButton>
-              {canEditUser && (
+              {onRewindMessage && (
                 <IconButton
                   size="sm"
-                  onClick={() => setIsEditing(true)}
-                  label="编辑并重新生成"
+                  onClick={() => void onRewindMessage(message.id)}
+                  label="回到这里"
+                  title="回到这里：删掉这条提问及其之后的消息，原文放回输入框"
                 >
-                  <Pencil size={14} strokeWidth={2} />
+                  <RotateCcw size={14} strokeWidth={2} />
                 </IconButton>
               )}
               {onForkMessage && (
@@ -1015,15 +978,6 @@ function MessageBubbleComponent({
                   title="从这里建分支（复制到新对话）"
                 >
                   <GitBranch size={14} strokeWidth={2} />
-                </IconButton>
-              )}
-              {onDeleteMessage && (
-                <IconButton
-                  size="sm"
-                  onClick={() => void onDeleteMessage(message.id)}
-                  label="删除"
-                >
-                  <Trash2 size={14} strokeWidth={2} />
                 </IconButton>
               )}
             </div>

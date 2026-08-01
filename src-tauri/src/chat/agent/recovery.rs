@@ -30,6 +30,9 @@ pub struct DegradedAnswer {
     pub kind: String,
     /// 一行人读的失败原因（已按 kind 精确化，不再笼统说"可能上下文过长"）。
     pub reason: String,
+    /// 供应商返回的原始报错（已剥壳裁剪）。`reason` 只是分类话术，真正能排查的是这个。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// 本轮已完成的工具调用摘要（名称 + 结果首行），让用户知道哪些工作没白做。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_summaries: Vec<DegradedToolSummary>,
@@ -52,6 +55,7 @@ impl FailureKind {
             FailureKind::ContextOverflow => "context_overflow",
             FailureKind::Empty => "empty_response",
             FailureKind::Exhausted => "rate_limited",
+            FailureKind::Timeout => "timeout",
             FailureKind::Other => "unknown",
         }
     }
@@ -68,6 +72,9 @@ pub(crate) enum FailureKind {
     Empty,
     /// 限流 / 鉴权 / 5xx / 网络等——底层 api.rs 已重试或换 key,升到这层即已耗尽。
     Exhausted,
+    /// 传输层超时 / 连接中断 / 流断包——**没有** HTTP 状态码,供应商压根没答完。
+    /// 典型:大上下文经第三方中转,SSE 跑到一半被截断,重试再超时。
+    Timeout,
     /// 其它(无法归类)。
     Other,
 }
@@ -137,6 +144,21 @@ const NON_OVERFLOW_PATTERNS: &[&str] = &[
     "available balance",
 ];
 
+/// 传输层没答完的信号：超时 / 连接断 / SSE 断包。这些**没有** HTTP 状态码，
+/// 只在 `extract_status_code` 返回 None 时才判定，免得把带状态码的 5xx 抢走。
+const TRANSPORT_PATTERNS: &[&str] = &[
+    "timed out",
+    "timeout",
+    "error sending request",
+    "connection reset",
+    "connection closed",
+    "connection refused",
+    "incomplete or invalid encoded stream chunk",
+    "dns error",
+    "流式响应读取中断",
+    "请求超时",
+];
+
 /// 判断错误文本是否为「上下文超长」(overflow)。先排除限流/配额误判,再匹配 overflow 文案。
 fn is_context_overflow(lower: &str) -> bool {
     if NON_OVERFLOW_PATTERNS.iter().any(|n| lower.contains(n)) {
@@ -180,6 +202,9 @@ pub(crate) fn classify(message: &str) -> FailureKind {
         // Remediate 兜一手(去敏精简后重试),不会更糟。
         Some(429) | Some(401) | Some(402) | Some(403) => FailureKind::Exhausted,
         Some(code) if (500..600).contains(&code) => FailureKind::Exhausted,
+        // 无状态码 = 供应商压根没答完(超时 / 连接断 / SSE 断包)。别再叫"模型调用失败",
+        // 也别去敏重做——同样的大请求只会再超一次时。
+        None if TRANSPORT_PATTERNS.iter().any(|n| lower.contains(n)) => FailureKind::Timeout,
         _ => FailureKind::Other,
     }
 }
@@ -218,7 +243,10 @@ pub(crate) fn decide(
         // 一次,通常能产出真正的总结;失败了下一轮 already_remediated 会兜底,不会更糟。
         FailureKind::ContentModeration | FailureKind::Other => RecoveryAction::Remediate,
         // 空响应 / 限流耗尽:重做无意义(同样的输入只会再失败),直接用已收集结果兜底。
-        FailureKind::Empty | FailureKind::Exhausted => RecoveryAction::DegradeToGathered,
+        // 超时同理,而且更甚:去敏重做还要再排队等一次 3 分钟超时,纯粹浪费用户时间。
+        FailureKind::Empty | FailureKind::Exhausted | FailureKind::Timeout => {
+            RecoveryAction::DegradeToGathered
+        }
     }
 }
 
@@ -233,9 +261,57 @@ pub(crate) fn assemble_results_from_tool_records(
     language: &str,
     kind: FailureKind,
 ) -> String {
-    assemble_degraded_answer(records, language, kind)
+    assemble_degraded_answer(records, language, kind, None)
         .map(|d| d.text)
         .unwrap_or_default()
+}
+
+/// 把错误串压成**一句能看**的原始报错，给卡片当证据用。
+///
+/// 输入形如 `Chat tools planning Error: 400 Bad Request - {"error":{"message":"…"}} (attempt 3/3)`，
+/// 三步瘦身：去掉内部阶段名前缀 → 把 JSON body 换成里面的 message → 裁剪。
+/// 状态码和 `(attempt N/M)` 都留着，它们正是排查要看的东西。
+///
+/// ponytail: 只认 `" Error: "` 一个前缀分隔符、只解一次 JSON。解不动就原样出，
+/// 显示得丑一点也好过把真报错吞掉。
+fn extract_error_detail(raw: &str) -> Option<String> {
+    const MAX_DETAIL_CHARS: usize = 240;
+    let mut detail = raw.trim();
+    if detail.is_empty() {
+        return None;
+    }
+    // "Chat tools planning Error: xxx" → "xxx"（阶段名对用户无意义）
+    if let Some(at) = detail.find(" Error: ") {
+        detail = detail[at + " Error: ".len()..].trim_start();
+    }
+    let mut detail = detail.to_string();
+    // {"error":{"message":"真话"}} → 真话
+    if let (Some(start), Some(end)) = (detail.find('{'), detail.rfind('}')) {
+        if start < end {
+            if let Some(msg) = serde_json::from_str::<serde_json::Value>(&detail[start..=end])
+                .ok()
+                .and_then(|v| {
+                    let err = v.get("error");
+                    err.and_then(|e| e.get("message"))
+                        .or_else(|| v.get("message"))
+                        .or(err)
+                        .and_then(|m| m.as_str().map(str::to_string))
+                })
+                .filter(|s| !s.trim().is_empty())
+            {
+                detail.replace_range(start..=end, msg.trim());
+            }
+        }
+    }
+    let detail = detail.trim();
+    Some(if detail.chars().count() > MAX_DETAIL_CHARS {
+        format!(
+            "{}…",
+            detail.chars().take(MAX_DETAIL_CHARS).collect::<String>()
+        )
+    } else {
+        detail.to_string()
+    })
 }
 
 /// 结构化版本：同一套裁剪规则，但把「原因 / 工具摘要 / 纯文本」分开返回，
@@ -245,6 +321,7 @@ pub(crate) fn assemble_degraded_answer(
     records: &[ToolCallRecord],
     language: &str,
     kind: FailureKind,
+    raw_error: Option<&str>,
 ) -> Option<DegradedAnswer> {
     /// 摘要里最多列几条工具结果(其余折叠为计数)。
     const MAX_BLOCKS: usize = 8;
@@ -320,6 +397,7 @@ pub(crate) fn assemble_degraded_answer(
     Some(DegradedAnswer {
         kind: kind.wire_kind().to_string(),
         reason: reason.to_string(),
+        detail: raw_error.and_then(extract_error_detail),
         tool_summaries: summaries,
         text: out,
     })
@@ -362,6 +440,13 @@ fn failure_reason_line(kind: FailureKind, zh: bool) -> &'static str {
                 "⚠️ 模型返回了空响应。请重试,或更换模型。"
             } else {
                 "⚠️ The model returned an empty response. Retry or switch models."
+            }
+        }
+        FailureKind::Timeout => {
+            if zh {
+                "⚠️ 请求超时 / 流式连接中断,多次重试后仍失败 —— 供应商没把这次回答传完。常见于上下文过大叠加第三方中转:精简对话,或换一个更稳的接口地址。"
+            } else {
+                "⚠️ The request timed out or the stream broke, and retries still failed — the provider never finished this response. Usually an oversized context through a relay endpoint: trim the conversation or switch to a more reliable endpoint."
             }
         }
         FailureKind::Other => {
@@ -545,10 +630,23 @@ mod tests {
             ),
             rec("failed_tool", ToolCallStatus::Error, Some("不该出现")),
         ];
-        let d = assemble_degraded_answer(&records, "zh-CN", FailureKind::Exhausted)
-            .expect("有成功工具结果 ⇒ 应产出结构化降级描述");
+        let d = assemble_degraded_answer(
+            &records,
+            "zh-CN",
+            FailureKind::Exhausted,
+            Some(r#"Chat stream Error: 429 Too Many Requests - {"error":{"message":"concurrency limit reached, retry in 30s"}}"#),
+        )
+        .expect("有成功工具结果 ⇒ 应产出结构化降级描述");
         assert_eq!(d.kind, "rate_limited");
         assert!(d.reason.contains("限流") || d.reason.contains("配额"));
+        // 真正能排查的是原始报错，不是分类话术。
+        assert!(
+            d.detail
+                .as_deref()
+                .is_some_and(|s| s.contains("429") && s.contains("concurrency limit reached")),
+            "got {:?}",
+            d.detail
+        );
         assert_eq!(d.tool_summaries.len(), 2, "失败的工具不进摘要");
         assert_eq!(d.tool_summaries[0].name, "mixer_generate_image");
         assert_eq!(d.tool_summaries[0].preview, "Generated 1 image.");
@@ -557,7 +655,62 @@ mod tests {
         assert!(!d.text.contains("不该出现"));
 
         // 无成功结果 ⇒ None（调用方退回静态文案），与文本版 is_empty 语义一致。
-        assert!(assemble_degraded_answer(&[], "zh-CN", FailureKind::Exhausted).is_none());
+        assert!(assemble_degraded_answer(&[], "zh-CN", FailureKind::Exhausted, None).is_none());
+    }
+
+    #[test]
+    fn extract_error_detail_strips_stage_prefix_and_unwraps_json() {
+        // 400 + JSON body：阶段名去掉、body 换成 message、状态码和重试次数留着
+        assert_eq!(
+            extract_error_detail(
+                r#"Chat stream Error: 400 Bad Request - {"error":{"message":"Content Exists Risk"}} (attempt 1/1)"#
+            )
+            .as_deref(),
+            Some("400 Bad Request - Content Exists Risk (attempt 1/1)")
+        );
+        // 真实日志样本：401（顶层 error.message）
+        assert_eq!(
+            extract_error_detail(
+                r#"Chat tools planning Error: 401 Unauthorized - {"error":{"message":"Authentication Fails, Your api key: ****f094 is invalid","type":"authentication_error"}} (attempt 1/3)"#
+            )
+            .as_deref(),
+            Some("401 Unauthorized - Authentication Fails, Your api key: ****f094 is invalid (attempt 1/3)")
+        );
+        // 真实日志样本：超时（无 JSON，原样保留 url 与重试次数）
+        assert_eq!(
+            extract_error_detail(
+                "Chat tools planning Error: error sending request for url (https://relay.example/v1/responses) → operation timed out [timeout,request] (attempt 3/3)"
+            )
+            .as_deref(),
+            Some("error sending request for url (https://relay.example/v1/responses) → operation timed out [timeout,request] (attempt 3/3)")
+        );
+        assert_eq!(extract_error_detail("   "), None);
+        // 超长裁剪，不把整份 body 糊进卡片
+        let long = extract_error_detail(&"x".repeat(2000)).expect("some");
+        assert!(long.chars().count() <= 241, "got {}", long.chars().count());
+    }
+
+    #[test]
+    fn classify_detects_transport_failures_without_status() {
+        // 真实日志里的两条：超时 + SSE 断包。没有状态码 ⇒ Timeout，而不是笼统的 Other。
+        for msg in [
+            "Chat tools planning Error: error sending request for url (https://relay.example/v1/responses) → operation timed out [timeout,request] (attempt 3/3)",
+            "Chat tools planning 流式响应读取中断：the provider sent an incomplete or invalid encoded stream chunk。",
+            "Chat stream Error: connection reset by peer",
+        ] {
+            assert_eq!(classify(msg), FailureKind::Timeout, "should be timeout: {msg}");
+        }
+        // 带状态码的 5xx 仍归 Exhausted（换 key/退避是它的路子，不是传输层）
+        assert_eq!(
+            classify("Chat API Error: 504 Gateway Timeout"),
+            FailureKind::Exhausted
+        );
+        // 超时不做去敏重做——那只会再排队等一次超时
+        assert_eq!(
+            decide(FailureKind::Timeout, true, false, false),
+            RecoveryAction::DegradeToGathered
+        );
+        assert_eq!(FailureKind::Timeout.wire_kind(), "timeout");
     }
 
     #[test]
@@ -579,10 +732,11 @@ mod tests {
             FailureKind::ContextOverflow,
             FailureKind::ContentModeration,
             FailureKind::Empty,
+            FailureKind::Timeout,
             FailureKind::Other,
         ] {
             let text = assemble_results_from_tool_records(&records, "zh-CN", kind);
-            let structured = assemble_degraded_answer(&records, "zh-CN", kind).expect("some");
+            let structured = assemble_degraded_answer(&records, "zh-CN", kind, None).expect("some");
             assert_eq!(text, structured.text, "kind={kind:?}");
         }
     }

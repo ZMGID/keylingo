@@ -34,11 +34,12 @@ import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
 import { GitStatusPill } from './dock/GitStatusPill'
 import { GitDiffChip } from './dock/GitDiffChip'
+import { AgentTodoIndicator } from './AgentTodoIndicator'
 import { Button, IconButton } from '../components/Button'
 import type { Lang } from '../settings/i18n'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
-import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
+import type { AgentPlanMode, AgentPlanState, AgentTodoState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
 import {
   buildSlashCommands,
   commandMatches,
@@ -361,6 +362,7 @@ interface InputBarProps {
   toolStatusHint?: string
   sendDisabledReason?: string
   agentPlanState?: AgentPlanState | null
+  agentTodoState?: AgentTodoState | null
   onAgentPlanModeChange?: (mode: AgentPlanMode) => void | Promise<void>
   enabledSkills?: SlashSkill[]
   onOpenSkillSettings?: () => void
@@ -431,6 +433,7 @@ export function InputBar({
   toolStatusHint,
   sendDisabledReason,
   agentPlanState = null,
+  agentTodoState = null,
   onAgentPlanModeChange,
   enabledSkills = [],
   onOpenSkillSettings,
@@ -524,6 +527,7 @@ export function InputBar({
   const modeEntryEnabled = Boolean(onModeChange) && modeOptions.length > 0
   // 状态条只放「你在哪」—— 当前项目或集。Git 分支/diff 归下面的工具栏。
   const gitStatusEnabled = Boolean(gitWorkdir && gitLang && onOpenGitPanel)
+  const todoBarVisible = (agentTodoState?.items?.length ?? 0) > 0
   const statusBarVisible = Boolean(
     (projectEntryEnabled && effectiveProject) || effectiveSet,
   )
@@ -1084,6 +1088,14 @@ export function InputBar({
       }
     }
 
+    // 生成中按 Esc = 点停止。只绑在输入框上（发完焦点就在这），
+    // 不接全局监听——图片查看器/右键菜单/侧边栏那一堆 Esc 关闭会跟着一块触发。
+    if (e.key === 'Escape' && onCancel && cancelVisible && !cancelling) {
+      e.preventDefault()
+      onCancel()
+      return
+    }
+
     if (e.key !== 'Enter' || e.shiftKey) return
     e.preventDefault()
     handleSend()
@@ -1625,8 +1637,8 @@ export function InputBar({
             </div>
           </div>
         )}
-        {/* ① 状态条：「你在哪 + 改了多少」—— 左侧当前项目/集，右侧 diff 徽标。 */}
-        {(statusBarVisible || gitStatusEnabled) && (
+        {/* ① 状态条：「你在哪 + 在做什么 + 改了多少」—— 项目/集、当前 todo、diff 徽标。 */}
+        {(statusBarVisible || todoBarVisible || gitStatusEnabled) && (
           <div className="chat-composer-status" data-tauri-drag-region="false">
             {statusBarVisible && effectiveProject && (
               <div className="relative min-w-0">
@@ -1674,6 +1686,9 @@ export function InputBar({
                 <Layers strokeWidth={1.75} />
                 <span className="min-w-0 truncate">{effectiveSet.name}</span>
               </button>
+            )}
+            {todoBarVisible && (
+              <AgentTodoIndicator todoState={agentTodoState} placement="status" />
             )}
             {gitStatusEnabled && gitWorkdir && gitLang && onOpenGitPanel && (
               <GitDiffChip
@@ -1740,67 +1755,75 @@ export function InputBar({
               {sendDisabledReason || toolStatusHint}
             </div>
           )}
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={handleInput}
-            onPaste={(e) => void handlePaste(e)}
-            onKeyDown={handleKeyDown}
-            onSelect={handleSelect}
-            autoCapitalize="off"
-            autoCorrect="off"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={
-              usesExternalRuntime
-                ? `${cliAgentLabel} 命令，输入 / 补全`
-                : 'Ask me anything...'
-            }
-            rows={1}
-            /* 宽度用 calc 收 28px（= 发送键 28 宽 + right-2 的 8 − 与滚动条留的 4px 呼吸）而不是
-               w-full + pr-*：滚动条长在**盒子右边缘**，padding 挡不住它，只有把盒子本身收窄
-               才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
-               不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
-               custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
-            className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
-          />
+          {/* 输入行自成定位上下文。发送键靠 inset-y-0 + my-auto 求垂直居中，而这是按
+              **最近的定位祖先**算的：挂在 shell 上时，上面的附件 / 引用 / 提示条的高度
+              也会被算进去——加一张引用卡片，按钮就往上飘半张卡片，正好落到引用卡右下角。
+              把它和 textarea 圈进同一个 relative 行，居中就只按输入行算。
+              `-mr-3 pr-3`：让本行的 padding box 右缘与 shell 的 padding box 右缘重合，
+              这样下面的 `right-2` 和改动前落在同一像素（shell 的 px-3 不随容器查询变，
+              这 12px 是常量）。垂直方向仍旧不写死数值——shell 的 py 在容器查询里会变。 */}
+          <div className="relative -mr-3 pr-3">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInput}
+              onPaste={(e) => void handlePaste(e)}
+              onKeyDown={handleKeyDown}
+              onSelect={handleSelect}
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={
+                usesExternalRuntime
+                  ? `${cliAgentLabel} 命令，输入 / 补全`
+                  : 'Ask me anything...'
+              }
+              rows={1}
+              /* 宽度用 calc 收 28px（= 发送键 28 宽 + right-2 的 8 − 与滚动条留的 4px 呼吸）而不是
+                 w-full + pr-*：滚动条长在**盒子右边缘**，padding 挡不住它，只有把盒子本身收窄
+                 才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
+                 不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
+                 custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
+              className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
+            />
 
-          {/* 发送 / 停止：绝对定位在输入框右侧。用 inset-y-0 + my-auto 让浏览器按容器
-              实际高度算垂直居中（别手数 py/border 的格子，容器内距在容器查询里还会变）。
-              两按钮共存于同一槽位，按 cancelVisible 做 opacity+scale crossfade。 */}
-          <div className="chat-composer-send-slot absolute inset-y-0 right-2 my-auto h-7 w-7">
-            <button
-              type="button"
-              onClick={handleSend}
-              disabled={!canSend}
-              tabIndex={-1}
-              title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
-              aria-label={sendDisabledReason || '发送'}
-              aria-hidden={cancelVisible && !!onCancel}
-              className={`chat-composer-send absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
-                cancelVisible && onCancel
-                  ? 'pointer-events-none scale-90 opacity-0'
-                  : 'opacity-100'
-              } ${canSend ? 'is-ready' : ''}`}
-            >
-              <ArrowUp size={16} strokeWidth={2.25} />
-            </button>
-            {onCancel ? (
+            {/* 发送 / 停止：绝对定位在输入行右侧。两按钮共存于同一槽位，
+                按 cancelVisible 做 opacity+scale crossfade。 */}
+            <div className="chat-composer-send-slot absolute inset-y-0 right-2 my-auto h-7 w-7">
               <button
                 type="button"
-                onClick={onCancel}
-                disabled={cancelling}
-                tabIndex={cancelVisible ? undefined : -1}
-                aria-hidden={!cancelVisible}
-                className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
-                  cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
-                }`}
-                title={cancelling ? '正在停止' : '停止生成'}
-                aria-label={cancelling ? '正在停止' : '停止生成'}
+                onClick={handleSend}
+                disabled={!canSend}
+                tabIndex={-1}
+                title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
+                aria-label={sendDisabledReason || '发送'}
+                aria-hidden={cancelVisible && !!onCancel}
+                className={`chat-composer-send absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
+                  cancelVisible && onCancel
+                    ? 'pointer-events-none scale-90 opacity-0'
+                    : 'opacity-100'
+                } ${canSend ? 'is-ready' : ''}`}
               >
-                <Square size={12} strokeWidth={2.4} fill="currentColor" />
+                <ArrowUp size={16} strokeWidth={2.25} />
               </button>
-            ) : null}
+              {onCancel ? (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  disabled={cancelling}
+                  tabIndex={cancelVisible ? undefined : -1}
+                  aria-hidden={!cancelVisible}
+                  className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
+                    cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
+                  }`}
+                  title={cancelling ? '正在停止' : '停止生成（Esc）'}
+                  aria-label={cancelling ? '正在停止' : '停止生成'}
+                >
+                  <Square size={12} strokeWidth={2.4} fill="currentColor" />
+                </button>
+              ) : null}
+            </div>
           </div>
         </div>
 

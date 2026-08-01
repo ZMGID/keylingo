@@ -111,6 +111,14 @@ pub fn resolve_provider_credentials(
 
 /// 普通非流式 API 请求的总超时。
 pub const STANDARD_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// 非流式**对话补全**的总超时。
+///
+/// 为什么不能沿用 60 秒：一次 high reasoning + 十万 token 输入的补全，光思考就要两三分钟，
+/// 非流式又是「憋完整个回答再一次性返回」——60 秒结构性必然超时，三次重试白烧 195 秒。
+/// 实测就踩过：流式跑了 135 秒断包后回落非流式，3×60 秒全超，用户等了三分多钟拿到
+/// 一句"模型调用失败"。流式那条路本来就只有 300 秒读空闲、没有总时长上限，回落到更紧的
+/// 硬顶是反的。
+pub const CHAT_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// 只限制 TCP/TLS 建连阶段，避免 DNS/握手长期卡住。
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 流式响应的读空闲超时：持续有 SSE chunk 到达时不会触发。
@@ -129,6 +137,14 @@ const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 为非流式请求设置总超时。流式请求不要用它，否则长回答会被总时长切断。
 pub fn with_standard_request_timeout(request: RequestBuilder) -> RequestBuilder {
     request.timeout(STANDARD_HTTP_REQUEST_TIMEOUT)
+}
+
+/// 为非流式**对话补全**设置总超时（[`CHAT_COMPLETION_REQUEST_TIMEOUT`]）。
+/// 四个适配器（openai / anthropic / gemini / responses）的非流式路径都用它，
+/// 别再退回 [`with_standard_request_timeout`]——那是给 embedding / rerank / 文档解析
+/// 这类「秒级就该回」的请求用的。
+pub fn with_chat_request_timeout(request: RequestBuilder) -> RequestBuilder {
+    request.timeout(CHAT_COMPLETION_REQUEST_TIMEOUT)
 }
 
 /// 把 JSON body 挂到请求上：`gzip=false` 走普通 `.json()`；`gzip=true` 则序列化后

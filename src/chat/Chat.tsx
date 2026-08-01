@@ -34,7 +34,6 @@ import { PermissionPicker } from './PermissionPicker'
 import { derivePermissionModes, useDetectedExternalAgents } from './permissionModes'
 import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
 import { ContextIndicator } from './ContextIndicator'
-import { AgentTodoIndicator } from './AgentTodoIndicator'
 import { isExecutableAgentPlanText } from './agentPlan'
 import {
   agentRuntimesEqual,
@@ -3050,6 +3049,30 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [applyConversation, refreshSidebar],
   )
 
+  // 一键 rewind（「回到这里」）：截掉这条提问及其之后的所有消息，原文塞回输入框，用户改完再自己发。
+  // 破坏性且不可撤销 → 先 confirm（与删除消息同一把关）。
+  const handleRewindMessage = useCallback(
+    async (messageId: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      if (!window.confirm('回到这里？这条提问及其之后的所有消息会被删除，原文放回输入框。')) return
+      try {
+        const { conversation, content } = await chatApi.rewindToMessage(conv.id, messageId)
+        applyConversation(conversation)
+        setAssistantStreamStatsByMessageId({})
+        setStreamError('')
+        refreshSidebar()
+        insertTextIntoComposer(content)
+        // 上下文用量后台补算（后端 rewind 故意不算，见那边注释）：几秒的 MCP 列表不该挡住 UI。
+        void refreshContextStats(conversation.id)
+      } catch (err) {
+        console.error('Failed to rewind conversation:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '回到这里失败')
+      }
+    },
+    [applyConversation, refreshContextStats, refreshSidebar],
+  )
+
   // 对话分支（方案 B）：在某条消息处建分支——把该消息及之前的消息复制进新对话，
   // 立即打开新对话（不自动发送）。源对话只读、不受影响。
   const handleForkMessage = useCallback(
@@ -3788,7 +3811,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             <PanelRight size={15} />
           </IconButton>
         </div>
-        <AgentTodoIndicator todoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null} />
       </div>
     </>
   )
@@ -4009,6 +4031,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       toolStatusHint={toolStatusHint}
                       sendDisabledReason={sendDisabledReason}
                       agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                      agentTodoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null}
                       onAgentPlanModeChange={handleAgentPlanModeChange}
                       enabledSkills={slashSkills}
                       onOpenSkillSettings={openSkillCenter}
@@ -4110,6 +4133,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       onUpdateMessage={handleUpdateMessage}
                       onRegenerateMessage={handleRegenerateMessage}
                       onForkMessage={handleForkMessage}
+                      onRewindMessage={handleRewindMessage}
                       onDeleteMessage={handleDeleteMessage}
                       onSaveMessageToNote={handleSaveMessageToNote}
                       onRetryLastUser={handleRegenerateMessage}
@@ -4167,6 +4191,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     toolStatusHint={toolStatusHint}
                     sendDisabledReason={sendDisabledReason}
                     agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                    agentTodoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null}
                     onAgentPlanModeChange={handleAgentPlanModeChange}
                     enabledSkills={slashSkills}
                     onOpenSkillSettings={openSkillCenter}

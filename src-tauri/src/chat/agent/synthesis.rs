@@ -440,8 +440,12 @@ pub(crate) async fn recover_synthesis(
         RecoveryAction::DegradeToGathered => {
             // 结构化留存一份供前端渲染成独立卡片；返回值仍是同样的纯文本，
             // 兼容旧前端 / 外部 CLI（它们只读 content）。
-            let degraded =
-                recovery::assemble_degraded_answer(&state.tool_records, &config.language, kind);
+            let degraded = recovery::assemble_degraded_answer(
+                &state.tool_records,
+                &config.language,
+                kind,
+                Some(failure_message),
+            );
             let text = degraded
                 .as_ref()
                 .map(|d| d.text.clone())
@@ -450,7 +454,7 @@ pub(crate) async fn recover_synthesis(
             text
         }
         RecoveryAction::CompactAndRetry => recover_overflow_compact_and_retry(env, state).await,
-        RecoveryAction::Remediate => recover_remediate(env, state, kind).await,
+        RecoveryAction::Remediate => recover_remediate(env, state, kind, failure_message).await,
     }
 }
 
@@ -482,6 +486,8 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
             Err("cancelled".to_string())
         }
     };
+    // 重试自己的报错也要留给卡片——否则用户只看到"压缩后仍失败"这句空话。
+    let mut retry_error: Option<String> = None;
     let text = match result {
         Ok((message, usage)) => {
             state.merge_usage(usage);
@@ -494,6 +500,7 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
         }
         Err(err) => {
             eprintln!("Chat synthesis overflow compact-and-retry failed: {err}");
+            retry_error = Some(err);
             String::new()
         }
     };
@@ -505,6 +512,7 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
             &state.tool_records,
             &config.language,
             recovery::FailureKind::ContextOverflow,
+            retry_error.as_deref(),
         );
         let text = degraded
             .as_ref()
@@ -521,6 +529,7 @@ async fn recover_remediate(
     env: &LoopEnv<'_>,
     state: &mut RunState,
     kind: recovery::FailureKind,
+    failure_message: &str,
 ) -> String {
     let config = env.config;
     let reduced = build_neutral_reduced_messages(state);
@@ -561,8 +570,13 @@ async fn recover_remediate(
         text
     } else {
         // 去敏重试仍失败 → 确定性兜底(decide 的 already_remediated 臂)。
-        let degraded =
-            recovery::assemble_degraded_answer(&state.tool_records, &config.language, kind);
+        // detail 用**最初**那次失败的报错：去敏重试只是补救手段，用户要排查的是原始原因。
+        let degraded = recovery::assemble_degraded_answer(
+            &state.tool_records,
+            &config.language,
+            kind,
+            Some(failure_message),
+        );
         let text = degraded
             .as_ref()
             .map(|d| d.text.clone())

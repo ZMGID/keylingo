@@ -1,7 +1,7 @@
 use reqwest::header::ACCEPT_ENCODING;
 use serde_json::Value;
 
-use crate::api::{send_with_failover, with_standard_request_timeout};
+use crate::api::{send_with_failover, with_chat_request_timeout};
 use crate::settings::ModelProvider;
 use crate::state::AppState;
 use crate::usage::{
@@ -75,7 +75,7 @@ impl OpenAiChatProvider<'_> {
         result
     }
 
-    /// 单次发送（带多 key failover）。非流式套 `with_standard_request_timeout` 总超时；
+    /// 单次发送（带多 key failover）。非流式套 `with_chat_request_timeout` 总超时；
     /// 流式不套，避免活跃 SSE 被总超时砍断（与改动前两条路径各自的行为一致）。
     async fn post_chat(
         &self,
@@ -106,7 +106,7 @@ impl OpenAiChatProvider<'_> {
                 let req = if stream {
                     req
                 } else {
-                    with_standard_request_timeout(req)
+                    with_chat_request_timeout(req)
                 };
                 req.send()
             },

@@ -42,6 +42,7 @@ interface MessageListProps {
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
   onRegenerateMessage?: (messageId: string, newContent?: string) => Promise<void>
   onForkMessage?: (messageId: string) => Promise<void>
+  onRewindMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
   onSaveMessageToNote?: (messageId: string) => Promise<boolean>
   onExecuteAgentPlan?: (messageId: string) => Promise<void> | void
@@ -83,6 +84,7 @@ function MessageListBase({
   onUpdateMessage,
   onRegenerateMessage,
   onForkMessage,
+  onRewindMessage,
   onDeleteMessage,
   onSaveMessageToNote,
   onExecuteAgentPlan,
@@ -562,6 +564,7 @@ function MessageListBase({
               // （编辑文本会被无声丢弃），所以从入口处直接收起。
               onRegenerateMessage={streaming || streamFrozen ? undefined : onRegenerateMessage}
               onForkMessage={streaming || streamFrozen ? undefined : onForkMessage}
+              onRewindMessage={streaming || streamFrozen ? undefined : onRewindMessage}
               onDeleteMessage={onDeleteMessage}
               onSaveMessageToNote={onSaveMessageToNote}
               agentPlanOverride={msg.id === legacyPlanMessageId ? agentPlanState : null}
@@ -657,6 +660,7 @@ function MessageListBase({
       onUpdateMessage,
       onRegenerateMessage,
       onForkMessage,
+      onRewindMessage,
       onDeleteMessage,
       onSaveMessageToNote,
       onExecuteAgentPlan,

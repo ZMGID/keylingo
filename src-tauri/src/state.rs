@@ -995,6 +995,54 @@ impl AppState {
         killed
     }
 
+    /// Kill the background jobs a single conversation started, and drop them from
+    /// the registry. Used when deleting a conversation: a still-running dev server
+    /// keeps its cwd inside `chat-workspaces/<id>`, and on Windows an in-use
+    /// directory refuses to be removed — which used to abort the whole delete.
+    /// Returns how many process groups were killed.
+    ///
+    /// Jobs with no `conversation_id` (test seeds / non-agent paths) are left
+    /// alone: unowned is not the same as owned-by-this-conversation.
+    pub fn kill_background_commands_for_conversation(&self, conversation_id: &str) -> usize {
+        let mut map = self
+            .background_commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let owned: Vec<String> = map
+            .values()
+            .filter(|job| job.conversation_id.as_deref() == Some(conversation_id))
+            .map(|job| job.job_id.clone())
+            .collect();
+        let mut killed = 0;
+        for job_id in &owned {
+            let Some(job) = map.get_mut(job_id) else {
+                continue;
+            };
+            if matches!(
+                job.status,
+                crate::native_tools::BackgroundCommandStatus::Running
+            ) {
+                // 同 kill_all：优先叫醒持有 Child 的 waiter，避免直接按已回收的 pid 杀
+                // （pid 复用 TOCTOU）；没有 waiter 才回落到进程组直杀。
+                match job.kill_tx.take() {
+                    Some(kill_tx) => {
+                        let _ = kill_tx.send(());
+                        killed += 1;
+                    }
+                    None => {
+                        if let Some(pid) = job.pid {
+                            crate::native_tools::kill_process_group(pid);
+                            killed += 1;
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&job.log_path);
+            map.remove(job_id);
+        }
+        killed
+    }
+
     /// 该 base_url 是否已被学习为"拒绝 prompt_cache_key"。
     pub fn prompt_cache_key_unsupported(&self, base_url: &str) -> bool {
         self.prompt_cache_key_unsupported
