@@ -249,3 +249,17 @@ Bundled document Skills require their execution runtime in the installer. If `pd
 - **Windows**: Manual launch opens settings by default. Autostart uses a dedicated `--from-autostart` arg to avoid popping up settings. Single-instance guard ensures clicking the app icon focuses the existing instance.
 - **LaTeX math**: Both screenshot result and explain use `react-markdown` + `remark-math` + `rehype-katex` for rendering LaTeX formulas.
 - **Prompt templates**: Default prompts and prompt composition live in Rust (`prompts.rs` plus defaults exposed through `get_default_prompt_templates`). Custom prompts support `{lang}` and `{text}` placeholders.
+
+## Agent skills
+
+### Issue tracker
+
+议题走 GitHub Issues（`ZMGID/kivio`），用 `gh` CLI 读写。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+沿用五个标准角色标签，标签名即角色名。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+Single-context：根目录 `CONTEXT.md` + `docs/adr/`，不存在时静默跳过。见 `docs/agents/domain.md`。
