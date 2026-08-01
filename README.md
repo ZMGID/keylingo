@@ -51,7 +51,7 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 ## AI 客户端
 
 <p align="center">
-  <img src="docs/screenshots/chat-agent.png" width="840" alt="Kivio Desktop AI 客户端">
+  <img src="docs/screenshots/chat-client.png" width="840" alt="Kivio Desktop AI 客户端">
 </p>
 
 与服务商无关的 Agent 运行时，带真正的工具循环，不是聊天套壳。
@@ -257,7 +257,7 @@ Design principles, as implemented in code:
 ## The AI Client
 
 <p align="center">
-  <img src="docs/screenshots/chat-agent.png" width="840" alt="Kivio Desktop AI client">
+  <img src="docs/screenshots/chat-client.png" width="840" alt="Kivio Desktop AI client">
 </p>
 
 A provider-agnostic agent runtime with a real tool loop, not a thin chat wrapper.
