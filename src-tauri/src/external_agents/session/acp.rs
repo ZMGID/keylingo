@@ -2899,3 +2899,268 @@ mod live_reasoning_tests {
         );
     }
 }
+
+// -------------------------------------------------------------------------------------------
+// 导入用：ACP 会话枚举
+// -------------------------------------------------------------------------------------------
+
+/// `session/list` 返回的一条会话（只取导入列表要用的字段）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpSessionSummary {
+    pub session_id: String,
+    pub cwd: String,
+    pub title: Option<String>,
+}
+
+/// ACP `session/list` 探针：起进程 → `initialize` → 按 `cwd` 翻页拉会话 → 关掉。
+///
+/// **只在导入列表里用**，不参与聊天路径。
+///
+/// 返回 `None` 表示**该 agent 不支持导入**——要么 `initialize` 没声明 `loadSession`
+/// （导进来也续不了聊，本机 gemini 就是这样），要么 `session/list` 回 `Method not found`。
+/// 返回 `Some(vec![])` 是"支持但这个目录下没有会话"，两者含义不同，前端展示也不同。
+///
+/// `cwd` 必须传给 agent：不传的话它返回的是**全局**最近会话，翻页上限会在够到本目录的会话
+/// 之前就截断（这个坑 paseo 也踩过并写在注释里）。
+pub async fn probe_acp_sessions(
+    bin: &Path,
+    args: &[&str],
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Option<Vec<AcpSessionSummary>> {
+    // ponytail: 每次列表都起一次进程握手（实测 opencode ~2s）。导入入口是低频动作，
+    // 不做连接复用；真觉得慢再挂到 detection 的缓存上。
+    let mut child = crate::external_agents::spawn::cli_command(bin)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .no_console_window()
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    let deadline = Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+
+    write_rpc(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "clientCapabilities": { "terminal": false },
+            "clientInfo": { "name": "kivio", "version": "external-agents" },
+        }),
+    )
+    .await
+    .ok()?;
+
+    let init = read_rpc_response(&mut reader, 1, started, deadline).await?;
+    let supports_load = init
+        .get("result")
+        .and_then(|r| r.get("agentCapabilities"))
+        .and_then(|c| c.get("loadSession"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !supports_load {
+        let _ = child.start_kill();
+        return None;
+    }
+
+    let cwd_text = cwd.to_string_lossy().to_string();
+    let mut sessions = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut next_id: u64 = 2;
+    // 翻页上限：防止 agent 返回一个永不为空的游标把我们困在这里。
+    for _ in 0..20 {
+        let mut params = json!({ "cwd": cwd_text });
+        if let Some(c) = cursor.as_ref() {
+            params["cursor"] = json!(c);
+        }
+        let id = next_id;
+        next_id += 1;
+        if write_rpc(&mut stdin, id, "session/list", params).await.is_err() {
+            break;
+        }
+        let Some(response) = read_rpc_response(&mut reader, id, started, deadline).await else {
+            break;
+        };
+        if response.get("error").is_some() {
+            // `Method not found` ⇒ 这个 agent 根本没有会话枚举，按"不支持导入"处理。
+            let _ = child.start_kill();
+            return None;
+        }
+        let Some(result) = response.get("result") else {
+            break;
+        };
+        if let Some(items) = result.get("sessions").and_then(|v| v.as_array()) {
+            for item in items {
+                let Some(session_id) = item.get("sessionId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                sessions.push(AcpSessionSummary {
+                    session_id: session_id.to_string(),
+                    cwd: item
+                        .get("cwd")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&cwd_text)
+                        .to_string(),
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                });
+            }
+        }
+        cursor = result
+            .get("nextCursor")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let _ = child.start_kill();
+    Some(sessions)
+}
+
+/// 读到指定 id 的 JSON-RPC 响应为止，途中的通知一律丢弃。超时或流结束返回 `None`。
+async fn read_rpc_response(
+    reader: &mut Lines<BufReader<ChildStdout>>,
+    want_id: u64,
+    started: std::time::Instant,
+    deadline: Duration,
+) -> Option<Value> {
+    loop {
+        if started.elapsed() > deadline {
+            return None;
+        }
+        let line = match timeout(Duration::from_millis(200), reader.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) | Ok(Err(_)) => return None,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("id").and_then(|v| v.as_u64()) == Some(want_id) {
+            return Some(value);
+        }
+    }
+}
+
+/// 用 ACP `session/load` 把一条既有会话的历史重放出来，收集期间推送的 `session/update`。
+///
+/// 只在**导入**时用。返回的是原始 update 负载，交给 `import_history::parse_acp_updates`
+/// 转成 `ChatMessage`——协议细节留在本模块，消息形状的事归那边。
+///
+/// 返回 `None` = 加载失败或该 agent 不支持；`Some(vec![])` = 加载成功但**不重放历史**
+/// （kimi 实测就是这样）。两者调用方要区别对待。
+pub async fn probe_acp_session_history(
+    bin: &Path,
+    args: &[&str],
+    cwd: &Path,
+    session_id: &str,
+    timeout_secs: u64,
+) -> Option<Vec<Value>> {
+    let mut child = crate::external_agents::spawn::cli_command(bin)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .no_console_window()
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    let deadline = Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+
+    write_rpc(
+        &mut stdin,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "clientCapabilities": { "terminal": false },
+            "clientInfo": { "name": "kivio", "version": "external-agents" },
+        }),
+    )
+    .await
+    .ok()?;
+    read_rpc_response(&mut reader, 1, started, deadline).await?;
+
+    write_rpc(
+        &mut stdin,
+        2,
+        "session/load",
+        json!({
+            "sessionId": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "mcpServers": [],
+        }),
+    )
+    .await
+    .ok()?;
+
+    // 重放的通知**大部分在响应之前**到达，但不能只读到响应就停——实测部分 agent 会在
+    // 响应之后再补推。所以收到响应后再多听一小段（tail window），否则会漏掉尾巴上的消息。
+    let mut updates = Vec::new();
+    let mut got_response = false;
+    let mut tail_deadline: Option<std::time::Instant> = None;
+    loop {
+        if started.elapsed() > deadline {
+            break;
+        }
+        if let Some(tail) = tail_deadline {
+            if std::time::Instant::now() > tail {
+                break;
+            }
+        }
+        let line = match timeout(Duration::from_millis(200), reader.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) | Ok(Err(_)) => break,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("id").and_then(|v| v.as_u64()) == Some(2) {
+            if value.get("error").is_some() {
+                let _ = child.start_kill();
+                return None;
+            }
+            got_response = true;
+            tail_deadline = Some(std::time::Instant::now() + Duration::from_secs(3));
+            continue;
+        }
+        if value.get("method").and_then(|v| v.as_str()) == Some("session/update") {
+            if let Some(update) = value.get("params").and_then(|p| p.get("update")) {
+                updates.push(update.clone());
+            }
+        }
+    }
+
+    let _ = child.start_kill();
+    got_response.then_some(updates)
+}

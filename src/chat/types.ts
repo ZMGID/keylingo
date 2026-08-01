@@ -455,6 +455,35 @@ export interface AgentRuntimeConfig {
   external_sandbox?: string | null
 }
 
+/// 一条可从本地 CLI 导入的原生会话。后端 `ImportableSession` 的镜像。
+export interface ImportableCliSession {
+  agentId: string
+  /** 该 CLI 自己的会话 id——续聊时 `--resume` / `session/load` 认的就是这个。 */
+  sessionId: string
+  title?: string | null
+  /** 会话创建时所在的工作目录，必然等于当前项目根（后端已按此过滤）。 */
+  cwd: string
+  /** 最后活动时间，epoch **毫秒**（注意与 `ChatMessage.timestamp` 的秒不同）。 */
+  updatedAt?: number | null
+  /** `null` = 来源给不出条数（ACP `session/list` 不返回），界面显示"未知"而不是 0。 */
+  messageCount?: number | null
+  /** 由导入功能带进来的。 */
+  alreadyImported: boolean
+  /**
+   * 已经有 Kivio 对话绑着这条原生会话时，那条对话的 id。
+   *
+   * **不等于 `alreadyImported`**：Kivio 自己创建的外部 CLI 对话运行时也会写绑定。
+   * 两种都不能再导入（绑定是 1:1 的），但要说不同的话。
+   */
+  boundConversationId?: string | null
+}
+
+export interface CliImportResult {
+  success: boolean
+  imported: Array<{ agentId: string; sessionId: string; conversationId: string }>
+  failures: Array<{ agentId: string; sessionId: string; error: string }>
+}
+
 export interface DetectedExternalAgent {
   id: string
   name: string

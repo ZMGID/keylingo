@@ -21,6 +21,7 @@ import { ConversationList } from './ConversationList'
 import { ChatSectionMenu } from './ChatSectionMenu'
 import { ProjectContextMenu } from './ProjectContextMenu'
 import { ProjectDialog } from './ProjectDialog'
+import { CliImportDialog } from './CliImportDialog'
 import { SetContextMenu } from './SetContextMenu'
 import { SetDialog } from './SetDialog'
 import { SidebarAccountMenu } from './SidebarAccountMenu'
@@ -503,6 +504,7 @@ export const Sidebar = memo(function Sidebar({
     anchor: ConversationMenuAnchor
   } | null>(null)
   const [dialogProject, setDialogProject] = useState<ChatProject | null | undefined>(undefined)
+  const [importProject, setImportProject] = useState<ChatProject | null>(null)
   const [projectSaving, setProjectSaving] = useState(false)
   const [projectError, setProjectError] = useState('')
   const [setMenuState, setSetMenuState] = useState<{
@@ -1447,8 +1449,22 @@ export const Sidebar = memo(function Sidebar({
             setProjectError('')
           }}
           onOpenFolder={() => void handleOpenProjectFolder(menuProject)}
+          onImportFromCli={() => setImportProject(menuProject)}
           onDelete={() => void handleDeleteProject(menuProject)}
           onClose={() => setProjectMenuState(null)}
+        />
+      )}
+
+      {importProject && (
+        <CliImportDialog
+          project={importProject}
+          onClose={() => setImportProject(null)}
+          onOpenConversation={(conversationId) => onSelectConversation(conversationId)}
+          onImported={(conversationIds) => {
+            void loadSidebarData({ silent: true })
+            // 导入多条时跳到第一条——总得落到某一条上，第一条是列表里最新的那个。
+            if (conversationIds[0]) onSelectConversation(conversationIds[0])
+          }}
         />
       )}
 

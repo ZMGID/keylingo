@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { FolderOpen, Pencil, Trash2 } from 'lucide-react'
+import { Download, FolderOpen, Pencil, Trash2 } from 'lucide-react'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import { useCloseAnimation } from './useCloseAnimation'
 import { useClampedMenuPosition } from './useClampedMenuPosition'
@@ -10,6 +10,7 @@ interface ProjectContextMenuProps {
   hasRootFolder: boolean
   onRename: () => void
   onOpenFolder: () => void
+  onImportFromCli: () => void
   onDelete: () => void
   onClose: () => void
 }
@@ -19,6 +20,7 @@ export function ProjectContextMenu({
   hasRootFolder,
   onRename,
   onOpenFolder,
+  onImportFromCli,
   onDelete,
   onClose: onCloseProp,
 }: ProjectContextMenuProps) {
@@ -78,6 +80,22 @@ export function ProjectContextMenu({
       >
         <FolderOpen strokeWidth={1.75} />
         打开项目文件夹
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={!hasRootFolder}
+        // 导入按工作目录匹配会话，没有项目根就无从比对（ADR-0001）。
+        title={hasRootFolder ? undefined : '请先在项目设置中选择文件夹'}
+        className="kv-menu-item"
+        onClick={() => {
+          if (!hasRootFolder) return
+          onImportFromCli()
+          onClose()
+        }}
+      >
+        <Download strokeWidth={1.75} />
+        从 CLI 导入对话
       </button>
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
       <button

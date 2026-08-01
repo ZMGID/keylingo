@@ -862,12 +862,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 堆一个可滚动的失败列表没有对应的用户动作。
   const [hookWarning, setHookWarning] = useState<ChatHookPayload | null>(null)
   const [imageViewerItem, setImageViewerItem] = useState<ChatImageViewerItem | null>(null)
+  // 导入的对话：CLI 那边是否已经有新内容（ADR-0002）。只提示，不同步。
+  const [importedHistoryStale, setImportedHistoryStale] = useState(false)
   const currentConversationIdRef = useRef<string | null>(null)
   // 始终指向最新 currentConversation。消息操作 handler（编辑/删除/重发）借此读取最新会话，
   // 而无需把 currentConversation 列进 useCallback 依赖——否则每次切模型/思考等级（currentConversation
   // 换引用）这些 handler 都换身份，打穿 MessageBubble 的 memo 导致全列表重渲（公式 remount 闪烁）。
   const currentConversationRef = useRef(currentConversation)
   currentConversationRef.current = currentConversation
+
+  useEffect(() => {
+    const id = currentConversation?.id
+    if (!id) {
+      setImportedHistoryStale(false)
+      return
+    }
+    let cancelled = false
+    void chatApi
+      .importedHistoryStale(id)
+      .then((stale) => {
+        if (!cancelled) setImportedHistoryStale(stale)
+      })
+      // 检查不了就当没过期——这只是个提示，不该因为它报错打断打开对话。
+      .catch(() => {
+        if (!cancelled) setImportedHistoryStale(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentConversation?.id])
   const activeRunIdRef = useRef<string | null>(null)
   const locallyCancelledConversationIdRef = useRef<string | null>(null)
   const locallyCancelledRunIdRef = useRef<string | null>(null)
@@ -4123,6 +4146,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       </div>
                     )
                   })()}
+                  {importedHistoryStale && (
+                    <div className="flex justify-center px-4 pt-2">
+                      <span
+                        className="inline-flex max-w-full items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-[11px] text-amber-700 dark:bg-amber-500/15 dark:text-amber-400"
+                        title="这条会话在 CLI 那边继续聊过。Kivio 里的历史是导入时的快照，不会自动同步；续聊时 CLI 用的仍是它自己那份完整上下文。"
+                      >
+                        <span className="truncate">
+                          这条会话在 CLI 那边有新内容，此处显示的历史不完整
+                        </span>
+                      </span>
+                    </div>
+                  )}
                   <Suspense fallback={<MessageListLoading />}>
                     <MessageList
                       key={currentConversation?.id ?? 'empty'}

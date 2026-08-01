@@ -377,3 +377,68 @@ mod tests {
         assert_eq!(payload["currentReasoning"], "high");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// 从本地 CLI 导入对话
+// ---------------------------------------------------------------------------------------------
+
+/// 列出某个项目下可导入的原生会话（按项目工作目录过滤，已导入的带标记）。
+#[tauri::command]
+pub async fn chat_list_importable_cli_sessions(
+    app: AppHandle,
+    project_id: String,
+) -> Result<serde_json::Value, String> {
+    let sessions =
+        crate::external_agents::import::list_importable_for_project(&app, &project_id).await?;
+    Ok(serde_json::json!({ "success": true, "sessions": sessions }))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionRequest {
+    pub agent_id: String,
+    pub session_id: String,
+}
+
+/// 批量导入。**单条失败不影响其它条**——一次勾十条，不该因为其中一条的文件损坏就全军覆没。
+#[tauri::command]
+pub async fn chat_import_cli_sessions(
+    app: AppHandle,
+    project_id: String,
+    items: Vec<ImportSessionRequest>,
+) -> Result<serde_json::Value, String> {
+    let mut imported = Vec::new();
+    let mut failures = Vec::new();
+    for item in items {
+        match crate::external_agents::import::import_one_session(
+            &app,
+            &project_id,
+            &item.agent_id,
+            &item.session_id,
+        )
+        .await
+        {
+            Ok(conversation_id) => imported.push(serde_json::json!({
+                "agentId": item.agent_id,
+                "sessionId": item.session_id,
+                "conversationId": conversation_id,
+            })),
+            Err(error) => failures.push(serde_json::json!({
+                "agentId": item.agent_id,
+                "sessionId": item.session_id,
+                "error": error,
+            })),
+        }
+    }
+    Ok(serde_json::json!({
+        "success": failures.is_empty(),
+        "imported": imported,
+        "failures": failures,
+    }))
+}
+
+/// 这条导入的对话，在 CLI 那边是不是已经有新内容了（ADR-0002 的过期提示）。
+#[tauri::command]
+pub fn chat_imported_history_stale(app: AppHandle, conversation_id: String) -> bool {
+    crate::external_agents::import::imported_history_is_stale(&app, &conversation_id)
+}

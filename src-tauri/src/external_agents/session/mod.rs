@@ -259,3 +259,35 @@ pub fn clear_live_handle(app: &AppHandle, conversation_id: &str) {
         let _ = fs::remove_file(path);
     }
 }
+
+/// 删除一条对话时，清掉它的所有会话绑定记录（`conv_*.json` / `live-*.json` / `imported-*.json`）。
+///
+/// **不清会留下幽灵绑定**：那条原生会话会在导入列表里永远显示"已导入"、永远不能再导，
+/// 点进去还跳到一条已经不存在的对话。
+///
+/// **不碰 CLI 自己的 transcript**——`~/.claude/projects/` 之类是 CLI 的数据，Kivio 从不写它，
+/// 删 Kivio 对话不该连带毁掉用户在终端里还能 resume 的会话。
+///
+/// 尽力而为：单个文件删不掉只记警告，不让删除对话整体失败。
+pub fn remove_all_bindings(app: &AppHandle, conversation_id: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut targets = Vec::new();
+    if let Ok(path) = session_path(app, conversation_id) {
+        targets.push(path);
+    }
+    if let Ok(path) = live_handle_path(app, conversation_id) {
+        targets.push(path);
+    }
+    if let Ok(base) = sessions_dir(app) {
+        targets.push(base.join(format!("imported-{conversation_id}.json")));
+    }
+    for path in targets {
+        if !path.exists() {
+            continue;
+        }
+        if let Err(e) = fs::remove_file(&path) {
+            warnings.push(format!("会话绑定未能清理（{}）：{e}", path.display()));
+        }
+    }
+    warnings
+}

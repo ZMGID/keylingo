@@ -17,6 +17,7 @@ import type {
   PendingAttachment,
 } from './types'
 import type { ThinkingLevel, WebSearchMode, ModelRef } from './types'
+import type { CliImportResult, ImportableCliSession } from './types'
 
 export type { DetectedExternalAgent, AgentRuntimeConfig }
 
@@ -1589,5 +1590,32 @@ export const chatApi = {
       throw new Error('Failed to set agent runtime')
     }
     return result.conversation
+  },
+
+  // ── 从本地 CLI 导入对话 ───────────────────────────────────────────────────
+  // 导入是**项目内的动作**：只列出工作目录等于该项目根的原生会话，导入后仍由原 CLI 续聊。
+  // 契约见 docs/adr/0001..0003。
+
+  async listImportableCliSessions(projectId: string): Promise<ImportableCliSession[]> {
+    if (!isTauriRuntime()) return []
+    const result = await invoke<{ success: boolean; sessions: ImportableCliSession[] }>(
+      'chat_list_importable_cli_sessions',
+      { projectId },
+    )
+    return result.sessions ?? []
+  },
+
+  async importCliSessions(
+    projectId: string,
+    items: { agentId: string; sessionId: string }[],
+  ): Promise<CliImportResult> {
+    if (!isTauriRuntime()) return { success: false, imported: [], failures: [] }
+    return invoke<CliImportResult>('chat_import_cli_sessions', { projectId, items })
+  },
+
+  // 打开已导入的对话时问一次：CLI 那边有没有新内容。只提示，不同步（ADR-0002）。
+  async importedHistoryStale(conversationId: string): Promise<boolean> {
+    if (!isTauriRuntime()) return false
+    return invoke<boolean>('chat_imported_history_stale', { conversationId })
   },
 }

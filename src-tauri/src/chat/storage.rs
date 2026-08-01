@@ -604,8 +604,12 @@ pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<Vec<String>, Str
             None
         }
     };
-    let warnings =
+    let mut warnings =
         remove_conversation_side_artifacts(workspace.as_deref(), attachments_dir.as_deref());
+
+    // 外部 CLI 的会话绑定也要跟着走，否则那条原生会话会永远显示"已导入"、再也导不进来。
+    // 只删 Kivio 侧的绑定记录，**不动 CLI 自己的 transcript**（用户在终端里还要 resume）。
+    warnings.extend(crate::external_agents::session::remove_all_bindings(app, id));
 
     // Sweep legacy outputs/runs left by older versions. This never touches a project root.
     crate::native_tools::remove_sandbox_exports_for_conversation(id);
