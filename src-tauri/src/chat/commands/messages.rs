@@ -261,14 +261,44 @@ pub(crate) async fn push_assistant_message(
     let mut message = message;
     message.degraded = degraded;
     let stored_content = message.content.clone();
-    let generated_title = if let Some(user_content) = title_from_first_user {
-        if conversation.messages.len() == 1 && conversation.title == "新对话" {
+
+    // 标题还是"自动生成的样子"吗——`"新对话"`，或者等于第一句用户消息的启发式结果。
+    // 用户手动重命名过的标题不会等于启发式结果，所以据此判断不会覆盖用户的命名。
+    let title_looks_auto = conversation.title == "新对话"
+        || title_from_first_user.is_some_and(|first| conversation.title == generate_title(first));
+    let is_external = conversation.agent_runtime.kind == crate::chat::types::AgentRuntimeKind::External;
+
+    // 外部 CLI 对话优先用 CLI 自己生成的标题：那是用户在 CLI 里看到的那个，而且不花模型调用。
+    //
+    // **每轮都试一次**（一次文件读，很便宜）：CLI 是异步写标题的（claude 的 `ai-title`），
+    // 首轮回复落盘时往往还没有，只在第一轮试就永远拿不到。
+    let external_cli_title = if is_external && title_looks_auto {
+        crate::external_agents::import::cli_session_title(app, &conversation.id)
+            .filter(|title| !title.trim().is_empty() && *title != conversation.title)
+    } else {
+        None
+    };
+
+    let generated_title = if external_cli_title.is_some() {
+        external_cli_title
+    } else if let Some(user_content) = title_from_first_user {
+        // 外部对话放宽首轮门槛：它的标题可能已经被兜底成"第一句用户消息"，
+        // 卡在 `== "新对话"` 上的话，标题模型这一步压根不会触发。
+        let wants_generation = conversation.messages.len() == 1
+            && if is_external {
+                title_looks_auto
+            } else {
+                conversation.title == "新对话"
+            };
+        if wants_generation {
             // 被取消的首条回复不值得花一次模型调用生成标题（标题生成是一次
             // 带 8s 超时的 LLM 请求，会显著拖慢"停止"后 invoke 的返回 / 输入框解锁）。
             // 用本地启发式标题兜底；下一条正常回复或重命名仍可得到更好的标题。
             if stream_outcome == Some("cancelled") {
                 Some(generate_title(user_content))
             } else {
+                // 外部对话的 `provider_id`/`model` 是空的（ADR-0001），`resolve_mixer_side_model`
+                // 会因此跳过"继承会话模型"，落到设置里的标题模型、再兜到全局 Chat 模型。
                 Some(
                     resolve_conversation_title(
                         settings,
