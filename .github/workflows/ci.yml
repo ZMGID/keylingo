@@ -34,6 +34,7 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # typecheck 本身就串了 protocol:check（见 package.json），生成物漂移在这一步拦住。
       - name: Typecheck
         run: npm run typecheck
 
@@ -41,9 +42,6 @@ jobs:
         run: npm run test
 
       # tauri-build 会校验 externalBin（kivio-ocr-helper）对应当前 target triple 的二进制存在。
-      # 在 macOS 上 build:swift 构建真实 Swift sidecar，满足校验（否则 cargo test 在 build-script 阶段失败）。
-      - name: Check generated chat protocol
-        run: npm run protocol:check
-
+      # 上面的 build:swift 在 macOS 上构建真实 Swift sidecar 满足校验，否则这一步会在 build-script 阶段失败。
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
