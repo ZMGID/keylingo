@@ -1,7 +1,7 @@
 import { RefreshCw, FolderOpen } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { homeDir, join } from '@tauri-apps/api/path'
-import { Toggle, Select, Input, TextArea, SettingRow, SettingsGroup, FieldBlock } from '../components'
+import { Select, Input, TextArea, SettingRow, SettingsGroup, FieldBlock } from '../components'
 import { Button } from '../../components/Button'
 import type { I18n, Lang } from '../i18n'
 import type { SettingsTab } from '../SettingsShell'
@@ -131,18 +131,6 @@ export function ChatTab({
       </SettingsGroup>
 
       <SettingsGroup title={lang === 'zh' ? '响应' : 'Response'}>
-        <SettingRow label={t.chatStreamEnabled}>
-          <Toggle
-            checked={chatConfig.streamEnabled !== false}
-            onChange={(streamEnabled) => onUpdateChat({ streamEnabled })}
-          />
-        </SettingRow>
-        <SettingRow label={t.chatThinkingEnabled} description={t.chatThinkingHint}>
-          <Toggle
-            checked={chatConfig.thinkingEnabled !== false}
-            onChange={(thinkingEnabled) => onUpdateChat({ thinkingEnabled })}
-          />
-        </SettingRow>
         <SettingRow label={t.chatMaxOutputTokens} stack>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">

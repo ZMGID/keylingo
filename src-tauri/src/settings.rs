@@ -2198,9 +2198,11 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.lens.web_search.search_depth = default_web_search_depth();
     }
 
+    // ponytail: 流式输出 / 思考模式的设置项已从 UI 移除，恒为开启（老配置里的 false 在此归位）
+    settings.chat.stream_enabled = true;
+    settings.chat.thinking_enabled = true;
+
     if !settings.chat_behavior_migrated_from_lens {
-        settings.chat.stream_enabled = settings.lens.stream_enabled;
-        settings.chat.thinking_enabled = settings.lens.thinking_enabled;
         if settings.lens.default_language.trim().is_empty() {
             // keep chat.default_language empty → inherit chain unchanged
         } else {
