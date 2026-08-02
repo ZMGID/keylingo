@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { getCurrentWindow, type PhysicalSize } from '@tauri-apps/api/window'
 import { api } from '../api/tauri'
 import { isMac, isWindows, usesNativeTitlebar } from './platform'
@@ -33,9 +33,15 @@ function useDocumentDark(): boolean {
 export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostProps) {
   const [maximized, setMaximized] = useState(false)
   const [nativeEffectActive, setNativeEffectActive] = useState(false)
-  // 材质输入只有物理尺寸（焦点跟随交给 AppKit，见 chatWindowEffects）。
-  // resize 按 150ms 收敛（理由见上方 syncMaximized —— setEffects 也是一次 IPC，不能每帧发）。
-  const [effectSize, setEffectSize] = useState<PhysicalSize | null>(null)
+  const [effectInput, setEffectInput] = useState<{
+    focused: boolean
+    size: PhysicalSize
+    revision: number
+  } | null>(null)
+  // DWM mutations cannot be cancelled once invoke() has crossed the IPC boundary.
+  // Serialize them so an older theme/focus request can never land after the latest one.
+  const effectSyncQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const effectSyncGenerationRef = useRef(0)
   // mac 全屏：以 isFullscreen() 为权威（菜单栏「始终显示」时 innerHeight 到不了 screen.height，
   // 纯几何判定会漏判，顶栏 pl-[92px] 留出空块）。
   //
@@ -172,28 +178,65 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
     }
   }, [])
 
-  // 系统窗口材质的输入采集：物理尺寸。
+  // 系统窗口材质的输入采集：物理尺寸 + 焦点。Microsoft 明确规定桌面 Mica 在失焦时
+  // 退回实色；Windows 下必须在失焦帧撤掉透明 CSS 外壳，重新聚焦后再应用一次主题变体。
   useEffect(() => {
     if (!isTauriRuntime() || effectPlatform === 'linux') return
 
     const win = getCurrentWindow()
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    let stopResize: (() => void) | undefined
+    const stops: Array<() => void> = []
+
+    const push = (next: Partial<{ focused: boolean; size: PhysicalSize }>) => {
+      if (!cancelled) setEffectInput(previous => previous ? { ...previous, ...next } : previous)
+    }
+
+    const refresh = () => {
+      if (!cancelled) {
+        setEffectInput(previous => previous
+          ? { ...previous, revision: previous.revision + 1 }
+          : previous)
+      }
+    }
 
     void (async () => {
       try {
-        const size = await win.innerSize()
+        const [focused, size] = await Promise.all([win.isFocused(), win.innerSize()])
         if (cancelled) return
-        setEffectSize(size)
+        setEffectInput({ focused, size, revision: 0 })
 
         const stop = await win.onResized(({ payload }) => {
           if (timer !== undefined) clearTimeout(timer)
           timer = setTimeout(() => {
-            if (!cancelled) setEffectSize(payload)
+            push({ size: payload })
           }, 150)
         })
-        cancelled ? stop() : (stopResize = stop)
+        cancelled ? stop() : stops.push(stop)
+
+        if (effectPlatform === 'windows') {
+          const stopMove = await win.onMoved(() => {
+            if (timer !== undefined) clearTimeout(timer)
+            timer = setTimeout(refresh, 150)
+          })
+          cancelled ? stopMove() : stops.push(stopMove)
+
+          const stopFocus = await win.onFocusChanged(({ payload }) => {
+            // Fail closed in the same event turn; waiting for IPC would expose the
+            // system's light inactive fallback through the transparent title bar.
+            if (!payload) setNativeEffectActive(false)
+            push({ focused: payload })
+          })
+          cancelled ? stopFocus() : stops.push(stopFocus)
+
+          // Close the gap between the first isFocused() snapshot and listener
+          // installation. A deactivation in that interval would otherwise leave
+          // the transparent class stuck until the next focus transition.
+          const latestFocused = await win.isFocused()
+          if (cancelled) return
+          if (!latestFocused) setNativeEffectActive(false)
+          push({ focused: latestFocused })
+        }
       } catch {
         if (!cancelled) setNativeEffectActive(false)
       }
@@ -202,31 +245,44 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
     return () => {
       cancelled = true
       if (timer !== undefined) clearTimeout(timer)
-      stopResize?.()
+      stops.forEach(stop => stop())
     }
   }, [])
 
-  // 材质应用：输入或设置一变就重跑，React 负责收敛；晚到的结果由 cancelled 丢弃。
+  // 材质应用：调用严格串行，generation 只允许最后一份结果控制透明外壳。
+  // React effect 的 cancelled 只能阻止 setState，阻止不了已发出的原生 DWM 调用；若不排队，
+  // 旧的 light/focus 请求可能在新的 dark/focus 请求之后才落地，制造偶发混合主题。
   useEffect(() => {
-    if (!isTauriRuntime() || effectPlatform === 'linux' || !effectSize) return
+    if (!isTauriRuntime() || effectPlatform === 'linux' || !effectInput) return
     let cancelled = false
-    void syncChatWindowEffect(
-      getCurrentWindow(),
-      effectPlatform,
-      translucentSidebar,
-      effectSize,
-      dark,
-    ).then(active => {
-      if (cancelled) return
-      setNativeEffectActive(active)
-      // 材质没上就把窗口设回 opaque：内容本来铺满整窗，非 opaque 只是白付合成开销
-      // （台前调度缩放整窗时掉帧）。macOS 专属，其他平台后端 no-op。
-      if (effectPlatform === 'macos') void api.chatWindowSetOpaque(!active)
-    })
+    const generation = ++effectSyncGenerationRef.current
+
+    if (effectPlatform === 'windows') setNativeEffectActive(false)
+
+    const task = effectSyncQueueRef.current
+      .catch(() => {})
+      .then(async () => {
+        if (cancelled) return
+        const active = await syncChatWindowEffect(
+          getCurrentWindow(),
+          effectPlatform,
+          translucentSidebar,
+          effectInput.focused,
+          effectInput.size,
+          dark,
+        )
+        if (cancelled || generation !== effectSyncGenerationRef.current) return
+        setNativeEffectActive(active)
+        // 材质没上就把窗口设回 opaque：内容本来铺满整窗，非 opaque 只是白付合成开销
+        // （台前调度缩放整窗时掉帧）。macOS 专属，其他平台后端 no-op。
+        if (effectPlatform === 'macos') void api.chatWindowSetOpaque(!active)
+      })
+    effectSyncQueueRef.current = task
+
     return () => {
       cancelled = true
     }
-  }, [translucentSidebar, effectSize, dark])
+  }, [translucentSidebar, effectInput, dark])
 
   const nativeEffectClass = nativeEffectActive ? ' chat-window-host--native-effect' : ''
 

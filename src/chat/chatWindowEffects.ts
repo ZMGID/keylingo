@@ -32,6 +32,7 @@ export async function syncChatWindowEffect(
   window: EffectWindow,
   platform: ChatEffectPlatform,
   enabled: boolean,
+  focused: boolean,
   size: Pick<PhysicalSize, 'width' | 'height'>,
   dark: boolean,
   applyMica: ApplyMica = api.chatWindowApplyMica,
@@ -41,6 +42,12 @@ export async function syncChatWindowEffect(
     await window.clearEffects().catch(() => {})
     return false
   }
+
+  // Microsoft documents that desktop Mica switches to a solid fallback when the
+  // window deactivates. Keep the native effect installed, but let the caller hide
+  // the transparent CSS shell until focus returns. This avoids a light system
+  // fallback flashing through a dark app and makes refocus re-apply the variant.
+  if (platform === 'windows' && !focused) return false
 
   // Windows：materials 由后端上，因为只有它能报告 Mica 是否真的生效（见 ApplyMica）。
   // 变体跟应用主题走（→ DWMWA_USE_IMMERSIVE_DARK_MODE）：裸 Mica 跟**系统**主题，

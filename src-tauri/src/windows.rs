@@ -229,7 +229,13 @@ fn apply_windows_chat_window_frame(window: &WebviewWindow) {
 pub fn chat_window_apply_mica(window: WebviewWindow, dark: bool) -> bool {
     #[cfg(target_os = "windows")]
     {
-        window_vibrancy::apply_mica(&window, Some(dark)).is_ok()
+        match window_vibrancy::apply_mica(&window, Some(dark)) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[chat-window] failed to apply Mica: {error}");
+                false
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
