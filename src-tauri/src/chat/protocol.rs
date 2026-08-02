@@ -2032,6 +2032,56 @@ mod tests {
     }
 
     #[test]
+    fn empty_delta_with_segment_reserves_its_timeline_slot() {
+        // 工具卡 / 内置搜索卡的占位事件：delta 是空的，段本身才是信息（order 决定它插在
+        // 时间线哪一格）。快照必须收下它，否则前端流式期间没有卡可渲染。
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        let tool_slot = ChatSegmentPayload {
+            id: "tool-slot".into(),
+            kind: ChatSegmentKind::Tool,
+            phase: ChatSegmentPhase::ToolLoop,
+            order: 1,
+            step_number: Some(1),
+            round: Some(1),
+            text: None,
+            tool_call_id: Some("call-1".into()),
+        };
+        hub.push(
+            "run",
+            ChatRunEvent::TextDelta {
+                delta: String::new(),
+                segment: Some(tool_slot),
+            },
+        )
+        .unwrap();
+        hub.push(
+            "run",
+            ChatRunEvent::TextDelta {
+                delta: "answer".into(),
+                segment: Some(ChatSegmentPayload {
+                    id: "text".into(),
+                    kind: ChatSegmentKind::Text,
+                    phase: ChatSegmentPhase::Plain,
+                    order: 2,
+                    step_number: None,
+                    round: None,
+                    text: None,
+                    tool_call_id: None,
+                }),
+            },
+        )
+        .unwrap();
+        let segments = &hub.runs["run"].snapshot.segments;
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].id, "tool-slot");
+        assert_eq!(segments[0].order, 1);
+        assert_eq!(segments[0].tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(segments[1].id, "text");
+        assert_eq!(hub.runs["run"].snapshot.content, "answer");
+    }
+
+    #[test]
     fn empty_failure_terminal_preserves_accumulated_snapshot_content() {
         let mut hub = ChatProtocolHub::default();
         hub.register("conv", "run", "message", 0).unwrap();

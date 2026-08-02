@@ -20,7 +20,9 @@ use super::context::{
     group_answer_excluded_from_context, mark_summary_stale_if_needed, resolve_usage_anchor,
     should_auto_compress_context,
 };
-use super::interaction::{approve_agent_plan_for_execution, format_tool_approval_summary};
+use super::interaction::{
+    approve_agent_plan_for_execution, format_tool_approval_summary, stream_delta_event_kinds,
+};
 use super::messages::{
     assistant_model_messages_for_storage, build_assistant_message, build_error_arm_message,
     content_from_segments, normalize_assistant_segments, reasoning_from_segments,
@@ -2666,4 +2668,27 @@ fn file_ledger_flows_into_replayed_summary_message() {
     );
     // The summary text itself is still present above the ledger.
     assert!(content.contains("summary of older messages"));
+}
+
+/// 回归护栏：空 delta + 有 segment 是工具卡 / 内置搜索卡的「占位」调用，必须照发一条
+/// TextDelta，否则工具卡整场流式期间都不渲染（协议里工具事件不带 segment/order）。
+#[test]
+fn empty_delta_with_segment_still_emits_a_placeholder_event() {
+    // 工具槽位宣告：只发 text。
+    assert_eq!(stream_delta_event_kinds("", None, true), (false, true));
+    // reasoning 占位：只发 reasoning，不重复发 text。
+    assert_eq!(stream_delta_event_kinds("", Some(""), true), (true, false));
+    // 有 reasoning 正文时同样不重复发 text。
+    assert_eq!(
+        stream_delta_event_kinds("", Some("think"), true),
+        (true, false)
+    );
+    // 正常文本增量。
+    assert_eq!(stream_delta_event_kinds("hi", None, true), (false, true));
+    // 什么都没有：一条都不发。
+    assert_eq!(stream_delta_event_kinds("", None, false), (false, false));
+    assert_eq!(
+        stream_delta_event_kinds("", Some(""), false),
+        (false, false)
+    );
 }

@@ -562,6 +562,22 @@ pub(crate) fn emit_chat_tool_record(
     );
 }
 
+/// 决定一次 `emit_chat_stream_delta` 要发哪几条事件：`(发 reasoning, 发 text)`。
+///
+/// 空 delta + 有 segment 是「宣告段位置」的专用调用（工具卡槽位、内置搜索卡预留槽、段
+/// phase 改写）。`ChatToolPayload` 不带 segment/order，工具事件自己说不清该插在哪儿，这条
+/// 空 delta 事件就是唯一的位置载体——丢掉它，工具卡在流式期间根本不渲染，内置搜索卡会掉到
+/// 答案末尾。delta 和 segment 都空才是真的没内容，那才一条都不发。
+pub(super) fn stream_delta_event_kinds(
+    delta: &str,
+    reasoning_delta: Option<&str>,
+    has_segment: bool,
+) -> (bool, bool) {
+    let emit_reasoning = reasoning_delta.is_some_and(|value| !value.is_empty() || has_segment);
+    let emit_text = !delta.is_empty() || (has_segment && !emit_reasoning);
+    (emit_reasoning, emit_text)
+}
+
 pub(crate) fn emit_chat_stream_delta(
     app: &AppHandle,
     _conversation_id: &str,
@@ -572,17 +588,19 @@ pub(crate) fn emit_chat_stream_delta(
     segment: Option<&ChatMessageSegment>,
 ) {
     let segment = segment.map(crate::chat::protocol::ChatSegmentPayload::from);
-    if let Some(reasoning_delta) = reasoning_delta.filter(|value| !value.is_empty()) {
+    let (emit_reasoning, emit_text) =
+        stream_delta_event_kinds(delta, reasoning_delta, segment.is_some());
+    if emit_reasoning {
         crate::chat::protocol::emit_run_event(
             app,
             run_id,
             crate::chat::protocol::ChatRunEvent::ReasoningDelta {
-                delta: reasoning_delta.to_string(),
+                delta: reasoning_delta.unwrap_or_default().to_string(),
                 segment: segment.clone(),
             },
         );
     }
-    if !delta.is_empty() {
+    if emit_text {
         crate::chat::protocol::emit_run_event(
             app,
             run_id,
