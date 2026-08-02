@@ -218,9 +218,18 @@ impl ConversationRepository {
         super::storage::load_conversation(app, id).map_err(Into::into)
     }
 
+    /// 以下四个纯读操作只拿共享 barrier，且**不拿 `index_lock`**。
+    ///
+    /// `index_lock` 存在的意义是串行化 index.json 的 read-modify-write（`persist_locked` /
+    /// `bulk_mutate_loaded` / `delete_conversation`）；纯读方不改任何东西，而 `atomic_write`
+    /// 是 write-temp + rename，读者只会看到完整的旧版本或完整的新版本，撕不了。以前这几个
+    /// 读操作既拿独占 barrier 又拿 index_lock，于是"流式回答中途在侧栏搜一下"会让 agent 每轮
+    /// 的 `persist_partial_assistant` 排队等一次全量文件扫描，反之亦然。
+    ///
+    /// 共享 barrier 依然挡住 `bulk_mutate_loaded`（它拿独占），所以"批量迁移期间读到半套数据"
+    /// 这条不变式没变。加锁顺序仍是 barrier → conversation → index，没有新的环。
     pub async fn list_index(&self, app: &AppHandle) -> RepositoryResult<ConversationIndex> {
-        let _barrier = self.barrier.write().await;
-        let _index = self.index_lock.lock().await;
+        let _barrier = self.barrier.read().await;
         super::storage::load_index_or_scan(app).map_err(Into::into)
     }
 
@@ -233,8 +242,7 @@ impl ConversationRepository {
         project_id: Option<String>,
         set_id: Option<String>,
     ) -> RepositoryResult<Vec<ConversationListItem>> {
-        let _barrier = self.barrier.write().await;
-        let _index = self.index_lock.lock().await;
+        let _barrier = self.barrier.read().await;
         super::storage::get_conversations(app, offset, limit, folder, project_id, set_id)
             .map_err(Into::into)
     }
@@ -245,11 +253,13 @@ impl ConversationRepository {
         query: &str,
         limit: usize,
     ) -> RepositoryResult<Vec<ConversationListItem>> {
-        let _barrier = self.barrier.write().await;
-        let _index = self.index_lock.lock().await;
+        let _barrier = self.barrier.read().await;
         super::storage::search_conversations(app, query, limit).map_err(Into::into)
     }
 
+    /// 只读探查，不写。"同一个空对话被两个新建请求同时复用"这条不变式由调用方的
+    /// `AppState::chat_create_conversation_lock` 保证（独占 barrier 从来也保证不了它：
+    /// 复用一个空对话不会改动它，串行化两次探查照样都会命中同一条）。
     #[allow(clippy::too_many_arguments)]
     pub async fn find_reusable_blank(
         &self,
@@ -261,8 +271,7 @@ impl ConversationRepository {
         set_id: Option<&str>,
         assistant_id: Option<&str>,
     ) -> RepositoryResult<Option<Conversation>> {
-        let _barrier = self.barrier.write().await;
-        let _index = self.index_lock.lock().await;
+        let _barrier = self.barrier.read().await;
         super::storage::find_reusable_blank_conversation(
             app,
             provider_id,
@@ -469,10 +478,9 @@ impl ConversationRepository {
     ) -> RepositoryResult<Conversation> {
         let persisted = super::storage::write_conversation_file(app, &conversation)?;
         let _index = self.index_lock.lock().await;
-        let mut index = match super::storage::load_index(app) {
-            Ok(index) => index,
-            Err(_) => super::storage::load_index_or_scan(app)?,
-        };
+        // 读侧的 `load_index_or_scan` 只读不写（否则会绕开这把锁 lost update），所以残缺索引
+        // 的落盘自愈只能在这里发生：这一步既拿到了对账过的索引，末尾的 save_index 又把它写回。
+        let mut index = super::storage::load_index_or_scan(app)?;
         let item = ConversationListItem::from(&persisted);
         if let Some(position) = index
             .conversations

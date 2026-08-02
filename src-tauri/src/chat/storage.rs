@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -76,7 +76,17 @@ pub(crate) fn atomic_write(path: &Path, content: &str, label: &str) -> Result<()
         // 绝不"先 remove 再 rename"——那会制造"目标文件中途消失"的窗口:一旦紧接的
         // rename 失败,index.json 就没了,下次读到空索引会把其余对话文件全部孤立(数据看似丢失)。
         // 瞬时失败(锁 / 杀软占用)交给下面的外层重试循环 sleep 后重试整次写,期间旧文件始终保留。
-        let write_result = fs::write(&tmp_path, content).and_then(|_| fs::rename(&tmp_path, path));
+        //
+        // rename 之前必须 sync_all():否则数据还在页缓存里、rename 的元数据却可能先落盘,
+        // 断电后 conv_x.json 会变成 0 字节或被截断——load_conversation 硬报错,而列表扫描
+        // 又会静默跳过它,用户看到的就是"这条对话没了"。
+        let write_result = (|| {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp_path, path)
+        })();
 
         match write_result {
             Ok(()) => return Ok(()),
@@ -102,9 +112,8 @@ pub(crate) fn read_conversation_file(path: &Path, id: &str) -> Result<Conversati
     serde_json::from_str(&content).map_err(|e| format!("对话文件已损坏，无法加载（{id}）：{e}"))
 }
 
-fn load_conversation_list_from_files(app: &AppHandle) -> Result<Vec<ConversationListItem>, String> {
-    let dir = conversations_dir(app)?;
-    let entries = fs::read_dir(&dir).map_err(|e| format!("read conversations dir: {e}"))?;
+fn load_conversation_list_in_dir(dir: &Path) -> Result<Vec<ConversationListItem>, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read conversations dir: {e}"))?;
     let mut conversations = Vec::new();
 
     for entry in entries {
@@ -137,31 +146,44 @@ fn load_conversation_list_from_files(app: &AppHandle) -> Result<Vec<Conversation
 }
 
 pub(crate) fn load_index_or_scan(app: &AppHandle) -> Result<ConversationIndex, String> {
-    // index.json 只是缓存；conv_<id>.json 才是真相源。读取时用文件对账缓存:
-    // 只要有对话文件不在索引里(索引残缺/缺失/写坏),就以文件为准重扫重建并写回修复,
-    // 从根本上杜绝"残缺索引覆盖真实数据引用"导致的对话消失。
-    let disk_items = load_conversation_list_from_files(app)?;
-    match load_index(app) {
-        Ok(index) => {
-            if conversation_index_matches_disk(&index, &disk_items) {
-                Ok(index)
-            } else {
-                let healed = ConversationIndex {
-                    conversations: disk_items,
-                };
-                save_index(app, &healed)?;
-                Ok(healed)
-            }
-        }
+    load_index_or_scan_in_dir(&conversations_dir(app)?)
+}
+
+/// index.json 只是缓存；conv_<id>.json 才是真相源。
+///
+/// 对账口径必须**廉价**：一次 readdir 只比文件名，不读也不反序列化任何对话正文。曾经改成
+/// "全量读所有 conv_*.json 再逐条比 revision"，于是 500 个会话的用户每次刷侧栏都要把几百 MB
+/// JSON 同步解析一遍，index.json 这层缓存等于作废。索引里缺任一磁盘文件（索引残缺/缺失/写坏）
+/// 才退化成全量重扫；多余的幽灵条目无害，按 updated_at 排序时会被过滤掉。
+///
+/// **只读不写**：自愈落盘统一交给持有 `index_lock` 的写路径（`repository::persist_locked` /
+/// `bulk_mutate_loaded` / `delete_conversation`）。这里顺手 `save_index` 会绕开那把锁，
+/// 和并发的持久化 lost update——刚存的会话会在侧栏短暂消失。
+fn load_index_or_scan_in_dir(dir: &Path) -> Result<ConversationIndex, String> {
+    let file_ids = conversation_file_ids_in_dir(dir).unwrap_or_default();
+    match load_index_in_dir(dir) {
+        Ok(index) if index_covers_files(&index, &file_ids) => Ok(index),
+        Ok(_) => Ok(ConversationIndex {
+            conversations: load_conversation_list_in_dir(dir)?,
+        }),
         Err(e) => {
             eprintln!("conversation index unavailable, rebuilding list from files: {e}");
-            rebuild_and_heal_index(app)
+            Ok(ConversationIndex {
+                conversations: load_conversation_list_in_dir(dir)?,
+            })
         }
     }
 }
 
-/// 纯逻辑:扫描给定目录,收集有效对话 id(便于单测)。
-#[cfg(test)]
+/// 索引是否覆盖了磁盘上每个对话文件。只比 id，不比内容/revision。
+fn index_covers_files(index: &ConversationIndex, file_ids: &[String]) -> bool {
+    let indexed: std::collections::HashSet<&str> =
+        index.conversations.iter().map(|c| c.id.as_str()).collect();
+    file_ids.iter().all(|id| indexed.contains(id.as_str()))
+}
+
+/// 纯逻辑:扫描给定目录,收集有效对话 id(只看文件名,不读内容)。
+/// `validate_conversation_id` 要求 `conv_` 前缀 → 天然排除 index/projects/assistants.json。
 fn conversation_file_ids_in_dir(dir: &Path) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| format!("read conversations dir: {e}"))? {
@@ -177,17 +199,6 @@ fn conversation_file_ids_in_dir(dir: &Path) -> Result<Vec<String>, String> {
         }
     }
     Ok(ids)
-}
-
-/// 从对话文件重扫重建列表,并尽力写回修复 index.json(写失败仅告警,不影响返回)。
-fn rebuild_and_heal_index(app: &AppHandle) -> Result<ConversationIndex, String> {
-    let index = ConversationIndex {
-        conversations: load_conversation_list_from_files(app)?,
-    };
-    if let Err(e) = save_index(app, &index) {
-        eprintln!("heal conversation index write failed (non-fatal): {e}");
-    }
-    Ok(index)
 }
 
 /// 获取对话存储根目录：{app_data_dir}/conversations/
@@ -236,7 +247,11 @@ pub fn conversation_attachments_dir(app: &AppHandle, id: &str) -> Result<PathBuf
 
 /// 加载对话索引
 pub fn load_index(app: &AppHandle) -> Result<ConversationIndex, String> {
-    let path = index_file_path(app)?;
+    load_index_in_dir(&conversations_dir(app)?)
+}
+
+fn load_index_in_dir(dir: &Path) -> Result<ConversationIndex, String> {
+    let path = dir.join("index.json");
     if !path.exists() {
         return Ok(ConversationIndex::default());
     }
@@ -520,23 +535,6 @@ pub(crate) fn write_conversation_file(
     Ok(to_save)
 }
 
-fn conversation_index_matches_disk(
-    index: &ConversationIndex,
-    disk_items: &[ConversationListItem],
-) -> bool {
-    let indexed: std::collections::HashMap<&str, &ConversationListItem> = index
-        .conversations
-        .iter()
-        .map(|item| (item.id.as_str(), item))
-        .collect();
-    index.conversations.len() == disk_items.len()
-        && disk_items.iter().all(|disk| {
-            indexed
-                .get(disk.id.as_str())
-                .is_some_and(|cached| cached.revision == disk.revision)
-        })
-}
-
 /// 删除对话。
 ///
 /// **顺序即契约**：先摘掉「决定它还在不在侧栏」的两样东西——对话文件和索引条目——
@@ -697,7 +695,8 @@ pub fn get_conversations(
 
 /// 全量索引搜索：在所有对话（不止侧栏默认加载的前 N 个）的标题/预览/文件夹里做大小写
 /// 不敏感子串匹配，按更新时间倒序返回前 limit 个。让侧栏搜索能找到已掉出"最近"列表的老对话。
-/// 仅读 index.json（轻量元数据），不读对话正文，因此与对话总数无关地廉价。
+/// 元数据命中只读 index.json（轻量）；没命中的才逐个读对话正文做全文匹配——所以这个函数的
+/// 成本与对话总数成正比，别放在任何全局写锁里。
 pub fn search_conversations(
     app: &AppHandle,
     query: &str,
@@ -1902,35 +1901,27 @@ mod index_self_heal_tests {
     }
 
     #[test]
-    fn index_revision_mismatch_or_legacy_entry_requires_rebuild() {
-        let disk = vec![list_item("conv_a", Some(3))];
-        assert!(conversation_index_matches_disk(
-            &ConversationIndex {
-                conversations: disk.clone()
-            },
-            &disk
-        ));
-        assert!(!conversation_index_matches_disk(
-            &ConversationIndex {
-                conversations: vec![list_item("conv_a", Some(2))]
-            },
-            &disk
-        ));
-        assert!(!conversation_index_matches_disk(
-            &ConversationIndex {
-                conversations: vec![list_item("conv_a", None)]
-            },
-            &disk
-        ));
-        assert!(!conversation_index_matches_disk(
-            &ConversationIndex {
-                conversations: vec![
-                    list_item("conv_a", Some(3)),
-                    list_item("conv_stale", Some(1))
-                ]
-            },
-            &disk
-        ));
+    fn atomic_write_syncs_full_content_and_leaves_no_temp_file() {
+        let dir = temp_dir();
+        let path = dir.join("conv_a.json");
+        // 大内容:一次 write_all + sync_all 之后 rename,读回来必须一字不少
+        // (少了就说明数据还在页缓存里、rename 却已经生效——断电后就是 0 字节/截断文件)。
+        let big = "x".repeat(1024 * 1024);
+        atomic_write(&path, &big, "test").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap().len(), big.len());
+
+        // 覆盖已有文件:整体替换,不留旧内容残尾。
+        atomic_write(&path, "short", "test").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "short");
+
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "残留临时文件：{leftovers:?}");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1970,14 +1961,50 @@ mod index_self_heal_tests {
 
     #[test]
     fn covers_all_logic_detects_missing_conversation_files() {
-        // 模拟 load_index_or_scan 的核心判定:file_ids ⊆ indexed 才信任索引。
-        let indexed: std::collections::HashSet<&str> = ["conv_a", "conv_b"].into_iter().collect();
+        let index = ConversationIndex {
+            conversations: vec![list_item("conv_a", Some(1)), list_item("conv_b", Some(1))],
+        };
         // 索引覆盖全部文件(还多一个幽灵条目 conv_b)→ 信任
-        let files_covered = ["conv_a"];
-        assert!(files_covered.iter().all(|id| indexed.contains(*id)));
+        assert!(index_covers_files(&index, &["conv_a".to_string()]));
         // 有文件(conv_c)不在索引 → 需重建
-        let files_diverged = ["conv_a", "conv_c"];
-        assert!(!files_diverged.iter().all(|id| indexed.contains(*id)));
+        assert!(!index_covers_files(
+            &index,
+            &["conv_a".to_string(), "conv_c".to_string()]
+        ));
+    }
+
+    /// 对账必须廉价:只比文件名,绝不反序列化对话正文。
+    ///
+    /// 这条挂了就意味着"侧栏刷新退化成全量扫盘"那个性能回退回来了——500 个会话的用户每点
+    /// 一次侧栏就要同步解析几百 MB JSON。这里用"文件名合法但正文是坏 JSON"的会话当探针:
+    /// 只要还有人去读正文,它就会被判为损坏并从列表里消失。
+    #[test]
+    fn cheap_reconciliation_trusts_index_without_reading_conversation_bodies() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("index.json"),
+            serde_json::to_string(&ConversationIndex {
+                conversations: vec![list_item("conv_a", Some(1))],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.join("conv_a.json"), "{ not json at all").unwrap();
+
+        let index = load_index_or_scan_in_dir(&dir).unwrap();
+        assert_eq!(index.conversations.len(), 1);
+        assert_eq!(index.conversations[0].id, "conv_a");
+
+        // 出现索引没覆盖的文件才允许退化成全量重扫。
+        fs::write(dir.join("conv_b.json"), "{ also broken").unwrap();
+        assert!(load_index_or_scan_in_dir(&dir)
+            .unwrap()
+            .conversations
+            .is_empty());
+
+        // 且重扫只读不写:自愈落盘归持有 index_lock 的写路径,这里写回就会 lost update。
+        assert_eq!(load_index_in_dir(&dir).unwrap().conversations.len(), 1);
+        fs::remove_dir_all(&dir).ok();
     }
 }
 
