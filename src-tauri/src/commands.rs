@@ -518,7 +518,10 @@ pub(crate) async fn fetch_models(
         |key| {
             // 拉模型列表也走该供应商的请求配置：中转站常按自定义头/UA 决定放行与可见模型。
             let request = crate::provider_request::apply(
-                state.client_for(&effective).get(url.clone()).bearer_auth(key),
+                state
+                    .client_for(&effective)
+                    .get(url.clone())
+                    .bearer_auth(key),
                 &effective,
                 None,
             );

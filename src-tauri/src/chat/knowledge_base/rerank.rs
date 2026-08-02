@@ -51,7 +51,10 @@ pub async fn rerank(
     let response = send_with_failover(state, "Rerank API", attempts, &provider.id, &keys, |key| {
         with_standard_request_timeout(
             crate::provider_request::apply(
-                state.client_for(provider).post(url.clone()).bearer_auth(key),
+                state
+                    .client_for(provider)
+                    .post(url.clone())
+                    .bearer_auth(key),
                 provider,
                 None,
             )

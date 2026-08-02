@@ -483,8 +483,10 @@ impl AnthropicMessagesProvider<'_> {
         &self,
         metadata: &crate::chat::model::RequestMetadata,
     ) -> Vec<(String, String)> {
-        let mut pairs =
-            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref());
+        let mut pairs = crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        );
         // 1 小时缓存是 beta 能力，必须显式声明才生效。anthropic-beta 不是保留头（用户可能
         // 要开别的 beta），所以这里得跟用户填的那条合并成一行 —— 发两行的话调试面板（BTreeMap）
         // 只显示一条，就和实际发出去的对不上了。
@@ -494,7 +496,13 @@ impl AnthropicMessagesProvider<'_> {
                 .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
                 .map(|(_, value)| value.clone());
             let merged = match existing {
-                Some(value) if value.split(',').any(|v| v.trim() == EXTENDED_CACHE_TTL_BETA) => value,
+                Some(value)
+                    if value
+                        .split(',')
+                        .any(|v| v.trim() == EXTENDED_CACHE_TTL_BETA) =>
+                {
+                    value
+                }
                 Some(value) => format!("{value}, {EXTENDED_CACHE_TTL_BETA}"),
                 None => EXTENDED_CACHE_TTL_BETA.to_string(),
             };
@@ -1775,7 +1783,10 @@ mod tests {
 
         let ephemeral = serde_json::json!({ "type": "ephemeral" });
         // system 从字符串变成块数组，最后一块带断点。
-        assert_eq!(body["system"][0]["text"], serde_json::json!("you are kivio"));
+        assert_eq!(
+            body["system"][0]["text"],
+            serde_json::json!("you are kivio")
+        );
         assert_eq!(body["system"][0]["cache_control"], ephemeral);
         // 只有最后一个工具带断点（前缀越长命中越多，中间打断点是浪费）。
         let tools = body["tools"].as_array().expect("tools");

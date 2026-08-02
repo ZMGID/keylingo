@@ -59,47 +59,51 @@ impl LanguageModelProvider for OpenAiResponsesProvider<'_> {
 }
 
 impl OpenAiResponsesProvider<'_> {
-    async fn generate_inner(&self, request: GenerateRequest) -> Result<GenerateOutput, ModelError> {
-        match self.generate_once(request.clone()).await {
-            Err(err) if self.should_retry_without_cache_key(&request, &err.to_string(), false) => {
-                self.generate_once(request).await
-            }
-            other => other,
-        }
-    }
-
-    /// 少数严格端点拒收 `prompt_cache_key`。首次因此 400 后记住该 base_url，去掉字段重试一次，
-    /// 本会话后续 `request_body` 就地跳过——与 openai.rs 共用同一份学习结果。
-    fn should_retry_without_cache_key(
+    /// 发送 Responses 请求；若因严格端点拒绝 `prompt_cache_key` 而 400，自动去掉该字段重试
+    /// 一次，并把该 base_url 记入 state（本会话后续 `request_body` 就地跳过）。
+    ///
+    /// 重试落在**发送层**而不是整轮生成层：整轮重跑会把第一次的失败也记进用量账本与请求调试
+    /// 缓冲，流式路径还会重复吐字。与 openai.rs::send_chat_body 同形状，学习结果也共用。
+    async fn send_responses_body(
         &self,
         request: &GenerateRequest,
-        err: &str,
         stream: bool,
-    ) -> bool {
-        if !super::openai::error_rejects_prompt_cache_key(err) {
-            return false;
+        label: &str,
+    ) -> Result<reqwest::Response, String> {
+        let body = self.request_body(request, stream);
+        let result = self.post_responses(request, &body, stream, label).await;
+        if let Err(ref err) = result {
+            // 仅当本次确实发了 prompt_cache_key、且错误点名了它，才去掉重试（避免误伤别的 400）。
+            if body.get("prompt_cache_key").is_some()
+                && super::openai::error_rejects_prompt_cache_key(err)
+            {
+                self.state
+                    .mark_prompt_cache_key_unsupported(&self.provider.base_url);
+                let retry_body = self.request_body(request, stream);
+                return self
+                    .post_responses(request, &retry_body, stream, label)
+                    .await;
+            }
         }
-        if self.request_body(request, stream).get("prompt_cache_key").is_none() {
-            return false;
-        }
-        self.state
-            .mark_prompt_cache_key_unsupported(&self.provider.base_url);
-        true
+        result
     }
 
-    async fn generate_once(&self, request: GenerateRequest) -> Result<GenerateOutput, ModelError> {
-        let label = request_label(&request, "Responses API");
-        let started_at = chrono::Local::now().timestamp();
-        let started = std::time::Instant::now();
-        let body = self.request_body(&request, false);
-        let response = send_with_failover(
+    /// 单次发送（带多 key failover）。非流式套总超时；流式不套，避免活跃 SSE 被砍断。
+    async fn post_responses(
+        &self,
+        request: &GenerateRequest,
+        body: &Value,
+        stream: bool,
+        label: &str,
+    ) -> Result<reqwest::Response, String> {
+        send_with_failover(
             self.state,
-            &label,
+            label,
             self.retry_attempts,
             &self.provider.id,
             &self.provider.api_keys,
             |key| {
-                with_chat_request_timeout(crate::api::attach_json_body(
+                let req = crate::api::attach_json_body(
                     crate::provider_request::apply(
                         self.state
                             .client_for(self.provider)
@@ -109,18 +113,39 @@ impl OpenAiResponsesProvider<'_> {
                         self.provider,
                         request.metadata.conversation_id.as_deref(),
                     ),
-                    &body,
+                    body,
                     self.provider.compress_request_body,
-                ))
-                .send()
+                );
+                let req = if stream {
+                    req
+                } else {
+                    with_chat_request_timeout(req)
+                };
+                req.send()
             },
         )
         .await
-        .map_err(|err| {
-            self.record_usage_failure(&request, &label, started_at, started.elapsed(), &err);
-            self.record_debug_failure(&request, &label, false, &err, started_at, started.elapsed());
-            ModelError::new(err)
-        })?;
+    }
+
+    async fn generate_inner(&self, request: GenerateRequest) -> Result<GenerateOutput, ModelError> {
+        let label = request_label(&request, "Responses API");
+        let started_at = chrono::Local::now().timestamp();
+        let started = std::time::Instant::now();
+        let response = self
+            .send_responses_body(&request, false, &label)
+            .await
+            .map_err(|err| {
+                self.record_usage_failure(&request, &label, started_at, started.elapsed(), &err);
+                self.record_debug_failure(
+                    &request,
+                    &label,
+                    false,
+                    &err,
+                    started_at,
+                    started.elapsed(),
+                );
+                ModelError::new(err)
+            })?;
 
         let raw = response.text().await.map_err(|err| {
             let message = format!("{label} read body: {err}");
@@ -230,52 +255,24 @@ impl OpenAiResponsesProvider<'_> {
         request: GenerateRequest,
         sink: &mut (dyn StreamSink + Send),
     ) -> Result<GenerateOutput, ModelError> {
-        match self.stream_once(request.clone(), sink).await {
-            Err(err) if self.should_retry_without_cache_key(&request, &err.to_string(), true) => {
-                self.stream_once(request, sink).await
-            }
-            other => other,
-        }
-    }
-
-    async fn stream_once(
-        &self,
-        request: GenerateRequest,
-        sink: &mut (dyn StreamSink + Send),
-    ) -> Result<GenerateOutput, ModelError> {
         let label = request_label(&request, "Responses stream");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
-        let body = self.request_body(&request, true);
-        let mut response = send_with_failover(
-            self.state,
-            &label,
-            self.retry_attempts,
-            &self.provider.id,
-            &self.provider.api_keys,
-            |key| {
-                crate::api::attach_json_body(
-                    crate::provider_request::apply(
-                        self.state
-                            .client_for(self.provider)
-                            .post(self.responses_url())
-                            .bearer_auth(key)
-                            .header(ACCEPT_ENCODING, "identity"),
-                        self.provider,
-                        request.metadata.conversation_id.as_deref(),
-                    ),
-                    &body,
-                    self.provider.compress_request_body,
-                )
-                .send()
-            },
-        )
-        .await
-        .map_err(|err| {
-            self.record_usage_failure(&request, &label, started_at, started.elapsed(), &err);
-            self.record_debug_failure(&request, &label, true, &err, started_at, started.elapsed());
-            ModelError::new(err)
-        })?;
+        let mut response = self
+            .send_responses_body(&request, true, &label)
+            .await
+            .map_err(|err| {
+                self.record_usage_failure(&request, &label, started_at, started.elapsed(), &err);
+                self.record_debug_failure(
+                    &request,
+                    &label,
+                    true,
+                    &err,
+                    started_at,
+                    started.elapsed(),
+                );
+                ModelError::new(err)
+            })?;
 
         let mut buffer = String::new();
         let mut utf8 = crate::api::Utf8StreamDecoder::default();
@@ -443,9 +440,10 @@ impl OpenAiResponsesProvider<'_> {
         }
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
         headers.insert("Content-Type".to_string(), "application/json".to_string());
-        for (name, value) in
-            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
-        {
+        for (name, value) in crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        ) {
             headers.insert(name, value);
         }
         crate::chat::request_debug::sanitize_headers(headers)

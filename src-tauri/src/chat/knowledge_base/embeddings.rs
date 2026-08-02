@@ -140,12 +140,17 @@ pub async fn embed_batch(
         &provider.id,
         &keys,
         |key| {
-            with_standard_request_timeout(crate::provider_request::apply(
-                state.client_for(provider).post(url.clone()).bearer_auth(key),
-                provider,
-                None,
+            with_standard_request_timeout(
+                crate::provider_request::apply(
+                    state
+                        .client_for(provider)
+                        .post(url.clone())
+                        .bearer_auth(key),
+                    provider,
+                    None,
+                )
+                .json(&body),
             )
-            .json(&body))
             .send()
         },
     )

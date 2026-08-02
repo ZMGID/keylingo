@@ -630,7 +630,10 @@ async fn generate_with_gemini_native(
             &provider.api_keys,
             |key| {
                 crate::provider_request::apply(
-                    state.client_for(provider).post(&url).header("x-goog-api-key", key),
+                    state
+                        .client_for(provider)
+                        .post(&url)
+                        .header("x-goog-api-key", key),
                     provider,
                     None,
                 )

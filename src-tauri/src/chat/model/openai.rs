@@ -376,9 +376,10 @@ impl OpenAiChatProvider<'_> {
         for (name, value) in session_header_pairs(metadata) {
             crate::provider_request::upsert_pair(&mut pairs, name.to_string(), value);
         }
-        for (name, value) in
-            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
-        {
+        for (name, value) in crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        ) {
             crate::provider_request::upsert_pair(&mut pairs, name, value);
         }
         let mut request = request;
@@ -404,9 +405,10 @@ impl OpenAiChatProvider<'_> {
         for (name, value) in session_header_pairs(metadata) {
             headers.insert(name.to_string(), value);
         }
-        for (name, value) in
-            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
-        {
+        for (name, value) in crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        ) {
             headers.insert(name, value);
         }
         crate::chat::request_debug::sanitize_headers(headers)

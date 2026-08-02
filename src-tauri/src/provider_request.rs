@@ -97,7 +97,10 @@ fn identity_pairs(
             // 整套一起发：按 UA 放行的网关往往同时校验这组 X-Stainless-* 指纹，
             // 少发几条等于没伪装。Content-Type / anthropic-version 由适配器自己带。
             vec![
-                p("User-Agent", format!("claude-cli/{version} (external, cli)")),
+                p(
+                    "User-Agent",
+                    format!("claude-cli/{version} (external, cli)"),
+                ),
                 p("x-app", "cli".to_string()),
                 p("X-Stainless-OS", "MacOS".to_string()),
                 p("X-Stainless-Arch", "arm64".to_string()),
@@ -107,7 +110,10 @@ fn identity_pairs(
                 p("X-Stainless-Package-Version", "0.74.0".to_string()),
                 p("X-Stainless-Timeout", "600".to_string()),
                 p("X-Stainless-Retry-Count", "0".to_string()),
-                p("anthropic-dangerous-direct-browser-access", "true".to_string()),
+                p(
+                    "anthropic-dangerous-direct-browser-access",
+                    "true".to_string(),
+                ),
             ]
         }
         "codex" => {
@@ -158,7 +164,10 @@ pub fn header_pairs(
 /// 保证都必须在这里做完 —— 一旦两条同名的进了 pairs，上游会收到两行，而请求调试面板用的是
 /// BTreeMap，只显示后写的那条，「面板显示的和实际发的」就对不上了。
 pub fn upsert_pair(pairs: &mut Vec<(String, String)>, name: String, value: String) {
-    match pairs.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+    match pairs
+        .iter_mut()
+        .find(|(n, _)| n.eq_ignore_ascii_case(&name))
+    {
         Some(existing) => *existing = (name, value),
         None => pairs.push((name, value)),
     }
@@ -230,9 +239,9 @@ mod tests {
     fn malformed_headers_are_dropped() {
         let provider = provider_with(ProviderRequestConfig {
             custom_headers: vec![
-                header("Bad Name", "v"),          // 头名里有空格
-                header("X-Inject", "a\r\nB: c"),  // CRLF 注入
-                header("X-Cjk", "中文"),          // 非 ASCII
+                header("Bad Name", "v"),         // 头名里有空格
+                header("X-Inject", "a\r\nB: c"), // CRLF 注入
+                header("X-Cjk", "中文"),         // 非 ASCII
                 header("X-Ok", "fine"),
             ],
             ..Default::default()
@@ -283,7 +292,10 @@ mod tests {
             ],
             ..Default::default()
         });
-        assert_eq!(header_pairs(&provider, None), vec![("X-Ok".to_string(), "1".to_string())]);
+        assert_eq!(
+            header_pairs(&provider, None),
+            vec![("X-Ok".to_string(), "1".to_string())]
+        );
     }
 
     #[test]
@@ -308,14 +320,20 @@ mod tests {
         // 内嵌 CR/LF 与非 ASCII：退回内置版本。
         for bad in [CRLF_VERSION, "中文"] {
             let ua = ua_for(bad);
-            assert_eq!(ua, format!("claude-cli/{CLAUDE_CODE_BUILTIN_VERSION} (external, cli)"));
+            assert_eq!(
+                ua,
+                format!("claude-cli/{CLAUDE_CODE_BUILTIN_VERSION} (external, cli)")
+            );
         }
         // 首尾空白（粘贴常带的尾换行）先被 trim 掉，剩下的合法就照用，不必退回。
         assert_eq!(ua_for(TRAILING_LF), "claude-cli/2.0 (external, cli)");
 
         // 不管走哪条分支，发出去的头值都必须是合法的。
         for version in [CRLF_VERSION, "中文", TRAILING_LF, "", "2.1.71"] {
-            assert!(is_valid_header_value(&ua_for(version)), "version: {version:?}");
+            assert!(
+                is_valid_header_value(&ua_for(version)),
+                "version: {version:?}"
+            );
         }
     }
 
@@ -343,7 +361,10 @@ mod tests {
             "x-stainless-retry-count",
             "anthropic-dangerous-direct-browser-access",
         ] {
-            assert!(names.contains(&expected.to_string()), "missing {expected}: {names:?}");
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing {expected}: {names:?}"
+            );
         }
     }
 

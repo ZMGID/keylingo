@@ -197,7 +197,11 @@ fn build_client(no_proxy: bool) -> Client {
         .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
         .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
         .http2_keep_alive_while_idle(true);
-    let builder = if no_proxy { builder.no_proxy() } else { builder };
+    let builder = if no_proxy {
+        builder.no_proxy()
+    } else {
+        builder
+    };
     builder.build().unwrap_or_else(|err| {
         eprintln!("Failed to build HTTP client: {err}");
         Client::new()

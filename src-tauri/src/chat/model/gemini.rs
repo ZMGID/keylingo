@@ -394,9 +394,10 @@ impl GeminiProvider<'_> {
         }
         headers.insert("content-type".to_string(), "application/json".to_string());
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
-        for (name, value) in
-            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
-        {
+        for (name, value) in crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        ) {
             headers.insert(name, value);
         }
         crate::chat::request_debug::sanitize_headers(headers)
