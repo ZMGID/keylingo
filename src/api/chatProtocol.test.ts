@@ -146,6 +146,39 @@ describe('chat protocol sequencing', () => {
     expect(seen).toEqual([1, 1])
   })
 
+  it('drops the sync-time queue instead of buffering it unbounded', async () => {
+    const seen: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.seq)
+    })
+    chatProtocolTesting.ingest(event(1))
+
+    // sync 在飞的时候 live 事件不走 pending，改道进 liveDuringSync——那道队列
+    // 也得有上限，否则一次快速回答就能把内存撑起来。
+    let releaseSync: (value: unknown) => void = () => {}
+    invokeMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseSync = resolve
+      }),
+    )
+    const inFlight = syncChatProtocol('conversation')
+    for (let seq = 2; seq < 700; seq += 1) chatProtocolTesting.ingest(event(seq, 'text_delta'))
+    releaseSync({
+      protocolVersion: 1,
+      conversationRevision: 0,
+      missingRunIds: [],
+      runs: [],
+    })
+    await inFlight
+    await flushSync()
+
+    // 队列被丢掉：那 698 帧一个都没派发出来，只有最初那条 seq=1。
+    expect(seen).toEqual([1])
+    // run 状态也一并丢掉，序列从头开始能重新收下（等 sync 回快照）。
+    chatProtocolTesting.ingest(event(1))
+    expect(seen).toEqual([1, 1])
+  })
+
   it('rejects regressed conversation revisions', () => {
     const revisions: number[] = []
     chatProtocolTesting.subscribe((item) => {

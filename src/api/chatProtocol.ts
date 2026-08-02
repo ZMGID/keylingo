@@ -207,6 +207,16 @@ function applyEvent(event: ChatProtocolEvent) {
   }
   if (syncing.has(event.conversationId)) {
     const queue = liveDuringSync.get(event.conversationId) ?? []
+    // 同 MAX_PENDING_EVENTS 那道护栏：sync 在飞的时候 live 事件改道进这里，
+    // 一次快速回答几千个 delta 照样能把内存撑起来。攒满就整队丢掉 + 丢 run 状态，
+    // sync 结束后第一个 live 事件必然判成 gap，走快照重建。
+    if (queue.length >= MAX_PENDING_EVENTS) {
+      liveDuringSync.delete(event.conversationId)
+      for (const [runId, state] of runs) {
+        if (state.conversationId === event.conversationId) runs.delete(runId)
+      }
+      return
+    }
     queue.push(event)
     liveDuringSync.set(event.conversationId, queue)
     return
