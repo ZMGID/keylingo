@@ -312,7 +312,13 @@ pub(crate) fn has_known_direct_image_generation_route(
     provider: &ModelProvider,
     model: &str,
 ) -> bool {
-    if !matches!(provider.api_format_kind(), ProviderApiFormat::OpenAiChat) {
+    // xAI 也算：`resolve_image_route` 已把 api.x.ai 判到 ImagesApi、`uses_xai_images_api`
+    // 认得 grok-imagine，管子是通的，只差这道门。不放行的话，用 Grok 预设（xai_responses）
+    // 的用户选 grok-imagine 模型直接打 prompt 会退化成一次普通文本请求。
+    if !matches!(
+        provider.api_format_kind(),
+        ProviderApiFormat::OpenAiChat | ProviderApiFormat::XaiResponses
+    ) {
         return false;
     }
     // 判据来源换成单一 resolver，但**不扩大直连范围**：Chat route 恒为已知直连；ImagesApi route
@@ -451,11 +457,12 @@ async fn generate_with_images_api(
             raw.chars().take(500).collect::<String>()
         )
     })?;
-    parse_images_api_response(state, &value).await
+    parse_images_api_response(state, provider, &value).await
 }
 
 async fn parse_images_api_response(
     state: &AppState,
+    provider: &ModelProvider,
     value: &Value,
 ) -> Result<Vec<GeneratedImage>, String> {
     let Some(data) = value.get("data").and_then(|value| value.as_array()) else {
@@ -495,7 +502,7 @@ async fn parse_images_api_response(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let (mime_type, base64) = fetch_image_url(state, url).await?;
+            let (mime_type, base64) = fetch_image_url(state, provider, url).await?;
             images.push(GeneratedImage {
                 mime_type,
                 base64,
@@ -802,12 +809,18 @@ fn parse_gemini_native_response(value: &Value) -> Result<Vec<GeneratedImage>, St
     Ok(images)
 }
 
-async fn fetch_image_url(state: &AppState, url: &str) -> Result<(String, String), String> {
+/// 下载出图返回的图片 URL。走**该供应商的**客户端：关掉「跟随系统代理」的供应商，
+/// 这一跳也该直连——否则 UI 上写着「该供应商所有请求」的开关在这条路径上不成立。
+async fn fetch_image_url(
+    state: &AppState,
+    provider: &ModelProvider,
+    url: &str,
+) -> Result<(String, String), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Image generation returned a non-http image URL".to_string());
     }
     let response = state
-        .http
+        .client_for(provider)
         .get(url)
         .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
         .send()

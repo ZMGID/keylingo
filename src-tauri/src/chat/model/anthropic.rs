@@ -461,17 +461,29 @@ impl AnthropicMessagesProvider<'_> {
         }
         // prompt caching 放在最后：断点必须打在最终 body 上，否则 provider_options
         // 覆盖掉 system/tools 时断点就落在被丢弃的旧内容上了。
-        if let Some(cache) = self.prompt_cache_control() {
+        if let Some(cache) = self.prompt_cache_control(&request.metadata) {
             apply_prompt_cache_breakpoints(&mut body, &cache.value());
         }
         body
     }
 
-    /// 该供应商本次是否要打 prompt 缓存断点。只有 anthropic_messages 协议 + 开关打开才生效。
-    fn prompt_cache_control(&self) -> Option<PromptCache> {
-        if !self.provider.request.prompt_caching {
+    /// 该供应商本次是否要打 prompt 缓存断点。
+    ///
+    /// 除了开关，还要求本次请求属于某个**会话**（有 `conversation_id`）。翻译器 / 截图翻译 /
+    /// Lens / 上下文压缩 / 标题总结走的是同一个生成入口但都是一次性调用，给它们打断点等于
+    /// 按 1.25× 写一份下次内容全变、永远读不到的缓存 —— 纯加价。OpenAI 侧靠「没有会话 id 就
+    /// 不发 prompt_cache_key」天然排除了这些路径，这里对齐同一条门。
+    fn prompt_cache_control(
+        &self,
+        metadata: &crate::chat::model::RequestMetadata,
+    ) -> Option<PromptCache> {
+        if !self.provider.prompt_caching_enabled() {
             return None;
         }
+        metadata
+            .conversation_id
+            .as_deref()
+            .filter(|id| !id.is_empty())?;
         Some(PromptCache {
             long_ttl: self.provider.request.prompt_cache_retention == "long",
         })
@@ -490,7 +502,10 @@ impl AnthropicMessagesProvider<'_> {
         // 1 小时缓存是 beta 能力，必须显式声明才生效。anthropic-beta 不是保留头（用户可能
         // 要开别的 beta），所以这里得跟用户填的那条合并成一行 —— 发两行的话调试面板（BTreeMap）
         // 只显示一条，就和实际发出去的对不上了。
-        if self.prompt_cache_control().is_some_and(|c| c.long_ttl) {
+        if self
+            .prompt_cache_control(metadata)
+            .is_some_and(|c| c.long_ttl)
+        {
             let existing = pairs
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
@@ -1813,7 +1828,11 @@ mod tests {
         let body = adapter.request_body(&cache_test_request(), false);
         assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
         // 1h 不带 beta 头会被拒，所以头和 ttl 必须同进同出。
-        let headers = adapter.debug_request_headers(&Default::default());
+        let in_session = crate::chat::model::RequestMetadata {
+            conversation_id: Some("conv_abc".into()),
+            ..Default::default()
+        };
+        let headers = adapter.debug_request_headers(&in_session);
         assert_eq!(
             headers.get("anthropic-beta").map(String::as_str),
             Some(EXTENDED_CACHE_TTL_BETA)
@@ -1822,9 +1841,48 @@ mod tests {
         let short_provider = cache_test_provider(true, "short");
         let short_adapter = AnthropicMessagesProvider::new(&state, &short_provider, 1);
         assert!(short_adapter
+            .debug_request_headers(&in_session)
+            .get("anthropic-beta")
+            .is_none());
+        // 一次性调用（无会话 id）连断点都不打，自然也不该带 beta 头。
+        assert!(adapter
             .debug_request_headers(&Default::default())
             .get("anthropic-beta")
             .is_none());
+    }
+
+    #[test]
+    fn one_shot_calls_get_no_breakpoints_even_with_caching_on() {
+        // 翻译器 / 截图翻译 / Lens / 上下文压缩 / 标题总结走同一个生成入口，但都没有
+        // conversation_id。给它们打断点 = 按 1.25× 写一份下次内容全变、永远读不到的缓存。
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = cache_test_provider(true, "short");
+        let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
+        let mut request = cache_test_request();
+        request.metadata.conversation_id = None;
+        let body = adapter.request_body(&request, false);
+        assert_eq!(body["system"], serde_json::json!("you are kivio"));
+        assert!(!body.to_string().contains("cache_control"), "body: {body}");
+        // 空串也算没有会话。
+        request.metadata.conversation_id = Some(String::new());
+        assert!(!adapter
+            .request_body(&request, false)
+            .to_string()
+            .contains("cache_control"));
+    }
+
+    #[test]
+    fn anthropic_caching_is_off_by_default_openai_is_on() {
+        // 老配置没有 request 字段 → prompt_caching = None → 按协议给默认。
+        // Anthropic 关（净新增线格式变化、无自愈兜底），OpenAI 开（本来就一直在发）。
+        let mut p = cache_test_provider(true, "short");
+        p.request.prompt_caching = None;
+        assert!(!p.prompt_caching_enabled(), "Anthropic 默认应为关");
+        p.api_format = "openai_chat".into();
+        assert!(p.prompt_caching_enabled(), "OpenAI 默认应为开");
     }
 
     #[test]
@@ -1855,7 +1913,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: crate::settings::ProviderRequestConfig {
-                prompt_caching: caching,
+                prompt_caching: Some(caching),
                 prompt_cache_retention: retention.into(),
                 ..Default::default()
             },
@@ -1885,7 +1943,11 @@ mod tests {
             }],
             tools: vec![cache_test_tool("read"), cache_test_tool("write")],
             options: GenerateOptions::default(),
-            metadata: Default::default(),
+            // 有会话 id 才会打断点（一次性调用不该付这份钱），见 prompt_cache_control。
+            metadata: crate::chat::model::RequestMetadata {
+                conversation_id: Some("conv_abc".into()),
+                ..Default::default()
+            },
         }
     }
 

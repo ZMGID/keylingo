@@ -113,16 +113,19 @@ describe('ProvidersTab', () => {
     expect(props.onUpdateProvider).not.toHaveBeenCalled()
   })
 
-  it('gzip 开关搬进「请求配置」二级页，说明默认收起、gzipInfoOpen 命中才展开', async () => {
+  it('gzip 开关搬进「请求配置」二级页，一级页看不到', async () => {
     renderTab()
     expect(screen.queryByText(/压缩请求体/)).toBeNull()
     await userEvent.click(screen.getByRole('button', { name: new RegExp(t.requestConfig) }))
     expect(screen.getByText(/压缩请求体/)).toBeTruthy()
     expect(screen.queryByText(/WAF 会扫描明文请求体/)).toBeNull()
+  })
 
+  it('gzipInfoOpen 命中时二级页展开 gzip 说明', async () => {
+    // 单独一条：同一个 document 里 render 两棵树再靠 getAllByRole 挑最后一个，
+    // 正是本文件 renderTabWithRerender 那条注释要消灭的写法。
     renderTab({ gzipInfoOpen: new Set(['p1']) })
-    const entries = screen.getAllByRole('button', { name: new RegExp(t.requestConfig) })
-    await userEvent.click(entries[entries.length - 1])
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.requestConfig) }))
     expect(screen.getByText(/WAF 会扫描明文请求体/)).toBeTruthy()
   })
 

@@ -1056,11 +1056,12 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     })
   }, [])
 
-  const setProviderIcon = useCallback((id: string, dataUrl: string) => {
+  const setProviderIcon = useCallback((id: string, iconKey: string) => {
     setSettings((prev) => {
       if (!prev) return prev
       const next = { ...(prev.providerIcons ?? {}) }
-      if (dataUrl) next[id] = dataUrl
+      // 空串 = 恢复「自动匹配」，删掉这条而不是存空值。
+      if (iconKey) next[id] = iconKey
       else delete next[id]
       return { ...prev, providerIcons: next }
     })

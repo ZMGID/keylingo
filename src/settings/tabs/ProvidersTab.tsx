@@ -1,5 +1,5 @@
 import { Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Toggle, Input, SettingsGroup } from '../components'
 import { IconButton } from '../../components/Button'
 import { ProviderSortableList } from '../ProviderSortableList'
@@ -123,6 +123,8 @@ export function ProvidersTab({
 }: ProvidersTabProps) {
   const configured = selectedProvider?.apiKeys.some((key) => key.trim())
   const [iconPickerOpen, setIconPickerOpen] = useState(false)
+  // 切供应商时收起：展开着的选择器会直接作用到新选中的那个上。
+  useEffect(() => setIconPickerOpen(false), [selectedProvider?.id])
 
   return (
     <div className="kv-providers-root">

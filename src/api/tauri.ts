@@ -856,8 +856,12 @@ export type ProviderRequestConfig = {
   customHeaders?: { key: string; value: string }[]
   /** 是否跟随系统代理。默认 true；关掉走直连。 */
   useSystemProxy?: boolean
-  /** Anthropic prompt caching（仅 anthropic_messages 协议生效）。 */
-  promptCaching?: boolean
+  /**
+   * prompt 缓存。`undefined` = 跟随协议默认（OpenAI Chat/Responses 开、Anthropic 关），
+   * 用户拨过开关才是显式布尔。与 Rust 侧 `ProviderRequestConfig.prompt_caching: Option<bool>`
+   * 一致 —— 裸 boolean 分不清「用户选了 true」和「默认填的 true」。
+   */
+  promptCaching?: boolean | null
   /** 'short'（5 分钟）| 'long'（1 小时，需 beta 头） */
   promptCacheRetention?: string
   /** '' 关闭 | 'claude_code' | 'codex' | 'grok' */
@@ -1421,8 +1425,8 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
         : [],
       // 默认跟随系统代理 —— 与加这个开关之前的行为一致。
       useSystemProxy: provider.request?.useSystemProxy !== false,
-      // 默认开：两条协议上都是省钱且无副作用的，见 ProviderRequestConfig 注释。
-      promptCaching: provider.request?.promptCaching !== false,
+      // 保持 undefined/null 语义：由协议决定默认，见 promptCachingEnabled。
+      promptCaching: provider.request?.promptCaching ?? null,
       promptCacheRetention:
         provider.request?.promptCacheRetention === 'long' ? 'long' : 'short',
       cliIdentity: provider.request?.cliIdentity ?? '',
@@ -1445,6 +1449,20 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
  * （gpt-5 在其上开 web_search 会 400）。前端据此把「内置」选项置灰。
  * 与 Rust 侧 `model_metadata::builtin_web_search_supported` 保持一致。
  */
+/**
+ * 该协议下 prompt 缓存是否有可发送的字段，以及未显式设置时的默认值。
+ * 必须与 Rust 侧 `ModelProvider::prompt_caching_enabled` 一致。
+ */
+export function promptCachingDefault(apiFormat?: string): boolean {
+  return normalizeProviderApiFormat(apiFormat) !== 'anthropic_messages'
+}
+
+export function promptCachingSupported(apiFormat?: string): boolean {
+  const kind = normalizeProviderApiFormat(apiFormat)
+  // Gemini 服务端隐式缓存、xAI 直接拒收 prompt_cache_key —— 都没有可发的字段。
+  return kind !== 'gemini' && kind !== 'xai_responses'
+}
+
 export function builtinWebSearchSupported(apiFormat?: string): boolean {
   const kind = normalizeProviderApiFormat(apiFormat)
   return (

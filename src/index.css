@@ -3537,7 +3537,7 @@ button.chat-composer-status-item:hover {
   transition: background 0.12s ease;
 }
 .kv-subpage-entry:hover {
-  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
 }
 .dark .kv-subpage-entry:hover {
   background: rgba(255, 255, 255, 0.06);

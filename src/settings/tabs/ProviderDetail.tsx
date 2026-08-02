@@ -62,6 +62,7 @@ export function ProviderDetail({
           <span className="kv-subpage-back-title">{t.requestConfig}</span>
         </button>
         <ProviderRequestPanel
+          key={provider.id}
           provider={provider}
           t={t}
           lang={lang}

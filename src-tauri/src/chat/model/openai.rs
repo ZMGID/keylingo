@@ -402,13 +402,20 @@ impl OpenAiChatProvider<'_> {
         }
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
         headers.insert("Content-Type".to_string(), "application/json".to_string());
+        // 先按大小写不敏感合成一份，再折进 BTreeMap。BTreeMap 的 key 是大小写敏感的：
+        // 用户把自定义头写成 `X-Session-Id`（不在保留名单里，允许覆盖）时，发送路径会
+        // upsert 成一条，直接往 map 里塞会显示成两条——正是本模块要杜绝的那种不一致。
+        let mut pairs: Vec<(String, String)> = Vec::new();
         for (name, value) in session_header_pairs(metadata) {
-            headers.insert(name.to_string(), value);
+            crate::provider_request::upsert_pair(&mut pairs, name.to_string(), value);
         }
         for (name, value) in crate::provider_request::header_pairs(
             self.provider,
             metadata.conversation_id.as_deref(),
         ) {
+            crate::provider_request::upsert_pair(&mut pairs, name, value);
+        }
+        for (name, value) in pairs {
             headers.insert(name, value);
         }
         crate::chat::request_debug::sanitize_headers(headers)
@@ -519,7 +526,7 @@ impl OpenAiChatProvider<'_> {
         // 自动去掉该字段重试并记入 state.prompt_cache_key_unsupported，本会话后续就地跳过。
         // 开关关掉时不发这个字段：这就是 OpenAI 侧「prompt 缓存」的全部内容
         // （官方按稳定前缀 + 该键做缓存路由），Anthropic 那边对应的是 cache_control 断点。
-        if self.provider.request.prompt_caching
+        if self.provider.prompt_caching_enabled()
             && !self
                 .state
                 .prompt_cache_key_unsupported(&self.provider.base_url)
@@ -1387,7 +1394,7 @@ mod tests {
                 model_overrides: Default::default(),
                 compress_request_body: false,
                 request: crate::settings::ProviderRequestConfig {
-                    prompt_caching: caching,
+                    prompt_caching: Some(caching),
                     ..Default::default()
                 },
             };
@@ -1412,8 +1419,28 @@ mod tests {
         };
         assert_eq!(body_with(true)["prompt_cache_key"], "conv_abc");
         assert!(body_with(false).get("prompt_cache_key").is_none());
-        // 默认开：老配置里没有这个字段的供应商行为不变。
-        assert!(crate::settings::ProviderRequestConfig::default().prompt_caching);
+        // 老配置没有这个字段（None）时按协议给默认：OpenAI 系照旧发（行为不变），
+        // Anthropic 侧不打断点（净新增的线格式变化，不能悄悄替用户开）。
+        let mut p = ModelProvider {
+            id: "x".into(),
+            name: "x".into(),
+            api_keys: vec!["k".into()],
+            api_key_legacy: None,
+            base_url: "https://api.openai.com/v1".into(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "openai_chat".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+        };
+        assert!(p.request.prompt_caching.is_none());
+        assert!(p.prompt_caching_enabled(), "OpenAI Chat 默认应为开");
+        p.api_format = "openai_responses".into();
+        assert!(p.prompt_caching_enabled(), "OpenAI Responses 默认应为开");
+        p.api_format = "anthropic_messages".into();
+        assert!(!p.prompt_caching_enabled(), "Anthropic 默认应为关");
     }
 
     #[test]

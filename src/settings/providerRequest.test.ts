@@ -13,9 +13,22 @@ describe('headerIssue', () => {
     expect(headerIssue({ key: 'X-Title', value: 'kivio' }, true)).toBeNull()
   })
 
-  it('rejects reserved keys regardless of case', () => {
-    expect(headerIssue({ key: 'Authorization', value: 'x' }, true)).toBe('reserved')
-    expect(headerIssue({ key: 'X-API-Key', value: 'x' }, true)).toBe('reserved')
+  it('rejects every reserved key, case-insensitively', () => {
+    // 必须与 Rust 侧 provider_request.rs::RESERVED_HEADER_KEYS 逐条一致。少一条 = 用户
+    // 能填能存，保存后被 sanitize_settings 静默删掉、列表当场消失。
+    for (const key of [
+      'Authorization',
+      'X-API-Key',
+      'x-goog-api-key',
+      'Host',
+      'Content-Length',
+      'Content-Encoding',
+      'Content-Type',
+      'Accept-Encoding',
+      'anthropic-version',
+    ]) {
+      expect(headerIssue({ key, value: 'x' }, true), key).toBe('reserved')
+    }
   })
 
   it('rejects malformed keys and CRLF / non-ASCII values', () => {
@@ -69,7 +82,17 @@ describe('parseHeaderImport', () => {
 
   it('falls back to plain "Name: value" lines', () => {
     const result = parseHeaderImport('X-Title: kivio\nHTTP-Referer: https://kivio.dev')
-    expect(result.headers).toHaveLength(2)
+    expect(result.headers).toEqual([
+      { key: 'X-Title', value: 'kivio' },
+      { key: 'HTTP-Referer', value: 'https://kivio.dev' },
+    ])
+  })
+
+  it('does not treat a -H-less curl command as plain header lines', () => {
+    // 否则会把 `curl https://x/v1 -d '{...}'` 当请求头解析，报一堆没用的 issue。
+    const result = parseHeaderImport(String.raw`curl https://x/v1 -d '{"model":"gpt-4o"}'`)
+    expect(result.headers).toEqual([])
+    expect(result.issues).toEqual([])
   })
 
   it('throws on empty input, broken JSON and unterminated quotes', () => {
@@ -143,6 +166,21 @@ describe('mergeImportedHeaders', () => {
 })
 
 describe('effectiveUserAgent', () => {
+  it('falls back to the builtin version when the configured one is not header-safe', () => {
+    // Rust 的 identity_version 会校验后退回内置版本。前端不校验的话，面板上那块
+    // 「实际发送的 User-Agent」显示的就是个假值。
+    for (const bad of ['1.2.3\u4e2d\u6587', '1.2.3\r\n0']) {
+      expect(effectiveUserAgent([], 'claude_code', bad), bad).toEqual({
+        value: 'claude-cli/2.1.71 (external, cli)',
+        source: 'preset',
+      })
+    }
+    // 首尾空白先 trim，剩下合法就照用（粘贴常带尾换行，那不该算非法）。
+    expect(effectiveUserAgent([], 'claude_code', '  9.9.9\n').value).toBe(
+      'claude-cli/9.9.9 (external, cli)',
+    )
+  })
+
   it('falls back to the preset when no custom UA is set', () => {
     expect(effectiveUserAgent([], 'claude_code', '')).toEqual({
       value: 'claude-cli/2.1.71 (external, cli)',

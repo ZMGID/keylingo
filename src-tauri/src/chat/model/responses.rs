@@ -28,27 +28,27 @@ use super::{
     ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
 
-/// UI 档位 → xAI 官方 effort（`none|low|medium|high|xhigh`）。返回 `None` 表示这一档在该
-/// 模型上不该发（例如只有 grok-4.3 / grok-3 认 `none`）。
-fn xai_reasoning_effort(effort: &str, model: &str) -> Option<&'static str> {
-    let id = model.trim().to_ascii_lowercase();
-    let supports_none = id.contains("grok-4.3") || id.contains("grok-3");
+/// UI 档位 → xAI 官方 effort。
+///
+/// **不处理「关闭思考」**：`resolve_thinking`（`chat/commands/reasoning.rs`）把 `off` 变成
+/// `(enabled=false, level=None)`，所以 `off` 这个字符串永远到不了适配器，本函数只会收到
+/// `low/medium/high/xhigh/max`。曾经写过 `"off" => "none"` 的分支和配套的 grok-4.3/grok-3
+/// 门控，都是够不着的死代码 —— 连带那条测试也是绕开真实入口硬塞出来的假绿灯。
+/// 要让 Grok 真能关思考，得先让 `resolve_thinking` 把 `off` 作为一个等级透传下来。
+fn xai_reasoning_effort(effort: &str) -> Option<&'static str> {
     match effort.trim().to_ascii_lowercase().as_str() {
-        "off" | "none" => supports_none.then_some("none"),
-        "minimal" => Some("low"),
-        "low" => Some("low"),
+        "minimal" | "low" => Some("low"),
         "medium" => Some("medium"),
-        "high" => Some("high"),
+        "high" | "max" => Some("high"),
         "xhigh" => Some("xhigh"),
-        "max" => Some("high"),
         _ => None,
     }
 }
 
-/// grok 的 `include`：思考链回放恒带；按已启用的服务端工具追加来源 / 输出字段，
-/// 不显式 include 的话搜索来源和执行输出根本不会回传。
+/// grok 的 `include`：按已启用的服务端工具列出要回传的字段，不显式 include 的话
+/// 搜索来源和执行输出根本不会回来。没有服务端工具时返回空（调用方据此不发该字段）。
 fn xai_include_values(tools: Option<&Value>) -> Vec<Value> {
-    let mut values = vec![Value::String("reasoning.encrypted_content".to_string())];
+    let mut values: Vec<Value> = Vec::new();
     let Some(tools) = tools.and_then(Value::as_array) else {
         return values;
     };
@@ -445,7 +445,7 @@ impl OpenAiResponsesProvider<'_> {
         if let Some(effort) = request.options.thinking_level.as_deref() {
             if is_xai {
                 // xAI 有自己的一套档位，且拒收 `store`。
-                if let Some(mapped) = xai_reasoning_effort(effort, &request.model) {
+                if let Some(mapped) = xai_reasoning_effort(effort) {
                     body["reasoning"] = serde_json::json!({ "effort": mapped });
                 }
             } else {
@@ -465,16 +465,25 @@ impl OpenAiResponsesProvider<'_> {
             }
         }
         if is_xai {
-            // grok 的服务端工具只有显式 include 才回传来源与执行输出；
-            // reasoning.encrypted_content 是 store 关闭时跨轮回放推理项的前提，恒带。
-            body["include"] = Value::Array(xai_include_values(body.get("tools")));
+            // grok 的服务端工具只有显式 include 才回传来源与执行输出，不 include 就拿不到
+            // 搜索来源。没有服务端工具时不必发这个字段。
+            //
+            // 注意这里**不带** `reasoning.encrypted_content`：加密推理项在 `types.rs` 的
+            // 回放里是被丢弃的（"Reasoning is omitted on replay"），要来只是让每次响应多背
+            // 一份没人消费的密文。
+            let include = xai_include_values(body.get("tools"));
+            if include.is_empty() {
+                body.as_object_mut().map(|o| o.remove("include"));
+            } else {
+                body["include"] = Value::Array(include);
+            }
         }
         // 会话级缓存键：Responses 与 Chat Completions 认同一个 `prompt_cache_key`
         // （官方按稳定前缀 + 该键做缓存路由）。同一对话每轮同值，提升命中。
         // 与 openai.rs 共用 `state.prompt_cache_key_unsupported` 的学习结果——严格端点
         // 首次 400 后就地跳过，不必两个适配器各踩一遍。
         if !is_xai
-            && self.provider.request.prompt_caching
+            && self.provider.prompt_caching_enabled()
             && !self
                 .state
                 .prompt_cache_key_unsupported(&self.provider.base_url)
@@ -1531,24 +1540,19 @@ mod tests {
             xai_body("grok-4.3", Some("xhigh"), false)["reasoning"]["effort"],
             "xhigh"
         );
-        // `none` 只有 grok-4.3 / grok-3 认；别的型号上不该发这一档。
-        assert_eq!(
-            xai_body("grok-4.3", Some("off"), false)["reasoning"]["effort"],
-            "none"
-        );
-        assert!(xai_body("grok-4.1-fast", Some("off"), false)
-            .get("reasoning")
-            .is_none());
+        // 「关闭思考」到不了这里：`resolve_thinking` 把 off 变成 (false, None)，适配器
+        // 收到的 thinking_level 是 None，body 里干脆没有 reasoning 字段。曾经写过
+        // `"off" => "none"` 的分支和一条直接塞 Some("off") 的断言——绕开了唯一的真实入口，
+        // 是假绿灯。这条断言守住真实形态，别再让人以为 Grok 能关思考。
+        assert!(xai_body("grok-4.3", None, false).get("reasoning").is_none());
     }
 
     #[test]
     fn xai_includes_server_tool_outputs() {
-        // 不显式 include 的话，grok 的搜索来源根本不回传。
-        let plain = xai_body("grok-4.3", None, false);
-        assert_eq!(
-            plain["include"],
-            serde_json::json!(["reasoning.encrypted_content"])
-        );
+        // 没有服务端工具时不发这个字段（尤其别带 reasoning.encrypted_content：
+        // types.rs 的回放会丢弃推理项，要来只是让每次响应多背一份没人消费的密文）。
+        assert!(xai_body("grok-4.3", None, false).get("include").is_none());
+        // 开了内置搜索才发，且必须含来源字段——不 include 就拿不到 grok 的搜索来源。
         let searching = xai_body("grok-4.3", None, true);
         let include = searching["include"].as_array().expect("include");
         assert!(

@@ -4,6 +4,8 @@
 export type ProviderCustomHeader = { key: string; value: string }
 
 /** 由 Kivio 自己管理、不允许用户覆盖的头。 */
+// 必须与 Rust 侧 `provider_request.rs::RESERVED_HEADER_KEYS` **逐条一致**。少一条的后果是
+// 用户在面板里能填能存，保存后 sanitize_settings 把它静默删掉、列表里当场消失。
 const RESERVED_HEADER_KEYS = new Set([
   'authorization',
   'x-api-key',
@@ -11,6 +13,10 @@ const RESERVED_HEADER_KEYS = new Set([
   'host',
   'content-length',
   'content-encoding',
+  // 适配器已经发了 `Content-Type: application/json` 和 `Accept-Encoding: identity`，
+  // reqwest 的 .header() 是 append 不是覆盖——多一条 gzip 会让 SSE 变二进制垃圾。
+  'content-type',
+  'accept-encoding',
   'anthropic-version',
 ])
 
@@ -225,7 +231,8 @@ export function parseHeaderImport(text: string): ImportResult {
     pushRawHeaderLine(result, raw)
   }
   // 不是 cURL、也没有 -H：多半是直接粘的 `Name: value` 若干行。
-  if (!sawHeaderFlag) {
+  // 但明确以 curl 开头的命令就别乱猜了——把 `-d '{...}'` 当请求头解析只会报一堆无用 issue。
+  if (!sawHeaderFlag && !/^curl\b/i.test(trimmed)) {
     for (const line of trimmed.split(/\r?\n/)) {
       if (line.trim()) pushRawHeaderLine(result, line.trim())
     }
@@ -264,9 +271,15 @@ export const CLI_IDENTITY_BUILTIN_VERSIONS: Record<string, string> = {
   grok: '0.2.110',
 }
 
-/** CLI 身份预设的 User-Agent；与 Rust 侧 `provider_request::identity_pairs` 保持一致。 */
+/**
+ * CLI 身份预设的 User-Agent；与 Rust 侧 `provider_request::identity_pairs` 保持一致。
+ *
+ * 版本号要过头值校验后才用 —— Rust 的 `identity_version` 非法就退回内置版本。不校验的话
+ * 面板上那块「实际发送的 User-Agent」在用户填了非 ASCII / 带换行的版本号时显示的是假值。
+ */
 export function identityUserAgent(identity: string, version: string): string | null {
-  const v = version.trim() || CLI_IDENTITY_BUILTIN_VERSIONS[identity]
+  const configured = version.trim()
+  const v = (isValidHeaderValue(configured) ? configured : '') || CLI_IDENTITY_BUILTIN_VERSIONS[identity]
   if (!v) return null
   if (identity === 'claude_code') return `claude-cli/${v} (external, cli)`
   if (identity === 'codex') return `codex_cli_rs/${v} (Ubuntu 24.4.0; x86_64) WindowsTerminal`

@@ -49,10 +49,10 @@ pub struct ProviderRequestConfig {
     pub custom_headers: Vec<ProviderCustomHeader>,
     /// 是否跟随系统代理。默认 true —— 与加这个开关之前的行为一致；关掉才走直连。
     pub use_system_proxy: bool,
-    /// prompt 缓存。默认开——两条协议上都是省钱且无副作用的：
-    /// Anthropic 打 `cache_control` 断点，OpenAI Chat / Responses 发 `prompt_cache_key`
-    /// 路由提示。Gemini 由服务端隐式缓存，没有可发的字段，开关对它无意义。
-    pub prompt_caching: bool,
+    /// prompt 缓存。`None` = 跟随协议默认（见 `prompt_caching_enabled`），用户显式拨过才是
+    /// `Some`。之所以不是裸 `bool`：两条协议的安全默认不同，而裸 bool 分不清「用户选了 true」
+    /// 和「serde 填的 true」。
+    pub prompt_caching: Option<bool>,
     /// 缓存时长档位：`short`（默认 5 分钟）| `long`（1 小时，需 beta 头）。仅 Anthropic。
     pub prompt_cache_retention: String,
     /// CLI 身份伪装：`""` 关闭 | `claude_code` | `codex` | `grok`。
@@ -66,7 +66,7 @@ impl Default for ProviderRequestConfig {
         Self {
             custom_headers: Vec::new(),
             use_system_proxy: true,
-            prompt_caching: true,
+            prompt_caching: None,
             prompt_cache_retention: "short".to_string(),
             cli_identity: String::new(),
             cli_identity_version: String::new(),
@@ -157,17 +157,31 @@ impl ProviderApiFormat {
             Self::XaiResponses => "xai_responses",
         }
     }
-
-    /// 是否走 Responses 线协议（`POST /responses`）。`OpenAiResponses` 与 `XaiResponses`
-    /// 共用适配器，只在请求体清洗上分叉。
-    pub fn is_responses_wire(self) -> bool {
-        matches!(self, Self::OpenAiResponses | Self::XaiResponses)
-    }
 }
 
 impl ModelProvider {
     pub fn api_format_kind(&self) -> ProviderApiFormat {
         ProviderApiFormat::from_raw(&self.api_format)
+    }
+
+    /// 该供应商本次是否启用 prompt 缓存。用户没拨过开关时按协议给默认，取值原则是
+    /// **「不改变加这个开关之前的行为」**：
+    ///
+    /// - OpenAI Chat / Responses：默认**开**。`prompt_cache_key` 本来就一直在发，
+    ///   默认关反而是静默削弱现状。
+    /// - Anthropic：默认**关**。断点是净新增的线格式变化（`system` 从字符串变块数组、
+    ///   tools 与末条消息各加 `cache_control`），而这条路没有 `prompt_cache_key` 那种
+    ///   「被拒就学会并重试」的自愈。第三方 Anthropic 兼容网关严格的直接 400，宽松的
+    ///   把块数组读成空 —— 后者会让系统提示词静默丢失，用户只看到模型突然变笨。
+    ///   想省钱的人自己去二级页打开。
+    /// - Gemini：没有可发的字段，取值无意义。
+    pub fn prompt_caching_enabled(&self) -> bool {
+        self.request
+            .prompt_caching
+            .unwrap_or(match self.api_format_kind() {
+                ProviderApiFormat::AnthropicMessages => false,
+                _ => true,
+            })
     }
 }
 
@@ -1928,9 +1942,14 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             provider.request.cli_identity = String::new();
         }
         // 版本号会被拼进 User-Agent，非法值清空（`identity_version` 会退回内置版本）。
-        if !crate::provider_request::is_valid_header_value(&provider.request.cli_identity_version) {
-            provider.request.cli_identity_version = String::new();
-        }
+        // 先 trim 再判，与 `identity_version` 同口径：粘贴常带尾换行，那不该算非法。
+        let trimmed_version = provider.request.cli_identity_version.trim().to_string();
+        provider.request.cli_identity_version =
+            if crate::provider_request::is_valid_header_value(&trimmed_version) {
+                trimmed_version
+            } else {
+                String::new()
+            };
     }
 
     let removed_legacy_local_provider_ids: std::collections::HashSet<String> = settings
