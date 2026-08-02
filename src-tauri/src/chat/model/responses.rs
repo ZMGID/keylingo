@@ -404,8 +404,12 @@ impl OpenAiResponsesProvider<'_> {
         }
         if !request.system.trim().is_empty() {
             if is_xai {
-                // xAI 拒收 `instructions`。**搬**而不是丢：直接删掉系统提示词就凭空消失了。
-                // Responses 的 input 接受 `role: system` 项，放在最前面等价于 instructions。
+                // 放进 `input` 首位而不是用 `instructions`。
+                //
+                // xAI 的文档把 `instructions` 列在 `/v1/responses` 的请求体参数里，所以它
+                // 大概是能收的；但 `input` 里带 `role:system` 项在两种情况下都成立，是更
+                // 稳的一条路。参考实现（LiveAgent）把 `instructions` 直接删掉不补——照抄
+                // 会让系统提示词凭空消失，所以是**搬**不是丢。
                 if let Some(input) = body["input"].as_array_mut() {
                     input.insert(
                         0,
@@ -444,7 +448,7 @@ impl OpenAiResponsesProvider<'_> {
         // 已把「未显式设档」默认成 high，故内置搜索天然拿到非 minimal。
         if let Some(effort) = request.options.thinking_level.as_deref() {
             if is_xai {
-                // xAI 有自己的一套档位，且拒收 `store`。
+                // xAI 有自己的一套 effort 档位。
                 if let Some(mapped) = xai_reasoning_effort(effort) {
                     body["reasoning"] = serde_json::json!({ "effort": mapped });
                 }
@@ -465,6 +469,13 @@ impl OpenAiResponsesProvider<'_> {
             }
         }
         if is_xai {
+            // **必须显式关掉服务端存储。** xAI 的 Responses 是有状态设计，`store` 默认 true，
+            // 文档原文：「New responses will be stored for 30 days and then permanently
+            // deleted.」我们每轮都自带完整 input、从不使用 `previous_response_id`，那份
+            // 服务端副本对我们毫无用处，却让用户的每一次 Grok 对话在 xAI 存 30 天。
+            // 与本适配器在 OpenAI Responses 上的做法一致。
+            body["store"] = Value::Bool(false);
+
             // grok 的服务端工具只有显式 include 才回传来源与执行输出，不 include 就拿不到
             // 搜索来源。没有服务端工具时不必发这个字段。
             //
@@ -482,6 +493,11 @@ impl OpenAiResponsesProvider<'_> {
         // （官方按稳定前缀 + 该键做缓存路由）。同一对话每轮同值，提升命中。
         // 与 openai.rs 共用 `state.prompt_cache_key_unsupported` 的学习结果——严格端点
         // 首次 400 后就地跳过，不必两个适配器各踩一遍。
+        //
+        // xAI 不发：它的请求体参数表里确实有 `prompt_cache_key`，但文档描述的缓存机制是
+        // 「Automatic caching of conversation history」——靠 `previous_response_id` 续接
+        // 会话省钱，而不是按这个键做前缀路由。我们不用 previous_response_id，发了拿不到
+        // 任何好处。
         if !is_xai
             && self.provider.prompt_caching_enabled()
             && !self
@@ -1505,15 +1521,22 @@ mod tests {
     }
 
     #[test]
-    fn xai_drops_the_fields_its_endpoint_rejects() {
+    fn xai_body_omits_what_is_useless_and_opts_out_of_storage() {
         let body = xai_body("grok-4.3", Some("high"), false);
-        // xAI 严格拒收这批 OpenAI 专有字段，发了就整个请求 400。
-        for field in ["instructions", "store", "prompt_cache_key", "metadata"] {
+        // `instructions` 搬进了 input（见下一条测试）；`prompt_cache_key` 对 xAI 没用
+        // ——它的缓存靠 previous_response_id 自动做，不认这个键。
+        for field in ["instructions", "prompt_cache_key"] {
             assert!(
                 body.get(field).is_none(),
                 "{field} must not be sent: {body}"
             );
         }
+        // **必须显式关存储**：xAI 的 Responses `store` 默认 true、服务端留 30 天，
+        // 而我们从不用 previous_response_id，那份副本纯属白存用户的对话。
+        assert_eq!(
+            body["store"], false,
+            "must opt out of xAI server-side storage: {body}"
+        );
     }
 
     #[test]
