@@ -7,7 +7,7 @@ export type ChatProtocolScope = "run" | "conversation";
 
 export type ChatPythonInputFile = { name: string, dataBase64: string, sizeBytes: number, };
 
-export type ChatRunPythonPayload = { protocolVersion: typeof CHAT_PROTOCOL_VERSION, requestId: string, runId: string, parentConversationId: string | null, parentRunId: string | null, parentMessageId: string | null, code: string, timeoutMs: number, files: Array<ChatPythonInputFile>, };
+export type ChatRunPythonPayload = { protocolVersion: typeof CHAT_PROTOCOL_VERSION, runId: string, parentConversationId: string | null, parentRunId: string | null, parentMessageId: string | null, code: string, timeoutMs: number, files: Array<ChatPythonInputFile>, };
 
 export type ChatSegmentKind = "text" | "reasoning" | "tool";
 

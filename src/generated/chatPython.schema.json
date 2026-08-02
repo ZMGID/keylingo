@@ -57,9 +57,6 @@
       "const": 1,
       "type": "integer"
     },
-    "requestId": {
-      "type": "string"
-    },
     "runId": {
       "type": "string"
     },
@@ -71,7 +68,6 @@
   },
   "required": [
     "protocolVersion",
-    "requestId",
     "runId",
     "code",
     "timeoutMs",

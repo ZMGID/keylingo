@@ -61,9 +61,22 @@ function snapshot(overrides: Partial<ChatRunSnapshot> = {}): ChatRunSnapshot {
 }
 
 describe('chat protocol sequencing', () => {
-  beforeEach(() => chatProtocolTesting.reset())
+  // 缺口会真的触发一次 sync（applyEvent 期间进 liveDuringSync，sync 收尾时才排干），
+  // 所以这里必须给 invoke 一个合法空结果，并在断言前 flush 掉那一轮异步。
+  beforeEach(() => {
+    chatProtocolTesting.reset()
+    invokeMock.mockReset()
+    invokeMock.mockResolvedValue({
+      protocolVersion: 1,
+      conversationRevision: 0,
+      missingRunIds: [],
+      runs: [],
+    })
+  })
 
-  it('drops duplicates and drains a buffered gap in order', () => {
+  const flushSync = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('drops duplicates and drains a buffered gap in order', async () => {
     const seen: number[] = []
     chatProtocolTesting.subscribe((item) => {
       if (item.scope === 'run') seen.push(item.seq)
@@ -72,6 +85,7 @@ describe('chat protocol sequencing', () => {
     chatProtocolTesting.ingest(event(3, 'text_delta'))
     chatProtocolTesting.ingest(event(1))
     chatProtocolTesting.ingest(event(2, 'text_delta'))
+    await flushSync()
     expect(seen).toEqual([1, 2, 3])
   })
 
@@ -86,7 +100,7 @@ describe('chat protocol sequencing', () => {
     expect(seen).toEqual([1, 2])
   })
 
-  it('commits a buffered terminal only after the sequence gap closes', () => {
+  it('commits a buffered terminal only after the sequence gap closes', async () => {
     const seen: number[] = []
     chatProtocolTesting.subscribe((item) => {
       if (item.scope === 'run') seen.push(item.seq)
@@ -95,6 +109,7 @@ describe('chat protocol sequencing', () => {
     chatProtocolTesting.ingest(event(3, 'run_completed'))
     chatProtocolTesting.ingest(event(4, 'text_delta'))
     chatProtocolTesting.ingest(event(2, 'text_delta'))
+    await flushSync()
     expect(seen).toEqual([1, 2, 3])
   })
 
@@ -117,13 +132,14 @@ describe('chat protocol sequencing', () => {
     errorSpy.mockRestore()
   })
 
-  it('drops the run state instead of buffering an unbounded gap', () => {
+  it('drops the run state instead of buffering an unbounded gap', async () => {
     const seen: number[] = []
     chatProtocolTesting.subscribe((item) => {
       if (item.scope === 'run') seen.push(item.seq)
     })
     chatProtocolTesting.ingest(event(1))
     for (let seq = 3; seq < 700; seq += 1) chatProtocolTesting.ingest(event(seq, 'text_delta'))
+    await flushSync()
 
     // 状态被丢掉后，序列从头开始也能重新收下（等待 sync 回快照）。
     chatProtocolTesting.ingest(event(1))
@@ -217,10 +233,9 @@ describe('chat protocol sequencing', () => {
     })).toBe(false)
   })
 
-  it('deduplicates Python requests by stable requestId', () => {
+  it('deduplicates Python requests by stable runId', () => {
     const request = {
       protocolVersion: 1,
-      requestId: 'python-request',
       runId: 'python-run',
       parentConversationId: 'conversation',
       parentRunId: 'run',
@@ -296,11 +311,10 @@ describe('chat protocol sequencing', () => {
 
   it('replays a pending Python snapshot request once per JS lifecycle', () => {
     const requests: string[] = []
-    chatProtocolTesting.subscribePython((request) => requests.push(request.requestId))
+    chatProtocolTesting.subscribePython((request) => requests.push(request.runId))
     const request = {
       protocolVersion: 1 as const,
-      requestId: 'python-pending',
-      runId: 'python-run',
+      runId: 'python-pending',
       parentConversationId: 'conversation',
       parentRunId: 'run',
       parentMessageId: 'message',

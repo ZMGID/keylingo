@@ -39,7 +39,6 @@ pub struct ChatPythonInputFile {
 pub struct ChatRunPythonPayload {
     #[ts(type = "typeof CHAT_PROTOCOL_VERSION")]
     pub protocol_version: u32,
-    pub request_id: String,
     pub run_id: String,
     pub parent_conversation_id: Option<String>,
     pub parent_run_id: Option<String>,
@@ -1208,18 +1207,18 @@ impl ChatProtocolHub {
             .snapshot
             .pending_python_requests
             .iter()
-            .any(|pending| pending.request_id == request.request_id)
+            .any(|pending| pending.run_id == request.run_id)
         {
             run.snapshot.pending_python_requests.push(request);
         }
         Ok(())
     }
 
-    fn detach_python_request(&mut self, request_id: &str) {
+    fn detach_python_request(&mut self, run_id: &str) {
         for run in self.runs.values_mut() {
             run.snapshot
                 .pending_python_requests
-                .retain(|pending| pending.request_id != request_id);
+                .retain(|pending| pending.run_id != run_id);
         }
     }
 }
@@ -1575,12 +1574,12 @@ pub fn attach_python_request(app: &AppHandle, request: ChatRunPythonPayload) -> 
         .attach_python_request(request)
 }
 
-pub fn detach_python_request(app: &AppHandle, request_id: &str) {
+pub fn detach_python_request(app: &AppHandle, run_id: &str) {
     app.state::<AppState>()
         .chat_protocol
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .detach_python_request(request_id);
+        .detach_python_request(run_id);
 }
 
 pub fn withdraw_tool_approval(app: &AppHandle, tool_call_id: &str) {
@@ -2172,7 +2171,6 @@ mod tests {
         hub.register("conv", "run", "message", 0).unwrap();
         let request = ChatRunPythonPayload {
             protocol_version: CHAT_PROTOCOL_VERSION,
-            request_id: "python".into(),
             run_id: "python".into(),
             parent_conversation_id: Some("conv".into()),
             parent_run_id: Some("run".into()),

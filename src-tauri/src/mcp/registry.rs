@@ -1257,7 +1257,6 @@ pub(super) async fn run_python_via_pyodide(
     let (tx, rx) = oneshot::channel();
     let payload = crate::chat::protocol::ChatRunPythonPayload {
         protocol_version: crate::chat::protocol::CHAT_PROTOCOL_VERSION,
-        request_id: run_id.clone(),
         run_id: run_id.clone(),
         parent_conversation_id: parent.as_ref().map(|ctx| ctx.conversation_id.clone()),
         parent_run_id: parent.as_ref().map(|ctx| ctx.run_id.clone()),
@@ -1283,7 +1282,6 @@ pub(super) async fn run_python_via_pyodide(
             crate::state::PendingPythonRun {
                 sender: tx,
                 export_ctx: export_ctx.clone(),
-                request: payload.clone(),
             },
         );
     }

@@ -35,7 +35,6 @@ pub struct PendingChatExternalAttachment {
 pub struct PendingPythonRun {
     pub sender: oneshot::Sender<PythonRunResult>,
     pub export_ctx: SandboxExportContext,
-    pub request: crate::chat::protocol::ChatRunPythonPayload,
 }
 
 #[derive(Debug)]

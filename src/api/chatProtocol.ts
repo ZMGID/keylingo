@@ -47,7 +47,6 @@ const syncRetryAttempts = new Map<string, number>()
 const syncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let nativeListener: Promise<() => void> | null = null
 let nativePythonListener: Promise<() => void> | null = null
-let requestSync = (conversationId: string) => { void syncChatProtocol(conversationId) }
 
 function reportIssue(issue: ChatProtocolIssue, conversationId?: string) {
   for (const subscriber of issueSubscribers) subscriber(issue, conversationId)
@@ -128,11 +127,11 @@ function applyRunEvent(event: ChatRunEventEnvelope) {
       // 缺口补不上时 pending 会把整个回答（几千个 delta）攒进内存且永不派发。
       // 丢掉这个 run 的状态：下次 sync 不带它的 cursor，后端直接回快照重建。
       runs.delete(event.runId)
-      requestSync(event.conversationId)
+      void syncChatProtocol(event.conversationId)
       return
     }
     state.pending.set(event.seq, event)
-    requestSync(event.conversationId)
+    void syncChatProtocol(event.conversationId)
     return
   }
   // 先推进 lastSeq/terminal 再派发：即使派发路径出问题，序列也不会卡在原地
@@ -436,8 +435,8 @@ export function acceptChatPythonPayload(payload: unknown): ChatRunPythonPayload 
     return null
   }
   const request = payload as ChatRunPythonPayload
-  if (seenPythonRequests.has(request.requestId)) return null
-  seenPythonRequests.add(request.requestId)
+  if (seenPythonRequests.has(request.runId)) return null
+  seenPythonRequests.add(request.runId)
   return request
 }
 
@@ -454,7 +453,6 @@ export const chatProtocolTesting = {
     issueSubscribers.clear()
     pythonSubscribers.clear()
     seenPythonRequests.clear()
-    requestSync = () => {}
   },
   subscribe(subscriber: Subscriber) {
     subscribers.add(subscriber)
