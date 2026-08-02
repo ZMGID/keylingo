@@ -101,7 +101,7 @@ impl<'a> RunResultBuilder<'a> {
     }
 
     fn emit(&self) {
-        if let Some(reason) = self.emit_done_reason {
+        if self.emit_done_reason.is_some() {
             self.host.emit_stream_delta(
                 self.ids.conversation_id,
                 self.ids.run_id,
@@ -109,13 +109,6 @@ impl<'a> RunResultBuilder<'a> {
                 &self.content,
                 None,
                 self.emit_segment.as_ref(),
-            );
-            self.host.emit_stream_done(
-                self.ids.conversation_id,
-                self.ids.run_id,
-                self.ids.message_id,
-                reason,
-                &self.content,
             );
         }
     }
@@ -319,13 +312,6 @@ pub(crate) fn finalize_planning_final(
             None,
             None,
         );
-        env.host.emit_stream_done(
-            &config.conversation_id,
-            &config.run_id,
-            &config.message_id,
-            "done",
-            &response,
-        );
     }
     if !state.generated_api_messages.is_empty() {
         state.generated_api_messages.push(message);
@@ -518,9 +504,8 @@ pub(crate) fn cancelled_tool_round_run_result(
     }
 }
 
-/// Build a cancelled `AgentRunResult` from the loop's accumulated `state` and
-/// emit the single `done("cancelled")` event the frontend's freeze logic relies
-/// on. Used by the planning/loop-top cancellation paths (no partial streamed
+/// Build a cancelled `AgentRunResult` from the loop's accumulated `state`.
+/// Used by the planning/loop-top cancellation paths (no partial streamed
 /// answer to preserve) so they end with `Ok(cancelled_result)` carrying the
 /// tool records / segments / api messages gathered up to the cancel point —
 /// mirroring the tool-round cancellation path so the whole turn is persisted
@@ -530,13 +515,6 @@ pub(crate) fn cancelled_run_result_from_state(
     state: &mut RunState,
 ) -> AgentRunResult {
     let config = env.config;
-    env.host.emit_stream_done(
-        &config.conversation_id,
-        &config.run_id,
-        &config.message_id,
-        "cancelled",
-        "",
-    );
     cancelled_tool_round_run_result(
         &config.language,
         &state.planning_reasoning_parts,

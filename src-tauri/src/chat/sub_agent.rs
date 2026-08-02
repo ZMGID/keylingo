@@ -477,18 +477,6 @@ impl AgentHost for SubAgentHost {
         self.emit_progress("running", false);
     }
 
-    fn emit_stream_done(
-        &self,
-        _conversation_id: &str,
-        _run_id: &str,
-        _message_id: &str,
-        _reason: &str,
-        _full: &str,
-    ) {
-        // Final state is delivered as the parent tool record's structured
-        // content by the spawn handler; nothing to do here.
-    }
-
     fn emit_tool_record(
         &self,
         _conversation_id: &str,
@@ -2493,15 +2481,6 @@ mod tests {
             _delta: &str,
             _reasoning_delta: Option<&str>,
             _segment: Option<&ChatMessageSegment>,
-        ) {
-        }
-        fn emit_stream_done(
-            &self,
-            _conversation_id: &str,
-            _run_id: &str,
-            _message_id: &str,
-            _reason: &str,
-            _full: &str,
         ) {
         }
         fn emit_tool_record(

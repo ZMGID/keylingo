@@ -830,16 +830,6 @@ mod tests {
         ) {
         }
 
-        fn emit_stream_done(
-            &self,
-            _conversation_id: &str,
-            _run_id: &str,
-            _message_id: &str,
-            _reason: &str,
-            _full: &str,
-        ) {
-        }
-
         fn emit_tool_record(
             &self,
             _conversation_id: &str,

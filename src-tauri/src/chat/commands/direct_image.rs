@@ -7,7 +7,7 @@ use crate::mcp::types::ChatToolArtifact;
 use crate::settings::{ModelProvider, Settings};
 use crate::state::AppState;
 
-use super::interaction::{emit_chat_stream_delta, emit_chat_stream_done, wait_for_chat_cancel};
+use super::interaction::{emit_chat_stream_delta, wait_for_chat_cancel};
 use super::messages::{plain_text_segment, push_assistant_message};
 use super::{agent_run_entry_label, Conversation};
 
@@ -46,9 +46,7 @@ pub(super) async fn complete_direct_image_generation_reply(
     let started = Instant::now();
     emit_chat_stream_delta(
         app,
-        &conversation.id,
         run_id,
-        &assistant_message_id,
         DIRECT_IMAGE_GENERATION_PENDING,
         None,
         Some(&plain_text_segment(1000, DIRECT_IMAGE_GENERATION_PENDING)),
@@ -65,14 +63,6 @@ pub(super) async fn complete_direct_image_generation_reply(
             "Chat image generation",
         ) => result,
         _ = wait_for_chat_cancel(state.inner(), &conversation.id, run_generation) => {
-            emit_chat_stream_done(
-                app,
-                &conversation.id,
-                run_id,
-                &assistant_message_id,
-                "cancelled",
-                "",
-            );
             crate::chat::protocol::finish_run(
                 app,
                 run_id,
@@ -92,14 +82,6 @@ pub(super) async fn complete_direct_image_generation_reply(
             } else {
                 direct_image_generation_content(&output.artifacts)
             };
-            emit_chat_stream_done(
-                app,
-                &conversation.id,
-                run_id,
-                &assistant_message_id,
-                "done",
-                &content,
-            );
             let active_skill = active_skill_id
                 .map(str::to_string)
                 .or_else(|| conversation.active_skill_id.clone());

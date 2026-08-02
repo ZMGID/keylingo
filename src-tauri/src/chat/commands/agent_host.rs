@@ -8,8 +8,8 @@ use crate::state::AppState;
 
 use super::context::{emit_chat_compaction_state, emit_chat_context_usage_live};
 use super::interaction::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, request_session_consent,
-    request_tool_approval, request_user_response, wait_for_chat_cancel,
+    emit_chat_stream_delta, emit_chat_tool_record, request_session_consent, request_tool_approval,
+    request_user_response, wait_for_chat_cancel,
 };
 use super::messages::persist_partial_assistant_snapshot;
 pub(super) struct ChatAgentHost<'a> {
@@ -25,43 +25,24 @@ pub(super) struct ChatAgentHost<'a> {
 impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
     fn emit_stream_delta(
         &self,
-        conversation_id: &str,
+        _conversation_id: &str,
         run_id: &str,
-        message_id: &str,
+        _message_id: &str,
         delta: &str,
         reasoning_delta: Option<&str>,
         segment: Option<&ChatMessageSegment>,
     ) {
-        emit_chat_stream_delta(
-            &self.app,
-            conversation_id,
-            run_id,
-            message_id,
-            delta,
-            reasoning_delta,
-            segment,
-        );
-    }
-
-    fn emit_stream_done(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-        message_id: &str,
-        reason: &str,
-        full: &str,
-    ) {
-        emit_chat_stream_done(&self.app, conversation_id, run_id, message_id, reason, full);
+        emit_chat_stream_delta(&self.app, run_id, delta, reasoning_delta, segment);
     }
 
     fn emit_tool_record(
         &self,
-        conversation_id: &str,
+        _conversation_id: &str,
         run_id: &str,
-        message_id: &str,
+        _message_id: &str,
         record: &ToolCallRecord,
     ) {
-        emit_chat_tool_record(&self.app, conversation_id, run_id, message_id, record);
+        emit_chat_tool_record(&self.app, run_id, record);
     }
 
     fn emit_compaction_status(
@@ -219,16 +200,6 @@ impl crate::chat::agent::AgentHost for ProbeAgentHost<'_> {
         _delta: &str,
         _reasoning_delta: Option<&str>,
         _segment: Option<&ChatMessageSegment>,
-    ) {
-    }
-
-    fn emit_stream_done(
-        &self,
-        _conversation_id: &str,
-        _run_id: &str,
-        _message_id: &str,
-        _reason: &str,
-        _full: &str,
     ) {
     }
 

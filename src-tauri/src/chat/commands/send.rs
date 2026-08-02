@@ -140,7 +140,7 @@ pub(crate) async fn chat_send_message(
         Ok(context_state) => {
             conversation.context_state = context_state;
             if should_auto_compress_context(&conversation.context_state, &conversation) {
-                match compress_conversation_context(&app, &state, &mut conversation, "auto").await {
+                match compress_conversation_context(&state, &mut conversation, "auto").await {
                     Ok(()) => {
                         let refreshed = compute_context_state(
                             &app,

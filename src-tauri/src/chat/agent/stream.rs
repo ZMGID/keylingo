@@ -779,17 +779,6 @@ impl ChatStreamOutput {
     }
 }
 
-pub fn should_emit_done(policy: AgentStreamPolicy, output: &ChatStreamOutput) -> bool {
-    match policy {
-        AgentStreamPolicy::SynthesisAlwaysDone => true,
-        AgentStreamPolicy::SynthesisDeferEmpty => !output.content.trim().is_empty(),
-        AgentStreamPolicy::PlanningNoDoneUntilNoTools => {
-            output.tool_calls.is_empty()
-                && pending_tool_calls_from_dsml(&output.raw_content).is_empty()
-        }
-    }
-}
-
 pub fn validate_stream_output(
     label: &str,
     policy: AgentStreamPolicy,
@@ -831,7 +820,6 @@ mod tests {
     struct TestHost {
         records: Mutex<Vec<ToolCallRecord>>,
         segments: Mutex<Vec<ChatMessageSegment>>,
-        done_reasons: Mutex<Vec<String>>,
     }
 
     impl AgentHost for TestHost {
@@ -850,20 +838,6 @@ mod tests {
                     .unwrap_or_else(|err| err.into_inner())
                     .push(segment.clone());
             }
-        }
-
-        fn emit_stream_done(
-            &self,
-            _conversation_id: &str,
-            _run_id: &str,
-            _message_id: &str,
-            reason: &str,
-            _full: &str,
-        ) {
-            self.done_reasons
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .push(reason.to_string());
         }
 
         fn emit_tool_record(
@@ -1072,10 +1046,6 @@ mod tests {
             false,
         );
 
-        assert!(!should_emit_done(
-            AgentStreamPolicy::SynthesisDeferEmpty,
-            &output
-        ));
         assert!(validate_stream_output(
             "Chat stream",
             AgentStreamPolicy::SynthesisDeferEmpty,
@@ -1116,11 +1086,6 @@ mod tests {
             &output,
         )
         .expect("image-only planning output must validate");
-        // 出图也要真的收尾发 done（否则前端一直转圈）。
-        assert!(should_emit_done(
-            AgentStreamPolicy::PlanningNoDoneUntilNoTools,
-            &output
-        ));
 
         // 没图时仍照旧报错（不放宽既有守门）。
         output.images.clear();
@@ -1143,10 +1108,6 @@ mod tests {
             false,
         );
 
-        assert!(should_emit_done(
-            AgentStreamPolicy::SynthesisDeferEmpty,
-            &output
-        ));
         validate_stream_output(
             "Chat stream",
             AgentStreamPolicy::SynthesisDeferEmpty,

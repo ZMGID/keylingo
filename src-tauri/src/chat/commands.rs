@@ -49,9 +49,7 @@ pub(crate) use probe_runtime::run_chat_probe;
 
 pub(crate) mod mutations;
 
-pub(crate) use interaction::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record,
-};
+pub(crate) use interaction::{emit_chat_stream_delta, emit_chat_tool_record};
 pub(crate) use messages::push_assistant_message;
 use tooling::{
     append_agent_ask_user_tools, append_agent_todo_tools, apply_agent_plan_tool_filter,

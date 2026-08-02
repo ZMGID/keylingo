@@ -20,8 +20,8 @@ use super::stop::{
     is_tools_unsupported_error, sanitize_assistant_text_response,
 };
 use super::stream::{
-    should_emit_done, validate_stream_output, AgentStreamSink, ChatStreamOutput,
-    ToolCallDraftTracker, WebSearchCardTracker,
+    validate_stream_output, AgentStreamSink, ChatStreamOutput, ToolCallDraftTracker,
+    WebSearchCardTracker,
 };
 use super::types::{AgentRunResult, AgentStreamPolicy};
 
@@ -759,13 +759,6 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         ) => result?,
         _ = host.wait_for_generation_inactive(conversation_id, generation) => {
             let (content, reasoning) = sink.snapshot();
-            host.emit_stream_done(
-                conversation_id,
-                run_id,
-                message_id,
-                "cancelled",
-                content.trim(),
-            );
             return Ok(ChatStreamOutput::new(
                 content.trim().to_string(),
                 reasoning.trim().to_string(),
@@ -785,24 +778,6 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         snapshot_content,
         snapshot_reasoning,
     );
-    validate_stream_output(label, policy, &stream_output).map_err(|err| {
-        if !tool_draft_tracker
-            .as_ref()
-            .is_some_and(|tracker| tracker.has_unfinished_drafts())
-        {
-            host.emit_stream_done(conversation_id, run_id, message_id, "error", "");
-        }
-        ModelError::new(err)
-    })?;
-    if should_emit_done(policy, &stream_output) {
-        sink.flush_pending_text();
-        host.emit_stream_done(
-            conversation_id,
-            run_id,
-            message_id,
-            "done",
-            &stream_output.content,
-        );
-    }
+    validate_stream_output(label, policy, &stream_output).map_err(ModelError::new)?;
     Ok(stream_output)
 }

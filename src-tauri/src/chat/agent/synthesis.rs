@@ -236,13 +236,6 @@ pub(crate) async fn synthesis_step(
                 "Chat API",
             ) => result,
             _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
-                host.emit_stream_done(
-                    &config.conversation_id,
-                    &config.run_id,
-                    &config.message_id,
-                    "cancelled",
-                    "",
-                );
                 return Err("cancelled".to_string());
             }
         };
@@ -315,13 +308,6 @@ pub(crate) async fn synthesis_step(
                 .emit_and_record(&mut state.generated_api_messages);
             (fallback, reasoning, response_reasoning)
         } else if response.trim().is_empty() {
-            host.emit_stream_done(
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                "error",
-                "",
-            );
             return Err(empty_assistant_response_error("Chat API"));
         } else {
             host.emit_stream_delta(
@@ -331,13 +317,6 @@ pub(crate) async fn synthesis_step(
                 &response,
                 None,
                 Some(&response_segment),
-            );
-            host.emit_stream_done(
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                "done",
-                &response,
             );
             if !state.generated_api_messages.is_empty() {
                 state.generated_api_messages.push(message);

@@ -6,7 +6,6 @@ use crate::chat::types::{
 };
 use crate::settings::Settings;
 use crate::state::AppState;
-use tauri::AppHandle;
 
 use super::loop_::{LoopEnv, RunState};
 use super::planning::call_chat_completion_message_streamed;
@@ -1571,29 +1570,17 @@ pub(crate) fn accumulate_source_ids(conversation: &Conversation, until_id: &str)
 ///
 /// `trigger`: `"manual"` | `"auto"`。`focus`：手动 `/compact <focus>` 聚焦指令（自动为 None）。
 /// 失败 / 无可摘要旧段 / 摘要质量不达标 → `Err`，**不覆盖**旧 summary。
-///
-/// 事件配对保证：入口发 `started`，任何 `Err` 出口发 `failed`，成功出口发 `completed`
-/// （由 `compact_conversation_inner` 发）。前端靠终止事件把"压缩中"状态归位——
-/// 缺失终止事件会让 UI 永久卡在压缩中。
 pub(crate) async fn compact_conversation(
-    app: &AppHandle,
     state: &AppState,
     settings: &Settings,
     conversation: &mut Conversation,
     trigger: &str,
     focus: Option<&str>,
 ) -> Result<(), String> {
-    emit_compaction_event(app, &conversation.id, "started", Some(trigger), None);
-    let result =
-        compact_conversation_inner(app, state, settings, conversation, trigger, focus).await;
-    if result.is_err() {
-        emit_compaction_event(app, &conversation.id, "failed", Some(trigger), None);
-    }
-    result
+    compact_conversation_inner(state, settings, conversation, trigger, focus).await
 }
 
 async fn compact_conversation_inner(
-    app: &AppHandle,
     state: &AppState,
     settings: &Settings,
     conversation: &mut Conversation,
@@ -1740,31 +1727,12 @@ async fn compact_conversation_inner(
     conversation
         .context_state
         .compaction_boundaries
-        .push(boundary_record.clone());
+        .push(boundary_record);
     // R-4：多次链式压缩后提示准确性下降；未达阈值则清空告警（清掉上一轮"压缩失败但已发送"等旧警告）。
     conversation.context_state.warning =
         decay_warning_for(conversation.context_state.compression_count);
 
-    emit_compaction_event(
-        app,
-        &conversation.id,
-        "completed",
-        Some(trigger),
-        Some(&boundary_record),
-    );
     Ok(())
-}
-
-/// 发协议压缩更新（与 commands/context.rs 的 `emit_chat_compaction_state` 同 payload）。
-fn emit_compaction_event(
-    _app: &AppHandle,
-    _conversation_id: &str,
-    _phase: &str,
-    _trigger: Option<&str>,
-    _boundary: Option<&CompactionBoundaryRecord>,
-) {
-    // Run-scoped compaction progress is emitted by ChatAgentHost. Manual
-    // compaction is represented by the persisted conversation context event.
 }
 
 /// 由当前会话解析出主模型（供 compression/title 等 auxiliary 任务在 mixer 选 auto 时跟随）。

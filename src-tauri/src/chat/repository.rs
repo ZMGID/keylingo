@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::{
     AgentPlanState, AgentRuntimeConfig, AgentTodoState, ChatAssistantSnapshot, ChatMessage,
-    Conversation, ConversationContextState, ConversationIndex, ConversationListItem, ModelRef,
+    Conversation, ConversationContextState, ConversationListItem, ModelRef,
     WebSearchMode,
 };
 
@@ -218,7 +218,7 @@ impl ConversationRepository {
         super::storage::load_conversation(app, id).map_err(Into::into)
     }
 
-    /// 以下四个纯读操作只拿共享 barrier，且**不拿 `index_lock`**。
+    /// 以下三个纯读操作只拿共享 barrier，且**不拿 `index_lock`**。
     ///
     /// `index_lock` 存在的意义是串行化 index.json 的 read-modify-write（`persist_locked` /
     /// `bulk_mutate_loaded` / `delete_conversation`）；纯读方不改任何东西，而 `atomic_write`
@@ -228,11 +228,6 @@ impl ConversationRepository {
     ///
     /// 共享 barrier 依然挡住 `bulk_mutate_loaded`（它拿独占），所以"批量迁移期间读到半套数据"
     /// 这条不变式没变。加锁顺序仍是 barrier → conversation → index，没有新的环。
-    pub async fn list_index(&self, app: &AppHandle) -> RepositoryResult<ConversationIndex> {
-        let _barrier = self.barrier.read().await;
-        super::storage::load_index_or_scan(app).map_err(Into::into)
-    }
-
     pub async fn list(
         &self,
         app: &AppHandle,

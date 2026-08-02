@@ -87,13 +87,6 @@ pub(crate) async fn run_tool_round(
         .extend(round_result.response_messages.iter().cloned());
     state.tool_records.extend(round_result.tool_records);
     if round_cancelled {
-        host.emit_stream_done(
-            &config.conversation_id,
-            &config.run_id,
-            &config.message_id,
-            "cancelled",
-            "",
-        );
         return ToolRoundOutcome::Cancelled(cancelled_tool_round_run_result(
             &config.language,
             &state.planning_reasoning_parts,

@@ -28,7 +28,6 @@ struct RecordedDelta {
 struct TestHost {
     records: Mutex<Vec<ToolCallRecord>>,
     deltas: Mutex<Vec<RecordedDelta>>,
-    dones: Mutex<Vec<(String, String)>>,
     /// Per-call snapshot sizes from `persist_partial_assistant`:
     /// `(message_id, tool_records_len, segments_len, api_messages_len)`.
     persists: Mutex<Vec<(String, usize, usize, usize)>>,
@@ -80,13 +79,6 @@ impl TestHost {
             .clone()
     }
 
-    fn recorded_dones(&self) -> Vec<(String, String)> {
-        self.dones
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
-    }
-
     fn recorded_tool_records(&self) -> Vec<ToolCallRecord> {
         self.records
             .lock()
@@ -130,20 +122,6 @@ impl AgentHost for TestHost {
                 reasoning_delta: reasoning_delta.map(str::to_string),
                 segment: segment.cloned(),
             });
-    }
-
-    fn emit_stream_done(
-        &self,
-        _conversation_id: &str,
-        _run_id: &str,
-        _message_id: &str,
-        reason: &str,
-        full: &str,
-    ) {
-        self.dones
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .push((reason.to_string(), full.to_string()));
     }
 
     fn emit_tool_record(
@@ -1474,15 +1452,11 @@ fn tool_planning_failed_run_result_marks_drafts_error_and_emits_fallback() {
     assert_eq!(fallback_segment.round, None);
     assert_eq!(fallback_segment.text.as_deref(), Some(fallback.as_str()));
 
-    // Fallback delta + a single "done" done event.
+    // Fallback delta.
     assert!(host
         .recorded_deltas()
         .iter()
         .any(|delta| delta.delta == fallback));
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), fallback.clone())]
-    );
 
     // The final assistant message is pushed unconditionally here.
     assert_eq!(result.api_messages.len(), 1);
@@ -1527,10 +1501,6 @@ async fn run_loop_stream_planning_interrupt_after_tool_draft_returns_error_resul
     assert!(
         executor.events().is_empty(),
         "interrupted tool drafts must never execute"
-    );
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), fallback.clone())]
     );
     assert_eq!(result.api_messages.len(), 1);
     assert_eq!(
@@ -1583,12 +1553,6 @@ async fn run_loop_stream_synthesis_failure_preserves_tool_records_with_fallback(
         Some(recovered.as_str())
     );
 
-    // Planning never emits done while tool calls are pending; the only done is
-    // the recovered "done".
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
     let fallback_delta = host
         .recorded_deltas()
         .into_iter()
@@ -1637,10 +1601,6 @@ async fn run_loop_stream_synthesis_cancelled_returns_cancelled_with_stopped_cont
         ToolCallStatus::Success
     ));
 
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(dones[0].0, "cancelled");
-
     assert_eq!(
         result
             .api_messages
@@ -1677,9 +1637,6 @@ async fn run_loop_stream_synthesis_cancelled_keeps_partial_content() {
     assert_eq!(result.stream_outcome, "cancelled");
     assert_eq!(result.content, "部分回答");
     assert_eq!(result.tool_records.len(), 1);
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1);
-    assert_eq!(dones[0], ("cancelled".to_string(), "部分回答".to_string()));
     assert_eq!(
         result
             .api_messages
@@ -1730,11 +1687,6 @@ async fn run_loop_planning_top_cancelled_preserves_gathered_tool_records() {
         vec!["start:read".to_string(), "finish:read".to_string()]
     );
 
-    // Exactly one done("cancelled") event for the frontend freeze logic.
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(dones[0].0, "cancelled");
-
     // The turn is persistable: the stopped-generation placeholder is appended
     // as a synthesis api message + segment alongside the preserved records.
     assert!(result.segments.iter().any(|segment| {
@@ -1766,16 +1718,6 @@ async fn run_loop_stream_planning_cancelled_keeps_partial_text() {
     assert!(
         executor.events().is_empty(),
         "no tools may execute in a cancelled plain-text turn"
-    );
-
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(
-        dones[0],
-        (
-            "cancelled".to_string(),
-            "这是已经生成的部分回答内容".to_string()
-        )
     );
 
     assert!(result.segments.iter().any(|segment| {
@@ -1826,8 +1768,7 @@ async fn run_loop_stream_planning_cancelled_orders_reasoning_before_text() {
 /// or tool draft was generated must now end with Ok(cancelled_result) carrying
 /// the stopped-generation placeholder — not a bare Err("cancelled") that
 /// skipped persistence. With no prior rounds there are no tool records to
-/// preserve, but the turn is still persistable (one done("cancelled") event,
-/// already emitted by the stream layer, and no duplicate).
+/// preserve, but the turn is still persistable.
 #[tokio::test]
 async fn run_loop_stream_planning_cancelled_with_no_text_returns_cancelled() {
     let server = MockModelServer::start(vec![MockResponse::SseThenHang(Vec::new())]);
@@ -1843,9 +1784,6 @@ async fn run_loop_stream_planning_cancelled_with_no_text_returns_cancelled() {
     assert_eq!(result.stream_outcome, "cancelled");
     assert_eq!(result.content, stopped_generation_content("zh-CN"));
     assert!(result.tool_records.is_empty());
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event (no duplicate)");
-    assert_eq!(dones[0], ("cancelled".to_string(), String::new()));
 }
 
 /// Bug fix regression: when no tools are configured, the plain synthesis path
@@ -1868,10 +1806,6 @@ async fn run_loop_stream_plain_synthesis_cancelled_keeps_partial_text() {
     assert_eq!(result.stream_outcome, "cancelled");
     assert_eq!(result.content, "部分回答");
     assert!(result.tool_records.is_empty());
-
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(dones[0], ("cancelled".to_string(), "部分回答".to_string()));
 
     assert!(result.segments.iter().any(|segment| {
         segment.kind == ChatMessageSegmentKind::Text
@@ -2495,11 +2429,6 @@ async fn run_loop_compaction_thrash_degrades_with_gathered_results() {
         3,
         "anti-thrashing must bound model calls (summary + planning + summary), no repeat-fail loop"
     );
-    // A single done event with the degraded content (turn ended cleanly).
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), result.content.clone())]
-    );
 }
 
 /// Under-budget runs must not be touched by compaction: the request body
@@ -2564,10 +2493,6 @@ async fn run_loop_stream_synthesis_empty_output_uses_fallback_and_completes() {
         result.tool_records[0].status,
         ToolCallStatus::Success
     ));
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
 
     assert!(result.segments.iter().any(|segment| {
         segment.kind == ChatMessageSegmentKind::Text
@@ -2618,10 +2543,6 @@ async fn run_loop_nonstream_synthesis_failure_preserves_tool_records_with_fallba
         .recorded_deltas()
         .iter()
         .any(|delta| delta.delta == recovered));
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
     assert_eq!(
         result
             .api_messages
@@ -2678,10 +2599,6 @@ async fn run_loop_overflow_recovery_compacts_and_retries_success() {
     ));
     // The model was called exactly 3 times: planning, failed synthesis, retry.
     assert_eq!(server.captured_bodies().len(), 3);
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), "summary after compaction".to_string())]
-    );
 }
 
 /// Overflow recovery (single-attempt guard): both the synthesis call and the
@@ -2725,10 +2642,6 @@ async fn run_loop_overflow_recovery_retries_once_then_degrades() {
     // Single-attempt guard: planning + failed synthesis + ONE retry = 3 calls,
     // not an unbounded compact→retry loop.
     assert_eq!(server.captured_bodies().len(), 3);
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
 }
 
 /// Fallback F: non-streamed synthesis returns empty content after tool results;
@@ -2769,10 +2682,6 @@ async fn run_loop_nonstream_synthesis_empty_output_uses_fallback() {
     assert_eq!(result.content, recovered);
     assert_eq!(result.reasoning.as_deref(), Some("synthesis reasoning"));
     assert_eq!(result.tool_records.len(), 1);
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
 
     let final_message = result.api_messages.last().expect("final api message");
     assert_eq!(
@@ -3045,18 +2954,6 @@ impl AgentHost for HookedHost {
             reasoning_delta,
             segment,
         );
-    }
-
-    fn emit_stream_done(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-        message_id: &str,
-        reason: &str,
-        full: &str,
-    ) {
-        self.inner
-            .emit_stream_done(conversation_id, run_id, message_id, reason, full);
     }
 
     fn emit_tool_record(

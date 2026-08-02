@@ -106,7 +106,7 @@ pub(crate) async fn chat_compress_context(
             "conversation": conversation,
         }));
     }
-    compress_conversation_context(&app, &state, &mut conversation, "manual").await?;
+    compress_conversation_context(&state, &mut conversation, "manual").await?;
     let context_state = compute_context_state(&app, &state, &conversation, None, &[]).await?;
     conversation.context_state = context_state.clone();
     conversation = crate::chat::repository::repository(&app)
@@ -880,7 +880,7 @@ pub(super) async fn try_auto_compress_context_after_update(
     if !should_auto_compress_context(&conversation.context_state, conversation) {
         return;
     }
-    match compress_conversation_context(app, state, conversation, "auto").await {
+    match compress_conversation_context(state, conversation, "auto").await {
         Ok(()) => {
             match compute_context_state(
                 app,
@@ -911,14 +911,12 @@ pub(super) async fn try_auto_compress_context_after_update(
 }
 
 pub(super) async fn compress_conversation_context(
-    app: &AppHandle,
     state: &State<'_, AppState>,
     conversation: &mut Conversation,
     trigger: &str,
 ) -> Result<(), String> {
     let settings = state.settings_read().clone();
     crate::chat::agent::compaction::compact_conversation(
-        app,
         state.inner(),
         &settings,
         conversation,

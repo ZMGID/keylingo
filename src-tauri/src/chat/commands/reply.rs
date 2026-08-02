@@ -30,7 +30,7 @@ use super::catalog::{
 use super::context::{build_chat_api_messages, resolve_usage_anchor};
 use super::direct_image::complete_direct_image_generation_reply;
 use super::interaction::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, wait_for_chat_cancel,
+    emit_chat_stream_delta, emit_chat_tool_record, wait_for_chat_cancel,
 };
 use super::messages::{
     auxiliary_tool_segments, build_assistant_message, capture_agent_plan_draft_if_needed,
@@ -246,20 +246,12 @@ pub(super) async fn complete_assistant_reply_inner(
         let started = Instant::now();
         emit_chat_stream_delta(
             app,
-            &conversation.id,
             &run_id,
-            &assistant_message_id,
             "",
             None,
             Some(&tool_segment_for_record(&record, 100, None)),
         );
-        emit_chat_tool_record(
-            app,
-            &conversation.id,
-            &run_id,
-            &assistant_message_id,
-            &record,
-        );
+        emit_chat_tool_record(app, &run_id, &record);
         let analysis = tokio::select! {
             result = analyze_chat_images_with_auxiliary_model(
                 state,
@@ -280,16 +272,8 @@ pub(super) async fn complete_assistant_reply_inner(
                     None,
                     Some("Mixer vision analysis cancelled".to_string()),
                 );
-                emit_chat_tool_record(app, &conversation.id, &run_id, &assistant_message_id, &record);
+                emit_chat_tool_record(app, &run_id, &record);
                 auxiliary_tool_records.push(record);
-                emit_chat_stream_done(
-                    app,
-                    &conversation.id,
-                    &run_id,
-                    &assistant_message_id,
-                    "cancelled",
-                    "",
-                );
                 if arm.is_some() {
                     protocol_guard.defer_terminal();
                     return Ok(ArmReplyOutcome {
@@ -317,13 +301,7 @@ pub(super) async fn complete_assistant_reply_inner(
                     Some(truncate_chars(result.content.trim(), 1000)),
                     None,
                 );
-                emit_chat_tool_record(
-                    app,
-                    &conversation.id,
-                    &run_id,
-                    &assistant_message_id,
-                    &record,
-                );
+                emit_chat_tool_record(app, &run_id, &record);
                 auxiliary_tool_records.push(record);
                 Some(result)
             }
@@ -335,13 +313,7 @@ pub(super) async fn complete_assistant_reply_inner(
                     None,
                     Some(err.clone()),
                 );
-                emit_chat_tool_record(
-                    app,
-                    &conversation.id,
-                    &run_id,
-                    &assistant_message_id,
-                    &record,
-                );
+                emit_chat_tool_record(app, &run_id, &record);
                 auxiliary_tool_records.push(record);
                 if arm.is_some() {
                     protocol_guard.defer_terminal();

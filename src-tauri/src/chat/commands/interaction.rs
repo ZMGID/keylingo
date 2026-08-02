@@ -436,7 +436,7 @@ pub(crate) async fn request_tool_approval(
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
             drop(pending);
-            withdraw_tool_confirm(app, conversation_id, &record.id);
+            withdraw_tool_confirm(app, &record.id);
             return false;
         }
     };
@@ -452,14 +452,14 @@ pub(crate) async fn request_tool_approval(
             // 超时/通道断开 ⇒ 这条已经按拒绝处理了。必须把卡片撤掉，否则用户回来点
             // 「允许」是个静默空操作（`chat_confirm_tool_call` 找不到条目就直接 Ok），
             // 他会以为自己批准了，而工具早就被拒了。
-            withdraw_tool_confirm(app, conversation_id, &record.id);
+            withdraw_tool_confirm(app, &record.id);
             false
         }
     }
 }
 
 /// 通知前端撤掉某条审批卡（已超时 / 已取消 / 询问方已经不在了，答复不再有意义）。
-pub(crate) fn withdraw_tool_confirm(app: &AppHandle, _conversation_id: &str, tool_call_id: &str) {
+pub(crate) fn withdraw_tool_confirm(app: &AppHandle, tool_call_id: &str) {
     crate::chat::protocol::withdraw_tool_approval(app, tool_call_id);
 }
 
@@ -551,13 +551,7 @@ pub(super) async fn wait_for_chat_cancel(state: &AppState, conversation_id: &str
     }
 }
 
-pub(crate) fn emit_chat_tool_record(
-    app: &AppHandle,
-    _conversation_id: &str,
-    run_id: &str,
-    _message_id: &str,
-    record: &ToolCallRecord,
-) {
+pub(crate) fn emit_chat_tool_record(app: &AppHandle, run_id: &str, record: &ToolCallRecord) {
     crate::chat::protocol::emit_run_event(
         app,
         run_id,
@@ -588,9 +582,7 @@ pub(super) fn stream_delta_event_kinds(
 
 pub(crate) fn emit_chat_stream_delta(
     app: &AppHandle,
-    _conversation_id: &str,
     run_id: &str,
-    _message_id: &str,
     delta: &str,
     reasoning_delta: Option<&str>,
     segment: Option<&ChatMessageSegment>,
@@ -618,17 +610,6 @@ pub(crate) fn emit_chat_stream_delta(
             },
         );
     }
-}
-
-pub(crate) fn emit_chat_stream_done(
-    _app: &AppHandle,
-    _conversation_id: &str,
-    _run_id: &str,
-    _message_id: &str,
-    _reason: &str,
-    _full: &str,
-) {
-    // Terminal protocol events are emitted by the command boundary after persistence.
 }
 
 /// 审批卡要展示的两样东西：`target` 是这次操作的对象（文件路径 / 命令），用来在前端拼

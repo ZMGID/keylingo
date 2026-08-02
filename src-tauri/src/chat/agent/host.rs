@@ -19,15 +19,6 @@ pub trait AgentHost: Send + Sync {
         segment: Option<&ChatMessageSegment>,
     );
 
-    fn emit_stream_done(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-        message_id: &str,
-        reason: &str,
-        full: &str,
-    );
-
     fn emit_tool_record(
         &self,
         conversation_id: &str,

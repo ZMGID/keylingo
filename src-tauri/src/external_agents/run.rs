@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::chat::agent::AgentRunEntry;
 use crate::chat::commands::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, push_assistant_message,
+    emit_chat_stream_delta, emit_chat_tool_record, push_assistant_message,
 };
 use crate::chat::memory::l1_prompt_block;
 use crate::chat::model::ModelUsage;
@@ -412,7 +412,6 @@ pub async fn run_external_cli_reply(
             app,
             &conversation_id,
             &run_id,
-            &assistant_message_id,
             &compaction_anchor_id,
             &mut content,
             &mut reasoning,
@@ -629,15 +628,6 @@ pub async fn run_external_cli_reply(
             );
         }
     }
-
-    emit_chat_stream_done(
-        app,
-        &conversation_id,
-        &run_id,
-        &assistant_message_id,
-        &stream_outcome,
-        &content,
-    );
 
     persist_delivered_session(
         app,
@@ -1548,11 +1538,7 @@ impl ApprovalHost<'_> {
             }
         }
         for id in tool_call_ids {
-            crate::chat::commands::interaction::withdraw_tool_confirm(
-                self.app,
-                self.conversation_id,
-                id,
-            );
+            crate::chat::commands::interaction::withdraw_tool_confirm(self.app, id);
         }
     }
 }
@@ -1928,9 +1914,9 @@ fn push_tool_segment(
 
 /// 构造一条 CLI 自压的边界记录，并发协议压缩更新通知前端插分隔线。
 ///
-/// payload 与内置路径（`chat/agent/compaction.rs::emit_compaction_event` /
-/// `chat/commands/context.rs::emit_chat_compaction_state`）同形，且**直接复用
-/// `CompactionBoundaryRecord`** 而不是手写一份 json——两份形状迟早分叉（spec 第 2 条）。
+/// payload 与内置路径（`chat/commands/context.rs::emit_chat_compaction_state`）同形，
+/// 且**直接复用 `CompactionBoundaryRecord`** 而不是手写一份 json——两份形状迟早分叉
+/// （spec 第 2 条）。
 ///
 /// 返回记录供调用方落盘：live 事件与持久化必须是**同一条记录**（同一个 id），
 /// 否则刷新后会出现两条分隔线。
@@ -1939,7 +1925,6 @@ fn push_tool_segment(
 /// 缺失时为 0，前端此时不显示「→ N」。
 fn emit_cli_compaction(
     app: &AppHandle,
-    _conversation_id: &str,
     run_id: &str,
     anchor_message_id: &str,
     trigger: &str,
@@ -2078,7 +2063,6 @@ fn apply_unified_event(
     app: &AppHandle,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     compaction_anchor_id: &str,
     content: &mut String,
     reasoning: &mut String,
@@ -2105,15 +2089,7 @@ fn apply_unified_event(
                 tool_calls.len(),
                 &delta,
             );
-            emit_chat_stream_delta(
-                app,
-                conversation_id,
-                run_id,
-                message_id,
-                &delta,
-                None,
-                Some(&segment),
-            );
+            emit_chat_stream_delta(app, run_id, &delta, None, Some(&segment));
         }
         UnifiedAgentEvent::ThinkingDelta { delta } => {
             reasoning.push_str(&delta);
@@ -2124,29 +2100,13 @@ fn apply_unified_event(
                 tool_calls.len(),
                 &delta,
             );
-            emit_chat_stream_delta(
-                app,
-                conversation_id,
-                run_id,
-                message_id,
-                "",
-                Some(&delta),
-                Some(&segment),
-            );
+            emit_chat_stream_delta(app, run_id, "", Some(&delta), Some(&segment));
         }
         UnifiedAgentEvent::ToolUse { id, name, input } => {
             segment_tracker.reset_text();
             segment_tracker.reset_reasoning();
             let segment = push_tool_segment(segments, segment_order, &id);
-            emit_chat_stream_delta(
-                app,
-                conversation_id,
-                run_id,
-                message_id,
-                "",
-                None,
-                Some(&segment),
-            );
+            emit_chat_stream_delta(app, run_id, "", None, Some(&segment));
             let record = ToolCallRecord {
                 id: id.clone(),
                 name: name.clone(),
@@ -2168,7 +2128,7 @@ fn apply_unified_event(
             };
             tool_map.insert(id.clone(), tool_calls.len());
             tool_calls.push(record.clone());
-            emit_chat_tool_record(app, conversation_id, run_id, message_id, &record);
+            emit_chat_tool_record(app, run_id, &record);
         }
         UnifiedAgentEvent::ToolResult {
             tool_use_id,
@@ -2184,7 +2144,7 @@ fn apply_unified_event(
                     };
                     record.result_preview = Some(truncate_for_preview(&result_content, 800));
                     record.completed_at = Some(now);
-                    emit_chat_tool_record(app, conversation_id, run_id, message_id, record);
+                    emit_chat_tool_record(app, run_id, record);
                 }
             }
         }
@@ -2255,7 +2215,6 @@ fn apply_unified_event(
             }
             cli_compactions.push(emit_cli_compaction(
                 app,
-                conversation_id,
                 run_id,
                 compaction_anchor_id,
                 &trigger,
