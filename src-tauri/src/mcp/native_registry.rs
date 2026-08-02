@@ -83,9 +83,7 @@ pub enum NativeToolCall {
     /// resolution because it only needs the conversation id, matching the
     /// legacy `RegistryToolExecutor` special case which never resolved a
     /// workspace for todo tools.
-    Conversation(
-        for<'a> fn(&'a AppHandle, &'a str, &'a str, Value) -> NativeToolFuture<'a>,
-    ),
+    Conversation(for<'a> fn(&'a AppHandle, &'a str, &'a str, Value) -> NativeToolFuture<'a>),
     /// Host-mediated tool (ask_user): intercepted in
     /// `chat/agent/execute.rs::execute_ask_user_call` and must never reach
     /// the registry dispatcher.

@@ -37,11 +37,10 @@ pub struct PendingPythonRun {
     pub export_ctx: SandboxExportContext,
 }
 
+/// 一条挂起的会话级授权。run_id 用来在应答/取消/超时时撤掉快照里的授权卡。
 #[derive(Debug)]
 pub struct PendingSessionConsent {
-    pub conversation_id: String,
     pub run_id: String,
-    pub message_id: String,
     pub sender: oneshot::Sender<bool>,
 }
 
@@ -50,8 +49,6 @@ pub struct PendingSessionConsent {
 #[derive(Debug)]
 pub struct PendingToolApproval {
     pub conversation_id: String,
-    pub run_id: String,
-    pub message_id: String,
     pub tool_name: String,
     pub sender: oneshot::Sender<bool>,
 }

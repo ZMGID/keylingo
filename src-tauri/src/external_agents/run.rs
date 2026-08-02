@@ -439,7 +439,6 @@ pub async fn run_external_cli_reply(
         state,
         conversation_id: &conversation_id,
         run_id: &run_id,
-        message_id: &assistant_message_id,
         generation: run_generation,
     });
 
@@ -1437,7 +1436,6 @@ struct ApprovalHost<'a> {
     state: &'a AppState,
     conversation_id: &'a str,
     run_id: &'a str,
-    message_id: &'a str,
     generation: u64,
 }
 
@@ -1484,7 +1482,6 @@ impl ApprovalHost<'_> {
                     self.state,
                     self.conversation_id,
                     self.run_id,
-                    self.message_id,
                     self.generation,
                     &record,
                     prompt,
@@ -1505,7 +1502,6 @@ impl ApprovalHost<'_> {
             self.state,
             self.conversation_id,
             self.run_id,
-            self.message_id,
             self.generation,
             &record,
         )

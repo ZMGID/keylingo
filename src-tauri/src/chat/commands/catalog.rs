@@ -9,9 +9,8 @@ use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::attachments::{save_message_attachments, title_source_for_user_message};
 use crate::chat::storage::{
     archive_assistant, assistant_snapshot, create_assistant, create_set, delete_project,
-    delete_set, duplicate_assistant, find_project_by_id, find_project_by_name,
-    find_set_by_id, get_assistants, get_projects, get_sets, update_assistant, update_project,
-    update_set,
+    delete_set, duplicate_assistant, find_project_by_id, find_project_by_name, find_set_by_id,
+    get_assistants, get_projects, get_sets, update_assistant, update_project, update_set,
 };
 use crate::chat::{
     AgentPlanState, AgentTodoState, Attachment, ChatAssistant, ChatMessage, Conversation,
@@ -281,10 +280,7 @@ pub(crate) async fn create_chat_conversation_internal(
         .map(|assistant| assistant.id.clone());
 
     let conversation = {
-        let _create_guard = state
-            .chat_create_conversation_lock
-            .lock()
-            .await;
+        let _create_guard = state.chat_create_conversation_lock.lock().await;
         if let Some(conversation) = crate::chat::repository::repository(app)
             .find_reusable_blank(
                 app,
@@ -432,11 +428,16 @@ pub(crate) async fn chat_import_external_conversation(
     let imported_title = conversation.title.clone();
     let imported_messages = conversation.messages.clone();
     conversation = crate::chat::repository::repository(&app)
-        .mutate_expected(&app, &conversation.id, Some(conversation.revision), |latest| {
-            latest.title = imported_title;
-            latest.messages = imported_messages;
-            Ok(())
-        })
+        .mutate_expected(
+            &app,
+            &conversation.id,
+            Some(conversation.revision),
+            |latest| {
+                latest.title = imported_title;
+                latest.messages = imported_messages;
+                Ok(())
+            },
+        )
         .await
         .map_err(crate::chat::repository::repository_error)?;
 

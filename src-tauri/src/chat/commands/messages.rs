@@ -265,7 +265,8 @@ pub(crate) async fn push_assistant_message(
     // 用户手动重命名过的标题不会等于启发式结果，所以据此判断不会覆盖用户的命名。
     let title_looks_auto = conversation.title == "新对话"
         || title_from_first_user.is_some_and(|first| conversation.title == generate_title(first));
-    let is_external = conversation.agent_runtime.kind == crate::chat::types::AgentRuntimeKind::External;
+    let is_external =
+        conversation.agent_runtime.kind == crate::chat::types::AgentRuntimeKind::External;
 
     // 外部 CLI 对话优先用 CLI 自己生成的标题：那是用户在 CLI 里看到的那个，而且不花模型调用。
     //
@@ -363,9 +364,9 @@ pub(crate) async fn push_assistant_message(
                         );
                         break;
                     }
-                    Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
-                        if attempt == 0 =>
-                    {
+                    Err(crate::chat::repository::ConversationRepositoryError::Conflict {
+                        ..
+                    }) if attempt == 0 => {
                         persisted = crate::chat::repository::repository(app)
                             .get(app, &conversation_id)
                             .await

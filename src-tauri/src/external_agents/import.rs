@@ -49,7 +49,11 @@ pub fn canonical_key(path: &str) -> String {
     let text = text.replace('\\', "/");
     let trimmed = text.trim_end_matches('/');
     // 盘符根（`C:`）trim 后为空是正常的，保留原串避免退化成空键。
-    let key = if trimmed.is_empty() { text.as_str() } else { trimmed };
+    let key = if trimmed.is_empty() {
+        text.as_str()
+    } else {
+        trimmed
+    };
     if cfg!(windows) {
         key.to_lowercase()
     } else {
@@ -108,7 +112,10 @@ fn claude_session_identity(path: &Path) -> Option<(String, String)> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let cwd = value.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
+        let cwd = value
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let session_id = value
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -428,9 +435,7 @@ fn codex_session_detail(path: &Path) -> (usize, Option<String>) {
         };
         let payload = value.get("payload");
         let outer = value.get("type").and_then(|v| v.as_str());
-        let inner = payload
-            .and_then(|p| p.get("type"))
-            .and_then(|v| v.as_str());
+        let inner = payload.and_then(|p| p.get("type")).and_then(|v| v.as_str());
 
         match (outer, inner) {
             (Some("event_msg"), Some("user_message")) => {
@@ -573,8 +578,7 @@ pub async fn list_acp_sessions(
     let args = (def.build_args)(&ctx, &opts, None);
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let summaries =
-        probe_acp_sessions(&resolved, &args_ref, Path::new(project_root), 25).await?;
+    let summaries = probe_acp_sessions(&resolved, &args_ref, Path::new(project_root), 25).await?;
 
     Some(
         summaries
@@ -677,7 +681,11 @@ pub fn bound_sessions(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -1264,7 +1272,10 @@ mod tests {
         for s in sessions.iter().take(5) {
             println!(
                 "  {}  {} 条  {:?}  cwd={}",
-                s.session_id, s.message_count.unwrap_or(0), s.title, s.cwd
+                s.session_id,
+                s.message_count.unwrap_or(0),
+                s.title,
+                s.cwd
             );
         }
         assert!(
@@ -1347,9 +1358,15 @@ mod tests {
     #[test]
     fn parse_rfc3339_ms_matches_known_epochs() {
         assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_rfc3339_ms("2026-07-30T15:31:07.007792600Z"), Some(1785425467000));
+        assert_eq!(
+            parse_rfc3339_ms("2026-07-30T15:31:07.007792600Z"),
+            Some(1785425467000)
+        );
         // 闰年 2 月末，跨月边界。
-        assert_eq!(parse_rfc3339_ms("2024-02-29T00:00:00Z"), Some(1709164800000));
+        assert_eq!(
+            parse_rfc3339_ms("2024-02-29T00:00:00Z"),
+            Some(1709164800000)
+        );
         assert_eq!(parse_rfc3339_ms("短"), None);
     }
 
@@ -1420,9 +1437,18 @@ mod tests {
         for s in &sessions {
             *by_agent.entry(s.agent_id.clone()).or_insert(0usize) += 1;
         }
-        println!("项目根 {root} 共 {} 条，按 CLI：{by_agent:?}", sessions.len());
+        println!(
+            "项目根 {root} 共 {} 条，按 CLI：{by_agent:?}",
+            sessions.len()
+        );
         for s in sessions.iter().take(8) {
-            println!("  [{}] {} {} 条 {:?}", s.agent_id, s.session_id, s.message_count.unwrap_or(0), s.title);
+            println!(
+                "  [{}] {} {} 条 {:?}",
+                s.agent_id,
+                s.session_id,
+                s.message_count.unwrap_or(0),
+                s.title
+            );
         }
         assert!(sessions.iter().all(|s| paths_match(&s.cwd, &root)));
     }

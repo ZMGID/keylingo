@@ -73,7 +73,12 @@ impl Pending {
             && self.images.is_empty()
     }
 
-    fn push_segment(&mut self, kind: ChatMessageSegmentKind, text: Option<String>, tool: Option<String>) {
+    fn push_segment(
+        &mut self,
+        kind: ChatMessageSegmentKind,
+        text: Option<String>,
+        tool: Option<String>,
+    ) {
         let order = self.order;
         self.order += 1;
         self.segments.push(ChatMessageSegment {
@@ -92,7 +97,8 @@ impl Pending {
         if self.is_empty() {
             return None;
         }
-        let reasoning = (!self.reasoning.trim().is_empty()).then(|| self.reasoning.trim().to_string());
+        let reasoning =
+            (!self.reasoning.trim().is_empty()).then(|| self.reasoning.trim().to_string());
         Some(ImportedMessage {
             message: ChatMessage {
                 id: Uuid::new_v4().to_string(),
@@ -153,7 +159,10 @@ pub fn parse_claude_history(raw: &str) -> Vec<ImportedMessage> {
             .and_then(Value::as_str)
             .and_then(crate::external_agents::import::parse_rfc3339_ms)
             .unwrap_or(0);
-        let entry_type = entry.get("type").and_then(Value::as_str).unwrap_or_default();
+        let entry_type = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if entry_type != "user" && entry_type != "assistant" {
             continue; // queue-operation / mode / ai-title / file-history-snapshot 等内部账务。
         }
@@ -179,7 +188,11 @@ pub fn parse_claude_history(raw: &str) -> Vec<ImportedMessage> {
                 pending.text.push('\n');
             }
             pending.text.push_str(text.trim());
-            pending.push_segment(ChatMessageSegmentKind::Text, Some(text.trim().to_string()), None);
+            pending.push_segment(
+                ChatMessageSegmentKind::Text,
+                Some(text.trim().to_string()),
+                None,
+            );
             continue;
         }
 
@@ -232,7 +245,10 @@ pub fn parse_claude_history(raw: &str) -> Vec<ImportedMessage> {
 fn apply_user_block(block: &Value, pending: &mut Pending, out: &mut [ImportedMessage]) {
     match block.get("type").and_then(Value::as_str) {
         Some("text") => {
-            let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+            let text = block
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if !text.trim().is_empty() {
                 if !pending.text.is_empty() {
                     pending.text.push('\n');
@@ -258,11 +274,11 @@ fn apply_user_block(block: &Value, pending: &mut Pending, out: &mut [ImportedMes
             let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
             // 结果要回填到**已经收尾**的那条 assistant 消息上——tool_result 总是晚于发起它的
             // assistant 记录到达，此时那条消息多半已经被 flush 进 out 了。
-            for record in pending
-                .tool_calls
-                .iter_mut()
-                .chain(out.iter_mut().rev().flat_map(|m| m.message.tool_calls.iter_mut()))
-            {
+            for record in pending.tool_calls.iter_mut().chain(
+                out.iter_mut()
+                    .rev()
+                    .flat_map(|m| m.message.tool_calls.iter_mut()),
+            ) {
                 if record.id == tool_use_id {
                     record.status = if is_error {
                         ToolCallStatus::Error
@@ -285,7 +301,10 @@ fn apply_user_block(block: &Value, pending: &mut Pending, out: &mut [ImportedMes
 fn apply_assistant_block(block: &Value, pending: &mut Pending) {
     match block.get("type").and_then(Value::as_str) {
         Some("text") => {
-            let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+            let text = block
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if !text.trim().is_empty() {
                 if !pending.text.is_empty() {
                     pending.text.push('\n');
@@ -417,7 +436,11 @@ impl Pending {
             self.reasoning.push('\n');
         }
         self.reasoning.push_str(text);
-        self.push_segment(ChatMessageSegmentKind::Reasoning, Some(text.to_string()), None);
+        self.push_segment(
+            ChatMessageSegmentKind::Reasoning,
+            Some(text.to_string()),
+            None,
+        );
     }
 
     fn push_tool(&mut self, id: String, name: String, arguments: String) {
@@ -578,8 +601,9 @@ pub fn parse_grok_history(raw: &str) -> Vec<ImportedMessage> {
                     Some(Value::Array(blocks)) => {
                         for block in blocks {
                             match block.get("type").and_then(Value::as_str) {
-                                Some("text") => pending
-                                    .push_text(block.get("text").and_then(Value::as_str).unwrap_or("")),
+                                Some("text") => pending.push_text(
+                                    block.get("text").and_then(Value::as_str).unwrap_or(""),
+                                ),
                                 Some("image") => {
                                     if let Some(image) = block
                                         .get("url")
@@ -624,7 +648,8 @@ pub fn parse_grok_history(raw: &str) -> Vec<ImportedMessage> {
                 switch_role(&mut pending, &mut out, "assistant", 0);
                 if let Some(items) = entry.get("summary").and_then(Value::as_array) {
                     for item in items {
-                        pending.push_reasoning(item.get("text").and_then(Value::as_str).unwrap_or(""));
+                        pending
+                            .push_reasoning(item.get("text").and_then(Value::as_str).unwrap_or(""));
                     }
                 }
             }
@@ -632,8 +657,9 @@ pub fn parse_grok_history(raw: &str) -> Vec<ImportedMessage> {
                 let Some(call_id) = entry.get("tool_call_id").and_then(Value::as_str) else {
                     continue;
                 };
-                let text =
-                    truncate_tool_result(entry.get("content").and_then(Value::as_str).unwrap_or(""));
+                let text = truncate_tool_result(
+                    entry.get("content").and_then(Value::as_str).unwrap_or(""),
+                );
                 resolve_tool_result(&mut pending, &mut out, call_id, text, false);
             }
             _ => {}
@@ -690,7 +716,8 @@ pub fn parse_codex_history(raw: &str) -> Vec<ImportedMessage> {
                 switch_role(&mut pending, &mut out, "assistant", ts);
                 if let Some(items) = payload.get("summary").and_then(Value::as_array) {
                     for item in items {
-                        pending.push_reasoning(item.get("text").and_then(Value::as_str).unwrap_or(""));
+                        pending
+                            .push_reasoning(item.get("text").and_then(Value::as_str).unwrap_or(""));
                     }
                 }
             }
@@ -739,8 +766,9 @@ pub fn parse_codex_history(raw: &str) -> Vec<ImportedMessage> {
                 let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
                     continue;
                 };
-                let text =
-                    truncate_tool_result(payload.get("output").and_then(Value::as_str).unwrap_or(""));
+                let text = truncate_tool_result(
+                    payload.get("output").and_then(Value::as_str).unwrap_or(""),
+                );
                 resolve_tool_result(&mut pending, &mut out, call_id, text, false);
             }
             _ => {}
@@ -874,12 +902,7 @@ fn append_acp_text(pending: &mut Pending, update: &Value, is_reasoning: bool) {
     } else {
         ChatMessageSegmentKind::Text
     };
-    if let Some(segment) = pending
-        .segments
-        .iter_mut()
-        .rev()
-        .find(|s| s.kind == want)
-    {
+    if let Some(segment) = pending.segments.iter_mut().rev().find(|s| s.kind == want) {
         segment.text = Some(latest);
     }
 }
@@ -924,9 +947,11 @@ fn collect_acp_tool_output(content: &Value) -> String {
         Value::Array(items) => items
             .iter()
             .filter_map(|item| {
-                item.get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| item.get("content").and_then(|c| c.get("text")).and_then(Value::as_str))
+                item.get("text").and_then(Value::as_str).or_else(|| {
+                    item.get("content")
+                        .and_then(|c| c.get("text"))
+                        .and_then(Value::as_str)
+                })
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -965,7 +990,10 @@ mod tests {
         assert_eq!(assistant.content, "我来看看");
         assert_eq!(assistant.tool_calls.len(), 1);
         assert_eq!(assistant.tool_calls[0].name, "run_terminal_command");
-        assert_eq!(assistant.tool_calls[0].result_preview.as_deref(), Some("exit: 0"));
+        assert_eq!(
+            assistant.tool_calls[0].result_preview.as_deref(),
+            Some("exit: 0")
+        );
     }
 
     #[test]
@@ -994,13 +1022,26 @@ mod tests {
         ]);
         let msgs = parse_codex_history(&raw);
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].message.content, "改一下这个文件", "developer 注入不该混进正文");
+        assert_eq!(
+            msgs[0].message.content, "改一下这个文件",
+            "developer 注入不该混进正文"
+        );
         let assistant = &msgs[1].message;
         assert_eq!(assistant.content, "这就改");
-        let names: Vec<&str> = assistant.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = assistant
+            .tool_calls
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert_eq!(names, vec!["shell_command", "apply_patch"]);
-        assert_eq!(assistant.tool_calls[0].result_preview.as_deref(), Some("Exit code: 0"));
-        assert_eq!(assistant.tool_calls[1].result_preview.as_deref(), Some("Success."));
+        assert_eq!(
+            assistant.tool_calls[0].result_preview.as_deref(),
+            Some("Exit code: 0")
+        );
+        assert_eq!(
+            assistant.tool_calls[1].result_preview.as_deref(),
+            Some("Success.")
+        );
     }
 
     #[test]
@@ -1054,7 +1095,10 @@ mod tests {
                 msgs.iter().map(|m| m.images.len()).sum::<usize>(),
             );
             assert!(msgs.len() > 1, "[{label}] 至少该解析出多条消息");
-            assert!(biggest < TOOL_RESULT_CAP_BYTES + 200, "[{label}] 截断没生效");
+            assert!(
+                biggest < TOOL_RESULT_CAP_BYTES + 200,
+                "[{label}] 截断没生效"
+            );
             for pair in msgs.windows(2) {
                 assert_ne!(
                     pair[0].message.role, pair[1].message.role,
@@ -1095,10 +1139,18 @@ mod tests {
         assert_eq!(msgs[1].message.reasoning.as_deref(), Some("先想想"));
         assert_eq!(msgs[1].message.content, "你好");
         // 段落顺序要保留：思考在前、正文在后。
-        let kinds: Vec<_> = msgs[1].message.segments.iter().map(|s| s.kind.clone()).collect();
+        let kinds: Vec<_> = msgs[1]
+            .message
+            .segments
+            .iter()
+            .map(|s| s.kind.clone())
+            .collect();
         assert_eq!(
             kinds,
-            vec![ChatMessageSegmentKind::Reasoning, ChatMessageSegmentKind::Text]
+            vec![
+                ChatMessageSegmentKind::Reasoning,
+                ChatMessageSegmentKind::Text
+            ]
         );
     }
 
@@ -1180,14 +1232,20 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         let msgs = parse_claude_history(&raw);
         let users = msgs.iter().filter(|m| m.message.role == "user").count();
-        let assistants = msgs.iter().filter(|m| m.message.role == "assistant").count();
+        let assistants = msgs
+            .iter()
+            .filter(|m| m.message.role == "assistant")
+            .count();
         let calls: usize = msgs.iter().map(|m| m.message.tool_calls.len()).sum();
         let resolved = msgs
             .iter()
             .flat_map(|m| &m.message.tool_calls)
             .filter(|c| c.result_preview.is_some() || c.error.is_some())
             .count();
-        let reasoning = msgs.iter().filter(|m| m.message.reasoning.is_some()).count();
+        let reasoning = msgs
+            .iter()
+            .filter(|m| m.message.reasoning.is_some())
+            .count();
         let images: usize = msgs.iter().map(|m| m.images.len()).sum();
         let biggest = msgs
             .iter()
@@ -1195,12 +1253,22 @@ mod tests {
             .filter_map(|c| c.result_preview.as_ref().map(|p| p.len()))
             .max()
             .unwrap_or(0);
-        println!("原始 {} 字节 → {} 条消息（user {users} / assistant {assistants}）", raw.len(), msgs.len());
+        println!(
+            "原始 {} 字节 → {} 条消息（user {users} / assistant {assistants}）",
+            raw.len(),
+            msgs.len()
+        );
         println!("工具调用 {calls} 个，其中 {resolved} 个配到了结果；带思考的消息 {reasoning} 条；图片 {images} 张");
         println!("最大 result_preview {biggest} 字节（上限 {TOOL_RESULT_CAP_BYTES} + 截断说明）");
         for m in msgs.iter().take(3) {
             let head: String = m.message.content.chars().take(50).collect();
-            println!("  [{}] {:?} tools={} seg={}", m.message.role, head, m.message.tool_calls.len(), m.message.segments.len());
+            println!(
+                "  [{}] {:?} tools={} seg={}",
+                m.message.role,
+                head,
+                m.message.tool_calls.len(),
+                m.message.segments.len()
+            );
         }
         assert!(msgs.len() > 1, "真实会话至少该解析出多条消息");
         assert!(

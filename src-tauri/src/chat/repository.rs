@@ -8,8 +8,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::{
     AgentPlanState, AgentRuntimeConfig, AgentTodoState, ChatAssistantSnapshot, ChatMessage,
-    Conversation, ConversationContextState, ConversationListItem, ModelRef,
-    WebSearchMode,
+    Conversation, ConversationContextState, ConversationListItem, ModelRef, WebSearchMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

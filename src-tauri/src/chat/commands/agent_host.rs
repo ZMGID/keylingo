@@ -115,7 +115,6 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
                 self.state,
                 ctx.conversation_id,
                 ctx.run_id,
-                ctx.message_id,
                 ctx.generation,
                 record,
             )
@@ -133,7 +132,6 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
                 self.state,
                 ctx.tool_conversation_id,
                 ctx.run_id,
-                ctx.message_id,
                 ctx.generation,
             )
             .await
@@ -152,7 +150,6 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
                 self.state,
                 ctx.conversation_id,
                 ctx.run_id,
-                ctx.message_id,
                 ctx.generation,
                 record,
                 prompt,

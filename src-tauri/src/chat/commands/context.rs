@@ -98,7 +98,12 @@ pub(crate) async fn chat_compress_context(
             .await
             .map_err(crate::chat::repository::repository_error)?;
         let context_state = conversation.context_state.clone();
-        emit_chat_context_state(&app, &conversation.id, conversation.revision, &context_state);
+        emit_chat_context_state(
+            &app,
+            &conversation.id,
+            conversation.revision,
+            &context_state,
+        );
         strip_transcripts_for_frontend(&mut conversation);
         return Ok(serde_json::json!({
             "success": true,
@@ -118,7 +123,12 @@ pub(crate) async fn chat_compress_context(
         )
         .await
         .map_err(crate::chat::repository::repository_error)?;
-    emit_chat_context_state(&app, &conversation.id, conversation.revision, &context_state);
+    emit_chat_context_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &context_state,
+    );
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,

@@ -69,11 +69,9 @@ pub(crate) async fn run_chat_probe(
 
     let mut conversation = match resume_id {
         Some(id) => load_conversation(app, id).map_err(|e| fail(Some(id.to_string()), e))?,
-        None => {
-            new_probe_conversation(app, state, req, PROBE_PROJECT_ID)
-                .await
-                .map_err(|e| fail(None, e))?
-        }
+        None => new_probe_conversation(app, state, req, PROBE_PROJECT_ID)
+            .await
+            .map_err(|e| fail(None, e))?,
     };
     let conversation_id = conversation.id.clone();
     let fail = move |error: String| ProbeRunError {
@@ -134,13 +132,18 @@ pub(crate) async fn run_chat_probe(
     let plan_state = conversation.agent_plan_state.clone();
     let web_search_mode = conversation.web_search_mode;
     conversation = crate::chat::repository::repository(app)
-        .mutate_expected(app, &conversation.id, Some(conversation.revision), |latest| {
-            latest.agent_runtime = runtime;
-            latest.agent_plan_state = plan_state;
-            latest.web_search_mode = web_search_mode;
-            latest.messages.push(user_message);
-            Ok(())
-        })
+        .mutate_expected(
+            app,
+            &conversation.id,
+            Some(conversation.revision),
+            |latest| {
+                latest.agent_runtime = runtime;
+                latest.agent_plan_state = plan_state;
+                latest.web_search_mode = web_search_mode;
+                latest.messages.push(user_message);
+                Ok(())
+            },
+        )
         .await
         .map_err(crate::chat::repository::repository_error)
         .map_err(&fail)?;

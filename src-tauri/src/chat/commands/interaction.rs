@@ -316,7 +316,6 @@ pub(super) async fn request_session_consent(
     state: &AppState,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     generation: u64,
 ) -> bool {
     // Already granted for this conversation — no prompt.
@@ -341,9 +340,7 @@ pub(super) async fn request_session_consent(
         pending.insert(
             conversation_id.to_string(),
             crate::state::PendingSessionConsent {
-                conversation_id: conversation_id.to_string(),
                 run_id: run_id.to_string(),
-                message_id: message_id.to_string(),
                 sender: tx,
             },
         );
@@ -387,7 +384,6 @@ pub(crate) async fn request_tool_approval(
     state: &AppState,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     generation: u64,
     record: &ToolCallRecord,
 ) -> bool {
@@ -406,8 +402,6 @@ pub(crate) async fn request_tool_approval(
             record.id.clone(),
             crate::state::PendingToolApproval {
                 conversation_id: conversation_id.to_string(),
-                run_id: run_id.to_string(),
-                message_id: message_id.to_string(),
                 tool_name: record.name.clone(),
                 sender: tx,
             },
@@ -468,7 +462,6 @@ pub(crate) async fn request_user_response(
     state: &AppState,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     generation: u64,
     record: &ToolCallRecord,
     prompt: crate::chat::ask_user::AskUserPromptPayload,
@@ -482,10 +475,7 @@ pub(crate) async fn request_user_response(
         pending.insert(
             record.id.clone(),
             crate::chat::ask_user::PendingAskUserPrompt {
-                conversation_id: conversation_id.to_string(),
                 run_id: run_id.to_string(),
-                message_id: message_id.to_string(),
-                tool_call_id: record.id.clone(),
                 prompt: prompt.clone(),
                 sender: tx,
             },

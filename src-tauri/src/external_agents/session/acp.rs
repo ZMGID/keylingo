@@ -2985,7 +2985,10 @@ pub async fn probe_acp_sessions(
         }
         let id = next_id;
         next_id += 1;
-        if write_rpc(&mut stdin, id, "session/list", params).await.is_err() {
+        if write_rpc(&mut stdin, id, "session/list", params)
+            .await
+            .is_err()
+        {
             break;
         }
         let Some(response) = read_rpc_response(&mut reader, id, started, deadline).await else {

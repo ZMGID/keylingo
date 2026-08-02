@@ -29,9 +29,7 @@ use super::catalog::{
 };
 use super::context::{build_chat_api_messages, resolve_usage_anchor};
 use super::direct_image::complete_direct_image_generation_reply;
-use super::interaction::{
-    emit_chat_stream_delta, emit_chat_tool_record, wait_for_chat_cancel,
-};
+use super::interaction::{emit_chat_stream_delta, emit_chat_tool_record, wait_for_chat_cancel};
 use super::messages::{
     auxiliary_tool_segments, build_assistant_message, capture_agent_plan_draft_if_needed,
     push_assistant_message, tool_segment_for_record,
