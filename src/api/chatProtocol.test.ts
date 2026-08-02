@@ -1,9 +1,18 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   ChatRunEventEnvelope,
   ChatRunSnapshot,
 } from '../generated/chatProtocol'
-import { acceptChatPythonPayload, chatProtocolTesting } from './chatProtocol'
+import {
+  acceptChatPythonPayload,
+  chatProtocolTesting,
+  subscribeChatProtocolIssues,
+  syncChatProtocol,
+} from './chatProtocol'
+
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
+vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
 
 function event(seq: number, type: ChatRunEventEnvelope['type'] = 'run_started') {
   const common = {
@@ -283,5 +292,51 @@ describe('chat protocol sequencing', () => {
     expect(chatProtocolTesting.validateSync(valid)).toBe(true)
     expect(chatProtocolTesting.validateSync({ ...valid, extra: true })).toBe(false)
     expect(chatProtocolTesting.validateSync({ ...valid, protocolVersion: 2 })).toBe(false)
+  })
+})
+
+describe('chat protocol sync', () => {
+  const syncResult = (conversationRevision = 0) => ({
+    protocolVersion: 1,
+    conversationRevision,
+    missingRunIds: [],
+    runs: [],
+  })
+  const sentCursors = (call: number) => (
+    invokeMock.mock.calls[call][1] as { request: { cursors: unknown } }
+  ).request.cursors
+
+  beforeEach(() => {
+    chatProtocolTesting.reset()
+    invokeMock.mockReset()
+  })
+
+  it('seeds the revision on first sight instead of demanding a resync', async () => {
+    const issues: string[] = []
+    subscribeChatProtocolIssues((issue) => issues.push(issue))
+
+    invokeMock.mockResolvedValue(syncResult(7))
+    await syncChatProtocol('conversation')
+    expect(issues).toEqual([])
+
+    invokeMock.mockResolvedValue(syncResult(8))
+    await syncChatProtocol('conversation')
+    expect(issues).toEqual(['resync_required'])
+  })
+
+  it('stops sending cursors once a run reaches a terminal state', async () => {
+    invokeMock.mockResolvedValue(syncResult())
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest({ ...event(1), runId: 'live-run' } as ChatRunEventEnvelope)
+
+    await syncChatProtocol('conversation')
+    expect(sentCursors(0)).toEqual([
+      { runId: 'run', lastSeq: 1 },
+      { runId: 'live-run', lastSeq: 1 },
+    ])
+
+    chatProtocolTesting.ingest(event(2, 'run_completed'))
+    await syncChatProtocol('conversation')
+    expect(sentCursors(1)).toEqual([{ runId: 'live-run', lastSeq: 1 }])
   })
 })

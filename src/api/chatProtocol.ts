@@ -328,8 +328,11 @@ export async function syncChatProtocol(conversationId: string) {
   let acceptedSync = false
   try {
     await ensureListener()
+    // 只给还在跑的 run 带 cursor：后端 5 分钟后会剪掉已完成的 run，
+    // 再带着它们的 cursor 去 sync 只会被算进 missingRunIds，白触发一次全量 reload。
+    // run 的状态本身要留着（快照恢复/去重还要用），所以是不带 cursor，不是删。
     const cursors = [...runs.entries()]
-      .filter(([, state]) => state.conversationId === conversationId)
+      .filter(([, state]) => state.conversationId === conversationId && !state.terminal)
       .map(([runId, state]) => ({ runId, lastSeq: state.lastSeq }))
     const result = await invoke<unknown>('chat_sync_state', {
       request: { protocolVersion: CHAT_PROTOCOL_VERSION, conversationId, cursors },
@@ -360,13 +363,16 @@ export async function syncChatProtocol(conversationId: string) {
       return
     }
     acceptedSync = true
-    const knownRevision = conversationRevisions.get(conversationId) ?? 0
-    if (validated.conversationRevision > knownRevision) {
+    // 本窗口没见过这个会话时，直接把后端 revision 收下当基线。
+    // 任何有内容的会话 revision 都 > 0，把「没见过」当「落后」会导致
+    // 第一次切进任何会话都必定触发一次多余的全量 reload。
+    const knownRevision = conversationRevisions.get(conversationId)
+    if (knownRevision !== undefined && validated.conversationRevision > knownRevision) {
       reportIssue('resync_required', conversationId)
     }
     conversationRevisions.set(
       conversationId,
-      Math.max(knownRevision, validated.conversationRevision),
+      Math.max(knownRevision ?? 0, validated.conversationRevision),
     )
     if (validated.missingRunIds.length > 0) {
       for (const runId of validated.missingRunIds) runs.delete(runId)
