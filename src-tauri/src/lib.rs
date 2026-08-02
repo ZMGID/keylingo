@@ -505,6 +505,7 @@ pub fn run() {
             usage::usage_clear,
             chat::commands::interaction::get_request_debug_records,
             chat::commands::interaction::clear_request_debug_records,
+            chat::protocol::chat_sync_state,
             // Chat 模块命令
             chat::commands::catalog::chat_get_conversations,
             chat::commands::interaction::chat_list_background_commands,

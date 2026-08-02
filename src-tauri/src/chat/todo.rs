@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::chat::types::{AgentTodoItem, AgentTodoState, AgentTodoStatus};
 use crate::mcp::types::McpToolCallResult;
@@ -89,7 +89,7 @@ pub fn format_prompt(state: &AgentTodoState, todo_tools_available: bool) -> Stri
 }
 
 /// Conversation-scoped registry handler: load the conversation, apply the
-/// todo tool, persist, emit the `chat-todo` event, and return the tool
+/// todo tool, persist, emit the typed protocol update, and return the tool
 /// result. Mirrors the legacy `RegistryToolExecutor` todo special case and
 /// deliberately does not resolve a native tool workspace.
 pub fn handle_conversation_tool_call<'a>(
@@ -99,26 +99,30 @@ pub fn handle_conversation_tool_call<'a>(
     arguments: Value,
 ) -> crate::mcp::native_registry::NativeToolFuture<'a> {
     Box::pin(async move {
-    if !is_agent_todo_tool_name(tool_name) {
-        return Err(format!("Unknown todo tool: {tool_name}"));
-    }
-    let outcome = apply_todo_write(arguments)?;
-    crate::chat::repository::repository(app)
-        .update_todo(app, conversation_id, outcome.state.clone())
-        .await
-        .map_err(crate::chat::repository::repository_error)?;
-    emit_chat_todo_state(app, conversation_id, &outcome.state);
-    Ok(tool_result(&outcome.state, &outcome.changed))
+        if !is_agent_todo_tool_name(tool_name) {
+            return Err(format!("Unknown todo tool: {tool_name}"));
+        }
+        let outcome = apply_todo_write(arguments)?;
+        let persisted = crate::chat::repository::repository(app)
+            .update_todo(app, conversation_id, outcome.state.clone())
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
+        emit_chat_todo_state(app, conversation_id, &persisted.agent_todo_state);
+        Ok(tool_result(&outcome.state, &outcome.changed))
     })
 }
 
-pub fn emit_chat_todo_state(app: &AppHandle, conversation_id: &str, todo_state: &AgentTodoState) {
-    let _ = app.emit(
-        "chat-todo",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "todoState": todo_state,
-        }),
+pub fn emit_chat_todo_state(app: &AppHandle, conversation_id: &str, _todo_state: &AgentTodoState) {
+    let Ok(conversation) = crate::chat::storage::load_conversation(app, conversation_id) else {
+        return;
+    };
+    crate::chat::protocol::emit_conversation_event(
+        app,
+        conversation_id,
+        conversation.revision,
+        crate::chat::protocol::ChatConversationEvent::TodoUpdated {
+            todo_state: (&conversation.agent_todo_state).into(),
+        },
     );
 }
 

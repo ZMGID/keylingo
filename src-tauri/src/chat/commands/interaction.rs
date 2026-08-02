@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::time::{sleep, timeout};
 
 use crate::chat::agent::execute::truncate_chars;
@@ -122,6 +122,7 @@ pub(crate) fn chat_cancel_stream(
 /// `chat_tool_always_allow`——决策通道本身仍是 bool，三态只存在于这一层。
 #[tauri::command]
 pub(crate) fn chat_confirm_tool_call(
+    app: AppHandle,
     state: State<AppState>,
     tool_call_id: String,
     approved: bool,
@@ -137,6 +138,7 @@ pub(crate) fn chat_confirm_tool_call(
             state.grant_tool_always_allow(&pending.conversation_id, &pending.tool_name);
         }
         let _ = pending.sender.send(approved);
+        crate::chat::protocol::withdraw_tool_approval(&app, &tool_call_id);
     }
     Ok(())
 }
@@ -198,17 +200,19 @@ pub(crate) fn chat_kill_background_command(
 /// 响应会话级文件/命令工具授权请求(按 conversation_id)。
 #[tauri::command]
 pub(crate) fn chat_respond_session_consent(
+    app: AppHandle,
     state: State<AppState>,
     conversation_id: String,
     granted: bool,
 ) -> Result<(), String> {
-    let sender = state
+    let pending = state
         .pending_chat_session_consents
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&conversation_id);
-    if let Some(sender) = sender {
-        let _ = sender.send(granted);
+    if let Some(pending) = pending {
+        crate::chat::protocol::resolve_session_consent(&app, &pending.run_id);
+        let _ = pending.sender.send(granted);
     }
     Ok(())
 }
@@ -216,6 +220,7 @@ pub(crate) fn chat_respond_session_consent(
 /// 回答 ask_user 澄清卡片。
 #[tauri::command]
 pub(crate) fn chat_submit_user_choice(
+    app: AppHandle,
     state: State<AppState>,
     tool_call_id: String,
     answers: HashMap<String, crate::chat::ask_user::AskUserAnswer>,
@@ -249,6 +254,7 @@ pub(crate) fn chat_submit_user_choice(
     let Some(pending) = pending else {
         return Err("Clarification is no longer awaiting a response".to_string());
     };
+    crate::chat::protocol::resolve_user_prompt(&app, &pending.run_id, &tool_call_id);
     let _ = pending.sender.send(response);
     Ok(())
 }
@@ -256,6 +262,7 @@ pub(crate) fn chat_submit_user_choice(
 /// 前端 Pyodide 执行完成后回传结果。
 #[tauri::command]
 pub(crate) fn chat_python_complete(
+    app: AppHandle,
     state: State<AppState>,
     run_id: String,
     content: String,
@@ -268,6 +275,7 @@ pub(crate) fn chat_python_complete(
         .unwrap_or_else(|e| e.into_inner())
         .remove(&run_id);
     if let Some(pending) = pending {
+        crate::chat::protocol::detach_python_request(&app, &run_id);
         let _ = pending.sender.send(crate::mcp::types::PythonRunResult {
             content,
             is_error,
@@ -280,14 +288,18 @@ pub(crate) fn chat_python_complete(
 pub(super) fn emit_chat_plan_state(
     app: &AppHandle,
     conversation_id: &str,
-    plan_state: &AgentPlanState,
+    _plan_state: &AgentPlanState,
 ) {
-    let _ = app.emit(
-        "chat-plan",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "planState": plan_state,
-        }),
+    let Ok(conversation) = crate::chat::storage::load_conversation(app, conversation_id) else {
+        return;
+    };
+    crate::chat::protocol::emit_conversation_event(
+        app,
+        conversation_id,
+        conversation.revision,
+        crate::chat::protocol::ChatConversationEvent::PlanUpdated {
+            plan_state: (&conversation.agent_plan_state).into(),
+        },
     );
 }
 
@@ -318,15 +330,20 @@ pub(super) async fn request_session_consent(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Only one outstanding consent prompt per conversation.
-        pending.insert(conversation_id.to_string(), tx);
+        pending.insert(
+            conversation_id.to_string(),
+            crate::state::PendingSessionConsent {
+                conversation_id: conversation_id.to_string(),
+                run_id: run_id.to_string(),
+                message_id: message_id.to_string(),
+                sender: tx,
+            },
+        );
     }
-    let _ = app.emit(
-        "chat-session-consent",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::SessionConsentRequested,
     );
     let result = tokio::select! {
         result = timeout(Duration::from_secs(60), rx) => result,
@@ -336,9 +353,11 @@ pub(super) async fn request_session_consent(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(conversation_id);
+            crate::chat::protocol::resolve_session_consent(app, run_id);
             return false;
         }
     };
+    crate::chat::protocol::resolve_session_consent(app, run_id);
     match result {
         Ok(Ok(true)) => {
             state.grant_chat_consent(conversation_id);
@@ -379,26 +398,26 @@ pub(crate) async fn request_tool_approval(
             record.id.clone(),
             crate::state::PendingToolApproval {
                 conversation_id: conversation_id.to_string(),
+                run_id: run_id.to_string(),
+                message_id: message_id.to_string(),
                 tool_name: record.name.clone(),
                 sender: tx,
             },
         );
     }
     let summary = format_tool_approval_summary(record);
-    let _ = app.emit(
-        "chat-tool-confirm",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "toolCallId": record.id,
-            "name": record.name,
-            "source": record.source,
-            "serverId": record.server_id,
-            "target": summary.target,
-            "argumentsPreview": summary.detail,
-            "sensitivity": "sensitive",
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::ToolApprovalRequested {
+            tool_call_id: record.id.clone(),
+            name: record.name.clone(),
+            source: record.source.clone(),
+            server_id: record.server_id.clone(),
+            target: summary.target,
+            arguments_preview: summary.detail,
+            sensitivity: "sensitive".to_string(),
+        },
     );
     let result = tokio::select! {
         result = timeout(Duration::from_secs(60), rx) => result,
@@ -432,14 +451,8 @@ pub(crate) async fn request_tool_approval(
 }
 
 /// 通知前端撤掉某条审批卡（已超时 / 已取消 / 询问方已经不在了，答复不再有意义）。
-pub(crate) fn withdraw_tool_confirm(app: &AppHandle, conversation_id: &str, tool_call_id: &str) {
-    let _ = app.emit(
-        "chat-tool-confirm-withdraw",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "toolCallId": tool_call_id,
-        }),
-    );
+pub(crate) fn withdraw_tool_confirm(app: &AppHandle, _conversation_id: &str, tool_call_id: &str) {
+    crate::chat::protocol::withdraw_tool_approval(app, tool_call_id);
 }
 
 pub(crate) async fn request_user_response(
@@ -461,6 +474,10 @@ pub(crate) async fn request_user_response(
         pending.insert(
             record.id.clone(),
             crate::chat::ask_user::PendingAskUserPrompt {
+                conversation_id: conversation_id.to_string(),
+                run_id: run_id.to_string(),
+                message_id: message_id.to_string(),
+                tool_call_id: record.id.clone(),
                 prompt: prompt.clone(),
                 sender: tx,
             },
@@ -473,19 +490,16 @@ pub(crate) async fn request_user_response(
         crate::chat::ask_user::ASK_USER_PHASE_AWAITING,
         &empty_answers,
     );
-    let _ = app.emit(
-        "chat-user-prompt",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "toolCallId": record.id,
-            "id": record.id,
-            "name": record.name,
-            "source": record.source,
-            "prompt": prompt,
-            "structuredContent": structured_content,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::UserPromptRequested {
+            tool_call_id: record.id.clone(),
+            name: record.name.clone(),
+            source: record.source.clone(),
+            prompt: (&prompt).into(),
+            structured_content: Some(structured_content),
+        },
     );
 
     let result = tokio::select! {
@@ -496,10 +510,11 @@ pub(crate) async fn request_user_response(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
+            crate::chat::protocol::resolve_user_prompt(app, run_id, &record.id);
             return crate::chat::ask_user::cancelled_response();
         }
     };
-    match result {
+    let response = match result {
         Ok(Ok(response)) => response,
         Ok(Err(_)) => {
             let mut pending = state
@@ -517,7 +532,9 @@ pub(crate) async fn request_user_response(
             pending.remove(&record.id);
             crate::chat::ask_user::timeout_response()
         }
-    }
+    };
+    crate::chat::protocol::resolve_user_prompt(app, run_id, &record.id);
+    response
 }
 
 pub(super) async fn wait_for_chat_cancel(state: &AppState, conversation_id: &str, generation: u64) {
@@ -528,92 +545,64 @@ pub(super) async fn wait_for_chat_cancel(state: &AppState, conversation_id: &str
 
 pub(crate) fn emit_chat_tool_record(
     app: &AppHandle,
-    conversation_id: &str,
+    _conversation_id: &str,
     run_id: &str,
-    message_id: &str,
+    _message_id: &str,
     record: &ToolCallRecord,
 ) {
-    let _ = app.emit(
-        "chat-tool",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "toolCallId": record.id,
-            "id": record.id,
-            "name": record.name,
-            "source": record.source,
-            "serverId": record.server_id,
-            "status": record.status,
-            "argumentsPreview": truncate_chars(&record.arguments, 800),
-            "resultPreview": record.result_preview,
-            "error": record.error,
-            "startedAt": record.started_at,
-            "completedAt": record.completed_at,
-            "durationMs": record.duration_ms,
-            "round": record.round,
-            "sensitive": record.sensitive,
-            "artifacts": record.artifacts,
-            "traceId": record.trace_id,
-            "spanId": record.span_id,
-            "structuredContent": record.structured_content,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::ToolUpdated {
+            tool: crate::chat::protocol::ChatToolPayload::from_record(
+                record,
+                truncate_chars(&record.arguments, 800),
+            ),
+        },
     );
 }
 
 pub(crate) fn emit_chat_stream_delta(
     app: &AppHandle,
-    conversation_id: &str,
+    _conversation_id: &str,
     run_id: &str,
-    message_id: &str,
+    _message_id: &str,
     delta: &str,
     reasoning_delta: Option<&str>,
     segment: Option<&ChatMessageSegment>,
 ) {
-    let _ = app.emit(
-        "chat-stream",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "imageId": "",
-            "kind": "answer",
-            "delta": delta,
-            "reasoningDelta": reasoning_delta,
-            "segmentId": segment.map(|segment| segment.id.as_str()),
-            "segmentKind": segment.map(|segment| &segment.kind),
-            "phase": segment.map(|segment| &segment.phase),
-            "order": segment.map(|segment| segment.order),
-            "stepNumber": segment.and_then(|segment| segment.step_number),
-            "round": segment.and_then(|segment| segment.round),
-            "toolCallId": segment.and_then(|segment| segment.tool_call_id.as_deref()),
-            "segment": segment,
-        }),
-    );
+    let segment = segment.map(crate::chat::protocol::ChatSegmentPayload::from);
+    if let Some(reasoning_delta) = reasoning_delta.filter(|value| !value.is_empty()) {
+        crate::chat::protocol::emit_run_event(
+            app,
+            run_id,
+            crate::chat::protocol::ChatRunEvent::ReasoningDelta {
+                delta: reasoning_delta.to_string(),
+                segment: segment.clone(),
+            },
+        );
+    }
+    if !delta.is_empty() {
+        crate::chat::protocol::emit_run_event(
+            app,
+            run_id,
+            crate::chat::protocol::ChatRunEvent::TextDelta {
+                delta: delta.to_string(),
+                segment,
+            },
+        );
+    }
 }
 
 pub(crate) fn emit_chat_stream_done(
-    app: &AppHandle,
-    conversation_id: &str,
-    run_id: &str,
-    message_id: &str,
-    reason: &str,
-    full: &str,
+    _app: &AppHandle,
+    _conversation_id: &str,
+    _run_id: &str,
+    _message_id: &str,
+    _reason: &str,
+    _full: &str,
 ) {
-    let _ = app.emit(
-        "chat-stream",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "imageId": "",
-            "kind": "answer",
-            "delta": "",
-            "done": true,
-            "reason": reason,
-            "full": full,
-        }),
-    );
+    // Terminal protocol events are emitted by the command boundary after persistence.
 }
 
 /// 审批卡要展示的两样东西：`target` 是这次操作的对象（文件路径 / 命令），用来在前端拼

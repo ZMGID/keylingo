@@ -25,6 +25,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Swift sidecar
+        run: npm run build:swift
+
       - name: Lint
         run: npm run lint
 
@@ -34,13 +40,10 @@ jobs:
       - name: Frontend tests
         run: npm run test
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
       # tauri-build 会校验 externalBin（kivio-ocr-helper）对应当前 target triple 的二进制存在。
       # 在 macOS 上 build:swift 构建真实 Swift sidecar，满足校验（否则 cargo test 在 build-script 阶段失败）。
-      - name: Build Swift sidecar
-        run: npm run build:swift
+      - name: Check generated chat protocol
+        run: npm run protocol:check
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml

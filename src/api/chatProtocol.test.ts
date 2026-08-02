@@ -1,0 +1,287 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import type {
+  ChatRunEventEnvelope,
+  ChatRunSnapshot,
+} from '../generated/chatProtocol'
+import { acceptChatPythonPayload, chatProtocolTesting } from './chatProtocol'
+
+function event(seq: number, type: ChatRunEventEnvelope['type'] = 'run_started') {
+  const common = {
+    protocolVersion: 1,
+    scope: 'run' as const,
+    conversationId: 'conversation',
+    runId: 'run',
+    messageId: 'message',
+    seq,
+    baseRevision: 0,
+  }
+  if (type === 'text_delta') {
+    return { ...common, type, delta: `${seq}`, segment: null } as ChatRunEventEnvelope
+  }
+  if (type === 'run_completed') {
+    return { ...common, type, full: 'done', conversationRevision: 2 } as ChatRunEventEnvelope
+  }
+  return { ...common, type: 'run_started', recovery: null } as ChatRunEventEnvelope
+}
+
+function snapshot(overrides: Partial<ChatRunSnapshot> = {}): ChatRunSnapshot {
+  return {
+    protocolVersion: 1,
+    conversationId: 'conversation',
+    runId: 'run',
+    messageId: 'message',
+    lastSeq: 7,
+    baseRevision: 1,
+    recovery: null,
+    status: 'running',
+    content: '',
+    reasoning: '',
+    segments: [],
+    tools: [],
+    contextUsage: null,
+    subagents: [],
+    compaction: null,
+    todoState: null,
+    planState: null,
+    pendingInteractions: [],
+    pendingPythonRequests: [],
+    warnings: [],
+    terminal: null,
+    ...overrides,
+  }
+}
+
+describe('chat protocol sequencing', () => {
+  beforeEach(() => chatProtocolTesting.reset())
+
+  it('drops duplicates and drains a buffered gap in order', () => {
+    const seen: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.seq)
+    })
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(3, 'text_delta'))
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(2, 'text_delta'))
+    expect(seen).toEqual([1, 2, 3])
+  })
+
+  it('rejects late nonduplicate events after a continuous terminal', () => {
+    const seen: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.seq)
+    })
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(2, 'run_completed'))
+    chatProtocolTesting.ingest(event(3, 'text_delta'))
+    expect(seen).toEqual([1, 2])
+  })
+
+  it('commits a buffered terminal only after the sequence gap closes', () => {
+    const seen: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.seq)
+    })
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(3, 'run_completed'))
+    chatProtocolTesting.ingest(event(4, 'text_delta'))
+    chatProtocolTesting.ingest(event(2, 'text_delta'))
+    expect(seen).toEqual([1, 2, 3])
+  })
+
+  it('rejects regressed conversation revisions', () => {
+    const revisions: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'conversation') revisions.push(item.revision)
+    })
+    const conversationEvent = (revision: number) => ({
+      protocolVersion: 1 as const,
+      scope: 'conversation' as const,
+      conversationId: 'conversation',
+      revision,
+      type: 'plan_updated' as const,
+      planState: { mode: 'act' as const, status: 'empty' as const, plan: null, updatedAt: revision },
+    })
+    chatProtocolTesting.ingest(conversationEvent(2))
+    chatProtocolTesting.ingest(conversationEvent(1))
+    expect(revisions).toEqual([2])
+  })
+
+  it('uses terminal conversationRevision as a monotonic watermark', () => {
+    const revisions: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'conversation') revisions.push(item.revision)
+    })
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(2, 'run_completed'))
+    chatProtocolTesting.ingest({
+      protocolVersion: 1,
+      scope: 'conversation',
+      conversationId: 'conversation',
+      revision: 1,
+      type: 'plan_updated',
+      planState: { mode: 'act', status: 'empty', plan: null, updatedAt: 1 },
+    })
+    expect(revisions).toEqual([])
+  })
+
+  it('rejects a replay whose declared range is not continuous', () => {
+    chatProtocolTesting.ingest(event(1))
+    expect(chatProtocolTesting.isContinuousReplay('conversation', {
+      kind: 'events',
+      runId: 'run',
+      fromSeq: 2,
+      throughSeq: 3,
+      events: [event(3, 'text_delta')],
+    })).toBe(false)
+  })
+
+  it('rejects semantically invalid snapshot event slots', () => {
+    const invalid = snapshot({
+      status: 'completed',
+      terminal: {
+        type: 'text_delta', delta: 'not terminal', segment: null,
+      } as unknown as ChatRunSnapshot['terminal'],
+    })
+    expect(chatProtocolTesting.validateSync({
+      protocolVersion: 1,
+      conversationRevision: 1,
+      missingRunIds: [],
+      runs: [{ kind: 'snapshot', snapshot: invalid }],
+    })).toBe(false)
+    expect(chatProtocolTesting.isSemanticallyValidSnapshot('conversation', invalid)).toBe(false)
+  })
+
+  it('rejects invalid fan-out recovery indexes', () => {
+    const invalid = snapshot({
+      recovery: {
+        groupId: 'group',
+        groupSize: 2,
+        armIndex: 2,
+        providerId: 'provider',
+        model: 'model',
+      },
+    })
+    expect(chatProtocolTesting.isSemanticallyValidSnapshot('conversation', invalid)).toBe(false)
+  })
+
+  it('rejects unknown fields and protocol versions at the schema boundary', () => {
+    expect(chatProtocolTesting.validate(event(1))).toBe(true)
+    expect(chatProtocolTesting.validate({ ...event(1), extra: true })).toBe(false)
+    expect(chatProtocolTesting.validate({ ...event(1), protocolVersion: 2 })).toBe(false)
+    expect(chatProtocolTesting.validate({
+      ...event(1),
+      type: 'todo_updated',
+      todoState: { items: [], updatedAt: 1, extra: true },
+    })).toBe(false)
+  })
+
+  it('deduplicates Python requests by stable requestId', () => {
+    const request = {
+      protocolVersion: 1,
+      requestId: 'python-request',
+      runId: 'python-run',
+      parentConversationId: 'conversation',
+      parentRunId: 'run',
+      parentMessageId: 'message',
+      code: '1 + 1',
+      timeoutMs: 1000,
+      files: [],
+    }
+    expect(acceptChatPythonPayload(request)).not.toBeNull()
+    expect(acceptChatPythonPayload(request)).toBeNull()
+  })
+
+  it('restores the complete segment timeline from a run snapshot', () => {
+    const seen: ChatRunEventEnvelope[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item)
+    })
+
+    chatProtocolTesting.applySnapshot(snapshot({
+      reasoning: 'thinking',
+      content: 'answer',
+      segments: [
+        {
+          id: 'text', kind: 'text', phase: 'synthesis', order: 3,
+          stepNumber: 1, round: 1, text: 'answer', toolCallId: null,
+        },
+        {
+          id: 'reasoning', kind: 'reasoning', phase: 'tool_loop', order: 1,
+          stepNumber: 1, round: 1, text: 'thinking', toolCallId: null,
+        },
+        {
+          id: 'tool', kind: 'tool', phase: 'tool_loop', order: 2,
+          stepNumber: 1, round: 1, text: null, toolCallId: 'call-1',
+        },
+      ],
+    }))
+
+    expect(seen.map((item) => item.type)).toEqual([
+      'run_started', 'reasoning_delta', 'text_delta', 'text_delta',
+    ])
+    expect(seen.slice(1).map((item) => (
+      item.type === 'text_delta' || item.type === 'reasoning_delta'
+        ? item.segment?.id
+        : null
+    ))).toEqual(['reasoning', 'tool', 'text'])
+  })
+
+  it('marks snapshot events as restored deliveries', () => {
+    const sources: string[] = []
+    chatProtocolTesting.subscribe((_item, delivery) => sources.push(delivery.source))
+
+    chatProtocolTesting.applySnapshot(snapshot({ content: 'restored' }))
+
+    expect(sources).toEqual(['snapshot', 'snapshot'])
+  })
+
+  it('preserves the exact terminal event from a snapshot', () => {
+    const errors: string[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run' && item.type === 'run_failed') errors.push(item.error)
+    })
+    chatProtocolTesting.applySnapshot(snapshot({
+      status: 'failed',
+      terminal: {
+        type: 'run_failed',
+        error: 'provider disconnected',
+        full: 'partial',
+        conversationRevision: 4,
+      },
+    }))
+    expect(errors).toEqual(['provider disconnected'])
+  })
+
+  it('replays a pending Python snapshot request once per JS lifecycle', () => {
+    const requests: string[] = []
+    chatProtocolTesting.subscribePython((request) => requests.push(request.requestId))
+    const request = {
+      protocolVersion: 1 as const,
+      requestId: 'python-pending',
+      runId: 'python-run',
+      parentConversationId: 'conversation',
+      parentRunId: 'run',
+      parentMessageId: 'message',
+      code: 'print(1)',
+      timeoutMs: 1000,
+      files: [],
+    }
+    const pending = snapshot({ pendingPythonRequests: [request] })
+    chatProtocolTesting.applySnapshot(pending)
+    chatProtocolTesting.applySnapshot(pending)
+    expect(requests).toEqual(['python-pending'])
+  })
+
+  it('validates the complete sync result and rejects extra fields', () => {
+    const valid = {
+      protocolVersion: 1,
+      conversationRevision: 3,
+      missingRunIds: [],
+      runs: [],
+    }
+    expect(chatProtocolTesting.validateSync(valid)).toBe(true)
+    expect(chatProtocolTesting.validateSync({ ...valid, extra: true })).toBe(false)
+    expect(chatProtocolTesting.validateSync({ ...valid, protocolVersion: 2 })).toBe(false)
+  })
+})

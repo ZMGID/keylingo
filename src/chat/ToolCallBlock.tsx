@@ -357,7 +357,7 @@ function subagentUsageLine(usage: SubagentView['usage']): string {
 
 /** Parse sub-agent state (P3) from a tool record's structured content: either
  *  the final `{ type: "subagent", ... }` result or the live `subagentProgress`
- *  merged in from `chat-subagent` events. */
+ *  merged in from typed subagent protocol events. */
 function structuredSubagent(toolCall: ToolCallRecord): SubagentView | null {
   const structured = objectValue(toolCall.structured_content ?? toolCall.structuredContent)
   if (!structured) return null

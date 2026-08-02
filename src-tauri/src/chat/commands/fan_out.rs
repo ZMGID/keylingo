@@ -37,47 +37,94 @@ pub(super) async fn run_reply_fan_out(
     // 故各臂统一传 title=None：多答首条回复的标题留给后续单模型轮或手动重命名
     // （避免 N 个克隆各自异步生成标题再丢弃）。
     let run_entry = agent_run_entry_label(crate::chat::agent::AgentRunEntry::Send);
-    let arm_futures = arms.iter().map(|(provider_id, model)| {
-        let mut arm_conversation = conversation.clone();
-        let provider_id = provider_id.clone();
-        let model = model.clone();
-        let arm = ReplyArm {
-            group_id: group_id.to_string(),
-            provider_id: provider_id.clone(),
-            model: model.clone(),
-        };
-        async move {
-            let outcome = complete_assistant_reply_inner(
-                app,
-                state,
-                &mut arm_conversation,
-                None,
-                last_user_api_content,
-                last_user_image_paths,
-                active_skill_id,
-                crate::chat::agent::AgentRunEntry::Send,
-                Some(&arm),
-                false,
-            )
-            .await;
-            (outcome, provider_id, model)
-        }
-    });
+    let arm_futures = arms
+        .iter()
+        .enumerate()
+        .map(|(arm_index, (provider_id, model))| {
+            let mut arm_conversation = conversation.clone();
+            let provider_id = provider_id.clone();
+            let model = model.clone();
+            let arm = ReplyArm {
+                group_id: group_id.to_string(),
+                group_size: arms.len(),
+                arm_index,
+                provider_id: provider_id.clone(),
+                model: model.clone(),
+            };
+            async move {
+                let outcome = complete_assistant_reply_inner(
+                    app,
+                    state,
+                    &mut arm_conversation,
+                    None,
+                    last_user_api_content,
+                    last_user_image_paths,
+                    active_skill_id,
+                    crate::chat::agent::AgentRunEntry::Send,
+                    Some(&arm),
+                    false,
+                )
+                .await;
+                (outcome, provider_id, model)
+            }
+        });
 
     let results = futures::future::join_all(arm_futures).await;
 
     let mut produced = 0usize;
     let mut cancelled = 0usize;
     let mut first_error: Option<String> = None;
+    let mut terminals = Vec::new();
     for (outcome, provider_id, model) in results {
         match outcome {
             Ok(ArmReplyOutcome {
                 message: Some(message),
+                run_id,
+                error: _,
             }) => {
+                if let Some(run_id) = run_id {
+                    terminals.push((
+                        run_id,
+                        message
+                            .stream_outcome
+                            .clone()
+                            .unwrap_or_else(|| "completed".to_string()),
+                        message.content.clone(),
+                    ));
+                }
                 upsert_assistant_message(conversation, message);
                 produced += 1;
             }
-            Ok(ArmReplyOutcome { message: None }) => {
+            Ok(ArmReplyOutcome {
+                message: None,
+                run_id: Some(run_id),
+                error: Some(err),
+            }) => {
+                if err == "cancelled" {
+                    terminals.push((run_id, "cancelled".to_string(), String::new()));
+                    cancelled += 1;
+                    continue;
+                }
+                let message = build_error_arm_message(
+                    group_id,
+                    provider_id,
+                    model,
+                    err.clone(),
+                    run_entry,
+                    active_skill_id,
+                );
+                terminals.push((run_id, "error".to_string(), message.content.clone()));
+                upsert_assistant_message(conversation, message);
+                produced += 1;
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+            Ok(ArmReplyOutcome {
+                message: None,
+                run_id: _,
+                error: _,
+            }) => {
                 // 不应发生（arm 模式必返回消息），保守计为无产出。
             }
             Err(err) if err == "cancelled" => {
@@ -110,10 +157,25 @@ pub(super) async fn run_reply_fan_out(
             .filter(|message| message.group_id.as_deref() == Some(group_id))
             .cloned()
             .collect();
-        let mut persisted = crate::chat::repository::repository(app)
+        let persisted_result = crate::chat::repository::repository(app)
             .upsert_messages(app, &conversation.id, arm_messages)
             .await
-            .map_err(crate::chat::repository::repository_error)?;
+            .map_err(crate::chat::repository::repository_error);
+        let mut persisted = match persisted_result {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                for (run_id, _, _) in terminals {
+                    crate::chat::protocol::finish_run(
+                        app,
+                        &run_id,
+                        &error,
+                        "",
+                        conversation.revision,
+                    );
+                }
+                return Err(error);
+            }
+        };
         for attempt in 0..2 {
             match compute_context_state(app, state, &persisted, None, &[]).await {
                 Ok(context_state) => {
@@ -123,23 +185,30 @@ pub(super) async fn run_reply_fan_out(
                     {
                         Ok(latest) => {
                             persisted = latest;
-                            emit_chat_context_state(
-                                app,
-                                &persisted.id,
-                                &persisted.context_state,
-                            );
+                            emit_chat_context_state(app, &persisted.id, &persisted.context_state);
                             break;
                         }
                         Err(crate::chat::repository::ConversationRepositoryError::Conflict {
                             ..
                         }) if attempt == 0 => {
-                            persisted = crate::chat::repository::repository(app)
+                            match crate::chat::repository::repository(app)
                                 .get(app, &conversation.id)
                                 .await
-                                .map_err(crate::chat::repository::repository_error)?;
+                                .map_err(crate::chat::repository::repository_error)
+                            {
+                                Ok(latest) => persisted = latest,
+                                Err(error) => {
+                                    eprintln!(
+                                        "Conversation reload failed after multi-model fan-out context conflict: {error}"
+                                    );
+                                    break;
+                                }
+                            }
                         }
                         Err(err) => {
-                            eprintln!("Context state commit failed after multi-model fan-out: {err}");
+                            eprintln!(
+                                "Context state commit failed after multi-model fan-out: {err}"
+                            );
                             break;
                         }
                     }
@@ -151,9 +220,21 @@ pub(super) async fn run_reply_fan_out(
             }
         }
         *conversation = persisted;
+        for (run_id, outcome, content) in terminals {
+            crate::chat::protocol::finish_run(
+                app,
+                &run_id,
+                &outcome,
+                &content,
+                conversation.revision,
+            );
+        }
         return Ok(());
     }
 
+    for (run_id, outcome, content) in terminals {
+        crate::chat::protocol::finish_run(app, &run_id, &outcome, &content, conversation.revision);
+    }
     if cancelled > 0 && first_error.is_none() {
         return Err("cancelled".to_string());
     }

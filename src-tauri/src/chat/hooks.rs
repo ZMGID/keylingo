@@ -3,7 +3,7 @@
 //!
 //! **调度端到端在 Rust**。生命周期事件天然发生在 `chat/agent/loop_.rs`，把执行链放到
 //! 前端就要为每个事件加一条 Tauri 事件 + 一次 IPC 往返 + 一套跨进程 scope 取消注册表。
-//! 前端只负责配置 UI 和展示失败警告（`chat-hook` 事件）。
+//! 前端只负责配置 UI 和展示失败警告（typed protocol event）。
 //!
 //! Hook 一律 **fire-and-forget**：不能拒绝工具调用、不能改写参数、不能强制模型继续。
 //! 失败只上报警告，绝不打断对话。
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::settings::HookDef;
 
@@ -97,7 +97,7 @@ struct HookJob {
     epoch: u64,
 }
 
-/// 失败上报通道。生产环境是 `app.emit("chat-hook", …)`；单测注入一个收集闭包，
+/// 失败上报通道。生产环境走 typed protocol hub；单测注入一个收集闭包，
 /// 于是整个执行器不依赖 Tauri 运行时即可测试。
 type FailureSink = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 
@@ -148,8 +148,29 @@ impl HookDispatcher {
         cwd: PathBuf,
         model: String,
     ) -> Option<Self> {
+        let sink_run_id = run_id.clone();
         let sink: FailureSink = Box::new(move |payload| {
-            let _ = app.emit("chat-hook", payload);
+            crate::chat::protocol::emit_run_event(
+                &app,
+                &sink_run_id,
+                crate::chat::protocol::ChatRunEvent::HookFailed {
+                    hook_name: payload
+                        .get("hookName")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    event: payload
+                        .get("event")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    message: payload
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                },
+            );
         });
         Self::with_sink(
             hooks,

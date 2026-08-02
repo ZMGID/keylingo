@@ -65,6 +65,10 @@ pub struct AskUserResponseResult {
 }
 
 pub struct PendingAskUserPrompt {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub message_id: String,
+    pub tool_call_id: String,
     pub prompt: AskUserPromptPayload,
     pub sender: oneshot::Sender<AskUserResponseResult>,
 }

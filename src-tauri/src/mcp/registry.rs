@@ -1195,15 +1195,13 @@ async fn resolve_native_workspace(
     let Some(native_ctx) = native_ctx else {
         return Ok(NativeToolWorkspace::standalone());
     };
-    let conversation =
-        crate::chat::storage::load_conversation(app, &native_ctx.conversation_id).map_err(
-            |err| {
-                format!(
-                    "Resolve native tool workspace failed for conversation {}: {err}",
-                    native_ctx.conversation_id
-                )
-            },
-        )?;
+    let conversation = crate::chat::storage::load_conversation(app, &native_ctx.conversation_id)
+        .map_err(|err| {
+            format!(
+                "Resolve native tool workspace failed for conversation {}: {err}",
+                native_ctx.conversation_id
+            )
+        })?;
     let Some(project) = crate::chat::storage::resolve_conversation_project(app, &conversation)?
     else {
         let directory = crate::chat::repository::repository(app)
@@ -1241,6 +1239,7 @@ pub(super) async fn run_python_via_pyodide(
         .clamp(1_000, 300_000);
     let input_files = collect_python_input_files(app, workspace, arguments)?;
     let run_id = uuid::Uuid::new_v4().to_string();
+    let parent = native_ctx.clone();
     let output_directory = workspace.default_output_directory()?;
     let export_ctx = native_ctx
         .map(|ctx| crate::native_tools::SandboxExportContext {
@@ -1256,6 +1255,24 @@ pub(super) async fn run_python_via_pyodide(
             output_directory,
         });
     let (tx, rx) = oneshot::channel();
+    let payload = crate::chat::protocol::ChatRunPythonPayload {
+        protocol_version: crate::chat::protocol::CHAT_PROTOCOL_VERSION,
+        request_id: run_id.clone(),
+        run_id: run_id.clone(),
+        parent_conversation_id: parent.as_ref().map(|ctx| ctx.conversation_id.clone()),
+        parent_run_id: parent.as_ref().map(|ctx| ctx.run_id.clone()),
+        parent_message_id: parent.as_ref().map(|ctx| ctx.message_id.clone()),
+        code: code.to_string(),
+        timeout_ms,
+        files: input_files
+            .into_iter()
+            .map(|file| crate::chat::protocol::ChatPythonInputFile {
+                name: file.name,
+                data_base64: file.data_base64,
+                size_bytes: file.size_bytes,
+            })
+            .collect(),
+    };
     {
         let mut pending = state
             .pending_python_runs
@@ -1266,24 +1283,21 @@ pub(super) async fn run_python_via_pyodide(
             crate::state::PendingPythonRun {
                 sender: tx,
                 export_ctx: export_ctx.clone(),
+                request: payload.clone(),
             },
         );
     }
-    let emit_result = app.emit(
-        "chat-run-python",
-        serde_json::json!({
-            "runId": run_id,
-            "code": code,
-            "timeoutMs": timeout_ms,
-            "files": input_files,
-        }),
-    );
+    if let Err(error) = crate::chat::protocol::attach_python_request(app, payload.clone()) {
+        eprintln!("Failed to attach Python request to chat snapshot: {error}");
+    }
+    let emit_result = app.emit("chat-run-python", payload);
     if let Err(err) = emit_result {
         let mut pending = state
             .pending_python_runs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         pending.remove(&run_id);
+        crate::chat::protocol::detach_python_request(app, &run_id);
         return Err(format!("Failed to start Python runner: {err}"));
     }
 
@@ -1345,6 +1359,7 @@ pub(super) async fn run_python_via_pyodide(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&run_id);
+            crate::chat::protocol::detach_python_request(app, &run_id);
             Err(format!("Python execution timed out after {timeout_ms}ms"))
         }
     }

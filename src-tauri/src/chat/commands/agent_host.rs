@@ -15,6 +15,7 @@ use super::messages::persist_partial_assistant_snapshot;
 pub(super) struct ChatAgentHost<'a> {
     pub(super) app: AppHandle,
     pub(super) state: &'a AppState,
+    pub(super) run_id: String,
     /// 多模型臂置 true：抑制 mid-run 部分快照落盘（协调者统一落盘）。默认 false（现状）。
     pub(super) suppress_partial_persist: bool,
     /// 用户配置的生命周期 Hooks。无启用 Hook 时为 `None`，loop 零开销。
@@ -70,7 +71,14 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         trigger: Option<&str>,
         boundary: Option<&CompactionBoundaryRecord>,
     ) {
-        emit_chat_compaction_state(&self.app, conversation_id, phase, trigger, boundary);
+        emit_chat_compaction_state(
+            &self.app,
+            conversation_id,
+            &self.run_id,
+            phase,
+            trigger,
+            boundary,
+        );
     }
 
     fn emit_context_usage_live(
@@ -82,6 +90,7 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         emit_chat_context_usage_live(
             &self.app,
             conversation_id,
+            &self.run_id,
             used_tokens,
             context_window_tokens,
         );
@@ -297,7 +306,7 @@ impl crate::chat::agent::ToolExecutor for RegistryToolExecutor<'_> {
                 generation: ctx.generation,
                 depth: ctx.depth,
             };
-            mcp::registry::call_tool(
+            let result = mcp::registry::call_tool(
                 &self.app,
                 self.state,
                 tool,
@@ -305,7 +314,22 @@ impl crate::chat::agent::ToolExecutor for RegistryToolExecutor<'_> {
                 skill_cache,
                 Some(native_ctx),
             )
-            .await
+            .await;
+            if result.is_ok() && crate::mcp::types::canonical_tool_name(&tool.name) == "todo_write"
+            {
+                if let Ok(conversation) =
+                    crate::chat::storage::load_conversation(&self.app, ctx.tool_conversation_id)
+                {
+                    crate::chat::protocol::emit_run_event(
+                        &self.app,
+                        ctx.run_id,
+                        crate::chat::protocol::ChatRunEvent::TodoUpdated {
+                            todo_state: (&conversation.agent_todo_state).into(),
+                        },
+                    );
+                }
+            }
+            result
         })
     }
 }

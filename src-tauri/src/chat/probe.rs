@@ -118,7 +118,7 @@ struct ProbeUsage {
 /// 生成过程中推给前端的「上下文占用活数」快照（一次一条，按到达顺序）。
 ///
 /// 轮末的 `contextState` 只能证明**结束后**的数对不对；用量条要不要在**过程中**跟着走，
-/// 在 app 层此前完全断言不了。这里靠 Rust 侧订阅 `chat-context`（与聊天窗口收的是同一条
+/// 在 app 层此前完全断言不了。这里靠 Rust 侧订阅 context protocol update（与聊天窗口收的是同一条
 /// 事件、同一份载荷）把过程中的每一次推送记下来，让端到端套件能断言
 /// 「一轮里至少推过一次」「数字单调不减」。
 ///
@@ -289,26 +289,34 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
 
     let started = Instant::now();
     // 订阅生成过程中的实时占用推送。用 Rust 侧的事件订阅（`app.listen`）而不是给生产代码
-    // 加旁路：`emit_chat_context_usage_live` 发的就是聊天窗口收的那一条 `chat-context`，
+    // 加旁路：`emit_chat_context_usage_live` 发的就是聊天窗口收的同一条 protocol update，
     // 这里收到什么前端就收到什么。整段是 probe 侧代码，生产路径零改动。
     let live_ticks: std::sync::Arc<std::sync::Mutex<Vec<ProbeLiveUsageTick>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let tick_sink = live_ticks.clone();
-    let tick_listener = app.listen("chat-context", move |event| {
+    let tick_listener = app.listen(crate::chat::protocol::CHAT_PROTOCOL_EVENT, move |event| {
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
             return;
         };
         // 只收实时载荷；轮末的权威快照（`contextState`）走 result 里的 `contextState`。
-        let Some(live) = payload.get("live").filter(|value| !value.is_null()) else {
+        if payload.get("type").and_then(|value| value.as_str()) != Some("context_usage_updated") {
+            return;
+        }
+        let Some(usage) = payload.get("usage") else {
             return;
         };
-        let used = live.get("usedTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let used = usage
+            .get("usedTokens")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
         tick_sink
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .push(ProbeLiveUsageTick {
                 used_tokens: used,
-                context_window_tokens: live.get("contextWindowTokens").and_then(|v| v.as_u64()),
+                context_window_tokens: usage
+                    .get("contextWindowTokens")
+                    .and_then(|value| value.as_u64()),
             });
     });
     let run = crate::chat::commands::run_chat_probe(app, &state, &req);

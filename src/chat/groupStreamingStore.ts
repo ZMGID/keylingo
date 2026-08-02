@@ -108,6 +108,38 @@ export function beginGroup(
   emit()
 }
 
+/** Rebuild one fan-out arm from protocol recovery metadata after a window reload. */
+export function restoreGroupArm(
+  conversationId: string,
+  groupId: string,
+  groupSize: number,
+  armIndex: number,
+  messageId: string,
+  providerId: string,
+  model: string,
+): GroupColumnSnapshot {
+  let group = activeGroups.get(conversationId)
+  if (!group || group.groupId !== groupId) {
+    const expectedColumns = Math.max(1, groupSize)
+    group = {
+      conversationId,
+      groupId,
+      expectedColumns,
+      columns: Array.from({ length: expectedColumns }, (_, index) => (
+        makeColumn(`pending-${groupId}-${index}`, null, null)
+      )),
+    }
+    activeGroups.set(conversationId, group)
+  }
+  const index = Math.min(Math.max(0, armIndex), group.columns.length - 1)
+  const column = group.columns[index]
+  column.messageId = messageId
+  column.providerId = providerId
+  column.model = model
+  emit()
+  return column
+}
+
 /** 该会话当前是否处于多答组流式中。 */
 export function hasActiveGroup(conversationId: string): boolean {
   return activeGroups.has(conversationId)

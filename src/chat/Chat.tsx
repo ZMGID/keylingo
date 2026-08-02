@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { GitBranch, PanelRight, X } from 'lucide-react'
+import { GitBranch, PanelRight, TriangleAlert, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
@@ -130,8 +130,10 @@ import {
   endGroup,
   ensureGroupColumn,
   flushGroups,
+  getActiveGroup,
   hasActiveGroup,
   resetGroups,
+  restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
 import { compareTimelineSegments, segmentStepNumber, segmentToolCallId } from './segments'
@@ -412,15 +414,17 @@ function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
 }
 
 function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment | null {
-  const raw = payload.segment ?? null
-  const id = payload.segmentId ?? raw?.id
-  const kind = payload.segmentKind ?? raw?.kind
-  const phase = payload.phase ?? raw?.phase
-  const order = payload.order ?? raw?.order
+  const raw = payload.type === 'text_delta' || payload.type === 'reasoning_delta'
+    ? payload.segment
+    : null
+  const id = raw?.id
+  const kind = raw?.kind
+  const phase = raw?.phase
+  const order = raw?.order
   if (!id || !kind || !phase || order == null) return null
 
-  const stepNumber = raw?.step_number ?? raw?.stepNumber ?? payload.stepNumber ?? null
-  const toolCallId = raw?.tool_call_id ?? raw?.toolCallId ?? payload.toolCallId ?? null
+  const stepNumber = raw?.stepNumber ?? null
+  const toolCallId = raw?.toolCallId ?? null
   return {
     id,
     kind,
@@ -428,11 +432,32 @@ function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment 
     order,
     step_number: stepNumber,
     stepNumber,
-    round: raw?.round ?? payload.round ?? null,
+    round: raw?.round ?? null,
     text: raw?.text ?? null,
     tool_call_id: toolCallId,
     toolCallId,
   }
+}
+
+function streamTextDelta(payload: ChatStreamPayload): string {
+  return payload.type === 'text_delta' ? payload.delta : ''
+}
+
+function streamReasoningDelta(payload: ChatStreamPayload): string {
+  return payload.type === 'reasoning_delta' ? payload.delta : ''
+}
+
+function isStreamTerminal(payload: ChatStreamPayload): boolean {
+  return payload.type === 'run_completed'
+    || payload.type === 'run_cancelled'
+    || payload.type === 'run_failed'
+}
+
+function streamTerminalReason(payload: ChatStreamPayload): 'done' | 'cancelled' | 'error' | undefined {
+  if (payload.type === 'run_completed') return 'done'
+  if (payload.type === 'run_cancelled') return 'cancelled'
+  if (payload.type === 'run_failed') return 'error'
+  return undefined
 }
 
 function upsertStreamSegment(
@@ -550,21 +575,23 @@ function updateReasoningSegmentDuration(
   }
 }
 
-// 把一条 chat-stream delta 累积进给定快照（会话单流 or 多答组某列共用）。
+// 把一条协议 delta 累积进给定快照（会话单流 or 多答组某列共用）。
 // 原地 mutate snapshot；segment 已由调用方算好。返回 void。
 function applyStreamDeltaToSnapshot(
   snapshot: ConversationStreamSnapshot,
   payload: ChatStreamPayload,
   segment: ChatMessageSegment | null,
 ) {
+  const textDelta = streamTextDelta(payload)
+  const reasoningDelta = streamReasoningDelta(payload)
   if (segment) {
     snapshot.segments = upsertStreamSegment(
       snapshot.segments,
       segment,
-      segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+      segment.kind === 'reasoning' ? reasoningDelta : textDelta,
     )
   }
-  if (payload.reasoningDelta) {
+  if (reasoningDelta) {
     const now = Date.now()
     if (snapshot.reasoningStartedAt == null) {
       snapshot.reasoningStartedAt = now
@@ -576,13 +603,13 @@ function applyStreamDeltaToSnapshot(
     }
     snapshot.streaming = true
     snapshot.reasoningStreaming = true
-    snapshot.reasoning += payload.reasoningDelta
+    snapshot.reasoning += reasoningDelta
     snapshot.reasoningDurationMs = Math.max(
       snapshot.reasoningDurationMs ?? 0,
       now - snapshot.reasoningStartedAt,
     )
   }
-  if (payload.delta) {
+  if (textDelta) {
     if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
       snapshot.reasoningDurationMs = Math.max(
         snapshot.reasoningDurationMs ?? 0,
@@ -597,7 +624,7 @@ function applyStreamDeltaToSnapshot(
     }
     snapshot.streaming = true
     snapshot.reasoningStreaming = false
-    snapshot.content += payload.delta
+    snapshot.content += textDelta
   }
 }
 
@@ -617,7 +644,7 @@ function finalizeReasoningDurationOnDone(snapshot: ConversationStreamSnapshot) {
   }
 }
 
-// 把一条 chat-tool record 累积进给定快照（会话单流 or 多答组某列共用）。原地 mutate。
+// 把一条协议 tool record 累积进给定快照（会话单流 or 多答组某列共用）。原地 mutate。
 function applyToolRecordToSnapshot(
   snapshot: ConversationStreamSnapshot,
   record: ToolCallRecord,
@@ -858,9 +885,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [agentLoopCompacting, setAgentLoopCompacting] = useState(false)
   const [animateCompactionBoundaryId, setAnimateCompactionBoundaryId] = useState<string | null>(null)
   const [contextError, setContextError] = useState('')
-  // Hook 执行失败（chat-hook）：非阻断警告条。ponytail: 只留最新一条 —— Hook 是旁路观测，
+  // Hook 执行失败：非阻断警告条。ponytail: 只留最新一条 —— Hook 是旁路观测，
   // 堆一个可滚动的失败列表没有对应的用户动作。
   const [hookWarning, setHookWarning] = useState<ChatHookPayload | null>(null)
+  const [protocolVersionMismatch, setProtocolVersionMismatch] = useState(false)
   const [imageViewerItem, setImageViewerItem] = useState<ChatImageViewerItem | null>(null)
   // 导入的对话：CLI 那边是否已经有新内容（ADR-0002）。只提示，不同步。
   const [importedHistoryStale, setImportedHistoryStale] = useState(false)
@@ -895,6 +923,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const locallyCancelledConversationIdRef = useRef<string | null>(null)
   const locallyCancelledRunIdRef = useRef<string | null>(null)
   const inFlightConversationsRef = useRef<Set<string>>(new Set())
+  const restoredRunIdsRef = useRef<Set<string>>(new Set())
   const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
@@ -985,6 +1014,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   ), [])
 
   const applyConversation = useCallback((conversation: Conversation | null) => {
+    const current = currentConversationRef.current
+    if (
+      conversation
+      && current
+      && conversation.id === current.id
+      && conversation.revision < current.revision
+    ) {
+      return
+    }
     // 兜底网：后端已在所有返回 Conversation 的命令出口剥离 model_messages/api_messages
     // （strip_transcripts_for_frontend），所以正常路径到这里已是轻量副本。这里再剥一次，确保
     // 任何遗漏/未来新增的后端出口都不会把这两份前端永不读的转录留进 React state。后端回放读盘
@@ -1006,9 +1044,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // messages 数组引用**。否则每条消息都变成新对象，击穿 MessageBubble/ChatMarkdown 的 memo，
   // 历史消息里的 LaTeX 会整屏重渲闪一下。这类更新后端不会改 messages，沿用旧引用安全。
   const applyConversationMeta = useCallback((updated: Conversation) => {
-    setCurrentConversation((prev) =>
-      prev && prev.id === updated.id ? { ...updated, messages: prev.messages } : updated,
-    )
+    setCurrentConversation((prev) => {
+      if (prev?.id === updated.id && updated.revision < prev.revision) return prev
+      return prev && prev.id === updated.id ? { ...updated, messages: prev.messages } : updated
+    })
   }, [])
 
   const patchContextState = useCallback((nextState: ConversationContextState) => {
@@ -1770,6 +1809,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [applyConversation, clearStreamingPreview, localState, syncGeneratingConversationIds])
 
+  useTauriEvent(api.onChatProtocolIssue, ({ issue, conversationId }) => {
+    if (issue === 'version_mismatch') {
+      setProtocolVersionMismatch(true)
+    } else if (
+      issue === 'resync_required'
+      && conversationId
+      && conversationId === currentConversationIdRef.current
+    ) {
+      void reloadConversation(conversationId)
+    }
+  }, [reloadConversation])
+
   useTauriEvent(api.onChatStream, (payload) => {
       if (isLocallyCancelledPayload(
         payload,
@@ -1778,10 +1829,66 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       )) {
         return
       }
+      const terminal = isStreamTerminal(payload)
+      const terminalPayload = {
+        conversationId: payload.conversationId,
+        reason: streamTerminalReason(payload),
+      }
+      if (payload.type === 'run_started') {
+        if (payload.restoredFromSnapshot) restoredRunIdsRef.current.add(payload.runId)
+        const remainingApprovals = (pendingToolConfirmsRef.current[payload.conversationId] ?? [])
+          .filter((item) => item.runId !== payload.runId)
+        if (remainingApprovals.length > 0) {
+          pendingToolConfirmsRef.current[payload.conversationId] = remainingApprovals
+        } else {
+          delete pendingToolConfirmsRef.current[payload.conversationId]
+        }
+        if (currentConversationIdRef.current === payload.conversationId) {
+          setPendingToolConfirm(remainingApprovals[0] ?? null)
+        }
+        if (pendingSessionConsentsRef.current[payload.conversationId]?.runId === payload.runId) {
+          delete pendingSessionConsentsRef.current[payload.conversationId]
+          if (currentConversationIdRef.current === payload.conversationId) {
+            setPendingSessionConsent(null)
+          }
+        }
+        if (payload.recovery) {
+          restoreGroupArm(
+            payload.conversationId,
+            payload.recovery.groupId,
+            payload.recovery.groupSize,
+            payload.recovery.armIndex,
+            payload.messageId,
+            payload.recovery.providerId,
+            payload.recovery.model,
+          )
+        }
+        markConversationInFlight(payload.conversationId)
+        if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+          const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+          if (column) {
+            Object.assign(column, createEmptyStreamSnapshot(), {
+              runId: payload.runId,
+              streaming: true,
+              startedAt: Date.now(),
+            })
+            touchGroup()
+          }
+          return
+        }
+        const restored = createEmptyStreamSnapshot()
+        restored.runId = payload.runId
+        restored.streaming = true
+        restored.startedAt = Date.now()
+        streamSnapshotsRef.current[payload.conversationId] = restored
+        syncGeneratingConversationIds()
+        showStreamSnapshotIfCurrent(payload.conversationId, restored)
+        return
+      }
       if (!streamSnapshotsRef.current[payload.conversationId]) {
         if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
-          if (payload.done) {
-            void finishStreamingRun(payload)
+          if (terminal) {
+            void finishStreamingRun(terminalPayload)
           }
           return
         }
@@ -1796,11 +1903,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         if (!column) return
         const segment = streamPayloadToSegment(payload)
         applyStreamDeltaToSnapshot(column, payload, segment)
-        if (payload.done) {
+        if (terminal) {
           finalizeReasoningDurationOnDone(column)
           column.streaming = false
           // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
           flushGroups()
+          if (restoredRunIdsRef.current.delete(payload.runId)) {
+            const group = getActiveGroup(payload.conversationId)
+            if (group?.columns.every((item) => !item.streaming)) {
+              endGroup(payload.conversationId)
+              void finishStreamingRun(terminalPayload)
+            }
+          }
         } else {
           // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
           touchGroup()
@@ -1814,14 +1928,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         snapshot.runId = payload.runId
       }
       const segment = streamPayloadToSegment(payload)
+      const textDelta = streamTextDelta(payload)
+      const reasoningDelta = streamReasoningDelta(payload)
       if (segment) {
         snapshot.segments = upsertStreamSegment(
           snapshot.segments,
           segment,
-          segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+          segment.kind === 'reasoning' ? reasoningDelta : textDelta,
         )
       }
-      if (payload.reasoningDelta) {
+      if (reasoningDelta) {
         const now = Date.now()
         if (snapshot.reasoningStartedAt == null) {
           snapshot.reasoningStartedAt = now
@@ -1833,13 +1949,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         }
         snapshot.streaming = true
         snapshot.reasoningStreaming = true
-        snapshot.reasoning += payload.reasoningDelta
+        snapshot.reasoning += reasoningDelta
         snapshot.reasoningDurationMs = Math.max(
           snapshot.reasoningDurationMs ?? 0,
           now - snapshot.reasoningStartedAt,
         )
       }
-      if (payload.delta) {
+      if (textDelta) {
         if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
           snapshot.reasoningDurationMs = Math.max(
             snapshot.reasoningDurationMs ?? 0,
@@ -1854,11 +1970,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         }
         snapshot.streaming = true
         snapshot.reasoningStreaming = false
-        snapshot.content += payload.delta
+        snapshot.content += textDelta
       }
       syncGeneratingConversationIds()
       showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-      if (payload.done) {
+      if (terminal) {
         if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
           snapshot.reasoningDurationMs = Math.max(
             snapshot.reasoningDurationMs ?? 0,
@@ -1873,14 +1989,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         }
         // done：立即 flush 最后一帧，别让合帧吞掉收尾内容。
         showStreamSnapshotIfCurrent(payload.conversationId, snapshot, true)
-        // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
-        if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
-          pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(payload)
+        if (restoredRunIdsRef.current.delete(payload.runId)) {
+          void finishStreamingRun(terminalPayload)
           return
         }
-        void finishStreamingRun(payload)
+        // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
+        if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+          pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(terminalPayload)
+          return
+        }
+        void finishStreamingRun(terminalPayload)
       }
-  }, [ensureStreamSnapshot, finishStreamingRun, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
+  }, [ensureStreamSnapshot, finishStreamingRun, markConversationInFlight, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatContext, (payload) => {
     const currentConversationId = currentConversationIdRef.current
@@ -2007,7 +2127,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // Live nested sub-agent progress (P3): merge onto the parent tool card's
   // structuredContent.subagentProgress, addressed by parentToolCallId.
   useTauriEvent(api.onChatSubagent, (payload) => {
-      // A `chat-subagent` progress event must address an existing snapshot for
+      // A subagent progress event must address an existing snapshot for
       // the parent conversation (do NOT create one — that would resurrect a
       // finalized conversation). Accept whenever the conversation is in-flight
       // or a snapshot already exists.
@@ -2032,8 +2152,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         steps: payload.steps ?? [],
       }
       // Sub-agents run blocking + single-result: the parent tool card transitions
-      // running→done via the `chat-tool` flow (the inline result), while these
-      // `chat-subagent` events drive the live nested progress (steps/preview).
+      // running→done via the tool update flow (the inline result), while these
+      // subagent events drive the live nested progress (steps/preview).
       snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
         if (i !== index) return item
         const existing =
@@ -2135,6 +2255,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     void api.chatRespondSessionConsent(pendingSessionConsent.conversationId, granted)
     setPendingSessionConsent(null)
   }, [pendingSessionConsent])
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id
+    if (!conversationId) return
+    void api.chatSyncState(conversationId).catch((error) => {
+      console.error('Failed to synchronize chat protocol state:', error)
+    })
+  }, [currentConversation?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -4000,6 +4128,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               )}
               {conversationTitlebarControls}
                 </header>
+                )}
+
+                {protocolVersionMismatch && (
+                  <div
+                    className="flex shrink-0 items-center gap-2 border-y border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-900 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-100"
+                    role="alert"
+                  >
+                    <TriangleAlert className="shrink-0" size={15} aria-hidden="true" />
+                    <span>组件版本不一致，请重启 Kivio</span>
+                  </div>
                 )}
 
                 <div className="flex min-h-0 flex-1 flex-col">

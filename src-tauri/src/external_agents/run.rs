@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::chat::agent::AgentRunEntry;
@@ -316,6 +316,15 @@ pub async fn run_external_cli_reply(
     let run_generation = state.next_chat_generation(&conversation.id);
     let run_id = format!("ext-run-{}-{}", run_generation, Uuid::new_v4());
     let assistant_message_id = format!("msg_{}", Uuid::new_v4());
+    crate::chat::protocol::register_run(
+        app,
+        &conversation.id,
+        &run_id,
+        &assistant_message_id,
+        conversation.revision,
+    );
+    let _protocol_guard =
+        crate::chat::protocol::RegisteredRunGuard::new(app, &run_id, conversation.revision);
 
     // Phase 2 / B1: claude、codex app-server 与 ACP 家族都通过 live-session 注册表把进程跨轮
     // 保活。只剩 `PiRpc` 每轮起一个新子进程（见下面 `_ =>` 分支的注释）。
@@ -641,7 +650,7 @@ pub async fn run_external_cli_reply(
         is_slash,
     )?;
 
-    // A7：把 CLI 自压的边界落到会话上。此前只发了 `chat-compaction` 事件、从不落盘，
+    // A7：把 CLI 自压的边界落到会话上。此前只发了实时压缩更新、从不落盘，
     // 于是「已压缩 N 次」永远不涨、刷新或重开会话后分隔线消失（那条注释说要记一次压缩，
     // 但代码并没有做）。写在 `push_assistant_message` **之前**：它会用
     // `compute_context_state` 整体重算 `context_state`，而外部路径的重算会把
@@ -658,6 +667,8 @@ pub async fn run_external_cli_reply(
             .push(boundary.clone());
     }
 
+    let terminal_content = content.clone();
+    let terminal_outcome = stream_outcome.clone();
     push_assistant_message(
         app,
         state,
@@ -688,6 +699,14 @@ pub async fn run_external_cli_reply(
         None,
     )
     .await?;
+
+    crate::chat::protocol::finish_run(
+        app,
+        &run_id,
+        &terminal_outcome,
+        &terminal_content,
+        conversation.revision,
+    );
 
     Ok(())
 }
@@ -1370,7 +1389,7 @@ where
                 }
             }
             // 会话侧送来一条「这个工具能用吗」⇒ 复用内置 agent 那条审批链路去问用户
-            // （`chat-tool-confirm` 事件 + `chat_confirm_tool_call` 命令 + 同一张挂起表），
+            // （typed approval event + `chat_confirm_tool_call` 命令 + 同一张挂起表），
             // 不另建一套 UI（spec 第 2 条）。
             Some(ask) = async {
                 match ask_rx.as_mut() {
@@ -1418,7 +1437,7 @@ where
 /// 宿主侧回答工具审批询问所需的一切。
 ///
 /// 存在的意义只有一个：**把外部 CLI 的权限询问接到 Kivio 已有的那条审批链路上**
-/// （`chat-tool-confirm` 事件 → 前端确认卡 → `chat_confirm_tool_call` → 同一张
+/// （typed approval event → 前端确认卡 → `chat_confirm_tool_call` → 同一张
 /// `pending_chat_tool_approvals` 挂起表）。内置 agent 用的就是这一套，不许再造第二套
 /// （spec 第 2 条）。唯一需要的适配是 **id 映射**：Kivio 那侧按「工具调用 id」寻址，
 /// 而 CLI 给的是它自己的 `request_id` —— 所以卡片用 claude 的 `tool_use_id`（与工具卡同一个
@@ -1907,7 +1926,7 @@ fn push_tool_segment(
     segment
 }
 
-/// 构造一条 CLI 自压的边界记录，并发 `chat-compaction` 通知前端插分隔线。
+/// 构造一条 CLI 自压的边界记录，并发协议压缩更新通知前端插分隔线。
 ///
 /// payload 与内置路径（`chat/agent/compaction.rs::emit_compaction_event` /
 /// `chat/commands/context.rs::emit_chat_compaction_state`）同形，且**直接复用
@@ -1920,7 +1939,8 @@ fn push_tool_segment(
 /// 缺失时为 0，前端此时不显示「→ N」。
 fn emit_cli_compaction(
     app: &AppHandle,
-    conversation_id: &str,
+    _conversation_id: &str,
+    run_id: &str,
     anchor_message_id: &str,
     trigger: &str,
     pre_tokens: Option<u64>,
@@ -1942,14 +1962,14 @@ fn emit_cli_compaction(
         trigger: trigger.to_string(),
         created_at: now,
     };
-    let _ = app.emit(
-        "chat-compaction",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "phase": "completed",
-            "trigger": trigger,
-            "boundary": &boundary,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::CompactionUpdated {
+            phase: "completed".to_string(),
+            trigger: Some(trigger.to_string()),
+            boundary: Some((&boundary).into()),
+        },
     );
     boundary
 }
@@ -2185,6 +2205,7 @@ fn apply_unified_event(
                 crate::chat::commands::context::emit_chat_context_usage_live(
                     app,
                     conversation_id,
+                    run_id,
                     used,
                     window,
                 );
@@ -2221,7 +2242,7 @@ fn apply_unified_event(
         } => {
             // CLI **自己**压缩了上下文（claude 的 compact_boundary）。Kivio 并没有发
             // `/compact`，所以不能走 `external_agents::compact` 那条路；这里做两件事：
-            //   1. 发 `chat-compaction` 让前端**立刻**插入分隔线——否则用户只会看到
+            //   1. 发协议压缩更新让前端**立刻**插入分隔线——否则用户只会看到
             //      「对话突然变短了」而没有任何解释；
             //   2. 把同一条记录攒起来，读流结束后落到 `context_state`
             //      （计数 + 边界持久化，见调用方注释）。
@@ -2235,6 +2256,7 @@ fn apply_unified_event(
             cli_compactions.push(emit_cli_compaction(
                 app,
                 conversation_id,
+                run_id,
                 compaction_anchor_id,
                 &trigger,
                 pre_tokens,

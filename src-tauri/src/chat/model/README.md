@@ -14,7 +14,7 @@ Rules:
 - Provider adapters may use `serde_json::Value` freely at their wire boundary.
 - Storage can keep legacy `api_messages` for compatibility, but new replay logic should
   prefer canonical model messages when available.
-- Tauri event payloads remain stable: `chat-stream`, `chat-tool`, and `chat-context`
+- Realtime Tauri payloads are generated from the Rust `chat-protocol` contract.
   are UI contracts, not provider contracts.
 - Model-generated images are protocol-agnostic on the contract: adapters parse each
   wire format's output-image shape (Gemini `inlineData`, …) into `GenerateOutput.images`

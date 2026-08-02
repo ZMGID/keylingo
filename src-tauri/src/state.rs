@@ -35,6 +35,15 @@ pub struct PendingChatExternalAttachment {
 pub struct PendingPythonRun {
     pub sender: oneshot::Sender<PythonRunResult>,
     pub export_ctx: SandboxExportContext,
+    pub request: crate::chat::protocol::ChatRunPythonPayload,
+}
+
+#[derive(Debug)]
+pub struct PendingSessionConsent {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub message_id: String,
+    pub sender: oneshot::Sender<bool>,
 }
 
 /// 一条挂起的敏感工具审批。除 sender 外还带上 conversation_id + 工具名，因为
@@ -42,6 +51,8 @@ pub struct PendingPythonRun {
 #[derive(Debug)]
 pub struct PendingToolApproval {
     pub conversation_id: String,
+    pub run_id: String,
+    pub message_id: String,
     pub tool_name: String,
     pub sender: oneshot::Sender<bool>,
 }
@@ -129,6 +140,8 @@ pub struct AppState {
     /// 正在进行 assistant 回复生成的 (conversation_id → run_id 集合)，防止同对话同一 run 重复，
     /// 但允许同一会话多条 run 并存（多模型一问多答）。
     pub chat_active_replies: Mutex<HashMap<String, HashSet<String>>>,
+    /// Sequenced, replayable realtime chat protocol state keyed by run id.
+    pub chat_protocol: Mutex<crate::chat::protocol::ChatProtocolHub>,
     /// 等待用户确认的敏感 Chat tool 调用（key = tool_call_id）。
     pub pending_chat_tool_approvals: Mutex<HashMap<String, PendingToolApproval>>,
     /// 本对话已按工具名授予的「总是允许」集合：`(conversation_id, 小写工具名)`。
@@ -138,7 +151,7 @@ pub struct AppState {
     /// 仅内存、不持久化:重启后重新授权(也是一道轻量安全属性)。
     pub chat_session_consent: Mutex<HashSet<String>>,
     /// 等待用户响应的会话级授权请求(按 conversation_id,同一会话同时至多一个)。
-    pub pending_chat_session_consents: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    pub pending_chat_session_consents: Mutex<HashMap<String, PendingSessionConsent>>,
     /// 串行化会话授权弹窗:同一时刻全局只发一个授权请求。首轮多个并行只读工具
     /// (read/grep/find/ls)同时触发授权时,避免互相覆盖 pending sender 导致「假拒绝」——
     /// 拿到锁后先复查 has_chat_consent,领头者授权后其余直接复用、不再弹窗。
@@ -317,6 +330,7 @@ impl AppState {
             chat_stream_generation: AtomicU64::new(0),
             chat_active_generations: Mutex::new(HashMap::new()),
             chat_active_replies: Mutex::new(HashMap::new()),
+            chat_protocol: Mutex::new(crate::chat::protocol::ChatProtocolHub::default()),
             pending_chat_tool_approvals: Mutex::new(HashMap::new()),
             chat_tool_always_allow: Mutex::new(HashSet::new()),
             chat_session_consent: Mutex::new(HashSet::new()),

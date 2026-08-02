@@ -318,6 +318,7 @@ pub(crate) async fn push_assistant_message(
 
     let first_user = title_from_first_user.map(str::to_string);
     let message_plan = message.agent_plan.clone();
+    let plan_update = message_plan.clone();
     let conversation_id = conversation.id.clone();
     let mut persisted = crate::chat::repository::repository(app)
         .mutate(app, &conversation_id, |latest| {
@@ -379,6 +380,9 @@ pub(crate) async fn push_assistant_message(
     }
 
     *conversation = persisted;
+    if let Some(plan) = plan_update {
+        emit_chat_plan_state(app, &conversation_id, &plan);
+    }
     Ok(())
 }
 
@@ -772,7 +776,6 @@ fn edited_assistant_model_messages(message: &ChatMessage) -> Vec<ModelMessage> {
 }
 
 pub(super) fn capture_agent_plan_draft_if_needed(
-    app: &AppHandle,
     conversation: &mut Conversation,
     original_plan_mode: bool,
     content: &str,
@@ -796,7 +799,6 @@ pub(super) fn capture_agent_plan_draft_if_needed(
         };
     }
     conversation.agent_plan_state = next_state.clone();
-    emit_chat_plan_state(app, &conversation.id, &next_state);
     Some(next_state)
 }
 

@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
 
 use crate::agents::AgentDefinition;
@@ -443,20 +443,19 @@ impl SubAgentHost {
             guard.last_emit = Some(now);
             (clip(&guard.text, 1200), guard.aggregate_steps())
         };
-        let _ = self.app.emit(
-            "chat-subagent",
-            serde_json::json!({
-                "parentConversationId": self.parent_conversation_id,
-                "parentRunId": self.parent_run_id,
-                "parentToolCallId": self.parent_tool_call_id,
-                "taskId": self.task_id,
-                "name": self.name,
-                "model": self.model,
-                "depth": self.depth,
-                "status": status,
-                "preview": text,
-                "steps": steps,
-            }),
+        crate::chat::protocol::emit_run_event(
+            &self.app,
+            &self.parent_run_id,
+            crate::chat::protocol::ChatRunEvent::SubagentUpdated {
+                parent_tool_call_id: self.parent_tool_call_id.clone(),
+                task_id: self.task_id.clone(),
+                name: self.name.clone(),
+                model: Some(self.model.clone()),
+                depth: self.depth,
+                status: status.to_string(),
+                preview: Some(text),
+                steps,
+            },
         );
     }
 }
@@ -1325,8 +1324,8 @@ impl Drop for SpawnDropGuard {
 /// Turn a sub-agent run outcome into the task record update + tool result.
 /// Marks the record finished and returns the `McpToolCallResult` (returned
 /// inline to the parent loop). The synchronous path emits NO terminal
-/// `chat-subagent` event: the full result (status + content + usage) propagates
-/// inline via the `chat-tool` flow, and the card keeps the last running progress
+/// Protocol subagent update: the full result (status + content + usage) propagates
+/// inline via the tool update flow, and the card keeps the last running progress
 /// event's accumulated steps/preview — a terminal event (whose payload omits
 /// steps/preview) would overwrite `subagentProgress` with empty arrays and wipe
 /// that step history. Resolves `AppState`/manager from the owned `AppHandle`.

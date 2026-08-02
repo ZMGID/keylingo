@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model::openai_messages_from_model_messages;
@@ -58,7 +58,12 @@ pub(crate) async fn chat_get_context_stats(
         compute_context_state(&app, &state, &conversation, None, &[]).await?
     };
     conversation = crate::chat::repository::repository(&app)
-        .update_context(&app, &conversation_id, conversation.revision, context_state.clone())
+        .update_context(
+            &app,
+            &conversation_id,
+            conversation.revision,
+            context_state.clone(),
+        )
         .await
         .map_err(crate::chat::repository::repository_error)?;
     strip_transcripts_for_frontend(&mut conversation);
@@ -105,7 +110,12 @@ pub(crate) async fn chat_compress_context(
     let context_state = compute_context_state(&app, &state, &conversation, None, &[]).await?;
     conversation.context_state = context_state.clone();
     conversation = crate::chat::repository::repository(&app)
-        .update_context(&app, &conversation_id, conversation.revision, context_state.clone())
+        .update_context(
+            &app,
+            &conversation_id,
+            conversation.revision,
+            context_state.clone(),
+        )
         .await
         .map_err(crate::chat::repository::repository_error)?;
     emit_chat_context_state(&app, &conversation.id, &context_state);
@@ -826,7 +836,9 @@ pub(super) async fn rollback_user_message_after_failed_send(
     let context_state = conversation.context_state.clone();
     let persisted = crate::chat::repository::repository(app)
         .mutate(app, &conversation.id, |latest| {
-            latest.messages.retain(|message| message.id != user_message_id);
+            latest
+                .messages
+                .retain(|message| message.id != user_message_id);
             latest.context_state = context_state;
             Ok(())
         })
@@ -913,20 +925,24 @@ pub(super) async fn compress_conversation_context(
 pub(super) fn emit_chat_context_state(
     app: &AppHandle,
     conversation_id: &str,
-    context_state: &ConversationContextState,
+    _context_state: &ConversationContextState,
 ) {
-    let _ = app.emit(
-        "chat-context",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "contextState": context_state,
-        }),
+    let Ok(conversation) = crate::chat::storage::load_conversation(app, conversation_id) else {
+        return;
+    };
+    crate::chat::protocol::emit_conversation_event(
+        app,
+        conversation_id,
+        conversation.revision,
+        crate::chat::protocol::ChatConversationEvent::ContextUpdated {
+            context_state: (&conversation.context_state).into(),
+        },
     );
 }
 
 /// **生成过程中**的上下文占用活数（分子 + 分母）。
 ///
-/// 复用 `chat-context` 这一条既有通道（不新造事件）：同一个主题、同一个订阅者、同一套
+/// 复用统一协议的 context update（不新造事件）：同一个主题、同一个订阅者、同一套
 /// conversationId 路由。载荷用 `live` 与权威快照 `contextState` 区分——权威快照那条要读磁盘、
 /// 连 MCP 列工具、算分段，绝不能放在每个增量上（spec 第 9 条的精神）；实时这条只带两个数，
 /// 前端就地更新分子/分母与比例，其余字段（分段、压缩计数、来源标签）留给轮末的权威计算。
@@ -935,37 +951,39 @@ pub(super) fn emit_chat_context_state(
 /// （分母粘滞，见 `applyLiveContextUsage`）：claude 的窗口只在轮末那条 `result` 里带。
 pub(crate) fn emit_chat_context_usage_live(
     app: &AppHandle,
-    conversation_id: &str,
+    _conversation_id: &str,
+    run_id: &str,
     used_tokens: u64,
     context_window_tokens: Option<u64>,
 ) {
-    let _ = app.emit(
-        "chat-context",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "live": {
-                "usedTokens": used_tokens,
-                "contextWindowTokens": context_window_tokens,
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::ContextUsageUpdated {
+            usage: crate::chat::protocol::ChatContextUsagePayload {
+                used_tokens,
+                context_window_tokens,
             },
-        }),
+        },
     );
 }
 
 pub(super) fn emit_chat_compaction_state(
     app: &AppHandle,
-    conversation_id: &str,
+    _conversation_id: &str,
+    run_id: &str,
     phase: &str,
     trigger: Option<&str>,
     boundary: Option<&CompactionBoundaryRecord>,
 ) {
-    let _ = app.emit(
-        "chat-compaction",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "phase": phase,
-            "trigger": trigger,
-            "boundary": boundary,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::CompactionUpdated {
+            phase: phase.to_string(),
+            trigger: trigger.map(str::to_string),
+            boundary: boundary.map(Into::into),
+        },
     );
 }
 

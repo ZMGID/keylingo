@@ -97,7 +97,7 @@ export function buildContextBarSlices(
 /**
  * 生成过程中的「上下文占用活数」就地补进已有的上下文状态。
  *
- * 后端在回答生成过程中通过 `chat-context` 的 `live` 载荷推来两个数（分子 + 分母）；
+ * 后端在回答生成过程中通过统一协议的 live context update 推来两个数（分子 + 分母）；
  * 轮末仍会有一次权威计算覆盖它（那次还带分段明细、压缩计数、来源标签）。这里只动能由
  * 这两个数直接推出的字段，其余一律沿用旧值——尤其 `status` / `token_count_source`：
  * 它们的判定阈值与口径在 Rust 侧（`external_agents/context.rs`），在前端再写一套就是两份口径。

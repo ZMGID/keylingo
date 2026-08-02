@@ -6,7 +6,7 @@ use crate::chat::types::{
 };
 use crate::settings::Settings;
 use crate::state::AppState;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use super::loop_::{LoopEnv, RunState};
 use super::planning::call_chat_completion_message_streamed;
@@ -1567,7 +1567,7 @@ pub(crate) fn accumulate_source_ids(conversation: &Conversation, until_id: &str)
 /// 落盘压缩统一入口（手动 `chat_compress_context` / 自动发送前 / L2 run 结束三处共用）。
 /// 按 token 尾窗切 old_segment / recent_tail，序列化 old_segment（含完整工具转录，工具结果截 2000 字），
 /// 调统一核心 `compact_with_summary_model`（Claude 9 段 prompt + 流式 + 质量兜底），写回
-/// `context_state.summary` + `compaction_boundaries` + `compression_count`，发 `chat-compaction` 事件。
+/// `context_state.summary` + `compaction_boundaries` + `compression_count`，发协议压缩更新。
 ///
 /// `trigger`: `"manual"` | `"auto"`。`focus`：手动 `/compact <focus>` 聚焦指令（自动为 None）。
 /// 失败 / 无可摘要旧段 / 摘要质量不达标 → `Err`，**不覆盖**旧 summary。
@@ -1755,23 +1755,16 @@ async fn compact_conversation_inner(
     Ok(())
 }
 
-/// 发 `chat-compaction` 事件（与 commands/context.rs 的 `emit_chat_compaction_state` 同 payload）。
+/// 发协议压缩更新（与 commands/context.rs 的 `emit_chat_compaction_state` 同 payload）。
 fn emit_compaction_event(
-    app: &AppHandle,
-    conversation_id: &str,
-    phase: &str,
-    trigger: Option<&str>,
-    boundary: Option<&CompactionBoundaryRecord>,
+    _app: &AppHandle,
+    _conversation_id: &str,
+    _phase: &str,
+    _trigger: Option<&str>,
+    _boundary: Option<&CompactionBoundaryRecord>,
 ) {
-    let _ = app.emit(
-        "chat-compaction",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "phase": phase,
-            "trigger": trigger,
-            "boundary": boundary,
-        }),
-    );
+    // Run-scoped compaction progress is emitted by ChatAgentHost. Manual
+    // compaction is represented by the persisted conversation context event.
 }
 
 /// 由当前会话解析出主模型（供 compression/title 等 auxiliary 任务在 mixer 选 auto 时跟随）。

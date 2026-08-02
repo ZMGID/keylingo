@@ -73,6 +73,13 @@ pub(super) async fn complete_direct_image_generation_reply(
                 "cancelled",
                 "",
             );
+            crate::chat::protocol::finish_run(
+                app,
+                run_id,
+                "cancelled",
+                "",
+                conversation.revision,
+            );
             return Err("cancelled".to_string());
         }
     };
@@ -119,6 +126,13 @@ pub(super) async fn complete_direct_image_generation_reply(
                 None,
             )
             .await?;
+            crate::chat::protocol::finish_run(
+                app,
+                run_id,
+                "completed",
+                &content,
+                conversation.revision,
+            );
             Ok(())
         }
         Ok(output) => {
@@ -127,6 +141,7 @@ pub(super) async fn complete_direct_image_generation_reply(
                 "Direct image generation failed after {}ms: {err}",
                 started.elapsed().as_millis()
             );
+            crate::chat::protocol::finish_run(app, run_id, "error", "", conversation.revision);
             Err(err)
         }
         Err(err) => {
@@ -134,6 +149,7 @@ pub(super) async fn complete_direct_image_generation_reply(
                 "Direct image generation failed after {}ms: {err}",
                 started.elapsed().as_millis()
             );
+            crate::chat::protocol::finish_run(app, run_id, "error", "", conversation.revision);
             Err(err)
         }
     }

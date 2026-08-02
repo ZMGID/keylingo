@@ -6,6 +6,20 @@ import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { normalizeThemeColorId } from '../themeColors'
+import {
+  subscribeChatProtocol,
+  subscribeChatProtocolIssues,
+  subscribeChatPython,
+  syncChatProtocol,
+  type ChatProtocolDelivery,
+  type ChatProtocolIssue,
+} from './chatProtocol'
+import type {
+  ChatProtocolEvent,
+  ChatRunEventEnvelope,
+  ChatSegmentPayload as GeneratedChatSegmentPayload,
+  ChatRunPythonPayload as GeneratedChatRunPythonPayload,
+} from '../generated/chatProtocol'
 
 // ========== 类型定义 ==========
 
@@ -49,43 +63,12 @@ export type LensStreamPayload = {
   full?: string
 }
 
-export type ChatStreamSegmentKind = 'text' | 'reasoning' | 'tool'
+export type ChatStreamSegment = GeneratedChatSegmentPayload
 
-export type ChatStreamSegmentPhase = 'auxiliary' | 'plain' | 'tool_loop' | 'synthesis'
-
-export type ChatStreamSegment = {
-  id: string
-  kind: ChatStreamSegmentKind
-  phase: ChatStreamSegmentPhase
-  order: number
-  step_number?: number | null
-  stepNumber?: number | null
-  round?: number | null
-  text?: string | null
-  tool_call_id?: string | null
-  toolCallId?: string | null
-}
-
-export type ChatStreamPayload = {
-  conversationId: string
-  runId: string
-  messageId?: string
-  imageId?: string
-  kind: 'answer'
-  delta: string
-  reasoningDelta?: string
-  segmentId?: string | null
-  segmentKind?: ChatStreamSegmentKind | null
-  phase?: ChatStreamSegmentPhase | null
-  order?: number | null
-  stepNumber?: number | null
-  round?: number | null
-  toolCallId?: string | null
-  segment?: ChatStreamSegment | null
-  done?: boolean
-  reason?: 'done' | 'cancelled' | 'error'
-  full?: string
-}
+export type ChatStreamPayload = Extract<
+  ChatRunEventEnvelope,
+  { type: 'run_started' | 'text_delta' | 'reasoning_delta' | 'run_completed' | 'run_cancelled' | 'run_failed' }
+> & { restoredFromSnapshot?: boolean }
 
 export type ChatExternalSendAttachment = {
   id: string
@@ -443,16 +426,7 @@ export type ChatNativeToolsConfig = {
   workspaceRoots?: string[]
 }
 
-export type ChatRunPythonPayload = {
-  runId: string
-  code: string
-  timeoutMs: number
-  files?: Array<{
-    name: string
-    dataBase64: string
-    sizeBytes: number
-  }>
-}
+export type ChatRunPythonPayload = GeneratedChatRunPythonPayload
 
 export type ChatPastedImageResult = {
   success: boolean
@@ -563,7 +537,7 @@ export type HookDef = {
   timeoutMs: number
 }
 
-/** Hook 执行失败上报（事件名 chat-hook）。fire-and-forget，只展示警告不打断对话。 */
+/** Hook 执行失败上报。fire-and-forget，只展示警告不打断对话。 */
 export type ChatHookPayload = {
   conversationId: string
   runId: string
@@ -1740,6 +1714,12 @@ async function on<T>(event: string, handler: (payload: T) => void): Promise<Unli
   }
 }
 
+async function onChatProtocol(
+  handler: (payload: ChatProtocolEvent, delivery: ChatProtocolDelivery) => void,
+): Promise<Unlisten> {
+  return subscribeChatProtocol(handler)
+}
+
 // ========== API 导出 ==========
 
 export const api = {
@@ -1896,59 +1876,171 @@ export const api = {
     on<LensStreamPayload>('lens-stream', (payload) => listener(payload)),
   onChatStream: (listener: (payload: ChatStreamPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatStreamPayload>('chat-stream', (payload) => listener(payload))
+    return onChatProtocol((event, delivery) => {
+      if (event.scope !== 'run') return
+      if (
+        event.type === 'run_started'
+        || event.type === 'text_delta'
+        || event.type === 'reasoning_delta'
+        || event.type === 'run_completed'
+        || event.type === 'run_cancelled'
+        || event.type === 'run_failed'
+      ) {
+        listener({ ...event, restoredFromSnapshot: delivery.source === 'snapshot' })
+      }
+    })
   },
   onChatContext: (listener: (payload: ChatContextPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatContextPayload>('chat-context', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.type === 'context_updated' && event.scope === 'conversation') {
+        listener({ conversationId: event.conversationId, contextState: event.contextState as ChatContextState })
+      } else if (event.type === 'context_usage_updated' && event.scope === 'run') {
+        listener({ conversationId: event.conversationId, live: event.usage })
+      }
+    })
   },
   onChatCompaction: (listener: (payload: ChatCompactionPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatCompactionPayload>('chat-compaction', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'compaction_updated') return
+      listener({
+        conversationId: event.conversationId,
+        phase: event.phase,
+        trigger: event.trigger ?? undefined,
+        boundary: event.boundary as CompactionBoundaryRecord | null,
+      })
+    })
   },
   onChatTodo: (listener: (payload: ChatTodoPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatTodoPayload>('chat-todo', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.type !== 'todo_updated') return
+      listener({ conversationId: event.conversationId, todoState: event.todoState as ChatTodoState })
+    })
   },
   onChatPlan: (listener: (payload: ChatPlanPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatPlanPayload>('chat-plan', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.type !== 'plan_updated') return
+      listener({ conversationId: event.conversationId, planState: event.planState as ChatPlanState })
+    })
   },
   onChatTool: (listener: (payload: ChatToolProgressPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatToolProgressPayload>('chat-tool', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'tool_updated') return
+      const tool = event.tool
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        messageId: event.messageId,
+        toolCallId: tool.id,
+        ...tool,
+        status: tool.status as ChatToolStatus,
+        artifacts: tool.artifacts as ChatToolArtifact[],
+      })
+    })
   },
   /** 生命周期 Hook 执行失败（脚本非零退出 / 超时 / HTTP 非 2xx）。对话本身不受影响。 */
   onChatHook: (listener: (payload: ChatHookPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatHookPayload>('chat-hook', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'hook_failed') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        hookName: event.hookName,
+        event: event.event,
+        message: event.message,
+      })
+    })
   },
   onChatSubagent: (listener: (payload: ChatSubagentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatSubagentPayload>('chat-subagent', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'subagent_updated') return
+      listener({
+        parentConversationId: event.conversationId,
+        parentRunId: event.runId,
+        parentToolCallId: event.parentToolCallId,
+        taskId: event.taskId,
+        name: event.name,
+        model: event.model ?? undefined,
+        depth: event.depth,
+        status: event.status as ChatSubagentPayload['status'],
+        preview: event.preview ?? undefined,
+        steps: event.steps,
+      })
+    })
   },
   onChatUserPrompt: (listener: (payload: ChatUserPromptPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatUserPromptPayload>('chat-user-prompt', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'user_prompt_requested') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        messageId: event.messageId,
+        toolCallId: event.toolCallId,
+        id: event.toolCallId,
+        name: event.name,
+        source: event.source,
+        prompt: event.prompt as AskUserPromptPayload,
+        structuredContent: event.structuredContent,
+      })
+    })
   },
   onChatToolConfirm: (listener: (payload: ChatToolConfirmPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatToolConfirmPayload>('chat-tool-confirm', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'tool_approval_requested') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        messageId: event.messageId,
+        toolCallId: event.toolCallId,
+        name: event.name,
+        source: event.source,
+        serverId: event.serverId,
+        target: event.target,
+        argumentsPreview: event.argumentsPreview,
+        sensitivity: event.sensitivity,
+      })
+    })
   },
   /** 后端已按超时/取消处理掉某条审批 ⇒ 撤掉卡片，别让用户答一个没人听的问题。 */
   onChatToolConfirmWithdraw: (
     listener: (payload: { conversationId: string; toolCallId: string }) => void,
   ) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<{ conversationId: string; toolCallId: string }>(
-      'chat-tool-confirm-withdraw',
-      (payload) => listener(payload),
-    )
+    return onChatProtocol((event) => {
+      if (event.scope === 'run' && event.type === 'tool_approval_withdrawn') {
+        listener({ conversationId: event.conversationId, toolCallId: event.toolCallId })
+      }
+    })
   },
   onChatSessionConsent: (listener: (payload: ChatSessionConsentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatSessionConsentPayload>('chat-session-consent', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope === 'run' && event.type === 'session_consent_requested') {
+        listener({
+          conversationId: event.conversationId,
+          runId: event.runId,
+          messageId: event.messageId,
+        })
+      }
+    })
   },
+  onChatProtocolIssue: (
+    listener: (notice: { issue: ChatProtocolIssue; conversationId?: string }) => void,
+  ) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return Promise.resolve(subscribeChatProtocolIssues((issue, conversationId) => {
+      listener({ issue, conversationId })
+    }))
+  },
+  chatSyncState: (conversationId: string) => syncChatProtocol(conversationId),
   onChatOpenConversation: (listener: (payload: { conversationId: string; reload?: boolean | null; error?: string | null }) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<{ conversationId: string; reload?: boolean | null; error?: string | null }>('chat-open-conversation', (payload) => listener(payload))
@@ -2062,7 +2154,7 @@ export const api = {
     invoke<void>('chat_python_complete', { runId, content, isError, artifacts }),
   onChatRunPython: (listener: (payload: ChatRunPythonPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatRunPythonPayload>('chat-run-python', (payload) => listener(payload))
+    return subscribeChatPython(listener)
   },
   onChatAssistantsChanged: (listener: (assistantId: string) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
