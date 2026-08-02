@@ -315,16 +315,20 @@ impl crate::chat::agent::ToolExecutor for RegistryToolExecutor<'_> {
                 Some(native_ctx),
             )
             .await;
-            if result.is_ok() && crate::mcp::types::canonical_tool_name(&tool.name) == "todo_write"
-            {
-                if let Ok(conversation) =
-                    crate::chat::storage::load_conversation(&self.app, ctx.tool_conversation_id)
-                {
+            // run 域这条有 replay 价值，保留；但别为它再整读一遍会话 JSON——
+            // todo_write 的结构化返回里本来就带着刚落盘的权威 todoState。
+            if crate::mcp::types::canonical_tool_name(&tool.name) == "todo_write" {
+                if let Some(todo_state) = result.as_ref().ok().and_then(|res| {
+                    serde_json::from_value::<crate::chat::types::AgentTodoState>(
+                        res.structured_content.as_ref()?.get("todoState")?.clone(),
+                    )
+                    .ok()
+                }) {
                     crate::chat::protocol::emit_run_event(
                         &self.app,
                         ctx.run_id,
                         crate::chat::protocol::ChatRunEvent::TodoUpdated {
-                            todo_state: (&conversation.agent_todo_state).into(),
+                            todo_state: (&todo_state).into(),
                         },
                     );
                 }

@@ -355,7 +355,12 @@ pub(crate) async fn push_assistant_message(
                 {
                     Ok(latest) => {
                         persisted = latest;
-                        emit_chat_context_state(app, &conversation_id, &persisted.context_state);
+                        emit_chat_context_state(
+                            app,
+                            &conversation_id,
+                            persisted.revision,
+                            &persisted.context_state,
+                        );
                         break;
                     }
                     Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
@@ -381,7 +386,7 @@ pub(crate) async fn push_assistant_message(
 
     *conversation = persisted;
     if let Some(plan) = plan_update {
-        emit_chat_plan_state(app, &conversation_id, &plan);
+        emit_chat_plan_state(app, &conversation_id, conversation.revision, &plan);
     }
     Ok(())
 }

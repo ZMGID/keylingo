@@ -98,7 +98,7 @@ pub(crate) async fn chat_compress_context(
             .await
             .map_err(crate::chat::repository::repository_error)?;
         let context_state = conversation.context_state.clone();
-        emit_chat_context_state(&app, &conversation.id, &context_state);
+        emit_chat_context_state(&app, &conversation.id, conversation.revision, &context_state);
         strip_transcripts_for_frontend(&mut conversation);
         return Ok(serde_json::json!({
             "success": true,
@@ -118,7 +118,7 @@ pub(crate) async fn chat_compress_context(
         )
         .await
         .map_err(crate::chat::repository::repository_error)?;
-    emit_chat_context_state(&app, &conversation.id, &context_state);
+    emit_chat_context_state(&app, &conversation.id, conversation.revision, &context_state);
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
@@ -827,7 +827,6 @@ pub(super) async fn rollback_user_message_after_failed_send(
         Ok(mut context_state) => {
             context_state.warning = None;
             conversation.context_state = context_state.clone();
-            emit_chat_context_state(app, &conversation.id, &context_state);
         }
         Err(context_err) => {
             eprintln!("Context usage estimate failed after send rollback: {context_err}");
@@ -844,6 +843,13 @@ pub(super) async fn rollback_user_message_after_failed_send(
         })
         .await
         .map_err(crate::chat::repository::repository_error)?;
+    // 落盘之后再发：revision 必须是权威的那个，否则前端 applyEvent 会按旧 revision 丢弃。
+    emit_chat_context_state(
+        app,
+        &persisted.id,
+        persisted.revision,
+        &persisted.context_state,
+    );
     *conversation = persisted;
     Ok(())
 }
@@ -925,17 +931,15 @@ pub(super) async fn compress_conversation_context(
 pub(super) fn emit_chat_context_state(
     app: &AppHandle,
     conversation_id: &str,
-    _context_state: &ConversationContextState,
+    revision: u64,
+    context_state: &ConversationContextState,
 ) {
-    let Ok(conversation) = crate::chat::storage::load_conversation(app, conversation_id) else {
-        return;
-    };
     crate::chat::protocol::emit_conversation_event(
         app,
         conversation_id,
-        conversation.revision,
+        revision,
         crate::chat::protocol::ChatConversationEvent::ContextUpdated {
-            context_state: (&conversation.context_state).into(),
+            context_state: context_state.into(),
         },
     );
 }

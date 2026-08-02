@@ -159,7 +159,12 @@ pub(crate) async fn chat_send_message(
                             })
                             .await
                             .map_err(crate::chat::repository::repository_error)?;
-                        emit_chat_context_state(&app, &conversation.id, &refreshed);
+                        emit_chat_context_state(
+                            &app,
+                            &conversation.id,
+                            conversation.revision,
+                            &refreshed,
+                        );
                     }
                     Err(err) => {
                         eprintln!("Auto context compression failed: {err}");
@@ -194,6 +199,7 @@ pub(crate) async fn chat_send_message(
                         emit_chat_context_state(
                             &app,
                             &conversation.id,
+                            conversation.revision,
                             &conversation.context_state,
                         );
                     }
@@ -207,7 +213,12 @@ pub(crate) async fn chat_send_message(
                     })
                     .await
                     .map_err(crate::chat::repository::repository_error)?;
-                emit_chat_context_state(&app, &conversation.id, &context_state);
+                emit_chat_context_state(
+                    &app,
+                    &conversation.id,
+                    conversation.revision,
+                    &context_state,
+                );
             }
         }
         Err(err) => {

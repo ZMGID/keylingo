@@ -45,7 +45,12 @@ pub(crate) async fn chat_set_agent_plan_mode(
         })
         .await
         .map_err(crate::chat::repository::repository_error)?;
-    emit_chat_plan_state(&app, &conversation.id, &conversation.agent_plan_state);
+    emit_chat_plan_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &conversation.agent_plan_state,
+    );
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -67,7 +72,12 @@ pub(crate) async fn chat_execute_agent_plan(
         })
         .await
         .map_err(crate::chat::repository::repository_error)?;
-    emit_chat_plan_state(&app, &conversation.id, &conversation.agent_plan_state);
+    emit_chat_plan_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &conversation.agent_plan_state,
+    );
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -288,17 +298,15 @@ pub(crate) fn chat_python_complete(
 pub(super) fn emit_chat_plan_state(
     app: &AppHandle,
     conversation_id: &str,
-    _plan_state: &AgentPlanState,
+    revision: u64,
+    plan_state: &AgentPlanState,
 ) {
-    let Ok(conversation) = crate::chat::storage::load_conversation(app, conversation_id) else {
-        return;
-    };
     crate::chat::protocol::emit_conversation_event(
         app,
         conversation_id,
-        conversation.revision,
+        revision,
         crate::chat::protocol::ChatConversationEvent::PlanUpdated {
-            plan_state: (&conversation.agent_plan_state).into(),
+            plan_state: plan_state.into(),
         },
     );
 }

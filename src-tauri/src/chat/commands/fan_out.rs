@@ -185,7 +185,12 @@ pub(super) async fn run_reply_fan_out(
                     {
                         Ok(latest) => {
                             persisted = latest;
-                            emit_chat_context_state(app, &persisted.id, &persisted.context_state);
+                            emit_chat_context_state(
+                                app,
+                                &persisted.id,
+                                persisted.revision,
+                                &persisted.context_state,
+                            );
                             break;
                         }
                         Err(crate::chat::repository::ConversationRepositoryError::Conflict {

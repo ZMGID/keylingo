@@ -85,7 +85,7 @@ pub(crate) async fn chat_update_message(
             Err(err) => return Err(crate::chat::repository::repository_error(err)),
         }
     };
-    emit_chat_context_state(&app, &conversation.id, &context_state);
+    emit_chat_context_state(&app, &conversation.id, conversation.revision, &context_state);
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -245,7 +245,12 @@ pub(crate) async fn chat_regenerate_message(
         {
             Ok(latest) => {
                 conversation = latest;
-                emit_chat_context_state(&app, &conversation.id, &context_state);
+                emit_chat_context_state(
+                    &app,
+                    &conversation.id,
+                    conversation.revision,
+                    &context_state,
+                );
                 break;
             }
             Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
@@ -353,7 +358,7 @@ pub(crate) async fn chat_delete_message(
             Err(err) => return Err(crate::chat::repository::repository_error(err)),
         }
     };
-    emit_chat_context_state(&app, &conversation.id, &context_state);
+    emit_chat_context_state(&app, &conversation.id, conversation.revision, &context_state);
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
