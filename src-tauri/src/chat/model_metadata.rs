@@ -322,10 +322,13 @@ pub(crate) fn model_can_generate_images_directly(provider: &ModelProvider, model
 /// 依 `api_format`：OpenAI Responses / Gemini / Anthropic Messages 支持；OpenAI Chat
 /// Completions 不支持（gpt-5 在其上开 `web_search` 会 400）。前端据此把「内置」选项置灰。
 pub(crate) fn builtin_web_search_supported(provider: &ModelProvider) -> bool {
-    use crate::settings::ProviderApiFormat::{AnthropicMessages, Gemini, OpenAiResponses};
+    use crate::settings::ProviderApiFormat::{
+        AnthropicMessages, Gemini, OpenAiResponses, XaiResponses,
+    };
+    // xAI 的 Responses 同样有服务端 web_search（还多 x_search），与 OpenAI Responses 同形。
     matches!(
         provider.api_format_kind(),
-        OpenAiResponses | Gemini | AnthropicMessages
+        OpenAiResponses | XaiResponses | Gemini | AnthropicMessages
     )
 }
 

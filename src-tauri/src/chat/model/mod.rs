@@ -35,7 +35,9 @@ pub(crate) async fn generate_with_chat_provider(
                 .generate(request)
                 .await
         }
-        ProviderApiFormat::OpenAiResponses => {
+        // xAI 与 OpenAI 的 Responses 是同一条线协议，共用适配器；差异只在请求体清洗，
+        // 由 `responses.rs` 内部按 `api_format_kind()` 分叉。
+        ProviderApiFormat::OpenAiResponses | ProviderApiFormat::XaiResponses => {
             OpenAiResponsesProvider::new(state, provider, retry_attempts)
                 .generate(request)
                 .await
@@ -68,7 +70,9 @@ pub(crate) async fn stream_with_chat_provider(
                 .stream(request, sink)
                 .await
         }
-        ProviderApiFormat::OpenAiResponses => {
+        // xAI 与 OpenAI 的 Responses 是同一条线协议，共用适配器；差异只在请求体清洗，
+        // 由 `responses.rs` 内部按 `api_format_kind()` 分叉。
+        ProviderApiFormat::OpenAiResponses | ProviderApiFormat::XaiResponses => {
             OpenAiResponsesProvider::new(state, provider, retry_attempts)
                 .stream(request, sink)
                 .await

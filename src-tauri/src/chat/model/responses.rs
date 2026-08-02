@@ -15,7 +15,7 @@ use reqwest::header::ACCEPT_ENCODING;
 use serde_json::Value;
 
 use crate::api::{send_with_failover, with_chat_request_timeout};
-use crate::settings::ModelProvider;
+use crate::settings::{ModelProvider, ProviderApiFormat};
 use crate::state::AppState;
 use crate::usage::{
     chat_usage_source_for_label, error_kind_from_message, model_usage_from_openai_value,
@@ -27,6 +27,45 @@ use super::{
     GenerateOutput, GenerateRequest, GeneratedImageData, LanguageModelProvider, ModelError,
     ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
 };
+
+/// UI 档位 → xAI 官方 effort（`none|low|medium|high|xhigh`）。返回 `None` 表示这一档在该
+/// 模型上不该发（例如只有 grok-4.3 / grok-3 认 `none`）。
+fn xai_reasoning_effort(effort: &str, model: &str) -> Option<&'static str> {
+    let id = model.trim().to_ascii_lowercase();
+    let supports_none = id.contains("grok-4.3") || id.contains("grok-3");
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => supports_none.then_some("none"),
+        "minimal" => Some("low"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("high"),
+        _ => None,
+    }
+}
+
+/// grok 的 `include`：思考链回放恒带；按已启用的服务端工具追加来源 / 输出字段，
+/// 不显式 include 的话搜索来源和执行输出根本不会回传。
+fn xai_include_values(tools: Option<&Value>) -> Vec<Value> {
+    let mut values = vec![Value::String("reasoning.encrypted_content".to_string())];
+    let Some(tools) = tools.and_then(Value::as_array) else {
+        return values;
+    };
+    for tool in tools {
+        let extra = match tool.get("type").and_then(Value::as_str).map(str::trim) {
+            Some("web_search") => "web_search_call.action.sources",
+            Some("file_search") => "file_search_call.results",
+            Some("code_interpreter") => "code_interpreter_call.outputs",
+            _ => continue,
+        };
+        let extra = Value::String(extra.to_string());
+        if !values.contains(&extra) {
+            values.push(extra);
+        }
+    }
+    values
+}
 
 pub struct OpenAiResponsesProvider<'a> {
     state: &'a AppState,
@@ -349,6 +388,9 @@ impl OpenAiResponsesProvider<'_> {
     }
 
     fn request_body(&self, request: &GenerateRequest, stream: bool) -> Value {
+        // 协议来自用户在设置里选的「Grok (xAI)」，不是猜 base_url——中转站可以把 grok
+        // 挂在任意域名上，靠域名判断必然漏。
+        let is_xai = self.provider.api_format_kind() == ProviderApiFormat::XaiResponses;
         let mut body = serde_json::json!({
             "model": request.model,
             "input": responses_input_from_model_messages(&request.messages),
@@ -361,7 +403,21 @@ impl OpenAiResponsesProvider<'_> {
             body["temperature"] = serde_json::json!(temperature);
         }
         if !request.system.trim().is_empty() {
-            body["instructions"] = Value::String(request.system.clone());
+            if is_xai {
+                // xAI 拒收 `instructions`。**搬**而不是丢：直接删掉系统提示词就凭空消失了。
+                // Responses 的 input 接受 `role: system` 项，放在最前面等价于 instructions。
+                if let Some(input) = body["input"].as_array_mut() {
+                    input.insert(
+                        0,
+                        serde_json::json!({
+                            "role": "system",
+                            "content": [{ "type": "input_text", "text": request.system }],
+                        }),
+                    );
+                }
+            } else {
+                body["instructions"] = Value::String(request.system.clone());
+            }
         }
         if request.options.max_tokens > 0 {
             body["max_output_tokens"] = Value::from(request.options.max_tokens);
@@ -387,25 +443,38 @@ impl OpenAiResponsesProvider<'_> {
         // 关键：gpt-5 系列在 minimal reasoning 下不执行 hosted web_search；resolve_thinking
         // 已把「未显式设档」默认成 high，故内置搜索天然拿到非 minimal。
         if let Some(effort) = request.options.thinking_level.as_deref() {
-            body["reasoning"] = serde_json::json!({ "effort": effort });
-            // 无状态模式：Responses 的 `store` 默认 true（服务端保存会话状态并按
-            // response id 串联轮次）。我们每轮都自带完整 input，不依赖服务端状态，
-            // 让服务端白存一份没有意义；代理渠道多半也没真正实现存储。
-            //
-            // 与 Codex 官方客户端对齐：同一模型/同一渠道，它发的就是 store:false +
-            // include:["reasoning.encrypted_content"]（见抓包 trace_dd26cbe7）——
-            // 思考链靠 encrypted_content 随响应回传，不依赖服务端存储。
-            //
-            // 注意：这不能修复该渠道对大请求的间歇性 502（同一 payload 重打 5 次 2 失败，
-            // 与本字段无关，见 commit message）。此处只是对齐官方客户端的正确用法。
-            body["store"] = Value::Bool(false);
-            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+            if is_xai {
+                // xAI 有自己的一套档位，且拒收 `store`。
+                if let Some(mapped) = xai_reasoning_effort(effort, &request.model) {
+                    body["reasoning"] = serde_json::json!({ "effort": mapped });
+                }
+            } else {
+                body["reasoning"] = serde_json::json!({ "effort": effort });
+                // 无状态模式：Responses 的 `store` 默认 true（服务端保存会话状态并按
+                // response id 串联轮次）。我们每轮都自带完整 input，不依赖服务端状态，
+                // 让服务端白存一份没有意义；代理渠道多半也没真正实现存储。
+                //
+                // 与 Codex 官方客户端对齐：同一模型/同一渠道，它发的就是 store:false +
+                // include:["reasoning.encrypted_content"]（见抓包 trace_dd26cbe7）——
+                // 思考链靠 encrypted_content 随响应回传，不依赖服务端存储。
+                //
+                // 注意：这不能修复该渠道对大请求的间歇性 502（同一 payload 重打 5 次 2 失败，
+                // 与本字段无关，见 commit message）。此处只是对齐官方客户端的正确用法。
+                body["store"] = Value::Bool(false);
+                body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+            }
+        }
+        if is_xai {
+            // grok 的服务端工具只有显式 include 才回传来源与执行输出；
+            // reasoning.encrypted_content 是 store 关闭时跨轮回放推理项的前提，恒带。
+            body["include"] = Value::Array(xai_include_values(body.get("tools")));
         }
         // 会话级缓存键：Responses 与 Chat Completions 认同一个 `prompt_cache_key`
         // （官方按稳定前缀 + 该键做缓存路由）。同一对话每轮同值，提升命中。
         // 与 openai.rs 共用 `state.prompt_cache_key_unsupported` 的学习结果——严格端点
         // 首次 400 后就地跳过，不必两个适配器各踩一遍。
-        if self.provider.request.prompt_caching
+        if !is_xai
+            && self.provider.request.prompt_caching
             && !self
                 .state
                 .prompt_cache_key_unsupported(&self.provider.base_url)
@@ -1383,6 +1452,155 @@ mod tests {
             metadata: Default::default(),
         };
         OpenAiResponsesProvider::new(&state, &provider, 1).request_body(&request, false)
+    }
+
+    fn xai_body(model: &str, effort: Option<&str>, builtin_search: bool) -> Value {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = ModelProvider {
+            id: "test".into(),
+            name: "Grok".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            // 故意用一个非 api.x.ai 的域名：协议来自用户的选择，不是猜域名。
+            base_url: "https://relay.example.com/v1".into(),
+            available_models: vec![model.into()],
+            enabled_models: vec![model.into()],
+            enabled: true,
+            api_format: "xai_responses".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+        };
+        let request = GenerateRequest {
+            model: model.into(),
+            system: "你是 Kivio".into(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions {
+                thinking_level: effort.map(str::to_string),
+                builtin_web_search: builtin_search,
+                ..Default::default()
+            },
+            metadata: crate::chat::model::RequestMetadata {
+                conversation_id: Some("conv_abc".into()),
+                ..Default::default()
+            },
+        };
+        OpenAiResponsesProvider::new(&state, &provider, 1).request_body(&request, false)
+    }
+
+    #[test]
+    fn xai_drops_the_fields_its_endpoint_rejects() {
+        let body = xai_body("grok-4.3", Some("high"), false);
+        // xAI 严格拒收这批 OpenAI 专有字段，发了就整个请求 400。
+        for field in ["instructions", "store", "prompt_cache_key", "metadata"] {
+            assert!(
+                body.get(field).is_none(),
+                "{field} must not be sent: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn xai_moves_the_system_prompt_into_input_instead_of_dropping_it() {
+        let body = xai_body("grok-4.3", None, false);
+        // 直接删 instructions 会让系统提示词凭空消失——必须搬进 input 首位。
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"][0]["text"], "你是 Kivio");
+        assert_eq!(input[1]["role"], "user");
+    }
+
+    #[test]
+    fn xai_maps_effort_onto_its_own_ladder() {
+        assert_eq!(
+            xai_body("grok-4.3", Some("minimal"), false)["reasoning"]["effort"],
+            "low"
+        );
+        assert_eq!(
+            xai_body("grok-4.3", Some("max"), false)["reasoning"]["effort"],
+            "high"
+        );
+        assert_eq!(
+            xai_body("grok-4.3", Some("xhigh"), false)["reasoning"]["effort"],
+            "xhigh"
+        );
+        // `none` 只有 grok-4.3 / grok-3 认；别的型号上不该发这一档。
+        assert_eq!(
+            xai_body("grok-4.3", Some("off"), false)["reasoning"]["effort"],
+            "none"
+        );
+        assert!(xai_body("grok-4.1-fast", Some("off"), false)
+            .get("reasoning")
+            .is_none());
+    }
+
+    #[test]
+    fn xai_includes_server_tool_outputs() {
+        // 不显式 include 的话，grok 的搜索来源根本不回传。
+        let plain = xai_body("grok-4.3", None, false);
+        assert_eq!(
+            plain["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        let searching = xai_body("grok-4.3", None, true);
+        let include = searching["include"].as_array().expect("include");
+        assert!(
+            include.contains(&Value::String("web_search_call.action.sources".to_string())),
+            "{searching}"
+        );
+    }
+
+    #[test]
+    fn openai_responses_is_untouched_by_the_xai_branch() {
+        // 同一个适配器伺候两种协议，OpenAI 那条路必须逐字节照旧。
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = ModelProvider {
+            id: "test".into(),
+            name: "OpenAI".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            base_url: "https://api.openai.com/v1".into(),
+            available_models: vec!["gpt-5.5".into()],
+            enabled_models: vec!["gpt-5.5".into()],
+            enabled: true,
+            api_format: "openai_responses".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+        };
+        let request = GenerateRequest {
+            model: "gpt-5.5".into(),
+            system: "你是 Kivio".into(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions {
+                thinking_level: Some("high".into()),
+                ..Default::default()
+            },
+            metadata: crate::chat::model::RequestMetadata {
+                conversation_id: Some("conv_abc".into()),
+                ..Default::default()
+            },
+        };
+        let body = OpenAiResponsesProvider::new(&state, &provider, 1).request_body(&request, false);
+        assert_eq!(body["instructions"], "你是 Kivio");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["prompt_cache_key"], "conv_abc");
+        assert_eq!(body["input"][0]["role"], "user");
     }
 
     #[test]

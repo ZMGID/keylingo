@@ -1115,7 +1115,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       availableModels: [],
       enabledModels: [],
       enabled: true,
-      apiFormat: 'openai_chat',
+      apiFormat: preset.apiFormat ?? 'openai_chat',
     }
     setSettings({
       ...settings,

@@ -51,12 +51,16 @@ describe('ProviderRequestPanel', () => {
     expect(screen.getByText(t.promptCachingHintAnthropic)).toBeTruthy()
   })
 
-  it('greys out prompt caching only on Gemini, where nothing can be sent', () => {
+  it('greys out prompt caching on the protocols with no cache field to send', () => {
     // 藏起来会让人以为这个功能没做 —— 之前就踩过。
-    renderPanel({ apiFormat: 'gemini' })
-    expect(screen.getByText(t.promptCachingUnsupported)).toBeTruthy()
-    const toggle = screen.getByRole('switch', { name: t.promptCaching })
-    expect((toggle as HTMLButtonElement).disabled).toBe(true)
+    // Gemini 是服务端隐式缓存，xAI 直接拒收 prompt_cache_key。
+    for (const apiFormat of ['gemini', 'xai_responses']) {
+      cleanup()
+      renderPanel({ apiFormat })
+      expect(screen.getByText(t.promptCachingUnsupported), apiFormat).toBeTruthy()
+      const toggle = screen.getByRole('switch', { name: t.promptCaching })
+      expect((toggle as HTMLButtonElement).disabled, apiFormat).toBe(true)
+    }
   })
 
   it('turning prompt caching off reports promptCaching: false', async () => {

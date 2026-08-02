@@ -624,7 +624,9 @@ pub(crate) async fn test_provider_connection(
                         "generationConfig": { "maxOutputTokens": 1 },
                     }),
                 ),
-                ProviderApiFormat::OpenAiResponses => (
+                // xAI 与 OpenAI 的 Responses 端点同形，测试请求体本来就只有这三个字段，
+                // 都不在 xAI 的拒收名单上，无需分叉。
+                ProviderApiFormat::OpenAiResponses | ProviderApiFormat::XaiResponses => (
                     format!("{base}/responses"),
                     serde_json::json!({
                         "model": model,

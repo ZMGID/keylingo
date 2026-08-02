@@ -1435,6 +1435,7 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
   if (apiFormat === 'anthropic' || apiFormat === 'anthropic_messages') return 'anthropic_messages'
   if (apiFormat === 'openai_responses' || apiFormat === 'responses') return 'openai_responses'
   if (apiFormat === 'gemini' || apiFormat === 'google' || apiFormat === 'gemini_generate') return 'gemini'
+  if (apiFormat === 'xai' || apiFormat === 'xai_responses' || apiFormat === 'grok') return 'xai_responses'
   return 'openai_chat'
 }
 
@@ -1446,7 +1447,12 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
  */
 export function builtinWebSearchSupported(apiFormat?: string): boolean {
   const kind = normalizeProviderApiFormat(apiFormat)
-  return kind === 'openai_responses' || kind === 'gemini' || kind === 'anthropic_messages'
+  return (
+    kind === 'openai_responses' ||
+    kind === 'xai_responses' ||
+    kind === 'gemini' ||
+    kind === 'anthropic_messages'
+  )
 }
 
 const CHAT_TOOL_DEFAULT_ROUNDS = 20

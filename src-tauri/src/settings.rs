@@ -129,6 +129,12 @@ pub enum ProviderApiFormat {
     /// Google Gemini native `generateContent` protocol. Avoids the OpenAI-compat
     /// endpoint's strict rejection of unknown fields (e.g. `promptCacheKey` 400).
     Gemini,
+    /// xAI (Grok) 的 Responses 端点。**线协议与 `OpenAiResponses` 相同**，走同一个适配器；
+    /// 区别是 xAI 严格拒收一批 OpenAI 专有字段（`store` / `prompt_cache_key` /
+    /// `instructions` / `metadata` / `stream_options` …），思考档位也是它自己的一套
+    /// （`none|low|medium|high|xhigh`）。做成独立协议而不是按 base_url 猜：中转站可以把
+    /// grok 挂在任意域名上，靠域名判断必然漏。
+    XaiResponses,
 }
 
 impl ProviderApiFormat {
@@ -137,6 +143,7 @@ impl ProviderApiFormat {
             "anthropic" | "anthropic_messages" => Self::AnthropicMessages,
             "openai_responses" | "responses" => Self::OpenAiResponses,
             "gemini" | "google" | "gemini_generate" => Self::Gemini,
+            "xai" | "xai_responses" | "grok" => Self::XaiResponses,
             _ => Self::OpenAiChat,
         }
     }
@@ -147,7 +154,14 @@ impl ProviderApiFormat {
             Self::AnthropicMessages => "anthropic_messages",
             Self::OpenAiResponses => "openai_responses",
             Self::Gemini => "gemini",
+            Self::XaiResponses => "xai_responses",
         }
+    }
+
+    /// 是否走 Responses 线协议（`POST /responses`）。`OpenAiResponses` 与 `XaiResponses`
+    /// 共用适配器，只在请求体清洗上分叉。
+    pub fn is_responses_wire(self) -> bool {
+        matches!(self, Self::OpenAiResponses | Self::XaiResponses)
     }
 }
 

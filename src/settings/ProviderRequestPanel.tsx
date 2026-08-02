@@ -69,7 +69,9 @@ export function ProviderRequestPanel({
   const isAnthropic = provider.apiFormat === 'anthropic_messages'
   // Anthropic 打 cache_control 断点，OpenAI Chat / Responses 发 prompt_cache_key 路由提示。
   // Gemini 由服务端隐式缓存前缀，没有可发的字段，开关对它无意义。
-  const cachingSupported = isAnthropic || provider.apiFormat !== 'gemini'
+  // Anthropic 打 cache_control 断点，OpenAI Chat / Responses 发 prompt_cache_key 路由提示。
+  // Gemini 服务端隐式缓存、xAI 直接拒收 prompt_cache_key —— 两者都没有可发的字段。
+  const cachingSupported = !['gemini', 'xai_responses'].includes(provider.apiFormat)
 
   const patch = (updates: Partial<ProviderRequestConfig>) =>
     onUpdateProvider(provider.id, { request: { ...config, ...updates } })

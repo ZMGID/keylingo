@@ -94,6 +94,7 @@ export function ProviderDetail({
               { value: 'openai_responses', label: 'OpenAI Responses' },
               { value: 'anthropic_messages', label: 'Anthropic' },
               { value: 'gemini', label: 'Gemini' },
+              { value: 'xai_responses', label: 'Grok (xAI)' },
             ]}
           />
         </div>
