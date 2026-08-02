@@ -1,6 +1,5 @@
 //! 从本地 CLI 导入对话——可导入会话的枚举。
 //!
-//! 契约见 `.trellis/tasks/08-01-import-cli-conversations/design.md`，
 //! 决策依据见 `docs/adr/0001..0003`。三条硬约束：
 //!
 //! 1. 只列出**工作目录等于给定项目根**的会话（ADR-0001）。路径比对必须 realpath-aware。

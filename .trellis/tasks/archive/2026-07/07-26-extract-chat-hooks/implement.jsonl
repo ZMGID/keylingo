@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/frontend/hook-guidelines.md", "reason": "custom hook 约定（当前为待填状态，抽 hook 时若形成约定应回填）"}
-{"file": ".trellis/spec/frontend/resource-lifecycle.md", "reason": "事件订阅 / 定时器 / RAF 的清理契约 —— 抽 stream hook 时最容易漏 cleanup"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "chat-stream/tool/context 事件跨 Rust-前端边界，抽 hook 不得改变时序"}

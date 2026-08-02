@@ -1,3 +1,0 @@
-{"file": ".trellis/tasks/07-27-claude-stream-json-parity/research/stream-json-protocol.md", "reason": "校验解析是否覆盖了记录在案的全部变体，字段名是否与官方类型一致。"}
-{"file": ".trellis/tasks/07-27-claude-stream-json-parity/prd.md", "reason": "AC1-AC9 逐条核对，特别是 AC7 的测试基线 1209/0/18 不得倒退。"}
-{"file": ".trellis/spec/guides/external-cli-agents.md", "reason": "校验未违反既有契约：错误分类、流解析健壮性、单测要求。"}

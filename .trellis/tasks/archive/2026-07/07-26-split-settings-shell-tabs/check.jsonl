@@ -1,2 +1,0 @@
-{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "检查抽出的 tab 组件是否符合 props / 组合约定"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "确认 props 传递未改变 settings 草稿 / dirty 判定的数据流"}

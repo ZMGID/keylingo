@@ -8,7 +8,7 @@
 | 范围 | **Chat Agent 编排层**（`src-tauri/src/chat/agent/` 目标模块）；不含 Lens、不含第三方连接器（Composio 等） |
 | 目标读者 | 产品、Rust/前端研发、测试 |
 | 用户可感知变化（Phase B） | **无** — 仅后端重构与可测性提升 |
-| 关联文档 | [CHAT_ARCHITECTURE.md](./CHAT_ARCHITECTURE.md)（v1.1）、[.trellis/spec/frontend/type-safety.md](../.trellis/spec/frontend/type-safety.md)、[06-04-normalize-chat-runtime-framework](../.trellis/tasks/06-04-normalize-chat-runtime-framework/prd.md)、[06-04-chat-optimization-prd](../.trellis/tasks/06-04-chat-optimization-prd/prd.md) |
+| 关联文档 | [CHAT_ARCHITECTURE.md](./CHAT_ARCHITECTURE.md)（v1.1） |
 
 ### 修订记录
 
@@ -76,9 +76,9 @@ Kivio Chat 已完成 **Model 层** 的 Provider 抽象（`chat/model`：`Languag
 
 | 任务/模块 | 职责 |
 |-----------|------|
-| [normalize-chat-runtime-framework](../.trellis/tasks/06-04-normalize-chat-runtime-framework/prd.md) | **Model 层**：Provider 适配、SSE 解析、`GenerateRequest` |
+| normalize-chat-runtime-framework | **Model 层**：Provider 适配、SSE 解析、`GenerateRequest` |
 | **本 PRD（Agent Runtime）** | **编排层**：tool loop、step、prepare/stop/finish、与 Tauri 事件衔接 |
-| [chat-optimization-prd](../.trellis/tasks/06-04-chat-optimization-prd/prd.md) | **产品体验**：稳定性、内置工具文案、冒烟清单 |
+| chat-optimization-prd | **产品体验**：稳定性、内置工具文案、冒烟清单 |
 
 ---
 
@@ -111,7 +111,6 @@ Kivio Chat 已完成 **Model 层** 的 Provider 抽象（`chat/model`：`Languag
 | 能力 | 代码位置 | 说明 |
 |------|----------|------|
 | Provider 抽象 | `src-tauri/src/chat/model/` | `OpenAiChatProvider`、`AnthropicMessagesProvider` |
-| 跨层契约 | `.trellis/spec/frontend/type-safety.md` | Provider + MCP/Skill + **Chat Agent Runtime** 场景 |
 | 架构文档 | `docs/CHAT_ARCHITECTURE.md` v1.1 | Model/Agent 分层、消息流已更新 |
 | 工具注册/调用 | `src-tauri/src/mcp/registry.rs` | `list_enabled_tool_defs`、`call_tool`（native/skill/mcp） |
 | 多轮工具循环 | `commands.rs` → `complete_assistant_reply` | `max_tool_rounds`、无 `tool_calls` 即结束 planning |
@@ -394,7 +393,7 @@ pub trait AgentHost: Send + Sync {
 
 ### FR-08 行为不变承诺
 
-与 [type-safety.md](../.trellis/spec/frontend/type-safety.md) 及现网一致：
+与现网一致：
 
 - Tauri 事件 payload
 - `model_messages` / `api_messages` 持久化
@@ -528,10 +527,6 @@ pub trait AgentHost: Send + Sync {
 
 - [Vercel AI SDK — Agents: Loop Control](https://ai-sdk.dev/docs/agents/loop-control)
 - [Vercel AI SDK — Tool Calling](https://ai-sdk.dev/docs/ai-sdk-core/tools-and-tool-calling)
-
-### 12.4 type-safety 同步
-
-实现 Phase B 时若新增 `AgentRunConfig` 字段或 `AgentHost` 方法，须同步更新 [.trellis/spec/frontend/type-safety.md](../.trellis/spec/frontend/type-safety.md) 中 **Scenario: Chat Agent Runtime**。
 
 ---
 

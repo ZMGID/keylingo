@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "虚拟列表行动效契约：气泡入场只在流式播放、历史行不动，直接约束 R2 气泡 scale/入场改动"}
-{"file": "research/audit-A-entry-hero.md", "reason": "入口/空态/下拉现状 + G1/G2 差距的 file:line 锚点与可复用原语（R1 下拉 stagger、R2 hero 两级）"}
-{"file": "research/audit-B-messages-tools.md", "reason": "气泡/工具卡/状态动效现状与 B1/B4 差距锚点（R2 气泡、R4 error pop、勿重造清单）"}
-{"file": "research/audit-C-nav-overlays.md", "reason": "侧边栏/浮层现状与 C-1..C-4 差距锚点（R1 会话列表/搜索/菜单 stagger、R3 退出动画 hook 范式）"}

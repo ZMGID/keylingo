@@ -9,8 +9,7 @@
 //! - parallel whitelist in `chat/agent/rounds.rs::tool_call_parallel_eligible`
 //! - native read-only arm in `types.rs::ChatToolDefinition::is_read_only_tool`
 //!
-//! Contract notes (see `.trellis/spec/backend/agent-runtime.md` and
-//! `.trellis/spec/backend/file-tools.md`):
+//! Contract notes:
 //! - The `parallel_safe` set is intentionally narrow: web_search/web_fetch/
 //!   read plus the read-side project tools (ls/grep/find), and only when
 //!   approval-free. Do not widen or narrow it here without a spec change.

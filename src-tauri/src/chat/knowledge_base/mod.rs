@@ -1,6 +1,6 @@
 //! Knowledge base (RAG) — storage layer + vector search.
 //!
-//! MVP design (see `.trellis/tasks/06-25-knowledge-base-rag/prd.md`):
+//! MVP design:
 //! - Multiple libraries, each bound to one `(embedding_provider, model, dim)`.
 //! - Vectors stored as plain `f32` in a per-library JSON file; search is an
 //!   exact brute-force cosine scan in Rust.

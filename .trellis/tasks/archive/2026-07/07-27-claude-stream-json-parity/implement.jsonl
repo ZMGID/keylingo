@@ -1,2 +1,0 @@
-{"file": ".trellis/tasks/07-27-claude-stream-json-parity/research/stream-json-protocol.md", "reason": "claude stream-json 的实测消息形态 + 官方 sdk.d.ts 类型定义摘录 + 复现命令。所有解析改动以此为准，尤其 D1 那条 subtype=success 但 is_error=true 的真实样本。"}
-{"file": ".trellis/spec/guides/external-cli-agents.md", "reason": "第 5 条要求错误出口统一走 errors::classify（R1 直接相关）；第 10 条非 JSON 行 continue；第 13 条必须带可红→绿单测。"}

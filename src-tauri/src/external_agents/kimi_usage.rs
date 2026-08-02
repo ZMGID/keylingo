@@ -19,7 +19,7 @@
 //! `workspace::resolve_effective_cwd()`（`chat-workspaces/<conversation_id>`）。
 //!
 //! **必须跳过空壳会话**：Kivio 的斜杠命令探测每次 `session/new` 都会在 kimi 侧留下一个没有
-//! 任何 turn 的会话（见 `.trellis/spec/guides/external-cli-agents.md` 第 11b 条的探测残渣）。
+//! 任何 turn 的会话（探测残渣）。
 //! 实测某个 workDir 下 53 个 session 里 52 个是空壳。判据：wire.jsonl 里存在
 //! `type == "usage.record"` 且 `usageScope == "turn"` 的记录。有效候选按 wire.jsonl mtime 取最新。
 //!

@@ -362,9 +362,7 @@ chat_get_conversations (Rust)
 
 规范索引：
 
-- Provider 契约：`.trellis/spec/frontend/type-safety.md`（Scenario: Chat Runtime Provider Contract）
-- Agent 契约（草案）：`.trellis/spec/frontend/type-safety.md`（Scenario: Chat Agent Runtime）
-- Provider 标准化任务：`.trellis/tasks/06-04-normalize-chat-runtime-framework/prd.md`
+- Provider 契约：`src-tauri/src/chat/model/README.md`
 
 ---
 

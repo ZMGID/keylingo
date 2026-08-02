@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "验收气泡入场是否遵守虚拟列表行动效契约（仅流式播放、reduced-motion 兜底）"}
-{"file": "research/audit-C-nav-overlays.md", "reason": "核对 stagger/退出动画改动点与预估改动量、reduced-motion 兜底范围是否落实"}
-{"file": "research/audit-B-messages-tools.md", "reason": "核对未越界：未引入工具四色/色令牌，仅动效；error pop 门控不误伤历史批量"}
