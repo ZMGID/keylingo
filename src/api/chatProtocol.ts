@@ -25,6 +25,8 @@ type RunState = {
   pending: Map<number, ChatRunEventEnvelope>
 }
 
+const MAX_PENDING_EVENTS = 500
+
 const ajv = new Ajv2020({
   allErrors: true,
   strict: false,
@@ -52,7 +54,14 @@ function reportIssue(issue: ChatProtocolIssue, conversationId?: string) {
 }
 
 function dispatch(event: ChatProtocolEvent, delivery: ChatProtocolDelivery = { source: 'live' }) {
-  for (const subscriber of subscribers) subscriber(event, delivery)
+  // 一个订阅者抛错不能连累其他订阅者：共用一条通道后这里是单点。
+  for (const subscriber of subscribers) {
+    try {
+      subscriber(event, delivery)
+    } catch (error) {
+      console.error('Chat protocol subscriber threw', error, event)
+    }
+  }
 }
 
 function runState(event: ChatRunEventEnvelope): RunState {
@@ -97,8 +106,17 @@ function scheduleSync(conversationId: string, delayMs = 0) {
 function retrySync(conversationId: string) {
   const attempts = (syncRetryAttempts.get(conversationId) ?? 0) + 1
   syncRetryAttempts.set(conversationId, attempts)
-  if (attempts <= 3) scheduleSync(conversationId, 250 * attempts)
-  else reportIssue('resync_required', conversationId)
+  if (attempts <= 3) {
+    scheduleSync(conversationId, 250 * attempts)
+    return
+  }
+  // 放弃补洞时得把该会话的 run 状态一起丢掉，否则前端 reload 也带不走缺口，
+  // 下次 sync 还是带着老 cursor 去要补丁。丢掉后后端会回快照。
+  for (const [runId, state] of runs) {
+    if (state.conversationId === conversationId) runs.delete(runId)
+  }
+  syncRetryAttempts.delete(conversationId)
+  reportIssue('resync_required', conversationId)
 }
 
 function applyRunEvent(event: ChatRunEventEnvelope) {
@@ -106,22 +124,28 @@ function applyRunEvent(event: ChatRunEventEnvelope) {
   if (event.seq <= state.lastSeq) return
   if (state.terminal) return
   if (event.seq > state.lastSeq + 1) {
+    if (state.pending.size >= MAX_PENDING_EVENTS) {
+      // 缺口补不上时 pending 会把整个回答（几千个 delta）攒进内存且永不派发。
+      // 丢掉这个 run 的状态：下次 sync 不带它的 cursor，后端直接回快照重建。
+      runs.delete(event.runId)
+      requestSync(event.conversationId)
+      return
+    }
     state.pending.set(event.seq, event)
     requestSync(event.conversationId)
     return
   }
-  advanceTerminalRevision(event)
-  dispatch(event)
-  state.lastSeq = event.seq
-  state.terminal = isTerminal(event)
-  while (!state.terminal) {
-    const next = state.pending.get(state.lastSeq + 1)
-    if (!next) break
-    state.pending.delete(next.seq)
+  // 先推进 lastSeq/terminal 再派发：即使派发路径出问题，序列也不会卡在原地
+  // 把之后每一帧都判成 gap。
+  let next: ChatRunEventEnvelope | undefined = event
+  while (next) {
     advanceTerminalRevision(next)
-    dispatch(next)
     state.lastSeq = next.seq
     state.terminal = isTerminal(next)
+    dispatch(next)
+    if (state.terminal) return
+    next = state.pending.get(state.lastSeq + 1)
+    if (next) state.pending.delete(next.seq)
   }
 }
 

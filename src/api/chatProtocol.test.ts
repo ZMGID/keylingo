@@ -98,6 +98,38 @@ describe('chat protocol sequencing', () => {
     expect(seen).toEqual([1, 2, 3])
   })
 
+  it('keeps the stream alive when a subscriber throws', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const seen: number[] = []
+    chatProtocolTesting.subscribe(() => {
+      throw new Error('bad handler')
+    })
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.seq)
+    })
+
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(2, 'text_delta'))
+    chatProtocolTesting.ingest(event(3, 'run_completed'))
+
+    expect(seen).toEqual([1, 2, 3])
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
+  })
+
+  it('drops the run state instead of buffering an unbounded gap', () => {
+    const seen: number[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.seq)
+    })
+    chatProtocolTesting.ingest(event(1))
+    for (let seq = 3; seq < 700; seq += 1) chatProtocolTesting.ingest(event(seq, 'text_delta'))
+
+    // 状态被丢掉后，序列从头开始也能重新收下（等待 sync 回快照）。
+    chatProtocolTesting.ingest(event(1))
+    expect(seen).toEqual([1, 1])
+  })
+
   it('rejects regressed conversation revisions', () => {
     const revisions: number[] = []
     chatProtocolTesting.subscribe((item) => {
