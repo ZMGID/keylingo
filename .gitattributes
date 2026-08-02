@@ -1,0 +1,4 @@
+# Protocol codegen output is byte-compared by `npm run protocol:check`.
+# The exporter writes LF; without this, autocrlf=true checkouts get CRLF and
+# the check fails on Windows (and so do typecheck/build, which chain it).
+src/generated/** -text
