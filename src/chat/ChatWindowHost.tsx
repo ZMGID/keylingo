@@ -36,7 +36,6 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
   const [effectInput, setEffectInput] = useState<{
     focused: boolean
     size: PhysicalSize
-    revision: number
   } | null>(null)
   // DWM mutations cannot be cancelled once invoke() has crossed the IPC boundary.
   // Serialize them so an older theme/focus request can never land after the latest one.
@@ -192,19 +191,11 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
       if (!cancelled) setEffectInput(previous => previous ? { ...previous, ...next } : previous)
     }
 
-    const refresh = () => {
-      if (!cancelled) {
-        setEffectInput(previous => previous
-          ? { ...previous, revision: previous.revision + 1 }
-          : previous)
-      }
-    }
-
     void (async () => {
       try {
         const [focused, size] = await Promise.all([win.isFocused(), win.innerSize()])
         if (cancelled) return
-        setEffectInput({ focused, size, revision: 0 })
+        setEffectInput({ focused, size })
 
         const stop = await win.onResized(({ payload }) => {
           if (timer !== undefined) clearTimeout(timer)
@@ -215,13 +206,12 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
         cancelled ? stop() : stops.push(stop)
 
         if (effectPlatform === 'windows') {
-          const stopMove = await win.onMoved(() => {
-            if (timer !== undefined) clearTimeout(timer)
-            timer = setTimeout(refresh, 150)
-          })
-          cancelled ? stopMove() : stops.push(stopMove)
+          // 移动窗口不需要重设 DWM：Mica 是 per-HWND 属性，跨屏由 DWM 自己重绘；
+          // 跨屏 DPI 变化会带来 WM_SIZE，走上面的 onResized 就够了。
 
+          let focusEventSeen = false
           const stopFocus = await win.onFocusChanged(({ payload }) => {
+            focusEventSeen = true
             // Fail closed in the same event turn; waiting for IPC would expose the
             // system's light inactive fallback through the transparent title bar.
             if (!payload) setNativeEffectActive(false)
@@ -232,8 +222,9 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
           // Close the gap between the first isFocused() snapshot and listener
           // installation. A deactivation in that interval would otherwise leave
           // the transparent class stuck until the next focus transition.
+          // 监听器一旦报过值，它就是更新的事实 —— 这次补读只可能是过期快照，丢掉。
           const latestFocused = await win.isFocused()
-          if (cancelled) return
+          if (cancelled || focusEventSeen) return
           if (!latestFocused) setNativeEffectActive(false)
           push({ focused: latestFocused })
         }
@@ -257,7 +248,9 @@ export function ChatWindowHost({ children, translucentSidebar }: ChatWindowHostP
     let cancelled = false
     const generation = ++effectSyncGenerationRef.current
 
-    if (effectPlatform === 'windows') setNativeEffectActive(false)
+    // 这里刻意不预先 setNativeEffectActive(false)：尺寸变化也会重跑本 effect，预清等于
+    // 「撤透明外壳 → 等一次 IPC → 再加回来」，拖动/缩放窗口时肉眼一闪。失焦那一帧的
+    // fail-closed 由 onFocusChanged 同帧完成，不需要在这里再兜一遍。
 
     const task = effectSyncQueueRef.current
       .catch(() => {})
