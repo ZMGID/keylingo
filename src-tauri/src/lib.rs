@@ -23,6 +23,7 @@ pub mod path_env;
 pub mod plugins;
 pub mod proc;
 pub mod prompts;
+pub mod provider_request;
 pub mod rapidocr;
 pub mod replace_translation;
 #[cfg(target_os = "macos")]

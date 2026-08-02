@@ -20,7 +20,7 @@ type Props = Parameters<typeof ProvidersTab>[0]
  *   2. 密钥池的显隐、增删按 index 作用到正确的那一条
  *   3. 各回调不串（更新 / 删除 / 模型抽屉 / 测试连接）
  */
-function renderTab(overrides: Partial<Props> = {}) {
+function buildProps(overrides: Partial<Props> = {}): Props {
   const provider = makeProvider({ apiKeys: ['sk-aaa', 'sk-bbb'] })
   const props: Props = {
     settings: makeSettings({ providers: [provider] }),
@@ -35,6 +35,7 @@ function renderTab(overrides: Partial<Props> = {}) {
     onAddProvider: vi.fn(),
     onAddProviderFromPreset: vi.fn(),
     onUpdateProvider: vi.fn(),
+    onSetProviderIcon: vi.fn(),
     onRequestDeleteProvider: vi.fn(),
     onToggleGzipInfo: vi.fn(),
     onToggleKeyReveal: vi.fn(),
@@ -44,8 +45,20 @@ function renderTab(overrides: Partial<Props> = {}) {
     onRemoveEnabledModel: vi.fn(),
     ...overrides,
   }
+  return props
+}
+
+function renderTab(overrides: Partial<Props> = {}) {
+  const props = buildProps(overrides)
   render(<ProvidersTab {...props} />)
   return props
+}
+
+/** 需要在同一棵树上换 props 的用例（如切换供应商）用它，别重新 render 出第二棵树。 */
+function renderTabWithRerender(overrides: Partial<Props> = {}) {
+  const props = { ...buildProps(overrides) }
+  const view = render(<ProvidersTab {...props} />)
+  return { props, rerender: (next: Props) => view.rerender(<ProvidersTab {...next} />) }
 }
 
 describe('ProvidersTab', () => {
@@ -100,10 +113,16 @@ describe('ProvidersTab', () => {
     expect(props.onUpdateProvider).not.toHaveBeenCalled()
   })
 
-  it('gzip 说明默认收起，gzipInfoOpen 命中才展开', () => {
+  it('gzip 开关搬进「请求配置」二级页，说明默认收起、gzipInfoOpen 命中才展开', async () => {
     renderTab()
+    expect(screen.queryByText(/压缩请求体/)).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.requestConfig) }))
+    expect(screen.getByText(/压缩请求体/)).toBeTruthy()
     expect(screen.queryByText(/WAF 会扫描明文请求体/)).toBeNull()
+
     renderTab({ gzipInfoOpen: new Set(['p1']) })
+    const entries = screen.getAllByRole('button', { name: new RegExp(t.requestConfig) })
+    await userEvent.click(entries[entries.length - 1])
     expect(screen.getByText(/WAF 会扫描明文请求体/)).toBeTruthy()
   })
 
@@ -131,5 +150,30 @@ describe('ProvidersTab', () => {
     const props = renderTab()
     await userEvent.click(screen.getByRole('button', { name: new RegExp(t.addProvider) }))
     expect(props.onAddProvider).toHaveBeenCalled()
+  })
+
+  it('「请求配置」入口进二级页，返回后回到一级页', async () => {
+    renderTab()
+    expect(screen.queryByText(t.customHeaders)).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.requestConfig) }))
+    expect(screen.getByText(t.customHeaders)).toBeTruthy()
+    // 二级页接管右栏：一级页的字段不该还留在 DOM 里。
+    expect(screen.queryByText(t.baseUrl)).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: /返回/ }))
+    expect(screen.getByText(t.baseUrl)).toBeTruthy()
+    expect(screen.queryByText(t.customHeaders)).toBeNull()
+  })
+
+  it('切换供应商时退回一级页，避免改到别人的请求头', async () => {
+    const other = makeProvider({ id: 'p2', name: 'Anthropic' })
+    const { rerender, props } = renderTabWithRerender()
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.requestConfig) }))
+    expect(screen.getByText(t.customHeaders)).toBeTruthy()
+
+    rerender({ ...props, selectedProvider: other })
+    expect(screen.queryByText(t.customHeaders)).toBeNull()
+    expect(screen.getByText(t.baseUrl)).toBeTruthy()
   })
 })

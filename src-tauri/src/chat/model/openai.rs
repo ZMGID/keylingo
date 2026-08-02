@@ -94,7 +94,7 @@ impl OpenAiChatProvider<'_> {
                 let req = crate::api::attach_json_body(
                     self.with_session_headers(
                         self.state
-                            .http
+                            .client_for(self.provider)
                             .post(self.chat_completions_url())
                             .bearer_auth(key)
                             .header(ACCEPT_ENCODING, "identity"),
@@ -364,13 +364,25 @@ impl OpenAiChatProvider<'_> {
     /// 会话亲和头（对齐 opencode）：同一对话每轮带同一 id。会话亲和型代理据此把请求
     /// 稳定路由到同一上游会话（不再靠前缀指纹猜，杜绝串台/复用脏会话）；正经 provider
     /// 忽略未知头，无副作用。发送与请求调试记录共用 `session_header_pairs`，杜绝漂移。
+    /// 供应商「请求配置」里的 CLI 身份头与自定义头也在这里叠上（同名时自定义优先）。
     fn with_session_headers(
         &self,
         request: reqwest::RequestBuilder,
         metadata: &crate::chat::model::RequestMetadata,
     ) -> reqwest::RequestBuilder {
-        let mut request = request;
+        // 先把会话头与请求配置的头合成一份「同名只留一条」的清单再贴：reqwest 的
+        // `.header()` 是 append，分两轮贴会让用户自定义的 x-session-id 与我们自己的并存。
+        let mut pairs: Vec<(String, String)> = Vec::new();
         for (name, value) in session_header_pairs(metadata) {
+            crate::provider_request::upsert_pair(&mut pairs, name.to_string(), value);
+        }
+        for (name, value) in
+            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
+        {
+            crate::provider_request::upsert_pair(&mut pairs, name, value);
+        }
+        let mut request = request;
+        for (name, value) in pairs {
             request = request.header(name, value);
         }
         request
@@ -391,6 +403,11 @@ impl OpenAiChatProvider<'_> {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
         for (name, value) in session_header_pairs(metadata) {
             headers.insert(name.to_string(), value);
+        }
+        for (name, value) in
+            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
+        {
+            headers.insert(name, value);
         }
         crate::chat::request_debug::sanitize_headers(headers)
     }
@@ -1067,6 +1084,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1114,6 +1132,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides,
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1193,6 +1212,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides,
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1241,6 +1261,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let tool = crate::chat::model::ModelTool {
@@ -1305,6 +1326,7 @@ mod tests {
                 api_format: "openai_chat".into(),
                 model_overrides: Default::default(),
                 compress_request_body: false,
+                request: Default::default(),
             };
             let adapter = OpenAiChatProvider::new(&state, &provider, 1);
             let request = GenerateRequest {

@@ -851,6 +851,21 @@ export type ModelInfo = {
 // AI 模型提供商配置
 // apiKeys 支持多 key failover：第一个为主 key，其余为备用 key；
 // 当某个 key 触发限流/配额/鉴权失败时后端会自动切下一个。
+export type ProviderRequestConfig = {
+  /** 附加到该供应商所有请求上的自定义头。同名时覆盖 CLI 身份预设。 */
+  customHeaders?: { key: string; value: string }[]
+  /** 是否跟随系统代理。默认 true；关掉走直连。 */
+  useSystemProxy?: boolean
+  /** Anthropic prompt caching（仅 anthropic_messages 协议生效）。 */
+  promptCaching?: boolean
+  /** 'short'（5 分钟）| 'long'（1 小时，需 beta 头） */
+  promptCacheRetention?: string
+  /** '' 关闭 | 'claude_code' | 'codex' | 'grok' */
+  cliIdentity?: string
+  /** 身份版本号，空则用内置常量 */
+  cliIdentityVersion?: string
+}
+
 export type ModelProvider = {
   id: string
   name: string
@@ -864,6 +879,8 @@ export type ModelProvider = {
   // 把 agent 工具/系统提示里的 shell/路径/SQL 文本误判为攻击而返回 403 的供应商。
   compressRequestBody?: boolean
   modelOverrides?: Record<string, ModelInfo>
+  /** 「请求配置」：自定义头 / 代理 / prompt 缓存 / CLI 身份 */
+  request?: ProviderRequestConfig
 }
 
 // 提供商连接测试输入（支持使用未保存的配置进行测试）
@@ -873,6 +890,8 @@ export type ProviderConnectionInput = {
   apiKeys: string[]
   model?: string
   apiFormat?: string
+  /** 编辑中（可能尚未保存）的请求配置。不传则后端回落已保存的那份。 */
+  request?: ProviderRequestConfig
 }
 
 export type DefaultModelSelection = {
@@ -964,6 +983,8 @@ export type Settings = {
   chatTools: ChatToolsConfig
   documentProcessing?: DocumentProcessingConfig
   knowledgeBase?: KnowledgeBaseConfig
+  /** 供应商自定义图标：provider id → 图标 key（见 chat/ModelIcon 的 PROVIDER_BRANDS） */
+  providerIcons?: Record<string, string>
   retryEnabled: boolean
   retryAttempts: number
   screenshotTranslation: {
@@ -1394,6 +1415,18 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
     enabled: provider.enabled !== false,
     compressRequestBody: provider.compressRequestBody === true,
     apiFormat: normalizeProviderApiFormat(provider.apiFormat),
+    request: {
+      customHeaders: Array.isArray(provider.request?.customHeaders)
+        ? provider.request.customHeaders
+        : [],
+      // 默认跟随系统代理 —— 与加这个开关之前的行为一致。
+      useSystemProxy: provider.request?.useSystemProxy !== false,
+      promptCaching: provider.request?.promptCaching === true,
+      promptCacheRetention:
+        provider.request?.promptCacheRetention === 'long' ? 'long' : 'short',
+      cliIdentity: provider.request?.cliIdentity ?? '',
+      cliIdentityVersion: provider.request?.cliIdentityVersion ?? '',
+    },
   }
 }
 

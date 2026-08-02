@@ -701,6 +701,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides,
             compress_request_body: false,
+            request: Default::default(),
         }
     }
 

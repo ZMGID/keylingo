@@ -453,6 +453,44 @@ pub(crate) async fn replace_translation_pack_install(
     Ok(manager.install_replace_translation(tier).await)
 }
 
+/// 拼一个只用来读「请求配置」的临时 provider：优先前端传来的编辑中配置，缺省回落已保存的；
+/// 供应商都还没保存过时给一份默认值（跟随系统代理、无自定义头）。
+///
+/// `provider_request::apply` / `AppState::client_for` 只读 `request` 字段，其余字段是什么
+/// 不影响结果，所以这里用 `Default` 填充而不是去构造一份真实配置。
+fn effective_request_provider(
+    settings: &crate::settings::Settings,
+    provider_id: &str,
+    request_override: Option<crate::settings::ProviderRequestConfig>,
+) -> crate::settings::ModelProvider {
+    let mut provider = settings
+        .get_provider(provider_id)
+        .cloned()
+        .unwrap_or_else(|| crate::settings::ModelProvider {
+            id: provider_id.to_string(),
+            name: String::new(),
+            api_keys: Vec::new(),
+            api_key_legacy: None,
+            base_url: String::new(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "openai_chat".to_string(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+        });
+    if let Some(request) = request_override {
+        provider.request = request;
+    }
+    // 设置文件可被手改，前端也可能传来没过校验的草稿，这里按发送前的规则再滤一遍。
+    provider
+        .request
+        .custom_headers
+        .retain(crate::provider_request::is_usable_header);
+    provider
+}
+
 #[tauri::command]
 pub(crate) async fn fetch_models(
     state: State<'_, AppState>,
@@ -460,8 +498,10 @@ pub(crate) async fn fetch_models(
     provider: Option<ProviderConnectionInput>,
 ) -> Result<Vec<String>, String> {
     let settings = state.settings_read().clone();
+    let request_override = provider.as_ref().and_then(|p| p.request.clone());
     let (base_url, api_keys) = resolve_provider_credentials(&settings, &provider_id, provider)?;
     let retry_attempts = effective_retry_attempts(&settings);
+    let effective = effective_request_provider(&settings, &provider_id, request_override);
 
     if api_keys.is_empty() {
         return Err("Missing API Key".to_string());
@@ -475,7 +515,15 @@ pub(crate) async fn fetch_models(
         retry_attempts,
         &provider_id,
         &api_keys,
-        |key| with_standard_request_timeout(state.http.get(url.clone()).bearer_auth(key)).send(),
+        |key| {
+            // 拉模型列表也走该供应商的请求配置：中转站常按自定义头/UA 决定放行与可见模型。
+            let request = crate::provider_request::apply(
+                state.client_for(&effective).get(url.clone()).bearer_auth(key),
+                &effective,
+                None,
+            );
+            with_standard_request_timeout(request).send()
+        },
     )
     .await?;
 
@@ -528,6 +576,7 @@ pub(crate) async fn test_provider_connection(
                 .map(|p| p.api_format_kind())
         })
         .unwrap_or(ProviderApiFormat::OpenAiChat);
+    let request_override = provider.as_ref().and_then(|p| p.request.clone());
     let (base_url, api_keys) = resolve_provider_credentials(&settings, &provider_id, provider)?;
 
     let api_key = match api_keys.first() {
@@ -542,6 +591,14 @@ pub(crate) async fn test_provider_connection(
 
     let retry_attempts = effective_retry_attempts(&settings);
     let base = base_url.trim_end_matches('/');
+    // 测试连接必须和真实请求带一样的头（网关常按 UA / 自定义头放行），
+    // 否则这里通过、聊天时 403，用户完全查不出原因。
+    // 用 `effective` 这个临时 provider：优先取前端传来的编辑中配置，缺省回落已保存的。
+    let effective = effective_request_provider(&settings, &provider_id, request_override);
+    let with_request_config = |request: reqwest::RequestBuilder| {
+        crate::provider_request::apply(request, &effective, None)
+    };
+    let client = state.client_for(&effective);
 
     let result = match model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         Some(model) => {
@@ -582,7 +639,7 @@ pub(crate) async fn test_provider_connection(
                 ),
             };
             send_with_retry("Provider API", retry_attempts, || {
-                let request = state.http.post(url.clone()).json(&body);
+                let request = with_request_config(client.post(url.clone())).json(&body);
                 let request = match api_format {
                     ProviderApiFormat::AnthropicMessages => request
                         .header("x-api-key", &api_key)
@@ -598,7 +655,7 @@ pub(crate) async fn test_provider_connection(
             // /models 探测（Gemini 原生同样有 GET /models；Anthropic 也提供 /models）。
             let url = format!("{base}/models");
             send_with_retry("Provider API", retry_attempts, || {
-                let request = state.http.get(url.clone());
+                let request = with_request_config(client.get(url.clone()));
                 let request = match api_format {
                     ProviderApiFormat::AnthropicMessages => request
                         .header("x-api-key", &api_key)

@@ -526,6 +526,7 @@ fn test_provider(base_url: &str) -> ModelProvider {
         api_format: "openai_chat".to_string(),
         model_overrides: std::collections::HashMap::new(),
         compress_request_body: false,
+        request: Default::default(),
     }
 }
 

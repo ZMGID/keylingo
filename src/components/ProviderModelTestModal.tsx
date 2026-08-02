@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { X, RefreshCw, Check } from 'lucide-react'
 import { api } from '../api/tauri'
+import type { ProviderRequestConfig } from '../api/tauri'
 import { ModelIcon } from '../chat/ModelIcon'
 import { Button, IconButton } from './Button'
 
@@ -17,6 +18,7 @@ export function ProviderModelTestModal({
   baseUrl,
   apiKeys,
   apiFormat,
+  request,
   models,
   lang,
   onClose,
@@ -25,6 +27,8 @@ export function ProviderModelTestModal({
   baseUrl: string
   apiKeys: string[]
   apiFormat: string
+  /** 编辑中的请求配置：测试必须和真实聊天带一样的头，否则「测试通过、聊天 403」。 */
+  request?: ProviderRequestConfig
   models: string[]
   lang: Lang
   onClose: () => void
@@ -67,7 +71,14 @@ export function ProviderModelTestModal({
     await Promise.all(
       targets.map(async (model) => {
         try {
-          const r = await api.testProviderConnection(providerId, { id: providerId, baseUrl, apiKeys, apiFormat, model })
+          const r = await api.testProviderConnection(providerId, {
+            id: providerId,
+            baseUrl,
+            apiKeys,
+            apiFormat,
+            model,
+            request,
+          })
           setResults((prev) => ({
             ...prev,
             [model]: r.success ? { status: 'ok' } : { status: 'fail', error: r.error },

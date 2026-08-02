@@ -3522,6 +3522,67 @@ button.chat-composer-status-item:hover {
   color: var(--text-faint);
   margin-bottom: 4px;
 }
+/* 二级页入口行（如供应商详情里的「请求配置 ›」）与其返回条 */
+.kv-subpage-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  margin: 2px 0;
+  border-radius: 10px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.kv-subpage-entry:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+}
+.dark .kv-subpage-entry:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.kv-subpage-entry-icon {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--text-faint);
+  background: rgba(0, 0, 0, 0.05);
+}
+.dark .kv-subpage-entry-icon {
+  background: rgba(255, 255, 255, 0.07);
+}
+.kv-subpage-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--text-faint);
+  background: transparent;
+}
+.kv-subpage-back:hover {
+  color: var(--text);
+}
+.kv-subpage-back-title {
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 组标题里的说明文字与计数标签不跟着大写（可折叠分组的标题行） */
+.kv-group-title .kv-row-desc,
+.kv-group-title .kv-tag {
+  text-transform: none;
+  letter-spacing: normal;
+}
 /* 组标题里的操作按钮（如快捷键「恢复默认 / 检查冲突」）不受 uppercase 影响 */
 .kv-group-title .kv-btn {
   text-transform: none;

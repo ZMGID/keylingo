@@ -1,7 +1,9 @@
 import { Plus, Trash2 } from 'lucide-react'
+import { useState } from 'react'
 import { Toggle, Input, SettingsGroup } from '../components'
 import { IconButton } from '../../components/Button'
 import { ProviderSortableList } from '../ProviderSortableList'
+import { ProviderIcon, PROVIDER_BRANDS } from '../../chat/ModelIcon'
 import { PROVIDER_PRESETS, type ProviderPreset } from '../providerPresets'
 import { ProviderDetail } from './ProviderDetail'
 import { isProviderEnabled } from '../utils'
@@ -48,6 +50,7 @@ function ProviderList({
         selectedId={selectedProvider?.id}
         lang={lang}
         providerNameLabel={t.providerName}
+        icons={settings.providerIcons}
         onSelect={onSelect}
         onReorder={onReorder}
         trailing={PROVIDER_PRESETS
@@ -85,6 +88,7 @@ interface ProvidersTabProps {
   onAddProvider: () => void
   onAddProviderFromPreset: (preset: ProviderPreset) => void
   onUpdateProvider: (id: string, updates: Partial<ModelProvider>) => void
+  onSetProviderIcon: (id: string, dataUrl: string) => void
   onRequestDeleteProvider: (id: string) => void
   onToggleGzipInfo: (id: string) => void
   onToggleKeyReveal: (keyId: string) => void
@@ -108,6 +112,7 @@ export function ProvidersTab({
   onAddProvider,
   onAddProviderFromPreset,
   onUpdateProvider,
+  onSetProviderIcon,
   onRequestDeleteProvider,
   onToggleGzipInfo,
   onToggleKeyReveal,
@@ -117,6 +122,7 @@ export function ProvidersTab({
   onRemoveEnabledModel,
 }: ProvidersTabProps) {
   const configured = selectedProvider?.apiKeys.some((key) => key.trim())
+  const [iconPickerOpen, setIconPickerOpen] = useState(false)
 
   return (
     <div className="kv-providers-root">
@@ -163,11 +169,65 @@ export function ProvidersTab({
                     </IconButton>
                   </div>
                 </div>
-                <Input
-                  value={selectedProvider.name}
-                  onChange={(v) => onUpdateProvider(selectedProvider.id, { name: v })}
-                  placeholder="Provider name"
-                />
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setIconPickerOpen((v) => !v)}
+                    title={lang === 'zh' ? '选择图标' : 'Choose icon'}
+                    data-tauri-drag-region="false"
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white ring-1 ring-black/[0.06] transition hover:ring-black/20 dark:bg-neutral-900 dark:ring-white/[0.08] dark:hover:ring-white/25"
+                  >
+                    <ProviderIcon
+                      name={selectedProvider.name}
+                      baseUrl={selectedProvider.baseUrl}
+                      iconKey={settings.providerIcons?.[selectedProvider.id]}
+                      size={20}
+                    />
+                  </button>
+                  <Input
+                    className="min-w-0 flex-1"
+                    value={selectedProvider.name}
+                    onChange={(v) => onUpdateProvider(selectedProvider.id, { name: v })}
+                    placeholder="Provider name"
+                  />
+                </div>
+                {iconPickerOpen && (
+                  <div className="rounded-lg bg-black/[0.02] p-2 ring-1 ring-black/[0.06] dark:bg-white/[0.03] dark:ring-white/[0.08]">
+                    <div className="grid grid-cols-[repeat(auto-fill,minmax(2rem,1fr))] gap-1">
+                      <button
+                        type="button"
+                        title={lang === 'zh' ? '自动匹配' : 'Auto'}
+                        onClick={() => {
+                          onSetProviderIcon(selectedProvider.id, '')
+                          setIconPickerOpen(false)
+                        }}
+                        data-tauri-drag-region="false"
+                        className={`flex h-8 items-center justify-center rounded-md text-[10px] text-neutral-500 hover:bg-black/[0.06] dark:text-neutral-400 dark:hover:bg-white/[0.08] ${
+                          settings.providerIcons?.[selectedProvider.id] ? '' : 'bg-black/[0.07] dark:bg-white/[0.1]'
+                        }`}
+                      >
+                        {lang === 'zh' ? '自动' : 'Auto'}
+                      </button>
+                      {Object.keys(PROVIDER_BRANDS).map((key) => (
+                        <button
+                          key={key}
+                          type="button"
+                          title={key}
+                          onClick={() => {
+                            onSetProviderIcon(selectedProvider.id, key)
+                            setIconPickerOpen(false)
+                          }}
+                          data-tauri-drag-region="false"
+                          className={`flex h-8 items-center justify-center rounded-md hover:bg-black/[0.06] dark:hover:bg-white/[0.08] ${
+                            settings.providerIcons?.[selectedProvider.id] === key ? 'bg-black/[0.07] dark:bg-white/[0.1]' : ''
+                          }`}
+                        >
+                          <ProviderIcon name={key} iconKey={key} size={18} />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <p className="kv-provider-empty-hint">

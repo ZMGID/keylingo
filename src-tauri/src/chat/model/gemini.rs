@@ -64,11 +64,15 @@ impl GeminiProvider<'_> {
             &self.provider.api_keys,
             |key| {
                 with_chat_request_timeout(crate::api::attach_json_body(
-                    self.state
-                        .http
-                        .post(&url)
-                        .headers(gemini_headers(key).unwrap_or_default())
-                        .header(ACCEPT_ENCODING, "identity"),
+                    crate::provider_request::apply(
+                        self.state
+                            .client_for(self.provider)
+                            .post(&url)
+                            .headers(gemini_headers(key).unwrap_or_default())
+                            .header(ACCEPT_ENCODING, "identity"),
+                        self.provider,
+                        request.metadata.conversation_id.as_deref(),
+                    ),
                     &body,
                     self.provider.compress_request_body,
                 ))
@@ -149,11 +153,15 @@ impl GeminiProvider<'_> {
             &self.provider.api_keys,
             |key| {
                 crate::api::attach_json_body(
-                    self.state
-                        .http
-                        .post(&url)
-                        .headers(gemini_headers(key).unwrap_or_default())
-                        .header(ACCEPT_ENCODING, "identity"),
+                    crate::provider_request::apply(
+                        self.state
+                            .client_for(self.provider)
+                            .post(&url)
+                            .headers(gemini_headers(key).unwrap_or_default())
+                            .header(ACCEPT_ENCODING, "identity"),
+                        self.provider,
+                        request.metadata.conversation_id.as_deref(),
+                    ),
                     &body,
                     self.provider.compress_request_body,
                 )
@@ -376,13 +384,21 @@ impl GeminiProvider<'_> {
     }
 
     /// 重建本次请求实际会带的 headers（脱敏后）供请求调试面板展示。
-    fn debug_request_headers(&self) -> std::collections::BTreeMap<String, String> {
+    fn debug_request_headers(
+        &self,
+        metadata: &crate::chat::model::RequestMetadata,
+    ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
         if let Some(key) = self.provider.api_keys.first() {
             headers.insert("x-goog-api-key".to_string(), key.clone());
         }
         headers.insert("content-type".to_string(), "application/json".to_string());
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
+        for (name, value) in
+            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
+        {
+            headers.insert(name, value);
+        }
         crate::chat::request_debug::sanitize_headers(headers)
     }
 
@@ -407,7 +423,7 @@ impl GeminiProvider<'_> {
                 duration_ms: duration.as_millis() as u64,
                 status: "success",
                 url: self.endpoint_url(&request.model, stream),
-                headers: self.debug_request_headers(),
+                headers: self.debug_request_headers(&request.metadata),
                 body: self.request_body(request, stream),
                 stream,
                 response: crate::chat::request_debug::RequestDebugResponse::from_output(
@@ -440,7 +456,7 @@ impl GeminiProvider<'_> {
                 duration_ms: duration.as_millis() as u64,
                 status: "error",
                 url: self.endpoint_url(&request.model, stream),
-                headers: self.debug_request_headers(),
+                headers: self.debug_request_headers(&request.metadata),
                 body: self.request_body(request, stream),
                 stream,
                 response: crate::chat::request_debug::RequestDebugResponse::from_error(
@@ -1153,6 +1169,7 @@ mod tests {
             api_format: "gemini".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         }
     }
 

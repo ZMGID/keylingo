@@ -437,6 +437,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let request = GenerateRequest {
             model: "gpt-5".into(),

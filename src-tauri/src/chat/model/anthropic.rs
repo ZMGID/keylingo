@@ -16,6 +16,81 @@ use super::{
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// 1 小时缓存的 beta 开关；不带这个头时 `ttl: "1h"` 会被拒。
+const EXTENDED_CACHE_TTL_BETA: &str = "extended-cache-ttl-2025-04-11";
+
+/// 一次请求的 prompt 缓存设置。
+struct PromptCache {
+    long_ttl: bool,
+}
+
+impl PromptCache {
+    fn value(&self) -> Value {
+        if self.long_ttl {
+            serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
+        } else {
+            serde_json::json!({ "type": "ephemeral" })
+        }
+    }
+}
+
+/// 在请求体上打 prompt 缓存断点。用文档化的**显式断点**写法（给内容块加 `cache_control`），
+/// 而不是顶层 `cache_control`——后者只在官方域名成立，兼容网关的行为没法保证。
+///
+/// 断点位置按前缀稳定性从前往后排：tools → system → 最后一条消息的最后一个可缓存块。
+/// 前两个是每轮不变的长前缀（省钱的大头），第三个把本轮的对话历史也一起缓存进去，
+/// 下一轮就能直接命中。Anthropic 上限 4 个断点，这里最多用 3 个。
+fn apply_prompt_cache_breakpoints(body: &mut Value, cache_control: &Value) {
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        if let Some(last) = tools.last_mut().and_then(Value::as_object_mut) {
+            last.insert("cache_control".to_string(), cache_control.clone());
+        }
+    }
+
+    // system 平时是裸字符串，缓存要求块结构 —— 只在开缓存时改形状，关缓存的请求体保持原样。
+    if let Some(system) = body.get("system").and_then(Value::as_str) {
+        body["system"] = serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": cache_control.clone(),
+        }]);
+    } else if let Some(blocks) = body.get_mut("system").and_then(Value::as_array_mut) {
+        mark_last_cacheable_block(blocks, cache_control);
+    }
+
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        if let Some(content) = messages
+            .last_mut()
+            .and_then(|m| m.get_mut("content"))
+            .and_then(Value::as_array_mut)
+        {
+            mark_last_cacheable_block(content, cache_control);
+        }
+    }
+}
+
+/// 给最后一个可缓存的块加断点。`thinking` 块与空 text 块不能带 cache_control。
+fn mark_last_cacheable_block(blocks: &mut [Value], cache_control: &Value) {
+    for block in blocks.iter_mut().rev() {
+        let Some(obj) = block.as_object_mut() else {
+            continue;
+        };
+        match obj.get("type").and_then(Value::as_str) {
+            Some("thinking") | Some("redacted_thinking") => continue,
+            Some("text")
+                if obj
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_none_or(|t| t.trim().is_empty()) =>
+            {
+                continue
+            }
+            _ => {}
+        }
+        obj.insert("cache_control".to_string(), cache_control.clone());
+        return;
+    }
+}
 
 pub struct AnthropicMessagesProvider<'a> {
     state: &'a AppState,
@@ -61,11 +136,14 @@ impl AnthropicMessagesProvider<'_> {
             &self.provider.api_keys,
             |key| {
                 with_chat_request_timeout(crate::api::attach_json_body(
-                    self.state
-                        .http
-                        .post(self.messages_url())
-                        .headers(anthropic_headers(key).unwrap_or_default())
-                        .header(ACCEPT_ENCODING, "identity"),
+                    self.with_extra_headers(
+                        self.state
+                            .client_for(self.provider)
+                            .post(self.messages_url())
+                            .headers(anthropic_headers(key).unwrap_or_default())
+                            .header(ACCEPT_ENCODING, "identity"),
+                        &request.metadata,
+                    ),
                     &body,
                     self.provider.compress_request_body,
                 ))
@@ -145,11 +223,14 @@ impl AnthropicMessagesProvider<'_> {
             &self.provider.api_keys,
             |key| {
                 crate::api::attach_json_body(
-                    self.state
-                        .http
-                        .post(self.messages_url())
-                        .headers(anthropic_headers(key).unwrap_or_default())
-                        .header(ACCEPT_ENCODING, "identity"),
+                    self.with_extra_headers(
+                        self.state
+                            .client_for(self.provider)
+                            .post(self.messages_url())
+                            .headers(anthropic_headers(key).unwrap_or_default())
+                            .header(ACCEPT_ENCODING, "identity"),
+                        &request.metadata,
+                    ),
                     &body,
                     self.provider.compress_request_body,
                 )
@@ -378,13 +459,70 @@ impl AnthropicMessagesProvider<'_> {
                 body[key] = value.clone();
             }
         }
+        // prompt caching 放在最后：断点必须打在最终 body 上，否则 provider_options
+        // 覆盖掉 system/tools 时断点就落在被丢弃的旧内容上了。
+        if let Some(cache) = self.prompt_cache_control() {
+            apply_prompt_cache_breakpoints(&mut body, &cache.value());
+        }
         body
     }
 
+    /// 该供应商本次是否要打 prompt 缓存断点。只有 anthropic_messages 协议 + 开关打开才生效。
+    fn prompt_cache_control(&self) -> Option<PromptCache> {
+        if !self.provider.request.prompt_caching {
+            return None;
+        }
+        Some(PromptCache {
+            long_ttl: self.provider.request.prompt_cache_retention == "long",
+        })
+    }
+
+    /// 供应商「请求配置」带来的附加头（CLI 身份 / 自定义头）+ prompt 缓存的 beta 头。
+    /// 发送路径与请求调试面板共用，杜绝「面板显示的和实际发的不一致」。
+    fn extra_header_pairs(
+        &self,
+        metadata: &crate::chat::model::RequestMetadata,
+    ) -> Vec<(String, String)> {
+        let mut pairs =
+            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref());
+        // 1 小时缓存是 beta 能力，必须显式声明才生效。anthropic-beta 不是保留头（用户可能
+        // 要开别的 beta），所以这里得跟用户填的那条合并成一行 —— 发两行的话调试面板（BTreeMap）
+        // 只显示一条，就和实际发出去的对不上了。
+        if self.prompt_cache_control().is_some_and(|c| c.long_ttl) {
+            let existing = pairs
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                .map(|(_, value)| value.clone());
+            let merged = match existing {
+                Some(value) if value.split(',').any(|v| v.trim() == EXTENDED_CACHE_TTL_BETA) => value,
+                Some(value) => format!("{value}, {EXTENDED_CACHE_TTL_BETA}"),
+                None => EXTENDED_CACHE_TTL_BETA.to_string(),
+            };
+            crate::provider_request::upsert_pair(&mut pairs, "anthropic-beta".to_string(), merged);
+        }
+        pairs
+    }
+
+    /// 把 `extra_header_pairs` 贴到请求上。
+    fn with_extra_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+        metadata: &crate::chat::model::RequestMetadata,
+    ) -> reqwest::RequestBuilder {
+        let mut request = request;
+        for (name, value) in self.extra_header_pairs(metadata) {
+            request = request.header(name, value);
+        }
+        request
+    }
+
     /// 重建本次请求实际会带的 headers（脱敏后）供请求调试面板展示。镜像 `anthropic_headers`
-    /// （x-api-key / anthropic-version / content-type）+ 发送路径另加的 Accept-Encoding。
-    /// x-api-key 用首个 key（正常发送用的也是它）派生脱敏预览。
-    fn debug_request_headers(&self) -> std::collections::BTreeMap<String, String> {
+    /// （x-api-key / anthropic-version / content-type）+ 发送路径另加的 Accept-Encoding
+    /// 与 `extra_header_pairs`。x-api-key 用首个 key（正常发送用的也是它）派生脱敏预览。
+    fn debug_request_headers(
+        &self,
+        metadata: &crate::chat::model::RequestMetadata,
+    ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
         if let Some(key) = self.provider.api_keys.first() {
             headers.insert("x-api-key".to_string(), key.clone());
@@ -395,6 +533,9 @@ impl AnthropicMessagesProvider<'_> {
         );
         headers.insert("content-type".to_string(), "application/json".to_string());
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
+        for (name, value) in self.extra_header_pairs(metadata) {
+            headers.insert(name, value);
+        }
         crate::chat::request_debug::sanitize_headers(headers)
     }
 
@@ -420,7 +561,7 @@ impl AnthropicMessagesProvider<'_> {
                 duration_ms: duration.as_millis() as u64,
                 status: "success",
                 url: self.messages_url(),
-                headers: self.debug_request_headers(),
+                headers: self.debug_request_headers(&request.metadata),
                 body: self.request_body(request, stream),
                 stream,
                 response: crate::chat::request_debug::RequestDebugResponse::from_output(
@@ -454,7 +595,7 @@ impl AnthropicMessagesProvider<'_> {
                 duration_ms: duration.as_millis() as u64,
                 status: "error",
                 url: self.messages_url(),
-                headers: self.debug_request_headers(),
+                headers: self.debug_request_headers(&request.metadata),
                 body: self.request_body(request, stream),
                 stream,
                 response: crate::chat::request_debug::RequestDebugResponse::from_error(
@@ -1509,6 +1650,7 @@ mod tests {
             api_format: "anthropic_messages".into(),
             model_overrides,
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1577,6 +1719,7 @@ mod tests {
             api_format: "anthropic_messages".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
         let base = GenerateRequest {
@@ -1604,6 +1747,135 @@ mod tests {
                 .any(|t| t["type"] == "web_search_20250305" && t["name"] == "web_search"),
             "body: {on}"
         );
+    }
+
+    #[test]
+    fn prompt_caching_off_leaves_body_untouched() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = cache_test_provider(false, "short");
+        let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
+        let body = adapter.request_body(&cache_test_request(), false);
+        // 关缓存时 system 仍是裸字符串、没有任何 cache_control —— 与加这个功能之前逐字节一致。
+        assert_eq!(body["system"], serde_json::json!("you are kivio"));
+        assert!(!body.to_string().contains("cache_control"), "body: {body}");
+    }
+
+    #[test]
+    fn prompt_caching_marks_tools_system_and_last_message() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = cache_test_provider(true, "short");
+        let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
+        let body = adapter.request_body(&cache_test_request(), false);
+
+        let ephemeral = serde_json::json!({ "type": "ephemeral" });
+        // system 从字符串变成块数组，最后一块带断点。
+        assert_eq!(body["system"][0]["text"], serde_json::json!("you are kivio"));
+        assert_eq!(body["system"][0]["cache_control"], ephemeral);
+        // 只有最后一个工具带断点（前缀越长命中越多，中间打断点是浪费）。
+        let tools = body["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"], ephemeral);
+        // 最后一条消息的最后一个内容块带断点。
+        let messages = body["messages"].as_array().expect("messages");
+        let last = messages.last().expect("last message");
+        let content = last["content"].as_array().expect("content blocks");
+        assert_eq!(content.last().unwrap()["cache_control"], ephemeral);
+        // 断点总数 ≤ Anthropic 的 4 个上限。
+        assert_eq!(body.to_string().matches("cache_control").count(), 3);
+    }
+
+    #[test]
+    fn long_retention_adds_ttl_and_beta_header() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let provider = cache_test_provider(true, "long");
+        let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
+        let body = adapter.request_body(&cache_test_request(), false);
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        // 1h 不带 beta 头会被拒，所以头和 ttl 必须同进同出。
+        let headers = adapter.debug_request_headers(&Default::default());
+        assert_eq!(
+            headers.get("anthropic-beta").map(String::as_str),
+            Some(EXTENDED_CACHE_TTL_BETA)
+        );
+
+        let short_provider = cache_test_provider(true, "short");
+        let short_adapter = AnthropicMessagesProvider::new(&state, &short_provider, 1);
+        assert!(short_adapter
+            .debug_request_headers(&Default::default())
+            .get("anthropic-beta")
+            .is_none());
+    }
+
+    #[test]
+    fn cache_breakpoint_skips_thinking_and_empty_text_blocks() {
+        let mut blocks = vec![
+            serde_json::json!({ "type": "text", "text": "real content" }),
+            serde_json::json!({ "type": "text", "text": "   " }),
+            serde_json::json!({ "type": "thinking", "thinking": "hmm" }),
+        ];
+        mark_last_cacheable_block(&mut blocks, &serde_json::json!({ "type": "ephemeral" }));
+        // thinking 块和空 text 块不能带 cache_control，断点要往前退到第一块。
+        assert!(blocks[0].get("cache_control").is_some());
+        assert!(blocks[1].get("cache_control").is_none());
+        assert!(blocks[2].get("cache_control").is_none());
+    }
+
+    fn cache_test_provider(caching: bool, retention: &str) -> crate::settings::ModelProvider {
+        crate::settings::ModelProvider {
+            id: "test".into(),
+            name: "Test".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            base_url: "https://api.anthropic.com".into(),
+            available_models: vec!["claude-opus-4-8".into()],
+            enabled_models: vec!["claude-opus-4-8".into()],
+            enabled: true,
+            api_format: "anthropic_messages".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: crate::settings::ProviderRequestConfig {
+                prompt_caching: caching,
+                prompt_cache_retention: retention.into(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn cache_test_tool(name: &str) -> ModelTool {
+        ModelTool {
+            id: name.into(),
+            name: name.into(),
+            description: format!("{name} a file"),
+            source: "native".into(),
+            server_id: None,
+            server_name: None,
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            sensitive: false,
+        }
+    }
+
+    fn cache_test_request() -> GenerateRequest {
+        GenerateRequest {
+            model: "claude-opus-4-8".into(),
+            system: "you are kivio".into(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: vec![cache_test_tool("read"), cache_test_tool("write")],
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { GripHorizontal } from 'lucide-react'
 import type { ModelProvider } from '../api/tauri'
+import { ProviderIcon } from '../chat/ModelIcon'
 import { isProviderEnabled } from './utils'
 
 type ProviderSortableListProps = {
@@ -8,6 +9,8 @@ type ProviderSortableListProps = {
   selectedId: string | undefined
   lang: 'zh' | 'en'
   providerNameLabel: string
+  /** provider id → 手选的图标 key；缺省时按名字/域名自动匹配。 */
+  icons?: Record<string, string>
   onSelect: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
   /** 追加在真实供应商项之后、同一列表容器内的节点（如快速预设项），保证连续排列不被撑到底部。 */
@@ -21,6 +24,7 @@ export function ProviderSortableList({
   selectedId,
   lang,
   providerNameLabel,
+  icons,
   onSelect,
   onReorder,
   trailing,
@@ -157,6 +161,12 @@ export function ProviderSortableList({
           >
             <span className="kv-provider-item-select">
               <span className={`kv-provider-dot ${!isProviderEnabled(provider) ? 'off' : configured ? 'on' : 'warn'}`} />
+              <ProviderIcon
+                name={provider.name}
+                baseUrl={provider.baseUrl}
+                iconKey={icons?.[provider.id]}
+                size={15}
+              />
               <span className="kv-provider-name">{provider.name || providerNameLabel}</span>
             </span>
             <button

@@ -427,13 +427,14 @@ async fn generate_with_images_api(
         &provider.id,
         &provider.api_keys,
         |key| {
-            state
-                .http
-                .post(&url)
-                .bearer_auth(key)
-                .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
-                .json(&body)
-                .send()
+            crate::provider_request::apply(
+                state.client_for(provider).post(&url).bearer_auth(key),
+                provider,
+                None,
+            )
+            .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
+            .json(&body)
+            .send()
         },
     )
     .await?;
@@ -537,13 +538,14 @@ async fn generate_with_openrouter_chat(
         &provider.id,
         &provider.api_keys,
         |key| {
-            state
-                .http
-                .post(&url)
-                .bearer_auth(key)
-                .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
-                .json(&body)
-                .send()
+            crate::provider_request::apply(
+                state.client_for(provider).post(&url).bearer_auth(key),
+                provider,
+                None,
+            )
+            .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
+            .json(&body)
+            .send()
         },
     )
     .await?;
@@ -627,13 +629,14 @@ async fn generate_with_gemini_native(
             &provider.id,
             &provider.api_keys,
             |key| {
-                state
-                    .http
-                    .post(&url)
-                    .header("x-goog-api-key", key)
-                    .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
-                    .json(&body)
-                    .send()
+                crate::provider_request::apply(
+                    state.client_for(provider).post(&url).header("x-goog-api-key", key),
+                    provider,
+                    None,
+                )
+                .timeout(IMAGE_GENERATION_HTTP_TIMEOUT)
+                .json(&body)
+                .send()
             },
         )
         .await;
@@ -1043,6 +1046,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         };
 
         assert_eq!(
@@ -1121,6 +1125,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         };
         assert_eq!(
             resolve_image_route(&openrouter, "google/gemini-3.1-flash-image-preview"),
@@ -1233,6 +1238,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         };
 
         assert!(uses_xai_images_api(&provider, "grok-imagine-image-quality"));
@@ -1256,6 +1262,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let openrouter = ModelProvider {
             base_url: "https://openrouter.ai/api/v1".to_string(),
@@ -1301,6 +1308,7 @@ mod tests {
             api_format: "gemini".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         }
     }
 

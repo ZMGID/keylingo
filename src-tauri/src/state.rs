@@ -211,6 +211,9 @@ pub struct AppState {
     /// without needing an AppHandle threaded through every call path.
     pub usage_dir: PathBuf,
     pub http: Client,
+    /// 直连客户端（忽略系统/环境代理）。只有当某个供应商关掉「跟随系统代理」时才构造，
+    /// 默认全跟随系统代理的用户不会多出一个连接池。
+    http_direct: std::sync::OnceLock<Client>,
     /// macOS Apple Vision OCR sidecar 客户端。只有系统 OCR 路径会拉起。
     #[cfg(target_os = "macos")]
     pub macos_ocr: std::sync::Arc<MacOcrClient>,
@@ -340,6 +343,7 @@ impl AppState {
             mcp_tool_snapshots: Mutex::new(mcp_tool_snapshots),
             usage_dir,
             http,
+            http_direct: std::sync::OnceLock::new(),
             #[cfg(target_os = "macos")]
             macos_ocr,
             offline_models,
@@ -370,6 +374,17 @@ impl AppState {
             InpaintingClient::new(offline_models),
         )
     }
+    /// 该供应商应当使用的 HTTP 客户端。默认跟随系统代理（与加这个开关之前一致），
+    /// 关掉时用忽略代理的直连客户端。
+    pub fn client_for(&self, provider: &crate::settings::ModelProvider) -> &Client {
+        if provider.request.use_system_proxy {
+            &self.http
+        } else {
+            self.http_direct
+                .get_or_init(crate::api::build_direct_http_client)
+        }
+    }
+
     /// 安全读取设置（锁中毒时返回内部数据，不 panic）
     pub fn settings_read(&self) -> std::sync::RwLockReadGuard<'_, Settings> {
         self.settings.read().unwrap_or_else(|e| e.into_inner())

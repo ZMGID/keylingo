@@ -1,17 +1,20 @@
+import { useEffect, useState } from 'react'
 import {
-  Plus, Minus, Trash2, RefreshCw, Eye, EyeOff, Info, Wrench, Brain,
+  Plus, Minus, Trash2, RefreshCw, Eye, EyeOff, Wrench, Brain,
+  ArrowLeft, ChevronRight, Globe,
   Image as ImageIcon,
 } from 'lucide-react'
-import { Toggle, Select, Input, SettingRow, SettingsGroup, FieldBlock } from '../components'
+import { Select, Input, SettingsGroup, FieldBlock } from '../components'
 import { Button, IconButton } from '../../components/Button'
 import { ModelIcon } from '../../chat/ModelIcon'
 import { PROVIDER_PRESETS } from '../providerPresets'
+import { ProviderRequestPanel } from '../ProviderRequestPanel'
 import { resolveModelInfo } from '../../data/modelMatching'
 import { api, normalizeProviderApiFormat } from '../../api/tauri'
 import type { I18n, Lang } from '../i18n'
 import type { ModelProvider } from '../../api/tauri'
 
-/** 右栏：选中供应商的启用/命名 + 端点/协议/gzip/密钥池/模型列表。 */
+/** 右栏：选中供应商的端点/协议/gzip/密钥池/模型列表，以及通往「请求配置」二级页的入口。 */
 export function ProviderDetail({
   provider,
   t,
@@ -41,7 +44,37 @@ export function ProviderDetail({
   onOpenModelDrawer: (target: { providerId: string; model: string }) => void
   onRemoveEnabledModel: (providerId: string, model: string) => void
 }) {
+  const [showRequestPage, setShowRequestPage] = useState(false)
+  // 切换供应商时退回一级页：否则会停在二级页上、悄悄改到另一个供应商的头。
+  useEffect(() => setShowRequestPage(false), [provider.id])
+
+  if (showRequestPage) {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => setShowRequestPage(false)}
+          className="kv-subpage-back"
+          data-tauri-drag-region="false"
+        >
+          <ArrowLeft size={14} />
+          <span>{lang === 'zh' ? '返回' : 'Back'}</span>
+          <span className="kv-subpage-back-title">{t.requestConfig}</span>
+        </button>
+        <ProviderRequestPanel
+          provider={provider}
+          t={t}
+          lang={lang}
+          gzipInfoOpen={gzipInfoOpen}
+          onToggleGzipInfo={onToggleGzipInfo}
+          onUpdateProvider={onUpdateProvider}
+        />
+      </>
+    )
+  }
+
   return (
+    <>
     <SettingsGroup title={lang === 'zh' ? '配置' : 'Configuration'}>
       <FieldBlock label={t.baseUrl}>
         <div className="kv-provider-endpoint-row">
@@ -65,35 +98,6 @@ export function ProviderDetail({
           />
         </div>
       </FieldBlock>
-
-      <SettingRow
-        label={
-          <span className="flex flex-col gap-1">
-            <span className="flex items-center gap-1">
-              <span>{lang === 'zh' ? '压缩请求体 (gzip)' : 'Compress request body (gzip)'}</span>
-              <IconButton
-                size="xs"
-                label={lang === 'zh' ? '显示说明' : 'Show details'}
-                onClick={() => onToggleGzipInfo(provider.id)}
-              >
-                <Info size={12} />
-              </IconButton>
-            </span>
-            {gzipInfoOpen.has(provider.id) && (
-              <span className="kv-row-desc block mt-1">
-                {lang === 'zh'
-                  ? '个别供应商前置的 WAF 会扫描明文请求体，把工具/系统提示里的 shell 命令、文件路径等文本误判为攻击而返回 403。开启后请求体用 gzip 压缩发送（多数网关可正常解压）。若该供应商不接受 gzip 请求（如官方 DeepSeek）会返回 400，请保持关闭。'
-                  : 'Some providers sit behind a WAF that scans the plaintext request body and returns 403 for shell/path text inside tool or system-prompt content. Enable to gzip the request body (most gateways accept it). Keep off for providers that reject gzip requests (e.g. official DeepSeek), which would return 400.'}
-              </span>
-            )}
-          </span>
-        }
-      >
-        <Toggle
-          checked={provider.compressRequestBody === true}
-          onChange={(v) => onUpdateProvider(provider.id, { compressRequestBody: v })}
-        />
-      </SettingRow>
 
       <FieldBlock label={t.apiKey} description={t.apiKeysHint}>
         <div className="space-y-1.5">
@@ -199,6 +203,25 @@ export function ProviderDetail({
         </div>
       </div>
 
+      <button
+        type="button"
+        onClick={() => setShowRequestPage(true)}
+        className="kv-subpage-entry"
+        data-tauri-drag-region="false"
+      >
+        <span className="kv-subpage-entry-icon">
+          <Globe size={15} />
+        </span>
+        <span className="kv-row-text">
+          <span className="kv-row-label">{t.requestConfig}</span>
+          <span className="kv-row-desc">{t.requestConfigHint}</span>
+        </span>
+        {(provider.request?.customHeaders?.length ?? 0) > 0 && (
+          <span className="kv-tag ok tabular-nums">{provider.request?.customHeaders?.length}</span>
+        )}
+        <ChevronRight size={15} className="shrink-0 opacity-45" />
+      </button>
+
       <FieldBlock
         label={(
           <span className="inline-flex items-center gap-2">
@@ -256,5 +279,6 @@ export function ProviderDetail({
         </ul>
       </FieldBlock>
     </SettingsGroup>
+    </>
   )
 }

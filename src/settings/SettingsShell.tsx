@@ -1056,6 +1056,16 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     })
   }, [])
 
+  const setProviderIcon = useCallback((id: string, dataUrl: string) => {
+    setSettings((prev) => {
+      if (!prev) return prev
+      const next = { ...(prev.providerIcons ?? {}) }
+      if (dataUrl) next[id] = dataUrl
+      else delete next[id]
+      return { ...prev, providerIcons: next }
+    })
+  }, [])
+
   const reorderProviders = useCallback((fromId: string, toId: string) => {
     if (fromId === toId) return
     setSettings((prev) => {
@@ -1151,9 +1161,12 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       settings.defaultModels.chat.providerId === id || settings.chatProviderId === id
 
     const defaultModels = clearDefaultModelProvider(settings.defaultModels, id)
+    const providerIcons = { ...(settings.providerIcons ?? {}) }
+    delete providerIcons[id]
     const nextSettings: SettingsData = {
       ...settings,
       providers: nextProviders,
+      providerIcons,
       translatorProviderId: translatorProvider ? translatorProvider.id : '',
       translatorModel: resolveModel(translatorProvider, settings.translatorModel),
       defaultModels,
@@ -1309,6 +1322,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           id: currentProvider.id,
           baseUrl: currentProvider.baseUrl,
           apiKeys: currentProvider.apiKeys,
+          // 设置窗口是手动保存的，这里必须带上编辑中的请求配置，
+          // 否则拉列表用的头和真实聊天不一致。
+          request: currentProvider.request,
         }
         : undefined)
       if (currentProvider) {
@@ -2124,6 +2140,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 onAddProvider={addProvider}
                 onAddProviderFromPreset={addProviderFromPreset}
                 onUpdateProvider={updateProvider}
+                onSetProviderIcon={setProviderIcon}
                 onRequestDeleteProvider={setConfirmDeleteProviderId}
                 onToggleGzipInfo={(id) => setGzipInfoOpen((prev) => {
                   const next = new Set(prev)
@@ -2273,6 +2290,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             baseUrl={p.baseUrl}
             apiKeys={p.apiKeys}
             apiFormat={p.apiFormat}
+            request={p.request}
             models={p.enabledModels}
             lang={lang}
             onClose={() => setModelTestProviderId(null)}

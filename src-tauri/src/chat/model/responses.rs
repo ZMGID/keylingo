@@ -72,11 +72,15 @@ impl OpenAiResponsesProvider<'_> {
             &self.provider.api_keys,
             |key| {
                 with_chat_request_timeout(crate::api::attach_json_body(
-                    self.state
-                        .http
-                        .post(self.responses_url())
-                        .bearer_auth(key)
-                        .header(ACCEPT_ENCODING, "identity"),
+                    crate::provider_request::apply(
+                        self.state
+                            .client_for(self.provider)
+                            .post(self.responses_url())
+                            .bearer_auth(key)
+                            .header(ACCEPT_ENCODING, "identity"),
+                        self.provider,
+                        request.metadata.conversation_id.as_deref(),
+                    ),
                     &body,
                     self.provider.compress_request_body,
                 ))
@@ -210,11 +214,15 @@ impl OpenAiResponsesProvider<'_> {
             &self.provider.api_keys,
             |key| {
                 crate::api::attach_json_body(
-                    self.state
-                        .http
-                        .post(self.responses_url())
-                        .bearer_auth(key)
-                        .header(ACCEPT_ENCODING, "identity"),
+                    crate::provider_request::apply(
+                        self.state
+                            .client_for(self.provider)
+                            .post(self.responses_url())
+                            .bearer_auth(key)
+                            .header(ACCEPT_ENCODING, "identity"),
+                        self.provider,
+                        request.metadata.conversation_id.as_deref(),
+                    ),
                     &body,
                     self.provider.compress_request_body,
                 )
@@ -366,13 +374,21 @@ impl OpenAiResponsesProvider<'_> {
     /// 重建本次请求实际会带的 headers（脱敏后）供请求调试面板展示。镜像发送路径：
     /// bearer_auth(key) + Accept-Encoding identity + JSON content-type。
     /// Authorization 用首个 key（正常发送用的也是它）派生脱敏预览。
-    fn debug_request_headers(&self) -> std::collections::BTreeMap<String, String> {
+    fn debug_request_headers(
+        &self,
+        metadata: &crate::chat::model::RequestMetadata,
+    ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
         if let Some(key) = self.provider.api_keys.first() {
             headers.insert("Authorization".to_string(), format!("Bearer {key}"));
         }
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
         headers.insert("Content-Type".to_string(), "application/json".to_string());
+        for (name, value) in
+            crate::provider_request::header_pairs(self.provider, metadata.conversation_id.as_deref())
+        {
+            headers.insert(name, value);
+        }
         crate::chat::request_debug::sanitize_headers(headers)
     }
 
@@ -398,7 +414,7 @@ impl OpenAiResponsesProvider<'_> {
                 duration_ms: duration.as_millis() as u64,
                 status: "success",
                 url: self.responses_url(),
-                headers: self.debug_request_headers(),
+                headers: self.debug_request_headers(&request.metadata),
                 body: self.request_body(request, stream),
                 stream,
                 response: crate::chat::request_debug::RequestDebugResponse::from_output(
@@ -432,7 +448,7 @@ impl OpenAiResponsesProvider<'_> {
                 duration_ms: duration.as_millis() as u64,
                 status: "error",
                 url: self.responses_url(),
-                headers: self.debug_request_headers(),
+                headers: self.debug_request_headers(&request.metadata),
                 body: self.request_body(request, stream),
                 stream,
                 response: crate::chat::request_debug::RequestDebugResponse::from_error(
@@ -1293,6 +1309,7 @@ mod tests {
             api_format: "openai_responses".into(),
             model_overrides,
             compress_request_body: false,
+            request: Default::default(),
         };
         let request = GenerateRequest {
             model: model.into(),
@@ -1329,6 +1346,7 @@ mod tests {
             api_format: "openai_responses".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let base = GenerateRequest {
             model: "gpt-5.5".into(),
