@@ -171,14 +171,14 @@ impl AgentHost for TestHost {
             .push((used_tokens, context_window_tokens));
     }
 
-    fn persist_partial_assistant(
-        &self,
-        _conversation_id: &str,
-        message_id: &str,
-        tool_records: &[ToolCallRecord],
-        segments: &[ChatMessageSegment],
-        api_messages: &[serde_json::Value],
-    ) {
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        _conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [serde_json::Value],
+    ) -> super::super::host::AgentHostFuture<'a, ()> {
         if self.cancel_on_persist {
             self.cancel_flag.store(true, Ordering::SeqCst);
         }
@@ -191,6 +191,7 @@ impl AgentHost for TestHost {
                 segments.len(),
                 api_messages.len(),
             ));
+        Box::pin(async {})
     }
 
     fn request_tool_approval<'a>(
@@ -3106,21 +3107,21 @@ impl AgentHost for HookedHost {
             .wait_for_generation_inactive(conversation_id, generation)
     }
 
-    fn persist_partial_assistant(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-        tool_records: &[ToolCallRecord],
-        segments: &[ChatMessageSegment],
-        api_messages: &[Value],
-    ) {
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [Value],
+    ) -> super::super::host::AgentHostFuture<'a, ()> {
         self.inner.persist_partial_assistant(
             conversation_id,
             message_id,
             tool_records,
             segments,
             api_messages,
-        );
+        )
     }
 
     fn hooks(&self) -> Option<&crate::chat::hooks::HookDispatcher> {

@@ -149,7 +149,7 @@ pub struct AppState {
     /// 等待前端 Pyodide 完成的 run_python 调用。
     pub pending_python_runs: Mutex<HashMap<String, PendingPythonRun>>,
     /// 保护 Chat 空白会话复用的短临界区，避免快速多次新建时并发创建多个空白对话。
-    pub chat_create_conversation_lock: Mutex<()>,
+    pub chat_create_conversation_lock: tokio::sync::Mutex<()>,
     /// 外部 CLI 斜杠命令探测缓存（agent_id:cwd → 命令列表）。
     pub external_slash_commands_cache: Mutex<
         HashMap<
@@ -324,7 +324,7 @@ impl AppState {
             chat_consent_prompt_lock: tokio::sync::Mutex::new(()),
             pending_chat_user_prompts: Mutex::new(HashMap::new()),
             pending_python_runs: Mutex::new(HashMap::new()),
-            chat_create_conversation_lock: Mutex::new(()),
+            chat_create_conversation_lock: tokio::sync::Mutex::new(()),
             external_slash_commands_cache: Mutex::new(HashMap::new()),
             external_agent_models_cache: Mutex::new(HashMap::new()),
             external_detected_agents_cache: Mutex::new(HashMap::new()),

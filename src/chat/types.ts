@@ -501,6 +501,7 @@ export interface DetectedExternalAgent {
 
 export interface Conversation {
   id: string
+  revision: number
   title: string
   provider_id: string
   model: string
@@ -569,6 +570,7 @@ export type WebSearchMode = 'off' | 'builtin' | 'third_party'
 
 export interface ConversationListItem {
   id: string
+  revision?: number
   title: string
   preview: string
   provider_id: string

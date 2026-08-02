@@ -70,14 +70,15 @@ pub trait AgentHost: Send + Sync {
     /// replayable on a later "continue" — without them an `interrupted` draft
     /// loses all tool context and the model restarts from scratch. Default
     /// no-op for hosts that don't own persistence (sub-agents, tests).
-    fn persist_partial_assistant(
-        &self,
-        _conversation_id: &str,
-        _message_id: &str,
-        _tool_records: &[ToolCallRecord],
-        _segments: &[ChatMessageSegment],
-        _api_messages: &[serde_json::Value],
-    ) {
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        _conversation_id: &'a str,
+        _message_id: &'a str,
+        _tool_records: &'a [ToolCallRecord],
+        _segments: &'a [ChatMessageSegment],
+        _api_messages: &'a [serde_json::Value],
+    ) -> AgentHostFuture<'a, ()> {
+        Box::pin(async {})
     }
 
     fn request_tool_approval<'a>(

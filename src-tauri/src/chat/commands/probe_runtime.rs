@@ -4,9 +4,7 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::chat::probe::ProbeRequest;
-use crate::chat::storage::{
-    create_project, get_projects, load_conversation, save_conversation, update_project,
-};
+use crate::chat::storage::{create_project, get_projects, load_conversation, update_project};
 use crate::chat::{ChatMessage, ConversationContextState};
 use crate::state::AppState;
 
@@ -72,7 +70,9 @@ pub(crate) async fn run_chat_probe(
     let mut conversation = match resume_id {
         Some(id) => load_conversation(app, id).map_err(|e| fail(Some(id.to_string()), e))?,
         None => {
-            new_probe_conversation(app, state, req, PROBE_PROJECT_ID).map_err(|e| fail(None, e))?
+            new_probe_conversation(app, state, req, PROBE_PROJECT_ID)
+                .await
+                .map_err(|e| fail(None, e))?
         }
     };
     let conversation_id = conversation.id.clone();
@@ -130,9 +130,20 @@ pub(crate) async fn run_chat_probe(
         timestamp: chrono::Local::now().timestamp(),
         degraded: None,
     };
-    conversation.messages.push(user_message);
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(app, &conversation).map_err(&fail)?;
+    let runtime = conversation.agent_runtime.clone();
+    let plan_state = conversation.agent_plan_state.clone();
+    let web_search_mode = conversation.web_search_mode;
+    conversation = crate::chat::repository::repository(app)
+        .mutate_expected(app, &conversation.id, Some(conversation.revision), |latest| {
+            latest.agent_runtime = runtime;
+            latest.agent_plan_state = plan_state;
+            latest.web_search_mode = web_search_mode;
+            latest.messages.push(user_message);
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)
+        .map_err(&fail)?;
 
     if let Some(delay_ms) = req.cancel_after_ms {
         schedule_probe_cancel(app, &conversation.id, Duration::from_millis(delay_ms));
@@ -276,7 +287,7 @@ fn schedule_probe_cancel(app: &AppHandle, conversation_id: &str, delay: Duration
 /// 新建一次 probe 会话：绑到固定复用的「Chat Probe」项目（根为 cwd，使文件工具相对路径可解析），
 /// 标题取自 prompt 便于在列表里识别，可选钉到外部 CLI 运行时。
 #[cfg(debug_assertions)]
-fn new_probe_conversation(
+async fn new_probe_conversation(
     app: &AppHandle,
     state: &State<'_, AppState>,
     req: &ProbeRequest,
@@ -302,7 +313,8 @@ fn new_probe_conversation(
                 false,
                 Some(cwd.to_string()),
                 true,
-            );
+            )
+            .await;
         } else {
             create_project(
                 app,
@@ -333,7 +345,8 @@ fn new_probe_conversation(
         project_id,
         None,
         None,
-    )?;
+    )
+    .await?;
     conversation.title = {
         let head: String = req.prompt.chars().take(60).collect();
         format!("🔬 {head}")

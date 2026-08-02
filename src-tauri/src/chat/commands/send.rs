@@ -5,7 +5,7 @@ use crate::chat::attachments::{
     compose_user_content_for_api, save_message_attachments, stored_image_paths_for_attachments,
     title_source_for_user_message,
 };
-use crate::chat::storage::{conversation_attachments_dir, load_conversation, save_conversation};
+use crate::chat::storage::{conversation_attachments_dir, load_conversation};
 use crate::chat::ChatMessage;
 use crate::skills;
 use crate::state::AppState;
@@ -123,7 +123,10 @@ pub(crate) async fn chat_send_message(
 
     conversation.messages.push(user_message.clone());
     conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    conversation = crate::chat::repository::repository(&app)
+        .append_message(&app, &conversation_id, user_message.clone())
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
     match compute_context_state(
         &app,
@@ -149,7 +152,13 @@ pub(crate) async fn chat_send_message(
                         .await?;
                         conversation.context_state = refreshed.clone();
                         conversation.updated_at = chrono::Local::now().timestamp();
-                        save_conversation(&app, &conversation)?;
+                        conversation = crate::chat::repository::repository(&app)
+                            .mutate(&app, &conversation_id, |latest| {
+                                latest.context_state = refreshed.clone();
+                                Ok(())
+                            })
+                            .await
+                            .map_err(crate::chat::repository::repository_error)?;
                         emit_chat_context_state(&app, &conversation.id, &refreshed);
                     }
                     Err(err) => {
@@ -174,7 +183,14 @@ pub(crate) async fn chat_send_message(
                         conversation.context_state.warning = Some(format!(
                             "Automatic compression failed: {err}. The uncompressed request was sent because the estimate is still within the model window."
                         ));
-                        save_conversation(&app, &conversation)?;
+                        let next_context_state = conversation.context_state.clone();
+                        conversation = crate::chat::repository::repository(&app)
+                            .mutate(&app, &conversation_id, |latest| {
+                                latest.context_state = next_context_state;
+                                Ok(())
+                            })
+                            .await
+                            .map_err(crate::chat::repository::repository_error)?;
                         emit_chat_context_state(
                             &app,
                             &conversation.id,
@@ -184,7 +200,13 @@ pub(crate) async fn chat_send_message(
                 }
             } else {
                 let context_state = conversation.context_state.clone();
-                save_conversation(&app, &conversation)?;
+                conversation = crate::chat::repository::repository(&app)
+                    .mutate(&app, &conversation_id, |latest| {
+                        latest.context_state = context_state.clone();
+                        Ok(())
+                    })
+                    .await
+                    .map_err(crate::chat::repository::repository_error)?;
                 emit_chat_context_state(&app, &conversation.id, &context_state);
             }
         }
@@ -243,7 +265,7 @@ pub(crate) async fn chat_send_message(
     )
     .await;
     // 剥离按臂做、且在各臂最后一次写盘之后。发送前超上下文那条提前返回的分支会先 rollback
-    // 再 save_conversation，若在 match 前统一剥，就会把剥光的对话写回磁盘、永久丢掉盘上转录。
+    // 再持久化，若在 match 前统一剥，就会把剥光的对话写回磁盘、永久丢掉盘上转录。
     match reply_outcome {
         Ok(()) => {
             strip_transcripts_for_frontend(&mut conversation);

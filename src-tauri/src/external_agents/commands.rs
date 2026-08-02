@@ -1,6 +1,5 @@
 use tauri::AppHandle;
 
-use crate::chat::storage::{load_conversation, save_conversation};
 use crate::chat::types::AgentRuntimeConfig;
 use crate::external_agents::detection::{
     detect_agent_models, detect_availability_all, AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL,
@@ -198,27 +197,23 @@ pub async fn chat_list_external_cli_slash_commands(
 }
 
 #[tauri::command]
-pub fn chat_set_agent_runtime(
+pub async fn chat_set_agent_runtime(
     app: AppHandle,
     conversation_id: String,
     agent_runtime: AgentRuntimeConfig,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-
-    // Session ↔ agent binding: one conversation, one agent (builtin Kivio or a local CLI).
-    // Once the conversation has any message, kind / external_agent_id cannot change — switching
-    // would orphan CLI native session history (external) or mix incompatible tool loops (builtin).
-    // Model / reasoning / sandbox tweaks on the *same* agent stay allowed. Empty conversations
-    // remain free to pick any agent.
-    check_runtime_switch_allowed(
-        &conversation.agent_runtime,
-        conversation.messages.is_empty(),
-        &agent_runtime,
-    )?;
-
-    conversation.agent_runtime = agent_runtime;
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            check_runtime_switch_allowed(
+                &conversation.agent_runtime,
+                conversation.messages.is_empty(),
+                &agent_runtime,
+            )?;
+            conversation.agent_runtime = agent_runtime;
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,

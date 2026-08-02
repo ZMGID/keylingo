@@ -148,6 +148,7 @@ mod tests {
     fn conversation() -> Conversation {
         Conversation {
             id: "conv_test".to_string(),
+            revision: 0,
             title: "Export test".to_string(),
             provider_id: "secret-provider".to_string(),
             model: "gpt-test".to_string(),

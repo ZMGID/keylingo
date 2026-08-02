@@ -7,7 +7,7 @@ use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model::openai_messages_from_model_messages;
 use crate::chat::model_call::session_model_for_conversation;
 use crate::chat::model_metadata::context_window_for_model;
-use crate::chat::storage::{find_set_by_id, load_conversation, save_conversation};
+use crate::chat::storage::{find_set_by_id, load_conversation};
 use crate::chat::{
     ChatMessage, CompactionBoundaryRecord, ContextUsageSegment, Conversation,
     ConversationContextState, ConversationContextSummary,
@@ -57,8 +57,10 @@ pub(crate) async fn chat_get_context_stats(
     } else {
         compute_context_state(&app, &state, &conversation, None, &[]).await?
     };
-    conversation.context_state = context_state.clone();
-    save_conversation(&app, &conversation)?;
+    conversation = crate::chat::repository::repository(&app)
+        .update_context(&app, &conversation_id, conversation.revision, context_state.clone())
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
@@ -81,8 +83,15 @@ pub(crate) async fn chat_compress_context(
             &mut conversation,
         )
         .await?;
-        conversation.updated_at = chrono::Local::now().timestamp();
-        save_conversation(&app, &conversation)?;
+        conversation = crate::chat::repository::repository(&app)
+            .update_context(
+                &app,
+                &conversation_id,
+                conversation.revision,
+                conversation.context_state.clone(),
+            )
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
         let context_state = conversation.context_state.clone();
         emit_chat_context_state(&app, &conversation.id, &context_state);
         strip_transcripts_for_frontend(&mut conversation);
@@ -95,8 +104,10 @@ pub(crate) async fn chat_compress_context(
     compress_conversation_context(&app, &state, &mut conversation, "manual").await?;
     let context_state = compute_context_state(&app, &state, &conversation, None, &[]).await?;
     conversation.context_state = context_state.clone();
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    conversation = crate::chat::repository::repository(&app)
+        .update_context(&app, &conversation_id, conversation.revision, context_state.clone())
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     emit_chat_context_state(&app, &conversation.id, &context_state);
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -812,7 +823,17 @@ pub(super) async fn rollback_user_message_after_failed_send(
             eprintln!("Context usage estimate failed after send rollback: {context_err}");
         }
     }
-    save_conversation(app, conversation)
+    let context_state = conversation.context_state.clone();
+    let persisted = crate::chat::repository::repository(app)
+        .mutate(app, &conversation.id, |latest| {
+            latest.messages.retain(|message| message.id != user_message_id);
+            latest.context_state = context_state;
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    *conversation = persisted;
+    Ok(())
 }
 
 pub(super) fn should_auto_compress_context(

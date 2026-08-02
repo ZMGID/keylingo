@@ -338,7 +338,8 @@ pub async fn run_agent_loop(
                 &state.tool_records,
                 state.segment_builder.segments(),
                 &state.generated_api_messages,
-            );
+            )
+            .await;
         }
     }
 

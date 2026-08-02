@@ -448,6 +448,7 @@ mod tests {
     fn empty_conversation() -> Conversation {
         Conversation {
             id: "c1".to_string(),
+            revision: 0,
             title: "t".to_string(),
             provider_id: "p".to_string(),
             model: "m".to_string(),

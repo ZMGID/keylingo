@@ -1295,6 +1295,7 @@ fn test_chat_message(id: &str, role: &str, content: &str, timestamp: i64) -> Cha
 fn test_conversation_with_summary(stale: bool) -> Conversation {
     Conversation {
         id: "conv_test".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "provider".to_string(),
         model: "model".to_string(),
@@ -1677,6 +1678,7 @@ fn stale_summary_is_ignored_by_message_builder() {
 fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
     let conversation = Conversation {
         id: "conv_test".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "provider".to_string(),
         model: "text-model".to_string(),
@@ -1802,6 +1804,7 @@ fn regenerate_truncation_rejects_bad_edit_targets() {
 fn build_chat_api_messages_replays_hidden_tool_transcript() {
     let conversation = Conversation {
         id: "conv_test".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "provider".to_string(),
         model: "model".to_string(),
@@ -1963,6 +1966,7 @@ fn sanitize_image_payloads_replaces_raw_base64_lines() {
 fn build_chat_api_messages_sanitizes_image_payloads_in_replayed_history() {
     let conversation = Conversation {
             id: "conv_test".to_string(),
+            revision: 0,
             title: "test".to_string(),
             provider_id: "provider".to_string(),
             model: "model".to_string(),
@@ -2092,6 +2096,7 @@ fn image_token_estimates_follow_provider_dimension_rules() {
 fn test_conversation_with_messages(messages: Vec<ChatMessage>) -> Conversation {
     Conversation {
         id: "conv_multi".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "openai".to_string(),
         model: "gpt-4o".to_string(),

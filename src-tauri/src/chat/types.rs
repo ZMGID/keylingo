@@ -455,6 +455,10 @@ impl WebSearchMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
+    /// Monotonic on-disk revision maintained by `ConversationRepository`.
+    /// Legacy conversation files deserialize as revision 0.
+    #[serde(default)]
+    pub revision: u64,
     pub title: String,
     pub provider_id: String,
     pub model: String,
@@ -533,6 +537,10 @@ pub struct ForkOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationListItem {
     pub id: String,
+    /// `None` identifies a legacy index entry that must be reconciled from the
+    /// conversation file before the index can be trusted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
     pub title: String,
     pub preview: String, // 最后一条消息的前 100 字符
     pub provider_id: String,
@@ -712,6 +720,7 @@ impl From<&Conversation> for ConversationListItem {
 
         ConversationListItem {
             id: conv.id.clone(),
+            revision: Some(conv.revision),
             title: conv.title.clone(),
             preview,
             provider_id: conv.provider_id.clone(),

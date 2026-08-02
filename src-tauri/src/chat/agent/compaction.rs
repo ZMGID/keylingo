@@ -1848,6 +1848,7 @@ mod tests {
     fn test_conversation(messages: Vec<ChatMessage>) -> Conversation {
         Conversation {
             id: "conv_test".to_string(),
+            revision: 0,
             title: "t".to_string(),
             provider_id: "p".to_string(),
             model: "m".to_string(),

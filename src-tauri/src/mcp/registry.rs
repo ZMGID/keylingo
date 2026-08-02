@@ -992,7 +992,7 @@ async fn call_native_tool(
         let ctx = native_ctx
             .as_ref()
             .ok_or_else(|| format!("{} requires a conversation context", entry.name))?;
-        return handler(app, &ctx.conversation_id, &tool.name, arguments);
+        return handler(app, &ctx.conversation_id, &tool.name, arguments).await;
     }
     if let NativeToolCall::SubAgent(handler) = &entry.call {
         // Sub-agent management tools manage agents, not files: dispatch before
@@ -1019,7 +1019,8 @@ async fn call_native_tool(
         app,
         &settings.chat_tools.native_tools.working_directory,
         native_ctx.as_ref(),
-    )?;
+    )
+    .await?;
 
     match &entry.call {
         NativeToolCall::SyncText(call) => Ok(text_tool_result(call(&workspace, &arguments)?)),
@@ -1186,7 +1187,7 @@ fn format_read_file_for_model(result: &ReadFileResult) -> String {
     out
 }
 
-fn resolve_native_workspace(
+async fn resolve_native_workspace(
     app: &AppHandle,
     working_directory: &str,
     native_ctx: Option<&NativeToolContext>,
@@ -1194,7 +1195,7 @@ fn resolve_native_workspace(
     let Some(native_ctx) = native_ctx else {
         return Ok(NativeToolWorkspace::standalone());
     };
-    let mut conversation =
+    let conversation =
         crate::chat::storage::load_conversation(app, &native_ctx.conversation_id).map_err(
             |err| {
                 format!(
@@ -1205,11 +1206,10 @@ fn resolve_native_workspace(
         )?;
     let Some(project) = crate::chat::storage::resolve_conversation_project(app, &conversation)?
     else {
-        let directory = crate::chat::storage::prepare_ordinary_conversation_workspace(
-            app,
-            &mut conversation,
-            working_directory,
-        )?;
+        let directory = crate::chat::repository::repository(app)
+            .prepare_ordinary_workspace(app, &conversation.id, working_directory)
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
         return Ok(NativeToolWorkspace::conversation(directory));
     };
     Ok(NativeToolWorkspace::project(

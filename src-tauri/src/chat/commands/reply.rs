@@ -34,8 +34,7 @@ use super::interaction::{
 };
 use super::messages::{
     auxiliary_tool_segments, build_assistant_message, capture_agent_plan_draft_if_needed,
-    merge_latest_agent_plan_state, merge_latest_agent_todo_state, push_assistant_message,
-    tool_segment_for_record,
+    push_assistant_message, tool_segment_for_record,
 };
 use super::reply_runtime::{ArmReplyOutcome, ChatReplyGuard, ReplyArm};
 use super::resolve_thinking;
@@ -610,8 +609,10 @@ pub(super) async fn complete_assistant_reply_inner(
     .await;
     let result = result?;
 
-    merge_latest_agent_todo_state(app, conversation);
-    merge_latest_agent_plan_state(app, conversation);
+    *conversation = crate::chat::repository::repository(app)
+        .get(app, &conversation.id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     let message_plan = capture_agent_plan_draft_if_needed(
         app,
         conversation,

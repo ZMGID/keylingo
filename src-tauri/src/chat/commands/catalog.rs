@@ -10,9 +10,8 @@ use crate::chat::attachments::{save_message_attachments, title_source_for_user_m
 use crate::chat::storage::{
     archive_assistant, assistant_snapshot, create_assistant, create_set, delete_project,
     delete_set, duplicate_assistant, find_project_by_id, find_project_by_name,
-    find_reusable_blank_conversation, find_set_by_id, get_assistants,
-    get_conversations as get_convs, get_projects, get_sets, load_conversation, save_conversation,
-    update_assistant, update_project, update_set,
+    find_set_by_id, get_assistants, get_projects, get_sets, update_assistant, update_project,
+    update_set,
 };
 use crate::chat::{
     AgentPlanState, AgentTodoState, Attachment, ChatAssistant, ChatMessage, Conversation,
@@ -64,7 +63,7 @@ pub(super) fn project_prompt_context_for(
 
 /// 获取对话列表
 #[tauri::command]
-pub(crate) fn chat_get_conversations(
+pub(crate) async fn chat_get_conversations(
     app: AppHandle,
     offset: usize,
     limit: usize,
@@ -72,7 +71,10 @@ pub(crate) fn chat_get_conversations(
     project_id: Option<String>,
     set_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let conversations = get_convs(&app, offset, limit, folder, project_id, set_id)?;
+    let conversations = crate::chat::repository::repository(&app)
+        .list(&app, offset, limit, folder, project_id, set_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     Ok(serde_json::json!({
         "success": true,
         "conversations": conversations,
@@ -82,12 +84,15 @@ pub(crate) fn chat_get_conversations(
 /// 全量搜索对话（不止侧栏默认加载的前 N 个）。先按标题/预览/文件夹匹配元数据，
 /// 未命中再全文扫消息正文（content + reasoning），让搜索能找到深埋在对话中间的内容。
 #[tauri::command]
-pub(crate) fn chat_search_conversations(
+pub(crate) async fn chat_search_conversations(
     app: AppHandle,
     query: String,
     limit: usize,
 ) -> Result<serde_json::Value, String> {
-    let conversations = crate::chat::storage::search_conversations(&app, &query, limit)?;
+    let conversations = crate::chat::repository::repository(&app)
+        .search(&app, &query, limit)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     Ok(serde_json::json!({
         "success": true,
         "conversations": conversations,
@@ -96,11 +101,14 @@ pub(crate) fn chat_search_conversations(
 
 /// 获取对话详情
 #[tauri::command]
-pub(crate) fn chat_get_conversation(
+pub(crate) async fn chat_get_conversation(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
+    let mut conversation = crate::chat::repository::repository(&app)
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     reconcile_conversation_orphan_tool_segments(&mut conversation);
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -157,9 +165,9 @@ pub(super) fn strip_transcripts_for_frontend(conversation: &mut Conversation) {
 
 /// 创建新对话
 #[tauri::command]
-pub(crate) fn chat_create_conversation(
+pub(crate) async fn chat_create_conversation(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     provider_id: Option<String>,
     model: Option<String>,
     folder: Option<String>,
@@ -176,7 +184,8 @@ pub(crate) fn chat_create_conversation(
         project_id,
         set_id,
         assistant_id,
-    )?;
+    )
+    .await?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -184,7 +193,7 @@ pub(crate) fn chat_create_conversation(
     }))
 }
 
-pub(crate) fn create_chat_conversation_internal(
+pub(crate) async fn create_chat_conversation_internal(
     app: &AppHandle,
     state: &AppState,
     provider_id: Option<String>,
@@ -275,21 +284,26 @@ pub(crate) fn create_chat_conversation_internal(
         let _create_guard = state
             .chat_create_conversation_lock
             .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if let Some(conversation) = find_reusable_blank_conversation(
-            &app,
-            &provider_id,
-            &model,
-            folder.as_deref(),
-            project_id.as_deref(),
-            set_id.as_deref(),
-            assistant_id_for_reuse.as_deref(),
-        )? {
+            .await;
+        if let Some(conversation) = crate::chat::repository::repository(app)
+            .find_reusable_blank(
+                app,
+                &provider_id,
+                &model,
+                folder.as_deref(),
+                project_id.as_deref(),
+                set_id.as_deref(),
+                assistant_id_for_reuse.as_deref(),
+            )
+            .await
+            .map_err(crate::chat::repository::repository_error)?
+        {
             conversation
         } else {
             let now = chrono::Local::now().timestamp();
             let conversation = Conversation {
                 id: format!("conv_{}", Uuid::new_v4()),
+                revision: 0,
                 title: "新对话".to_string(),
                 provider_id,
                 model,
@@ -319,8 +333,10 @@ pub(crate) fn create_chat_conversation_internal(
                 agent_runtime: settings.chat.default_agent_runtime.clone(),
             };
 
-            save_conversation(&app, &conversation)?;
-            conversation
+            crate::chat::repository::repository(app)
+                .create(app, conversation)
+                .await
+                .map_err(crate::chat::repository::repository_error)?
         }
     };
 
@@ -332,9 +348,9 @@ pub(crate) fn create_chat_conversation_internal(
 /// 把 Lens 浮窗内已有的 user/assistant 历史搬到客户端成为真正的对话历史，截图挂在首个 user 轮，
 /// 用户落地后可直接继续输入。
 #[tauri::command]
-pub(crate) fn chat_import_external_conversation(
+pub(crate) async fn chat_import_external_conversation(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     messages: Vec<ExternalConversationMessage>,
     attachments: Vec<String>,
     provider_id: Option<String>,
@@ -359,7 +375,8 @@ pub(crate) fn chat_import_external_conversation(
         project_id,
         None,
         None,
-    )?;
+    )
+    .await?;
     // create 可能复用了一个空白会话；这里清空以确保从干净状态写入历史。
     conversation.messages.clear();
 
@@ -412,8 +429,16 @@ pub(crate) fn chat_import_external_conversation(
         });
     }
 
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let imported_title = conversation.title.clone();
+    let imported_messages = conversation.messages.clone();
+    conversation = crate::chat::repository::repository(&app)
+        .mutate_expected(&app, &conversation.id, Some(conversation.revision), |latest| {
+            latest.title = imported_title;
+            latest.messages = imported_messages;
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -600,7 +625,7 @@ fn builder_system_prompt(app: &AppHandle, settings: &Settings) -> String {
 }
 
 #[tauri::command]
-pub(crate) fn chat_create_builder_conversation(
+pub(crate) async fn chat_create_builder_conversation(
     app: AppHandle,
     state: State<'_, AppState>,
     provider_id: Option<String>,
@@ -640,6 +665,7 @@ pub(crate) fn chat_create_builder_conversation(
     let now = chrono::Local::now().timestamp();
     let conversation = Conversation {
         id: format!("conv_{}", Uuid::new_v4()),
+        revision: 0,
         title: "搭建新专家".to_string(),
         provider_id,
         model,
@@ -665,7 +691,10 @@ pub(crate) fn chat_create_builder_conversation(
         forked_from: None,
         agent_runtime: crate::chat::AgentRuntimeConfig::default(),
     };
-    save_conversation(&app, &conversation)?;
+    let conversation = crate::chat::repository::repository(&app)
+        .create(&app, conversation)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,
@@ -736,7 +765,7 @@ pub(crate) fn chat_create_project(
 }
 
 #[tauri::command]
-pub(crate) fn chat_update_project(
+pub(crate) async fn chat_update_project(
     app: AppHandle,
     project_id: String,
     name: Option<String>,
@@ -760,7 +789,8 @@ pub(crate) fn chat_update_project(
         color_set.unwrap_or(color_has_value),
         root_path,
         root_path_set.unwrap_or(root_path_has_value),
-    )?;
+    )
+    .await?;
     Ok(serde_json::json!({
         "success": true,
         "project": project,
@@ -768,11 +798,11 @@ pub(crate) fn chat_update_project(
 }
 
 #[tauri::command]
-pub(crate) fn chat_delete_project(
+pub(crate) async fn chat_delete_project(
     app: AppHandle,
     project_id: String,
 ) -> Result<serde_json::Value, String> {
-    delete_project(&app, &project_id)?;
+    delete_project(&app, &project_id).await?;
     Ok(serde_json::json!({
         "success": true,
     }))
@@ -868,7 +898,10 @@ pub(crate) fn chat_update_set(
 }
 
 #[tauri::command]
-pub(crate) fn chat_delete_set(app: AppHandle, set_id: String) -> Result<serde_json::Value, String> {
-    delete_set(&app, &set_id)?;
+pub(crate) async fn chat_delete_set(
+    app: AppHandle,
+    set_id: String,
+) -> Result<serde_json::Value, String> {
+    delete_set(&app, &set_id).await?;
     Ok(serde_json::json!({ "success": true }))
 }

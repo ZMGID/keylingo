@@ -87,28 +87,31 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         );
     }
 
-    fn persist_partial_assistant(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-        tool_records: &[ToolCallRecord],
-        segments: &[ChatMessageSegment],
-        api_messages: &[Value],
-    ) {
-        if self.suppress_partial_persist {
-            // 多模型臂不直接写盘（避免 N 条并发 run 同写 conversations/{id}.json）。
-            return;
-        }
-        if let Err(err) = persist_partial_assistant_snapshot(
-            &self.app,
-            conversation_id,
-            message_id,
-            tool_records,
-            segments,
-            api_messages,
-        ) {
-            eprintln!("persist partial assistant snapshot failed: {err}");
-        }
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [Value],
+    ) -> crate::chat::agent::AgentHostFuture<'a, ()> {
+        Box::pin(async move {
+            if self.suppress_partial_persist {
+                return;
+            }
+            if let Err(err) = persist_partial_assistant_snapshot(
+                &self.app,
+                conversation_id,
+                message_id,
+                tool_records,
+                segments,
+                api_messages,
+            )
+            .await
+            {
+                eprintln!("persist partial assistant snapshot failed: {err}");
+            }
+        })
     }
 
     fn request_tool_approval<'a>(

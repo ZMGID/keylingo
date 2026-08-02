@@ -302,6 +302,7 @@ const mockChatApi = {
     const snapshot = assistant ? assistantSnapshot(assistant) : null
     const conversation: Conversation = {
       id: `conv_dev_${crypto.randomUUID()}`,
+      revision: 0,
       title: '新对话',
       provider_id: providerId?.trim() || snapshot?.provider_id || snapshot?.providerId || 'dev-provider',
       model: model?.trim() || snapshot?.model || 'dev-model',

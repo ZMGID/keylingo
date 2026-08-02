@@ -78,12 +78,12 @@ pub(crate) fn get_default_prompt_templates() -> serde_json::Value {
 /// 先对传入的设置进行清理（sanitize），然后应用开机自启动、重新注册热键、持久化设置、更新托盘菜单
 /// 如果热键注册失败，则回滚运行时设置到之前的状态
 #[tauri::command]
-pub(crate) fn save_settings(
+pub(crate) async fn save_settings(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    apply_settings(&app, &state, settings)
+    apply_settings(&app, &state, settings).await
 }
 
 /// trim + 去空 + 去重（保序）。
@@ -142,9 +142,9 @@ pub(crate) fn set_translate_card_size(
 }
 
 /// sanitize → 应用运行时（自启/热键/托盘）→ 持久化，失败回滚。save_settings 与 import_settings 共用。
-fn apply_settings(
+async fn apply_settings(
     app: &AppHandle,
-    state: &State<AppState>,
+    state: &State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
     let previous_settings = state.settings_read().clone();
@@ -172,7 +172,9 @@ fn apply_settings(
             app,
             old_working_directory,
             new_working_directory,
-        ) {
+        )
+        .await
+        {
             restore_runtime_settings(app, state, &previous_settings);
             return Err(format!("Failed to migrate conversation workspaces: {err}"));
         }
@@ -187,6 +189,7 @@ fn apply_settings(
                     new_working_directory,
                     old_working_directory,
                 )
+                .await
             {
                 eprintln!("Failed to roll back conversation workspace migration: {rollback_err}");
             }
@@ -232,9 +235,9 @@ pub(crate) fn export_settings(state: State<AppState>, path: String) -> Result<()
 
 /// 从备份文件导入设置，覆盖当前全部设置并立即生效（与保存同样走 sanitize/回滚）。
 #[tauri::command]
-pub(crate) fn import_settings(
+pub(crate) async fn import_settings(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     path: String,
 ) -> Result<Settings, String> {
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))?;
@@ -248,7 +251,7 @@ pub(crate) fn import_settings(
         .ok_or_else(|| "备份文件缺少 settings 字段".to_string())?;
     let settings: Settings = serde_json::from_value(settings_value.clone())
         .map_err(|e| format!("备份内容无法解析: {e}"))?;
-    apply_settings(&app, &state, settings)
+    apply_settings(&app, &state, settings).await
 }
 
 #[tauri::command]

@@ -10,7 +10,6 @@ use crate::mcp::types::ChatToolArtifact;
 use crate::state::AppState;
 
 use super::catalog::strip_transcripts_for_frontend;
-use crate::chat::storage::{load_conversation, save_conversation};
 
 /// 取走外部入口排队给 Chat 前端发送的消息。
 #[tauri::command]
@@ -32,17 +31,20 @@ pub(crate) fn chat_take_external_sends(
 }
 
 #[tauri::command]
-pub(crate) fn chat_set_agent_plan_mode(
+pub(crate) async fn chat_set_agent_plan_mode(
     app: AppHandle,
     conversation_id: String,
     mode: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
     let mode = crate::chat::plan::mode_from_str(&mode)?;
-    conversation.agent_plan_state =
-        crate::chat::plan::with_mode(&conversation.agent_plan_state, mode);
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let mut conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            conversation.agent_plan_state =
+                crate::chat::plan::with_mode(&conversation.agent_plan_state, mode);
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     emit_chat_plan_state(&app, &conversation.id, &conversation.agent_plan_state);
 
     strip_transcripts_for_frontend(&mut conversation);
@@ -54,15 +56,17 @@ pub(crate) fn chat_set_agent_plan_mode(
 }
 
 #[tauri::command]
-pub(crate) fn chat_execute_agent_plan(
+pub(crate) async fn chat_execute_agent_plan(
     app: AppHandle,
     conversation_id: String,
     message_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-    approve_agent_plan_for_execution(&mut conversation, message_id.as_deref())?;
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let mut conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            approve_agent_plan_for_execution(conversation, message_id.as_deref())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     emit_chat_plan_state(&app, &conversation.id, &conversation.agent_plan_state);
 
     strip_transcripts_for_frontend(&mut conversation);

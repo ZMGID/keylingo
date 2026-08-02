@@ -92,22 +92,24 @@ pub fn format_prompt(state: &AgentTodoState, todo_tools_available: bool) -> Stri
 /// todo tool, persist, emit the `chat-todo` event, and return the tool
 /// result. Mirrors the legacy `RegistryToolExecutor` todo special case and
 /// deliberately does not resolve a native tool workspace.
-pub fn handle_conversation_tool_call(
-    app: &AppHandle,
-    conversation_id: &str,
-    tool_name: &str,
+pub fn handle_conversation_tool_call<'a>(
+    app: &'a AppHandle,
+    conversation_id: &'a str,
+    tool_name: &'a str,
     arguments: Value,
-) -> Result<McpToolCallResult, String> {
-    let mut conversation = crate::chat::storage::load_conversation(app, conversation_id)?;
+) -> crate::mcp::native_registry::NativeToolFuture<'a> {
+    Box::pin(async move {
     if !is_agent_todo_tool_name(tool_name) {
         return Err(format!("Unknown todo tool: {tool_name}"));
     }
     let outcome = apply_todo_write(arguments)?;
-    conversation.agent_todo_state = outcome.state.clone();
-    conversation.updated_at = chrono::Local::now().timestamp();
-    crate::chat::storage::save_conversation(app, &conversation)?;
-    emit_chat_todo_state(app, &conversation.id, &outcome.state);
+    crate::chat::repository::repository(app)
+        .update_todo(app, conversation_id, outcome.state.clone())
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    emit_chat_todo_state(app, conversation_id, &outcome.state);
     Ok(tool_result(&outcome.state, &outcome.changed))
+    })
 }
 
 pub fn emit_chat_todo_state(app: &AppHandle, conversation_id: &str, todo_state: &AgentTodoState) {

@@ -981,6 +981,7 @@ pub async fn import_one_session(
 
     let conversation = Conversation {
         id: conversation_id.clone(),
+        revision: 0,
         title,
         // 外部 CLI 对话不走 Kivio provider（ADR-0001），这两个字段留空。
         provider_id: String::new(),
@@ -1014,7 +1015,10 @@ pub async fn import_one_session(
         },
     };
     let message_count = conversation.messages.len();
-    crate::chat::storage::save_conversation(app, &conversation)?;
+    crate::chat::repository::repository(app)
+        .create(app, conversation)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
     // 会话绑定：写哪种文件由 `resumes_session_via_cli` 决定（claude 走 CLI 的 `--resume`，
     // 其余走 live handle）。写错了续聊就会开一条全新会话，历史静默丢失。

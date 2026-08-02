@@ -253,7 +253,7 @@ pub(crate) fn externalize_message_artifacts(
 }
 
 /// 快速判断:消息里是否存在"需要外置"的内联大图(图片 + 无 path + data_url 超阈值)。
-/// 用于 save_conversation 的廉价预扫描——没有这类 artifact 就完全不必克隆对话。
+/// 用于会话持久化的廉价预扫描——没有这类 artifact 就完全不必克隆对话。
 pub(crate) fn message_has_inline_image_to_externalize(message: &ChatMessage) -> bool {
     let needs = |artifact: &ChatToolArtifact| {
         if artifact

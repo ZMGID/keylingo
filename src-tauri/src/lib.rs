@@ -305,6 +305,7 @@ pub fn run() {
                 rapidocr::RapidOcrClient::new(offline_models),
                 inpainting,
             ));
+            app.manage(chat::repository::ConversationRepository::default());
             // Dock 的 workspace 文件监听服务（文件树 / Git 面板的秒级刷新源）。
             app.manage(std::sync::Arc::new(dock::watch::WorkspaceWatchService::new(
                 app.handle().clone(),

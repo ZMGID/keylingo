@@ -7,16 +7,14 @@ use crate::state::AppState;
 use super::context::{compute_context_state, emit_chat_context_state};
 use super::messages::{build_error_arm_message, upsert_assistant_message};
 use super::reply_runtime::{ArmReplyOutcome, ReplyArm};
-use super::{
-    agent_run_entry_label, complete_assistant_reply_inner, save_conversation, Conversation,
-};
+use super::{agent_run_entry_label, complete_assistant_reply_inner, Conversation};
 
 /// 多模型一问多答（任务 06-30 步骤 3）的协调者。
 ///
 /// 对每个臂 `(provider_id, model)`：在会话的**独立克隆**上并发跑一次 agent loop
 /// （`complete_assistant_reply_inner` 的 arm 模式），各臂自带 message_id/run_id/generation +
 /// 共享 `group_id`，工具自动批准、**不直接落盘**。全部臂结束后，把各臂产出的 assistant
-/// 消息按 id `upsert` 进真正的 `conversation`、统一计算一次上下文、一次性 `save_conversation`，
+/// 消息按 id 一次性 `upsert` 进最新会话，再统一计算并提交上下文，
 /// 从根本上避开 N 条并发 run 同写 `conversations/{id}.json` 的竞态。
 ///
 /// 返回：
@@ -106,18 +104,53 @@ pub(super) async fn run_reply_fan_out(
     }
 
     if produced > 0 {
-        // 至少一列产出（成功或报错）：合并后统一计算一次上下文并落盘。
-        match compute_context_state(app, state, conversation, None, &[]).await {
-            Ok(context_state) => {
-                conversation.context_state = context_state.clone();
-                emit_chat_context_state(app, &conversation.id, &context_state);
-            }
-            Err(err) => {
-                eprintln!("Context usage estimate failed after multi-model fan-out: {err}");
+        let arm_messages = conversation
+            .messages
+            .iter()
+            .filter(|message| message.group_id.as_deref() == Some(group_id))
+            .cloned()
+            .collect();
+        let mut persisted = crate::chat::repository::repository(app)
+            .upsert_messages(app, &conversation.id, arm_messages)
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
+        for attempt in 0..2 {
+            match compute_context_state(app, state, &persisted, None, &[]).await {
+                Ok(context_state) => {
+                    match crate::chat::repository::repository(app)
+                        .update_context(app, &persisted.id, persisted.revision, context_state)
+                        .await
+                    {
+                        Ok(latest) => {
+                            persisted = latest;
+                            emit_chat_context_state(
+                                app,
+                                &persisted.id,
+                                &persisted.context_state,
+                            );
+                            break;
+                        }
+                        Err(crate::chat::repository::ConversationRepositoryError::Conflict {
+                            ..
+                        }) if attempt == 0 => {
+                            persisted = crate::chat::repository::repository(app)
+                                .get(app, &conversation.id)
+                                .await
+                                .map_err(crate::chat::repository::repository_error)?;
+                        }
+                        Err(err) => {
+                            eprintln!("Context state commit failed after multi-model fan-out: {err}");
+                            break;
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Context usage estimate failed after multi-model fan-out: {err}");
+                    break;
+                }
             }
         }
-        conversation.updated_at = chrono::Local::now().timestamp();
-        save_conversation(app, conversation)?;
+        *conversation = persisted;
         return Ok(());
     }
 

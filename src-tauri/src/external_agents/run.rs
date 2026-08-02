@@ -12,7 +12,6 @@ use crate::chat::commands::{
 };
 use crate::chat::memory::l1_prompt_block;
 use crate::chat::model::ModelUsage;
-use crate::chat::storage::save_conversation;
 use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, CompactionBoundaryRecord,
     ToolCallRecord, ToolCallStatus,
@@ -690,7 +689,6 @@ pub async fn run_external_cli_reply(
     )
     .await?;
 
-    save_conversation(app, conversation)?;
     Ok(())
 }
 

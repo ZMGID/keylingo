@@ -12,6 +12,18 @@ use super::{
 
 const WRITE_RETRY_ATTEMPTS: usize = 3;
 
+fn temporary_write_path(path: &Path) -> PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}.tmp.{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("conversation"),
+            uuid::Uuid::new_v4()
+        ))
+}
+
 fn validate_conversation_id(id: &str) -> Result<(), String> {
     let valid = id.starts_with("conv_")
         && id.len() > "conv_".len()
@@ -58,13 +70,7 @@ pub(crate) fn atomic_write(path: &Path, content: &str, label: &str) -> Result<()
     fs::create_dir_all(parent).map_err(|e| format!("create {label} dir: {e}"))?;
 
     for attempt in 0..WRITE_RETRY_ATTEMPTS {
-        let tmp_path = parent.join(format!(
-            ".{}.tmp.{}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("conversation"),
-            attempt
-        ));
+        let tmp_path = temporary_write_path(path);
 
         // 直接 rename 覆盖:Windows/Unix 的 fs::rename 都会原子替换已存在目标。
         // 绝不"先 remove 再 rename"——那会制造"目标文件中途消失"的窗口:一旦紧接的
@@ -91,7 +97,7 @@ pub(crate) fn atomic_write(path: &Path, content: &str, label: &str) -> Result<()
     Err(format!("write {label} file failed"))
 }
 
-fn read_conversation_file(path: &Path, id: &str) -> Result<Conversation, String> {
+pub(crate) fn read_conversation_file(path: &Path, id: &str) -> Result<Conversation, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("读取对话文件失败（{id}）：{e}"))?;
     serde_json::from_str(&content).map_err(|e| format!("对话文件已损坏，无法加载（{id}）：{e}"))
 }
@@ -130,21 +136,21 @@ fn load_conversation_list_from_files(app: &AppHandle) -> Result<Vec<Conversation
     Ok(conversations)
 }
 
-fn load_index_or_scan(app: &AppHandle) -> Result<ConversationIndex, String> {
+pub(crate) fn load_index_or_scan(app: &AppHandle) -> Result<ConversationIndex, String> {
     // index.json 只是缓存；conv_<id>.json 才是真相源。读取时用文件对账缓存:
     // 只要有对话文件不在索引里(索引残缺/缺失/写坏),就以文件为准重扫重建并写回修复,
     // 从根本上杜绝"残缺索引覆盖真实数据引用"导致的对话消失。
-    let file_ids = conversation_file_ids(app).unwrap_or_default();
+    let disk_items = load_conversation_list_from_files(app)?;
     match load_index(app) {
         Ok(index) => {
-            let indexed: std::collections::HashSet<&str> =
-                index.conversations.iter().map(|c| c.id.as_str()).collect();
-            // 索引覆盖了每个磁盘对话文件 → 信任它(允许含多余幽灵条目,无害);
-            // 缺任一文件 → 索引残缺 → 重建。
-            if file_ids.iter().all(|id| indexed.contains(id.as_str())) {
+            if conversation_index_matches_disk(&index, &disk_items) {
                 Ok(index)
             } else {
-                rebuild_and_heal_index(app)
+                let healed = ConversationIndex {
+                    conversations: disk_items,
+                };
+                save_index(app, &healed)?;
+                Ok(healed)
             }
         }
         Err(e) => {
@@ -154,14 +160,8 @@ fn load_index_or_scan(app: &AppHandle) -> Result<ConversationIndex, String> {
     }
 }
 
-/// 仅按文件名廉价收集磁盘上的有效对话 id(不读文件内容)。
-/// `validate_conversation_id` 要求 `conv_` 前缀 → 天然排除 index/projects/assistants.json。
-fn conversation_file_ids(app: &AppHandle) -> Result<Vec<String>, String> {
-    let dir = conversations_dir(app)?;
-    conversation_file_ids_in_dir(&dir)
-}
-
 /// 纯逻辑:扫描给定目录,收集有效对话 id(便于单测)。
+#[cfg(test)]
 fn conversation_file_ids_in_dir(dir: &Path) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| format!("read conversations dir: {e}"))? {
@@ -246,7 +246,7 @@ pub fn load_index(app: &AppHandle) -> Result<ConversationIndex, String> {
 }
 
 /// 保存对话索引
-pub fn save_index(app: &AppHandle, index: &ConversationIndex) -> Result<(), String> {
+pub(crate) fn save_index(app: &AppHandle, index: &ConversationIndex) -> Result<(), String> {
     let path = index_file_path(app)?;
     let content =
         serde_json::to_string_pretty(index).map_err(|e| format!("serialize index: {e}"))?;
@@ -495,53 +495,46 @@ pub fn load_conversation(app: &AppHandle, id: &str) -> Result<Conversation, Stri
 }
 
 /// 保存对话详情
-pub fn save_conversation(app: &AppHandle, conversation: &Conversation) -> Result<(), String> {
+/// Low-level JSON store primitive. Conversation business code must write via
+/// `ConversationRepository`; this function deliberately does not touch the index.
+pub(crate) fn write_conversation_file(
+    app: &AppHandle,
+    conversation: &Conversation,
+) -> Result<Conversation, String> {
     let path = conversation_file_path(app, &conversation.id)?;
-
-    // 保存时顺带瘦身:把内联的大图 artifact 外置到磁盘(新消息首存即生效;老对话下次保存自动迁移)。
-    // 仅在确实存在这类 artifact 时才克隆,稳态下零额外开销。
-    let slimmed;
-    let to_save: &Conversation = if conversation
+    let mut to_save = conversation.clone();
+    if to_save
         .messages
         .iter()
         .any(super::attachments::message_has_inline_image_to_externalize)
     {
-        let mut clone = conversation.clone();
-        let conv_id = clone.id.clone();
-        for message in clone.messages.iter_mut() {
+        let conv_id = to_save.id.clone();
+        for message in to_save.messages.iter_mut() {
             super::attachments::externalize_message_artifacts(app, &conv_id, message);
         }
-        slimmed = clone;
-        &slimmed
-    } else {
-        conversation
-    };
-
-    let content = serde_json::to_string_pretty(to_save)
-        .map_err(|e| format!("serialize conversation: {e}"))?;
-    atomic_write(&path, &content, "conversation")?;
-
-    // 更新索引
-    let mut index = load_index_or_scan(app)?;
-    let list_item = ConversationListItem::from(to_save);
-
-    if let Some(pos) = index.conversations.iter().position(|c| c.id == to_save.id) {
-        index.conversations[pos] = list_item;
-    } else {
-        index.conversations.insert(0, list_item);
     }
 
-    save_index(app, &index)
+    let content = serde_json::to_string_pretty(&to_save)
+        .map_err(|e| format!("serialize conversation: {e}"))?;
+    atomic_write(&path, &content, "conversation")?;
+    Ok(to_save)
 }
 
-pub fn save_conversation_without_index(
-    app: &AppHandle,
-    conversation: &Conversation,
-) -> Result<(), String> {
-    let path = conversation_file_path(app, &conversation.id)?;
-    let content = serde_json::to_string_pretty(conversation)
-        .map_err(|e| format!("serialize conversation: {e}"))?;
-    atomic_write(&path, &content, "conversation")
+fn conversation_index_matches_disk(
+    index: &ConversationIndex,
+    disk_items: &[ConversationListItem],
+) -> bool {
+    let indexed: std::collections::HashMap<&str, &ConversationListItem> = index
+        .conversations
+        .iter()
+        .map(|item| (item.id.as_str(), item))
+        .collect();
+    index.conversations.len() == disk_items.len()
+        && disk_items.iter().all(|disk| {
+            indexed
+                .get(disk.id.as_str())
+                .is_some_and(|cached| cached.revision == disk.revision)
+        })
 }
 
 /// 删除对话。
@@ -556,7 +549,7 @@ pub fn save_conversation_without_index(
 /// 才掉"。副产物残留顶多占点磁盘，比这个轻得多。
 ///
 /// 返回未能清理的副产物说明（供上层提示用户），空 = 全清干净。
-pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<Vec<String>, String> {
+pub(crate) fn delete_conversation(app: &AppHandle, id: &str) -> Result<Vec<String>, String> {
     validate_conversation_id(id)?;
     let path = conversation_file_path(app, id)?;
     let mut index = load_index_or_scan(app)?;
@@ -609,7 +602,9 @@ pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<Vec<String>, Str
 
     // 外部 CLI 的会话绑定也要跟着走，否则那条原生会话会永远显示"已导入"、再也导不进来。
     // 只删 Kivio 侧的绑定记录，**不动 CLI 自己的 transcript**（用户在终端里还要 resume）。
-    warnings.extend(crate::external_agents::session::remove_all_bindings(app, id));
+    warnings.extend(crate::external_agents::session::remove_all_bindings(
+        app, id,
+    ));
 
     // Sweep legacy outputs/runs left by older versions. This never touches a project root.
     crate::native_tools::remove_sandbox_exports_for_conversation(id);
@@ -979,7 +974,7 @@ pub fn create_project_with_options(
     Ok(project)
 }
 
-pub fn update_project(
+pub async fn update_project(
     app: &AppHandle,
     project_id: &str,
     name: Option<String>,
@@ -1031,13 +1026,13 @@ pub fn update_project(
     save_project_index(app, &project_index)?;
 
     if project.name != old_name {
-        move_project_conversations(app, &old_name, Some(&project.id), Some(&project.name))?;
+        move_project_conversations(app, &old_name, Some(&project.id), Some(&project.name)).await?;
     }
 
     Ok(project)
 }
 
-pub fn delete_project(app: &AppHandle, project_id: &str) -> Result<(), String> {
+pub async fn delete_project(app: &AppHandle, project_id: &str) -> Result<(), String> {
     validate_project_id(project_id)?;
     let mut project_index = load_project_index(app)?;
     let Some(pos) = project_index
@@ -1049,7 +1044,7 @@ pub fn delete_project(app: &AppHandle, project_id: &str) -> Result<(), String> {
     };
     let project = project_index.projects.remove(pos);
     save_project_index(app, &project_index)?;
-    move_project_conversations(app, &project.name, Some(&project.id), None)
+    move_project_conversations(app, &project.name, Some(&project.id), None).await
 }
 
 fn normalize_project_name(name: &str) -> Result<String, String> {
@@ -1268,7 +1263,7 @@ pub fn update_set(
     Ok(set)
 }
 
-pub fn delete_set(app: &AppHandle, set_id: &str) -> Result<(), String> {
+pub async fn delete_set(app: &AppHandle, set_id: &str) -> Result<(), String> {
     validate_set_id(set_id)?;
     let mut index = load_set_index(app)?;
     let Some(pos) = index.sets.iter().position(|set| set.id == set_id) else {
@@ -1276,28 +1271,22 @@ pub fn delete_set(app: &AppHandle, set_id: &str) -> Result<(), String> {
     };
     index.sets.remove(pos);
     save_set_index(app, &index)?;
-    clear_set_from_conversations(app, set_id)
+    clear_set_from_conversations(app, set_id).await
 }
 
 /// 删除集后，把名下对话的 set_id 清空（对话回到散对话、不丢）。仿 move_project_conversations。
-fn clear_set_from_conversations(app: &AppHandle, set_id: &str) -> Result<(), String> {
-    let mut index = load_index_or_scan(app)?;
-    let mut changed = false;
-    for item in &mut index.conversations {
-        if item.set_id.as_deref() != Some(set_id) {
-            continue;
-        }
-        let mut conversation = load_conversation(app, &item.id)?;
-        conversation.set_id = None;
-        conversation.updated_at = chrono::Local::now().timestamp();
-        save_conversation_without_index(app, &conversation)?;
-        *item = ConversationListItem::from(&conversation);
-        changed = true;
-    }
-    if changed {
-        save_index(app, &index)?;
-    }
-    Ok(())
+async fn clear_set_from_conversations(app: &AppHandle, set_id: &str) -> Result<(), String> {
+    crate::chat::repository::repository(app)
+        .bulk_mutate(app, |conversation| {
+            if conversation.set_id.as_deref() != Some(set_id) {
+                return Ok(false);
+            }
+            conversation.set_id = None;
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+        .map_err(crate::chat::repository::repository_error)
 }
 
 fn has_non_empty_value(value: Option<&str>) -> bool {
@@ -1331,7 +1320,7 @@ fn conversation_list_item_has_project_binding(
     legacy_folder_is_project(app, item.folder.as_deref())
 }
 
-fn rewrite_conversation_artifact_paths(
+pub(crate) fn rewrite_conversation_artifact_paths(
     conversation: &mut Conversation,
     mappings: &[(PathBuf, PathBuf)],
 ) -> bool {
@@ -1363,29 +1352,7 @@ fn rewrite_conversation_artifact_paths(
     changed
 }
 
-pub fn prepare_ordinary_conversation_workspace(
-    app: &AppHandle,
-    conversation: &mut Conversation,
-    ordinary_working_root: &str,
-) -> Result<PathBuf, String> {
-    if resolve_conversation_project(app, conversation)?.is_some() {
-        return resolve_conversation_working_directory(app, conversation, ordinary_working_root);
-    }
-    let target = crate::native_tools::conversation_workspace_directory(
-        ordinary_working_root,
-        &conversation.id,
-    )?;
-    let legacy = crate::native_tools::legacy_outputs_dir(&conversation.id)?;
-    if legacy.exists() {
-        crate::native_tools::merge_directory_without_overwrite(&legacy, &target)?;
-        if rewrite_conversation_artifact_paths(conversation, &[(legacy.clone(), target.clone())]) {
-            save_conversation_without_index(app, conversation)?;
-        }
-    }
-    Ok(target)
-}
-
-pub fn migrate_ordinary_conversation_workspaces(
+pub async fn migrate_ordinary_conversation_workspaces(
     app: &AppHandle,
     old_root: &str,
     new_root: &str,
@@ -1395,80 +1362,85 @@ pub fn migrate_ordinary_conversation_workspaces(
     }
 
     struct WorkspaceMigration {
-        conversation: Option<Conversation>,
+        conversation_index: usize,
         old_dir: PathBuf,
         legacy_dir: PathBuf,
         new_dir: PathBuf,
     }
 
-    let index = load_index_or_scan(app)?;
-    let mut migrations = Vec::new();
-    for item in index.conversations {
-        let path = conversation_file_path(app, &item.id)?;
-        let conversation = if path.exists() {
-            Some(load_conversation(app, &item.id)?)
-        } else {
-            None
-        };
-        let project_bound = match conversation.as_ref() {
-            Some(conversation) => conversation_has_project_binding(app, conversation)?,
-            None => conversation_list_item_has_project_binding(app, &item)?,
-        };
-        if project_bound {
-            continue;
-        }
-        migrations.push(WorkspaceMigration {
-            conversation,
-            old_dir: crate::native_tools::conversation_workspace_directory(old_root, &item.id)?,
-            legacy_dir: crate::native_tools::legacy_outputs_dir(&item.id)?,
-            new_dir: crate::native_tools::conversation_workspace_directory(new_root, &item.id)?,
-        });
-    }
-
-    // Validate every conversation before moving the first file. This prevents a
-    // later name conflict from leaving earlier conversations on the new root.
-    for migration in &migrations {
-        if migration.old_dir.exists() {
-            crate::native_tools::preflight_directory_merge(&migration.old_dir, &migration.new_dir)?;
-        }
-        if migration.legacy_dir.exists() {
-            crate::native_tools::preflight_directory_merge(
-                &migration.legacy_dir,
-                &migration.new_dir,
-            )?;
-            if migration.old_dir.exists() {
-                crate::native_tools::preflight_directory_merge(
-                    &migration.legacy_dir,
-                    &migration.old_dir,
-                )?;
+    crate::chat::repository::repository(app)
+        .bulk_mutate_loaded(app, |conversations| {
+            let mut migrations = Vec::new();
+            for (conversation_index, conversation) in conversations.iter().enumerate() {
+                if conversation_has_project_binding(app, conversation)? {
+                    continue;
+                }
+                migrations.push(WorkspaceMigration {
+                    conversation_index,
+                    old_dir: crate::native_tools::conversation_workspace_directory(
+                        old_root,
+                        &conversation.id,
+                    )?,
+                    legacy_dir: crate::native_tools::legacy_outputs_dir(&conversation.id)?,
+                    new_dir: crate::native_tools::conversation_workspace_directory(
+                        new_root,
+                        &conversation.id,
+                    )?,
+                });
             }
-        }
-    }
 
-    for mut migration in migrations {
-        let mut mappings = Vec::new();
-        if migration.old_dir.exists() {
-            crate::native_tools::merge_directory_without_overwrite(
-                &migration.old_dir,
-                &migration.new_dir,
-            )?;
-            mappings.push((migration.old_dir, migration.new_dir.clone()));
-        }
-        if migration.legacy_dir.exists() {
-            crate::native_tools::merge_directory_without_overwrite(
-                &migration.legacy_dir,
-                &migration.new_dir,
-            )?;
-            mappings.push((migration.legacy_dir, migration.new_dir.clone()));
-        }
-        if let Some(conversation) = migration.conversation.as_mut() {
-            if !mappings.is_empty() && rewrite_conversation_artifact_paths(conversation, &mappings)
-            {
-                save_conversation_without_index(app, conversation)?;
+            // Validate every conversation before moving the first file. This prevents a
+            // later name conflict from leaving earlier conversations on the new root.
+            for migration in &migrations {
+                if migration.old_dir.exists() {
+                    crate::native_tools::preflight_directory_merge(
+                        &migration.old_dir,
+                        &migration.new_dir,
+                    )?;
+                }
+                if migration.legacy_dir.exists() {
+                    crate::native_tools::preflight_directory_merge(
+                        &migration.legacy_dir,
+                        &migration.new_dir,
+                    )?;
+                    if migration.old_dir.exists() {
+                        crate::native_tools::preflight_directory_merge(
+                            &migration.legacy_dir,
+                            &migration.old_dir,
+                        )?;
+                    }
+                }
             }
-        }
-    }
-    Ok(())
+
+            let mut changed = Vec::new();
+            for migration in migrations {
+                let mut mappings = Vec::new();
+                if migration.old_dir.exists() {
+                    crate::native_tools::merge_directory_without_overwrite(
+                        &migration.old_dir,
+                        &migration.new_dir,
+                    )?;
+                    mappings.push((migration.old_dir, migration.new_dir.clone()));
+                }
+                if migration.legacy_dir.exists() {
+                    crate::native_tools::merge_directory_without_overwrite(
+                        &migration.legacy_dir,
+                        &migration.new_dir,
+                    )?;
+                    mappings.push((migration.legacy_dir, migration.new_dir.clone()));
+                }
+                let conversation = &mut conversations[migration.conversation_index];
+                if !mappings.is_empty()
+                    && rewrite_conversation_artifact_paths(conversation, &mappings)
+                {
+                    changed.push(conversation.id.clone());
+                }
+            }
+            Ok(changed)
+        })
+        .await
+        .map(|_| ())
+        .map_err(crate::chat::repository::repository_error)
 }
 
 pub fn resolve_conversation_working_directory(
@@ -1603,36 +1575,30 @@ fn unique_assistant_copy_name(app: &AppHandle, base_name: &str) -> Result<String
     Ok(format!("{base} {}", chrono::Local::now().timestamp()))
 }
 
-fn move_project_conversations(
+async fn move_project_conversations(
     app: &AppHandle,
     old_name: &str,
     old_project_id: Option<&str>,
     next_name: Option<&str>,
 ) -> Result<(), String> {
-    let mut index = load_index_or_scan(app)?;
-    let mut changed = false;
-    for item in &mut index.conversations {
-        let belongs_to_project = item.folder.as_deref() == Some(old_name)
-            || old_project_id
-                .map(|project_id| item.project_id.as_deref() == Some(project_id))
-                .unwrap_or(false);
-        if !belongs_to_project {
-            continue;
-        }
-        let mut conversation = load_conversation(app, &item.id)?;
-        conversation.folder = next_name.map(str::to_string);
-        if next_name.is_none() {
-            conversation.project_id = None;
-        }
-        conversation.updated_at = chrono::Local::now().timestamp();
-        save_conversation_without_index(app, &conversation)?;
-        *item = ConversationListItem::from(&conversation);
-        changed = true;
-    }
-    if changed {
-        save_index(app, &index)?;
-    }
-    Ok(())
+    crate::chat::repository::repository(app)
+        .bulk_mutate(app, |conversation| {
+            let belongs_to_project = conversation.folder.as_deref() == Some(old_name)
+                || old_project_id
+                    .map(|project_id| conversation.project_id.as_deref() == Some(project_id))
+                    .unwrap_or(false);
+            if !belongs_to_project {
+                return Ok(false);
+            }
+            conversation.folder = next_name.map(str::to_string);
+            if next_name.is_none() {
+                conversation.project_id = None;
+            }
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+        .map_err(crate::chat::repository::repository_error)
 }
 
 #[cfg(test)]
@@ -1868,11 +1834,28 @@ mod builtin_assistant_tests {
 mod index_self_heal_tests {
     use super::*;
     use std::fs;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
     fn temp_dir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("kivio-storage-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    fn list_item(id: &str, revision: Option<u64>) -> ConversationListItem {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "revision": revision,
+            "title": id,
+            "preview": "",
+            "provider_id": "provider",
+            "model": "model",
+            "message_count": 0,
+            "created_at": 1,
+            "updated_at": 1
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -1886,6 +1869,84 @@ mod index_self_heal_tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "BBBB");
         assert!(path.exists());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concurrent_temporary_paths_are_unique() {
+        let target = Arc::new(PathBuf::from("C:/tmp/conv_same.json"));
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let threads: Vec<_> = (0..64)
+            .map(|_| {
+                let target = Arc::clone(&target);
+                let paths = Arc::clone(&paths);
+                thread::spawn(move || {
+                    paths
+                        .lock()
+                        .unwrap()
+                        .push(temporary_write_path(target.as_ref()));
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let paths = paths.lock().unwrap();
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(paths.len(), 64);
+        assert_eq!(unique.len(), paths.len());
+        assert!(paths.iter().all(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".conv_same.json.tmp."))
+        }));
+    }
+
+    #[test]
+    fn index_revision_mismatch_or_legacy_entry_requires_rebuild() {
+        let disk = vec![list_item("conv_a", Some(3))];
+        assert!(conversation_index_matches_disk(
+            &ConversationIndex {
+                conversations: disk.clone()
+            },
+            &disk
+        ));
+        assert!(!conversation_index_matches_disk(
+            &ConversationIndex {
+                conversations: vec![list_item("conv_a", Some(2))]
+            },
+            &disk
+        ));
+        assert!(!conversation_index_matches_disk(
+            &ConversationIndex {
+                conversations: vec![list_item("conv_a", None)]
+            },
+            &disk
+        ));
+        assert!(!conversation_index_matches_disk(
+            &ConversationIndex {
+                conversations: vec![
+                    list_item("conv_a", Some(3)),
+                    list_item("conv_stale", Some(1))
+                ]
+            },
+            &disk
+        ));
+    }
+
+    #[test]
+    fn legacy_conversation_revision_defaults_to_zero() {
+        let conversation: Conversation = serde_json::from_value(serde_json::json!({
+            "id": "conv_legacy",
+            "title": "legacy",
+            "provider_id": "provider",
+            "model": "model",
+            "created_at": 1,
+            "updated_at": 1,
+            "messages": []
+        }))
+        .unwrap();
+        assert_eq!(conversation.revision, 0);
+        assert_eq!(ConversationListItem::from(&conversation).revision, Some(0));
     }
 
     #[test]

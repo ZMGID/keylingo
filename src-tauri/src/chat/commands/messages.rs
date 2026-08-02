@@ -20,7 +20,6 @@ use super::{
     AgentPlanState, ChatMessage, ChatMessageSegment, ChatMessageSegmentKind,
     ChatMessageSegmentPhase, Conversation, ToolCallRecord, ToolCallStatus,
 };
-use crate::chat::storage::{load_conversation, save_conversation};
 
 /// 多答组的列标识：(group_id, provider_id, model)。单模型为 None（字段写 None）。
 type AssistantGroupMeta = (String, String, String);
@@ -317,25 +316,69 @@ pub(crate) async fn push_assistant_message(
         None
     };
 
-    upsert_assistant_message(conversation, message);
+    let first_user = title_from_first_user.map(str::to_string);
+    let message_plan = message.agent_plan.clone();
+    let conversation_id = conversation.id.clone();
+    let mut persisted = crate::chat::repository::repository(app)
+        .mutate(app, &conversation_id, |latest| {
+            upsert_assistant_message(latest, message);
+            if let Some(title) = generated_title {
+                let title_is_still_auto = latest.title == "新对话"
+                    || first_user
+                        .as_deref()
+                        .is_some_and(|first| latest.title == generate_title(first));
+                if title_is_still_auto {
+                    latest.title = title;
+                }
+            }
+            if let Some(plan) = message_plan {
+                latest.agent_plan_state = plan;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
-    if let Some(title) = generated_title {
-        conversation.title = title;
+    // Context is derived from the full conversation. Commit it with CAS and
+    // recompute once if an unrelated operation advanced the revision while the
+    // potentially expensive estimate/compression was running.
+    for attempt in 0..2 {
+        match compute_context_state(app, state, &persisted, None, &[]).await {
+            Ok(context_state) => {
+                persisted.context_state = context_state;
+                try_auto_compress_context_after_update(app, state, &mut persisted, None, &[]).await;
+                let next_context = persisted.context_state.clone();
+                match crate::chat::repository::repository(app)
+                    .update_context(app, &conversation_id, persisted.revision, next_context)
+                    .await
+                {
+                    Ok(latest) => {
+                        persisted = latest;
+                        emit_chat_context_state(app, &conversation_id, &persisted.context_state);
+                        break;
+                    }
+                    Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                        if attempt == 0 =>
+                    {
+                        persisted = crate::chat::repository::repository(app)
+                            .get(app, &conversation_id)
+                            .await
+                            .map_err(crate::chat::repository::repository_error)?;
+                    }
+                    Err(err) => {
+                        eprintln!("Context state commit failed after assistant reply: {err}");
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Context usage estimate failed after assistant reply: {err}");
+                break;
+            }
+        }
     }
 
-    match compute_context_state(app, state, conversation, None, &[]).await {
-        Ok(context_state) => {
-            conversation.context_state = context_state.clone();
-            try_auto_compress_context_after_update(app, state, conversation, None, &[]).await;
-            emit_chat_context_state(app, &conversation.id, &conversation.context_state);
-        }
-        Err(err) => {
-            eprintln!("Context usage estimate failed after assistant reply: {err}");
-        }
-    }
-
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(app, conversation)?;
+    *conversation = persisted;
     Ok(())
 }
 
@@ -366,7 +409,7 @@ pub(super) fn upsert_assistant_message(conversation: &mut Conversation, message:
 /// replayable on a later "continue" — `model_messages` are derived from them
 /// exactly as the final write does, keeping the storage shape consistent. No-op
 /// when nothing has been produced yet.
-pub(super) fn persist_partial_assistant_snapshot(
+pub(super) async fn persist_partial_assistant_snapshot(
     app: &AppHandle,
     conversation_id: &str,
     message_id: &str,
@@ -377,7 +420,6 @@ pub(super) fn persist_partial_assistant_snapshot(
     if tool_records.is_empty() && segments.is_empty() {
         return Ok(());
     }
-    let mut conversation = load_conversation(app, conversation_id)?;
     let segments = segments.to_vec();
     // 中断草稿是「永不完成」run 的最终存档，最易出孤立工具分段——同样反向对账补齐。
     let mut tool_records = tool_records.to_vec();
@@ -413,9 +455,11 @@ pub(super) fn persist_partial_assistant_snapshot(
         timestamp: chrono::Local::now().timestamp(),
         degraded: None,
     };
-    upsert_assistant_message(&mut conversation, draft);
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(app, &conversation)
+    crate::chat::repository::repository(app)
+        .upsert_message(app, conversation_id, draft)
+        .await
+        .map(|_| ())
+        .map_err(crate::chat::repository::repository_error)
 }
 
 pub(super) fn normalize_assistant_segments(
@@ -724,28 +768,6 @@ fn edited_assistant_model_messages(message: &ChatMessage) -> Vec<ModelMessage> {
     } else {
         replay.extend(edited_answer);
         replay
-    }
-}
-
-pub(super) fn merge_latest_agent_todo_state(app: &AppHandle, conversation: &mut Conversation) {
-    match load_conversation(app, &conversation.id) {
-        Ok(latest) => {
-            conversation.agent_todo_state = latest.agent_todo_state;
-        }
-        Err(err) => {
-            eprintln!("Failed to reload latest agent todo state before saving reply: {err}");
-        }
-    }
-}
-
-pub(super) fn merge_latest_agent_plan_state(app: &AppHandle, conversation: &mut Conversation) {
-    match load_conversation(app, &conversation.id) {
-        Ok(latest) => {
-            conversation.agent_plan_state = latest.agent_plan_state;
-        }
-        Err(err) => {
-            eprintln!("Failed to reload latest agent plan state before saving reply: {err}");
-        }
     }
 }
 
