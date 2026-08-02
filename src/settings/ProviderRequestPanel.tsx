@@ -67,6 +67,9 @@ export function ProviderRequestPanel({
   const config = provider.request ?? {}
   const headers = config.customHeaders ?? []
   const isAnthropic = provider.apiFormat === 'anthropic_messages'
+  // Anthropic 打 cache_control 断点，OpenAI Chat / Responses 发 prompt_cache_key 路由提示。
+  // Gemini 由服务端隐式缓存前缀，没有可发的字段，开关对它无意义。
+  const cachingSupported = isAnthropic || provider.apiFormat !== 'gemini'
 
   const patch = (updates: Partial<ProviderRequestConfig>) =>
     onUpdateProvider(provider.id, { request: { ...config, ...updates } })
@@ -150,16 +153,22 @@ export function ProviderRequestPanel({
               和联网搜索「内置」选项在 Chat Completions 上置灰的处理一致。 */}
       <SettingRow
         label={t.promptCaching}
-        description={isAnthropic ? t.promptCachingHint : t.promptCachingUnsupported}
+        description={
+          !cachingSupported
+            ? t.promptCachingUnsupported
+            : isAnthropic
+              ? t.promptCachingHintAnthropic
+              : t.promptCachingHintOpenAI
+        }
       >
         <Toggle
           ariaLabel={t.promptCaching}
-          checked={isAnthropic && config.promptCaching === true}
-          disabled={!isAnthropic}
+          checked={cachingSupported && config.promptCaching !== false}
+          disabled={!cachingSupported}
           onChange={(promptCaching) => patch({ promptCaching })}
         />
       </SettingRow>
-      {isAnthropic && config.promptCaching && (
+      {isAnthropic && config.promptCaching !== false && (
         <SettingRow label={t.promptCacheRetention}>
           <Select
             className="w-44"

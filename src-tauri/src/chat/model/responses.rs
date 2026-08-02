@@ -60,6 +60,34 @@ impl LanguageModelProvider for OpenAiResponsesProvider<'_> {
 
 impl OpenAiResponsesProvider<'_> {
     async fn generate_inner(&self, request: GenerateRequest) -> Result<GenerateOutput, ModelError> {
+        match self.generate_once(request.clone()).await {
+            Err(err) if self.should_retry_without_cache_key(&request, &err.to_string(), false) => {
+                self.generate_once(request).await
+            }
+            other => other,
+        }
+    }
+
+    /// 少数严格端点拒收 `prompt_cache_key`。首次因此 400 后记住该 base_url，去掉字段重试一次，
+    /// 本会话后续 `request_body` 就地跳过——与 openai.rs 共用同一份学习结果。
+    fn should_retry_without_cache_key(
+        &self,
+        request: &GenerateRequest,
+        err: &str,
+        stream: bool,
+    ) -> bool {
+        if !super::openai::error_rejects_prompt_cache_key(err) {
+            return false;
+        }
+        if self.request_body(request, stream).get("prompt_cache_key").is_none() {
+            return false;
+        }
+        self.state
+            .mark_prompt_cache_key_unsupported(&self.provider.base_url);
+        true
+    }
+
+    async fn generate_once(&self, request: GenerateRequest) -> Result<GenerateOutput, ModelError> {
         let label = request_label(&request, "Responses API");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
@@ -198,6 +226,19 @@ impl OpenAiResponsesProvider<'_> {
     }
 
     async fn stream_inner(
+        &self,
+        request: GenerateRequest,
+        sink: &mut (dyn StreamSink + Send),
+    ) -> Result<GenerateOutput, ModelError> {
+        match self.stream_once(request.clone(), sink).await {
+            Err(err) if self.should_retry_without_cache_key(&request, &err.to_string(), true) => {
+                self.stream_once(request, sink).await
+            }
+            other => other,
+        }
+    }
+
+    async fn stream_once(
         &self,
         request: GenerateRequest,
         sink: &mut (dyn StreamSink + Send),
@@ -362,6 +403,24 @@ impl OpenAiResponsesProvider<'_> {
             // 与本字段无关，见 commit message）。此处只是对齐官方客户端的正确用法。
             body["store"] = Value::Bool(false);
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+        }
+        // 会话级缓存键：Responses 与 Chat Completions 认同一个 `prompt_cache_key`
+        // （官方按稳定前缀 + 该键做缓存路由）。同一对话每轮同值，提升命中。
+        // 与 openai.rs 共用 `state.prompt_cache_key_unsupported` 的学习结果——严格端点
+        // 首次 400 后就地跳过，不必两个适配器各踩一遍。
+        if self.provider.request.prompt_caching
+            && !self
+                .state
+                .prompt_cache_key_unsupported(&self.provider.base_url)
+        {
+            if let Some(conversation_id) = request
+                .metadata
+                .conversation_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+            {
+                body["prompt_cache_key"] = Value::String(conversation_id.to_string());
+            }
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {

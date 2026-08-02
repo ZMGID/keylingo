@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ProviderRequestPanel } from './ProviderRequestPanel'
@@ -38,22 +38,36 @@ describe('ProviderRequestPanel', () => {
     }
   })
 
-  it('shows prompt caching greyed out on non-Anthropic providers instead of hiding it', () => {
-    // 藏起来会让人以为这个功能没做 —— 之前就踩过。
+  it('offers prompt caching on OpenAI protocols too, with protocol-specific wording', () => {
+    // OpenAI 侧的「缓存」= 发 prompt_cache_key，不是 Anthropic 的 cache_control 断点，
+    // 两边说明文案不能混用。
     renderPanel({ apiFormat: 'openai_chat' })
+    expect(screen.getByText(t.promptCachingHintOpenAI)).toBeTruthy()
+    expect((screen.getByRole('switch', { name: t.promptCaching }) as HTMLButtonElement).disabled)
+      .toBe(false)
+
+    cleanup()
+    renderPanel({ apiFormat: 'anthropic_messages' })
+    expect(screen.getByText(t.promptCachingHintAnthropic)).toBeTruthy()
+  })
+
+  it('greys out prompt caching only on Gemini, where nothing can be sent', () => {
+    // 藏起来会让人以为这个功能没做 —— 之前就踩过。
+    renderPanel({ apiFormat: 'gemini' })
     expect(screen.getByText(t.promptCachingUnsupported)).toBeTruthy()
     const toggle = screen.getByRole('switch', { name: t.promptCaching })
     expect((toggle as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('enables prompt caching on Anthropic providers and reports the change', async () => {
+  it('turning prompt caching off reports promptCaching: false', async () => {
+    // 默认是开的，所以这里点一下应该是「关」。
     const { onUpdateProvider, provider } = renderPanel({ apiFormat: 'anthropic_messages' })
     const toggle = screen.getByRole('switch', { name: t.promptCaching })
-    expect((toggle as HTMLButtonElement).disabled).toBe(false)
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
     await userEvent.click(toggle)
     expect(onUpdateProvider).toHaveBeenCalledWith(
       provider.id,
-      expect.objectContaining({ request: expect.objectContaining({ promptCaching: true }) }),
+      expect.objectContaining({ request: expect.objectContaining({ promptCaching: false }) }),
     )
   })
 

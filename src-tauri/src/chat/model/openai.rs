@@ -48,7 +48,7 @@ impl LanguageModelProvider for OpenAiChatProvider<'_> {
 
 /// 判断错误是否是"端点拒绝 prompt_cache_key 字段"。仅在本次确实发了该字段时配合调用，
 /// 错误体点名该字段即视为命中（NVIDIA NIM / 智谱 GLM 等严格端点的 400 会带上字段名）。
-fn error_rejects_prompt_cache_key(err: &str) -> bool {
+pub(super) fn error_rejects_prompt_cache_key(err: &str) -> bool {
     err.contains("prompt_cache_key")
 }
 
@@ -515,9 +515,12 @@ impl OpenAiChatProvider<'_> {
         // 400（"Unrecognized request argument"），这正是逼出原生 gemini 适配器的同类问题。
         // 少数严格端点连 snake_case 也拒（NVIDIA NIM / 智谱 GLM）：首次 400 后由 stream/generate
         // 自动去掉该字段重试并记入 state.prompt_cache_key_unsupported，本会话后续就地跳过。
-        if !self
-            .state
-            .prompt_cache_key_unsupported(&self.provider.base_url)
+        // 开关关掉时不发这个字段：这就是 OpenAI 侧「prompt 缓存」的全部内容
+        // （官方按稳定前缀 + 该键做缓存路由），Anthropic 那边对应的是 cache_control 断点。
+        if self.provider.request.prompt_caching
+            && !self
+                .state
+                .prompt_cache_key_unsupported(&self.provider.base_url)
         {
             if let Some(conversation_id) = request
                 .metadata
@@ -1361,6 +1364,54 @@ mod tests {
             make("https://api.openai.com/v1")["prompt_cache_key"],
             "conv_abc"
         );
+    }
+
+    #[test]
+    fn prompt_caching_toggle_gates_the_cache_key() {
+        // OpenAI 侧的「prompt 缓存」就是这个字段，关掉开关必须不发。默认是开的。
+        let state =
+            AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
+        let body_with = |caching: bool| {
+            let provider = ModelProvider {
+                id: "test".into(),
+                name: "Test".into(),
+                api_keys: vec!["sk-test".into()],
+                api_key_legacy: None,
+                base_url: "https://api.openai.com/v1".into(),
+                available_models: vec!["m".into()],
+                enabled_models: vec!["m".into()],
+                enabled: true,
+                api_format: "openai_chat".into(),
+                model_overrides: Default::default(),
+                compress_request_body: false,
+                request: crate::settings::ProviderRequestConfig {
+                    prompt_caching: caching,
+                    ..Default::default()
+                },
+            };
+            let adapter = OpenAiChatProvider::new(&state, &provider, 1);
+            adapter.request_body(
+                &GenerateRequest {
+                    model: "m".into(),
+                    system: "sys".into(),
+                    messages: vec![ModelMessage {
+                        role: ModelRole::User,
+                        content: vec![MessagePart::Text { text: "hi".into() }],
+                    }],
+                    tools: Vec::new(),
+                    options: GenerateOptions::default(),
+                    metadata: crate::chat::model::RequestMetadata {
+                        conversation_id: Some("conv_abc".into()),
+                        ..Default::default()
+                    },
+                },
+                false,
+            )
+        };
+        assert_eq!(body_with(true)["prompt_cache_key"], "conv_abc");
+        assert!(body_with(false).get("prompt_cache_key").is_none());
+        // 默认开：老配置里没有这个字段的供应商行为不变。
+        assert!(crate::settings::ProviderRequestConfig::default().prompt_caching);
     }
 
     #[test]

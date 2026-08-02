@@ -49,9 +49,11 @@ pub struct ProviderRequestConfig {
     pub custom_headers: Vec<ProviderCustomHeader>,
     /// 是否跟随系统代理。默认 true —— 与加这个开关之前的行为一致；关掉才走直连。
     pub use_system_proxy: bool,
-    /// Anthropic prompt caching（仅 anthropic_messages 协议生效）。
+    /// prompt 缓存。默认开——两条协议上都是省钱且无副作用的：
+    /// Anthropic 打 `cache_control` 断点，OpenAI Chat / Responses 发 `prompt_cache_key`
+    /// 路由提示。Gemini 由服务端隐式缓存，没有可发的字段，开关对它无意义。
     pub prompt_caching: bool,
-    /// 缓存时长档位：`short`（默认 5 分钟）| `long`（1 小时，需 beta 头）。
+    /// 缓存时长档位：`short`（默认 5 分钟）| `long`（1 小时，需 beta 头）。仅 Anthropic。
     pub prompt_cache_retention: String,
     /// CLI 身份伪装：`""` 关闭 | `claude_code` | `codex` | `grok`。
     pub cli_identity: String,
@@ -64,7 +66,7 @@ impl Default for ProviderRequestConfig {
         Self {
             custom_headers: Vec::new(),
             use_system_proxy: true,
-            prompt_caching: false,
+            prompt_caching: true,
             prompt_cache_retention: "short".to_string(),
             cli_identity: String::new(),
             cli_identity_version: String::new(),

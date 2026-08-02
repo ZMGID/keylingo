@@ -1421,7 +1421,8 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
         : [],
       // 默认跟随系统代理 —— 与加这个开关之前的行为一致。
       useSystemProxy: provider.request?.useSystemProxy !== false,
-      promptCaching: provider.request?.promptCaching === true,
+      // 默认开：两条协议上都是省钱且无副作用的，见 ProviderRequestConfig 注释。
+      promptCaching: provider.request?.promptCaching !== false,
       promptCacheRetention:
         provider.request?.promptCacheRetention === 'long' ? 'long' : 'short',
       cliIdentity: provider.request?.cliIdentity ?? '',
