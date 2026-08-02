@@ -1246,7 +1246,11 @@ fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
                     ChatPendingInteractionSnapshot::UserPromptRequested {
                         tool_call_id, ..
                     } => tool_call_id != &tool.id,
-                    ChatPendingInteractionSnapshot::SessionConsentRequested => false,
+                    // 会话级授权不带 tool_call_id，无法按工具匹配，所以这里一条都不能清：
+                    // 一轮最多 12 个并行工具，B 完成时 A 可能还在等授权，无条件清会把 A 的
+                    // 授权卡从快照里抹掉（live 流没事，但重开窗口/sync 恢复出来就没卡可答，
+                    // A 干等 60s 超时按拒绝处理）。清理统一交给 resolve_session_consent，
+                    // request_session_consent 的三条出口（应答/取消/超时）都会调它。
                     _ => true,
                 });
         }
@@ -2207,6 +2211,36 @@ mod tests {
         hub.resolve_session_consent("run");
         hub.resolve_user_prompt("run", "ask-1");
 
+        assert!(hub.runs["run"].snapshot.pending_interactions.is_empty());
+    }
+
+    #[test]
+    fn parallel_tool_completion_keeps_other_pending_session_consent() {
+        // 工具 A 弹会话授权、同轮工具 B 完成：B 的 tool_updated 不能把 A 的授权卡清掉。
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        hub.push("run", ChatRunEvent::SessionConsentRequested)
+            .unwrap();
+        let record: crate::chat::ToolCallRecord = serde_json::from_value(serde_json::json!({
+            "id": "tool-b",
+            "name": "read_file",
+            "status": "success"
+        }))
+        .unwrap();
+        hub.push(
+            "run",
+            ChatRunEvent::ToolUpdated {
+                tool: ChatToolPayload::from_record(&record, String::new()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hub.runs["run"].snapshot.pending_interactions,
+            vec![ChatPendingInteractionSnapshot::SessionConsentRequested]
+        );
+
+        hub.resolve_session_consent("run");
         assert!(hub.runs["run"].snapshot.pending_interactions.is_empty());
     }
 
