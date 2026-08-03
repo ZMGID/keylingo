@@ -1,4 +1,4 @@
-import { isValidElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Check, Code2, Copy, ExternalLink, Eye, Loader2 } from 'lucide-react'
 import type { Components, UrlTransform } from 'react-markdown'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
@@ -15,6 +15,7 @@ import { loadArtifactDataUrl } from './attachmentPreview'
 import type { KbHitView } from './knowledgeBaseHits'
 import { remarkCitations } from './citations'
 import { ChatInlineImage } from './ChatInlineImage'
+import { MarkdownStreamingContext } from './markdownStreaming'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -550,36 +551,97 @@ function htmlPreviewSrcDoc(html: string): string {
   return html
 }
 
+// 流式期间 html 每来一个 delta 就变一次。srcDoc 一变 iframe 就整篇重载 —— 页面闪，
+// 而且重载那一下的高度重测会让虚拟列表把视口重新拽回底部（滚不上去）。
+// 对策：内容还在长的时候**根本不挂 iframe**，只显示源码；静默 SETTLE_MS 后才挂一次。
+const HTML_PREVIEW_SETTLE_MS = 600
+
+// assumeSettled=false（消息还在流式生成）时首帧不能把当前值当定稿 —— 那正是「边生成边挂 iframe」。
+function useSettled(value: string, delay: number, assumeSettled: boolean): string | null {
+  const [settled, setSettled] = useState<string | null>(assumeSettled ? value : null)
+  useEffect(() => {
+    if (value === settled) return
+    const timer = setTimeout(() => setSettled(value), delay)
+    return () => clearTimeout(timer)
+  }, [value, settled, delay])
+  return settled
+}
+
+// 指针在预览里滚时，wheel 只在 iframe 自己的文档里派发，跨不过文档边界 —— 外层聊天列表的
+// useScrollFollow 收不到 wheel，`following` 永远解除不了；而浏览器的滚动链又真的把外层带上去
+// 一点，于是 scrollFollowCore 的「跟随中 gap>32px 就钉回底部」每格弹一次 = 抽搐。
+// srcdoc 的 iframe 与父页面同源，这里在**内部已经滚到头**（即滚动链真会发生）时补派发一个
+// 同 delta 的 wheel 到父文档，让外层照常按用户滚动解除跟随。合成事件不触发默认滚动，
+// 真正的滚动仍由浏览器的链式行为完成，不会滚两倍。
+function bridgeIframeWheel(event: { currentTarget: HTMLIFrameElement }) {
+  const frame = event.currentTarget
+  let win: Window | null = null
+  try {
+    win = frame.contentWindow
+  } catch {
+    return // 模型脚本可能把 iframe 导航到跨域，拿不到就算了
+  }
+  if (!win) return
+  win.addEventListener(
+    'wheel',
+    (wheel: WheelEvent) => {
+      let scroller: Element | null = null
+      try {
+        scroller = win.document.scrollingElement
+      } catch {
+        return
+      }
+      if (!scroller) return
+      const atTop = scroller.scrollTop <= 0
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1
+      if (wheel.deltaY < 0 ? !atTop : !atBottom) return
+      frame.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: wheel.deltaX, deltaY: wheel.deltaY, bubbles: true }),
+      )
+    },
+    { passive: true },
+  )
+}
+
 function HtmlCodePreview({ html }: { html: string }) {
   const [view, setView] = useState<'preview' | 'source'>('preview')
-  const previewHtml = useMemo(() => htmlPreviewSrcDoc(html), [html])
+  const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !useContext(MarkdownStreamingContext))
+  // 一旦定稿过就不再退回源码：生成中途停顿超过 SETTLE_MS 会让预览/源码来回跳。
+  const readyRef = useRef(false)
+  if (settledHtml === html) readyRef.current = true
+  const showPreview = view === 'preview' && readyRef.current
+  const previewHtml = useMemo(() => htmlPreviewSrcDoc(settledHtml ?? ''), [settledHtml])
 
   const openInBrowser = () => {
-    void api.openHtmlPreview(previewHtml).catch((err) => {
+    void api.openHtmlPreview(htmlPreviewSrcDoc(html)).catch((err) => {
       console.error('Failed to open HTML preview:', err)
     })
   }
 
   return (
     <>
-      {view === 'preview' ? (
+      {showPreview ? (
         <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
           <iframe
             title="HTML 预览"
             srcDoc={previewHtml}
+            onLoad={bridgeIframeWheel}
             className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
           />
         </div>
-      ) : null}
-      {view === 'source' ? <CodeBlock code={html} language="html" /> : null}
+      ) : (
+        <CodeBlock code={html} language="html" />
+      )}
       <div className="-mt-1 mb-2 flex justify-end gap-0.5">
-        <IconButton
-          size="sm"
-          onClick={() => setView((current) => (current === 'preview' ? 'source' : 'preview'))}
-          label={view === 'preview' ? '查看源码' : '查看预览'}
-        >
-          {view === 'preview' ? <Code2 size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-        </IconButton>
+        {readyRef.current ? (
+          <IconButton
+            size="sm"
+            onClick={() => setView((current) => (current === 'preview' ? 'source' : 'preview'))}
+            label={view === 'preview' ? '查看源码' : '查看预览'}
+          >
+            {view === 'preview' ? <Code2 size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+          </IconButton>
+        ) : null}
         <IconButton size="sm" onClick={openInBrowser} label="在浏览器打开">
           <ExternalLink size={14} strokeWidth={2} />
         </IconButton>

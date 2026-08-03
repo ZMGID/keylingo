@@ -31,6 +31,7 @@ import { ChatDotGridBackground } from './ChatDotGridBackground'
 import { ChatMarkdown } from './ChatMarkdown'
 import { DegradedAnswerCard } from './DegradedAnswerCard'
 import { GeneratedFileArtifacts } from './GeneratedFileArtifacts'
+import { MarkdownStreamingContext } from './markdownStreaming'
 import { artifactId, artifactPresentationFromToolCall, isArtifactPresentationToolCall } from './artifactPresentation'
 import { isExecutableAgentPlanText } from './agentPlan'
 import { artifactDataUrl, isImageArtifact } from './artifacts'
@@ -1023,6 +1024,7 @@ function MessageBubbleComponent({
   }
 
   return (
+    <MarkdownStreamingContext.Provider value={messageStreaming}>
     <div className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
       <div className="w-full min-w-0">
         {toolCalls.length > 0 && !isEditing && !hasTimelineSegments && (
@@ -1208,6 +1210,7 @@ function MessageBubbleComponent({
         )}
       </div>
     </div>
+    </MarkdownStreamingContext.Provider>
   )
 }
 
