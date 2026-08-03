@@ -340,6 +340,68 @@ body {
   content: none;
 }
 
+/* 代码块工具条：语言标签用伪元素画，复制图标用伪元素画。
+   伪元素不进 DOM 树 —— 一个大对话里有两百多个代码块，每块省下的
+   「语言 span + lucide svg + svg 内的 rect/path」是实打实的节点数。
+   改这里要同步看 ChatMarkdown.tsx 的 CodeBlock。 */
+.kv-code-toolbar::before {
+  content: attr(data-code-lang);
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1;
+  color: rgb(163 163 163);
+}
+
+.dark .kv-code-toolbar::before {
+  color: rgb(115 115 115);
+}
+
+/* 复制图标：两个错开的圆角方块；已复制态换成一个勾。 */
+.kv-copy-glyph {
+  position: relative;
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.kv-copy-glyph::before,
+.kv-copy-glyph::after {
+  content: '';
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 1.6px solid currentColor;
+  border-radius: 2.5px;
+}
+
+.kv-copy-glyph::before {
+  left: 0;
+  top: 0;
+}
+
+.kv-copy-glyph::after {
+  right: 0;
+  bottom: 0;
+  background: var(--bg-input);
+}
+
+.kv-copy-glyph.is-copied::before {
+  left: 1px;
+  top: 2px;
+  width: 12px;
+  height: 6px;
+  border-width: 0 0 1.9px 1.9px;
+  border-radius: 0;
+  transform: rotate(-45deg);
+}
+
+.kv-copy-glyph.is-copied::after {
+  display: none;
+}
+
 /* 自定义滚动条 — 悬浮胶囊式（chat 模型/权限等下拉菜单共用） */
 .custom-scrollbar,
 .chat-model-selector-menu,

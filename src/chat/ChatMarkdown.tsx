@@ -1,5 +1,5 @@
 import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Check, Code2, Copy, ExternalLink, Eye, Loader2 } from 'lucide-react'
+import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
 import type { Components, UrlTransform } from 'react-markdown'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { PluggableList } from 'unified'
@@ -141,17 +141,39 @@ function tokenPattern(source: string): RegExp {
   return new RegExp(source, 'y')
 }
 
+// 空白整段吞：**没有任何规则能以空白字符起头**（每条规则都以非空白字符类开头，`\b` 在空白位
+// 也只会因后续字符类不匹配而失败），所以整段空白可以一次跳过，不必对每个空白字符把全部规则
+// 都试一遍。缩进和换行在代码块里占比很大 —— 原来 5 万字符的代码要跑约 50 万次正则。
+const WHITESPACE_RUN = /\s+/y
+
 function scanTokens(code: string, rules: TokenRule[]): HighlightToken[] {
   const tokens: HighlightToken[] = []
   let index = 0
+  // 无分类文本按「运行区间」攒着，末尾一次 slice 出来。原来是逐字符 `text +=`，
+  // 长普通文本段会反复重建字符串。
+  let plainStart = -1
+
+  const flushPlain = (end: number) => {
+    if (plainStart < 0) return
+    tokens.push({ text: code.slice(plainStart, end) })
+    plainStart = -1
+  }
 
   while (index < code.length) {
-    let matched = false
+    WHITESPACE_RUN.lastIndex = index
+    const whitespace = WHITESPACE_RUN.exec(code)
+    if (whitespace) {
+      if (plainStart < 0) plainStart = index
+      index += whitespace[0].length
+      continue
+    }
 
+    let matched = false
     for (const rule of rules) {
       rule.pattern.lastIndex = index
       const match = rule.pattern.exec(code)
       if (!match?.[0]) continue
+      flushPlain(index)
       tokens.push({ text: match[0], className: rule.className })
       index += match[0].length
       matched = true
@@ -159,16 +181,12 @@ function scanTokens(code: string, rules: TokenRule[]): HighlightToken[] {
     }
 
     if (!matched) {
-      const previous = tokens[tokens.length - 1]
-      if (previous && !previous.className) {
-        previous.text += code[index]
-      } else {
-        tokens.push({ text: code[index] })
-      }
+      if (plainStart < 0) plainStart = index
       index += 1
     }
   }
 
+  flushPlain(code.length)
   return tokens
 }
 
@@ -280,14 +298,35 @@ function rulesForLanguage(language: string, code = ''): TokenRule[] {
   ]
 }
 
+// 高亮结果缓存：键 = 语言 + 源码。虚拟列表会卸载屏外气泡，往回翻或切回同一会话时同一批
+// 代码块会整批重新挂载 —— 一个大对话里有两百多个代码块，重扫 + 重建元素数组不便宜。
+// 与 mermaidSvgCache / texCache 同一模式：用外部 Map 而非 useMemo（React 可能丢弃 useMemo）。
+// React 元素是不可变描述符，跨挂载复用安全。
+const highlightCache = new Map<string, ReactNode[]>()
+const HIGHLIGHT_CACHE_MAX = 400
+
 // 导出给 dock 文件查看器复用（逐行调用，块注释跨行会降级——查看器场景可接受）。
 // eslint-disable-next-line react-refresh/only-export-components -- 纯函数 helper，热更新损失可接受
 export function highlightCode(code: string, language: string) {
-  return scanTokens(code, rulesForLanguage(language, code)).map((token, index) => (
+  const key = `${language}\n${code}`
+  const cached = highlightCache.get(key)
+  if (cached) {
+    // LRU：命中挪到队尾。
+    highlightCache.delete(key)
+    highlightCache.set(key, cached)
+    return cached
+  }
+  const rendered = scanTokens(code, rulesForLanguage(language, code)).map((token, index) => (
     token.className
       ? <span key={index} className={token.className}>{token.text}</span>
       : token.text
   ))
+  highlightCache.set(key, rendered)
+  if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
+    const oldest = highlightCache.keys().next().value
+    if (oldest !== undefined) highlightCache.delete(oldest)
+  }
+  return rendered
 }
 
 function normalizeCodeBlockText(code: string): string {
@@ -354,19 +393,25 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
 
   // 无独立头栏：语言 + 复制浮在右上。长行横向滚动时会从按钮下穿过，
   // 所以控件要有不透明底；首行用 pt 让开控件高度，避免和 "Code / 复制" 叠字。
+  //
+  // 语言标签和复制图标都用**伪元素**画（`.kv-code-toolbar::before` 取 data-code-lang，
+  // `.kv-copy-glyph` 的 ::before/::after 画两个方块或一个勾）。伪元素不进 DOM 树，
+  // 而一个大对话里有两百多个代码块：原来每块是 figure + 工具条 div + 语言 span + button
+  // + lucide svg + svg 内的 rect/path + pre + code = 9 个节点，现在 6 个。
+  // 每块省 3 个节点，231 块省约 700 个。
   return (
     <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
-      <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2">
-        <span className="max-w-[7rem] truncate text-[12px] leading-none text-neutral-400 dark:text-neutral-500">
-          {codeLanguageLabel(language)}
-        </span>
+      <div
+        className="kv-code-toolbar absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2"
+        data-code-lang={codeLanguageLabel(language)}
+      >
         {actions}
         <IconButton
           size="sm"
           onClick={() => void handleCopy()}
           label={copied ? '已复制' : '复制代码'}
         >
-          {copied ? <Check size={15} strokeWidth={2.2} className="chat-motion-pop" /> : <Copy size={15} strokeWidth={2.2} />}
+          <span className={copied ? 'kv-copy-glyph is-copied' : 'kv-copy-glyph'} aria-hidden="true" />
         </IconButton>
       </div>
       <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-10 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
