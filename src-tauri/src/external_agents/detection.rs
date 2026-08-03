@@ -626,9 +626,8 @@ async fn probe_models(
         }
     }
 
-    // Codex：对齐 desktop-cc-gui
-    //   runtime model/list  >  debug models  >  curated fallback
-    // 再 merge：补全 CLI 不列但 config/catalog 有的模型（如 gpt-5.6-sol）。
+    // Codex：对齐 desktop-cc-gui curated four；runtime 只 enrich 同 id。
+    // list/debug 都失败时仍 Ok(curated)—— 下拉永不空（不再抛误导性 Err）。
     if def.id == "codex" {
         let timeout_secs = def.list_models_timeout_secs.unwrap_or(20);
         let (config_model, _) = read_codex_current_config();
@@ -637,22 +636,15 @@ async fn probe_models(
         } else {
             probe_codex_debug_models(bin, cwd, timeout_secs).await
         };
-        // Always merge with curated fallback + config inject (even when runtime is empty —
-        // then merge starts from static fallback so the picker never shows a half-list).
         let base = runtime.unwrap_or_else(codex_static_fallback_probe);
         let merged = merge_codex_model_catalog(base, config_model.as_deref());
-        if merged.models.iter().any(|m| m.id != "default") {
-            return Ok(probe_ok(
-                merged.models,
-                None,
-                None,
-                merged.reasoning_options,
-                merged.reasoning_by_model,
-            ));
-        }
-        return Err(
-            "Codex model/list 与 debug models 均未返回模型（可能未登录或 CLI 过旧）".to_string(),
-        );
+        return Ok(probe_ok(
+            merged.models,
+            None,
+            None,
+            merged.reasoning_options,
+            merged.reasoning_by_model,
+        ));
     }
 
     if def.model_probe == Some(ModelProbeStrategy::Acp) {

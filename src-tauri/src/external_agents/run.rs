@@ -277,8 +277,21 @@ pub async fn run_external_cli_reply(
         include_partial_messages: true,
     };
 
+    // Claude: external_model is catalog id (picker); wire value is settings-mapped runtime.
+    // Resolve once at the boundary so launch argv and mid-session set_model share one id space.
+    let wire_model = if agent_id == "claude" {
+        crate::external_agents::session::claude_init::claude_wire_model(
+            conversation.agent_runtime.external_model.as_deref(),
+        )
+    } else {
+        conversation
+            .agent_runtime
+            .external_model
+            .clone()
+            .filter(|m| !m.is_empty() && m != "default")
+    };
     let build_options = RuntimeBuildOptions {
-        model: conversation.agent_runtime.external_model.clone(),
+        model: wire_model.clone(),
         reasoning: conversation.agent_runtime.external_reasoning.clone(),
         sandbox: conversation.agent_runtime.external_sandbox.clone(),
     };
@@ -472,7 +485,8 @@ pub async fn run_external_cli_reply(
             &resolved_bin,
             &args,
             &cwd,
-            conversation.agent_runtime.external_model.clone(),
+            // Claude: already resolved to runtime id above; other agents keep external_model.
+            wire_model.clone(),
             conversation.agent_runtime.external_reasoning.clone(),
             conversation.agent_runtime.external_sandbox.clone(),
             persistent_mcp,

@@ -265,6 +265,20 @@ fn is_compact_slash(prompt: &str) -> bool {
     prompt.trim() == "/compact"
 }
 
+/// Normalize conversation-stored effort before `turn/start`.
+///
+/// Curated catalog dropped `none`/`minimal` and added `max`/`ultra`. Legacy sessions may still
+/// hold the old ids — omit them rather than send a value the picker no longer offers.
+pub fn normalize_codex_effort(raw: Option<&str>) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "default" | "none" | "minimal" | "off" | "auto" | "unset" => None,
+        "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => Some(lower),
+        _ => None,
+    }
+}
+
 /// Build the `turn/start` params, applying the per-turn `model` / reasoning `effort` (R4: codex
 /// applies both every turn, so a mid-session switch takes effect on the next turn). Pure so the
 /// per-turn application is unit-testable.
@@ -281,7 +295,7 @@ fn build_codex_turn_params(
         "cwd": cwd,
         "approvalPolicy": "never",
     });
-    if let Some(effort) = effort {
+    if let Some(effort) = normalize_codex_effort(effort) {
         turn_params["effort"] = json!(effort);
     }
     if let Some(model) = model {
@@ -435,7 +449,7 @@ impl CodexAppServerSession {
         control: &mut mpsc::Receiver<SessionCommand>,
     ) -> Result<(), String> {
         let chosen_model = model.filter(|m| !m.is_empty() && *m != "default");
-        let chosen_effort = reasoning.filter(|r| !r.is_empty() && *r != "default");
+        let chosen_effort = normalize_codex_effort(reasoning);
         let turn_id = self.next_id;
         self.next_id += 1;
 
@@ -461,7 +475,7 @@ impl CodexAppServerSession {
                 &self.cwd,
                 input,
                 chosen_model,
-                chosen_effort,
+                chosen_effort.as_deref(),
             );
             write_rpc(&mut self.stdin, turn_id, "turn/start", turn_params).await?;
         }
@@ -1266,6 +1280,20 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.id == "ultra"));
+    }
+
+    #[test]
+    fn normalize_codex_effort_drops_legacy_and_keeps_valid() {
+        assert_eq!(normalize_codex_effort(None), None);
+        assert_eq!(normalize_codex_effort(Some("")), None);
+        assert_eq!(normalize_codex_effort(Some("default")), None);
+        assert_eq!(normalize_codex_effort(Some("none")), None);
+        assert_eq!(normalize_codex_effort(Some("minimal")), None);
+        assert_eq!(normalize_codex_effort(Some("off")), None);
+        assert_eq!(normalize_codex_effort(Some("bogus")), None);
+        assert_eq!(normalize_codex_effort(Some("high")).as_deref(), Some("high"));
+        assert_eq!(normalize_codex_effort(Some("XHIGH")).as_deref(), Some("xhigh"));
+        assert_eq!(normalize_codex_effort(Some("ultra")).as_deref(), Some("ultra"));
     }
 
     #[test]

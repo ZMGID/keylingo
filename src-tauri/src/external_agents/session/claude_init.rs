@@ -390,10 +390,63 @@ pub fn resolve_claude_cli_model(selected: &str) -> String {
     selected.to_string()
 }
 
+/// Wire model for Claude CLI: `None` = omit `--model` / skip set_model (Auto / empty).
+///
+/// Catalog ids go through settings/env mapping; non-catalog values pass through unchanged.
+/// Call this at **every** boundary that hands a model to the CLI (launch argv, set_model,
+/// reconnect) — not only at first spawn.
+pub fn claude_wire_model(selected: Option<&str>) -> Option<String> {
+    let selected = selected.map(str::trim).filter(|s| !s.is_empty())?;
+    if selected == "default" {
+        return None;
+    }
+    let runtime = resolve_claude_cli_model(selected);
+    if runtime.is_empty() || runtime == "default" {
+        None
+    } else {
+        Some(runtime)
+    }
+}
+
+/// Whether a live session must `set_model` to match `selected`.
+///
+/// Returns `Some(runtime_id)` when a change is needed, `None` when already on that runtime
+/// (or when Auto/empty — leave session model alone).
+pub fn needs_set_model(active: Option<&str>, selected: &str) -> Option<String> {
+    let runtime = claude_wire_model(Some(selected))?;
+    if active.map(str::trim) == Some(runtime.as_str()) {
+        None
+    } else {
+        Some(runtime)
+    }
+}
+
+/// Map Claude settings / CLI alias strings onto a curated catalog id for picker backfill.
+///
+/// Returns `None` for free-form gateway ids that are not a known family (display-only).
+pub fn map_claude_config_to_catalog_id(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "default" {
+        return None;
+    }
+    if CLAUDE_BUILTIN_TIERS.iter().any(|(id, _)| *id == raw) {
+        return Some(raw.to_string());
+    }
+    // Bare aliases + concrete ids → current curated tier.
+    match claude_model_family_key(raw) {
+        Some("fable") => Some("claude-fable-5".to_string()),
+        Some("opus") => Some("claude-opus-5".to_string()),
+        Some("sonnet") => Some("claude-sonnet-5".to_string()),
+        Some("haiku") => Some("claude-haiku-4-5-20251001".to_string()),
+        _ => None,
+    }
+}
+
 /// 胶囊「当前模型」：settings.json 顶层 `model`，否则 `ANTHROPIC_MODEL` / main 覆盖。
+/// 能映射到 catalog 的返回 catalog id（便于 RuntimePicker 回填）；否则返回 raw 仅展示。
 /// 不 spawn CLI（cc-gui 同样不起进程）。
 fn claude_configured_current_model(overrides: &ClaudeModelOverrides) -> Option<String> {
-    if let Some(path) = claude_config_dir().map(|d| d.join("settings.json")) {
+    let raw = if let Some(path) = claude_config_dir().map(|d| d.join("settings.json")) {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(root) = serde_json::from_str::<Value>(&content) {
                 if let Some(model) = root
@@ -402,12 +455,22 @@ fn claude_configured_current_model(overrides: &ClaudeModelOverrides) -> Option<S
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    return Some(model.to_string());
+                    Some(model.to_string())
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
         }
+    } else {
+        None
     }
-    overrides.main.clone()
+    .or_else(|| overrides.main.clone())?;
+
+    Some(map_claude_config_to_catalog_id(&raw).unwrap_or(raw))
 }
 
 /// Config dir Claude Code reads: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
@@ -704,12 +767,53 @@ mod tests {
         // 非 catalog id 原样透传。
         assert_eq!(resolve_claude_cli_model("already-custom"), "already-custom");
         assert_eq!(resolve_claude_cli_model("default"), "default");
+        // resolve 幂等：runtime id 再 resolve 不变。
+        assert_eq!(resolve_claude_cli_model("GLM-5.1"), "GLM-5.1");
+        // wire / needs_set_model：多轮已在 runtime 上时不再 set_model。
+        assert_eq!(
+            claude_wire_model(Some("claude-sonnet-5")).as_deref(),
+            Some("GLM-5.1")
+        );
+        assert_eq!(
+            needs_set_model(Some("GLM-5.1"), "claude-sonnet-5"),
+            None,
+            "active already on mapped runtime — no set_model"
+        );
+        assert_eq!(
+            needs_set_model(Some("kimi-k3"), "claude-sonnet-5").as_deref(),
+            Some("GLM-5.1"),
+            "switching tiers must emit mapped runtime id"
+        );
+        assert_eq!(claude_wire_model(Some("default")), None);
+        assert_eq!(claude_wire_model(None), None);
 
         match prev {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn map_config_aliases_to_catalog_for_picker_backfill() {
+        assert_eq!(
+            map_claude_config_to_catalog_id("opus").as_deref(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(
+            map_claude_config_to_catalog_id("sonnet").as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            map_claude_config_to_catalog_id("claude-sonnet-5").as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            map_claude_config_to_catalog_id("claude-opus-4-8").as_deref(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(map_claude_config_to_catalog_id("my-gateway-x"), None);
+        assert_eq!(map_claude_config_to_catalog_id("default"), None);
     }
 
     #[test]

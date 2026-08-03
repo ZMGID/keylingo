@@ -642,14 +642,16 @@ impl ClaudeStreamJsonSession {
         model: Option<&str>,
         control: &mut mpsc::Receiver<SessionCommand>,
     ) -> Result<(), String> {
-        let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
+        // Catalog id (claude-sonnet-5) → runtime id (settings/env mapped). active_model is
+        // always runtime-space (seeded from launch argv which already went through resolve).
+        let Some(runtime) =
+            crate::external_agents::session::claude_init::needs_set_model(self.active_model.as_deref(), model.unwrap_or(""))
+        else {
+            // Auto/empty, or already on the mapped runtime — no control request.
             return Ok(());
         };
-        if self.active_model.as_deref() == Some(model) {
-            return Ok(());
-        }
         let request_id = format!("kivio-set-model-{}", Uuid::new_v4());
-        let line = set_model_request_line(&request_id, model);
+        let line = set_model_request_line(&request_id, &runtime);
         if self.stdin.write_all(line.as_bytes()).await.is_err() || self.stdin.flush().await.is_err()
         {
             return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string());
@@ -679,7 +681,7 @@ impl ClaudeStreamJsonSession {
                     };
                     match control_response_verdict(&frame, &request_id) {
                         Some(true) => {
-                            self.active_model = Some(model.to_string());
+                            self.active_model = Some(runtime);
                             return Ok(());
                         }
                         // CLI 不认这个控制请求（或拒绝了）⇒ 退回换进程。
