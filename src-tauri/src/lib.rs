@@ -659,10 +659,19 @@ pub fn run() {
                     // 带超时：一个卡在握手里的 server 会占着会话锁不放，没有这层
                     // 上限的话退出钩子会永久阻塞在主线程上 —— 表现是「点关闭没反应、
                     // 进程不退」，连带其余所有 MCP 子进程全留在系统里。
-                    let drained = tauri::async_runtime::block_on(tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        state.mcp_disconnect_all(),
-                    ));
+                    //
+                    // ⚠️ `timeout(..)` **必须在 async 块里构造**，不能当参数传给 block_on。
+                    // 参数在进入运行时之前就求值了，而 `tokio::time::Sleep` 构造时就要求时间
+                    // 驱动在场，否则 panic「there is no reactor running」。这条 panic 会让
+                    // 下面整段退出清理（外部 CLI 会话 / 后台命令进程组 / 插件预览）全部不执行
+                    // —— 表现是每次退出漏一批孤儿子进程，外加退出码 101。
+                    let drained = tauri::async_runtime::block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            state.mcp_disconnect_all(),
+                        )
+                        .await
+                    });
                     if drained.is_err() {
                         // 超时说明某个会话锁拿不到（多半卡在握手里）。优雅关停这条路已经走不通，
                         // 按 pid 杀进程树兜底 —— 否则那句「falling back to process kill」就是空话，
@@ -676,10 +685,14 @@ pub fn run() {
                     // —— actor 要等下一次被 poll 才会走 close()，而运行时马上就随进程走了，
                     // `kill_on_drop` 也因此不会触发（Child 在那个永不 drop 的帧里）。
                     // 结果是每次退出留下一批 CLI 进程，各自还挂着自己拉起的 MCP 子进程。
-                    let closed = tauri::async_runtime::block_on(tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        state.close_all_external_live_sessions(),
-                    ));
+                    // 同上：timeout 必须在 async 块里构造。
+                    let closed = tauri::async_runtime::block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            state.close_all_external_live_sessions(),
+                        )
+                        .await
+                    });
                     if closed.is_err() {
                         eprintln!("External CLI sessions did not close in time on exit.");
                     }
