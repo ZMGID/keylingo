@@ -680,7 +680,6 @@ body {
 .chat-sidebar-shell,
 .chat-main-pane,
 .chat-center-page,
-.settings-embedded,
 .chat-dock-shell {
   border-radius: 12px;
   background: var(--theme-surface-soft);
@@ -708,10 +707,14 @@ body {
   overflow: hidden;
 }
 
-/* 内嵌设置页同样是那张纸（原先齐边铺满，和其余中心页不是一套语言）。左缝同 .chat-center-page
-   由侧栏的 margin-right 提供；背景不跟卡片组走 —— 它自己分左导航 muted / 右主区 surface 两半。 */
-.chat-window-shell .settings-embedded {
-  margin: var(--chat-card-top) 8px 8px 0;
+/* 内嵌设置页：齐边铺满聊天窗口。不跟会话主区那套缝/圆角/阴影走 ——
+   设置是整页工作面（左导航 + 右主区），浮卡缝会让顶栏三键/导航顶边读成「没贴齐」。
+   引导页（.onboarding-shell.settings-embedded）仍用浮卡规则。 */
+.chat-window-shell .settings-embedded:not(.onboarding-shell) {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 /* 用户气泡：底色得从主区卡片上「站起来」。原先写死 neutral-100 / neutral-800，是照旧底色
@@ -764,6 +767,13 @@ body {
   margin-left: -240px;
   opacity: 0;
   pointer-events: none;
+}
+
+/* 设置页齐边铺满：不再需要会话浮卡那 8px 左缝，否则会在导航栏左边露一条
+   透底（Mica/透明外壳下直接看到桌面）。收成 0 布局占位：
+   -240 + 240 + 0 = 0（普通折叠是 -240 + 240 + 8 = 8）。 */
+.chat-sidebar-shell.is-collapsed.is-settings-cover {
+  margin-right: 0;
 }
 
 .chat-dock-shell {
@@ -3584,39 +3594,76 @@ button.chat-composer-status-item:hover {
   color: var(--text-faint);
   margin-bottom: 4px;
 }
-/* 二级页入口行（如供应商详情里的「请求配置 ›」）与其返回条 */
+/* 二级页入口（如供应商详情「请求配置」）：与上方 kv-row 同系的分隔行，
+   不用大图标方块/灰底卡片，避免像移动端列表项。 */
 .kv-subpage-entry {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 11px 2px;
   margin: 2px 0;
-  border-radius: 10px;
+  border: none;
+  border-top: 1px solid var(--divider);
+  border-radius: 0;
   text-align: left;
   color: inherit;
   background: transparent;
-  transition: background 0.12s ease;
+  cursor: pointer;
+  transition: color 0.12s ease;
 }
-.kv-subpage-entry:hover {
-  background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+.kv-subpage-entry:hover .kv-subpage-entry-title {
+  color: var(--accent, #4f46e5);
 }
-.dark .kv-subpage-entry:hover {
-  background: rgba(255, 255, 255, 0.06);
+.kv-subpage-entry:hover .kv-subpage-entry-go {
+  color: var(--text);
+  opacity: 1;
 }
-.kv-subpage-entry-icon {
+.kv-subpage-entry-body {
+  flex: 1;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kv-subpage-entry-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text);
+  transition: color 0.12s ease;
+}
+.kv-subpage-entry-title svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.kv-subpage-entry:hover .kv-subpage-entry-title svg {
+  color: var(--accent, #4f46e5);
+}
+.kv-subpage-entry-hint {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+  /* 图标占位对齐：13 icon + 6 gap ≈ 19 */
+  padding-left: 19px;
+}
+.kv-subpage-entry-trail {
+  display: inline-flex;
   flex-shrink: 0;
   align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  color: var(--text-faint);
-  background: rgba(0, 0, 0, 0.05);
+  gap: 8px;
 }
-.dark .kv-subpage-entry-icon {
-  background: rgba(255, 255, 255, 0.07);
+.kv-subpage-entry-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.85;
+  transition: color 0.12s ease, opacity 0.12s ease;
 }
 .kv-subpage-back {
   display: flex;
@@ -4983,10 +5030,10 @@ input[type="password"]::-ms-clear {
 
 .kv-drawer-title {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
-  font-family: var(--font-mono, monospace);
-  text-align: center;
+  text-align: left;
 }
 
 .kv-drawer-body {
@@ -4996,6 +5043,16 @@ input[type="password"]::-ms-clear {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* 模型 id 放在顶栏下方，避免与聊天设置页 Windows 三键重叠。 */
+.kv-drawer-model-id {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  line-height: 1.35;
+  word-break: break-all;
+  color: var(--text, inherit);
 }
 
 .kv-drawer-section {
@@ -5186,9 +5243,14 @@ input[type="password"]::-ms-clear {
 }
 
 .chat-window-shell .onboarding-shell.settings-embedded {
-  /* 卡片外观继承 .settings-embedded；引导页不渲染聊天侧栏（见 Chat.tsx `chatView !== 'onboarding'`），
-     那 8px 左缝没人提供，自己补。 */
-  margin-left: 8px;
+  /* 引导页仍走浮卡（设置页已齐边铺满、从共享卡片组摘掉了）。
+     不渲染聊天侧栏，四边缝自己补。 */
+  margin: var(--chat-card-top) 8px 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(24, 24, 27, 0.07);
+  box-shadow:
+    0 1px 2px rgba(24, 24, 27, 0.04),
+    0 5px 14px -8px rgba(24, 24, 27, 0.10);
   --bg: var(--theme-surface);
   --bg-sidebar: var(--theme-surface-muted);
   --bg-savebar: var(--theme-surface-soft);
@@ -5213,6 +5275,10 @@ input[type="password"]::-ms-clear {
 }
 
 .dark .chat-window-shell .onboarding-shell.settings-embedded {
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 5px 14px -8px rgba(0, 0, 0, 0.35);
   --bg: #212121;
   --bg-sidebar: #1c1c1e;
   --bg-savebar: #212121;

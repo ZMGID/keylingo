@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   Plus, Minus, Trash2, RefreshCw, Eye, EyeOff, Wrench, Brain,
-  ArrowLeft, ChevronRight, Globe,
+  ArrowLeft, ChevronRight, SlidersHorizontal,
   Image as ImageIcon,
 } from 'lucide-react'
 import { Select, Input, SettingsGroup, FieldBlock } from '../components'
@@ -211,17 +211,26 @@ export function ProviderDetail({
         className="kv-subpage-entry"
         data-tauri-drag-region="false"
       >
-        <span className="kv-subpage-entry-icon">
-          <Globe size={15} />
+        <span className="kv-subpage-entry-body">
+          <span className="kv-subpage-entry-title">
+            <SlidersHorizontal size={13} strokeWidth={2} aria-hidden="true" />
+            {t.requestConfig}
+          </span>
+          <span className="kv-subpage-entry-hint">{t.requestConfigHint}</span>
         </span>
-        <span className="kv-row-text">
-          <span className="kv-row-label">{t.requestConfig}</span>
-          <span className="kv-row-desc">{t.requestConfigHint}</span>
+        <span className="kv-subpage-entry-trail">
+          {(provider.request?.customHeaders?.length ?? 0) > 0 && (
+            <span className="kv-tag ok tabular-nums">
+              {lang === 'zh'
+                ? `${provider.request?.customHeaders?.length} 个头`
+                : `${provider.request?.customHeaders?.length} headers`}
+            </span>
+          )}
+          <span className="kv-subpage-entry-go">
+            {lang === 'zh' ? '配置' : 'Edit'}
+            <ChevronRight size={14} aria-hidden="true" />
+          </span>
         </span>
-        {(provider.request?.customHeaders?.length ?? 0) > 0 && (
-          <span className="kv-tag ok tabular-nums">{provider.request?.customHeaders?.length}</span>
-        )}
-        <ChevronRight size={15} className="shrink-0 opacity-45" />
       </button>
 
       <FieldBlock

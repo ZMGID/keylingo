@@ -210,11 +210,13 @@ export function ModelDetailDrawer({
           >
             <ArrowLeft size={14} />
           </IconButton>
-          <span className="kv-drawer-title truncate">{modelName}</span>
-          <span style={{ width: 28 }} />
+          {/* 顶栏只放短标题；长模型 id 在下方，避免与聊天设置页 Windows 三键重叠。 */}
+          <span className="kv-drawer-title">{t.title}</span>
         </div>
 
         <div className="kv-drawer-body custom-scrollbar">
+          <div className="kv-drawer-model-id" title={modelName}>{modelName}</div>
+
           {!dbDefaults && (
             <p className="kv-drawer-hint">{t.noDatabase}</p>
           )}

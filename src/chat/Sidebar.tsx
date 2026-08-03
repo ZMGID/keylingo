@@ -1030,7 +1030,7 @@ export const Sidebar = memo(function Sidebar({
         ref={asideRef}
         className={`chat-sidebar-shell flex w-[240px] shrink-0 flex-col overflow-hidden${
           collapsed ? ' is-collapsed' : ''
-        }`}
+        }${settingsActive ? ' is-settings-cover' : ''}`}
         aria-hidden={collapsed}
       >
         {/* 侧栏内顶栏行只在 macOS 存在：那两枚按钮要贴着系统交通灯排。
