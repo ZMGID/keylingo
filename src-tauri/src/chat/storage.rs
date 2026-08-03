@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager};
 
 use super::{
     ChatAssistant, ChatAssistantIndex, ChatAssistantSnapshot, ChatProject, ChatProjectIndex,
-    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem,
+    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem, ConversationPin,
 };
 
 const WRITE_RETRY_ATTEMPTS: usize = 3;
@@ -833,17 +833,89 @@ pub fn get_projects(app: &AppHandle) -> Result<Vec<ChatProject>, String> {
         changed = true;
     }
 
-    project_index.projects.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-
+    // 这里刻意不排序：索引里的数组顺序就是侧栏顺序，由用户拖拽决定（集同理）。
+    // 加回任何 sort 都会静默抹掉用户手排的顺序且不报错 —— 见 docs/adr/0004。
     if changed {
         save_project_index(app, &project_index)?;
     }
 
     Ok(project_index.projects)
+}
+
+/// 按给定 id 顺序重排。规则：
+/// - `ids` 里认不出的 id 直接忽略（前端拿的是旧快照时会有）；
+/// - 重复 id 只认第一次；
+/// - `ids` **没提到**的项保持原有相对顺序，排在**最前面** —— 唯一会出现这种情况的
+///   现实场景是「前端取列表之后别处又新建了一个」，而新建就是 insert(0)，放最前正好一致。
+fn reorder_by_ids<T>(items: Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str) -> Vec<T> {
+    let mut rank: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, id) in ids.iter().enumerate() {
+        rank.entry(id.as_str()).or_insert(i);
+    }
+    let mut untouched = Vec::new();
+    let mut ranked = Vec::new();
+    for item in items {
+        match rank.get(id_of(&item)) {
+            Some(&i) => ranked.push((i, item)),
+            None => untouched.push(item),
+        }
+    }
+    ranked.sort_by_key(|(i, _)| *i);
+    untouched.extend(ranked.into_iter().map(|(_, item)| item));
+    untouched
+}
+
+pub fn reorder_projects(app: &AppHandle, ids: &[String]) -> Result<Vec<ChatProject>, String> {
+    // 只重排、不接收对象：整份写回会把别处（改名/改色）的改动冲掉。
+    let mut index = load_project_index(app)?;
+    index.projects = reorder_by_ids(index.projects, ids, |p| p.id.as_str());
+    save_project_index(app, &index)?;
+    Ok(index.projects)
+}
+
+pub fn reorder_sets(app: &AppHandle, ids: &[String]) -> Result<Vec<ChatSet>, String> {
+    let mut index = load_set_index(app)?;
+    index.sets = reorder_by_ids(index.sets, ids, |s| s.id.as_str());
+    save_set_index(app, &index)?;
+    Ok(index.sets)
+}
+
+/// 集/项目里对话的「钉住位置」。底座仍是更新时间倒序，被拖过的对话钉在 `row` 行，
+/// 其余按时间填剩下的空位。显示顺序在前端算（嵌套列表本来就是前端拼的），
+/// 后端只负责存 —— 所以这里没有排序逻辑，只有一份 group_id → 钉子表。
+///
+/// 单独一个文件而不是加到 ChatProject/ChatSet 上：那两个结构有多处构造点，
+/// 加字段要挨个改且会动到已有序列化；钉子是纯附加信息，分开存零风险。
+pub fn conversation_pins_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(conversations_dir(app)?.join("conversation-pins.json"))
+}
+
+pub fn load_conversation_pins(
+    app: &AppHandle,
+) -> Result<std::collections::HashMap<String, Vec<ConversationPin>>, String> {
+    let path = conversation_pins_file_path(app)?;
+    if !path.exists() {
+        return Ok(Default::default());
+    }
+    let content = fs::read_to_string(&path).map_err(|e| format!("read conversation pins: {e}"))?;
+    // 坏文件不该让侧栏起不来：钉子丢了最多是顺序回到时间序。
+    Ok(serde_json::from_str(&content).unwrap_or_default())
+}
+
+pub fn set_conversation_pins(
+    app: &AppHandle,
+    group_id: &str,
+    pins: Vec<ConversationPin>,
+) -> Result<(), String> {
+    let mut all = load_conversation_pins(app)?;
+    if pins.is_empty() {
+        all.remove(group_id);
+    } else {
+        all.insert(group_id.to_string(), pins);
+    }
+    let content =
+        serde_json::to_string_pretty(&all).map_err(|e| format!("serialize conversation pins: {e}"))?;
+    atomic_write(&conversation_pins_file_path(app)?, &content, "conversation pins")
 }
 
 pub fn get_assistants(
@@ -2054,5 +2126,46 @@ mod delete_side_artifact_tests {
         .is_empty());
 
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn order(items: &[&'static str], want: &[&str]) -> Vec<&'static str> {
+        reorder_by_ids(items.to_vec(), &ids(want), |s| *s)
+    }
+
+    #[test]
+    fn applies_requested_order() {
+        assert_eq!(order(&["a", "b", "c"], &["c", "a", "b"]), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn ignores_unknown_ids_and_duplicates() {
+        // 前端拿的是旧快照：ids 里提到了已删除的 "gone"，还重复了 "a"。
+        assert_eq!(
+            order(&["a", "b"], &["gone", "b", "a", "a"]),
+            ["b", "a"],
+            "认不出的 id 应被忽略，重复 id 只认第一次"
+        );
+    }
+
+    #[test]
+    fn unmentioned_items_keep_relative_order_and_go_first() {
+        // 别处新建的 "new" 前端还不知道；新建是 insert(0)，所以它应留在最前。
+        assert_eq!(order(&["new", "a", "b"], &["b", "a"]), ["new", "b", "a"]);
+    }
+
+    #[test]
+    fn is_idempotent() {
+        let once = order(&["a", "b", "c"], &["b", "c", "a"]);
+        let twice = reorder_by_ids(once.clone(), &ids(&once), |s| *s);
+        assert_eq!(once, twice);
     }
 }

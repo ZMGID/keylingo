@@ -4285,6 +4285,61 @@ input[type="password"]::-ms-clear {
 .kv-provider-list-items.is-sorting .kv-provider-item:not(.is-dragging) {
   transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
 }
+/* 侧栏分组（集/项目）与对话的插入线式拖拽：源行原地变淡作占位（**不位移**，
+   否则列表会塌一个洞），一张跟手的浮起卡片表示正在搬的是哪个，目标位置画线。
+   其余行不加 transform，所以不要求行高相等（见 utils/insertionReorder）。 */
+.kv-sidebar-group.is-dragging > .kv-sidebar-group-row,
+.kv-conv-row.is-dragging {
+  opacity: 0.38;
+}
+.kv-reorder-ghost {
+  position: fixed;
+  z-index: 9999;
+  transform: translate(14px, -50%);
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: rgb(38 38 38);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  pointer-events: none;
+}
+.dark .kv-reorder-ghost {
+  color: rgb(229 229 229);
+  background: rgba(38, 38, 38, 0.96);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.kv-reorder-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgb(59 130 246);
+  z-index: 30;
+  pointer-events: none;
+}
+.kv-reorder-line::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid rgb(59 130 246);
+  background: var(--kv-surface, #fff);
+}
+.dark .kv-reorder-line::before {
+  background: #1c1c1c;
+}
+
 .kv-provider-item-select {
   flex: 1;
   min-width: 0;

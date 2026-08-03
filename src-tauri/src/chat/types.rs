@@ -619,6 +619,13 @@ pub struct ChatSetIndex {
     pub sets: Vec<ChatSet>,
 }
 
+/// 一条对话被拖到集/项目里的固定行号。见 storage::set_conversation_pins。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationPin {
+    pub id: String,
+    pub row: u32,
+}
+
 /// 可复用 Chat 助手配置。存储字段保持 snake_case，与 Conversation JSON 一致。
 /// 重建后只保留：身份(name/desc/icon/color) + 系统提示词 + 模型 + 勾选的 MCP/技能白名单。
 /// 旧文件里的 author/tags/quick_commands/data_connectors/knowledge_skills 等字段由 serde 忽略未知字段容错。

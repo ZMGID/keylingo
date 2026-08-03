@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { estimateTokens } from '../utils/tokens'
 import { isExecutableAgentPlanText } from './agentPlan'
 import { isTauriRuntime } from './utils'
+import type { ConversationPin } from './conversationPins'
 import type {
   AgentRuntimeConfig,
   ChatAssistant,
@@ -1027,6 +1028,44 @@ export const chatApi = {
       throw new Error('Failed to get sets')
     }
     return result.sets
+  },
+
+  /** 侧栏手动顺序：只发 id 顺序，后端 load→重排→存，不覆盖其它字段（docs/adr/0004）。 */
+  async reorderProjects(ids: string[]): Promise<ChatProject[]> {
+    if (!isTauriRuntime()) return mockChatApi.getProjects()
+    const result = await invoke<{ success: boolean; projects: ChatProject[] }>(
+      'chat_reorder_projects',
+      { ids },
+    )
+    if (!result.success) {
+      throw new Error('Failed to reorder projects')
+    }
+    return result.projects
+  },
+
+  async reorderSets(ids: string[]): Promise<ChatSet[]> {
+    if (!isTauriRuntime()) return []
+    const result = await invoke<{ success: boolean; sets: ChatSet[] }>('chat_reorder_sets', {
+      ids,
+    })
+    if (!result.success) {
+      throw new Error('Failed to reorder sets')
+    }
+    return result.sets
+  },
+
+  /** 集/项目里对话的钉住位置（group_id → 钉子表）。见 chat/conversationPins.ts。 */
+  async getConversationPins(): Promise<Record<string, ConversationPin[]>> {
+    if (!isTauriRuntime()) return {}
+    const result = await invoke<{ success: boolean; pins: Record<string, ConversationPin[]> }>(
+      'chat_get_conversation_pins',
+    )
+    return result.success ? (result.pins ?? {}) : {}
+  },
+
+  async setConversationPins(groupId: string, pins: ConversationPin[]): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke<{ success: boolean }>('chat_set_conversation_pins', { groupId, pins })
   },
 
   async createSet(

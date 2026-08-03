@@ -39,6 +39,15 @@ interface ConversationListProps {
   // 「最近」平铺列表用：在每条对话右侧显示其所属「集 / 项目」标签（与搜索弹层一致）。
   // 项目/集 tab 的嵌套列表不传（已在该分组下，标签冗余）。
   showFolderLabel?: boolean
+  /**
+   * 集/项目下的手动排序。**不传 = 不可拖**（「最近」就不传：那里的语义是时间线）。
+   * `scopeId` 写进容器的 `data-reorder-scope`，让 useInsertionReorder 只在本分组内取样。
+   */
+  reorder?: {
+    scopeId: string
+    draggingId: string | null
+    startDrag: (e: React.PointerEvent<HTMLElement>, id: string) => void
+  }
   onSelectConversation: (id: string) => void
   onRenameConversation: (id: string, title: string) => Promise<void>
   onExportConversation: (id: string, title: string) => Promise<void>
@@ -58,6 +67,7 @@ export const ConversationList = memo(function ConversationList({
   indent = false,
   showAssistantName = true,
   showFolderLabel = false,
+  reorder,
   onSelectConversation,
   onRenameConversation,
   onExportConversation,
@@ -113,7 +123,10 @@ export const ConversationList = memo(function ConversationList({
 
   return (
     <>
-      <div className={compact ? 'space-y-0.5 py-0.5' : 'space-y-0.5 py-1'}>
+      <div
+        className={compact ? 'space-y-0.5 py-0.5' : 'space-y-0.5 py-1'}
+        data-reorder-scope={reorder?.scopeId}
+      >
         {conversations.map((conv) => {
           const active = currentConversationId === conv.id
           const isGenerating = generatingConversationIds.has(conv.id)
@@ -155,10 +168,15 @@ export const ConversationList = memo(function ConversationList({
             )
           }
 
+          const isDragging = reorder?.draggingId === conv.id
           return (
             <div
               key={conv.id}
-              className={`group relative flex min-w-0 items-center rounded-lg ${
+              data-reorder-id={conv.id}
+              onPointerDown={reorder ? (e) => reorder.startDrag(e, conv.id) : undefined}
+              className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
+                isDragging ? 'is-dragging ' : ''
+              }${
                 active
                   ? 'bg-black/[0.07] dark:bg-white/[0.11]'
                   : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
@@ -213,6 +231,7 @@ export const ConversationList = memo(function ConversationList({
               </button>
               <button
                 type="button"
+                data-no-drag
                 onClick={(e) => {
                   e.stopPropagation()
                   openMenu(conv.id, e.currentTarget)

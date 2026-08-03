@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useMemo, useRef, type ReactNode } from 'react'
 import { GripHorizontal } from 'lucide-react'
 import type { ModelProvider } from '../api/tauri'
 import { ProviderIcon } from '../chat/ModelIcon'
+import { usePointerReorder } from '../utils/pointerReorder'
 import { isProviderEnabled } from './utils'
 
 type ProviderSortableListProps = {
@@ -17,8 +18,6 @@ type ProviderSortableListProps = {
   trailing?: ReactNode
 }
 
-const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
-
 export function ProviderSortableList({
   providers,
   selectedId,
@@ -29,110 +28,14 @@ export function ProviderSortableList({
   onReorder,
   trailing,
 }: ProviderSortableListProps) {
-  const [draggingId, setDraggingId] = useState<string | null>(null)
-  const [overIndex, setOverIndex] = useState<number | null>(null)
-  const [dragOffsetY, setDragOffsetY] = useState(0)
   const listRef = useRef<HTMLDivElement>(null)
-  const rowHeight = useRef(31)
-
-  const draggingIndex = draggingId ? providers.findIndex((p) => p.id === draggingId) : -1
-
-  useEffect(() => {
-    if (!draggingId) return
-    const prev = document.body.style.userSelect
-    document.body.style.userSelect = 'none'
-    return () => {
-      document.body.style.userSelect = prev
-    }
-  }, [draggingId])
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>, providerId: string, index: number) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const list = listRef.current
-    const item = (e.currentTarget as HTMLElement).closest('.kv-provider-item') as HTMLElement | null
-    if (!list || !item) return
-
-    // 行高 + 列表 gap(1px)。索引全程用「起始索引 + 位移/行高」算出，
-    // 绝不读拖动中被 transform/过渡位移的 rect（旧实现的抖动与重叠根源）。
-    const rowH = (item.getBoundingClientRect().height || 30) + 1
-    rowHeight.current = rowH
-    const startY = e.clientY
-    const startScrollTop = list.scrollTop
-    const maxIndex = providers.length - 1
-    let lastY = startY
-    let raf = 0
-
-    setDraggingId(providerId)
-    setOverIndex(index)
-    setDragOffsetY(0)
-
-    const currentOffset = () => {
-      const raw = lastY - startY + (list.scrollTop - startScrollTop)
-      return clamp(raw, -index * rowH, (maxIndex - index) * rowH)
-    }
-
-    const update = () => {
-      const offset = currentOffset()
-      setDragOffsetY(offset)
-      setOverIndex(clamp(index + Math.round(offset / rowH), 0, maxIndex))
-    }
-
-    // 指针悬在列表上下边缘时持续滚动（pointermove 不动时也要滚，所以走 rAF）
-    const autoScroll = () => {
-      const rect = list.getBoundingClientRect()
-      const zone = 24
-      let delta = 0
-      if (lastY < rect.top + zone) delta = -Math.min(10, Math.ceil((rect.top + zone - lastY) / 4))
-      else if (lastY > rect.bottom - zone) delta = Math.min(10, Math.ceil((lastY - (rect.bottom - zone)) / 4))
-      if (delta) {
-        const prev = list.scrollTop
-        list.scrollTop += delta
-        if (list.scrollTop !== prev) update()
-      }
-      raf = requestAnimationFrame(autoScroll)
-    }
-    raf = requestAnimationFrame(autoScroll)
-
-    const onMove = (ev: PointerEvent) => {
-      lastY = ev.clientY
-      update()
-    }
-
-    const onUp = () => {
-      cancelAnimationFrame(raf)
-      document.removeEventListener('pointermove', onMove)
-      document.removeEventListener('pointerup', onUp)
-      document.removeEventListener('pointercancel', onUp)
-      const toIndex = clamp(index + Math.round(currentOffset() / rowH), 0, maxIndex)
-      const toId = providers[toIndex]?.id
-      if (toId && toId !== providerId) onReorder(providerId, toId)
-      setDraggingId(null)
-      setOverIndex(null)
-      setDragOffsetY(0)
-    }
-
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId)
-    } catch {
-      /* 捕获失败不致命，document 监听仍覆盖窗口内拖动 */
-    }
-    document.addEventListener('pointermove', onMove)
-    document.addEventListener('pointerup', onUp)
-    document.addEventListener('pointercancel', onUp)
-  }
-
-  const getItemTransform = (index: number) => {
-    if (draggingIndex < 0 || overIndex === null) return undefined
-    const h = rowHeight.current
-    if (index === draggingIndex) return `translateY(${dragOffsetY}px)`
-    if (draggingIndex < overIndex) {
-      if (index > draggingIndex && index <= overIndex) return `translateY(${-h}px)`
-    } else if (draggingIndex > overIndex) {
-      if (index >= overIndex && index < draggingIndex) return `translateY(${h}px)`
-    }
-    return undefined
-  }
+  const ids = useMemo(() => providers.map((p) => p.id), [providers])
+  const { draggingId, startDrag, itemTransform } = usePointerReorder({
+    ids,
+    listRef,
+    itemSelector: '.kv-provider-item',
+    onReorder,
+  })
 
   const dragLabel = lang === 'zh' ? '拖动调整顺序' : 'Drag to reorder'
 
@@ -141,7 +44,7 @@ export function ProviderSortableList({
       {providers.map((provider, index) => {
         const configured = provider.apiKeys.some((key) => key.trim())
         const isDragging = draggingId === provider.id
-        const transform = getItemTransform(index)
+        const transform = itemTransform(index)
 
         return (
           <div
@@ -174,7 +77,7 @@ export function ProviderSortableList({
               className="kv-provider-drag-handle"
               aria-label={dragLabel}
               title={dragLabel}
-              onPointerDown={(e) => handlePointerDown(e, provider.id, index)}
+              onPointerDown={(e) => startDrag(e, provider.id, index)}
               onClick={(e) => e.stopPropagation()}
               data-tauri-drag-region="false"
             >

@@ -28,6 +28,9 @@ import { SidebarAccountMenu } from './SidebarAccountMenu'
 import { getSettingsCached } from '../api/settingsCache'
 import { IconButton } from '../components/Button'
 import { chatApi } from './api'
+import { applyIdOrder, moveIdToIndex } from '../utils/pointerReorder'
+import { useInsertionReorder } from '../utils/insertionReorder'
+import { applyConversationPins, withPinAt, type ConversationPin } from './conversationPins'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { chatTitlebarMacInsetClass, isMac, usesNativeTitlebar } from './platform'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
@@ -481,6 +484,8 @@ export const Sidebar = memo(function Sidebar({
   const [conversations, setConversations] = useState<ConversationListItem[]>([])
   const [projects, setProjects] = useState<ChatProject[]>([])
   const [sets, setSets] = useState<ChatSet[]>([])
+  // 集/项目里对话的钉住位置：group_id → 钉子表。底座仍是时间序，见 conversationPins.ts。
+  const [conversationPins, setConversationPins] = useState<Record<string, ConversationPin[]>>({})
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   // 后端全量索引搜索结果（覆盖所有对话，不止已加载的前 80）；空查询/非 Tauri 时为空，回退客户端过滤。
@@ -536,14 +541,16 @@ export const Sidebar = memo(function Sidebar({
     const silent = options?.silent ?? false
     if (!silent) setLoading(true)
     try {
-      const [projectData, setData, assistantData, conversationData] = await Promise.all([
+      const [projectData, setData, assistantData, conversationData, pinData] = await Promise.all([
         chatApi.getProjects(),
         chatApi.getSets(),
         chatApi.getAssistants(),
         chatApi.getConversations(0, 80),
+        chatApi.getConversationPins(),
       ])
       setProjects(projectData)
       setSets(setData)
+      setConversationPins(pinData)
       setAssistants(assistantData)
       setConversations(conversationData)
       if (projectForLoad && !projectData.some((project) => project.id === projectForLoad.id)) {
@@ -829,28 +836,106 @@ export const Sidebar = memo(function Sidebar({
   const projectConversationMap = useMemo(() => {
     const map = new Map<string, ConversationListItem[]>()
     projects.forEach((project) => {
-      map.set(
-        project.id,
-        visibleConversations.filter((conversation) => conversationBelongsToProject(conversation, project)),
+      const inProject = visibleConversations.filter((conversation) =>
+        conversationBelongsToProject(conversation, project),
       )
+      map.set(project.id, applyConversationPins(inProject, conversationPins[project.id] ?? []))
     })
     return map
-  }, [projects, visibleConversations])
+  }, [conversationPins, projects, visibleConversations])
 
   const visibleProjects = projects
+
+  // ── 侧栏分组的手动顺序（docs/adr/0004）。数组顺序就是显示顺序，时间不参与。
+  // 插入线式拖拽：只有被拖那行浮起，其余行不动，目标位置画线 —— 所以不要求行高相等，
+  // 可展开的分组行直接能拖，不需要「拖拽时先全折叠」。
+  const groupScrollRef = useRef<HTMLDivElement>(null)
+  const projectIds = useMemo(() => visibleProjects.map((project) => project.id), [visibleProjects])
+  const setIds = useMemo(() => sets.map((set) => set.id), [sets])
+
+  const projectDrag = useInsertionReorder({
+    listRef: groupScrollRef,
+    rowSelector: '.kv-sidebar-group',
+    onDrop: (id, toIndex) => {
+      const nextIds = moveIdToIndex(projectIds, id, toIndex)
+      setProjects((previous) => applyIdOrder(previous, nextIds))
+      void chatApi.reorderProjects(nextIds).catch((err) => {
+        console.error('Failed to reorder projects:', err)
+        void loadSidebarData({ silent: true })
+      })
+    },
+  })
+
+  // 集/项目里的对话：拖到哪一行就钉在那一行，其余仍按更新时间填空位。
+  // 一个 hook 实例服务所有分组 —— 取样范围由把手最近的 [data-reorder-scope] 决定，
+  // 所以多个分组同时展开时不会互串。「最近」平铺列表不传 reorder，因此不可拖。
+  const conversationDrag = useInsertionReorder({
+    listRef: groupScrollRef,
+    rowSelector: '.kv-conv-row',
+    onDrop: (id, toIndex, groupId) => {
+      if (!groupId) return
+      const nextPins = withPinAt(conversationPins[groupId] ?? [], id, toIndex)
+      setConversationPins((previous) => ({ ...previous, [groupId]: nextPins }))
+      void chatApi.setConversationPins(groupId, nextPins).catch((err) => {
+        console.error('Failed to save conversation pins:', err)
+        void loadSidebarData({ silent: true })
+      })
+    },
+  })
+
+  const conversationReorderFor = useCallback(
+    (groupId: string) => ({
+      scopeId: groupId,
+      draggingId: conversationDrag.draggingId,
+      startDrag: conversationDrag.startDrag,
+    }),
+    [conversationDrag.draggingId, conversationDrag.startDrag],
+  )
+
+  const setDrag = useInsertionReorder({
+    listRef: groupScrollRef,
+    rowSelector: '.kv-sidebar-group',
+    onDrop: (id, toIndex) => {
+      const nextIds = moveIdToIndex(setIds, id, toIndex)
+      setSets((previous) => applyIdOrder(previous, nextIds))
+      void chatApi.reorderSets(nextIds).catch((err) => {
+        console.error('Failed to reorder sets:', err)
+        void loadSidebarData({ silent: true })
+      })
+    },
+  })
+
+  // 跟着指针走的浮起卡片：源行留在原位变淡作占位，这张卡表示「正在搬的是这个」。
+  const dragGhost = useMemo(() => {
+    const active = projectDrag.draggingId
+      ? { drag: projectDrag, label: projects.find((p) => p.id === projectDrag.draggingId)?.name }
+      : setDrag.draggingId
+        ? { drag: setDrag, label: sets.find((s) => s.id === setDrag.draggingId)?.name }
+        : conversationDrag.draggingId
+          ? {
+              drag: conversationDrag,
+              label: visibleConversations.find((c) => c.id === conversationDrag.draggingId)?.title,
+            }
+          : null
+    if (!active?.label || !active.drag.ghostPos) return null
+    return { label: active.label, ...active.drag.ghostPos }
+  }, [conversationDrag, projectDrag, projects, setDrag, sets, visibleConversations])
 
   const setConversationMap = useMemo(() => {
     const map = new Map<string, ConversationListItem[]>()
     sets.forEach((set) => {
       map.set(
         set.id,
-        visibleConversations.filter(
-          (conversation) => (conversation.set_id ?? conversation.setId) === set.id,
+        applyConversationPins(
+          visibleConversations.filter(
+            (conversation) => (conversation.set_id ?? conversation.setId) === set.id,
+          ),
+          conversationPins[set.id] ?? [],
         ),
       )
     })
     return map
-  }, [sets, visibleConversations])
+  }, [conversationPins, sets, visibleConversations])
 
   // 「最近」标签：跨集/项目的全部对话，置顶在前、再按更新时间倒序。
   const recentConversations = useMemo(
@@ -1112,7 +1197,29 @@ export const Sidebar = memo(function Sidebar({
               </div>
             </div>
 
-            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto" data-tauri-drag-region="false">
+            <div
+              ref={groupScrollRef}
+              className="kv-sidebar-groups custom-scrollbar relative min-h-0 flex-1 overflow-y-auto"
+              data-tauri-drag-region="false"
+            >
+            {(projectDrag.lineTop ?? setDrag.lineTop ?? conversationDrag.lineTop) !== null && (
+              <div
+                className="kv-reorder-line"
+                style={{
+                  top: `${projectDrag.lineTop ?? setDrag.lineTop ?? conversationDrag.lineTop ?? 0}px`,
+                }}
+              />
+            )}
+            {dragGhost &&
+              createPortal(
+                <div
+                  className="kv-reorder-ghost"
+                  style={{ left: `${dragGhost.x}px`, top: `${dragGhost.y}px` }}
+                >
+                  {dragGhost.label}
+                </div>,
+                document.body,
+              )}
             {activeTab === 'projects' && (
             <section key="projects" className="chat-motion-tab-in group/projects px-3 pb-2 pt-1">
                 <div className="mt-1.5 space-y-1">
@@ -1124,10 +1231,16 @@ export const Sidebar = memo(function Sidebar({
                     const previewConversations = expanded
                       ? projectConversations
                       : projectConversations.slice(0, PROJECT_PREVIEW_LIMIT)
+                    const isDragging = projectDrag.draggingId === project.id
                     return (
-                      <div key={project.id}>
+                      <div
+                        key={project.id}
+                        data-reorder-id={project.id}
+                        onPointerDown={(e) => projectDrag.startDrag(e, project.id)}
+                        className={`kv-sidebar-group${isDragging ? ' is-dragging' : ''}`}
+                      >
                         <div
-                          className={`group flex min-w-0 items-center rounded-lg ${
+                          className={`kv-sidebar-group-row group flex min-w-0 items-center rounded-lg ${
                             active
                               ? 'bg-black/[0.04] dark:bg-white/[0.08]'
                               : 'hover:bg-black/[0.035] dark:hover:bg-white/[0.06]'
@@ -1167,6 +1280,7 @@ export const Sidebar = memo(function Sidebar({
                           </button>
                           <IconButton
                             size="sm"
+                            data-no-drag
                             onClick={(e) => {
                               e.stopPropagation()
                               openProjectMenu(project.id, e.currentTarget)
@@ -1201,6 +1315,7 @@ export const Sidebar = memo(function Sidebar({
                       {!collapsedProject && previewConversations.length > 0 && (
                         <ConversationList
                           conversations={previewConversations}
+                          reorder={conversationReorderFor(project.id)}
                           currentConversationId={currentConversationId}
                           generatingConversationIds={generatingConversationIds}
                           projects={projects}
@@ -1265,10 +1380,16 @@ export const Sidebar = memo(function Sidebar({
                       const previewConversations = expanded
                         ? setConversations
                         : setConversations.slice(0, PROJECT_PREVIEW_LIMIT)
+                      const isDragging = setDrag.draggingId === set.id
                       return (
-                        <div key={set.id}>
+                        <div
+                          key={set.id}
+                          data-reorder-id={set.id}
+                          onPointerDown={(e) => setDrag.startDrag(e, set.id)}
+                          className={`kv-sidebar-group${isDragging ? ' is-dragging' : ''}`}
+                        >
                           <div
-                            className={`group flex min-w-0 items-center rounded-lg ${
+                            className={`kv-sidebar-group-row group flex min-w-0 items-center rounded-lg ${
                               active
                                 ? 'bg-black/[0.04] dark:bg-white/[0.08]'
                                 : 'hover:bg-black/[0.035] dark:hover:bg-white/[0.06]'
@@ -1309,6 +1430,7 @@ export const Sidebar = memo(function Sidebar({
                             </button>
                             <IconButton
                               size="sm"
+                              data-no-drag
                               onClick={(e) => {
                                 e.stopPropagation()
                                 openSetMenu(set.id, e.currentTarget)
@@ -1341,6 +1463,7 @@ export const Sidebar = memo(function Sidebar({
                           {!collapsedSet && previewConversations.length > 0 && (
                             <ConversationList
                               conversations={previewConversations}
+                              reorder={conversationReorderFor(set.id)}
                               currentConversationId={currentConversationId}
                               generatingConversationIds={generatingConversationIds}
                               projects={projects}

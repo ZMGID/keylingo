@@ -735,6 +735,35 @@ pub(crate) fn chat_get_projects(app: AppHandle) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
+pub(crate) fn chat_get_conversation_pins(app: AppHandle) -> Result<serde_json::Value, String> {
+    let pins = crate::chat::storage::load_conversation_pins(&app)?;
+    Ok(serde_json::json!({ "success": true, "pins": pins }))
+}
+
+/// `group_id` 是集或项目的 id（前缀不同，不会撞）。空 pins 表示清掉该分组的钉子。
+#[tauri::command]
+pub(crate) fn chat_set_conversation_pins(
+    app: AppHandle,
+    group_id: String,
+    pins: Vec<crate::chat::ConversationPin>,
+) -> Result<serde_json::Value, String> {
+    crate::chat::storage::set_conversation_pins(&app, &group_id, pins)?;
+    Ok(serde_json::json!({ "success": true }))
+}
+
+#[tauri::command]
+pub(crate) fn chat_reorder_projects(
+    app: AppHandle,
+    ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let projects = crate::chat::storage::reorder_projects(&app, &ids)?;
+    Ok(serde_json::json!({
+        "success": true,
+        "projects": projects,
+    }))
+}
+
+#[tauri::command]
 pub(crate) fn chat_create_project(
     app: AppHandle,
     name: String,
@@ -842,6 +871,15 @@ pub(crate) fn chat_project_open_folder(
 #[tauri::command]
 pub(crate) fn chat_get_sets(app: AppHandle) -> Result<serde_json::Value, String> {
     let sets = get_sets(&app)?;
+    Ok(serde_json::json!({ "success": true, "sets": sets }))
+}
+
+#[tauri::command]
+pub(crate) fn chat_reorder_sets(
+    app: AppHandle,
+    ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let sets = crate::chat::storage::reorder_sets(&app, &ids)?;
     Ok(serde_json::json!({ "success": true, "sets": sets }))
 }
 
