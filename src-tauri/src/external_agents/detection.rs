@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
 use crate::external_agents::registry::AGENT_DEFS;
 use crate::external_agents::session::acp::detect_acp_models;
 use crate::external_agents::session::claude_init::detect_claude_models;
+use crate::external_agents::session::codex_app_server::{
+    codex_static_fallback_probe, detect_codex_models, merge_codex_model_catalog,
+    parse_codex_model_list_result,
+};
 use crate::external_agents::session::pi_rpc::parse_pi_models;
 use crate::external_agents::types::{
     default_model_option, fallback_models_from_pairs, reasoning_options_from_pairs, DetectedAgent,
@@ -98,9 +103,13 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
         };
     };
     match probe_models(def, path.as_deref(), cwd).await {
-        Ok((models, mut current_model, mut current_reasoning, probed_reasoning)) => {
-            let mut reasoning_by_model = std::collections::HashMap::new();
-            // codex 的当前模型/推理不来自 `debug models`（其输出仅供列表），而是读 config.toml 顶层键。
+        Ok(probe) => {
+            let models = probe.models;
+            let mut current_model = probe.current_model;
+            let mut current_reasoning = probe.current_reasoning;
+            let probed_reasoning = probe.reasoning_options;
+            let mut reasoning_by_model = probe.reasoning_by_model;
+            // codex 的当前模型/推理不来自 model/list，而是读 config.toml 顶层键。
             if def.id == "codex" {
                 let (cm, cr) = read_codex_current_config();
                 current_model = current_model.or(cm);
@@ -140,9 +149,9 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             } else {
                 probed_reasoning
             };
-            // kimi：当前模型若在 config 里列了，以 config 为准（session/new 报的总是默认模型的
-            // 档位）。空列表 = always_thinking，明确无档位。模型不在 config 里才保留探测结果。
-            if def.id == "kimi" {
+            // kimi / codex：当前模型若有 per-model effort 表，用该表作为全局 reasoning_options
+            // （胶囊默认档位列表）。kimi 空列表 = always_thinking；codex 无表则保留探测默认模型档。
+            if matches!(def.id, "kimi" | "codex") {
                 if let Some(model) = current_model.as_deref() {
                     if let Some(opts) = reasoning_by_model.get(model) {
                         reasoning_options = opts.clone();
@@ -174,15 +183,28 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
                 reasoning_by_model,
             }
         }
-        Err(err) => AgentModelsResult {
-            models: fallback_models_from_pairs(def.fallback_models),
-            reasoning_options: reasoning,
-            source: ModelSource::Fallback,
-            probe_error: Some(err),
-            current_model: None,
-            current_reasoning: None,
-            reasoning_by_model: std::collections::HashMap::new(),
-        },
+        Err(err) => {
+            let models = fallback_models_from_pairs(def.fallback_models);
+            // codex fallback：给每个真实模型挂上静态 effort，前端换模型时仍有档位可选。
+            let reasoning_by_model = if def.id == "codex" {
+                models
+                    .iter()
+                    .filter(|m| m.id != "default")
+                    .map(|m| (m.id.clone(), reasoning.clone()))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            AgentModelsResult {
+                models,
+                reasoning_options: reasoning,
+                source: ModelSource::Fallback,
+                probe_error: Some(err),
+                current_model: None,
+                current_reasoning: None,
+                reasoning_by_model,
+            }
+        }
     }
 }
 
@@ -460,7 +482,7 @@ pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedA
     let models = if available {
         probe_models(def, path.as_deref(), cwd)
             .await
-            .map(|(models, _, _, _)| models)
+            .map(|probe| probe.models)
             .unwrap_or_else(|_| fallback_models_from_pairs(def.fallback_models))
     } else {
         fallback_models_from_pairs(def.fallback_models)
@@ -559,19 +581,34 @@ async fn probe_auth(def: &RuntimeAgentDef, path: Option<&std::path::Path>) -> Op
     }
 }
 
-/// 探测模型列表 + CLI 当前配置。返回
-/// `(models, current_model, current_reasoning, probed_reasoning_options)`。
-/// current_* 仅 ACP（currentModelId）与 claude（resolved model）路径能给出；其余为 None
-/// （codex 的当前配置由上层 detect_agent_models 从 config.toml 补齐）。
+/// 探测模型列表 + CLI 当前配置。
 ///
-/// 最后一项是 CLI **自报**的推理档位选项（kimi 的 ACP `thinking`：low/high/max）。
-/// 空 = 该 CLI 不暴露，回落 `def.reasoning_options` 静态表。
-type ProbeModelsOutput = (
-    Vec<RuntimeModelOption>,
-    Option<String>,
-    Option<String>,
-    Vec<RuntimeModelOption>,
-);
+/// `current_*` 仅 ACP / claude 路径能从探测本身给出；codex 由上层从 config.toml 补齐。
+/// `reasoning_options` / `reasoning_by_model`：CLI 自报档位（codex model/list、kimi ACP）；
+/// 空 = 回落 `def.reasoning_options` 静态表。
+struct ProbeModelsOutput {
+    models: Vec<RuntimeModelOption>,
+    current_model: Option<String>,
+    current_reasoning: Option<String>,
+    reasoning_options: Vec<RuntimeModelOption>,
+    reasoning_by_model: HashMap<String, Vec<RuntimeModelOption>>,
+}
+
+fn probe_ok(
+    models: Vec<RuntimeModelOption>,
+    current_model: Option<String>,
+    current_reasoning: Option<String>,
+    reasoning_options: Vec<RuntimeModelOption>,
+    reasoning_by_model: HashMap<String, Vec<RuntimeModelOption>>,
+) -> ProbeModelsOutput {
+    ProbeModelsOutput {
+        models,
+        current_model,
+        current_reasoning,
+        reasoning_options,
+        reasoning_by_model,
+    }
+}
 
 async fn probe_models(
     def: &RuntimeAgentDef,
@@ -585,8 +622,37 @@ async fn probe_models(
     if def.id == "opencode" {
         let timeout_secs = def.list_models_timeout_secs.unwrap_or(15);
         if let Some(models) = probe_opencode_models(bin, cwd, timeout_secs).await {
-            return Ok((models, None, None, Vec::new()));
+            return Ok(probe_ok(models, None, None, Vec::new(), HashMap::new()));
         }
+    }
+
+    // Codex：对齐 desktop-cc-gui
+    //   runtime model/list  >  debug models  >  curated fallback
+    // 再 merge：补全 CLI 不列但 config/catalog 有的模型（如 gpt-5.6-sol）。
+    if def.id == "codex" {
+        let timeout_secs = def.list_models_timeout_secs.unwrap_or(20);
+        let (config_model, _) = read_codex_current_config();
+        let runtime = if let Some(probe) = detect_codex_models(bin, cwd, timeout_secs).await {
+            Some(probe)
+        } else {
+            probe_codex_debug_models(bin, cwd, timeout_secs).await
+        };
+        // Always merge with curated fallback + config inject (even when runtime is empty —
+        // then merge starts from static fallback so the picker never shows a half-list).
+        let base = runtime.unwrap_or_else(codex_static_fallback_probe);
+        let merged = merge_codex_model_catalog(base, config_model.as_deref());
+        if merged.models.iter().any(|m| m.id != "default") {
+            return Ok(probe_ok(
+                merged.models,
+                None,
+                None,
+                merged.reasoning_options,
+                merged.reasoning_by_model,
+            ));
+        }
+        return Err(
+            "Codex model/list 与 debug models 均未返回模型（可能未登录或 CLI 过旧）".to_string(),
+        );
     }
 
     if def.model_probe == Some(ModelProbeStrategy::Acp) {
@@ -600,11 +666,12 @@ async fn probe_models(
         return detect_acp_models(bin, &args, cwd, timeout_secs)
             .await
             .map(|probe| {
-                (
+                probe_ok(
                     probe.models,
                     probe.current_model,
                     probe.current_reasoning,
                     probe.reasoning_options,
+                    HashMap::new(),
                 )
             })
             .ok_or_else(|| "ACP 模型探测未返回模型（可能未登录或握手失败）".to_string());
@@ -618,7 +685,9 @@ async fn probe_models(
         )
         .await
         {
-            Ok(Some((models, current_model))) => Ok((models, current_model, None, Vec::new())),
+            Ok(Some((models, current_model))) => {
+                Ok(probe_ok(models, current_model, None, Vec::new(), HashMap::new()))
+            }
             Ok(None) => Err("Claude 初始化未上报模型".to_string()),
             Err(_) => Err(format!("Claude 模型探测超时（{timeout_secs}s）")),
         };
@@ -651,7 +720,7 @@ async fn probe_models(
             stderr
         };
         return parse_pi_models(text.as_ref())
-            .map(|models| (models, None, None, Vec::new()))
+            .map(|models| probe_ok(models, None, None, Vec::new(), HashMap::new()))
             .ok_or_else(|| "未从 pi 输出解析出模型".to_string());
     }
 
@@ -663,8 +732,120 @@ async fn probe_models(
     }
     let text = String::from_utf8_lossy(&output.stdout);
     parse_models_list(def.id, text.as_ref())
-        .map(|models| (models, None, None, Vec::new()))
+        .map(|models| probe_ok(models, None, None, Vec::new(), HashMap::new()))
         .ok_or_else(|| "未从列模型输出解析出模型".to_string())
+}
+
+/// Secondary Codex catalog path: `codex debug models` JSON on stdout.
+/// Shape differs from `model/list` (`slug` / `supported_reasoning_levels` / `context_window`),
+/// so we normalize into the same `CodexModelsProbe` used by the app-server path.
+async fn probe_codex_debug_models(
+    bin: &Path,
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Option<crate::external_agents::session::codex_app_server::CodexModelsProbe> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        crate::external_agents::spawn::cli_command(bin)
+            .args(["debug", "models"])
+            .current_dir(cwd)
+            .no_console_window()
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_codex_debug_models_json(text.as_ref())
+}
+
+/// Normalize `codex debug models` JSON into the model/list-shaped probe result.
+fn parse_codex_debug_models_json(
+    stdout: &str,
+) -> Option<crate::external_agents::session::codex_app_server::CodexModelsProbe> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() || trimmed.to_lowercase().contains("no models available") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    // debug models: `{ "models": [ { "slug", "display_name", "context_window",
+    //   "supported_reasoning_levels": [{ "effort", "description" }], ... } ] }`
+    // Reuse model/list parser by mapping fields into its accepted aliases.
+    let models = value.get("models").and_then(|v| v.as_array())?;
+    let mapped: Vec<serde_json::Value> = models
+        .iter()
+        .map(|entry| {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = entry
+                .get("slug")
+                .or_else(|| entry.get("id"))
+                .cloned()
+            {
+                obj.insert("id".into(), id.clone());
+                obj.insert("model".into(), id);
+            }
+            if let Some(name) = entry
+                .get("display_name")
+                .or_else(|| entry.get("displayName"))
+                .cloned()
+            {
+                obj.insert("displayName".into(), name);
+            }
+            if let Some(desc) = entry.get("description").cloned() {
+                obj.insert("description".into(), desc);
+            }
+            if let Some(cw) = entry
+                .get("context_window")
+                .or_else(|| entry.get("contextWindow"))
+                .cloned()
+            {
+                obj.insert("context_window".into(), cw);
+            }
+            if let Some(levels) = entry
+                .get("supported_reasoning_levels")
+                .or_else(|| entry.get("supportedReasoningEfforts"))
+                .cloned()
+            {
+                // Normalize effort key so parse_codex_reasoning_efforts accepts it.
+                if let Some(arr) = levels.as_array() {
+                    let norm: Vec<serde_json::Value> = arr
+                        .iter()
+                        .map(|level| {
+                            let mut m = serde_json::Map::new();
+                            if let Some(effort) = level
+                                .get("effort")
+                                .or_else(|| level.get("reasoningEffort"))
+                                .or_else(|| level.get("reasoning_effort"))
+                                .cloned()
+                            {
+                                m.insert("reasoningEffort".into(), effort);
+                            }
+                            if let Some(d) = level.get("description").cloned() {
+                                m.insert("description".into(), d);
+                            }
+                            serde_json::Value::Object(m)
+                        })
+                        .collect();
+                    obj.insert(
+                        "supportedReasoningEfforts".into(),
+                        serde_json::Value::Array(norm),
+                    );
+                }
+            }
+            if let Some(def) = entry
+                .get("default_reasoning_level")
+                .or_else(|| entry.get("defaultReasoningEffort"))
+                .cloned()
+            {
+                obj.insert("defaultReasoningEffort".into(), def);
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    parse_codex_model_list_result(&serde_json::json!({ "data": mapped }))
 }
 
 async fn probe_opencode_models(
@@ -779,21 +960,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_json_models() {
-        let models = parse_models_list(
-            "codex",
-            r#"{"models":[{"slug":"gpt-5.3-codex","context_window":272000},{"slug":"o3"}]}"#,
+    fn parse_codex_debug_models_json_normalizes_to_catalog() {
+        let probe = parse_codex_debug_models_json(
+            r#"{
+              "models": [
+                {
+                  "slug": "gpt-5.5",
+                  "display_name": "GPT-5.5",
+                  "context_window": 272000,
+                  "default_reasoning_level": "medium",
+                  "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Fast"},
+                    {"effort": "medium", "description": "Balanced"},
+                    {"effort": "high", "description": "Deep"}
+                  ]
+                },
+                {"slug": "o3"}
+              ]
+            }"#,
         )
         .unwrap();
-        assert!(models.iter().any(|m| m.id == "gpt-5.3-codex"));
-        assert!(models.iter().any(|m| m.id == "o3"));
-        // Real window is carried through, and "Default" inherits the first model's window.
-        let sol = models.iter().find(|m| m.id == "gpt-5.3-codex").unwrap();
+        assert!(probe.models.iter().any(|m| m.id == "gpt-5.5"));
+        assert!(probe.models.iter().any(|m| m.id == "o3"));
+        let sol = probe.models.iter().find(|m| m.id == "gpt-5.5").unwrap();
         assert_eq!(sol.context_window_tokens, Some(272000));
-        assert_eq!(models[0].id, "default");
-        assert_eq!(models[0].context_window_tokens, Some(272000));
-        let o3 = models.iter().find(|m| m.id == "o3").unwrap();
-        assert_eq!(o3.context_window_tokens, None);
+        assert_eq!(sol.label, "GPT-5.5");
+        assert_eq!(probe.models[0].id, "default");
+        assert_eq!(probe.models[0].context_window_tokens, Some(272000));
+        // per-model efforts from supported_reasoning_levels
+        let efforts = probe.reasoning_by_model.get("gpt-5.5").unwrap();
+        assert!(efforts.iter().any(|e| e.id == "low"));
+        assert!(efforts.iter().any(|e| e.id == "high"));
+        assert!(probe.reasoning_options.iter().any(|e| e.id == "medium"));
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,105 +10,26 @@ use crate::external_agents::slash::is_claude_init;
 use crate::external_agents::spawn::{parse_json_line, spawn_agent, write_probe_stdin};
 use crate::external_agents::types::{RuntimeBuildOptions, RuntimeContext, RuntimeModelOption};
 
-/// `--model` aliases accepted by Claude Code, used to build a static model catalog with
-/// labels + context windows (no per-alias process probe). The CLI validates the alias at
-/// run time, so an unsupported alias simply fails that turn rather than the picker load.
+/// Built-in Claude Code model catalog — **ported from desktop-cc-gui**
+/// (`engine/status.rs::get_builtin_claude_models`).
 ///
-/// 取值来自 claude 2.1.220 二进制里的别名白名单
-/// `["sonnet","opus","haiku","fable","best","sonnet[1m]","opus[1m]","fable[1m]","opusplan"]`
-/// （spec 第 21 条：把本机装的二进制当文档查阅）。`haiku[1m]` **有意不在**里面 —— 白名单里
-/// 就没有它，尽管 haiku 的 catalog 条目标着 `supports_1m_suffix`。
-const CLAUDE_MODEL_ALIASES: &[&str] = &[
-    "opus",
-    "sonnet",
-    "sonnet[1m]",
-    "opus[1m]",
-    "haiku",
-    "fable",
-    "fable[1m]",
-    "best",
-    "opusplan",
-];
-
-/// 具体版本（钉死某一代模型，别名解析到哪一代由 CLI 版本决定，用户想退回上一版时需要这个）。
+/// Claude CLI 没有 list-models RPC。cc-gui 的做法是：
+/// 1. 只暴露 4 个家族档位（Fable / Opus / Sonnet / Haiku），catalog id 钉死当前代
+/// 2. `~/.claude/settings.json` 的 `env.ANTHROPIC_DEFAULT_*` / 进程 env **改写**
+///    每档的 runtime model + 展示名（tier id 不变，所以四行不会因映射到同一模型而折叠）
+/// 3. **不起进程**探测模型列表
 ///
-/// **数据来源**：claude 2.1.220 二进制里烘进去的模型目录（`{id,family,display_name,…}` 数组，
-/// 共 17 条），原样抄出 `id` + `display_name`，一个字没编。spec 第 21 条认可这种「把本机
-/// 二进制当文档查」的做法。
-///
-/// **但目录 ≠ 可用**（2026-07-30 修正）。同一个二进制里还烘着一张官方状态表
-/// （「Legacy / Deprecated / Retired Models」），照它 + 真机实测，那 17 条里有 6 条不能给用户：
-///
-/// | 条目 | 真实情况 |
-/// |---|---|
-/// | `claude-3-5-sonnet` | 2025-10-28 已退役 |
-/// | `claude-3-7-sonnet` | 2026-02-19 已退役；实测只打一句 `⚠ … was retired on …` 后无回答 |
-/// | `claude-3-5-haiku`  | 2026-02-19 已退役 |
-/// | `claude-sonnet-4-0` | 实测 `⚠ Claude Sonnet 4 was retired on June 15, 2026` |
-/// | `claude-opus-4-1`   | 实测 `⚠ … automatically remapped to Opus 4.8`，且 2026-08-05 退役 |
-/// | `claude-opus-4-0`   | 同上，实测 `modelUsage` 里回报的是 `claude-opus-4-8` |
-///
-/// 后两条最该删：**选了不报错，给的是另一个模型**（除非用户自己设了
-/// `CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP=1`）。一个「点了得到别的东西」的选项比没有更糟。
-///
-/// **刻意不做「按退役日期自动过滤」**：官方表里一半的日期是 `TBD`（`claude-opus-4-0` /
-/// `claude-sonnet-4-0` 就是），而实际退役是 CLI 运行时才告知的 —— 日期过滤既拦不住 TBD 那批，
-/// 又要多养一张会过期的日期表。这里就是一张需要人工对账的白名单：**升级 CLI 后
-/// 重新对一遍二进制里那张状态表**（搜字符串 `Retired Models (no longer available)`）。
-///
-/// **有意不带上下文窗口**：catalog 里确实有 `context:{window,…}`，但那正是 spec 第 14g 条
-/// 明令不许再建的那张表 —— 窗口会被 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`、1M beta、第三方 router
-/// 改写，只有 CLI 自己每轮实报的 `result.modelUsage[model].contextWindow` 准。这里只回答
-/// 「有哪些可选」。
-///
-/// **为什么不做「每个模型支持哪些 effort 档」的门控**：catalog 里有
-/// `capabilities:["effort","max_effort","xhigh_effort",…]`（如 Sonnet 4.6 就**没有**
-/// `xhigh_effort`），但真机核实过 CLI 对超出能力的档位是**静默降级**而非报错：
-/// 未知 `--effort` 只在 stderr 打一句 warning 后按默认档跑，`--thinking disabled` 撞上
-/// `rejects_disabled_thinking` 的 Fable 5 时被直接忽略（实测仍产出 2 个 thinking 块、
-/// 不报错）。也就是说门控纯属观感，代价却是再养一张会过期的能力表 —— 不划算。
-const CLAUDE_CONCRETE_MODELS: &[(&str, &str)] = &[
-    ("claude-opus-5", "Opus 5"),
-    ("claude-opus-4-8", "Opus 4.8"),
-    ("claude-opus-4-7", "Opus 4.7"),
-    ("claude-opus-4-6", "Opus 4.6"),
-    ("claude-opus-4-5", "Opus 4.5"),
-    ("claude-sonnet-5", "Sonnet 5"),
-    ("claude-sonnet-4-6", "Sonnet 4.6"),
-    ("claude-sonnet-4-5", "Sonnet 4.5"),
+/// 这里 id / label 与 cc-gui 字面一致；Kivio 额外在列表头保留 `default`（Auto / 不传
+/// `--model`），这是本应用胶囊语义，cc-gui 没有这一行。
+const CLAUDE_BUILTIN_TIERS: &[(&str, &str)] = &[
     ("claude-fable-5", "Fable 5"),
-    ("claude-mythos-5", "Mythos 5"),
-    ("claude-haiku-4-5", "Haiku 4.5"),
+    ("claude-opus-5", "Opus 5"),
+    ("claude-sonnet-5", "Sonnet 5"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
 ];
 
-/// 上面那张具体版本表是从**哪个** CLI 版本的二进制里读出来的。
-///
-/// 这是版本门控的判据：装的 CLI 比它旧时**不提供**具体版本条目，只留别名 + 用户自配模型
-/// （= 改动前的行为，严格不退步）。理由是我们只有这一个版本的样本 —— 更旧的 CLI 烘的是更短
-/// 的一张目录表，里面到底有哪些 id 我们**没有证据**，而 claude 对 `--model` 是**原样透传**的
-/// （真机核实：`--model claude-bogus-9` 照样启动、`system/init` 原样回报），错误要等到真正
-/// 发请求时才炸。宁可少给几个选项，也不要给一个「点了才发现不行」的选项。
-///
-/// 版本号从探活缓存里读（`spawn::cached_cli_version`），**不额外起进程**（spec 第 9 条）。
-/// 读不到版本 ⇒ 不做门控（照常提供），未知不该等于「功能消失」。
-const CONCRETE_MODELS_MIN_CLI_VERSION: (u32, u32, u32) = (2, 1, 220);
-
-/// `env.*` keys in `~/.claude/settings.json` (and the matching process env vars) that
-/// point Claude Code at a custom/third-party model. We surface these as extra `--model`
-/// targets so a user's gateway/bedrock setup shows up in the picker. These are the
-/// Claude CLI's own public env interface — not paseo's code.
-const CLAUDE_ENV_MODEL_KEYS: &[&str] = &[
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_SMALL_FAST_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-];
-
-/// Upper bound on the single best-effort "default" probe. Discovery no longer spawns a
-/// process per alias — the alias catalog is static — so this is the only spawn, kept short
-/// so the model picker stays responsive even when the CLI is slow to emit its init event.
-const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 8;
+/// Opus 5 is the default tier (matches cc-gui `ModelInfo::as_default()`).
+const CLAUDE_DEFAULT_TIER_ID: &str = "claude-opus-5";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeInitInfo {
@@ -261,121 +181,42 @@ pub async fn probe_claude_init(
     parse_claude_init_info(&init)
 }
 
-/// 返回 (模型目录, 当前解析模型)。当前模型 = CLI 对 "default" 实际解析出的模型（如
-/// "claude-fable-5[1m]"），供胶囊展示 CLI 当前配置；探不到时为 None。
-pub async fn detect_claude_models(
-    resolved_bin: &Path,
-    cwd: &Path,
-) -> Option<(Vec<RuntimeModelOption>, Option<String>)> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-
-    // 1. Default option — one best-effort probe (short timeout). The CLI reports the model
-    //    it actually resolves "default" to, which gives an accurate label + context window.
-    //    Failure is non-fatal: we still ship a generic "Default" entry.
-    let default_info = tokio::time::timeout(
-        Duration::from_secs(DEFAULT_PROBE_TIMEOUT_SECS),
-        probe_claude_init(resolved_bin, cwd, None),
-    )
-    .await
-    .ok()
-    .flatten();
-    let current_model = default_info
-        .as_ref()
-        .map(|info| info.resolved_model.clone());
-    out.push(RuntimeModelOption {
-        id: "default".to_string(),
-        label: match &default_info {
-            Some(info) => label_for_claude_model("default", &info.resolved_model),
-            None => "Default".to_string(),
-        },
-        context_window_tokens: default_info
-            .as_ref()
-            .and_then(|info| info.context_window_tokens),
-    });
-    seen.insert("default".to_string());
-
-    // 2. Built-in alias catalog — entirely static, no process spawn.
-    for &alias in CLAUDE_MODEL_ALIASES {
-        if seen.insert(alias.to_string()) {
-            out.push(catalog_model_option(alias));
-        }
-    }
-
-    // 3. 具体版本。版本号取自探活缓存（`resolve_binary` 刚刚跑过 `--version`），
-    //    **不新起进程**；CLI 太旧就整组不提供（见 CONCRETE_MODELS_MIN_CLI_VERSION）。
-    let version_line = crate::external_agents::spawn::cached_cli_version(resolved_bin);
-    for option in concrete_model_options(version_line.as_deref()) {
-        if seen.insert(option.id.clone()) {
-            out.push(option);
-        }
-    }
-
-    // 4. Custom models configured via ~/.claude/settings.json `env.*` + process env.
-    for model in claude_config_models() {
-        if seen.insert(model.clone()) {
-            out.push(RuntimeModelOption {
-                context_window_tokens: context_window_from_claude_resolved_model(&model),
-                label: model.clone(),
-                id: model,
-            });
-        }
-    }
-
-    Some((out, current_model))
-}
-
-/// Static catalog entry for a Claude `--model` alias — label + context window with no probe.
-fn catalog_model_option(alias: &str) -> RuntimeModelOption {
-    let is_1m = alias.to_ascii_lowercase().ends_with("[1m]");
-    let base = alias
-        .get(..alias.len().saturating_sub(if is_1m { 4 } else { 0 }))
-        .unwrap_or(alias);
-    let family = title_case_token(base);
-    RuntimeModelOption {
-        id: alias.to_string(),
-        label: if is_1m {
-            format!("{family} (1M context)")
-        } else {
-            family
-        },
-        context_window_tokens: context_window_from_claude_model_alias(alias),
-    }
-}
-
-/// 从 `claude --version` 的输出行里抠出 `(major, minor, patch)`。
+/// 构建 Claude 模型选单（对齐 desktop-cc-gui `get_claude_models`）。
 ///
-/// 本机实测输出形如 `2.1.220 (Claude Code)`。刻意只认「行首的 `x.y.z`」这一种形态：
-/// 认得越宽，越容易把某个日志行里的数字当成版本号，从而**误判成旧版**而悄悄少给选项。
-/// 认不出 ⇒ `None` ⇒ 不做门控（见 `CONCRETE_MODELS_MIN_CLI_VERSION`）。
-pub fn parse_claude_cli_version(line: &str) -> Option<(u32, u32, u32)> {
-    let head = line.trim().split_whitespace().next()?;
-    let mut parts = head.split('.');
-    let major = parts.next()?.parse::<u32>().ok()?;
-    let minor = parts.next()?.parse::<u32>().ok()?;
-    // patch 可能带后缀（如 `220-rc1`），只取前导数字。
-    let patch_raw = parts.next().unwrap_or("0");
-    let digits: String = patch_raw.chars().take_while(char::is_ascii_digit).collect();
-    let patch = digits.parse::<u32>().unwrap_or(0);
-    Some((major, minor, patch))
+/// - **不起进程**（`resolved_bin` / `cwd` 仅保留签名兼容；slash 探测另走 `probe_claude_init`）
+/// - 4 档 builtin + settings/env 覆盖改写 label（展示名）
+/// - 头上多一个 `default`（Kivio Auto：不传 `--model`）
+/// - `current_model`：读 `settings.json` 的 `model` / `ANTHROPIC_MODEL`（不 spawn）
+pub async fn detect_claude_models(
+    _resolved_bin: &Path,
+    _cwd: &Path,
+) -> Option<(Vec<RuntimeModelOption>, Option<String>)> {
+    Some(build_claude_model_catalog())
 }
 
-/// 当前装的 CLI 是否新到可以提供「具体版本」这一组模型选项。
-/// 版本读不到（`None`）时一律放行 —— 未知不该等于功能消失。
-pub fn cli_offers_concrete_models(version_line: Option<&str>) -> bool {
-    match version_line.and_then(parse_claude_cli_version) {
-        Some(installed) => installed >= CONCRETE_MODELS_MIN_CLI_VERSION,
-        None => true,
-    }
+/// 同步版，单测与 `detect_claude_models` 共用。
+fn build_claude_model_catalog() -> (Vec<RuntimeModelOption>, Option<String>) {
+    let overrides = read_claude_model_overrides();
+    let mut models = get_builtin_claude_models();
+    apply_claude_model_overrides(&mut models, &overrides);
+
+    // Kivio Auto 行：不传 `--model`，让 CLI 用自己的默认 / settings。
+    let mut out = vec![RuntimeModelOption {
+        id: "default".to_string(),
+        label: "Default".to_string(),
+        context_window_tokens: None,
+    }];
+    out.extend(models);
+
+    let current_model = claude_configured_current_model(&overrides);
+    (out, current_model)
 }
 
-/// 具体版本的模型选项。窗口一律 `None`（见 `CLAUDE_CONCRETE_MODELS` 的说明）；
-/// CLI 太旧时返回空列表，调用方就只剩别名 + 用户自配模型（= 改动前的行为）。
-fn concrete_model_options(version_line: Option<&str>) -> Vec<RuntimeModelOption> {
-    if !cli_offers_concrete_models(version_line) {
-        return Vec::new();
-    }
-    CLAUDE_CONCRETE_MODELS
+/// 与 cc-gui `get_builtin_claude_models` 同形：catalog id + 展示名。
+/// runtime model 默认 = catalog id；有覆盖时由 `apply_claude_model_overrides` 改 label，
+/// 真正传给 CLI 的值在 `resolve_claude_cli_model` 里再解析一次。
+fn get_builtin_claude_models() -> Vec<RuntimeModelOption> {
+    CLAUDE_BUILTIN_TIERS
         .iter()
         .map(|(id, label)| RuntimeModelOption {
             id: (*id).to_string(),
@@ -383,6 +224,190 @@ fn concrete_model_options(version_line: Option<&str>) -> Vec<RuntimeModelOption>
             context_window_tokens: None,
         })
         .collect()
+}
+
+#[derive(Default, Clone, Debug)]
+struct ClaudeModelOverrides {
+    main: Option<String>,
+    fable: Option<String>,
+    sonnet: Option<String>,
+    opus: Option<String>,
+    haiku: Option<String>,
+}
+
+fn normalize_non_empty(input: Option<String>) -> Option<String> {
+    input.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+/// 读进程 env + `~/.claude/settings.json` 的 `env`（文件覆盖 env，与 cc-gui 一致）。
+fn read_claude_model_overrides() -> ClaudeModelOverrides {
+    let mut overrides = ClaudeModelOverrides {
+        main: normalize_non_empty(std::env::var("ANTHROPIC_MODEL").ok()),
+        fable: normalize_non_empty(std::env::var("ANTHROPIC_DEFAULT_FABLE_MODEL").ok()),
+        sonnet: normalize_non_empty(std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL").ok()),
+        opus: normalize_non_empty(std::env::var("ANTHROPIC_DEFAULT_OPUS_MODEL").ok()),
+        haiku: normalize_non_empty(std::env::var("ANTHROPIC_DEFAULT_HAIKU_MODEL").ok()),
+    };
+
+    if let Some(file_overrides) = read_claude_model_overrides_from_settings() {
+        if file_overrides.main.is_some() {
+            overrides.main = file_overrides.main;
+        }
+        if file_overrides.fable.is_some() {
+            overrides.fable = file_overrides.fable;
+        }
+        if file_overrides.sonnet.is_some() {
+            overrides.sonnet = file_overrides.sonnet;
+        }
+        if file_overrides.opus.is_some() {
+            overrides.opus = file_overrides.opus;
+        }
+        if file_overrides.haiku.is_some() {
+            overrides.haiku = file_overrides.haiku;
+        }
+    }
+
+    overrides
+}
+
+fn read_claude_model_overrides_from_settings() -> Option<ClaudeModelOverrides> {
+    let path = claude_config_dir()?.join("settings.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let root = serde_json::from_str::<Value>(&content).ok()?;
+    let env = root.get("env")?;
+    Some(ClaudeModelOverrides {
+        main: normalize_non_empty(
+            env.get("ANTHROPIC_MODEL")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        ),
+        fable: normalize_non_empty(
+            env.get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        ),
+        sonnet: normalize_non_empty(
+            env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        ),
+        opus: normalize_non_empty(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        ),
+        haiku: normalize_non_empty(
+            env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        ),
+    })
+}
+
+/// Infer Claude model family for ANTHROPIC_DEFAULT_* slot resolution (cc-gui).
+fn claude_model_family_key(model_id: &str) -> Option<&'static str> {
+    let normalized = model_id.to_ascii_lowercase();
+    if normalized.contains("fable") {
+        return Some("fable");
+    }
+    if normalized.contains("haiku") {
+        return Some("haiku");
+    }
+    if normalized.contains("sonnet") {
+        return Some("sonnet");
+    }
+    if normalized.contains("opus") {
+        return Some("opus");
+    }
+    None
+}
+
+fn resolve_override_for_family<'a>(
+    family: &str,
+    overrides: &'a ClaudeModelOverrides,
+) -> Option<&'a str> {
+    let tier = match family {
+        "fable" => overrides.fable.as_deref(),
+        "haiku" => overrides.haiku.as_deref(),
+        "sonnet" => overrides.sonnet.as_deref(),
+        "opus" => overrides.opus.as_deref(),
+        _ => None,
+    };
+    tier.or(overrides.main.as_deref())
+}
+
+/// 把 settings/env 映射写到展示名上（cc-gui：改 `model` + `name`，tier id 不变）。
+/// Kivio 的 `RuntimeModelOption` 只有 id/label：id 保持 catalog，label 改成映射后的 runtime id。
+fn apply_claude_model_overrides(models: &mut [RuntimeModelOption], overrides: &ClaudeModelOverrides) {
+    let has_any = overrides.main.is_some()
+        || overrides.fable.is_some()
+        || overrides.sonnet.is_some()
+        || overrides.opus.is_some()
+        || overrides.haiku.is_some();
+    if !has_any {
+        return;
+    }
+
+    for model in models.iter_mut() {
+        let Some(family) = claude_model_family_key(&model.id) else {
+            continue;
+        };
+        let Some(mapped) = resolve_override_for_family(family, overrides) else {
+            continue;
+        };
+        // 展示映射后的 runtime id（与 cc-gui 把 name 改成 mapped 一致）。
+        model.label = mapped.to_string();
+    }
+}
+
+/// 选单里存的是 catalog id（如 `claude-sonnet-5`）；真正传给 `--model` 的是
+/// 映射后的 runtime id。无映射时原样返回。
+///
+/// 对齐 cc-gui：picker 身份与 CLI 透传值分离，四档映射到同一 runtime 也不会折叠。
+pub fn resolve_claude_cli_model(selected: &str) -> String {
+    let selected = selected.trim();
+    if selected.is_empty() || selected == "default" {
+        return selected.to_string();
+    }
+    // 只对 builtin catalog id 做家族映射；用户手填 / 旧会话里的自定义 id 原样透传。
+    let is_catalog = CLAUDE_BUILTIN_TIERS.iter().any(|(id, _)| *id == selected);
+    if !is_catalog {
+        return selected.to_string();
+    }
+    let overrides = read_claude_model_overrides();
+    if let Some(family) = claude_model_family_key(selected) {
+        if let Some(mapped) = resolve_override_for_family(family, &overrides) {
+            return mapped.to_string();
+        }
+    }
+    selected.to_string()
+}
+
+/// 胶囊「当前模型」：settings.json 顶层 `model`，否则 `ANTHROPIC_MODEL` / main 覆盖。
+/// 不 spawn CLI（cc-gui 同样不起进程）。
+fn claude_configured_current_model(overrides: &ClaudeModelOverrides) -> Option<String> {
+    if let Some(path) = claude_config_dir().map(|d| d.join("settings.json")) {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(root) = serde_json::from_str::<Value>(&content) {
+                if let Some(model) = root
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Some(model.to_string());
+                }
+            }
+        }
+    }
+    overrides.main.clone()
 }
 
 /// Config dir Claude Code reads: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
@@ -394,41 +419,6 @@ fn claude_config_dir() -> Option<PathBuf> {
         }
     }
     directories::BaseDirs::new().map(|base| base.home_dir().join(".claude"))
-}
-
-/// Extra model ids the user configured for Claude Code via settings.json `env.*` and process
-/// env vars (e.g. a gateway/bedrock model). Returns deduped, non-empty ids in discovery order.
-fn claude_config_models() -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let push = |raw: &str, out: &mut Vec<String>, seen: &mut HashSet<String>| {
-        let model = raw.trim();
-        if !model.is_empty() && seen.insert(model.to_string()) {
-            out.push(model.to_string());
-        }
-    };
-
-    if let Some(text) =
-        claude_config_dir().and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
-    {
-        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-            if let Some(env) = value.get("env").and_then(|v| v.as_object()) {
-                for key in CLAUDE_ENV_MODEL_KEYS {
-                    if let Some(model) = env.get(*key).and_then(|v| v.as_str()) {
-                        push(model, &mut out, &mut seen);
-                    }
-                }
-            }
-        }
-    }
-
-    for key in CLAUDE_ENV_MODEL_KEYS {
-        if let Ok(model) = std::env::var(key) {
-            push(&model, &mut out, &mut seen);
-        }
-    }
-
-    out
 }
 
 /// 用户在 Claude Code 里配的推理档位（`settings.json` 的 `effortLevel` / `ultracode`，
@@ -570,34 +560,189 @@ mod tests {
     }
 
     #[test]
-    fn catalog_options_have_labels_and_windows() {
-        let opus = catalog_model_option("opus");
-        assert_eq!(opus.id, "opus");
-        assert_eq!(opus.label, "Opus");
-        // 裸别名的窗口未知（见 context_window_from_claude_model_alias 的实测说明）：
-        // 编一个 200K 会让 `usage_ratio` 虚高 5 倍。
-        assert_eq!(opus.context_window_tokens, None);
+    fn builtin_catalog_matches_cc_gui() {
+        // 与 desktop-cc-gui `get_builtin_claude_models` 字面一致。
+        assert_eq!(CLAUDE_BUILTIN_TIERS.len(), 4);
+        assert_eq!(
+            CLAUDE_BUILTIN_TIERS,
+            &[
+                ("claude-fable-5", "Fable 5"),
+                ("claude-opus-5", "Opus 5"),
+                ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+            ]
+        );
+        assert_eq!(CLAUDE_DEFAULT_TIER_ID, "claude-opus-5");
+        // 不提供裸别名 / 冷门 / 历史版本堆。
+        for noise in [
+            "sonnet",
+            "opus",
+            "haiku",
+            "fable",
+            "best",
+            "opusplan",
+            "sonnet[1m]",
+            "claude-opus-4-8",
+            "claude-mythos-5",
+        ] {
+            assert!(
+                !CLAUDE_BUILTIN_TIERS.iter().any(|(id, _)| *id == noise),
+                "{noise} 不应出现在 builtin catalog"
+            );
+        }
+    }
 
-        let sonnet_1m = catalog_model_option("sonnet[1m]");
-        assert_eq!(sonnet_1m.id, "sonnet[1m]");
-        assert_eq!(sonnet_1m.label, "Sonnet (1M context)");
-        assert_eq!(sonnet_1m.context_window_tokens, Some(1_000_000));
+    /// 把 CLAUDE_CONFIG_DIR 指到空目录，避免读到本机真实 `~/.claude/settings.json`。
+    fn isolate_claude_config() -> (PathBuf, Option<String>) {
+        let dir = std::env::temp_dir().join(format!(
+            "kivio-claude-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        for key in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            std::env::remove_var(key);
+        }
+        (dir, prev)
+    }
+
+    fn restore_claude_config(dir: PathBuf, prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn full_catalog_covers_every_alias_without_spawn() {
-        // Every alias must yield a catalog entry — discovery no longer probes per alias.
-        // 窗口**不强制有值**：裸别名的窗口只有 CLI 自己知道（首轮 result 的 modelUsage 才报）。
-        for &alias in CLAUDE_MODEL_ALIASES {
-            let option = catalog_model_option(alias);
-            assert_eq!(option.id, alias);
-            assert!(!option.label.is_empty());
-            if alias.to_ascii_lowercase().contains("[1m]") {
-                assert_eq!(option.context_window_tokens, Some(1_000_000), "{alias}");
-            } else {
-                assert_eq!(option.context_window_tokens, None, "{alias}");
-            }
+    fn catalog_is_default_plus_four_tiers_without_spawn() {
+        let _guard = env_lock();
+        let (dir, prev) = isolate_claude_config();
+        let (models, _) = build_claude_model_catalog();
+        assert_eq!(models.len(), 5, "default + 4 tiers: {:?}", models);
+        assert_eq!(models[0].id, "default");
+        for (i, (id, label)) in CLAUDE_BUILTIN_TIERS.iter().enumerate() {
+            assert_eq!(models[i + 1].id, *id);
+            assert_eq!(models[i + 1].label, *label);
         }
+        // 裸别名不得出现。
+        assert!(!models.iter().any(|m| m.id == "sonnet" || m.id == "opus"));
+        restore_claude_config(dir, prev);
+    }
+
+    #[test]
+    fn settings_overrides_rewrite_labels_keep_catalog_ids() {
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "kivio-claude-override-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{
+              "env": {
+                "ANTHROPIC_MODEL": "MiniMax-M1[1m]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "kimi-k3",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.1",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M4[1m]",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"
+              }
+            }"#,
+        )
+        .unwrap();
+        let prev = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        for key in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let (models, _) = build_claude_model_catalog();
+        // tier id 稳定；label 变成映射后的 runtime id（cc-gui 同款）。
+        let fable = models.iter().find(|m| m.id == "claude-fable-5").unwrap();
+        assert_eq!(fable.label, "kimi-k3");
+        let opus = models.iter().find(|m| m.id == "claude-opus-5").unwrap();
+        assert_eq!(opus.label, "MiniMax-M4[1m]");
+        let sonnet = models.iter().find(|m| m.id == "claude-sonnet-5").unwrap();
+        assert_eq!(sonnet.label, "GLM-5.1");
+        let haiku = models
+            .iter()
+            .find(|m| m.id == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert_eq!(haiku.label, "deepseek-v4-flash");
+        // 四档都在，不会因映射折叠。
+        assert_eq!(
+            models.iter().filter(|m| m.id.starts_with("claude-")).count(),
+            4
+        );
+
+        // 传给 CLI 的是 runtime，不是 catalog id。
+        assert_eq!(resolve_claude_cli_model("claude-fable-5"), "kimi-k3");
+        assert_eq!(resolve_claude_cli_model("claude-sonnet-5"), "GLM-5.1");
+        assert_eq!(resolve_claude_cli_model("claude-opus-5"), "MiniMax-M4[1m]");
+        // 非 catalog id 原样透传。
+        assert_eq!(resolve_claude_cli_model("already-custom"), "already-custom");
+        assert_eq!(resolve_claude_cli_model("default"), "default");
+
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_tiers_map_to_same_runtime_without_collapse() {
+        let _guard = env_lock();
+        let (dir, prev) = isolate_claude_config();
+        std::env::set_var("ANTHROPIC_DEFAULT_FABLE_MODEL", "kimi-k3");
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", "kimi-k3");
+        std::env::set_var("ANTHROPIC_DEFAULT_OPUS_MODEL", "kimi-k3");
+        std::env::set_var("ANTHROPIC_DEFAULT_HAIKU_MODEL", "kimi-k3");
+
+        let (models, _) = build_claude_model_catalog();
+        let tiers: Vec<_> = models
+            .iter()
+            .filter(|m| m.id.starts_with("claude-"))
+            .collect();
+        assert_eq!(tiers.len(), 4);
+        assert!(tiers.iter().all(|m| m.label == "kimi-k3"));
+        // id 互不相同 —— 选中哪一档仍然可区分。
+        let mut ids = std::collections::HashSet::new();
+        for m in &tiers {
+            assert!(ids.insert(m.id.as_str()), "duplicate catalog id {}", m.id);
+        }
+
+        for key in [
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            std::env::remove_var(key);
+        }
+        restore_claude_config(dir, prev);
     }
 
     #[test]
@@ -629,78 +774,6 @@ mod tests {
         use crate::external_agents::context::parse_context_window_label;
         assert_eq!(parse_context_window_label("1m"), Some(1_000_000));
         assert_eq!(parse_context_window_label("200K"), Some(200_000));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires local claude CLI on PATH"]
-    async fn live_detect_claude_models_from_cli() {
-        use crate::external_agents::detection::detect_single_agent;
-        use crate::external_agents::registry::get_agent_def;
-
-        let def = get_agent_def("claude").expect("claude agent def");
-        let detected = detect_single_agent(def, &std::env::temp_dir()).await;
-        assert!(detected.available, "claude CLI should be available on PATH");
-        for model in &detected.models {
-            println!(
-                "  {} -> {} ({} tokens)",
-                model.id,
-                model.label,
-                model
-                    .context_window_tokens
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "?".to_string())
-            );
-        }
-        assert!(
-            detected.models.len() >= 4,
-            "expected multiple probed models, got {:?}",
-            detected.models
-        );
-
-        let default = detected
-            .models
-            .iter()
-            .find(|model| model.id == "default")
-            .expect("default model option");
-        assert_eq!(
-            default.context_window_tokens,
-            Some(1_000_000),
-            "default should resolve to 1M context"
-        );
-
-        let sonnet = detected
-            .models
-            .iter()
-            .find(|model| model.id == "sonnet")
-            .expect("sonnet model option");
-        assert_eq!(
-            sonnet.context_window_tokens, None,
-            "裸别名的窗口只有 CLI 自己知道（本机 `--model sonnet` 解析为 claude-sonnet-5[1M]），\
-             静态编一个 200K 会让分母小 5 倍"
-        );
-
-        let sonnet_1m = detected
-            .models
-            .iter()
-            .find(|model| model.id == "sonnet[1m]")
-            .expect("sonnet[1m] model option");
-        assert_eq!(
-            sonnet_1m.context_window_tokens,
-            Some(1_000_000),
-            "sonnet[1m] should be 1M"
-        );
-
-        // 具体版本必须真的出现在列表里（本机 CLI 版本足够新），且不带静态窗口。
-        let concrete = detected
-            .models
-            .iter()
-            .find(|model| model.id == "claude-opus-4-8")
-            .expect("具体版本 claude-opus-4-8 应可选（本机 CLI 版本 >= 2.1.220）");
-        assert_eq!(concrete.context_window_tokens, None);
-        assert!(detected
-            .models
-            .iter()
-            .any(|model| model.id == "claude-sonnet-4-5"));
     }
 
     /// `effortLevel` 必须能被读出来并落在 `defs/claude.rs` 的 REASONING id 集合内，
@@ -817,102 +890,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- 具体版本模型 + 版本门控 ----
-
-    /// 版本行解析：只认行首的 `x.y.z`。认得越宽越容易把日志里的数字当版本 ⇒ 误判成旧版
-    /// ⇒ 悄悄少给选项，而这种错没有任何可观测信号。
-    #[test]
-    fn parses_the_cli_version_line() {
-        // 本机实测输出。
-        assert_eq!(
-            parse_claude_cli_version("2.1.220 (Claude Code)"),
-            Some((2, 1, 220))
-        );
-        assert_eq!(parse_claude_cli_version("  3.0.0  "), Some((3, 0, 0)));
-        // patch 带后缀时只取前导数字。
-        assert_eq!(parse_claude_cli_version("2.2.10-rc1"), Some((2, 2, 10)));
-        // 两段版本号补 0。
-        assert_eq!(parse_claude_cli_version("2.1"), Some((2, 1, 0)));
-        // 认不出的一律 None（⇒ 不做门控）。
-        assert_eq!(parse_claude_cli_version(""), None);
-        assert_eq!(parse_claude_cli_version("Claude Code 2.1.220"), None);
-        assert_eq!(parse_claude_cli_version("v2.1.220"), None);
-    }
-
-    #[test]
-    fn concrete_models_are_gated_on_the_installed_cli_version() {
-        // 本机版本：给出全部具体版本条目。
-        let current = concrete_model_options(Some("2.1.220 (Claude Code)"));
-        assert_eq!(current.len(), CLAUDE_CONCRETE_MODELS.len());
-        assert!(current.iter().any(|m| m.id == "claude-opus-4-8"));
-        assert!(current.iter().any(|m| m.id == "claude-sonnet-5"));
-        // 具体版本一律不带窗口（窗口只认 CLI 每轮实报，spec 第 14g 条）。
-        for m in &current {
-            assert_eq!(m.context_window_tokens, None, "{} 不该带静态窗口", m.id);
-            assert!(!m.label.is_empty());
-        }
-
-        // 更新的版本照样给。
-        assert!(!concrete_model_options(Some("2.2.0 (Claude Code)")).is_empty());
-        assert!(!concrete_model_options(Some("3.0.0")).is_empty());
-
-        // 更旧的版本：整组不提供（回到改动前的行为，只剩别名 + 用户自配）。
-        assert!(concrete_model_options(Some("2.1.219 (Claude Code)")).is_empty());
-        assert!(concrete_model_options(Some("2.0.9")).is_empty());
-        assert!(concrete_model_options(Some("1.9.999")).is_empty());
-
-        // 版本读不到 ⇒ 不做门控。未知不该等于功能消失。
-        assert!(!concrete_model_options(None).is_empty());
-        assert!(!concrete_model_options(Some("weird output")).is_empty());
-    }
-
-    /// 已退役 / 被静默重映射的模型不得出现在选单里（见 `CLAUDE_CONCRETE_MODELS` 上方的对账表）。
-    ///
-    /// 前三个选了会得到一句 `⚠ … was retired on …` 加一个空回复；后三个更坏 ——
-    /// 不报错，直接把请求换成 Opus 4.8 跑，用户以为自己在用 4.1 其实不是。
-    /// 二进制目录里确实有这些 id，所以「照抄目录」这个动作本身会把它们带回来 —— 这条挡住。
-    #[test]
-    fn retired_and_silently_remapped_models_are_not_offered() {
-        const DEAD: &[&str] = &[
-            "claude-3-5-sonnet", // retired 2025-10-28
-            "claude-3-7-sonnet", // retired 2026-02-19
-            "claude-3-5-haiku",  // retired 2026-02-19
-            "claude-sonnet-4-0", // retired 2026-06-15（实测 CLI 原话）
-            "claude-opus-4-1",   // 静默重映射到 Opus 4.8；2026-08-05 退役
-            "claude-opus-4-0",   // 静默重映射到 Opus 4.8
-        ];
-        for dead in DEAD {
-            assert!(
-                !CLAUDE_CONCRETE_MODELS.iter().any(|(id, _)| id == dead),
-                "{dead} 已退役/会被静默换成别的模型，不能出现在选单里"
-            );
-        }
-        // 白名单本身不能被清空 —— 上面那条断言在空表上恒真。
-        assert!(CLAUDE_CONCRETE_MODELS.len() >= 8);
-        assert!(CLAUDE_CONCRETE_MODELS
-            .iter()
-            .any(|(id, _)| *id == "claude-opus-4-8"));
-    }
-
-    /// 具体版本表本身的卫生：id 唯一、不与别名冲突、形态是 `claude-…`（会被原样当
-    /// `--model` 传出去，一个手误在真机上只会表现为「跑到一半才报模型不存在」）。
-    #[test]
-    fn concrete_model_table_is_well_formed() {
-        let mut seen = std::collections::HashSet::new();
-        for (id, label) in CLAUDE_CONCRETE_MODELS {
-            assert!(seen.insert(*id), "重复的模型 id：{id}");
-            assert!(id.starts_with("claude-"), "{id} 不像具体模型 id");
-            assert!(!id.contains(' '), "{id} 含空格");
-            assert!(!label.is_empty(), "{id} 缺 label");
-            assert!(
-                !CLAUDE_MODEL_ALIASES.contains(id),
-                "{id} 与别名重复，会在下拉里出现两次"
-            );
-        }
-        // 别名表补齐了 CLI 白名单里的 best / opusplan。
-        assert!(CLAUDE_MODEL_ALIASES.contains(&"best"));
-        assert!(CLAUDE_MODEL_ALIASES.contains(&"opusplan"));
-    }
 }
 
 #[cfg(test)]

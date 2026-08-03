@@ -3,7 +3,15 @@ use super::super::types::{
     StreamFormat,
 };
 
-const FALLBACK_MODELS: &[(&str, &str)] = &[("default", "Default")];
+/// Probe 失败时的静态兜底：与 desktop-cc-gui builtin catalog 同 id/label，
+/// 另加 Kivio 的 `default`（Auto / 不传 `--model`）。
+const FALLBACK_MODELS: &[(&str, &str)] = &[
+    ("default", "Default"),
+    ("claude-fable-5", "Fable 5"),
+    ("claude-opus-5", "Opus 5"),
+    ("claude-sonnet-5", "Sonnet 5"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+];
 
 /// Claude Code 的思考档位。大部分走 `--effort <level>`，两个例外见 `claude_thinking_args`。
 ///
@@ -109,8 +117,12 @@ pub fn build_claude_args(
         .as_ref()
         .filter(|m| *m != "default" && !m.is_empty())
     {
-        args.push("--model".to_string());
-        args.push(model.clone());
+        // catalog id（claude-sonnet-5）→ settings/env 映射后的 runtime id（cc-gui 同款）。
+        let runtime = crate::external_agents::session::claude_init::resolve_claude_cli_model(model);
+        if !runtime.is_empty() && runtime != "default" {
+            args.push("--model".to_string());
+            args.push(runtime);
+        }
     }
     // 档位 → flag 的映射交给 `claude_thinking_args`：并非每一档都是 `--effort`
     // （「关闭思考」走 `--thinking disabled`）。
