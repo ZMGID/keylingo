@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { Search, SquarePen, Trash2 } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import { useCloseAnimation } from './useCloseAnimation'
 
@@ -24,6 +25,7 @@ export function ChatSectionMenu({
   onClose: onCloseProp,
   triggerRef,
 }: ChatSectionMenuProps) {
+  const t = useT()
   const menuRef = useRef<HTMLDivElement>(null)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
   const onClose = startClose
@@ -65,7 +67,7 @@ export function ChatSectionMenu({
         }}
       >
         <SquarePen strokeWidth={1.75} />
-        新建聊天
+        {t.chatNewChat}
       </button>
       <button
         type="button"
@@ -77,7 +79,7 @@ export function ChatSectionMenu({
         }}
       >
         <Search strokeWidth={1.75} />
-        搜索对话
+        {t.chatSearchConversations}
       </button>
 
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
@@ -93,7 +95,7 @@ export function ChatSectionMenu({
         }}
       >
         <Trash2 strokeWidth={1.75} />
-        清空全部对话
+        {t.chatClearAllConversations}
       </button>
     </div>
   )

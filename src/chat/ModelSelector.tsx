@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Star } from 'lucide-react'
 import { type ModelProvider } from '../api/tauri'
 import { getSettingsCached, setFavoriteModelsCached } from '../api/settingsCache'
+import { useT } from '../settings/i18n'
 import { isProviderEnabled } from '../settings/utils'
 import { ModelIcon } from './ModelIcon'
 import { usePopoverMaxHeight } from './usePopoverMaxHeight'
@@ -26,6 +27,7 @@ function ModelSelectorBase({
   currentModel,
   onModelChange,
 }: ModelSelectorProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [favorites, setFavorites] = useState<string[]>([])
@@ -68,7 +70,7 @@ function ModelSelectorBase({
     .filter((entry) => entry.models.length > 0)
   const currentProvider = activeProviders.find((p) => p.id === currentProviderId)
     ?? providers.find((p) => p.id === currentProviderId)
-  const displayName = currentModel || currentProvider?.enabledModels[0] || '选择模型'
+  const displayName = currentModel || currentProvider?.enabledModels[0] || t.chatSelectModel
 
   // 收藏置顶组：按存储顺序，过滤掉失效的（provider 已删/禁用/模型已不在列表）。
   const favoriteEntries = useMemo(() => {
@@ -128,8 +130,8 @@ function ModelSelectorBase({
         </button>
         <button
           type="button"
-          aria-label={isFav ? '取消收藏' : '收藏置顶'}
-          title={isFav ? '取消收藏' : '收藏置顶'}
+          aria-label={isFav ? t.chatUnfavorite : t.chatFavorite}
+          title={isFav ? t.chatUnfavorite : t.chatFavorite}
           onClick={(e) => {
             e.stopPropagation()
             toggleFavorite(providerId, model)
@@ -172,7 +174,7 @@ function ModelSelectorBase({
               <div className="px-1 py-1">
                 <div className="flex items-center gap-1 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-500">
                   <Star size={11} fill="currentColor" />
-                  收藏
+                  {t.chatFavorites}
                 </div>
                 {favoriteEntries.map((entry) =>
                   renderModelRow(entry.providerId, entry.model, 'fav'),
@@ -188,7 +190,7 @@ function ModelSelectorBase({
               </div>
             ))}
             {visibleProviders.length === 0 && (
-              <div className="px-4 py-6 text-center text-sm text-neutral-500">暂无可用模型</div>
+              <div className="px-4 py-6 text-center text-sm text-neutral-500">{t.chatNoModels}</div>
             )}
           </div>
         </>

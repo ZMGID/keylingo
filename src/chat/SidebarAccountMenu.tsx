@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Globe, RefreshCw, Settings as SettingsIcon } from 'lucide-react'
 import { useCloseAnimation } from './useCloseAnimation'
-import type { Lang } from '../settings/i18n'
+import { i18n, type Lang } from '../settings/i18n'
 import { isMac } from './platform'
 
 interface SidebarAccountMenuProps {
@@ -23,6 +23,7 @@ export function SidebarAccountMenu({
   onCheckUpdate,
   onClose: onCloseProp,
 }: SidebarAccountMenuProps) {
+  const t = i18n[lang]
   const menuRef = useRef<HTMLDivElement>(null)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
   const onClose = startClose
@@ -69,7 +70,7 @@ export function SidebarAccountMenu({
         }}
       >
         <SettingsIcon strokeWidth={1.75} />
-        设置
+        {t.settings}
         <span className="kv-menu-hint">{isMac ? '⌘,' : 'Ctrl+,'}</span>
       </button>
 
@@ -83,7 +84,7 @@ export function SidebarAccountMenu({
         }}
       >
         <RefreshCw strokeWidth={1.75} />
-        检查更新
+        {t.checkUpdate}
       </button>
 
       <div className="kv-menu-sep" />
@@ -91,7 +92,7 @@ export function SidebarAccountMenu({
       {/* 语言：二选一不值一个子菜单、更不值两行。压进单行，右侧紧凑分段控件。 */}
       <div className="kv-menu-item" style={{ cursor: 'default' }}>
         <Globe strokeWidth={1.75} />
-        语言
+        {t.language}
         <div className="ml-auto flex shrink-0 items-center gap-px rounded-[5px] bg-black/[0.05] p-px dark:bg-white/[0.07]">
           {(
             [

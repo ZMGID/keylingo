@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
 import { api } from '../api/tauri'
+import { useT } from '../settings/i18n'
 import { isMac } from './platform'
 
 type TrafficButton = 'close' | 'minimize' | 'maximize'
@@ -76,6 +77,7 @@ function CaptionIcon({ kind }: { kind: TrafficButton }) {
 }
 
 export function WindowControls() {
+  const t = useT()
   const handleClose = useCallback(() => {
     void api.closeWindow()
   }, [])
@@ -91,17 +93,17 @@ export function WindowControls() {
   if (!isMac) {
     return (
       <div className="chat-win-controls chat-win-controls--win" data-tauri-drag-region="false">
-        <button type="button" className="chat-win-btn" onClick={handleMinimize} aria-label="最小化">
+        <button type="button" className="chat-win-btn" onClick={handleMinimize} aria-label={t.chatWinMinimize}>
           <CaptionIcon kind="minimize" />
         </button>
-        <button type="button" className="chat-win-btn" onClick={handleMaximize} aria-label="最大化">
+        <button type="button" className="chat-win-btn" onClick={handleMaximize} aria-label={t.chatWinMaximize}>
           <CaptionIcon kind="maximize" />
         </button>
         <button
           type="button"
           className="chat-win-btn chat-win-btn--close"
           onClick={handleClose}
-          aria-label="关闭"
+          aria-label={t.chatWinClose}
         >
           <CaptionIcon kind="close" />
         </button>
@@ -124,7 +126,13 @@ export function WindowControls() {
                 ? handleMinimize
                 : handleMaximize
           }
-          aria-label={kind === 'close' ? '关闭' : kind === 'minimize' ? '最小化' : '最大化'}
+          aria-label={
+            kind === 'close'
+              ? t.chatWinClose
+              : kind === 'minimize'
+                ? t.chatWinMinimize
+                : t.chatWinMaximize
+          }
         />
       ))}
     </div>

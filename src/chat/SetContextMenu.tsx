@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Pencil, Trash2 } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import { useCloseAnimation } from './useCloseAnimation'
 import { useClampedMenuPosition } from './useClampedMenuPosition'
@@ -13,6 +14,7 @@ interface SetContextMenuProps {
 }
 
 export function SetContextMenu({ anchor, onRename, onDelete, onClose: onCloseProp }: SetContextMenuProps) {
+  const t = useT()
   const menuRef = useRef<HTMLDivElement>(null)
   const pos = useClampedMenuPosition(menuRef, anchor)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
@@ -53,7 +55,7 @@ export function SetContextMenu({ anchor, onRename, onDelete, onClose: onClosePro
         }}
       >
         <Pencil strokeWidth={1.75} />
-        重命名 / 设置
+        {t.chatRenameSetSettings}
       </button>
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
       <button
@@ -66,7 +68,7 @@ export function SetContextMenu({ anchor, onRename, onDelete, onClose: onClosePro
         }}
       >
         <Trash2 strokeWidth={1.75} />
-        删除集
+        {t.chatDeleteSet}
       </button>
     </div>,
     document.body,

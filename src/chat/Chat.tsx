@@ -81,7 +81,7 @@ import {
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
 import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
-import { i18n, type Lang } from '../settings/i18n'
+import { i18n, LangContext, type Lang } from '../settings/i18n'
 import { estimateTokens } from '../utils/tokens'
 import {
   CHAT_MIN_SIZE_COLLAPSED,
@@ -3967,6 +3967,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   )
 
   return (
+    <LangContext.Provider value={uiLang}>
     <div
       className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
     >
@@ -4446,5 +4447,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         )}
       </div>
     </div>
+    </LangContext.Provider>
   )
 }

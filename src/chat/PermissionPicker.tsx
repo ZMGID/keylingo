@@ -1,5 +1,6 @@
 import { memo, useMemo, useRef, useState } from 'react'
 import { Check } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import { derivePermissionModes } from './permissionModes'
 import { chatTitlebarIconButtonClass } from './platform'
 import { usePopoverMaxHeight } from './usePopoverMaxHeight'
@@ -22,6 +23,7 @@ function PermissionPickerBase({
   approvalPolicy,
   onApprovalPolicyChange,
 }: PermissionPickerProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const maxH = usePopoverMaxHeight(open, menuRef, 'down', 320)
@@ -35,7 +37,7 @@ function PermissionPickerBase({
   if (!onApprovalPolicyChange) return null
 
   const activeOption = options.find((option) => option.value === current)
-  const currentLabel = activeOption?.label ?? '权限'
+  const currentLabel = activeOption?.label ?? t.chatPermission
   const CurrentIcon = activeOption?.icon ?? options[0].icon
 
   const pick = (value: string) => {
@@ -53,8 +55,8 @@ function PermissionPickerBase({
             ? 'bg-black/[0.06] text-neutral-800 dark:bg-white/[0.09] dark:text-neutral-100'
             : 'hover:text-neutral-800 dark:hover:text-neutral-100'
         }`}
-        title={`工具审批策略：${currentLabel}`}
-        aria-label={`工具审批策略：${currentLabel}`}
+        title={t.chatApprovalPolicy.replace('{name}', currentLabel)}
+        aria-label={t.chatApprovalPolicy.replace('{name}', currentLabel)}
       >
         <CurrentIcon size={16} strokeWidth={1.8} />
       </button>

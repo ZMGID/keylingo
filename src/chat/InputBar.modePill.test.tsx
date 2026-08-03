@@ -48,9 +48,9 @@ function renderComposer(modes: { options: ReturnType<typeof derivePermissionMode
 
 function openModeMenu(pillLabel: string) {
   act(() => {
-    fireEvent.click(screen.getByTitle('切换模式 · Switch mode'))
+    fireEvent.click(screen.getByTitle('切换模式'))
   })
-  expect(screen.getByTitle('切换模式 · Switch mode')).toHaveTextContent(pillLabel)
+  expect(screen.getByTitle('切换模式')).toHaveTextContent(pillLabel)
 }
 
 describe('InputBar 底栏模式胶囊', () => {
@@ -105,6 +105,6 @@ describe('InputBar 底栏模式胶囊', () => {
       agentRuntime: runtime,
       agents: [{ id: 'opencode', name: 'OpenCode', available: true, models: [], sandboxOptions: [] }],
     }))
-    expect(screen.queryByTitle('切换模式 · Switch mode')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('切换模式')).not.toBeInTheDocument()
   })
 })

@@ -36,7 +36,7 @@ import { chatTitlebarMacInsetClass, isMac, usesNativeTitlebar } from './platform
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
-import type { Lang } from '../settings/i18n'
+import { i18n, useT, type I18n, type Lang } from '../settings/i18n'
 import { conversationMarkdownFilename } from './conversationExport'
 
 function resolveChatUserProfile(
@@ -54,15 +54,15 @@ export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | '
 
 const extensionSubItems: Array<{
   id: ExtensionsNavItem
-  label: string
+  label: (t: I18n) => string
   icon: (props: { size?: number; className?: string }) => React.JSX.Element
 }> = [
-  { id: 'assistants', label: '助手', icon: AgentIcon },
-  { id: 'skill', label: 'Skill', icon: SkillIcon },
-  { id: 'mcp', label: 'MCP', icon: McpIcon },
-  { id: 'knowledge', label: '知识库', icon: KnowledgeIcon },
-  { id: 'notes', label: '笔记', icon: (props) => <NotebookPen size={props.size} className={props.className} strokeWidth={1.75} /> },
-  { id: 'plugins', label: '插件', icon: (props) => <Puzzle size={props.size} className={props.className} strokeWidth={1.75} /> },
+  { id: 'assistants', label: (t) => t.chatNavAssistants, icon: AgentIcon },
+  { id: 'skill', label: () => 'Skill', icon: SkillIcon },
+  { id: 'mcp', label: () => 'MCP', icon: McpIcon },
+  { id: 'knowledge', label: (t) => t.chatNavKnowledge, icon: KnowledgeIcon },
+  { id: 'notes', label: (t) => t.chatNavNotes, icon: (props) => <NotebookPen size={props.size} className={props.className} strokeWidth={1.75} /> },
+  { id: 'plugins', label: (t) => t.chatNavPlugins, icon: (props) => <Puzzle size={props.size} className={props.className} strokeWidth={1.75} /> },
 ]
 
 const PROJECT_PREVIEW_LIMIT = 5
@@ -251,6 +251,7 @@ function ExtensionsNav({
   activeItem?: ExtensionsNavItem | null
   onSelectItem: (item: ExtensionsNavItem) => void
 }) {
+  const t = useT()
   const [expanded, setExpanded] = useState(() => Boolean(activeItem))
 
   useEffect(() => {
@@ -274,7 +275,7 @@ function ExtensionsNav({
         <span className="flex h-5 w-5 shrink-0 items-center justify-center text-neutral-600 transition duration-300 ease-out will-change-transform group-hover:text-neutral-800 group-active:scale-90 group-hover:rotate-3 group-hover:scale-110 dark:text-neutral-400 dark:group-hover:text-neutral-200">
           <LayoutGrid size={17} strokeWidth={1.75} />
         </span>
-        <span className="min-w-0 flex-1 truncate">扩展</span>
+        <span className="min-w-0 flex-1 truncate">{t.chatNavExtensions}</span>
         <ChevronRight
           size={14}
           strokeWidth={2}
@@ -304,7 +305,7 @@ function ExtensionsNav({
                 }`}>
                   <Icon size={15} />
                 </span>
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                <span className="min-w-0 flex-1 truncate">{item.label(t)}</span>
               </button>
             )
           })}
@@ -333,6 +334,7 @@ function SearchDialog({
   onSelectConversation: (conversation: ConversationListItem) => void
   onClose: () => void
 }) {
+  const t = useT()
   const dialogRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -363,7 +365,7 @@ function SearchDialog({
         className="chat-motion-popover flex max-h-[62vh] w-full max-w-[560px] flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl shadow-black/25 dark:border-neutral-700 dark:bg-[#242426]"
         role="dialog"
         aria-modal="true"
-        aria-label="搜索对话"
+        aria-label={t.chatSearchConversations}
       >
         <div className="flex items-center gap-2 border-b border-neutral-200/80 px-3 py-2 dark:border-neutral-700/80">
           <Search size={15} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
@@ -383,13 +385,13 @@ function SearchDialog({
                 onSelectConversation(results[0])
               }
             }}
-            placeholder="搜索对话"
+            placeholder={t.chatSearchConversations}
             className="min-w-0 flex-1 bg-transparent text-[14px] font-medium text-neutral-900 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
           />
         </div>
 
         <div className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
-          {normalizedQuery ? '搜索结果' : '近期对话'}
+          {normalizedQuery ? t.chatSearchResults : t.chatRecentConversations}
         </div>
 
         <div className="custom-scrollbar min-h-0 overflow-y-auto px-1.5 pb-1.5">
@@ -425,7 +427,7 @@ function SearchDialog({
                   </span>
                   {setLabel && (
                     <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
-                      集 · {setLabel}
+                      {t.chatSetPrefix} · {setLabel}
                     </span>
                   )}
                   {!setLabel && projectLabel && (
@@ -438,7 +440,7 @@ function SearchDialog({
             })
           ) : (
             <div className="px-3 py-6 text-center text-[13px] text-neutral-400 dark:text-neutral-500">
-              没有匹配的对话
+              {t.chatNoMatchingConversations}
             </div>
           )}
         </div>
@@ -474,6 +476,7 @@ export const Sidebar = memo(function Sidebar({
   searchOpen,
   onSearchOpenChange,
 }: SidebarProps) {
+  const t = i18n[lang]
   const asideRef = useRef<HTMLElement>(null)
   // 折叠后侧栏仍挂载（用于滑出动画），用 inert 让其退出 tab 序 / 不可点击 / 不进 a11y 树。
   // useLayoutEffect：在绘制前与 JSX 里的 aria-hidden 原子地一起生效，避免短暂可聚焦窗口。
@@ -601,7 +604,7 @@ export const Sidebar = memo(function Sidebar({
   }
 
   const handleDeleteConversation = async (id: string) => {
-    if (!window.confirm('确定删除此对话？此操作无法撤销。')) return
+    if (!window.confirm(t.chatDeleteConversationConfirm)) return
     // B3：删"generating"会话先强制清父组件 in-flight/乐观状态，
     // 让乐观合并（visibleConversations）不再保留它。
     if (generatingConversationIds.has(id)) {
@@ -617,16 +620,12 @@ export const Sidebar = memo(function Sidebar({
       // 对话本身已删掉，只是副产物没清干净（典型：工作区里还有进程占着目录）。
       // 以前这类情况整个删除会中止、对话又冒回来，现在只提示一句。
       if (warnings.length > 0) {
-        window.alert(
-          (lang === 'zh'
-            ? '对话已删除，但以下内容未能清理：\n\n'
-            : 'Conversation deleted, but this could not be cleaned up:\n\n') + warnings.join('\n'),
-        )
+        window.alert(t.chatDeleteConversationPartial + warnings.join('\n'))
       }
     } catch (err) {
       console.error('Failed to delete conversation:', err)
       const message = err instanceof Error ? err.message : String(err)
-      window.alert((lang === 'zh' ? '删除对话失败：' : 'Failed to delete conversation: ') + message)
+      window.alert(t.chatDeleteConversationFailed + message)
     } finally {
       // 无论后端删除成功或抛错，都本地剔除该 id 并刷新侧栏，确保 ghost 立即消失。
       setConversations((items) => items.filter((item) => item.id !== id))
@@ -647,7 +646,7 @@ export const Sidebar = memo(function Sidebar({
       if (!path) return
       await chatApi.exportConversationMarkdown(id, path, lang)
     } catch (err) {
-      const prefix = lang === 'zh' ? '导出失败：' : 'Export failed: '
+      const prefix = t.chatExportFailed
       const message = err instanceof Error ? err.message : String(err)
       window.alert(`${prefix}${message}`)
     }
@@ -710,14 +709,14 @@ export const Sidebar = memo(function Sidebar({
       await loadSidebarData({ silent: true, setOverride: set })
       setDialogSet(undefined)
     } catch (err) {
-      setSetDialogError(typeof err === 'string' ? err : (err as Error).message || '集保存失败')
+      setSetDialogError(typeof err === 'string' ? err : (err as Error).message || t.chatSetSaveFailed)
     } finally {
       setSetDialogSaving(false)
     }
   }
 
   const handleDeleteSet = async (set: ChatSet) => {
-    if (!window.confirm(`确定删除集「${set.name}」？集内的对话会移出集，不会被删除。`)) {
+    if (!window.confirm(t.chatDeleteSetConfirm.replace('{name}', set.name))) {
       return
     }
     try {
@@ -769,7 +768,7 @@ export const Sidebar = memo(function Sidebar({
       await loadSidebarData({ silent: true, projectOverride: project })
       setDialogProject(undefined)
     } catch (err) {
-      setProjectError(typeof err === 'string' ? err : (err as Error).message || '项目保存失败')
+      setProjectError(typeof err === 'string' ? err : (err as Error).message || t.chatProjectSaveFailed)
     } finally {
       setProjectSaving(false)
     }
@@ -779,12 +778,12 @@ export const Sidebar = memo(function Sidebar({
     try {
       await chatApi.openProjectFolder(project.id)
     } catch (err) {
-      window.alert(typeof err === 'string' ? err : (err as Error).message || '打开项目文件夹失败')
+      window.alert(typeof err === 'string' ? err : (err as Error).message || t.chatOpenProjectFolderFailed)
     }
   }
 
   const handleDeleteProject = async (project: ChatProject) => {
-    if (!window.confirm(`确定删除项目「${project.name}」？项目内的聊天会移出项目，不会被删除。`)) {
+    if (!window.confirm(t.chatDeleteProjectConfirm.replace('{name}', project.name))) {
       return
     }
     try {
@@ -804,8 +803,10 @@ export const Sidebar = memo(function Sidebar({
       ? conversations.filter((conv) => conversationBelongsToProject(conv, selectedProject))
       : conversations
     if (targetConversations.length === 0) return
-    const scope = selectedProject ? `项目「${selectedProject.name}」中的` : '全部'
-    if (!window.confirm(`确定删除${scope} ${targetConversations.length} 个对话？此操作无法撤销。`)) return
+    const confirmText = selectedProject
+      ? t.chatDeleteAllInProjectConfirm.replace('{name}', selectedProject.name)
+      : t.chatDeleteAllConfirm
+    if (!window.confirm(confirmText.replace('{count}', String(targetConversations.length)))) return
     try {
       await Promise.all(targetConversations.map((conv) => chatApi.deleteConversation(conv.id)))
       if (currentConversationId && targetConversations.some((conv) => conv.id === currentConversationId)) {
@@ -1054,13 +1055,13 @@ export const Sidebar = memo(function Sidebar({
       >
         <NavRow
           icon={<SquarePen size={17} strokeWidth={1.75} />}
-          label="新建聊天"
+          label={t.chatNewChat}
           onClick={onNewConversation}
           iconMotion="group-hover:-rotate-6 group-hover:scale-110"
         />
         <NavRow
           icon={<Search size={17} strokeWidth={1.75} />}
-          label="搜索"
+          label={t.chatSearch}
           onClick={() => onSearchOpenChange(true)}
           active={searchOpen}
           iconMotion="group-hover:scale-110"
@@ -1075,7 +1076,7 @@ export const Sidebar = memo(function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col" data-tauri-drag-region="false">
         {loading ? (
-          <div className="space-y-2 px-3 py-3" aria-label="加载中" aria-busy="true">
+          <div className="space-y-2 px-3 py-3" aria-label={t.chatLoading} aria-busy="true">
             {[0, 1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="kv-skeleton h-7 rounded-lg" />
             ))}
@@ -1085,9 +1086,9 @@ export const Sidebar = memo(function Sidebar({
             <div className="flex items-center justify-between px-3 pb-1 pt-3">
               <div className="flex items-center gap-1.5 text-[13px] font-semibold">
                 {([
-                  ['conversations', '最近'],
-                  ['sets', '集'],
-                  ['projects', '项目'],
+                  ['conversations', t.chatTabRecent],
+                  ['sets', t.chatTabSets],
+                  ['projects', t.chatTabProjects],
                 ] as const).flatMap(([tab, label], i) => {
                   const button = (
                     <button
@@ -1122,7 +1123,7 @@ export const Sidebar = memo(function Sidebar({
                       size="sm"
                       onClick={openSectionMenu}
                       className={sectionMenuAnchor ? 'bg-black/[0.06] text-neutral-600 dark:bg-white/[0.1] dark:text-neutral-200' : ''}
-                      label="对话列表操作"
+                      label={t.chatConversationListActions}
                       aria-haspopup="menu"
                       aria-expanded={sectionMenuAnchor !== null}
                     >
@@ -1131,7 +1132,7 @@ export const Sidebar = memo(function Sidebar({
                     <IconButton
                       size="sm"
                       onClick={onNewConversation}
-                      label="新建聊天"
+                      label={t.chatNewChat}
                     >
                       <SquarePen size={15} strokeWidth={1.75} />
                     </IconButton>
@@ -1152,14 +1153,14 @@ export const Sidebar = memo(function Sidebar({
                           return next
                         })
                       }}
-                      label={allVisibleSetsCollapsed ? '展开全部集' : '折叠全部集'}
+                      label={allVisibleSetsCollapsed ? t.chatExpandAllSets : t.chatCollapseAllSets}
                     >
                       <MoreHorizontal size={15} />
                     </IconButton>
                     <IconButton
                       size="sm"
                       onClick={openCreateSetDialog}
-                      label="新建集"
+                      label={t.chatNewSet}
                     >
                       <Plus size={15} strokeWidth={2} />
                     </IconButton>
@@ -1180,15 +1181,15 @@ export const Sidebar = memo(function Sidebar({
                           return next
                         })
                       }}
-                      label={allVisibleProjectsCollapsed ? '展开全部项目' : '折叠全部项目'}
+                      label={allVisibleProjectsCollapsed ? t.chatExpandAllProjects : t.chatCollapseAllProjects}
                     >
                       <MoreHorizontal size={15} />
                     </IconButton>
                     <IconButton
                       size="sm"
                       onClick={openCreateProjectDialog}
-                      label="新建项目"
-                      title={`新建项目 (${modLabel}P)`}
+                      label={t.chatNewProject}
+                      title={`${t.chatNewProject} (${modLabel}P)`}
                     >
                       <FolderPlus size={15} strokeWidth={1.75} />
                     </IconButton>
@@ -1261,7 +1262,7 @@ export const Sidebar = memo(function Sidebar({
                                 ? 'font-semibold text-neutral-900 dark:text-neutral-100'
                                 : 'font-medium text-neutral-600 dark:text-neutral-300'
                             }`}
-                            title={collapsedProject ? `展开 ${project.name}` : `折叠 ${project.name}`}
+                            title={(collapsedProject ? t.chatExpandNamed : t.chatCollapseNamed).replace('{name}', project.name)}
                             aria-expanded={!collapsedProject}
                           >
                             <ChevronRight
@@ -1290,7 +1291,7 @@ export const Sidebar = memo(function Sidebar({
                                 ? 'opacity-100'
                                 : 'opacity-0 group-hover:opacity-100'
                             }`}
-                            label="项目操作"
+                            label={t.chatProjectActions}
                           >
                             <MoreHorizontal size={15} />
                           </IconButton>
@@ -1306,7 +1307,7 @@ export const Sidebar = memo(function Sidebar({
                               onSelectProject(project)
                             }}
                             className="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                            label="新建聊天"
+                            label={t.chatNewChat}
                           >
                             <SquarePen size={15} strokeWidth={1.75} />
                           </IconButton>
@@ -1349,7 +1350,7 @@ export const Sidebar = memo(function Sidebar({
                           }}
                           className="ml-8 rounded-md px-2.5 py-0.5 text-left text-[13px] font-medium text-neutral-400 transition-colors hover:bg-black/[0.035] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-300"
                         >
-                          {expanded ? '收起' : '展开显示'}
+                          {expanded ? t.chatShowLess : t.chatShowMore}
                         </button>
                       )}
                       </div>
@@ -1369,7 +1370,7 @@ export const Sidebar = memo(function Sidebar({
                       className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-[13px] text-neutral-400 transition-colors hover:bg-black/[0.035] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-300"
                     >
                       <Plus size={14} strokeWidth={2} className="shrink-0" />
-                      新建一个集（系统提示词 + 默认助手）
+                      {t.chatNewSetHint}
                     </button>
                   ) : (
                     sets.map((set) => {
@@ -1410,7 +1411,7 @@ export const Sidebar = memo(function Sidebar({
                                   ? 'font-semibold text-neutral-900 dark:text-neutral-100'
                                   : 'font-medium text-neutral-600 dark:text-neutral-300'
                               }`}
-                              title={collapsedSet ? `展开 ${set.name}` : `折叠 ${set.name}`}
+                              title={(collapsedSet ? t.chatExpandNamed : t.chatCollapseNamed).replace('{name}', set.name)}
                               aria-expanded={!collapsedSet}
                             >
                               <ChevronRight
@@ -1438,7 +1439,7 @@ export const Sidebar = memo(function Sidebar({
                               className={`shrink-0 transition-opacity ${
                                 setMenuState?.setId === set.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                               }`}
-                              label="集操作"
+                              label={t.chatSetActions}
                             >
                               <MoreHorizontal size={15} />
                             </IconButton>
@@ -1454,7 +1455,7 @@ export const Sidebar = memo(function Sidebar({
                                 onSelectSet(set)
                               }}
                               className="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                              label="在此集新建聊天"
+                              label={t.chatNewChatInSet}
                             >
                               <SquarePen size={15} strokeWidth={1.75} />
                             </IconButton>
@@ -1497,7 +1498,7 @@ export const Sidebar = memo(function Sidebar({
                               }}
                               className="ml-8 rounded-md px-2.5 py-0.5 text-left text-[13px] font-medium text-neutral-400 transition-colors hover:bg-black/[0.035] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-300"
                             >
-                              {expanded ? '收起' : '展开显示'}
+                              {expanded ? t.chatShowLess : t.chatShowMore}
                             </button>
                           )}
                         </div>

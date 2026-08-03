@@ -3,6 +3,7 @@
 // 弹层贴按钮、紧凑宽度，不再铺满输入框。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Bot, Check, Settings2 } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import { chatApi } from './api'
 import { api } from '../api/tauri'
 import { builtinAssistantGlyph } from './assistantIcons'
@@ -23,6 +24,7 @@ export function AssistantPicker({
   disabled?: boolean
   layout?: 'footer' | 'inline'
 }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const ref = useRef<HTMLDivElement>(null)
@@ -72,6 +74,9 @@ export function AssistantPicker({
 
   const placement = layout === 'inline' ? 'top-full mt-1.5' : 'bottom-full mb-1.5'
   const origin = layout === 'inline' ? 'top left' : 'bottom left'
+  const assistantChipLabel = currentAssistant
+    ? t.chatAssistantChip.replace('{name}', currentAssistant.name)
+    : t.chatSelectOrCreateAssistant
   const maxH = usePopoverMaxHeight(open, popoverRef, layout === 'inline' ? 'down' : 'up', 320)
 
   const pick = (assistant: ChatAssistant | null) => {
@@ -95,8 +100,8 @@ export function AssistantPicker({
         }`}
         aria-expanded={open}
         aria-haspopup="menu"
-        label={currentAssistant ? `专家 · ${currentAssistant.name}` : '选择或创建专家'}
-        title={currentAssistant ? `专家 · ${currentAssistant.name}` : '选择或创建专家'}
+        label={assistantChipLabel}
+        title={assistantChipLabel}
       >
         {currentAssistant
           ? builtinAssistantGlyph(currentAssistant.id, 18) ?? <Bot size={18} strokeWidth={1.75} />
@@ -119,11 +124,11 @@ export function AssistantPicker({
               <span className="grid size-4 shrink-0 place-items-center">
                 <Bot size={13} strokeWidth={1.75} />
               </span>
-              不使用专家
+              {t.chatNoAssistant}
             </button>
           )}
           {assistants.length === 0 ? (
-            <p className="px-2 py-2 text-[11px] text-neutral-500">还没有专家，点下方创建。</p>
+            <p className="px-2 py-2 text-[11px] text-neutral-500">{t.chatNoAssistantsYet}</p>
           ) : (
             assistants.map((assistant) => {
               const active = assistant.id === currentAssistant?.id
@@ -159,7 +164,7 @@ export function AssistantPicker({
             <span className="grid size-4 shrink-0 place-items-center">
               <Settings2 size={13} strokeWidth={1.75} />
             </span>
-            管理 / 创建专家
+            {t.chatManageAssistants}
           </button>
         </div>
       )}

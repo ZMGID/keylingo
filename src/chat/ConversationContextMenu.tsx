@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, Download, Folder, Layers, Pencil, Trash2 } from 'lucide-react'
-import type { Lang } from '../settings/i18n'
+import { i18n, type Lang } from '../settings/i18n'
 import type { ChatProject, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
 import { useClampedMenuPosition } from './useClampedMenuPosition'
@@ -42,6 +42,7 @@ export function ConversationContextMenu({
   onDelete,
   onClose: onCloseProp,
 }: ConversationContextMenuProps) {
+  const t = i18n[lang]
   const menuRef = useRef<HTMLDivElement>(null)
   const pos = useClampedMenuPosition(menuRef, anchor)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
@@ -83,7 +84,7 @@ export function ConversationContextMenu({
         }}
       >
         <Pencil strokeWidth={1.75} />
-        重命名
+        {t.chatRename}
       </button>
 
       <div className="group/sub relative">
@@ -93,14 +94,14 @@ export function ConversationContextMenu({
           className="kv-menu-item"
         >
           <Folder strokeWidth={1.75} />
-          <span className="min-w-0 flex-1">添加到项目</span>
+          <span className="min-w-0 flex-1">{t.chatAddToProject}</span>
           <ChevronRight size={16} className="shrink-0 text-neutral-400" />
         </button>
 
         <div className="pointer-events-none absolute left-full top-0 z-[201] min-w-[168px] pl-1 opacity-0 transition-opacity group-hover/sub:pointer-events-auto group-hover/sub:opacity-100">
           <div className="kv-menu">
             {projects.length === 0 ? (
-              <div className="kv-menu-item">暂无项目</div>
+              <div className="kv-menu-item">{t.chatNoProjects}</div>
             ) : (
               projects.map((project) => {
                 const active = conversationProjectId
@@ -136,7 +137,7 @@ export function ConversationContextMenu({
                     onClose()
                   }}
                 >
-                  移出项目
+                  {t.chatRemoveFromProject}
                 </button>
               </>
             )}
@@ -151,14 +152,14 @@ export function ConversationContextMenu({
           className="kv-menu-item"
         >
           <Layers strokeWidth={1.75} />
-          <span className="min-w-0 flex-1">移动到集</span>
+          <span className="min-w-0 flex-1">{t.chatMoveToSet}</span>
           <ChevronRight size={16} className="shrink-0 text-neutral-400" />
         </button>
 
         <div className="pointer-events-none absolute left-full top-0 z-[201] min-w-[168px] pl-1 opacity-0 transition-opacity group-hover/subset:pointer-events-auto group-hover/subset:opacity-100">
           <div className="kv-menu">
             {sets.length === 0 ? (
-              <div className="kv-menu-item">暂无集</div>
+              <div className="kv-menu-item">{t.chatNoSets}</div>
             ) : (
               sets.map((set) => {
                 const active = conversationSetId === set.id
@@ -192,7 +193,7 @@ export function ConversationContextMenu({
                     onClose()
                   }}
                 >
-                  移出集
+                  {t.chatRemoveFromSet}
                 </button>
               </>
             )}
@@ -210,7 +211,7 @@ export function ConversationContextMenu({
         }}
       >
         <Download strokeWidth={1.75} />
-        {lang === 'zh' ? '导出' : 'Export'}
+        {t.chatExport}
       </button>
 
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
@@ -225,7 +226,7 @@ export function ConversationContextMenu({
         }}
       >
         <Trash2 strokeWidth={1.75} />
-        删除
+        {t.chatDelete}
       </button>
     </div>
   )

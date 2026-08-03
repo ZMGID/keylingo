@@ -36,7 +36,7 @@ import { GitStatusPill } from './dock/GitStatusPill'
 import { GitDiffChip } from './dock/GitDiffChip'
 import { AgentTodoIndicator } from './AgentTodoIndicator'
 import { Button, IconButton } from '../components/Button'
-import type { Lang } from '../settings/i18n'
+import { useT, type I18n, type Lang } from '../settings/i18n'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
 import type { AgentPlanMode, AgentPlanState, AgentTodoState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
@@ -131,14 +131,15 @@ function projectUpdatedAt(project: ChatProject): number {
   return project.updated_at ?? project.updatedAt ?? project.created_at ?? project.createdAt ?? 0
 }
 
-function nextBlankProjectName(projects: ChatProject[]): string {
+function nextBlankProjectName(projects: ChatProject[], t: I18n): string {
   const names = new Set(projects.map((project) => project.name))
-  if (!names.has('新项目')) return '新项目'
+  const base = t.chatDefaultProjectName
+  if (!names.has(base)) return base
   for (let index = 2; index < 100; index += 1) {
-    const name = `新项目 ${index}`
+    const name = `${base} ${index}`
     if (!names.has(name)) return name
   }
-  return `新项目 ${Date.now()}`
+  return `${base} ${Date.now()}`
 }
 
 type SlashCommandId =
@@ -334,14 +335,14 @@ function imageExtensionForMime(mimeType: string): string {
   }
 }
 
-function readFileAsBase64(file: File): Promise<string> {
+function readFileAsBase64(file: File, readError: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => {
       const result = typeof reader.result === 'string' ? reader.result : ''
       resolve(result.split(',')[1] ?? '')
     }
-    reader.onerror = () => reject(reader.error ?? new Error('读取剪贴板图片失败'))
+    reader.onerror = () => reject(reader.error ?? new Error(readError))
     reader.readAsDataURL(file)
   })
 }
@@ -470,6 +471,7 @@ export function InputBar({
   gitLang,
   onOpenGitPanel,
 }: InputBarProps) {
+  const t = useT()
   const draftKeyValue = draftKey(conversationId)
   const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
   const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
@@ -546,7 +548,7 @@ export function InputBar({
     (paths: string[]) =>
       paths.map((path) => {
         const normalized = path.replace(/\\/g, '/')
-        const name = normalized.split('/').filter(Boolean).pop() || '附件'
+        const name = normalized.split('/').filter(Boolean).pop() || t.chatAttachmentFallbackName
         const ext = name.split('.').pop()?.toLowerCase() ?? ''
         const type: PendingAttachment['type'] = IMAGE_EXTENSIONS.includes(ext) ? 'image' : 'file'
         return {
@@ -556,7 +558,7 @@ export function InputBar({
           path,
         }
       }),
-    [],
+    [t],
   )
 
   const loadProjectOptions = useCallback(async () => {
@@ -567,11 +569,11 @@ export function InputBar({
       setProjectOptions(await chatApi.getProjects())
     } catch (err) {
       console.error('Failed to load chat projects:', err)
-      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : '项目加载失败')
+      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatProjectLoadFailed)
     } finally {
       setProjectOptionsLoading(false)
     }
-  }, [projectEntryEnabled])
+  }, [projectEntryEnabled, t])
 
   const toggleProjectMenu = useCallback(() => {
     if (!projectEntryEnabled || disabled) return
@@ -604,12 +606,12 @@ export function InputBar({
       const picked = await open({
         directory: true,
         multiple: false,
-        title: '选择空白项目创建位置',
+        title: t.chatPickBlankProjectLocation,
       })
       const parentPath = Array.isArray(picked) ? picked[0] : picked
       if (!parentPath) return
 
-      const name = nextBlankProjectName(projectOptions)
+      const name = nextBlankProjectName(projectOptions, t)
       const rootPath = joinPath(parentPath, name)
       const project = await chatApi.createProject(name, null, null, rootPath, { ensureRootDir: true })
       setProjectOptions((prev) => [
@@ -620,12 +622,12 @@ export function InputBar({
       await onSelectProject(project)
     } catch (err) {
       console.error('Failed to create blank chat project from input bar:', err)
-      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : '项目创建失败')
+      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatProjectCreateFailed)
     } finally {
       setProjectCreating(false)
       requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
     }
-  }, [closeProjectMenu, disabled, onSelectProject, projectCreating, projectOptions])
+  }, [closeProjectMenu, disabled, onSelectProject, projectCreating, projectOptions, t])
 
   const createProjectFromFolder = useCallback(async () => {
     if (!onSelectProject || disabled || projectCreating) return
@@ -635,7 +637,7 @@ export function InputBar({
       const picked = await open({
         directory: true,
         multiple: false,
-        title: '选择项目文件夹',
+        title: t.chatPickProjectFolder,
       })
       const rootPath = Array.isArray(picked) ? picked[0] : picked
       if (!rootPath) return
@@ -648,12 +650,12 @@ export function InputBar({
       await onSelectProject(project)
     } catch (err) {
       console.error('Failed to create chat project from input bar:', err)
-      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : '项目创建失败')
+      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatProjectCreateFailed)
     } finally {
       setProjectCreating(false)
       requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
     }
-  }, [closeProjectMenu, disabled, onSelectProject, projectCreating])
+  }, [closeProjectMenu, disabled, onSelectProject, projectCreating, t])
 
   const updateTextareaHeight = useCallback(() => {
     const textarea = textareaRef.current
@@ -739,7 +741,7 @@ export function InputBar({
         if (cancelled) return
         setExternalCliSlashCommands([])
         setExternalCliSlashHint(
-          typeof err === 'string' ? err : err instanceof Error ? err.message : '无法加载 CLI 命令',
+          typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatCliCommandsLoadFailed,
         )
       })
       .finally(() => {
@@ -749,7 +751,7 @@ export function InputBar({
     return () => {
       cancelled = true
     }
-  }, [conversationId, externalAgentName, usesExternalRuntime])
+  }, [conversationId, externalAgentName, usesExternalRuntime, t])
   const filteredSlashCommands = useMemo(
     () => allSlashCommands.filter((command) => (
       commandMatches(command, activeSlashToken?.query ?? '')
@@ -844,7 +846,7 @@ export function InputBar({
         ? next.filter((attachment) => attachment.type === 'image')
         : next.filter((attachment) => attachment.name.trim() !== '')
       if (filtered.length === 0) {
-        setAttachmentError(options?.imagesOnly ? '请拖入图片文件' : '未识别到可添加的文件')
+        setAttachmentError(options?.imagesOnly ? t.chatDropImagesOnly : t.chatNoAddableFiles)
         return
       }
 
@@ -856,7 +858,7 @@ export function InputBar({
           return true
         })
         if (dedupedNext.length === 0) {
-          setAttachmentError('附件已添加')
+          setAttachmentError(t.chatAttachmentAdded)
           return prev
         }
         setAttachmentError('')
@@ -864,7 +866,7 @@ export function InputBar({
       })
       textareaRef.current?.focus()
     },
-    [],
+    [t],
   )
 
   const setAgentPlanMode = useCallback(async (mode: AgentPlanMode) => {
@@ -930,10 +932,10 @@ export function InputBar({
     } catch (err) {
       console.error('Failed to add chat attachment:', err)
       setAttachmentError(
-        typeof err === 'string' ? err : err instanceof Error ? err.message : '添加附件失败',
+        typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatAttachmentAddFailed,
       )
     }
-  }, [addAttachments, attachmentsFromPaths, closeProjectMenu, disabled])
+  }, [addAttachments, attachmentsFromPaths, closeProjectMenu, disabled, t])
 
   const handleSlashCommandSelect = useCallback(async (command: SlashCommandDefinition) => {
     if (disabled) return
@@ -1173,14 +1175,14 @@ export function InputBar({
             ? imageExtensionForMime(file.type)
             : ext
           const name = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExt}`
-          const dataBase64 = await readFileAsBase64(file)
+          const dataBase64 = await readFileAsBase64(file, t.chatClipboardImageReadFailed)
           const result = await api.chatSavePastedImage(
             name,
             file.type || `image/${imageExt}`,
             dataBase64,
           )
           if (!result.success || !result.path || !result.name) {
-            throw new Error(result.error || '粘贴图片失败')
+            throw new Error(result.error || t.chatPasteImageFailed)
           }
           pastedAttachments.push({
             id: `pending-att-${crypto.randomUUID()}`,
@@ -1194,10 +1196,10 @@ export function InputBar({
         if (file.size <= 0) continue
 
         const name = file.name || `pasted-file-${Date.now()}-${index + 1}.${ext}`
-        const dataBase64 = await readFileAsBase64(file)
+        const dataBase64 = await readFileAsBase64(file, t.chatClipboardImageReadFailed)
         const result = await api.chatSavePastedAttachment(name, dataBase64)
         if (!result.success || !result.path || !result.name) {
-          throw new Error(result.error || '粘贴附件失败')
+          throw new Error(result.error || t.chatPasteAttachmentFailed)
         }
         pastedAttachments.push({
           id: `pending-att-${crypto.randomUUID()}`,
@@ -1208,7 +1210,7 @@ export function InputBar({
       }
 
       if (pastedAttachments.length === 0) {
-        setAttachmentError('未识别到可添加的文件')
+        setAttachmentError(t.chatNoAddableFiles)
         return
       }
 
@@ -1216,7 +1218,7 @@ export function InputBar({
     } catch (err) {
       console.error('Failed to paste chat attachment:', err)
       setAttachmentError(
-        typeof err === 'string' ? err : err instanceof Error ? err.message : '粘贴附件失败',
+        typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatPasteAttachmentFailed,
       )
     }
   }
@@ -1433,7 +1435,7 @@ export function InputBar({
         <input
           value={projectSearchQuery}
           onChange={(event) => setProjectSearchQuery(event.target.value)}
-          placeholder="搜索项目"
+          placeholder={t.chatSearchProjects}
           className="min-w-0 flex-1 border-0 bg-transparent text-[12px] font-semibold text-neutral-800 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
         />
       </div>
@@ -1441,7 +1443,7 @@ export function InputBar({
       <div className="chat-popover-scroll mt-0.5 max-h-48 overflow-y-auto">
         {projectOptionsLoading ? (
           <div className="px-2 py-2.5 text-[12px] text-neutral-400 dark:text-neutral-500">
-            正在加载项目…
+            {t.chatLoadingProjects}
           </div>
         ) : projectOptionsError ? (
           <div className="px-2 py-2 text-[12px] text-red-500 dark:text-red-400">
@@ -1479,7 +1481,7 @@ export function InputBar({
           </div>
         ) : (
           <div className="px-2 py-2.5 text-[12px] leading-5 text-neutral-400 dark:text-neutral-500">
-            {projectSearchQuery.trim() ? '没有匹配的项目' : '还没有最近项目'}
+            {projectSearchQuery.trim() ? t.chatNoMatchingProjects : t.chatNoRecentProjects}
           </div>
         )}
       </div>
@@ -1492,7 +1494,7 @@ export function InputBar({
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
           >
             <Folder size={14} strokeWidth={1.75} className="shrink-0" />
-            <span className="min-w-0 flex-1 truncate">退出项目工作</span>
+            <span className="min-w-0 flex-1 truncate">{t.chatLeaveProject}</span>
           </button>
         )}
         <button
@@ -1503,7 +1505,7 @@ export function InputBar({
         >
           <Plus size={14} strokeWidth={1.8} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
           <span className="min-w-0 flex-1 truncate">
-            {projectCreating ? '正在添加…' : '新建空白项目'}
+            {projectCreating ? t.chatAddingProject : t.chatNewBlankProject}
           </span>
         </button>
         <button
@@ -1513,7 +1515,7 @@ export function InputBar({
           className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
         >
           <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-          <span className="min-w-0 flex-1 truncate">使用现有文件夹</span>
+          <span className="min-w-0 flex-1 truncate">{t.chatUseExistingFolder}</span>
         </button>
       </div>
     </>
@@ -1542,13 +1544,13 @@ export function InputBar({
                         onOpenSkillSettings()
                       }}
                     >
-                      管理
+                      {t.chatManage}
                     </Button>
                   )}
                 </div>
                 <div className="text-[11px] leading-4 text-neutral-600 dark:text-neutral-300">
                   <span className="text-neutral-500 dark:text-neutral-400">
-                    已启用 {enabledSkills.length} 个
+                    {t.chatSkillsEnabledCount.replace('{n}', String(enabledSkills.length))}
                   </span>
                   {enabledSkills.length > 0 && (
                     <>
@@ -1629,7 +1631,7 @@ export function InputBar({
                 <div className="flex h-[26px] items-center px-2 text-[11px] font-medium text-neutral-400 dark:text-neutral-500">
                   {usesExternalRuntime
                     ? (externalCliSlashLoading
-                      ? '正在加载 CLI 命令…'
+                      ? t.chatLoadingCliCommands
                       : externalCliSlashHint ?? 'No matching CLI command')
                     : 'No matching command'}
                 </div>
@@ -1647,7 +1649,7 @@ export function InputBar({
                   onClick={toggleProjectMenu}
                   disabled={disabled}
                   className="chat-composer-status-item"
-                  title={`项目 · ${effectiveProject.name}`}
+                  title={t.chatProjectChip.replace('{name}', effectiveProject.name)}
                   aria-haspopup="menu"
                   aria-expanded={projectMenuOpen}
                 >
@@ -1681,7 +1683,7 @@ export function InputBar({
                 }}
                 disabled={disabled || !onSelectSet}
                 className="chat-composer-status-item"
-                title={`集 · ${effectiveSet.name}（点击退出）`}
+                title={t.chatSetChipExit.replace('{name}', effectiveSet.name)}
               >
                 <Layers strokeWidth={1.75} />
                 <span className="min-w-0 truncate">{effectiveSet.name}</span>
@@ -1714,7 +1716,7 @@ export function InputBar({
         >
           {dragActive && (
             <div className="chat-motion-fade-up mb-2 rounded-2xl border border-dashed border-[#e8a090]/70 bg-[#e8a090]/10 px-3 py-2 text-center text-[13px] font-medium text-[#a35f51] dark:text-[#f1b4a7]">
-              松开即可添加附件
+              {t.chatDropToAttach}
             </div>
           )}
           {attachments.length > 0 && (
@@ -1741,7 +1743,7 @@ export function InputBar({
                     type="button"
                     className="kv-quote-chip-remove"
                     onClick={() => setQuotes((prev) => prev.filter((_, idx) => idx !== i))}
-                    aria-label="移除引用"
+                    aria-label={t.chatRemoveQuote}
                     data-tauri-drag-region="false"
                   >
                     <X size={13} />
@@ -1776,7 +1778,7 @@ export function InputBar({
               spellCheck={false}
               placeholder={
                 usesExternalRuntime
-                  ? `${cliAgentLabel} 命令，输入 / 补全`
+                  ? t.chatCliCommandPlaceholder.replace('{agent}', cliAgentLabel)
                   : 'Ask me anything...'
               }
               rows={1}
@@ -1796,8 +1798,8 @@ export function InputBar({
                 onClick={handleSend}
                 disabled={!canSend}
                 tabIndex={-1}
-                title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
-                aria-label={sendDisabledReason || '发送'}
+                title={sendDisabledReason || (canSend ? t.chatSend : t.chatSendHintEmpty)}
+                aria-label={sendDisabledReason || t.chatSend}
                 aria-hidden={cancelVisible && !!onCancel}
                 className={`chat-composer-send absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
                   cancelVisible && onCancel
@@ -1817,8 +1819,8 @@ export function InputBar({
                   className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
                     cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
                   }`}
-                  title={cancelling ? '正在停止' : '停止生成（Esc）'}
-                  aria-label={cancelling ? '正在停止' : '停止生成'}
+                  title={cancelling ? t.chatStopping : t.chatStopGenerating}
+                  aria-label={cancelling ? t.chatStopping : t.chatStopGeneratingShort}
                 >
                   <Square size={12} strokeWidth={2.4} fill="currentColor" />
                 </button>
@@ -1833,7 +1835,7 @@ export function InputBar({
             <IconButton
               size="sm"
               shape="circle"
-              label="添加附件"
+              label={t.chatAddAttachment}
               onClick={() => void openAttachmentPicker()}
               disabled={disabled}
               tabIndex={-1}
@@ -1865,7 +1867,7 @@ export function InputBar({
                 <IconButton
                   size="sm"
                   shape="circle"
-                  label="进入项目工作"
+                  label={t.chatEnterProject}
                   onClick={toggleProjectMenu}
                   disabled={disabled}
                   aria-expanded={projectMenuOpen}
@@ -1941,7 +1943,7 @@ export function InputBar({
                   } disabled:cursor-default disabled:opacity-50`}
                   aria-expanded={modeMenuOpen}
                   aria-haspopup="menu"
-                  title="切换模式 · Switch mode"
+                  title={t.chatSwitchMode}
                 >
                   <activeModeOption.icon
                     size={13}

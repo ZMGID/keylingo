@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Layers } from 'lucide-react'
 import { type ModelProvider } from '../api/tauri'
 import { getSettingsCached } from '../api/settingsCache'
+import { useT } from '../settings/i18n'
 import { isProviderEnabled } from '../settings/utils'
 import { ModelIcon } from './ModelIcon'
 import { IconButton } from '../components/Button'
@@ -23,6 +24,7 @@ function sameRef(a: ModelRef, b: ModelRef): boolean {
 }
 
 function MultiModelSelectorBase({ value, onChange, placement = 'up' }: MultiModelSelectorProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const triggerRef = useRef<HTMLDivElement>(null)
@@ -108,7 +110,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up' }: MultiMode
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="menu"
-        label="多模型一问多答 · 选择并行回答的模型（上限 4）"
+        label={t.chatMultiModelLabel.replace('{max}', String(MAX_REPLY_MODELS))}
         className={`shrink-0 ${enabled ? 'text-emerald-600 dark:text-emerald-400' : ''}`}
       >
         <Layers size={18} strokeWidth={1.75} className="shrink-0" />
@@ -121,10 +123,12 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up' }: MultiMode
               key={`${ref.provider_id}:${ref.model}`}
               type="button"
               onClick={() => removeChip(ref)}
-              aria-label={`移除 ${ref.model}`}
+              aria-label={t.chatRemoveNamed.replace('{name}', ref.model)}
               className="chat-model-stack-item relative -ml-2 transition-[margin,transform] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-standard)] first:ml-0 hover:scale-110 active:scale-95 group-hover/stack:ml-1 group-hover/stack:first:ml-0"
               style={{ zIndex: value.length - i }}
-              title={`${ref.model} | ${providerName(ref.provider_id)} · 点击移除`}
+              title={t.chatModelChipHint
+                .replace('{model}', ref.model)
+                .replace('{provider}', providerName(ref.provider_id))}
             >
               <span className="grid size-6 place-items-center rounded-full border border-neutral-200 bg-white dark:border-neutral-600 dark:bg-neutral-800">
                 <ModelIcon model={ref.model} size={14} />
@@ -143,7 +147,9 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up' }: MultiMode
           role="menu"
         >
           <div className="px-2.5 py-1 text-[11px] font-medium text-neutral-400">
-            选择并行回答的模型（{value.length}/{MAX_REPLY_MODELS}）。选 0 或 1 个 = 单模型。
+            {t.chatMultiModelHint
+              .replace('{n}', String(value.length))
+              .replace('{max}', String(MAX_REPLY_MODELS))}
           </div>
           {visibleProviders.map(({ provider, models }) => (
             <div key={provider.id} className="px-1 py-0.5">
@@ -184,7 +190,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up' }: MultiMode
             </div>
           ))}
           {visibleProviders.length === 0 && (
-            <div className="px-4 py-6 text-center text-sm text-neutral-500">暂无可用模型</div>
+            <div className="px-4 py-6 text-center text-sm text-neutral-500">{t.chatNoModels}</div>
           )}
         </div>
       )}

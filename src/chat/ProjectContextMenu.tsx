@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, FolderOpen, Pencil, Trash2 } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import { useCloseAnimation } from './useCloseAnimation'
 import { useClampedMenuPosition } from './useClampedMenuPosition'
@@ -24,6 +25,7 @@ export function ProjectContextMenu({
   onDelete,
   onClose: onCloseProp,
 }: ProjectContextMenuProps) {
+  const t = useT()
   const menuRef = useRef<HTMLDivElement>(null)
   const pos = useClampedMenuPosition(menuRef, anchor)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
@@ -64,13 +66,13 @@ export function ProjectContextMenu({
         }}
       >
         <Pencil strokeWidth={1.75} />
-        重命名
+        {t.chatRename}
       </button>
       <button
         type="button"
         role="menuitem"
         disabled={!hasRootFolder}
-        title={hasRootFolder ? undefined : '请先在项目设置中选择文件夹'}
+        title={hasRootFolder ? undefined : t.chatPickFolderFirst}
         className="kv-menu-item"
         onClick={() => {
           if (!hasRootFolder) return
@@ -79,14 +81,14 @@ export function ProjectContextMenu({
         }}
       >
         <FolderOpen strokeWidth={1.75} />
-        打开项目文件夹
+        {t.chatOpenProjectFolder}
       </button>
       <button
         type="button"
         role="menuitem"
         disabled={!hasRootFolder}
         // 导入按工作目录匹配会话，没有项目根就无从比对（ADR-0001）。
-        title={hasRootFolder ? undefined : '请先在项目设置中选择文件夹'}
+        title={hasRootFolder ? undefined : t.chatPickFolderFirst}
         className="kv-menu-item"
         onClick={() => {
           if (!hasRootFolder) return
@@ -95,7 +97,7 @@ export function ProjectContextMenu({
         }}
       >
         <Download strokeWidth={1.75} />
-        从 CLI 导入对话
+        {t.chatImportFromCli}
       </button>
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
       <button
@@ -108,7 +110,7 @@ export function ProjectContextMenu({
         }}
       >
         <Trash2 strokeWidth={1.75} />
-        删除项目
+        {t.chatDeleteProject}
       </button>
     </div>,
     document.body,

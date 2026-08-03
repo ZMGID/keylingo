@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { Brain, Check, ChevronDown } from 'lucide-react'
 import { api } from '../api/tauri'
+import { useT } from '../settings/i18n'
 import { chatTitlebarPillButtonClass } from './platform'
 import type { ThinkingLevel } from './types'
 
@@ -36,6 +37,7 @@ function ThinkingLevelSelectorBase({
   currentModel,
   onChange,
 }: ThinkingLevelSelectorProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [levels, setLevels] = useState<string[]>(FALLBACK_LEVELS)
 
@@ -91,8 +93,8 @@ function ThinkingLevelSelectorBase({
         type="button"
         onClick={() => setOpen(!open)}
         className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
-        title={`思考等级：${labelFor(effective)}`}
-        aria-label={`思考等级：${labelFor(effective)}`}
+        title={t.chatThinkingLevel.replace('{level}', labelFor(effective))}
+        aria-label={t.chatThinkingLevel.replace('{level}', labelFor(effective))}
       >
         <Brain size={15} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
         <span className="chat-thinking-level-label max-w-[64px] truncate font-medium text-neutral-800 dark:text-neutral-200">

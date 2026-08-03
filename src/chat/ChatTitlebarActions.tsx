@@ -1,4 +1,5 @@
 import { PanelLeftClose, PanelLeftOpen, SquarePen } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import { chatTitlebarPillIconClass } from './platform'
 
 type ChatTitlebarActionsProps = {
@@ -12,8 +13,9 @@ export function ChatTitlebarActions({
   onToggleSidebar,
   onNewConversation,
 }: ChatTitlebarActionsProps) {
+  const t = useT()
   const ToggleIcon = sidebarExpanded ? PanelLeftClose : PanelLeftOpen
-  const toggleLabel = sidebarExpanded ? '收起侧栏' : '展开侧栏'
+  const toggleLabel = sidebarExpanded ? t.chatCollapseSidebar : t.chatExpandSidebar
 
   return (
     <div
@@ -39,8 +41,8 @@ export function ChatTitlebarActions({
         type="button"
         onClick={onNewConversation}
         className={`${chatTitlebarPillIconClass} group`}
-        title="新建聊天"
-        aria-label="新建聊天"
+        title={t.chatNewChat}
+        aria-label={t.chatNewChat}
       >
         <SquarePen
           size={15}

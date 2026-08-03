@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Boxes } from 'lucide-react'
+import { useT } from '../settings/i18n'
 import { messageNavigatorProximityWidth, type MessageNavigatorNode } from './messageNavigator'
 
 interface PreviewAnchor {
@@ -38,6 +39,7 @@ function MessageNavigatorBase({
   onNavigate,
   onNavigateStep,
 }: MessageNavigatorProps) {
+  const t = useT()
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastWheelAtRef = useRef(0)
   const proximityFrameRef = useRef<number | null>(null)
@@ -112,7 +114,7 @@ function MessageNavigatorBase({
 
   return (
     <>
-      <aside className="chat-message-navigator" aria-label="对话轮次导航">
+      <aside className="chat-message-navigator" aria-label={t.chatTurnNavigator}>
         <div
           ref={viewportRef}
           className="chat-message-navigator-viewport"
@@ -130,7 +132,13 @@ function MessageNavigatorBase({
                   data-message-navigator-id={node.id}
                   className={`chat-message-navigator-node ${active ? 'is-active' : ''} ${visibleNodeIdSet.has(node.id) ? 'is-visible' : ''} ${node.kind === 'compaction' ? 'is-compaction' : ''}`}
                   aria-current={active ? 'location' : undefined}
-                  aria-label={node.kind === 'compaction' ? '上下文压缩摘要' : `第 ${index + 1} 轮：${node.title}`}
+                  aria-label={
+                    node.kind === 'compaction'
+                      ? t.chatCompactionSummaryLabel
+                      : t.chatTurnLabel
+                          .replace('{n}', String(index + 1))
+                          .replace('{title}', node.title)
+                  }
                   onClick={() => onNavigate(node)}
                   onMouseEnter={(event) => showPreview(node, event.currentTarget)}
                   onFocus={(event) => showPreview(node, event.currentTarget)}
@@ -158,7 +166,7 @@ function MessageNavigatorBase({
         >
           <div className="chat-message-navigator-preview-title">
             {preview.node.kind === 'compaction' && <Boxes size={14} aria-hidden="true" />}
-            <span>{preview.node.title || '未命名消息'}</span>
+            <span>{preview.node.title || t.chatUntitledMessage}</span>
           </div>
           {preview.node.answerPreview && (
             <p className="chat-message-navigator-preview-answer">{preview.node.answerPreview}</p>

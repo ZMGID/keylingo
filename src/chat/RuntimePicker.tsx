@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Check, Brain, RefreshCw } from 'lucide-react'
 import { AgentIcon } from './AgentIcon'
+import { useT } from '../settings/i18n'
 import { chatApi, type DetectedExternalAgent } from './api'
 import { chatTitlebarPillButtonClass } from './platform'
 import { IconButton } from '../components/Button'
@@ -53,6 +54,7 @@ function stripParenthetical(label: string): string {
 }
 
 function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, locked = false }: RuntimePickerProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [agents, setAgents] = useState<DetectedExternalAgent[]>([])
   const [refreshing, setRefreshing] = useState(false)
@@ -101,8 +103,8 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
 
   const label = useMemo(() => {
     if (!usesExternal) return 'Kivio Agent'
-    return currentAgent?.name ?? agentRuntime.externalAgentId ?? '本地 CLI'
-  }, [agentRuntime.externalAgentId, currentAgent?.name, usesExternal])
+    return currentAgent?.name ?? agentRuntime.externalAgentId ?? t.chatRuntimeLocalCli
+  }, [agentRuntime.externalAgentId, currentAgent?.name, t, usesExternal])
 
   const selectBuiltin = () => {
     if (locked) return
@@ -160,16 +162,16 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
           >
             {locked && (
               <div className="kv-runtime-picker__locked-hint">
-                会话已绑定当前 Agent，新建会话可切换
+                {t.chatRuntimeBoundHint}
               </div>
             )}
             <div className="kv-runtime-picker__row">
               <div className="kv-runtime-picker__agents-head">
-                <span className="kv-runtime-picker__label">代理</span>
+                <span className="kv-runtime-picker__label">{t.chatRuntimeAgent}</span>
                 <IconButton
                   size="xs"
                   variant="ghost"
-                  label="刷新本机 CLI"
+                  label={t.chatRuntimeRefresh}
                   onClick={() => {
                     void loadAgents(true)
                   }}
@@ -221,7 +223,7 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
               </div>
               {availableAgents.length === 0 && (
                 <span className="kv-runtime-picker__hint">
-                  {refreshing ? '正在检测本机 CLI…' : 'PATH 中未发现可用 CLI'}
+                  {refreshing ? t.chatRuntimeDetecting : t.chatRuntimeNoneFound}
                 </span>
               )}
             </div>
@@ -243,6 +245,7 @@ function ExternalModelSelectorBase({
   onModelChange,
   conversationId,
 }: ExternalModelSelectorProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [reasoningOpen, setReasoningOpen] = useState(false)
   const modelMenuRef = useRef<HTMLDivElement>(null)
@@ -400,9 +403,9 @@ function ExternalModelSelectorBase({
       const inList = models.find((item) => item.id === currentModel)
       return stripProviderPrefix(stripParenthetical(mapDefaultLabel(inList?.label ?? currentModel)))
     }
-    if (loading) return '获取中…'
+    if (loading) return t.chatRuntimeFetching
     return 'Auto'
-  }, [agentRuntime.externalModel, models, currentModel, loading])
+  }, [agentRuntime.externalModel, models, currentModel, loading, t])
 
   if (agentRuntime.kind !== 'external' || !agentRuntime.externalAgentId) {
     return null
@@ -433,7 +436,7 @@ function ExternalModelSelectorBase({
             <div ref={modelMenuRef} style={{ maxHeight: modelMenuMaxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[200px] overflow-y-auto kv-menu">
               {source === 'fallback' && (
                 <div className="kv-runtime-picker__fallback mx-1 my-1">
-                  <span>探测失败，显示默认列表</span>
+                  <span>{t.chatRuntimeProbeFailed}</span>
                   <button
                     type="button"
                     className="kv-runtime-picker__fallback-retry"
@@ -443,7 +446,7 @@ function ExternalModelSelectorBase({
                       if (agentId) void loadModels(agentId, true)
                     }}
                   >
-                    重试
+                    {t.chatRetry}
                   </button>
                 </div>
               )}
@@ -451,7 +454,7 @@ function ExternalModelSelectorBase({
                 <div
                   className={`kv-menu-row ${loading ? 'reasoning-shimmer-text' : 'text-neutral-500 dark:text-neutral-400'}`}
                 >
-                  {loading ? '正在探测模型…' : '该 CLI 未上报可用模型'}
+                  {loading ? t.chatRuntimeProbingModels : t.chatRuntimeNoModels}
                 </div>
               ) : (
                 models.map((model) => (
@@ -481,7 +484,7 @@ function ExternalModelSelectorBase({
                       agentRuntime.externalModel === model.id ? 'font-semibold' : ''
                     }`}
                   >
-                    {model.id === 'default' ? 'Auto（CLI 默认）' : model.label}
+                    {model.id === 'default' ? t.chatRuntimeAutoCliDefault : model.label}
                   </button>
                 ))
               )}
@@ -497,8 +500,8 @@ function ExternalModelSelectorBase({
             type="button"
             onClick={() => setReasoningOpen(!reasoningOpen)}
             className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
-            title={`思考等级：${currentReasoningLabel}`}
-            aria-label={`思考等级：${currentReasoningLabel}`}
+            title={t.chatThinkingLevel.replace('{level}', currentReasoningLabel)}
+            aria-label={t.chatThinkingLevel.replace('{level}', currentReasoningLabel)}
           >
             <Brain size={15} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
             <span className="chat-thinking-level-label max-w-[64px] truncate font-medium text-neutral-800 dark:text-neutral-200">
@@ -534,7 +537,7 @@ function ExternalModelSelectorBase({
                       }`}
                     >
                       <span className="min-w-0 truncate">
-                        {option.id === 'default' ? 'Auto（CLI 默认）' : option.label}
+                        {option.id === 'default' ? t.chatRuntimeAutoCliDefault : option.label}
                       </span>
                       {active && <Check size={15} className="shrink-0 text-neutral-500" />}
                     </button>
