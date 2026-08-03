@@ -540,13 +540,23 @@ impl OpenAiChatProvider<'_> {
                 body["prompt_cache_key"] = Value::String(conversation_id.to_string());
             }
         }
-        if !request.options.thinking_enabled
-            && utils::provider_supports_thinking_field(&self.provider.base_url)
-        {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
+        // UI「Off」→ 显式关闭思考。省略字段在多家默认会落到 high（DeepSeek 文档：
+        // 思考默认开、effort 默认 high；OpenAI 也把 none 列为一等 effort）。
+        //
+        // 两套 wire：
+        // - DeepSeek / Kimi 官方：Chat Completions 用 `thinking.type=disabled` 做开关
+        //   （其 reasoning_effort 只认 low/high/max，没有 none）。
+        // - 其余 OpenAI 兼容端（含代理 / OpenAI 自家）：`reasoning_effort: "none"`。
+        if !request.options.thinking_enabled {
+            if utils::provider_supports_thinking_field(&self.provider.base_url) {
+                body["thinking"] = serde_json::json!({ "type": "disabled" });
+            } else {
+                body["reasoning_effort"] = Value::String("none".to_string());
+            }
         }
         // 思考等级 → OpenAI Chat `reasoning_effort`，原样下发（档位由模型库 reasoningEfforts 门控）。
         // 代理普遍接受;不发 Qwen/vLLM 私有的 enable_thinking / chat_template_kwargs。
+        // 与上面 Off 分支互斥：resolve_thinking 在 off 时把 level 抹成 None。
         if let Some(effort) = request.options.thinking_level.as_deref() {
             body["reasoning_effort"] = Value::String(effort.to_string());
         }
@@ -1080,8 +1090,16 @@ mod tests {
     use crate::settings::ModelInfo;
 
     /// Build a real OpenAI-compatible provider request body via the production
-    /// `request_body` path and assert how `thinking_level` maps to the wire.
+    /// `request_body` path and assert how thinking maps to the wire.
     fn build_openai_body(thinking_level: Option<&str>, base_url: &str) -> Value {
+        build_openai_body_with(thinking_level, true, base_url)
+    }
+
+    fn build_openai_body_with(
+        thinking_level: Option<&str>,
+        thinking_enabled: bool,
+        base_url: &str,
+    ) -> Value {
         let state =
             AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
         let provider = ModelProvider {
@@ -1108,6 +1126,7 @@ mod tests {
             }],
             tools: Vec::new(),
             options: GenerateOptions {
+                thinking_enabled,
                 thinking_level: thinking_level.map(|s| s.to_string()),
                 ..Default::default()
             },
@@ -1166,7 +1185,7 @@ mod tests {
 
     #[test]
     fn thinking_level_maps_to_reasoning_effort() {
-        // 未设等级 → 不发 reasoning_effort（与改动前一致）。
+        // 开思考但未设等级 → 不发 reasoning_effort（与改动前一致）。
         let none = build_openai_body(None, "https://api.openai.com/v1");
         assert!(none.get("reasoning_effort").is_none(), "body: {none}");
 
@@ -1177,6 +1196,34 @@ mod tests {
 
         let high = build_openai_body(Some("high"), "https://api.openai.com/v1");
         assert_eq!(high["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn thinking_off_sends_explicit_none_on_openai_compat() {
+        // UI Off → 显式 reasoning_effort:"none"，不能省略（多家省略默认 high）。
+        let off = build_openai_body_with(None, false, "https://api.openai.com/v1");
+        assert_eq!(off["reasoning_effort"], "none", "body: {off}");
+        assert!(off.get("thinking").is_none(), "body: {off}");
+
+        // 代理 / 中转同样走 none（base_url 不含 deepseek.com / moonshot.cn）。
+        let relay = build_openai_body_with(None, false, "https://relay.example.com/v1");
+        assert_eq!(relay["reasoning_effort"], "none", "body: {relay}");
+    }
+
+    #[test]
+    fn thinking_off_uses_thinking_disabled_on_deepseek_and_kimi() {
+        // DeepSeek / Kimi 官方 Chat Completions：开关是 thinking.type，不是
+        // reasoning_effort:"none"（官方 schema 的 effort 只有 low/high/max）。
+        let ds = build_openai_body_with(None, false, "https://api.deepseek.com/v1");
+        assert_eq!(ds["thinking"]["type"], "disabled", "body: {ds}");
+        assert!(
+            ds.get("reasoning_effort").is_none(),
+            "DeepSeek Chat 不该发 none: {ds}"
+        );
+
+        let kimi = build_openai_body_with(None, false, "https://api.moonshot.cn/v1");
+        assert_eq!(kimi["thinking"]["type"], "disabled", "body: {kimi}");
+        assert!(kimi.get("reasoning_effort").is_none(), "body: {kimi}");
     }
 
     #[test]

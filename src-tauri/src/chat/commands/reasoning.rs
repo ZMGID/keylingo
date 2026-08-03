@@ -6,7 +6,10 @@ use crate::state::AppState;
 
 /// 由「每对话思考等级」解析出实际下发给模型的 `(thinking_enabled, thinking_level)`。
 /// chat 不再跟随全局思考开关（全局开关只服务 lens / 快速翻译），未显式选档时落到默认档「high」。
-/// - `"off"` → 强制关思考，不带等级。
+/// - `"off"` → 强制关思考，`thinking_level=None`。适配器看到 `thinking_enabled=false` 后
+///   **显式**发关闭信号（OpenAI Chat → `reasoning_effort:"none"`；DeepSeek/Kimi →
+///   `thinking.type=disabled`；Responses → `reasoning.effort:"none"`），不能省略字段——
+///   DeepSeek / 部分代理省略时默认 effort=high，等于白关。
 /// - `"low"|"medium"|"high"|"xhigh"|"max"` → 开思考并带等级（适配器原样映射为
 ///   reasoning_effort / reasoning.effort / output_config.effort / thinkingLevel）。
 /// - `None` 或其它未知值 → 默认档「high」（与前端 `ThinkingLevelSelector` 的 DEFAULT_LEVEL 一致）。

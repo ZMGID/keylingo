@@ -139,10 +139,15 @@ pub struct GenerateOptions {
     /// 显式的单次请求覆盖；None 时由 provider/model 元数据解析，仍缺省则不发送。
     pub temperature: Option<f64>,
     pub max_tokens: u32,
+    /// 思考开关。UI「Off」时为 false：适配器**必须显式**下发关闭信号
+    /// （OpenAI Chat → `reasoning_effort:"none"`；DeepSeek/Kimi → `thinking.type=disabled`；
+    /// Responses → `reasoning.effort:"none"`），不能靠省略字段——多家默认 effort=high。
     pub thinking_enabled: bool,
-    /// 每对话「思考等级」(`"low"|"medium"|"high"`)。`None` = 未显式设置，维持现状
-    /// （仅受 `thinking_enabled` 控制，不发任何 effort/reasoning 字段）。仅在用户显式
-    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`。
+    /// 每对话「思考等级」(`"low"|"medium"|"high"|…`)。`None` = 未设档：
+    /// - `thinking_enabled=false` 时必为 None（`resolve_thinking` 保证），走关闭分支；
+    /// - `thinking_enabled=true` 时 None = 模型无 effort 旋钮，不发等级字段。
+    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`，
+    /// Responses→`reasoning.effort`，Gemini→`thinkingLevel`。
     #[serde(default)]
     pub thinking_level: Option<String>,
     /// 是否请求模型的**原生内置联网搜索**（任务 07-23）。仅在会话为 Builtin 模式且当前

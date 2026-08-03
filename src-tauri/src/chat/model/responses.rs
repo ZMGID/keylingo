@@ -30,13 +30,12 @@ use super::{
 
 /// UI 档位 → xAI 官方 effort。
 ///
-/// **不处理「关闭思考」**：`resolve_thinking`（`chat/commands/reasoning.rs`）把 `off` 变成
-/// `(enabled=false, level=None)`，所以 `off` 这个字符串永远到不了适配器，本函数只会收到
-/// `low/medium/high/xhigh/max`。曾经写过 `"off" => "none"` 的分支和配套的 grok-4.3/grok-3
-/// 门控，都是够不着的死代码 —— 连带那条测试也是绕开真实入口硬塞出来的假绿灯。
-/// 要让 Grok 真能关思考，得先让 `resolve_thinking` 把 `off` 作为一个等级透传下来。
+/// 「关闭思考」不经这里：`resolve_thinking` 把 UI `off` 变成 `(enabled=false, level=None)`，
+/// 适配器在 `!thinking_enabled` 分支直接发 `reasoning.effort: "none"`。本函数只映射
+/// 真正的等级字符串（`low/medium/high/xhigh/max`，以及偶发透传的 `minimal`/`none`）。
 fn xai_reasoning_effort(effort: &str) -> Option<&'static str> {
     match effort.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Some("none"),
         "minimal" | "low" => Some("low"),
         "medium" => Some("medium"),
         "high" | "max" => Some("high"),
@@ -443,10 +442,21 @@ impl OpenAiResponsesProvider<'_> {
             body["tools"] = Value::Array(tools_arr);
             body["tool_choice"] = Value::String("auto".to_string());
         }
-        // 思考等级 → Responses `reasoning.effort`，原样下发（档位由模型库 reasoningEfforts 门控）。
-        // 关键：gpt-5 系列在 minimal reasoning 下不执行 hosted web_search；resolve_thinking
+        // 思考 → Responses `reasoning.effort`。
+        //
+        // UI Off（`thinking_enabled=false`）必须**显式**发 `"none"`：OpenAI 把 none 列为一等
+        // effort；DeepSeek Responses 文档也写 `none/low/high/max`（none = 关闭思考），且
+        // **默认思考开、effort=high**——省略字段等于白关。xAI 部分模型文档写「不能关」，
+        // 仍按用户选择发 none，而不是静默默认到 high。
+        //
+        // 选了具体档位则原样下发（档位由模型库 reasoningEfforts 门控）。
+        // 注意：gpt-5 系列在 minimal reasoning 下不执行 hosted web_search；resolve_thinking
         // 已把「未显式设档」默认成 high，故内置搜索天然拿到非 minimal。
-        if let Some(effort) = request.options.thinking_level.as_deref() {
+        if !request.options.thinking_enabled {
+            body["reasoning"] = serde_json::json!({ "effort": "none" });
+            // 关思考仍走无状态：不依赖服务端会话，也不要 encrypted reasoning。
+            body["store"] = Value::Bool(false);
+        } else if let Some(effort) = request.options.thinking_level.as_deref() {
             if is_xai {
                 // xAI 有自己的一套 effort 档位。
                 if let Some(mapped) = xai_reasoning_effort(effort) {
@@ -1480,13 +1490,22 @@ mod tests {
     }
 
     fn xai_body(model: &str, effort: Option<&str>, builtin_search: bool) -> Value {
+        xai_body_with(model, effort, true, builtin_search)
+    }
+
+    fn xai_body_with(
+        model: &str,
+        effort: Option<&str>,
+        thinking_enabled: bool,
+        builtin_search: bool,
+    ) -> Value {
         let state = crate::state::AppState::new_headless(
             crate::settings::Settings::default(),
             std::env::temp_dir(),
         );
         let provider = ModelProvider {
-            id: "test".into(),
-            name: "Grok".into(),
+            id: "xai".into(),
+            name: "xAI".into(),
             api_keys: vec!["sk-test".into()],
             api_key_legacy: None,
             // 故意用一个非 api.x.ai 的域名：协议来自用户的选择，不是猜域名。
@@ -1508,6 +1527,7 @@ mod tests {
             }],
             tools: Vec::new(),
             options: GenerateOptions {
+                thinking_enabled,
                 thinking_level: effort.map(str::to_string),
                 builtin_web_search: builtin_search,
                 ..Default::default()
@@ -1563,11 +1583,11 @@ mod tests {
             xai_body("grok-4.3", Some("xhigh"), false)["reasoning"]["effort"],
             "xhigh"
         );
-        // 「关闭思考」到不了这里：`resolve_thinking` 把 off 变成 (false, None)，适配器
-        // 收到的 thinking_level 是 None，body 里干脆没有 reasoning 字段。曾经写过
-        // `"off" => "none"` 的分支和一条直接塞 Some("off") 的断言——绕开了唯一的真实入口，
-        // 是假绿灯。这条断言守住真实形态，别再让人以为 Grok 能关思考。
+        // 开思考但未设档 → 不发 reasoning（不擅自兜底）。
         assert!(xai_body("grok-4.3", None, false).get("reasoning").is_none());
+        // UI Off → 显式 effort:"none"（thinking_enabled=false，level=None）。
+        let off = xai_body_with("grok-4.3", None, false, false);
+        assert_eq!(off["reasoning"]["effort"], "none", "body: {off}");
     }
 
     #[test]
@@ -1675,7 +1695,7 @@ mod tests {
             "body: {on}"
         );
         assert_eq!(on["tool_choice"], "auto");
-        // 无思考档 ⇒ 不发 reasoning（effort 由 resolve_thinking 在上游决定，适配器不兜底）。
+        // 开思考但无档位 ⇒ 不发 reasoning（effort 由 resolve_thinking 在上游决定，适配器不兜底）。
         assert!(on.get("reasoning").is_none(), "body: {on}");
         // 显式设 high ⇒ reasoning.effort=high。
         let mut req_high = base.clone();
@@ -1689,10 +1709,24 @@ mod tests {
         req_x.options.thinking_level = Some("xhigh".into());
         let xh = adapter.request_body(&req_x, false);
         assert_eq!(xh["reasoning"]["effort"], "xhigh", "body: {xh}");
-        // 纯对话（无内置、无思考档）⇒ 不发 reasoning。
+        // 纯对话（开思考、无内置、无档）⇒ 不发 reasoning。
         assert!(off.get("reasoning").is_none(), "body: {off}");
+        // UI Off → 显式 none（OpenAI / DeepSeek Responses 文档；省略会默认 high）。
+        let mut req_off = base.clone();
+        req_off.options.thinking_enabled = false;
+        let thinking_off = adapter.request_body(&req_off, false);
+        assert_eq!(
+            thinking_off["reasoning"]["effort"], "none",
+            "body: {thinking_off}"
+        );
+        assert_eq!(thinking_off["store"], false, "body: {thinking_off}");
+        // 关思考不需要 encrypted reasoning content。
+        assert!(
+            thinking_off.get("include").is_none(),
+            "body: {thinking_off}"
+        );
 
-        // 发 reasoning 时同时发 store:false + include（与 Codex 官方客户端一致）：
+        // 发 reasoning 档位时同时发 store:false + include（与 Codex 官方客户端一致）：
         // 我们每轮自带完整 input，不依赖服务端会话状态，思考链走 encrypted_content。
         assert_eq!(high["store"], false, "body: {high}");
         assert_eq!(
@@ -1700,7 +1734,7 @@ mod tests {
             serde_json::json!(["reasoning.encrypted_content"]),
             "body: {high}"
         );
-        // 不发 reasoning 时不该无故附带这两项（保持与既有纯对话请求字节兼容）。
+        // 开思考但不发 reasoning 档时不该无故附带这两项（保持与既有纯对话请求字节兼容）。
         assert!(off.get("store").is_none(), "body: {off}");
         assert!(off.get("include").is_none(), "body: {off}");
     }
