@@ -567,42 +567,6 @@ function useSettled(value: string, delay: number, assumeSettled: boolean): strin
   return settled
 }
 
-// 指针在预览里滚时，wheel 只在 iframe 自己的文档里派发，跨不过文档边界 —— 外层聊天列表的
-// useScrollFollow 收不到 wheel，`following` 永远解除不了；而浏览器的滚动链又真的把外层带上去
-// 一点，于是 scrollFollowCore 的「跟随中 gap>32px 就钉回底部」每格弹一次 = 抽搐。
-// srcdoc 的 iframe 与父页面同源，这里在**内部已经滚到头**（即滚动链真会发生）时补派发一个
-// 同 delta 的 wheel 到父文档，让外层照常按用户滚动解除跟随。合成事件不触发默认滚动，
-// 真正的滚动仍由浏览器的链式行为完成，不会滚两倍。
-function bridgeIframeWheel(event: { currentTarget: HTMLIFrameElement }) {
-  const frame = event.currentTarget
-  let win: Window | null = null
-  try {
-    win = frame.contentWindow
-  } catch {
-    return // 模型脚本可能把 iframe 导航到跨域，拿不到就算了
-  }
-  if (!win) return
-  win.addEventListener(
-    'wheel',
-    (wheel: WheelEvent) => {
-      let scroller: Element | null = null
-      try {
-        scroller = win.document.scrollingElement
-      } catch {
-        return
-      }
-      if (!scroller) return
-      const atTop = scroller.scrollTop <= 0
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1
-      if (wheel.deltaY < 0 ? !atTop : !atBottom) return
-      frame.dispatchEvent(
-        new WheelEvent('wheel', { deltaX: wheel.deltaX, deltaY: wheel.deltaY, bubbles: true }),
-      )
-    },
-    { passive: true },
-  )
-}
-
 function HtmlCodePreview({ html }: { html: string }) {
   const [view, setView] = useState<'preview' | 'source'>('preview')
   const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !useContext(MarkdownStreamingContext))
@@ -625,7 +589,6 @@ function HtmlCodePreview({ html }: { html: string }) {
           <iframe
             title="HTML 预览"
             srcDoc={previewHtml}
-            onLoad={bridgeIframeWheel}
             className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
           />
         </div>
