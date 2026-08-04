@@ -2141,8 +2141,15 @@ export const api = {
     invoke<ChatPastedImageResult>('chat_save_pasted_attachment', { name, dataBase64 }),
   chatReadClipboardFiles: () =>
     invoke<ChatClipboardFilesResult>('chat_read_clipboard_files'),
-  chatConfirmToolCall: (toolCallId: string, approved: boolean, always = false) =>
-    invoke<void>('chat_confirm_tool_call', { toolCallId, approved, always }),
+  // permissionMode 只有计划批准卡会传（三选一里用户选的那一档），决定批准后把 CLI 切到
+  // 哪个权限模式。普通审批传 null。
+  chatConfirmToolCall: (
+    toolCallId: string,
+    approved: boolean,
+    always = false,
+    permissionMode: string | null = null,
+  ) =>
+    invoke<void>('chat_confirm_tool_call', { toolCallId, approved, always, permissionMode }),
   chatRespondSessionConsent: (conversationId: string, granted: boolean) =>
     invoke<void>('chat_respond_session_consent', { conversationId, granted }),
   chatSubmitUserChoice: (

@@ -50,7 +50,18 @@ pub struct PendingSessionConsent {
 pub struct PendingToolApproval {
     pub conversation_id: String,
     pub tool_name: String,
-    pub sender: oneshot::Sender<bool>,
+    pub sender: oneshot::Sender<ToolApprovalOutcome>,
+}
+
+/// 用户对一张审批卡的答复。
+///
+/// 绝大多数审批只有「允许 / 拒绝」，`permission_mode` 恒为 `None`。它存在的唯一理由是
+/// claude 的计划批准（`ExitPlanMode`）：那张卡是**三选一**（批准并自动放行 / 批准但逐步
+/// 确认 / 拒绝），选哪一档决定了批准之后要把 CLI 切到哪个权限模式。
+#[derive(Debug, Clone, Default)]
+pub struct ToolApprovalOutcome {
+    pub approved: bool,
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug)]

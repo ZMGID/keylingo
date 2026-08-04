@@ -103,7 +103,7 @@ import { ChatDotGridBackground } from './ChatDotGridBackground'
 import { RightDock, type DockPreviewRequest, type DockRevealRequest, type DockTab } from './dock/RightDock'
 import { dockApi } from './dock/api'
 import { insertTextIntoComposer } from './composerInsert'
-import { onDockDiffPreviewRequest, onDockPreviewRequest } from './dock/dockPreview'
+import { onDockDiffPreviewRequest, onDockMarkdownPreviewRequest, onDockPreviewRequest, requestDockMarkdownPreview } from './dock/dockPreview'
 import { IconButton } from '../components/Button'
 import { normalizeToolCallStatus } from './toolStatus'
 import { TypewriterText } from './TypewriterText'
@@ -406,12 +406,33 @@ const TOOL_APPROVAL_VERBS: Record<string, { verb: string; path?: boolean }> = {
  * 工具名小写后匹配：内置 agent 报 `write`，外部 CLI 报自己的原名（claude 的 `Write`）。
  */
 function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
-  const spec = TOOL_APPROVAL_VERBS[(payload.name || '').toLowerCase()]
+  const name = (payload.name || '').toLowerCase()
+  // claude 的计划批准：批的是卡片上那份计划，不是「一个叫 ExitPlanMode 的工具」。
+  if (name === 'exitplanmode') return '批准这份计划，开始执行？'
+  const spec = TOOL_APPROVAL_VERBS[name]
   const target = payload.target?.trim()
   if (!spec || !target) return `允许调用工具 ${payload.name}？`
   const shown = spec.path ? target.split(/[\\/]/).filter(Boolean).pop() || target : target
   return `允许${spec.verb} ${shown}？`
 }
+
+/** 计划批准卡不给「总是允许」：那等于以后每份计划都自动批、还自动切出计划模式，
+ *  而用户当时想说的只是「这一份可以」。 */
+function isPlanApproval(payload: ChatToolConfirmPayload): boolean {
+  return (payload.name || '').toLowerCase() === 'exitplanmode'
+}
+
+/** 计划批准的三个选项，对齐 Claude Code 自己的那三条
+ *  （Yes and bypass permissions / Yes manually approve edits / Tell Claude what to change）。
+ *  `mode` 是批准后要把 CLI 切到的权限档位，同时会写回会话配置，让底栏胶囊跟着变 ——
+ *  否则批准之后界面还显示「计划 (只读)」，而 claude 已经在改文件了。
+ *
+ *  末位是主按钮（Ctrl+↵）：批完计划最常见的意图就是「别再拦我了，去做」，
+ *  Claude Code 自己的默认选中项也是 bypass 那条。 */
+const PLAN_APPROVAL_ACTIONS: { label: string; mode: string }[] = [
+  { label: '批准，逐步确认', mode: 'default' },
+  { label: '批准并自动放行', mode: 'bypassPermissions' },
+]
 
 function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment | null {
   const raw = payload.type === 'text_delta' || payload.type === 'reasoning_delta'
@@ -2208,6 +2229,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === payload.conversationId) {
       setPendingToolConfirm(queue[0] ?? null)
+      // 计划卡一出现就在右侧栏摊开整份计划 —— 卡片上那块小灰框读不完。
+      if (isPlanApproval(payload) && payload.argumentsPreview?.trim()) {
+        requestDockMarkdownPreview({ title: '计划', text: payload.argumentsPreview })
+      }
     }
   }, [syncGeneratingConversationIds])
 
@@ -2226,7 +2251,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [syncGeneratingConversationIds])
 
-  const resolvePendingToolConfirm = useCallback((approved: boolean, always = false) => {
+  const resolvePendingToolConfirm = useCallback((approved: boolean, always = false, permissionMode: string | null = null) => {
     if (!pendingToolConfirm) return
     const conversationId = pendingToolConfirm.conversationId
     const rest = (pendingToolConfirmsRef.current[conversationId] ?? [])
@@ -2237,7 +2262,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       delete pendingToolConfirmsRef.current[conversationId]
     }
     syncGeneratingConversationIds()
-    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved, always)
+    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved, always, permissionMode)
     // 队列里还有下一条就接着弹，别让它在后台等到超时。
     setPendingToolConfirm(rest[0] ?? null)
   }, [pendingToolConfirm, syncGeneratingConversationIds])
@@ -3732,6 +3757,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [],
   )
 
+  // claude 交计划（ExitPlanMode）→ dock 侧栏渲染整份计划。审批卡里那块 `max-h-40` 的
+  // 灰框只够扫一眼，而「批不批这个计划」是要读完才能决定的。
+  useEffect(
+    () =>
+      onDockMarkdownPreviewRequest((payload) => {
+        setDockTab('files')
+        rememberDockTab('files')
+        setDockOpen(true)
+        rememberDockOpen(true)
+        setDockPreview((prev) => ({ kind: 'markdown', ...payload, nonce: (prev?.nonce ?? 0) + 1 }))
+      }),
+    [],
+  )
+
   // 文件树「插入 @ 引用」：经 composerInsert 文本信道注入输入框正文。
   const handleInsertFileMention = useCallback((path: string) => {
     insertTextIntoComposer(`@${path} `)
@@ -4329,11 +4368,31 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                             title={toolApprovalTitle(pendingToolConfirm)}
                             subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
                             detail={pendingToolConfirm.argumentsPreview}
-                            actions={[
-                              { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
-                              { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
-                              { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
-                            ]}
+                            actions={isPlanApproval(pendingToolConfirm)
+                              ? [
+                                // 拒绝 = Claude Code 的「Tell Claude what to change」：不执行，
+                                // 用户在输入框里说要改什么，claude 继续留在计划模式改计划。
+                                { label: '拒绝 / 让它改', onSelect: () => resolvePendingToolConfirm(false) },
+                                ...PLAN_APPROVAL_ACTIONS.map((action, index) => ({
+                                  label: action.label,
+                                  primary: index === PLAN_APPROVAL_ACTIONS.length - 1,
+                                  hint: index === PLAN_APPROVAL_ACTIONS.length - 1 ? 'Ctrl+↵' : undefined,
+                                  onSelect: () => {
+                                    resolvePendingToolConfirm(true, false, action.mode)
+                                    // 会话配置也切过去：CLI 那侧已被 `set_permission_mode` 切档，
+                                    // 配置不跟着改的话底栏胶囊仍显示「计划 (只读)」（与实际不符），
+                                    // 而且下次触发重启时会带着 `--permission-mode plan` 回到只读。
+                                    void handleExternalSandboxChange(action.mode).catch((error) => {
+                                      console.error('Failed to persist the post-plan permission mode:', error)
+                                    })
+                                  },
+                                })),
+                              ]
+                              : [
+                                { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
+                                { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
+                                { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
+                              ]}
                           />
                         )}
                         {pendingSessionConsent && (

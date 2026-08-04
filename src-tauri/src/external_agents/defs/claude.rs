@@ -156,7 +156,7 @@ pub fn build_claude_args(
     args.push(permission_mode.clone());
     // 追加在**档位值之后**：`--permission-mode` 与它的值必须相邻，中间插一个 flag 会让
     // 档位变成 `--permission-prompt-tool` 而真正的档位沦为裸位置参数。
-    args.extend(claude_permission_prompt_args(&permission_mode));
+    args.extend(claude_permission_prompt_args());
     args
 }
 
@@ -166,20 +166,32 @@ pub fn build_claude_args(
 /// `detection::sandbox_options_for`）。
 pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
-/// 走 stdio 控制通道问用户要权限的档位。目前只有 `default`。
+/// `--permission-prompt-tool stdio`：**每一档都带**（paseo 同款 —— 它的 `canUseTool` 回调
+/// 也是无条件挂上，档位交给 CLI 自己判断该不该来问）。
 ///
-/// 判据（`claude_permission_prompt_args`）刻意只认这**一个**档位，理由是「不改既有行为」：
-/// - `bypassPermissions`（默认档）：CLI 在咨询回调**之前**就放行一切，加了 flag 等于空转，
-///   但会顺带把 `AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode` 塞进工具表
-///   （本机实测：带 flag 的 init 有这三个，不带的没有）——那三个我们还答不了；
-/// - `auto` / `dontAsk`：CLI 自己那套分类器 / 白名单就是这两档的全部意义，加 flag 会把
-///   它们变成「每次问」，等于抹掉档位差异；
-/// - `plan` / `acceptEdits`：**代价比这里原先写的大**。官方 headless 文档原文是
+/// **这个 flag 不只是「要不要弹审批卡」，它同时是 `AskUserQuestion` / `EnterPlanMode` /
+/// `ExitPlanMode` 三个交互工具的总开关。** 本机实测（claude 2.1.207，`system/init` 的
+/// `tools[]`，2026-08-04）—— 六个档位全测，结论完全一致：
+///
+/// | argv | Ask | ExitPlan | EnterPlan |
+/// |---|---|---|---|
+/// | `--permission-mode {bypassPermissions,plan,acceptEdits,auto}`（不带 flag） | 无 | 无 | 无 |
+/// | 同上 **+ `--permission-prompt-tool stdio`** | **有** | **有** | **有** |
+///
+/// 与档位无关、与 `CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL` 无关，**只跟这个 flag 绑定**
+/// （连 `plan` 档不带 flag 都没有 `ExitPlanMode`）。此前只有 `default` 档带 ⇒ 其余档位下
+/// claude 手里根本没有「反问用户」这个工具 ⇒ 这个功能对 99% 的用户等于不存在。
+///
+/// **各档位的既有行为不变**，差异全部落在收到询问之后怎么处理，而不是带不带 flag：
+/// - `bypassPermissions`（默认档）：普通工具由 `claude_mode_auto_allows_tools` 就地放行、
+///   不弹卡（用户已经选了「全自动放行」），弹出来的只有问用户卡；
+/// - 其余档位：普通工具照常走审批卡。对 `auto` / `dontAsk` 来说这正是那两档的语义
+///   （分类器 / 白名单挡下来的那些，本来就该问人，此前是被 CLI 直接拒）；对
+///   `acceptEdits` / `plan` 还顺手补上了官方 headless 文档点名的那个坑 ——
 ///   「Other shell commands and network requests still need an `--allowedTools` entry or a
-///   `permissions.allow` rule, otherwise **the run aborts** when one is attempted」——
-///   越权操作不是「那一次调用被拒」，是**整轮崩掉**（用户选了「接受编辑」、claude 跑一句
-///   `npm test` 就没了）。按官方语义这两档其实**必须**带上这个 flag 才完整；今天不带是
-///   已知的半残状态，等默认档的产品决策一起放开。
+///   `permissions.allow` rule, otherwise **the run aborts** when one is attempted」，
+///   越权操作此前不是「那一次被拒」而是**整轮崩掉**（选了「接受编辑」、claude 跑一句
+///   `npm test` 就没了）。
 ///
 /// 值就是字面量 `stdio`（不是某个 MCP 工具名）。两条独立证据：
 /// 1. 二进制里 `ekm(mode, …)`：`if(mode==="stdio") return t.createCanUseTool(n)`，
@@ -192,12 +204,35 @@ pub const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 /// ⇒ stdout 收到 `control_request` / `can_use_tool`，回 `{behavior:"allow"}` 文件真的建了、
 /// 回 `{behavior:"deny",message}` 文件没建且 message 原样成为 `tool_result`；**不带 flag 的
 /// 对照组一条 `control_request` 都没有**，权限被 CLI 直接拒（"…but you haven't granted it yet"）。
-pub fn claude_permission_prompt_args(permission_mode: &str) -> Vec<String> {
-    if permission_mode == "default" {
-        vec!["--permission-prompt-tool".to_string(), "stdio".to_string()]
-    } else {
-        vec![]
-    }
+pub fn claude_permission_prompt_args() -> Vec<String> {
+    vec![
+        "--permission-prompt-tool".to_string(),
+        "stdio".to_string(),
+        // 允许**之后**用 `set_permission_mode` 切到 `bypassPermissions`。
+        //
+        // 不带它的话那条控制请求会被就地拒掉，回执原文（本机 2.1.207 实测）：
+        // `Cannot set permission mode to bypassPermissions because the session was not launched
+        //  with --dangerously-skip-permissions`
+        // —— 于是「批准计划 + 自动放行」永远切不过去。paseo 靠的是同一个开关
+        // （SDK 的 `allowDangerouslySkipPermissions: true`，注释写的就是「保住之后
+        // setPermissionMode("bypassPermissions") 的能力」）。
+        //
+        // **它本身不放松任何权限**：实测带上它启动，`system/init` 的 `permissionMode` 仍是
+        // 我们传的那一档（`default` 还是 `default`、`plan` 还是 `plan`），只是解开了「以后
+        // 能不能切到 bypass」这把锁。切到 `acceptEdits` / `default` 不需要它。
+        "--allow-dangerously-skip-permissions".to_string(),
+    ]
+}
+
+/// 这一档收到普通工具的 `can_use_tool` 时，是不是**就地放行、不打扰用户**。
+///
+/// 只有 `bypassPermissions` 是 true：那一档的语义本来就是「全自动放行」，此前连询问通道
+/// 都没有。现在为了 `AskUserQuestion` 把通道接上，普通工具必须原地放行 —— 否则「完全」档
+/// 会突然开始弹审批卡，那是行为回退。
+///
+/// `AskUserQuestion` 不受这里管（它不是「要不要放行这个工具」，见 `ApprovalHost::ask`）。
+pub fn claude_mode_auto_allows_tools(permission_mode: &str) -> bool {
+    permission_mode == DEFAULT_PERMISSION_MODE
 }
 
 /// `--append-system-prompt-file <path>`：把 Kivio 的会话级系统指令**追加**到 claude 原生
@@ -564,29 +599,40 @@ mod tests {
 
     // ---- 工具审批：--permission-prompt-tool stdio 的门控 ----
 
-    /// **接上审批之后默认行为必须一字不变**：默认档仍是 `bypassPermissions`，且不带
-    /// `--permission-prompt-tool` —— 否则所有既有用户的对话会突然开始弹卡片。
+    /// **默认档接上通道之后，用户可感知的行为必须一字不变**：默认档仍是
+    /// `bypassPermissions`，而它带 flag 只是为了 `AskUserQuestion`（那是这个工具唯一的
+    /// 开关，见 `claude_permission_prompt_args` 的实测矩阵）——普通工具就地放行、不弹卡。
     #[test]
     fn the_default_permission_mode_still_asks_for_nothing() {
         assert_eq!(DEFAULT_PERMISSION_MODE, "bypassPermissions");
-        for mode in ["bypassPermissions", "acceptEdits", "plan", ""] {
+        assert!(
+            claude_mode_auto_allows_tools("bypassPermissions"),
+            "「完全」档的普通工具必须就地放行，否则既有用户会突然开始弹卡片"
+        );
+        for mode in ["default", "acceptEdits", "plan", "auto", "dontAsk", ""] {
             assert!(
-                claude_permission_prompt_args(mode).is_empty(),
-                "{mode} 档不该带审批 flag（会改变既有行为）"
+                !claude_mode_auto_allows_tools(mode),
+                "{mode} 档不该被就地放行（那是偷偷降级成 bypassPermissions）"
             );
         }
     }
 
-    /// 只有 `default` 档走 stdio 控制通道问用户。值是字面量 `stdio`（不是某个 MCP 工具名）。
+    /// 三个交互工具（`AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode`）只在带 flag 时
+    /// 存在，所以**每一档都带**。值是字面量 `stdio`（不是某个 MCP 工具名）。
     #[test]
     fn the_ask_mode_routes_permissions_over_the_stdio_control_channel() {
         assert_eq!(
-            claude_permission_prompt_args("default"),
-            vec!["--permission-prompt-tool".to_string(), "stdio".to_string()]
+            claude_permission_prompt_args(),
+            vec![
+                "--permission-prompt-tool".to_string(),
+                "stdio".to_string(),
+                "--allow-dangerously-skip-permissions".to_string(),
+            ]
         );
     }
 
-    /// argv 层面：选了「每次确认」⇒ flag 与档位成对出现；其余档位一个都没有。
+    /// argv 层面：每一档都带 flag（否则那一档的 claude 手里没有问用户这个工具），
+    /// 而档位值本身照原样传给 CLI。
     #[test]
     fn build_args_carries_the_prompt_tool_only_for_the_ask_mode() {
         let mk = |sandbox: Option<&str>| {
@@ -605,23 +651,31 @@ mod tests {
                 None,
             )
         };
-        let asking = mk(Some("default"));
-        assert!(asking
-            .windows(2)
-            .any(|w| w == ["--permission-prompt-tool", "stdio"]));
-        assert!(asking
-            .windows(2)
-            .any(|w| w == ["--permission-mode", "default"]));
-        for mode in [
-            None,
-            Some("plan"),
-            Some("acceptEdits"),
-            Some("bypassPermissions"),
+        for (mode, expected_mode) in [
+            (Some("default"), "default"),
+            (Some("bypassPermissions"), "bypassPermissions"),
+            (Some("plan"), "plan"),
+            (Some("acceptEdits"), "acceptEdits"),
+            (Some("auto"), "auto"),
+            (Some("dontAsk"), "dontAsk"),
+            (None, DEFAULT_PERMISSION_MODE),
         ] {
+            let args = mk(mode);
             assert!(
-                !mk(mode).contains(&"--permission-prompt-tool".to_string()),
-                "{mode:?} 不该带审批 flag"
+                args.windows(2)
+                    .any(|w| w == ["--permission-prompt-tool", "stdio"]),
+                "{mode:?} 该带审批 flag —— 它是问用户工具的总开关"
             );
+            // 少了这个，「批准计划 + 自动放行」切档会被 CLI 拒（实测回执见
+            // `claude_permission_prompt_args`）。
+            assert!(
+                args.contains(&"--allow-dangerously-skip-permissions".to_string()),
+                "{mode:?} 该带解锁 bypass 切档的 flag"
+            );
+            // 档位与它的值仍然相邻（中间插 flag 会让档位沦为裸位置参数）。
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--permission-mode", expected_mode]));
         }
     }
 

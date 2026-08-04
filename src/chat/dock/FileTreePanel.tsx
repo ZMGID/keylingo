@@ -48,6 +48,7 @@ import {
 import { useFileTree } from './useFileTree'
 import { FileViewer } from './FileViewer'
 import { DiffView } from './DiffView'
+import { ChatMarkdown } from '../ChatMarkdown'
 import type { DockFsEntry } from './types'
 import type { DockPreviewRequest } from './RightDock'
 
@@ -184,10 +185,12 @@ export function FileTreePanel({
   /** Shift 范围选择的锚点（最近一次非 Shift 的点选）。 */
   const selectionAnchorRef = useRef<string | null>(null)
   const [editing, setEditing] = useState<EditingState | null>(null)
-  /** 就地查看器：点树里的文件 / 工具卡片文件预览（workdir 任意）/ 工具卡片 diff 预览。 */
+  /** 就地查看器：点树里的文件 / 工具卡片文件预览（workdir 任意）/ 工具卡片 diff 预览 /
+   *  计划预览。 */
   const [viewer, setViewer] = useState<
     | { kind: 'file'; workdir: string; path: string }
     | { kind: 'diff'; title: string; patch: string }
+    | { kind: 'markdown'; title: string; text: string }
     | null
   >(null)
   /** 拖拽悬停中的目标目录（ROOT_PATH = 根）。 */
@@ -287,7 +290,9 @@ export function FileTreePanel({
     setViewer(
       previewRequest.kind === 'file'
         ? { kind: 'file', workdir: previewRequest.workdir, path: previewRequest.path }
-        : { kind: 'diff', title: previewRequest.title, patch: previewRequest.patch },
+        : previewRequest.kind === 'markdown'
+          ? { kind: 'markdown', title: previewRequest.title, text: previewRequest.text }
+          : { kind: 'diff', title: previewRequest.title, patch: previewRequest.patch },
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewRequest?.nonce])
@@ -960,6 +965,21 @@ export function FileTreePanel({
           </div>
           <div className="custom-scrollbar min-h-0 flex-1 overflow-auto p-2">
             <DiffView patch={viewer.patch} lang={lang} />
+          </div>
+        </div>
+      )}
+      {viewer?.kind === 'markdown' && (
+        <div className="absolute inset-0 z-10 flex flex-col bg-[var(--theme-surface-soft)] dark:bg-[#262629]">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-neutral-200/70 px-2 py-1.5 dark:border-neutral-700/50">
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-neutral-800 dark:text-neutral-100">
+              {viewer.title}
+            </span>
+            <IconButton label={t.dockViewerClose} size="sm" variant="ghost" onClick={() => setViewer(null)}>
+              <X size={13} />
+            </IconButton>
+          </div>
+          <div className="custom-scrollbar min-h-0 flex-1 overflow-auto px-3 py-2">
+            <ChatMarkdown content={viewer.text} />
           </div>
         </div>
       )}

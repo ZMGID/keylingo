@@ -433,6 +433,10 @@ pub async fn run_external_cli_reply(
         conversation_id: &conversation_id,
         run_id: &run_id,
         generation: run_generation,
+        auto_allow_tools: std::sync::atomic::AtomicBool::new(
+            permission_mode_from_args(&args)
+                .is_some_and(crate::external_agents::defs::claude::claude_mode_auto_allows_tools),
+        ),
     });
 
     // Drain stderr concurrently with the stdout read below: keeps a full stderr pipe from
@@ -1286,6 +1290,16 @@ fn turn_asks_for_permission(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--permission-prompt-tool")
 }
 
+/// 本轮 argv 里的权限档位（`--permission-mode` 的值）。
+///
+/// 与 `turn_asks_for_permission` 同一个理由从 argv 读回来而不是再抄一份规则：决定 CLI 行为
+/// 的就是 argv 本身，读它就不可能与 `build_args` 分叉。
+fn permission_mode_from_args(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find(|w| w[0] == "--permission-mode")
+        .map(|w| w[1].as_str())
+}
+
 /// Send one `RunTurn` on `control` and pump its events/terminal result. On user cancel, send a
 /// protocol-level `Cancel`; if the turn doesn't wind down within `CANCEL_ESCALATE_GRACE`, escalate
 /// to `Close` (A5) so a hung session can't block cancellation indefinitely.
@@ -1418,6 +1432,17 @@ where
     outcome
 }
 
+/// 批准计划后把 claude 切到的档位 —— **仅当前端没给**（老 UI / 「总是允许」直通）时的兜底。
+///
+/// `acceptEdits` 而不是 `bypassPermissions`：批了计划的意思是「这些改动我同意」，不是
+/// 「以后任何命令都别问我」。正常路径下这一档由用户在卡片上三选一决定
+/// （见 `Chat.tsx` 的 `PLAN_APPROVAL_ACTIONS`）。
+const PLAN_APPROVED_PERMISSION_MODE: &str = "acceptEdits";
+
+/// 「批准并自动放行」那一档的值。与 `defs::claude::DEFAULT_PERMISSION_MODE` 同值，
+/// 但语义不同（那个是「新会话的默认档」，这个是「计划批准后要不要继续弹卡」的判据）。
+const FULL_ACCESS_PERMISSION_MODE: &str = "bypassPermissions";
+
 /// 宿主侧回答工具审批询问所需的一切。
 ///
 /// 存在的意义只有一个：**把外部 CLI 的权限询问接到 Kivio 已有的那条审批链路上**
@@ -1432,6 +1457,11 @@ struct ApprovalHost<'a> {
     conversation_id: &'a str,
     run_id: &'a str,
     generation: u64,
+    /// 普通工具就地放行、不弹卡（「完全」档；见 `claude_mode_auto_allows_tools`）。
+    /// 这一档接上询问通道**只为了** `AskUserQuestion` / `ExitPlanMode`，不是为了开始审批。
+    ///
+    /// 可变（`AtomicBool`）是因为用户可以在**轮中**用「批准并自动放行」把整轮切进这一档。
+    auto_allow_tools: std::sync::atomic::AtomicBool,
 }
 
 impl ApprovalHost<'_> {
@@ -1488,9 +1518,62 @@ impl ApprovalHost<'_> {
                     approved,
                     updated_input: approved
                         .then(|| claude_ask_user_updated_input(&ask.input, &answered)),
+                    set_permission_mode: None,
                 };
             }
             // 入参形状不认识（CLI 改了 schema）：退回普通审批卡，别静默吞掉这次询问。
+        }
+        // `ExitPlanMode` = 「计划写完了，批准我照着做」。走普通审批卡（卡片上就是计划正文，
+        // 见 `format_tool_approval_summary`），但批准时**必须额外切档位** —— CLI 不会因为这次
+        // `allow` 自己离开计划档，不切的话它下一句 `Edit` 又被挡回来，用户点了「批准」却什么
+        // 都没发生。目标档位取 `acceptEdits`（paseo 同款默认：批了计划就别再为每次编辑弹卡）。
+        //
+        // 这一条**排在 `auto_allow_tools` 之前**：批准一个计划是真正的用户决定，
+        // 「完全」档也不该替他点头。
+        //
+        // ponytail: 只切**本次会话**的档位，不改会话配置里的 `external_sandbox`
+        // （底栏胶囊仍显示「计划」）。够用是因为常驻会话不会因此重启；进程真的重启时会退回
+        // 计划档、需要重新批准。要让胶囊跟着变，得在跑轮途中改会话配置 —— 那是另一件事。
+        if crate::external_agents::session::claude_stream::is_exit_plan_mode(&ask.tool_name) {
+            let outcome = crate::chat::commands::interaction::request_tool_approval_outcome(
+                self.app,
+                self.state,
+                self.conversation_id,
+                self.run_id,
+                self.generation,
+                &record,
+            )
+            .await;
+            let mode = outcome
+                .approved
+                .then(|| {
+                    outcome
+                        .permission_mode
+                        .clone()
+                        .unwrap_or_else(|| PLAN_APPROVED_PERMISSION_MODE.to_string())
+                });
+            // 「批准并自动放行」= 这一轮剩下的工具也别再弹卡了。`auto_allow_tools` 是开轮时
+            // 从 argv 读的（那时还是计划档），不就地翻掉的话用户选了「自动放行」却还要一个个
+            // 点 —— 正是他刚刚选的那一档要消灭的东西。
+            if mode.as_deref() == Some(FULL_ACCESS_PERMISSION_MODE) {
+                self.auto_allow_tools.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return crate::external_agents::session::live::ApprovalDecision {
+                request_id: ask.request_id,
+                approved: outcome.approved,
+                updated_input: None,
+                set_permission_mode: mode,
+            };
+        }
+        // 「完全」档：通道之所以接上只为了上面那两张卡，普通工具原地放行。
+        // 少了这一条，选了「全自动放行」的用户会突然开始每个工具都被问一次。
+        if self.auto_allow_tools.load(std::sync::atomic::Ordering::Relaxed) {
+            return crate::external_agents::session::live::ApprovalDecision {
+                request_id: ask.request_id,
+                approved: true,
+                updated_input: None,
+                set_permission_mode: None,
+            };
         }
         let approved = crate::chat::commands::interaction::request_tool_approval(
             self.app,
@@ -1505,6 +1588,7 @@ impl ApprovalHost<'_> {
             request_id: ask.request_id,
             approved,
             updated_input: None,
+            set_permission_mode: None,
         }
     }
 
@@ -1610,6 +1694,12 @@ fn ask_user_prompt_from_claude_input(
 /// 多选时把多个 label 用 `, ` 拼起来（官方文档只给了单选的例子，多选的分隔符**未核实**；
 /// 拼串至少保证 claude 拿到的是它认识的字符串类型，而不是一个它可能不接受的数组）。
 /// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
+///
+/// **回的是「原入参 + answers」而不是重新拼一个 `{questions, answers}`**（paseo 的写法：
+/// `{...permission.request.input, answers}`）。`updatedInput` 会**整个替换**这次调用的入参，
+/// 自己拼就意味着 CLI 哪天给 schema 加个字段、我们就静默把它丢了 —— paseo 那边这个坑是
+/// 真踩过的（CHANGELOG #760「Answering an interactive question from a Claude agent now
+/// reaches Claude correctly instead of being dropped」）。
 fn claude_ask_user_updated_input(
     original_input: &serde_json::Value,
     answered: &crate::chat::ask_user::AskUserResponseResult,
@@ -1660,7 +1750,13 @@ fn claude_ask_user_updated_input(
             );
         }
     }
-    serde_json::json!({ "questions": raw, "answers": answers })
+    let mut updated = original_input
+        .as_object()
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    updated.insert("questions".to_string(), serde_json::Value::Array(raw));
+    updated.insert("answers".to_string(), serde_json::Value::Object(answers));
+    serde_json::Value::Object(updated)
 }
 
 fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
@@ -2588,7 +2684,7 @@ mod tests {
         );
         assert!(turn_asks_for_permission(&asking));
 
-        // 默认档（全自动放行）与其它 CLI 的 argv 一律不接 —— 既有行为不变。
+        // 默认档现在也接通道（`AskUserQuestion` 的唯一开关），但普通工具就地放行。
         let silent = crate::external_agents::defs::claude::build_claude_args(
             &RuntimeContext {
                 extra_allowed_dirs: vec![],
@@ -2603,10 +2699,43 @@ mod tests {
             },
             None,
         );
-        assert!(!turn_asks_for_permission(&silent));
+        assert!(turn_asks_for_permission(&silent));
         assert!(!turn_asks_for_permission(&[]));
         // 值出现在别处（比如某个 prompt 里）不算 —— 判据只认 flag 本身。
         assert!(!turn_asks_for_permission(&["stdio".to_string()]));
+    }
+
+    /// 「完全」档接上询问通道之后**用户感知不到差别**：普通工具原地放行，只有问用户卡会弹。
+    /// 判据同样取自 argv（`--permission-mode` 的值），不在这里重抄一份档位规则。
+    #[test]
+    fn the_full_access_mode_auto_allows_ordinary_tools() {
+        let mk = |sandbox: Option<&str>| {
+            crate::external_agents::defs::claude::build_claude_args(
+                &RuntimeContext {
+                    extra_allowed_dirs: vec![],
+                    resume_session_id: None,
+                    new_session_id: None,
+                    include_partial_messages: true,
+                },
+                &RuntimeBuildOptions {
+                    model: None,
+                    reasoning: None,
+                    sandbox: sandbox.map(str::to_string),
+                },
+                None,
+            )
+        };
+        let auto_allows = |args: &[String]| {
+            permission_mode_from_args(args)
+                .is_some_and(crate::external_agents::defs::claude::claude_mode_auto_allows_tools)
+        };
+        assert!(auto_allows(&mk(None)), "默认档（完全）必须就地放行");
+        assert!(auto_allows(&mk(Some("bypassPermissions"))));
+        assert!(
+            !auto_allows(&mk(Some("default"))),
+            "「每次确认」必须真的弹卡，不能被放行"
+        );
+        assert_eq!(permission_mode_from_args(&[]), None);
     }
 
     #[test]
@@ -3077,6 +3206,31 @@ mod tests {
             updated["answers"]["怎么做？"],
             serde_json::json!("都不要，换个思路")
         );
+    }
+
+    /// `updatedInput` **整个替换**这次调用的入参，所以原入参里我们不认识的字段必须原样带回，
+    /// 不能自己拼一个 `{questions, answers}` 了事 —— 那样 CLI 加个字段我们就静默丢了它
+    /// （paseo 踩过这个坑，见 `claude_ask_user_updated_input` 的说明）。
+    #[test]
+    fn unknown_input_fields_survive_the_round_trip() {
+        let input = serde_json::json!({
+            "questions": [{ "question": "去哪？", "options": [{ "label": "左" }] }],
+            "someFutureField": { "kept": true },
+        });
+        let answered = crate::chat::ask_user::AskUserResponseResult {
+            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: std::collections::HashMap::from([(
+                "0".to_string(),
+                crate::chat::ask_user::AskUserAnswer {
+                    selected_option_ids: vec!["0".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        let updated = claude_ask_user_updated_input(&input, &answered);
+        assert_eq!(updated["someFutureField"], input["someFutureField"]);
+        assert_eq!(updated["questions"], input["questions"]);
+        assert_eq!(updated["answers"]["去哪？"], serde_json::json!("左"));
     }
 
     /// 指纹只对 claude 生效（它的 effort / permission-mode / 系统提示是启动 flag）；

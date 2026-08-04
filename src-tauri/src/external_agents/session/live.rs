@@ -31,9 +31,9 @@ pub struct ApprovalAsk {
     /// 工具入参原文，用于卡片上的摘要。
     pub input: serde_json::Value,
     /// CLI 标记「这个工具要用户在卡片上直接作答」（`AskUserQuestion` / `ExitPlanMode`）。
-    /// 官方答法是从**同一条** `can_use_tool` 通道回 `allow + updatedInput.answers`。
-    /// `AskUserQuestion` 已经走通（宿主侧转成 Kivio 自己的问用户卡片，答复经
-    /// `ApprovalDecision::updated_input` 回去）；其余仍当场拒
+    /// 这两个都已经走通：`AskUserQuestion` 转成 Kivio 的问用户卡片、答复经
+    /// `ApprovalDecision::updated_input` 回去；`ExitPlanMode` 走审批卡、批准时额外经
+    /// `ApprovalDecision::set_permission_mode` 切档位。其余（CLI 将来新增的交互工具）仍当场拒
     /// （见 `claude_stream::APPROVAL_INTERACTIVE_UNSUPPORTED`）。
     pub requires_user_interaction: bool,
 }
@@ -49,6 +49,13 @@ pub struct ApprovalDecision {
     /// `allow + updatedInput.answers`（见 `claude_stream::APPROVAL_INTERACTIVE_UNSUPPORTED`），
     /// 没有第二条控制请求。`None` = 不改入参，CLI 用原入参。
     pub updated_input: Option<serde_json::Value>,
+    /// 回这条答复**之前**要先把 CLI 切到的权限档位（`set_permission_mode` 控制请求）。
+    ///
+    /// 存在的唯一理由是 `ExitPlanMode`：批准一个计划 = 「同意，去做吧」，而 CLI 不会因为
+    /// 这次 `allow` 自己离开计划档 —— 不切档位的话它下一句 `Edit` 又被计划档挡回来，
+    /// 用户点了「批准」却什么都没发生。paseo 的做法一样（`await setPermissionMode(...)`
+    /// 在 resolve 之前），顺序不能反：先切档、再放行。
+    pub set_permission_mode: Option<String>,
 }
 
 /// 一轮的权限审批通道。宿主持 `requests` 的接收端与 `decisions` 的发送端；会话持另一半。

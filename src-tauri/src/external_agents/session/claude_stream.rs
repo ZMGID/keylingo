@@ -271,6 +271,32 @@ fn set_model_request_line(request_id: &str, model: &str) -> String {
     )
 }
 
+/// 一条 `set_permission_mode` 控制请求（含结尾换行）。
+///
+/// **批准计划（`ExitPlanMode`）必须先发这条**：CLI 不会因为那次 `allow` 自己离开计划档，
+/// 不切档位的话它下一句 `Edit` 又被挡回去 —— 用户点了「批准」却什么都没发生。
+///
+/// **wire 形状是二进制核实的**（claude 2.1.207）：CLI 自己构造这条请求的代码是
+/// `{type:"control_request", request_id:`set-mode-…`, request:{subtype:"set_permission_mode",
+/// mode:e.permissionMode, ultraplan:e.ultraplan}}`，且 `set_permission_mode` 就在它接受的
+/// 控制请求集合里（`new Set(["set_model","set_permission_mode","interrupt",…])`）。
+/// `ultraplan` 是可选的，我们不发。
+///
+/// 与 `set_model` 同样的纪律：**调用方要读回 `control_response`**。二进制里有一条
+/// `set_permission_mode is not supported in this context (onSetPermissionMode callback not
+/// registered)` 的错误串 —— 也就是说它可能失败，失败了就得让用户知道，而不是让他对着一个
+/// 「批准了但 claude 还在计划档」的会话发呆。
+fn set_permission_mode_request_line(request_id: &str, mode: &str) -> String {
+    format!(
+        "{}\n",
+        json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "set_permission_mode", "mode": mode },
+        })
+    )
+}
+
 /// 一条 `control_response` 是不是在答我们那个 request_id；是的话返回它成功了没有。
 ///
 /// 形状与我们**发出去**的答复同构（`response.subtype` 为 `success` / `error`，
@@ -288,12 +314,18 @@ fn control_response_verdict(frame: &Value, request_id: &str) -> Option<bool> {
 
 /// 这条询问该问用户，还是当场就能定？返回 `Err(理由)` = 直接拒，不打扰用户。
 ///
-/// 目前只有一条当场拒的规则：`requires_user_interaction`（见
-/// `APPROVAL_INTERACTIVE_UNSUPPORTED`）。抽成纯函数是为了让「哪些不问用户」有单测可证。
+/// 目前只有一条当场拒的规则：`requires_user_interaction` 且**不是我们已经接住的那两个**
+/// （见 `APPROVAL_INTERACTIVE_UNSUPPORTED`）。抽成纯函数是为了让「哪些不问用户」有单测可证。
 fn approval_verdict(ask: &ApprovalAsk) -> Result<(), &'static str> {
-    // `AskUserQuestion` 现在答得了：宿主把它转成 Kivio 自己的问用户卡片，选项经
-    // `ApprovalDecision::updated_input` 回给 CLI（官方 `allow + updatedInput.answers`）。
-    if ask.requires_user_interaction && !is_ask_user_question(&ask.tool_name) {
+    // 两个交互工具都答得了：
+    // - `AskUserQuestion` → Kivio 自己的问用户卡片，选项经 `updated_input` 回去；
+    // - `ExitPlanMode`   → 普通审批卡，批准时经 `set_permission_mode` 先切档位再放行。
+    // 其余（CLI 将来新增的交互工具）仍当场拒 —— 沉默地放行一个我们答不了的交互工具，
+    // 结果是那一轮挂在它自己的对话框上。
+    if ask.requires_user_interaction
+        && !is_ask_user_question(&ask.tool_name)
+        && !is_exit_plan_mode(&ask.tool_name)
+    {
         return Err(APPROVAL_INTERACTIVE_UNSUPPORTED);
     }
     Ok(())
@@ -303,6 +335,11 @@ fn approval_verdict(ask: &ApprovalAsk) -> Result<(), &'static str> {
 /// 但比对时放宽 —— 名字是 CLI 给的，不值得为大小写差异丢掉整个功能。
 pub fn is_ask_user_question(tool_name: &str) -> bool {
     tool_name.eq_ignore_ascii_case("AskUserQuestion")
+}
+
+/// claude 内置的「计划写完了，批准我去做」工具名。同样放宽大小写比对。
+pub fn is_exit_plan_mode(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("ExitPlanMode")
 }
 
 /// 从一条 `can_use_tool` 请求里读出问用户所需的字段。
@@ -756,6 +793,9 @@ impl ClaudeStreamJsonSession {
         // 记下原始文案在轮末返回，让 `run.rs` 的重连策略把它降级成「换个新会话重连 + 上下文已重置
         // 提示」，而不是把一句英文原文甩给用户。
         let mut missing_session: Option<String> = None;
+        // 已发出、还没读到 `control_response` 的 `set_permission_mode`（批准计划时切档）。
+        // `(request_id, 目标档位)`。见下面读到答复时的处理。
+        let mut pending_mode_switch: Option<(String, String)> = None;
         loop {
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => {
@@ -802,6 +842,19 @@ impl ClaudeStreamJsonSession {
                         continue;
                     };
                     pending.remove(index);
+                    // 先切档位、再放行（顺序不能反）：`ExitPlanMode` 的批准要让 CLI 真的
+                    // 离开计划档，否则它下一句 `Edit` 又被挡回来。同一条 stdin 上的两帧按
+                    // 写入顺序处理，所以这里只要保证「切档在前」即可。
+                    if let Some(mode) = decision.set_permission_mode.as_deref() {
+                        let request_id = format!("kivio-set-mode-{}", Uuid::new_v4());
+                        let line = set_permission_mode_request_line(&request_id, mode);
+                        let _ = self.stdin.write_all(line.as_bytes()).await;
+                        let _ = self.stdin.flush().await;
+                        // 读回它的 `control_response`：这条请求**可能不被支持**（二进制里有
+                        // 那条 `onSetPermissionMode callback not registered` 的错误串）。
+                        // 失败了要让用户看见，而不是留他对着一个「批准了却还在计划档」的会话。
+                        pending_mode_switch = Some((request_id, mode.to_string()));
+                    }
                     let line = approval_response_line(
                         &decision.request_id,
                         decision.approved,
@@ -858,8 +911,24 @@ impl ClaudeStreamJsonSession {
                     continue;
                 }
             };
-            match classify_inbound_frame(&value, ask_tx.is_some()) {
-                // **fail-closed**：认不出来的控制请求也必须回一条 error 响应。沉默会让 claude
+            // 切档位请求的回执。失败必须说出来 —— 用户刚点了「批准计划」，而 claude 还在
+            // 计划档里，它接下来每一次编辑都会被挡回去，界面上却什么都看不出来。
+            if let Some((request_id, mode)) = pending_mode_switch.as_ref() {
+                if let Some(ok) = control_response_verdict(&value, request_id) {
+                    if !ok {
+                        let _ = events
+                            .send(UnifiedAgentEvent::TextDelta {
+                                delta: format!(
+                                    "\n\n> ⚠️ 已批准计划，但把 claude 切到「{mode}」档位失败了 —— 它可能仍在计划模式，无法真正修改文件。\n\n"
+                                ),
+                            })
+                            .await;
+                    }
+                    pending_mode_switch = None;
+                    continue;
+                }
+            }
+            match classify_inbound_frame(&value, ask_tx.is_some()) {                // **fail-closed**：认不出来的控制请求也必须回一条 error 响应。沉默会让 claude
                 // 永远等下去（它那侧没有超时），而本轮的读循环也没有超时 —— 那一轮就永久挂死。
                 InboundFrame::Reply(reply) => {
                     let _ = self.stdin.write_all(reply.as_bytes()).await;
@@ -1176,9 +1245,27 @@ mod tests {
 
     /// ack 只认自己那条 request_id，且必须能区分 success / error ——
     /// 认错了就会把「CLI 不支持」当成「切换成功」，于是用户换了模型却静默跑旧的。
+    /// 切档位请求的形状。**字段名是二进制核实的**（CLI 自己构造这条请求时用的就是
+    /// `{subtype:"set_permission_mode", mode:…}`）—— 猜错的表现是用户批准了计划、
+    /// claude 却还在计划档里，谁都看不出为什么。
     #[test]
-    fn control_response_verdict_matches_only_our_request_id() {
-        let ok: Value = serde_json::from_str(
+    fn set_permission_mode_request_shape_matches_the_control_request_envelope() {
+        let line = set_permission_mode_request_line("req-plan", "acceptEdits");
+        assert!(line.ends_with('\n'), "必须是一整行");
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["type"], serde_json::json!("control_request"));
+        // request_id 在**帧顶层**（与 `set_model` / `interrupt` 一致）。
+        assert_eq!(value["request_id"], serde_json::json!("req-plan"));
+        assert_eq!(
+            value["request"]["subtype"],
+            serde_json::json!("set_permission_mode")
+        );
+        assert_eq!(value["request"]["mode"], serde_json::json!("acceptEdits"));
+        assert!(value["request"]["mode"].is_string());
+    }
+
+    #[test]
+    fn control_response_verdict_matches_only_our_request_id() {        let ok: Value = serde_json::from_str(
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"a"}}"#,
         )
         .unwrap();
@@ -1489,12 +1576,11 @@ mod tests {
         assert!(reject_pending_lines(&[], "x").is_empty());
     }
 
-    /// 需要在卡片上直接作答的工具（`AskUserQuestion` / `ExitPlanMode`）当场拒，不打扰用户：
-    /// 批准它们只会让 CLI 紧接着发一条我们还没实现的 `request_user_dialog`，那条会被
-    /// fail-closed 回 error、工具照样失败 —— 给用户一张点了也没用的卡片更糟。
+    /// 两个交互工具都必须问到用户；CLI 将来新增的交互工具仍当场拒
+    /// （给一张点了也没用的卡片比诚实拒掉更糟）。
     #[test]
     fn interactive_tools_are_denied_without_bothering_the_user() {
-        // `AskUserQuestion` 现在**要问用户**：宿主把它转成 Kivio 的问用户卡片，
+        // `AskUserQuestion`：宿主把它转成 Kivio 的问用户卡片，
         // 选项经 `ApprovalDecision::updated_input` 回给 CLI（官方 `allow + updatedInput`）。
         let ask_user = ask_for(
             r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{},"requires_user_interaction":true}}"#,
@@ -1505,13 +1591,23 @@ mod tests {
             "AskUserQuestion 必须问用户，不能当场拒"
         );
 
-        // 其余需要卡片内作答的工具仍当场拒：`ExitPlanMode` 的批准要先发切档位的控制帧，
-        // 那条路还没核实过，给一张点了没用的卡片比诚实拒掉更糟。
+        // `ExitPlanMode`：走普通审批卡，批准时经 `ApprovalDecision::set_permission_mode`
+        // 先把 CLI 切出计划档再放行。
         let plan = ask_for(
-            r#"{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{},"requires_user_interaction":true}}"#,
+            r#"{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"1. 改 a.rs"},"requires_user_interaction":true}}"#,
         )
         .expect("ask");
-        assert!(approval_verdict(&plan).is_err());
+        assert!(
+            approval_verdict(&plan).is_ok(),
+            "ExitPlanMode 必须问用户 —— 计划批不批是用户的决定"
+        );
+
+        // 认不出来的交互工具（CLI 将来新增的）仍当场拒。
+        let future = ask_for(
+            r#"{"type":"control_request","request_id":"r4","request":{"subtype":"can_use_tool","tool_name":"SomeFutureDialog","input":{},"requires_user_interaction":true}}"#,
+        )
+        .expect("ask");
+        assert!(approval_verdict(&future).is_err());
 
         let ordinary = ask_for(
             r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
@@ -1856,6 +1952,24 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires live claude login + network"]
     async fn live_ask_user_question_accepts_our_updated_input() {
+        live_ask_user_round_trip("default").await;
+    }
+
+    /// 同一条往返，跑在**默认档**（「完全」= `bypassPermissions`）上。
+    ///
+    /// 单测只能证明 argv 带上了 flag、以及带 flag 的 init 里有 `AskUserQuestion`
+    /// （`defs::claude::claude_permission_prompt_args` 的实测矩阵）。**它证明不了**这一档下
+    /// CLI 真的会为 `AskUserQuestion` 发 `can_use_tool` —— bypass 的语义是「咨询回调之前就
+    /// 放行」，若它对这个工具也照样短路，模型拿到的就是一份没有 answers 的原始入参。
+    /// 那正是这条测试要证伪的东西：跑绿了才说明默认档的问用户是真的通的。
+    #[tokio::test]
+    #[ignore = "requires live claude login + network"]
+    async fn live_ask_user_question_works_in_the_default_full_access_mode() {
+        live_ask_user_round_trip(crate::external_agents::defs::claude::DEFAULT_PERMISSION_MODE)
+            .await;
+    }
+
+    async fn live_ask_user_round_trip(sandbox: &str) {
         let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
             eprintln!("SKIP: 本机没有可用的 claude CLI");
             return;
@@ -1864,9 +1978,9 @@ mod live_tests {
         let workdir = std::env::temp_dir().join(format!("kivio-claude-askuser-{session_id}"));
         std::fs::create_dir_all(&workdir).expect("create workdir");
 
-        // 「每次确认」档位：只有带 `--permission-prompt-tool stdio` 时 `AskUserQuestion`
-        // 才会出现在工具表里（本机实测：带 flag 的 init 有它，不带的没有）。
-        let args = live_args_with_sandbox(&session_id, None, Some("default"));
+        // `AskUserQuestion` 只在带 `--permission-prompt-tool stdio` 时才出现在工具表里
+        // （档位无关，见 `defs::claude::claude_permission_prompt_args` 的实测矩阵）。
+        let args = live_args_with_sandbox(&session_id, None, Some(sandbox));
         let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &args, &workdir).await else {
             eprintln!("SKIP: 连接失败（未登录 / 网络？）");
             let _ = std::fs::remove_dir_all(&workdir);
@@ -1926,6 +2040,7 @@ mod live_tests {
                         request_id: ask.request_id,
                         approved: true,
                         updated_input,
+                            set_permission_mode: None,
                     })
                     .await;
                 if sent.is_err() {
@@ -1973,6 +2088,99 @@ text={}",
         );
 
         close_and_cleanup(control, &workdir).await;
+    }
+
+    /// **批准计划的真机判据**：计划档下让 claude 提一个改文件的计划 → 它调 `ExitPlanMode`
+    /// → 我们批准并经 `set_permission_mode` 把它切到 `acceptEdits` → 它真的把文件建出来。
+    ///
+    /// 这条测试是 `set_permission_mode` 那个 wire 形状唯一能证伪的地方（字段名是从二进制里
+    /// 读出来的，不是文档）。切档失败的表现：文件没建出来，且输出里带我们那条警告。
+    #[tokio::test]
+    #[ignore = "requires live claude login + network"]
+    async fn live_plan_approval_switches_the_cli_out_of_plan_mode() {
+        let Some(bin) = resolve_binary(&CLAUDE_AGENT_DEF).await else {
+            eprintln!("SKIP: 本机没有可用的 claude CLI");
+            return;
+        };
+        let session_id = Uuid::new_v4().to_string();
+        let workdir = std::env::temp_dir().join(format!("kivio-claude-plan-{session_id}"));
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+        let target = workdir.join("plan-proof.txt");
+
+        let args = live_args_with_sandbox(&session_id, None, Some("plan"));
+        let Ok(session) = ClaudeStreamJsonSession::connect(&bin, &args, &workdir).await else {
+            eprintln!("SKIP: 连接失败（未登录 / 网络？）");
+            let _ = std::fs::remove_dir_all(&workdir);
+            return;
+        };
+        let control = spawn_claude_stream_session_actor(session);
+
+        let (ask_tx, mut ask_rx) = mpsc::channel::<ApprovalAsk>(8);
+        let (dec_tx, dec_rx) = mpsc::channel(8);
+        let bridge = ApprovalBridge {
+            requests: ask_tx,
+            decisions: dec_rx,
+        };
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let asked_for_task = asked.clone();
+        // 扮演宿主 + 用户：批准一切；`ExitPlanMode` 额外带上切档位（生产代码同款）。
+        let answerer = tokio::spawn(async move {
+            while let Some(ask) = ask_rx.recv().await {
+                eprintln!("  ask: tool={}", ask.tool_name);
+                asked_for_task
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(ask.tool_name.clone());
+                let set_permission_mode =
+                    is_exit_plan_mode(&ask.tool_name).then(|| "acceptEdits".to_string());
+                let sent = dec_tx
+                    .send(crate::external_agents::session::live::ApprovalDecision {
+                        request_id: ask.request_id,
+                        approved: true,
+                        updated_input: None,
+                        set_permission_mode,
+                    })
+                    .await;
+                if sent.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let out = one_turn_with_approvals(
+            &control,
+            "Propose a one-step plan to create a file named plan-proof.txt containing the \
+             single word ok in the current directory, then call ExitPlanMode. Once the plan \
+             is approved, create that file.",
+            false,
+            Some(bridge),
+        )
+        .await;
+        answerer.abort();
+        let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        eprintln!("result={:?}\nasked={asked:?}\ntext={}", out.result, out.text.trim());
+
+        if out.result.is_err() {
+            eprintln!("SKIP: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        if !asked.iter().any(|name| is_exit_plan_mode(name)) {
+            eprintln!("SKIP: 这一轮模型没有用 ExitPlanMode（提示词没引导住）：{asked:?}");
+            close_and_cleanup(control, &workdir).await;
+            return;
+        }
+        assert!(
+            !out.text.contains("切到"),
+            "切档位被 CLI 拒了（形状多半不对）：{}",
+            out.text
+        );
+        let created = target.exists();
+        close_and_cleanup(control, &workdir).await;
+        assert!(
+            created,
+            "批准了计划但文件没建出来 —— claude 多半还卡在计划档里（set_permission_mode 没生效）"
+        );
     }
 
     /// **多选答案的分隔符判据**（Issue 5）：官方文档只给了单选的例子，我们用 `", "` 拼串。
@@ -2059,6 +2267,7 @@ text={}",
                         request_id: ask.request_id,
                         approved: true,
                         updated_input,
+                            set_permission_mode: None,
                     })
                     .await;
                 if sent.is_err() {
@@ -2511,6 +2720,7 @@ text={}",
                         request_id: ask.request_id,
                         approved: approve,
                         updated_input: None,
+                            set_permission_mode: None,
                     })
                     .await;
                 if sent.is_err() {

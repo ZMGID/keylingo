@@ -427,6 +427,37 @@ fn sanitize_generated_title_rejects_empty_output() {
     assert_eq!(sanitize_generated_title("标题：..."), None);
 }
 
+/// 计划批准卡上必须是**计划正文**：用户批的是这份计划，看到一坨截断的 JSON 就没法判断
+/// 该不该点批准。
+#[test]
+fn format_tool_approval_summary_shows_the_plan_text() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "ExitPlanMode".to_string(),
+        source: "external_cli".to_string(),
+        server_id: None,
+        arguments: r#"{"plan":"1. 改 run.rs\n2. 加测试"}"#.to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert!(summary.detail.contains("1. 改 run.rs"));
+    assert!(summary.detail.contains("2. 加测试"));
+    // 认出计划之后不再拖一坨原始 JSON。
+    assert!(!summary.detail.contains("\"plan\""));
+}
+
 #[test]
 fn format_tool_approval_summary_highlights_run_command() {
     let record = ToolCallRecord {

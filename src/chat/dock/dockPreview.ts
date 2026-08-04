@@ -32,3 +32,21 @@ export function onDockDiffPreviewRequest(cb: DiffListener): () => void {
 export function requestDockDiffPreview(payload: DockDiffPayload): void {
   diffListener?.(payload)
 }
+
+// markdown 预览信道：claude 提交计划（ExitPlanMode）→ 右侧栏渲染整份计划。
+// 与 diff 分开而不是复用：载荷不同（正文 vs 补丁），渲染器也不同（ChatMarkdown vs DiffView）。
+export type DockMarkdownPayload = { title: string; text: string }
+type MarkdownListener = (payload: DockMarkdownPayload) => void
+
+let markdownListener: MarkdownListener | null = null
+
+export function onDockMarkdownPreviewRequest(cb: MarkdownListener): () => void {
+  markdownListener = cb
+  return () => {
+    if (markdownListener === cb) markdownListener = null
+  }
+}
+
+export function requestDockMarkdownPreview(payload: DockMarkdownPayload): void {
+  markdownListener?.(payload)
+}

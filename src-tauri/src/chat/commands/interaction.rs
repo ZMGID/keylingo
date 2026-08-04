@@ -137,6 +137,9 @@ pub(crate) fn chat_confirm_tool_call(
     tool_call_id: String,
     approved: bool,
     always: Option<bool>,
+    // 计划批准（`ExitPlanMode`）三选一里用户选的那一档，决定批准后把 CLI 切到哪个权限
+    // 模式。普通审批不传。
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
     let pending = state
         .pending_chat_tool_approvals
@@ -147,7 +150,12 @@ pub(crate) fn chat_confirm_tool_call(
         if approved && always.unwrap_or(false) {
             state.grant_tool_always_allow(&pending.conversation_id, &pending.tool_name);
         }
-        let _ = pending.sender.send(approved);
+        let _ = pending.sender.send(crate::state::ToolApprovalOutcome {
+            approved,
+            permission_mode: permission_mode
+                .map(|mode| mode.trim().to_string())
+                .filter(|mode| !mode.is_empty()),
+        });
         crate::chat::protocol::withdraw_tool_approval(&app, &tool_call_id);
     }
     Ok(())
@@ -387,10 +395,27 @@ pub(crate) async fn request_tool_approval(
     generation: u64,
     record: &ToolCallRecord,
 ) -> bool {
+    request_tool_approval_outcome(app, state, conversation_id, run_id, generation, record)
+        .await
+        .approved
+}
+
+/// 同 `request_tool_approval`，但把用户选的那一档也带回来（计划批准的三选一）。
+pub(crate) async fn request_tool_approval_outcome(
+    app: &AppHandle,
+    state: &AppState,
+    conversation_id: &str,
+    run_id: &str,
+    generation: u64,
+    record: &ToolCallRecord,
+) -> crate::state::ToolApprovalOutcome {
     // 用户此前对该工具按过「总是允许」→ 本对话内直接放行，不弹卡、不占挂起表。
     // 内置 agent 与外部 CLI 都走这个函数，所以一处判断两条路同时生效。
     if state.has_tool_always_allow(conversation_id, &record.name) {
-        return true;
+        return crate::state::ToolApprovalOutcome {
+            approved: true,
+            permission_mode: None,
+        };
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
@@ -431,7 +456,7 @@ pub(crate) async fn request_tool_approval(
             pending.remove(&record.id);
             drop(pending);
             withdraw_tool_confirm(app, &record.id);
-            return false;
+            return crate::state::ToolApprovalOutcome::default();
         }
     };
     match result {
@@ -447,7 +472,7 @@ pub(crate) async fn request_tool_approval(
             // 「允许」是个静默空操作（`chat_confirm_tool_call` 找不到条目就直接 Ok），
             // 他会以为自己批准了，而工具早就被拒了。
             withdraw_tool_confirm(app, &record.id);
-            false
+            crate::state::ToolApprovalOutcome::default()
         }
     }
 }
@@ -665,6 +690,17 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> ToolAppro
                 if let Some(old) = first_old {
                     lines.push(format!("Replace: {}", truncate_chars(&old, 180)));
                 }
+            }
+        }
+        // claude 的「计划写完了，批准我照着做」。卡片上要看到的是**计划正文**本身
+        // —— 用户批的是这份计划，不是一个工具名。
+        //
+        // 留得比别的分支长得多（20k 字符）有两个理由：卡片上那块灰框自己会滚
+        // （`max-h-40 overflow-auto`），而**右侧栏会拿同一份文本渲染整份计划**
+        // （`requestDockMarkdownPreview`）—— 在这里截短就等于右边也读不全。
+        "exitplanmode" => {
+            if let Some(plan) = field(&["plan"]) {
+                lines.push(truncate_chars(&plan, 20_000));
             }
         }
         _ => {}

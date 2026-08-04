@@ -359,6 +359,37 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText('run.rs')).toBeInTheDocument()
   })
 
+  // claude 的问用户走的是它自己的工具名。认不出来 = 渲染成普通工具卡 = 用户无处作答。
+  it('renders claude AskUserQuestion as the ask-user card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'AskUserQuestion',
+          source: 'external_cli',
+          status: 'running',
+          structured_content: {
+            askUser: {
+              phase: 'awaiting',
+              questions: [{
+                id: '0',
+                prompt: '用哪种方式重试？',
+                options: [
+                  { id: '0', label: '指数退避' },
+                  { id: '1', label: '立即重试' },
+                ],
+                allow_multiple: false,
+                allow_custom: true,
+              }],
+              answers: {},
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('用哪种方式重试？')).toBeInTheDocument()
+    expect(screen.getByText('指数退避')).toBeInTheDocument()
+  })
+
   it('maps claude WebFetch / TodoWrite through the snake_case aliases', () => {
     const { unmount } = render(
       <ToolCallBlock
