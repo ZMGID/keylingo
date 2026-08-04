@@ -385,7 +385,10 @@ pub async fn run_command(
 /// Above this size, a command's full output is written to a temp file and the
 /// returned text is tail-truncated. The full log path is noted in the head of
 /// the returned text so the model can read the complete output if needed.
-const MAX_INLINE_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
+/// `files.rs` also cites it: a `head -c` bigger than this would be offloaded to
+/// a log the model then has to `read` — which is what it was escaping in the
+/// first place.
+pub(super) const MAX_INLINE_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// Tail-truncation caps for the inline body: keep the END of the output (where
 /// errors and final results live), bounded by both a line count and a byte size,

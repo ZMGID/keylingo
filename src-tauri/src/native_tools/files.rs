@@ -145,8 +145,8 @@ pub fn read_file(
     } else {
         lines[start..end].join("\n")
     };
+    let display_path = workspace_display_path(workspace, &full);
     Ok(ReadFileResult {
-        path: workspace_display_path(workspace, &full),
         resolved_path: full.display().to_string(),
         content: returned_content,
         total_lines,
@@ -154,11 +154,28 @@ pub fn read_file(
         end_line: end,
         truncated,
         file_size: metadata.len(),
-        // 首行自身就超字节预算时 kept==0：下一次从**下一行**继续，绝不把 next_offset
-        // 停在同一行上（那会让模型原地打转）。整行内容由 warning 指向 run_command。
-        next_offset: truncated.then(|| if kept == 0 { start + 2 } else { end + 1 }),
-        warnings: cap_warnings(capped, start, end, kept),
+        next_offset: truncated.then(|| next_offset_after(start, end, kept, capped)),
+        warnings: cap_warnings(capped, &display_path, start, end, kept),
+        path: display_path,
     })
+}
+
+/// 下一次续读的起始行。
+///
+/// 常规是 `end + 1`。唯一的例外是**怪物长行**（首行自身就超字节预算 → `kept == 0`
+/// 且触顶原因是 `Bytes`）：那一行永远读不出来，`end + 1` 会把 next_offset 停在它
+/// 自己身上，模型照做就是原地打转，所以跳到下一行，整行内容交给 warning 指的
+/// `run_command`。
+///
+/// 判据必须同时看 `capped`，**不能只看 `kept == 0`**：`limit=0` 同样得到 `kept == 0`
+/// 但 `capped` 是 `None`，那时必须老老实实指回 `end + 1`（= 原地），否则会静默跳过
+/// 一行、且因为没触顶连 warning 都不给。
+fn next_offset_after(start: usize, end: usize, kept: usize, capped: Option<TruncatedBy>) -> usize {
+    if kept == 0 && capped == Some(TruncatedBy::Bytes) {
+        start + 2
+    } else {
+        end + 1
+    }
 }
 
 /// 触顶原因（照抄 pi `TruncationResult.truncatedBy`）。
@@ -195,15 +212,26 @@ fn truncate_head(lines: &[&str]) -> (usize, Option<TruncatedBy>) {
 
 /// 把触顶原因翻成模型能照做的一句话（对齐 pi 的 `[Showing lines … Use offset=N to
 /// continue.]`）。没触顶就没有 warning——文件本来就读完了，不该吓唬模型。
-fn cap_warnings(capped: Option<TruncatedBy>, start: usize, end: usize, kept: usize) -> Vec<String> {
+fn cap_warnings(
+    capped: Option<TruncatedBy>,
+    path: &str,
+    start: usize,
+    end: usize,
+    kept: usize,
+) -> Vec<String> {
     let kb = TOOL_OUTPUT_MAX_BYTES / 1024;
     match capped {
         None => Vec::new(),
+        // 怪物长行的逃生口。`head -c` 取的是 run_command 的**内联**上限而不是 50KB：
+        // 超过那个数 run_command 会把输出转存成日志文件，模型还得回头 read 它，那一行
+        // 依旧超 50KB —— 兜了一圈回到原点。命令给的是示例（Windows 上未必有 sed），
+        // 路径是真路径，模型可以直接照抄。
         Some(TruncatedBy::Bytes) if kept == 0 => vec![format!(
-            "第 {line} 行单行就超过 {kb}KB 的单次读取上限。用 run_command 取这一行：\
-             sed -n '{line}p' <path> | head -c {TOOL_OUTPUT_MAX_BYTES}；或用 offset={next} 跳过它继续。",
+            "第 {line} 行单行就超过 {kb}KB 的单次读取上限。用 run_command 单独取它，\
+             例如 `sed -n '{line}p' {path} | head -c {inline}`；或用 offset={next} 跳过这一行继续。",
             line = start + 1,
             next = start + 2,
+            inline = super::shell::MAX_INLINE_COMMAND_OUTPUT_BYTES,
         )],
         Some(TruncatedBy::Bytes) => vec![format!(
             "单次读取上限 {kb}KB 已触顶（不是文件结尾），用 offset={} 继续。",
@@ -243,10 +271,13 @@ fn read_file_window_streaming(
     for line in reader.lines() {
         let line = line.map_err(|err| format!("Read file failed: {err}"))?;
         if total_lines >= start && total_lines < end && !window_byte_capped {
-            if window_bytes + line.len() > TOOL_OUTPUT_MAX_BYTES {
+            // `+1` 是 join("\n") 会补回来的换行符——不算就会比预算多发 (行数-1) 字节，
+            // 和非流式路径的 truncate_head 口径对不上。
+            let cost = line.len() + usize::from(!window.is_empty());
+            if window_bytes + cost > TOOL_OUTPUT_MAX_BYTES {
                 window_byte_capped = true;
             } else {
-                window_bytes += line.len();
+                window_bytes += cost;
                 window.push(line);
             }
         }
@@ -264,8 +295,8 @@ fn read_file_window_streaming(
     } else {
         None
     };
+    let display_path = workspace_display_path(workspace, full);
     Ok(ReadFileResult {
-        path: workspace_display_path(workspace, full),
         resolved_path: full.display().to_string(),
         content: window.join("\n"),
         total_lines,
@@ -273,8 +304,9 @@ fn read_file_window_streaming(
         end_line: end,
         truncated,
         file_size: metadata.len(),
-        next_offset: truncated.then(|| if kept == 0 { start + 2 } else { end + 1 }),
-        warnings: cap_warnings(capped, start, end, kept),
+        next_offset: truncated.then(|| next_offset_after(start, end, kept, capped)),
+        warnings: cap_warnings(capped, &display_path, start, end, kept),
+        path: display_path,
     })
 }
 
@@ -1830,6 +1862,40 @@ mod tests {
         assert_eq!(result.next_offset, Some(2), "skips past the monster line");
         assert!(result.warnings[0].contains("run_command"));
         let _ = fs::remove_file(monster);
+    }
+
+    #[test]
+    fn zero_limit_stays_put_and_multibyte_budget_counts_bytes() {
+        let workspace = NativeToolWorkspace::global(&[]);
+
+        // `limit: 0` also yields kept == 0, but it is NOT the monster-line case:
+        // next_offset must point back at the same line, never skip one. Regression
+        // for the `kept == 0` shortcut that silently swallowed line 1.
+        let file = std::env::temp_dir().join(format!("kivio_zero_{}.txt", uuid::Uuid::new_v4()));
+        fs::write(&file, "one\ntwo\nthree\n").expect("write");
+        let result = read_file(
+            &workspace,
+            &json!({ "path": file.to_string_lossy(), "limit": 0 }),
+        )
+        .expect("zero limit");
+        assert_eq!(result.next_offset, Some(1), "must not skip line 1");
+        assert!(result.warnings.is_empty(), "no cap was hit");
+        let _ = fs::remove_file(file);
+
+        // The byte budget counts BYTES, not chars: CJK is 3 bytes per char, so two
+        // 9k-char lines are 54KB and cannot share one 50KB window.
+        let cjk = std::env::temp_dir().join(format!("kivio_cjk_{}.txt", uuid::Uuid::new_v4()));
+        let line = "中".repeat(9_000); // 27_000 bytes
+        fs::write(&cjk, format!("{line}\n{line}\n{line}\n")).expect("write");
+        let result =
+            read_file(&workspace, &json!({ "path": cjk.to_string_lossy() })).expect("read cjk");
+        assert_eq!(result.end_line, 1, "27KB × 2 would blow the 50KB budget");
+        assert_eq!(
+            result.content.chars().count(),
+            9_000,
+            "whole chars, never cut mid-codepoint"
+        );
+        let _ = fs::remove_file(cjk);
     }
 
     #[test]
