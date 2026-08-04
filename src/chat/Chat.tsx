@@ -23,6 +23,7 @@ import {
 } from './chatRoutes'
 import { ChatImageViewer } from './ChatImageViewer'
 import { ApprovalCard } from './ApprovalCard'
+import { AskUserBlock } from './AskUserBlock'
 import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
@@ -899,11 +900,30 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [toolsRequested, setToolsRequested] = useState(false)
   const [approvalPolicy, setApprovalPolicy] = useState('readonly_auto_sensitive_confirm')
   const [pendingToolConfirm, setPendingToolConfirm] = useState<ChatToolConfirmPayload | null>(null)
+  /** 待答的问用户询问：整张可作答的面板吊在**输入框上方**（与审批卡同一个槽位），
+   *  消息流里只留一行痕迹。生成这一刻是停在这里等人的，把它放在视线和手都在的地方。 */
+  const [pendingUserPrompt, setPendingUserPrompt] = useState<ChatUserPromptPayload | null>(null)
   const [pendingSessionConsent, setPendingSessionConsent] = useState<ChatSessionConsentPayload | null>(null)
   const [contextState, setContextState] = useState<ConversationContextState | null>(null)
   const [contextLoading, setContextLoading] = useState(false)
-  const [contextCompressing, setContextCompressing] = useState(false)
-  const [agentLoopCompacting, setAgentLoopCompacting] = useState(false)
+  // 压缩状态必须按会话记，不能用全局 boolean：压缩中切会话会把「压缩中」动画留在
+  // 另一个会话上，而压缩事件按 conversationId 派发，收敛条件不能再是「是不是当前会话」
+  // （那样后台会话的 completed 会被丢掉，标志永远清不掉）。手动与自动压缩共用这一个集合。
+  const [compactingConversationIds, setCompactingConversationIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const markConversationCompacting = useCallback((conversationId: string, compacting: boolean) => {
+    setCompactingConversationIds((previous) => {
+      if (previous.has(conversationId) === compacting) return previous
+      const next = new Set(previous)
+      if (compacting) next.add(conversationId)
+      else next.delete(conversationId)
+      return next
+    })
+  }, [])
+  const contextCompressing = currentConversation
+    ? compactingConversationIds.has(currentConversation.id)
+    : false
   const [animateCompactionBoundaryId, setAnimateCompactionBoundaryId] = useState<string | null>(null)
   const [contextError, setContextError] = useState('')
   // Hook 执行失败：非阻断警告条。ponytail: 只留最新一条 —— Hook 是旁路观测，
@@ -949,6 +969,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
   const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload[]>>({})
+  /** 按会话排队（同审批卡）：切会话回来还在等的那条要还在。 */
+  const pendingUserPromptsRef = useRef<Record<string, ChatUserPromptPayload[]>>({})
   const pendingSessionConsentsRef = useRef<Record<string, ChatSessionConsentPayload>>({})
   const streamStartedAtRef = useRef<number | null>(null)
   const streamingContentRef = useRef('')
@@ -971,6 +993,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     streamErrors: streamErrorsRef.current,
     pendingToolConfirms: pendingToolConfirmsRef.current,
     pendingSessionConsents: pendingSessionConsentsRef.current,
+    pendingUserPrompts: pendingUserPromptsRef.current,
   }), [])
 
   const syncGeneratingConversationIds = useCallback(() => {
@@ -1120,6 +1143,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       clearStreamingPreview()
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
+      setPendingUserPrompt(null)
       setStreamCoarse({ streamError: '' })
       return
     }
@@ -1137,6 +1161,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setStreamCoarse({ streamError: streamErrorsRef.current[conversationId] ?? '' })
     setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId]?.[0] ?? null)
     setPendingSessionConsent(pendingSessionConsentsRef.current[conversationId] ?? null)
+    setPendingUserPrompt(pendingUserPromptsRef.current[conversationId]?.[0] ?? null)
   }, [cancelPendingFrame, clearStreamingPreview])
 
   const applyStreamSnapshotToState = useCallback((snapshot: ConversationStreamSnapshot) => {
@@ -1163,6 +1188,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (currentConversationIdRef.current === conversationId) {
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
+      setPendingUserPrompt(null)
       clearStreamingPreview()
     }
   }, [clearStreamingPreview, localState, syncGeneratingConversationIds])
@@ -1180,9 +1206,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (conversationId) {
       delete pendingToolConfirmsRef.current[conversationId]
       delete pendingSessionConsentsRef.current[conversationId]
+      delete pendingUserPromptsRef.current[conversationId]
     }
     setPendingToolConfirm(null)
     setPendingSessionConsent(null)
+    setPendingUserPrompt(null)
   }, [])
 
   const resetLocalCancellation = useCallback(() => {
@@ -1733,8 +1761,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const handleCompressContext = useCallback(async () => {
     const conversationId = currentConversationIdRef.current
-    if (!conversationId || contextCompressing) return
-    setContextCompressing(true)
+    if (!conversationId || compactingConversationIds.has(conversationId)) return
+    markConversationCompacting(conversationId, true)
     setContextError('')
     try {
       const result = await chatApi.compressContext(conversationId)
@@ -1757,17 +1785,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         setContextError(typeof err === 'string' ? err : (err as Error).message || '上下文压缩失败')
       }
     } finally {
-      if (currentConversationIdRef.current === conversationId) {
-        setContextCompressing(false)
-      }
+      // 清零不看「我还在不在这个会话」——切走后原来那个守卫永远不成立，标志会卡死。
+      markConversationCompacting(conversationId, false)
     }
-  }, [contextCompressing, patchContextState, refreshSidebar])
+  }, [compactingConversationIds, markConversationCompacting, patchContextState, refreshSidebar])
 
   const finishStreamingRun = useCallback(
     async (payload: { reason?: string; conversationId?: string }) => {
       const conversationId = payload.conversationId ?? currentConversationIdRef.current
       // 兜底：run 结束时压缩必然已终止；防御后端遗漏终止事件把"压缩中"状态卡死。
-      setAgentLoopCompacting(false)
+      if (conversationId) markConversationCompacting(conversationId, false)
       if (payload.reason !== 'cancelled') {
         resetLocalCancellation()
       }
@@ -1790,10 +1817,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (conversationId && currentConversationIdRef.current === conversationId) {
         setPendingToolConfirm(null)
         setPendingSessionConsent(null)
+        setPendingUserPrompt(null)
         clearStreamingPreview()
       }
     },
-    [clearStreamingPreview, localState, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+    [clearStreamingPreview, localState, markConversationCompacting, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
   )
 
   const flushPendingStreamDone = useCallback(async (conversationId?: string): Promise<boolean> => {
@@ -1822,6 +1850,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       applyConversation(conversation)
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
+      setPendingUserPrompt(null)
     }
     clearConversationLocalState(localState(), conversationId)
     syncGeneratingConversationIds()
@@ -2047,19 +2076,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [patchContextState])
 
   useTauriEvent(api.onChatCompaction, (payload) => {
-    const currentConversationId = currentConversationIdRef.current
-    if (!currentConversationId || payload.conversationId !== currentConversationId) {
-      return
-    }
-    if (payload.phase === 'started') {
-      if (payload.trigger !== 'manual') {
-        setAgentLoopCompacting(true)
-      }
-      return
-    }
+    const conversationId = payload.conversationId
+    if (!conversationId) return
+    // 压缩状态按事件里的会话记，不看是不是当前会话：后台会话的 started/completed
+    // 都要收进集合，否则切走再切回来会漏掉开始、或者永远等不到结束。
     if (payload.trigger !== 'manual') {
-      setAgentLoopCompacting(false)
+      markConversationCompacting(conversationId, payload.phase === 'started')
     }
+    if (payload.phase === 'started') return
+    // 下面这些改的是当前会话的展示状态（边界动画 / currentConversation），仍要按当前会话过滤。
+    if (conversationId !== currentConversationIdRef.current) return
     const boundary = payload.boundary
     if (boundary?.id) {
       setAnimateCompactionBoundaryId(boundary.id)
@@ -2083,7 +2109,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         return { ...conversation, context_state: nextState, contextState: nextState }
       })
     }
-  }, [])
+  }, [markConversationCompacting])
 
   useTauriEvent(api.onChatTodo, (payload) => {
     const currentConversationId = currentConversationIdRef.current
@@ -2214,9 +2240,38 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       snapshot.toolCalls = index < 0
         ? [...snapshot.toolCalls, record]
         : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+      // 同时排进「输入框上方」那张面板的队列：消息流里的那条只是痕迹，真正作答在面板上。
+      const queue = pendingUserPromptsRef.current[payload.conversationId] ?? []
+      const queued = queue.some((item) => item.toolCallId === payload.toolCallId)
+      pendingUserPromptsRef.current[payload.conversationId] = queued ? queue : [...queue, payload]
+      if (currentConversationIdRef.current === payload.conversationId) {
+        setPendingUserPrompt(pendingUserPromptsRef.current[payload.conversationId][0] ?? null)
+      }
       syncGeneratingConversationIds()
       showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
+
+  /** 面板用的工具记录：**必须记忆** —— 写在 JSX 里每渲染新建一个对象，会把卡片里
+   *  「换了新询问就重置草稿」的 effect 变成每渲染都重置（用户选到一半的答案被清空）。 */
+  const pendingUserPromptRecord = useMemo(
+    () => (pendingUserPrompt ? userPromptEventToRecord(pendingUserPrompt) : null),
+    [pendingUserPrompt],
+  )
+
+  /** 面板作答完（或那一轮结束了）就把它收起来。后端没有「已答复」事件 ——
+   *  `resolve_user_prompt` 只清重放快照、不发事件，所以收起由前端自己负责。 */
+  const dismissPendingUserPrompt = useCallback((conversationId: string, toolCallId?: string) => {
+    const rest = (pendingUserPromptsRef.current[conversationId] ?? [])
+      .filter((item) => toolCallId == null || item.toolCallId !== toolCallId)
+    if (rest.length > 0) {
+      pendingUserPromptsRef.current[conversationId] = rest
+    } else {
+      delete pendingUserPromptsRef.current[conversationId]
+    }
+    if (currentConversationIdRef.current === conversationId) {
+      setPendingUserPrompt(rest[0] ?? null)
+    }
+  }, [])
 
   useTauriEvent(api.onChatToolConfirm, (payload) => {
     // 排队而不是覆盖：一条消息里并行调多个工具时，后端会同时挂着多条询问等答复
@@ -2459,7 +2514,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setPendingUserMessageConversationId(null)
     setContextError('')
     setContextLoading(false)
-    setContextCompressing(false)
     setStreamError('')
   }, [
     activeAgentRuntime,
@@ -4354,15 +4408,26 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       groupSelections={currentConversation?.group_selections ?? currentConversation?.groupSelections ?? {}}
                       onSetGroupSelection={handleSetGroupSelection}
                       contextState={contextState}
-                      compactionInProgress={contextCompressing || agentLoopCompacting}
+                      compactionInProgress={contextCompressing}
                       animateCompactionBoundaryId={animateCompactionBoundaryId}
                       lang={uiLang}
                     />
                   </Suspense>
                   {/* ponytail: 只挂在有消息的分支。审批必然发生在一次 run 里，此时至少已有一条用户消息，空态 hero 不可能出卡。 */}
-                  {(pendingToolConfirm || pendingSessionConsent) && (
+                  {(pendingToolConfirm || pendingSessionConsent || pendingUserPrompt) && (
                     <div className="shrink-0 px-6">
                       <div className="mx-auto w-full max-w-4xl">
+                        {/* 问用户的面板排在审批卡之前：它是「整轮停在这里等你」的那一件事。 */}
+                        {pendingUserPrompt && pendingUserPromptRecord && (
+                          <AskUserBlock
+                            variant="docked"
+                            toolCall={pendingUserPromptRecord}
+                            onResolved={() => dismissPendingUserPrompt(
+                              pendingUserPrompt.conversationId,
+                              pendingUserPrompt.toolCallId,
+                            )}
+                          />
+                        )}
                         {pendingToolConfirm && (
                           <ApprovalCard
                             title={toolApprovalTitle(pendingToolConfirm)}

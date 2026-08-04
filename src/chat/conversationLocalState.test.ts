@@ -18,6 +18,7 @@ function makeState(): ConversationLocalState {
     streamErrors: { c1: 'err1', c2: 'err2' },
     pendingToolConfirms: { c1: { conversationId: 'c1' } as never, c2: {} as never },
     pendingSessionConsents: { c1: { conversationId: 'c1' } as never, c2: {} as never },
+    pendingUserPrompts: { c1: [{ conversationId: 'c1' }] as never, c2: [] as never },
   }
 }
 

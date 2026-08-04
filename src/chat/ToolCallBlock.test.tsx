@@ -359,8 +359,9 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText('run.rs')).toBeInTheDocument()
   })
 
-  // claude 的问用户走的是它自己的工具名。认不出来 = 渲染成普通工具卡 = 用户无处作答。
-  it('renders claude AskUserQuestion as the ask-user card', () => {
+  // claude 的问用户走的是它自己的工具名。认不出来 = 渲染成普通工具卡（一坨 JSON），
+  // 而不是这行「等待你回答」的痕迹 —— 整张可作答的面板吊在输入框上方，见 AskUserBlock.test。
+  it('renders claude AskUserQuestion as the inline ask-user trace', () => {
     render(
       <ToolCallBlock
         toolCall={buildToolCall({
@@ -373,10 +374,7 @@ describe('ToolCallBlock', () => {
               questions: [{
                 id: '0',
                 prompt: '用哪种方式重试？',
-                options: [
-                  { id: '0', label: '指数退避' },
-                  { id: '1', label: '立即重试' },
-                ],
+                options: [{ id: '0', label: '指数退避' }, { id: '1', label: '立即重试' }],
                 allow_multiple: false,
                 allow_custom: true,
               }],
@@ -386,8 +384,10 @@ describe('ToolCallBlock', () => {
         })}
       />,
     )
-    expect(screen.getByText('用哪种方式重试？')).toBeInTheDocument()
-    expect(screen.getByText('指数退避')).toBeInTheDocument()
+    expect(screen.getByText(/等待你回答/)).toBeInTheDocument()
+    // 消息流里不该出现第二份可点的选项（会和面板抢焦点、也能被点两次）。
+    expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    expect(screen.queryByText('指数退避')).not.toBeInTheDocument()
   })
 
   it('maps claude WebFetch / TodoWrite through the snake_case aliases', () => {

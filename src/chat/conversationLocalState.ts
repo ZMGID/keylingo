@@ -1,5 +1,5 @@
 import type { ConversationStreamSnapshot } from './conversationRuns'
-import type { ChatSessionConsentPayload, ChatToolConfirmPayload } from '../api/tauri'
+import type { ChatSessionConsentPayload, ChatToolConfirmPayload, ChatUserPromptPayload } from '../api/tauri'
 
 /**
  * 一个会话在前端持有的全部本地运行态。
@@ -26,6 +26,8 @@ export interface ConversationLocalState {
    */
   pendingToolConfirms: Record<string, ChatToolConfirmPayload[]>
   pendingSessionConsents: Record<string, ChatSessionConsentPayload>
+  /** 每会话一条待答的问用户询问队列（面板吊在输入框上方，同审批卡的并发理由）。 */
+  pendingUserPrompts: Record<string, ChatUserPromptPayload[]>
 }
 
 /** 清理时可选择动哪些字段。默认只清「一轮结束」必然要清的三项。 */
@@ -41,7 +43,7 @@ export interface ClearScope {
 /**
  * 清掉一个会话的本地运行态。
  *
- * 无条件清理的三项 —— 快照、待确认工具、待确认会话授权 —— 是「这一轮跑完了」
+ * 无条件清理的四项 —— 快照、待确认工具、待确认会话授权、待答询问 —— 是「这一轮跑完了」
  * 的定义，6 处调用点全都要清。可选项按场景开启，见 ClearScope 各字段注释。
  */
 export function clearConversationLocalState(
@@ -52,6 +54,7 @@ export function clearConversationLocalState(
   delete state.streamSnapshots[conversationId]
   delete state.pendingToolConfirms[conversationId]
   delete state.pendingSessionConsents[conversationId]
+  delete state.pendingUserPrompts[conversationId]
   if (scope.inFlight) state.inFlight.delete(conversationId)
   if (scope.pendingStreamDone) delete state.pendingStreamDone[conversationId]
   if (scope.streamErrors) delete state.streamErrors[conversationId]
