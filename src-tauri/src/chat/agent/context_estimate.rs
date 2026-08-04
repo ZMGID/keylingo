@@ -39,6 +39,27 @@ pub(crate) fn anchor_total_tokens(usage: &ModelUsage, api_format: &str) -> Optio
     }
 }
 
+/// 只算 **prompt 侧**（不含本次输出）的 token —— `anchor_total_tokens` 减掉 output。
+///
+/// 静默超窗检测（pi `isContextOverflow` case 2/3）要比的是「我们发过去多少」和
+/// 「窗口多大」，把响应的 output 算进来会让判定虚高。分家族口径与
+/// `anchor_total_tokens` 一致：
+/// - `anthropic_messages`：`input_tokens` 是**非缓存**部分，全量 prompt =
+///   `input + cache_read + cache_creation`（三者不相交，对齐 pi 的 `input + cacheRead`）。
+/// - 其它（`openai_*` / responses）：`input_tokens`(=prompt) 已含 cached，**不**再叠加。
+pub(crate) fn prompt_tokens(usage: &ModelUsage, api_format: &str) -> Option<u64> {
+    let input = usage.input_tokens?;
+    if api_format == "anthropic_messages" {
+        Some(
+            input
+                .saturating_add(usage.cached_input_tokens.unwrap_or(0))
+                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0)),
+        )
+    } else {
+        Some(input)
+    }
+}
+
 /// 计算上下文有效占用与是否采用了真实锚点。
 ///
 /// - `anchor_total`：`Some` = 有可用锚点（上次「prompt+响应」真实 token 总数）；`None` = 无锚点。
@@ -148,5 +169,22 @@ mod tests {
     #[test]
     fn effective_no_anchor_uses_estimate() {
         assert_eq!(effective_context_tokens(None, 0, 42_000), (42_000, false));
+    }
+
+    #[test]
+    fn prompt_tokens_excludes_output_and_sums_anthropic_cache() {
+        // Anthropic: input 是非缓存部分，cache 必须补上；output(100) 不能算进来。
+        let u = usage(Some(100_000), Some(50_000), Some(20_000));
+        assert_eq!(prompt_tokens(&u, "anthropic_messages"), Some(170_000));
+        // OpenAI 系：input 已含 cached，不再叠加，也不含 output。
+        assert_eq!(prompt_tokens(&u, "openai_chat"), Some(100_000));
+        assert_eq!(prompt_tokens(&u, "openai_responses"), Some(100_000));
+    }
+
+    #[test]
+    fn prompt_tokens_needs_input() {
+        let u = usage(None, Some(10), Some(10));
+        assert_eq!(prompt_tokens(&u, "anthropic_messages"), None);
+        assert_eq!(prompt_tokens(&u, "openai_chat"), None);
     }
 }

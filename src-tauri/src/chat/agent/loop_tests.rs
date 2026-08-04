@@ -2601,6 +2601,85 @@ async fn run_loop_overflow_recovery_compacts_and_retries_success() {
     assert_eq!(server.captured_bodies().len(), 3);
 }
 
+/// 静默超窗（pi `isContextOverflow` case 2/3）：synthesis 调用 **HTTP 200 成功**，
+/// 但正文为空、且 provider 实报的 prompt token 已经顶到窗口。没有任何错误文案可以
+/// 匹配，`classify("")` 只会给 `Empty` → 直接拿工具结果降级；用量证据必须把它改判成
+/// `ContextOverflow`，走「压缩一次再重发」。断言最终用的是重发的答案，不是兜底摘要。
+#[tokio::test]
+async fn run_loop_empty_response_at_context_window_recovers_as_silent_overflow() {
+    // 200 + 空正文 + prompt 顶满 40k 窗口 = 被静默吞掉的超窗请求。
+    let empty_at_window = serde_json::json!({
+        "choices": [{
+            "finish_reason": "stop",
+            "message": { "role": "assistant", "content": "" }
+        }],
+        "usage": { "prompt_tokens": 40_000, "completion_tokens": 0, "total_tokens": 40_000 }
+    })
+    .to_string();
+    let retry_answer = serde_json::json!({
+        "choices": [{
+            "finish_reason": "stop",
+            "message": { "role": "assistant", "content": "压缩后重发拿到的答案" }
+        }]
+    })
+    .to_string();
+    let server = MockModelServer::start(vec![
+        MockResponse::Json(planning_tool_call_json()),
+        MockResponse::Json(empty_at_window),
+        // 改判成 overflow 后先压缩：摘要调用恒为流式，与 run 的 stream 设置无关。
+        MockResponse::Sse(vec![
+            long_summary_sse("SUMMARY_MARKER: 早前轮次摘要。"),
+            "[DONE]".to_string(),
+        ]),
+        MockResponse::Json(retry_answer),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, false);
+    config.provider.model_overrides.insert(
+        "test-model".to_string(),
+        crate::settings::ModelInfo {
+            context_window: Some(40_000),
+            ..Default::default()
+        },
+    );
+    // 25k token 的纯文本历史：规划/合成前的估算（<36k 预算）不触发压缩，所以前两次
+    // 调用是干净的；但它超过 20k 的保护尾窗，改判后压缩有旧段可摘要（且旧段里没有
+    // 工具结果 → microcompact 无从降级 → 必定走 LLM 摘要，调用次数确定）。
+    config.runtime_messages =
+        vec![serde_json::json!({ "role": "system", "content": "system prompt" })];
+    for i in 0..5 {
+        config.runtime_messages.push(serde_json::json!({
+            "role": if i % 2 == 0 { "user" } else { "assistant" },
+            "content": "a".repeat(20_000),
+        }));
+    }
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("silent overflow recovery must not bubble Err");
+
+    assert_eq!(
+        result.content, "压缩后重发拿到的答案",
+        "空响应 + 用量顶窗必须走压缩重发，而不是当成 Empty 直接降级"
+    );
+    // 「成功但空正文」这条路走的是 synthesis 的正常收尾（既有行为），outcome 仍是
+    // completed；只有**报错**的那条路才标 recovered。恢复是否发生看 content。
+    assert_eq!(result.stream_outcome, "completed");
+    assert!(
+        result.degraded.is_none(),
+        "重发成功就没有降级卡片，got: {:?}",
+        result.degraded
+    );
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 4, "规划 / 空响应合成 / 摘要 / 重发");
+    assert!(
+        bodies[2].contains("tasked with summarizing conversations"),
+        "第 3 次调用必须是压缩摘要"
+    );
+}
+
 /// Overflow recovery (single-attempt guard): both the synthesis call and the
 /// compact-and-retry call fail with overflow 400. Recovery must NOT loop —
 /// it degrades to the gathered-results fallback after exactly one retry.

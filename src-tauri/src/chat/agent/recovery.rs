@@ -167,6 +167,35 @@ fn is_context_overflow(lower: &str) -> bool {
     OVERFLOW_PATTERNS.iter().any(|n| lower.contains(n))
 }
 
+/// 静默超窗的判定线：provider 实报的 prompt token 占窗口的比例。
+/// 取 0.99 对齐 pi `isContextOverflow` 的 case 3；case 2 的「严格大于窗口」是它的子集,
+/// 一条线同时盖住两种形态。
+const SILENT_OVERFLOW_RATIO: f64 = 0.99;
+
+/// pi `isContextOverflow` 的 case 2/3 —— **不报错的超窗**。
+///
+/// [`classify`] 只认错误文案，但有一类供应商/网关压根不报错：超窗请求照收，然后回
+/// 一个 200 + 空正文（pi 点名 z.ai），或者把输入截断到刚好填满窗口、`finish_reason`
+/// 给 `length` 而 output 是 0（pi 点名 Xiaomi MiMo）。两种形态都没有任何文案可匹配,
+/// 只看文本就永远发现不了，表现为「模型返回了空响应」。
+///
+/// 唯一的证据是 provider 实报的用量：prompt 已经顶到窗口，那这就是撑爆了，不管对方
+/// 说没说。命中后按 `ContextOverflow` 处置（压缩一次再重发），而不是当成 `Empty`
+/// 直接降级 —— 后者对同一份输入重来一次只会再失败。
+///
+/// **命中不了的场景要心里有数**：这条判据的分母是**模型**的窗口。经第三方中转时,
+/// 中转自己的上限往往远小于模型窗口（实测 60 万 token 打 1M 窗口即被吞），那种情况
+/// 用量离窗口还远，这里判不出来 —— 真正的防线是工具输出上限，别让请求长到那个份上。
+pub(crate) fn is_silent_overflow(prompt_tokens: Option<u64>, window: usize) -> bool {
+    let Some(prompt) = prompt_tokens else {
+        return false;
+    };
+    if window == 0 {
+        return false;
+    }
+    prompt as f64 >= window as f64 * SILENT_OVERFLOW_RATIO
+}
+
 /// 把错误消息文本归类。`message` 为空视为 `Empty`(调用方在"成功但空响应"时传空串)。
 pub(crate) fn classify(message: &str) -> FailureKind {
     let trimmed = message.trim();
@@ -462,6 +491,22 @@ fn failure_reason_line(kind: FailureKind, zh: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silent_overflow_needs_usage_evidence_at_the_window() {
+        // 顶到窗口（含刚好过 0.99 线）→ 判超窗。
+        assert!(is_silent_overflow(Some(200_000), 200_000));
+        assert!(is_silent_overflow(Some(210_000), 200_000)); // pi case 2：严格超窗
+        assert!(is_silent_overflow(Some(198_000), 200_000)); // pi case 3：0.99 线
+                                                             // 差一点点就不算——0.99 线以下不许猜。
+        assert!(!is_silent_overflow(Some(197_000), 200_000));
+        // 实测那一例：60 万 token 打 1M 窗口，卡住的是中转不是模型窗口，
+        // 这条判据本来就该判不出来（真正的防线是工具输出上限）。
+        assert!(!is_silent_overflow(Some(602_824), 1_000_000));
+        // 没有用量 / 窗口未知 → 不猜。
+        assert!(!is_silent_overflow(None, 200_000));
+        assert!(!is_silent_overflow(Some(999_999), 0));
+    }
 
     fn rec(name: &str, status: ToolCallStatus, preview: Option<&str>) -> ToolCallRecord {
         ToolCallRecord {

@@ -410,7 +410,7 @@ pub(crate) async fn recover_synthesis(
     failure_message: &str,
 ) -> String {
     let config = env.config;
-    let kind = recovery::classify(failure_message);
+    let kind = silent_overflow_aware_kind(env, state, recovery::classify(failure_message));
     let has_results = !state.tool_records.is_empty();
     // 恢复中枢只在此处被调用一次/次失败,故 already_remediated / overflow_recovery_attempted
     // 都从 false 起算;真正的「只重试一次」守门在各分支内部用本地标志实现。
@@ -437,8 +437,43 @@ pub(crate) async fn recover_synthesis(
     }
 }
 
-/// CompactAndRetry 执行:压缩一次历史 → 用压缩后的发送视图重发一次合成。
-/// 成功 → 用其结果;仍失败 → 降级到确定性兜底(对应 decide 的 overflow_recovery_attempted 臂)。
+/// 把 `Empty` 在**有用量证据**时改判成 `ContextOverflow`（pi `isContextOverflow`
+/// case 2/3 的落地，判据见 [`recovery::is_silent_overflow`]）。
+///
+/// 「模型调用成功但正文为空」有两种成因，处置完全相反：真的没话说 → 重来无意义,
+/// 拿工具结果降级；被静默吞掉的超窗请求 → 压缩一次再重发，多半就出来了。
+/// `classify` 只有一个空串可看，分不出来；provider 实报的 prompt token 能。
+///
+/// 只改判 `Empty`：其它 kind 都有明确的错误文案，不该被用量猜测覆盖。
+fn silent_overflow_aware_kind(
+    env: &LoopEnv<'_>,
+    state: &RunState,
+    kind: recovery::FailureKind,
+) -> recovery::FailureKind {
+    if kind != recovery::FailureKind::Empty {
+        return kind;
+    }
+    let Some(usage) = state.last_step_usage.as_ref() else {
+        return kind;
+    };
+    let config = env.config;
+    let window = crate::chat::model_metadata::context_window_for_model(
+        Some(&config.provider),
+        &config.model,
+    )
+    .0;
+    let prompt = super::context_estimate::prompt_tokens(usage, &config.provider.api_format);
+    if !recovery::is_silent_overflow(prompt, window) {
+        return kind;
+    }
+    eprintln!(
+        "Chat: empty response with prompt {prompt:?} tokens against window {window} — \
+         treating as silent context overflow (compact and retry)"
+    );
+    recovery::FailureKind::ContextOverflow
+}
+
+/// CompactAndRetry 执行:压缩一次历史 → 用压缩后的发送视图重发一次合成。/// 成功 → 用其结果;仍失败 → 降级到确定性兜底(对应 decide 的 overflow_recovery_attempted 臂)。
 /// 单次守门:本函数只压缩-重试一次,绝不递归,杜绝「压完仍超 → 再压」死循环。
 async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunState) -> String {
     let config = env.config;
