@@ -116,6 +116,7 @@ import {
   createEmptyStreamSnapshot,
   isConversationBusy,
   isConversationInFlight,
+  mergeToolRecord,
   type ConversationStreamSnapshot,
 } from './conversationRuns'
 import {
@@ -685,7 +686,7 @@ function applyToolRecordToSnapshot(
   const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
   snapshot.toolCalls = index < 0
     ? [...snapshot.toolCalls, record]
-    : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+    : snapshot.toolCalls.map((item, i) => (i === index ? mergeToolRecord(item, record) : item))
   snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
 }
 

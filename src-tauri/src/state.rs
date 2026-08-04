@@ -166,6 +166,15 @@ pub struct AppState {
     /// 等待用户回答的 Chat ask_user 澄清卡片。
     pub pending_chat_user_prompts:
         Mutex<HashMap<String, crate::chat::ask_user::PendingAskUserPrompt>>,
+    /// 外部 CLI 的问用户答完之后的 `askUser` 结构化载荷（键 = 工具调用 id）。
+    ///
+    /// 为什么要绕一道：那条卡片的记录是 CLI 的流解析层建的（`structured_content` 是 claude
+    /// 的原始入参），而答案只有审批宿主那侧知道，两边在不同的任务里。不放进落盘记录的话，
+    /// 消息流里那块「问了什么 + 选了什么」刷新一次就没了 —— 只剩一行看不见的灰字。
+    ///
+    /// ponytail: 只在 `ToolResult` 落地时消费一次并移除；那一轮死在半路的残留会留到进程退出
+    /// （一条询问一个小 JSON，量级可忽略）。真要收严就在轮末按 run 清一次。
+    pub answered_ask_user_content: Mutex<HashMap<String, serde_json::Value>>,
     /// 等待前端 Pyodide 完成的 run_python 调用。
     pub pending_python_runs: Mutex<HashMap<String, PendingPythonRun>>,
     /// 保护 Chat 空白会话复用的短临界区，避免快速多次新建时并发创建多个空白对话。
@@ -344,6 +353,7 @@ impl AppState {
             pending_chat_session_consents: Mutex::new(HashMap::new()),
             chat_consent_prompt_lock: tokio::sync::Mutex::new(()),
             pending_chat_user_prompts: Mutex::new(HashMap::new()),
+            answered_ask_user_content: Mutex::new(HashMap::new()),
             pending_python_runs: Mutex::new(HashMap::new()),
             chat_create_conversation_lock: tokio::sync::Mutex::new(()),
             external_slash_commands_cache: Mutex::new(HashMap::new()),

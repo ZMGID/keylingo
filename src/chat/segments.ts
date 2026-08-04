@@ -86,18 +86,25 @@ export function toolCallDiffStats(toolCall: ToolCallRecord): DiffStats | null {
 }
 
 /** Tool calls that render as their own dedicated, always-visible card in the
- *  timeline (never folded into the "调用 N 次工具" group): sub-agents (`agent`)
- *  and advisor consultations. Matched by structured content type first, then by
- *  the native tool name for the still-streaming case (before structured content
- *  arrives). */
+ *  timeline (never folded into the "调用 N 次工具" group): sub-agents (`agent`),
+ *  advisor consultations, and ask-user prompts. Matched by structured content type
+ *  first, then by the native tool name for the still-streaming case (before
+ *  structured content arrives). */
 export function isStandaloneToolCard(toolCall: ToolCallRecord): boolean {
   const structured = toolCall.structured_content ?? toolCall.structuredContent
   if (structured && typeof structured === 'object') {
     const type = (structured as { type?: unknown }).type
     if (type === 'subagent' || type === 'advisor') return true
+    // 问用户：载荷里是 `askUser`（没有 `type` 字段）。它记的是「问了什么 + 你选了什么」，
+    // 折进「调用 N 次工具」里等于把一次人为决定藏起来 —— 那是这条对话里最该看见的东西。
+    if ('askUser' in (structured as Record<string, unknown>)) return true
+  }
+  const name = toolRecordRawName(toolCall)
+  // 外部 CLI 报的是自己的工具名（`AskUserQuestion`），所以这条判据不能只认 native。
+  if (name.toLowerCase().replace(/[_\-\s]/g, '') === 'askuserquestion' || name === 'ask_user') {
+    return true
   }
   if (toolCall.source !== 'native') return false
-  const name = toolRecordRawName(toolCall)
   return name === 'agent' || name === 'advisor' || isArtifactPresentationToolCall(toolCall)
 }
 

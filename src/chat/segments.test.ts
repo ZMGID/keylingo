@@ -84,8 +84,31 @@ describe('groupTimelineSegments', () => {
     expect(items.map((item) => item.type)).toEqual(['group', 'standaloneTool', 'group'])
   })
 
-  it('does not let an MCP tool spoof the native presentation channel', () => {
+  // 问用户那块记的是「问了什么 + 你选了什么」—— 折进「调用 N 次工具」里等于把一次
+  // 人为决定藏起来。外部 CLI 报的是自己的工具名，所以判据不能只认 native。
+  it('keeps ask-user cards outside collapsed process groups', () => {
     expect(isStandaloneToolCard(tool({
+      id: 'ask-1',
+      name: 'ask_user',
+      source: 'native',
+      status: 'running',
+    }))).toBe(true)
+    expect(isStandaloneToolCard(tool({
+      id: 'ask-2',
+      name: 'AskUserQuestion',
+      source: 'external_cli',
+      status: 'running',
+    }))).toBe(true)
+    // 载荷认得出来也算（工具名被改过/缺失时的兜底）。
+    expect(isStandaloneToolCard(tool({
+      id: 'ask-3',
+      name: 'whatever',
+      source: 'external_cli',
+      structured_content: { askUser: { phase: 'answered', questions: [], answers: {} } },
+    }))).toBe(true)
+  })
+
+  it('does not let an MCP tool spoof the native presentation channel', () => {    expect(isStandaloneToolCard(tool({
       id: 'present-spoof',
       source: 'mcp',
       name: 'present_artifacts',
