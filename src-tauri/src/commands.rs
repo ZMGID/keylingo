@@ -1,6 +1,8 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use arboard::Clipboard;
+use base64::Engine as _;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_shell::ShellExt;
@@ -387,6 +389,167 @@ pub(crate) fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     app.shell().open(url, None).map_err(|e| e.to_string())
 }
 
+/// 模型输出里的本地文件链接**禁止**打开的扩展名。
+///
+/// 为什么是黑名单而不是白名单：白名单必漏——docx / xlsx / zip / mp4 / py 都是用户会点的正常
+/// 文件，漏一个就是「点了没反应」，跟「在 Kivio 里打开」一样是坏的。真正需要挡的只有
+/// 「默认处理器会**执行代码**」那一小类，那是可枚举的：`shell().open` 对 `.command` / `.app`
+/// / Windows `.bat` 是执行语义，而 href 来自模型输出（不可信输入）。安装器（pkg/msi）一并挡,
+/// 它们点一下就进安装流程。
+///
+/// 没有扩展名的文件也一律拒：类 Unix 下带执行位的裸文件名恰好是最危险的一种。
+const EXECUTABLE_LOCAL_EXTENSIONS: &[&str] = &[
+    // macOS / 类 Unix：脚本与可执行包
+    "command", "sh", "bash", "zsh", "csh", "ksh", "fish", "app", "scpt", "applescript",
+    "workflow", "terminal", "action", "jar", "py", "pyw", "rb", "pl", "php", "lua",
+    // Windows：默认处理器就是执行
+    "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta",
+    "scr", "cpl", "dll", "reg", "lnk", "inf",
+    // 安装器：点一下就开始装
+    "pkg", "mpkg", "msi", "msp", "dmg", "appx", "msix",
+];
+
+/// 扩展名闸门：`shell().open` 对这些是执行/安装语义，一律不开。空扩展名同样拒。
+fn ensure_openable_extension(path: &std::path::Path) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext.is_empty() || EXECUTABLE_LOCAL_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!(
+            "为安全起见不直接打开这种文件（默认程序可能是执行它）：{}",
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
+/// `file://` URL / 绝对路径 / 相对路径 → 校验过的本地文件路径。
+///
+/// `base` 是相对路径的解析基准（会话工作目录）。给不出 base 时相对路径一律拒绝——猜一个
+/// base 只会开错文件。给了 base 也要挡住 `../../` 逃逸：href 来自模型输出。
+fn local_file_path_from_href(href: &str, base: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    let href = href.trim();
+    let raw = if href.len() >= 7 && href[..7].eq_ignore_ascii_case("file://") {
+        // 走 url crate 而不是手撕前缀：`file:///a%20b.html` 这类百分号编码得正确还原。
+        url::Url::parse(href)
+            .map_err(|e| format!("无法解析 file URL：{e}"))?
+            .to_file_path()
+            .map_err(|_| "file URL 不是本机路径".to_string())?
+    } else {
+        PathBuf::from(href)
+    };
+    let path = if raw.is_absolute() {
+        raw
+    } else {
+        let base = base.ok_or_else(|| "无法定位这个相对路径对应的文件".to_string())?;
+        let joined = base.join(&raw);
+        // 逃逸检查放在存在性之前：canonicalize 要求文件真在，失败就当不存在处理。
+        let real = joined
+            .canonicalize()
+            .map_err(|_| "文件不存在".to_string())?;
+        let base_real = base
+            .canonicalize()
+            .map_err(|e| format!("无法解析工作目录：{e}"))?;
+        if !real.starts_with(&base_real) {
+            return Err("链接指向了工作目录之外".to_string());
+        }
+        real
+    };
+    ensure_openable_extension(&path)?;
+    if !path.is_file() {
+        return Err("文件不存在".to_string());
+    }
+    Ok(path)
+}
+
+/// 用系统默认程序打开**本地文件**（模型输出里的 `file://` / 绝对路径 / 相对路径链接）。
+///
+/// 与 `open_external`（只认 http(s)）分开而不是放宽它：把关方式完全不同——见
+/// `local_file_path_from_href` 与 `EXECUTABLE_LOCAL_EXTENSIONS`。
+///
+/// 相对路径的基准取 `dock_resolve_cwd`——**与 agent 实际写文件的目录同一个解析器**（右侧
+/// Dock 也用它）。CLI 写完文件常给一条 `assets/index.html` 这样的相对链接。
+#[tauri::command]
+#[allow(deprecated)]
+pub(crate) async fn open_local_file(
+    app: AppHandle,
+    href: String,
+    conversation_id: Option<String>,
+) -> Result<(), String> {
+    let needs_base = {
+        let trimmed = href.trim();
+        !(trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("file://"))
+            && !std::path::Path::new(trimmed).is_absolute()
+    };
+    let base = if needs_base {
+        let id = conversation_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        match crate::dock::dock_resolve_cwd(app.clone(), id, None).await {
+            Ok(dir) => Some(PathBuf::from(dir)),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let path = local_file_path_from_href(&href, base.as_deref())?;
+    let path_str = path.to_str().ok_or_else(|| "路径不是 UTF-8".to_string())?;
+    app.shell()
+        .open(path_str, None)
+        .map_err(|e| e.to_string())
+}
+
+/// data URL → 临时文件名（只保留 basename，挡住 `../` 与目录分隔符）。
+fn temp_file_name_from_artifact_name(name: &str) -> String {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('.');
+    if base.is_empty() {
+        // 无名产物：故意不给扩展名 ⇒ 被 `ensure_openable_extension` 拒掉。不知道是什么就别开。
+        "file".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// 把内存里的 data URL 写成临时文件，再用系统默认程序打开。
+///
+/// 用于**没有 path 的旧 artifact**（新产物都带 path，走 `chat_open_generated_artifact`）。
+/// 替代前端原来的 `window.open(dataUrl)`——那条在 Tauri 里由 webview 自己处理，不会交给
+/// 默认程序（表现就是「点了在 Kivio 里打开 / 什么都没发生」）。
+///
+/// 扩展名同样过 `ensure_openable_extension`：这里是**先落盘再交给默认程序**，一个 `.command`
+/// 产物落地就成了可执行文件。
+#[tauri::command]
+#[allow(deprecated)]
+pub(crate) fn open_data_url_file(app: AppHandle, name: String, data_url: String) -> Result<(), String> {
+    let payload = data_url
+        .split_once(";base64,")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| "只支持 base64 的 data URL".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.trim().as_bytes())
+        .map_err(|e| format!("data URL 解码失败：{e}"))?;
+
+    let file_name = temp_file_name_from_artifact_name(&name);
+    // 每次一个独立子目录：同名产物不会互相覆盖，也不用担心撞到别的临时文件。
+    let dir = std::env::temp_dir().join(format!("kivio-artifact-{}", uuid::Uuid::new_v4()));
+    let path = dir.join(&file_name);
+    ensure_openable_extension(&path)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("写临时文件失败：{e}"))?;
+
+    let path_str = path.to_str().ok_or_else(|| "路径不是 UTF-8".to_string())?;
+    app.shell().open(path_str, None).map_err(|e| e.to_string())
+}
+
 /// 将 Chat 里的 HTML 预览写成临时文件，并用系统默认浏览器打开。
 #[tauri::command]
 #[allow(deprecated)]
@@ -765,6 +928,95 @@ pub(crate) fn open_permission_settings(kind: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::dedup_preserve_order;
+    use super::local_file_path_from_href;
+
+    /// 旧 artifact（无 path）落临时文件时的文件名清洗：只取 basename，挡目录穿越。
+    /// 扩展名闸门与本地文件链接共用 `ensure_openable_extension`——落盘后同样是「交给默认程序」。
+    #[test]
+    fn artifact_temp_name_keeps_basename_and_refuses_executables() {
+        use super::{ensure_openable_extension, temp_file_name_from_artifact_name};
+        use std::path::Path;
+
+        assert_eq!(temp_file_name_from_artifact_name("report.docx"), "report.docx");
+        // 目录穿越：只保留最后一段。
+        assert_eq!(
+            temp_file_name_from_artifact_name("../../etc/passwd.txt"),
+            "passwd.txt"
+        );
+        assert_eq!(temp_file_name_from_artifact_name("a\\b\\c.csv"), "c.csv");
+        // 空 / 纯点：给个不带扩展名的名字，随后被扩展名闸门拒掉（不知道是什么就别开）。
+        assert_eq!(temp_file_name_from_artifact_name("  "), "file");
+
+        assert!(ensure_openable_extension(Path::new("/t/report.docx")).is_ok());
+        assert!(ensure_openable_extension(Path::new("/t/x.command")).is_err());
+        assert!(ensure_openable_extension(Path::new("/t/file")).is_err());
+    }
+
+
+    ///
+    /// 钉住两件事：① 正常文件（不止 html —— docx/zip/csv 这些都得能开）都放行；
+    /// ② `shell().open` 对 `.command` 是**执行**语义，而 href 来自模型输出 ⇒ 必须拒。
+    #[test]
+    fn local_file_href_opens_ordinary_files_and_refuses_executables() {
+        let dir = std::env::temp_dir().join(format!("kivio-open-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("a b.html");
+        std::fs::write(&page, "<html></html>").unwrap();
+
+        // file:// + 百分号编码的空格必须还原成真实路径。
+        let url = url::Url::from_file_path(&page).unwrap();
+        assert!(url.as_str().contains("%20"), "样本应带百分号编码：{url}");
+        assert_eq!(local_file_path_from_href(url.as_str(), None).unwrap(), page);
+        // 裸绝对路径同样放行。
+        assert_eq!(
+            local_file_path_from_href(page.to_str().unwrap(), None).unwrap(),
+            page
+        );
+
+        // 不止 html：常见的「交给默认程序」文件都要放行。
+        for name in ["report.docx", "data.xlsx", "bundle.zip", "clip.mp4", "notes.md"] {
+            let file = dir.join(name);
+            std::fs::write(&file, "x").unwrap();
+            assert!(
+                local_file_path_from_href(file.to_str().unwrap(), None).is_ok(),
+                "{name} 应该能用默认程序打开"
+            );
+        }
+
+        // 默认处理器会执行的一类：即便文件真存在也不许开。
+        for name in ["run.command", "install.pkg", "go.bat", "tool.app", "s.py"] {
+            let file = dir.join(name);
+            std::fs::write(&file, "x").unwrap();
+            assert!(
+                local_file_path_from_href(file.to_str().unwrap(), None).is_err(),
+                "{name} 的默认程序可能是执行它，必须拒"
+            );
+        }
+        // 没有扩展名：类 Unix 下带执行位的裸文件名最危险。
+        let bare = dir.join("runme");
+        std::fs::write(&bare, "x").unwrap();
+        assert!(local_file_path_from_href(bare.to_str().unwrap(), None).is_err());
+
+        // 相对路径：给了会话工作目录才解析，且不许越出它（href 是模型输出）。
+        assert_eq!(
+            local_file_path_from_href("a b.html", Some(&dir)).unwrap(),
+            page.canonicalize().unwrap()
+        );
+        assert!(
+            local_file_path_from_href("a b.html", None).is_err(),
+            "没有基准目录时不许猜"
+        );
+        assert!(
+            local_file_path_from_href("../../etc/hosts", Some(&dir)).is_err(),
+            "../ 逃逸必须挡住"
+        );
+        // 存在性：白名单内但文件不存在。
+        assert!(
+            local_file_path_from_href(dir.join("missing.html").to_str().unwrap(), None).is_err()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn dedup_preserve_order_trims_dedups_keeps_order() {

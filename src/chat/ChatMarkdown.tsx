@@ -706,8 +706,21 @@ const markdownComponents: Components = {
   a: ({ href, children }) => <LinkAnchor href={typeof href === 'string' ? href : ''}>{children}</LinkAnchor>,
 }
 
-function LinkAnchor({ href, children }: { href: string; children?: ReactNode }) {
+function LinkAnchor({
+  href,
+  children,
+  conversationId,
+}: {
+  href: string
+  children?: ReactNode
+  /** 相对路径链接要靠它在后端解析会话工作目录；没有就只能放弃打开（但仍不导航）。 */
+  conversationId?: string | null
+}) {
   const isWeb = /^https?:\/\//i.test(href)
+  // 这些 scheme 保留 <a> 默认行为，由系统协议处理器接走（不会导航 webview 自身）。
+  const isSystemScheme = /^(mailto|tel|sms):/i.test(href)
+  // 页内锚点（目录跳转）保留默认行为：它不会导航走，只是滚动。
+  const isHashOnly = href.startsWith('#')
   return (
     <a
       // 不能加 target="_blank"：WRY 的 new-window 处理在 WKWebView 委托层，
@@ -715,12 +728,22 @@ function LinkAnchor({ href, children }: { href: string; children?: ReactNode }) 
       href={href || undefined}
       rel="noopener noreferrer"
       onClick={(event) => {
-        // A plain <a> click would navigate the Tauri webview itself and
-        // blow away the chat UI. Open web links in the system browser.
-        // 非 http(s)（mailto:/tel: 等）保留默认导航交给系统处理，openExternal 只认 http(s)。
-        if (!isWeb) return
+        // 除了系统 scheme 和页内锚点，**一律**掐掉默认导航。<a> 的默认行为会把 Tauri
+        // webview 自己导航走，整个聊天 UI（含未落盘的会话状态）随之消失——实测点一条 CLI
+        // 生成的本地文件链接，窗口直接白掉。此前这里只挡 http(s)，本地文件链接（绝对路径 /
+        // 相对路径）走的正是「放行默认导航」那条路。
+        if (isSystemScheme || isHashOnly) return
         event.preventDefault()
-        void api.openExternal(href).catch((err) => console.error('openExternal failed', err))
+        if (isWeb) {
+          void api.openExternal(href).catch((err) => console.error('openExternal failed', err))
+          return
+        }
+        if (!href) return
+        // 其余一律当本地文件交给系统默认程序。相对路径的基准由后端按会话工作目录解析
+        // （与 agent 写文件的目录同一个解析器），前端不拼路径。
+        void api
+          .openLocalFile(href, conversationId)
+          .catch((err) => console.error('openLocalFile failed', err))
       }}
     >
       {children}
@@ -804,6 +827,12 @@ function isSafeImageDataUrl(src: string): boolean {
 
 const chatMarkdownUrlTransform: UrlTransform = (url, key, node) => {
   if (key === 'src' && node.tagName === 'img' && isSafeImageDataUrl(url)) {
+    return url
+  }
+  // `defaultUrlTransform` 会把 `file:` 整个剥成空 href（协议白名单里没有它），CLI 写完文件
+  // 给的 `file://…/index.html` 于是变成死链。放行它，点击由 LinkAnchor 交给
+  // `open_local_file`（后端再做扩展名/存在性把关，不是把 file: 当可信输入）。
+  if (key === 'href' && node.tagName === 'a' && /^file:\/\//i.test(url)) {
     return url
   }
   return defaultUrlTransform(url)
@@ -1062,7 +1091,7 @@ function ChatMarkdownComponent({
           const n = Number(cite[1])
           return <CitationChip n={n} hit={citations?.get(n)} />
         }
-        return <LinkAnchor href={url}>{children}</LinkAnchor>
+        return <LinkAnchor href={url} conversationId={conversationId}>{children}</LinkAnchor>
       },
       img: ({ src, alt }) => {
         const rawSrc = typeof src === 'string' ? src : ''

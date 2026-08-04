@@ -89,6 +89,10 @@ export function ChatInlineImage({
         onClick={onOpenViewer}
         onContextMenu={(event) => {
           event.preventDefault()
+          // 必须掐断冒泡：滚动容器上还挂着消息级右键菜单（MessageList.handleContextMenu），
+          // 图片在消息内 ⇒ 它也会命中并开一个「复制整条消息」菜单，且 portal 挂得更晚、
+          // 盖在图片菜单上面 —— 表现就是右键图片弹出来的是消息菜单。
+          event.stopPropagation()
           setMenuAnchor({ left: event.clientX, top: event.clientY })
         }}
         aria-label="预览图片"

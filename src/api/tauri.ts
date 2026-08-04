@@ -1779,6 +1779,12 @@ export const api = {
 
   // 外部链接
   openExternal: (url: string) => invoke<void>('open_external', { url }),
+  /**
+   * 打开模型输出里的本地文件链接（file:// / 绝对路径 / 相对路径）。
+   * 相对路径由后端按会话工作目录解析，故要带 conversationId。扩展名/存在性/逃逸都在后端把关。
+   */
+  openLocalFile: (href: string, conversationId?: string | null) =>
+    invoke<void>('open_local_file', { href, conversationId: conversationId ?? null }),
   openHtmlPreview: (html: string) => invoke<void>('open_html_preview', { html }),
 
   // 连接器 OAuth：跑完整 OAuth（PKCE + DCR + loopback，会打开浏览器授权）→

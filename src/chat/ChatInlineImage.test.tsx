@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { act, render } from '@testing-library/react'
 import { ChatInlineImage } from './ChatInlineImage'
 
@@ -44,5 +44,24 @@ describe('ChatInlineImage', () => {
 
     const remote = render(<ChatInlineImage src="https://example.com/a.png" alt="x" />)
     expect(remote.container.querySelector('img')!.getAttribute('loading')).toBe('lazy')
+  })
+
+  // 滚动容器上挂着消息级右键菜单（MessageList.handleContextMenu）。图片的右键必须掐断冒泡,
+  // 否则那个菜单也会开，且 portal 挂得更晚 ⇒ 盖住图片菜单，用户以为图片右键没了。
+  it('stops the contextmenu from reaching the message-level menu', () => {
+    const onParentContextMenu = vi.fn()
+    const { container } = render(
+      <div onContextMenu={onParentContextMenu}>
+        <ChatInlineImage src={`${PNG}D`} alt="x" />
+      </div>,
+    )
+    act(() => {
+      container
+        .querySelector('button')!
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    })
+    expect(onParentContextMenu).not.toHaveBeenCalled()
+    // 自己的菜单要开出来（复制图片/另存那一层）。
+    expect(document.body.textContent).toContain('复制图片')
   })
 })

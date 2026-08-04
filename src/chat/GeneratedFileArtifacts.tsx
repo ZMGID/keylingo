@@ -88,7 +88,9 @@ async function openGeneratedArtifact(artifact: ChatToolArtifact) {
 
   const dataUrl = artifactDataUrl(artifact)
   if (!dataUrl) return
-  window.open(dataUrl, '_blank', 'noopener,noreferrer')
+  // 没有 path 的旧 artifact：落成临时文件再交给系统默认程序。
+  // 不能用 `window.open(dataUrl)` —— 那条在 Tauri 里由 webview 自己处理，不会打开默认程序。
+  await invoke('open_data_url_file', { name: artifact.name ?? 'file.bin', dataUrl })
 }
 
 async function revealGeneratedArtifact(artifact: ChatToolArtifact) {

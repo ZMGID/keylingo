@@ -466,6 +466,8 @@ pub fn run() {
             commands::translate_text,
             commands::commit_translation,
             commands::open_external,
+            commands::open_local_file,
+            commands::open_data_url_file,
             commands::open_html_preview,
             lens_commands::explain_read_image,
             commands::fetch_models,
