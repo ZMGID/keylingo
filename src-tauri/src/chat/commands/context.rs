@@ -57,21 +57,68 @@ pub(crate) async fn chat_get_context_stats(
     } else {
         compute_context_state(&app, &state, &conversation, None, &[]).await?
     };
-    conversation = crate::chat::repository::repository(&app)
-        .update_context(
-            &app,
-            &conversation_id,
-            conversation.revision,
-            context_state.clone(),
-        )
-        .await
-        .map_err(crate::chat::repository::repository_error)?;
+    conversation = persist_context_state_best_effort(
+        &app,
+        &conversation_id,
+        conversation,
+        context_state.clone(),
+    )
+    .await?;
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
         "contextState": context_state,
         "conversation": conversation,
     }))
+}
+
+/// 把刚算出来的上下文状态落盘。**抢不到版本不算失败**。
+///
+/// 上面那次计算是个 async 的慢活（外部 CLI 那条还要探模型），期间生成中的那一轮每落一条
+/// 消息就把会话推进一版，于是拿着旧 revision 去写必然撞 `Conflict`。而这个命令语义上是
+/// **读**（用户点刷新问「我的上下文多满」），落盘只是顺手缓存 —— 把缓存失败变成用户可见的
+/// 红字是纯粹的噪声：面板里那条「conversation revision conflict (conv_…): expected 2,
+/// actual 6」就是这么来的（生成中打开面板必现）。
+///
+/// 撞了先用**最新**的 revision 重试一次（多数情况下这一次就成了）；再撞就放弃落盘，直接把
+/// 算出来的状态返回给前端 —— 反正轮末的权威计算会自己写一次。
+async fn persist_context_state_best_effort(
+    app: &AppHandle,
+    conversation_id: &str,
+    conversation: crate::chat::Conversation,
+    context_state: crate::chat::ConversationContextState,
+) -> Result<crate::chat::Conversation, String> {
+    let repository = crate::chat::repository::repository(app);
+    match repository
+        .update_context(
+            app,
+            conversation_id,
+            conversation.revision,
+            context_state.clone(),
+        )
+        .await
+    {
+        Ok(updated) => Ok(updated),
+        Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. }) => {
+            let latest = repository
+                .get(app, conversation_id)
+                .await
+                .map_err(crate::chat::repository::repository_error)?;
+            let revision = latest.revision;
+            match repository
+                .update_context(app, conversation_id, revision, context_state)
+                .await
+            {
+                Ok(updated) => Ok(updated),
+                // 还在被推进（生成中）⇒ 不落盘，返回刚读到的会话 + 算出来的状态。
+                Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. }) => {
+                    Ok(latest)
+                }
+                Err(err) => Err(crate::chat::repository::repository_error(err)),
+            }
+        }
+        Err(err) => Err(crate::chat::repository::repository_error(err)),
+    }
 }
 
 #[tauri::command]
@@ -88,16 +135,18 @@ pub(crate) async fn chat_compress_context(
             &mut conversation,
         )
         .await?;
-        conversation = crate::chat::repository::repository(&app)
-            .update_context(
-                &app,
-                &conversation_id,
-                conversation.revision,
-                conversation.context_state.clone(),
-            )
-            .await
-            .map_err(crate::chat::repository::repository_error)?;
-        let context_state = conversation.context_state.clone();
+        let context_state_after_compact = conversation.context_state.clone();
+        // 同 `chat_get_context_stats`：压缩**已经发生**了，落盘缓存抢不到版本不该报错。
+        conversation = persist_context_state_best_effort(
+            &app,
+            &conversation_id,
+            conversation,
+            context_state_after_compact.clone(),
+        )
+        .await?;
+        // 用**压缩后算出来的**那份，不能读回 `conversation.context_state`：落盘被让位时
+        // 上面返回的是重新读到的会话，它身上还是压缩前的状态。
+        let context_state = context_state_after_compact;
         emit_chat_context_state(
             &app,
             &conversation.id,
@@ -952,15 +1001,24 @@ pub(super) fn emit_chat_context_state(
     );
 }
 
-/// **生成过程中**的上下文占用活数（分子 + 分母）。
+/// **生成过程中**的上下文占用（分子 + 分母）。
 ///
 /// 复用统一协议的 context update（不新造事件）：同一个主题、同一个订阅者、同一套
 /// conversationId 路由。载荷用 `live` 与权威快照 `contextState` 区分——权威快照那条要读磁盘、
-/// 连 MCP 列工具、算分段，绝不能放在每个增量上（spec 第 9 条的精神）；实时这条只带两个数，
+/// 连 MCP 列工具、算分段，绝不能放在每个增量上（spec 第 9 条的精神）；这条只带两个数，
 /// 前端就地更新分子/分母与比例，其余字段（分段、压缩计数、来源标签）留给轮末的权威计算。
 ///
+/// **唯一的生产者是内置 agent 的压缩检查**（`chat/agent/compaction.rs`），粒度是**每个
+/// planning 轮一次**，两个数与轮末权威计算出自同一对函数（`anchor_total_tokens` +
+/// `effective_context_tokens`，分母同样是 `context_window_for_model`），所以轮末不会跳。
+///
+/// 外部 CLI **不再走这条**：那边曾有一条 350ms 节流的通道，分子是单次请求快照（工具循环里
+/// 每请求一变、压缩后还会掉）、分母是上一轮的粘滞值、分段是前端缩放出来的，看着就是在跳。
+/// 现在外部 CLI 的占用一轮只更新一次，由轮末权威计算发出。别再给这个函数加第二个生产者
+/// 之前先想清楚那三点。
+///
 /// `context_window_tokens` 为 `None` = 本次上报没带窗口，**前端必须保留已知的旧值**
-/// （分母粘滞，见 `applyLiveContextUsage`）：claude 的窗口只在轮末那条 `result` 里带。
+/// （分母粘滞，见 `applyLiveContextUsage`）。
 pub(crate) fn emit_chat_context_usage_live(
     app: &AppHandle,
     _conversation_id: &str,

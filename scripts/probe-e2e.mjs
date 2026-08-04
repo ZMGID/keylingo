@@ -421,41 +421,44 @@ const SCENARIOS = [
   },
 
   {
-    name: 'live-usage',
-    desc: '生成过程中就推占用：一轮里多次工具调用，实时推送至少一次且数字单调不减',
+    name: 'context-usage-per-turn',
+    desc: '外部 CLI 的占用一轮只更新一次：轮中不推实时，轮末权威值到位',
     async run() {
-      // 连着读同一个文件三次：一轮里多次 LLM 往返 ⇒ 过程中占用应当一路往上走。
-      const r = await turn('live-usage', {
+      // 连着读同一个文件三次：一轮里多次 LLM 往返 —— 以前正是这种轮次会推一串实时数字。
+      const r = await turn('context-usage-per-turn', {
         prompt:
           `Use the Read tool to read ${SENTINEL_NAME} in the current working directory three ` +
           `times in a row (three separate Read calls), then reply with its contents once.`,
         computeContextStats: true,
       })
       check(r.streamOutcome === 'completed', '本轮应正常完成', r.streamOutcome)
+      // 曾经这里断言「实时至少推一次」。那条通道已删：分子是单次请求快照（工具循环里每请求
+      // 一变、压缩后还会掉）、分母是上一轮的粘滞值、分段是前端缩放出来的 —— 三分之二不是真值，
+      // 而这个数字唯一能驱动的动作（压缩 / 换会话）只发生在两轮之间。改回来先想清楚这三点。
       const ticks = r.liveUsageTicks || []
       check(
-        ticks.length > 0,
-        '生成过程中一次实时占用都没推 —— 用量条只能等轮末（这正是本次修复的目标）',
-        r,
-      )
-      check(
-        ticks.every((tick) => typeof tick.usedTokens === 'number' && tick.usedTokens > 0),
-        '实时推送的分子应恒 > 0（0 不该推出去，会让用量条闪一下）',
+        ticks.length === 0,
+        '外部 CLI 又开始在轮中推实时占用了（分子是单次请求快照，会跳）',
         ticks,
       )
-      const nonDecreasing = ticks.every((tick, i) => i === 0 || tick.usedTokens >= ticks[i - 1].usedTokens)
-      check(nonDecreasing, '过程中的占用往回跳了（输入侧快照被只带输出的上报冲掉？）', ticks)
-      // 与轮末的权威值同口径：实时的最后一个值不该比权威值大（权威值只会更全）。
-      if (r.contextState && typeof r.contextState.estimatedInputTokens === 'number') {
-        const last = ticks[ticks.length - 1].usedTokens
-        soft(
-          last <= r.contextState.estimatedInputTokens,
-          '实时的最后一个分子大于轮末权威值 —— 两边口径可能分叉了',
-          { last, authoritative: r.contextState.estimatedInputTokens },
-        )
-      }
-      soft(ticks.length >= 2, '一轮里只推了一次（工具调用可能没发生，断言力度不足）', ticks)
-      info(`实时推送 ${ticks.length} 次：${ticks.map((t) => t.usedTokens).join(' → ')}`)
+      const cs = r.contextState
+      check(!!cs, '轮末应有权威上下文快照（computeContextStats 打开了）', r)
+      check(
+        typeof cs.estimatedInputTokens === 'number' && cs.estimatedInputTokens > 0,
+        '轮末权威分子应 > 0 —— 这是用量条现在唯一的数据来源',
+        cs,
+      )
+      check(
+        typeof cs.contextWindowTokens === 'number' && cs.contextWindowTokens > 0,
+        '轮末权威分母缺失 ⇒ 用量条只能显示「满度未知」',
+        cs,
+      )
+      soft(
+        cs.tokenCountSource === 'cli_reported',
+        '轮末分子不是 CLI 实报口径（外部 CLI 不该退回估算）',
+        cs,
+      )
+      info(`轮末权威值 ${cs.estimatedInputTokens} / ${cs.contextWindowTokens}（来源 ${cs.tokenCountSource}）`)
     },
   },
 

@@ -162,8 +162,8 @@ pub struct ExternalSessionUsage {
 ///
 /// `total_tokens` 缺失时退回 `input + output`（改动前落盘的旧会话没有 total）。
 ///
-/// **实时通道也必须走这里**（`run.rs` 的用量 tick）：分子口径只有这一个真源，
-/// 在事件层另算一套会让生成过程中的数字与轮末的权威值不一致，用户看到的是轮末跳一下。
+/// **分子口径只有这一个真源**：轮末的权威计算走它。曾经那条实时通道也走它（正是为了不让
+/// 生成过程中的数字与轮末的权威值分叉），那条通道已删 —— 外部 CLI 的占用现在一轮只更新一次。
 pub(crate) fn cli_reported_context_tokens(usage: &ModelUsage) -> usize {
     usage
         .total_tokens
@@ -325,6 +325,39 @@ pub fn compute_external_context_state(
         detected_models,
         usage.reported_context_window,
     );
+    // **CLI 还没报过任何数 ⇒ 什么都不显示**（分子分母全空，前端就地退回「—」）。
+    //
+    // 走到这里的只有首轮（`collect_external_session_usage` 的最后一条兜底：拿会话转录估算
+    // 的那个分支 —— 第二轮起总有上一条 assistant 消息的实报值）。此前那一档显示的是
+    // 「0% · ~19 / 200.0K」：分子是转录估算（不含 CLI 的系统提示 / 工具表 / 读过的文件，
+    // 差一个数量级），分母是静态表编的（`claude-sonnet-5` 表里 200K，而 CLI 实报 1M
+    // ——`[1m]` beta）。两个数都是假的，凑出来的百分比也是假的。
+    //
+    // 首轮答完就有真值了（轮末权威计算 = CLI 实报），空一小会儿比给个错的强。代价：**从不
+    // 上报用量的 CLI** 会一直显示「—」；那也比一个差一个数量级的估算诚实。
+    if usage.token_count_source != TOKEN_COUNT_CLI {
+        return ConversationContextState {
+            estimated_input_tokens: 0,
+            context_window_tokens: None,
+            context_window_estimated: false,
+            usage_ratio: None,
+            status: "unknown".to_string(),
+            segments: Vec::new(),
+            last_measured_at: chrono::Local::now().timestamp(),
+            last_compressed_at: conversation.context_state.last_compressed_at,
+            compressed_message_count: 0,
+            compression_count: conversation.context_state.compression_count,
+            summary: None,
+            compaction_boundaries: conversation.context_state.compaction_boundaries.clone(),
+            warning: conversation.context_state.warning.clone(),
+            context_source: Some(CONTEXT_SOURCE_EXTERNAL.to_string()),
+            token_count_source: None,
+            session_input_tokens: None,
+            session_output_tokens: None,
+            external_agent_id: Some(agent_id.to_string()),
+            external_model: normalized_external_model(model),
+        };
+    }
     let usage_ratio = context_window_tokens
         .filter(|window| *window > 0)
         .map(|window| usage.input_tokens as f32 / window as f32);
@@ -352,11 +385,16 @@ pub fn compute_external_context_state(
         session_input_tokens: Some(usage.input_tokens),
         session_output_tokens: Some(usage.output_tokens),
         external_agent_id: Some(agent_id.to_string()),
-        external_model: if model.trim().is_empty() || model == "default" {
-            None
-        } else {
-            Some(model.to_string())
-        },
+        external_model: normalized_external_model(model),
+    }
+}
+
+/// `default` / 空串都当「没指定模型」（不是一个叫 default 的模型）。
+fn normalized_external_model(model: &str) -> Option<String> {
+    if model.trim().is_empty() || model == "default" {
+        None
+    } else {
+        Some(model.to_string())
     }
 }
 
@@ -678,6 +716,49 @@ mod tests {
         assert_eq!(state.status, "unknown");
         // 分子仍然照常显示。
         assert_eq!(state.estimated_input_tokens, 5010);
+    }
+
+    /// **首轮什么都不显示**：CLI 一个数都没报过时，分子分母全空（前端退回「—」），
+    /// 而不是拿转录估算 + 静态表窗口凑一个「0% · ~19 / 200.0K」——两个数都是假的。
+    #[test]
+    fn no_cli_report_yet_shows_nothing_instead_of_an_estimate() {
+        let mut conversation = empty_conversation();
+        conversation.agent_runtime.external_agent_id = Some("claude".to_string());
+        conversation.agent_runtime.external_model = Some("claude-sonnet-5".to_string());
+        // 首轮：只有用户消息，还没有任何带用量的 assistant 消息。
+        conversation.messages.push(message(
+            "u1",
+            "user",
+            "帮我看一下这个仓库的上下文用量是怎么算的",
+            None,
+        ));
+
+        let state = compute_external_context_state(
+            &conversation,
+            "claude",
+            "claude-sonnet-5",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(state.estimated_input_tokens, 0, "分子不该是转录估算");
+        assert_eq!(
+            state.context_window_tokens, None,
+            "分母不该来自静态表（表里 200K，而 CLI 实报 1M）"
+        );
+        assert_eq!(state.usage_ratio, None);
+        assert_eq!(state.status, "unknown");
+        assert!(
+            state.segments.is_empty(),
+            "不该有「Estimated transcript」那一条"
+        );
+        assert_eq!(state.token_count_source, None, "没有数就别声明口径");
+        // 仍然要标明这是外部 CLI 会话（前端据此选压缩按钮的文案等）。
+        assert_eq!(
+            state.context_source.as_deref(),
+            Some(CONTEXT_SOURCE_EXTERNAL)
+        );
+        assert_eq!(state.external_agent_id.as_deref(), Some("claude"));
     }
 
     #[test]

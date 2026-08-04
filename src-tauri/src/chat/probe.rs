@@ -185,7 +185,8 @@ struct ProbeResult {
     usage: Option<ProbeUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_state: Option<ProbeContextState>,
-    /// 生成过程中收到的实时占用推送（空 = 一次都没推过）。
+    /// 生成过程中收到的实时占用推送。**只有内置 agent 会推**（每个 planning 轮一次）；
+    /// 外部 CLI 一轮只在轮末更新一次占用，所以那条路上这里恒为空 —— 不是坏了。
     live_usage_ticks: Vec<ProbeLiveUsageTick>,
     live_session: ProbeLiveSession,
     /// 本轮墙钟耗时。常驻的收益（首轮约 3.2s 冷启动 vs 后续约 0.1s）此前只能在 bash 里掐表。

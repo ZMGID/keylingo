@@ -1017,11 +1017,13 @@ impl ClaudeStreamState {
                     }
                 }
             }
-            // **输出侧的实时通道**：claude 边生成边报本条消息已产出的 token
-            // （Anthropic 流协议的 `message_delta.usage`）。此前完全没接 ⇒ 一轮里分子只在
-            // 每次请求**开始**时跳一下，中间连着调十几次工具的漫长过程中数字一动不动。
+            // **输出侧用量**：claude 边生成边报本条消息已产出的 token（Anthropic 流协议的
+            // `message_delta.usage`）。与输入侧快照相加得到本次请求的已用量，汇入本轮的
+            // 合并用量（`merge_cli_usage`）。
             //
-            // 与输入侧快照相加得到「此刻已用」；子会话同样不进主线（它有自己的上下文窗口）。
+            // 用户点停止的那种轮次**没有 `result` 帧**，这里攒下的就是落盘用量的唯一来源
+            // —— 所以别因为「实时用量条已经删了」就把这段也删掉。
+            // 子会话同样不进主线（它有自己的上下文窗口）。
             "message_delta" => {
                 if sidechain {
                     return;
@@ -1373,8 +1375,8 @@ mod tests {
     }
 
     /// **子任务的用量绝不能混进主对话**：子 agent 有自己独立的上下文窗口，且常用便宜的小模型
-    /// （窗口小 5 倍）。分流（按帧上的 `parent_tool_use_id` 分车道）必须在实时通道**之前**，
-    /// 否则派子任务的那几秒用量条会跳到一个与主对话无关的数字再跳回来。
+    /// （窗口小 5 倍）。分流（按帧上的 `parent_tool_use_id` 分车道）必须在用量汇入主线**之前**，
+    /// 否则派了子任务的那一轮，落盘用量和轮末的用量条都会带上一段与主对话无关的数字。
     #[test]
     fn sidechain_usage_never_reaches_the_main_conversation_realtime_value() {
         let events = run(&[

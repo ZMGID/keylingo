@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use chrono::Local;
 use tauri::{AppHandle, State};
@@ -395,7 +395,6 @@ pub async fn run_external_cli_reply(
     // 第三方 router 都只有它知道）。这里若拿静态表算个兜底分母下发，就会出现「回答中
     // `claude-sonnet-5` ⇒ 200K、答完跳回 1M」。前端 `contextPanel.ts::applyLiveContextUsage`
     // 对 `null` 分母保留已知旧窗口，所以不下发就是「沿用上一轮的分母」——正是要的语义。
-    let mut usage_ticker = ContextUsageTicker::default();
 
     let mut emit_event = |event: UnifiedAgentEvent| {
         if let Some(commands) = slash::slash_commands_from_event(&event) {
@@ -403,7 +402,6 @@ pub async fn run_external_cli_reply(
         }
         apply_unified_event(
             app,
-            &conversation_id,
             &run_id,
             &compaction_anchor_id,
             &mut content,
@@ -417,7 +415,6 @@ pub async fn run_external_cli_reply(
             &mut segment_order,
             &mut segment_tracker,
             &mut cli_compactions,
-            &mut usage_ticker,
             event,
         );
     };
@@ -1544,19 +1541,18 @@ impl ApprovalHost<'_> {
                 &record,
             )
             .await;
-            let mode = outcome
-                .approved
-                .then(|| {
-                    outcome
-                        .permission_mode
-                        .clone()
-                        .unwrap_or_else(|| PLAN_APPROVED_PERMISSION_MODE.to_string())
-                });
+            let mode = outcome.approved.then(|| {
+                outcome
+                    .permission_mode
+                    .clone()
+                    .unwrap_or_else(|| PLAN_APPROVED_PERMISSION_MODE.to_string())
+            });
             // 「批准并自动放行」= 这一轮剩下的工具也别再弹卡了。`auto_allow_tools` 是开轮时
             // 从 argv 读的（那时还是计划档），不就地翻掉的话用户选了「自动放行」却还要一个个
             // 点 —— 正是他刚刚选的那一档要消灭的东西。
             if mode.as_deref() == Some(FULL_ACCESS_PERMISSION_MODE) {
-                self.auto_allow_tools.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.auto_allow_tools
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             return crate::external_agents::session::live::ApprovalDecision {
                 request_id: ask.request_id,
@@ -1567,7 +1563,10 @@ impl ApprovalHost<'_> {
         }
         // 「完全」档：通道之所以接上只为了上面那两张卡，普通工具原地放行。
         // 少了这一条，选了「全自动放行」的用户会突然开始每个工具都被问一次。
-        if self.auto_allow_tools.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .auto_allow_tools
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return crate::external_agents::session::live::ApprovalDecision {
                 request_id: ask.request_id,
                 approved: true,
@@ -2064,78 +2063,8 @@ fn nonzero_exit_is_a_failure(exit_code: Option<i32>, protocol_completed: bool) -
     !protocol_completed && exit_code.map(|code| code != 0).unwrap_or(false)
 }
 
-#[allow(clippy::too_many_arguments)]
-/// 生成过程中往前端推「上下文占用活数」的节流器。
-///
-/// 为什么需要它：分子的上报频率由 CLI 决定（claude 的输出侧是边生成边报），一条一推等于
-/// 每个 token 都过一次 IPC。节流量级对齐仓库里子 agent 进度卡的 ~350ms。
-///
-/// **只带分子**：分母在一轮内是常量，且唯一权威来源是 CLI 轮末实报的 `contextWindow`；
-/// 中途拿静态表编一个下发，只会让百分比在两个值之间跳（见构造点注释）。CLI 若在同一条
-/// usage 上报里带了窗口（ACP `usage_update.size`），照原样透传——那是实报，不是猜的。
-#[derive(Default)]
-struct ContextUsageTicker {
-    /// 上一次真正推出去的 `(分子, 分母)`。数字没变就不推。
-    last: Option<(u64, Option<u64>)>,
-    last_emit: Option<Instant>,
-}
-
-/// 节流间隔。与子 agent 进度卡（~350ms）同量级：肉眼连续，又不至于每 token 一次 IPC。
-const CONTEXT_USAGE_TICK_INTERVAL: Duration = Duration::from_millis(350);
-
-/// 要不要推这一次活数。抽成纯函数以便单测（spec 第 13 条）。
-///
-/// 三条判据：
-/// 1. 分子为 0 不推——没有分子的上报（未登录 / 斜杠命令那种零用量轮）只带分母，
-///    推出去会让用量条闪一下 0。
-/// 2. 与上次推出去的完全相同不推（CLI 一轮里会重复报同一个快照）。
-/// 3. 距上次推不足 [`CONTEXT_USAGE_TICK_INTERVAL`] 不推，**但本轮第一次总是推**——
-///    否则一轮很短时用户什么都看不到。
-fn should_emit_usage_tick(
-    last: Option<(u64, Option<u64>)>,
-    since_last_emit: Option<Duration>,
-    next: (u64, Option<u64>),
-) -> bool {
-    if next.0 == 0 {
-        return false;
-    }
-    if last == Some(next) {
-        return false;
-    }
-    match since_last_emit {
-        Some(elapsed) => elapsed >= CONTEXT_USAGE_TICK_INTERVAL,
-        None => true,
-    }
-}
-
-impl ContextUsageTicker {
-    /// 由合并后的 CLI 用量算出 `(分子, 分母)`。
-    ///
-    /// 分子走 `context::cli_reported_context_tokens` —— 与轮末权威计算**同一个函数**，
-    /// 否则用户会在轮末看到数字跳一下（spec 14b 那类「最后一层把前面全丢掉」的形态）。
-    /// 分母只有 CLI 本轮实报时才带（`merge_cli_usage` 已保证实报窗口在一轮内粘滞），
-    /// 缺失就发 `None` = 前端沿用已知窗口。
-    fn values(&self, usage: &ModelUsage) -> (u64, Option<u64>) {
-        let used = crate::external_agents::context::cli_reported_context_tokens(usage) as u64;
-        (used, usage.context_window_tokens)
-    }
-
-    /// 到点就推：返回 `Some((分子, 分母))` 表示调用方应该发事件。
-    fn tick(&mut self, usage: &ModelUsage, now: Instant) -> Option<(u64, Option<u64>)> {
-        let next = self.values(usage);
-        let since = self.last_emit.map(|at| now.duration_since(at));
-        if !should_emit_usage_tick(self.last, since, next) {
-            return None;
-        }
-        self.last = Some(next);
-        self.last_emit = Some(now);
-        Some(next)
-    }
-}
-
 fn apply_unified_event(
     app: &AppHandle,
-    conversation_id: &str,
     run_id: &str,
     compaction_anchor_id: &str,
     content: &mut String,
@@ -2149,7 +2078,6 @@ fn apply_unified_event(
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
     cli_compactions: &mut Vec<CompactionBoundaryRecord>,
-    usage_ticker: &mut ContextUsageTicker,
     event: UnifiedAgentEvent,
 ) {
     let now = Local::now().timestamp();
@@ -2223,28 +2151,15 @@ fn apply_unified_event(
             }
         }
         UnifiedAgentEvent::Usage { usage: u } => {
-            let merged = merge_cli_usage(usage.as_ref(), u);
-            // **实时通道**：生成过程中就把占用推给前端，别等轮末。
+            // 只累积，不下发。上下文占用**一轮更新一次**，由轮末那次权威计算发出
+            // （`compute_context_state` → `context_updated`）。
             //
-            // 建在这一层（而不是 claude 的解析器里）是为了让全部外部 CLI 一起受益：
-            // ACP 的 `usage_update`、codex 的 `thread/tokenUsage/updated`、pi 的用量通知
-            // 都已在各自解析层归一成 `UnifiedAgentEvent::Usage`，这里是它们唯一的汇合点。
-            //
-            // **分流已在上游完成**：子会话（claude 的 sidechain / 子 agent）的用量根本不会
-            // 变成 `Usage` 事件（`stream/claude.rs` 在 `message_start` / `message_delta` 里
-            // 按 `parent_tool_use_id` 提前 return），所以实时通道天然走在分流之后 ——
-            // 顺序反了的话，派子任务的那几秒用量条会跳到一个与主对话无关的数字（子 agent
-            // 常用便宜小模型，窗口小 5 倍）再跳回来。
-            if let Some((used, window)) = usage_ticker.tick(&merged, Instant::now()) {
-                crate::chat::commands::context::emit_chat_context_usage_live(
-                    app,
-                    conversation_id,
-                    run_id,
-                    used,
-                    window,
-                );
-            }
-            *usage = Some(merged);
+            // 曾经这里有一条 350ms 节流的「实时」通道，删掉的理由是它三分之二不是真值：
+            // 分子是**单次请求**的快照（工具循环里每请求一变、压缩后还会掉，看着就是在跳），
+            // 分母是上一轮留下的粘滞值（claude 只在轮末 `result` 里报窗口），进度条里的分段
+            // 构成则是前端按比例硬缩放出来的。而这个数字唯一能驱动的动作（压缩 / 换会话）
+            // 只发生在两轮之间 —— 轮中看到也用不上。要改回来先想清楚这三点。
+            *usage = Some(merge_cli_usage(usage.as_ref(), u));
         }
         UnifiedAgentEvent::Error { message, .. } => {
             eprintln!("[external-agent] stream error: {message}");
@@ -2437,9 +2352,9 @@ mod tests {
         );
     }
 
-    // ---- 生成过程中的用量实时推送（分子/分母 + 节流）----
+    // ---- CLI 实报用量的合并口径（一轮一次，轮末权威值用的就是它）----
 
-    fn tick_usage(input: u64, output: u64, cache_read: u64, window: Option<u64>) -> ModelUsage {
+    fn usage_parts(input: u64, output: u64, cache_read: u64, window: Option<u64>) -> ModelUsage {
         crate::external_agents::stream::usage_from_parts(
             crate::external_agents::stream::CliUsageParts {
                 input,
@@ -2451,84 +2366,19 @@ mod tests {
         )
     }
 
-    /// 实时值的分子必须与轮末权威值同口径（都走 `cli_reported_context_tokens`）。
-    /// 只读 `input_tokens` 会把 cache 丢在最后一层（spec 14b 踩过的形态），
-    /// 表现为用户在轮末看到数字猛跳一下。
+    /// 零用量的上报不得把已经攒到的分子清零（spec 14h）。`/help` 那种没有 LLM 往返的
+    /// `result` 四个字段全 0 却带窗口 —— 采纳它的窗口，但绝不采纳它的 0。
     #[test]
-    fn usage_tick_numerator_uses_the_same_formula_as_the_authoritative_value() {
-        let ticker = ContextUsageTicker::default();
-        let usage = tick_usage(1_200, 800, 45_000, Some(1_000_000));
-        let (used, window) = ticker.values(&usage);
-        assert_eq!(used, 47_000, "cache 必须计入分子");
-        assert_eq!(
-            used as usize,
-            crate::external_agents::context::cli_reported_context_tokens(&usage),
-            "实时分子与轮末权威分子必须是同一个函数算出来的"
-        );
-        assert_eq!(window, Some(1_000_000));
-    }
-
-    /// **分母不实时**：中途的上报不带窗口（claude 只在轮末那条 `result` 里带）时发 `None`,
-    /// 前端据此沿用已知窗口。绝不在这里拿静态表编一个 —— `claude-sonnet-5` 静态表是 200K
-    /// 而 CLI 实报 1M（`[1m]` beta），编出来就是「回答中 89%、答完 18%」。
-    #[test]
-    fn usage_tick_omits_the_denominator_until_the_cli_reports_one() {
-        let ticker = ContextUsageTicker::default();
-        assert_eq!(ticker.values(&tick_usage(1_000, 0, 0, None)).1, None);
-
-        // 一轮内：先来一条带窗口的，再来一条不带窗口的 —— `merge_cli_usage` 让它粘滞。
-        let with_window = tick_usage(1_000, 0, 0, Some(1_000_000));
-        let without_window = tick_usage(1_000, 500, 0, None);
-        let merged = merge_cli_usage(Some(&with_window), without_window);
-        assert_eq!(
-            ticker.values(&merged).1,
-            Some(1_000_000),
-            "不带窗口的后到上报把已知分母冲成了未知"
-        );
-    }
-
-    #[test]
-    fn usage_tick_throttle_rules() {
-        // 本轮第一次总是推（一轮很短时也要看得见）。
-        assert!(should_emit_usage_tick(None, None, (100, Some(200_000))));
-        // 数字没变不推（CLI 会重复报同一个快照）。
-        assert!(!should_emit_usage_tick(
-            Some((100, Some(200_000))),
-            Some(Duration::from_secs(5)),
-            (100, Some(200_000)),
-        ));
-        // 变了但还没到节流间隔 ⇒ 不推（否则每个 token 一次 IPC）。
-        assert!(!should_emit_usage_tick(
-            Some((100, Some(200_000))),
-            Some(Duration::from_millis(40)),
-            (180, Some(200_000)),
-        ));
-        // 变了且到点 ⇒ 推。
-        assert!(should_emit_usage_tick(
-            Some((100, Some(200_000))),
-            Some(CONTEXT_USAGE_TICK_INTERVAL),
-            (180, Some(200_000)),
-        ));
-        // 分子为 0 的上报（未登录 / 零用量的斜杠命令轮，只带分母）不推：会让用量条闪一下 0。
-        assert!(!should_emit_usage_tick(None, None, (0, Some(200_000))));
-    }
-
-    /// 零用量的上报不得把已经推出去的活数清零（spec 14h 的同一条规则在实时通道上的体现）。
-    #[test]
-    fn zero_usage_report_does_not_reset_the_live_value() {
-        let real = tick_usage(1_200, 800, 45_000, None);
-        let mut ticker = ContextUsageTicker::default();
-        let now = Instant::now();
-        assert_eq!(ticker.tick(&real, now), Some((47_000, None)));
-        // `/help` 那种没有 LLM 往返的 result：四个字段全 0，但带窗口。
-        let zero_with_window = tick_usage(0, 0, 0, Some(1_000_000));
+    fn zero_usage_report_does_not_reset_the_numerator() {
+        let real = usage_parts(1_200, 800, 45_000, None);
+        let zero_with_window = usage_parts(0, 0, 0, Some(1_000_000));
         let merged = merge_cli_usage(Some(&real), zero_with_window);
-        let later = now + Duration::from_secs(1);
         assert_eq!(
-            ticker.tick(&merged, later),
-            Some((47_000, Some(1_000_000))),
+            crate::external_agents::context::cli_reported_context_tokens(&merged),
+            47_000,
             "分子必须保持 47000（只采纳零值上报带来的窗口）"
         );
+        assert_eq!(merged.context_window_tokens, Some(1_000_000));
     }
 
     #[test]
