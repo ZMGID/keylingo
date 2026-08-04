@@ -458,6 +458,39 @@ fn format_tool_approval_summary_shows_the_plan_text() {
     assert!(!summary.detail.contains("\"plan\""));
 }
 
+/// `EnterPlanMode` 没有入参：卡片不能因为「认不出操作对象」退到裸 JSON 分支、蹲一个 `{}`。
+/// 标题（前端的 `toolApprovalTitle`）已经把事情说完了。
+#[test]
+fn format_tool_approval_summary_leaves_enter_plan_mode_without_detail() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "EnterPlanMode".to_string(),
+        source: "external_cli".to_string(),
+        server_id: None,
+        arguments: "{}".to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert!(summary.target.is_none());
+    assert!(
+        summary.detail.is_empty(),
+        "不该显示 `{{}}`：{}",
+        summary.detail
+    );
+}
+
 #[test]
 fn format_tool_approval_summary_highlights_run_command() {
     let record = ToolCallRecord {

@@ -317,14 +317,17 @@ fn control_response_verdict(frame: &Value, request_id: &str) -> Option<bool> {
 /// 目前只有一条当场拒的规则：`requires_user_interaction` 且**不是我们已经接住的那两个**
 /// （见 `APPROVAL_INTERACTIVE_UNSUPPORTED`）。抽成纯函数是为了让「哪些不问用户」有单测可证。
 fn approval_verdict(ask: &ApprovalAsk) -> Result<(), &'static str> {
-    // 两个交互工具都答得了：
+    // 三个交互工具都答得了：
     // - `AskUserQuestion` → Kivio 自己的问用户卡片，选项经 `updated_input` 回去；
-    // - `ExitPlanMode`   → 普通审批卡，批准时经 `set_permission_mode` 先切档位再放行。
+    // - `ExitPlanMode`   → 审批卡，批准时经 `set_permission_mode` 先切档位再放行；
+    // - `EnterPlanMode`  → 审批卡，**放行就够** —— 它的实现里自己就切了档
+    //   （二进制：`setToolPermissionContext(… {type:"setMode",mode:"plan",destination:"session"})`）。
     // 其余（CLI 将来新增的交互工具）仍当场拒 —— 沉默地放行一个我们答不了的交互工具，
     // 结果是那一轮挂在它自己的对话框上。
     if ask.requires_user_interaction
         && !is_ask_user_question(&ask.tool_name)
         && !is_exit_plan_mode(&ask.tool_name)
+        && !is_enter_plan_mode(&ask.tool_name)
     {
         return Err(APPROVAL_INTERACTIVE_UNSUPPORTED);
     }
@@ -340,6 +343,16 @@ pub fn is_ask_user_question(tool_name: &str) -> bool {
 /// claude 内置的「计划写完了，批准我去做」工具名。同样放宽大小写比对。
 pub fn is_exit_plan_mode(tool_name: &str) -> bool {
     tool_name.eq_ignore_ascii_case("ExitPlanMode")
+}
+
+/// claude 内置的「让我先探索、出个方案再动手」工具名（claude 自己要求进入计划档）。
+///
+/// 与 `ExitPlanMode` 的**不对称**：这个工具的实现里自己就把会话切进了计划档
+/// （二进制里 `call` 直接 `setMode: plan, destination: "session"`），所以宿主只要放行，
+/// 不需要额外发 `set_permission_mode`。反向那次（离开计划档）落在哪一档是用户在卡片上
+/// 三选一决定的，那次才要发切档帧。
+pub fn is_enter_plan_mode(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("EnterPlanMode")
 }
 
 /// 从一条 `can_use_tool` 请求里读出问用户所需的字段。
@@ -1608,6 +1621,17 @@ mod tests {
         )
         .expect("ask");
         assert!(approval_verdict(&future).is_err());
+
+        // `EnterPlanMode`：claude 自己要求进入计划档。放行就够（它的实现里自己切档），
+        // 但要不要进只读档是用户的决定 ⇒ 必须问。
+        let enter_plan = ask_for(
+            r#"{"type":"control_request","request_id":"r5","request":{"subtype":"can_use_tool","tool_name":"EnterPlanMode","input":{},"requires_user_interaction":true}}"#,
+        )
+        .expect("ask");
+        assert!(
+            approval_verdict(&enter_plan).is_ok(),
+            "EnterPlanMode 必须问用户 —— 把一次生成中途变成只读是用户的决定"
+        );
 
         let ordinary = ask_for(
             r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,

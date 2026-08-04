@@ -1561,6 +1561,29 @@ impl ApprovalHost<'_> {
                 set_permission_mode: mode,
             };
         }
+        // `EnterPlanMode` = claude 自己要求「先探索、出方案，别急着改」。**放行就够** ——
+        // 它的实现里自己就把会话切进了计划档，宿主不用发切档帧（与 `ExitPlanMode` 不对称，
+        // 见 `claude_stream::is_enter_plan_mode`）。
+        //
+        // 同样排在 `auto_allow_tools` 之前：把一次生成中途变成只读是用户的决定，
+        // 「完全」档也不该替他点头。底栏胶囊由前端在批准后写成「计划」（同计划批准那条路）。
+        if crate::external_agents::session::claude_stream::is_enter_plan_mode(&ask.tool_name) {
+            let approved = crate::chat::commands::interaction::request_tool_approval(
+                self.app,
+                self.state,
+                self.conversation_id,
+                self.run_id,
+                self.generation,
+                &record,
+            )
+            .await;
+            return crate::external_agents::session::live::ApprovalDecision {
+                request_id: ask.request_id,
+                approved,
+                updated_input: None,
+                set_permission_mode: None,
+            };
+        }
         // 「完全」档：通道之所以接上只为了上面那两张卡，普通工具原地放行。
         // 少了这一条，选了「全自动放行」的用户会突然开始每个工具都被问一次。
         if self

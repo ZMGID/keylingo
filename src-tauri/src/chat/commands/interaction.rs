@@ -703,6 +703,14 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> ToolAppro
                 lines.push(truncate_chars(&plan, 20_000));
             }
         }
+        // claude 自己要求进入计划档。这个工具**没有入参**，标题已经把事情说完了；
+        // 不给 detail，否则会退到下面的裸 JSON 分支、卡片上蹲一个 `{}`。
+        "enterplanmode" => {
+            return ToolApprovalSummary {
+                target: None,
+                detail: String::new(),
+            };
+        }
         _ => {}
     }
 

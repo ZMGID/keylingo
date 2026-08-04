@@ -410,6 +410,8 @@ function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
   const name = (payload.name || '').toLowerCase()
   // claude 的计划批准：批的是卡片上那份计划，不是「一个叫 ExitPlanMode 的工具」。
   if (name === 'exitplanmode') return '批准这份计划，开始执行？'
+  // claude 自己要求进入计划档：先探索、出方案，这一轮不动代码。
+  if (name === 'enterplanmode') return '让 claude 先出方案，暂不改动代码？'
   const spec = TOOL_APPROVAL_VERBS[name]
   const target = payload.target?.trim()
   if (!spec || !target) return `允许调用工具 ${payload.name}？`
@@ -417,10 +419,17 @@ function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
   return `允许${spec.verb} ${shown}？`
 }
 
-/** 计划批准卡不给「总是允许」：那等于以后每份计划都自动批、还自动切出计划模式，
- *  而用户当时想说的只是「这一份可以」。 */
+/** 计划批准卡不给「总是允许」：那等于以后每份计划都自动批、还自动替你选落在哪一档，
+ *  而用户当时想说的只是「这一份可以」。Claude Code 的计划提示也只有三选一、没有「别再问」。
+ *  `EnterPlanMode` 相反 —— 它走的是普通工具提示那套，Claude Code 在那里是给「别再问」的。 */
 function isPlanApproval(payload: ChatToolConfirmPayload): boolean {
   return (payload.name || '').toLowerCase() === 'exitplanmode'
+}
+
+/** claude 主动要求进入计划档。批准就够（CLI 自己切档），但会话配置要跟着写成 `plan`，
+ *  否则底栏胶囊还显示「完全」而 claude 已经进只读了。 */
+function isEnterPlanApproval(payload: ChatToolConfirmPayload): boolean {
+  return (payload.name || '').toLowerCase() === 'enterplanmode'
 }
 
 /** 计划批准的三个选项，对齐 Claude Code 自己的那三条
@@ -4453,11 +4462,42 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                                   },
                                 })),
                               ]
-                              : [
-                                { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
-                                { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
-                                { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
-                              ]}
+                              : isEnterPlanApproval(pendingToolConfirm)
+                                ? [
+                                  { label: '不用，直接做', onSelect: () => resolvePendingToolConfirm(false) },
+                                  // 「总是允许」对齐 Claude Code 普通工具提示里的「别再问」。
+                                  // 代价（写在这里免得以后当 bug 查）：此后被自动放行的那几次
+                                  // 不经过卡片，前端也就没机会写会话档位 —— CLI 已进只读、而底栏
+                                  // 胶囊仍是上一档，直到下次刷新/切会话。用户主动说了「别再问」，
+                                  // 这个滞后可以接受。
+                                  {
+                                    label: '总是允许',
+                                    onSelect: () => {
+                                      resolvePendingToolConfirm(true, true)
+                                      void handleExternalSandboxChange('plan').catch((error) => {
+                                        console.error('Failed to persist the plan permission mode:', error)
+                                      })
+                                    },
+                                  },
+                                  {
+                                    label: '进入计划模式',
+                                    primary: true,
+                                    hint: 'Ctrl+↵',
+                                    onSelect: () => {
+                                      // 放行就够 —— CLI 自己切档（见 claude_stream::is_enter_plan_mode）。
+                                      // 这里只把会话配置跟上，让底栏胶囊与实际一致、重启也不掉回来。
+                                      resolvePendingToolConfirm(true)
+                                      void handleExternalSandboxChange('plan').catch((error) => {
+                                        console.error('Failed to persist the plan permission mode:', error)
+                                      })
+                                    },
+                                  },
+                                ]
+                                : [
+                                  { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
+                                  { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
+                                  { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
+                                ]}
                           />
                         )}
                         {pendingSessionConsent && (
