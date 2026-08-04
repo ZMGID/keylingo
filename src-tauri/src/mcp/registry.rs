@@ -1366,7 +1366,7 @@ pub(super) async fn run_python_via_pyodide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_tools::{ReadFileResult, ReadFileState};
+    use crate::native_tools::ReadFileResult;
 
     #[test]
     fn read_file_tool_result_preserves_structured_content() {
@@ -1380,11 +1380,6 @@ mod tests {
             truncated: false,
             file_size: 10,
             next_offset: None,
-            read_state: ReadFileState {
-                scope: "full".to_string(),
-                mtime: Some(123),
-                already_read: false,
-            },
             warnings: Vec::new(),
         };
 
@@ -1404,7 +1399,6 @@ mod tests {
         assert_eq!(structured["end_line"], 2);
         assert_eq!(structured["truncated"], false);
         assert_eq!(structured["file_size"], 10);
-        assert_eq!(structured["read_state"]["scope"], "full");
         // 模型看到的 content 是 cat -n 文本（不再是 JSON），结构化内容仍完整保留给前端。
         assert_eq!(
             output.content,
@@ -1610,11 +1604,6 @@ while True:
             truncated: true,
             file_size: 4096,
             next_offset: Some(12),
-            read_state: ReadFileState {
-                scope: "partial".to_string(),
-                mtime: Some(1),
-                already_read: false,
-            },
             warnings: Vec::new(),
         };
         let output = read_file_tool_result(result).expect("tool result");

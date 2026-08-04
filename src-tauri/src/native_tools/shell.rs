@@ -389,9 +389,10 @@ const MAX_INLINE_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// Tail-truncation caps for the inline body: keep the END of the output (where
 /// errors and final results live), bounded by both a line count and a byte size,
-/// whichever hits first.
-const TAIL_MAX_LINES: usize = 2_000;
-const TAIL_MAX_BYTES: usize = 50 * 1024;
+/// whichever hits first. Same budget as `read` — one shared pair of numbers so
+/// no tool can be the one that forgot its output ceiling (pi `truncate.ts`).
+const TAIL_MAX_LINES: usize = super::TOOL_OUTPUT_MAX_LINES;
+const TAIL_MAX_BYTES: usize = super::TOOL_OUTPUT_MAX_BYTES;
 
 /// Keep the LAST `TAIL_MAX_LINES` lines / `TAIL_MAX_BYTES` bytes of `text`,
 /// dropping earlier lines. Returns `(kept_text, dropped_line_count)` where a

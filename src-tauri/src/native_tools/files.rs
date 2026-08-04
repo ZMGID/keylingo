@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{
     resolve_tool_read_path, resolve_tool_write_path, workspace_display_path, NativeToolWorkspace,
-    MAX_READ_FILE_BYTES,
+    MAX_READ_FILE_BYTES, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES,
 };
 
 const MAX_LIST_ENTRIES: usize = 500;
@@ -65,16 +65,7 @@ pub struct ReadFileResult {
     pub file_size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<usize>,
-    pub read_state: ReadFileState,
     pub warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ReadFileState {
-    pub scope: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mtime: Option<u64>,
-    pub already_read: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,14 +120,10 @@ pub fn read_file(
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
 
+    // 超过内存阈值 → 流式行窗口读，不再报错要求调用方自己传 offset/limit。
+    // 输出上限两条路径一致（TOOL_OUTPUT_MAX_*），所以「整个文件多大」不再是失败条件，
+    // 只决定用哪个读法（对齐 pi：read 永远给得出东西，给多少由 truncate 决定）。
     if metadata.len() > MAX_READ_FILE_BYTES {
-        if arguments.get("offset").is_none() && limit.is_none() {
-            return Err(format!(
-                "File too large to read at once ({} bytes, max {}). Pass offset/limit to read a line window.",
-                metadata.len(),
-                MAX_READ_FILE_BYTES
-            ));
-        }
         return read_file_window_streaming(workspace, &full, &metadata, offset, limit);
     }
 
@@ -145,19 +132,18 @@ pub fn read_file(
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
     let start = offset.saturating_sub(1).min(lines.len());
-    let end = limit
+    let requested_end = limit
         .map(|lim| (start + lim).min(lines.len()))
         .unwrap_or(lines.len());
+    // 照抄 pi `read.ts`：模型给的 limit 先切，**再无条件过一遍 truncate_head**。
+    // limit 是模型的意图，上限是框架的地板——模型写多大都翻不过去。
+    let (kept, capped) = truncate_head(&lines[start..requested_end]);
+    let end = start + kept;
     let truncated = end < total_lines;
-    let returned_content = if offset == 1 && limit.is_none() {
+    let returned_content = if offset == 1 && limit.is_none() && capped.is_none() {
         content
     } else {
         lines[start..end].join("\n")
-    };
-    let scope = if offset == 1 && !truncated {
-        "full"
-    } else {
-        "partial"
     };
     Ok(ReadFileResult {
         path: workspace_display_path(workspace, &full),
@@ -168,21 +154,71 @@ pub fn read_file(
         end_line: end,
         truncated,
         file_size: metadata.len(),
-        next_offset: truncated.then_some(end + 1),
-        read_state: ReadFileState {
-            scope: scope.to_string(),
-            mtime: file_mtime_secs(&metadata),
-            already_read: false,
-        },
-        warnings: Vec::new(),
+        // 首行自身就超字节预算时 kept==0：下一次从**下一行**继续，绝不把 next_offset
+        // 停在同一行上（那会让模型原地打转）。整行内容由 warning 指向 run_command。
+        next_offset: truncated.then(|| if kept == 0 { start + 2 } else { end + 1 }),
+        warnings: cap_warnings(capped, start, end, kept),
     })
 }
 
-/// Default line window when reading an oversized file with offset but no limit.
-const LARGE_READ_DEFAULT_LIMIT: usize = 2_000;
+/// 触顶原因（照抄 pi `TruncationResult.truncatedBy`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TruncatedBy {
+    Lines,
+    Bytes,
+}
+
+/// 从头保留完整行，直到行数到 [`TOOL_OUTPUT_MAX_LINES`] 或字节到
+/// [`TOOL_OUTPUT_MAX_BYTES`]（照抄 pi `truncateHead`：谁先到算谁，绝不返回半行）。
+///
+/// 返回 `(保留行数, 触顶原因)`；原因为 `None` = 整段都放得下。首行自身就超字节预算
+/// → `(0, Some(Bytes))`，由调用方给出 `run_command` 兜底提示（pi 那边指向 bash）。
+fn truncate_head(lines: &[&str]) -> (usize, Option<TruncatedBy>) {
+    let total_bytes: usize =
+        lines.iter().map(|line| line.len()).sum::<usize>() + lines.len().saturating_sub(1);
+    if lines.len() <= TOOL_OUTPUT_MAX_LINES && total_bytes <= TOOL_OUTPUT_MAX_BYTES {
+        return (lines.len(), None);
+    }
+    let mut used = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        if idx >= TOOL_OUTPUT_MAX_LINES {
+            return (idx, Some(TruncatedBy::Lines));
+        }
+        let cost = line.len() + usize::from(idx > 0);
+        if used + cost > TOOL_OUTPUT_MAX_BYTES {
+            return (idx, Some(TruncatedBy::Bytes));
+        }
+        used += cost;
+    }
+    (lines.len(), None)
+}
+
+/// 把触顶原因翻成模型能照做的一句话（对齐 pi 的 `[Showing lines … Use offset=N to
+/// continue.]`）。没触顶就没有 warning——文件本来就读完了，不该吓唬模型。
+fn cap_warnings(capped: Option<TruncatedBy>, start: usize, end: usize, kept: usize) -> Vec<String> {
+    let kb = TOOL_OUTPUT_MAX_BYTES / 1024;
+    match capped {
+        None => Vec::new(),
+        Some(TruncatedBy::Bytes) if kept == 0 => vec![format!(
+            "第 {line} 行单行就超过 {kb}KB 的单次读取上限。用 run_command 取这一行：\
+             sed -n '{line}p' <path> | head -c {TOOL_OUTPUT_MAX_BYTES}；或用 offset={next} 跳过它继续。",
+            line = start + 1,
+            next = start + 2,
+        )],
+        Some(TruncatedBy::Bytes) => vec![format!(
+            "单次读取上限 {kb}KB 已触顶（不是文件结尾），用 offset={} 继续。",
+            end + 1
+        )],
+        Some(TruncatedBy::Lines) => vec![format!(
+            "单次读取上限 {TOOL_OUTPUT_MAX_LINES} 行已触顶（不是文件结尾），用 offset={} 继续。",
+            end + 1
+        )],
+    }
+}
 
 /// Streams an oversized file line by line, keeping only the requested window in
-/// memory. The window itself is still capped at MAX_READ_FILE_BYTES.
+/// memory. The window obeys the same [`TOOL_OUTPUT_MAX_LINES`] /
+/// [`TOOL_OUTPUT_MAX_BYTES`] budget as the in-memory path.
 fn read_file_window_streaming(
     workspace: &NativeToolWorkspace,
     full: &Path,
@@ -192,7 +228,9 @@ fn read_file_window_streaming(
 ) -> Result<ReadFileResult, String> {
     use std::io::BufRead;
 
-    let limit = limit.unwrap_or(LARGE_READ_DEFAULT_LIMIT).max(1);
+    let limit = limit
+        .unwrap_or(TOOL_OUTPUT_MAX_LINES)
+        .clamp(1, TOOL_OUTPUT_MAX_LINES);
     let start = offset.saturating_sub(1);
     let end = start.saturating_add(limit);
 
@@ -205,7 +243,7 @@ fn read_file_window_streaming(
     for line in reader.lines() {
         let line = line.map_err(|err| format!("Read file failed: {err}"))?;
         if total_lines >= start && total_lines < end && !window_byte_capped {
-            if window_bytes + line.len() > MAX_READ_FILE_BYTES as usize {
+            if window_bytes + line.len() > TOOL_OUTPUT_MAX_BYTES {
                 window_byte_capped = true;
             } else {
                 window_bytes += line.len();
@@ -216,15 +254,16 @@ fn read_file_window_streaming(
     }
 
     let start = start.min(total_lines);
-    let end = (start + window.len()).min(total_lines);
+    let kept = window.len();
+    let end = (start + kept).min(total_lines);
     let truncated = end < total_lines;
-    let mut warnings = Vec::new();
-    if window_byte_capped {
-        warnings.push(format!(
-            "Line window exceeded {MAX_READ_FILE_BYTES} bytes; returned fewer lines than requested. Continue with offset={}.",
-            end + 1
-        ));
-    }
+    let capped = if window_byte_capped {
+        Some(TruncatedBy::Bytes)
+    } else if truncated && kept >= limit && limit == TOOL_OUTPUT_MAX_LINES {
+        Some(TruncatedBy::Lines)
+    } else {
+        None
+    };
     Ok(ReadFileResult {
         path: workspace_display_path(workspace, full),
         resolved_path: full.display().to_string(),
@@ -234,22 +273,9 @@ fn read_file_window_streaming(
         end_line: end,
         truncated,
         file_size: metadata.len(),
-        next_offset: truncated.then_some(end + 1),
-        read_state: ReadFileState {
-            scope: "partial".to_string(),
-            mtime: file_mtime_secs(metadata),
-            already_read: false,
-        },
-        warnings,
+        next_offset: truncated.then(|| if kept == 0 { start + 2 } else { end + 1 }),
+        warnings: cap_warnings(capped, start, end, kept),
     })
-}
-
-fn file_mtime_secs(metadata: &fs::Metadata) -> Option<u64> {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
 }
 
 pub fn write_file(
@@ -1679,7 +1705,6 @@ mod tests {
         assert_eq!(result.end_line, 2);
         assert!(!result.truncated);
         assert_eq!(result.next_offset, None);
-        assert_eq!(result.read_state.scope, "full");
 
         let _ = fs::remove_file(file);
     }
@@ -1706,13 +1731,12 @@ mod tests {
         assert_eq!(result.end_line, 3);
         assert!(result.truncated);
         assert_eq!(result.next_offset, Some(4));
-        assert_eq!(result.read_state.scope, "partial");
 
         let _ = fs::remove_file(file);
     }
 
     #[test]
-    fn read_file_rejects_oversized_file_without_window_but_allows_offset_limit() {
+    fn read_file_windows_oversized_file_instead_of_failing() {
         let file = std::env::temp_dir().join(format!("kivio_big_{}.txt", uuid::Uuid::new_v4()));
         let line = "x".repeat(1024);
         let mut body = String::new();
@@ -1723,10 +1747,20 @@ mod tests {
         fs::write(&file, &body).expect("write big file");
 
         let workspace = NativeToolWorkspace::global(&[]);
-        let err = read_file(&workspace, &json!({ "path": file.to_string_lossy() })).unwrap_err();
+        // No offset/limit: used to be a hard error. Now it returns the head window,
+        // bounded by the 50KB byte budget (each line is ~1KB → ~50 lines).
+        let head = read_file(&workspace, &json!({ "path": file.to_string_lossy() }))
+            .expect("oversized read returns a window");
+        assert_eq!(head.total_lines, 3000);
+        assert_eq!(head.start_line, 1);
+        assert!(head.content.len() <= TOOL_OUTPUT_MAX_BYTES);
+        assert!(head.end_line < 3000, "capped, not the whole file");
+        assert!(head.truncated);
+        assert_eq!(head.next_offset, Some(head.end_line + 1));
         assert!(
-            err.contains("offset/limit"),
-            "error should hint at windowed reads: {err}"
+            head.warnings.iter().any(|w| w.contains("50KB")),
+            "byte cap explained to the model: {:?}",
+            head.warnings
         );
 
         let result = read_file(
@@ -1744,9 +1778,81 @@ mod tests {
         assert!(result.content.starts_with("2000 "));
         assert!(result.truncated);
         assert_eq!(result.next_offset, Some(2003));
-        assert_eq!(result.read_state.scope, "partial");
+        assert!(result.warnings.is_empty(), "user limit is not a cap hit");
 
         let _ = fs::remove_file(file);
+    }
+
+    #[test]
+    fn read_file_caps_output_at_line_and_byte_budgets() {
+        let workspace = NativeToolWorkspace::global(&[]);
+
+        // Line budget: many short lines, well under the byte budget.
+        let many = std::env::temp_dir().join(format!("kivio_lines_{}.txt", uuid::Uuid::new_v4()));
+        let body = (0..TOOL_OUTPUT_MAX_LINES + 500)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&many, &body).expect("write");
+        let result = read_file(&workspace, &json!({ "path": many.to_string_lossy() }))
+            .expect("read many lines");
+        assert_eq!(result.end_line, TOOL_OUTPUT_MAX_LINES);
+        assert!(result.truncated);
+        assert_eq!(result.next_offset, Some(TOOL_OUTPUT_MAX_LINES + 1));
+        assert!(result.warnings[0].contains("2000 行"));
+        // An oversized model-supplied `limit` cannot lift the cap.
+        let forced = read_file(
+            &workspace,
+            &json!({ "path": many.to_string_lossy(), "limit": 999_999 }),
+        )
+        .expect("read with huge limit");
+        assert_eq!(forced.end_line, TOOL_OUTPUT_MAX_LINES);
+        let _ = fs::remove_file(many);
+
+        // Byte budget: few lines, each huge.
+        let fat = std::env::temp_dir().join(format!("kivio_fat_{}.txt", uuid::Uuid::new_v4()));
+        let chunk = "y".repeat(20 * 1024);
+        fs::write(&fat, format!("{chunk}\n{chunk}\n{chunk}\n{chunk}\n")).expect("write");
+        let result =
+            read_file(&workspace, &json!({ "path": fat.to_string_lossy() })).expect("read fat");
+        assert!(result.content.len() <= TOOL_OUTPUT_MAX_BYTES);
+        assert_eq!(result.end_line, 2, "two 20KB lines fit under 50KB");
+        assert!(result.warnings[0].contains("50KB"));
+        let _ = fs::remove_file(fat);
+
+        // A single line bigger than the whole budget: nothing to return, but the
+        // model gets an escape hatch and next_offset never points at that line.
+        let monster = std::env::temp_dir().join(format!("kivio_mon_{}.txt", uuid::Uuid::new_v4()));
+        fs::write(&monster, format!("{}\nshort\n", "z".repeat(60 * 1024))).expect("write");
+        let result = read_file(&workspace, &json!({ "path": monster.to_string_lossy() }))
+            .expect("read monster line");
+        assert!(result.content.is_empty());
+        assert_eq!(result.next_offset, Some(2), "skips past the monster line");
+        assert!(result.warnings[0].contains("run_command"));
+        let _ = fs::remove_file(monster);
+    }
+
+    #[test]
+    fn truncate_head_matches_pi_semantics() {
+        // Fits → untouched.
+        assert_eq!(truncate_head(&["a", "b"]), (2, None));
+        // Line budget wins when lines are short.
+        let short: Vec<&str> = vec!["a"; TOOL_OUTPUT_MAX_LINES + 10];
+        assert_eq!(
+            truncate_head(&short),
+            (TOOL_OUTPUT_MAX_LINES, Some(TruncatedBy::Lines))
+        );
+        // Byte budget wins when lines are long, and only whole lines come back.
+        let long = "q".repeat(30 * 1024);
+        let fat: Vec<&str> = vec![long.as_str(); 5];
+        assert_eq!(truncate_head(&fat), (1, Some(TruncatedBy::Bytes)));
+        // First line alone over budget → nothing kept.
+        let huge = "q".repeat(TOOL_OUTPUT_MAX_BYTES + 1);
+        assert_eq!(
+            truncate_head(&[huge.as_str(), "tail"]),
+            (0, Some(TruncatedBy::Bytes))
+        );
+        assert_eq!(truncate_head(&[]), (0, None));
     }
 
     #[test]
