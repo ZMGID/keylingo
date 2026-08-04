@@ -458,7 +458,6 @@ pub async fn dock_terminal_close(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     #[test]
     fn session_id_has_term_prefix_and_is_unique() {

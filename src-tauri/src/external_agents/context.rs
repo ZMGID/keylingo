@@ -524,6 +524,21 @@ mod tests {
         assert_eq!(tokens, FALLBACK_CONTEXT_WINDOW_TOKENS);
     }
 
+    /// 回归：`claude-sonnet-5` 静态表只知道 200K，而 CLI 实报 1M（`[1m]` beta）。实报永远
+    /// 压过静态表 —— 生成过程中的分母干脆不下发（`ContextUsageTicker`），由前端沿用上一轮
+    /// 这里算出的值，否则就是「回答时 89%、答完 18%」。
+    #[test]
+    fn cli_reported_window_beats_the_claude_static_table() {
+        assert_eq!(
+            context_window_for_external_model("claude", "claude-sonnet-5", None, Some(1_000_000)).0,
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_window_for_external_model("claude", "claude-sonnet-5", None, None).0,
+            Some(200_000)
+        );
+    }
+
     #[test]
     fn kimi_static_window_map() {
         assert_eq!(

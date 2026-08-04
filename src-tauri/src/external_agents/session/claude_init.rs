@@ -28,9 +28,6 @@ const CLAUDE_BUILTIN_TIERS: &[(&str, &str)] = &[
     ("claude-haiku-4-5-20251001", "Haiku 4.5"),
 ];
 
-/// Opus 5 is the default tier (matches cc-gui `ModelInfo::as_default()`).
-const CLAUDE_DEFAULT_TIER_ID: &str = "claude-opus-5";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeInitInfo {
     pub resolved_model: String,
@@ -635,7 +632,6 @@ mod tests {
                 ("claude-haiku-4-5-20251001", "Haiku 4.5"),
             ]
         );
-        assert_eq!(CLAUDE_DEFAULT_TIER_ID, "claude-opus-5");
         // 不提供裸别名 / 冷门 / 历史版本堆。
         for noise in [
             "sonnet",

@@ -390,32 +390,12 @@ pub async fn run_external_cli_reply(
         crate::external_agents::workspace::resolve_detection_cwd(app, Some(&conversation.id))
             .map(|detection_cwd| slash::cache_key(&agent_id, &detection_cwd.to_string_lossy()))
             .unwrap_or_else(|_| slash::cache_key(&agent_id, &cwd.to_string_lossy()));
-    // 实时用量推送的分母兜底：在**读流之前**算好一次（模型探测缓存的内存读 + 纯查表，
-    // 不起任何子进程 —— spec 第 9 条）。CLI 本轮实报优先级最高，只有它缺失时才用这个值，
-    // 与轮末 `context_window_for_external_model` 的优先级链一致（否则 codex/pi/opencode
-    // 这些窗口来自探测上报的 CLI 会在轮末看到分母凭空出现）。
-    let mut usage_ticker = {
-        let cached_models = state.get_cached_external_agent_models(
-            &slash_cache_key,
-            crate::external_agents::detection::EXTERNAL_AGENT_MODELS_CACHE_TTL,
-            crate::external_agents::detection::EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
-        );
-        let model_for_window = conversation
-            .agent_runtime
-            .external_model
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("default");
-        let fallback_window = crate::external_agents::context::context_window_for_external_model(
-            &agent_id,
-            model_for_window,
-            cached_models.as_ref().map(|cache| cache.models.as_slice()),
-            None,
-        )
-        .0
-        .map(|window| window as u64);
-        ContextUsageTicker::new(fallback_window)
-    };
+    // 实时用量推送：**只推分子**。分母不实时——它在一轮内是常量，且唯一权威来源是 CLI 轮末
+    // 实报的 `result.modelUsage[model].contextWindow`（claude 的 `[1m]` beta / 环境覆盖 /
+    // 第三方 router 都只有它知道）。这里若拿静态表算个兜底分母下发，就会出现「回答中
+    // `claude-sonnet-5` ⇒ 200K、答完跳回 1M」。前端 `contextPanel.ts::applyLiveContextUsage`
+    // 对 `null` 分母保留已知旧窗口，所以不下发就是「沿用上一轮的分母」——正是要的语义。
+    let mut usage_ticker = ContextUsageTicker::default();
 
     let mut emit_event = |event: UnifiedAgentEvent| {
         if let Some(commands) = slash::slash_commands_from_event(&event) {
@@ -938,7 +918,8 @@ where
     // guard 落地即清，覆盖下面每条 `return`。**轮内重连之后必须重挂**：`reconnect_fresh`
     // 会往注册表塞一条全新的 `LiveSession`（`busy: false`），旧 guard 还指着旧会话的 Arc
     // —— 不重挂的话，恰好是刚付过冷启动的那条路反而不受保护。
-    let mut busy = state.mark_external_live_session_busy(conversation_id);
+    // 下划线名字是必要的：这个值只靠 Drop 起作用，没有任何读取点。
+    let mut _busy = state.mark_external_live_session_busy(conversation_id);
 
     // At most one automatic fresh reconnect after a non-cancel / non-auth failure (R3), plus one
     // reconnect for a config change that only a relaunch can apply (R4 NeedsReconnect). Each is
@@ -1026,7 +1007,7 @@ where
         )
         .await?;
         // 新会话进了注册表 ⇒ 旧 guard 已经指不到它了，重挂一个（旧的在赋值时落地）。
-        busy = state.mark_external_live_session_busy(conversation_id);
+        _busy = state.mark_external_live_session_busy(conversation_id);
         control = next_control;
         prompt = if resumed {
             reuse_prompt.to_string()
@@ -1993,15 +1974,11 @@ fn nonzero_exit_is_a_failure(exit_code: Option<i32>, protocol_completed: bool) -
 /// 为什么需要它：分子的上报频率由 CLI 决定（claude 的输出侧是边生成边报），一条一推等于
 /// 每个 token 都过一次 IPC。节流量级对齐仓库里子 agent 进度卡的 ~350ms。
 ///
-/// **只带两个数**（分子 + 分母）：轮末那次权威计算要读磁盘（会话文件、kimi 的 wire.jsonl、
-/// 模型探测缓存），放在每个增量上就是热路径灾难（spec 第 9 条的精神）。
+/// **只带分子**：分母在一轮内是常量，且唯一权威来源是 CLI 轮末实报的 `contextWindow`；
+/// 中途拿静态表编一个下发，只会让百分比在两个值之间跳（见构造点注释）。CLI 若在同一条
+/// usage 上报里带了窗口（ACP `usage_update.size`），照原样透传——那是实报，不是猜的。
+#[derive(Default)]
 struct ContextUsageTicker {
-    /// 分母的**非实报**兜底（探测上报 / 静态表 / 数据库），在读流**之前**算好一次。
-    ///
-    /// 必须预先算：`context_window_for_external_model` 要读模型探测缓存，虽然只是内存读，
-    /// 但把它放进每个增量里就等于在热路径上重算窗口链。CLI 本轮实报优先级最高（spec 14e），
-    /// 所以实报存在时它不参与。
-    fallback_window: Option<u64>,
     /// 上一次真正推出去的 `(分子, 分母)`。数字没变就不推。
     last: Option<(u64, Option<u64>)>,
     last_emit: Option<Instant>,
@@ -2036,24 +2013,15 @@ fn should_emit_usage_tick(
 }
 
 impl ContextUsageTicker {
-    fn new(fallback_window: Option<u64>) -> Self {
-        Self {
-            fallback_window,
-            last: None,
-            last_emit: None,
-        }
-    }
-
     /// 由合并后的 CLI 用量算出 `(分子, 分母)`。
     ///
     /// 分子走 `context::cli_reported_context_tokens` —— 与轮末权威计算**同一个函数**，
     /// 否则用户会在轮末看到数字跳一下（spec 14b 那类「最后一层把前面全丢掉」的形态）。
-    /// 分母：CLI 本轮实报优先，缺失时用预算好的兜底（`merge_cli_usage` 已保证实报窗口
-    /// 在一轮内粘滞，不会被后到的不带窗口上报冲掉）。
+    /// 分母只有 CLI 本轮实报时才带（`merge_cli_usage` 已保证实报窗口在一轮内粘滞），
+    /// 缺失就发 `None` = 前端沿用已知窗口。
     fn values(&self, usage: &ModelUsage) -> (u64, Option<u64>) {
         let used = crate::external_agents::context::cli_reported_context_tokens(usage) as u64;
-        let window = usage.context_window_tokens.or(self.fallback_window);
-        (used, window)
+        (used, usage.context_window_tokens)
     }
 
     /// 到点就推：返回 `Some((分子, 分母))` 表示调用方应该发事件。
@@ -2392,7 +2360,7 @@ mod tests {
     /// 表现为用户在轮末看到数字猛跳一下。
     #[test]
     fn usage_tick_numerator_uses_the_same_formula_as_the_authoritative_value() {
-        let ticker = ContextUsageTicker::new(None);
+        let ticker = ContextUsageTicker::default();
         let usage = tick_usage(1_200, 800, 45_000, Some(1_000_000));
         let (used, window) = ticker.values(&usage);
         assert_eq!(used, 47_000, "cache 必须计入分子");
@@ -2404,35 +2372,22 @@ mod tests {
         assert_eq!(window, Some(1_000_000));
     }
 
-    /// **分母粘滞**：中途的上报不带窗口（claude 只在轮末那条 `result` 里带）时，
-    /// 不许把已知的窗口冲掉变成「满度未知」。
-    ///
-    /// 一轮内的粘滞由 `merge_cli_usage` 负责（既有逻辑）；跨轮/首轮由预算好的兜底承担。
+    /// **分母不实时**：中途的上报不带窗口（claude 只在轮末那条 `result` 里带）时发 `None`,
+    /// 前端据此沿用已知窗口。绝不在这里拿静态表编一个 —— `claude-sonnet-5` 静态表是 200K
+    /// 而 CLI 实报 1M（`[1m]` beta），编出来就是「回答中 89%、答完 18%」。
     #[test]
-    fn usage_tick_denominator_survives_reports_that_omit_the_window() {
-        // 一轮内：先来一条带窗口的，再来一条不带窗口的。
+    fn usage_tick_omits_the_denominator_until_the_cli_reports_one() {
+        let ticker = ContextUsageTicker::default();
+        assert_eq!(ticker.values(&tick_usage(1_000, 0, 0, None)).1, None);
+
+        // 一轮内：先来一条带窗口的，再来一条不带窗口的 —— `merge_cli_usage` 让它粘滞。
         let with_window = tick_usage(1_000, 0, 0, Some(1_000_000));
         let without_window = tick_usage(1_000, 500, 0, None);
         let merged = merge_cli_usage(Some(&with_window), without_window);
-        let ticker = ContextUsageTicker::new(None);
         assert_eq!(
             ticker.values(&merged).1,
             Some(1_000_000),
             "不带窗口的后到上报把已知分母冲成了未知"
-        );
-
-        // 首轮尚无实报窗口时用预算好的兜底（探测上报 / 静态表），而不是「未知」。
-        let fallback_ticker = ContextUsageTicker::new(Some(272_000));
-        assert_eq!(
-            fallback_ticker.values(&tick_usage(1_000, 0, 0, None)).1,
-            Some(272_000)
-        );
-        // 但 CLI 本轮实报永远优先（模型可能中途切换，spec 14e）。
-        assert_eq!(
-            fallback_ticker
-                .values(&tick_usage(1_000, 0, 0, Some(400_000)))
-                .1,
-            Some(400_000)
         );
     }
 
@@ -2466,7 +2421,7 @@ mod tests {
     #[test]
     fn zero_usage_report_does_not_reset_the_live_value() {
         let real = tick_usage(1_200, 800, 45_000, None);
-        let mut ticker = ContextUsageTicker::new(None);
+        let mut ticker = ContextUsageTicker::default();
         let now = Instant::now();
         assert_eq!(ticker.tick(&real, now), Some((47_000, None)));
         // `/help` 那种没有 LLM 往返的 result：四个字段全 0，但带窗口。

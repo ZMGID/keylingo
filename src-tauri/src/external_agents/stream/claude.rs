@@ -72,21 +72,25 @@ fn usage_parts_all_zero(parts: &CliUsageParts) -> bool {
 /// 所以上面这条分支目前**跑不到**，留着只是为了这个字段哪天回来时口径仍然正确；
 /// 真正在干活的是下面的顶层回退 + 闸门。
 ///
-/// **顶层回退带闸门**（`completed_result_turns == 0`，即本会话的第一个 `result`）：
-/// `usage` 顶层是本轮的**计费总量**（= 各次往返之和）。第一轮只有一次往返时它恰好
-/// 等于上下文占用；从第二轮起（同一进程内）它既不是快照、也漏掉前面轮次已在窗口里的历史，
-/// 拿来当分子会持续虚高。实测第二轮（一次 Bash 工具调用 ⇒ 两次往返）顶层
+/// **顶层回退带闸门**（本轮还没收到过任何 per-request 快照）：
+/// `usage` 顶层是**计费总量**（= 各次往返之和，且在 `--resume` 的会话里连历史轮次一起累）。
+/// 只有一次往返时它恰好等于上下文占用；多次往返时它既不是快照、还把每次往返重读的
+/// cache 叠了一遍，拿来当分子会持续虚高。实测两次往返的一轮顶层
 /// `cache_creation 41939 = 41791 + 148`（两次相加），据此算出 83,849，而真实占用
-/// 只有 ~42,054 —— **接近翻倍**。闸门关上时返回 `None`：那一轮的真实占用由
+/// 只有 ~42,054 —— **接近翻倍**；恢复出来的长会话更夸张（实测 927,511 对真实 193,560，
+/// 差值全是 `cache_read` 的逐次累加）。闸门关上时返回 `None`：本轮真实占用由
 /// `message_start.message.usage` 上报（服务端算的、每次请求都有），比顶层计费总量准。
 ///
-/// 注：B1（一个会话一个常驻进程）落地后这个闸门**真正开始生效** —— 同一个
-/// `ClaudeStreamState` 跨轮存活（`session/claude_stream.rs` 持有它），计数会真的往上涨。
-/// 也正因如此，`--include-partial-messages` 必须**始终开着**（`run.rs` 传
+/// **闸门判据必须是「本轮有没有 per-request 快照」，不能是「这是本进程第几个 result」。**
+/// 后者（曾用的 `completed_result_turns == 0`）假设「进程的第一个 result ⇒ 只有一次往返」,
+/// 而 `--resume` 恢复的会话第一轮就能有几十次往返、顶层还带着整段历史的累计——每次重启
+/// 应用后的第一轮都会踩中，用量条从 193.6K 跳到 927.5K。
+///
+/// 注：`--include-partial-messages` 必须**始终开着**（`run.rs` 传
 /// `include_partial_messages: true`）：`iterations` 恒空 + 顶层被闸门拦住
-/// ⇒ 第 2 轮起分子**完全依赖** `message_start.message.usage`，关掉那个 flag
-/// 用量条就没有分子了。这个耦合比写下第一版注释时更硬，改 flag 前先看这里。
-fn claude_result_usage_snapshot(usage: &Value, completed_result_turns: u32) -> Option<&Value> {
+/// ⇒ 分子**完全依赖** `message_start.message.usage`，关掉那个 flag 用量条就没有分子了。
+/// 这个耦合比写下第一版注释时更硬，改 flag 前先看这里。
+fn claude_result_usage_snapshot(usage: &Value, per_request_usage_seen: bool) -> Option<&Value> {
     if let Some(last) = usage
         .get("iterations")
         .and_then(|v| v.as_array())
@@ -94,7 +98,7 @@ fn claude_result_usage_snapshot(usage: &Value, completed_result_turns: u32) -> O
     {
         return Some(last);
     }
-    (completed_result_turns == 0).then_some(usage)
+    (!per_request_usage_seen).then_some(usage)
 }
 
 /// 从 `result.modelUsage` 取**当前模型的上下文窗口**（分母的最高优先级来源）。
@@ -515,8 +519,13 @@ pub struct ClaudeStreamState {
     /// 把它计入就会让「派过子任务的那一轮」永久失去 `result.result` 兜底。
     /// 这条由 `emit_text` 只在主线路径被调用来保证。
     any_text_emitted: bool,
-    /// 本会话已经收完的 `result` 轮次数。给 `claude_result_usage_snapshot` 的顶层回退开闸门。
+    /// 本会话已经收完的 `result` 轮次数。常驻会话的轮次边界信号（`run_turn` 读它）。
     completed_result_turns: u32,
+    /// **per-turn**：本轮是否已经收到过 per-request 的用量快照
+    /// （`message_start.message.usage` / `message_delta.usage`）。
+    /// `result` 顶层那份「计费总量」只在它为 `false` 时才可当分子——见
+    /// `claude_result_usage_snapshot`。在 `result`（轮次边界）复位。
+    per_request_usage_seen: bool,
     /// 最近一个 `result` 是否是**用户中断**的收尾（`terminal_reason == "aborted_streaming"`）。
     /// 常驻会话据此把这一轮送去「已取消」出口而不是错误出口（见 `result_is_user_abort`）。
     last_result_aborted: bool,
@@ -848,8 +857,8 @@ impl ClaudeStreamState {
                 self.last_result_aborted = aborted;
                 // usage 解析**先于**错误分支——失败轮次的用量同样要计入用量条。
                 //
-                // 分子：`iterations` 末项（多次往返的独立快照），顶层回退带「仅第一个 result」
-                // 闸门（见 `claude_result_usage_snapshot`）。
+                // 分子：`iterations` 末项（多次往返的独立快照），顶层回退带「本轮还没收到过
+                // per-request 快照」闸门（见 `claude_result_usage_snapshot`）。
                 // 分母：`modelUsage[当前模型].contextWindow`（CLI 唯一权威的窗口来源，A8）。
                 let context_window = obj.get("modelUsage").and_then(|mu| {
                     context_window_from_model_usage(mu, self.resolved_model.as_deref())
@@ -857,7 +866,7 @@ impl ClaudeStreamState {
                 let mut parts = obj
                     .get("usage")
                     .and_then(|usage| {
-                        claude_result_usage_snapshot(usage, self.completed_result_turns)
+                        claude_result_usage_snapshot(usage, self.per_request_usage_seen)
                     })
                     .map(claude_usage_parts)
                     .unwrap_or_default();
@@ -916,6 +925,7 @@ impl ClaudeStreamState {
                 // per-turn 状态在这里复位，per-session 计数在这里递增。
                 self.completed_result_turns = self.completed_result_turns.saturating_add(1);
                 self.any_text_emitted = false;
+                self.per_request_usage_seen = false;
                 self.reported_assistant_errors.clear();
                 // 车道是 per-turn 的：sidechain 随它的 `Task` 一起结束，主线的消息状态也会由
                 // 下一轮的 `message_start` 重建。不清的话常驻会话里每派一次子任务就多一条
@@ -1000,6 +1010,7 @@ impl ClaudeStreamState {
                     // 存下输入侧快照供 `message_delta` 的输出侧接上（见 `message_delta_usage`）。
                     self.lane(lane).request_input = Some(parts.clone());
                     if !usage_parts_all_zero(&parts) {
+                        self.per_request_usage_seen = true;
                         sink(UnifiedAgentEvent::Usage {
                             usage: usage_from_parts(parts),
                         });
@@ -1020,6 +1031,7 @@ impl ClaudeStreamState {
                 };
                 let request_input = self.lane(lane).request_input.clone();
                 if let Some(parts) = message_delta_usage(request_input.as_ref(), usage) {
+                    self.per_request_usage_seen = true;
                     sink(UnifiedAgentEvent::Usage {
                         usage: usage_from_parts(parts),
                     });
@@ -1947,18 +1959,22 @@ mod tests {
         assert_eq!(all[0].total_tokens, Some(46_500));
     }
 
-    /// 顶层回退的闸门：同一个 state（= 常驻进程下的同一个会话）第二个 result 起，
-    /// `iterations` 为空时不再拿顶层「计费总量」当上下文快照。
+    /// 顶层回退的闸门：本轮只要收到过 per-request 快照（`message_start` / `message_delta`），
+    /// `iterations` 为空时就不再拿顶层「计费总量」当上下文快照。
+    ///
+    /// **判据不能是「本进程第几个 result」**：`--resume` 恢复的会话第一轮就可能有几十次往返，
+    /// 顶层还带着整段历史的累计 —— 实测 927,511 对真实 193,560，差值全是 `cache_read`
+    /// 的逐次累加。每次重启应用后的第一轮都会踩中。
     #[test]
-    fn top_level_usage_fallback_is_gated_to_the_first_result_of_a_session() {
+    fn top_level_usage_fallback_is_gated_by_per_request_snapshots() {
         let flat = serde_json::json!({"input_tokens": 7, "output_tokens": 3});
         assert!(
-            claude_result_usage_snapshot(&flat, 0).is_some(),
-            "第一个 result 仍要用顶层回退"
+            claude_result_usage_snapshot(&flat, false).is_some(),
+            "本轮没有 per-request 快照时仍要用顶层回退"
         );
         assert!(
-            claude_result_usage_snapshot(&flat, 1).is_none(),
-            "第二个 result 起顶层是计费总量，不是上下文快照"
+            claude_result_usage_snapshot(&flat, true).is_none(),
+            "本轮有过 per-request 快照 ⇒ 顶层是计费总量，不是上下文快照"
         );
 
         // iterations 非空时不受闸门影响——那才是真正的快照序列。
@@ -1967,9 +1983,37 @@ mod tests {
             "iterations": [{"input_tokens": 900, "output_tokens": 30}]
         });
         assert_eq!(
-            claude_result_usage_snapshot(&with_iterations, 5).and_then(|v| v.get("input_tokens")),
+            claude_result_usage_snapshot(&with_iterations, true).and_then(|v| v.get("input_tokens")),
             Some(&serde_json::json!(900))
         );
+    }
+
+    /// 恢复出来的长会话（每次重启应用都会走到）：进程的**第一个** `result` 也可能是
+    /// 几十次往返之后的收尾，顶层 `usage` 是整段历史的计费总量。本机实测原文的数量级：
+    /// `cache_creation 193,560`（= 真实上下文）+ `cache_read 726,895`（各次往返重读的累加）
+    /// ⇒ 顶层当分子就是 927,511，而 `/context` 报的真实占用是 193.6k。
+    ///
+    /// 旧闸门（`completed_result_turns == 0`）在这里是放行的，于是轮末把 message_start
+    /// 报过的 193.6K 覆盖成 927.5K —— 用量条 20% 一路跳到 93%。
+    #[test]
+    fn resumed_session_first_result_does_not_report_the_cumulative_billing_total() {
+        let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-1",
+               "usage":{"input_tokens":2719,"cache_creation_input_tokens":193560,
+                        "cache_read_input_tokens":0,"output_tokens":4}}}}"#,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2719,
+               "output_tokens":4337,"cache_read_input_tokens":726895,
+               "cache_creation_input_tokens":193560,"iterations":[]}}"#,
+        ]);
+        let totals: Vec<_> = usages(&events)
+            .iter()
+            .filter_map(|u| u.total_tokens)
+            .collect();
+        assert!(
+            totals.iter().all(|total| *total < 300_000),
+            "顶层计费总量（927,511）被当成了上下文占用：{totals:?}"
+        );
+        assert_eq!(totals.last().copied(), Some(196_283));
     }
 
     /// 端到端形态：同一个 state 连跑两轮，第二轮的空 `iterations` 不再产出 usage
@@ -1977,12 +2021,23 @@ mod tests {
     #[test]
     fn second_result_in_one_session_does_not_report_top_level_usage() {
         let events = run(&[
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m-0",
+               "usage":{"input_tokens":90,"output_tokens":1}}}}"#,
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":5,"iterations":[]}}"#,
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":900,"output_tokens":40,"iterations":[]}}"#,
         ]);
         let all = usages(&events);
-        assert_eq!(all.len(), 1, "第二个 result 不该再报顶层用量：{events:?}");
-        assert_eq!(all[0].total_tokens, Some(105));
+        assert_eq!(
+            all.len(),
+            2,
+            "本轮有 per-request 快照 ⇒ 两个 result 都不该报顶层用量：{events:?}"
+        );
+        assert_eq!(all[0].total_tokens, Some(91), "message_start 那条");
+        assert_eq!(
+            all[1].total_tokens,
+            Some(940),
+            "第二轮没有 per-request 快照 ⇒ 顶层回退放行"
+        );
     }
 
     /// **本机实测原文**（claude 2.1.220，2026-07-30）：第二轮调了一次 Bash ⇒ 两次模型往返，
@@ -2014,14 +2069,11 @@ mod tests {
         ]);
         let all = usages(&events);
         let totals: Vec<_> = all.iter().filter_map(|u| u.total_tokens).collect();
-        // 第一轮：message_start 先到（39013），result 顶层回退放行再精修一次
-        // （2+7+39010 = 39019，首个 result 且只有一次往返，两者一致）。
-        // 第二轮：两次往返各一条 message_start，而 result 顶层被闸门拦住 ⇒ 不产出第五条。
-        assert_eq!(
-            totals,
-            vec![39_013, 39_019, 41_795, 41_942],
-            "得到：{all:?}"
-        );
+        // 每一轮的分子都只来自 message_start：第一轮 39013，第二轮两次往返 41795 / 41942。
+        // 两轮的 result 顶层都被闸门拦住（本轮已有 per-request 快照）—— 首轮那次顶层回退
+        // （2+7+39010 = 39019）虽然数值上也对，但它与 39013 是同一份占用的两种算法,
+        // 放行它只是给用量条多一次无意义的抖动，而在恢复的会话里同一条路会给出 927,511。
+        assert_eq!(totals, vec![39_013, 41_795, 41_942], "得到：{all:?}");
         // 收尾值必须是最后一次往返的占用，而不是两次相加的计费总量。
         assert_eq!(totals.last(), Some(&41_942));
         assert!(
@@ -2255,11 +2307,11 @@ mod tests {
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":950,"output_tokens":40,"iterations":[]}}"#,
         ]);
         let all = usages(&events);
-        // 第 1 轮：message_start(100) + result 顶层回退(105)；第 2 轮：只有 message_start(8900)。
+        // 两轮的分子都只来自 message_start（100 / 8900）：两轮的 result 顶层都被闸门拦住。
         assert_eq!(
             all.len(),
-            3,
-            "第 2 轮的 result 不该再报顶层计费总量：{events:?}"
+            2,
+            "result 不该再报顶层计费总量：{events:?}"
         );
         assert_eq!(
             all.last().and_then(|u| u.total_tokens),
