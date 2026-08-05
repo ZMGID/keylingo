@@ -241,6 +241,11 @@ export interface Attachment {
   type: 'image' | 'file'
   name: string
   path: string
+  /**
+   * 内存虚拟文本附件（粘贴长文本生成的虚拟 txt）：正文随对话消息持久化，
+   * 不生成独立磁盘文件；`path` 以 `memory://` 开头时存在。
+   */
+  content?: string
 }
 
 export interface PendingAttachment {
@@ -248,6 +253,11 @@ export interface PendingAttachment {
   type: 'image' | 'file'
   name: string
   path: string
+  /**
+   * 内存文本附件（粘贴长文本自动生成的虚拟 txt）：正文只存浏览器内存、不落盘。
+   * 存在即视为虚拟附件：点击卡片打开编辑弹窗而非系统打开；提交时随消息传给后端。
+   */
+  content?: string
 }
 
 export interface ChatProject {

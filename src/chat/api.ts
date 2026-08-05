@@ -1257,12 +1257,18 @@ export const chatApi = {
     if (!isTauriRuntime()) {
       return mockChatApi.sendMessage(conversationId, content, attachments, activeSkillId)
     }
+    // 磁盘附件传路径；内存文本附件（粘贴长文本虚拟 txt）直接传内容，由后端注入 prompt，不落盘。
+    const diskPaths = attachments.filter((a) => a.content === undefined).map((a) => a.path)
+    const textAttachments = attachments
+      .filter((a): a is PendingAttachment & { content: string } => a.content !== undefined)
+      .map((a) => ({ name: a.name, content: a.content }))
     const result = await invoke<{ success: boolean; conversation?: Conversation; error?: string }>(
       'chat_send_message',
       {
         conversationId,
         content,
-        attachments: attachments.map((attachment) => attachment.path),
+        attachments: diskPaths,
+        textAttachments,
         activeSkillId,
       }
     )

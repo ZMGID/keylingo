@@ -3,12 +3,15 @@ import { FileText, X } from 'lucide-react'
 import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageContextMenu'
 import { loadAttachmentDataUrl, openAttachment, type DisplayAttachment } from './attachmentPreview'
 import { openChatImageViewer } from './imageViewer'
+import { PastedTextEditorModal } from './PastedTextEditorModal'
 
 type ChatAttachmentsProps = {
   attachments: DisplayAttachment[]
   conversationId?: string | null
   variant: 'user' | 'assistant' | 'composer'
   onRemove?: (id: string) => void
+  /** 内存文本附件（粘贴长文本虚拟 txt）点击时回调，用于打开编辑弹窗。 */
+  onEditAttachment?: (attachment: DisplayAttachment) => void
 }
 
 function ImagePreview({
@@ -111,6 +114,8 @@ function FileAttachmentChip({
   conversationId,
   variant,
   onRemove,
+  onEdit,
+  onViewText,
   removing = false,
   onExited,
 }: {
@@ -118,6 +123,9 @@ function FileAttachmentChip({
   conversationId?: string | null
   variant: ChatAttachmentsProps['variant']
   onRemove?: (id: string) => void
+  onEdit?: (attachment: DisplayAttachment) => void
+  /** 已发送消息中的虚拟文本附件（memory://）：打开只读查看弹窗。 */
+  onViewText?: (name: string, content: string) => void
   removing?: boolean
   onExited?: (id: string) => void
 }) {
@@ -141,7 +149,21 @@ function FileAttachmentChip({
     >
       <button
         type="button"
-        onClick={() => void openAttachment(attachment, conversationId)}
+        onClick={() => {
+          // 内存文本附件（虚拟 txt）：composer 中打开编辑弹窗。
+          if ('content' in attachment && typeof attachment.content === 'string' && onEdit) {
+            onEdit(attachment)
+            return
+          }
+          // 已发送消息中的虚拟文本附件（memory:// 标记）：打开只读查看弹窗。
+          if (attachment.path.startsWith('memory://')) {
+            if (typeof attachment.content === 'string' && onViewText) {
+              onViewText(attachment.name, attachment.content)
+            }
+            return
+          }
+          void openAttachment(attachment, conversationId)
+        }}
         className={`flex min-w-0 items-center text-left hover:opacity-80 ${variant === 'composer' ? 'gap-1' : 'flex-1 gap-2'}`}
         title={attachment.name}
       >
@@ -176,9 +198,12 @@ export function ChatAttachments({
   conversationId,
   variant,
   onRemove,
+  onEditAttachment,
 }: ChatAttachmentsProps) {
   // 移除中的附件：先打退出动画，animationend 后再真正 onRemove（卸载节点）。
   const [removingIds, setRemovingIds] = useState<ReadonlySet<string>>(() => new Set())
+  // 已发送消息中虚拟文本附件的只读查看弹窗。
+  const [viewingText, setViewingText] = useState<{ name: string; content: string } | null>(null)
 
   const beginRemove = onRemove
     ? (id: string) => setRemovingIds((prev) => new Set(prev).add(id))
@@ -256,11 +281,23 @@ export function ChatAttachments({
               conversationId={conversationId}
               variant={variant}
               onRemove={beginRemove}
+              onEdit={onEditAttachment}
+              onViewText={(name, content) => setViewingText({ name, content })}
               removing={removingIds.has(attachment.id)}
               onExited={finishRemove}
             />
           ))}
         </div>
+      )}
+
+      {viewingText && (
+        <PastedTextEditorModal
+          name={viewingText.name}
+          initialContent={viewingText.content}
+          readOnly
+          onSave={() => {}}
+          onClose={() => setViewingText(null)}
+        />
       )}
     </div>
   )

@@ -367,7 +367,10 @@ pub struct Attachment {
     #[serde(rename = "type")]
     pub attachment_type: String, // "image" | "file"
     pub name: String,
-    pub path: String, // 相对于对话附件目录的路径
+    pub path: String, // 相对于对话附件目录的路径；`memory://` 前缀 = 内存虚拟文本附件
+    /// 内存虚拟文本附件（粘贴长文本生成的虚拟 txt）正文：随对话消息持久化，不生成独立磁盘文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// Agent 运行时种类：内置 loop 或外部 CLI。

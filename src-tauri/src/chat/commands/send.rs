@@ -2,9 +2,10 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::chat::attachments::{
-    compose_user_content_for_api, save_message_attachments, stored_image_paths_for_attachments,
-    title_source_for_user_message,
+    compose_text_attachments_for_api, compose_user_content_for_api, save_message_attachments,
+    stored_image_paths_for_attachments, title_source_for_user_message, TextAttachmentInput,
 };
+use crate::chat::Attachment;
 use crate::chat::storage::{conversation_attachments_dir, load_conversation};
 use crate::chat::ChatMessage;
 use crate::skills;
@@ -28,8 +29,11 @@ pub(crate) async fn chat_send_message(
     conversation_id: String,
     content: String,
     attachments: Vec<String>,
+    text_attachments: Option<Vec<TextAttachmentInput>>,
     active_skill_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    // 内存文本附件（粘贴长文本虚拟 txt）：前端总传；缺省为空数组以兼容旧调用。
+    let text_attachments = text_attachments.unwrap_or_default();
     // Busy 拒绝：该会话仍有任意一条 run 在跑（含多模型并发组）时不允许再发新消息。
     // 用原子的哨兵预留替代「先 check 后 register」，关闭并发发送同时通过 busy 检查的 TOCTOU 窗口。
     // 哨兵在本命令返回前一直存活；实际的 per-run 槽位 / generation 在 `complete_assistant_reply`
@@ -67,14 +71,29 @@ pub(crate) async fn chat_send_message(
         }
     };
 
-    let message_attachments = save_message_attachments(&app, &conversation_id, attachments)?;
+    let mut message_attachments = save_message_attachments(&app, &conversation_id, attachments)?;
+    // 虚拟文本附件（memory:// 标记、不落盘）：持久化附件记录（含正文，随对话消息保存，
+    // 不生成独立磁盘文件），使回复完成后已发送消息的气泡仍能展示并可点击查看内容。
+    for text_attachment in &text_attachments {
+        message_attachments.push(Attachment {
+            id: format!("att-mem-{}", Uuid::new_v4()),
+            attachment_type: "file".to_string(),
+            name: text_attachment.name.clone(),
+            path: format!("memory://{}", Uuid::new_v4()),
+            content: Some(text_attachment.content.clone()),
+        });
+    }
     let attachments_dir = if message_attachments.is_empty() {
         None
     } else {
         Some(conversation_attachments_dir(&app, &conversation_id)?)
     };
-    let api_content =
+    let mut api_content =
         compose_user_content_for_api(&content, &message_attachments, attachments_dir.as_deref());
+    // 内存文本附件（虚拟 txt）正文直接内联进 API 内容，不落盘、不持久化。
+    if !text_attachments.is_empty() {
+        api_content = compose_text_attachments_for_api(&api_content, &text_attachments);
+    }
     let title_source = title_source_for_user_message(&content, &message_attachments);
     let last_user_image_paths =
         stored_image_paths_for_attachments(&app, &conversation_id, &message_attachments)?;
