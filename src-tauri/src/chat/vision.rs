@@ -20,7 +20,7 @@ use super::mcp_image_feedback::{
     select_image_artifacts_for_attach,
 };
 use super::model_call::{
-    call_chat_completion_message, chat_missing_model_error, format_chat_missing_api_key_error,
+    chat_missing_model_error, format_chat_missing_api_key_error,
     session_model_for_conversation,
 };
 use super::storage::load_conversation;
@@ -223,16 +223,21 @@ pub(super) async fn analyze_chat_images_with_auxiliary_model(
             "content": parts,
         }),
     ];
-    let message = call_chat_completion_message(
-        state,
+    // 走流式（见 planning.rs 上 call_chat_completion_output_with_usage / *_streamed 的注释）：
+    // 非流式在部分 openai_responses 代理上直接报 "Unknown Responses API error"。
+    let message = crate::chat::agent::planning::call_chat_completion_message_streamed(
+        state.inner(),
         &provider,
         &auxiliary_model.model,
         messages,
         None,
         retry_attempts,
-        false,
-        Some(conversation_id),
-        Some(message_id),
+        // 不发 reasoning effort，交给端点默认（`false` 的语义是显式下发 "none"，不是不发；
+        // 而 none 不在 xAI 的档位里，会 400）。
+        true,
+        4096,
+        conversation_id,
+        message_id,
         "Chat auxiliary vision analysis",
     )
     .await?;

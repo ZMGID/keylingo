@@ -1,44 +1,13 @@
-use serde_json::Value;
-use tauri::State;
 
-use crate::chat::model::{
-    generate_request_from_openai_messages, generate_with_chat_provider, GenerateOptions,
-    GenerateRequestContext,
-};
-use crate::mcp::ChatToolDefinition;
-use crate::settings::{ModelProvider, SessionModel};
-use crate::state::AppState;
+use crate::settings::SessionModel;
 
 use super::Conversation;
 
-pub(super) async fn call_chat_completion_message(
-    state: &State<'_, AppState>,
-    provider: &ModelProvider,
-    model: &str,
-    messages: Vec<Value>,
-    tools: Option<&[ChatToolDefinition]>,
-    retry_attempts: usize,
-    thinking_enabled: bool,
-    conversation_id: Option<&str>,
-    message_id: Option<&str>,
-    label: &str,
-) -> Result<Value, String> {
-    let request = generate_request_from_openai_messages(
-        model,
-        messages,
-        tools,
-        GenerateOptions {
-            thinking_enabled,
-            ..GenerateOptions::default()
-        },
-        label,
-        GenerateRequestContext::new(conversation_id, message_id),
-    );
-    let output = generate_with_chat_provider(state.inner(), provider, retry_attempts, request)
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(output.to_openai_compatible_message())
-}
+// 这里曾经有一个非流式的 `call_chat_completion_message`（`generate_with_chat_provider`）。
+// **已删除，不要再加回来**：部分 openai_responses 代理只可靠地服务流式请求，非流式调用报
+// "Unknown Responses API error"——压缩、标题总结、辅助视觉先后各被绊过一次。需要「一次拿完整
+// 结果」的调用统一用 `chat::agent::planning::call_chat_completion_message_streamed`
+// （或要 usage/引用时用 `call_chat_completion_output_with_usage`，它内部也已走流式）。
 
 pub(super) fn format_chat_missing_api_key_error(provider_name: &str) -> String {
     let provider = provider_name.trim();

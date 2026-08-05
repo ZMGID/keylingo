@@ -338,9 +338,10 @@ impl ToolExecutor for CancelAfterToolExecutor {
 /// Responses are served in connection-accept order; each response closes (or
 /// deliberately breaks) its connection so reqwest opens a fresh one per request.
 enum MockResponse {
-    /// Complete JSON chat completion body.
-    Json(String),
     /// SSE stream; each entry becomes one `data: <entry>` event.
+    ///
+    /// 没有「完整 JSON 响应」这个变体：所有模型调用都走流式线（见
+    /// `sse_from_completion_json`）。写着更好读的非流式固件用那个函数转过来。
     Sse(Vec<String>),
     /// Plain HTTP error status with a JSON body.
     Status(u16, String),
@@ -439,14 +440,6 @@ fn sse_body(events: &[String]) -> String {
 
 fn serve_mock_response(mut stream: TcpStream, response: MockResponse) {
     match response {
-        MockResponse::Json(body) => {
-            let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-        }
         MockResponse::Status(code, body) => {
             let _ = write!(
                     stream,
@@ -595,26 +588,53 @@ fn planning_tool_call_sse_events() -> Vec<String> {
         ]
 }
 
-/// Non-stream planning step: one `read` tool call.
-fn planning_tool_call_json() -> String {
-    serde_json::json!({
-        "choices": [{
-            "finish_reason": "tool_calls",
-            "message": {
-                "role": "assistant",
-                "content": Value::Null,
-                "tool_calls": [{
-                    "id": "call_read",
-                    "type": "function",
-                    "function": {
-                        "name": "read",
-                        "arguments": "{\"path\":\"/tmp/kivio-test.txt\"}"
-                    }
-                }]
-            }
-        }]
-    })
-    .to_string()
+/// 把一份非流式 chat-completion JSON 固件转成等价的 SSE 事件序列。
+///
+/// 「要完整结果」的模型调用现在**一律走流式线**（`generate_via_stream_collect`，理由见
+/// planning.rs 上 `call_chat_completion_output_with_usage` 的注释）—— 包括
+/// `stream_enabled=false` 这个模式：那个开关现在只决定「是否往 host 发增量事件」，
+/// 不再决定线格式。固件用非流式 JSON 写着更好读，所以在这里做一次机械转换，
+/// 而不是把每个测试都手抄成 SSE。
+fn sse_from_completion_json(body: &str) -> Vec<String> {
+    let parsed: Value = serde_json::from_str(body).expect("mock body must be valid JSON");
+    let message = &parsed["choices"][0]["message"];
+    let mut events = Vec::new();
+    if let Some(reasoning) = message["reasoning_content"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+    {
+        events.push(
+            serde_json::json!({"choices":[{"delta":{"reasoning_content": reasoning}}]}).to_string(),
+        );
+    }
+    if let Some(content) = message["content"].as_str().filter(|text| !text.is_empty()) {
+        events.push(serde_json::json!({"choices":[{"delta":{"content": content}}]}).to_string());
+    }
+    if let Some(tool_calls) = message["tool_calls"].as_array() {
+        // 流式约定要 index；参数不切片（测试不关心分片，只关心最终 draft）。
+        let deltas = tool_calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                let mut call = call.clone();
+                call["index"] = serde_json::json!(index);
+                call
+            })
+            .collect::<Vec<_>>();
+        events.push(serde_json::json!({"choices":[{"delta":{"tool_calls": deltas}}]}).to_string());
+    }
+    if let Some(finish) = parsed["choices"][0]["finish_reason"].as_str() {
+        events.push(
+            serde_json::json!({"choices":[{"delta":{},"finish_reason": finish}]}).to_string(),
+        );
+    }
+    // usage 必须带过来：静默超窗的判定就靠 provider 实报的 prompt_tokens（空正文 + 顶窗
+    // ⇒ 改判 ContextOverflow）。流式里 usage 走末尾那个 choices 为空的块。
+    if let Some(usage) = parsed.get("usage").filter(|usage| !usage.is_null()) {
+        events.push(serde_json::json!({"choices":[],"usage": usage}).to_string());
+    }
+    events.push("[DONE]".to_string());
+    events
 }
 
 fn test_round_context() -> ToolRoundContext<'static> {
@@ -1681,7 +1701,7 @@ async fn run_loop_planning_top_cancelled_preserves_gathered_tool_records() {
     let server = MockModelServer::start(vec![
         // Round 1 planning: one read tool call. The tool executes, the round
         // completes, then persist flips cancel → round 2 loop-top cancels.
-        MockResponse::Json(planning_tool_call_json()),
+        MockResponse::Sse(planning_tool_call_sse_events()),
     ]);
     let state = test_app_state();
     let mut config = test_run_config(&state, &server.base_url, false);
@@ -2622,7 +2642,7 @@ async fn run_loop_stream_synthesis_empty_output_uses_fallback_and_completes() {
 #[tokio::test]
 async fn run_loop_nonstream_synthesis_failure_preserves_tool_records_with_fallback() {
     let server = MockModelServer::start(vec![
-        MockResponse::Json(planning_tool_call_json()),
+        MockResponse::Sse(planning_tool_call_sse_events()),
         MockResponse::Status(400, r#"{"error":"mock synthesis failure"}"#.to_string()),
     ]);
     let state = test_app_state();
@@ -2678,7 +2698,7 @@ async fn run_loop_overflow_recovery_compacts_and_retries_success() {
     })
     .to_string();
     let server = MockModelServer::start(vec![
-        MockResponse::Json(planning_tool_call_json()),
+        MockResponse::Sse(planning_tool_call_sse_events()),
         // Synthesis call #1 fails with an overflow-shaped 400.
         MockResponse::Status(
             400,
@@ -2686,7 +2706,7 @@ async fn run_loop_overflow_recovery_compacts_and_retries_success() {
                 .to_string(),
         ),
         // CompactAndRetry re-sends synthesis; this one succeeds.
-        MockResponse::Json(retry_answer),
+        MockResponse::Sse(sse_from_completion_json(&retry_answer)),
     ]);
     let state = test_app_state();
     let config = test_run_config(&state, &server.base_url, false);
@@ -2732,14 +2752,14 @@ async fn run_loop_empty_response_at_context_window_recovers_as_silent_overflow()
     })
     .to_string();
     let server = MockModelServer::start(vec![
-        MockResponse::Json(planning_tool_call_json()),
-        MockResponse::Json(empty_at_window),
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(sse_from_completion_json(&empty_at_window)),
         // 改判成 overflow 后先压缩：摘要调用恒为流式，与 run 的 stream 设置无关。
         MockResponse::Sse(vec![
             long_summary_sse("SUMMARY_MARKER: 早前轮次摘要。"),
             "[DONE]".to_string(),
         ]),
-        MockResponse::Json(retry_answer),
+        MockResponse::Sse(sse_from_completion_json(&retry_answer)),
     ]);
     let state = test_app_state();
     let mut config = test_run_config(&state, &server.base_url, false);
@@ -2799,7 +2819,7 @@ async fn run_loop_overflow_recovery_retries_once_then_degrades() {
             .to_string(),
     );
     let server = MockModelServer::start(vec![
-        MockResponse::Json(planning_tool_call_json()),
+        MockResponse::Sse(planning_tool_call_sse_events()),
         // Synthesis call #1: overflow.
         MockResponse::Status(
             400,
@@ -2847,8 +2867,8 @@ async fn run_loop_nonstream_synthesis_empty_output_uses_fallback() {
     })
     .to_string();
     let server = MockModelServer::start(vec![
-        MockResponse::Json(planning_tool_call_json()),
-        MockResponse::Json(empty_synthesis),
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(sse_from_completion_json(&empty_synthesis)),
     ]);
     let state = test_app_state();
     let config = test_run_config(&state, &server.base_url, false);
@@ -2964,12 +2984,15 @@ async fn run_loop_stream_builtin_web_search_card_precedes_answer_single_card() {
     );
 }
 
-/// 集成（非流式）：内置模式 + Responses provider 的非流式答案路径。内置搜索引用只能在拿到
-/// 完整答案后合成，走 `emit_builtin_web_search_card(order=预留槽)`——同样落在答案之前、单卡。
+/// 集成（非流式答案路径）：内置模式 + Responses provider。`stream_enabled=false` 现在只表示
+/// 「不往 host 发增量」，线格式仍是流式（见 `sse_from_completion_json` 的注释），所以固件是
+/// SSE；引用在拿到完整答案后合成，走 `emit_builtin_web_search_card(order=预留槽)`
+/// —— 同样落在答案之前、单卡。
 #[tokio::test]
 async fn run_loop_nonstream_builtin_web_search_card_uses_reserved_slot() {
-    let body = r#"{"status":"completed","output":[{"type":"web_search_call","action":{"type":"search","query":"kivio latest release"}},{"type":"message","content":[{"type":"output_text","text":"Kivio 最新版本信息。","annotations":[{"type":"url_citation","title":"Kivio Release","url":"https://kivio.dev/releases"}]}]}]}"#;
-    let server = MockModelServer::start(vec![MockResponse::Json(body.to_string())]);
+    let server = MockModelServer::start(vec![MockResponse::Sse(
+        responses_web_search_sse_events(),
+    )]);
     let state = test_app_state();
     let mut config = test_run_config(&state, &server.base_url, false);
     config.provider.api_format = "openai_responses".to_string();

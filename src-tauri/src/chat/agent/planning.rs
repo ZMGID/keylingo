@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::chat::model::{
-    generate_request_from_openai_messages, generate_with_chat_provider, stream_with_chat_provider,
+    generate_request_from_openai_messages, stream_with_chat_provider,
     BuiltinWebSearch, GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext,
     ModelError, PendingToolCall, StreamPart, StreamSink,
 };
@@ -615,7 +615,13 @@ pub(crate) async fn call_chat_completion_output_with_usage(
         label,
         GenerateRequestContext::new(Some(conversation_id), Some(message_id)),
     );
-    let output = generate_with_chat_provider(state, provider, retry_attempts, request)
+    // **一律走流式**（`generate_via_stream_collect`），哪怕调用方只要一个完整结果。
+    // 部分 openai_responses 代理只可靠地服务流式请求，非流式 `generate` 直接报
+    // "Unknown Responses API error" —— 压缩、标题总结都各自被这个坑绊过一次。
+    // 这里是所有「要完整结果」的模型调用的唯一出口（planning / synthesis / 恢复重试 /
+    // 原生工具都汇到这儿），改在这一处就等于全线走流式；`GenerateOutput` 两条路径同型，
+    // usage / web_search / images 照旧回传（正常答案路径本来就只走流式，是被走熟的那条）。
+    let output = generate_via_stream_collect(state, provider, retry_attempts, request)
         .await
         .map_err(|err| err.to_string())?;
     let usage = output.usage.clone();

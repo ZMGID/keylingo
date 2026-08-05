@@ -9,7 +9,6 @@ use crate::chat::Conversation;
 use crate::settings::{SessionModel, Settings};
 use crate::state::AppState;
 
-use super::super::model_call::call_chat_completion_message;
 
 pub(super) async fn resolve_conversation_title(
     settings: &Settings,
@@ -36,8 +35,16 @@ pub(super) async fn resolve_conversation_title(
     .await
     {
         Ok(Some(title)) => title,
-        Ok(None) => generate_title(user_content),
-        Err(_) => generate_title(user_content),
+        // 兜底必须留痕：这三条路都会安静地把标题变成「第一句用户消息」，用户只能看到
+        // 「标题没总结」，而用量日志里连一条请求都没有（超时会把 future 丢掉、来不及记账）。
+        Ok(None) => {
+            eprintln!("[title] 跳过模型总结（provider/model 未解析或被门控），退回截断标题");
+            generate_title(user_content)
+        }
+        Err(_) => {
+            eprintln!("[title] 模型总结 8s 超时，退回截断标题");
+            generate_title(user_content)
+        }
     }
 }
 
@@ -50,11 +57,16 @@ async fn generate_title_with_model(
     assistant_content: &str,
 ) -> Option<String> {
     let (provider_id, model) = settings.effective_title_summary_model_for_session(session);
-    let provider = settings.get_provider(&provider_id)?.clone();
+    let Some(provider) = settings.get_provider(&provider_id).cloned() else {
+        eprintln!("[title] provider 未找到: {provider_id}");
+        return None;
+    };
     if provider.api_keys.is_empty() || model.trim().is_empty() {
+        eprintln!("[title] provider 无 key 或 model 为空: {provider_id} / {model}");
         return None;
     }
     if model_can_generate_images_directly(&provider, &model) {
+        eprintln!("[title] 生图模型不用于标题: {model}");
         return None;
     }
 
@@ -75,19 +87,38 @@ async fn generate_title_with_model(
             "content": prompt,
         }),
     ];
-    let message = call_chat_completion_message(
-        state,
+    // **必须走流式**，不能用非流式 `generate`：部分 openai_responses 代理只可靠地服务流式
+    // 请求，非流式调用直接报 "Unknown Responses API error"。压缩的摘要调用早就因为同一个原因
+    // 改走流式了（见 planning.rs 上 call_chat_completion_message_streamed 的注释），当时的结论
+    // 是「压缩是 agent 里唯一的非流式调用」—— 标题生成在 commands/ 里、不在 agent/ 里，被漏了。
+    // 表现就是这类渠道上标题永远总结不出来，只能静默兜底成第一句用户消息。
+    let message = crate::chat::agent::planning::call_chat_completion_message_streamed(
+        state.inner(),
         &provider,
         &model,
         messages,
         None,
         retry_attempts,
-        false,
-        Some(conversation_id),
-        None,
+        // **不发 reasoning effort**（`thinking_enabled: true` + level 不设 = 两个适配器都不写
+        // 这个字段），交给端点自己的默认。
+        //
+        // 这里原来传 `false`，而 `false` 的语义是「显式下发关闭信号」：Responses 发
+        // `reasoning.effort:"none"`、Chat 发 `reasoning_effort:"none"`。xAI 的档位只有
+        // low/medium/high/xhigh，没有 none —— 实测两次真正发出去的标题请求全部失败
+        // （grok-4.5：http_400 / http_503，用量日志里带着 reasoningEffort:"none"）。
+        // 标题这种一次性小请求不值得为「关思考」去赌各家对 none 的支持度。
+        true,
+        // 标题本身十几个字就够，但思考型模型的 reasoning token 也吃这个预算，留点余量。
+        2048,
+        conversation_id,
+        "",
         "Chat title summary",
     )
     .await
+    .map_err(|err| {
+        eprintln!("[title] 模型请求失败: {err}");
+        err
+    })
     .ok()?;
     let raw = agent_stop::assistant_content_from_api_message(&message);
 

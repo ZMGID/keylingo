@@ -2401,9 +2401,10 @@ mod tests {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(String::from_utf8_lossy(&buf[header_end..]).into_owned());
+                    let body = sse_body_from_completion_json(&body);
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
                     );
@@ -2424,9 +2425,51 @@ mod tests {
         }
     }
 
+    /// 把一份非流式 chat-completion JSON 固件转成 SSE 响应体。
+    ///
+    /// 「要完整结果」的模型调用现在**一律走流式线**（见 planning.rs 上
+    /// `call_chat_completion_output_with_usage` 的注释），`stream_enabled=false` 只表示
+    /// 「不往 host 发增量」。固件用非流式 JSON 写着更好读，所以在出口做一次机械转换
+    /// （与 `agent/loop_tests.rs::sse_from_completion_json` 同形；两个测试模块互不可见，
+    /// 为二十行搭一个共享 test-util 模块不划算）。
+    fn sse_body_from_completion_json(body: &str) -> String {
+        let parsed: Value = serde_json::from_str(body).expect("mock body must be valid JSON");
+        let message = &parsed["choices"][0]["message"];
+        let mut events: Vec<String> = Vec::new();
+        if let Some(content) = message["content"].as_str().filter(|text| !text.is_empty()) {
+            events.push(serde_json::json!({"choices":[{"delta":{"content": content}}]}).to_string());
+        }
+        if let Some(tool_calls) = message["tool_calls"].as_array() {
+            // 流式约定要 index；参数不切片（测试只关心最终 draft）。
+            let deltas = tool_calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    let mut call = call.clone();
+                    call["index"] = serde_json::json!(index);
+                    call
+                })
+                .collect::<Vec<_>>();
+            events
+                .push(serde_json::json!({"choices":[{"delta":{"tool_calls": deltas}}]}).to_string());
+        }
+        if let Some(finish) = parsed["choices"][0]["finish_reason"].as_str() {
+            events.push(
+                serde_json::json!({"choices":[{"delta":{},"finish_reason": finish}]}).to_string(),
+            );
+        }
+        if let Some(usage) = parsed.get("usage").filter(|usage| !usage.is_null()) {
+            events.push(serde_json::json!({"choices":[],"usage": usage}).to_string());
+        }
+        events.push("[DONE]".to_string());
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
+    }
+
     /// A no-tool-call final assistant answer (ends the loop).
-    fn final_answer_json(text: &str) -> String {
-        serde_json::json!({
+    fn final_answer_json(text: &str) -> String {        serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": { "role": "assistant", "content": text }
