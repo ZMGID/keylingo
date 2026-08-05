@@ -6,6 +6,7 @@ import {
   HEAVY_MIGRATION_STEP,
   MOUNTED_MIN_ITEMS,
   mountedCountForBudget,
+  sendReserveHeight,
   splitHistoryForVirtualization,
   VIRTUALIZE_THRESHOLD,
 } from './messageListVirtualization'
@@ -152,5 +153,20 @@ describe('splitHistoryForVirtualization', () => {
     const list = items(Array.from({ length: 300 }, () => 'message'))
     const frozen = splitHistoryForVirtualization(list, { minMounted: 32, frozenStart: 16 })
     expect(frozen.mountedStartIndex).toBeGreaterThan(16)
+  })
+})
+
+describe('sendReserveHeight', () => {
+  it('视口够高时就是比例值', () => {
+    expect(sendReserveHeight(800, 40, 16)).toBe(360)
+  })
+
+  it('视口被 ask_user 面板挤矮 / 锚点行很高时，夹到「锚点仍在屏幕里」', () => {
+    // 视口只剩 300、锚点行 200：比例值 135 会把锚点顶出去，必须夹到 300-200-32=68
+    expect(sendReserveHeight(300, 200, 16)).toBe(68)
+  })
+
+  it('锚点自己就超过视口时不给负数', () => {
+    expect(sendReserveHeight(300, 400, 16)).toBe(0)
   })
 })

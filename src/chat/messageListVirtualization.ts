@@ -241,3 +241,17 @@ export function splitHistoryForVirtualization<T extends { kind: string }>(
     mountedStartIndex,
   }
 }
+
+/**
+ * 发送后尾部预留的高度。基准是**滚动视口**的实测高度，不是窗口高 —— ask_user 面板吊在输入框
+ * 上方、在滚动区之外，它一出现视口就矮一大截，按窗口算的预留会比视口还高、把刚发出的那条消息
+ * 整个顶出屏幕。所以再夹一道「视口 - 锚点行高 - 上下留白」：比例给多大，那条消息都得留在屏幕里。
+ */
+export const SEND_RESERVE_RATIO = 0.45
+
+export function sendReserveHeight(viewportH: number, anchorH: number, edgePadding: number): number {
+  return Math.max(
+    0,
+    Math.min(viewportH * SEND_RESERVE_RATIO, viewportH - anchorH - edgePadding * 2),
+  )
+}

@@ -30,6 +30,7 @@ import {
   HEAVY_MIGRATION_STEP,
   LOAD_EARLIER_TRIGGER_PX,
   mountedCountForBudget,
+  sendReserveHeight,
   splitHistoryForVirtualization,
   VIRTUALIZE_COST_THRESHOLD,
   type HistorySplit,
@@ -353,7 +354,7 @@ function MessageListBase({
         },
       }
     }
-    // 首 token 之前没有流式内容项——生成期间的占位/状态由列表尾部常驻的
+    // 首 token 之前没有流式内容项——生成期间的占位/状态由 tailWrap 里常驻的
     // StreamStatusLine 承担（动效 logo + 耗时/tokens/任务数）。
     return null
   }, [
@@ -705,6 +706,58 @@ function MessageListBase({
     prevMessageCountRef.current = count
   }, [messages, followHandle])
 
+  // 发送后的尾部预留，两个阶段一处算：
+  // - **运行中**：撑在尾部 wrapper 的 minHeight 上（是 min，回答长过它就自然吃掉，不用逐帧算）。
+  // - **结束后**：同一段预留补到底部留白上。两阶段量的是同一段跨度（最后一条 user 的底边 →
+  //   内容底边）、同一个 reserve 值，所以交接前后总高相等，视图不动（短回答不再往下沉）。
+  //
+  // 基准必须是**滚动视口**的高度，不是窗口高（dvh）：ask_user 面板吊在输入框上方、在滚动区
+  // 之外，它一出现视口就矮一大截，按窗口算的预留会比视口还高，把上一条消息整个顶出屏幕。
+  // 再夹一道 `视口 - 锚点行高`：不管比例给多大，那条刚发出的消息必须留在屏幕里。
+  // 只在「本次会话里刚生成完」时接管留白：切换/打开会话不给预留，老会话的样子不变。
+  const tailWrapRef = useRef<HTMLDivElement | null>(null)
+  const tailSpacerRef = useRef<HTMLDivElement | null>(null)
+  const reserveHandoffRef = useRef(false)
+  useLayoutEffect(() => {
+    reserveHandoffRef.current = false
+  }, [conversationId])
+  useLayoutEffect(() => {
+    const wrap = tailWrapRef.current
+    const spacer = tailSpacerRef.current
+    if (!wrap || !spacer || !viewportEl) return
+    if (streaming) reserveHandoffRef.current = true
+
+    const apply = () => {
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const row = lastUser && contentEl
+        ? contentEl.querySelector(`[data-message-id="${CSS.escape(lastUser.id)}"]`)
+        : null
+      const anchorH = row?.getBoundingClientRect().height ?? 0
+      const reserve = sendReserveHeight(viewportEl.clientHeight, anchorH, LIST_EDGE_PADDING_PX)
+      if (streaming) {
+        wrap.style.minHeight = `${Math.round(reserve)}px`
+        // 留白交还给 minHeight：不还的话上一轮量出来的高度会和 minHeight 叠成两段预留。
+        spacer.style.height = `${LIST_EDGE_PADDING_PX}px`
+        return
+      }
+      wrap.style.minHeight = ''
+      if (!reserveHandoffRef.current || !row) {
+        spacer.style.height = `${LIST_EDGE_PADDING_PX}px`
+        return
+      }
+      // 跨度用 spacer 自己的顶边量，与 spacer 当前高度无关，避免自反馈。
+      const span = spacer.getBoundingClientRect().top - row.getBoundingClientRect().bottom
+      spacer.style.height = `${Math.max(LIST_EDGE_PADDING_PX, Math.round(reserve - span))}px`
+    }
+
+    apply()
+    // 视口高度会变（ask_user 面板出现/消失、输入框长高、窗口 resize），每次都得重算预留。
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(apply)
+    observer.observe(viewportEl)
+    return () => observer.disconnect()
+  }, [streaming, messages, contentEl, viewportEl])
+
   const renderItem = useCallback(
     (item: RenderItem) => {
       switch (item.kind) {
@@ -896,24 +949,29 @@ function MessageListBase({
               ))}
             </>
           )}
-          {/* 流式气泡/错误/底部留白在列表尾部实挂载，增长高度可精确测量 */}
-          {dynamicItem && (
-            <div className="pb-0.5" data-chat-message-list-item={dynamicItem.kind} data-message-id="streaming-assistant">
-              {renderItem(dynamicItem)}
-            </div>
-          )}
-          {errorItem && (
-            <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
-              {renderItem(errorItem)}
-            </div>
-          )}
-          {/* 消息流末尾常驻的存在标记（对标 Claude Code 的小星号）：有对话就一直在
-              （空会话首页没有），生成中动效 + 耗时/tokens/运行中任务数（组件内部按秒采样）。
-              多答组（live-group）有自己的列内进度，生成期间只保持静态 logo。 */}
-          {(messages.length > 0 || streaming) && (
-            <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
-          )}
-          <div aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
+          {/* 流式气泡/错误/底部留白在列表尾部实挂载，增长高度可精确测量。
+              minHeight（由上方 layout effect 按视口高写入）= 发送后的预留：钉底时这段空盒子撑在
+              最后，刚发出的用户消息因此离输入框有一段距离，回答在盒子顶部往下长、长过预留后这段
+              自然消失；运行结束时预留由 tailSpacer 接住，总高不变、视图不动。 */}
+          <div ref={tailWrapRef}>
+            {dynamicItem && (
+              <div className="pb-0.5" data-chat-message-list-item={dynamicItem.kind} data-message-id="streaming-assistant">
+                {renderItem(dynamicItem)}
+              </div>
+            )}
+            {errorItem && (
+              <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
+                {renderItem(errorItem)}
+              </div>
+            )}
+            {/* 消息流末尾常驻的存在标记（对标 Claude Code 的小星号）：有对话就一直在
+                （空会话首页没有），生成中动效 + 耗时/tokens/运行中任务数（组件内部按秒采样）。
+                多答组（live-group）有自己的列内进度，生成期间只保持静态 logo。 */}
+            {(messages.length > 0 || streaming) && (
+              <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
+            )}
+            <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
+          </div>
         </div>
       </div>
       {/* 上下边界渐变遮罩，纯覆盖层。颜色必须跟 .chat-main-pane 的底色走（浅色 --theme-surface-soft，暗色 #262629）——
