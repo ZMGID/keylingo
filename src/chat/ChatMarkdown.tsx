@@ -5,6 +5,10 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { PluggableList } from 'unified'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+// CommonMark 的 flanking 规则对 CJK 是坏的：`**` 一侧贴中文标点、另一侧贴汉字时既不能开
+// 也不能闭，`**一句话总结：**最近` / `一份**“报告”**，共` 会原样吐出星号。模型写中文时天天
+// 撞这个。该扩展只放宽 CJK 的判定，CommonMark 测试集输出不变。
+import remarkCjkFriendly from 'remark-cjk-friendly'
 import katex from 'katex'
 import katexCss from 'katex/dist/katex.min.css?inline'
 import { normalizeMarkdownForRender } from './markdownUtils'
@@ -1073,7 +1077,7 @@ function ChatMarkdownComponent({
 }: ChatMarkdownProps) {
   const normalized = useMemo(() => normalizeMarkdownForRender(content), [content])
   const remarkPlugins = useMemo<PluggableList>(() => {
-    const plugins: PluggableList = [remarkGfm, remarkMath]
+    const plugins: PluggableList = [remarkGfm, remarkMath, remarkCjkFriendly]
     if (citations && citations.size > 0) {
       plugins.push(remarkCitations(new Set(citations.keys())))
     }
