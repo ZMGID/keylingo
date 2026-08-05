@@ -85,19 +85,51 @@ export function toolCallDiffStats(toolCall: ToolCallRecord): DiffStats | null {
   return additions || removals ? { additions, removals } : null
 }
 
+/**
+ * 用户在生成中「立刻引导」插进来的那句话（后端合成的 display-only 记录，见
+ * `chat/agent/steering.rs`）。渲染成一条用户小气泡而不是工具卡。
+ *
+ * 三条判据全要 —— 这张卡呈现的是「用户说过的话」，冒充它比冒充一张搜索卡严重：
+ * 只有 native 通道、保留工具名、structured type 三者同时对上才认。
+ */
+export function isUserSteerToolCall(toolCall: ToolCallRecord): boolean {
+  if (toolCall.source !== 'native') return false
+  if (toolRecordRawName(toolCall) !== 'user_steer') return false
+  const structured = toolCall.structured_content ?? toolCall.structuredContent
+  if (!structured || typeof structured !== 'object') return false
+  return (structured as { type?: unknown }).type === 'user_steer'
+}
+
+/** 插话卡里那句话（空串 = 不是插话卡 / 载荷缺字段）。 */
+export function userSteerText(toolCall: ToolCallRecord): string {
+  const structured = toolCall.structured_content ?? toolCall.structuredContent
+  if (!structured || typeof structured !== 'object') return ''
+  const text = (structured as { text?: unknown }).text
+  return typeof text === 'string' ? text : ''
+}
+
 /** Tool calls that render as their own dedicated, always-visible card in the
- *  timeline (never folded into the "调用 N 次工具" group): sub-agents (`agent`)
- *  and advisor consultations. Matched by structured content type first, then by
- *  the native tool name for the still-streaming case (before structured content
- *  arrives). */
+ *  timeline (never folded into the "调用 N 次工具" group): sub-agents (`agent`),
+ *  advisor consultations, and ask-user prompts. Matched by structured content type
+ *  first, then by the native tool name for the still-streaming case (before
+ *  structured content arrives). */
 export function isStandaloneToolCard(toolCall: ToolCallRecord): boolean {
+  // 用户插话：把它折进「调用 N 次工具」等于把用户自己说的话藏起来，同 ask_user 的理由。
+  if (isUserSteerToolCall(toolCall)) return true
   const structured = toolCall.structured_content ?? toolCall.structuredContent
   if (structured && typeof structured === 'object') {
     const type = (structured as { type?: unknown }).type
     if (type === 'subagent' || type === 'advisor') return true
+    // 问用户：载荷里是 `askUser`（没有 `type` 字段）。它记的是「问了什么 + 你选了什么」，
+    // 折进「调用 N 次工具」里等于把一次人为决定藏起来 —— 那是这条对话里最该看见的东西。
+    if ('askUser' in (structured as Record<string, unknown>)) return true
+  }
+  const name = toolRecordRawName(toolCall)
+  // 外部 CLI 报的是自己的工具名（`AskUserQuestion`），所以这条判据不能只认 native。
+  if (name.toLowerCase().replace(/[_\-\s]/g, '') === 'askuserquestion' || name === 'ask_user') {
+    return true
   }
   if (toolCall.source !== 'native') return false
-  const name = toolRecordRawName(toolCall)
   return name === 'agent' || name === 'advisor' || isArtifactPresentationToolCall(toolCall)
 }
 

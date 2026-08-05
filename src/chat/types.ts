@@ -507,6 +507,11 @@ export interface DetectedExternalAgent {
   sandbox_options?: Array<{ id: string; label: string }>
   authStatus?: string | null
   auth_status?: string | null
+  /** 设置页里被用户停用：不出现在运行时选择器，但已绑定它的旧会话照常。 */
+  disabled?: boolean
+  /** 该 CLI 的协议能否往在飞的轮次里注入一条用户消息（「立刻引导」）。目前只有 codex。 */
+  supportsSteering?: boolean
+  supports_steering?: boolean
 }
 
 export interface Conversation {

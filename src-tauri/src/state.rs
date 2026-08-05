@@ -166,6 +166,15 @@ pub struct AppState {
     /// 等待用户回答的 Chat ask_user 澄清卡片。
     pub pending_chat_user_prompts:
         Mutex<HashMap<String, crate::chat::ask_user::PendingAskUserPrompt>>,
+    /// 外部 CLI 的问用户答完之后的 `askUser` 结构化载荷（键 = 工具调用 id）。
+    ///
+    /// 为什么要绕一道：那条卡片的记录是 CLI 的流解析层建的（`structured_content` 是 claude
+    /// 的原始入参），而答案只有审批宿主那侧知道，两边在不同的任务里。不放进落盘记录的话，
+    /// 消息流里那块「问了什么 + 选了什么」刷新一次就没了 —— 只剩一行看不见的灰字。
+    ///
+    /// ponytail: 只在 `ToolResult` 落地时消费一次并移除；那一轮死在半路的残留会留到进程退出
+    /// （一条询问一个小 JSON，量级可忽略）。真要收严就在轮末按 run 清一次。
+    pub answered_ask_user_content: Mutex<HashMap<String, serde_json::Value>>,
     /// 等待前端 Pyodide 完成的 run_python 调用。
     pub pending_python_runs: Mutex<HashMap<String, PendingPythonRun>>,
     /// 保护 Chat 空白会话复用的短临界区，避免快速多次新建时并发创建多个空白对话。
@@ -198,6 +207,14 @@ pub struct AppState {
     /// 外部入口（例如 Lens）交给 Chat 前端发送的待处理消息。
     /// 后端只负责保存请求和打开窗口，实际发送必须走 Chat 前端的手动发送状态机。
     pub pending_chat_external_sends: Mutex<Vec<PendingChatExternalSend>>,
+    /// 运行中用户插话（steering）的信箱：conversation_id → 待注入的用户消息。
+    /// `run_agent_loop` 在每个轮次开头 take 一次（取一次清一次），注入进本轮模型历史。
+    /// 仅内存、不持久化：它描述的是「某条正在跑的 run」，进程活着才有意义。
+    ///
+    /// ponytail: 按 conversation_id 而不是 run_id 建键 —— 同会话多条并发 run（多模型一问多答）时
+    /// 无法定向到具体某条臂，所以前端在 `reply_models ≥ 2` 时不给「立刻引导」入口。要支持就把键
+    /// 换成 run_id，并让前端把当前 run_id 传进来。
+    pub pending_chat_steering: Mutex<HashMap<String, Vec<crate::chat::agent::SteeringMessage>>>,
     /// Lens 启动前抓到的选中文本：放在这里等前端 enterSelect 来取走。
     /// 取一次清一次（take 语义）。无选中 / 取过 / translate 模式 = None。
     pub pending_selection: Mutex<Option<String>>,
@@ -344,6 +361,7 @@ impl AppState {
             pending_chat_session_consents: Mutex::new(HashMap::new()),
             chat_consent_prompt_lock: tokio::sync::Mutex::new(()),
             pending_chat_user_prompts: Mutex::new(HashMap::new()),
+            answered_ask_user_content: Mutex::new(HashMap::new()),
             pending_python_runs: Mutex::new(HashMap::new()),
             chat_create_conversation_lock: tokio::sync::Mutex::new(()),
             external_slash_commands_cache: Mutex::new(HashMap::new()),
@@ -353,6 +371,7 @@ impl AppState {
             model_probe_locks: Mutex::new(HashMap::new()),
             external_live_sessions: Mutex::new(HashMap::new()),
             pending_chat_external_sends: Mutex::new(Vec::new()),
+            pending_chat_steering: Mutex::new(HashMap::new()),
             pending_selection: Mutex::new(None),
             lens_freeze_frame_image_id: Mutex::new(None),
             lens_pending_reset: Mutex::new(None),
@@ -566,6 +585,53 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// 用户在运行中插话：把消息放进该会话的 steering 信箱，等 `run_agent_loop` 轮首来取。
+    /// 返回 false = 该会话当前没有活跃 run，调用方应改走普通发送（前端队列）。
+    pub fn push_chat_steering(
+        &self,
+        conversation_id: &str,
+        message: crate::chat::agent::SteeringMessage,
+    ) -> bool {
+        if self
+            .chat_active_generations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(conversation_id)
+            .map(|active| active.is_empty())
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        self.pending_chat_steering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(conversation_id.to_string())
+            .or_default()
+            .push(message);
+        true
+    }
+
+    /// 取走该会话待注入的插话（取一次清一次）。空集合时移除键，避免无界累积。
+    pub fn take_chat_steering(
+        &self,
+        conversation_id: &str,
+    ) -> Vec<crate::chat::agent::SteeringMessage> {
+        self.pending_chat_steering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conversation_id)
+            .unwrap_or_default()
+    }
+
+    /// run 结束时丢掉没来得及消费的插话——否则它会漏进**下一条** run 的第一轮。
+    /// 不丢消息：前端队列里那条要等卡片事件才出队，收不到就按普通消息重发。
+    pub fn clear_chat_steering(&self, conversation_id: &str) {
+        self.pending_chat_steering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conversation_id);
+    }
+
     /// 对话被删除时清理其按 conversation_id 累积的运行态痕迹：活跃 generation 集合、
     /// 会话级工具同意标记、按工具名的「总是允许」集合。三者都严格按 conversation_id 取键，对话删除后再不会被
     /// 引用，是最无歧义的有界清理点（不影响其它活跃对话）。generation 号本身来自进程级
@@ -583,6 +649,7 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(conv, _)| conv != conversation_id);
+        self.clear_chat_steering(conversation_id);
     }
 
     /// 尝试占用某个对话的某条 run 回复槽位。同会话允许多条 run 并存（多模型一问多答）；
@@ -775,6 +842,32 @@ impl AppState {
         );
     }
 
+    /// 切换第三方供应商后作废该 agent 的模型探测缓存。key 形如 `agent:cwd`，
+    /// 同一个 agent 在不同工作目录下各有一条，全部要清。
+    pub fn clear_external_agent_models_cache(&self, agent_id: &str) {
+        let prefix = format!("{agent_id}:");
+        self.external_agent_models_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    /// 保存设置后整表作废（供应商可能变了，而设置保存不频繁，不值得逐 agent 比对）。
+    pub fn clear_all_external_agent_models_cache(&self) {
+        self.external_agent_models_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// 作废可用性缓存（含落盘快照之外的内存副本）。切供应商后版本/认证状态都可能变了。
+    pub fn clear_detected_agents_cache(&self) {
+        self.external_detected_agents_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     pub fn get_cached_detected_agents(
         &self,
         cache_key: &str,
@@ -841,8 +934,7 @@ impl AppState {
         None
     }
 
-    /// 把这条会话标成「有在飞轮次」，返回的 guard 落地时自动清掉。
-    ///
+    /// 把这条会话标成「有在飞轮次」，返回的 guard 落地时自动清掉。    ///
     /// 轮次开始后调一次即可（复用与新建两条路都走得到），清扫器与 LRU 在此期间会跳过它。
     /// 不存在（刚被回收）时返回 `None` —— 那种情况下这一轮自己持着 `control`，照样跑完。
     pub fn mark_external_live_session_busy(
@@ -856,6 +948,21 @@ impl AppState {
         map.get(conversation_id).map(|session| {
             crate::external_agents::session::live::TurnBusyGuard::new(session.busy.clone())
         })
+    }
+
+    /// 取出该会话常驻 CLI 的控制通道（若有）。给「运行中插话」用：外部 CLI 那条路不走
+    /// `pending_chat_steering` 信箱（那是内置 agent 循环的轮首注入），而是把命令直接送进
+    /// 会话 actor，由各协议自己决定能不能注入。不存在常驻会话 = 这条对话没在跑 CLI。
+    pub fn external_live_session_control_any(
+        &self,
+        conversation_id: &str,
+    ) -> Option<tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>>
+    {
+        self.external_live_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(conversation_id)
+            .map(|session| session.control.clone())
     }
 
     pub fn register_external_live_session(

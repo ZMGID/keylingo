@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::Local;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::chat::agent::AgentRunEntry;
@@ -1506,9 +1506,38 @@ impl ApprovalHost<'_> {
                     self.run_id,
                     self.generation,
                     &record,
-                    prompt,
+                    prompt.clone(),
                 )
                 .await;
+                // 答完把**带答案**的记录补发一次，消息流里才留得下「问了什么 + 选了什么」。
+                // 少了这一步，那条工具卡的载荷永远停在「等待作答」，而 claude 随后回的
+                // `tool_result` 又不带结构化内容 ⇒ 看着像「答完什么都没留下」。
+                // 内置 agent 那条路早就这么做了（`agent/execute.rs` 的 ask_user 分支）。
+                let mut answered_record = record.clone();
+                answered_record.status = ToolCallStatus::Success;
+                answered_record.completed_at = Some(chrono::Local::now().timestamp());
+                answered_record.sensitive = false;
+                answered_record.structured_content =
+                    Some(crate::chat::ask_user::structured_content(
+                        &prompt,
+                        &answered.phase,
+                        &answered.answers,
+                    ));
+                crate::chat::commands::interaction::emit_chat_tool_record(
+                    self.app,
+                    self.run_id,
+                    &answered_record,
+                );
+                // 同一份载荷再留一份给**落盘记录**：那条 tool 记录是流解析层建的
+                // （`structured_content` 是 claude 的原始入参），答案只有这里知道。
+                // 不留的话刷新一次「问了什么 + 选了什么」就没了（见 AppState 上的说明）。
+                if let Some(content) = answered_record.structured_content.clone() {
+                    self.state
+                        .answered_ask_user_content
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .insert(answered_record.id.clone(), content);
+                }
                 let approved = answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
                 return crate::external_agents::session::live::ApprovalDecision {
                     request_id: ask.request_id,
@@ -2169,6 +2198,17 @@ fn apply_unified_event(
                     };
                     record.result_preview = Some(truncate_for_preview(&result_content, 800));
                     record.completed_at = Some(now);
+                    // 问用户答完时留下的 `askUser` 载荷（问题 + 用户选的答案）在这里落进记录，
+                    // 覆盖流解析层塞的原始入参 —— 否则消息流里那块刷新一次就只剩一行灰字。
+                    if let Some(answered) = app
+                        .state::<AppState>()
+                        .answered_ask_user_content
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .remove(&tool_use_id)
+                    {
+                        record.structured_content = Some(answered);
+                    }
                     emit_chat_tool_record(app, run_id, record);
                 }
             }
@@ -2234,6 +2274,23 @@ fn apply_unified_event(
                 post_tokens,
                 now,
             ));
+        }
+        UnifiedAgentEvent::UserSteer { id, text } => {
+            // 用户在这一轮里插了一句话，且 CLI 已受理注入。卡片走**内置循环那一份构造**
+            // （`chat::agent::steering::build_steer_record`）：同一个工具名、同一个
+            // structured_content 形状，前端那条 `isUserSteerToolCall` 判据与「收到卡才出队」
+            // 的对账逻辑因此两条路共用，不需要为外部 CLI 再写一遍。
+            segment_tracker.reset_text();
+            segment_tracker.reset_reasoning();
+            let Some(message) = crate::chat::agent::SteeringMessage::new(id, &text) else {
+                return;
+            };
+            let record = crate::chat::agent::steering::build_steer_record(&message, 1);
+            let segment = push_tool_segment(segments, segment_order, &record.id);
+            emit_chat_stream_delta(app, run_id, "", None, Some(&segment));
+            tool_map.insert(record.id.clone(), tool_calls.len());
+            tool_calls.push(record.clone());
+            emit_chat_tool_record(app, run_id, &record);
         }
         _ => {}
     }

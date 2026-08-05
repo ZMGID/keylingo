@@ -12,7 +12,7 @@ function useSelectMenuRect(
   open: boolean,
   value: string,
   optionsLength: number,
-  triggerRef: RefObject<HTMLButtonElement | null>,
+  triggerRef: RefObject<HTMLElement | null>,
 ) {
   const [menuRect, setMenuRect] = useState<{
     left: number
@@ -66,27 +66,14 @@ export function Toggle({ checked, onChange, disabled, ariaLabel }: { checked: bo
   )
 }
 
-/**
- * 下拉选择 — 自绘菜单，避免 macOS 原生 select 的系统高亮/勾选反馈和受控状态不同步。
- */
-export function Select({ value, onChange, options, className = '', disabled: disabledProp = false, title }: {
-  value: string
-  onChange: (v: string) => void
-  options: SelectOption[]
-  className?: string
-  disabled?: boolean
-  /** 覆盖触发按钮的原生 tooltip（默认显示当前选中项）。 */
-  title?: string
-}) {
-  const [open, setOpen] = useState(false)
-  const triggerRef = useRef<HTMLButtonElement | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
-  const selected = options.find(opt => opt.value === value)
-  const displayLabel = selected?.label || value
-  const displayTitle = selected?.title || displayLabel
-  const disabled = disabledProp || options.length === 0
-  const { menuRect, updateMenuRect } = useSelectMenuRect(open, value, options.length, triggerRef)
-
+/** 下拉菜单开合 + 点外关闭 + Esc，Select / SuggestInput 共用。 */
+function useSelectMenuOpen(
+  open: boolean,
+  setOpen: (open: boolean) => void,
+  triggerRef: RefObject<HTMLElement | null>,
+  menuRef: RefObject<HTMLElement | null>,
+  updateMenuRect: () => void,
+) {
   useEffect(() => {
     if (!open) return
     const handlePointerDown = (event: PointerEvent) => {
@@ -112,7 +99,78 @@ export function Select({ value, onChange, options, className = '', disabled: dis
       window.removeEventListener('resize', handleLayoutChange)
       window.removeEventListener('scroll', handleLayoutChange, true)
     }
-  }, [open, updateMenuRect])
+  }, [open, setOpen, triggerRef, menuRef, updateMenuRect])
+}
+
+/** 与 Select 同款的选项菜单（portal）。 */
+function SelectMenuPortal({
+  open,
+  menuRef,
+  menuRect,
+  options,
+  value,
+  onPick,
+}: {
+  open: boolean
+  menuRef: RefObject<HTMLDivElement | null>
+  menuRect: { left: number; top?: number; bottom?: number; width: number; maxHeight: number }
+  options: SelectOption[]
+  value: string
+  onPick: (value: string) => void
+}) {
+  if (!open) return null
+  return createPortal(
+    <div
+      ref={menuRef as React.RefObject<HTMLDivElement>}
+      role="listbox"
+      className="kv-select-menu fixed z-[1000] overflow-y-auto custom-scrollbar"
+      style={{ left: menuRect.left, top: menuRect.top, bottom: menuRect.bottom, width: menuRect.width, maxHeight: menuRect.maxHeight }}
+      data-tauri-drag-region="false"
+    >
+      {options.map(opt => {
+        const active = opt.value === value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="option"
+            aria-selected={active}
+            onClick={() => onPick(opt.value)}
+            title={opt.title || opt.label}
+            className={`kv-select-option ${active ? 'is-active' : ''}`}
+            data-tauri-drag-region="false"
+          >
+            <Check className="kv-select-option-check" strokeWidth={2.5} aria-hidden />
+            <span className="min-w-0 flex-1 truncate">{opt.label}</span>
+          </button>
+        )
+      })}
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * 下拉选择 — 自绘菜单，避免 macOS 原生 select 的系统高亮/勾选反馈和受控状态不同步。
+ */
+export function Select({ value, onChange, options, className = '', disabled: disabledProp = false, title }: {
+  value: string
+  onChange: (v: string) => void
+  options: SelectOption[]
+  className?: string
+  disabled?: boolean
+  /** 覆盖触发按钮的原生 tooltip（默认显示当前选中项）。 */
+  title?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const selected = options.find(opt => opt.value === value)
+  const displayLabel = selected?.label || value
+  const displayTitle = selected?.title || displayLabel
+  const disabled = disabledProp || options.length === 0
+  const { menuRect, updateMenuRect } = useSelectMenuRect(open, value, options.length, triggerRef)
+  useSelectMenuOpen(open, setOpen, triggerRef, menuRef, updateMenuRect)
 
   return (
     <div className={`relative ${className}`}>
@@ -141,39 +199,97 @@ export function Select({ value, onChange, options, className = '', disabled: dis
         />
       </button>
 
-      {open && createPortal(
-        <div
-          ref={menuRef}
-          role="listbox"
-          className="kv-select-menu fixed z-[1000] overflow-y-auto custom-scrollbar"
-          style={{ left: menuRect.left, top: menuRect.top, bottom: menuRect.bottom, width: menuRect.width, maxHeight: menuRect.maxHeight }}
+      <SelectMenuPortal
+        open={open}
+        menuRef={menuRef}
+        menuRect={menuRect}
+        options={options}
+        value={value}
+        onPick={(next) => {
+          onChange(next)
+          setOpen(false)
+          triggerRef.current?.focus()
+        }}
+      />
+    </div>
+  )
+}
+
+/**
+ * 可输入 + 右侧下拉箭头（获取模型列表后用）。
+ * 菜单与 Select 共用同一套 kv-select-menu / option 样式，不另做一套下拉。
+ */
+export function SuggestInput({
+  value,
+  onChange,
+  options,
+  placeholder = '',
+  className = '',
+  mono = false,
+  disabled = false,
+  ariaLabel,
+}: {
+  value: string
+  onChange: (v: string) => void
+  options: SelectOption[]
+  placeholder?: string
+  className?: string
+  mono?: boolean
+  disabled?: boolean
+  ariaLabel?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const canSuggest = options.length > 0 && !disabled
+  // 菜单宽度对齐整行（输入框 + 箭头），锚在 root 上
+  const { menuRect, updateMenuRect } = useSelectMenuRect(open, value, options.length, rootRef)
+  useSelectMenuOpen(open, setOpen, rootRef, menuRef, updateMenuRect)
+
+  return (
+    <div ref={rootRef} className={`kv-suggest-input ${className}`.trim()}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+        spellCheck={false}
+        aria-label={ariaLabel}
+        className={`kv-input kv-suggest-input-field ${mono ? 'mono' : ''}`}
+        data-tauri-drag-region="false"
+      />
+      {canSuggest && (
+        <button
+          ref={triggerRef}
+          type="button"
+          className="kv-suggest-input-toggle"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-label={ariaLabel ? `${ariaLabel} list` : 'Open suggestions'}
+          onClick={() => setOpen((v) => !v)}
           data-tauri-drag-region="false"
         >
-          {options.map(opt => {
-            const active = opt.value === value
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                role="option"
-                aria-selected={active}
-                onClick={() => {
-                  onChange(opt.value)
-                  setOpen(false)
-                  triggerRef.current?.focus()
-                }}
-                title={opt.title || opt.label}
-                className={`kv-select-option ${active ? 'is-active' : ''}`}
-                data-tauri-drag-region="false"
-              >
-                <Check className="kv-select-option-check" strokeWidth={2.5} aria-hidden />
-                <span className="min-w-0 flex-1 truncate">{opt.label}</span>
-              </button>
-            )
-          })}
-        </div>,
-        document.body,
+          <ChevronDown
+            size={14}
+            strokeWidth={2.25}
+            className={`transition-transform ${open ? 'rotate-180' : ''}`}
+          />
+        </button>
       )}
+      <SelectMenuPortal
+        open={open && canSuggest}
+        menuRef={menuRef}
+        menuRect={menuRect}
+        options={options}
+        value={value}
+        onPick={(next) => {
+          onChange(next)
+          setOpen(false)
+          triggerRef.current?.focus()
+        }}
+      />
     </div>
   )
 }

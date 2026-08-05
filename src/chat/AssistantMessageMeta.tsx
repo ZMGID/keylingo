@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { Check, Copy, Gauge, GitBranch, NotebookPen, Pencil, RotateCcw, Trash2 } from 'lucide-react'
+import { Check, Copy, Gauge, GitBranch, NotebookPen, RotateCcw, Trash2 } from 'lucide-react'
 import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
-import { estimateTokens } from '../utils/tokens'
+import { estimateTokens, formatTokensK } from '../utils/tokens'
 import { formatAssistantMessageTime } from './messageFormat'
 import type { MessageUsage } from './types'
 
@@ -14,7 +14,6 @@ interface AssistantMessageMetaProps {
   runEntry?: string | null
   streamOutcome?: string | null
   usage?: MessageUsage | null
-  onEdit?: () => void
   onRegenerate?: () => void
   onFork?: () => void
   onDelete?: () => void
@@ -27,11 +26,16 @@ function realUsageTokens(usage?: MessageUsage | null): { total: number; label: s
   const output = usage.output_tokens ?? usage.outputTokens
   const input = usage.input_tokens ?? usage.inputTokens
   const total = usage.total_tokens ?? usage.totalTokens
+  // 千位以上收成 K（`↑38897` → `↑38.9K`）：这一行是回答下面的元信息条，精确到个位既没人读、
+  // 又比旁边的上下文用量条（一直是 K）长出一截。口径与那条一致，用同一个 formatTokensK。
   if (output != null && input != null) {
-    return { total: input + output, label: `↑${input} ↓${output}` }
+    return {
+      total: input + output,
+      label: `↑${formatTokensK(input)} ↓${formatTokensK(output)}`,
+    }
   }
-  if (total != null) return { total, label: `${total} tokens` }
-  if (output != null) return { total: output, label: `↓${output}` }
+  if (total != null) return { total, label: `${formatTokensK(total)} tokens` }
+  if (output != null) return { total: output, label: `↓${formatTokensK(output)}` }
   return null
 }
 
@@ -43,7 +47,6 @@ export function AssistantMessageMeta({
   runEntry,
   streamOutcome,
   usage,
-  onEdit,
   onRegenerate,
   onFork,
   onDelete,
@@ -55,7 +58,7 @@ export function AssistantMessageMeta({
   const realUsage = realUsageTokens(usage)
   const tokenLabel = realUsage
     ? realUsage.label
-    : `~${estimateTokens(`${content}${reasoning ? `\n${reasoning}` : ''}`)} tokens`
+    : `~${formatTokensK(estimateTokens(`${content}${reasoning ? `\n${reasoning}` : ''}`))} tokens`
   const speed =
     tokensPerSec != null && Number.isFinite(tokensPerSec)
       ? Math.max(1, Math.round(tokensPerSec))
@@ -107,14 +110,6 @@ export function AssistantMessageMeta({
           label={saved ? '已存为笔记' : '存为笔记'}
         >
           {saved ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <NotebookPen size={14} strokeWidth={2} />}
-        </IconButton>
-        <IconButton
-          size="sm"
-          onClick={onEdit}
-          disabled={!onEdit}
-          label="编辑"
-        >
-          <Pencil size={14} strokeWidth={2} />
         </IconButton>
         <IconButton
           size="sm"

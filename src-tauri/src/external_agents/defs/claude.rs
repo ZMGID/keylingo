@@ -112,6 +112,14 @@ pub fn build_claude_args(
     if ctx.include_partial_messages {
         args.push("--include-partial-messages".to_string());
     }
+    // 第三方供应商：光注入环境变量不够 —— 用户 `~/.claude/settings.json` 的 `env` 段会被
+    // Claude Code 注入自己进程、盖掉继承来的同名变量（那份文件通常已被 cc-switch 写满）。
+    // 这份只含 `{"env": …}` 的覆盖文件才是压得住的一层，见 `provider_profile` 模块头。
+    if let Some(path) = crate::external_agents::provider_profile::claude_settings_override("claude")
+    {
+        args.push("--settings".to_string());
+        args.push(path.to_string_lossy().into_owned());
+    }
     if let Some(model) = options
         .model
         .as_ref()
@@ -349,6 +357,7 @@ pub const CLAUDE_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     stream_format: StreamFormat::ClaudeStreamJson,
     resumes_session_via_cli: true,
     supports_native_image: true,
+        supports_steering: false,
     image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_claude_args,
 };

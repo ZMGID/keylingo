@@ -62,8 +62,29 @@ pub fn strip_parent_session_env(command: &mut Command) -> &mut Command {
 /// 新增拉起 CLI 的代码请一律用它而不是 `Command::new`——忘记剥离不会编译报错、
 /// 也不会立刻出错，只在「Kivio 从某个 agent 里启动」这种特定场景下才炸，极难排查。
 pub fn cli_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let program = program.as_ref();
     let mut command = Command::new(program);
     strip_parent_session_env(&mut command);
+    // 设置页里针对这个 CLI 填的环境变量覆盖（`ANTHROPIC_BASE_URL` 之类），按二进制名反查。
+    for (key, value) in crate::external_agents::overrides::env_for_bin(Path::new(program)) {
+        command.env(key, value);
+    }
+    command
+}
+
+/// `cli_command` + 该 agent 的静态 `def.env`。有 `def` 在手时用它，覆盖按 id 精确取。
+///
+/// 探测（version / auth / 列模型）也要带上环境变量覆盖：用户配了 `ANTHROPIC_BASE_URL` 指向中转，
+/// 只在跑轮次时注入的话，认证探测仍打官方端点，设置页会显示「未认证」而实际能用。
+pub fn agent_cli_command(def: &RuntimeAgentDef, program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    strip_parent_session_env(&mut command);
+    for (key, value) in def.env {
+        command.env(key, value);
+    }
+    for (key, value) in crate::external_agents::overrides::env_for(def.id) {
+        command.env(key, value);
+    }
     command
 }
 
@@ -221,33 +242,42 @@ fn probe_cache_key(path: &Path) -> Option<String> {
 /// `--version`（实测 6.6ms ~ 328ms 不等），之后走 `PROBE_CACHE` ⇒ 稳态只剩
 /// `which -a` 的 ~2-3ms，与改动前基本持平。
 pub async fn resolve_binary(def: &RuntimeAgentDef) -> Option<PathBuf> {
+    // 用户在设置页指定了路径就**只认它**：静默回退到 PATH 会让「我明明指了这个二进制」
+    // 与实际跑的东西对不上，比诚实报「未安装」更难查。
+    if let Some(path) = crate::external_agents::overrides::custom_path(def.id) {
+        return probe_executable_cached(&path, def.version_args)
+            .await
+            .then_some(path);
+    }
     for candidate in std::iter::once(def.bin).chain(def.fallback_bins.iter().copied()) {
         for path in which_all(candidate).await {
-            let key = probe_cache_key(&path);
-            if let Some(key) = key.as_deref() {
-                if let Some(cached) = PROBE_CACHE.lock().ok().and_then(|c| c.get(key).cloned()) {
-                    if cached.executable {
-                        return Some(path);
-                    }
-                    continue;
-                }
-            }
-            let (ok, version) = probe_executable(&path, def.version_args).await;
-            if let (Some(key), Ok(mut cache)) = (key, PROBE_CACHE.lock()) {
-                cache.insert(
-                    key,
-                    ProbeOutcome {
-                        executable: ok,
-                        version,
-                    },
-                );
-            }
-            if ok {
+            if probe_executable_cached(&path, def.version_args).await {
                 return Some(path);
             }
         }
     }
     None
+}
+
+/// `probe_executable` + `PROBE_CACHE`（key 含 mtime/size，换版本自动失效）。
+async fn probe_executable_cached(path: &Path, version_args: &[&str]) -> bool {
+    let key = probe_cache_key(path);
+    if let Some(key) = key.as_deref() {
+        if let Some(cached) = PROBE_CACHE.lock().ok().and_then(|c| c.get(key).cloned()) {
+            return cached.executable;
+        }
+    }
+    let (ok, version) = probe_executable(path, version_args).await;
+    if let (Some(key), Ok(mut cache)) = (key, PROBE_CACHE.lock()) {
+        cache.insert(
+            key,
+            ProbeOutcome {
+                executable: ok,
+                version,
+            },
+        );
+    }
+    ok
 }
 
 /// 探活时顺手记下的 CLI 版本号（`--version` 首行），**不起任何新进程**。
@@ -360,7 +390,7 @@ pub async fn spawn_agent(
     cwd: &Path,
     extra_env: &HashMap<String, String>,
 ) -> Result<SpawnedAgent, String> {
-    let mut command = Command::new(resolved_bin);
+    let mut command = agent_cli_command(def, resolved_bin);
     command
         .args(args)
         .current_dir(cwd)
@@ -369,10 +399,6 @@ pub async fn spawn_agent(
         .stderr(Stdio::piped())
         .no_console_window()
         .kill_on_drop(true);
-    strip_parent_session_env(&mut command);
-    for (key, value) in def.env {
-        command.env(key, value);
-    }
     for (key, value) in extra_env {
         command.env(key, value);
     }

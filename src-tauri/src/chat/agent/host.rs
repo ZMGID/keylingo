@@ -98,6 +98,12 @@ pub trait AgentHost: Send + Sync {
 
     fn is_generation_active(&self, conversation_id: &str, generation: u64) -> bool;
 
+    /// 运行中用户插话（steering）：轮首取走该会话待注入的用户消息（take 语义，取一次清一次）。
+    /// 默认空 —— 只有能收到用户输入的宿主（GUI chat）才有这条通道；子 agent / probe / 测试保持默认。
+    fn take_steering_messages(&self, _conversation_id: &str) -> Vec<super::SteeringMessage> {
+        Vec::new()
+    }
+
     fn wait_for_generation_inactive<'a>(
         &'a self,
         conversation_id: &'a str,

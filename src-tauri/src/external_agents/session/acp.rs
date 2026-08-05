@@ -1488,6 +1488,11 @@ impl AcpSession {
                     return Err("cancelled".to_string());
                 }
                 Ok(SessionCommand::Close) => return Err("closed".to_string()),
+                // ACP 没有「往在飞的 prompt 追加输入」的原语 —— 全部动作只有 `session/prompt`
+                // 与 `session/cancel`。回 false，这条消息留在前端队列里等轮末自动发送。
+                Ok(SessionCommand::Steer { accepted, .. }) => {
+                    let _ = accepted.send(false);
+                }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
@@ -1670,6 +1675,11 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
                         )
                         .await;
                     let _ = done.send(result);
+                }
+                // 轮次之间没有可注入的对象：回 false 让前端把这条留在队列里、
+                // 轮末按普通消息发出去（绝不静默吞掉）。
+                SessionCommand::Steer { accepted, .. } => {
+                    let _ = accepted.send(false);
                 }
                 SessionCommand::Cancel => {}
                 SessionCommand::Close => {
@@ -2609,6 +2619,7 @@ mod tests {
             UnifiedAgentEvent::Raw { .. } => "Raw",
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
+            UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
         }
     }
 

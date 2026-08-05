@@ -468,8 +468,12 @@ export function AskUserBlock({ toolCall, variant = 'inline', onResolved }: AskUs
   submitRef.current = (skipped, draftOverride) => { void submit(skipped, draftOverride) }
 
   return (
-    <div className={`not-prose w-full overflow-hidden rounded-2xl border border-neutral-200/70 bg-white/95 text-[12px] leading-5 text-neutral-700 shadow-[0_14px_36px_-28px_rgba(0,0,0,0.5),0_1px_2px_rgba(0,0,0,0.035)] dark:border-neutral-700/70 dark:bg-neutral-900/85 dark:text-neutral-200 ${
-      docked ? '' : 'my-2 max-w-[min(100%,38rem)]'
+    <div className={`not-prose w-full overflow-hidden rounded-2xl border border-neutral-200/70 bg-white/95 text-[12px] leading-5 text-neutral-700 dark:border-neutral-700/70 dark:bg-neutral-900/85 dark:text-neutral-200 ${
+      // 只有吊在输入框上方那张才有投影（它是浮在对话之上的层）。消息流里的那块是**内容**，
+      // 带投影会在浅灰底上糊出一条脏影子 —— 与旁边其它工具卡（无投影）也不是一套。
+      docked
+        ? 'shadow-[0_14px_36px_-28px_rgba(0,0,0,0.5),0_1px_2px_rgba(0,0,0,0.035)]'
+        : 'my-2 max-w-[min(100%,38rem)]'
     }`}>
       {/* 标题行：问题本身当标题（原来是「需要确认」当标题、问题降到正文，主次颠倒）。
           右侧是翻页 + 跳过，同参考图的 `‹ 1 of 4 ›  ×`。 */}
@@ -650,16 +654,19 @@ export function AskUserBlock({ toolCall, variant = 'inline', onResolved }: AskUs
           </div>
         </>
       ) : (
-        <div className="chat-popover-scroll max-h-32 overflow-y-auto px-3.5 pb-3">
-          <div className="space-y-1">
+        /* 已作答：问题 + 用户选的答案逐条列出（参考 Claude Code 答完之后那块）。
+           答案**不截断、不塞进右侧小药丸** —— 「我当时选了什么」是这块唯一的价值，
+           截一半就等于没留下。 */
+        <div className="chat-popover-scroll max-h-64 overflow-y-auto px-3.5 pb-3">
+          <div className="space-y-2">
             {parsed.questions.map((question) => (
-              <div key={question.id} className="flex items-start justify-between gap-2">
-                <span className="min-w-0 flex-1 break-words text-[12px] leading-5 text-neutral-500 dark:text-neutral-400">
+              <div key={question.id}>
+                <div className="break-words text-[12.5px] font-medium leading-5 text-neutral-800 dark:text-neutral-100">
                   {question.prompt}
-                </span>
-                <span className="max-w-[55%] shrink-0 truncate rounded-md bg-neutral-100 px-1.5 py-0.5 text-[11px] leading-5 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
+                </div>
+                <div className="mt-0.5 break-words text-[12px] leading-5 text-neutral-500 dark:text-neutral-400">
                   {readonlySummary(question, parsed.answers[question.id])}
-                </span>
+                </div>
               </div>
             ))}
           </div>

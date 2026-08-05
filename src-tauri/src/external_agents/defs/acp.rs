@@ -46,6 +46,7 @@ const fn acp_def(
         stream_format: StreamFormat::AcpJsonRpc,
         resumes_session_via_cli: false,
         supports_native_image: true,
+        supports_steering: false,
         image_mime_whitelist: &[],
         build_args,
     }

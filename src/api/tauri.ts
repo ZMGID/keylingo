@@ -485,6 +485,40 @@ export type ChatConfig = {
   userDisplayName?: string
   userAvatar?: string
   defaultAgentRuntime?: AgentRuntimeConfig
+  /** 本地 CLI Agent 的每-CLI 覆盖，key = agent id。 */
+  externalCliAgents?: Record<string, ExternalCliAgentConfig>
+}
+
+export type ExternalCliAgentConfig = {
+  disabled?: boolean
+  /** 自定义可执行文件路径；空 = 走 PATH 探测。 */
+  path?: string
+  env?: Array<{ key: string; value: string }>
+  customModels?: Array<{ id: string; label: string }>
+  /** 该 CLI 的第三方供应商（中转站）列表。 */
+  providers?: ExternalCliProvider[]
+  /** 当前生效的供应商 id；空 = 用 CLI 自己的配置。 */
+  currentProvider?: string
+}
+
+/**
+ * 一个第三方供应商。各 CLI 用到的字段不同：claude / gemini 用 `env`，
+ * codex 用 `configToml` + `authJson`（物化成私有 CODEX_HOME）；
+ * OpenCode / Pi 用 `configJson` + `authJson` + `defaultModel` 合并进原生全局配置；
+ * Pi 另用 `defaultReasoning` 写入终端默认 thinking 档位。
+ */
+export type ExternalCliProvider = {
+  id: string
+  name: string
+  remark?: string
+  env?: Array<{ key: string; value: string }>
+  configToml?: string
+  configJson?: string
+  authJson?: string
+  /** Kivio-only model override state; never written into the CLI native config. */
+  modelMetadataJson?: string
+  defaultModel?: string
+  defaultReasoning?: string
 }
 
 export type ChatMemoryConfig = {
@@ -1560,7 +1594,8 @@ function prepareSettingsForSave(settings: Settings): Settings {
   }
 }
 
-function normalizeSettings(settings: Settings): Settings {
+/** 归一化设置（导出供单测钉死 externalCliAgents 等字段不被重建丢掉）。 */
+export function normalizeSettings(settings: Settings): Settings {
   const current = settings as Partial<Settings>
   const defaultModels = normalizeDefaultModels(current.defaultModels, {
     providerId: current.chatProviderId ?? '',
@@ -1602,6 +1637,10 @@ function normalizeSettings(settings: Settings): Settings {
       systemPrompt: current.chat?.systemPrompt ?? '',
       userDisplayName: current.chat?.userDisplayName ?? '',
       userAvatar: current.chat?.userAvatar ?? '',
+      // 本地 CLI 覆盖（供应商列表 / 路径 / 停用）与默认运行时：之前重建 chat 时丢掉了，
+      // 自动保存回写后「所有供应商」会一直空。
+      defaultAgentRuntime: current.chat?.defaultAgentRuntime,
+      externalCliAgents: current.chat?.externalCliAgents,
     },
     chatMemory: normalizeChatMemory(current.chatMemory),
     providers: Array.isArray(current.providers) ? current.providers.map(normalizeProvider) : [],

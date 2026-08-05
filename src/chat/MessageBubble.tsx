@@ -5,6 +5,7 @@ import {
   Brain,
   Check,
   Copy,
+  CornerDownRight,
   FileCode2,
   FilePen,
   FileSearch,
@@ -44,7 +45,7 @@ import { ToolCallBlock } from './ToolCallBlock'
 import { ToolCallErrorBoundary } from './ToolCallErrorBoundary'
 import type { AgentPlanState, ChatMessage, ChatMessageSegment, ChatToolArtifact, ToolCallRecord } from './types'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
-import { compareTimelineSegments, groupTimelineSegments, isStandaloneToolCard, segmentToolCallId, summarizeToolGroup, toolRecordId } from './segments'
+import { compareTimelineSegments, groupTimelineSegments, isStandaloneToolCard, isUserSteerToolCall, segmentToolCallId, summarizeToolGroup, toolRecordId, userSteerText } from './segments'
 import type { TimelineGroupItem, ToolGroupIcon } from './segments'
 
 const DIRECT_IMAGE_GENERATION_PENDING = '[[KIVIO_DIRECT_IMAGE_GENERATION_PENDING]]'
@@ -373,6 +374,27 @@ function MissingToolSegment({ toolCallId }: { toolCallId: string }) {
   )
 }
 
+/**
+ * 用户在生成中插进来的那句话（「立刻引导」）。它不是一次工具调用，所以不套工具卡的外壳 ——
+ * 渲染成一条右对齐的小气泡，读起来就是「我在这里插了一句」，与时间线上下文的因果关系对得上。
+ */
+function UserSteerSegment({ toolCall }: { toolCall: ToolCallRecord }) {
+  const text = userSteerText(toolCall)
+  if (!text.trim()) return null
+  return (
+    <div className="not-prose flex justify-end">
+      <div className="flex max-w-[85%] items-start gap-1.5 rounded-md bg-neutral-100 px-2.5 py-1.5 text-[12.5px] leading-5 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
+        <CornerDownRight
+          size={13}
+          strokeWidth={1.9}
+          className="mt-0.5 shrink-0 text-neutral-400 dark:text-neutral-500"
+        />
+        <span className="min-w-0 whitespace-pre-wrap break-words">{text}</span>
+      </div>
+    </div>
+  )
+}
+
 function TimelineToolSegment({
   segment,
   toolCalls,
@@ -388,6 +410,9 @@ function TimelineToolSegment({
   const toolCall = toolCalls.find((record) => toolRecordId(record) === toolCallId)
   if (!toolCall) {
     return <MissingToolSegment toolCallId={toolCallId} />
+  }
+  if (isUserSteerToolCall(toolCall)) {
+    return <UserSteerSegment toolCall={toolCall} />
   }
   if (isArtifactPresentationToolCall(toolCall)) {
     return (
@@ -774,7 +799,9 @@ function TimelineSegments({
           if (!toolCall) return null
           return (
             <div key={item.segment.id} className="chat-motion-fade">
-              {isArtifactPresentationToolCall(toolCall) ? (
+              {isUserSteerToolCall(toolCall) ? (
+                <UserSteerSegment toolCall={toolCall} />
+              ) : isArtifactPresentationToolCall(toolCall) ? (
                 <ArtifactPresentationBlock
                   toolCall={toolCall}
                   artifacts={artifacts}
@@ -809,7 +836,9 @@ function TimelineSegments({
       })}
       {orphanTools.map((toolCall, index) => (
         <div key={toolRecordId(toolCall) || `orphan-tool-${index}`} className="chat-motion-fade">
-          {isArtifactPresentationToolCall(toolCall) ? (
+          {isUserSteerToolCall(toolCall) ? (
+            <UserSteerSegment toolCall={toolCall} />
+          ) : isArtifactPresentationToolCall(toolCall) ? (
             <ArtifactPresentationBlock
               toolCall={toolCall}
               artifacts={artifacts}
@@ -848,10 +877,12 @@ function MessageBubbleComponent({
   // 历史消息会被虚拟列表反复卸载/挂载；只让真正的流式预览播放进入动画，
   // 否则滚动时每个重新进入 DOM 的旧气泡都会淡入并上移，看起来像刷新且阻滞滚动。
   const playEntranceAnimation = messageStreaming
+  // 「这条可以改动吗」：门控重新生成 / 删除。`onUpdateMessage` 保留在判据里不是残留——
+  // MessageGroup 的**在飞列**正是靠不传它来一次关掉这些入口（见那里的 `!live ? … : undefined`），
+  // 去掉它会让还在生成的那一列冒出删除键。（编辑入口已按需求移除，改写消息不再有 UI。）
   const canMutate = Boolean(onUpdateMessage && onDeleteMessage && onRegenerateMessage)
   const attachments = message.attachments ?? []
   const toolCalls = message.tool_calls ?? message.toolCalls ?? []
-  const [isEditing, setIsEditing] = useState(false)
   // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → null → 不渲染卡片。
   const degraded = message.degraded ?? null
   // 降级文案同时走三条路：content、时间线 text 分段、以及这张卡片。卡片已完整表达，
@@ -861,7 +892,7 @@ function MessageBubbleComponent({
     (segment) =>
       !degradedText || segment.kind !== 'text' || segmentText(segment).trim() !== degradedText,
   )
-  const hasTimelineSegments = !isEditing && timelineSegments.length > 0
+  const hasTimelineSegments = timelineSegments.length > 0
   const messageArtifacts = message.artifacts ?? []
   const toolArtifacts = toolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])
   // Markdown 和显式展示引用仍使用全量 artifacts；回答末尾自动区域只兼容旧的无 ID artifact。
@@ -894,19 +925,12 @@ function MessageBubbleComponent({
     message.content.trim() !== degradedText
   const hasGeneratedImages = galleryImageArtifacts.length > 0
   const hasGeneratedFiles = generatedFileArtifacts.length > 0
-  const [draft, setDraft] = useState(message.content)
-  const [saving, setSaving] = useState(false)
   const [copied, setCopied] = useState(false)
   const [toolsExpanded, setToolsExpanded] = useState(false)
   // 工具调用超过 4 个时默认折叠（与思考过程一致）
   const toolsCollapsible = toolCalls.length > 4
   const agentPlan = message.agent_plan ?? message.agentPlan ?? agentPlanOverride
   const isAgentPlanMessage = isExecutableAgentPlanText(agentPlan?.plan)
-
-  useEffect(() => {
-    setDraft(message.content)
-    setIsEditing(false)
-  }, [message.id, message.content])
 
   const handleCopy = async () => {
     const ok = await copyToClipboard(message.content)
@@ -988,24 +1012,16 @@ function MessageBubbleComponent({
     )
   }
 
-  const handleSaveEdit = async () => {
-    const trimmed = draft.trim()
-    if (!trimmed || !onUpdateMessage) return
-    setSaving(true)
-    try {
-      await onUpdateMessage(message.id, trimmed)
-      setIsEditing(false)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   // 折叠时仅隐藏较早的，始终保留最新 4 个可见
   const RECENT_TOOL_COUNT = 4
   const olderToolCalls = toolsCollapsible ? toolCalls.slice(0, toolCalls.length - RECENT_TOOL_COUNT) : []
   const recentToolCalls = toolsCollapsible ? toolCalls.slice(toolCalls.length - RECENT_TOOL_COUNT) : toolCalls
   const renderToolCall = (toolCall: ToolCallRecord, index: number) => {
     const key = toolCall.id || toolCall.call_id || toolCall.callId || index
+    // 无时间线段的旧路径：插话卡照样不能退化成一张写着 user_steer 的工具卡。
+    if (isUserSteerToolCall(toolCall)) {
+      return <UserSteerSegment key={key} toolCall={toolCall} />
+    }
     if (isArtifactPresentationToolCall(toolCall)) {
       return (
         <ArtifactPresentationBlock
@@ -1027,7 +1043,7 @@ function MessageBubbleComponent({
     <MarkdownStreamingContext.Provider value={messageStreaming}>
     <div className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
       <div className="w-full min-w-0">
-        {toolCalls.length > 0 && !isEditing && !hasTimelineSegments && (
+        {toolCalls.length > 0 && !hasTimelineSegments && (
           <section
             aria-label="工具调用"
             className={message.content.trim().length > 0 || message.reasoning ? 'mb-3' : ''}
@@ -1061,7 +1077,7 @@ function MessageBubbleComponent({
           </section>
         )}
 
-        {message.reasoning && !isEditing && !hasTimelineSegments && (
+        {message.reasoning && !hasTimelineSegments && (
           <ReasoningBlock
             reasoning={message.reasoning}
             streaming={reasoningStreaming}
@@ -1069,39 +1085,7 @@ function MessageBubbleComponent({
           />
         )}
 
-        {isEditing ? (
-          <div className="space-y-2">
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              rows={6}
-              disabled={saving}
-              autoCapitalize="off"
-              autoCorrect="off"
-              spellCheck={false}
-              className="w-full resize-y rounded-xl border border-[var(--border-input)] bg-[var(--bg-input)] px-3 py-2.5 text-[15px] leading-relaxed text-neutral-900 outline-none focus:border-neutral-400 dark:text-neutral-100 dark:focus:border-neutral-500"
-            />
-            <div className="flex items-center gap-2">
-              <Button
-                variant="primary"
-                disabled={saving || !draft.trim()}
-                onClick={() => void handleSaveEdit()}
-              >
-                {saving ? '保存中…' : '保存'}
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={saving}
-                onClick={() => {
-                  setDraft(message.content)
-                  setIsEditing(false)
-                }}
-              >
-                取消
-              </Button>
-            </div>
-          </div>
-        ) : isDirectImageGenerationPending ? (
+        {isDirectImageGenerationPending ? (
           <ImageGenerationPending />
         ) : hasTimelineSegments ? (
           <>
@@ -1151,9 +1135,9 @@ function MessageBubbleComponent({
         )}
 
         {/* 降级兜底渲染成独立卡片：故障不混进正文，也不会被复制/回灌给模型。 */}
-        {!isEditing && degraded && <DegradedAnswerCard degraded={degraded} />}
+        {degraded && <DegradedAnswerCard degraded={degraded} />}
 
-        {!isEditing && isAgentPlanMessage && !isDirectImageGenerationPending && (
+        {isAgentPlanMessage && !isDirectImageGenerationPending && (
           <AgentPlanAction
             messageId={message.id}
             planState={agentPlan}
@@ -1162,7 +1146,7 @@ function MessageBubbleComponent({
           />
         )}
 
-        {!isEditing && message.content.trim().length > 0 && !isDirectImageGenerationPending && (
+        {message.content.trim().length > 0 && !isDirectImageGenerationPending && (
           <AssistantMessageMeta
             content={message.content}
             reasoning={message.reasoning}
@@ -1171,7 +1155,6 @@ function MessageBubbleComponent({
             runEntry={message.run_entry ?? message.runEntry}
             streamOutcome={message.stream_outcome ?? message.streamOutcome}
             usage={message.usage}
-            onEdit={canMutate ? () => setIsEditing(true) : undefined}
             onRegenerate={
               canMutate
                 ? () => {

@@ -11,7 +11,7 @@ import {
   segmentTokens,
 } from './contextPanel'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
-import { formatTokens } from '../utils/tokens'
+import { formatTokensK } from '../utils/tokens'
 import type { ConversationContextState } from './types'
 
 const PANEL_WIDTH = 240
@@ -49,13 +49,13 @@ function statusColor(status: string, ratio: number | null): string {
 }
 
 function formatTokenTotal(tokens: number, exact = false, approximatePrefix = '~'): string {
-  const formatted = formatTokens(tokens).replace('k', 'K')
+  const formatted = formatTokensK(tokens)
   return exact ? formatted : `${approximatePrefix}${formatted}`
 }
 
 function windowLabel(contextWindowTokens: number | null): string {
   if (!contextWindowTokens) return '—'
-  return formatTokens(contextWindowTokens).replace('k', 'K')
+  return formatTokensK(contextWindowTokens)
 }
 
 function messageCountLabel(messageCount: number, compressedMessageCount: number, t: I18n): string {

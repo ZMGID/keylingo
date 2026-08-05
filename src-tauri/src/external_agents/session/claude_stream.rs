@@ -716,6 +716,10 @@ impl ClaudeStreamJsonSession {
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => return Err("cancelled".to_string()),
                 Ok(SessionCommand::Close) => return Err("closed".to_string()),
+                // 还在换模型的握手里，轮次都没开始，无从注入。
+                Ok(SessionCommand::Steer { accepted, .. }) => {
+                    let _ = accepted.send(false);
+                }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
@@ -831,6 +835,18 @@ impl ClaudeStreamJsonSession {
                     self.reject_pending(&mut pending, APPROVAL_ABORTED_MESSAGE)
                         .await;
                     return Err("closed".to_string());
+                }
+                // **不能**往在飞的轮次里写第二条 user 行。官方对 stream-json 输入的语义是
+                // 「多条消息**顺序**处理」（Streaming Input 文档 + `--input-format stream-json`
+                // 没有任何注入用的 control_request：只有 initialize / interrupt /
+                // set_permission_mode / can_use_tool / hook_callback / mcp_message / set_model）。
+                // 真写进去的后果是 CLI 在本轮 `result` 之后**自己再起一轮**回答它，那一轮的事件
+                // 会漏进下一次 run_turn 的读循环里，把轮次边界搞乱。
+                //
+                // TUI 里那种「打字即插话」是交互界面自己的循环做的，不经过 stdin 协议。
+                // 所以这里回 false：那条消息留在前端队列里，轮末按普通消息发出去。
+                Ok(SessionCommand::Steer { accepted, .. }) => {
+                    let _ = accepted.send(false);
                 }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
@@ -1146,6 +1162,11 @@ pub fn spawn_claude_stream_session_actor(
                         )
                         .await;
                     let _ = done.send(result);
+                }
+                // 轮次之间没有可注入的对象：回 false 让前端把这条留在队列里、
+                // 轮末按普通消息发出去（绝不静默吞掉）。
+                SessionCommand::Steer { accepted, .. } => {
+                    let _ = accepted.send(false);
                 }
                 SessionCommand::Cancel => {} // 轮次之间没有在跑的轮次
                 SessionCommand::Close => {

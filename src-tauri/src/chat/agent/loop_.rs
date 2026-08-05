@@ -12,6 +12,7 @@ use super::finalize::{
 use super::host::AgentHost;
 use super::planning::{planning_step, PlanningStepOutcome};
 use super::rounds::{run_tool_round, ToolRoundOutcome};
+use super::steering::inject_steering_messages;
 use super::stop::patch_system_message;
 use super::synthesis::{synthesis_step, SynthesisFlow};
 use super::types::{AgentRunConfig, AgentRunResult};
@@ -289,6 +290,10 @@ pub async fn run_agent_loop(
             // 本轮的 turn_start / message_start 由 guard 构造时发；turn_end / message_end
             // 由它的 Drop 补齐，所以下面任何一条 return / continue / `?` 都不会漏配对。
             let mut turn = HookTurnGuard::new(hooks, round);
+
+            // 用户在生成期间点了「立刻引导」：轮次边界是唯一安全的注入点（上一轮的工具结果
+            // 已经落进历史，本轮还没开始调模型）。信箱为空时零开销。
+            inject_steering_messages(&env, &mut state, round);
 
             let planned = match planning_step(&env, &mut state, round).await? {
                 PlanningStepOutcome::FinalAnswer => break,

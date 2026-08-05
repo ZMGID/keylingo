@@ -22,6 +22,62 @@ import type { CliImportResult, ImportableCliSession } from './types'
 
 export type { DetectedExternalAgent, AgentRuntimeConfig }
 
+/** `chat_external_cli_scan_cc_switch` 的返回。`hasApiKey` 是布尔，后端不回明文 key。 */
+export interface CcSwitchProvider {
+  agentId: string
+  id: string
+  name: string
+  remark: string
+  env: Array<{ key: string; value: string }>
+  configToml: string
+  authJson: string
+  hasApiKey: boolean
+  isCurrent: boolean
+}
+
+export interface CcSwitchScan {
+  providers: CcSwitchProvider[]
+  /** 认得出但 Kivio 没有落地通道而跳过的条数（grok / hermes / openclaw…）。 */
+  skipped: number
+}
+
+/** `chat_external_cli_install_info` 的返回。 */
+export interface ExternalCliInstallInfo {
+  agentId: string
+  localVersion: string | null
+  latestVersion: string | null
+  updateAvailable: boolean
+  /** 可直接执行的安装/更新命令；null = 只能照文档手动装。 */
+  command: string | null
+  docsUrl: string
+  /** 已存在的配置目录绝对路径；null = 还没生成。 */
+  configDir: string | null
+}
+
+/** 订阅安装日志。`done` 那条带最终成功与否，`line` 为 null。 */
+export async function onExternalCliInstallLog(
+  handler: (event: { agentId: string; line: string | null; done: boolean; success: boolean }) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  const un = await listen<{ agentId: string; line: string | null; done: boolean; success: boolean }>(
+    'external-cli-install',
+    (e) => handler(e.payload),
+  )
+  return un
+}
+
+/** 订阅后台重探完成的可用性列表（`chat_detect_external_agents` 先返回落盘快照，探完再推这条）。 */
+export async function onExternalAgentsUpdated(
+  handler: (agents: DetectedExternalAgent[]) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  return await listen<{ agents: DetectedExternalAgent[] }>('external-agents-updated', (e) =>
+    handler(e.payload.agents ?? []),
+  )
+}
+
 export const BUILTIN_AGENT_RUNTIME: AgentRuntimeConfig = {
   kind: 'builtin',
   externalAgentId: null,
@@ -1285,6 +1341,22 @@ export const chatApi = {
     return result.conversation
   },
 
+  /**
+   * 运行中「立刻引导」：把这条消息投进后端 steering 信箱，等当前 run 的下一个轮次边界注入。
+   *
+   * 返回 false = 没进信箱（该会话此刻没有活跃 run / 文本为空），调用方应改走普通发送。
+   * 返回 true 只表示**已投递**，不表示已生效——真正生效的信号是那张 `user_steer` 工具卡事件
+   * （模型可能已经在写终答、后面再没有轮次边界，那条就得由运行结束后的队列自动发送兜住）。
+   */
+  async steerMessage(
+    conversationId: string,
+    steerId: string,
+    content: string,
+  ): Promise<boolean> {
+    if (!isTauriRuntime()) return false
+    return await invoke<boolean>('chat_steer_message', { conversationId, steerId, content })
+  },
+
   // 删除对话。返回未能清理的副产物说明（工作区被占用等）——对话本身一定已经删掉了，
   // 后端只有在「对话文件 / 索引」这两步失败时才抛错。
   async deleteConversation(conversationId: string): Promise<string[]> {
@@ -1579,6 +1651,44 @@ export const chatApi = {
       currentModel: result.currentModel ?? null,
       currentReasoning: result.currentReasoning ?? null,
     }
+  },
+
+  /** 设置页「本地 CLI Agent」：本地版本 / npm 最新版 / 安装命令 / 配置目录。 */
+  async externalCliInstallInfo(agentId: string): Promise<ExternalCliInstallInfo | null> {
+    if (!isTauriRuntime()) return null
+    return await invoke<ExternalCliInstallInfo>('chat_external_cli_install_info', { agentId })
+  },
+
+  /** 跑安装/更新命令；日志通过 `external-cli-install` 事件流回来（见 onExternalCliInstallLog）。 */
+  async externalCliInstall(agentId: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_external_cli_install', { agentId })
+  },
+
+  async externalCliOpenConfigDir(agentId: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_external_cli_open_config_dir', { agentId })
+  },
+
+  /**
+   * 删除供应商后清掉它物化出来的文件。
+   * 保存设置时后端会自动物化并清缓存（`persist_settings`），所以只有删除需要显式调用。
+   */
+  async externalCliProviderCleanup(agentId: string, providerId: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_external_cli_provider_cleanup', { agentId, providerId })
+  },
+
+  /** 供应商弹窗的「获取模型」：拿 base_url + key 去中转站问模型列表（只作建议用）。 */
+  async externalCliFetchRelayModels(baseUrl: string, apiKey: string): Promise<string[]> {
+    if (!isTauriRuntime()) return []
+    return await invoke<string[]>('chat_external_cli_fetch_relay_models', { baseUrl, apiKey })
+  },
+
+  /** 扫描本机 cc-switch 的库，列出可导入的供应商（只读）。 */
+  async externalCliScanCcSwitch(): Promise<CcSwitchScan> {
+    if (!isTauriRuntime()) return { providers: [], skipped: 0 }
+    return await invoke<CcSwitchScan>('chat_external_cli_scan_cc_switch')
   },
 
   async listExternalCliSlashCommands(

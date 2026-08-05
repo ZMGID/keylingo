@@ -96,7 +96,8 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
 
   const usesExternal = agentRuntime.kind === 'external' && !!agentRuntime.externalAgentId
   const availableAgents = useMemo(
-    () => agents.filter((agent) => agent.available),
+    // 设置页停用的不出现在这里；已经绑定它的旧会话照常（currentAgent 走的是全量 agents）。
+    () => agents.filter((agent) => agent.available && !agent.disabled),
     [agents],
   )
   const currentAgent = agents.find((item) => item.id === agentRuntime.externalAgentId)
