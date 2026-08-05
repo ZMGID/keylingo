@@ -411,14 +411,27 @@ function MessageListBase({
   // 揭示回调在 useCallback 里读它，走 ref 避免把 historyCosts 塞进依赖。
   const historyCostsRef = useRef<number[]>(historyCosts)
   historyCostsRef.current = historyCosts
-  // 判定按对话冻结，且只升不降：流式中途从「不虚拟化」翻成「虚拟化」会让上方从真实高度
-  // 变成 virtua 的估算高度，视口被拽走。用 ref 而非 state/effect，避免多渲一次和首帧读到旧值。
+  // 判定按对话冻结，且只升不降。用户正在翻历史时不切渲染模式：完成消息刚好跨过成本阈值时，
+  // 切到渐进加载会卸载上方 DOM、使 scrollTop 被 clamp，视觉上常落到本轮 user 消息。
+  // 回到底部后再升级，此时上方收缩不可见，下面的 layout effect 还会补钉一次。
   const heavyRef = useRef<{ id: string | null | undefined; heavy: boolean }>({ id: undefined, heavy: false })
   if (heavyRef.current.id !== conversationId) {
     heavyRef.current = { id: conversationId, heavy: false }
   }
-  if (totalHistoryCost > VIRTUALIZE_COST_THRESHOLD) heavyRef.current.heavy = true
+  if (
+    totalHistoryCost > VIRTUALIZE_COST_THRESHOLD
+    && followHandle.isFollowing()
+  ) {
+    heavyRef.current.heavy = true
+  }
   const heavyHistory = heavyRef.current.heavy
+  const previousHeavyHistoryRef = useRef(heavyHistory)
+
+  useLayoutEffect(() => {
+    const changed = previousHeavyHistoryRef.current !== heavyHistory
+    previousHeavyHistoryRef.current = heavyHistory
+    if (changed && followHandle.isFollowing()) followHandle.stickToBottom()
+  }, [followHandle, heavyHistory])
 
   // Paseo 式部分虚拟化：长列表只虚拟化更早历史，最近一段始终实挂载。
   // 读 isFollowing() 而不是 following state：脱离跟随时冻结边界，且不为跟随状态翻转多渲一次。
@@ -677,11 +690,15 @@ function MessageListBase({
     updateVisibleNavigatorNodes(lastNode ? [lastNode.id] : [])
   }, [conversationId, followHandle, updateActiveNavigatorNode, updateVisibleNavigatorNodes])
 
-  // 自己发出新消息时强制回到底部（即使刚才正往上翻历史）
+  // 自己发出新消息时强制回到底部（即使刚才正往上翻历史）。assistant 落库会替换列表外的
+  // streaming 节点；若仍在跟随，完成这次结构交接后也明确补钉，不能只依赖 ResizeObserver 时序。
   useLayoutEffect(() => {
     const count = messages.length
-    if (count > prevMessageCountRef.current && messages[count - 1]?.role === 'user') {
-      followHandle.stickToBottom()
+    if (count > prevMessageCountRef.current) {
+      const lastRole = messages[count - 1]?.role
+      if (lastRole === 'user' || (lastRole === 'assistant' && followHandle.isFollowing())) {
+        followHandle.stickToBottom()
+      }
     }
     prevMessageCountRef.current = count
   }, [messages, followHandle])

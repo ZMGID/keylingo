@@ -202,6 +202,84 @@ describe('MessageList ← streamingStore 集成', () => {
     expect(mountedMessages.length).toBeLessThan(messages.length)
   })
 
+  it('用户翻历史时，完成消息跨重会话阈值也不切换渲染模式', async () => {
+    const initialMessages = Array.from({ length: 4 }, (_, index) => message(index))
+    const { container, rerender } = render(
+      <MessageList messages={initialMessages} conversationId="heavy-completion-c1" />,
+    )
+    await flush()
+
+    const scroller = container.querySelector('.chat-motion-view-in.custom-scrollbar') as HTMLDivElement
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, get: () => 2400 },
+      scrollTop: { configurable: true, writable: true, value: 400 },
+    })
+    fireEvent.wheel(scroller, { deltaY: -40 })
+    await flush()
+    expect(screen.getByRole('button', { name: '回到底部' })).toBeInTheDocument()
+
+    // 80 个围栏代码块的估算成本超过 1500；旧逻辑会在这一帧切到 heavyHistory，
+    // 卸载上方行并让 scrollTop 被 clamp。本次仍应保留用户正在看的首条历史。
+    const heavyAnswer = Array.from({ length: 80 }, (_, index) => (
+      `\`\`\`text\nblock ${index}\n\`\`\``
+    )).join('\n')
+    rerender(
+      <MessageList
+        conversationId="heavy-completion-c1"
+        messages={[
+          ...initialMessages,
+          { id: 'heavy-answer', role: 'assistant', content: heavyAnswer, timestamp: 5 },
+        ]}
+      />,
+    )
+    await flush()
+
+    expect(container.querySelector('[data-message-id="m-0"]')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '回到底部' })).toBeInTheDocument()
+  })
+
+  it('仍在跟随时，assistant 落库后重新钉到底部', async () => {
+    const initialMessages = [{
+      id: 'completion-user',
+      role: 'user' as const,
+      content: 'question',
+      timestamp: 1,
+    }]
+    const { container, rerender } = render(
+      <MessageList messages={initialMessages} conversationId="completion-pin-c1" />,
+    )
+    await flush()
+
+    const scroller = container.querySelector('.chat-motion-view-in.custom-scrollbar') as HTMLDivElement
+    let scrollTop = 120
+    let writes = 0
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, get: () => 2400 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = value
+          writes += 1
+        },
+      },
+    })
+
+    rerender(
+      <MessageList
+        conversationId="completion-pin-c1"
+        messages={[
+          ...initialMessages,
+          { id: 'completion-answer', role: 'assistant', content: 'answer', timestamp: 2 },
+        ]}
+      />,
+    )
+    await flush()
+
+    expect(writes).toBeGreaterThan(0)
+    expect(scrollTop).toBe(2400)
+  })
+
   it('底部阈值内的小幅向上滚动不会闪现回到底部按钮', async () => {
     const { container } = render(
       <MessageList messages={[message(1)]} conversationId="wheel-threshold-c1" />,

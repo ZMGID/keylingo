@@ -209,6 +209,7 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       Math.max(0, viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight)
     const hasOverflow = () =>
       viewport.scrollHeight - viewport.clientHeight > SCROLLABLE_OVERFLOW_MIN_PX
+    const pendingScrollTimers = new Set<ReturnType<typeof setTimeout>>()
 
     const nestedCanConsumeWheelUp = (target: EventTarget | null) => {
       let node = target instanceof Element ? target : null
@@ -233,13 +234,21 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       // 拖回底部那一下会被永远判成 self，三条重跟随的路全部落空。
       const token = ignoreScrollTopRef.current
       ignoreScrollTopRef.current = null
-      const selfInduced = resizeWindowRef.current || viewport.scrollTop === token
-      dispatch({
-        type: 'scroll',
-        gap: getGap(),
-        now: Date.now(),
-        source: selfInduced ? 'self' : 'user',
-      })
+      const scrollTop = viewport.scrollTop
+      const gap = getGap()
+      // scroll 可能先于 ResizeObserver delivery 到达。延后一拍再判来源，让 RO 有机会打开
+      // resizeWindow；否则 virtua 的高度补偿会被当成用户滚动，直接解除流式跟随。
+      const timer = setTimeout(() => {
+        pendingScrollTimers.delete(timer)
+        const selfInduced = resizeWindowRef.current || scrollTop === token
+        dispatch({
+          type: 'scroll',
+          gap,
+          now: Date.now(),
+          source: selfInduced ? 'self' : 'user',
+        })
+      }, 1)
+      pendingScrollTimers.add(timer)
     }
 
     const handleWheel = (event: WheelEvent) => {
@@ -378,6 +387,8 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       }
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       resizeObserver?.disconnect()
+      for (const timer of pendingScrollTimers) clearTimeout(timer)
+      pendingScrollTimers.clear()
       cancelJumpAnimation()
       if (pinRafRef.current !== null) {
         cancelAnimationFrame(pinRafRef.current)
