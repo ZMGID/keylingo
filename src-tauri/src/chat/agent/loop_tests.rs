@@ -8,6 +8,7 @@ use std::sync::{
 use tokio::time::{sleep, Duration};
 
 use super::*;
+use crate::chat::agent::SteeringMessage;
 use crate::chat::model::{StreamPart, StreamSink as _};
 use crate::chat::types::ToolCallStatus;
 use crate::mcp::types::{
@@ -41,6 +42,9 @@ struct TestHost {
     /// round's loop-top generation check observes the cancellation. Used to
     /// exercise the planning/loop-top cancellation path deterministically.
     cancel_on_persist: bool,
+    /// 待注入的用户插话（steering）。`take_steering_messages` 一次取空，所以只在第一个
+    /// 轮次边界生效——与真实信箱的 take 语义一致。
+    steering: Mutex<Vec<SteeringMessage>>,
 }
 
 impl TestHost {
@@ -68,6 +72,16 @@ impl TestHost {
     fn cancelling_on_persist() -> Self {
         Self {
             cancel_on_persist: true,
+            ..Self::default()
+        }
+    }
+
+    /// 起手就有一条待注入的插话（模拟用户在第一轮工具跑着时点了「立刻引导」）。
+    fn with_steering(id: &str, text: &str) -> Self {
+        Self {
+            steering: Mutex::new(vec![
+                SteeringMessage::new(id.to_string(), text).expect("non-blank steering text")
+            ]),
             ..Self::default()
         }
     }
@@ -198,6 +212,15 @@ impl AgentHost for TestHost {
 
     fn is_generation_active(&self, _conversation_id: &str, _generation: u64) -> bool {
         !self.cancel_flag.load(Ordering::SeqCst)
+    }
+
+    fn take_steering_messages(&self, _conversation_id: &str) -> Vec<SteeringMessage> {
+        std::mem::take(
+            &mut *self
+                .steering
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()),
+        )
     }
 
     fn wait_for_generation_inactive<'a>(
@@ -2161,8 +2184,93 @@ async fn run_loop_persists_partial_assistant_after_completed_tool_round() {
     assert!(result.tool_records.iter().any(|r| r.id == "call_read"));
 }
 
-/// Layer2 compaction: when the history is over budget, a summary request fires
-/// first and the next provider request carries the summary instead of the old
+/// 运行中「立刻引导」：轮首注入的用户插话必须①进下一次模型请求，②在时间线上留一张
+/// `user_steer` 卡（否则用户说过的话在历史里查无此人），③随 api_messages 落盘让下一轮回放不丢。
+#[tokio::test]
+async fn run_loop_steering_injects_user_message_and_emits_card() {
+    let server = MockModelServer::start(vec![
+        // Round 1：一次 read 工具调用（跑完 → Continue，进第二轮）。
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        // Round 2：终答。这一次的请求体里应当已经带上插话。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"改用 rg 重跑了。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(3);
+    let host = TestHost::with_steering("steer-1", "别用 grep，改用 rg");
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run with steering completes");
+
+    // ① 第二轮的请求带上了插话（第一轮请求发出时信箱还没被取，所以只可能在第 2 次之后）。
+    let bodies = server.captured_bodies();
+    assert!(bodies.len() >= 2, "expected at least two provider requests");
+    assert!(
+        bodies[1].contains("改用 rg"),
+        "the steered user message must reach the next model call: {}",
+        bodies[1]
+    );
+
+    // ② 卡片：实时发过一条，且留在 run 结果里（→ 落盘到 assistant 消息的 tool_calls）。
+    let steer_card = |records: &[ToolCallRecord]| {
+        records.iter().any(|record| {
+            record.name == crate::chat::agent::STEER_TOOL_NAME
+                && record.source == "native"
+                && record
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("steer_id"))
+                    .and_then(|value| value.as_str())
+                    == Some("steer-1")
+        })
+    };
+    assert!(
+        steer_card(&host.recorded_tool_records()),
+        "a user_steer card is emitted live"
+    );
+    assert!(
+        steer_card(&result.tool_records),
+        "the user_steer card is part of the run result (persisted with the message)"
+    );
+
+    // 卡片有对应的 Tool 段，否则时间线上没有它的位置（只会挂到 orphan 兜底区）。
+    let card_id = result
+        .tool_records
+        .iter()
+        .find(|record| record.name == crate::chat::agent::STEER_TOOL_NAME)
+        .map(|record| record.id.clone())
+        .expect("steer record present");
+    assert!(
+        result
+            .segments
+            .iter()
+            .any(|segment| segment.tool_call_id.as_deref() == Some(card_id.as_str())),
+        "the steer card owns a timeline segment"
+    );
+
+    // ③ 落盘的 api_messages 里有这条 user 消息，下一轮回放才不丢。
+    assert!(
+        result.api_messages.iter().any(|message| {
+            message.get("role").and_then(|role| role.as_str()) == Some("user")
+                && message
+                    .get("content")
+                    .and_then(|content| content.as_str())
+                    .map(|content| content.contains("改用 rg"))
+                    .unwrap_or(false)
+        }),
+        "the steered message is stored for replay: {:?}",
+        result.api_messages
+    );
+
+    assert_eq!(result.stream_outcome, "completed");
+}
+
+/// Layer2 compaction: when the history is over budget, a summary request fires/// first and the next provider request carries the summary instead of the old
 /// history; the summary itself stays out of persisted api_messages, and the
 /// compacted full history is returned via `compacted_history` (R3).
 #[tokio::test]

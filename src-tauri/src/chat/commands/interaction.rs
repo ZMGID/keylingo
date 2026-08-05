@@ -277,6 +277,50 @@ pub(crate) fn chat_submit_user_choice(
     Ok(())
 }
 
+/// 运行中「立刻引导」：把用户这条消息注入正在跑的这一轮。
+///
+/// 两条运行时各走各的通道：
+///   - **内置 agent 循环** → 放进 `pending_chat_steering` 信箱，`run_agent_loop` 在下一个轮次
+///     边界取走（`chat::agent::steering`）。
+///   - **外部 CLI** → 把 `SessionCommand::Steer` 送进常驻会话的 actor，由各协议自己决定：
+///     codex 走 `turn/steer`（真注入，不中断）；claude 的 stream-json 输入是**顺序**处理的、
+///     没有注入原语，ACP 也没有 —— 那两条会回 false。
+///
+/// 返回 `false` = 没进去（此刻没有在跑的轮次 / 该协议不支持 / 对端拒绝），前端据此把这条留在
+/// 队列里，按普通消息在轮末发出去。注意「进去了」不等于「已生效」：真正生效的信号是那张
+/// `user_steer` 卡的事件，前端收到才把队列里那条出队。
+#[tauri::command]
+pub(crate) async fn chat_steer_message(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    steer_id: String,
+    content: String,
+) -> Result<bool, String> {
+    let Some(message) = crate::chat::agent::SteeringMessage::new(steer_id, &content) else {
+        return Ok(false);
+    };
+    // 常驻 CLI 会话优先：这条对话由外部 CLI 在跑时，内置信箱根本没人来取。
+    if let Some(control) = state.external_live_session_control_any(&conversation_id) {
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let sent = control
+            .send(
+                crate::external_agents::session::live::SessionCommand::Steer {
+                    id: message.id,
+                    text: message.text,
+                    accepted: accepted_tx,
+                },
+            )
+            .await
+            .is_ok();
+        if !sent {
+            return Ok(false);
+        }
+        // actor 每条命令都会答复；真丢了（actor 中途没了）按未受理处理。
+        return Ok(accepted_rx.await.unwrap_or(false));
+    }
+    Ok(state.push_chat_steering(&conversation_id, message))
+}
+
 /// 前端 Pyodide 执行完成后回传结果。
 #[tauri::command]
 pub(crate) fn chat_python_complete(

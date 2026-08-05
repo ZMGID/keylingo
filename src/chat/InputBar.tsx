@@ -350,6 +350,13 @@ function readFileAsBase64(file: File, readError: string): Promise<string> {
 interface InputBarProps {
   onSend: (content: string, attachments: PendingAttachment[]) => void
   disabled?: boolean
+  /**
+   * 生成中（`disabled`）时的排队入口。传了它 = 运行中不再吞掉发送，而是把这条排进队列，
+   * 本轮结束后自动发出（也可以在队列条上点「立刻引导」注入当前运行）。
+   * 传了它还会放开附件相关的门（选择 / 粘贴 / 拖入）——那些是纯本地状态，运行中做没有风险；
+   * 斜杠命令 / 项目 / 模式 / 知识库仍按 `disabled` 锁住（它们要打后端）。
+   */
+  onQueue?: (content: string, attachments: PendingAttachment[]) => void
   onCancel?: () => void
   cancelVisible?: boolean
   cancelling?: boolean
@@ -421,6 +428,7 @@ interface InputBarProps {
 export function InputBar({
   onSend,
   disabled,
+  onQueue,
   onCancel,
   cancelVisible,
   cancelling,
@@ -472,6 +480,10 @@ export function InputBar({
   onOpenGitPanel,
 }: InputBarProps) {
   const t = useT()
+  // 生成中的排队模式：Enter 改成入队，且只锁「要打后端」的入口。附件的选择 / 粘贴 / 拖入
+  // 是纯本地状态，运行中做没有风险，所以走 composerLocked（比 disabled 宽）这道门。
+  const queueMode = Boolean(disabled && onQueue)
+  const composerLocked = Boolean(disabled) && !queueMode
   const draftKeyValue = draftKey(conversationId)
   const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
   const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
@@ -915,7 +927,7 @@ export function InputBar({
   }, [modeOptions, modeValue, pickMode])
 
   const openAttachmentPicker = useCallback(async () => {
-    if (disabled) return
+    if (composerLocked) return
     setToolPanelOpen(false)
     closeProjectMenu()
     setSlashPanelOpen(false)
@@ -935,7 +947,7 @@ export function InputBar({
         typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatAttachmentAddFailed,
       )
     }
-  }, [addAttachments, attachmentsFromPaths, closeProjectMenu, disabled, t])
+  }, [addAttachments, attachmentsFromPaths, closeProjectMenu, composerLocked, t])
 
   const handleSlashCommandSelect = useCallback(async (command: SlashCommandDefinition) => {
     if (disabled) return
@@ -1018,14 +1030,20 @@ export function InputBar({
 
   const handleSend = () => {
     const trimmed = input.trim()
-    if ((!trimmed && quotes.length === 0 && attachments.length === 0) || disabled || sendDisabledReason) return
+    if ((!trimmed && quotes.length === 0 && attachments.length === 0) || sendDisabledReason) return
+    // 生成中：有排队入口就排队（本轮结束后自动发出），没有就照旧什么都不做。
+    if (disabled && !onQueue) return
     const quotedBlock = quotes
       .map((q) => q.split('\n').map((line) => `> ${line}`).join('\n'))
       .join('\n\n')
     const content = quotedBlock
       ? (trimmed ? `${quotedBlock}\n\n${trimmed}` : quotedBlock)
       : trimmed
-    onSend(content, attachments)
+    if (disabled && onQueue) {
+      onQueue(content, attachments)
+    } else {
+      onSend(content, attachments)
+    }
     setInput('')
     setQuotes([])
     setAttachments([])
@@ -1116,7 +1134,7 @@ export function InputBar({
   }
 
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (disabled || !isTauriRuntime()) return
+    if (composerLocked || !isTauriRuntime()) return
 
     const attachableClipboardFiles = Array.from(e.clipboardData.files).filter(isAttachableClipboardFile)
     const textarea = textareaRef.current
@@ -1366,7 +1384,7 @@ export function InputBar({
     let unlisten: (() => void) | undefined
 
     getCurrentWebview().onDragDropEvent((event) => {
-      if (cancelled || disabled) return
+      if (cancelled || composerLocked) return
 
       if (event.payload.type === 'enter' || event.payload.type === 'over') {
         setDragActive(true)
@@ -1398,12 +1416,16 @@ export function InputBar({
       setDragActive(false)
       unlisten?.()
     }
-  }, [addAttachments, attachmentsFromPaths, disabled])
+  }, [addAttachments, attachmentsFromPaths, composerLocked])
 
   const canSend = (Boolean(input.trim()) || attachments.length > 0)
     && !slashPanelOpen
-    && !disabled
+    && (!disabled || queueMode)
     && !sendDisabledReason
+  // 发送键与停止键共用输入行右侧那一个槽位（crossfade）。生成中**有东西可发**时把槽位还给
+  // 发送键 —— 就是原本那个键、原本的样子，按下去这一条进队列。这一刻停止走 Esc（见
+  // handleKeyDown）或清空输入框让停止键回来；否则用户在生成中打完字会发现没有键可按。
+  const stopOwnsSendSlot = Boolean(cancelVisible && onCancel) && !(queueMode && canSend)
   const cliAgentLabel = externalCliAgentLabel(externalAgentName)
 
   const wrapperClass =
@@ -1724,7 +1746,7 @@ export function InputBar({
               <ChatAttachments
                 attachments={attachments}
                 variant="composer"
-                onRemove={disabled ? undefined : removeAttachment}
+                onRemove={composerLocked ? undefined : removeAttachment}
               />
             </div>
           )}
@@ -1790,8 +1812,8 @@ export function InputBar({
               className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
             />
 
-            {/* 发送 / 停止：绝对定位在输入行右侧。两按钮共存于同一槽位，
-                按 cancelVisible 做 opacity+scale crossfade。 */}
+            {/* 发送 / 停止：绝对定位在输入行右侧。两按钮共存于同一槽位，做 opacity+scale
+                crossfade。谁占槽位见 `stopOwnsSendSlot`：生成中打了字就归发送键。 */}
             <div className="chat-composer-send-slot absolute inset-y-0 right-2 my-auto h-7 w-7">
               <button
                 type="button"
@@ -1800,9 +1822,9 @@ export function InputBar({
                 tabIndex={-1}
                 title={sendDisabledReason || (canSend ? t.chatSend : t.chatSendHintEmpty)}
                 aria-label={sendDisabledReason || t.chatSend}
-                aria-hidden={cancelVisible && !!onCancel}
+                aria-hidden={stopOwnsSendSlot}
                 className={`chat-composer-send absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
-                  cancelVisible && onCancel
+                  stopOwnsSendSlot
                     ? 'pointer-events-none scale-90 opacity-0'
                     : 'opacity-100'
                 } ${canSend ? 'is-ready' : ''}`}
@@ -1814,10 +1836,10 @@ export function InputBar({
                   type="button"
                   onClick={onCancel}
                   disabled={cancelling}
-                  tabIndex={cancelVisible ? undefined : -1}
-                  aria-hidden={!cancelVisible}
+                  tabIndex={stopOwnsSendSlot ? undefined : -1}
+                  aria-hidden={!stopOwnsSendSlot}
                   className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
-                    cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
+                    stopOwnsSendSlot ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
                   }`}
                   title={cancelling ? t.chatStopping : t.chatStopGenerating}
                   aria-label={cancelling ? t.chatStopping : t.chatStopGeneratingShort}

@@ -12,10 +12,12 @@ pub(crate) mod recovery;
 pub(crate) mod rounds;
 pub mod stop;
 pub mod stream;
+pub mod steering;
 pub(crate) mod synthesis;
 pub mod types;
 
 pub use execute::{ToolExecutionContext, ToolExecutor, ToolExecutorFuture};
 pub use host::{AgentHost, AgentHostFuture};
 pub use loop_::run_agent_loop;
+pub use steering::{SteeringMessage, STEER_TOOL_NAME};
 pub use types::{AgentRunConfig, AgentRunEntry};

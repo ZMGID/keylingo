@@ -337,15 +337,16 @@ function subagentUsage(value: unknown): SubagentView['usage'] {
   return { inputTokens: input, outputTokens: output, totalTokens: total }
 }
 
-/** Compact token count, e.g. 1234 → "1.2k", 999 → "999". */
+/** Compact token count, e.g. 1234 → "1.2K", 999 → "999"。大写 K 与消息用量条、
+ *  上下文用量条一致（见 `utils/tokens.ts::formatTokensK`）。 */
 function formatTokenCount(value?: number): string {
   if (value == null || !Number.isFinite(value) || value < 0) return ''
   if (value < 1000) return String(Math.round(value))
   const thousands = value / 1000
-  return `${thousands >= 100 ? Math.round(thousands) : thousands.toFixed(1)}k`
+  return `${thousands >= 100 ? Math.round(thousands) : thousands.toFixed(1)}K`
 }
 
-/** One-line token summary like `↑1.2k ↓340 · 1.5k tokens`. Empty when no usage. */
+/** One-line token summary like `↑1.2K ↓340 · 1.5K tokens`. Empty when no usage. */
 function subagentUsageLine(usage: SubagentView['usage']): string {
   if (!usage) return ''
   const parts: string[] = []

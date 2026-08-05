@@ -3,6 +3,8 @@ import { GitBranch, PanelRight, TriangleAlert, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
+import { useMessageQueue } from './hooks/useMessageQueue'
+import type { QueuedMessage } from './hooks/useMessageQueue'
 import { useStreamRenderFrame } from './hooks/useStreamRenderFrame'
 import { useTauriEvent } from './hooks/useTauriEvent'
 import {
@@ -24,6 +26,7 @@ import {
 import { ChatImageViewer } from './ChatImageViewer'
 import { ApprovalCard } from './ApprovalCard'
 import { AskUserBlock } from './AskUserBlock'
+import { QueuedMessages } from './QueuedMessages'
 import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
@@ -138,7 +141,7 @@ import {
   restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
-import { compareTimelineSegments, segmentStepNumber, segmentToolCallId } from './segments'
+import { compareTimelineSegments, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { applyLiveContextUsage } from './contextPanel'
 
@@ -832,6 +835,9 @@ type SendMessageOptions = {
   conversationOverride?: Conversation | null
 }
 
+/** 稳定空数组：没有排队消息时不要每次渲染都造一个新引用。 */
+const NO_QUEUED_MESSAGES: QueuedMessage[] = []
+
 export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [chatView, setChatView] = useState<ChatView>(() => {
     const path = hashPath()
@@ -1044,6 +1050,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     })
     // 若该会话还挂着待刷新的合帧，连带取消，避免被剔除的 ghost 还闪一帧。
     cancelPendingFrameFor(conversationId)
+    // 排队消息也一起剔除：会话没了，队列里那几条再没有能落到的地方（`drain` 也拿不到会话对象）。
+    // 经 ref 调用是因为队列 hook 声明在下方（它要转发 handleSendMessage）。
+    messageQueueRef.current.clearConversation(conversationId)
     setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
     syncGeneratingConversationIds()
   }, [cancelPendingFrameFor, localState, syncGeneratingConversationIds])
@@ -2172,6 +2181,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const record = toolEventToRecord(payload)
       snapshot.streaming = true
       snapshot.reasoningStreaming = false
+      // 插话卡到了 = 那条「立刻引导」真的进了模型历史，现在才把它从队列里摘掉。
+      // （在此之前它一直留着，好让「没赶上轮次边界」退化成运行结束后的自动发送。）
+      if (isUserSteerToolCall(record)) {
+        const steerId = (record.structuredContent as { steer_id?: unknown } | undefined)?.steer_id
+        if (typeof steerId === 'string') {
+          messageQueueRef.current.confirmSteered(payload.conversationId, steerId)
+        }
+      }
       const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
       snapshot.toolCalls = index < 0
         ? [...snapshot.toolCalls, record]
@@ -3034,6 +3051,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         // 丢弃被延后的 finishStreamingRun(它会再次全量 reloadConversation),避免每轮随历史线性变慢。
         delete pendingStreamDoneRef.current[conversationId]
         finishStreamingRunWithConversation(conversationId, persistedConversation)
+        // 这一轮正常收尾 → 发出排队里的下一条（只发一条，它自己再跑一轮）。
+        // 报错 / 用户按停止的 run 走不到这里：那时队列条目留着，由用户决定要不要发。
+        void messageQueueRef.current.drain(persistedConversation)
       } else if (!(await flushPendingStreamDone(conversationId))) {
         clearStreamSnapshot(conversationId)
       }
@@ -3162,6 +3182,58 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       handleSendMessageRef.current(content, attachments, options),
     onError: setStreamError,
   })
+
+  // 运行中的消息队列（Codex 式排队 + 立刻引导）。同上用 ref 转发 handleSendMessage，
+  // 保持 drain 的身份稳定（它被 handleSendMessage 自己的 finally 调用，不能互相拖依赖）。
+  const messageQueue = useMessageQueue({
+    onSendMessage: (content, attachments, options) =>
+      handleSendMessageRef.current(content, attachments, options),
+    onRestoreToComposer: (message) => insertTextIntoComposer(message.content),
+  })
+  const messageQueueRef = useRef(messageQueue)
+  messageQueueRef.current = messageQueue
+
+  const currentQueuedMessages = currentConversation
+    ? messageQueue.queued[currentConversation.id] ?? NO_QUEUED_MESSAGES
+    : NO_QUEUED_MESSAGES
+  // 「立刻引导」能不能给入口，取决于这一轮由谁在跑：
+  //   - 内置 agent 循环 → 能（轮首注入，见 chat/agent/steering.rs）；
+  //   - 外部 CLI → 看它的协议支不支持（`supportsSteering`，后端 RuntimeAgentDef 是唯一真源）。
+  //     codex 有 `turn/steer`；claude 的 stream-json 输入是顺序处理的、ACP 只有 prompt/cancel。
+  //   - 多模型一问多答 → 一律不给：同会话 N 条并发 run，按 conversation 键的信箱定不到某条臂。
+  const activeExternalAgentSupportsSteering = useMemo(() => {
+    const agentId = activeAgentRuntime.externalAgentId
+    if (!agentId) return false
+    const agent = detectedExternalAgents.find((item) => item.id === agentId)
+    return Boolean(agent?.supportsSteering ?? agent?.supports_steering)
+  }, [activeAgentRuntime.externalAgentId, detectedExternalAgents])
+  const canSteerCurrentConversation =
+    (usesExternalRuntime ? activeExternalAgentSupportsSteering : true)
+    && activeReplyModels.length < 2
+
+  const handleQueueMessage = useCallback((content: string, attachments: PendingAttachment[]) => {
+    const conversationId = currentConversationIdRef.current
+    if (!conversationId) return
+    messageQueueRef.current.enqueue(conversationId, content, attachments)
+  }, [])
+
+  const handleSteerQueuedMessage = useCallback((messageId: string) => {
+    const conversationId = currentConversationIdRef.current
+    if (!conversationId) return
+    void messageQueueRef.current.steer(conversationId, messageId)
+  }, [])
+
+  const handleRemoveQueuedMessage = useCallback((messageId: string) => {
+    const conversationId = currentConversationIdRef.current
+    if (!conversationId) return
+    messageQueueRef.current.remove(conversationId, messageId)
+  }, [])
+
+  const handleRestoreQueuedMessage = useCallback((messageId: string) => {
+    const conversationId = currentConversationIdRef.current
+    if (!conversationId) return
+    messageQueueRef.current.restoreToComposer(conversationId, messageId)
+  }, [])
 
   const handleExecuteAgentPlan = useCallback(async (messageId: string) => {
     const conversation = currentConversation
@@ -3911,7 +3983,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const settingsPanelActive = chatView === 'settings' && extensionsNavItem === null
 
   const handleSidebarOpenExtensionsItem = useCallback((item: ExtensionsNavItem) => {
-    // 设置页开着时点扩展项：先走退场（含未保存改动确认），否则设置页被硬切走、动画不播。
+    // 设置页开着时点扩展项：先走退场（会 flush 自动保存），否则设置页被硬切走、动画不播。
     // 侧栏在设置页下常驻可点（见下方 collapsed 注释）后这条路径才可达。
     runAfterLeavingSettings(() => openExtensionsItem(item))
   }, [openExtensionsItem, runAfterLeavingSettings])
@@ -4282,6 +4354,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     <InputBar
                       layout="inline"
                       onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                      onQueue={handleQueueMessage}
                       disabled={isCurrentConversationBusy()}
                       onCancel={() => void handleCancelStream()}
                       cancelVisible={streamCoarse.streaming}
@@ -4514,8 +4587,24 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       </div>
                     </div>
                   )}
+                  {/* 排队中的消息：与审批卡同一个槽位（输入框正上方，视线和手都在的地方）。 */}
+                  {currentQueuedMessages.length > 0 && (
+                    <div className="shrink-0 px-6">
+                      <div className="mx-auto w-full max-w-4xl">
+                        <QueuedMessages
+                          messages={currentQueuedMessages}
+                          canSteer={canSteerCurrentConversation}
+                          onSteer={handleSteerQueuedMessage}
+                          onRemove={handleRemoveQueuedMessage}
+                          onRestore={handleRestoreQueuedMessage}
+                          lang={uiLang}
+                        />
+                      </div>
+                    </div>
+                  )}
                   <InputBar
                     onSend={(content, attachments) => void handleSendMessage(content, attachments)}
+                    onQueue={handleQueueMessage}
                     disabled={isCurrentConversationBusy()}
                     onCancel={() => void handleCancelStream()}
                     cancelVisible={streamCoarse.streaming}
