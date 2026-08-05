@@ -1830,7 +1830,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         refreshSidebar()
       }
       if (conversationId) {
-        clearConversationLocalState(localState(), conversationId)
+        // in-flight 也一起清：终局事件是「这一轮结束了」的权威。
+        // 走 send/regenerate 的 run 到这里时它们的 finally 已经清过（这里是幂等的空操作）；
+        // 而**恢复的 run**（restoredFromSnapshot，窗口重载后后端回放正在跑的那轮）没有 invoke
+        // 归属它，只有这条路径能清 —— 漏了它侧栏那颗转圈就永远停不下来。
+        clearConversationLocalState(localState(), conversationId, { inFlight: true })
         syncGeneratingConversationIds()
       }
       if (conversationId && currentConversationIdRef.current === conversationId) {
