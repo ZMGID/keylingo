@@ -205,6 +205,11 @@ pub fn list_plugin_statuses_cached_with_state(
 /// 用户点「启用」后，Kivio 运行时再挂官方 MCP stdio + 把已装官方 Skill 接入 Agent。
 pub fn get_install_brief(id: &str) -> Result<PluginInstallBrief, String> {
     let catalog = catalog_plugin(id).ok_or_else(|| format!("unknown plugin: {id}"))?;
+    // GUI 应用型插件（Skill 由 Kivio 下载、无 MCP，如 ego lite）：officecli 那套 MCP/skills-install
+    // 模板不适用，走精简简报。
+    if catalog.skill_download_url.is_some() {
+        return Ok(build_downloaded_skill_app_brief(catalog));
+    }
     let readme_urls: Vec<String> = catalog
         .readme_urls
         .iter()
@@ -345,6 +350,81 @@ PATH 若仅新终端生效：请用户在插件页点刷新，或重启 Kivio。
     })
 }
 
+/// 面向「GUI 应用 + Kivio 下载 Skill」型插件（如 ego lite）的安装简报：
+/// AI 只负责装 app + 引导 onboarding；Skill 由 Kivio 启用时下载，本插件无 MCP。
+fn build_downloaded_skill_app_brief(catalog: &CatalogPlugin) -> PluginInstallBrief {
+    let readme_urls: Vec<String> = catalog
+        .readme_urls
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let readme_block = if readme_urls.is_empty() {
+        format!("- 打开仓库阅读 README：{}", catalog.repo)
+    } else {
+        readme_urls
+            .iter()
+            .map(|u| format!("- {u}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let user_message = format!(
+        r#"# 安装 Kivio 插件：{name}
+
+## 1. 项目
+
+- **GitHub：** {repo}
+- **官网：** {homepage}
+- **plugin_id：** `{id}`
+- **命令名：** `{binary}`
+
+## 2. 先读 README，再动手
+
+1. `web_fetch` 拉取 README（安装 / onboarding 部分都要读）：
+{readme_block}
+2. 用 2～4 句向用户复述用途 + 官方安装方式 + 你将执行的步骤。命令须来自 README，勿凭记忆编造。
+
+## 3. 分工（必读）
+
+- **你（AI）**：按官方方式安装应用，并引导用户完成首次 onboarding，直到 `{binary}` 命令可用。
+- **Skill：不用你装。** 用户在「扩展 → 插件」点**启用**后，Kivio 会自动从仓库下载 `{binary}` 的官方 Skill 并接入对话。**禁止**手写 / 精简 Skill。
+- **MCP：本插件无 MCP。** 不要配置任何 mcp 命令，也不要改 Kivio settings。
+
+## 4. 安装步骤
+
+{doc}
+
+## 5. 收尾对用户说
+
+> 应用与 onboarding 完成后，请到 Kivio →「扩展 → 插件」，找到 **{name}** 点**刷新**确认已检测到，再打开**启用**。启用后 Kivio 会自动下载并接入官方 Skill。
+"#,
+        name = catalog.name,
+        repo = catalog.repo,
+        homepage = catalog.homepage,
+        id = catalog.id,
+        binary = catalog.binary,
+        readme_block = readme_block,
+        doc = catalog.install_doc.trim(),
+    );
+    PluginInstallBrief {
+        plugin_id: catalog.id.to_string(),
+        plugin_name: catalog.name.to_string(),
+        conversation_title: format!("安装插件 · {}", catalog.name),
+        readme_urls,
+        user_message,
+    }
+}
+
+/// 启用「下载型」插件时，从 `skill_download_url` 拉取 Skill 到 `plugins/<id>/skills/`
+/// （解压 zip 内首个 SKILL.md 文件夹到 `.../skills/<skill_id>/`）。
+async fn download_plugin_skill(catalog: &CatalogPlugin, url: &str) -> Result<(), String> {
+    let dest = plugin_dir(catalog.id)
+        .ok_or_else(|| "app data directory unavailable".to_string())?
+        .join("skills");
+    std::fs::create_dir_all(&dest).map_err(|e| format!("create plugin skills dir: {e}"))?;
+    crate::skills::download_skill_zip_into(url, &dest).await?;
+    Ok(())
+}
+
 pub async fn set_plugin_enabled(
     app: &AppHandle,
     state: &AppState,
@@ -382,6 +462,17 @@ pub async fn set_plugin_enabled(
 
     let mut skill_sync_err: Option<String> = None;
     if enabled {
+        // 下载型插件（如 ego lite）：从仓库拉 Skill 到插件目录；失败不阻断启用，提示用户。
+        if let Some(url) = catalog.skill_download_url {
+            if let Err(err) = download_plugin_skill(catalog, url).await {
+                skill_sync_err = Some(err);
+                eprintln!(
+                    "[plugins] skill download on enable {}: {}",
+                    id,
+                    skill_sync_err.as_deref().unwrap_or("")
+                );
+            }
+        }
         // Skill 同步失败不阻断 MCP 启用；提示用户走「让 AI 安装」补 Skills
         if let Err(err) = write_skill_files(catalog) {
             skill_sync_err = Some(err);
@@ -698,21 +789,6 @@ fn kill_named_processes(name: &str) {
     #[cfg(not(any(windows, unix)))]
     {
         let _ = name;
-    }
-}
-
-fn bundle_summary(catalog: &CatalogPlugin) -> String {
-    let mut parts = Vec::new();
-    if !catalog.skill_ids.is_empty() {
-        parts.push(format!("Skill×{}", catalog.skill_ids.len()));
-    }
-    if catalog.mcp.is_some() {
-        parts.push("MCP".to_string());
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" · {}", parts.join(" + "))
     }
 }
 

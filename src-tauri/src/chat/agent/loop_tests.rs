@@ -28,10 +28,11 @@ struct RecordedDelta {
 struct TestHost {
     records: Mutex<Vec<ToolCallRecord>>,
     deltas: Mutex<Vec<RecordedDelta>>,
-    dones: Mutex<Vec<(String, String)>>,
     /// Per-call snapshot sizes from `persist_partial_assistant`:
     /// `(message_id, tool_records_len, segments_len, api_messages_len)`.
     persists: Mutex<Vec<(String, usize, usize, usize)>>,
+    /// 生成过程中推给前端的上下文占用活数：`(分子, 分母)`，每轮一条。
+    context_ticks: Mutex<Vec<(u64, Option<u64>)>>,
     cancel_after: Option<Duration>,
     cancel_flag: Arc<AtomicBool>,
     cancel_on_first_text_delta: bool,
@@ -78,13 +79,6 @@ impl TestHost {
             .clone()
     }
 
-    fn recorded_dones(&self) -> Vec<(String, String)> {
-        self.dones
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
-    }
-
     fn recorded_tool_records(&self) -> Vec<ToolCallRecord> {
         self.records
             .lock()
@@ -94,6 +88,13 @@ impl TestHost {
 
     fn recorded_persists(&self) -> Vec<(String, usize, usize, usize)> {
         self.persists
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn recorded_context_ticks(&self) -> Vec<(u64, Option<u64>)> {
+        self.context_ticks
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
@@ -123,20 +124,6 @@ impl AgentHost for TestHost {
             });
     }
 
-    fn emit_stream_done(
-        &self,
-        _conversation_id: &str,
-        _run_id: &str,
-        _message_id: &str,
-        reason: &str,
-        full: &str,
-    ) {
-        self.dones
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .push((reason.to_string(), full.to_string()));
-    }
-
     fn emit_tool_record(
         &self,
         _conversation_id: &str,
@@ -150,14 +137,26 @@ impl AgentHost for TestHost {
             .push(record.clone());
     }
 
-    fn persist_partial_assistant(
+    fn emit_context_usage_live(
         &self,
         _conversation_id: &str,
-        message_id: &str,
-        tool_records: &[ToolCallRecord],
-        segments: &[ChatMessageSegment],
-        api_messages: &[serde_json::Value],
+        used_tokens: u64,
+        context_window_tokens: Option<u64>,
     ) {
+        self.context_ticks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((used_tokens, context_window_tokens));
+    }
+
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        _conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [serde_json::Value],
+    ) -> super::super::host::AgentHostFuture<'a, ()> {
         if self.cancel_on_persist {
             self.cancel_flag.store(true, Ordering::SeqCst);
         }
@@ -170,6 +169,7 @@ impl AgentHost for TestHost {
                 segments.len(),
                 api_messages.len(),
             ));
+        Box::pin(async {})
     }
 
     fn request_tool_approval<'a>(
@@ -505,6 +505,7 @@ fn test_provider(base_url: &str) -> ModelProvider {
         api_format: "openai_chat".to_string(),
         model_overrides: std::collections::HashMap::new(),
         compress_request_body: false,
+        request: Default::default(),
     }
 }
 
@@ -537,6 +538,7 @@ fn test_run_config<'a>(
         language: "zh-CN".to_string(),
         thinking_enabled: false,
         thinking_level: None,
+        web_search_mode: crate::chat::types::WebSearchMode::Off,
         stream_enabled,
         max_output_tokens: 1024,
         retry_attempts: 1,
@@ -1388,6 +1390,7 @@ fn tool_planning_failed_run_result_marks_drafts_error_and_emits_fallback() {
         None,
         None,
         Some(tracker.clone()),
+        None,
     );
     sink.emit(StreamPart::ToolCallStart {
         id: "call_write".to_string(),
@@ -1449,15 +1452,11 @@ fn tool_planning_failed_run_result_marks_drafts_error_and_emits_fallback() {
     assert_eq!(fallback_segment.round, None);
     assert_eq!(fallback_segment.text.as_deref(), Some(fallback.as_str()));
 
-    // Fallback delta + a single "done" done event.
+    // Fallback delta.
     assert!(host
         .recorded_deltas()
         .iter()
         .any(|delta| delta.delta == fallback));
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), fallback.clone())]
-    );
 
     // The final assistant message is pushed unconditionally here.
     assert_eq!(result.api_messages.len(), 1);
@@ -1502,10 +1501,6 @@ async fn run_loop_stream_planning_interrupt_after_tool_draft_returns_error_resul
     assert!(
         executor.events().is_empty(),
         "interrupted tool drafts must never execute"
-    );
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), fallback.clone())]
     );
     assert_eq!(result.api_messages.len(), 1);
     assert_eq!(
@@ -1558,12 +1553,6 @@ async fn run_loop_stream_synthesis_failure_preserves_tool_records_with_fallback(
         Some(recovered.as_str())
     );
 
-    // Planning never emits done while tool calls are pending; the only done is
-    // the recovered "done".
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
     let fallback_delta = host
         .recorded_deltas()
         .into_iter()
@@ -1573,6 +1562,17 @@ async fn run_loop_stream_synthesis_failure_preserves_tool_records_with_fallback(
     let segment = fallback_delta.segment.expect("fallback delta has segment");
     assert_eq!(segment.kind, ChatMessageSegmentKind::Text);
     assert_eq!(segment.phase, ChatMessageSegmentPhase::Synthesis);
+
+    // 错误卡片要拿到**供应商的原话**，而不是只有"模型调用失败"这句分类话术。
+    let degraded = result
+        .degraded
+        .expect("degrade path must attach a card payload");
+    assert_eq!(degraded.kind, "unknown");
+    assert_eq!(
+        degraded.detail.as_deref(),
+        Some("400 Bad Request - mock synthesis failure (attempt 1/1)"),
+        "raw provider error must survive into the card"
+    );
 }
 
 /// Fallback C: streamed synthesis is cancelled after tool results exist; the run
@@ -1600,10 +1600,6 @@ async fn run_loop_stream_synthesis_cancelled_returns_cancelled_with_stopped_cont
         result.tool_records[0].status,
         ToolCallStatus::Success
     ));
-
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(dones[0].0, "cancelled");
 
     assert_eq!(
         result
@@ -1641,9 +1637,6 @@ async fn run_loop_stream_synthesis_cancelled_keeps_partial_content() {
     assert_eq!(result.stream_outcome, "cancelled");
     assert_eq!(result.content, "部分回答");
     assert_eq!(result.tool_records.len(), 1);
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1);
-    assert_eq!(dones[0], ("cancelled".to_string(), "部分回答".to_string()));
     assert_eq!(
         result
             .api_messages
@@ -1694,11 +1687,6 @@ async fn run_loop_planning_top_cancelled_preserves_gathered_tool_records() {
         vec!["start:read".to_string(), "finish:read".to_string()]
     );
 
-    // Exactly one done("cancelled") event for the frontend freeze logic.
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(dones[0].0, "cancelled");
-
     // The turn is persistable: the stopped-generation placeholder is appended
     // as a synthesis api message + segment alongside the preserved records.
     assert!(result.segments.iter().any(|segment| {
@@ -1730,16 +1718,6 @@ async fn run_loop_stream_planning_cancelled_keeps_partial_text() {
     assert!(
         executor.events().is_empty(),
         "no tools may execute in a cancelled plain-text turn"
-    );
-
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(
-        dones[0],
-        (
-            "cancelled".to_string(),
-            "这是已经生成的部分回答内容".to_string()
-        )
     );
 
     assert!(result.segments.iter().any(|segment| {
@@ -1790,8 +1768,7 @@ async fn run_loop_stream_planning_cancelled_orders_reasoning_before_text() {
 /// or tool draft was generated must now end with Ok(cancelled_result) carrying
 /// the stopped-generation placeholder — not a bare Err("cancelled") that
 /// skipped persistence. With no prior rounds there are no tool records to
-/// preserve, but the turn is still persistable (one done("cancelled") event,
-/// already emitted by the stream layer, and no duplicate).
+/// preserve, but the turn is still persistable.
 #[tokio::test]
 async fn run_loop_stream_planning_cancelled_with_no_text_returns_cancelled() {
     let server = MockModelServer::start(vec![MockResponse::SseThenHang(Vec::new())]);
@@ -1807,9 +1784,6 @@ async fn run_loop_stream_planning_cancelled_with_no_text_returns_cancelled() {
     assert_eq!(result.stream_outcome, "cancelled");
     assert_eq!(result.content, stopped_generation_content("zh-CN"));
     assert!(result.tool_records.is_empty());
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event (no duplicate)");
-    assert_eq!(dones[0], ("cancelled".to_string(), String::new()));
 }
 
 /// Bug fix regression: when no tools are configured, the plain synthesis path
@@ -1832,10 +1806,6 @@ async fn run_loop_stream_plain_synthesis_cancelled_keeps_partial_text() {
     assert_eq!(result.stream_outcome, "cancelled");
     assert_eq!(result.content, "部分回答");
     assert!(result.tool_records.is_empty());
-
-    let dones = host.recorded_dones();
-    assert_eq!(dones.len(), 1, "exactly one done event");
-    assert_eq!(dones[0], ("cancelled".to_string(), "部分回答".to_string()));
 
     assert!(result.segments.iter().any(|segment| {
         segment.kind == ChatMessageSegmentKind::Text
@@ -2077,6 +2047,66 @@ async fn run_loop_no_anchor_skips_compaction_when_estimate_below_budget() {
     assert!(
         !bodies[0].contains("tasked with summarizing conversations"),
         "without an anchor, an under-budget estimate must NOT trigger compaction"
+    );
+}
+
+/// **内置路径的实时用量**：上下文占用要在生成过程中就推给前端，而不是等一轮完全结束。
+///
+/// 内置路径唯一的等价实时来源是 `maybe_compact_send_view` —— 它每个 planning 轮都跑一次，
+/// 且已经按权威口径算出了分子（`effective_context_tokens`）与分母
+/// （`context_window_for_model`），所以实时通道零额外计算。这条断言两件事：
+/// 一轮里**多次**上报（多次工具往返 ⇒ 多轮 ⇒ 多次上报），且数字单调不减。
+#[tokio::test]
+async fn run_loop_reports_live_context_usage_each_round() {
+    let server = MockModelServer::start(vec![
+        // 第 1 轮：调一次工具。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+        // 第 2 轮：给最终答案收尾。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"读完了。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.provider.model_overrides.insert(
+        "test-model".to_string(),
+        crate::settings::ModelInfo {
+            context_window: Some(200_000),
+            ..Default::default()
+        },
+    );
+    config.tools = vec![native_read_file_tool()];
+    config.runtime_messages = vec![
+        serde_json::json!({ "role": "system", "content": "system prompt" }),
+        serde_json::json!({ "role": "user", "content": "a".repeat(4_000) }),
+    ];
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run completes");
+    assert_eq!(result.content, "读完了。");
+
+    let ticks = host.recorded_context_ticks();
+    assert!(
+        ticks.len() >= 2,
+        "多轮的 run 必须在过程中多次上报占用（修复前一次都没有）：{ticks:?}"
+    );
+    assert!(
+        ticks
+            .iter()
+            .all(|(used, window)| *used > 0 && *window == Some(200_000)),
+        "分子必须非零、分母必须是模型窗口：{ticks:?}"
+    );
+    // 单调不减：工具结果进入历史后占用只会涨（压缩才会降，本例不触发）。
+    assert!(
+        ticks.windows(2).all(|pair| pair[1].0 >= pair[0].0),
+        "过程中的占用不该往回跳：{ticks:?}"
     );
 }
 
@@ -2399,11 +2429,6 @@ async fn run_loop_compaction_thrash_degrades_with_gathered_results() {
         3,
         "anti-thrashing must bound model calls (summary + planning + summary), no repeat-fail loop"
     );
-    // A single done event with the degraded content (turn ended cleanly).
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), result.content.clone())]
-    );
 }
 
 /// Under-budget runs must not be touched by compaction: the request body
@@ -2468,10 +2493,6 @@ async fn run_loop_stream_synthesis_empty_output_uses_fallback_and_completes() {
         result.tool_records[0].status,
         ToolCallStatus::Success
     ));
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
 
     assert!(result.segments.iter().any(|segment| {
         segment.kind == ChatMessageSegmentKind::Text
@@ -2522,10 +2543,6 @@ async fn run_loop_nonstream_synthesis_failure_preserves_tool_records_with_fallba
         .recorded_deltas()
         .iter()
         .any(|delta| delta.delta == recovered));
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
     assert_eq!(
         result
             .api_messages
@@ -2582,9 +2599,84 @@ async fn run_loop_overflow_recovery_compacts_and_retries_success() {
     ));
     // The model was called exactly 3 times: planning, failed synthesis, retry.
     assert_eq!(server.captured_bodies().len(), 3);
+}
+
+/// 静默超窗（pi `isContextOverflow` case 2/3）：synthesis 调用 **HTTP 200 成功**，
+/// 但正文为空、且 provider 实报的 prompt token 已经顶到窗口。没有任何错误文案可以
+/// 匹配，`classify("")` 只会给 `Empty` → 直接拿工具结果降级；用量证据必须把它改判成
+/// `ContextOverflow`，走「压缩一次再重发」。断言最终用的是重发的答案，不是兜底摘要。
+#[tokio::test]
+async fn run_loop_empty_response_at_context_window_recovers_as_silent_overflow() {
+    // 200 + 空正文 + prompt 顶满 40k 窗口 = 被静默吞掉的超窗请求。
+    let empty_at_window = serde_json::json!({
+        "choices": [{
+            "finish_reason": "stop",
+            "message": { "role": "assistant", "content": "" }
+        }],
+        "usage": { "prompt_tokens": 40_000, "completion_tokens": 0, "total_tokens": 40_000 }
+    })
+    .to_string();
+    let retry_answer = serde_json::json!({
+        "choices": [{
+            "finish_reason": "stop",
+            "message": { "role": "assistant", "content": "压缩后重发拿到的答案" }
+        }]
+    })
+    .to_string();
+    let server = MockModelServer::start(vec![
+        MockResponse::Json(planning_tool_call_json()),
+        MockResponse::Json(empty_at_window),
+        // 改判成 overflow 后先压缩：摘要调用恒为流式，与 run 的 stream 设置无关。
+        MockResponse::Sse(vec![
+            long_summary_sse("SUMMARY_MARKER: 早前轮次摘要。"),
+            "[DONE]".to_string(),
+        ]),
+        MockResponse::Json(retry_answer),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, false);
+    config.provider.model_overrides.insert(
+        "test-model".to_string(),
+        crate::settings::ModelInfo {
+            context_window: Some(40_000),
+            ..Default::default()
+        },
+    );
+    // 25k token 的纯文本历史：规划/合成前的估算（<36k 预算）不触发压缩，所以前两次
+    // 调用是干净的；但它超过 20k 的保护尾窗，改判后压缩有旧段可摘要（且旧段里没有
+    // 工具结果 → microcompact 无从降级 → 必定走 LLM 摘要，调用次数确定）。
+    config.runtime_messages =
+        vec![serde_json::json!({ "role": "system", "content": "system prompt" })];
+    for i in 0..5 {
+        config.runtime_messages.push(serde_json::json!({
+            "role": if i % 2 == 0 { "user" } else { "assistant" },
+            "content": "a".repeat(20_000),
+        }));
+    }
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("silent overflow recovery must not bubble Err");
+
     assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), "summary after compaction".to_string())]
+        result.content, "压缩后重发拿到的答案",
+        "空响应 + 用量顶窗必须走压缩重发，而不是当成 Empty 直接降级"
+    );
+    // 「成功但空正文」这条路走的是 synthesis 的正常收尾（既有行为），outcome 仍是
+    // completed；只有**报错**的那条路才标 recovered。恢复是否发生看 content。
+    assert_eq!(result.stream_outcome, "completed");
+    assert!(
+        result.degraded.is_none(),
+        "重发成功就没有降级卡片，got: {:?}",
+        result.degraded
+    );
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 4, "规划 / 空响应合成 / 摘要 / 重发");
+    assert!(
+        bodies[2].contains("tasked with summarizing conversations"),
+        "第 3 次调用必须是压缩摘要"
     );
 }
 
@@ -2629,10 +2721,6 @@ async fn run_loop_overflow_recovery_retries_once_then_degrades() {
     // Single-attempt guard: planning + failed synthesis + ONE retry = 3 calls,
     // not an unbounded compact→retry loop.
     assert_eq!(server.captured_bodies().len(), 3);
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
 }
 
 /// Fallback F: non-streamed synthesis returns empty content after tool results;
@@ -2673,10 +2761,6 @@ async fn run_loop_nonstream_synthesis_empty_output_uses_fallback() {
     assert_eq!(result.content, recovered);
     assert_eq!(result.reasoning.as_deref(), Some("synthesis reasoning"));
     assert_eq!(result.tool_records.len(), 1);
-    assert_eq!(
-        host.recorded_dones(),
-        vec![("done".to_string(), recovered.clone())]
-    );
 
     let final_message = result.api_messages.last().expect("final api message");
     assert_eq!(
@@ -2688,5 +2772,475 @@ async fn run_loop_nonstream_synthesis_empty_output_uses_fallback() {
             .get("reasoning_content")
             .and_then(Value::as_str),
         Some("synthesis reasoning")
+    );
+}
+
+/// Responses 格式的一段内置搜索 SSE（web_search_call 查询 + 正文 + url_citation 来源），
+/// 供内置搜索实时卡端到端集成测试用（任务 07-23）。无 function_call → planning 直接终答。
+fn responses_web_search_sse_events() -> Vec<String> {
+    vec![
+        r#"{"type":"response.output_item.added","item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}"#.to_string(),
+        r#"{"type":"response.output_item.done","item":{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"kivio latest release"}}}"#.to_string(),
+        r#"{"type":"response.output_text.delta","delta":"Kivio 最新版本信息。"}"#.to_string(),
+        r#"{"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","title":"Kivio Release","url":"https://kivio.dev/releases"}}"#.to_string(),
+        r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Kivio 最新版本信息。"}]}]}}"#.to_string(),
+        "[DONE]".to_string(),
+    ]
+}
+
+/// 收集本条 assistant 消息里的内置搜索卡段（tool_call_id 以 `websearch_` 打头）。
+fn web_search_card_segments(result: &AgentRunResult) -> Vec<&ChatMessageSegment> {
+    result
+        .segments
+        .iter()
+        .filter(|segment| {
+            segment.kind == ChatMessageSegmentKind::Tool
+                && segment
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("websearch_"))
+        })
+        .collect()
+}
+
+/// 集成（流式）：内置模式 + 支持内置搜索的 Responses provider，模型执行 hosted web_search。
+/// 期望——**单张** web_search 卡，落在答案文本**之前**（预留槽 order < 正文段 order），
+/// 终态 Success；不双卡；FinalAnswer 路径不丢卡（任务 07-23）。
+#[tokio::test]
+async fn run_loop_stream_builtin_web_search_card_precedes_answer_single_card() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(responses_web_search_sse_events())]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    // Responses provider（支持内置搜索）+ 会话内置模式。
+    config.provider.api_format = "openai_responses".to_string();
+    config.web_search_mode = crate::chat::types::WebSearchMode::Builtin;
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("builtin web search run completes");
+
+    assert_eq!(result.stream_outcome, "completed");
+    assert_eq!(result.content, "Kivio 最新版本信息。");
+
+    // 落盘工具记录：恰好一条 web_search，终态 Success。
+    let web_records: Vec<_> = result
+        .tool_records
+        .iter()
+        .filter(|record| record.name == "web_search")
+        .collect();
+    assert_eq!(
+        web_records.len(),
+        1,
+        "exactly one persisted web_search card"
+    );
+    assert!(matches!(web_records[0].status, ToolCallStatus::Success));
+
+    // 卡段唯一（不双卡），且 order 落在答案文本段之前。
+    let cards = web_search_card_segments(&result);
+    assert_eq!(cards.len(), 1, "no double card");
+    let answer = result
+        .segments
+        .iter()
+        .find(|segment| {
+            segment.kind == ChatMessageSegmentKind::Text
+                && segment.text.as_deref() == Some("Kivio 最新版本信息。")
+        })
+        .expect("answer text segment persisted");
+    assert!(
+        cards[0].order < answer.order,
+        "web search card (order {}) must precede the answer text (order {})",
+        cards[0].order,
+        answer.order,
+    );
+}
+
+/// 集成（非流式）：内置模式 + Responses provider 的非流式答案路径。内置搜索引用只能在拿到
+/// 完整答案后合成，走 `emit_builtin_web_search_card(order=预留槽)`——同样落在答案之前、单卡。
+#[tokio::test]
+async fn run_loop_nonstream_builtin_web_search_card_uses_reserved_slot() {
+    let body = r#"{"status":"completed","output":[{"type":"web_search_call","action":{"type":"search","query":"kivio latest release"}},{"type":"message","content":[{"type":"output_text","text":"Kivio 最新版本信息。","annotations":[{"type":"url_citation","title":"Kivio Release","url":"https://kivio.dev/releases"}]}]}]}"#;
+    let server = MockModelServer::start(vec![MockResponse::Json(body.to_string())]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, false);
+    config.provider.api_format = "openai_responses".to_string();
+    config.web_search_mode = crate::chat::types::WebSearchMode::Builtin;
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("non-stream builtin web search run completes");
+
+    assert_eq!(result.stream_outcome, "completed");
+    assert_eq!(result.content, "Kivio 最新版本信息。");
+
+    let web_records: Vec<_> = result
+        .tool_records
+        .iter()
+        .filter(|record| record.name == "web_search")
+        .collect();
+    assert_eq!(web_records.len(), 1);
+    assert!(matches!(web_records[0].status, ToolCallStatus::Success));
+
+    let cards = web_search_card_segments(&result);
+    assert_eq!(cards.len(), 1, "single card");
+    let answer = result
+        .segments
+        .iter()
+        .find(|segment| {
+            segment.kind == ChatMessageSegmentKind::Text
+                && segment.text.as_deref() == Some("Kivio 最新版本信息。")
+        })
+        .expect("answer text segment persisted");
+    assert!(
+        cards[0].order < answer.order,
+        "reserved-slot card (order {}) must precede answer (order {})",
+        cards[0].order,
+        answer.order,
+    );
+}
+
+/// Gemini 原生出图（任务 07-24）：模型在流式答案里返回 inlineData 图片 →
+/// `GenerateOutput.images` → 循环跨阶段累积进 `RunState.generated_images` →
+/// `attach_usage` 挂到 `AgentRunResult.images`。reply 侧据此落成 assistant 消息级
+/// artifacts（data_url + size_bytes 断言见 commands::reply 的转换单测）。
+#[tokio::test]
+async fn run_loop_gemini_native_image_lands_in_run_result_images() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(vec![
+        r#"{"candidates":[{"content":{"parts":[{"text":"这是为你生成的图片。"},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}}]}"#
+            .to_string(),
+        r#"{"candidates":[{"finishReason":"STOP"}]}"#.to_string(),
+    ])]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.provider.api_format = "gemini".to_string();
+    // 出图模型不调工具：给纯文本任务，模型直接以「文本 + 图片」作答（无 tool call）→ FinalAnswer。
+    config.tools = Vec::new();
+    config.runtime_messages = vec![
+        serde_json::json!({ "role": "system", "content": "system prompt" }),
+        serde_json::json!({ "role": "user", "content": "画一只猫" }),
+    ];
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("gemini image-gen answer must not bubble Err");
+
+    assert_eq!(
+        result.images.len(),
+        1,
+        "the single native image reaches the run result"
+    );
+    assert_eq!(result.images[0].mime_type, "image/png");
+    assert_eq!(result.images[0].data, "aGVsbG8=");
+    assert!(result.content.contains("这是为你生成的图片。"));
+}
+
+// ===== 生命周期 Hooks 的事件配对（任务 07-28-hooks）=====
+//
+// 手点 GUI 只能验一条路径，而 loop 有 8 条 return。这里用「只记流水、不真执行」的
+// 调度器，把每条路径的派发序列钉死：每个 turn_start 必配一个 turn_end，
+// 每个 message_start 必配一个 message_end，agent_end 恰好一次且永远收尾。
+
+/// 挂了 recording 调度器的 TestHost。
+struct HookedHost {
+    inner: TestHost,
+    hooks: crate::chat::hooks::HookDispatcher,
+}
+
+impl HookedHost {
+    fn new(inner: TestHost) -> Self {
+        Self {
+            inner,
+            hooks: crate::chat::hooks::HookDispatcher::recording(),
+        }
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.hooks
+            .recorded()
+            .into_iter()
+            .map(|(event, _)| event)
+            .collect()
+    }
+}
+
+/// 事件流水的自洽断言：首尾是 agent_start/agent_end 且各恰好一次；
+/// turn/message 严格配对且不嵌套；tool 的 start/end 数量相等。
+fn assert_hook_events_well_formed(events: &[&str]) {
+    assert_eq!(events.first(), Some(&"agent_start"), "{events:?}");
+    assert_eq!(events.last(), Some(&"agent_end"), "{events:?}");
+    for name in ["agent_start", "agent_end"] {
+        assert_eq!(
+            events.iter().filter(|event| **event == name).count(),
+            1,
+            "{name} must fire exactly once: {events:?}"
+        );
+    }
+    let (mut turn_open, mut message_open) = (false, false);
+    let (mut tool_start, mut tool_end) = (0, 0);
+    for event in events {
+        match *event {
+            "turn_start" => {
+                assert!(!turn_open, "nested turn_start: {events:?}");
+                turn_open = true;
+            }
+            "turn_end" => {
+                assert!(turn_open, "turn_end without turn_start: {events:?}");
+                assert!(!message_open, "turn_end before message_end: {events:?}");
+                turn_open = false;
+            }
+            "message_start" => {
+                assert!(!message_open, "nested message_start: {events:?}");
+                assert!(turn_open, "message_start outside a turn: {events:?}");
+                message_open = true;
+            }
+            "message_end" => {
+                assert!(
+                    message_open,
+                    "message_end without message_start: {events:?}"
+                );
+                message_open = false;
+            }
+            "tool_execution_start" => tool_start += 1,
+            "tool_execution_end" => tool_end += 1,
+            _ => {}
+        }
+    }
+    assert!(!turn_open, "turn never closed: {events:?}");
+    assert!(!message_open, "message never closed: {events:?}");
+    assert_eq!(tool_start, tool_end, "unpaired tool events: {events:?}");
+}
+
+impl AgentHost for HookedHost {
+    fn emit_stream_delta(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        message_id: &str,
+        delta: &str,
+        reasoning_delta: Option<&str>,
+        segment: Option<&ChatMessageSegment>,
+    ) {
+        self.inner.emit_stream_delta(
+            conversation_id,
+            run_id,
+            message_id,
+            delta,
+            reasoning_delta,
+            segment,
+        );
+    }
+
+    fn emit_tool_record(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        message_id: &str,
+        record: &ToolCallRecord,
+    ) {
+        self.inner
+            .emit_tool_record(conversation_id, run_id, message_id, record);
+    }
+
+    fn request_tool_approval<'a>(
+        &'a self,
+        ctx: &'a ToolExecutionContext<'a>,
+        record: &'a ToolCallRecord,
+    ) -> super::super::host::AgentHostFuture<'a, bool> {
+        self.inner.request_tool_approval(ctx, record)
+    }
+
+    fn request_session_consent<'a>(
+        &'a self,
+        ctx: &'a ToolExecutionContext<'a>,
+    ) -> super::super::host::AgentHostFuture<'a, bool> {
+        self.inner.request_session_consent(ctx)
+    }
+
+    fn request_user_response<'a>(
+        &'a self,
+        ctx: &'a ToolExecutionContext<'a>,
+        record: &'a ToolCallRecord,
+        prompt: crate::chat::ask_user::AskUserPromptPayload,
+    ) -> super::super::host::AgentHostFuture<'a, crate::chat::ask_user::AskUserResponseResult> {
+        self.inner.request_user_response(ctx, record, prompt)
+    }
+
+    fn is_generation_active(&self, conversation_id: &str, generation: u64) -> bool {
+        self.inner.is_generation_active(conversation_id, generation)
+    }
+
+    fn wait_for_generation_inactive<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        generation: u64,
+    ) -> super::super::host::AgentHostFuture<'a, ()> {
+        self.inner
+            .wait_for_generation_inactive(conversation_id, generation)
+    }
+
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [Value],
+    ) -> super::super::host::AgentHostFuture<'a, ()> {
+        self.inner.persist_partial_assistant(
+            conversation_id,
+            message_id,
+            tool_records,
+            segments,
+            api_messages,
+        )
+    }
+
+    fn hooks(&self) -> Option<&crate::chat::hooks::HookDispatcher> {
+        Some(&self.hooks)
+    }
+}
+
+/// 正常路径：一轮工具调用 + 合成。
+#[tokio::test]
+async fn hook_events_pair_up_on_the_tool_round_path() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"好了"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::default());
+    let executor = RecordingExecutor::default();
+
+    run_agent_loop(config, &host, &executor)
+        .await
+        .expect("loop must succeed");
+
+    let events = host.events();
+    assert_hook_events_well_formed(&events);
+    assert!(
+        events.contains(&"tool_execution_start"),
+        "tool round must emit tool events: {events:?}"
+    );
+}
+
+/// 无工具会话：整段跳过工具循环，此前一个 turn/message 事件都不发（回归守卫）。
+#[tokio::test]
+async fn hook_events_pair_up_on_the_no_tools_path() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(vec![
+        r#"{"choices":[{"delta":{"content":"直接回答"}}]}"#.to_string(),
+        "[DONE]".to_string(),
+    ])]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.tools = Vec::new();
+    let host = HookedHost::new(TestHost::default());
+    let executor = RecordingExecutor::default();
+
+    run_agent_loop(config, &host, &executor)
+        .await
+        .expect("loop must succeed");
+
+    let events = host.events();
+    assert_hook_events_well_formed(&events);
+    assert!(
+        events.contains(&"turn_start") && events.contains(&"message_end"),
+        "a tool-less conversation is still one turn: {events:?}"
+    );
+}
+
+/// 取消路径：用户在工具轮后停止，收尾事件仍须闭合。
+#[tokio::test]
+async fn hook_events_pair_up_when_cancelled() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(planning_tool_call_sse_events()),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    // 必须放行第二轮：默认 max_tool_rounds=Some(1) 会让第一轮后直接撞 RoundLimit
+    // break，`cancelling_on_persist` 翻的旗子根本没有循环顶部再去读它 —— 这条测试
+    // 就会挂着「when_cancelled」的名字实际走正常路径。
+    config.effective_chat_tools.max_tool_rounds = Some(2);
+    let host = HookedHost::new(TestHost::cancelling_on_persist());
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("cancellation must not bubble Err");
+    assert_eq!(
+        result.stream_outcome, "cancelled",
+        "this test is only meaningful if the run really was cancelled"
+    );
+
+    assert_hook_events_well_formed(&host.events());
+    // 事件流水看不出取消（取消路径与正常路径同形），得直接查世代。
+    assert!(
+        host.hooks.cancel_epoch() > 0,
+        "the loop must tell the dispatcher it was cancelled"
+    );
+}
+
+/// 回归：**synthesis 阶段**的取消也必须传到调度器。loop 里显式 `cancel()` 的三处
+/// 全在工具轮分支上，而用户点「停止」最常落在流式最长的 synthesis 阶段——那条路
+/// 走的是 `SynthesisFlow::Early(outcome=cancelled)`，一处 `cancel()` 都不经过。
+/// 漏掉的后果不是少发个事件，而是「停止」之后排队的 Hook 照跑、在跑的脚本没人杀。
+#[tokio::test]
+async fn cancelling_during_synthesis_still_cancels_hooks() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::SseThenHang(vec![
+            r#"{"choices":[{"delta":{"content":"部分回答"}}]}"#.to_string()
+        ]),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::cancelling_on_first_text_delta());
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("cancelled synthesis must not bubble Err");
+    assert_eq!(result.stream_outcome, "cancelled");
+
+    assert_hook_events_well_formed(&host.events());
+    assert!(
+        host.hooks.cancel_epoch() > 0,
+        "a stop during synthesis must cancel queued/running hooks, not just emit agent_end"
+    );
+}
+
+/// 正常完成的 run **不能**取消 Hook —— 兜底判的是 generation 而非「有没有出错」，
+/// 判错了就会把成功路径上排队的 `agent_end` 之前的 Hook 静默丢掉。
+#[tokio::test]
+async fn a_successful_run_never_cancels_hooks() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"好了"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let config = test_run_config(&state, &server.base_url, true);
+    let host = HookedHost::new(TestHost::default());
+    let executor = RecordingExecutor::default();
+
+    run_agent_loop(config, &host, &executor)
+        .await
+        .expect("loop must succeed");
+
+    assert_eq!(
+        host.hooks.cancel_epoch(),
+        0,
+        "a clean run must not cancel hooks"
     );
 }

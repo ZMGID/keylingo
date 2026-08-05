@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{send_with_retry, with_standard_request_timeout},
-    mcp::client::StreamableHttpMcpClient,
     settings::{ChatMcpServer, LensWebSearchConfig, WebSearchProvider},
     state::AppState,
 };
@@ -96,7 +95,11 @@ pub fn provider_label(provider: WebSearchProvider) -> &'static str {
 /// 已给默认值，这里兜「用户手动清空输入框」的情况）。
 fn normalized_base_url<'a>(configured: &'a str, fallback: &'a str) -> &'a str {
     let trimmed = configured.trim().trim_end_matches('/');
-    if trimmed.is_empty() { fallback } else { trimmed }
+    if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    }
 }
 
 pub async fn search_web(
@@ -145,14 +148,7 @@ async fn search_ollama(
     let base = normalized_base_url(&config.ollama_base_url, "https://ollama.com");
     let url = format!("{base}/api/web_search");
     let response = send_with_retry("Ollama search", retry_attempts, || {
-        with_standard_request_timeout(
-            state
-                .http
-                .post(&url)
-                .bearer_auth(api_key)
-                .json(&body),
-        )
-        .send()
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
     })
     .await?;
 
@@ -211,15 +207,20 @@ async fn search_exa_mcp(
         url,
         ..ChatMcpServer::default()
     };
-    let client = StreamableHttpMcpClient::new(server, 30_000, state.http.clone());
-
+    // 一次性连接，不进 MCP 连接池：这个 server 是临时合成的（api key 就在 URL 里），
+    // 不该被当成用户配置的常驻服务器缓存起来。
     let max_results = config.max_results.clamp(1, 10);
-    let result = client
-        .call_tool(
-            "web_search_exa",
-            serde_json::json!({ "query": query, "numResults": max_results }),
-        )
-        .await?;
+    let raw = crate::mcp::conn::call_tool_once(
+        &server,
+        &state.http,
+        "web_search_exa",
+        serde_json::json!({ "query": query, "numResults": max_results }),
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    let result = crate::mcp::result::parse_tool_result(
+        serde_json::to_value(&raw).map_err(|err| err.to_string())?,
+    );
     if result.is_error {
         return Err(format!("Exa MCP search failed: {}", result.content));
     }
@@ -357,14 +358,7 @@ async fn search_tavily(
     let base = normalized_base_url(&config.tavily_base_url, "https://api.tavily.com");
     let url = format!("{base}/search");
     let response = send_with_retry("Tavily search", retry_attempts, || {
-        with_standard_request_timeout(
-            state
-                .http
-                .post(&url)
-                .bearer_auth(api_key)
-                .json(&body),
-        )
-        .send()
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
     })
     .await?;
 
@@ -647,13 +641,6 @@ fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
 /// Render web search results into the textual context block injected into the
 /// model conversation: a two-line header, then per result a `[N] Title` line, a
 /// `URL: …` line, and optional `Published:` / `Score:` / `Snippet:` lines.
-///
-/// NOTE: the kivio-code tool card parser (`kivio_code::interactive::tool_card::
-/// parse_web_results`) depends on this exact line shape — it recognizes `[N] Title`
-/// title lines and the following `URL:` line to render a compact result list.
-/// If you change the per-result format here (reorder lines, drop the `[N]` title
-/// prefix, rename `URL:`), update that parser too, or the card silently falls back
-/// to a flat text preview / mis-associates URLs.
 pub fn format_web_context(results: &[WebSearchResult]) -> String {
     if results.is_empty() {
         return String::new();

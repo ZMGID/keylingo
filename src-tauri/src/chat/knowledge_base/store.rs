@@ -490,8 +490,6 @@ pub fn build_fts_query(raw: &str) -> Option<String> {
     }
 }
 
-
-
 fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeChunk> {
     Ok(KnowledgeChunk {
         id: row.get("chunk_id")?,
@@ -585,12 +583,17 @@ pub fn hybrid_search(
     weight_vector: f32,
     weight_keyword: f32,
 ) -> Result<Vec<(KnowledgeChunk, f32)>, String> {
-    Ok(
-        hybrid_search_detailed(conn, query_vec, query_text, top_k, weight_vector, weight_keyword)?
-            .into_iter()
-            .map(|c| (c.chunk, c.fused_score))
-            .collect(),
-    )
+    Ok(hybrid_search_detailed(
+        conn,
+        query_vec,
+        query_text,
+        top_k,
+        weight_vector,
+        weight_keyword,
+    )?
+    .into_iter()
+    .map(|c| (c.chunk, c.fused_score))
+    .collect())
 }
 
 /// A fused candidate carrying per-lane diagnostics. `hybrid_search` is a thin
@@ -778,7 +781,10 @@ mod tests {
         assert!(build_fts_query("   ").is_none());
         assert!(build_fts_query("，。！").is_none());
         // CJK question → OR of bigrams, each quoted.
-        assert_eq!(build_fts_query("退款条件").unwrap(), "\"退款\" OR \"款条\" OR \"条件\"");
+        assert_eq!(
+            build_fts_query("退款条件").unwrap(),
+            "\"退款\" OR \"款条\" OR \"条件\""
+        );
         // Exact code preserved as a single quoted token.
         assert_eq!(build_fts_query("E1021").unwrap(), "\"e1021\"");
         // FTS5 operators / quotes in user text are neutralized (quoted literals),
@@ -911,4 +917,3 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 }
-

@@ -16,8 +16,17 @@ pub const CHAT_MIN_INNER_HEIGHT: f64 = 400.0;
 const CHAT_DEFAULT_INNER_WIDTH: f64 = 1280.0;
 const CHAT_DEFAULT_INNER_HEIGHT: f64 = 800.0;
 
+/// Windows / Linux 的自绘全宽标题栏带高度（与 index.css `.chat-titlebar-strip { height: 44px }` 同步）。
+/// macOS 用系统 Overlay 标题栏、不占额外内容高度，故为 0。
+#[cfg(target_os = "macos")]
+const CHAT_TITLEBAR_STRIP_HEIGHT: f64 = 0.0;
+#[cfg(not(target_os = "macos"))]
+const CHAT_TITLEBAR_STRIP_HEIGHT: f64 = 44.0;
+
+/// 把「可见内容所需尺寸」换算成窗口 inner 尺寸：非 macOS 要额外容纳那条标题栏带，
+/// 否则小窗下带会吃掉 44px 内容高度，把输入框挤出可视区。
 fn chat_window_size_for_visible_content(width: f64, height: f64) -> (f64, f64) {
-    (width, height)
+    (width, height + CHAT_TITLEBAR_STRIP_HEIGHT)
 }
 
 pub fn apply_chat_window_min_size(window: &WebviewWindow, sidebar_expanded: bool) {
@@ -30,16 +39,86 @@ pub fn apply_chat_window_min_size(window: &WebviewWindow, sidebar_expanded: bool
     let _ = window.set_min_size(Some(LogicalSize::new(width, height)));
 }
 
+/// 悬浮卡片式侧栏的外边距（与 index.css `.chat-sidebar-shell { margin: 8px }` 同步）。
+/// 灯 x 随卡片左缘 +8；y 跟随侧栏顶栏图标（图标在卡片内上提后，窗口坐标中心仍约 26px，与主区顶栏齐）。
 #[cfg(target_os = "macos")]
-const CHAT_TRAFFIC_LIGHT_X: f64 = 14.0;
+const CHAT_SIDEBAR_CARD_INSET: f64 = 8.0;
+
+/// 灯到卡片左缘的距离（不是到窗口左缘）。
+#[cfg(target_os = "macos")]
+const CHAT_TRAFFIC_LIGHT_X: f64 = 14.0 + CHAT_SIDEBAR_CARD_INSET;
 
 /// 交给 tao `traffic_light_inset` 的 y。tao 会在每次内容视图 `drawRect` 重新应用这个 inset
-/// （见 tao 源 view.rs::draw_rect → inset_traffic_lights），故窗口拖动/缩放/移动全程都保持对齐，
-/// 无需我们再手动重排。tao 容器高度 = close 按钮高度 + y；实测 close_h=14、y=28 → 灯中心=26px，
-/// 正好落在顶栏图标中心（`chatTitlebarRowClass` = `h-[52px] items-center`，中心 26px）。
-/// 反向对齐：灯跟随图标固定位置，而非移动图标。
+/// （见 tao 源 view.rs::draw_rect → inset_traffic_lights），故窗口拖动/缩放/移动全程都保持对齐。
+///
+/// 这个 y **不等于**灯中心。tao 只写按钮的 `origin.x`，`origin.y` 始终是 AppKit 布局出来的值：
+///   容器高 = 按钮高 + y，灯中心距顶 = y − button.origin.y + button.height / 2
+/// 而 `button.origin.y` / `button.height` 随 macOS 版本变（标题栏容器自然高度不同），
+/// 所以「y=32 → 中心 30」只在某些系统上成立 —— 早先几次「统一到 30」的修复就是栽在这里。
+/// 现在不再假设：前端用 `chat_traffic_light_center_y` 量出真实中心，顶栏那条线跟着灯走
+/// （见 index.css `--chat-traffic-center-y`）。这个常数只决定灯大致落在哪，不需要精确。
 #[cfg(target_os = "macos")]
-const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 28.0;
+const CHAT_TRAFFIC_LIGHT_INSET_Y: f64 = 32.0;
+
+/// 交通灯中心距 WebView 内容顶缘的距离（CSS px / AppKit point，同一单位）。
+///
+/// 前端据此把侧栏顶栏图标、主区顶栏控件摆到同一条线上。非 macOS / 取不到 / 数值离谱都返回
+/// `None`，前端退回 CSS 里的默认 30px。
+#[tauri::command]
+pub async fn chat_traffic_light_center_y(window: WebviewWindow) -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        // NSView 几何只能在主线程读，命令本身在 worker 线程，用 channel 取回。
+        let (tx, rx) = std::sync::mpsc::channel();
+        let window_for_main = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let measured = window_for_main
+                    .ns_window()
+                    .ok()
+                    .filter(|ptr| !ptr.is_null())
+                    .and_then(|ptr| unsafe {
+                        measure_traffic_light_center_y(ptr as cocoa::base::id)
+                    });
+                let _ = tx.send(measured);
+            })
+            .ok()?;
+        rx.recv_timeout(std::time::Duration::from_millis(500))
+            .ok()
+            .flatten()
+            // 灯只可能在标题栏那一带；离谱值当没量到，别把 padding 算成负数。
+            .filter(|y| (8.0..=80.0).contains(y))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// 把 close 按钮的 bounds 转到 contentView 坐标系，换算成「距内容顶缘」。
+/// contentView 未翻转（y 自下而上），故距顶 = 内容高 − (y + 高/2)。
+/// Overlay 标题栏下 contentView 铺满整个窗口 frame，所以这就是 CSS 的 y。
+#[cfg(target_os = "macos")]
+unsafe fn measure_traffic_light_center_y(window: cocoa::base::id) -> Option<f64> {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSRect;
+    use objc::{msg_send, sel, sel_impl};
+
+    const NS_WINDOW_CLOSE_BUTTON: u64 = 0;
+    let close: id = msg_send![window, standardWindowButton: NS_WINDOW_CLOSE_BUTTON];
+    let content: id = msg_send![window, contentView];
+    if close == nil || content == nil {
+        return None;
+    }
+    let bounds: NSRect = msg_send![close, bounds];
+    let in_content: NSRect = msg_send![close, convertRect: bounds toView: content];
+    let content_bounds: NSRect = msg_send![content, bounds];
+    if content_bounds.size.height <= 0.0 || in_content.size.height <= 0.0 {
+        return None;
+    }
+    Some(content_bounds.size.height - (in_content.origin.y + in_content.size.height / 2.0))
+}
 
 /// 隐藏 Overlay 标题栏的窗口标题文字。交通灯位置本身由 builder 的 `traffic_light_position`
 /// （= tao `traffic_light_inset`，tao 每次 drawRect 自动重新应用）负责并持久保持，这里不再手动重排。
@@ -92,10 +171,9 @@ pub fn apply_chat_window_chrome(window: &WebviewWindow) {
         let _ = window.set_decorations(false);
         #[cfg(target_os = "windows")]
         {
-            // 不透明窗口：原生背景随主题（暗色 #212121 / 浅色白）。这是 WebView 之下的原生清屏色，
-            // 伸缩时新暴露区域会先用它绘制，必须与主题一致，否则暗色下会先闪一下白。
-            // 圆角 / 描边 / 阴影交给 DWM；前端 shell 仍会铺满覆盖。
-            apply_chat_window_theme_background(window, chat_window_is_dark(window));
+            // Mica 需要透明 WebView 背景（见 ensure_chat_window_with_hash）；不支持 Mica 时
+            // 由前端不透明 shell 完整覆盖回退。所以这里不再设主题清屏色。
+            let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
             let _ = window.set_shadow(true);
             apply_windows_chat_window_frame(window);
         }
@@ -104,38 +182,6 @@ pub fn apply_chat_window_chrome(window: &WebviewWindow) {
             let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
             let _ = window.set_shadow(false);
         }
-    }
-}
-
-/// 让 Windows 不透明 chat 窗口的原生背景随主题：暗色用 #212121、浅色用白。
-/// 这是 WebView 之下的原生清屏色——伸缩时新暴露区域会先用它绘制，故必须与主题一致，
-/// 否则暗色下会先闪一下白。macOS / Linux 为透明窗口，保持透明、不在此设置。
-pub fn apply_chat_window_theme_background(window: &WebviewWindow, is_dark: bool) {
-    #[cfg(target_os = "windows")]
-    {
-        let color = if is_dark {
-            Color(33, 33, 33, 255)
-        } else {
-            Color(255, 255, 255, 255)
-        };
-        let _ = window.set_background_color(Some(color));
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (window, is_dark);
-    }
-}
-
-/// 解析 chat 窗口当前是否深色：settings.theme 为 light/dark 直接取，system 跟随窗口的 OS 主题。
-#[cfg(target_os = "windows")]
-fn chat_window_is_dark(window: &WebviewWindow) -> bool {
-    let app = window.app_handle();
-    let state = app.state::<crate::state::AppState>();
-    let mode = state.settings_read().theme.clone();
-    match mode.as_str() {
-        "dark" => true,
-        "light" => false,
-        _ => matches!(window.theme(), Ok(tauri::Theme::Dark)),
     }
 }
 
@@ -170,6 +216,72 @@ fn apply_windows_chat_window_frame(window: &WebviewWindow) {
             &border_color as *const _ as *const c_void,
             std::mem::size_of_val(&border_color) as u32,
         );
+    }
+}
+
+/// 给 chat 窗口上 Mica，返回「材质是否真的生效」。
+///
+/// 不能用 `window.set_effects()`：tauri 的 `vibrancy::apply_effects` 直接丢弃
+/// `apply_mica` 的 Result，`set_effects` 又是 `let _ =`，于是 Win10（build < 22000，
+/// 根本没有 Mica）上前端也会收到 resolve，误判「材质已生效」把外壳设成 transparent
+/// —— 透明窗口 + 没有材质 = 直接透出后面的桌面和别的窗口。
+#[tauri::command]
+pub fn chat_window_apply_mica(window: WebviewWindow, dark: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        match window_vibrancy::apply_mica(&window, Some(dark)) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[chat-window] failed to apply Mica: {error}");
+                false
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, dark);
+        false
+    }
+}
+
+/// macOS chat 窗口：材质没上时把 NSWindow 设回 opaque。
+///
+/// 建窗时写死 `transparent(true)`（Menu 材质要透过 WebView 才看得见），但材质关掉后内容
+/// 本来就是铺满整窗的不透明外壳 —— 非 opaque 的 NSWindow 白拿不到合成器的不透明快路径，
+/// 阴影还要每帧从 alpha 反推。台前调度 / Mission Control 缩放整窗时这笔开销肉眼可见掉帧。
+/// 所以按「材质是否激活」来回切：材质上了必须 NO，没上就 YES。
+#[tauri::command]
+pub fn chat_window_set_opaque(window: WebviewWindow, opaque: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        use cocoa::base::id;
+        let window_for_main = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            let Ok(ptr) = window_for_main.ns_window() else {
+                return;
+            };
+            if ptr.is_null() {
+                return;
+            }
+            unsafe {
+                use objc::{class, msg_send, sel, sel_impl};
+                let ns_window = ptr as id;
+                // opaque 窗口的 backgroundColor 必须是实色：clearColor + setOpaque:YES
+                // 会让页面还没画到的地方读到未定义内容。windowBackgroundColor 跟 NSAppearance，
+                // 首帧之后整窗都被外壳盖住，用户看不到它。
+                let color: id = if opaque {
+                    msg_send![class!(NSColor), windowBackgroundColor]
+                } else {
+                    msg_send![class!(NSColor), clearColor]
+                };
+                let _: () = msg_send![ns_window, setBackgroundColor: color];
+                let _: () = msg_send![ns_window, setOpaque: opaque];
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, opaque);
     }
 }
 
@@ -258,29 +370,28 @@ pub fn ensure_chat_window_with_hash(app: &AppHandle, hash: &str) -> Result<Webvi
                 CHAT_TRAFFIC_LIGHT_X,
                 CHAT_TRAFFIC_LIGHT_INSET_Y,
             ))
-            .transparent(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .shadow(true);
     }
 
     #[cfg(target_os = "windows")]
     {
-        // Windows：不透明无边框窗口，圆角 / 描边 / 阴影全部交给 DWM
-        // （见 apply_windows_chat_window_frame）。刻意不用透明分层窗口，
-        // 否则 Win11 在分层表面上绘制系统边框时会出现一条二次接缝（顶部“叠了一层”）。
+        // Windows：透明无边框窗口让 Mica 穿过 WebView，圆角 / 描边 / 阴影交给 DWM。
         builder = builder
             .decorations(false)
-            .transparent(false)
-            .background_color(Color(255, 255, 255, 255))
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
             .shadow(true);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        // Linux：透明无边框壳，由前端 CSS 自绘圆角 / 边框 / 阴影。
+        // Linux：不支持系统窗口材质，始终使用不透明回退。
         builder = builder
             .decorations(false)
-            .transparent(true)
-            .background_color(Color(0, 0, 0, 0))
+            .transparent(false)
+            .background_color(Color(255, 255, 255, 255))
             .shadow(false);
     }
 
@@ -317,8 +428,12 @@ fn ensure_overlay_window(
         return Ok(window);
     }
 
-    // chat 模式 hash 为 '#lens'（readModeFromHash 默认即 chat）；translate / translateText / replace 带 query。
-    let hash = if mode == "translate" || mode == "translateText" || mode == "replace" {
+    // chat 模式 hash 为 '#lens'（readModeFromHash 默认即 chat）；其余模式带 query。
+    let hash = if mode == "translate"
+        || mode == "translateText"
+        || mode == "replace"
+        || mode == "screenshot"
+    {
         format!("lens?mode={mode}")
     } else {
         "lens".to_string()

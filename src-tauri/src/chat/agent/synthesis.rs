@@ -1,21 +1,23 @@
 use serde_json::{json, Value};
 
+use crate::chat::model::BuiltinWebSearch;
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ToolCallStatus};
 
 use super::finalize::{
-    empty_synthesis_fallback_response, segment_phase_for_agent_phase, stopped_generation_content,
-    synthesis_failed_fallback_response, RunResultBuilder,
+    emit_builtin_web_search_card, empty_synthesis_fallback_response, segment_phase_for_agent_phase,
+    stopped_generation_content, synthesis_failed_fallback_response, RunResultBuilder,
 };
 use super::loop_::{LoopEnv, RunState};
 use super::planning::{
-    call_chat_completion_message_with_usage, stream_scoped_chat_completion_inner,
+    call_chat_completion_message_with_usage, call_chat_completion_output_with_usage,
+    stream_scoped_chat_completion_inner,
 };
 use super::recovery::{self, RecoveryAction};
 use super::stop::{
     empty_assistant_response_error, extract_reasoning_content, final_assistant_api_message,
     merge_reasoning, sanitize_assistant_text_response,
 };
-use super::stream::ChatStreamOutput;
+use super::stream::{ChatStreamOutput, WebSearchCardTracker};
 use super::types::{AgentPhase, AgentRunConfig, AgentRunResult, AgentStreamPolicy};
 
 pub(crate) struct SynthesisCompleted {
@@ -59,6 +61,8 @@ pub(crate) async fn synthesis_step(
         None,
         &format!("step_{step_number}_reasoning"),
     );
+    // reasoning 与正文之间预留内置搜索实时卡的 order 槽（任务 07-23，与 planning 同款）。
+    let web_search_order = state.segment_builder.reserve_order();
     let response_segment = state.segment_builder.reserve(
         ChatMessageSegmentKind::Text,
         response_phase.clone(),
@@ -66,7 +70,22 @@ pub(crate) async fn synthesis_step(
         None,
         &format!("step_{step_number}_text"),
     );
+    // 内置搜索实时卡追踪器：仅 Builtin 模式且模型支持时建（否则 None，走现状路径）。
+    let synth_web_search_tracker = if config.builtin_web_search_active() {
+        Some(WebSearchCardTracker::new(
+            web_search_order,
+            None,
+            response_phase.clone(),
+            config.provider.name.clone(),
+        ))
+    } else {
+        None
+    };
 
+    // 内置搜索引用（**仅非流式路径**会有值）：流式路径由实时卡追踪器边流边合成，
+    // 此处只承接非流式 `generate` 的解析结果。初值 None 仅为满足声明（流式分支不赋值）。
+    #[allow(unused_assignments)]
+    let mut synth_web_search: Option<BuiltinWebSearch> = None;
     let (response, reasoning, response_reasoning) = if config.stream_enabled {
         let stream = stream_scoped_chat_completion_inner(
             config.state,
@@ -78,6 +97,7 @@ pub(crate) async fn synthesis_step(
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.run_id,
@@ -88,10 +108,11 @@ pub(crate) async fn synthesis_step(
             Some(response_segment.clone()),
             Some(response_reasoning_segment.clone()),
             None,
+            synth_web_search_tracker.clone(),
         )
         .await
         .map_err(|err| err.to_string());
-        let stream = match stream {
+        let mut stream = match stream {
             Ok(stream) => stream,
             Err(err) if !state.tool_records.is_empty() => {
                 eprintln!("Chat synthesis stream failed after tool records; recovering: {err}");
@@ -106,6 +127,7 @@ pub(crate) async fn synthesis_step(
                         .segment(&response_segment)
                         .emit_done("done")
                         .outcome("recovered")
+                        .degraded(state.degraded.take())
                         .finish(
                             std::mem::take(&mut state.segment_builder),
                             &state.planning_reasoning_parts,
@@ -159,6 +181,7 @@ pub(crate) async fn synthesis_step(
             ));
         }
         state.merge_usage(stream.usage.clone());
+        state.generated_images.append(&mut stream.images);
         let final_reasoning_for_api = stream.reasoning.clone();
         let reasoning = merge_reasoning(&state.planning_reasoning_parts, stream.reasoning.clone());
         let response = sanitize_assistant_text_response(&stream.content);
@@ -197,7 +220,7 @@ pub(crate) async fn synthesis_step(
         // 保证两条合成路径在超限场景行为一致。
         let runtime_messages = send_messages.clone();
         let message_result = tokio::select! {
-            result = call_chat_completion_message_with_usage(
+            result = call_chat_completion_output_with_usage(
                 config.state,
                 &config.provider,
                 &config.model,
@@ -206,25 +229,21 @@ pub(crate) async fn synthesis_step(
                 config.retry_attempts,
                 config.thinking_enabled,
                 config.thinking_level.clone(),
+                config.builtin_web_search_active(),
                 config.max_output_tokens,
                 &config.conversation_id,
                 &config.message_id,
                 "Chat API",
             ) => result,
             _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
-                host.emit_stream_done(
-                    &config.conversation_id,
-                    &config.run_id,
-                    &config.message_id,
-                    "cancelled",
-                    "",
-                );
                 return Err("cancelled".to_string());
             }
         };
         let message = match message_result {
-            Ok((message, usage)) => {
+            Ok((message, usage, web_search, images)) => {
                 state.merge_usage(usage);
+                synth_web_search = web_search;
+                state.generated_images.extend(images);
                 message
             }
             Err(err) if !state.tool_records.is_empty() => {
@@ -240,6 +259,7 @@ pub(crate) async fn synthesis_step(
                         .segment(&response_segment)
                         .emit_done("done")
                         .outcome("recovered")
+                        .degraded(state.degraded.take())
                         .finish(
                             std::mem::take(&mut state.segment_builder),
                             &state.planning_reasoning_parts,
@@ -288,13 +308,6 @@ pub(crate) async fn synthesis_step(
                 .emit_and_record(&mut state.generated_api_messages);
             (fallback, reasoning, response_reasoning)
         } else if response.trim().is_empty() {
-            host.emit_stream_done(
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                "error",
-                "",
-            );
             return Err(empty_assistant_response_error("Chat API"));
         } else {
             host.emit_stream_delta(
@@ -305,19 +318,35 @@ pub(crate) async fn synthesis_step(
                 None,
                 Some(&response_segment),
             );
-            host.emit_stream_done(
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                "done",
-                &response,
-            );
             if !state.generated_api_messages.is_empty() {
                 state.generated_api_messages.push(message);
             }
             (response, reasoning, response_reasoning)
         }
     };
+
+    // 内置搜索（服务端托管）发生过 ⇒ 一张来源卡落盘（预留槽 = 答案文本之前）。
+    // 与 planning 同款互斥：流式 take_card 落 Success 终态卡；非流式才用 synth_web_search 合成。
+    if let Some(tracker) = synth_web_search_tracker.as_ref() {
+        if let Some((record, segment)) = tracker.take_card() {
+            state
+                .segment_builder
+                .append_existing_segments(vec![segment]);
+            state.tool_records.push(record);
+        }
+    }
+    if let Some(web_search) = synth_web_search.as_ref() {
+        emit_builtin_web_search_card(
+            host,
+            env.ids(),
+            state,
+            web_search,
+            &config.provider.name,
+            response_phase.clone(),
+            None,
+            Some(web_search_order),
+        );
+    }
 
     Ok(SynthesisFlow::Completed(SynthesisCompleted {
         response,
@@ -381,24 +410,70 @@ pub(crate) async fn recover_synthesis(
     failure_message: &str,
 ) -> String {
     let config = env.config;
-    let kind = recovery::classify(failure_message);
+    let kind = silent_overflow_aware_kind(env, state, recovery::classify(failure_message));
     let has_results = !state.tool_records.is_empty();
     // 恢复中枢只在此处被调用一次/次失败,故 already_remediated / overflow_recovery_attempted
     // 都从 false 起算;真正的「只重试一次」守门在各分支内部用本地标志实现。
     match recovery::decide(kind, has_results, false, false) {
         RecoveryAction::Surface => String::new(),
-        RecoveryAction::DegradeToGathered => recovery::assemble_results_from_tool_records(
-            &state.tool_records,
-            &config.language,
-            kind,
-        ),
+        RecoveryAction::DegradeToGathered => {
+            // 结构化留存一份供前端渲染成独立卡片；返回值仍是同样的纯文本，
+            // 兼容旧前端 / 外部 CLI（它们只读 content）。
+            let degraded = recovery::assemble_degraded_answer(
+                &state.tool_records,
+                &config.language,
+                kind,
+                Some(failure_message),
+            );
+            let text = degraded
+                .as_ref()
+                .map(|d| d.text.clone())
+                .unwrap_or_default();
+            state.degraded = degraded;
+            text
+        }
         RecoveryAction::CompactAndRetry => recover_overflow_compact_and_retry(env, state).await,
-        RecoveryAction::Remediate => recover_remediate(env, state, kind).await,
+        RecoveryAction::Remediate => recover_remediate(env, state, kind, failure_message).await,
     }
 }
 
-/// CompactAndRetry 执行:压缩一次历史 → 用压缩后的发送视图重发一次合成。
-/// 成功 → 用其结果;仍失败 → 降级到确定性兜底(对应 decide 的 overflow_recovery_attempted 臂)。
+/// 把 `Empty` 在**有用量证据**时改判成 `ContextOverflow`（pi `isContextOverflow`
+/// case 2/3 的落地，判据见 [`recovery::is_silent_overflow`]）。
+///
+/// 「模型调用成功但正文为空」有两种成因，处置完全相反：真的没话说 → 重来无意义,
+/// 拿工具结果降级；被静默吞掉的超窗请求 → 压缩一次再重发，多半就出来了。
+/// `classify` 只有一个空串可看，分不出来；provider 实报的 prompt token 能。
+///
+/// 只改判 `Empty`：其它 kind 都有明确的错误文案，不该被用量猜测覆盖。
+fn silent_overflow_aware_kind(
+    env: &LoopEnv<'_>,
+    state: &RunState,
+    kind: recovery::FailureKind,
+) -> recovery::FailureKind {
+    if kind != recovery::FailureKind::Empty {
+        return kind;
+    }
+    let Some(usage) = state.last_step_usage.as_ref() else {
+        return kind;
+    };
+    let config = env.config;
+    let window = crate::chat::model_metadata::context_window_for_model(
+        Some(&config.provider),
+        &config.model,
+    )
+    .0;
+    let prompt = super::context_estimate::prompt_tokens(usage, &config.provider.api_format);
+    if !recovery::is_silent_overflow(prompt, window) {
+        return kind;
+    }
+    eprintln!(
+        "Chat: empty response with prompt {prompt:?} tokens against window {window} — \
+         treating as silent context overflow (compact and retry)"
+    );
+    recovery::FailureKind::ContextOverflow
+}
+
+/// CompactAndRetry 执行:压缩一次历史 → 用压缩后的发送视图重发一次合成。/// 成功 → 用其结果;仍失败 → 降级到确定性兜底(对应 decide 的 overflow_recovery_attempted 臂)。
 /// 单次守门:本函数只压缩-重试一次,绝不递归,杜绝「压完仍超 → 再压」死循环。
 async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunState) -> String {
     let config = env.config;
@@ -415,6 +490,7 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.message_id,
@@ -424,6 +500,8 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
             Err("cancelled".to_string())
         }
     };
+    // 重试自己的报错也要留给卡片——否则用户只看到"压缩后仍失败"这句空话。
+    let mut retry_error: Option<String> = None;
     let text = match result {
         Ok((message, usage)) => {
             state.merge_usage(usage);
@@ -436,6 +514,7 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
         }
         Err(err) => {
             eprintln!("Chat synthesis overflow compact-and-retry failed: {err}");
+            retry_error = Some(err);
             String::new()
         }
     };
@@ -443,11 +522,18 @@ async fn recover_overflow_compact_and_retry(env: &LoopEnv<'_>, state: &mut RunSt
         text
     } else {
         // 压缩重试仍失败 → 确定性兜底(decide 的 overflow_recovery_attempted=true 臂)。
-        recovery::assemble_results_from_tool_records(
+        let degraded = recovery::assemble_degraded_answer(
             &state.tool_records,
             &config.language,
             recovery::FailureKind::ContextOverflow,
-        )
+            retry_error.as_deref(),
+        );
+        let text = degraded
+            .as_ref()
+            .map(|d| d.text.clone())
+            .unwrap_or_default();
+        state.degraded = degraded;
+        text
     }
 }
 
@@ -457,6 +543,7 @@ async fn recover_remediate(
     env: &LoopEnv<'_>,
     state: &mut RunState,
     kind: recovery::FailureKind,
+    failure_message: &str,
 ) -> String {
     let config = env.config;
     let reduced = build_neutral_reduced_messages(state);
@@ -471,6 +558,7 @@ async fn recover_remediate(
             config.retry_attempts,
             config.thinking_enabled,
             config.thinking_level.clone(),
+            config.builtin_web_search_active(),
             config.max_output_tokens,
             &config.conversation_id,
             &config.message_id,
@@ -496,7 +584,19 @@ async fn recover_remediate(
         text
     } else {
         // 去敏重试仍失败 → 确定性兜底(decide 的 already_remediated 臂)。
-        recovery::assemble_results_from_tool_records(&state.tool_records, &config.language, kind)
+        // detail 用**最初**那次失败的报错：去敏重试只是补救手段，用户要排查的是原始原因。
+        let degraded = recovery::assemble_degraded_answer(
+            &state.tool_records,
+            &config.language,
+            kind,
+            Some(failure_message),
+        );
+        let text = degraded
+            .as_ref()
+            .map(|d| d.text.clone())
+            .unwrap_or_default();
+        state.degraded = degraded;
+        text
     }
 }
 

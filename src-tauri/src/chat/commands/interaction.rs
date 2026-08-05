@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::time::{sleep, timeout};
 
 use crate::chat::agent::execute::truncate_chars;
@@ -10,7 +10,6 @@ use crate::mcp::types::ChatToolArtifact;
 use crate::state::AppState;
 
 use super::catalog::strip_transcripts_for_frontend;
-use crate::chat::storage::{load_conversation, save_conversation};
 
 /// 取走外部入口排队给 Chat 前端发送的消息。
 #[tauri::command]
@@ -32,18 +31,26 @@ pub(crate) fn chat_take_external_sends(
 }
 
 #[tauri::command]
-pub(crate) fn chat_set_agent_plan_mode(
+pub(crate) async fn chat_set_agent_plan_mode(
     app: AppHandle,
     conversation_id: String,
     mode: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
     let mode = crate::chat::plan::mode_from_str(&mode)?;
-    conversation.agent_plan_state =
-        crate::chat::plan::with_mode(&conversation.agent_plan_state, mode);
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
-    emit_chat_plan_state(&app, &conversation.id, &conversation.agent_plan_state);
+    let mut conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            conversation.agent_plan_state =
+                crate::chat::plan::with_mode(&conversation.agent_plan_state, mode);
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    emit_chat_plan_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &conversation.agent_plan_state,
+    );
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -54,16 +61,23 @@ pub(crate) fn chat_set_agent_plan_mode(
 }
 
 #[tauri::command]
-pub(crate) fn chat_execute_agent_plan(
+pub(crate) async fn chat_execute_agent_plan(
     app: AppHandle,
     conversation_id: String,
     message_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-    approve_agent_plan_for_execution(&mut conversation, message_id.as_deref())?;
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
-    emit_chat_plan_state(&app, &conversation.id, &conversation.agent_plan_state);
+    let mut conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            approve_agent_plan_for_execution(conversation, message_id.as_deref())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    emit_chat_plan_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &conversation.agent_plan_state,
+    );
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -114,20 +128,35 @@ pub(crate) fn chat_cancel_stream(
     Ok(())
 }
 
-/// 响应敏感工具调用确认。
+/// 响应敏感工具调用确认。`always=true` 时额外把「本对话内该工具不再询问」落进
+/// `chat_tool_always_allow`——决策通道本身仍是 bool，三态只存在于这一层。
 #[tauri::command]
 pub(crate) fn chat_confirm_tool_call(
+    app: AppHandle,
     state: State<AppState>,
     tool_call_id: String,
     approved: bool,
+    always: Option<bool>,
+    // 计划批准（`ExitPlanMode`）三选一里用户选的那一档，决定批准后把 CLI 切到哪个权限
+    // 模式。普通审批不传。
+    permission_mode: Option<String>,
 ) -> Result<(), String> {
-    let sender = state
+    let pending = state
         .pending_chat_tool_approvals
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&tool_call_id);
-    if let Some(sender) = sender {
-        let _ = sender.send(approved);
+    if let Some(pending) = pending {
+        if approved && always.unwrap_or(false) {
+            state.grant_tool_always_allow(&pending.conversation_id, &pending.tool_name);
+        }
+        let _ = pending.sender.send(crate::state::ToolApprovalOutcome {
+            approved,
+            permission_mode: permission_mode
+                .map(|mode| mode.trim().to_string())
+                .filter(|mode| !mode.is_empty()),
+        });
+        crate::chat::protocol::withdraw_tool_approval(&app, &tool_call_id);
     }
     Ok(())
 }
@@ -176,29 +205,32 @@ pub(crate) fn chat_list_background_commands(state: State<AppState>) -> Vec<serde
 }
 
 /// 从 UI 终止一个后台命令。复用 agent 的 `kill_background`（整组杀 + 标记 Killed）。
+/// 用户从 UI 面板显式操作，可跨会话（面板列的是全部作业），故不传会话过滤。
 #[tauri::command]
 pub(crate) fn chat_kill_background_command(
     state: State<AppState>,
     job_id: String,
 ) -> Result<(), String> {
-    crate::native_tools::kill_background(&state, &serde_json::json!({ "job_id": job_id }))
+    crate::native_tools::kill_background(&state, &serde_json::json!({ "job_id": job_id }), None)
         .map(|_| ())
 }
 
 /// 响应会话级文件/命令工具授权请求(按 conversation_id)。
 #[tauri::command]
 pub(crate) fn chat_respond_session_consent(
+    app: AppHandle,
     state: State<AppState>,
     conversation_id: String,
     granted: bool,
 ) -> Result<(), String> {
-    let sender = state
+    let pending = state
         .pending_chat_session_consents
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&conversation_id);
-    if let Some(sender) = sender {
-        let _ = sender.send(granted);
+    if let Some(pending) = pending {
+        crate::chat::protocol::resolve_session_consent(&app, &pending.run_id);
+        let _ = pending.sender.send(granted);
     }
     Ok(())
 }
@@ -206,6 +238,7 @@ pub(crate) fn chat_respond_session_consent(
 /// 回答 ask_user 澄清卡片。
 #[tauri::command]
 pub(crate) fn chat_submit_user_choice(
+    app: AppHandle,
     state: State<AppState>,
     tool_call_id: String,
     answers: HashMap<String, crate::chat::ask_user::AskUserAnswer>,
@@ -239,6 +272,7 @@ pub(crate) fn chat_submit_user_choice(
     let Some(pending) = pending else {
         return Err("Clarification is no longer awaiting a response".to_string());
     };
+    crate::chat::protocol::resolve_user_prompt(&app, &pending.run_id, &tool_call_id);
     let _ = pending.sender.send(response);
     Ok(())
 }
@@ -246,6 +280,7 @@ pub(crate) fn chat_submit_user_choice(
 /// 前端 Pyodide 执行完成后回传结果。
 #[tauri::command]
 pub(crate) fn chat_python_complete(
+    app: AppHandle,
     state: State<AppState>,
     run_id: String,
     content: String,
@@ -258,6 +293,7 @@ pub(crate) fn chat_python_complete(
         .unwrap_or_else(|e| e.into_inner())
         .remove(&run_id);
     if let Some(pending) = pending {
+        crate::chat::protocol::detach_python_request(&app, &run_id);
         let _ = pending.sender.send(crate::mcp::types::PythonRunResult {
             content,
             is_error,
@@ -270,14 +306,16 @@ pub(crate) fn chat_python_complete(
 pub(super) fn emit_chat_plan_state(
     app: &AppHandle,
     conversation_id: &str,
+    revision: u64,
     plan_state: &AgentPlanState,
 ) {
-    let _ = app.emit(
-        "chat-plan",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "planState": plan_state,
-        }),
+    crate::chat::protocol::emit_conversation_event(
+        app,
+        conversation_id,
+        revision,
+        crate::chat::protocol::ChatConversationEvent::PlanUpdated {
+            plan_state: plan_state.into(),
+        },
     );
 }
 
@@ -286,7 +324,6 @@ pub(super) async fn request_session_consent(
     state: &AppState,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     generation: u64,
 ) -> bool {
     // Already granted for this conversation — no prompt.
@@ -308,15 +345,18 @@ pub(super) async fn request_session_consent(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Only one outstanding consent prompt per conversation.
-        pending.insert(conversation_id.to_string(), tx);
+        pending.insert(
+            conversation_id.to_string(),
+            crate::state::PendingSessionConsent {
+                run_id: run_id.to_string(),
+                sender: tx,
+            },
+        );
     }
-    let _ = app.emit(
-        "chat-session-consent",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::SessionConsentRequested,
     );
     let result = tokio::select! {
         result = timeout(Duration::from_secs(60), rx) => result,
@@ -326,9 +366,11 @@ pub(super) async fn request_session_consent(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(conversation_id);
+            crate::chat::protocol::resolve_session_consent(app, run_id);
             return false;
         }
     };
+    crate::chat::protocol::resolve_session_consent(app, run_id);
     match result {
         Ok(Ok(true)) => {
             state.grant_chat_consent(conversation_id);
@@ -345,36 +387,64 @@ pub(super) async fn request_session_consent(
     }
 }
 
-pub(super) async fn request_tool_approval(
+pub(crate) async fn request_tool_approval(
     app: &AppHandle,
     state: &AppState,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     generation: u64,
     record: &ToolCallRecord,
 ) -> bool {
+    request_tool_approval_outcome(app, state, conversation_id, run_id, generation, record)
+        .await
+        .approved
+}
+
+/// 同 `request_tool_approval`，但把用户选的那一档也带回来（计划批准的三选一）。
+pub(crate) async fn request_tool_approval_outcome(
+    app: &AppHandle,
+    state: &AppState,
+    conversation_id: &str,
+    run_id: &str,
+    generation: u64,
+    record: &ToolCallRecord,
+) -> crate::state::ToolApprovalOutcome {
+    // 用户此前对该工具按过「总是允许」→ 本对话内直接放行，不弹卡、不占挂起表。
+    // 内置 agent 与外部 CLI 都走这个函数，所以一处判断两条路同时生效。
+    if state.has_tool_always_allow(conversation_id, &record.name) {
+        return crate::state::ToolApprovalOutcome {
+            approved: true,
+            permission_mode: None,
+        };
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         let mut pending = state
             .pending_chat_tool_approvals
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        pending.insert(record.id.clone(), tx);
+        pending.insert(
+            record.id.clone(),
+            crate::state::PendingToolApproval {
+                conversation_id: conversation_id.to_string(),
+                tool_name: record.name.clone(),
+                sender: tx,
+            },
+        );
     }
-    let _ = app.emit(
-        "chat-tool-confirm",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "toolCallId": record.id,
-            "name": record.name,
-            "source": record.source,
-            "serverId": record.server_id,
-            "argumentsPreview": format_tool_approval_summary(record),
-            "sensitivity": "sensitive",
-        }),
+    let summary = format_tool_approval_summary(record);
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::ToolApprovalRequested {
+            tool_call_id: record.id.clone(),
+            name: record.name.clone(),
+            source: record.source.clone(),
+            server_id: record.server_id.clone(),
+            target: summary.target,
+            arguments_preview: summary.detail,
+            sensitivity: "sensitive".to_string(),
+        },
     );
     let result = tokio::select! {
         result = timeout(Duration::from_secs(60), rx) => result,
@@ -384,7 +454,9 @@ pub(super) async fn request_tool_approval(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
-            return false;
+            drop(pending);
+            withdraw_tool_confirm(app, &record.id);
+            return crate::state::ToolApprovalOutcome::default();
         }
     };
     match result {
@@ -395,17 +467,26 @@ pub(super) async fn request_tool_approval(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
-            false
+            drop(pending);
+            // 超时/通道断开 ⇒ 这条已经按拒绝处理了。必须把卡片撤掉，否则用户回来点
+            // 「允许」是个静默空操作（`chat_confirm_tool_call` 找不到条目就直接 Ok），
+            // 他会以为自己批准了，而工具早就被拒了。
+            withdraw_tool_confirm(app, &record.id);
+            crate::state::ToolApprovalOutcome::default()
         }
     }
 }
 
-pub(super) async fn request_user_response(
+/// 通知前端撤掉某条审批卡（已超时 / 已取消 / 询问方已经不在了，答复不再有意义）。
+pub(crate) fn withdraw_tool_confirm(app: &AppHandle, tool_call_id: &str) {
+    crate::chat::protocol::withdraw_tool_approval(app, tool_call_id);
+}
+
+pub(crate) async fn request_user_response(
     app: &AppHandle,
     state: &AppState,
     conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     generation: u64,
     record: &ToolCallRecord,
     prompt: crate::chat::ask_user::AskUserPromptPayload,
@@ -419,6 +500,7 @@ pub(super) async fn request_user_response(
         pending.insert(
             record.id.clone(),
             crate::chat::ask_user::PendingAskUserPrompt {
+                run_id: run_id.to_string(),
                 prompt: prompt.clone(),
                 sender: tx,
             },
@@ -431,19 +513,16 @@ pub(super) async fn request_user_response(
         crate::chat::ask_user::ASK_USER_PHASE_AWAITING,
         &empty_answers,
     );
-    let _ = app.emit(
-        "chat-user-prompt",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "toolCallId": record.id,
-            "id": record.id,
-            "name": record.name,
-            "source": record.source,
-            "prompt": prompt,
-            "structuredContent": structured_content,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::UserPromptRequested {
+            tool_call_id: record.id.clone(),
+            name: record.name.clone(),
+            source: record.source.clone(),
+            prompt: (&prompt).into(),
+            structured_content: Some(structured_content),
+        },
     );
 
     let result = tokio::select! {
@@ -454,10 +533,11 @@ pub(super) async fn request_user_response(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
+            crate::chat::protocol::resolve_user_prompt(app, run_id, &record.id);
             return crate::chat::ask_user::cancelled_response();
         }
     };
-    match result {
+    let response = match result {
         Ok(Ok(response)) => response,
         Ok(Err(_)) => {
             let mut pending = state
@@ -475,7 +555,9 @@ pub(super) async fn request_user_response(
             pending.remove(&record.id);
             crate::chat::ask_user::timeout_response()
         }
-    }
+    };
+    crate::chat::protocol::resolve_user_prompt(app, run_id, &record.id);
+    response
 }
 
 pub(super) async fn wait_for_chat_cancel(state: &AppState, conversation_id: &str, generation: u64) {
@@ -484,131 +566,114 @@ pub(super) async fn wait_for_chat_cancel(state: &AppState, conversation_id: &str
     }
 }
 
-pub(crate) fn emit_chat_tool_record(
-    app: &AppHandle,
-    conversation_id: &str,
-    run_id: &str,
-    message_id: &str,
-    record: &ToolCallRecord,
-) {
-    let _ = app.emit(
-        "chat-tool",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "toolCallId": record.id,
-            "id": record.id,
-            "name": record.name,
-            "source": record.source,
-            "serverId": record.server_id,
-            "status": record.status,
-            "argumentsPreview": truncate_chars(&record.arguments, 800),
-            "resultPreview": record.result_preview,
-            "error": record.error,
-            "startedAt": record.started_at,
-            "completedAt": record.completed_at,
-            "durationMs": record.duration_ms,
-            "round": record.round,
-            "sensitive": record.sensitive,
-            "artifacts": record.artifacts,
-            "traceId": record.trace_id,
-            "spanId": record.span_id,
-            "structuredContent": record.structured_content,
-        }),
+pub(crate) fn emit_chat_tool_record(app: &AppHandle, run_id: &str, record: &ToolCallRecord) {
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::ToolUpdated {
+            tool: crate::chat::protocol::ChatToolPayload::from_record(
+                record,
+                truncate_chars(&record.arguments, 800),
+            ),
+        },
     );
+}
+
+/// 决定一次 `emit_chat_stream_delta` 要发哪几条事件：`(发 reasoning, 发 text)`。
+///
+/// 空 delta + 有 segment 是「宣告段位置」的专用调用（工具卡槽位、内置搜索卡预留槽、段
+/// phase 改写）。`ChatToolPayload` 不带 segment/order，工具事件自己说不清该插在哪儿，这条
+/// 空 delta 事件就是唯一的位置载体——丢掉它，工具卡在流式期间根本不渲染，内置搜索卡会掉到
+/// 答案末尾。delta 和 segment 都空才是真的没内容，那才一条都不发。
+pub(super) fn stream_delta_event_kinds(
+    delta: &str,
+    reasoning_delta: Option<&str>,
+    has_segment: bool,
+) -> (bool, bool) {
+    let emit_reasoning = reasoning_delta.is_some_and(|value| !value.is_empty() || has_segment);
+    let emit_text = !delta.is_empty() || (has_segment && !emit_reasoning);
+    (emit_reasoning, emit_text)
 }
 
 pub(crate) fn emit_chat_stream_delta(
     app: &AppHandle,
-    conversation_id: &str,
     run_id: &str,
-    message_id: &str,
     delta: &str,
     reasoning_delta: Option<&str>,
     segment: Option<&ChatMessageSegment>,
 ) {
-    let _ = app.emit(
-        "chat-stream",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "imageId": "",
-            "kind": "answer",
-            "delta": delta,
-            "reasoningDelta": reasoning_delta,
-            "segmentId": segment.map(|segment| segment.id.as_str()),
-            "segmentKind": segment.map(|segment| &segment.kind),
-            "phase": segment.map(|segment| &segment.phase),
-            "order": segment.map(|segment| segment.order),
-            "stepNumber": segment.and_then(|segment| segment.step_number),
-            "round": segment.and_then(|segment| segment.round),
-            "toolCallId": segment.and_then(|segment| segment.tool_call_id.as_deref()),
-            "segment": segment,
-        }),
-    );
+    let segment = segment.map(crate::chat::protocol::ChatSegmentPayload::from);
+    let (emit_reasoning, emit_text) =
+        stream_delta_event_kinds(delta, reasoning_delta, segment.is_some());
+    if emit_reasoning {
+        crate::chat::protocol::emit_run_event(
+            app,
+            run_id,
+            crate::chat::protocol::ChatRunEvent::ReasoningDelta {
+                delta: reasoning_delta.unwrap_or_default().to_string(),
+                segment: segment.clone(),
+            },
+        );
+    }
+    if emit_text {
+        crate::chat::protocol::emit_run_event(
+            app,
+            run_id,
+            crate::chat::protocol::ChatRunEvent::TextDelta {
+                delta: delta.to_string(),
+                segment,
+            },
+        );
+    }
 }
 
-pub(crate) fn emit_chat_stream_done(
-    app: &AppHandle,
-    conversation_id: &str,
-    run_id: &str,
-    message_id: &str,
-    reason: &str,
-    full: &str,
-) {
-    let _ = app.emit(
-        "chat-stream",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "runId": run_id,
-            "messageId": message_id,
-            "imageId": "",
-            "kind": "answer",
-            "delta": "",
-            "done": true,
-            "reason": reason,
-            "full": full,
-        }),
-    );
+/// 审批卡要展示的两样东西：`target` 是这次操作的对象（文件路径 / 命令），用来在前端拼
+/// 「允许写入 xxx.md？」这种自然语言标题；`detail` 是代码块正文。
+pub(super) struct ToolApprovalSummary {
+    pub target: Option<String>,
+    pub detail: String,
 }
 
-pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
+pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> ToolApprovalSummary {
     let parsed = serde_json::from_str::<Value>(&record.arguments).ok();
+    let field = |names: &[&str]| -> Option<String> {
+        names.iter().find_map(|name| {
+            parsed
+                .as_ref()
+                .and_then(|value| value.get(*name))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    };
+    let mut target = None;
     let mut lines = Vec::new();
-    match record.name.as_str() {
-        "bash" => {
-            if let Some(command) = parsed
-                .as_ref()
-                .and_then(|value| value.get("command"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                lines.push(format!("Command: {command}"));
+    // 工具名归一化：内置 agent 用小写 snake_case（`bash` / `write`），而**外部 CLI 报的是
+    // 自己的原名**（claude 的 `Bash` / `Write` / `Edit` / `Read` 是 PascalCase）。不归一化
+    // 的话外部 CLI 的审批卡永远落进 `_` 分支、只剩一坨截断的 JSON（与 spec 第 23 条前端
+    // 工具卡踩过的是同一个坑）。字段名同理：claude 用 `file_path`，我们用 `path`。
+    match record.name.to_ascii_lowercase().as_str() {
+        "bash" | "run_command" => {
+            if let Some(command) = field(&["command"]) {
+                target = Some(truncate_chars(
+                    command.lines().next().unwrap_or(&command),
+                    120,
+                ));
+                lines.push(command);
             }
-            if let Some(cwd) = parsed
-                .as_ref()
-                .and_then(|value| value.get("cwd"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+            if let Some(cwd) = field(&["cwd", "working_directory"]) {
                 lines.push(format!("Working directory: {cwd}"));
             }
         }
-        "write" | "edit" | "read" => {
-            if let Some(path) = parsed
-                .as_ref()
-                .and_then(|value| value.get("path"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                lines.push(format!("Path: {path}"));
+        "write" | "edit" | "read" | "write_file" | "edit_file" | "read_file" | "notebookedit" => {
+            if let Some(path) = field(&["path", "file_path", "notebook_path"]) {
+                target = Some(path.clone());
+                lines.push(path);
             }
-            if record.name == "edit" {
+            if record.name.eq_ignore_ascii_case("edit")
+                || record.name.eq_ignore_ascii_case("edit_file")
+            {
                 // Current shape: edits: [{old_string, new_string}, ...]. Preview the
                 // first edit's old_string; fall back to the legacy single-edit field.
                 let first_old = parsed
@@ -618,28 +683,48 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> String {
                     .and_then(|edits| edits.first())
                     .and_then(|edit| edit.get("old_string"))
                     .and_then(|value| value.as_str())
-                    .or_else(|| {
-                        parsed
-                            .as_ref()
-                            .and_then(|value| value.get("old_string").or_else(|| value.get("old")))
-                            .and_then(|value| value.as_str())
-                    })
                     .map(str::trim)
-                    .filter(|value| !value.is_empty());
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| field(&["old_string", "old"]));
                 if let Some(old) = first_old {
-                    lines.push(format!("Replace: {}", truncate_chars(old, 180)));
+                    lines.push(format!("Replace: {}", truncate_chars(&old, 180)));
                 }
             }
+        }
+        // claude 的「计划写完了，批准我照着做」。卡片上要看到的是**计划正文**本身
+        // —— 用户批的是这份计划，不是一个工具名。
+        //
+        // 留得比别的分支长得多（20k 字符）有两个理由：卡片上那块灰框自己会滚
+        // （`max-h-40 overflow-auto`），而**右侧栏会拿同一份文本渲染整份计划**
+        // （`requestDockMarkdownPreview`）—— 在这里截短就等于右边也读不全。
+        "exitplanmode" => {
+            if let Some(plan) = field(&["plan"]) {
+                lines.push(truncate_chars(&plan, 20_000));
+            }
+        }
+        // claude 自己要求进入计划档。这个工具**没有入参**，标题已经把事情说完了；
+        // 不给 detail，否则会退到下面的裸 JSON 分支、卡片上蹲一个 `{}`。
+        "enterplanmode" => {
+            return ToolApprovalSummary {
+                target: None,
+                detail: String::new(),
+            };
         }
         _ => {}
     }
 
+    // ponytail: 只有认不出操作对象时才退回裸 JSON。认出来了还把 `Raw arguments:` 追在后面，
+    // 卡片就退化成一坨截断的 JSON（旧版本正是如此），用户看不出自己在批准什么。
     if lines.is_empty() {
-        truncate_chars(&record.arguments, 800)
+        ToolApprovalSummary {
+            target: None,
+            detail: truncate_chars(&record.arguments, 800),
+        }
     } else {
-        let mut summary = lines.join("\n");
-        summary.push_str("\n\nRaw arguments:\n");
-        summary.push_str(&truncate_chars(&record.arguments, 800));
-        summary
+        ToolApprovalSummary {
+            target,
+            detail: lines.join("\n"),
+        }
     }
 }

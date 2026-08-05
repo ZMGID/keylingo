@@ -1,9 +1,13 @@
 use tauri::AppHandle;
 
-use crate::chat::storage::{load_conversation, save_conversation};
 use crate::chat::types::AgentRuntimeConfig;
-use crate::external_agents::detection::{detect_all_agents, EXTERNAL_AGENT_MODELS_CACHE_TTL};
+use crate::external_agents::detection::{
+    detect_agent_models, detect_availability_all, AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL,
+    EXTERNAL_AGENT_MODELS_CACHE_TTL, EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+};
+use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::slash::{cache_key, list_external_cli_slash_commands};
+use crate::external_agents::types::{CachedAgentModels, ModelSource};
 use crate::external_agents::workspace::resolve_detection_cwd;
 use crate::state::AppState;
 
@@ -14,12 +18,11 @@ pub async fn chat_detect_external_agents(
     force_refresh: Option<bool>,
     conversation_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let _ = (&app, &conversation_id); // 可用性与 cwd 无关；参数保留为兼容前端签名。
     let force = force_refresh.unwrap_or(false);
-    let cwd = resolve_detection_cwd(&app, conversation_id.as_deref())?;
-    let cwd_key = cwd.to_string_lossy().into_owned();
     if !force {
         if let Some(agents) =
-            state.get_cached_detected_agents(&cwd_key, EXTERNAL_AGENT_MODELS_CACHE_TTL)
+            state.get_cached_detected_agents(AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL)
         {
             return Ok(serde_json::json!({
                 "success": true,
@@ -29,21 +32,150 @@ pub async fn chat_detect_external_agents(
         }
     }
 
-    let agents = detect_all_agents(&cwd).await;
-    for agent in &agents {
-        if !agent.models.is_empty() {
-            state.set_cached_external_agent_models(
-                cache_key(&agent.id, &cwd_key),
-                agent.models.clone(),
-            );
+    // single-flight：并发调用只实跑一次；后到者持锁后复查缓存即命中。
+    let _guard = state.availability_probe_lock.lock().await;
+    if !force {
+        if let Some(agents) =
+            state.get_cached_detected_agents(AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL)
+        {
+            return Ok(serde_json::json!({
+                "success": true,
+                "agents": agents,
+                "cached": true,
+            }));
         }
     }
-    state.set_cached_detected_agents(cwd_key, agents.clone());
+    let agents = detect_availability_all().await;
+    state.set_cached_detected_agents(AVAILABILITY_CACHE_KEY.to_string(), agents.clone());
     Ok(serde_json::json!({
         "success": true,
         "agents": agents,
         "cached": false,
     }))
+}
+
+/// 懒查：只探一个指定 agent 的模型（cwd-scoped），single-flight + 缓存。前端在选中该 agent /
+/// 打开其模型下拉时调用，避免列表阶段对所有 CLI 跑昂贵的模型探测（claude 达 25s）。
+#[tauri::command]
+pub async fn chat_detect_external_agent_models(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    conversation_id: Option<String>,
+    force: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let force = force.unwrap_or(false);
+    let def = get_agent_def(&agent_id).ok_or_else(|| format!("未知外部 Agent: {agent_id}"))?;
+    let cwd = resolve_detection_cwd(&app, conversation_id.as_deref())?;
+    let cwd_key = cwd.to_string_lossy().into_owned();
+    let key = cache_key(&agent_id, &cwd_key);
+
+    if !force {
+        if let Some(cached) = state.get_cached_external_agent_models(
+            &key,
+            EXTERNAL_AGENT_MODELS_CACHE_TTL,
+            EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+        ) {
+            return Ok(cached_models_payload(def, &cached, true));
+        }
+    }
+
+    let lock = state.model_probe_lock_for(&key);
+    let _guard = lock.lock().await;
+    if !force {
+        if let Some(cached) = state.get_cached_external_agent_models(
+            &key,
+            EXTERNAL_AGENT_MODELS_CACHE_TTL,
+            EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+        ) {
+            return Ok(cached_models_payload(def, &cached, true));
+        }
+    }
+    let probe = detect_agent_models(def, &cwd).await;
+    if !probe.models.is_empty() {
+        // probed 长 TTL，fallback 短 TTL 负缓存——由 get 侧按 source 分别裁定过期。
+        // reasoning_options 必须一并写入：ACP/kimi 档位只来自探测，def 静态表为空。
+        state.set_cached_external_agent_models(
+            key,
+            CachedAgentModels {
+                models: probe.models.clone(),
+                source: probe.source,
+                reasoning_options: probe.reasoning_options.clone(),
+                reasoning_by_model: probe.reasoning_by_model.clone(),
+                current_model: probe.current_model.clone(),
+                current_reasoning: probe.current_reasoning.clone(),
+            },
+        );
+    }
+    Ok(models_payload(
+        &probe.models,
+        &probe.reasoning_options,
+        &probe.reasoning_by_model,
+        probe.source,
+        probe.current_model.as_deref(),
+        probe.current_reasoning.as_deref(),
+        false,
+        probe.probe_error.as_deref(),
+    ))
+}
+
+fn models_payload(
+    models: &[crate::external_agents::types::RuntimeModelOption],
+    reasoning_options: &[crate::external_agents::types::RuntimeModelOption],
+    reasoning_by_model: &std::collections::HashMap<
+        String,
+        Vec<crate::external_agents::types::RuntimeModelOption>,
+    >,
+    source: ModelSource,
+    current_model: Option<&str>,
+    current_reasoning: Option<&str>,
+    cached_flag: bool,
+    probe_error: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "success": true,
+        "models": models,
+        "reasoningOptions": reasoning_options,
+        "reasoningByModel": reasoning_by_model,
+        "source": source.as_str(),
+        "cached": cached_flag,
+    });
+    if let Some(model) = current_model {
+        payload["currentModel"] = serde_json::Value::String(model.to_string());
+    }
+    if let Some(reasoning) = current_reasoning {
+        payload["currentReasoning"] = serde_json::Value::String(reasoning.to_string());
+    }
+    if source == ModelSource::Fallback {
+        if let Some(err) = probe_error {
+            payload["probeError"] = serde_json::Value::String(err.to_string());
+        }
+    }
+    payload
+}
+
+/// 组装缓存命中的返回 JSON：模型 + 缓存的 reasoning 选项 + 来源 + CLI 当前配置。
+/// 缓存里档位为空时回落 def 静态表（claude/codex/pi/grok 有表；ACP 系仍为空）。
+fn cached_models_payload(
+    def: &crate::external_agents::types::RuntimeAgentDef,
+    cached: &CachedAgentModels,
+    cached_flag: bool,
+) -> serde_json::Value {
+    let reasoning_options = if cached.reasoning_options.is_empty() {
+        crate::external_agents::types::reasoning_options_from_pairs(def.reasoning_options)
+    } else {
+        cached.reasoning_options.clone()
+    };
+    models_payload(
+        &cached.models,
+        &reasoning_options,
+        &cached.reasoning_by_model,
+        cached.source,
+        cached.current_model.as_deref(),
+        cached.current_reasoning.as_deref(),
+        cached_flag,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -65,17 +197,243 @@ pub async fn chat_list_external_cli_slash_commands(
 }
 
 #[tauri::command]
-pub fn chat_set_agent_runtime(
+pub async fn chat_set_agent_runtime(
     app: AppHandle,
     conversation_id: String,
     agent_runtime: AgentRuntimeConfig,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-    conversation.agent_runtime = agent_runtime;
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            check_runtime_switch_allowed(
+                &conversation.agent_runtime,
+                conversation.messages.is_empty(),
+                &agent_runtime,
+            )?;
+            conversation.agent_runtime = agent_runtime;
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,
     }))
+}
+
+/// Pure binding rule for `chat_set_agent_runtime` (extracted so it is unit-testable without a Tauri
+/// `AppHandle`). Returns `Err` with a user-facing message when the switch is forbidden.
+///
+/// Rule: **one agent per conversation**. Empty conversations may switch freely; once any message
+/// exists, `kind` and `external_agent_id` are frozen (covers both local CLI *and* Kivio builtin).
+/// Same-agent model / reasoning / sandbox updates remain allowed.
+fn check_runtime_switch_allowed(
+    current: &AgentRuntimeConfig,
+    messages_is_empty: bool,
+    next: &AgentRuntimeConfig,
+) -> Result<(), String> {
+    if messages_is_empty {
+        return Ok(());
+    }
+    let normalize_id = |id: &Option<String>| {
+        id.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let kind_changed = current.kind != next.kind;
+    let id_changed =
+        normalize_id(&current.external_agent_id) != normalize_id(&next.external_agent_id);
+    if kind_changed || id_changed {
+        let bound_name = if current.is_external() {
+            current
+                .external_agent_id
+                .as_deref()
+                .and_then(get_agent_def)
+                .map(|d| d.name.to_string())
+                .or_else(|| normalize_id(&current.external_agent_id))
+                .unwrap_or_else(|| "当前 CLI".to_string())
+        } else {
+            "内置 Agent".to_string()
+        };
+        return Err(format!("会话已绑定 {bound_name}，新建会话可切换 Agent"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::types::AgentRuntimeKind;
+
+    fn external(id: &str, model: &str) -> AgentRuntimeConfig {
+        AgentRuntimeConfig {
+            kind: AgentRuntimeKind::External,
+            external_agent_id: Some(id.to_string()),
+            external_model: Some(model.to_string()),
+            external_reasoning: None,
+            external_sandbox: None,
+        }
+    }
+
+    #[test]
+    fn empty_conversation_allows_any_switch() {
+        let current = external("claude", "default");
+        let next = AgentRuntimeConfig::default(); // builtin
+        assert!(check_runtime_switch_allowed(&current, true, &next).is_ok());
+        let next2 = external("codex", "default");
+        assert!(check_runtime_switch_allowed(&current, true, &next2).is_ok());
+    }
+
+    #[test]
+    fn non_empty_external_rejects_agent_and_kind_change() {
+        let current = external("claude", "default");
+        // Switch to a different CLI.
+        let to_other = external("codex", "default");
+        assert!(check_runtime_switch_allowed(&current, false, &to_other).is_err());
+        // Switch back to builtin.
+        let to_builtin = AgentRuntimeConfig::default();
+        assert!(check_runtime_switch_allowed(&current, false, &to_builtin).is_err());
+    }
+
+    #[test]
+    fn non_empty_external_allows_model_and_reasoning_change() {
+        let current = external("claude", "default");
+        let same_agent_new_model = external("claude", "sonnet");
+        assert!(check_runtime_switch_allowed(&current, false, &same_agent_new_model).is_ok());
+        let mut with_reasoning = external("claude", "default");
+        with_reasoning.external_reasoning = Some("high".to_string());
+        assert!(check_runtime_switch_allowed(&current, false, &with_reasoning).is_ok());
+    }
+
+    #[test]
+    fn non_empty_builtin_rejects_switch_to_external() {
+        let current = AgentRuntimeConfig::default(); // builtin
+        let to_external = external("claude", "default");
+        assert!(check_runtime_switch_allowed(&current, false, &to_external).is_err());
+    }
+
+    #[test]
+    fn non_empty_builtin_allows_same_kind_noop() {
+        let current = AgentRuntimeConfig::default();
+        let same = AgentRuntimeConfig::default();
+        assert!(check_runtime_switch_allowed(&current, false, &same).is_ok());
+    }
+
+    /// 回归：缓存命中必须带回探测到的 reasoning_options。
+    /// kimi 等 ACP CLI 的 def.reasoning_options 是空的；若命中时只回落 def 表，
+    /// effort 胶囊在第二次打开时消失（bac8f53 漏的那步）。
+    #[test]
+    fn cached_payload_preserves_probed_reasoning_options() {
+        use crate::external_agents::registry::get_agent_def;
+        use crate::external_agents::types::{CachedAgentModels, ModelSource, RuntimeModelOption};
+
+        let def = get_agent_def("kimi").expect("kimi def");
+        assert!(
+            def.reasoning_options.is_empty(),
+            "precondition: acp_def 静态档位表为空"
+        );
+
+        let cached = CachedAgentModels {
+            models: vec![RuntimeModelOption {
+                id: "kimi-code/kimi-for-coding".into(),
+                label: "K2.7 Coding".into(),
+                context_window_tokens: None,
+            }],
+            source: ModelSource::Probed,
+            reasoning_options: vec![
+                RuntimeModelOption {
+                    id: "low".into(),
+                    label: "Low".into(),
+                    context_window_tokens: None,
+                },
+                RuntimeModelOption {
+                    id: "high".into(),
+                    label: "High".into(),
+                    context_window_tokens: None,
+                },
+                RuntimeModelOption {
+                    id: "max".into(),
+                    label: "Max".into(),
+                    context_window_tokens: None,
+                },
+            ],
+            reasoning_by_model: Default::default(),
+            current_model: Some("kimi-code/kimi-for-coding".into()),
+            current_reasoning: Some("high".into()),
+        };
+
+        let payload = cached_models_payload(def, &cached, true);
+        let opts = payload["reasoningOptions"]
+            .as_array()
+            .expect("reasoningOptions array");
+        assert_eq!(opts.len(), 3, "缓存命中应保留探测档位，不能回落空 def 表");
+        assert_eq!(opts[0]["id"], "low");
+        assert_eq!(opts[2]["id"], "max");
+        assert_eq!(payload["currentReasoning"], "high");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 从本地 CLI 导入对话
+// ---------------------------------------------------------------------------------------------
+
+/// 列出某个项目下可导入的原生会话（按项目工作目录过滤，已导入的带标记）。
+#[tauri::command]
+pub async fn chat_list_importable_cli_sessions(
+    app: AppHandle,
+    project_id: String,
+) -> Result<serde_json::Value, String> {
+    let sessions =
+        crate::external_agents::import::list_importable_for_project(&app, &project_id).await?;
+    Ok(serde_json::json!({ "success": true, "sessions": sessions }))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionRequest {
+    pub agent_id: String,
+    pub session_id: String,
+}
+
+/// 批量导入。**单条失败不影响其它条**——一次勾十条，不该因为其中一条的文件损坏就全军覆没。
+#[tauri::command]
+pub async fn chat_import_cli_sessions(
+    app: AppHandle,
+    project_id: String,
+    items: Vec<ImportSessionRequest>,
+) -> Result<serde_json::Value, String> {
+    let mut imported = Vec::new();
+    let mut failures = Vec::new();
+    for item in items {
+        match crate::external_agents::import::import_one_session(
+            &app,
+            &project_id,
+            &item.agent_id,
+            &item.session_id,
+        )
+        .await
+        {
+            Ok(conversation_id) => imported.push(serde_json::json!({
+                "agentId": item.agent_id,
+                "sessionId": item.session_id,
+                "conversationId": conversation_id,
+            })),
+            Err(error) => failures.push(serde_json::json!({
+                "agentId": item.agent_id,
+                "sessionId": item.session_id,
+                "error": error,
+            })),
+        }
+    }
+    Ok(serde_json::json!({
+        "success": failures.is_empty(),
+        "imported": imported,
+        "failures": failures,
+    }))
+}
+
+/// 这条导入的对话，在 CLI 那边是不是已经有新内容了（ADR-0002 的过期提示）。
+#[tauri::command]
+pub fn chat_imported_history_stale(app: AppHandle, conversation_id: String) -> bool {
+    crate::external_agents::import::imported_history_is_stale(&app, &conversation_id)
 }

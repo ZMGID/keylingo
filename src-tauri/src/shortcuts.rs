@@ -6,8 +6,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::commands::apply_launch_at_startup;
 use crate::lens_commands::{
-    lens_close, lens_request, lens_request_replace, lens_request_translate,
-    lens_request_translate_text, request_lens_close,
+    lens_close, lens_request, lens_request_replace, lens_request_screenshot,
+    lens_request_translate, lens_request_translate_text, request_lens_close,
 };
 use crate::settings::Settings;
 use crate::state::AppState;
@@ -474,9 +474,11 @@ enum HotkeyErrorKind {
 enum HotkeyScope {
     Translator,
     Chat,
+    CloseChat,
     Screenshot,
     ScreenshotText,
     ScreenshotReplace,
+    ScreenshotAnnotate,
     Lens,
 }
 
@@ -599,6 +601,31 @@ pub(crate) fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
         }
     }
 
+    if !settings.close_chat_hotkey.trim().is_empty() {
+        let hotkey = settings.close_chat_hotkey.trim().to_string();
+        let hotkey_key = hotkey.to_lowercase();
+        if !registered.insert(hotkey_key) {
+            errors.push(HotkeyError {
+                kind: HotkeyErrorKind::Duplicate,
+                scope: HotkeyScope::CloseChat,
+                hotkey: hotkey.clone(),
+                raw: None,
+            });
+        } else if let Err(err) =
+            shortcut_manager.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    close_chat_window(app);
+                }
+            })
+        {
+            errors.push(classify_hotkey_error(
+                HotkeyScope::CloseChat,
+                hotkey,
+                err.to_string(),
+            ));
+        }
+    }
+
     if settings.screenshot_translation.enabled {
         let hotkey = settings.screenshot_translation.hotkey.trim().to_string();
         if !hotkey.is_empty() {
@@ -713,6 +740,42 @@ pub(crate) fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
                         err.to_string(),
                     ));
                 }
+            }
+        }
+    }
+
+    if settings.screenshot_annotate.enabled {
+        let hotkey = settings.screenshot_annotate.hotkey.trim().to_string();
+        if !hotkey.is_empty() {
+            let hotkey_key = hotkey.to_lowercase();
+            if !registered.insert(hotkey_key) {
+                errors.push(HotkeyError {
+                    kind: HotkeyErrorKind::Duplicate,
+                    scope: HotkeyScope::ScreenshotAnnotate,
+                    hotkey: hotkey.clone(),
+                    raw: None,
+                });
+            } else if let Err(err) =
+                shortcut_manager.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        if lens_is_active(app) {
+                            let _ = request_lens_close(app);
+                        } else {
+                            let handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(err) = lens_request_screenshot(handle) {
+                                    eprintln!("Screenshot annotate trigger error: {err}");
+                                }
+                            });
+                        }
+                    }
+                })
+            {
+                errors.push(classify_hotkey_error(
+                    HotkeyScope::ScreenshotAnnotate,
+                    hotkey,
+                    err.to_string(),
+                ));
             }
         }
     }
@@ -1029,6 +1092,13 @@ fn restore_macos_development_app_icon() {
     }
 }
 
+/// 关闭独立 AI 客户端窗口（销毁 chat WebView，与点右上角 × 一致）。
+pub(crate) fn close_chat_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("chat") {
+        let _ = window.close();
+    }
+}
+
 /// 打开独立 AI 客户端窗口。
 pub(crate) fn open_chat_window(app: &AppHandle) -> Result<(), String> {
     // 故意打开 Chat：清掉浮窗的"前台交还"快照（两个槽都清），避免随后浮窗关闭把前台从 Chat
@@ -1146,6 +1216,29 @@ pub(crate) fn open_settings_window_for_activation(app: &AppHandle) -> Result<(),
         let _ = focus_lens_window(app);
         return Ok(());
     }
+    // 激活（单实例二次启动 / Windows 普通启动）时，优先把用户当前已开的主窗口带到前台：
+    // 绝不强跳 Chat，更不能把正在 #chat/settings 配置的用户重置回 #chat（会丢失填到一半的
+    // API key）。只有一个主窗口都没开时，才新开 Chat 作为默认入口。
+    for label in ["settings", "chat", "main"] {
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        set_macos_regular_activation_policy(app);
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+        #[cfg(target_os = "macos")]
+        if label == "chat" {
+            apply_macos_traffic_light_position(&window);
+        }
+        return Ok(());
+    }
     open_chat_window(app)
 }
 
@@ -1260,8 +1353,11 @@ pub(crate) fn setup_tray(app: &AppHandle) -> Result<(), String> {
                         return;
                     }
                 }
-                if let Err(err) = open_chat_window(app) {
-                    eprintln!("Tray click chat trigger error: {}", err);
+                // 托盘图标点击 = 把 Kivio 带到前台：优先聚焦当前已开的窗口，不强跳 Chat，
+                // 也不把停在 #chat/settings 的用户重置回 #chat（丢失填到一半的配置）。
+                // 一个窗口都没开时才新开 Chat。
+                if let Err(err) = open_settings_window_for_activation(app) {
+                    eprintln!("Tray click activation error: {}", err);
                 }
             }
         })

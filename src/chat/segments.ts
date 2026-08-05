@@ -10,6 +10,81 @@ export function toolRecordRawName(toolCall: ToolCallRecord): string {
   return toolCall.tool_name || toolCall.toolName || toolCall.name || ''
 }
 
+/** Edit/Write 类工具名（含外部 CLI 的 Edit/Write/MultiEdit/NotebookEdit 变体）。 */
+function isFileWriteToolName(toolCall: ToolCallRecord): boolean {
+  const name = toolRecordRawName(toolCall).toLowerCase().replace(/[_\-\s]/g, '')
+  return ['write', 'writefile', 'edit', 'editfile', 'multiedit', 'notebookedit'].includes(name)
+}
+
+function recordObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function recordString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function parsedToolArguments(toolCall: ToolCallRecord): Record<string, unknown> | null {
+  const value = toolCall.arguments ?? toolCall.args ?? toolCall.input
+  if (typeof value !== 'string') return recordObject(value)
+  try {
+    return recordObject(JSON.parse(value))
+  } catch {
+    return null
+  }
+}
+
+export interface DiffStats {
+  additions: number
+  removals: number
+}
+
+/** Edit/Write 类工具的 `+N -N`：优先读后端 structured_content 的真实 additions/removals；
+ *  外部 CLI 的记录没有统计时，按参数新旧文本（old_string/new_string/edits[]/content）的
+ *  行数估算。非文件写入工具、未完成的调用返回 null。
+ *  ponytail: replace_all 的多处命中会被低估成一处，参数即所见，够用。 */
+export function toolCallDiffStats(toolCall: ToolCallRecord): DiffStats | null {
+  if (!isFileWriteToolName(toolCall)) return null
+  if (normalizeToolCallStatus(toolCall.status) !== 'completed') return null
+
+  const structured = recordObject(toolCall.structured_content ?? toolCall.structuredContent)
+  if (structured && !recordObject(structured.toolDraft)) {
+    const files = Array.isArray(structured.files) ? structured.files.map(recordObject) : []
+    if (typeof structured.additions === 'number' || typeof structured.removals === 'number' || files.length) {
+      let additions = typeof structured.additions === 'number' ? structured.additions : 0
+      let removals = typeof structured.removals === 'number' ? structured.removals : 0
+      if (!additions && !removals) {
+        for (const file of files) {
+          additions += typeof file?.additions === 'number' ? file.additions : 0
+          removals += typeof file?.removals === 'number' ? file.removals : 0
+        }
+      }
+      return { additions, removals }
+    }
+  }
+
+  const args = parsedToolArguments(toolCall)
+  const lines = (text: string) => (text ? text.split('\n').length : 0)
+  let additions = 0
+  let removals = 0
+  const edits = Array.isArray(args?.edits) ? args.edits : null
+  if (edits) {
+    for (const edit of edits) {
+      const pair = recordObject(edit)
+      additions += lines(recordString(pair?.new_string))
+      removals += lines(recordString(pair?.old_string))
+    }
+  } else if (recordString(args?.old_string) || recordString(args?.new_string)) {
+    additions = lines(recordString(args?.new_string))
+    removals = lines(recordString(args?.old_string))
+  } else {
+    additions = lines(recordString(args?.content) || recordString(args?.text))
+  }
+  return additions || removals ? { additions, removals } : null
+}
+
 /** Tool calls that render as their own dedicated, always-visible card in the
  *  timeline (never folded into the "调用 N 次工具" group): sub-agents (`agent`)
  *  and advisor consultations. Matched by structured content type first, then by
@@ -273,6 +348,8 @@ export interface ToolGroupSummary {
   /** 组内涉及的「有意义类别」列表（去重、保持首次出现顺序、剔除 `'other'`）。
    *  混合类别时用于在摘要后排一行各类工具图标；纯 reasoning 组为 `[]`。 */
   categories: ToolGroupIcon[]
+  /** 组内所有 Edit/Write 的 `+N -N` 总计；没有文件写入（或行数全为 0）时为 null。 */
+  diffStats: DiffStats | null
 }
 
 /**
@@ -329,6 +406,14 @@ export function summarizeToolGroup(
     status,
     icon,
     categories: meaningful,
+    diffStats: matchedTools.reduce<DiffStats | null>((total, tool) => {
+      const stats = toolCallDiffStats(tool)
+      if (!stats) return total
+      return {
+        additions: (total?.additions ?? 0) + stats.additions,
+        removals: (total?.removals ?? 0) + stats.removals,
+      }
+    }, null),
   }
 }
 

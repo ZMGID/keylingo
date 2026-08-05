@@ -1,7 +1,7 @@
 use reqwest::header::ACCEPT_ENCODING;
 use serde_json::Value;
 
-use crate::api::{send_with_failover, with_standard_request_timeout};
+use crate::api::{send_with_failover, with_chat_request_timeout};
 use crate::settings::ModelProvider;
 use crate::state::AppState;
 use crate::usage::{
@@ -12,8 +12,8 @@ use crate::utils;
 
 use super::{
     openai_messages_from_generate_request, pending_tool_calls_from_openai_message,
-    stream_read_error, GenerateOutput, GenerateRequest, LanguageModelProvider, ModelError,
-    ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink,
+    stream_read_error, GenerateOutput, GenerateRequest, GeneratedImageData, LanguageModelProvider,
+    ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink,
 };
 
 pub struct OpenAiChatProvider<'a> {
@@ -48,7 +48,7 @@ impl LanguageModelProvider for OpenAiChatProvider<'_> {
 
 /// 判断错误是否是"端点拒绝 prompt_cache_key 字段"。仅在本次确实发了该字段时配合调用，
 /// 错误体点名该字段即视为命中（NVIDIA NIM / 智谱 GLM 等严格端点的 400 会带上字段名）。
-fn error_rejects_prompt_cache_key(err: &str) -> bool {
+pub(super) fn error_rejects_prompt_cache_key(err: &str) -> bool {
     err.contains("prompt_cache_key")
 }
 
@@ -75,7 +75,7 @@ impl OpenAiChatProvider<'_> {
         result
     }
 
-    /// 单次发送（带多 key failover）。非流式套 `with_standard_request_timeout` 总超时；
+    /// 单次发送（带多 key failover）。非流式套 `with_chat_request_timeout` 总超时；
     /// 流式不套，避免活跃 SSE 被总超时砍断（与改动前两条路径各自的行为一致）。
     async fn post_chat(
         &self,
@@ -94,7 +94,7 @@ impl OpenAiChatProvider<'_> {
                 let req = crate::api::attach_json_body(
                     self.with_session_headers(
                         self.state
-                            .http
+                            .client_for(self.provider)
                             .post(self.chat_completions_url())
                             .bearer_auth(key)
                             .header(ACCEPT_ENCODING, "identity"),
@@ -106,7 +106,7 @@ impl OpenAiChatProvider<'_> {
                 let req = if stream {
                     req
                 } else {
-                    with_standard_request_timeout(req)
+                    with_chat_request_timeout(req)
                 };
                 req.send()
             },
@@ -214,6 +214,8 @@ impl OpenAiChatProvider<'_> {
         let mut tool_partials: Vec<PartialToolCall> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut usage: Option<ModelUsage> = None;
+        // 代理仿 OpenRouter 出图：流式 chunk 的 `delta.images` 逐帧累积，finish 后并入 output。
+        let mut images: Vec<GeneratedImageData> = Vec::new();
 
         loop {
             let chunk = response.chunk().await.map_err(|err| {
@@ -264,6 +266,8 @@ impl OpenAiChatProvider<'_> {
                         finish_reason: Some(reason),
                         provider_messages: Vec::new(),
                         cancelled: false,
+                        web_search: None,
+                        images,
                     };
                     self.record_usage_success(
                         &request,
@@ -305,6 +309,13 @@ impl OpenAiChatProvider<'_> {
                         sink.emit(StreamPart::TextDelta { delta })?;
                     }
                 }
+                for image in extract_chat_stream_images(&value) {
+                    sink.emit(StreamPart::ImageData {
+                        mime_type: image.mime_type.clone(),
+                        data: image.data.clone(),
+                    })?;
+                    images.push(image);
+                }
             }
         }
 
@@ -322,6 +333,8 @@ impl OpenAiChatProvider<'_> {
             finish_reason: Some(reason),
             provider_messages: Vec::new(),
             cancelled: false,
+            web_search: None,
+            images,
         };
         self.record_usage_success(
             &request,
@@ -351,13 +364,26 @@ impl OpenAiChatProvider<'_> {
     /// 会话亲和头（对齐 opencode）：同一对话每轮带同一 id。会话亲和型代理据此把请求
     /// 稳定路由到同一上游会话（不再靠前缀指纹猜，杜绝串台/复用脏会话）；正经 provider
     /// 忽略未知头，无副作用。发送与请求调试记录共用 `session_header_pairs`，杜绝漂移。
+    /// 供应商「请求配置」里的 CLI 身份头与自定义头也在这里叠上（同名时自定义优先）。
     fn with_session_headers(
         &self,
         request: reqwest::RequestBuilder,
         metadata: &crate::chat::model::RequestMetadata,
     ) -> reqwest::RequestBuilder {
-        let mut request = request;
+        // 先把会话头与请求配置的头合成一份「同名只留一条」的清单再贴：reqwest 的
+        // `.header()` 是 append，分两轮贴会让用户自定义的 x-session-id 与我们自己的并存。
+        let mut pairs: Vec<(String, String)> = Vec::new();
         for (name, value) in session_header_pairs(metadata) {
+            crate::provider_request::upsert_pair(&mut pairs, name.to_string(), value);
+        }
+        for (name, value) in crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        ) {
+            crate::provider_request::upsert_pair(&mut pairs, name, value);
+        }
+        let mut request = request;
+        for (name, value) in pairs {
             request = request.header(name, value);
         }
         request
@@ -376,8 +402,21 @@ impl OpenAiChatProvider<'_> {
         }
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
         headers.insert("Content-Type".to_string(), "application/json".to_string());
+        // 先按大小写不敏感合成一份，再折进 BTreeMap。BTreeMap 的 key 是大小写敏感的：
+        // 用户把自定义头写成 `X-Session-Id`（不在保留名单里，允许覆盖）时，发送路径会
+        // upsert 成一条，直接往 map 里塞会显示成两条——正是本模块要杜绝的那种不一致。
+        let mut pairs: Vec<(String, String)> = Vec::new();
         for (name, value) in session_header_pairs(metadata) {
-            headers.insert(name.to_string(), value);
+            crate::provider_request::upsert_pair(&mut pairs, name.to_string(), value);
+        }
+        for (name, value) in crate::provider_request::header_pairs(
+            self.provider,
+            metadata.conversation_id.as_deref(),
+        ) {
+            crate::provider_request::upsert_pair(&mut pairs, name, value);
+        }
+        for (name, value) in pairs {
+            headers.insert(name, value);
         }
         crate::chat::request_debug::sanitize_headers(headers)
     }
@@ -485,9 +524,12 @@ impl OpenAiChatProvider<'_> {
         // 400（"Unrecognized request argument"），这正是逼出原生 gemini 适配器的同类问题。
         // 少数严格端点连 snake_case 也拒（NVIDIA NIM / 智谱 GLM）：首次 400 后由 stream/generate
         // 自动去掉该字段重试并记入 state.prompt_cache_key_unsupported，本会话后续就地跳过。
-        if !self
-            .state
-            .prompt_cache_key_unsupported(&self.provider.base_url)
+        // 开关关掉时不发这个字段：这就是 OpenAI 侧「prompt 缓存」的全部内容
+        // （官方按稳定前缀 + 该键做缓存路由），Anthropic 那边对应的是 cache_control 断点。
+        if self.provider.prompt_caching_enabled()
+            && !self
+                .state
+                .prompt_cache_key_unsupported(&self.provider.base_url)
         {
             if let Some(conversation_id) = request
                 .metadata
@@ -498,21 +540,39 @@ impl OpenAiChatProvider<'_> {
                 body["prompt_cache_key"] = Value::String(conversation_id.to_string());
             }
         }
-        if !request.options.thinking_enabled
-            && utils::provider_supports_thinking_field(&self.provider.base_url)
-        {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
+        // UI「Off」→ 显式关闭思考。省略字段在多家默认会落到 high（DeepSeek 文档：
+        // 思考默认开、effort 默认 high；OpenAI 也把 none 列为一等 effort）。
+        //
+        // 两套 wire：
+        // - DeepSeek / Kimi 官方：Chat Completions 用 `thinking.type=disabled` 做开关
+        //   （其 reasoning_effort 只认 low/high/max，没有 none）。
+        // - 其余 OpenAI 兼容端（含代理 / OpenAI 自家）：`reasoning_effort: "none"`。
+        if !request.options.thinking_enabled {
+            if utils::provider_supports_thinking_field(&self.provider.base_url) {
+                body["thinking"] = serde_json::json!({ "type": "disabled" });
+            } else {
+                body["reasoning_effort"] = Value::String("none".to_string());
+            }
         }
-        // 思考等级（仅在用户显式选了等级时注入）。reasoning_effort 是 OpenAI Chat
-        // Completions 的标准参数（GPT-5/o 系），代理普遍接受；不发 Qwen/vLLM 私有的
-        // enable_thinking / chat_template_kwargs。
-        if let Some(level) = request
-            .options
-            .thinking_level
-            .as_deref()
-            .filter(|l| !l.is_empty())
+        // 思考等级 → OpenAI Chat `reasoning_effort`，原样下发（档位由模型库 reasoningEfforts 门控）。
+        // 代理普遍接受;不发 Qwen/vLLM 私有的 enable_thinking / chat_template_kwargs。
+        // 与上面 Off 分支互斥：resolve_thinking 在 off 时把 level 抹成 None。
+        if let Some(effort) = request.options.thinking_level.as_deref() {
+            body["reasoning_effort"] = Value::String(effort.to_string());
+        }
+        // 模型级额外请求体字段（model_overrides[model].extra_body）：原样 merge 进 body 根部，
+        // 给严格端点塞标准 schema 外的私有旋钮（NVIDIA NIM / vLLM `chat_template_kwargs` 等）。
+        // 放在单次 provider_options 之前，让显式的单次覆盖仍然最后生效。
+        if let Some(extra) = self
+            .provider
+            .model_overrides
+            .get(&request.model)
+            .and_then(|info| info.extra_body.as_ref())
+            .and_then(|value| value.as_object())
         {
-            body["reasoning_effort"] = Value::String(level.to_string());
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {
@@ -585,7 +645,7 @@ impl OpenAiChatProvider<'_> {
                 model: &request.model,
                 source: &source,
                 operation: &operation,
-                status: "error",
+                status: crate::usage::failure_status_from_message(error),
                 status_code: crate::api::extract_status_code(error),
                 usage: None,
                 usage_source: "missing",
@@ -620,6 +680,11 @@ pub fn output_from_chat_completion(
         .and_then(|value| value.as_str())
         .map(str::to_string);
     let usage = model_usage_from_openai_response(value);
+    // 代理仿 OpenRouter 出图：非流式在 message.images 携带图片数组，解析为协议无关 images。
+    let images = message
+        .get("images")
+        .map(generated_images_from_openai_images)
+        .unwrap_or_default();
 
     Ok(GenerateOutput {
         text,
@@ -629,6 +694,8 @@ pub fn output_from_chat_completion(
         finish_reason,
         provider_messages: vec![message],
         cancelled: false,
+        web_search: None,
+        images,
     })
 }
 
@@ -934,6 +1001,71 @@ fn finish_tool_call_partials(
     Ok(calls)
 }
 
+/// 从 OpenRouter 风格的 `images` 数组解析出模型生成的图片（协议无关形态）。
+/// 形如 `[{type:"image_url", image_url:{url:"data:image/png;base64,..."}}]`（这些代理仿
+/// OpenRouter 出图）。仅收 data URL；http(s) 直链或格式异常项静默跳过（不报错，保持无图
+/// 响应字节等价——绝大多数普通 chat 无该字段，行为完全不变）。
+fn generated_images_from_openai_images(images: &Value) -> Vec<GeneratedImageData> {
+    let Some(array) = images.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in array {
+        let Some(url) = item
+            .get("image_url")
+            .or_else(|| item.get("imageUrl"))
+            .and_then(|value| value.get("url"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        if let Some(image) = parse_openai_image_data_url(url) {
+            out.push(image);
+        }
+    }
+    out
+}
+
+/// 解析 data URL 为 GeneratedImageData（mime + 纯 base64）。非 data URL（含 http(s) 直链）
+/// 或非 base64 编码返回 None 静默跳过——现阶段不下载远程直链，只避免误伤正常 chat。
+fn parse_openai_image_data_url(url: &str) -> Option<GeneratedImageData> {
+    let trimmed = url.trim();
+    let rest = trimmed.strip_prefix("data:")?;
+    let (metadata, payload) = rest.split_once(',')?;
+    if !metadata
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        return None;
+    }
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return None;
+    }
+    let mime_type = metadata
+        .split(';')
+        .next()
+        .map(str::trim)
+        .filter(|value| value.starts_with("image/"))
+        .unwrap_or("image/png")
+        .to_string();
+    Some(GeneratedImageData {
+        mime_type,
+        data: payload.to_string(),
+    })
+}
+
+/// 流式 chunk 的 `choices[0].delta.images` → 协议无关 images（形状同非流式 message.images）。
+fn extract_chat_stream_images(value: &Value) -> Vec<GeneratedImageData> {
+    value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("images"))
+        .map(generated_images_from_openai_images)
+        .unwrap_or_default()
+}
+
 fn openai_stream_finish_reason(value: &Value) -> Option<&str> {
     value
         .get("choices")
@@ -958,8 +1090,16 @@ mod tests {
     use crate::settings::ModelInfo;
 
     /// Build a real OpenAI-compatible provider request body via the production
-    /// `request_body` path and assert how `thinking_level` maps to the wire.
+    /// `request_body` path and assert how thinking maps to the wire.
     fn build_openai_body(thinking_level: Option<&str>, base_url: &str) -> Value {
+        build_openai_body_with(thinking_level, true, base_url)
+    }
+
+    fn build_openai_body_with(
+        thinking_level: Option<&str>,
+        thinking_enabled: bool,
+        base_url: &str,
+    ) -> Value {
         let state =
             AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
         let provider = ModelProvider {
@@ -974,6 +1114,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -985,6 +1126,7 @@ mod tests {
             }],
             tools: Vec::new(),
             options: GenerateOptions {
+                thinking_enabled,
                 thinking_level: thinking_level.map(|s| s.to_string()),
                 ..Default::default()
             },
@@ -1021,6 +1163,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides,
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1042,7 +1185,7 @@ mod tests {
 
     #[test]
     fn thinking_level_maps_to_reasoning_effort() {
-        // 未设等级 → 不发 reasoning_effort（与改动前一致）。
+        // 开思考但未设等级 → 不发 reasoning_effort（与改动前一致）。
         let none = build_openai_body(None, "https://api.openai.com/v1");
         assert!(none.get("reasoning_effort").is_none(), "body: {none}");
 
@@ -1053,6 +1196,34 @@ mod tests {
 
         let high = build_openai_body(Some("high"), "https://api.openai.com/v1");
         assert_eq!(high["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn thinking_off_sends_explicit_none_on_openai_compat() {
+        // UI Off → 显式 reasoning_effort:"none"，不能省略（多家省略默认 high）。
+        let off = build_openai_body_with(None, false, "https://api.openai.com/v1");
+        assert_eq!(off["reasoning_effort"], "none", "body: {off}");
+        assert!(off.get("thinking").is_none(), "body: {off}");
+
+        // 代理 / 中转同样走 none（base_url 不含 deepseek.com / moonshot.cn）。
+        let relay = build_openai_body_with(None, false, "https://relay.example.com/v1");
+        assert_eq!(relay["reasoning_effort"], "none", "body: {relay}");
+    }
+
+    #[test]
+    fn thinking_off_uses_thinking_disabled_on_deepseek_and_kimi() {
+        // DeepSeek / Kimi 官方 Chat Completions：开关是 thinking.type，不是
+        // reasoning_effort:"none"（官方 schema 的 effort 只有 low/high/max）。
+        let ds = build_openai_body_with(None, false, "https://api.deepseek.com/v1");
+        assert_eq!(ds["thinking"]["type"], "disabled", "body: {ds}");
+        assert!(
+            ds.get("reasoning_effort").is_none(),
+            "DeepSeek Chat 不该发 none: {ds}"
+        );
+
+        let kimi = build_openai_body_with(None, false, "https://api.moonshot.cn/v1");
+        assert_eq!(kimi["thinking"]["type"], "disabled", "body: {kimi}");
+        assert!(kimi.get("reasoning_effort").is_none(), "body: {kimi}");
     }
 
     #[test]
@@ -1074,6 +1245,66 @@ mod tests {
     }
 
     #[test]
+    fn model_extra_body_merges_into_request_body_root() {
+        // model_overrides[model].extra_body 原样进 body 根部（NVIDIA NIM chat_template_kwargs 用例）。
+        let state =
+            AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
+        let mut model_overrides = std::collections::HashMap::new();
+        model_overrides.insert(
+            "deepseek-ai/deepseek-v4-pro".to_string(),
+            ModelInfo {
+                extra_body: Some(serde_json::json!({
+                    "chat_template_kwargs": { "thinking": true }
+                })),
+                ..ModelInfo::default()
+            },
+        );
+        let provider = ModelProvider {
+            id: "nv".into(),
+            name: "NV".into(),
+            api_keys: vec!["nvapi-test".into()],
+            api_key_legacy: None,
+            base_url: "https://integrate.api.nvidia.com/v1".into(),
+            available_models: vec!["deepseek-ai/deepseek-v4-pro".into()],
+            enabled_models: vec!["deepseek-ai/deepseek-v4-pro".into()],
+            enabled: true,
+            api_format: "openai_chat".into(),
+            model_overrides,
+            compress_request_body: false,
+            request: Default::default(),
+        };
+        let adapter = OpenAiChatProvider::new(&state, &provider, 1);
+        let request = GenerateRequest {
+            model: "deepseek-ai/deepseek-v4-pro".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions::default(),
+            metadata: Default::default(),
+        };
+        let body = adapter.request_body(&request, false);
+        assert_eq!(
+            body["chat_template_kwargs"],
+            serde_json::json!({ "thinking": true }),
+            "body: {body}"
+        );
+
+        // 无 override 的模型不受影响。
+        let plain = GenerateRequest {
+            model: "other-model".into(),
+            ..request
+        };
+        let plain_body = adapter.request_body(&plain, false);
+        assert!(
+            plain_body.get("chat_template_kwargs").is_none(),
+            "body: {plain_body}"
+        );
+    }
+
+    #[test]
     fn request_body_carries_session_cache_key_and_stream_usage() {
         let state =
             AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
@@ -1089,6 +1320,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let tool = crate::chat::model::ModelTool {
@@ -1153,6 +1385,7 @@ mod tests {
                 api_format: "openai_chat".into(),
                 model_overrides: Default::default(),
                 compress_request_body: false,
+                request: Default::default(),
             };
             let adapter = OpenAiChatProvider::new(&state, &provider, 1);
             let request = GenerateRequest {
@@ -1187,6 +1420,74 @@ mod tests {
             make("https://api.openai.com/v1")["prompt_cache_key"],
             "conv_abc"
         );
+    }
+
+    #[test]
+    fn prompt_caching_toggle_gates_the_cache_key() {
+        // OpenAI 侧的「prompt 缓存」就是这个字段，关掉开关必须不发。默认是开的。
+        let state =
+            AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
+        let body_with = |caching: bool| {
+            let provider = ModelProvider {
+                id: "test".into(),
+                name: "Test".into(),
+                api_keys: vec!["sk-test".into()],
+                api_key_legacy: None,
+                base_url: "https://api.openai.com/v1".into(),
+                available_models: vec!["m".into()],
+                enabled_models: vec!["m".into()],
+                enabled: true,
+                api_format: "openai_chat".into(),
+                model_overrides: Default::default(),
+                compress_request_body: false,
+                request: crate::settings::ProviderRequestConfig {
+                    prompt_caching: Some(caching),
+                    ..Default::default()
+                },
+            };
+            let adapter = OpenAiChatProvider::new(&state, &provider, 1);
+            adapter.request_body(
+                &GenerateRequest {
+                    model: "m".into(),
+                    system: "sys".into(),
+                    messages: vec![ModelMessage {
+                        role: ModelRole::User,
+                        content: vec![MessagePart::Text { text: "hi".into() }],
+                    }],
+                    tools: Vec::new(),
+                    options: GenerateOptions::default(),
+                    metadata: crate::chat::model::RequestMetadata {
+                        conversation_id: Some("conv_abc".into()),
+                        ..Default::default()
+                    },
+                },
+                false,
+            )
+        };
+        assert_eq!(body_with(true)["prompt_cache_key"], "conv_abc");
+        assert!(body_with(false).get("prompt_cache_key").is_none());
+        // 老配置没有这个字段（None）时按协议给默认：OpenAI 系照旧发（行为不变），
+        // Anthropic 侧不打断点（净新增的线格式变化，不能悄悄替用户开）。
+        let mut p = ModelProvider {
+            id: "x".into(),
+            name: "x".into(),
+            api_keys: vec!["k".into()],
+            api_key_legacy: None,
+            base_url: "https://api.openai.com/v1".into(),
+            available_models: Vec::new(),
+            enabled_models: Vec::new(),
+            enabled: true,
+            api_format: "openai_chat".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+        };
+        assert!(p.request.prompt_caching.is_none());
+        assert!(p.prompt_caching_enabled(), "OpenAI Chat 默认应为开");
+        p.api_format = "openai_responses".into();
+        assert!(p.prompt_caching_enabled(), "OpenAI Responses 默认应为开");
+        p.api_format = "anthropic_messages".into();
+        assert!(!p.prompt_caching_enabled(), "Anthropic 默认应为关");
     }
 
     #[test]
@@ -1357,6 +1658,108 @@ mod tests {
         assert_eq!(calls[0].function_name, "web_search");
         assert_eq!(calls[0].arguments["query"], "吉林市 明天 天气");
         assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn parses_message_images_from_openrouter_style_response() {
+        // 代理仿 OpenRouter：非流式 message.images 携带 data URL 图片数组。
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "here is your image",
+                    "images": [{
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/png;base64,aGVsbG8=" }
+                    }]
+                }
+            }]
+        });
+
+        let output = output_from_chat_completion(&value, "{}", "test").expect("output");
+        assert_eq!(output.text, "here is your image");
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].mime_type, "image/png");
+        assert_eq!(output.images[0].data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn response_without_images_has_empty_images() {
+        // 无 images 字段：行为字节等价，images 为空（普通 chat 非回归）。
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "plain text" }
+            }]
+        });
+        let output = output_from_chat_completion(&value, "{}", "test").expect("output");
+        assert!(output.images.is_empty());
+    }
+
+    #[test]
+    fn stream_delta_images_emit_image_data_and_aggregate() {
+        // 流式 delta.images：解析出图 → 发 StreamPart::ImageData 且累积进最终 images。
+        // 复刻 stream_inner 每 chunk 的 emit + push 逻辑（无需真实 HTTP）。
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "images": [{
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/webp;base64,d29ybGQ=" }
+                    }]
+                }
+            }]
+        });
+
+        let mut parts = Vec::new();
+        let mut images: Vec<GeneratedImageData> = Vec::new();
+        {
+            let mut sink = |part| {
+                parts.push(part);
+                Ok::<(), ModelError>(())
+            };
+            for image in extract_chat_stream_images(&chunk) {
+                sink.emit(StreamPart::ImageData {
+                    mime_type: image.mime_type.clone(),
+                    data: image.data.clone(),
+                })
+                .expect("emit");
+                images.push(image);
+            }
+        }
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/webp");
+        assert_eq!(images[0].data, "d29ybGQ=");
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            StreamPart::ImageData { mime_type, data } => {
+                assert_eq!(mime_type, "image/webp");
+                assert_eq!(data, "d29ybGQ=");
+            }
+            other => panic!("expected ImageData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_delta_without_images_yields_nothing() {
+        // delta 无 images：解析为空（普通流式 chat 非回归）。
+        let chunk = serde_json::json!({
+            "choices": [{ "delta": { "content": "hi" } }]
+        });
+        assert!(extract_chat_stream_images(&chunk).is_empty());
+    }
+
+    #[test]
+    fn parse_openai_image_data_url_skips_http_and_non_base64() {
+        // http(s) 直链、非 base64 data URL、非 data URL 均静默跳过（返回 None，不报错）。
+        assert!(parse_openai_image_data_url("https://example.com/a.png").is_none());
+        assert!(parse_openai_image_data_url("data:image/png,notbase64").is_none());
+        assert!(parse_openai_image_data_url("not-a-url").is_none());
+        let ok = parse_openai_image_data_url("data:image/jpeg;base64,aGVsbG8=").expect("parsed");
+        assert_eq!(ok.mime_type, "image/jpeg");
+        assert_eq!(ok.data, "aGVsbG8=");
     }
 
     #[test]

@@ -331,6 +331,10 @@ pub struct ChatMessage {
     /// Final stream outcome for this assistant message: `completed`, `cancelled`, or `error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_outcome: Option<String>,
+    /// 降级兜底的结构化描述：模型调用失败、但本轮已有工具结果时填充。
+    /// 前端渲染成独立错误卡片；正文 `content` 不再混入故障文案。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
     /// Provider-reported usage accumulated across all model calls of this reply
     /// (planning/synthesis/compaction). None when the provider reports no usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -414,10 +418,47 @@ impl AgentRuntimeConfig {
     }
 }
 
+/// 会话级联网搜索模式（任务 07-23）。
+/// - `Off`：不联网。
+/// - `Builtin`：模型原生内置搜索（仅部分 provider 支持，按 `api_format` 判定）。
+/// - `ThirdParty`：既有 `search_web` 工具（复用 Lens 第三方配置 Tavily/Exa/…）。
+///
+/// `Conversation.web_search_mode` 为 `None` 时运行时回退全局 `nativeTools.webSearch`
+/// （on ⇒ ThirdParty，off ⇒ Off），保证旧对话行为逐字节不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchMode {
+    Off,
+    Builtin,
+    ThirdParty,
+}
+
+impl WebSearchMode {
+    /// 解析会话的**有效**联网搜索模式（任务 07-23）。
+    /// 会话未显式设置（`None`）时回退全局 `native_tools.web_search`：
+    /// on ⇒ `ThirdParty`，off ⇒ `Off`，保证旧对话行为逐字节不变。
+    pub fn resolve(
+        conv_mode: Option<WebSearchMode>,
+        settings: &crate::settings::Settings,
+    ) -> WebSearchMode {
+        conv_mode.unwrap_or({
+            if settings.chat_tools.native_tools.web_search {
+                WebSearchMode::ThirdParty
+            } else {
+                WebSearchMode::Off
+            }
+        })
+    }
+}
+
 /// 完整对话数据（存储在 conversations/{id}.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
+    /// Monotonic on-disk revision maintained by `ConversationRepository`.
+    /// Legacy conversation files deserialize as revision 0.
+    #[serde(default)]
+    pub revision: u64,
     pub title: String,
     pub provider_id: String,
     pub model: String,
@@ -456,6 +497,9 @@ pub struct Conversation {
     /// 每对话「思考等级」：`"off"|"low"|"medium"|"high"`，`None` = 跟随全局思考开关。
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// 会话级联网搜索模式（任务 07-23）。`None` = 未设置，运行时回退全局 `nativeTools.webSearch`。
+    #[serde(default)]
+    pub web_search_mode: Option<WebSearchMode>,
     /// 多模型一问多答（任务 06-30，决策 D2）：会话级持久化的多答模型集合（上限 4）。
     /// 空或单元素 = 单模型现状。一条 user 消息会 fan-out 给这些模型并发回答。
     #[serde(default)]
@@ -493,6 +537,10 @@ pub struct ForkOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationListItem {
     pub id: String,
+    /// `None` identifies a legacy index entry that must be reconciled from the
+    /// conversation file before the index can be trusted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
     pub title: String,
     pub preview: String, // 最后一条消息的前 100 字符
     pub provider_id: String,
@@ -569,6 +617,13 @@ pub struct ChatSet {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatSetIndex {
     pub sets: Vec<ChatSet>,
+}
+
+/// 一条对话被拖到集/项目里的固定行号。见 storage::set_conversation_pins。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationPin {
+    pub id: String,
+    pub row: u32,
 }
 
 /// 可复用 Chat 助手配置。存储字段保持 snake_case，与 Conversation JSON 一致。
@@ -672,6 +727,7 @@ impl From<&Conversation> for ConversationListItem {
 
         ConversationListItem {
             id: conv.id.clone(),
+            revision: Some(conv.revision),
             title: conv.title.clone(),
             preview,
             provider_id: conv.provider_id.clone(),
@@ -714,6 +770,52 @@ mod tests {
         assert!(msg.group_id.is_none());
         assert!(msg.provider_id.is_none());
         assert!(msg.model.is_none());
+    }
+
+    // 会话级三态联网搜索（任务 07-23，R1）：老会话 web_search_mode 缺字段反序列化为 None，
+    // 且有效模式回退全局 nativeTools.webSearch，保证旧对话行为逐字节不变。
+    #[test]
+    fn conversation_deserializes_without_web_search_mode_field() {
+        // 只给必需字段的最小老会话 JSON（无 web_search_mode）。
+        let json = r#"{
+            "id": "conv_old",
+            "title": "old",
+            "provider_id": "openai",
+            "model": "gpt-4o",
+            "messages": [],
+            "created_at": 1,
+            "updated_at": 1
+        }"#;
+        let conv: Conversation =
+            serde_json::from_str(json).expect("legacy Conversation parses without web_search_mode");
+        assert!(conv.web_search_mode.is_none());
+    }
+
+    #[test]
+    fn web_search_mode_resolve_falls_back_to_global() {
+        let mut settings = crate::settings::Settings::default();
+        // None（老会话/未设置）→ 依全局开关：on ⇒ ThirdParty，off ⇒ Off。
+        settings.chat_tools.native_tools.web_search = true;
+        assert_eq!(
+            WebSearchMode::resolve(None, &settings),
+            WebSearchMode::ThirdParty
+        );
+        settings.chat_tools.native_tools.web_search = false;
+        assert_eq!(WebSearchMode::resolve(None, &settings), WebSearchMode::Off);
+        // 显式设过 ⇒ 无视全局，原样返回（即便全局 off 也保留会话选择）。
+        assert_eq!(
+            WebSearchMode::resolve(Some(WebSearchMode::Builtin), &settings),
+            WebSearchMode::Builtin
+        );
+        assert_eq!(
+            WebSearchMode::resolve(Some(WebSearchMode::Off), &settings),
+            WebSearchMode::Off
+        );
+        settings.chat_tools.native_tools.web_search = true;
+        assert_eq!(
+            WebSearchMode::resolve(Some(WebSearchMode::Off), &settings),
+            WebSearchMode::Off
+        );
     }
 
     #[test]

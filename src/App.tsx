@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { Settings as SettingsIcon, Cpu } from 'lucide-react'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { api, isTauriRuntime } from './api/tauri'
 import { getSettingsCached } from './api/settingsCache'
 import { i18n, type Lang } from './settings/i18n'
@@ -174,6 +175,10 @@ function Translator({
         <input
           ref={inputRef}
           autoFocus
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
           className="w-full px-3.5 py-2 bg-white/70 dark:bg-neutral-800/40 ring-1 ring-black/[0.05] dark:ring-white/[0.06] rounded-xl text-[14.5px] text-neutral-900 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-500 focus:outline-none focus:ring-black/[0.12] dark:focus:ring-white/[0.18] focus:bg-white dark:focus:bg-neutral-800/70 transition-all"
           placeholder={t.translatorPlaceholder}
           value={input}
@@ -204,6 +209,12 @@ function Translator({
  * 应用根组件
  * 根据 URL hash 切换不同视图模式（翻译器、设置、lens）
  */
+// 与 index.css 的 --font-sans 默认栈保持一致（跨 mac/Win 含 CJK 覆盖）。
+const UI_FONT_FALLBACK_STACK =
+  'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif'
+const UI_MONO_FALLBACK_STACK =
+  'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace'
+
 function App() {
   // 从 URL hash 和查询参数解析当前模式
   const getMode = () => {
@@ -221,6 +232,7 @@ function App() {
 
   const [mode, setMode] = useState(getMode)
   const [themeMode, setThemeMode] = useState<'system' | 'light' | 'dark'>('system')
+  const [translucentSidebar, setTranslucentSidebar] = useState(false)
   const [translateSource, setTranslateSource] = useState<string>('')
   const [lang, setLang] = useState<Lang>('zh')
 
@@ -244,15 +256,38 @@ function App() {
     const settings = await getSettingsCached()
     const nextMode = (settings.theme || 'system') as 'system' | 'light' | 'dark'
     setThemeMode(nextMode)
+    setTranslucentSidebar(settings.translucentSidebar)
     const isDark = nextMode === 'dark' || (nextMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
     if (isDark) {
       document.documentElement.classList.add('dark')
     } else {
       document.documentElement.classList.remove('dark')
     }
-    // 同步 chat 窗口原生背景（Windows 不透明窗口），避免伸缩时露白底闪烁。其他窗口/平台 no-op。
-    void api.setChatWindowBackground(isDark)
     document.documentElement.dataset.themeColor = normalizeThemeColorId(settings.themeColor)
+    // UI 字号（整体缩放）+ 自定义字体：仅作用于聊天窗口，翻译窗/Lens 保持原始几何与布局。
+    // 直接读 hash（稳定的 import）而非 mode state，避免让 applyTheme 变成不稳定依赖。
+    const root = document.documentElement
+    if (isChatPath(hashPath())) {
+      const scale = Math.min(1.4, Math.max(0.8, settings.uiFontScale ?? 1))
+      // 用原生 webview 缩放（等同浏览器 Cmd+加号），而非 CSS zoom —— CSS zoom 会打乱
+      // 聊天消息列表 virtua 虚拟滚动的 scrollTop/scrollHeight 几何量，导致流式生成时跟随钉底失效。
+      if (isTauriRuntime()) void getCurrentWebview().setZoom(scale).catch(() => {})
+      const family = (settings.uiFontFamily ?? '').trim()
+      // 默认字体栈与 index.css 的 --font-sans 保持一致；自定义字体拼到最前，缺失时回退系统字体。
+      root.style.setProperty(
+        '--font-sans',
+        family
+          ? `"${family}", ${UI_FONT_FALLBACK_STACK}`
+          : UI_FONT_FALLBACK_STACK,
+      )
+      const mono = (settings.uiFontMono ?? '').trim()
+      root.style.setProperty(
+        '--font-mono',
+        mono
+          ? `"${mono}", ${UI_MONO_FALLBACK_STACK}`
+          : UI_MONO_FALLBACK_STACK,
+      )
+    }
     setTranslateSource(settings.translatorModel || 'AI')
     setLang((settings.settingsLanguage as Lang) || 'zh')
     // 首次应用主题后（下一帧）再开启主题色过渡，避免初始 light↔dark 闪烁；
@@ -472,7 +507,7 @@ function App() {
   }
   if (mode === 'chat') {
     return (
-      <ChatWindowHost>
+      <ChatWindowHost translucentSidebar={translucentSidebar}>
         <Suspense
           fallback={
             <div className="flex h-full w-full items-center justify-center bg-transparent">

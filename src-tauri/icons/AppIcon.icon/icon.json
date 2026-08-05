@@ -1,0 +1,134 @@
+{
+  "fill-specializations": [
+    {
+      "value": "system-light"
+    },
+    {
+      "appearance": "dark",
+      "value": "system-dark"
+    }
+  ],
+  "groups": [
+    {
+      "name": "Kivio Mark",
+      "lighting": "combined",
+      "blur-material-specializations": [
+        {
+          "value": 0.12
+        },
+        {
+          "appearance": "dark",
+          "value": 0.18
+        },
+        {
+          "appearance": "tinted",
+          "value": 0.08
+        }
+      ],
+      "layers": [
+        {
+          "name": "Kivio",
+          "image-name": "logo-mark.png",
+          "glass": true,
+          "hidden": false,
+          "opacity": 1,
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "display-p3:0.03529,0.08235,0.14510,1.00000",
+                  "display-p3:0.00000,0.37647,1.00000,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "linear-gradient": [
+                  "display-p3:0.06275,0.12549,0.21176,1.00000",
+                  "display-p3:0.00000,0.32157,0.90980,1.00000"
+                ],
+                "orientation": {
+                  "start": {
+                    "x": 0.5,
+                    "y": 0
+                  },
+                  "stop": {
+                    "x": 0.5,
+                    "y": 1
+                  }
+                }
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-gray:1.00000,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow-specializations": [
+        {
+          "value": {
+            "kind": "layer-color",
+            "opacity": 0.22
+          }
+        },
+        {
+          "appearance": "dark",
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.35
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "kind": "none",
+            "opacity": 0
+          }
+        }
+      ],
+      "specular": true,
+      "translucency-specializations": [
+        {
+          "value": {
+            "enabled": true,
+            "value": 0.2
+          }
+        },
+        {
+          "appearance": "dark",
+          "value": {
+            "enabled": true,
+            "value": 0.32
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "enabled": true,
+            "value": 0.72
+          }
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

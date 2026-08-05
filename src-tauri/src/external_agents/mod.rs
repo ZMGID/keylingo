@@ -1,8 +1,13 @@
+pub mod attachments;
 pub mod commands;
 pub mod compact;
 pub mod context;
 pub mod defs;
 pub mod detection;
+pub mod errors;
+pub mod import;
+pub mod import_history;
+pub mod kimi_usage;
 pub mod prompt;
 pub mod registry;
 pub mod run;

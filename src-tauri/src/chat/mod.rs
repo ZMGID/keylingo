@@ -5,6 +5,7 @@ pub mod attachments;
 pub mod commands;
 pub mod dsml_tools;
 pub mod export;
+pub mod hooks;
 pub mod image_generation;
 pub mod knowledge_base;
 mod mcp_image_feedback;
@@ -15,6 +16,8 @@ pub mod model_metadata;
 pub mod plan;
 #[cfg(debug_assertions)]
 pub mod probe;
+pub mod protocol;
+pub mod repository;
 pub mod request_debug;
 pub mod storage;
 pub mod sub_agent;

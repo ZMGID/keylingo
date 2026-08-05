@@ -169,6 +169,31 @@ pub(super) fn apply_agent_plan_tool_filter(
     blocked
 }
 
+/// 会话级三态联网搜索（任务 07-23）：按有效模式收敛第三方 `search_web` 工具的暴露。
+/// - `ThirdParty`：保证 `search_web` 存在（列表因全局开关缺席时，若已配置搜索 key 则补回）。
+/// - `Builtin` / `Off`：移除 `search_web`（内置走请求体注入，Off 完全不联网）。
+///
+/// 内置注入不在此处——由 `AgentRunConfig.builtin_web_search_active()` 经 `GenerateOptions`
+/// 驱动各适配器；此函数只管客户端工具的去留。
+pub(super) fn apply_web_search_mode_tool_filter(
+    tools: &mut Vec<ChatToolDefinition>,
+    mode: crate::chat::types::WebSearchMode,
+    settings: &crate::settings::Settings,
+) {
+    const SEARCH_WEB_ID: &str = "native__web_search";
+    match mode {
+        crate::chat::types::WebSearchMode::ThirdParty => {
+            let present = tools.iter().any(|t| t.id == SEARCH_WEB_ID);
+            if !present && crate::mcp::registry::web_search_configured(settings) {
+                tools.push(crate::mcp::types::native_web_search_tool());
+            }
+        }
+        crate::chat::types::WebSearchMode::Builtin | crate::chat::types::WebSearchMode::Off => {
+            tools.retain(|t| t.id != SEARCH_WEB_ID);
+        }
+    }
+}
+
 fn agent_plan_allows_tool(tool: &ChatToolDefinition) -> bool {
     if tool.source == "native" && crate::chat::ask_user::is_ask_user_tool_name(&tool.name) {
         return true;
@@ -247,4 +272,38 @@ fn has_inline_code_request_intent(text: &str, normalized: &str) -> bool {
     const EN_MARKERS: &[&str] = &["```", "code block", "fenced code"];
     ZH_MARKERS.iter().any(|marker| text.contains(marker))
         || EN_MARKERS.iter().any(|marker| normalized.contains(marker))
+}
+
+#[cfg(test)]
+mod web_search_filter_tests {
+    use super::*;
+    use crate::chat::types::WebSearchMode;
+
+    #[test]
+    fn off_and_builtin_remove_search_web() {
+        let settings = crate::settings::Settings::default();
+        for mode in [WebSearchMode::Off, WebSearchMode::Builtin] {
+            let mut tools = vec![
+                crate::mcp::types::native_web_search_tool(),
+                crate::mcp::types::native_web_fetch_tool(),
+            ];
+            apply_web_search_mode_tool_filter(&mut tools, mode, &settings);
+            assert!(
+                !tools.iter().any(|t| t.id == "native__web_search"),
+                "search_web should be stripped in {mode:?}"
+            );
+            assert!(
+                tools.iter().any(|t| t.id == "native__web_fetch"),
+                "unrelated tools must survive in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn third_party_keeps_existing_search_web() {
+        let settings = crate::settings::Settings::default();
+        let mut tools = vec![crate::mcp::types::native_web_search_tool()];
+        apply_web_search_mode_tool_filter(&mut tools, WebSearchMode::ThirdParty, &settings);
+        assert!(tools.iter().any(|t| t.id == "native__web_search"));
+    }
 }

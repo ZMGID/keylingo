@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, path::Path, time::Duration};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -15,12 +15,9 @@ use crate::{
     state::AppState,
 };
 
-use super::{
-    client::{StdioMcpClient, StreamableHttpMcpClient},
-    types::{
-        list_native_builtin_tool_defs, mixer_generate_image_tool, native_skill_tools,
-        tool_definition_from_mcp, ChatToolDefinition, McpToolCallResult,
-    },
+use super::types::{
+    list_native_builtin_tool_defs, mixer_generate_image_tool, native_skill_tools,
+    tool_definition_from_mcp, ChatToolDefinition, McpToolCallResult,
 };
 
 #[derive(Debug, Clone)]
@@ -226,7 +223,7 @@ pub async fn list_enabled_tool_catalog(app: &AppHandle, state: &AppState) -> Ena
     }
 
     let (mcp_tools, unavailable_mcp_servers) =
-        collect_enabled_mcp_tool_defs(state, app, &settings).await;
+        collect_enabled_mcp_tool_defs(state, Some(app), &settings).await;
     tools.extend(mcp_tools);
     tools.extend(list_skill_tool_defs(&settings));
 
@@ -241,14 +238,17 @@ pub async fn list_enabled_tool_catalog(app: &AppHandle, state: &AppState) -> Ena
 /// There is deliberately no aggregate tool-list cache: connected sessions
 /// already retain their schema, and failed sessions already have reconnect
 /// backoff, so another cache only creates stale-state invalidation paths.
+///
+/// 每个 server 的现场 listing 有 [`WARM_TOOL_LIST_TIMEOUT`] 的等待上限：慢/坏 server
+/// 不再拖住整轮工具收集，超时与失败同路降级到落盘快照 / unavailable。
 pub(crate) async fn collect_enabled_mcp_tool_defs(
     state: &AppState,
-    sink: &impl super::manager::McpEventSink,
+    sink: super::manager::McpEventSink<'_>,
     settings: &crate::settings::Settings,
 ) -> (Vec<ChatToolDefinition>, Vec<String>) {
     let servers = eligible_mcp_servers(settings);
     let listings = servers.iter().map(|server| async move {
-        let result = state.mcp_list_tools(sink, server).await;
+        let result = list_tools_bounded(state, sink, server).await;
         (*server, result)
     });
 
@@ -273,6 +273,83 @@ pub(crate) async fn collect_enabled_mcp_tool_defs(
         }
     }
     (tools, unavailable)
+}
+
+/// 单个 server 现场 tools/list 的等待上限。已连接的 server 走池命中微秒级返回，不受影响；
+/// 未连上的 server 最多等这么久，之后本轮转入快照兜底 / unavailable。
+pub(crate) const WARM_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 有界等待的现场 listing。生产路径（sink 带 AppHandle）把 listing spawn 成独立后台任务，
+/// 超时只**放弃等待、不取消任务**——慢 server 后台继续连完，成功后 `remember_mcp_tools`
+/// 写快照 + emit Connected，下一轮直接可用。无 AppHandle（单测 / headless sink）拿不到
+/// `'static` 的状态引用，退化为对 future 本体 timeout（超时即取消，对测试语义足够）。
+async fn list_tools_bounded(
+    state: &AppState,
+    sink: super::manager::McpEventSink<'_>,
+    server: &ChatMcpServer,
+) -> Result<Vec<crate::mcp::types::McpTool>, String> {
+    match sink {
+        Some(app) => {
+            let app = app.clone();
+            let owned = server.clone();
+            let task = tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                state.mcp_list_tools(Some(&app), &owned).await
+            });
+            match tokio::time::timeout(WARM_TOOL_LIST_TIMEOUT, task).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(join_err)) => Err(format!("MCP listing task failed: {join_err}")),
+                Err(_) => Err(format!(
+                    "tools/list did not answer within {}s; connection keeps warming in the background",
+                    WARM_TOOL_LIST_TIMEOUT.as_secs()
+                )),
+            }
+        }
+        None => tokio::time::timeout(WARM_TOOL_LIST_TIMEOUT, state.mcp_list_tools(sink, server))
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "tools/list did not answer within {}s",
+                    WARM_TOOL_LIST_TIMEOUT.as_secs()
+                ))
+            }),
+    }
+}
+
+/// 预热目标筛选：None = 全部 runtime-eligible 的 server；Some = 其中 id 命中的子集。
+/// 停用 / 全局工具开关关闭的 server 一律不预热。
+fn select_warmup_servers(
+    settings: &crate::settings::Settings,
+    server_ids: Option<&[String]>,
+) -> Vec<ChatMcpServer> {
+    eligible_mcp_servers(settings)
+        .into_iter()
+        .filter(|server| server_ids.is_none_or(|ids| ids.iter().any(|id| id == &server.id)))
+        .cloned()
+        .collect()
+}
+
+/// 后台预热 MCP 连接：对指定（None = 全部启用）的 server 各自发起一次「连接 + tools/list」。
+/// fire-and-forget：立即返回 Ok，结果经 `mcp-server-state` 事件推送呈现（连接中 → 已连接/错误）；
+/// 成功的 tools/list 会顺手写内存 + 落盘快照。连接池单飞门闩保证与手动「测试连接」/
+/// 对话触发的连接并发无害；单个 server 失败只打日志 + emit Error，不影响其他 server。
+#[tauri::command]
+pub async fn chat_mcp_warmup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    let settings = state.settings_read().clone();
+    for server in select_warmup_servers(&settings, server_ids.as_deref()) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            if let Err(err) = state.mcp_list_tools(Some(&app), &server).await {
+                eprintln!("MCP warmup for {} failed: {err}", server.name);
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Apply the server's explicit per-tool setting. An empty list means all tools.
@@ -365,6 +442,235 @@ pub fn chat_mcp_import_json(path: String) -> McpImportResult {
     }
 }
 
+/// 一个 CLI 的 MCP 扫描结果。`available` = 该 CLI 的配置文件存在（与是否解析出
+/// server 无关）；解析失败降级为 `available:true, servers:[]`，不炸整个扫描。
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CliMcpGroup {
+    available: bool,
+    servers: Vec<ChatMcpServer>,
+}
+
+/// 三个本地 CLI（Claude Code / Codex / OpenCode）的 MCP 扫描结果。
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CliImportScan {
+    claude: CliMcpGroup,
+    codex: CliMcpGroup,
+    opencode: CliMcpGroup,
+}
+
+/// Codex `~/.codex/config.toml` 的 `[mcp_servers.<name>]` 子表（全 stdio）。
+/// 忽略 `enabled` / `startup_timeout_sec` 等字段。
+#[derive(Debug, Deserialize)]
+struct CodexMcpServer {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexConfig {
+    #[serde(default)]
+    mcp_servers: HashMap<String, CodexMcpServer>,
+}
+
+/// OpenCode `~/.config/opencode/opencode.json` 的 `mcp.<name>`。
+/// `type:"local"` → stdio（`command` 是 `[cmd, ...args]` 数组）；
+/// `type:"remote"` → streamable_http（`url` + `headers`）。
+#[derive(Debug, Deserialize)]
+struct OpencodeMcpServer {
+    #[serde(default, rename = "type")]
+    server_type: Option<String>,
+    #[serde(default)]
+    command: Vec<String>,
+    #[serde(default)]
+    environment: HashMap<String, String>,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpencodeConfig {
+    #[serde(default)]
+    mcp: HashMap<String, OpencodeMcpServer>,
+}
+
+/// 组装一条导入用的 `ChatMcpServer`：新 uuid、默认停用、无连接器/认证。
+fn imported_mcp_server(
+    name: String,
+    transport: String,
+    url: String,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    headers: HashMap<String, String>,
+    cwd: Option<String>,
+) -> ChatMcpServer {
+    ChatMcpServer {
+        id: format!("mcp-{}", uuid::Uuid::new_v4()),
+        name,
+        enabled: false,
+        transport,
+        url,
+        command,
+        args,
+        env,
+        headers,
+        cwd,
+        enabled_tools: Vec::new(),
+        connector_id: None,
+        auth: None,
+    }
+}
+
+/// 读 `~/.claude.json` 顶层 `mcpServers`（schema 同 Cursor mcp.json）。跳过
+/// `projects[*].mcpServers`。文件缺失 → `available:false`；解析失败 → 空组。
+fn parse_claude_mcp(home: &Path) -> CliMcpGroup {
+    let path = home.join(".claude.json");
+    if !path.exists() {
+        return CliMcpGroup::default();
+    }
+    let servers = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<CursorMcpJson>(&raw).ok())
+        .map(|parsed| {
+            parsed
+                .mcp_servers
+                .into_iter()
+                .map(|(name, server)| {
+                    imported_mcp_server(
+                        name,
+                        normalize_imported_transport(&server),
+                        server.url,
+                        server.command,
+                        server.args,
+                        server.env,
+                        server.headers,
+                        server.cwd,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CliMcpGroup {
+        available: true,
+        servers,
+    }
+}
+
+/// 读 `~/.codex/config.toml` 的 `[mcp_servers.*]`（全 stdio）。
+fn parse_codex_mcp(home: &Path) -> CliMcpGroup {
+    let path = home.join(".codex").join("config.toml");
+    if !path.exists() {
+        return CliMcpGroup::default();
+    }
+    let servers = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| toml::from_str::<CodexConfig>(&raw).ok())
+        .map(|parsed| {
+            parsed
+                .mcp_servers
+                .into_iter()
+                .map(|(name, server)| {
+                    imported_mcp_server(
+                        name,
+                        "stdio".to_string(),
+                        String::new(),
+                        server.command,
+                        server.args,
+                        server.env,
+                        HashMap::new(),
+                        server.cwd,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CliMcpGroup {
+        available: true,
+        servers,
+    }
+}
+
+/// 读 `~/.config/opencode/opencode.json` 的 `mcp.*`（local→stdio / remote→http）。
+fn parse_opencode_mcp(home: &Path) -> CliMcpGroup {
+    let path = home.join(".config").join("opencode").join("opencode.json");
+    if !path.exists() {
+        return CliMcpGroup::default();
+    }
+    let servers = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<OpencodeConfig>(&raw).ok())
+        .map(|parsed| {
+            parsed
+                .mcp
+                .into_iter()
+                .map(|(name, server)| {
+                    let is_remote = server
+                        .server_type
+                        .as_deref()
+                        .map(|kind| kind.eq_ignore_ascii_case("remote"))
+                        .unwrap_or(false);
+                    if is_remote {
+                        imported_mcp_server(
+                            name,
+                            "streamable_http".to_string(),
+                            server.url,
+                            String::new(),
+                            Vec::new(),
+                            HashMap::new(),
+                            server.headers,
+                            None,
+                        )
+                    } else {
+                        let mut parts = server.command.into_iter();
+                        let command = parts.next().unwrap_or_default();
+                        let args = parts.collect::<Vec<_>>();
+                        imported_mcp_server(
+                            name,
+                            "stdio".to_string(),
+                            String::new(),
+                            command,
+                            args,
+                            server.environment,
+                            HashMap::new(),
+                            None,
+                        )
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CliMcpGroup {
+        available: true,
+        servers,
+    }
+}
+
+/// 扫描本机已安装的 Claude Code / Codex / OpenCode 配置，解析出可导入的 MCP
+/// 服务器（按 CLI 分组）。缺配置文件 = 该组 `available:false`；单个 CLI 解析
+/// 失败降级为空组，绝不 panic、绝不返回 Err。
+#[tauri::command]
+pub fn chat_cli_import_scan() -> CliImportScan {
+    let Some(base) = directories::BaseDirs::new() else {
+        return CliImportScan::default();
+    };
+    let home = base.home_dir();
+    CliImportScan {
+        claude: parse_claude_mcp(home),
+        codex: parse_codex_mcp(home),
+        opencode: parse_opencode_mcp(home),
+    }
+}
+
 /// 单个连接器工具的元信息（名称 + 描述），给连接器详情面板的工具列表用。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -390,7 +696,7 @@ pub async fn chat_mcp_list_tool_defs(
         .find(|server| server.id == server_id)
         .cloned()
         .ok_or_else(|| "MCP server is missing".to_string())?;
-    let tools = state.mcp_list_tools(&app, &server).await?;
+    let tools = state.mcp_list_tools(Some(&app), &server).await?;
     Ok(tools
         .into_iter()
         .map(|tool| ConnectorToolInfo {
@@ -416,7 +722,7 @@ pub async fn chat_mcp_reload_server(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<(), String> {
-    state.mcp_reload_server(&app, &server_id).await;
+    state.mcp_reload_server(Some(&app), &server_id).await;
     Ok(())
 }
 
@@ -454,7 +760,7 @@ pub async fn call_tool(
         .ok_or_else(|| "MCP server is disabled or missing".to_string())?;
     // 走持久连接池：复用长连接、liveness 探活 + 透明重连、按 server_id 隔离。
     let mut result = state
-        .mcp_call_tool(app, &server, &tool.name, arguments.clone())
+        .mcp_call_tool(Some(app), &server, &tool.name, arguments.clone())
         .await?;
     // R1：MCP 工具结果里的图片 artifact 直达模型——vision 主模型直喂原图，
     // 纯文本主模型走辅助视觉模型审查向分析（R2）。通用于所有 MCP server，非
@@ -483,23 +789,22 @@ pub async fn call_tool(
     Ok(result)
 }
 
+/// 一次性列出某个 server 的工具。给设置页的「测试连接」按钮用 —— 测的是**还没保存**
+/// 的草稿配置，所以刻意不进连接池。
+///
+/// 整体套一层超时：rmcp 的握手本身不带超时，死服务器会把设置页挂死。这里取消 future
+/// 是安全的（连接建完就拆，握手和 tools/list 都是幂等读），和 `tools/call` 不同。
 async fn list_server_tools(
     http: &reqwest::Client,
     server: &ChatMcpServer,
     timeout_ms: u64,
 ) -> Result<Vec<ChatToolDefinition>, String> {
-    let tools = match server.transport.as_str() {
-        "streamable_http" => {
-            StreamableHttpMcpClient::new(server.clone(), timeout_ms, http.clone())
-                .list_tools()
-                .await?
-        }
-        _ => {
-            StdioMcpClient::new(server.clone(), timeout_ms)
-                .list_tools()
-                .await?
-        }
-    };
+    let tools = tokio::time::timeout(
+        Duration::from_millis(timeout_ms.max(1_000)),
+        super::conn::list_tools_once(server, http),
+    )
+    .await
+    .map_err(|_| format!("MCP connection to {} timed out", server.name))??;
     Ok(tools_from_mcp(server, tools))
 }
 
@@ -558,7 +863,7 @@ pub fn unavailable_mcp_servers_note(names: &[String]) -> Option<String> {
     ))
 }
 
-fn web_search_configured(settings: &crate::settings::Settings) -> bool {
+pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> bool {
     match settings.lens.web_search.provider {
         WebSearchProvider::Tavily => !settings.lens.web_search.tavily_api_key.trim().is_empty(),
         WebSearchProvider::Exa => !settings.lens.web_search.exa_api_key.trim().is_empty(),
@@ -687,7 +992,7 @@ async fn call_native_tool(
         let ctx = native_ctx
             .as_ref()
             .ok_or_else(|| format!("{} requires a conversation context", entry.name))?;
-        return handler(app, &ctx.conversation_id, &tool.name, arguments);
+        return handler(app, &ctx.conversation_id, &tool.name, arguments).await;
     }
     if let NativeToolCall::SubAgent(handler) = &entry.call {
         // Sub-agent management tools manage agents, not files: dispatch before
@@ -714,7 +1019,8 @@ async fn call_native_tool(
         app,
         &settings.chat_tools.native_tools.working_directory,
         native_ctx.as_ref(),
-    )?;
+    )
+    .await?;
 
     match &entry.call {
         NativeToolCall::SyncText(call) => Ok(text_tool_result(call(&workspace, &arguments)?)),
@@ -881,7 +1187,7 @@ fn format_read_file_for_model(result: &ReadFileResult) -> String {
     out
 }
 
-fn resolve_native_workspace(
+async fn resolve_native_workspace(
     app: &AppHandle,
     working_directory: &str,
     native_ctx: Option<&NativeToolContext>,
@@ -889,22 +1195,19 @@ fn resolve_native_workspace(
     let Some(native_ctx) = native_ctx else {
         return Ok(NativeToolWorkspace::standalone());
     };
-    let mut conversation =
-        crate::chat::storage::load_conversation(app, &native_ctx.conversation_id).map_err(
-            |err| {
-                format!(
-                    "Resolve native tool workspace failed for conversation {}: {err}",
-                    native_ctx.conversation_id
-                )
-            },
-        )?;
+    let conversation = crate::chat::storage::load_conversation(app, &native_ctx.conversation_id)
+        .map_err(|err| {
+            format!(
+                "Resolve native tool workspace failed for conversation {}: {err}",
+                native_ctx.conversation_id
+            )
+        })?;
     let Some(project) = crate::chat::storage::resolve_conversation_project(app, &conversation)?
     else {
-        let directory = crate::chat::storage::prepare_ordinary_conversation_workspace(
-            app,
-            &mut conversation,
-            working_directory,
-        )?;
+        let directory = crate::chat::repository::repository(app)
+            .prepare_ordinary_workspace(app, &conversation.id, working_directory)
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
         return Ok(NativeToolWorkspace::conversation(directory));
     };
     Ok(NativeToolWorkspace::project(
@@ -936,6 +1239,7 @@ pub(super) async fn run_python_via_pyodide(
         .clamp(1_000, 300_000);
     let input_files = collect_python_input_files(app, workspace, arguments)?;
     let run_id = uuid::Uuid::new_v4().to_string();
+    let parent = native_ctx.clone();
     let output_directory = workspace.default_output_directory()?;
     let export_ctx = native_ctx
         .map(|ctx| crate::native_tools::SandboxExportContext {
@@ -951,6 +1255,23 @@ pub(super) async fn run_python_via_pyodide(
             output_directory,
         });
     let (tx, rx) = oneshot::channel();
+    let payload = crate::chat::protocol::ChatRunPythonPayload {
+        protocol_version: crate::chat::protocol::CHAT_PROTOCOL_VERSION,
+        run_id: run_id.clone(),
+        parent_conversation_id: parent.as_ref().map(|ctx| ctx.conversation_id.clone()),
+        parent_run_id: parent.as_ref().map(|ctx| ctx.run_id.clone()),
+        parent_message_id: parent.as_ref().map(|ctx| ctx.message_id.clone()),
+        code: code.to_string(),
+        timeout_ms,
+        files: input_files
+            .into_iter()
+            .map(|file| crate::chat::protocol::ChatPythonInputFile {
+                name: file.name,
+                data_base64: file.data_base64,
+                size_bytes: file.size_bytes,
+            })
+            .collect(),
+    };
     {
         let mut pending = state
             .pending_python_runs
@@ -964,21 +1285,17 @@ pub(super) async fn run_python_via_pyodide(
             },
         );
     }
-    let emit_result = app.emit(
-        "chat-run-python",
-        serde_json::json!({
-            "runId": run_id,
-            "code": code,
-            "timeoutMs": timeout_ms,
-            "files": input_files,
-        }),
-    );
+    if let Err(error) = crate::chat::protocol::attach_python_request(app, payload.clone()) {
+        eprintln!("Failed to attach Python request to chat snapshot: {error}");
+    }
+    let emit_result = app.emit("chat-run-python", payload);
     if let Err(err) = emit_result {
         let mut pending = state
             .pending_python_runs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         pending.remove(&run_id);
+        crate::chat::protocol::detach_python_request(app, &run_id);
         return Err(format!("Failed to start Python runner: {err}"));
     }
 
@@ -1040,6 +1357,7 @@ pub(super) async fn run_python_via_pyodide(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&run_id);
+            crate::chat::protocol::detach_python_request(app, &run_id);
             Err(format!("Python execution timed out after {timeout_ms}ms"))
         }
     }
@@ -1048,7 +1366,7 @@ pub(super) async fn run_python_via_pyodide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_tools::{ReadFileResult, ReadFileState};
+    use crate::native_tools::ReadFileResult;
 
     #[test]
     fn read_file_tool_result_preserves_structured_content() {
@@ -1062,11 +1380,6 @@ mod tests {
             truncated: false,
             file_size: 10,
             next_offset: None,
-            read_state: ReadFileState {
-                scope: "full".to_string(),
-                mtime: Some(123),
-                already_read: false,
-            },
             warnings: Vec::new(),
         };
 
@@ -1086,7 +1399,6 @@ mod tests {
         assert_eq!(structured["end_line"], 2);
         assert_eq!(structured["truncated"], false);
         assert_eq!(structured["file_size"], 10);
-        assert_eq!(structured["read_state"]["scope"], "full");
         // 模型看到的 content 是 cat -n 文本（不再是 JSON），结构化内容仍完整保留给前端。
         assert_eq!(
             output.content,
@@ -1103,6 +1415,183 @@ mod tests {
         assert!(mcp_server_is_runtime_eligible(&server));
     }
 
+    fn enabled_server(id: &str) -> ChatMcpServer {
+        ChatMcpServer {
+            id: id.to_string(),
+            name: format!("{id} server"),
+            enabled: true,
+            transport: "stdio".to_string(),
+            command: "true".to_string(),
+            ..ChatMcpServer::default()
+        }
+    }
+
+    fn settings_with_servers(servers: Vec<ChatMcpServer>) -> crate::settings::Settings {
+        let mut settings = crate::settings::Settings::default();
+        settings.chat_tools.enabled = true;
+        settings.chat_tools.servers = servers;
+        settings
+    }
+
+    #[test]
+    fn warmup_selection_covers_all_eligible_or_the_requested_subset() {
+        let mut disabled = enabled_server("off");
+        disabled.enabled = false;
+        let settings =
+            settings_with_servers(vec![enabled_server("a"), enabled_server("b"), disabled]);
+
+        // None = 全部 eligible（停用的不预热）
+        let all = select_warmup_servers(&settings, None);
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // Some = 指定 id 子集；未知 id / 停用 server 被忽略
+        let subset = select_warmup_servers(
+            &settings,
+            Some(&["b".to_string(), "off".to_string(), "ghost".to_string()]),
+        );
+        assert_eq!(
+            subset.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn warmup_selection_is_empty_when_chat_tools_disabled() {
+        let mut settings = settings_with_servers(vec![enabled_server("a")]);
+        settings.chat_tools.enabled = false;
+        assert!(select_warmup_servers(&settings, None).is_empty());
+    }
+
+    /// 一快一慢（慢 = 永不应答握手）的工具收集：慢 server 不把整轮拖到全局 60s 超时，
+    /// 快 server 工具照常返回。unix-gated：依赖 python3 + sleep 起 stdio 假 server。
+    #[cfg(unix)]
+    mod warm_timeout {
+        use super::*;
+        use crate::state::test_app_state;
+        use std::io::Write;
+
+        fn write_fast_fake_server() -> std::path::PathBuf {
+            let script = r#"#!/usr/bin/env python3
+import sys, json
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    mid = msg.get("id")
+    method = msg.get("method")
+    if mid is None:
+        continue
+    if method == "initialize":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1.0.0"}}}
+    elif method == "tools/list":
+        resp = {"jsonrpc":"2.0","id":mid,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}}
+    else:
+        resp = {"jsonrpc":"2.0","id":mid,"result":{}}
+    sys.stdout.write(json.dumps(resp)+"\n")
+    sys.stdout.flush()
+"#;
+            let mut path = std::env::temp_dir();
+            path.push(format!("kivio-fake-mcp-warm-{}.py", uuid::Uuid::new_v4()));
+            let mut file = std::fs::File::create(&path).expect("create fake server");
+            file.write_all(script.as_bytes())
+                .expect("write fake server");
+            path
+        }
+
+        fn fast_server(script: &std::path::Path) -> ChatMcpServer {
+            ChatMcpServer {
+                id: "fast".to_string(),
+                name: "fast server".to_string(),
+                enabled: true,
+                transport: "stdio".to_string(),
+                command: "python3".to_string(),
+                args: vec!["-u".to_string(), script.to_str().unwrap().to_string()],
+                ..ChatMcpServer::default()
+            }
+        }
+
+        /// 进程能起但永不应答 initialize：没有本地超时时会等满全局 tool timeout（默认 60s）。
+        fn hanging_server() -> ChatMcpServer {
+            ChatMcpServer {
+                id: "hang".to_string(),
+                name: "hang server".to_string(),
+                enabled: true,
+                transport: "stdio".to_string(),
+                command: "sleep".to_string(),
+                args: vec!["120".to_string()],
+                ..ChatMcpServer::default()
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn slow_server_is_bounded_and_fast_server_tools_survive() {
+            let script = write_fast_fake_server();
+            let state = test_app_state();
+            let settings = settings_with_servers(vec![fast_server(&script), hanging_server()]);
+
+            let started = std::time::Instant::now();
+            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, None, &settings).await;
+            let elapsed = started.elapsed();
+
+            assert!(
+                elapsed < Duration::from_secs(WARM_TOOL_LIST_TIMEOUT.as_secs() + 7),
+                "collection must be bounded by the per-server timeout, took {elapsed:?}"
+            );
+            assert!(
+                tools.iter().any(|tool| tool.id == "mcp__fast__echo"),
+                "fast server tools must survive the slow sibling: {tools:?}"
+            );
+            assert_eq!(
+                unavailable,
+                vec!["hang server".to_string()],
+                "the hanging server has no snapshot, so it is unavailable this round"
+            );
+
+            state.mcp_disconnect_all().await;
+            let _ = std::fs::remove_file(&script);
+            let _ = std::fs::remove_dir_all(&state.usage_dir);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn slow_server_with_snapshot_degrades_to_last_known_schema() {
+            let state = test_app_state();
+            let server = hanging_server();
+            state.set_mcp_tool_snapshot(
+                server.id.clone(),
+                crate::mcp::manager::config_fingerprint(&server),
+                vec![crate::mcp::types::McpTool {
+                    name: "cached_tool".to_string(),
+                    description: "from snapshot".to_string(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    output_schema: None,
+                    annotations: None,
+                }],
+            );
+            let settings = settings_with_servers(vec![server]);
+
+            let (tools, unavailable) = collect_enabled_mcp_tool_defs(&state, None, &settings).await;
+
+            assert!(
+                tools.iter().any(|tool| tool.id == "mcp__hang__cached_tool"),
+                "timeout with a matching snapshot must degrade to last-known schema: {tools:?}"
+            );
+            assert!(unavailable.is_empty());
+
+            state.mcp_disconnect_all().await;
+            let _ = std::fs::remove_dir_all(&state.usage_dir);
+        }
+    }
+
     #[test]
     fn read_file_tool_result_numbers_from_offset_and_flags_truncation() {
         let result = ReadFileResult {
@@ -1115,11 +1604,6 @@ mod tests {
             truncated: true,
             file_size: 4096,
             next_offset: Some(12),
-            read_state: ReadFileState {
-                scope: "partial".to_string(),
-                mtime: Some(1),
-                already_read: false,
-            },
             warnings: Vec::new(),
         };
         let output = read_file_tool_result(result).expect("tool result");
@@ -1127,5 +1611,176 @@ mod tests {
             output.content,
             "src/big.txt — lines 10-11 of 100 (truncated; continue with offset=12)\n    10\tline ten\n    11\tline eleven"
         );
+    }
+
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kivio-cli-import-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp home");
+        dir
+    }
+
+    #[test]
+    fn parse_claude_mcp_reads_top_level_servers() {
+        let home = temp_home("claude");
+        fs::write(
+            home.join(".claude.json"),
+            r#"{
+              "mcpServers": {
+                "codegraph": {
+                  "command": "codegraph",
+                  "args": ["mcp"],
+                  "env": { "CODEGRAPH_DB": "/tmp/cg.db" }
+                }
+              },
+              "projects": {
+                "/some/path": { "mcpServers": { "should-skip": { "command": "nope" } } }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let group = parse_claude_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 1);
+        let server = &group.servers[0];
+        assert_eq!(server.name, "codegraph");
+        assert_eq!(server.transport, "stdio");
+        assert_eq!(server.command, "codegraph");
+        assert_eq!(server.args, vec!["mcp".to_string()]);
+        assert_eq!(
+            server.env.get("CODEGRAPH_DB").map(String::as_str),
+            Some("/tmp/cg.db")
+        );
+        assert!(!server.enabled);
+        assert!(server.connector_id.is_none());
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_codex_mcp_reads_toml_env_subtable() {
+        let home = temp_home("codex");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex").join("config.toml"),
+            r#"
+[mcp_servers.node_repl]
+command = "node"
+args = ["--experimental-repl-await"]
+startup_timeout_sec = 20
+
+[mcp_servers.node_repl.env]
+NODE_ENV = "development"
+FOO = "bar"
+"#,
+        )
+        .unwrap();
+
+        let group = parse_codex_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 1);
+        let server = &group.servers[0];
+        assert_eq!(server.name, "node_repl");
+        assert_eq!(server.transport, "stdio");
+        assert_eq!(server.command, "node");
+        assert_eq!(server.args, vec!["--experimental-repl-await".to_string()]);
+        assert_eq!(
+            server.env.get("NODE_ENV").map(String::as_str),
+            Some("development")
+        );
+        assert_eq!(server.env.get("FOO").map(String::as_str), Some("bar"));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_opencode_mcp_splits_local_command_array() {
+        let home = temp_home("opencode");
+        fs::create_dir_all(home.join(".config").join("opencode")).unwrap();
+        fs::write(
+            home.join(".config").join("opencode").join("opencode.json"),
+            r#"{
+              "mcp": {
+                "local-fs": {
+                  "type": "local",
+                  "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                  "environment": { "DEBUG": "1" }
+                },
+                "remote-svc": {
+                  "type": "remote",
+                  "url": "https://mcp.example.com/mcp",
+                  "headers": { "Authorization": "Bearer x" }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let group = parse_opencode_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 2);
+
+        let local = group.servers.iter().find(|s| s.name == "local-fs").unwrap();
+        assert_eq!(local.transport, "stdio");
+        assert_eq!(local.command, "npx");
+        assert_eq!(
+            local.args,
+            vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                "/tmp".to_string()
+            ]
+        );
+        assert_eq!(local.env.get("DEBUG").map(String::as_str), Some("1"));
+
+        let remote = group
+            .servers
+            .iter()
+            .find(|s| s.name == "remote-svc")
+            .unwrap();
+        assert_eq!(remote.transport, "streamable_http");
+        assert_eq!(remote.url, "https://mcp.example.com/mcp");
+        assert_eq!(
+            remote.headers.get("Authorization").map(String::as_str),
+            Some("Bearer x")
+        );
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parsers_return_unavailable_group_when_config_missing() {
+        let home = temp_home("missing");
+        assert!(!parse_claude_mcp(&home).available);
+        assert!(!parse_codex_mcp(&home).available);
+        assert!(!parse_opencode_mcp(&home).available);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parsers_degrade_to_empty_group_on_corrupt_config() {
+        let home = temp_home("corrupt");
+        fs::write(home.join(".claude.json"), "{ not valid json").unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(home.join(".codex").join("config.toml"), "= broken toml =").unwrap();
+        fs::create_dir_all(home.join(".config").join("opencode")).unwrap();
+        fs::write(
+            home.join(".config").join("opencode").join("opencode.json"),
+            "not json at all",
+        )
+        .unwrap();
+
+        let claude = parse_claude_mcp(&home);
+        assert!(claude.available);
+        assert!(claude.servers.is_empty());
+        let codex = parse_codex_mcp(&home);
+        assert!(codex.available);
+        assert!(codex.servers.is_empty());
+        let opencode = parse_opencode_mcp(&home);
+        assert!(opencode.available);
+        assert!(opencode.servers.is_empty());
+
+        fs::remove_dir_all(&home).ok();
     }
 }

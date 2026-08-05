@@ -173,6 +173,15 @@ export function ConnectorsIcon(props: IconProps) {
   )
 }
 
+// Hooks：闪电（生命周期触发）
+export function HooksIcon(props: IconProps) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M13.5 2.5 L5 13.5 H11 L10.5 21.5 L19 10.5 H13 Z" />
+    </svg>
+  )
+}
+
 // Skill：卷轴
 export function SkillIcon(props: IconProps) {
   return (

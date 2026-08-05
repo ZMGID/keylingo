@@ -7,16 +7,9 @@ use crate::chat::model::ModelUsage;
 #[serde(rename_all = "snake_case")]
 pub enum StreamFormat {
     ClaudeStreamJson,
-    JsonEventStream,
     PiRpc,
     AcpJsonRpc,
     CodexAppServer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum JsonEventParser {
-    Kimi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +52,45 @@ pub struct RuntimeModelOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u32>,
+}
+
+/// 模型下拉列表的来源：真实探测得到，还是探测失败后降级到静态表（fallback）。
+/// 前端据此显示"默认列表"角标 + 重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    Probed,
+    Fallback,
+}
+
+impl ModelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelSource::Probed => "probed",
+            ModelSource::Fallback => "fallback",
+        }
+    }
+}
+
+/// 模型探测缓存条目：带来源，供 state 层按来源应用不同 TTL（probed 长、fallback 短负缓存）。
+/// 同时缓存 CLI 当前配置的模型/推理等级（current_*）与**推理档位列表**，使缓存命中也能回填胶囊。
+///
+/// `reasoning_options` 必须一起缓存：kimi 等 ACP CLI 的档位来自探测（`configOptions`），
+/// `acp_def` 静态表是空的。若缓存只存 models 而命中时回落 def 表，effort 胶囊会在第二次
+/// 打开时消失（bac8f53 修了探测路径，但漏了这一步）。
+#[derive(Debug, Clone)]
+pub struct CachedAgentModels {
+    pub models: Vec<RuntimeModelOption>,
+    pub source: ModelSource,
+    /// 探测得到的推理档位列表（kimi ACP thinking: low/high/max 等）。空 = 无档位或回落 def。
+    pub reasoning_options: Vec<RuntimeModelOption>,
+    /// 按模型的 effort 列表（kimi support_efforts）。缓存命中时前端按所选模型切换档位。
+    pub reasoning_by_model: std::collections::HashMap<String, Vec<RuntimeModelOption>>,
+    /// CLI 自己当前配置的模型 id（codex config.toml / ACP currentModelId / claude resolved model）。
+    /// None = 该 CLI 无「当前模型」概念，前端显示「自动」。
+    pub current_model: Option<String>,
+    /// CLI 当前配置的推理等级 id（codex model_reasoning_effort / ACP default reasoning effort）。
+    pub current_reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,8 +145,13 @@ pub struct RuntimeAgentDef {
     pub prompt_via_stdin: bool,
     pub prompt_input_format: PromptInputFormat,
     pub stream_format: StreamFormat,
-    pub json_event_parser: Option<JsonEventParser>,
     pub resumes_session_via_cli: bool,
+    /// 该 CLI 是否能通过其协议原生接收图片（Claude base64 / ACP image / Codex localImage）。
+    /// false（pi/kimi）时图片降级为在 prompt 文本里写出路径。
+    pub supports_native_image: bool,
+    /// 允许原生注入的图片 MIME 白名单；空 = 不限。Claude stream-json 仅认 jpeg/png/gif/webp，
+    /// 超出的图片降级为路径文本（不静默丢弃）。
+    pub image_mime_whitelist: &'static [&'static str],
     pub build_args: fn(&RuntimeContext, &RuntimeBuildOptions, Option<&str>) -> Vec<String>,
 }
 
@@ -162,6 +199,33 @@ pub enum UnifiedAgentEvent {
     },
     SlashCommands {
         commands: Vec<ExternalCliSlashCommand>,
+    },
+    /// CLI 在**自己内部**完成了一次上下文压缩（claude 的
+    /// `{"type":"system","subtype":"compact_boundary"}`）。
+    ///
+    /// 与 Kivio 主动发 `/compact`（`external_agents/compact.rs`）不同：那是用户点的、
+    /// Kivio 知情；这条是 CLI 自动触发的，Kivio 只能被动收到通知。不接的话
+    /// 用户会看到「对话突然变短了但没有任何提示」。
+    ///
+    /// 字段取自 `compact_metadata`，claude 2.1.220 反查二进制核实的构造处为
+    /// `{ trigger, pre_tokens, post_tokens?, cumulative_dropped_tokens?, duration_ms?,
+    ///    user_context?, messages_summarized? }`。
+    ///
+    /// **历史注记**：此处曾写「**没有** post_tokens，压缩后的占用由下一条
+    /// `message_start.message.usage` 上报，不需要也不该猜」——那是错的，`post_tokens`
+    /// 确实存在。照那条注释走的结果是 `run.rs::emit_cli_compaction` 把
+    /// `token_estimate_after` 硬编码 0，前端分隔线上的「→ N」永远不显示。
+    CliCompacted {
+        /// `manual`（CLI 内用户敲的 /compact）| `auto`（CLI 自动触发）
+        trigger: String,
+        /// 压缩**前**的上下文占用；CLI 未提供时为 `None`。
+        pre_tokens: Option<u64>,
+        /// 压缩**后**的上下文占用；CLI 未提供时为 `None`（此时前端不显示「→ N」）。
+        post_tokens: Option<u64>,
+        /// 本会话累计被丢弃的 token（`cumulative_dropped_tokens`），仅用于诊断日志。
+        dropped_tokens: Option<u64>,
+        /// 压缩耗时，仅用于诊断日志。
+        duration_ms: Option<u64>,
     },
 }
 

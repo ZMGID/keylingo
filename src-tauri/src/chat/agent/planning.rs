@@ -1,16 +1,15 @@
 use serde_json::Value;
 
 use crate::chat::model::{
-    generate_request_from_openai_messages, AnthropicMessagesProvider, GenerateOptions,
-    GenerateOutput, GenerateRequest, GenerateRequestContext, LanguageModelProvider, ModelError,
-    OpenAiChatProvider, OpenAiResponsesProvider, PendingToolCall, StreamPart, StreamSink,
+    generate_request_from_openai_messages, generate_with_chat_provider, stream_with_chat_provider,
+    BuiltinWebSearch, GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext,
+    ModelError, PendingToolCall, StreamPart, StreamSink,
 };
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase};
 use crate::mcp::ChatToolDefinition;
-use crate::settings::ProviderApiFormat;
 
 use super::finalize::{
-    cancelled_run_result_from_state, cancelled_tool_round_run_result,
+    cancelled_run_result_from_state, cancelled_tool_round_run_result, emit_builtin_web_search_card,
     tool_planning_failed_run_result, RunResultBuilder,
 };
 use super::host::AgentHost;
@@ -21,8 +20,8 @@ use super::stop::{
     is_tools_unsupported_error, sanitize_assistant_text_response,
 };
 use super::stream::{
-    should_emit_done, validate_stream_output, AgentStreamSink, ChatStreamOutput,
-    ToolCallDraftTracker,
+    validate_stream_output, AgentStreamSink, ChatStreamOutput, ToolCallDraftTracker,
+    WebSearchCardTracker,
 };
 use super::types::{AgentRunResult, AgentStreamPolicy};
 
@@ -30,6 +29,24 @@ pub(crate) struct ChatPlanningStep {
     pub(crate) message: Value,
     pub(crate) streamed: bool,
 }
+
+/// 流式响应中途断包后，重连**同一条流式请求**的次数上限。
+///
+/// 为什么不是降级到非流式（这是本常量取代的旧行为）：
+/// - 非流式意味着彻底丢掉已经流出来的部分，还要从头重新生成完整回答；
+/// - 非流式带总超时，长思考模型（high reasoning + 大 max_output_tokens）结构性跑不完
+///   —— 实测流式跑 135s 断包后回落非流式，3 次 60s 全超，白等 195s（现已放宽到
+///   `api::CHAT_COMPLETION_REQUEST_TIMEOUT`，但方向仍然是错的）；
+/// - 官方客户端的做法就是重连流式：Codex CLI 断流后重连最多 5 次，且在 0.130.0
+///   直接删掉了非流式（`wire_api = "chat"`）这条回退路径。
+///
+/// SSE 没有续传能力（无 offset / sequence），所以"重连"必然等于"重跑"——业界共识是
+/// 对话客户端做有界重试 + 退避就够，不值得为此上 Redis buffer / Last-Event-ID 那套。
+/// 取 2 次而非 Codex 的 5 次：每次重试都要重传整个请求体，2 次已覆盖偶发断包。
+const STREAM_INTERRUPT_RETRIES: u32 = 2;
+
+/// 断流重连前的退避基数（第 n 次重试等 n × 该值）。
+const STREAM_INTERRUPT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(crate) struct PlannedToolRound {
     pub(crate) message: Value,
@@ -127,6 +144,9 @@ pub(crate) async fn planning_step(
         Some(round),
         &format!("step_{step_number}_reasoning"),
     );
+    // 在 reasoning 与正文之间预留内置搜索实时卡的 order 槽（任务 07-23）：搜索发生时卡插到
+    // 这里 → 渲染在答案文本之前；未搜索则该 order 留空洞无害。
+    let web_search_order = state.segment_builder.reserve_order();
     let planning_text_segment = state.segment_builder.reserve(
         ChatMessageSegmentKind::Text,
         ChatMessageSegmentPhase::ToolLoop,
@@ -140,151 +160,156 @@ pub(crate) async fn planning_step(
         Some(step_number),
         state.segment_builder.next_order(),
     );
+    // 内置搜索实时卡追踪器：仅在会话 Builtin 模式且模型支持时建（否则 None，走现状路径）。
+    let planning_web_search_tracker = if config.builtin_web_search_active() {
+        Some(WebSearchCardTracker::new(
+            web_search_order,
+            Some(round),
+            ChatMessageSegmentPhase::ToolLoop,
+            config.provider.name.clone(),
+        ))
+    } else {
+        None
+    };
+    // 本轮内置搜索引用（**仅非流式路径**会有值）：流式路径由实时卡追踪器边流边合成，
+    // 故此处只承接非流式 `generate` 的解析结果，稍后与 take_card 二选一落盘（不双卡）。
+    let mut planning_web_search: Option<BuiltinWebSearch> = None;
     let planning_result = if config.stream_enabled {
-        match stream_scoped_chat_completion_inner(
-            config.state,
-            host,
-            &config.provider,
-            &config.model,
-            send_messages.clone(),
-            Some(&active_tools),
-            config.retry_attempts,
-            config.thinking_enabled,
-            config.thinking_level.clone(),
-            config.max_output_tokens,
-            &config.conversation_id,
-            &config.run_id,
-            &config.message_id,
-            config.generation,
-            "Chat tools planning",
-            stream_policy,
-            Some(planning_text_segment.clone()),
-            Some(planning_reasoning_segment.clone()),
-            Some(planning_tool_drafts.clone()),
-        )
-        .await
-        {
-            Ok(stream) => {
-                if stream.cancelled {
-                    let partial = sanitize_assistant_text_response(&stream.content);
-                    if partial.trim().is_empty() || planning_tool_drafts.has_started() {
-                        // No preservable partial answer (empty text, or tool-arg
-                        // drafting had started and is now incomplete). The stream
-                        // layer already emitted the single done("cancelled") event,
-                        // so build the cancelled result WITHOUT re-emitting — but
-                        // still end with Ok(cancelled_result) carrying the rounds
-                        // already accumulated, so the turn is persisted instead of
-                        // dropped via a bare Err("cancelled").
+        // 断流 → 重连同一条流式请求（见 `STREAM_INTERRUPT_RETRIES`），不降级非流式。
+        let mut interrupt_attempt = 0u32;
+        loop {
+            match stream_scoped_chat_completion_inner(
+                config.state,
+                host,
+                &config.provider,
+                &config.model,
+                send_messages.clone(),
+                Some(&active_tools),
+                config.retry_attempts,
+                config.thinking_enabled,
+                config.thinking_level.clone(),
+                config.builtin_web_search_active(),
+                config.max_output_tokens,
+                &config.conversation_id,
+                &config.run_id,
+                &config.message_id,
+                config.generation,
+                "Chat tools planning",
+                stream_policy,
+                Some(planning_text_segment.clone()),
+                Some(planning_reasoning_segment.clone()),
+                Some(planning_tool_drafts.clone()),
+                planning_web_search_tracker.clone(),
+            )
+            .await
+            {
+                Ok(mut stream) => {
+                    if stream.cancelled {
+                        let partial = sanitize_assistant_text_response(&stream.content);
+                        if partial.trim().is_empty() || planning_tool_drafts.has_started() {
+                            // No preservable partial answer (empty text, or tool-arg
+                            // drafting had started and is now incomplete). The stream
+                            // layer already emitted the single done("cancelled") event,
+                            // so build the cancelled result WITHOUT re-emitting — but
+                            // still end with Ok(cancelled_result) carrying the rounds
+                            // already accumulated, so the turn is persisted instead of
+                            // dropped via a bare Err("cancelled").
+                            return Ok(PlanningStepOutcome::Cancelled(
+                                cancelled_tool_round_run_result(
+                                    &config.language,
+                                    &state.planning_reasoning_parts,
+                                    std::mem::take(&mut state.tool_records),
+                                    std::mem::take(&mut state.segment_builder).all(),
+                                    std::mem::take(&mut state.generated_api_messages),
+                                ),
+                            ));
+                        }
+                        // Partial plain text was already streamed to the frontend and the
+                        // stream layer already emitted the single done("cancelled") event;
+                        // preserve the generated text instead of dropping the whole turn.
+                        // Append the reasoning segment first (its reserved order is lower
+                        // than the text segment's) so the persisted timeline keeps reasoning
+                        // above the answer; otherwise normalize_assistant_segments would add
+                        // a trailing reasoning segment that renders below the text.
+                        if let Some(reasoning_text) = stream
+                            .reasoning
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                        {
+                            let mut reasoning_segment = planning_reasoning_segment.clone();
+                            reasoning_segment.phase = ChatMessageSegmentPhase::Plain;
+                            state.segment_builder.append_text_from_template(
+                                &reasoning_segment,
+                                reasoning_text.to_string(),
+                            );
+                        }
+                        let mut segment = planning_text_segment.clone();
+                        segment.phase = ChatMessageSegmentPhase::Plain;
                         return Ok(PlanningStepOutcome::Cancelled(
-                            cancelled_tool_round_run_result(
-                                &config.language,
-                                &state.planning_reasoning_parts,
-                                std::mem::take(&mut state.tool_records),
-                                std::mem::take(&mut state.segment_builder).all(),
-                                std::mem::take(&mut state.generated_api_messages),
-                            ),
+                            RunResultBuilder::new(host, env.ids(), partial)
+                                .segment(&segment)
+                                .api_reasoning(stream.reasoning.clone())
+                                .reasoning_tail(stream.reasoning)
+                                .outcome("cancelled")
+                                .finish(
+                                    std::mem::take(&mut state.segment_builder),
+                                    &state.planning_reasoning_parts,
+                                    std::mem::take(&mut state.tool_records),
+                                    std::mem::take(&mut state.generated_api_messages),
+                                ),
                         ));
                     }
-                    // Partial plain text was already streamed to the frontend and the
-                    // stream layer already emitted the single done("cancelled") event;
-                    // preserve the generated text instead of dropping the whole turn.
-                    // Append the reasoning segment first (its reserved order is lower
-                    // than the text segment's) so the persisted timeline keeps reasoning
-                    // above the answer; otherwise normalize_assistant_segments would add
-                    // a trailing reasoning segment that renders below the text.
-                    if let Some(reasoning_text) = stream
-                        .reasoning
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        let mut reasoning_segment = planning_reasoning_segment.clone();
-                        reasoning_segment.phase = ChatMessageSegmentPhase::Plain;
-                        state.segment_builder.append_text_from_template(
-                            &reasoning_segment,
-                            reasoning_text.to_string(),
-                        );
-                    }
-                    let mut segment = planning_text_segment.clone();
-                    segment.phase = ChatMessageSegmentPhase::Plain;
-                    return Ok(PlanningStepOutcome::Cancelled(
-                        RunResultBuilder::new(host, env.ids(), partial)
-                            .segment(&segment)
-                            .api_reasoning(stream.reasoning.clone())
-                            .reasoning_tail(stream.reasoning)
-                            .outcome("cancelled")
-                            .finish(
-                                std::mem::take(&mut state.segment_builder),
-                                &state.planning_reasoning_parts,
-                                std::mem::take(&mut state.tool_records),
-                                std::mem::take(&mut state.generated_api_messages),
-                            ),
-                    ));
+                    state.merge_usage(stream.usage.clone());
+                    state.generated_images.append(&mut stream.images);
+                    break Ok(ChatPlanningStep {
+                        message: stream.to_openai_compatible_message(),
+                        streamed: true,
+                    });
                 }
-                state.merge_usage(stream.usage.clone());
-                Ok(ChatPlanningStep {
-                    message: stream.to_openai_compatible_message(),
-                    streamed: true,
-                })
-            }
-            Err(err) if planning_tool_drafts.has_started() => {
-                eprintln!(
+                Err(err) if planning_tool_drafts.has_started() => {
+                    eprintln!(
                     "Chat tools planning stream interrupted while generating tool arguments; surfacing tool draft error without retry: {}",
                     err
                 );
-                return Ok(PlanningStepOutcome::DraftFailed(
-                    tool_planning_failed_run_result(
-                        host,
-                        config,
-                        std::mem::take(&mut state.segment_builder),
-                        planning_text_segment.clone(),
-                        planning_tool_drafts,
-                        &state.planning_reasoning_parts,
-                        std::mem::take(&mut state.generated_api_messages),
-                        err.to_string(),
-                    ),
-                ));
-            }
-            Err(err) if err.is_stream_read_interrupted() => {
-                eprintln!(
-                    "Chat tools planning stream interrupted; retrying once without streaming: {}",
-                    err
-                );
-                // 与下方非流式路径同款 select：降级重试内部有 send_with_retry 的多次退避
-                // （每次 60s 超时），不接取消的话，用户点停止后会卡在这里直到重试耗尽。
-                tokio::select! {
-                    result = call_chat_completion_message_with_usage(
-                        config.state,
-                        &config.provider,
-                        &config.model,
-                        send_messages.clone(),
-                        Some(&active_tools),
-                        config.retry_attempts,
-                        config.thinking_enabled,
-                        config.thinking_level.clone(),
-                        config.max_output_tokens,
-                        &config.conversation_id,
-                        &config.message_id,
-                        "Chat tools planning",
-                    ) => result.map(|(message, usage)| {
-                        state.merge_usage(usage);
-                        ChatPlanningStep {
-                            message,
-                            streamed: false,
-                        }
-                    }),
-                    _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
-                        return Ok(PlanningStepOutcome::Cancelled(
-                            cancelled_run_result_from_state(env, state),
-                        ));
-                    }
+                    return Ok(PlanningStepOutcome::DraftFailed(
+                        tool_planning_failed_run_result(
+                            host,
+                            config,
+                            std::mem::take(&mut state.segment_builder),
+                            planning_text_segment.clone(),
+                            planning_tool_drafts,
+                            &state.planning_reasoning_parts,
+                            std::mem::take(&mut state.generated_api_messages),
+                            err.to_string(),
+                        ),
+                    ));
                 }
+                Err(err)
+                    if err.is_stream_read_interrupted()
+                        && interrupt_attempt < STREAM_INTERRUPT_RETRIES =>
+                {
+                    interrupt_attempt += 1;
+                    eprintln!(
+                    "Chat tools planning stream interrupted; reconnecting the stream ({interrupt_attempt}/{STREAM_INTERRUPT_RETRIES}): {err}"
+                );
+                    // 退避必须接取消：否则用户点停止后要等满退避 + 下一次完整流。
+                    tokio::select! {
+                        _ = tokio::time::sleep(STREAM_INTERRUPT_BACKOFF * interrupt_attempt) => {}
+                        _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
+                            return Ok(PlanningStepOutcome::Cancelled(
+                                cancelled_run_result_from_state(env, state),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                Err(err) => break Err(err.to_string()),
             }
-            Err(err) => Err(err.to_string()),
         }
     } else {
         tokio::select! {
-            result = call_chat_completion_message_with_usage(
+            result = call_chat_completion_output_with_usage(
                 config.state,
                 &config.provider,
                 &config.model,
@@ -293,12 +318,15 @@ pub(crate) async fn planning_step(
                 config.retry_attempts,
                 config.thinking_enabled,
                 config.thinking_level.clone(),
+                config.builtin_web_search_active(),
                 config.max_output_tokens,
                 &config.conversation_id,
                 &config.message_id,
                 "Chat tools planning",
-            ) => result.map(|(message, usage)| {
+            ) => result.map(|(message, usage, web_search, images)| {
                 state.merge_usage(usage);
+                planning_web_search = web_search;
+                state.generated_images.extend(images);
                 ChatPlanningStep {
                     message,
                     streamed: false,
@@ -354,11 +382,17 @@ pub(crate) async fn planning_step(
                 let content = super::synthesis::recover_synthesis(env, state, &err).await;
                 if !content.trim().is_empty() {
                     eprintln!("Chat planning call failed mid-run; recovered: {err}");
+                    // 降级文案是本轮的**正文**，段 phase 必须是 Synthesis（不能留 ToolLoop）：
+                    // content_from_segments 只认 Plain|Synthesis，留 ToolLoop 会让
+                    // normalize_assistant_segments 以为正文没落段而再补一条，正文渲染两遍。
+                    let mut segment = planning_text_segment.clone();
+                    segment.phase = ChatMessageSegmentPhase::Synthesis;
                     return Ok(PlanningStepOutcome::Recovered(
                         RunResultBuilder::new(host, env.ids(), content)
-                            .segment(&planning_text_segment)
+                            .segment(&segment)
                             .emit_done("done")
                             .outcome("recovered")
+                            .degraded(state.degraded.take())
                             .finish(
                                 std::mem::take(&mut state.segment_builder),
                                 &state.planning_reasoning_parts,
@@ -371,6 +405,29 @@ pub(crate) async fn planning_step(
             return Err(err);
         }
     };
+    // 内置搜索（服务端托管）发生过 ⇒ 一张「网络搜索」卡落盘（预留槽 = 答案文本之前）。
+    // 两条路径互斥：流式由实时卡追踪器边流边合成（take_card 落 Success 终态卡）；
+    // 非流式只在拿到完整答案后合成（planning_web_search 才有值）。绝不双卡。
+    if let Some(tracker) = planning_web_search_tracker.as_ref() {
+        if let Some((record, segment)) = tracker.take_card() {
+            state
+                .segment_builder
+                .append_existing_segments(vec![segment]);
+            state.tool_records.push(record);
+        }
+    }
+    if let Some(web_search) = planning_web_search.as_ref() {
+        emit_builtin_web_search_card(
+            host,
+            env.ids(),
+            state,
+            web_search,
+            &config.provider.name,
+            ChatMessageSegmentPhase::ToolLoop,
+            Some(round),
+            Some(web_search_order),
+        );
+    }
     let tool_calls = extract_tool_calls(&message);
     if tool_calls.is_empty() {
         let response =
@@ -378,7 +435,12 @@ pub(crate) async fn planning_step(
         // 空响应重试（一次）：正文空 + 无工具调用 = 抽风网关的典型症状（HTTP 200 但
         // 正文什么都没给，可能残留一段 reasoning）。这种消息走到 finalize 必报
         // "empty assistant response"——与其断轮不如原地重试一次；再空则照旧报错。
-        if response.trim().is_empty() && !state.planning_empty_retried {
+        // 例外：本轮出了图（hosted image generation，如 Responses 的 image_generation_call）
+        // 时正文本就是空串——图即答案，重试只会再生成一张，必须放行。
+        if response.trim().is_empty()
+            && state.generated_images.is_empty()
+            && !state.planning_empty_retried
+        {
             state.planning_empty_retried = true;
             eprintln!("Chat tools planning returned an empty response; retrying once");
             return Ok(PlanningStepOutcome::RetryEmptyResponse);
@@ -488,11 +550,57 @@ pub(crate) async fn call_chat_completion_message_with_usage(
     retry_attempts: usize,
     thinking_enabled: bool,
     thinking_level: Option<String>,
+    builtin_web_search: bool,
     max_output_tokens: u32,
     conversation_id: &str,
     message_id: &str,
     label: &str,
 ) -> Result<(Value, Option<crate::chat::model::ModelUsage>), String> {
+    let (message, usage, _web_search, _images) = call_chat_completion_output_with_usage(
+        state,
+        provider,
+        model,
+        messages,
+        tools,
+        retry_attempts,
+        thinking_enabled,
+        thinking_level,
+        builtin_web_search,
+        max_output_tokens,
+        conversation_id,
+        message_id,
+        label,
+    )
+    .await?;
+    Ok((message, usage))
+}
+
+/// 同 `call_chat_completion_message_with_usage`，但额外回传适配器解析出的内置搜索引用
+/// （`GenerateOutput.web_search`）。非流式答案路径用它把内置搜索可视化成工具卡（任务 07-23）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn call_chat_completion_output_with_usage(
+    state: &crate::state::AppState,
+    provider: &crate::settings::ModelProvider,
+    model: &str,
+    messages: Vec<Value>,
+    tools: Option<&[ChatToolDefinition]>,
+    retry_attempts: usize,
+    thinking_enabled: bool,
+    thinking_level: Option<String>,
+    builtin_web_search: bool,
+    max_output_tokens: u32,
+    conversation_id: &str,
+    message_id: &str,
+    label: &str,
+) -> Result<
+    (
+        Value,
+        Option<crate::chat::model::ModelUsage>,
+        Option<crate::chat::model::BuiltinWebSearch>,
+        Vec<crate::chat::model::GeneratedImageData>,
+    ),
+    String,
+> {
     let request = generate_request_from_openai_messages(
         model,
         messages,
@@ -500,6 +608,7 @@ pub(crate) async fn call_chat_completion_message_with_usage(
         GenerateOptions {
             thinking_enabled,
             thinking_level,
+            builtin_web_search,
             max_tokens: max_output_tokens,
             ..GenerateOptions::default()
         },
@@ -510,7 +619,14 @@ pub(crate) async fn call_chat_completion_message_with_usage(
         .await
         .map_err(|err| err.to_string())?;
     let usage = output.usage.clone();
-    Ok((output.to_openai_compatible_message(), usage))
+    let web_search = output.web_search.clone();
+    let images = output.images.clone();
+    Ok((
+        output.to_openai_compatible_message(),
+        usage,
+        web_search,
+        images,
+    ))
 }
 
 /// 与 `call_chat_completion_message_with_usage` 同形（返回 `to_openai_compatible_message()` Value），
@@ -595,6 +711,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
     retry_attempts: usize,
     thinking_enabled: bool,
     thinking_level: Option<String>,
+    builtin_web_search: bool,
     max_output_tokens: u32,
     conversation_id: &str,
     run_id: &str,
@@ -605,6 +722,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
     text_segment: Option<ChatMessageSegment>,
     reasoning_segment: Option<ChatMessageSegment>,
     tool_draft_tracker: Option<ToolCallDraftTracker>,
+    web_search_tracker: Option<WebSearchCardTracker>,
 ) -> Result<ChatStreamOutput, ModelError> {
     let request = generate_request_from_openai_messages(
         model,
@@ -613,6 +731,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         GenerateOptions {
             thinking_enabled,
             thinking_level,
+            builtin_web_search,
             max_tokens: max_output_tokens,
             ..GenerateOptions::default()
         },
@@ -628,6 +747,7 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         text_segment,
         reasoning_segment,
         tool_draft_tracker.clone(),
+        web_search_tracker,
     );
     let output = tokio::select! {
         result = stream_with_chat_provider(
@@ -639,13 +759,6 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         ) => result?,
         _ = host.wait_for_generation_inactive(conversation_id, generation) => {
             let (content, reasoning) = sink.snapshot();
-            host.emit_stream_done(
-                conversation_id,
-                run_id,
-                message_id,
-                "cancelled",
-                content.trim(),
-            );
             return Ok(ChatStreamOutput::new(
                 content.trim().to_string(),
                 reasoning.trim().to_string(),
@@ -654,90 +767,17 @@ pub(crate) async fn stream_scoped_chat_completion_inner(
         }
     };
     sink.flush_pending_text();
+    // 内置搜索实时卡定稿：流成功结束 ⇒ 翻 Success 并发终态记录（取消路径已在上面的
+    // select 分支 return，不会到这里，故取消时实时卡不落 Success，与 draft 行为一致）。
+    if let Some(record) = sink.finish_web_search_card() {
+        host.emit_tool_record(conversation_id, run_id, message_id, &record);
+    }
     let (snapshot_content, snapshot_reasoning) = sink.snapshot();
     let stream_output = ChatStreamOutput::from_generate_output_with_snapshot(
         output,
         snapshot_content,
         snapshot_reasoning,
     );
-    validate_stream_output(label, policy, &stream_output).map_err(|err| {
-        if !tool_draft_tracker
-            .as_ref()
-            .is_some_and(|tracker| tracker.has_unfinished_drafts())
-        {
-            host.emit_stream_done(conversation_id, run_id, message_id, "error", "");
-        }
-        ModelError::new(err)
-    })?;
-    if should_emit_done(policy, &stream_output) {
-        sink.flush_pending_text();
-        host.emit_stream_done(
-            conversation_id,
-            run_id,
-            message_id,
-            "done",
-            &stream_output.content,
-        );
-    }
+    validate_stream_output(label, policy, &stream_output).map_err(ModelError::new)?;
     Ok(stream_output)
-}
-pub(crate) async fn generate_with_chat_provider(
-    state: &crate::state::AppState,
-    provider: &crate::settings::ModelProvider,
-    retry_attempts: usize,
-    request: crate::chat::model::GenerateRequest,
-) -> Result<GenerateOutput, ModelError> {
-    match provider.api_format_kind() {
-        ProviderApiFormat::OpenAiChat => {
-            OpenAiChatProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-        ProviderApiFormat::AnthropicMessages => {
-            AnthropicMessagesProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-        ProviderApiFormat::OpenAiResponses => {
-            OpenAiResponsesProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-        ProviderApiFormat::Gemini => {
-            crate::chat::model::GeminiProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-    }
-}
-
-pub(crate) async fn stream_with_chat_provider(
-    state: &crate::state::AppState,
-    provider: &crate::settings::ModelProvider,
-    retry_attempts: usize,
-    request: crate::chat::model::GenerateRequest,
-    sink: &mut (dyn crate::chat::model::StreamSink + Send),
-) -> Result<GenerateOutput, ModelError> {
-    match provider.api_format_kind() {
-        ProviderApiFormat::OpenAiChat => {
-            OpenAiChatProvider::new(state, provider, retry_attempts)
-                .stream(request, sink)
-                .await
-        }
-        ProviderApiFormat::AnthropicMessages => {
-            AnthropicMessagesProvider::new(state, provider, retry_attempts)
-                .stream(request, sink)
-                .await
-        }
-        ProviderApiFormat::OpenAiResponses => {
-            OpenAiResponsesProvider::new(state, provider, retry_attempts)
-                .stream(request, sink)
-                .await
-        }
-        ProviderApiFormat::Gemini => {
-            crate::chat::model::GeminiProvider::new(state, provider, retry_attempts)
-                .stream(request, sink)
-                .await
-        }
-    }
 }

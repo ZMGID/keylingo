@@ -51,6 +51,9 @@ pub struct AgentRunConfig<'a> {
     /// 每对话「思考等级」(`Some("low"|"medium"|"high")`)。`None` = 未设置，维持现状。
     /// 仅作用于答案生成（planning/synthesis），不作用于压缩摘要。
     pub thinking_level: Option<String>,
+    /// 会话级联网搜索有效模式（任务 07-23）。由 `effective_web_search_mode` 解析后传入。
+    /// 决定本 run 是否暴露 `search_web`（ThirdParty）或请求内置搜索（Builtin，且模型支持）。
+    pub web_search_mode: crate::chat::types::WebSearchMode,
     pub stream_enabled: bool,
     pub max_output_tokens: u32,
     pub retry_attempts: usize,
@@ -64,6 +67,16 @@ pub struct AgentRunConfig<'a> {
     /// 锚点响应**之后**（不含响应本身，响应用 output 计入锚点）新增消息的字符估算，由 commands.rs
     /// 组装 runtime_messages 时算好。与 `initial_anchor_total_tokens` 配对：`effective = 锚点 + 该 trailing`。
     pub initial_anchor_trailing_estimate: usize,
+}
+
+impl AgentRunConfig<'_> {
+    /// 本 run 是否应请求模型**原生内置联网搜索**（任务 07-23）：
+    /// 会话为 `Builtin` 模式且当前 provider 支持（按 `api_format`）。
+    /// 用于答案生成（planning/synthesis）设置 `GenerateOptions.builtin_web_search`。
+    pub(crate) fn builtin_web_search_active(&self) -> bool {
+        self.web_search_mode == crate::chat::types::WebSearchMode::Builtin
+            && crate::chat::model_metadata::builtin_web_search_supported(&self.provider)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,4 +103,10 @@ pub struct AgentRunResult {
     /// Agent-loop L2 compaction summary for `context_state.summary` persistence
     /// (L2 不再只 push boundary，run 结束时由 commands.rs 写回 summary + compression_count）。
     pub compaction_summary: Option<crate::chat::types::ConversationContextSummary>,
+    /// 本轮降级兜底的结构化描述（模型失败但已产出工具结果）。None = 正常回答。
+    /// 落到 `ChatMessage.degraded`，前端据此渲染错误卡片。
+    pub degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
+    /// 模型原生生成的图片（Gemini native image gen，任务 07-24）：跨轮累积的
+    /// `GenerateOutput.images`，reply 侧落成 assistant 消息级 artifacts。空 = 未出图。
+    pub images: Vec<crate::chat::model::GeneratedImageData>,
 }

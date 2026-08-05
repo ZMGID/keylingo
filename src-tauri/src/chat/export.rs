@@ -148,6 +148,7 @@ mod tests {
     fn conversation() -> Conversation {
         Conversation {
             id: "conv_test".to_string(),
+            revision: 0,
             title: "Export test".to_string(),
             provider_id: "secret-provider".to_string(),
             model: "gpt-test".to_string(),
@@ -178,6 +179,7 @@ mod tests {
                     provider_id: None,
                     model: None,
                     timestamp: 1_700_000_000,
+                    degraded: None,
                 },
                 ChatMessage {
                     id: "assistant_1".to_string(),
@@ -205,6 +207,7 @@ mod tests {
                     provider_id: None,
                     model: None,
                     timestamp: 1_700_000_001,
+                    degraded: None,
                 },
             ],
             agent_runtime: AgentRuntimeConfig::default(),
@@ -223,6 +226,7 @@ mod tests {
             knowledge_base_ids: vec![],
             force_knowledge_search: false,
             thinking_level: None,
+            web_search_mode: None,
             reply_models: vec![],
             group_selections: HashMap::new(),
             forked_from: None,
@@ -268,6 +272,7 @@ mod tests {
             provider_id: None,
             model: None,
             timestamp: 1_700_000_002,
+            degraded: None,
         });
 
         let markdown = render_conversation_markdown(&conversation, "en");

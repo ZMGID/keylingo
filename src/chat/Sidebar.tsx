@@ -2,16 +2,17 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from 'react-dom'
 import { save } from '@tauri-apps/plugin-dialog'
 import {
+  ChevronDown,
   ChevronRight,
   Folder,
   FolderPlus,
   Layers,
   LayoutGrid,
   MoreHorizontal,
+  NotebookPen,
   Plus,
   Puzzle,
   Search,
-  Settings as SettingsIcon,
   SquarePen,
 } from 'lucide-react'
 import type { ChatAssistant, ChatProject, ChatSet, ConversationListItem } from './types'
@@ -20,17 +21,22 @@ import { ConversationList } from './ConversationList'
 import { ChatSectionMenu } from './ChatSectionMenu'
 import { ProjectContextMenu } from './ProjectContextMenu'
 import { ProjectDialog } from './ProjectDialog'
+import { CliImportDialog } from './CliImportDialog'
 import { SetContextMenu } from './SetContextMenu'
 import { SetDialog } from './SetDialog'
+import { SidebarAccountMenu } from './SidebarAccountMenu'
 import { getSettingsCached } from '../api/settingsCache'
 import { IconButton } from '../components/Button'
 import { chatApi } from './api'
+import { applyIdOrder, moveIdToIndex } from '../utils/pointerReorder'
+import { useInsertionReorder } from '../utils/insertionReorder'
+import { applyConversationPins, withPinAt, type ConversationPin } from './conversationPins'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
-import { chatTitlebarMacInsetClass, chatTitlebarRowClass, isMac } from './platform'
+import { chatTitlebarMacInsetClass, isMac, usesNativeTitlebar } from './platform'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
-import type { Lang } from '../settings/i18n'
+import { i18n, useT, type I18n, type Lang } from '../settings/i18n'
 import { conversationMarkdownFilename } from './conversationExport'
 
 function resolveChatUserProfile(
@@ -44,18 +50,19 @@ function resolveChatUserProfile(
 
 const modLabel = isMac ? '⌘' : 'Ctrl'
 
-export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'plugins'
+export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'plugins'
 
 const extensionSubItems: Array<{
   id: ExtensionsNavItem
-  label: string
+  label: (t: I18n) => string
   icon: (props: { size?: number; className?: string }) => React.JSX.Element
 }> = [
-  { id: 'assistants', label: '助手', icon: AgentIcon },
-  { id: 'skill', label: 'Skill', icon: SkillIcon },
-  { id: 'mcp', label: 'MCP', icon: McpIcon },
-  { id: 'knowledge', label: '知识库', icon: KnowledgeIcon },
-  { id: 'plugins', label: '插件', icon: (props) => <Puzzle size={props.size} className={props.className} strokeWidth={1.75} /> },
+  { id: 'assistants', label: (t) => t.chatNavAssistants, icon: AgentIcon },
+  { id: 'skill', label: () => 'Skill', icon: SkillIcon },
+  { id: 'mcp', label: () => 'MCP', icon: McpIcon },
+  { id: 'knowledge', label: (t) => t.chatNavKnowledge, icon: KnowledgeIcon },
+  { id: 'notes', label: (t) => t.chatNavNotes, icon: (props) => <NotebookPen size={props.size} className={props.className} strokeWidth={1.75} /> },
+  { id: 'plugins', label: (t) => t.chatNavPlugins, icon: (props) => <Puzzle size={props.size} className={props.className} strokeWidth={1.75} /> },
 ]
 
 const PROJECT_PREVIEW_LIMIT = 5
@@ -119,6 +126,8 @@ interface SidebarProps {
   onForceDropConversation?: (id: string) => void
   onOpenSettings: () => void
   onOpenExtensionsItem: (item: ExtensionsNavItem) => void
+  onSelectLang: (lang: Lang) => void
+  onCheckUpdate: () => void
   settingsActive?: boolean
   extensionsActive?: ExtensionsNavItem | null
   collapsed: boolean
@@ -131,45 +140,74 @@ interface SidebarProps {
 
 function SidebarUserFooter({
   profile,
+  lang,
   settingsActive,
   onOpenSettings,
+  onSelectLang,
+  onCheckUpdate,
 }: {
   profile: ChatUserProfile
+  lang: Lang
   settingsActive: boolean
   onOpenSettings: () => void
+  onSelectLang: (lang: Lang) => void
+  onCheckUpdate: () => void
 }) {
+  const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(null)
+  const rowRef = useRef<HTMLButtonElement>(null)
+
   return (
     <div
-      className="shrink-0 border-t border-neutral-200/60 px-2 pb-2.5 pt-2 dark:border-neutral-800/80"
+      className="shrink-0 border-t border-neutral-200/60 p-1.5 dark:border-neutral-800/80"
       data-tauri-drag-region="false"
     >
-      <div className="flex items-center gap-2 px-2 py-1.5">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <UserAvatar profile={profile} size={28} />
-          {profile.displayName.length > 0 && (
-            <span
-              className="min-w-0 truncate text-[13px] text-neutral-700 dark:text-neutral-300"
-              title={profile.displayName}
-            >
-              {profile.displayName}
-            </span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onOpenSettings}
-          className={`shrink-0 rounded-md p-1.5 transition-colors ${
-            settingsActive
-              ? 'bg-black/[0.06] text-neutral-800 dark:bg-white/[0.1] dark:text-neutral-100'
-              : 'text-neutral-400 hover:bg-black/[0.05] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.08] dark:hover:text-neutral-300'
-          }`}
-          title="设置"
-          aria-label="设置"
-          aria-pressed={settingsActive}
+      {/* 整行即触发（对齐 Claude）：不再是「名字 + 独立齿轮按钮」，设置折进菜单。 */}
+      <button
+        ref={rowRef}
+        type="button"
+        onClick={() => {
+          if (menuRect) {
+            setMenuRect(null)
+            return
+          }
+          const rect = rowRef.current?.getBoundingClientRect()
+          if (!rect) return
+          setMenuRect({ left: rect.left, top: rect.top, width: rect.width })
+        }}
+        className={`flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors ${
+          menuRect || settingsActive
+            ? 'bg-black/[0.06] dark:bg-white/[0.1]'
+            : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+        }`}
+        aria-haspopup="menu"
+        aria-expanded={menuRect !== null}
+      >
+        <UserAvatar profile={profile} size={22} />
+        <span
+          className="min-w-0 flex-1 truncate text-[12.5px] text-neutral-700 dark:text-neutral-300"
+          title={profile.displayName || undefined}
         >
-          <SettingsIcon size={16} strokeWidth={1.75} />
-        </button>
-      </div>
+          {profile.displayName || 'Kivio'}
+        </span>
+        <ChevronDown
+          size={13}
+          strokeWidth={2}
+          className={`shrink-0 text-neutral-400 transition-transform duration-[var(--kv-dur-fast)] dark:text-neutral-500 ${
+            menuRect ? 'rotate-180' : ''
+          }`}
+        />
+      </button>
+
+      {menuRect && (
+        <SidebarAccountMenu
+          triggerRect={menuRect}
+          lang={lang}
+          onOpenSettings={onOpenSettings}
+          onSelectLang={onSelectLang}
+          onCheckUpdate={onCheckUpdate}
+          onClose={() => setMenuRect(null)}
+        />
+      )}
     </div>
   )
 }
@@ -213,6 +251,7 @@ function ExtensionsNav({
   activeItem?: ExtensionsNavItem | null
   onSelectItem: (item: ExtensionsNavItem) => void
 }) {
+  const t = useT()
   const [expanded, setExpanded] = useState(() => Boolean(activeItem))
 
   useEffect(() => {
@@ -236,7 +275,7 @@ function ExtensionsNav({
         <span className="flex h-5 w-5 shrink-0 items-center justify-center text-neutral-600 transition duration-300 ease-out will-change-transform group-hover:text-neutral-800 group-active:scale-90 group-hover:rotate-3 group-hover:scale-110 dark:text-neutral-400 dark:group-hover:text-neutral-200">
           <LayoutGrid size={17} strokeWidth={1.75} />
         </span>
-        <span className="min-w-0 flex-1 truncate">扩展</span>
+        <span className="min-w-0 flex-1 truncate">{t.chatNavExtensions}</span>
         <ChevronRight
           size={14}
           strokeWidth={2}
@@ -246,7 +285,7 @@ function ExtensionsNav({
         />
       </button>
       {expanded && (
-        <div className="ml-[26px] mt-0.5">
+        <div className="ml-[12px] mt-0.5 grid grid-cols-2 gap-x-1">
           {extensionSubItems.map((item) => {
             const active = activeItem === item.id
             const Icon = item.icon
@@ -255,7 +294,7 @@ function ExtensionsNav({
                 key={item.id}
                 type="button"
                 onClick={() => onSelectItem(item.id)}
-                className={`flex w-full items-center gap-2 rounded-md py-1.5 pl-2 pr-2 text-left text-[13px] transition-colors ${
+                className={`flex items-center gap-2 rounded-md py-1.5 pl-2 pr-1 text-left text-[13px] transition-colors ${
                   active
                     ? 'font-medium text-neutral-900 dark:text-neutral-100'
                     : 'text-neutral-700 hover:bg-black/[0.04] hover:text-neutral-900 dark:text-neutral-300 dark:hover:bg-white/[0.06] dark:hover:text-neutral-100'
@@ -266,7 +305,7 @@ function ExtensionsNav({
                 }`}>
                   <Icon size={15} />
                 </span>
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                <span className="min-w-0 flex-1 truncate">{item.label(t)}</span>
               </button>
             )
           })}
@@ -295,6 +334,7 @@ function SearchDialog({
   onSelectConversation: (conversation: ConversationListItem) => void
   onClose: () => void
 }) {
+  const t = useT()
   const dialogRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -325,7 +365,7 @@ function SearchDialog({
         className="chat-motion-popover flex max-h-[62vh] w-full max-w-[560px] flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl shadow-black/25 dark:border-neutral-700 dark:bg-[#242426]"
         role="dialog"
         aria-modal="true"
-        aria-label="搜索对话"
+        aria-label={t.chatSearchConversations}
       >
         <div className="flex items-center gap-2 border-b border-neutral-200/80 px-3 py-2 dark:border-neutral-700/80">
           <Search size={15} strokeWidth={1.75} className="shrink-0 text-neutral-400" />
@@ -333,6 +373,10 @@ function SearchDialog({
             ref={inputRef}
             type="text"
             value={query}
+            autoCapitalize="off"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
             onChange={(event) => onQueryChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && results[0]) {
@@ -341,13 +385,13 @@ function SearchDialog({
                 onSelectConversation(results[0])
               }
             }}
-            placeholder="搜索对话"
+            placeholder={t.chatSearchConversations}
             className="min-w-0 flex-1 bg-transparent text-[14px] font-medium text-neutral-900 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
           />
         </div>
 
         <div className="px-3 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
-          {normalizedQuery ? '搜索结果' : '近期对话'}
+          {normalizedQuery ? t.chatSearchResults : t.chatRecentConversations}
         </div>
 
         <div className="custom-scrollbar min-h-0 overflow-y-auto px-1.5 pb-1.5">
@@ -383,7 +427,7 @@ function SearchDialog({
                   </span>
                   {setLabel && (
                     <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
-                      集 · {setLabel}
+                      {t.chatSetPrefix} · {setLabel}
                     </span>
                   )}
                   {!setLabel && projectLabel && (
@@ -396,7 +440,7 @@ function SearchDialog({
             })
           ) : (
             <div className="px-3 py-6 text-center text-[13px] text-neutral-400 dark:text-neutral-500">
-              没有匹配的对话
+              {t.chatNoMatchingConversations}
             </div>
           )}
         </div>
@@ -421,6 +465,8 @@ export const Sidebar = memo(function Sidebar({
   onForceDropConversation,
   onOpenSettings,
   onOpenExtensionsItem,
+  onSelectLang,
+  onCheckUpdate,
   settingsActive = false,
   extensionsActive = null,
   collapsed,
@@ -430,6 +476,7 @@ export const Sidebar = memo(function Sidebar({
   searchOpen,
   onSearchOpenChange,
 }: SidebarProps) {
+  const t = i18n[lang]
   const asideRef = useRef<HTMLElement>(null)
   // 折叠后侧栏仍挂载（用于滑出动画），用 inert 让其退出 tab 序 / 不可点击 / 不进 a11y 树。
   // useLayoutEffect：在绘制前与 JSX 里的 aria-hidden 原子地一起生效，避免短暂可聚焦窗口。
@@ -440,6 +487,8 @@ export const Sidebar = memo(function Sidebar({
   const [conversations, setConversations] = useState<ConversationListItem[]>([])
   const [projects, setProjects] = useState<ChatProject[]>([])
   const [sets, setSets] = useState<ChatSet[]>([])
+  // 集/项目里对话的钉住位置：group_id → 钉子表。底座仍是时间序，见 conversationPins.ts。
+  const [conversationPins, setConversationPins] = useState<Record<string, ConversationPin[]>>({})
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   // 后端全量索引搜索结果（覆盖所有对话，不止已加载的前 80）；空查询/非 Tauri 时为空，回退客户端过滤。
@@ -463,6 +512,7 @@ export const Sidebar = memo(function Sidebar({
     anchor: ConversationMenuAnchor
   } | null>(null)
   const [dialogProject, setDialogProject] = useState<ChatProject | null | undefined>(undefined)
+  const [importProject, setImportProject] = useState<ChatProject | null>(null)
   const [projectSaving, setProjectSaving] = useState(false)
   const [projectError, setProjectError] = useState('')
   const [setMenuState, setSetMenuState] = useState<{
@@ -494,14 +544,16 @@ export const Sidebar = memo(function Sidebar({
     const silent = options?.silent ?? false
     if (!silent) setLoading(true)
     try {
-      const [projectData, setData, assistantData, conversationData] = await Promise.all([
+      const [projectData, setData, assistantData, conversationData, pinData] = await Promise.all([
         chatApi.getProjects(),
         chatApi.getSets(),
         chatApi.getAssistants(),
         chatApi.getConversations(0, 80),
+        chatApi.getConversationPins(),
       ])
       setProjects(projectData)
       setSets(setData)
+      setConversationPins(pinData)
       setAssistants(assistantData)
       setConversations(conversationData)
       if (projectForLoad && !projectData.some((project) => project.id === projectForLoad.id)) {
@@ -552,7 +604,7 @@ export const Sidebar = memo(function Sidebar({
   }
 
   const handleDeleteConversation = async (id: string) => {
-    if (!window.confirm('确定删除此对话？此操作无法撤销。')) return
+    if (!window.confirm(t.chatDeleteConversationConfirm)) return
     // B3：删"generating"会话先强制清父组件 in-flight/乐观状态，
     // 让乐观合并（visibleConversations）不再保留它。
     if (generatingConversationIds.has(id)) {
@@ -564,9 +616,16 @@ export const Sidebar = memo(function Sidebar({
       }
     }
     try {
-      await chatApi.deleteConversation(id)
+      const warnings = await chatApi.deleteConversation(id)
+      // 对话本身已删掉，只是副产物没清干净（典型：工作区里还有进程占着目录）。
+      // 以前这类情况整个删除会中止、对话又冒回来，现在只提示一句。
+      if (warnings.length > 0) {
+        window.alert(t.chatDeleteConversationPartial + warnings.join('\n'))
+      }
     } catch (err) {
       console.error('Failed to delete conversation:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      window.alert(t.chatDeleteConversationFailed + message)
     } finally {
       // 无论后端删除成功或抛错，都本地剔除该 id 并刷新侧栏，确保 ghost 立即消失。
       setConversations((items) => items.filter((item) => item.id !== id))
@@ -587,7 +646,7 @@ export const Sidebar = memo(function Sidebar({
       if (!path) return
       await chatApi.exportConversationMarkdown(id, path, lang)
     } catch (err) {
-      const prefix = lang === 'zh' ? '导出失败：' : 'Export failed: '
+      const prefix = t.chatExportFailed
       const message = err instanceof Error ? err.message : String(err)
       window.alert(`${prefix}${message}`)
     }
@@ -650,14 +709,14 @@ export const Sidebar = memo(function Sidebar({
       await loadSidebarData({ silent: true, setOverride: set })
       setDialogSet(undefined)
     } catch (err) {
-      setSetDialogError(typeof err === 'string' ? err : (err as Error).message || '集保存失败')
+      setSetDialogError(typeof err === 'string' ? err : (err as Error).message || t.chatSetSaveFailed)
     } finally {
       setSetDialogSaving(false)
     }
   }
 
   const handleDeleteSet = async (set: ChatSet) => {
-    if (!window.confirm(`确定删除集「${set.name}」？集内的对话会移出集，不会被删除。`)) {
+    if (!window.confirm(t.chatDeleteSetConfirm.replace('{name}', set.name))) {
       return
     }
     try {
@@ -709,7 +768,7 @@ export const Sidebar = memo(function Sidebar({
       await loadSidebarData({ silent: true, projectOverride: project })
       setDialogProject(undefined)
     } catch (err) {
-      setProjectError(typeof err === 'string' ? err : (err as Error).message || '项目保存失败')
+      setProjectError(typeof err === 'string' ? err : (err as Error).message || t.chatProjectSaveFailed)
     } finally {
       setProjectSaving(false)
     }
@@ -719,12 +778,12 @@ export const Sidebar = memo(function Sidebar({
     try {
       await chatApi.openProjectFolder(project.id)
     } catch (err) {
-      window.alert(typeof err === 'string' ? err : (err as Error).message || '打开项目文件夹失败')
+      window.alert(typeof err === 'string' ? err : (err as Error).message || t.chatOpenProjectFolderFailed)
     }
   }
 
   const handleDeleteProject = async (project: ChatProject) => {
-    if (!window.confirm(`确定删除项目「${project.name}」？项目内的聊天会移出项目，不会被删除。`)) {
+    if (!window.confirm(t.chatDeleteProjectConfirm.replace('{name}', project.name))) {
       return
     }
     try {
@@ -744,8 +803,10 @@ export const Sidebar = memo(function Sidebar({
       ? conversations.filter((conv) => conversationBelongsToProject(conv, selectedProject))
       : conversations
     if (targetConversations.length === 0) return
-    const scope = selectedProject ? `项目「${selectedProject.name}」中的` : '全部'
-    if (!window.confirm(`确定删除${scope} ${targetConversations.length} 个对话？此操作无法撤销。`)) return
+    const confirmText = selectedProject
+      ? t.chatDeleteAllInProjectConfirm.replace('{name}', selectedProject.name)
+      : t.chatDeleteAllConfirm
+    if (!window.confirm(confirmText.replace('{count}', String(targetConversations.length)))) return
     try {
       await Promise.all(targetConversations.map((conv) => chatApi.deleteConversation(conv.id)))
       if (currentConversationId && targetConversations.some((conv) => conv.id === currentConversationId)) {
@@ -776,28 +837,106 @@ export const Sidebar = memo(function Sidebar({
   const projectConversationMap = useMemo(() => {
     const map = new Map<string, ConversationListItem[]>()
     projects.forEach((project) => {
-      map.set(
-        project.id,
-        visibleConversations.filter((conversation) => conversationBelongsToProject(conversation, project)),
+      const inProject = visibleConversations.filter((conversation) =>
+        conversationBelongsToProject(conversation, project),
       )
+      map.set(project.id, applyConversationPins(inProject, conversationPins[project.id] ?? []))
     })
     return map
-  }, [projects, visibleConversations])
+  }, [conversationPins, projects, visibleConversations])
 
   const visibleProjects = projects
+
+  // ── 侧栏分组的手动顺序（docs/adr/0004）。数组顺序就是显示顺序，时间不参与。
+  // 插入线式拖拽：只有被拖那行浮起，其余行不动，目标位置画线 —— 所以不要求行高相等，
+  // 可展开的分组行直接能拖，不需要「拖拽时先全折叠」。
+  const groupScrollRef = useRef<HTMLDivElement>(null)
+  const projectIds = useMemo(() => visibleProjects.map((project) => project.id), [visibleProjects])
+  const setIds = useMemo(() => sets.map((set) => set.id), [sets])
+
+  const projectDrag = useInsertionReorder({
+    listRef: groupScrollRef,
+    rowSelector: '.kv-sidebar-group',
+    onDrop: (id, toIndex) => {
+      const nextIds = moveIdToIndex(projectIds, id, toIndex)
+      setProjects((previous) => applyIdOrder(previous, nextIds))
+      void chatApi.reorderProjects(nextIds).catch((err) => {
+        console.error('Failed to reorder projects:', err)
+        void loadSidebarData({ silent: true })
+      })
+    },
+  })
+
+  // 集/项目里的对话：拖到哪一行就钉在那一行，其余仍按更新时间填空位。
+  // 一个 hook 实例服务所有分组 —— 取样范围由把手最近的 [data-reorder-scope] 决定，
+  // 所以多个分组同时展开时不会互串。「最近」平铺列表不传 reorder，因此不可拖。
+  const conversationDrag = useInsertionReorder({
+    listRef: groupScrollRef,
+    rowSelector: '.kv-conv-row',
+    onDrop: (id, toIndex, groupId) => {
+      if (!groupId) return
+      const nextPins = withPinAt(conversationPins[groupId] ?? [], id, toIndex)
+      setConversationPins((previous) => ({ ...previous, [groupId]: nextPins }))
+      void chatApi.setConversationPins(groupId, nextPins).catch((err) => {
+        console.error('Failed to save conversation pins:', err)
+        void loadSidebarData({ silent: true })
+      })
+    },
+  })
+
+  const conversationReorderFor = useCallback(
+    (groupId: string) => ({
+      scopeId: groupId,
+      draggingId: conversationDrag.draggingId,
+      startDrag: conversationDrag.startDrag,
+    }),
+    [conversationDrag.draggingId, conversationDrag.startDrag],
+  )
+
+  const setDrag = useInsertionReorder({
+    listRef: groupScrollRef,
+    rowSelector: '.kv-sidebar-group',
+    onDrop: (id, toIndex) => {
+      const nextIds = moveIdToIndex(setIds, id, toIndex)
+      setSets((previous) => applyIdOrder(previous, nextIds))
+      void chatApi.reorderSets(nextIds).catch((err) => {
+        console.error('Failed to reorder sets:', err)
+        void loadSidebarData({ silent: true })
+      })
+    },
+  })
+
+  // 跟着指针走的浮起卡片：源行留在原位变淡作占位，这张卡表示「正在搬的是这个」。
+  const dragGhost = useMemo(() => {
+    const active = projectDrag.draggingId
+      ? { drag: projectDrag, label: projects.find((p) => p.id === projectDrag.draggingId)?.name }
+      : setDrag.draggingId
+        ? { drag: setDrag, label: sets.find((s) => s.id === setDrag.draggingId)?.name }
+        : conversationDrag.draggingId
+          ? {
+              drag: conversationDrag,
+              label: visibleConversations.find((c) => c.id === conversationDrag.draggingId)?.title,
+            }
+          : null
+    if (!active?.label || !active.drag.ghostPos) return null
+    return { label: active.label, ...active.drag.ghostPos }
+  }, [conversationDrag, projectDrag, projects, setDrag, sets, visibleConversations])
 
   const setConversationMap = useMemo(() => {
     const map = new Map<string, ConversationListItem[]>()
     sets.forEach((set) => {
       map.set(
         set.id,
-        visibleConversations.filter(
-          (conversation) => (conversation.set_id ?? conversation.setId) === set.id,
+        applyConversationPins(
+          visibleConversations.filter(
+            (conversation) => (conversation.set_id ?? conversation.setId) === set.id,
+          ),
+          conversationPins[set.id] ?? [],
         ),
       )
     })
     return map
-  }, [sets, visibleConversations])
+  }, [conversationPins, sets, visibleConversations])
 
   // 「最近」标签：跨集/项目的全部对话，置顶在前、再按更新时间倒序。
   const recentConversations = useMemo(
@@ -889,33 +1028,40 @@ export const Sidebar = memo(function Sidebar({
     <>
       <aside
         ref={asideRef}
-        className={`chat-sidebar-shell flex h-full w-[240px] shrink-0 flex-col${
+        className={`chat-sidebar-shell flex w-[240px] shrink-0 flex-col overflow-hidden${
           collapsed ? ' is-collapsed' : ''
-        }`}
+        }${settingsActive ? ' is-settings-cover' : ''}`}
         aria-hidden={collapsed}
       >
-        <div
-          className={`${chatTitlebarRowClass} ${chatTitlebarMacInsetClass} pr-3`}
-          data-tauri-drag-region
-        >
-          <ChatTitlebarActions
-            sidebarExpanded
-            onToggleSidebar={onToggleCollapsed}
-            onNewConversation={onNewConversation}
-          />
-          <div className="min-w-0 flex-1" data-tauri-drag-region />
-        </div>
+        {/* 侧栏内顶栏行只在 macOS 存在：那两枚按钮要贴着系统交通灯排。
+            Windows / Linux 已把它们常驻到全宽标题栏带（见 ChatTitlebar），此处渲染会重复。 */}
+        {usesNativeTitlebar && (
+          <div
+            className={`chat-titlebar-row chat-sidebar-titlebar-row flex shrink-0 gap-2 ${chatTitlebarMacInsetClass} pr-3`}
+            data-tauri-drag-region
+          >
+            <ChatTitlebarActions
+              sidebarExpanded
+              onToggleSidebar={onToggleCollapsed}
+              onNewConversation={onNewConversation}
+            />
+            <div className="min-w-0 flex-1" data-tauri-drag-region />
+          </div>
+        )}
 
-      <nav className="shrink-0 space-y-0.5 px-3 pb-2" data-tauri-drag-region="false">
+      <nav
+        className={`shrink-0 space-y-0.5 px-3 pb-2 ${usesNativeTitlebar ? '' : 'pt-2'}`}
+        data-tauri-drag-region="false"
+      >
         <NavRow
           icon={<SquarePen size={17} strokeWidth={1.75} />}
-          label="新建聊天"
+          label={t.chatNewChat}
           onClick={onNewConversation}
           iconMotion="group-hover:-rotate-6 group-hover:scale-110"
         />
         <NavRow
           icon={<Search size={17} strokeWidth={1.75} />}
-          label="搜索"
+          label={t.chatSearch}
           onClick={() => onSearchOpenChange(true)}
           active={searchOpen}
           iconMotion="group-hover:scale-110"
@@ -930,7 +1076,7 @@ export const Sidebar = memo(function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col" data-tauri-drag-region="false">
         {loading ? (
-          <div className="space-y-2 px-3 py-3" aria-label="加载中" aria-busy="true">
+          <div className="space-y-2 px-3 py-3" aria-label={t.chatLoading} aria-busy="true">
             {[0, 1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="kv-skeleton h-7 rounded-lg" />
             ))}
@@ -940,9 +1086,9 @@ export const Sidebar = memo(function Sidebar({
             <div className="flex items-center justify-between px-3 pb-1 pt-3">
               <div className="flex items-center gap-1.5 text-[13px] font-semibold">
                 {([
-                  ['conversations', '最近'],
-                  ['sets', '集'],
-                  ['projects', '项目'],
+                  ['conversations', t.chatTabRecent],
+                  ['sets', t.chatTabSets],
+                  ['projects', t.chatTabProjects],
                 ] as const).flatMap(([tab, label], i) => {
                   const button = (
                     <button
@@ -977,7 +1123,7 @@ export const Sidebar = memo(function Sidebar({
                       size="sm"
                       onClick={openSectionMenu}
                       className={sectionMenuAnchor ? 'bg-black/[0.06] text-neutral-600 dark:bg-white/[0.1] dark:text-neutral-200' : ''}
-                      label="对话列表操作"
+                      label={t.chatConversationListActions}
                       aria-haspopup="menu"
                       aria-expanded={sectionMenuAnchor !== null}
                     >
@@ -986,7 +1132,7 @@ export const Sidebar = memo(function Sidebar({
                     <IconButton
                       size="sm"
                       onClick={onNewConversation}
-                      label="新建聊天"
+                      label={t.chatNewChat}
                     >
                       <SquarePen size={15} strokeWidth={1.75} />
                     </IconButton>
@@ -1007,14 +1153,14 @@ export const Sidebar = memo(function Sidebar({
                           return next
                         })
                       }}
-                      label={allVisibleSetsCollapsed ? '展开全部集' : '折叠全部集'}
+                      label={allVisibleSetsCollapsed ? t.chatExpandAllSets : t.chatCollapseAllSets}
                     >
                       <MoreHorizontal size={15} />
                     </IconButton>
                     <IconButton
                       size="sm"
                       onClick={openCreateSetDialog}
-                      label="新建集"
+                      label={t.chatNewSet}
                     >
                       <Plus size={15} strokeWidth={2} />
                     </IconButton>
@@ -1035,15 +1181,15 @@ export const Sidebar = memo(function Sidebar({
                           return next
                         })
                       }}
-                      label={allVisibleProjectsCollapsed ? '展开全部项目' : '折叠全部项目'}
+                      label={allVisibleProjectsCollapsed ? t.chatExpandAllProjects : t.chatCollapseAllProjects}
                     >
                       <MoreHorizontal size={15} />
                     </IconButton>
                     <IconButton
                       size="sm"
                       onClick={openCreateProjectDialog}
-                      label="新建项目"
-                      title={`新建项目 (${modLabel}P)`}
+                      label={t.chatNewProject}
+                      title={`${t.chatNewProject} (${modLabel}P)`}
                     >
                       <FolderPlus size={15} strokeWidth={1.75} />
                     </IconButton>
@@ -1052,11 +1198,33 @@ export const Sidebar = memo(function Sidebar({
               </div>
             </div>
 
-            <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto" data-tauri-drag-region="false">
+            <div
+              ref={groupScrollRef}
+              className="kv-sidebar-groups custom-scrollbar relative min-h-0 flex-1 overflow-y-auto"
+              data-tauri-drag-region="false"
+            >
+            {(projectDrag.lineTop ?? setDrag.lineTop ?? conversationDrag.lineTop) !== null && (
+              <div
+                className="kv-reorder-line"
+                style={{
+                  top: `${projectDrag.lineTop ?? setDrag.lineTop ?? conversationDrag.lineTop ?? 0}px`,
+                }}
+              />
+            )}
+            {dragGhost &&
+              createPortal(
+                <div
+                  className="kv-reorder-ghost"
+                  style={{ left: `${dragGhost.x}px`, top: `${dragGhost.y}px` }}
+                >
+                  {dragGhost.label}
+                </div>,
+                document.body,
+              )}
             {activeTab === 'projects' && (
             <section key="projects" className="chat-motion-tab-in group/projects px-3 pb-2 pt-1">
                 <div className="mt-1.5 space-y-1">
-                  {visibleProjects.map((project, index) => {
+                  {visibleProjects.map((project) => {
                     const active = selectedProject?.id === project.id
                     const projectConversations = projectConversationMap.get(project.id) ?? []
                     const collapsedProject = collapsedProjectIds.has(project.id)
@@ -1064,17 +1232,20 @@ export const Sidebar = memo(function Sidebar({
                     const previewConversations = expanded
                       ? projectConversations
                       : projectConversations.slice(0, PROJECT_PREVIEW_LIMIT)
+                    const isDragging = projectDrag.draggingId === project.id
                     return (
-                      <div key={project.id}>
+                      <div
+                        key={project.id}
+                        data-reorder-id={project.id}
+                        onPointerDown={(e) => projectDrag.startDrag(e, project.id)}
+                        className={`kv-sidebar-group${isDragging ? ' is-dragging' : ''}`}
+                      >
                         <div
-                          className={`chat-motion-row group flex min-w-0 items-center rounded-lg ${
+                          className={`kv-sidebar-group-row group flex min-w-0 items-center rounded-lg ${
                             active
                               ? 'bg-black/[0.04] dark:bg-white/[0.08]'
                               : 'hover:bg-black/[0.035] dark:hover:bg-white/[0.06]'
                           }`}
-                          style={{
-                            ['--chat-motion-delay' as string]: `${Math.min(index, 12) * 18}ms`,
-                          }}
                         >
                           <button
                             type="button"
@@ -1091,7 +1262,7 @@ export const Sidebar = memo(function Sidebar({
                                 ? 'font-semibold text-neutral-900 dark:text-neutral-100'
                                 : 'font-medium text-neutral-600 dark:text-neutral-300'
                             }`}
-                            title={collapsedProject ? `展开 ${project.name}` : `折叠 ${project.name}`}
+                            title={(collapsedProject ? t.chatExpandNamed : t.chatCollapseNamed).replace('{name}', project.name)}
                             aria-expanded={!collapsedProject}
                           >
                             <ChevronRight
@@ -1110,6 +1281,7 @@ export const Sidebar = memo(function Sidebar({
                           </button>
                           <IconButton
                             size="sm"
+                            data-no-drag
                             onClick={(e) => {
                               e.stopPropagation()
                               openProjectMenu(project.id, e.currentTarget)
@@ -1119,7 +1291,7 @@ export const Sidebar = memo(function Sidebar({
                                 ? 'opacity-100'
                                 : 'opacity-0 group-hover:opacity-100'
                             }`}
-                            label="项目操作"
+                            label={t.chatProjectActions}
                           >
                             <MoreHorizontal size={15} />
                           </IconButton>
@@ -1135,7 +1307,7 @@ export const Sidebar = memo(function Sidebar({
                               onSelectProject(project)
                             }}
                             className="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                            label="新建聊天"
+                            label={t.chatNewChat}
                           >
                             <SquarePen size={15} strokeWidth={1.75} />
                           </IconButton>
@@ -1144,6 +1316,7 @@ export const Sidebar = memo(function Sidebar({
                       {!collapsedProject && previewConversations.length > 0 && (
                         <ConversationList
                           conversations={previewConversations}
+                          reorder={conversationReorderFor(project.id)}
                           currentConversationId={currentConversationId}
                           generatingConversationIds={generatingConversationIds}
                           projects={projects}
@@ -1177,7 +1350,7 @@ export const Sidebar = memo(function Sidebar({
                           }}
                           className="ml-8 rounded-md px-2.5 py-0.5 text-left text-[13px] font-medium text-neutral-400 transition-colors hover:bg-black/[0.035] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-300"
                         >
-                          {expanded ? '收起' : '展开显示'}
+                          {expanded ? t.chatShowLess : t.chatShowMore}
                         </button>
                       )}
                       </div>
@@ -1197,10 +1370,10 @@ export const Sidebar = memo(function Sidebar({
                       className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-[13px] text-neutral-400 transition-colors hover:bg-black/[0.035] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-300"
                     >
                       <Plus size={14} strokeWidth={2} className="shrink-0" />
-                      新建一个集（系统提示词 + 默认助手）
+                      {t.chatNewSetHint}
                     </button>
                   ) : (
-                    sets.map((set, index) => {
+                    sets.map((set) => {
                       const active = selectedSet?.id === set.id
                       const setConversations = setConversationMap.get(set.id) ?? []
                       const collapsedSet = collapsedSetIds.has(set.id)
@@ -1208,15 +1381,20 @@ export const Sidebar = memo(function Sidebar({
                       const previewConversations = expanded
                         ? setConversations
                         : setConversations.slice(0, PROJECT_PREVIEW_LIMIT)
+                      const isDragging = setDrag.draggingId === set.id
                       return (
-                        <div key={set.id}>
+                        <div
+                          key={set.id}
+                          data-reorder-id={set.id}
+                          onPointerDown={(e) => setDrag.startDrag(e, set.id)}
+                          className={`kv-sidebar-group${isDragging ? ' is-dragging' : ''}`}
+                        >
                           <div
-                            className={`chat-motion-row group flex min-w-0 items-center rounded-lg ${
+                            className={`kv-sidebar-group-row group flex min-w-0 items-center rounded-lg ${
                               active
                                 ? 'bg-black/[0.04] dark:bg-white/[0.08]'
                                 : 'hover:bg-black/[0.035] dark:hover:bg-white/[0.06]'
                             }`}
-                            style={{ ['--chat-motion-delay' as string]: `${Math.min(index, 12) * 18}ms` }}
                           >
                             <button
                               type="button"
@@ -1233,7 +1411,7 @@ export const Sidebar = memo(function Sidebar({
                                   ? 'font-semibold text-neutral-900 dark:text-neutral-100'
                                   : 'font-medium text-neutral-600 dark:text-neutral-300'
                               }`}
-                              title={collapsedSet ? `展开 ${set.name}` : `折叠 ${set.name}`}
+                              title={(collapsedSet ? t.chatExpandNamed : t.chatCollapseNamed).replace('{name}', set.name)}
                               aria-expanded={!collapsedSet}
                             >
                               <ChevronRight
@@ -1253,6 +1431,7 @@ export const Sidebar = memo(function Sidebar({
                             </button>
                             <IconButton
                               size="sm"
+                              data-no-drag
                               onClick={(e) => {
                                 e.stopPropagation()
                                 openSetMenu(set.id, e.currentTarget)
@@ -1260,7 +1439,7 @@ export const Sidebar = memo(function Sidebar({
                               className={`shrink-0 transition-opacity ${
                                 setMenuState?.setId === set.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                               }`}
-                              label="集操作"
+                              label={t.chatSetActions}
                             >
                               <MoreHorizontal size={15} />
                             </IconButton>
@@ -1276,7 +1455,7 @@ export const Sidebar = memo(function Sidebar({
                                 onSelectSet(set)
                               }}
                               className="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                              label="在此集新建聊天"
+                              label={t.chatNewChatInSet}
                             >
                               <SquarePen size={15} strokeWidth={1.75} />
                             </IconButton>
@@ -1285,6 +1464,7 @@ export const Sidebar = memo(function Sidebar({
                           {!collapsedSet && previewConversations.length > 0 && (
                             <ConversationList
                               conversations={previewConversations}
+                              reorder={conversationReorderFor(set.id)}
                               currentConversationId={currentConversationId}
                               generatingConversationIds={generatingConversationIds}
                               projects={projects}
@@ -1318,7 +1498,7 @@ export const Sidebar = memo(function Sidebar({
                               }}
                               className="ml-8 rounded-md px-2.5 py-0.5 text-left text-[13px] font-medium text-neutral-400 transition-colors hover:bg-black/[0.035] hover:text-neutral-600 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-300"
                             >
-                              {expanded ? '收起' : '展开显示'}
+                              {expanded ? t.chatShowLess : t.chatShowMore}
                             </button>
                           )}
                         </div>
@@ -1377,8 +1557,11 @@ export const Sidebar = memo(function Sidebar({
 
       <SidebarUserFooter
         profile={userProfile}
+        lang={lang}
         settingsActive={settingsActive}
         onOpenSettings={onOpenSettings}
+        onSelectLang={onSelectLang}
+        onCheckUpdate={onCheckUpdate}
       />
 
       {projectMenuState && menuProject && (
@@ -1390,8 +1573,22 @@ export const Sidebar = memo(function Sidebar({
             setProjectError('')
           }}
           onOpenFolder={() => void handleOpenProjectFolder(menuProject)}
+          onImportFromCli={() => setImportProject(menuProject)}
           onDelete={() => void handleDeleteProject(menuProject)}
           onClose={() => setProjectMenuState(null)}
+        />
+      )}
+
+      {importProject && (
+        <CliImportDialog
+          project={importProject}
+          onClose={() => setImportProject(null)}
+          onOpenConversation={(conversationId) => onSelectConversation(conversationId)}
+          onImported={(conversationIds) => {
+            void loadSidebarData({ silent: true })
+            // 导入多条时跳到第一条——总得落到某一条上，第一条是列表里最新的那个。
+            if (conversationIds[0]) onSelectConversation(conversationIds[0])
+          }}
         />
       )}
 

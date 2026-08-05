@@ -55,6 +55,11 @@
   object-fit: contain;
 }
 
+/* logo-mark.png 是纯黑单色 mark，暗色下黑贴黑不可见 → 反色成白。 */
+.dark .kv-runtime-picker__builtin-logo {
+  filter: invert(1);
+}
+
 .kv-runtime-picker__popover {
   position: absolute;
   top: calc(100% + 8px);
@@ -92,47 +97,71 @@
   color: rgb(115 115 115);
 }
 
+.kv-runtime-picker__agents-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* fallback（探测失败降级）提示行：一行文案 + 重试按钮。 */
+.kv-runtime-picker__fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgb(234 179 8 / 0.35);
+  border-radius: 8px;
+  background: rgb(254 252 232);
+  font-size: 12px;
+  color: rgb(133 77 14);
+}
+
+.dark .kv-runtime-picker__fallback {
+  border-color: rgb(234 179 8 / 0.3);
+  background: rgb(66 32 6 / 0.4);
+  color: rgb(253 224 71);
+}
+
+.kv-runtime-picker__fallback-retry {
+  appearance: none;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.kv-runtime-picker__fallback-retry:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .kv-runtime-picker__hint {
   font-size: 12px;
   color: rgb(115 115 115);
 }
 
-.kv-runtime-picker__seg {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid rgb(245 245 245);
-  border-radius: 10px;
-  background: rgb(250 250 250);
-}
-
-.dark .kv-runtime-picker__seg {
-  border-color: rgb(38 38 38);
-  background: rgb(38 38 38);
-}
-
-.kv-runtime-picker__seg-btn {
-  appearance: none;
-  border: 0;
+/* 会话-CLI 绑定锁提示行（R3）。 */
+.kv-runtime-picker__locked-hint {
+  padding: 6px 8px;
+  border: 1px solid rgb(115 115 115 / 0.2);
   border-radius: 8px;
-  background: transparent;
-  padding: 6px 10px;
+  background: rgb(245 245 245);
   font-size: 12px;
-  font-weight: 600;
-  color: rgb(115 115 115);
-  cursor: pointer;
+  color: rgb(82 82 82);
 }
 
-.kv-runtime-picker__seg-btn.is-active {
-  background: white;
-  color: rgb(23 23 23);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
-}
-
-.dark .kv-runtime-picker__seg-btn.is-active {
-  background: rgb(23 23 23);
-  color: rgb(245 245 245);
+.dark .kv-runtime-picker__locked-hint {
+  border-color: rgb(255 255 255 / 0.12);
+  background: rgb(38 38 38);
+  color: rgb(163 163 163);
 }
 
 .kv-runtime-picker__agent-grid {
@@ -184,6 +213,12 @@
 .kv-runtime-picker__agent:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+/* 列表里的 Kivio 图标跟 AgentIcon 一样 20px（胶囊上是 18px）。 */
+.kv-runtime-picker__agent .kv-runtime-picker__builtin-logo {
+  width: 20px;
+  height: 20px;
 }
 
 .kv-runtime-picker__agent-name {

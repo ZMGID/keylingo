@@ -6,8 +6,8 @@ use crate::chat::attachments::{compose_user_content_for_api, stored_image_paths_
 use crate::state::AppState;
 
 use super::super::storage::{
-    assistant_snapshot, conversation_attachments_dir, delete_conversation as delete_conv,
-    find_project_by_id, find_project_by_name, find_set_by_id, load_conversation, save_conversation,
+    assistant_snapshot, conversation_attachments_dir, find_project_by_id, find_project_by_name,
+    find_set_by_id, load_conversation,
 };
 use super::super::{
     AgentPlanState, AgentTodoState, ChatMessage, Conversation, ConversationContextState, ForkOrigin,
@@ -38,25 +38,59 @@ pub(crate) async fn chat_update_message(
     message_id: String,
     content: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err("消息内容不能为空".to_string());
     }
-
-    let idx = find_message_index(&conversation, &message_id)?;
-    if conversation.messages[idx].role != "assistant" {
-        return Err("仅支持编辑助手回复".to_string());
-    }
-
-    mark_summary_stale_if_needed(&mut conversation, idx);
-    replace_final_text_segments_for_edit(&mut conversation.messages[idx], trimmed);
-    conversation.messages[idx].timestamp = chrono::Local::now().timestamp();
-    let context_state = compute_context_state(&app, &state, &conversation, None, &[]).await?;
-    conversation.context_state = context_state.clone();
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
-    emit_chat_context_state(&app, &conversation.id, &context_state);
+    let repository = crate::chat::repository::repository(&app);
+    let mut snapshot = repository
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    let mut attempt = 0;
+    let (mut conversation, context_state) = loop {
+        let mut candidate = snapshot.clone();
+        let idx = find_message_index(&candidate, &message_id)?;
+        if candidate.messages[idx].role != "assistant" {
+            return Err("仅支持编辑助手回复".to_string());
+        }
+        mark_summary_stale_if_needed(&mut candidate, idx);
+        replace_final_text_segments_for_edit(&mut candidate.messages[idx], trimmed);
+        candidate.messages[idx].timestamp = chrono::Local::now().timestamp();
+        let context_state = compute_context_state(&app, &state, &candidate, None, &[]).await?;
+        let edited_message = candidate.messages[idx].clone();
+        match repository
+            .mutate_expected(&app, &conversation_id, Some(snapshot.revision), |latest| {
+                let latest_idx = find_message_index(latest, &message_id)?;
+                if latest.messages[latest_idx].role != "assistant" {
+                    return Err("仅支持编辑助手回复".to_string());
+                }
+                mark_summary_stale_if_needed(latest, latest_idx);
+                latest.messages[latest_idx] = edited_message;
+                latest.context_state = context_state.clone();
+                Ok(())
+            })
+            .await
+        {
+            Ok(latest) => break (latest, context_state),
+            Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                if attempt == 0 =>
+            {
+                attempt += 1;
+                snapshot = repository
+                    .get(&app, &conversation_id)
+                    .await
+                    .map_err(crate::chat::repository::repository_error)?;
+            }
+            Err(err) => return Err(crate::chat::repository::repository_error(err)),
+        }
+    };
+    emit_chat_context_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &context_state,
+    );
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -123,29 +157,46 @@ pub(crate) async fn chat_regenerate_message(
         }));
     };
 
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-    let idx = find_message_index(&conversation, &message_id)?;
-    apply_regenerate_truncation(&mut conversation, idx, new_content)?;
-    if conversation.messages.last().map(|m| m.role.as_str()) != Some("user") {
-        return Err("缺少对应的用户消息，无法重新生成".to_string());
-    }
-
-    // 多答组（任务 06-30 / D5 / AC4）：truncate 可能删掉某组的显式「选中条」（或整组），
-    // 留下指向已删消息的 group_selections，会让 group_answer_excluded_from_context 把残余
-    // 答案全排除出上下文。清掉任何指向已不存在消息的选中记录，回退到「组内第一条」默认。
-    if !conversation.group_selections.is_empty() {
-        let existing_ids: std::collections::HashSet<&str> = conversation
-            .messages
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect();
-        conversation
-            .group_selections
-            .retain(|_, msg_id| existing_ids.contains(msg_id.as_str()));
-    }
-
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let repository = crate::chat::repository::repository(&app);
+    let mut snapshot = repository
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    let mut attempt = 0;
+    let mut conversation = loop {
+        let next_content = new_content.clone();
+        match repository
+            .mutate_expected(&app, &conversation_id, Some(snapshot.revision), |latest| {
+                let idx = find_message_index(latest, &message_id)?;
+                apply_regenerate_truncation(latest, idx, next_content)?;
+                if latest.messages.last().map(|message| message.role.as_str()) != Some("user") {
+                    return Err("缺少对应的用户消息，无法重新生成".to_string());
+                }
+                let existing_ids: std::collections::HashSet<String> = latest
+                    .messages
+                    .iter()
+                    .map(|message| message.id.clone())
+                    .collect();
+                latest
+                    .group_selections
+                    .retain(|_, selected| existing_ids.contains(selected));
+                Ok(())
+            })
+            .await
+        {
+            Ok(latest) => break latest,
+            Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                if attempt == 0 =>
+            {
+                attempt += 1;
+                snapshot = repository
+                    .get(&app, &conversation_id)
+                    .await
+                    .map_err(crate::chat::repository::repository_error)?;
+            }
+            Err(err) => return Err(crate::chat::repository::repository_error(err)),
+        }
+    };
 
     let last_user_api_content = conversation
         .messages
@@ -172,21 +223,54 @@ pub(crate) async fn chat_regenerate_message(
         })
         .transpose()?
         .unwrap_or_default();
-    match compute_context_state(
-        &app,
-        &state,
-        &conversation,
-        last_user_api_content.as_deref(),
-        &last_user_image_paths,
-    )
-    .await
-    {
-        Ok(context_state) => {
-            conversation.context_state = context_state.clone();
-            save_conversation(&app, &conversation)?;
-            emit_chat_context_state(&app, &conversation.id, &context_state);
+    for attempt in 0..2 {
+        let context_state = match compute_context_state(
+            &app,
+            &state,
+            &conversation,
+            last_user_api_content.as_deref(),
+            &last_user_image_paths,
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(err) => {
+                eprintln!("Context usage estimate failed before regenerate: {err}");
+                break;
+            }
+        };
+        match repository
+            .update_context(
+                &app,
+                &conversation_id,
+                conversation.revision,
+                context_state.clone(),
+            )
+            .await
+        {
+            Ok(latest) => {
+                conversation = latest;
+                emit_chat_context_state(
+                    &app,
+                    &conversation.id,
+                    conversation.revision,
+                    &context_state,
+                );
+                break;
+            }
+            Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                if attempt == 0 =>
+            {
+                conversation = repository
+                    .get(&app, &conversation_id)
+                    .await
+                    .map_err(crate::chat::repository::repository_error)?;
+            }
+            Err(err) => {
+                eprintln!("Context state commit failed before regenerate: {err}");
+                break;
+            }
         }
-        Err(err) => eprintln!("Context usage estimate failed before regenerate: {err}"),
     }
     let reply_outcome = complete_assistant_reply(
         &app,
@@ -224,38 +308,149 @@ pub(crate) async fn chat_delete_message(
     conversation_id: String,
     message_id: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-    let idx = find_message_index(&conversation, &message_id)?;
-    if conversation.messages[idx].role != "assistant" {
-        return Err("仅支持删除助手回复".to_string());
-    }
-
-    mark_summary_stale_if_needed(&mut conversation, idx);
-    let removed = conversation.messages.remove(idx);
-    // 多答组（任务 06-30 / D5 / AC4）：删除某条答案时，若它正是某组的显式「选中条」，
-    // 清掉该 group 的 group_selections 记录，让选中条回退到「该组顺序第一条」。否则
-    // group_selections 会指向已删除的 message_id，导致 group_answer_excluded_from_context
-    // 把整组答案都排除出下一轮上下文（无任何答案进历史）。
-    if let Some(group_id) = removed.group_id.as_deref() {
-        if conversation
-            .group_selections
-            .get(group_id)
-            .map(String::as_str)
-            == Some(removed.id.as_str())
-        {
-            conversation.group_selections.remove(group_id);
+    let repository = crate::chat::repository::repository(&app);
+    let mut snapshot = repository
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    let mut attempt = 0;
+    let (mut conversation, context_state) = loop {
+        let mut candidate = snapshot.clone();
+        let idx = find_message_index(&candidate, &message_id)?;
+        if candidate.messages[idx].role != "assistant" {
+            return Err("仅支持删除助手回复".to_string());
         }
-    }
-    let context_state = compute_context_state(&app, &state, &conversation, None, &[]).await?;
-    conversation.context_state = context_state.clone();
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
-    emit_chat_context_state(&app, &conversation.id, &context_state);
+        mark_summary_stale_if_needed(&mut candidate, idx);
+        let removed = candidate.messages.remove(idx);
+        if let Some(group_id) = removed.group_id.as_deref() {
+            if candidate.group_selections.get(group_id).map(String::as_str)
+                == Some(removed.id.as_str())
+            {
+                candidate.group_selections.remove(group_id);
+            }
+        }
+        let context_state = compute_context_state(&app, &state, &candidate, None, &[]).await?;
+        match repository
+            .mutate_expected(&app, &conversation_id, Some(snapshot.revision), |latest| {
+                let latest_idx = find_message_index(latest, &message_id)?;
+                if latest.messages[latest_idx].role != "assistant" {
+                    return Err("仅支持删除助手回复".to_string());
+                }
+                mark_summary_stale_if_needed(latest, latest_idx);
+                let removed = latest.messages.remove(latest_idx);
+                if let Some(group_id) = removed.group_id.as_deref() {
+                    if latest.group_selections.get(group_id).map(String::as_str)
+                        == Some(removed.id.as_str())
+                    {
+                        latest.group_selections.remove(group_id);
+                    }
+                }
+                latest.context_state = context_state.clone();
+                Ok(())
+            })
+            .await
+        {
+            Ok(latest) => break (latest, context_state),
+            Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                if attempt == 0 =>
+            {
+                attempt += 1;
+                snapshot = repository
+                    .get(&app, &conversation_id)
+                    .await
+                    .map_err(crate::chat::repository::repository_error)?;
+            }
+            Err(err) => return Err(crate::chat::repository::repository_error(err)),
+        }
+    };
+    emit_chat_context_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &context_state,
+    );
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,
+    }))
+}
+
+/// 一键 rewind（「回到这里」）：删掉这条用户提问**及其之后**的所有消息，把原文回传给前端塞进输入框。
+/// 与 `chat_regenerate_message` 的区别：不自动重生成，用户可以改完再自己发。
+/// ponytail: 被删消息的附件文件留在会话附件目录里（孤儿）—— 原文回输入框但附件不回，
+/// 清理留给会话删除时的整目录清空。要连附件一起回填再单独做。
+#[tauri::command]
+pub(crate) async fn chat_rewind_to_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    message_id: String,
+) -> Result<serde_json::Value, String> {
+    // 与 regenerate 同一把哨兵：会话里还有 run 在跑时不许截历史。
+    let Some(_send_reservation) = ChatSendReservation::try_acquire(state.inner(), &conversation_id)
+    else {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": CHAT_REPLY_BUSY_ERROR,
+        }));
+    };
+
+    // ponytail: 故意不在这里跑 compute_context_state —— 它要列 MCP 工具/扫技能，能拖几秒，
+    // 而 rewind 只是删消息。前端拿到结果立刻更新，随后 fire-and-forget 调 chat_get_context_stats
+    // 补算上下文用量。
+    let repository = crate::chat::repository::repository(&app);
+    let mut snapshot = repository
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    let mut attempt = 0;
+    let (mut conversation, content) = loop {
+        let idx = find_message_index(&snapshot, &message_id)?;
+        if snapshot.messages[idx].role != "user" {
+            return Err("仅支持回到用户提问".to_string());
+        }
+        let content = snapshot.messages[idx].content.clone();
+        match repository
+            .mutate_expected(&app, &conversation_id, Some(snapshot.revision), |latest| {
+                let latest_idx = find_message_index(latest, &message_id)?;
+                if latest.messages[latest_idx].role != "user" {
+                    return Err("仅支持回到用户提问".to_string());
+                }
+                mark_summary_stale_if_needed(latest, latest_idx);
+                latest.messages.truncate(latest_idx);
+                let existing_ids: std::collections::HashSet<String> = latest
+                    .messages
+                    .iter()
+                    .map(|message| message.id.clone())
+                    .collect();
+                latest
+                    .group_selections
+                    .retain(|_, selected| existing_ids.contains(selected));
+                Ok(())
+            })
+            .await
+        {
+            Ok(latest) => break (latest, content),
+            Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                if attempt == 0 =>
+            {
+                attempt += 1;
+                snapshot = repository
+                    .get(&app, &conversation_id)
+                    .await
+                    .map_err(crate::chat::repository::repository_error)?;
+            }
+            Err(err) => return Err(crate::chat::repository::repository_error(err)),
+        }
+    };
+
+    strip_transcripts_for_frontend(&mut conversation);
+    Ok(serde_json::json!({
+        "success": true,
+        "conversation": conversation,
+        "content": content,
     }))
 }
 
@@ -286,7 +481,7 @@ pub(super) fn build_fork_messages(messages: &[ChatMessage], anchor_idx: usize) -
 /// 纯复制 + 打开，不自动发送（决策 Q1）。新对话继承源的会话级配置、深拷被引用的附件/图片
 /// artifact，并记录 `forked_from` 供 UI 面包屑回跳。源对话完全只读、不受影响。
 #[tauri::command]
-pub(crate) fn chat_fork_conversation(
+pub(crate) async fn chat_fork_conversation(
     app: AppHandle,
     conversation_id: String,
     message_id: String,
@@ -319,6 +514,7 @@ pub(crate) fn chat_fork_conversation(
 
     let conversation = Conversation {
         id: new_id,
+        revision: 0,
         title,
         provider_id: source.provider_id.clone(),
         model: source.model.clone(),
@@ -339,6 +535,7 @@ pub(crate) fn chat_fork_conversation(
         knowledge_base_ids: source.knowledge_base_ids.clone(),
         force_knowledge_search: source.force_knowledge_search,
         thinking_level: source.thinking_level.clone(),
+        web_search_mode: source.web_search_mode,
         reply_models: source.reply_models.clone(),
         group_selections,
         forked_from: Some(ForkOrigin {
@@ -348,7 +545,10 @@ pub(crate) fn chat_fork_conversation(
         }),
     };
 
-    save_conversation(&app, &conversation)?;
+    let conversation = crate::chat::repository::repository(&app)
+        .create(&app, conversation)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
     let mut conversation = conversation;
     // 与 chat_get_conversation 一致：返回前做读时孤立工具分段对账（必须在 strip 之前——
@@ -425,26 +625,37 @@ fn copy_forked_conversation_files(
 
 /// 删除对话
 #[tauri::command]
-pub(crate) fn chat_delete_conversation(
+pub(crate) async fn chat_delete_conversation(
     app: AppHandle,
-    state: tauri::State<crate::state::AppState>,
+    state: tauri::State<'_, crate::state::AppState>,
     conversation_id: String,
 ) -> Result<serde_json::Value, String> {
     // 删对话即终止其持久外部 CLI 会话（actor 关闭子进程）并清掉跨重启 resume 句柄。
     state.remove_external_live_session(&conversation_id);
     crate::external_agents::session::clear_live_handle(&app, &conversation_id);
+    // 该对话起的后台命令也一并收掉。它们本来只在退出应用时统一清（跨轮存活是有意的），
+    // 但一个还在跑的 dev server 会把 cwd 钉在对话工作区里，Windows 上直接导致工作区
+    // 删不掉。删对话时这些进程已经没有归属，先杀掉再清目录。
+    let killed = state.kill_background_commands_for_conversation(&conversation_id);
+    if killed > 0 {
+        eprintln!("Deleted conversation {conversation_id}: killed {killed} background command(s)");
+    }
     // 顺手清掉该对话在内存里按 conversation_id 累积的运行态小 map（stream 代际计数 /
     // 会话级工具同意），它们只插不删、严格无界——对话删了便永远不会再被引用。
     state.forget_chat_conversation_runtime(&conversation_id);
-    delete_conv(&app, &conversation_id)?;
+    let warnings = crate::chat::repository::repository(&app)
+        .delete(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
     Ok(serde_json::json!({
         "success": true,
+        "warnings": warnings,
     }))
 }
 
 /// 更新对话（标题、置顶、文件夹等）
 #[tauri::command]
-pub(crate) fn chat_update_conversation(
+pub(crate) async fn chat_update_conversation(
     app: AppHandle,
     conversation_id: String,
     title: Option<String>,
@@ -459,128 +670,143 @@ pub(crate) fn chat_update_conversation(
     knowledge_base_ids: Option<Vec<String>>,
     force_knowledge_search: Option<bool>,
     thinking_level: Option<String>,
+    web_search_mode: Option<String>,
     reply_models: Option<Vec<crate::chat::ModelRef>>,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-
-    if let Some(t) = title {
-        conversation.title = t;
-    }
-    if let Some(p) = pinned {
-        conversation.pinned = p;
-    }
-    if let Some(folder) = folder {
-        let trimmed = folder.trim();
-        conversation.folder = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-        conversation.project_id = match conversation.folder.as_deref() {
-            Some(folder) => find_project_by_name(&app, folder)?.map(|project| project.id),
-            None => None,
-        };
-    }
-    if let Some(project_id) = project_id {
-        let trimmed = project_id.trim();
-        if trimmed.is_empty() {
-            conversation.project_id = None;
-            conversation.folder = None;
-        } else {
-            let project = find_project_by_id(&app, trimmed)?;
-            conversation.project_id = Some(project.id);
-            conversation.folder = Some(project.name);
-            conversation.set_id = None; // 集与项目互斥
-        }
-    }
-    if let Some(set_id) = set_id {
-        let trimmed = set_id.trim();
-        if trimmed.is_empty() {
-            conversation.set_id = None;
-        } else {
-            let set = find_set_by_id(&app, trimmed)?;
-            conversation.set_id = Some(set.id);
-            // 集与项目互斥：归入集即移出项目/文件夹
-            conversation.project_id = None;
-            conversation.folder = None;
-        }
-    }
-    if let Some(provider_id) = provider_id {
-        conversation.provider_id = provider_id;
-    }
-    if let Some(model) = model {
-        conversation.model = model;
-    }
-    if let Some(skill_id) = active_skill_id {
-        let trimmed = skill_id.trim();
-        conversation.active_skill_id = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-    if let Some(assistant_id) = assistant_id {
-        let trimmed = assistant_id.trim();
-        if trimmed.is_empty() {
-            conversation.assistant_id = None;
-            conversation.assistant_snapshot = None;
-            conversation.active_skill_id = None;
-        } else {
-            let snapshot = assistant_snapshot(&app, trimmed)?;
-            // 切换助手不再强制激活默认技能;skill_ids 仅作白名单。
-            conversation.active_skill_id = None;
-            conversation.assistant_id = Some(snapshot.id.clone());
-            conversation.assistant_snapshot = Some(snapshot);
-        }
-    }
-    if let Some(ids) = knowledge_base_ids {
-        // Drop blanks/dups; order preserved.
-        let mut seen = std::collections::HashSet::new();
-        conversation.knowledge_base_ids = ids
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && seen.insert(s.clone()))
-            .collect();
-    }
-    if let Some(force) = force_knowledge_search {
-        conversation.force_knowledge_search = force;
-    }
-    if let Some(level) = thinking_level {
-        // 仅接受已知值；空串/未知 → 清除（回到「跟随全局」）。
-        conversation.thinking_level = match level.trim() {
-            "off" | "low" | "medium" | "high" | "xhigh" | "max" => Some(level.trim().to_string()),
-            _ => None,
-        };
-    }
-    if let Some(reply_models) = reply_models {
-        // 多模型一问多答（决策 D2/D4）：持久化会话级多答模型集。去重（provider+model）、
-        // 丢空、保序、上限 MAX_REPLY_MODELS（超出报错，前端应已禁选）。
-        if reply_models.len() > MAX_REPLY_MODELS {
-            return Err(format!(
-                "多模型并行回答最多同时选择 {MAX_REPLY_MODELS} 个模型。"
-            ));
-        }
-        let mut seen = std::collections::HashSet::new();
-        conversation.reply_models = reply_models
-            .into_iter()
-            .filter_map(|m| {
-                let provider_id = m.provider_id.trim().to_string();
-                let model = m.model.trim().to_string();
-                if provider_id.is_empty() || model.is_empty() {
-                    return None;
-                }
-                let key = format!("{provider_id}\u{0}{model}");
-                if seen.insert(key) {
-                    Some(crate::chat::ModelRef { provider_id, model })
-                } else {
+    let mut conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            if let Some(t) = title {
+                conversation.title = t;
+            }
+            if let Some(p) = pinned {
+                conversation.pinned = p;
+            }
+            if let Some(folder) = folder {
+                let trimmed = folder.trim();
+                conversation.folder = if trimmed.is_empty() {
                     None
+                } else {
+                    Some(trimmed.to_string())
+                };
+                conversation.project_id = match conversation.folder.as_deref() {
+                    Some(folder) => find_project_by_name(&app, folder)?.map(|project| project.id),
+                    None => None,
+                };
+            }
+            if let Some(project_id) = project_id {
+                let trimmed = project_id.trim();
+                if trimmed.is_empty() {
+                    conversation.project_id = None;
+                    conversation.folder = None;
+                } else {
+                    let project = find_project_by_id(&app, trimmed)?;
+                    conversation.project_id = Some(project.id);
+                    conversation.folder = Some(project.name);
+                    conversation.set_id = None; // 集与项目互斥
                 }
-            })
-            .collect();
-    }
+            }
+            if let Some(set_id) = set_id {
+                let trimmed = set_id.trim();
+                if trimmed.is_empty() {
+                    conversation.set_id = None;
+                } else {
+                    let set = find_set_by_id(&app, trimmed)?;
+                    conversation.set_id = Some(set.id);
+                    // 集与项目互斥：归入集即移出项目/文件夹
+                    conversation.project_id = None;
+                    conversation.folder = None;
+                }
+            }
+            if let Some(provider_id) = provider_id {
+                conversation.provider_id = provider_id;
+            }
+            if let Some(model) = model {
+                conversation.model = model;
+            }
+            if let Some(skill_id) = active_skill_id {
+                let trimmed = skill_id.trim();
+                conversation.active_skill_id = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+            if let Some(assistant_id) = assistant_id {
+                let trimmed = assistant_id.trim();
+                if trimmed.is_empty() {
+                    conversation.assistant_id = None;
+                    conversation.assistant_snapshot = None;
+                    conversation.active_skill_id = None;
+                } else {
+                    let snapshot = assistant_snapshot(&app, trimmed)?;
+                    // 切换助手不再强制激活默认技能;skill_ids 仅作白名单。
+                    conversation.active_skill_id = None;
+                    conversation.assistant_id = Some(snapshot.id.clone());
+                    conversation.assistant_snapshot = Some(snapshot);
+                }
+            }
+            if let Some(ids) = knowledge_base_ids {
+                // Drop blanks/dups; order preserved.
+                let mut seen = std::collections::HashSet::new();
+                conversation.knowledge_base_ids = ids
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+                    .collect();
+            }
+            if let Some(force) = force_knowledge_search {
+                conversation.force_knowledge_search = force;
+            }
+            if let Some(level) = thinking_level {
+                // 仅接受已知值；空串/未知 → 清除（回到「跟随全局」）。
+                conversation.thinking_level = match level.trim() {
+                    "off" | "low" | "medium" | "high" | "xhigh" | "max" => {
+                        Some(level.trim().to_string())
+                    }
+                    _ => None,
+                };
+            }
+            if let Some(mode) = web_search_mode {
+                // 会话级三态联网搜索（任务 07-23）。空/未知 → 清除（回退全局 nativeTools.webSearch）。
+                use crate::chat::types::WebSearchMode;
+                conversation.web_search_mode = match mode.trim() {
+                    "off" => Some(WebSearchMode::Off),
+                    "builtin" => Some(WebSearchMode::Builtin),
+                    "third_party" => Some(WebSearchMode::ThirdParty),
+                    _ => None,
+                };
+            }
+            if let Some(reply_models) = reply_models {
+                // 多模型一问多答（决策 D2/D4）：持久化会话级多答模型集。去重（provider+model）、
+                // 丢空、保序、上限 MAX_REPLY_MODELS（超出报错，前端应已禁选）。
+                if reply_models.len() > MAX_REPLY_MODELS {
+                    return Err(format!(
+                        "多模型并行回答最多同时选择 {MAX_REPLY_MODELS} 个模型。"
+                    ));
+                }
+                let mut seen = std::collections::HashSet::new();
+                conversation.reply_models = reply_models
+                    .into_iter()
+                    .filter_map(|m| {
+                        let provider_id = m.provider_id.trim().to_string();
+                        let model = m.model.trim().to_string();
+                        if provider_id.is_empty() || model.is_empty() {
+                            return None;
+                        }
+                        let key = format!("{provider_id}\u{0}{model}");
+                        if seen.insert(key) {
+                            Some(crate::chat::ModelRef { provider_id, model })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
 
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -593,30 +819,32 @@ pub(crate) fn chat_update_conversation(
 /// `message_id` 必须是属于 `group_id` 这组的某条 assistant 消息；写入
 /// `conversation.group_selections[group_id] = message_id`，下一轮历史拼装据此只保留该条。
 #[tauri::command]
-pub(crate) fn chat_set_group_selection(
+pub(crate) async fn chat_set_group_selection(
     app: AppHandle,
     conversation_id: String,
     group_id: String,
     message_id: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = load_conversation(&app, &conversation_id)?;
-    let group_id = group_id.trim();
-    let message_id = message_id.trim();
+    let group_id = group_id.trim().to_string();
+    let message_id = message_id.trim().to_string();
     if group_id.is_empty() || message_id.is_empty() {
         return Err("group_id 与 message_id 不能为空".to_string());
     }
-    // 校验：该消息必须存在、是 assistant、且属于这个 group。
-    let valid = conversation.messages.iter().any(|m| {
-        m.id == message_id && m.role == "assistant" && m.group_id.as_deref() == Some(group_id)
-    });
-    if !valid {
-        return Err("选中的回答不属于该多答组".to_string());
-    }
-    conversation
-        .group_selections
-        .insert(group_id.to_string(), message_id.to_string());
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
+    let mut conversation = crate::chat::repository::repository(&app)
+        .mutate(&app, &conversation_id, |conversation| {
+            let valid = conversation.messages.iter().any(|message| {
+                message.id == message_id
+                    && message.role == "assistant"
+                    && message.group_id.as_deref() == Some(group_id.as_str())
+            });
+            if !valid {
+                return Err("选中的回答不属于该多答组".to_string());
+            }
+            conversation.group_selections.insert(group_id, message_id);
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({

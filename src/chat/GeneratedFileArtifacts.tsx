@@ -88,7 +88,9 @@ async function openGeneratedArtifact(artifact: ChatToolArtifact) {
 
   const dataUrl = artifactDataUrl(artifact)
   if (!dataUrl) return
-  window.open(dataUrl, '_blank', 'noopener,noreferrer')
+  // 没有 path 的旧 artifact：落成临时文件再交给系统默认程序。
+  // 不能用 `window.open(dataUrl)` —— 那条在 Tauri 里由 webview 自己处理，不会打开默认程序。
+  await invoke('open_data_url_file', { name: artifact.name ?? 'file.bin', dataUrl })
 }
 
 async function revealGeneratedArtifact(artifact: ChatToolArtifact) {
@@ -129,7 +131,7 @@ function GeneratedFileCard({
     }
   }, [menuOpen])
 
-  const menuButtonClass = 'flex w-full items-center gap-2.5 whitespace-nowrap px-2.5 py-2 text-left text-[13px] leading-4 text-neutral-800 transition-colors hover:bg-neutral-100 dark:text-neutral-100 dark:hover:bg-neutral-800'
+  const menuButtonClass = 'kv-menu-item whitespace-nowrap'
   const menuIconClass = 'h-3.5 w-3.5 shrink-0 text-neutral-600 dark:text-neutral-300'
 
   const handleCopyPath = async () => {
@@ -183,7 +185,7 @@ function GeneratedFileCard({
           <MoreHorizontal size={16} strokeWidth={2} />
         </IconButton>
         {menuOpen && (
-          <div className="absolute right-0 top-7 z-20 w-44 overflow-hidden rounded-lg border border-neutral-200 bg-white py-1 shadow-lg shadow-black/10 dark:border-neutral-700 dark:bg-neutral-900 dark:shadow-black/30">
+          <div className="absolute right-0 top-7 z-20 w-44 overflow-hidden kv-menu">
             <button
               type="button"
               className={menuButtonClass}

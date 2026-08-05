@@ -1,7 +1,8 @@
 // 检索测试台（D1）：选库 + 输入查询 → 走与 knowledge_search 完全相同的检索核心，
 // 分阶段展示向量/关键词命中、融合、重排(含降级)、阈值/去重淘汰与耗时。
 import { useState } from 'react'
-import { AlertCircle, Search } from 'lucide-react'
+import { AlertCircle, Check, Copy, Search } from 'lucide-react'
+import { copyToClipboard } from '../utils/clipboard'
 import {
   kbRetrievalTest,
   type KnowledgeLibrary,
@@ -26,6 +27,34 @@ const DECISION_CLASS: Record<RetrievalDecision, string> = {
 
 function num(n: number | undefined, digits = 4): string {
   return n == null ? '—' : n.toFixed(digits)
+}
+
+// 片段单元格：hover 显示复制按钮，点击复制原文并给对勾反馈。
+function SnippetCell({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = () => {
+    void copyToClipboard(text).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <td className="min-w-[240px] px-2.5 py-2 text-neutral-600 dark:text-neutral-400">
+      <div className="group/snip flex items-start gap-1.5">
+        <span className="line-clamp-2 flex-1">{text}</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="shrink-0 rounded p-1 text-neutral-400 opacity-0 transition-opacity hover:bg-black/[0.05] hover:text-neutral-600 focus-visible:opacity-100 group-hover/snip:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-neutral-200"
+          title={copied ? '已复制' : '复制片段'}
+          aria-label={copied ? '已复制' : '复制片段'}
+        >
+          {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+        </button>
+      </div>
+    </td>
+  )
 }
 
 function rank(n: number | undefined): string {
@@ -85,7 +114,7 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
           </div>
 
           {/* 查询 */}
-          <div className="flex items-start gap-2">
+          <div className="flex items-stretch gap-2">
             <textarea
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -95,14 +124,14 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
               placeholder="输入查询…（⌘/Ctrl+Enter 运行）"
               rows={2}
               data-tauri-drag-region="false"
-              className="min-w-0 flex-1 resize-y rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] outline-none focus:border-[#C56646] dark:border-neutral-700 dark:bg-neutral-900"
+              className="min-w-0 flex-1 resize-none rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-[#C56646] dark:border-neutral-700 dark:bg-neutral-900"
             />
             <button
               type="button"
               onClick={run}
               disabled={busy || !query.trim() || selected.length === 0}
               data-tauri-drag-region="false"
-              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[#C56646] px-3.5 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              className="flex shrink-0 items-center gap-1.5 self-stretch rounded-lg bg-[#C56646] px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
             >
               <Search size={14} />
               {busy ? '检索中…' : '运行'}
@@ -136,9 +165,9 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
                 <p className="text-[13px] text-neutral-500 dark:text-neutral-400">未召回任何候选（知识库中没有相关内容）。</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
-                  <table className="w-full min-w-[720px] text-left text-[11.5px]">
+                  <table className="w-full min-w-[760px] text-left text-[11.5px]">
                     <thead className="bg-neutral-50 text-neutral-500 dark:bg-neutral-900/50 dark:text-neutral-400">
-                      <tr>
+                      <tr className="whitespace-nowrap">
                         <th className="px-2.5 py-2 font-medium">状态</th>
                         <th className="px-2.5 py-2 font-medium">来源</th>
                         <th className="px-2.5 py-2 text-right font-medium">向量#</th>
@@ -155,24 +184,27 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
                           key={`${c.kbId}:${c.chunkId}`}
                           className="border-t border-neutral-100 align-top dark:border-neutral-800/70"
                         >
-                          <td className="px-2.5 py-2">
-                            <span className={`rounded px-1.5 py-0.5 text-[10.5px] ${DECISION_CLASS[c.decision]}`}>
+                          <td className="whitespace-nowrap px-2.5 py-2">
+                            <span className={`inline-block rounded px-1.5 py-0.5 text-[10.5px] ${DECISION_CLASS[c.decision]}`}>
                               {c.finalRank != null ? `#${c.finalRank + 1} ` : ''}
                               {DECISION_LABEL[c.decision]}
                             </span>
                           </td>
                           <td className="px-2.5 py-2 text-neutral-700 dark:text-neutral-300">
-                            {c.docName}
-                            {c.headingPath && <span className="text-neutral-400"> — {c.headingPath}</span>}
+                            <div
+                              className="max-w-[9rem] truncate"
+                              title={c.docName + (c.headingPath ? ` — ${c.headingPath}` : '')}
+                            >
+                              {c.docName}
+                              {c.headingPath && <span className="text-neutral-400"> — {c.headingPath}</span>}
+                            </div>
                           </td>
-                          <td className="px-2.5 py-2 text-right tabular-nums">{rank(c.vectorRank)}</td>
-                          <td className="px-2.5 py-2 text-right tabular-nums">{num(c.vectorDistance)}</td>
-                          <td className="px-2.5 py-2 text-right tabular-nums">{rank(c.keywordRank)}</td>
-                          <td className="px-2.5 py-2 text-right tabular-nums">{num(c.fusedScore, 5)}</td>
-                          <td className="px-2.5 py-2 text-right tabular-nums">{num(c.rerankScore)}</td>
-                          <td className="px-2.5 py-2 text-neutral-600 dark:text-neutral-400">
-                            <span className="line-clamp-2">{c.text}</span>
-                          </td>
+                          <td className="whitespace-nowrap px-2.5 py-2 text-right tabular-nums">{rank(c.vectorRank)}</td>
+                          <td className="whitespace-nowrap px-2.5 py-2 text-right tabular-nums">{num(c.vectorDistance)}</td>
+                          <td className="whitespace-nowrap px-2.5 py-2 text-right tabular-nums">{rank(c.keywordRank)}</td>
+                          <td className="whitespace-nowrap px-2.5 py-2 text-right tabular-nums">{num(c.fusedScore, 5)}</td>
+                          <td className="whitespace-nowrap px-2.5 py-2 text-right tabular-nums">{num(c.rerankScore)}</td>
+                          <SnippetCell text={c.text} />
                         </tr>
                       ))}
                     </tbody>

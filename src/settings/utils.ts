@@ -126,15 +126,20 @@ export const parseModelPairValue = (value: string): [string, string] => {
 
 export const isProviderEnabled = (provider: ModelProvider) => provider.enabled !== false
 
-export const buildModelPairOptions = (providers: ModelProvider[]): SelectOption[] =>
+export const buildModelPairOptions = (
+  providers: ModelProvider[],
+  filterModel?: (provider: ModelProvider, model: string) => boolean,
+): SelectOption[] =>
   providers
     .filter(provider => isProviderEnabled(provider))
     .flatMap(provider =>
-      provider.enabledModels.map(model => ({
-        value: modelPairValue(provider.id, model),
-        label: `${provider.name} - ${model}`,
-        title: `${provider.name} - ${model}`,
-      })),
+      provider.enabledModels
+        .filter(model => !filterModel || filterModel(provider, model))
+        .map(model => ({
+          value: modelPairValue(provider.id, model),
+          label: `${provider.name} - ${model}`,
+          title: `${provider.name} - ${model}`,
+        })),
     )
 
 /**
@@ -157,7 +162,15 @@ export const stableStringify = (value: unknown): string =>
 
 type HotkeyErrorPayload = {
   kind: 'conflict' | 'duplicate' | 'empty' | 'other'
-  scope: 'translator' | 'chat' | 'screenshot' | 'screenshot_text' | 'lens'
+  scope:
+    | 'translator'
+    | 'chat'
+    | 'close_chat'
+    | 'screenshot'
+    | 'screenshot_text'
+    | 'screenshot_replace'
+    | 'screenshot_annotate'
+    | 'lens'
   hotkey: string
   raw?: string
 }
@@ -165,8 +178,11 @@ type HotkeyErrorPayload = {
 const SCOPE_KEY: Record<HotkeyErrorPayload['scope'], keyof typeof i18n.zh> = {
   translator: 'hotkeyScopeTranslator',
   chat: 'hotkeyScopeChat',
+  close_chat: 'hotkeyScopeCloseChat',
   screenshot: 'hotkeyScopeScreenshot',
   screenshot_text: 'hotkeyScopeScreenshotText',
+  screenshot_replace: 'hotkeyScopeScreenshotReplace',
+  screenshot_annotate: 'annotateHotkeyLabel',
   lens: 'hotkeyScopeLens',
 }
 

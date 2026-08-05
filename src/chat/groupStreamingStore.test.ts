@@ -8,6 +8,7 @@ import {
   getGroupsVersion,
   hasActiveGroup,
   resetGroups,
+  restoreGroupArm,
   subscribeGroups,
   touchGroup,
 } from './groupStreamingStore'
@@ -111,5 +112,79 @@ describe('groupStreamingStore', () => {
     expect(sub).toHaveBeenCalledTimes(2)
 
     unsub()
+  })
+
+  it('restores fan-out arms by recovery index when snapshots arrive out of order', () => {
+    const second = restoreGroupArm('c1', 'recovered-group', 3, 1, 'msg-b', 'provider-b', 'model-b')
+    const first = restoreGroupArm('c1', 'recovered-group', 3, 0, 'msg-a', 'provider-a', 'model-a')
+
+    const group = getActiveGroup('c1')
+    expect(group).toMatchObject({
+      conversationId: 'c1',
+      groupId: 'recovered-group',
+      expectedColumns: 3,
+    })
+    expect(group?.columns).toHaveLength(3)
+    expect(group?.columns[0]).toBe(first)
+    expect(group?.columns[1]).toBe(second)
+    expect(group?.columns[0]).toMatchObject({
+      messageId: 'msg-a',
+      providerId: 'provider-a',
+      model: 'model-a',
+    })
+    expect(group?.columns[1]).toMatchObject({
+      messageId: 'msg-b',
+      providerId: 'provider-b',
+      model: 'model-b',
+    })
+    expect(group?.columns[2]).toMatchObject({
+      messageId: 'pending-recovered-group-2',
+      providerId: null,
+      model: null,
+    })
+  })
+
+  it('restores the same arm idempotently without replacing sibling state', () => {
+    const first = restoreGroupArm('c1', 'recovered-group', 2, 0, 'msg-a', 'provider-a', 'model-a')
+    const second = restoreGroupArm('c1', 'recovered-group', 2, 1, 'msg-b', 'provider-b', 'model-b')
+    first.content = 'partial answer'
+    second.content = 'sibling answer'
+
+    const restoredAgain = restoreGroupArm(
+      'c1',
+      'recovered-group',
+      2,
+      0,
+      'msg-a-new',
+      'provider-a-new',
+      'model-a-new',
+    )
+
+    expect(restoredAgain).toBe(first)
+    expect(restoredAgain).toMatchObject({
+      messageId: 'msg-a-new',
+      providerId: 'provider-a-new',
+      model: 'model-a-new',
+      content: 'partial answer',
+    })
+    expect(getActiveGroup('c1')?.columns[1]).toBe(second)
+    expect(getActiveGroup('c1')?.columns[1]).toMatchObject({
+      messageId: 'msg-b',
+      content: 'sibling answer',
+    })
+  })
+
+  it('replaces a stale group when recovery metadata names a new group', () => {
+    beginGroup('c1', 'stale-group', [{ providerId: 'old-provider', model: 'old-model' }])
+
+    restoreGroupArm('c1', 'recovered-group', 2, 1, 'msg-b', 'provider-b', 'model-b')
+
+    const group = getActiveGroup('c1')
+    expect(group?.groupId).toBe('recovered-group')
+    expect(group?.expectedColumns).toBe(2)
+    expect(group?.columns).toHaveLength(2)
+    expect(group?.columns[0].messageId).toBe('pending-recovered-group-0')
+    expect(group?.columns[1].messageId).toBe('msg-b')
+    expect(group?.columns.some((column) => column.providerId === 'old-provider')).toBe(false)
   })
 })

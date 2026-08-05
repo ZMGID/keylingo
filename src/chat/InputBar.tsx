@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -7,11 +7,11 @@ import {
   Archive,
   Check,
   ChevronDown,
-  ChevronRight,
   CircleHelp,
   Eraser,
   Folder,
   FolderPlus,
+  Layers,
   ListChecks,
   MessageSquarePlus,
   Network,
@@ -22,17 +22,24 @@ import {
   Sparkles,
   Square,
   Terminal,
+  TextQuote,
   Wrench,
-  Zap,
+  X,
 } from 'lucide-react'
 import { ChatAttachments } from './ChatAttachments'
 import { SourcesButton } from './SourcesButton'
+import { onComposerInsert, onComposerTextInsert } from './composerInsert'
+import { draftKey, getComposerDraft, migrateNewChatDraft, setComposerDraft } from './composerDraft'
 import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
+import { GitStatusPill } from './dock/GitStatusPill'
+import { GitDiffChip } from './dock/GitDiffChip'
+import { AgentTodoIndicator } from './AgentTodoIndicator'
 import { Button, IconButton } from '../components/Button'
+import { useT, type I18n, type Lang } from '../settings/i18n'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
-import type { AgentPlanMode, AgentPlanState, ChatAssistant, ChatProject, ModelRef, PendingAttachment } from './types'
+import type { AgentPlanMode, AgentPlanState, AgentTodoState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
 import {
   buildSlashCommands,
   commandMatches,
@@ -41,6 +48,7 @@ import {
   type SlashSkill,
 } from './slashCommands'
 import { mapExternalCliSlashCommands, externalCliAgentLabel } from './externalCliSlashCommands'
+import type { ModeOption, ModeTone } from './permissionModes'
 import { isTauriRuntime } from './utils'
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif']
@@ -114,18 +122,24 @@ function pathTail(path: string): string {
   return normalized.split('/').filter(Boolean).pop() ?? path
 }
 
+function joinPath(parent: string, name: string): string {
+  const sep = parent.includes('\\') && !parent.includes('/') ? '\\' : '/'
+  return `${parent.replace(/[\\/]+$/, '')}${sep}${name}`
+}
+
 function projectUpdatedAt(project: ChatProject): number {
   return project.updated_at ?? project.updatedAt ?? project.created_at ?? project.createdAt ?? 0
 }
 
-function nextBlankProjectName(projects: ChatProject[]): string {
+function nextBlankProjectName(projects: ChatProject[], t: I18n): string {
   const names = new Set(projects.map((project) => project.name))
-  if (!names.has('新项目')) return '新项目'
+  const base = t.chatDefaultProjectName
+  if (!names.has(base)) return base
   for (let index = 2; index < 100; index += 1) {
-    const name = `新项目 ${index}`
+    const name = `${base} ${index}`
     if (!names.has(name)) return name
   }
-  return `新项目 ${Date.now()}`
+  return `${base} ${Date.now()}`
 }
 
 type SlashCommandId =
@@ -262,43 +276,18 @@ function slashCommandIcon(command: SlashCommandDefinition) {
   }
 }
 
-const AGENT_MODE_OPTIONS: {
-  mode: AgentPlanMode
-  label: string
-  description: string
-  icon: typeof Zap
-}[] = [
-  {
-    mode: 'act',
-    label: 'Act',
-    description: '普通模式 · Normal',
-    icon: Zap,
-  },
-  {
-    mode: 'plan',
-    label: 'Plan',
-    description: '计划模式 · Enter plan mode',
-    icon: ListChecks,
-  },
-  {
-    mode: 'orchestrate',
-    label: 'Orchestrate',
-    description: '主动派 Subagent · Proactive subagents',
-    icon: Network,
-  },
-]
-
-// pill 颜色呼应输入框边框：Act=neutral、Plan=emerald、Orchestrate=violet
-const AGENT_MODE_PILL_CLASS: Record<AgentPlanMode, { idle: string; iconColor: string }> = {
-  act: {
+// pill 颜色呼应输入框边框：Act=neutral、Plan=emerald、Orchestrate=violet。
+// 档位表由 Chat 传入（内置三档 / 本地 CLI 档位），这里只按 tone 取样式。
+const MODE_PILL_CLASS: Record<ModeTone, { idle: string; iconColor: string }> = {
+  neutral: {
     idle: 'text-neutral-600 hover:bg-neutral-200/60 dark:text-neutral-300 dark:hover:bg-neutral-700/55',
     iconColor: 'text-neutral-500 dark:text-neutral-300',
   },
-  plan: {
+  emerald: {
     idle: 'text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-400/10',
     iconColor: 'text-emerald-500 dark:text-emerald-400',
   },
-  orchestrate: {
+  violet: {
     idle: 'text-violet-600 hover:bg-violet-500/10 dark:text-violet-400 dark:hover:bg-violet-400/10',
     iconColor: 'text-violet-500 dark:text-violet-400',
   },
@@ -346,14 +335,14 @@ function imageExtensionForMime(mimeType: string): string {
   }
 }
 
-function readFileAsBase64(file: File): Promise<string> {
+function readFileAsBase64(file: File, readError: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => {
       const result = typeof reader.result === 'string' ? reader.result : ''
       resolve(result.split(',')[1] ?? '')
     }
-    reader.onerror = () => reject(reader.error ?? new Error('读取剪贴板图片失败'))
+    reader.onerror = () => reject(reader.error ?? new Error(readError))
     reader.readAsDataURL(file)
   })
 }
@@ -374,6 +363,7 @@ interface InputBarProps {
   toolStatusHint?: string
   sendDisabledReason?: string
   agentPlanState?: AgentPlanState | null
+  agentTodoState?: AgentTodoState | null
   onAgentPlanModeChange?: (mode: AgentPlanMode) => void | Promise<void>
   enabledSkills?: SlashSkill[]
   onOpenSkillSettings?: () => void
@@ -383,6 +373,9 @@ interface InputBarProps {
   conversationProject?: { id: string; name: string } | null
   onSelectProject?: (project: ChatProject | null) => void | Promise<void>
   showProjectEntry?: boolean
+  /** 导航态选中的集；与项目互斥。空对话时显示 Start in / 状态条。 */
+  selectedSet?: ChatSet | null
+  onSelectSet?: (set: ChatSet | null) => void | Promise<void>
   /** 当前生效的专家(无则为空);显示在底部栏 */
   currentAssistant?: { id: string; name: string } | null
   onOpenAssistantCenter?: () => void
@@ -405,13 +398,24 @@ interface InputBarProps {
   mcpServers?: ChatMcpServer[]
   onToggleMcpServer?: (serverId: string) => void | Promise<void>
   /** 网络搜索全局开关（nativeTools.webSearch）；在「来源」弹层内切换 */
-  webSearchEnabled?: boolean
-  onToggleWebSearch?: () => void | Promise<void>
+  webSearchMode?: WebSearchMode
+  onSetWebSearchMode?: (mode: WebSearchMode) => void | Promise<void>
+  builtinWebSearchSupported?: boolean
   /** 多答模型集（会话级 reply_models / replyModels；0/1 个=单模型，≥2=一问多答） */
   replyModels?: ModelRef[]
   onChangeReplyModels?: (models: ModelRef[]) => void | Promise<void>
-  /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 左边 */
+  /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 右边 */
   contextSlot?: ReactNode
+  /** 底栏模式胶囊的档位表，由 Chat 算好传入（内置会话 = Kivio 三档；本地 CLI 会话 =
+   *  该 CLI 自己的沙盒/权限档位）。空表 = 无档位可选，胶囊整个不渲染。 */
+  modeOptions?: ModeOption[]
+  modeValue?: string
+  onModeChange?: (value: string) => void | Promise<void>
+  /** Git 状态胶囊：Dock 解析出的工作目录；空则不渲染 */
+  gitWorkdir?: string | null
+  gitLang?: Lang
+  /** 胶囊卡片里「在 Git 面板中打开」：打开 Dock 并切到 Git 页 */
+  onOpenGitPanel?: () => void
 }
 
 export function InputBar({
@@ -430,6 +434,7 @@ export function InputBar({
   toolStatusHint,
   sendDisabledReason,
   agentPlanState = null,
+  agentTodoState = null,
   onAgentPlanModeChange,
   enabledSkills = [],
   onOpenSkillSettings,
@@ -437,6 +442,8 @@ export function InputBar({
   conversationProject = null,
   onSelectProject,
   showProjectEntry = false,
+  selectedSet = null,
+  onSelectSet,
   currentAssistant = null,
   onOpenAssistantCenter,
   onSelectAssistant,
@@ -451,14 +458,24 @@ export function InputBar({
   onToggleForceKnowledgeSearch,
   mcpServers = [],
   onToggleMcpServer,
-  webSearchEnabled = true,
-  onToggleWebSearch,
+  webSearchMode = 'off',
+  onSetWebSearchMode,
+  builtinWebSearchSupported = false,
   replyModels = [],
   onChangeReplyModels,
   contextSlot,
+  modeOptions = [],
+  modeValue = '',
+  onModeChange,
+  gitWorkdir = null,
+  gitLang,
+  onOpenGitPanel,
 }: InputBarProps) {
-  const [input, setInput] = useState('')
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  const t = useT()
+  const draftKeyValue = draftKey(conversationId)
+  const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
+  const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
+  const [attachments, setAttachments] = useState<PendingAttachment[]>(() => getComposerDraft(draftKeyValue)?.attachments ?? [])
   const [attachmentError, setAttachmentError] = useState('')
   const [dragActive, setDragActive] = useState(false)
   const [toolPanelOpen, setToolPanelOpen] = useState(false)
@@ -469,7 +486,6 @@ export function InputBar({
   const [projectOptionsError, setProjectOptionsError] = useState('')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
   const [projectCreating, setProjectCreating] = useState(false)
-  const [projectCreateMenuOpen, setProjectCreateMenuOpen] = useState(false)
   const [slashPanelOpen, setSlashPanelOpen] = useState(false)
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [activeSlashToken, setActiveSlashToken] = useState<ActiveSlashToken | null>(null)
@@ -479,6 +495,24 @@ export function InputBar({
   const [slashPanelLeft, setSlashPanelLeft] = useState(0)
   const innerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // 草稿持久化：会话 key 变化（切对话且未卸载）时载入对应草稿；每次内容变化写回内存 store。
+  // keyRef 保证写回落到当前会话，不串到刚切走的会话。
+  const draftKeyRef = useRef(draftKeyValue)
+  useEffect(() => {
+    if (draftKeyRef.current === draftKeyValue) return
+    const prevKey = draftKeyRef.current
+    draftKeyRef.current = draftKeyValue
+    // 新建会话刚落库拿到 id（切 plan/orchestrate 模式等会触发）：草稿跟着搬过去，
+    // 本地 state 已经是那份内容，直接返回，别当成「切到了另一条会话」把字清掉。
+    if (migrateNewChatDraft(prevKey, draftKeyValue)) return
+    const d = getComposerDraft(draftKeyValue)
+    setInput(d?.input ?? '')
+    setQuotes(d?.quotes ?? [])
+    setAttachments(d?.attachments ?? [])
+  }, [draftKeyValue])
+  useEffect(() => {
+    setComposerDraft(draftKeyRef.current, { input, quotes, attachments })
+  }, [input, quotes, attachments])
   const agentPlanMode = agentPlanState?.mode ?? 'act'
   const agentPlanActive = agentPlanMode === 'plan'
   const agentOrchestrateActive = agentPlanMode === 'orchestrate'
@@ -487,16 +521,23 @@ export function InputBar({
   // 这样从「最近」打开一条属于项目的对话时，按钮仍能显示该项目。
   const effectiveProject: { id: string; name: string } | null =
     selectedProject ?? (conversationProject?.name ? conversationProject : null)
+  // 集：导航态选中的集（项目优先；两者在侧栏互斥）。
+  const effectiveSet: { id: string; name: string } | null =
+    effectiveProject ? null : (selectedSet ? { id: selectedSet.id, name: selectedSet.name } : null)
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
-  const modeEntryEnabled = Boolean(onAgentPlanModeChange)
-  const activeModeOption = AGENT_MODE_OPTIONS.find((option) => option.mode === agentPlanMode)
-    ?? AGENT_MODE_OPTIONS[0]
-  const activeModePillClass = AGENT_MODE_PILL_CLASS[agentPlanMode]
+  const modeEntryEnabled = Boolean(onModeChange) && modeOptions.length > 0
+  // 状态条只放「你在哪」—— 当前项目或集。Git 分支/diff 归下面的工具栏。
+  const gitStatusEnabled = Boolean(gitWorkdir && gitLang && onOpenGitPanel)
+  const todoBarVisible = (agentTodoState?.items?.length ?? 0) > 0
+  const statusBarVisible = Boolean(
+    (projectEntryEnabled && effectiveProject) || effectiveSet,
+  )
+  const activeModeOption = modeOptions.find((option) => option.value === modeValue) ?? modeOptions[0]
+  const activeModePillClass = MODE_PILL_CLASS[activeModeOption?.tone ?? 'neutral']
 
   const closeProjectMenu = useCallback(() => {
     setProjectMenuOpen(false)
-    setProjectCreateMenuOpen(false)
   }, [])
 
   const closeModeMenu = useCallback(() => {
@@ -507,7 +548,7 @@ export function InputBar({
     (paths: string[]) =>
       paths.map((path) => {
         const normalized = path.replace(/\\/g, '/')
-        const name = normalized.split('/').filter(Boolean).pop() || '附件'
+        const name = normalized.split('/').filter(Boolean).pop() || t.chatAttachmentFallbackName
         const ext = name.split('.').pop()?.toLowerCase() ?? ''
         const type: PendingAttachment['type'] = IMAGE_EXTENSIONS.includes(ext) ? 'image' : 'file'
         return {
@@ -517,7 +558,7 @@ export function InputBar({
           path,
         }
       }),
-    [],
+    [t],
   )
 
   const loadProjectOptions = useCallback(async () => {
@@ -528,11 +569,11 @@ export function InputBar({
       setProjectOptions(await chatApi.getProjects())
     } catch (err) {
       console.error('Failed to load chat projects:', err)
-      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : '项目加载失败')
+      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatProjectLoadFailed)
     } finally {
       setProjectOptionsLoading(false)
     }
-  }, [projectEntryEnabled])
+  }, [projectEntryEnabled, t])
 
   const toggleProjectMenu = useCallback(() => {
     if (!projectEntryEnabled || disabled) return
@@ -541,7 +582,6 @@ export function InputBar({
     setModeMenuOpen(false)
     setProjectMenuOpen((open) => {
       const nextOpen = !open
-      setProjectCreateMenuOpen(false)
       if (nextOpen) {
         setProjectSearchQuery('')
         void loadProjectOptions()
@@ -562,7 +602,18 @@ export function InputBar({
     setProjectOptionsError('')
     setProjectCreating(true)
     try {
-      const project = await chatApi.createProject(nextBlankProjectName(projectOptions), null, null, null)
+      // 空白项目必须落到真实文件夹：先选父目录，再在其中 mkdir 并登记项目。
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: t.chatPickBlankProjectLocation,
+      })
+      const parentPath = Array.isArray(picked) ? picked[0] : picked
+      if (!parentPath) return
+
+      const name = nextBlankProjectName(projectOptions, t)
+      const rootPath = joinPath(parentPath, name)
+      const project = await chatApi.createProject(name, null, null, rootPath, { ensureRootDir: true })
       setProjectOptions((prev) => [
         project,
         ...prev.filter((item) => item.id !== project.id),
@@ -571,12 +622,12 @@ export function InputBar({
       await onSelectProject(project)
     } catch (err) {
       console.error('Failed to create blank chat project from input bar:', err)
-      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : '项目创建失败')
+      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatProjectCreateFailed)
     } finally {
       setProjectCreating(false)
       requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
     }
-  }, [closeProjectMenu, disabled, onSelectProject, projectCreating, projectOptions])
+  }, [closeProjectMenu, disabled, onSelectProject, projectCreating, projectOptions, t])
 
   const createProjectFromFolder = useCallback(async () => {
     if (!onSelectProject || disabled || projectCreating) return
@@ -586,7 +637,7 @@ export function InputBar({
       const picked = await open({
         directory: true,
         multiple: false,
-        title: '选择项目文件夹',
+        title: t.chatPickProjectFolder,
       })
       const rootPath = Array.isArray(picked) ? picked[0] : picked
       if (!rootPath) return
@@ -599,12 +650,12 @@ export function InputBar({
       await onSelectProject(project)
     } catch (err) {
       console.error('Failed to create chat project from input bar:', err)
-      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : '项目创建失败')
+      setProjectOptionsError(typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatProjectCreateFailed)
     } finally {
       setProjectCreating(false)
       requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
     }
-  }, [closeProjectMenu, disabled, onSelectProject, projectCreating])
+  }, [closeProjectMenu, disabled, onSelectProject, projectCreating, t])
 
   const updateTextareaHeight = useCallback(() => {
     const textarea = textareaRef.current
@@ -613,6 +664,41 @@ export function InputBar({
     textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
     textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden'
   }, [])
+
+  // 高度/滚动条是 input 的纯函数，统一在这里跟。原来每条改 input 的路径各自补一次
+  // requestAnimationFrame(updateTextareaHeight)，草稿回填那条（见上方 draftKeyValue effect）
+  // 漏了 —— 切走再切回时框子还留着上一条会话的高度且 overflowY:hidden，下半截文本看不到也滚不动。
+  // 用 layout effect 而非 rAF：DOM 提交后、绘制前跑完，不闪；也不必在每个 setInput 后手动记得调。
+  useLayoutEffect(updateTextareaHeight, [input, updateTextareaHeight])
+
+  // 消息区「添加到聊天」：把选中文字作为引用卡片挂到输入框上方（发送时才拼进正文）。
+  const insertQuoteFromSelection = useCallback((text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    setQuotes((prev) => [...prev, trimmed])
+    requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
+  }, [])
+
+  useEffect(() => onComposerInsert(insertQuoteFromSelection), [insertQuoteFromSelection])
+
+  // Right Dock「插入 @ 引用」等：文本直接追加到输入框正文（与引用卡片信道并列）。
+  const insertTextAtEnd = useCallback((text: string) => {
+    if (!text) return
+    setInput((prev) => {
+      const needsSpace = prev.length > 0 && !prev.endsWith(' ') && !prev.endsWith('\n')
+      return `${prev}${needsSpace ? ' ' : ''}${text}`
+    })
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (textarea) {
+        textarea.focus({ preventScroll: true })
+        textarea.selectionStart = textarea.value.length
+        textarea.selectionEnd = textarea.value.length
+      }
+    })
+  }, [])
+
+  useEffect(() => onComposerTextInsert(insertTextAtEnd), [insertTextAtEnd])
 
   const syncSlashToken = useCallback((value: string, cursor: number) => {
     const token = findActiveSlashToken(value, cursor)
@@ -655,7 +741,7 @@ export function InputBar({
         if (cancelled) return
         setExternalCliSlashCommands([])
         setExternalCliSlashHint(
-          typeof err === 'string' ? err : err instanceof Error ? err.message : '无法加载 CLI 命令',
+          typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatCliCommandsLoadFailed,
         )
       })
       .finally(() => {
@@ -665,7 +751,7 @@ export function InputBar({
     return () => {
       cancelled = true
     }
-  }, [conversationId, externalAgentName, usesExternalRuntime])
+  }, [conversationId, externalAgentName, usesExternalRuntime, t])
   const filteredSlashCommands = useMemo(
     () => allSlashCommands.filter((command) => (
       commandMatches(command, activeSlashToken?.query ?? '')
@@ -688,7 +774,6 @@ export function InputBar({
     const token = activeSlashToken
     if (!token) {
       setInput('')
-      requestAnimationFrame(updateTextareaHeight)
       return
     }
 
@@ -699,11 +784,10 @@ export function InputBar({
         if (!textarea) return
         textarea.selectionStart = Math.min(token.start, next.length)
         textarea.selectionEnd = Math.min(token.start, next.length)
-        updateTextareaHeight()
       })
       return next
     })
-  }, [activeSlashToken, updateTextareaHeight])
+  }, [activeSlashToken])
 
   const completeActiveSlashToken = useCallback((command: SlashCommandDefinition) => {
     const token = activeSlashToken
@@ -718,7 +802,6 @@ export function InputBar({
         textarea.focus({ preventScroll: true })
         textarea.selectionStart = cursor
         textarea.selectionEnd = cursor
-        updateTextareaHeight()
       })
       return next
     })
@@ -728,7 +811,7 @@ export function InputBar({
       query: command.slash.slice(1),
     })
     setSlashPanelOpen(true)
-  }, [activeSlashToken, updateTextareaHeight])
+  }, [activeSlashToken])
 
   // Skill commands complete to `/name ` (trailing space) and close the popover
   // so the user types arguments; the whole string is sent on Enter and parsed
@@ -747,13 +830,12 @@ export function InputBar({
         textarea.focus({ preventScroll: true })
         textarea.selectionStart = cursor
         textarea.selectionEnd = cursor
-        updateTextareaHeight()
       })
       return next
     })
     setActiveSlashToken(null)
     setSlashPanelOpen(false)
-  }, [activeSlashToken, updateTextareaHeight])
+  }, [activeSlashToken])
 
   const selectedSlashCommand = filteredSlashCommands[slashSelectedIndex]
     ?? filteredSlashCommands[0]
@@ -764,7 +846,7 @@ export function InputBar({
         ? next.filter((attachment) => attachment.type === 'image')
         : next.filter((attachment) => attachment.name.trim() !== '')
       if (filtered.length === 0) {
-        setAttachmentError(options?.imagesOnly ? '请拖入图片文件' : '未识别到可添加的文件')
+        setAttachmentError(options?.imagesOnly ? t.chatDropImagesOnly : t.chatNoAddableFiles)
         return
       }
 
@@ -776,7 +858,7 @@ export function InputBar({
           return true
         })
         if (dedupedNext.length === 0) {
-          setAttachmentError('附件已添加')
+          setAttachmentError(t.chatAttachmentAdded)
           return prev
         }
         setAttachmentError('')
@@ -784,7 +866,7 @@ export function InputBar({
       })
       textareaRef.current?.focus()
     },
-    [],
+    [t],
   )
 
   const setAgentPlanMode = useCallback(async (mode: AgentPlanMode) => {
@@ -801,19 +883,36 @@ export function InputBar({
     })
   }, [agentPlanMode, closeModeMenu, closeProjectMenu, disabled, onAgentPlanModeChange])
 
+  // 模式胶囊选档：档位表由 Chat 决定（内置三档 / 本地 CLI 档位），这里只回传选中的 value。
+  const pickMode = useCallback(async (value: string) => {
+    if (disabled || !onModeChange) return
+    setSlashPanelOpen(false)
+    setToolPanelOpen(false)
+    closeProjectMenu()
+    closeModeMenu()
+    if (value !== modeValue) {
+      await onModeChange(value)
+    }
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true })
+    })
+  }, [closeModeMenu, closeProjectMenu, disabled, modeValue, onModeChange])
+
   const toggleModeMenu = useCallback(() => {
-    if (disabled || !onAgentPlanModeChange) return
+    if (disabled || !modeEntryEnabled) return
     setSlashPanelOpen(false)
     setToolPanelOpen(false)
     closeProjectMenu()
     setModeMenuOpen((open) => !open)
-  }, [closeProjectMenu, disabled, onAgentPlanModeChange])
+  }, [closeProjectMenu, disabled, modeEntryEnabled])
 
-  const toggleAgentPlanMode = useCallback(async () => {
-    const next: AgentPlanMode =
-      agentPlanMode === 'act' ? 'plan' : agentPlanMode === 'plan' ? 'orchestrate' : 'act'
-    await setAgentPlanMode(next)
-  }, [agentPlanMode, setAgentPlanMode])
+  // Shift+Tab 在胶囊当前那套档位里循环，跟看得见的控件保持一致。
+  const cycleMode = useCallback(async () => {
+    if (modeOptions.length === 0) return
+    const index = modeOptions.findIndex((option) => option.value === modeValue)
+    const next = modeOptions[(index + 1) % modeOptions.length]
+    await pickMode(next.value)
+  }, [modeOptions, modeValue, pickMode])
 
   const openAttachmentPicker = useCallback(async () => {
     if (disabled) return
@@ -833,10 +932,10 @@ export function InputBar({
     } catch (err) {
       console.error('Failed to add chat attachment:', err)
       setAttachmentError(
-        typeof err === 'string' ? err : err instanceof Error ? err.message : '添加附件失败',
+        typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatAttachmentAddFailed,
       )
     }
-  }, [addAttachments, attachmentsFromPaths, closeProjectMenu, disabled])
+  }, [addAttachments, attachmentsFromPaths, closeProjectMenu, disabled, t])
 
   const handleSlashCommandSelect = useCallback(async (command: SlashCommandDefinition) => {
     if (disabled) return
@@ -859,7 +958,6 @@ export function InputBar({
         textarea.focus({ preventScroll: true })
         textarea.selectionStart = 1
         textarea.selectionEnd = 1
-        updateTextareaHeight()
       })
       return
     }
@@ -878,7 +976,6 @@ export function InputBar({
         setInput('')
         setAttachments([])
         setAttachmentError('')
-        requestAnimationFrame(updateTextareaHeight)
         await onNewChat?.()
         return
       case 'compact':
@@ -888,7 +985,6 @@ export function InputBar({
         setInput('')
         setAttachments([])
         setAttachmentError('')
-        requestAnimationFrame(updateTextareaHeight)
         await onClearChat?.()
         return
       case 'settings':
@@ -918,14 +1014,20 @@ export function InputBar({
     removeActiveSlashToken,
     setAgentPlanMode,
     closeProjectMenu,
-    updateTextareaHeight,
   ])
 
   const handleSend = () => {
     const trimmed = input.trim()
-    if ((!trimmed && attachments.length === 0) || disabled || sendDisabledReason) return
-    onSend(trimmed, attachments)
+    if ((!trimmed && quotes.length === 0 && attachments.length === 0) || disabled || sendDisabledReason) return
+    const quotedBlock = quotes
+      .map((q) => q.split('\n').map((line) => `> ${line}`).join('\n'))
+      .join('\n\n')
+    const content = quotedBlock
+      ? (trimmed ? `${quotedBlock}\n\n${trimmed}` : quotedBlock)
+      : trimmed
+    onSend(content, attachments)
     setInput('')
+    setQuotes([])
     setAttachments([])
     setAttachmentError('')
     setToolPanelOpen(false)
@@ -940,9 +1042,9 @@ export function InputBar({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return
 
-    if (e.key === 'Tab' && e.shiftKey && onAgentPlanModeChange && !disabled) {
+    if (e.key === 'Tab' && e.shiftKey && modeEntryEnabled && !disabled) {
       e.preventDefault()
-      void toggleAgentPlanMode()
+      void cycleMode()
       return
     }
 
@@ -988,6 +1090,14 @@ export function InputBar({
       }
     }
 
+    // 生成中按 Esc = 点停止。只绑在输入框上（发完焦点就在这），
+    // 不接全局监听——图片查看器/右键菜单/侧边栏那一堆 Esc 关闭会跟着一块触发。
+    if (e.key === 'Escape' && onCancel && cancelVisible && !cancelling) {
+      e.preventDefault()
+      onCancel()
+      return
+    }
+
     if (e.key !== 'Enter' || e.shiftKey) return
     e.preventDefault()
     handleSend()
@@ -996,11 +1106,8 @@ export function InputBar({
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const nextValue = e.target.value
     setInput(nextValue)
-    const el = e.target
-    el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
-    el.style.overflowY = el.scrollHeight > 160 ? 'auto' : 'hidden'
-    syncSlashToken(nextValue, el.selectionStart)
+    // 高度/滚动条由 input 的 layout effect 统一跟，这里不再内联量一遍。
+    syncSlashToken(nextValue, e.target.selectionStart)
   }
 
   const handleSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
@@ -1068,14 +1175,14 @@ export function InputBar({
             ? imageExtensionForMime(file.type)
             : ext
           const name = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExt}`
-          const dataBase64 = await readFileAsBase64(file)
+          const dataBase64 = await readFileAsBase64(file, t.chatClipboardImageReadFailed)
           const result = await api.chatSavePastedImage(
             name,
             file.type || `image/${imageExt}`,
             dataBase64,
           )
           if (!result.success || !result.path || !result.name) {
-            throw new Error(result.error || '粘贴图片失败')
+            throw new Error(result.error || t.chatPasteImageFailed)
           }
           pastedAttachments.push({
             id: `pending-att-${crypto.randomUUID()}`,
@@ -1089,10 +1196,10 @@ export function InputBar({
         if (file.size <= 0) continue
 
         const name = file.name || `pasted-file-${Date.now()}-${index + 1}.${ext}`
-        const dataBase64 = await readFileAsBase64(file)
+        const dataBase64 = await readFileAsBase64(file, t.chatClipboardImageReadFailed)
         const result = await api.chatSavePastedAttachment(name, dataBase64)
         if (!result.success || !result.path || !result.name) {
-          throw new Error(result.error || '粘贴附件失败')
+          throw new Error(result.error || t.chatPasteAttachmentFailed)
         }
         pastedAttachments.push({
           id: `pending-att-${crypto.randomUUID()}`,
@@ -1103,7 +1210,7 @@ export function InputBar({
       }
 
       if (pastedAttachments.length === 0) {
-        setAttachmentError('未识别到可添加的文件')
+        setAttachmentError(t.chatNoAddableFiles)
         return
       }
 
@@ -1111,7 +1218,7 @@ export function InputBar({
     } catch (err) {
       console.error('Failed to paste chat attachment:', err)
       setAttachmentError(
-        typeof err === 'string' ? err : err instanceof Error ? err.message : '粘贴附件失败',
+        typeof err === 'string' ? err : err instanceof Error ? err.message : t.chatPasteAttachmentFailed,
       )
     }
   }
@@ -1125,7 +1232,10 @@ export function InputBar({
     if (!autoFocus || disabled) return
     requestAnimationFrame(() => {
       if (shouldComposerAutoFocus(document.activeElement)) {
-        textareaRef.current?.focus({ preventScroll: true })
+        const el = textareaRef.current
+        el?.focus({ preventScroll: true })
+        // 恢复草稿后光标应落到末尾，而非开头，省得每次手动移到最后再输入。
+        if (el) el.selectionStart = el.selectionEnd = el.value.length
       }
     })
   }, [autoFocus, disabled])
@@ -1317,6 +1427,99 @@ export function InputBar({
   const mcpStatusLine = toolsDisabledReason
     || (externalMcpTools.length > 0 ? `MCP ${externalMcpTools.length}` : '')
 
+  // 项目菜单内容：贴按钮紧凑宽度，状态条 / 工具栏入口共用同一 body。
+  const projectMenuBody = (
+    <>
+      <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-neutral-500 dark:text-neutral-400">
+        <Search size={14} strokeWidth={1.8} className="shrink-0" />
+        <input
+          value={projectSearchQuery}
+          onChange={(event) => setProjectSearchQuery(event.target.value)}
+          placeholder={t.chatSearchProjects}
+          className="min-w-0 flex-1 border-0 bg-transparent text-[12px] font-semibold text-neutral-800 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
+        />
+      </div>
+
+      <div className="chat-popover-scroll mt-0.5 max-h-48 overflow-y-auto">
+        {projectOptionsLoading ? (
+          <div className="px-2 py-2.5 text-[12px] text-neutral-400 dark:text-neutral-500">
+            {t.chatLoadingProjects}
+          </div>
+        ) : projectOptionsError ? (
+          <div className="px-2 py-2 text-[12px] text-red-500 dark:text-red-400">
+            {projectOptionsError}
+          </div>
+        ) : visibleProjectOptions.length > 0 ? (
+          <div className="py-1">
+            {visibleProjectOptions.map((project) => {
+              const active = selectedProject?.id === project.id
+              const pathLabel = projectPathLabel(project)
+              return (
+                <button
+                  key={project.id}
+                  type="button"
+                  onClick={() => void selectProject(project)}
+                  className={`flex min-h-[34px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left transition-colors ${
+                    active
+                      ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
+                      : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                  }`}
+                >
+                  <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[12px] font-semibold">{project.name}</span>
+                    {pathLabel && (
+                      <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
+                        {pathLabel}
+                      </span>
+                    )}
+                  </span>
+                  {active && <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="px-2 py-2.5 text-[12px] leading-5 text-neutral-400 dark:text-neutral-500">
+            {projectSearchQuery.trim() ? t.chatNoMatchingProjects : t.chatNoRecentProjects}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-0.5 border-t border-neutral-200/80 pt-0.5 dark:border-neutral-800">
+        {selectedProject && (
+          <button
+            type="button"
+            onClick={() => void selectProject(null)}
+            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+          >
+            <Folder size={14} strokeWidth={1.75} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{t.chatLeaveProject}</span>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => void createBlankProject()}
+          disabled={projectCreating}
+          className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
+        >
+          <Plus size={14} strokeWidth={1.8} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
+          <span className="min-w-0 flex-1 truncate">
+            {projectCreating ? t.chatAddingProject : t.chatNewBlankProject}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => void createProjectFromFolder()}
+          disabled={projectCreating}
+          className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
+        >
+          <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
+          <span className="min-w-0 flex-1 truncate">{t.chatUseExistingFolder}</span>
+        </button>
+      </div>
+    </>
+  )
 
   return (
     <div className={wrapperClass}>
@@ -1325,7 +1528,7 @@ export function InputBar({
           <>
             <div className="fixed inset-0 z-30" onClick={() => setToolPanelOpen(false)} aria-hidden />
             <div
-              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-hidden rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] shadow-[0_10px_28px_rgba(0,0,0,0.14)] dark:border-neutral-700 dark:bg-neutral-900 ${projectPanelPlacementClass}`}
+              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-hidden kv-menu ${projectPanelPlacementClass}`}
               style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
               data-tauri-drag-region="false"
             >
@@ -1341,13 +1544,13 @@ export function InputBar({
                         onOpenSkillSettings()
                       }}
                     >
-                      管理
+                      {t.chatManage}
                     </Button>
                   )}
                 </div>
                 <div className="text-[11px] leading-4 text-neutral-600 dark:text-neutral-300">
                   <span className="text-neutral-500 dark:text-neutral-400">
-                    已启用 {enabledSkills.length} 个
+                    {t.chatSkillsEnabledCount.replace('{n}', String(enabledSkills.length))}
                   </span>
                   {enabledSkills.length > 0 && (
                     <>
@@ -1376,7 +1579,7 @@ export function InputBar({
         )}
         {slashPanelOpen && (
           <div
-            className={`chat-motion-popover absolute z-40 overflow-hidden rounded-lg border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-0.5 font-sans shadow-[0_6px_18px_-16px_rgba(0,0,0,0.2),0_1px_4px_rgba(0,0,0,0.05)] dark:border-neutral-700 dark:bg-neutral-900 ${slashPanelPlacementClass}`}
+            className={`chat-motion-popover absolute z-40 overflow-hidden kv-menu font-sans ${slashPanelPlacementClass}`}
             style={{
               ['--chat-popover-origin' as string]: slashPanelOrigin,
               ['--chat-popover-start-y' as string]: '0px',
@@ -1428,7 +1631,7 @@ export function InputBar({
                 <div className="flex h-[26px] items-center px-2 text-[11px] font-medium text-neutral-400 dark:text-neutral-500">
                   {usesExternalRuntime
                     ? (externalCliSlashLoading
-                      ? '正在加载 CLI 命令…'
+                      ? t.chatLoadingCliCommands
                       : externalCliSlashHint ?? 'No matching CLI command')
                     : 'No matching command'}
                 </div>
@@ -1436,137 +1639,72 @@ export function InputBar({
             </div>
           </div>
         )}
-        {projectMenuOpen && projectEntryEnabled && (
-          <>
-            <div
-              className="fixed inset-0 z-30"
-              onClick={closeProjectMenu}
-              aria-hidden
-            />
-            <div
-              className={`chat-motion-popover absolute inset-x-0 z-40 overflow-visible rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${projectPanelPlacementClass}`}
-              style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
-              data-tauri-drag-region="false"
-            >
-              <div className="flex h-7 items-center gap-1.5 rounded-md px-2 text-neutral-500 dark:text-neutral-400">
-                <Search size={14} strokeWidth={1.8} className="shrink-0" />
-                <input
-                  value={projectSearchQuery}
-                  onChange={(event) => setProjectSearchQuery(event.target.value)}
-                  placeholder="搜索项目"
-                  className="min-w-0 flex-1 border-0 bg-transparent text-[12px] font-semibold text-neutral-800 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500"
-                />
-              </div>
-
-              <div className="chat-popover-scroll mt-0.5 max-h-48 overflow-y-auto">
-                {projectOptionsLoading ? (
-                  <div className="px-2 py-2.5 text-[12px] text-neutral-400 dark:text-neutral-500">
-                    正在加载项目…
-                  </div>
-                ) : projectOptionsError ? (
-                  <div className="px-2 py-2 text-[12px] text-red-500 dark:text-red-400">
-                    {projectOptionsError}
-                  </div>
-                ) : visibleProjectOptions.length > 0 ? (
-                  <div className="py-1">
-                    {visibleProjectOptions.map((project) => {
-                      const active = selectedProject?.id === project.id
-                      const pathLabel = projectPathLabel(project)
-                      return (
-                        <button
-                          key={project.id}
-                          type="button"
-                          onClick={() => void selectProject(project)}
-                          className={`flex min-h-[34px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left transition-colors ${
-                            active
-                              ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
-                              : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
-                          }`}
-                        >
-                          <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[12px] font-semibold">{project.name}</span>
-                            {pathLabel && (
-                              <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
-                                {pathLabel}
-                              </span>
-                            )}
-                          </span>
-                          {active && <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />}
-                        </button>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-2 py-2.5 text-[12px] leading-5 text-neutral-400 dark:text-neutral-500">
-                    {projectSearchQuery.trim() ? '没有匹配的项目' : '还没有最近项目'}
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-0.5 border-t border-neutral-200/80 pt-0.5 dark:border-neutral-800">
-                {selectedProject && (
-                  <button
-                    type="button"
-                    onClick={() => void selectProject(null)}
-                    className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
-                  >
-                    <Folder size={14} strokeWidth={1.75} className="shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">退出项目工作</span>
-                  </button>
-                )}
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setProjectCreateMenuOpen((open) => !open)}
-                    disabled={projectCreating}
-                    className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold transition-colors disabled:cursor-default disabled:opacity-50 ${
-                      projectCreateMenuOpen
-                        ? 'bg-neutral-100 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
-                        : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-100 dark:hover:bg-neutral-800'
-                    }`}
-                    aria-haspopup="menu"
-                    aria-expanded={projectCreateMenuOpen}
-                  >
-                    <FolderPlus size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {projectCreating ? '正在添加…' : '添加新项目'}
-                    </span>
-                    <ChevronRight size={13} strokeWidth={1.9} className="shrink-0 text-neutral-400" />
-                  </button>
-                  {projectCreateMenuOpen && (
+        {/* ① 状态条：「你在哪 + 在做什么 + 改了多少」—— 项目/集、当前 todo、diff 徽标。 */}
+        {(statusBarVisible || todoBarVisible || gitStatusEnabled) && (
+          <div className="chat-composer-status" data-tauri-drag-region="false">
+            {statusBarVisible && effectiveProject && (
+              <div className="relative min-w-0">
+                <button
+                  type="button"
+                  onClick={toggleProjectMenu}
+                  disabled={disabled}
+                  className="chat-composer-status-item"
+                  title={t.chatProjectChip.replace('{name}', effectiveProject.name)}
+                  aria-haspopup="menu"
+                  aria-expanded={projectMenuOpen}
+                >
+                  <Folder strokeWidth={1.75} />
+                  <span className="min-w-0 truncate">{effectiveProject.name}</span>
+                </button>
+                {projectMenuOpen && projectEntryEnabled && (
+                  <>
                     <div
-                      className="absolute left-0 top-full z-50 mt-1 w-[152px] rounded-lg border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 sm:bottom-0 sm:left-full sm:top-auto sm:mt-0 sm:ml-1"
-                      role="menu"
+                      className="fixed inset-0 z-30"
+                      onClick={closeProjectMenu}
+                      aria-hidden
+                    />
+                    <div
+                      className={`chat-motion-popover absolute left-0 z-50 w-[min(260px,calc(100vw-24px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
+                      style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
+                      data-tauri-drag-region="false"
                     >
-                      <button
-                        type="button"
-                        onClick={() => void createBlankProject()}
-                        disabled={projectCreating}
-                        className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
-                      >
-                        <Plus size={14} strokeWidth={1.8} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-                        <span className="min-w-0 flex-1 truncate">新建空白项目</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void createProjectFromFolder()}
-                        disabled={projectCreating}
-                        className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[12px] font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:cursor-default disabled:opacity-50 dark:text-neutral-100 dark:hover:bg-neutral-800"
-                      >
-                        <Folder size={14} strokeWidth={1.75} className="shrink-0 text-neutral-600 dark:text-neutral-300" />
-                        <span className="min-w-0 flex-1 truncate">使用现有文件夹</span>
-                      </button>
+                      {projectMenuBody}
                     </div>
-                  )}
-                </div>
+                  </>
+                )}
               </div>
-            </div>
-          </>
+            )}
+            {statusBarVisible && effectiveSet && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (disabled || !onSelectSet) return
+                  void onSelectSet(null)
+                }}
+                disabled={disabled || !onSelectSet}
+                className="chat-composer-status-item"
+                title={t.chatSetChipExit.replace('{name}', effectiveSet.name)}
+              >
+                <Layers strokeWidth={1.75} />
+                <span className="min-w-0 truncate">{effectiveSet.name}</span>
+              </button>
+            )}
+            {todoBarVisible && (
+              <AgentTodoIndicator todoState={agentTodoState} placement="status" />
+            )}
+            {gitStatusEnabled && gitWorkdir && gitLang && onOpenGitPanel && (
+              <GitDiffChip
+                workdir={gitWorkdir}
+                lang={gitLang}
+                onOpenGitPanel={onOpenGitPanel}
+              />
+            )}
+          </div>
         )}
+
         <div
           data-chat-composer="true"
-          className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-[28px] border px-3 py-2.5 transition-[box-shadow,border-color] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
+          className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-xl border px-3 py-2 transition-[box-shadow,border-color] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
             dragActive
               ? 'border-[#e8a090] shadow-[0_2px_12px_rgba(0,0,0,0.06)] ring-2 ring-[#e8a090]/25 dark:border-[#e8a090] dark:shadow-none'
               : agentPlanActive
@@ -1578,7 +1716,7 @@ export function InputBar({
         >
           {dragActive && (
             <div className="chat-motion-fade-up mb-2 rounded-2xl border border-dashed border-[#e8a090]/70 bg-[#e8a090]/10 px-3 py-2 text-center text-[13px] font-medium text-[#a35f51] dark:text-[#f1b4a7]">
-              松开即可添加附件
+              {t.chatDropToAttach}
             </div>
           )}
           {attachments.length > 0 && (
@@ -1595,31 +1733,109 @@ export function InputBar({
               {attachmentError}
             </div>
           )}
+          {quotes.length > 0 && (
+            <div className="chat-motion-fade-up mb-2 flex flex-col gap-1.5">
+              {quotes.map((q, i) => (
+                <div key={i} className="kv-quote-chip">
+                  <TextQuote size={14} className="kv-quote-chip-icon" />
+                  <span className="kv-quote-chip-text">{q}</span>
+                  <button
+                    type="button"
+                    className="kv-quote-chip-remove"
+                    onClick={() => setQuotes((prev) => prev.filter((_, idx) => idx !== i))}
+                    aria-label={t.chatRemoveQuote}
+                    data-tauri-drag-region="false"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {(sendDisabledReason || toolStatusHint) && !attachmentError && (
             <div className="chat-motion-fade-up mb-2 px-1 text-[12px] text-amber-600 dark:text-amber-300">
               {sendDisabledReason || toolStatusHint}
             </div>
           )}
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={handleInput}
-            onPaste={(e) => void handlePaste(e)}
-            onKeyDown={handleKeyDown}
-            onSelect={handleSelect}
-            placeholder={
-              usesExternalRuntime
-                ? `${cliAgentLabel} 命令，输入 / 补全`
-                : 'Ask me anything...'
-            }
-            rows={1}
-            className="block max-h-40 min-h-[28px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent px-1 py-1.5 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
-          />
-          <div className="mt-1.5 flex items-center gap-1">
+          {/* 输入行自成定位上下文。发送键靠 inset-y-0 + my-auto 求垂直居中，而这是按
+              **最近的定位祖先**算的：挂在 shell 上时，上面的附件 / 引用 / 提示条的高度
+              也会被算进去——加一张引用卡片，按钮就往上飘半张卡片，正好落到引用卡右下角。
+              把它和 textarea 圈进同一个 relative 行，居中就只按输入行算。
+              `-mr-3 pr-3`：让本行的 padding box 右缘与 shell 的 padding box 右缘重合，
+              这样下面的 `right-2` 和改动前落在同一像素（shell 的 px-3 不随容器查询变，
+              这 12px 是常量）。垂直方向仍旧不写死数值——shell 的 py 在容器查询里会变。 */}
+          <div className="relative -mr-3 pr-3">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInput}
+              onPaste={(e) => void handlePaste(e)}
+              onKeyDown={handleKeyDown}
+              onSelect={handleSelect}
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={
+                usesExternalRuntime
+                  ? t.chatCliCommandPlaceholder.replace('{agent}', cliAgentLabel)
+                  : 'Ask me anything...'
+              }
+              rows={1}
+              /* 宽度用 calc 收 28px（= 发送键 28 宽 + right-2 的 8 − 与滚动条留的 4px 呼吸）而不是
+                 w-full + pr-*：滚动条长在**盒子右边缘**，padding 挡不住它，只有把盒子本身收窄
+                 才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
+                 不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
+                 custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
+              className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
+            />
+
+            {/* 发送 / 停止：绝对定位在输入行右侧。两按钮共存于同一槽位，
+                按 cancelVisible 做 opacity+scale crossfade。 */}
+            <div className="chat-composer-send-slot absolute inset-y-0 right-2 my-auto h-7 w-7">
+              <button
+                type="button"
+                onClick={handleSend}
+                disabled={!canSend}
+                tabIndex={-1}
+                title={sendDisabledReason || (canSend ? t.chatSend : t.chatSendHintEmpty)}
+                aria-label={sendDisabledReason || t.chatSend}
+                aria-hidden={cancelVisible && !!onCancel}
+                className={`chat-composer-send absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
+                  cancelVisible && onCancel
+                    ? 'pointer-events-none scale-90 opacity-0'
+                    : 'opacity-100'
+                } ${canSend ? 'is-ready' : ''}`}
+              >
+                <ArrowUp size={16} strokeWidth={2.25} />
+              </button>
+              {onCancel ? (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  disabled={cancelling}
+                  tabIndex={cancelVisible ? undefined : -1}
+                  aria-hidden={!cancelVisible}
+                  className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
+                    cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
+                  }`}
+                  title={cancelling ? t.chatStopping : t.chatStopGenerating}
+                  aria-label={cancelling ? t.chatStopping : t.chatStopGeneratingShort}
+                >
+                  <Square size={12} strokeWidth={2.4} fill="currentColor" />
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        {/* ③ 功能栏：移出输入框，裸露坐在窗口底色上（无背景无边框）。
+            这样输入框高度只由文本决定，能收到单行 —— 原来图标在盒内，盒子被撑到 ~100px。 */}
+        <div className="chat-composer-tools" data-tauri-drag-region="false">
             <IconButton
               size="sm"
               shape="circle"
-              label="添加附件"
+              label={t.chatAddAttachment}
               onClick={() => void openAttachmentPicker()}
               disabled={disabled}
               tabIndex={-1}
@@ -1628,7 +1844,7 @@ export function InputBar({
               <Plus size={18} strokeWidth={1.75} />
             </IconButton>
 
-            {onChangeKnowledgeBaseIds && onToggleWebSearch && (
+            {onChangeKnowledgeBaseIds && onSetWebSearchMode && (
               <SourcesButton
                 knowledgeBaseIds={knowledgeBaseIds}
                 onChangeKnowledgeBaseIds={onChangeKnowledgeBaseIds}
@@ -1636,37 +1852,51 @@ export function InputBar({
                 onToggleForceKnowledgeSearch={onToggleForceKnowledgeSearch}
                 mcpServers={mcpServers}
                 onToggleMcpServer={onToggleMcpServer ?? (() => {})}
-                webSearchEnabled={webSearchEnabled}
-                onToggleWebSearch={onToggleWebSearch}
+                webSearchMode={webSearchMode}
+                onSetWebSearchMode={onSetWebSearchMode}
+                builtinWebSearchSupported={builtinWebSearchSupported}
                 onOpenSettings={onOpenSettings}
                 disabled={disabled}
                 layout={layout}
-                anchorRef={innerRef}
               />
             )}
-            {projectEntryEnabled && (
-              <IconButton
-                size="sm"
-                shape="circle"
-                label={effectiveProject ? `项目 · ${effectiveProject.name}` : '进入项目工作'}
-                onClick={toggleProjectMenu}
-                disabled={disabled}
-                aria-expanded={projectMenuOpen}
-                aria-haspopup="menu"
-                className={`shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 disabled:opacity-50 dark:focus-visible:ring-neutral-600 ${
-                  projectMenuOpen
-                    ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-100'
-                    : effectiveProject
-                      ? 'text-indigo-500! dark:text-indigo-300!'
+            {/* 已选项目时这个入口移到状态条（那里是「当前上下文」的位置），
+                工具栏只在未选项目时保留「进入项目」这个动作。 */}
+            {projectEntryEnabled && !effectiveProject && (
+              <div className="relative shrink-0">
+                <IconButton
+                  size="sm"
+                  shape="circle"
+                  label={t.chatEnterProject}
+                  onClick={toggleProjectMenu}
+                  disabled={disabled}
+                  aria-expanded={projectMenuOpen}
+                  aria-haspopup="menu"
+                  className={`shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 disabled:opacity-50 dark:focus-visible:ring-neutral-600 ${
+                    projectMenuOpen
+                      ? 'bg-neutral-200 text-neutral-700 dark:bg-neutral-700 dark:text-neutral-100'
                       : ''
-                }`}
-              >
-                {effectiveProject ? (
-                  <Folder size={18} strokeWidth={1.75} />
-                ) : (
+                  }`}
+                >
                   <FolderPlus size={18} strokeWidth={1.75} />
+                </IconButton>
+                {projectMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-30"
+                      onClick={closeProjectMenu}
+                      aria-hidden
+                    />
+                    <div
+                      className={`chat-motion-popover absolute left-0 z-50 w-[min(260px,calc(100vw-24px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
+                      style={{ ['--chat-popover-origin' as string]: projectPanelOrigin }}
+                      data-tauri-drag-region="false"
+                    >
+                      {projectMenuBody}
+                    </div>
+                  </>
                 )}
-              </IconButton>
+              </div>
             )}
             {showAssistantEntry && onOpenAssistantCenter && (
               <AssistantPicker
@@ -1675,7 +1905,6 @@ export function InputBar({
                 onOpenCenter={onOpenAssistantCenter}
                 disabled={disabled}
                 layout={layout}
-                anchorRef={innerRef}
               />
             )}
 
@@ -1685,20 +1914,22 @@ export function InputBar({
                   value={replyModels}
                   onChange={(models) => void onChangeReplyModels(models)}
                   placement={layout === 'inline' ? 'down' : 'up'}
-                  anchorRef={innerRef}
                 />
               </div>
             )}
 
+            {/* Git 分支胶囊 + diff 徽标（ml-auto 把徽标顶到右侧、挨着上下文指示器）。 */}
+            {gitStatusEnabled && gitWorkdir && gitLang && onOpenGitPanel && (
+              <GitStatusPill
+                workdir={gitWorkdir}
+                lang={gitLang}
+                disabled={disabled}
+                onOpenGitPanel={onOpenGitPanel}
+              />
+            )}
+
             <div className="ml-auto flex items-center gap-1.5">
-            {/* 注入 anchorRef/placement：上下文弹层与项目/知识库/MCP 共用容器锚点与翻转方向 */}
-            {isValidElement<{ anchorRef?: RefObject<HTMLDivElement | null>; placement?: 'up' | 'down' }>(contextSlot)
-              ? cloneElement(contextSlot, {
-                  anchorRef: innerRef,
-                  placement: layout === 'inline' ? 'down' : 'up',
-                })
-              : contextSlot}
-            {modeEntryEnabled && (
+            {modeEntryEnabled && activeModeOption && (
               <div className="relative shrink-0 self-center">
                 <button
                   type="button"
@@ -1712,7 +1943,7 @@ export function InputBar({
                   } disabled:cursor-default disabled:opacity-50`}
                   aria-expanded={modeMenuOpen}
                   aria-haspopup="menu"
-                  title="切换模式 · Switch mode"
+                  title={t.chatSwitchMode}
                 >
                   <activeModeOption.icon
                     size={13}
@@ -1732,22 +1963,22 @@ export function InputBar({
                   <>
                     <div className="fixed inset-0 z-30" onClick={closeModeMenu} aria-hidden />
                     <div
-                      className={`chat-motion-popover absolute right-0 z-40 w-[min(236px,calc(100vw-32px))] overflow-visible rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${projectPanelPlacementClass}`}
+                      className={`chat-motion-popover absolute right-0 z-40 w-[min(236px,calc(100vw-32px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
                       style={{ ['--chat-popover-origin' as string]: modePanelOrigin }}
                       data-tauri-drag-region="false"
                       role="menu"
                     >
-                      {AGENT_MODE_OPTIONS.map((option) => {
-                        const active = option.mode === agentPlanMode
+                      {modeOptions.map((option) => {
+                        const active = option.value === modeValue
                         const Icon = option.icon
                         return (
                           <button
-                            key={option.mode}
+                            key={option.value}
                             type="button"
                             role="menuitemradio"
                             aria-checked={active}
-                            onClick={() => void setAgentPlanMode(option.mode)}
-                            className={`flex min-h-[30px] w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors ${
+                            onClick={() => void pickMode(option.value)}
+                            className={`kv-menu-row transition-colors ${
                               active
                                 ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
                                 : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
@@ -1756,13 +1987,15 @@ export function InputBar({
                             <Icon
                               size={14}
                               strokeWidth={1.8}
-                              className={`shrink-0 ${AGENT_MODE_PILL_CLASS[option.mode].iconColor}`}
+                              className={`shrink-0 ${MODE_PILL_CLASS[option.tone].iconColor}`}
                             />
                             <span className="min-w-0 flex-1 leading-tight">
                               <span className="block truncate text-[12px] font-semibold">{option.label}</span>
-                              <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
-                                {option.description}
-                              </span>
+                              {option.description && (
+                                <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
+                                  {option.description}
+                                </span>
+                              )}
                             </span>
                             {active && (
                               <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />
@@ -1776,50 +2009,16 @@ export function InputBar({
               </div>
             )}
 
-            {/* 发送 / 停止：两按钮共存于同一槽位，按 cancelVisible 做 opacity+scale crossfade */}
-            <div className="relative h-9 w-9 shrink-0">
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!canSend}
-                tabIndex={-1}
-                title={sendDisabledReason || (canSend ? '发送' : '输入消息后发送')}
-                aria-label={sendDisabledReason || '发送'}
-                aria-hidden={cancelVisible && !!onCancel}
-                className={`absolute inset-0 flex items-center justify-center rounded-full transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-spring)] ${
-                  cancelVisible && onCancel
-                    ? 'pointer-events-none scale-90 opacity-0'
-                    : 'opacity-100'
-                } ${
-                  canSend
-                    ? `bg-[#e8a090] text-white shadow-sm hover:bg-[#df9585] active:scale-90${
-                        cancelVisible && onCancel ? '' : ' chat-motion-soft-pulse'
-                      }`
-                    : 'bg-neutral-200 text-neutral-400 dark:bg-neutral-700 dark:text-neutral-500'
-                }`}
-              >
-                <ArrowUp size={18} strokeWidth={2.25} />
-              </button>
-              {onCancel ? (
-                <button
-                  type="button"
-                  onClick={onCancel}
-                  disabled={cancelling}
-                  tabIndex={cancelVisible ? undefined : -1}
-                  aria-hidden={!cancelVisible}
-                  className={`absolute inset-0 flex items-center justify-center rounded-full bg-neutral-900 text-white shadow-sm transition-all duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:bg-neutral-700 disabled:bg-neutral-300 disabled:text-neutral-500 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 dark:disabled:bg-neutral-700 dark:disabled:text-neutral-500 ${
-                    cancelVisible ? 'opacity-100' : 'pointer-events-none scale-90 opacity-0'
-                  }`}
-                  title={cancelling ? '正在停止' : '停止生成'}
-                  aria-label={cancelling ? '正在停止' : '停止生成'}
-                >
-                  <Square size={13} strokeWidth={2.4} fill="currentColor" />
-                </button>
-              ) : null}
-            </div>
+            {/* 注入 placement：上下文弹层贴按钮紧凑展开，仅翻转方向随 layout */}
+            {isValidElement<{ placement?: 'up' | 'down' }>(contextSlot)
+              ? cloneElement(contextSlot, {
+                  placement: layout === 'inline' ? 'down' : 'up',
+                })
+              : contextSlot}
+
+            {/* 发送 / 停止已移进输入框右端（见 textarea 同级的 chat-composer-send-slot）。 */}
             </div>
           </div>
-        </div>
       </div>
     </div>
   )

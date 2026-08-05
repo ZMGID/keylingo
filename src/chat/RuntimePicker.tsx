@@ -1,8 +1,11 @@
-import { memo, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, Check, Brain } from 'lucide-react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDown, Check, Brain, RefreshCw } from 'lucide-react'
 import { AgentIcon } from './AgentIcon'
+import { useT } from '../settings/i18n'
 import { chatApi, type DetectedExternalAgent } from './api'
 import { chatTitlebarPillButtonClass } from './platform'
+import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { AgentRuntimeConfig } from './types'
 import './runtimePicker.css'
 
@@ -12,6 +15,9 @@ interface RuntimePickerProps {
   agentRuntime: AgentRuntimeConfig
   onRuntimeChange: (runtime: AgentRuntimeConfig) => void
   conversationId?: string | null
+  // 一 agent 一对话：已有消息的会话锁定运行时来源（内置 / 本地 CLI 均不可换）。
+  // 锁定时 popover 仍可展开查看，但所有切换项 disabled 并显示提示行。
+  locked?: boolean
 }
 
 const BUILTIN: AgentRuntimeConfig = {
@@ -30,26 +36,63 @@ function externalRuntime(agentId: string, model?: string | null): AgentRuntimeCo
   }
 }
 
-function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId }: RuntimePickerProps) {
+// 胶囊显示：把裸 "Default" 映射为「自动」（不再向用户暴露内部占位名）。
+function mapDefaultLabel(label: string): string {
+  return label === 'Default' ? 'Auto' : label
+}
+
+// 胶囊只显示模型名尾巴，去掉 provider 前缀（"foo/mimo-v2.5-pro" → "mimo-v2.5-pro"），
+// 避免有意义的尾部被截断；下拉列表仍保留完整 id。
+function stripProviderPrefix(label: string): string {
+  const slash = label.lastIndexOf('/')
+  return slash >= 0 ? label.slice(slash + 1) : label
+}
+
+// 胶囊隐藏模型名里的括号补充（"kimi (kimi-for-coding)" → "kimi"），下拉列表仍保留完整名。
+function stripParenthetical(label: string): string {
+  return label.replace(/\s*\([^)]*\)\s*$/, '').trim() || label
+}
+
+function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, locked = false }: RuntimePickerProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [agents, setAgents] = useState<DetectedExternalAgent[]>([])
+  const [refreshing, setRefreshing] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuMaxH = usePopoverMaxHeight(open, menuRef, 'down', 460)
+  // 请求代际：conversationId 切换 / 手动刷新会并发发起检测，只让最新一次的结果落地
+  // （也兜住卸载后 setState）。
+  const agentsReqIdRef = useRef(0)
+
+  const loadAgents = useCallback(
+    (force: boolean) => {
+      const reqId = ++agentsReqIdRef.current
+      // 初次检测与手动刷新共用同一 in-flight 态：spinner + 「正在检测本机 CLI…」提示，
+      // 避免首探未返回时误显示「PATH 中未发现可用 CLI」。
+      setRefreshing(true)
+      return chatApi
+        .detectExternalAgents(force, conversationId)
+        .then((list) => {
+          if (agentsReqIdRef.current === reqId) setAgents(list)
+          return list
+        })
+        .catch((err) => {
+          console.error('Failed to detect external agents:', err)
+          if (agentsReqIdRef.current === reqId && !force) setAgents([])
+          return null
+        })
+        .finally(() => {
+          if (agentsReqIdRef.current === reqId) setRefreshing(false)
+        })
+    },
+    [conversationId],
+  )
 
   useEffect(() => {
-    let active = true
-    setAgents([])
-    void chatApi.detectExternalAgents(false, conversationId)
-      .then((list) => {
-        if (active) setAgents(list)
-      })
-      .catch((err) => {
-        if (!active) return
-        console.error('Failed to detect external agents:', err)
-        setAgents([])
-      })
-    return () => {
-      active = false
-    }
-  }, [conversationId])
+    // 每次 loadAgents 调用自身会先 ++reqId 使旧在途请求失效；卸载后 setState 在 React 18
+    // 是安全 no-op，无需 cleanup 递增（避免 exhaustive-deps 对 cleanup 读 ref 的告警）。
+    void loadAgents(false)
+  }, [loadAgents])
 
   const usesExternal = agentRuntime.kind === 'external' && !!agentRuntime.externalAgentId
   const availableAgents = useMemo(
@@ -59,28 +102,24 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId }: Ru
   const currentAgent = agents.find((item) => item.id === agentRuntime.externalAgentId)
 
   const label = useMemo(() => {
-    if (!usesExternal) return '内置 Agent'
-    return currentAgent?.name ?? agentRuntime.externalAgentId ?? '本地 CLI'
-  }, [agentRuntime.externalAgentId, currentAgent?.name, usesExternal])
+    if (!usesExternal) return 'Kivio Agent'
+    return currentAgent?.name ?? agentRuntime.externalAgentId ?? t.chatRuntimeLocalCli
+  }, [agentRuntime.externalAgentId, currentAgent?.name, t, usesExternal])
 
   const selectBuiltin = () => {
+    if (locked) return
     onRuntimeChange(BUILTIN)
     setOpen(false)
   }
 
   const selectExternal = (agent: DetectedExternalAgent) => {
+    if (locked) return
     if (!agent.available) return
+    // 隐式契约（D3）：后端各探测路径都把合成的 "default" 占位放在 models[0]
+    // （default_model_option / fallback_models 首项），因此这里取 [0] 即「让 CLI 用自己的默认模型」。
     const defaultModel = agent.models[0]?.id ?? 'default'
     onRuntimeChange(externalRuntime(agent.id, defaultModel))
     setOpen(false)
-  }
-
-  const selectLocalCliMode = () => {
-    if (usesExternal && currentAgent?.available) return
-    const firstAvailable = availableAgents[0]
-    if (firstAvailable) {
-      selectExternal(firstAvailable)
-    }
   }
 
   return (
@@ -116,60 +155,76 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId }: Ru
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
           <div
+            ref={menuRef}
+            style={{ maxHeight: menuMaxH, overflowY: 'auto' }}
             className="kv-runtime-picker__popover chat-motion-popover"
             role="menu"
           >
-            <div className="kv-runtime-picker__row">
-              <span className="kv-runtime-picker__label">模式</span>
-              <div className="kv-runtime-picker__seg" role="tablist">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={!usesExternal}
-                  className={`kv-runtime-picker__seg-btn${!usesExternal ? ' is-active' : ''}`}
-                  onClick={selectBuiltin}
-                >
-                  内置 Agent
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={usesExternal}
-                  disabled={availableAgents.length === 0}
-                  className={`kv-runtime-picker__seg-btn${usesExternal ? ' is-active' : ''}`}
-                  onClick={selectLocalCliMode}
-                >
-                  本地 CLI
-                </button>
+            {locked && (
+              <div className="kv-runtime-picker__locked-hint">
+                {t.chatRuntimeBoundHint}
               </div>
-            </div>
-
+            )}
             <div className="kv-runtime-picker__row">
-              <span className="kv-runtime-picker__label">代理</span>
-              {agents.length === 0 ? (
-                <span className="kv-runtime-picker__hint">正在检测本机 CLI…</span>
-              ) : availableAgents.length === 0 ? (
-                <span className="kv-runtime-picker__hint">PATH 中未发现可用 CLI</span>
-              ) : (
-                <div className="kv-runtime-picker__agent-grid" role="radiogroup">
-                  {availableAgents.map((agent) => {
-                    const active = usesExternal && agentRuntime.externalAgentId === agent.id
-                    return (
-                      <button
-                        key={agent.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        title={agent.version ?? undefined}
-                        onClick={() => selectExternal(agent)}
-                        className={`kv-runtime-picker__agent${active ? ' is-active' : ''}`}
-                      >
-                        <AgentIcon id={agent.id} size={20} />
-                        <span className="kv-runtime-picker__agent-name">{agent.name}</span>
-                      </button>
-                    )
-                  })}
-                </div>
+              <div className="kv-runtime-picker__agents-head">
+                <span className="kv-runtime-picker__label">{t.chatRuntimeAgent}</span>
+                <IconButton
+                  size="xs"
+                  variant="ghost"
+                  label={t.chatRuntimeRefresh}
+                  onClick={() => {
+                    void loadAgents(true)
+                  }}
+                  disabled={refreshing}
+                >
+                  <RefreshCw size={13} className={refreshing ? 'animate-spin' : undefined} />
+                </IconButton>
+              </div>
+              {/* Kivio 自己就是一个代理，和本机 CLI 同列平铺（原先上面还有一行「模式」分段器，
+                  内置/本地 CLI 二选一 —— 两级选择表达的是同一件事，去掉一级）。 */}
+              <div className="kv-runtime-picker__agent-grid" role="radiogroup">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!usesExternal}
+                  disabled={locked && usesExternal}
+                  onClick={selectBuiltin}
+                  className={`kv-runtime-picker__agent${!usesExternal ? ' is-active' : ''}`}
+                >
+                  <img
+                    src={KIVIO_LOGO_SRC}
+                    alt=""
+                    aria-hidden="true"
+                    className="kv-runtime-picker__builtin-logo"
+                    width={20}
+                    height={20}
+                    draggable={false}
+                  />
+                  <span className="kv-runtime-picker__agent-name">Kivio Agent</span>
+                </button>
+                {availableAgents.map((agent) => {
+                  const active = usesExternal && agentRuntime.externalAgentId === agent.id
+                  return (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      disabled={locked && !active}
+                      title={agent.version ?? undefined}
+                      onClick={() => selectExternal(agent)}
+                      className={`kv-runtime-picker__agent${active ? ' is-active' : ''}`}
+                    >
+                      <AgentIcon id={agent.id} size={20} />
+                      <span className="kv-runtime-picker__agent-name">{agent.name}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              {availableAgents.length === 0 && (
+                <span className="kv-runtime-picker__hint">
+                  {refreshing ? t.chatRuntimeDetecting : t.chatRuntimeNoneFound}
+                </span>
               )}
             </div>
           </div>
@@ -190,43 +245,167 @@ function ExternalModelSelectorBase({
   onModelChange,
   conversationId,
 }: ExternalModelSelectorProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [reasoningOpen, setReasoningOpen] = useState(false)
-  const [agents, setAgents] = useState<DetectedExternalAgent[]>([])
+  const modelMenuRef = useRef<HTMLDivElement>(null)
+  const modelMenuMaxH = usePopoverMaxHeight(open, modelMenuRef, 'down', 320)
+  // 懒查：只探选中 agent 的模型（cwd-scoped），不再拉全量列表。保留上次结果，不清空闪。
+  const [models, setModels] = useState<DetectedExternalAgent['models']>([])
+  const [reasoningOptions, setReasoningOptions] = useState<
+    NonNullable<DetectedExternalAgent['reasoningOptions']>
+  >([])
+  // kimi 等：档位随模型变（K3=low/high/max，K2.7 always_thinking=无）。按所选模型取。
+  const [reasoningByModel, setReasoningByModel] = useState<
+    Record<string, NonNullable<DetectedExternalAgent['reasoningOptions']>>
+  >({})
+  const [loading, setLoading] = useState(false)
+  // source: probed=真实探测 / fallback=探测失败降级静态表（显示"默认列表"角标 + 重试）。
+  const [source, setSource] = useState<'probed' | 'fallback'>('probed')
+  // CLI 自己当前配置的模型（codex config.toml / ACP currentModelId / claude resolved）。用于胶囊
+  // 显示真实名字并在用户未显式选择时自动同步；null = 该 CLI 无「当前」概念 → 显示「自动」。
+  const [currentModel, setCurrentModel] = useState<string | null>(null)
+  // 请求代际：agent 切换/卸载时使在途请求失效，防止旧结果覆盖新 agent 或卸载后 setState。
+  const modelsReqIdRef = useRef(0)
+  // 上次探测的 agent：仅在真正切换 agent 时清空 currentModel。模型列表刻意跨请求保留（防闪），
+  // 但 currentModel 驱动胶囊主文案——若不清，新 agent 探测期间/失败后会一直显示上个 CLI 的模型名。
+  const lastAgentIdRef = useRef<string | null>(null)
+  // 用 ref 读最新 runtime / onModelChange，避免把它们塞进 loadModels 依赖导致每次选模型重探。
+  const runtimeRef = useRef(agentRuntime)
+  runtimeRef.current = agentRuntime
+  const onModelChangeRef = useRef(onModelChange)
+  onModelChangeRef.current = onModelChange
+
+  const loadModels = useCallback(
+    (agentId: string, force?: boolean) => {
+      const reqId = ++modelsReqIdRef.current
+      setLoading(true)
+      return chatApi
+        .detectExternalAgentModels(agentId, conversationId, force)
+        .then((result) => {
+          if (modelsReqIdRef.current !== reqId) return
+          setModels(result.models)
+          setReasoningOptions(result.reasoningOptions)
+          setReasoningByModel(result.reasoningByModel ?? {})
+          setSource(result.source)
+          setCurrentModel(result.currentModel ?? null)
+          // 自动同步 CLI 当前配置：仅当用户未显式选择（externalModel 空 / 'default'）时。
+          const rt = runtimeRef.current
+          const explicitModel = !!rt.externalModel && rt.externalModel !== 'default'
+          if (explicitModel) return
+          const cur = result.currentModel
+          // 当前模型是列表里可选的真实 id（grok / codex）才回填 externalModel；claude 的 resolved
+          // model 不在别名目录里，不回填（发送仍走 CLI 默认），仅由显示层展示其名字。
+          const selectable = !!cur && result.models.some((m) => m.id === cur)
+          const nextModel = selectable ? (cur as string) : rt.externalModel ?? 'default'
+          const explicitReasoning =
+            !!rt.externalReasoning && rt.externalReasoning !== 'default'
+          // 回填当前档位：只认「确实在该模型档位列表里」的值。改前是硬编码 on/off 黑名单——
+          // 判据和真相源分了岔（真相源是 reasoningByModel / reasoningOptions），
+          // 将来哪个 CLI 真把 On/Off 当合法档位就会被误杀成「自动」。按列表判即可。
+          const probedReasoning = result.currentReasoning
+          const activeOpts =
+            (cur && result.reasoningByModel?.[cur]) || result.reasoningOptions
+          const saneReasoning =
+            probedReasoning && activeOpts.some((o) => o.id === probedReasoning)
+              ? probedReasoning
+              : null
+          const nextReasoning = !explicitReasoning && saneReasoning
+            ? saneReasoning
+            : rt.externalReasoning ?? null
+          if (nextModel !== (rt.externalModel ?? 'default') || nextReasoning !== (rt.externalReasoning ?? null)) {
+            onModelChangeRef.current(nextModel, nextReasoning)
+          }
+        })
+        .catch(() => {
+          if (modelsReqIdRef.current !== reqId) return
+          // 不再静默吞错：置为降级态，展示重试。保留上次模型列表不清空。
+          setSource('fallback')
+        })
+        .finally(() => {
+          if (modelsReqIdRef.current === reqId) setLoading(false)
+        })
+    },
+    [conversationId],
+  )
 
   useEffect(() => {
-    let active = true
-    setAgents([])
-    void chatApi.detectExternalAgents(false, conversationId)
-      .then((list) => {
-        if (active) setAgents(list)
-      })
-      .catch(() => {
-        if (active) setAgents([])
-      })
-    return () => {
-      active = false
+    const agentId = agentRuntime.externalAgentId ?? null
+    if (lastAgentIdRef.current !== agentId) {
+      lastAgentIdRef.current = agentId
+      // 换 agent：旧 CLI 的 currentModel 立刻失效（探测中显示「获取中…」而非上个 CLI 的模型名）。
+      setCurrentModel(null)
+      setReasoningByModel({})
     }
-  }, [conversationId])
+    if (!agentId) {
+      // 失效在途请求，防止旧结果落到已清空的状态上。
+      modelsReqIdRef.current++
+      setModels([])
+      setReasoningOptions([])
+      setReasoningByModel({})
+      setSource('probed')
+      return
+    }
+    // loadModels 自身先 ++reqId 使旧在途请求失效（agent/conversation 变更时 effect 重跑即覆盖）。
+    void loadModels(agentId)
+  }, [agentRuntime.externalAgentId, loadModels])
 
-  const agent = agents.find((item) => item.id === agentRuntime.externalAgentId)
-  // Empty list means the CLI didn't report any models — render an explicit empty state instead
-  // of injecting a synthetic "Default" that the backend normalizes away / ignores anyway.
-  const models = useMemo(() => agent?.models ?? [], [agent])
-  const reasoningOptions = useMemo(() => agent?.reasoningOptions ?? [], [agent])
-  const currentReasoning = agentRuntime.externalReasoning ?? 'default'
-  const currentReasoningLabel =
-    reasoningOptions.find((o) => o.id === currentReasoning)?.label ?? currentReasoning
+  // 当前展示用的 effort 列表：优先按所选/当前模型从 reasoningByModel 取（kimi 按模型变档）。
+  const activeReasoningOptions = useMemo(() => {
+    const modelId =
+      agentRuntime.externalModel && agentRuntime.externalModel !== 'default'
+        ? agentRuntime.externalModel
+        : currentModel
+    if (modelId && Object.prototype.hasOwnProperty.call(reasoningByModel, modelId)) {
+      return reasoningByModel[modelId] ?? []
+    }
+    // 过滤 ACP 误报的 On-only 开关，避免胶囊显示「On」。
+    const filtered = reasoningOptions.filter(
+      (o) => !['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(o.id.toLowerCase()),
+    )
+    // 若过滤后只剩空、或原来就只有开关——不显示档位。
+    if (
+      reasoningOptions.length > 0 &&
+      reasoningOptions.every((o) =>
+        ['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(o.id.toLowerCase()),
+      )
+    ) {
+      return []
+    }
+    return filtered.length > 0 ? filtered : reasoningOptions
+  }, [agentRuntime.externalModel, currentModel, reasoningByModel, reasoningOptions])
+
+  const reasoningPillValue = agentRuntime.externalReasoning ?? 'default'
+  const currentReasoningLabel = useMemo(() => {
+    const opt = activeReasoningOptions.find((o) => o.id === reasoningPillValue)
+    const raw = opt?.label ?? reasoningPillValue
+    // 未显式选择推理等级（default）时显示「自动」，不再暴露裸 "Default"。
+    // 残留的 on/off 也当自动（不是档位名）。
+    if (
+      raw === 'Default' ||
+      reasoningPillValue === 'default' ||
+      ['on', 'off', 'true', 'false'].includes(String(reasoningPillValue).toLowerCase())
+    ) {
+      return 'Auto'
+    }
+    return raw
+  }, [activeReasoningOptions, reasoningPillValue])
   const displayName = useMemo(() => {
     const currentId = agentRuntime.externalModel
-    const selected = currentId ? models.find((item) => item.id === currentId) : undefined
-    // On the pill, show the model name only — drop the provider prefix (e.g.
-    // "zmfooogreencloud/mimo-v2.5-pro" → "mimo-v2.5-pro") so the meaningful tail isn't truncated.
-    // The dropdown keeps the full id.
-    const rawLabel = selected?.label ?? currentId ?? '选择模型'
-    const slash = rawLabel.lastIndexOf('/')
-    return slash >= 0 ? rawLabel.slice(slash + 1) : rawLabel
-  }, [agentRuntime.externalModel, models])
+    const explicit = !!currentId && currentId !== 'default'
+    // 显式选择：显示所选模型 label（探测中列表未到时退回原始 id）。
+    if (explicit) {
+      const selected = models.find((item) => item.id === currentId)
+      return stripProviderPrefix(stripParenthetical(mapDefaultLabel(selected?.label ?? currentId)))
+    }
+    // 未显式选择：优先显示 CLI 当前配置模型的真实名字；探测中显示「获取中…」；都没有则「自动」。
+    if (currentModel) {
+      const inList = models.find((item) => item.id === currentModel)
+      return stripProviderPrefix(stripParenthetical(mapDefaultLabel(inList?.label ?? currentModel)))
+    }
+    if (loading) return t.chatRuntimeFetching
+    return 'Auto'
+  }, [agentRuntime.externalModel, models, currentModel, loading, t])
 
   if (agentRuntime.kind !== 'external' || !agentRuntime.externalAgentId) {
     return null
@@ -240,21 +419,42 @@ function ExternalModelSelectorBase({
           onClick={() => setOpen(!open)}
           className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
         >
-          <span className="max-w-[140px] truncate font-medium text-neutral-800 dark:text-neutral-200">
+          {/* ponytail: 探测中复用已有的 shimmer 文字动画，不再转圈；chevron 常驻避免宽度跳动 */}
+          <span
+            className={`max-w-[140px] truncate font-medium ${loading ? 'reasoning-shimmer-text' : 'text-neutral-800 dark:text-neutral-200'}`}
+          >
             {displayName}
           </span>
           <ChevronDown
             size={15}
-            className={`shrink-0 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`}
+            className={`shrink-0 transition-transform ${loading ? 'text-neutral-300 dark:text-neutral-600' : 'text-neutral-400'} ${open ? 'rotate-180' : ''}`}
           />
         </button>
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-            <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 max-h-[min(320px,50vh)] min-w-[200px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
+            <div ref={modelMenuRef} style={{ maxHeight: modelMenuMaxH }} className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[200px] overflow-y-auto kv-menu">
+              {source === 'fallback' && (
+                <div className="kv-runtime-picker__fallback mx-1 my-1">
+                  <span>{t.chatRuntimeProbeFailed}</span>
+                  <button
+                    type="button"
+                    className="kv-runtime-picker__fallback-retry"
+                    disabled={loading}
+                    onClick={() => {
+                      const agentId = agentRuntime.externalAgentId
+                      if (agentId) void loadModels(agentId, true)
+                    }}
+                  >
+                    {t.chatRetry}
+                  </button>
+                </div>
+              )}
               {models.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-neutral-500 dark:text-neutral-400">
-                  该 CLI 未上报可用模型
+                <div
+                  className={`kv-menu-row ${loading ? 'reasoning-shimmer-text' : 'text-neutral-500 dark:text-neutral-400'}`}
+                >
+                  {loading ? t.chatRuntimeProbingModels : t.chatRuntimeNoModels}
                 </div>
               ) : (
                 models.map((model) => (
@@ -262,14 +462,29 @@ function ExternalModelSelectorBase({
                     key={model.id}
                     type="button"
                     onClick={() => {
-                      onModelChange(model.id)
+                      // 换模型时 effort 可能变（kimi K3 有 low/high/max，K2.7 无）。
+                      // 旧值是 on/off 或不在新列表里 → 清掉或落到 high。
+                      const efforts = reasoningByModel[model.id]
+                      const cur = agentRuntime.externalReasoning
+                      // 同上：只看「在不在新模型的档位列表里」，不再额外拉黑 on/off。
+                      const curOk =
+                        !!cur &&
+                        cur !== 'default' &&
+                        (!efforts || efforts.some((o) => o.id === cur))
+                      let nextReasoning: string | null = curOk ? (cur as string) : null
+                      if (!curOk && efforts && efforts.length > 0) {
+                        nextReasoning =
+                          efforts.find((o) => o.id === 'high')?.id ?? efforts[0]?.id ?? null
+                      }
+                      if (efforts && efforts.length === 0) nextReasoning = null
+                      onModelChange(model.id, nextReasoning)
                       setOpen(false)
                     }}
-                    className={`block w-full px-3 py-2 text-left text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800 ${
+                    className={`kv-menu-row text-neutral-700 hover:bg-black/[0.05] dark:text-neutral-200 dark:hover:bg-white/[0.07] ${
                       agentRuntime.externalModel === model.id ? 'font-semibold' : ''
                     }`}
                   >
-                    {model.label}
+                    {model.id === 'default' ? t.chatRuntimeAutoCliDefault : model.label}
                   </button>
                 ))
               )}
@@ -279,14 +494,14 @@ function ExternalModelSelectorBase({
       </div>
 
       {/* Standalone thinking-level pill, mirroring the builtin ThinkingLevelSelector. */}
-      {reasoningOptions.length > 0 && (
+      {activeReasoningOptions.length > 0 && (
         <div className="relative shrink-0" data-tauri-drag-region="false">
           <button
             type="button"
             onClick={() => setReasoningOpen(!reasoningOpen)}
             className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
-            title={`思考等级：${currentReasoningLabel}`}
-            aria-label={`思考等级：${currentReasoningLabel}`}
+            title={t.chatThinkingLevel.replace('{level}', currentReasoningLabel)}
+            aria-label={t.chatThinkingLevel.replace('{level}', currentReasoningLabel)}
           >
             <Brain size={15} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
             <span className="chat-thinking-level-label max-w-[64px] truncate font-medium text-neutral-800 dark:text-neutral-200">
@@ -304,9 +519,9 @@ function ExternalModelSelectorBase({
                 onClick={() => setReasoningOpen(false)}
                 aria-hidden
               />
-              <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[160px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white py-1 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
-                {reasoningOptions.map((option) => {
-                  const active = option.id === currentReasoning
+              <div className="chat-model-selector-menu chat-motion-popover absolute left-0 top-full z-20 mt-2 min-w-[160px] overflow-y-auto kv-menu">
+                {activeReasoningOptions.map((option) => {
+                  const active = option.id === reasoningPillValue
                   return (
                     <button
                       key={option.id}
@@ -315,13 +530,15 @@ function ExternalModelSelectorBase({
                         onModelChange(agentRuntime.externalModel ?? 'default', option.id)
                         setReasoningOpen(false)
                       }}
-                      className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors ${
+                      className={`kv-menu-row justify-between transition-colors ${
                         active
                           ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
                           : 'text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:hover:bg-neutral-800/80'
                       }`}
                     >
-                      <span className="min-w-0 truncate">{option.label}</span>
+                      <span className="min-w-0 truncate">
+                        {option.id === 'default' ? t.chatRuntimeAutoCliDefault : option.label}
+                      </span>
                       {active && <Check size={15} className="shrink-0 text-neutral-500" />}
                     </button>
                   )

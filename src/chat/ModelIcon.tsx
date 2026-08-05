@@ -20,6 +20,39 @@ import Minimax from '@lobehub/icons/es/Minimax/components/Color'
 import Cohere from '@lobehub/icons/es/Cohere/components/Color'
 import Microsoft from '@lobehub/icons/es/Microsoft/components/Color'
 import Stepfun from '@lobehub/icons/es/Stepfun/components/Color'
+// Provider-only brands (no model-id counterpart above).
+import OpenRouter from '@lobehub/icons/es/OpenRouter/components/Mono'
+import SiliconCloud from '@lobehub/icons/es/SiliconCloud/components/Color'
+import Ollama from '@lobehub/icons/es/Ollama/components/Mono'
+import Google from '@lobehub/icons/es/Google/components/Color'
+import Nvidia from '@lobehub/icons/es/Nvidia/components/Color'
+import Groq from '@lobehub/icons/es/Groq/components/Mono'
+import Together from '@lobehub/icons/es/Together/components/Color'
+import Fireworks from '@lobehub/icons/es/Fireworks/components/Color'
+import Perplexity from '@lobehub/icons/es/Perplexity/components/Color'
+import Azure from '@lobehub/icons/es/Azure/components/Color'
+import Volcengine from '@lobehub/icons/es/Volcengine/components/Color'
+import Bailian from '@lobehub/icons/es/Bailian/components/Color'
+import Baichuan from '@lobehub/icons/es/Baichuan/components/Color'
+import Hunyuan from '@lobehub/icons/es/Hunyuan/components/Color'
+import Spark from '@lobehub/icons/es/Spark/components/Color'
+import ModelScope from '@lobehub/icons/es/ModelScope/components/Color'
+import GiteeAI from '@lobehub/icons/es/GiteeAI/components/Mono'
+import Novita from '@lobehub/icons/es/Novita/components/Color'
+import PPIO from '@lobehub/icons/es/PPIO/components/Color'
+import Infinigence from '@lobehub/icons/es/Infinigence/components/Color'
+import DeepInfra from '@lobehub/icons/es/DeepInfra/components/Color'
+import Cerebras from '@lobehub/icons/es/Cerebras/components/Color'
+import Hyperbolic from '@lobehub/icons/es/Hyperbolic/components/Color'
+import LmStudio from '@lobehub/icons/es/LmStudio/components/Mono'
+import Vllm from '@lobehub/icons/es/Vllm/components/Color'
+import Xinference from '@lobehub/icons/es/Xinference/components/Color'
+import Github from '@lobehub/icons/es/Github/components/Mono'
+import Ai302 from '@lobehub/icons/es/Ai302/components/Color'
+import AiHubMix from '@lobehub/icons/es/AiHubMix/components/Color'
+import SenseNova from '@lobehub/icons/es/SenseNova/components/Color'
+import Jina from '@lobehub/icons/es/Jina/components/Mono'
+import Voyage from '@lobehub/icons/es/Voyage/components/Color'
 
 // lobehub leaf icons declare `size?: string | number`; widen via a loose cast so the
 // map stays typed without fighting their prop types.
@@ -85,3 +118,146 @@ export function ModelIcon({ model, size = 18, className }: ModelIconProps) {
 
 // eslint-disable-next-line react-refresh/only-export-components -- test-only helper
 export { matchGlyph as _matchGlyphForTest }
+
+// 供应商图标注册表。key 即持久化到设置里的图标标识（settings.providerIcons）。
+// eslint-disable-next-line react-refresh/only-export-components -- 图标表与组件同源，拆文件只为 HMR 不值当
+export const PROVIDER_BRANDS: Record<string, Glyph> = {
+  OpenAI: G(OpenAI),
+  Claude: G(Claude),
+  Gemini: G(Gemini),
+  Google: G(Google),
+  DeepSeek: G(DeepSeek),
+  Qwen: G(Qwen),
+  ChatGLM: G(ChatGLM),
+  Moonshot: G(Moonshot),
+  Grok: G(Grok),
+  Mistral: G(Mistral),
+  Meta: G(Meta),
+  Cohere: G(Cohere),
+  Minimax: G(Minimax),
+  Stepfun: G(Stepfun),
+  Doubao: G(Doubao),
+  Wenxin: G(Wenxin),
+  Yi: G(Yi),
+  Microsoft: G(Microsoft),
+  Gemma: G(Gemma),
+  OpenRouter: G(OpenRouter),
+  SiliconCloud: G(SiliconCloud),
+  Ollama: G(Ollama),
+  Nvidia: G(Nvidia),
+  Groq: G(Groq),
+  Together: G(Together),
+  Fireworks: G(Fireworks),
+  Perplexity: G(Perplexity),
+  Azure: G(Azure),
+  Volcengine: G(Volcengine),
+  Bailian: G(Bailian),
+  Baichuan: G(Baichuan),
+  Hunyuan: G(Hunyuan),
+  Spark: G(Spark),
+  ModelScope: G(ModelScope),
+  GiteeAI: G(GiteeAI),
+  Novita: G(Novita),
+  PPIO: G(PPIO),
+  Infinigence: G(Infinigence),
+  DeepInfra: G(DeepInfra),
+  Cerebras: G(Cerebras),
+  Hyperbolic: G(Hyperbolic),
+  LmStudio: G(LmStudio),
+  Vllm: G(Vllm),
+  Xinference: G(Xinference),
+  Github: G(Github),
+  Ai302: G(Ai302),
+  AiHubMix: G(AiHubMix),
+  SenseNova: G(SenseNova),
+  Jina: G(Jina),
+  Voyage: G(Voyage),
+}
+
+// 自动匹配：先按 baseUrl 的域名，再按名字。用户改名成「小白」也能靠域名认出来。
+const PROVIDER_ICON_MAP: Array<[RegExp, string]> = [
+  [/openrouter/, 'OpenRouter'],
+  [/siliconflow|siliconcloud|硅基/, 'SiliconCloud'],
+  [/ollama/, 'Ollama'],
+  [/bigmodel|zhipu|glm|智谱/, 'ChatGLM'],
+  [/deepseek/, 'DeepSeek'],
+  [/moonshot|kimi/, 'Moonshot'],
+  [/anthropic|claude/, 'Claude'],
+  [/generativelanguage|googleapis|aistudio|\bgoogle\b|gemini/, 'Google'],
+  [/nvidia|英伟达/, 'Nvidia'],
+  [/groq/, 'Groq'],
+  [/together/, 'Together'],
+  [/fireworks/, 'Fireworks'],
+  [/perplexity/, 'Perplexity'],
+  [/azure/, 'Azure'],
+  [/volces|volcengine|ark\.cn|doubao|火山|豆包/, 'Volcengine'],
+  [/dashscope|aliyun|bailian|百炼|通义|qwen/, 'Bailian'],
+  [/baichuan|百川/, 'Baichuan'],
+  [/hunyuan|混元|tencent/, 'Hunyuan'],
+  [/xf-yun|iflytek|spark|讯飞|星火/, 'Spark'],
+  [/modelscope|魔搭/, 'ModelScope'],
+  [/gitee/, 'GiteeAI'],
+  [/novita/, 'Novita'],
+  [/ppio|派欧/, 'PPIO'],
+  [/infini|infinigence|无问/, 'Infinigence'],
+  [/deepinfra/, 'DeepInfra'],
+  [/cerebras/, 'Cerebras'],
+  [/hyperbolic/, 'Hyperbolic'],
+  [/lmstudio|lm-studio|127\.0\.0\.1:1234|localhost:1234/, 'LmStudio'],
+  [/vllm/, 'Vllm'],
+  [/xinference/, 'Xinference'],
+  [/github/, 'Github'],
+  [/302\.ai/, 'Ai302'],
+  [/aihubmix/, 'AiHubMix'],
+  [/sensenova|sensetime|商汤/, 'SenseNova'],
+  [/jina/, 'Jina'],
+  [/voyage/, 'Voyage'],
+  [/minimax/, 'Minimax'],
+  [/stepfun|阶跃/, 'Stepfun'],
+  [/mistral/, 'Mistral'],
+  [/cohere/, 'Cohere'],
+  [/x\.ai|grok/, 'Grok'],
+  [/openai/, 'OpenAI'],
+]
+
+function matchProviderGlyph(haystack: string): Glyph | null {
+  const s = haystack.toLowerCase()
+  for (const [re, key] of PROVIDER_ICON_MAP) {
+    if (re.test(s)) return PROVIDER_BRANDS[key]
+  }
+  return matchGlyph(s)
+}
+
+interface ProviderIconProps {
+  name: string
+  baseUrl?: string
+  /** 用户手选的图标 key（PROVIDER_BRANDS 的键）；未设置时自动匹配。 */
+  iconKey?: string
+  size?: number
+  className?: string
+}
+
+export function ProviderIcon({ name, baseUrl, iconKey, size = 16, className }: ProviderIconProps) {
+  const Brand = (iconKey ? PROVIDER_BRANDS[iconKey] : undefined) ?? matchProviderGlyph(`${baseUrl ?? ''} ${name}`)
+  if (Brand) {
+    return (
+      <span className={className} style={{ display: 'inline-flex', flexShrink: 0 }} aria-hidden="true">
+        <Brand size={size} />
+      </span>
+    )
+  }
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center rounded-md bg-neutral-200 text-[9px] font-semibold uppercase text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300 ${className ?? ''}`}
+      style={{ width: size, height: size }}
+      aria-hidden="true"
+    >
+      {name.trim().slice(0, 1) || '?'}
+    </span>
+  )
+}
+
+// eslint-disable-next-line react-refresh/only-export-components -- test-only helper
+export { matchProviderGlyph as _matchProviderGlyphForTest }
+// eslint-disable-next-line react-refresh/only-export-components -- test-only helper
+export const _providerIconMapKeysForTest = () => PROVIDER_ICON_MAP.map(([, key]) => key)

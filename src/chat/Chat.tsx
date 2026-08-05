@@ -1,7 +1,30 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { GitBranch, Wrench, X } from 'lucide-react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { GitBranch, PanelRight, TriangleAlert, X } from 'lucide-react'
 import { Sidebar, type ExtensionsNavItem } from './Sidebar'
+import { useChatRouting } from './hooks/useChatRouting'
+import { useExternalSendQueue } from './hooks/useExternalSendQueue'
+import { useStreamRenderFrame } from './hooks/useStreamRenderFrame'
+import { useTauriEvent } from './hooks/useTauriEvent'
+import {
+  clearConversationLocalState,
+  type ConversationLocalState,
+} from './conversationLocalState'
+import {
+  getRouteConversationId,
+  hashPath,
+  isChatAssistantCenterPath,
+  isChatKnowledgeCenterPath,
+  isChatMcpCenterPath,
+  isChatNotesPath,
+  isChatOnboardingRoute,
+  isChatPluginCenterPath,
+  isChatSettingsPath,
+  isChatSkillCenterPath,
+} from './chatRoutes'
 import { ChatImageViewer } from './ChatImageViewer'
+import { ApprovalCard } from './ApprovalCard'
+import { AskUserBlock } from './AskUserBlock'
+import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
 import { InputBar } from './InputBar'
@@ -9,10 +32,9 @@ import { ModelSelector } from './ModelSelector'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
 import { PermissionPicker } from './PermissionPicker'
+import { derivePermissionModes, useDetectedExternalAgents } from './permissionModes'
 import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
-import { WindowControls } from './WindowControls'
 import { ContextIndicator } from './ContextIndicator'
-import { AgentTodoIndicator } from './AgentTodoIndicator'
 import { isExecutableAgentPlanText } from './agentPlan'
 import {
   agentRuntimesEqual,
@@ -43,11 +65,13 @@ import type {
   ToolCallRecord,
   ThinkingLevel,
   ModelRef,
+  WebSearchMode,
 } from './types'
 import {
   api,
-  type ChatExternalSendRequest,
+  builtinWebSearchSupported,
   type ChatSessionConsentPayload,
+  type ChatHookPayload,
   type ChatStreamPayload,
   type ChatToolConfirmPayload,
   type ChatToolDefinition,
@@ -58,18 +82,30 @@ import {
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
 import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
-import type { Lang } from '../settings/i18n'
+import { i18n, LangContext, type Lang } from '../settings/i18n'
 import { estimateTokens } from '../utils/tokens'
 import {
   CHAT_MIN_SIZE_COLLAPSED,
   CHAT_MIN_SIZE_EXPANDED,
   forgetRememberedChatRoute,
   getRememberedChatSidebarCollapsed,
-  isChatOnboardingPath,
+  getRememberedDockOpen,
+  getRememberedDockTab,
+  getRememberedDockWidth,
+  getRememberedTreeExpanded,
   rememberChatSidebarCollapsed,
   rememberChatSize,
+  rememberDockOpen,
+  rememberDockTab,
+  rememberDockWidth,
+  rememberTreeExpanded,
 } from './persistence'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
+import { RightDock, type DockPreviewRequest, type DockRevealRequest, type DockTab } from './dock/RightDock'
+import { dockApi } from './dock/api'
+import { insertTextIntoComposer } from './composerInsert'
+import { onDockDiffPreviewRequest, onDockMarkdownPreviewRequest, onDockPreviewRequest, requestDockMarkdownPreview } from './dock/dockPreview'
+import { IconButton } from '../components/Button'
 import { normalizeToolCallStatus } from './toolStatus'
 import { TypewriterText } from './TypewriterText'
 import { pickRandomChatEmptyGreeting, isTauriRuntime } from './utils'
@@ -95,12 +131,15 @@ import {
   endGroup,
   ensureGroupColumn,
   flushGroups,
+  getActiveGroup,
   hasActiveGroup,
   resetGroups,
+  restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
 import { compareTimelineSegments, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
+import { applyLiveContextUsage } from './contextPanel'
 
 const AssistantCenter = lazy(() => import('./AssistantCenter').then((module) => ({
   default: module.AssistantCenter,
@@ -131,6 +170,10 @@ const PluginCenter = lazy(() => import('./PluginCenter').then((module) => ({
   default: module.PluginCenter,
 })))
 
+const NotesCenter = lazy(() => import('./NotesCenter').then((module) => ({
+  default: module.NotesCenter,
+})))
+
 const MessageList = lazy(() => import('./MessageList').then((module) => ({
   default: module.MessageList,
 })))
@@ -143,7 +186,7 @@ function MessageListLoading() {
   )
 }
 
-type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'plugins' | 'onboarding'
+type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'plugins' | 'onboarding'
 
 interface ChatProps {
   onSettingsChange: () => void
@@ -155,37 +198,128 @@ interface ChatProps {
   onContentReady?: () => void
 }
 
-function hashPath(): string {
-  return window.location.hash.replace('#', '').split('?')[0]
+/**
+ * 设置页入场容器：先静态铺好起始态（下移 + 半透明），首帧绘制之后再加 --entered 触发过渡。
+ *
+ * 为什么不能直接用 CSS animation：animation 走墙钟时间，而 SettingsShell 那棵树很大，
+ * 挂载帧的布局/绘制常吃掉上百毫秒 —— 等首帧真正画出来，动画已经跑完大半，体感就是"没有动画"
+ * （退场没这问题，它作用于已绘制的元素）。双 rAF 把起点钉在首帧之后，整段位移必定可见。
+ * 同款模式见 CompactionDivider。
+ */
+function SettingsEnterPane({ exiting, className, children }: {
+  exiting: boolean
+  className: string
+  children: ReactNode
+}) {
+  const [entered, setEntered] = useState(false)
+
+  useLayoutEffect(() => {
+    let cancelled = false
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!cancelled) setEntered(true)
+      })
+    })
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  const motion = exiting
+    ? 'chat-motion-settings-out'
+    : `chat-motion-settings-in${entered ? ' chat-motion-settings-in--entered' : ''}`
+
+  return <div className={`${motion} ${className}`}>{children}</div>
 }
 
-function isChatSettingsPath(path: string): boolean {
-  return path === 'chat/settings' || path.startsWith('chat/settings/')
+/**
+ * 记住用户在顶栏最后一次选的聊天模型与思考等级，作为新会话/空会话的默认（以用户的选择为准，
+ * 取代旧的「默认模型」设置，也不再把思考等级硬回落到 high）。仅前端偏好，存 localStorage。
+ */
+const LAST_MODEL_KEY = 'kivio.chat.lastModel'
+const LAST_THINKING_KEY = 'kivio.chat.lastThinkingLevel'
+
+function loadLastModel(): { providerId: string; model: string } | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_MODEL_KEY)
+    if (!raw) return null
+    const v = JSON.parse(raw)
+    if (v && typeof v.providerId === 'string' && typeof v.model === 'string' && v.providerId) {
+      return v
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
 }
 
-function isChatAssistantCenterPath(path: string): boolean {
-  return path === 'chat/assistants' || path.startsWith('chat/assistants/')
+function saveLastModel(providerId: string, model: string): void {
+  try {
+    if (providerId) {
+      window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify({ providerId, model }))
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
-function isChatOnboardingRoute(path: string): boolean {
-  return isChatOnboardingPath(path)
+const VALID_THINKING_LEVELS: ReadonlySet<string> = new Set([
+  'off',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+])
+
+// 网络搜索模式全局默认（任务 07-23，与思考等级同款「记住上次选择」模式）：
+// 选一次即成为新会话/未显式设置会话的默认，免去每个对话重复切换。
+const LAST_WEB_SEARCH_MODE_KEY = 'kivio.chat.lastWebSearchMode'
+const VALID_WEB_SEARCH_MODES: ReadonlySet<string> = new Set(['off', 'builtin', 'third_party'])
+
+function loadLastWebSearchMode(): WebSearchMode | undefined {
+  try {
+    const raw = window.localStorage.getItem(LAST_WEB_SEARCH_MODE_KEY)
+    return raw && VALID_WEB_SEARCH_MODES.has(raw) ? (raw as WebSearchMode) : undefined
+  } catch {
+    return undefined
+  }
 }
 
-function isChatSkillCenterPath(path: string): boolean {
-  return path === 'chat/skill' || path.startsWith('chat/skill/')
+function saveLastWebSearchMode(mode: WebSearchMode): void {
+  try {
+    window.localStorage.setItem(LAST_WEB_SEARCH_MODE_KEY, mode)
+  } catch {
+    /* ignore */
+  }
 }
 
-function isChatPluginCenterPath(path: string): boolean {
-  return path === 'chat/plugins' || path.startsWith('chat/plugins/')
+function loadLastThinkingLevel(): ThinkingLevel | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_THINKING_KEY)
+    return raw && VALID_THINKING_LEVELS.has(raw) ? (raw as ThinkingLevel) : null
+  } catch {
+    return null
+  }
 }
 
-function isChatMcpCenterPath(path: string): boolean {
-  return path === 'chat/mcp' || path.startsWith('chat/mcp/')
+function saveLastThinkingLevel(level: ThinkingLevel | null): void {
+  try {
+    if (level) window.localStorage.setItem(LAST_THINKING_KEY, level)
+    else window.localStorage.removeItem(LAST_THINKING_KEY)
+  } catch {
+    /* ignore */
+  }
 }
 
-function isChatKnowledgeCenterPath(path: string): boolean {
-  return path === 'chat/knowledge' || path.startsWith('chat/knowledge/')
-}
+
+
+
+
+
+
+
 
 function scheduleIdleTask(callback: () => void, timeout = 1200): () => void {
   const idleWindow = window as Window & {
@@ -255,16 +389,73 @@ function userPromptEventToRecord(payload: ChatUserPromptPayload): ToolCallRecord
   }
 }
 
+/** 工具名 → 自然语言动词。`path` 表示操作对象是文件路径（标题里只显示文件名）。 */
+const TOOL_APPROVAL_VERBS: Record<string, { verb: string; path?: boolean }> = {
+  write: { verb: '写入', path: true },
+  write_file: { verb: '写入', path: true },
+  edit: { verb: '修改', path: true },
+  edit_file: { verb: '修改', path: true },
+  notebookedit: { verb: '修改', path: true },
+  read: { verb: '读取', path: true },
+  read_file: { verb: '读取', path: true },
+  bash: { verb: '执行' },
+  run_command: { verb: '执行' },
+}
+
+/**
+ * 审批卡标题。后端认出操作对象（`target`）时拼「允许写入 xxx.md？」，认不出就退回工具名。
+ * 工具名小写后匹配：内置 agent 报 `write`，外部 CLI 报自己的原名（claude 的 `Write`）。
+ */
+function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
+  const name = (payload.name || '').toLowerCase()
+  // claude 的计划批准：批的是卡片上那份计划，不是「一个叫 ExitPlanMode 的工具」。
+  if (name === 'exitplanmode') return '批准这份计划，开始执行？'
+  // claude 自己要求进入计划档：先探索、出方案，这一轮不动代码。
+  if (name === 'enterplanmode') return '让 claude 先出方案，暂不改动代码？'
+  const spec = TOOL_APPROVAL_VERBS[name]
+  const target = payload.target?.trim()
+  if (!spec || !target) return `允许调用工具 ${payload.name}？`
+  const shown = spec.path ? target.split(/[\\/]/).filter(Boolean).pop() || target : target
+  return `允许${spec.verb} ${shown}？`
+}
+
+/** 计划批准卡不给「总是允许」：那等于以后每份计划都自动批、还自动替你选落在哪一档，
+ *  而用户当时想说的只是「这一份可以」。Claude Code 的计划提示也只有三选一、没有「别再问」。
+ *  `EnterPlanMode` 相反 —— 它走的是普通工具提示那套，Claude Code 在那里是给「别再问」的。 */
+function isPlanApproval(payload: ChatToolConfirmPayload): boolean {
+  return (payload.name || '').toLowerCase() === 'exitplanmode'
+}
+
+/** claude 主动要求进入计划档。批准就够（CLI 自己切档），但会话配置要跟着写成 `plan`，
+ *  否则底栏胶囊还显示「完全」而 claude 已经进只读了。 */
+function isEnterPlanApproval(payload: ChatToolConfirmPayload): boolean {
+  return (payload.name || '').toLowerCase() === 'enterplanmode'
+}
+
+/** 计划批准的三个选项，对齐 Claude Code 自己的那三条
+ *  （Yes and bypass permissions / Yes manually approve edits / Tell Claude what to change）。
+ *  `mode` 是批准后要把 CLI 切到的权限档位，同时会写回会话配置，让底栏胶囊跟着变 ——
+ *  否则批准之后界面还显示「计划 (只读)」，而 claude 已经在改文件了。
+ *
+ *  末位是主按钮（Ctrl+↵）：批完计划最常见的意图就是「别再拦我了，去做」，
+ *  Claude Code 自己的默认选中项也是 bypass 那条。 */
+const PLAN_APPROVAL_ACTIONS: { label: string; mode: string }[] = [
+  { label: '批准，逐步确认', mode: 'default' },
+  { label: '批准并自动放行', mode: 'bypassPermissions' },
+]
+
 function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment | null {
-  const raw = payload.segment ?? null
-  const id = payload.segmentId ?? raw?.id
-  const kind = payload.segmentKind ?? raw?.kind
-  const phase = payload.phase ?? raw?.phase
-  const order = payload.order ?? raw?.order
+  const raw = payload.type === 'text_delta' || payload.type === 'reasoning_delta'
+    ? payload.segment
+    : null
+  const id = raw?.id
+  const kind = raw?.kind
+  const phase = raw?.phase
+  const order = raw?.order
   if (!id || !kind || !phase || order == null) return null
 
-  const stepNumber = raw?.step_number ?? raw?.stepNumber ?? payload.stepNumber ?? null
-  const toolCallId = raw?.tool_call_id ?? raw?.toolCallId ?? payload.toolCallId ?? null
+  const stepNumber = raw?.stepNumber ?? null
+  const toolCallId = raw?.toolCallId ?? null
   return {
     id,
     kind,
@@ -272,11 +463,32 @@ function streamPayloadToSegment(payload: ChatStreamPayload): ChatMessageSegment 
     order,
     step_number: stepNumber,
     stepNumber,
-    round: raw?.round ?? payload.round ?? null,
+    round: raw?.round ?? null,
     text: raw?.text ?? null,
     tool_call_id: toolCallId,
     toolCallId,
   }
+}
+
+function streamTextDelta(payload: ChatStreamPayload): string {
+  return payload.type === 'text_delta' ? payload.delta : ''
+}
+
+function streamReasoningDelta(payload: ChatStreamPayload): string {
+  return payload.type === 'reasoning_delta' ? payload.delta : ''
+}
+
+function isStreamTerminal(payload: ChatStreamPayload): boolean {
+  return payload.type === 'run_completed'
+    || payload.type === 'run_cancelled'
+    || payload.type === 'run_failed'
+}
+
+function streamTerminalReason(payload: ChatStreamPayload): 'done' | 'cancelled' | 'error' | undefined {
+  if (payload.type === 'run_completed') return 'done'
+  if (payload.type === 'run_cancelled') return 'cancelled'
+  if (payload.type === 'run_failed') return 'error'
+  return undefined
 }
 
 function upsertStreamSegment(
@@ -394,21 +606,23 @@ function updateReasoningSegmentDuration(
   }
 }
 
-// 把一条 chat-stream delta 累积进给定快照（会话单流 or 多答组某列共用）。
+// 把一条协议 delta 累积进给定快照（会话单流 or 多答组某列共用）。
 // 原地 mutate snapshot；segment 已由调用方算好。返回 void。
 function applyStreamDeltaToSnapshot(
   snapshot: ConversationStreamSnapshot,
   payload: ChatStreamPayload,
   segment: ChatMessageSegment | null,
 ) {
+  const textDelta = streamTextDelta(payload)
+  const reasoningDelta = streamReasoningDelta(payload)
   if (segment) {
     snapshot.segments = upsertStreamSegment(
       snapshot.segments,
       segment,
-      segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+      segment.kind === 'reasoning' ? reasoningDelta : textDelta,
     )
   }
-  if (payload.reasoningDelta) {
+  if (reasoningDelta) {
     const now = Date.now()
     if (snapshot.reasoningStartedAt == null) {
       snapshot.reasoningStartedAt = now
@@ -420,13 +634,13 @@ function applyStreamDeltaToSnapshot(
     }
     snapshot.streaming = true
     snapshot.reasoningStreaming = true
-    snapshot.reasoning += payload.reasoningDelta
+    snapshot.reasoning += reasoningDelta
     snapshot.reasoningDurationMs = Math.max(
       snapshot.reasoningDurationMs ?? 0,
       now - snapshot.reasoningStartedAt,
     )
   }
-  if (payload.delta) {
+  if (textDelta) {
     if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
       snapshot.reasoningDurationMs = Math.max(
         snapshot.reasoningDurationMs ?? 0,
@@ -441,7 +655,7 @@ function applyStreamDeltaToSnapshot(
     }
     snapshot.streaming = true
     snapshot.reasoningStreaming = false
-    snapshot.content += payload.delta
+    snapshot.content += textDelta
   }
 }
 
@@ -461,7 +675,7 @@ function finalizeReasoningDurationOnDone(snapshot: ConversationStreamSnapshot) {
   }
 }
 
-// 把一条 chat-tool record 累积进给定快照（会话单流 or 多答组某列共用）。原地 mutate。
+// 把一条协议 tool record 累积进给定快照（会话单流 or 多答组某列共用）。原地 mutate。
 function applyToolRecordToSnapshot(
   snapshot: ConversationStreamSnapshot,
   record: ToolCallRecord,
@@ -626,6 +840,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (isChatSkillCenterPath(path)) return 'skill'
     if (isChatMcpCenterPath(path)) return 'mcp'
     if (isChatKnowledgeCenterPath(path)) return 'knowledge'
+    if (isChatNotesPath(path)) return 'notes'
     if (isChatPluginCenterPath(path)) return 'plugins'
     return 'conversation'
   })
@@ -671,7 +886,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [draftKnowledgeBaseIds, setDraftKnowledgeBaseIds] = useState<string[]>([])
   const [draftForceKnowledgeSearch, setDraftForceKnowledgeSearch] = useState(false)
   // 欢迎页思考等级草稿；首次发送建会话时落到会话上。null=跟随全局。
-  const [draftThinkingLevel, setDraftThinkingLevel] = useState<ThinkingLevel | null>(null)
+  const [draftThinkingLevel, setDraftThinkingLevel] = useState<ThinkingLevel | null>(loadLastThinkingLevel)
+  // 欢迎页联网搜索模式草稿（任务 07-23）；首次发送建会话时落到会话上。undefined=跟随全局。
+  const [draftWebSearchMode, setDraftWebSearchMode] = useState<WebSearchMode | undefined>(undefined)
   // 多模型一问多答（任务 06-30）：欢迎页（尚无会话）时的多答模型草稿；首次发送建会话时落到会话上。
   const [draftReplyModels, setDraftReplyModels] = useState<ModelRef[]>([])
   const [draftAgentRuntime, setDraftAgentRuntime] = useState<AgentRuntimeConfig>(
@@ -685,36 +902,84 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [enabledTools, setEnabledTools] = useState<ChatToolDefinition[]>([])
   const [mcpServers, setMcpServers] = useState<ChatMcpServer[]>([])
   const [webSearchEnabled, setWebSearchEnabled] = useState(true)
+  // provider id → apiFormat（任务 07-23）：用于判断当前模型是否支持内置搜索。
+  const [providerApiFormats, setProviderApiFormats] = useState<Record<string, string>>({})
   const [enabledToolCount, setEnabledToolCount] = useState<number | null>(null)
   const [toolsDisabledReason, setToolsDisabledReason] = useState('')
   const [toolsRequested, setToolsRequested] = useState(false)
   const [approvalPolicy, setApprovalPolicy] = useState('readonly_auto_sensitive_confirm')
   const [pendingToolConfirm, setPendingToolConfirm] = useState<ChatToolConfirmPayload | null>(null)
+  /** 待答的问用户询问：整张可作答的面板吊在**输入框上方**（与审批卡同一个槽位），
+   *  消息流里只留一行痕迹。生成这一刻是停在这里等人的，把它放在视线和手都在的地方。 */
+  const [pendingUserPrompt, setPendingUserPrompt] = useState<ChatUserPromptPayload | null>(null)
   const [pendingSessionConsent, setPendingSessionConsent] = useState<ChatSessionConsentPayload | null>(null)
   const [contextState, setContextState] = useState<ConversationContextState | null>(null)
   const [contextLoading, setContextLoading] = useState(false)
-  const [contextCompressing, setContextCompressing] = useState(false)
-  const [agentLoopCompacting, setAgentLoopCompacting] = useState(false)
+  // 压缩状态必须按会话记，不能用全局 boolean：压缩中切会话会把「压缩中」动画留在
+  // 另一个会话上，而压缩事件按 conversationId 派发，收敛条件不能再是「是不是当前会话」
+  // （那样后台会话的 completed 会被丢掉，标志永远清不掉）。手动与自动压缩共用这一个集合。
+  const [compactingConversationIds, setCompactingConversationIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const markConversationCompacting = useCallback((conversationId: string, compacting: boolean) => {
+    setCompactingConversationIds((previous) => {
+      if (previous.has(conversationId) === compacting) return previous
+      const next = new Set(previous)
+      if (compacting) next.add(conversationId)
+      else next.delete(conversationId)
+      return next
+    })
+  }, [])
+  const contextCompressing = currentConversation
+    ? compactingConversationIds.has(currentConversation.id)
+    : false
   const [animateCompactionBoundaryId, setAnimateCompactionBoundaryId] = useState<string | null>(null)
   const [contextError, setContextError] = useState('')
+  // Hook 执行失败：非阻断警告条。ponytail: 只留最新一条 —— Hook 是旁路观测，
+  // 堆一个可滚动的失败列表没有对应的用户动作。
+  const [hookWarning, setHookWarning] = useState<ChatHookPayload | null>(null)
+  const [protocolVersionMismatch, setProtocolVersionMismatch] = useState(false)
   const [imageViewerItem, setImageViewerItem] = useState<ChatImageViewerItem | null>(null)
+  // 导入的对话：CLI 那边是否已经有新内容（ADR-0002）。只提示，不同步。
+  const [importedHistoryStale, setImportedHistoryStale] = useState(false)
   const currentConversationIdRef = useRef<string | null>(null)
   // 始终指向最新 currentConversation。消息操作 handler（编辑/删除/重发）借此读取最新会话，
   // 而无需把 currentConversation 列进 useCallback 依赖——否则每次切模型/思考等级（currentConversation
   // 换引用）这些 handler 都换身份，打穿 MessageBubble 的 memo 导致全列表重渲（公式 remount 闪烁）。
   const currentConversationRef = useRef(currentConversation)
   currentConversationRef.current = currentConversation
+
+  useEffect(() => {
+    const id = currentConversation?.id
+    if (!id) {
+      setImportedHistoryStale(false)
+      return
+    }
+    let cancelled = false
+    void chatApi
+      .importedHistoryStale(id)
+      .then((stale) => {
+        if (!cancelled) setImportedHistoryStale(stale)
+      })
+      // 检查不了就当没过期——这只是个提示，不该因为它报错打断打开对话。
+      .catch(() => {
+        if (!cancelled) setImportedHistoryStale(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentConversation?.id])
   const activeRunIdRef = useRef<string | null>(null)
   const locallyCancelledConversationIdRef = useRef<string | null>(null)
   const locallyCancelledRunIdRef = useRef<string | null>(null)
   const inFlightConversationsRef = useRef<Set<string>>(new Set())
-  const externalSendQueueRef = useRef<ChatExternalSendRequest[]>([])
-  const externalSendDrainProcessingRef = useRef(false)
-  const externalSendDrainRequestedRef = useRef(false)
+  const restoredRunIdsRef = useRef<Set<string>>(new Set())
   const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
-  const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload>>({})
+  const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload[]>>({})
+  /** 按会话排队（同审批卡）：切会话回来还在等的那条要还在。 */
+  const pendingUserPromptsRef = useRef<Record<string, ChatUserPromptPayload[]>>({})
   const pendingSessionConsentsRef = useRef<Record<string, ChatSessionConsentPayload>>({})
   const streamStartedAtRef = useRef<number | null>(null)
   const streamingContentRef = useRef('')
@@ -723,10 +988,22 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const pendingAfterSettingsCloseRef = useRef<(() => void) | null>(null)
   // A 合帧（render coalescing）：高频 stream/tool/subagent/userprompt 事件不再每条都同步
   // setState 重渲，而是把"待显示的快照"记到 ref，用 requestAnimationFrame 每帧最多 flush 一次。
-  const pendingStreamRenderRef = useRef<{ conversationId: string; snapshot: ConversationStreamSnapshot } | null>(null)
-  const streamRenderRafRef = useRef<number | null>(null)
 
   useEffect(() => onChatImageViewerOpen(setImageViewerItem), [])
+
+  // 会话本地运行态的聚合视图：6 处「按会话清理」共用（见 conversationLocalState.ts）。
+  // ref 仍各自独立持有 —— 读取侧有 30 处、语义各异，不适合一并打包。
+  // 每次现取 .current 而非快照：flushPendingStreamDone 会整体替换
+  // pendingStreamDoneRef.current，快照会指向旧对象。
+  const localState = useCallback((): ConversationLocalState => ({
+    inFlight: inFlightConversationsRef.current,
+    pendingStreamDone: pendingStreamDoneRef.current,
+    streamSnapshots: streamSnapshotsRef.current,
+    streamErrors: streamErrorsRef.current,
+    pendingToolConfirms: pendingToolConfirmsRef.current,
+    pendingSessionConsents: pendingSessionConsentsRef.current,
+    pendingUserPrompts: pendingUserPromptsRef.current,
+  }), [])
 
   const syncGeneratingConversationIds = useCallback(() => {
     setGeneratingConversationIds(collectGeneratingConversationIds(
@@ -746,26 +1023,29 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncGeneratingConversationIds()
   }, [syncGeneratingConversationIds])
 
+  // 合帧抽成 useStreamRenderFrame。applyStreamSnapshotToState 定义在下方
+  // （它依赖此处之后才声明的 setter），故经 ref 间接调用。
+  const applyStreamSnapshotToStateRef = useRef<((s: ConversationStreamSnapshot) => void) | null>(null)
+  const {
+    cancelPendingFrame,
+    cancelPendingFrameFor,
+    showStreamSnapshotIfCurrent,
+  } = useStreamRenderFrame({
+    applySnapshot: (snapshot) => applyStreamSnapshotToStateRef.current?.(snapshot),
+    currentConversationIdRef,
+  })
+
   // B：彻底把一个会话从所有本地乐观/in-flight/快照状态中剔除（ghost 清理）。
   // 不触碰 currentConversation/route，由调用方按场景决定。
   const dropConversationLocally = useCallback((conversationId: string) => {
-    inFlightConversationsRef.current.delete(conversationId)
-    delete streamSnapshotsRef.current[conversationId]
-    delete pendingToolConfirmsRef.current[conversationId]
-    delete pendingSessionConsentsRef.current[conversationId]
-    delete pendingStreamDoneRef.current[conversationId]
-    delete streamErrorsRef.current[conversationId]
+    clearConversationLocalState(localState(), conversationId, {
+      inFlight: true, pendingStreamDone: true, streamErrors: true,
+    })
     // 若该会话还挂着待刷新的合帧，连带取消，避免被剔除的 ghost 还闪一帧。
-    if (pendingStreamRenderRef.current?.conversationId === conversationId) {
-      if (streamRenderRafRef.current != null) {
-        cancelAnimationFrame(streamRenderRafRef.current)
-        streamRenderRafRef.current = null
-      }
-      pendingStreamRenderRef.current = null
-    }
+    cancelPendingFrameFor(conversationId)
     setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
     syncGeneratingConversationIds()
-  }, [syncGeneratingConversationIds])
+  }, [cancelPendingFrameFor, localState, syncGeneratingConversationIds])
 
   const setStreamErrorForConversation = useCallback((conversationId: string, error: string) => {
     if (error) {
@@ -787,6 +1067,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   ), [])
 
   const applyConversation = useCallback((conversation: Conversation | null) => {
+    const current = currentConversationRef.current
+    if (
+      conversation
+      && current
+      && conversation.id === current.id
+      && conversation.revision < current.revision
+    ) {
+      return
+    }
     // 兜底网：后端已在所有返回 Conversation 的命令出口剥离 model_messages/api_messages
     // （strip_transcripts_for_frontend），所以正常路径到这里已是轻量副本。这里再剥一次，确保
     // 任何遗漏/未来新增的后端出口都不会把这两份前端永不读的转录留进 React state。后端回放读盘
@@ -808,9 +1097,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // messages 数组引用**。否则每条消息都变成新对象，击穿 MessageBubble/ChatMarkdown 的 memo，
   // 历史消息里的 LaTeX 会整屏重渲闪一下。这类更新后端不会改 messages，沿用旧引用安全。
   const applyConversationMeta = useCallback((updated: Conversation) => {
-    setCurrentConversation((prev) =>
-      prev && prev.id === updated.id ? { ...updated, messages: prev.messages } : updated,
-    )
+    setCurrentConversation((prev) => {
+      if (prev?.id === updated.id && updated.revision < prev.revision) return prev
+      return prev && prev.id === updated.id ? { ...updated, messages: prev.messages } : updated
+    })
   }, [])
 
   const patchContextState = useCallback((nextState: ConversationContextState) => {
@@ -837,18 +1127,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const clearStreamingPreview = useCallback(() => {
     // 取消挂起的合帧，避免旧快照在清空后又被刷回来产生空帧/串帧。
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    pendingStreamRenderRef.current = null
+    cancelPendingFrame()
     // 内容回空闲 + streaming/frozen/cancelling 归位；streamError 不动（与原语义一致）。
     resetStreamStore()
     activeRunIdRef.current = null
     streamStartedAtRef.current = null
     streamingContentRef.current = ''
     streamingReasoningRef.current = ''
-  }, [])
+  }, [cancelPendingFrame])
 
   const ensureStreamSnapshot = useCallback((conversationId: string) => {
     const existing = streamSnapshotsRef.current[conversationId]
@@ -861,15 +1147,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const restoreStreamingPreview = useCallback((conversationId: string | null) => {
     // 切换会话/恢复预览前取消任何挂起的合帧，避免上一个会话的快照被刷到当前视图。
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    pendingStreamRenderRef.current = null
+    cancelPendingFrame()
     if (!conversationId) {
       clearStreamingPreview()
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
+      setPendingUserPrompt(null)
       setStreamCoarse({ streamError: '' })
       return
     }
@@ -885,9 +1168,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       streamingReasoningRef.current = snapshot.reasoning
     }
     setStreamCoarse({ streamError: streamErrorsRef.current[conversationId] ?? '' })
-    setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId] ?? null)
+    setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId]?.[0] ?? null)
     setPendingSessionConsent(pendingSessionConsentsRef.current[conversationId] ?? null)
-  }, [clearStreamingPreview])
+    setPendingUserPrompt(pendingUserPromptsRef.current[conversationId]?.[0] ?? null)
+  }, [cancelPendingFrame, clearStreamingPreview])
 
   const applyStreamSnapshotToState = useCallback((snapshot: ConversationStreamSnapshot) => {
     setStreamSnapshot(snapshot)
@@ -898,67 +1182,25 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     streamingReasoningRef.current = snapshot.reasoning
   }, [])
 
-  // 立即把挂起帧刷出去（done/结束、卸载、切换会话前调用），保证不丢最后一帧。
-  const flushStreamRender = useCallback(() => {
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    const pending = pendingStreamRenderRef.current
-    pendingStreamRenderRef.current = null
-    if (!pending) return
-    if (currentConversationIdRef.current !== pending.conversationId) return
-    applyStreamSnapshotToState(pending.snapshot)
-  }, [applyStreamSnapshotToState])
-
-  // 取消挂起帧而不应用（切换会话/卸载时调用，避免把旧会话快照刷到新会话）。
-  // 注：clearStreamingPreview / restoreStreamingPreview 已内联同样的取消逻辑。
-
-  // A 合帧：事件本身仍即时累积到 snapshot 对象，这里只把"渲染"节流到每帧一次。
-  // immediate=true（done 等终止帧）立即 flush，不再等下一帧。
-  const showStreamSnapshotIfCurrent = useCallback((
-    conversationId: string,
-    snapshot: ConversationStreamSnapshot,
-    immediate = false,
-  ) => {
-    if (currentConversationIdRef.current !== conversationId) return
-    pendingStreamRenderRef.current = { conversationId, snapshot }
-    if (immediate) {
-      flushStreamRender()
-      return
-    }
-    if (streamRenderRafRef.current != null) return
-    streamRenderRafRef.current = requestAnimationFrame(() => {
-      streamRenderRafRef.current = null
-      const pending = pendingStreamRenderRef.current
-      pendingStreamRenderRef.current = null
-      if (!pending) return
-      if (currentConversationIdRef.current !== pending.conversationId) return
-      applyStreamSnapshotToState(pending.snapshot)
-    })
-  }, [applyStreamSnapshotToState, flushStreamRender])
+  // 填充上面 useStreamRenderFrame 用来打破声明顺序依赖的间接层。
+  applyStreamSnapshotToStateRef.current = applyStreamSnapshotToState
 
   useEffect(() => () => {
-    if (streamRenderRafRef.current != null) {
-      cancelAnimationFrame(streamRenderRafRef.current)
-      streamRenderRafRef.current = null
-    }
-    // 卸载时清掉所有活跃多答组，避免遗留列快照。
+    // 卸载时清掉所有活跃多答组，避免遗留列快照。（挂起帧的取消已在 useStreamRenderFrame 内）
     resetGroups()
   }, [])
 
   const clearStreamSnapshot = useCallback((conversationId: string | null) => {
     if (!conversationId) return
-    delete streamSnapshotsRef.current[conversationId]
-    delete pendingToolConfirmsRef.current[conversationId]
-    delete pendingSessionConsentsRef.current[conversationId]
+    clearConversationLocalState(localState(), conversationId)
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === conversationId) {
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
+      setPendingUserPrompt(null)
       clearStreamingPreview()
     }
-  }, [clearStreamingPreview, syncGeneratingConversationIds])
+  }, [clearStreamingPreview, localState, syncGeneratingConversationIds])
 
   const cancelCurrentRunLocally = useCallback(() => {
     locallyCancelledConversationIdRef.current = currentConversationIdRef.current
@@ -973,9 +1215,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (conversationId) {
       delete pendingToolConfirmsRef.current[conversationId]
       delete pendingSessionConsentsRef.current[conversationId]
+      delete pendingUserPromptsRef.current[conversationId]
     }
     setPendingToolConfirm(null)
     setPendingSessionConsent(null)
+    setPendingUserPrompt(null)
   }, [])
 
   const resetLocalCancellation = useCallback(() => {
@@ -988,6 +1232,21 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [currentConversation, draftAgentRuntime],
   )
   const usesExternalRuntime = activeAgentRuntime.kind === 'external' && !!activeAgentRuntime.externalAgentId
+  // 底栏模式胶囊的档位表：内置会话 = Kivio 的 Act/Plan/Orchestrate；本地 CLI 会话 = 该 CLI
+  // 自己的沙盒/权限档位（Kivio 三档对外部 CLI 不生效）。CLI 没有档位时返回空表 → 胶囊隐藏。
+  const detectedExternalAgents = useDetectedExternalAgents(currentConversation?.id ?? null)
+  const activeAgentPlanMode = currentConversation?.agent_plan_state?.mode
+    ?? currentConversation?.agentPlanState?.mode
+    ?? 'act'
+  const composerModes = useMemo(
+    () => derivePermissionModes({
+      target: 'composer',
+      agentRuntime: activeAgentRuntime,
+      agents: detectedExternalAgents,
+      agentPlanMode: activeAgentPlanMode,
+    }),
+    [activeAgentRuntime, detectedExternalAgents, activeAgentPlanMode],
+  )
   const currentConversationIsBlank = isPlainBlankConversation(currentConversation)
   const activeProviderId = currentConversation && !currentConversationIsBlank
     ? currentConversation.provider_id
@@ -995,6 +1254,23 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const activeModel = currentConversation && !currentConversationIsBlank
     ? currentConversation.model
     : draftModel
+  // 会话级三态联网搜索（任务 07-23）：会话显式模式优先 → 记住的全局默认（上次选择）
+  // → 全局 nativeTools.webSearch 开关。这样选一次内置即成为所有新对话的默认。
+  const activeWebSearchMode = useMemo<WebSearchMode>(() => {
+    if (currentConversation && !currentConversationIsBlank) {
+      const explicit = currentConversation.webSearchMode ?? currentConversation.web_search_mode
+      if (explicit) return explicit
+    } else if (draftWebSearchMode) {
+      return draftWebSearchMode
+    }
+    const remembered = loadLastWebSearchMode()
+    if (remembered) return remembered
+    return webSearchEnabled ? 'third_party' : 'off'
+  }, [currentConversation, currentConversationIsBlank, draftWebSearchMode, webSearchEnabled])
+  const activeBuiltinWebSearchSupported = useMemo(
+    () => builtinWebSearchSupported(providerApiFormats[activeProviderId ?? '']),
+    [providerApiFormats, activeProviderId],
+  )
   // 多模型一问多答（任务 06-30）：当前生效的多答模型集（会话级持久 reply_models，欢迎页用草稿）。
   const activeReplyModels = useMemo<ModelRef[]>(
     () => (currentConversation && !currentConversationIsBlank
@@ -1067,6 +1343,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const chatTools = settings.chatTools
       setMcpServers(chatTools?.servers ?? [])
       setWebSearchEnabled(chatTools?.nativeTools?.webSearch !== false)
+      setProviderApiFormats(
+        Object.fromEntries((settings.providers ?? []).map((p) => [p.id, p.apiFormat ?? ''])),
+      )
       setApprovalPolicy(chatTools?.approvalPolicy || 'readonly_auto_sensitive_confirm')
       const nextDisabledSkillIds = chatTools?.disabledSkillIds ?? []
       setDisabledSkillIds((prev) =>
@@ -1151,27 +1430,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [onSettingsChange, refreshToolIndicator])
 
-  const handleToggleWebSearch = useCallback(async () => {
-    try {
-      const settings = await refreshSettings()
-      const nativeTools = settings.chatTools?.nativeTools
-      const next = !(nativeTools?.webSearch !== false)
-      setWebSearchEnabled(next)
-      await saveSettingsCached({
-        ...settings,
-        chatTools: {
-          ...settings.chatTools,
-          nativeTools: { ...(nativeTools ?? {}), webSearch: next },
-        },
-      })
-      onSettingsChange()
-      await refreshToolIndicator()
-    } catch (err) {
-      console.error('Failed to toggle web search:', err)
-      void refreshToolIndicator()
-    }
-  }, [onSettingsChange, refreshToolIndicator])
-
   const unavailableRecommendedTools = useMemo(
     () =>
       effectiveSkillRecommendedTools.filter(
@@ -1200,71 +1458,41 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const sendDisabledReason = effectiveSkillRecommendedTools.length > 0 ? toolStatusHint : ''
 
-  const getRouteConversationId = useCallback(() => {
-    const path = hashPath()
-    if (!path.startsWith('chat/')) return null
-    const rest = path.slice('chat/'.length)
-    if (rest === 'settings' || rest.startsWith('settings/')) return null
-    if (rest === 'assistants' || rest.startsWith('assistants/')) return null
-    if (rest === 'skill' || rest.startsWith('skill/')) return null
-    if (rest === 'knowledge' || rest.startsWith('knowledge/')) return null
-    if (rest === 'onboarding' || rest.startsWith('onboarding/')) return null
-    return decodeURIComponent(rest)
+
+  // 路由簇抽成 useChatRouting（见 hooks/useChatRouting.ts）。
+  // reloadConversation 定义在下方且自身依赖 syncConversationRoute（循环依赖），
+  // 故经 ref 间接调用：hook 只读 ref.current，ref 在其定义后赋值。
+  const reloadConversationRef = useRef<((id: string) => void) | null>(null)
+  const handleRouteResetConversation = useCallback(() => {
+    currentConversationIdRef.current = null
+    applyConversation(null)
+    restoreStreamingPreview(null)
+  }, [applyConversation, restoreStreamingPreview])
+  const handleRouteLoadConversation = useCallback((conversationId: string) => {
+    reloadConversationRef.current?.(conversationId)
   }, [])
 
-  const syncConversationRoute = useCallback((conversationId: string | null) => {
-    const nextHash = conversationId ? `#chat/${encodeURIComponent(conversationId)}` : '#chat'
-    if (window.location.hash !== nextHash) {
-      window.location.hash = nextHash
-    }
-  }, [])
-
-  const syncSettingsRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/settings') {
-      window.location.hash = '#chat/settings'
-    }
-  }, [])
-
-  const syncOnboardingRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/onboarding') {
-      window.location.hash = '#chat/onboarding'
-    }
-  }, [])
+  const {
+    syncConversationRoute,
+    syncSettingsRoute,
+    syncOnboardingRoute,
+    syncAssistantCenterRoute,
+    syncSkillCenterRoute,
+    syncPluginCenterRoute,
+    syncMcpCenterRoute,
+    syncKnowledgeCenterRoute,
+    syncNotesRoute,
+  } = useChatRouting({
+    onViewChange: setChatView,
+    onLoadConversation: handleRouteLoadConversation,
+    onResetConversation: handleRouteResetConversation,
+    currentConversationIdRef,
+  })
 
   const handleOnboardingExit = useCallback(() => {
     setChatView('conversation')
     syncConversationRoute(null)
   }, [syncConversationRoute])
-
-  const syncAssistantCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/assistants') {
-      window.location.hash = '#chat/assistants'
-    }
-  }, [])
-
-  const syncSkillCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/skill') {
-      window.location.hash = '#chat/skill'
-    }
-  }, [])
-
-  const syncPluginCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/plugins') {
-      window.location.hash = '#chat/plugins'
-    }
-  }, [])
-
-  const syncMcpCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/mcp') {
-      window.location.hash = '#chat/mcp'
-    }
-  }, [])
-
-  const syncKnowledgeCenterRoute = useCallback(() => {
-    if (window.location.hash !== '#chat/knowledge') {
-      window.location.hash = '#chat/knowledge'
-    }
-  }, [])
 
   const refreshSidebar = useCallback(() => {
     setSidebarRefreshKey((key) => key + 1)
@@ -1274,10 +1502,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     try {
       const settings = await getSettingsCached()
       setUiLang((settings.settingsLanguage as Lang) || 'zh')
-      const chatDefault = settings.defaultModels.chat
-      if (chatDefault.providerId) {
+      // 以用户最后一次在顶栏选的模型为默认；provider 仍存在时才用。localStorage 为空时
+      // （首次运行）回落到 onboarding 写入的 defaultModels.chat，再回落 lens / 翻译模型。
+      const last = loadLastModel()
+      const lastProviderOk =
+        last && (settings.providers || []).some((p) => p.id === last.providerId)
+      const chatDefault = settings.defaultModels?.chat
+      if (last && lastProviderOk) {
+        setDraftProviderId(last.providerId)
+        setDraftModel(last.model)
+      } else if (chatDefault?.providerId) {
         setDraftProviderId(chatDefault.providerId)
-        setDraftModel(chatDefault.model)
+        setDraftModel(chatDefault.model || '')
       } else if (settings.lens?.providerId) {
         setDraftProviderId(settings.lens.providerId)
         setDraftModel(settings.lens.model || '')
@@ -1326,6 +1562,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }, 1500)
   }, [refreshToolIndicator])
 
+  // 开窗预热：后台把所有启用的 MCP server 连接并抓一次工具清单（fire-and-forget，
+  // 连接池单飞保证幂等），首轮对话的工具收集不再现场握手。
+  useEffect(() => {
+    void api.chatMcpWarmup()
+  }, [])
+
   // 空闲预取各中心页 chunk，避免首次切到设置/专家/技能/插件时才触发 lazy import 而转圈；
   // 预取后切换时 Suspense 不再挂起，chat-motion-view-in 动画得以播在真实内容上（而非 spinner）。
   useEffect(() => {
@@ -1335,6 +1577,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       void import('./SkillCenter')
       void import('./McpCenter')
       void import('./KnowledgeCenter')
+      void import('./NotesCenter')
       void import('./PluginCenter')
       void import('./MessageList')
     }, 400)
@@ -1371,6 +1614,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncKnowledgeCenterRoute()
   }, [syncKnowledgeCenterRoute])
 
+  const openNotesCenter = useCallback(() => {
+    setChatView('notes')
+    syncNotesRoute()
+  }, [syncNotesRoute])
+
   const openExtensionsItem = useCallback((item: ExtensionsNavItem) => {
     setExtensionsNavItem(item)
     if (item === 'assistants') {
@@ -1389,29 +1637,40 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       openKnowledgeCenter()
       return
     }
+    if (item === 'notes') {
+      openNotesCenter()
+      return
+    }
     if (item === 'plugins') {
       openPluginCenter()
       return
     }
-  }, [openAssistantCenter, openSkillCenter, openMcpCenter, openKnowledgeCenter, openPluginCenter])
+  }, [openAssistantCenter, openSkillCenter, openMcpCenter, openKnowledgeCenter, openNotesCenter, openPluginCenter])
 
   const extensionsActive = useMemo<ExtensionsNavItem | null>(() => {
     if (chatView === 'assistants') return 'assistants'
     if (chatView === 'skill') return 'skill'
     if (chatView === 'mcp') return 'mcp'
     if (chatView === 'knowledge') return 'knowledge'
+    if (chatView === 'notes') return 'notes'
     if (chatView === 'plugins') return 'plugins'
     return null
   }, [chatView])
 
+  const [settingsExiting, setSettingsExiting] = useState(false)
   const handleSettingsClose = useCallback(() => {
-    setChatView('conversation')
-    syncConversationRoute(currentConversationIdRef.current)
-    void loadSkills()
-    void refreshToolIndicator()
-    const pending = pendingAfterSettingsCloseRef.current
-    pendingAfterSettingsCloseRef.current = null
-    pending?.()
+    // 先播退场下滑动画，动画结束再真正切视图卸载（与 CSS 时长对齐）。
+    setSettingsExiting(true)
+    window.setTimeout(() => {
+      setSettingsExiting(false)
+      setChatView('conversation')
+      syncConversationRoute(currentConversationIdRef.current)
+      void loadSkills()
+      void refreshToolIndicator()
+      const pending = pendingAfterSettingsCloseRef.current
+      pendingAfterSettingsCloseRef.current = null
+      pending?.()
+    }, 220)
   }, [loadSkills, refreshToolIndicator, syncConversationRoute])
 
   // 中心页（技能/MCP/插件/专家）没有自己的返回按钮，离开靠侧栏选会话/新建等任意路径。
@@ -1476,6 +1735,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
 
+  // 填充上面 useChatRouting 用来打破循环依赖的间接层。
+  reloadConversationRef.current = (id: string) => { void reloadConversation(id, { force: true }) }
+
   const refreshContextStats = useCallback(async (conversationId?: string) => {
     const targetConversationId = conversationId ?? currentConversationIdRef.current
     if (!targetConversationId) {
@@ -1508,8 +1770,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const handleCompressContext = useCallback(async () => {
     const conversationId = currentConversationIdRef.current
-    if (!conversationId || contextCompressing) return
-    setContextCompressing(true)
+    if (!conversationId || compactingConversationIds.has(conversationId)) return
+    markConversationCompacting(conversationId, true)
     setContextError('')
     try {
       const result = await chatApi.compressContext(conversationId)
@@ -1532,17 +1794,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         setContextError(typeof err === 'string' ? err : (err as Error).message || '上下文压缩失败')
       }
     } finally {
-      if (currentConversationIdRef.current === conversationId) {
-        setContextCompressing(false)
-      }
+      // 清零不看「我还在不在这个会话」——切走后原来那个守卫永远不成立，标志会卡死。
+      markConversationCompacting(conversationId, false)
     }
-  }, [contextCompressing, patchContextState, refreshSidebar])
+  }, [compactingConversationIds, markConversationCompacting, patchContextState, refreshSidebar])
 
   const finishStreamingRun = useCallback(
     async (payload: { reason?: string; conversationId?: string }) => {
       const conversationId = payload.conversationId ?? currentConversationIdRef.current
       // 兜底：run 结束时压缩必然已终止；防御后端遗漏终止事件把"压缩中"状态卡死。
-      setAgentLoopCompacting(false)
+      if (conversationId) markConversationCompacting(conversationId, false)
       if (payload.reason !== 'cancelled') {
         resetLocalCancellation()
       }
@@ -1559,18 +1820,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         refreshSidebar()
       }
       if (conversationId) {
-        delete streamSnapshotsRef.current[conversationId]
-        delete pendingToolConfirmsRef.current[conversationId]
-        delete pendingSessionConsentsRef.current[conversationId]
+        clearConversationLocalState(localState(), conversationId)
         syncGeneratingConversationIds()
       }
       if (conversationId && currentConversationIdRef.current === conversationId) {
         setPendingToolConfirm(null)
         setPendingSessionConsent(null)
+        setPendingUserPrompt(null)
         clearStreamingPreview()
       }
     },
-    [clearStreamingPreview, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+    [clearStreamingPreview, localState, markConversationCompacting, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
   )
 
   const flushPendingStreamDone = useCallback(async (conversationId?: string): Promise<boolean> => {
@@ -1599,491 +1859,482 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       applyConversation(conversation)
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
+      setPendingUserPrompt(null)
     }
-    delete streamSnapshotsRef.current[conversationId]
-    delete pendingToolConfirmsRef.current[conversationId]
-    delete pendingSessionConsentsRef.current[conversationId]
+    clearConversationLocalState(localState(), conversationId)
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === conversationId) {
       clearStreamingPreview()
     }
-  }, [applyConversation, clearStreamingPreview, syncGeneratingConversationIds])
+  }, [applyConversation, clearStreamingPreview, localState, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
+  useTauriEvent(api.onChatProtocolIssue, ({ issue, conversationId }) => {
+    if (issue === 'version_mismatch') {
+      setProtocolVersionMismatch(true)
+    } else if (
+      issue === 'resync_required'
+      && conversationId
+      && conversationId === currentConversationIdRef.current
+    ) {
+      void reloadConversation(conversationId)
+    }
+  }, [reloadConversation])
 
-    const setupListener = async () => {
-      unlisten = await api.onChatStream((payload) => {
-        if (cancelled) return
-        if (isLocallyCancelledPayload(
-          payload,
-          locallyCancelledConversationIdRef.current,
-          locallyCancelledRunIdRef.current,
-        )) {
-          return
+  useTauriEvent(api.onChatStream, (payload) => {
+      if (isLocallyCancelledPayload(
+        payload,
+        locallyCancelledConversationIdRef.current,
+        locallyCancelledRunIdRef.current,
+      )) {
+        return
+      }
+      const terminal = isStreamTerminal(payload)
+      const terminalPayload = {
+        conversationId: payload.conversationId,
+        reason: streamTerminalReason(payload),
+      }
+      if (payload.type === 'run_started') {
+        if (payload.restoredFromSnapshot) restoredRunIdsRef.current.add(payload.runId)
+        const remainingApprovals = (pendingToolConfirmsRef.current[payload.conversationId] ?? [])
+          .filter((item) => item.runId !== payload.runId)
+        if (remainingApprovals.length > 0) {
+          pendingToolConfirmsRef.current[payload.conversationId] = remainingApprovals
+        } else {
+          delete pendingToolConfirmsRef.current[payload.conversationId]
         }
-        if (!streamSnapshotsRef.current[payload.conversationId]) {
-          if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
-            if (payload.done) {
-              void finishStreamingRun(payload)
-            }
-            return
+        if (currentConversationIdRef.current === payload.conversationId) {
+          setPendingToolConfirm(remainingApprovals[0] ?? null)
+        }
+        if (pendingSessionConsentsRef.current[payload.conversationId]?.runId === payload.runId) {
+          delete pendingSessionConsentsRef.current[payload.conversationId]
+          if (currentConversationIdRef.current === payload.conversationId) {
+            setPendingSessionConsent(null)
           }
         }
-        // 多答组分支（任务 06-30）：该会话处于多模型并发流时，按 messageId 路由到对应列，
-        // 不动会话级单流快照（单模型路径零回归）。
-        if (hasActiveGroup(payload.conversationId) && payload.messageId) {
-          const column = ensureGroupColumn(
+        if (payload.recovery) {
+          restoreGroupArm(
             payload.conversationId,
+            payload.recovery.groupId,
+            payload.recovery.groupSize,
+            payload.recovery.armIndex,
             payload.messageId,
-          )
-          if (!column) return
-          const segment = streamPayloadToSegment(payload)
-          applyStreamDeltaToSnapshot(column, payload, segment)
-          if (payload.done) {
-            finalizeReasoningDurationOnDone(column)
-            column.streaming = false
-            // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
-            flushGroups()
-          } else {
-            // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
-            touchGroup()
-          }
-          // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
-          return
-        }
-        const snapshot = ensureStreamSnapshot(payload.conversationId)
-        if (payload.runId) {
-          if (snapshot.runId && snapshot.runId !== payload.runId) return
-          snapshot.runId = payload.runId
-        }
-        const segment = streamPayloadToSegment(payload)
-        if (segment) {
-          snapshot.segments = upsertStreamSegment(
-            snapshot.segments,
-            segment,
-            segment.kind === 'reasoning' ? payload.reasoningDelta ?? '' : payload.delta ?? '',
+            payload.recovery.providerId,
+            payload.recovery.model,
           )
         }
-        if (payload.reasoningDelta) {
-          const now = Date.now()
-          if (snapshot.reasoningStartedAt == null) {
-            snapshot.reasoningStartedAt = now
-          }
-          if (segment?.kind === 'reasoning') {
-            const segmentStartedAt = snapshot.reasoningStartedAtBySegmentId[segment.id] ?? now
-            snapshot.reasoningStartedAtBySegmentId[segment.id] = segmentStartedAt
-            updateReasoningSegmentDuration(snapshot, segment.id, now)
-          }
-          snapshot.streaming = true
-          snapshot.reasoningStreaming = true
-          snapshot.reasoning += payload.reasoningDelta
-          snapshot.reasoningDurationMs = Math.max(
-            snapshot.reasoningDurationMs ?? 0,
-            now - snapshot.reasoningStartedAt,
-          )
-        }
-        if (payload.delta) {
-          if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
-            snapshot.reasoningDurationMs = Math.max(
-              snapshot.reasoningDurationMs ?? 0,
-              Date.now() - snapshot.reasoningStartedAt,
-            )
-          }
-          if (segment?.kind === 'text') {
-            const activeReasoningSegment = findReasoningSegmentForText(snapshot.segments, segment)
-            if (activeReasoningSegment) {
-              updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
-            }
-          }
-          snapshot.streaming = true
-          snapshot.reasoningStreaming = false
-          snapshot.content += payload.delta
-        }
-        syncGeneratingConversationIds()
-        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-        if (payload.done) {
-          if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
-            snapshot.reasoningDurationMs = Math.max(
-              snapshot.reasoningDurationMs ?? 0,
-              Date.now() - snapshot.reasoningStartedAt,
-            )
-            const activeReasoningSegment = [...snapshot.segments]
-              .reverse()
-              .find((item) => item.kind === 'reasoning')
-            if (activeReasoningSegment) {
-              updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
-            }
-          }
-          // done：立即 flush 最后一帧，别让合帧吞掉收尾内容。
-          showStreamSnapshotIfCurrent(payload.conversationId, snapshot, true)
-          // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
-          if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
-            pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(payload)
-            return
-          }
-          void finishStreamingRun(payload)
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
-  }, [ensureStreamSnapshot, finishStreamingRun, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
-
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatContext((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        patchContextState(payload.contextState)
-        setContextError('')
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
-  }, [patchContextState])
-
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatCompaction((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        if (payload.phase === 'started') {
-          if (payload.trigger !== 'manual') {
-            setAgentLoopCompacting(true)
-          }
-          return
-        }
-        if (payload.trigger !== 'manual') {
-          setAgentLoopCompacting(false)
-        }
-        const boundary = payload.boundary
-        if (boundary?.id) {
-          setAnimateCompactionBoundaryId(boundary.id)
-          window.setTimeout(() => {
-            setAnimateCompactionBoundaryId((current) => (current === boundary.id ? null : current))
-          }, 1800)
-        }
-        if (boundary && payload.phase === 'completed') {
-          setCurrentConversation((conversation) => {
-            if (!conversation) return conversation
-            const prevState = conversation.context_state ?? conversation.contextState
-            const existing = prevState?.compaction_boundaries ?? prevState?.compactionBoundaries ?? []
-            if (existing.some((item) => item.id === boundary.id)) return conversation
-            const nextBoundaries = [...existing, boundary]
-            const nextState = {
-              ...(prevState ?? {}),
-              compaction_boundaries: nextBoundaries,
-              compactionBoundaries: nextBoundaries,
-            }
-            setContextState(nextState)
-            return { ...conversation, context_state: nextState, contextState: nextState }
-          })
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatTodo((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        patchAgentTodoState(payload.todoState)
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
-  }, [patchAgentTodoState])
-
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatPlan((payload) => {
-        if (cancelled) return
-        const currentConversationId = currentConversationIdRef.current
-        if (!currentConversationId || payload.conversationId !== currentConversationId) {
-          return
-        }
-        patchAgentPlanState(payload.planState)
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
-  }, [patchAgentPlanState])
-
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatTool((payload) => {
-        if (cancelled) return
-        if (isLocallyCancelledPayload(
-          payload,
-          locallyCancelledConversationIdRef.current,
-          locallyCancelledRunIdRef.current,
-        )) {
-          return
-        }
-        // 忽略 invoke 结束后的迟到 tool 事件，否则会重新 setStreaming(true) 卡死输入栏。
-        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
-        // 多答组分支：按 messageId 路由到对应列。
+        markConversationInFlight(payload.conversationId)
         if (hasActiveGroup(payload.conversationId) && payload.messageId) {
           const column = ensureGroupColumn(payload.conversationId, payload.messageId)
-          if (!column) return
-          const record = toolEventToRecord(payload)
-          applyToolRecordToSnapshot(column, record)
-          touchGroup()
+          if (column) {
+            Object.assign(column, createEmptyStreamSnapshot(), {
+              runId: payload.runId,
+              streaming: true,
+              startedAt: Date.now(),
+            })
+            touchGroup()
+          }
           return
         }
-        const snapshot = ensureStreamSnapshot(payload.conversationId)
-        if (payload.runId) {
-          if (snapshot.runId && snapshot.runId !== payload.runId) return
-          snapshot.runId = payload.runId
+        const restored = createEmptyStreamSnapshot()
+        restored.runId = payload.runId
+        restored.streaming = true
+        restored.startedAt = Date.now()
+        streamSnapshotsRef.current[payload.conversationId] = restored
+        syncGeneratingConversationIds()
+        showStreamSnapshotIfCurrent(payload.conversationId, restored)
+        return
+      }
+      if (!streamSnapshotsRef.current[payload.conversationId]) {
+        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+          if (terminal) {
+            void finishStreamingRun(terminalPayload)
+          }
+          return
         }
-        const record = toolEventToRecord(payload)
+      }
+      // 多答组分支（任务 06-30）：该会话处于多模型并发流时，按 messageId 路由到对应列，
+      // 不动会话级单流快照（单模型路径零回归）。
+      if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+        const column = ensureGroupColumn(
+          payload.conversationId,
+          payload.messageId,
+        )
+        if (!column) return
+        const segment = streamPayloadToSegment(payload)
+        applyStreamDeltaToSnapshot(column, payload, segment)
+        if (terminal) {
+          finalizeReasoningDurationOnDone(column)
+          column.streaming = false
+          // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
+          flushGroups()
+          if (restoredRunIdsRef.current.delete(payload.runId)) {
+            const group = getActiveGroup(payload.conversationId)
+            if (group?.columns.every((item) => !item.streaming)) {
+              endGroup(payload.conversationId)
+              void finishStreamingRun(terminalPayload)
+            }
+          }
+        } else {
+          // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
+          touchGroup()
+        }
+        // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
+        return
+      }
+      const snapshot = ensureStreamSnapshot(payload.conversationId)
+      if (payload.runId) {
+        if (snapshot.runId && snapshot.runId !== payload.runId) return
+        snapshot.runId = payload.runId
+      }
+      const segment = streamPayloadToSegment(payload)
+      const textDelta = streamTextDelta(payload)
+      const reasoningDelta = streamReasoningDelta(payload)
+      if (segment) {
+        snapshot.segments = upsertStreamSegment(
+          snapshot.segments,
+          segment,
+          segment.kind === 'reasoning' ? reasoningDelta : textDelta,
+        )
+      }
+      if (reasoningDelta) {
+        const now = Date.now()
+        if (snapshot.reasoningStartedAt == null) {
+          snapshot.reasoningStartedAt = now
+        }
+        if (segment?.kind === 'reasoning') {
+          const segmentStartedAt = snapshot.reasoningStartedAtBySegmentId[segment.id] ?? now
+          snapshot.reasoningStartedAtBySegmentId[segment.id] = segmentStartedAt
+          updateReasoningSegmentDuration(snapshot, segment.id, now)
+        }
+        snapshot.streaming = true
+        snapshot.reasoningStreaming = true
+        snapshot.reasoning += reasoningDelta
+        snapshot.reasoningDurationMs = Math.max(
+          snapshot.reasoningDurationMs ?? 0,
+          now - snapshot.reasoningStartedAt,
+        )
+      }
+      if (textDelta) {
+        if (snapshot.reasoningStreaming && snapshot.reasoningStartedAt != null) {
+          snapshot.reasoningDurationMs = Math.max(
+            snapshot.reasoningDurationMs ?? 0,
+            Date.now() - snapshot.reasoningStartedAt,
+          )
+        }
+        if (segment?.kind === 'text') {
+          const activeReasoningSegment = findReasoningSegmentForText(snapshot.segments, segment)
+          if (activeReasoningSegment) {
+            updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+          }
+        }
         snapshot.streaming = true
         snapshot.reasoningStreaming = false
-        const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
-        snapshot.toolCalls = index < 0
-          ? [...snapshot.toolCalls, record]
-          : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
-        snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
-        syncGeneratingConversationIds()
-        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-      })
-      if (cancelled) {
-        unlisten()
+        snapshot.content += textDelta
       }
-    }
+      syncGeneratingConversationIds()
+      showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
+      if (terminal) {
+        if (snapshot.reasoningStartedAt != null && snapshot.reasoningStreaming) {
+          snapshot.reasoningDurationMs = Math.max(
+            snapshot.reasoningDurationMs ?? 0,
+            Date.now() - snapshot.reasoningStartedAt,
+          )
+          const activeReasoningSegment = [...snapshot.segments]
+            .reverse()
+            .find((item) => item.kind === 'reasoning')
+          if (activeReasoningSegment) {
+            updateReasoningSegmentDuration(snapshot, activeReasoningSegment.id)
+          }
+        }
+        // done：立即 flush 最后一帧，别让合帧吞掉收尾内容。
+        showStreamSnapshotIfCurrent(payload.conversationId, snapshot, true)
+        if (restoredRunIdsRef.current.delete(payload.runId)) {
+          void finishStreamingRun(terminalPayload)
+          return
+        }
+        // invoke 未完成前不要 reload；延后到 flushPendingStreamDone，避免与 send 写盘竞态。
+        if (isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+          pendingStreamDoneRef.current[payload.conversationId] = () => finishStreamingRun(terminalPayload)
+          return
+        }
+        void finishStreamingRun(terminalPayload)
+      }
+  }, [ensureStreamSnapshot, finishStreamingRun, markConversationInFlight, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
+  useTauriEvent(api.onChatContext, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
     }
+    // 生成过程中的活数：只有分子 + 分母，就地补进现有状态（分段/压缩计数/来源标签留给
+    // 轮末的权威快照）。不能走 patchContextState —— 那条要求一份完整的上下文状态对象。
+    if (payload.live) {
+      setContextState((prev) => {
+        const next = applyLiveContextUsage(prev, payload.live!)
+        if (!next || next === prev) return prev
+        setCurrentConversation((conversation) => conversation
+          ? { ...conversation, context_state: next, contextState: next }
+          : conversation)
+        return next
+      })
+      return
+    }
+    if (!payload.contextState) return
+    patchContextState(payload.contextState)
+    setContextError('')
+  }, [patchContextState])
+
+  useTauriEvent(api.onChatCompaction, (payload) => {
+    const conversationId = payload.conversationId
+    if (!conversationId) return
+    // 压缩状态按事件里的会话记，不看是不是当前会话：后台会话的 started/completed
+    // 都要收进集合，否则切走再切回来会漏掉开始、或者永远等不到结束。
+    if (payload.trigger !== 'manual') {
+      markConversationCompacting(conversationId, payload.phase === 'started')
+    }
+    if (payload.phase === 'started') return
+    // 下面这些改的是当前会话的展示状态（边界动画 / currentConversation），仍要按当前会话过滤。
+    if (conversationId !== currentConversationIdRef.current) return
+    const boundary = payload.boundary
+    if (boundary?.id) {
+      setAnimateCompactionBoundaryId(boundary.id)
+      window.setTimeout(() => {
+        setAnimateCompactionBoundaryId((current) => (current === boundary.id ? null : current))
+      }, 1800)
+    }
+    if (boundary && payload.phase === 'completed') {
+      setCurrentConversation((conversation) => {
+        if (!conversation) return conversation
+        const prevState = conversation.context_state ?? conversation.contextState
+        const existing = prevState?.compaction_boundaries ?? prevState?.compactionBoundaries ?? []
+        if (existing.some((item) => item.id === boundary.id)) return conversation
+        const nextBoundaries = [...existing, boundary]
+        const nextState = {
+          ...(prevState ?? {}),
+          compaction_boundaries: nextBoundaries,
+          compactionBoundaries: nextBoundaries,
+        }
+        setContextState(nextState)
+        return { ...conversation, context_state: nextState, contextState: nextState }
+      })
+    }
+  }, [markConversationCompacting])
+
+  useTauriEvent(api.onChatTodo, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
+    }
+    patchAgentTodoState(payload.todoState)
+  }, [patchAgentTodoState])
+
+  useTauriEvent(api.onChatPlan, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
+    }
+    patchAgentPlanState(payload.planState)
+  }, [patchAgentPlanState])
+
+  useTauriEvent(api.onChatHook, (payload) => {
+    const currentConversationId = currentConversationIdRef.current
+    if (!currentConversationId || payload.conversationId !== currentConversationId) {
+      return
+    }
+    setHookWarning(payload)
+  }, [])
+
+  useTauriEvent(api.onChatTool, (payload) => {
+      if (isLocallyCancelledPayload(
+        payload,
+        locallyCancelledConversationIdRef.current,
+        locallyCancelledRunIdRef.current,
+      )) {
+        return
+      }
+      // 忽略 invoke 结束后的迟到 tool 事件，否则会重新 setStreaming(true) 卡死输入栏。
+      if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
+      // 多答组分支：按 messageId 路由到对应列。
+      if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+        const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+        if (!column) return
+        const record = toolEventToRecord(payload)
+        applyToolRecordToSnapshot(column, record)
+        touchGroup()
+        return
+      }
+      const snapshot = ensureStreamSnapshot(payload.conversationId)
+      if (payload.runId) {
+        if (snapshot.runId && snapshot.runId !== payload.runId) return
+        snapshot.runId = payload.runId
+      }
+      const record = toolEventToRecord(payload)
+      snapshot.streaming = true
+      snapshot.reasoningStreaming = false
+      const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+      snapshot.toolCalls = index < 0
+        ? [...snapshot.toolCalls, record]
+        : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+      snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
+      syncGeneratingConversationIds()
+      showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
   // Live nested sub-agent progress (P3): merge onto the parent tool card's
   // structuredContent.subagentProgress, addressed by parentToolCallId.
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatSubagent((payload) => {
-        if (cancelled) return
-        // A `chat-subagent` progress event must address an existing snapshot for
-        // the parent conversation (do NOT create one — that would resurrect a
-        // finalized conversation). Accept whenever the conversation is in-flight
-        // or a snapshot already exists.
-        const existingSnapshot = streamSnapshotsRef.current[payload.parentConversationId]
-        const inFlight = isConversationInFlight(
-          inFlightConversationsRef.current,
-          payload.parentConversationId,
-        )
-        if (!inFlight && !existingSnapshot) return
-        const snapshot = ensureStreamSnapshot(payload.parentConversationId)
-        // Match the active run when known; only drop when both ids are set and differ.
-        if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
-        const index = snapshot.toolCalls.findIndex((item) => item.id === payload.parentToolCallId)
-        if (index < 0) return
-        const progress = {
-          taskId: payload.taskId,
-          name: payload.name,
-          model: payload.model ?? '',
-          depth: payload.depth,
-          status: payload.status,
-          preview: payload.preview ?? '',
-          steps: payload.steps ?? [],
-        }
-        // Sub-agents run blocking + single-result: the parent tool card transitions
-        // running→done via the `chat-tool` flow (the inline result), while these
-        // `chat-subagent` events drive the live nested progress (steps/preview).
-        snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
-          if (i !== index) return item
-          const existing =
-            item.structuredContent && typeof item.structuredContent === 'object'
-              ? (item.structuredContent as Record<string, unknown>)
-              : {}
-          const nextStructured: Record<string, unknown> = {
-            ...existing,
-            subagentProgress: progress,
-          }
-          return {
-            ...item,
-            structuredContent: nextStructured,
-          }
-        })
-        showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
-      })
-      if (cancelled) {
-        unlisten()
+  useTauriEvent(api.onChatSubagent, (payload) => {
+      // A subagent progress event must address an existing snapshot for
+      // the parent conversation (do NOT create one — that would resurrect a
+      // finalized conversation). Accept whenever the conversation is in-flight
+      // or a snapshot already exists.
+      const existingSnapshot = streamSnapshotsRef.current[payload.parentConversationId]
+      const inFlight = isConversationInFlight(
+        inFlightConversationsRef.current,
+        payload.parentConversationId,
+      )
+      if (!inFlight && !existingSnapshot) return
+      const snapshot = ensureStreamSnapshot(payload.parentConversationId)
+      // Match the active run when known; only drop when both ids are set and differ.
+      if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
+      const index = snapshot.toolCalls.findIndex((item) => item.id === payload.parentToolCallId)
+      if (index < 0) return
+      const progress = {
+        taskId: payload.taskId,
+        name: payload.name,
+        model: payload.model ?? '',
+        depth: payload.depth,
+        status: payload.status,
+        preview: payload.preview ?? '',
+        steps: payload.steps ?? [],
       }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+      // Sub-agents run blocking + single-result: the parent tool card transitions
+      // running→done via the tool update flow (the inline result), while these
+      // subagent events drive the live nested progress (steps/preview).
+      snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
+        if (i !== index) return item
+        const existing =
+          item.structuredContent && typeof item.structuredContent === 'object'
+            ? (item.structuredContent as Record<string, unknown>)
+            : {}
+        const nextStructured: Record<string, unknown> = {
+          ...existing,
+          subagentProgress: progress,
+        }
+        return {
+          ...item,
+          structuredContent: nextStructured,
+        }
+      })
+      showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatUserPrompt((payload) => {
-        if (cancelled) return
-        if (isLocallyCancelledPayload(
-          payload,
-          locallyCancelledConversationIdRef.current,
-          locallyCancelledRunIdRef.current,
-        )) {
-          return
-        }
-        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
-        const snapshot = ensureStreamSnapshot(payload.conversationId)
-        if (payload.runId) {
-          if (snapshot.runId && snapshot.runId !== payload.runId) return
-          snapshot.runId = payload.runId
-        }
-        const record = userPromptEventToRecord(payload)
-        snapshot.streaming = true
-        snapshot.reasoningStreaming = false
-        const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
-        snapshot.toolCalls = index < 0
-          ? [...snapshot.toolCalls, record]
-          : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
-        syncGeneratingConversationIds()
-        showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
-      })
-      if (cancelled) {
-        unlisten()
+  useTauriEvent(api.onChatUserPrompt, (payload) => {
+      if (isLocallyCancelledPayload(
+        payload,
+        locallyCancelledConversationIdRef.current,
+        locallyCancelledRunIdRef.current,
+      )) {
+        return
       }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+      if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) return
+      const snapshot = ensureStreamSnapshot(payload.conversationId)
+      if (payload.runId) {
+        if (snapshot.runId && snapshot.runId !== payload.runId) return
+        snapshot.runId = payload.runId
+      }
+      const record = userPromptEventToRecord(payload)
+      snapshot.streaming = true
+      snapshot.reasoningStreaming = false
+      const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
+      snapshot.toolCalls = index < 0
+        ? [...snapshot.toolCalls, record]
+        : snapshot.toolCalls.map((item, i) => (i === index ? { ...item, ...record } : item))
+      // 同时排进「输入框上方」那张面板的队列：消息流里的那条只是痕迹，真正作答在面板上。
+      const queue = pendingUserPromptsRef.current[payload.conversationId] ?? []
+      const queued = queue.some((item) => item.toolCallId === payload.toolCallId)
+      pendingUserPromptsRef.current[payload.conversationId] = queued ? queue : [...queue, payload]
+      if (currentConversationIdRef.current === payload.conversationId) {
+        setPendingUserPrompt(pendingUserPromptsRef.current[payload.conversationId][0] ?? null)
+      }
+      syncGeneratingConversationIds()
+      showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
+  /** 面板用的工具记录：**必须记忆** —— 写在 JSX 里每渲染新建一个对象，会把卡片里
+   *  「换了新询问就重置草稿」的 effect 变成每渲染都重置（用户选到一半的答案被清空）。 */
+  const pendingUserPromptRecord = useMemo(
+    () => (pendingUserPrompt ? userPromptEventToRecord(pendingUserPrompt) : null),
+    [pendingUserPrompt],
+  )
 
-    const setupListener = async () => {
-      unlisten = await api.onChatToolConfirm((payload) => {
-        if (cancelled) return
-        pendingToolConfirmsRef.current[payload.conversationId] = payload
-        syncGeneratingConversationIds()
-        if (currentConversationIdRef.current === payload.conversationId) {
-          setPendingToolConfirm(payload)
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
+  /** 面板作答完（或那一轮结束了）就把它收起来。后端没有「已答复」事件 ——
+   *  `resolve_user_prompt` 只清重放快照、不发事件，所以收起由前端自己负责。 */
+  const dismissPendingUserPrompt = useCallback((conversationId: string, toolCallId?: string) => {
+    const rest = (pendingUserPromptsRef.current[conversationId] ?? [])
+      .filter((item) => toolCallId == null || item.toolCallId !== toolCallId)
+    if (rest.length > 0) {
+      pendingUserPromptsRef.current[conversationId] = rest
+    } else {
+      delete pendingUserPromptsRef.current[conversationId]
     }
+    if (currentConversationIdRef.current === conversationId) {
+      setPendingUserPrompt(rest[0] ?? null)
+    }
+  }, [])
 
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
+  useTauriEvent(api.onChatToolConfirm, (payload) => {
+    // 排队而不是覆盖：一条消息里并行调多个工具时，后端会同时挂着多条询问等答复
+    // （按 request_id 路由）。覆盖会让用户没看见的那条静默超时 ⇒ 模型收到「用户拒绝」。
+    const queue = pendingToolConfirmsRef.current[payload.conversationId] ?? []
+    if (!queue.some((item) => item.toolCallId === payload.toolCallId)) {
+      queue.push(payload)
+    }
+    pendingToolConfirmsRef.current[payload.conversationId] = queue
+    syncGeneratingConversationIds()
+    if (currentConversationIdRef.current === payload.conversationId) {
+      setPendingToolConfirm(queue[0] ?? null)
+      // 计划卡一出现就在右侧栏摊开整份计划 —— 卡片上那块小灰框读不完。
+      if (isPlanApproval(payload) && payload.argumentsPreview?.trim()) {
+        requestDockMarkdownPreview({ title: '计划', text: payload.argumentsPreview })
+      }
     }
   }, [syncGeneratingConversationIds])
 
-  const resolvePendingToolConfirm = useCallback((approved: boolean) => {
-    if (!pendingToolConfirm) return
-    delete pendingToolConfirmsRef.current[pendingToolConfirm.conversationId]
+  useTauriEvent(api.onChatToolConfirmWithdraw, (payload) => {
+    const rest = (pendingToolConfirmsRef.current[payload.conversationId] ?? [])
+      .filter((item) => item.toolCallId !== payload.toolCallId)
+    if (rest.length > 0) {
+      pendingToolConfirmsRef.current[payload.conversationId] = rest
+    } else {
+      delete pendingToolConfirmsRef.current[payload.conversationId]
+    }
     syncGeneratingConversationIds()
-    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved)
-    setPendingToolConfirm(null)
+    if (currentConversationIdRef.current === payload.conversationId) {
+      setPendingToolConfirm((current) =>
+        current?.toolCallId === payload.toolCallId ? rest[0] ?? null : current)
+    }
+  }, [syncGeneratingConversationIds])
+
+  const resolvePendingToolConfirm = useCallback((approved: boolean, always = false, permissionMode: string | null = null) => {
+    if (!pendingToolConfirm) return
+    const conversationId = pendingToolConfirm.conversationId
+    const rest = (pendingToolConfirmsRef.current[conversationId] ?? [])
+      .filter((item) => item.toolCallId !== pendingToolConfirm.toolCallId)
+    if (rest.length > 0) {
+      pendingToolConfirmsRef.current[conversationId] = rest
+    } else {
+      delete pendingToolConfirmsRef.current[conversationId]
+    }
+    syncGeneratingConversationIds()
+    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved, always, permissionMode)
+    // 队列里还有下一条就接着弹，别让它在后台等到超时。
+    setPendingToolConfirm(rest[0] ?? null)
   }, [pendingToolConfirm, syncGeneratingConversationIds])
 
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-
-    const setupListener = async () => {
-      unlisten = await api.onChatSessionConsent((payload) => {
-        if (cancelled) return
-        pendingSessionConsentsRef.current[payload.conversationId] = payload
-        if (currentConversationIdRef.current === payload.conversationId) {
-          setPendingSessionConsent(payload)
-        }
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
+  useTauriEvent(api.onChatSessionConsent, (payload) => {
+    pendingSessionConsentsRef.current[payload.conversationId] = payload
+    if (currentConversationIdRef.current === payload.conversationId) {
+      setPendingSessionConsent(payload)
     }
   }, [])
 
@@ -2093,6 +2344,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     void api.chatRespondSessionConsent(pendingSessionConsent.conversationId, granted)
     setPendingSessionConsent(null)
   }, [pendingSessionConsent])
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id
+    if (!conversationId) return
+    void api.chatSyncState(conversationId).catch((error) => {
+      console.error('Failed to synchronize chat protocol state:', error)
+    })
+  }, [currentConversation?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -2175,51 +2434,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [openEmbeddedSettings])
 
-  useEffect(() => {
-    const loadFromRoute = () => {
-      const path = hashPath()
-      if (isChatOnboardingRoute(path)) {
-        setChatView('onboarding')
-        return
-      }
-      if (isChatSettingsPath(path)) {
-        setChatView('settings')
-        return
-      }
-      if (isChatAssistantCenterPath(path)) {
-        setChatView('assistants')
-        return
-      }
-      if (isChatSkillCenterPath(path)) {
-        setChatView('skill')
-        return
-      }
-      if (isChatMcpCenterPath(path)) {
-        setChatView('mcp')
-        return
-      }
-      if (isChatKnowledgeCenterPath(path)) {
-        setChatView('knowledge')
-        return
-      }
-      if (isChatPluginCenterPath(path)) {
-        setChatView('plugins')
-        return
-      }
-      setChatView('conversation')
-      const conversationId = getRouteConversationId()
-      if (!conversationId) {
-        currentConversationIdRef.current = null
-        applyConversation(null)
-        restoreStreamingPreview(null)
-        return
-      }
-      void reloadConversation(conversationId, { force: true })
-    }
-    loadFromRoute()
-    window.addEventListener('hashchange', loadFromRoute)
-    return () => window.removeEventListener('hashchange', loadFromRoute)
-  }, [applyConversation, getRouteConversationId, reloadConversation, restoreStreamingPreview])
 
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -2244,9 +2458,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     api.onChatOpenConversation((payload) => {
       if (cancelled || !payload.conversationId) return
       setChatView('conversation')
-      syncConversationRoute(payload.conversationId)
-      if (payload.reload !== false) {
-        void reloadConversation(payload.conversationId, { force: true })
+      if (getRouteConversationId() === payload.conversationId) {
+        // hash 不变、不会触发 hashchange，按需显式重载。
+        if (payload.reload !== false) {
+          void reloadConversation(payload.conversationId, { force: true })
+        }
+      } else {
+        // hash 变化统一走 loadFromRoute 加载；这里再显式 reload 会让同一对话读两遍。
+        syncConversationRoute(payload.conversationId)
       }
       refreshSidebar()
     }).then((dispose) => {
@@ -2262,6 +2481,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const handleSelectConversation = useCallback(async (conversationId: string) => {
     setAssistantStreamStatsByMessageId({})
+    setHookWarning(null)
     try {
       const conv = await chatApi.getConversation(conversationId)
       currentConversationIdRef.current = conversationId
@@ -2303,7 +2523,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setPendingUserMessageConversationId(null)
     setContextError('')
     setContextLoading(false)
-    setContextCompressing(false)
     setStreamError('')
   }, [
     activeAgentRuntime,
@@ -2342,10 +2561,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (isConversationInFlight(inFlightConversationsRef.current, conversationId)) {
         await chatApi.cancelStream(conversationId)
       }
-      delete streamSnapshotsRef.current[conversationId]
-      delete pendingToolConfirmsRef.current[conversationId]
-      delete pendingSessionConsentsRef.current[conversationId]
-      delete streamErrorsRef.current[conversationId]
+      clearConversationLocalState(localState(), conversationId, { streamErrors: true })
       clearConversationInFlight(conversationId)
       forgetRememberedChatRoute()
       currentConversationIdRef.current = null
@@ -2363,7 +2579,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       console.error('Failed to clear chat:', err)
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '清空对话失败')
     }
-  }, [applyConversation, clearConversationInFlight, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute])
+  }, [applyConversation, clearConversationInFlight, localState, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute])
 
   const handleStartAssistantChat = useCallback(async (assistant: ChatAssistant) => {
     setAssistantStreamStatsByMessageId({})
@@ -2584,7 +2800,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     }
 
-    if (!agentRuntimesEqual(normalizeAgentRuntime(conversation), draftAgentRuntime)) {
+    // 草稿运行时只落到「尚无消息」的会话（欢迎页选好 Agent → 首次发送建会话的场景）。已有消息的
+    // 会话以其自身运行时为准：draft 在切换会话/重启后可能是陈旧的（如初始 BUILTIN），无条件回写
+    // 会被后端「一 agent 一对话」绑定校验（check_runtime_switch_allowed）拒绝，把正常发送卡死。
+    // 空会话判定与后端放行条件一致。
+    if (
+      (conversation.messages?.length ?? 0) === 0
+      && !agentRuntimesEqual(normalizeAgentRuntime(conversation), draftAgentRuntime)
+    ) {
       try {
         conversation = await chatApi.setAgentRuntime(conversation.id, draftAgentRuntime)
         applyConversation(conversation)
@@ -2627,10 +2850,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     }
 
-    // 同理：把欢迎页选好的思考等级草稿落到新会话上。
+    // 把全局默认思考等级套到「从未显式设过等级」的会话上（新会话 / 旧的 null 会话）。
+    // 只在 convLevel 为 null 时应用——绝不覆盖用户为某个会话显式选的等级。
     if (draftThinkingLevel) {
       const convLevel = conversation.thinking_level ?? conversation.thinkingLevel ?? null
-      if (convLevel !== draftThinkingLevel) {
+      if (convLevel === null) {
         try {
           conversation = await chatApi.updateConversation(conversation.id, {
             thinkingLevel: draftThinkingLevel,
@@ -2638,6 +2862,23 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           applyConversation(conversation)
         } catch (err) {
           console.error('Failed to apply thinking level draft before send:', err)
+        }
+      }
+    }
+
+    // 会话级三态联网搜索（任务 07-23）：把欢迎页草稿或记住的全局默认落到新会话上
+    // （仅当会话尚未显式设过模式时），后端 Builtin 注入依赖会话字段而非前端展示值。
+    {
+      const desiredMode = draftWebSearchMode ?? loadLastWebSearchMode()
+      const convMode = conversation.web_search_mode ?? conversation.webSearchMode ?? null
+      if (desiredMode && convMode === null) {
+        try {
+          conversation = await chatApi.updateConversation(conversation.id, {
+            webSearchMode: desiredMode,
+          })
+          applyConversation(conversation)
+        } catch (err) {
+          console.error('Failed to apply web search mode draft before send:', err)
         }
       }
     }
@@ -2708,6 +2949,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       resetStreamStore()
       setStreamCoarse({ streaming: true })
       setStreamErrorForConversation(conversationId, '')
+      // 上一轮的 Hook 失败警告不该跨轮挂着——它描述的是已经结束的那次运行。
+      setHookWarning(null)
       activeRunIdRef.current = null
       streamStartedAtRef.current = startedAt
       streamingContentRef.current = ''
@@ -2808,6 +3051,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     draftForceKnowledgeSearch,
     draftThinkingLevel,
     draftReplyModels,
+    draftWebSearchMode,
     effectiveSkillId,
     enabledSkills,
     ensureStreamSnapshot,
@@ -2909,6 +3153,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const importExternalConversationRef = useRef(importExternalConversation)
   importExternalConversationRef.current = importExternalConversation
 
+  const { drainExternalSends, hasPendingDrainRequest } = useExternalSendQueue({
+    onEnterConversationView: () => setChatView('conversation'),
+    onImportConversation: (messages, attachmentPaths) =>
+      importExternalConversationRef.current(messages, attachmentPaths),
+    onSendMessage: (content, attachments, options) =>
+      handleSendMessageRef.current(content, attachments, options),
+    onError: setStreamError,
+  })
+
   const handleExecuteAgentPlan = useCallback(async (messageId: string) => {
     const conversation = currentConversation
     if (!conversation) return
@@ -2958,76 +3211,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setStreamErrorForConversation,
   ])
 
-  const drainExternalSends = useCallback(async () => {
-    if (externalSendDrainProcessingRef.current) {
-      externalSendDrainRequestedRef.current = true
-      return
-    }
-
-    externalSendDrainProcessingRef.current = true
-    try {
-      do {
-        externalSendDrainRequestedRef.current = false
-
-        const result = await api.chatTakeExternalSends()
-        if (!result.success) {
-          const error = 'error' in result && typeof result.error === 'string'
-            ? result.error
-            : ''
-          throw new Error(error || 'Failed to take external Chat messages')
-        }
-        const requests = result.requests ?? []
-        if (requests.length > 0) {
-          externalSendQueueRef.current.push(...requests)
-        }
-
-        const request = externalSendQueueRef.current[0]
-        if (!request) continue
-        setChatView('conversation')
-        const attachmentPaths = (request.attachments ?? [])
-          .map((attachment) => attachment.path)
-          .filter((path): path is string => !!path)
-
-        // 历史预置分支：把 Lens 完整多轮历史 + 截图搬成一个新会话（不发消息、不触发回复），落地末尾可续聊。
-        if (request.messages && request.messages.length > 0) {
-          await importExternalConversationRef.current(request.messages, attachmentPaths)
-          externalSendQueueRef.current.shift()
-          continue
-        }
-
-        const attachments = (request.attachments ?? [])
-          .filter((attachment) => attachment.path)
-          .map<PendingAttachment>((attachment, index) => ({
-            id: attachment.id || `external-${request.id}-${index}`,
-            type: attachment.type === 'file' ? 'file' : 'image',
-            name: attachment.name || (attachment.type === 'file' ? 'Attachment' : 'Image'),
-            path: attachment.path,
-          }))
-        const accepted = await handleSendMessageRef.current(
-          request.content ?? '',
-          attachments,
-          { forceNewConversation: true },
-        )
-        if (accepted) {
-          externalSendQueueRef.current.shift()
-        } else {
-          externalSendDrainRequestedRef.current = true
-          break
-        }
-      } while (externalSendDrainRequestedRef.current || externalSendQueueRef.current.length > 0)
-    } catch (err) {
-      console.error('Failed to process external Chat message:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '外部消息发送失败')
-    } finally {
-      externalSendDrainProcessingRef.current = false
-      if (externalSendDrainRequestedRef.current) {
-        window.setTimeout(() => {
-          void drainExternalSends()
-        }, 0)
-      }
-    }
-  }, [])
-
   useEffect(() => {
     let cancelled = false
     const disposers: Array<() => void> = []
@@ -3062,10 +3245,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [drainExternalSends])
 
   useEffect(() => {
-    if (!streamCoarse.streaming && externalSendDrainRequestedRef.current) {
+    if (!streamCoarse.streaming && hasPendingDrainRequest()) {
       void drainExternalSends()
     }
-  }, [drainExternalSends, streamCoarse.streaming])
+  }, [drainExternalSends, hasPendingDrainRequest, streamCoarse.streaming])
 
   const handleUpdateMessage = useCallback(
     async (messageId: string, content: string) => {
@@ -3105,6 +3288,30 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [applyConversation, refreshSidebar],
   )
 
+  // 一键 rewind（「回到这里」）：截掉这条提问及其之后的所有消息，原文塞回输入框，用户改完再自己发。
+  // 破坏性且不可撤销 → 先 confirm（与删除消息同一把关）。
+  const handleRewindMessage = useCallback(
+    async (messageId: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      if (!window.confirm('回到这里？这条提问及其之后的所有消息会被删除，原文放回输入框。')) return
+      try {
+        const { conversation, content } = await chatApi.rewindToMessage(conv.id, messageId)
+        applyConversation(conversation)
+        setAssistantStreamStatsByMessageId({})
+        setStreamError('')
+        refreshSidebar()
+        insertTextIntoComposer(content)
+        // 上下文用量后台补算（后端 rewind 故意不算，见那边注释）：几秒的 MCP 列表不该挡住 UI。
+        void refreshContextStats(conversation.id)
+      } catch (err) {
+        console.error('Failed to rewind conversation:', err)
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '回到这里失败')
+      }
+    },
+    [applyConversation, refreshContextStats, refreshSidebar],
+  )
+
   // 对话分支（方案 B）：在某条消息处建分支——把该消息及之前的消息复制进新对话，
   // 立即打开新对话（不自动发送）。源对话只读、不受影响。
   const handleForkMessage = useCallback(
@@ -3126,6 +3333,39 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     },
     [applyConversation, refreshSidebar, restoreStreamingPreview, syncConversationRoute],
+  )
+
+  const handleSaveMessageToNote = useCallback(
+    async (messageId: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return false
+      const message = conv.messages.find((m) => m.id === messageId)
+      if (!message) return false
+      const content = message.content?.trim() || ''
+      if (!content) return false
+
+      const firstLine = content
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.length > 0)
+      const title = firstLine
+        ? firstLine
+            .replace(/^#+\s*/, '')
+            .replace(/\*\*|__|\*|_|`>/g, '')
+            .slice(0, 40)
+            .trim() || '对话笔记'
+        : '对话笔记'
+      try {
+        await api.notesCreate(title, content, '', 'chat')
+        setStreamError('')
+        return true
+      } catch (err) {
+        console.error('Failed to save message to note:', err)
+        setStreamError(err instanceof Error ? err.message : String(err) || '存为笔记失败')
+        return false
+      }
+    },
+    [],
   )
 
   // 多答组「选中条」（任务 06-30 / D5）：标记某组进下一轮历史的列。默认第一列；用户点选改。
@@ -3282,9 +3522,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     await handleRuntimeChange(next)
   }, [activeAgentRuntime, handleRuntimeChange])
 
+  // 底栏胶囊选档：本地 CLI 会话写该 CLI 的沙盒档位，内置会话写 Kivio 的 Act/Plan/Orchestrate。
+  const handleComposerModeChange = useCallback(async (value: string) => {
+    if (usesExternalRuntime) {
+      await handleExternalSandboxChange(value)
+      return
+    }
+    await handleAgentPlanModeChange(value as AgentPlanMode)
+  }, [handleAgentPlanModeChange, handleExternalSandboxChange, usesExternalRuntime])
+
   const handleModelChange = useCallback(async (providerId: string, model: string) => {
     setDraftProviderId(providerId)
     setDraftModel(model)
+    saveLastModel(providerId, model) // 记住为全局默认
 
     if (!currentConversation) return
 
@@ -3302,6 +3552,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevel | null) => {
     setDraftThinkingLevel(level)
+    saveLastThinkingLevel(level) // 记住为全局默认，不再回落到 high
     if (!currentConversation) return
     try {
       const updatedConv = await chatApi.updateConversation(currentConversation.id, {
@@ -3311,6 +3562,23 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     } catch (err) {
       console.error('Failed to change thinking level:', err)
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '思考等级切换失败')
+    }
+  }, [applyConversationMeta, currentConversation])
+
+  // 会话级三态联网搜索（任务 07-23）：设置模式,持久化到会话(欢迎页先存草稿),
+  // 并记住为全局默认——之后所有新会话/未显式设置的会话自动沿用(与思考等级同款)。
+  const handleSetWebSearchMode = useCallback(async (mode: WebSearchMode) => {
+    setDraftWebSearchMode(mode)
+    saveLastWebSearchMode(mode)
+    if (!currentConversation) return
+    try {
+      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+        webSearchMode: mode,
+      })
+      applyConversationMeta(updatedConv)
+    } catch (err) {
+      console.error('Failed to change web search mode:', err)
+      setStreamError(typeof err === 'string' ? err : (err as Error).message || '联网搜索模式切换失败')
     }
   }, [applyConversationMeta, currentConversation])
 
@@ -3419,6 +3687,158 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     rememberChatSidebarCollapsed(collapsed)
   }, [])
 
+  // ---------- Right Dock ----------
+  const [dockOpen, setDockOpen] = useState(() => getRememberedDockOpen())
+  const [dockWidth, setDockWidth] = useState(() => getRememberedDockWidth())
+  const [dockTab, setDockTab] = useState<DockTab>(() => getRememberedDockTab())
+  const [dockWorkdir, setDockWorkdir] = useState('')
+  const [treeExpanded, setTreeExpanded] = useState<string[]>([])
+  const [dockReveal, setDockReveal] = useState<DockRevealRequest>(null)
+  const [dockPreview, setDockPreview] = useState<DockPreviewRequest>(null)
+
+  // 工作目录跟随当前会话 / 选中项目 / agent runtime 变化，由后端 dock_resolve_cwd 解析
+  // （外部 agent 与内置 runtime 的实际写入目录不同，runtime 切换必须重解析）。
+  useEffect(() => {
+    const conversationId = currentConversation?.id ?? null
+    const projectId = selectedProject?.id ?? null
+    if (!conversationId && !projectId) {
+      setDockWorkdir('')
+      return
+    }
+    let cancelled = false
+    dockApi
+      .resolveCwd(conversationId, projectId)
+      .then((cwd) => {
+        if (!cancelled) setDockWorkdir(cwd)
+      })
+      .catch(() => {
+        if (!cancelled) setDockWorkdir('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentConversation?.id, selectedProject?.id, activeAgentRuntime.kind])
+
+  // 文件树展开状态按 workdir 持久化，workdir 切换时重新载入。
+  useEffect(() => {
+    setTreeExpanded(dockWorkdir ? getRememberedTreeExpanded(dockWorkdir) : [])
+  }, [dockWorkdir])
+
+  const handleToggleDock = useCallback(() => {
+    setDockOpen((prev) => {
+      rememberDockOpen(!prev)
+      return !prev
+    })
+  }, [])
+
+  const handleCloseDock = useCallback(() => {
+    setDockOpen(false)
+    rememberDockOpen(false)
+  }, [])
+
+  // 输入栏 Git 胶囊「在 Git 面板中打开」：展开 Dock 并切到 Git 页。
+  const handleOpenDockGit = useCallback(() => {
+    setDockTab('git')
+    rememberDockTab('git')
+    setDockOpen(true)
+    rememberDockOpen(true)
+  }, [])
+
+  const handleDockWidthChange = useCallback((nextWidth: number) => {
+    setDockWidth(nextWidth)
+    rememberDockWidth(nextWidth)
+  }, [])
+
+  const handleDockTabChange = useCallback((tab: DockTab) => {
+    setDockTab(tab)
+    rememberDockTab(tab)
+  }, [])
+
+  const handleTreeExpandedChange = useCallback(
+    (paths: string[]) => {
+      setTreeExpanded(paths)
+      if (dockWorkdir) rememberTreeExpanded(dockWorkdir, paths)
+    },
+    [dockWorkdir],
+  )
+
+  // Git 面板「在文件树中定位」：切到文件 tab 并展开定位。
+  const handleDockRevealInTree = useCallback((path: string) => {
+    setDockTab('files')
+    rememberDockTab('files')
+    setDockOpen(true)
+    rememberDockOpen(true)
+    setDockReveal((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+
+  // 工具卡片点文件名 → dock 查看器预览。workdir 内的路径同时在树里定位；
+  // workdir 外的绝对路径（如写到桌面的文件）用其所在目录作查看器根。
+  useEffect(
+    () =>
+      onDockPreviewRequest((rawPath) => {
+        const normalize = (value: string) => value.replace(/\\/g, '/').replace(/^\/\/\?\//, '')
+        const target = normalize(rawPath.trim())
+        if (!target) return
+        const wd = normalize(dockWorkdir)
+        const isAbsolute = /^(?:[a-zA-Z]:)?\//.test(target)
+        let request: { workdir: string; path: string } | null = null
+        let revealRel: string | null = null
+        if (isAbsolute) {
+          if (wd && target.toLowerCase().startsWith(`${wd.toLowerCase()}/`)) {
+            revealRel = target.slice(wd.length + 1)
+            request = { workdir: dockWorkdir, path: revealRel }
+          } else {
+            const idx = target.lastIndexOf('/')
+            if (idx > 0) request = { workdir: target.slice(0, idx), path: target.slice(idx + 1) }
+          }
+        } else if (dockWorkdir) {
+          revealRel = target.replace(/^\.\//, '')
+          request = { workdir: dockWorkdir, path: revealRel }
+        }
+        if (!request) return
+        setDockTab('files')
+        rememberDockTab('files')
+        setDockOpen(true)
+        rememberDockOpen(true)
+        if (revealRel) setDockReveal((prev) => ({ path: revealRel, nonce: (prev?.nonce ?? 0) + 1 }))
+        const next = request
+        setDockPreview((prev) => ({ kind: 'file', ...next, nonce: (prev?.nonce ?? 0) + 1 }))
+      }),
+    [dockWorkdir],
+  )
+
+  // 工具卡片点 +N -N 徽标 → dock 侧栏渲染整份带色 diff。
+  useEffect(
+    () =>
+      onDockDiffPreviewRequest((payload) => {
+        setDockTab('files')
+        rememberDockTab('files')
+        setDockOpen(true)
+        rememberDockOpen(true)
+        setDockPreview((prev) => ({ kind: 'diff', ...payload, nonce: (prev?.nonce ?? 0) + 1 }))
+      }),
+    [],
+  )
+
+  // claude 交计划（ExitPlanMode）→ dock 侧栏渲染整份计划。审批卡里那块 `max-h-40` 的
+  // 灰框只够扫一眼，而「批不批这个计划」是要读完才能决定的。
+  useEffect(
+    () =>
+      onDockMarkdownPreviewRequest((payload) => {
+        setDockTab('files')
+        rememberDockTab('files')
+        setDockOpen(true)
+        rememberDockOpen(true)
+        setDockPreview((prev) => ({ kind: 'markdown', ...payload, nonce: (prev?.nonce ?? 0) + 1 }))
+      }),
+    [],
+  )
+
+  // 文件树「插入 @ 引用」：经 composerInsert 文本信道注入输入框正文。
+  const handleInsertFileMention = useCallback((path: string) => {
+    insertTextIntoComposer(`@${path} `)
+  }, [])
+
   const handleCollapseSidebar = useCallback(() => {
     setSidebarCollapsedPersisted(true)
   }, [setSidebarCollapsedPersisted])
@@ -3487,6 +3907,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     dropConversationLocally(id)
   }, [dropConversationLocally])
 
+  const settingsPanelActive = chatView === 'settings' && extensionsNavItem === null
+
+  const handleSidebarOpenExtensionsItem = useCallback((item: ExtensionsNavItem) => {
+    // 设置页开着时点扩展项：先走退场（含未保存改动确认），否则设置页被硬切走、动画不播。
+    // 侧栏在设置页下常驻可点（见下方 collapsed 注释）后这条路径才可达。
+    runAfterLeavingSettings(() => openExtensionsItem(item))
+  }, [openExtensionsItem, runAfterLeavingSettings])
+
   const handleSidebarOpenSettings = useCallback(() => {
     const settingsPanelOpen = chatView === 'settings' && extensionsNavItem === null
     if (settingsPanelOpen) {
@@ -3500,6 +3928,27 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setExtensionsNavItem(null)
     openEmbeddedSettings('chat')
   }, [chatView, extensionsNavItem, handleSettingsClose, openEmbeddedSettings])
+
+  // 侧栏账户菜单：语言切换 / 检查更新。都是全局行为，所以留在 Chat 这层，
+  // 侧栏只负责触发（它拿不到 settings 也不该自己全量保存）。
+  const handleSidebarSelectLang = useCallback((next: Lang) => {
+    setUiLang(next)
+    void (async () => {
+      try {
+        const settings = await getSettingsCached()
+        await saveSettingsCached({ ...settings, settingsLanguage: next })
+      } catch (err) {
+        console.error('Failed to save UI language:', err)
+      }
+    })()
+  }, [])
+
+  // 检查更新：设置「关于」页已有完整流程（检查中 / 有新版 / 已最新 + 下载入口），
+  // 这里只负责把用户送过去，不重造一套。
+  const handleSidebarCheckUpdate = useCallback(() => {
+    setExtensionsNavItem(null)
+    openEmbeddedSettings('about')
+  }, [openEmbeddedSettings])
 
   const handleSidebarSearchOpenChange = useCallback((open: boolean) => {
     if (open) {
@@ -3516,15 +3965,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 带高 24px（低于各中心页 pt-7/py-6 的内容起点），不遮挡任何可交互内容；
   // 收起态按钮行复用会话页收起态顶栏的同一套行高/缩进类（52px 行 + mac 交通灯缩进），
   // 保证收起/展开、中心页/会话页之间按钮位置完全不跳。
-  const centerPageTopStrip = (
+  //
+  // 仅 macOS 需要：Windows / Linux 的 ChatTitlebar 是一条常驻全宽带，
+  // 拖拽区与那两枚按钮本就在带里且不随侧栏收展移动，这条兜底带纯属重复。
+  const centerPageTopStrip = usesNativeTitlebar ? (
     <div className="absolute inset-x-0 top-0 z-20 h-6" data-tauri-drag-region>
       {sidebarCollapsed && (
         <div
-          className={`chat-titlebar-row ${chatTitlebarRowClass} ${
-            usesNativeTitlebar
-              ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`
-              : 'px-3'
-          }`}
+          className={`chat-titlebar-row ${chatTitlebarRowClass} ${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`}
           data-tauri-drag-region
         >
           <ChatTitlebarActions
@@ -3535,15 +3983,120 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         </div>
       )}
     </div>
+  ) : null
+
+  // 中心页为上方那条收起态按钮行让出的高度（Windows / Linux 无此行，见 centerPageTopStrip）。
+  const centerPagePadTop = usesNativeTitlebar && sidebarCollapsed ? 'pt-12' : ''
+  // 扩展中心页共用的外壳：与会话主区同款浮起卡片（见 .chat-center-page）。
+  // 六个中心页共用 key="center"：React 复用同一个 div，入场动画只在「从会话页进来」时跑一次。
+  // 各页各自 key 的话每次互切都是新节点 → 重播 opacity 0→1，中间几帧透出背景，就是那下闪。
+  const centerPageClass = `chat-motion-view-in chat-center-page relative flex min-h-0 min-w-0 flex-1 flex-col ${centerPagePadTop}`
+
+  // 会话页顶栏控件。非 mac 渲染进全宽标题栏带（单行 chrome），mac 仍留在主区 52px 顶栏。
+  // 抽成变量而非组件：依赖十余个 Chat 局部状态与回调，拆组件只会换来一长串 props。
+  const conversationTitlebarControls = (
+    <>
+      <div className="flex min-w-0 items-center gap-1">
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <RuntimePicker
+            agentRuntime={activeAgentRuntime}
+            onRuntimeChange={handleRuntimeChange}
+            conversationId={currentConversation?.id}
+            locked={
+              // 一 agent 一对话：有消息后锁死 kind/agent（内置 Kivio 与本地 CLI 一律）。
+              !!currentConversation &&
+              (currentConversation.messages?.length ?? 0) > 0
+            }
+          />
+        </div>
+        <div className="min-w-0 max-w-full shrink" data-tauri-drag-region="false">
+          {usesExternalRuntime ? (
+            <ExternalModelSelector
+              agentRuntime={activeAgentRuntime}
+              onModelChange={handleExternalModelChange}
+              conversationId={currentConversation?.id}
+            />
+          ) : (
+            <ModelSelector
+              currentProviderId={activeProviderId}
+              currentModel={activeModel}
+              onModelChange={handleModelChange}
+            />
+          )}
+        </div>
+        {!usesExternalRuntime && (
+          <div className="shrink-0 chat-thinking-pill-wrap" data-tauri-drag-region="false">
+            <ThinkingLevelSelector
+              currentProviderId={activeProviderId}
+              currentModel={activeModel}
+              value={
+                currentConversation
+                  ? (currentConversation.thinking_level
+                      ?? currentConversation.thinkingLevel
+                      ?? draftThinkingLevel)
+                  : draftThinkingLevel
+              }
+              onChange={handleThinkingLevelChange}
+            />
+          </div>
+        )}
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <PermissionPicker
+            agentRuntime={activeAgentRuntime}
+            approvalPolicy={approvalPolicy}
+            onApprovalPolicyChange={handleApprovalPolicyChange}
+          />
+        </div>
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <BackgroundJobsIndicator />
+        </div>
+      </div>
+      <div className="min-w-5 flex-1" data-tauri-drag-region />
+      <div className="flex min-w-0 shrink items-center justify-end gap-1">
+        <div className="shrink-0" data-tauri-drag-region="false">
+          <IconButton
+            label={i18n[uiLang].dockToggle}
+            size="sm"
+            variant="ghost"
+            className={dockOpen ? 'bg-black/5 text-neutral-800 dark:bg-white/10 dark:text-neutral-100' : ''}
+            onClick={handleToggleDock}
+          >
+            <PanelRight size={15} />
+          </IconButton>
+        </div>
+      </div>
+    </>
   )
 
   return (
+    <LangContext.Provider value={uiLang}>
     <div
       className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
     >
-      {!usesNativeTitlebar && <WindowControls />}
-      <div className="flex h-full min-h-0 w-full">
-        {chatView !== 'onboarding' && !(chatView === 'settings' && extensionsNavItem === null) ? (
+      {!usesNativeTitlebar && (
+        <ChatTitlebar
+          sidebarExpanded={!sidebarCollapsed}
+          /* 与下方 <Sidebar collapsed> 取反同源：设置页里侧栏也是收起的，
+             只看 sidebarCollapsed 会在设置页多留 240px 空档。 */
+          sidebarVisible={!(sidebarCollapsed || settingsPanelActive)}
+          settingsMode={settingsPanelActive}
+          onToggleSidebar={() => {
+            if (sidebarCollapsed) setSidebarCollapsedPersisted(false)
+            else handleCollapseSidebar()
+          }}
+          onNewConversation={() => {
+            runAfterLeavingSettings(() => void handleNewConversation())
+          }}
+        >
+          {chatView === 'conversation' ? conversationTitlebarControls : null}
+        </ChatTitlebar>
+      )}
+      <div className="flex min-h-0 w-full flex-1">
+        {chatView !== 'onboarding' ? (
+        /* 设置页自带 200px 导航栏，聊天侧栏此时借用已有的折叠过渡整体滑出（不再直接卸载，
+           否则左列会先空一帧、且关闭时侧栏是瞬间 pop 回来的）。退场期保持折叠，
+           等视图真正切回会话后再滑入，与会话页入场同时发生 —— 否则侧栏会在设置页
+           淡出的同时把它挤窄。 */
         <Sidebar
           lang={uiLang}
           currentConversationId={currentConversation?.id}
@@ -3557,11 +4110,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           onNewConversation={handleSidebarNewConversation}
           onConversationDeleted={handleSidebarConversationDeleted}
           onForceDropConversation={handleSidebarForceDropConversation}
-          onOpenExtensionsItem={openExtensionsItem}
+          onOpenExtensionsItem={handleSidebarOpenExtensionsItem}
           onOpenSettings={handleSidebarOpenSettings}
-          settingsActive={chatView === 'settings' && extensionsNavItem === null}
+          onSelectLang={handleSidebarSelectLang}
+          onCheckUpdate={handleSidebarCheckUpdate}
+          settingsActive={settingsPanelActive}
           extensionsActive={extensionsActive}
-          collapsed={sidebarCollapsed}
+          collapsed={sidebarCollapsed || settingsPanelActive}
           onToggleCollapsed={handleCollapseSidebar}
           refreshKey={sidebarRefreshKey}
           profileRefreshKey={sidebarProfileRefreshKey}
@@ -3571,7 +4126,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         ) : null}
 
         {chatView === 'onboarding' ? (
-          <div className="chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <OnboardingShell
               onComplete={handleOnboardingExit}
               onSkip={handleOnboardingExit}
@@ -3579,8 +4134,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             />
           </div>
         ) : chatView === 'settings' ? (
-          <div key="settings" className="chat-motion-view-in chat-win-titlebar-safe flex min-h-0 min-w-0 flex-1 flex-col">
-            <Suspense fallback={null}>
+          /* Suspense 必须包在动画容器外面：放在里面时 fallback=null 会让容器先带着空白挂载、
+             动画播在空白上，lazy 内容晚几帧才 pop 进来（进场看起来"没有动画"）。
+             包在外面则容器与内容一起挂载，动画全程播在真实内容上。 */
+          <Suspense fallback={null}>
+            <SettingsEnterPane
+              key="settings"
+              exiting={settingsExiting}
+              className={`flex min-h-0 min-w-0 flex-1 flex-col${
+                !usesNativeTitlebar && settingsPanelActive ? ' settings-embedded-under-strip' : ''
+              }`}
+            >
               <SettingsShell
                 ref={settingsRef}
                 variant="embedded"
@@ -3590,10 +4154,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                 onSettingsChange={handleSettingsChange}
                 onReady={emitContentReady}
               />
-            </Suspense>
-          </div>
+            </SettingsEnterPane>
+          </Suspense>
         ) : chatView === 'assistants' ? (
-          <div key="assistants" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <AssistantCenter
@@ -3606,46 +4170,56 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </Suspense>
           </div>
         ) : chatView === 'skill' ? (
-          <div key="skill" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <SkillCenter onSkillsChanged={() => void loadSkills()} />
             </Suspense>
           </div>
         ) : chatView === 'mcp' ? (
-          <div key="mcp" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <McpCenter />
             </Suspense>
           </div>
         ) : chatView === 'knowledge' ? (
-          <div key="knowledge" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <KnowledgeCenter />
             </Suspense>
           </div>
+        ) : chatView === 'notes' ? (
+          <div key="center" className={centerPageClass}>
+            {centerPageTopStrip}
+            <Suspense fallback={null}>
+              <NotesCenter />
+            </Suspense>
+          </div>
         ) : chatView === 'plugins' ? (
-          <div key="plugins" className={`chat-motion-view-in chat-win-titlebar-safe relative flex min-h-0 min-w-0 flex-1 flex-col ${sidebarCollapsed ? 'pt-12' : ''}`}>
+          <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
               <PluginCenter onRequestAiInstall={handleRequestPluginAiInstall} />
             </Suspense>
           </div>
         ) : (
-          <div className="chat-main-pane relative flex min-w-0 flex-1 flex-col">
+          <div className="chat-motion-pane-in chat-main-pane relative flex min-w-0 flex-1 flex-col">
             {/* 图片查看器为浮层(见下方 overlay),不替换主面板 —— 否则会卸载 InputBar,
                 丢掉待发送附件 / 草稿。here 起正常内容,始终挂载。 */}
             <>
+                {/* 非 mac 的顶栏控件已并进全宽标题栏带（见上方 ChatTitlebar），此行只 mac 渲染。 */}
+                {usesNativeTitlebar && (
                 <header
               className={`chat-titlebar-row ${chatTitlebarRowClass} min-w-0 gap-2 ${
-                sidebarCollapsed && usesNativeTitlebar
-                  ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac`
+                sidebarCollapsed
+                  ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac pr-3`
                   : 'px-6'
-              } ${sidebarCollapsed ? 'pr-3' : ''} ${!usesNativeTitlebar ? 'chat-win-titlebar-safe' : ''}`}
+              }`}
               data-tauri-drag-region
             >
+              {/* mac 收起态把这两枚按钮借到主区顶栏、给交通灯让位。 */}
               {sidebarCollapsed && (
                 <ChatTitlebarActions
                   sidebarExpanded={false}
@@ -3655,63 +4229,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                   }}
                 />
               )}
-              <div className="flex min-w-0 items-center gap-1">
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <RuntimePicker
-                    agentRuntime={activeAgentRuntime}
-                    onRuntimeChange={handleRuntimeChange}
-                    conversationId={currentConversation?.id}
-                  />
-                </div>
-                <div className="min-w-0 max-w-full shrink" data-tauri-drag-region="false">
-                  {usesExternalRuntime ? (
-                    <ExternalModelSelector
-                      agentRuntime={activeAgentRuntime}
-                      onModelChange={handleExternalModelChange}
-                      conversationId={currentConversation?.id}
-                    />
-                  ) : (
-                    <ModelSelector
-                      currentProviderId={activeProviderId}
-                      currentModel={activeModel}
-                      onModelChange={handleModelChange}
-                    />
-                  )}
-                </div>
-                {!usesExternalRuntime && (
-                  <div className="shrink-0 chat-thinking-pill-wrap" data-tauri-drag-region="false">
-                    <ThinkingLevelSelector
-                      currentProviderId={activeProviderId}
-                      currentModel={activeModel}
-                      value={
-                        currentConversation
-                          ? (currentConversation.thinking_level
-                              ?? currentConversation.thinkingLevel
-                              ?? null)
-                          : draftThinkingLevel
-                      }
-                      onChange={handleThinkingLevelChange}
-                    />
+              {conversationTitlebarControls}
+                </header>
+                )}
+
+                {protocolVersionMismatch && (
+                  <div
+                    className="flex shrink-0 items-center gap-2 border-y border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-900 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-100"
+                    role="alert"
+                  >
+                    <TriangleAlert className="shrink-0" size={15} aria-hidden="true" />
+                    <span>组件版本不一致，请重启 Kivio</span>
                   </div>
                 )}
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <PermissionPicker
-                    agentRuntime={activeAgentRuntime}
-                    conversationId={currentConversation?.id}
-                    onSandboxChange={handleExternalSandboxChange}
-                    approvalPolicy={approvalPolicy}
-                    onApprovalPolicyChange={handleApprovalPolicyChange}
-                  />
-                </div>
-                <div className="shrink-0" data-tauri-drag-region="false">
-                  <BackgroundJobsIndicator />
-                </div>
-              </div>
-              <div className="min-w-5 flex-1" data-tauri-drag-region />
-              <div className="flex min-w-0 shrink items-center justify-end gap-1">
-                <AgentTodoIndicator todoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null} />
-              </div>
-                </header>
 
                 <div className="flex min-h-0 flex-1 flex-col">
                   {showEmptyHero ? (
@@ -3725,13 +4255,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                           ? currentAssistantSnapshot.name
                           : selectedProject
                             ? `Start in “${selectedProject.name}”`
-                            : emptyHeroGreeting.text
+                            : selectedSet
+                              ? `Start in “${selectedSet.name}”`
+                              : emptyHeroGreeting.text
                       }
                     >
                       {currentAssistantSnapshot ? (
                         currentAssistantSnapshot.name
                       ) : selectedProject ? (
                         `Start in “${selectedProject.name}”`
+                      ) : selectedSet ? (
+                        `Start in “${selectedSet.name}”`
                       ) : (
                         <TypewriterText
                           key={emptyHeroGreeting.key}
@@ -3761,6 +4295,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       toolStatusHint={toolStatusHint}
                       sendDisabledReason={sendDisabledReason}
                       agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                      agentTodoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null}
                       onAgentPlanModeChange={handleAgentPlanModeChange}
                       enabledSkills={slashSkills}
                       onOpenSkillSettings={openSkillCenter}
@@ -3768,6 +4303,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       conversationProject={conversationProject}
                       onSelectProject={handleSidebarSelectProject}
                       showProjectEntry
+                      selectedSet={selectedSet}
+                      onSelectSet={handleSidebarSelectSet}
                       currentAssistant={currentAssistantSnapshot ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name } : null}
                       onOpenAssistantCenter={openAssistantCenter}
                       onSelectAssistant={handleSelectAssistant}
@@ -3781,8 +4318,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
                       mcpServers={mcpServers}
                       onToggleMcpServer={handleToggleMcpServer}
-                      webSearchEnabled={webSearchEnabled}
-                      onToggleWebSearch={handleToggleWebSearch}
+                      webSearchMode={activeWebSearchMode}
+                      onSetWebSearchMode={handleSetWebSearchMode}
+                      builtinWebSearchSupported={activeBuiltinWebSearchSupported}
                       replyModels={activeReplyModels}
                       onChangeReplyModels={handleChangeReplyModels}
                       contextSlot={
@@ -3798,12 +4336,38 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                           lang={uiLang}
                         />
                       }
+                      gitWorkdir={dockWorkdir || null}
+                      gitLang={uiLang}
+                      onOpenGitPanel={handleOpenDockGit}
+                      modeOptions={composerModes.options}
+                      modeValue={composerModes.current}
+                      onModeChange={handleComposerModeChange}
                     />
                     </div>
                   </div>
                 </div>
                   ) : (
                     <>
+                  {hookWarning && hookWarning.conversationId === currentConversation?.id && (
+                    <div className="flex items-start gap-2 px-4 pt-2">
+                      <div className="flex min-w-0 flex-1 items-start gap-2 rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] leading-4 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200">
+                        <span className="min-w-0 flex-1">
+                          {i18n[uiLang].chatHookFailed
+                            .replace('{name}', hookWarning.hookName || hookWarning.event)
+                            .replace('{event}', hookWarning.event)}
+                          {` — ${hookWarning.message}`}
+                        </span>
+                        <IconButton
+                          size="xs"
+                          variant="ghost"
+                          label={i18n[uiLang].chatHookDismiss}
+                          onClick={() => setHookWarning(null)}
+                        >
+                          <X size={12} />
+                        </IconButton>
+                      </div>
+                    </div>
+                  )}
                   {(() => {
                     const origin = currentConversation?.forked_from ?? currentConversation?.forkedFrom
                     if (!origin) return null
@@ -3823,6 +4387,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       </div>
                     )
                   })()}
+                  {importedHistoryStale && (
+                    <div className="flex justify-center px-4 pt-2">
+                      <span
+                        className="inline-flex max-w-full items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-[11px] text-amber-700 dark:bg-amber-500/15 dark:text-amber-400"
+                        title="这条会话在 CLI 那边继续聊过。Kivio 里的历史是导入时的快照，不会自动同步；续聊时 CLI 用的仍是它自己那份完整上下文。"
+                      >
+                        <span className="truncate">
+                          这条会话在 CLI 那边有新内容，此处显示的历史不完整
+                        </span>
+                      </span>
+                    </div>
+                  )}
                   <Suspense fallback={<MessageListLoading />}>
                     <MessageList
                       key={currentConversation?.id ?? 'empty'}
@@ -3833,17 +4409,110 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       onUpdateMessage={handleUpdateMessage}
                       onRegenerateMessage={handleRegenerateMessage}
                       onForkMessage={handleForkMessage}
+                      onRewindMessage={handleRewindMessage}
                       onDeleteMessage={handleDeleteMessage}
+                      onSaveMessageToNote={handleSaveMessageToNote}
                       onRetryLastUser={handleRegenerateMessage}
                       onExecuteAgentPlan={handleExecuteAgentPlan}
                       groupSelections={currentConversation?.group_selections ?? currentConversation?.groupSelections ?? {}}
                       onSetGroupSelection={handleSetGroupSelection}
                       contextState={contextState}
-                      compactionInProgress={contextCompressing || agentLoopCompacting}
+                      compactionInProgress={contextCompressing}
                       animateCompactionBoundaryId={animateCompactionBoundaryId}
                       lang={uiLang}
                     />
                   </Suspense>
+                  {/* ponytail: 只挂在有消息的分支。审批必然发生在一次 run 里，此时至少已有一条用户消息，空态 hero 不可能出卡。 */}
+                  {(pendingToolConfirm || pendingSessionConsent || pendingUserPrompt) && (
+                    <div className="shrink-0 px-6">
+                      <div className="mx-auto w-full max-w-4xl">
+                        {/* 问用户的面板排在审批卡之前：它是「整轮停在这里等你」的那一件事。 */}
+                        {pendingUserPrompt && pendingUserPromptRecord && (
+                          <AskUserBlock
+                            variant="docked"
+                            toolCall={pendingUserPromptRecord}
+                            onResolved={() => dismissPendingUserPrompt(
+                              pendingUserPrompt.conversationId,
+                              pendingUserPrompt.toolCallId,
+                            )}
+                          />
+                        )}
+                        {pendingToolConfirm && (
+                          <ApprovalCard
+                            title={toolApprovalTitle(pendingToolConfirm)}
+                            subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
+                            detail={pendingToolConfirm.argumentsPreview}
+                            actions={isPlanApproval(pendingToolConfirm)
+                              ? [
+                                // 拒绝 = Claude Code 的「Tell Claude what to change」：不执行，
+                                // 用户在输入框里说要改什么，claude 继续留在计划模式改计划。
+                                { label: '拒绝 / 让它改', onSelect: () => resolvePendingToolConfirm(false) },
+                                ...PLAN_APPROVAL_ACTIONS.map((action, index) => ({
+                                  label: action.label,
+                                  primary: index === PLAN_APPROVAL_ACTIONS.length - 1,
+                                  hint: index === PLAN_APPROVAL_ACTIONS.length - 1 ? 'Ctrl+↵' : undefined,
+                                  onSelect: () => {
+                                    resolvePendingToolConfirm(true, false, action.mode)
+                                    // 会话配置也切过去：CLI 那侧已被 `set_permission_mode` 切档，
+                                    // 配置不跟着改的话底栏胶囊仍显示「计划 (只读)」（与实际不符），
+                                    // 而且下次触发重启时会带着 `--permission-mode plan` 回到只读。
+                                    void handleExternalSandboxChange(action.mode).catch((error) => {
+                                      console.error('Failed to persist the post-plan permission mode:', error)
+                                    })
+                                  },
+                                })),
+                              ]
+                              : isEnterPlanApproval(pendingToolConfirm)
+                                ? [
+                                  { label: '不用，直接做', onSelect: () => resolvePendingToolConfirm(false) },
+                                  // 「总是允许」对齐 Claude Code 普通工具提示里的「别再问」。
+                                  // 代价（写在这里免得以后当 bug 查）：此后被自动放行的那几次
+                                  // 不经过卡片，前端也就没机会写会话档位 —— CLI 已进只读、而底栏
+                                  // 胶囊仍是上一档，直到下次刷新/切会话。用户主动说了「别再问」，
+                                  // 这个滞后可以接受。
+                                  {
+                                    label: '总是允许',
+                                    onSelect: () => {
+                                      resolvePendingToolConfirm(true, true)
+                                      void handleExternalSandboxChange('plan').catch((error) => {
+                                        console.error('Failed to persist the plan permission mode:', error)
+                                      })
+                                    },
+                                  },
+                                  {
+                                    label: '进入计划模式',
+                                    primary: true,
+                                    hint: 'Ctrl+↵',
+                                    onSelect: () => {
+                                      // 放行就够 —— CLI 自己切档（见 claude_stream::is_enter_plan_mode）。
+                                      // 这里只把会话配置跟上，让底栏胶囊与实际一致、重启也不掉回来。
+                                      resolvePendingToolConfirm(true)
+                                      void handleExternalSandboxChange('plan').catch((error) => {
+                                        console.error('Failed to persist the plan permission mode:', error)
+                                      })
+                                    },
+                                  },
+                                ]
+                                : [
+                                  { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
+                                  { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
+                                  { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
+                                ]}
+                          />
+                        )}
+                        {pendingSessionConsent && (
+                          <ApprovalCard
+                            title="允许本次会话使用文件和命令工具？"
+                            subtitle="授权后，本会话内 Kivio 可读写、删除磁盘上的任意文件并执行任意终端命令（包括项目目录之外）。仅本次会话有效，重启后需重新授权。"
+                            actions={[
+                              { label: '拒绝', onSelect: () => resolvePendingSessionConsent(false) },
+                              { label: '允许本次会话', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingSessionConsent(true) },
+                            ]}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )}
                   <InputBar
                     onSend={(content, attachments) => void handleSendMessage(content, attachments)}
                     disabled={isCurrentConversationBusy()}
@@ -3860,6 +4529,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     toolStatusHint={toolStatusHint}
                     sendDisabledReason={sendDisabledReason}
                     agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
+                    agentTodoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null}
                     onAgentPlanModeChange={handleAgentPlanModeChange}
                     enabledSkills={slashSkills}
                     onOpenSkillSettings={openSkillCenter}
@@ -3867,6 +4537,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     conversationProject={conversationProject}
                     onSelectProject={handleSidebarSelectProject}
                     showProjectEntry
+                    selectedSet={selectedSet}
+                    onSelectSet={handleSidebarSelectSet}
                     currentAssistant={currentAssistantSnapshot ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name } : null}
                     onOpenAssistantCenter={openAssistantCenter}
                     onSelectAssistant={handleSelectAssistant}
@@ -3880,8 +4552,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
                     mcpServers={mcpServers}
                     onToggleMcpServer={handleToggleMcpServer}
-                    webSearchEnabled={webSearchEnabled}
-                    onToggleWebSearch={handleToggleWebSearch}
+                    webSearchMode={activeWebSearchMode}
+                    onSetWebSearchMode={handleSetWebSearchMode}
+                    builtinWebSearchSupported={activeBuiltinWebSearchSupported}
                     replyModels={activeReplyModels}
                     onChangeReplyModels={handleChangeReplyModels}
                     contextSlot={
@@ -3897,6 +4570,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                         lang={uiLang}
                       />
                     }
+                    gitWorkdir={dockWorkdir || null}
+                    gitLang={uiLang}
+                    onOpenGitPanel={handleOpenDockGit}
+                    modeOptions={composerModes.options}
+                    modeValue={composerModes.current}
+                    onModeChange={handleComposerModeChange}
                   />
                     </>
                   )}
@@ -3912,96 +4591,26 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             )}
           </div>
         )}
+        {chatView === 'conversation' && (
+          <RightDock
+            open={dockOpen}
+            width={dockWidth}
+            activeTab={dockTab}
+            workdir={dockWorkdir}
+            lang={uiLang}
+            treeExpanded={treeExpanded}
+            revealRequest={dockReveal}
+            previewRequest={dockPreview}
+            onToggleTab={handleDockTabChange}
+            onWidthChange={handleDockWidthChange}
+            onClose={handleCloseDock}
+            onTreeExpandedChange={handleTreeExpandedChange}
+            onInsertMention={handleInsertFileMention}
+            onRevealInTree={handleDockRevealInTree}
+          />
+        )}
       </div>
-      {pendingToolConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" data-tauri-drag-region="false">
-          <div className="w-full max-w-md rounded-lg border border-neutral-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
-            <div className="mb-3 flex items-start gap-2">
-              <Wrench size={17} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100">
-                  允许调用工具 {pendingToolConfirm.name}？
-                </div>
-                <div className="mt-1 text-[12px] text-neutral-500 dark:text-neutral-400">
-                  {pendingToolConfirm.source}
-                  {pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}
-                  {pendingToolConfirm.sensitivity ? ` · ${pendingToolConfirm.sensitivity}` : ''}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="rounded-md p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                aria-label="拒绝"
-                onClick={() => resolvePendingToolConfirm(false)}
-              >
-                <X size={14} />
-              </button>
-            </div>
-            {pendingToolConfirm.argumentsPreview && (
-              <pre className="custom-scrollbar mb-3 max-h-40 overflow-auto rounded-md bg-neutral-100 p-3 text-[11px] leading-relaxed text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
-                {pendingToolConfirm.argumentsPreview}
-              </pre>
-            )}
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
-                onClick={() => resolvePendingToolConfirm(false)}
-              >
-                拒绝
-              </button>
-              <button
-                type="button"
-                className="rounded-md bg-neutral-900 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200"
-                onClick={() => resolvePendingToolConfirm(true)}
-              >
-                允许
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      {pendingSessionConsent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" data-tauri-drag-region="false">
-          <div className="w-full max-w-md rounded-lg border border-neutral-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
-            <div className="mb-3 flex items-start gap-2">
-              <Wrench size={17} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100">
-                  允许本次会话使用文件和命令工具？
-                </div>
-                <div className="mt-1 text-[12px] text-neutral-500 dark:text-neutral-400">
-                  授权后，本会话内 Kivio 可读取、写入、删除磁盘上的任意文件，并执行任意终端命令（包括项目目录之外的位置）。仅本次会话有效，应用重启后需重新授权。
-                </div>
-              </div>
-              <button
-                type="button"
-                className="rounded-md p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                aria-label="拒绝"
-                onClick={() => resolvePendingSessionConsent(false)}
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
-                onClick={() => resolvePendingSessionConsent(false)}
-              >
-                拒绝
-              </button>
-              <button
-                type="button"
-                className="rounded-md bg-neutral-900 px-3 py-1.5 text-[12px] font-medium text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200"
-                onClick={() => resolvePendingSessionConsent(true)}
-              >
-                允许本次会话
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
+    </LangContext.Provider>
   )
 }

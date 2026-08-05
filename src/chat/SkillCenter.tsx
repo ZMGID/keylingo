@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
+import { homeDir } from '@tauri-apps/api/path'
 import { ChatMarkdown } from './ChatMarkdown'
 import {
   api,
@@ -24,7 +25,7 @@ import {
   type SkillMeta,
 } from '../api/tauri'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
-import { Select } from '../settings/components'
+import { Select, Toggle } from '../settings/components'
 import { Button, IconButton } from '../components/Button'
 import { SkillStoreBrowser } from './SkillStoreBrowser'
 import { SkillIcon } from '../settings/NavIcons'
@@ -33,6 +34,16 @@ interface SkillCenterProps {
   /** Skill 启用状态 / 列表变化后通知 Chat 刷新其技能列表 */
   onSkillsChanged?: () => void
 }
+
+/** 本地 CLI 技能来源：key 用于分组，dirs 是相对家目录的技能目录（多个都扫，装哪因版本而异） */
+const CLI_SKILL_SOURCES = [
+  { key: 'claude', label: 'Claude Code', dirs: ['.claude/skills'] },
+  { key: 'codex', label: 'Codex', dirs: ['.codex/skills'] },
+  { key: 'opencode', label: 'OpenCode', dirs: ['.config/opencode/skills', '.opencode/skills'] },
+] as const
+
+type CliSkillKey = (typeof CLI_SKILL_SOURCES)[number]['key']
+type CliSkillGroups = Record<CliSkillKey, SkillMeta[]>
 
 function defaultChatTools(): ChatToolsConfig {
   return {
@@ -74,38 +85,6 @@ function skillMatches(skill: SkillMeta, query: string): boolean {
 }
 
 /** 自带样式的开关：明暗对比清晰，不依赖设置面板的 CSS 变量作用域 */
-function Switch({
-  checked,
-  onChange,
-  ariaLabel,
-}: {
-  checked: boolean
-  onChange: (value: boolean) => void
-  ariaLabel?: string
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={ariaLabel}
-      onClick={() => onChange(!checked)}
-      data-tauri-drag-region="false"
-      className={`relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors focus:outline-none ${
-        checked
-          ? 'bg-emerald-500 hover:bg-emerald-600'
-          : 'bg-neutral-300 hover:bg-neutral-400 dark:bg-neutral-600 dark:hover:bg-neutral-500'
-      }`}
-    >
-      <span
-        className={`inline-block size-[18px] rounded-full bg-white shadow-sm transition-transform ${
-          checked ? 'translate-x-[18px]' : 'translate-x-0.5'
-        }`}
-      />
-    </button>
-  )
-}
-
 function SkillCard({
   skill,
   enabled,
@@ -169,7 +148,7 @@ function SkillCard({
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
           >
-            <Switch checked={enabled} onChange={(next) => onToggleEnabled(skill.id, next)} ariaLabel={`启用 ${skill.name}`} />
+            <Toggle checked={enabled} onChange={(next) => onToggleEnabled(skill.id, next)} ariaLabel={`启用 ${skill.name}`} />
           </span>
         )}
       </div>
@@ -333,6 +312,12 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
   const [query, setQuery] = useState('')
   const [view, setView] = useState<'installed' | 'store' | 'import' | 'advanced'>('installed')
   const [selectedSkillPreview, setSelectedSkillPreview] = useState<SkillDetail | null>(null)
+  // 从本地 CLI（Claude Code / Codex / OpenCode）的技能目录导入
+  const [cliSkills, setCliSkills] = useState<CliSkillGroups | null>(null)
+  const [cliScanning, setCliScanning] = useState(false)
+  const [cliSelected, setCliSelected] = useState<Set<string>>(new Set())
+  const [cliImporting, setCliImporting] = useState(false)
+  const [cliImportDone, setCliImportDone] = useState('')
 
   const settingsRef = useRef<Settings | null>(null)
   const saveTimer = useRef<number | null>(null)
@@ -507,6 +492,83 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     }
   }, [])
 
+  // 扫描三个 CLI 的技能目录：复用 chat_skills_list 的额外扫描路径（external 源即 CLI 技能），
+  // 再按 skill.path 的目录前缀把结果归到对应 CLI 分组。
+  const handleCliScan = useCallback(async () => {
+    setCliScanning(true)
+    setCliImportDone('')
+    setSkillError('')
+    try {
+      const home = (await homeDir()).replace(/[/\\]+$/, '')
+      const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+      // 每个 CLI 目录 → 归一化前缀（用于把扫描结果分组）
+      const sources = CLI_SKILL_SOURCES.map((source) => ({
+        key: source.key,
+        prefixes: source.dirs.map((dir) => norm(`${home}/${dir}`)),
+      }))
+      const scanDirs = CLI_SKILL_SOURCES.flatMap((source) => source.dirs.map((dir) => `${home}/${dir}`))
+      const result = await api.chatSkillsList(scanDirs)
+      if (!result.success) {
+        setSkillError(result.error || 'Skill 扫描失败')
+        setCliSkills({ claude: [], codex: [], opencode: [] })
+        return
+      }
+      const scanned = result.skills.filter((skill) => skill.source === 'external' && skill.path)
+      const groups: CliSkillGroups = { claude: [], codex: [], opencode: [] }
+      for (const skill of scanned) {
+        const path = norm(skill.path as string)
+        const source = sources.find((s) => s.prefixes.some((prefix) => path.startsWith(prefix)))
+        if (source) groups[source.key].push(skill)
+      }
+      setCliSkills(groups)
+      setCliSelected(new Set())
+    } catch (err) {
+      setSkillError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCliScanning(false)
+    }
+  }, [])
+
+  const toggleCliSelected = useCallback((id: string) => {
+    setCliSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  // 导入选中技能 = 逐项从 skill.path（.../<id>/SKILL.md）推出文件夹后复制进 Kivio 用户技能目录。
+  const handleCliImportSelected = useCallback(async () => {
+    if (!cliSkills) return
+    const all = [...cliSkills.claude, ...cliSkills.codex, ...cliSkills.opencode]
+    const chosen = all.filter((skill) => cliSelected.has(skill.id) && skill.path)
+    if (chosen.length === 0) return
+    setCliImporting(true)
+    setCliImportDone('')
+    setSkillError('')
+    let imported = 0
+    try {
+      for (const skill of chosen) {
+        const folder = (skill.path as string).replace(/[/\\]+SKILL\.md$/i, '')
+        const result = await api.chatSkillsImport(folder)
+        if (result.success) imported += 1
+        else setSkillError(result.error || `导入「${skill.name}」失败`)
+      }
+      await refreshChatSkills()
+      onSkillsChanged?.()
+      if (imported > 0) {
+        setCliImportDone(`已导入 ${imported} 个技能到「已安装」。`)
+        setCliSkills(null)
+        setCliSelected(new Set())
+      }
+    } catch (err) {
+      setSkillError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCliImporting(false)
+    }
+  }, [cliSkills, cliSelected, onSkillsChanged, refreshChatSkills])
+
   const normalizedQuery = query.trim().toLowerCase()
   const builtinSkills = useMemo(
     () => skills.filter((skill) => isBuiltinSkill(skill) && skillMatches(skill, normalizedQuery)),
@@ -623,6 +685,76 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                 </Button>
               </div>
               <SkillUrlImport onInstalled={() => void refreshChatSkills()} />
+              <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">从本地 CLI 导入</div>
+                    <p className="text-[12px] text-neutral-500 dark:text-neutral-400">
+                      扫描本机 Claude Code / Codex / OpenCode 的技能目录，勾选后复制进 Kivio 个人技能目录。
+                    </p>
+                  </div>
+                  <Button onClick={() => void handleCliScan()} disabled={cliScanning} data-tauri-drag-region="false">
+                    <Search size={14} />
+                    {cliScanning ? '扫描中…' : '扫描'}
+                  </Button>
+                </div>
+
+                {cliSkills && (() => {
+                  const total = cliSkills.claude.length + cliSkills.codex.length + cliSkills.opencode.length
+                  return (
+                    <div className="mt-3 space-y-3">
+                      {total === 0 ? (
+                        <div className="rounded-md border border-dashed border-neutral-200 px-3 py-2 text-[11.5px] text-neutral-400 dark:border-neutral-800">
+                          未在本机 CLI 技能目录下发现技能。
+                        </div>
+                      ) : (
+                        <>
+                          {CLI_SKILL_SOURCES.map((source) => {
+                            const group = cliSkills[source.key]
+                            if (group.length === 0) return null
+                            return (
+                              <div key={source.key}>
+                                <div className="mb-1.5 text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{source.label}</div>
+                                <div className="overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800 [&>*+*]:border-t [&>*+*]:border-neutral-100 dark:[&>*+*]:border-neutral-800/70">
+                                  {group.map((skill) => (
+                                    <label
+                                      key={skill.id}
+                                      className="flex cursor-pointer items-center gap-2.5 px-3 py-2"
+                                      data-tauri-drag-region="false"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={cliSelected.has(skill.id)}
+                                        onChange={() => toggleCliSelected(skill.id)}
+                                        className="size-3.5 shrink-0 accent-[#C56646]"
+                                      />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="truncate text-[12.5px] font-medium text-neutral-800 dark:text-neutral-100">{skill.name}</div>
+                                        <div className="truncate text-[11px] text-neutral-400">{skill.description || '未设置描述'}</div>
+                                      </div>
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            )
+                          })}
+                          <Button
+                            onClick={() => void handleCliImportSelected()}
+                            disabled={cliImporting || cliSelected.size === 0}
+                            data-tauri-drag-region="false"
+                          >
+                            {cliImporting ? '导入中…' : `导入选中 (${cliSelected.size})`}
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  )
+                })()}
+
+                {cliImportDone && (
+                  <div className="mt-2 text-[12px] text-emerald-600 dark:text-emerald-400">{cliImportDone}</div>
+                )}
+              </div>
               {skillError && (
                 <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
                   {skillError}
@@ -645,7 +777,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                       允许模型根据 description 自动 activate skill
                     </p>
                   </div>
-                  <Switch
+                  <Toggle
                     checked={chatTools.skillAutoMatch !== false}
                     onChange={(skillAutoMatch) => persistChatTools({ skillAutoMatch })}
                     ariaLabel="自动匹配 Skill"

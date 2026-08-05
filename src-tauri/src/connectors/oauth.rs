@@ -157,7 +157,31 @@ pub fn auth_server_well_known_urls(auth_server: &str) -> Vec<String> {
     ]
 }
 
-/// 构造 authorize URL（含 PKCE / state / scope）。
+/// RFC 8707 的 resource indicator：这次授权/这枚 token 是**给哪个 MCP 服务器**用的。
+///
+/// MCP 规范（2025-06-18 起）原文是 MUST，而且是「不管授权服务器支持不支持都必须发」：
+/// > MCP clients MUST implement Resource Indicators for OAuth 2.0 as defined in RFC 8707 …
+/// > MUST be included in both authorization requests and token requests … MCP clients MUST send
+/// > this parameter regardless of whether authorization servers support it.
+///
+/// 不发的代价不只是「不合规」：拿到的 token 没有 audience 绑定，规范专门有一节
+/// *Access Token Privilege Restriction* 讲这正是跨服务重用 token 的攻击面。
+///
+/// 规范化：**显式**去掉 fragment（RFC 9728 明确禁止）并把 host 转小写，其余原样保留。
+/// host 小写其实 `url` crate 解析时就顺手做了，这里再做一次是为了**不依赖那个顺带行为**
+/// —— 哪天有人把这里换成纯字符串处理，规范化就会静默丢掉。
+pub fn canonical_resource_indicator(resource_url: &str) -> Result<String, String> {
+    let mut url = url::Url::parse(resource_url.trim())
+        .map_err(|err| format!("Invalid MCP resource URL: {err}"))?;
+    url.set_fragment(None);
+    if let Some(host) = url.host_str().map(str::to_ascii_lowercase) {
+        url.set_host(Some(&host))
+            .map_err(|err| format!("Invalid MCP resource host: {err}"))?;
+    }
+    Ok(url.to_string())
+}
+
+/// 构造 authorize URL（含 PKCE / state / scope / RFC 8707 resource）。
 pub fn build_authorize_url(
     authorization_endpoint: &str,
     client_id: &str,
@@ -165,6 +189,7 @@ pub fn build_authorize_url(
     state: &str,
     challenge: &str,
     scopes: &[String],
+    resource: &str,
 ) -> Result<String, String> {
     let mut url = url::Url::parse(authorization_endpoint)
         .map_err(|err| format!("Invalid authorization endpoint: {err}"))?;
@@ -179,6 +204,8 @@ pub fn build_authorize_url(
         if !scopes.is_empty() {
             query.append_pair("scope", &scopes.join(" "));
         }
+        // 见 `canonical_resource_indicator`：规范要求无条件带上。
+        query.append_pair("resource", resource);
     }
     Ok(url.to_string())
 }
@@ -282,13 +309,22 @@ pub fn needs_refresh(auth: &ConnectorAuth, now_unix: i64, leeway_secs: i64) -> b
 }
 
 /// 构造 refresh_token 授权的表单字段（application/x-www-form-urlencoded 的键值）。
-pub fn build_refresh_form(refresh_token: &str, client_id: Option<&str>) -> Vec<(String, String)> {
+pub fn build_refresh_form(
+    refresh_token: &str,
+    client_id: Option<&str>,
+    resource: Option<&str>,
+) -> Vec<(String, String)> {
     let mut form = vec![
         ("grant_type".to_string(), "refresh_token".to_string()),
         ("refresh_token".to_string(), refresh_token.to_string()),
     ];
     if let Some(client_id) = client_id.filter(|c| !c.trim().is_empty()) {
         form.push(("client_id".to_string(), client_id.to_string()));
+    }
+    // 刷新同样要带 resource —— 否则换回来的新 token 又丢了 audience 绑定
+    // （见 `canonical_resource_indicator`）。
+    if let Some(resource) = resource.filter(|r| !r.trim().is_empty()) {
+        form.push(("resource".to_string(), resource.to_string()));
     }
     form
 }
@@ -474,9 +510,10 @@ pub async fn run_oauth_connect(
     )
     .await?;
 
-    // 4. PKCE + state。
+    // 4. PKCE + state + RFC 8707 resource。
     let pkce = generate_pkce();
     let state = uuid::Uuid::new_v4().to_string();
+    let resource = canonical_resource_indicator(resource_url)?;
     let authorize_url = build_authorize_url(
         &metadata.authorization_endpoint,
         &client_id,
@@ -484,6 +521,7 @@ pub async fn run_oauth_connect(
         &state,
         &pkce.challenge,
         &metadata.scopes_supported,
+        &resource,
     )?;
 
     // 5. 开浏览器，等 loopback 回调拿 code（校验 state，带整体超时）。
@@ -501,6 +539,7 @@ pub async fn run_oauth_connect(
         &redirect_uri,
         &client_id,
         &pkce.verifier,
+        &resource,
     )
     .await?;
 
@@ -712,6 +751,7 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
 }
 
 /// authorization_code 换 token。
+#[allow(clippy::too_many_arguments)]
 async fn exchange_code(
     http: &reqwest::Client,
     token_endpoint: &str,
@@ -719,6 +759,7 @@ async fn exchange_code(
     redirect_uri: &str,
     client_id: &str,
     code_verifier: &str,
+    resource: &str,
 ) -> Result<TokenResponse, String> {
     let form = [
         ("grant_type", "authorization_code"),
@@ -726,6 +767,8 @@ async fn exchange_code(
         ("redirect_uri", redirect_uri),
         ("client_id", client_id),
         ("code_verifier", code_verifier),
+        // 见 `canonical_resource_indicator`：授权请求与 token 请求**两处都**要带。
+        ("resource", resource),
     ];
     let response = timeout(
         DISCOVERY_TIMEOUT,
@@ -777,8 +820,12 @@ pub async fn refresh_access_token(
     token_endpoint: &str,
     refresh_token: &str,
     client_id: Option<&str>,
+    // 该 MCP 服务器的 URL（RFC 8707 resource indicator）。拿不到时传 `None`，
+    // 但正常路径上应该总是有 —— 见 `canonical_resource_indicator`。
+    resource_url: Option<&str>,
 ) -> Result<TokenResponse, String> {
-    let form = build_refresh_form(refresh_token, client_id);
+    let resource = resource_url.and_then(|url| canonical_resource_indicator(url).ok());
+    let form = build_refresh_form(refresh_token, client_id, resource.as_deref());
     let response = timeout(
         DISCOVERY_TIMEOUT,
         http.post(token_endpoint).form(&form).send(),
@@ -899,9 +946,15 @@ mod tests {
             "state-xyz",
             "challenge-abc",
             &["read".to_string(), "write".to_string()],
+            "https://mcp.example.com/mcp",
         )
         .unwrap();
         assert!(url.contains("response_type=code"));
+        // RFC 8707：规范要求无条件带 resource，缺了它 token 就没有 audience 绑定。
+        assert!(
+            url.contains("resource=https%3A%2F%2Fmcp.example.com%2Fmcp"),
+            "{url}"
+        );
         assert!(url.contains("client_id=client-123"));
         assert!(url.contains("code_challenge=challenge-abc"));
         assert!(url.contains("code_challenge_method=S256"));
@@ -982,13 +1035,39 @@ mod tests {
 
     #[test]
     fn builds_refresh_form() {
-        let form = build_refresh_form("rt-1", Some("client-1"));
+        let form = build_refresh_form(
+            "rt-1",
+            Some("client-1"),
+            Some("https://mcp.example.com/mcp"),
+        );
         assert!(form.contains(&("grant_type".to_string(), "refresh_token".to_string())));
         assert!(form.contains(&("refresh_token".to_string(), "rt-1".to_string())));
         assert!(form.contains(&("client_id".to_string(), "client-1".to_string())));
-        // 无 client_id 时省略该字段。
-        let form = build_refresh_form("rt-1", None);
+        // 刷新同样要带 resource，否则新 token 又丢了 audience 绑定。
+        assert!(form.contains(&(
+            "resource".to_string(),
+            "https://mcp.example.com/mcp".to_string()
+        )));
+        // 无 client_id / 无 resource 时省略对应字段。
+        let form = build_refresh_form("rt-1", None, None);
         assert!(!form.iter().any(|(k, _)| k == "client_id"));
+        assert!(!form.iter().any(|(k, _)| k == "resource"));
+    }
+
+    #[test]
+    fn resource_indicator_drops_fragment() {
+        // RFC 9728 明确禁止 fragment。
+        assert_eq!(
+            canonical_resource_indicator("https://mcp.example.com/mcp#frag").unwrap(),
+            "https://mcp.example.com/mcp"
+        );
+        // host 小写是**显式**做的，不靠 url crate 顺带（注释与实现必须对得上）。
+        assert_eq!(
+            canonical_resource_indicator("https://MCP.Example.COM/MCP").unwrap(),
+            "https://mcp.example.com/MCP",
+            "host 要小写，path 不能动"
+        );
+        assert!(canonical_resource_indicator("not a url").is_err());
     }
 
     #[test]

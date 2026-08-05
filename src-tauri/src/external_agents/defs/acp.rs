@@ -1,10 +1,12 @@
-//! Shared definition for the ACP-family external agents (cursor / gemini / opencode / hermes).
+//! Shared definition for the ACP-family external agents (cursor / gemini / opencode / hermes / kimi).
 //!
-//! All four launch over the Agent Client Protocol (`StreamFormat::AcpJsonRpc`), probe models via
+//! All launch over the Agent Client Protocol (`StreamFormat::AcpJsonRpc`), probe models via
 //! `ModelProbeStrategy::Acp`, discover slash commands via `SlashStrategy::Acp`, and build a
 //! constant launch-arg vec. They differ only in id / name / binary / auth-probe / fallback models
-//! / launch args / env — so a single [`acp_def`] const constructor + data rows replaces four
-//! near-identical struct literals.
+//! / launch args / env — so a single [`acp_def`] const constructor + data rows replaces several
+//! near-identical struct literals. `kimi` joins this family via `kimi acp` (its own ACP server),
+//! inheriting persistent sessions, native resume, mid-turn model switch, and error-classified
+//! reconnect instead of the old per-turn `-p` + `stream-json` spawn.
 
 use super::super::types::{
     ModelProbeStrategy, PromptInputFormat, RuntimeAgentDef, RuntimeBuildOptions, RuntimeContext,
@@ -42,8 +44,9 @@ const fn acp_def(
         prompt_via_stdin: false,
         prompt_input_format: PromptInputFormat::Text,
         stream_format: StreamFormat::AcpJsonRpc,
-        json_event_parser: None,
         resumes_session_via_cli: false,
+        supports_native_image: true,
+        image_mime_whitelist: &[],
         build_args,
     }
 }
@@ -114,6 +117,18 @@ const HERMES_MODELS: &[(&str, &str)] = &[
 
 const GEMINI_ENV: &[(&str, &str)] = &[("GEMINI_CLI_TRUST_WORKSPACE", "true")];
 
+// Kimi Code models used only when the ACP session/new probe reports none (offline / not logged in).
+// The real catalog now comes from the ACP `availableModels` / `configOptions` probe like the other
+// ACP agents — this table is the fallback the picker labels as "默认列表".
+const KIMI_MODELS: &[(&str, &str)] = &[
+    ("default", "Default"),
+    ("kimi-code/k3", "K3 (kimi-code/k3)"),
+    (
+        "kimi-code/kimi-for-coding",
+        "K2.7 Coding (kimi-code/kimi-for-coding)",
+    ),
+];
+
 pub const CURSOR_AGENT_DEF: RuntimeAgentDef = acp_def(
     "cursor-agent",
     "Cursor Agent",
@@ -162,6 +177,21 @@ pub const HERMES_AGENT_DEF: RuntimeAgentDef = acp_def(
     build_hermes_args,
 );
 
+pub const KIMI_AGENT_DEF: RuntimeAgentDef = acp_def(
+    "kimi",
+    "Kimi CLI",
+    "kimi",
+    // 刻意不加 `kimi-cli` 别名：那是已停止维护的旧 Python 版（版本号 1.4x），协议与模型列表
+    // 都和现在的 TypeScript 版 Kimi Code（0.x，命令名就是 `kimi`）不同。回退过去会静默跑错
+    // 目标，不如老实报「未安装」。
+    &[],
+    None,
+    KIMI_MODELS,
+    &["acp"],
+    &[],
+    build_acp_args,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +214,7 @@ mod tests {
             (&GEMINI_AGENT_DEF, &["--experimental-acp"]),
             (&OPENCODE_AGENT_DEF, &["acp"]),
             (&HERMES_AGENT_DEF, &["acp", "--accept-hooks"]),
+            (&KIMI_AGENT_DEF, &["acp"]),
         ];
         for (def, expected) in cases {
             let args = (def.build_args)(&ctx, &opts, None);

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown } from 'lucide-react'
 
 type ReasoningBlockProps = {
   reasoning: string
@@ -67,9 +66,13 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
     }
   }, [streaming, collapsible])
 
+  // 流式期间不要测量 max-height：思考文本每个 delta 都在增删，重设 max-height 会重启一段
+  // 缓动过渡，内容高度于是逐帧变化（实测一次收起跑 18 帧、1061→919px）。消息区的钉底跟随
+  // 由 ResizeObserver 驱动，每一帧都会被当成内容增长而重钉一次 scrollTop —— 表现为流式时
+  // 整个消息区抖动、像被强制滚动。折叠/展开是离散的用户操作，仍走动画。
   useEffect(() => {
     const body = bodyRef.current
-    if (!body || !collapsible) {
+    if (!body || !collapsible || streaming) {
       setBodyMaxHeight(null)
       return
     }
@@ -84,7 +87,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
   }, [reasoning, streaming, hideBody, open])
 
   const titleClass =
-    'mb-1 flex w-full items-center gap-1 text-left text-[12.5px] font-medium text-neutral-700 transition-colors dark:text-neutral-200'
+    'mb-1 flex w-full items-center gap-1 text-left text-[11.5px] font-medium text-neutral-700 transition-colors dark:text-neutral-200'
   const bodyClass = [
     'chat-motion-reasoning-body',
     streaming ? 'opacity-95' : 'opacity-90',
@@ -110,7 +113,7 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
       className={`mb-3 border-l pl-3 transition-colors duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
         streaming
           ? 'border-neutral-300 dark:border-neutral-600'
-          : 'border-neutral-200 dark:border-neutral-700'
+          : 'border-[var(--border-input)]'
       }`}
     >
       {collapsible ? (
@@ -133,11 +136,6 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
               </span>
             )}
           </span>
-          <ChevronDown
-            size={12}
-            strokeWidth={2}
-            className={`shrink-0 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] ${open ? 'rotate-180' : ''}`}
-          />
         </button>
       ) : (
         <div className={titleClass}>

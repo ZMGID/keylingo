@@ -8,9 +8,11 @@
 //! - `extract_status_code` / `is_failover_error` —— failover 判定（401/402/403 立即换 key；429 阈值化换 key）。
 //! - `send_with_retry` —— 网络抖动 / 5xx / 429 退避重试。
 //! - `send_with_failover` —— 在 api_keys 列表上轮换；401/402/403 立即换 key，429 达阈值且有备用 key 才换。
-//! - `call_openai_text` / `call_openai_ocr` / `call_vision_api` —— chat completion 三类调用。
-//! - `stream_chat_call` / `stream_translate_combined` / `stream_vision_response` —— SSE 流解析。
-//! - `build_ocr_request_body` —— 视觉 + 流式 body 构造。
+//! - `call_openai_text` / `call_openai_ocr` / `call_vision_api` —— 翻译/OCR/Lens 三类调用，
+//!   内部组 `GenerateRequest` 走 `chat/model/` 的多协议适配器（尊重 provider.api_format）。
+//! - `stream_chat_call` / `stream_translate_combined` —— 流式调用；`LensEventSink` /
+//!   `CombinedTranslateEventSink` 把适配器的 `StreamPart` 翻译成现有 Tauri 事件。
+//! - `ocr_image_message` —— 视觉请求的 image+text 用户消息构造。
 
 use std::{
     collections::HashSet,
@@ -18,7 +20,7 @@ use std::{
     future::Future,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use base64::{engine::general_purpose, Engine as _};
@@ -26,18 +28,17 @@ use reqwest::{header::HeaderMap, Client, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::chat::model::ModelUsage;
+use crate::chat::model::{
+    generate_with_chat_provider, stream_with_chat_provider, GenerateOptions, GenerateRequest,
+    MessagePart, ModelError, ModelErrorKind, ModelMessage, ModelRole, RequestMetadata, StreamPart,
+    StreamSink,
+};
 use crate::lens_commands::resolve_explain_image_path;
 use crate::prompts::COMBINED_TRANSLATE_SEPARATOR;
 use crate::settings::{
     self, default_lens_system_prompt, no_think_instruction, ExplainMessage, Settings,
 };
 use crate::state::AppState;
-use crate::usage::{
-    error_kind_from_message, model_usage_from_openai_value, model_usage_from_stream_value,
-    record_model_call, UsageRecordInput,
-};
-use crate::utils::provider_supports_thinking_field;
 
 // ===== Provider 凭据 =====
 
@@ -52,6 +53,18 @@ pub struct ProviderConnectionInput {
     pub api_keys: Vec<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// 连接测试用的模型：有则发一条极小对话请求（比 /models 更能反映“能不能调模型”，
+    /// 且不依赖供应商支持 /models）；无则回退到 /models 探测。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 供应商接口协议（openai_chat / anthropic_messages / openai_responses / gemini），
+    /// 测试请求按它选 URL 和鉴权方式；缺省时从 settings 里的供应商配置读取。
+    #[serde(default)]
+    pub api_format: Option<String>,
+    /// 「请求配置」（自定义头 / 代理 / CLI 身份）。设置窗口是手动保存的，测试连接必须用
+    /// **正在编辑**的这份，否则「测试通过、聊天 403」，用户完全查不出原因。
+    #[serde(default)]
+    pub request: Option<crate::settings::ProviderRequestConfig>,
 }
 
 impl ProviderConnectionInput {
@@ -102,14 +115,40 @@ pub fn resolve_provider_credentials(
 
 /// 普通非流式 API 请求的总超时。
 pub const STANDARD_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// 非流式**对话补全**的总超时。
+///
+/// 为什么不能沿用 60 秒：一次 high reasoning + 十万 token 输入的补全，光思考就要两三分钟，
+/// 非流式又是「憋完整个回答再一次性返回」——60 秒结构性必然超时，三次重试白烧 195 秒。
+/// 实测就踩过：流式跑了 135 秒断包后回落非流式，3×60 秒全超，用户等了三分多钟拿到
+/// 一句"模型调用失败"。流式那条路本来就只有 300 秒读空闲、没有总时长上限，回落到更紧的
+/// 硬顶是反的。
+pub const CHAT_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// 只限制 TCP/TLS 建连阶段，避免 DNS/握手长期卡住。
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 流式响应的读空闲超时：持续有 SSE chunk 到达时不会触发。
 const HTTP_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// 空闲连接在池中最多保留多久后被淘汰。默认(reqwest 90s)偏长；缩短以更快丢弃可能已被
+/// 服务端/NAT 静默关闭的连接，降低长时间运行后复用陈旧连接的概率。
+const HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// TCP keepalive：让内核定期探活，及时发现对端已消失的连接。
+const HTTP_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+/// HTTP/2 keepalive PING 间隔：h2 单连接多路复用，一条半死连接会拖垮该 host 的全部请求；
+/// 定期 PING 让 hyper 主动探测并丢弃死连接（配合 while_idle 覆盖空闲期）。
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// HTTP/2 keepalive PING 超时：PING 无响应超过此值即判定连接死亡。
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 为非流式请求设置总超时。流式请求不要用它，否则长回答会被总时长切断。
 pub fn with_standard_request_timeout(request: RequestBuilder) -> RequestBuilder {
     request.timeout(STANDARD_HTTP_REQUEST_TIMEOUT)
+}
+
+/// 为非流式**对话补全**设置总超时（[`CHAT_COMPLETION_REQUEST_TIMEOUT`]）。
+/// 四个适配器（openai / anthropic / gemini / responses）的非流式路径都用它，
+/// 别再退回 [`with_standard_request_timeout`]——那是给 embedding / rerank / 文档解析
+/// 这类「秒级就该回」的请求用的。
+pub fn with_chat_request_timeout(request: RequestBuilder) -> RequestBuilder {
+    request.timeout(CHAT_COMPLETION_REQUEST_TIMEOUT)
 }
 
 /// 把 JSON body 挂到请求上：`gzip=false` 走普通 `.json()`；`gzip=true` 则序列化后
@@ -138,15 +177,35 @@ pub fn attach_json_body(
 }
 
 /// 构建 HTTP 客户端：不设置 total timeout，避免活跃 SSE 流在 60 秒处被砍掉。
+/// 连接池加保活 + 缩短空闲淘汰：长时间运行后不再复用被对端静默关闭的陈旧连接
+/// （见任务 07-24-http-connection-pool-diagnosis）。
 pub fn build_http_client() -> Client {
-    Client::builder()
+    build_client(false)
+}
+
+/// 直连客户端：同样的连接池调优，但忽略系统/环境代理。供关掉「跟随系统代理」的供应商使用。
+pub fn build_direct_http_client() -> Client {
+    build_client(true)
+}
+
+fn build_client(no_proxy: bool) -> Client {
+    let builder = Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .read_timeout(HTTP_READ_IDLE_TIMEOUT)
-        .build()
-        .unwrap_or_else(|err| {
-            eprintln!("Failed to build HTTP client: {err}");
-            Client::new()
-        })
+        .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(HTTP_TCP_KEEPALIVE)
+        .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true);
+    let builder = if no_proxy {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    builder.build().unwrap_or_else(|err| {
+        eprintln!("Failed to build HTTP client: {err}");
+        Client::new()
+    })
 }
 
 /// 流式 UTF-8 增量解码器：SSE 分片可能在多字节字符（如中文 3 字节）中间切开，
@@ -225,11 +284,54 @@ fn is_retryable_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect()
 }
 
+/// 把 reqwest 错误展开成完整 source 链文本。reqwest 的 `Display` 常年只有一句
+/// `error sending request`，真正的原因（DNS 解析 / TCP connect / TLS handshake /
+/// connection closed / h2 reset）都在 `std::error::Error::source()` 链里。诊断长时间
+/// 运行后的 `statusCode=null` 网络故障必须看到这条链（见任务 07-24-http-connection-pool-diagnosis）。
+pub fn format_reqwest_error(error: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut parts = vec![error.to_string()];
+    let mut src = error.source();
+    while let Some(err) = src {
+        let text = err.to_string();
+        // 跳过与上一层完全重复的文案，避免链条里堆叠同一句。
+        if parts.last().map(|p| p != &text).unwrap_or(true) {
+            parts.push(text);
+        }
+        src = err.source();
+    }
+    // 附带 reqwest 的错误类别标记，便于区分是 connect / timeout / body / decode。
+    let mut kind = Vec::new();
+    if error.is_connect() {
+        kind.push("connect");
+    }
+    if error.is_timeout() {
+        kind.push("timeout");
+    }
+    if error.is_request() {
+        kind.push("request");
+    }
+    if error.is_body() {
+        kind.push("body");
+    }
+    if error.is_decode() {
+        kind.push("decode");
+    }
+    let chain = parts.join(" → ");
+    if kind.is_empty() {
+        chain
+    } else {
+        format!("{chain} [{}]", kind.join(","))
+    }
+}
+
 /// 计算重试延迟
-/// 优先使用服务器返回的 Retry-After 头；否则使用指数退避策略
+/// 优先使用服务器返回的 Retry-After 头；否则使用指数退避策略。
+/// Retry-After 同样受 `RETRY_MAX_DELAY_MS` 封顶：上游（或中转）偶尔返回
+/// `Retry-After: 86400` 之类的巨值，照睡会把整次请求挂死一天（只能靠取消轮询打断）。
 fn retry_delay_ms(attempt: usize, retry_after: Option<u64>) -> u64 {
     if let Some(seconds) = retry_after {
-        return seconds.saturating_mul(1000);
+        return seconds.saturating_mul(1000).min(RETRY_MAX_DELAY_MS);
     }
 
     let delay = RETRY_BASE_DELAY_MS.saturating_mul(2u64.saturating_pow((attempt - 1) as u32));
@@ -532,7 +634,7 @@ where
                 return Err(format!("{} (attempt {}/{})", err_msg, attempt, shown_max));
             }
             Err(err) => {
-                let err_msg = format!("{} Error: {}", label, err);
+                let err_msg = format!("{} Error: {}", label, format_reqwest_error(&err));
                 if is_retryable_error(&err) && attempt < attempts {
                     last_error = Some(err_msg);
                     let delay = retry_delay_ms(attempt, None);
@@ -577,76 +679,48 @@ async fn sleep_with_cancel(
     Ok(())
 }
 
-enum ApiUsageOutcome<'a> {
-    Success(Option<ModelUsage>),
-    Failure(&'a str),
-    Cancelled(Option<ModelUsage>),
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_api_usage(
-    state: &AppState,
-    provider: &settings::ModelProvider,
-    model: &str,
-    source: &str,
-    operation: &str,
-    started_at: i64,
-    started: Instant,
-    outcome: ApiUsageOutcome<'_>,
-) {
-    let (status, status_code, usage, usage_source, error_kind) = match outcome {
-        ApiUsageOutcome::Success(usage) => ("success", Some(200), usage, "provider_reported", None),
-        ApiUsageOutcome::Failure(error) => (
-            "error",
-            extract_status_code(error),
-            None,
-            "missing",
-            Some(error_kind_from_message(error)),
-        ),
-        ApiUsageOutcome::Cancelled(usage) => (
-            "cancelled",
-            None,
-            usage,
-            "provider_reported",
-            Some("cancelled".to_string()),
-        ),
-    };
-    record_model_call(
-        state,
-        UsageRecordInput {
-            provider,
-            model,
-            source,
-            operation,
-            status,
-            status_code,
-            usage,
-            usage_source,
-            started_at,
-            duration_ms: started.elapsed().as_millis() as u64,
-            conversation_id: None,
-            message_id: None,
-            error_kind,
-        },
-    );
-}
-
 // ===== Chat completion 调用 =====
+// 翻译/OCR/Lens 的模型调用统一组 `GenerateRequest` 走 `chat/model/` 的多协议适配器
+// （openai_chat / anthropic_messages / openai_responses / gemini），尊重 provider.api_format。
+// usage 记录由适配器完成（source/operation 通过 `RequestMetadata` 显式传入，面板维度不变）；
+// 本层不再重复记录。
 
-pub(crate) fn apply_model_temperature(
-    body: &mut serde_json::Value,
-    provider: &settings::ModelProvider,
-    model: &str,
-) {
-    if let Some(temperature) =
-        crate::chat::model_metadata::temperature_for_model(Some(provider), model)
-    {
-        body["temperature"] = serde_json::json!(temperature);
+/// 构造翻译/OCR/Lens 调用的 `RequestMetadata`：label 进错误文案，
+/// usage_source/usage_operation 显式传给适配器的 usage 记录（不靠 label 推断）。
+fn legacy_request_metadata(
+    label: &str,
+    usage_source: &str,
+    usage_operation: &str,
+) -> RequestMetadata {
+    RequestMetadata {
+        label: label.to_string(),
+        usage_source: Some(usage_source.to_string()),
+        usage_operation: Some(usage_operation.to_string()),
+        ..RequestMetadata::default()
     }
 }
 
-/// 调用 OpenAI 兼容的文本聊天接口。
-/// temperature 仅在模型库或 provider/model override 显式配置时发送。
+/// 视觉请求的 image+text 用户消息（image 在 text 前，与 lens/截图翻译一贯顺序一致）。
+/// 各协议的图像编码由对应适配器完成。
+pub fn ocr_image_message(image_path: &Path, prompt: &str) -> Result<ModelMessage, String> {
+    let bytes = fs::read(image_path).map_err(|e| e.to_string())?;
+    let base64 = general_purpose::STANDARD.encode(bytes);
+    Ok(ModelMessage {
+        role: ModelRole::User,
+        content: vec![
+            MessagePart::Image {
+                mime_type: "image/png".to_string(),
+                data: base64,
+            },
+            MessagePart::Text {
+                text: prompt.to_string(),
+            },
+        ],
+    })
+}
+
+/// 纯文本模型调用（翻译器 / 选中文本翻译 / 本地 OCR 后翻译的非流式路径）。
+/// temperature / thinking 禁用字段由适配器按 provider/model 元数据处理。
 pub async fn call_openai_text(
     state: &State<'_, AppState>,
     config: &settings::ModelProvider,
@@ -660,70 +734,25 @@ pub async fn call_openai_text(
     if model.trim().is_empty() {
         return Err("Please select a model first".to_string());
     }
-    let started_at = chrono::Local::now().timestamp();
-    let started = Instant::now();
-    let fail = |err: String| -> String {
-        record_api_usage(
-            state.inner(),
-            config,
-            model,
-            usage_source,
-            usage_operation,
-            started_at,
-            started,
-            ApiUsageOutcome::Failure(&err),
-        );
-        err
-    };
-    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-    let mut body = serde_json::json!({
-      "model": model,
-      "messages": [{ "role": "user", "content": prompt }]
-    });
-    apply_model_temperature(&mut body, config, model);
-    if !thinking_enabled && provider_supports_thinking_field(&config.base_url) {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
-
-    let response = send_with_failover(
-        state,
-        "OpenAI API",
-        retry_attempts,
-        &config.id,
-        &config.api_keys,
-        |key| {
-            with_standard_request_timeout(state.http.post(url.clone()).bearer_auth(key).json(&body))
-                .send()
+    let request = GenerateRequest {
+        model: model.to_string(),
+        system: String::new(),
+        messages: vec![ModelMessage::text(ModelRole::User, prompt)],
+        tools: Vec::new(),
+        options: GenerateOptions {
+            thinking_enabled,
+            ..GenerateOptions::default()
         },
-    )
-    .await
-    .map_err(&fail)?;
-
-    let value: serde_json::Value = response.json().await.map_err(|e| fail(e.to_string()))?;
-    let usage = model_usage_from_openai_value(&value);
-    let content = value
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .ok_or_else(|| fail("Invalid response".to_string()))?;
-
-    record_api_usage(
-        state.inner(),
-        config,
-        model,
-        usage_source,
-        usage_operation,
-        started_at,
-        started,
-        ApiUsageOutcome::Success(usage),
-    );
-    Ok(content.trim().to_string())
+        metadata: legacy_request_metadata("Text API", usage_source, usage_operation),
+    };
+    let output = generate_with_chat_provider(state.inner(), config, retry_attempts, request)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(output.text.trim().to_string())
 }
 
-/// 调用 OpenAI 兼容的 OCR/视觉接口。
-/// 将图片转为 Base64 后作为 image_url 类型内容发送；temperature 默认省略。
+/// 带图的 OCR/视觉调用（截图翻译非流式路径）。
+/// 将图片作为 image part 发送，各协议的图像编码走对应适配器的 message 组装。
 pub async fn call_openai_ocr(
     state: &State<'_, AppState>,
     config: &settings::ModelProvider,
@@ -738,113 +767,25 @@ pub async fn call_openai_ocr(
     if model.trim().is_empty() {
         return Err("Please select a model first".to_string());
     }
-    let started_at = chrono::Local::now().timestamp();
-    let started = Instant::now();
-    let fail = |err: String| -> String {
-        record_api_usage(
-            state.inner(),
-            config,
-            model,
-            usage_source,
-            usage_operation,
-            started_at,
-            started,
-            ApiUsageOutcome::Failure(&err),
-        );
-        err
-    };
-    let bytes = fs::read(image_path).map_err(|e| e.to_string())?;
-    let base64 = general_purpose::STANDARD.encode(bytes);
-    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
-
-    // 与 lens 的 vision body 对齐：image 在 text 前、显式 max_tokens。
-    // thinking 按调用方传入：截图翻译默认 false（节省时间），lens 默认 true。
-    let mut body = serde_json::json!({
-      "model": model,
-      "messages": [
-        {
-          "role": "user",
-          "content": [
-            {
-              "type": "image_url",
-              "image_url": { "url": format!("data:image/png;base64,{base64}") }
-            },
-            {
-              "type": "text",
-              "text": prompt
-            }
-          ]
-        }
-      ],
-      "max_tokens": 2000
-    });
-    apply_model_temperature(&mut body, config, model);
-    if !thinking_enabled && provider_supports_thinking_field(&config.base_url) {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
-
-    let response = send_with_failover(
-        state,
-        "OpenAI OCR",
-        retry_attempts,
-        &config.id,
-        &config.api_keys,
-        |key| {
-            with_standard_request_timeout(state.http.post(url.clone()).bearer_auth(key).json(&body))
-                .send()
+    let request = GenerateRequest {
+        model: model.to_string(),
+        system: String::new(),
+        messages: vec![ocr_image_message(image_path, prompt)?],
+        tools: Vec::new(),
+        options: GenerateOptions {
+            thinking_enabled,
+            ..GenerateOptions::default()
         },
-    )
-    .await
-    .map_err(&fail)?;
-
-    // 显式检查 HTTP 状态：非 2xx 把原始 body 文本带回，避免后续 .json() 抛出含糊的 "error decoding response body"
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-        let snippet: String = body_text.chars().take(500).collect();
-        return Err(fail(format!("OCR HTTP {}: {}", status.as_u16(), snippet)));
-    }
-
-    let raw = response
-        .text()
+        metadata: legacy_request_metadata("OCR API", usage_source, usage_operation),
+    };
+    let output = generate_with_chat_provider(state.inner(), config, retry_attempts, request)
         .await
-        .map_err(|e| fail(format!("OCR read body: {}", e)))?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        fail(format!(
-            "OCR parse JSON: {} (body: {})",
-            e,
-            raw.chars().take(500).collect::<String>()
-        ))
-    })?;
-    let usage = model_usage_from_openai_value(&value);
-    let content = value
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .ok_or_else(|| {
-            fail(format!(
-                "Invalid OCR response: {}",
-                raw.chars().take(500).collect::<String>()
-            ))
-        })?;
-
-    record_api_usage(
-        state.inner(),
-        config,
-        model,
-        usage_source,
-        usage_operation,
-        started_at,
-        started,
-        ApiUsageOutcome::Success(usage),
-    );
-    Ok(content.trim().to_string())
+        .map_err(|err| err.to_string())?;
+    Ok(output.text.trim().to_string())
 }
 
 /// 调用视觉 API（截图解释 / Lens 共用）
-/// 支持流式输出：如果 stream 为 true，通过 stream_vision_response 逐段 emit `event_name` 事件。
+/// 支持流式输出：如果 stream 为 true，通过 `LensEventSink` 逐段 emit `event_name` 事件。
 /// `provider_id_override` 非空时使用指定 provider/model（用于 lens 选择独立模型）；空则走 explain 配置。
 #[allow(clippy::too_many_arguments)]
 pub async fn call_vision_api(
@@ -877,6 +818,7 @@ pub async fn call_vision_api(
 
     // 优先用调用方传入的 system_prompt_override；否则用默认模板（区分有/无图片）
     // 关闭思考时在 system 末尾追加显式禁止指令，作为参数层不生效时的兜底
+    // （适配器层会按 provider 元数据补 thinking 禁用字段）
     let system_prompt_to_use = {
         let base = match system_prompt_override.filter(|s| !s.is_empty()) {
             Some(s) => s.to_string(),
@@ -889,38 +831,32 @@ pub async fn call_vision_api(
         }
     };
 
-    let mut api_messages = Vec::new();
-    api_messages.push(serde_json::json!({
-      "role": "system",
-      "content": system_prompt_to_use
-    }));
-
+    let explain_role = |role: &str| -> ModelRole {
+        if role == "assistant" {
+            ModelRole::Assistant
+        } else {
+            ModelRole::User
+        }
+    };
+    let mut api_messages: Vec<ModelMessage> = Vec::new();
     if has_image {
         let image_path = resolve_explain_image_path(app, state, image_id)?;
-        let bytes = fs::read(image_path).map_err(|e| e.to_string())?;
-        let base64 = general_purpose::STANDARD.encode(bytes);
         if let Some(first) = messages.first() {
-            api_messages.push(serde_json::json!({
-        "role": "user",
-        "content": [
-          { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{base64}") } },
-          { "type": "text", "text": first.content }
-        ]
-      }));
+            api_messages.push(ocr_image_message(&image_path, &first.content)?);
             for message in messages.iter().skip(1) {
-                api_messages.push(serde_json::json!({
-                  "role": message.role,
-                  "content": message.content
-                }));
+                api_messages.push(ModelMessage::text(
+                    explain_role(&message.role),
+                    message.content.clone(),
+                ));
             }
         }
     } else {
         // 纯文本：每条 message 直接 push（无图）
         for message in messages.iter() {
-            api_messages.push(serde_json::json!({
-              "role": message.role,
-              "content": message.content,
-            }));
+            api_messages.push(ModelMessage::text(
+                explain_role(&message.role),
+                message.content.clone(),
+            ));
         }
     }
 
@@ -930,291 +866,73 @@ pub async fn call_vision_api(
     if model.trim().is_empty() {
         return Err("Please select a model first".to_string());
     }
-    let started_at = chrono::Local::now().timestamp();
-    let started = Instant::now();
-    let fail = |err: String| -> String {
-        record_api_usage(
-            state.inner(),
-            provider,
-            model,
-            usage_source,
-            usage_operation,
-            started_at,
-            started,
-            ApiUsageOutcome::Failure(&err),
-        );
-        err
-    };
-    let url = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
-    let mut body = serde_json::json!({
-      "model": model,
-      "messages": api_messages,
-      "max_tokens": 2000
-    });
-    apply_model_temperature(&mut body, provider, model);
-    if stream {
-        body["stream"] = serde_json::json!(true);
-    }
-
-    // 关闭思考模式：仅塞 DeepSeek/Kimi 官方文档约定的 thinking={type:"disabled"} 字段。
-    // 不注入 chat_template_kwargs / enable_thinking —— 这俩是 vLLM/Qwen 私有字段，第三方代理
-    // （如 OpenRouter / 反代）做严格校验会以 400 拒绝整个请求（实测 DeepSeek 路径上 chat_template_kwargs
-    // 直接报错）。注：reasoning_effort 是 OpenAI 标准参数（非私有），chat 路径的「思考等级」按需注入；
-    // 这里是 lens/翻译路径，保持仅 thinking:disabled。提示词层的 no-think 指令是更稳的兜底。
-    if !thinking_enabled && provider_supports_thinking_field(&provider.base_url) {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
-
-    let response = send_with_failover(
-        state,
-        "Vision API",
-        retry_attempts,
-        &provider.id,
-        &provider.api_keys,
-        |key| {
-            let request = state.http.post(url.clone()).bearer_auth(key).json(&body);
-            let request = if stream {
-                request
-            } else {
-                with_standard_request_timeout(request)
-            };
-            request.send()
+    let request = GenerateRequest {
+        model: model.to_string(),
+        system: system_prompt_to_use,
+        messages: api_messages,
+        tools: Vec::new(),
+        options: GenerateOptions {
+            thinking_enabled,
+            ..GenerateOptions::default()
         },
-    )
-    .await
-    .map_err(&fail)?;
-
-    // 先检查 HTTP 状态：非 2xx 直接读出 body 文本作为错误，避免后续 .json() / chunk() 拿到非预期格式时抛出含糊的 "error decoding response body"。
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-        let snippet = body_text.chars().take(500).collect::<String>();
-        return Err(fail(format!(
-            "Vision API HTTP {}: {}",
-            status.as_u16(),
-            snippet
-        )));
-    }
+        metadata: legacy_request_metadata("Vision API", usage_source, usage_operation),
+    };
 
     if stream {
-        // 启动新流：递增代号，存到本流持有的快照里；后续 chunk 循环只要发现全局代号 != 自己的快照就退出。
+        // 启动新流：递增代号，存到本流持有的快照里；sink 每次 emit 只要发现全局代号 != 自己的快照
+        // 就返回 Cancelled 错，适配器沿 `?` 上抛回来。
         let generation = state
             .explain_stream_generation
             .fetch_add(1, Ordering::SeqCst)
             + 1;
-        let stream_result = stream_vision_response(
-            app,
-            response,
+        let mut sink = LensEventSink::new(
+            |payload| {
+                let _ = app.emit(event_name, payload);
+            },
             image_id,
             stream_kind,
-            event_name,
             &state.explain_stream_generation,
             generation,
-        )
-        .await
-        .map_err(&fail)?;
-        record_api_usage(
-            state.inner(),
-            provider,
-            model,
-            usage_source,
-            usage_operation,
-            started_at,
-            started,
-            if stream_result.cancelled {
-                ApiUsageOutcome::Cancelled(stream_result.usage)
-            } else {
-                ApiUsageOutcome::Success(stream_result.usage)
-            },
         );
-        return Ok(stream_result.text);
-    }
-
-    // 非流式：先读 raw text，再 parse JSON，把原始 body 作为错误信息便于诊断。
-    let raw = response
-        .text()
-        .await
-        .map_err(|e| fail(format!("Vision API read body: {}", e)))?;
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(value) => value,
-        Err(err) => {
-            if let Some(content) = parse_sse_chat_content(&raw) {
-                record_api_usage(
-                    state.inner(),
-                    provider,
-                    model,
-                    usage_source,
-                    usage_operation,
-                    started_at,
-                    started,
-                    ApiUsageOutcome::Success(None),
-                );
-                return Ok(content);
+        let result =
+            stream_with_chat_provider(state.inner(), provider, retry_attempts, request, &mut sink)
+                .await;
+        return match result {
+            // 正常结束：done 事件已由 sink 的 Finish 分支发出。
+            Ok(output) => Ok(output.text.trim().to_string()),
+            // 取消不是错误：emit done("cancelled")，返回已累积的部分文本。
+            Err(err) if err.is_cancelled() => {
+                sink.emit_done("cancelled");
+                Ok(sink.full_text().trim().to_string())
             }
-            return Err(fail(format!(
-                "Vision API parse JSON: {} (body: {})",
-                err,
-                raw.chars().take(500).collect::<String>()
-            )));
-        }
-    };
-    let usage = model_usage_from_openai_value(&value);
-    let content = value
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .ok_or_else(|| {
-            fail(format!(
-                "Invalid vision response: {}",
-                raw.chars().take(500).collect::<String>()
-            ))
-        })?;
-
-    record_api_usage(
-        state.inner(),
-        provider,
-        model,
-        usage_source,
-        usage_operation,
-        started_at,
-        started,
-        ApiUsageOutcome::Success(usage),
-    );
-    Ok(content.trim().to_string())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamTextMode {
-    Delta,
-    Snapshot,
-}
-
-#[derive(Debug, Clone)]
-struct StreamCallResult {
-    text: String,
-    usage: Option<ModelUsage>,
-    cancelled: bool,
-}
-
-fn extract_sse_chat_text(value: &serde_json::Value) -> Option<(&str, StreamTextMode)> {
-    let choice = value.get("choices").and_then(|choices| choices.get(0))?;
-
-    if let Some(content) = choice
-        .get("delta")
-        .and_then(|delta| delta.get("content"))
-        .and_then(|content| content.as_str())
-        .filter(|content| !content.is_empty())
-    {
-        return Some((content, StreamTextMode::Delta));
-    }
-
-    choice
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .filter(|content| !content.is_empty())
-        .map(|content| (content, StreamTextMode::Snapshot))
-}
-
-fn append_stream_text(full: &mut String, text: &str, mode: StreamTextMode) -> Option<String> {
-    if text.is_empty() {
-        return None;
-    }
-
-    match mode {
-        StreamTextMode::Delta => {
-            full.push_str(text);
-            Some(text.to_string())
-        }
-        StreamTextMode::Snapshot => {
-            if text == full || full.starts_with(text) {
-                return None;
+            Err(err) => {
+                sink.emit_done("error");
+                Err(err.to_string())
             }
-            if text.starts_with(full.as_str()) {
-                let delta = text[full.len()..].to_string();
-                full.clear();
-                full.push_str(text);
-                return if delta.is_empty() { None } else { Some(delta) };
-            }
-
-            full.push_str(text);
-            Some(text.to_string())
-        }
-    }
-}
-
-fn parse_sse_chat_content(raw: &str) -> Option<String> {
-    let mut full = String::new();
-    for line in raw.lines() {
-        let line = line.trim();
-        if !line.starts_with("data:") {
-            continue;
-        }
-        let data = line.trim_start_matches("data:").trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let value: serde_json::Value = match serde_json::from_str(data) {
-            Ok(value) => value,
-            Err(_) => continue,
         };
-        if let Some((content, mode)) = extract_sse_chat_text(&value) {
-            let _ = append_stream_text(&mut full, content, mode);
-        }
     }
-    let full = full.trim();
-    if full.is_empty() {
-        None
-    } else {
-        Some(full.to_string())
-    }
+
+    let output = generate_with_chat_provider(state.inner(), provider, retry_attempts, request)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(output.text.trim().to_string())
 }
 
-// ===== SSE 流 =====
+// ===== 流式调用 =====
 
-/// 构造带 image 的 OCR/视觉请求 body（model 由调用方注入），开启 stream
-pub fn build_ocr_request_body(
-    image_path: &Path,
-    prompt: &str,
-    thinking_enabled: bool,
-    provider: &settings::ModelProvider,
-    model: &str,
-) -> Result<serde_json::Value, String> {
-    let bytes = fs::read(image_path).map_err(|e| e.to_string())?;
-    let base64 = general_purpose::STANDARD.encode(bytes);
-    let mut body = serde_json::json!({
-      "messages": [{
-        "role": "user",
-        "content": [
-          { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{base64}") } },
-          { "type": "text", "text": prompt }
-        ]
-      }],
-      "max_tokens": 2000,
-      "stream": true
-    });
-    apply_model_temperature(&mut body, provider, model);
-    if !thinking_enabled && provider_supports_thinking_field(&provider.base_url) {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
-    Ok(body)
-}
-
-/// 通用流式 chat 调用：发送 body（model 在外层注入）→ 解析 SSE → 通过 stream_vision_response emit。
+/// 通用流式 chat 调用：组 `GenerateRequest` → 适配器流式 → `LensEventSink` emit 事件。
 /// 复用 explain_stream_generation 作取消代号（lens-stream / lens-translate-stream 都共用）。
+/// 取消不是错误：emit done("cancelled") 并返回已累积的部分文本。
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_chat_call(
     app: &AppHandle,
     state: &State<'_, AppState>,
     provider: &settings::ModelProvider,
     model: &str,
-    mut body: serde_json::Value,
+    system: String,
+    messages: Vec<ModelMessage>,
     retry_attempts: usize,
+    thinking_enabled: bool,
     image_id: &str,
     kind: &str,
     event_name: &str,
@@ -1224,87 +942,45 @@ pub async fn stream_chat_call(
     if model.trim().is_empty() {
         return Err("Please select a model first".to_string());
     }
-    let started_at = chrono::Local::now().timestamp();
-    let started = Instant::now();
-    let fail = |err: String| -> String {
-        record_api_usage(
-            state.inner(),
-            provider,
-            model,
-            usage_source,
-            usage_operation,
-            started_at,
-            started,
-            ApiUsageOutcome::Failure(&err),
-        );
-        err
+    let request = GenerateRequest {
+        model: model.to_string(),
+        system,
+        messages,
+        tools: Vec::new(),
+        options: GenerateOptions {
+            thinking_enabled,
+            ..GenerateOptions::default()
+        },
+        metadata: legacy_request_metadata("Stream chat", usage_source, usage_operation),
     };
-    body["model"] = serde_json::json!(model);
-    let url = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
     let generation = state
         .explain_stream_generation
         .fetch_add(1, Ordering::SeqCst)
         + 1;
-
-    let response = send_with_failover_cancelable(
-        state,
-        "Stream chat",
-        retry_attempts,
-        &provider.id,
-        &provider.api_keys,
-        || state.explain_stream_generation.load(Ordering::SeqCst) != generation,
-        |key| {
-            state
-                .http
-                .post(url.clone())
-                .bearer_auth(key)
-                .json(&body)
-                .send()
+    let mut sink = LensEventSink::new(
+        |payload| {
+            let _ = app.emit(event_name, payload);
         },
-    )
-    .await
-    .map_err(&fail)?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-        let snippet: String = body_text.chars().take(500).collect();
-        return Err(fail(format!(
-            "Stream HTTP {}: {}",
-            status.as_u16(),
-            snippet
-        )));
-    }
-
-    let stream_result = stream_vision_response(
-        app,
-        response,
         image_id,
         kind,
-        event_name,
         &state.explain_stream_generation,
         generation,
-    )
-    .await
-    .map_err(&fail)?;
-    record_api_usage(
-        state.inner(),
-        provider,
-        model,
-        usage_source,
-        usage_operation,
-        started_at,
-        started,
-        if stream_result.cancelled {
-            ApiUsageOutcome::Cancelled(stream_result.usage)
-        } else {
-            ApiUsageOutcome::Success(stream_result.usage)
-        },
     );
-    Ok(stream_result.text)
+    let result =
+        stream_with_chat_provider(state.inner(), provider, retry_attempts, request, &mut sink)
+            .await;
+    match result {
+        // 正常结束：done 事件已由 sink 的 Finish 分支发出。
+        Ok(output) => Ok(output.text.trim().to_string()),
+        Err(err) if err.is_cancelled() => {
+            sink.emit_done("cancelled");
+            Ok(sink.full_text().trim().to_string())
+        }
+        Err(err) => {
+            sink.emit_done("error");
+            Err(err.to_string())
+        }
+    }
 }
 
 /// 截图翻译合并模式流：单次调用模型，按 `<<<ORIGINAL>>>` 分隔符把 SSE delta 拆成两段。
@@ -1320,8 +996,10 @@ pub async fn stream_translate_combined(
     state: &State<'_, AppState>,
     provider: &settings::ModelProvider,
     model: &str,
-    mut body: serde_json::Value,
+    system: String,
+    messages: Vec<ModelMessage>,
     retry_attempts: usize,
+    thinking_enabled: bool,
     image_id: &str,
     event_name: &str,
     usage_source: &str,
@@ -1330,444 +1008,404 @@ pub async fn stream_translate_combined(
     if model.trim().is_empty() {
         return Err("Please select a model first".to_string());
     }
-    let started_at = chrono::Local::now().timestamp();
-    let started = Instant::now();
-    let fail = |err: String| -> String {
-        record_api_usage(
-            state.inner(),
-            provider,
-            model,
+    let request = GenerateRequest {
+        model: model.to_string(),
+        system,
+        messages,
+        tools: Vec::new(),
+        options: GenerateOptions {
+            thinking_enabled,
+            ..GenerateOptions::default()
+        },
+        metadata: legacy_request_metadata(
+            "Stream translate combined",
             usage_source,
             usage_operation,
-            started_at,
-            started,
-            ApiUsageOutcome::Failure(&err),
-        );
-        err
+        ),
     };
-    body["model"] = serde_json::json!(model);
-    let url = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
     let my_gen = state
         .explain_stream_generation
         .fetch_add(1, Ordering::SeqCst)
         + 1;
-
-    let mut response = send_with_failover_cancelable(
-        state,
-        "Stream translate combined",
-        retry_attempts,
-        &provider.id,
-        &provider.api_keys,
-        || state.explain_stream_generation.load(Ordering::SeqCst) != my_gen,
-        |key| {
-            state
-                .http
-                .post(url.clone())
-                .bearer_auth(key)
-                .json(&body)
-                .send()
+    let mut sink = CombinedTranslateEventSink::new(
+        |payload| {
+            let _ = app.emit(event_name, payload);
         },
-    )
-    .await
-    .map_err(&fail)?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-        let snippet: String = body_text.chars().take(500).collect();
-        return Err(fail(format!(
-            "Stream HTTP {}: {}",
-            status.as_u16(),
-            snippet
-        )));
-    }
-
-    let sep = COMBINED_TRANSLATE_SEPARATOR;
-    let sep_len = sep.len();
-
-    let mut sse_buf = String::new();
-    let mut utf8 = Utf8StreamDecoder::default();
-    let mut tail = String::new();
-    let mut streamed_content = String::new();
-    let mut translated = String::new();
-    let mut original = String::new();
-    let mut sep_seen = false;
-    let mut usage: Option<ModelUsage> = None;
-
-    let emit_done = |reason: &str| {
-        let _ = app.emit(
-            event_name,
-            serde_json::json!({
-              "imageId": image_id, "delta": "", "done": true, "reason": reason,
-            }),
-        );
-    };
-
-    loop {
-        if state.explain_stream_generation.load(Ordering::SeqCst) != my_gen {
-            // 取消：把 tail 当作 translated flush（避免末尾几个字符丢失），再 emit done
-            if !tail.is_empty() && !sep_seen {
-                translated.push_str(&tail);
-                let _ = app.emit(
-                    event_name,
-                    serde_json::json!({ "imageId": image_id, "kind": "translated", "delta": tail }),
-                );
-            }
-            emit_done("cancelled");
-            record_api_usage(
-                state.inner(),
-                provider,
-                model,
-                usage_source,
-                usage_operation,
-                started_at,
-                started,
-                ApiUsageOutcome::Cancelled(usage),
-            );
-            return Ok((translated, original));
-        }
-
-        let chunk = match response.chunk().await {
-            Ok(Some(c)) => c,
-            Ok(None) => break,
-            Err(e) => {
-                emit_done("error");
-                return Err(fail(e.to_string()));
-            }
-        };
-
-        let text = utf8.push(&chunk);
-        sse_buf.push_str(&text);
-
-        while let Some(pos) = sse_buf.find('\n') {
-            let line: String = sse_buf.drain(..=pos).collect();
-            let line = line.trim();
-            if !line.starts_with("data:") {
-                continue;
-            }
-            let data = line.trim_start_matches("data:").trim();
-            if data.is_empty() {
-                continue;
-            }
-            if data == "[DONE]" {
-                // flush tail
-                if !sep_seen && !tail.is_empty() {
-                    translated.push_str(&tail);
-                    let _ = app.emit(
-            event_name,
-            serde_json::json!({ "imageId": image_id, "kind": "translated", "delta": tail }),
-          );
-                }
-                emit_done("done");
-                record_api_usage(
-                    state.inner(),
-                    provider,
-                    model,
-                    usage_source,
-                    usage_operation,
-                    started_at,
-                    started,
-                    ApiUsageOutcome::Success(usage),
-                );
-                return Ok((translated, original));
-            }
-
-            let value: serde_json::Value = match serde_json::from_str(data) {
-                Ok(val) => val,
-                Err(_) => continue,
-            };
-            if let Some(next_usage) = model_usage_from_stream_value(&value) {
-                usage = Some(next_usage);
-            }
-
-            let delta_obj = value
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"));
-
-            // 推理链 emit（恒定 kind="translated"，前端在主面板渲染）
-            if let Some(r) = delta_obj
-                .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                let _ = app.emit(
-                    event_name,
-                    serde_json::json!({
-                      "imageId": image_id, "kind": "translated", "delta": "", "reasoningDelta": r,
-                    }),
-                );
-            }
-
-            let Some((content, mode)) = extract_sse_chat_text(&value) else {
-                continue;
-            };
-            let Some(content_delta) = append_stream_text(&mut streamed_content, content, mode)
-            else {
-                continue;
-            };
-            let c = content_delta.as_str();
-
-            if sep_seen {
-                original.push_str(c);
-                let _ = app.emit(
-                    event_name,
-                    serde_json::json!({ "imageId": image_id, "kind": "original", "delta": c }),
-                );
-                continue;
-            }
-
-            tail.push_str(c);
-            if let Some(idx) = tail.find(sep) {
-                // 分隔符命中：拆 before / after，trim 掉分隔符相邻的换行，分别发出
-                let before: String = tail.drain(..idx).collect();
-                // 移除分隔符本身
-                tail.drain(..sep_len);
-                let after: String = std::mem::take(&mut tail);
-
-                let before_emit = before.trim_end_matches('\n').to_string();
-                if !before_emit.is_empty() {
-                    translated.push_str(&before_emit);
-                    let _ = app.emit(
-            event_name,
-            serde_json::json!({ "imageId": image_id, "kind": "translated", "delta": before_emit }),
-          );
-                }
-                sep_seen = true;
-                let after_emit = after.trim_start_matches('\n').to_string();
-                if !after_emit.is_empty() {
-                    original.push_str(&after_emit);
-                    let _ = app.emit(
-            event_name,
-            serde_json::json!({ "imageId": image_id, "kind": "original", "delta": after_emit }),
-          );
-                }
-            } else {
-                // 没命中：emit 安全前缀（保留末尾 sep_len-1 字节防止跨 chunk 分隔符被切碎）
-                let max_emit = tail.len().saturating_sub(sep_len.saturating_sub(1));
-                if max_emit == 0 {
-                    continue;
-                }
-                // 找一个合法 char boundary（CJK 字符多字节，不能切到字符中间）
-                let mut safe = max_emit;
-                while safe > 0 && !tail.is_char_boundary(safe) {
-                    safe -= 1;
-                }
-                if safe == 0 {
-                    continue;
-                }
-                let to_emit: String = tail.drain(..safe).collect();
-                translated.push_str(&to_emit);
-                let _ = app.emit(
-          event_name,
-          serde_json::json!({ "imageId": image_id, "kind": "translated", "delta": to_emit }),
-        );
-            }
-        }
-    }
-
-    // SSE 流结束（连接关闭）但没收到 [DONE]：flush tail
-    if !sep_seen && !tail.is_empty() {
-        translated.push_str(&tail);
-        let _ = app.emit(
-            event_name,
-            serde_json::json!({ "imageId": image_id, "kind": "translated", "delta": tail }),
-        );
-    }
-    emit_done("done");
-    record_api_usage(
-        state.inner(),
-        provider,
-        model,
-        usage_source,
-        usage_operation,
-        started_at,
-        started,
-        ApiUsageOutcome::Success(usage),
+        image_id,
+        &state.explain_stream_generation,
+        my_gen,
     );
-    Ok((translated, original))
+    let result =
+        stream_with_chat_provider(state.inner(), provider, retry_attempts, request, &mut sink)
+            .await;
+    match result {
+        // 正常结束：Finish 分支已 flush tail + emit done("done")。
+        Ok(_) => Ok((sink.translated().to_string(), sink.original().to_string())),
+        // 取消不是错误：flush tail 当译文 + emit done("cancelled")，返回部分结果。
+        Err(err) if err.is_cancelled() => {
+            sink.flush_tail_emit();
+            sink.emit_done("cancelled");
+            Ok((sink.translated().to_string(), sink.original().to_string()))
+        }
+        Err(err) => {
+            sink.emit_done("error");
+            Err(err.to_string())
+        }
+    }
 }
 
-/// 流式解析视觉 API 的 SSE 响应
-/// 逐 chunk 读取响应体，解析 "data:" 行，提取 delta 中的 content 并通过 `event_name` emit。
-/// 支持取消：调用方持有 `my_generation`，全局代号 `generation_atom` 一旦变化即视为被新流或外部取消作废。
-async fn stream_vision_response(
-    app: &AppHandle,
-    mut response: reqwest::Response,
-    image_id: &str,
-    kind: &str,
-    event_name: &str,
-    generation_atom: &AtomicU64,
+// ===== StreamPart → Lens 事件桥（多协议适配器接入旧调用路径的 sink 层）=====
+
+/// 取消哨兵文案：包含 "cancelled"，使 usage 记录层（`error_kind_from_message` /
+/// `failure_status_from_message`）把该错误归类为 cancelled 而非 failure。
+pub(crate) const STREAM_CANCELLED_SENTINEL: &str =
+    "stream cancelled: superseded by a newer generation";
+
+/// 代际失配时 sink 返回的取消错误。适配器的 `?` 会把它一路抛回调用方；
+/// 调用方捕获 `is_cancelled()` 后按取消（正常收尾）而非错误处理。
+pub(crate) fn stream_cancelled_error() -> ModelError {
+    ModelError::with_kind(STREAM_CANCELLED_SENTINEL, ModelErrorKind::Cancelled)
+}
+
+/// 把模型适配器的 `StreamPart` 翻译成现有 Lens Tauri 事件 payload 的 sink。
+/// 事件形状与 `stream_vision_response` 的 emit 逐字节一致（UI 契约不动）：
+/// - `TextDelta`      → `{ imageId, kind, delta }`
+/// - `ReasoningDelta` → `{ imageId, kind, delta: "", reasoningDelta }`
+/// - `Finish`         → `{ imageId, kind, delta: "", done: true, reason: "done", full }`
+///
+/// 每次 emit 前检查 `explain_stream_generation` 代际：失配即返回 `Cancelled` 错。
+/// 事件发送通过注入闭包完成（调用方包一层 `app.emit(event_name, …)`），便于脱离
+/// `AppHandle` 单测。
+pub(crate) struct LensEventSink<'a, F: FnMut(serde_json::Value) + Send> {
+    emit_event: F,
+    image_id: &'a str,
+    kind: &'a str,
+    generation_atom: &'a AtomicU64,
     my_generation: u64,
-) -> Result<StreamCallResult, String> {
-    let mut buffer = String::new();
-    let mut utf8 = Utf8StreamDecoder::default();
-    let mut full = String::new();
-    let mut reasoning_full = String::new();
-    let mut usage: Option<ModelUsage> = None;
+    full: String,
+}
 
-    let emit_done = |reason: &str, full_text: &str| {
-        let _ = app.emit(
-            event_name,
-            serde_json::json!({
-              "imageId": image_id,
-              "kind": kind,
-              "delta": "",
-              "done": true,
-              "reason": reason,
-              "full": full_text,
-            }),
-        );
-    };
-
-    loop {
-        if generation_atom.load(Ordering::SeqCst) != my_generation {
-            emit_done("cancelled", full.trim());
-            return Ok(StreamCallResult {
-                text: full.trim().to_string(),
-                usage,
-                cancelled: true,
-            });
-        }
-
-        let chunk = match response.chunk().await {
-            Ok(Some(c)) => c,
-            Ok(None) => break,
-            Err(e) => {
-                emit_done("error", full.trim());
-                return Err(e.to_string());
-            }
-        };
-
-        let text = utf8.push(&chunk);
-        buffer.push_str(&text);
-
-        while let Some(pos) = buffer.find('\n') {
-            let line: String = buffer.drain(..=pos).collect();
-            let line = line.trim();
-            if !line.starts_with("data:") {
-                continue;
-            }
-            let data = line.trim_start_matches("data:").trim();
-            if data.is_empty() {
-                continue;
-            }
-            if data == "[DONE]" {
-                emit_done("done", full.trim());
-                return Ok(StreamCallResult {
-                    text: full.trim().to_string(),
-                    usage,
-                    cancelled: false,
-                });
-            }
-
-            let value: serde_json::Value = match serde_json::from_str(data) {
-                Ok(val) => val,
-                Err(_) => continue,
-            };
-            if let Some(next_usage) = model_usage_from_stream_value(&value) {
-                usage = Some(next_usage);
-            }
-
-            let delta_obj = value
-                .get("choices")
-                .and_then(|choices| choices.get(0))
-                .and_then(|choice| choice.get("delta"));
-
-            // 推理模型（DeepSeek-R1 / Kimi 等）把链路放在 delta.reasoning_content
-            // 部分实现用 delta.reasoning。两种字段都尝试取，只要有就 emit。
-            let reasoning = delta_obj
-                .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-
-            if let Some(r) = reasoning {
-                let Some(reasoning_delta) =
-                    append_stream_text(&mut reasoning_full, r, StreamTextMode::Delta)
-                else {
-                    continue;
-                };
-                let _ = app.emit(
-                    event_name,
-                    serde_json::json!({
-                      "imageId": image_id,
-                      "kind": kind,
-                      "delta": "",
-                      "reasoningDelta": reasoning_delta,
-                    }),
-                );
-            }
-
-            if let Some((content, mode)) = extract_sse_chat_text(&value) {
-                let Some(delta) = append_stream_text(&mut full, content, mode) else {
-                    continue;
-                };
-                let _ = app.emit(
-                    event_name,
-                    serde_json::json!({ "imageId": image_id, "kind": kind, "delta": delta }),
-                );
-            }
+impl<'a, F: FnMut(serde_json::Value) + Send> LensEventSink<'a, F> {
+    pub(crate) fn new(
+        emit_event: F,
+        image_id: &'a str,
+        kind: &'a str,
+        generation_atom: &'a AtomicU64,
+        my_generation: u64,
+    ) -> Self {
+        Self {
+            emit_event,
+            image_id,
+            kind,
+            generation_atom,
+            my_generation,
+            full: String::new(),
         }
     }
 
-    emit_done("done", full.trim());
-    Ok(StreamCallResult {
-        text: full.trim().to_string(),
-        usage,
-        cancelled: false,
-    })
+    /// 已累积的完整文本（取消时调用方取部分结果用）。
+    pub(crate) fn full_text(&self) -> &str {
+        &self.full
+    }
+
+    /// 发出 done 事件（reason: "done"/"cancelled"/"error"）。Finish 分支与调用方收尾共用。
+    pub(crate) fn emit_done(&mut self, reason: &str) {
+        (self.emit_event)(serde_json::json!({
+          "imageId": self.image_id,
+          "kind": self.kind,
+          "delta": "",
+          "done": true,
+          "reason": reason,
+          "full": self.full.trim(),
+        }));
+    }
+
+    fn is_stale(&self) -> bool {
+        self.generation_atom.load(Ordering::SeqCst) != self.my_generation
+    }
+}
+
+impl<F: FnMut(serde_json::Value) + Send> StreamSink for LensEventSink<'_, F> {
+    fn emit(&mut self, part: StreamPart) -> Result<(), ModelError> {
+        if self.is_stale() {
+            return Err(stream_cancelled_error());
+        }
+        match part {
+            StreamPart::TextDelta { delta } => {
+                if delta.is_empty() {
+                    return Ok(());
+                }
+                self.full.push_str(&delta);
+                (self.emit_event)(serde_json::json!({
+                  "imageId": self.image_id, "kind": self.kind, "delta": delta,
+                }));
+            }
+            StreamPart::ReasoningDelta { delta } => {
+                if delta.is_empty() {
+                    return Ok(());
+                }
+                (self.emit_event)(serde_json::json!({
+                  "imageId": self.image_id,
+                  "kind": self.kind,
+                  "delta": "",
+                  "reasoningDelta": delta,
+                }));
+            }
+            StreamPart::Finish { .. } => {
+                self.emit_done("done");
+            }
+            StreamPart::Error { message } => return Err(ModelError::new(message)),
+            // 不传 tools，ToolCall* 不会出现。
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// 合并翻译流的一段拆分产物：分隔符前为译文、后为原文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CombinedSplitPiece {
+    Translated(String),
+    Original(String),
+}
+
+/// `<<<ORIGINAL>>>` 拆分状态机（从 `stream_translate_combined` 的内联逻辑提炼，
+/// 行为逐条对齐；本体的迁移在后续步骤完成）。
+///
+/// 关键点（与原实现一致）：
+/// - 分隔符可能跨 delta 边界 → tail 缓冲住末尾 (SEPARATOR.len()-1) 字节，防止把分隔符
+///   前缀当译文 emit 出去
+/// - tail 切片必须落在 UTF-8 char boundary，否则 `String::drain` 会 panic
+///   （用户截图常含 CJK，每字 3 字节）
+/// - 分隔符命中时：前段 trim 尾部换行、后段 trim 头部换行（仅限同一 delta 内的相邻换行）
+#[derive(Debug, Default)]
+pub(crate) struct CombinedTranslateSplitter {
+    tail: String,
+    sep_seen: bool,
+    translated: String,
+    original: String,
+}
+
+impl CombinedTranslateSplitter {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 喂入一段文本增量，返回本次可安全发出的拆分片段（可能为空）。
+    pub(crate) fn push(&mut self, delta: &str) -> Vec<CombinedSplitPiece> {
+        let mut out = Vec::new();
+        if delta.is_empty() {
+            return out;
+        }
+        if self.sep_seen {
+            self.original.push_str(delta);
+            out.push(CombinedSplitPiece::Original(delta.to_string()));
+            return out;
+        }
+
+        let sep = COMBINED_TRANSLATE_SEPARATOR;
+        let sep_len = sep.len();
+        self.tail.push_str(delta);
+        if let Some(idx) = self.tail.find(sep) {
+            // 分隔符命中：拆 before / after，trim 掉分隔符相邻的换行，分别发出
+            let before: String = self.tail.drain(..idx).collect();
+            // 移除分隔符本身
+            self.tail.drain(..sep_len);
+            let after: String = std::mem::take(&mut self.tail);
+
+            let before_emit = before.trim_end_matches('\n').to_string();
+            if !before_emit.is_empty() {
+                self.translated.push_str(&before_emit);
+                out.push(CombinedSplitPiece::Translated(before_emit));
+            }
+            self.sep_seen = true;
+            let after_emit = after.trim_start_matches('\n').to_string();
+            if !after_emit.is_empty() {
+                self.original.push_str(&after_emit);
+                out.push(CombinedSplitPiece::Original(after_emit));
+            }
+        } else {
+            // 没命中：emit 安全前缀（保留末尾 sep_len-1 字节防止跨 delta 分隔符被切碎）
+            let max_emit = self.tail.len().saturating_sub(sep_len.saturating_sub(1));
+            if max_emit == 0 {
+                return out;
+            }
+            // 找一个合法 char boundary（CJK 字符多字节，不能切到字符中间）
+            let mut safe = max_emit;
+            while safe > 0 && !self.tail.is_char_boundary(safe) {
+                safe -= 1;
+            }
+            if safe == 0 {
+                return out;
+            }
+            let to_emit: String = self.tail.drain(..safe).collect();
+            self.translated.push_str(&to_emit);
+            out.push(CombinedSplitPiece::Translated(to_emit));
+        }
+        out
+    }
+
+    /// 流结束/取消时把残留 tail 当译文 flush（避免末尾几个字符丢失）。
+    /// 与原实现一致：仅在分隔符尚未出现且 tail 非空时有内容。
+    pub(crate) fn flush_tail(&mut self) -> Option<String> {
+        if self.sep_seen || self.tail.is_empty() {
+            return None;
+        }
+        let tail = std::mem::take(&mut self.tail);
+        self.translated.push_str(&tail);
+        Some(tail)
+    }
+
+    /// 已累积的完整译文（含已 flush 的 tail）。
+    pub(crate) fn translated(&self) -> &str {
+        &self.translated
+    }
+
+    /// 已累积的完整原文。
+    pub(crate) fn original(&self) -> &str {
+        &self.original
+    }
+}
+
+/// 合并翻译流的事件桥 sink：`TextDelta` 经 `CombinedTranslateSplitter` 拆成
+/// kind="translated"/"original" 两种事件再转发。事件形状与 `stream_translate_combined`
+/// 现有 emit 逐字节一致：
+/// - 译文段  → `{ imageId, kind: "translated", delta }`
+/// - 原文段  → `{ imageId, kind: "original", delta }`
+/// - 推理链  → `{ imageId, kind: "translated", delta: "", reasoningDelta }`
+/// - done    → `{ imageId, delta: "", done: true, reason }`（`Finish` 时 flush tail 后 reason="done"）
+///
+/// 与 `LensEventSink` 相同的代际取消语义。
+pub(crate) struct CombinedTranslateEventSink<'a, F: FnMut(serde_json::Value) + Send> {
+    emit_event: F,
+    image_id: &'a str,
+    generation_atom: &'a AtomicU64,
+    my_generation: u64,
+    splitter: CombinedTranslateSplitter,
+}
+
+impl<'a, F: FnMut(serde_json::Value) + Send> CombinedTranslateEventSink<'a, F> {
+    pub(crate) fn new(
+        emit_event: F,
+        image_id: &'a str,
+        generation_atom: &'a AtomicU64,
+        my_generation: u64,
+    ) -> Self {
+        Self {
+            emit_event,
+            image_id,
+            generation_atom,
+            my_generation,
+            splitter: CombinedTranslateSplitter::new(),
+        }
+    }
+
+    pub(crate) fn translated(&self) -> &str {
+        self.splitter.translated()
+    }
+
+    pub(crate) fn original(&self) -> &str {
+        self.splitter.original()
+    }
+
+    fn is_stale(&self) -> bool {
+        self.generation_atom.load(Ordering::SeqCst) != self.my_generation
+    }
+
+    fn emit_piece(&mut self, piece: CombinedSplitPiece) {
+        let (kind, delta) = match piece {
+            CombinedSplitPiece::Translated(delta) => ("translated", delta),
+            CombinedSplitPiece::Original(delta) => ("original", delta),
+        };
+        (self.emit_event)(serde_json::json!({
+          "imageId": self.image_id, "kind": kind, "delta": delta,
+        }));
+    }
+
+    /// 把残留 tail 当译文 flush 并发出对应事件（done/cancel 收尾共用）。
+    pub(crate) fn flush_tail_emit(&mut self) {
+        if let Some(tail) = self.splitter.flush_tail() {
+            self.emit_piece(CombinedSplitPiece::Translated(tail));
+        }
+    }
+
+    /// 发出 done 事件（reason: "done" / "cancelled" / "error"，由调用方收尾时定）。
+    pub(crate) fn emit_done(&mut self, reason: &str) {
+        (self.emit_event)(serde_json::json!({
+          "imageId": self.image_id, "delta": "", "done": true, "reason": reason,
+        }));
+    }
+}
+
+impl<F: FnMut(serde_json::Value) + Send> StreamSink for CombinedTranslateEventSink<'_, F> {
+    fn emit(&mut self, part: StreamPart) -> Result<(), ModelError> {
+        if self.is_stale() {
+            return Err(stream_cancelled_error());
+        }
+        match part {
+            StreamPart::TextDelta { delta } => {
+                for piece in self.splitter.push(&delta) {
+                    self.emit_piece(piece);
+                }
+            }
+            StreamPart::ReasoningDelta { delta } => {
+                if delta.is_empty() {
+                    return Ok(());
+                }
+                // 推理链 emit（恒定 kind="translated"，前端在主面板渲染）
+                (self.emit_event)(serde_json::json!({
+                  "imageId": self.image_id,
+                  "kind": "translated",
+                  "delta": "",
+                  "reasoningDelta": delta,
+                }));
+            }
+            StreamPart::Finish { .. } => {
+                self.flush_tail_emit();
+                self.emit_done("done");
+            }
+            StreamPart::Error { message } => return Err(ModelError::new(message)),
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn temperature_test_provider(temperature: Option<f64>) -> settings::ModelProvider {
-        let mut model_overrides = std::collections::HashMap::new();
-        if let Some(temperature) = temperature {
-            model_overrides.insert(
-                "custom-model".to_string(),
-                settings::ModelInfo {
-                    temperature: Some(temperature),
-                    ..settings::ModelInfo::default()
-                },
-            );
-        }
-        settings::ModelProvider {
-            id: "test".into(),
-            name: "Test".into(),
-            api_keys: vec!["sk-test".into()],
-            api_key_legacy: None,
-            base_url: "https://api.example.com/v1".into(),
-            available_models: vec!["custom-model".into()],
-            enabled_models: vec!["custom-model".into()],
-            enabled: true,
-            api_format: "openai_chat".into(),
-            model_overrides,
-            compress_request_body: false,
-        }
+    #[test]
+    fn retry_after_is_capped_at_max_delay() {
+        // 上游/中转返回的巨值 Retry-After 不得被照单全收：否则单次重试会挂死数小时，
+        // 只能靠取消轮询打断（B2）。
+        assert_eq!(retry_delay_ms(1, Some(86_400)), RETRY_MAX_DELAY_MS);
+        assert_eq!(retry_delay_ms(1, Some(u64::MAX)), RETRY_MAX_DELAY_MS);
+        // 合理值仍原样生效（未被 clamp 抹平）。
+        let small = 2u64;
+        assert!(small * 1000 < RETRY_MAX_DELAY_MS, "测试前提：2s 应小于上限");
+        assert_eq!(retry_delay_ms(1, Some(small)), small * 1000);
+        // 无 Retry-After → 指数退避，同样受上限约束。
+        assert!(retry_delay_ms(99, None) <= RETRY_MAX_DELAY_MS);
     }
 
     #[test]
-    fn raw_openai_body_temperature_is_optional_and_model_scoped() {
-        let mut default_body = serde_json::json!({"model": "custom-model"});
-        apply_model_temperature(
-            &mut default_body,
-            &temperature_test_provider(None),
-            "custom-model",
+    fn http_client_builder_config_is_valid() {
+        // build_http_client 内部 unwrap_or_else 会在 builder 非法时静默退回 Client::new()，
+        // 掩盖配置错误。这里直接断言相同的 builder 链能 build 成功（keepalive/pool 参数合法）。
+        let built = Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .read_timeout(HTTP_READ_IDLE_TIMEOUT)
+            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+            .tcp_keepalive(HTTP_TCP_KEEPALIVE)
+            .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+            .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+            .http2_keep_alive_while_idle(true)
+            .build();
+        assert!(
+            built.is_ok(),
+            "http client builder rejected config: {built:?}"
         );
-        assert!(default_body.get("temperature").is_none());
-
-        let mut configured_body = serde_json::json!({"model": "custom-model"});
-        apply_model_temperature(
-            &mut configured_body,
-            &temperature_test_provider(Some(0.4)),
-            "custom-model",
-        );
-        assert_eq!(configured_body["temperature"], serde_json::json!(0.4));
     }
 
     #[test]
@@ -1996,52 +1634,6 @@ mod tests {
         assert!(policy.should_retry_rate_limit(1));
         assert!(policy.should_retry_rate_limit(5));
         assert!(policy.should_retry_rate_limit(99));
-    }
-
-    #[test]
-    fn append_stream_text_emits_delta_chunks_as_is() {
-        let mut full = String::new();
-
-        assert_eq!(
-            append_stream_text(&mut full, "你", StreamTextMode::Delta),
-            Some("你".to_string())
-        );
-        assert_eq!(
-            append_stream_text(&mut full, "好", StreamTextMode::Delta),
-            Some("好".to_string())
-        );
-        assert_eq!(full, "你好");
-    }
-
-    #[test]
-    fn append_stream_text_converts_snapshots_to_suffix_deltas() {
-        let mut full = String::new();
-
-        assert_eq!(
-            append_stream_text(&mut full, "你", StreamTextMode::Snapshot),
-            Some("你".to_string())
-        );
-        assert_eq!(
-            append_stream_text(&mut full, "你好", StreamTextMode::Snapshot),
-            Some("好".to_string())
-        );
-        assert_eq!(
-            append_stream_text(&mut full, "你好", StreamTextMode::Snapshot),
-            None
-        );
-        assert_eq!(full, "你好");
-    }
-
-    #[test]
-    fn parse_sse_chat_content_handles_cumulative_message_snapshots() {
-        let raw = r#"
-data: {"choices":[{"message":{"content":"你"}}]}
-data: {"choices":[{"message":{"content":"你好"}}]}
-data: {"choices":[{"message":{"content":"你好，世界"}}]}
-data: [DONE]
-"#;
-
-        assert_eq!(parse_sse_chat_content(raw), Some("你好，世界".to_string()));
     }
 
     // ===== retry_delay_ms / parse_retry_after =====
@@ -2441,5 +2033,255 @@ data: [DONE]
         assert!(result.is_err());
         // 无备用 key → 退避到限流专用上限。
         assert_eq!(calls.load(AtomicOrdering::SeqCst), RATE_LIMIT_MAX_ATTEMPTS);
+    }
+
+    // ===== LensEventSink / CombinedTranslateSplitter（StreamPart → 事件桥）=====
+
+    const TEST_SEP: &str = "<<<ORIGINAL>>>";
+
+    fn text_delta(delta: &str) -> StreamPart {
+        StreamPart::TextDelta {
+            delta: delta.to_string(),
+        }
+    }
+
+    #[test]
+    fn lens_event_sink_translates_stream_parts_to_event_payloads() {
+        let generation = AtomicU64::new(7);
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        {
+            let mut sink = LensEventSink::new(
+                |payload| events.push(payload),
+                "img-1",
+                "answer",
+                &generation,
+                7,
+            );
+            sink.emit(text_delta("Hello")).unwrap();
+            sink.emit(StreamPart::ReasoningDelta {
+                delta: "thinking...".to_string(),
+            })
+            .unwrap();
+            sink.emit(text_delta(" world")).unwrap();
+            sink.emit(StreamPart::Finish {
+                reason: "done".to_string(),
+                full: "Hello world".to_string(),
+            })
+            .unwrap();
+            assert_eq!(sink.full_text(), "Hello world");
+        }
+        // 形状与 stream_vision_response 的 emit 逐字节一致。
+        assert_eq!(
+            events,
+            vec![
+                serde_json::json!({ "imageId": "img-1", "kind": "answer", "delta": "Hello" }),
+                serde_json::json!({
+                  "imageId": "img-1", "kind": "answer", "delta": "", "reasoningDelta": "thinking..."
+                }),
+                serde_json::json!({ "imageId": "img-1", "kind": "answer", "delta": " world" }),
+                serde_json::json!({
+                  "imageId": "img-1", "kind": "answer", "delta": "", "done": true,
+                  "reason": "done", "full": "Hello world"
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn lens_event_sink_cancelled_generation_errors_on_first_emit() {
+        let generation = AtomicU64::new(8); // 全局代际已前进（sink 持有的是 7）
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut sink = LensEventSink::new(
+            |payload| events.push(payload),
+            "img-1",
+            "answer",
+            &generation,
+            7,
+        );
+        let err = sink.emit(text_delta("Hello")).unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(events.is_empty());
+        // usage 记录层按同一哨兵归类为 cancelled。
+        assert_eq!(
+            crate::usage::failure_status_from_message(&err.to_string()),
+            "cancelled"
+        );
+        assert_eq!(
+            crate::usage::error_kind_from_message(&err.to_string()),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn combined_sink_cancelled_generation_errors_on_first_emit() {
+        let generation = AtomicU64::new(2);
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut sink = CombinedTranslateEventSink::new(
+            |payload| events.push(payload),
+            "img-1",
+            &generation,
+            1,
+        );
+        let err = sink.emit(text_delta("你好")).unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn combined_splitter_separator_within_single_delta() {
+        let mut splitter = CombinedTranslateSplitter::new();
+        let pieces = splitter.push(&format!("你好\n{TEST_SEP}\nHello"));
+        assert_eq!(
+            pieces,
+            vec![
+                CombinedSplitPiece::Translated("你好".to_string()),
+                CombinedSplitPiece::Original("Hello".to_string()),
+            ]
+        );
+        assert_eq!(splitter.translated(), "你好");
+        assert_eq!(splitter.original(), "Hello");
+    }
+
+    #[test]
+    fn combined_splitter_separator_across_delta_boundary() {
+        let mut splitter = CombinedTranslateSplitter::new();
+        let mut pieces = Vec::new();
+        // 分隔符被拆成三段跨 delta 到达。
+        pieces.extend(splitter.push("译文<<<ORI"));
+        pieces.extend(splitter.push("GIN"));
+        pieces.extend(splitter.push("AL>>>原文"));
+        assert_eq!(
+            pieces,
+            vec![
+                CombinedSplitPiece::Translated("译文".to_string()),
+                CombinedSplitPiece::Original("原文".to_string()),
+            ]
+        );
+        assert!(splitter.flush_tail().is_none());
+    }
+
+    #[test]
+    fn combined_splitter_holds_separator_prefix_in_tail() {
+        let mut splitter = CombinedTranslateSplitter::new();
+        // "<<<ORI" 是分隔符前缀（< sep_len-1 字节），必须整个扣在 tail 里不发出。
+        let pieces = splitter.push("<<<ORI");
+        assert!(pieces.is_empty());
+        // 后续证明它确实是分隔符 → 不应有任何 Translated 泄漏。
+        let pieces = splitter.push("GINAL>>>after");
+        assert_eq!(
+            pieces,
+            vec![CombinedSplitPiece::Original("after".to_string())]
+        );
+        assert_eq!(splitter.translated(), "");
+    }
+
+    #[test]
+    fn combined_splitter_separator_prefix_turns_out_to_be_text() {
+        let mut splitter = CombinedTranslateSplitter::new();
+        // 前缀最终不是分隔符 → 之后作为译文正常放行。
+        let mut pieces = Vec::new();
+        pieces.extend(splitter.push("<<<ORI"));
+        pieces.extend(splitter.push("X more text"));
+        let flushed = splitter.flush_tail();
+        let mut all = String::new();
+        for piece in &pieces {
+            match piece {
+                CombinedSplitPiece::Translated(t) => all.push_str(t),
+                CombinedSplitPiece::Original(_) => panic!("unexpected original piece"),
+            }
+        }
+        if let Some(tail) = flushed {
+            all.push_str(&tail);
+        }
+        assert_eq!(all, "<<<ORIX more text");
+        assert_eq!(splitter.translated(), "<<<ORIX more text");
+    }
+
+    #[test]
+    fn combined_splitter_cjk_multibyte_boundary_does_not_panic() {
+        // tail 安全前缀切点落在 CJK 多字节字符中间时必须回退到 char boundary。
+        // 构造:tail 长度略大于 sep_len-1 且切点在"文"三字节内。
+        let mut splitter = CombinedTranslateSplitter::new();
+        let mut emitted = String::new();
+        for delta in ["这是一段很长的中文译文", "继", "续", "累积文本"] {
+            for piece in splitter.push(delta) {
+                match piece {
+                    CombinedSplitPiece::Translated(t) => emitted.push_str(&t),
+                    CombinedSplitPiece::Original(_) => panic!("unexpected original piece"),
+                }
+            }
+        }
+        if let Some(tail) = splitter.flush_tail() {
+            emitted.push_str(&tail);
+        }
+        assert_eq!(emitted, "这是一段很长的中文译文继续累积文本");
+    }
+
+    #[test]
+    fn combined_splitter_separator_exactly_at_delta_end() {
+        let mut splitter = CombinedTranslateSplitter::new();
+        let mut pieces = Vec::new();
+        pieces.extend(splitter.push(&format!("译文\n{TEST_SEP}")));
+        pieces.extend(splitter.push("\n原文"));
+        // 与旧实现逐字节对齐：trim 换行只发生在"分隔符所在的同一 delta"内；
+        // 分隔符恰好收在 delta 末尾时，下一 delta 的开头换行原样透传（前端渲染时无感）。
+        assert_eq!(
+            pieces,
+            vec![
+                CombinedSplitPiece::Translated("译文".to_string()),
+                CombinedSplitPiece::Original("\n原文".to_string()),
+            ]
+        );
+        assert_eq!(splitter.translated(), "译文");
+        assert_eq!(splitter.original(), "\n原文");
+    }
+
+    #[test]
+    fn combined_splitter_flush_tail_preserves_trailing_chars() {
+        // 无分隔符的流：结束时残留 tail 必须 flush 为译文（对齐旧取消/结束语义）。
+        let mut splitter = CombinedTranslateSplitter::new();
+        let mut emitted = String::new();
+        for piece in splitter.push("整段没有分隔符的译文") {
+            match piece {
+                CombinedSplitPiece::Translated(t) => emitted.push_str(&t),
+                CombinedSplitPiece::Original(_) => panic!("unexpected original piece"),
+            }
+        }
+        let tail = splitter.flush_tail().expect("tail should flush");
+        emitted.push_str(&tail);
+        assert_eq!(emitted, "整段没有分隔符的译文");
+        // flush 后再 flush 为空。
+        assert!(splitter.flush_tail().is_none());
+    }
+
+    #[test]
+    fn combined_sink_emits_split_events_and_done() {
+        let generation = AtomicU64::new(3);
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        {
+            let mut sink = CombinedTranslateEventSink::new(
+                |payload| events.push(payload),
+                "img-9",
+                &generation,
+                3,
+            );
+            sink.emit(text_delta(&format!("你好\n{TEST_SEP}\nHello")))
+                .unwrap();
+            sink.emit(StreamPart::Finish {
+                reason: "done".to_string(),
+                full: String::new(),
+            })
+            .unwrap();
+            assert_eq!(sink.translated(), "你好");
+            assert_eq!(sink.original(), "Hello");
+        }
+        assert_eq!(
+            events,
+            vec![
+                serde_json::json!({ "imageId": "img-9", "kind": "translated", "delta": "你好" }),
+                serde_json::json!({ "imageId": "img-9", "kind": "original", "delta": "Hello" }),
+                serde_json::json!({ "imageId": "img-9", "delta": "", "done": true, "reason": "done" }),
+            ]
+        );
     }
 }

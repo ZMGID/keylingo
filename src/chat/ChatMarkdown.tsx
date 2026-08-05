@@ -1,5 +1,5 @@
-import { isValidElement, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Check, Code2, Copy, ExternalLink, Eye, Loader2 } from 'lucide-react'
+import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
 import type { Components, UrlTransform } from 'react-markdown'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { PluggableList } from 'unified'
@@ -14,6 +14,8 @@ import { artifactDataUrl } from './artifacts'
 import { loadArtifactDataUrl } from './attachmentPreview'
 import type { KbHitView } from './knowledgeBaseHits'
 import { remarkCitations } from './citations'
+import { ChatInlineImage } from './ChatInlineImage'
+import { MarkdownStreamingContext } from './markdownStreaming'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -29,20 +31,23 @@ interface ChatMarkdownProps {
   citations?: Map<number, KbHitView>
 }
 
+/* 代码块 / 行内码的底色走 `--bg-hover`：它在亮色下映射 `--theme-surface-hover`
+   （跟着暖/冷/象牙主题走），在 `.dark` 里被显式覆盖成 #2c2c30。
+   **不要直接用 `--theme-surface-*`** —— 那批没有暗色态，直接用会让暗色模式变成亮色底。 */
 const CODE_PROSE =
-  'prose-pre:bg-neutral-100 prose-pre:text-neutral-800 dark:prose-pre:bg-neutral-800 dark:prose-pre:text-neutral-100'
+  'prose-pre:bg-[var(--bg-hover)] prose-pre:text-[var(--text)]'
 
 const proseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-100 ${CODE_PROSE}`
+  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
 
 const reasoningProseClass =
-  `chat-markdown chat-reasoning-markdown prose prose-sm dark:prose-invert max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500 prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-500 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-400 ${CODE_PROSE}`
+  `chat-markdown chat-reasoning-markdown prose prose-sm dark:prose-invert max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500 prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-500 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
 
 const lensProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-100 ${CODE_PROSE}`
+  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
 
 const lensMutedProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400 prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-neutral-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-600 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-neutral-800 dark:prose-code:text-neutral-400 ${CODE_PROSE}`
+  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400 prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-600 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
 
 function markdownProseClass(variant: ChatMarkdownProps['variant']): string {
   switch (variant) {
@@ -136,17 +141,39 @@ function tokenPattern(source: string): RegExp {
   return new RegExp(source, 'y')
 }
 
+// 空白整段吞：**没有任何规则能以空白字符起头**（每条规则都以非空白字符类开头，`\b` 在空白位
+// 也只会因后续字符类不匹配而失败），所以整段空白可以一次跳过，不必对每个空白字符把全部规则
+// 都试一遍。缩进和换行在代码块里占比很大 —— 原来 5 万字符的代码要跑约 50 万次正则。
+const WHITESPACE_RUN = /\s+/y
+
 function scanTokens(code: string, rules: TokenRule[]): HighlightToken[] {
   const tokens: HighlightToken[] = []
   let index = 0
+  // 无分类文本按「运行区间」攒着，末尾一次 slice 出来。原来是逐字符 `text +=`，
+  // 长普通文本段会反复重建字符串。
+  let plainStart = -1
+
+  const flushPlain = (end: number) => {
+    if (plainStart < 0) return
+    tokens.push({ text: code.slice(plainStart, end) })
+    plainStart = -1
+  }
 
   while (index < code.length) {
-    let matched = false
+    WHITESPACE_RUN.lastIndex = index
+    const whitespace = WHITESPACE_RUN.exec(code)
+    if (whitespace) {
+      if (plainStart < 0) plainStart = index
+      index += whitespace[0].length
+      continue
+    }
 
+    let matched = false
     for (const rule of rules) {
       rule.pattern.lastIndex = index
       const match = rule.pattern.exec(code)
       if (!match?.[0]) continue
+      flushPlain(index)
       tokens.push({ text: match[0], className: rule.className })
       index += match[0].length
       matched = true
@@ -154,16 +181,12 @@ function scanTokens(code: string, rules: TokenRule[]): HighlightToken[] {
     }
 
     if (!matched) {
-      const previous = tokens[tokens.length - 1]
-      if (previous && !previous.className) {
-        previous.text += code[index]
-      } else {
-        tokens.push({ text: code[index] })
-      }
+      if (plainStart < 0) plainStart = index
       index += 1
     }
   }
 
+  flushPlain(code.length)
   return tokens
 }
 
@@ -275,12 +298,35 @@ function rulesForLanguage(language: string, code = ''): TokenRule[] {
   ]
 }
 
-function highlightCode(code: string, language: string) {
-  return scanTokens(code, rulesForLanguage(language, code)).map((token, index) => (
+// 高亮结果缓存：键 = 语言 + 源码。虚拟列表会卸载屏外气泡，往回翻或切回同一会话时同一批
+// 代码块会整批重新挂载 —— 一个大对话里有两百多个代码块，重扫 + 重建元素数组不便宜。
+// 与 mermaidSvgCache / texCache 同一模式：用外部 Map 而非 useMemo（React 可能丢弃 useMemo）。
+// React 元素是不可变描述符，跨挂载复用安全。
+const highlightCache = new Map<string, ReactNode[]>()
+const HIGHLIGHT_CACHE_MAX = 400
+
+// 导出给 dock 文件查看器复用（逐行调用，块注释跨行会降级——查看器场景可接受）。
+// eslint-disable-next-line react-refresh/only-export-components -- 纯函数 helper，热更新损失可接受
+export function highlightCode(code: string, language: string) {
+  const key = `${language}\n${code}`
+  const cached = highlightCache.get(key)
+  if (cached) {
+    // LRU：命中挪到队尾。
+    highlightCache.delete(key)
+    highlightCache.set(key, cached)
+    return cached
+  }
+  const rendered = scanTokens(code, rulesForLanguage(language, code)).map((token, index) => (
     token.className
       ? <span key={index} className={token.className}>{token.text}</span>
       : token.text
   ))
+  highlightCache.set(key, rendered)
+  if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
+    const oldest = highlightCache.keys().next().value
+    if (oldest !== undefined) highlightCache.delete(oldest)
+  }
+  return rendered
 }
 
 function normalizeCodeBlockText(code: string): string {
@@ -330,7 +376,7 @@ function mermaidThemeVariables(dark: boolean) {
   }
 }
 
-function CodeBlock({ code, language }: { code: string; language: string }) {
+function CodeBlock({ code, language, actions }: { code: string; language: string; actions?: ReactNode }) {
   const normalizedCode = useMemo(() => normalizeCodeBlockText(code), [code])
   const highlighted = useMemo(
     () => highlightCode(normalizedCode, language),
@@ -345,23 +391,30 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
     window.setTimeout(() => setCopied(false), 1600)
   }
 
+  // 无独立头栏：语言 + 复制浮在右上。长行横向滚动时会从按钮下穿过，
+  // 所以控件要有不透明底；首行用 pt 让开控件高度，避免和 "Code / 复制" 叠字。
+  //
+  // 语言标签和复制图标都用**伪元素**画（`.kv-code-toolbar::before` 取 data-code-lang，
+  // `.kv-copy-glyph` 的 ::before/::after 画两个方块或一个勾）。伪元素不进 DOM 树，
+  // 而一个大对话里有两百多个代码块：原来每块是 figure + 工具条 div + 语言 span + button
+  // + lucide svg + svg 内的 rect/path + pre + code = 9 个节点，现在 6 个。
+  // 每块省 3 个节点，231 块省约 700 个。
   return (
-    <figure className="not-prose my-3 overflow-hidden rounded-lg border border-neutral-200/80 bg-neutral-50 text-neutral-950 shadow-sm dark:border-neutral-700/80 dark:bg-neutral-900 dark:text-neutral-100">
-      <div className="flex items-center gap-2 border-b border-neutral-200/70 px-4 py-2.5 dark:border-neutral-800">
-        <Code2 size={15} strokeWidth={2.4} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
-        <figcaption className="text-[13px] font-semibold leading-5 text-neutral-800 dark:text-neutral-100">
-          {codeLanguageLabel(language)}
-        </figcaption>
+    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+      <div
+        className="kv-code-toolbar absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2"
+        data-code-lang={codeLanguageLabel(language)}
+      >
+        {actions}
         <IconButton
           size="sm"
-          className="-mr-1 ml-auto"
           onClick={() => void handleCopy()}
           label={copied ? '已复制' : '复制代码'}
         >
-          {copied ? <Check size={17} strokeWidth={2.2} className="chat-motion-pop" /> : <Copy size={17} strokeWidth={2.2} />}
+          <span className={copied ? 'kv-copy-glyph is-copied' : 'kv-copy-glyph'} aria-hidden="true" />
         </IconButton>
       </div>
-      <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-2 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
+      <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-10 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
         <code className="font-mono">{highlighted}</code>
       </pre>
     </figure>
@@ -467,41 +520,48 @@ function MermaidBlock({ code }: { code: string }) {
     }
   }, [cacheKey, isDark, normalizedCode])
 
-  return (
-    <figure className="not-prose my-3 overflow-hidden rounded-lg border border-neutral-200/80 bg-white text-neutral-950 shadow-sm dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100">
-      <div className="flex items-center gap-2 border-b border-neutral-200/70 px-4 py-2.5 dark:border-neutral-800">
-        <Code2 size={15} strokeWidth={2.4} className="shrink-0 text-neutral-500 dark:text-neutral-400" />
-        <figcaption className="text-[13px] font-semibold leading-5">
-          Mermaid
-        </figcaption>
-        {!error && (
-          <IconButton
-            size="sm"
-            className="-mr-1 ml-auto"
-            onClick={() => setView((current) => (current === 'diagram' ? 'source' : 'diagram'))}
-            label={view === 'diagram' ? '查看源码' : '查看图表'}
-          >
-            {view === 'diagram' ? <Code2 size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
-          </IconButton>
-        )}
-      </div>
-      {view === 'source' ? (
+  // 与 CodeBlock 同风格：无独立头栏，"Mermaid" 标签 + 切换按钮悬浮在右上角。
+  const toggle = (
+    <IconButton
+      size="sm"
+      onClick={() => setView((current) => (current === 'diagram' ? 'source' : 'diagram'))}
+      label={view === 'diagram' ? '查看源码' : '查看图表'}
+    >
+      {view === 'diagram' ? <Code2 size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
+    </IconButton>
+  )
+
+  // 源码视图直接复用 CodeBlock（自带卡片 + Mermaid 标签 + 复制），切换按钮塞进它的角标行，
+  // 不再套外层卡片（套了会读成「卡片里还有个卡片」）。
+  if (view === 'source') {
+    return <CodeBlock code={normalizedCode} language="mermaid" actions={toggle} />
+  }
+
+  if (error) {
+    return (
+      <>
+        <div className="my-3 -mb-1 rounded-lg border border-red-100 bg-red-50 px-4 py-2 text-[12px] leading-5 text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          Mermaid 渲染失败：{error}
+        </div>
         <CodeBlock code={normalizedCode} language="mermaid" />
-      ) : loading ? (
+      </>
+    )
+  }
+
+  return (
+    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+      <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2">
+        <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">Mermaid</span>
+        {toggle}
+      </div>
+      {loading ? (
         <div className="flex min-h-28 items-center justify-center gap-2 px-4 py-8 text-[13px] text-neutral-400 dark:text-neutral-500">
           <Loader2 size={15} className="animate-spin" />
           正在渲染图表
         </div>
-      ) : error ? (
-        <>
-          <div className="border-b border-red-100 bg-red-50 px-4 py-2 text-[12px] leading-5 text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
-            Mermaid 渲染失败：{error}
-          </div>
-          <CodeBlock code={normalizedCode} language="mermaid" />
-        </>
       ) : (
         <div
-          className="custom-scrollbar max-w-full overflow-x-auto overflow-y-hidden [contain:content] bg-white px-4 py-4 dark:bg-neutral-950 [&>svg]:mx-auto [&>svg]:max-w-none"
+          className="custom-scrollbar max-w-full overflow-x-auto overflow-y-hidden [contain:content] bg-white px-4 pb-4 pt-10 dark:bg-neutral-950 [&>svg]:mx-auto [&>svg]:max-w-none"
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       )}
@@ -536,36 +596,60 @@ function htmlPreviewSrcDoc(html: string): string {
   return html
 }
 
+// 流式期间 html 每来一个 delta 就变一次。srcDoc 一变 iframe 就整篇重载 —— 页面闪，
+// 而且重载那一下的高度重测会让虚拟列表把视口重新拽回底部（滚不上去）。
+// 对策：内容还在长的时候**根本不挂 iframe**，只显示源码；静默 SETTLE_MS 后才挂一次。
+const HTML_PREVIEW_SETTLE_MS = 600
+
+// assumeSettled=false（消息还在流式生成）时首帧不能把当前值当定稿 —— 那正是「边生成边挂 iframe」。
+function useSettled(value: string, delay: number, assumeSettled: boolean): string | null {
+  const [settled, setSettled] = useState<string | null>(assumeSettled ? value : null)
+  useEffect(() => {
+    if (value === settled) return
+    const timer = setTimeout(() => setSettled(value), delay)
+    return () => clearTimeout(timer)
+  }, [value, settled, delay])
+  return settled
+}
+
 function HtmlCodePreview({ html }: { html: string }) {
   const [view, setView] = useState<'preview' | 'source'>('preview')
-  const previewHtml = useMemo(() => htmlPreviewSrcDoc(html), [html])
+  const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !useContext(MarkdownStreamingContext))
+  // 一旦定稿过就不再退回源码：生成中途停顿超过 SETTLE_MS 会让预览/源码来回跳。
+  const readyRef = useRef(false)
+  if (settledHtml === html) readyRef.current = true
+  const showPreview = view === 'preview' && readyRef.current
+  const previewHtml = useMemo(() => htmlPreviewSrcDoc(settledHtml ?? ''), [settledHtml])
 
   const openInBrowser = () => {
-    void api.openHtmlPreview(previewHtml).catch((err) => {
+    void api.openHtmlPreview(htmlPreviewSrcDoc(html)).catch((err) => {
       console.error('Failed to open HTML preview:', err)
     })
   }
 
   return (
     <>
-      {view === 'preview' ? (
-        <div className="my-3 overflow-hidden rounded-lg border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-950">
+      {showPreview ? (
+        <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
           <iframe
             title="HTML 预览"
             srcDoc={previewHtml}
             className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
           />
         </div>
-      ) : null}
-      {view === 'source' ? <CodeBlock code={html} language="html" /> : null}
+      ) : (
+        <CodeBlock code={html} language="html" />
+      )}
       <div className="-mt-1 mb-2 flex justify-end gap-0.5">
-        <IconButton
-          size="sm"
-          onClick={() => setView((current) => (current === 'preview' ? 'source' : 'preview'))}
-          label={view === 'preview' ? '查看源码' : '查看预览'}
-        >
-          {view === 'preview' ? <Code2 size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-        </IconButton>
+        {readyRef.current ? (
+          <IconButton
+            size="sm"
+            onClick={() => setView((current) => (current === 'preview' ? 'source' : 'preview'))}
+            label={view === 'preview' ? '查看源码' : '查看预览'}
+          >
+            {view === 'preview' ? <Code2 size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+          </IconButton>
+        ) : null}
         <IconButton size="sm" onClick={openInBrowser} label="在浏览器打开">
           <ExternalLink size={14} strokeWidth={2} />
         </IconButton>
@@ -591,31 +675,52 @@ const markdownComponents: Components = {
     }
     return <CodeBlock code={codeChildrenToString(children)} language="" />
   },
+  // 表格：**每个单元格一个独立圆角块**，横竖都靠 border-spacing 的空隙分隔。
+  // **没有任何边框线**，别加 border，也别给容器加外框。
   table: ({ children }) => (
     <div className="custom-scrollbar my-3 max-w-full overflow-x-auto">
-      <table className="w-full min-w-[240px] border-collapse text-[13px] leading-snug">
+      <table className="w-full min-w-[240px] border-separate [border-spacing:3px] text-[13px] leading-snug">
         {children}
       </table>
     </div>
   ),
-  thead: ({ children }) => (
-    <thead className="bg-neutral-50 dark:bg-neutral-800/90">{children}</thead>
-  ),
-  th: ({ children }) => (
-    <th className="border border-neutral-200/90 px-3 py-2 text-left font-semibold text-neutral-800 dark:border-neutral-700 dark:text-neutral-100">
+  // `style` **必须透传**：markdown 的列对齐（`:---:` / `---:`）由 remark-gfm 转成单元格上的
+  // `text-align` 内联样式。原来只接 `children`，对齐被整个丢掉 —— 声明了居中/右对齐的表格
+  // 全部渲染成左对齐。内联样式优先级高于下面的 `text-left`，两者不冲突。
+  th: ({ children, style }) => (
+    <th
+      style={style}
+      className="rounded-md bg-[var(--bg-hover)] px-3 py-2 text-left font-semibold text-neutral-800 dark:text-neutral-100"
+    >
       {children}
     </th>
   ),
-  td: ({ children }) => (
-    <td className="border border-neutral-200/90 px-3 py-2 align-top text-neutral-700 dark:border-neutral-700 dark:text-neutral-300">
+  td: ({ children, style }) => (
+    <td
+      style={style}
+      className="rounded-md bg-neutral-500/[0.09] px-3 py-2 align-top text-neutral-700 dark:bg-neutral-400/[0.1] dark:text-neutral-300"
+    >
       {children}
     </td>
   ),
   a: ({ href, children }) => <LinkAnchor href={typeof href === 'string' ? href : ''}>{children}</LinkAnchor>,
 }
 
-function LinkAnchor({ href, children }: { href: string; children?: ReactNode }) {
+function LinkAnchor({
+  href,
+  children,
+  conversationId,
+}: {
+  href: string
+  children?: ReactNode
+  /** 相对路径链接要靠它在后端解析会话工作目录；没有就只能放弃打开（但仍不导航）。 */
+  conversationId?: string | null
+}) {
   const isWeb = /^https?:\/\//i.test(href)
+  // 这些 scheme 保留 <a> 默认行为，由系统协议处理器接走（不会导航 webview 自身）。
+  const isSystemScheme = /^(mailto|tel|sms):/i.test(href)
+  // 页内锚点（目录跳转）保留默认行为：它不会导航走，只是滚动。
+  const isHashOnly = href.startsWith('#')
   return (
     <a
       // 不能加 target="_blank"：WRY 的 new-window 处理在 WKWebView 委托层，
@@ -623,12 +728,22 @@ function LinkAnchor({ href, children }: { href: string; children?: ReactNode }) 
       href={href || undefined}
       rel="noopener noreferrer"
       onClick={(event) => {
-        // A plain <a> click would navigate the Tauri webview itself and
-        // blow away the chat UI. Open web links in the system browser.
-        // 非 http(s)（mailto:/tel: 等）保留默认导航交给系统处理，openExternal 只认 http(s)。
-        if (!isWeb) return
+        // 除了系统 scheme 和页内锚点，**一律**掐掉默认导航。<a> 的默认行为会把 Tauri
+        // webview 自己导航走，整个聊天 UI（含未落盘的会话状态）随之消失——实测点一条 CLI
+        // 生成的本地文件链接，窗口直接白掉。此前这里只挡 http(s)，本地文件链接（绝对路径 /
+        // 相对路径）走的正是「放行默认导航」那条路。
+        if (isSystemScheme || isHashOnly) return
         event.preventDefault()
-        void api.openExternal(href).catch((err) => console.error('openExternal failed', err))
+        if (isWeb) {
+          void api.openExternal(href).catch((err) => console.error('openExternal failed', err))
+          return
+        }
+        if (!href) return
+        // 其余一律当本地文件交给系统默认程序。相对路径的基准由后端按会话工作目录解析
+        // （与 agent 写文件的目录同一个解析器），前端不拼路径。
+        void api
+          .openLocalFile(href, conversationId)
+          .catch((err) => console.error('openLocalFile failed', err))
       }}
     >
       {children}
@@ -659,7 +774,7 @@ function CitationChip({ n, hit }: { n: number; hit?: KbHitView }) {
         [{n}]
       </button>
       {open && (
-        <span className="absolute left-0 top-full z-30 mt-1 block w-80 max-w-[80vw] rounded-lg border border-black/[0.08] bg-white p-2.5 text-left text-xs shadow-lg dark:border-white/[0.12] dark:bg-neutral-900">
+        <span className="absolute left-0 top-full z-30 mt-1 block w-80 max-w-[80vw] rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] p-2.5 text-left text-xs shadow-lg">
           {hit ? (
             <>
               <span className="mb-1 flex items-center gap-1 font-medium text-neutral-700 dark:text-neutral-200">
@@ -712,6 +827,12 @@ function isSafeImageDataUrl(src: string): boolean {
 
 const chatMarkdownUrlTransform: UrlTransform = (url, key, node) => {
   if (key === 'src' && node.tagName === 'img' && isSafeImageDataUrl(url)) {
+    return url
+  }
+  // `defaultUrlTransform` 会把 `file:` 整个剥成空 href（协议白名单里没有它），CLI 写完文件
+  // 给的 `file://…/index.html` 于是变成死链。放行它，点击由 LinkAnchor 交给
+  // `open_local_file`（后端再做扩展名/存在性把关，不是把 file: 当可信输入）。
+  if (key === 'href' && node.tagName === 'a' && /^file:\/\//i.test(url)) {
     return url
   }
   return defaultUrlTransform(url)
@@ -778,22 +899,15 @@ function MarkdownArtifactImage({
   }, [artifact, conversationId, inline, rawSrc])
 
   if (!src) return null
+  const openViewer = () => onImageClick?.(src, alt, rawSrc)
   return (
-    <button
-      type="button"
-      className="my-3 block max-w-full cursor-zoom-in rounded-md p-0 text-left"
-      onClick={() => {
-        onImageClick?.(src, alt, rawSrc)
-      }}
-      aria-label="预览图片"
-    >
-      <img
-        src={src}
-        alt={alt}
-        loading="lazy"
-        className="max-h-[420px] max-w-full rounded-md border border-neutral-200/90 bg-white object-contain dark:border-neutral-700 dark:bg-neutral-900"
-      />
-    </button>
+    <ChatInlineImage
+      src={src}
+      alt={alt}
+      name={artifact?.name ?? rawSrc}
+      onOpenViewer={openViewer}
+      className="my-3"
+    />
   )
 }
 
@@ -977,7 +1091,7 @@ function ChatMarkdownComponent({
           const n = Number(cite[1])
           return <CitationChip n={n} hit={citations?.get(n)} />
         }
-        return <LinkAnchor href={url}>{children}</LinkAnchor>
+        return <LinkAnchor href={url} conversationId={conversationId}>{children}</LinkAnchor>
       },
       img: ({ src, alt }) => {
         const rawSrc = typeof src === 'string' ? src : ''

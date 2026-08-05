@@ -1,9 +1,10 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, Download, Folder, Layers, Pencil, Trash2 } from 'lucide-react'
-import type { Lang } from '../settings/i18n'
+import { i18n, type Lang } from '../settings/i18n'
 import type { ChatProject, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
+import { useClampedMenuPosition } from './useClampedMenuPosition'
 
 export interface ConversationMenuAnchor {
   left: number
@@ -41,7 +42,9 @@ export function ConversationContextMenu({
   onDelete,
   onClose: onCloseProp,
 }: ConversationContextMenuProps) {
+  const t = i18n[lang]
   const menuRef = useRef<HTMLDivElement>(null)
+  const pos = useClampedMenuPosition(menuRef, anchor)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
   // 所有内部关闭触发（菜单项动作后 / 外部点击 / Esc）走 startClose，先播退场再卸载
   const onClose = startClose
@@ -66,39 +69,39 @@ export function ConversationContextMenu({
   const menu = (
     <div
       ref={menuRef}
-      className={`${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[200px] rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]`}
-      style={{ left: anchor.left, top: anchor.top }}
+      className={`kv-menu ${closing ? 'chat-motion-popover-out' : 'chat-motion-popover chat-motion-menu-cascade'} fixed z-[200] min-w-[176px]`}
+      style={{ left: pos.left, top: pos.top }}
       role="menu"
       onAnimationEnd={onAnimationEnd}
     >
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onRename()
           onClose()
         }}
       >
-        <Pencil size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
-        重命名
+        <Pencil strokeWidth={1.75} />
+        {t.chatRename}
       </button>
 
       <div className="group/sub relative">
         <button
           type="button"
           role="menuitem"
-          className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+          className="kv-menu-item"
         >
-          <Folder size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
-          <span className="min-w-0 flex-1">添加到项目</span>
+          <Folder strokeWidth={1.75} />
+          <span className="min-w-0 flex-1">{t.chatAddToProject}</span>
           <ChevronRight size={16} className="shrink-0 text-neutral-400" />
         </button>
 
         <div className="pointer-events-none absolute left-full top-0 z-[201] min-w-[168px] pl-1 opacity-0 transition-opacity group-hover/sub:pointer-events-auto group-hover/sub:opacity-100">
-          <div className="rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]">
+          <div className="kv-menu">
             {projects.length === 0 ? (
-              <div className="px-3.5 py-2 text-[13px] text-neutral-400">暂无项目</div>
+              <div className="kv-menu-item">{t.chatNoProjects}</div>
             ) : (
               projects.map((project) => {
                 const active = conversationProjectId
@@ -108,7 +111,7 @@ export function ConversationContextMenu({
                 <button
                   key={project.id}
                   type="button"
-                  className={`flex w-full px-3.5 py-2 text-left text-[13px] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+                  className={`kv-menu-item ${
                     active
                       ? 'font-medium text-neutral-900 dark:text-neutral-50'
                       : 'text-neutral-800 dark:text-neutral-100'
@@ -128,13 +131,13 @@ export function ConversationContextMenu({
                 <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
                 <button
                   type="button"
-                  className="flex w-full px-3.5 py-2 text-left text-[13px] text-neutral-600 transition-colors hover:bg-black/[0.04] dark:text-neutral-300 dark:hover:bg-white/[0.06]"
+                  className="kv-menu-item"
                   onClick={() => {
                     onMoveToProject(undefined)
                     onClose()
                   }}
                 >
-                  移出项目
+                  {t.chatRemoveFromProject}
                 </button>
               </>
             )}
@@ -146,17 +149,17 @@ export function ConversationContextMenu({
         <button
           type="button"
           role="menuitem"
-          className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+          className="kv-menu-item"
         >
-          <Layers size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
-          <span className="min-w-0 flex-1">移动到集</span>
+          <Layers strokeWidth={1.75} />
+          <span className="min-w-0 flex-1">{t.chatMoveToSet}</span>
           <ChevronRight size={16} className="shrink-0 text-neutral-400" />
         </button>
 
         <div className="pointer-events-none absolute left-full top-0 z-[201] min-w-[168px] pl-1 opacity-0 transition-opacity group-hover/subset:pointer-events-auto group-hover/subset:opacity-100">
-          <div className="rounded-xl border border-neutral-200/90 bg-white py-1.5 shadow-lg dark:border-neutral-700 dark:bg-[#2a2a2c]">
+          <div className="kv-menu">
             {sets.length === 0 ? (
-              <div className="px-3.5 py-2 text-[13px] text-neutral-400">暂无集</div>
+              <div className="kv-menu-item">{t.chatNoSets}</div>
             ) : (
               sets.map((set) => {
                 const active = conversationSetId === set.id
@@ -164,7 +167,7 @@ export function ConversationContextMenu({
                   <button
                     key={set.id}
                     type="button"
-                    className={`flex w-full px-3.5 py-2 text-left text-[13px] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+                    className={`kv-menu-item ${
                       active
                         ? 'font-medium text-neutral-900 dark:text-neutral-50'
                         : 'text-neutral-800 dark:text-neutral-100'
@@ -184,13 +187,13 @@ export function ConversationContextMenu({
                 <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
                 <button
                   type="button"
-                  className="flex w-full px-3.5 py-2 text-left text-[13px] text-neutral-600 transition-colors hover:bg-black/[0.04] dark:text-neutral-300 dark:hover:bg-white/[0.06]"
+                  className="kv-menu-item"
                   onClick={() => {
                     onMoveToSet(undefined)
                     onClose()
                   }}
                 >
-                  移出集
+                  {t.chatRemoveFromSet}
                 </button>
               </>
             )}
@@ -201,14 +204,14 @@ export function ConversationContextMenu({
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-neutral-800 transition-colors hover:bg-black/[0.04] dark:text-neutral-100 dark:hover:bg-white/[0.06]"
+        className="kv-menu-item"
         onClick={() => {
           onExport()
           onClose()
         }}
       >
-        <Download size={16} strokeWidth={1.75} className="shrink-0 text-neutral-500" />
-        {lang === 'zh' ? '导出' : 'Export'}
+        <Download strokeWidth={1.75} />
+        {t.chatExport}
       </button>
 
       <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
@@ -216,14 +219,14 @@ export function ConversationContextMenu({
       <button
         type="button"
         role="menuitem"
-        className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+        className="kv-menu-item kv-menu-item--danger"
         onClick={() => {
           onDelete()
           onClose()
         }}
       >
-        <Trash2 size={16} strokeWidth={1.75} className="shrink-0" />
-        删除
+        <Trash2 strokeWidth={1.75} />
+        {t.chatDelete}
       </button>
     </div>
   )

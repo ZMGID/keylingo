@@ -1,6 +1,6 @@
 //! Knowledge base (RAG) — storage layer + vector search.
 //!
-//! MVP design (see `.trellis/tasks/06-25-knowledge-base-rag/prd.md`):
+//! MVP design:
 //! - Multiple libraries, each bound to one `(embedding_provider, model, dim)`.
 //! - Vectors stored as plain `f32` in a per-library JSON file; search is an
 //!   exact brute-force cosine scan in Rust.
@@ -38,9 +38,9 @@ pub mod retrieval;
 pub mod store;
 
 #[cfg(test)]
-mod live_e2e_tests;
-#[cfg(test)]
 mod eval_tests;
+#[cfg(test)]
+mod live_e2e_tests;
 
 /// A knowledge library. `embedding_dim` is 0 until the first chunk is indexed
 /// (the dimension is learned from the first embedding response).
@@ -427,6 +427,10 @@ fn delete_document_at(root: &Path, kb_id: &str, doc_id: &str) -> Result<(), Stri
     refresh_library_counts_at(root, kb_id)
 }
 
+/// Cross-library hybrid (vector + keyword RRF) search, top-k best-first.
+/// Test-only: production retrieval goes through `retrieval::retrieve`; this
+/// remains as the unit under test for the multi-library fusion/sort/truncate path.
+#[cfg(test)]
 fn search_at(
     root: &Path,
     kb_ids: &[String],
@@ -643,28 +647,6 @@ pub fn mount_system_prompt(app: &AppHandle, kb_ids: &[String], force: bool) -> O
             "This conversation has knowledge bases attached: {names_str}. When the user's question may relate to these documents, prefer calling knowledge_search first — the documents are already indexed, so do not ask the user to re-upload files. When you use a retrieved passage, cite its source number inline as [n] (the number shown before each returned passage) so the user can trace it; only if nothing relevant is found, say the knowledge base doesn't cover it."
         )
     })
-}
-
-/// Hybrid (vector + keyword RRF) search across libraries, top-k best-first.
-/// `weight_keyword = 0` ⇒ pure vector.
-pub fn search(
-    app: &AppHandle,
-    kb_ids: &[String],
-    query: &[f32],
-    query_text: &str,
-    top_k: usize,
-    weight_vector: f32,
-    weight_keyword: f32,
-) -> Result<Vec<ScoredChunk>, String> {
-    search_at(
-        &kb_root(app)?,
-        kb_ids,
-        query,
-        query_text,
-        top_k,
-        weight_vector,
-        weight_keyword,
-    )
 }
 
 #[cfg(test)]

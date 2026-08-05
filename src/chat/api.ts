@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { estimateTokens } from '../utils/tokens'
 import { isExecutableAgentPlanText } from './agentPlan'
 import { isTauriRuntime } from './utils'
+import type { ConversationPin } from './conversationPins'
 import type {
   AgentRuntimeConfig,
   ChatAssistant,
@@ -16,7 +17,8 @@ import type {
   DetectedExternalAgent,
   PendingAttachment,
 } from './types'
-import type { ThinkingLevel, ModelRef } from './types'
+import type { ThinkingLevel, WebSearchMode, ModelRef } from './types'
+import type { CliImportResult, ImportableCliSession } from './types'
 
 export type { DetectedExternalAgent, AgentRuntimeConfig }
 
@@ -301,6 +303,7 @@ const mockChatApi = {
     const snapshot = assistant ? assistantSnapshot(assistant) : null
     const conversation: Conversation = {
       id: `conv_dev_${crypto.randomUUID()}`,
+      revision: 0,
       title: '新对话',
       provider_id: providerId?.trim() || snapshot?.provider_id || snapshot?.providerId || 'dev-provider',
       model: model?.trim() || snapshot?.model || 'dev-model',
@@ -800,6 +803,28 @@ const mockChatApi = {
     return conversation
   },
 
+  async rewindToMessage(
+    conversationId: string,
+    messageId: string,
+  ): Promise<{ conversation: Conversation; content: string }> {
+    const conversations = loadMockConversations()
+    const index = conversations.findIndex((item) => item.id === conversationId)
+    if (index < 0) throw new Error('Conversation not found')
+    const conversation = { ...conversations[index] }
+    const messageIndex = conversation.messages.findIndex((message) => message.id === messageId)
+    if (messageIndex < 0) throw new Error('Message not found')
+    const target = conversation.messages[messageIndex]
+    if (target.role !== 'user') throw new Error('仅支持回到用户提问')
+    conversation.messages = conversation.messages.slice(0, messageIndex)
+    conversation.updated_at = nowSeconds()
+    const contextState = estimateMockContext(conversation)
+    conversation.context_state = contextState
+    conversation.contextState = contextState
+    conversations[index] = conversation
+    saveMockConversations(conversations)
+    return { conversation, content: target.content }
+  },
+
   async getContextStats(conversationId: string): Promise<{ contextState: ConversationContextState; conversation: Conversation }> {
     const conversations = loadMockConversations()
     const index = conversations.findIndex((item) => item.id === conversationId)
@@ -1005,6 +1030,44 @@ export const chatApi = {
     return result.sets
   },
 
+  /** 侧栏手动顺序：只发 id 顺序，后端 load→重排→存，不覆盖其它字段（docs/adr/0004）。 */
+  async reorderProjects(ids: string[]): Promise<ChatProject[]> {
+    if (!isTauriRuntime()) return mockChatApi.getProjects()
+    const result = await invoke<{ success: boolean; projects: ChatProject[] }>(
+      'chat_reorder_projects',
+      { ids },
+    )
+    if (!result.success) {
+      throw new Error('Failed to reorder projects')
+    }
+    return result.projects
+  },
+
+  async reorderSets(ids: string[]): Promise<ChatSet[]> {
+    if (!isTauriRuntime()) return []
+    const result = await invoke<{ success: boolean; sets: ChatSet[] }>('chat_reorder_sets', {
+      ids,
+    })
+    if (!result.success) {
+      throw new Error('Failed to reorder sets')
+    }
+    return result.sets
+  },
+
+  /** 集/项目里对话的钉住位置（group_id → 钉子表）。见 chat/conversationPins.ts。 */
+  async getConversationPins(): Promise<Record<string, ConversationPin[]>> {
+    if (!isTauriRuntime()) return {}
+    const result = await invoke<{ success: boolean; pins: Record<string, ConversationPin[]> }>(
+      'chat_get_conversation_pins',
+    )
+    return result.success ? (result.pins ?? {}) : {}
+  },
+
+  async setConversationPins(groupId: string, pins: ConversationPin[]): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke<{ success: boolean }>('chat_set_conversation_pins', { groupId, pins })
+  },
+
   async createSet(
     name: string,
     systemPrompt?: string,
@@ -1064,11 +1127,18 @@ export const chatApi = {
     description?: string | null,
     color?: string | null,
     rootPath?: string | null,
+    options?: { ensureRootDir?: boolean },
   ): Promise<ChatProject> {
     if (!isTauriRuntime()) return mockChatApi.createProject(name, description, color, rootPath)
     const result = await invoke<{ success: boolean; project: ChatProject }>(
       'chat_create_project',
-      { name, description, color, rootPath },
+      {
+        name,
+        description,
+        color,
+        rootPath,
+        ensureRootDir: options?.ensureRootDir ?? false,
+      },
     )
     if (!result.success) {
       throw new Error('Failed to create project')
@@ -1209,15 +1279,21 @@ export const chatApi = {
     return result.conversation
   },
 
-  // 删除对话
-  async deleteConversation(conversationId: string): Promise<void> {
-    if (!isTauriRuntime()) return mockChatApi.deleteConversation(conversationId)
-    const result = await invoke<{ success: boolean }>('chat_delete_conversation', {
-      conversationId,
-    })
+  // 删除对话。返回未能清理的副产物说明（工作区被占用等）——对话本身一定已经删掉了，
+  // 后端只有在「对话文件 / 索引」这两步失败时才抛错。
+  async deleteConversation(conversationId: string): Promise<string[]> {
+    if (!isTauriRuntime()) {
+      await mockChatApi.deleteConversation(conversationId)
+      return []
+    }
+    const result = await invoke<{ success: boolean; warnings?: string[] }>(
+      'chat_delete_conversation',
+      { conversationId },
+    )
     if (!result.success) {
       throw new Error('Failed to delete conversation')
     }
+    return result.warnings ?? []
   },
 
   // 更新对话
@@ -1236,6 +1312,7 @@ export const chatApi = {
       knowledgeBaseIds?: string[]
       forceKnowledgeSearch?: boolean
       thinkingLevel?: ThinkingLevel | null
+      webSearchMode?: WebSearchMode | null
       replyModels?: ModelRef[]
     }
   ): Promise<Conversation> {
@@ -1244,6 +1321,7 @@ export const chatApi = {
     const hasProjectUpdate = 'projectId' in updates
     const hasSetUpdate = 'setId' in updates
     const hasThinkingUpdate = 'thinkingLevel' in updates
+    const hasWebSearchUpdate = 'webSearchMode' in updates
     const result = await invoke<{ success: boolean; conversation: Conversation }>(
       'chat_update_conversation',
       {
@@ -1261,6 +1339,8 @@ export const chatApi = {
         forceKnowledgeSearch: updates.forceKnowledgeSearch,
         // null/未知 → 空串，后端解析为 None（回到「跟随全局」）。
         thinkingLevel: hasThinkingUpdate ? updates.thinkingLevel ?? '' : undefined,
+        // 会话级三态联网搜索（任务 07-23）：null/未知 → 空串，后端回退全局开关。
+        webSearchMode: hasWebSearchUpdate ? updates.webSearchMode ?? '' : undefined,
         // 多模型一问多答（任务 06-30）：持久化会话级多答模型集（决策 D2/D4）。
         replyModels: updates.replyModels,
       }
@@ -1338,6 +1418,26 @@ export const chatApi = {
       throw new Error(result.error || 'Failed to regenerate message')
     }
     return result.conversation
+  },
+
+  // 一键 rewind：删掉该用户提问及其之后的消息，返回新会话 + 被删掉的原文（前端塞回输入框）。
+  async rewindToMessage(
+    conversationId: string,
+    messageId: string,
+  ): Promise<{ conversation: Conversation; content: string }> {
+    if (!isTauriRuntime()) {
+      return mockChatApi.rewindToMessage(conversationId, messageId)
+    }
+    const result = await invoke<{
+      success: boolean
+      conversation?: Conversation
+      content?: string
+      error?: string
+    }>('chat_rewind_to_message', { conversationId, messageId })
+    if (!result.success || !result.conversation) {
+      throw new Error(result.error || 'Failed to rewind conversation')
+    }
+    return { conversation: result.conversation, content: result.content ?? '' }
   },
 
   // 对话分支（方案 B）：把源对话某消息及其之前的消息复制进一个新对话，返回新对话。不自动发送。
@@ -1434,6 +1534,47 @@ export const chatApi = {
     return result.agents ?? []
   },
 
+  // 懒查：只探选中 agent 的模型（cwd-scoped）。列表阶段不查模型，避免对所有 CLI 跑昂贵探测。
+  async detectExternalAgentModels(
+    agentId: string,
+    conversationId?: string | null,
+    force = false,
+  ): Promise<{
+    models: DetectedExternalAgent['models']
+    reasoningOptions: NonNullable<DetectedExternalAgent['reasoningOptions']>
+    /** 按模型的 effort 档位（kimi：K3 有 low/high/max，always_thinking 模型无）。 */
+    reasoningByModel: Record<string, NonNullable<DetectedExternalAgent['reasoningOptions']>>
+    source: 'probed' | 'fallback'
+    probeError?: string
+    // CLI 自己当前配置的模型/推理等级（用于胶囊自动同步「同步 CLI 当前配置」）。null = 无当前概念。
+    currentModel?: string | null
+    currentReasoning?: string | null
+  }> {
+    if (!isTauriRuntime()) {
+      return { models: [], reasoningOptions: [], reasoningByModel: {}, source: 'probed' }
+    }
+    const result = await invoke<{
+      success: boolean
+      models?: DetectedExternalAgent['models']
+      reasoningOptions?: NonNullable<DetectedExternalAgent['reasoningOptions']>
+      reasoningByModel?: Record<string, NonNullable<DetectedExternalAgent['reasoningOptions']>>
+      source?: 'probed' | 'fallback'
+      probeError?: string
+      currentModel?: string | null
+      currentReasoning?: string | null
+    }>('chat_detect_external_agent_models', { agentId, conversationId, force })
+    return {
+      models: result.models ?? [],
+      reasoningOptions: result.reasoningOptions ?? [],
+      reasoningByModel: result.reasoningByModel ?? {},
+      // 向后兼容：旧后端不返回 source 时视为 probed（不显示降级角标）。
+      source: result.source ?? 'probed',
+      probeError: result.probeError,
+      currentModel: result.currentModel ?? null,
+      currentReasoning: result.currentReasoning ?? null,
+    }
+  },
+
   async listExternalCliSlashCommands(
     agentId: string,
     conversationId?: string | null,
@@ -1489,5 +1630,32 @@ export const chatApi = {
       throw new Error('Failed to set agent runtime')
     }
     return result.conversation
+  },
+
+  // ── 从本地 CLI 导入对话 ───────────────────────────────────────────────────
+  // 导入是**项目内的动作**：只列出工作目录等于该项目根的原生会话，导入后仍由原 CLI 续聊。
+  // 契约见 docs/adr/0001..0003。
+
+  async listImportableCliSessions(projectId: string): Promise<ImportableCliSession[]> {
+    if (!isTauriRuntime()) return []
+    const result = await invoke<{ success: boolean; sessions: ImportableCliSession[] }>(
+      'chat_list_importable_cli_sessions',
+      { projectId },
+    )
+    return result.sessions ?? []
+  },
+
+  async importCliSessions(
+    projectId: string,
+    items: { agentId: string; sessionId: string }[],
+  ): Promise<CliImportResult> {
+    if (!isTauriRuntime()) return { success: false, imported: [], failures: [] }
+    return invoke<CliImportResult>('chat_import_cli_sessions', { projectId, items })
+  },
+
+  // 打开已导入的对话时问一次：CLI 那边有没有新内容。只提示，不同步（ADR-0002）。
+  async importedHistoryStale(conversationId: string): Promise<boolean> {
+    if (!isTauriRuntime()) return false
+    return invoke<boolean>('chat_imported_history_stale', { conversationId })
   },
 }

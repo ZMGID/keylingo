@@ -24,6 +24,19 @@ pub fn build_pi_args(
     _prompt: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["--mode".to_string(), "rpc".to_string()];
+    // pi 原生会话：`--session-id <id>` 语义天然幂等——不存在则创建、存在则续接。首轮
+    // resolve_agent_resume_context 给出 new_session_id（新 uuid，落盘 external-agent-sessions），
+    // 后续轮给出 resume_session_id（同一 id），两种情况都用这同一个 flag。pi 每轮 spawn，
+    // 靠这个 id 让 CLI 自己从原生会话文件恢复历史，Kivio 不再重放 transcript。
+    if let Some(session_id) = ctx
+        .resume_session_id
+        .as_ref()
+        .or(ctx.new_session_id.as_ref())
+        .filter(|s| !s.is_empty())
+    {
+        args.push("--session-id".to_string());
+        args.push(session_id.clone());
+    }
     if let Some(model) = options
         .model
         .as_ref()
@@ -40,12 +53,10 @@ pub fn build_pi_args(
         args.push("--thinking".to_string());
         args.push(reasoning.clone());
     }
-    for dir in &ctx.extra_allowed_dirs {
-        if !dir.is_empty() {
-            args.push("--append-system-prompt".to_string());
-            args.push(dir.clone());
-        }
-    }
+    // 注意：pi 无「授权目录」flag（`--help` 无 --add-dir/allowed-dir 等价项，只有 --approve 信任
+    // 项目本地文件）。此前把 extra_allowed_dirs 塞进 `--append-system-prompt` 是误用——该 flag
+    // 是「向系统提示追加文本/文件内容」，会把目录路径当提示词写进去，既不授权也污染上下文。
+    // 附件目录路径已在 prompt 文本的附件说明块里给出，pi 靠自身文件权限模型读取，无需此处注入。
     args
 }
 
@@ -69,8 +80,9 @@ pub const PI_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     prompt_via_stdin: true,
     prompt_input_format: PromptInputFormat::Text,
     stream_format: StreamFormat::PiRpc,
-    json_event_parser: None,
-    resumes_session_via_cli: false,
+    resumes_session_via_cli: true,
+    supports_native_image: false,
+    image_mime_whitelist: &[],
     build_args: build_pi_args,
 };
 
@@ -96,6 +108,51 @@ mod tests {
         );
         assert!(args.contains(&"rpc".to_string()));
         assert!(args.contains(&"--thinking".to_string()));
-        assert!(args.contains(&"--append-system-prompt".to_string()));
+        // extra_allowed_dirs 不再被塞进 --append-system-prompt（pi 无授权目录 flag）。
+        assert!(!args.contains(&"--append-system-prompt".to_string()));
+        assert!(!args.contains(&"/skills".to_string()));
+        // 无 session id 时不带 --session-id。
+        assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn pi_build_args_passes_new_session_id_on_first_turn() {
+        let args = build_pi_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                resume_session_id: None,
+                new_session_id: Some("sess-new".to_string()),
+                include_partial_messages: false,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: None,
+            },
+            None,
+        );
+        assert!(args.windows(2).any(|w| w == ["--session-id", "sess-new"]));
+    }
+
+    #[test]
+    fn pi_build_args_resumes_via_session_id_on_later_turn() {
+        let args = build_pi_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                // A resume takes precedence over any new id, and both map to the same flag.
+                resume_session_id: Some("sess-existing".to_string()),
+                new_session_id: None,
+                include_partial_messages: false,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: None,
+            },
+            None,
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--session-id", "sess-existing"]));
     }
 }

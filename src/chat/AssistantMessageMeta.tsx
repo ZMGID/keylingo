@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, Copy, Gauge, GitBranch, Pencil, RotateCcw, Trash2 } from 'lucide-react'
+import { Check, Copy, Gauge, GitBranch, NotebookPen, Pencil, RotateCcw, Trash2 } from 'lucide-react'
 import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
 import { estimateTokens } from '../utils/tokens'
@@ -18,6 +18,7 @@ interface AssistantMessageMetaProps {
   onRegenerate?: () => void
   onFork?: () => void
   onDelete?: () => void
+  onSaveToNote?: () => Promise<boolean> | boolean
 }
 
 /** Provider 报告的真实 token 数（输入+输出聚合的 total，或输出 token）；没有则 null。 */
@@ -46,8 +47,10 @@ export function AssistantMessageMeta({
   onRegenerate,
   onFork,
   onDelete,
+  onSaveToNote,
 }: AssistantMessageMetaProps) {
   const [copied, setCopied] = useState(false)
+  const [saved, setSaved] = useState(false)
   // 优先显示 provider 报告的真实用量；provider 不报时回落到 chars 估算（带 ~ 前缀）。
   const realUsage = realUsageTokens(usage)
   const tokenLabel = realUsage
@@ -63,6 +66,14 @@ export function AssistantMessageMeta({
     if (!ok) return
     setCopied(true)
     window.setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleSaveToNote = async () => {
+    if (!onSaveToNote) return
+    const ok = await Promise.resolve(onSaveToNote())
+    if (!ok) return
+    setSaved(true)
+    window.setTimeout(() => setSaved(false), 2000)
   }
 
   const runEntryLabel = runEntry === 'regenerate' ? '已重新生成' : null
@@ -88,6 +99,14 @@ export function AssistantMessageMeta({
           label={copied ? '已复制' : '复制'}
         >
           {copied ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <Copy size={14} strokeWidth={2} />}
+        </IconButton>
+        <IconButton
+          size="sm"
+          onClick={() => void handleSaveToNote()}
+          disabled={!onSaveToNote}
+          label={saved ? '已存为笔记' : '存为笔记'}
+        >
+          {saved ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <NotebookPen size={14} strokeWidth={2} />}
         </IconButton>
         <IconButton
           size="sm"

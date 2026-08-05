@@ -16,6 +16,7 @@ import {
 } from '../api/tauri'
 import { refreshSettings } from '../api/settingsCache'
 import { Button, IconButton } from '../components/Button'
+import { Toggle } from '../settings/components'
 
 interface PluginCenterProps {
   /** 让 Kivio AI 按规范文档安装：父级开新对话并发送 install brief */
@@ -23,41 +24,6 @@ interface PluginCenterProps {
 }
 
 type TabId = 'plaza' | 'installed'
-
-function Switch({
-  checked,
-  onChange,
-  disabled,
-  ariaLabel,
-}: {
-  checked: boolean
-  onChange: (value: boolean) => void
-  disabled?: boolean
-  ariaLabel?: string
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={ariaLabel}
-      disabled={disabled}
-      onClick={() => !disabled && onChange(!checked)}
-      data-tauri-drag-region="false"
-      className={`relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 ${
-        checked
-          ? 'bg-emerald-500 hover:bg-emerald-600'
-          : 'bg-neutral-300 hover:bg-neutral-400 dark:bg-neutral-600 dark:hover:bg-neutral-500'
-      }`}
-    >
-      <span
-        className={`inline-block size-[18px] rounded-full bg-white shadow-sm transition-transform ${
-          checked ? 'translate-x-[18px]' : 'translate-x-0.5'
-        }`}
-      />
-    </button>
-  )
-}
 
 function PluginCard({
   plugin,
@@ -171,7 +137,7 @@ function PluginCard({
         {plugin.installed && (
           <div className="flex shrink-0 flex-col items-end gap-1 pt-0.5">
             <span className="text-[11px] text-neutral-400">启用</span>
-            <Switch
+            <Toggle
               checked={plugin.enabled}
               disabled={busy}
               onChange={(next) => onToggleEnabled(plugin.id, next)}

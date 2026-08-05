@@ -87,6 +87,10 @@ pub struct RequestDebugResponse {
     pub finish_reason: Option<String>,
     #[serde(default)]
     pub usage: Option<ModelUsage>,
+    /// 内置联网搜索解析结果（任务 07-23）：从响应里提取到的 queries + citations；
+    /// `null` = 未解析到任何搜索痕迹（模型没搜 / 渠道没返回结构化字段）。
+    #[serde(default)]
+    pub web_search: Value,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -101,6 +105,11 @@ impl RequestDebugResponse {
             tool_calls: tool_calls_to_value(&output.tool_calls),
             finish_reason: output.finish_reason.clone(),
             usage: output.usage.clone(),
+            web_search: output
+                .web_search
+                .as_ref()
+                .and_then(|ws| serde_json::to_value(ws).ok())
+                .unwrap_or(Value::Null),
             error: None,
         }
     }
@@ -110,6 +119,7 @@ impl RequestDebugResponse {
         Self {
             status_code,
             tool_calls: Value::Null,
+            web_search: Value::Null,
             error: Some(error.to_string()),
             ..Default::default()
         }
@@ -427,6 +437,7 @@ mod tests {
             api_format: "openai_chat".into(),
             model_overrides: Default::default(),
             compress_request_body: false,
+            request: Default::default(),
         };
         let request = GenerateRequest {
             model: "gpt-5".into(),
@@ -458,6 +469,8 @@ mod tests {
             finish_reason: Some("tool_calls".into()),
             provider_messages: Vec::new(),
             cancelled: false,
+            web_search: None,
+            images: Vec::new(),
         };
 
         let mut headers = BTreeMap::new();

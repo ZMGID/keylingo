@@ -1,8 +1,47 @@
 import { ARROW_COLOR, ARROW_HEAD_ANGLE_DEG } from './annotation'
-import type { Arrow } from './types'
+import type { Annotation } from './types'
 
-export function ArrowSvg({ arrow }: { arrow: Arrow }) {
-  const { x1, y1, x2, y2 } = arrow
+/** 箭头/矩形的 SVG 实时预览。马赛克由独立的 canvas 预览层渲染（需要位图采样），此组件画半透明占位。 */
+export function AnnotationSvg({ annotation }: { annotation: Annotation }) {
+  const { kind, x1, y1, x2, y2 } = annotation
+
+  if (kind === 'rect' || kind === 'mosaic') {
+    const x = Math.min(x1, x2)
+    const y = Math.min(y1, y2)
+    const w = Math.abs(x2 - x1)
+    const h = Math.abs(y2 - y1)
+    if (w < 1 || h < 1) return null
+    if (kind === 'mosaic') {
+      // 拖拽中的马赛克草稿：毛玻璃感占位（真正像素化由 MosaicCanvas 层在落定后渲染）
+      return (
+        <rect
+          x={x}
+          y={y}
+          width={w}
+          height={h}
+          rx={3}
+          fill="rgba(120,120,128,0.35)"
+          stroke="rgba(255,255,255,0.8)"
+          strokeWidth={1.5}
+          strokeDasharray="6 4"
+        />
+      )
+    }
+    return (
+      <rect
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        rx={6}
+        fill="none"
+        stroke={ARROW_COLOR}
+        strokeWidth={4}
+        strokeLinejoin="round"
+      />
+    )
+  }
+
   const dx = x2 - x1
   const dy = y2 - y1
   const len = Math.hypot(dx, dy)
@@ -38,4 +77,9 @@ export function ArrowSvg({ arrow }: { arrow: Arrow }) {
       />
     </g>
   )
+}
+
+/** 旧名兼容：Lens chat 模式沿用 */
+export function ArrowSvg({ arrow }: { arrow: Annotation }) {
+  return <AnnotationSvg annotation={arrow} />
 }

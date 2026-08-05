@@ -195,7 +195,7 @@
 
 <div class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">≡</button>
-  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.8.1</span></a>
+  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.8.4</span></a>
   <div class="spacer"></div>
   <a class="top-link" href="../index.html">← 官网</a>
   <a class="icon-link" href="https://github.com/ZMGID/kivio" target="_blank" rel="noopener" aria-label="GitHub">
@@ -223,6 +223,8 @@
       <a class="item" href="#/local-agents" data-page="local-agents">Kivio Code 与外部 Agent</a>
       <a class="item" href="#/knowledge" data-page="knowledge">知识库</a>
       <a class="item" href="#/sandbox" data-page="sandbox">代码沙箱</a>
+      <a class="item" href="#/dock" data-page="dock">右侧 Dock</a>
+      <a class="item" href="#/hooks" data-page="hooks">生命周期 Hooks</a>
     </div>
     <div class="group">
       <div class="group-label">屏幕工具</div>
@@ -274,6 +276,8 @@
           <tr><td><a href="#/local-agents">Kivio Code 与外部 Agent</a></td><td>终端编码 Agent，以及 Claude Code、Codex、OpenCode、Pi 等本地 CLI 接管</td></tr>
           <tr><td><a href="#/knowledge">知识库</a></td><td>向量 + 全文混合检索 RAG，全部本地索引</td></tr>
           <tr><td><a href="#/sandbox">代码沙箱</a></td><td>Pyodide 本地运行 Python，图表/文档产物自动交付</td></tr>
+          <tr><td><a href="#/dock">右侧 Dock</a></td><td>文件树、Git 审查与真实 PTY 终端，绑定对话工作目录</td></tr>
+          <tr><td><a href="#/hooks">生命周期 Hooks</a></td><td>在对话的 8 个时点跑脚本或发 HTTP 请求</td></tr>
           <tr><td><a href="#/translate">划词翻译</a></td><td>全局热键，流式翻译，提交即回填原应用</td></tr>
           <tr><td><a href="#/lens">Lens 取景</a></td><td>圈选屏幕任意区域或窗口，直接进入视觉对话</td></tr>
           <tr><td><a href="#/ocr">截图翻译与 OCR</a></td><td>Apple Vision / Windows OCR / 离线 RapidOCR 三引擎</td></tr>
@@ -284,9 +288,9 @@
     <article data-page="install" class="hidden">
       <div class="crumb">开始</div>
       <h1>安装</h1>
-      <p class="lead">当前稳定版为 v2.8.1，从 GitHub Releases 获取对应平台安装包。</p>
+      <p class="lead">当前稳定版为 v2.8.4，从 GitHub Releases 获取对应平台安装包。</p>
       <h2 id="install-mac">macOS</h2>
-      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.8.1_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
+      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.8.4_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
       <pre><code>xattr -cr "/Applications/Kivio Desktop.app"</code></pre>
       <p>首次使用以下功能时，系统会请求相应的隐私权限：</p>
       <table>
@@ -298,7 +302,7 @@
       </table>
       <p>在「系统设置 → 隐私与安全性」中为 Kivio Desktop 打开对应开关即可，无需重启应用。</p>
       <h2 id="install-win">Windows</h2>
-      <p>下载并运行 <code>Kivio.Desktop_2.8.1_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
+      <p>下载并运行 <code>Kivio.Desktop_2.8.4_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
       <h2 id="install-update">更新</h2>
       <p>应用启动时会静默检查一次 GitHub Releases 是否有新版本（<code>autoCheckUpdate</code>，默认开启）。也可以在「设置 → 关于」手动检查；发现新版本后可直接在应用内下载安装包并启动安装。若 GitHub API 检查失败，界面会提供 Releases 页面作为手动下载兜底。</p>
     </article>
@@ -306,7 +310,7 @@
     <article data-page="quickstart" class="hidden">
       <div class="crumb">开始</div>
       <h1>快速上手</h1>
-      <p class="lead">从安装 v2.8.1 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
+      <p class="lead">从安装 v2.8.4 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
       <h2 id="qs-install">第一步 · 安装并启动</h2>
       <p>从 <a href="https://github.com/ZMGID/kivio/releases/latest" target="_blank" rel="noopener">GitHub Releases ↗</a> 下载最新版：macOS Apple Silicon 使用 <code>.dmg</code>，Windows x64 使用 NSIS <code>-setup.exe</code>。macOS DMG 未签名，首次启动需要右键 →「打开」。详细权限与更新说明见 <a href="#/install">安装</a>。</p>
       <h2 id="qs-key">第二步 · 完成首次引导</h2>
@@ -532,6 +536,60 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <p>每次对话最多累计 16 个交付文件，超出时按最旧优先淘汰；这些文件会一直保留，直到对话本身被删除。</p>
     </article>
 
+    <article data-page="dock" class="hidden">
+      <div class="crumb">智能体</div>
+      <h1>右侧 Dock</h1>
+      <p class="lead">文件树、Git 审查、真实终端 —— 看着智能体改你的文件，而不是猜它改了什么。</p>
+      <p>聊天窗右侧可以拉出一条 IDE 式侧栏，绑定<b>当前对话的工作目录</b>：项目对话是项目根目录，非项目对话是该对话专属的工作区目录。内置运行时与外部 CLI 代理各自解析各自的目录，Dock 显示的始终是这一轮真正会被写入的那个。</p>
+      <p>宽度可拖拽调整，开合状态、宽度、当前页签与每个项目展开过的目录都会记住。</p>
+      <h2 id="dock-files">文件树</h2>
+      <ul>
+        <li>框选、Ctrl / Shift 多选，鼠标拖拽移动文件，批量删除。</li>
+        <li>内联新建与重命名：失焦即确认，出错时错误文字直接显示在行内；新建完成后自动选中并定位。</li>
+        <li>就地查看器：点文件即可查看，带行号，可编辑保存。二进制文件与超过 1MiB 的文件会被拒绝打开。</li>
+        <li>目录变动由文件系统监听器推送，不需要手动刷新。</li>
+      </ul>
+      <h2 id="dock-git">Git 审查</h2>
+      <p>工作目录是 Git 仓库时，这个页签列出改动文件并显示 diff。未跟踪文件的状态徽章用 <code>A</code>（新增）而不是 <code>?</code>，免得读成未知错误。单个 diff 超过 512KB 会被截断。</p>
+      <p>Git 操作直接调用系统的 <code>git</code> 命令，遇到 <code>index.lock</code> 冲突会自动重试。</p>
+      <h2 id="dock-terminal">终端</h2>
+      <p>真正的 PTY 终端（macOS 用 forkpty，Windows 用 ConPTY），不是命令输出的模拟回显 —— 交互式程序、颜色、光标控制都正常工作。工作目录与 Dock 一致。关闭会话时其子进程一并结束。</p>
+      <h2 id="dock-diff">与工具卡片联动</h2>
+      <p>智能体调用 <code>write</code> / <code>edit</code> 时，聊天里的工具卡片折叠行会直接显示 <code>+N -N</code>（增绿删红）。展开是富渲染 diff：带 <code>@@</code> 行号列、词级差异高亮、整行铺色。</p>
+      <p>点卡片上的文件名会在右侧 Dock 里预览这个文件（<code>write</code> / <code>edit</code> 看 diff，<code>read</code> 看文件内容）。文件在工作目录之外时，用它所在的目录作为临时根目录打开。</p>
+    </article>
+
+    <article data-page="hooks" class="hidden">
+      <div class="crumb">智能体</div>
+      <h1>生命周期 Hooks</h1>
+      <p class="lead">在对话的 8 个时点自动跑一段脚本或发一个 HTTP 请求。</p>
+      <p>内置智能体运行时会在固定的生命周期事件上派发 Hook，用来做通知、埋点、外部联动这类事情。在设置的 <b>Hooks</b> 页添加、启停与编辑。</p>
+      <h2 id="hooks-events">事件</h2>
+      <table>
+        <thead><tr><th>事件</th><th>时机</th></tr></thead>
+        <tbody>
+          <tr><td><code>agent_start</code> / <code>agent_end</code></td><td>整轮智能体运行的开始与结束</td></tr>
+          <tr><td><code>turn_start</code> / <code>turn_end</code></td><td>每一轮工具循环的开始与结束</td></tr>
+          <tr><td><code>message_start</code> / <code>message_end</code></td><td>每条模型消息的开始与结束</td></tr>
+          <tr><td><code>tool_execution_start</code> / <code>tool_execution_end</code></td><td>每次工具调用的开始与结束</td></tr>
+        </tbody>
+      </table>
+      <h2 id="hooks-types">两种 Hook</h2>
+      <ul>
+        <li><b>命令</b> —— 执行一段 Shell 脚本，事件载荷以 JSON 从 stdin 传入。</li>
+        <li><b>HTTP</b> —— 向指定 URL 发请求，可自定义方法与请求头，载荷为 JSON 请求体。</li>
+      </ul>
+      <p>两种都可设置超时。除 stdin / 请求体外，命令 Hook 还能读到这些环境变量（与 Claude Code、Codex 的事实标准对齐）：</p>
+      <p><code>KIVIO_HOOK_EVENT</code> · <code>KIVIO_HOOK_NAME</code> · <code>KIVIO_CONVERSATION_ID</code> · <code>KIVIO_RUN_ID</code> · <code>KIVIO_WORKDIR</code> · <code>KIVIO_TOOL_NAME</code></p>
+      <h2 id="hooks-semantics">行为约定</h2>
+      <ul>
+        <li><b>fire-and-forget</b> —— Hook 不会阻断工具调用，也不能改写工具参数或拦截执行。失败只在界面上报一条警告，不影响这一轮对话。</li>
+        <li><b>零 Hook 零开销</b> —— 一条 Hook 都没启用时，运行时完全不会走这条链路。</li>
+        <li><b>作用范围</b> —— 只对 Kivio Desktop 内置的智能体运行时生效；外部 CLI 代理（claude、codex 等）由各自的 CLI 驱动，不触发这些事件。</li>
+        <li>取消对话时，已经派发出去的 Hook 仍会正常收到结束事件，不会被吞掉。</li>
+      </ul>
+    </article>
+
     <article data-page="translate" class="hidden">
       <div class="crumb">屏幕工具</div>
       <h1>划词翻译</h1>
@@ -693,6 +751,45 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <div class="crumb">更多</div>
       <h1>更新日志</h1>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
+      <h2 id="changelog-284">v2.8.4 · 2026-07-31</h2>
+      <ul>
+        <li><b>右侧 Dock：文件树、Git 审查、真实终端</b> —— 聊天窗右侧新增按工作目录绑定的 IDE 侧栏。文件树支持框选多选、拖拽移动、批量删除、内联新建/重命名与就地查看编辑；Git 面板看改动与 diff；终端是真正的 PTY（forkpty / ConPTY）。工具卡片的 Write/Edit 显示 <code>+N -N</code>，展开是带行号列与词级高亮的 diff，点文件名即在右侧预览。</li>
+        <li><b>claude CLI 改为一会话一常驻进程</b> —— 不再每轮重开子进程：首轮约 3.2 秒，之后每轮约 0.1 秒。换模型不再丢上下文；子会话（Task）不再把自述印进主回答、不再污染用量与压缩分母；停止改用 <code>interrupt</code> 控制请求而非杀进程。</li>
+        <li><b>上下文用量终于是准的</b> —— 所有外部 CLI 都漏算了 cache token（实测 kimi 97.6%、pi 62%、opencode 13%），且各家 cache 包含关系不同（codex 已含在 input 内，claude/pi/ACP 须相加）。分母也修了：claude 裸别名实测都是 100 万上下文，旧表一律按 20 万算，压缩在真实占用 20% 就触发。用量现在实时更新。</li>
+        <li><b>MCP 改用官方 rmcp SDK</b> —— 两套手写 JSON-RPC 合成一条通路，净删约 2270 行，「设置页测试连接」与「聊天里调用」不再表现不一致。顺带修好：远程 HTTP MCP 加了工具无需重启即可见；Windows 上 <code>npx.cmd</code> 这类 shim 不再找不到；装了企业 TLS 中间证书的用户从「连不上」变「能连」。</li>
+        <li><b>工具审批改为内联卡片，claude CLI 也会来问</b> —— 输入框上方的内联卡片：自然语言标题、只放路径或命令的代码块、带数字快捷键的三个动作，新增本对话「总是允许」。外部 claude CLI 接进同一条审批链路。并发审批不再只留最后一张卡（此前另外两张会静默超时被拒）。</li>
+        <li><b>对话生命周期 Hooks</b> —— 内置智能体的 8 个生命周期事件可挂 Shell 脚本或 HTTP Hook，载荷走 stdin JSON + <code>KIVIO_*</code> 环境变量。fire-and-forget，不阻断工具调用；没配 Hook 时零开销。设置新增 Hooks 页。</li>
+        <li><b>子智能体角色通用化</b> —— 角色列表在运行时生成进 <code>agent</code> 工具描述（内置/用户/项目三层），不必再猜名字；字段照 Claude Code / Cursor 的 <code>.md</code> + frontmatter 事实标准，拷来的角色文件直接可用。支持工具通配、<code>disallowedTools</code> 继承减法与调用内临时角色。</li>
+        <li><b>界面：悬浮卡片式侧栏与 Windows 全宽标题栏</b> —— 侧栏/主区/Dock 改为三张浮起的卡片，侧栏支持系统级模糊材质（Windows Mica 跟应用主题）。Windows 三键改为贯穿全宽的 44px 标题栏带，内容不再留 132px 躲它。全站下拉栏统一规格、输入区拆三层、表格与代码块重做、等宽字体补 CJK 回退、macOS 顶栏那条线统一到同一基线。</li>
+        <li><b>图片右键菜单</b> —— 新增复制图片 / 图片另存为… / 查看大图（内嵌图与生成图两条路径都挂上）；大图查看器的复制与另存取原图而非缩略图。</li>
+        <li><b>claude 模型清单剔掉 6 个退役 / 会被静默换掉的模型</b> —— 目录不等于可用：4 个已退役（选了只回退役警告），<code>opus-4-1</code> / <code>opus-4-0</code> 更糟——不报错，直接给你 Opus 4.8。</li>
+        <li><b>稳定性与正确性修复</b> —— 退出不再留孤儿 claude 进程及其 MCP 子孙；外部 CLI 调过工具的回答不再渲染两遍；grok 的 token 用量在 <code>_meta</code> 里，此前一路读空；系统提示改走 <code>--append-system-prompt-file</code>，长会话压缩后不再静默失效；<code>/cost</code> 等客户端斜杠命令输出不再被吞；被截断的回答不再标成「完成」；探测不再堆空壳会话；流式思考不再逐帧抖动。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.4" target="_blank" rel="noopener">查看 v2.8.4 Release notes ↗</a></p>
+      <h2 id="changelog-283">v2.8.3 · 2026-07-25</h2>
+      <ul>
+        <li><b>翻译 / 截图 / Lens 支持全部模型协议</b> —— 这三个功能此前把请求硬编码成 OpenAI 的 <code>chat/completions</code> 格式，配置成 Gemini、Anthropic 或 OpenAI Responses 协议的供应商一用就 404。现在与聊天共用同一套模型适配层，四种协议都能用。</li>
+        <li><b>修复 Gemini / Vertex 与 grok 拒绝工具调用</b> —— 内置工具 schema 中分支未标注类型的 <code>anyOf</code> 会让 Vertex 整请求驳回、grok 拒收工具定义，这些模型此前用不了工具；现已剥离并由运行时校验兜底。</li>
+        <li><b>内置联网搜索</b> —— 每个会话可选「关闭 / 内置 / 第三方」三态，内置模式直接调用供应商自带搜索（OpenAI Responses、Gemini、Anthropic），搜索过程以实时卡片显示在答案上方，最后一次选择记为新会话默认。</li>
+        <li><b>外部 CLI 全面重做</b> —— 全部 CLI 改用原生会话机制不再重放历史（kimi 迁 ACP，pi 用 <code>--session-id</code>）；错误分类并给出可操作引导；可用性与模型探测分离加缓存，第 2 轮起前置开销从 10–25 秒降到 500 毫秒内。</li>
+        <li><b>Gemini 原生生图</b> —— 聊天里可用 Gemini 原生协议出图并挂到 artifacts；OpenAI 兼容中转出图也已打通，端点路由收敛为单一解析并在猜错时自愈。</li>
+        <li><b>LaTeX 公式显示修复</b> —— 模型常用的 <code>\[...\]</code> 块级与 <code>\(...\)</code> 行内分隔符此前完全渲染不出来，现已支持。</li>
+        <li><b>从本地 CLI 导入 MCP 与 Skill</b> —— 扩展页可扫描已安装的 Claude Code / Codex / OpenCode 配置并导入；MCP 改为启用与开窗时预热连接，首轮工具收集加短超时兜底。</li>
+        <li><b>独立截图标注</b> —— 新增箭头、矩形、马赛克标注，支持撤销后复制或保存；冻结帧双端常开，截图不再带鼠标指针。</li>
+        <li><b>新增 ego lite 插件</b> —— 启用时自动从仓库下载配套的 ego-browser Skill，随上游更新。</li>
+        <li><b>输入与界面修复</b> —— 所有输入框关闭 WebKit 智能输入（修自动大写与 autocorrect 插空格）；模型下拉按能力筛选（生图/视觉/embedding）；弹层与右键菜单按视口边缘自适应；对话搜索可全文匹配正文；输入框草稿跨对话保留；新增模型级 <code>extra_body</code> 透传。</li>
+        <li><b>稳定性修复</b> —— HTTP 连接池加保活（修长时运行后 <code>error sending request</code>）；请求调试 token 不再恒为 0；修复会话重复加载、多模型并答流式栏冻结、<code>Retry-After</code> 巨值长时挂起、后台命令未按会话隔离、检索 rerank 分被覆盖与结果静默截断。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.3" target="_blank" rel="noopener">查看 v2.8.3 Release notes ↗</a></p>
+      <h2 id="changelog-282">v2.8.2 · 2026-07-20</h2>
+      <ul>
+        <li><b>笔记中心升级</b> —— 加入文件夹式管理与 Milkdown 实时预览编辑器，可把卡片移动到文件夹、用内联弹框管理文件夹。</li>
+        <li><b>消息区交互增强</b> —— 划词可「添加到聊天」引用进输入框，内置右键菜单支持复制选中/复制整条消息，并重构跟随滚动，修复流式不跟随与钉底闪动。</li>
+        <li><b>界面更个性化</b> —— 可自定义 UI 字号、界面字体与代码字体；头像改本地图片上传；记住上次模型与思考等级作为默认（移除「默认模型」设置），并精简翻译/资料设置。</li>
+        <li><b>连接测试更可靠</b> —— 测试连接按供应商 api_format 分派正确协议，改为模型批量测试，密码框去掉重复的原生眼睛图标。</li>
+        <li><b>外部 Agent 与体验细节</b> —— 本地 CLI 可接收图片/文件附件，可用性与模型探测拆分（不再频繁重复检测），移除 Kivio Code 终端 agent；修复暗色模式可见性；优化检索面板与知识库 tab；Lens 输入栏置于截图选区之上。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.2" target="_blank" rel="noopener">查看 v2.8.2 Release notes ↗</a></p>
       <h2 id="changelog-281">v2.8.1 · 2026-07-19</h2>
       <ul>
         <li><b>扩展中心</b> —— 新增 MCP 注册表市场（Official/Smithery/Glama）与技能商店（ClawHub + URL 安装），知识库整合进扩展中心，可在应用内浏览、安装、卸载。</li>

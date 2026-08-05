@@ -33,6 +33,47 @@ impl Default for OpenAIConfig {
     }
 }
 
+/// 供应商级自定义请求头的一条。key/value 的合法性由 `provider_request` 校验，
+/// 非法或命中保留名单的条目在 `sanitize_settings` 里丢弃（设置文件可被手改，后端必须自己拦）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ProviderCustomHeader {
+    pub key: String,
+    pub value: String,
+}
+
+/// 供应商级「请求配置」：自定义请求头 / 代理 / prompt 缓存 / CLI 身份伪装。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderRequestConfig {
+    /// 附加到该供应商所有请求上的自定义头。同名时覆盖 CLI 身份预设。
+    pub custom_headers: Vec<ProviderCustomHeader>,
+    /// 是否跟随系统代理。默认 true —— 与加这个开关之前的行为一致；关掉才走直连。
+    pub use_system_proxy: bool,
+    /// prompt 缓存。`None` = 跟随协议默认（见 `prompt_caching_enabled`），用户显式拨过才是
+    /// `Some`。之所以不是裸 `bool`：两条协议的安全默认不同，而裸 bool 分不清「用户选了 true」
+    /// 和「serde 填的 true」。
+    pub prompt_caching: Option<bool>,
+    /// 缓存时长档位：`short`（默认 5 分钟）| `long`（1 小时，需 beta 头）。仅 Anthropic。
+    pub prompt_cache_retention: String,
+    /// CLI 身份伪装：`""` 关闭 | `claude_code` | `codex` | `grok`。
+    pub cli_identity: String,
+    /// 身份版本号，空则用内置常量。
+    pub cli_identity_version: String,
+}
+
+impl Default for ProviderRequestConfig {
+    fn default() -> Self {
+        Self {
+            custom_headers: Vec::new(),
+            use_system_proxy: true,
+            prompt_caching: None,
+            prompt_cache_retention: "short".to_string(),
+            cli_identity: String::new(),
+            cli_identity_version: String::new(),
+        }
+    }
+}
+
 /**
  * AI 模型提供商配置
  *
@@ -73,6 +114,9 @@ pub struct ModelProvider {
     /// 不接受 gzip 的供应商（如官方 DeepSeek）请保持关闭，否则会 400。
     #[serde(default)]
     pub compress_request_body: bool,
+    /// 「请求配置」：自定义头 / 代理 / prompt 缓存 / CLI 身份。
+    #[serde(default)]
+    pub request: ProviderRequestConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +129,12 @@ pub enum ProviderApiFormat {
     /// Google Gemini native `generateContent` protocol. Avoids the OpenAI-compat
     /// endpoint's strict rejection of unknown fields (e.g. `promptCacheKey` 400).
     Gemini,
+    /// xAI (Grok) 的 Responses 端点。**线协议与 `OpenAiResponses` 相同**，走同一个适配器；
+    /// 区别是 xAI 严格拒收一批 OpenAI 专有字段（`store` / `prompt_cache_key` /
+    /// `instructions` / `metadata` / `stream_options` …），思考档位也是它自己的一套
+    /// （`none|low|medium|high|xhigh`）。做成独立协议而不是按 base_url 猜：中转站可以把
+    /// grok 挂在任意域名上，靠域名判断必然漏。
+    XaiResponses,
 }
 
 impl ProviderApiFormat {
@@ -93,6 +143,7 @@ impl ProviderApiFormat {
             "anthropic" | "anthropic_messages" => Self::AnthropicMessages,
             "openai_responses" | "responses" => Self::OpenAiResponses,
             "gemini" | "google" | "gemini_generate" => Self::Gemini,
+            "xai" | "xai_responses" | "grok" => Self::XaiResponses,
             _ => Self::OpenAiChat,
         }
     }
@@ -103,6 +154,7 @@ impl ProviderApiFormat {
             Self::AnthropicMessages => "anthropic_messages",
             Self::OpenAiResponses => "openai_responses",
             Self::Gemini => "gemini",
+            Self::XaiResponses => "xai_responses",
         }
     }
 }
@@ -110,6 +162,26 @@ impl ProviderApiFormat {
 impl ModelProvider {
     pub fn api_format_kind(&self) -> ProviderApiFormat {
         ProviderApiFormat::from_raw(&self.api_format)
+    }
+
+    /// 该供应商本次是否启用 prompt 缓存。用户没拨过开关时按协议给默认，取值原则是
+    /// **「不改变加这个开关之前的行为」**：
+    ///
+    /// - OpenAI Chat / Responses：默认**开**。`prompt_cache_key` 本来就一直在发，
+    ///   默认关反而是静默削弱现状。
+    /// - Anthropic：默认**关**。断点是净新增的线格式变化（`system` 从字符串变块数组、
+    ///   tools 与末条消息各加 `cache_control`），而这条路没有 `prompt_cache_key` 那种
+    ///   「被拒就学会并重试」的自愈。第三方 Anthropic 兼容网关严格的直接 400，宽松的
+    ///   把块数组读成空 —— 后者会让系统提示词静默丢失，用户只看到模型突然变笨。
+    ///   想省钱的人自己去二级页打开。
+    /// - Gemini：没有可发的字段，取值无意义。
+    pub fn prompt_caching_enabled(&self) -> bool {
+        self.request
+            .prompt_caching
+            .unwrap_or(match self.api_format_kind() {
+                ProviderApiFormat::AnthropicMessages => false,
+                _ => true,
+            })
     }
 }
 
@@ -128,6 +200,16 @@ pub struct ModelInfo {
     pub omit_temperature: Option<bool>,
     pub capabilities: Option<ModelCapabilities>,
     pub pricing: Option<ModelPricing>,
+    /// 每模型「思考等级」白名单，覆盖模型库的 `reasoningEfforts`。
+    /// `None` = 跟随模型库；`Some([])` = 该模型没有 effort 旋钮（请求不带任何等级字段）；
+    /// `Some([..])` = 只这几档可选可下发。仅用于 model_overrides。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
+    /// 每模型额外请求体字段（原样 merge 进 chat/completions body 根部）。
+    /// 用于给严格 OpenAI-compat 端点塞标准 schema 之外的私有旋钮，例如 NVIDIA NIM /
+    /// vLLM / SGLang 的 `chat_template_kwargs`、GLM 的 thinking 开关等。仅用于 model_overrides。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -455,10 +537,6 @@ pub struct LensConfig {
     /// 进入截图选择态时是否显示顶部提示。默认 true，避免用户按下快捷键后看不出已进入截图模式。
     #[serde(default = "default_true")]
     pub show_capture_hint: bool,
-    /// Windows 兼容模式：进入截图选择态前先抓取当前显示器冻结帧，再在覆盖层内显示和裁剪冻结帧。
-    /// Windows 默认 true（规避浏览器视频在透明置顶 WebView2 下变黑）；其他平台不生效。
-    #[serde(default = "default_windows_freeze_frame_selection")]
-    pub windows_freeze_frame_selection: bool,
     #[serde(default)]
     pub web_search: LensWebSearchConfig,
 }
@@ -490,7 +568,6 @@ impl Default for LensConfig {
             send_to_chat: true,
             message_order: "asc".to_string(),
             show_capture_hint: true,
-            windows_freeze_frame_selection: default_windows_freeze_frame_selection(),
             web_search: LensWebSearchConfig::default(),
         }
     }
@@ -883,6 +960,109 @@ fn default_chat_approval_policy() -> String {
 /// string, so a user who deliberately chose another policy is never stomped.
 const LEGACY_DEFAULT_APPROVAL_POLICY: &str = "readonly_auto_sensitive_confirm";
 
+/// Hook 超时的合法区间与默认值。
+pub const HOOK_MIN_TIMEOUT_MS: u64 = 1_000;
+pub const HOOK_MAX_TIMEOUT_MS: u64 = 600_000;
+pub const HOOK_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+
+fn default_hook_timeout_ms() -> u64 {
+    HOOK_DEFAULT_TIMEOUT_MS
+}
+
+fn default_hook_method() -> String {
+    "POST".to_string()
+}
+
+/// 对话生命周期 Hook：在 agent loop 的某个事件点执行 Shell 脚本或发一个 HTTP 请求。
+/// 一律 fire-and-forget —— 不阻断、不改写工具调用（见 07-28-hooks PRD 的「非目标」）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HookDef {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// 8 个生命周期事件之一（见 `chat::hooks::HookEvent`）。未知值在 sanitize 时丢弃。
+    pub event: String,
+    pub enabled: bool,
+    /// "command" | "http"
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// kind == "command" 时的脚本正文。
+    pub script: String,
+    /// kind == "http" 时的目标。
+    pub url: String,
+    #[serde(default = "default_hook_method")]
+    pub method: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for HookDef {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            description: String::new(),
+            event: String::new(),
+            enabled: false,
+            kind: "command".to_string(),
+            script: String::new(),
+            url: String::new(),
+            method: default_hook_method(),
+            headers: std::collections::BTreeMap::new(),
+            timeout_ms: default_hook_timeout_ms(),
+        }
+    }
+}
+
+/// 归一 Hook 列表：丢弃事件名/类型非法或目标为空的条目，补空 id，钳制超时。
+/// 无效条目直接丢弃而非修正——一个 event 打错字的 Hook 没有合理的「就近」事件可猜。
+/// 把 JSON `null` 当成空 `Vec` 收下，而不是报类型错误。
+/// 见 `ChatToolsConfig::hooks` 上的注释：一个字段被前端漏传就会在磁盘上留下 null，
+/// 而 serde 的 `default` 兜不住 null，会让整个父结构解析失败。
+fn null_tolerant_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn sanitize_hooks(hooks: &mut Vec<HookDef>) {
+    hooks.retain_mut(|hook| {
+        hook.event = hook.event.trim().to_string();
+        hook.kind = hook.kind.trim().to_lowercase();
+        if crate::chat::hooks::HookEvent::parse(&hook.event).is_none() {
+            return false;
+        }
+        match hook.kind.as_str() {
+            "command" => {
+                if hook.script.trim().is_empty() {
+                    return false;
+                }
+            }
+            "http" => {
+                if hook.url.trim().is_empty() {
+                    return false;
+                }
+                hook.method = hook.method.trim().to_uppercase();
+                if hook.method.is_empty() {
+                    hook.method = default_hook_method();
+                }
+            }
+            _ => return false,
+        }
+        if hook.id.trim().is_empty() {
+            hook.id = uuid::Uuid::new_v4().to_string();
+        }
+        hook.timeout_ms = hook
+            .timeout_ms
+            .clamp(HOOK_MIN_TIMEOUT_MS, HOOK_MAX_TIMEOUT_MS);
+        true
+    });
+}
+
 /**
  * Chat 工具与 Skill 配置。
  */
@@ -923,6 +1103,14 @@ pub struct ChatToolsConfig {
     /// 默认关闭；关闭时 adapter 零开销（不构造记录）。仅内存、不落盘。
     #[serde(default)]
     pub request_debug_enabled: bool,
+    /// 对话生命周期 Hooks（07-28-hooks）。空数组 = 无 Hook = agent loop 零开销。
+    ///
+    /// `deserialize_with` 而非光 `default`：字段刚上线时前端漏传，`invoke` 把缺失字段
+    /// 序列化成 **null** 落进了 settings.json，而 `default` 只兜「键不存在」，遇到
+    /// null 会以 `invalid type: null, expected a sequence` 让**整个 chatTools 解析失败**
+    /// （连 MCP 服务器、原生工具开关一起丢）。null 归一到空数组。
+    #[serde(default, deserialize_with = "null_tolerant_vec")]
+    pub hooks: Vec<HookDef>,
     pub native_tools: ChatNativeToolsConfig,
 }
 
@@ -944,6 +1132,7 @@ impl Default for ChatToolsConfig {
             sub_agent_provider_id: String::new(),
             sub_agent_model: String::new(),
             request_debug_enabled: false,
+            hooks: Vec::new(),
             native_tools: ChatNativeToolsConfig::default(),
         }
     }
@@ -1158,6 +1347,31 @@ pub fn email_accounts_system_prompt(
 }
 
 /**
+ * 独立截图标注功能配置（截图 → 箭头/矩形/马赛克标注 → 复制/保存）
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScreenshotAnnotateConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_screenshot_annotate_hotkey")]
+    pub hotkey: String,
+}
+
+fn default_screenshot_annotate_hotkey() -> String {
+    "CommandOrControl+Shift+S".to_string()
+}
+
+impl Default for ScreenshotAnnotateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: default_screenshot_annotate_hotkey(),
+        }
+    }
+}
+
+/**
  * 应用完整设置
  */
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1168,10 +1382,24 @@ pub struct Settings {
     /// 打开 AI 客户端（chat 窗口）的全局热键。
     #[serde(default = "default_chat_hotkey")]
     pub chat_hotkey: String,
+    /// 关闭 AI 客户端（chat 窗口）的全局热键。
+    #[serde(default = "default_close_chat_hotkey")]
+    pub close_chat_hotkey: String,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
+    #[serde(default = "default_true")]
+    pub translucent_sidebar: bool,
+    /// UI 整体缩放（作用于聊天窗口根元素 zoom），范围 0.8–1.4，1.0 为默认。
+    #[serde(default = "default_ui_font_scale")]
+    pub ui_font_scale: f32,
+    /// 自定义 UI 字体名（系统已装字体，拼到字体栈最前）。空串 = 系统默认。
+    #[serde(default)]
+    pub ui_font_family: String,
+    /// 自定义代码/等宽字体名（作用于 --font-mono）。空串 = 系统默认。
+    #[serde(default)]
+    pub ui_font_mono: String,
     #[serde(default = "default_target_lang")]
     pub target_lang: String,
     #[serde(default = "default_true")]
@@ -1194,6 +1422,8 @@ pub struct Settings {
     pub providers: Vec<ModelProvider>,
     #[serde(default)]
     pub screenshot_translation: ScreenshotTranslationConfig,
+    #[serde(default)]
+    pub screenshot_annotate: ScreenshotAnnotateConfig,
     #[serde(default, alias = "cowork")]
     pub lens: LensConfig,
     #[serde(default)]
@@ -1206,6 +1436,11 @@ pub struct Settings {
     pub document_processing: DocumentProcessingConfig,
     #[serde(default)]
     pub knowledge_base: KnowledgeBaseConfig,
+    /// 供应商自定义图标：provider id → 图标 key（前端 PROVIDER_BRANDS 的键）。
+    /// ponytail: 单独一张表而不是 ModelProvider 上加字段——那个结构体有 50 处字面量构造，
+    /// 而且只有设置界面关心图标。
+    #[serde(default)]
+    pub provider_icons: std::collections::HashMap<String, String>,
     /// 一次性：将 Lens 的流式/思考开关复制到独立的 Chat 配置（旧版共用 Lens 行为）。
     #[serde(default)]
     pub chat_behavior_migrated_from_lens: bool,
@@ -1345,8 +1580,13 @@ impl Default for Settings {
         Self {
             hotkey: "CommandOrControl+Alt+T".to_string(),
             chat_hotkey: "CommandOrControl+Shift+K".to_string(),
+            close_chat_hotkey: default_close_chat_hotkey(),
             theme: "system".to_string(),
             theme_color: default_theme_color(),
+            translucent_sidebar: true,
+            ui_font_scale: default_ui_font_scale(),
+            ui_font_family: String::new(),
+            ui_font_mono: String::new(),
             target_lang: "auto".to_string(),
             auto_paste: true,
             launch_at_startup: false,
@@ -1358,12 +1598,14 @@ impl Default for Settings {
             translator_prompt: None,
             providers: vec![],
             screenshot_translation: ScreenshotTranslationConfig::default(),
+            screenshot_annotate: ScreenshotAnnotateConfig::default(),
             lens: LensConfig::default(),
             chat: ChatConfig::default(),
             chat_memory: ChatMemoryConfig::default(),
             chat_tools: ChatToolsConfig::default(),
             document_processing: DocumentProcessingConfig::default(),
             knowledge_base: KnowledgeBaseConfig::default(),
+            provider_icons: std::collections::HashMap::new(),
             chat_behavior_migrated_from_lens: false,
             settings_language: Some("zh".to_string()),
             retry_enabled: default_retry_enabled(),
@@ -1633,6 +1875,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
                 api_format: "openai".to_string(),
                 model_overrides: std::collections::HashMap::new(),
                 compress_request_body: false,
+                request: Default::default(),
             });
             settings.translator_provider_id = "default-translator".to_string();
             settings.translator_model = old_openai.model;
@@ -1657,6 +1900,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
                 api_format: "openai".to_string(),
                 model_overrides: std::collections::HashMap::new(),
                 compress_request_body: false,
+                request: Default::default(),
             });
             settings.screenshot_translation.provider_id = "default-ocr".to_string();
             settings.screenshot_translation.model = old_ocr.model;
@@ -1678,6 +1922,34 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             let trimmed = k.trim();
             !trimmed.is_empty() && seen.insert(trimmed.to_string())
         });
+
+        // 请求配置归一：settings.json 是用户可以手改的文件，非法头名会让 reqwest
+        // 构造请求时直接失败，头值里的 CR/LF 是 header 注入，这里一并丢掉。
+        provider
+            .request
+            .custom_headers
+            .retain(crate::provider_request::is_usable_header);
+        if !matches!(
+            provider.request.prompt_cache_retention.as_str(),
+            "short" | "long"
+        ) {
+            provider.request.prompt_cache_retention = "short".to_string();
+        }
+        if !matches!(
+            provider.request.cli_identity.as_str(),
+            "" | "claude_code" | "codex" | "grok"
+        ) {
+            provider.request.cli_identity = String::new();
+        }
+        // 版本号会被拼进 User-Agent，非法值清空（`identity_version` 会退回内置版本）。
+        // 先 trim 再判，与 `identity_version` 同口径：粘贴常带尾换行，那不该算非法。
+        let trimmed_version = provider.request.cli_identity_version.trim().to_string();
+        provider.request.cli_identity_version =
+            if crate::provider_request::is_valid_header_value(&trimmed_version) {
+                trimmed_version
+            } else {
+                String::new()
+            };
     }
 
     let removed_legacy_local_provider_ids: std::collections::HashSet<String> = settings
@@ -1868,6 +2140,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     // 4. 规范化快捷键字符串
     settings.hotkey = normalize_hotkey(&settings.hotkey);
     settings.chat_hotkey = normalize_hotkey(&settings.chat_hotkey);
+    settings.close_chat_hotkey = normalize_hotkey(&settings.close_chat_hotkey);
     settings.screenshot_translation.hotkey =
         normalize_hotkey(&settings.screenshot_translation.hotkey);
     settings.screenshot_translation.text_hotkey =
@@ -1875,6 +2148,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     settings.screenshot_translation.replace_hotkey =
         normalize_hotkey(&settings.screenshot_translation.replace_hotkey);
     settings.lens.hotkey = normalize_hotkey(&settings.lens.hotkey);
+    settings.screenshot_annotate.hotkey = normalize_hotkey(&settings.screenshot_annotate.hotkey);
 
     // 规范化提示词（去除首尾空白，空值转为 None）
     settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
@@ -1896,6 +2170,11 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     if !matches!(settings.theme_color.as_str(), "neutral" | "warm" | "cool") {
         settings.theme_color = default_theme_color();
     }
+    settings.ui_font_scale = if settings.ui_font_scale.is_finite() {
+        settings.ui_font_scale.clamp(0.8, 1.4)
+    } else {
+        default_ui_font_scale()
+    };
     if settings.lens.message_order != "asc" && settings.lens.message_order != "desc" {
         settings.lens.message_order = "asc".to_string();
     }
@@ -1954,9 +2233,11 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.lens.web_search.search_depth = default_web_search_depth();
     }
 
+    // ponytail: 流式输出 / 思考模式的设置项已从 UI 移除，恒为开启（老配置里的 false 在此归位）
+    settings.chat.stream_enabled = true;
+    settings.chat.thinking_enabled = true;
+
     if !settings.chat_behavior_migrated_from_lens {
-        settings.chat.stream_enabled = settings.lens.stream_enabled;
-        settings.chat.thinking_enabled = settings.lens.thinking_enabled;
         if settings.lens.default_language.trim().is_empty() {
             // keep chat.default_language empty → inherit chain unchanged
         } else {
@@ -2004,6 +2285,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     ) {
         settings.chat_tools.approval_policy = default_chat_approval_policy();
     }
+    sanitize_hooks(&mut settings.chat_tools.hooks);
     // One-shot green-light migration: bring a pre-green-light install (native
     // tools defaulted OFF + old approval_policy) to the new baseline. Idempotent
     // via `chat_tools_greenlit_v1` so a user who later turns a tool back off, or
@@ -2469,12 +2751,6 @@ fn default_false() -> bool {
     false
 }
 
-/// 冻结帧选区默认值：Windows 默认开启（规避透明置顶 WebView2 下浏览器视频变黑，
-/// 且配合优化后的依赖性能良好），其他平台保持关闭。该功能本身仅 Windows 生效。
-fn default_windows_freeze_frame_selection() -> bool {
-    cfg!(target_os = "windows")
-}
-
 fn default_api_format() -> String {
     "openai_chat".to_string()
 }
@@ -2485,6 +2761,10 @@ fn default_hotkey() -> String {
 
 fn default_chat_hotkey() -> String {
     "CommandOrControl+Shift+K".to_string()
+}
+
+fn default_close_chat_hotkey() -> String {
+    "CommandOrControl+Shift+W".to_string()
 }
 
 fn default_screenshot_translation_hotkey() -> String {
@@ -2514,6 +2794,10 @@ fn default_theme() -> String {
 
 fn default_theme_color() -> String {
     "neutral".to_string()
+}
+
+fn default_ui_font_scale() -> f32 {
+    1.0
 }
 
 fn default_target_lang() -> String {
@@ -2584,6 +2868,13 @@ fn normalize_hotkey(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_settings_enable_translucent_sidebar_by_default() {
+        let settings: Settings =
+            serde_json::from_str("{}").expect("legacy settings should deserialize");
+        assert!(settings.translucent_sidebar);
+    }
 
     #[test]
     fn legacy_model_info_without_temperature_deserializes_as_absent() {
@@ -2676,16 +2967,31 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_settings_clamps_ui_font_scale() {
+        let mut s = Settings::default();
+        s.ui_font_scale = 5.0;
+        assert_eq!(sanitize_settings(s).ui_font_scale, 1.4);
+        let mut s = Settings::default();
+        s.ui_font_scale = 0.1;
+        assert_eq!(sanitize_settings(s).ui_font_scale, 0.8);
+        let mut s = Settings::default();
+        s.ui_font_scale = f32::NAN;
+        assert_eq!(sanitize_settings(s).ui_font_scale, 1.0);
+    }
+
+    #[test]
     fn sanitize_settings_normalizes_hotkeys() {
         let mut s = Settings::default();
         s.hotkey = "cmd+alt+T".to_string();
         s.chat_hotkey = "cmd+shift+K".to_string();
+        s.close_chat_hotkey = "cmd+shift+W".to_string();
         s.screenshot_translation.hotkey = "ctrl+shift+A".to_string();
         s.screenshot_translation.text_hotkey = "cmd+shift+T".to_string();
         s.lens.hotkey = "cmd+shift+G".to_string();
         let s = sanitize_settings(s);
         assert_eq!(s.hotkey, "CommandOrControl+Alt+T");
         assert_eq!(s.chat_hotkey, "CommandOrControl+Shift+K");
+        assert_eq!(s.close_chat_hotkey, "CommandOrControl+Shift+W");
         assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+A");
         assert_eq!(
             s.screenshot_translation.text_hotkey,
@@ -2824,6 +3130,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "cloud".to_string(),
@@ -2837,6 +3144,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "apple".to_string();
         s.translator_model = "apple-foundation".to_string();
@@ -2888,6 +3196,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         let s = sanitize_settings(s);
         let p = s.get_provider("p").unwrap();
@@ -2910,6 +3219,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         let s = sanitize_settings(s);
         let p = s.get_provider("p").unwrap();
@@ -2935,6 +3245,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         let s = sanitize_settings(s);
         let p = s.get_provider("p").unwrap();
@@ -3020,6 +3331,129 @@ mod tests {
 
         assert!(!settings.chat_tools.native_tools.run_command);
         assert_eq!(settings.chat_tools.approval_policy, "always_confirm");
+    }
+
+    #[test]
+    fn hooks_default_to_empty_and_survive_legacy_settings() {
+        // 纯新增字段：旧 settings.json 缺 hooks → 空数组，行为与现状一致。
+        let cfg: ChatToolsConfig =
+            serde_json::from_str("{}").expect("ChatToolsConfig defaults from empty object");
+        assert!(cfg.hooks.is_empty());
+    }
+
+    #[test]
+    fn hook_def_wire_shape_matches_the_frontend_type() {
+        // 前端 `HookDef`（src/api/tauri.ts）逐字段镜像这个结构。字段名/大小写漂移了，
+        // 保存时会静默丢字段（serde default 兜住，用户只看到「配了但没生效」）。
+        let hook = HookDef {
+            id: "h1".to_string(),
+            name: "lint-guard".to_string(),
+            description: "d".to_string(),
+            event: "tool_execution_start".to_string(),
+            enabled: true,
+            kind: "http".to_string(),
+            script: String::new(),
+            url: "https://example.test/h".to_string(),
+            method: "POST".to_string(),
+            headers: [("X-A".to_string(), "1".to_string())].into_iter().collect(),
+            timeout_ms: 60_000,
+        };
+        let value = serde_json::to_value(&hook).expect("serialize");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "description",
+                "enabled",
+                "event",
+                "headers",
+                "id",
+                "method",
+                "name",
+                "script",
+                "timeoutMs",
+                "type",
+                "url",
+            ],
+            "wire field names drifted from the TS HookDef"
+        );
+
+        // 前端写回的 JSON 也必须原样读回来。
+        let round_tripped: HookDef = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(round_tripped.kind, "http");
+        assert_eq!(round_tripped.timeout_ms, 60_000);
+        assert_eq!(
+            round_tripped.headers.get("X-A").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn sanitize_hooks_drops_invalid_entries_and_clamps_timeout() {
+        let mut settings = Settings::default();
+        settings.chat_tools.hooks = vec![
+            // 合法 command：补 id、钳制超时下限。
+            HookDef {
+                name: "log".to_string(),
+                event: " agent_end ".to_string(),
+                enabled: true,
+                kind: "Command".to_string(),
+                script: "echo hi".to_string(),
+                timeout_ms: 1,
+                ..Default::default()
+            },
+            // 合法 http：方法归一到大写。
+            HookDef {
+                id: "http-1".to_string(),
+                event: "turn_start".to_string(),
+                kind: "http".to_string(),
+                url: "https://example.test/hook".to_string(),
+                method: "post".to_string(),
+                timeout_ms: 10_000_000,
+                ..Default::default()
+            },
+            // 事件名非法 → 丢弃（没有合理的「就近」事件可猜）。
+            HookDef {
+                event: "agent_started".to_string(),
+                kind: "command".to_string(),
+                script: "echo x".to_string(),
+                ..Default::default()
+            },
+            // 类型非法 → 丢弃。
+            HookDef {
+                event: "agent_end".to_string(),
+                kind: "webhook".to_string(),
+                ..Default::default()
+            },
+            // command 但脚本为空 / http 但 url 为空 → 丢弃。
+            HookDef {
+                event: "agent_end".to_string(),
+                kind: "command".to_string(),
+                script: "   ".to_string(),
+                ..Default::default()
+            },
+            HookDef {
+                event: "agent_end".to_string(),
+                kind: "http".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let settings = sanitize_settings(settings);
+        let hooks = &settings.chat_tools.hooks;
+
+        assert_eq!(hooks.len(), 2, "only the two valid hooks survive");
+        assert_eq!(hooks[0].event, "agent_end", "event is trimmed");
+        assert_eq!(hooks[0].kind, "command", "kind is lowercased");
+        assert!(!hooks[0].id.is_empty(), "blank id is filled in");
+        assert_eq!(hooks[0].timeout_ms, HOOK_MIN_TIMEOUT_MS);
+        assert_eq!(hooks[1].method, "POST", "method is uppercased");
+        assert_eq!(hooks[1].timeout_ms, HOOK_MAX_TIMEOUT_MS);
     }
 
     #[test]
@@ -3111,6 +3545,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "p".to_string();
         s.screenshot_translation.provider_id = "p".to_string();
@@ -3138,6 +3573,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "lens".to_string(),
@@ -3151,6 +3587,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "translator".to_string();
         s.translator_model = "gpt-4o".to_string();
@@ -3181,6 +3618,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "lens".to_string(),
@@ -3194,6 +3632,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "translator".to_string();
         s.translator_model = "gpt-4o".to_string();
@@ -3238,6 +3677,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         settings.providers.push(ModelProvider {
             id: "session".to_string(),
@@ -3251,6 +3691,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         settings.default_models.chat.provider_id = "global".to_string();
         settings.default_models.chat.model = "gemini-3.1-flash-lite".to_string();
@@ -3289,6 +3730,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.chat_provider_id = "chat".to_string();
         s.chat_model = "m2".to_string();
@@ -3315,6 +3757,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "vision".to_string(),
@@ -3328,6 +3771,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "title".to_string(),
@@ -3341,6 +3785,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "compression".to_string(),
@@ -3354,6 +3799,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "image".to_string(),
@@ -3367,6 +3813,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "chat".to_string();
         s.translator_model = "chat-model".to_string();
@@ -3421,6 +3868,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "chat".to_string();
         s.translator_model = "m1".to_string();
@@ -3466,6 +3914,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "lens".to_string(),
@@ -3479,6 +3928,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "translator".to_string();
         s.translator_model = "gpt-4o".to_string();
@@ -3621,18 +4071,6 @@ mod tests {
     }
 
     #[test]
-    fn lens_windows_freeze_frame_selection_defaults_per_platform() {
-        // Windows 默认开启，其他平台默认关闭。
-        let expected = cfg!(target_os = "windows");
-
-        let s = Settings::default();
-        assert_eq!(s.lens.windows_freeze_frame_selection, expected);
-
-        let cfg: LensConfig = serde_json::from_str("{}").expect("empty lens config should load");
-        assert_eq!(cfg.windows_freeze_frame_selection, expected);
-    }
-
-    #[test]
     fn sanitize_settings_resets_lens_provider_when_pointing_to_nonexistent() {
         let mut s = Settings::default();
         s.providers.push(ModelProvider {
@@ -3647,6 +4085,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.lens.provider_id = "nonexistent".to_string();
         s.lens.model = "ghost-model".to_string();
@@ -3671,6 +4110,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         let s = sanitize_settings(s);
         assert_eq!(s.onboarding_status, "completed");
@@ -3698,6 +4138,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         let s = sanitize_settings(s);
         assert_eq!(s.onboarding_status, "pending");
@@ -3718,6 +4159,7 @@ mod tests {
             enabled: false,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.providers.push(ModelProvider {
             id: "active".to_string(),
@@ -3731,6 +4173,7 @@ mod tests {
             enabled: true,
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         });
         s.translator_provider_id = "disabled".to_string();
         s.translator_model = "off-model".to_string();
@@ -3935,5 +4378,37 @@ mod tests {
             settings.chat_tools.native_tools.working_directory,
             default_chat_working_directory()
         );
+    }
+}
+
+#[cfg(test)]
+mod hooks_disk_compat_tests {
+    use super::*;
+
+    /// 回归：hooks 字段刚上线时前端漏传，`invoke` 把它序列化成 null 写进了
+    /// settings.json。serde 的 `default` 只兜「键不存在」，遇到 null 会报
+    /// `invalid type: null, expected a sequence` —— 整个 chatTools 解析失败，
+    /// 连 MCP 服务器和原生工具开关一起丢。
+    #[test]
+    fn null_hooks_on_disk_does_not_break_chat_tools() {
+        let json = serde_json::json!({
+            "enabled": true,
+            "hooks": null,
+            "servers": [{ "id": "s1", "name": "srv" }],
+        });
+        let config: ChatToolsConfig =
+            serde_json::from_value(json).expect("null hooks must not break chatTools");
+        assert!(config.hooks.is_empty());
+        assert!(config.enabled, "sibling fields must survive");
+        assert_eq!(config.servers.len(), 1, "sibling fields must survive");
+    }
+
+    /// 键完全不存在（更旧的磁盘文件）同样要能读。
+    #[test]
+    fn missing_hooks_key_defaults_to_empty() {
+        let config: ChatToolsConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true }))
+                .expect("missing hooks key must parse");
+        assert!(config.hooks.is_empty());
     }
 }

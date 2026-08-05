@@ -2,21 +2,23 @@ use super::super::types::{
     PromptInputFormat, RuntimeAgentDef, RuntimeBuildOptions, RuntimeContext, StreamFormat,
 };
 
+/// 探测彻底失败时的静态兜底 — 与 desktop-cc-gui `generatedModelCatalog.json` 四档一致。
 const FALLBACK_MODELS: &[(&str, &str)] = &[
     ("default", "Default"),
-    ("gpt-5.3-codex", "gpt-5.3-codex"),
-    ("gpt-5", "gpt-5"),
-    ("o3", "o3"),
+    ("gpt-5.6-sol", "gpt-5.6-sol"),
+    ("gpt-5.6-terra", "gpt-5.6-terra"),
+    ("gpt-5.6-luna", "gpt-5.6-luna"),
+    ("gpt-5.5", "gpt-5.5"),
 ];
 
 const REASONING: &[(&str, &str)] = &[
     ("default", "Default"),
-    ("none", "None"),
-    ("minimal", "Minimal"),
     ("low", "Low"),
     ("medium", "Medium"),
     ("high", "High"),
     ("xhigh", "XHigh"),
+    ("max", "Max"),
+    ("ultra", "Ultra"),
 ];
 
 pub fn build_codex_args(
@@ -39,7 +41,8 @@ pub const CODEX_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     fallback_models: FALLBACK_MODELS,
     reasoning_options: REASONING,
     list_models_args: Some(&["debug", "models"]),
-    list_models_timeout_secs: None,
+    // `codex debug models` cold-start can exceed 5s（首次要拉配置/鉴权）；给 15s 免误判失败（F4）。
+    list_models_timeout_secs: Some(20),
     models_from_stderr: false,
     model_probe: None,
     model_probe_args: None,
@@ -49,8 +52,9 @@ pub const CODEX_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     prompt_via_stdin: false,
     prompt_input_format: PromptInputFormat::Text,
     stream_format: StreamFormat::CodexAppServer,
-    json_event_parser: None,
     resumes_session_via_cli: false,
+    supports_native_image: true,
+    image_mime_whitelist: &[],
     build_args: build_codex_args,
 };
 

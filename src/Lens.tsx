@@ -9,12 +9,14 @@ import { Button } from './components/Button'
 import { i18n, type Lang } from './settings/i18n'
 import { copyToClipboard } from './utils/clipboard'
 
-import type { Arrow, BarRect, CapturedFrame, HistoryItem, Metrics, Mode, Point, Stage, TranslateCardDrag } from './lens/types'
+import type { Annotation, AnnotationKind, BarRect, CapturedFrame, HistoryItem, Metrics, Mode, Point, Stage, TranslateCardDrag } from './lens/types'
 import { ArrowSvg } from './lens/ArrowSvg'
+import { AnnotateToolbar } from './lens/AnnotateToolbar'
+import { MosaicPreview } from './lens/MosaicPreview'
 import { ReplaceTranslateOverlay } from './lens/ReplaceTranslateOverlay'
 import { ARROW_MIN_DRAG_PX, composeAnnotatedImage } from './lens/annotation'
 import { HISTORY_MAX, HISTORY_THUMB_SIZE, loadHistoryFromStorage, makeThumbnail, saveHistoryToStorage } from './lens/history'
-import { DRAG_THRESHOLD, FLOATING_GAP, FLOATING_PADDING, READY_BAR_H, SELECT_REVEAL_DELAY_MS, TRANSITION_MS, clamp, computeAnchoredBar, computeChatBarWidth, computeMetrics, computeSelectBar, isMacPlatform } from './lens/layout'
+import { ANCHOR_GAP, DRAG_THRESHOLD, FLOATING_GAP, FLOATING_PADDING, READY_BAR_H, SELECT_REVEAL_DELAY_MS, TRANSITION_MS, clamp, computeChatBarWidth, computeMetrics, computeSelectBar, isMacPlatform } from './lens/layout'
 
 // 翻译卡缩放后内容区高度固定，此值预留 header+footer+padding，
 // 保证「卡整体高 = chrome + 内容」不被 overflow-hidden 裁掉底部复制栏。
@@ -38,12 +40,14 @@ function readModeFromHash(): Mode {
   if (mode === 'translate') return 'translate'
   if (mode === 'translateText') return 'translateText'
   if (mode === 'replace') return 'replace'
+  if (mode === 'screenshot') return 'screenshot'
   return 'chat'
 }
 
 function keepFullscreenForMode(curMode: Mode, screenshotKeepFullscreen: boolean): boolean {
   return curMode === 'chat'
     || curMode === 'replace'
+    || curMode === 'screenshot'
     || (curMode === 'translate' && screenshotKeepFullscreen)
 }
 
@@ -94,6 +98,13 @@ const waitForFrames = (frames: number) => new Promise<void>((resolve) => {
 })
 
 const LENS_HIDE_IDLE_TIMEOUT_MS = 120
+
+// take-once 复位载荷的前端缓存：React StrictMode 开发模式下 mount effect 会跑两次，
+// 第二次 take 必然拿到 null（已被第一次消费）。若此时 enterSelect({}) 会把第一次已
+// 加载的 freezeFrameImageId/冻结帧清掉（且第一次的异步加载已被 cleanup 的
+// cancelPendingMotion 作废）→ 冻结帧永远出不来。缓存最近一次 take 到的载荷，
+// mount 时 take 到 null 就用缓存重放。resetBeforeHide 时清空，避免跨会话串台。
+let lastResetPayloadCache: LensResetPayload | null = null
 
 const waitForVisibleIdle = (timeout = LENS_HIDE_IDLE_TIMEOUT_MS) => new Promise<void>((resolve) => {
   const idleWindow = window as Window & {
@@ -186,19 +197,26 @@ export default function Lens() {
   // capturedFrame：保留最后一次截图选区/窗口的高亮框，作为"已截图"视觉标记，ready/answering 态继续显示
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
   const [showCaptureHint, setShowCaptureHint] = useState(false)
-  // 箭头标注:仅 stage==='ready' 子模式
-  // arrows / draftArrow 坐标系 = capturedFrame 逻辑像素 (左上角为原点)
+  // 标注（箭头/矩形/马赛克）:chat 模式在 stage==='ready' 的 drawMode 子模式（仅箭头）；
+  // screenshot 模式在 ready 态常开（工具可切换）。
+  // annotations / draftAnnotation 坐标系 = capturedFrame 逻辑像素 (左上角为原点)
   const [drawMode, setDrawMode] = useState(false)
-  const [arrows, setArrows] = useState<Arrow[]>([])
+  const [arrows, setArrows] = useState<Annotation[]>([])
+  // screenshot 模式当前工具
+  const [annotateTool, setAnnotateTool] = useState<AnnotationKind>('arrow')
+  const [annotateCopied, setAnnotateCopied] = useState(false)
+  const [annotateSaving, setAnnotateSaving] = useState(false)
   // 源码/渲染切换：false=渲染模式(ChatMarkdown)，true=源码模式(原始文本)
   const [sourceMode, setSourceMode] = useState(false)
-  const [draftArrow, setDraftArrow] = useState<Arrow | null>(null)
-  // 任何 stage 切换时强制清掉 draw 子模式 + 已落箭头
+  const [draftArrow, setDraftArrow] = useState<Annotation | null>(null)
+  // 任何 stage 切换时强制清掉 draw 子模式 + 已落标注
   useEffect(() => {
     if (stage !== 'ready') {
       setDrawMode(false)
       setArrows([])
       setDraftArrow(null)
+      setAnnotateCopied(false)
+      setAnnotateSaving(false)
     }
   }, [stage])
   // 冻结帧绘制：把 data URL 画进 canvas，backing store = 图片原生像素，CSS 铺满 viewport，
@@ -348,6 +366,10 @@ export default function Lens() {
       if (historyOpenRef.current || capturingRef.current) return false
       if (modeRef.current === 'chat') {
         return stageRef.current === 'select' || stageRef.current === 'ready' || stageRef.current === 'answering'
+      }
+      if (modeRef.current === 'screenshot') {
+        // 键盘焦点给 root（Cmd+Z / Esc），无输入框
+        return stageRef.current === 'select' || stageRef.current === 'ready'
       }
       return stageRef.current === 'select' || stageRef.current === 'translating' || stageRef.current === 'translated'
     }
@@ -594,22 +616,48 @@ export default function Lens() {
     // 冷挂载 与 复用收到 lens:reset 走同一路径：主动 take 后端暂存的复位载荷（frame +
     // freezeFrameImageId）再 enterSelect。后端保证每次打开只会触发其中一个（冷创建→挂载；
     // 复用→事件），所以每次打开只跑一次 enterSelect，不会双跑把 take-once 的选区吞掉。
-    const consumeAndEnter = async () => {
-      let payload: LensResetPayload = {}
+    //
+    // 冷创建竞态：后端 lens_request_internal 里"截冻结帧(200ms+) → 写 payload"发生在
+    // ensure_lens_window 之后，而 vite/生产 bundle 挂载可能更快 → mount 的 take 先到，
+    // 拿到 empty。所以 mount 路径 take 到 empty 时要轮询重试（150ms × 12 ≈ 1.8s 覆盖
+    // 慢机冻结帧耗时），拿到才 enter；全部落空再用缓存（StrictMode 双挂载重放）或空载荷兜底。
+    let disposed = false
+    const takeOnce = async (): Promise<LensResetPayload | null> => {
       try {
         const raw = await api.lensTakeResetPayload()
-        if (raw) payload = readLensResetPayload(JSON.parse(raw))
+        if (raw) {
+          const payload = readLensResetPayload(JSON.parse(raw))
+          lastResetPayloadCache = payload
+          return payload
+        }
       } catch (err) {
         console.error('[lens] take reset payload failed', err)
       }
-      void enterSelect(payload)
+      return null
     }
-    void consumeAndEnter()
+    const consumeAndEnter = async (fromMount: boolean) => {
+      let payload = await takeOnce()
+      if (!payload && fromMount) {
+        for (let i = 0; i < 12 && !payload && !disposed; i++) {
+          // StrictMode 第二次挂载：本会话已缓存（resetBeforeHide 会清空缓存），直接重放
+          if (lastResetPayloadCache) {
+            payload = lastResetPayloadCache
+            break
+          }
+          await new Promise(r => setTimeout(r, 150))
+          payload = await takeOnce()
+        }
+      }
+      if (disposed) return
+      void enterSelect(payload ?? {})
+    }
+    void consumeAndEnter(true)
     const handleReset = () => {
-      void consumeAndEnter()
+      void consumeAndEnter(false)
     }
     window.addEventListener('lens:reset', handleReset)
     return () => {
+      disposed = true
       window.removeEventListener('lens:reset', handleReset)
       cancelPendingMotion()
     }
@@ -830,6 +878,8 @@ export default function Lens() {
   const resetBeforeHide = useCallback(() => {
     cancelPendingMotion()
     releaseFreezeCanvas()
+    // 会话结束：清掉 take-once 载荷缓存，避免下次 StrictMode 重放到旧会话的冻结帧
+    lastResetPayloadCache = null
     fullscreenMetricsRef.current = null
     translateStartRef.current = null
     // 防御：和 enterSelect 同理 —— reset 路径不该走持久化
@@ -964,6 +1014,21 @@ export default function Lens() {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [drawMode])
 
+  // screenshot 标注模式键盘:Cmd+Z 撤销最后一个标注（Esc 走全局 handler 直接关闭）
+  useEffect(() => {
+    if (mode !== 'screenshot' || stage !== 'ready') return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        setArrows(prev => prev.slice(0, -1))
+        setDraftArrow(null)
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [mode, stage])
+
   // select 态切到其他应用 → 自动收起灰幕。
   // 注意：截图过程中 screencapture 可能让 lens 短暂失焦，capturingRef 防止误关。
   useEffect(() => {
@@ -1086,8 +1151,8 @@ export default function Lens() {
     })
   }, [barRect])
 
-  /** 截图后在前端直接算 bar 位置，让对话栏飞到选区外侧。
-   *  优先右侧，其次左侧；左右都放不下时回退到下方或上方。 */
+  /** 截图后在前端直接算 bar 位置，让对话栏飞到选区左/右侧。
+   *  优先右侧，右侧空间不够再放左侧；都不够时贴大空间一侧。 */
   const flyBarToAnchor = async (
     anchorAbsX: number,
     anchorAbsY: number,
@@ -1102,19 +1167,30 @@ export default function Lens() {
     const vw = window.innerWidth
     const vh = window.innerHeight
     const barW = mode === 'chat' ? computeChatBarWidth(metrics) : Math.min(cardWidthRef.current, vw - FLOATING_PADDING * 2)
-    const totalH = READY_BAR_H + 8 + metrics.ANSWER_H
-    const targetRect = computeAnchoredBar({
-      viewportWidth: vw,
-      viewportHeight: vh,
-      anchorX: ax,
-      anchorY: ay,
-      anchorWidth: anchorW,
-      anchorHeight: anchorH,
-      barWidth: barW,
-      sideContentHeight: totalH,
-    })
-    const targetX = targetRect.x
-    const targetY = targetRect.y
+    const ANSWER_H = metrics.ANSWER_H
+
+    const rightStart = ax + anchorW + ANCHOR_GAP
+    const spaceRight = vw - rightStart - 16
+    const spaceLeft = ax - ANCHOR_GAP - 16
+
+    let targetX: number
+    if (spaceRight >= barW) {
+      targetX = rightStart
+    } else if (spaceLeft >= barW) {
+      targetX = ax - barW - ANCHOR_GAP
+    } else {
+      // 左右都放不下完整 bar：贴空间更大的一侧屏幕边
+      targetX = spaceRight >= spaceLeft ? vw - barW - 16 : 16
+    }
+
+    // 垂直：与选区中心对齐；总高度需容纳 bar + 8 + answer 区
+    const totalH = READY_BAR_H + 8 + ANSWER_H
+    let targetY = ay + anchorH / 2 - READY_BAR_H / 2
+    if (targetY + totalH > vh - 16) targetY = vh - totalH - 16
+    if (targetY < 16) targetY = 16
+
+    if (targetX < 16) targetX = 16
+    if (targetX + barW > vw - 16) targetX = vw - barW - 16
 
     // translate 模式截完直接进 translating；chat 模式进 ready 等用户提问
     const targetStage: Stage = (mode === 'translate' || mode === 'replace') ? 'translating' : 'ready'
@@ -1416,6 +1492,12 @@ export default function Lens() {
           if (img.success) setImagePreview(img.data ?? '')
         } catch (err) { console.error(err) }
       })()
+      if (mode === 'screenshot') {
+        // 截图标注：无对话栏可飞，直接进 ready（工具栏对着 capturedFrame 渲染）
+        flushSync(() => { setStage('ready') })
+        focusLensSurface([0, 80, 200])
+        return
+      }
       await flyBarToAnchor(
         Math.round(info.x), Math.round(info.y), Math.round(info.width), Math.round(info.height),
         info.owner,
@@ -1473,6 +1555,11 @@ export default function Lens() {
           if (img.success) setImagePreview(img.data ?? '')
         } catch (err) { console.error(err) }
       })()
+      if (mode === 'screenshot') {
+        flushSync(() => { setStage('ready') })
+        focusLensSurface([0, 80, 200])
+        return
+      }
       await flyBarToAnchor(params.absoluteX, params.absoluteY, params.width, params.height, '')
       if (captureOpenSeq !== lensOpenSeqRef.current) return
       if (mode === 'translate') void runTranslate(newId)
@@ -1735,6 +1822,68 @@ export default function Lens() {
       setStreaming(false)
     } finally {
       preparingSendRef.current = false
+    }
+  }
+
+  // ====== screenshot 标注模式：合成 + 复制 / 保存 ======
+  const composeCurrentAnnotated = async (): Promise<string | null> => {
+    if (!imagePreview || !capturedFrame) return null
+    try {
+      return await composeAnnotatedImage(
+        imagePreview,
+        arrows,
+        capturedFrame.width,
+        capturedFrame.height,
+      )
+    } catch (err) {
+      console.error('[lens-annotate] compose failed:', err)
+      return null
+    }
+  }
+
+  const handleAnnotateCopy = async () => {
+    if (annotateSaving) return
+    const base64 = await composeCurrentAnnotated()
+    if (!base64) return
+    try {
+      const result = await api.lensCopyImageToClipboard(base64)
+      if (!result.success) {
+        console.error('[lens-annotate] copy failed:', result.error)
+        return
+      }
+      setAnnotateCopied(true)
+      // 短暂展示"已复制"反馈再关闭
+      window.setTimeout(() => { void closeAfterReset() }, 450)
+    } catch (err) {
+      console.error('[lens-annotate] copy failed:', err)
+    }
+  }
+
+  const handleAnnotateSave = async () => {
+    if (annotateSaving) return
+    setAnnotateSaving(true)
+    try {
+      const base64 = await composeCurrentAnnotated()
+      if (!base64) return
+      const { save } = await import('@tauri-apps/plugin-dialog')
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const defaultName = `screenshot-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.png`
+      const path = await save({
+        defaultPath: defaultName,
+        filters: [{ name: 'PNG', extensions: ['png'] }],
+      })
+      if (!path) return // 用户取消：留在标注态
+      const result = await api.lensSaveAnnotatedPng(base64, path)
+      if (!result.success) {
+        console.error('[lens-annotate] save failed:', result.error)
+        return
+      }
+      await closeAfterReset()
+    } catch (err) {
+      console.error('[lens-annotate] save failed:', err)
+    } finally {
+      setAnnotateSaving(false)
     }
   }
 
@@ -2124,8 +2273,29 @@ export default function Lens() {
         />
       )}
 
+      {/* 已落定马赛克实时预览（真实像素化，与导出同算法）——screenshot 模式专用 */}
+      {capturedFrame && stage === 'ready' && mode === 'screenshot' && imagePreview && arrows.some(a => a.kind === 'mosaic') && (
+        <div
+          className="absolute pointer-events-none"
+          style={{
+            left: capturedFrame.x,
+            top: capturedFrame.y,
+            width: capturedFrame.width,
+            height: capturedFrame.height,
+            zIndex: 8,
+          }}
+        >
+          <MosaicPreview
+            imageSrc={imagePreview}
+            annotations={arrows}
+            width={capturedFrame.width}
+            height={capturedFrame.height}
+          />
+        </div>
+      )}
+
       {/* drawMode 关闭时也持续显示已落下的箭头 */}
-      {capturedFrame && stage === 'ready' && keepFullscreen && !drawMode && arrows.length > 0 && (
+      {capturedFrame && stage === 'ready' && keepFullscreen && !drawMode && mode !== 'screenshot' && arrows.length > 0 && (
         <svg
           className="absolute pointer-events-none"
           style={{
@@ -2145,9 +2315,10 @@ export default function Lens() {
         </svg>
       )}
 
-      {/* drawMode:在 capturedFrame 矩形内画箭头.透明 div 收事件、SVG 渲染,
-          不加 dim、不再贴 imagePreview 背景,直接显示原画面 */}
-      {capturedFrame && stage === 'ready' && keepFullscreen && drawMode && (
+      {/* drawMode:在 capturedFrame 矩形内画标注.透明 div 收事件、SVG 渲染,
+          不加 dim、不再贴 imagePreview 背景,直接显示原画面
+          chat 模式 = drawMode 子模式（仅箭头）；screenshot 模式 = ready 态常开（工具可切） */}
+      {capturedFrame && stage === 'ready' && keepFullscreen && (drawMode || mode === 'screenshot') && (
         <div
           className="absolute"
           style={{
@@ -2165,7 +2336,8 @@ export default function Lens() {
             const rect = e.currentTarget.getBoundingClientRect()
             const x = e.clientX - rect.left
             const y = e.clientY - rect.top
-            setDraftArrow({ x1: x, y1: y, x2: x, y2: y })
+            const kind: AnnotationKind = mode === 'screenshot' ? annotateTool : 'arrow'
+            setDraftArrow({ kind, x1: x, y1: y, x2: x, y2: y })
           }}
           onPointerMove={(e) => {
             if (!draftArrow) return
@@ -2199,13 +2371,55 @@ export default function Lens() {
             className="absolute inset-0 pointer-events-none"
             style={{ overflow: 'visible' }}
           >
-            {arrows.map((a, i) => (
+            {/* 已落定的马赛克由 MosaicPreview 真实像素化渲染，SVG 层跳过（拖拽中的草稿仍显示占位） */}
+            {arrows.filter(a => a.kind !== 'mosaic').map((a, i) => (
               <ArrowSvg key={i} arrow={a} />
             ))}
             {draftArrow && <ArrowSvg arrow={draftArrow} />}
           </svg>
         </div>
       )}
+
+      {/* screenshot 标注工具栏：选区下方（放不下则上方），带入场动画 */}
+      {capturedFrame && stage === 'ready' && mode === 'screenshot' && (() => {
+        const TOOLBAR_H = 52
+        const TOOLBAR_W = 332 // 估算宽度，仅用于水平 clamp
+        const GAP = 12
+        const below = capturedFrame.y + capturedFrame.height + GAP
+        const placeAbove = below + TOOLBAR_H > viewport.h - 8
+        const tbY = placeAbove
+          ? Math.max(8, capturedFrame.y - GAP - TOOLBAR_H)
+          : below
+        const tbX = Math.max(8, Math.min(
+          capturedFrame.x + capturedFrame.width / 2 - TOOLBAR_W / 2,
+          viewport.w - TOOLBAR_W - 8,
+        ))
+        return (
+          <AnnotateToolbar
+            x={tbX}
+            y={tbY}
+            placeAbove={placeAbove}
+            tool={annotateTool}
+            onToolChange={setAnnotateTool}
+            canUndo={arrows.length > 0}
+            onUndo={() => { setArrows(prev => prev.slice(0, -1)); setDraftArrow(null) }}
+            onCopy={() => { void handleAnnotateCopy() }}
+            onSave={() => { void handleAnnotateSave() }}
+            copied={annotateCopied}
+            saving={annotateSaving}
+            labels={{
+              arrow: t.annotateToolArrow,
+              rect: t.annotateToolRect,
+              mosaic: t.annotateToolMosaic,
+              undo: t.annotateUndo,
+              copy: t.annotateCopy,
+              copied: t.annotateCopied,
+              save: t.annotateSave,
+              saving: t.annotateSaving,
+            }}
+          />
+        )
+      })()}
 
       {/* select-only：hover 高亮 / drag 选区 / 顶部 hint */}
       {stage === 'select' && (
@@ -2253,7 +2467,7 @@ export default function Lens() {
       {showBar && (
         <div
           ref={barRef}
-          className="absolute ease-out"
+          className="absolute z-[40] ease-out"
           onMouseDown={(e) => { if (stage !== 'select') e.stopPropagation() }}
           onMouseMove={(e) => { if (stage !== 'select') e.stopPropagation() }}
           onMouseUp={(e) => { if (stage !== 'select') e.stopPropagation() }}
@@ -2326,6 +2540,10 @@ export default function Lens() {
             <input
               ref={inputRef}
               autoFocus
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {

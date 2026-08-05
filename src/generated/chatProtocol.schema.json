@@ -1,0 +1,1910 @@
+{
+  "$defs": {
+    "ChatAskUserOptionPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ChatAskUserPromptPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "questions": {
+          "items": {
+            "$ref": "#/$defs/ChatAskUserQuestionPayload"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "type": "object"
+    },
+    "ChatAskUserQuestionPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "allowCustom": {
+          "type": "boolean"
+        },
+        "allowMultiple": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/ChatAskUserOptionPayload"
+          },
+          "type": "array"
+        },
+        "prompt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "options",
+        "allowMultiple",
+        "allowCustom"
+      ],
+      "type": "object"
+    },
+    "ChatCompactionBoundaryPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "displayAfterMessageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "sourceUntilMessageId": {
+          "type": "string"
+        },
+        "summaryContent": {
+          "type": "string"
+        },
+        "tokenEstimateAfter": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokenEstimateBefore": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sourceUntilMessageId",
+        "tokenEstimateBefore",
+        "tokenEstimateAfter",
+        "summaryContent",
+        "trigger",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ChatContextStatePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "compactionBoundaries": {
+          "items": {
+            "$ref": "#/$defs/ChatCompactionBoundaryPayload"
+          },
+          "type": "array"
+        },
+        "compressedMessageCount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "compressionCount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contextSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contextWindowEstimated": {
+          "type": "boolean"
+        },
+        "contextWindowTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "estimatedInputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "externalAgentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "externalModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastCompressedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastMeasuredAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/ChatContextUsageSegmentPayload"
+          },
+          "type": "array"
+        },
+        "sessionInputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sessionOutputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatContextSummaryPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tokenCountSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usageRatio": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "warning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "estimatedInputTokens",
+        "contextWindowEstimated",
+        "status",
+        "segments",
+        "lastMeasuredAt",
+        "compressedMessageCount",
+        "compressionCount",
+        "compactionBoundaries"
+      ],
+      "type": "object"
+    },
+    "ChatContextSummaryPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "fileLedger": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatFileLedgerPayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "sourceMessageIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sourceUntilMessageId": {
+          "type": "string"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "tokenEstimateAfter": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokenEstimateBefore": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "content",
+        "sourceMessageIds",
+        "sourceUntilMessageId",
+        "tokenEstimateBefore",
+        "tokenEstimateAfter",
+        "createdAt",
+        "providerId",
+        "model",
+        "stale"
+      ],
+      "type": "object"
+    },
+    "ChatContextUsagePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "contextWindowTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usedTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "usedTokens"
+      ],
+      "type": "object"
+    },
+    "ChatContextUsageSegmentPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "estimatedTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "estimatedTokens"
+      ],
+      "type": "object"
+    },
+    "ChatConversationEventEnvelope": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contextState": {
+              "$ref": "#/$defs/ChatContextStatePayload"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope": {
+              "const": "conversation",
+              "type": "string"
+            },
+            "type": {
+              "const": "context_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "contextState",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "conversationId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope": {
+              "const": "conversation",
+              "type": "string"
+            },
+            "todoState": {
+              "$ref": "#/$defs/ChatTodoStatePayload"
+            },
+            "type": {
+              "const": "todo_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "todoState",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "conversationId": {
+              "type": "string"
+            },
+            "planState": {
+              "$ref": "#/$defs/ChatPlanStatePayload"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope": {
+              "const": "conversation",
+              "type": "string"
+            },
+            "type": {
+              "const": "plan_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "planState",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ChatFileLedgerPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "modifiedFiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "omittedCount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readFiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "readFiles",
+        "modifiedFiles",
+        "omittedCount"
+      ],
+      "type": "object"
+    },
+    "ChatPlanMode": {
+      "enum": [
+        "act",
+        "plan",
+        "orchestrate"
+      ],
+      "type": "string"
+    },
+    "ChatPlanStatePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ChatPlanMode"
+        },
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ChatPlanStatus"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "status",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ChatPlanStatus": {
+      "enum": [
+        "empty",
+        "draft",
+        "approved"
+      ],
+      "type": "string"
+    },
+    "ChatProtocolScope": {
+      "enum": [
+        "run",
+        "conversation"
+      ],
+      "type": "string"
+    },
+    "ChatRunEventEnvelope": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "recovery": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChatRunRecoveryMetadata"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "run_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "delta": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "segment": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChatSegmentPayload"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "text_delta",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "delta",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "delta": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "segment": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChatSegmentPayload"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "reasoning_delta",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "delta",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tool": {
+              "$ref": "#/$defs/ChatToolPayload"
+            },
+            "type": {
+              "const": "tool_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tool",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "depth": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "parentToolCallId": {
+              "type": "string"
+            },
+            "preview": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string"
+            },
+            "steps": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "taskId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "subagent_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "parentToolCallId",
+            "taskId",
+            "name",
+            "depth",
+            "status",
+            "steps",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "context_usage_updated",
+              "type": "string"
+            },
+            "usage": {
+              "$ref": "#/$defs/ChatContextUsagePayload"
+            }
+          },
+          "required": [
+            "type",
+            "usage",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "boundary": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChatCompactionBoundaryPayload"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "trigger": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "compaction_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "phase",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "todoState": {
+              "$ref": "#/$defs/ChatTodoStatePayload"
+            },
+            "type": {
+              "const": "todo_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "todoState",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "planState": {
+              "$ref": "#/$defs/ChatPlanStatePayload"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "plan_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "planState",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "session_consent_requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "argumentsPreview": {
+              "type": "string"
+            },
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "sensitivity": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "serverId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "toolCallId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "tool_approval_requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "toolCallId",
+            "name",
+            "source",
+            "argumentsPreview",
+            "sensitivity",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "toolCallId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "tool_approval_withdrawn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "toolCallId",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "prompt": {
+              "$ref": "#/$defs/ChatAskUserPromptPayload"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "string"
+            },
+            "structuredContent": true,
+            "toolCallId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "user_prompt_requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "toolCallId",
+            "name",
+            "source",
+            "prompt",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string"
+            },
+            "hookName": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "hook_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "hookName",
+            "event",
+            "message",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "conversationRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "full": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "run_completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "full",
+            "conversationRevision",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "conversationRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "error": {
+              "type": "string"
+            },
+            "full": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "run_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "error",
+            "full",
+            "conversationRevision",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "conversationRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "full": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "run_cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "full",
+            "conversationRevision",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ChatRunRecoveryMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "armIndex": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "groupId": {
+          "type": "string"
+        },
+        "groupSize": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "groupId",
+        "groupSize",
+        "armIndex",
+        "providerId",
+        "model"
+      ],
+      "type": "object"
+    },
+    "ChatSegmentKind": {
+      "enum": [
+        "text",
+        "reasoning",
+        "tool"
+      ],
+      "type": "string"
+    },
+    "ChatSegmentPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ChatSegmentKind"
+        },
+        "order": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "phase": {
+          "$ref": "#/$defs/ChatSegmentPhase"
+        },
+        "round": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stepNumber": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolCallId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "phase",
+        "order"
+      ],
+      "type": "object"
+    },
+    "ChatSegmentPhase": {
+      "enum": [
+        "auxiliary",
+        "plain",
+        "tool_loop",
+        "synthesis"
+      ],
+      "type": "string"
+    },
+    "ChatTodoItemPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "blockedBy": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "content": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ChatTodoStatus"
+        }
+      },
+      "required": [
+        "id",
+        "content",
+        "status",
+        "blocks",
+        "blockedBy"
+      ],
+      "type": "object"
+    },
+    "ChatTodoStatePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ChatTodoItemPayload"
+          },
+          "type": "array"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ChatTodoStatus": {
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ChatToolArtifactPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "dataUrl": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sizeBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "mimeType",
+        "dataUrl"
+      ],
+      "type": "object"
+    },
+    "ChatToolPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "argumentsPreview": {
+          "type": "string"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/ChatToolArtifactPayload"
+          },
+          "type": "array"
+        },
+        "completedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resultPreview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "round": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sensitive": {
+          "type": "boolean"
+        },
+        "serverId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "spanId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "structuredContent": true,
+        "traceId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "source",
+        "status",
+        "argumentsPreview",
+        "round",
+        "sensitive",
+        "artifacts"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ChatRunEventEnvelope"
+    },
+    {
+      "$ref": "#/$defs/ChatConversationEventEnvelope"
+    }
+  ],
+  "title": "ChatProtocolEvent"
+}

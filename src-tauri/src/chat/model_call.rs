@@ -2,12 +2,11 @@ use serde_json::Value;
 use tauri::State;
 
 use crate::chat::model::{
-    generate_request_from_openai_messages, AnthropicMessagesProvider, GenerateOptions,
-    GenerateOutput, GenerateRequestContext, LanguageModelProvider, OpenAiChatProvider,
-    OpenAiResponsesProvider,
+    generate_request_from_openai_messages, generate_with_chat_provider, GenerateOptions,
+    GenerateRequestContext,
 };
 use crate::mcp::ChatToolDefinition;
-use crate::settings::{ModelProvider, ProviderApiFormat, SessionModel};
+use crate::settings::{ModelProvider, SessionModel};
 use crate::state::AppState;
 
 use super::Conversation;
@@ -35,40 +34,10 @@ pub(super) async fn call_chat_completion_message(
         label,
         GenerateRequestContext::new(conversation_id, message_id),
     );
-    let output =
-        generate_with_chat_provider(state.inner(), provider, retry_attempts, request).await?;
+    let output = generate_with_chat_provider(state.inner(), provider, retry_attempts, request)
+        .await
+        .map_err(|err| err.to_string())?;
     Ok(output.to_openai_compatible_message())
-}
-
-async fn generate_with_chat_provider(
-    state: &AppState,
-    provider: &crate::settings::ModelProvider,
-    retry_attempts: usize,
-    request: crate::chat::model::GenerateRequest,
-) -> Result<GenerateOutput, String> {
-    match provider.api_format_kind() {
-        ProviderApiFormat::OpenAiChat => {
-            OpenAiChatProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-        ProviderApiFormat::AnthropicMessages => {
-            AnthropicMessagesProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-        ProviderApiFormat::OpenAiResponses => {
-            OpenAiResponsesProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-        ProviderApiFormat::Gemini => {
-            crate::chat::model::GeminiProvider::new(state, provider, retry_attempts)
-                .generate(request)
-                .await
-        }
-    }
-    .map_err(|err| err.to_string())
 }
 
 pub(super) fn format_chat_missing_api_key_error(provider_name: &str) -> String {

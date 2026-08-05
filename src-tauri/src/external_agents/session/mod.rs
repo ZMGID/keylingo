@@ -12,6 +12,8 @@ use crate::external_agents::types::ExternalAgentSession;
 
 pub mod acp;
 pub mod claude_init;
+/// 常驻 `claude` 会话（B1）：一个会话一个进程。
+pub mod claude_stream;
 pub mod codex_app_server;
 pub mod live;
 pub mod pi_rpc;
@@ -57,8 +59,7 @@ pub struct AgentResumeContext {
     pub stored_stable_prompt_hash: Option<String>,
     pub skip_instructions: bool,
     /// Effective model at delivery time, normalized (empty / "default" → `None`). Persisted
-    /// alongside the session so a later turn that picks a different model can detect it and
-    /// start a fresh session instead of resuming (some CLIs bake model into the resumed session).
+    /// alongside the session so the stored record reflects what the CLI was last asked to use.
     pub delivered_model: Option<String>,
 }
 
@@ -78,7 +79,6 @@ pub fn resolve_agent_resume_context(
     resumes_via_cli: bool,
     instructions: &str,
     current_model: Option<&str>,
-    is_slash: bool,
 ) -> AgentResumeContext {
     let delivered_model = normalize_model(current_model);
     if !resumes_via_cli {
@@ -94,27 +94,16 @@ pub fn resolve_agent_resume_context(
 
     let hash = stable_prompt_hash(instructions);
     if let Some(stored) = load_session(app, conversation_id).filter(|s| s.agent_id == agent_id) {
-        // Model mismatch → the CLI's stored session is pinned to the old model; force a fresh
-        // one so the newly-selected model actually takes effect. Exception: a slash command
-        // (`/compact`, `/clear`, …) is meta-work on the CURRENT session — starting a new one
-        // would send the slash into an empty context and produce nothing useful. Keep resuming
-        // and let the next non-slash turn pick up the model switch instead. In that case the
-        // effective delivered model is still the stored one (the CLI ignores `--model` on
-        // `--resume`), so surface it as such and let `persist_delivered_session` skip writing.
-        let effective_delivered = if is_slash {
-            stored.model.clone()
-        } else if stored.model != delivered_model {
-            return AgentResumeContext {
-                resume_session_id: None,
-                new_session_id: Some(Uuid::new_v4().to_string()),
-                is_resuming: false,
-                stored_stable_prompt_hash: None,
-                skip_instructions: false,
-                delivered_model,
-            };
-        } else {
-            delivered_model
-        };
+        // 换模型**照常 resume**，不开新会话。
+        //
+        // 这里曾经有一段「模型变了就丢弃会话、生成新 session id」的逻辑，依据是一句没有实测
+        // 支撑的注释（「CLI 在 `--resume` 上会忽略 `--model`，会话钉死在旧模型」）。
+        // 2026-07-29 本机实测（claude 2.1.220）推翻了它：`--session-id X --model sonnet` 记住
+        // 一个数字后，`--resume X --model opus` 起来的会话**既报自己是 Opus、又记得那个数字**
+        // ——切换生效，上下文也没丢。丢弃会话是纯粹的损失（用户换个模型就丢掉整段对话）。
+        //
+        // 进程侧由 `claude_stream` 的启动参数指纹接管：模型变了 ⇒ 指纹不匹配 ⇒ 换进程重连，
+        // 但带 `--resume <同一个 id>`，上下文照样续上。
         let skip = stored
             .stable_prompt_hash
             .as_ref()
@@ -125,7 +114,7 @@ pub fn resolve_agent_resume_context(
             is_resuming: true,
             stored_stable_prompt_hash: stored.stable_prompt_hash.clone(),
             skip_instructions: skip,
-            delivered_model: effective_delivered,
+            delivered_model,
         };
     }
 
@@ -137,6 +126,29 @@ pub fn resolve_agent_resume_context(
         skip_instructions: false,
         delivered_model,
     }
+}
+
+/// 把落盘的原生会话 id 换成一个新的（其余字段原样保留）。
+///
+/// **为什么必须做这一步**：claude 的 `--resume <id>` 是从这条落盘记录读出来的
+/// （`resolve_agent_resume_context` → `build_claude_args`），**不是**从 live handle 读的。
+/// 会话记录在 claude 那边被清掉之后（`No conversation found with session ID`），只改本轮的
+/// argv 是不够的 —— 下一轮又会拿那个死 id 去 `--resume`，于是**每一轮**都要降级一次、
+/// 每一轮都丢一次上下文并弹一次「上下文已重置」。
+///
+/// 记录不存在（或属于别的 agent）就什么也不做：那种情况下 argv 里本来也不会有 `--resume`。
+pub fn replace_stored_session_id(
+    app: &AppHandle,
+    conversation_id: &str,
+    agent_id: &str,
+    session_id: &str,
+) {
+    let Some(mut stored) = load_session(app, conversation_id).filter(|s| s.agent_id == agent_id)
+    else {
+        return;
+    };
+    stored.session_id = session_id.to_string();
+    let _ = save_session(app, &stored);
 }
 
 pub fn persist_delivered_session(
@@ -167,11 +179,15 @@ pub fn persist_delivered_session(
                 },
             )?;
         }
-    } else if resume_ctx.stored_stable_prompt_hash.as_deref()
-        != Some(stable_prompt_hash(instructions).as_str())
-    {
-        if let Some(mut stored) = load_session(app, conversation_id) {
-            stored.stable_prompt_hash = Some(stable_prompt_hash(instructions));
+    } else if let Some(mut stored) = load_session(app, conversation_id) {
+        // 记录随「系统提示变了」或「模型换了」任一变化而更新。以前只看提示哈希——换模型走的是
+        // 另一条（丢弃会话）分支，所以看不看模型无所谓；现在换模型也 resume，只看哈希会让存下
+        // 的模型一直停在第一次那个值上。
+        let next_hash = stable_prompt_hash(instructions);
+        let hash_changed = stored.stable_prompt_hash.as_deref() != Some(next_hash.as_str());
+        let model_changed = stored.model != resume_ctx.delivered_model;
+        if hash_changed || model_changed {
+            stored.stable_prompt_hash = Some(next_hash);
             stored.model = resume_ctx.delivered_model.clone();
             save_session(app, &stored)?;
         }
@@ -212,9 +228,9 @@ mod tests {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveSessionHandle {
     pub agent_id: String,
-    /// `"codex_app_server"` | `"acp_json_rpc"`.
+    /// `"codex_app_server"` | `"acp_json_rpc"` | `"claude_stream_json"`.
     pub protocol: String,
-    /// Native thread id (codex) / session id (ACP).
+    /// Native thread id (codex) / session id (ACP / claude)。
     pub native_id: String,
     pub cwd: String,
 }
@@ -242,4 +258,36 @@ pub fn clear_live_handle(app: &AppHandle, conversation_id: &str) {
     if let Ok(path) = live_handle_path(app, conversation_id) {
         let _ = fs::remove_file(path);
     }
+}
+
+/// 删除一条对话时，清掉它的所有会话绑定记录（`conv_*.json` / `live-*.json` / `imported-*.json`）。
+///
+/// **不清会留下幽灵绑定**：那条原生会话会在导入列表里永远显示"已导入"、永远不能再导，
+/// 点进去还跳到一条已经不存在的对话。
+///
+/// **不碰 CLI 自己的 transcript**——`~/.claude/projects/` 之类是 CLI 的数据，Kivio 从不写它，
+/// 删 Kivio 对话不该连带毁掉用户在终端里还能 resume 的会话。
+///
+/// 尽力而为：单个文件删不掉只记警告，不让删除对话整体失败。
+pub fn remove_all_bindings(app: &AppHandle, conversation_id: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut targets = Vec::new();
+    if let Ok(path) = session_path(app, conversation_id) {
+        targets.push(path);
+    }
+    if let Ok(path) = live_handle_path(app, conversation_id) {
+        targets.push(path);
+    }
+    if let Ok(base) = sessions_dir(app) {
+        targets.push(base.join(format!("imported-{conversation_id}.json")));
+    }
+    for path in targets {
+        if !path.exists() {
+            continue;
+        }
+        if let Err(e) = fs::remove_file(&path) {
+            warnings.push(format!("会话绑定未能清理（{}）：{e}", path.display()));
+        }
+    }
+    warnings
 }

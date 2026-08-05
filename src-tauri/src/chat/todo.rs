@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::chat::types::{AgentTodoItem, AgentTodoState, AgentTodoStatus};
 use crate::mcp::types::McpToolCallResult;
@@ -89,34 +89,47 @@ pub fn format_prompt(state: &AgentTodoState, todo_tools_available: bool) -> Stri
 }
 
 /// Conversation-scoped registry handler: load the conversation, apply the
-/// todo tool, persist, emit the `chat-todo` event, and return the tool
+/// todo tool, persist, emit the typed protocol update, and return the tool
 /// result. Mirrors the legacy `RegistryToolExecutor` todo special case and
 /// deliberately does not resolve a native tool workspace.
-pub fn handle_conversation_tool_call(
-    app: &AppHandle,
-    conversation_id: &str,
-    tool_name: &str,
+pub fn handle_conversation_tool_call<'a>(
+    app: &'a AppHandle,
+    conversation_id: &'a str,
+    tool_name: &'a str,
     arguments: Value,
-) -> Result<McpToolCallResult, String> {
-    let mut conversation = crate::chat::storage::load_conversation(app, conversation_id)?;
-    if !is_agent_todo_tool_name(tool_name) {
-        return Err(format!("Unknown todo tool: {tool_name}"));
-    }
-    let outcome = apply_todo_write(arguments)?;
-    conversation.agent_todo_state = outcome.state.clone();
-    conversation.updated_at = chrono::Local::now().timestamp();
-    crate::chat::storage::save_conversation(app, &conversation)?;
-    emit_chat_todo_state(app, &conversation.id, &outcome.state);
-    Ok(tool_result(&outcome.state, &outcome.changed))
+) -> crate::mcp::native_registry::NativeToolFuture<'a> {
+    Box::pin(async move {
+        if !is_agent_todo_tool_name(tool_name) {
+            return Err(format!("Unknown todo tool: {tool_name}"));
+        }
+        let outcome = apply_todo_write(arguments)?;
+        let persisted = crate::chat::repository::repository(app)
+            .update_todo(app, conversation_id, outcome.state.clone())
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
+        emit_chat_todo_state(
+            app,
+            conversation_id,
+            persisted.revision,
+            &persisted.agent_todo_state,
+        );
+        Ok(tool_result(&outcome.state, &outcome.changed))
+    })
 }
 
-pub fn emit_chat_todo_state(app: &AppHandle, conversation_id: &str, todo_state: &AgentTodoState) {
-    let _ = app.emit(
-        "chat-todo",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "todoState": todo_state,
-        }),
+pub fn emit_chat_todo_state(
+    app: &AppHandle,
+    conversation_id: &str,
+    revision: u64,
+    todo_state: &AgentTodoState,
+) {
+    crate::chat::protocol::emit_conversation_event(
+        app,
+        conversation_id,
+        revision,
+        crate::chat::protocol::ChatConversationEvent::TodoUpdated {
+            todo_state: todo_state.into(),
+        },
     );
 }
 
@@ -354,6 +367,14 @@ fn todo_output_schema() -> Value {
 mod tests {
     use super::*;
     use crate::chat::types::Conversation;
+
+    #[test]
+    fn emit_uses_caller_supplied_revision_and_state() {
+        // 回归钉子：0245efb 曾把这几个 emit 改成忽略入参、自己 load_conversation 读盘取
+        // revision，绕过 repository 的 per-conversation 锁，并发下会发出偏低的 revision，
+        // 被前端 applyEvent 直接丢弃。签名里必须留着调用方传来的 (revision, state)。
+        let _: fn(&AppHandle, &str, u64, &AgentTodoState) = emit_chat_todo_state;
+    }
 
     #[test]
     fn old_conversation_json_defaults_todo_state() {

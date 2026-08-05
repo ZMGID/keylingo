@@ -7,6 +7,9 @@
 @theme {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
   --font-serif: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  /* mono 栈补 CJK 无衬线回退：Windows 上 Consolas 等没有中文字形，
+     缺了这段会掉进浏览器默认的宋体（衬线），代码/diff 里的中文很难看。 */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", monospace;
 }
 
 /* 自定义 dark 变体：通过 .dark 类启用深色模式 */
@@ -26,14 +29,19 @@ body {
 }
 
 :root {
-  --theme-surface: #ffffff;
-  --theme-surface-soft: #fbfbfc;
-  --theme-surface-muted: #f6f6f7;
-  --theme-surface-hover: #f0f0f2;
-  --theme-surface-active: #e9e9ec;
-  --theme-surface-titlebar: #ececef;
-  --theme-surface-border: #e4e4e7;
-  --theme-surface-border-strong: #d4d4d8;
+  /* neutral = 象牙白 / 蛋壳白（off-white，极淡奶油调）。
+     暖偏移固定为 (R, R−1, R−3)：顶层 253 → #fdfcfa。
+     亮度台阶沿用原冷灰坡道的差值（−4 / −9 / −15 / −22 / −19 / −27 / −43），
+     所以对比关系一个没变，只是色相从偏蓝转成偏黄 —— 半路改色相会让悬停底色
+     在大面积相邻时读出色相翻转，坡道必须整条同向。 */
+  --theme-surface: #fdfcfa;
+  --theme-surface-soft: #f9f8f6;
+  --theme-surface-muted: #f4f3f1;
+  --theme-surface-hover: #eeedeb;
+  --theme-surface-active: #e7e6e4;
+  --theme-surface-titlebar: #eae9e7;
+  --theme-surface-border: #e2e1df;
+  --theme-surface-border-strong: #d2d1cf;
 }
 
 /* ===== 全局按钮/组件语义 token（kv-btn / kv-icon-btn 依赖）=====
@@ -97,7 +105,7 @@ body {
 .theme-transitions-ready .chat-window-shell,
 .theme-transitions-ready .chat-main-pane,
 .theme-transitions-ready .chat-themed-surface,
-.theme-transitions-ready .assistant-center-root {
+.theme-transitions-ready .chat-center-page {
   transition:
     background-color var(--kv-dur-normal) var(--kv-ease-out),
     border-color var(--kv-dur-normal) var(--kv-ease-out);
@@ -106,7 +114,8 @@ body {
 /* 侧栏折叠：margin-left 不进 transition（瞬时切换）。原来动画 margin-left 会让 flex-1 主区宽度
    每帧变化 → 含公式表格的消息每帧 reflow + 容器查询/样式重算（profiler 实测的折叠卡顿根因）。
    改为布局瞬时（主区只 reflow 一次），仅保留 opacity 淡出（合成器属性，不触发 reflow）。 */
-.theme-transitions-ready .chat-sidebar-shell {
+.theme-transitions-ready .chat-sidebar-shell,
+.theme-transitions-ready .chat-dock-shell {
   transition:
     opacity var(--kv-dur-normal) var(--kv-ease-out),
     background-color var(--kv-dur-normal) var(--kv-ease-out),
@@ -331,6 +340,68 @@ body {
   content: none;
 }
 
+/* 代码块工具条：语言标签用伪元素画，复制图标用伪元素画。
+   伪元素不进 DOM 树 —— 一个大对话里有两百多个代码块，每块省下的
+   「语言 span + lucide svg + svg 内的 rect/path」是实打实的节点数。
+   改这里要同步看 ChatMarkdown.tsx 的 CodeBlock。 */
+.kv-code-toolbar::before {
+  content: attr(data-code-lang);
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1;
+  color: rgb(163 163 163);
+}
+
+.dark .kv-code-toolbar::before {
+  color: rgb(115 115 115);
+}
+
+/* 复制图标：两个错开的圆角方块；已复制态换成一个勾。 */
+.kv-copy-glyph {
+  position: relative;
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.kv-copy-glyph::before,
+.kv-copy-glyph::after {
+  content: '';
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 1.6px solid currentColor;
+  border-radius: 2.5px;
+}
+
+.kv-copy-glyph::before {
+  left: 0;
+  top: 0;
+}
+
+.kv-copy-glyph::after {
+  right: 0;
+  bottom: 0;
+  background: var(--bg-input);
+}
+
+.kv-copy-glyph.is-copied::before {
+  left: 1px;
+  top: 2px;
+  width: 12px;
+  height: 6px;
+  border-width: 0 0 1.9px 1.9px;
+  border-radius: 0;
+  transform: rotate(-45deg);
+}
+
+.kv-copy-glyph.is-copied::after {
+  display: none;
+}
+
 /* 自定义滚动条 — 悬浮胶囊式（chat 模型/权限等下拉菜单共用） */
 .custom-scrollbar,
 .chat-model-selector-menu,
@@ -531,6 +602,9 @@ body {
   height: 100%;
   width: 100%;
   display: flex;
+  /* Windows / Linux：第一行是全宽标题栏带，第二行才是侧栏 + 主区（见 .chat-titlebar-strip）。
+     macOS 用系统 Overlay 标题栏、不渲染那条带，此时只有内容一行，column 与 row 等价。 */
+  flex-direction: column;
   overflow: hidden;
   border-radius: 14px;
   border: 1px solid rgba(0, 0, 0, 0.06);
@@ -571,11 +645,6 @@ body {
   box-shadow: none;
 }
 
-.chat-window-host--maximized .chat-win-controls--win {
-  top: 8px;
-  right: 8px;
-}
-
 /* macOS 原生 Overlay 标题栏：去掉自绘圆角边框，交给系统窗口壳 */
 .chat-window-shell--native-titlebar {
   border: none;
@@ -587,38 +656,272 @@ body {
   box-shadow: none;
 }
 
+/* ===== 三张悬浮卡片（侧栏 / 主区 / 右 Dock）的共同外观 =====
+   四周留 8px，缝隙透出 .chat-window-shell 的 --theme-surface。
+   色彩对齐 Claude Code：卡片与外壳几乎同亮度（差 ~2%），分离感几乎全部来自那道缝 +
+   一条极淡的 hairline。反直觉但关键 —— 灰阶差一旦超过 4%，就从「一张纸浮起来」
+   退回「几块拼在一起的板」。所以用 --theme-surface-soft（≈2% 差）而不是 muted（3.5%，偏重），
+   描边也不能用 border-strong（近白卡片上会读成一条灰线）。
+   高度由 flex align-items:stretch 减掉上下 margin 得出（所以三者都不能再挂 h-full）。 */
+/* 卡片上缝。有全宽顶栏带时收窄：带高 44、内容 28，带自身已经在卡片上方留了 8px 光学
+   留白，再叠 8px 就读成两段。侧/下缝保持 8。 */
+:root {
+  --chat-card-top: 8px;
+  /* 交通灯中心距窗口内容顶缘的距离；整条 macOS 顶栏线（灯 / 侧栏那两枚图标 / 模型 /
+     思考强度 / 审批）都对到这条线上。默认 30px 只是兜底 —— 真值由 ChatWindowHost
+     从 AppKit 量出来后覆写，因为它随 macOS 版本变（见 windows.rs 那条注释）。 */
+  --chat-traffic-center-y: 30px;
+}
+
+.chat-window-shell:has(> .chat-titlebar-strip) {
+  --chat-card-top: 2px;
+}
+
+.chat-sidebar-shell,
+.chat-main-pane,
+.chat-center-page,
+.chat-dock-shell {
+  border-radius: 12px;
+  background: var(--theme-surface-soft);
+  border: 1px solid rgba(24, 24, 27, 0.07);
+  box-shadow:
+    0 1px 2px rgba(24, 24, 27, 0.04),
+    0 5px 14px -8px rgba(24, 24, 27, 0.10);
+}
+
 .chat-main-pane {
   container-type: size;
   container-name: chat-main;
   overflow: hidden;
-  background: var(--theme-surface);
+  /* 左右不留 margin：缝隙由侧栏的 margin-right:8 与 Dock 的 margin-left:8 提供。
+     若这里也写 8，相邻处会叠成 16px 双倍缝。两侧收起时各自补 8px（见 .is-collapsed）。 */
+  margin: var(--chat-card-top) 0 8px;
 }
 
-.chat-themed-surface,
-.assistant-center-root {
-  background: var(--theme-surface);
+/* 扩展中心页（助手 / Skill / MCP / 知识库 / 笔记 / 插件）：与会话主区同一张浮起的纸。
+   刻意不复用 .chat-main-pane —— 那个带 container-name: chat-main，会把会话布局的容器
+   查询接到中心页宽度上。右缝也得自己补：会话页那 8px 由收起态 Dock 的 margin-left 提供，
+   中心页不渲染 Dock（见 Chat.tsx 的 `chatView === 'conversation' && <RightDock>`）。 */
+.chat-center-page {
+  margin: var(--chat-card-top) 8px 8px 0;
+  overflow: hidden;
+}
+
+/* 内嵌设置页：齐边铺满聊天窗口。不跟会话主区那套缝/圆角/阴影走 ——
+   设置是整页工作面（左导航 + 右主区），浮卡缝会让顶栏三键/导航顶边读成「没贴齐」。
+   引导页（.onboarding-shell.settings-embedded）仍用浮卡规则。 */
+.chat-window-shell .settings-embedded:not(.onboarding-shell) {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* 用户气泡：底色得从主区卡片上「站起来」。原先写死 neutral-100 / neutral-800，是照旧底色
+   （亮 #ffffff、暗 #212121）挑的；卡片改成 --theme-surface-soft (#f9f8f6) / #262629 之后，
+   亮色只差 1.6% 且冷暖相反，暗色 #262626 vs #262629 几乎同色 —— 气泡直接读不出来。
+   跟卡片-外壳那 ~2% 的「同一张纸」原则不同：气泡是小面积前景块，要的是能一眼框出边界。 */
+.chat-user-bubble {
+  background: var(--theme-surface-hover);
+}
+
+/* 暗色里「浮起」= 更亮（压深读作凹陷），与三张卡片同一套判断。 */
+.dark .chat-user-bubble {
+  background: #313134;
+}
+
+/* 主区内的 MessageList 加载占位（Chat.tsx 的 MessageListLoading）跟主区卡片同色。 */
+.chat-themed-surface {
+  background: var(--theme-surface-soft);
 }
 
 .chat-sidebar-shell {
-  /* 表面层级第 3 层（最深）：比主区再低一档，三套浅色主题各自从 --theme-surface-muted 派生，保持色相 */
-  background: color-mix(in srgb, var(--theme-surface-muted) 92%, #000);
-  /* 注意：--border 变量只在 settings-embedded 作用域定义，这里必须直接引用主题变量 */
-  border-right: 1px solid var(--theme-surface-border);
-  /* 折叠动画：负 margin 把固定宽度（240px，与 w-[240px] 同步）的侧栏整体滑出左侧，
-     由 .chat-window-shell 的 overflow:hidden 裁剪；width 不变 → 内容不被压缩。 */
+  margin: var(--chat-card-top) 8px 8px;
+  /* 折叠动画：负 margin 把整张卡片滑出左侧，由 .chat-window-shell 的 overflow:hidden 裁剪；
+     width 不变 → 内容不被压缩。 */
   transition:
     margin-left var(--kv-dur-slow) var(--kv-ease-standard),
     opacity var(--kv-dur-normal) var(--kv-ease-out);
 }
 
+/* 侧栏顶栏：只上移那俩图标，卡片本身仍四周 margin:8 悬浮。
+   基线（Windows / Linux）保持 5/3，行总高 40。macOS 见下面那条按灯对齐的覆写。 */
+.chat-sidebar-shell > .chat-sidebar-titlebar-row {
+  align-items: flex-start;
+  padding-top: 5px;
+  padding-bottom: 3px;
+}
+
+/* macOS：图标是 h-8（32px）按钮，要让按钮中心落在窗口的 --chat-traffic-center-y
+   （= 交通灯中心实测值，见 :root）→ 卡片内 padding-top = center − card-top − 16。
+   padding-bottom 补足，行总高恒定 40，下方内容不位移。
+   max() 兜底：万一量到的 center 小得离谱，负 padding 会让整条声明失效。 */
+.chat-window-host--mac-titlebar .chat-sidebar-shell > .chat-sidebar-titlebar-row {
+  padding-top: max(0px, calc(var(--chat-traffic-center-y) - var(--chat-card-top) - 16px));
+  padding-bottom: max(0px, calc(8px + 16px + var(--chat-card-top) - var(--chat-traffic-center-y)));
+}
+
 .chat-sidebar-shell.is-collapsed {
+  /* -240 而非 -(240+8)：卡片 border box 落在 [-240, 0] 已完全出屏，同时布局推进
+     = -240 + 240 + margin-right 8 = 8，把那 8px 留给主区卡片当左缝。 */
   margin-left: -240px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 设置页齐边铺满：不再需要会话浮卡那 8px 左缝，否则会在导航栏左边露一条
+   透底（Mica/透明外壳下直接看到桌面）。收成 0 布局占位：
+   -240 + 240 + 0 = 0（普通折叠是 -240 + 240 + 8 = 8）。 */
+.chat-sidebar-shell.is-collapsed.is-settings-cover {
+  margin-right: 0;
+}
+
+.chat-dock-shell {
+  /* 宽度由内联 CSS 变量 --chat-dock-width 驱动（拖拽时 rAF 直写，不经 React）。 */
+  width: var(--chat-dock-width, 360px);
+  margin: var(--chat-card-top) 8px 8px;
+  /* 折叠：负 margin-right 把整张卡片滑出右侧，宽度不变内容不被压缩。 */
+  transition:
+    margin-right var(--kv-dur-slow) var(--kv-ease-standard),
+    opacity var(--kv-dur-normal) var(--kv-ease-out);
+}
+
+.chat-dock-shell.is-collapsed {
+  /* 不再减那 8px：布局推进 = margin-left 8 + W - W = 8，留给主区卡片当右缝；
+     卡片 border box 从行右缘起算，仍完全出屏。 */
+  margin-right: calc(-1 * var(--chat-dock-width, 360px));
   opacity: 0;
   pointer-events: none;
 }
 
 .chat-composer-shell {
   background: var(--theme-surface);
+}
+
+/* ===== 输入区三层结构 =====
+   原来是「一个 28px 大圆角盒子，图标全塞在里面」→ 盒子被撑到 ~100px 高。
+   改为三条独立横条（对齐 Claude Code）：
+     ① .chat-composer-status  上下文状态条（项目/集/知识库 + 上下文占用），灰底，仅在有内容时渲染
+     ② .chat-composer-shell   纯输入框，白底描边，高度只由文本决定
+     ③ .chat-composer-tools   功能栏，完全裸露坐在窗口底色上，无背景无边框
+   三层各自决定高度，输入框因此能收到单行。 */
+.chat-composer-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  margin-bottom: 6px;
+  border-radius: 7px;
+  /* 底色用 soft（≈2% 亮度差）而非 muted（3.5%）：灰阶差超过 ~4% 就会从
+     「浮在纸面上的一层信息」读成「一块拼上去的灰板」（同 .chat-sidebar-shell 的权衡）。 */
+  background: var(--theme-surface-soft);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.dark .chat-composer-status {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+/* 无项目且无改动时状态条内容为空（diff 徽标自隐藏），空条直接不显示。 */
+.chat-composer-status:empty {
+  display: none;
+}
+
+/* 状态条内的一格（项目、集、知识库…）：图标 + 文字，可点则有 hover */
+.chat-composer-status-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--text);
+  transition: background-color var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+button.chat-composer-status-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark button.chat-composer-status-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.chat-composer-status-item > svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.chat-composer-status-sep {
+  flex-shrink: 0;
+  color: var(--theme-surface-border-strong);
+}
+
+.chat-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  padding: 0 2px;
+}
+
+/* 裸露工具栏上的图标钮：原来是极浅的细线图标，飘在点阵背景上立不住。
+   加深到 --text-faint 之上一档，并让 hover 有明确的底，读作「可按」。 */
+.chat-composer-tools .kv-icon-btn {
+  color: #71717a;
+}
+
+.dark .chat-composer-tools .kv-icon-btn {
+  color: #a1a1aa;
+}
+
+.chat-composer-tools .kv-icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.dark .chat-composer-tools .kv-icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* 图标统一 16px：各调用点传的是 18（原来在高盒子里合适），裸栏里偏大。
+   在这里统一压一档，省得逐个改 size=。 */
+.chat-composer-tools .kv-icon-btn > svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 输入框内的发送键：只有箭头，没有底圆（28px 仍是点击热区，视觉上不占面积）。
+   空输入时是淡灰箭头，有内容时才上强调色 —— 强调只在「真的可以发」这一刻出现。
+   去掉填充后箭头是细描边，颜色比原来的圆底加深一档才够看清。 */
+.chat-composer-send {
+  color: var(--text-faint);
+}
+
+.chat-composer-send.is-ready {
+  color: #d2755f;
+}
+
+.chat-composer-send.is-ready:hover {
+  color: #c06249;
+}
+
+.chat-composer-send.is-ready:active {
+  transform: scale(0.9);
+}
+
+.dark .chat-composer-send.is-ready {
+  color: #e8a090;
+}
+
+.dark .chat-composer-send.is-ready:hover {
+  color: #f0b3a5;
 }
 
 .chat-message-navigator {
@@ -813,18 +1116,44 @@ body {
   }
 }
 
-.dark .chat-main-pane {
-  background: #212121;
+/* 暗色同理：外壳 #212121，三张卡片只比它亮一点点（不是压深 —— 暗色里「浮起」= 更亮，
+   压深读作凹陷）。 */
+.dark .chat-sidebar-shell,
+.dark .chat-main-pane,
+.dark .chat-center-page,
+.dark .chat-dock-shell,
+.dark .chat-themed-surface {
+  background: #262629;
 }
 
-.dark .chat-themed-surface,
-.dark .assistant-center-root {
-  background: #212121;
+.dark .chat-sidebar-shell,
+.dark .chat-main-pane,
+.dark .chat-center-page,
+.dark .chat-dock-shell {
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    0 5px 16px -8px rgba(0, 0, 0, 0.45);
 }
 
-.dark .chat-sidebar-shell {
-  background: #1c1c1e;
-  border-right-color: rgba(255, 255, 255, 0.07);
+/* 系统窗口材质（macOS Menu / Windows Mica）激活：外壳让开，材质从卡片四周那道 8px
+   缝里透出来；侧栏 / Dock 只留一层 scrim 保证文字对比度 —— Mica 是壁纸取色，不保证可读性，
+   所以两端都要留，不能像纯透明那样把字直接放到壁纸上。
+   主区卡片刻意不透：那是长文本阅读面，正文压在壁纸取色上会掉可读性。
+   模糊由系统合成器负责，这里绝不加 backdrop-filter。 */
+.chat-window-host--native-effect .chat-window-shell {
+  background: transparent;
+}
+
+.chat-window-host--native-effect .chat-sidebar-shell,
+.chat-window-host--native-effect .chat-dock-shell {
+  background: color-mix(in srgb, var(--theme-surface-soft) 72%, transparent);
+}
+
+/* 暗色 scrim 略薄（66% vs 72%）：深底上壁纸取色本身更暗，透多一点仍压得住文字。 */
+.dark .chat-window-host--native-effect .chat-sidebar-shell,
+.dark .chat-window-host--native-effect .chat-dock-shell {
+  background: color-mix(in srgb, #262629 66%, transparent);
 }
 
 .dark .chat-composer-shell {
@@ -899,13 +1228,13 @@ body {
   }
 
   .chat-composer-shell {
-    border-radius: 22px;
-    padding-top: 0.5rem;
-    padding-bottom: 0.5rem;
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
   }
 }
 
 @container chat-main (max-width: 440px) {
+  /* 窄窗口收紧灯与图标的间距。跟上面的 92px 同源，同样不再补那多余的 8px。 */
   .chat-titlebar-row--collapsed-mac {
     padding-left: 72px;
   }
@@ -982,6 +1311,13 @@ body {
     padding-bottom: 0.375rem;
   }
 
+  /* 窄容器：状态条压扁一档，长项目名靠 min-width:0 + truncate 自行收缩 */
+  .chat-composer-status {
+    min-height: 28px;
+    padding: 0 6px;
+    font-size: 11.5px;
+  }
+
   .chat-composer-footer {
     padding-bottom: 0.75rem;
   }
@@ -1010,11 +1346,12 @@ body {
   position: relative;
   overflow: hidden;
   isolation: isolate;
-  background-color: var(--theme-surface);
+  /* 主区卡片的满幅子元素，底色必须与卡片一致（点阵 canvas 是透明叠在上面的）。 */
+  background-color: var(--theme-surface-soft);
 }
 
 .dark .chat-empty-hero {
-  background-color: #212121;
+  background-color: #262629;
 }
 
 .chat-empty-hero-dot-canvas {
@@ -1064,8 +1401,11 @@ body {
    整页轻位移打底，中心页内部大块（头部→tab 行→内容）再依序入场，见下方级联规则。
    注意：Chat.tsx 各视图分支的包裹 div 带 key={view}，否则 React 原地复用 DOM 节点、
    动画只在首挂载播一次，视图间切换不重播（正是「切换没效果」的根因）。 */
+/* fill 用 backwards 而非 both：动画结束后不能残留 transform —— NotesCenter / SkillCenter
+   等中心页内有 `fixed inset-0` 遮罩与弹窗，任何非 none 的 transform（包括 translateY(0)
+   保留下来的 matrix(1,0,0,1,0,0)）都会把它们的包含块从视口钉到本元素上，遮罩不再铺满窗口。 */
 .chat-motion-view-in {
-  animation: chat-motion-view-in 280ms var(--kv-ease-standard) both;
+  animation: chat-motion-view-in 280ms var(--kv-ease-standard) backwards;
 }
 
 /* 中心页内部层级递进：只作用于中心页结构（assistant-center-root > main > 容器 > 大块）。
@@ -1114,6 +1454,120 @@ body {
 .chat-motion-menu-cascade > *:nth-child(3) { animation-delay: 68ms; }
 .chat-motion-menu-cascade > *:nth-child(4) { animation-delay: 92ms; }
 .chat-motion-menu-cascade > *:nth-child(n + 5) { animation-delay: 112ms; }
+
+/* ===== 弹出菜单统一规格 =====
+   之前 12 个文件各自手搓（px-3.5 py-2 / px-2.5 py-2 / gap-3 / gap-2.5 …），
+   行高和内距都不一致、整体偏大。这里定一套：菜单项 26px 行高、12px 字、
+   10px 横内距、图标 14px。改这里 = 全站菜单一起变。
+   注意：不含定位/入场动画（那些留在各自的 fixed + chat-motion-* 上）。 */
+.kv-menu {
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--theme-surface-border);
+  background: var(--theme-surface);
+  box-shadow:
+    0 0 0 0.5px rgba(24, 24, 27, 0.04),
+    0 4px 12px -4px rgba(24, 24, 27, 0.12),
+    0 12px 28px -12px rgba(24, 24, 27, 0.18);
+}
+
+.dark .kv-menu {
+  border-color: rgba(255, 255, 255, 0.09);
+  background: #2a2a2c;
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.05),
+    0 4px 14px -4px rgba(0, 0, 0, 0.5),
+    0 14px 32px -14px rgba(0, 0, 0, 0.6);
+}
+
+.kv-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text);
+  transition: background-color var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+.kv-menu-item:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .kv-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.kv-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 菜单项内的 lucide 图标：统一压到 14px 且不参与 flex 收缩 */
+.kv-menu-item > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+/* 只管尺寸的变体：给那些自带选中态/hover 条件类的选择器项用（picker 里的模板字符串），
+   套上它统一行高与内距，颜色和 hover 仍归调用方。 */
+.kv-menu-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  min-height: 28px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.kv-menu-item--danger {
+  color: var(--danger);
+}
+
+.kv-menu-item--danger > svg {
+  color: currentColor;
+}
+
+.kv-menu-item--danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* 右侧从属信息（快捷键、当前值） */
+.kv-menu-hint {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.kv-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--theme-surface-border);
+}
+
+.dark .kv-menu-sep {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 分组小标题 */
+.kv-menu-label {
+  padding: 6px 8px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
 
 .chat-motion-soft-pulse {
   animation: chat-motion-soft-pulse 1.8s ease-in-out infinite;
@@ -1425,6 +1879,55 @@ body {
   }
 }
 
+/* 会话页入场：设置页下滑退场后，聊天区跟着抬起，否则聊天界面是直接 pop 出来的。
+   fill 用 backwards 而非 both：动画结束后不能残留 transform —— .chat-main-pane 内有
+   InputBar 的 `fixed inset-0` 遮罩，任何 transform 都会把它们的包含块钉到本元素上。 */
+.chat-motion-pane-in {
+  animation: chat-motion-view-in 260ms var(--kv-ease-standard) backwards;
+}
+
+/* 设置页入场：从底部轻微上浮。位移用固定 px 而非 %（% 是元素自身高度，整页高度下会变成
+   100px+ 的长距离平移，读起来像"整页在挪"而不是 sheet 抬起）。
+   opacity 起点不为 0：全透明阶段的位移是看不见的，给 0.2 让上浮过程可感。
+
+   为什么用 pre-enter + transition 而不是 animation（对齐 CompactionDivider 的双 rAF 模式）：
+   CSS animation 走墙钟时间，而 SettingsShell 那棵树很大，挂载帧的布局/绘制常吃掉上百毫秒 ——
+   等首帧真正画出来，动画已经跑完大半，体感就是"没有动画"。改成先静态铺好起始态，
+   双 rAF（首帧绘制之后）再加 --entered 触发过渡，整段位移就一定可见。 */
+.chat-motion-settings-in {
+  opacity: 0.2;
+  transform: translateY(24px);
+  will-change: transform, opacity;
+}
+
+.chat-motion-settings-in--entered {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 320ms var(--kv-ease-standard),
+    transform 320ms var(--kv-ease-standard);
+}
+
+/* 设置页退场：下滑淡出。退场要加速曲线（越滑越快），减速曲线会在半途「停住」；
+   时长与 Chat.tsx handleSettingsClose 的卸载延时一致（220ms）——进出时长不能差太多，
+   否则是"缓缓推上来、啪一下掉下去"。终点全透明避免冻帧可见。 */
+.chat-motion-settings-out {
+  animation: chat-motion-settings-out 220ms cubic-bezier(0.4, 0, 1, 1) both;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
+@keyframes chat-motion-settings-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
 /* 设置 section 切换入场（对齐 LiveAgent settingsSectionIn / settingsSectionTitleIn）：
    标题与内容各自 key={activeTab} 重播，内容 14px + 轻缩放，标题 8px。 */
 .settings-section-enter {
@@ -1703,16 +2206,9 @@ body {
   color: var(--color-neutral-300, #d4d4d4);
 }
 
-.chat-compaction-summary-chevron {
-  transition: transform var(--kv-dur-fast) var(--kv-ease-standard);
-}
-
-.chat-compaction-summary-chevron.is-open {
-  transform: rotate(180deg);
-}
-
 .chat-compaction-summary-body {
-  margin-left: 18px;
+  /* 原来是 18px，用来和已删掉的 14px 折叠箭头对齐；现在标题左侧没有图标了。 */
+  margin-left: 0;
   padding-bottom: 8px;
   font-size: 12px;
   color: var(--color-neutral-600, #525252);
@@ -1855,6 +2351,8 @@ body {
   .chat-motion-fade-up,
   .chat-motion-bubble-in,
   .chat-motion-view-in,
+  .chat-motion-pane-in,
+  .chat-motion-settings-out,
   .settings-section-enter,
   .settings-section-title-enter,
   .chat-motion-popover,
@@ -1872,6 +2370,13 @@ body {
   .chat-motion-reveal,
   .chat-motion-reasoning-body {
     transition: none;
+    transform: none;
+  }
+
+  /* 设置页入场改用 pre-enter + transition（见上方注释），animation:none 管不到它 ——
+     直接把起始态压平成终态，双 rAF 一到就是原地，无位移。 */
+  .chat-motion-settings-in {
+    opacity: 1;
     transform: none;
   }
 
@@ -1984,17 +2489,20 @@ body {
 
 .settings-embedded-nav {
   width: 200px;
+  /* 侧栏左右内边距抽成变量：底部「返回对话」要用负边距抵掉它，才能让分隔线通栏。 */
+  --nav-pad-x: 8px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: var(--bg-sidebar);
-  padding: 16px 8px 12px;
+  padding: 16px var(--nav-pad-x) 0;
   overflow: hidden;
 }
 
+/* 设置页自带导航栏顶掉聊天侧栏时，导航栏贴窗口顶 → 也要多留卡片那 8px 才不压到灯 */
 .settings-embedded--traffic-safe .settings-embedded-nav {
-  padding-top: 52px;
+  padding-top: 60px;
 }
 
 .dark .chat-window-shell .settings-embedded-nav {
@@ -2012,18 +2520,19 @@ body {
   user-select: none;
 }
 
-/* 嵌入式设置左栏顶部「返回对话」：紧凑、靠左，位于「设置」标题上方 */
+/* 嵌入式设置左栏底部「返回对话」：落在「关于」上方，行规格对齐 nav-item */
 .settings-embedded-back {
-  display: inline-flex;
-  align-self: flex-start;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 0 12px 8px;
-  padding: 4px 8px;
+  gap: 10px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
   border: none;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
-  font-size: 12.5px;
+  text-align: left;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-faint, #737373);
   cursor: default;
@@ -2043,6 +2552,9 @@ body {
   background: rgba(255, 255, 255, 0.06);
   color: #f5f5f5;
 }
+.settings-embedded-back .settings-embedded-nav-icon {
+  color: inherit;
+}
 
 .settings-embedded-nav-list {
   display: flex;
@@ -2051,8 +2563,23 @@ body {
   padding: 0 4px;
 }
 
+/* 窗口变矮时分类列表自己滚，否则它撑满高度 + 外层 overflow:hidden 会把底部「返回对话」裁掉。 */
+.settings-embedded-nav-list:not(.settings-embedded-nav-list--footer) {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 底部「返回对话」与右侧 savebar 同高（.kv-savebar 48px）、同基线，负边距抵掉 aside 内边距 → 两条分隔线连成通栏一条 */
 .settings-embedded-nav-list--footer {
-  padding-bottom: 4px;
+  flex-shrink: 0;
+  height: 48px;
+  justify-content: center;
+  margin: 0 calc(-1 * var(--nav-pad-x));
+  padding: 0 calc(var(--nav-pad-x) + 4px);
+  border-top: 1px solid var(--border, rgba(0, 0, 0, 0.06));
+}
+.dark .chat-window-shell .settings-embedded-nav-list--footer {
+  border-top-color: rgba(255, 255, 255, 0.08);
 }
 
 .settings-embedded-nav-item {
@@ -2214,7 +2741,7 @@ body {
 }
 
 .settings-embedded-savebar {
-  height: 52px;
+  /* 高度由 .kv-savebar（48px）决定，这里别再写，否则和左栏 footer 高度会各自漂。 */
   padding: 0 24px;
   background: var(--bg-savebar);
   border-top: 1px solid var(--border);
@@ -2228,7 +2755,9 @@ body {
 }
 
 .settings-embedded-savebar .kv-btn:not(.primary) {
+  min-width: 72px;
   border-radius: 8px;
+  padding: 6px 16px;
 }
 
 /* 模型页：加宽、拉高左侧供应商列表，预设合并在列表内 */
@@ -2411,8 +2940,7 @@ body {
 @container settings-shell (max-width: 820px) {
   .settings-embedded-nav {
     width: 52px;
-    padding-left: 6px;
-    padding-right: 6px;
+    --nav-pad-x: 6px;
   }
 
   .settings-embedded-nav-title {
@@ -2432,16 +2960,13 @@ body {
 
   /* 窄栏（52px 图标轨）里「返回对话」也收成纯图标居中，否则文字被挤成竖排。tooltip 保留标签。 */
   .settings-embedded-back {
-    align-self: stretch;
     justify-content: center;
     gap: 0;
-    margin-left: 4px;
-    margin-right: 4px;
     padding-left: 8px;
     padding-right: 8px;
   }
 
-  .settings-embedded-back > span {
+  .settings-embedded-back > span:not(.settings-embedded-nav-icon) {
     display: none;
   }
 }
@@ -2567,6 +3092,47 @@ body {
   }
 }
 
+/* 顶栏行下缘留白。基线（Windows / Linux）保持 10px。 */
+.chat-titlebar-row:not(.chat-sidebar-titlebar-row) {
+  padding-bottom: 10px;
+}
+
+/* macOS：整条顶栏线（灯 / 那两枚图标 / 模型 / 思考强度 / 审批）对到 --chat-traffic-center-y
+   —— 交通灯中心的实测值，不再是写死的 30（那个常数只在部分 macOS 版本上成立，见 windows.rs）。
+   用 padding-bottom 而非改行高：行仍占 52px（下方内容不位移），内容盒居中落在
+   card-top + (52 − pb)/2 = center → pb = 52 − 2*(center − card-top)。
+   排除侧栏那行：它不是 52px 居中行，自己按同一个变量算 padding-top（见 .chat-sidebar-titlebar-row）。 */
+.chat-window-host--mac-titlebar .chat-titlebar-row:not(.chat-sidebar-titlebar-row) {
+  padding-bottom: max(
+    0px,
+    calc(52px - 2 * (var(--chat-traffic-center-y) - var(--chat-card-top)))
+  );
+}
+
+/* 侧栏收起时顶栏行回到主区。收起态主区卡片左缘也在 x=8（`.is-collapsed` 用 -240px 而非
+   -248px，刻意把那 8px 留成左缝），与展开态侧栏卡片的左缘同位；灯 x 也按「卡片内」算过
+   （windows.rs 里 x = 14 + 8）。所以两态用同一个 92px，收起态不再额外 +8 ——
+   多补的话图标就比展开态右移 8px（历史回归：-248 → -240 时这里没跟着减）。 */
+.chat-titlebar-row--collapsed-mac {
+  padding-left: 92px;
+}
+
+/* macOS 全屏：系统隐藏交通灯，所有为灯预留的缩进都要撤掉，否则顶栏左边空一大块。
+   `pl-[92px]` 与 collapsed 的 `padding-left` 都要盖掉；Tailwind 工具类靠 !important。 */
+.chat-window-host--mac-fullscreen .chat-titlebar-row {
+  padding-left: 0.75rem !important;
+}
+
+.chat-window-host--mac-fullscreen .chat-titlebar-row--collapsed-mac {
+  padding-left: 0.75rem !important;
+}
+
+/* 全屏没有灯可对，缩进撤掉即可；垂直仍沿用上面那条统一的 30，行内保持一致。 */
+
+.chat-window-host--mac-fullscreen .settings-embedded--traffic-safe .settings-embedded-nav {
+  padding-top: 16px;
+}
+
 .chat-traffic {
   display: flex;
   align-items: center;
@@ -2606,6 +3172,72 @@ body {
   background: #28c840;
 }
 
+/* Windows / Linux 全宽标题栏带：无独立底色（透出窗口底色）、无底边框，整条可拖拽。
+   会话页的业务控件也在这一条里 —— 非 mac 没有主区 52px 顶栏，chrome 只此一行，
+   所以高度按 32px 胶囊控件取 44（38 只够放三键，装不下控件）。
+   侧栏卡片 / Dock / 主区都在带下方，故三键可贴角、不必让各视图 padding-right 躲开。
+
+   padding-left 按**盒子左缘**对齐窗口内容左缘：侧栏卡片 margin-left 8，所以第一枚按钮的
+   盒子左缘也放 8 —— 顶栏钮与下方侧栏卡片共一条竖直边。
+   （曾按 glyph 对到侧栏 NavRow 图标列 P=29；那让按钮离窗口边太远，改回按边对齐。
+   代价：顶栏铅笔 glyph 比侧栏「新建聊天」铅笔靠左 ~21px，这是有意的取舍。） */
+.chat-titlebar-strip {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  height: 44px;
+  padding-left: 8px;
+}
+
+/* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，
+   把业务控件推到主区卡片左缘 —— 否则控件压在侧栏卡片上方，读作错位。
+   宽度 = 主区卡片左缘 256（侧栏 margin 8 + w-[240px] + margin 8）− 带自身 padding-left 8 = 248，
+   与 `.chat-sidebar-shell` 的 w-[240px] + margin:8 同步（改一处必改另一处）。
+   用 min-width 而非 width 做过渡：width 的收起态是 auto（按钮自然宽），auto 不可插值、
+   动画会直接跳；min-width 两端都是具体值，且 max(内容宽, min-width) 天然贴合按钮宽度，
+   不必把「两枚 28px 钮 + 2px 间距」这种数字硬编码进来。
+   曲线与时长同侧栏折叠（--kv-dur-slow / --kv-ease-standard），两者才像一起移动。 */
+.chat-titlebar-strip-nav {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  transition: min-width var(--kv-dur-slow) var(--kv-ease-standard);
+}
+
+.chat-titlebar-strip-nav--reserve {
+  min-width: 248px;
+}
+
+/* 设置页：带浮起、不占行高，让 200/52px 灰导航栏自己从 y=0 画起（见 ChatTitlebar 注释）。
+   带保持全宽且透明 —— 全宽才留住窗口拖拽区，透明才让导航栏的灰透上来。
+   只有右端三键是实体，故 z-index 压在内容上层。 */
+.chat-titlebar-strip--settings {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  padding-left: 0;
+}
+
+/* 带在设置页是透明浮层（见上）。导航栏不再为它留 44px，改为抬到带之上：标题因此回到
+   与页头同一条水平线，窄栏（52px 图标轨）第一枚图标也不会被带吃掉点击。
+   代价是带在导航栏这一列的拖拽区被盖住 —— 由「设置」标题自己接管拖拽（见 SettingsShell）。
+   macOS 走 .settings-embedded--traffic-safe 那条，不受影响。 */
+.settings-embedded-under-strip .settings-embedded-nav {
+  position: relative;
+  z-index: 31;
+}
+
+/* 页头右侧为三键让位（三键 3×46=138 + 呼吸 12）。只此一处需要 ——
+   下方 .kv-scroll 在页头之下，不会钻到带里。 */
+.settings-embedded-under-strip .settings-embedded-header {
+  padding-right: 150px;
+}
+
 .chat-win-controls {
   display: flex;
   align-items: center;
@@ -2613,54 +3245,37 @@ body {
   flex-shrink: 0;
 }
 
+/* Windows caption 键规格：46 宽、方角、无容器（无描边 / 无阴影 / 无毛玻璃）。
+   高度撑满整条带并贴住窗口顶边 —— 原生 caption 键的命中区就是顶到窗口边缘的
+   （最大化后鼠标甩到屏幕顶角仍能点中）。刻意不做垂直居中：带 38 − 键 32 的那 6px
+   会在 hover 填色时露成「红块上下各缺一条」。 */
 .chat-win-controls--win {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 40;
-  height: 34px;
-  padding: 0 5px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 8px 24px rgba(0, 0, 0, 0.08);
-  backdrop-filter: blur(18px);
-}
-
-.dark .chat-win-controls--win {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(33, 33, 33, 0.92);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.22),
-    0 8px 24px rgba(0, 0, 0, 0.3);
+  gap: 0;
+  align-self: stretch;
 }
 
 .chat-win-btn {
   display: grid;
-  width: 32px;
-  height: 24px;
+  width: 46px;
+  height: 100%;
   place-items: center;
   border: none;
   background: transparent;
-  color: #606068;
-  border-radius: 9999px;
+  color: #1f1f23;
+  border-radius: 0;
   line-height: 1;
   cursor: default;
   transition:
     background-color 0.14s ease,
-    color 0.14s ease,
-    transform 0.14s ease;
+    color 0.14s ease;
 }
 
 .chat-win-btn:hover {
   background: rgba(0, 0, 0, 0.055);
-  color: #1f1f23;
 }
 
 .chat-win-btn:active {
-  transform: scale(0.94);
+  background: rgba(0, 0, 0, 0.09);
 }
 
 .chat-win-btn--close:hover {
@@ -2668,13 +3283,21 @@ body {
   color: #fff;
 }
 
+.chat-win-btn--close:active {
+  background: #f1707a;
+  color: #fff;
+}
+
 .dark .chat-win-btn {
-  color: #a3a3aa;
+  color: #e8e8ea;
 }
 
 .dark .chat-win-btn:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: #f5f5f5;
+}
+
+.dark .chat-win-btn:active {
+  background: rgba(255, 255, 255, 0.13);
 }
 
 .dark .chat-win-btn--close:hover {
@@ -2682,12 +3305,9 @@ body {
   color: #fff;
 }
 
-.chat-win-titlebar-safe .chat-titlebar-row,
-.chat-titlebar-row.chat-win-titlebar-safe,
-.chat-win-titlebar-safe .settings-embedded-header,
-.chat-win-titlebar-safe .assistant-center-header,
-.chat-win-titlebar-safe .onboarding-topbar {
-  padding-right: 132px;
+.dark .chat-win-btn--close:active {
+  background: #f1707a;
+  color: #fff;
 }
 
 @container chat-window (max-width: 520px) {
@@ -2737,38 +3357,11 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-.kv[data-theme-color="neutral"] {
-  --theme-surface: #ffffff;
-  --theme-surface-soft: #fbfbfc;
-  --theme-surface-muted: #f6f6f7;
-  --theme-surface-hover: #f0f0f2;
-  --theme-surface-active: #e9e9ec;
-  --theme-surface-titlebar: #ececef;
-  --theme-surface-border: #e4e4e7;
-  --theme-surface-border-strong: #d4d4d8;
-}
-
-.kv[data-theme-color="warm"] {
-  --theme-surface: #f7f3ea;
-  --theme-surface-soft: #f2ece0;
-  --theme-surface-muted: #ece5d4;
-  --theme-surface-hover: #e4dbc8;
-  --theme-surface-active: #dbd0ba;
-  --theme-surface-titlebar: #e9e1d1;
-  --theme-surface-border: #ddd3c0;
-  --theme-surface-border-strong: #cbbda4;
-}
-
-.kv[data-theme-color="cool"] {
-  --theme-surface: #eef3fa;
-  --theme-surface-soft: #e7eef7;
-  --theme-surface-muted: #dee8f2;
-  --theme-surface-hover: #d4e0ee;
-  --theme-surface-active: #c8d7e8;
-  --theme-surface-titlebar: #e0e9f4;
-  --theme-surface-border: #d2def0;
-  --theme-surface-border-strong: #bccfe6;
-}
+/* 主题色令牌不在此重复定义：--theme-surface* 是自定义属性，会从 :root 继承进本作用域，
+   而 .kv 的 data-theme-color 与 documentElement 同源（都来自 settings.themeColor，
+   见 App.tsx applyTheme 与 SettingsShell）。
+   早先这里抄了 neutral/warm/cool 三份完全相同的值，是纯复制品；且没有暗色限定，
+   一旦给 --theme-surface* 加暗色态就会被它盖回亮色。删掉，靠继承。 */
 
 .dark .kv,
 .kv[data-theme="dark"] {
@@ -3001,6 +3594,111 @@ body {
   color: var(--text-faint);
   margin-bottom: 4px;
 }
+/* 二级页入口（如供应商详情「请求配置」）：与上方 kv-row 同系的分隔行，
+   不用大图标方块/灰底卡片，避免像移动端列表项。 */
+.kv-subpage-entry {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 11px 2px;
+  margin: 2px 0;
+  border: none;
+  border-top: 1px solid var(--divider);
+  border-radius: 0;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.kv-subpage-entry:hover .kv-subpage-entry-title {
+  color: var(--accent, #4f46e5);
+}
+.kv-subpage-entry:hover .kv-subpage-entry-go {
+  color: var(--text);
+  opacity: 1;
+}
+.kv-subpage-entry-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kv-subpage-entry-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text);
+  transition: color 0.12s ease;
+}
+.kv-subpage-entry-title svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.kv-subpage-entry:hover .kv-subpage-entry-title svg {
+  color: var(--accent, #4f46e5);
+}
+.kv-subpage-entry-hint {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+  /* 图标占位对齐：13 icon + 6 gap ≈ 19 */
+  padding-left: 19px;
+}
+.kv-subpage-entry-trail {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+.kv-subpage-entry-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.85;
+  transition: color 0.12s ease, opacity 0.12s ease;
+}
+.kv-subpage-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--text-faint);
+  background: transparent;
+}
+.kv-subpage-back:hover {
+  color: var(--text);
+}
+.kv-subpage-back-title {
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 组标题里的说明文字与计数标签不跟着大写（可折叠分组的标题行） */
+.kv-group-title .kv-row-desc,
+.kv-group-title .kv-tag {
+  text-transform: none;
+  letter-spacing: normal;
+}
+/* 组标题里的操作按钮（如快捷键「恢复默认 / 检查冲突」）不受 uppercase 影响 */
+.kv-group-title .kv-btn {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+  font-size: 12px;
+}
 /* 分区大标题：合并页里区隔「输入翻译 / 快速翻译」等顶层板块 */
 .kv-section-title {
   font-size: 13px;
@@ -3055,13 +3753,16 @@ body {
   width: 30px;
   height: 18px;
   border-radius: 999px;
-  background: var(--border-strong);
+  /* ponytail: off 态用固定中灰，别用 --border-strong(#d4d4d8 在白卡上几乎不可见) */
+  background: #a1a1aa;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
   cursor: pointer;
   flex-shrink: 0;
   transition: background 0.15s;
   border: none;
   padding: 0;
 }
+.dark .kv-toggle { background: #52525b; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
 .kv-toggle::after {
   content: "";
   position: absolute;
@@ -3132,16 +3833,69 @@ body {
 }
 .kv-select-button { line-height: 1.35; }
 .kv-select-menu {
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--theme-surface-border);
+  background: var(--theme-surface);
+  box-shadow:
+    0 0 0 0.5px rgba(24, 24, 27, 0.04),
+    0 4px 12px -4px rgba(24, 24, 27, 0.12),
+    0 12px 28px -12px rgba(24, 24, 27, 0.18);
 }
 .dark .kv-select-menu {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(29, 29, 31, 0.96);
+  border-color: rgba(255, 255, 255, 0.09);
+  background: #2a2a2c;
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.05),
+    0 4px 14px -4px rgba(0, 0, 0, 0.5),
+    0 14px 32px -14px rgba(0, 0, 0, 0.6);
+}
+
+/* 选项行：与 .kv-menu-item 同规格（28px / 12.5px）。
+   勾常驻左侧但未选中时 visibility:hidden —— 这样标签起点始终对齐，
+   且不必给右侧留 32px 空位（原来 pr-8 把标签提前截断成「白山智算 - DeepSeek-…」）。 */
+.kv-select-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text);
+  transition: background-color var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+.kv-select-option:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .kv-select-option:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 选中态：macOS 原生下拉是「勾 + 轻底」，不是实心蓝条（那是 Win98 观感）。 */
+.kv-select-option.is-active {
+  font-weight: 500;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .kv-select-option.is-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.kv-select-option-check {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  visibility: hidden;
+  color: var(--accent);
+}
+
+.kv-select-option.is-active .kv-select-option-check {
+  visibility: visible;
 }
 
 .kv-input {
@@ -3162,9 +3916,10 @@ body {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .kv-input::placeholder { color: var(--text-faint); }
-/* 隐藏 Edge/WebView2 原生密码可见性按钮，避免与自定义 Eye 按钮重复 */
-.kv-input[type="password"]::-ms-reveal,
-.kv-input[type="password"]::-ms-clear {
+/* Windows WebView2 (Edge) 给 password 框注入原生的 reveal/clear 眼睛图标，
+   会和我们自定义的显示切换按钮叠成两个眼睛。全局隐藏原生的。 */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear {
   display: none;
 }
 .kv-input.mono,
@@ -3200,7 +3955,10 @@ body {
   border: 1px solid var(--border-input);
   border-radius: 6px;
   padding: 3px 5px 3px 8px;
-  min-width: 130px;
+  /* 固定宽度：空态长 placeholder 与已配置键帽同宽，避免列表里一长一短 */
+  box-sizing: border-box;
+  width: 11.75rem;
+  min-width: 11.75rem;
   min-height: 30px;
   cursor: default;
   box-shadow: var(--shadow-sm);
@@ -3248,8 +4006,7 @@ body {
   color: var(--text-faint);
   cursor: default;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: center;  justify-content: center;
   padding: 0;
 }
 .kv-hotkey-clear {
@@ -3288,9 +4045,12 @@ body {
   color: var(--accent);
   font-weight: 500;
 }
-/* 快捷键列表：紧凑两栏 + 行间细分隔线 */
+/* 快捷键列表：紧凑两栏 + 行间细分隔线；右侧热键框右对齐内容 */
 .kv-hotkey-list .kv-row + .kv-row {
   border-top: 1px solid var(--border-subtle);
+}
+.kv-hotkey-list .kv-hotkey {
+  justify-content: flex-end;
 }
 
 .kv-btn {
@@ -3572,6 +4332,61 @@ body {
 .kv-provider-list-items.is-sorting .kv-provider-item:not(.is-dragging) {
   transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
 }
+/* 侧栏分组（集/项目）与对话的插入线式拖拽：源行原地变淡作占位（**不位移**，
+   否则列表会塌一个洞），一张跟手的浮起卡片表示正在搬的是哪个，目标位置画线。
+   其余行不加 transform，所以不要求行高相等（见 utils/insertionReorder）。 */
+.kv-sidebar-group.is-dragging > .kv-sidebar-group-row,
+.kv-conv-row.is-dragging {
+  opacity: 0.38;
+}
+.kv-reorder-ghost {
+  position: fixed;
+  z-index: 9999;
+  transform: translate(14px, -50%);
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: rgb(38 38 38);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  pointer-events: none;
+}
+.dark .kv-reorder-ghost {
+  color: rgb(229 229 229);
+  background: rgba(38, 38, 38, 0.96);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.kv-reorder-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgb(59 130 246);
+  z-index: 30;
+  pointer-events: none;
+}
+.kv-reorder-line::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid rgb(59 130 246);
+  background: var(--kv-surface, #fff);
+}
+.dark .kv-reorder-line::before {
+  background: #1c1c1c;
+}
+
 .kv-provider-item-select {
   flex: 1;
   min-width: 0;
@@ -4215,10 +5030,10 @@ body {
 
 .kv-drawer-title {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
-  font-family: var(--font-mono, monospace);
-  text-align: center;
+  text-align: left;
 }
 
 .kv-drawer-body {
@@ -4228,6 +5043,16 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* 模型 id 放在顶栏下方，避免与聊天设置页 Windows 三键重叠。 */
+.kv-drawer-model-id {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  line-height: 1.35;
+  word-break: break-all;
+  color: var(--text, inherit);
 }
 
 .kv-drawer-section {
@@ -4298,6 +5123,76 @@ body {
   flex-shrink: 0;
 }
 
+/* ===== 供应商模型批量测试弹窗 ===== */
+.kv-model-test-modal {
+  width: min(560px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  max-height: min(640px, calc(100vh - 64px));
+}
+.kv-mtest-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.kv-mtest-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+.kv-mtest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.kv-mtest-check {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.kv-mtest-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kv-mtest-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.kv-mtest-status--ok { color: var(--success, #16a34a); }
+.kv-mtest-status--fail { color: var(--danger, #c44); }
+.kv-mtest-error {
+  margin: 0 2px 8px;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--danger, #c44);
+  background: color-mix(in srgb, var(--danger, #c44) 8%, transparent);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
 /* ===== Capability Badges ===== */
 
 .kv-enabled-model-badges {
@@ -4348,6 +5243,14 @@ body {
 }
 
 .chat-window-shell .onboarding-shell.settings-embedded {
+  /* 引导页仍走浮卡（设置页已齐边铺满、从共享卡片组摘掉了）。
+     不渲染聊天侧栏，四边缝自己补。 */
+  margin: var(--chat-card-top) 8px 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(24, 24, 27, 0.07);
+  box-shadow:
+    0 1px 2px rgba(24, 24, 27, 0.04),
+    0 5px 14px -8px rgba(24, 24, 27, 0.10);
   --bg: var(--theme-surface);
   --bg-sidebar: var(--theme-surface-muted);
   --bg-savebar: var(--theme-surface-soft);
@@ -4372,6 +5275,10 @@ body {
 }
 
 .dark .chat-window-shell .onboarding-shell.settings-embedded {
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.2),
+    0 5px 14px -8px rgba(0, 0, 0, 0.35);
   --bg: #212121;
   --bg-sidebar: #1c1c1e;
   --bg-savebar: #212121;
@@ -5065,3 +5972,106 @@ body {
     width: 34px;
   }
 }
+
+/* ===== 笔记编辑器 (Milkdown Crepe) =====
+   融入页面：透明背景、去掉 frame 自带卡片/内边距、字体跟随系统，
+   与标题左对齐。深色变量特异性高于 frame.css 的 .milkdown，自动生效。 */
+.kv-note-editor .milkdown {
+  --crepe-color-background: transparent;
+  --crepe-font-default: inherit;
+  --crepe-font-title: inherit;
+  background: transparent;
+}
+
+.kv-note-editor .milkdown .ProseMirror {
+  padding: 0;
+}
+
+.kv-note-editor .milkdown .ProseMirror:focus {
+  outline: none;
+}
+
+.dark .kv-note-editor .milkdown {
+  --crepe-color-background: transparent;
+  --crepe-color-on-background: #e6e6e6;
+  --crepe-color-surface: #121212;
+  --crepe-color-surface-low: #1c1c1c;
+  --crepe-color-on-surface: #d1d1d1;
+  --crepe-color-on-surface-variant: #a9a9a9;
+  --crepe-color-outline: #757575;
+  --crepe-color-primary: #b5b5b5;
+  --crepe-color-secondary: #4d4d4d;
+  --crepe-color-on-secondary: #d6d6d6;
+  --crepe-color-inverse: #e5e5e5;
+  --crepe-color-on-inverse: #2a2a2a;
+  --crepe-color-inline-code: #ff6666;
+  --crepe-color-error: #ff6666;
+  --crepe-color-hover: #232323;
+  --crepe-color-selected: #2f2f2f;
+  --crepe-color-inline-area: #2b2b2b;
+}
+
+/* 消息区划词「添加到聊天」浮动按钮 */
+.kv-add-to-chat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #1f1f22;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  cursor: default;
+  white-space: nowrap;
+  animation: kv-add-to-chat-in 90ms ease-out;
+}
+.dark .kv-add-to-chat {
+  color: #f0f0f0;
+  background: #2a2a2d;
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+.kv-add-to-chat:hover { border-color: color-mix(in srgb, var(--accent, #2f6ff0) 55%, currentColor); }
+@keyframes kv-add-to-chat-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 输入框上方的引用卡片 */
+.kv-quote-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: var(--bg-input-subtle, var(--bg-hover));
+  border: 1px solid var(--border);
+}
+.kv-quote-chip-icon { flex-shrink: 0; margin-top: 1px; color: var(--text-muted); }
+.kv-quote-chip-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.kv-quote-chip-remove {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--text-faint);
+  cursor: default;
+}
+.kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }

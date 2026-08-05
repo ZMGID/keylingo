@@ -64,15 +64,14 @@ fn scan_root_entries(
 }
 
 /// Resolve the same per-user skills directory the GUI uses
-/// (`<app_data_dir>/skills`), but WITHOUT a Tauri `AppHandle`. Used by the
-/// headless `kivio-code` CLI. `app_data_dir` is derived from the
-/// `directories` crate against the bundle identifier `com.zmair.kivio`,
-/// mirroring `kivio_code::settings_loader::app_data_dir`.
+/// (`<app_data_dir>/skills`), but WITHOUT a Tauri `AppHandle`. `app_data_dir`
+/// is derived from the `directories` crate against the bundle identifier
+/// `com.zmair.kivio`, via `crate::app_data::app_data_dir`.
 ///
 /// Returns `None` only when no home/data directory can be determined. The
 /// directory is created if missing so the user has a place to drop skills.
 pub fn user_skills_dir_headless() -> Option<PathBuf> {
-    let dir = crate::kivio_code::settings_loader::app_data_dir()?.join("skills");
+    let dir = crate::app_data::app_data_dir()?.join("skills");
     // Best-effort create; ignore failures (read-only / permission) — discovery
     // simply finds nothing rather than erroring.
     let _ = fs::create_dir_all(&dir);

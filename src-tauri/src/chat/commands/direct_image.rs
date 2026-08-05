@@ -7,7 +7,7 @@ use crate::mcp::types::ChatToolArtifact;
 use crate::settings::{ModelProvider, Settings};
 use crate::state::AppState;
 
-use super::interaction::{emit_chat_stream_delta, emit_chat_stream_done, wait_for_chat_cancel};
+use super::interaction::{emit_chat_stream_delta, wait_for_chat_cancel};
 use super::messages::{plain_text_segment, push_assistant_message};
 use super::{agent_run_entry_label, Conversation};
 
@@ -46,9 +46,7 @@ pub(super) async fn complete_direct_image_generation_reply(
     let started = Instant::now();
     emit_chat_stream_delta(
         app,
-        &conversation.id,
         run_id,
-        &assistant_message_id,
         DIRECT_IMAGE_GENERATION_PENDING,
         None,
         Some(&plain_text_segment(1000, DIRECT_IMAGE_GENERATION_PENDING)),
@@ -65,13 +63,12 @@ pub(super) async fn complete_direct_image_generation_reply(
             "Chat image generation",
         ) => result,
         _ = wait_for_chat_cancel(state.inner(), &conversation.id, run_generation) => {
-            emit_chat_stream_done(
+            crate::chat::protocol::finish_run(
                 app,
-                &conversation.id,
                 run_id,
-                &assistant_message_id,
                 "cancelled",
                 "",
+                conversation.revision,
             );
             return Err("cancelled".to_string());
         }
@@ -79,15 +76,12 @@ pub(super) async fn complete_direct_image_generation_reply(
 
     match result {
         Ok(output) if !output.is_error => {
-            let content = direct_image_generation_content(&output.artifacts);
-            emit_chat_stream_done(
-                app,
-                &conversation.id,
-                run_id,
-                &assistant_message_id,
-                "done",
-                &content,
-            );
+            // 有图 → 渲染图片；模型只回文字（澄清/拒绝）无图 → 展示那段文字。
+            let content = if output.artifacts.is_empty() {
+                output.content.clone()
+            } else {
+                direct_image_generation_content(&output.artifacts)
+            };
             let active_skill = active_skill_id
                 .map(str::to_string)
                 .or_else(|| conversation.active_skill_id.clone());
@@ -110,8 +104,17 @@ pub(super) async fn complete_direct_image_generation_reply(
                 None,
                 None,
                 None,
+                // 直出图路径不经 agent 循环，没有降级兜底。
+                None,
             )
             .await?;
+            crate::chat::protocol::finish_run(
+                app,
+                run_id,
+                "completed",
+                &content,
+                conversation.revision,
+            );
             Ok(())
         }
         Ok(output) => {
@@ -120,6 +123,7 @@ pub(super) async fn complete_direct_image_generation_reply(
                 "Direct image generation failed after {}ms: {err}",
                 started.elapsed().as_millis()
             );
+            crate::chat::protocol::finish_run(app, run_id, "error", "", conversation.revision);
             Err(err)
         }
         Err(err) => {
@@ -127,6 +131,7 @@ pub(super) async fn complete_direct_image_generation_reply(
                 "Direct image generation failed after {}ms: {err}",
                 started.elapsed().as_millis()
             );
+            crate::chat::protocol::finish_run(app, run_id, "error", "", conversation.revision);
             Err(err)
         }
     }

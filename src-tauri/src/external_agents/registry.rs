@@ -1,4 +1,4 @@
-use crate::external_agents::defs::{acp, claude, codex, grok, kimi, pi};
+use crate::external_agents::defs::{acp, claude, codex, grok, pi};
 use crate::external_agents::types::RuntimeAgentDef;
 
 pub const AGENT_DEFS: &[RuntimeAgentDef] = &[
@@ -7,7 +7,7 @@ pub const AGENT_DEFS: &[RuntimeAgentDef] = &[
     acp::CURSOR_AGENT_DEF,
     acp::OPENCODE_AGENT_DEF,
     acp::GEMINI_AGENT_DEF,
-    kimi::KIMI_AGENT_DEF,
+    acp::KIMI_AGENT_DEF,
     pi::PI_AGENT_DEF,
     acp::HERMES_AGENT_DEF,
     grok::GROK_AGENT_DEF,

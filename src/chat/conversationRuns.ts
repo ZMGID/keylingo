@@ -33,14 +33,14 @@ export function isConversationBusy(
 export function collectGeneratingConversationIds(
   inFlightConversations: ReadonlySet<string>,
   streamSnapshots: Record<string, ConversationStreamSnapshot>,
-  pendingToolConfirms: Record<string, unknown>,
+  pendingToolConfirms: Record<string, readonly unknown[]>,
 ): Set<string> {
   const ids = new Set<string>(inFlightConversations)
   for (const [conversationId, snapshot] of Object.entries(streamSnapshots)) {
     if (snapshot.streaming) ids.add(conversationId)
   }
-  for (const conversationId of Object.keys(pendingToolConfirms)) {
-    ids.add(conversationId)
+  for (const [conversationId, queue] of Object.entries(pendingToolConfirms)) {
+    if (queue.length > 0) ids.add(conversationId)
   }
   return ids
 }

@@ -272,16 +272,17 @@ pub async fn retrieve(
     if rerank_on && !merged.is_empty() {
         if let Some(rc) = &req.rerank {
             if let Some(rp) = settings.get_provider(&rc.provider_id).cloned() {
-                let send_n = req.rerank_top_k.min(merged.len()).max(1);
+                let send_n = rerank_send_n(req.rerank_top_k, req.context_top_k, merged.len());
                 let docs: Vec<String> = merged
                     .iter()
                     .take(send_n)
                     .map(|c| c.fused.chunk.text.clone())
                     .collect();
                 let t = Instant::now();
-                let result =
-                    super::rerank::rerank(state, &rp, &rc.model, &req.query, &docs, send_n, attempts)
-                        .await;
+                let result = super::rerank::rerank(
+                    state, &rp, &rc.model, &req.query, &docs, send_n, attempts,
+                )
+                .await;
                 rerank_ms = t.elapsed().as_millis() as u64;
                 match result {
                     Ok(scored) if !scored.is_empty() => {
@@ -343,11 +344,17 @@ pub async fn retrieve(
         if rank < context_n {
             hits.push(ScoredChunk {
                 kb_id: c.kb_id.clone(),
-                score: c.fused.fused_score,
+                // rerank 命中时用校准后的 rerank 分（回退 fused）：否则返回给模型/来源卡的
+                // 分数与实际（rerank 后的）排序不单调，排第一的片段可能显示比第二名更低的分。
+                score: c.rerank_score.unwrap_or(c.fused.fused_score),
                 chunk: c.fused.chunk.clone(),
             });
         }
-        candidates.push(candidate_diag(c, decision, (rank < context_n).then_some(rank)));
+        candidates.push(candidate_diag(
+            c,
+            decision,
+            (rank < context_n).then_some(rank),
+        ));
     }
     for c in &below {
         candidates.push(candidate_diag(c, Decision::BelowThreshold, None));
@@ -406,6 +413,15 @@ fn jaccard_trigram(a: &str, b: &str) -> f32 {
     inter / union
 }
 
+/// How many candidates to send to the reranker. Must cover at least
+/// `context_top_k`: with a threshold active, `passes_threshold` drops every
+/// candidate the reranker never scored, so sending fewer than the number of
+/// slots we intend to fill silently truncates the result to `rerank_top_k`
+/// (e.g. rerank_top_k=5 + context_top_k=20 ⇒ never more than 5 passages).
+fn rerank_send_n(rerank_top_k: usize, context_top_k: usize, available: usize) -> usize {
+    rerank_top_k.max(context_top_k).min(available).max(1)
+}
+
 /// Score-kind-aware relevance gate (D5). See the threshold stage for semantics.
 fn passes_threshold(c: &KbCandidate, rerank_on: bool, min_score: f32) -> bool {
     if min_score <= 0.0 {
@@ -428,7 +444,11 @@ fn passes_threshold(c: &KbCandidate, rerank_on: bool, min_score: f32) -> bool {
         .unwrap_or(false)
 }
 
-fn candidate_diag(c: &KbCandidate, decision: Decision, final_rank: Option<usize>) -> RetrievalCandidate {
+fn candidate_diag(
+    c: &KbCandidate,
+    decision: Decision,
+    final_rank: Option<usize>,
+) -> RetrievalCandidate {
     RetrievalCandidate {
         kb_id: c.kb_id.clone(),
         doc_id: c.fused.chunk.doc_id.clone(),
@@ -450,10 +470,14 @@ fn candidate_diag(c: &KbCandidate, decision: Decision, final_rank: Option<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::knowledge_base::KnowledgeChunk;
     use crate::chat::knowledge_base::store::FusedCandidate;
+    use crate::chat::knowledge_base::KnowledgeChunk;
 
-    fn cand(rerank_score: Option<f32>, keyword_rank: Option<usize>, vector_distance: Option<f32>) -> KbCandidate {
+    fn cand(
+        rerank_score: Option<f32>,
+        keyword_rank: Option<usize>,
+        vector_distance: Option<f32>,
+    ) -> KbCandidate {
         KbCandidate {
             kb_id: "k".into(),
             fused: FusedCandidate {
@@ -506,6 +530,37 @@ mod tests {
         assert!(!passes_threshold(&cand(None, None, None), false, 0.5));
     }
 
+    #[test]
+    fn rerank_send_n_covers_context_slots() {
+        // B4b: rerank_top_k < context_top_k 时必须按 context_top_k 送，否则阈值阶段
+        // 会把未打分的尾部全判死，结果被静默截到 rerank_top_k。
+        assert_eq!(rerank_send_n(5, 20, 100), 20);
+        // rerank_top_k 更大时以它为准（用户显式想让更多候选参与重排）。
+        assert_eq!(rerank_send_n(30, 10, 100), 30);
+        // 不得超过实际可用候选数。
+        assert_eq!(rerank_send_n(5, 20, 8), 8);
+        // 至少 1（空池由调用方的 !merged.is_empty() 挡掉，这里守住下界）。
+        assert_eq!(rerank_send_n(0, 0, 0), 1);
+    }
+
+    #[test]
+    fn hit_score_prefers_rerank_over_fused() {
+        // B4a: rerank 命中时 hits.score 用校准分，否则回退 fused —— 保证返回的分数
+        // 与实际排序单调一致。这里直接断言 context selection 用的取分表达式。
+        let with_rerank = cand(Some(0.93), None, None);
+        assert_eq!(
+            with_rerank
+                .rerank_score
+                .unwrap_or(with_rerank.fused.fused_score),
+            0.93
+        );
+        let without = cand(None, Some(0), None);
+        assert_eq!(
+            without.rerank_score.unwrap_or(without.fused.fused_score),
+            without.fused.fused_score
+        );
+    }
+
     fn chunk(doc: &str, order: usize, text: &str) -> super::super::KnowledgeChunk {
         super::super::KnowledgeChunk {
             id: format!("{doc}-{order}"),
@@ -526,8 +581,14 @@ mod tests {
         let a = chunk("d1", 0, "退款需要在七天内申请并提供订单编号");
         let b = chunk("d1", 1, "退款需要在七天内申请并提供订单编号（续）"); // adjacent
         let c = chunk("d2", 5, "完全不同文档的另一段内容"); // other doc
-        assert!(is_near_duplicate(&a, &b), "adjacent same-doc chunks are dupes");
-        assert!(!is_near_duplicate(&a, &c), "different docs must never be merged");
+        assert!(
+            is_near_duplicate(&a, &b),
+            "adjacent same-doc chunks are dupes"
+        );
+        assert!(
+            !is_near_duplicate(&a, &c),
+            "different docs must never be merged"
+        );
     }
 
     #[test]
@@ -540,8 +601,17 @@ mod tests {
         let c0 = chunk("d", 0, boiler);
         let c1 = chunk("d", 1, "退款必须在购买后七天内提出，逾期不予受理。"); // unique answer
         let c2 = chunk("d", 2, boiler); // duplicate of c0 by text
-        assert!(is_near_duplicate(&c0, &c2), "high-overlap boilerplate = dupe");
-        assert!(!is_near_duplicate(&c0, &c1), "unique answer is not a dupe of boilerplate");
-        assert!(!is_near_duplicate(&c1, &c2), "unique answer is not a dupe of boilerplate");
+        assert!(
+            is_near_duplicate(&c0, &c2),
+            "high-overlap boilerplate = dupe"
+        );
+        assert!(
+            !is_near_duplicate(&c0, &c1),
+            "unique answer is not a dupe of boilerplate"
+        );
+        assert!(
+            !is_near_duplicate(&c1, &c2),
+            "unique answer is not a dupe of boilerplate"
+        );
     }
 }

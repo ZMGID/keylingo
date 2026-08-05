@@ -29,19 +29,17 @@ use super::catalog::{
 };
 use super::context::{build_chat_api_messages, resolve_usage_anchor};
 use super::direct_image::complete_direct_image_generation_reply;
-use super::interaction::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, wait_for_chat_cancel,
-};
+use super::interaction::{emit_chat_stream_delta, emit_chat_tool_record, wait_for_chat_cancel};
 use super::messages::{
     auxiliary_tool_segments, build_assistant_message, capture_agent_plan_draft_if_needed,
-    merge_latest_agent_plan_state, merge_latest_agent_todo_state, push_assistant_message,
-    tool_segment_for_record,
+    push_assistant_message, tool_segment_for_record,
 };
 use super::reply_runtime::{ArmReplyOutcome, ChatReplyGuard, ReplyArm};
 use super::resolve_thinking;
 use super::tooling::{
     append_agent_ask_user_tools, append_agent_todo_tools, apply_agent_plan_tool_filter,
-    apply_inline_code_request_tool_filter, list_tools_for_chat, resolve_forced_skill_id,
+    apply_inline_code_request_tool_filter, apply_web_search_mode_tool_filter, list_tools_for_chat,
+    resolve_forced_skill_id,
 };
 
 pub(super) async fn complete_assistant_reply(
@@ -96,20 +94,37 @@ pub(super) async fn complete_assistant_reply_inner(
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == "user")
-            .map(|m| m.content.clone())
+            .find(|m| m.role == "user");
+        let latest_user_text = latest_user.map(|m| m.content.clone()).unwrap_or_default();
+        // 外部 CLI 也要带附件：图片走各协议原生块 / 降级，文件走路径说明。图片路径已由调用方
+        // 算好（last_user_image_paths）；文件路径从最后一条 user 消息现解析（best-effort）。
+        let latest_user_file_paths = latest_user
+            .map(|m| {
+                crate::chat::attachments::stored_file_paths_for_attachments(
+                    app,
+                    &conversation.id,
+                    &m.attachments,
+                )
+                .unwrap_or_default()
+            })
             .unwrap_or_default();
         return crate::external_agents::run_external_cli_reply(
             app,
             state,
             conversation,
             title_from_first_user,
-            &latest_user,
+            &latest_user_text,
+            last_user_image_paths,
+            &latest_user_file_paths,
             active_skill_id,
             entry,
         )
         .await
-        .map(|_| ArmReplyOutcome { message: None });
+        .map(|_| ArmReplyOutcome {
+            message: None,
+            run_id: None,
+            error: None,
+        });
     }
 
     let settings = state.settings_read().clone();
@@ -139,31 +154,55 @@ pub(super) async fn complete_assistant_reply_inner(
     let (thinking_enabled, thinking_level) = resolve_thinking(
         conversation.thinking_level.as_deref(),
         settings.chat.thinking_enabled,
+        Some(&provider),
+        &resolved_model,
     );
     let retry_attempts = if settings.retry_enabled {
         settings.retry_attempts as usize
     } else {
         1
     };
+    let plan_mode = crate::chat::plan::is_plan_mode(&conversation.agent_plan_state);
+    let orchestrate_mode = crate::chat::plan::is_orchestrate_mode(&conversation.agent_plan_state);
+    let direct_image_model =
+        !plan_mode && model_can_generate_images_directly(&provider, &resolved_model);
     let run_generation = state.next_chat_generation(&conversation.id);
     let run_id = format!("chat-run-{}-{}", run_generation, Uuid::new_v4());
     let assistant_message_id = format!("msg_{}", Uuid::new_v4());
+    let recovery = arm.map(|arm| crate::chat::protocol::ChatRunRecoveryMetadata {
+        group_id: arm.group_id.clone(),
+        group_size: arm.group_size as u32,
+        arm_index: arm.arm_index as u32,
+        provider_id: arm.provider_id.clone(),
+        model: arm.model.clone(),
+    });
+    crate::chat::protocol::register_run_with_recovery(
+        app,
+        &conversation.id,
+        &run_id,
+        &assistant_message_id,
+        conversation.revision,
+        recovery,
+    );
+    let mut protocol_guard =
+        crate::chat::protocol::RegisteredRunGuard::new(app, &run_id, conversation.revision);
     // per-run 回复槽位 + 活跃 generation 守卫：本函数任意退出路径（含早返回的直接生图 /
     // 辅助视觉分支）都会 drop 它，释放该 run 的槽位并退役其 generation。同会话多模型并发时
     // 每条 run 各持一个守卫，互不影响。`next_chat_generation` 已登记 generation，这里仅补登
     // run_id 槽位；run_id 由 generation + uuid 拼成，必不重复，try_new 不会返回 None。
     let _reply_guard =
         ChatReplyGuard::try_new(state.inner(), &conversation.id, &run_id, run_generation);
-    let plan_mode = crate::chat::plan::is_plan_mode(&conversation.agent_plan_state);
-    let orchestrate_mode = crate::chat::plan::is_orchestrate_mode(&conversation.agent_plan_state);
-    if !plan_mode && model_can_generate_images_directly(&provider, &resolved_model) {
-        if arm.is_some() {
-            // 多答 fan-out MVP 不支持「直接生图模型」作为并行臂（生图路径自行落盘，
-            // 与多臂统一合并落盘冲突）。该臂直接报错，其它臂不受影响。
-            return Err(
+    if direct_image_model && arm.is_some() {
+        protocol_guard.defer_terminal();
+        return Ok(ArmReplyOutcome {
+            message: None,
+            run_id: Some(run_id),
+            error: Some(
                 "多模型并行回答暂不支持直接生图模型，请在多答选择中移除该模型。".to_string(),
-            );
-        }
+            ),
+        });
+    }
+    if direct_image_model {
         return complete_direct_image_generation_reply(
             app,
             state,
@@ -181,7 +220,11 @@ pub(super) async fn complete_assistant_reply_inner(
             entry,
         )
         .await
-        .map(|_| ArmReplyOutcome { message: None });
+        .map(|_| ArmReplyOutcome {
+            message: None,
+            run_id: None,
+            error: None,
+        });
     }
     let session = session_model_for_conversation(conversation);
     let auxiliary_vision_model = auxiliary_vision_model_for_images(
@@ -201,20 +244,12 @@ pub(super) async fn complete_assistant_reply_inner(
         let started = Instant::now();
         emit_chat_stream_delta(
             app,
-            &conversation.id,
             &run_id,
-            &assistant_message_id,
             "",
             None,
             Some(&tool_segment_for_record(&record, 100, None)),
         );
-        emit_chat_tool_record(
-            app,
-            &conversation.id,
-            &run_id,
-            &assistant_message_id,
-            &record,
-        );
+        emit_chat_tool_record(app, &run_id, &record);
         let analysis = tokio::select! {
             result = analyze_chat_images_with_auxiliary_model(
                 state,
@@ -235,15 +270,22 @@ pub(super) async fn complete_assistant_reply_inner(
                     None,
                     Some("Mixer vision analysis cancelled".to_string()),
                 );
-                emit_chat_tool_record(app, &conversation.id, &run_id, &assistant_message_id, &record);
+                emit_chat_tool_record(app, &run_id, &record);
                 auxiliary_tool_records.push(record);
-                emit_chat_stream_done(
+                if arm.is_some() {
+                    protocol_guard.defer_terminal();
+                    return Ok(ArmReplyOutcome {
+                        message: None,
+                        run_id: Some(run_id),
+                        error: Some("cancelled".to_string()),
+                    });
+                }
+                crate::chat::protocol::finish_run(
                     app,
-                    &conversation.id,
                     &run_id,
-                    &assistant_message_id,
                     "cancelled",
                     "",
+                    conversation.revision,
                 );
                 return Err("cancelled".to_string());
             }
@@ -257,13 +299,7 @@ pub(super) async fn complete_assistant_reply_inner(
                     Some(truncate_chars(result.content.trim(), 1000)),
                     None,
                 );
-                emit_chat_tool_record(
-                    app,
-                    &conversation.id,
-                    &run_id,
-                    &assistant_message_id,
-                    &record,
-                );
+                emit_chat_tool_record(app, &run_id, &record);
                 auxiliary_tool_records.push(record);
                 Some(result)
             }
@@ -275,14 +311,16 @@ pub(super) async fn complete_assistant_reply_inner(
                     None,
                     Some(err.clone()),
                 );
-                emit_chat_tool_record(
-                    app,
-                    &conversation.id,
-                    &run_id,
-                    &assistant_message_id,
-                    &record,
-                );
+                emit_chat_tool_record(app, &run_id, &record);
                 auxiliary_tool_records.push(record);
+                if arm.is_some() {
+                    protocol_guard.defer_terminal();
+                    return Ok(ArmReplyOutcome {
+                        message: None,
+                        run_id: Some(run_id),
+                        error: Some(err),
+                    });
+                }
                 return Err(err);
             }
         }
@@ -358,6 +396,14 @@ pub(super) async fn complete_assistant_reply_inner(
     }
     apply_inline_code_request_tool_filter(&mut tools, last_user_api_content);
     let blocked_tool_calls = apply_agent_plan_tool_filter(&mut tools, plan_mode);
+    // 会话级三态联网搜索（任务 07-23）：按有效模式收敛第三方 `search_web` 的暴露；
+    // 内置搜索走 `config.web_search_mode` → 各适配器请求体注入，不在工具列表里。
+    // builder 会话已清空工具（只留 save_assistant），不参与搜索门控。
+    let web_search_mode =
+        crate::chat::types::WebSearchMode::resolve(conversation.web_search_mode, &settings);
+    if !builder_mode {
+        apply_web_search_mode_tool_filter(&mut tools, web_search_mode, &settings);
+    }
     let user_tools_available = tools_capable && !tools.is_empty();
     agent_prepare::apply_skill_fallback_when_tools_unavailable(
         &mut effective_chat_tools,
@@ -366,11 +412,23 @@ pub(super) async fn complete_assistant_reply_inner(
     );
     let ask_user_tools_available = append_agent_ask_user_tools(&mut tools);
     let todo_tools_available = append_agent_todo_tools(&mut tools);
+    // Resolved here (rather than further down with the other prompt context) so
+    // the sub-agent role registry below can reuse the project root instead of
+    // resolving the conversation's project a second time.
+    let project_prompt_context = project_prompt_context_for(app, conversation);
     // Multi-agent spawn tool (P3): exposure is mode-controlled. Act and
     // Orchestrate both expose the `agent` tool; Plan mode excludes it (spawn is a
     // side-effecting, non-read-only capability).
     if !plan_mode && !builder_mode {
-        crate::chat::sub_agent::append_tool_definitions(&mut tools, true);
+        // Load the role registry (built-in + user + project) so the `agent`
+        // tool's schema lists the roles that actually exist for this
+        // conversation — the model must not have to guess role names.
+        let project_root = project_prompt_context
+            .as_ref()
+            .and_then(|context| context.root_path.as_deref())
+            .map(std::path::Path::new);
+        let agent_defs = crate::agents::load_agent_definitions(app, project_root);
+        crate::chat::sub_agent::append_tool_definitions(&mut tools, true, &agent_defs);
     }
     // Orchestrate mode raises the autonomy budget: a single user message may
     // need more tool rounds to plan, fan out sub-agents, and aggregate. We lift
@@ -387,7 +445,6 @@ pub(super) async fn complete_assistant_reply_inner(
         crate::chat::todo::format_prompt(&conversation.agent_todo_state, todo_tools_available);
     let agent_ask_user_prompt = crate::chat::ask_user::format_prompt(ask_user_tools_available);
     let agent_plan_prompt = crate::chat::plan::format_prompt(&conversation.agent_plan_state);
-    let project_prompt_context = project_prompt_context_for(app, conversation);
     // Default workbench surfaced to the model. It is an ergonomic default, not
     // a sandbox; explicit user paths continue to take precedence.
     let workbench_dir = crate::chat::storage::resolve_conversation_working_directory(
@@ -444,13 +501,26 @@ pub(super) async fn complete_assistant_reply_inner(
             None => system_prompt,
         };
 
-    let runtime_messages = build_chat_api_messages(
+    let runtime_messages = match build_chat_api_messages(
         &system_prompt,
         conversation,
         last_user_idx,
         last_user_content_for_main,
         main_image_paths,
-    )?;
+    ) {
+        Ok(messages) => messages,
+        Err(error) => {
+            if arm.is_some() {
+                protocol_guard.defer_terminal();
+                return Ok(ArmReplyOutcome {
+                    message: None,
+                    run_id: Some(run_id),
+                    error: Some(error),
+                });
+            }
+            return Err(error);
+        }
+    };
     let mut fallback_chat_tools = effective_chat_tools.clone();
     if skill_id.is_some() && fallback_chat_tools.skill_fallback_mode == "progressive" {
         fallback_chat_tools.skill_fallback_mode = "skill_md_only".to_string();
@@ -485,9 +555,28 @@ pub(super) async fn complete_assistant_reply_inner(
     let chat_host = ChatAgentHost {
         app: app.clone(),
         state: state.inner(),
+        run_id: run_id.clone(),
         // 多模型臂不直接落盘（最终由协调者统一 upsert + save），因此抑制 loop 的
         // mid-run 部分快照写盘，避免 N 条并发 run 同写 conversations/{id}.json 的竞态。
         suppress_partial_persist: arm.is_some(),
+        // 生命周期 Hooks：无启用条目时为 None，loop 完全不感知。先用 `any_enabled`
+        // 短路，没配 Hook 时连下面这几个 id / model 字符串都不分配（验收 6）。
+        hooks: crate::chat::hooks::HookDispatcher::any_enabled(&settings.chat_tools.hooks)
+            .then(|| {
+                crate::chat::hooks::HookDispatcher::new(
+                    app.clone(),
+                    &settings.chat_tools.hooks,
+                    conversation.id.clone(),
+                    run_id.clone(),
+                    assistant_message_id.clone(),
+                    workbench_dir
+                        .as_deref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(std::env::temp_dir),
+                    format!("{}:{}", provider.id, resolved_model),
+                )
+            })
+            .flatten(),
     };
     // probe（无头测试通道，仅 debug）：换用自动放行审批/consent/ask_user 的 host，
     // 否则模型调用敏感工具或 ask_user 会 await GUI 应答而永久挂起。
@@ -542,6 +631,7 @@ pub(super) async fn complete_assistant_reply_inner(
             language,
             thinking_enabled,
             thinking_level,
+            web_search_mode,
             stream_enabled,
             max_output_tokens,
             retry_attempts,
@@ -554,12 +644,69 @@ pub(super) async fn complete_assistant_reply_inner(
         &executor,
     )
     .await;
-    let result = result?;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if arm.is_some() {
+                protocol_guard.defer_terminal();
+                return Ok(ArmReplyOutcome {
+                    message: None,
+                    run_id: Some(run_id),
+                    error: Some(error),
+                });
+            }
+            let (terminal_content, terminal_revision) =
+                match crate::chat::repository::repository(app)
+                    .get(app, &conversation.id)
+                    .await
+                {
+                    Ok(latest) => {
+                        let content = latest
+                            .messages
+                            .iter()
+                            .find(|message| message.id == assistant_message_id)
+                            .map(|message| message.content.clone())
+                            .unwrap_or_default();
+                        let revision = latest.revision;
+                        *conversation = latest;
+                        (content, revision)
+                    }
+                    Err(_) => (String::new(), conversation.revision),
+                };
+            crate::chat::protocol::finish_run(
+                app,
+                &run_id,
+                if error == "cancelled" {
+                    "cancelled"
+                } else {
+                    "error"
+                },
+                &terminal_content,
+                terminal_revision,
+            );
+            return Err(error);
+        }
+    };
 
-    merge_latest_agent_todo_state(app, conversation);
-    merge_latest_agent_plan_state(app, conversation);
+    let refreshed = crate::chat::repository::repository(app)
+        .get(app, &conversation.id)
+        .await
+        .map_err(crate::chat::repository::repository_error);
+    *conversation = match refreshed {
+        Ok(conversation) => conversation,
+        Err(error) => {
+            if arm.is_some() {
+                protocol_guard.defer_terminal();
+                return Ok(ArmReplyOutcome {
+                    message: None,
+                    run_id: Some(run_id),
+                    error: Some(error),
+                });
+            }
+            return Err(error);
+        }
+    };
     let message_plan = capture_agent_plan_draft_if_needed(
-        app,
         conversation,
         plan_mode,
         &result.content,
@@ -569,6 +716,9 @@ pub(super) async fn complete_assistant_reply_inner(
     segments.extend(result.segments);
     let mut tool_records = auxiliary_tool_records;
     tool_records.extend(result.tool_records);
+    // 模型原生生成的图片（Gemini native image gen，任务 07-24）→ assistant 消息级 artifacts，
+    // 前端答案下方图片画廊直接展示（消费 message.artifacts）。空则无开销。
+    let artifacts = generated_image_artifacts(&result.images);
     let run_entry = agent_run_entry_label(entry);
     if let Some(arm) = arm {
         // 多模型臂：构造 assistant 消息但**不落盘**，交协调者统一合并 + 一次性 save。
@@ -576,7 +726,7 @@ pub(super) async fn complete_assistant_reply_inner(
             assistant_message_id,
             result.content,
             result.reasoning,
-            Vec::new(),
+            artifacts,
             tool_records,
             result.api_messages,
             segments,
@@ -592,8 +742,14 @@ pub(super) async fn complete_assistant_reply_inner(
                 resolved_model.clone(),
             )),
         );
+        // 降级兜底的结构化描述挂到消息上，前端渲染成独立错误卡片（正文不再混故障文案）。
+        let mut message = message;
+        message.degraded = result.degraded;
+        protocol_guard.defer_terminal();
         return Ok(ArmReplyOutcome {
             message: Some(message),
+            run_id: Some(run_id),
+            error: None,
         });
     }
     if let Some(boundary) = result.compaction_boundary.clone() {
@@ -632,6 +788,9 @@ pub(super) async fn complete_assistant_reply_inner(
             conversation.context_state.compression_count,
         );
     }
+    let terminal_content = result.content.clone();
+    let terminal_outcome = result.stream_outcome.clone();
+    let run_plan_update = message_plan.clone();
     push_assistant_message(
         app,
         state,
@@ -640,7 +799,7 @@ pub(super) async fn complete_assistant_reply_inner(
         assistant_message_id,
         result.content,
         result.reasoning,
-        Vec::new(),
+        artifacts,
         tool_records,
         result.api_messages,
         segments,
@@ -651,14 +810,103 @@ pub(super) async fn complete_assistant_reply_inner(
         result.usage,
         result.last_step_usage,
         message_plan,
+        result.degraded,
     )
     .await?;
-    Ok(ArmReplyOutcome { message: None })
+    if let Some(plan_state) = run_plan_update {
+        crate::chat::protocol::emit_run_event(
+            app,
+            &run_id,
+            crate::chat::protocol::ChatRunEvent::PlanUpdated {
+                plan_state: (&plan_state).into(),
+            },
+        );
+    }
+    crate::chat::protocol::finish_run(
+        app,
+        &run_id,
+        &terminal_outcome,
+        &terminal_content,
+        conversation.revision,
+    );
+    Ok(ArmReplyOutcome {
+        message: None,
+        run_id: None,
+        error: None,
+    })
 }
 
 pub(super) fn agent_run_entry_label(entry: crate::chat::agent::AgentRunEntry) -> &'static str {
     match entry {
         crate::chat::agent::AgentRunEntry::Send => "send",
         crate::chat::agent::AgentRunEntry::Regenerate => "regenerate",
+    }
+}
+
+/// 把模型原生生成的图片（`GenerateOutput.images`，任务 07-24）转成 assistant 消息级
+/// `ChatToolArtifact`：`data:{mime};base64,{data}` 内联，name `generated-image-{i}.{ext}`
+/// （1 基）。复用 image_generation 的 `extension_for_mime` / `decoded_base64_len`，与 Mixer
+/// 出图工具的 artifact 形态保持一致。空输入 → 空 Vec（无开销）。
+fn generated_image_artifacts(
+    images: &[crate::chat::model::GeneratedImageData],
+) -> Vec<crate::mcp::types::ChatToolArtifact> {
+    use crate::chat::image_generation::{decoded_base64_len, extension_for_mime};
+    images
+        .iter()
+        .enumerate()
+        .map(|(idx, image)| {
+            let extension = extension_for_mime(&image.mime_type);
+            crate::mcp::types::ChatToolArtifact {
+                id: None,
+                name: format!("generated-image-{}.{}", idx + 1, extension),
+                mime_type: image.mime_type.clone(),
+                data_url: format!("data:{};base64,{}", image.mime_type, image.data),
+                size_bytes: decoded_base64_len(&image.data),
+                path: None,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::model::GeneratedImageData;
+
+    /// 任务 07-24：Gemini 原生出图 → assistant 消息级 artifacts。转换产出 data_url 前缀 +
+    /// size_bytes，穿过 build_assistant_message 后落在 ChatMessage.artifacts。
+    #[test]
+    fn native_image_becomes_assistant_message_artifact() {
+        let images = vec![GeneratedImageData {
+            mime_type: "image/png".to_string(),
+            // base64("hello") = "aGVsbG8=" → 解码 5 字节。
+            data: "aGVsbG8=".to_string(),
+        }];
+        let artifacts = generated_image_artifacts(&images);
+
+        let message = build_assistant_message(
+            "msg_test".to_string(),
+            "这是图片。".to_string(),
+            None,
+            artifacts,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some("send"),
+            Some("completed"),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(message.artifacts.len(), 1);
+        let artifact = &message.artifacts[0];
+        assert_eq!(artifact.name, "generated-image-1.png");
+        assert_eq!(artifact.mime_type, "image/png");
+        assert!(artifact.data_url.starts_with("data:image/png;base64,"));
+        assert!(artifact.data_url.ends_with("aGVsbG8="));
+        assert_eq!(artifact.size_bytes, Some(5));
     }
 }

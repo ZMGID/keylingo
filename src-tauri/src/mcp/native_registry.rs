@@ -9,8 +9,7 @@
 //! - parallel whitelist in `chat/agent/rounds.rs::tool_call_parallel_eligible`
 //! - native read-only arm in `types.rs::ChatToolDefinition::is_read_only_tool`
 //!
-//! Contract notes (see `.trellis/spec/backend/agent-runtime.md` and
-//! `.trellis/spec/backend/file-tools.md`):
+//! Contract notes:
 //! - The `parallel_safe` set is intentionally narrow: web_search/web_fetch/
 //!   read plus the read-side project tools (ls/grep/find), and only when
 //!   approval-free. Do not widen or narrow it here without a spec change.
@@ -84,7 +83,7 @@ pub enum NativeToolCall {
     /// resolution because it only needs the conversation id, matching the
     /// legacy `RegistryToolExecutor` special case which never resolved a
     /// workspace for todo tools.
-    Conversation(fn(&AppHandle, &str, &str, Value) -> Result<McpToolCallResult, String>),
+    Conversation(for<'a> fn(&'a AppHandle, &'a str, &'a str, Value) -> NativeToolFuture<'a>),
     /// Host-mediated tool (ask_user): intercepted in
     /// `chat/agent/execute.rs::execute_ask_user_call` and must never reach
     /// the registry dispatcher.
@@ -356,7 +355,10 @@ pub static NATIVE_TOOLS: &[NativeToolEntry] = &[
     // governed by depth + concurrency caps, not per-call approval prompts.
     NativeToolEntry {
         name: crate::chat::sub_agent::AGENT_TOOL_NAME,
-        def: crate::chat::sub_agent::agent_tool,
+        // The real schema is built per-request with the loaded role registry
+        // (`sub_agent::append_tool_definitions`); the registry only needs the
+        // name/shape here, so an empty role list is correct.
+        def: || crate::chat::sub_agent::agent_tool(&[]),
         enabled: |_, _, _| false,
         // parallel_safe = true: each `agent` spawn runs in isolation (its own
         // synthetic conversation/generation/message history), bypasses approval,
@@ -712,6 +714,7 @@ fn call_advisor(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
                 retry_attempts,
                 false,
                 None,
+                false,
                 max_output_tokens,
                 &conversation_id,
                 &message_id,
@@ -778,6 +781,7 @@ fn call_run_command(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             ctx.settings.chat_tools.tool_timeout_ms,
             ctx.arguments,
             Some(ctx.state),
+            ctx.native_ctx.map(|c| c.conversation_id.as_str()),
         )
         .await?;
         Ok(text_tool_result(content))
@@ -793,10 +797,11 @@ fn call_bash_output(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             .and_then(|value| value.as_str())
             .map(|id| !id.trim().is_empty())
             .unwrap_or(false);
+        let conversation_id = ctx.native_ctx.map(|c| c.conversation_id.as_str());
         let content = if has_job {
-            crate::native_tools::bash_output(ctx.state, ctx.arguments)?
+            crate::native_tools::bash_output(ctx.state, ctx.arguments, conversation_id)?
         } else {
-            crate::native_tools::list_background(ctx.state, ctx.arguments)?
+            crate::native_tools::list_background(ctx.state, ctx.arguments, conversation_id)?
         };
         Ok(text_tool_result(content))
     })
@@ -804,7 +809,11 @@ fn call_bash_output(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
 
 fn call_kill_background(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     Box::pin(async move {
-        let content = crate::native_tools::kill_background(ctx.state, ctx.arguments)?;
+        let content = crate::native_tools::kill_background(
+            ctx.state,
+            ctx.arguments,
+            ctx.native_ctx.map(|c| c.conversation_id.as_str()),
+        )?;
         Ok(text_tool_result(content))
     })
 }
@@ -863,10 +872,19 @@ fn call_present_artifacts(
         return Err("present_artifacts accepts at most 16 files".to_string());
     }
 
-    let artifacts = paths
-        .iter()
-        .map(|path| local_file_artifact(workspace, path))
-        .collect::<Result<Vec<_>, _>>()?;
+    // 模型常把生成图的 artifact 名（generated-image-1.png）当成 path 一起传进来。
+    // 单个 path 读不到不能废掉整次调用，否则同一调用里的 artifact_ids 也一起丢，图就不显示了。
+    let mut artifacts = Vec::new();
+    let mut skipped = Vec::new();
+    for path in &paths {
+        match local_file_artifact(workspace, path) {
+            Ok(artifact) => artifacts.push(artifact),
+            Err(err) => skipped.push(err),
+        }
+    }
+    if artifacts.is_empty() && artifact_ids.is_empty() {
+        return Err(skipped.join("; "));
+    }
     let caption = arguments
         .get("caption")
         .and_then(Value::as_str)
@@ -880,8 +898,28 @@ fn call_present_artifacts(
     if let Some(caption) = caption {
         structured["caption"] = Value::String(caption);
     }
+    // 结果必须如实说清「展示了几个」。此前无条件写 "Selected files will be displayed"
+    // 再追加一句 "Skipped ..."，模型收到的是自相矛盾的两句话（说要展示、又说跳过了），
+    // 无法判断成没成，于是回空响应把整轮卡死（实测 out=4 tokens，稳定复现）。
+    let shown = artifact_ids.len() + artifacts.len();
+    let mut content = if shown == 1 {
+        "Displayed 1 file in the response.".to_string()
+    } else {
+        format!("Displayed {shown} files in the response.")
+    };
+    if !skipped.is_empty() {
+        // 措辞对准模型的真实错误：它把生成文件当本地路径传了。明说下次别再传 paths，
+        // 且明确「本次展示未受影响」，避免它以为整体失败而不敢往下说话。
+        content.push_str(&format!(
+            "\n\nIgnored {} unreadable path(s): {}. \
+             Generated files are addressed by artifact_ids only — do not pass them in paths. \
+             This did not affect the files listed above.",
+            skipped.len(),
+            skipped.join("; "),
+        ));
+    }
     Ok(McpToolCallResult {
-        content: "Selected files will be displayed at this point in the response.".to_string(),
+        content,
         is_error: false,
         raw: structured.clone(),
         artifacts,
@@ -1237,6 +1275,71 @@ mod tests {
             }))
         );
         assert!(result.artifacts.is_empty());
+    }
+
+    #[test]
+    fn present_artifacts_keeps_ids_when_a_path_is_unreadable() {
+        // 模型把生成图的 artifact 名当 path 传进来时，artifact_ids 仍须生效。
+        let workspace = NativeToolWorkspace::standalone();
+        let result = call_present_artifacts(
+            &workspace,
+            &serde_json::json!({
+                "artifact_ids": ["art_a"],
+                "paths": ["generated-image-1.png"]
+            }),
+        )
+        .expect("presentation survives an unreadable path");
+        assert!(result.artifacts.is_empty());
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["artifactIds"],
+            serde_json::json!(["art_a"])
+        );
+        assert!(result.content.contains("generated-image-1.png"));
+
+        // 回给模型的文本必须自洽：明说展示了 1 个，且声明本次展示未受影响。
+        // 此前是无条件的 "Selected files will be displayed" + "Skipped ..."，两句矛盾，
+        // 模型判断不出成没成而回空响应，整轮卡死（实测 out=4 tokens，稳定复现）。
+        assert!(
+            result.content.contains("Displayed 1 file"),
+            "must state how many were shown, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("did not affect"),
+            "must tell the model the presentation still succeeded, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("will be displayed"),
+            "must not promise a future display alongside a skip notice"
+        );
+        // 顺带引导模型别再拿生成文件当 path 传。
+        assert!(result.content.contains("artifact_ids"));
+
+        // 全部无效时仍报错。
+        assert!(call_present_artifacts(
+            &workspace,
+            &serde_json::json!({ "paths": ["generated-image-1.png"] })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn present_artifacts_reports_plural_and_stays_clean_without_skips() {
+        let workspace = NativeToolWorkspace::standalone();
+        let result = call_present_artifacts(
+            &workspace,
+            &serde_json::json!({ "artifact_ids": ["art_a", "art_b"] }),
+        )
+        .expect("presentation result");
+        assert!(
+            result.content.contains("Displayed 2 files"),
+            "got: {}",
+            result.content
+        );
+        // 没有跳过项时不该出现任何「忽略/未受影响」的噪音。
+        assert!(!result.content.contains("Ignored"));
+        assert!(!result.content.contains("did not affect"));
     }
 
     #[test]

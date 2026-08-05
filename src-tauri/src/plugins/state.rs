@@ -33,7 +33,7 @@ impl Default for PluginMeta {
 }
 
 pub fn plugins_root() -> Option<PathBuf> {
-    crate::kivio_code::settings_loader::app_data_dir().map(|dir| dir.join("plugins"))
+    crate::app_data::app_data_dir().map(|dir| dir.join("plugins"))
 }
 
 pub fn plugin_dir(id: &str) -> Option<PathBuf> {

@@ -51,11 +51,13 @@ function useSelectMenuRect(
 /**
  * 开关切换组件 — on 态用 brand 蓝，slider 加双层阴影
  */
-export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+export function Toggle({ checked, onChange, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; ariaLabel?: string }) {
   return (
     <button
       type="button"
-      onClick={() => onChange(!checked)}
+      onClick={() => !disabled && onChange(!checked)}
+      disabled={disabled}
+      aria-label={ariaLabel}
       role="switch"
       aria-checked={checked}
       className={`kv-toggle ${checked ? 'on' : ''}`}
@@ -67,11 +69,14 @@ export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: 
 /**
  * 下拉选择 — 自绘菜单，避免 macOS 原生 select 的系统高亮/勾选反馈和受控状态不同步。
  */
-export function Select({ value, onChange, options, className = '' }: {
+export function Select({ value, onChange, options, className = '', disabled: disabledProp = false, title }: {
   value: string
   onChange: (v: string) => void
   options: SelectOption[]
   className?: string
+  disabled?: boolean
+  /** 覆盖触发按钮的原生 tooltip（默认显示当前选中项）。 */
+  title?: string
 }) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -79,7 +84,7 @@ export function Select({ value, onChange, options, className = '' }: {
   const selected = options.find(opt => opt.value === value)
   const displayLabel = selected?.label || value
   const displayTitle = selected?.title || displayLabel
-  const disabled = options.length === 0
+  const disabled = disabledProp || options.length === 0
   const { menuRect, updateMenuRect } = useSelectMenuRect(open, value, options.length, triggerRef)
 
   useEffect(() => {
@@ -125,7 +130,7 @@ export function Select({ value, onChange, options, className = '' }: {
         className="kv-select kv-select-button relative w-full h-[30px] text-left disabled:opacity-50 disabled:cursor-not-allowed"
         aria-haspopup="listbox"
         aria-expanded={open}
-        title={displayTitle}
+        title={title ?? displayTitle}
         data-tauri-drag-region="false"
       >
         <span className="block truncate">{displayLabel}</span>
@@ -140,7 +145,7 @@ export function Select({ value, onChange, options, className = '' }: {
         <div
           ref={menuRef}
           role="listbox"
-          className="kv-select-menu fixed z-[1000] overflow-y-auto custom-scrollbar p-1"
+          className="kv-select-menu fixed z-[1000] overflow-y-auto custom-scrollbar"
           style={{ left: menuRect.left, top: menuRect.top, bottom: menuRect.bottom, width: menuRect.width, maxHeight: menuRect.maxHeight }}
           data-tauri-drag-region="false"
         >
@@ -158,21 +163,11 @@ export function Select({ value, onChange, options, className = '' }: {
                   triggerRef.current?.focus()
                 }}
                 title={opt.title || opt.label}
-                className={`relative flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 pr-8 text-left text-[12.5px] leading-5 transition-colors ${
-                  active
-                    ? 'bg-blue-600 text-white'
-                    : 'text-neutral-800 dark:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08]'
-                }`}
+                className={`kv-select-option ${active ? 'is-active' : ''}`}
                 data-tauri-drag-region="false"
               >
+                <Check className="kv-select-option-check" strokeWidth={2.5} aria-hidden />
                 <span className="min-w-0 flex-1 truncate">{opt.label}</span>
-                {active && (
-                  <Check
-                    size={14}
-                    strokeWidth={2.5}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2"
-                  />
-                )}
               </button>
             )
           })}
@@ -260,6 +255,32 @@ export function SettingRow({ label, description, children, className = '', stack
         )}
       </div>
       {stack ? children : <div className="kv-row-control">{children}</div>}
+    </div>
+  )
+}
+
+/**
+ * 纵向字段块：标签 + 说明在上，控件在下。
+ * 原在 SettingsShell 内部，抽 tab 组件后需跨模块共享，移到这里。
+ */
+export function FieldBlock({
+  label,
+  description,
+  children,
+  className = '',
+}: {
+  label: ReactNode
+  description?: string
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <div className={`py-2 ${className}`}>
+      <div className="mb-2">
+        <div className="kv-row-label">{label}</div>
+        {description && <p className="kv-row-desc">{description}</p>}
+      </div>
+      {children}
     </div>
   )
 }
@@ -427,13 +448,16 @@ export function HotkeyInput({
       <div className="flex items-center gap-2">
         <div
           className={`kv-hotkey ${inline ? '' : 'flex-1'} ${recording ? 'recording' : ''} ${error ? 'error' : ''}`}
+          title={!value && !recording ? placeholder : undefined}
         >
           {recording ? (
             <span className="kv-hotkey-record-label animate-pulse">{recordingPlaceholder}</span>
           ) : value ? (
             <HotkeyDisplay hotkey={value} />
           ) : (
-            <span className="text-[12px] text-neutral-400 dark:text-neutral-500">{placeholder}</span>
+            <span className="min-w-0 truncate text-[12px] leading-[19px] text-neutral-400 dark:text-neutral-500">
+              {placeholder}
+            </span>
           )}
           {showClear && (
             <button

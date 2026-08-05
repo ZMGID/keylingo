@@ -1,11 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import { createPortal } from 'react-dom'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Layers } from 'lucide-react'
 import { type ModelProvider } from '../api/tauri'
 import { getSettingsCached } from '../api/settingsCache'
+import { useT } from '../settings/i18n'
 import { isProviderEnabled } from '../settings/utils'
 import { ModelIcon } from './ModelIcon'
 import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { ModelRef } from './types'
 
 const MAX_REPLY_MODELS = 4
@@ -14,21 +15,21 @@ interface MultiModelSelectorProps {
   // 当前会话级多答模型集（含单模型时的会话主模型 0/1 个）。
   value: ModelRef[]
   onChange: (models: ModelRef[]) => void
-  // 弹层方向：与输入框其他按钮（知识库/项目/MCP/专家）一致——footer 朝上、inline 朝下。
+  // 弹层方向：footer 朝上、inline 朝下。
   placement?: 'up' | 'down'
-  // 弹层 portal 挂载到输入框容器，与项目/知识库弹窗共用同一锚点/整宽/方向/样式。
-  anchorRef?: RefObject<HTMLDivElement | null>
 }
 
 function sameRef(a: ModelRef, b: ModelRef): boolean {
   return a.provider_id === b.provider_id && a.model === b.model
 }
 
-function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }: MultiModelSelectorProps) {
+function MultiModelSelectorBase({ value, onChange, placement = 'up' }: MultiModelSelectorProps) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const triggerRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const maxH = usePopoverMaxHeight(open, popoverRef, placement === 'down' ? 'down' : 'up', 360)
 
   const loadProviders = useCallback(async () => {
     try {
@@ -48,8 +49,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
     if (!open) return
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node
-      // 弹层经 portal 渲染到容器外，需同时排除触发区与弹层本身，否则点弹层会被判为外部点击而关闭。
-      if (triggerRef.current?.contains(t) || popoverRef.current?.contains(t)) return
+      if (triggerRef.current?.contains(t)) return
       setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
@@ -99,69 +99,8 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
 
   const enabled = value.length >= 2
 
-  // 与输入框其他弹层一致：朝上(footer)用 bottom-full，朝下(inline)用 top-full。
   const placementClass = placement === 'down' ? 'top-full mt-1.5' : 'bottom-full mb-1.5'
   const popoverOrigin = placement === 'down' ? 'top left' : 'bottom left'
-
-  // 面板内容：与项目/知识库弹窗共用——portal 到输入框容器、inset-x-0 整宽、按 placement 上下翻转。
-  const panel =
-    open && anchorRef?.current
-      ? createPortal(
-          <div
-            ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 max-h-[min(420px,60vh)] overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placementClass}`}
-            style={{ ['--chat-popover-origin' as string]: popoverOrigin }}
-            data-tauri-drag-region="false"
-            role="menu"
-          >
-            <div className="px-2.5 py-1 text-[11px] font-medium text-neutral-400">
-              选择并行回答的模型（{value.length}/{MAX_REPLY_MODELS}）。选 0 或 1 个 = 单模型。
-            </div>
-            {visibleProviders.map(({ provider, models }) => (
-              <div key={provider.id} className="px-1 py-0.5">
-                <div className="px-2.5 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-                  {provider.name}
-                </div>
-                {models.map((model) => {
-                  const checked = value.some((item) => sameRef(item, { provider_id: provider.id, model }))
-                  const disabled = !checked && atLimit
-                  return (
-                    <button
-                      key={model}
-                      type="button"
-                      disabled={disabled}
-                      onClick={() => toggle(provider.id, model)}
-                      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px] transition-colors ${
-                        checked
-                          ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
-                          : disabled
-                            ? 'cursor-default text-neutral-300 dark:text-neutral-600'
-                            : 'text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:hover:bg-neutral-800/80'
-                      }`}
-                    >
-                      <span
-                        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
-                          checked
-                            ? 'border-emerald-500 bg-emerald-500 text-white'
-                            : 'border-neutral-300 dark:border-neutral-600'
-                        }`}
-                      >
-                        {checked && <span className="text-[10px] leading-none">✓</span>}
-                      </span>
-                      <ModelIcon model={model} size={16} />
-                      <span className="min-w-0 truncate">{model}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            ))}
-            {visibleProviders.length === 0 && (
-              <div className="px-4 py-6 text-center text-sm text-neutral-500">暂无可用模型</div>
-            )}
-          </div>,
-          anchorRef.current,
-        )
-      : null
 
   return (
     <div ref={triggerRef} className="relative flex min-w-0 items-center gap-1" data-tauri-drag-region="false">
@@ -171,7 +110,7 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="menu"
-        label="多模型一问多答 · 选择并行回答的模型（上限 4）"
+        label={t.chatMultiModelLabel.replace('{max}', String(MAX_REPLY_MODELS))}
         className={`shrink-0 ${enabled ? 'text-emerald-600 dark:text-emerald-400' : ''}`}
       >
         <Layers size={18} strokeWidth={1.75} className="shrink-0" />
@@ -184,10 +123,12 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
               key={`${ref.provider_id}:${ref.model}`}
               type="button"
               onClick={() => removeChip(ref)}
-              aria-label={`移除 ${ref.model}`}
+              aria-label={t.chatRemoveNamed.replace('{name}', ref.model)}
               className="chat-model-stack-item relative -ml-2 transition-[margin,transform] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-standard)] first:ml-0 hover:scale-110 active:scale-95 group-hover/stack:ml-1 group-hover/stack:first:ml-0"
               style={{ zIndex: value.length - i }}
-              title={`${ref.model} | ${providerName(ref.provider_id)} · 点击移除`}
+              title={t.chatModelChipHint
+                .replace('{model}', ref.model)
+                .replace('{provider}', providerName(ref.provider_id))}
             >
               <span className="grid size-6 place-items-center rounded-full border border-neutral-200 bg-white dark:border-neutral-600 dark:bg-neutral-800">
                 <ModelIcon model={ref.model} size={14} />
@@ -197,7 +138,62 @@ function MultiModelSelectorBase({ value, onChange, placement = 'up', anchorRef }
         </div>
       )}
 
-      {panel}
+      {open && (
+        <div
+          ref={popoverRef}
+          className={`chat-motion-popover chat-popover-scroll absolute left-0 z-50 w-[min(280px,calc(100vw-24px))] overflow-y-auto kv-menu ${placementClass}`}
+          style={{ ['--chat-popover-origin' as string]: popoverOrigin, maxHeight: maxH }}
+          data-tauri-drag-region="false"
+          role="menu"
+        >
+          <div className="px-2.5 py-1 text-[11px] font-medium text-neutral-400">
+            {t.chatMultiModelHint
+              .replace('{n}', String(value.length))
+              .replace('{max}', String(MAX_REPLY_MODELS))}
+          </div>
+          {visibleProviders.map(({ provider, models }) => (
+            <div key={provider.id} className="px-1 py-0.5">
+              <div className="px-2.5 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
+                {provider.name}
+              </div>
+              {models.map((model) => {
+                const checked = value.some((item) => sameRef(item, { provider_id: provider.id, model }))
+                const disabled = !checked && atLimit
+                return (
+                  <button
+                    key={model}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => toggle(provider.id, model)}
+                    className={`kv-menu-row transition-colors ${
+                      checked
+                        ? 'bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
+                        : disabled
+                          ? 'cursor-default text-neutral-300 dark:text-neutral-600'
+                          : 'text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:hover:bg-neutral-800/80'
+                    }`}
+                  >
+                    <span
+                      className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                        checked
+                          ? 'border-emerald-500 bg-emerald-500 text-white'
+                          : 'border-neutral-300 dark:border-neutral-600'
+                      }`}
+                    >
+                      {checked && <span className="text-[10px] leading-none">✓</span>}
+                    </span>
+                    <ModelIcon model={model} size={16} />
+                    <span className="min-w-0 truncate">{model}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+          {visibleProviders.length === 0 && (
+            <div className="px-4 py-6 text-center text-sm text-neutral-500">{t.chatNoModels}</div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

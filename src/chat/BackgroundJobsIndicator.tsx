@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Square, TerminalSquare } from 'lucide-react'
 import { api, type BackgroundCommandInfo } from '../api/tauri'
+import { useT } from '../settings/i18n'
 import { chatTitlebarIconButtonClass } from './platform'
 
 const POLL_MS = 2500
@@ -23,9 +24,10 @@ function formatElapsed(secs: number): string {
  * absolutely-positioned popover inside the header.
  */
 export function BackgroundJobsIndicator() {
+  const t = useT()
   const [jobs, setJobs] = useState<BackgroundCommandInfo[]>([])
   const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [pos, setPos] = useState<{ top: number; left: number; maxH: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const killing = useRef<Set<string>>(new Set())
 
@@ -50,7 +52,10 @@ export function BackgroundJobsIndicator() {
 
   const place = useCallback(() => {
     const rect = btnRef.current?.getBoundingClientRect()
-    if (rect) setPos({ top: rect.bottom + 6, left: rect.left })
+    if (rect) {
+      const top = rect.bottom + 6
+      setPos({ top, left: rect.left, maxH: Math.max(160, Math.min(360, window.innerHeight - top - 8)) })
+    }
   }, [])
 
   // Nothing running → don't show, and don't keep a stale popover open.
@@ -86,6 +91,8 @@ export function BackgroundJobsIndicator() {
     setOpen((v) => !v)
   }
 
+  const runningLabel = t.chatBgJobsRunning.replace('{n}', String(jobs.length))
+
   return (
     <div className="relative" data-tauri-drag-region="false">
       <button
@@ -97,8 +104,8 @@ export function BackgroundJobsIndicator() {
             ? 'bg-black/[0.06] text-neutral-800 dark:bg-white/[0.09] dark:text-neutral-100'
             : 'text-emerald-600 hover:text-emerald-700 dark:text-emerald-500 dark:hover:text-emerald-400'
         }`}
-        title={`${jobs.length} 个后台命令运行中`}
-        aria-label={`${jobs.length} 个后台命令运行中`}
+        title={runningLabel}
+        aria-label={runningLabel}
       >
         <TerminalSquare size={16} strokeWidth={1.8} />
         <span className="absolute -right-0.5 -top-0.5 flex size-2">
@@ -112,11 +119,11 @@ export function BackgroundJobsIndicator() {
           <>
             <div className="fixed inset-0 z-[2000]" onClick={() => setOpen(false)} aria-hidden />
             <div
-              className="chat-motion-popover chat-popover-scroll fixed z-[2001] max-h-[min(360px,55vh)] w-[320px] overflow-y-auto rounded-2xl border border-neutral-200/90 bg-white p-1.5 shadow-xl dark:border-neutral-700 dark:bg-neutral-900"
-              style={{ top: pos.top, left: pos.left }}
+              className="chat-motion-popover chat-popover-scroll fixed z-[2001] w-[320px] overflow-y-auto kv-menu"
+              style={{ top: pos.top, left: pos.left, maxHeight: pos.maxH }}
             >
               <div className="px-2 py-1.5 text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
-                后台命令 · {jobs.length}
+                {t.chatBgJobs.replace('{n}', String(jobs.length))}
               </div>
               {jobs.map((job) => (
                 <div
@@ -139,8 +146,8 @@ export function BackgroundJobsIndicator() {
                     type="button"
                     onClick={() => void kill(job.jobId)}
                     className="grid size-7 shrink-0 place-items-center rounded-md text-neutral-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30 dark:hover:text-red-300"
-                    title="终止"
-                    aria-label={`终止 ${job.command}`}
+                    title={t.chatKill}
+                    aria-label={t.chatKillNamed.replace('{name}', job.command)}
                   >
                     <Square size={13} strokeWidth={2} fill="currentColor" />
                   </button>

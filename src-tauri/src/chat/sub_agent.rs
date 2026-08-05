@@ -41,9 +41,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
 
+use crate::agents::AgentDefinition;
 use crate::chat::agent::prepare::{available_builtin_tool_names, build_chat_system_prompt};
 use crate::chat::agent::types::AgentRunResult;
 use crate::chat::agent::{
@@ -82,6 +83,10 @@ const MAX_SUB_AGENT_TASKS: usize = 128;
 /// `run_agent_loop` surfaces as `Err`. Top-level chat recovers via user resend;
 /// a sub-agent has no resend loop, so we retry the run once before giving up.
 const SUB_AGENT_MAX_ATTEMPTS: usize = 2;
+/// Substring identifying the "model returned an empty assistant message" error
+/// produced by `run_agent_loop`. Single source of truth for both the retry
+/// predicate (`should_retry_sub_agent`) and the user-facing error mapping.
+const EMPTY_RESPONSE_MARKER: &str = "empty assistant response";
 /// Outer per-tool-call timeout for the `agent` spawn tool. The sub-agent run
 /// itself has no inner wall-clock cap (it finishes naturally or via cascade
 /// cancel); the default generic tool timeout (120s) is far shorter and would
@@ -105,16 +110,22 @@ pub fn depth_allows_spawn(depth: u8) -> bool {
     depth < MAX_SUB_AGENT_DEPTH
 }
 
-/// Whether a failed sub-agent run should be retried. Retry only when the outcome
-/// is an error that is NOT a cancellation, there are attempts remaining, and the
-/// parent generation is still active (so we never retry after a cascade cancel).
-/// A cancellation (own stop or parent cascade) must never be retried.
+/// Whether a failed sub-agent run should be retried. Retry ONLY the empty
+/// assistant response case (reasoning models intermittently return an empty
+/// planning message and a sub-agent has no user resend loop), with attempts
+/// remaining and the parent generation still active.
+///
+/// Deliberately narrow: a retry re-runs the whole agent loop from scratch, so
+/// any other error class would re-execute side effects already performed in the
+/// failed attempt (e.g. a run that wrote files over several rounds and only then
+/// hit a fatal provider error would write them twice). A cancellation (own stop
+/// or parent cascade) is never retried.
 fn should_retry_sub_agent(
     outcome: &Result<AgentRunResult, String>,
     attempt: usize,
     parent_active: bool,
 ) -> bool {
-    matches!(outcome, Err(err) if err != "cancelled")
+    matches!(outcome, Err(err) if err.contains(EMPTY_RESPONSE_MARKER))
         && attempt + 1 < SUB_AGENT_MAX_ATTEMPTS
         && parent_active
 }
@@ -432,20 +443,19 @@ impl SubAgentHost {
             guard.last_emit = Some(now);
             (clip(&guard.text, 1200), guard.aggregate_steps())
         };
-        let _ = self.app.emit(
-            "chat-subagent",
-            serde_json::json!({
-                "parentConversationId": self.parent_conversation_id,
-                "parentRunId": self.parent_run_id,
-                "parentToolCallId": self.parent_tool_call_id,
-                "taskId": self.task_id,
-                "name": self.name,
-                "model": self.model,
-                "depth": self.depth,
-                "status": status,
-                "preview": text,
-                "steps": steps,
-            }),
+        crate::chat::protocol::emit_run_event(
+            &self.app,
+            &self.parent_run_id,
+            crate::chat::protocol::ChatRunEvent::SubagentUpdated {
+                parent_tool_call_id: self.parent_tool_call_id.clone(),
+                task_id: self.task_id.clone(),
+                name: self.name.clone(),
+                model: Some(self.model.clone()),
+                depth: self.depth,
+                status: status.to_string(),
+                preview: Some(text),
+                steps,
+            },
         );
     }
 }
@@ -465,18 +475,6 @@ impl AgentHost for SubAgentHost {
             guard.text.push_str(delta);
         }
         self.emit_progress("running", false);
-    }
-
-    fn emit_stream_done(
-        &self,
-        _conversation_id: &str,
-        _run_id: &str,
-        _message_id: &str,
-        _reason: &str,
-        _full: &str,
-    ) {
-        // Final state is delivered as the parent tool record's structured
-        // content by the spawn handler; nothing to do here.
     }
 
     fn emit_tool_record(
@@ -745,6 +743,8 @@ async fn run_sub_agent(app: AppHandle, req: SubAgentRequest) -> Result<AgentRunR
             language: req.language.clone(),
             thinking_enabled,
             thinking_level: None,
+            // 子代理不做联网搜索（父代理的搜索结果已在上下文里）。
+            web_search_mode: crate::chat::types::WebSearchMode::Off,
             stream_enabled,
             max_output_tokens,
             retry_attempts,
@@ -793,7 +793,38 @@ pub struct SubAgentCallCtx<'a> {
     pub arguments: &'a Value,
 }
 
-pub fn agent_tool() -> ChatToolDefinition {
+/// Compose the `subagent_type` parameter description from the ACTUALLY loaded
+/// definitions (built-in + user + project), so the model discovers user-authored
+/// roles without being told they exist. Deliberately no JSON-Schema `enum`: a
+/// role file created mid-run would be rejected provider-side, and inline ad-hoc
+/// roles omit the field entirely — a soft failure listing the available roles is
+/// more useful.
+fn subagent_type_description(defs: &[AgentDefinition]) -> String {
+    let available = defs
+        .iter()
+        .map(|d| {
+            let description = d.description.trim();
+            if description.is_empty() {
+                d.name.clone()
+            } else {
+                format!("{} — {}", d.name, description)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut out = String::from("Named agent role.");
+    if !available.is_empty() {
+        out.push_str(" Available: ");
+        out.push_str(&available);
+        out.push('.');
+    }
+    out.push_str(
+        " Omit to use general-purpose, or omit it and pass system_prompt/tools to define an ad-hoc role inline.",
+    );
+    out
+}
+
+pub fn agent_tool(defs: &[AgentDefinition]) -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__agent".to_string(),
         name: AGENT_TOOL_NAME.to_string(),
@@ -811,12 +842,26 @@ pub fn agent_tool() -> ChatToolDefinition {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "Agent type: general-purpose (default), researcher, coder, reviewer, or a user/project-defined type."
+                    "description": subagent_type_description(defs)
                 },
                 "name": {
                     "type": "string",
                     "maxLength": 80,
                     "description": "Optional short label for this sub-agent run."
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "description": "Ad-hoc persona for this run. Replaces the named role's prompt."
+                },
+                "tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Ad-hoc tool allow-list, replacing the named role's. Supports `mcp__<server>__*`, `mcp__*`, `*`. Empty means inherit every tool."
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Ad-hoc tool deny-list, replacing the named role's. Applied BEFORE `tools`."
                 }
             },
             "required": ["prompt"],
@@ -832,15 +877,19 @@ pub fn agent_tool() -> ChatToolDefinition {
     }
 }
 
-pub fn tool_definitions() -> Vec<ChatToolDefinition> {
-    vec![agent_tool()]
+pub fn tool_definitions(defs: &[AgentDefinition]) -> Vec<ChatToolDefinition> {
+    vec![agent_tool(defs)]
 }
 
 /// Append sub-agent management tools (model-facing), skipping the `agent`
 /// spawn tool when `allow_spawn` is false (i.e. inside a sub-agent — second
 /// guard against recursion alongside the depth check).
-pub fn append_tool_definitions(tools: &mut Vec<ChatToolDefinition>, allow_spawn: bool) {
-    for tool in tool_definitions() {
+pub fn append_tool_definitions(
+    tools: &mut Vec<ChatToolDefinition>,
+    allow_spawn: bool,
+    defs: &[AgentDefinition],
+) {
+    for tool in tool_definitions(defs) {
         if tool.name == AGENT_TOOL_NAME && !allow_spawn {
             continue;
         }
@@ -851,6 +900,71 @@ pub fn append_tool_definitions(tools: &mut Vec<ChatToolDefinition>, allow_spawn:
             tools.push(tool);
         }
     }
+}
+
+/// Apply the `agent` call's inline role fields onto `def`. Each field is a WHOLE
+/// REPLACEMENT, not a merge: merging could not express "researcher, but without
+/// web_fetch", while replacement expresses any combination under one rule.
+/// Empty strings / empty arrays count as "not provided".
+fn apply_inline_overrides(def: &mut AgentDefinition, arguments: &Value) {
+    if let Some(prompt) = arguments
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        def.system_prompt = prompt.to_string();
+    }
+    if let Some(tools) = inline_string_list(arguments, "tools") {
+        def.tools = tools;
+    }
+    if let Some(denied) = inline_string_list(arguments, "disallowed_tools") {
+        def.disallowed_tools = denied;
+    }
+}
+
+/// Read an inline `Vec<String>` argument, returning `None` when absent or empty
+/// (so an empty array never turns into a narrowing that blocks everything).
+fn inline_string_list(arguments: &Value, key: &str) -> Option<Vec<String>> {
+    let items: Vec<String> = arguments
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!items.is_empty()).then_some(items)
+}
+
+/// Message for a spawn refused because its narrowing left no tools. The two
+/// causes need different wording: a denylist that emptied the pool is NOT a
+/// spelling problem, and reporting correctly-spelled allow entries as
+/// "unresolved" sends the model off fixing names that were never wrong.
+///
+/// `deny_emptied_pool` must be computed on the pre-narrowing catalog, because
+/// `unresolved_allow_entries` skips denied tools and therefore reports every
+/// allow entry as unresolved under a deny-all — exactly the misleading case.
+fn zero_tool_refusal(
+    def: &AgentDefinition,
+    unresolved: &[String],
+    deny_emptied_pool: bool,
+) -> String {
+    let prefix = format!("Sub-agent '{}' would launch with zero tools", def.name);
+    if deny_emptied_pool {
+        return format!(
+            "{prefix}: disallowed_tools ({}) removed every tool. Narrow the deny-list, or use `tools` to allow-list what the sub-agent needs.",
+            def.disallowed_tools.join(", ")
+        );
+    }
+    if !unresolved.is_empty() {
+        return format!(
+            "{prefix}. These entries matched no available tool: {}.",
+            unresolved.join(", ")
+        );
+    }
+    format!("{prefix}. Check its tools / disallowedTools configuration.")
 }
 
 fn err_result(message: impl Into<String>) -> McpToolCallResult {
@@ -933,7 +1047,10 @@ pub fn handle_agent_spawn<'a>(
                     .join(", ")
             )));
         };
-        let def = def.clone();
+        // The named role is the BASE; inline `system_prompt`/`tools`/
+        // `disallowed_tools` replace their counterparts for this run only (R2).
+        let mut def = def.clone();
+        apply_inline_overrides(&mut def, ctx.arguments);
 
         // Provider/model resolution, three tiers:
         //   1. agent definition `model` field — highest, resolved against the
@@ -969,7 +1086,38 @@ pub fn handle_agent_spawn<'a>(
         let mut tools = crate::mcp::registry::list_enabled_tool_catalog(ctx.app, ctx.state)
             .await
             .tools;
+        // Computed on the UNFILTERED catalog (before narrowing) so the refusal
+        // below can name the entries that matched nothing.
+        let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&tools, &def);
+        // Whether the DENYLIST alone leaves nothing behind, measured before the
+        // allow-list narrows anything. Drives the refusal wording below.
+        let deny_emptied_pool = !def.disallowed_tools.is_empty()
+            && !tools.is_empty()
+            && tools.iter().all(|tool| {
+                def.disallowed_tools
+                    .iter()
+                    .any(|entry| crate::chat::agent::filter::entry_matches(tool, entry))
+                    || is_sub_agent_tool_name(&tool.name)
+            });
         crate::chat::agent::filter::filter_tools_for_agent(&mut tools, &def);
+        // Spec: a narrowing that resolves to the empty set must REFUSE to launch
+        // rather than silently start a zero-tool worker. Skill tools are kept
+        // unconditionally by the filter, so they don't count as resolved.
+        // Both lists are checked: a deny-all (`disallowed_tools: ["*"]`) empties
+        // the pool even when `tools` is empty, which the allow-only guard missed.
+        let narrowing_requested = !def.tools.is_empty() || !def.disallowed_tools.is_empty();
+        if narrowing_requested
+            && tools.iter().all(|tool| {
+                tool.source == "skill"
+                    || crate::chat::agent::prepare::is_native_skill_tool_name(&tool.name)
+            })
+        {
+            return Ok(err_result(zero_tool_refusal(
+                &def,
+                &unresolved,
+                deny_emptied_pool,
+            )));
+        }
         let available_builtin_tools = available_builtin_tool_names(&tools);
 
         // Compose the sub-agent system prompt: persona prefix + base chat
@@ -983,11 +1131,20 @@ pub fn handle_agent_spawn<'a>(
             &settings.email_accounts,
             himalaya_binary.as_deref(),
         );
+        // Real skill registry (was `SkillRegistry::default()` — an empty catalog,
+        // so the skill tools the filter deliberately keeps had nothing to find).
+        // Always the FULL registry: `def.skills` is a preload list, not a
+        // visibility narrowing, so the sub-agent can still activate other skills.
+        let skill_registry =
+            crate::skills::build_registry(ctx.app, &settings.chat_tools.skill_scan_paths)
+                .unwrap_or_default();
+        let persona =
+            compose_persona_with_preloaded_skills(&def.system_prompt, &skill_registry, &def.skills);
         let system_prompt = build_chat_system_prompt(
             &language,
             false,
             settings.chat.thinking_enabled,
-            &SkillRegistry::default(),
+            &skill_registry,
             &settings.chat_tools,
             true,
             &available_builtin_tools,
@@ -995,7 +1152,7 @@ pub fn handle_agent_spawn<'a>(
             None,
             None,
             None,
-            &compose_persona(&def.system_prompt),
+            &persona,
             None,
             None,
             None,
@@ -1155,8 +1312,8 @@ impl Drop for SpawnDropGuard {
 /// Turn a sub-agent run outcome into the task record update + tool result.
 /// Marks the record finished and returns the `McpToolCallResult` (returned
 /// inline to the parent loop). The synchronous path emits NO terminal
-/// `chat-subagent` event: the full result (status + content + usage) propagates
-/// inline via the `chat-tool` flow, and the card keeps the last running progress
+/// Protocol subagent update: the full result (status + content + usage) propagates
+/// inline via the tool update flow, and the card keeps the last running progress
 /// event's accumulated steps/preview — a terminal event (whose payload omits
 /// steps/preview) would overwrite `subagentProgress` with empty arrays and wipe
 /// that step history. Resolves `AppState`/manager from the owned `AppHandle`.
@@ -1282,7 +1439,7 @@ fn compute_sub_agent_finalization(
             // internal error string. The empty-assistant-response case (a
             // reasoning model returning nothing in planning) is the common
             // failure; other errors keep their original text.
-            let display_err = if err.contains("empty assistant response") {
+            let display_err = if err.contains(EMPTY_RESPONSE_MARKER) {
                 "Subagent 运行失败：模型返回了空响应（可重试）。".to_string()
             } else {
                 err.clone()
@@ -1329,6 +1486,33 @@ fn compose_persona(persona: &str) -> String {
             "{persona}\n\nYou are running as a sub-agent: work autonomously with the available tools and return a clear, complete final answer. You cannot ask the user questions."
         )
     }
+}
+
+/// Persona + `skills:` PRELOAD (industry semantics): the listed skills' full
+/// bodies are injected into the launch context so the sub-agent starts with that
+/// knowledge instead of having to activate them first. It does NOT restrict which
+/// skills it may activate later — the registry stays full.
+///
+/// Rides on `custom_system_prompt` (the persona channel) rather than
+/// `active_skill_detail`: that channel only injects under the
+/// `skill_md_only`/`legacy_full_body` fallback modes, so on the default
+/// `progressive` mode a preload through it would silently do nothing.
+fn compose_persona_with_preloaded_skills(
+    persona: &str,
+    registry: &SkillRegistry,
+    skills: &[String],
+) -> String {
+    let base = compose_persona(persona);
+    let bodies: Vec<String> = skills
+        .iter()
+        .filter_map(|id| registry.find(id))
+        .filter(|record| !record.body.trim().is_empty())
+        .map(|record| format!("Preloaded Skill ({}):\n{}", record.meta.name, record.body))
+        .collect();
+    if bodies.is_empty() {
+        return base;
+    }
+    format!("{base}\n\n{}", bodies.join("\n\n"))
 }
 
 #[cfg(test)]
@@ -1399,7 +1583,7 @@ mod tests {
     #[test]
     fn append_tools_strips_spawn_when_not_allowed() {
         let mut tools = Vec::new();
-        append_tool_definitions(&mut tools, false);
+        append_tool_definitions(&mut tools, false, &[]);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(
             !names.contains(&"agent"),
@@ -1410,9 +1594,278 @@ mod tests {
     #[test]
     fn append_tools_includes_spawn_when_allowed() {
         let mut tools = Vec::new();
-        append_tool_definitions(&mut tools, true);
+        append_tool_definitions(&mut tools, true, &[]);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"agent"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic role schema (R1) + inline ad-hoc roles (R2)
+    // -----------------------------------------------------------------------
+
+    fn test_def(id: &str, description: &str) -> AgentDefinition {
+        AgentDefinition {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: description.to_string(),
+            system_prompt: "base persona".to_string(),
+            model: None,
+            tools: vec!["read".to_string()],
+            disallowed_tools: Vec::new(),
+            skills: Vec::new(),
+            source: "user".to_string(),
+        }
+    }
+
+    /// The `subagent_type` description must name EVERY loaded role (including
+    /// user/project `.md` roles) — that is how the model discovers them.
+    #[test]
+    fn schema_description_lists_every_loaded_role() {
+        let defs = [
+            crate::agents::builtin_agent_definitions(),
+            vec![test_def("my-analyst", "财报结构化分析")],
+        ]
+        .concat();
+        let tool = agent_tool(&defs);
+        let description = tool.input_schema["properties"]["subagent_type"]["description"]
+            .as_str()
+            .expect("subagent_type description");
+        for def in &defs {
+            assert!(
+                description.contains(&def.name),
+                "role {} must be listed in the schema",
+                def.name
+            );
+        }
+        assert!(description.contains("财报结构化分析"));
+        // No `enum`: an inline ad-hoc role omits the field, and a role file
+        // created mid-run must not be rejected provider-side.
+        assert!(tool.input_schema["properties"]["subagent_type"]
+            .get("enum")
+            .is_none());
+    }
+
+    /// The inline ad-hoc fields are declared even though `additionalProperties`
+    /// stays false — otherwise a strict provider rejects the call.
+    #[test]
+    fn schema_declares_inline_role_fields() {
+        let tool = agent_tool(&[]);
+        let properties = &tool.input_schema["properties"];
+        for key in ["system_prompt", "tools", "disallowed_tools"] {
+            assert!(properties.get(key).is_some(), "{key} must be declared");
+        }
+        assert_eq!(tool.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn inline_overrides_replace_the_named_role_fields() {
+        let mut def = test_def("researcher", "Read-only research");
+        def.disallowed_tools = vec!["bash".to_string()];
+        apply_inline_overrides(
+            &mut def,
+            &serde_json::json!({
+                "system_prompt": "  You only read Notion.  ",
+                "tools": ["mcp__notion__*", " "],
+                "disallowed_tools": ["write"]
+            }),
+        );
+        assert_eq!(def.system_prompt, "You only read Notion.");
+        // Whole replacement, not a merge (blank entries dropped).
+        assert_eq!(def.tools, vec!["mcp__notion__*".to_string()]);
+        assert_eq!(def.disallowed_tools, vec!["write".to_string()]);
+    }
+
+    #[test]
+    fn inline_overrides_absent_or_empty_leave_the_role_untouched() {
+        let base = test_def("researcher", "Read-only research");
+        // Nothing inline.
+        let mut def = base.clone();
+        apply_inline_overrides(&mut def, &serde_json::json!({ "prompt": "go" }));
+        assert_eq!(def.system_prompt, base.system_prompt);
+        assert_eq!(def.tools, base.tools);
+        assert_eq!(def.disallowed_tools, base.disallowed_tools);
+        // Blank string / empty arrays count as "not provided" — an empty allow
+        // list must not become a narrowing that blocks everything.
+        let mut def = base.clone();
+        apply_inline_overrides(
+            &mut def,
+            &serde_json::json!({ "system_prompt": "   ", "tools": [], "disallowed_tools": [] }),
+        );
+        assert_eq!(def.system_prompt, base.system_prompt);
+        assert_eq!(def.tools, base.tools);
+        assert_eq!(def.disallowed_tools, base.disallowed_tools);
+    }
+
+    /// Pure-inline role: no `subagent_type`, so `general-purpose` is the base and
+    /// the inline fields fill it in completely (no special-case branch needed).
+    #[test]
+    fn inline_only_role_builds_on_general_purpose() {
+        let defs = crate::agents::builtin_agent_definitions();
+        let mut def = crate::agents::find_definition(&defs, "general-purpose")
+            .expect("general-purpose")
+            .clone();
+        apply_inline_overrides(
+            &mut def,
+            &serde_json::json!({
+                "prompt": "audit the config",
+                "system_prompt": "You audit configuration files.",
+                "tools": ["read", "grep"]
+            }),
+        );
+        assert_eq!(def.system_prompt, "You audit configuration files.");
+        assert_eq!(
+            def.tools,
+            vec!["read".to_string(), "grep".to_string()],
+            "inline allow-list must narrow a general-purpose base"
+        );
+    }
+
+    /// The spawn refusal message must name the entries that resolved to nothing,
+    /// which is exactly what `unresolved_allow_entries` reports.
+    #[test]
+    fn zero_tool_refusal_names_the_unresolved_entries() {
+        let pool = vec![agent_tool(&[]), crate::mcp::types::native_read_file_tool()];
+        let mut def = test_def("typo-agent", "");
+        def.tools = vec!["reed_file".to_string(), "mcp__notionn__*".to_string()];
+        let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&pool, &def);
+        assert_eq!(
+            unresolved,
+            vec!["reed_file".to_string(), "mcp__notionn__*".to_string()]
+        );
+        let message = zero_tool_refusal(&def, &unresolved, false);
+        assert!(message.contains("reed_file"));
+        assert!(message.contains("mcp__notionn__*"));
+        assert!(message.contains("matched no available tool"));
+        // And the tool table really is empty after filtering.
+        let mut filtered = pool.clone();
+        crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
+        assert!(filtered.is_empty());
+    }
+
+    /// Mirror of the spawn path's `deny_emptied_pool` computation, so the tests
+    /// exercise the same predicate the runtime uses.
+    fn deny_emptied_pool(pool: &[ChatToolDefinition], def: &AgentDefinition) -> bool {
+        !def.disallowed_tools.is_empty()
+            && !pool.is_empty()
+            && pool.iter().all(|tool| {
+                def.disallowed_tools
+                    .iter()
+                    .any(|entry| crate::chat::agent::filter::entry_matches(tool, entry))
+                    || is_sub_agent_tool_name(&tool.name)
+            })
+    }
+
+    #[test]
+    fn deny_all_refusal_blames_the_denylist_not_the_allow_entries() {
+        // Observed in the wild: the model sent `disallowed_tools: ["*"]` with the
+        // built-in `coder` role. Every allow entry was spelled correctly, yet
+        // `unresolved_allow_entries` reports them all (it skips denied tools), so
+        // the message must key on the denylist instead — otherwise the model goes
+        // off "fixing" names that were never wrong.
+        let pool = vec![agent_tool(&[]), crate::mcp::types::native_read_file_tool()];
+        let mut def = test_def("coder", "");
+        def.tools = vec!["read".to_string(), "grep".to_string()];
+        def.disallowed_tools = vec!["*".to_string()];
+
+        assert!(deny_emptied_pool(&pool, &def));
+        let unresolved = crate::chat::agent::filter::unresolved_allow_entries(&pool, &def);
+        let message = zero_tool_refusal(&def, &unresolved, true);
+        assert!(message.contains("disallowed_tools"), "{message}");
+        assert!(
+            !message.contains("matched no available tool"),
+            "correctly-spelled entries must not be blamed: {message}"
+        );
+
+        // A deny-all really does empty the table even though `tools` is non-empty.
+        let mut filtered = pool.clone();
+        crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn deny_all_is_caught_even_when_no_allow_list_is_set() {
+        // The refusal guard must key on EITHER list: with `tools` empty, an
+        // allow-only guard would let a zero-tool sub-agent launch silently.
+        let pool = vec![crate::mcp::types::native_read_file_tool()];
+        let mut def = test_def("general-purpose", "");
+        def.tools = Vec::new();
+        def.disallowed_tools = vec!["*".to_string()];
+
+        let mut filtered = pool.clone();
+        crate::chat::agent::filter::filter_tools_for_agent(&mut filtered, &def);
+        assert!(filtered.is_empty(), "deny-all empties the pool");
+
+        let narrowing_requested = !def.tools.is_empty() || !def.disallowed_tools.is_empty();
+        assert!(
+            narrowing_requested,
+            "the denylist alone must trip the guard"
+        );
+        assert!(deny_emptied_pool(&pool, &def));
+    }
+
+    // -----------------------------------------------------------------------
+    // Skills preload (R4)
+    // -----------------------------------------------------------------------
+
+    fn skill_record(id: &str, body: &str) -> crate::skills::SkillRecord {
+        crate::skills::SkillRecord {
+            meta: crate::skills::SkillMeta {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: String::new(),
+                source: "builtin".to_string(),
+                path: None,
+                recommended_tools: Vec::new(),
+                disable_model_invocation: false,
+                files: Vec::new(),
+                triggers: Vec::new(),
+                argument_hint: None,
+                arguments: Vec::new(),
+            },
+            location: std::path::PathBuf::new(),
+            base_dir: std::path::PathBuf::new(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn preloaded_skills_inject_full_bodies_into_the_persona() {
+        let registry = SkillRegistry {
+            records: vec![
+                skill_record("pdf", "PDF STEPS BODY"),
+                skill_record("docx", "DOCX STEPS BODY"),
+            ],
+            warnings: Vec::new(),
+        };
+        let persona = compose_persona_with_preloaded_skills(
+            "You analyse documents.",
+            &registry,
+            &["pdf".to_string(), "docx".to_string()],
+        );
+        assert!(persona.contains("You analyse documents."));
+        assert!(persona.contains("PDF STEPS BODY"));
+        assert!(persona.contains("DOCX STEPS BODY"));
+    }
+
+    #[test]
+    fn no_preload_leaves_the_persona_identical_and_unknown_ids_are_skipped() {
+        let registry = SkillRegistry {
+            records: vec![skill_record("pdf", "PDF STEPS BODY")],
+            warnings: Vec::new(),
+        };
+        let plain = compose_persona("You analyse documents.");
+        assert_eq!(
+            compose_persona_with_preloaded_skills("You analyse documents.", &registry, &[]),
+            plain
+        );
+        assert_eq!(
+            compose_persona_with_preloaded_skills(
+                "You analyse documents.",
+                &registry,
+                &["nope".to_string()]
+            ),
+            plain
+        );
     }
 
     #[test]
@@ -1598,6 +2051,8 @@ mod tests {
             compacted_history: None,
             compaction_boundary: None,
             compaction_summary: None,
+            images: Vec::new(),
+            degraded: None,
         })
     }
 
@@ -1619,6 +2074,8 @@ mod tests {
             compacted_history: None,
             compaction_boundary: None,
             compaction_summary: None,
+            images: Vec::new(),
+            degraded: None,
         })
     }
 
@@ -1726,6 +2183,21 @@ mod tests {
         let cancelled: Result<AgentRunResult, String> = Err("cancelled".to_string());
         assert!(!should_retry_sub_agent(&cancelled, 0, true));
 
+        // Any OTHER fatal error must NOT retry: a retry re-runs the whole loop, so
+        // a run that already wrote files over several rounds before failing would
+        // repeat those side effects. Only the empty-response class is retryable.
+        for other in [
+            "provider request failed: 500 Internal Server Error",
+            "context length exceeded",
+            "tool execution failed: write_file denied",
+        ] {
+            let fatal: Result<AgentRunResult, String> = Err(other.to_string());
+            assert!(
+                !should_retry_sub_agent(&fatal, 0, true),
+                "must not retry (side-effect replay): {other}"
+            );
+        }
+
         // Success → never retry.
         assert!(!should_retry_sub_agent(&ok_run_result(), 0, true));
 
@@ -1777,6 +2249,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         }
     }
 
@@ -1864,6 +2337,7 @@ mod tests {
             api_format: "openai_chat".to_string(),
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
+            request: Default::default(),
         }
     }
 
@@ -2009,15 +2483,6 @@ mod tests {
             _segment: Option<&ChatMessageSegment>,
         ) {
         }
-        fn emit_stream_done(
-            &self,
-            _conversation_id: &str,
-            _run_id: &str,
-            _message_id: &str,
-            _reason: &str,
-            _full: &str,
-        ) {
-        }
         fn emit_tool_record(
             &self,
             _conversation_id: &str,
@@ -2142,7 +2607,7 @@ mod tests {
                 serde_json::json!({ "role": "system", "content": "you orchestrate workers" }),
                 serde_json::json!({ "role": "user", "content": "research three topics in parallel" }),
             ],
-            tools: vec![agent_tool()],
+            tools: vec![agent_tool(&[])],
             blocked_tool_calls: Vec::new(),
             settings: Settings::default(),
             effective_chat_tools: ChatToolsConfig {
@@ -2152,6 +2617,8 @@ mod tests {
             language: "zh-CN".to_string(),
             thinking_enabled: false,
             thinking_level: None,
+            // 子代理不做联网搜索（父代理的搜索结果已在上下文里）。
+            web_search_mode: crate::chat::types::WebSearchMode::Off,
             stream_enabled: false,
             max_output_tokens: 1024,
             retry_attempts: 1,

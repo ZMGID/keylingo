@@ -34,6 +34,7 @@ interface MessageGroupProps {
   onRegenerateMessage?: (messageId: string) => Promise<void>
   onForkMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
+  onSaveMessageToNote?: (messageId: string) => Promise<boolean>
 }
 
 interface GroupColumn {
@@ -89,6 +90,7 @@ function GroupColumnView({
   onRegenerateMessage,
   onForkMessage,
   onDeleteMessage,
+  onSaveMessageToNote,
 }: {
   column: GroupColumn
   conversationId?: string | null
@@ -104,6 +106,7 @@ function GroupColumnView({
   onRegenerateMessage?: (messageId: string) => Promise<void>
   onForkMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
+  onSaveMessageToNote?: (messageId: string) => Promise<boolean>
 }) {
   const { message, streaming } = column
   const wrapperClass = showColumnChrome
@@ -161,6 +164,7 @@ function GroupColumnView({
             onRegenerateMessage={!live ? onRegenerateMessage : undefined}
             onForkMessage={!live ? onForkMessage : undefined}
             onDeleteMessage={!live ? onDeleteMessage : undefined}
+            onSaveMessageToNote={!live ? onSaveMessageToNote : undefined}
           />
         </ColumnScrollBody>
       ) : (
@@ -174,6 +178,7 @@ function GroupColumnView({
           onRegenerateMessage={!live ? onRegenerateMessage : undefined}
           onForkMessage={!live ? onForkMessage : undefined}
           onDeleteMessage={!live ? onDeleteMessage : undefined}
+          onSaveMessageToNote={!live ? onSaveMessageToNote : undefined}
         />
       )}
     </div>
@@ -264,9 +269,12 @@ function MessageGroupBase({
   onRegenerateMessage,
   onForkMessage,
   onDeleteMessage,
+  onSaveMessageToNote,
 }: MessageGroupProps) {
   // 订阅 group store 版本号：流式列内容更新时驱动重渲。
-  useGroupsVersion()
+  // 版本号还必须进下面 columns 的 memo deps —— store 是原地 mutate 列对象，
+  // liveGroup 引用永不变，只靠 [live, liveGroup, messages] 会让 memo 冻结在首帧。
+  const groupsVersion = useGroupsVersion()
   const liveGroup = conversationId ? getActiveGroup(conversationId) : undefined
   const live = Boolean(liveGroup && liveGroup.groupId === groupId)
 
@@ -286,7 +294,9 @@ function MessageGroupBase({
       }))
     }
     return messages.map((message) => ({ message, streaming: false }))
-  }, [live, liveGroup, messages])
+    // groupsVersion：流式列被原地 mutate，靠版本号让 memo 重算（见上方注释）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, liveGroup, messages, groupsVersion])
 
   if (columns.length === 0) return null
 
@@ -329,6 +339,7 @@ function MessageGroupBase({
               onRegenerateMessage={onRegenerateMessage}
               onForkMessage={onForkMessage}
               onDeleteMessage={onDeleteMessage}
+              onSaveMessageToNote={onSaveMessageToNote}
             />
           ))}
         </div>
@@ -348,6 +359,7 @@ function MessageGroupBase({
           onRegenerateMessage={onRegenerateMessage}
           onForkMessage={onForkMessage}
           onDeleteMessage={onDeleteMessage}
+          onSaveMessageToNote={onSaveMessageToNote}
         />
       )}
       <GroupFooter

@@ -547,8 +547,7 @@ fn common_dirs_windows() -> Vec<String> {
 /// Read the `Path` value from either the system or user environment registry
 /// hive. Returns `None` if the key/value is absent or any registry call fails
 /// (callers fall back to defaults). Read-only — never opens for write, never
-/// modifies the registry. Mirrors the `RegOpenKeyExW`/`RegQueryValueExW`
-/// pattern in `cli_install::install_windows`.
+/// modifies the registry. Uses the `RegOpenKeyExW`/`RegQueryValueExW` pattern.
 ///
 /// - `system == true`  → `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
 /// - `system == false` → `HKCU\Environment`

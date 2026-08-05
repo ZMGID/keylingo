@@ -139,12 +139,23 @@ pub struct GenerateOptions {
     /// 显式的单次请求覆盖；None 时由 provider/model 元数据解析，仍缺省则不发送。
     pub temperature: Option<f64>,
     pub max_tokens: u32,
+    /// 思考开关。UI「Off」时为 false：适配器**必须显式**下发关闭信号
+    /// （OpenAI Chat → `reasoning_effort:"none"`；DeepSeek/Kimi → `thinking.type=disabled`；
+    /// Responses → `reasoning.effort:"none"`），不能靠省略字段——多家默认 effort=high。
     pub thinking_enabled: bool,
-    /// 每对话「思考等级」(`"low"|"medium"|"high"`)。`None` = 未显式设置，维持现状
-    /// （仅受 `thinking_enabled` 控制，不发任何 effort/reasoning 字段）。仅在用户显式
-    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`。
+    /// 每对话「思考等级」(`"low"|"medium"|"high"|…`)。`None` = 未设档：
+    /// - `thinking_enabled=false` 时必为 None（`resolve_thinking` 保证），走关闭分支；
+    /// - `thinking_enabled=true` 时 None = 模型无 effort 旋钮，不发等级字段。
+    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`，
+    /// Responses→`reasoning.effort`，Gemini→`thinkingLevel`。
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// 是否请求模型的**原生内置联网搜索**（任务 07-23）。仅在会话为 Builtin 模式且当前
+    /// provider 支持（`builtin_web_search_supported`）时置 true；各适配器据此往请求体
+    /// 追加各家原生搜索工具（OpenAI Responses `web_search` / Gemini `google_search` /
+    /// Anthropic `web_search_20250305`）。默认 false，不支持的适配器忽略。
+    #[serde(default)]
+    pub builtin_web_search: bool,
     #[serde(default)]
     pub provider_options: Value,
 }
@@ -156,6 +167,7 @@ impl Default for GenerateOptions {
             max_tokens: 8192,
             thinking_enabled: true,
             thinking_level: None,
+            builtin_web_search: false,
             provider_options: Value::Object(Default::default()),
         }
     }
@@ -210,6 +222,15 @@ pub struct ModelUsage {
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
+    /// CLI 自报的**上下文窗口总大小**（不是用量）。来源：ACP `usage_update.size`
+    /// （官方 RFD「Session Usage and Context Status」，字段平铺在 `update` 下）。
+    ///
+    /// 只有外部 CLI 会话填；内置 provider 恒 `None`——内置路径的窗口来自
+    /// `model_metadata::context_window_for_model`，与本字段无关。放在 `ModelUsage` 里
+    /// 是因为窗口与用量由 CLI 在同一次上报中给出，随消息一起持久化后
+    /// `collect_external_session_usage` 能一并读到，无需为分母另开事件通道。
+    #[serde(default)]
+    pub context_window_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +247,43 @@ pub struct PendingToolCall {
     pub signature: Option<String>,
 }
 
+/// 单条内置搜索引用（服务端托管的原生联网搜索返回的来源）。仅取 {title,url}，
+/// 前端渲染成可点来源脚注（任务 07-23，MVP 只做来源列表、不做正文 `[n]` 锚定）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebCitation {
+    pub title: String,
+    pub url: String,
+}
+
+/// 模型**原生内置联网搜索**的解析产物：模型执行的搜索词 + 来源引用。
+/// 内置搜索由 provider 服务端执行，agent 循环看不到工具调用，故适配器从响应里
+/// 尽力解析出查询/引用，循环据此合成一张「网络搜索」工具卡可视化给用户。
+/// 任一项解析不到即为空；整体解析不到则 `GenerateOutput.web_search` 为 None。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuiltinWebSearch {
+    #[serde(default)]
+    pub queries: Vec<String>,
+    #[serde(default)]
+    pub citations: Vec<WebCitation>,
+}
+
+impl BuiltinWebSearch {
+    /// 无查询也无引用视为「没发生可见的内置搜索」，不合成卡片。
+    pub fn is_empty(&self) -> bool {
+        self.queries.is_empty() && self.citations.is_empty()
+    }
+}
+
+/// 模型**生成**的一张图片（协议无关形态）。适配器把各家 wire 格式（Gemini
+/// `inlineData` 等）解析成 base64 + mime，穿过契约层交给 runtime 落地为 artifact。
+/// 与 `MessagePart::Image`（用户上行的图）区分：这是模型的输出图。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedImageData {
+    pub mime_type: String,
+    /// base64 编码的图片字节（不含 data: 前缀）。
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateOutput {
     pub text: String,
@@ -235,6 +293,14 @@ pub struct GenerateOutput {
     pub finish_reason: Option<String>,
     pub provider_messages: Vec<Value>,
     pub cancelled: bool,
+    /// 模型原生内置联网搜索的解析结果（仅 provider 服务端执行了内置搜索时为 Some）。
+    /// 默认 None：绝大多数调用不开内置搜索，解析失败也降级为 None，不阻断答案。
+    #[serde(default)]
+    pub web_search: Option<BuiltinWebSearch>,
+    /// 模型**生成的图片**（协议无关）。适配器解析各家 wire 出图格式填充；默认空，
+    /// 绝大多数调用不出图。runtime 据此把图落地为 assistant 消息 artifact。
+    #[serde(default)]
+    pub images: Vec<GeneratedImageData>,
 }
 
 impl GenerateOutput {
@@ -247,6 +313,8 @@ impl GenerateOutput {
             finish_reason: None,
             provider_messages: vec![provider_message],
             cancelled: false,
+            web_search: None,
+            images: Vec::new(),
         }
     }
 
@@ -259,6 +327,8 @@ impl GenerateOutput {
             finish_reason: Some("cancelled".to_string()),
             provider_messages: Vec::new(),
             cancelled: true,
+            web_search: None,
+            images: Vec::new(),
         }
     }
 
@@ -301,19 +371,55 @@ impl GenerateOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamPart {
-    TextDelta { delta: String },
-    ReasoningDelta { delta: String },
-    ToolCallStart { id: String, name: String },
-    ToolCallDelta { id: String, delta: String },
-    ToolCallDone { call: PendingToolCall },
-    Finish { reason: String, full: String },
-    Error { message: String },
+    TextDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        id: String,
+        delta: String,
+    },
+    ToolCallDone {
+        call: PendingToolCall,
+    },
+    /// 模型**原生内置联网搜索**的实时进度（任务 07-23）。适配器在服务端执行搜索的
+    /// 过程中逐帧发射：首帧可为空（= 开牌 Running），随后带查询词/来源增量。为什么单变体
+    /// 而非拆 Start/Update——sink 把「首次收到」当开牌、后续当增量累加，对三家适配器最省事。
+    /// 仅 `AgentStreamSink` 消费（合成一张实时「网络搜索」卡置于答案文本之前）；Lens/丢弃
+    /// 等其它 sink 走兜底 `_ => {}`，不受影响。
+    WebSearch {
+        queries: Vec<String>,
+        citations: Vec<WebCitation>,
+    },
+    /// 模型**生成的一张图片**的流式帧（协议无关）。适配器解析各家 wire 出图（Gemini
+    /// `inlineData` 等）逐张发射；`AgentStreamSink` 收集并落地为 artifact。其它 sink
+    /// （Lens/丢弃/planning）走各自兜底，不受影响。
+    ImageData {
+        mime_type: String,
+        data: String,
+    },
+    Finish {
+        reason: String,
+        full: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelErrorKind {
     Other,
     StreamReadInterrupted,
+    /// 调用方主动取消（如 Lens 流的 `explain_stream_generation` 代际失配）。
+    /// 由 sink 在 emit 时返回，适配器沿 `?` 上抛；包装层据此把取消当正常结束处理。
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +445,10 @@ impl ModelError {
 
     pub fn is_stream_read_interrupted(&self) -> bool {
         self.kind == ModelErrorKind::StreamReadInterrupted
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.kind == ModelErrorKind::Cancelled
     }
 }
 

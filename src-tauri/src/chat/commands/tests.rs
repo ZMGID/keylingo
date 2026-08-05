@@ -20,7 +20,9 @@ use super::context::{
     group_answer_excluded_from_context, mark_summary_stale_if_needed, resolve_usage_anchor,
     should_auto_compress_context,
 };
-use super::interaction::{approve_agent_plan_for_execution, format_tool_approval_summary};
+use super::interaction::{
+    approve_agent_plan_for_execution, format_tool_approval_summary, stream_delta_event_kinds,
+};
 use super::messages::{
     assistant_model_messages_for_storage, build_assistant_message, build_error_arm_message,
     content_from_segments, normalize_assistant_segments, reasoning_from_segments,
@@ -35,39 +37,44 @@ use super::*;
 
 #[test]
 fn resolve_thinking_maps_levels_and_defaults_to_high() {
+    // 有 effort 旋钮的模型（gpt-5.6 支持 low/medium/high/xhigh/max）。模型库里查得到，
+    // 不需要 provider（provider 只用于读 model_overrides + Anthropic 家族兜底）。
+    let r = |level: Option<&str>, global: bool| resolve_thinking(level, global, None, "gpt-5.6");
     // 未设置 → 默认档 high，不再跟随全局（全局只服务 lens / 翻译）。
-    assert_eq!(
-        resolve_thinking(None, true),
-        (true, Some("high".to_string()))
-    );
-    assert_eq!(
-        resolve_thinking(None, false),
-        (true, Some("high".to_string()))
-    );
+    assert_eq!(r(None, true), (true, Some("high".to_string())));
+    assert_eq!(r(None, false), (true, Some("high".to_string())));
     // off → 强制关。
-    assert_eq!(resolve_thinking(Some("off"), true), (false, None));
+    assert_eq!(r(Some("off"), true), (false, None));
     // 具体等级 → 开 + 带等级。
+    assert_eq!(r(Some("low"), false), (true, Some("low".to_string())));
+    assert_eq!(r(Some("high"), false), (true, Some("high".to_string())));
+    // xhigh / max 原样放行（该模型认不认由模型库门控，不在这里收敛）。
+    assert_eq!(r(Some("xhigh"), false), (true, Some("xhigh".to_string())));
+    assert_eq!(r(Some("max"), false), (true, Some("max".to_string())));
+    // 未知值 → 当作未设置，落默认档 high。
+    assert_eq!(r(Some("ultra"), true), (true, Some("high".to_string())));
+}
+
+#[test]
+fn resolve_thinking_drops_level_for_models_without_effort_knob() {
+    // 模型库里 `reasoningEfforts: []` = 没有 effort 旋钮。Claude 4.5 及更早不认
+    // `output_config.effort`（传了 400），这里就得把等级抹成 None，适配器自然不发。
+    for model in ["claude-sonnet-4.5", "claude-opus-4", "claude-haiku-4.5"] {
+        assert_eq!(
+            resolve_thinking(Some("high"), true, None, model),
+            (true, None),
+            "{model} 不该带 effort"
+        );
+    }
+    // 4.6+ 反过来必须带上。
     assert_eq!(
-        resolve_thinking(Some("low"), false),
-        (true, Some("low".to_string()))
-    );
-    assert_eq!(
-        resolve_thinking(Some("high"), false),
-        (true, Some("high".to_string()))
-    );
-    // xhigh / max 也放行（是否被模型接受由前端按模型门控）。
-    assert_eq!(
-        resolve_thinking(Some("xhigh"), false),
-        (true, Some("xhigh".to_string()))
-    );
-    assert_eq!(
-        resolve_thinking(Some("max"), false),
+        resolve_thinking(Some("max"), true, None, "claude-opus-4.7"),
         (true, Some("max".to_string()))
     );
-    // 未知值 → 当作未设置，落默认档 high。
+    // off 仍然优先：关思考就是关思考。
     assert_eq!(
-        resolve_thinking(Some("ultra"), true),
-        (true, Some("high".to_string()))
+        resolve_thinking(Some("off"), true, None, "claude-opus-4.7"),
+        (false, None)
     );
 }
 
@@ -189,6 +196,7 @@ fn test_provider(id: &str, name: &str, enabled_models: Vec<&str>) -> ModelProvid
         api_format: "openai_chat".to_string(),
         model_overrides: HashMap::new(),
         compress_request_body: false,
+        request: Default::default(),
     }
 }
 
@@ -419,6 +427,70 @@ fn sanitize_generated_title_rejects_empty_output() {
     assert_eq!(sanitize_generated_title("标题：..."), None);
 }
 
+/// 计划批准卡上必须是**计划正文**：用户批的是这份计划，看到一坨截断的 JSON 就没法判断
+/// 该不该点批准。
+#[test]
+fn format_tool_approval_summary_shows_the_plan_text() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "ExitPlanMode".to_string(),
+        source: "external_cli".to_string(),
+        server_id: None,
+        arguments: r#"{"plan":"1. 改 run.rs\n2. 加测试"}"#.to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert!(summary.detail.contains("1. 改 run.rs"));
+    assert!(summary.detail.contains("2. 加测试"));
+    // 认出计划之后不再拖一坨原始 JSON。
+    assert!(!summary.detail.contains("\"plan\""));
+}
+
+/// `EnterPlanMode` 没有入参：卡片不能因为「认不出操作对象」退到裸 JSON 分支、蹲一个 `{}`。
+/// 标题（前端的 `toolApprovalTitle`）已经把事情说完了。
+#[test]
+fn format_tool_approval_summary_leaves_enter_plan_mode_without_detail() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "EnterPlanMode".to_string(),
+        source: "external_cli".to_string(),
+        server_id: None,
+        arguments: "{}".to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert!(summary.target.is_none());
+    assert!(
+        summary.detail.is_empty(),
+        "不该显示 `{{}}`：{}",
+        summary.detail
+    );
+}
+
 #[test]
 fn format_tool_approval_summary_highlights_run_command() {
     let record = ToolCallRecord {
@@ -442,9 +514,12 @@ fn format_tool_approval_summary_highlights_run_command() {
     };
 
     let summary = format_tool_approval_summary(&record);
-    assert!(summary.contains("Command: npm test"));
-    assert!(summary.contains("Working directory: /tmp/project"));
-    assert!(summary.contains("Raw arguments"));
+    assert_eq!(summary.target.as_deref(), Some("npm test"));
+    assert!(summary.detail.contains("npm test"));
+    assert!(summary.detail.contains("Working directory: /tmp/project"));
+    // 认出操作对象后不再拖一坨原始 JSON。
+    assert!(!summary.detail.contains("Raw arguments"));
+    assert!(!summary.detail.contains("\"command\""));
 }
 
 #[test]
@@ -470,8 +545,37 @@ fn format_tool_approval_summary_highlights_file_path() {
     };
 
     let summary = format_tool_approval_summary(&record);
-    assert!(summary.contains("Path: /tmp/project/out.txt"));
-    assert!(summary.contains("Raw arguments"));
+    assert_eq!(summary.target.as_deref(), Some("/tmp/project/out.txt"));
+    assert_eq!(summary.detail, "/tmp/project/out.txt");
+    // 正文里不该再出现 `content` 那一大坨。
+    assert!(!summary.detail.contains("hello"));
+}
+
+#[test]
+fn format_tool_approval_summary_falls_back_to_raw_arguments() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "some_mcp_tool".to_string(),
+        source: "mcp".to_string(),
+        server_id: Some("srv".to_string()),
+        arguments: r#"{"foo":"bar"}"#.to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert!(summary.target.is_none());
+    assert_eq!(summary.detail, r#"{"foo":"bar"}"#);
 }
 
 #[test]
@@ -756,6 +860,238 @@ fn normalize_segments_adds_auxiliary_and_skipped_tool_segments() {
 }
 
 #[test]
+fn normalize_segments_does_not_duplicate_toolloop_only_answer_text() {
+    // 回归：正文段必须是 Plain|Synthesis —— content_from_segments 只认这两个 phase，
+    // 正文若只落在别的 phase 上，这里就会再补一条同文案的 Synthesis 段，前端遂把同一段
+    // 文案渲染两遍。本用例守住「正文段 = Synthesis 时不重复」这一半，另一半（生产者不许
+    // 把正文标成 ToolLoop）由 external_cli_answer_text_after_tools_is_not_duplicated 守。
+    let recovered = "⚠️ 模型调用失败。请重试。".to_string();
+    let segments = normalize_assistant_segments(
+        &recovered,
+        None,
+        &[],
+        vec![ChatMessageSegment {
+            id: "seg_1002_step_2_text".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::Synthesis,
+            order: 1002,
+            step_number: Some(2),
+            round: Some(2),
+            text: Some(recovered.clone()),
+            tool_call_id: None,
+        }],
+    );
+    assert_eq!(
+        segments
+            .iter()
+            .filter(|segment| segment.text.as_deref() == Some(recovered.as_str()))
+            .count(),
+        1,
+        "answer text must not be duplicated into a second segment"
+    );
+    assert_eq!(
+        content_from_segments(&segments).as_deref(),
+        Some(&*recovered)
+    );
+}
+
+/// 回归（用户实测）：本地 CLI 会话里「只要这一轮调用过工具，回答就在气泡里显示两遍」。
+///
+/// 外部 CLI 路径的 `content` 是所有 TextDelta 的累加，所以它产出的**每一条**文本分段都必须
+/// 被 `content_from_segments` 认可（Plain|Synthesis）。工具之后的正文一度标成 ToolLoop，
+/// 于是这里判定「有正文但没有任何分段覆盖」→ 再补一条同文案的 Synthesis 段 → 渲染两遍。
+///
+/// 本用例直接问 `segment_phase_for_tool_count`（生产者本人）要 phase，而不是硬编码一个
+/// phase 常量——这样生产者哪天再标回 ToolLoop，这条就会红。
+#[test]
+fn external_cli_answer_text_after_tools_is_not_duplicated() {
+    use crate::external_agents::run::segment_phase_for_tool_count;
+
+    let answer = "已创建 `dup.md`，内容为 `hello`。".to_string();
+    let tool_calls = vec![test_tool_record(
+        "call_write",
+        "external_cli",
+        1,
+        ToolCallStatus::Success,
+    )];
+    // 外部 CLI 落库前的分段形态：推理 → 工具 → 工具之后的正文。
+    let segments = vec![
+        ChatMessageSegment {
+            id: "seg_reasoning".to_string(),
+            kind: ChatMessageSegmentKind::Reasoning,
+            phase: segment_phase_for_tool_count(&ChatMessageSegmentKind::Reasoning, 0),
+            order: 1,
+            step_number: None,
+            round: None,
+            text: Some("我先建文件".to_string()),
+            tool_call_id: None,
+        },
+        ChatMessageSegment {
+            id: "seg_tool".to_string(),
+            kind: ChatMessageSegmentKind::Tool,
+            phase: ChatMessageSegmentPhase::ToolLoop,
+            order: 2,
+            step_number: None,
+            round: Some(1),
+            text: None,
+            tool_call_id: Some("call_write".to_string()),
+        },
+        ChatMessageSegment {
+            id: "seg_answer".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: segment_phase_for_tool_count(&ChatMessageSegmentKind::Text, tool_calls.len()),
+            order: 3,
+            step_number: None,
+            round: Some(1),
+            text: Some(answer.clone()),
+            tool_call_id: None,
+        },
+    ];
+
+    let segments = normalize_assistant_segments(&answer, None, &tool_calls, segments);
+
+    assert_eq!(
+        segments
+            .iter()
+            .filter(|segment| segment.kind == ChatMessageSegmentKind::Text
+                && segment.text.as_deref() == Some(answer.as_str()))
+            .count(),
+        1,
+        "工具之后的正文只能有一条分段，否则气泡里会显示两遍"
+    );
+    assert_eq!(content_from_segments(&segments).as_deref(), Some(&*answer));
+}
+
+/// 「说一句 → 调工具 → 再说一句」：外部 CLI 的 `content` 是两段拼起来的，所以两条文本分段
+/// 都必须被 `content_from_segments` 认可——只认最后一条的话，落库正文会丢掉工具之前那句。
+#[test]
+fn external_cli_text_around_tool_call_all_counts_as_content() {
+    use crate::external_agents::run::segment_phase_for_tool_count;
+
+    let tool_calls = vec![test_tool_record(
+        "call_write",
+        "external_cli",
+        1,
+        ToolCallStatus::Success,
+    )];
+    let before = "我来建这个文件。";
+    let after = "已创建 `dup.md`。";
+    let segments = vec![
+        ChatMessageSegment {
+            id: "seg_before".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: segment_phase_for_tool_count(&ChatMessageSegmentKind::Text, 0),
+            order: 1,
+            step_number: None,
+            round: None,
+            text: Some(before.to_string()),
+            tool_call_id: None,
+        },
+        ChatMessageSegment {
+            id: "seg_tool".to_string(),
+            kind: ChatMessageSegmentKind::Tool,
+            phase: ChatMessageSegmentPhase::ToolLoop,
+            order: 2,
+            step_number: None,
+            round: Some(1),
+            text: None,
+            tool_call_id: Some("call_write".to_string()),
+        },
+        ChatMessageSegment {
+            id: "seg_after".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: segment_phase_for_tool_count(&ChatMessageSegmentKind::Text, tool_calls.len()),
+            order: 3,
+            step_number: None,
+            round: Some(1),
+            text: Some(after.to_string()),
+            tool_call_id: None,
+        },
+    ];
+    let content = format!("{before}{after}");
+
+    let segments = normalize_assistant_segments(&content, None, &tool_calls, segments);
+
+    assert_eq!(
+        segments
+            .iter()
+            .filter(|segment| segment.kind == ChatMessageSegmentKind::Text)
+            .count(),
+        2,
+        "不许为「正文没落段」再补一条全文分段"
+    );
+    let stored = content_from_segments(&segments).expect("content must be covered by segments");
+    assert!(stored.contains(before), "工具之前那句不能从正文里掉出去");
+    assert!(stored.contains(after), "工具之后那句不能从正文里掉出去");
+}
+
+/// 内置路径的护栏：内置 loop 的 `content` **只**是最终答案（工具循环期间的过程文字留在
+/// ToolLoop 分段里、不进 content，见 `chat/agent/planning.rs`）。所以
+/// `content_from_segments` 必须继续把 ToolLoop 文本**排除**在正文之外——谁要是为了修
+/// 外部 CLI 的重复而放宽这把共享的尺，这条用例就会红。
+#[test]
+fn builtin_toolloop_narration_stays_out_of_content() {
+    let final_answer = "结论：改好了。";
+    let tool_calls = vec![test_tool_record(
+        "call_read",
+        "native",
+        1,
+        ToolCallStatus::Success,
+    )];
+    let segments = vec![
+        ChatMessageSegment {
+            id: "seg_1000_step_1_text".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::ToolLoop,
+            order: 1000,
+            step_number: Some(1),
+            round: Some(1),
+            text: Some("我先看一下这个文件。".to_string()),
+            tool_call_id: None,
+        },
+        ChatMessageSegment {
+            id: "seg_1001_tool_call_read".to_string(),
+            kind: ChatMessageSegmentKind::Tool,
+            phase: ChatMessageSegmentPhase::ToolLoop,
+            order: 1001,
+            step_number: Some(1),
+            round: Some(1),
+            text: None,
+            tool_call_id: Some("call_read".to_string()),
+        },
+        ChatMessageSegment {
+            id: "seg_1002_step_2_text".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::Synthesis,
+            order: 1002,
+            step_number: Some(2),
+            round: None,
+            text: Some(final_answer.to_string()),
+            tool_call_id: None,
+        },
+    ];
+
+    let normalized = normalize_assistant_segments(final_answer, None, &tool_calls, segments);
+
+    // 一条都不许补：正文已经有 Synthesis 段覆盖。
+    assert_eq!(normalized.len(), 3);
+    // 过程文字不进正文，正文就是最终答案本身。
+    assert_eq!(
+        content_from_segments(&normalized).as_deref(),
+        Some(final_answer)
+    );
+    // 过程文字仍以 ToolLoop 分段留在时间线上（前端按 phase 渲染成灰色过程文本）。
+    assert_eq!(
+        normalized
+            .iter()
+            .filter(|segment| segment.kind == ChatMessageSegmentKind::Text
+                && segment.phase == ChatMessageSegmentPhase::ToolLoop)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn normalize_segments_inserts_tool_segments_before_synthesis_text() {
     let tool_calls = vec![test_tool_record(
         "call_read",
@@ -878,6 +1214,7 @@ fn editing_assistant_reply_replaces_final_text_segments_only() {
         provider_id: None,
         model: None,
         timestamp: 1,
+        degraded: None,
     };
 
     replace_final_text_segments_for_edit(&mut message, "new final");
@@ -980,6 +1317,7 @@ fn editing_assistant_reply_rewrites_replay_to_edited_final_answer() {
         provider_id: None,
         model: None,
         timestamp: 1,
+        degraded: None,
     };
 
     replace_final_text_segments_for_edit(&mut message, "new final");
@@ -1016,12 +1354,14 @@ fn test_chat_message(id: &str, role: &str, content: &str, timestamp: i64) -> Cha
         provider_id: None,
         model: None,
         timestamp,
+        degraded: None,
     }
 }
 
 fn test_conversation_with_summary(stale: bool) -> Conversation {
     Conversation {
         id: "conv_test".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "provider".to_string(),
         model: "model".to_string(),
@@ -1066,6 +1406,7 @@ fn test_conversation_with_summary(stale: bool) -> Conversation {
         knowledge_base_ids: Vec::new(),
         force_knowledge_search: false,
         thinking_level: None,
+        web_search_mode: None,
         reply_models: Vec::new(),
         group_selections: std::collections::HashMap::new(),
         forked_from: None,
@@ -1403,6 +1744,7 @@ fn stale_summary_is_ignored_by_message_builder() {
 fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
     let conversation = Conversation {
         id: "conv_test".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "provider".to_string(),
         model: "text-model".to_string(),
@@ -1422,6 +1764,7 @@ fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
         knowledge_base_ids: Vec::new(),
         force_knowledge_search: false,
         thinking_level: None,
+        web_search_mode: None,
         reply_models: Vec::new(),
         group_selections: std::collections::HashMap::new(),
         forked_from: None,
@@ -1527,6 +1870,7 @@ fn regenerate_truncation_rejects_bad_edit_targets() {
 fn build_chat_api_messages_replays_hidden_tool_transcript() {
     let conversation = Conversation {
         id: "conv_test".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "provider".to_string(),
         model: "model".to_string(),
@@ -1552,6 +1896,7 @@ fn build_chat_api_messages_replays_hidden_tool_transcript() {
                 provider_id: None,
                 model: None,
                 timestamp: 1,
+                degraded: None,
             },
             ChatMessage {
                 id: "msg_assistant_1".to_string(),
@@ -1598,6 +1943,7 @@ fn build_chat_api_messages_replays_hidden_tool_transcript() {
                 provider_id: None,
                 model: None,
                 timestamp: 2,
+                degraded: None,
             },
         ],
         active_skill_id: Some("doc".to_string()),
@@ -1615,6 +1961,7 @@ fn build_chat_api_messages_replays_hidden_tool_transcript() {
         knowledge_base_ids: Vec::new(),
         force_knowledge_search: false,
         thinking_level: None,
+        web_search_mode: None,
         reply_models: Vec::new(),
         group_selections: std::collections::HashMap::new(),
         forked_from: None,
@@ -1685,6 +2032,7 @@ fn sanitize_image_payloads_replaces_raw_base64_lines() {
 fn build_chat_api_messages_sanitizes_image_payloads_in_replayed_history() {
     let conversation = Conversation {
             id: "conv_test".to_string(),
+            revision: 0,
             title: "test".to_string(),
             provider_id: "provider".to_string(),
             model: "model".to_string(),
@@ -1723,6 +2071,7 @@ fn build_chat_api_messages_sanitizes_image_payloads_in_replayed_history() {
                     provider_id: None,
                     model: None,
                     timestamp: 2,
+                    degraded: None,
                 },
             ],
             active_skill_id: None,
@@ -1740,6 +2089,7 @@ fn build_chat_api_messages_sanitizes_image_payloads_in_replayed_history() {
             knowledge_base_ids: Vec::new(),
             force_knowledge_search: false,
         thinking_level: None,
+        web_search_mode: None,
             reply_models: Vec::new(),
             group_selections: std::collections::HashMap::new(),
             forked_from: None,
@@ -1812,6 +2162,7 @@ fn image_token_estimates_follow_provider_dimension_rules() {
 fn test_conversation_with_messages(messages: Vec<ChatMessage>) -> Conversation {
     Conversation {
         id: "conv_multi".to_string(),
+        revision: 0,
         title: "test".to_string(),
         provider_id: "openai".to_string(),
         model: "gpt-4o".to_string(),
@@ -1831,6 +2182,7 @@ fn test_conversation_with_messages(messages: Vec<ChatMessage>) -> Conversation {
         knowledge_base_ids: Vec::new(),
         force_knowledge_search: false,
         thinking_level: None,
+        web_search_mode: None,
         reply_models: Vec::new(),
         group_selections: std::collections::HashMap::new(),
         forked_from: None,
@@ -2345,9 +2697,15 @@ fn file_ledger_flows_into_replayed_summary_message() {
 
     // Recompute the ledger over the covered history and store it (mirrors both
     // compaction persist sites).
-    let ledger = crate::chat::agent::file_ledger::build_for_boundary(&conversation, "msg_assistant_1");
+    let ledger =
+        crate::chat::agent::file_ledger::build_for_boundary(&conversation, "msg_assistant_1");
     assert!(!ledger.is_empty(), "ledger should capture the two ops");
-    conversation.context_state.summary.as_mut().unwrap().file_ledger = Some(ledger);
+    conversation
+        .context_state
+        .summary
+        .as_mut()
+        .unwrap()
+        .file_ledger = Some(ledger);
 
     let messages =
         build_chat_api_messages("system prompt", &conversation, Some(2), None, &[]).unwrap();
@@ -2364,9 +2722,37 @@ fn file_ledger_flows_into_replayed_summary_message() {
         })
         .expect("a system message carries the Files touched block");
     let content = summary_sys["content"].as_str().unwrap();
-    assert!(content.contains(r#"Modified: "src/main.rs""#), "modified path: {content}");
-    assert!(content.contains(r#"Read: "src/lib.rs""#), "read path: {content}");
+    assert!(
+        content.contains(r#"Modified: "src/main.rs""#),
+        "modified path: {content}"
+    );
+    assert!(
+        content.contains(r#"Read: "src/lib.rs""#),
+        "read path: {content}"
+    );
     // The summary text itself is still present above the ledger.
     assert!(content.contains("summary of older messages"));
 }
 
+/// 回归护栏：空 delta + 有 segment 是工具卡 / 内置搜索卡的「占位」调用，必须照发一条
+/// TextDelta，否则工具卡整场流式期间都不渲染（协议里工具事件不带 segment/order）。
+#[test]
+fn empty_delta_with_segment_still_emits_a_placeholder_event() {
+    // 工具槽位宣告：只发 text。
+    assert_eq!(stream_delta_event_kinds("", None, true), (false, true));
+    // reasoning 占位：只发 reasoning，不重复发 text。
+    assert_eq!(stream_delta_event_kinds("", Some(""), true), (true, false));
+    // 有 reasoning 正文时同样不重复发 text。
+    assert_eq!(
+        stream_delta_event_kinds("", Some("think"), true),
+        (true, false)
+    );
+    // 正常文本增量。
+    assert_eq!(stream_delta_event_kinds("hi", None, true), (false, true));
+    // 什么都没有：一条都不发。
+    assert_eq!(stream_delta_event_kinds("", None, false), (false, false));
+    assert_eq!(
+        stream_delta_event_kinds("", Some(""), false),
+        (false, false)
+    );
+}

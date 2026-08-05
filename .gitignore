@@ -50,10 +50,10 @@ src-tauri/swift/kivio-ocr-helper/.build/
 .codex/
 .cursor/
 .opencode/
+.trellis/
 # AI 助手项目记忆（本地维护，不入库）
 MEMORY.md
-# .trellis/ is tracked; its own .trellis/.gitignore excludes runtime/backup/cache files.
 
 # Local runtime discovery caches and manual E2E artifacts
 /mcps/
-/output/local-artifacts/
+/output/

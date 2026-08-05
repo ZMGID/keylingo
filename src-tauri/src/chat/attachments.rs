@@ -253,7 +253,7 @@ pub(crate) fn externalize_message_artifacts(
 }
 
 /// 快速判断:消息里是否存在"需要外置"的内联大图(图片 + 无 path + data_url 超阈值)。
-/// 用于 save_conversation 的廉价预扫描——没有这类 artifact 就完全不必克隆对话。
+/// 用于会话持久化的廉价预扫描——没有这类 artifact 就完全不必克隆对话。
 pub(crate) fn message_has_inline_image_to_externalize(message: &ChatMessage) -> bool {
     let needs = |artifact: &ChatToolArtifact| {
         if artifact
@@ -587,6 +587,35 @@ pub(crate) fn stored_image_paths_for_attachments(
             Ok(path)
         })
         .collect()
+}
+
+/// 解析非图片文件附件的绝对路径（外部 CLI 用：拼进 prompt + allowed-dir）。
+/// 缺失文件跳过（best-effort），不致命——避免一个失效附件阻断整条消息。
+pub(crate) fn stored_file_paths_for_attachments(
+    app: &AppHandle,
+    conversation_id: &str,
+    attachments: &[Attachment],
+) -> Result<Vec<PathBuf>, String> {
+    let file_attachments = attachments
+        .iter()
+        .filter(|attachment| attachment.attachment_type != "image")
+        .collect::<Vec<_>>();
+    if file_attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = conversation_attachments_dir(app, conversation_id)?;
+    let mut paths = Vec::new();
+    for attachment in file_attachments {
+        let stored = Path::new(&attachment.path);
+        if stored.components().count() != 1 {
+            return Err(format!("Invalid attachment path: {}", attachment.path));
+        }
+        let path = dir.join(stored);
+        if path.is_file() {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]

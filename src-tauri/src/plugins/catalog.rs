@@ -28,6 +28,9 @@ pub struct CatalogPlugin {
     pub skill_ids: &'static [&'static str],
     /// 附属 Skill 正文（启用时写入磁盘并进入技能扫描）
     pub skill_md: &'static str,
+    /// 可选：从该 GitHub 仓库 / 直链 zip 下载附属 Skill（启用时下载进插件 skill 目录，随上游更新）。
+    /// 与 `skill_md` 二选一；两者皆空且非 officecli 时启用不落 Skill。
+    pub skill_download_url: Option<&'static str>,
     /// 可选 MCP：启用时自动注册 stdio server
     pub mcp: Option<PluginMcpSpec>,
     /// **Kivio 安装契约**（薄层）：流程/约束/验收；具体命令以 README 为准，勿与 README 冲突
@@ -77,8 +80,35 @@ Do **not** start layout-heavy work without the domain skill.\n\
     // 官方 skill id = load_skill frontmatter `name`（启用时从 CLI 全量同步）
     skill_ids: OFFICECLI_OFFICIAL_SKILL_IDS,
     skill_md: "", // 空 = 使用官方 CLI 同步（见 install::sync_officecli_official_skills）
+    skill_download_url: None,
     mcp: Some(PluginMcpSpec { args: &["mcp"] }),
     install_doc: OFFICECLI_INSTALL_DOC,
+}, CatalogPlugin {
+    id: "ego-lite",
+    name: "ego lite",
+    description: "面向 AI Agent 的 Chromium 浏览器（macOS）。Agent 在独立空间复用你的登录态，用于打开网页、填表、点击、截图、抓取、Web 测试等。附带 ego-browser Skill（由 Kivio 从仓库自动下载）。",
+    binary: "ego-browser",
+    tags: &["Browser", "Automation", "Skill", "macOS"],
+    homepage: "https://lite.ego.app/",
+    repo: "https://github.com/citrolabs/ego-lite",
+    // onboarding 后注册到用户 bin；PATH 未刷新时按这些路径兜底检测。
+    // macOS 无 %USERPROFILE% 环境变量，须用展开器支持的 $HOME。
+    known_binary_paths: &[
+        "$HOME/.local/bin/ego-browser",
+        "/usr/local/bin/ego-browser",
+        "/opt/homebrew/bin/ego-browser",
+    ],
+    readme_urls: &["https://raw.githubusercontent.com/citrolabs/ego-lite/main/README.md"],
+    system_hint: "\
+### ego lite (plugin: ego-lite)\n\
+**Role.** Real Chromium browser automation for interactive web tasks — open pages, fill forms, click, screenshot, scrape, log in, test web apps.\n\
+Prefer the `ego-browser` skill over web_fetch / built-in browsing whenever the task needs real page interaction.\n\
+Activate the `ego-browser` skill, then run browser work via run_command as `ego-browser nodejs <<'EOF' … EOF` (default one invocation per task). Do NOT import Playwright or launch another browser.",
+    skill_ids: &["ego-browser"],
+    skill_md: "", // 由 Kivio 从 skill_download_url 下载
+    skill_download_url: Some("https://github.com/citrolabs/ego-lite"),
+    mcp: None,
+    install_doc: EGO_LITE_INSTALL_DOC,
 }];
 
 /// `officecli load_skill` / skills install 的完整集合（CLI 子名 → frontmatter skill id）。
@@ -114,6 +144,24 @@ pub const OFFICECLI_OFFICIAL_SKILL_IDS: &[&str] = &[
 pub fn catalog_plugin(id: &str) -> Option<&'static CatalogPlugin> {
     PLUGIN_CATALOG.iter().find(|p| p.id == id)
 }
+
+/// ego lite 安装补充：GUI 应用（macOS .dmg），Skill 由 Kivio 下载，无 MCP、无 brew。
+const EGO_LITE_INSTALL_DOC: &str = r#"## 本插件补充（ego lite）
+
+- **仅 macOS**。ego lite 是 GUI 应用（.dmg）；`ego-browser` 命令由 app 完成首次 onboarding 后注册到 PATH（通常 `~/.local/bin`）。
+- **安装 app（二选一）**：
+  1. 官网 / README 里的直链下载 .dmg：https://lite.ego.app/ ，下载后打开 .dmg 安装；
+  2. 或运行技能自带脚本（若在本机）：`sh skills/ego-browser/scripts/install.sh`（macOS only）。
+- 安装后**请用户在 app 内完成一次 onboarding**（可选导入 Chrome 数据），onboarding 会注册 `ego-browser` 到 `~/.local/bin`。等用户确认完成再继续。
+- 验证：`command -v ego-browser`（找不到则 `export PATH="$HOME/.local/bin:$PATH"` 重试），再跑：
+  ```
+  ego-browser nodejs <<'EOF'
+  console.log('ego-browser ready')
+  EOF
+  ```
+- **Skill 由 Kivio 负责**：用户点「启用」后，Kivio 自动从仓库下载 `ego-browser` Skill 并接入对话——**你（AI）不要手写 Skill，也不要配置任何 MCP（本插件无 MCP）**。
+- **无 brew cask**：不要 `brew install`。
+"#;
 
 /// 插件专属补充。通用「读 GitHub / 兼容 Kivio」写在 get_install_brief 模板里。
 const OFFICECLI_INSTALL_DOC: &str = r#"## 本插件补充（OfficeCLI）

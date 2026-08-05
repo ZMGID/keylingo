@@ -6,59 +6,43 @@ use crate::mcp::{self, ChatToolDefinition};
 use crate::skills;
 use crate::state::AppState;
 
-use super::context::emit_chat_compaction_state;
+use super::context::{emit_chat_compaction_state, emit_chat_context_usage_live};
 use super::interaction::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, request_session_consent,
-    request_tool_approval, request_user_response, wait_for_chat_cancel,
+    emit_chat_stream_delta, emit_chat_tool_record, request_session_consent, request_tool_approval,
+    request_user_response, wait_for_chat_cancel,
 };
 use super::messages::persist_partial_assistant_snapshot;
 pub(super) struct ChatAgentHost<'a> {
     pub(super) app: AppHandle,
     pub(super) state: &'a AppState,
+    pub(super) run_id: String,
     /// 多模型臂置 true：抑制 mid-run 部分快照落盘（协调者统一落盘）。默认 false（现状）。
     pub(super) suppress_partial_persist: bool,
+    /// 用户配置的生命周期 Hooks。无启用 Hook 时为 `None`，loop 零开销。
+    pub(super) hooks: Option<crate::chat::hooks::HookDispatcher>,
 }
 
 impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
     fn emit_stream_delta(
         &self,
-        conversation_id: &str,
+        _conversation_id: &str,
         run_id: &str,
-        message_id: &str,
+        _message_id: &str,
         delta: &str,
         reasoning_delta: Option<&str>,
         segment: Option<&ChatMessageSegment>,
     ) {
-        emit_chat_stream_delta(
-            &self.app,
-            conversation_id,
-            run_id,
-            message_id,
-            delta,
-            reasoning_delta,
-            segment,
-        );
-    }
-
-    fn emit_stream_done(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-        message_id: &str,
-        reason: &str,
-        full: &str,
-    ) {
-        emit_chat_stream_done(&self.app, conversation_id, run_id, message_id, reason, full);
+        emit_chat_stream_delta(&self.app, run_id, delta, reasoning_delta, segment);
     }
 
     fn emit_tool_record(
         &self,
-        conversation_id: &str,
+        _conversation_id: &str,
         run_id: &str,
-        message_id: &str,
+        _message_id: &str,
         record: &ToolCallRecord,
     ) {
-        emit_chat_tool_record(&self.app, conversation_id, run_id, message_id, record);
+        emit_chat_tool_record(&self.app, run_id, record);
     }
 
     fn emit_compaction_status(
@@ -68,31 +52,56 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         trigger: Option<&str>,
         boundary: Option<&CompactionBoundaryRecord>,
     ) {
-        emit_chat_compaction_state(&self.app, conversation_id, phase, trigger, boundary);
-    }
-
-    fn persist_partial_assistant(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-        tool_records: &[ToolCallRecord],
-        segments: &[ChatMessageSegment],
-        api_messages: &[Value],
-    ) {
-        if self.suppress_partial_persist {
-            // 多模型臂不直接写盘（避免 N 条并发 run 同写 conversations/{id}.json）。
-            return;
-        }
-        if let Err(err) = persist_partial_assistant_snapshot(
+        emit_chat_compaction_state(
             &self.app,
             conversation_id,
-            message_id,
-            tool_records,
-            segments,
-            api_messages,
-        ) {
-            eprintln!("persist partial assistant snapshot failed: {err}");
-        }
+            &self.run_id,
+            phase,
+            trigger,
+            boundary,
+        );
+    }
+
+    fn emit_context_usage_live(
+        &self,
+        conversation_id: &str,
+        used_tokens: u64,
+        context_window_tokens: Option<u64>,
+    ) {
+        emit_chat_context_usage_live(
+            &self.app,
+            conversation_id,
+            &self.run_id,
+            used_tokens,
+            context_window_tokens,
+        );
+    }
+
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [Value],
+    ) -> crate::chat::agent::AgentHostFuture<'a, ()> {
+        Box::pin(async move {
+            if self.suppress_partial_persist {
+                return;
+            }
+            if let Err(err) = persist_partial_assistant_snapshot(
+                &self.app,
+                conversation_id,
+                message_id,
+                tool_records,
+                segments,
+                api_messages,
+            )
+            .await
+            {
+                eprintln!("persist partial assistant snapshot failed: {err}");
+            }
+        })
     }
 
     fn request_tool_approval<'a>(
@@ -106,7 +115,6 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
                 self.state,
                 ctx.conversation_id,
                 ctx.run_id,
-                ctx.message_id,
                 ctx.generation,
                 record,
             )
@@ -124,7 +132,6 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
                 self.state,
                 ctx.tool_conversation_id,
                 ctx.run_id,
-                ctx.message_id,
                 ctx.generation,
             )
             .await
@@ -143,7 +150,6 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
                 self.state,
                 ctx.conversation_id,
                 ctx.run_id,
-                ctx.message_id,
                 ctx.generation,
                 record,
                 prompt,
@@ -166,6 +172,10 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
             wait_for_chat_cancel(self.state, conversation_id, generation).await;
         })
     }
+
+    fn hooks(&self) -> Option<&crate::chat::hooks::HookDispatcher> {
+        self.hooks.as_ref()
+    }
 }
 
 /// 无头测试通道（probe）的 AgentHost，仅 debug 构建。跑的是与 GUI 完全相同的生成核心
@@ -187,16 +197,6 @@ impl crate::chat::agent::AgentHost for ProbeAgentHost<'_> {
         _delta: &str,
         _reasoning_delta: Option<&str>,
         _segment: Option<&ChatMessageSegment>,
-    ) {
-    }
-
-    fn emit_stream_done(
-        &self,
-        _conversation_id: &str,
-        _run_id: &str,
-        _message_id: &str,
-        _reason: &str,
-        _full: &str,
     ) {
     }
 
@@ -274,7 +274,7 @@ impl crate::chat::agent::ToolExecutor for RegistryToolExecutor<'_> {
                 generation: ctx.generation,
                 depth: ctx.depth,
             };
-            mcp::registry::call_tool(
+            let result = mcp::registry::call_tool(
                 &self.app,
                 self.state,
                 tool,
@@ -282,7 +282,26 @@ impl crate::chat::agent::ToolExecutor for RegistryToolExecutor<'_> {
                 skill_cache,
                 Some(native_ctx),
             )
-            .await
+            .await;
+            // run 域这条有 replay 价值，保留；但别为它再整读一遍会话 JSON——
+            // todo_write 的结构化返回里本来就带着刚落盘的权威 todoState。
+            if crate::mcp::types::canonical_tool_name(&tool.name) == "todo_write" {
+                if let Some(todo_state) = result.as_ref().ok().and_then(|res| {
+                    serde_json::from_value::<crate::chat::types::AgentTodoState>(
+                        res.structured_content.as_ref()?.get("todoState")?.clone(),
+                    )
+                    .ok()
+                }) {
+                    crate::chat::protocol::emit_run_event(
+                        &self.app,
+                        ctx.run_id,
+                        crate::chat::protocol::ChatRunEvent::TodoUpdated {
+                            todo_state: (&todo_state).into(),
+                        },
+                    );
+                }
+            }
+            result
         })
     }
 }

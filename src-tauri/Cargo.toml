@@ -1,13 +1,12 @@
 # Kivio Rust 后端 Cargo 配置
 [package]
 name = "kivio"
-version = "2.8.1"
+version = "2.8.6"
 description = "Kivio Desktop - Screen-level AI assistant for macOS/Windows"
 authors = ["ZM"]
 license = "GPL-3.0-or-later"
 edition = "2021"
-# 项目有两个 binary（kivio 主应用 + kivio-code CLI）。`tauri dev` 跑裸 `cargo run`，
-# 没有 default-run 会因「不知道跑哪个 binary」直接报错退出。固定默认跑主应用 kivio。
+# `tauri dev` 跑裸 `cargo run`，没有 default-run 会因「不知道跑哪个 binary」直接报错退出。
 default-run = "kivio"
 
 [lib]
@@ -19,8 +18,8 @@ name = "kivio"
 path = "src/main.rs"
 
 [[bin]]
-name = "kivio-code"
-path = "src/bin/kivio-code.rs"
+name = "export-chat-protocol"
+path = "src/bin/export_chat_protocol.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -30,6 +29,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1.2.2"
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 # gzip：api.rs 请求体压缩开关 + rapidocr 模型解包（跨平台）
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
@@ -41,35 +42,40 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 chrono = "0.4"
 
+# MCP 官方 Rust SDK：唯一的 MCP wire 实现（stdio 子进程 + Streamable HTTP）。
+# 版本写死不用 caret —— 3.x 仍在破坏性演进，升版本当独立任务做。
+# 关掉 default features（含 server，我们只做 client）。
+rmcp = { version = "3.0.1", default-features = false, features = [
+  "client",
+  "client-side-sse",
+  "reqwest",
+  "transport-child-process",
+  "transport-streamable-http-client",
+  "transport-streamable-http-client-reqwest",
+  "which-command",
+] }
+
 # HTTP 客户端与异步运行时
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "multipart", "form"] }
 tokio = { version = "1", features = ["time", "process", "io-util", "sync", "rt-multi-thread", "macros"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 scraper = "0.23"
 html-escape = "0.2"
 regex = "1"
 ignore = "0.4"
+# Dock：workspace 文件监听（notify）+ git 命令超时杀进程树（wait-timeout）。
+notify = "7"
+wait-timeout = "0.2"
+# Dock 终端面板：跨平台 PTY（macOS/Linux forkpty，Windows ConPTY）。
+portable-pty = "0.8"
 
-# kivio-code 终端 agent CLI 用：参数解析 + 跨平台 app-data 目录定位。
-clap = { version = "4", features = ["derive"] }
+# 跨平台 app-data 目录定位。
 directories = "5"
 
-# Kivio Code CLI / TUI
-crossterm = "0.29"
-unicode-width = "0.2"
-unicode-segmentation = "1"
+# 解析 Codex 的 config.toml（从本地 CLI 导入 MCP）。
+toml = "0.8"
+
 unicode-normalization = "0.1"
-# TUI Markdown 渲染：pulldown-cmark 解析 + syntect 代码块语法高亮。
-# syntect 默认特性会拉入 onig（C 依赖）；这里关默认、改用纯 Rust 的 fancy-regex 后端，
-# 保持 cargo build 不需要外部 C 工具链。
-pulldown-cmark = { version = "0.13", default-features = false }
-syntect = { version = "5", default-features = false, features = [
-  "default-syntaxes",
-  "default-themes",
-  "regex-fancy",
-  "parsing",
-  "html",
-] }
 
 # 工具库
 base64 = "0.22"
@@ -120,6 +126,9 @@ libc = "0.2"
 # Windows 平台特有依赖（屏幕截图、选中文本捕获）
 [target.'cfg(target_os = "windows")'.dependencies]
 xcap = "0.8"
+# 直接调用以拿到 Mica 的真实结果。0.8+ 会传播 DwmSetWindowAttribute 的 HRESULT；
+# 旧版只按系统 build 判支持并丢弃调用失败，前端会误把透明外壳打开。
+window-vibrancy = "0.8"
 windows = { version = "0.61.3", features = [
   "Foundation",
   "Graphics_Imaging",

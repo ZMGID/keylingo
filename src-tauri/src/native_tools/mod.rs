@@ -7,7 +7,7 @@ pub(crate) use fetch::html_to_text;
 pub use fetch::web_fetch;
 pub use files::{
     edit_file, glob_files, list_dir, read_file, search_files, write_file, FileMutationResult,
-    ReadFileResult, ReadFileState,
+    ReadFileResult,
 };
 pub(crate) use sandbox_exports::preflight_directory_merge;
 pub use sandbox_exports::{
@@ -17,6 +17,7 @@ pub use sandbox_exports::{
     remove_sandbox_exports_for_conversation, resolve_sandbox_export_file_path,
     SandboxExportContext,
 };
+pub(crate) use shell::build_shell_command;
 pub use shell::run_command;
 pub use shell::{
     bash_output, kill_background, kill_process_group, list_background, run_command_shell_hint,
@@ -28,7 +29,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Above this size a file is read through the streaming line-window reader
+/// instead of being slurped into memory. NOT an output budget — that is
+/// [`TOOL_OUTPUT_MAX_BYTES`], which applies to every read regardless of size.
 pub const MAX_READ_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 工具输出的统一上限，照抄 pi `core/tools/truncate.ts` 的 `DEFAULT_MAX_LINES` /
+/// `DEFAULT_MAX_BYTES`：**行数和字节数谁先到算谁**，且永远只返回完整行。
+///
+/// pi 的规范是「每个工具的输出出口都过一遍 truncate」。Kivio 的 `run_command`
+/// 早就在用这两个数（tail 方向），但 `read` 一直没有出口上限：一次 `read` 能把
+/// 2MB 的长行文件整个灌进上下文（≈50 万 token），连读几个这样的文件就把请求撑到
+/// 供应商静默返回 200 + 空正文——表现为「模型返回了空响应」，实为框架没有地板。
+pub const TOOL_OUTPUT_MAX_LINES: usize = 2_000;
+pub const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ProjectWorkspaceContext {

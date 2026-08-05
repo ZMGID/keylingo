@@ -770,6 +770,8 @@ pub fn model_usage_from_openai_value(value: &Value) -> Option<ModelUsage> {
         reasoning_tokens: completion_details
             .and_then(|details| details.get("reasoning_tokens"))
             .and_then(Value::as_u64),
+        // 内置 provider 路径：窗口来自 model_metadata，不由响应携带。
+        context_window_tokens: None,
     })
 }
 
@@ -788,6 +790,8 @@ pub fn model_usage_from_anthropic_value(value: &Value) -> Option<ModelUsage> {
         cached_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation,
         reasoning_tokens: None,
+        // 内置 provider 路径：窗口来自 model_metadata，不由响应携带。
+        context_window_tokens: None,
     })
 }
 
@@ -847,6 +851,17 @@ pub fn error_kind_from_message(message: &str) -> String {
         "stream_error".to_string()
     } else {
         "request_error".to_string()
+    }
+}
+
+/// 失败记录的 usage status：错误文案命中取消语义时记 `"cancelled"`，否则 `"error"`。
+/// 四个模型适配器的 `record_usage_failure` 签名只有错误字符串（不带 `ModelError`），
+/// 故在共享层按与 `error_kind_from_message` 同一口径判定，避免改四处签名。
+pub fn failure_status_from_message(message: &str) -> &'static str {
+    if error_kind_from_message(message) == "cancelled" {
+        "cancelled"
+    } else {
+        "error"
     }
 }
 

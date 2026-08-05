@@ -6,20 +6,11 @@ import { chatApi } from '../chat/api'
 vi.mock('../chat/api', () => ({
   chatApi: {
     detectExternalAgents: vi.fn(),
+    detectExternalAgentModels: vi.fn().mockResolvedValue({ models: [], reasoningOptions: [] }),
   },
 }))
 
 const mockDetect = vi.mocked(chatApi.detectExternalAgents)
-
-const baseChatConfig = {
-  streamEnabled: true,
-  defaultAgentRuntime: {
-    kind: 'builtin' as const,
-    externalAgentId: null,
-    externalModel: null,
-    externalReasoning: null,
-  },
-}
 
 describe('ExternalAgentsSettings', () => {
   beforeEach(() => {
@@ -46,8 +37,6 @@ describe('ExternalAgentsSettings', () => {
     render(
       <ExternalAgentsSettings
         lang="zh"
-        chatConfig={baseChatConfig}
-        onChatChange={vi.fn()}
       />,
     )
 

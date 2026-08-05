@@ -7,6 +7,9 @@ import { Button, IconButton } from './Button'
 
 type Lang = 'zh' | 'en'
 
+/** 与 Rust `REASONING_EFFORT_LEVELS` 一致，顺序即展示顺序。 */
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
 type ModelDetailDrawerProps = {
   modelName: string
   overrides?: Record<string, ModelInfo>
@@ -36,11 +39,15 @@ export function ModelDetailDrawer({
   const [temperatureInput, setTemperatureInput] = useState(
     resolved.temperature?.toString() ?? '',
   )
+  const [extraBodyInput, setExtraBodyInput] = useState(
+    resolved.extraBody ? JSON.stringify(resolved.extraBody, null, 2) : '',
+  )
 
   useEffect(() => {
     const next = resolveModelInfo(modelName, overrides)
     setForm(next)
     setTemperatureInput(next.temperature?.toString() ?? '')
+    setExtraBodyInput(next.extraBody ? JSON.stringify(next.extraBody, null, 2) : '')
   }, [modelName, overrides])
 
   const updateField = useCallback(<K extends keyof ModelInfo>(key: K, value: ModelInfo[K]) => {
@@ -60,6 +67,18 @@ export function ModelDetailDrawer({
       ...prev,
       pricing: { ...prev.pricing, [key]: num },
     }))
+  }, [])
+
+  // 思考等级白名单：undefined=跟随模型库/家族兜底；[]=该模型不发送等级字段；否则只这几档。
+  const toggleEffort = useCallback((level: string) => {
+    setForm(prev => {
+      const current = prev.reasoningEfforts
+      if (!current) return { ...prev, reasoningEfforts: [level] }
+      const next = current.includes(level)
+        ? current.filter(item => item !== level)
+        : EFFORT_LEVELS.filter(item => item === level || current.includes(item))
+      return { ...prev, reasoningEfforts: [...next] }
+    })
   }, [])
 
   const updateTemperature = useCallback((value: string) => {
@@ -89,16 +108,46 @@ export function ModelDetailDrawer({
     !Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2
   )
 
+  // extraBody：留空=无覆盖；否则必须是合法 JSON 对象。非对象/解析失败视为无效并阻止保存。
+  const updateExtraBody = useCallback((value: string) => {
+    setExtraBodyInput(value)
+    const trimmed = value.trim()
+    if (!trimmed) {
+      setForm(prev => ({ ...prev, extraBody: undefined }))
+      return
+    }
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        setForm(prev => ({ ...prev, extraBody: parsed }))
+      }
+    } catch {
+      // 无效 JSON：保留输入文本，由 extraBodyInvalid 拦截保存，不改 form。
+    }
+  }, [])
+
+  const extraBodyInvalid = (() => {
+    const trimmed = extraBodyInput.trim()
+    if (!trimmed) return false
+    try {
+      const parsed = JSON.parse(trimmed)
+      return !(parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+    } catch {
+      return true
+    }
+  })()
+
   const handleSave = useCallback(() => {
-    if (temperatureInvalid) return
+    if (temperatureInvalid || extraBodyInvalid) return
     onSave(modelName, form)
-  }, [modelName, form, onSave, temperatureInvalid])
+  }, [modelName, form, onSave, temperatureInvalid, extraBodyInvalid])
 
   const handleReset = useCallback(() => {
     onReset(modelName)
     if (dbDefaults) {
       setForm(dbDefaults)
       setTemperatureInput(dbDefaults.temperature?.toString() ?? '')
+      setExtraBodyInput(dbDefaults.extraBody ? JSON.stringify(dbDefaults.extraBody, null, 2) : '')
     }
   }, [modelName, onReset, dbDefaults])
 
@@ -120,10 +169,26 @@ export function ModelDetailDrawer({
     streaming: lang === 'zh' ? '流式输出' : 'Streaming',
     webSearch: lang === 'zh' ? '网络搜索' : 'Web Search',
     imageGeneration: lang === 'zh' ? '生图' : 'Image Generation',
+    efforts: lang === 'zh' ? '思考等级' : 'Reasoning Effort',
+    effortsFollow: lang === 'zh' ? '跟随模型库' : 'Follow database',
+    effortsFollowHint: lang === 'zh'
+      ? '跟随模型库；模型库也没列时按家族兜底（Anthropic 全档，其余 low/medium/high）。'
+      : 'Follows the model database; falls back per family (Anthropic all levels, others low/medium/high).',
+    effortsEmptyHint: lang === 'zh'
+      ? '全部取消 = 该模型没有思考等级旋钮，请求不发送等级字段，工具栏也不显示选择器。'
+      : 'None selected = no effort knob: requests omit the level and the picker is hidden.',
+    effortsHint: lang === 'zh'
+      ? '只有勾选的等级可选、可下发。发错等级会被上游直接 400，不做静默降级。'
+      : 'Only checked levels are selectable and sent. A wrong level 400s upstream; no silent downgrade.',
     pricing: lang === 'zh' ? '定价 (per 1M tokens, USD)' : 'Pricing (per 1M tokens, USD)',
     input: lang === 'zh' ? '输入' : 'Input',
     output: lang === 'zh' ? '输出' : 'Output',
     cachedInput: lang === 'zh' ? '缓存输入' : 'Cached Input',
+    extraBody: lang === 'zh' ? '额外请求体 (JSON)' : 'Extra Request Body (JSON)',
+    extraBodyHint: lang === 'zh'
+      ? '原样合并进请求体根部。用于端点私有参数，如 NVIDIA NIM / vLLM 的 chat_template_kwargs。留空则不发送。'
+      : 'Merged into the request body root. For endpoint-specific params like NVIDIA NIM / vLLM chat_template_kwargs. Leave blank to omit.',
+    extraBodyInvalid: lang === 'zh' ? '请输入合法的 JSON 对象。' : 'Enter a valid JSON object.',
     save: lang === 'zh' ? '保存' : 'Save',
     reset: lang === 'zh' ? '重置为默认值' : 'Reset to Defaults',
     noDatabase: lang === 'zh' ? '未在数据库中找到此模型，可手动填写参数。' : 'Model not found in database. You can fill in parameters manually.',
@@ -145,11 +210,13 @@ export function ModelDetailDrawer({
           >
             <ArrowLeft size={14} />
           </IconButton>
-          <span className="kv-drawer-title truncate">{modelName}</span>
-          <span style={{ width: 28 }} />
+          {/* 顶栏只放短标题；长模型 id 在下方，避免与聊天设置页 Windows 三键重叠。 */}
+          <span className="kv-drawer-title">{t.title}</span>
         </div>
 
         <div className="kv-drawer-body custom-scrollbar">
+          <div className="kv-drawer-model-id" title={modelName}>{modelName}</div>
+
           {!dbDefaults && (
             <p className="kv-drawer-hint">{t.noDatabase}</p>
           )}
@@ -215,6 +282,49 @@ export function ModelDetailDrawer({
           </div>
 
           <div className="kv-drawer-section">
+            <label className="kv-drawer-label">{t.efforts}</label>
+            <div className="kv-drawer-toggles">
+              <div className="kv-drawer-toggle-row">
+                <span className="kv-drawer-toggle-label">{t.effortsFollow}</span>
+                <Toggle
+                  checked={!form.reasoningEfforts}
+                  onChange={(v) =>
+                    updateField(
+                      'reasoningEfforts',
+                      // 关掉「跟随」时从当前生效档起步，而不是空/全档，免得一关就改了行为。
+                      v ? undefined : (dbDefaults?.reasoningEfforts ?? ['low', 'medium', 'high']),
+                    )
+                  }
+                />
+              </div>
+              {form.reasoningEfforts && (
+                <div className="kv-drawer-toggle-row">
+                  <div className="kv-seg">
+                    {EFFORT_LEVELS.map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`shrink-0 ${form.reasoningEfforts?.includes(level) ? 'active' : ''}`}
+                        onClick={() => toggleEffort(level)}
+                        data-tauri-drag-region="false"
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
+              {!form.reasoningEfforts
+                ? t.effortsFollowHint
+                : form.reasoningEfforts.length === 0
+                  ? t.effortsEmptyHint
+                  : t.effortsHint}
+            </p>
+          </div>
+
+          <div className="kv-drawer-section">
             <label className="kv-drawer-label">{t.pricing}</label>
             <div className="kv-drawer-row">
               <div className="kv-drawer-section flex-1">
@@ -246,6 +356,22 @@ export function ModelDetailDrawer({
               </div>
             </div>
           </div>
+
+          <div className="kv-drawer-section">
+            <label className="kv-drawer-label">{t.extraBody}</label>
+            <textarea
+              className="kv-input font-mono text-[12px] min-h-[88px] resize-y"
+              value={extraBodyInput}
+              onChange={(e) => updateExtraBody(e.target.value)}
+              placeholder={'{\n  "chat_template_kwargs": { "thinking": true }\n}'}
+              spellCheck={false}
+              data-tauri-drag-region="false"
+              aria-invalid={extraBodyInvalid}
+            />
+            <p className={`mt-1 text-[11px] ${extraBodyInvalid ? 'text-red-500' : 'text-neutral-400 dark:text-neutral-500'}`}>
+              {extraBodyInvalid ? t.extraBodyInvalid : t.extraBodyHint}
+            </p>
+          </div>
         </div>
 
         <div className="kv-drawer-footer">
@@ -263,7 +389,7 @@ export function ModelDetailDrawer({
           <Button
             variant="primary"
             onClick={handleSave}
-            disabled={!isDirty || temperatureInvalid}
+            disabled={!isDirty || temperatureInvalid || extraBodyInvalid}
             data-tauri-drag-region="false"
           >
             {t.save}

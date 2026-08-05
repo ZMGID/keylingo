@@ -7,8 +7,7 @@ use tauri::{AppHandle, State};
 use tokio::io::AsyncBufReadExt;
 use uuid::Uuid;
 
-use crate::chat::storage::load_conversation;
-use crate::external_agents::detection::detect_single_agent;
+use crate::external_agents::detection::detect_availability_single;
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::session::acp::detect_acp_commands;
 use crate::external_agents::spawn::{
@@ -17,10 +16,13 @@ use crate::external_agents::spawn::{
 use crate::external_agents::types::{
     ExternalCliSlashCommand, RuntimeBuildOptions, RuntimeContext, SlashStrategy, UnifiedAgentEvent,
 };
-use crate::external_agents::workspace::resolve_effective_cwd;
+use crate::external_agents::workspace::resolve_detection_cwd;
 use crate::state::AppState;
 
 pub const SLASH_COMMANDS_CACHE_TTL: Duration = Duration::from_secs(300);
+/// 空结果负缓存 TTL（与模型探测 fallback 负缓存对齐）：CLI 不上报斜杠命令 / 探测超时得空列表时，
+/// 短 TTL 内不再重探，避免切会话/切 agent 每次都重发 session/new（kimi 侧每次落一个空壳会话）。
+pub const SLASH_COMMANDS_EMPTY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub fn cache_key(agent_id: &str, cwd: &str) -> String {
     format!("{agent_id}:{cwd}")
@@ -143,7 +145,11 @@ pub async fn list_external_cli_slash_commands(
 
     let cwd = resolve_slash_cwd(app, conversation_id)?;
     let key = cache_key(agent_id, &cwd);
-    if let Some(cached) = state.get_cached_external_slash_commands(&key, SLASH_COMMANDS_CACHE_TTL) {
+    if let Some(cached) = state.get_cached_external_slash_commands(
+        &key,
+        SLASH_COMMANDS_CACHE_TTL,
+        SLASH_COMMANDS_EMPTY_CACHE_TTL,
+    ) {
         return Ok((true, cached, None));
     }
 
@@ -163,7 +169,7 @@ pub async fn list_external_cli_slash_commands(
 
     let commands = match def.slash_strategy {
         SlashStrategy::ClaudeInit => {
-            let detected = detect_single_agent(def, Path::new(&cwd)).await;
+            let detected = detect_availability_single(def).await;
             if !detected.available {
                 return Err(format!(
                     "{} 未安装或不可用，请确认 CLI 在 PATH 中。",
@@ -173,11 +179,16 @@ pub async fn list_external_cli_slash_commands(
             let resolved_bin = resolve_binary(def)
                 .await
                 .ok_or_else(|| format!("无法定位 {} 可执行文件", def.bin))?;
-            let args = (def.build_args)(&runtime_ctx, &build_options, None);
+            let args = crate::external_agents::defs::claude::ephemeral_probe_args(&(def
+                .build_args)(
+                &runtime_ctx,
+                &build_options,
+                None,
+            ));
             probe_claude_slash_commands(&resolved_bin, Path::new(&cwd), &args).await?
         }
         SlashStrategy::Acp => {
-            let detected = detect_single_agent(def, Path::new(&cwd)).await;
+            let detected = detect_availability_single(def).await;
             if !detected.available {
                 return Err(format!(
                     "{} 未安装或不可用，请确认 CLI 在 PATH 中。",
@@ -223,6 +234,10 @@ pub async fn list_external_cli_slash_commands(
         SlashStrategy::None => unreachable!("None handled above"),
     };
 
+    // R1: cache the result even when empty (negative cache) so切会话/切 agent 不再每次重探。
+    // 空列表由 get 的 short TTL 兜底；非空走长 TTL。
+    state.set_cached_external_slash_commands(key, commands.clone());
+
     if commands.is_empty()
         && matches!(
             def.slash_strategy,
@@ -236,21 +251,15 @@ pub async fn list_external_cli_slash_commands(
         ));
     }
 
-    state.set_cached_external_slash_commands(key, commands.clone());
     Ok((true, commands, None))
 }
 
+/// 斜杠命令探测用 cwd：与模型探测对齐用全局 scope（`resolve_detection_cwd` → `__global__`），
+/// 而非每会话独立 workspace。斜杠命令是 CLI 全局命令，与 cwd 无关；用全局 scope 后残渣不再散落
+/// 各会话工作区、缓存键全 App 共享（切会话即命中）。只有绑定项目的会话落到项目根。
 fn resolve_slash_cwd(app: &AppHandle, conversation_id: Option<&str>) -> Result<String, String> {
-    if let Some(conversation_id) = conversation_id.filter(|id| !id.trim().is_empty()) {
-        let conversation = load_conversation(app, conversation_id)?;
-        let workspace_cwd =
-            resolve_effective_cwd(app, conversation_id, conversation.project_id.as_deref())?;
-        Ok(workspace_cwd.to_string_lossy().into_owned())
-    } else {
-        Ok(std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| ".".to_string()))
-    }
+    let cwd = resolve_detection_cwd(app, conversation_id)?;
+    Ok(cwd.to_string_lossy().into_owned())
 }
 
 pub fn slash_commands_from_event(

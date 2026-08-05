@@ -37,6 +37,33 @@ pub struct PendingPythonRun {
     pub export_ctx: SandboxExportContext,
 }
 
+/// 一条挂起的会话级授权。run_id 用来在应答/取消/超时时撤掉快照里的授权卡。
+#[derive(Debug)]
+pub struct PendingSessionConsent {
+    pub run_id: String,
+    pub sender: oneshot::Sender<bool>,
+}
+
+/// 一条挂起的敏感工具审批。除 sender 外还带上 conversation_id + 工具名，因为
+/// 「总是允许」是在响应命令（只拿到 tool_call_id）里落表的，得知道往哪条键上记。
+#[derive(Debug)]
+pub struct PendingToolApproval {
+    pub conversation_id: String,
+    pub tool_name: String,
+    pub sender: oneshot::Sender<ToolApprovalOutcome>,
+}
+
+/// 用户对一张审批卡的答复。
+///
+/// 绝大多数审批只有「允许 / 拒绝」，`permission_mode` 恒为 `None`。它存在的唯一理由是
+/// claude 的计划批准（`ExitPlanMode`）：那张卡是**三选一**（批准并自动放行 / 批准但逐步
+/// 确认 / 拒绝），选哪一档决定了批准之后要把 CLI 切到哪个权限模式。
+#[derive(Debug, Clone, Default)]
+pub struct ToolApprovalOutcome {
+    pub approved: bool,
+    pub permission_mode: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct TimedCacheEntry<V> {
     created_at: Instant,
@@ -120,13 +147,18 @@ pub struct AppState {
     /// 正在进行 assistant 回复生成的 (conversation_id → run_id 集合)，防止同对话同一 run 重复，
     /// 但允许同一会话多条 run 并存（多模型一问多答）。
     pub chat_active_replies: Mutex<HashMap<String, HashSet<String>>>,
-    /// 等待用户确认的敏感 Chat tool 调用。
-    pub pending_chat_tool_approvals: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    /// Sequenced, replayable realtime chat protocol state keyed by run id.
+    pub chat_protocol: Mutex<crate::chat::protocol::ChatProtocolHub>,
+    /// 等待用户确认的敏感 Chat tool 调用（key = tool_call_id）。
+    pub pending_chat_tool_approvals: Mutex<HashMap<String, PendingToolApproval>>,
+    /// 本对话已按工具名授予的「总是允许」集合：`(conversation_id, 小写工具名)`。
+    /// 仅内存、不持久化，重启后重新询问（同 `chat_session_consent` 的取舍）。
+    pub chat_tool_always_allow: Mutex<HashSet<(String, String)>>,
     /// 本会话(conversation_id)已授予「文件/命令」工具的会话级授权集合。
     /// 仅内存、不持久化:重启后重新授权(也是一道轻量安全属性)。
     pub chat_session_consent: Mutex<HashSet<String>>,
     /// 等待用户响应的会话级授权请求(按 conversation_id,同一会话同时至多一个)。
-    pub pending_chat_session_consents: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    pub pending_chat_session_consents: Mutex<HashMap<String, PendingSessionConsent>>,
     /// 串行化会话授权弹窗:同一时刻全局只发一个授权请求。首轮多个并行只读工具
     /// (read/grep/find/ls)同时触发授权时,避免互相覆盖 pending sender 导致「假拒绝」——
     /// 拿到锁后先复查 has_chat_consent,领头者授权后其余直接复用、不再弹窗。
@@ -137,7 +169,7 @@ pub struct AppState {
     /// 等待前端 Pyodide 完成的 run_python 调用。
     pub pending_python_runs: Mutex<HashMap<String, PendingPythonRun>>,
     /// 保护 Chat 空白会话复用的短临界区，避免快速多次新建时并发创建多个空白对话。
-    pub chat_create_conversation_lock: Mutex<()>,
+    pub chat_create_conversation_lock: tokio::sync::Mutex<()>,
     /// 外部 CLI 斜杠命令探测缓存（agent_id:cwd → 命令列表）。
     pub external_slash_commands_cache: Mutex<
         HashMap<
@@ -145,14 +177,20 @@ pub struct AppState {
             TimedCacheEntry<Vec<crate::external_agents::types::ExternalCliSlashCommand>>,
         >,
     >,
-    /// 外部 CLI 模型列表探测缓存（agent_id:cwd → 模型选项）。
-    pub external_agent_models_cache: Mutex<
-        HashMap<String, TimedCacheEntry<Vec<crate::external_agents::types::RuntimeModelOption>>>,
-    >,
+    /// 外部 CLI 模型列表探测缓存（agent_id:cwd → 模型选项 + 来源）。probed 结果长 TTL，
+    /// fallback（探测失败降级）短 TTL 负缓存，防止连续失败风暴。
+    pub external_agent_models_cache:
+        Mutex<HashMap<String, TimedCacheEntry<crate::external_agents::types::CachedAgentModels>>>,
     /// 外部 CLI 全量检测结果缓存（cwd → available/version/auth/models）。避免 RuntimePicker /
     /// 设置页每次打开都重探全部 CLI，同时隔离项目级模型配置。force_refresh 时跳过当前 cwd。
     pub external_detected_agents_cache:
         Mutex<HashMap<String, TimedCacheEntry<Vec<crate::external_agents::types::DetectedAgent>>>>,
+    /// single-flight：可用性探测的全局串行锁——并发调用只实跑一次，后到者持锁后复查缓存即命中。
+    pub availability_probe_lock: tokio::sync::Mutex<()>,
+    /// single-flight：按 (agent:cwd) key 的模型探测锁，避免同一目标并发重探。
+    // ponytail: 无上限增长，每 (agent, cwd) 一项（会话×agent 级，量很小）；若日后 key 基数变大，
+    // 改成带容量上限的 LRU 或探测完即移除空闲锁。
+    pub model_probe_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     /// Phase 2 持久会话注册表：conversation_id → 活会话（仅持有控制通道，不持有 Child）。
     /// 仅在 get/insert/remove 时短暂持锁，绝不跨 turn await 持锁。
     pub external_live_sessions:
@@ -177,6 +215,11 @@ pub struct AppState {
     /// 运行时学习到的"该端点拒绝 `prompt_cache_key`"集合（按 base_url）。
     /// 某端点首次因该字段 400 后记入，本会话后续请求不再发，避免重复触发 + 无谓重试。
     pub prompt_cache_key_unsupported: Mutex<HashSet<String>>,
+    /// 出图端点自愈缓存：(provider_id, normalized_model) → 上次成功的 [`ImageRoute`]。
+    /// 首选端点被 provider 判为端点错配后，换端点成功即记入，下次同模型直达正确端点。
+    /// 仅内存、不落盘（`ImageRoute` 是运行时枚举，非配置）。
+    pub image_route_cache:
+        Mutex<HashMap<(String, String), crate::chat::image_generation::ImageRoute>>,
     /// MCP 持久连接池：server_id → 该 server 的长连接会话。
     /// 每会话独立 `Arc<Mutex>`，A 服务器握手不阻塞 B；外层 `tokio::sync::Mutex`
     /// 只在命中判断 / 插入 / 移除时短暂持有，绝不跨握手 await。
@@ -188,6 +231,9 @@ pub struct AppState {
     /// without needing an AppHandle threaded through every call path.
     pub usage_dir: PathBuf,
     pub http: Client,
+    /// 直连客户端（忽略系统/环境代理）。只有当某个供应商关掉「跟随系统代理」时才构造，
+    /// 默认全跟随系统代理的用户不会多出一个连接池。
+    http_direct: std::sync::OnceLock<Client>,
     /// macOS Apple Vision OCR sidecar 客户端。只有系统 OCR 路径会拉起。
     #[cfg(target_os = "macos")]
     pub macos_ocr: std::sync::Arc<MacOcrClient>,
@@ -291,16 +337,20 @@ impl AppState {
             chat_stream_generation: AtomicU64::new(0),
             chat_active_generations: Mutex::new(HashMap::new()),
             chat_active_replies: Mutex::new(HashMap::new()),
+            chat_protocol: Mutex::new(crate::chat::protocol::ChatProtocolHub::default()),
             pending_chat_tool_approvals: Mutex::new(HashMap::new()),
+            chat_tool_always_allow: Mutex::new(HashSet::new()),
             chat_session_consent: Mutex::new(HashSet::new()),
             pending_chat_session_consents: Mutex::new(HashMap::new()),
             chat_consent_prompt_lock: tokio::sync::Mutex::new(()),
             pending_chat_user_prompts: Mutex::new(HashMap::new()),
             pending_python_runs: Mutex::new(HashMap::new()),
-            chat_create_conversation_lock: Mutex::new(()),
+            chat_create_conversation_lock: tokio::sync::Mutex::new(()),
             external_slash_commands_cache: Mutex::new(HashMap::new()),
             external_agent_models_cache: Mutex::new(HashMap::new()),
             external_detected_agents_cache: Mutex::new(HashMap::new()),
+            availability_probe_lock: tokio::sync::Mutex::new(()),
+            model_probe_locks: Mutex::new(HashMap::new()),
             external_live_sessions: Mutex::new(HashMap::new()),
             pending_chat_external_sends: Mutex::new(Vec::new()),
             pending_selection: Mutex::new(None),
@@ -309,10 +359,12 @@ impl AppState {
             key_cooldowns: Mutex::new(HashMap::new()),
             active_key_idx: Mutex::new(HashMap::new()),
             prompt_cache_key_unsupported: Mutex::new(HashSet::new()),
+            image_route_cache: Mutex::new(HashMap::new()),
             mcp_sessions: tokio::sync::Mutex::new(HashMap::new()),
             mcp_tool_snapshots: Mutex::new(mcp_tool_snapshots),
             usage_dir,
             http,
+            http_direct: std::sync::OnceLock::new(),
             #[cfg(target_os = "macos")]
             macos_ocr,
             offline_models,
@@ -343,6 +395,17 @@ impl AppState {
             InpaintingClient::new(offline_models),
         )
     }
+    /// 该供应商应当使用的 HTTP 客户端。默认跟随系统代理（与加这个开关之前一致），
+    /// 关掉时用忽略代理的直连客户端。
+    pub fn client_for(&self, provider: &crate::settings::ModelProvider) -> &Client {
+        if provider.request.use_system_proxy {
+            &self.http
+        } else {
+            self.http_direct
+                .get_or_init(crate::api::build_direct_http_client)
+        }
+    }
+
     /// 安全读取设置（锁中毒时返回内部数据，不 panic）
     pub fn settings_read(&self) -> std::sync::RwLockReadGuard<'_, Settings> {
         self.settings.read().unwrap_or_else(|e| e.into_inner())
@@ -476,6 +539,23 @@ impl AppState {
             .insert(conversation_id.to_string());
     }
 
+    /// 该对话是否已对某个工具按下过「总是允许」。工具名统一小写后比较：内置 agent 报的是
+    /// `write`，外部 CLI 报的是自己的原名（claude 的 `Write`），不归一化两边对不上。
+    pub fn has_tool_always_allow(&self, conversation_id: &str, tool_name: &str) -> bool {
+        self.chat_tool_always_allow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(conversation_id.to_string(), tool_name.to_ascii_lowercase()))
+    }
+
+    /// 记录「本对话内该工具不再询问」(本进程内有效)。
+    pub fn grant_tool_always_allow(&self, conversation_id: &str, tool_name: &str) {
+        self.chat_tool_always_allow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((conversation_id.to_string(), tool_name.to_ascii_lowercase()));
+    }
+
     /// 判断指定 conversation 的某条 Chat 运行是否仍然有效（其 generation 仍在活跃集合内）。
     pub fn is_chat_generation_active(&self, conversation_id: &str, generation: u64) -> bool {
         self.chat_active_generations
@@ -486,8 +566,8 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// 对话被删除时清理其按 conversation_id 累积的运行态痕迹：活跃 generation 集合与
-    /// 会话级工具同意标记。两者都严格按 conversation_id 取键，对话删除后再不会被
+    /// 对话被删除时清理其按 conversation_id 累积的运行态痕迹：活跃 generation 集合、
+    /// 会话级工具同意标记、按工具名的「总是允许」集合。三者都严格按 conversation_id 取键，对话删除后再不会被
     /// 引用，是最无歧义的有界清理点（不影响其它活跃对话）。generation 号本身来自进程级
     /// 全局计数器（不分桶），无需在此清理。
     pub fn forget_chat_conversation_runtime(&self, conversation_id: &str) {
@@ -499,6 +579,10 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(conversation_id);
+        self.chat_tool_always_allow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(conv, _)| conv != conversation_id);
     }
 
     /// 尝试占用某个对话的某条 run 回复槽位。同会话允许多条 run 并存（多模型一问多答）；
@@ -608,12 +692,32 @@ impl AppState {
         }
     }
 
+    /// 斜杠命令缓存读取，TTL 随结果空/非空区分：非空命令列表用长 TTL（`full_ttl`），
+    /// 空列表（CLI 不上报任何斜杠命令 / 探测超时降级为空）用短 TTL（`empty_ttl`）做**负缓存**，
+    /// 避免切会话/切 agent 每次 useEffect 都重探（kimi 侧每探测一次即落一个空壳会话）。
     pub fn get_cached_external_slash_commands(
         &self,
         cache_key: &str,
-        ttl: Duration,
+        full_ttl: Duration,
+        empty_ttl: Duration,
     ) -> Option<Vec<crate::external_agents::types::ExternalCliSlashCommand>> {
-        get_cached(&self.external_slash_commands_cache, cache_key, ttl)
+        let mut cache = self
+            .external_slash_commands_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let max_ttl = full_ttl.max(empty_ttl);
+        cache.retain(|_, entry| entry.created_at.elapsed() <= max_ttl);
+        let entry = cache.get_mut(cache_key)?;
+        let ttl = if entry.value.is_empty() {
+            empty_ttl
+        } else {
+            full_ttl
+        };
+        if entry.created_at.elapsed() > ttl {
+            return None;
+        }
+        entry.last_accessed = Instant::now();
+        Some(entry.value.clone())
     }
 
     pub fn set_cached_external_slash_commands(
@@ -630,18 +734,37 @@ impl AppState {
         );
     }
 
+    /// 读模型探测缓存：按条目来源应用不同 TTL——probed 用 `probed_ttl`，fallback 用
+    /// `fallback_ttl`（短负缓存）。任一超时视为未命中。
     pub fn get_cached_external_agent_models(
         &self,
         cache_key: &str,
-        ttl: Duration,
-    ) -> Option<Vec<crate::external_agents::types::RuntimeModelOption>> {
-        get_cached(&self.external_agent_models_cache, cache_key, ttl)
+        probed_ttl: Duration,
+        fallback_ttl: Duration,
+    ) -> Option<crate::external_agents::types::CachedAgentModels> {
+        use crate::external_agents::types::ModelSource;
+        let mut cache = self
+            .external_agent_models_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let max_ttl = probed_ttl.max(fallback_ttl);
+        cache.retain(|_, entry| entry.created_at.elapsed() <= max_ttl);
+        let entry = cache.get_mut(cache_key)?;
+        let ttl = match entry.value.source {
+            ModelSource::Probed => probed_ttl,
+            ModelSource::Fallback => fallback_ttl,
+        };
+        if entry.created_at.elapsed() > ttl {
+            return None;
+        }
+        entry.last_accessed = Instant::now();
+        Some(entry.value.clone())
     }
 
     pub fn set_cached_external_agent_models(
         &self,
         cache_key: String,
-        models: Vec<crate::external_agents::types::RuntimeModelOption>,
+        models: crate::external_agents::types::CachedAgentModels,
     ) {
         set_cached(
             &self.external_agent_models_cache,
@@ -674,13 +797,32 @@ impl AppState {
         );
     }
 
+    /// single-flight：取（或创建）某 (agent:cwd) key 的模型探测锁。持锁期间探测，
+    /// 释放后并发者复查缓存即命中，避免同一目标并发重探。
+    pub fn model_probe_lock_for(&self, key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .model_probe_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locks
+            .entry(key.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     /// Phase 2: return the control channel of a reusable live session for this conversation
-    /// (same agent + cwd, actor still alive). Removes a stale/mismatched entry as a side effect.
+    /// (same agent + cwd + launch configuration, actor still alive). Removes a stale/mismatched
+    /// entry as a side effect.
+    ///
+    /// `launch_config` 让「配置变了 ⇒ 换进程」不需要额外的控制通道：不匹配就当成不可复用，
+    /// 丢弃条目（actor 收到通道关闭后自行关停子进程），调用方走连接分支并原生 resume
+    /// ⇒ 新 flag 生效且上下文不丢（spec 第 8 条）。
     pub fn external_live_session_control(
         &self,
         conversation_id: &str,
         agent_id: &str,
         cwd: &str,
+        launch_config: &crate::external_agents::session::live::LaunchConfig,
     ) -> Option<tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>>
     {
         let mut map = self
@@ -688,14 +830,32 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(session) = map.get_mut(conversation_id) {
-            if session.is_reusable(agent_id, cwd) {
+            if session.is_reusable(agent_id, cwd, launch_config) {
                 session.last_activity = Instant::now();
+                session.turns_served = session.turns_served.saturating_add(1);
                 return Some(session.control.clone());
             }
         }
         // Dropping the removed entry closes its control channel → the actor shuts the child down.
         map.remove(conversation_id);
         None
+    }
+
+    /// 把这条会话标成「有在飞轮次」，返回的 guard 落地时自动清掉。
+    ///
+    /// 轮次开始后调一次即可（复用与新建两条路都走得到），清扫器与 LRU 在此期间会跳过它。
+    /// 不存在（刚被回收）时返回 `None` —— 那种情况下这一轮自己持着 `control`，照样跑完。
+    pub fn mark_external_live_session_busy(
+        &self,
+        conversation_id: &str,
+    ) -> Option<crate::external_agents::session::live::TurnBusyGuard> {
+        let map = self
+            .external_live_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.get(conversation_id).map(|session| {
+            crate::external_agents::session::live::TurnBusyGuard::new(session.busy.clone())
+        })
     }
 
     pub fn register_external_live_session(
@@ -710,12 +870,14 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Reclaim idle sessions (dropping each entry closes its actor + child) and any whose
-        // actor already exited.
+        // actor already exited. 有在飞轮次的会话不参与回收（见 `LiveSession::busy`）。
         map.retain(|_, s| !s.is_idle(IDLE_TTL));
         // Bound concurrent live processes: evict least-recently-used until under the cap.
+        // 同样跳过在飞的 —— 正在跑长轮次的那条恰好 `last_activity` 最旧，不排除就一定被它选中。
         while map.len() >= MAX_LIVE_SESSIONS {
             let Some(oldest) = map
                 .iter()
+                .filter(|(_, s)| !s.busy.load(std::sync::atomic::Ordering::Acquire))
                 .min_by_key(|(_, s)| s.last_activity)
                 .map(|(k, _)| k.clone())
             else {
@@ -745,12 +907,41 @@ impl AppState {
         before - map.len()
     }
 
-    /// Drop all live sessions (e.g. on app shutdown). Each actor closes its child process.
-    pub fn close_all_external_live_sessions(&self) {
-        self.external_live_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+    /// 关停所有活的外部 CLI 会话（退出钩子用），**等它们真的退出**。
+    ///
+    /// 只 `clear()` 掉 sender 是不够的：那只是让 actor 在**下一次被 poll 时**才走
+    /// `close()`，而退出钩子后面运行时就随进程走了，actor 永远等不到那一次 poll。
+    /// `kill_on_drop(true)` 同理不触发 —— `Child` 就在那个永不 drop 的 actor 栈帧里。
+    /// 结果是每次退出留下最多 `MAX_LIVE_SESSIONS` 个 CLI 进程，各自还挂着自己拉起的
+    /// MCP stdio 子进程（`kill_on_drop` 也只杀直接子进程，够不到孙子）。
+    ///
+    /// 所以这里显式发 `Close` 并等通道关闭；超时没退的按 pid 杀进程树。按 pid 杀是
+    /// `LiveSession::child_pid` 那条「绝不按 pid 杀」规则的**唯一例外** —— 那条规则防的是
+    /// 把进程从一个还活着的 actor 底下抽走，而进程退出时这个顾虑已经不存在了。
+    pub async fn close_all_external_live_sessions(&self) {
+        const PER_SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(1_500);
+        let sessions: Vec<crate::external_agents::session::live::LiveSession> = {
+            let mut map = self
+                .external_live_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.drain().map(|(_, session)| session).collect()
+        };
+        futures::future::join_all(sessions.into_iter().map(|session| async move {
+            let _ = session
+                .control
+                .send(crate::external_agents::session::live::SessionCommand::Close)
+                .await;
+            if tokio::time::timeout(PER_SESSION_CLOSE_TIMEOUT, session.control.closed())
+                .await
+                .is_err()
+            {
+                if let Some(pid) = session.child_pid {
+                    crate::native_tools::kill_process_group(pid);
+                }
+            }
+        }))
+        .await;
     }
 
     /// Shared handle to the background-command registry. Returned as a cloned
@@ -840,6 +1031,54 @@ impl AppState {
         killed
     }
 
+    /// Kill the background jobs a single conversation started, and drop them from
+    /// the registry. Used when deleting a conversation: a still-running dev server
+    /// keeps its cwd inside `chat-workspaces/<id>`, and on Windows an in-use
+    /// directory refuses to be removed — which used to abort the whole delete.
+    /// Returns how many process groups were killed.
+    ///
+    /// Jobs with no `conversation_id` (test seeds / non-agent paths) are left
+    /// alone: unowned is not the same as owned-by-this-conversation.
+    pub fn kill_background_commands_for_conversation(&self, conversation_id: &str) -> usize {
+        let mut map = self
+            .background_commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let owned: Vec<String> = map
+            .values()
+            .filter(|job| job.conversation_id.as_deref() == Some(conversation_id))
+            .map(|job| job.job_id.clone())
+            .collect();
+        let mut killed = 0;
+        for job_id in &owned {
+            let Some(job) = map.get_mut(job_id) else {
+                continue;
+            };
+            if matches!(
+                job.status,
+                crate::native_tools::BackgroundCommandStatus::Running
+            ) {
+                // 同 kill_all：优先叫醒持有 Child 的 waiter，避免直接按已回收的 pid 杀
+                // （pid 复用 TOCTOU）；没有 waiter 才回落到进程组直杀。
+                match job.kill_tx.take() {
+                    Some(kill_tx) => {
+                        let _ = kill_tx.send(());
+                        killed += 1;
+                    }
+                    None => {
+                        if let Some(pid) = job.pid {
+                            crate::native_tools::kill_process_group(pid);
+                            killed += 1;
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&job.log_path);
+            map.remove(job_id);
+        }
+        killed
+    }
+
     /// 该 base_url 是否已被学习为"拒绝 prompt_cache_key"。
     pub fn prompt_cache_key_unsupported(&self, base_url: &str) -> bool {
         self.prompt_cache_key_unsupported
@@ -923,6 +1162,109 @@ mod tests {
     }
 
     #[test]
+    fn model_probe_lock_is_shared_per_key_and_distinct_across_keys() {
+        let st = test_state();
+        let a1 = st.model_probe_lock_for("claude:/proj");
+        let a2 = st.model_probe_lock_for("claude:/proj");
+        let b = st.model_probe_lock_for("codex:/proj");
+        // 同 key 复用同一把锁（single-flight 生效），不同 key 各自独立。
+        assert!(std::sync::Arc::ptr_eq(&a1, &a2));
+        assert!(!std::sync::Arc::ptr_eq(&a1, &b));
+    }
+
+    #[test]
+    fn external_agent_models_cache_applies_source_aware_ttl() {
+        use crate::external_agents::types::{CachedAgentModels, ModelSource, RuntimeModelOption};
+        let st = test_state();
+        let one = |id: &str| RuntimeModelOption {
+            id: id.to_string(),
+            label: id.to_string(),
+            context_window_tokens: None,
+        };
+
+        // probed 条目在长 TTL 内命中，短 fallback TTL 不影响它。
+        st.set_cached_external_agent_models(
+            "claude:/p".to_string(),
+            CachedAgentModels {
+                models: vec![one("gpt-5")],
+                source: ModelSource::Probed,
+                reasoning_options: vec![],
+                reasoning_by_model: Default::default(),
+                current_model: None,
+                current_reasoning: None,
+            },
+        );
+        assert!(st
+            .get_cached_external_agent_models("claude:/p", Duration::from_secs(300), Duration::ZERO)
+            .is_some());
+
+        // fallback 条目按短 TTL 裁定：TTL=0 立即视为过期（负缓存到点即重探）。
+        st.set_cached_external_agent_models(
+            "codex:/p".to_string(),
+            CachedAgentModels {
+                models: vec![one("default")],
+                source: ModelSource::Fallback,
+                reasoning_options: vec![],
+                reasoning_by_model: Default::default(),
+                current_model: None,
+                current_reasoning: None,
+            },
+        );
+        assert!(st
+            .get_cached_external_agent_models("codex:/p", Duration::from_secs(300), Duration::ZERO)
+            .is_none());
+        // 同一 fallback 条目在足够长的 fallback TTL 内仍命中。
+        st.set_cached_external_agent_models(
+            "codex:/p".to_string(),
+            CachedAgentModels {
+                models: vec![one("default")],
+                source: ModelSource::Fallback,
+                reasoning_options: vec![],
+                reasoning_by_model: Default::default(),
+                current_model: None,
+                current_reasoning: None,
+            },
+        );
+        let hit = st.get_cached_external_agent_models(
+            "codex:/p",
+            Duration::from_secs(300),
+            Duration::from_secs(30),
+        );
+        assert!(matches!(hit.map(|c| c.source), Some(ModelSource::Fallback)));
+    }
+
+    #[test]
+    fn external_slash_commands_cache_negative_caches_empty_with_short_ttl() {
+        use crate::external_agents::types::ExternalCliSlashCommand;
+        let st = test_state();
+        let cmd = |name: &str| ExternalCliSlashCommand {
+            slash: format!("/{name}"),
+            name: name.to_string(),
+            description: None,
+            argument_hint: None,
+        };
+
+        // 非空命令列表走长 TTL：短(empty) TTL=0 不影响它，仍命中。
+        st.set_cached_external_slash_commands("kimi:/g".to_string(), vec![cmd("compact")]);
+        assert!(st
+            .get_cached_external_slash_commands("kimi:/g", Duration::from_secs(300), Duration::ZERO)
+            .is_some());
+
+        // 空列表（负缓存）按短 TTL 裁定：empty TTL=0 立即过期 → 到点重探。
+        st.set_cached_external_slash_commands("grok:/g".to_string(), Vec::new());
+        assert!(st
+            .get_cached_external_slash_commands("grok:/g", Duration::from_secs(300), Duration::ZERO)
+            .is_none());
+        // 但空列表在足够长的 empty TTL 内仍命中（TTL 内不重探）。
+        let hit = st.get_cached_external_slash_commands(
+            "grok:/g",
+            Duration::from_secs(300),
+            Duration::from_secs(30),
+        );
+        assert!(matches!(hit, Some(ref v) if v.is_empty()));
+    }
+
+    #[test]
     fn bounded_cache_sweeps_all_expired_entries_on_read() {
         let cache = Mutex::new(HashMap::from([
             (
@@ -1003,6 +1345,98 @@ mod tests {
             thread.join().unwrap();
         }
         assert!(cache.lock().unwrap().len() <= 16);
+    }
+
+    fn sample_mcp_tool(name: &str) -> McpTool {
+        McpTool {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            input_schema: serde_json::json!({ "type": "object" }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_persists_across_state_restart() {
+        let st = test_state();
+        let usage_dir = st.usage_dir.clone();
+        st.set_mcp_tool_snapshot("srv".into(), "fp-1".into(), vec![sample_mcp_tool("echo")]);
+
+        // 内存命中
+        let hit = st
+            .get_mcp_tool_snapshot("srv", "fp-1")
+            .expect("in-memory hit");
+        assert_eq!(hit[0].name, "echo");
+
+        // 模拟重启：新 AppState 从同一 usage_dir 灌入落盘快照
+        let restarted = AppState::new_headless(Settings::default(), usage_dir.clone());
+        let reloaded = restarted
+            .get_mcp_tool_snapshot("srv", "fp-1")
+            .expect("snapshot reloads from disk after restart");
+        assert_eq!(reloaded[0].name, "echo");
+        assert_eq!(reloaded[0].description, "echo tool");
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_fingerprint_mismatch_misses() {
+        let st = test_state();
+        let usage_dir = st.usage_dir.clone();
+        st.set_mcp_tool_snapshot("srv".into(), "fp-old".into(), vec![sample_mcp_tool("echo")]);
+
+        assert!(st.get_mcp_tool_snapshot("srv", "fp-new").is_none());
+        // 落盘后重启同样不命中改配置的旧快照
+        let restarted = AppState::new_headless(Settings::default(), usage_dir.clone());
+        assert!(restarted.get_mcp_tool_snapshot("srv", "fp-new").is_none());
+        assert!(restarted.get_mcp_tool_snapshot("srv", "fp-old").is_some());
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_ignores_corrupt_disk_file() {
+        let usage_dir =
+            std::env::temp_dir().join(format!("kivio-test-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&usage_dir).expect("create usage dir");
+        std::fs::write(mcp_tool_snapshot_path(&usage_dir), "{ not json !!")
+            .expect("write corrupt snapshot file");
+
+        // 损坏文件 = 视为无缓存，不 panic
+        let st = AppState::new_headless(Settings::default(), usage_dir.clone());
+        assert!(st.get_mcp_tool_snapshot("srv", "fp").is_none());
+
+        // 后续写入照常覆盖损坏文件
+        st.set_mcp_tool_snapshot("srv".into(), "fp".into(), vec![sample_mcp_tool("echo")]);
+        let restarted = AppState::new_headless(Settings::default(), usage_dir.clone());
+        assert!(restarted.get_mcp_tool_snapshot("srv", "fp").is_some());
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
+    }
+
+    #[test]
+    fn mcp_tool_snapshot_file_contains_no_secrets_and_empty_tools_are_not_stored() {
+        let st = test_state();
+        let usage_dir = st.usage_dir.clone();
+        // 空工具列表不入缓存（也不落盘）
+        st.set_mcp_tool_snapshot("empty".into(), "fp".into(), Vec::new());
+        assert!(st.get_mcp_tool_snapshot("empty", "fp").is_none());
+
+        st.set_mcp_tool_snapshot("srv".into(), "fp".into(), vec![sample_mcp_tool("echo")]);
+        let raw = std::fs::read_to_string(mcp_tool_snapshot_path(&usage_dir))
+            .expect("snapshot file exists");
+        // 落盘内容只有工具 schema + 指纹哈希：不该出现 headers/env/token 之类的键
+        assert!(raw.contains("config_fingerprint"));
+        assert!(raw.contains("echo"));
+        for secret_marker in ["Authorization", "Bearer", "headers", "api_key"] {
+            assert!(
+                !raw.contains(secret_marker),
+                "snapshot file must not contain {secret_marker}: {raw}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&usage_dir);
     }
 
     #[test]
@@ -1094,6 +1528,22 @@ mod tests {
         assert!(st.has_chat_consent("conv-1"));
         // Consent is scoped to a single conversation, not global.
         assert!(!st.has_chat_consent("conv-2"));
+    }
+
+    #[test]
+    fn chat_tool_always_allow_is_per_conversation_and_tool() {
+        let st = test_state();
+        assert!(!st.has_tool_always_allow("conv-1", "write"));
+        st.grant_tool_always_allow("conv-1", "write");
+        assert!(st.has_tool_always_allow("conv-1", "write"));
+        // 外部 CLI 报 PascalCase，必须命中同一条。
+        assert!(st.has_tool_always_allow("conv-1", "Write"));
+        // 只放行按下的那个工具，不是整会话放行。
+        assert!(!st.has_tool_always_allow("conv-1", "read"));
+        // 不跨对话。
+        assert!(!st.has_tool_always_allow("conv-2", "write"));
+        st.forget_chat_conversation_runtime("conv-1");
+        assert!(!st.has_tool_always_allow("conv-1", "write"));
     }
 
     // --- 多模型一问多答：并发护栏 per-run 化（任务 06-30 步骤 1） ---

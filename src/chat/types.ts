@@ -147,6 +147,27 @@ export type ChatMessageSegmentKind = 'text' | 'reasoning' | 'tool'
 
 export type ChatMessageSegmentPhase = 'auxiliary' | 'plain' | 'tool_loop' | 'synthesis'
 
+/** 降级兜底的结构化描述（后端 recovery.rs 产出）。 */
+export interface DegradedAnswer {
+  /** 稳定标识，前端据此选图标/措辞，不解析文案。 */
+  kind:
+    | 'rate_limited'
+    | 'context_overflow'
+    | 'timeout'
+    | 'moderation'
+    | 'empty_response'
+    | 'unknown'
+    | string
+  /** 一行人读的失败原因。 */
+  reason: string
+  /** 供应商返回的原始报错（已剥壳裁剪）——真正能排查的那一句。 */
+  detail?: string | null
+  /** 本轮已完成的工具调用摘要。 */
+  toolSummaries?: { name: string; preview: string }[]
+  /** 纯文本版本，供不渲染卡片的场景回落。 */
+  text: string
+}
+
 export interface ChatMessageSegment {
   id: string
   kind: ChatMessageSegmentKind
@@ -182,6 +203,11 @@ export interface ChatMessage {
   runEntry?: 'send' | 'regenerate' | string | null
   stream_outcome?: 'completed' | 'cancelled' | 'error' | 'interrupted' | string | null
   streamOutcome?: 'completed' | 'cancelled' | 'error' | 'interrupted' | string | null
+  /**
+   * 降级兜底：模型调用失败、但本轮已有工具结果时由后端填充。
+   * 渲染成独立错误卡片 —— 正文 content 不再混入故障文案。
+   */
+  degraded?: DegradedAnswer | null
   /** Provider 报告的本条回复真实 token 用量（规划/合成/压缩累计）；不报告时缺省。 */
   usage?: MessageUsage | null
   /** 多模型一问多答：同一条 user 消息 fan-out 出的 N 条 assistant 共享同一个 group id；单模型为空。 */
@@ -429,6 +455,35 @@ export interface AgentRuntimeConfig {
   external_sandbox?: string | null
 }
 
+/// 一条可从本地 CLI 导入的原生会话。后端 `ImportableSession` 的镜像。
+export interface ImportableCliSession {
+  agentId: string
+  /** 该 CLI 自己的会话 id——续聊时 `--resume` / `session/load` 认的就是这个。 */
+  sessionId: string
+  title?: string | null
+  /** 会话创建时所在的工作目录，必然等于当前项目根（后端已按此过滤）。 */
+  cwd: string
+  /** 最后活动时间，epoch **毫秒**（注意与 `ChatMessage.timestamp` 的秒不同）。 */
+  updatedAt?: number | null
+  /** `null` = 来源给不出条数（ACP `session/list` 不返回），界面显示"未知"而不是 0。 */
+  messageCount?: number | null
+  /** 由导入功能带进来的。 */
+  alreadyImported: boolean
+  /**
+   * 已经有 Kivio 对话绑着这条原生会话时，那条对话的 id。
+   *
+   * **不等于 `alreadyImported`**：Kivio 自己创建的外部 CLI 对话运行时也会写绑定。
+   * 两种都不能再导入（绑定是 1:1 的），但要说不同的话。
+   */
+  boundConversationId?: string | null
+}
+
+export interface CliImportResult {
+  success: boolean
+  imported: Array<{ agentId: string; sessionId: string; conversationId: string }>
+  failures: Array<{ agentId: string; sessionId: string; error: string }>
+}
+
 export interface DetectedExternalAgent {
   id: string
   name: string
@@ -446,6 +501,7 @@ export interface DetectedExternalAgent {
 
 export interface Conversation {
   id: string
+  revision: number
   title: string
   provider_id: string
   model: string
@@ -478,6 +534,9 @@ export interface Conversation {
   forceKnowledgeSearch?: boolean
   thinking_level?: ThinkingLevel | null
   thinkingLevel?: ThinkingLevel | null
+  /** 会话级三态联网搜索（任务 07-23）。缺省/null = 跟随全局 nativeTools.webSearch。 */
+  web_search_mode?: WebSearchMode | null
+  webSearchMode?: WebSearchMode | null
   /** 多模型一问多答（D2）：会话级持久化的多答模型集合（上限 4）。空或单元素 = 单模型现状。 */
   reply_models?: ModelRef[]
   replyModels?: ModelRef[]
@@ -506,8 +565,12 @@ export interface ModelRef {
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
+/** 会话级三态联网搜索模式（任务 07-23）。off=不联网；builtin=模型原生内置搜索；third_party=search_web 工具。 */
+export type WebSearchMode = 'off' | 'builtin' | 'third_party'
+
 export interface ConversationListItem {
   id: string
+  revision?: number
   title: string
   preview: string
   provider_id: string

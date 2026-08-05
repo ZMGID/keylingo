@@ -20,7 +20,6 @@ use super::{
     AgentPlanState, ChatMessage, ChatMessageSegment, ChatMessageSegmentKind,
     ChatMessageSegmentPhase, Conversation, ToolCallRecord, ToolCallStatus,
 };
-use crate::chat::storage::{load_conversation, save_conversation};
 
 /// 多答组的列标识：(group_id, provider_id, model)。单模型为 None（字段写 None）。
 type AssistantGroupMeta = (String, String, String);
@@ -186,6 +185,7 @@ pub(super) fn build_assistant_message(
         provider_id,
         model,
         timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
     }
 }
 
@@ -237,6 +237,8 @@ pub(crate) async fn push_assistant_message(
     usage: Option<crate::chat::model::ModelUsage>,
     anchor_usage: Option<crate::chat::model::ModelUsage>,
     agent_plan: Option<AgentPlanState>,
+    // 降级兜底的结构化描述；Some 时前端渲染成独立错误卡片。
+    degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
 ) -> Result<(), String> {
     let message = build_assistant_message(
         message_id,
@@ -255,15 +257,48 @@ pub(crate) async fn push_assistant_message(
         // 单模型落盘路径不带 group 信息（行为不变）。
         None,
     );
+    let mut message = message;
+    message.degraded = degraded;
     let stored_content = message.content.clone();
-    let generated_title = if let Some(user_content) = title_from_first_user {
-        if conversation.messages.len() == 1 && conversation.title == "新对话" {
+
+    // 标题还是"自动生成的样子"吗——`"新对话"`，或者等于第一句用户消息的启发式结果。
+    // 用户手动重命名过的标题不会等于启发式结果，所以据此判断不会覆盖用户的命名。
+    let title_looks_auto = conversation.title == "新对话"
+        || title_from_first_user.is_some_and(|first| conversation.title == generate_title(first));
+    let is_external =
+        conversation.agent_runtime.kind == crate::chat::types::AgentRuntimeKind::External;
+
+    // 外部 CLI 对话优先用 CLI 自己生成的标题：那是用户在 CLI 里看到的那个，而且不花模型调用。
+    //
+    // **每轮都试一次**（一次文件读，很便宜）：CLI 是异步写标题的（claude 的 `ai-title`），
+    // 首轮回复落盘时往往还没有，只在第一轮试就永远拿不到。
+    let external_cli_title = if is_external && title_looks_auto {
+        crate::external_agents::import::cli_session_title(app, &conversation.id)
+            .filter(|title| !title.trim().is_empty() && *title != conversation.title)
+    } else {
+        None
+    };
+
+    let generated_title = if external_cli_title.is_some() {
+        external_cli_title
+    } else if let Some(user_content) = title_from_first_user {
+        // 外部对话放宽首轮门槛：它的标题可能已经被兜底成"第一句用户消息"，
+        // 卡在 `== "新对话"` 上的话，标题模型这一步压根不会触发。
+        let wants_generation = conversation.messages.len() == 1
+            && if is_external {
+                title_looks_auto
+            } else {
+                conversation.title == "新对话"
+            };
+        if wants_generation {
             // 被取消的首条回复不值得花一次模型调用生成标题（标题生成是一次
             // 带 8s 超时的 LLM 请求，会显著拖慢"停止"后 invoke 的返回 / 输入框解锁）。
             // 用本地启发式标题兜底；下一条正常回复或重命名仍可得到更好的标题。
             if stream_outcome == Some("cancelled") {
                 Some(generate_title(user_content))
             } else {
+                // 外部对话的 `provider_id`/`model` 是空的（ADR-0001），`resolve_mixer_side_model`
+                // 会因此跳过"继承会话模型"，落到设置里的标题模型、再兜到全局 Chat 模型。
                 Some(
                     resolve_conversation_title(
                         settings,
@@ -282,25 +317,78 @@ pub(crate) async fn push_assistant_message(
         None
     };
 
-    upsert_assistant_message(conversation, message);
+    let first_user = title_from_first_user.map(str::to_string);
+    let message_plan = message.agent_plan.clone();
+    let plan_update = message_plan.clone();
+    let conversation_id = conversation.id.clone();
+    let mut persisted = crate::chat::repository::repository(app)
+        .mutate(app, &conversation_id, |latest| {
+            upsert_assistant_message(latest, message);
+            if let Some(title) = generated_title {
+                let title_is_still_auto = latest.title == "新对话"
+                    || first_user
+                        .as_deref()
+                        .is_some_and(|first| latest.title == generate_title(first));
+                if title_is_still_auto {
+                    latest.title = title;
+                }
+            }
+            if let Some(plan) = message_plan {
+                latest.agent_plan_state = plan;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
 
-    if let Some(title) = generated_title {
-        conversation.title = title;
+    // Context is derived from the full conversation. Commit it with CAS and
+    // recompute once if an unrelated operation advanced the revision while the
+    // potentially expensive estimate/compression was running.
+    for attempt in 0..2 {
+        match compute_context_state(app, state, &persisted, None, &[]).await {
+            Ok(context_state) => {
+                persisted.context_state = context_state;
+                try_auto_compress_context_after_update(app, state, &mut persisted, None, &[]).await;
+                let next_context = persisted.context_state.clone();
+                match crate::chat::repository::repository(app)
+                    .update_context(app, &conversation_id, persisted.revision, next_context)
+                    .await
+                {
+                    Ok(latest) => {
+                        persisted = latest;
+                        emit_chat_context_state(
+                            app,
+                            &conversation_id,
+                            persisted.revision,
+                            &persisted.context_state,
+                        );
+                        break;
+                    }
+                    Err(crate::chat::repository::ConversationRepositoryError::Conflict {
+                        ..
+                    }) if attempt == 0 => {
+                        persisted = crate::chat::repository::repository(app)
+                            .get(app, &conversation_id)
+                            .await
+                            .map_err(crate::chat::repository::repository_error)?;
+                    }
+                    Err(err) => {
+                        eprintln!("Context state commit failed after assistant reply: {err}");
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Context usage estimate failed after assistant reply: {err}");
+                break;
+            }
+        }
     }
 
-    match compute_context_state(app, state, conversation, None, &[]).await {
-        Ok(context_state) => {
-            conversation.context_state = context_state.clone();
-            try_auto_compress_context_after_update(app, state, conversation, None, &[]).await;
-            emit_chat_context_state(app, &conversation.id, &conversation.context_state);
-        }
-        Err(err) => {
-            eprintln!("Context usage estimate failed after assistant reply: {err}");
-        }
+    *conversation = persisted;
+    if let Some(plan) = plan_update {
+        emit_chat_plan_state(app, &conversation_id, conversation.revision, &plan);
     }
-
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(app, conversation)?;
     Ok(())
 }
 
@@ -331,7 +419,7 @@ pub(super) fn upsert_assistant_message(conversation: &mut Conversation, message:
 /// replayable on a later "continue" — `model_messages` are derived from them
 /// exactly as the final write does, keeping the storage shape consistent. No-op
 /// when nothing has been produced yet.
-pub(super) fn persist_partial_assistant_snapshot(
+pub(super) async fn persist_partial_assistant_snapshot(
     app: &AppHandle,
     conversation_id: &str,
     message_id: &str,
@@ -342,7 +430,6 @@ pub(super) fn persist_partial_assistant_snapshot(
     if tool_records.is_empty() && segments.is_empty() {
         return Ok(());
     }
-    let mut conversation = load_conversation(app, conversation_id)?;
     let segments = segments.to_vec();
     // 中断草稿是「永不完成」run 的最终存档，最易出孤立工具分段——同样反向对账补齐。
     let mut tool_records = tool_records.to_vec();
@@ -376,10 +463,13 @@ pub(super) fn persist_partial_assistant_snapshot(
         provider_id: None,
         model: None,
         timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
     };
-    upsert_assistant_message(&mut conversation, draft);
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(app, &conversation)
+    crate::chat::repository::repository(app)
+        .upsert_message(app, conversation_id, draft)
+        .await
+        .map(|_| ())
+        .map_err(crate::chat::repository::repository_error)
 }
 
 pub(super) fn normalize_assistant_segments(
@@ -691,30 +781,7 @@ fn edited_assistant_model_messages(message: &ChatMessage) -> Vec<ModelMessage> {
     }
 }
 
-pub(super) fn merge_latest_agent_todo_state(app: &AppHandle, conversation: &mut Conversation) {
-    match load_conversation(app, &conversation.id) {
-        Ok(latest) => {
-            conversation.agent_todo_state = latest.agent_todo_state;
-        }
-        Err(err) => {
-            eprintln!("Failed to reload latest agent todo state before saving reply: {err}");
-        }
-    }
-}
-
-pub(super) fn merge_latest_agent_plan_state(app: &AppHandle, conversation: &mut Conversation) {
-    match load_conversation(app, &conversation.id) {
-        Ok(latest) => {
-            conversation.agent_plan_state = latest.agent_plan_state;
-        }
-        Err(err) => {
-            eprintln!("Failed to reload latest agent plan state before saving reply: {err}");
-        }
-    }
-}
-
 pub(super) fn capture_agent_plan_draft_if_needed(
-    app: &AppHandle,
     conversation: &mut Conversation,
     original_plan_mode: bool,
     content: &str,
@@ -738,7 +805,6 @@ pub(super) fn capture_agent_plan_draft_if_needed(
         };
     }
     conversation.agent_plan_state = next_state.clone();
-    emit_chat_plan_state(app, &conversation.id, &next_state);
     Some(next_state)
 }
 

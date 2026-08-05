@@ -1,18 +1,20 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model::openai_messages_from_model_messages;
 use crate::chat::model_call::session_model_for_conversation;
 use crate::chat::model_metadata::context_window_for_model;
-use crate::chat::storage::{find_set_by_id, load_conversation, save_conversation};
+use crate::chat::storage::{find_set_by_id, load_conversation};
 use crate::chat::{
     ChatMessage, CompactionBoundaryRecord, ContextUsageSegment, Conversation,
     ConversationContextState, ConversationContextSummary,
 };
-use crate::external_agents::detection::EXTERNAL_AGENT_MODELS_CACHE_TTL;
+use crate::external_agents::detection::{
+    EXTERNAL_AGENT_MODELS_CACHE_TTL, EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+};
 use crate::mcp::ChatToolDefinition;
 use crate::settings::{ModelProvider, ProviderApiFormat};
 use crate::skills;
@@ -49,19 +51,74 @@ pub(crate) async fn chat_get_context_stats(
             None,
             None,
             Some(&cwd),
+            Some(&cwd),
         )
         .await
     } else {
         compute_context_state(&app, &state, &conversation, None, &[]).await?
     };
-    conversation.context_state = context_state.clone();
-    save_conversation(&app, &conversation)?;
+    conversation = persist_context_state_best_effort(
+        &app,
+        &conversation_id,
+        conversation,
+        context_state.clone(),
+    )
+    .await?;
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
         "contextState": context_state,
         "conversation": conversation,
     }))
+}
+
+/// 把刚算出来的上下文状态落盘。**抢不到版本不算失败**。
+///
+/// 上面那次计算是个 async 的慢活（外部 CLI 那条还要探模型），期间生成中的那一轮每落一条
+/// 消息就把会话推进一版，于是拿着旧 revision 去写必然撞 `Conflict`。而这个命令语义上是
+/// **读**（用户点刷新问「我的上下文多满」），落盘只是顺手缓存 —— 把缓存失败变成用户可见的
+/// 红字是纯粹的噪声：面板里那条「conversation revision conflict (conv_…): expected 2,
+/// actual 6」就是这么来的（生成中打开面板必现）。
+///
+/// 撞了先用**最新**的 revision 重试一次（多数情况下这一次就成了）；再撞就放弃落盘，直接把
+/// 算出来的状态返回给前端 —— 反正轮末的权威计算会自己写一次。
+async fn persist_context_state_best_effort(
+    app: &AppHandle,
+    conversation_id: &str,
+    conversation: crate::chat::Conversation,
+    context_state: crate::chat::ConversationContextState,
+) -> Result<crate::chat::Conversation, String> {
+    let repository = crate::chat::repository::repository(app);
+    match repository
+        .update_context(
+            app,
+            conversation_id,
+            conversation.revision,
+            context_state.clone(),
+        )
+        .await
+    {
+        Ok(updated) => Ok(updated),
+        Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. }) => {
+            let latest = repository
+                .get(app, conversation_id)
+                .await
+                .map_err(crate::chat::repository::repository_error)?;
+            let revision = latest.revision;
+            match repository
+                .update_context(app, conversation_id, revision, context_state)
+                .await
+            {
+                Ok(updated) => Ok(updated),
+                // 还在被推进（生成中）⇒ 不落盘，返回刚读到的会话 + 算出来的状态。
+                Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. }) => {
+                    Ok(latest)
+                }
+                Err(err) => Err(crate::chat::repository::repository_error(err)),
+            }
+        }
+        Err(err) => Err(crate::chat::repository::repository_error(err)),
+    }
 }
 
 #[tauri::command]
@@ -78,10 +135,24 @@ pub(crate) async fn chat_compress_context(
             &mut conversation,
         )
         .await?;
-        conversation.updated_at = chrono::Local::now().timestamp();
-        save_conversation(&app, &conversation)?;
-        let context_state = conversation.context_state.clone();
-        emit_chat_context_state(&app, &conversation.id, &context_state);
+        let context_state_after_compact = conversation.context_state.clone();
+        // 同 `chat_get_context_stats`：压缩**已经发生**了，落盘缓存抢不到版本不该报错。
+        conversation = persist_context_state_best_effort(
+            &app,
+            &conversation_id,
+            conversation,
+            context_state_after_compact.clone(),
+        )
+        .await?;
+        // 用**压缩后算出来的**那份，不能读回 `conversation.context_state`：落盘被让位时
+        // 上面返回的是重新读到的会话，它身上还是压缩前的状态。
+        let context_state = context_state_after_compact;
+        emit_chat_context_state(
+            &app,
+            &conversation.id,
+            conversation.revision,
+            &context_state,
+        );
         strip_transcripts_for_frontend(&mut conversation);
         return Ok(serde_json::json!({
             "success": true,
@@ -89,12 +160,24 @@ pub(crate) async fn chat_compress_context(
             "conversation": conversation,
         }));
     }
-    compress_conversation_context(&app, &state, &mut conversation, "manual").await?;
+    compress_conversation_context(&state, &mut conversation, "manual").await?;
     let context_state = compute_context_state(&app, &state, &conversation, None, &[]).await?;
     conversation.context_state = context_state.clone();
-    conversation.updated_at = chrono::Local::now().timestamp();
-    save_conversation(&app, &conversation)?;
-    emit_chat_context_state(&app, &conversation.id, &context_state);
+    conversation = crate::chat::repository::repository(&app)
+        .update_context(
+            &app,
+            &conversation_id,
+            conversation.revision,
+            context_state.clone(),
+        )
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    emit_chat_context_state(
+        &app,
+        &conversation.id,
+        conversation.revision,
+        &context_state,
+    );
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
@@ -512,34 +595,46 @@ pub(super) async fn compute_context_state(
     last_user_image_paths: &[PathBuf],
 ) -> Result<ConversationContextState, String> {
     if conversation.agent_runtime.is_external() {
-        let model_cache_key = crate::external_agents::workspace::resolve_effective_cwd(
+        // 缓存 key 必须与写入方 chat_detect_external_agent_models 一致：探测 cwd
+        // （resolve_detection_cwd，非项目会话 = __global__），否则该读取恒 miss。
+        let model_cache_key =
+            crate::external_agents::workspace::resolve_detection_cwd(app, Some(&conversation.id))
+                .ok()
+                .and_then(|cwd| {
+                    conversation
+                        .agent_runtime
+                        .external_agent_id
+                        .as_deref()
+                        .map(|agent_id| {
+                            crate::external_agents::slash::cache_key(
+                                agent_id,
+                                cwd.to_string_lossy().as_ref(),
+                            )
+                        })
+                });
+        let cached_models = model_cache_key.as_deref().and_then(|cache_key| {
+            state.get_cached_external_agent_models(
+                cache_key,
+                EXTERNAL_AGENT_MODELS_CACHE_TTL,
+                EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+            )
+        });
+        // 执行 cwd（resolve_effective_cwd，每会话独立 workspace）与上面的探测 cwd 是两回事：
+        // 它只用于按 workDir 关联 kimi 落盘的 wire.jsonl（见 kimi_usage 模块）。拿不到不影响其余。
+        let work_dir = crate::external_agents::workspace::resolve_effective_cwd(
             app,
             &conversation.id,
             conversation.project_id.as_deref(),
         )
-        .ok()
-        .and_then(|cwd| {
-            conversation
-                .agent_runtime
-                .external_agent_id
-                .as_deref()
-                .map(|agent_id| {
-                    crate::external_agents::slash::cache_key(
-                        agent_id,
-                        cwd.to_string_lossy().as_ref(),
-                    )
-                })
-        });
-        let cached_models = model_cache_key.as_deref().and_then(|cache_key| {
-            state.get_cached_external_agent_models(cache_key, EXTERNAL_AGENT_MODELS_CACHE_TTL)
-        });
+        .ok();
         return Ok(
             crate::external_agents::context::compute_external_context_state_with_probe(
                 conversation,
                 false,
                 None,
-                cached_models.as_deref(),
+                cached_models.as_ref().map(|c| c.models.as_slice()),
                 None,
+                work_dir.as_deref(),
             )
             .await,
         );
@@ -791,13 +886,31 @@ pub(super) async fn rollback_user_message_after_failed_send(
         Ok(mut context_state) => {
             context_state.warning = None;
             conversation.context_state = context_state.clone();
-            emit_chat_context_state(app, &conversation.id, &context_state);
         }
         Err(context_err) => {
             eprintln!("Context usage estimate failed after send rollback: {context_err}");
         }
     }
-    save_conversation(app, conversation)
+    let context_state = conversation.context_state.clone();
+    let persisted = crate::chat::repository::repository(app)
+        .mutate(app, &conversation.id, |latest| {
+            latest
+                .messages
+                .retain(|message| message.id != user_message_id);
+            latest.context_state = context_state;
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    // 落盘之后再发：revision 必须是权威的那个，否则前端 applyEvent 会按旧 revision 丢弃。
+    emit_chat_context_state(
+        app,
+        &persisted.id,
+        persisted.revision,
+        &persisted.context_state,
+    );
+    *conversation = persisted;
+    Ok(())
 }
 
 pub(super) fn should_auto_compress_context(
@@ -826,7 +939,7 @@ pub(super) async fn try_auto_compress_context_after_update(
     if !should_auto_compress_context(&conversation.context_state, conversation) {
         return;
     }
-    match compress_conversation_context(app, state, conversation, "auto").await {
+    match compress_conversation_context(state, conversation, "auto").await {
         Ok(()) => {
             match compute_context_state(
                 app,
@@ -857,14 +970,12 @@ pub(super) async fn try_auto_compress_context_after_update(
 }
 
 pub(super) async fn compress_conversation_context(
-    app: &AppHandle,
     state: &State<'_, AppState>,
     conversation: &mut Conversation,
     trigger: &str,
 ) -> Result<(), String> {
     let settings = state.settings_read().clone();
     crate::chat::agent::compaction::compact_conversation(
-        app,
         state.inner(),
         &settings,
         conversation,
@@ -877,32 +988,72 @@ pub(super) async fn compress_conversation_context(
 pub(super) fn emit_chat_context_state(
     app: &AppHandle,
     conversation_id: &str,
+    revision: u64,
     context_state: &ConversationContextState,
 ) {
-    let _ = app.emit(
-        "chat-context",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "contextState": context_state,
-        }),
+    crate::chat::protocol::emit_conversation_event(
+        app,
+        conversation_id,
+        revision,
+        crate::chat::protocol::ChatConversationEvent::ContextUpdated {
+            context_state: context_state.into(),
+        },
+    );
+}
+
+/// **生成过程中**的上下文占用（分子 + 分母）。
+///
+/// 复用统一协议的 context update（不新造事件）：同一个主题、同一个订阅者、同一套
+/// conversationId 路由。载荷用 `live` 与权威快照 `contextState` 区分——权威快照那条要读磁盘、
+/// 连 MCP 列工具、算分段，绝不能放在每个增量上（spec 第 9 条的精神）；这条只带两个数，
+/// 前端就地更新分子/分母与比例，其余字段（分段、压缩计数、来源标签）留给轮末的权威计算。
+///
+/// **唯一的生产者是内置 agent 的压缩检查**（`chat/agent/compaction.rs`），粒度是**每个
+/// planning 轮一次**，两个数与轮末权威计算出自同一对函数（`anchor_total_tokens` +
+/// `effective_context_tokens`，分母同样是 `context_window_for_model`），所以轮末不会跳。
+///
+/// 外部 CLI **不再走这条**：那边曾有一条 350ms 节流的通道，分子是单次请求快照（工具循环里
+/// 每请求一变、压缩后还会掉）、分母是上一轮的粘滞值、分段是前端缩放出来的，看着就是在跳。
+/// 现在外部 CLI 的占用一轮只更新一次，由轮末权威计算发出。别再给这个函数加第二个生产者
+/// 之前先想清楚那三点。
+///
+/// `context_window_tokens` 为 `None` = 本次上报没带窗口，**前端必须保留已知的旧值**
+/// （分母粘滞，见 `applyLiveContextUsage`）。
+pub(crate) fn emit_chat_context_usage_live(
+    app: &AppHandle,
+    _conversation_id: &str,
+    run_id: &str,
+    used_tokens: u64,
+    context_window_tokens: Option<u64>,
+) {
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::ContextUsageUpdated {
+            usage: crate::chat::protocol::ChatContextUsagePayload {
+                used_tokens,
+                context_window_tokens,
+            },
+        },
     );
 }
 
 pub(super) fn emit_chat_compaction_state(
     app: &AppHandle,
-    conversation_id: &str,
+    _conversation_id: &str,
+    run_id: &str,
     phase: &str,
     trigger: Option<&str>,
     boundary: Option<&CompactionBoundaryRecord>,
 ) {
-    let _ = app.emit(
-        "chat-compaction",
-        serde_json::json!({
-            "conversationId": conversation_id,
-            "phase": phase,
-            "trigger": trigger,
-            "boundary": boundary,
-        }),
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::CompactionUpdated {
+            phase: phase.to_string(),
+            trigger: trigger.map(str::to_string),
+            boundary: boundary.map(Into::into),
+        },
     );
 }
 

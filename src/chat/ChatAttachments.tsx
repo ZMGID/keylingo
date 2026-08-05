@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { FileText, X } from 'lucide-react'
+import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageContextMenu'
 import { loadAttachmentDataUrl, openAttachment, type DisplayAttachment } from './attachmentPreview'
 import { openChatImageViewer } from './imageViewer'
 
@@ -24,6 +25,7 @@ function ImagePreview({
   const [src, setSrc] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
+  const [menuAnchor, setMenuAnchor] = useState<ChatImageMenuAnchor | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -64,6 +66,13 @@ function ImagePreview({
               : 'chat-motion-fade block max-w-full cursor-zoom-in rounded-xl p-0 text-left'
           }
           onClick={() => onPreview?.(src, attachment.name)}
+          // 与模型出图（ChatInlineImage）同一个菜单组件。stopPropagation 是必须的：
+          // 滚动容器上挂着消息级右键菜单，不掐断就会被它盖住。
+          onContextMenu={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            setMenuAnchor({ left: event.clientX, top: event.clientY })
+          }}
           title="预览图片"
           aria-label="预览图片"
         >
@@ -79,6 +88,15 @@ function ImagePreview({
           />
         </button>
       )}
+      {menuAnchor && src ? (
+        <ChatImageContextMenu
+          anchor={menuAnchor}
+          src={src}
+          name={attachment.name}
+          onOpenViewer={() => onPreview?.(src, attachment.name)}
+          onClose={() => setMenuAnchor(null)}
+        />
+      ) : null}
       {!loading && failed && (
         <div className={`${loadingClass} px-4 text-center text-[12px] text-neutral-400`}>
           图片无法预览

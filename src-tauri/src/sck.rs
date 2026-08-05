@@ -55,7 +55,9 @@ pub fn capture_window(window_id: u32) -> Result<PathBuf, String> {
 
     let config = SCStreamConfiguration::new()
         .with_width(pixel_w)
-        .with_height(pixel_h);
+        .with_height(pixel_h)
+        // 截图不带鼠标指针（SCK 默认 true 会把光标烙进冻结帧/窗口截图）
+        .with_shows_cursor(false);
 
     let image = SCScreenshotManager::capture_image(&filter, &config)
         .map_err(|e| format!("SCScreenshotManager::capture_image failed: {:?}", e))?;
@@ -152,7 +154,9 @@ pub fn capture_region(
     let config = SCStreamConfiguration::new()
         .with_source_rect(local)
         .with_width(pixel_w)
-        .with_height(pixel_h);
+        .with_height(pixel_h)
+        // 截图不带鼠标指针（冻结帧/区域截图都不应包含光标）
+        .with_shows_cursor(false);
 
     let image = SCScreenshotManager::capture_image(&filter, &config)
         .map_err(|e| format!("SCScreenshotManager::capture_image failed: {:?}", e))?;

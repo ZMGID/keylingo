@@ -1,12 +1,9 @@
 import { forwardRef, useImperativeHandle, useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react'
 import {
-  X, Check, Plus, Minus, Trash2, RefreshCw,
-  ExternalLink, Download, Upload, Wrench, FolderOpen, Eye, EyeOff, Info,
-  Brain, Image as ImageIcon, ArrowLeft,
+  X, Check, RefreshCw,
+  Download, Upload, ArrowLeft,
 } from 'lucide-react'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { homeDir, join } from '@tauri-apps/api/path'
-import { ChatMarkdown } from '../chat/ChatMarkdown'
 import {
   api,
   type Settings as SettingsType,
@@ -19,7 +16,6 @@ import {
   type ChatNativeToolsConfig,
   type ChatMemoryConfig,
   defaultNativeTools,
-  normalizeProviderApiFormat,
   type ReplaceTranslationPackStatus,
   type RapidOcrTier,
 } from '../api/tauri'
@@ -33,47 +29,49 @@ import {
 import { i18n } from './i18n'
 import {
   GeneralIcon, HotkeysIcon, TranslateIcon, LensIcon, ChatIcon, MemoryIcon, MixerIcon,
-  CodeIcon, AgentIcon, WebSearchIcon, ConnectorsIcon, UsageIcon, ProvidersIcon, AboutIcon,
+  AgentIcon, WebSearchIcon, ConnectorsIcon, UsageIcon, ProvidersIcon, AboutIcon, HooksIcon,
 } from './NavIcons'
 import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, stableStringify } from './utils'
-import { PROVIDER_PRESETS, type ProviderPreset } from './providerPresets'
-import { ModelPairSelect } from './ModelPairSelect'
+import { type ProviderPreset } from './providerPresets'
 import { ProviderModelsPicker } from './ProviderModelsPicker'
-import { ModelIcon } from '../chat/ModelIcon'
-import { ProviderSortableList } from './ProviderSortableList'
-import { PromptField, ScreenshotTranslationSettings } from './ScreenshotTranslationSettings'
+import { ScreenshotTranslationSettings } from './ScreenshotTranslationSettings'
 import { initialReplacePackProgressState, reduceReplacePackProgress } from './replacePackProgress'
 import { UsageStatsPanel } from './UsageStatsPanel'
 import { RequestDebugPanel } from './RequestDebugPanel'
-import { KivioCodeSettings } from './KivioCodeSettings'
 import { ExternalAgentsSettings } from './ExternalAgentsSettings'
+import { HotkeysTab } from './tabs/HotkeysTab'
+import { LensTab } from './tabs/LensTab'
+import { MixerTab } from './tabs/MixerTab'
+import { TranslateTab } from './tabs/TranslateTab'
+import { MemoryTab } from './tabs/MemoryTab'
+import { ChatTab } from './tabs/ChatTab'
+import { ProvidersTab } from './tabs/ProvidersTab'
+import { HooksTab } from './tabs/HooksTab'
+import { AppearanceGroup, BehaviorGroup, PermissionsGroup } from './tabs/GeneralTab'
+import { AppInfoGroup, UpdateGroup } from './tabs/AboutTab'
+import { MEMORY_L1_MAX_BYTES, utf8ByteLength, type MemoryLayerKey } from './memoryLayers'
 import { ModelDetailDrawer } from '../components/ModelDetailDrawer'
-import { Button, IconButton } from '../components/Button'
+import { ProviderModelTestModal } from '../components/ProviderModelTestModal'
+import { Button } from '../components/Button'
 import { resolveModelInfo } from '../data/modelMatching'
 import { useWindowInteractionFocus } from '../utils/windowFocus'
 import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/chatTools'
-import { THEME_COLOR_PRESETS, normalizeThemeColorId } from '../themeColors'
+import { normalizeThemeColorId } from '../themeColors'
+import { UI_FONT_PX_MIN, UI_FONT_PX_MAX } from './uiFont'
 import {
-  Toggle, Select, Input, TextArea,
-  SettingRow, PermissionItem, HotkeyInput,
-  SettingsGroup,
+  SettingRow,
+  SettingsGroup, FieldBlock,
 } from './components'
 import { ConnectorsPanel } from './ConnectorsPanel'
 import { WebSearchPanel } from './WebSearchPanel'
 import { defaultChatTools } from './chatToolsShared'
 
-export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'kivioCode' | 'externalAgents' | 'webSearch' | 'connectors' | 'usage' | 'providers' | 'about'
+export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'hooks' | 'webSearch' | 'connectors' | 'usage' | 'providers' | 'about'
 
 type SettingsData = SettingsType
-type MemoryLayerKey = 'l1' | 'l2'
-
-const MEMORY_L1_MAX_BYTES = 5_000
-const CHAT_MAX_OUTPUT_TOKEN_OPTIONS = [2048, 8192, 16384, 32768]
-const textEncoder = new TextEncoder()
-
-function utf8ByteLength(value: string): number {
-  return textEncoder.encode(value).length
-}
+// UI 字号：以 px 展示、以整体缩放（zoom）实现。CSS 全是 px 硬编码，做不了真正的 rem 基准字号，
+// 故 14px 锚定为 100%，输入 px → scale = px/14。ponytail: zoom 代理，若将来全量 rem 化可换真基准。
+const UI_FONT_BASE_PX = 14
 
 export interface SettingsShellProps {
   variant: 'standalone' | 'embedded'
@@ -91,112 +89,16 @@ export interface SettingsShellHandle {
   requestClose: () => void
 }
 
-function FieldBlock({
-  label,
-  description,
-  children,
-  className = '',
-}: {
-  label: React.ReactNode
-  description?: string
-  children: React.ReactNode
-  className?: string
-}) {
-  return (
-    <div className={`py-2 ${className}`}>
-      <div className="mb-2">
-        <div className="kv-row-label">{label}</div>
-        {description && <p className="kv-row-desc">{description}</p>}
-      </div>
-      {children}
-    </div>
-  )
-}
-
-function MemoryEditor({
-  layer,
-  title,
-  description,
-  value,
-  savedValue,
-  maxBytes,
-  rows,
-  loading,
-  saving,
-  lang,
-  onChange,
-  onSave,
-  onReload,
-}: {
-  layer: MemoryLayerKey
-  title: string
-  description: string
-  value: string
-  savedValue: string
-  maxBytes?: number
-  rows: number
-  loading: boolean
-  saving: boolean
-  lang: string
-  onChange: (value: string) => void
-  onSave: () => void
-  onReload: () => void
-}) {
-  const bytes = utf8ByteLength(value)
-  const overLimit = maxBytes !== undefined && bytes > maxBytes
-  const dirty = value !== savedValue
-  return (
-    <div className="kv-panel">
-      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="kv-panel-title !mb-1">
-            {title}
-            <span className={`kv-tag ${overLimit ? 'danger' : dirty ? 'warn' : 'ok'}`}>
-              {maxBytes ? `${bytes} / ${maxBytes} bytes` : `${bytes} bytes`}
-            </span>
-          </div>
-          <div className="kv-panel-body">{description}</div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button
-            size="sm"
-            onClick={onReload}
-            disabled={loading || saving}
-            data-tauri-drag-region="false"
-          >
-            <RefreshCw size={10} className={loading ? 'animate-spin' : ''} />
-            {lang === 'zh' ? '重载' : 'Reload'}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={onSave}
-            disabled={loading || saving || !dirty || overLimit}
-            data-tauri-drag-region="false"
-          >
-            {saving ? (lang === 'zh' ? '保存中' : 'Saving') : (lang === 'zh' ? '保存' : 'Save')}
-          </Button>
-        </div>
-      </div>
-      <textarea
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        rows={rows}
-        className="kv-textarea mono custom-scrollbar min-h-[160px]"
-        spellCheck={false}
-        data-tauri-drag-region="false"
-        aria-label={title}
-      />
-      {overLimit && (
-        <p className="mt-1.5 text-[11px] leading-snug text-red-500 dark:text-red-400">
-          {lang === 'zh'
-            ? `${layer.toUpperCase()} 超出字节上限，保存前需要精简。`
-            : `${layer.toUpperCase()} is over its byte limit.`}
-        </p>
-      )}
-    </div>
-  )
-}
+/** 快捷键作用域。原本是组件体内的局部 type，抽 HotkeysTab 后需要跨模块共享，提到模块作用域。 */
+export type HotkeyScopeKey =
+  | 'main'
+  | 'chat'
+  | 'closeChat'
+  | 'screenshotTranslation'
+  | 'screenshotTranslationText'
+  | 'screenshotTranslationReplace'
+  | 'screenshotAnnotate'
+  | 'lens'
 
 function defaultChatConfig(): NonNullable<SettingsData['chat']> {
   return {
@@ -221,11 +123,6 @@ function defaultChatMemory(): ChatMemoryConfig {
     enabled: false,
     toolWriteConfirm: false,
   }
-}
-
-function formatTokenCount(tokens?: number): string {
-  if (!tokens || !Number.isFinite(tokens)) return ''
-  return `${tokens.toLocaleString()} tokens`
 }
 
 function resolveEffectiveChatModel(settings: SettingsData): { provider?: ModelProvider, model: string } {
@@ -319,6 +216,7 @@ function resolveDefaultModelsAfterModelRemoval(
   }
 }
 
+
 /**
  * 设置面板主组件（standalone / embedded 双宿主）
  */
@@ -343,17 +241,18 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [confirmDeleteProviderId, setConfirmDeleteProviderId] = useState<string | null>(null)
-  const [recordingTarget, setRecordingTarget] = useState<null | 'main' | 'chat' | 'screenshotTranslation' | 'screenshotTranslationText' | 'screenshotTranslationReplace' | 'lens'>(null)
+  const [recordingTarget, setRecordingTarget] = useState<HotkeyScopeKey | null>(null)
   const [defaultPrompts, setDefaultPrompts] = useState<DefaultPromptTemplates | null>(null)
   const [chatSystemPromptInteracted, setChatSystemPromptInteracted] = useState(false)
   const [retryAttemptsInput, setRetryAttemptsInput] = useState('')
+  const [uiFontPxInput, setUiFontPxInput] = useState('')
+  const [systemFonts, setSystemFonts] = useState<string[]>([])
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus | null>(null)
   const [permissionsLoading, setPermissionsLoading] = useState(false)
-  const [testingProviderId, setTestingProviderId] = useState<string | null>(null)
   const [fetchingProviderId, setFetchingProviderId] = useState<string | null>(null)
   const [modelPickerProviderId, setModelPickerProviderId] = useState<string | null>(null)
   const [drawerModel, setDrawerModel] = useState<{ providerId: string; model: string } | null>(null)
-  const [providerTestFeedback, setProviderTestFeedback] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [modelTestProviderId, setModelTestProviderId] = useState<string | null>(null)
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [memoryDrafts, setMemoryDrafts] = useState<Record<MemoryLayerKey, string>>({ l1: '', l2: '' })
   const [memorySnapshots, setMemorySnapshots] = useState<Record<MemoryLayerKey, string>>({ l1: '', l2: '' })
@@ -412,12 +311,16 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   // OS 层面的冲突(Spotlight 占用 Cmd+Space 等)仍需保存后从后端拿到结果。
   // 返回每个 scope 对应的"和谁冲突"——前端各 HotkeyInput 拿到对应 scope 的伙伴名后,
   // 用 hotkeyScope* 模板自己拼本地化字符串。
-  type HotkeyScopeKey = 'main' | 'chat' | 'screenshotTranslation' | 'screenshotTranslationText' | 'screenshotTranslationReplace' | 'lens'
   const hotkeyConflicts = useMemo<Partial<Record<HotkeyScopeKey, HotkeyScopeKey>>>(() => {
     if (!settings) return {}
     const slots: Array<{ scope: HotkeyScopeKey; hotkey: string; enabled: boolean }> = [
       { scope: 'main', hotkey: settings.hotkey || '', enabled: !!(settings.hotkey || '').trim() },
       { scope: 'chat', hotkey: settings.chatHotkey || '', enabled: !!(settings.chatHotkey || '').trim() },
+      {
+        scope: 'closeChat',
+        hotkey: settings.closeChatHotkey || '',
+        enabled: !!(settings.closeChatHotkey || '').trim(),
+      },
       {
         scope: 'screenshotTranslation',
         hotkey: settings.screenshotTranslation?.hotkey || '',
@@ -434,6 +337,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
         enabled: settings.screenshotTranslation?.enabled !== false
           && settings.screenshotTranslation?.replaceEnabled !== false,
       },
+      { scope: 'screenshotAnnotate', hotkey: settings.screenshotAnnotate?.hotkey || '', enabled: settings.screenshotAnnotate?.enabled !== false },
       { scope: 'lens', hotkey: settings.lens?.hotkey || '', enabled: settings.lens?.enabled !== false },
     ]
     const groups = new Map<string, HotkeyScopeKey[]>()
@@ -455,12 +359,14 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     return out
   }, [settings])
 
-  const SCOPE_I18N_KEY: Record<HotkeyScopeKey, 'hotkeyScopeTranslator' | 'hotkeyScopeChat' | 'hotkeyScopeScreenshot' | 'hotkeyScopeScreenshotText' | 'hotkeyScopeScreenshotReplace' | 'hotkeyScopeLens'> = {
+  const SCOPE_I18N_KEY: Record<HotkeyScopeKey, 'hotkeyScopeTranslator' | 'hotkeyScopeChat' | 'hotkeyScopeCloseChat' | 'hotkeyScopeScreenshot' | 'hotkeyScopeScreenshotText' | 'hotkeyScopeScreenshotReplace' | 'annotateHotkeyLabel' | 'hotkeyScopeLens'> = {
     main: 'hotkeyScopeTranslator',
     chat: 'hotkeyScopeChat',
+    closeChat: 'hotkeyScopeCloseChat',
     screenshotTranslation: 'hotkeyScopeScreenshot',
     screenshotTranslationText: 'hotkeyScopeScreenshotText',
     screenshotTranslationReplace: 'hotkeyScopeScreenshotReplace',
+    screenshotAnnotate: 'annotateHotkeyLabel',
     lens: 'hotkeyScopeLens',
   }
   const conflictMessageFor = (scope: HotkeyScopeKey): string | undefined => {
@@ -772,16 +678,46 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     void refreshReplacePackStatus(tier)
   }, [refreshReplacePackStatus, settings?.screenshotTranslation?.rapidOcrTier])
 
-  useEffect(() => {
-    setProviderTestFeedback({})
-  }, [lang])
-
   const retryAttempts = settings?.retryAttempts
 
   useEffect(() => {
     if (retryAttempts === undefined) return
     setRetryAttemptsInput(String(retryAttempts ?? 3))
   }, [retryAttempts])
+
+  const uiFontScale = settings?.uiFontScale
+  useEffect(() => {
+    if (uiFontScale === undefined) return
+    setUiFontPxInput(String(Math.round((uiFontScale ?? 1) * UI_FONT_BASE_PX)))
+  }, [uiFontScale])
+
+  const commitUiFontPx = (raw: string, commit: boolean) => {
+    if (!settings) return
+    const fallback = String(Math.round((settings.uiFontScale ?? 1) * UI_FONT_BASE_PX))
+    if (raw.trim() === '') {
+      if (commit) setUiFontPxInput(fallback)
+      return
+    }
+    const parsed = Number.parseInt(raw, 10)
+    if (Number.isNaN(parsed)) {
+      if (commit) setUiFontPxInput(fallback)
+      return
+    }
+    const clamped = Math.min(UI_FONT_PX_MAX, Math.max(UI_FONT_PX_MIN, parsed))
+    if (commit) setUiFontPxInput(String(clamped))
+    updateSettings({ uiFontScale: clamped / UI_FONT_BASE_PX })
+  }
+
+  // 系统已装字体列表，仅拉取一次（前端无法枚举，走后端 CoreText/GDI）。
+  useEffect(() => {
+    let alive = true
+    api.listSystemFonts().then((fonts) => {
+      if (alive) setSystemFonts(fonts)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!settings?.providers.length) {
@@ -935,44 +871,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     handleSave,
     handleSaveAndClose,
   ])
-
-  /**
-   * 测试提供商连接
-   */
-  const handleTestConnection = async (providerId: string) => {
-    setTestingProviderId(providerId)
-    setProviderTestFeedback((prev) => {
-      const next = { ...prev }
-      delete next[providerId]
-      return next
-    })
-    try {
-      const provider = settings?.providers.find((p) => p.id === providerId)
-      const result = await api.testProviderConnection(providerId, provider
-        ? {
-          id: provider.id,
-          baseUrl: provider.baseUrl,
-          apiKeys: provider.apiKeys,
-        }
-        : undefined)
-      if (result.success) {
-        setProviderTestFeedback((prev) => ({ ...prev, [providerId]: { ok: true, message: t.connectionOk } }))
-      } else {
-        setProviderTestFeedback((prev) => ({
-          ...prev,
-          [providerId]: { ok: false, message: `${t.connectionFailed}${result.error || 'Unknown error'}` },
-        }))
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      setProviderTestFeedback((prev) => ({
-        ...prev,
-        [providerId]: { ok: false, message: `${t.connectionFailed}${message}` },
-      }))
-    } finally {
-      setTestingProviderId(null)
-    }
-  }
 
   /**
    * 打开 macOS 系统权限设置
@@ -1158,6 +1056,17 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     })
   }, [])
 
+  const setProviderIcon = useCallback((id: string, iconKey: string) => {
+    setSettings((prev) => {
+      if (!prev) return prev
+      const next = { ...(prev.providerIcons ?? {}) }
+      // 空串 = 恢复「自动匹配」，删掉这条而不是存空值。
+      if (iconKey) next[id] = iconKey
+      else delete next[id]
+      return { ...prev, providerIcons: next }
+    })
+  }, [])
+
   const reorderProviders = useCallback((fromId: string, toId: string) => {
     if (fromId === toId) return
     setSettings((prev) => {
@@ -1207,7 +1116,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       availableModels: [],
       enabledModels: [],
       enabled: true,
-      apiFormat: 'openai_chat',
+      apiFormat: preset.apiFormat ?? 'openai_chat',
     }
     setSettings({
       ...settings,
@@ -1253,9 +1162,12 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       settings.defaultModels.chat.providerId === id || settings.chatProviderId === id
 
     const defaultModels = clearDefaultModelProvider(settings.defaultModels, id)
+    const providerIcons = { ...(settings.providerIcons ?? {}) }
+    delete providerIcons[id]
     const nextSettings: SettingsData = {
       ...settings,
       providers: nextProviders,
+      providerIcons,
       translatorProviderId: translatorProvider ? translatorProvider.id : '',
       translatorModel: resolveModel(translatorProvider, settings.translatorModel),
       defaultModels,
@@ -1411,6 +1323,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           id: currentProvider.id,
           baseUrl: currentProvider.baseUrl,
           apiKeys: currentProvider.apiKeys,
+          // 设置窗口是手动保存的，这里必须带上编辑中的请求配置，
+          // 否则拉列表用的头和真实聊天不一致。
+          request: currentProvider.request,
         }
         : undefined)
       if (currentProvider) {
@@ -1456,6 +1371,20 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   }, [])
 
   /**
+   * 更新截图标注配置
+   */
+  const updateScreenshotAnnotate = useCallback((updates: Partial<NonNullable<SettingsData['screenshotAnnotate']>>) => {
+    setSettings((prev) => {
+      if (!prev) return prev
+      const current = prev.screenshotAnnotate || {
+        enabled: true,
+        hotkey: 'CommandOrControl+Shift+S',
+      }
+      return { ...prev, screenshotAnnotate: { ...current, ...updates } }
+    })
+  }, [])
+
+  /**
    * 更新 Lens 配置
    */
   const updateLens = useCallback((updates: Partial<SettingsData['lens']>) => {
@@ -1474,7 +1403,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
         sendToChat: true,
         messageOrder: 'asc' as const,
         showCaptureHint: true,
-        windowsFreezeFrameSelection: getPlatform() === 'windows',
         webSearch: {
           enabled: false,
           provider: 'tavily' as const,
@@ -1600,7 +1528,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   /**
    * 切换快捷键录制状态
    */
-  const toggleRecording = (target: 'main' | 'chat' | 'screenshotTranslation' | 'screenshotTranslationText' | 'screenshotTranslationReplace' | 'lens') => {
+  const toggleRecording = (target: HotkeyScopeKey) => {
     setRecordingTarget((current) => (current === target ? null : target))
   }
 
@@ -1644,12 +1572,16 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
         updateSettings({ hotkey })
       } else if (recordingTarget === 'chat') {
         updateSettings({ chatHotkey: hotkey })
+      } else if (recordingTarget === 'closeChat') {
+        updateSettings({ closeChatHotkey: hotkey })
       } else if (recordingTarget === 'screenshotTranslation') {
         updateScreenshotTranslation({ hotkey })
       } else if (recordingTarget === 'screenshotTranslationText') {
         updateScreenshotTranslation({ textHotkey: hotkey })
       } else if (recordingTarget === 'screenshotTranslationReplace') {
         updateScreenshotTranslation({ replaceHotkey: hotkey })
+      } else if (recordingTarget === 'screenshotAnnotate') {
+        updateScreenshotAnnotate({ hotkey })
       } else if (recordingTarget === 'lens') {
         updateLens({ hotkey })
       }
@@ -1657,7 +1589,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [recordingTarget, updateLens, updateScreenshotTranslation, updateSettings])
+  }, [recordingTarget, updateLens, updateScreenshotAnnotate, updateScreenshotTranslation, updateSettings])
 
   const loadingShellClass =
     variant === 'embedded'
@@ -1715,8 +1647,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     { id: 'chat' as const, label: t.tabChatClient, icon: ChatIcon },
     { id: 'memory' as const, label: t.tabMemory, icon: MemoryIcon },
     { id: 'mixer' as const, label: t.tabMixer, icon: MixerIcon },
-    { id: 'kivioCode' as const, label: 'Kivio Code', icon: CodeIcon },
     { id: 'externalAgents' as const, label: t.tabExternalAgents, icon: AgentIcon },
+    { id: 'hooks' as const, label: t.tabHooks, icon: HooksIcon },
     { id: 'connectors' as const, label: t.tabConnectors, icon: ConnectorsIcon },
     { id: 'webSearch' as const, label: t.tabWebSearch, icon: WebSearchIcon },
     { id: 'usage' as const, label: lang === 'zh' ? '用量统计' : 'Usage', icon: UsageIcon },
@@ -1757,17 +1689,15 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
         ? '按副任务路由模型：视觉、标题总结、上下文压缩、生图。'
         : 'Route models by side task: vision, title summaries, context compression, and image generation.',
     },
-    kivioCode: {
-      title: 'Kivio Code',
-      subtitle: lang === 'zh'
-        ? '终端编码代理的模型、审批与上下文。'
-        : 'Model, approval, and context for the terminal agent.',
-    },
     externalAgents: {
       title: t.tabExternalAgents,
       subtitle: lang === 'zh'
         ? '检测并启用外部 CLI 编码代理。'
         : 'Detect and enable external CLI coding agents.',
+    },
+    hooks: {
+      title: t.tabHooks,
+      subtitle: t.hooksPageSubtitle,
     },
     connectors: {
       title: t.tabConnectors,
@@ -1801,6 +1731,28 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     ?? settings.providers.find((provider) => provider.id === settings.lens?.providerId)
     ?? settings.providers.find((provider) => provider.id === settings.translatorProviderId)
 
+  const aboutNavButton = (embedded: boolean) => (
+    <button
+      type="button"
+      onClick={() => setActiveTab('about')}
+      className={
+        embedded
+          ? `settings-embedded-nav-item ${activeTab === 'about' ? 'active' : ''}`
+          : `kv-nav-item ${activeTab === 'about' ? 'active' : ''}`
+      }
+      data-tauri-drag-region="false"
+    >
+      {embedded ? (
+        <span className="settings-embedded-nav-icon">
+          <AboutIcon size={17} strokeWidth={1.75} />
+        </span>
+      ) : (
+        <AboutIcon strokeWidth={1.7} />
+      )}
+      <span>{lang === 'zh' ? '关于' : 'About'}</span>
+    </button>
+  )
+
   const categoryNav =
     variant === 'embedded' ? (
       <>
@@ -1822,19 +1774,22 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
               </button>
             )
           })}
+          {/* 关于紧跟模型，作为分类列表最后一项（不再被 spacer 顶到物理底） */}
+          {aboutNavButton(true)}
         </nav>
         <div className="min-h-0 flex-1" />
         <nav className="settings-embedded-nav-list settings-embedded-nav-list--footer">
           <button
             type="button"
-            onClick={() => setActiveTab('about')}
-            className={`settings-embedded-nav-item ${activeTab === 'about' ? 'active' : ''}`}
+            onClick={handleCloseRequest}
+            className="settings-embedded-back"
+            title={lang === 'zh' ? '返回对话' : 'Back to chat'}
             data-tauri-drag-region="false"
           >
             <span className="settings-embedded-nav-icon">
-              <AboutIcon size={17} strokeWidth={1.75} />
+              <ArrowLeft size={17} strokeWidth={1.75} />
             </span>
-            <span>{lang === 'zh' ? '关于' : 'About'}</span>
+            <span>{lang === 'zh' ? '返回对话' : 'Back to chat'}</span>
           </button>
         </nav>
       </>
@@ -1856,21 +1811,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
               </button>
             )
           })}
+          {aboutNavButton(false)}
         </nav>
 
         <div className="kv-nav-spacer" />
-
-        <nav className="kv-nav">
-          <button
-            type="button"
-            onClick={() => setActiveTab('about')}
-            className={`kv-nav-item ${activeTab === 'about' ? 'active' : ''}`}
-            data-tauri-drag-region="false"
-          >
-            <AboutIcon strokeWidth={1.7} />
-            <span>{lang === 'zh' ? '关于' : 'About'}</span>
-          </button>
-        </nav>
       </>
     )
 
@@ -1894,87 +1838,27 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {/* ===== 基础设置标签页 ===== */}
             {activeTab === 'general' && (
               <>
-                <SettingsGroup title={lang === 'zh' ? '外观' : 'Appearance'}>
-                  <SettingRow label={t.language}>
-                    <Select
-                      className="w-36"
-                      value={settings.settingsLanguage || 'zh'}
-                      onChange={(v) => updateSettings({ settingsLanguage: v as 'zh' | 'en' })}
-                      options={[
-                        { value: 'zh', label: '中文' },
-                        { value: 'en', label: 'English' },
-                      ]}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.theme}>
-                    <div className="kv-seg">
-                      {[
-                        { value: 'system', label: t.themeSystem },
-                        { value: 'light', label: t.themeLight },
-                        { value: 'dark', label: t.themeDark },
-                      ].map((option) => (
-                        <button
-                          key={option.value}
-                          type="button"
-                          className={(settings.theme || 'system') === option.value ? 'active' : ''}
-                          onClick={() => updateSettings({ theme: option.value as SettingsData['theme'] })}
-                          data-tauri-drag-region="false"
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </SettingRow>
-                  <SettingRow label={t.themeColor}>
-                    <div className="kv-seg" role="radiogroup" aria-label={t.themeColor}>
-                      {THEME_COLOR_PRESETS.map((preset) => {
-                        const active = themeColor === preset.id
-                        return (
-                          <button
-                            key={preset.id}
-                            type="button"
-                            className={active ? 'active' : ''}
-                            onClick={() => updateSettings({ themeColor: preset.id })}
-                            role="radio"
-                            aria-checked={active}
-                            data-tauri-drag-region="false"
-                          >
-                            {preset.labels[lang]}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </SettingRow>
-                </SettingsGroup>
+                <AppearanceGroup
+                  settings={settings}
+                  t={t}
+                  lang={lang}
+                  themeColor={themeColor}
+                  systemFonts={systemFonts}
+                  uiFontPxInput={uiFontPxInput}
+                  onUpdateSettings={updateSettings}
+                  onUiFontPxInputChange={setUiFontPxInput}
+                  onCommitUiFontPx={commitUiFontPx}
+                />
 
-                <SettingsGroup title={lang === 'zh' ? '行为' : 'Behavior'}>
-                  <SettingRow label={t.launchAtStartup}>
-                    <Toggle
-                      checked={settings.launchAtStartup ?? false}
-                      onChange={(v) => updateSettings({ launchAtStartup: v })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.retryEnabled}>
-                    <Toggle
-                      checked={settings.retryEnabled ?? true}
-                      onChange={(v) => updateSettings({ retryEnabled: v })}
-                    />
-                  </SettingRow>
-                  {settings.retryEnabled !== false && (
-                    <SettingRow label={t.retryAttempts}>
-                      <Input
-                        type="number"
-                        value={retryAttemptsInput}
-                        onChange={handleRetryAttemptsChange}
-                        onBlur={handleRetryAttemptsBlur}
-                        placeholder="3"
-                        min={1}
-                        max={5}
-                        className="!w-20 text-center"
-                      />
-                    </SettingRow>
-                  )}
-                </SettingsGroup>
+                <BehaviorGroup
+                  settings={settings}
+                  t={t}
+                  lang={lang}
+                  retryAttemptsInput={retryAttemptsInput}
+                  onUpdateSettings={updateSettings}
+                  onRetryAttemptsChange={handleRetryAttemptsChange}
+                  onRetryAttemptsBlur={handleRetryAttemptsBlur}
+                />
 
                 <SettingsGroup title={lang === 'zh' ? '首次使用' : 'First-time setup'}>
                   <SettingRow
@@ -2025,35 +1909,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 </SettingsGroup>
 
                 {permissionStatus?.platform === 'macos' && (
-                  <SettingsGroup title={t.permissions}>
-                    <PermissionItem
-                      label={t.accessibilityPermission}
-                      granted={permissionStatus.accessibility}
-                      grantedText={t.permissionGranted}
-                      missingText={t.permissionMissing}
-                      actionLabel={t.openSystemSettings}
-                      onOpen={() => handleOpenPermissionSettings('accessibility')}
-                    />
-                    <PermissionItem
-                      label={t.screenRecordingPermission}
-                      granted={permissionStatus.screenRecording}
-                      grantedText={t.permissionGranted}
-                      missingText={t.permissionMissing}
-                      actionLabel={t.openSystemSettings}
-                      onOpen={() => handleOpenPermissionSettings('screen-recording')}
-                    />
-                    <div className="flex justify-end py-2">
-                      <Button
-                        size="sm"
-                        onClick={refreshPermissions}
-                        disabled={permissionsLoading}
-                        data-tauri-drag-region="false"
-                      >
-                        <RefreshCw size={10} className={permissionsLoading ? 'animate-spin' : ''} />
-                        {t.refreshPermissions}
-                      </Button>
-                    </div>
-                  </SettingsGroup>
+                  <PermissionsGroup
+                    t={t}
+                    permissionStatus={permissionStatus}
+                    permissionsLoading={permissionsLoading}
+                    onOpenPermissionSettings={handleOpenPermissionSettings}
+                    onRefreshPermissions={refreshPermissions}
+                  />
                 )}
               </>
             )}
@@ -2061,56 +1923,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {/* ===== 翻译设置标签页 ===== */}
             {activeTab === 'translate' && (
               <>
-                <div className="kv-section-title">{t.tabTranslate}</div>
-                <SettingsGroup title={lang === 'zh' ? '输出' : 'Output'}>
-                  <SettingRow label={t.targetLang}>
-                    <Select
-                      className="w-40"
-                      value={settings.targetLang || 'auto'}
-                      onChange={(v) => updateSettings({ targetLang: v })}
-                      options={[
-                        { value: 'auto', label: t.langAuto },
-                        { value: 'en', label: t.langEn },
-                        { value: 'zh', label: t.langZh },
-                        { value: 'zh-Hant', label: t.langZhTw },
-                        { value: 'ja', label: t.langJa },
-                        { value: 'ko', label: t.langKo },
-                        { value: 'fr', label: t.langFr },
-                        { value: 'de', label: t.langDe },
-                      ]}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.autoPaste}>
-                    <Toggle
-                      checked={settings.autoPaste ?? true}
-                      onChange={(v) => updateSettings({ autoPaste: v })}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.sectionModel}>
-                  <SettingRow label={t.selectModelPair}>
-                    <ModelPairSelect
-                      providerId={settings.translatorProviderId}
-                      model={settings.translatorModel}
-                      providers={settings.providers}
-                      onChange={(providerId, model) => {
-                        updateSettings({ translatorProviderId: providerId, translatorModel: model })
-                      }}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.sectionPrompt}>
-                  <PromptField
-                    label={t.translatorPrompt}
-                    description={t.translatorPromptHint}
-                    value={settings.translatorPrompt || ''}
-                    defaultText={defaultPrompts?.translationTemplate || ''}
-                    restoreLabel={t.restoreDefaultPrompt}
-                    onChange={(v) => updateSettings({ translatorPrompt: v })}
-                  />
-                </SettingsGroup>
+                <TranslateTab
+                  settings={settings}
+                  t={t}
+                  lang={lang}
+                  defaultPrompts={defaultPrompts}
+                  onUpdateSettings={updateSettings}
+                />
 
                 <div className="kv-section-title">{t.tabScreenshot}</div>
                 <ScreenshotTranslationSettings
@@ -2137,741 +1956,105 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
             {/* ===== 快捷键标签页：集中所有全局热键 ===== */}
             {activeTab === 'hotkeys' && (
-              <SettingsGroup title={t.tabHotkeys} className="kv-hotkey-list">
-                <SettingRow label={t.tabTranslate}>
-                  <HotkeyInput
-                    inline
-                    value={settings.hotkey}
-                    placeholder={t.hotkeyPlaceholder}
-                    recording={recordingTarget === 'main'}
-                    onToggleRecording={() => toggleRecording('main')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateSettings({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('main')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.chatHotkeyLabel}>
-                  <HotkeyInput
-                    inline
-                    value={settings.chatHotkey}
-                    placeholder={t.hotkeyPlaceholder}
-                    recording={recordingTarget === 'chat'}
-                    onToggleRecording={() => toggleRecording('chat')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateSettings({ chatHotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('chat')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.screenshotHotkey}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotTranslation?.hotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+A"
-                    recording={recordingTarget === 'screenshotTranslation'}
-                    onToggleRecording={() => toggleRecording('screenshotTranslation')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotTranslation({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotTranslation')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.screenshotTextHotkey}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotTranslation?.textHotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+T"
-                    recording={recordingTarget === 'screenshotTranslationText'}
-                    onToggleRecording={() => toggleRecording('screenshotTranslationText')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotTranslation({ textHotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotTranslationText')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.replaceTranslateHotkey}>
-                  <HotkeyInput
-                    inline
-                    value={settings.screenshotTranslation?.replaceHotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+R"
-                    recording={recordingTarget === 'screenshotTranslationReplace'}
-                    onToggleRecording={() => toggleRecording('screenshotTranslationReplace')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateScreenshotTranslation({ replaceHotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('screenshotTranslationReplace')}
-                  />
-                </SettingRow>
-                <SettingRow label={t.lensTabLabel}>
-                  <HotkeyInput
-                    inline
-                    value={settings.lens?.hotkey ?? ''}
-                    placeholder="CommandOrControl+Shift+G"
-                    recording={recordingTarget === 'lens'}
-                    onToggleRecording={() => toggleRecording('lens')}
-                    recordLabel={t.hotkeyRecord}
-                    recordingLabel={t.hotkeyRecording}
-                    recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                    onClear={() => updateLens({ hotkey: '' })}
-                    clearLabel={t.hotkeyClear}
-                    error={conflictMessageFor('lens')}
-                  />
-                </SettingRow>
-              </SettingsGroup>
+              <HotkeysTab
+                settings={settings}
+                t={t}
+                recordingTarget={recordingTarget}
+                onToggleRecording={toggleRecording}
+                conflictMessageFor={conflictMessageFor}
+                hotkeyConflicts={hotkeyConflicts}
+                onUpdateSettings={updateSettings}
+                onUpdateScreenshotTranslation={updateScreenshotTranslation}
+                onUpdateScreenshotAnnotate={updateScreenshotAnnotate}
+                onUpdateLens={updateLens}
+              />
             )}
 
             {/* ===== Lens 标签页 ===== */}
             {activeTab === 'lens' && (
-              <>
-                <SettingsGroup title={t.lensSection}>
-                  <SettingRow label={t.enabled}>
-                    <Toggle
-                      checked={settings.lens?.enabled !== false}
-                      onChange={(v) => updateLens({ enabled: v })}
-                    />
-                  </SettingRow>
-
-                  {settings.lens?.enabled !== false && (
-                    <>
-                      <SettingRow label={t.lensResponseLanguage}>
-                        <Select
-                          className="w-44"
-                          value={settings.lens?.defaultLanguage || ''}
-                          onChange={(v) => updateLens({ defaultLanguage: v })}
-                          options={[
-                            { value: '', label: t.lensLanguageInherit },
-                            { value: 'zh', label: '中文' },
-                            { value: 'zh-Hant', label: '繁體中文' },
-                            { value: 'en', label: 'English' },
-                          ]}
-                        />
-                      </SettingRow>
-                      <SettingRow label={t.lensStreamEnabled}>
-                        <Toggle
-                          checked={settings.lens?.streamEnabled !== false}
-                          onChange={(v) => updateLens({ streamEnabled: v })}
-                        />
-                      </SettingRow>
-                      <SettingRow label={t.lensThinkingEnabled} description={t.lensThinkingHint}>
-                        <Toggle
-                          checked={settings.lens?.thinkingEnabled !== false}
-                          onChange={(v) => updateLens({ thinkingEnabled: v })}
-                        />
-                      </SettingRow>
-                    </>
-                  )}
-                </SettingsGroup>
-
-                {settings.lens?.enabled !== false && (
-                  <>
-                    <SettingsGroup title={lang === 'zh' ? '对话' : 'Conversation'}>
-                      <SettingRow label={t.lensSendToChat}>
-                        <Toggle
-                          checked={settings.lens?.sendToChat !== false}
-                          onChange={(v) => updateLens({ sendToChat: v })}
-                        />
-                      </SettingRow>
-                      <SettingRow label={t.lensMessageOrder}>
-                        <Select
-                          className="w-52"
-                          value={settings.lens?.messageOrder ?? 'asc'}
-                          onChange={(v) => updateLens({ messageOrder: v as 'asc' | 'desc' })}
-                          options={[
-                            { value: 'asc', label: t.lensMessageOrderAsc },
-                            { value: 'desc', label: t.lensMessageOrderDesc },
-                          ]}
-                        />
-                      </SettingRow>
-                      <SettingRow label={t.lensShowCaptureHint}>
-                        <Toggle
-                          checked={settings.lens?.showCaptureHint !== false}
-                          onChange={(v) => updateLens({ showCaptureHint: v })}
-                        />
-                      </SettingRow>
-                      {platform === 'windows' && (
-                        <SettingRow label={t.lensWindowsFreezeFrameSelection} description={t.lensWindowsFreezeFrameSelectionHint}>
-                          <Toggle
-                            checked={settings.lens?.windowsFreezeFrameSelection === true}
-                            onChange={(v) => updateLens({ windowsFreezeFrameSelection: v })}
-                          />
-                        </SettingRow>
-                      )}
-                    </SettingsGroup>
-
-                    <SettingsGroup title={t.engine}>
-                      <SettingRow label={t.selectModelPair}>
-                        <ModelPairSelect
-                          providerId={settings.lens?.providerId || ''}
-                          model={settings.lens?.model || ''}
-                          providers={settings.providers}
-                          inheritLabel={t.lensLanguageInherit}
-                          onChange={(providerId, model) => {
-                            updateLens({ providerId, model })
-                          }}
-                        />
-                      </SettingRow>
-                    </SettingsGroup>
-
-                    <SettingsGroup title={t.imageArchive}>
-                      <SettingRow label={t.imageArchive}>
-                        <Toggle
-                          checked={settings.imageArchiveEnabled ?? false}
-                          onChange={(v) => updateSettings({ imageArchiveEnabled: v })}
-                        />
-                      </SettingRow>
-                      {settings.imageArchiveEnabled && (
-                        <SettingRow label={t.imageArchivePath} stack>
-                          <div className="kv-path-row">
-                            <Input
-                              value={settings.imageArchivePath || ''}
-                              onChange={(v) => updateSettings({ imageArchivePath: v })}
-                              placeholder={t.imageArchivePathPlaceholder}
-                            />
-                            <Button
-                              onClick={async () => {
-                                try {
-                                  const selected = await open({ directory: true, multiple: false })
-                                  if (typeof selected === 'string') {
-                                    updateSettings({ imageArchivePath: selected })
-                                  }
-                                } catch (err) {
-                                  console.error('Failed to pick directory:', err)
-                                }
-                              }}
-                              data-tauri-drag-region="false"
-                            >
-                              {t.imageArchiveBrowse}
-                            </Button>
-                          </div>
-                        </SettingRow>
-                      )}
-                    </SettingsGroup>
-
-                    <SettingsGroup title={t.customPrompts}>
-                      <PromptField
-                        label={t.lensSystemPrompt}
-                        value={settings.lens?.systemPrompt || ''}
-                        defaultText={lensDefaults?.system || ''}
-                        restoreLabel={t.restoreDefaultPrompt}
-                        onChange={(v) => updateLens({ systemPrompt: v })}
-                      />
-                      <PromptField
-                        label={t.lensQuestionPrompt}
-                        value={settings.lens?.questionPrompt || ''}
-                        defaultText={lensDefaults?.question || ''}
-                        restoreLabel={t.restoreDefaultPrompt}
-                        onChange={(v) => updateLens({ questionPrompt: v })}
-                      />
-                    </SettingsGroup>
-                  </>
-                )}
-              </>
+              <LensTab
+                settings={settings}
+                t={t}
+                lang={lang}
+                lensDefaults={lensDefaults}
+                onUpdateSettings={updateSettings}
+                onUpdateLens={updateLens}
+              />
             )}
 
             {/* ===== AI 客户端标签页 ===== */}
             {activeTab === 'chat' && (
-              <>
-                <SettingsGroup title={lang === 'zh' ? '个人资料' : 'Profile'}>
-                  <SettingRow
-                    label={lang === 'zh' ? '用户名' : 'Display name'}
-                  >
-                    <Input
-                      value={chatConfig.userDisplayName || ''}
-                      onChange={(userDisplayName) => updateChat({ userDisplayName })}
-                      placeholder={lang === 'zh' ? '选填' : 'Optional'}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? '头像' : 'Avatar'}
-                    stack
-                  >
-                    <Input
-                      value={chatConfig.userAvatar || ''}
-                      onChange={(userAvatar) => updateChat({ userAvatar })}
-                      placeholder="https://..."
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={lang === 'zh' ? '工作目录' : 'Workspace'}>
-                  <SettingRow label={lang === 'zh' ? '普通对话工作目录' : 'Conversation workspace'} stack>
-                    <div className="flex w-full flex-col gap-2">
-                      <div className="flex gap-2">
-                        <Input
-                          className="min-w-0 flex-1"
-                          value={chatTools.nativeTools?.workingDirectory ?? ''}
-                          placeholder={lang === 'zh' ? '默认：~/Kivio/workspace' : 'Default: ~/Kivio/workspace'}
-                          onChange={(workingDirectory) => updateNativeTools({ workingDirectory })}
-                        />
-                        <Button
-                          size="sm"
-                          className="shrink-0"
-                          onClick={async () => {
-                            const selected = await open({ directory: true, multiple: false })
-                            if (!selected || typeof selected !== 'string') return
-                            updateNativeTools({ workingDirectory: selected })
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          <FolderOpen size={11} />
-                          {lang === 'zh' ? '选择' : 'Choose'}
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="shrink-0"
-                          onClick={async () => {
-                            const defaultPath = await join(await homeDir(), 'Kivio', 'workspace')
-                            updateNativeTools({ workingDirectory: defaultPath })
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          <RefreshCw size={11} />
-                          {lang === 'zh' ? '恢复默认' : 'Reset'}
-                        </Button>
-                      </div>
-                      <p className="kv-row-desc">
-                        {lang === 'zh'
-                          ? '未绑定项目的普通对话会在此目录下按对话 ID 使用独立工作台；用户明确指定的其他路径不受限制。'
-                          : 'Ordinary chats get a per-conversation workbench here. Explicit paths chosen by the user remain unrestricted.'}
-                      </p>
-                    </div>
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.defaultModelsSection}>
-                  <SettingRow
-                    label={t.defaultChatModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.chat.providerId || ''}
-                      model={settings.defaultModels.chat.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.defaultModelsUnset}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('chat', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  {!chatProvider && (
-                    <p className="kv-row-desc px-0 pb-2">
-                      {lang === 'zh' ? '请先在「模型」中添加并配置供应商。' : 'Add and configure a provider under Models first.'}
-                    </p>
-                  )}
-                </SettingsGroup>
-
-                <SettingsGroup title={lang === 'zh' ? '响应' : 'Response'}>
-                  <SettingRow label={t.chatStreamEnabled}>
-                    <Toggle
-                      checked={chatConfig.streamEnabled !== false}
-                      onChange={(streamEnabled) => updateChat({ streamEnabled })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.chatThinkingEnabled} description={t.chatThinkingHint}>
-                    <Toggle
-                      checked={chatConfig.thinkingEnabled !== false}
-                      onChange={(thinkingEnabled) => updateChat({ thinkingEnabled })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={t.chatMaxOutputTokens} stack>
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[15px] font-medium text-neutral-900 dark:text-neutral-50">
-                            {formatTokenCount(effectiveChatMaxOutput.maxOutput)}
-                          </span>
-                          <span className={`kv-tag ${effectiveChatMaxOutput.source === 'fallback' ? 'warn' : 'ok'}`}>
-                            {chatMaxOutputSourceLabel}
-                          </span>
-                        </div>
-                        <p className="kv-row-desc mt-1 min-w-0 break-all">
-                          {lang === 'zh' ? '当前聊天模型：' : 'Current chat model: '}
-                          {chatMaxOutputModelLabel}
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="kv-row-desc whitespace-nowrap">
-                          {lang === 'zh' ? '兜底' : 'Fallback'}
-                        </span>
-                        <Select
-                          className="w-44"
-                          value={String(chatFallbackMaxOutputTokens)}
-                          onChange={(maxOutputTokens) => updateChat({ maxOutputTokens: Number(maxOutputTokens) })}
-                          options={CHAT_MAX_OUTPUT_TOKEN_OPTIONS.map((tokens) => ({
-                            value: String(tokens),
-                            label: formatTokenCount(tokens),
-                          }))}
-                        />
-                      </div>
-                    </div>
-                  </SettingRow>
-                  <SettingRow label={t.chatDefaultLanguage}>
-                    <Select
-                      className="w-44"
-                      value={chatConfig.defaultLanguage || ''}
-                      onChange={(defaultLanguage) => updateChat({ defaultLanguage })}
-                      options={[
-                        { value: '', label: t.lensLanguageInherit },
-                        { value: 'zh', label: '中文' },
-                        { value: 'zh-Hant', label: '繁體中文' },
-                        { value: 'en', label: 'English' },
-                      ]}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.customPrompts}>
-                  <FieldBlock label={t.chatSystemPrompt} description={t.chatSystemPromptHint}>
-                    <div className="mb-2 flex justify-end">
-                      <Button
-                        size="sm"
-                        onClick={() => {
-                          setChatSystemPromptInteracted(false)
-                          updateChat({ systemPrompt: '' })
-                        }}
-                        disabled={!chatDefaults || (!chatConfig.systemPrompt && !chatSystemPromptInteracted)}
-                        data-tauri-drag-region="false"
-                      >
-                        <RefreshCw size={10} />
-                        {t.restoreDefaultPrompt}
-                      </Button>
-                    </div>
-                    <TextArea
-                      value={chatSystemPromptValue}
-                      onChange={(systemPrompt) => {
-                        setChatSystemPromptInteracted(true)
-                        updateChat({ systemPrompt })
-                      }}
-                      rows={4}
-                    />
-                  </FieldBlock>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.chatToolsSection}>
-                  <div className="flex flex-wrap gap-2 pb-2">
-                    <Button
-                      size="sm"
-                      onClick={() => setActiveTab('memory')}
-                      data-tauri-drag-region="false"
-                    >
-                      <MemoryIcon size={11} />
-                      {t.tabMemory}
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => setActiveTab('externalAgents')}
-                      data-tauri-drag-region="false"
-                    >
-                      <AgentIcon size={11} />
-                      {t.chatOpenExternalAgents}
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => setActiveTab('providers')}
-                      data-tauri-drag-region="false"
-                    >
-                      <ProvidersIcon size={11} />
-                      {t.chatOpenProviders}
-                    </Button>
-                  </div>
-                  <SettingRow
-                    label={lang === 'zh' ? 'MCP 工具' : 'MCP tools'}
-                  >
-                    <span className={`kv-tag ${chatTools.enabled ? 'ok' : ''}`}>
-                      {chatTools.enabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? 'Skill 运行时' : 'Skill runtime'}
-                  >
-                    <span className={`kv-tag ${skillRuntimeEnabled ? 'ok' : ''}`}>
-                      {skillRuntimeEnabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? '内置工具' : 'Native tools'}
-                  >
-                    <span className={`kv-tag ${nativeBuiltinToolsEnabled ? 'ok' : ''}`}>
-                      {nativeBuiltinToolsEnabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={t.tabMemory}
-                  >
-                    <span className={`kv-tag ${chatMemory.enabled ? 'ok' : ''}`}>
-                      {chatMemory.enabled
-                        ? (lang === 'zh' ? '已启用' : 'On')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                  <SettingRow
-                    label={lang === 'zh' ? '联网搜索' : 'Web search'}
-                  >
-                    <span className={`kv-tag ${(settings.lens?.webSearch?.enabled || chatTools.nativeTools?.webSearch) ? 'ok' : ''}`}>
-                      {(settings.lens?.webSearch?.enabled || chatTools.nativeTools?.webSearch)
-                        ? (lang === 'zh' ? '部分启用' : 'Partially on')
-                        : (lang === 'zh' ? '未启用' : 'Off')}
-                    </span>
-                  </SettingRow>
-                </SettingsGroup>
-              </>
+              <ChatTab
+                settings={settings}
+                t={t}
+                lang={lang}
+                chatConfig={chatConfig}
+                chatTools={chatTools}
+                chatMemory={chatMemory}
+                chatDefaults={chatDefaults}
+                chatSystemPromptValue={chatSystemPromptValue}
+                chatSystemPromptInteracted={chatSystemPromptInteracted}
+                chatFallbackMaxOutputTokens={chatFallbackMaxOutputTokens}
+                effectiveChatMaxOutput={effectiveChatMaxOutput}
+                chatMaxOutputSourceLabel={chatMaxOutputSourceLabel}
+                chatMaxOutputModelLabel={chatMaxOutputModelLabel}
+                skillRuntimeEnabled={skillRuntimeEnabled}
+                nativeBuiltinToolsEnabled={nativeBuiltinToolsEnabled}
+                onUpdateChat={updateChat}
+                onUpdateNativeTools={updateNativeTools}
+                onSystemPromptInteractedChange={setChatSystemPromptInteracted}
+                onNavigateTab={setActiveTab}
+              />
             )}
 
             {/* ===== 记忆标签页 ===== */}
             {activeTab === 'memory' && (
-              <>
-                <SettingsGroup title={lang === 'zh' ? '记忆运行' : 'Memory runtime'}>
-                  <SettingRow
-                    label={lang === 'zh' ? '启用记忆' : 'Enable memory'}
-                    description={lang === 'zh'
-                      ? '开启后注入 L1，并暴露 memory 工具。'
-                      : 'Injects L1 and exposes memory tools.'}
-                  >
-                    <Toggle
-                      checked={chatMemory.enabled}
-                      onChange={(enabled) => updateChatMemory({ enabled })}
-                    />
-                  </SettingRow>
-                  <SettingRow label={lang === 'zh' ? '记忆文件夹' : 'Memory folder'} stack>
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <Button
-                        size="sm"
-                        onClick={() => void refreshChatMemory()}
-                        disabled={memoryLoading}
-                        data-tauri-drag-region="false"
-                      >
-                        <RefreshCw size={10} className={memoryLoading ? 'animate-spin' : ''} />
-                        {lang === 'zh' ? '刷新' : 'Refresh'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => void handleOpenMemoryFolder()}
-                        data-tauri-drag-region="false"
-                      >
-                        <FolderOpen size={11} />
-                        {lang === 'zh' ? '打开文件夹' : 'Open folder'}
-                      </Button>
-                      {memoryDir && <span className="kv-row-desc min-w-0 break-all">{memoryDir}</span>}
-                    </div>
-                  </SettingRow>
-                  {memoryError && <div className="kv-inline-error">{memoryError}</div>}
-                  {memorySuccess && (
-                    <div className="kv-panel info">
-                      <div className="kv-panel-body">{memorySuccess}</div>
-                    </div>
-                  )}
-                </SettingsGroup>
-
-                <SettingsGroup title="L1">
-                  <MemoryEditor
-                    layer="l1"
-                    title={lang === 'zh' ? 'L1 在线记忆' : 'L1 Online Memory'}
-                    description={lang === 'zh'
-                      ? '每次回答都会参考的偏好与约束。'
-                      : 'Preferences and constraints applied to every reply.'}
-                    value={memoryDrafts.l1}
-                    savedValue={memorySnapshots.l1}
-                    maxBytes={MEMORY_L1_MAX_BYTES}
-                    rows={9}
-                    loading={memoryLoading}
-                    saving={memorySavingLayer === 'l1'}
-                    lang={lang}
-                    onChange={(value) => {
-                      setMemoryDrafts((prev) => ({ ...prev, l1: value }))
-                      setMemorySuccess('')
-                    }}
-                    onSave={() => void handleSaveMemoryLayer('l1')}
-                    onReload={() => void refreshChatMemory()}
-                  />
-                </SettingsGroup>
-
-                <SettingsGroup title="L2">
-                  <MemoryEditor
-                    layer="l2"
-                    title={lang === 'zh' ? 'L2 长期记忆' : 'L2 Long-Term Memory'}
-                    description={lang === 'zh'
-                      ? '长期记录，按需通过 memory 工具读取。'
-                      : 'Long-term notes, read on demand via memory tools.'}
-                    value={memoryDrafts.l2}
-                    savedValue={memorySnapshots.l2}
-                    rows={13}
-                    loading={memoryLoading}
-                    saving={memorySavingLayer === 'l2'}
-                    lang={lang}
-                    onChange={(value) => {
-                      setMemoryDrafts((prev) => ({ ...prev, l2: value }))
-                      setMemorySuccess('')
-                    }}
-                    onSave={() => void handleSaveMemoryLayer('l2')}
-                    onReload={() => void refreshChatMemory()}
-                  />
-                </SettingsGroup>
-              </>
+              <MemoryTab
+                lang={lang}
+                chatMemory={chatMemory}
+                memoryDir={memoryDir}
+                memoryError={memoryError}
+                memorySuccess={memorySuccess}
+                memoryLoading={memoryLoading}
+                memorySavingLayer={memorySavingLayer}
+                memoryDrafts={memoryDrafts}
+                memorySnapshots={memorySnapshots}
+                onUpdateChatMemory={updateChatMemory}
+                onRefresh={() => void refreshChatMemory()}
+                onOpenFolder={() => void handleOpenMemoryFolder()}
+                onDraftChange={(layer, value) => {
+                  setMemoryDrafts((prev) => ({ ...prev, [layer]: value }))
+                  setMemorySuccess('')
+                }}
+                onSaveLayer={(layer) => void handleSaveMemoryLayer(layer)}
+              />
             )}
 
             {/* ===== 混音器标签页 ===== */}
             {activeTab === 'mixer' && (
-              <>
-                <SettingsGroup title={t.mixerSection}>
-                  <div className="mb-3 flex items-start justify-between gap-3">
-                    {t.mixerSectionHint ? (
-                      <p className="kv-row-desc max-w-[560px]">{t.mixerSectionHint}</p>
-                    ) : <span />}
-                    <Button
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() => {
-                        updateDefaultModel('vision', '', '')
-                        updateDefaultModel('titleSummary', '', '')
-                        updateDefaultModel('compression', '', '')
-                        updateDefaultModel('imageGeneration', '', '')
-                      }}
-                      data-tauri-drag-region="false"
-                    >
-                      {t.mixerResetAuto}
-                    </Button>
-                  </div>
-                  <SettingRow
-                    label={t.auxiliaryVisionModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.vision.providerId || ''}
-                      model={settings.defaultModels.vision.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerAutoVisionModel}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('vision', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.defaultTitleSummaryModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.titleSummary.providerId || ''}
-                      model={settings.defaultModels.titleSummary.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerAutoModel}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('titleSummary', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.defaultCompressionModel}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.compression.providerId || ''}
-                      model={settings.defaultModels.compression.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerAutoModel}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('compression', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.defaultImageGenerationModel}
-                    description={t.defaultImageGenerationModelHint}
-                  >
-                    <ModelPairSelect
-                      providerId={settings.defaultModels.imageGeneration.providerId || ''}
-                      model={settings.defaultModels.imageGeneration.model || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerNoImageGenerationModel}
-                      onChange={(providerId, model) => {
-                        updateDefaultModel('imageGeneration', providerId, model)
-                      }}
-                    />
-                  </SettingRow>
-                  {!chatProvider && (
-                    <p className="kv-row-desc px-0 pb-2">
-                      {lang === 'zh' ? '请先在「模型」中添加并配置供应商。' : 'Add and configure a provider under Models first.'}
-                    </p>
-                  )}
-                </SettingsGroup>
-
-                <SettingsGroup title={t.mixerSubAgentSection}>
-                  <SettingRow
-                    label={t.defaultSubAgentModel}
-                    description={t.defaultSubAgentModelHint}
-                  >
-                    <ModelPairSelect
-                      providerId={chatTools.subAgentProviderId || ''}
-                      model={chatTools.subAgentModel || ''}
-                      providers={settings.providers}
-                      inheritLabel={t.mixerFollowChatModel}
-                      onChange={(providerId, model) => {
-                        updateChatTools({ subAgentProviderId: providerId, subAgentModel: model })
-                      }}
-                    />
-                  </SettingRow>
-                </SettingsGroup>
-
-                <SettingsGroup title={t.mixerAdvisorSection}>
-                  <SettingRow
-                    label={t.defaultAdvisorModel}
-                    description={t.defaultAdvisorModelHint}
-                  >
-                    <Toggle
-                      checked={Boolean(settings.defaultModels.advisor.providerId)}
-                      onChange={(on) => {
-                        if (on) {
-                          // 开启：若尚未选过模型，默认落到第一个可用供应商的首个模型，用户可再改。
-                          if (!settings.defaultModels.advisor.providerId) {
-                            const p = settings.providers.find(
-                              (pp) => pp.enabled && (pp.enabledModels?.length ?? 0) > 0,
-                            )
-                            updateDefaultModel('advisor', p?.id ?? '', p?.enabledModels[0] ?? '')
-                          }
-                        } else {
-                          updateDefaultModel('advisor', '', '')
-                        }
-                      }}
-                    />
-                  </SettingRow>
-                  {Boolean(settings.defaultModels.advisor.providerId) && (
-                    <SettingRow label={lang === 'zh' ? '顾问模型' : 'Advisor model'}>
-                      <ModelPairSelect
-                        providerId={settings.defaultModels.advisor.providerId || ''}
-                        model={settings.defaultModels.advisor.model || ''}
-                        providers={settings.providers}
-                        onChange={(providerId, model) => {
-                          updateDefaultModel('advisor', providerId, model)
-                        }}
-                      />
-                    </SettingRow>
-                  )}
-                </SettingsGroup>
-              </>
-            )}
-
-            {/* ===== Kivio Code 标签页 ===== */}
-            {activeTab === 'kivioCode' && (
-              <KivioCodeSettings lang={lang} providers={settings.providers} />
+              <MixerTab
+                settings={settings}
+                t={t}
+                lang={lang}
+                chatTools={chatTools}
+                hasChatProvider={Boolean(chatProvider)}
+                onUpdateDefaultModel={updateDefaultModel}
+                onUpdateChatTools={updateChatTools}
+              />
             )}
 
             {activeTab === 'externalAgents' && (
               <ExternalAgentsSettings
                 lang={lang}
-                chatConfig={chatConfig}
-                onChatChange={updateChat}
+              />
+            )}
+
+            {/* ===== Hooks 标签页（对话生命周期） ===== */}
+            {activeTab === 'hooks' && (
+              <HooksTab
+                lang={lang}
+                hooks={chatTools.hooks ?? []}
+                onChange={(hooks) => updateChatTools({ hooks })}
               />
             )}
 
@@ -2945,488 +2128,63 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
             {/* ===== 模型管理标签页 ===== */}
             {activeTab === 'providers' && (
-              <div className="kv-providers-root">
-                <div className="kv-providers">
-                <div className="kv-provider-list">
-                  <button
-                    type="button"
-                    onClick={addProvider}
-                    className="kv-provider-add"
-                    data-tauri-drag-region="false"
-                  >
-                    <Plus />
-                    {t.addProvider}
-                  </button>
-
-                  <ProviderSortableList
-                    providers={settings.providers}
-                    selectedId={selectedProvider?.id}
-                    lang={lang}
-                    providerNameLabel={t.providerName}
-                    onSelect={setSelectedProviderId}
-                    onReorder={reorderProviders}
-                    trailing={PROVIDER_PRESETS
-                      .filter((preset) => !settings.providers.some((p) => p.baseUrl === preset.baseUrl))
-                      .map((preset) => (
-                        <button
-                          key={preset.name}
-                          type="button"
-                          onClick={() => addProviderFromPreset(preset)}
-                          className="kv-provider-item"
-                          title={lang === 'zh' ? `添加 ${preset.name}` : `Add ${preset.name}`}
-                          data-tauri-drag-region="false"
-                        >
-                          <span className="kv-provider-item-select">
-                            <span className="kv-provider-dot off" />
-                            <span className="kv-provider-name">{preset.name}</span>
-                          </span>
-                        </button>
-                      ))}
-                  />
-                </div>
-
-                <div className="kv-provider-detail">
-                  <SettingsGroup title={lang === 'zh' ? '供应商' : 'Provider'} className="!pt-0 kv-provider-section">
-                    {selectedProvider ? (() => {
-                      const provider = selectedProvider
-                      const configured = provider.apiKeys.some((key) => key.trim())
-                      return (
-                        <div className="kv-provider-header">
-                          <div className="kv-provider-header-toolbar">
-                            <span className="kv-row-label">{lang === 'zh' ? '启用供应商' : 'Enable provider'}</span>
-                            <Toggle
-                              checked={isProviderEnabled(provider)}
-                              onChange={(enabled) => updateProvider(provider.id, { enabled })}
-                            />
-                          </div>
-                          <div className="kv-provider-header-toolbar">
-                            <span className="kv-row-label">{t.providerName}</span>
-                            <div className="kv-provider-header-actions">
-                              <span className={`kv-tag ${!isProviderEnabled(provider) ? 'warn' : configured ? 'ok' : 'warn'}`}>
-                                {!isProviderEnabled(provider)
-                                  ? (lang === 'zh' ? '已禁用' : 'Disabled')
-                                  : configured ? t.connectionOk : t.permissionMissing}
-                              </span>
-                              <IconButton
-                                variant="danger"
-                                size="xs"
-                                onClick={() => setConfirmDeleteProviderId(provider.id)}
-                                data-tauri-drag-region="false"
-                                title={t.deleteProvider}
-                                label={t.deleteProvider}
-                              >
-                                <Trash2 size={12} />
-                              </IconButton>
-                            </div>
-                          </div>
-                          <Input
-                            value={provider.name}
-                            onChange={(v) => updateProvider(provider.id, { name: v })}
-                            placeholder="Provider name"
-                          />
-                        </div>
-                      )
-                    })() : (
-                      <p className="kv-provider-empty-hint">
-                        {lang === 'zh' ? '在左侧选择供应商，或点上方「添加」新建。' : 'Select a provider on the left, or click “Add” above.'}
-                      </p>
-                    )}
-                  </SettingsGroup>
-
-                  {selectedProvider ? (() => {
-                    const provider = selectedProvider
-                    return (
-                        <SettingsGroup title={lang === 'zh' ? '配置' : 'Configuration'}>
-                          <FieldBlock label={t.baseUrl}>
-                            <div className="kv-provider-endpoint-row">
-                              <Input
-                                className="min-w-0 flex-1"
-                                value={provider.baseUrl}
-                                onChange={(v) => updateProvider(provider.id, { baseUrl: v })}
-                                placeholder="https://api.openai.com/v1"
-                                mono
-                              />
-                              <Select
-                                className="w-[11.5rem] shrink-0"
-                                value={normalizeProviderApiFormat(provider.apiFormat)}
-                                onChange={(apiFormat) => updateProvider(provider.id, { apiFormat })}
-                                options={[
-                                  { value: 'openai_chat', label: 'OpenAI Chat' },
-                                  { value: 'openai_responses', label: 'OpenAI Responses' },
-                                  { value: 'anthropic_messages', label: 'Anthropic' },
-                                  { value: 'gemini', label: 'Gemini' },
-                                ]}
-                              />
-                            </div>
-                          </FieldBlock>
-
-                          <SettingRow
-                            label={
-                              <span className="flex flex-col gap-1">
-                                <span className="flex items-center gap-1">
-                                  <span>{lang === 'zh' ? '压缩请求体 (gzip)' : 'Compress request body (gzip)'}</span>
-                                  <IconButton
-                                    size="xs"
-                                    label={lang === 'zh' ? '显示说明' : 'Show details'}
-                                    onClick={() => setGzipInfoOpen((prev) => {
-                                      const next = new Set(prev)
-                                      if (next.has(provider.id)) next.delete(provider.id)
-                                      else next.add(provider.id)
-                                      return next
-                                    })}
-                                  >
-                                    <Info size={12} />
-                                  </IconButton>
-                                </span>
-                                {gzipInfoOpen.has(provider.id) && (
-                                  <span className="kv-row-desc block mt-1">
-                                    {lang === 'zh'
-                                      ? '个别供应商前置的 WAF 会扫描明文请求体，把工具/系统提示里的 shell 命令、文件路径等文本误判为攻击而返回 403。开启后请求体用 gzip 压缩发送（多数网关可正常解压）。若该供应商不接受 gzip 请求（如官方 DeepSeek）会返回 400，请保持关闭。'
-                                      : 'Some providers sit behind a WAF that scans the plaintext request body and returns 403 for shell/path text inside tool or system-prompt content. Enable to gzip the request body (most gateways accept it). Keep off for providers that reject gzip requests (e.g. official DeepSeek), which would return 400.'}
-                                  </span>
-                                )}
-                              </span>
-                            }
-                          >
-                            <Toggle
-                              checked={provider.compressRequestBody === true}
-                              onChange={(v) => updateProvider(provider.id, { compressRequestBody: v })}
-                            />
-                          </SettingRow>
-
-                          <FieldBlock label={t.apiKey} description={t.apiKeysHint}>
-                            <div className="space-y-1.5">
-                              {(() => {
-                                // 命中快速预设 baseUrl 时，给出「获取 API Key」外链引导用户申请。
-                                const preset = PROVIDER_PRESETS.find(
-                                  (p) => p.baseUrl === provider.baseUrl && p.apiKeyUrl,
-                                )
-                                if (!preset?.apiKeyUrl) return null
-                                return (
-                                  <button
-                                    type="button"
-                                    onClick={() => void api.openExternal(preset.apiKeyUrl!)}
-                                    className="inline-flex w-fit items-center gap-0.5 text-[12px] text-indigo-500 hover:underline dark:text-indigo-300"
-                                    data-tauri-drag-region="false"
-                                  >
-                                    {lang === 'zh' ? `获取 ${preset.name} API Key ↗` : `Get ${preset.name} API key ↗`}
-                                  </button>
-                                )
-                              })()}
-                              {(provider.apiKeys.length > 0 ? provider.apiKeys : ['']).map((key, idx) => {
-                                const total = Math.max(provider.apiKeys.length, 1)
-                                const keyId = `${provider.id}-${idx}`
-                                const revealed = revealedKeys.has(keyId)
-                                return (
-                                  <div key={`${provider.id}-${total}-${idx}`} className="flex items-center gap-1.5">
-                                    <Input
-                                      type={revealed ? 'text' : 'password'}
-                                      value={key}
-                                      mono
-                                      onChange={(v) => {
-                                        const base = provider.apiKeys.length > 0 ? [...provider.apiKeys] : ['']
-                                        base[idx] = v
-                                        updateProvider(provider.id, { apiKeys: base })
-                                      }}
-                                      placeholder={idx === 0 ? `sk-... (${t.apiKeyPrimary})` : `sk-... (${t.apiKeyBackup})`}
-                                    />
-                                    <IconButton
-                                      size="xs"
-                                      onClick={() => toggleKeyReveal(keyId)}
-                                      title={revealed ? (lang === 'zh' ? '隐藏密钥' : 'Hide key') : (lang === 'zh' ? '显示密钥' : 'Show key')}
-                                      label={revealed ? (lang === 'zh' ? '隐藏密钥' : 'Hide key') : (lang === 'zh' ? '显示密钥' : 'Show key')}
-                                      data-tauri-drag-region="false"
-                                    >
-                                      {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
-                                    </IconButton>
-                                    {total > 1 && (
-                                      <IconButton
-                                        variant="danger"
-                                        size="xs"
-                                        onClick={() => {
-                                          const next = provider.apiKeys.filter((_, i) => i !== idx)
-                                          updateProvider(provider.id, { apiKeys: next })
-                                        }}
-                                        title={t.removeKey}
-                                        label={t.removeKey}
-                                        data-tauri-drag-region="false"
-                                      >
-                                        <Trash2 size={12} />
-                                      </IconButton>
-                                    )}
-                                  </div>
-                                )
-                              })}
-                            </div>
-                            <Button
-                              size="sm"
-                              className="mt-2"
-                              onClick={() => {
-                                const base = provider.apiKeys.length > 0 ? provider.apiKeys : ['']
-                                updateProvider(provider.id, { apiKeys: [...base, ''] })
-                              }}
-                              data-tauri-drag-region="false"
-                            >
-                              <Plus size={11} />
-                              {t.addKey}
-                            </Button>
-                          </FieldBlock>
-
-                          <div className="kv-row">
-                            <div className="kv-row-text">
-                              <span className="kv-row-label">{t.testConnection}</span>
-                              {providerTestFeedback[provider.id]?.message && (
-                                <p className="kv-row-desc">{providerTestFeedback[provider.id]?.message}</p>
-                              )}
-                            </div>
-                            <div className="kv-row-control kv-row-control-cluster">
-                              <Button
-                                size="sm"
-                                onClick={() => openModelPicker(provider.id)}
-                                data-tauri-drag-region="false"
-                              >
-                                <RefreshCw size={10} className={fetchingProviderId === provider.id ? 'animate-spin' : ''} />
-                                {provider.availableModels.length > 0
-                                  ? (lang === 'zh' ? '管理模型' : 'Models')
-                                  : t.fetchModels}
-                              </Button>
-                              <Button
-                                size="sm"
-                                onClick={() => handleTestConnection(provider.id)}
-                                disabled={testingProviderId === provider.id}
-                                data-tauri-drag-region="false"
-                              >
-                                <RefreshCw size={10} className={testingProviderId === provider.id ? 'animate-spin' : ''} />
-                                {testingProviderId === provider.id ? t.testingConnection : t.testConnection}
-                              </Button>
-                            </div>
-                          </div>
-
-                          <FieldBlock
-                            label={(
-                              <span className="inline-flex items-center gap-2">
-                                <span>{lang === 'zh' ? '模型' : 'Models'}</span>
-                                <span className="kv-tag">{provider.enabledModels.length}</span>
-                              </span>
-                            )}
-                          >
-                            <ul className="kv-enabled-model-list">
-                              {provider.enabledModels.length === 0 && (
-                                <li className="kv-enabled-model-empty">
-                                  {lang === 'zh' ? '点击上方「获取模型列表」拉取并添加模型。' : 'Use "Fetch Models" above to load and add models.'}
-                                </li>
-                              )}
-                              {provider.enabledModels.map(model => {
-                                const caps = resolveModelInfo(model, provider.modelOverrides).capabilities
-                                return (
-                                  <li key={model} className="kv-enabled-model-row" onClick={() => setDrawerModel({ providerId: provider.id, model })}>
-                                    <ModelIcon model={model} size={16} />
-                                    <span className="kv-enabled-model-name" title={model}>{model}</span>
-                                    <span className="kv-enabled-model-badges">
-                                      {caps?.vision && (
-                                        <span className="kv-badge-mini kv-badge-mini--vision" title={lang === 'zh' ? '视觉' : 'Vision'}>
-                                          <Eye size={11} strokeWidth={2} />
-                                        </span>
-                                      )}
-                                      {caps?.functionCalling && (
-                                        <span className="kv-badge-mini kv-badge-mini--tools" title={lang === 'zh' ? '工具调用' : 'Tools'}>
-                                          <Wrench size={11} strokeWidth={2} />
-                                        </span>
-                                      )}
-                                      {caps?.reasoning && (
-                                        <span className="kv-badge-mini kv-badge-mini--reasoning" title={lang === 'zh' ? '推理' : 'Reasoning'}>
-                                          <Brain size={11} strokeWidth={2} />
-                                        </span>
-                                      )}
-                                      {caps?.imageGeneration && (
-                                        <span className="kv-badge-mini kv-badge-mini--image" title={lang === 'zh' ? '生图' : 'Image generation'}>
-                                          <ImageIcon size={11} strokeWidth={2} />
-                                        </span>
-                                      )}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => { e.stopPropagation(); removeEnabledModel(provider.id, model) }}
-                                      className="kv-enabled-model-remove"
-                                      data-tauri-drag-region="false"
-                                      aria-label={t.removeModel}
-                                    >
-                                      <Minus size={14} />
-                                    </button>
-                                  </li>
-                                )
-                              })}
-                            </ul>
-                          </FieldBlock>
-                        </SettingsGroup>
-                    )
-                  })() : null}
-                </div>
-                </div>
-              </div>
+              <ProvidersTab
+                settings={settings}
+                t={t}
+                lang={lang}
+                selectedProvider={selectedProvider}
+                revealedKeys={revealedKeys}
+                gzipInfoOpen={gzipInfoOpen}
+                fetchingProviderId={fetchingProviderId}
+                onSelectProvider={setSelectedProviderId}
+                onReorderProviders={reorderProviders}
+                onAddProvider={addProvider}
+                onAddProviderFromPreset={addProviderFromPreset}
+                onUpdateProvider={updateProvider}
+                onSetProviderIcon={setProviderIcon}
+                onRequestDeleteProvider={setConfirmDeleteProviderId}
+                onToggleGzipInfo={(id) => setGzipInfoOpen((prev) => {
+                  const next = new Set(prev)
+                  if (next.has(id)) next.delete(id)
+                  else next.add(id)
+                  return next
+                })}
+                onToggleKeyReveal={toggleKeyReveal}
+                onOpenModelPicker={openModelPicker}
+                onOpenModelTest={setModelTestProviderId}
+                onOpenModelDrawer={setDrawerModel}
+                onRemoveEnabledModel={removeEnabledModel}
+              />
             )}
 
             {/* ===== 关于标签页 ===== */}
             {activeTab === 'about' && (
               <>
-                <SettingsGroup title={lang === 'zh' ? '应用' : 'Application'}>
-                  <div className="kv-panel mb-2">
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-[10px] overflow-hidden shrink-0">
-                        <img src="/icon.png" alt="Kivio Desktop" className="w-full h-full object-contain" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="kv-page-title">Kivio Desktop</div>
-                        <div className="kv-panel-body">{lang === 'zh' ? '屏幕级 AI 助手' : 'Screen-level AI Assistant'}</div>
-                      </div>
-                    </div>
-                  </div>
-                  <SettingRow label={t.currentVersion}>
-                    <span className="kv-tag">v{appVersion}</span>
-                  </SettingRow>
-                  <SettingRow label={lang === 'zh' ? '开发者' : 'Developer'}>
-                    <span className="kv-row-desc">ZM</span>
-                  </SettingRow>
-                </SettingsGroup>
+                <AppInfoGroup t={t} lang={lang} appVersion={appVersion} />
 
-                <SettingsGroup title={t.checkUpdate}>
-                  <SettingRow label={t.autoCheckUpdate}>
-                    <Toggle
-                      checked={settings?.autoCheckUpdate ?? true}
-                      onChange={(v) => updateSettings({ autoCheckUpdate: v })}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label={t.checkUpdate}
-                    description={updateStatus === 'up-to-date' ? t.upToDate : undefined}
-                  >
-                    <Button
-                      size="sm"
-                      onClick={handleCheckUpdate}
-                      disabled={updateStatus === 'checking'}
-                      data-tauri-drag-region="false"
-                    >
-                      <RefreshCw size={11} className={updateStatus === 'checking' ? 'animate-spin' : ''} />
-                      {updateStatus === 'checking' ? t.checkingUpdate : t.checkUpdate}
-                    </Button>
-                  </SettingRow>
-
-                  {updateStatus === 'check-failed' && (
-                    <div className="kv-panel mt-2">
-                      <div className="kv-panel-body mb-2 text-amber-700 dark:text-amber-400">
-                        {t.updateCheckFailed}
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={handleOpenGithubReleases}
-                        data-tauri-drag-region="false"
-                      >
-                        {t.downloadFromGithub}
-                      </Button>
-                    </div>
-                  )}
-
-                  {updateStatus === 'available' && updateInfo && (
-                    <div className="kv-panel info mt-2">
-                      <div className="kv-panel-title">
-                        {t.updateAvailable}
-                        <span className="kv-tag accent ml-auto">v{updateInfo.version}</span>
-                      </div>
-                      {updateInfo.body && (
-                        <div className="custom-scrollbar mb-3 max-h-40 overflow-y-auto text-[12px] leading-relaxed">
-                          <ChatMarkdown content={updateInfo.body} />
-                        </div>
-                      )}
-
-                      {downloadState === 'downloading' && (
-                        <div className="mb-3">
-                          <div className="flex items-center justify-between kv-panel-body mb-1">
-                            <span>{t.downloading}</span>
-                            <span className="font-mono tabular-nums">{downloadPercent}%</span>
-                          </div>
-                          <div className="kv-progress">
-                            <div style={{ width: `${downloadPercent}%` }} />
-                          </div>
-                        </div>
-                      )}
-
-                      {downloadState === 'failed' && downloadError && (
-                        <div className="kv-inline-error mb-3">
-                          {t.downloadFailed}: {downloadError}
-                        </div>
-                      )}
-
-                      <div className="flex gap-2 flex-wrap">
-                        {downloadState === 'idle' && (
-                          <>
-                            <Button
-                              variant="primary"
-                              onClick={handleDownloadAndInstall}
-                              data-tauri-drag-region="false"
-                            >
-                              <Download size={12} />
-                              {t.downloadAndInstall}
-                            </Button>
-                            <Button
-                              onClick={handleOpenReleasePage}
-                              data-tauri-drag-region="false"
-                            >
-                              <ExternalLink size={12} />
-                              {t.downloadFromGithub}
-                            </Button>
-                          </>
-                        )}
-                        {downloadState === 'downloading' && (
-                          <Button disabled>
-                            <RefreshCw size={12} className="animate-spin" />
-                            {t.downloading}
-                          </Button>
-                        )}
-                        {downloadState === 'downloaded' && (
-                          <Button
-                            variant="primary"
-                            onClick={handleInstall}
-                            data-tauri-drag-region="false"
-                          >
-                            <Download size={12} />
-                            {t.installAndRestart}
-                          </Button>
-                        )}
-                        {downloadState === 'failed' && (
-                          <>
-                            <Button
-                              variant="primary"
-                              onClick={handleDownloadAndInstall}
-                              data-tauri-drag-region="false"
-                            >
-                              <RefreshCw size={12} />
-                              {t.retryDownload}
-                            </Button>
-                            <Button
-                              onClick={handleOpenReleasePage}
-                              data-tauri-drag-region="false"
-                            >
-                              <ExternalLink size={12} />
-                              {t.downloadFromGithub}
-                            </Button>
-                          </>
-                        )}
-                        <Button
-                          variant="ghost"
-                          onClick={() => {
-                            setUpdateStatus('idle')
-                            setDownloadState('idle')
-                            setDownloadPercent(0)
-                            setDownloadError('')
-                          }}
-                          data-tauri-drag-region="false"
-                        >
-                          {t.updateLater}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </SettingsGroup>
+                <UpdateGroup
+                  settings={settings}
+                  t={t}
+                  update={{
+                    status: updateStatus,
+                    info: updateInfo,
+                    downloadState,
+                    downloadPercent,
+                    downloadError,
+                  }}
+                  onUpdateSettings={updateSettings}
+                  onCheck={handleCheckUpdate}
+                  onDownloadAndInstall={handleDownloadAndInstall}
+                  onInstall={handleInstall}
+                  onOpenReleasePage={handleOpenReleasePage}
+                  onOpenGithubReleases={handleOpenGithubReleases}
+                  onDismiss={() => {
+                    setUpdateStatus('idle')
+                    setDownloadState('idle')
+                    setDownloadPercent(0)
+                    setDownloadError('')
+                  }}
+                />
               </>
             )}
           </div>
@@ -3524,6 +2282,22 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           onReset={(modelName) => resetModelOverride(drawerModel.providerId, modelName)}
         />
       )}
+      {modelTestProviderId && settings && (() => {
+        const p = settings.providers.find(pv => pv.id === modelTestProviderId)
+        if (!p) return null
+        return (
+          <ProviderModelTestModal
+            providerId={p.id}
+            baseUrl={p.baseUrl}
+            apiKeys={p.apiKeys}
+            apiFormat={p.apiFormat}
+            request={p.request}
+            models={p.enabledModels}
+            lang={lang}
+            onClose={() => setModelTestProviderId(null)}
+          />
+        )
+      })()}
       {/* 未保存更改确认弹窗 */}
       {closeConfirmOpen && (
         <div className="kv-modal-backdrop" data-tauri-drag-region="false">
@@ -3600,17 +2374,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       >
         {!hideNav && (
           <aside className="settings-embedded-nav">
-            <button
-              type="button"
-              onClick={handleCloseRequest}
-              className="settings-embedded-back"
-              title={lang === 'zh' ? '返回对话' : 'Back to chat'}
-              data-tauri-drag-region="false"
-            >
-              <ArrowLeft size={16} strokeWidth={1.9} />
-              <span>{lang === 'zh' ? '返回对话' : 'Back to chat'}</span>
-            </button>
-            <h2 className="settings-embedded-nav-title">{t.settings}</h2>
+            <h2 className="settings-embedded-nav-title" onMouseDown={handleSettingsDragMouseDown}>
+              {t.settings}
+            </h2>
             {categoryNav}
           </aside>
         )}

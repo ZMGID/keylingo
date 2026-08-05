@@ -28,7 +28,7 @@ pub struct HimalayaInstallResult {
 }
 
 fn kivio_himalaya_install_dir() -> Option<PathBuf> {
-    crate::kivio_code::settings_loader::app_data_dir().map(|dir| dir.join("himalaya-cli"))
+    crate::app_data::app_data_dir().map(|dir| dir.join("himalaya-cli"))
 }
 
 fn kivio_himalaya_binary_path() -> Option<PathBuf> {

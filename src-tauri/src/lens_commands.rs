@@ -17,13 +17,14 @@ use uuid::Uuid;
 use xcap::Monitor;
 
 use crate::api::{
-    apply_model_temperature, build_ocr_request_body, call_openai_ocr, call_openai_text,
-    call_vision_api, effective_retry_attempts, stream_chat_call, stream_translate_combined,
+    call_openai_ocr, call_openai_text, call_vision_api, effective_retry_attempts,
+    ocr_image_message, stream_chat_call, stream_translate_combined,
 };
 #[cfg(target_os = "windows")]
 use crate::capture_geometry::{
     monitor_for_region, windows_monitor_region, CaptureMonitor, CaptureRect,
 };
+use crate::chat::model::{ModelMessage, ModelRole};
 use crate::lens;
 use crate::prompts::{
     build_combined_translate_prompt, build_ocr_direct_translation_prompt,
@@ -43,7 +44,7 @@ use crate::shortcuts::{capture_active_selection, get_mouse_position, open_chat_w
 use crate::state::{
     AppState, PendingChatExternalAttachment, PendingChatExternalMessage, PendingChatExternalSend,
 };
-use crate::utils::{language_name, provider_supports_thinking_field, resolve_target_lang};
+use crate::utils::{language_name, resolve_target_lang};
 use crate::web_search::{format_web_context, search_web, WebSearchResult};
 use crate::windows;
 
@@ -119,7 +120,7 @@ fn unregister_lens_escape_shortcut(app: &AppHandle) {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn insert_temp_explain_image(app: &AppHandle, path: PathBuf) -> String {
     let image_id = Uuid::new_v4().to_string();
     let state = app.state::<AppState>();
@@ -472,10 +473,14 @@ pub(crate) fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), S
     // 先记下浮窗是否"已存在"（复用）：冷创建时前端会全新挂载、自行 take 复位载荷与选区，
     // 之后绝不能再发 lens:reset——否则 mount 的 enterSelect 与事件的 enterSelect 双跑,
     // take-once 的选中文本会被先取后作废丢弃（见前端 selectionReqIdRef 竞态）。
-    let target_label = if mode == "chat" { "lens" } else { "translate" };
+    let target_label = if mode == "chat" || mode == "screenshot" {
+        "lens"
+    } else {
+        "translate"
+    };
     let overlay_existed = app.get_webview_window(target_label).is_some();
     let window = {
-        let ensured = if mode == "chat" {
+        let ensured = if mode == "chat" || mode == "screenshot" {
             windows::ensure_lens_window(app, mode)
         } else {
             windows::ensure_translate_window(app, mode)
@@ -499,6 +504,7 @@ pub(crate) fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), S
         "translate" => "translate",
         "translateText" => "translateText",
         "replace" => "replace",
+        "screenshot" => "screenshot",
         _ => "chat",
     };
     let mut freeze_frame_image_id: Option<String> = None;
@@ -512,7 +518,7 @@ pub(crate) fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), S
             "[lens-timing]   ..after_position +{}ms",
             __t0.elapsed().as_millis()
         );
-        freeze_frame_image_id = prepare_windows_freeze_frame(app, frame);
+        freeze_frame_image_id = prepare_freeze_frame(app, frame);
     }
     eprintln!(
         "[lens-timing] after_freeze_capture +{}ms",
@@ -601,6 +607,11 @@ pub(crate) fn lens_request_replace(app: AppHandle) -> Result<(), String> {
     lens_request_internal(&app, "replace")
 }
 
+/// 独立截图标注入口：截完进标注态（箭头/矩形/马赛克 + 复制/保存），无 AI 输入框。
+pub(crate) fn lens_request_screenshot(app: AppHandle) -> Result<(), String> {
+    lens_request_internal(&app, "screenshot")
+}
+
 /// 返回当前屏幕上可见应用窗口列表（macOS 实际数据；Windows 空数组）。
 #[tauri::command]
 pub(crate) fn lens_list_windows() -> Vec<lens::WindowInfo> {
@@ -667,7 +678,7 @@ pub(crate) async fn lens_capture_region(
         }
     };
 
-    let result = capture_region_from_freeze_frame(
+    let result = match capture_region_from_freeze_frame(
         &app,
         freeze_frame_image_id.as_deref(),
         x,
@@ -675,19 +686,37 @@ pub(crate) async fn lens_capture_region(
         width,
         height,
         scale_factor,
-    )
-    .unwrap_or_else(|| {
-        capture_region_image(
-            absolute_x,
-            absolute_y,
-            x,
-            y,
-            width,
-            height,
-            scale_factor,
-            exclude_self_pid,
-        )
-    });
+    ) {
+        Some(result) => result,
+        None => {
+            // 冻结帧缺失/过期（会话内二次截图、开屏抓帧失败）→ 现场截屏兜底。
+            // Windows xcap 不能像 macOS SCK 那样按 PID 排除自身，必须先藏浮窗
+            // （等 DWM 合成一帧生效）再截，否则会把 lens 遮罩/对话框截进图里。
+            #[cfg(target_os = "windows")]
+            let overlay = active_overlay_window(&app);
+            #[cfg(target_os = "windows")]
+            if let Some(w) = overlay.as_ref() {
+                let _ = w.hide();
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            let live = capture_region_image(
+                absolute_x,
+                absolute_y,
+                x,
+                y,
+                width,
+                height,
+                scale_factor,
+                exclude_self_pid,
+            );
+            #[cfg(target_os = "windows")]
+            if let Some(w) = overlay.as_ref() {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            live
+        }
+    };
     match result {
         Ok(path) => {
             let image_id = Uuid::new_v4().to_string();
@@ -1480,14 +1509,10 @@ pub(crate) async fn lens_translate(
                 &state,
                 &ocr_provider,
                 &settings.screenshot_translation.model,
-                build_ocr_request_body(
-                    &temp_path,
-                    &prompt,
-                    st_thinking,
-                    &ocr_provider,
-                    &settings.screenshot_translation.model,
-                )?,
+                String::new(),
+                vec![ocr_image_message(&temp_path, &prompt)?],
                 retry_attempts,
+                st_thinking,
                 &image_id,
                 "translated",
                 "lens-translate-stream",
@@ -1545,14 +1570,10 @@ pub(crate) async fn lens_translate(
             &state,
             &ocr_provider,
             &settings.screenshot_translation.model,
-            build_ocr_request_body(
-                &temp_path,
-                &prompt,
-                st_thinking,
-                &ocr_provider,
-                &settings.screenshot_translation.model,
-            )?,
+            String::new(),
+            vec![ocr_image_message(&temp_path, &prompt)?],
             retry_attempts,
+            st_thinking,
             &image_id,
             "lens-translate-stream",
             "screenshot_translation",
@@ -1676,21 +1697,15 @@ pub(crate) async fn lens_translate_text(
     );
 
     let translated = if st_stream {
-        let mut body = serde_json::json!({
-          "messages": [{ "role": "user", "content": prompt }],
-          "stream": true,
-        });
-        apply_model_temperature(&mut body, &provider, &settings.screenshot_translation.model);
-        if !st_thinking && provider_supports_thinking_field(&provider.base_url) {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
-        }
         match stream_chat_call(
             &app,
             &state,
             &provider,
             &settings.screenshot_translation.model,
-            body,
+            String::new(),
+            vec![ModelMessage::text(ModelRole::User, prompt.clone())],
             retry_attempts,
+            st_thinking,
             &request_id,
             "translated",
             "lens-translate-stream",
@@ -1860,21 +1875,18 @@ async fn local_ocr_then_translate(
     // 3) Translate via configured provider.
     let translated = if st_stream {
         // Cloud streaming: 用 stream_chat_call + 文字消息（不带 image）
-        let mut body = serde_json::json!({
-          "messages": [{ "role": "user", "content": translate_prompt }],
-          "stream": true,
-        });
-        apply_model_temperature(&mut body, translate_provider, translate_model);
-        if !st_thinking && provider_supports_thinking_field(&translate_provider.base_url) {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
-        }
         match stream_chat_call(
             app,
             state,
             translate_provider,
             translate_model,
-            body,
+            String::new(),
+            vec![ModelMessage::text(
+                ModelRole::User,
+                translate_prompt.clone(),
+            )],
             retry_attempts,
+            st_thinking,
             image_id,
             "translated",
             "lens-translate-stream",
@@ -2214,22 +2226,37 @@ pub(crate) fn lens_close(app: AppHandle) -> Result<(), String> {
 /// 的情况——丢事件也能从这里拉到冻结帧。无 pending（已被取走 / 未设置）返回 None。
 #[tauri::command]
 pub(crate) fn lens_take_reset_payload(state: State<'_, AppState>) -> Option<String> {
-    state
+    let taken = state
         .lens_pending_reset
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .take()
+        .take();
+    eprintln!(
+        "[lens-freeze] take_reset_payload -> {}",
+        taken.as_deref().unwrap_or("<empty>")
+    );
+    taken
 }
 
-#[cfg(target_os = "windows")]
-fn prepare_windows_freeze_frame(app: &AppHandle, frame: Option<LensFrame>) -> Option<String> {
-    let settings = app.state::<AppState>().settings_read().clone();
-    if !settings.lens.windows_freeze_frame_selection {
-        return None;
-    }
+/// 冻结帧：进入选择态前抓取当前显示器整帧，之后的区域截图从该帧裁剪（双端常开，无开关）。
+/// - Windows：规避浏览器视频在透明置顶 WebView2 下变黑。
+/// - macOS：SCK 捕获时排除自身 PID（webview 此刻虽未显示，防御复用窗口的边缘态）。
+/// 捕获失败静默降级：返回 None，前端照常走实时透明覆盖 + 现场截图路径。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn prepare_freeze_frame(app: &AppHandle, frame: Option<LensFrame>) -> Option<String> {
     let frame = frame?;
     let width = frame.width.round().max(1.0) as u32;
     let height = frame.height.round().max(1.0) as u32;
+    let exclude_self_pid: Option<i32> = {
+        #[cfg(target_os = "macos")]
+        {
+            Some(std::process::id() as i32)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    };
     let path = capture_region_image(
         frame.x.round() as i32,
         frame.y.round() as i32,
@@ -2238,13 +2265,14 @@ fn prepare_windows_freeze_frame(app: &AppHandle, frame: Option<LensFrame>) -> Op
         width,
         height,
         1.0,
-        None,
+        exclude_self_pid,
     )
     .map_err(|err| {
         eprintln!("[lens-freeze] capture failed: {err}");
         err
     })
     .ok()?;
+    eprintln!("[lens-freeze] captured frame -> {}", path.display());
     let image_id = insert_temp_explain_image(app, path);
     let state = app.state::<AppState>();
     {
@@ -2257,8 +2285,8 @@ fn prepare_windows_freeze_frame(app: &AppHandle, frame: Option<LensFrame>) -> Op
     Some(image_id)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn prepare_windows_freeze_frame(_app: &AppHandle, _frame: Option<LensFrame>) -> Option<String> {
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn prepare_freeze_frame(_app: &AppHandle, _frame: Option<LensFrame>) -> Option<String> {
     None
 }
 
@@ -2717,6 +2745,59 @@ pub(crate) fn lens_register_annotated_image(
     }
 
     Ok(serde_json::json!({ "success": true, "imageId": image_id }))
+}
+
+/// 截图标注：把合成后的 PNG 写入系统剪贴板（解码为 RGBA 后走 arboard）。
+#[tauri::command]
+pub(crate) async fn lens_copy_image_to_clipboard(
+    base64_png: String,
+) -> Result<serde_json::Value, String> {
+    // 解码 + 剪贴板都是阻塞操作，放 blocking 线程避免卡 UI 事件循环
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let bytes = general_purpose::STANDARD
+            .decode(base64_png.as_bytes())
+            .map_err(|e| format!("base64 decode failed: {e}"))?;
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| format!("png decode failed: {e}"))?
+            .to_rgba8();
+        let (w, h) = img.dimensions();
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        clipboard
+            .set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: std::borrow::Cow::Owned(img.into_raw()),
+            })
+            .map_err(|e| format!("clipboard write failed: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match result {
+        Ok(()) => Ok(serde_json::json!({ "success": true })),
+        Err(e) => Ok(serde_json::json!({ "success": false, "error": e })),
+    }
+}
+
+/// 截图标注：把合成后的 PNG 保存到用户选定路径（路径来自前端 dialog 插件的保存对话框）。
+#[tauri::command]
+pub(crate) async fn lens_save_annotated_png(
+    base64_png: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let bytes = general_purpose::STANDARD
+            .decode(base64_png.as_bytes())
+            .map_err(|e| format!("base64 decode failed: {e}"))?;
+        std::fs::write(&path, &bytes).map_err(|e| format!("write file failed: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match result {
+        Ok(()) => Ok(serde_json::json!({ "success": true })),
+        Err(e) => Ok(serde_json::json!({ "success": false, "error": e })),
+    }
 }
 
 /// 清理截图临时文件：从映射中移除并删除磁盘文件

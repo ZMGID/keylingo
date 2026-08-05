@@ -6,6 +6,20 @@ import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { normalizeThemeColorId } from '../themeColors'
+import {
+  subscribeChatProtocol,
+  subscribeChatProtocolIssues,
+  subscribeChatPython,
+  syncChatProtocol,
+  type ChatProtocolDelivery,
+  type ChatProtocolIssue,
+} from './chatProtocol'
+import type {
+  ChatProtocolEvent,
+  ChatRunEventEnvelope,
+  ChatSegmentPayload as GeneratedChatSegmentPayload,
+  ChatRunPythonPayload as GeneratedChatRunPythonPayload,
+} from '../generated/chatProtocol'
 
 // ========== 类型定义 ==========
 
@@ -49,43 +63,12 @@ export type LensStreamPayload = {
   full?: string
 }
 
-export type ChatStreamSegmentKind = 'text' | 'reasoning' | 'tool'
+export type ChatStreamSegment = GeneratedChatSegmentPayload
 
-export type ChatStreamSegmentPhase = 'auxiliary' | 'plain' | 'tool_loop' | 'synthesis'
-
-export type ChatStreamSegment = {
-  id: string
-  kind: ChatStreamSegmentKind
-  phase: ChatStreamSegmentPhase
-  order: number
-  step_number?: number | null
-  stepNumber?: number | null
-  round?: number | null
-  text?: string | null
-  tool_call_id?: string | null
-  toolCallId?: string | null
-}
-
-export type ChatStreamPayload = {
-  conversationId: string
-  runId: string
-  messageId?: string
-  imageId?: string
-  kind: 'answer'
-  delta: string
-  reasoningDelta?: string
-  segmentId?: string | null
-  segmentKind?: ChatStreamSegmentKind | null
-  phase?: ChatStreamSegmentPhase | null
-  order?: number | null
-  stepNumber?: number | null
-  round?: number | null
-  toolCallId?: string | null
-  segment?: ChatStreamSegment | null
-  done?: boolean
-  reason?: 'done' | 'cancelled' | 'error'
-  full?: string
-}
+export type ChatStreamPayload = Extract<
+  ChatRunEventEnvelope,
+  { type: 'run_started' | 'text_delta' | 'reasoning_delta' | 'run_completed' | 'run_cancelled' | 'run_failed' }
+> & { restoredFromSnapshot?: boolean }
 
 export type ChatExternalSendAttachment = {
   id: string
@@ -170,9 +153,23 @@ export type ChatContextState = {
   warningMessage?: string | null
 }
 
+export type ChatContextLiveUsage = {
+  /** 此刻已用（分子）。口径与轮末权威值一致，真源在 Rust 侧。 */
+  usedTokens: number
+  /** 上下文窗口（分母）。`null` = 本次上报没带窗口，前端必须保留已知的旧值（分母粘滞）。 */
+  contextWindowTokens?: number | null
+}
+
+/**
+ * 上下文状态更新。两种形态共用这一条通道：
+ * - `contextState` —— 轮末/手动刷新的**权威快照**（含分段、压缩计数、来源标签）。
+ * - `live` —— 生成过程中的**活数**（只有分子 + 分母）。权威快照那次要读磁盘、列工具、算分段，
+ *   不能放在每个增量上，所以实时这条刻意只带两个数。
+ */
 export type ChatContextPayload = {
   conversationId: string
-  contextState: ChatContextState
+  contextState?: ChatContextState
+  live?: ChatContextLiveUsage
 }
 
 export type ChatCompactionPayload = {
@@ -326,6 +323,8 @@ export type ChatToolConfirmPayload = {
   name: string
   source: string
   serverId?: string | null
+  /** 这次操作的对象（文件完整路径 / 命令首行），后端认得出时才有。用于拼自然语言标题。 */
+  target?: string | null
   argumentsPreview?: string
   sensitivity?: string
 }
@@ -377,6 +376,19 @@ export type ChatMcpServer = {
   }
 }
 
+/** 单个 CLI 的 MCP 扫描分组。available = 该 CLI 配置文件存在（与是否解析出 server 无关）。 */
+export type CliMcpGroup = {
+  available: boolean
+  servers: ChatMcpServer[]
+}
+
+/** 从本地 CLI 导入 MCP 的扫描结果（Claude Code / Codex / OpenCode 三组）。 */
+export type CliImportScan = {
+  claude: CliMcpGroup
+  codex: CliMcpGroup
+  opencode: CliMcpGroup
+}
+
 /** MCP 持久连接状态，与后端 McpServerState（serde tag="kind"）一一对应。 */
 export type McpServerState =
   | { kind: 'connecting' }
@@ -414,16 +426,7 @@ export type ChatNativeToolsConfig = {
   workspaceRoots?: string[]
 }
 
-export type ChatRunPythonPayload = {
-  runId: string
-  code: string
-  timeoutMs: number
-  files?: Array<{
-    name: string
-    dataBase64: string
-    sizeBytes: number
-  }>
-}
+export type ChatRunPythonPayload = GeneratedChatRunPythonPayload
 
 export type ChatPastedImageResult = {
   success: boolean
@@ -503,9 +506,51 @@ export type ChatMemoryState = {
   dir: string
 }
 
+/** 对话生命周期 Hook 事件（对齐 Rust `chat::hooks::HookEvent`，8 个，顺序即对话流）。 */
+export const HOOK_EVENTS = [
+  'agent_start',
+  'turn_start',
+  'message_start',
+  'message_end',
+  'tool_execution_start',
+  'tool_execution_end',
+  'turn_end',
+  'agent_end',
+] as const
+
+export type HookEvent = typeof HOOK_EVENTS[number]
+
+/** 镜像 Rust `settings::HookDef`（camelCase 序列化）。 */
+export type HookDef = {
+  id: string
+  name: string
+  description: string
+  event: HookEvent | string
+  enabled: boolean
+  type: 'command' | 'http'
+  /** type === 'command' 时的脚本正文。 */
+  script: string
+  /** type === 'http' 时的目标。 */
+  url: string
+  method: string
+  headers: Record<string, string>
+  timeoutMs: number
+}
+
+/** Hook 执行失败上报。fire-and-forget，只展示警告不打断对话。 */
+export type ChatHookPayload = {
+  conversationId: string
+  runId: string
+  hookName: string
+  event: string
+  message: string
+}
+
 export type ChatToolsConfig = {
   enabled: boolean
   servers: ChatMcpServer[]
+  /** 对话生命周期 Hooks。空数组 = 无 Hook = agent loop 零开销。 */
+  hooks?: HookDef[]
   skillScanPaths: string[]
   skillAutoMatch?: boolean
   skillFallbackMode?: 'progressive' | 'skill_md_only' | 'legacy_full_body' | string
@@ -769,11 +814,36 @@ export type ModelInfo = {
     output?: number
     cachedInput?: number
   }
+  /** 每模型额外请求体字段（原样 merge 进 chat/completions body 根部）。用于给严格 OpenAI-compat
+   *  端点塞标准 schema 之外的私有旋钮，如 NVIDIA NIM / vLLM 的 chat_template_kwargs。仅用于 modelOverrides。 */
+  extraBody?: Record<string, unknown>
+  /** 该模型可选的思考等级（reasoning effort）。undefined=跟随模型库；`[]`=没有等级旋钮（请求不带
+   *  等级字段）；否则只这几档可选可下发。模型库条目也用这个字段，用户覆盖优先。 */
+  reasoningEfforts?: string[]
 }
 
 // AI 模型提供商配置
 // apiKeys 支持多 key failover：第一个为主 key，其余为备用 key；
 // 当某个 key 触发限流/配额/鉴权失败时后端会自动切下一个。
+export type ProviderRequestConfig = {
+  /** 附加到该供应商所有请求上的自定义头。同名时覆盖 CLI 身份预设。 */
+  customHeaders?: { key: string; value: string }[]
+  /** 是否跟随系统代理。默认 true；关掉走直连。 */
+  useSystemProxy?: boolean
+  /**
+   * prompt 缓存。`undefined` = 跟随协议默认（OpenAI Chat/Responses 开、Anthropic 关），
+   * 用户拨过开关才是显式布尔。与 Rust 侧 `ProviderRequestConfig.prompt_caching: Option<bool>`
+   * 一致 —— 裸 boolean 分不清「用户选了 true」和「默认填的 true」。
+   */
+  promptCaching?: boolean | null
+  /** 'short'（5 分钟）| 'long'（1 小时，需 beta 头） */
+  promptCacheRetention?: string
+  /** '' 关闭 | 'claude_code' | 'codex' | 'grok' */
+  cliIdentity?: string
+  /** 身份版本号，空则用内置常量 */
+  cliIdentityVersion?: string
+}
+
 export type ModelProvider = {
   id: string
   name: string
@@ -787,6 +857,8 @@ export type ModelProvider = {
   // 把 agent 工具/系统提示里的 shell/路径/SQL 文本误判为攻击而返回 403 的供应商。
   compressRequestBody?: boolean
   modelOverrides?: Record<string, ModelInfo>
+  /** 「请求配置」：自定义头 / 代理 / prompt 缓存 / CLI 身份 */
+  request?: ProviderRequestConfig
 }
 
 // 提供商连接测试输入（支持使用未保存的配置进行测试）
@@ -794,6 +866,10 @@ export type ProviderConnectionInput = {
   id?: string
   baseUrl: string
   apiKeys: string[]
+  model?: string
+  apiFormat?: string
+  /** 编辑中（可能尚未保存）的请求配置。不传则后端回落已保存的那份。 */
+  request?: ProviderRequestConfig
 }
 
 export type DefaultModelSelection = {
@@ -862,8 +938,14 @@ export type KnowledgeBaseConfig = {
 export type Settings = {
   hotkey: string
   chatHotkey: string
+  /** 关闭 AI 客户端（chat 窗口）的全局热键。 */
+  closeChatHotkey: string
   theme: 'system' | 'light' | 'dark'
   themeColor: string
+  translucentSidebar: boolean
+  uiFontScale?: number
+  uiFontFamily?: string
+  uiFontMono?: string
   targetLang: string
   autoPaste: boolean
   launchAtStartup: boolean
@@ -879,6 +961,8 @@ export type Settings = {
   chatTools: ChatToolsConfig
   documentProcessing?: DocumentProcessingConfig
   knowledgeBase?: KnowledgeBaseConfig
+  /** 供应商自定义图标：provider id → 图标 key（见 chat/ModelIcon 的 PROVIDER_BRANDS） */
+  providerIcons?: Record<string, string>
   retryEnabled: boolean
   retryAttempts: number
   screenshotTranslation: {
@@ -919,6 +1003,11 @@ export type Settings = {
     /** 替换翻译自定义提示词（仅翻译规则，JSON 输出契约固定）。空 → 内置替换模板 */
     replacePrompt?: string
   }
+  /** 独立截图标注（截图 → 箭头/矩形/马赛克 → 复制/保存） */
+  screenshotAnnotate?: {
+    enabled: boolean
+    hotkey: string
+  }
   lens: {
     enabled: boolean
     hotkey: string
@@ -936,8 +1025,6 @@ export type Settings = {
     messageOrder?: 'asc' | 'desc'
     /** 进入截图选择态时是否显示顶部提示（默认 true） */
     showCaptureHint?: boolean
-    /** Windows 兼容模式：进入选择态前冻结当前画面，再从冻结帧裁剪（默认 false） */
-    windowsFreezeFrameSelection?: boolean
     /** Lens 联网搜索配置 */
     webSearch?: {
       enabled: boolean
@@ -1048,6 +1135,33 @@ export type PluginActionResult = {
   status: PluginStatus
 }
 
+/** 笔记元信息（列表用） */
+export type NoteMeta = {
+  id: string
+  title: string
+  /** 列表卡片预览：正文压成单行的前若干字符 */
+  preview: string
+  /** 单层文件夹名；空串 = 库根 */
+  folder: string
+  /** 'user' | 'chat' */
+  origin: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** 完整笔记（编辑器用） */
+export type Note = {
+  id: string
+  title: string
+  content: string
+  /** 单层文件夹名；空串 = 库根 */
+  folder: string
+  /** 'user' | 'chat' */
+  origin: string
+  createdAt: string
+  updatedAt: string
+}
+
 /** 交给 Kivio AI 的安装任务（含官方 README URL + Kivio 契约） */
 export type PluginInstallBrief = {
   pluginId: string
@@ -1056,25 +1170,6 @@ export type PluginInstallBrief = {
   /** 官方 README raw URL，安装时须先 fetch */
   readmeUrls: string[]
   userMessage: string
-}
-
-/** kivio-code CLI 的独立配置(存于 <app_data>/kivio-code/config.json,与共享 Settings 分开)。 */
-export type KivioCodeConfig = {
-  /** 读取 CLAUDE.md / .claude 上下文文件(默认 true)。 */
-  readClaudeDir: boolean
-  /** kivio-code 专属默认 provider id;空/缺省时回退到共享 Chat 模型。 */
-  defaultProviderId?: string | null
-  /** kivio-code 专属默认模型名(裸名,无 provider 前缀);与 defaultProviderId 搭配。 */
-  defaultModel?: string | null
-  /** 工具审批策略:'auto' | 'readonly_auto_sensitive_confirm' | 'always_confirm';缺省为 auto。 */
-  approvalPolicy?: string | null
-}
-
-/** install_cli_command 的返回:是否成功 / 是否已安装 / 给用户的提示信息。 */
-export type InstallCliResult = {
-  ok: boolean
-  alreadyInstalled: boolean
-  message: string
 }
 
 export type UsageRange = 'today' | '1d' | '7d' | '30d'
@@ -1199,12 +1294,19 @@ export type RequestDebugRecord = {
     toolCalls?: unknown
     finishReason?: string | null
     usage?: {
+      // 后端 ModelUsage 无 rename_all，实际落盘是 snake_case；camelCase 字段保留以防未来统一。
       inputTokens?: number | null
       outputTokens?: number | null
       totalTokens?: number | null
       cachedInputTokens?: number | null
       cacheCreationInputTokens?: number | null
       reasoningTokens?: number | null
+      input_tokens?: number | null
+      output_tokens?: number | null
+      total_tokens?: number | null
+      cached_input_tokens?: number | null
+      cache_creation_input_tokens?: number | null
+      reasoning_tokens?: number | null
     } | null
     error?: string | null
   }
@@ -1291,6 +1393,19 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
     enabled: provider.enabled !== false,
     compressRequestBody: provider.compressRequestBody === true,
     apiFormat: normalizeProviderApiFormat(provider.apiFormat),
+    request: {
+      customHeaders: Array.isArray(provider.request?.customHeaders)
+        ? provider.request.customHeaders
+        : [],
+      // 默认跟随系统代理 —— 与加这个开关之前的行为一致。
+      useSystemProxy: provider.request?.useSystemProxy !== false,
+      // 保持 undefined/null 语义：由协议决定默认，见 promptCachingEnabled。
+      promptCaching: provider.request?.promptCaching ?? null,
+      promptCacheRetention:
+        provider.request?.promptCacheRetention === 'long' ? 'long' : 'short',
+      cliIdentity: provider.request?.cliIdentity ?? '',
+      cliIdentityVersion: provider.request?.cliIdentityVersion ?? '',
+    },
   }
 }
 
@@ -1298,7 +1413,38 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
   if (apiFormat === 'anthropic' || apiFormat === 'anthropic_messages') return 'anthropic_messages'
   if (apiFormat === 'openai_responses' || apiFormat === 'responses') return 'openai_responses'
   if (apiFormat === 'gemini' || apiFormat === 'google' || apiFormat === 'gemini_generate') return 'gemini'
+  if (apiFormat === 'xai' || apiFormat === 'xai_responses' || apiFormat === 'grok') return 'xai_responses'
   return 'openai_chat'
+}
+
+/**
+ * 当前 provider 是否支持模型原生内置联网搜索（任务 07-23）。
+ * OpenAI Responses / Gemini / Anthropic Messages 支持；Chat Completions 不支持
+ * （gpt-5 在其上开 web_search 会 400）。前端据此把「内置」选项置灰。
+ * 与 Rust 侧 `model_metadata::builtin_web_search_supported` 保持一致。
+ */
+/**
+ * 该协议下 prompt 缓存是否有可发送的字段，以及未显式设置时的默认值。
+ * 必须与 Rust 侧 `ModelProvider::prompt_caching_enabled` 一致。
+ */
+export function promptCachingDefault(apiFormat?: string): boolean {
+  return normalizeProviderApiFormat(apiFormat) !== 'anthropic_messages'
+}
+
+export function promptCachingSupported(apiFormat?: string): boolean {
+  const kind = normalizeProviderApiFormat(apiFormat)
+  // Gemini 服务端隐式缓存、xAI 直接拒收 prompt_cache_key —— 都没有可发的字段。
+  return kind !== 'gemini' && kind !== 'xai_responses'
+}
+
+export function builtinWebSearchSupported(apiFormat?: string): boolean {
+  const kind = normalizeProviderApiFormat(apiFormat)
+  return (
+    kind === 'openai_responses' ||
+    kind === 'xai_responses' ||
+    kind === 'gemini' ||
+    kind === 'anthropic_messages'
+  )
 }
 
 const CHAT_TOOL_DEFAULT_ROUNDS = 20
@@ -1312,11 +1458,17 @@ function normalizeMaxToolRounds(value: unknown): number | null {
   return Math.min(CHAT_TOOL_MAX_ROUNDS, Math.max(CHAT_TOOL_MIN_ROUNDS, Math.round(parsed)))
 }
 
-function normalizeChatTools(config?: Partial<ChatToolsConfig> | null): ChatToolsConfig {
+/**
+ * 归一化 chatTools。**白名单重建**：这里逐字段列举，漏掉一个字段 = 该字段每次
+ * 保存/读取都被静默丢弃（hooks 就这样丢过一次）。新增 ChatToolsConfig 字段时
+ * 必须同步加到这里，`normalize_chat_tools_keeps_every_field` 会守门。
+ */
+export function normalizeChatTools(config?: Partial<ChatToolsConfig> | null): ChatToolsConfig {
   const current = config ?? {}
   return {
     enabled: current.enabled ?? false,
     servers: Array.isArray(current.servers) ? current.servers : [],
+    hooks: Array.isArray(current.hooks) ? current.hooks : [],
     skillScanPaths: Array.isArray(current.skillScanPaths) ? current.skillScanPaths : [],
     skillAutoMatch: current.skillAutoMatch ?? true,
     skillFallbackMode: current.skillFallbackMode || 'progressive',
@@ -1427,8 +1579,13 @@ function normalizeSettings(settings: Settings): Settings {
     ...settings,
     hotkey: current.hotkey ?? 'CommandOrControl+Alt+T',
     chatHotkey: current.chatHotkey ?? 'CommandOrControl+Shift+K',
+    closeChatHotkey: current.closeChatHotkey ?? 'CommandOrControl+Shift+W',
     theme: current.theme ?? 'system',
     themeColor: normalizeThemeColorId(current.themeColor),
+    translucentSidebar: current.translucentSidebar ?? true,
+    uiFontScale: current.uiFontScale ?? 1,
+    uiFontFamily: current.uiFontFamily ?? '',
+    uiFontMono: current.uiFontMono ?? '',
     targetLang: current.targetLang ?? 'auto',
     autoPaste: current.autoPaste ?? true,
     launchAtStartup: current.launchAtStartup ?? false,
@@ -1471,6 +1628,10 @@ function normalizeSettings(settings: Settings): Settings {
       textPrompt: current.screenshotTranslation?.textPrompt ?? '',
       replacePrompt: current.screenshotTranslation?.replacePrompt ?? '',
     },
+    screenshotAnnotate: {
+      enabled: current.screenshotAnnotate?.enabled ?? true,
+      hotkey: current.screenshotAnnotate?.hotkey ?? 'CommandOrControl+Shift+S',
+    },
     lens: {
       enabled: current.lens?.enabled ?? true,
       hotkey: current.lens?.hotkey ?? 'CommandOrControl+Shift+G',
@@ -1484,8 +1645,6 @@ function normalizeSettings(settings: Settings): Settings {
       sendToChat: current.lens?.sendToChat ?? true,
       messageOrder: current.lens?.messageOrder === 'desc' ? 'desc' : 'asc',
       showCaptureHint: current.lens?.showCaptureHint ?? true,
-      windowsFreezeFrameSelection:
-        current.lens?.windowsFreezeFrameSelection ?? navigator.platform.startsWith('Win'),
       webSearch: {
         enabled: current.lens?.webSearch?.enabled ?? false,
         provider: current.lens?.webSearch?.provider ?? 'tavily',
@@ -1555,29 +1714,22 @@ async function on<T>(event: string, handler: (payload: T) => void): Promise<Unli
   }
 }
 
+async function onChatProtocol(
+  handler: (payload: ChatProtocolEvent, delivery: ChatProtocolDelivery) => void,
+): Promise<Unlisten> {
+  return subscribeChatProtocol(handler)
+}
+
 // ========== API 导出 ==========
 
 export const api = {
   // 设置相关
   getSettings: async () => normalizeSettings(await invoke<Settings>('get_settings')),
-  // 某模型支持的思考等级列表（数据来自模型库 reasoningEfforts）。
-  reasoningEffortsForModel: (model: string, apiFormat?: string) =>
-    invoke<string[]>('chat_reasoning_efforts_for_model', { model, apiFormat }),
-  // kivio-code 的独立配置（与共享 Settings 分开存储，走专用命令读写）。
-  getKivioCodeConfig: () => invoke<KivioCodeConfig>('get_kivio_code_config'),
-  saveKivioCodeConfig: (config: KivioCodeConfig) =>
-    invoke<void>('set_kivio_code_config', { config }),
-  // kivio-code 全局指令文件(<app_data>/agents/AGENTS.md),每轮注入系统提示。
-  getKivioCodeGlobalInstructions: () =>
-    invoke<string>('get_kivio_code_global_instructions'),
-  saveKivioCodeGlobalInstructions: (content: string) =>
-    invoke<void>('set_kivio_code_global_instructions', { content }),
-  // 「安装命令行工具」:把 kivio 命令注册进用户 PATH(Win)/软链到 ~/.local/bin(mac),使 `kivio code` 可用。
-  installCliCommand: () => invoke<InstallCliResult>('install_cli_command'),
-  // 把（Windows 不透明）chat 窗口的原生背景设为当前主题色，避免伸缩时闪白。其他窗口/平台为 no-op。
-  setChatWindowBackground: (isDark: boolean) =>
-    invoke('set_chat_window_background', { isDark }).catch(() => {}),
+  // 某模型可选的思考等级列表（用户覆盖 modelOverrides → 模型库 reasoningEfforts → 家族兜底）。
+  reasoningEffortsForModel: (model: string, providerId?: string) =>
+    invoke<string[]>('chat_reasoning_efforts_for_model', { model, providerId }),
   getDefaultPromptTemplates: () => invoke<DefaultPromptTemplates>('get_default_prompt_templates'),
+  listSystemFonts: () => invoke<string[]>('list_system_fonts').catch(() => [] as string[]),
   saveSettings: async (settings: Settings) =>
     normalizeSettings(await invoke<Settings>('save_settings', { settings: prepareSettingsForSave(settings) })),
   /** 轻量持久化收藏模型（不触发热键/托盘重注册，区别于 saveSettings 的全量事务保存）。 */
@@ -1627,6 +1779,12 @@ export const api = {
 
   // 外部链接
   openExternal: (url: string) => invoke<void>('open_external', { url }),
+  /**
+   * 打开模型输出里的本地文件链接（file:// / 绝对路径 / 相对路径）。
+   * 相对路径由后端按会话工作目录解析，故要带 conversationId。扩展名/存在性/逃逸都在后端把关。
+   */
+  openLocalFile: (href: string, conversationId?: string | null) =>
+    invoke<void>('open_local_file', { href, conversationId: conversationId ?? null }),
   openHtmlPreview: (html: string) => invoke<void>('open_html_preview', { html }),
 
   // 连接器 OAuth：跑完整 OAuth（PKCE + DCR + loopback，会打开浏览器授权）→
@@ -1654,10 +1812,35 @@ export const api = {
     invoke<PluginActionResult>('plugins_set_enabled', { id, enabled }),
   pluginsUninstall: (id: string) => invoke<PluginActionResult>('plugins_uninstall', { id }),
 
+  /** 扩展 → 笔记 */
+  notesList: () => invoke<NoteMeta[]>('notes_list'),
+  notesRead: (id: string) => invoke<Note>('notes_read', { id }),
+  notesCreate: (title: string, content: string, folder: string, origin: string) =>
+    invoke<Note>('notes_create', { title, content, folder, origin }),
+  notesUpdate: (id: string, title: string, content: string, folder: string) =>
+    invoke<Note>('notes_update', { id, title, content, folder }),
+  notesFoldersList: () => invoke<string[]>('notes_folders_list'),
+  notesFolderCreate: (name: string) => invoke<string[]>('notes_folder_create', { name }),
+  notesFolderRename: (oldName: string, newName: string) =>
+    invoke<string[]>('notes_folder_rename', { old: oldName, new: newName }),
+  notesFolderDelete: (name: string) => invoke<string[]>('notes_folder_delete', { name }),
+  notesDelete: (id: string) => invoke<void>('notes_delete', { id }),
+
   testHimalayaEmail: (account: EmailAccountConfig, existingAccounts?: EmailAccountConfig[]) =>
     invoke<string>('test_himalaya_email_cmd', { account, existingAccounts }),
 
   // 窗口控制
+  /** 给当前（chat）窗口上 Mica，返回材质是否真的生效。Win10 没有 Mica 时为 false —— 这条
+   *  路走后端而不是 window.setEffects()，因为 tauri 把 apply_mica 的失败静默吞掉了。 */
+  chatWindowApplyMica: (dark: boolean): Promise<boolean> =>
+    invoke('chat_window_apply_mica', { dark }),
+  /** macOS：材质没上时把 NSWindow 设回 opaque，换回合成器的不透明快路径（台前调度不掉帧）。
+   *  材质上了必须传 false，否则 Menu 材质被实色背景挡死。非 macOS 是 no-op。 */
+  chatWindowSetOpaque: (opaque: boolean): Promise<void> =>
+    invoke('chat_window_set_opaque', { opaque }),
+  /** macOS 交通灯中心距内容顶缘的真实距离（CSS px）。取不到返回 null，前端退回默认值。 */
+  chatTrafficLightCenterY: (): Promise<number | null> =>
+    invoke('chat_traffic_light_center_y'),
   resizeWindow: async (width: number, height: number) => {
     const win = getCurrentWindow()
     await win.setSize(new LogicalSize(width, height))
@@ -1699,44 +1882,171 @@ export const api = {
     on<LensStreamPayload>('lens-stream', (payload) => listener(payload)),
   onChatStream: (listener: (payload: ChatStreamPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatStreamPayload>('chat-stream', (payload) => listener(payload))
+    return onChatProtocol((event, delivery) => {
+      if (event.scope !== 'run') return
+      if (
+        event.type === 'run_started'
+        || event.type === 'text_delta'
+        || event.type === 'reasoning_delta'
+        || event.type === 'run_completed'
+        || event.type === 'run_cancelled'
+        || event.type === 'run_failed'
+      ) {
+        listener({ ...event, restoredFromSnapshot: delivery.source === 'snapshot' })
+      }
+    })
   },
   onChatContext: (listener: (payload: ChatContextPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatContextPayload>('chat-context', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.type === 'context_updated' && event.scope === 'conversation') {
+        listener({ conversationId: event.conversationId, contextState: event.contextState as ChatContextState })
+      } else if (event.type === 'context_usage_updated' && event.scope === 'run') {
+        listener({ conversationId: event.conversationId, live: event.usage })
+      }
+    })
   },
   onChatCompaction: (listener: (payload: ChatCompactionPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatCompactionPayload>('chat-compaction', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'compaction_updated') return
+      listener({
+        conversationId: event.conversationId,
+        phase: event.phase,
+        trigger: event.trigger ?? undefined,
+        boundary: event.boundary as CompactionBoundaryRecord | null,
+      })
+    })
   },
   onChatTodo: (listener: (payload: ChatTodoPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatTodoPayload>('chat-todo', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.type !== 'todo_updated') return
+      listener({ conversationId: event.conversationId, todoState: event.todoState as ChatTodoState })
+    })
   },
   onChatPlan: (listener: (payload: ChatPlanPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatPlanPayload>('chat-plan', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.type !== 'plan_updated') return
+      listener({ conversationId: event.conversationId, planState: event.planState as ChatPlanState })
+    })
   },
   onChatTool: (listener: (payload: ChatToolProgressPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatToolProgressPayload>('chat-tool', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'tool_updated') return
+      const tool = event.tool
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        messageId: event.messageId,
+        toolCallId: tool.id,
+        ...tool,
+        status: tool.status as ChatToolStatus,
+        artifacts: tool.artifacts as ChatToolArtifact[],
+      })
+    })
+  },
+  /** 生命周期 Hook 执行失败（脚本非零退出 / 超时 / HTTP 非 2xx）。对话本身不受影响。 */
+  onChatHook: (listener: (payload: ChatHookPayload) => void) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'hook_failed') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        hookName: event.hookName,
+        event: event.event,
+        message: event.message,
+      })
+    })
   },
   onChatSubagent: (listener: (payload: ChatSubagentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatSubagentPayload>('chat-subagent', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'subagent_updated') return
+      listener({
+        parentConversationId: event.conversationId,
+        parentRunId: event.runId,
+        parentToolCallId: event.parentToolCallId,
+        taskId: event.taskId,
+        name: event.name,
+        model: event.model ?? undefined,
+        depth: event.depth,
+        status: event.status as ChatSubagentPayload['status'],
+        preview: event.preview ?? undefined,
+        steps: event.steps,
+      })
+    })
   },
   onChatUserPrompt: (listener: (payload: ChatUserPromptPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatUserPromptPayload>('chat-user-prompt', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'user_prompt_requested') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        messageId: event.messageId,
+        toolCallId: event.toolCallId,
+        id: event.toolCallId,
+        name: event.name,
+        source: event.source,
+        prompt: event.prompt as AskUserPromptPayload,
+        structuredContent: event.structuredContent,
+      })
+    })
   },
   onChatToolConfirm: (listener: (payload: ChatToolConfirmPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatToolConfirmPayload>('chat-tool-confirm', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'tool_approval_requested') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        messageId: event.messageId,
+        toolCallId: event.toolCallId,
+        name: event.name,
+        source: event.source,
+        serverId: event.serverId,
+        target: event.target,
+        argumentsPreview: event.argumentsPreview,
+        sensitivity: event.sensitivity,
+      })
+    })
+  },
+  /** 后端已按超时/取消处理掉某条审批 ⇒ 撤掉卡片，别让用户答一个没人听的问题。 */
+  onChatToolConfirmWithdraw: (
+    listener: (payload: { conversationId: string; toolCallId: string }) => void,
+  ) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return onChatProtocol((event) => {
+      if (event.scope === 'run' && event.type === 'tool_approval_withdrawn') {
+        listener({ conversationId: event.conversationId, toolCallId: event.toolCallId })
+      }
+    })
   },
   onChatSessionConsent: (listener: (payload: ChatSessionConsentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatSessionConsentPayload>('chat-session-consent', (payload) => listener(payload))
+    return onChatProtocol((event) => {
+      if (event.scope === 'run' && event.type === 'session_consent_requested') {
+        listener({
+          conversationId: event.conversationId,
+          runId: event.runId,
+          messageId: event.messageId,
+        })
+      }
+    })
   },
+  onChatProtocolIssue: (
+    listener: (notice: { issue: ChatProtocolIssue; conversationId?: string }) => void,
+  ) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return Promise.resolve(subscribeChatProtocolIssues((issue, conversationId) => {
+      listener({ issue, conversationId })
+    }))
+  },
+  chatSyncState: (conversationId: string) => syncChatProtocol(conversationId),
   onChatOpenConversation: (listener: (payload: { conversationId: string; reload?: boolean | null; error?: string | null }) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<{ conversationId: string; reload?: boolean | null; error?: string | null }>('chat-open-conversation', (payload) => listener(payload))
@@ -1772,12 +2082,19 @@ export const api = {
       'chat_mcp_import_json',
       { path },
     ),
+  /** 扫描本机已安装 CLI（Claude Code / Codex / OpenCode）的 MCP 配置，按 CLI 分组返回可导入项。 */
+  chatCliImportScan: () => invoke<CliImportScan>('chat_cli_import_scan'),
   chatMcpServerStatus: (serverId: string) =>
     invoke<McpServerStatus>('chat_mcp_server_status', { serverId }),
   chatMcpListToolDefs: (serverId: string) =>
     invoke<{ name: string; description: string }[]>('chat_mcp_list_tool_defs', { serverId }),
   chatMcpReloadServer: (serverId: string) =>
     invoke<void>('chat_mcp_reload_server', { serverId }),
+  /** 后台预热 MCP 连接（fire-and-forget）：不传 = 全部启用的 server；结果走 onMcpServerState 推送。 */
+  chatMcpWarmup: (serverIds?: string[]) => {
+    if (!isTauriRuntime()) return Promise.resolve()
+    return invoke<void>('chat_mcp_warmup', { serverIds })
+  },
   chatSkillsList: (skillScanPaths?: string[]) =>
     invoke<{ success: boolean; skills: SkillMeta[]; warnings?: string[]; error?: string | null }>(
       'chat_skills_list',
@@ -1824,8 +2141,15 @@ export const api = {
     invoke<ChatPastedImageResult>('chat_save_pasted_attachment', { name, dataBase64 }),
   chatReadClipboardFiles: () =>
     invoke<ChatClipboardFilesResult>('chat_read_clipboard_files'),
-  chatConfirmToolCall: (toolCallId: string, approved: boolean) =>
-    invoke<void>('chat_confirm_tool_call', { toolCallId, approved }),
+  // permissionMode 只有计划批准卡会传（三选一里用户选的那一档），决定批准后把 CLI 切到
+  // 哪个权限模式。普通审批传 null。
+  chatConfirmToolCall: (
+    toolCallId: string,
+    approved: boolean,
+    always = false,
+    permissionMode: string | null = null,
+  ) =>
+    invoke<void>('chat_confirm_tool_call', { toolCallId, approved, always, permissionMode }),
   chatRespondSessionConsent: (conversationId: string, granted: boolean) =>
     invoke<void>('chat_respond_session_consent', { conversationId, granted }),
   chatSubmitUserChoice: (
@@ -1843,7 +2167,7 @@ export const api = {
     invoke<void>('chat_python_complete', { runId, content, isError, artifacts }),
   onChatRunPython: (listener: (payload: ChatRunPythonPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return on<ChatRunPythonPayload>('chat-run-python', (payload) => listener(payload))
+    return subscribeChatPython(listener)
   },
   onChatAssistantsChanged: (listener: (assistantId: string) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
@@ -1880,6 +2204,10 @@ export const api = {
     invoke<{ success: boolean; imageId?: string; error?: string }>(
       'lens_register_annotated_image', { base64Png }
     ),
+  lensCopyImageToClipboard: (base64Png: string) =>
+    invoke<{ success: boolean; error?: string }>('lens_copy_image_to_clipboard', { base64Png }),
+  lensSaveAnnotatedPng: (base64Png: string, path: string) =>
+    invoke<{ success: boolean; error?: string }>('lens_save_annotated_png', { base64Png, path }),
   lensTranslate: (imageId: string) =>
     invoke<{ success: boolean; original?: string; translated?: string; error?: string }>(
       'lens_translate', { imageId }

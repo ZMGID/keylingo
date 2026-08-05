@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::Local;
@@ -7,37 +8,82 @@ use uuid::Uuid;
 
 use crate::chat::agent::AgentRunEntry;
 use crate::chat::commands::{
-    emit_chat_stream_delta, emit_chat_stream_done, emit_chat_tool_record, push_assistant_message,
+    emit_chat_stream_delta, emit_chat_tool_record, push_assistant_message,
 };
 use crate::chat::memory::l1_prompt_block;
 use crate::chat::model::ModelUsage;
-use crate::chat::storage::save_conversation;
 use crate::chat::types::{
-    ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
-    ToolCallStatus,
+    ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, CompactionBoundaryRecord,
+    ToolCallRecord, ToolCallStatus,
 };
 use crate::chat::Conversation;
-use crate::external_agents::detection::detect_single_agent;
+use crate::external_agents::defs::claude::append_system_prompt_file_args;
 use crate::external_agents::prompt::{
-    compose_external_prompt, compose_external_prompt_passthrough, cwd_hint, is_cli_slash_input,
+    compose_external_prompt, compose_external_prompt_passthrough, cwd_hint,
+    instructions_via_launch_flag, is_cli_slash_input,
 };
 use crate::external_agents::registry::get_agent_def;
-use crate::external_agents::session::acp::{run_acp_session, AcpMcpServer};
-use crate::external_agents::session::codex_app_server::run_codex_app_server_session;
+use crate::external_agents::session::acp::AcpMcpServer;
+use crate::external_agents::session::live::LaunchConfig;
 use crate::external_agents::session::pi_rpc::run_pi_rpc_session;
-use crate::external_agents::session::{persist_delivered_session, resolve_agent_resume_context};
+use crate::external_agents::session::{
+    persist_delivered_session, resolve_agent_resume_context, stable_prompt_hash,
+};
 use crate::external_agents::skill_stage::{skill_cwd_alias_segment, stage_active_skill};
 use crate::external_agents::slash::{self};
 use crate::external_agents::spawn::{
-    drain_stderr, read_stdout_lines, resolve_binary, spawn_agent, tail_chars, write_prompt_stdin,
+    drain_stderr, kill_agent_process_tree, resolve_binary, spawn_agent, tail_chars,
 };
-use crate::external_agents::stream::create_stream_handler;
 use crate::external_agents::types::{
     RuntimeBuildOptions, RuntimeContext, StreamFormat, UnifiedAgentEvent,
 };
 use crate::external_agents::workspace::{extra_allowed_dirs_for_agent, resolve_effective_cwd};
 use crate::skills::read_skill_detail;
 use crate::state::AppState;
+
+/// Emitted (as a leading text banner) when a persistent-session turn expected to resume a native
+/// session but had to reconnect fresh — the CLI's prior context is gone (R4 "resume 失败降级：
+/// 提示上下文已丢失而非静默重放"). Rendered as a markdown blockquote so it reads as a system notice
+/// and stays visually separate from the answer. TextDelta is chosen over Raw because Raw is only
+/// surfaced when the turn produces no other output (see `apply_unified_event`), which would make
+/// the notice silently vanish on the common case where the fresh turn does answer — defeating the
+/// "不静默" goal. This uses the existing TextDelta variant, so no event/payload shape changes.
+const CONTEXT_RESET_NOTICE: &str =
+    "> ⚠️ 会话上下文已重置：原生会话无法恢复，本轮之前的对话历史对该 CLI 不可见。\n\n";
+
+fn context_reset_notice_event() -> UnifiedAgentEvent {
+    UnifiedAgentEvent::TextDelta {
+        delta: CONTEXT_RESET_NOTICE.to_string(),
+    }
+}
+
+/// 系统提示落盘文件的前缀。启动 GC 也认这个前缀（`screenshot::cleanup_orphan_temp_files`），
+/// 崩溃留下的残渣 24h 后被回收。
+const SYSTEM_PROMPT_FILE_PREFIX: &str = "kivio-extsys-";
+
+/// 把会话级系统指令（用户系统提示 + Memory + cwd 提示）写到一个文件，供 CLI 用
+/// `--append-system-prompt-file` 读取（A1）。
+///
+/// **为什么是 file 而不是内联字符串**：Windows 命令行有 32767 字符上限，而含 Memory 块的
+/// instructions 可能超；npm 安装的用户拿到的是 `claude.cmd`，长参数在批处理转义那层还有风险。
+///
+/// 路径按 conversation_id 固定 ⇒ **每轮覆写同一个文件**，不会随轮次累积（每个会话最多一个）。
+fn write_system_prompt_file(conversation_id: &str, instructions: &str) -> Result<PathBuf, String> {
+    // conversation_id 来自内部 uuid，但仍做一次保守净化——它要拼进文件名。
+    let safe_id: String = conversation_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = std::env::temp_dir().join(format!("{SYSTEM_PROMPT_FILE_PREFIX}{safe_id}.md"));
+    std::fs::write(&path, instructions).map_err(|e| format!("write system prompt file: {e}"))?;
+    Ok(path)
+}
 
 pub async fn run_external_cli_slash_command(
     app: &AppHandle,
@@ -54,18 +100,23 @@ pub async fn run_external_cli_slash_command(
         conversation,
         None,
         slash_command,
+        &[],
+        &[],
         None,
         AgentRunEntry::Send,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_external_cli_reply(
     app: &AppHandle,
     state: &State<'_, AppState>,
     conversation: &mut Conversation,
     title_from_first_user: Option<&str>,
     latest_user_message: &str,
+    image_paths: &[std::path::PathBuf],
+    file_paths: &[std::path::PathBuf],
     active_skill_id: Option<&str>,
     entry: AgentRunEntry,
 ) -> Result<(), String> {
@@ -80,17 +131,20 @@ pub async fn run_external_cli_reply(
     let def = get_agent_def(&agent_id).ok_or_else(|| format!("未知外部 Agent: {agent_id}"))?;
 
     let cwd = resolve_effective_cwd(app, &conversation.id, conversation.project_id.as_deref())?;
-    let detected = detect_single_agent(def, &cwd).await;
-    if !detected.available {
-        return Err(format!(
-            "{} 未安装或不可用，请确认 CLI 在 PATH 中。",
-            def.name
-        ));
-    }
-
+    // N2：回复路径不再跑完整检测（version/auth/模型探测可达 10-25s）。可用性/auth 的展示
+    // 交给列表阶段；这里只解析二进制（唯一必需项），把第 2+ 轮的前置开销压到 <500ms。
+    let probe_start = Instant::now();
     let resolved_bin = resolve_binary(def)
         .await
-        .ok_or_else(|| format!("无法定位 {} 可执行文件", def.bin))?;
+        .ok_or_else(|| format!("{} 未安装或不可用，请确认 CLI 在 PATH 中。", def.name))?;
+    // 计时日志仅 debug 构建输出（供 <500ms 验收测量），release 不刷 stderr。
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "[external-agent] {} 前置二进制解析耗时 {}ms",
+            def.id,
+            probe_start.elapsed().as_millis()
+        );
+    }
 
     let is_slash = is_cli_slash_input(latest_user_message);
 
@@ -122,6 +176,26 @@ pub async fn run_external_cli_reply(
     }
     daemon_instructions.push_str(&cwd_hint(cwd.to_string_lossy().as_ref()));
 
+    // A1：部分 CLI（目前只有 claude）的系统指令走**启动 flag** 而不是 prompt 正文。
+    //
+    // 为什么改：塞进正文的那条消息会被 CLI 自己的上下文压缩摘要掉甚至丢弃，而
+    // `skip_instructions`（内容没变就不重发）保证了**永远不会补发** ⇒ 长会话跑一阵子后
+    // 用户配置的系统提示与 Memory 静默失效，没有任何可观测信号。
+    // 启动 flag 每次进程启动都重新注入，与对话历史无关，压缩影响不到。
+    let instructions_via_flag = instructions_via_launch_flag(def.id);
+    let system_prompt_file = if instructions_via_flag && !is_slash {
+        match write_system_prompt_file(&conversation.id, daemon_instructions.trim()) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                // 写不出文件不该让整轮失败：退回正文注入（旧行为）而不是没有系统提示。
+                eprintln!("[external-agent] {err}，本轮退回正文注入");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let resume_ctx = resolve_agent_resume_context(
         app,
         &conversation.id,
@@ -129,7 +203,6 @@ pub async fn run_external_cli_reply(
         def.resumes_session_via_cli,
         &daemon_instructions,
         conversation.agent_runtime.external_model.as_deref(),
-        is_slash,
     );
 
     let skill_dir = skill_detail.as_ref().and_then(|d| d.meta.path.clone());
@@ -146,18 +219,57 @@ pub async fn run_external_cli_reply(
         compose_external_prompt_passthrough(latest_user_message)
     } else {
         compose_external_prompt(
-            conversation,
-            &daemon_instructions,
+            // 走启动 flag 的 CLI 不再把 instructions 拼进正文（否则同一份内容发两遍）。
+            // 其余 8 个 CLI 仍是正文注入 + `skip_instructions` 去重（spec 第 1 条）。
+            if system_prompt_file.is_some() {
+                ""
+            } else {
+                &daemon_instructions
+            },
             skill_body.as_deref(),
             skill_dir.as_deref(),
             skill_folder.as_deref(),
             resume_ctx.skip_instructions,
-            resume_ctx.is_resuming,
             latest_user_message,
         )
     };
+    let mut composed = composed;
 
-    let extra_dirs = extra_allowed_dirs_for_agent(def, &settings.chat_tools.skill_scan_paths);
+    // 附件（slash 命令不带附件，保持 passthrough 语义）。图片：支持原生图片块的协议按白名单
+    // 加载为 base64 块，其余（不支持 / 超白名单 / 读失败）降级为路径文本；文件：一律路径说明块。
+    let (image_blocks, degraded_image_paths): (
+        Vec<crate::external_agents::attachments::ImageBlock>,
+        Vec<std::path::PathBuf>,
+    ) = if is_slash {
+        (Vec::new(), Vec::new())
+    } else if def.supports_native_image {
+        crate::external_agents::attachments::load_image_blocks(
+            image_paths,
+            def.image_mime_whitelist,
+        )
+    } else {
+        (Vec::new(), image_paths.to_vec())
+    };
+    if !is_slash {
+        composed
+            .full_prompt
+            .push_str(&crate::external_agents::attachments::image_paths_note(
+                &degraded_image_paths,
+            ));
+        composed
+            .full_prompt
+            .push_str(&crate::external_agents::attachments::file_attachments_note(
+                file_paths,
+            ));
+    }
+
+    let mut extra_dirs = extra_allowed_dirs_for_agent(def, &settings.chat_tools.skill_scan_paths);
+    // 降级图片 / 文件需要 CLI 自己从磁盘读 → 把本会话附件目录加进 allowed-dir。
+    if !is_slash && (!degraded_image_paths.is_empty() || !file_paths.is_empty()) {
+        if let Ok(dir) = crate::chat::storage::conversation_attachments_dir(app, &conversation.id) {
+            extra_dirs.push(dir.to_string_lossy().to_string());
+        }
+    }
     let runtime_ctx = RuntimeContext {
         extra_allowed_dirs: extra_dirs,
         resume_session_id: resume_ctx.resume_session_id.clone(),
@@ -165,8 +277,21 @@ pub async fn run_external_cli_reply(
         include_partial_messages: true,
     };
 
+    // Claude: external_model is catalog id (picker); wire value is settings-mapped runtime.
+    // Resolve once at the boundary so launch argv and mid-session set_model share one id space.
+    let wire_model = if agent_id == "claude" {
+        crate::external_agents::session::claude_init::claude_wire_model(
+            conversation.agent_runtime.external_model.as_deref(),
+        )
+    } else {
+        conversation
+            .agent_runtime
+            .external_model
+            .clone()
+            .filter(|m| !m.is_empty() && m != "default")
+    };
     let build_options = RuntimeBuildOptions {
-        model: conversation.agent_runtime.external_model.clone(),
+        model: wire_model.clone(),
         reasoning: conversation.agent_runtime.external_reasoning.clone(),
         sandbox: conversation.agent_runtime.external_sandbox.clone(),
     };
@@ -188,18 +313,37 @@ pub async fn run_external_cli_reply(
         Some(composed.full_prompt.as_str())
     };
     let args = (def.build_args)(&runtime_ctx, &build_options, prompt_for_args);
+    // A1：系统指令以 flag 追加（不改 `build_args` 的形状，也不动 `RuntimeContext` ——
+    // 那两处是所有 CLI 共用的，为一个 claude 专属 flag 加字段要牵动全部 def 与其单测）。
+    let args = match system_prompt_file.as_deref() {
+        Some(path) => {
+            let mut args = args;
+            args.extend(append_system_prompt_file_args(path));
+            args
+        }
+        None => args,
+    };
 
     let extra_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     let run_generation = state.next_chat_generation(&conversation.id);
     let run_id = format!("ext-run-{}-{}", run_generation, Uuid::new_v4());
     let assistant_message_id = format!("msg_{}", Uuid::new_v4());
+    crate::chat::protocol::register_run(
+        app,
+        &conversation.id,
+        &run_id,
+        &assistant_message_id,
+        conversation.revision,
+    );
+    let _protocol_guard =
+        crate::chat::protocol::RegisteredRunGuard::new(app, &run_id, conversation.revision);
 
-    // Phase 2: codex app-server and ACP-family agents keep the process alive across turns via
-    // the live-session registry. Other protocols still spawn one child per turn.
+    // Phase 2 / B1: claude、codex app-server 与 ACP 家族都通过 live-session 注册表把进程跨轮
+    // 保活。只剩 `PiRpc` 每轮起一个新子进程（见下面 `_ =>` 分支的注释）。
     let persistent = matches!(
         def.stream_format,
-        StreamFormat::CodexAppServer | StreamFormat::AcpJsonRpc
+        StreamFormat::ClaudeStreamJson | StreamFormat::CodexAppServer | StreamFormat::AcpJsonRpc
     );
     let mut spawned_opt = if persistent {
         None
@@ -212,13 +356,45 @@ pub async fn run_external_cli_reply(
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut tool_map: HashMap<String, usize> = HashMap::new();
     let mut usage: Option<ModelUsage> = None;
+    // 协议层自报的失败（claude `result.is_error` / codex `turn/completed failed` / pi
+    // `stopReason:error` …）。读流本身常常**正常** Ok 返回，失败只体现在这条消息里，
+    // 故单独记下来在出口与 `read_result` 一起判（见 `resolve_turn_error`）。
+    let mut stream_error: Option<String> = None;
     let mut stream_outcome = "completed".to_string();
+    // A7：CLI **自己**压缩上下文时产生的边界记录。不能在事件回调里直接改 `conversation`
+    // （闭包已可变借走了一批局部变量，而 `conversation` 在读流之后还要用），
+    // 所以先攒起来，读流结束后一次性落到 `context_state`。
+    let mut cli_compactions: Vec<CompactionBoundaryRecord> = Vec::new();
+    // 分隔线的时间线锚点 = 触发时刻的最后一条消息（与内置路径 `compaction.rs` 同语义）。
+    // **必须是个能解析到的 id**：前端 `resolveCompactionBoundaries` 对空锚点直接 `continue`
+    // ——此前这里发的是空串，于是 CLI 自压的分隔线一次都没渲染过。
+    let compaction_anchor_id = conversation
+        .messages
+        .last()
+        .map(|message| message.id.clone())
+        .unwrap_or_else(|| assistant_message_id.clone());
+    // 协议层完成标志：本轮是否读到了 CLI 明确的「本轮结束」帧（claude 的 `result`）。
+    // 用于豁免出口的「非零退出码 = 失败」规则（spec 第 8b 条）——杀整棵进程树后
+    // 拿到非零退出码的路径变多（Windows `TerminateProcess` 退出码恒为 1），
+    // 不豁免会凭空造出失败气泡。
+    let protocol_completed = false;
     let mut segment_order = 0u32;
     let mut segments: Vec<ChatMessageSegment> = Vec::new();
     let mut segment_tracker = StreamSegmentTracker::default();
     let conversation_id = conversation.id.clone();
     let started_at = Instant::now();
-    let slash_cache_key = slash::cache_key(&agent_id, &cwd.to_string_lossy());
+    // 缓存 key 用探测 cwd（resolve_detection_cwd，非项目会话 = __global__），与斜杠探测的
+    // 读取 key 一致——运行时从 CLI init 学到的真实命令列表才能覆盖探测缓存（含空负缓存）。
+    // 执行 cwd（上面的 `cwd`）保持每会话独立，仅缓存 key 用全局 scope。
+    let slash_cache_key =
+        crate::external_agents::workspace::resolve_detection_cwd(app, Some(&conversation.id))
+            .map(|detection_cwd| slash::cache_key(&agent_id, &detection_cwd.to_string_lossy()))
+            .unwrap_or_else(|_| slash::cache_key(&agent_id, &cwd.to_string_lossy()));
+    // 实时用量推送：**只推分子**。分母不实时——它在一轮内是常量，且唯一权威来源是 CLI 轮末
+    // 实报的 `result.modelUsage[model].contextWindow`（claude 的 `[1m]` beta / 环境覆盖 /
+    // 第三方 router 都只有它知道）。这里若拿静态表算个兜底分母下发，就会出现「回答中
+    // `claude-sonnet-5` ⇒ 200K、答完跳回 1M」。前端 `contextPanel.ts::applyLiveContextUsage`
+    // 对 `null` 分母保留已知旧窗口，所以不下发就是「沿用上一轮的分母」——正是要的语义。
 
     let mut emit_event = |event: UnifiedAgentEvent| {
         if let Some(commands) = slash::slash_commands_from_event(&event) {
@@ -226,23 +402,39 @@ pub async fn run_external_cli_reply(
         }
         apply_unified_event(
             app,
-            &conversation_id,
             &run_id,
-            &assistant_message_id,
+            &compaction_anchor_id,
             &mut content,
             &mut reasoning,
             &mut raw_output,
             &mut tool_calls,
             &mut tool_map,
             &mut usage,
+            &mut stream_error,
             &mut segments,
             &mut segment_order,
             &mut segment_tracker,
+            &mut cli_compactions,
             event,
         );
     };
 
     let cancel_check = || !state.is_chat_generation_active(&conversation_id, run_generation);
+
+    // 本轮接不接工具审批。**判据取自即将启动的 argv 本身**，而不是再抄一遍「哪些档位会询问」
+    // 的规则：真正决定 CLI 会不会问的就是那个 flag（`--permission-prompt-tool stdio`），
+    // 从 argv 读回来就不可能与 `build_args` 的决定分叉（spec 第 2 条）。
+    let approval_host = turn_asks_for_permission(&args).then(|| ApprovalHost {
+        app,
+        state,
+        conversation_id: &conversation_id,
+        run_id: &run_id,
+        generation: run_generation,
+        auto_allow_tools: std::sync::atomic::AtomicBool::new(
+            permission_mode_from_args(&args)
+                .is_some_and(crate::external_agents::defs::claude::claude_mode_auto_allows_tools),
+        ),
+    });
 
     // Drain stderr concurrently with the stdout read below: keeps a full stderr pipe from
     // blocking the child, and captures failure text a silent (non-JSON, empty-stdout) run would
@@ -253,6 +445,18 @@ pub async fn run_external_cli_reply(
 
     let read_result = if persistent {
         let persistent_mcp: Vec<AcpMcpServer> = vec![];
+        // 本轮的启动配置指纹：变了就换进程（spec 第 8 条）。指令哈希只在**真的注入了**
+        // `--append-system-prompt-file` 时才有值——斜杠命令那一轮不注入，不参与判定。
+        let launch_config = launch_config_for_turn(
+            def.stream_format,
+            conversation.agent_runtime.external_model.as_deref(),
+            conversation.agent_runtime.external_reasoning.as_deref(),
+            conversation.agent_runtime.external_sandbox.as_deref(),
+            system_prompt_file
+                .as_ref()
+                .map(|_| stable_prompt_hash(daemon_instructions.trim()))
+                .as_deref(),
+        );
         run_persistent_turn(
             app,
             state,
@@ -262,82 +466,55 @@ pub async fn run_external_cli_reply(
             &resolved_bin,
             &args,
             &cwd,
-            conversation.agent_runtime.external_model.clone(),
+            // Claude: already resolved to runtime id above; other agents keep external_model.
+            wire_model.clone(),
             conversation.agent_runtime.external_reasoning.clone(),
             conversation.agent_runtime.external_sandbox.clone(),
             persistent_mcp,
+            &launch_config,
             &composed.full_prompt,
-            latest_user_message,
+            persistent_turn_prompt(
+                def.stream_format,
+                &composed.full_prompt,
+                latest_user_message,
+            ),
+            &image_blocks,
             &mut emit_event,
             &cancel_check,
+            approval_host.as_ref(),
         )
         .await
     } else {
+        // 常驻改造（B1）之后，非常驻路径**只剩 `PiRpc`** —— 上面的 `persistent` 谓词把
+        // claude / codex / ACP 全收走了，而 `StreamFormat` 一共就这四个变体。此前这里还留着
+        // `CodexAppServer` / `AcpJsonRpc` / `_` 三条臂（连带 `run_acp_session` 与
+        // `run_codex_app_server_session` 两个一次性驱动，共约 470 行），全部不可达 ——
+        // 那正是 rmcp 那次重构刚在 MCP 上消灭掉的「同一个协议两份实现」。
+        debug_assert_eq!(def.stream_format, StreamFormat::PiRpc);
         let spawned = spawned_opt
             .as_mut()
             .expect("non-persistent path spawns a child");
-        match def.stream_format {
-            StreamFormat::PiRpc => {
-                let model = conversation.agent_runtime.external_model.as_deref();
-                run_pi_rpc_session(
-                    &mut spawned.child,
-                    &composed.full_prompt,
-                    model,
-                    |event| emit_event(event),
-                    cancel_check,
-                )
-                .await
-            }
-            StreamFormat::CodexAppServer => {
-                let model = conversation.agent_runtime.external_model.as_deref();
-                let reasoning = conversation.agent_runtime.external_reasoning.as_deref();
-                run_codex_app_server_session(
-                    &mut spawned.child,
-                    &composed.full_prompt,
-                    model,
-                    reasoning,
-                    &cwd,
-                    |event| emit_event(event),
-                    cancel_check,
-                )
-                .await
-            }
-            StreamFormat::AcpJsonRpc => {
-                let model = conversation.agent_runtime.external_model.as_deref();
-                let mcp_servers: Vec<AcpMcpServer> = vec![];
-                run_acp_session(
-                    &mut spawned.child,
-                    &composed.full_prompt,
-                    &cwd,
-                    model,
-                    &mcp_servers,
-                    |event| emit_event(event),
-                    cancel_check,
-                )
-                .await
-            }
-            _ => {
-                if def.prompt_via_stdin {
-                    write_prompt_stdin(&mut spawned.child, def, &composed.full_prompt).await?;
-                }
-                let mut handler = create_stream_handler(def.stream_format, def.json_event_parser);
-                read_stdout_lines(
-                    &mut spawned.child,
-                    |line| {
-                        handler.handle_line(line, &mut |event| emit_event(event));
-                        Ok(())
-                    },
-                    cancel_check,
-                )
-                .await
-            }
-        }
+        let model = conversation.agent_runtime.external_model.as_deref();
+        run_pi_rpc_session(
+            &mut spawned.child,
+            &composed.full_prompt,
+            model,
+            |event| emit_event(event),
+            cancel_check,
+        )
+        .await
     };
 
     // Non-persistent path waits on (and drops/kills) the per-turn child. Persistent sessions
     // keep their process alive in the registry, so there is nothing to wait on here.
     let exit_code: Option<i32> = match spawned_opt {
         Some(mut spawned) => {
+            // A6: on a read error the child may still be running (e.g. an I/O error that didn't
+            // kill it) — kill first so `wait()` can't block on a live process. 杀**整棵树**
+            // 而不只是直接子进程：CLI 会按用户配置拉起自己的 MCP 服务器作为子进程。
+            if read_result.is_err() {
+                kill_agent_process_tree(&mut spawned.child);
+            }
             let status = spawned.child.wait().await.map_err(|e| e.to_string())?;
             status.code()
         }
@@ -347,17 +524,39 @@ pub async fn run_external_cli_reply(
         Some(task) => task.await.unwrap_or_default(),
         None => String::new(),
     };
-    if let Err(err) = &read_result {
-        stream_outcome = if err == "cancelled" {
-            "cancelled"
+    // 出口诊断（仅 debug 构建）：定位「生成异常结束」这类 outcome 误判时的第一手数据。
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "[external-agent] {} turn done: read_result={:?} exit_code={:?} stderr_len={} stderr_tail={:?}",
+            def.id,
+            read_result.as_ref().err(),
+            exit_code,
+            stderr_output.len(),
+            tail_chars(stderr_output.trim(), 200),
+        );
+    }
+    // R2: a read error (non-cancel) becomes a classified, actionable bubble — the raw error goes
+    // into a collapsible `<details>` rather than being shown verbatim as the bubble body.
+    let turn_error = resolve_turn_error(read_result.as_ref().err(), stream_error.as_ref());
+    let mut error_rendered = false;
+    if let Some(err) = turn_error {
+        if is_cancellation(err) {
+            stream_outcome = "cancelled".to_string();
         } else {
-            "error"
+            stream_outcome = "error".to_string();
+            let classified =
+                crate::external_agents::errors::classify(err, exit_code, &stderr_output, &agent_id);
+            let bubble = classified.render_bubble();
+            append_final_text(
+                &mut content,
+                &mut segments,
+                &mut segment_order,
+                tool_calls.len(),
+                &bubble,
+            );
+            error_rendered = true;
         }
-        .to_string();
-        if err != "cancelled" && content.trim().is_empty() && raw_output.trim().is_empty() {
-            raw_output = format!("{} 读取输出失败：{}", def.name, err);
-        }
-    } else if exit_code.map(|code| code != 0).unwrap_or(false) {
+    } else if nonzero_exit_is_a_failure(exit_code, protocol_completed) {
         if content.trim().is_empty() {
             stream_outcome = "error".to_string();
         }
@@ -365,69 +564,95 @@ pub async fn run_external_cli_reply(
 
     // Fill empty content from the richest available fallback: captured raw stdout lines first,
     // then stderr (as an explicit failure), then the slash / no-output placeholders.
-    if content.trim().is_empty() {
-        if !raw_output.trim().is_empty() {
-            content = raw_output.trim().to_string();
+    if !error_rendered && content.trim().is_empty() {
+        let fallback = if !raw_output.trim().is_empty() {
+            raw_output.trim().to_string()
         } else if !stderr_output.trim().is_empty() {
             stream_outcome = "error".to_string();
-            content = format!(
+            format!(
                 "{} 执行失败：\n\n{}",
                 def.name,
                 truncate_for_preview(stderr_output.trim(), 4000)
-            );
+            )
         } else if stream_outcome == "completed" {
             if is_slash {
-                content = format!("{} 命令已执行", def.name);
+                format!("{} 命令已执行", def.name)
             } else {
                 stream_outcome = "error".to_string();
-                content = format!(
+                format!(
                     "{} 未产生输出（exit={:?}，耗时 {}ms）",
                     def.name,
                     exit_code,
                     started_at.elapsed().as_millis()
-                );
+                )
             }
-        }
+        } else {
+            String::new()
+        };
+        append_final_text(
+            &mut content,
+            &mut segments,
+            &mut segment_order,
+            tool_calls.len(),
+            &fallback,
+        );
     }
 
     // A nonzero exit with stderr is a failure even if the CLI also produced some stdout — append
-    // the stderr (unless it's already the content) so the error is visible, not swallowed.
-    if exit_code.map(|code| code != 0).unwrap_or(false) && !stderr_output.trim().is_empty() {
+    // the stderr (unless it's already the content) so the error is visible, not swallowed. Skipped
+    // when a classified error bubble already folded the stderr into its `<details>`, and when the
+    // protocol already said this turn completed (spec 8b).
+    if !error_rendered
+        && nonzero_exit_is_a_failure(exit_code, protocol_completed)
+        && !stderr_output.trim().is_empty()
+    {
         stream_outcome = "error".to_string();
         if !content.contains(stderr_output.trim()) {
-            if !content.trim().is_empty() {
-                content.push_str("\n\n");
-            }
-            content.push_str(&format!(
+            let tail = format!(
                 "{} stderr：\n\n{}",
                 def.name,
                 truncate_for_preview(stderr_output.trim(), 4000)
-            ));
+            );
+            append_final_text(
+                &mut content,
+                &mut segments,
+                &mut segment_order,
+                tool_calls.len(),
+                &tail,
+            );
         }
     }
-
-    emit_chat_stream_done(
-        app,
-        &conversation_id,
-        &run_id,
-        &assistant_message_id,
-        &stream_outcome,
-        &content,
-    );
 
     persist_delivered_session(
         app,
         &conversation_id,
         def.id,
         &resume_ctx,
-        if composed.instructions_block.is_empty() {
-            &daemon_instructions
-        } else {
-            &composed.instructions_block
-        },
+        // 哈希只覆盖**会话级常量**（系统提示 + Memory + cwd 提示）。skill 正文是 per-turn 的，
+        // 不进哈希——否则换 skill 会被当成「instructions 变了」而重发一遍会话级指令。
+        &daemon_instructions,
         is_slash,
     )?;
 
+    // A7：把 CLI 自压的边界落到会话上。此前只发了实时压缩更新、从不落盘，
+    // 于是「已压缩 N 次」永远不涨、刷新或重开会话后分隔线消失（那条注释说要记一次压缩，
+    // 但代码并没有做）。写在 `push_assistant_message` **之前**：它会用
+    // `compute_context_state` 整体重算 `context_state`，而外部路径的重算会把
+    // `compression_count` / `compaction_boundaries` / `last_compressed_at` 原样带过去。
+    for boundary in &cli_compactions {
+        conversation.context_state.compression_count = conversation
+            .context_state
+            .compression_count
+            .saturating_add(1);
+        conversation.context_state.last_compressed_at = Some(boundary.created_at);
+        conversation
+            .context_state
+            .compaction_boundaries
+            .push(boundary.clone());
+    }
+
+    let terminal_content = content.clone();
+    let terminal_outcome = stream_outcome.clone();
     push_assistant_message(
         app,
         state,
@@ -454,10 +679,19 @@ pub async fn run_external_cli_reply(
         usage,
         None,
         None,
+        // 外部 CLI 走自己的协议，没有 agent 循环的降级兜底。
+        None,
     )
     .await?;
 
-    save_conversation(app, conversation)?;
+    crate::chat::protocol::finish_run(
+        app,
+        &run_id,
+        &terminal_outcome,
+        &terminal_content,
+        conversation.revision,
+    );
+
     Ok(())
 }
 
@@ -484,7 +718,7 @@ impl StreamSegmentTracker {
         tool_calls_len: usize,
         delta: &str,
     ) -> ChatMessageSegment {
-        let phase = text_phase_for_tool_count(tool_calls_len);
+        let phase = segment_phase_for_tool_count(&kind, tool_calls_len);
         let active = match kind {
             ChatMessageSegmentKind::Reasoning => &mut self.active_reasoning_idx,
             _ => &mut self.active_text_idx,
@@ -534,112 +768,614 @@ async fn run_persistent_turn<E, C>(
     reasoning: Option<String>,
     sandbox: Option<String>,
     mcp_servers: Vec<AcpMcpServer>,
+    launch_config: &LaunchConfig,
     first_prompt: &str,
     reuse_prompt: &str,
+    images: &[crate::external_agents::attachments::ImageBlock],
     emit: &mut E,
     cancel: &C,
+    // 本轮的工具审批出口。`None` = 不接（协议不支持 / 用户没选会询问的权限档位）——
+    // 会话侧仍对 `can_use_tool` 回 error 兜底，绝不沉默。
+    approvals: Option<&ApprovalHost<'_>>,
 ) -> Result<(), String>
 where
     E: FnMut(UnifiedAgentEvent),
     C: Fn() -> bool,
 {
-    use crate::external_agents::session::live::{LiveSession, SessionCommand};
+    use crate::external_agents::session::live::LiveSession;
     use crate::external_agents::session::{
         clear_live_handle, load_live_handle, save_live_handle, LiveSessionHandle,
     };
-    use tokio::sync::{mpsc, oneshot};
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let protocol_tag = persistent_protocol_tag(protocol);
 
-    // 1. Reuse a live session already in the registry; 2. resume a persisted one; 3. fresh.
-    let (control, prompt) =
-        match state.external_live_session_control(conversation_id, agent_id, &cwd_str) {
-            Some(control) => (control, reuse_prompt.to_string()),
-            None => {
-                let resume_native = load_live_handle(app, conversation_id)
-                    .filter(|h| {
-                        h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag
-                    })
-                    .map(|h| h.native_id);
-                let (control, native_id, resumed) = connect_persistent_session(
-                    protocol,
-                    resolved_bin,
-                    args,
-                    cwd,
-                    model.as_deref(),
-                    sandbox.as_deref(),
-                    &mcp_servers,
-                    resume_native,
-                )
-                .await?;
-                let _ = save_live_handle(
+    // 本轮实际使用的启动参数。resume 失效时会被改写成「开新会话」（见
+    // `drop_resume_for_fresh_session`），所以不能直接用调用方那份不可变的 `args`。
+    let mut turn_args: Vec<String> = args.to_vec();
+    // resume 已经被摘掉过一次了吗。降级恰好一次（第二次仍失败说明原因不是 resume）。
+    let mut dropped_resume = false;
+
+    // Establish the control channel: 1. reuse a live session in the registry; 2. resume a
+    // persisted one; 3. connect fresh.
+    //
+    // 复用判据里含 `launch_config`：模型 / reasoning / sandbox / 系统指令任一变化 ⇒ 不可复用
+    // ⇒ 丢弃条目（actor 自行关停旧进程）并走下面的连接分支**带原生 resume**，于是新 flag
+    // 生效而上下文不丢（spec 第 8 条：UI 所见必须与会话实际配置一致）。
+    let (mut control, mut prompt) = match state.external_live_session_control(
+        conversation_id,
+        agent_id,
+        &cwd_str,
+        launch_config,
+    ) {
+        Some(control) => (control, reuse_prompt.to_string()),
+        None => {
+            let resume_native = load_live_handle(app, conversation_id)
+                .filter(|h| {
+                    h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag
+                })
+                .map(|h| h.native_id);
+            // We intended to continue an existing native session iff a matching handle was
+            // persisted. If the resume then fails and we fall back to fresh, the prior context
+            // is lost and the user must be told (R4) rather than silently getting a blank slate.
+            let intended_resume = resume_native.is_some();
+            let connected = match connect_persistent_session(
+                protocol,
+                resolved_bin,
+                &turn_args,
+                cwd,
+                model.as_deref(),
+                reasoning.as_deref(),
+                sandbox.as_deref(),
+                &mcp_servers,
+                resume_native.clone(),
+            )
+            .await
+            {
+                Ok(connected) => connected,
+                // resume 失效也可能在**启动**阶段就暴露：claude 的 `--resume <不存在的 id>`
+                // 会把同一句话写到 stderr 然后 `exit 1`，被 `connect()` 的即时 `try_wait`
+                // 抓成 `claude-init: …` 带 stderr 尾部（实测 2.2s 才退，所以这条更少见 ——
+                // 但只处理流里那条会漏掉这个场景）。降级方式与轮内失败完全一致。
+                Err(err)
+                    if !dropped_resume
+                        && crate::external_agents::stream::claude::is_missing_session_error(
+                            &err,
+                        ) =>
+                {
+                    dropped_resume = true;
+                    turn_args = drop_resume_for_fresh_session(
+                        app,
+                        conversation_id,
+                        agent_id,
+                        protocol,
+                        &turn_args,
+                    );
+                    connect_persistent_session(
+                        protocol,
+                        resolved_bin,
+                        &turn_args,
+                        cwd,
+                        model.as_deref(),
+                        reasoning.as_deref(),
+                        sandbox.as_deref(),
+                        &mcp_servers,
+                        None,
+                    )
+                    .await?
+                }
+                Err(err) => return Err(err),
+            };
+            let PersistentConnection {
+                control,
+                native_id,
+                resumed,
+                child_pid,
+            } = connected;
+            let _ = save_live_handle(
+                app,
+                conversation_id,
+                &LiveSessionHandle {
+                    agent_id: agent_id.to_string(),
+                    protocol: protocol_tag.to_string(),
+                    native_id,
+                    cwd: cwd_str.clone(),
+                },
+            );
+            state.register_external_live_session(
+                conversation_id.to_string(),
+                LiveSession {
+                    control: control.clone(),
+                    agent_id: agent_id.to_string(),
+                    cwd: cwd_str.clone(),
+                    launch_config: launch_config.clone(),
+                    last_activity: std::time::Instant::now(),
+                    child_pid,
+                    turns_served: 1,
+                    busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+            );
+            // A resumed session already holds history → send only the latest message.
+            let prompt = if resumed {
+                reuse_prompt.to_string()
+            } else {
+                first_prompt.to_string()
+            };
+            // Intended to resume but ended up fresh → warn about the lost context.
+            // `dropped_resume` 走的也是这一条：resume 的目标会话被 claude 清理掉了，我们换了个
+            // 新会话继续 —— 用户该看到的正是这条**已有的**「上下文已重置」提示，
+            // 而不是 claude 那句英文原文（别为它新写一条文案，spec 第 2 条）。
+            if !resumed && (intended_resume || dropped_resume) {
+                emit(context_reset_notice_event());
+            }
+            (control, prompt)
+        }
+    };
+
+    // 标记「有在飞轮次」：一轮可以跑十几分钟（没有轮内超时），而 `last_activity` 只在轮
+    // 开始时写一次。不标的话清扫器/LRU 会在轮中把这条会话回收掉 —— 这一轮不会断，但轮末
+    // 最后一个 sender 落地就把进程关了，下一轮白付一次冷启动（越重度使用越吃不到常驻）。
+    // guard 落地即清，覆盖下面每条 `return`。
+    // guard 落地即清，覆盖下面每条 `return`。**轮内重连之后必须重挂**：`reconnect_fresh`
+    // 会往注册表塞一条全新的 `LiveSession`（`busy: false`），旧 guard 还指着旧会话的 Arc
+    // —— 不重挂的话，恰好是刚付过冷启动的那条路反而不受保护。
+    // 下划线名字是必要的：这个值只靠 Drop 起作用，没有任何读取点。
+    let mut _busy = state.mark_external_live_session_busy(conversation_id);
+
+    // At most one automatic fresh reconnect after a non-cancel / non-auth failure (R3), plus one
+    // reconnect for a config change that only a relaunch can apply (R4 NeedsReconnect). Each is
+    // gated by its own bool so a persistently-failing session can't loop.
+    let mut retried_after_failure = false;
+    let mut reconnected_for_config = false;
+    loop {
+        let outcome = drive_persistent_turn(
+            &control,
+            prompt.clone(),
+            model.clone(),
+            reasoning.clone(),
+            images,
+            emit,
+            cancel,
+            approvals,
+        )
+        .await;
+
+        let err = match outcome {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+
+        // 会话是否还能留在注册表里。默认丢弃（entry 落地 ⇒ control sender 关闭 ⇒ actor 关停
+        // 子进程）；只有「协议级取消之后会话仍可用」的协议例外 —— 否则用户点一次「停止」
+        // 就把常驻进程连带杀掉，上下文延续与 0.1s 冷启动全部作废（见 `cancel_keeps_live_session`）。
+        if !cancel_keeps_live_session(&err, protocol) {
+            state.remove_external_live_session(conversation_id);
+        }
+
+        match persistent_failure_action(
+            &err,
+            agent_id,
+            retried_after_failure,
+            reconnected_for_config,
+            dropped_resume,
+        ) {
+            // Cancelled keeps the persisted handle so a later turn can resume the native session.
+            PersistentFailureAction::Cancelled => return Err(err),
+            // Auth / exhausted retries → drop the handle (process likely dead) and surface the error.
+            PersistentFailureAction::Fatal => {
+                clear_live_handle(app, conversation_id);
+                return Err(err);
+            }
+            // Launch-flag config change (reasoning) → relaunch fresh with the new `args`.
+            PersistentFailureAction::ReconnectConfig => {
+                reconnected_for_config = true;
+            }
+            // resume 的目标会话在 CLI 那边没了 → 换个新会话 id、不带 resume 重连一次。
+            // 这里**不重置** `retried_after_failure`：降级本身有独立闸门（`dropped_resume`）。
+            PersistentFailureAction::ReconnectWithoutResume => {
+                dropped_resume = true;
+                turn_args = drop_resume_for_fresh_session(
                     app,
                     conversation_id,
-                    &LiveSessionHandle {
-                        agent_id: agent_id.to_string(),
-                        protocol: protocol_tag.to_string(),
-                        native_id,
-                        cwd: cwd_str.clone(),
-                    },
+                    agent_id,
+                    protocol,
+                    &turn_args,
                 );
-                state.register_external_live_session(
-                    conversation_id.to_string(),
-                    LiveSession {
-                        control: control.clone(),
-                        agent_id: agent_id.to_string(),
-                        cwd: cwd_str.clone(),
-                        last_activity: std::time::Instant::now(),
-                    },
-                );
-                // A resumed session already holds history → send only the latest message.
-                let prompt = if resumed {
-                    reuse_prompt.to_string()
-                } else {
-                    first_prompt.to_string()
-                };
-                (control, prompt)
             }
+            // Transient failure → drop the stale handle and reconnect fresh once.
+            PersistentFailureAction::RetryFresh => {
+                retried_after_failure = true;
+                clear_live_handle(app, conversation_id);
+            }
+        }
+
+        let (next_control, resumed) = reconnect_fresh(
+            app,
+            state,
+            conversation_id,
+            agent_id,
+            protocol,
+            protocol_tag,
+            resolved_bin,
+            &turn_args,
+            cwd,
+            &cwd_str,
+            model.as_deref(),
+            reasoning.as_deref(),
+            sandbox.as_deref(),
+            &mcp_servers,
+            launch_config,
+        )
+        .await?;
+        // 新会话进了注册表 ⇒ 旧 guard 已经指不到它了，重挂一个（旧的在赋值时落地）。
+        _busy = state.mark_external_live_session_busy(conversation_id);
+        control = next_control;
+        prompt = if resumed {
+            reuse_prompt.to_string()
+        } else {
+            first_prompt.to_string()
         };
+        // A fresh reconnect after an in-run session failure drops whatever context that session
+        // had accumulated this run — surface it rather than silently continuing on a blank slate.
+        // 但**真的续上了**原生会话时不能发这条（claude 的 argv 仍带 `--resume` 就属于这种）：
+        // 一条假的「上下文已重置」本身就是 bug。
+        if !resumed {
+            emit(context_reset_notice_event());
+        }
+    }
+}
+
+/// Connect a persistent session for the reconnect paths (no live handle to resume from), persist
+/// its handle, and register it. Returns the control channel plus **whether the CLI actually
+/// continued its native session** — for claude that happens when `args` still carry `--resume`,
+/// and in that case the caller must NOT claim the context was reset (a false alarm is its own bug).
+#[allow(clippy::too_many_arguments)]
+async fn reconnect_fresh(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    conversation_id: &str,
+    agent_id: &str,
+    protocol: StreamFormat,
+    protocol_tag: &str,
+    resolved_bin: &std::path::Path,
+    args: &[String],
+    cwd: &std::path::Path,
+    cwd_str: &str,
+    model: Option<&str>,
+    reasoning: Option<&str>,
+    sandbox: Option<&str>,
+    mcp_servers: &[AcpMcpServer],
+    launch_config: &LaunchConfig,
+) -> Result<
+    (
+        tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
+        bool,
+    ),
+    String,
+> {
+    use crate::external_agents::session::live::LiveSession;
+    use crate::external_agents::session::{save_live_handle, LiveSessionHandle};
+
+    let PersistentConnection {
+        control,
+        native_id,
+        resumed,
+        child_pid,
+    } = connect_persistent_session(
+        protocol,
+        resolved_bin,
+        args,
+        cwd,
+        model,
+        reasoning,
+        sandbox,
+        mcp_servers,
+        None,
+    )
+    .await?;
+    let _ = save_live_handle(
+        app,
+        conversation_id,
+        &LiveSessionHandle {
+            agent_id: agent_id.to_string(),
+            protocol: protocol_tag.to_string(),
+            native_id,
+            cwd: cwd_str.to_string(),
+        },
+    );
+    state.register_external_live_session(
+        conversation_id.to_string(),
+        LiveSession {
+            control: control.clone(),
+            agent_id: agent_id.to_string(),
+            cwd: cwd_str.to_string(),
+            launch_config: launch_config.clone(),
+            last_activity: std::time::Instant::now(),
+            child_pid,
+            turns_served: 1,
+            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        },
+    );
+    Ok((control, resumed))
+}
+
+/// 本轮的启动配置指纹。
+///
+/// 只有 claude 需要它：它的 `--model` / `--effort` / `--permission-mode` /
+/// `--append-system-prompt-file` **全是启动参数**，常驻之后只能靠换进程生效。改动前每轮
+/// spawn 新进程，换配置是「下一轮自动带上新 flag」白捡的；常驻打破了这个便宜，不补上就会
+/// 出现「界面显示一套、会话实际跑另一套」（违反 spec 第 8 条，是功能退步而非缺功能）。
+///
+/// ACP / codex 能在会话内改模型与推理档位（`session/set_config_option` / 每轮 `turn/start`
+/// 带 model），指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。
+fn launch_config_for_turn(
+    protocol: StreamFormat,
+    _model: Option<&str>,
+    reasoning: Option<&str>,
+    sandbox: Option<&str>,
+    instructions_hash: Option<&str>,
+) -> LaunchConfig {
+    if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
+        return LaunchConfig::default();
+    }
+    LaunchConfig {
+        // **model 不在指纹里**：它能在会话内换（`claude_stream::apply_model_change` 发
+        // `set_model` 控制请求，官方 `Query.setModel()` 在 streaming input mode 下可用）。
+        // 换模型是用户最频繁的操作，把它留在指纹里等于每换一次就付一次 3.2s 冷启动 +
+        // 一整段历史重放。会话内切换失败时 `run_turn` 返回 `NEEDS_RECONNECT`，走既有的
+        // ReconnectConfig 那条路 —— 也就是退回本次改动之前的行为，没有静默失效的可能。
+        //
+        // reasoning / sandbox 仍在指纹里：`--effort` 对应的官方入口是
+        // `applyFlagSettings({effortLevel})`，wire 形状**没有核实过**；`--permission-mode`
+        // 更换还会改变要不要带 `--permission-prompt-tool stdio`（见
+        // `defs::claude::claude_permission_prompt_args`），那是启动参数的事，会话内切不了。
+        flags: format!(
+            "{}|{}",
+            reasoning.unwrap_or_default(),
+            sandbox.unwrap_or_default()
+        ),
+        instructions: instructions_hash.map(str::to_string),
+    }
+}
+
+/// 持久会话「复用 / resume 轮」要发的正文。
+///
+/// claude 的 `composed.full_prompt` **本身就不含**会话级指令（它们走
+/// `--append-system-prompt-file` 启动 flag，spec 第 1 条），剩下的全是 **per-turn** 内容：
+/// active skill 正文 + 降级附件说明 + 用户消息。这些每轮都必须整份发出去 —— 只发最新用户
+/// 消息会让 skill 正文与附件说明从第 2 轮起静默消失（active skill 是用户可以中途换的
+/// per-turn 选择）。
+///
+/// 其余持久协议（codex / ACP）的 full_prompt 首轮**含**指令，复用轮只发最新用户消息，
+/// 保持现有行为。
+fn persistent_turn_prompt<'a>(
+    protocol: StreamFormat,
+    composed_prompt: &'a str,
+    latest_user_message: &'a str,
+) -> &'a str {
+    match protocol {
+        StreamFormat::ClaudeStreamJson => composed_prompt,
+        _ => latest_user_message,
+    }
+}
+
+/// 本轮错误是否代表「用户取消」——出口走 cancelled（不弹错误气泡、不发上下文重置提示、
+/// 更不会重发这一轮 prompt）。
+fn is_cancellation(err: &str) -> bool {
+    err == "cancelled" || err == crate::external_agents::session::live::CANCELLED_SESSION_LOST
+}
+
+/// 这次失败之后，常驻会话能不能留在注册表里继续服下一轮。
+///
+/// **claude**：`run_turn` 发出协议级 `interrupt` 后**一直读到本轮的 `result` 才返回**
+/// （实测被中断的轮次一定有 result），流位置回到轮次边界、进程完好 ⇒ 可以直接继续用。
+/// 这是常驻改造的核心收益：点一次「停止」不该让用户丢掉整个会话上下文，也不该再花 3.2 秒
+/// 重新拉起进程。
+///
+/// **ACP / codex**：`session/cancel` / `turn/interrupt` 发出后立刻返回，reader 停在流中间
+/// （未消费的 prompt 响应 + 后续 update），复用会读到上一轮的残帧 ⇒ 保持原行为（丢弃会话，
+/// 下一轮从落盘 handle 原生 resume）。
+///
+/// `CANCELLED_SESSION_LOST`（进程死了 / 取消超时被硬 Close）任何协议都不保留。
+fn cancel_keeps_live_session(err: &str, protocol: StreamFormat) -> bool {
+    err == "cancelled" && matches!(protocol, StreamFormat::ClaudeStreamJson)
+}
+
+/// What `run_persistent_turn` should do after a turn fails. Pure so the retry policy is unit
+/// testable without a Tauri context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistentFailureAction {
+    /// User cancellation — surface as-is, keep the persisted handle for a later resume.
+    Cancelled,
+    /// Relaunch fresh to apply a launch-flag config change (reasoning without a config option).
+    ReconnectConfig,
+    /// `--resume` 的目标会话在 CLI 那边已经不存在了 —— 摘掉 resume、换个新会话 id 重连一次。
+    ///
+    /// 与 `RetryFresh` 的区别不是「重不重连」而是**带不带 resume**：claude 的会话 flag 在
+    /// argv 里，`RetryFresh` 会拿同一份 argv 再连一次 ⇒ 同一个死 id 再 `--resume` 一次 ⇒
+    /// 必然再失败一次，然后用户拿到一句英文原文。
+    ReconnectWithoutResume,
+    /// Transient failure — reconnect fresh once and re-send the prompt.
+    RetryFresh,
+    /// Auth failure or exhausted retries — give up and surface the error.
+    Fatal,
+}
+
+fn persistent_failure_action(
+    err: &str,
+    agent_id: &str,
+    retried_after_failure: bool,
+    reconnected_for_config: bool,
+    dropped_resume: bool,
+) -> PersistentFailureAction {
+    if is_cancellation(err) {
+        return PersistentFailureAction::Cancelled;
+    }
+    if err == crate::external_agents::session::acp::NEEDS_RECONNECT {
+        // Only relaunch once for a config change; a repeat means the relaunch didn't help.
+        return if reconnected_for_config {
+            PersistentFailureAction::Fatal
+        } else {
+            PersistentFailureAction::ReconnectConfig
+        };
+    }
+    // resume 失效：**必须排在下面那条 auth / retried 之前**。它不是瞬时故障（重连同一份 argv
+    // 一定再失败），也不是认证问题，而是一个有确定处置的状态：换个新会话继续。
+    // 同样只降级一次 —— 摘掉 resume 之后还失败说明是别的原因。
+    if crate::external_agents::stream::claude::is_missing_session_error(err) {
+        return if dropped_resume {
+            PersistentFailureAction::Fatal
+        } else {
+            PersistentFailureAction::ReconnectWithoutResume
+        };
+    }
+    // Auth is never auto-retried (a doomed retry could trigger a login storm).
+    if crate::external_agents::errors::is_auth_error(err, agent_id) {
+        return PersistentFailureAction::Fatal;
+    }
+    if retried_after_failure {
+        PersistentFailureAction::Fatal
+    } else {
+        PersistentFailureAction::RetryFresh
+    }
+}
+
+/// resume 失效的降级：换一个新的原生会话 id，把它写进落盘记录，并返回改写后的启动参数。
+///
+/// 三件事必须一起做，少一件就会留一个坑：
+/// 1. **argv**：`--resume <死 id>` → `--session-id <新 id>`（`claude_args_fresh_session`）；
+/// 2. **会话记录**：`--resume` 的来源是它，不改的话下一轮又拿死 id 去 resume（每轮降级一次）；
+/// 3. **live handle**：它的 `native_id` 也指着那个死会话，留着会在别处兜底成 `--resume`。
+///
+/// 只对 claude 有意义（会话 flag 在 argv 里）。其余协议的判据文案根本不会命中，
+/// 这里仍按协议分流，免得哪天有人给别的 CLI 复用这条路时静默改错参数。
+fn drop_resume_for_fresh_session(
+    app: &AppHandle,
+    conversation_id: &str,
+    agent_id: &str,
+    protocol: StreamFormat,
+    args: &[String],
+) -> Vec<String> {
+    use crate::external_agents::session::{clear_live_handle, replace_stored_session_id};
+
+    if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
+        return args.to_vec();
+    }
+    let fresh_id = uuid::Uuid::new_v4().to_string();
+    replace_stored_session_id(app, conversation_id, agent_id, &fresh_id);
+    clear_live_handle(app, conversation_id);
+    crate::external_agents::defs::claude::claude_args_fresh_session(args, &fresh_id)
+}
+
+/// True when a cancel was requested (`cancel_at` set) and the grace period has elapsed without the
+/// turn winding down — the caller escalates to `Close` (A5). Pure for unit testing.
+fn cancel_should_escalate(
+    cancel_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+    grace: std::time::Duration,
+) -> bool {
+    matches!(cancel_at, Some(t) if now.saturating_duration_since(t) >= grace)
+}
+
+/// 本轮的 argv 是否让 CLI 走「问宿主要权限」那条路。
+///
+/// 判据只有一条：argv 里带 `--permission-prompt-tool`。这是**真正**决定 CLI 会不会发
+/// `can_use_tool` 的那个开关（本机 2.1.220 对照实测：带 ⇒ 收到询问；不带 ⇒ 一条都没有、
+/// 权限被 CLI 直接拒），所以从 argv 读回来比在这里重抄一份「哪些权限档位会询问」的规则
+/// 更不容易分叉 —— 那份规则的唯一副本在 `defs::claude::claude_permission_prompt_args`。
+fn turn_asks_for_permission(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--permission-prompt-tool")
+}
+
+/// 本轮 argv 里的权限档位（`--permission-mode` 的值）。
+///
+/// 与 `turn_asks_for_permission` 同一个理由从 argv 读回来而不是再抄一份规则：决定 CLI 行为
+/// 的就是 argv 本身，读它就不可能与 `build_args` 分叉。
+fn permission_mode_from_args(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find(|w| w[0] == "--permission-mode")
+        .map(|w| w[1].as_str())
+}
+
+/// Send one `RunTurn` on `control` and pump its events/terminal result. On user cancel, send a
+/// protocol-level `Cancel`; if the turn doesn't wind down within `CANCEL_ESCALATE_GRACE`, escalate
+/// to `Close` (A5) so a hung session can't block cancellation indefinitely.
+async fn drive_persistent_turn<E, C>(
+    control: &tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
+    prompt: String,
+    model: Option<String>,
+    reasoning: Option<String>,
+    images: &[crate::external_agents::attachments::ImageBlock],
+    emit: &mut E,
+    cancel: &C,
+    approvals: Option<&ApprovalHost<'_>>,
+) -> Result<(), String>
+where
+    E: FnMut(UnifiedAgentEvent),
+    C: Fn() -> bool,
+{
+    use crate::external_agents::session::live::{ApprovalBridge, SessionCommand};
+    use futures::stream::{FuturesUnordered, StreamExt};
+    use tokio::sync::{mpsc, oneshot};
+
+    const CANCEL_ESCALATE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
     let (events_tx, mut events_rx) = mpsc::channel::<UnifiedAgentEvent>(64);
     let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+    // 审批通道只在宿主接得住时才建。会话侧据此决定 `can_use_tool` 是「问用户」还是走那条
+    // fail-closed 的 error 兜底 —— 两种都绝不沉默（沉默 = 那一轮永久挂死）。
+    let (bridge, mut ask_rx, decision_tx) = match approvals {
+        Some(_) => {
+            let (ask_tx, ask_rx) = mpsc::channel(8);
+            let (decision_tx, decision_rx) = mpsc::channel(8);
+            (
+                Some(ApprovalBridge {
+                    requests: ask_tx,
+                    decisions: decision_rx,
+                }),
+                Some(ask_rx),
+                Some(decision_tx),
+            )
+        }
+        None => (None, None, None),
+    };
     if control
         .send(SessionCommand::RunTurn {
             prompt,
             model,
             reasoning,
+            images: images.to_vec(),
             events: events_tx,
             done: done_tx,
+            approvals: bridge,
         })
         .await
         .is_err()
     {
-        state.remove_external_live_session(conversation_id);
-        clear_live_handle(app, conversation_id);
         return Err("外部 CLI 会话已结束，请重试".to_string());
     }
+
+    // 在飞的审批（可以有多条：claude 会并行调工具）。放 `FuturesUnordered` 而不是 spawn：
+    // 借用 `app`/`state` 就够，不需要 `'static`，而且本函数返回时它们自然被丢弃。
+    let mut in_flight = FuturesUnordered::new();
+    // 本轮问过的 toolCallId。返回前必须把 `pending_chat_tool_approvals` 里可能残留的条目扫掉
+    // ——那张表按 id 存 oneshot sender，走了异常出口（EOF / 硬 Close）不扫就是一条永久泄漏。
+    let mut asked_ids: Vec<String> = Vec::new();
 
     let mut done_rx = done_rx;
     let mut events_open = true;
     let mut cancel_sent = false;
-    loop {
+    let mut cancel_at: Option<std::time::Instant> = None;
+    let outcome = loop {
         tokio::select! {
             biased;
             result = &mut done_rx => {
+                // Invariant (A4): the actor sends every `event` before `done`, and mpsc preserves
+                // order, so all remaining events are already queued — drain them before returning.
                 while let Ok(event) = events_rx.try_recv() {
                     emit(event);
                 }
-                let outcome = result.unwrap_or_else(|_| Err("session actor dropped".to_string()));
-                // A non-cancel failure means the process likely died — drop the live session and
-                // its persisted handle so the next turn connects fresh.
-                if let Err(ref e) = outcome {
-                    state.remove_external_live_session(conversation_id);
-                    if e != "cancelled" {
-                        clear_live_handle(app, conversation_id);
-                    }
-                }
-                return outcome;
+                break result.unwrap_or_else(|_| Err("session actor dropped".to_string()));
             }
             maybe_event = events_rx.recv(), if events_open => {
                 match maybe_event {
@@ -647,48 +1383,490 @@ where
                     None => events_open = false,
                 }
             }
+            // 会话侧送来一条「这个工具能用吗」⇒ 复用内置 agent 那条审批链路去问用户
+            // （typed approval event + `chat_confirm_tool_call` 命令 + 同一张挂起表），
+            // 不另建一套 UI（spec 第 2 条）。
+            Some(ask) = async {
+                match ask_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => None,
+                }
+            }, if ask_rx.is_some() => {
+                if let Some(host) = approvals {
+                    asked_ids.push(ask.tool_call_id.clone());
+                    in_flight.push(host.ask(ask));
+                }
+            }
+            // 用户答了 ⇒ 把答复送回会话，由它写 `control_response`。
+            Some(decision) = in_flight.next(), if !in_flight.is_empty() => {
+                if let Some(tx) = decision_tx.as_ref() {
+                    let _: Result<_, _> = tx.send(decision).await;
+                }
+            }
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
         }
         if !cancel_sent && cancel() {
             cancel_sent = true;
+            cancel_at = Some(std::time::Instant::now());
             let _ = control.send(SessionCommand::Cancel).await;
+        }
+        // A5: protocol-level cancel didn't wind the turn down in time → escalate to a hard Close.
+        if cancel_should_escalate(cancel_at, std::time::Instant::now(), CANCEL_ESCALATE_GRACE) {
+            let _ = control.send(SessionCommand::Close).await;
+            // 用 `CANCELLED_SESSION_LOST` 而不是 `"cancelled"`：出口仍按取消呈现，但会话
+            // 已经被硬 Close 掉了，注册表条目**必须**丢弃 —— 否则 claude 的「取消后保留常驻
+            // 会话」会把一个死 actor 留到下一轮才发现。
+            break Err(crate::external_agents::session::live::CANCELLED_SESSION_LOST.to_string());
+        }
+    };
+    // 会话侧那张挂起表由 `claude_stream::reject_pending` 负责整批拒掉（它才是欠 CLI 响应的
+    // 一方）；这里只扫宿主侧的残留条目 + 让在飞的 future 随本函数一起丢弃。
+    if let Some(host) = approvals {
+        host.forget(&asked_ids);
+    }
+    // 未消费的答复对应的询问已经被会话侧拒掉了，丢弃即可。
+    drop(decision_tx);
+    outcome
+}
+
+/// 批准计划后把 claude 切到的档位 —— **仅当前端没给**（老 UI / 「总是允许」直通）时的兜底。
+///
+/// `acceptEdits` 而不是 `bypassPermissions`：批了计划的意思是「这些改动我同意」，不是
+/// 「以后任何命令都别问我」。正常路径下这一档由用户在卡片上三选一决定
+/// （见 `Chat.tsx` 的 `PLAN_APPROVAL_ACTIONS`）。
+const PLAN_APPROVED_PERMISSION_MODE: &str = "acceptEdits";
+
+/// 「批准并自动放行」那一档的值。与 `defs::claude::DEFAULT_PERMISSION_MODE` 同值，
+/// 但语义不同（那个是「新会话的默认档」，这个是「计划批准后要不要继续弹卡」的判据）。
+const FULL_ACCESS_PERMISSION_MODE: &str = "bypassPermissions";
+
+/// 宿主侧回答工具审批询问所需的一切。
+///
+/// 存在的意义只有一个：**把外部 CLI 的权限询问接到 Kivio 已有的那条审批链路上**
+/// （typed approval event → 前端确认卡 → `chat_confirm_tool_call` → 同一张
+/// `pending_chat_tool_approvals` 挂起表）。内置 agent 用的就是这一套，不许再造第二套
+/// （spec 第 2 条）。唯一需要的适配是 **id 映射**：Kivio 那侧按「工具调用 id」寻址，
+/// 而 CLI 给的是它自己的 `request_id` —— 所以卡片用 claude 的 `tool_use_id`（与工具卡同一个
+/// id），回程按 `request_id` 路由，两者在 `ApprovalAsk` 里成对携带。
+struct ApprovalHost<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+    conversation_id: &'a str,
+    run_id: &'a str,
+    generation: u64,
+    /// 普通工具就地放行、不弹卡（「完全」档；见 `claude_mode_auto_allows_tools`）。
+    /// 这一档接上询问通道**只为了** `AskUserQuestion` / `ExitPlanMode`，不是为了开始审批。
+    ///
+    /// 可变（`AtomicBool`）是因为用户可以在**轮中**用「批准并自动放行」把整轮切进这一档。
+    auto_allow_tools: std::sync::atomic::AtomicBool,
+}
+
+impl ApprovalHost<'_> {
+    /// 问用户一次。返回的 `ApprovalDecision` 带回 `request_id`，会话据它回 `control_response`。
+    ///
+    /// 超时 / 用户点停止时 `request_tool_approval` 自己会返回 false 并清掉挂起条目
+    /// —— 也就是**默认拒**，这正是 fail-closed 想要的。
+    async fn ask(
+        &self,
+        ask: crate::external_agents::session::live::ApprovalAsk,
+    ) -> crate::external_agents::session::live::ApprovalDecision {
+        // 复用 `ToolCallRecord` 作为审批卡的载体：`request_tool_approval` 的入参就是它，
+        // 而它的 `format_tool_approval_summary` 已经会把 claude 的 `Write`/`file_path`
+        // 摘成人看得懂的一两行。只填审批需要的字段，其余留默认。
+        let record = ToolCallRecord {
+            id: ask.tool_call_id.clone(),
+            name: ask.tool_name.clone(),
+            source: "external_cli".to_string(),
+            server_id: None,
+            arguments: serde_json::to_string(&ask.input).unwrap_or_else(|_| "{}".to_string()),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: None,
+            completed_at: None,
+            round: 1,
+            sensitive: true,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: None,
+        };
+        // `AskUserQuestion` 不是「要不要放行这个工具」，而是「claude 在问用户一个问题」。
+        // 官方答法是从**同一条** `can_use_tool` 通道回 `allow + updatedInput.answers`
+        // （没有第二条控制请求）。宿主这边把它转成 Kivio 已有的问用户卡片 —— 那套 UI 的
+        // 形状（问题 + 选项 + 单选/多选 + 自定义文本）与 claude 的入参一一对得上，
+        // 不该为它再造第二套卡片（spec 第 2 条）。
+        if crate::external_agents::session::claude_stream::is_ask_user_question(&ask.tool_name) {
+            if let Some(prompt) = ask_user_prompt_from_claude_input(&ask.input) {
+                let answered = crate::chat::commands::interaction::request_user_response(
+                    self.app,
+                    self.state,
+                    self.conversation_id,
+                    self.run_id,
+                    self.generation,
+                    &record,
+                    prompt,
+                )
+                .await;
+                let approved = answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
+                return crate::external_agents::session::live::ApprovalDecision {
+                    request_id: ask.request_id,
+                    approved,
+                    updated_input: approved
+                        .then(|| claude_ask_user_updated_input(&ask.input, &answered)),
+                    set_permission_mode: None,
+                };
+            }
+            // 入参形状不认识（CLI 改了 schema）：退回普通审批卡，别静默吞掉这次询问。
+        }
+        // `ExitPlanMode` = 「计划写完了，批准我照着做」。走普通审批卡（卡片上就是计划正文，
+        // 见 `format_tool_approval_summary`），但批准时**必须额外切档位** —— CLI 不会因为这次
+        // `allow` 自己离开计划档，不切的话它下一句 `Edit` 又被挡回来，用户点了「批准」却什么
+        // 都没发生。目标档位取 `acceptEdits`（paseo 同款默认：批了计划就别再为每次编辑弹卡）。
+        //
+        // 这一条**排在 `auto_allow_tools` 之前**：批准一个计划是真正的用户决定，
+        // 「完全」档也不该替他点头。
+        //
+        // ponytail: 只切**本次会话**的档位，不改会话配置里的 `external_sandbox`
+        // （底栏胶囊仍显示「计划」）。够用是因为常驻会话不会因此重启；进程真的重启时会退回
+        // 计划档、需要重新批准。要让胶囊跟着变，得在跑轮途中改会话配置 —— 那是另一件事。
+        if crate::external_agents::session::claude_stream::is_exit_plan_mode(&ask.tool_name) {
+            let outcome = crate::chat::commands::interaction::request_tool_approval_outcome(
+                self.app,
+                self.state,
+                self.conversation_id,
+                self.run_id,
+                self.generation,
+                &record,
+            )
+            .await;
+            let mode = outcome.approved.then(|| {
+                outcome
+                    .permission_mode
+                    .clone()
+                    .unwrap_or_else(|| PLAN_APPROVED_PERMISSION_MODE.to_string())
+            });
+            // 「批准并自动放行」= 这一轮剩下的工具也别再弹卡了。`auto_allow_tools` 是开轮时
+            // 从 argv 读的（那时还是计划档），不就地翻掉的话用户选了「自动放行」却还要一个个
+            // 点 —— 正是他刚刚选的那一档要消灭的东西。
+            if mode.as_deref() == Some(FULL_ACCESS_PERMISSION_MODE) {
+                self.auto_allow_tools
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return crate::external_agents::session::live::ApprovalDecision {
+                request_id: ask.request_id,
+                approved: outcome.approved,
+                updated_input: None,
+                set_permission_mode: mode,
+            };
+        }
+        // `EnterPlanMode` = claude 自己要求「先探索、出方案，别急着改」。**放行就够** ——
+        // 它的实现里自己就把会话切进了计划档，宿主不用发切档帧（与 `ExitPlanMode` 不对称，
+        // 见 `claude_stream::is_enter_plan_mode`）。
+        //
+        // 同样排在 `auto_allow_tools` 之前：把一次生成中途变成只读是用户的决定，
+        // 「完全」档也不该替他点头。底栏胶囊由前端在批准后写成「计划」（同计划批准那条路）。
+        if crate::external_agents::session::claude_stream::is_enter_plan_mode(&ask.tool_name) {
+            let approved = crate::chat::commands::interaction::request_tool_approval(
+                self.app,
+                self.state,
+                self.conversation_id,
+                self.run_id,
+                self.generation,
+                &record,
+            )
+            .await;
+            return crate::external_agents::session::live::ApprovalDecision {
+                request_id: ask.request_id,
+                approved,
+                updated_input: None,
+                set_permission_mode: None,
+            };
+        }
+        // 「完全」档：通道之所以接上只为了上面那两张卡，普通工具原地放行。
+        // 少了这一条，选了「全自动放行」的用户会突然开始每个工具都被问一次。
+        if self
+            .auto_allow_tools
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return crate::external_agents::session::live::ApprovalDecision {
+                request_id: ask.request_id,
+                approved: true,
+                updated_input: None,
+                set_permission_mode: None,
+            };
+        }
+        let approved = crate::chat::commands::interaction::request_tool_approval(
+            self.app,
+            self.state,
+            self.conversation_id,
+            self.run_id,
+            self.generation,
+            &record,
+        )
+        .await;
+        crate::external_agents::session::live::ApprovalDecision {
+            request_id: ask.request_id,
+            approved,
+            updated_input: None,
+            set_permission_mode: None,
+        }
+    }
+
+    /// 扫掉本轮问过的挂起条目。异常出口（EOF / 硬 Close）下 `ask` 的 future 会被直接丢弃，
+    /// 它没机会自己清理，不扫就在这张进程级的表里永久留一条。
+    ///
+    /// **同时要撤掉前端卡片**：`request_tool_approval` 只在自己的超时 / 取消分支里发撤回，
+    /// 而 future 被丢弃时那两条分支根本不执行。少了这一手，卡片会留在屏幕上，用户点
+    /// 「允许」是静默空操作（挂起条目已经被下面删掉了）—— 正是撤回事件本来要消灭的那个现象。
+    fn forget(&self, tool_call_ids: &[String]) {
+        if tool_call_ids.is_empty() {
+            return;
+        }
+        {
+            let mut pending = self
+                .state
+                .pending_chat_tool_approvals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for id in tool_call_ids {
+                pending.remove(id);
+            }
+        }
+        for id in tool_call_ids {
+            crate::chat::commands::interaction::withdraw_tool_confirm(self.app, id);
         }
     }
 }
 
+/// claude `AskUserQuestion` 的入参 → Kivio 的问用户卡片载荷。
+///
+/// 入参形状（官方工具 schema）：
+/// `{"questions":[{"question":"…","header":"…","multiSelect":bool,
+///   "options":[{"label":"…","description":"…"}]}]}`
+///
+/// 映射到 Kivio 的 `AskUserQuestion` 时，选项 id 用**下标**（claude 的选项没有 id，
+/// 只有 label），答复时再按同一个下标翻回 label —— 见 `claude_ask_user_updated_input`。
+/// 形状不认识（CLI 改了 schema）返回 `None`，调用方退回普通审批卡。
+fn ask_user_prompt_from_claude_input(
+    input: &serde_json::Value,
+) -> Option<crate::chat::ask_user::AskUserPromptPayload> {
+    let raw = input.get("questions")?.as_array()?;
+    let questions: Vec<crate::chat::ask_user::AskUserQuestion> = raw
+        .iter()
+        .enumerate()
+        .filter_map(|(qi, question)| {
+            let text = question.get("question")?.as_str()?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            let options: Vec<crate::chat::ask_user::AskUserOption> = question
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|options| {
+                    options
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(oi, option)| {
+                            let label = option.get("label")?.as_str()?.trim().to_string();
+                            if label.is_empty() {
+                                return None;
+                            }
+                            Some(crate::chat::ask_user::AskUserOption {
+                                id: oi.to_string(),
+                                label,
+                                description: option
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if options.is_empty() {
+                return None;
+            }
+            Some(crate::chat::ask_user::AskUserQuestion {
+                id: qi.to_string(),
+                prompt: text,
+                options,
+                allow_multiple: question
+                    .get("multiSelect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                // claude 的 schema 里没有「自定义文本」这一档，但用户总该能不选任何预设项
+                // 直接说自己的想法 —— 这是 Kivio 卡片本来就有的能力，白给。
+                allow_custom: true,
+            })
+        })
+        .collect();
+    (!questions.is_empty()).then_some(crate::chat::ask_user::AskUserPromptPayload {
+        title: None,
+        questions,
+    })
+}
+
+/// 用户的选择 → claude 要的 `updatedInput`。
+///
+/// 官方形状：`{"questions": <原样回传>, "answers": {"<问题文本>": "<选中的 label>"}}`。
+/// 多选时把多个 label 用 `, ` 拼起来（官方文档只给了单选的例子，多选的分隔符**未核实**；
+/// 拼串至少保证 claude 拿到的是它认识的字符串类型，而不是一个它可能不接受的数组）。
+/// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
+///
+/// **回的是「原入参 + answers」而不是重新拼一个 `{questions, answers}`**（paseo 的写法：
+/// `{...permission.request.input, answers}`）。`updatedInput` 会**整个替换**这次调用的入参，
+/// 自己拼就意味着 CLI 哪天给 schema 加个字段、我们就静默把它丢了 —— paseo 那边这个坑是
+/// 真踩过的（CHANGELOG #760「Answering an interactive question from a Claude agent now
+/// reaches Claude correctly instead of being dropped」）。
+fn claude_ask_user_updated_input(
+    original_input: &serde_json::Value,
+    answered: &crate::chat::ask_user::AskUserResponseResult,
+) -> serde_json::Value {
+    let mut answers = serde_json::Map::new();
+    let raw = original_input
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for (qi, question) in raw.iter().enumerate() {
+        let Some(text) = question.get("question").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(answer) = answered.answers.get(&qi.to_string()) else {
+            continue;
+        };
+        if let Some(custom) = answer
+            .custom_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            answers.insert(
+                text.to_string(),
+                serde_json::Value::String(custom.to_string()),
+            );
+            continue;
+        }
+        let labels: Vec<String> = answer
+            .selected_option_ids
+            .iter()
+            .filter_map(|id| {
+                let index: usize = id.parse().ok()?;
+                question
+                    .get("options")?
+                    .as_array()?
+                    .get(index)?
+                    .get("label")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        if !labels.is_empty() {
+            answers.insert(
+                text.to_string(),
+                serde_json::Value::String(labels.join(", ")),
+            );
+        }
+    }
+    let mut updated = original_input
+        .as_object()
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    updated.insert("questions".to_string(), serde_json::Value::Array(raw));
+    updated.insert("answers".to_string(), serde_json::Value::Object(answers));
+    serde_json::Value::Object(updated)
+}
+
 fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
     match protocol {
+        StreamFormat::ClaudeStreamJson => "claude_stream_json",
         StreamFormat::CodexAppServer => "codex_app_server",
         StreamFormat::AcpJsonRpc => "acp_json_rpc",
         _ => "unknown",
     }
 }
 
+/// 一次「建立常驻会话」的产物。
+///
+/// `child_pid` 是纯元数据（写进注册表条目供诊断 / 判定「两轮是不是同一个进程」），
+/// 任何关停路径都走 actor 的 `Close`，绝不按 pid 杀。
+struct PersistentConnection {
+    control: tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
+    native_id: String,
+    resumed: bool,
+    child_pid: Option<u32>,
+}
+
 /// Connect (or resume) a persistent protocol session, returning its control channel, native id,
 /// and whether a resume actually succeeded. Falls back to a fresh session if resume fails.
+#[allow(clippy::too_many_arguments)]
 async fn connect_persistent_session(
     protocol: StreamFormat,
     resolved_bin: &std::path::Path,
     args: &[String],
     cwd: &std::path::Path,
     model: Option<&str>,
+    reasoning: Option<&str>,
     sandbox: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     resume_native: Option<String>,
-) -> Result<
-    (
-        tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
-        String,
-        bool,
-    ),
-    String,
-> {
+) -> Result<PersistentConnection, String> {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
+    use crate::external_agents::session::claude_stream::{
+        spawn_claude_stream_session_actor, ClaudeStreamJsonSession,
+    };
     use crate::external_agents::session::codex_app_server::{
         spawn_codex_session_actor, CodexAppServerSession,
     };
 
     match protocol {
+        StreamFormat::ClaudeStreamJson => {
+            // claude 的会话 id 走**启动参数**，不像 codex / ACP 在握手 RPC 里传 ——
+            // 所以这里要看/改 argv 而不是传参。
+            //
+            // **参数说了算**：`build_claude_args` 已按 `resolve_agent_resume_context` 放好
+            // `--resume <id>`（续接已有会话）或 `--session-id <new>`（这个对话还没有会话）。
+            // 参数里的会话标记是**本轮的真实决定**；live handle 只是「上一个进程最后报的那个
+            // id」。让 handle 压过参数，会把一个全新对话接到某个旧会话上 —— 用户会在新对话里
+            // 看到别人的上下文。
+            //
+            // （历史：这里曾解释成「换模型要开新会话」。2026-07-29 本机实测 claude 2.1.220
+            // 推翻了那个前提 —— `--resume` 带另一个 `--model` 既切得动模型、也保住上下文，
+            // 所以换模型现在照常续接。优先级本身不变，只是理由换了。见 spec 第 8 / 25 条。）
+            //
+            // live handle 只在参数里**没有**任何会话 flag 时兜底，且必须改写成 `--resume`：
+            // 同一个 id 再 `--session-id` 一次会被 claude 以「id 已存在」拒绝启动。
+            let (effective_args, resumed) = if args.iter().any(|arg| arg == "--resume") {
+                (args.to_vec(), true)
+            } else if args.iter().any(|arg| arg == "--session-id") {
+                (args.to_vec(), false)
+            } else if let Some(id) = resume_native
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                (
+                    crate::external_agents::defs::claude::claude_args_resuming(args, id),
+                    true,
+                )
+            } else {
+                (args.to_vec(), false)
+            };
+            let session =
+                ClaudeStreamJsonSession::connect(resolved_bin, &effective_args, cwd).await?;
+            let id = session.session_id().to_string();
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_claude_stream_session_actor(session),
+                native_id: id,
+                resumed,
+                child_pid,
+            })
+        }
         StreamFormat::CodexAppServer => {
             if let Some(tid) = resume_native.as_deref() {
                 if let Ok(session) = CodexAppServerSession::connect(
@@ -702,40 +1880,125 @@ async fn connect_persistent_session(
                 .await
                 {
                     let id = session.thread_id().to_string();
-                    return Ok((spawn_codex_session_actor(session), id, true));
+                    let child_pid = session.child_pid();
+                    return Ok(PersistentConnection {
+                        control: spawn_codex_session_actor(session),
+                        native_id: id,
+                        resumed: true,
+                        child_pid,
+                    });
                 }
+                // C3: resume failed → fall through to fresh so the caller overwrites the stale
+                // live handle (whose native_id is dead) instead of retrying a doomed resume.
+                eprintln!("[external-agent] codex resume failed, connecting fresh");
             }
             let session =
                 CodexAppServerSession::connect(resolved_bin, args, cwd, model, sandbox, None)
                     .await?;
             let id = session.thread_id().to_string();
-            Ok((spawn_codex_session_actor(session), id, false))
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_codex_session_actor(session),
+                native_id: id,
+                resumed: false,
+                child_pid,
+            })
         }
         StreamFormat::AcpJsonRpc => {
             if let Some(sid) = resume_native.as_deref() {
-                if let Ok(session) =
-                    AcpSession::connect(resolved_bin, args, cwd, model, mcp_servers, Some(sid))
-                        .await
+                if let Ok(session) = AcpSession::connect(
+                    resolved_bin,
+                    args,
+                    cwd,
+                    model,
+                    reasoning,
+                    mcp_servers,
+                    Some(sid),
+                )
+                .await
                 {
                     let id = session.session_id().to_string();
-                    return Ok((spawn_acp_session_actor(session), id, true));
+                    let child_pid = session.child_pid();
+                    return Ok(PersistentConnection {
+                        control: spawn_acp_session_actor(session),
+                        native_id: id,
+                        resumed: true,
+                        child_pid,
+                    });
                 }
+                // C3: resume failed → connect fresh; the caller's save_live_handle overwrites the
+                // stale handle so the next turn won't attempt the dead native_id again.
+                eprintln!("[external-agent] acp resume failed, connecting fresh");
             }
             let session =
-                AcpSession::connect(resolved_bin, args, cwd, model, mcp_servers, None).await?;
+                AcpSession::connect(resolved_bin, args, cwd, model, reasoning, mcp_servers, None)
+                    .await?;
             let id = session.session_id().to_string();
-            Ok((spawn_acp_session_actor(session), id, false))
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_acp_session_actor(session),
+                native_id: id,
+                resumed: false,
+                child_pid,
+            })
         }
         _ => Err("protocol does not support persistent sessions".to_string()),
     }
 }
 
-fn text_phase_for_tool_count(tool_calls_len: usize) -> ChatMessageSegmentPhase {
+/// 文本 / 推理分段的 phase。
+///
+/// **文本段绝不能标 ToolLoop。** 落库时 `message.content` 是由
+/// `chat::commands::messages::content_from_segments` 从分段反算出来的，而那把尺只认
+/// `Plain | Synthesis` 的文本段；外部 CLI 这边的 `content` 却是**所有** `TextDelta` 的累加。
+/// 一旦工具之后的正文被标成 ToolLoop，那把尺就看不见它 → `normalize_assistant_segments`
+/// 判定「有正文但没有任何分段覆盖」→ 再补一条同文案的 Synthesis 段 → 气泡里正文渲染两遍。
+/// 所以调过工具之后的正文标 `Synthesis`（语义也对：那就是工具跑完后的汇报），与内置路径
+/// `chat/agent/planning.rs` 里「正文段必须是 Plain|Synthesis」的约定一致。
+///
+/// 推理段不受这条约束（`reasoning_from_segments` 不看 phase），保持原有 ToolLoop 语义。
+pub(crate) fn segment_phase_for_tool_count(
+    kind: &ChatMessageSegmentKind,
+    tool_calls_len: usize,
+) -> ChatMessageSegmentPhase {
     if tool_calls_len == 0 {
-        ChatMessageSegmentPhase::Plain
-    } else {
-        ChatMessageSegmentPhase::ToolLoop
+        return ChatMessageSegmentPhase::Plain;
     }
+    match kind {
+        ChatMessageSegmentKind::Reasoning => ChatMessageSegmentPhase::ToolLoop,
+        _ => ChatMessageSegmentPhase::Synthesis,
+    }
+}
+
+/// 把一段「轮末补充文案」（分类错误气泡 / stderr / 占位文案）**同时**写进 `content` 和
+/// `segments`。两者必须一起长：读流结束后单独往 `content` 上拼字符串，会让
+/// 「正文」与「被 `content_from_segments` 认可的分段文字」对不上——落库时要么正文被
+/// 渲染两遍（正文一条分段都没覆盖时），要么这段补充文案被整段丢掉（已有分段覆盖时）。
+fn append_final_text(
+    content: &mut String,
+    segments: &mut Vec<ChatMessageSegment>,
+    segment_order: &mut u32,
+    tool_calls_len: usize,
+    text: &str,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if !content.trim().is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str(text);
+    *segment_order += 1;
+    segments.push(ChatMessageSegment {
+        id: format!("seg_{}", Uuid::new_v4()),
+        kind: ChatMessageSegmentKind::Text,
+        phase: segment_phase_for_tool_count(&ChatMessageSegmentKind::Text, tool_calls_len),
+        order: *segment_order,
+        step_number: None,
+        round: None,
+        text: Some(text.to_string()),
+        tool_call_id: None,
+    });
 }
 
 fn push_tool_segment(
@@ -758,20 +2021,86 @@ fn push_tool_segment(
     segment
 }
 
+/// 构造一条 CLI 自压的边界记录，并发协议压缩更新通知前端插分隔线。
+///
+/// payload 与内置路径（`chat/commands/context.rs::emit_chat_compaction_state`）同形，
+/// 且**直接复用 `CompactionBoundaryRecord`** 而不是手写一份 json——两份形状迟早分叉
+/// （spec 第 2 条）。
+///
+/// 返回记录供调用方落盘：live 事件与持久化必须是**同一条记录**（同一个 id），
+/// 否则刷新后会出现两条分隔线。
+///
+/// `token_estimate_after` 取 `compact_metadata.post_tokens`（claude 2.1.220 确实有这个字段）；
+/// 缺失时为 0，前端此时不显示「→ N」。
+fn emit_cli_compaction(
+    app: &AppHandle,
+    run_id: &str,
+    anchor_message_id: &str,
+    trigger: &str,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+    now: i64,
+) -> CompactionBoundaryRecord {
+    let boundary = CompactionBoundaryRecord {
+        id: format!("ctxbd_{}", Uuid::new_v4()),
+        // CLI 内部压缩，Kivio 拿不到「摘要覆盖到哪条消息」——这是 CLI 自己的上下文切分点，
+        // 协议里也不上报。留空并靠 `display_after_message_id` 做时间线锚点。
+        source_until_message_id: String::new(),
+        display_after_message_id: Some(anchor_message_id.to_string()),
+        token_estimate_before: pre_tokens.unwrap_or(0) as usize,
+        token_estimate_after: post_tokens.unwrap_or(0) as usize,
+        // 摘要正文只存在于 CLI 自己的会话里，协议不上报。
+        summary_content: String::new(),
+        // CLI 自压沿用 CLI 自报的 trigger（`auto` / `manual`），与内置的 `agent_loop`
+        // 区分开——排查时能看出压缩是谁触发的。
+        trigger: trigger.to_string(),
+        created_at: now,
+    };
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::CompactionUpdated {
+            phase: "completed".to_string(),
+            trigger: Some(trigger.to_string()),
+            boundary: Some((&boundary).into()),
+        },
+    );
+    boundary
+}
+
+/// 非零退出码是否应判定为本轮失败。
+///
+/// `protocol_completed`（读到了 CLI 明确的本轮结束帧）时**一律豁免**：spec 第 8b 条记的
+/// 已知坑是 Windows `TerminateProcess` 退出码恒为 1，配合「非零退出 + 有 stderr = error」
+/// 会把正常收尾的轮次误判成失败；杀整棵进程树后中招面进一步变大。判据改为**协议层完成标志**
+/// 而不是退出码形态——真实的协议层失败（`result.is_error` 等）走 `resolve_turn_error`
+/// 那条路，不依赖退出码。
+///
+/// **常驻路径上这条规则天然不适用**（B1 起）：进程不再每轮退出，`exit_code` 恒为 `None`
+/// （只有非持久分支才 `wait()` 子进程），所以本函数在 claude / codex / ACP 上恒返回 false。
+/// 退出码该归给哪一轮的问题于是不存在了 —— 常驻进程的退出发生在**会话关闭**时（idle 回收 /
+/// LRU 淘汰 / 配置变更重连 / 应用退出），与任何单轮都无关，那条路径上也没有气泡可污染。
+/// 目前只有 `PiRpc` 还走非持久分支，而它不上报协议层完成标志（`protocol_completed` 恒 false），
+/// 所以对它规则照旧生效。
+fn nonzero_exit_is_a_failure(exit_code: Option<i32>, protocol_completed: bool) -> bool {
+    !protocol_completed && exit_code.map(|code| code != 0).unwrap_or(false)
+}
+
 fn apply_unified_event(
     app: &AppHandle,
-    conversation_id: &str,
     run_id: &str,
-    message_id: &str,
+    compaction_anchor_id: &str,
     content: &mut String,
     reasoning: &mut String,
     raw_output: &mut String,
     tool_calls: &mut Vec<ToolCallRecord>,
     tool_map: &mut HashMap<String, usize>,
     usage: &mut Option<ModelUsage>,
+    stream_error: &mut Option<String>,
     segments: &mut Vec<ChatMessageSegment>,
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
+    cli_compactions: &mut Vec<CompactionBoundaryRecord>,
     event: UnifiedAgentEvent,
 ) {
     let now = Local::now().timestamp();
@@ -785,15 +2114,7 @@ fn apply_unified_event(
                 tool_calls.len(),
                 &delta,
             );
-            emit_chat_stream_delta(
-                app,
-                conversation_id,
-                run_id,
-                message_id,
-                &delta,
-                None,
-                Some(&segment),
-            );
+            emit_chat_stream_delta(app, run_id, &delta, None, Some(&segment));
         }
         UnifiedAgentEvent::ThinkingDelta { delta } => {
             reasoning.push_str(&delta);
@@ -804,29 +2125,13 @@ fn apply_unified_event(
                 tool_calls.len(),
                 &delta,
             );
-            emit_chat_stream_delta(
-                app,
-                conversation_id,
-                run_id,
-                message_id,
-                "",
-                Some(&delta),
-                Some(&segment),
-            );
+            emit_chat_stream_delta(app, run_id, "", Some(&delta), Some(&segment));
         }
         UnifiedAgentEvent::ToolUse { id, name, input } => {
             segment_tracker.reset_text();
             segment_tracker.reset_reasoning();
             let segment = push_tool_segment(segments, segment_order, &id);
-            emit_chat_stream_delta(
-                app,
-                conversation_id,
-                run_id,
-                message_id,
-                "",
-                None,
-                Some(&segment),
-            );
+            emit_chat_stream_delta(app, run_id, "", None, Some(&segment));
             let record = ToolCallRecord {
                 id: id.clone(),
                 name: name.clone(),
@@ -848,7 +2153,7 @@ fn apply_unified_event(
             };
             tool_map.insert(id.clone(), tool_calls.len());
             tool_calls.push(record.clone());
-            emit_chat_tool_record(app, conversation_id, run_id, message_id, &record);
+            emit_chat_tool_record(app, run_id, &record);
         }
         UnifiedAgentEvent::ToolResult {
             tool_use_id,
@@ -864,15 +2169,30 @@ fn apply_unified_event(
                     };
                     record.result_preview = Some(truncate_for_preview(&result_content, 800));
                     record.completed_at = Some(now);
-                    emit_chat_tool_record(app, conversation_id, run_id, message_id, record);
+                    emit_chat_tool_record(app, run_id, record);
                 }
             }
         }
         UnifiedAgentEvent::Usage { usage: u } => {
-            *usage = Some(u);
+            // 只累积，不下发。上下文占用**一轮更新一次**，由轮末那次权威计算发出
+            // （`compute_context_state` → `context_updated`）。
+            //
+            // 曾经这里有一条 350ms 节流的「实时」通道，删掉的理由是它三分之二不是真值：
+            // 分子是**单次请求**的快照（工具循环里每请求一变、压缩后还会掉，看着就是在跳），
+            // 分母是上一轮留下的粘滞值（claude 只在轮末 `result` 里报窗口），进度条里的分段
+            // 构成则是前端按比例硬缩放出来的。而这个数字唯一能驱动的动作（压缩 / 换会话）
+            // 只发生在两轮之间 —— 轮中看到也用不上。要改回来先想清楚这三点。
+            *usage = Some(merge_cli_usage(usage.as_ref(), u));
         }
         UnifiedAgentEvent::Error { message, .. } => {
             eprintln!("[external-agent] stream error: {message}");
+            // 协议层报的失败必须能走到出口的 `errors::classify`（spec 第 5 条）：只打日志的话，
+            // 一条「CLI 明确说本轮失败了」的消息会被整个吞掉——claude 未登录时的
+            // `{"subtype":"success","is_error":true}` 正是这样被当成成功轮次的。
+            // 首条为准（后续多为同一失败的连带回声），不覆盖。
+            if stream_error.is_none() {
+                *stream_error = Some(message);
+            }
         }
         UnifiedAgentEvent::Raw { line } => {
             // Unparsed stdout line — accumulate (capped) as a fallback surfaced only if the run
@@ -885,8 +2205,94 @@ fn apply_unified_event(
                 *raw_output = tail_chars(raw_output, 8192);
             }
         }
+        UnifiedAgentEvent::CliCompacted {
+            trigger,
+            pre_tokens,
+            post_tokens,
+            dropped_tokens,
+            duration_ms,
+        } => {
+            // CLI **自己**压缩了上下文（claude 的 compact_boundary）。Kivio 并没有发
+            // `/compact`，所以不能走 `external_agents::compact` 那条路；这里做两件事：
+            //   1. 发协议压缩更新让前端**立刻**插入分隔线——否则用户只会看到
+            //      「对话突然变短了」而没有任何解释；
+            //   2. 把同一条记录攒起来，读流结束后落到 `context_state`
+            //      （计数 + 边界持久化，见调用方注释）。
+            // 分子仍由 `message_start.message.usage` / `result` 上报（服务端算的），
+            // 这里不推算用量。
+            if cfg!(debug_assertions) {
+                eprintln!(
+                    "[external-agent] cli compaction trigger={trigger} pre={pre_tokens:?} post={post_tokens:?} dropped={dropped_tokens:?} duration_ms={duration_ms:?}"
+                );
+            }
+            cli_compactions.push(emit_cli_compaction(
+                app,
+                run_id,
+                compaction_anchor_id,
+                &trigger,
+                pre_tokens,
+                post_tokens,
+                now,
+            ));
+        }
         _ => {}
     }
+}
+
+/// 本轮的失败判据：读流错误与**协议层自报的失败**（`UnifiedAgentEvent::Error`）共用
+/// 同一个出口，从而都能走到 `errors::classify`（spec 第 5 条）。
+///
+/// 为什么不能只看 `read_result`：读流经常**正常** `Ok` 返回（CLI 完整输出后 exit 0），
+/// 失败只体现在流里的一条消息里。claude 未登录的真实样本
+/// `{"type":"result","subtype":"success","is_error":true,"result":"Not logged in …"}`
+/// 就是这样：进程干净退出、stdout 全是合法 JSON，于是整轮被判为「已完成」，
+/// 用户拿到一个空气泡且零提示。
+///
+/// `read_result` 的错误优先：进程级失败带退出码与 stderr，`classify` 能给出更准的分类。
+fn resolve_turn_error<'a>(
+    read_error: Option<&'a String>,
+    stream_error: Option<&'a String>,
+) -> Option<&'a String> {
+    read_error.or(stream_error)
+}
+
+/// 合并一轮内先后到达的多次 CLI 用量上报：**后到覆盖先到**（取最新快照），
+/// 但两处例外：
+///
+/// 1. `context_window_tokens` **粘滞**——新值为 `None` 时保留旧值。
+///    ACP 一轮里会到两次用量：`session/update` 的 `usage_update` 带 `size`（窗口）先到，
+///    `session/prompt` 的 `PromptResponse.usage` 不带窗口后到；直接整体覆盖会让分母被后一条
+///    冲成 `None`，用量条退回「窗口未知」。claude 侧方向相同：`message_start` 的 usage 不带
+///    窗口、`result` 的带（`modelUsage.contextWindow`），后到覆盖正好把窗口补上。
+/// 2. **全零的 token 数不覆盖非零的**。没有 LLM 往返的 `result`（未登录 / `/help` /
+///    未知斜杠命令 / 我们自己发的 `/compact`）四个字段全 0，但它仍可能携带窗口。
+///    若让它整体覆盖，本轮 `message_start` 报的真实占用会被清零 ⇒ 用量条从 47K 掉到 0
+///    （`context.rs` 挑「最近一条 usage」的判据是 `is_some()`，`Some(0)` 会命中）。
+///    这一条与 `stream/claude.rs` 的全零守卫是同一条规则的两道防线。
+fn merge_cli_usage(previous: Option<&ModelUsage>, mut incoming: ModelUsage) -> ModelUsage {
+    if incoming.context_window_tokens.is_none() {
+        incoming.context_window_tokens = previous.and_then(|prev| prev.context_window_tokens);
+    }
+    if let Some(prev) = previous {
+        if usage_tokens_all_zero(&incoming) && !usage_tokens_all_zero(prev) {
+            let window = incoming.context_window_tokens;
+            incoming = prev.clone();
+            incoming.context_window_tokens = window;
+        }
+    }
+    incoming
+}
+
+/// 一次上报里所有 token 数是否都是 0 / 缺失（= 这条上报没有任何分子信息）。
+/// 这条用量上报有没有任何非零 token。`context.rs::usage_has_token_numbers` 是它的反面，
+/// 两处必须共用同一个判据（此前 `reasoning_tokens` 只有这边算，见那里的注释）。
+pub(crate) fn usage_tokens_all_zero(usage: &ModelUsage) -> bool {
+    usage.input_tokens.unwrap_or(0) == 0
+        && usage.output_tokens.unwrap_or(0) == 0
+        && usage.total_tokens.unwrap_or(0) == 0
+        && usage.cached_input_tokens.unwrap_or(0) == 0
+        && usage.cache_creation_input_tokens.unwrap_or(0) == 0
+        && usage.reasoning_tokens.unwrap_or(0) == 0
 }
 
 fn truncate_for_preview(value: &str, max_chars: usize) -> String {
@@ -900,6 +2306,310 @@ fn truncate_for_preview(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 协议层自报的失败必须能到出口——修复前这里只打了一条日志，于是
+    /// 「CLI 明确说本轮失败了」被整个吞掉（claude 未登录 ⇒ 空气泡 + 零提示）。
+    #[test]
+    fn protocol_reported_failure_reaches_the_error_exit() {
+        let stream_error = "Not logged in · Please run /login".to_string();
+        let resolved = resolve_turn_error(None, Some(&stream_error));
+        assert_eq!(
+            resolved,
+            Some(&stream_error),
+            "读流 Ok 时，协议层自报的失败仍必须成为本轮错误"
+        );
+    }
+
+    /// 读流错误优先于协议层消息：进程级失败带退出码/stderr，`classify` 分得更准。
+    #[test]
+    fn read_error_wins_over_protocol_reported_failure() {
+        let read_error = "session-new: timed out".to_string();
+        let stream_error = "some protocol complaint".to_string();
+        assert_eq!(
+            resolve_turn_error(Some(&read_error), Some(&stream_error)),
+            Some(&read_error)
+        );
+    }
+
+    /// 两者都没有 ⇒ 本轮成功，不得凭空造出错误（正常轮次不能被新逻辑误判）。
+    #[test]
+    fn clean_turn_has_no_error() {
+        assert_eq!(resolve_turn_error(None, None), None);
+    }
+
+    /// 端到端：claude 未登录的**真实样本**从流解析一路走到气泡文案。
+    /// 这条把 `stream/claude.rs` 的解析与 `run.rs` 的出口接在一起——两边各自正确
+    /// 但没接上，正是上一轮 `collect_external_session_usage` 那类空转 bug 的形态。
+    #[test]
+    fn real_not_logged_in_payload_renders_an_actionable_bubble() {
+        let raw = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","stop_reason":"stop_sequence","total_cost_usd":0,"permission_denials":[],"usage":{"input_tokens":0,"output_tokens":0,"iterations":[]}}"#;
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+
+        // 1) 解析：produce 一条 Error。
+        let mut stream_error: Option<String> = None;
+        crate::external_agents::stream::claude::ClaudeStreamState::default().handle_value(
+            &value,
+            &mut |event| {
+                if let UnifiedAgentEvent::Error { message } = event {
+                    if stream_error.is_none() {
+                        stream_error = Some(message);
+                    }
+                }
+            },
+        );
+        assert!(stream_error.is_some(), "未登录样本应产出 Error");
+
+        // 2) 出口：读流 Ok + exit 0（CLI 干净退出）时仍判为本轮失败。
+        let turn_error = resolve_turn_error(None, stream_error.as_ref()).expect("应判定为本轮失败");
+
+        // 3) 气泡：可操作的中文提示，裸英文只进 <details>。
+        let bubble = crate::external_agents::errors::classify(turn_error, Some(0), "", "claude")
+            .render_bubble();
+        assert!(
+            bubble.contains("claude /login"),
+            "气泡应给出可操作的登录命令：{bubble}"
+        );
+        assert!(
+            !bubble.trim().is_empty(),
+            "气泡不得为空——这正是修复前的症状"
+        );
+    }
+
+    // ---- CLI 实报用量的合并口径（一轮一次，轮末权威值用的就是它）----
+
+    fn usage_parts(input: u64, output: u64, cache_read: u64, window: Option<u64>) -> ModelUsage {
+        crate::external_agents::stream::usage_from_parts(
+            crate::external_agents::stream::CliUsageParts {
+                input,
+                output,
+                cache_read,
+                context_window: window,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// 零用量的上报不得把已经攒到的分子清零（spec 14h）。`/help` 那种没有 LLM 往返的
+    /// `result` 四个字段全 0 却带窗口 —— 采纳它的窗口，但绝不采纳它的 0。
+    #[test]
+    fn zero_usage_report_does_not_reset_the_numerator() {
+        let real = usage_parts(1_200, 800, 45_000, None);
+        let zero_with_window = usage_parts(0, 0, 0, Some(1_000_000));
+        let merged = merge_cli_usage(Some(&real), zero_with_window);
+        assert_eq!(
+            crate::external_agents::context::cli_reported_context_tokens(&merged),
+            47_000,
+            "分子必须保持 47000（只采纳零值上报带来的窗口）"
+        );
+        assert_eq!(merged.context_window_tokens, Some(1_000_000));
+    }
+
+    #[test]
+    fn cli_usage_merge_keeps_latest_numbers() {
+        let first = ModelUsage {
+            input_tokens: Some(100),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&first),
+            ModelUsage {
+                input_tokens: Some(250),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.input_tokens, Some(250));
+    }
+
+    #[test]
+    fn cli_usage_merge_keeps_window_when_later_report_omits_it() {
+        // ACP 实际时序：usage_update(带 size) 先到，PromptResponse.usage(无 size) 后到。
+        let with_window = ModelUsage {
+            input_tokens: Some(13_477),
+            context_window_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&with_window),
+            ModelUsage {
+                input_tokens: Some(11_685),
+                output_tokens: Some(4),
+                context_window_tokens: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.context_window_tokens, Some(200_000));
+        assert_eq!(merged.input_tokens, Some(11_685));
+    }
+
+    #[test]
+    fn cli_usage_merge_lets_newer_window_win() {
+        let old = ModelUsage {
+            context_window_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&old),
+            ModelUsage {
+                context_window_tokens: Some(1_048_576),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.context_window_tokens, Some(1_048_576));
+    }
+
+    #[test]
+    fn cli_usage_merge_without_previous_is_identity() {
+        let merged = merge_cli_usage(
+            None,
+            ModelUsage {
+                input_tokens: Some(7),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.input_tokens, Some(7));
+        assert_eq!(merged.context_window_tokens, None);
+    }
+
+    /// **零用量的 result 不许把分子清零**（A2）。claude 在没有 LLM 往返的轮次
+    /// （未登录 / `/help` / 未知斜杠命令 / Kivio 自己发的 `/compact`）会报一条全 0 的 usage，
+    /// 但它仍可能带着 `modelUsage.contextWindow`。直接整体覆盖会把本轮 `message_start`
+    /// 报的真实占用清零 ⇒ 用量条从 47K 掉到 0。
+    #[test]
+    fn cli_usage_merge_keeps_real_numbers_when_a_zero_report_arrives_later() {
+        let realtime = ModelUsage {
+            input_tokens: Some(1_200),
+            output_tokens: Some(800),
+            cached_input_tokens: Some(45_000),
+            cache_creation_input_tokens: Some(300),
+            total_tokens: Some(47_300),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&realtime),
+            ModelUsage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                total_tokens: Some(0),
+                context_window_tokens: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.total_tokens, Some(47_300), "分子被清零了");
+        assert_eq!(merged.input_tokens, Some(1_200));
+        // 但窗口（分母）要采纳——它是静态属性，与本轮有没有用量无关。
+        assert_eq!(merged.context_window_tokens, Some(1_000_000));
+    }
+
+    /// 反向不成立：真实数字仍要能覆盖先到的另一份真实数字（取最新快照的语义不变）。
+    #[test]
+    fn cli_usage_merge_still_takes_the_latest_nonzero_snapshot() {
+        let first = ModelUsage {
+            input_tokens: Some(100),
+            total_tokens: Some(100),
+            ..Default::default()
+        };
+        let merged = merge_cli_usage(
+            Some(&first),
+            ModelUsage {
+                input_tokens: Some(900),
+                total_tokens: Some(900),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.total_tokens, Some(900));
+    }
+
+    // ---- 非零退出码的豁免（spec 第 8b 条 + A9 杀整棵进程树）----
+
+    /// 读到协议层完成标志（claude 的 `result` 帧）后，非零退出码不得再把这一轮标成失败。
+    /// Windows `TerminateProcess` 退出码恒为 1，而杀整棵进程树让这条路径变常见——
+    /// 不豁免就会凭空造出失败气泡。
+    #[test]
+    fn protocol_completion_exempts_a_nonzero_exit() {
+        assert!(!nonzero_exit_is_a_failure(Some(1), true));
+        assert!(!nonzero_exit_is_a_failure(Some(-1), true));
+        // 没有完成标志时仍按老规则判失败。
+        assert!(nonzero_exit_is_a_failure(Some(1), false));
+        // 正常退出 / 退出码未知（信号退出，unix 下 code() = None）都不是失败。
+        assert!(!nonzero_exit_is_a_failure(Some(0), false));
+        assert!(!nonzero_exit_is_a_failure(None, false));
+    }
+
+    // ---- 工具审批：本轮接不接询问 ----
+
+    /// 判据取自 argv 本身：带 `--permission-prompt-tool` 才建审批通道。
+    /// 这样就不可能与 `defs::claude::claude_permission_prompt_args` 的决定分叉。
+    #[test]
+    fn the_approval_bridge_follows_the_launch_flag() {
+        let asking = crate::external_agents::defs::claude::build_claude_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                resume_session_id: None,
+                new_session_id: None,
+                include_partial_messages: true,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: Some("default".to_string()),
+            },
+            None,
+        );
+        assert!(turn_asks_for_permission(&asking));
+
+        // 默认档现在也接通道（`AskUserQuestion` 的唯一开关），但普通工具就地放行。
+        let silent = crate::external_agents::defs::claude::build_claude_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                resume_session_id: None,
+                new_session_id: None,
+                include_partial_messages: true,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: None,
+            },
+            None,
+        );
+        assert!(turn_asks_for_permission(&silent));
+        assert!(!turn_asks_for_permission(&[]));
+        // 值出现在别处（比如某个 prompt 里）不算 —— 判据只认 flag 本身。
+        assert!(!turn_asks_for_permission(&["stdio".to_string()]));
+    }
+
+    /// 「完全」档接上询问通道之后**用户感知不到差别**：普通工具原地放行，只有问用户卡会弹。
+    /// 判据同样取自 argv（`--permission-mode` 的值），不在这里重抄一份档位规则。
+    #[test]
+    fn the_full_access_mode_auto_allows_ordinary_tools() {
+        let mk = |sandbox: Option<&str>| {
+            crate::external_agents::defs::claude::build_claude_args(
+                &RuntimeContext {
+                    extra_allowed_dirs: vec![],
+                    resume_session_id: None,
+                    new_session_id: None,
+                    include_partial_messages: true,
+                },
+                &RuntimeBuildOptions {
+                    model: None,
+                    reasoning: None,
+                    sandbox: sandbox.map(str::to_string),
+                },
+                None,
+            )
+        };
+        let auto_allows = |args: &[String]| {
+            permission_mode_from_args(args)
+                .is_some_and(crate::external_agents::defs::claude::claude_mode_auto_allows_tools)
+        };
+        assert!(auto_allows(&mk(None)), "默认档（完全）必须就地放行");
+        assert!(auto_allows(&mk(Some("bypassPermissions"))));
+        assert!(
+            !auto_allows(&mk(Some("default"))),
+            "「每次确认」必须真的弹卡，不能被放行"
+        );
+        assert_eq!(permission_mode_from_args(&[]), None);
+    }
 
     #[test]
     fn stream_segment_tracker_reuses_text_segment_for_deltas() {
@@ -968,6 +2678,539 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].text.as_deref(), Some("before"));
         assert_eq!(segments[1].text.as_deref(), Some("after"));
-        assert_eq!(after.phase, ChatMessageSegmentPhase::ToolLoop);
+        // 工具之后的**正文**必须是 Synthesis：`content` 累加了所有 TextDelta，正文段标
+        // ToolLoop 会让落库的 normalize 以为正文没落段而再补一条 → 气泡显示两遍。
+        assert_eq!(after.phase, ChatMessageSegmentPhase::Synthesis);
+    }
+
+    #[test]
+    fn stream_segment_tracker_keeps_reasoning_in_tool_loop_phase() {
+        // 推理段不参与正文口径（reasoning_from_segments 不看 phase），保持 ToolLoop 语义。
+        let mut segments = Vec::new();
+        let mut order = 0u32;
+        let mut tracker = StreamSegmentTracker::default();
+
+        let thinking = tracker.append(
+            ChatMessageSegmentKind::Reasoning,
+            &mut segments,
+            &mut order,
+            2,
+            "还得再看一眼",
+        );
+
+        assert_eq!(thinking.phase, ChatMessageSegmentPhase::ToolLoop);
+    }
+
+    #[test]
+    fn append_final_text_grows_content_and_segments_together() {
+        // 轮末补充文案（错误气泡 / stderr / 占位）必须同时进 `content` 和 `segments`：
+        // 只拼 `content` 的话，落库时要么正文重复、要么这段补充文案被整段丢掉。
+        let mut content = String::from("已创建 dup.md。");
+        let mut segments = vec![ChatMessageSegment {
+            id: "seg_answer".to_string(),
+            kind: ChatMessageSegmentKind::Text,
+            phase: ChatMessageSegmentPhase::Synthesis,
+            order: 3,
+            step_number: None,
+            round: Some(1),
+            text: Some("已创建 dup.md。".to_string()),
+            tool_call_id: None,
+        }];
+        let mut order = 3u32;
+
+        append_final_text(
+            &mut content,
+            &mut segments,
+            &mut order,
+            1,
+            "claude stderr：boom",
+        );
+
+        assert_eq!(content, "已创建 dup.md。\n\nclaude stderr：boom");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].text.as_deref(), Some("claude stderr：boom"));
+        assert_eq!(segments[1].kind, ChatMessageSegmentKind::Text);
+        assert_eq!(segments[1].phase, ChatMessageSegmentPhase::Synthesis);
+        assert_eq!(segments[1].order, 4);
+    }
+
+    #[test]
+    fn append_final_text_ignores_blank_text() {
+        let mut content = String::new();
+        let mut segments = Vec::new();
+        let mut order = 0u32;
+
+        append_final_text(&mut content, &mut segments, &mut order, 0, "   \n ");
+
+        assert!(content.is_empty());
+        assert!(segments.is_empty());
+        assert_eq!(order, 0);
+    }
+
+    #[test]
+    fn append_final_text_on_empty_content_starts_a_plain_segment() {
+        // 没有工具的一轮（例如斜杠命令占位文案）：正文段是 Plain，同样被正文口径认可。
+        let mut content = String::new();
+        let mut segments = Vec::new();
+        let mut order = 0u32;
+
+        append_final_text(
+            &mut content,
+            &mut segments,
+            &mut order,
+            0,
+            "claude 命令已执行",
+        );
+
+        assert_eq!(content, "claude 命令已执行");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].phase, ChatMessageSegmentPhase::Plain);
+    }
+
+    // ---- Persistent-session retry policy (R3 / R4) ----
+
+    use crate::external_agents::session::acp::NEEDS_RECONNECT;
+
+    #[test]
+    fn cancelled_failure_is_surfaced_as_is() {
+        assert_eq!(
+            persistent_failure_action("cancelled", "grok", false, false, false),
+            PersistentFailureAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn auth_failure_is_never_retried() {
+        assert_eq!(
+            persistent_failure_action("Authentication required", "grok", false, false, false),
+            PersistentFailureAction::Fatal
+        );
+    }
+
+    #[test]
+    fn transient_failure_retries_fresh_once() {
+        assert_eq!(
+            persistent_failure_action(
+                "ACP session exited mid-turn",
+                "cursor-agent",
+                false,
+                false,
+                false
+            ),
+            PersistentFailureAction::RetryFresh
+        );
+        // Already retried → give up.
+        assert_eq!(
+            persistent_failure_action(
+                "ACP session exited mid-turn",
+                "cursor-agent",
+                true,
+                false,
+                false
+            ),
+            PersistentFailureAction::Fatal
+        );
+    }
+
+    #[test]
+    fn needs_reconnect_relaunches_once_then_gives_up() {
+        assert_eq!(
+            persistent_failure_action(NEEDS_RECONNECT, "grok", false, false, false),
+            PersistentFailureAction::ReconnectConfig
+        );
+        assert_eq!(
+            persistent_failure_action(NEEDS_RECONNECT, "grok", false, true, false),
+            PersistentFailureAction::Fatal
+        );
+    }
+
+    // ---- resume 失效必须降级，而不是把 CLI 的英文原句甩给用户 ----
+
+    /// 本机实测原样本（claude 2.1.220，`-p --output-format stream-json --resume <随机 uuid>`）：
+    /// stdout 一条 `result`，`errors[]` 里就是这句话；stderr 同一句话，然后 `exit 1`。
+    const REAL_MISSING_SESSION_ERROR: &str =
+        "No conversation found with session ID: d85724b7-59e4-4690-8984-1f31ca9a3414";
+
+    /// 认出来 ⇒ 摘掉 resume 换新会话重连一次；再失败才算真失败。
+    ///
+    /// 反面（改动前的行为）：这条文案落进 `RetryFresh`，而 `RetryFresh` 拿的是**同一份 argv**
+    /// ——同一个死 id 再 `--resume` 一次，必然再失败一次，然后用户拿到一句看不懂的英文。
+    #[test]
+    fn a_missing_resume_target_reconnects_without_resume_exactly_once() {
+        assert_eq!(
+            persistent_failure_action(REAL_MISSING_SESSION_ERROR, "claude", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+        // 已经降级过一次还失败 ⇒ 原因不是 resume，别再兜圈子。
+        assert_eq!(
+            persistent_failure_action(REAL_MISSING_SESSION_ERROR, "claude", false, false, true),
+            PersistentFailureAction::Fatal
+        );
+    }
+
+    /// 启动阶段暴露的那条（`connect()` 的 `try_wait` 抓到「立刻退出」+ stderr 尾部）
+    /// 必须命中同一条判据 —— 判据是 `contains`，不是全等。
+    #[test]
+    fn the_startup_flavour_of_the_same_failure_is_recognized_too() {
+        let from_connect = format!(
+            "claude-init: 进程启动后立刻退出（exit code: 1）\n\n<details>\n{REAL_MISSING_SESSION_ERROR}\n</details>"
+        );
+        assert_eq!(
+            persistent_failure_action(&from_connect, "claude", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+    }
+
+    /// 判据不能宽到把别的失败也拽进来：那会让真实的认证 / 瞬时故障走错分支。
+    #[test]
+    fn unrelated_failures_do_not_look_like_a_missing_resume_target() {
+        for err in [
+            "Not logged in · Please run /login",
+            "claude 常驻会话在轮次中退出",
+            "No message found with message.uuid of: abc",
+            "Session not found: abc",
+            "",
+        ] {
+            assert_ne!(
+                persistent_failure_action(err, "claude", false, false, false),
+                PersistentFailureAction::ReconnectWithoutResume,
+                "{err:?} 被误判成 resume 失效"
+            );
+        }
+    }
+
+    /// 取消永远优先：用户刚点了停止，不该被解读成任何一种重连。
+    #[test]
+    fn cancellation_still_wins_over_the_resume_downgrade() {
+        assert_eq!(
+            persistent_failure_action("cancelled", "claude", false, false, false),
+            PersistentFailureAction::Cancelled
+        );
+    }
+
+    /// 降级后的 argv 必须是「开新会话」而不是「换个 id 继续 resume」：
+    /// 死会话的 id 不存在，`--resume` 无论换成谁都续不上。
+    #[test]
+    fn the_downgraded_args_open_a_brand_new_session() {
+        use crate::external_agents::defs::claude::{
+            claude_args_fresh_session, claude_session_id_from_args,
+        };
+        let dead = vec![
+            "-p".to_string(),
+            "--resume".to_string(),
+            "dead-id".to_string(),
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+        ];
+        let fresh = claude_args_fresh_session(&dead, "brand-new-id");
+        assert!(
+            !fresh.contains(&"--resume".to_string()),
+            "还带着 --resume ⇒ 必然再失败一次：{fresh:?}"
+        );
+        assert!(
+            !fresh.contains(&"dead-id".to_string()),
+            "死 id 的值没被一起摘掉（会变成非法位置参数）：{fresh:?}"
+        );
+        assert!(fresh
+            .windows(2)
+            .any(|w| w == ["--session-id", "brand-new-id"]));
+        assert_eq!(
+            claude_session_id_from_args(&fresh).as_deref(),
+            Some("brand-new-id")
+        );
+        // 其余参数原样保留。
+        assert!(fresh
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "bypassPermissions"]));
+    }
+
+    #[test]
+    fn cancel_escalates_only_after_grace() {
+        let now = std::time::Instant::now();
+        let grace = std::time::Duration::from_secs(10);
+        // No cancel requested → never escalate.
+        assert!(!cancel_should_escalate(None, now, grace));
+        // Cancel just now → within grace, don't escalate.
+        assert!(!cancel_should_escalate(Some(now), now, grace));
+        // Cancel 11s ago → escalate to Close.
+        let past = now
+            .checked_sub(std::time::Duration::from_secs(11))
+            .expect("instant in range");
+        assert!(cancel_should_escalate(Some(past), now, grace));
+    }
+
+    // ---- B1：常驻 claude（取消存活 / 配置变更重连 / 每轮正文）----
+
+    use crate::external_agents::session::live::CANCELLED_SESSION_LOST;
+
+    /// 两种取消都走 cancelled 出口：不弹错误气泡、不发上下文重置提示、更不重发本轮 prompt。
+    #[test]
+    fn both_cancel_flavours_are_cancellations() {
+        assert!(is_cancellation("cancelled"));
+        assert!(is_cancellation(CANCELLED_SESSION_LOST));
+        assert!(!is_cancellation("ACP session exited mid-turn"));
+        assert!(!is_cancellation(""));
+        assert_eq!(
+            persistent_failure_action(CANCELLED_SESSION_LOST, "claude", false, false, false),
+            PersistentFailureAction::Cancelled
+        );
+    }
+
+    /// **整个改造的验收点之一**：claude 协议级取消之后常驻会话必须留在注册表里。
+    /// 丢弃条目 ⇒ control sender 落地 ⇒ actor 收到通道关闭 ⇒ 子进程被关停，
+    /// 于是点一次「停止」就等于把会话上下文和 0.1s 冷启动一起扔掉。
+    #[test]
+    fn a_claude_cancel_keeps_the_live_session() {
+        assert!(cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::ClaudeStreamJson
+        ));
+        // 硬 Close / 进程已死：任何协议都不保留（留着就是个死 actor）。
+        assert!(!cancel_keeps_live_session(
+            CANCELLED_SESSION_LOST,
+            StreamFormat::ClaudeStreamJson
+        ));
+        // ACP / codex 的 reader 在取消后停在流中间，复用会读到残帧 ⇒ 保持原行为。
+        assert!(!cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::AcpJsonRpc
+        ));
+        assert!(!cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::CodexAppServer
+        ));
+        // 真实失败一律丢弃。
+        assert!(!cancel_keeps_live_session(
+            "claude 常驻会话在轮次中退出",
+            StreamFormat::ClaudeStreamJson
+        ));
+    }
+
+    /// claude 的 `AskUserQuestion` 入参必须能映射成 Kivio 的问用户卡片，否则这个功能
+    /// 就退回到「当场拒」——claude 在 Kivio 里从此不能反问用户。
+    #[test]
+    fn claude_ask_user_input_maps_to_the_ask_user_card() {
+        let input = serde_json::json!({
+            "questions": [{
+                "question": "用哪种缓存？",
+                "header": "Cache",
+                "multiSelect": false,
+                "options": [
+                    { "label": "Redis", "description": "跨进程共享" },
+                    { "label": "内存", "description": null },
+                ],
+            }],
+        });
+        let prompt = ask_user_prompt_from_claude_input(&input).expect("必须能映射");
+        assert_eq!(prompt.questions.len(), 1);
+        let question = &prompt.questions[0];
+        assert_eq!(question.prompt, "用哪种缓存？");
+        assert!(!question.allow_multiple);
+        // 选项 id 是**下标**（claude 的选项没有 id），答复时按同一个下标翻回 label。
+        assert_eq!(question.options[0].id, "0");
+        assert_eq!(question.options[0].label, "Redis");
+        assert_eq!(
+            question.options[0].description.as_deref(),
+            Some("跨进程共享")
+        );
+        assert_eq!(question.options[1].id, "1");
+        assert!(question.options[1].description.is_none());
+    }
+
+    /// 形状不认识时必须返回 `None` —— 调用方据此退回普通审批卡，而不是静默吞掉询问
+    /// （吞掉 = CLI 那条 promise 永远等不到回复 = 整轮挂死）。
+    #[test]
+    fn unknown_ask_user_shapes_degrade_to_none() {
+        assert!(ask_user_prompt_from_claude_input(&serde_json::json!({})).is_none());
+        // 没有选项的问题不成卡片。
+        assert!(ask_user_prompt_from_claude_input(&serde_json::json!({
+            "questions": [{ "question": "空的", "options": [] }],
+        }))
+        .is_none());
+    }
+
+    /// 答复必须按官方形状回：`{questions: <原样>, answers: {"<问题文本>": "<label>"}}`。
+    /// 键是**问题文本**而不是下标 —— 用错就等于没答，claude 会当成没选。
+    #[test]
+    fn ask_user_answers_use_the_question_text_as_key() {
+        let input = serde_json::json!({
+            "questions": [{
+                "question": "用哪种缓存？",
+                "options": [{ "label": "Redis" }, { "label": "内存" }],
+            }],
+        });
+        let answered = crate::chat::ask_user::AskUserResponseResult {
+            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: std::collections::HashMap::from([(
+                "0".to_string(),
+                crate::chat::ask_user::AskUserAnswer {
+                    selected_option_ids: vec!["1".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        let updated = claude_ask_user_updated_input(&input, &answered);
+        assert_eq!(
+            updated["answers"]["用哪种缓存？"],
+            serde_json::json!("内存")
+        );
+        // 原问题必须原样回传（官方要求）。
+        assert_eq!(updated["questions"], input["questions"]);
+    }
+
+    /// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
+    #[test]
+    fn custom_text_wins_over_selected_options() {
+        let input = serde_json::json!({
+            "questions": [{ "question": "怎么做？", "options": [{ "label": "A" }] }],
+        });
+        let answered = crate::chat::ask_user::AskUserResponseResult {
+            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: std::collections::HashMap::from([(
+                "0".to_string(),
+                crate::chat::ask_user::AskUserAnswer {
+                    selected_option_ids: vec!["0".to_string()],
+                    custom_text: Some("都不要，换个思路".to_string()),
+                },
+            )]),
+        };
+        let updated = claude_ask_user_updated_input(&input, &answered);
+        assert_eq!(
+            updated["answers"]["怎么做？"],
+            serde_json::json!("都不要，换个思路")
+        );
+    }
+
+    /// `updatedInput` **整个替换**这次调用的入参，所以原入参里我们不认识的字段必须原样带回，
+    /// 不能自己拼一个 `{questions, answers}` 了事 —— 那样 CLI 加个字段我们就静默丢了它
+    /// （paseo 踩过这个坑，见 `claude_ask_user_updated_input` 的说明）。
+    #[test]
+    fn unknown_input_fields_survive_the_round_trip() {
+        let input = serde_json::json!({
+            "questions": [{ "question": "去哪？", "options": [{ "label": "左" }] }],
+            "someFutureField": { "kept": true },
+        });
+        let answered = crate::chat::ask_user::AskUserResponseResult {
+            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: std::collections::HashMap::from([(
+                "0".to_string(),
+                crate::chat::ask_user::AskUserAnswer {
+                    selected_option_ids: vec!["0".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        let updated = claude_ask_user_updated_input(&input, &answered);
+        assert_eq!(updated["someFutureField"], input["someFutureField"]);
+        assert_eq!(updated["questions"], input["questions"]);
+        assert_eq!(updated["answers"]["去哪？"], serde_json::json!("左"));
+    }
+
+    /// 指纹只对 claude 生效（它的 effort / permission-mode / 系统提示是启动 flag）；
+    /// ACP / codex 恒为默认值 ⇒ 永不触发重连，既有行为不变。
+    #[test]
+    fn launch_config_only_fingerprints_claude() {
+        let claude = launch_config_for_turn(
+            StreamFormat::ClaudeStreamJson,
+            Some("opus"),
+            Some("high"),
+            Some("plan"),
+            Some("hash-1"),
+        );
+        // model **不进指纹**：它能在会话内换（`set_model`），不需要换进程。
+        assert_eq!(claude.flags, "high|plan");
+        assert_eq!(claude.instructions.as_deref(), Some("hash-1"));
+
+        for protocol in [
+            StreamFormat::AcpJsonRpc,
+            StreamFormat::CodexAppServer,
+            StreamFormat::PiRpc,
+        ] {
+            assert_eq!(
+                launch_config_for_turn(
+                    protocol,
+                    Some("opus"),
+                    Some("high"),
+                    Some("plan"),
+                    Some("h")
+                ),
+                LaunchConfig::default(),
+                "{protocol:?} 不该参与启动指纹判定"
+            );
+        }
+    }
+
+    /// 真正的启动 flag 任一变化都要触发重连（`accepts` 为 false）；全都没变则复用。
+    /// **换模型是例外** —— 见下一条测试。
+    #[test]
+    fn every_launch_flag_change_forces_a_reconnect() {
+        let base = |model, reasoning, sandbox, hash| {
+            launch_config_for_turn(
+                StreamFormat::ClaudeStreamJson,
+                model,
+                reasoning,
+                sandbox,
+                hash,
+            )
+        };
+        let established = base(Some("opus"), Some("high"), Some("plan"), Some("h1"));
+        assert!(established.accepts(&base(Some("opus"), Some("high"), Some("plan"), Some("h1"))));
+        assert!(!established.accepts(&base(Some("opus"), Some("low"), Some("plan"), Some("h1"))));
+        assert!(!established.accepts(&base(
+            Some("opus"),
+            Some("high"),
+            Some("bypassPermissions"),
+            Some("h1")
+        )));
+        // 系统提示 / Memory 改了：文件内容变了，而常驻进程只在启动时读一遍。
+        assert!(!established.accepts(&base(Some("opus"), Some("high"), Some("plan"), Some("h2"))));
+    }
+
+    /// **换模型不再换进程**。官方 `Query.setModel()` 在 streaming input mode 下可用，
+    /// 所以模型走会话内的 `set_model` 控制请求；把它留在指纹里等于用户每换一次模型都付
+    /// 一次冷启动 + 一整段历史重放。会话内切换失败时 `run_turn` 返回 `NEEDS_RECONNECT`，
+    /// 退回换进程 —— 所以摘掉它不会让「换了却没生效」变成静默失败。
+    #[test]
+    fn changing_only_the_model_reuses_the_process() {
+        let with = |model| {
+            launch_config_for_turn(
+                StreamFormat::ClaudeStreamJson,
+                model,
+                Some("high"),
+                Some("plan"),
+                Some("h1"),
+            )
+        };
+        assert!(with(Some("opus")).accepts(&with(Some("sonnet"))));
+        assert!(with(Some("sonnet")).accepts(&with(None)));
+    }
+
+    /// claude 每轮都发整份 composed prompt：会话级指令走启动 flag、不在正文里，剩下的
+    /// skill 正文 + 附件说明是 per-turn 的，只发最新用户消息会让它们从第 2 轮起静默消失。
+    #[test]
+    fn claude_sends_the_full_composed_prompt_every_turn() {
+        let composed = "## Skill: pdf\n<body>\n\n用户消息";
+        let latest = "用户消息";
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::ClaudeStreamJson, composed, latest),
+            composed
+        );
+        // codex / ACP 的 full_prompt 首轮含指令，复用轮只发最新消息（保持原行为）。
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::CodexAppServer, composed, latest),
+            latest
+        );
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::AcpJsonRpc, composed, latest),
+            latest
+        );
+    }
+
+    /// 常驻路径上 `exit_code` 恒为 `None`（只有非持久分支才 `wait()` 子进程），
+    /// 所以「非零退出 = 失败」这条规则在常驻会话上天然不触发。
+    #[test]
+    fn the_nonzero_exit_rule_does_not_apply_to_persistent_sessions() {
+        assert!(!nonzero_exit_is_a_failure(None, false));
+        assert!(!nonzero_exit_is_a_failure(None, true));
     }
 }

@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { MoreHorizontal } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
-import type { Lang } from '../settings/i18n'
+import { i18n, type I18n, type Lang } from '../settings/i18n'
 import {
   ConversationContextMenu,
   type ConversationMenuAnchor,
@@ -13,11 +13,12 @@ function conversationFolderLabel(
   conv: ConversationListItem,
   projects: ChatProject[],
   sets: ChatSet[],
+  t: I18n,
 ): string {
   const setId = conv.set_id ?? conv.setId ?? null
   if (setId) {
     const setName = sets.find((s) => s.id === setId)?.name
-    if (setName) return `集 · ${setName}`
+    if (setName) return `${t.chatSetPrefix} · ${setName}`
   }
   const projectId = conv.project_id ?? conv.projectId ?? null
   const project = projectId
@@ -39,6 +40,15 @@ interface ConversationListProps {
   // 「最近」平铺列表用：在每条对话右侧显示其所属「集 / 项目」标签（与搜索弹层一致）。
   // 项目/集 tab 的嵌套列表不传（已在该分组下，标签冗余）。
   showFolderLabel?: boolean
+  /**
+   * 集/项目下的手动排序。**不传 = 不可拖**（「最近」就不传：那里的语义是时间线）。
+   * `scopeId` 写进容器的 `data-reorder-scope`，让 useInsertionReorder 只在本分组内取样。
+   */
+  reorder?: {
+    scopeId: string
+    draggingId: string | null
+    startDrag: (e: React.PointerEvent<HTMLElement>, id: string) => void
+  }
   onSelectConversation: (id: string) => void
   onRenameConversation: (id: string, title: string) => Promise<void>
   onExportConversation: (id: string, title: string) => Promise<void>
@@ -58,6 +68,7 @@ export const ConversationList = memo(function ConversationList({
   indent = false,
   showAssistantName = true,
   showFolderLabel = false,
+  reorder,
   onSelectConversation,
   onRenameConversation,
   onExportConversation,
@@ -69,6 +80,7 @@ export const ConversationList = memo(function ConversationList({
     conversationId: string
     anchor: ConversationMenuAnchor
   } | null>(null)
+  const t = i18n[lang]
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -113,15 +125,19 @@ export const ConversationList = memo(function ConversationList({
 
   return (
     <>
-      <div className={compact ? 'space-y-0.5 py-0.5' : 'space-y-0.5 py-1'}>
-        {conversations.map((conv, index) => {
+      <div
+        className={compact ? 'space-y-0.5 py-0.5' : 'space-y-0.5 py-1'}
+        data-reorder-scope={reorder?.scopeId}
+      >
+        {conversations.map((conv) => {
           const active = currentConversationId === conv.id
           const isGenerating = generatingConversationIds.has(conv.id)
           const isRenaming = renamingId === conv.id
-          const folderLabel = showFolderLabel ? conversationFolderLabel(conv, projects, sets) : ''
+          const folderLabel = showFolderLabel ? conversationFolderLabel(conv, projects, sets, t) : ''
           // 分支对话：把「（分支）」后缀从可截断的标题里拆出，做成不缩的固定标签，
           // 避免侧栏窄宽时被省略号吃掉（forked_from 字段判定，不依赖标题文字）。
           const isFork = Boolean(conv.forked_from ?? conv.forkedFrom)
+          // 后端写进标题的后缀恒为中文（存量数据也是），所以剥离用常量、显示用 t。
           const FORK_SUFFIX = '（分支）'
           const displayTitle =
             isFork && conv.title.endsWith(FORK_SUFFIX)
@@ -155,17 +171,19 @@ export const ConversationList = memo(function ConversationList({
             )
           }
 
+          const isDragging = reorder?.draggingId === conv.id
           return (
             <div
               key={conv.id}
-              className={`chat-motion-row group relative flex min-w-0 items-center rounded-lg ${
+              data-reorder-id={conv.id}
+              onPointerDown={reorder ? (e) => reorder.startDrag(e, conv.id) : undefined}
+              className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
+                isDragging ? 'is-dragging ' : ''
+              }${
                 active
                   ? 'bg-black/[0.07] dark:bg-white/[0.11]'
                   : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
               }`}
-              style={{
-                ['--chat-motion-delay' as string]: `${Math.min(index, 12) * 18}ms`,
-              }}
             >
               <button
                 type="button"
@@ -181,16 +199,20 @@ export const ConversationList = memo(function ConversationList({
                       ? 'font-medium text-neutral-700 dark:text-neutral-300'
                       : 'text-neutral-700 dark:text-neutral-300'
                 }`}
-                title={isGenerating ? `${conv.title}（正在生成…）` : conv.title}
+                title={
+                  isGenerating
+                    ? t.chatTitleGenerating.replace('{title}', conv.title)
+                    : conv.title
+                }
               >
                 <span className="flex min-w-0 items-center gap-1.5">
                   <span className="block min-w-0 flex-1 truncate">{displayTitle}</span>
                   {isFork && (
                     <span
                       className="shrink-0 text-[11px] font-normal text-neutral-400 dark:text-neutral-500"
-                      title="分叉自其它对话"
+                      title={t.chatForkedFromOther}
                     >
-                      （分支）
+                      {t.chatForkSuffix}
                     </span>
                   )}
                   {folderLabel && (
@@ -204,7 +226,7 @@ export const ConversationList = memo(function ConversationList({
                   {isGenerating && (
                     <span
                       className="inline-flex h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-[1.5px] border-neutral-300 border-t-neutral-600 dark:border-neutral-600 dark:border-t-neutral-200"
-                      aria-label="正在生成"
+                      aria-label={t.chatGenerating}
                     />
                   )}
                 </span>
@@ -216,6 +238,7 @@ export const ConversationList = memo(function ConversationList({
               </button>
               <button
                 type="button"
+                data-no-drag
                 onClick={(e) => {
                   e.stopPropagation()
                   openMenu(conv.id, e.currentTarget)
@@ -225,7 +248,7 @@ export const ConversationList = memo(function ConversationList({
                     ? 'opacity-100'
                     : 'opacity-0 group-hover:opacity-100'
                 }`}
-                aria-label="对话操作"
+                aria-label={t.chatConversationActions}
               >
                 <MoreHorizontal size={15} />
               </button>

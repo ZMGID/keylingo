@@ -232,7 +232,10 @@ export function ChatDotGridBackground() {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true })
+    // ponytail: 不开 desynchronized —— 这块画布本来就按 20fps 跑（TARGET_FRAME_MS），
+    // 低延迟直通路径一点收益没有，却会在「transparent(true) 窗口 + 圆角 overflow:hidden 祖先」
+    // 下被 WebView2 降级成不透明黑层，把整个主区涂黑。
+    const ctx = canvas.getContext('2d', { alpha: true })
     if (!ctx) return
     const buckets = bucketsRef.current
     let disposed = false

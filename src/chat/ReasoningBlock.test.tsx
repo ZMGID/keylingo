@@ -27,6 +27,17 @@ describe('ReasoningBlock', () => {
     expect(within(section).getByTestId('reasoning-text')).toHaveTextContent('line four')
   })
 
+  it('leaves max-height unset while streaming so growth never animates', () => {
+    // 流式中若给 body 写 max-height，CSS 过渡会让内容高度逐帧变化（实测一次收起 18 帧），
+    // 消息区的 ResizeObserver 钉底会逐帧重写 scrollTop —— 表现为整屏抖动。
+    const { rerender, container } = render(<ReasoningBlock reasoning="alpha" streaming />)
+    const body = container.querySelector('.chat-motion-reasoning-body') as HTMLElement
+    expect(body.style.maxHeight).toBe('')
+
+    rerender(<ReasoningBlock reasoning={'alpha\nbeta\ngamma'} streaming />)
+    expect(body.style.maxHeight).toBe('')
+  })
+
   it('renders markdown and code fences as plain thinking text', () => {
     render(<ReasoningBlock reasoning={'Before\n```ts\nconst x = 1\n```\nAfter'} streaming />)
     const section = screen.getByLabelText('Thinking')

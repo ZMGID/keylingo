@@ -250,4 +250,207 @@ describe('ToolCallBlock', () => {
     const pre = container.querySelector('pre')
     expect(pre?.textContent).toBe(code)
   })
+
+  it('renders the built-in web search record via the default compact card (Web search · provider)', () => {
+    // 任务 07-23:内置搜索复用默认 web_search 工具卡渲染(不再单独做卡片),
+    // 头部显示「Web search · <provider>」,provider 取自 structured_content.provider。
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'web_search',
+          source: 'native',
+          status: 'success',
+          arguments: JSON.stringify({ query: 'kivio release' }),
+          structured_content: {
+            type: 'builtin_web_search',
+            provider: 'OpenAI',
+            queries: ['kivio release'],
+            citations: [{ title: 'A 站', url: 'https://a.com' }],
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText(/Web search · OpenAI/)).toBeInTheDocument()
+  })
+
+  // ---- 外部 CLI（claude Code）的内置工具：名字 PascalCase + 字段名 file_path ----
+  //
+  // 两处**各自独立**的错配：工具名不归一化（switch 分支写的是小写）、参数字段名只读
+  // `path`（claude 用 `file_path`）。两者任一没修，折叠行都会退到
+  // `previewValue(arguments)` —— 一坨 220 字符截断的 JSON，完全不可扫读。
+
+  it('maps claude PascalCase Read + file_path to the verb/target row', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'Read',
+          source: 'external_cli',
+          arguments: JSON.stringify({ file_path: 'E:/proj/src/chat/Chat.tsx' }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Read')).toBeInTheDocument()
+    expect(within(button).getByText('Chat.tsx')).toBeInTheDocument()
+    // 修复前的症状：整个参数 JSON 落在折叠行上。
+    expect(within(button).queryByText(/file_path/)).not.toBeInTheDocument()
+  })
+
+  it('maps claude Bash to Run + the command', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'Bash',
+          source: 'external_cli',
+          arguments: JSON.stringify({ command: 'npm run typecheck', description: 'Typecheck' }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Run')).toBeInTheDocument()
+    expect(within(button).getByText('Typecheck')).toBeInTheDocument()
+  })
+
+  it('maps claude Grep / Glob to their pattern targets', () => {
+    const { unmount } = render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'Grep',
+          source: 'external_cli',
+          arguments: JSON.stringify({ pattern: 'kill_process_group', path: 'src-tauri' }),
+        })}
+      />,
+    )
+    let button = screen.getByRole('button')
+    expect(within(button).getByText('Grep')).toBeInTheDocument()
+    expect(within(button).getByText('kill_process_group')).toBeInTheDocument()
+    unmount()
+
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'Glob',
+          source: 'external_cli',
+          arguments: JSON.stringify({ pattern: '**/*.rs', path: 'src-tauri/src' }),
+        })}
+      />,
+    )
+    button = screen.getByRole('button')
+    expect(within(button).getByText('Glob')).toBeInTheDocument()
+    expect(within(button).getByText(/\*\*\/\*\.rs/)).toBeInTheDocument()
+  })
+
+  it('maps claude Edit (old_string/new_string) to Edit + the file basename', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'Edit',
+          source: 'external_cli',
+          arguments: JSON.stringify({
+            file_path: 'src-tauri/src/external_agents/run.rs',
+            old_string: 'let _ = spawned.child.start_kill();',
+            new_string: 'kill_agent_process_tree(&mut spawned.child);',
+          }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Edit')).toBeInTheDocument()
+    expect(within(button).getByText('run.rs')).toBeInTheDocument()
+  })
+
+  // claude 的问用户走的是它自己的工具名。认不出来 = 渲染成普通工具卡（一坨 JSON），
+  // 而不是这行「等待你回答」的痕迹 —— 整张可作答的面板吊在输入框上方，见 AskUserBlock.test。
+  it('renders claude AskUserQuestion as the inline ask-user trace', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'AskUserQuestion',
+          source: 'external_cli',
+          status: 'running',
+          structured_content: {
+            askUser: {
+              phase: 'awaiting',
+              questions: [{
+                id: '0',
+                prompt: '用哪种方式重试？',
+                options: [{ id: '0', label: '指数退避' }, { id: '1', label: '立即重试' }],
+                allow_multiple: false,
+                allow_custom: true,
+              }],
+              answers: {},
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText(/等待你回答/)).toBeInTheDocument()
+    // 消息流里不该出现第二份可点的选项（会和面板抢焦点、也能被点两次）。
+    expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    expect(screen.queryByText('指数退避')).not.toBeInTheDocument()
+  })
+
+  it('maps claude WebFetch / TodoWrite through the snake_case aliases', () => {
+    const { unmount } = render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'WebFetch',
+          source: 'external_cli',
+          arguments: JSON.stringify({ url: 'https://example.com/docs', prompt: 'summarize' }),
+        })}
+      />,
+    )
+    let button = screen.getByRole('button')
+    expect(within(button).getByText('Fetch')).toBeInTheDocument()
+    expect(within(button).getByText(/example\.com\/docs/)).toBeInTheDocument()
+    unmount()
+
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'TodoWrite',
+          source: 'external_cli',
+          arguments: JSON.stringify({
+            todos: [
+              { content: 'a', status: 'completed' },
+              { content: 'b', status: 'pending' },
+            ],
+          }),
+        })}
+      />,
+    )
+    button = screen.getByRole('button')
+    expect(within(button).getByText('Update todos')).toBeInTheDocument()
+    expect(within(button).getByText('1/2')).toBeInTheDocument()
+  })
+
+  it('keeps MCP tool names verbatim (normalization must not lowercase the display name)', () => {
+    // 归一化只用于 switch 匹配。MCP 工具名的大小写有意义，把它小写化会改坏显示。
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'mcp__notion__searchPages',
+          source: 'mcp',
+          arguments: JSON.stringify({ q: 'kivio' }),
+        })}
+      />,
+    )
+    expect(screen.getByText('mcp__notion__searchPages')).toBeInTheDocument()
+  })
+
+  it('still renders Kivio native snake_case tools unchanged', () => {
+    // 归一化不得让原生工具落空：`read_file` / `search_files` 等必须仍命中各自分支。
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'search_files',
+          source: 'native',
+          arguments: JSON.stringify({ query: 'usage_parts_all_zero', path: 'src-tauri' }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Grep')).toBeInTheDocument()
+    expect(within(button).getByText('usage_parts_all_zero')).toBeInTheDocument()
+  })
 })

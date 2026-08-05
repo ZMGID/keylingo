@@ -2,25 +2,28 @@
 
 pub mod agents;
 pub mod api;
+pub mod app_data;
 pub mod capture_geometry;
 pub mod chat;
-pub mod cli_install;
 pub mod commands;
 pub mod connectors;
+pub mod dock;
 pub mod external_agents;
+pub mod fonts;
 pub mod inpainting;
-pub mod kivio_code;
 pub mod lens;
 pub mod lens_commands;
 #[cfg(target_os = "macos")]
 pub mod macos_ocr;
 pub mod mcp;
 pub mod native_tools;
+pub mod notes;
 pub mod offline_models;
 pub mod path_env;
 pub mod plugins;
 pub mod proc;
 pub mod prompts;
+pub mod provider_request;
 pub mod rapidocr;
 pub mod replace_translation;
 #[cfg(target_os = "macos")]
@@ -302,6 +305,15 @@ pub fn run() {
                 rapidocr::RapidOcrClient::new(offline_models),
                 inpainting,
             ));
+            app.manage(chat::repository::ConversationRepository::default());
+            // Dock 的 workspace 文件监听服务（文件树 / Git 面板的秒级刷新源）。
+            app.manage(std::sync::Arc::new(dock::watch::WorkspaceWatchService::new(
+                app.handle().clone(),
+            )));
+            // Dock 终端面板的 PTY 会话登记表（会话 drop 时兜底 kill 子进程）。
+            app.manage(std::sync::Arc::new(dock::terminal::TerminalService::new(
+                app.handle().clone(),
+            )));
 
             // Apply the stored sub-agent concurrency cap (default sizes the gate
             // to DEFAULT_SUB_AGENT_CONCURRENCY; reconcile to the user's setting).
@@ -418,7 +430,7 @@ pub fn run() {
                                 let Some(state) = app_handle.try_state::<AppState>() else {
                                     return;
                                 };
-                                let _ = state.mcp_get_or_connect(&app_handle, &server).await;
+                                let _ = state.mcp_get_or_connect(Some(&app_handle), &server).await;
                             }
                         })
                         .await;
@@ -439,12 +451,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
-            commands::get_kivio_code_config,
-            commands::set_kivio_code_config,
-            commands::get_kivio_code_global_instructions,
-            commands::set_kivio_code_global_instructions,
-            commands::install_cli_command,
-            commands::set_chat_window_background,
+            windows::chat_window_apply_mica,
+            windows::chat_window_set_opaque,
+            windows::chat_traffic_light_center_y,
+            fonts::list_system_fonts,
             commands::get_default_prompt_templates,
             commands::save_settings,
             commands::set_favorite_models,
@@ -456,6 +466,8 @@ pub fn run() {
             commands::translate_text,
             commands::commit_translation,
             commands::open_external,
+            commands::open_local_file,
+            commands::open_data_url_file,
             commands::open_html_preview,
             lens_commands::explain_read_image,
             commands::fetch_models,
@@ -467,6 +479,8 @@ pub fn run() {
             lens_commands::lens_capture_window,
             lens_commands::lens_capture_region,
             lens_commands::lens_register_annotated_image,
+            lens_commands::lens_copy_image_to_clipboard,
+            lens_commands::lens_save_annotated_png,
             lens_commands::lens_ask,
             lens_commands::lens_send_to_chat,
             lens_commands::lens_send_history_to_chat,
@@ -493,6 +507,7 @@ pub fn run() {
             usage::usage_clear,
             chat::commands::interaction::get_request_debug_records,
             chat::commands::interaction::clear_request_debug_records,
+            chat::protocol::chat_sync_state,
             // Chat 模块命令
             chat::commands::catalog::chat_get_conversations,
             chat::commands::interaction::chat_list_background_commands,
@@ -509,11 +524,15 @@ pub fn run() {
             chat::commands::catalog::chat_duplicate_assistant,
             chat::commands::catalog::chat_delete_assistant,
             chat::commands::catalog::chat_get_projects,
+            chat::commands::catalog::chat_reorder_projects,
+            chat::commands::catalog::chat_get_conversation_pins,
+            chat::commands::catalog::chat_set_conversation_pins,
             chat::commands::catalog::chat_create_project,
             chat::commands::catalog::chat_update_project,
             chat::commands::catalog::chat_delete_project,
             chat::commands::catalog::chat_project_open_folder,
             chat::commands::catalog::chat_get_sets,
+            chat::commands::catalog::chat_reorder_sets,
             chat::commands::catalog::chat_create_set,
             chat::commands::catalog::chat_update_set,
             chat::commands::catalog::chat_delete_set,
@@ -542,19 +561,26 @@ pub fn run() {
             chat::commands::mutations::chat_delete_message,
             chat::commands::mutations::chat_set_group_selection,
             chat::commands::mutations::chat_regenerate_message,
+            chat::commands::mutations::chat_rewind_to_message,
             chat::commands::mutations::chat_fork_conversation,
             external_agents::commands::chat_detect_external_agents,
+            external_agents::commands::chat_detect_external_agent_models,
             external_agents::commands::chat_list_external_cli_slash_commands,
             external_agents::commands::chat_set_agent_runtime,
+            external_agents::commands::chat_list_importable_cli_sessions,
+            external_agents::commands::chat_import_cli_sessions,
+            external_agents::commands::chat_imported_history_stale,
             chat::memory::chat_memory_get,
             chat::memory::chat_memory_save,
             chat::memory::chat_memory_open_folder,
             mcp::registry::chat_mcp_list_tools,
             mcp::registry::chat_mcp_test_server,
             mcp::registry::chat_mcp_import_json,
+            mcp::registry::chat_cli_import_scan,
             mcp::registry::chat_mcp_server_status,
             mcp::registry::chat_mcp_list_tool_defs,
             mcp::registry::chat_mcp_reload_server,
+            mcp::registry::chat_mcp_warmup,
             connectors::connector_oauth_connect,
             connectors::obsidian::list_obsidian_vaults_cmd,
             connectors::himalaya::list_email_provider_presets,
@@ -566,6 +592,15 @@ pub fn run() {
             plugins::plugins_install_brief,
             plugins::plugins_set_enabled,
             plugins::plugins_uninstall,
+            notes::notes_list,
+            notes::notes_read,
+            notes::notes_create,
+            notes::notes_update,
+            notes::notes_delete,
+            notes::notes_folders_list,
+            notes::notes_folder_create,
+            notes::notes_folder_rename,
+            notes::notes_folder_delete,
             skills::chat_skills_list,
             skills::chat_skills_read,
             skills::chat_skills_import,
@@ -584,6 +619,39 @@ pub fn run() {
             chat::knowledge_base::ingest::kb_reindex_library,
             chat::knowledge_base::ingest::kb_update_embedding,
             chat::knowledge_base::ingest::kb_set_embed_batch_size,
+            // Dock 模块命令（右侧文件树 + Git 面板 + 终端面板 + workspace 监听）
+            dock::dock_resolve_cwd,
+            dock::fs::dock_fs_list,
+            dock::fs::dock_fs_search,
+            dock::fs::dock_fs_read,
+            dock::fs::dock_fs_write,
+            dock::fs::dock_fs_create,
+            dock::fs::dock_fs_rename,
+            dock::fs::dock_fs_move,
+            dock::fs::dock_fs_delete,
+            dock::fs::dock_fs_open_path,
+            dock::git::dock_git_status,
+            dock::git::dock_git_diff,
+            dock::git::dock_git_log,
+            dock::git::dock_git_commit_diff,
+            dock::git::dock_git_branches,
+            dock::git::dock_git_stage,
+            dock::git::dock_git_stage_all,
+            dock::git::dock_git_unstage,
+            dock::git::dock_git_unstage_all,
+            dock::git::dock_git_discard,
+            dock::git::dock_git_discard_all,
+            dock::git::dock_git_commit,
+            dock::git::dock_git_switch_branch,
+            dock::git::dock_git_create_branch,
+            dock::git::dock_git_init,
+            dock::git::dock_git_diff_stat,
+            dock::git::dock_git_add_to_gitignore,
+            dock::watch::dock_workspace_watch_set,
+            dock::terminal::dock_terminal_create,
+            dock::terminal::dock_terminal_write,
+            dock::terminal::dock_terminal_resize,
+            dock::terminal::dock_terminal_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -594,9 +662,46 @@ pub fn run() {
                 } else {
                     // 真正退出：同步排干 MCP 连接池，杀掉所有持久子进程，避免孤儿进程。
                     let state: State<AppState> = app_handle.state();
-                    tauri::async_runtime::block_on(state.mcp_disconnect_all());
-                    // 丢弃所有活的外部 CLI 会话；每个 actor 关闭其子进程（kill_on_drop 兜底）。
-                    state.close_all_external_live_sessions();
+                    // 带超时：一个卡在握手里的 server 会占着会话锁不放，没有这层
+                    // 上限的话退出钩子会永久阻塞在主线程上 —— 表现是「点关闭没反应、
+                    // 进程不退」，连带其余所有 MCP 子进程全留在系统里。
+                    //
+                    // ⚠️ `timeout(..)` **必须在 async 块里构造**，不能当参数传给 block_on。
+                    // 参数在进入运行时之前就求值了，而 `tokio::time::Sleep` 构造时就要求时间
+                    // 驱动在场，否则 panic「there is no reactor running」。这条 panic 会让
+                    // 下面整段退出清理（外部 CLI 会话 / 后台命令进程组 / 插件预览）全部不执行
+                    // —— 表现是每次退出漏一批孤儿子进程，外加退出码 101。
+                    let drained = tauri::async_runtime::block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            state.mcp_disconnect_all(),
+                        )
+                        .await
+                    });
+                    if drained.is_err() {
+                        // 超时说明某个会话锁拿不到（多半卡在握手里）。优雅关停这条路已经走不通，
+                        // 按 pid 杀进程树兜底 —— 否则那句「falling back to process kill」就是空话，
+                        // stdio 子进程（及它自己拉起的孙子）会留在系统里。
+                        let killed = state.kill_mcp_children_now();
+                        eprintln!(
+                            "MCP disconnect timed out on exit; killed {killed} stdio child process tree(s)."
+                        );
+                    }
+                    // 外部 CLI 会话：必须**同步**等它们关完。只 clear 掉 sender 是不够的
+                    // —— actor 要等下一次被 poll 才会走 close()，而运行时马上就随进程走了，
+                    // `kill_on_drop` 也因此不会触发（Child 在那个永不 drop 的帧里）。
+                    // 结果是每次退出留下一批 CLI 进程，各自还挂着自己拉起的 MCP 子进程。
+                    // 同上：timeout 必须在 async 块里构造。
+                    let closed = tauri::async_runtime::block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            state.close_all_external_live_sessions(),
+                        )
+                        .await
+                    });
+                    if closed.is_err() {
+                        eprintln!("External CLI sessions did not close in time on exit.");
+                    }
                     // 杀掉所有跟踪中的后台 run_command 进程组（跨 turn 存活，只在这里或
                     // 显式 kill_background 才清理），删除其 per-job 日志，避免孤儿进程/文件。
                     let killed = state.kill_all_background_commands();
@@ -619,14 +724,14 @@ pub fn run() {
                         eprintln!("Failed to open chat on dock reopen: {err}");
                     }
                 } else if let Some(window) = first_visible_user_window(app_handle) {
-                    if window.label() == "chat" {
-                        if let Err(err) = open_chat_window(app_handle) {
-                            eprintln!("Failed to restore chat on dock reopen: {err}");
-                        }
-                    } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                    // 已有可见窗口：只把它带到前台，绝不调 open_chat_window——那会把停在
+                    // #chat/settings 的用户重置回 #chat，丢失填到一半的配置。
+                    let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Regular);
+                    if window.is_minimized().ok().unwrap_or(false) {
+                        let _ = window.unminimize();
                     }
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 } else if let Err(err) = open_chat_window(app_handle) {
                     eprintln!("Failed to open chat on dock reopen: {err}");
                 }

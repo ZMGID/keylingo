@@ -87,19 +87,59 @@ const DOCS: &[EvalDoc] = &[
 
 const QUERIES: &[EvalQuery] = &[
     // 中文自然语言改写（措辞与原句不同）——关键词 phrase 查询会漏，这是 D2 的核心。
-    EvalQuery { query: "退款要满足什么条件", relevant: &["refund"], lang: "zh" },
-    EvalQuery { query: "多久能收到货", relevant: &["shipping"], lang: "zh" },
-    EvalQuery { query: "忘记密码怎么办", relevant: &["password"], lang: "zh" },
-    EvalQuery { query: "怎么开发票", relevant: &["invoice"], lang: "zh" },
-    EvalQuery { query: "白金会员有什么好处", relevant: &["vip"], lang: "zh" },
+    EvalQuery {
+        query: "退款要满足什么条件",
+        relevant: &["refund"],
+        lang: "zh",
+    },
+    EvalQuery {
+        query: "多久能收到货",
+        relevant: &["shipping"],
+        lang: "zh",
+    },
+    EvalQuery {
+        query: "忘记密码怎么办",
+        relevant: &["password"],
+        lang: "zh",
+    },
+    EvalQuery {
+        query: "怎么开发票",
+        relevant: &["invoice"],
+        lang: "zh",
+    },
+    EvalQuery {
+        query: "白金会员有什么好处",
+        relevant: &["vip"],
+        lang: "zh",
+    },
     // 精确编号/错误码——应命中。
-    EvalQuery { query: "E1021", relevant: &["errcode"], lang: "code" },
+    EvalQuery {
+        query: "E1021",
+        relevant: &["errcode"],
+        lang: "code",
+    },
     // 英文改写。
-    EvalQuery { query: "how long is the warranty period", relevant: &["warranty"], lang: "en" },
-    EvalQuery { query: "can I return an item I bought", relevant: &["return"], lang: "en" },
+    EvalQuery {
+        query: "how long is the warranty period",
+        relevant: &["warranty"],
+        lang: "en",
+    },
+    EvalQuery {
+        query: "can I return an item I bought",
+        relevant: &["return"],
+        lang: "en",
+    },
     // 负样本——知识库里没有答案。
-    EvalQuery { query: "你们支持哪些加密货币支付", relevant: &[], lang: "neg" },
-    EvalQuery { query: "what is the CEO's phone number", relevant: &[], lang: "neg" },
+    EvalQuery {
+        query: "你们支持哪些加密货币支付",
+        relevant: &[],
+        lang: "neg",
+    },
+    EvalQuery {
+        query: "what is the CEO's phone number",
+        relevant: &[],
+        lang: "neg",
+    },
 ];
 
 struct Metrics {
@@ -246,16 +286,26 @@ fn eval_retrieval_report() {
     for q in QUERIES {
         *by_lang.entry(q.lang).or_default() += 1;
     }
-    println!("corpus: {} docs, {} queries {by_lang:?}", DOCS.len(), QUERIES.len());
+    println!(
+        "corpus: {} docs, {} queries {by_lang:?}",
+        DOCS.len(),
+        QUERIES.len()
+    );
     row("vector", &vec_only);
     row("keyword", &kw_only);
     row("hybrid", &hybrid);
-    println!("negatives    | top-1 fused mean {neg_mean:.5} (n={})", neg_top.len());
+    println!(
+        "negatives    | top-1 fused mean {neg_mean:.5} (n={})",
+        neg_top.len()
+    );
     println!("======================================================\n");
 
     // Weak sanity: the pipeline must retrieve *something* relevant on the vector
     // lane, and hybrid must be no worse than vector-only at R@20.
-    assert!(vec_only.recall20 > 0.0, "vector lane retrieved nothing relevant");
+    assert!(
+        vec_only.recall20 > 0.0,
+        "vector lane retrieved nothing relevant"
+    );
     assert!(
         hybrid.recall20 + 1e-6 >= vec_only.recall20,
         "hybrid R@20 regressed below vector-only"

@@ -4,7 +4,6 @@ import {
   Bot,
   Brain,
   CheckCircle2,
-  ChevronDown,
   CircleSlash,
   Copy,
   Download,
@@ -34,7 +33,9 @@ import type { LucideIcon } from 'lucide-react'
 import type { AgentTodoItem, AgentTodoState, AgentTodoStatus, ToolCallRecord, ToolCallStatus } from './types'
 import { normalizeToolCallStatus } from './toolStatus'
 import { formatToolResultPreview } from './toolResultPreview'
-import { toolRecordRawName as toolRawName } from './segments'
+import { toolCallDiffStats, toolRecordRawName } from './segments'
+import { requestDockDiffPreview, requestDockPreview } from './dock/dockPreview'
+import { DiffView } from './dock/DiffView'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
 import { AskUserBlock } from './AskUserBlock'
 import { ChatMarkdown } from './ChatMarkdown'
@@ -102,6 +103,58 @@ function parsedArguments(toolCall: ToolCallRecord): Record<string, unknown> | nu
   } catch {
     return null
   }
+}
+
+/** 外部 CLI 的内置工具名 → 本文件各 switch 使用的规范名（Kivio 原生工具的 snake_case）。
+ *
+ *  key 是「小写 + 去掉下划线/连字符/空格」后的形态，所以 `WebFetch` 与 `web_fetch` 归到
+ *  同一个 key。表里**只列本文件确实有对应分支**的工具；其余（`Task` / `Skill` 的独有语义等）
+ *  保持原名走 default —— 显示工具本名，比映射到一个语义不符的分支好。 */
+const CLI_TOOL_NAME_ALIASES: Record<string, string> = {
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  todowrite: 'todo_write',
+  // claude 的 MultiEdit 用 `edits[]`，正是 `fileToolArgumentPreview` 的 edit 分支已支持的形状。
+  multiedit: 'edit',
+  // NotebookEdit 的目标路径在 `notebook_path`，见 `toolPathArgument`。
+  notebookedit: 'edit',
+  // claude 的 `AskUserQuestion` 就是 Kivio 的问用户卡片：宿主已经把它的入参映射成 `askUser`
+  // 结构化载荷、答复也走同一条 `chat_submit_user_choice`（`external_agents/run.rs` 的
+  // `ask_user_prompt_from_claude_input` / `claude_ask_user_updated_input`）。少了这条别名，
+  // `isAskUserTool` 认不出它 ⇒ 渲染成一张普通工具卡 ⇒ 用户**没有任何控件可答**，只能看它
+  // 转到 600s 超时、被当成拒绝回给 CLI。整条链路后端全通，唯一的断点就是这一行。
+  askuserquestion: 'ask_user',
+}
+
+/** 展示映射用的规范工具名。
+ *
+ *  `toolRecordRawName` 原样返回工具名、不做归一化，而下面所有 switch 分支写的都是小写
+ *  snake_case —— claude Code 的内置工具是 PascalCase 的 `Read` / `Bash` / `Grep` / `Glob` /
+ *  `Edit` / `WebFetch` / `TodoWrite`，于是**全部落进 default**：`getToolTarget` 返回 ''，
+ *  折叠行退到 `previewValue(arguments)`，显示一坨 220 字符截断的 JSON，完全不可扫读。
+ *
+ *  **只用于 switch 匹配，不要拿它当显示文案**：MCP 工具名（`mcp__server__toolName`）的
+ *  大小写有意义，`getToolName` 的 default 分支必须回落 `toolRecordRawName` 的原名。 */
+function toolRawName(toolCall: ToolCallRecord): string {
+  const lower = toolRecordRawName(toolCall).toLowerCase()
+  return CLI_TOOL_NAME_ALIASES[lower.replace(/[_\-\s]/g, '')] ?? lower
+}
+
+/** 文件类工具的目标路径。
+ *
+ *  claude Code 的内置工具用 `file_path`（NotebookEdit 用 `notebook_path`），Kivio 原生工具
+ *  用 `path`。只读 `path` 的话，即便工具名归一化对上了，claude 的 Read/Write/Edit 依然拿不到
+ *  目标 —— 名字和字段名是两处**各自独立**的错配。 */
+function toolPathArgument(args: Record<string, unknown> | null): string {
+  return firstString(
+    args?.path,
+    args?.file_path,
+    args?.filePath,
+    args?.notebook_path,
+    args?.notebookPath,
+    args?.relative_path,
+    args?.relativePath,
+  )
 }
 
 function toolGlyph(toolCall: ToolCallRecord): LucideIcon | ComponentType<{ size?: number; strokeWidth?: number; className?: string }> {
@@ -310,7 +363,7 @@ function subagentUsageLine(usage: SubagentView['usage']): string {
 
 /** Parse sub-agent state (P3) from a tool record's structured content: either
  *  the final `{ type: "subagent", ... }` result or the live `subagentProgress`
- *  merged in from `chat-subagent` events. */
+ *  merged in from typed subagent protocol events. */
 function structuredSubagent(toolCall: ToolCallRecord): SubagentView | null {
   const structured = objectValue(toolCall.structured_content ?? toolCall.structuredContent)
   if (!structured) return null
@@ -465,13 +518,6 @@ function ConsultCard({
           >
             {statusLine}
           </span>
-        )}
-        {hasBody && (
-          <ChevronDown
-            size={12}
-            strokeWidth={2}
-            className={`ml-auto shrink-0 text-neutral-400 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] dark:text-neutral-500 ${open ? 'rotate-180' : ''}`}
-          />
         )}
       </button>
 
@@ -864,10 +910,22 @@ function fileMutationStats(mutation: FileMutationStructuredContent): string {
   return `+${mutation.additions ?? 0} -${mutation.removals ?? 0}`
 }
 
+/** 完整 diff 文本（单文件 diff 或逐文件拼接），显示前洗掉 Windows `\\?\` 前缀。 */
+function mutationDiffText(mutation: FileMutationStructuredContent): string {
+  return (mutation.diff || (mutation.files ?? []).map((file) => file.diff).filter(Boolean).join('\n'))
+    .replace(/\\\\\?\\/g, '')
+    .trim()
+}
+
+/** Windows canonicalize 会给绝对路径加 `\\?\` 前缀（后端结果原样带出），显示前洗掉。 */
+function cleanWinPath(path: string): string {
+  return path.replace(/^(\\\\\?\\|\/\/\?\/)/, '')
+}
+
 function fileMutationTarget(mutation: FileMutationStructuredContent): string {
-  if (mutation.files?.length === 1) return mutation.files[0]?.path || ''
+  if (mutation.files?.length === 1) return cleanWinPath(mutation.files[0]?.path || '')
   if (mutation.files?.length) return `${mutation.files.length} 个文件`
-  return mutation.resolvedPath || mutation.resolved_path || ''
+  return cleanWinPath(mutation.resolvedPath || mutation.resolved_path || '')
 }
 
 function fileMutationPreview(mutation: FileMutationStructuredContent): string {
@@ -876,11 +934,84 @@ function fileMutationPreview(mutation: FileMutationStructuredContent): string {
   return [target, stats].filter(Boolean).join(' · ')
 }
 
+/** 从参数里抽出 Edit/Write 的新旧文本对（外部 CLI 的记录没有后端 structured 统计时用）。 */
+function argEditPairs(rawName: string, args: Record<string, unknown> | null): Array<{ old: string; new: string }> {
+  if (rawName === 'write' || rawName === 'write_file') {
+    const content = stringValue(args?.content) || stringValue(args?.text)
+    return content ? [{ old: '', new: content }] : []
+  }
+  const edits = Array.isArray(args?.edits) ? args.edits : null
+  if (edits) {
+    return edits
+      .map((edit) => objectValue(edit))
+      .filter((edit): edit is Record<string, unknown> => Boolean(edit))
+      .map((edit) => ({ old: stringValue(edit.old_string), new: stringValue(edit.new_string) }))
+      .filter((pair) => pair.old || pair.new)
+  }
+  const oldString = stringValue(args?.old_string)
+  const newString = stringValue(args?.new_string)
+  return oldString || newString ? [{ old: oldString, new: newString }] : []
+}
+
+/** 折叠行的 `+N -N`：优先用后端 structured_content 的真实统计；没有（外部 CLI 的
+ *  Edit/Write）就走 `toolCallDiffStats` 按参数行数估算，只在调用成功后显示。 */
+function fileMutationInlineStats(
+  toolCall: ToolCallRecord,
+  mutation: FileMutationStructuredContent | null,
+): { additions: number; removals: number } | null {
+  if (mutation) return { additions: mutation.additions ?? 0, removals: mutation.removals ?? 0 }
+  return toolCallDiffStats(toolCall)
+}
+
+/** 外部 CLI 的 Edit/Write 没有后端 diff：从参数新旧文本拼一个 ± 行的伪 diff 供展开区显示。 */
+function argEditDiff(toolCall: ToolCallRecord, args: Record<string, unknown> | null): string {
+  const rawName = toolRawName(toolCall)
+  if (!isFileMutationTool(rawName)) return ''
+  const chunks = argEditPairs(rawName, args).map((pair) => {
+    const removed = pair.old ? pair.old.split('\n').map((line) => `- ${line}`).join('\n') : ''
+    const added = pair.new ? pair.new.split('\n').map((line) => `+ ${line}`).join('\n') : ''
+    return [removed, added].filter(Boolean).join('\n')
+  })
+  const diff = chunks.filter(Boolean).join('\n···\n')
+  return diff.length > 4000 ? `${diff.slice(0, 4000)}…` : diff
+}
+
+/** 折叠行行尾的 `+N -N` 徽标：加绿减红，与分组头总计一致。可点时跳 dock 侧栏 diff 预览。 */
+function InlineDiffStats({
+  additions,
+  removals,
+  onClick,
+}: {
+  additions: number
+  removals: number
+  onClick?: () => void
+}) {
+  return (
+    <span
+      className={`shrink-0 font-mono text-[11px] tabular-nums${
+        onClick ? ' cursor-pointer rounded px-0.5 hover:bg-neutral-500/10 dark:hover:bg-neutral-400/10' : ''
+      }`}
+      onClick={
+        onClick
+          ? (e) => {
+              e.stopPropagation()
+              onClick()
+            }
+          : undefined
+      }
+    >
+      <span className="text-emerald-600 dark:text-emerald-400">+{additions}</span>
+      <span className="ml-1 text-red-500/80 dark:text-red-400/80">-{removals}</span>
+    </span>
+  )
+}
+
 function FileMutationDetails({ mutation }: { mutation: FileMutationStructuredContent }) {
   const files = mutation.files ?? []
   const warnings = mutation.warnings ?? []
   const diagnostics = mutation.diagnostics ?? []
-  const diff = (mutation.diff || files.map((file) => file.diff).filter(Boolean).join('\n')).trim()
+  // ponytail: 全局洗掉 `\\?\`（含 diff 头里的 b/\\?\C:\...）；正文行里出现该串的概率可忽略。
+  const diff = mutationDiffText(mutation)
 
   return (
     <div className="space-y-1.5">
@@ -895,11 +1026,11 @@ function FileMutationDetails({ mutation }: { mutation: FileMutationStructuredCon
                 <span className="shrink-0 text-neutral-400 dark:text-neutral-500">
                   {fileOperationLabel(file.operation)}
                 </span>
-                <span className="min-w-0 truncate">{file.path}</span>
-                <span className="shrink-0 tabular-nums text-[#C56646] dark:text-[#E39A78]">
+                <span className="min-w-0 truncate">{cleanWinPath(file.path)}</span>
+                <span className="shrink-0 tabular-nums text-emerald-600 dark:text-emerald-400">
                   +{file.additions}
                 </span>
-                <span className="shrink-0 tabular-nums text-red-500/80">
+                <span className="shrink-0 tabular-nums text-red-500/80 dark:text-red-400/80">
                   -{file.removals}
                 </span>
               </div>
@@ -928,13 +1059,8 @@ function FileMutationDetails({ mutation }: { mutation: FileMutationStructuredCon
         </div>
       )}
       {diff && (
-        <div>
-          <div className="text-[10.5px] font-medium text-neutral-400 dark:text-neutral-500">
-            Diff
-          </div>
-          <pre className="custom-scrollbar max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/[0.035] px-2 py-1.5 font-mono text-[10.5px] leading-4 text-neutral-600 dark:bg-white/[0.055] dark:text-neutral-300">
-            {diff}
-          </pre>
+        <div className="custom-scrollbar max-h-96 overflow-auto">
+          <DiffView patch={diff} lang="zh" />
         </div>
       )}
     </div>
@@ -960,7 +1086,7 @@ function fileOperationLabel(operation: string): string {
 
 function fileToolArgumentPreview(toolCall: ToolCallRecord, args: Record<string, unknown> | null): string {
   const rawName = toolRawName(toolCall)
-  const path = typeof args?.path === 'string' ? args.path.trim() : ''
+  const path = toolPathArgument(args)
   const query = typeof args?.query === 'string'
     ? args.query.trim()
     : typeof args?.pattern === 'string'
@@ -1013,6 +1139,8 @@ function getDuration(toolCall: ToolCallRecord): number | undefined {
 
 function getToolName(toolCall: ToolCallRecord): string {
   const raw = toolRawName(toolCall) || 'Tool'
+  // default 分支要回落的**原始**名（MCP 工具名大小写有意义，归一化后的名字不能拿来显示）。
+  const displayName = toolRecordRawName(toolCall) || 'Tool'
 
   if (raw === 'skill' || raw === 'skill_activate') return 'Activate skill'
   // 全英文、原形动词（不加 -ed）：直接用工具本名的动词形式，如 Read / Run / Grep / Glob。
@@ -1066,7 +1194,7 @@ function getToolName(toolCall: ToolCallRecord): string {
   if (raw === 'mixer_vision') return 'Vision'
   if (raw === 'mixer_generate_image') return 'Generate image'
   if (raw === 'todo_write' || raw === 'todo_update') return 'Update todos'
-  return raw
+  return displayName
 }
 
 function firstString(...values: unknown[]): string {
@@ -1101,7 +1229,7 @@ function readLineLabel(toolCall: ToolCallRecord, args: Record<string, unknown> |
 function getToolTarget(toolCall: ToolCallRecord): string {
   const raw = toolRawName(toolCall)
   const args = parsedArguments(toolCall)
-  const path = firstString(args?.path, args?.relative_path, args?.relativePath)
+  const path = toolPathArgument(args)
   const primary = ((): string => {
     switch (raw) {
       case 'read':
@@ -1398,10 +1526,33 @@ function DefaultToolCallBlock({
 
   const toolName = getToolName(toolCall)
   const target = useMemo(() => getToolTarget(toolCall), [toolCall])
+  const args = useMemo(() => parsedArguments(toolCall), [toolCall])
   const fileMutation = useMemo(() => structuredFileMutation(toolCall), [toolCall])
+  const inlineStats = useMemo(
+    () => fileMutationInlineStats(toolCall, fileMutation),
+    [toolCall, fileMutation],
+  )
+  // 后端没给 diff（外部 CLI）时才用参数拼伪 diff，二者取其一。
+  const argDiff = useMemo(
+    () => (fileMutation ? '' : argEditDiff(toolCall, args)),
+    [toolCall, fileMutation, args],
+  )
   const knowledgeHits = useMemo(() => knowledgeSearchHits(toolCall), [toolCall])
   const argumentPreview = useMemo(() => getArgumentPreview(toolCall), [toolCall])
   const resultPreview = useMemo(() => getResultPreview(toolCall), [toolCall])
+  // 文件类工具（Read/Write/Edit）的目标路径：折叠行文件名可点，跳到右侧 dock 查看器预览。
+  const previewPath = useMemo(() => {
+    const raw = toolRawName(toolCall)
+    if (!['read', 'read_file', 'write', 'write_file', 'edit', 'edit_file'].includes(raw)) return ''
+    return toolPathArgument(args)
+  }, [toolCall, args])
+  // +N -N 徽标点击用的完整 diff：真 diff 优先，外部 CLI 的伪 diff 包一层最小 patch 头。
+  const diffPatch = useMemo(() => {
+    if (fileMutation) return mutationDiffText(fileMutation)
+    if (!argDiff) return ''
+    const p = previewPath.replace(/\\/g, '/')
+    return p ? `--- a/${p}\n+++ b/${p}\n@@ @@\n${argDiff}` : `@@ @@\n${argDiff}`
+  }, [fileMutation, argDiff, previewPath])
   const error = toolCall.error ? compactToolError(toolCall.error) : ''
   const hasFileMutationDetails = Boolean(
     fileMutation && (
@@ -1411,7 +1562,7 @@ function DefaultToolCallBlock({
       fileMutation.diagnostics?.length
     ),
   )
-  const hasDetails = Boolean(argumentPreview || resultPreview || error || hasFileMutationDetails || knowledgeHits)
+  const hasDetails = Boolean(argumentPreview || resultPreview || error || hasFileMutationDetails || knowledgeHits || argDiff)
 
   return (
     <div className="not-prose mb-1 text-[12.5px] leading-5 text-neutral-500 dark:text-neutral-400">
@@ -1421,7 +1572,7 @@ function DefaultToolCallBlock({
           if (hasDetails) setOpen((value) => !value)
         }}
         aria-expanded={hasDetails ? open : undefined}
-        className={`max-w-full min-w-0 inline-flex items-center gap-1.5 rounded-md py-0 transition-colors ${
+        className={`max-w-full min-w-0 inline-flex items-center gap-1.5 rounded-md py-0 text-[11.5px] transition-colors ${
           hasDetails
             ? 'hover:text-neutral-700 dark:hover:text-neutral-200'
             : 'cursor-default'
@@ -1436,15 +1587,39 @@ function DefaultToolCallBlock({
           {toolName || '工具'}
         </span>
         {target && (
-          <span className="min-w-0 truncate text-neutral-400 dark:text-neutral-500">
+          <span
+            className={`min-w-0 truncate ${
+              previewPath || diffPatch
+                ? 'cursor-pointer text-neutral-400 underline-offset-2 hover:text-neutral-700 hover:underline dark:text-neutral-500 dark:hover:text-neutral-200'
+                : 'text-neutral-400 dark:text-neutral-500'
+            }`}
+            onClick={
+              previewPath || diffPatch
+                ? (e) => {
+                    e.stopPropagation()
+                    // Write/Edit 有 diff 就直接看 diff（Claude Code 行为：整行绿加红删）；
+                    // Read / 没有 diff 的才开纯文件查看器。
+                    if (diffPatch) {
+                      requestDockDiffPreview({ title: `${toolName} ${target}`.trim(), patch: diffPatch })
+                    } else {
+                      requestDockPreview(previewPath)
+                    }
+                  }
+                : undefined
+            }
+          >
             {target}
           </span>
         )}
-        {hasDetails && (
-          <ChevronDown
-            size={12}
-            strokeWidth={2}
-            className={`shrink-0 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] ${open ? 'rotate-180' : ''}`}
+        {inlineStats && (
+          <InlineDiffStats
+            additions={inlineStats.additions}
+            removals={inlineStats.removals}
+            onClick={
+              diffPatch
+                ? () => requestDockDiffPreview({ title: `${toolName} ${target}`.trim(), patch: diffPatch })
+                : undefined
+            }
           />
         )}
       </button>
@@ -1475,6 +1650,26 @@ function DefaultToolCallBlock({
             {open && knowledgeHits && <KnowledgeHits hits={knowledgeHits} />}
             {fileMutation && hasFileMutationDetails && (
               <FileMutationDetails mutation={fileMutation} />
+            )}
+            {open && argDiff && (
+              <div className="custom-scrollbar max-h-72 overflow-auto rounded-md border border-neutral-200/80 dark:border-neutral-700/60">
+                <pre className="font-mono text-[11px] leading-[1.5]">
+                  {argDiff.split('\n').map((line, index) => (
+                    <div
+                      key={index}
+                      className={
+                        line.startsWith('+')
+                          ? 'bg-emerald-500/10 px-2 text-emerald-800 dark:text-emerald-200'
+                          : line.startsWith('-')
+                            ? 'bg-red-500/10 px-2 text-red-800 dark:text-red-200'
+                            : 'px-2 text-neutral-500 dark:text-neutral-400'
+                      }
+                    >
+                      {line || ' '}
+                    </div>
+                  ))}
+                </pre>
+              </div>
             )}
             {error && (
               <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">

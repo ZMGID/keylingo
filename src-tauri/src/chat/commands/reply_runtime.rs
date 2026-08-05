@@ -123,6 +123,8 @@ impl Drop for ChatReplyGuard<'_> {
 /// 单模型路径传 `None`，行为与改造前完全一致。
 pub(super) struct ReplyArm {
     pub(super) group_id: String,
+    pub(super) group_size: usize,
+    pub(super) arm_index: usize,
     pub(super) provider_id: String,
     pub(super) model: String,
 }
@@ -131,4 +133,6 @@ pub(super) struct ReplyArm {
 /// 单模型路径（`arm = None`）`message` 为 None（已在函数内自行落盘）。
 pub(super) struct ArmReplyOutcome {
     pub(super) message: Option<ChatMessage>,
+    pub(super) run_id: Option<String>,
+    pub(super) error: Option<String>,
 }

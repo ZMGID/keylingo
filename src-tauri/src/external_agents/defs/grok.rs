@@ -81,7 +81,8 @@ pub const GROK_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     // Cross-turn resume goes through the ACP live-session registry (session/load;
     // grok advertises loadSession: true), same as the other ACP agents.
     resumes_session_via_cli: false,
-    json_event_parser: None,
+    supports_native_image: true,
+    image_mime_whitelist: &[],
     build_args: build_grok_args,
 };
 
@@ -112,9 +113,7 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("agent"));
         assert_eq!(args.last().map(String::as_str), Some("stdio"));
         assert!(args.windows(2).any(|w| w == ["-m", "grok-4.5"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["--reasoning-effort", "high"]));
+        assert!(args.windows(2).any(|w| w == ["--reasoning-effort", "high"]));
         assert!(args.contains(&"--always-approve".to_string()));
     }
 
@@ -142,7 +141,10 @@ mod tests {
             GROK_AGENT_DEF.model_probe,
             Some(ModelProbeStrategy::Acp)
         ));
-        assert_eq!(GROK_AGENT_DEF.model_probe_args, Some(&["agent", "stdio"][..]));
+        assert_eq!(
+            GROK_AGENT_DEF.model_probe_args,
+            Some(&["agent", "stdio"][..])
+        );
         assert!(matches!(GROK_AGENT_DEF.slash_strategy, SlashStrategy::Acp));
     }
 
@@ -153,9 +155,11 @@ mod tests {
     #[ignore = "requires live grok login + network"]
     async fn grok_live_smoke() {
         use crate::external_agents::detection::detect_single_agent;
-        use crate::external_agents::session::acp::run_acp_session;
-        use crate::external_agents::spawn::{resolve_binary, spawn_agent};
+        use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
+        use crate::external_agents::session::live::SessionCommand;
+        use crate::external_agents::spawn::resolve_binary;
         use crate::external_agents::types::UnifiedAgentEvent;
+        use tokio::sync::{mpsc, oneshot};
 
         let cwd = std::env::temp_dir();
         let detected = detect_single_agent(&GROK_AGENT_DEF, &cwd).await;
@@ -168,7 +172,10 @@ mod tests {
         );
         assert!(detected.available, "grok binary not found on PATH");
         assert_eq!(detected.auth_status.as_deref(), Some("ok"));
-        assert!(detected.models.len() > 1, "ACP model probe returned nothing");
+        assert!(
+            detected.models.len() > 1,
+            "ACP model probe returned nothing"
+        );
 
         let bin = resolve_binary(&GROK_AGENT_DEF).await.expect("resolve grok");
         let args = build_grok_args(
@@ -180,25 +187,36 @@ mod tests {
             },
             None,
         );
-        let mut spawned = spawn_agent(&GROK_AGENT_DEF, &bin, &args, &cwd, &Default::default())
+        // 走生产用的常驻 actor（此前这里驱动的是只被真机测试吊着命的一次性 `run_acp_session`）。
+        let session = AcpSession::connect(&bin, &args, &cwd, None, Some("low"), &[], None)
             .await
-            .expect("spawn grok");
-        let events = std::cell::RefCell::new(Vec::<UnifiedAgentEvent>::new());
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            run_acp_session(
-                &mut spawned.child,
-                "Reply with exactly the token GROK_SMOKE_OK and nothing else.",
-                &cwd,
-                None,
-                &[],
-                |event| events.borrow_mut().push(event),
-                || false,
-            ),
-        )
-        .await;
-        let _ = spawned.child.start_kill();
-        let captured = events.into_inner();
+            .expect("connect grok acp session");
+        let control = spawn_acp_session_actor(session);
+        let (events_tx, mut events_rx) = mpsc::channel::<UnifiedAgentEvent>(256);
+        let (done_tx, done_rx) = oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                prompt: "Reply with exactly the token GROK_SMOKE_OK and nothing else.".to_string(),
+                model: None,
+                // 必须与 connect 时的 reasoning 一致：grok 的 reasoning 是启动参数，
+                // 不一致会走 ReasoningAction::Reconnect 直接返回 NEEDS_RECONNECT，一轮都跑不到。
+                reasoning: Some("low".to_string()),
+                images: Vec::new(),
+                events: events_tx,
+                done: done_tx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                out.push(event);
+            }
+            out
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), done_rx).await;
+        let captured = collector.await.expect("collector task");
         eprintln!("grok smoke: {} events, result={result:?}", captured.len());
         let text: String = captured
             .iter()
@@ -208,7 +226,26 @@ mod tests {
             })
             .collect();
         eprintln!("grok smoke text: {text:?}");
-        assert!(matches!(result, Ok(Ok(()))), "ACP turn failed: {result:?}");
+        assert!(
+            matches!(result, Ok(Ok(Ok(())))),
+            "ACP turn failed: {result:?}"
+        );
         assert!(text.contains("GROK_SMOKE_OK"), "got: {text:?}");
+        // 分子必须真的到手：grok 既不发 `usage_update` 也不填 `result.usage`，用量只在
+        // `result._meta` 里（见 `acp::usage_from_prompt_result`）。少了那条路这里恒为空，
+        // 上下文条会掉到字符估算兜底 —— 空会话第一轮实测 14.8K，估算差一个数量级。
+        let usage = captured
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                UnifiedAgentEvent::Usage { usage } => Some(usage),
+                _ => None,
+            })
+            .expect("grok 未上报用量：_meta 读取路径断了");
+        eprintln!("grok smoke usage: {usage:?}");
+        assert!(
+            usage.total_tokens.unwrap_or(0) > 0,
+            "用量事件到了但分子是 0: {usage:?}"
+        );
     }
 }

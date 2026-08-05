@@ -1,13 +1,20 @@
 // 会话「来源」选择器：把三类信息源整合进一个弹层——
 // 知识库（会话级挂载 id）、连接器（MCP 服务器全局 enabled）、网络搜索（nativeTools.webSearch 全局）。
 // 仿 Notion「信息源」：每项一个开关，底部「管理来源」跳设置。
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
-import { createPortal } from 'react-dom'
+// 弹层贴按钮、紧凑宽度，不再铺满输入框。
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { SlidersHorizontal, Library, Globe, SearchCheck } from 'lucide-react'
-import { McpIcon } from '../settings/NavIcons'
 import { kbListLibraries, onKbIndex, type KnowledgeLibrary } from './knowledgeBase'
 import { IconButton } from '../components/Button'
+import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { ChatMcpServer } from '../api/tauri'
+import type { WebSearchMode } from './types'
+
+const WEB_SEARCH_OPTIONS: { value: WebSearchMode; label: string; hint?: string }[] = [
+  { value: 'off', label: '关闭' },
+  { value: 'builtin', label: '内置', hint: '使用模型自带的联网搜索' },
+  { value: 'third_party', label: '第三方', hint: '使用已配置的搜索服务（Tavily / Exa 等）' },
+]
 
 function Switch({ checked }: { checked: boolean }) {
   return (
@@ -42,7 +49,7 @@ function SourceRow({
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-neutral-700 transition-colors hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800"
+      className="kv-menu-item"
     >
       <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -57,14 +64,12 @@ export function SourcesButton({
   onChangeKnowledgeBaseIds,
   forceKnowledgeSearch = false,
   onToggleForceKnowledgeSearch,
-  mcpServers,
-  onToggleMcpServer,
-  webSearchEnabled,
-  onToggleWebSearch,
+  webSearchMode,
+  onSetWebSearchMode,
+  builtinWebSearchSupported = false,
   onOpenSettings,
   disabled,
   layout = 'footer',
-  anchorRef,
 }: {
   knowledgeBaseIds: string[]
   onChangeKnowledgeBaseIds: (ids: string[]) => void | Promise<void>
@@ -72,12 +77,13 @@ export function SourcesButton({
   onToggleForceKnowledgeSearch?: () => void | Promise<void>
   mcpServers: ChatMcpServer[]
   onToggleMcpServer: (serverId: string) => void | Promise<void>
-  webSearchEnabled: boolean
-  onToggleWebSearch: () => void | Promise<void>
+  webSearchMode: WebSearchMode
+  onSetWebSearchMode: (mode: WebSearchMode) => void | Promise<void>
+  /** 当前模型是否支持内置搜索（否则「内置」置灰）。 */
+  builtinWebSearchSupported?: boolean
   onOpenSettings?: () => void
   disabled?: boolean
   layout?: 'footer' | 'inline'
-  anchorRef?: RefObject<HTMLDivElement | null>
 }) {
   const [open, setOpen] = useState(false)
   const [libraries, setLibraries] = useState<KnowledgeLibrary[]>([])
@@ -121,7 +127,7 @@ export function SourcesButton({
     if (!open) return
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node
-      if (ref.current?.contains(t) || popoverRef.current?.contains(t)) return
+      if (ref.current?.contains(t)) return
       setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
@@ -129,8 +135,7 @@ export function SourcesButton({
   }, [open])
 
   const mountedKbCount = knowledgeBaseIds.length
-  const enabledMcpCount = mcpServers.filter((s) => s.enabled).length
-  const anyActive = mountedKbCount > 0 || enabledMcpCount > 0 || webSearchEnabled
+  const anyActive = mountedKbCount > 0 || webSearchMode !== 'off'
 
   const toggleKb = (id: string) => {
     void onChangeKnowledgeBaseIds(
@@ -142,94 +147,7 @@ export function SourcesButton({
 
   const placement = layout === 'inline' ? 'top-full mt-1.5' : 'bottom-full mb-1.5'
   const origin = layout === 'inline' ? 'top left' : 'bottom left'
-
-  const panel =
-    open && anchorRef?.current
-      ? createPortal(
-          <div
-            ref={popoverRef}
-            className={`chat-motion-popover chat-popover-scroll absolute inset-x-0 z-40 max-h-[52vh] overflow-y-auto rounded-xl border border-[var(--theme-surface-border)] bg-[var(--theme-surface)] p-1 shadow-[0_10px_24px_rgba(0,0,0,0.12)] dark:border-neutral-700 dark:bg-neutral-900 ${placement}`}
-            style={{ ['--chat-popover-origin' as string]: origin }}
-            data-tauri-drag-region="false"
-            role="menu"
-          >
-            {libraries.length > 0 && (
-              <>
-                <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-                  知识库
-                </div>
-                {libraries.map((lib) => (
-                  <SourceRow
-                    key={lib.id}
-                    icon={<Library size={13} strokeWidth={1.75} />}
-                    label={lib.name}
-                    meta={String(lib.docCount)}
-                    checked={knowledgeBaseIds.includes(lib.id)}
-                    onClick={() => toggleKb(lib.id)}
-                  />
-                ))}
-                {onToggleForceKnowledgeSearch && (
-                  <SourceRow
-                    icon={<SearchCheck size={13} strokeWidth={1.75} />}
-                    label="强制检索"
-                    meta={mountedKbCount === 0 ? '需先挂载' : undefined}
-                    checked={forceKnowledgeSearch}
-                    onClick={() => void onToggleForceKnowledgeSearch()}
-                  />
-                )}
-              </>
-            )}
-
-            {mcpServers.length > 0 && (
-              <>
-                <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-                  连接器
-                </div>
-                {mcpServers.map((server) => (
-                  <SourceRow
-                    key={server.id}
-                    icon={<McpIcon size={13} />}
-                    label={server.name}
-                    meta={server.transport === 'stdio' ? 'stdio' : 'http'}
-                    checked={server.enabled}
-                    onClick={() => void onToggleMcpServer(server.id)}
-                  />
-                ))}
-              </>
-            )}
-
-            <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-              网络
-            </div>
-            <SourceRow
-              icon={<Globe size={13} strokeWidth={1.75} />}
-              label="网络搜索"
-              checked={webSearchEnabled}
-              onClick={() => void onToggleWebSearch()}
-            />
-
-            {onOpenSettings && (
-              <>
-                <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-800" />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOpen(false)
-                    onOpenSettings()
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] font-medium text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
-                >
-                  <span className="grid size-4 shrink-0 place-items-center">
-                    <SlidersHorizontal size={13} strokeWidth={1.75} />
-                  </span>
-                  管理来源
-                </button>
-              </>
-            )}
-          </div>,
-          anchorRef.current,
-        )
-      : null
+  const maxH = usePopoverMaxHeight(open, popoverRef, layout === 'inline' ? 'down' : 'up', 360)
 
   return (
     <div className="relative" ref={ref}>
@@ -251,7 +169,92 @@ export function SourcesButton({
       >
         <SlidersHorizontal size={16} strokeWidth={1.75} />
       </IconButton>
-      {panel}
+      {open && (
+        <div
+          ref={popoverRef}
+          className={`chat-motion-popover chat-popover-scroll absolute left-0 z-50 w-[min(280px,calc(100vw-24px))] overflow-y-auto kv-menu ${placement}`}
+          style={{ ['--chat-popover-origin' as string]: origin, maxHeight: maxH }}
+          data-tauri-drag-region="false"
+          role="menu"
+        >
+          <div className="flex items-center gap-2 px-2 py-1 text-[12px] text-neutral-700 dark:text-neutral-200">
+            <span className="grid size-4 shrink-0 place-items-center text-neutral-500 dark:text-neutral-400">
+              <Globe size={13} strokeWidth={1.75} />
+            </span>
+            <span className="min-w-0 flex-1 truncate">网络搜索</span>
+            <div className="flex shrink-0 gap-1">
+              {WEB_SEARCH_OPTIONS.map((opt) => {
+                const active = webSearchMode === opt.value
+                const dim = opt.value === 'builtin' && !builtinWebSearchSupported
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    disabled={dim}
+                    title={dim ? '当前模型不支持内置搜索' : opt.hint}
+                    onClick={() => void onSetWebSearchMode(opt.value)}
+                    className={`rounded-md px-2 py-0.5 text-[11.5px] transition-colors ${
+                      active
+                        ? 'bg-emerald-500/15 font-medium text-emerald-700 dark:text-emerald-300'
+                        : dim
+                          ? 'cursor-not-allowed text-neutral-300 dark:text-neutral-600'
+                          : 'text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {libraries.length > 0 && (
+            <>
+              <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
+                知识库
+              </div>
+              {libraries.map((lib) => (
+                <SourceRow
+                  key={lib.id}
+                  icon={<Library size={13} strokeWidth={1.75} />}
+                  label={lib.name}
+                  meta={String(lib.docCount)}
+                  checked={knowledgeBaseIds.includes(lib.id)}
+                  onClick={() => toggleKb(lib.id)}
+                />
+              ))}
+              {onToggleForceKnowledgeSearch && (
+                <SourceRow
+                  icon={<SearchCheck size={13} strokeWidth={1.75} />}
+                  label="强制检索"
+                  meta={mountedKbCount === 0 ? '需先挂载' : undefined}
+                  checked={forceKnowledgeSearch}
+                  onClick={() => void onToggleForceKnowledgeSearch()}
+                />
+              )}
+            </>
+          )}
+
+          {onOpenSettings && (
+            <>
+              <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-800" />
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false)
+                  onOpenSettings()
+                }}
+                className="kv-menu-item"
+              >
+                <span className="grid size-4 shrink-0 place-items-center">
+                  <SlidersHorizontal size={13} strokeWidth={1.75} />
+                </span>
+                管理来源
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

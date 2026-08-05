@@ -253,35 +253,6 @@ pub fn native_web_search_tool() -> ChatToolDefinition {
     }
 }
 
-/// `enter_plan_mode` — kivio-code-only signal tool. The model calls this (instead of
-/// editing) when it judges the build-mode task complex / multi-step / multi-file. It does
-/// NOT change state itself: the interactive layer detects the `enter_plan_mode` tool record
-/// at turn end and runs a read-only planning pass, then pauses for the user to `proceed`.
-/// Only advertised in build mode when `auto_plan` is on (never in plan mode, never to
-/// sub-agents). The `reason` arg is optional and shown to the user.
-pub fn native_enter_plan_mode_tool() -> ChatToolDefinition {
-    ChatToolDefinition {
-        id: "native__enter_plan_mode".to_string(),
-        name: "enter_plan_mode".to_string(),
-        description: "Switch to read-only PLAN mode before doing anything else for this request. Call this as your FIRST action when the task is complex, multi-step, touches architecture, or spans multiple files — instead of editing. After you call it, STOP immediately: do not call other tools and do not edit; a read-only planning pass runs next and the user reviews the plan before any implementation. For a small, single-file, well-scoped change, skip this and just do the work.".to_string(),
-        source: "native".to_string(),
-        server_id: None,
-        server_name: Some("Kivio".to_string()),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Optional one-line reason why this task needs planning first (shown to the user)."
-                }
-            }
-        }),
-        sensitive: false,
-        annotations: None,
-        output_schema: None,
-    }
-}
-
 pub fn native_skill_activate_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "skill__activate".to_string(),
@@ -314,7 +285,7 @@ pub fn native_read_file_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__read_file".to_string(),
         name: "read".to_string(),
-        description: "Read a local file or directory. For a file: text is line-numbered as `N<TAB>line` for easy reference; the numbers are display-only and are NOT part of the file — never include them in edit old_string. Optional offset/limit select a 1-based line window — use them for large files; the result reports total_lines and next_offset so you can continue reading. For a directory path: returns its entries (folded in the former `ls` tool); offset/limit are ignored. Image files (png/jpg/webp/…) are also supported: the image is shown to you directly when your model has vision, otherwise it is described or OCR'd to text — so you can `read` screenshots and photos by path. For PDF/Word/Excel, use the matching skill instead.".to_string(),
+        description: "Read a local file or directory. For a file: text is line-numbered as `N<TAB>line` for easy reference; the numbers are display-only and are NOT part of the file — never include them in edit old_string. Output is capped at 2000 lines or 50KB, whichever is hit first, so a single read can never flood the context; when the cap or your own limit stops the read early the result says so and reports total_lines and next_offset — continue with offset until you have what you need. Optional offset/limit select a 1-based line window (the cap still applies on top). For a directory path: returns its entries (folded in the former `ls` tool); offset/limit are ignored. Image files (png/jpg/webp/…) are also supported: the image is shown to you directly when your model has vision, otherwise it is described or OCR'd to text — so you can `read` screenshots and photos by path. For PDF/Word/Excel, use the matching skill instead.".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -570,7 +541,7 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__present_artifacts".to_string(),
         name: "present_artifacts".to_string(),
-        description: "Show files or images in the chat. You must call this when the user asks to show, preview, attach, or send a file; reading or describing a file does not display it. Use artifact_ids for generated files or paths for existing local files. Unselected files remain hidden.".to_string(),
+        description: "Show files or images in the chat. You must call this when the user asks to show, preview, attach, or send a file; reading or describing a file does not display it. Pass artifact_ids for files this conversation generated, or paths for files that already exist on disk — never both for the same file, and never invent a path for a generated file. Unselected files remain hidden.".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -579,14 +550,14 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
             "properties": {
                 "artifact_ids": {
                     "type": "array",
-                    "description": "Generated artifact IDs to display",
+                    "description": "IDs of files generated in this conversation (e.g. images from mixer_generate_image). These have no filesystem path — do not also list them in paths.",
                     "items": { "type": "string", "minLength": 1 },
                     "minItems": 1,
                     "maxItems": 16
                 },
                 "paths": {
                     "type": "array",
-                    "description": "Existing local file paths to display",
+                    "description": "Paths of files that already exist on disk. Only for files you read or wrote yourself; never for generated artifacts.",
                     "items": { "type": "string", "minLength": 1 },
                     "minItems": 1,
                     "maxItems": 16
@@ -597,10 +568,8 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
                     "maxLength": 300
                 }
             },
-            "anyOf": [
-                { "required": ["artifact_ids"] },
-                { "required": ["paths"] }
-            ],
+            // 不用顶层 anyOf 表达“二选一必填”：grok/Vertex/Anthropic 都会拒或需剥离，
+            // call_present_artifacts 在运行时校验，模型侧靠 description 提示即可。
             "additionalProperties": false
         }),
         sensitive: false,
