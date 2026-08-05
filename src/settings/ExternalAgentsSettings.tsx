@@ -4,7 +4,6 @@ import {
   ChevronRight,
   Download,
   ExternalLink,
-  FolderOpen,
   Pencil,
   Plus,
   RefreshCw,
@@ -62,6 +61,26 @@ function Row({
       <div className="kv-row-control">{children}</div>
     </div>
   )
+}
+
+/** 比较 CLI 常见的数字版本号；缺段按 0 处理，解析失败时交回后端结果兜底。 */
+function isVersionNewer(localVersion: string, latestVersion: string): boolean | null {
+  const parse = (value: string) => {
+    const match = value.match(/\d+(?:\.\d+){2,}/)?.[0]
+    if (!match) return null
+    const parts = match.split('.').map(Number)
+    return parts.every(Number.isSafeInteger) ? parts : null
+  }
+  const local = parse(localVersion)
+  const latest = parse(latestVersion)
+  if (!local || !latest) return null
+  const length = Math.max(local.length, latest.length)
+  for (let index = 0; index < length; index += 1) {
+    const currentPart = local[index] ?? 0
+    const latestPart = latest[index] ?? 0
+    if (latestPart !== currentPart) return latestPart > currentPart
+  }
+  return false
 }
 
 interface ExternalAgentsSettingsProps {
@@ -234,6 +253,7 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
               lang={lang}
               config={overrides[selected.id] ?? EMPTY_CONFIG}
               onPatch={(patch) => patchOverride(selected.id, patch)}
+              reloadAgents={loadAgents}
             />
           ) : (
             <p className="kv-row-desc py-8 text-center">
@@ -251,18 +271,19 @@ function AgentDetail({
   lang,
   config,
   onPatch,
+  reloadAgents,
 }: {
   agent: DetectedExternalAgent
   lang: Lang
   config: ExternalCliAgentConfig
   onPatch: (patch: Partial<ExternalCliAgentConfig>) => void
+  reloadAgents: (force?: boolean) => Promise<void>
 }) {
   const t = i18n[lang]
   const disabled = config.disabled ?? agent.disabled ?? false
-  const env = config.env ?? []
   const customModels = config.customModels ?? []
-  const [expanded, setExpanded] = useState<'models' | 'env' | null>(null)
-  const install = useInstall(agent.id)
+  const [modelsExpanded, setModelsExpanded] = useState(false)
+  const install = useInstall(agent.id, reloadAgents)
 
   const [probedModels, setProbedModels] = useState<DetectedExternalAgent['models']>([])
   useEffect(() => {
@@ -287,11 +308,33 @@ function AgentDetail({
     if (typeof picked === 'string') onPatch({ path: picked })
   }
 
-  const toggle = (panel: 'models' | 'env') =>
-    setExpanded((prev) => (prev === panel ? null : panel))
-
   const { info, checking, running, log, result, logRef, refresh, runInstall } = install
   const localVersion = info?.localVersion ?? agent.version ?? null
+  const versionComparison =
+    localVersion && info?.latestVersion
+      ? isVersionNewer(localVersion, info.latestVersion)
+      : null
+  const updateAvailable = versionComparison ?? info?.updateAvailable ?? false
+  const versionStatus = !agent.available
+    ? null
+    : checking
+      ? { label: t.externalAgentsCheckingVersion, tone: '' }
+      : !info
+        ? { label: t.externalAgentsVersionCheckFailed, tone: 'warn' }
+        : !localVersion || !info.latestVersion
+          ? { label: t.externalAgentsLatestVersionUnknown, tone: 'warn' }
+          : updateAvailable
+            ? {
+                label: (info.command
+                  ? t.externalAgentsUpdateAvailable
+                  : t.externalAgentsManualUpdateAvailable
+                ).replace('{version}', info.latestVersion),
+                tone: 'warn',
+              }
+            : { label: t.externalAgentsUpToDate, tone: 'ok' }
+  const showInstallAction = Boolean(
+    info?.command && !checking && (!agent.available || updateAvailable),
+  )
 
   return (
     <>
@@ -313,18 +356,15 @@ function AgentDetail({
             </a>
           )}
         </span>
-        {agent.available && (
-          <span className="kv-tag ok">{t.externalAgentsDetected}</span>
-        )}
         <span className="kv-cli-pill">{localVersion ?? t.externalAgentsNotInstalled}</span>
-        {info?.updateAvailable && info.latestVersion && (
-          <span className="kv-cli-pill next">→ {info.latestVersion}</span>
+        {versionStatus && (
+          <span className={`kv-tag ${versionStatus.tone}`}>{versionStatus.label}</span>
         )}
-        {info?.command && (
+        {showInstallAction && (
           <Button size="sm" variant="primary" onClick={() => void runInstall()} disabled={running}>
             {running
               ? t.externalAgentsInstalling
-              : localVersion
+              : agent.available
                 ? t.externalAgentsUpdate
                 : t.externalAgentsInstall}
           </Button>
@@ -382,11 +422,11 @@ function AgentDetail({
             .replace('{probed}', String(probedModels.length))
             .replace('{custom}', String(customModels.length))}
         >
-          <Button size="sm" onClick={() => toggle('models')}>
-            {expanded === 'models' ? t.externalAgentsCollapse : t.externalAgentsManageModels}
+          <Button size="sm" onClick={() => setModelsExpanded((value) => !value)}>
+            {modelsExpanded ? t.externalAgentsCollapse : t.externalAgentsManageModels}
           </Button>
         </Row>
-        {expanded === 'models' && (
+        {modelsExpanded && (
           <div className="kv-cli-sub">
             <p className="kv-row-desc">{t.externalAgentsModelsDesc}</p>
             {probedModels.length > 0 && (
@@ -440,69 +480,6 @@ function AgentDetail({
             </div>
           </div>
         )}
-        <Row
-          label={t.externalAgentsEnvSection}
-          desc={
-            env.length > 0
-              ? t.externalAgentsEnvCount.replace('{count}', String(env.length))
-              : t.externalAgentsEnvNone
-          }
-        >
-          <Button size="sm" onClick={() => toggle('env')}>
-            {expanded === 'env' ? t.externalAgentsCollapse : t.externalAgentsManageEnv}
-          </Button>
-        </Row>
-        {expanded === 'env' && (
-          <div className="kv-cli-sub">
-            <p className="kv-row-desc">{t.externalAgentsEnvDesc}</p>
-            {env.map((pair, idx) => (
-              <div key={idx} className="flex items-center gap-2">
-                <Input
-                  value={pair.key}
-                  onChange={(value) =>
-                    onPatch({ env: env.map((e, i) => (i === idx ? { ...e, key: value } : e)) })
-                  }
-                  placeholder={t.externalAgentsEnvKey}
-                  mono
-                />
-                <Input
-                  value={pair.value}
-                  onChange={(value) =>
-                    onPatch({ env: env.map((e, i) => (i === idx ? { ...e, value } : e)) })
-                  }
-                  placeholder={t.externalAgentsEnvValue}
-                  mono
-                />
-                <IconButton
-                  size="sm"
-                  label={t.externalAgentsRemove}
-                  onClick={() => onPatch({ env: env.filter((_, i) => i !== idx) })}
-                >
-                  <Trash2 size={13} />
-                </IconButton>
-              </div>
-            ))}
-            <div>
-              <Button size="sm" onClick={() => onPatch({ env: [...env, { key: '', value: '' }] })}>
-                <Plus size={12} />
-                {t.externalAgentsEnvAdd}
-              </Button>
-            </div>
-          </div>
-        )}
-        {info && (
-          <Row
-            label={t.externalAgentsConfigSection}
-            desc={info.configDir ?? t.externalAgentsNoConfigDir}
-          >
-            {info.configDir && (
-              <Button size="sm" onClick={() => void chatApi.externalCliOpenConfigDir(agent.id)}>
-                <FolderOpen size={12} />
-                {t.externalAgentsOpenConfigDir}
-              </Button>
-            )}
-          </Row>
-        )}
       </div>
 
       {agent.id === 'cursor-agent' && agent.available && (
@@ -527,7 +504,16 @@ function providerSubtitle(provider: ExternalCliProvider): string {
   const baseUrl = provider.env?.find((pair) => /BASE_URL$/i.test(pair.key))?.value
   if (baseUrl) return baseUrl
   const fromToml = provider.configToml?.match(/base_url\s*=\s*"([^"]+)"/)?.[1]
-  return fromToml ?? ''
+  if (fromToml) return fromToml
+  try {
+    const config = JSON.parse(provider.configJson ?? '{}') as Record<string, unknown>
+    if (typeof config.baseUrl === 'string') return config.baseUrl
+    const options = config.options as Record<string, unknown> | undefined
+    if (typeof options?.baseURL === 'string') return options.baseURL
+  } catch {
+    // The edit modal will surface malformed Kivio-owned JSON; keep the list usable meanwhile.
+  }
+  return ''
 }
 
 /**
@@ -605,7 +591,8 @@ function ProviderSection({
     setImporting(false)
   }
 
-  const envOnly = agentId !== 'claude' && agentId !== 'codex'
+  const nativeOnDisk = agentId === 'opencode' || agentId === 'pi'
+  const envOnly = agentId !== 'claude' && agentId !== 'codex' && !nativeOnDisk
 
   return (
     <div className="kv-cli-providers">
@@ -676,7 +663,11 @@ function ProviderSection({
         )}
       </div>
       <p className="kv-row-desc mt-2">
-        {envOnly ? t.externalAgentsProviderEnvOnly : t.externalAgentsProviderScope}
+        {nativeOnDisk
+          ? t.externalAgentsNativeScope
+          : envOnly
+            ? t.externalAgentsProviderEnvOnly
+            : t.externalAgentsProviderScope}
       </p>
 
       {editing !== undefined && (
@@ -703,9 +694,9 @@ function ProviderSection({
 }
 
 /** 版本检查 + 一键安装/更新的状态机。只被 AgentDetail 用，抽出来纯粹是别让它涨到 200 行。 */
-function useInstall(agentId: string) {
+function useInstall(agentId: string, reloadAgents: (force?: boolean) => Promise<void>) {
   const [info, setInfo] = useState<ExternalCliInstallInfo | null>(null)
-  const [checking, setChecking] = useState(false)
+  const [checking, setChecking] = useState(true)
   const [running, setRunning] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [result, setResult] = useState<'ok' | 'fail' | null>(null)
@@ -713,9 +704,13 @@ function useInstall(agentId: string) {
 
   const refresh = useCallback(async () => {
     setChecking(true)
-    const next = await chatApi.externalCliInstallInfo(agentId).catch(() => null)
-    setInfo(next)
-    setChecking(false)
+    try {
+      setInfo(await chatApi.externalCliInstallInfo(agentId))
+    } catch {
+      setInfo(null)
+    } finally {
+      setChecking(false)
+    }
   }, [agentId])
 
   useEffect(() => {
@@ -742,13 +737,15 @@ function useInstall(agentId: string) {
     })
     try {
       await chatApi.externalCliInstall(agentId)
+      setResult('ok')
     } catch (err) {
       setLog((prev) => [...prev, String(err)])
       setResult('fail')
-      setRunning(false)
     } finally {
+      setRunning(false)
       unlisten()
       await refresh()
+      await reloadAgents(true)
     }
   }
 

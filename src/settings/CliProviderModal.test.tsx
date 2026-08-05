@@ -1,0 +1,153 @@
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { CliProviderModal } from './CliProviderModal'
+
+vi.mock('../chat/api', () => ({
+  chatApi: {
+    externalCliFetchRelayModels: vi.fn(),
+  },
+}))
+
+describe('CliProviderModal native providers', () => {
+  it('saves OpenCode as native provider JSON instead of environment variables', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="opencode"
+        agentName="OpenCode"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'Relay' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'https://relay.example/v1' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), {
+      target: { value: 'sk-test' },
+    })
+    const modelInputs = screen.getAllByPlaceholderText('模型 ID')
+    fireEvent.change(modelInputs[0], { target: { value: 'gpt-test' } })
+    fireEvent.change(modelInputs[1], { target: { value: 'gpt-test' } })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const saved = onSave.mock.calls[0][0]
+    expect(saved.env).toEqual([])
+    expect(saved.defaultModel).toBe('gpt-test')
+    expect(JSON.parse(saved.configJson)).toMatchObject({
+      npm: '@ai-sdk/openai-compatible',
+      options: { baseURL: 'https://relay.example/v1' },
+      models: { 'gpt-test': { name: 'gpt-test' } },
+    })
+    expect(JSON.parse(saved.authJson)).toEqual({ type: 'api', key: 'sk-test' })
+  })
+
+  it('auto-fills Pi metadata from a model id and allows advanced overrides', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="pi"
+        agentName="Pi"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'Grok Relay' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'https://relay.example/v1' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), {
+      target: { value: 'sk-pi' },
+    })
+    fireEvent.change(screen.getByLabelText('模型 ID'), {
+      target: { value: 'grok-4.5' },
+    })
+    expect(screen.getByLabelText('默认模型')).toHaveValue('grok-4.5')
+    expect(screen.getByText('模型库已识别')).toBeInTheDocument()
+    expect(screen.getByText('500K 上下文')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '模型高级设置' }))
+    expect(screen.getByRole('switch', { name: '支持推理' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('switch', { name: '支持图片输入' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.change(screen.getByLabelText('上下文窗口'), { target: { value: '256000' } })
+    fireEvent.change(screen.getByLabelText('最大输出 Token'), { target: { value: '32768' } })
+    fireEvent.click(screen.getByRole('button', { name: '添加模型' }))
+    fireEvent.change(screen.getAllByLabelText('模型 ID')[1], {
+      target: { value: 'relay-fast-model' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const saved = onSave.mock.calls[0][0]
+    expect(saved.defaultReasoning).toBe('high')
+    expect(JSON.parse(saved.configJson)).toMatchObject({
+      api: 'openai-completions',
+      models: [
+        {
+          id: 'grok-4.5',
+          name: 'Grok 4.5',
+          reasoning: true,
+          input: ['text', 'image'],
+          contextWindow: 256000,
+          maxTokens: 32768,
+        },
+        {
+          id: 'relay-fast-model',
+          name: 'relay-fast-model',
+          reasoning: false,
+          input: ['text'],
+          contextWindow: 128000,
+          maxTokens: 16384,
+        },
+      ],
+    })
+  })
+
+  it('uses the first unknown Pi model as default with thinking off', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="pi"
+        agentName="Pi"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'Private Relay' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'https://relay.example/v1' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), {
+      target: { value: 'sk-pi' },
+    })
+    fireEvent.change(screen.getByLabelText('模型 ID'), {
+      target: { value: 'company-private-model' },
+    })
+
+    expect(screen.getByLabelText('默认模型')).toHaveValue('company-private-model')
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const saved = onSave.mock.calls[0][0]
+    expect(saved.defaultModel).toBe('company-private-model')
+    expect(saved.defaultReasoning).toBe('off')
+    expect(JSON.parse(saved.configJson).models[0]).toMatchObject({
+      id: 'company-private-model',
+      reasoning: false,
+      contextWindow: 128000,
+      maxTokens: 16384,
+    })
+  })
+})

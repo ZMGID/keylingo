@@ -5,6 +5,7 @@ import {
   EyeOff,
   Plus,
   RefreshCw,
+  RotateCcw,
   SlidersHorizontal,
   Trash2,
   X,
@@ -19,7 +20,7 @@ import OpenCode from '@lobehub/icons/es/OpenCode/components/Mono'
 import LongCat from '@lobehub/icons/es/LongCat/components/Color'
 import XiaomiMiMo from '@lobehub/icons/es/XiaomiMiMo/components/Mono'
 import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono'
-import { Input, Label, SuggestInput, TextArea } from './components'
+import { Input, Label, Select, SuggestInput, TextArea, Toggle } from './components'
 import { Button, IconButton } from '../components/Button'
 import type { SelectOption } from './utils'
 import { chatApi } from '../chat/api'
@@ -54,6 +55,28 @@ import {
   type CodexPresetBrand,
   type CodexPresetId,
 } from './cliCodexPresets'
+import {
+  buildNativeCliProvider,
+  emptyNativeModel,
+  normalizeNativeModels,
+  PI_API_OPTIONS,
+  piThinkingOptionsForModel,
+  readNativeCliProvider,
+  recommendedPiThinkingLevel,
+  resolvePiModelMetadata,
+  type NativeCliAgentId,
+  type PiThinkingLevel,
+} from './cliNativeProviderConfigs'
+
+function isPositiveInteger(value: string): boolean {
+  return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0
+}
+
+function formatTokenLimit(value: number): string {
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(2))}M`
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(1))}K`
+  return String(value)
+}
 
 type Glyph = ComponentType<{ size?: number; style?: CSSProperties }>
 const G = (icon: unknown) => icon as Glyph
@@ -170,6 +193,7 @@ function initialClaudeEnv(initial?: ExternalCliProvider | null): EnvPair[] {
  * 供应商编辑弹窗。**按 CLI 分形态**，因为各 CLI 接第三方的机制根本不同：
  * - claude：预设 + 结构化字段 + JSON / 原始 env
  * - codex：预设 + config.toml / auth.json（物化成私有 CODEX_HOME）
+ * - opencode / pi：原生 provider / auth / default model 配置
  * - 其余：手填环境变量
  */
 export function CliProviderModal({
@@ -190,6 +214,10 @@ export function CliProviderModal({
   const t = i18n[lang]
   const isCodex = agentId === 'codex'
   const isClaude = agentId === 'claude'
+  const isOpenCode = agentId === 'opencode'
+  const isPi = agentId === 'pi'
+  const isNative = isOpenCode || isPi
+  const nativeAgentId: NativeCliAgentId = isPi ? 'pi' : 'opencode'
   const codexInitial = isCodex ? initialCodexTomlAuth(initial) : null
   const [name, setName] = useState(initial?.name ?? '')
   const [remark, setRemark] = useState(initial?.remark ?? '')
@@ -198,6 +226,9 @@ export function CliProviderModal({
   )
   const [configToml, setConfigToml] = useState(codexInitial?.configToml ?? initial?.configToml ?? '')
   const [authJson, setAuthJson] = useState(codexInitial?.authJson ?? initial?.authJson ?? '')
+  const [nativeForm, setNativeForm] = useState(() =>
+    readNativeCliProvider(nativeAgentId, isNative ? initial : null),
+  )
   const [showRaw, setShowRaw] = useState(!isClaude)
   const [showKey, setShowKey] = useState(false)
   const [error, setError] = useState('')
@@ -208,6 +239,7 @@ export function CliProviderModal({
   const [jsonDraft, setJsonDraft] = useState<string | null>(null)
   const [jsonError, setJsonError] = useState('')
   const [showJson, setShowJson] = useState(isClaude)
+  const [expandedNativeModels, setExpandedNativeModels] = useState<Set<number>>(() => new Set())
   const [activePreset, setActivePreset] = useState<ClaudePresetId>(() =>
     isClaude
       ? detectClaudePresetId(envPairsToRecord(initialClaudeEnv(initial)))
@@ -228,6 +260,54 @@ export function CliProviderModal({
     () => fetchedModels.map((model) => ({ value: model, label: model })),
     [fetchedModels],
   )
+  const nativeModelOptions = useMemo<SelectOption[]>(
+    () => normalizeNativeModels(nativeForm.models).map((model) => ({
+      value: model.id,
+      label: isPi ? resolvePiModelMetadata(model).displayName : (model.name || model.id),
+    })),
+    [isPi, nativeForm.models],
+  )
+  const defaultPiModel = useMemo(
+    () => nativeForm.models.find((model) => model.id.trim() === nativeForm.defaultModel.trim()),
+    [nativeForm.defaultModel, nativeForm.models],
+  )
+  const piThinkingOptions = useMemo(
+    () => piThinkingOptionsForModel(defaultPiModel),
+    [defaultPiModel],
+  )
+
+  const updateNativeModelId = (idx: number, id: string) => {
+    setNativeForm((prev) => {
+      const previousId = prev.models[idx]?.id ?? ''
+      const models = prev.models.map((item, i) => i === idx ? { ...item, id } : item)
+      if (prev.defaultModel.trim() && prev.defaultModel !== previousId) {
+        return { ...prev, models }
+      }
+      return {
+        ...prev,
+        models,
+        defaultModel: id,
+        defaultThinkingLevel: isPi ? recommendedPiThinkingLevel(models[idx]) : prev.defaultThinkingLevel,
+      }
+    })
+  }
+
+  const updatePiModelReasoning = (idx: number, reasoning: boolean | null) => {
+    setNativeForm((prev) => {
+      const models = prev.models.map((item, i) => i === idx ? { ...item, reasoning } : item)
+      const updated = models[idx]
+      if (!updated || updated.id.trim() !== prev.defaultModel.trim()) return { ...prev, models }
+      const supported = piThinkingOptionsForModel(updated)
+      const current = prev.defaultThinkingLevel as PiThinkingLevel
+      return {
+        ...prev,
+        models,
+        defaultThinkingLevel: supported.includes(current)
+          ? current
+          : recommendedPiThinkingLevel(updated),
+      }
+    })
+  }
 
   const jsonText =
     jsonDraft ??
@@ -327,13 +407,20 @@ export function CliProviderModal({
   const codexApiKey = isCodex ? extractOpenAiApiKey(authJson) : ''
 
   const fetchModels = async () => {
-    const url = isCodex ? codexBaseUrl : baseUrl
-    const key = isCodex ? codexApiKey : readClaudeApiKey(env)
+    const url = isCodex ? codexBaseUrl : isNative ? nativeForm.baseUrl : baseUrl
+    const key = isCodex ? codexApiKey : isNative ? nativeForm.apiKey : readClaudeApiKey(env)
     setFetching(true)
     setFetchNote('')
     try {
       const models = await chatApi.externalCliFetchRelayModels(url, key)
       setFetchedModels(models)
+      if (isNative && models.length > 0 && normalizeNativeModels(nativeForm.models).length === 0) {
+        setNativeForm((prev) => ({
+          ...prev,
+          models: [emptyNativeModel(nativeAgentId, models[0])],
+          defaultModel: prev.defaultModel || models[0],
+        }))
+      }
       setFetchNote(
         models.length === 0
           ? t.externalAgentsProviderModelsEmpty
@@ -411,6 +498,61 @@ export function CliProviderModal({
         env: [],
         configToml: configToml,
         authJson: authJson.trim(),
+      })
+      return
+    }
+    if (isNative) {
+      if (!nativeForm.baseUrl.trim()) {
+        setError(t.externalAgentsProviderUrlRequired)
+        return
+      }
+      if (!nativeForm.apiKey.trim()) {
+        setError(t.externalAgentsProviderKeyRequired)
+        return
+      }
+      const rawModelIds = nativeForm.models.map((model) => model.id.trim()).filter(Boolean)
+      const models = normalizeNativeModels(nativeForm.models)
+      if (models.length === 0) {
+        setError(t.externalAgentsNativeModelsRequired)
+        return
+      }
+      if (new Set(rawModelIds).size !== rawModelIds.length) {
+        setError(t.externalAgentsNativeModelsDuplicate)
+        return
+      }
+      if (isPi && models.some((model) => (
+        (model.contextWindow !== '' && !isPositiveInteger(model.contextWindow))
+        || (model.maxTokens !== '' && !isPositiveInteger(model.maxTokens))
+      ))) {
+        setError(t.externalAgentsPiTokenLimitsInvalid)
+        return
+      }
+      if (!models.some((model) => model.id === nativeForm.defaultModel.trim())) {
+        setError(t.externalAgentsNativeDefaultInvalid)
+        return
+      }
+      const defaultNativeModel = models.find((model) => model.id === nativeForm.defaultModel.trim())
+      if (
+        isPi
+        && defaultNativeModel
+        && !piThinkingOptionsForModel(defaultNativeModel).includes(
+          nativeForm.defaultThinkingLevel as PiThinkingLevel,
+        )
+      ) {
+        setError(t.externalAgentsPiDefaultReasoningRequired)
+        return
+      }
+      const native = buildNativeCliProvider(nativeAgentId, name.trim(), {
+        ...nativeForm,
+        models,
+      })
+      onSave({
+        id: initial?.id || `p-${Date.now().toString(36)}`,
+        name: name.trim(),
+        remark: remark.trim(),
+        env: [],
+        configToml: '',
+        ...native,
       })
       return
     }
@@ -757,13 +899,363 @@ export function CliProviderModal({
     </>
   )
 
+  const nativeBody = (
+    <div className="kv-native-provider-form">
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeIdentitySection}</h4>
+        </div>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderName} required />
+            <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderRemark} />
+            <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+          </div>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <div>
+            <h4>{t.externalAgentsNativeConnectionSection}</h4>
+            <p>{t.externalAgentsNativeConnectionHint}</p>
+          </div>
+        </div>
+        <div className={`kv-native-connection-grid ${isPi ? 'kv-native-connection-grid--pi' : ''}`}>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiUrl} required />
+            <Input
+              value={nativeForm.baseUrl}
+              onChange={(baseUrl) => setNativeForm((prev) => ({ ...prev, baseUrl }))}
+              mono
+              placeholder="https://api.example.com/v1"
+            />
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiKey} required />
+            <div className="kv-key-field">
+              <Input
+                value={nativeForm.apiKey}
+                onChange={(apiKey) => setNativeForm((prev) => ({ ...prev, apiKey }))}
+                type={showKey ? 'text' : 'password'}
+                mono
+                placeholder="sk-…"
+              />
+              <IconButton
+                size="sm"
+                label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
+                onClick={() => setShowKey((prev) => !prev)}
+              >
+                {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+              </IconButton>
+            </div>
+          </div>
+          {isPi && (
+            <div className="kv-form-block">
+              <FieldLabel text={t.externalAgentsNativeProtocol} required />
+              <Select
+                value={nativeForm.api}
+                onChange={(api) => setNativeForm((prev) => ({ ...prev, api }))}
+                options={PI_API_OPTIONS.map((api) => ({ value: api, label: api }))}
+              />
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head kv-native-section-head--actions">
+          <div>
+            <h4>{t.externalAgentsNativeModels}</h4>
+            <p>
+              {fetchNote && (fetchedModels.length > 0 || fetchNote === t.externalAgentsProviderModelsEmpty)
+                ? fetchNote
+                : t.externalAgentsNativeModelsHint}
+            </p>
+          </div>
+          <div className="kv-native-model-actions">
+            <span>{t.externalAgentsModelsCount.replace('{count}', String(nativeModelOptions.length))}</span>
+            <Button
+              size="sm"
+              onClick={() => void fetchModels()}
+              disabled={fetching || !nativeForm.baseUrl.trim()}
+            >
+              <RefreshCw size={12} className={fetching ? 'animate-spin' : ''} />
+              {fetching ? t.externalAgentsProviderFetchingModels : t.externalAgentsProviderFetchModels}
+            </Button>
+            <IconButton
+              size="sm"
+              label={t.externalAgentsNativeModelAdd}
+              onClick={() => setNativeForm((prev) => ({
+                ...prev,
+                models: [...prev.models, emptyNativeModel(nativeAgentId)],
+              }))}
+            >
+              <Plus size={13} />
+            </IconButton>
+          </div>
+        </div>
+
+        <div className="kv-native-model-list">
+          <div className="kv-native-model-columns" aria-hidden>
+            <span />
+            <span>{t.externalAgentsNativeModelId}</span>
+            <span>{isPi ? t.externalAgentsPiAutoMetadata : t.externalAgentsNativeModelName}</span>
+            <span />
+          </div>
+          {nativeForm.models.map((model, idx) => {
+            const metadata = isPi ? resolvePiModelMetadata(model) : null
+            const expanded = expandedNativeModels.has(idx)
+            const automaticLabel = metadata?.matched
+              ? t.externalAgentsPiMetadataMatched
+              : t.externalAgentsPiMetadataDefault
+            return (
+              <div key={idx} className={`kv-native-model-row ${expanded ? 'is-expanded' : ''}`}>
+                <div className="kv-native-model-main">
+                  <span className="kv-native-model-index">{String(idx + 1).padStart(2, '0')}</span>
+                  <SuggestInput
+                    value={model.id}
+                    onChange={(id) => updateNativeModelId(idx, id)}
+                    options={modelSelectOptions}
+                    placeholder={t.externalAgentsProviderModelPlaceholder}
+                    mono
+                    className="min-w-0"
+                    ariaLabel={t.externalAgentsNativeModelId}
+                  />
+                  {isPi && metadata ? (
+                    <div className="kv-native-model-summary">
+                      <span className={metadata.matched ? 'matched' : ''}>{automaticLabel}</span>
+                      <span>{formatTokenLimit(metadata.contextWindow)} {t.externalAgentsPiContextShort}</span>
+                      <span>{formatTokenLimit(metadata.maxTokens)} {t.externalAgentsPiOutputShort}</span>
+                      {metadata.reasoning && <span>{t.externalAgentsPiReasoningShort}</span>}
+                      {metadata.vision && <span>{t.externalAgentsPiVisionShort}</span>}
+                    </div>
+                  ) : (
+                    <Input
+                      value={model.name}
+                      onChange={(modelName) => setNativeForm((prev) => ({
+                        ...prev,
+                        models: prev.models.map((item, i) => i === idx ? { ...item, name: modelName } : item),
+                      }))}
+                      placeholder={t.externalAgentsNativeModelName}
+                      className="min-w-0"
+                    />
+                  )}
+                  <div className="kv-native-model-row-actions">
+                    {isPi && (
+                      <IconButton
+                        size="sm"
+                        variant="ghost"
+                        className={expanded ? 'active' : ''}
+                        label={t.externalAgentsPiModelAdvanced}
+                        aria-expanded={expanded}
+                        onClick={() => setExpandedNativeModels((previous) => {
+                          const next = new Set(previous)
+                          if (next.has(idx)) next.delete(idx)
+                          else next.add(idx)
+                          return next
+                        })}
+                      >
+                        <SlidersHorizontal size={13} />
+                      </IconButton>
+                    )}
+                    <IconButton
+                      size="sm"
+                      label={t.externalAgentsRemove}
+                      onClick={() => setNativeForm((prev) => {
+                        const removedDefault = prev.models[idx]?.id.trim() === prev.defaultModel.trim()
+                        const models = prev.models.length === 1
+                          ? [emptyNativeModel(nativeAgentId)]
+                          : prev.models.filter((_, i) => i !== idx)
+                        if (!removedDefault) return { ...prev, models }
+                        const defaultModel = models[0]?.id ?? ''
+                        return {
+                          ...prev,
+                          models,
+                          defaultModel,
+                          defaultThinkingLevel: isPi
+                            ? recommendedPiThinkingLevel(models[0])
+                            : prev.defaultThinkingLevel,
+                        }
+                      })}
+                    >
+                      <Trash2 size={13} />
+                    </IconButton>
+                  </div>
+                </div>
+                {isPi && metadata && expanded && (
+                  <div className="kv-native-model-advanced">
+                    <div className="kv-native-model-advanced-head">
+                      <span>{t.externalAgentsPiModelOverrides}</span>
+                      <span>{t.externalAgentsPiModelOverridesHint}</span>
+                    </div>
+                    <div className="kv-native-model-advanced-grid">
+                      <div className="kv-form-block">
+                        <FieldLabel text={t.externalAgentsNativeModelName} />
+                        <Input
+                          value={model.name}
+                          onChange={(modelName) => setNativeForm((prev) => ({
+                            ...prev,
+                            models: prev.models.map((item, i) => i === idx ? { ...item, name: modelName } : item),
+                          }))}
+                          placeholder={metadata.displayName}
+                        />
+                      </div>
+                      <div className="kv-form-block">
+                        <FieldLabel text={t.externalAgentsPiContextWindow} />
+                        <Input
+                          value={model.contextWindow}
+                          onChange={(contextWindow) => setNativeForm((prev) => ({
+                            ...prev,
+                            models: prev.models.map((item, i) => i === idx ? { ...item, contextWindow } : item),
+                          }))}
+                          placeholder={String(metadata.contextWindow)}
+                          type="number"
+                          min="1"
+                          step="1"
+                          inputMode="numeric"
+                          mono
+                          aria-label={t.externalAgentsPiContextWindow}
+                        />
+                      </div>
+                      <div className="kv-form-block">
+                        <FieldLabel text={t.externalAgentsPiMaxTokens} />
+                        <Input
+                          value={model.maxTokens}
+                          onChange={(maxTokens) => setNativeForm((prev) => ({
+                            ...prev,
+                            models: prev.models.map((item, i) => i === idx ? { ...item, maxTokens } : item),
+                          }))}
+                          placeholder={String(metadata.maxTokens)}
+                          type="number"
+                          min="1"
+                          step="1"
+                          inputMode="numeric"
+                          mono
+                          aria-label={t.externalAgentsPiMaxTokens}
+                        />
+                      </div>
+                    </div>
+                    <div className="kv-native-model-switches">
+                      <label>
+                        <Toggle
+                          checked={metadata.reasoning}
+                          onChange={(reasoning) => updatePiModelReasoning(idx, reasoning)}
+                          ariaLabel={t.externalAgentsPiReasoning}
+                        />
+                        <span>{t.externalAgentsPiReasoning}</span>
+                        {model.reasoning === null ? (
+                          <small>{t.externalAgentsPiAutomatic}</small>
+                        ) : (
+                          <IconButton
+                            size="xs"
+                            variant="ghost"
+                            label={t.externalAgentsPiRestoreAutomatic}
+                            onClick={() => updatePiModelReasoning(idx, null)}
+                          >
+                            <RotateCcw size={11} />
+                          </IconButton>
+                        )}
+                      </label>
+                      <label>
+                        <Toggle
+                          checked={metadata.vision}
+                          onChange={(vision) => setNativeForm((prev) => ({
+                            ...prev,
+                            models: prev.models.map((item, i) => i === idx ? { ...item, vision } : item),
+                          }))}
+                          ariaLabel={t.externalAgentsPiVision}
+                        />
+                        <span>{t.externalAgentsPiVision}</span>
+                        {model.vision === null ? (
+                          <small>{t.externalAgentsPiAutomatic}</small>
+                        ) : (
+                          <IconButton
+                            size="xs"
+                            variant="ghost"
+                            label={t.externalAgentsPiRestoreAutomatic}
+                            onClick={() => setNativeForm((prev) => ({
+                              ...prev,
+                              models: prev.models.map((item, i) => i === idx ? { ...item, vision: null } : item),
+                            }))}
+                          >
+                            <RotateCcw size={11} />
+                          </IconButton>
+                        )}
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        {fetchNote && fetchedModels.length === 0 && fetchNote !== t.externalAgentsProviderModelsEmpty && (
+          <p className="kv-form-error-inline">{fetchNote}</p>
+        )}
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <div>
+            <h4>{t.externalAgentsNativeStartupSection}</h4>
+            <p>{t.externalAgentsNativeDefaultHint}</p>
+          </div>
+        </div>
+        <div className={`kv-form-grid ${isPi ? '' : 'kv-form-grid--single'}`}>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsCodexDefaultModel} required />
+            <SuggestInput
+              value={nativeForm.defaultModel}
+              onChange={(defaultModel) => setNativeForm((prev) => {
+                const model = prev.models.find((item) => item.id.trim() === defaultModel.trim())
+                return {
+                  ...prev,
+                  defaultModel,
+                  defaultThinkingLevel: isPi
+                    ? recommendedPiThinkingLevel(model)
+                    : prev.defaultThinkingLevel,
+                }
+              })}
+              options={nativeModelOptions}
+              placeholder={t.externalAgentsProviderModelPlaceholder}
+              mono
+              ariaLabel={t.externalAgentsCodexDefaultModel}
+            />
+          </div>
+          {isPi && (
+            <div className="kv-form-block">
+              <FieldLabel text={t.externalAgentsPiDefaultThinking} required />
+              <Select
+                value={nativeForm.defaultThinkingLevel}
+                onChange={(defaultThinkingLevel) => setNativeForm((prev) => ({
+                  ...prev,
+                  defaultThinkingLevel,
+                }))}
+                options={piThinkingOptions.map((level) => ({
+                  value: level,
+                  label: level === 'off' ? t.externalAgentsPiThinkingOff : level,
+                }))}
+              />
+            </div>
+          )}
+        </div>
+      </section>
+
+      <p className="kv-native-persistence-note">{t.externalAgentsNativeWriteHint}</p>
+    </div>
+  )
+
   return createPortal(
     <div
       className="kv-modal-backdrop kv-modal-backdrop--portal"
       data-tauri-drag-region="false"
     >
       <div
-        className={`kv kv-modal kv-provider-modal ${isClaude || isCodex ? 'kv-provider-modal--wide' : ''}`}
+        className={`kv kv-modal kv-provider-modal ${isClaude || isCodex || isNative ? 'kv-provider-modal--wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -781,6 +1273,8 @@ export function CliProviderModal({
             claudeBody
           ) : isCodex ? (
             codexBody
+          ) : isNative ? (
+            nativeBody
           ) : (
             <>
               <div className="kv-form-grid">

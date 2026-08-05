@@ -25,6 +25,11 @@ fn get(id: &str) -> Option<ExternalCliAgentConfig> {
     OVERRIDES.read().ok()?.get(id).cloned()
 }
 
+/// 原生落盘层需要整份配置：不仅要看当前项，还要同步全部 Kivio 管理的 provider。
+pub fn agent_config(id: &str) -> Option<ExternalCliAgentConfig> {
+    get(id)
+}
+
 /// 用户是否停用了这个 CLI（不再出现在 Chat 的运行时选择器里）。
 pub fn is_disabled(id: &str) -> bool {
     get(id).map(|cfg| cfg.disabled).unwrap_or(false)
@@ -115,7 +120,10 @@ pub fn env_for_bin(bin: &std::path::Path) -> HashMap<String, String> {
 }
 
 /// Windows 上 PATH 命中的可能是 `claude.cmd` / `claude.exe`，所以带扩展名和不带都比一遍。
-fn bin_name_matches(bin: &std::path::Path, def: &crate::external_agents::types::RuntimeAgentDef) -> bool {
+fn bin_name_matches(
+    bin: &std::path::Path,
+    def: &crate::external_agents::types::RuntimeAgentDef,
+) -> bool {
     let stem = bin.file_stem().and_then(|s| s.to_str());
     let name = bin.file_name().and_then(|s| s.to_str());
     std::iter::once(def.bin)
@@ -138,10 +146,22 @@ mod tests {
     #[test]
     fn manual_env_wins_over_provider_env() {
         let base = HashMap::from([
-            ("ANTHROPIC_BASE_URL".to_string(), "https://provider".to_string()),
-            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-provider".to_string()),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://provider".to_string(),
+            ),
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "sk-provider".to_string(),
+            ),
         ]);
-        let merged = merge_env(base, &[pair("ANTHROPIC_BASE_URL", "https://manual"), pair("EXTRA", "1")]);
+        let merged = merge_env(
+            base,
+            &[
+                pair("ANTHROPIC_BASE_URL", "https://manual"),
+                pair("EXTRA", "1"),
+            ],
+        );
         // 手填是「我知道我在干什么」的逃生口，必须压过供应商。
         assert_eq!(merged["ANTHROPIC_BASE_URL"], "https://manual");
         // 供应商里手填没提到的键要保留，否则换个键名就把整份供应商配置抹了。
@@ -149,4 +169,3 @@ mod tests {
         assert_eq!(merged["EXTRA"], "1");
     }
 }
-

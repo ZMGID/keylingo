@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matchModel, resolveModelInfo } from './modelMatching'
+import { matchModel, matchModelExact, resolveModelInfo } from './modelMatching'
 
 describe('matchModel', () => {
   it('returns null for blank model names', () => {
@@ -77,6 +77,17 @@ describe('matchModel', () => {
     expect(info?.contextWindow).toBe(1_000_000)
     expect(info?.maxOutput).toBe(128_000)
     expect(info?.pricing?.input).toBe(10)
+  })
+})
+
+describe('matchModelExact', () => {
+  it('matches exact and provider-prefixed model ids', () => {
+    expect(matchModelExact('gpt-4o')).toEqual(matchModelExact('openai/gpt-4o'))
+    expect(matchModelExact('claude-sonnet-4-6')?.displayName).toBe('Claude Sonnet 4.6')
+  })
+
+  it('does not infer catalog metadata for private aliases', () => {
+    expect(matchModelExact('company-gpt-4o-special')).toBeNull()
   })
 })
 

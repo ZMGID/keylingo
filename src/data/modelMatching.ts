@@ -69,26 +69,14 @@ const normalizedEntries = dbKeys.map((orig) => {
 export function matchModel(modelName: string): ModelInfo | null {
   if (!modelName.trim()) return null
 
+  const exact = matchModelExact(modelName)
+  if (exact) return exact
+
   // 去掉 provider/ 前缀（如 "openai/gpt-4o" → "gpt-4o"）
   const name = modelName.toLowerCase().trim()
   const stripped = name.includes('/') ? name.split('/').pop()! : name
-
-  // 1. 精确匹配。先查完整 ID，允许数据库保存 OpenRouter 风格的 provider/model 专用条目。
-  if (db[name]) {
-    return toModelInfo(db[name])
-  }
-  if (db[stripped]) {
-    return toModelInfo(db[stripped])
-  }
-
-  // 1b. 分隔符归一化后的精确匹配（`claude-sonnet-4-6` ↔ `claude-sonnet-4.6`）。
-  //     必须在前缀匹配之前，否则会退化到旧的大版本条目。
   const normName = normalizeSep(name)
   const normStripped = normalizeSep(stripped)
-  const exactNorm = normalizedExact.get(normName) ?? normalizedExact.get(normStripped)
-  if (exactNorm) {
-    return toModelInfo(db[exactNorm])
-  }
 
   // 归一化候选，供前缀 / 包含匹配复用。
   const normCandidates = normName === normStripped ? [normStripped] : [normName, normStripped]
@@ -129,6 +117,24 @@ export function matchModel(modelName: string): ModelInfo | null {
   }
 
   return null
+}
+
+/**
+ * 仅按完整模型 ID 匹配，不做前缀或包含推断。
+ *
+ * 自定义 CLI 供应商常使用带品牌词的私有别名；对这类 ID 做模糊匹配会把别名误判成
+ * 公共模型并写入错误能力。允许 provider/model 前缀和点/横线版本分隔符归一化。
+ */
+export function matchModelExact(modelName: string): ModelInfo | null {
+  if (!modelName.trim()) return null
+  const name = modelName.toLowerCase().trim()
+  const stripped = name.includes('/') ? name.split('/').pop()! : name
+  if (db[name]) return toModelInfo(db[name])
+  if (db[stripped]) return toModelInfo(db[stripped])
+
+  const exactNorm = normalizedExact.get(normalizeSep(name))
+    ?? normalizedExact.get(normalizeSep(stripped))
+  return exactNorm ? toModelInfo(db[exactNorm]) : null
 }
 
 /**

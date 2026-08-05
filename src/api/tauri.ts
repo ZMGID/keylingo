@@ -503,7 +503,9 @@ export type ExternalCliAgentConfig = {
 
 /**
  * 一个第三方供应商。各 CLI 用到的字段不同：claude / gemini 用 `env`，
- * codex 用 `configToml` + `authJson`（物化成私有 CODEX_HOME）。
+ * codex 用 `configToml` + `authJson`（物化成私有 CODEX_HOME）；
+ * OpenCode / Pi 用 `configJson` + `authJson` + `defaultModel` 合并进原生全局配置；
+ * Pi 另用 `defaultReasoning` 写入终端默认 thinking 档位。
  */
 export type ExternalCliProvider = {
   id: string
@@ -511,7 +513,12 @@ export type ExternalCliProvider = {
   remark?: string
   env?: Array<{ key: string; value: string }>
   configToml?: string
+  configJson?: string
   authJson?: string
+  /** Kivio-only model override state; never written into the CLI native config. */
+  modelMetadataJson?: string
+  defaultModel?: string
+  defaultReasoning?: string
 }
 
 export type ChatMemoryConfig = {

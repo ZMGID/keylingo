@@ -644,6 +644,8 @@ pub struct ExternalCliAgentConfig {
 /// 一个第三方供应商（中转站）。**各 CLI 用到的字段不同**：
 /// - claude / gemini / 其余 env 系：只用 `env`（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` …）
 /// - codex：只用 `config_toml` / `auth_json`，物化成一个私有 `CODEX_HOME`
+/// - opencode / pi：用 `config_json` / `auth_json` / `default_model` 合并进 CLI 原生全局配置
+/// - pi：另用 `default_reasoning` 写入 `settings.json.defaultThinkingLevel`
 ///
 /// 扁平结构而不是 tagged enum：settings.json 是用户可手改的文件，enum 的 tag 写错整条读不出来。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -656,8 +658,16 @@ pub struct ExternalCliProvider {
     pub env: Vec<CliEnvVar>,
     /// 仅 codex：私有 CODEX_HOME 里 config.toml 的全文。
     pub config_toml: String,
-    /// 仅 codex：私有 CODEX_HOME 里 auth.json 的全文。
+    /// opencode / pi：单个原生 provider 对象的 JSON（不含 provider id 外层）。
+    pub config_json: String,
+    /// codex：私有 CODEX_HOME 的完整 auth.json；opencode / pi：单个原生凭据对象。
     pub auth_json: String,
+    /// Kivio 自用的模型覆盖状态；不写入 CLI 原生配置。
+    pub model_metadata_json: String,
+    /// opencode / pi：启用该供应商时写入原生设置的模型 id（不含 provider 前缀）。
+    pub default_model: String,
+    /// pi：终端独立启动时使用的默认 thinking 档位。
+    pub default_reasoning: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

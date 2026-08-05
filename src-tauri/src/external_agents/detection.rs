@@ -216,17 +216,16 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
 /// 选了第三方供应商时读的是那份私有 `CODEX_HOME` 里的 config.toml —— 子进程读哪份，这里就
 /// 得读哪份，否则胶囊显示的当前模型是用户全局配置里的、和实际跑的对不上。
 fn read_codex_current_config() -> (Option<String>, Option<String>) {
-    let path = match crate::external_agents::provider_profile::provider_env("codex")
-        .get("CODEX_HOME")
-    {
-        Some(home) => std::path::PathBuf::from(home).join("config.toml"),
-        None => {
-            let Some(base) = directories::BaseDirs::new() else {
-                return (None, None);
-            };
-            base.home_dir().join(".codex").join("config.toml")
-        }
-    };
+    let path =
+        match crate::external_agents::provider_profile::provider_env("codex").get("CODEX_HOME") {
+            Some(home) => std::path::PathBuf::from(home).join("config.toml"),
+            None => {
+                let Some(base) = directories::BaseDirs::new() else {
+                    return (None, None);
+                };
+                base.home_dir().join(".codex").join("config.toml")
+            }
+        };
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_codex_config_toplevel(&text),
         Err(_) => (None, None),
@@ -282,11 +281,11 @@ fn unquote_toml_scalar(value: &str) -> Option<String> {
 /// `provider/model`（与 pi --list-models 的 id 形态一致，可回填选择）。缺文件/键 → None。
 fn read_pi_current_config() -> Option<String> {
     let base = directories::BaseDirs::new()?;
-    let path = base
-        .home_dir()
-        .join(".pi")
-        .join("agent")
-        .join("settings.json");
+    let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| base.home_dir().join(".pi").join("agent"));
+    let path = agent_dir.join("settings.json");
     let text = std::fs::read_to_string(&path).ok()?;
     parse_pi_current_model(&text)
 }
@@ -691,9 +690,13 @@ async fn probe_models(
         )
         .await
         {
-            Ok(Some((models, current_model))) => {
-                Ok(probe_ok(models, current_model, None, Vec::new(), HashMap::new()))
-            }
+            Ok(Some((models, current_model))) => Ok(probe_ok(
+                models,
+                current_model,
+                None,
+                Vec::new(),
+                HashMap::new(),
+            )),
             Ok(None) => Err("Claude 初始化未上报模型".to_string()),
             Err(_) => Err(format!("Claude 模型探测超时（{timeout_secs}s）")),
         };
@@ -786,11 +789,7 @@ fn parse_codex_debug_models_json(
         .iter()
         .map(|entry| {
             let mut obj = serde_json::Map::new();
-            if let Some(id) = entry
-                .get("slug")
-                .or_else(|| entry.get("id"))
-                .cloned()
-            {
+            if let Some(id) = entry.get("slug").or_else(|| entry.get("id")).cloned() {
                 obj.insert("id".into(), id.clone());
                 obj.insert("model".into(), id);
             }
