@@ -35,6 +35,7 @@ static NATIVE_CONFIG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(())
 #[derive(Debug, Clone)]
 struct NativePaths {
     config: PathBuf,
+    alternate_configs: Vec<PathBuf>,
     auth: PathBuf,
     settings: Option<PathBuf>,
     state: PathBuf,
@@ -102,8 +103,24 @@ fn opencode_paths() -> Option<NativePaths> {
     let home = base.home_dir();
     let config_home = nonempty_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
     let data_home = nonempty_env_path("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+    let config_dir = config_home.join("opencode");
+    let candidates: Vec<PathBuf> = ["config.json", "opencode.json", "opencode.jsonc"]
+        .into_iter()
+        .map(|name| config_dir.join(name))
+        .collect();
+    let config = candidates
+        .iter()
+        .rev()
+        .find(|path| path.is_file())
+        .cloned()
+        .unwrap_or_else(|| config_dir.join("opencode.json"));
+    let alternate_configs = candidates
+        .into_iter()
+        .filter(|path| path != &config && path.is_file())
+        .collect();
     Some(NativePaths {
-        config: config_home.join("opencode/opencode.json"),
+        config,
+        alternate_configs,
         auth: data_home.join("opencode/auth.json"),
         settings: None,
         state: profiles_dir()?.join("opencode-native-state.json"),
@@ -116,6 +133,7 @@ fn pi_paths() -> Option<NativePaths> {
         .unwrap_or_else(|| base.home_dir().join(".pi/agent"));
     Some(NativePaths {
         config: agent.join("models.json"),
+        alternate_configs: Vec::new(),
         auth: agent.join("auth.json"),
         settings: Some(agent.join("settings.json")),
         state: profiles_dir()?.join("pi-native-state.json"),
@@ -265,7 +283,7 @@ struct NativeProviderEntry {
     source_id: String,
     native_id: String,
     config: Value,
-    auth: Value,
+    auth: Option<Value>,
     default_model: String,
     default_thinking_level: Option<String>,
 }
@@ -324,12 +342,15 @@ fn materialize_native_at(
 
     match agent_id {
         "opencode" => {
+            migrate_shadowed_opencode_configs(paths, &mut state, &previous_ids, &entries)?;
             let mut root = read_object_file(&paths.config, true, false, "OpenCode opencode.json")?;
             let before_root = root.clone();
-            sync_provider_map(&mut root, "provider", &previous_ids, &entries)?;
+            ensure_provider_id_available(&root, "provider", &previous_ids, &entries)?;
+            sync_provider_map(agent_id, &mut root, "provider", &previous_ids, &entries)?;
 
             let mut auth = read_object_file(&paths.auth, false, true, "OpenCode auth.json")?;
             let before_auth = auth.clone();
+            ensure_auth_id_available(&auth, &previous_ids, &entries)?;
             sync_auth_map(&mut auth, &previous_ids, &entries);
 
             apply_default_fields(
@@ -351,7 +372,8 @@ fn materialize_native_at(
         "pi" => {
             let mut models = read_object_file(&paths.config, false, false, "Pi models.json")?;
             let before_models = models.clone();
-            sync_provider_map(&mut models, "providers", &previous_ids, &entries)?;
+            ensure_provider_id_available(&models, "providers", &previous_ids, &entries)?;
+            sync_provider_map(agent_id, &mut models, "providers", &previous_ids, &entries)?;
 
             let mut auth = read_object_file(&paths.auth, false, true, "Pi auth.json")?;
             let before_auth = auth.clone();
@@ -390,6 +412,34 @@ fn materialize_native_at(
     write_managed_state(&paths.state, &state)
 }
 
+fn migrate_shadowed_opencode_configs(
+    paths: &NativePaths,
+    state: &mut NativeManagedState,
+    previous_ids: &HashSet<String>,
+    entries: &[NativeProviderEntry],
+) -> Result<(), String> {
+    for path in &paths.alternate_configs {
+        let root = read_object_file(path, true, false, "OpenCode shadowed config")?;
+        ensure_provider_id_available(&root, "provider", previous_ids, entries)?;
+    }
+    for path in &paths.alternate_configs {
+        let mut root = read_object_file(path, true, false, "OpenCode shadowed config")?;
+        let before = root.clone();
+        if state.defaults_managed
+            && root
+                .get("model")
+                .and_then(Value::as_str)
+                .and_then(|model| model.split_once('/'))
+                .is_some_and(|(provider, _)| previous_ids.contains(provider))
+        {
+            apply_default_fields(&mut root, state, &["model"], None);
+        }
+        remove_managed_provider_ids(&mut root, "provider", previous_ids)?;
+        write_object_if_changed(path, before, &root)?;
+    }
+    Ok(())
+}
+
 fn parse_native_entries(
     agent_id: &str,
     providers: &[ExternalCliProvider],
@@ -401,13 +451,28 @@ fn parse_native_entries(
         if provider.config_json.trim().is_empty() {
             continue;
         }
-        let native_id = native_provider_id(&provider.id)
-            .ok_or_else(|| format!("供应商 id 无法生成原生 provider id：{}", provider.id))?;
+        let native_id = if provider.native_provider_id.trim().is_empty() {
+            native_provider_id(&provider.id)
+                .ok_or_else(|| format!("供应商 id 无法生成原生 provider id：{}", provider.id))?
+        } else {
+            let configured = provider.native_provider_id.trim();
+            if !valid_explicit_native_provider_id(configured) {
+                return Err(format!(
+                    "供应商 {} 的原生 provider id 无效：{}",
+                    provider.name, configured
+                ));
+            }
+            configured.to_string()
+        };
         if !native_ids.insert(native_id.clone()) {
             return Err(format!("供应商 id 归一化后冲突：{native_id}"));
         }
         let config = parse_object_text(&provider.config_json, "provider configJson")?;
-        let auth = parse_object_text(&provider.auth_json, "provider authJson")?;
+        let auth = if provider.auth_json.trim().is_empty() {
+            Map::new()
+        } else {
+            parse_object_text(&provider.auth_json, "provider authJson")?
+        };
         let default_model = provider.default_model.trim().to_string();
         if default_model.is_empty() {
             return Err(format!("供应商 {} 缺少默认模型", provider.name));
@@ -436,7 +501,7 @@ fn parse_native_entries(
             source_id: provider.id.clone(),
             native_id,
             config: Value::Object(config),
-            auth: Value::Object(auth),
+            auth: (!auth.is_empty()).then(|| Value::Object(auth)),
             default_model,
             default_thinking_level,
         });
@@ -495,14 +560,17 @@ fn validate_native_provider(
     };
     match agent_id {
         "opencode" => {
-            if !nonempty(config.get("npm"))
-                || !config
+            if !nonempty(config.get("npm")) {
+                return Err(format!("供应商 {name} 的 OpenCode 配置缺少 npm"));
+            }
+            if config.get("npm").and_then(Value::as_str) == Some("@ai-sdk/openai-compatible")
+                && !config
                     .get("options")
                     .and_then(Value::as_object)
                     .is_some_and(|options| nonempty(options.get("baseURL")))
             {
                 return Err(format!(
-                    "供应商 {name} 的 OpenCode 配置缺少 npm 或 options.baseURL"
+                    "供应商 {name} 使用 OpenAI Compatible 时必须填写 options.baseURL"
                 ));
             }
         }
@@ -546,6 +614,9 @@ fn validate_native_auth(
     auth: &Map<String, Value>,
     name: &str,
 ) -> Result<(), String> {
+    if agent_id == "opencode" && auth.is_empty() {
+        return Ok(());
+    }
     let expected_type = if agent_id == "opencode" {
         "api"
     } else {
@@ -581,7 +652,152 @@ fn native_provider_id(id: &str) -> Option<String> {
     (!slug.is_empty()).then(|| format!("kivio-{slug}"))
 }
 
+fn valid_explicit_native_provider_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+fn ensure_provider_id_available(
+    root: &Map<String, Value>,
+    field: &str,
+    previous_ids: &HashSet<String>,
+    entries: &[NativeProviderEntry],
+) -> Result<(), String> {
+    let Some(existing) = root.get(field).and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if let Some(entry) = entries.iter().find(|entry| {
+        existing.contains_key(&entry.native_id) && !previous_ids.contains(&entry.native_id)
+    }) {
+        return Err(format!(
+            "原生配置中已存在非 Kivio 管理的供应商 id：{}",
+            entry.native_id
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_auth_id_available(
+    auth: &Map<String, Value>,
+    previous_ids: &HashSet<String>,
+    entries: &[NativeProviderEntry],
+) -> Result<(), String> {
+    if let Some(entry) = entries.iter().find(|entry| {
+        auth.contains_key(&entry.native_id) && !previous_ids.contains(&entry.native_id)
+    }) {
+        return Err(format!(
+            "原生 auth.json 中已存在非 Kivio 管理的供应商 id：{}",
+            entry.native_id
+        ));
+    }
+    Ok(())
+}
+
+fn merge_object(base: &mut Map<String, Value>, incoming: &Map<String, Value>) {
+    for (key, value) in incoming {
+        base.insert(key.clone(), value.clone());
+    }
+}
+
+fn merge_opencode_model(
+    mut existing: Map<String, Value>,
+    incoming: &Map<String, Value>,
+) -> Map<String, Value> {
+    for (key, value) in incoming {
+        if let (Some(base), Some(incoming)) = (
+            existing.get(key).and_then(Value::as_object).cloned(),
+            value.as_object(),
+        ) {
+            let mut merged = base;
+            merge_object(&mut merged, incoming);
+            existing.insert(key.clone(), Value::Object(merged));
+        } else {
+            existing.insert(key.clone(), value.clone());
+        }
+    }
+    existing
+}
+
+fn merge_opencode_provider(existing: Value, incoming: &Value) -> Value {
+    let (Some(mut existing), Some(incoming)) =
+        (existing.as_object().cloned(), incoming.as_object())
+    else {
+        return incoming.clone();
+    };
+
+    for (key, value) in incoming {
+        match key.as_str() {
+            "options" => {
+                let mut merged = existing
+                    .get("options")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(incoming) = value.as_object() {
+                    merge_object(&mut merged, incoming);
+                    if !incoming.contains_key("baseURL") {
+                        merged.remove("baseURL");
+                    }
+                    existing.insert(key.clone(), Value::Object(merged));
+                } else {
+                    existing.insert(key.clone(), value.clone());
+                }
+            }
+            "models" => {
+                let old_models = existing.get("models").and_then(Value::as_object);
+                let mut models = Map::new();
+                if let Some(incoming_models) = value.as_object() {
+                    for (model_id, model) in incoming_models {
+                        let mut merged = old_models
+                            .and_then(|models| models.get(model_id))
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        if let Some(incoming_model) = model.as_object() {
+                            merged = merge_opencode_model(merged, incoming_model);
+                            models.insert(model_id.clone(), Value::Object(merged));
+                        } else {
+                            models.insert(model_id.clone(), model.clone());
+                        }
+                    }
+                    existing.insert(key.clone(), Value::Object(models));
+                } else {
+                    existing.insert(key.clone(), value.clone());
+                }
+            }
+            _ => {
+                existing.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Value::Object(existing)
+}
+
+fn remove_managed_provider_ids(
+    root: &mut Map<String, Value>,
+    field: &str,
+    managed_ids: &HashSet<String>,
+) -> Result<(), String> {
+    let Some(value) = root.get_mut(field) else {
+        return Ok(());
+    };
+    let providers = value
+        .as_object_mut()
+        .ok_or_else(|| format!("原生配置的 {field} 必须是对象"))?;
+    for id in managed_ids {
+        providers.remove(id);
+    }
+    Ok(())
+}
+
 fn sync_provider_map(
+    agent_id: &str,
     root: &mut Map<String, Value>,
     field: &str,
     previous_ids: &HashSet<String>,
@@ -595,11 +811,22 @@ fn sync_provider_map(
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .ok_or_else(|| format!("原生配置的 {field} 必须是对象"))?;
+    let mut previous = HashMap::new();
     for id in previous_ids {
-        providers.remove(id);
+        if let Some(value) = providers.remove(id) {
+            previous.insert(id.clone(), value);
+        }
     }
     for entry in entries {
-        providers.insert(entry.native_id.clone(), entry.config.clone());
+        let config = if agent_id == "opencode" {
+            previous
+                .remove(&entry.native_id)
+                .map(|existing| merge_opencode_provider(existing, &entry.config))
+                .unwrap_or_else(|| entry.config.clone())
+        } else {
+            entry.config.clone()
+        };
+        providers.insert(entry.native_id.clone(), config);
     }
     Ok(())
 }
@@ -613,7 +840,9 @@ fn sync_auth_map(
         auth.remove(id);
     }
     for entry in entries {
-        auth.insert(entry.native_id.clone(), entry.auth.clone());
+        if let Some(value) = &entry.auth {
+            auth.insert(entry.native_id.clone(), value.clone());
+        }
     }
 }
 
@@ -739,7 +968,7 @@ fn write_object_if_changed(
 }
 
 /// 删除供应商时清掉它物化出来的文件。失败只记日志：残留一个读不到的旧文件不影响正确性。
-pub fn cleanup(agent_id: &str, provider_id: &str) {
+pub fn cleanup(agent_id: &str, provider_id: &str, native_provider_id: Option<&str>) {
     match agent_id {
         "claude" => {
             if let Some(path) = claude_settings_path_for(provider_id) {
@@ -752,7 +981,7 @@ pub fn cleanup(agent_id: &str, provider_id: &str) {
             }
         }
         "opencode" | "pi" => {
-            if let Err(err) = cleanup_native(agent_id, provider_id) {
+            if let Err(err) = cleanup_native(agent_id, provider_id, native_provider_id) {
                 eprintln!("[external-agent] 清理 {agent_id} 原生供应商失败：{err}");
             }
         }
@@ -760,7 +989,11 @@ pub fn cleanup(agent_id: &str, provider_id: &str) {
     }
 }
 
-fn cleanup_native(agent_id: &str, provider_id: &str) -> Result<(), String> {
+fn cleanup_native(
+    agent_id: &str,
+    provider_id: &str,
+    native_provider_id: Option<&str>,
+) -> Result<(), String> {
     let paths = match agent_id {
         "opencode" => opencode_paths(),
         "pi" => pi_paths(),
@@ -770,31 +1003,43 @@ fn cleanup_native(agent_id: &str, provider_id: &str) -> Result<(), String> {
     let _guard = NATIVE_CONFIG_LOCK
         .lock()
         .map_err(|_| "原生 CLI 配置写锁已损坏".to_string())?;
-    cleanup_native_at(agent_id, provider_id, &paths)
+    cleanup_native_at(agent_id, provider_id, native_provider_id, &paths)
 }
 
-fn cleanup_native_at(agent_id: &str, provider_id: &str, paths: &NativePaths) -> Result<(), String> {
-    let Some(native_id) = native_provider_id(provider_id) else {
+fn cleanup_native_at(
+    agent_id: &str,
+    provider_id: &str,
+    configured_native_id: Option<&str>,
+    paths: &NativePaths,
+) -> Result<(), String> {
+    let native_id = configured_native_id
+        .map(str::trim)
+        .filter(|id| valid_explicit_native_provider_id(id))
+        .map(str::to_string)
+        .or_else(|| native_provider_id(provider_id));
+    let Some(native_id) = native_id else {
         return Ok(());
     };
     let mut state = read_managed_state(&paths.state)?;
     match agent_id {
         "opencode" => {
-            let mut config = read_object_file(&paths.config, true, false, "原生 provider 配置")?;
-            let before_config = config.clone();
-            if state.defaults_managed
-                && config
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .and_then(|model| model.split_once('/'))
-                    .is_some_and(|(provider, _)| provider == native_id)
-            {
-                apply_default_fields(&mut config, &mut state, &["model"], None);
+            for config_path in std::iter::once(&paths.config).chain(&paths.alternate_configs) {
+                let mut config = read_object_file(config_path, true, false, "原生 provider 配置")?;
+                let before_config = config.clone();
+                if state.defaults_managed
+                    && config
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .and_then(|model| model.split_once('/'))
+                        .is_some_and(|(provider, _)| provider == native_id)
+                {
+                    apply_default_fields(&mut config, &mut state, &["model"], None);
+                }
+                if let Some(providers) = config.get_mut("provider").and_then(Value::as_object_mut) {
+                    providers.remove(&native_id);
+                }
+                write_object_if_changed(config_path, before_config, &config)?;
             }
-            if let Some(providers) = config.get_mut("provider").and_then(Value::as_object_mut) {
-                providers.remove(&native_id);
-            }
-            write_object_if_changed(&paths.config, before_config, &config)?;
         }
         "pi" => {
             let mut config = read_object_file(&paths.config, false, false, "原生 provider 配置")?;
@@ -892,6 +1137,7 @@ mod tests {
     fn test_paths(root: &Path, pi: bool) -> NativePaths {
         NativePaths {
             config: root.join(if pi { "models.json" } else { "opencode.json" }),
+            alternate_configs: Vec::new(),
             auth: root.join("auth.json"),
             settings: pi.then(|| root.join("settings.json")),
             state: root.join("kivio-state.json"),
@@ -986,6 +1232,28 @@ mod tests {
         assert_eq!(auth["user-relay"]["key"], "keep");
         assert_eq!(auth["kivio-relay-one"]["key"], "sk-test");
 
+        let mut user_edited = written.clone();
+        user_edited["provider"]["kivio-relay-one"]["headerTimeout"] = serde_json::json!(12_000);
+        user_edited["provider"]["kivio-relay-one"]["models"]["gpt-test"]["variants"] =
+            serde_json::json!({ "high": { "reasoningEffort": "high" } });
+        std::fs::write(
+            &paths.config,
+            serde_json::to_string_pretty(&user_edited).unwrap(),
+        )
+        .unwrap();
+        materialize_native_at("opencode", &config, &paths).unwrap();
+        let merged: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert_eq!(
+            merged["provider"]["kivio-relay-one"]["headerTimeout"],
+            12_000
+        );
+        assert_eq!(
+            merged["provider"]["kivio-relay-one"]["models"]["gpt-test"]["variants"]["high"]
+                ["reasoningEffort"],
+            "high"
+        );
+
         config.current_provider.clear();
         materialize_native_at("opencode", &config, &paths).unwrap();
         let restored: Value =
@@ -993,11 +1261,174 @@ mod tests {
         assert_eq!(restored["model"], "anthropic/claude-old");
         assert!(restored["provider"]["kivio-relay-one"].is_object());
 
-        cleanup_native_at("opencode", "Relay One", &paths).unwrap();
+        cleanup_native_at("opencode", "Relay One", None, &paths).unwrap();
         let cleaned: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
         assert!(cleaned["provider"].get("kivio-relay-one").is_none());
         assert!(cleaned["provider"]["user-relay"].is_object());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opencode_uses_stable_id_and_removes_managed_auth_when_key_is_cleared() {
+        let root = temp_root("opencode-stable-id");
+        let paths = test_paths(&root, false);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&paths.config, "{}").unwrap();
+        std::fs::write(&paths.auth, "{}").unwrap();
+        let mut provider = native_provider(
+            "internal-timestamp-id",
+            "Relay",
+            serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Relay",
+                "options": { "baseURL": "https://relay.example/v1" },
+                "models": { "claude-test": { "name": "Claude Test" } }
+            }),
+            serde_json::json!({ "type": "api", "key": "sk-test" }),
+            "claude-test",
+        );
+        provider.native_provider_id = "team-relay".to_string();
+        let mut config = ExternalCliAgentConfig {
+            providers: vec![provider],
+            current_provider: "internal-timestamp-id".to_string(),
+            ..Default::default()
+        };
+
+        materialize_native_at("opencode", &config, &paths).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert!(written["provider"]["team-relay"].is_object());
+        assert_eq!(written["model"], "team-relay/claude-test");
+
+        config.providers[0].auth_json.clear();
+        config.providers[0].config_json = serde_json::to_string(&serde_json::json!({
+            "npm": "@ai-sdk/anthropic",
+            "name": "Relay",
+            "options": {},
+            "models": { "claude-test": { "name": "Claude Test" } }
+        }))
+        .unwrap();
+        materialize_native_at("opencode", &config, &paths).unwrap();
+        let switched: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert_eq!(
+            switched["provider"]["team-relay"]["npm"],
+            "@ai-sdk/anthropic"
+        );
+        assert!(switched["provider"]["team-relay"]["options"]
+            .get("baseURL")
+            .is_none());
+        let auth: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.auth).unwrap()).unwrap();
+        assert!(auth.get("team-relay").is_none());
+
+        cleanup_native_at(
+            "opencode",
+            "internal-timestamp-id",
+            Some("team-relay"),
+            &paths,
+        )
+        .unwrap();
+        let cleaned: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert!(cleaned["provider"].get("team-relay").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opencode_refuses_to_overwrite_unmanaged_provider_id() {
+        let root = temp_root("opencode-provider-collision");
+        let paths = test_paths(&root, false);
+        std::fs::create_dir_all(&root).unwrap();
+        let original = r#"{"provider":{"team-relay":{"name":"User managed"}}}"#;
+        std::fs::write(&paths.config, original).unwrap();
+        std::fs::write(&paths.auth, "{}").unwrap();
+        let mut provider = native_provider(
+            "internal-id",
+            "Relay",
+            serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Relay",
+                "options": { "baseURL": "https://relay.example/v1" },
+                "models": { "gpt-test": { "name": "GPT Test" } }
+            }),
+            serde_json::json!({ "type": "api", "key": "sk-test" }),
+            "gpt-test",
+        );
+        provider.native_provider_id = "team-relay".to_string();
+        let config = ExternalCliAgentConfig {
+            providers: vec![provider],
+            current_provider: "internal-id".to_string(),
+            ..Default::default()
+        };
+
+        let err = materialize_native_at("opencode", &config, &paths).unwrap_err();
+        assert!(err.contains("非 Kivio 管理"));
+        assert_eq!(std::fs::read_to_string(&paths.config).unwrap(), original);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opencode_moves_managed_entries_to_the_highest_priority_config() {
+        let root = temp_root("opencode-config-precedence");
+        std::fs::create_dir_all(&root).unwrap();
+        let lower_path = root.join("opencode.json");
+        let higher_path = root.join("opencode.jsonc");
+        let lower_paths = test_paths(&root, false);
+        std::fs::write(&lower_path, r#"{"model":"user/old"}"#).unwrap();
+        std::fs::write(&lower_paths.auth, "{}").unwrap();
+        let provider = native_provider(
+            "Relay One",
+            "Relay One",
+            serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Relay One",
+                "options": { "baseURL": "https://relay.example/v1" },
+                "models": { "gpt-test": { "name": "GPT Test" } }
+            }),
+            serde_json::json!({ "type": "api", "key": "sk-test" }),
+            "gpt-test",
+        );
+        let mut config = ExternalCliAgentConfig {
+            providers: vec![provider],
+            current_provider: "Relay One".to_string(),
+            ..Default::default()
+        };
+        materialize_native_at("opencode", &config, &lower_paths).unwrap();
+
+        std::fs::write(
+            &higher_path,
+            r#"{
+              // Higher-priority user config.
+              "model": "top/selected",
+              "provider": { "top": { "name": "Top" } },
+            }"#,
+        )
+        .unwrap();
+        let higher_paths = NativePaths {
+            config: higher_path.clone(),
+            alternate_configs: vec![lower_path.clone()],
+            auth: lower_paths.auth.clone(),
+            settings: None,
+            state: lower_paths.state.clone(),
+        };
+        materialize_native_at("opencode", &config, &higher_paths).unwrap();
+
+        let lower: Value =
+            serde_json::from_str(&std::fs::read_to_string(&lower_path).unwrap()).unwrap();
+        assert_eq!(lower["model"], "user/old");
+        assert!(lower["provider"].get("kivio-relay-one").is_none());
+        let higher: Value =
+            serde_json::from_str(&std::fs::read_to_string(&higher_path).unwrap()).unwrap();
+        assert_eq!(higher["model"], "kivio-relay-one/gpt-test");
+        assert!(higher["provider"]["top"].is_object());
+
+        config.current_provider.clear();
+        materialize_native_at("opencode", &config, &higher_paths).unwrap();
+        let restored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&higher_path).unwrap()).unwrap();
+        assert_eq!(restored["model"], "top/selected");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1031,7 +1462,7 @@ mod tests {
         };
 
         materialize_native_at("opencode", &config, &paths).unwrap();
-        cleanup_native_at("opencode", "Relay One", &paths).unwrap();
+        cleanup_native_at("opencode", "Relay One", None, &paths).unwrap();
         let cleaned: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
         assert_eq!(cleaned["model"], "user-relay/old");
@@ -1144,7 +1575,7 @@ mod tests {
         };
 
         materialize_native_at("pi", &config, &paths).unwrap();
-        cleanup_native_at("pi", "Relay One", &paths).unwrap();
+        cleanup_native_at("pi", "Relay One", None, &paths).unwrap();
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(paths.settings.as_ref().unwrap()).unwrap(),
         )

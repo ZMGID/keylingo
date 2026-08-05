@@ -114,8 +114,13 @@ fn spawn_availability_refresh(app: AppHandle) {
 pub async fn chat_external_cli_provider_cleanup(
     agent_id: String,
     provider_id: String,
+    native_provider_id: Option<String>,
 ) -> Result<(), String> {
-    crate::external_agents::provider_profile::cleanup(&agent_id, &provider_id);
+    crate::external_agents::provider_profile::cleanup(
+        &agent_id,
+        &provider_id,
+        native_provider_id.as_deref(),
+    );
     Ok(())
 }
 

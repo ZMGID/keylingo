@@ -517,6 +517,8 @@ export type ExternalCliProvider = {
   authJson?: string
   /** Kivio-only model override state; never written into the CLI native config. */
   modelMetadataJson?: string
+  /** Stable provider id used by OpenCode/Pi native config references. */
+  nativeProviderId?: string
   defaultModel?: string
   defaultReasoning?: string
 }

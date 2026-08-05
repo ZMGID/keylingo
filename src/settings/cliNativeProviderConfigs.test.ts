@@ -3,15 +3,17 @@ import {
   buildNativeCliProvider,
   emptyNativeModel,
   readNativeCliProvider,
+  resolveOpenCodeModelMetadata,
   resolvePiModelMetadata,
 } from './cliNativeProviderConfigs'
 
 describe('cliNativeProviderConfigs', () => {
   it('builds the documented OpenCode provider and auth shapes', () => {
     const result = buildNativeCliProvider('opencode', 'Relay', {
+      nativeProviderId: 'relay',
       baseUrl: 'https://relay.example/v1',
       apiKey: 'sk-test',
-      api: 'openai-completions',
+      api: '@ai-sdk/openai-compatible',
       models: [{
         id: 'gpt-test',
         name: 'GPT Test',
@@ -22,18 +24,92 @@ describe('cliNativeProviderConfigs', () => {
       }],
       defaultModel: 'gpt-test',
       defaultThinkingLevel: 'off',
+      sourceConfigJson: '',
     })
     expect(JSON.parse(result.configJson!)).toEqual({
       npm: '@ai-sdk/openai-compatible',
       name: 'Relay',
       options: { baseURL: 'https://relay.example/v1' },
-      models: { 'gpt-test': { name: 'GPT Test' } },
+      models: {
+        'gpt-test': {
+          name: 'GPT Test',
+          reasoning: false,
+          attachment: false,
+          tool_call: true,
+          limit: { context: 128000, output: 16384 },
+          modalities: { input: ['text'], output: ['text'] },
+        },
+      },
     })
     expect(JSON.parse(result.authJson!)).toEqual({ type: 'api', key: 'sk-test' })
   })
 
+  it('fills OpenCode model metadata from an exact catalog match', () => {
+    const model = emptyNativeModel('opencode', 'grok-4.5')
+    expect(resolveOpenCodeModelMetadata(model)).toMatchObject({
+      matched: true,
+      displayName: 'Grok 4.5',
+      reasoning: true,
+      vision: true,
+      toolCall: true,
+      contextWindow: 500000,
+      maxTokens: 128000,
+    })
+
+    const built = buildNativeCliProvider('opencode', 'Grok Relay', {
+      nativeProviderId: 'grok-relay',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: '',
+      api: '@ai-sdk/openai-compatible',
+      models: [model],
+      defaultModel: model.id,
+      defaultThinkingLevel: 'off',
+      sourceConfigJson: '',
+    })
+    expect(built.authJson).toBe('')
+    expect(JSON.parse(built.configJson!).models['grok-4.5']).toMatchObject({
+      name: 'Grok 4.5',
+      reasoning: true,
+      attachment: true,
+      tool_call: true,
+      limit: { context: 500000, output: 128000 },
+      modalities: { input: ['text', 'image'], output: ['text'] },
+    })
+  })
+
+  it('keeps unknown OpenCode provider and model fields while updating managed fields', () => {
+    const built = buildNativeCliProvider('opencode', 'Relay', {
+      nativeProviderId: 'relay',
+      baseUrl: '',
+      apiKey: '',
+      api: '@ai-sdk/anthropic',
+      models: [emptyNativeModel('opencode', 'private-model')],
+      defaultModel: 'private-model',
+      defaultThinkingLevel: 'off',
+      sourceConfigJson: JSON.stringify({
+        timeout: 30000,
+        options: { customFlag: true, baseURL: 'https://old.example' },
+        models: {
+          'private-model': {
+            variants: { high: { reasoningEffort: 'high' } },
+            headers: { 'x-model': 'private' },
+          },
+        },
+      }),
+    })
+    const config = JSON.parse(built.configJson!)
+    expect(config.timeout).toBe(30000)
+    expect(config.options).toEqual({ customFlag: true })
+    expect(config.models['private-model']).toMatchObject({
+      variants: { high: { reasoningEffort: 'high' } },
+      headers: { 'x-model': 'private' },
+      limit: { context: 128000, output: 16384 },
+    })
+  })
+
   it('round-trips Pi provider fields and credential type', () => {
     const built = buildNativeCliProvider('pi', 'Relay', {
+      nativeProviderId: '',
       baseUrl: 'https://relay.example/v1',
       apiKey: 'sk-pi',
       api: 'openai-responses',
@@ -47,6 +123,7 @@ describe('cliNativeProviderConfigs', () => {
       }],
       defaultModel: 'gpt-test',
       defaultThinkingLevel: 'high',
+      sourceConfigJson: '',
     })
     expect(JSON.parse(built.authJson!)).toEqual({ type: 'api_key', key: 'sk-pi' })
     expect(JSON.parse(built.configJson!)).toMatchObject({
@@ -92,12 +169,14 @@ describe('cliNativeProviderConfigs', () => {
     })
 
     const built = buildNativeCliProvider('pi', 'Grok Relay', {
+      nativeProviderId: '',
       baseUrl: 'https://relay.example/v1',
       apiKey: 'sk-pi',
       api: 'openai-responses',
       models: [model],
       defaultModel: 'grok-4.5',
       defaultThinkingLevel: 'high',
+      sourceConfigJson: '',
     })
     expect(JSON.parse(built.configJson!).models).toEqual([{
       id: 'grok-4.5',
@@ -120,12 +199,14 @@ describe('cliNativeProviderConfigs', () => {
     ])
 
     const built = buildNativeCliProvider('pi', 'DeepSeek Relay', {
+      nativeProviderId: '',
       baseUrl: 'https://relay.example/v1',
       apiKey: 'sk-pi',
       api: 'openai-responses',
       models: [model],
       defaultModel: model.id,
       defaultThinkingLevel: 'max',
+      sourceConfigJson: '',
     })
     expect(JSON.parse(built.configJson!).models[0].thinkingLevelMap).toEqual({
       minimal: null,
@@ -177,6 +258,7 @@ describe('cliNativeProviderConfigs', () => {
 
   it('persists manual override intent separately from generated Pi metadata', () => {
     const built = buildNativeCliProvider('pi', 'Grok Relay', {
+      nativeProviderId: '',
       baseUrl: 'https://relay.example/v1',
       apiKey: 'sk-pi',
       api: 'openai-responses',
@@ -186,6 +268,7 @@ describe('cliNativeProviderConfigs', () => {
       }],
       defaultModel: 'grok-4.5',
       defaultThinkingLevel: 'high',
+      sourceConfigJson: '',
     })
     expect(JSON.parse(built.modelMetadataJson!)).toEqual({
       version: 1,

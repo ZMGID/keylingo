@@ -8,6 +8,7 @@ export type NativeCliModel = {
   name: string
   reasoning: boolean | null
   vision: boolean | null
+  toolCall?: boolean | null
   contextWindow: string
   maxTokens: string
 }
@@ -28,14 +29,28 @@ export type ResolvedPiModelMetadata = {
   thinkingLevelMap?: PiThinkingLevelMap
 }
 
+export type ResolvedOpenCodeModelMetadata = Omit<ResolvedPiModelMetadata, 'thinkingLevels' | 'thinkingLevelMap'> & {
+  toolCall: boolean
+}
+
 export type NativeCliProviderForm = {
+  nativeProviderId: string
   baseUrl: string
   apiKey: string
   api: string
   models: NativeCliModel[]
   defaultModel: string
   defaultThinkingLevel: string
+  sourceConfigJson: string
 }
+
+export const OPENCODE_NPM_OPTIONS = [
+  '@ai-sdk/openai-compatible',
+  '@ai-sdk/openai',
+  '@ai-sdk/anthropic',
+  '@ai-sdk/google',
+  '@openrouter/ai-sdk-provider',
+] as const
 
 export const PI_API_OPTIONS = [
   'openai-completions',
@@ -66,13 +81,29 @@ const PI_MAPPED_THINKING_OPTIONS: PiMappedThinkingLevel[] = [
 
 const PI_DEFAULT_CONTEXT_WINDOW = 128000
 const PI_DEFAULT_MAX_TOKENS = 16384
+const OPENCODE_DEFAULT_CONTEXT_WINDOW = 128000
+const OPENCODE_DEFAULT_MAX_TOKENS = 16384
+
+export function nativeProviderIdFromName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .replace(/-{2,}/g, '-')
+}
+
+export function isValidNativeProviderId(value: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(value)
+}
 
 export function emptyNativeModel(agentId: NativeCliAgentId, id = ''): NativeCliModel {
   return {
     id,
     name: '',
-    reasoning: agentId === 'pi' ? null : false,
-    vision: agentId === 'pi' ? null : false,
+    reasoning: null,
+    vision: null,
+    toolCall: agentId === 'opencode' ? null : undefined,
     contextWindow: '',
     maxTokens: '',
   }
@@ -119,11 +150,33 @@ export function normalizeNativeModels(models: NativeCliModel[]): NativeCliModel[
       name: model.name.trim(),
       reasoning: model.reasoning,
       vision: model.vision,
+      toolCall: model.toolCall ?? null,
       contextWindow: model.contextWindow.trim(),
       maxTokens: model.maxTokens.trim(),
     })
   }
   return normalized
+}
+
+export function resolveOpenCodeModelMetadata(model: NativeCliModel): ResolvedOpenCodeModelMetadata {
+  const matched = matchModelExact(model.id)
+  const matchedReasoning = matched?.capabilities?.reasoning === true
+    || (matched?.reasoningEfforts?.length ?? 0) > 0
+  return {
+    matched: matched !== null,
+    displayName: model.name.trim() || matched?.displayName || model.id.trim(),
+    reasoning: model.reasoning ?? matchedReasoning,
+    vision: model.vision ?? matched?.capabilities?.vision === true,
+    toolCall: model.toolCall ?? matched?.capabilities?.functionCalling !== false,
+    contextWindow: Number(model.contextWindow)
+      || (matched?.contextWindow && matched.contextWindow > 0
+        ? matched.contextWindow
+        : OPENCODE_DEFAULT_CONTEXT_WINDOW),
+    maxTokens: Number(model.maxTokens)
+      || (matched?.maxOutput && matched.maxOutput > 0
+        ? matched.maxOutput
+        : OPENCODE_DEFAULT_MAX_TOKENS),
+  }
 }
 
 export function resolvePiModelMetadata(model: NativeCliModel): ResolvedPiModelMetadata {
@@ -184,12 +237,13 @@ function readPersistedPiModel(value: unknown, id: string): NativeCliModel {
     name: stringValue(item.name),
     reasoning: typeof item.reasoning === 'boolean' ? item.reasoning : null,
     vision: typeof item.vision === 'boolean' ? item.vision : null,
+    toolCall: typeof item.toolCall === 'boolean' ? item.toolCall : null,
     contextWindow: positiveIntegerString(item.contextWindow),
     maxTokens: positiveIntegerString(item.maxTokens),
   }
 }
 
-function parsePiModelMetadata(text?: string): Record<string, unknown> | null {
+function parseModelMetadata(text?: string): Record<string, unknown> | null {
   if (!text?.trim()) return null
   try {
     const value = JSON.parse(text) as Record<string, unknown>
@@ -199,6 +253,48 @@ function parsePiModelMetadata(text?: string): Record<string, unknown> | null {
     return value.models as Record<string, unknown>
   } catch {
     return null
+  }
+}
+
+function readLegacyOpenCodeModel(item: Record<string, unknown>, id: string): NativeCliModel {
+  const automatic = resolveOpenCodeModelMetadata(emptyNativeModel('opencode', id))
+  const limit = item.limit && typeof item.limit === 'object' && !Array.isArray(item.limit)
+    ? item.limit as Record<string, unknown>
+    : {}
+  const modalities = item.modalities && typeof item.modalities === 'object' && !Array.isArray(item.modalities)
+    ? item.modalities as Record<string, unknown>
+    : {}
+  const input = Array.isArray(modalities.input)
+    ? modalities.input.filter((value): value is string => typeof value === 'string')
+    : null
+  const configuredName = stringValue(item.name)
+  const configuredContextWindow = positiveIntegerString(limit.context)
+  const configuredMaxTokens = positiveIntegerString(limit.output)
+  const configuredReasoning = typeof item.reasoning === 'boolean' ? item.reasoning : null
+  const configuredVision = typeof item.attachment === 'boolean'
+    ? item.attachment
+    : input ? input.includes('image') : null
+  const configuredToolCall = typeof item.tool_call === 'boolean' ? item.tool_call : null
+  return {
+    id,
+    name: configuredName && configuredName !== id && configuredName !== automatic.displayName
+      ? configuredName
+      : '',
+    reasoning: configuredReasoning !== null && configuredReasoning !== automatic.reasoning
+      ? configuredReasoning
+      : null,
+    vision: configuredVision !== null && configuredVision !== automatic.vision
+      ? configuredVision
+      : null,
+    toolCall: configuredToolCall !== null && configuredToolCall !== automatic.toolCall
+      ? configuredToolCall
+      : null,
+    contextWindow: configuredContextWindow && Number(configuredContextWindow) !== automatic.contextWindow
+      ? configuredContextWindow
+      : '',
+    maxTokens: configuredMaxTokens && Number(configuredMaxTokens) !== automatic.maxTokens
+      ? configuredMaxTokens
+      : '',
   }
 }
 
@@ -245,15 +341,14 @@ export function readNativeCliProvider(
   let baseUrl = ''
   let api = 'openai-completions'
   let models: NativeCliModel[] = []
-  const persistedPiModels = agentId === 'pi'
-    ? parsePiModelMetadata(initial?.modelMetadataJson)
-    : null
+  const persistedModels = parseModelMetadata(initial?.modelMetadataJson)
 
   if (agentId === 'opencode') {
     const options = config.options && typeof config.options === 'object' && !Array.isArray(config.options)
       ? config.options as Record<string, unknown>
       : {}
     baseUrl = stringValue(options.baseURL)
+    api = stringValue(config.npm) || '@ai-sdk/openai-compatible'
     const rawModels = config.models && typeof config.models === 'object' && !Array.isArray(config.models)
       ? config.models as Record<string, unknown>
       : {}
@@ -261,7 +356,9 @@ export function readNativeCliProvider(
       const item = value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : {}
-      return { ...emptyNativeModel('opencode', id), name: stringValue(item.name) || id }
+      return persistedModels !== null
+        ? readPersistedPiModel(persistedModels[id], id)
+        : readLegacyOpenCodeModel(item, id)
     })
   } else {
     baseUrl = stringValue(config.baseUrl)
@@ -274,8 +371,8 @@ export function readNativeCliProvider(
           const item = value as Record<string, unknown>
           const id = stringValue(item.id)
           if (!id) return []
-          return [persistedPiModels !== null
-            ? readPersistedPiModel(persistedPiModels[id], id)
+          return [persistedModels !== null
+            ? readPersistedPiModel(persistedModels[id], id)
             : readLegacyPiModel(item, id)]
         })
       : []
@@ -293,6 +390,9 @@ export function readNativeCliProvider(
     : null
   const supportedThinkingLevels = piThinkingOptionsForModel(defaultPiModel)
   return {
+    nativeProviderId: agentId === 'opencode'
+      ? initial?.nativeProviderId?.trim() || nativeProviderIdFromName(initial?.name ?? '')
+      : '',
     baseUrl,
     apiKey,
     api,
@@ -303,15 +403,17 @@ export function readNativeCliProvider(
         ? storedThinkingLevel
         : recommendedPiThinkingLevel(defaultPiModel)
       : 'off',
+    sourceConfigJson: initial?.configJson ?? '',
   }
 }
 
-function serializePiModelMetadata(models: NativeCliModel[]): string {
+function serializeModelMetadata(models: NativeCliModel[]): string {
   const entries = models.flatMap((model) => {
     const metadata: Record<string, string | boolean> = {}
     if (model.name) metadata.name = model.name
     if (model.reasoning !== null) metadata.reasoning = model.reasoning
     if (model.vision !== null) metadata.vision = model.vision
+    if (model.toolCall !== undefined && model.toolCall !== null) metadata.toolCall = model.toolCall
     if (model.contextWindow) metadata.contextWindow = model.contextWindow
     if (model.maxTokens) metadata.maxTokens = model.maxTokens
     return Object.keys(metadata).length > 0 ? [[model.id, metadata] as const] : []
@@ -325,13 +427,60 @@ export function buildNativeCliProvider(
   form: NativeCliProviderForm,
 ): Pick<ExternalCliProvider, 'configJson' | 'authJson' | 'modelMetadataJson' | 'defaultModel' | 'defaultReasoning'> {
   const models = normalizeNativeModels(form.models)
+  const sourceConfig = objectValue(form.sourceConfigJson)
   const config = agentId === 'opencode'
-    ? {
-        npm: '@ai-sdk/openai-compatible',
-        name,
-        options: { baseURL: form.baseUrl.trim() },
-        models: Object.fromEntries(models.map((model) => [model.id, { name: model.name || model.id }])),
-      }
+    ? (() => {
+        const sourceOptions = sourceConfig.options && typeof sourceConfig.options === 'object'
+          && !Array.isArray(sourceConfig.options)
+          ? sourceConfig.options as Record<string, unknown>
+          : {}
+        const sourceModels = sourceConfig.models && typeof sourceConfig.models === 'object'
+          && !Array.isArray(sourceConfig.models)
+          ? sourceConfig.models as Record<string, unknown>
+          : {}
+        const baseURL = form.baseUrl.trim()
+        const options = { ...sourceOptions }
+        if (baseURL) options.baseURL = baseURL
+        else delete options.baseURL
+        return {
+          ...sourceConfig,
+          npm: form.api.trim() || '@ai-sdk/openai-compatible',
+          name,
+          options,
+          models: Object.fromEntries(models.map((model) => {
+            const resolved = resolveOpenCodeModelMetadata(model)
+            const existing = sourceModels[model.id] && typeof sourceModels[model.id] === 'object'
+              && !Array.isArray(sourceModels[model.id])
+              ? sourceModels[model.id] as Record<string, unknown>
+              : {}
+            const existingLimit = existing.limit && typeof existing.limit === 'object'
+              && !Array.isArray(existing.limit)
+              ? existing.limit as Record<string, unknown>
+              : {}
+            const existingModalities = existing.modalities && typeof existing.modalities === 'object'
+              && !Array.isArray(existing.modalities)
+              ? existing.modalities as Record<string, unknown>
+              : {}
+            return [model.id, {
+              ...existing,
+              name: resolved.displayName,
+              reasoning: resolved.reasoning,
+              attachment: resolved.vision,
+              tool_call: resolved.toolCall,
+              limit: {
+                ...existingLimit,
+                context: resolved.contextWindow,
+                output: resolved.maxTokens,
+              },
+              modalities: {
+                ...existingModalities,
+                input: resolved.vision ? ['text', 'image'] : ['text'],
+                output: Array.isArray(existingModalities.output) ? existingModalities.output : ['text'],
+              },
+            }]
+          })),
+        }
+      })()
     : {
         name,
         baseUrl: form.baseUrl.trim(),
@@ -350,12 +499,12 @@ export function buildNativeCliProvider(
         }),
       }
   const auth = agentId === 'opencode'
-    ? { type: 'api', key: form.apiKey.trim() }
+    ? form.apiKey.trim() ? { type: 'api', key: form.apiKey.trim() } : null
     : { type: 'api_key', key: form.apiKey.trim() }
   return {
     configJson: JSON.stringify(config, null, 2),
-    authJson: JSON.stringify(auth, null, 2),
-    modelMetadataJson: agentId === 'pi' ? serializePiModelMetadata(models) : '',
+    authJson: auth ? JSON.stringify(auth, null, 2) : '',
+    modelMetadataJson: serializeModelMetadata(models),
     defaultModel: form.defaultModel.trim(),
     defaultReasoning: agentId === 'pi' ? form.defaultThinkingLevel : '',
   }

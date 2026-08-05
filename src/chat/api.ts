@@ -1668,9 +1668,13 @@ export const chatApi = {
    * 删除供应商后清掉它物化出来的文件。
    * 保存设置时后端会自动物化并清缓存（`persist_settings`），所以只有删除需要显式调用。
    */
-  async externalCliProviderCleanup(agentId: string, providerId: string): Promise<void> {
+  async externalCliProviderCleanup(
+    agentId: string,
+    providerId: string,
+    nativeProviderId?: string,
+  ): Promise<void> {
     if (!isTauriRuntime()) return
-    await invoke('chat_external_cli_provider_cleanup', { agentId, providerId })
+    await invoke('chat_external_cli_provider_cleanup', { agentId, providerId, nativeProviderId })
   },
 
   /** 供应商弹窗的「获取模型」：拿 base_url + key 去中转站问模型列表（只作建议用）。 */

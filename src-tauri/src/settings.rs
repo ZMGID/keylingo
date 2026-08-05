@@ -664,6 +664,8 @@ pub struct ExternalCliProvider {
     pub auth_json: String,
     /// Kivio 自用的模型覆盖状态；不写入 CLI 原生配置。
     pub model_metadata_json: String,
+    /// opencode / pi：原生配置中可被 `provider/model` 引用的稳定供应商 id。
+    pub native_provider_id: String,
     /// opencode / pi：启用该供应商时写入原生设置的模型 id（不含 provider 前缀）。
     pub default_model: String,
     /// pi：终端独立启动时使用的默认 thinking 档位。

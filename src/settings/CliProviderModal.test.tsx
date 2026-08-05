@@ -30,14 +30,15 @@ describe('CliProviderModal native providers', () => {
     fireEvent.change(screen.getByPlaceholderText('sk-…'), {
       target: { value: 'sk-test' },
     })
-    const modelInputs = screen.getAllByPlaceholderText('模型 ID')
-    fireEvent.change(modelInputs[0], { target: { value: 'gpt-test' } })
-    fireEvent.change(modelInputs[1], { target: { value: 'gpt-test' } })
+    fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'gpt-test' } })
+    expect(screen.queryByText('启动默认值')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '当前默认模型' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.click(screen.getByRole('button', { name: '添加' }))
 
     expect(onSave).toHaveBeenCalledTimes(1)
     const saved = onSave.mock.calls[0][0]
     expect(saved.env).toEqual([])
+    expect(saved.nativeProviderId).toBe('relay')
     expect(saved.defaultModel).toBe('gpt-test')
     expect(JSON.parse(saved.configJson)).toMatchObject({
       npm: '@ai-sdk/openai-compatible',
@@ -45,6 +46,72 @@ describe('CliProviderModal native providers', () => {
       models: { 'gpt-test': { name: 'gpt-test' } },
     })
     expect(JSON.parse(saved.authJson)).toEqual({ type: 'api', key: 'sk-test' })
+  })
+
+  it('allows an OpenCode native SDK provider without URL or API key', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="opencode"
+        agentName="OpenCode"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'Local Anthropic' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'OpenAI Compatible' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Anthropic' }))
+    fireEvent.change(screen.getByLabelText('模型 ID'), {
+      target: { value: 'claude-sonnet-4.6' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const saved = onSave.mock.calls[0][0]
+    expect(saved.nativeProviderId).toBe('local-anthropic')
+    expect(saved.authJson).toBe('')
+    expect(JSON.parse(saved.configJson)).toMatchObject({
+      npm: '@ai-sdk/anthropic',
+      options: {},
+      models: {
+        'claude-sonnet-4.6': {
+          reasoning: true,
+          attachment: true,
+        },
+      },
+    })
+  })
+
+  it('selects the OpenCode default model from the model row', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="opencode"
+        agentName="OpenCode"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'Relay' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'https://relay.example/v1' },
+    })
+    fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'model-a' } })
+    fireEvent.click(screen.getByRole('button', { name: '添加模型' }))
+    fireEvent.change(screen.getAllByLabelText('模型 ID')[1], { target: { value: 'model-b' } })
+    fireEvent.click(screen.getByRole('button', { name: '设为默认模型' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0][0].defaultModel).toBe('model-b')
   })
 
   it('auto-fills Pi metadata from a model id and allows advanced overrides', () => {
@@ -72,7 +139,7 @@ describe('CliProviderModal native providers', () => {
       target: { value: 'grok-4.5' },
     })
     expect(screen.getByLabelText('默认模型')).toHaveValue('grok-4.5')
-    expect(screen.getByText('模型库已识别')).toBeInTheDocument()
+    expect(screen.getByText('Grok 4.5')).toBeInTheDocument()
     expect(screen.getByText('500K 上下文')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '模型高级设置' }))
     expect(screen.getByRole('switch', { name: '支持推理' })).toHaveAttribute('aria-checked', 'true')
