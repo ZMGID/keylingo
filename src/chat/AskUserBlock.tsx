@@ -556,14 +556,10 @@ export function AskUserBlock({ toolCall, variant = 'inline', onResolved }: AskUs
                     onMouseDown={preventMouseFocus}
                     onMouseEnter={() => setActiveIndex(index)}
                     onClick={() => pickOption(currentQuestion, option.id)}
-                    className={`flex w-full items-center gap-3 rounded-xl border-t px-1.5 py-2 text-left transition-colors ${
-                      // 分隔线**永远占 1px**，只切换颜色。之前是「非当前行才加 border-t」，
-                      // 于是鼠标划过时行高在 1px 之间反复变 —— 整张面板（吊在输入框上方）
-                      // 跟着上下跳。尺寸绝不能随 hover 变。
-                      index === 0 || active
-                        ? 'border-transparent'
-                        : 'border-neutral-200/60 dark:border-neutral-700/50'
-                    } ${
+                    className={`flex w-full items-center gap-3 rounded-xl px-1.5 py-2 text-left transition-colors ${
+                      // 行之间不画线：当前行的底色已经把「在哪一行」说清楚了，再加分隔线就是两套
+                      // 冗余的边界。也别改回「非当前行才加 border-t」—— 那会让行高随 hover 在
+                      // 1px 之间变，整张面板（吊在输入框上方）跟着上下跳。尺寸绝不能随 hover 变。
                       active
                         ? 'bg-neutral-100 dark:bg-neutral-800'
                         : 'hover:bg-neutral-50 dark:hover:bg-neutral-800/50'
@@ -603,12 +599,10 @@ export function AskUserBlock({ toolCall, variant = 'inline', onResolved }: AskUs
 
               {allowCustom(currentQuestion) && (
                 <div
-                  className={`flex items-center gap-3 rounded-xl border-t px-1.5 py-1.5 ${
-                    // 同上：分隔线永远占 1px，只切颜色。
-                    optionCount === 0 || activeIndex === optionCount
-                      ? 'border-transparent'
-                      : 'border-neutral-200/60 dark:border-neutral-700/50'
-                  } ${activeIndex === optionCount ? 'bg-neutral-100 dark:bg-neutral-800' : ''}`}
+                  className={`flex items-center gap-3 rounded-xl px-1.5 py-1.5 ${
+                    // 同上：不画分隔线。
+                    activeIndex === optionCount ? 'bg-neutral-100 dark:bg-neutral-800' : ''
+                  }`}
                 >
                   <span className="grid size-6 shrink-0 place-items-center rounded-md bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500">
                     <Pencil size={12} strokeWidth={2} />
