@@ -21,6 +21,7 @@ import {
   type MessageNavigatorNode,
 } from './messageNavigator'
 import { useStreamCoarse, useStreamSnapshot } from './streamingStore'
+import { StreamStatusLine } from './StreamStatusLine'
 import { getActiveGroup, useGroupsVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
 import {
@@ -75,7 +76,6 @@ type RenderItem =
   | { kind: 'group'; key: string; groupId: string; messages: ChatMessage[] }
   | { kind: 'live-group'; key: string; groupId: string }
   | { kind: 'streaming'; key: 'streaming-assistant'; message: ChatMessage; messageStreaming: boolean; reasoningStreaming: boolean }
-  | { kind: 'thinking'; key: 'thinking' }
   | { kind: 'error'; key: 'error'; text: string; retryMessageId: string | null }
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
@@ -353,7 +353,9 @@ function MessageListBase({
         },
       }
     }
-    return streaming ? { kind: 'thinking', key: 'thinking' } : null
+    // 首 token 之前没有流式内容项——生成期间的占位/状态由列表尾部常驻的
+    // StreamStatusLine 承担（动效 logo + 耗时/tokens/任务数）。
+    return null
   }, [
     liveGroup,
     coarse.streaming,
@@ -772,12 +774,6 @@ function MessageListBase({
               reasoningDurationMsBySegmentId={streamingReasoningDurationMsBySegmentId}
             />
           )
-        case 'thinking':
-          return (
-            <div className="chat-motion-fade-up flex justify-start py-3">
-              <span className="reasoning-shimmer-text text-sm font-medium">正在思考</span>
-            </div>
-          )
         case 'compaction-divider':
           return (
             <CompactionDivider
@@ -910,6 +906,12 @@ function MessageListBase({
             <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
               {renderItem(errorItem)}
             </div>
+          )}
+          {/* 消息流末尾常驻的存在标记（对标 Claude Code 的小星号）：有对话就一直在
+              （空会话首页没有），生成中动效 + 耗时/tokens/运行中任务数（组件内部按秒采样）。
+              多答组（live-group）有自己的列内进度，生成期间只保持静态 logo。 */}
+          {(messages.length > 0 || streaming) && (
+            <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
           )}
           <div aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
         </div>

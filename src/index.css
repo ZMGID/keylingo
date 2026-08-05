@@ -6817,3 +6817,30 @@ input[type="password"]::-ms-clear {
   cursor: default;
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
+/* ---- 生成中状态行的动效 logo（GRD-02 · 回波）。点阵相位在 SVG 里逐点带 --p，
+   这里只负责动画与颜色（StreamStatusLine.tsx）。 ---- */
+.kv-stream-logo {
+  display: block;
+  overflow: visible;
+  --k: 1; /* 速度倍率 */
+  --dot: #1d6bf0; /* 唯一颜色 */
+}
+.kv-stream-logo circle {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  fill: var(--dot);
+}
+.kv-stream-logo .dt {
+  animation: kv-stream-echo calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
+  animation-delay: calc((1 - var(--p)) * -0.95s * var(--k));
+}
+@keyframes kv-stream-echo {
+  0% { fill-opacity: 0.28; transform: scale(0.72); }
+  20% { fill-opacity: 1; transform: scale(1.24); }
+  44%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kv-stream-logo circle { animation: none; transform: none; fill-opacity: 1; }
+}
+/* 闲置常驻态：动画停、点阵满亮（与 reduced-motion 同形）。 */
+.kv-stream-status-idle .kv-stream-logo .dt { animation: none; transform: none; fill-opacity: 1; }
