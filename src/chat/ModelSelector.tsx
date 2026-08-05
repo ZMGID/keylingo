@@ -31,6 +31,8 @@ function ModelSelectorBase({
   const [open, setOpen] = useState(false)
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [favorites, setFavorites] = useState<string[]>([])
+  const [tooltipVisible, setTooltipVisible] = useState(false)
+  const tooltipTimerRef = useRef<number | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const maxH = usePopoverMaxHeight(open, menuRef, 'down', 400)
 
@@ -71,6 +73,39 @@ function ModelSelectorBase({
   const currentProvider = activeProviders.find((p) => p.id === currentProviderId)
     ?? providers.find((p) => p.id === currentProviderId)
   const displayName = currentModel || currentProvider?.enabledModels[0] || t.chatSelectModel
+  // Tooltip 用模型原始元数据（服务商名 + 完整模型 ID），不截取 UI 上被省略的文本。
+  const tooltipText = currentProvider && currentModel
+    ? `${currentProvider.name}：${currentModel}`
+    : (currentModel || '')
+
+  // 悬浮提示：约 200ms 延迟防鼠标扫过闪烁；移出立即消失；下拉弹窗打开时不显示。
+  const clearTooltipTimer = useCallback(() => {
+    if (tooltipTimerRef.current !== null) {
+      window.clearTimeout(tooltipTimerRef.current)
+      tooltipTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => clearTooltipTimer, [clearTooltipTimer])
+  useEffect(() => {
+    if (open) {
+      // 打开菜单时取消待触发的计时器：只隐藏 Tooltip 不够，计时器到点会把
+      // tooltipVisible 设回 true，关闭菜单后 Tooltip 会立刻出现而非重新经过悬浮延迟。
+      clearTooltipTimer()
+      setTooltipVisible(false)
+    }
+  }, [open, clearTooltipTimer])
+  const handleTooltipEnter = useCallback(() => {
+    if (open) return
+    clearTooltipTimer()
+    tooltipTimerRef.current = window.setTimeout(() => {
+      tooltipTimerRef.current = null
+      setTooltipVisible(true)
+    }, 200)
+  }, [clearTooltipTimer, open])
+  const handleTooltipLeave = useCallback(() => {
+    clearTooltipTimer()
+    setTooltipVisible(false)
+  }, [clearTooltipTimer])
 
   // 收藏置顶组：按存储顺序，过滤掉失效的（provider 已删/禁用/模型已不在列表）。
   const favoriteEntries = useMemo(() => {
@@ -154,6 +189,8 @@ function ModelSelectorBase({
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        onMouseEnter={handleTooltipEnter}
+        onMouseLeave={handleTooltipLeave}
         className={`${chatTitlebarPillButtonClass} max-w-full min-w-0`}
       >
         {currentModel && <ModelIcon model={currentModel} size={16} />}
@@ -165,6 +202,16 @@ function ModelSelectorBase({
           className={`chat-model-selector-caret shrink-0 text-neutral-400 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] ${open ? 'rotate-180' : ''}`}
         />
       </button>
+
+      {!open && tooltipVisible && currentModel && (
+        <div
+          className="chat-motion-fade pointer-events-none absolute left-0 top-full z-30 mt-1 max-w-xs whitespace-pre-wrap break-words rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-left text-[12px] leading-relaxed text-neutral-900 shadow-lg"
+          role="tooltip"
+          data-tauri-drag-region="false"
+        >
+          {tooltipText}
+        </div>
+      )}
 
       {open && (
         <>
