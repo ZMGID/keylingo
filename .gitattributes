@@ -1,0 +1,16 @@
+# Normalize all text files to LF in the repo, regardless of platform checkout
+* text=auto eol=lf
+
+# Explicitly mark binary formats so line-ending conversion never touches them
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
