@@ -829,6 +829,48 @@ body {
   display: none;
 }
 
+/* 排队中的消息（运行中发的那几条，等轮末自动发出）。
+   与 ①状态条同一视觉家族：soft 底、无描边、faint 字 —— 它是「浮在纸面上的一层待办信息」，
+   不是审批卡那种要人当场决定的东西。用描边白卡会把注意力从正在生成的回答上抢走。 */
+.chat-composer-queue {
+  margin-bottom: 6px;
+  border-radius: 7px;
+  background: var(--theme-surface-soft);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.dark .chat-composer-queue {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+/* 一条排队消息。动作键平时透明（不占注意力也不跳版：仍然挂载、只是不可见），
+   指针悬停或键盘聚焦到行内任意控件时才现出来。 */
+.chat-composer-queue-row:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.dark .chat-composer-queue-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.chat-composer-queue-actions {
+  opacity: 0;
+  transition: opacity var(--kv-dur-instant) var(--kv-ease-out);
+}
+
+.chat-composer-queue-row:hover .chat-composer-queue-actions,
+.chat-composer-queue-row:focus-within .chat-composer-queue-actions {
+  opacity: 1;
+}
+
+/* 指针不可用（触屏）时没有 hover 可言，一律显形。 */
+@media (hover: none) {
+  .chat-composer-queue-actions {
+    opacity: 1;
+  }
+}
+
 /* 状态条内的一格（项目、集、知识库…）：图标 + 文字，可点则有 hover */
 .chat-composer-status-item {
   display: inline-flex;
@@ -2569,7 +2611,7 @@ button.chat-composer-status-item:hover {
   overflow-y: auto;
 }
 
-/* 底部「返回对话」与右侧 savebar 同高（.kv-savebar 48px）、同基线，负边距抵掉 aside 内边距 → 两条分隔线连成通栏一条 */
+/* 底部「返回对话」：负边距抵掉 aside 内边距 → 分隔线通栏 */
 .settings-embedded-nav-list--footer {
   flex-shrink: 0;
   height: 48px;
@@ -2738,26 +2780,6 @@ button.chat-composer-status-item:hover {
   border-radius: 10px;
   border-color: var(--border);
   background: var(--bg-input-subtle);
-}
-
-.settings-embedded-savebar {
-  /* 高度由 .kv-savebar（48px）决定，这里别再写，否则和左栏 footer 高度会各自漂。 */
-  padding: 0 24px;
-  background: var(--bg-savebar);
-  border-top: 1px solid var(--border);
-}
-
-.settings-embedded-savebar .kv-btn.primary {
-  min-width: 72px;
-  border-radius: 8px;
-  padding: 6px 16px;
-  font-weight: 500;
-}
-
-.settings-embedded-savebar .kv-btn:not(.primary) {
-  min-width: 72px;
-  border-radius: 8px;
-  padding: 6px 16px;
 }
 
 /* 模型页：加宽、拉高左侧供应商列表，预设合并在列表内 */
@@ -3012,18 +3034,6 @@ button.chat-composer-status-item:hover {
     padding-right: 16px;
   }
 
-  .settings-embedded-savebar {
-    padding-left: 12px;
-    padding-right: 12px;
-    gap: 8px;
-  }
-
-  .settings-embedded-savebar .kv-savebar-hint {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 }
 
 @container settings-shell (max-width: 480px) {
@@ -3076,19 +3086,6 @@ button.chat-composer-status-item:hover {
   .kv-row-control {
     width: 100%;
     justify-content: flex-start;
-  }
-
-  .kv-savebar {
-    padding-left: 12px;
-    padding-right: 12px;
-    gap: 8px;
-  }
-
-  .kv-savebar-hint {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 }
 
@@ -3533,6 +3530,7 @@ button.chat-composer-status-item:hover {
   flex-direction: column;
   min-width: 0;
   background: var(--bg);
+  position: relative;
 }
 .kv-page-header {
   padding: 14px 20px 10px;
@@ -4480,46 +4478,533 @@ input[type="password"]::-ms-clear {
   min-width: 0;
 }
 
-.kv-savebar {
-  height: 48px;
-  background: var(--bg-savebar);
-  border-top: 1px solid var(--border);
+/* ===== 供应商编辑弹窗 =====
+   头/身/脚三段：中间滚动，标题和按钮固定，长表单（codex 的两段原文）不会把按钮顶出屏幕。 */
+/* `.kv-modal` 的 max-width:340px 排在本段之后，同为单类选择器会后来居上，
+   所以这里必须叠一层 `.kv-modal`（与 `.kv-modal.kv-model-picker` 同办法）。 */
+.kv-modal.kv-provider-modal {
+  max-width: min(92vw, 780px);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: min(86vh, 760px);
+}
+.kv-modal.kv-provider-modal--wide {
+  max-width: min(94vw, 820px);
+  max-height: min(90vh, 860px);
+}
+.kv-provider-modal-head {
   display: flex;
   align-items: center;
-  padding: 0 16px;
+  gap: 8px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--divider);
+}
+.kv-provider-modal-head h3 {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.kv-provider-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.kv-provider-modal-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.kv-provider-modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--divider);
+}
+.kv-form-error {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: #dc2626;
+}
+.dark .kv-form-error { color: #f87171; }
+.kv-form-error-inline {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: #dc2626;
+}
+.dark .kv-form-error-inline { color: #f87171; }
+.kv-req { color: #dc2626; }
+.dark .kv-req { color: #f87171; }
+
+.kv-form-block { min-width: 0; }
+/* 字段标题和它右边的小按钮（「获取模型」）同一行。 */
+.kv-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.kv-field-row .kv-field-label { margin-bottom: 4px; }
+.kv-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+/* API Key：输入框 + 显示/隐藏的眼睛。 */
+.kv-key-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.kv-key-field > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Claude 供应商：安全提示 / 中转警告 */
+.kv-cli-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.kv-cli-notice svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.kv-cli-notice--warn {
+  border-color: color-mix(in srgb, #f59e0b 40%, var(--border));
+  background: color-mix(in srgb, #f59e0b 10%, var(--bg));
+  font-weight: 400;
+}
+.kv-cli-notice--warn svg {
+  color: #d97706;
+}
+.dark .kv-cli-notice--warn svg {
+  color: #fbbf24;
+}
+
+/* 预设芯片组（官方 + 中转） */
+.kv-preset-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kv-preset-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+.kv-preset-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input-subtle, var(--bg-hover));
+}
+.kv-preset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 6px 11px;
+  font-size: 12.5px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+.kv-preset-btn:hover {
+  border-color: var(--border-strong, var(--text-faint));
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.kv-preset-btn.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.kv-preset-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+.kv-preset-btn-icon :is(svg, img) {
+  width: 14px !important;
+  height: 14px !important;
   flex-shrink: 0;
 }
-.kv-savebar-hint {
+
+/* 可输入 + 右侧下拉箭头（SuggestInput，菜单复用 kv-select-menu） */
+.kv-suggest-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+.kv-suggest-input-field {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.kv-suggest-input-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border-input);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.kv-suggest-input-toggle:hover {
+  border-color: var(--border-strong, var(--text-faint));
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.kv-suggest-input-toggle:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* 模型档位：两列四格 */
+.kv-tier-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 6px;
+}
+.kv-tier-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.kv-tier-field > span {
+  flex-shrink: 0;
+  width: 48px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.kv-tier-field--suggest {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.kv-tier-suggest {
+  flex: 1;
+  min-width: 0;
+}
+.kv-tier-suggest .kv-suggest-input-field {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.kv-cli-advanced {
+  padding-top: 4px;
+  border-top: 1px solid var(--divider);
+}
+.kv-cli-advanced-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .kv-form-grid,
+  .kv-tier-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 折叠区标题（高级 / 环境变量）。 */
+.kv-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.kv-disclosure-caret {
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--text-faint);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.15s ease;
+}
+.kv-disclosure-caret.open { transform: rotate(90deg); }
+.kv-disclosure-count {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 15px;
+}
+
+/* ===== 本地 CLI Agent 页 =====
+   复用 .kv-providers* 两栏骨架 + .kv-row 行语义，这里只补三样它没有的：
+   品牌图标方块、右栏标题行、把若干 kv-row 圈成一张带边框的卡片。 */
+.kv-cli-iconbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+/* .kv-provider-item svg 把所有图标压到 12px，图标方块里的要按自己尺寸走 */
+.kv-cli-iconbox svg {
+  width: auto !important;
+  height: auto !important;
+}
+.kv-cli-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--divider);
+}
+/* 标题 + 官方文档一组，占住左侧全部余量：这样文档链接紧贴名字，
+   右侧版本/更新那组被顶到边上；窄宽度下先挤标题（留 5em 兜底，不许缩到看不见）。 */
+.kv-cli-head-main {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-muted);
+  gap: 10px;
 }
-.kv-savebar-hint > span:last-child {
+.kv-cli-head-title {
+  flex: 0 1 auto;
+  min-width: 5em;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.kv-savebar-hint .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warn);
+.kv-cli-docs {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-decoration: none;
 }
-.kv-savebar-hint .clean-icon {
-  color: var(--success);
+.kv-cli-docs:hover {
+  color: var(--text);
+}
+.kv-cli-pill {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.kv-cli-pill.next {
+  border-color: transparent;
+  background: transparent;
+  color: var(--warn);
+  font-weight: 600;
+  padding-left: 0;
+}
+.kv-cli-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 2px 14px;
+  margin-bottom: 12px;
+}
+/* 卡片里的行自己画分隔线，卡片不再重复 .kv-group 的上边框 */
+.kv-cli-card .kv-row:first-child,
+.kv-cli-card .kv-row-stack:first-child {
+  border-top: none;
+}
+.kv-cli-sub {
+  padding: 0 0 10px;
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kv-cli-log {
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  padding: 8px 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.kv-cli-search {
+  flex-shrink: 0;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.kv-cli-group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 5px 4px 4px;
+  margin-top: 2px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+}
+.kv-cli-group-head:hover { color: var(--text); }
+.kv-cli-group-head svg { width: 12px; height: 12px; flex-shrink: 0; }
+
+/* 「所有供应商」区块：标题行右侧挂导入/添加，下面直接复用 .kv-cli-card 的分隔行。 */
+.kv-cli-providers { margin-top: 18px; }
+.kv-cli-providers-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.kv-cli-providers-head > .kv-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* 供应商行：行首一个字母方块。**不给选中行加底色/色条** —— 卡片本身有 14px 内边距，
+   行底色只能画在内容盒里，四角与卡片圆角对不齐，看着像溢出的方块；「使用中」徽章足够表达状态。 */
+.kv-cli-provider { gap: 10px; }
+.kv-cli-provider .kv-row-text { min-width: 0; }
+.kv-cli-provider .kv-row-desc {
+  min-width: 0;
+  max-width: 100%;
+}
+.kv-cli-monogram {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.kv-cli-monogram.local { color: var(--text-faint); }
+/* 「使用中」徽章和「启用」按钮宽度不同，不定宽的话每行的铅笔/垃圾桶会左右错开。 */
+.kv-cli-provider .kv-row-control > .kv-tag,
+.kv-cli-provider .kv-row-control > .kv-btn {
+  min-width: 54px;
+  justify-content: center;
+}
+/* 置顶那行没有编辑/删除，补一块等宽占位让「启用」与下面几行对齐。 */
+.kv-cli-provider-spacer {
+  width: 60px;
   flex-shrink: 0;
 }
-.kv-savebar-hint.error { color: var(--danger); }
-.kv-savebar-hint.error .dot { background: var(--danger); }
-.kv-savebar-hint.warn { color: var(--warning, #b45309); }
-.kv-savebar-hint.warn .dot { background: var(--warning, #b45309); }
+
+/* 设置自动保存失败 / 热键警告：贴主内容区底部的轻量 toast（替代原 savebar） */
+.settings-autosave-toast {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 12px;
+  z-index: 20;
+  max-width: 100%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.settings-autosave-toast.error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+}
+.settings-autosave-toast.warn {
+  color: var(--warning, #b45309);
+  background: color-mix(in srgb, var(--warning, #b45309) 12%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--warning, #b45309) 35%, transparent);
+}
+.dark .settings-autosave-toast.error,
+.dark .chat-window-shell .settings-autosave-toast.error {
+  background: color-mix(in srgb, var(--danger) 18%, #1a1a1a);
+}
+.dark .settings-autosave-toast.warn,
+.dark .chat-window-shell .settings-autosave-toast.warn {
+  background: color-mix(in srgb, var(--warning, #b45309) 18%, #1a1a1a);
+}
 
 .kv-tag {
   display: inline-flex;

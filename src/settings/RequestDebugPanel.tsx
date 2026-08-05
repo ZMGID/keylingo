@@ -689,7 +689,7 @@ export function RequestDebugPanel({ lang, enabled, onToggleEnabled }: RequestDeb
           label={zh ? '记录 provider 请求' : 'Capture provider requests'}
           description={
             zh
-              ? '开启后每次 provider 调用（chat/子agent + 翻译/截图/Lens）的请求与响应被记入内存（脱敏 key，最多 50 条，不落盘）。改动后请保存设置生效。'
+              ? '开启后每次 provider 调用（chat/子agent + 翻译/截图/Lens）的请求与响应被记入内存（脱敏 key，最多 50 条，不落盘）。开关会自动保存生效。'
               : 'When on, every provider call (chat/sub-agent + translate/screenshot/Lens) is captured in memory (keys masked, up to 50, never written to disk). Save settings to apply.'
           }
           stack
@@ -753,7 +753,7 @@ export function RequestDebugPanel({ lang, enabled, onToggleEnabled }: RequestDeb
                       : 'No records yet. Trigger a chat or translation, then refresh.'
                     : zh
                       ? '未开启记录。打开上方开关并保存。'
-                      : 'Capture is off. Turn on the toggle above and save.'
+                      : 'Capture is off. Turn on the toggle above (autosaves).'
                   : zh
                     ? '没有匹配的记录。'
                     : 'No matching records.'}

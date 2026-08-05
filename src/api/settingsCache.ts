@@ -19,7 +19,7 @@ import { api, type Settings } from './tauri'
  * 字段级竞态属既有问题，靠 SWR pristine 校准缓解，非本缓存新引入。
  *
  * 失败语义：读失败不写缓存（下次重试）、保存失败不动缓存——与 SettingsShell
- * “加载失败不合成默认值，避免错误状态下 Save 覆盖磁盘真实数据”的既有约定一致。
+ * “加载失败不合成默认值，避免错误状态下自动保存覆盖磁盘真实数据”的既有约定一致。
  */
 
 let cached: Settings | null = null

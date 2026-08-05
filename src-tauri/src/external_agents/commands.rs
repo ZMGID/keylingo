@@ -1,4 +1,4 @@
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::chat::types::AgentRuntimeConfig;
 use crate::external_agents::detection::{
@@ -7,9 +7,31 @@ use crate::external_agents::detection::{
 };
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::slash::{cache_key, list_external_cli_slash_commands};
-use crate::external_agents::types::{CachedAgentModels, ModelSource};
+use crate::external_agents::types::{CachedAgentModels, DetectedAgent, ModelSource};
 use crate::external_agents::workspace::resolve_detection_cwd;
 use crate::state::AppState;
+
+/// 上次探测到的可用性快照落盘位置。内存缓存只活一个进程，重启后第一次打开设置页 / 运行时
+/// 选择器要干等一轮全量探测（9 个 CLI × version+auth 子进程）才有内容——快照就是为了让那一
+/// 眼先有东西看。
+fn availability_snapshot_path(state: &AppState) -> std::path::PathBuf {
+    state.usage_dir.join("external-agent-availability.json")
+}
+
+fn load_availability_snapshot(state: &AppState) -> Option<Vec<DetectedAgent>> {
+    let content = std::fs::read_to_string(availability_snapshot_path(state)).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_availability_snapshot(state: &AppState, agents: &[DetectedAgent]) {
+    let Ok(content) = serde_json::to_string(agents) else {
+        return;
+    };
+    let path = availability_snapshot_path(state);
+    if let Err(err) = crate::chat::storage::atomic_write(&path, &content, "外部 CLI 可用性快照") {
+        eprintln!("[external-agent] 保存可用性快照失败: {err}");
+    }
+}
 
 #[tauri::command]
 pub async fn chat_detect_external_agents(
@@ -18,7 +40,7 @@ pub async fn chat_detect_external_agents(
     force_refresh: Option<bool>,
     conversation_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let _ = (&app, &conversation_id); // 可用性与 cwd 无关；参数保留为兼容前端签名。
+    let _ = &conversation_id; // 可用性与 cwd 无关；参数保留为兼容前端签名。
     let force = force_refresh.unwrap_or(false);
     if !force {
         if let Some(agents) =
@@ -26,7 +48,18 @@ pub async fn chat_detect_external_agents(
         {
             return Ok(serde_json::json!({
                 "success": true,
-                "agents": agents,
+                "agents": stamp_disabled(agents),
+                "cached": true,
+            }));
+        }
+        // 内存没有（刚启动 / TTL 过期）就先把上次的快照端上去，真探测丢到后台，
+        // 探完通过 `external-agents-updated` 推给前端。用户看到的是「立刻有列表，
+        // 几秒后自己刷新」，而不是空列表 + 手动点重新扫描。
+        if let Some(agents) = load_availability_snapshot(&state) {
+            spawn_availability_refresh(app);
+            return Ok(serde_json::json!({
+                "success": true,
+                "agents": stamp_disabled(agents),
                 "cached": true,
             }));
         }
@@ -40,18 +73,102 @@ pub async fn chat_detect_external_agents(
         {
             return Ok(serde_json::json!({
                 "success": true,
-                "agents": agents,
+                "agents": stamp_disabled(agents),
                 "cached": true,
             }));
         }
     }
     let agents = detect_availability_all().await;
     state.set_cached_detected_agents(AVAILABILITY_CACHE_KEY.to_string(), agents.clone());
+    save_availability_snapshot(&state, &agents);
     Ok(serde_json::json!({
         "success": true,
-        "agents": agents,
+        "agents": stamp_disabled(agents),
         "cached": false,
     }))
+}
+
+/// 后台重探可用性并广播结果。single-flight 锁用 `try_lock`：已经有人在探就直接算了，
+/// 那一轮探完自己会广播。
+fn spawn_availability_refresh(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let Ok(_guard) = state.availability_probe_lock.try_lock() else {
+            return;
+        };
+        let agents = detect_availability_all().await;
+        state.set_cached_detected_agents(AVAILABILITY_CACHE_KEY.to_string(), agents.clone());
+        save_availability_snapshot(&state, &agents);
+        let _ = app.emit(
+            "external-agents-updated",
+            serde_json::json!({ "agents": stamp_disabled(agents) }),
+        );
+    });
+}
+
+/// 删除供应商时清掉它物化出来的文件（不影响任何设置，纯清理）。
+///
+/// 「保存设置 → 物化 + 清缓存」那条路在 `settings::persist_settings` 里，不需要前端调命令；
+/// 删除是唯一一个保存后**没有任何东西会去动那些文件**的操作，所以单独留一个口。
+#[tauri::command]
+pub async fn chat_external_cli_provider_cleanup(
+    agent_id: String,
+    provider_id: String,
+) -> Result<(), String> {
+    crate::external_agents::provider_profile::cleanup(&agent_id, &provider_id);
+    Ok(())
+}
+
+/// 供应商弹窗的「获取模型」：拿填好的 base_url + key 去中转站问模型列表。
+/// 只作建议用，拉不到就报错文案，不影响手填。
+#[tauri::command]
+pub async fn chat_external_cli_fetch_relay_models(
+    state: tauri::State<'_, AppState>,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    crate::external_agents::relay_models::fetch(&state.http, &base_url, &api_key).await
+}
+
+/// 扫描本机 cc-switch 的库，列出可导入的供应商。只读，不写任何东西。
+#[tauri::command]
+pub async fn chat_external_cli_scan_cc_switch() -> Result<serde_json::Value, String> {
+    let scan = crate::external_agents::cc_switch::scan()?;
+    serde_json::to_value(scan).map_err(|e| e.to_string())
+}
+
+/// 把设置页的「停用」开关盖到（可能来自缓存的）可用性结果上。
+fn stamp_disabled(
+    mut agents: Vec<crate::external_agents::types::DetectedAgent>,
+) -> Vec<crate::external_agents::types::DetectedAgent> {
+    for agent in agents.iter_mut() {
+        agent.disabled = crate::external_agents::overrides::is_disabled(&agent.id);
+    }
+    agents
+}
+
+/// 用户手填的模型追加到探测结果后面；id 撞车时保留探测出来的那条。
+fn merge_custom_models(
+    agent_id: &str,
+    models: &[crate::external_agents::types::RuntimeModelOption],
+) -> Vec<crate::external_agents::types::RuntimeModelOption> {
+    let mut merged = models.to_vec();
+    for custom in crate::external_agents::overrides::custom_models(agent_id) {
+        if merged.iter().any(|m| m.id == custom.id) {
+            continue;
+        }
+        let label = if custom.label.is_empty() {
+            custom.id.clone()
+        } else {
+            custom.label
+        };
+        merged.push(crate::external_agents::types::RuntimeModelOption {
+            id: custom.id,
+            label,
+            context_window_tokens: None,
+        });
+    }
+    merged
 }
 
 /// 懒查：只探一个指定 agent 的模型（cwd-scoped），single-flight + 缓存。前端在选中该 agent /
@@ -108,7 +225,7 @@ pub async fn chat_detect_external_agent_models(
         );
     }
     Ok(models_payload(
-        &probe.models,
+        &merge_custom_models(&agent_id, &probe.models),
         &probe.reasoning_options,
         &probe.reasoning_by_model,
         probe.source,
@@ -167,7 +284,7 @@ fn cached_models_payload(
         cached.reasoning_options.clone()
     };
     models_payload(
-        &cached.models,
+        &merge_custom_models(def.id, &cached.models),
         &reasoning_options,
         &cached.reasoning_by_model,
         cached.source,

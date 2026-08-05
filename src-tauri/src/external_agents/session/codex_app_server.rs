@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use crate::external_agents::session::live::SessionCommand;
@@ -314,6 +314,9 @@ pub struct CodexAppServerSession {
     cwd: String,
     next_id: u64,
     emitted_tools: HashSet<String>,
+    /// 服务端当前活跃轮次的 turn id（取自任意一条带 `turnId` 的通知）。
+    /// `turn/steer` 的 `expectedTurnId` 前置条件要用它；轮末清空。
+    active_turn_id: Option<String>,
     /// Ring-buffered stderr tail (N1), joined on close / error for diagnostics.
     stderr_tail: tokio::task::JoinHandle<String>,
 }
@@ -418,6 +421,7 @@ impl CodexAppServerSession {
                 cwd: cwd_str,
                 next_id: 3,
                 emitted_tools: HashSet::new(),
+                active_turn_id: None,
                 stderr_tail,
             }),
             Err(msg) => {
@@ -480,6 +484,10 @@ impl CodexAppServerSession {
             write_rpc(&mut self.stdin, turn_id, "turn/start", turn_params).await?;
         }
 
+        // 已发出、还在等响应的 `turn/steer`（rpc_id → (steer_id, 文本, 回执通道)）。
+        // 受理与否只有响应说得准，所以 oneshot 在这里排队、由读循环兑付。
+        let mut pending_steers: std::collections::HashMap<u64, (String, String, oneshot::Sender<bool>)> =
+            std::collections::HashMap::new();
         loop {
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => {
@@ -495,6 +503,37 @@ impl CodexAppServerSession {
                     return Err("cancelled".to_string());
                 }
                 Ok(SessionCommand::Close) => return Err("closed".to_string()),
+                Ok(SessionCommand::Steer { id, text, accepted }) => {
+                    // `turn/steer` 往**在飞的**这一轮追加用户输入（不新起一轮、不发
+                    // turn/started）。`expectedTurnId` 是前置条件，必须等于服务端当前活跃的
+                    // turn id —— 那是服务端给的字符串，不是我们的 JSON-RPC 请求 id，所以只能
+                    // 从通知里抓（每条通知的 params 都带 turnId）。还没抓到就说明这一轮还没
+                    // 真正开始，此时无从注入，回 false 让调用方按普通消息在轮末发。
+                    match self.active_turn_id.clone() {
+                        Some(expected_turn_id) => {
+                            let rpc_id = self.next_id;
+                            self.next_id += 1;
+                            let params = json!({
+                                "threadId": self.thread_id,
+                                "input": [{ "type": "text", "text": text }],
+                                "expectedTurnId": expected_turn_id,
+                            });
+                            match write_rpc(&mut self.stdin, rpc_id, "turn/steer", params).await {
+                                // 受理与否要等它的**响应**（review / compact 轮次会被拒），
+                                // 所以在这里只登记，由下面的读循环兑付这个 oneshot。
+                                Ok(()) => {
+                                    pending_steers.insert(rpc_id, (id, text, accepted));
+                                }
+                                Err(_) => {
+                                    let _ = accepted.send(false);
+                                }
+                            }
+                        }
+                        None => {
+                            let _ = accepted.send(false);
+                        }
+                    }
+                }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
@@ -529,6 +568,11 @@ impl CodexAppServerSession {
             }
             if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
                 let params = value.get("params").cloned().unwrap_or(Value::Null);
+                // 服务端给的活跃 turn id：每条 turn 相关通知的 params 都带 turnId。
+                // `turn/steer` 的 `expectedTurnId` 只能取自这里。
+                if let Some(turn) = params.get("turnId").and_then(|v| v.as_str()) {
+                    self.active_turn_id = Some(turn.to_string());
+                }
                 let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
                 let ended =
                     map_codex_notification(method, &params, &mut self.emitted_tools, &mut |e| {
@@ -538,9 +582,29 @@ impl CodexAppServerSession {
                     let _ = events.send(e).await;
                 }
                 if ended {
+                    self.active_turn_id = None;
                     return Ok(());
                 }
                 continue;
+            }
+            // `turn/steer` 的响应。**必须排在下面那条通用 error 分支之前**：被拒的 steer
+            // （review / compact 轮次不可 steer、expectedTurnId 已过期）回的是带 id 的
+            // error，落到通用分支会把整轮判死 —— 用户只是插话没插上，不该赔掉这一轮。
+            if let Some(rpc_id) = value.get("id").and_then(Value::as_u64) {
+                if let Some((steer_id, steer_text, accepted)) = pending_steers.remove(&rpc_id) {
+                    let ok = value.get("result").is_some();
+                    let _ = accepted.send(ok);
+                    if ok {
+                        // 受理了才在时间线上留卡（卡的语义是「这句话确实进了模型输入」）。
+                        let _ = events
+                            .send(UnifiedAgentEvent::UserSteer {
+                                id: steer_id,
+                                text: steer_text,
+                            })
+                            .await;
+                    }
+                    continue;
+                }
             }
             if let Some(err) = value.get("error") {
                 let message = err
@@ -1133,6 +1197,11 @@ pub fn spawn_codex_session_actor(
                         .await;
                     let _ = done.send(result);
                 }
+                // 轮次之间没有可注入的对象：回 false 让前端把这条留在队列里、
+                // 轮末按普通消息发出去（绝不静默吞掉）。
+                SessionCommand::Steer { accepted, .. } => {
+                    let _ = accepted.send(false);
+                }
                 SessionCommand::Cancel => {} // no active turn between turns
                 SessionCommand::Close => {
                     session.close().await;
@@ -1625,6 +1694,7 @@ mod tests {
             UnifiedAgentEvent::Raw { .. } => "Raw",
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
+            UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
         }
     }
 
@@ -1693,10 +1763,130 @@ mod tests {
         Some(collector.await.expect("collector task"))
     }
 
+    /// 真机验证「运行中立刻引导」：codex 的 `turn/steer` 往**在飞的**这一轮追加用户输入。
+    ///
+    /// 这条测的是三件只有真 app-server 能证明的事：
+    ///   1. `expectedTurnId` 拿的是**服务端**给的 turn id（我们从通知的 `turnId` 抓），
+    ///      用我们自己的 JSON-RPC 请求 id 会被判前置条件不符；
+    ///   2. 受理回执要等 `turn/steer` 的**响应**，不是写完就算；
+    ///   3. 被拒的 steer 回的是带 id 的 error，**不能**把整轮判死（读循环里那条
+    ///      `pending_steers` 分支必须排在通用 error 分支之前）。
     #[tokio::test]
     #[ignore = "requires live codex login + network"]
-    async fn codex_app_server_smoke() {
-        let Some(captured) = live_codex_turn(
+    async fn codex_turn_steer_injects_into_the_running_turn() {
+        let bin = match crate::external_agents::spawn::resolve_binary(
+            &crate::external_agents::defs::codex::CODEX_AGENT_DEF,
+        )
+        .await
+        {
+            Some(bin) => bin,
+            None => {
+                eprintln!("SKIP: 本机没有可用的 codex CLI");
+                return;
+            }
+        };
+        let cwd = std::env::temp_dir();
+        let session = match CodexAppServerSession::connect(
+            &bin,
+            &["app-server".to_string()],
+            &cwd,
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
+                return;
+            }
+        };
+        let control = spawn_codex_session_actor(session);
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<UnifiedAgentEvent>(256);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        control
+            .send(SessionCommand::RunTurn {
+                // 让这一轮够长，好在它跑着的时候插话（数到 5 会连着出好几段 reasoning/text）。
+                prompt: "Count slowly from 1 to 5, one number per line, then say COUNT_DONE."
+                    .to_string(),
+                model: None,
+                reasoning: None,
+                images: Vec::new(),
+                events: events_tx,
+                done: done_tx,
+                approvals: None,
+            })
+            .await
+            .expect("actor alive");
+
+        // 等到服务端真的开了这一轮（我们抓到 turnId）再插话。太早插 = 没有活跃 turn，
+        // 按设计会回 false —— 那是正确行为，但测不到注入。
+        let steer_control = control.clone();
+        let steered = tokio::spawn(async move {
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+                if steer_control
+                    .send(SessionCommand::Steer {
+                        id: "steer-live-1".to_string(),
+                        text: "Change of plan: stop counting and reply STEER_OK.".to_string(),
+                        accepted: accepted_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+                if accepted_rx.await.unwrap_or(false) {
+                    return true;
+                }
+            }
+            false
+        });
+
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(event) = events_rx.recv().await {
+                out.push(event);
+            }
+            out
+        });
+        match tokio::time::timeout(Duration::from_secs(180), done_rx).await {
+            Ok(Ok(Ok(()))) => eprintln!("turn: Ok"),
+            Ok(Ok(Err(err))) => eprintln!("turn: Err({err})"),
+            Ok(Err(_)) => eprintln!("turn: actor dropped the done channel"),
+            Err(_) => panic!("codex app-server session HUNG past the guard"),
+        }
+        let accepted = steered.await.expect("steer task");
+        let captured = collector.await.expect("collector task");
+        let seq: Vec<&str> = captured.iter().map(event_variant).collect();
+        eprintln!("codex steer sequence: {seq:?}");
+        for (i, ev) in captured.iter().enumerate() {
+            eprintln!("[{i}] {ev:?}");
+        }
+
+        assert!(accepted, "turn/steer 未被受理（seq: {seq:?}）");
+        let steer_event = captured.iter().any(|event| {
+            matches!(event, UnifiedAgentEvent::UserSteer { id, text }
+                if id == "steer-live-1" && text.contains("STEER_OK"))
+        });
+        assert!(
+            steer_event,
+            "受理了却没发 UserSteer 事件（时间线上就不会有插话卡）：{seq:?}"
+        );
+        // 被拒的 steer 不该赔掉整轮；受理的更不该。这一轮必须仍然正常产出内容。
+        assert!(
+            captured
+                .iter()
+                .any(|e| matches!(e, UnifiedAgentEvent::TextDelta { .. })),
+            "插话之后这一轮没有任何正文，疑似被 steer 的响应误判成致命错误：{seq:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live codex login + network"]
+    async fn codex_app_server_smoke() {        let Some(captured) = live_codex_turn(
             "Reply with exactly the token SMOKE_OK and nothing else.",
             Duration::from_secs(90),
         )

@@ -106,6 +106,14 @@ pub struct DetectedAgent {
     #[serde(default)]
     pub sandbox_options: Vec<RuntimeModelOption>,
     pub auth_status: Option<String>,
+    /// 用户在设置页停用了它。**不进可用性缓存**——出缓存时才盖章（`commands.rs`），
+    /// 否则改一次开关要等 `AVAILABILITY_CACHE_TTL`（600s）才生效。
+    #[serde(default)]
+    pub disabled: bool,
+    /// 协议是否支持运行中注入（见 `RuntimeAgentDef::supports_steering`）。
+    /// 前端据此决定排队条上给不给「立刻引导」。
+    #[serde(default)]
+    pub supports_steering: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +157,14 @@ pub struct RuntimeAgentDef {
     /// 该 CLI 是否能通过其协议原生接收图片（Claude base64 / ACP image / Codex localImage）。
     /// false（pi/kimi）时图片降级为在 prompt 文本里写出路径。
     pub supports_native_image: bool,
+    /// 该 CLI 的协议能否往**在飞的轮次**里追加一条用户输入（「立刻引导」）。
+    ///
+    /// 目前只有 codex 能：`turn/steer` + `expectedTurnId`（真机验证见
+    /// `session::codex_app_server` 的 `codex_turn_steer_injects_into_the_running_turn`）。
+    /// claude 的 stream-json 输入是**顺序**处理的、没有注入用的 control_request；
+    /// ACP 只有 `session/prompt` 与 `session/cancel`。这些一律 false —— 前端据此
+    /// 不显示引导入口，排队消息照旧在轮末自动发出。
+    pub supports_steering: bool,
     /// 允许原生注入的图片 MIME 白名单；空 = 不限。Claude stream-json 仅认 jpeg/png/gif/webp，
     /// 超出的图片降级为路径文本（不静默丢弃）。
     pub image_mime_whitelist: &'static [&'static str],
@@ -199,6 +215,16 @@ pub enum UnifiedAgentEvent {
     },
     SlashCommands {
         commands: Vec<ExternalCliSlashCommand>,
+    },
+    /// 用户在这一轮跑着的时候插了一句话（「立刻引导」），且 CLI 的协议**已受理**注入。
+    ///
+    /// 只在受理成功后发 —— 这条事件会被 `run.rs` 变成时间线上那张 `user_steer` 卡，
+    /// 而卡片的语义是「这句话确实进了模型的输入」。受理失败时不发，前端那条排队消息
+    /// 就留在队列里等轮末自动发送。
+    UserSteer {
+        /// 前端生成的 id，回到卡片的 `structured_content.steer_id` 供前端对账出队。
+        id: String,
+        text: String,
     },
     /// CLI 在**自己内部**完成了一次上下文压缩（claude 的
     /// `{"type":"system","subtype":"compact_boundary"}`）。

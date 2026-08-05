@@ -2275,6 +2275,23 @@ fn apply_unified_event(
                 now,
             ));
         }
+        UnifiedAgentEvent::UserSteer { id, text } => {
+            // 用户在这一轮里插了一句话，且 CLI 已受理注入。卡片走**内置循环那一份构造**
+            // （`chat::agent::steering::build_steer_record`）：同一个工具名、同一个
+            // structured_content 形状，前端那条 `isUserSteerToolCall` 判据与「收到卡才出队」
+            // 的对账逻辑因此两条路共用，不需要为外部 CLI 再写一遍。
+            segment_tracker.reset_text();
+            segment_tracker.reset_reasoning();
+            let Some(message) = crate::chat::agent::SteeringMessage::new(id, &text) else {
+                return;
+            };
+            let record = crate::chat::agent::steering::build_steer_record(&message, 1);
+            let segment = push_tool_segment(segments, segment_order, &record.id);
+            emit_chat_stream_delta(app, run_id, "", None, Some(&segment));
+            tool_map.insert(record.id.clone(), tool_calls.len());
+            tool_calls.push(record.clone());
+            emit_chat_tool_record(app, run_id, &record);
+        }
         _ => {}
     }
 }

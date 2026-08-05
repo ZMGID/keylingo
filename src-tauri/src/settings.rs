@@ -601,6 +601,9 @@ pub struct ChatConfig {
     /// 新建对话默认 Agent 运行时（内置 loop 或外部 CLI）。
     #[serde(default)]
     pub default_agent_runtime: crate::chat::AgentRuntimeConfig,
+    /// 本地 CLI Agent 的用户覆盖，key = agent id（claude/codex/…）。缺省 = 全默认。
+    #[serde(default)]
+    pub external_cli_agents: std::collections::HashMap<String, ExternalCliAgentConfig>,
 }
 
 impl Default for ChatConfig {
@@ -614,8 +617,62 @@ impl Default for ChatConfig {
             user_display_name: String::new(),
             user_avatar: String::new(),
             default_agent_runtime: crate::chat::AgentRuntimeConfig::default(),
+            external_cli_agents: std::collections::HashMap::new(),
         }
     }
+}
+
+/// 单个本地 CLI Agent 的用户覆盖（设置页「本地 CLI Agent」）。全字段可缺省 = 保持内置行为。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExternalCliAgentConfig {
+    /// 停用后不出现在 Chat 的运行时选择器里。已绑定该 CLI 的旧会话不受影响——
+    /// 一 agent 一对话，停用是「别再新建」而不是「把历史会话弄坏」。
+    pub disabled: bool,
+    /// 自定义可执行文件路径；空 = 走 PATH 探测。
+    pub path: String,
+    /// 注入该 CLI 子进程的环境变量（ANTHROPIC_BASE_URL / OPENAI_API_KEY 之类）。
+    pub env: Vec<CliEnvVar>,
+    /// 用户手填的模型，合并进探测出来的模型下拉。
+    pub custom_models: Vec<CliCustomModel>,
+    /// 该 CLI 的第三方供应商（中转站）列表。每个 CLI 各自一份，同 ccgui 的分桶方式。
+    pub providers: Vec<ExternalCliProvider>,
+    /// 当前生效的供应商 id；空 = 不托管，用 CLI 自己的配置（默认）。
+    pub current_provider: String,
+}
+
+/// 一个第三方供应商（中转站）。**各 CLI 用到的字段不同**：
+/// - claude / gemini / 其余 env 系：只用 `env`（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` …）
+/// - codex：只用 `config_toml` / `auth_json`，物化成一个私有 `CODEX_HOME`
+///
+/// 扁平结构而不是 tagged enum：settings.json 是用户可手改的文件，enum 的 tag 写错整条读不出来。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExternalCliProvider {
+    /// 从 cc-switch 导入时**保留原 id**，这样二次导入走更新而不是新增一条重复的。
+    pub id: String,
+    pub name: String,
+    pub remark: String,
+    pub env: Vec<CliEnvVar>,
+    /// 仅 codex：私有 CODEX_HOME 里 config.toml 的全文。
+    pub config_toml: String,
+    /// 仅 codex：私有 CODEX_HOME 里 auth.json 的全文。
+    pub auth_json: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CliEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CliCustomModel {
+    pub id: String,
+    /// 显示名；空则前端回落显示 id。
+    pub label: String,
 }
 
 /**
@@ -2480,7 +2537,54 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
 
     settings.onboarding_status = normalize_onboarding_status(&settings);
 
+    sanitize_external_cli_agents(&mut settings.chat.external_cli_agents);
+
     settings
+}
+
+/// settings.json 是用户可手改的文件：环境变量名/模型 id 空白或全空格会被原样塞进子进程环境，
+/// 表现成难查的「CLI 启动即报错」。这里统一 trim 并丢掉空条目，未知 agent id 的整条配置也丢掉。
+fn sanitize_external_cli_agents(
+    agents: &mut std::collections::HashMap<String, ExternalCliAgentConfig>,
+) {
+    agents.retain(|id, cfg| {
+        if crate::external_agents::registry::get_agent_def(id).is_none() {
+            return false;
+        }
+        cfg.path = cfg.path.trim().to_string();
+        for pair in cfg.env.iter_mut() {
+            pair.key = pair.key.trim().to_string();
+            pair.value = pair.value.trim().to_string();
+        }
+        cfg.env.retain(|pair| !pair.key.is_empty());
+        for model in cfg.custom_models.iter_mut() {
+            model.id = model.id.trim().to_string();
+            model.label = model.label.trim().to_string();
+        }
+        cfg.custom_models.retain(|model| !model.id.is_empty());
+        for provider in cfg.providers.iter_mut() {
+            provider.id = provider.id.trim().to_string();
+            provider.name = provider.name.trim().to_string();
+            for pair in provider.env.iter_mut() {
+                pair.key = pair.key.trim().to_string();
+                pair.value = pair.value.trim().to_string();
+            }
+            provider.env.retain(|pair| !pair.key.is_empty());
+        }
+        cfg.providers
+            .retain(|provider| !provider.id.is_empty() && !provider.name.is_empty());
+        // 悬空的 current_provider（供应商被删了 / 手改错了）必须归零：留着会让注入层
+        // 找不到条目而**静默什么都不注入**，用户看到的是「选了供应商但没生效」。
+        cfg.current_provider = cfg.current_provider.trim().to_string();
+        if !cfg
+            .providers
+            .iter()
+            .any(|provider| provider.id == cfg.current_provider)
+        {
+            cfg.current_provider = String::new();
+        }
+        true
+    });
 }
 
 fn default_onboarding_status() -> String {
@@ -2522,6 +2626,19 @@ fn normalize_onboarding_status(settings: &Settings) -> String {
  * 新版加载时 sanitize_settings 会把 api_key_legacy.take() 合并回 api_keys 并去重，无副作用。
  */
 pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    crate::external_agents::overrides::sync_from_settings(settings);
+    // 镜像同步之后立刻物化：供应商的落地文件（claude 的 `--settings` 覆盖 / codex 的私有
+    // CODEX_HOME）必须与设置同生共死。放在这里而不是让前端保存后再调一个命令，是因为
+    // 前端只要漏调一次，用户就会得到「选了供应商但没生效」——而这种 bug 完全不报错。
+    crate::external_agents::provider_profile::materialize_all();
+    // 供应商可能变了：模型列表（300s）与可用性（600s）两个探测缓存都得作废，
+    // 否则切完供应商还在拿上一个中转站的模型和版本号。设置保存本来就不频繁，无条件清即可。
+    {
+        use tauri::Manager;
+        let state = app.state::<crate::state::AppState>();
+        state.clear_all_external_agent_models_cache();
+        state.clear_detected_agents_cache();
+    }
     let mut to_persist = settings.clone();
     // Keep legacy top-level chat fields from turning Lens/Translator fallback into
     // an explicit defaultModels.chat selection on the next load.
@@ -2630,7 +2747,9 @@ pub fn load_settings(app: &AppHandle) -> Settings {
             .unwrap_or_default(),
         Err(_) => Settings::default(),
     };
-    sanitize_settings(settings)
+    let settings = sanitize_settings(settings);
+    crate::external_agents::overrides::sync_from_settings(&settings);
+    settings
 }
 
 // ========== 默认提示词生成 ==========

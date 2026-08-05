@@ -1,6 +1,6 @@
 import { forwardRef, useImperativeHandle, useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react'
 import {
-  X, Check, RefreshCw,
+  X, RefreshCw,
   Download, Upload, ArrowLeft,
 } from 'lucide-react'
 import { open, save } from '@tauri-apps/plugin-dialog'
@@ -227,7 +227,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [initialSettingsSnapshot, setInitialSettingsSnapshot] = useState('')
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? 'general')
   // 用量统计页内的二级视图：用量统计 / 请求调试（请求调试原为独立导航项，现并入用量统计）
@@ -238,8 +237,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const [saveError, setSaveError] = useState('')
   // 热键被占用未能注册的警告（保存已成功，只是提醒，不阻断）。
   const [saveWarning, setSaveWarning] = useState('')
-  const [saveSuccess, setSaveSuccess] = useState(false)
-  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [confirmDeleteProviderId, setConfirmDeleteProviderId] = useState<string | null>(null)
   const [recordingTarget, setRecordingTarget] = useState<HotkeyScopeKey | null>(null)
   const [defaultPrompts, setDefaultPrompts] = useState<DefaultPromptTemplates | null>(null)
@@ -286,13 +283,18 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const isMac = platform === 'macos'
   const hasSystemOcr = isMac || platform === 'windows'
   // 加载失败时的错误信息；非空则渲染错误 UI 而不是用合成默认值进入正常视图
-  // （否则用户可能没察觉就 Save 把磁盘真实数据覆盖掉）
+  // （否则用户可能没察觉就自动保存把磁盘真实数据覆盖掉）
   const [loadError, setLoadError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
-  const saveSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readyEmittedRef = useRef(false)
   // 镜像当前草稿的序列化快照，供后台 SWR 校准回调判断“用户是否已改动”而无需闭包捕获最新 state。
   const currentSettingsSnapshotRef = useRef('')
+  // 自动保存：最新草稿 + 防抖定时器 + 在飞请求（避免并发写互相覆盖）
+  const settingsRef = useRef<SettingsData | null>(null)
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const saveInFlightRef = useRef(false)
+  const saveAgainRef = useRef(false)
+  const toastClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const lang = settings?.settingsLanguage || 'zh'
   const t = i18n[lang]
@@ -300,11 +302,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const chatTools = settings?.chatTools || defaultChatTools()
   const nativeBuiltinToolsEnabled = hasEnabledNativeBuiltinTool(chatTools.nativeTools)
   const skillRuntimeEnabled = hasEnabledSkillRuntime(chatTools.nativeTools)
-  // 判断是否有未保存的更改
+  // 判断是否有未保存的更改（自动保存会在防抖后清掉）
   const hasUnsavedChanges = settings ? stableStringify(settings) !== initialSettingsSnapshot : false
   // 同步当前草稿快照到 ref（SWR 校准回调据此判断草稿是否 pristine）。
   useEffect(() => {
-    currentSettingsSnapshotRef.current = settings ? stableStringify(settings) : ''
+    const snapshot = settings ? stableStringify(settings) : ''
+    currentSettingsSnapshotRef.current = snapshot
+    settingsRef.current = settings
   }, [settings])
 
   // 客户端热键冲突检测:在保存前发现"两个启用功能用了同一个组合"。
@@ -730,28 +734,38 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   }, [selectedProviderId, settings?.providers])
 
   /**
-   * 保存设置
+   * 立即把当前草稿写盘。自动保存与关闭前 flush 共用。
+   * 保存中若草稿又变了，收尾后会再跑一轮，避免丢字。
    */
-  const handleSave = useCallback(async () => {
-    if (!settings) return false
+  const persistSettingsNow = useCallback(async () => {
+    const draft = settingsRef.current
+    if (!draft) return false
+    const draftSnapshot = stableStringify(draft)
+    if (draftSnapshot === initialSettingsSnapshot) return true
+
+    if (saveInFlightRef.current) {
+      saveAgainRef.current = true
+      return false
+    }
+
+    saveInFlightRef.current = true
+    saveAgainRef.current = false
     try {
-      setSaving(true)
       setSaveError('')
-      setSaveWarning('')
-      setSaveSuccess(false)
-      if (saveSuccessTimerRef.current) {
-        clearTimeout(saveSuccessTimerRef.current)
-        saveSuccessTimerRef.current = null
+      // 不主动清 saveWarning：热键警告来自独立事件，成功保存后可能紧接着到达
+      const savedSettings = await saveSettingsCached(draft)
+      const savedSnapshot = stableStringify(savedSettings)
+      const latestSnapshot = settingsRef.current ? stableStringify(settingsRef.current) : ''
+      // 用户在请求飞行中继续改了 → 只推进“已落盘基线”，别用服务端回包盖掉本地草稿
+      if (latestSnapshot === draftSnapshot) {
+        setSettings(savedSettings)
+        setInitialSettingsSnapshot(savedSnapshot)
+        settingsRef.current = savedSettings
+        currentSettingsSnapshotRef.current = savedSnapshot
+      } else {
+        setInitialSettingsSnapshot(savedSnapshot)
       }
-      const savedSettings = await saveSettingsCached(settings)
-      setSettings(savedSettings)
-      setInitialSettingsSnapshot(stableStringify(savedSettings))
       onSettingsChange()
-      setSaveSuccess(true)
-      saveSuccessTimerRef.current = setTimeout(() => {
-        setSaveSuccess(false)
-        saveSuccessTimerRef.current = null
-      }, 2200)
       return true
     } catch (err) {
       console.error('Failed to save settings:', err)
@@ -759,49 +773,73 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       const translated = formatHotkeyError(message, lang)
       const prefix = lang === 'zh' ? '保存失败:' : 'Save failed: '
       setSaveError(`${prefix}${translated.replace(/\n/g, ' / ')}`)
-      setSaveSuccess(false)
       return false
     } finally {
-      setSaving(false)
+      saveInFlightRef.current = false
+      if (saveAgainRef.current) {
+        saveAgainRef.current = false
+        void persistSettingsNow()
+      }
     }
-  }, [lang, onSettingsChange, settings])
+  }, [initialSettingsSnapshot, lang, onSettingsChange])
+
+  // 草稿相对已落盘基线有 diff → 防抖自动保存（开关/输入共用，避免每个按键打盘）
+  useEffect(() => {
+    if (!hasUnsavedChanges) return
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null
+      void persistSettingsNow()
+    }, 400)
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+    }
+  }, [hasUnsavedChanges, settings, persistSettingsNow])
 
   useEffect(() => {
     return () => {
-      if (saveSuccessTimerRef.current) {
-        clearTimeout(saveSuccessTimerRef.current)
-      }
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
+      if (toastClearTimerRef.current) clearTimeout(toastClearTimerRef.current)
     }
   }, [])
 
+  // 错误 / 热键警告：短暂 toast，几秒后自动消失
+  useEffect(() => {
+    if (!saveError && !saveWarning) return
+    if (toastClearTimerRef.current) clearTimeout(toastClearTimerRef.current)
+    toastClearTimerRef.current = setTimeout(() => {
+      setSaveError('')
+      setSaveWarning('')
+      toastClearTimerRef.current = null
+    }, 5000)
+    return () => {
+      if (toastClearTimerRef.current) {
+        clearTimeout(toastClearTimerRef.current)
+        toastClearTimerRef.current = null
+      }
+    }
+  }, [saveError, saveWarning])
+
   /**
-   * 请求关闭设置页（检查未保存更改）
+   * 关闭设置页：先 flush 未落盘改动，再关（不阻塞 UI 等回包）
    */
   const handleCloseRequest = useCallback(() => {
     if (recordingTarget) return
-    if (hasUnsavedChanges) {
-      setCloseConfirmOpen(true)
-      return
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
     }
+    if (hasUnsavedChanges) void persistSettingsNow()
     onClose()
-  }, [hasUnsavedChanges, onClose, recordingTarget])
+  }, [hasUnsavedChanges, onClose, persistSettingsNow, recordingTarget])
 
   useImperativeHandle(ref, () => ({ requestClose: handleCloseRequest }), [handleCloseRequest])
-
-  // 放弃更改并关闭
-  const handleDiscardAndClose = () => {
-    setCloseConfirmOpen(false)
-    onClose()
-  }
-
-  // 保存并关闭
-  const handleSaveAndClose = useCallback(async () => {
-    const saved = await handleSave()
-    if (saved) {
-      setCloseConfirmOpen(false)
-      onClose()
-    }
-  }, [handleSave, onClose])
 
   const handleSettingsDragMouseDown = useCallback((event: React.MouseEvent<HTMLElement>) => {
     if (event.button !== 0) return
@@ -813,7 +851,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     })
   }, [])
 
-  // 全局键盘：Esc 关闭、Cmd/Ctrl+S 保存；弹窗打开时优先处理弹窗内的 Esc/Enter
+  // 全局键盘：Esc 关闭、Cmd/Ctrl+S 立即 flush；弹窗打开时优先处理弹窗内的 Esc
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (recordingTarget) return
@@ -837,25 +875,15 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
         return
       }
 
-      // 未保存确认弹窗：Esc = 继续编辑（关弹窗）；Enter = 保存并关闭
-      if (closeConfirmOpen) {
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          e.stopPropagation()
-          setCloseConfirmOpen(false)
-        } else if (e.key === 'Enter') {
-          e.preventDefault()
-          e.stopPropagation()
-          if (!saving) void handleSaveAndClose()
-        }
-        return
-      }
-
       if (e.key === 'Escape') {
         handleCloseRequest()
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
-        if (hasUnsavedChanges && !saving) void handleSave()
+        if (autosaveTimerRef.current) {
+          clearTimeout(autosaveTimerRef.current)
+          autosaveTimerRef.current = null
+        }
+        if (hasUnsavedChanges) void persistSettingsNow()
       }
     }
     window.addEventListener('keydown', handler, true)
@@ -863,13 +891,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   }, [
     handleCloseRequest,
     recordingTarget,
-    closeConfirmOpen,
     confirmDeleteProviderId,
     modelPickerProviderId,
-    saving,
     hasUnsavedChanges,
-    handleSave,
-    handleSaveAndClose,
+    persistSettingsNow,
   ])
 
   /**
@@ -957,11 +982,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       if (!selected || typeof selected !== 'string') return
       const imported = await importSettingsCached(selected)
       setSettings(imported)
+      setInitialSettingsSnapshot(stableStringify(imported))
+      onSettingsChange()
       setBackupStatus({ kind: 'ok', msg: lang === 'zh' ? '设置已导入并生效。' : 'Settings imported and applied.' })
     } catch (err) {
       setBackupStatus({ kind: 'err', msg: `${lang === 'zh' ? '导入失败：' : 'Import failed: '}${err}` })
     }
-  }, [lang])
+  }, [lang, onSettingsChange])
 
   const handleRestartOnboarding = useCallback(async () => {
     if (!settings) return
@@ -1323,7 +1350,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           id: currentProvider.id,
           baseUrl: currentProvider.baseUrl,
           apiKeys: currentProvider.apiKeys,
-          // 设置窗口是手动保存的，这里必须带上编辑中的请求配置，
+          // 草稿可能尚未落盘，这里必须带上编辑中的请求配置，
           // 否则拉列表用的头和真实聊天不一致。
           request: currentProvider.request,
         }
@@ -1692,8 +1719,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     externalAgents: {
       title: t.tabExternalAgents,
       subtitle: lang === 'zh'
-        ? '检测并启用外部 CLI 编码代理。'
-        : 'Detect and enable external CLI coding agents.',
+        ? '检测外部 CLI 编码代理，管理版本、路径、模型与环境变量。'
+        : 'Detect external CLI coding agents; manage versions, paths, models, and env vars.',
     },
     hooks: {
       title: t.tabHooks,
@@ -2046,6 +2073,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {activeTab === 'externalAgents' && (
               <ExternalAgentsSettings
                 lang={lang}
+                settings={settings}
+                updateChat={updateChat}
               />
             )}
 
@@ -2189,50 +2218,16 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             )}
           </div>
 
-          <div className={`kv-savebar ${variant === 'embedded' ? 'settings-embedded-savebar' : ''}`}>
-            <div className={`kv-savebar-hint ${saveError ? 'error' : saveWarning ? 'warn' : hasUnsavedChanges ? 'dirty' : ''}`}>
-              {saveError ? (
-                <>
-                  <span className="dot" />
-                  <span title={saveError}>{saveError}</span>
-                </>
-              ) : saveWarning ? (
-                <>
-                  <span className="dot" />
-                  <span title={saveWarning}>{saveWarning}</span>
-                </>
-              ) : saveSuccess ? (
-                <>
-                  <span className="clean-icon"><Check size={13} strokeWidth={2.4} /></span>
-                  <span>{t.saved}</span>
-                </>
-              ) : hasUnsavedChanges ? (
-                <>
-                  <span className="dot" />
-                  <span>{lang === 'zh' ? '有未保存更改。' : 'You have unsaved changes.'}</span>
-                </>
-              ) : (
-                <>
-                  <span className="clean-icon"><Check size={13} strokeWidth={2.4} /></span>
-                  <span>{lang === 'zh' ? '所有更改已保存。' : 'All changes saved.'}</span>
-                </>
-              )}
+          {(saveError || saveWarning) && (
+            <div
+              className={`settings-autosave-toast ${saveError ? 'error' : 'warn'}`}
+              role="status"
+              title={saveError || saveWarning}
+              data-tauri-drag-region="false"
+            >
+              {saveError || saveWarning}
             </div>
-            <Button
-              onClick={handleCloseRequest}
-              data-tauri-drag-region="false"
-            >
-              {t.cancel}
-            </Button>
-            <Button
-              variant="primary"
-              onClick={handleSave}
-              disabled={saving || !hasUnsavedChanges}
-              data-tauri-drag-region="false"
-            >
-              {saving ? t.saving : t.save}
-            </Button>
-          </div>
+          )}
         </main>
   )
 
@@ -2298,36 +2293,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           />
         )
       })()}
-      {/* 未保存更改确认弹窗 */}
-      {closeConfirmOpen && (
-        <div className="kv-modal-backdrop" data-tauri-drag-region="false">
-          <div className="kv-modal space-y-3">
-            <h3 className="text-[14px] font-semibold">{t.unsavedChanges}</h3>
-            <p className="kv-panel-body">{t.unsavedChangesDesc}</p>
-            <div className="flex justify-end gap-2 pt-1">
-              <Button
-                variant="ghost"
-                onClick={() => setCloseConfirmOpen(false)}
-              >
-                {t.continueEditing}
-              </Button>
-              <Button
-                onClick={handleDiscardAndClose}
-              >
-                {t.discardAndClose}
-              </Button>
-              <Button
-                variant="primary"
-                onClick={handleSaveAndClose}
-                disabled={saving}
-                autoFocus
-              >
-                {saving ? t.saving : t.saveAndClose}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
       {/* 删除提供商确认弹窗 */}
       {confirmDeleteProviderId && (
         <div className="kv-modal-backdrop" data-tauri-drag-region="false">

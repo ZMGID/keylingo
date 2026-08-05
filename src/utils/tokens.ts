@@ -12,3 +12,11 @@ export function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return `${n}`
 }
+
+/**
+ * 同 `formatTokens`，但用**大写 K** —— Chat 界面的既有写法（上下文用量条、窗口大小、
+ * 消息用量都是 K）。此前是各调用点自己 `.replace('k', 'K')`，同一个惯例抄在两处。
+ */
+export function formatTokensK(n: number): string {
+  return formatTokens(n).replace('k', 'K')
+}

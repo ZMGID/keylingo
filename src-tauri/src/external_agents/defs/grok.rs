@@ -82,6 +82,7 @@ pub const GROK_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     // grok advertises loadSession: true), same as the other ACP agents.
     resumes_session_via_cli: false,
     supports_native_image: true,
+        supports_steering: false,
     image_mime_whitelist: &[],
     build_args: build_grok_args,
 };
