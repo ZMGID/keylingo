@@ -337,6 +337,37 @@ function normalizeCodeBlockText(code: string): string {
   return code.replace(/\n$/, '')
 }
 
+function errorDetailsFence(detail: string): string {
+  const longestRun = Math.max(0, ...Array.from(detail.matchAll(/`+/g), (match) => match[0].length))
+  return '`'.repeat(Math.max(3, longestRun + 1))
+}
+
+// Older external-agent failures were persisted with literal HTML. ReactMarkdown intentionally
+// does not enable raw HTML, so migrate only Kivio's exact legacy disclosure shape into the safe
+// fenced block below. Arbitrary model-authored HTML remains inert text.
+function normalizeLegacyErrorDetails(content: string): string {
+  return content.replace(
+    /<details>\s*<summary>错误详情<\/summary>\s*(`{3,})\s*\n([\s\S]*?)\n\1\s*<\/details>/g,
+    (_match, _oldFence: string, detail: string) => {
+      const fence = errorDetailsFence(detail)
+      return `${fence}kivio-error-details\n${detail}\n${fence}`
+    },
+  )
+}
+
+function ErrorDetails({ detail }: { detail: string }) {
+  return (
+    <details className="not-prose my-3 overflow-hidden rounded-md border border-red-200/80 bg-red-50/60 dark:border-red-900/70 dark:bg-red-950/20">
+      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-red-700 marker:text-red-400 dark:text-red-300 dark:marker:text-red-600">
+        错误详情
+      </summary>
+      <pre className="custom-scrollbar m-0 max-h-64 overflow-auto border-t border-red-200/70 bg-transparent px-3 py-2 text-xs leading-5 text-red-800 dark:border-red-900/60 dark:text-red-200">
+        <code className="whitespace-pre-wrap break-words font-mono">{normalizeCodeBlockText(detail)}</code>
+      </pre>
+    </details>
+  )
+}
+
 function readDocumentDark(): boolean {
   return typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
 }
@@ -674,6 +705,9 @@ const markdownComponents: Components = {
       }
       if (language === 'mermaid') {
         return <MermaidBlock code={code} />
+      }
+      if (language === 'kivio-error-details') {
+        return <ErrorDetails detail={code} />
       }
       return <CodeBlock code={code} language={language} />
     }
@@ -1075,7 +1109,10 @@ function ChatMarkdownComponent({
   variant = 'default',
   citations,
 }: ChatMarkdownProps) {
-  const normalized = useMemo(() => normalizeMarkdownForRender(content), [content])
+  const normalized = useMemo(
+    () => normalizeMarkdownForRender(normalizeLegacyErrorDetails(content)),
+    [content],
+  )
   const remarkPlugins = useMemo<PluggableList>(() => {
     const plugins: PluggableList = [remarkGfm, remarkMath, remarkCjkFriendly]
     if (citations && citations.size > 0) {

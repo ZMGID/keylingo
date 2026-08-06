@@ -285,6 +285,16 @@ pub fn map_pi_rpc_event(value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) 
                 message: message.to_string(),
             });
         }
+        "auto_retry_start" => {
+            let attempt = obj.get("attempt").and_then(|v| v.as_u64()).unwrap_or(1);
+            let max_attempts = obj
+                .get("maxAttempts")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(attempt);
+            sink(UnifiedAgentEvent::StatusNote {
+                text: format!("Pi 正在自动重试（{attempt}/{max_attempts}）…"),
+            });
+        }
         "auto_retry_end" if obj.get("success").and_then(|v| v.as_bool()) == Some(false) => {
             let message = obj
                 .get("finalError")
@@ -413,6 +423,10 @@ where
 {
     let mut reader = BufReader::new(stdout).lines();
     let mut agent_ended = false;
+    // Pi emits the failed turn before it announces whether an automatic retry will follow.
+    // Defer fatal errors until the final agent_end; otherwise a recovered retry still leaves
+    // Kivio's turn permanently marked as failed.
+    let mut pending_error: Option<String> = None;
     // agent_end 后等待 pi flush + 自行退出的宽限期。带 --session-id 时 pi 收尾要落盘会话，
     // 可能不再因 stdin EOF 立即退出——宽限期一到就主动 break，不再无限等 EOF（否则 UI 转圈不止）。
     let mut ended_at: Option<std::time::Instant> = None;
@@ -465,13 +479,39 @@ where
             continue;
         }
 
-        if map_pi_rpc_event(&value, sink) == PiRpcOutcome::AgentEnd {
+        if value.get("type").and_then(|v| v.as_str()) == Some("auto_retry_end")
+            && value.get("success").and_then(|v| v.as_bool()) == Some(true)
+        {
+            pending_error = None;
+        }
+
+        let outcome = map_pi_rpc_event(&value, &mut |event| match event {
+            UnifiedAgentEvent::Error { message } => {
+                if pending_error.is_none() {
+                    pending_error = Some(message);
+                }
+            }
+            other => sink(other),
+        });
+        if outcome == PiRpcOutcome::AgentEnd {
+            // AgentSession emits agent_end for each failed attempt. `willRetry: true` means its
+            // backoff/continuation state machine is still active, so keep both pipes open.
+            if value.get("willRetry").and_then(|v| v.as_bool()) == Some(true) {
+                continue;
+            }
+            if let Some(message) = pending_error.take() {
+                sink(UnifiedAgentEvent::Error { message });
+            }
             agent_ended = true;
             ended_at = Some(std::time::Instant::now());
             // The process may already be closing its stdin side after emitting agent_end. Shutdown
             // is only the signal to begin Pi's flush-and-exit path, so a concurrent close is safe.
             let _ = stdin.shutdown().await;
         }
+    }
+
+    if let Some(message) = pending_error {
+        sink(UnifiedAgentEvent::Error { message });
     }
 
     Ok(())
@@ -618,6 +658,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn map_pi_auto_retry_start_as_status() {
+        let value = serde_json::json!({
+            "type": "auto_retry_start",
+            "attempt": 2,
+            "maxAttempts": 3,
+            "delayMs": 4000
+        });
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |event| events.push(event));
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::StatusNote { text }] if text.contains("2/3")
+        ));
+    }
+
     fn pi_usage(raw: &str) -> crate::chat::model::ModelUsage {
         let value: Value = serde_json::from_str(raw).unwrap();
         let mut events = Vec::new();
@@ -695,6 +751,77 @@ mod tests {
             "trailing write must not hit EPIPE"
         );
         assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn keeps_pi_open_for_auto_retry_and_discards_recovered_error() {
+        let (stdout_reader, mut stdout_writer) = duplex(4096);
+        let writer = tokio::spawn(async move {
+            for line in [
+                r#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"network error"}}"#,
+                r#"{"type":"agent_end","willRetry":true}"#,
+                r#"{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":1}"#,
+                r#"{"type":"auto_retry_end","success":true,"attempt":1}"#,
+                r#"{"type":"turn_end","message":{"stopReason":"end_turn"}}"#,
+                r#"{"type":"agent_end","willRetry":false}"#,
+            ] {
+                stdout_writer.write_all(line.as_bytes()).await?;
+                stdout_writer.write_all(b"\n").await?;
+            }
+            stdout_writer.shutdown().await
+        });
+        let mut stdin = sink();
+        let mut events = Vec::new();
+
+        let result = drain_pi_rpc_output(
+            stdout_reader,
+            &mut stdin,
+            &mut |event| events.push(event),
+            || false,
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::StatusNote { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Error { .. })));
+    }
+
+    #[tokio::test]
+    async fn emits_deferred_pi_error_on_final_agent_end() {
+        let (stdout_reader, mut stdout_writer) = duplex(2048);
+        let writer = tokio::spawn(async move {
+            stdout_writer
+                .write_all(
+                    b"{\"type\":\"turn_end\",\"message\":{\"stopReason\":\"error\",\"errorMessage\":\"stream_read_error\"}}\n",
+                )
+                .await?;
+            stdout_writer
+                .write_all(b"{\"type\":\"agent_end\",\"willRetry\":false}\n")
+                .await?;
+            stdout_writer.shutdown().await
+        });
+        let mut stdin = sink();
+        let mut events = Vec::new();
+
+        let result = drain_pi_rpc_output(
+            stdout_reader,
+            &mut stdin,
+            &mut |event| events.push(event),
+            || false,
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::Error { message } if message == "stream_read_error"
+        )));
     }
 
     #[tokio::test]

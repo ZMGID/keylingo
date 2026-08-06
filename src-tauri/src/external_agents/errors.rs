@@ -14,6 +14,8 @@ pub enum ExternalAgentErrorKind {
     Auth,
     /// Handshake or turn timed out — usually slow network or an unresponsive CLI.
     Timeout,
+    /// The provider's streaming response was interrupted before the turn completed.
+    Transport,
     /// The child process exited / hit EOF before completing the turn.
     Exited,
     /// Any other protocol / RPC failure.
@@ -37,9 +39,16 @@ impl ClassifiedError {
     pub fn render_bubble(&self) -> String {
         let mut out = self.user_message.clone();
         if !self.detail.trim().is_empty() {
-            out.push_str("\n\n<details>\n<summary>错误详情</summary>\n\n```\n");
-            out.push_str(self.detail.trim());
-            out.push_str("\n```\n\n</details>");
+            let detail = self.detail.trim();
+            let longest_run = detail
+                .split(|ch| ch != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or_default();
+            let fence = "`".repeat(longest_run.saturating_add(1).max(3));
+            out.push_str(&format!(
+                "\n\n{fence}kivio-error-details\n{detail}\n{fence}"
+            ));
         }
         out
     }
@@ -104,6 +113,12 @@ fn detect_kind(raw: &str, exit_code: Option<i32>, stderr_tail: &str) -> External
         ExternalAgentErrorKind::Auth
     } else if hay.contains("timeout") || hay.contains("timed out") {
         ExternalAgentErrorKind::Timeout
+    } else if hay.contains("stream_read_error")
+        || hay.contains("stream read error")
+        || hay.contains("stream ended unexpectedly")
+        || hay.contains("stream ended before")
+    {
+        ExternalAgentErrorKind::Transport
     } else if hay.contains("exited")
         || hay.contains("eof")
         || matches!(exit_code, Some(code) if code != 0)
@@ -148,6 +163,9 @@ pub fn classify(
         ExternalAgentErrorKind::Timeout => {
             format!("{name} 握手或响应超时。可能是网络缓慢或 CLI 无响应，请稍后重试。")
         }
+        ExternalAgentErrorKind::Transport => format!(
+            "{name} 的模型流式响应中途断开，本轮未完成。通常是模型中转站、上游服务或网络连接暂时异常，请重试。"
+        ),
         ExternalAgentErrorKind::Exited => match exit_code {
             Some(code) => {
                 format!("{name} 进程意外退出（退出码 {code}），请确认 CLI 可正常启动后重试。")
@@ -308,11 +326,28 @@ mod tests {
             "grok",
         );
         let bubble = c.render_bubble();
-        // Main text is the actionable message, raw string only appears inside the details block.
+        // Main text is actionable; raw diagnostics use the frontend's safe disclosure block.
         assert!(bubble.starts_with("Grok CLI 未登录"));
-        assert!(bubble.contains("<details>"));
+        assert!(bubble.contains("```kivio-error-details"));
+        assert!(!bubble.contains("<details>"));
         assert!(bubble.contains("session-new: Authentication required"));
         assert!(bubble.contains("boom stderr"));
+    }
+
+    #[test]
+    fn classifies_stream_read_error_as_transport_even_with_nonzero_exit() {
+        let c = classify("stream_read_error", Some(1), "", "pi");
+        assert_eq!(c.kind, ExternalAgentErrorKind::Transport);
+        assert!(c.user_message.contains("流式响应中途断开"));
+        assert!(!c.user_message.contains("进程意外退出"));
+    }
+
+    #[test]
+    fn detail_fence_expands_past_embedded_backticks() {
+        let c = classify("protocol failed", None, "stderr with ``` inside", "pi");
+        let bubble = c.render_bubble();
+        assert!(bubble.contains("````kivio-error-details"));
+        assert!(bubble.ends_with("````"));
     }
 
     #[test]
