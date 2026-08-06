@@ -1244,9 +1244,13 @@ async fn summarize_history(
     let (history_head, turn_prefix) = split_history_turn_prefix(&head, &recent);
 
     // 历史摘要（预算封顶 + 流式调用 + 质量兜底都在 compact_with_summary_model 内）。
-    // 整段 head 都是本轮前半时没有历史可摘（对齐 pi 的 "No prior history."）。
+    // head 为空（整段 old_segment 都是本轮前半 / 只剩锚点+ack）时没有历史可重摘——
+    // **但上一份摘要必须随身携带**：它已被上面的过滤从视图中剔除，这里不带上就会随
+    // `replace_with_summary` 整段替换而永久丢失（审查发现的数据丢失回归：每个压缩
+    // 周期只有一次长 agentic 请求的常见用法必命中）。无旧摘要才是真·"No prior history."。
+    let mut cancel = cancel;
     let history_attempt = if history_head.is_empty() {
-        CompactAttempt::Summary("No prior history.".to_string())
+        CompactAttempt::Summary(empty_history_fallback_text(previous_summary.as_ref()))
     } else {
         compact_with_summary_model(
             state,
@@ -1261,14 +1265,14 @@ async fn summarize_history(
             retry_attempts,
             conversation_id,
             message_id,
-            cancel,
+            cancel.take(),
         )
         .await
     };
     let summary_text = match (history_attempt, turn_prefix.is_empty()) {
         (CompactAttempt::Summary(history_text), false) => {
-            // 前缀摘要第二跳。cancel future 已被历史摘要那跳消费（单次 future）；这跳
-            // 输出预算减半、通常很短，取消由下一个轮首的 generation 检查兜底。
+            // 前缀摘要第二跳。history 跳没消费 cancel（head 为空走了 fallback）时由
+            // 这一跳消费——否则 turn-prefix-only 压缩期间点「停止」要白等整个摘要调用。
             match compact_with_summary_model(
                 state,
                 provider,
@@ -1282,7 +1286,7 @@ async fn summarize_history(
                 retry_attempts,
                 conversation_id,
                 message_id,
-                None,
+                cancel.take(),
             )
             .await
             {
@@ -1331,6 +1335,16 @@ fn split_history_turn_prefix<'a>(
     {
         Some(pos) => (&head[..pos], &head[pos..]),
         None => (head, &[]),
+    }
+}
+
+/// history_head 为空（无历史可重摘）时历史段的替身文本：有上一份摘要就**原文携带**
+/// （它已被剔出视图，不带上就随整段替换永久丢失——链式压缩的旧摘要绝不许丢）；
+/// 没有才是 pi 的 "No prior history."。
+fn empty_history_fallback_text(previous_summary: Option<&PreviousSummary>) -> String {
+    match previous_summary {
+        Some(previous) => previous.text.clone(),
+        None => "No prior history.".to_string(),
     }
 }
 
@@ -2946,6 +2960,21 @@ mod tests {
         assert!(content.contains("Create a structured context checkpoint summary"));
         assert!(!content.contains("<previous-summary>"));
         assert!(!content.contains("Additional focus:"));
+    }
+
+    // 链式压缩的旧摘要绝不许丢（审查发现的数据丢失回归）：head 为空时历史段必须
+    // 原文携带上一份摘要——它已被剔出视图，不带上就随整段替换永久消失。
+    #[test]
+    fn empty_history_carries_previous_summary_forward() {
+        let previous = PreviousSummary {
+            text: "## Goal\n重构认证模块".to_string(),
+            from_injected: false,
+        };
+        assert_eq!(
+            empty_history_fallback_text(Some(&previous)),
+            "## Goal\n重构认证模块"
+        );
+        assert_eq!(empty_history_fallback_text(None), "No prior history.");
     }
 
     #[test]

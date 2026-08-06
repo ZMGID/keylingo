@@ -1080,7 +1080,7 @@ fn handle_responses_stream_event(
                     state.usage = Some(usage);
                 }
                 if let Some(status) = response.get("status").and_then(Value::as_str) {
-                    state.finish_reason = Some(responses_finish_reason(status, state));
+                    state.finish_reason = Some(responses_finish_reason(status, response, state));
                 }
                 // 完整 output 里若还带 web_search_call / message 注解，合并进已流式累加的结果
                 // （不覆盖：hosted web_search_call 通常只在 output_item.done 里出现，不重现在此）。
@@ -1386,10 +1386,23 @@ fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch
     }
 }
 
-fn responses_finish_reason(status: &str, state: &ResponsesStreamState) -> String {
+fn responses_finish_reason(status: &str, response: &Value, state: &ResponsesStreamState) -> String {
     match status {
         "completed" if !state.tool_calls.is_empty() => "tool_calls".to_string(),
         "completed" => "stop".to_string(),
+        // Responses 的输出截断不叫 length：status=="incomplete" + incomplete_details.reason
+        // =="max_output_tokens"。归一化为 Chat Completions 的 "length"，让上层
+        // 「finish_reason==length ⇒ 整批工具调用作废」的防护对 openai_responses /
+        // xai_responses 同样生效（anthropic/gemini 适配器已各自归一化，这里此前漏了）。
+        "incomplete"
+            if response
+                .get("incomplete_details")
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                == Some("max_output_tokens") =>
+        {
+            "length".to_string()
+        }
         other => other.to_string(),
     }
 }
@@ -2154,5 +2167,32 @@ mod tests {
             responses_error_message(&serde_json::json!({})),
             "Unknown Responses API error"
         );
+    }
+
+    /// Responses 的输出截断（status=incomplete + reason=max_output_tokens）必须归一化为
+    /// "length"，否则「finish_reason==length ⇒ 整批工具调用作废」防护对 Responses 系失效。
+    #[test]
+    fn incomplete_max_output_tokens_normalizes_to_length() {
+        let state = ResponsesStreamState::default();
+        let truncated = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" }
+        });
+        assert_eq!(
+            responses_finish_reason("incomplete", &truncated, &state),
+            "length"
+        );
+        // 其它 incomplete 原因（如 content_filter）原样透传，不冒充截断。
+        let filtered = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": { "reason": "content_filter" }
+        });
+        assert_eq!(
+            responses_finish_reason("incomplete", &filtered, &state),
+            "incomplete"
+        );
+        // completed 的两条既有映射不受影响。
+        let done = serde_json::json!({ "status": "completed" });
+        assert_eq!(responses_finish_reason("completed", &done, &state), "stop");
     }
 }
