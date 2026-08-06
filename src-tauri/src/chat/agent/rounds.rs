@@ -166,6 +166,24 @@ pub(crate) async fn execute_tool_round(
     tool_calls: Vec<PendingToolCall>,
     skill_cache: &mut skills::SkillRunCache,
 ) -> ToolRoundResult {
+    // 对齐 pi `failToolCallsFromTruncatedMessage`：finish_reason=="length" 说明整条响应
+    // 在 max_output_tokens 处被拦腰截断——流式工具参数经 salvage 收尾后完全可能「JSON 合法
+    // 但语义残缺」（写文件只写了半个 content、编辑少了半条 edit），逐个看解析是否成功不可靠。
+    // 整批作废、一个都不执行，让模型带着完整参数重发。
+    if ctx.finish_reason == Some("length") && !tool_calls.is_empty() {
+        let mut response_messages = Vec::new();
+        let mut tool_records = Vec::new();
+        for tool_call in tool_calls {
+            let result = truncated_tool_call_result(host, &ctx, tools, tool_call);
+            push_tool_execution_result(result, &mut response_messages, &mut tool_records);
+        }
+        return ToolRoundResult {
+            response_messages,
+            tool_records,
+            cancelled: false,
+        };
+    }
+
     let mut response_messages = Vec::new();
     let mut tool_records = Vec::new();
     let mut parallel_batch: Vec<ExecutableToolCall<'_>> = Vec::new();
@@ -694,6 +712,38 @@ fn invalid_tool_arguments_result(
     host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
     ToolExecutionResult {
         response_message: tool_message(tool_call.id.clone(), model_hint),
+        record: Some(record),
+        cancelled: false,
+        follow_up_messages: Vec::new(),
+    }
+}
+
+/// finish_reason=="length" 的整批作废结果：不执行，只给模型一条「参数可能被截断，
+/// 请重发」的错误结果（每个 tool_call_id 都必须被应答，缺一条下一轮请求直接 400）。
+fn truncated_tool_call_result(
+    host: &dyn AgentHost,
+    ctx: &ToolRoundContext<'_>,
+    tools: &[ChatToolDefinition],
+    tool_call: PendingToolCall,
+) -> ToolExecutionResult {
+    let error = "Not executed: the response hit the max output token limit \
+                 (finish_reason=length), so the tool-call arguments may be truncated."
+        .to_string();
+    let model_hint = format!(
+        "Tool call \"{}\" was not executed: the response hit the output token limit, so its \
+         arguments may be truncated. Re-issue the tool call with complete arguments — and if \
+         the arguments themselves are large (e.g. a big file write), produce smaller output \
+         by splitting the work across several calls.",
+        tool_call.function_name
+    );
+    let mut record = match match_tool_call(tools, &tool_call.function_name) {
+        Some(tool) => invalid_tool_arguments_record(&tool_call, tool, ctx.round, error),
+        None => unknown_tool_record(&tool_call, ctx.round, error),
+    };
+    attach_tool_trace(ctx, &mut record);
+    host.emit_tool_record(ctx.conversation_id, ctx.run_id, ctx.message_id, &record);
+    ToolExecutionResult {
+        response_message: tool_message(tool_call.id, model_hint),
         record: Some(record),
         cancelled: false,
         follow_up_messages: Vec::new(),

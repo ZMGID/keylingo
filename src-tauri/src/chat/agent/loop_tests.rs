@@ -42,9 +42,9 @@ struct TestHost {
     /// round's loop-top generation check observes the cancellation. Used to
     /// exercise the planning/loop-top cancellation path deterministically.
     cancel_on_persist: bool,
-    /// 待注入的用户插话（steering）。`take_steering_messages` 一次取空，所以只在第一个
-    /// 轮次边界生效——与真实信箱的 take 语义一致。
-    steering: Mutex<Vec<SteeringMessage>>,
+    /// 待注入的用户插话（steering），按「批」排队：`take_steering_messages` 每调一次弹出
+    /// 一批——模拟真实信箱「取一次清一次、之后新到的下次才取到」的时序。
+    steering: Mutex<std::collections::VecDeque<Vec<SteeringMessage>>>,
 }
 
 impl TestHost {
@@ -78,10 +78,15 @@ impl TestHost {
 
     /// 起手就有一条待注入的插话（模拟用户在第一轮工具跑着时点了「立刻引导」）。
     fn with_steering(id: &str, text: &str) -> Self {
+        Self::with_steering_batches(vec![vec![
+            SteeringMessage::new(id.to_string(), text).expect("non-blank steering text")
+        ]])
+    }
+
+    /// 按批排队的插话：第 N 次 take 弹出第 N 批（用空批表示「那个时刻信箱是空的」）。
+    fn with_steering_batches(batches: Vec<Vec<SteeringMessage>>) -> Self {
         Self {
-            steering: Mutex::new(vec![
-                SteeringMessage::new(id.to_string(), text).expect("non-blank steering text")
-            ]),
+            steering: Mutex::new(batches.into()),
             ..Self::default()
         }
     }
@@ -215,12 +220,11 @@ impl AgentHost for TestHost {
     }
 
     fn take_steering_messages(&self, _conversation_id: &str) -> Vec<SteeringMessage> {
-        std::mem::take(
-            &mut *self
-                .steering
-                .lock()
-                .unwrap_or_else(|err| err.into_inner()),
-        )
+        self.steering
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pop_front()
+            .unwrap_or_default()
     }
 
     fn wait_for_generation_inactive<'a>(
@@ -1950,7 +1954,7 @@ async fn run_loop_l2_compacts_old_history_keeps_current_round_raw() {
     // 三次请求：L2 摘要 + 规划 + 合成。摘要后的请求不再携带旧原文。
     let bodies = server.captured_bodies();
     assert_eq!(bodies.len(), 3, "summary + planning + synthesis requests");
-    assert!(bodies[0].contains("tasked with summarizing conversations"));
+    assert!(bodies[0].contains("context summarization assistant"));
     for body in &bodies[1..] {
         assert!(
             !body.contains(&"A".repeat(1_000)),
@@ -1997,7 +2001,7 @@ async fn run_loop_l2_compacts_old_history_keeps_current_round_raw() {
 /// 真实用量锚点：即便**字符估算**远低于压缩阈值，只要上一轮 provider 实报 usage（config
 /// 锚点）超过预算，run 首次规划前就应触发压缩。构造 window=40k（预算 ~34976）、history
 /// 字符估算 ~25k（< 预算，纯估算不会压），但 initial_anchor_total_tokens=40k（> 预算）→
-/// 首个请求必须是摘要（"tasked with summarizing conversations"）。
+/// 首个请求必须是摘要（"context summarization assistant"）。
 #[tokio::test]
 async fn run_loop_usage_anchor_triggers_compaction_when_estimate_below_budget() {
     let server = MockModelServer::start(vec![
@@ -2044,7 +2048,7 @@ async fn run_loop_usage_anchor_triggers_compaction_when_estimate_below_budget() 
     assert_eq!(result.content, "已按锚点压缩后作答。");
     let bodies = server.captured_bodies();
     assert!(
-        bodies[0].contains("tasked with summarizing conversations"),
+        bodies[0].contains("context summarization assistant"),
         "usage anchor over budget must trigger compaction as the first request"
     );
 }
@@ -2088,7 +2092,7 @@ async fn run_loop_no_anchor_skips_compaction_when_estimate_below_budget() {
     assert_eq!(result.content, "无需压缩直接作答。");
     let bodies = server.captured_bodies();
     assert!(
-        !bodies[0].contains("tasked with summarizing conversations"),
+        !bodies[0].contains("context summarization assistant"),
         "without an anchor, an under-budget estimate must NOT trigger compaction"
     );
 }
@@ -2290,7 +2294,180 @@ async fn run_loop_steering_injects_user_message_and_emits_card() {
     assert_eq!(result.stream_outcome, "completed");
 }
 
-/// Layer2 compaction: when the history is over budget, a summary request fires/// first and the next provider request carries the summary instead of the old
+/// one-at-a-time（对齐 pi PendingMessageQueue 默认模式）：同一批到达的两条插话不一次
+/// 灌进同一轮——每个轮次边界只注入一条，剩余的下一个边界送达。
+#[tokio::test]
+async fn run_loop_steering_delivers_one_message_per_round() {
+    let server = MockModelServer::start(vec![
+        // Round 1：工具调用（此前注入了第 1 条插话）。
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        // Round 2：终答（此前注入了第 2 条插话）。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"两条都照办。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(3);
+    let host = TestHost::with_steering_batches(vec![vec![
+        SteeringMessage::new("steer-a".into(), "第一条：先跑测试").expect("non-blank"),
+        SteeringMessage::new("steer-b".into(), "第二条：再改文档").expect("non-blank"),
+    ]]);
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run with queued steering completes");
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 2);
+    // 第一轮只带第一条；第二条要等下一个轮次边界。
+    assert!(bodies[0].contains("先跑测试"), "round 1 carries message #1");
+    assert!(
+        !bodies[0].contains("再改文档"),
+        "message #2 must NOT be flushed into the same round: {}",
+        bodies[0]
+    );
+    assert!(bodies[1].contains("再改文档"), "round 2 carries message #2");
+    // 两条各有自己的卡。
+    let steer_ids: Vec<_> = result
+        .tool_records
+        .iter()
+        .filter(|record| record.name == crate::chat::agent::STEER_TOOL_NAME)
+        .filter_map(|record| {
+            record
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("steer_id"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(steer_ids, vec!["steer-a", "steer-b"]);
+    assert_eq!(result.stream_outcome, "completed");
+}
+
+/// pi 外层 while 的 followUp 语义：模型给出终答时信箱里还有插话 ⇒ 终答落成中间
+/// assistant 消息、run 继续跑下一轮送达插话，而不是收束后靠前端把话重发成新消息。
+#[tokio::test]
+async fn run_loop_final_answer_with_pending_steering_continues() {
+    let server = MockModelServer::start(vec![
+        // Round 1：模型直接给终答（无工具调用）。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"先答一版。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+        // Round 2：带着插话续答。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"补充完毕。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(3);
+    // 时序：轮首取信箱时是空的（批 1），插话在终答流式期间到达（批 2 在
+    // FinalAnswer 边界的 steering_pending 检查被取到）。
+    let host = TestHost::with_steering_batches(vec![
+        Vec::new(),
+        vec![SteeringMessage::new("steer-late".into(), "顺便把 README 也更新").expect("non-blank")],
+    ]);
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run continues past the pending-steering final answer");
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 2, "final answer + one continuation round");
+    // 续答请求带着：被吸收成中间消息的第一版终答 + 插话。
+    assert!(bodies[1].contains("先答一版"), "absorbed assistant answer replays");
+    assert!(bodies[1].contains("README"), "the late steering message reaches the model");
+    // run 的最终正文是第二版；第一版存在于段与 api_messages 里（时间线完整）。
+    assert_eq!(result.content, "补充完毕。");
+    assert!(result.api_messages.iter().any(|message| {
+        message.get("role").and_then(|role| role.as_str()) == Some("assistant")
+            && message
+                .get("content")
+                .and_then(|content| content.as_str())
+                .map(|content| content.contains("先答一版"))
+                .unwrap_or(false)
+    }));
+    assert!(result.api_messages.iter().any(|message| {
+        message.get("role").and_then(|role| role.as_str()) == Some("user")
+            && message
+                .get("content")
+                .and_then(|content| content.as_str())
+                .map(|content| content.contains("README"))
+                .unwrap_or(false)
+    }));
+    // 插话卡照常出。
+    assert!(result
+        .tool_records
+        .iter()
+        .any(|record| record.name == crate::chat::agent::STEER_TOOL_NAME));
+    assert_eq!(result.stream_outcome, "completed");
+}
+
+/// 对齐 pi failToolCallsFromTruncatedMessage：finish_reason=="length" 时整批工具调用作废
+/// ——salvage 收尾可能产出「JSON 合法但语义残缺」的参数，一个都不执行，让模型重发。
+#[tokio::test]
+async fn run_loop_length_truncated_tool_calls_fail_whole_batch() {
+    let server = MockModelServer::start(vec![
+        // Round 1：两个 read 调用（参数 JSON 完整可解析），但 finish_reason=length。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":\"/tmp/a.txt\"}"}},{"index":1,"id":"call_b","function":{"name":"read","arguments":"{\"path\":\"/tmp/b.txt\"}"}}]}}]}"#
+                .to_string(),
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+        // Round 2：模型收到整批错误后正常收尾。
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"重发完成。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(3);
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run recovers after the truncated batch");
+
+    // 一个工具都没真正执行（参数可解析也不行——可能是被截断的半成品）。
+    assert!(
+        executor.events().is_empty(),
+        "no tool may execute from a length-truncated message: {:?}",
+        executor.events()
+    );
+    // 两个调用都留了错误记录，注明截断原因。
+    let truncated_records: Vec<_> = result
+        .tool_records
+        .iter()
+        .filter(|record| {
+            matches!(record.status, ToolCallStatus::Error)
+                && record
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("finish_reason=length"))
+        })
+        .collect();
+    assert_eq!(truncated_records.len(), 2, "{:?}", result.tool_records);
+    // 两个 tool_call_id 在下一轮请求里都有应答（缺一条严格 provider 会 400）。
+    let bodies = server.captured_bodies();
+    assert!(bodies.len() >= 2);
+    assert!(bodies[1].contains("call_a") && bodies[1].contains("call_b"));
+    assert!(bodies[1].contains("may be truncated"));
+    assert_eq!(result.content, "重发完成。");
+    assert_eq!(result.stream_outcome, "completed");
+}
+
+/// Layer2 compaction: when the history is over budget, a summary request fires
+/// first and the next provider request carries the summary instead of the old
 /// history; the summary itself stays out of persisted api_messages, and the
 /// compacted full history is returned via `compacted_history` (R3).
 #[tokio::test]
@@ -2344,7 +2521,7 @@ async fn run_loop_layer2_replaces_old_history_with_summary() {
     let bodies = server.captured_bodies();
     assert_eq!(bodies.len(), 2, "summary request + planning request");
     // 摘要请求带着 Claude Code 结构化 prompt 与旧段样本。
-    assert!(bodies[0].contains("tasked with summarizing conversations"));
+    assert!(bodies[0].contains("context summarization assistant"));
     // L2 摘要调用现在走**流式**路径——摘要请求体携带 `"stream":true`（这是它能在仅支持
     // 流式的 provider 上成功摘要的关键：mock 摘要响应以 SSE 提供而非非流式 JSON）。
     assert!(
@@ -2441,7 +2618,7 @@ async fn run_loop_compaction_summary_streams_on_streaming_only_provider() {
     );
     // 关键：摘要请求走流式（仅流式 provider 上能成功的根本原因）。
     assert!(
-        bodies[0].contains("tasked with summarizing conversations"),
+        bodies[0].contains("context summarization assistant"),
         "first request is the summary call"
     );
     assert!(
@@ -2803,7 +2980,7 @@ async fn run_loop_empty_response_at_context_window_recovers_as_silent_overflow()
     let bodies = server.captured_bodies();
     assert_eq!(bodies.len(), 4, "规划 / 空响应合成 / 摘要 / 重发");
     assert!(
-        bodies[2].contains("tasked with summarizing conversations"),
+        bodies[2].contains("context summarization assistant"),
         "第 3 次调用必须是压缩摘要"
     );
 }

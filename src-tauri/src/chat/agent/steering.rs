@@ -49,39 +49,63 @@ impl SteeringMessage {
     }
 }
 
-/// 轮首注入：取走信箱里所有插话，逐条推进模型历史并合成一张卡。
+/// 轮首注入：**one-at-a-time**（对齐 pi `PendingMessageQueue` 的默认 `QueueMode`）——先把
+/// 信箱里新到的插话全部拉进 RunState 本地队列，再只弹**一条**注入本轮。模型逐条应对，
+/// 多条排队的插话不会一次灌进同一轮；剩余的由后续轮次边界与 FinalAnswer 边界的
+/// [`steering_pending`] 检查保证送达（队列清空前 loop 不收束）。
 ///
 /// 两处 push 都是必须的：`runtime_messages` 让**本轮**模型看见，`generated_api_messages` 让它
 /// 随 assistant 消息落盘（`model_messages_from_openai_messages` 认 `"user"` role），**下一轮回放
 /// 不丢**。工具结果之后紧跟一条 user 文本对三种线格式都安全：Anthropic / Gemini 适配器各有
 /// `merge_consecutive_*_roles` 把它合进同一个 turn，OpenAI 系天然接受连续 user。
 pub(crate) fn inject_steering_messages(env: &LoopEnv<'_>, state: &mut RunState, round: u32) {
-    let pending = env
-        .host
-        .take_steering_messages(&env.config.conversation_id);
-    if pending.is_empty() {
-        return;
-    }
-    let ids = env.ids();
-    for message in pending {
-        state.runtime_messages.push(serde_json::json!({
-            "role": "user",
-            "content": message.text,
-        }));
-        state.generated_api_messages.push(serde_json::json!({
-            "role": "user",
-            "content": message.text,
-        }));
-
-        let record = build_steer_record(&message, round);
+    state.pending_steering.extend(
         env.host
-            .emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
-        let order = state.segment_builder.next_order();
-        state
-            .segment_builder
-            .append_existing_segments(vec![build_steer_segment(order, &record.id, round)]);
-        state.tool_records.push(record);
-    }
+            .take_steering_messages(&env.config.conversation_id),
+    );
+    let Some(message) = state.pending_steering.pop_front() else {
+        return;
+    };
+    let ids = env.ids();
+    state.runtime_messages.push(serde_json::json!({
+        "role": "user",
+        "content": message.text,
+    }));
+    state.generated_api_messages.push(serde_json::json!({
+        "role": "user",
+        "content": message.text,
+    }));
+
+    let record = build_steer_record(&message, round);
+    env.host
+        .emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
+    let order = state.segment_builder.next_order();
+    state
+        .segment_builder
+        .append_existing_segments(vec![build_steer_segment(order, &record.id, round)]);
+    state.tool_records.push(record);
+}
+
+/// FinalAnswer 边界的外层检查（对齐 pi agent-loop 的外层 `while`：agent 本要停下时轮询
+/// followUp 队列）：模型给出了终答，但信箱/本地队列里还有没送达的插话——run 不该在用户
+/// 话没说完时收束。把信箱新到的拉进本地队列后判空；true ⇒ 调用方把终答落成中间消息并
+/// 继续循环。
+pub(crate) fn steering_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool {
+    state.pending_steering.extend(
+        env.host
+            .take_steering_messages(&env.config.conversation_id),
+    );
+    !state.pending_steering.is_empty()
+}
+
+/// 把本该收束的终答落成一条**中间** assistant 消息（对齐 pi：终答照常成为历史的一部分，
+/// 随后的插话开启新的一轮）。文本/推理段已由 planning 落进 `segment_builder`（时间线顺序
+/// 正确），这里只补两本历史账；下一轮 planning 的请求即带着这条 assistant + 新注入的插话。
+pub(crate) fn absorb_final_answer(state: &mut RunState, message: serde_json::Value) {
+    state.runtime_messages.push(message.clone());
+    state.generated_api_messages.push(message);
+    // 下一轮 planning 重新决定是否流式收尾；上一轮终答的「已流出」状态不能带过去。
+    state.planning_final_streamed = false;
 }
 
 /// 插话卡的 `ToolCallRecord`。永远是 Success（它不是一次调用，是一件已经发生的事）。

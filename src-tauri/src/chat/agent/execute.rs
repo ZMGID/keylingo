@@ -149,6 +149,15 @@ pub async fn execute_tool_call(
     call: PendingToolCall,
     skill_cache: Option<&mut skills::SkillRunCache>,
 ) -> (ToolCallRecord, String, Vec<Value>) {
+    // 宽容 coercion（对齐 pi validateToolArguments 的 Value.Convert + coerceWithJsonSchema）：
+    // 校验前先按 schema 把「差一层类型」的参数掰正（"5"→5、"true"→true、5→"5"），
+    // 弱模型的这类口误不值得烧掉一整轮。`arguments_raw` 保持模型原话（展示/落盘/回放）。
+    let call = {
+        let mut call = call;
+        call.arguments =
+            coerce_tool_arguments(&tool.input_schema, std::mem::take(&mut call.arguments));
+        call
+    };
     let now = chrono::Local::now().timestamp();
     let mut record = ToolCallRecord {
         id: call.id.clone(),
@@ -397,6 +406,161 @@ fn tool_span_id(round: u32, tool_call_id: &str) -> String {
 
 pub fn validate_tool_arguments(tool: &ChatToolDefinition, arguments: &Value) -> Result<(), String> {
     validate_schema_value(&tool.input_schema, arguments, "arguments")
+}
+
+/// 按 JSON Schema 做宽容 coercion（pi `coerceWithJsonSchema` 的 Rust 移植）：
+/// 类型差一层皮的值在校验前被掰正，语义不明的值原样保留交给校验报错。
+/// 只做无损/明确的转换——字符串数字→数字、"true"/"false"→bool、数字/布尔→字符串、
+/// null→类型零值；对 object/array 递归；anyOf/oneOf 先试原值、再逐成员试 coercion。
+pub(crate) fn coerce_tool_arguments(schema: &Value, value: Value) -> Value {
+    if schema.is_null() || schema.as_object().is_some_and(|object| object.is_empty()) {
+        return value;
+    }
+    coerce_with_schema(schema, value)
+}
+
+fn coerce_with_schema(schema: &Value, mut value: Value) -> Value {
+    if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
+        for nested in all_of {
+            value = coerce_with_schema(nested, value);
+        }
+    }
+    if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array) {
+        value = coerce_with_union(any_of, value);
+    }
+    if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array) {
+        value = coerce_with_union(one_of, value);
+    }
+
+    let types = schema_types(schema);
+    let matches_union_member = types.len() > 1
+        && types
+            .iter()
+            .any(|type_name| value_matches_schema_type(type_name, &value));
+    if !types.is_empty() && !matches_union_member {
+        for type_name in &types {
+            let candidate = coerce_primitive_by_type(&value, type_name);
+            if let Some(candidate) = candidate {
+                value = candidate;
+                break;
+            }
+        }
+    }
+
+    if types.iter().any(|t| t == "object") {
+        if let Some(object) = value.as_object_mut() {
+            let properties = schema.get("properties").and_then(Value::as_object);
+            if let Some(properties) = properties {
+                for (key, child_schema) in properties {
+                    if let Some(child) = object.remove(key) {
+                        object.insert(key.clone(), coerce_with_schema(child_schema, child));
+                    }
+                }
+            }
+            if let Some(additional) = schema
+                .get("additionalProperties")
+                .filter(|extra| extra.is_object())
+            {
+                let extra_keys: Vec<String> = object
+                    .keys()
+                    .filter(|key| {
+                        properties
+                            .map(|props| !props.contains_key(*key))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect();
+                for key in extra_keys {
+                    if let Some(child) = object.remove(&key) {
+                        object.insert(key, coerce_with_schema(additional, child));
+                    }
+                }
+            }
+        }
+    }
+    if types.iter().any(|t| t == "array") {
+        if let (Some(items), Some(array)) = (schema.get("items"), value.as_array_mut()) {
+            if items.is_object() {
+                for item in array.iter_mut() {
+                    let taken = std::mem::take(item);
+                    *item = coerce_with_schema(items, taken);
+                }
+            }
+        }
+    }
+    value
+}
+
+/// anyOf/oneOf：原值已匹配任一成员则不动；否则逐成员试 coercion，取第一个校验通过的。
+fn coerce_with_union(options: &[Value], value: Value) -> Value {
+    if options
+        .iter()
+        .any(|option| validate_schema_value(option, &value, "v").is_ok())
+    {
+        return value;
+    }
+    for option in options {
+        let candidate = coerce_with_schema(option, value.clone());
+        if validate_schema_value(option, &candidate, "v").is_ok() {
+            return candidate;
+        }
+    }
+    value
+}
+
+fn schema_types(schema: &Value) -> Vec<String> {
+    match schema.get("type") {
+        Some(Value::String(type_name)) => vec![type_name.clone()],
+        Some(Value::Array(type_names)) => type_names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 单个标量的定向 coercion（pi `coercePrimitiveByType`）。返回 None = 不知道怎么转，原样保留。
+fn coerce_primitive_by_type(value: &Value, type_name: &str) -> Option<Value> {
+    match type_name {
+        "number" => match value {
+            Value::Null => Some(Value::from(0)),
+            Value::String(text) if !text.trim().is_empty() => {
+                text.trim().parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::from)
+            }
+            Value::Bool(flag) => Some(Value::from(if *flag { 1 } else { 0 })),
+            _ => None,
+        },
+        "integer" => match value {
+            Value::Null => Some(Value::from(0)),
+            Value::String(text) if !text.trim().is_empty() => {
+                text.trim().parse::<i64>().ok().map(Value::from)
+            }
+            Value::Bool(flag) => Some(Value::from(if *flag { 1 } else { 0 })),
+            _ => None,
+        },
+        "boolean" => match value {
+            Value::Null => Some(Value::Bool(false)),
+            Value::String(text) if text == "true" => Some(Value::Bool(true)),
+            Value::String(text) if text == "false" => Some(Value::Bool(false)),
+            Value::Number(number) if number.as_i64() == Some(1) => Some(Value::Bool(true)),
+            Value::Number(number) if number.as_i64() == Some(0) => Some(Value::Bool(false)),
+            _ => None,
+        },
+        "string" => match value {
+            Value::Null => Some(Value::String(String::new())),
+            Value::Number(number) => Some(Value::String(number.to_string())),
+            Value::Bool(flag) => Some(Value::String(flag.to_string())),
+            _ => None,
+        },
+        "null" => match value {
+            Value::String(text) if text.is_empty() => Some(Value::Null),
+            Value::Number(number) if number.as_i64() == Some(0) => Some(Value::Null),
+            Value::Bool(false) => Some(Value::Null),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn validate_schema_value(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
@@ -1477,5 +1641,90 @@ mod tests {
         assert!(err.contains("officecli"));
         assert!(err.contains("300") || err.contains("300s") || err.contains("300.0"));
         assert!(err.contains("勿原样重试") || err.contains("缩小"));
+    }
+
+    #[test]
+    fn coercion_fixes_string_number_and_bool() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "offset": { "type": "integer" },
+                "ratio": { "type": "number" },
+                "recursive": { "type": "boolean" },
+                "name": { "type": "string" }
+            }
+        });
+        let coerced = coerce_tool_arguments(
+            &schema,
+            serde_json::json!({
+                "offset": "5",
+                "ratio": "0.5",
+                "recursive": "true",
+                "name": 42
+            }),
+        );
+        assert_eq!(
+            coerced,
+            serde_json::json!({ "offset": 5, "ratio": 0.5, "recursive": true, "name": "42" })
+        );
+        // coercion 后必须能过既有校验（这就是它存在的意义）。
+        assert!(validate_schema_value(&schema, &coerced, "arguments").is_ok());
+    }
+
+    #[test]
+    fn coercion_recurses_into_arrays_and_nested_objects() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "line": { "type": "integer" } }
+                    }
+                }
+            }
+        });
+        let coerced = coerce_tool_arguments(
+            &schema,
+            serde_json::json!({ "edits": [ { "line": "12" }, { "line": 3 } ] }),
+        );
+        assert_eq!(
+            coerced,
+            serde_json::json!({ "edits": [ { "line": 12 }, { "line": 3 } ] })
+        );
+    }
+
+    #[test]
+    fn coercion_leaves_valid_and_hopeless_values_alone() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "count": { "type": "integer" } }
+        });
+        // 已合法：原样。
+        let valid = serde_json::json!({ "count": 7 });
+        assert_eq!(coerce_tool_arguments(&schema, valid.clone()), valid);
+        // 掰不动的（非数字字符串）：原样保留，交给校验去报错。
+        let hopeless = serde_json::json!({ "count": "many" });
+        assert_eq!(coerce_tool_arguments(&schema, hopeless.clone()), hopeless);
+        assert!(validate_schema_value(&schema, &hopeless, "arguments").is_err());
+    }
+
+    #[test]
+    fn coercion_resolves_any_of_by_member_validation() {
+        let schema = serde_json::json!({
+            "anyOf": [
+                { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] },
+                { "type": "integer" }
+            ]
+        });
+        // 原值已匹配成员一：不动。
+        let object = serde_json::json!({ "path": "a.rs" });
+        assert_eq!(coerce_tool_arguments(&schema, object.clone()), object);
+        // 字符串数字：coerce 后命中成员二。
+        assert_eq!(
+            coerce_tool_arguments(&schema, serde_json::json!("12")),
+            serde_json::json!(12)
+        );
     }
 }

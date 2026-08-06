@@ -75,106 +75,109 @@ pub(crate) const PERSISTED_SUMMARY_PREFIX: &str = "Previous conversation summary
 /// `[Assistant]:` 噪声行进入摘要输入。
 const SUMMARY_ACK_TEXT: &str = "已了解早前对话的摘要，继续当前任务。";
 
-/// 摘要模型调用的 system prompt（R6，逐字对齐 Claude Code 的 `qH1`/`AU2` 流程）。
-const SUMMARY_SYSTEM_PROMPT: &str =
-    "You are a helpful AI assistant tasked with summarizing conversations.";
+/// 摘要模型调用的 system prompt（逐字对齐 pi `SUMMARIZATION_SYSTEM_PROMPT`，
+/// coding-agent/src/core/compaction/utils.ts）。「不要续写对话」的约束配合
+/// `<conversation>` 标签包裹，是 pi 防止摘要模型把历史当对话接着聊的两道锁。
+const SUMMARY_SYSTEM_PROMPT: &str = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
-/// Claude Code 的 9 段结构化摘要 prompt（R6，verbatim 自 research/claude-code-compaction.md §3）。
-/// 作为最后一条 user 指令追加在序列化后的对话历史之后；模型先在 `<analysis>` 里链式分析每条消息，
-/// 再在 `<summary>` 里产出 9 段结构化摘要。安全约束/用户原话/next-step 逐字保留条款保留。
-pub(crate) const CLAUDE_CODE_SUMMARY_PROMPT: &str = "Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
 
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+/// 首次摘要 prompt（逐字对齐 pi `SUMMARIZATION_PROMPT`）：固定分节的「上下文检查点」。
+/// 取代早前的 Claude Code 9 段 `<analysis>`/`<summary>` 双段 prompt——pi 的分节格式为
+/// **增量更新**而设计（`UPDATE_SUMMARIZATION_PROMPT` 按节合并、In Progress→Done 迁移），
+/// 链式压缩不再是「摘要的摘要」而是同一份检查点的持续演进，衰减显著更慢；且无需
+/// analysis 前言，输出预算全花在正文上。
+pub(crate) const SUMMARIZATION_PROMPT: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-   - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-   - Note any security-relevant instructions or constraints the user stated (e.g., sensitive files or data to avoid, operations that must not be performed, credential or secret handling rules). These MUST be preserved verbatim in the summary so they continue to apply after compaction.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+Use this EXACT format:
 
-Your summary should include the following sections:
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
 
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent. Preserve any security-relevant instructions or constraints verbatim so they remain in effect after compaction.
-7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
-9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
-                       If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or \"(none)\" if none were mentioned]
 
-Here is an example of how your output should be structured:
+## Progress
+### Done
+- [x] [Completed tasks/changes]
 
-<example>
-<analysis>
-[Your thought process, ensuring all points are covered thoroughly and accurately]
-</analysis>
+### In Progress
+- [ ] [Current work]
 
-<summary>
-1. Primary Request and Intent:
-   [Detailed description]
+### Blocked
+- [Issues preventing progress, if any]
 
-2. Key Technical Concepts:
-   - [Concept 1]
-   - [Concept 2]
-   - [...]
+## Key Decisions
+- **[Decision]**: [Brief rationale]
 
-3. Files and Code Sections:
-   - [File Name 1]
-      - [Summary of why this file is important]
-      - [Summary of the changes made to this file, if any]
-      - [Important Code Snippet]
-   - [File Name 2]
-      - [Important Code Snippet]
-   - [...]
+## Next Steps
+1. [Ordered list of what should happen next]
 
-4. Errors and fixes:
-    - [Detailed description of error 1]:
-      - [How you fixed the error]
-      - [User feedback on the error if any]
-    - [...]
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or \"(none)\" if not applicable]
 
-5. Problem Solving:
-   [Description of solved problems and ongoing troubleshooting]
+Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
-6. All user messages:
-    - [Detailed non tool use user message]
-    - [...]
+/// 链式压缩的**更新**prompt（逐字对齐 pi `UPDATE_SUMMARIZATION_PROMPT`）：存在上一份摘要时
+/// 用它替代首次 prompt——PRESERVE 全部旧信息、按节合并新进展、In Progress→Done 迁移。
+pub(crate) const UPDATE_SUMMARIZATION_PROMPT: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
-7. Pending Tasks:
-   - [Task 1]
-   - [Task 2]
-   - [...]
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed
+- UPDATE \"Next Steps\" based on what was accomplished
+- PRESERVE exact file paths, function names, and error messages
+- If something is no longer relevant, you may remove it
 
-8. Current Work:
-   [Precise description of current work]
+Use this EXACT format:
 
-9. Optional Next Step:
-   [Optional Next step to take]
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
 
-</summary>
-</example>
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
 
-There may be additional summarization instructions provided in the included context. If so, remember to follow these instructions when creating the above summary. Examples of instructions include:
-<example>
-## Compact Instructions
-When summarizing the conversation focus on typescript code changes and also remember the mistakes you made and how you fixed them.
-</example>
-<example>
-# Summary instructions
-When you are using compact - please focus on test output and code changes. Include file reads verbatim.
-</example>";
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.";
+
+/// split-turn 前缀摘要 prompt（逐字对齐 pi `TURN_PREFIX_SUMMARIZATION_PROMPT`）：token 尾窗
+/// 把一轮从中间切开时，被裁掉的**本轮前半**用它单独摘要，与历史摘要拼接（历史摘要看不见
+/// 这半轮的细节，直接丢会让模型不知道保留的后半是在干什么）。
+pub(crate) const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = "This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+
+Summarize the prefix to provide context for the retained suffix:
+
+## Original Request
+[What did the user ask for in this turn?]
+
+## Early Progress
+- [Key decisions and work done in the prefix]
+
+## Context for Suffix
+- [Information needed to understand the retained recent work]
+
+Be concise. Focus on what's needed to understand the kept suffix.";
 
 /// 估算消息序列的 token 数：逐条把 content 字符串（以及非字符串 content / tool_calls
 /// 等结构化字段的 JSON 序列化）喂给 chars 启发式累加。
@@ -712,29 +715,48 @@ fn microcompact_send_view(
     }
 }
 
-/// 构造摘要请求的 user 指令体（R5/R6/R8/R10）：序列化后的旧段对话历史 + Claude Code 9 段 prompt；
-/// 存在上一份摘要时把它作为 `<previous-summary>` 让模型合并更新；`focus`（手动 `/compact <focus>`）
-/// 透传为 `## Compact Instructions`。
+/// 摘要调用的种类：决定用哪份 prompt 与输出预算。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryKind {
+    /// 历史摘要（首次 / 链式更新，按 `previous_summary` 有无自动选 prompt）。
+    History,
+    /// split-turn 前缀摘要（更小的输出预算，无 previous/focus）。
+    TurnPrefix,
+}
+
+/// 构造摘要请求的 user 指令体（对齐 pi `generateSummaryWithUsage` 的拼装顺序）：
+/// 序列化历史包进 `<conversation>` 标签（防模型续写对话）→ `<previous-summary>`（链式更新时）
+/// → 基底 prompt（有上一份摘要用 UPDATE、否则首次；TurnPrefix 用前缀 prompt）
+/// → `focus`（手动 `/compact <focus>`）以 `Additional focus:` 追加。
 fn build_summary_user_content(
     serialized_history: &str,
     previous_summary: Option<&str>,
     focus: Option<&str>,
+    kind: SummaryKind,
 ) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(serialized_history.to_string());
+    let mut prompt = format!("<conversation>\n{serialized_history}\n</conversation>\n\n");
+    if kind == SummaryKind::TurnPrefix {
+        prompt.push_str(TURN_PREFIX_SUMMARIZATION_PROMPT);
+        return prompt;
+    }
     if let Some(previous) = previous_summary {
-        parts.push(format!(
-            "Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n{previous}\n</previous-summary>"
+        prompt.push_str(&format!(
+            "<previous-summary>\n{previous}\n</previous-summary>\n\n"
         ));
     }
-    parts.push(CLAUDE_CODE_SUMMARY_PROMPT.to_string());
+    let base = if previous_summary.is_some() {
+        UPDATE_SUMMARIZATION_PROMPT
+    } else {
+        SUMMARIZATION_PROMPT
+    };
+    prompt.push_str(base);
     if let Some(focus) = focus {
         let focus = focus.trim();
         if !focus.is_empty() {
-            parts.push(format!("## Compact Instructions\n{focus}"));
+            prompt.push_str(&format!("\n\nAdditional focus: {focus}"));
         }
     }
-    parts.join("\n\n")
+    prompt
 }
 
 /// 从摘要模型的回复里抽取摘要正文：取 `<summary>...</summary>` 内文（如有），否则整体 trim。
@@ -1005,6 +1027,7 @@ async fn compact_with_summary_model(
     serialized_old_segment: &str,
     previous_summary: Option<&str>,
     focus: Option<&str>,
+    kind: SummaryKind,
     window: usize,
     config_max_output_tokens: u32,
     retry_attempts: usize,
@@ -1018,10 +1041,15 @@ async fn compact_with_summary_model(
     } else {
         ((window as f32) * SUMMARY_INPUT_BUDGET_RATIO) as usize
     };
-    // 为固定开销（system prompt + 9 段 Claude Code prompt + anchored previous_summary + focus）
+    // 为固定开销（system prompt + 基底 prompt + anchored previous_summary + focus）
     // 预留预算（R4：previous_summary 不被裁掉），剩余给序列化旧段 head。
+    let base_prompt = match kind {
+        SummaryKind::TurnPrefix => TURN_PREFIX_SUMMARIZATION_PROMPT,
+        SummaryKind::History if previous_summary.is_some() => UPDATE_SUMMARIZATION_PROMPT,
+        SummaryKind::History => SUMMARIZATION_PROMPT,
+    };
     let fixed_overhead = estimate_tokens(SUMMARY_SYSTEM_PROMPT)
-        + estimate_tokens(CLAUDE_CODE_SUMMARY_PROMPT)
+        + estimate_tokens(base_prompt)
         + previous_summary.map(estimate_tokens).unwrap_or(0)
         + focus.map(estimate_tokens).unwrap_or(0);
     // head 预算 = 总输入预算 - 固定开销；至少保留一点，避免开销吃光预算时退化为 0。
@@ -1031,12 +1059,17 @@ async fn compact_with_summary_model(
 
     // 序列化旧段，超 head 预算时头尾裁剪（R2）；未超则原样（R5）。
     let serialized = clip_serialized_to_budget(serialized_old_segment, head_budget);
-    let user_content = build_summary_user_content(&serialized, previous_summary, focus);
+    let user_content = build_summary_user_content(&serialized, previous_summary, focus, kind);
     let summary_request = vec![
         json!({ "role": "system", "content": SUMMARY_SYSTEM_PROMPT }),
         json!({ "role": "user", "content": user_content }),
     ];
 
+    // 前缀摘要预算减半（对齐 pi：turn prefix 用 0.5×，历史摘要 0.8×——它只需覆盖半轮）。
+    let max_output = match kind {
+        SummaryKind::History => summary_output_tokens(config_max_output_tokens),
+        SummaryKind::TurnPrefix => summary_output_tokens(config_max_output_tokens).min(4_096),
+    };
     // 流式调用：部分 provider（如 openai_responses 代理）只可靠服务流式，非流式会失败。
     let call = call_chat_completion_message_streamed(
         state,
@@ -1046,7 +1079,7 @@ async fn compact_with_summary_model(
         None,
         retry_attempts,
         false,
-        summary_output_tokens(config_max_output_tokens),
+        max_output,
         conversation_id,
         message_id,
         "Chat context compaction",
@@ -1203,23 +1236,64 @@ async fn summarize_history(
         system_prefix
     };
 
-    // 序列化旧段 head（未裁剪），统一交由 `compact_with_summary_model` 做预算封顶 + 流式调用 + 质量兜底。
-    let serialized_head = serialize_for_summary(&head);
-    let summary_text = compact_with_summary_model(
-        state,
-        provider,
-        model,
-        &serialized_head,
-        previous_summary.as_ref().map(|p| p.text.as_str()),
-        focus,
-        window,
-        config_max_output_tokens,
-        retry_attempts,
-        conversation_id,
-        message_id,
-        cancel,
-    )
-    .await;
+    // split-turn 检测（对齐 pi `findCutPoint` 的 `isSplitTurn`）：近期窗口不以 user 消息
+    // 开头（`select_recent_by_tokens` 已保证不以 tool 结果开头，此时只能是 assistant）⇒
+    // token 切点落在一轮中间。head 尾部的「本轮前半」（该轮起始 user 消息到切点）不进
+    // 历史摘要——历史 prompt 关注任务级进展，会把这半轮的操作细节抹平，保留的后半就
+    // 成了没头的尾巴——而是单独用前缀 prompt 摘要，再与历史摘要拼接。
+    let (history_head, turn_prefix) = split_history_turn_prefix(&head, &recent);
+
+    // 历史摘要（预算封顶 + 流式调用 + 质量兜底都在 compact_with_summary_model 内）。
+    // 整段 head 都是本轮前半时没有历史可摘（对齐 pi 的 "No prior history."）。
+    let history_attempt = if history_head.is_empty() {
+        CompactAttempt::Summary("No prior history.".to_string())
+    } else {
+        compact_with_summary_model(
+            state,
+            provider,
+            model,
+            &serialize_for_summary(history_head),
+            previous_summary.as_ref().map(|p| p.text.as_str()),
+            focus,
+            SummaryKind::History,
+            window,
+            config_max_output_tokens,
+            retry_attempts,
+            conversation_id,
+            message_id,
+            cancel,
+        )
+        .await
+    };
+    let summary_text = match (history_attempt, turn_prefix.is_empty()) {
+        (CompactAttempt::Summary(history_text), false) => {
+            // 前缀摘要第二跳。cancel future 已被历史摘要那跳消费（单次 future）；这跳
+            // 输出预算减半、通常很短，取消由下一个轮首的 generation 检查兜底。
+            match compact_with_summary_model(
+                state,
+                provider,
+                model,
+                &serialize_for_summary(turn_prefix),
+                None,
+                None,
+                SummaryKind::TurnPrefix,
+                window,
+                config_max_output_tokens,
+                retry_attempts,
+                conversation_id,
+                message_id,
+                None,
+            )
+            .await
+            {
+                CompactAttempt::Summary(prefix_text) => CompactAttempt::Summary(format!(
+                    "{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_text}"
+                )),
+                other => other,
+            }
+        }
+        (attempt, _) => attempt,
+    };
 
     match summary_text {
         CompactAttempt::Summary(text) => {
@@ -1235,6 +1309,29 @@ enum CompactOutcome {
     Compacted(Vec<Value>, String),
     Cancelled,
     Failed,
+}
+
+/// split-turn 切分（pi `findCutPoint` 的 `isSplitTurn` 判定）：近期窗口不以 user 消息开头
+/// ⇒ token 切点劈开了一轮，把 head 从「本轮起始 user 消息」处切成（历史，本轮前半）。
+/// 近期窗口以 user 开头、或 head 里根本没有 user 消息（找不到轮起点）时前半为空。
+fn split_history_turn_prefix<'a>(
+    head: &'a [Value],
+    recent: &[Value],
+) -> (&'a [Value], &'a [Value]) {
+    let split_turn = recent
+        .first()
+        .map(|m| m.get("role").and_then(Value::as_str) != Some("user"))
+        .unwrap_or(false);
+    if !split_turn {
+        return (head, &[]);
+    }
+    match head
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+    {
+        Some(pos) => (&head[..pos], &head[pos..]),
+        None => (head, &[]),
+    }
 }
 
 /// 循环内上下文治理入口。返回本步应发送的消息视图：
@@ -1658,6 +1755,9 @@ async fn compact_conversation_inner(
         &serialized_head,
         previous_summary.as_deref(),
         focus,
+        // ChatMessage 粒度的切分以整条 UI 消息为单位——一条 assistant UI 消息就是完整
+        // 一轮，边界天然不劈开 turn，无需 TurnPrefix。
+        SummaryKind::History,
         window,
         chat_max_output_tokens_for_model(Some(&provider), &model, settings.chat.max_output_tokens),
         retry_attempts,
@@ -2824,57 +2924,103 @@ mod tests {
     fn build_summary_prompt_carries_previous_summary_and_focus() {
         let content = build_summary_user_content(
             "[User]: hi\n\n[Assistant]: hello",
-            Some("1. Primary Request: build X"),
+            Some("## Goal\nbuild X"),
             Some("focus on tests"),
+            SummaryKind::History,
         );
-        // Anchored branch present.
-        assert!(content.contains("Update the anchored summary below"));
+        // 链式更新：走 UPDATE prompt + <previous-summary> 块（pi 语义）。
+        assert!(content.contains("PRESERVE all existing information"));
         assert!(content.contains("<previous-summary>"));
-        assert!(content.contains("1. Primary Request: build X"));
-        // Focus passed through as Compact Instructions.
-        assert!(content.contains("## Compact Instructions\nfocus on tests"));
-        // The serialized history is included.
-        assert!(content.contains("[User]: hi"));
+        assert!(content.contains("## Goal\nbuild X"));
+        // Focus 以 pi 的 Additional focus 形式追加。
+        assert!(content.contains("Additional focus: focus on tests"));
+        // 序列化历史包在 <conversation> 标签里（防止摘要模型续写对话）。
+        assert!(content.contains("<conversation>\n[User]: hi"));
+        assert!(content.contains("</conversation>"));
     }
 
     #[test]
     fn build_summary_prompt_fresh_has_no_previous_block() {
-        let content = build_summary_user_content("[User]: hi", None, None);
-        assert!(!content.contains("Update the anchored summary"));
+        let content = build_summary_user_content("[User]: hi", None, None, SummaryKind::History);
+        // 首次摘要：走 SUMMARIZATION prompt，无 previous 块、无 focus。
+        assert!(content.contains("Create a structured context checkpoint summary"));
         assert!(!content.contains("<previous-summary>"));
-        // The verbatim Claude Code prompt itself shows a `## Compact Instructions`
-        // EXAMPLE, so we can't assert on that substring; assert no focus text was
-        // injected instead (the focus from `/compact <focus>` would appear after it).
-        assert!(!content.contains("## Compact Instructions\nfocus"));
+        assert!(!content.contains("Additional focus:"));
     }
 
     #[test]
-    fn summary_prompt_has_nine_sections_and_analysis() {
-        // R6: the embedded Claude Code prompt must carry the 9 section headers + <analysis>.
+    fn split_turn_prefix_extraction() {
+        let user = |text: &str| json!({ "role": "user", "content": text });
+        let assistant = |text: &str| json!({ "role": "assistant", "content": text });
+        let tool = |text: &str| json!({ "role": "tool", "tool_call_id": "c", "content": text });
+
+        // 近期窗口以 user 开头：一轮没被劈开，无前缀。
+        let head = vec![user("q1"), assistant("a1")];
+        let recent = vec![user("q2"), assistant("draft")];
+        let (history, prefix) = split_history_turn_prefix(&head, &recent);
+        assert_eq!(history.len(), 2);
+        assert!(prefix.is_empty());
+
+        // 近期窗口以 assistant 开头：切点劈开了 q2 那一轮——前缀从 q2 起到 head 末尾。
+        let head = vec![user("q1"), assistant("a1"), user("q2"), assistant("work"), tool("r")];
+        let recent = vec![assistant("more work"), tool("r2")];
+        let (history, prefix) = split_history_turn_prefix(&head, &recent);
+        assert_eq!(history.len(), 2, "history ends before the split turn's user message");
+        assert_eq!(prefix.len(), 3, "prefix spans user q2 → cut point");
+        assert_eq!(prefix[0]["content"], "q2");
+
+        // head 里没有 user（找不到轮起点，对应 pi turnStartIndex == -1）：不切。
+        let head = vec![assistant("a1"), tool("r")];
+        let recent = vec![assistant("tail")];
+        let (history, prefix) = split_history_turn_prefix(&head, &recent);
+        assert_eq!(history.len(), 2);
+        assert!(prefix.is_empty());
+    }
+
+    #[test]
+    fn build_summary_prompt_turn_prefix_uses_prefix_prompt_only() {
+        let content = build_summary_user_content(
+            "[User]: do the thing\n\n[Assistant tool call]: read({\"path\":\"a.rs\"})",
+            Some("ignored"),
+            Some("ignored"),
+            SummaryKind::TurnPrefix,
+        );
+        assert!(content.contains("This is the PREFIX of a turn"));
+        // 前缀摘要不带 previous/focus（它只解释半轮，不承接链式更新）。
+        assert!(!content.contains("<previous-summary>"));
+        assert!(!content.contains("Additional focus:"));
+    }
+
+    #[test]
+    fn summary_prompts_match_pi_structure() {
+        // 对齐 pi coding-agent 的分节格式：首次/更新两份 prompt 都带同一组小节头。
         for header in [
-            "1. Primary Request and Intent",
-            "2. Key Technical Concepts",
-            "3. Files and Code Sections",
-            "4. Errors and fixes",
-            "5. Problem Solving",
-            "6. All user messages",
-            "7. Pending Tasks",
-            "8. Current Work",
-            "9. Optional Next Step",
+            "## Goal",
+            "## Constraints & Preferences",
+            "## Progress",
+            "### Done",
+            "### In Progress",
+            "### Blocked",
+            "## Key Decisions",
+            "## Next Steps",
+            "## Critical Context",
         ] {
             assert!(
-                CLAUDE_CODE_SUMMARY_PROMPT.contains(header),
-                "summary prompt missing section: {header}"
+                SUMMARIZATION_PROMPT.contains(header),
+                "summarization prompt missing section: {header}"
+            );
+            assert!(
+                UPDATE_SUMMARIZATION_PROMPT.contains(header),
+                "update prompt missing section: {header}"
             );
         }
-        assert!(CLAUDE_CODE_SUMMARY_PROMPT.contains("<analysis>"));
-        assert!(CLAUDE_CODE_SUMMARY_PROMPT.contains("</analysis>"));
-        assert!(CLAUDE_CODE_SUMMARY_PROMPT.contains("<summary>"));
-        // The summarizer system prompt is the exact Claude Code string.
-        assert_eq!(
-            SUMMARY_SYSTEM_PROMPT,
-            "You are a helpful AI assistant tasked with summarizing conversations."
-        );
+        // 更新 prompt 的核心语义：保留旧信息 + In Progress→Done 迁移。
+        assert!(UPDATE_SUMMARIZATION_PROMPT.contains("PRESERVE all existing information"));
+        assert!(UPDATE_SUMMARIZATION_PROMPT
+            .contains("move items from \"In Progress\" to \"Done\" when completed"));
+        // system prompt 是 pi 的 context summarization assistant（含防续写约束）。
+        assert!(SUMMARY_SYSTEM_PROMPT.starts_with("You are a context summarization assistant."));
+        assert!(SUMMARY_SYSTEM_PROMPT.contains("Do NOT continue the conversation."));
     }
 
     #[test]

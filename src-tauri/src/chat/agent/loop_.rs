@@ -12,7 +12,7 @@ use super::finalize::{
 use super::host::AgentHost;
 use super::planning::{planning_step, PlanningStepOutcome};
 use super::rounds::{run_tool_round, ToolRoundOutcome};
-use super::steering::inject_steering_messages;
+use super::steering::{absorb_final_answer, inject_steering_messages, steering_pending};
 use super::stop::patch_system_message;
 use super::synthesis::{synthesis_step, SynthesisFlow};
 use super::types::{AgentRunConfig, AgentRunResult};
@@ -59,6 +59,10 @@ pub(crate) struct RunState {
     /// 第一次遇到时 planning 返回 `RetryEmptyResponse` 原地重试；已重试过则照旧走
     /// FinalAnswer → finalize 报 "empty assistant response"。
     pub(crate) planning_empty_retried: bool,
+    /// 待注入的用户插话本地队列（对齐 pi `PendingMessageQueue`）：信箱一次取空后暂存在
+    /// 这里，`inject_steering_messages` 每个轮次边界只弹一条（one-at-a-time），剩余的由
+    /// 后续边界与 FinalAnswer 边界的 `steering_pending` 检查保证送达。
+    pub(crate) pending_steering: std::collections::VecDeque<super::steering::SteeringMessage>,
     pub(crate) skill_cache: skills::SkillRunCache,
     /// 本轮全部模型调用（规划/合成/压缩摘要）的 usage 累计；provider 不报则保持 None。
     pub(crate) usage: Option<crate::chat::model::ModelUsage>,
@@ -230,6 +234,7 @@ pub async fn run_agent_loop(
         planning_final_message: None,
         planning_final_streamed: false,
         planning_empty_retried: false,
+        pending_steering: std::collections::VecDeque::new(),
         skill_cache: skills::SkillRunCache::default(),
         usage: None,
         last_step_usage: None,
@@ -296,7 +301,19 @@ pub async fn run_agent_loop(
             inject_steering_messages(&env, &mut state, round);
 
             let planned = match planning_step(&env, &mut state, round).await? {
-                PlanningStepOutcome::FinalAnswer => break,
+                PlanningStepOutcome::FinalAnswer => {
+                    // pi 外层 while 的 followUp 语义：终答产生时信箱/队列里还有未送达的
+                    // 插话 ⇒ 终答落成一条**中间** assistant 消息，run 继续跑下一轮（轮首
+                    // 注入下一条插话）。否则 synthesis/finalize 期间到达的插话只能靠前端
+                    // 「重发为普通消息」兜底——用户视角是话被打回重排队、开了一条新 run。
+                    if steering_pending(&env, &mut state) {
+                        if let Some(message) = state.planning_final_message.take() {
+                            absorb_final_answer(&mut state, message);
+                        }
+                        continue;
+                    }
+                    break;
+                }
                 PlanningStepOutcome::ToolsUnsupported => break,
                 PlanningStepOutcome::RetryWithSkillTools => continue,
                 PlanningStepOutcome::RetryEmptyResponse => continue,
