@@ -1044,6 +1044,10 @@ export function InputBar({
     } else {
       onSend(content, attachments)
     }
+    // 同步清草稿 store，不能只靠下面 setState 后的写回 effect：首次发送常在同一提交里
+    // 把欢迎页 InputBar 卸载（欢迎页→对话页切换），卸载组件的 pending state 被丢弃、
+    // effect 不再跑，残留草稿会被新挂载的 InputBar 回填成「发送后输入框多一份文本」。
+    setComposerDraft(draftKeyRef.current, { input: '', quotes: [], attachments: [] })
     setInput('')
     setQuotes([])
     setAttachments([])

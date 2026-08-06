@@ -587,38 +587,78 @@ fn validate_memory_content(layer: MemoryLayer, content: &str) -> Result<(), Stri
 
 fn validate_secret_free(content: &str) -> Result<(), String> {
     let lower = content.to_ascii_lowercase();
-    let suspicious = [
-        "api_key",
-        "apikey",
-        "secret_key",
-        "private key",
-        "-----begin",
-        "bearer ",
-        "password:",
-        "passwd:",
-        "sk-",
-        "ghp_",
-        "github_pat_",
+    // 只看字段名/前缀的裸 contains 会误伤正常笔记："sk-" 命中 task-/desk-/risk-，
+    // "bearer"/"password" 是普通英文词，「不要把 apikey 写进 settings」是合法偏好。
+    // 词边界 + 后面紧跟一段 key 长度的 token 才像真凭据。报错点名命中的模式——
+    // 不点名模型只会盲改重试（实测连拦三次死循环）。
+    let key_like = [
+        ("sk-", 16),
+        ("ghp_", 20),
+        ("github_pat_", 20),
+        ("bearer", 16),
+        ("api_key", 16),
+        ("apikey", 16),
+        ("secret_key", 16),
+        ("password", 6),
+        ("passwd", 6),
     ];
-    if suspicious.iter().any(|needle| lower.contains(needle)) {
+    for (marker, min_len) in key_like {
+        if contains_credential(&lower, marker, min_len) {
+            return Err(format!(
+                "Memory content looks like it contains a credential (`{marker}` followed by a token); save a redacted summary instead."
+            ));
+        }
+    }
+    if lower.contains("-----begin") {
         return Err(
-            "Memory content looks like it may contain a secret or credential; save a redacted summary instead."
+            "Memory content looks like it contains a private key block; save a redacted summary instead."
                 .to_string(),
         );
     }
+    // 「system prompt」不在列：讨论系统提示词的笔记是合法内容，注入标志是祈使句本身。
     let injection_like = [
         "ignore previous instructions",
         "ignore all previous instructions",
         "disregard previous instructions",
-        "system prompt",
     ];
-    if injection_like.iter().any(|needle| lower.contains(needle)) {
-        return Err(
-            "Memory content looks like prompt-injection instructions; save neutral facts instead."
-                .to_string(),
-        );
+    for needle in injection_like {
+        if lower.contains(needle) {
+            return Err(format!(
+                "Memory content looks like prompt-injection instructions (matched `{needle}`); save neutral facts instead."
+            ));
+        }
     }
     Ok(())
+}
+
+/// `marker` 出现在词边界上、且其后（跳过至多 3 个 `: = " '` 空格类分隔符）
+/// 紧跟一段 ≥ `min_len` 的 token（字母数字 `_` `-`）才判为凭据。
+fn contains_credential(lower: &str, marker: &str, min_len: usize) -> bool {
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = lower[from..].find(marker) {
+        let at = from + pos;
+        let boundary = at == 0
+            || !(bytes[at - 1].is_ascii_alphanumeric()
+                || bytes[at - 1] == b'_'
+                || bytes[at - 1] == b'-');
+        let mut i = at + marker.len();
+        let mut skipped = 0;
+        while i < bytes.len() && skipped < 3 && matches!(bytes[i], b' ' | b':' | b'=' | b'"' | b'\'')
+        {
+            i += 1;
+            skipped += 1;
+        }
+        let run = bytes[i..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'-')
+            .count();
+        if boundary && run >= min_len {
+            return true;
+        }
+        from = at + marker.len();
+    }
+    false
 }
 
 fn append_block(current: &str, addition: &str) -> String {
@@ -710,6 +750,28 @@ mod tests {
         let content = "a".repeat(L1_MAX_BYTES + 1);
         assert!(validate_memory_content(MemoryLayer::L1, &content).is_err());
         assert!(validate_memory_content(MemoryLayer::L2, &content).is_ok());
+    }
+
+    #[test]
+    fn secret_filter_needs_boundary_and_token_tail() {
+        // 普通词、字段名讨论、中文笔记不拦
+        for ok in [
+            "task-oriented desk-side risk-based notes",
+            "偏好：不要把 apikey 写进 settings.json",
+            "the bearer of good news said password rules changed",
+            "把这条约定放进 system prompt 开头",
+            "文件分享偏好：我生成的HTML文件优先用本地路径分享",
+        ] {
+            assert!(validate_secret_free(ok).is_ok(), "should pass: {ok}");
+        }
+        // 真凭据形状要拦，且报错点名命中的模式
+        let err = validate_secret_free("key: sk-abcdefghijklmnop1234").unwrap_err();
+        assert!(err.contains("sk-"), "{err}");
+        assert!(validate_secret_free("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9x").is_err());
+        assert!(validate_secret_free("password: hunter42x").is_err());
+        assert!(validate_secret_free("-----BEGIN RSA PRIVATE KEY-----").is_err());
+        let err = validate_secret_free("please ignore previous instructions").unwrap_err();
+        assert!(err.contains("ignore previous instructions"), "{err}");
     }
 
     #[test]

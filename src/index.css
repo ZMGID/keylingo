@@ -214,38 +214,31 @@ body {
   animation: reasoning-tail-pulse 0.22s ease-out;
 }
 
-/* 思考过程「生成中」标签：柔和光带扫过 */
-@keyframes reasoning-shimmer {
-  0% {
-    background-position: 180% 0;
-  }
-  100% {
-    background-position: -180% 0;
-  }
-}
-
+/* 思考过程「生成中」标签：柔和光带扫过。
+   实现是 mask 扫动而不是 background-clip:text + 透明文字——后者在部分机器的
+   WKWebView/WebView2 上会间歇性失效：clip 不生效时渐变铺满整个元素盒（暗色下
+   表现为文字后面一块亮色底）。mask 失效的退化只是文字变实色，仍可读。 */
 .reasoning-shimmer-text {
-  background-image: linear-gradient(
+  color: rgb(115, 115, 115);
+  -webkit-mask-image: linear-gradient(
     100deg,
-    rgba(115, 115, 115, 0.45) 30%,
-    rgba(115, 115, 115, 1) 50%,
-    rgba(115, 115, 115, 0.45) 70%
+    rgba(0, 0, 0, 0.45) 30%,
+    #000 50%,
+    rgba(0, 0, 0, 0.45) 70%
   );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  animation: reasoning-shimmer 2.4s linear infinite;
+  mask-image: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0.45) 30%,
+    #000 50%,
+    rgba(0, 0, 0, 0.45) 70%
+  );
+  -webkit-mask-size: 200% 100%;
+  mask-size: 200% 100%;
+  animation: chat-motion-shimmer-sweep 2.4s linear infinite;
 }
 
 .dark .reasoning-shimmer-text {
-  background-image: linear-gradient(
-    100deg,
-    rgba(150, 150, 150, 0.4) 30%,
-    rgba(205, 205, 205, 1) 50%,
-    rgba(150, 150, 150, 0.4) 70%
-  );
+  color: rgb(205, 205, 205);
 }
 
 .reasoning-scroll-frame {
@@ -2100,65 +2093,68 @@ button.chat-composer-status-item:hover {
   }
 }
 
-/* 文字流光扫过：背景位置左右扫动（autonomous agent / 运行中工具名共用的中性机制） */
+/* 文字流光扫过：mask 位置左右扫动（思考标签 / autonomous agent / 运行中工具名共用）。
+   见 .reasoning-shimmer-text 的注释：不用 background-clip:text，防止部分机器上
+   clip 失效渲染成整块色底。 */
 @keyframes chat-motion-shimmer-sweep {
   0% {
-    background-position: 180% 0;
+    -webkit-mask-position: 180% 0;
+    mask-position: 180% 0;
   }
   100% {
-    background-position: -180% 0;
+    -webkit-mask-position: -180% 0;
+    mask-position: -180% 0;
   }
 }
 
-/* 子 Agent「运行中」状态行：紫色调流光扫过文字（autonomous agent working） */
+/* 子 Agent「运行中」状态行：紫色文字上流光扫过（autonomous agent working） */
 .chat-motion-subagent-shimmer {
-  background-image: linear-gradient(
+  color: rgb(139, 92, 246);
+  -webkit-mask-image: linear-gradient(
     100deg,
-    rgba(139, 92, 246, 0.5) 30%,
-    rgba(139, 92, 246, 1) 50%,
-    rgba(139, 92, 246, 0.5) 70%
+    rgba(0, 0, 0, 0.5) 30%,
+    #000 50%,
+    rgba(0, 0, 0, 0.5) 70%
   );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
+  mask-image: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0.5) 30%,
+    #000 50%,
+    rgba(0, 0, 0, 0.5) 70%
+  );
+  -webkit-mask-size: 200% 100%;
+  mask-size: 200% 100%;
   animation: chat-motion-shimmer-sweep 2s linear infinite;
 }
 
 .dark .chat-motion-subagent-shimmer {
-  background-image: linear-gradient(
-    100deg,
-    rgba(167, 139, 250, 0.45) 30%,
-    rgba(196, 181, 253, 1) 50%,
-    rgba(167, 139, 250, 0.45) 70%
-  );
+  color: rgb(196, 181, 253);
 }
 
-/* 普通工具「运行中」状态：terracotta 强调色流光扫过工具名（中性基色 → 高光 → 中性基色），
-   整行不再缩放/发光，仅工具名被「点亮」。颜色与已完成 ✓ 的 #C56646 / dark #E39A78 同源。 */
+/* 普通工具「运行中」状态：terracotta 工具名上光带扫过，整行不缩放/发光。
+   颜色与已完成 ✓ 的 #C56646 / dark #E39A78 同源。mask 只能调亮度不能换色，
+   原「中性→terracotta」双色渐变改为 terracotta 常驻 + 亮度扫动。 */
 .chat-motion-tool-shimmer {
-  background-image: linear-gradient(
+  color: #c56646;
+  -webkit-mask-image: linear-gradient(
     100deg,
-    rgba(64, 64, 64, 1) 30%,
-    rgba(197, 102, 70, 1) 50%,
-    rgba(64, 64, 64, 1) 70%
+    rgba(0, 0, 0, 0.55) 30%,
+    #000 50%,
+    rgba(0, 0, 0, 0.55) 70%
   );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
+  mask-image: linear-gradient(
+    100deg,
+    rgba(0, 0, 0, 0.55) 30%,
+    #000 50%,
+    rgba(0, 0, 0, 0.55) 70%
+  );
+  -webkit-mask-size: 200% 100%;
+  mask-size: 200% 100%;
   animation: chat-motion-shimmer-sweep 2s linear infinite;
 }
 
 .dark .chat-motion-tool-shimmer {
-  background-image: linear-gradient(
-    100deg,
-    rgba(229, 229, 229, 1) 30%,
-    rgba(227, 154, 120, 1) 50%,
-    rgba(229, 229, 229, 1) 70%
-  );
+  color: #e39a78;
 }
 
 .chat-compaction-divider {
@@ -2435,8 +2431,8 @@ button.chat-composer-status-item:hover {
   .chat-motion-subagent-shimmer,
   .chat-motion-tool-shimmer {
     animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
+    -webkit-mask-image: none;
+    mask-image: none;
     color: inherit;
   }
 
