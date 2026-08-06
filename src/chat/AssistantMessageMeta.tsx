@@ -95,8 +95,12 @@ export function AssistantMessageMeta({
   return (
     // 鼠标悬停在所属消息上（visible）才浮现，移走隐藏；focus-within 兜住键盘导航
     // （Tab 到按钮时行必须可见）。字号 11px、按钮 xs：元信息不与正文抢对比度。
+    // [will-change:opacity] 把本行提升为独立合成层：WKWebView 对非合成层的 opacity
+    // 变化存在重绘失效（探针实测 computed opacity 已到 0、屏幕上旧画面滞留）；合成层
+    // 的 opacity 由合成器每帧应用，不走重绘路径。**别删**——删了显隐在 macOS 上会
+    // 间歇性卡在可见。
     <div
-      className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-neutral-400 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 dark:text-neutral-500 ${visible ? 'opacity-100' : 'opacity-0'}`}
+      className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-neutral-400 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] [will-change:opacity] focus-within:opacity-100 dark:text-neutral-500 ${visible ? 'opacity-100' : 'opacity-0'}`}
     >
       <span className="shrink-0">{formatAssistantMessageTime(timestamp)}</span>
       {runEntryLabel && <span className="shrink-0">{runEntryLabel}</span>}

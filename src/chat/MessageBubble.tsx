@@ -928,11 +928,15 @@ function MessageBubbleComponent({
   const [copied, setCopied] = useState(false)
   const [toolsExpanded, setToolsExpanded] = useState(false)
   // 消息级悬停：鼠标在这条消息上 → 底部操作/元信息条显示，移走 → 隐藏。
-  // 显示走 onPointerEnter（送达可靠）；**隐藏不依赖 pointerleave**——WKWebView 会
-  // 间歇性吞掉边界事件（实测最后一条/重渲染频繁的消息上 leave 不来，状态卡在
-  // 显示）。改为悬停期间挂一个 document 级 pointermove：指针落在消息外即收起。
-  // 移动事件是持续流，漏一帧还有下一帧，不存在"漏发一次就永久卡住"。
-  // 监听只在悬停的那一条上活跃（全局同时至多一个），handler 是一次 contains 判断。
+  // 显示走 onPointerEnter（送达可靠）；**隐藏不依赖 pointerleave**——悬停期间挂一个
+  // document 级 pointermove，指针落在消息外即收起。移动事件是持续流，漏一帧还有
+  // 下一帧，不存在「边界事件漏发一次就永久卡住」。监听只在悬停的那一条上活跃
+  // （全局同时至多一个），handler 是一次 contains 判断。
+  //
+  // ⚠️ 显隐的最终修复不在这里而在渲染层：操作行必须带 `[will-change:opacity]`
+  // （见 AssistantMessageMeta / 下方用户操作行）。WKWebView 对非合成层的 opacity
+  // 变化存在重绘失效——探针实测状态/类名/computed opacity 全部正确置 0，屏幕上
+  // 旧画面滞留不消；提升为合成层后 opacity 由合成器每帧应用，不走重绘路径。
   const hoverRootRef = useRef<HTMLDivElement>(null)
   const [bubbleHovered, setBubbleHovered] = useState(false)
   useEffect(() => {
@@ -1006,7 +1010,7 @@ function MessageBubbleComponent({
           )}
           {hasText && (
             <div
-              className={`flex items-center gap-0.5 pr-0.5 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 ${bubbleHovered ? 'opacity-100' : 'opacity-0'}`}
+              className={`flex items-center gap-0.5 pr-0.5 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] [will-change:opacity] focus-within:opacity-100 ${bubbleHovered ? 'opacity-100' : 'opacity-0'}`}
             >
               <IconButton
                 size="xs"
