@@ -24,6 +24,18 @@ describe('MessageBubble mount motion', () => {
     const { container } = render(<MessageBubble message={assistantMessage} messageStreaming />)
     expect(container.firstElementChild).toHaveClass('chat-motion-bubble-in')
   })
+
+  // 元信息条 hover 显隐的接线：根容器必须是 .group、元信息条必须默认 opacity-0 +
+  // group-hover:opacity-100（悬停整条消息才浮现）。断言类名而非 :hover 行为
+  // （jsdom 不跑 CSS），CSS 机制本身已在真实浏览器验证过。
+  it('hides the assistant meta row until the message is hovered', () => {
+    const { container } = render(<MessageBubble message={assistantMessage} />)
+    const root = container.firstElementChild
+    expect(root).toHaveClass('group')
+    const meta = container.querySelector('.group .opacity-0.group-hover\\:opacity-100')
+    expect(meta).not.toBeNull()
+    expect(meta?.querySelector('[aria-label="复制"]')).not.toBeNull()
+  })
 })
 
 describe('MessageBubble agent plan action', () => {
