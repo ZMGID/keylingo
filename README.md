@@ -172,7 +172,18 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.6
+## 新版本 —— v2.8.7
+
+- **外部 CLI Agent 能力补齐** —— Claude Code 接入问用户、计划批准、后台任务和子代理实时进度，子代理调用独立显示为卡片；Agent 循环的读文件限制、超窗压缩、空响应判定与用量统计进一步对齐 Pi。
+- **Pi 与 pi-btw 适配** —— Pi 原生供应商配置接入统一外部 CLI 体系，pi-btw 事件映射进共享运行协议；流式中途断开时保留重试能力，并将上游断流与普通进程退出分开呈现。
+- **长文本粘贴附件** —— 超长粘贴内容转换为可查看、编辑的内存文本附件，并完整覆盖持久化、重新生成、外部 CLI、导出和 steering，不再静默丢失正文。
+- **聊天交互与渲染修复** —— 修复 `<details>` 标签原样显示、中文相邻粗体不渲染、问用户答案折叠、图片右键菜单被 WebView 吞掉，以及窗口 resize 竞态解除流式滚动跟随。
+- **状态动效和暗色模式** —— 消息流末尾新增常驻运行状态行，后台任务计数与侧栏运行指示更准确；修复部分设备尤其暗色模式下的状态动画异常，并降低 WKWebView 悬停显隐引发的重绘成本。
+- **记忆指令过滤** —— 收紧并修正记忆系统对命令字眼的安全匹配，避免正常内容被误过滤，同时清理输入区相关边界状态。
+- **OpenCode、模型与用量** —— 完善 OpenCode 原生供应商配置；外部 CLI 上下文用量按轮更新，新增首 token 延迟和思考档位记录，修复模型映射与统计口径。
+- **其它体验改进** —— 支持生成中消息排队与立即引导，检查更新可就地执行，发送后为新消息留出阅读空间；设置页供应商与 CLI 分栏更紧凑，并修复 Edge/WebView2 密码可见按钮重复。
+
+## v2.8.6
 
 - **实时协议版本化** —— 聊天的实时通信收进单条 `chat-protocol` 通道：运行事件带版本与序号，会话事件带 revision，断线可按快照重放，TypeScript 类型与 JSON Schema 由 Rust 侧生成后提交（`npm run protocol:check` 进 CI 门禁）。配套修掉会话持久化的并发竞争、侧栏刷新的全量扫盘与独占锁、一个订阅者抛错毒死整条实时流、空 delta 的段占位事件被吞。
 - **从本地 CLI 导入对话** —— 绑定了文件夹的项目新增「从 CLI 导入对话」：列出工作目录等于项目根的原生会话，导入成 Kivio 对话，续聊仍由原 CLI 承担，支持 claude / codex / grok / kimi / opencode。导入的对话钉死在原 CLI 与原工作目录，历史是一次性快照、不与 CLI 同步（附过期提示）；claude 的项目目录编码有损，改为读 jsonl 里的明文 cwd。
@@ -382,7 +393,18 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.6
+## What's New — v2.8.7
+
+- **Expanded external-CLI agent support** — Claude Code now supports ask-user, plan approval, background tasks, and live subagent progress, with subagent calls rendered as dedicated cards. File-read limits, context compaction, empty-response handling, and usage accounting are further aligned with Pi.
+- **Pi and pi-btw integration** — Pi provider configuration joins the shared external-CLI system, and pi-btw events map into the common run protocol. Mid-stream upstream failures retain retry behavior and are presented separately from ordinary process exits.
+- **Long-paste attachments** — oversized pasted text becomes an editable in-memory attachment, with complete support across persistence, regeneration, external CLIs, export, and steering, so its body is no longer silently lost.
+- **Chat interaction and rendering fixes** — fixes raw `<details>` tags, adjacent Chinese bold text not rendering, ask-user answers collapsing, image context menus being swallowed by the WebView, and a window-resize race that disabled streaming scroll follow.
+- **Status motion and dark mode** — the message stream gains a persistent run-status row, with more accurate background-task counts and sidebar activity. Status animation issues seen on some machines, especially in dark mode, are fixed, while WebView hover redraw cost is reduced.
+- **Memory-command filtering** — tightens and corrects safety matching for command-like wording so normal content is not mistakenly filtered, and cleans up related composer edge states.
+- **OpenCode, models, and usage** — completes native OpenCode provider configuration; external-CLI context usage now updates per turn, records time to first token and effort level, and fixes model mapping and accounting boundaries.
+- **More polish** — supports queued messages and immediate steering during generation, runs update checks in place, leaves reading space below newly sent messages, tightens the provider/CLI settings layout, and fixes duplicate password-visibility controls in Edge/WebView2.
+
+## v2.8.6
 
 - **Versioned realtime protocol** — chat realtime traffic moved onto a single `chat-protocol` channel: run events carry a version and a sequence number, conversation events carry a revision, a dropped connection replays from a snapshot, and the TypeScript types and JSON Schemas are generated from Rust and committed (`npm run protocol:check` gates CI). Along with it: conversation persistence is concurrency-safe, sidebar refresh no longer scans the whole disk or takes an exclusive lock, one throwing subscriber no longer poisons the realtime stream, and empty-delta segment placeholders are no longer swallowed.
 - **Import conversations from a local CLI** — projects bound to a folder gain "import conversation from CLI": it lists native sessions whose working directory equals the project root and imports them as Kivio conversations, with the original CLI still driving the continuation, for claude / codex / grok / kimi / opencode. An imported conversation is pinned to its original CLI and working directory, and history is a one-time snapshot rather than a live sync (with a staleness note); claude's project-directory encoding is lossy, so the plain `cwd` inside the jsonl is read instead.
