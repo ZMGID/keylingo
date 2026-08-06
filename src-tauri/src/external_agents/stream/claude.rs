@@ -373,7 +373,53 @@ pub fn background_task_event(value: &Value) -> Option<UnifiedAgentEvent> {
             description: None,
             summary: nonempty_str(obj, "summary"),
         }),
+        // 周期性进度（官方 `SDKTaskProgressMessage`，实测只有后台子代理发）：
+        // token / 工具计数 + 最近工具，拼成面板 Running 行的进度尾巴。借 `summary`
+        // 字段运载——Running 行把它当进度显示，终态的 notification 会用最终摘要覆盖。
+        Some("task_progress") => Some(UnifiedAgentEvent::BackgroundTask {
+            task_id: nonempty_str(obj, "task_id")?,
+            status: "running".to_string(),
+            kind: None,
+            description: nonempty_str(obj, "description"),
+            summary: task_progress_line(obj),
+        }),
         _ => None,
+    }
+}
+
+/// `task_progress` 帧 → Running 行的进度尾巴（"22.4k tokens · 3 tools · WebSearch"）。
+/// 全空时 `None`（upsert 对 None 不覆盖已有值，进度只会前进不会闪没）。
+fn task_progress_line(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    let usage = obj.get("usage");
+    let usage_field = |key: &str| usage.and_then(|u| u.get(key)).and_then(|v| v.as_u64());
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(tokens) = usage_field("total_tokens").filter(|n| *n > 0) {
+        parts.push(if tokens >= 1000 {
+            format!("{:.1}k tokens", tokens as f64 / 1000.0)
+        } else {
+            format!("{tokens} tokens")
+        });
+    }
+    if let Some(tools) = usage_field("tool_uses").filter(|n| *n > 0) {
+        parts.push(format!("{tools} tools"));
+    }
+    if let Some(tool) = nonempty_str(obj, "last_tool_name") {
+        parts.push(tool);
+    }
+    // 代理自报的一句话进度，可能很长——面板一行放不下，截到 60 字符。
+    if let Some(summary) = nonempty_str(obj, "summary") {
+        parts.push(if summary.chars().count() > 60 {
+            let mut s: String = summary.chars().take(60).collect();
+            s.push('…');
+            s
+        } else {
+            summary
+        });
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
     }
 }
 
@@ -724,11 +770,12 @@ impl ClaudeStreamState {
                             self.emit_text(sink, format!("{text}\n"));
                         }
                     }
-                    // 后台任务生命周期（started / notification）→ 注册表事件，单一来源在
-                    // `background_task_event`（轮间空闲读与残帧窗口共用）。**不注入气泡
-                    // 文案**：这类帧常在正文流式中途到达，TextDelta 会把正在生成的句子
-                    // 拦腰截断（实测），失败与否面板已有展示，claude 的唤醒轮也会口头汇报。
-                    Some("task_started") | Some("task_notification") => {
+                    // 后台任务生命周期（started / progress / notification）→ 注册表事件，
+                    // 单一来源在 `background_task_event`（轮间空闲读与残帧窗口共用）。
+                    // **不注入气泡文案**：这类帧常在正文流式中途到达，TextDelta 会把正在
+                    // 生成的句子拦腰截断（实测），失败与否面板已有展示，claude 的唤醒轮
+                    // 也会口头汇报。
+                    Some("task_started") | Some("task_progress") | Some("task_notification") => {
                         if let Some(event) = background_task_event(value) {
                             sink(event);
                         }
@@ -752,11 +799,11 @@ impl ClaudeStreamState {
                     // `files_persisted`（`SDKFilesPersistedEvent`）：SDK 的文件上传通道产物，
                     // Kivio 走本地 cwd + `--add-dir`，不用该通道，恒不出现。
                     //
-                    // `task_updated` / `task_progress` / `background_tasks_changed`：
-                    // ponytail: 后台任务面板 v1 只接 started + notification 两个边沿，够画
-                    // Running/Finished。`task_updated` 的 patch（paused / is_backgrounded）、
-                    // `task_progress` 的 token 计数、`background_tasks_changed` 的全量对账
-                    // （replace 语义，防漏边沿）等面板要显示这些细节时再接。
+                    // `task_updated` / `background_tasks_changed`：
+                    // ponytail: 面板已有 started + progress + notification 三个信号，够画
+                    // Running/Finished 和进度。`task_updated` 的 patch（paused /
+                    // is_backgrounded）、`background_tasks_changed` 的全量对账（replace
+                    // 语义，防漏边沿）等面板要显示这些细节时再接。
                     //
                     // 未知 / 未来新增 subtype 一律安全忽略：不 panic、不中断流（spec 第 10 条）。
                     _ => {}
@@ -1313,6 +1360,23 @@ mod tests {
             UnifiedAgentEvent::BackgroundTask { task_id, status, .. }
                 if task_id == "b2x" && status == "failed"
         ));
+    }
+
+    /// `task_progress`（周期性，后台子代理）→ running 条目 + 进度尾巴（借 summary 运载）。
+    /// 帧形状照官方 `SDKTaskProgressMessage`（usage{total_tokens,tool_uses,duration_ms} +
+    /// last_tool_name + summary）。
+    #[test]
+    fn task_progress_updates_the_running_entry_with_a_progress_line() {
+        let raw = r#"{"type":"system","subtype":"task_progress","task_id":"ad6979fa","tool_use_id":"toolu_016FK","description":"搜索最近 AI 资讯","subagent_type":"general-purpose","usage":{"total_tokens":22412,"tool_uses":3,"duration_ms":4830},"last_tool_name":"WebSearch","uuid":"u","session_id":"s"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert!(matches!(
+            &events[..],
+            [UnifiedAgentEvent::BackgroundTask { task_id, status, summary: Some(summary), .. }]
+                if task_id == "ad6979fa" && status == "running"
+                    && summary == "22.4k tokens · 3 tools · WebSearch"
+        ), "{events:?}");
     }
 
     /// sidechain 的 system 帧照旧整帧丢弃：子代理内部起的任务事件不能穿透

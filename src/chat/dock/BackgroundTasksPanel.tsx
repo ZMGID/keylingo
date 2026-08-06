@@ -121,9 +121,11 @@ export function BackgroundTasksPanel({ active, lang, conversationId }: Backgroun
             >
               {task.title}
             </div>
-            <div className="mt-0.5 text-[11px] text-neutral-400">
+            <div className="mt-0.5 truncate text-[11px] text-neutral-400" title={task.summary ?? undefined}>
               {task.pid != null ? `pid ${task.pid} · ` : ''}
               {formatElapsed(task.elapsedSecs)}
+              {/* 运行中的 summary 是进度尾巴（子代理的 task_progress：tokens · tools · 最近工具） */}
+              {task.summary ? ` · ${task.summary}` : ''}
             </div>
           </div>
           <button
