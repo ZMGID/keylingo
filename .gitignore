@@ -55,3 +55,4 @@ src-tauri/swift/kivio-ocr-helper/.build/
 # Local runtime discovery caches and manual E2E artifacts
 /mcps/
 /output/
+/.playwright-cli/
