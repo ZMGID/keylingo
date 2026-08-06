@@ -164,6 +164,33 @@ describe('ToolCallBlock', () => {
     expect(screen.getByText('调查结论')).toBeInTheDocument()
   })
 
+  // 外部 CLI（claude）的子代理调用没有 structured content：按 source+名字认进同一张
+  // SUBAGENT 卡，description 当人话任务名，终态结果从 result_preview 兜底。
+  it('renders an external CLI Agent call as a SUBAGENT consult card', async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'Agent',
+          source: 'external_cli',
+          status: 'success',
+          result_preview: '搜到 8 条本周 AI 资讯。',
+          arguments: {
+            description: '搜索最近 AI 资讯',
+            prompt: '用 WebSearch 搜索最近两周的 AI 资讯',
+            subagent_type: 'general-purpose',
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('SUBAGENT')).toBeInTheDocument()
+    expect(screen.getByText('general-purpose')).toBeInTheDocument()
+    expect(screen.getByText('搜索最近 AI 资讯')).toBeInTheDocument()
+    await user.click(screen.getByRole('button'))
+    expect(screen.getByText('用 WebSearch 搜索最近两周的 AI 资讯')).toBeInTheDocument()
+    expect(screen.getByText('搜到 8 条本周 AI 资讯。')).toBeInTheDocument()
+  })
+
   it('renders an advisor record as an ADVISOR consult card, expandable to the advice', async () => {
     const user = userEvent.setup()
     render(

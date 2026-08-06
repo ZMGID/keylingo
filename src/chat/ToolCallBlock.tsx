@@ -33,7 +33,7 @@ import type { LucideIcon } from 'lucide-react'
 import type { AgentTodoItem, AgentTodoState, AgentTodoStatus, ToolCallRecord, ToolCallStatus } from './types'
 import { normalizeToolCallStatus } from './toolStatus'
 import { formatToolResultPreview } from './toolResultPreview'
-import { toolCallDiffStats, toolRecordRawName } from './segments'
+import { isExternalSubagentToolCall, toolCallDiffStats, toolRecordRawName } from './segments'
 import { requestDockDiffPreview, requestDockPreview } from './dock/dockPreview'
 import { DiffView } from './dock/DiffView'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
@@ -387,6 +387,9 @@ function structuredSubagent(toolCall: ToolCallRecord): SubagentView | null {
 
 function isSubAgentRecord(toolCall: ToolCallRecord): boolean {
   if (structuredSubagent(toolCall)) return true
+  // 外部 CLI 的子代理（claude 的 Agent/Task）没有 structured content，
+  // 按 source+名字认，与内置 agent 同一张 SUBAGENT 卡。
+  if (isExternalSubagentToolCall(toolCall)) return true
   return toolCall.source === 'native' && toolRawName(toolCall) === 'agent'
 }
 
@@ -400,6 +403,8 @@ function subagentName(view: SubagentView | null, args: Record<string, unknown> |
   return (
     view?.name ||
     stringValue(args?.name) ||
+    // 外部 CLI（claude Agent/Task）：args.description 是那句人话任务名（"搜索最近 AI 资讯"）。
+    stringValue(args?.description) ||
     stringValue(args?.subagent_type) ||
     'subagent'
   )
@@ -542,7 +547,10 @@ function SubAgentCard({ toolCall }: ToolCallBlockProps) {
   const duration = formatDuration(getDuration(toolCall))
   const statusLine = subagentStatusLine(view, status)
   const prompt = subagentPrompt(args)
-  const result = view?.result || ''
+  // 内置 agent 的最终结果在 structured content 里；外部 CLI（claude Agent/Task）没有
+  // structured，最终结果落在 result_preview——终态时兜底取它，否则 Result 区恒空。
+  const result =
+    view?.result || (status !== 'running' && status !== 'pending' ? getResultPreview(toolCall) : '')
   const error = view?.error || (toolCall.error ? compactToolError(toolCall.error) : '')
   const steps = view?.steps ?? []
   const preview = view?.preview || ''

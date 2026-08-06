@@ -108,6 +108,14 @@ export function userSteerText(toolCall: ToolCallRecord): string {
   return typeof text === 'string' ? text : ''
 }
 
+/** 外部 CLI 的子代理工具调用：claude 新版报 `Agent`、旧版报 `Task`（source 恒为
+ *  `external_cli`，CLI 报自己的原始工具名）。精确匹配整名，MCP/native 不受影响。 */
+export function isExternalSubagentToolCall(toolCall: ToolCallRecord): boolean {
+  if (toolCall.source !== 'external_cli') return false
+  const name = toolRecordRawName(toolCall).toLowerCase()
+  return name === 'agent' || name === 'task'
+}
+
 /** Tool calls that render as their own dedicated, always-visible card in the
  *  timeline (never folded into the "调用 N 次工具" group): sub-agents (`agent`),
  *  advisor consultations, and ask-user prompts. Matched by structured content type
@@ -129,6 +137,9 @@ export function isStandaloneToolCard(toolCall: ToolCallRecord): boolean {
   if (name.toLowerCase().replace(/[_\-\s]/g, '') === 'askuserquestion' || name === 'ask_user') {
     return true
   }
+  // 外部 CLI 的子代理（claude 的 Agent/Task）：一次完整的委派，同内置 agent 独立成卡，
+  // 折进「调用 N 次工具」等于把派活这件事藏起来。
+  if (isExternalSubagentToolCall(toolCall)) return true
   if (toolCall.source !== 'native') return false
   return name === 'agent' || name === 'advisor' || isArtifactPresentationToolCall(toolCall)
 }

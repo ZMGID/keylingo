@@ -110,6 +110,30 @@ describe('groupTimelineSegments', () => {
     }))).toBe(true)
   })
 
+  // 外部 CLI 的子代理（claude 新版 `Agent` / 旧版 `Task`）：一次完整的委派，
+  // 同内置 agent 独立成卡，不折进「调用 N 次工具」。
+  it('keeps external CLI sub-agent calls outside collapsed process groups', () => {
+    expect(isStandaloneToolCard(tool({
+      id: 'ext-agent-1',
+      name: 'Agent',
+      source: 'external_cli',
+      status: 'running',
+    }))).toBe(true)
+    expect(isStandaloneToolCard(tool({
+      id: 'ext-task-1',
+      name: 'Task',
+      source: 'external_cli',
+      status: 'completed',
+    }))).toBe(true)
+    // MCP 服务器恰好有个叫 agent 的工具：不是子代理，照常折叠。
+    expect(isStandaloneToolCard(tool({
+      id: 'mcp-agent-1',
+      name: 'agent',
+      source: 'mcp',
+      status: 'completed',
+    }))).toBe(false)
+  })
+
   it('does not let an MCP tool spoof the native presentation channel', () => {
     expect(isStandaloneToolCard(tool({
       id: 'present-spoof',
