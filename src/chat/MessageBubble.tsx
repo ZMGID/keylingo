@@ -26,6 +26,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { Button, IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
+import { useHoverReveal } from './useHoverReveal'
 import { AssistantMessageMeta } from './AssistantMessageMeta'
 import { ChatAttachments } from './ChatAttachments'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
@@ -927,6 +928,10 @@ function MessageBubbleComponent({
   const hasGeneratedFiles = generatedFileArtifacts.length > 0
   const [copied, setCopied] = useState(false)
   const [toolsExpanded, setToolsExpanded] = useState(false)
+  // 用户气泡下操作行的 hover 显隐（事件驱动，原因见 useHoverReveal）。放在组件顶层
+  // 保证 hooks 无条件调用；assistant 分支不用它（AssistantMessageMeta 内有自己的实例）。
+  // 用户气泡是纯文本，hover 触发整个气泡重渲染成本可忽略。
+  const { ref: userActionsRef, hovered: userActionsHovered } = useHoverReveal<HTMLDivElement>()
   // 工具调用超过 4 个时默认折叠（与思考过程一致）
   const toolsCollapsible = toolCalls.length > 4
   const agentPlan = message.agent_plan ?? message.agentPlan ?? agentPlanOverride
@@ -946,7 +951,10 @@ function MessageBubbleComponent({
     const replyModelTags = (sentModels ?? []).filter((m) => (m.model ?? '').trim().length > 0)
     const showModelTags = replyModelTags.length >= 2
     return (
-      <div className={`group flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
+      <div
+        data-hover-reveal-root=""
+        className={`flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}
+      >
         <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
           {showModelTags && (
             <div className="flex flex-wrap items-center justify-end gap-1.5 pr-0.5">
@@ -977,32 +985,35 @@ function MessageBubbleComponent({
             </div>
           )}
           {hasText && (
-            <div className="flex items-center gap-0.5 pr-0.5 opacity-0 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 group-hover:opacity-100">
+            <div
+              ref={userActionsRef}
+              className={`flex items-center gap-0.5 pr-0.5 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 ${userActionsHovered ? 'opacity-100' : 'opacity-0'}`}
+            >
               <IconButton
-                size="sm"
+                size="xs"
                 onClick={() => void handleCopy()}
                 label={copied ? '已复制' : '复制'}
               >
-                {copied ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <Copy size={14} strokeWidth={2} />}
+                {copied ? <Check size={13} strokeWidth={2} className="chat-motion-pop" /> : <Copy size={13} strokeWidth={2} />}
               </IconButton>
               {onRewindMessage && (
                 <IconButton
-                  size="sm"
+                  size="xs"
                   onClick={() => void onRewindMessage(message.id)}
                   label="回到这里"
                   title="回到这里：删掉这条提问及其之后的消息，原文放回输入框"
                 >
-                  <RotateCcw size={14} strokeWidth={2} />
+                  <RotateCcw size={13} strokeWidth={2} />
                 </IconButton>
               )}
               {onForkMessage && (
                 <IconButton
-                  size="sm"
+                  size="xs"
                   onClick={() => void onForkMessage(message.id)}
                   label="建分支"
                   title="从这里建分支（复制到新对话）"
                 >
-                  <GitBranch size={14} strokeWidth={2} />
+                  <GitBranch size={13} strokeWidth={2} />
                 </IconButton>
               )}
             </div>

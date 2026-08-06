@@ -48,6 +48,27 @@ describe('MessageBubble mount motion', () => {
     fireEvent.blur(window)
     expect(meta).toHaveClass('opacity-0')
   })
+
+  // 用户气泡下的三个操作图标（复制/回到这里/建分支）：同一套事件驱动显隐。
+  it('hides the user bubble actions until the bubble is hovered', () => {
+    const { container } = render(
+      <MessageBubble
+        message={{ ...assistantMessage, id: 'user-hover', role: 'user', content: '你好' }}
+        onForkMessage={async () => {}}
+      />,
+    )
+    const root = container.firstElementChild as HTMLElement
+    expect(root).toHaveAttribute('data-hover-reveal-root')
+
+    const actions = screen.getByLabelText('复制').closest('.transition-opacity')
+    expect(actions).toHaveClass('opacity-0')
+
+    fireEvent.pointerEnter(root)
+    expect(actions).toHaveClass('opacity-100')
+
+    fireEvent.pointerLeave(root)
+    expect(actions).toHaveClass('opacity-0')
+  })
 })
 
 describe('MessageBubble agent plan action', () => {

@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Check, Copy, Gauge, GitBranch, NotebookPen, RotateCcw, Trash2 } from 'lucide-react'
 import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
 import { estimateTokens, formatTokensK } from '../utils/tokens'
 import { formatAssistantMessageTime } from './messageFormat'
+import { useHoverReveal } from './useHoverReveal'
 import type { MessageUsage } from './types'
 
 interface AssistantMessageMetaProps {
@@ -54,28 +55,10 @@ export function AssistantMessageMeta({
 }: AssistantMessageMetaProps) {
   const [copied, setCopied] = useState(false)
   const [saved, setSaved] = useState(false)
-  // hover 显隐用显式指针事件而非 CSS :hover（group-hover）：macOS WKWebView 存在
-  // :hover 粘滞——鼠标移出后样式不失效（Chromium 下同一套 CSS 实测正常）。事件派发
-  // 与 :hover 样式失效在 WebKit 里是两条路径，pointerleave 可靠。状态放在本组件、
-  // 监听挂到消息根容器（`data-hover-reveal-root`，见 MessageBubble）：hover 进出只
+  // hover 显隐：事件驱动（原因见 useHoverReveal），悬停边界 = 消息根容器
+  // （MessageBubble 的 data-hover-reveal-root）。状态在本组件内，hover 进出只
   // 重渲染这一小条，不动整个气泡（大消息的渲染成本纪律，见 CLAUDE.md 滚动一节）。
-  const rootRef = useRef<HTMLDivElement>(null)
-  const [hovered, setHovered] = useState(false)
-  useEffect(() => {
-    const host = rootRef.current?.closest('[data-hover-reveal-root]')
-    if (!(host instanceof HTMLElement)) return
-    const show = () => setHovered(true)
-    const hide = () => setHovered(false)
-    host.addEventListener('pointerenter', show)
-    host.addEventListener('pointerleave', hide)
-    // 光标快速甩出窗口时 WebKit 可能漏发 pointerleave——窗口失焦一并收起。
-    window.addEventListener('blur', hide)
-    return () => {
-      host.removeEventListener('pointerenter', show)
-      host.removeEventListener('pointerleave', hide)
-      window.removeEventListener('blur', hide)
-    }
-  }, [])
+  const { ref: rootRef, hovered } = useHoverReveal<HTMLDivElement>()
   // 优先显示 provider 报告的真实用量；provider 不报时回落到 chars 估算（带 ~ 前缀）。
   const realUsage = realUsageTokens(usage)
   const tokenLabel = realUsage
