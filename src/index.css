@@ -730,6 +730,15 @@ body {
   background: #313134;
 }
 
+/* 消息悬停操作/元信息条的显隐。`data-msg-hovered` 由 MessageBubble 的指针逻辑维护
+   （enter 置位、document pointermove 兜底清除），这里只负责按属性显隐。
+   不走 React state：滚动时消息从光标下滑过会连环触发 enter/leave，
+   走 state 每次都是整棵 MessageBubble 重渲——滚动不顺滑的主因之一。
+   行自身的 opacity-0 / transition / will-change（WKWebView 合成层，别删）在组件类名里。 */
+[data-msg-hovered] .msg-hover-reveal {
+  opacity: 1;
+}
+
 /* 主区内的 MessageList 加载占位（Chat.tsx 的 MessageListLoading）跟主区卡片同色。 */
 .chat-themed-surface {
   background: var(--theme-surface-soft);

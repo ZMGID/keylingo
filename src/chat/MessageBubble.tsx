@@ -933,23 +933,40 @@ function MessageBubbleComponent({
   // 下一帧，不存在「边界事件漏发一次就永久卡住」。监听只在悬停的那一条上活跃
   // （全局同时至多一个），handler 是一次 contains 判断。
   //
+  // **不走 React state，走 DOM 属性 + CSS**（`[data-msg-hovered] .msg-hover-reveal`）：
+  // 滚动时内容从静止的光标下滑过，WebKit 会随滚动连环补发 enter/leave，每滑过一条
+  // 消息就是两次 setState = 两次整棵 MessageBubble 重渲（体内的 map/filter 每次产新
+  // 数组，memo 的 ToolCallBlock 等照样全部重渲）——这是滚动不顺滑的主因之一。
+  // 属性切换不进 React，重渲为零；React 重渲也不会碰这个非受控属性。
+  //
   // ⚠️ 显隐的最终修复不在这里而在渲染层：操作行必须带 `[will-change:opacity]`
   // （见 AssistantMessageMeta / 下方用户操作行）。WKWebView 对非合成层的 opacity
   // 变化存在重绘失效——探针实测状态/类名/computed opacity 全部正确置 0，屏幕上
   // 旧画面滞留不消；提升为合成层后 opacity 由合成器每帧应用，不走重绘路径。
   const hoverRootRef = useRef<HTMLDivElement>(null)
-  const [bubbleHovered, setBubbleHovered] = useState(false)
-  useEffect(() => {
-    if (!bubbleHovered) return
+  const hoverMoveCleanupRef = useRef<(() => void) | null>(null)
+  const setBubbleHovered = (on: boolean) => {
+    // 先清后挂（幂等）：重复 enter、或悬停期间根元素被 React 重挂，都不会漏掉旧监听。
+    hoverMoveCleanupRef.current?.()
+    hoverMoveCleanupRef.current = null
+    const root = hoverRootRef.current
+    if (!root) return
+    root.toggleAttribute('data-msg-hovered', on)
+    if (!on) return
     const onMove = (event: PointerEvent) => {
-      const root = hoverRootRef.current
-      if (!root || !(event.target instanceof Node) || !root.contains(event.target)) {
+      const current = hoverRootRef.current
+      if (!current || !(event.target instanceof Node) || !current.contains(event.target)) {
         setBubbleHovered(false)
       }
     }
     document.addEventListener('pointermove', onMove, { passive: true })
-    return () => document.removeEventListener('pointermove', onMove)
-  }, [bubbleHovered])
+    hoverMoveCleanupRef.current = () => document.removeEventListener('pointermove', onMove)
+  }
+  // 悬停中整行被 virtua 卸载时，document 监听不能漏。
+  useEffect(() => () => {
+    hoverMoveCleanupRef.current?.()
+    hoverMoveCleanupRef.current = null
+  }, [])
   const hoverProps = {
     ref: hoverRootRef,
     onPointerEnter: () => setBubbleHovered(true),
@@ -1010,7 +1027,7 @@ function MessageBubbleComponent({
           )}
           {hasText && (
             <div
-              className={`flex items-center gap-0.5 pr-0.5 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] [will-change:opacity] focus-within:opacity-100 ${bubbleHovered ? 'opacity-100' : 'opacity-0'}`}
+              className="msg-hover-reveal flex items-center gap-0.5 pr-0.5 opacity-0 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] [will-change:opacity] focus-within:opacity-100"
             >
               <IconButton
                 size="xs"
@@ -1188,7 +1205,6 @@ function MessageBubbleComponent({
             content={message.content}
             reasoning={message.reasoning}
             timestamp={message.timestamp}
-            visible={bubbleHovered}
             tokensPerSec={tokensPerSec}
             runEntry={message.run_entry ?? message.runEntry}
             streamOutcome={message.stream_outcome ?? message.streamOutcome}

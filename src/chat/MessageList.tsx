@@ -69,6 +69,11 @@ interface MessageListProps {
 
 const LIST_EDGE_PADDING_PX = 16
 
+// 导航器高亮同步的最小间隔。这趟同步是 querySelectorAll + 逐行 getBoundingClientRect，
+// 若 virtua 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
+// 正是滚动不顺滑的主因之一。高亮不需要 120fps，8 次/秒足够。
+const NAVIGATOR_SYNC_INTERVAL_MS = 120
+
 // 列表里每一项的统一形态。整条会话全量喂给虚拟列表（消息都在内存，virtua 只渲可见项），
 // 屏外的气泡连同其 KaTeX host / Markdown / 图片 DOM 真正从 DOM 卸载。
 type RenderItem =
@@ -513,6 +518,9 @@ function MessageListBase({
     (count, node) => count + (node.kind === 'turn' ? 1 : 0),
     0,
   )
+  // 滚动回调里读，走 ref：导航器没渲染（< 4 轮）就别做整列表测量。
+  const navigatorEnabledRef = useRef(false)
+  navigatorEnabledRef.current = navigatorTurnCount >= 4
 
   const updateActiveNavigatorNode = useCallback((nodeId: string | null) => {
     if (activeNavigatorNodeIdRef.current === nodeId) return
@@ -625,10 +633,12 @@ function MessageListBase({
     let activeIndex: number | null = null
     let firstVisible = Number.POSITIVE_INFINITY
     let lastVisible = -1
-    rows.forEach((row) => {
+    // 行按文档顺序 = 纵向顺序：一旦某行顶边越过视口底边，后面的行全在屏下，直接停。
+    for (const row of rows) {
       const index = Number(row.dataset.chatRowIndex)
-      if (!Number.isFinite(index)) return
+      if (!Number.isFinite(index)) continue
       const rect = row.getBoundingClientRect()
+      if (rect.top >= viewportBottom) break
       if (rect.bottom > viewportTop && rect.top < viewportBottom) {
         firstVisible = Math.min(firstVisible, index)
         lastVisible = Math.max(lastVisible, index)
@@ -636,7 +646,7 @@ function MessageListBase({
       if (rect.top <= readingY && rect.bottom >= readingY) {
         activeIndex = index
       }
-    })
+    }
     if (activeIndex == null && lastVisible >= 0) activeIndex = lastVisible
     if (activeIndex != null) {
       updateActiveNavigatorNode(
@@ -652,16 +662,36 @@ function MessageListBase({
     }
   }, [updateActiveNavigatorNode, updateVisibleNavigatorNodes])
 
-  // 每帧最多量一次：上面那趟是 querySelectorAll + 逐行 getBoundingClientRect，
-  // 不节流的话每个滚动事件都强制一次布局读取。
+  // 滚动回调分两档：渐进加载的触发判断只读 scrollTop（便宜），每帧照跑；
+  // 导航器同步是整列表测量（querySelectorAll + 逐行 gBCR，virtua 同帧写过 DOM 时
+  // 第一下就是强制 reflow），节流到 NAVIGATOR_SYNC_INTERVAL_MS 一次 + 停下后补一次
+  // 尾同步，导航器没渲染时完全不跑。
   const navigatorSyncRafRef = useRef<number | null>(null)
+  const navigatorSyncLastTsRef = useRef(0)
+  const navigatorSyncTrailingRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scheduleNavigatorSync = useCallback(() => {
     if (navigatorSyncRafRef.current !== null) return
     navigatorSyncRafRef.current = requestAnimationFrame(() => {
       navigatorSyncRafRef.current = null
-      syncNavigatorFromDom()
-      // 和导航同步共用这一帧的布局读取，不额外多量一次。
       revealEarlier()
+      if (!navigatorEnabledRef.current) return
+      const now = performance.now()
+      if (now - navigatorSyncLastTsRef.current >= NAVIGATOR_SYNC_INTERVAL_MS) {
+        navigatorSyncLastTsRef.current = now
+        if (navigatorSyncTrailingRef.current !== null) {
+          clearTimeout(navigatorSyncTrailingRef.current)
+          navigatorSyncTrailingRef.current = null
+        }
+        syncNavigatorFromDom()
+        return
+      }
+      // 间隔内的滚动只重排尾同步：滚动一停就把最终位置对准。
+      if (navigatorSyncTrailingRef.current !== null) clearTimeout(navigatorSyncTrailingRef.current)
+      navigatorSyncTrailingRef.current = setTimeout(() => {
+        navigatorSyncTrailingRef.current = null
+        navigatorSyncLastTsRef.current = performance.now()
+        syncNavigatorFromDom()
+      }, NAVIGATOR_SYNC_INTERVAL_MS)
     })
   }, [revealEarlier, syncNavigatorFromDom])
 

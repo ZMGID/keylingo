@@ -31,26 +31,31 @@ describe('MessageBubble mount motion', () => {
     const { container } = render(<MessageBubble message={assistantMessage} />)
     const root = container.firstElementChild as HTMLElement
 
+    // 显隐不走 React state（滚动时消息滑过光标会连环 enter/leave，state 会整棵重渲），
+    // 走根元素 data-msg-hovered 属性 + index.css 的 `[data-msg-hovered] .msg-hover-reveal`。
+    // jsdom 不算样式，这里断言属性翻转 + 行挂着约定的 reveal 类。
     const meta = screen.getByLabelText('复制').closest('.transition-opacity') as HTMLElement
+    expect(meta).toHaveClass('msg-hover-reveal')
     expect(meta).toHaveClass('opacity-0')
+    expect(root).not.toHaveAttribute('data-msg-hovered')
 
     fireEvent.pointerEnter(root)
-    expect(meta).toHaveClass('opacity-100')
+    expect(root).toHaveAttribute('data-msg-hovered')
 
     fireEvent.pointerLeave(root)
-    expect(meta).toHaveClass('opacity-0')
+    expect(root).not.toHaveAttribute('data-msg-hovered')
 
     // WKWebView 会间歇性吞掉 pointerleave（实测最后一条消息上状态卡在显示）——
     // 兜底：悬停期间任何落在消息外的指针移动都收起，不依赖边界事件。
     fireEvent.pointerEnter(root)
-    expect(meta).toHaveClass('opacity-100')
+    expect(root).toHaveAttribute('data-msg-hovered')
     fireEvent.pointerMove(document.body)
-    expect(meta).toHaveClass('opacity-0')
+    expect(root).not.toHaveAttribute('data-msg-hovered')
 
     // 消息内的移动不收起。
     fireEvent.pointerEnter(root)
     fireEvent.pointerMove(root)
-    expect(meta).toHaveClass('opacity-100')
+    expect(root).toHaveAttribute('data-msg-hovered')
   })
 
   // 用户气泡下的三个操作图标（复制/回到这里/建分支）：同一套显隐。
@@ -64,13 +69,15 @@ describe('MessageBubble mount motion', () => {
     const root = container.firstElementChild as HTMLElement
 
     const actions = screen.getByLabelText('复制').closest('.transition-opacity') as HTMLElement
+    expect(actions).toHaveClass('msg-hover-reveal')
     expect(actions).toHaveClass('opacity-0')
+    expect(root).not.toHaveAttribute('data-msg-hovered')
 
     fireEvent.pointerEnter(root)
-    expect(actions).toHaveClass('opacity-100')
+    expect(root).toHaveAttribute('data-msg-hovered')
 
     fireEvent.pointerLeave(root)
-    expect(actions).toHaveClass('opacity-0')
+    expect(root).not.toHaveAttribute('data-msg-hovered')
   })
 })
 
