@@ -5350,6 +5350,34 @@ input[type="password"]::-ms-clear {
   gap: 12px;
   max-height: min(82vh, 600px);
 }
+
+/* 虚拟文本附件编辑弹窗（粘贴长文本转虚拟 txt 后点击打开） */
+.kv-modal.kv-pasted-text-editor {
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: min(82vh, 680px);
+}
+.kv-pasted-text-editor-textarea {
+  min-height: 280px;
+  width: 100%;
+  flex: 1;
+  resize: none;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border, var(--theme-surface-border));
+  background: var(--bg-input, var(--theme-surface));
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  outline: none;
+}
+.kv-pasted-text-editor-textarea:focus {
+  border-color: var(--ring, rgba(59, 130, 246, 0.45));
+}
 .kv-connector-detail-header {
   display: flex;
   align-items: flex-start;

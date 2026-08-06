@@ -971,6 +971,7 @@ pub async fn import_one_session(
                     attachment_type: "image".to_string(),
                     name: name.clone(),
                     path: name,
+                    content: None,
                 }),
                 Err(err) => eprintln!("导入图片失败（已跳过）：{err}"),
             }

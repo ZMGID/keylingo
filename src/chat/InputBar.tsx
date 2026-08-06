@@ -27,6 +27,7 @@ import {
   X,
 } from 'lucide-react'
 import { ChatAttachments } from './ChatAttachments'
+import { PastedTextEditorModal } from './PastedTextEditorModal'
 import { SourcesButton } from './SourcesButton'
 import { onComposerInsert, onComposerTextInsert } from './composerInsert'
 import { draftKey, getComposerDraft, migrateNewChatDraft, setComposerDraft } from './composerDraft'
@@ -52,6 +53,8 @@ import type { ModeOption, ModeTone } from './permissionModes'
 import { isTauriRuntime } from './utils'
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif']
+// 粘贴文本超过该字符数时不再写入输入框，转为内存虚拟 txt 附件（默认 3000，可配置阈值）。
+const PASTE_TEXT_ATTACHMENT_THRESHOLD = 3000
 
 function isAttachableClipboardFile(file: File): boolean {
   return Boolean(file.name?.trim()) || file.size > 0
@@ -489,6 +492,7 @@ export function InputBar({
   const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
   const [attachments, setAttachments] = useState<PendingAttachment[]>(() => getComposerDraft(draftKeyValue)?.attachments ?? [])
   const [attachmentError, setAttachmentError] = useState('')
+  const [editingAttachment, setEditingAttachment] = useState<PendingAttachment | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [toolPanelOpen, setToolPanelOpen] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
@@ -881,6 +885,13 @@ export function InputBar({
     [t],
   )
 
+  // 编辑弹窗保存：用编辑后的内容重建内存附件数据（提交时由 api 层生成新的 File/Blob 内容）。
+  const updateAttachmentContent = useCallback((id: string, content: string) => {
+    setAttachments((prev) => prev.map((attachment) =>
+      attachment.id === id ? { ...attachment, content } : attachment
+    ))
+  }, [])
+
   const setAgentPlanMode = useCallback(async (mode: AgentPlanMode) => {
     if (disabled || !onAgentPlanModeChange) return
     setSlashPanelOpen(false)
@@ -1050,6 +1061,8 @@ export function InputBar({
     setComposerDraft(draftKeyRef.current, { input: '', quotes: [], attachments: [] })
     setInput('')
     setQuotes([])
+    // 附件已随消息提交：清空输入框附件区。
+    // 虚拟文本附件由后端持久化为 memory:// 附件记录，随已发送消息在气泡中展示。
     setAttachments([])
     setAttachmentError('')
     setToolPanelOpen(false)
@@ -1147,8 +1160,11 @@ export function InputBar({
     const selectionEnd = textarea?.selectionEnd ?? input.length
     const valueBeforePaste = textarea?.value ?? input
 
-    // 剪贴板里已有 File 对象时可同步拦截；系统文件路径只能异步读取，后面再精确撤销文件名文本。
-    if (attachableClipboardFiles.length > 0) {
+    // 需同步拦截的两种情形：剪贴板有 File 对象（阻止文件名文本插入），或超长纯文本
+    // （转虚拟附件，阻止正文插入）。必须在任何 await 之前调用 preventDefault——
+    // 事件处理是 async 的，等读取完系统文件路径再调，浏览器默认粘贴早已把文本
+    // 插入输入框（事后清空又会误删用户已写内容）。
+    if (attachableClipboardFiles.length > 0 || clipText.length > PASTE_TEXT_ATTACHMENT_THRESHOLD) {
       e.preventDefault()
     }
 
@@ -1165,8 +1181,22 @@ export function InputBar({
     const hasNativeFiles = nativePaths.length > 0
     const hasClipboardFiles = attachableClipboardFiles.length > 0
 
-    // 纯文字粘贴：不拦截，交给浏览器默认处理
-    if (!hasNativeFiles && !hasClipboardFiles) return
+    // 纯文字粘贴：短文本放行交给浏览器默认处理；超长文本已在上方同步阶段 preventDefault
+    // （正文不会进输入框），这里只需生成内存虚拟 txt 附件（不落盘）。
+    if (!hasNativeFiles && !hasClipboardFiles) {
+      if (clipText.length > PASTE_TEXT_ATTACHMENT_THRESHOLD) {
+        addAttachments([
+          {
+            id: `pending-att-${crypto.randomUUID()}`,
+            type: 'file',
+            name: t.chatPastedTextAttachmentName,
+            path: `memory://${crypto.randomUUID()}`,
+            content: clipText,
+          },
+        ])
+      }
+      return
+    }
 
     if (hasNativeFiles && textarea) {
       // 等浏览器默认粘贴与 React onChange 完成后，只在内容完全等于“插入了文件名”时撤销。
@@ -1751,6 +1781,7 @@ export function InputBar({
                 attachments={attachments}
                 variant="composer"
                 onRemove={composerLocked ? undefined : removeAttachment}
+                onEditAttachment={setEditingAttachment}
               />
             </div>
           )}
@@ -2045,6 +2076,16 @@ export function InputBar({
             {/* 发送 / 停止已移进输入框右端（见 textarea 同级的 chat-composer-send-slot）。 */}
             </div>
           </div>
+
+          {/* 虚拟文本附件（粘贴长文本生成的 txt）编辑弹窗 */}
+          {editingAttachment?.content !== undefined && (
+            <PastedTextEditorModal
+              name={editingAttachment.name}
+              initialContent={editingAttachment.content}
+              onSave={(content) => updateAttachmentContent(editingAttachment.id, content)}
+              onClose={() => setEditingAttachment(null)}
+            />
+          )}
       </div>
     </div>
   )

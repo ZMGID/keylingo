@@ -368,6 +368,7 @@ fn inline_code_request_ignores_attachment_safe_copy_paths() {
                 attachment_type: "file".to_string(),
                 name: "report.pdf".to_string(),
                 path: "att_1-report.pdf".to_string(),
+                content: None,
             }],
             Some(Path::new("/Users/test/Library/Application Support/com.zmair.kivio/conversations/conv_1_attachments")),
         );

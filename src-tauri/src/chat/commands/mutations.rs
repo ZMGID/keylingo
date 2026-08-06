@@ -2,7 +2,10 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::chat::agent::execute::truncate_chars;
-use crate::chat::attachments::{compose_user_content_for_api, stored_image_paths_for_attachments};
+use crate::chat::attachments::{
+    compose_text_attachments_for_api, compose_user_content_for_api, stored_image_paths_for_attachments,
+    text_attachments_from_attachments,
+};
 use crate::state::AppState;
 
 use super::super::storage::{
@@ -208,11 +211,18 @@ pub(crate) async fn chat_regenerate_message(
             } else {
                 conversation_attachments_dir(&app, &conversation_id).ok()
             };
-            compose_user_content_for_api(
+            let mut api_content = compose_user_content_for_api(
                 &message.content,
                 &message.attachments,
                 attachment_dir.as_deref(),
-            )
+            );
+            // 虚拟文本附件（memory://）正文只存在附件记录里、不在 message.content 中：
+            // 重新生成时同样要内联，否则模型只会看到原始短提示词或空内容。
+            let text_attachments = text_attachments_from_attachments(&message.attachments);
+            if !text_attachments.is_empty() {
+                api_content = compose_text_attachments_for_api(&api_content, &text_attachments);
+            }
+            api_content
         });
     let last_user_image_paths = conversation
         .messages

@@ -95,6 +95,16 @@ fn render_message(message: &ChatMessage, labels: ExportLabels) -> Option<String>
         section.push('\n');
         section.push_str(&attachment_placeholder(attachment, labels));
         section.push('\n');
+        // 虚拟文本附件（memory://）没有磁盘文件可引用，正文只存在附件记录里：
+        // 直接内联渲染，否则导出的对话会永久缺失这部分用户输入。
+        if let Some(text) = &attachment.content {
+            let body = text.trim_end();
+            if !body.is_empty() {
+                section.push_str("\n附件正文：\n````text\n");
+                section.push_str(body);
+                section.push_str("\n````");
+            }
+        }
     }
     Some(section.trim_end().to_string())
 }
@@ -162,6 +172,7 @@ mod tests {
                         attachment_type: "file".to_string(),
                         name: "notes.pdf".to_string(),
                         path: "private/notes.pdf".to_string(),
+                        content: None,
                     }],
                     reasoning: None,
                     artifacts: vec![],
@@ -190,6 +201,7 @@ mod tests {
                         attachment_type: "image".to_string(),
                         name: "chart.png".to_string(),
                         path: "private/chart.png".to_string(),
+                        content: None,
                     }],
                     reasoning: Some("private reasoning".to_string()),
                     artifacts: vec![],
@@ -246,6 +258,23 @@ mod tests {
         assert!(!markdown.contains("api transcript"));
         assert!(!markdown.contains("secret-provider"));
         assert!(!markdown.contains("private/chart.png"));
+    }
+
+    #[test]
+    fn renders_memory_text_attachment_body_inline() {
+        let mut conversation = conversation();
+        conversation.messages[0].attachments.push(Attachment {
+            id: "att_mem".to_string(),
+            attachment_type: "file".to_string(),
+            name: "已粘贴的文本.txt".to_string(),
+            path: "memory://abc".to_string(),
+            content: Some("第一行日志\n第二行日志".to_string()),
+        });
+
+        let markdown = render_conversation_markdown(&conversation, "zh");
+        assert!(markdown.contains("[附件: 已粘贴的文本.txt]"));
+        assert!(markdown.contains("附件正文"));
+        assert!(markdown.contains("第一行日志\n第二行日志"));
     }
 
     #[test]

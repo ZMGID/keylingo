@@ -3,6 +3,9 @@ use std::{path::PathBuf, time::Instant};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
+use crate::chat::attachments::{
+    compose_text_attachments_for_api, text_attachments_from_attachments,
+};
 use crate::chat::agent::execute::truncate_chars;
 use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model_call::{
@@ -95,7 +98,19 @@ pub(super) async fn complete_assistant_reply_inner(
             .iter()
             .rev()
             .find(|m| m.role == "user");
-        let latest_user_text = latest_user.map(|m| m.content.clone()).unwrap_or_default();
+        // 虚拟文本附件（memory://）正文只存在附件记录里、不在 message.content 中：
+        // 在此重建内联正文，外部 CLI 才能看到粘贴的长文本。磁盘附件仍走
+        // file_paths → file_attachments_note 的路径说明（run.rs），不进正文。
+        let latest_user_text = latest_user
+            .map(|m| {
+                let text_attachments = text_attachments_from_attachments(&m.attachments);
+                if text_attachments.is_empty() {
+                    m.content.clone()
+                } else {
+                    compose_text_attachments_for_api(&m.content, &text_attachments)
+                }
+            })
+            .unwrap_or_default();
         // 外部 CLI 也要带附件：图片走各协议原生块 / 降级，文件走路径说明。图片路径已由调用方
         // 算好（last_user_image_paths）；文件路径从最后一条 user 消息现解析（best-effort）。
         let latest_user_file_paths = latest_user

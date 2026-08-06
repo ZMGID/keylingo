@@ -17,6 +17,19 @@ const MAX_ATTACHMENT_PREVIEW_BYTES: u64 = 12 * 1024 * 1024;
 const MAX_PASTED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_PASTED_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
+/// 内存文本附件（粘贴长文本自动生成的虚拟 txt）：正文只存在于请求内存、不落盘。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextAttachmentInput {
+    pub name: String,
+    pub content: String,
+}
+
+/// 判断是否为内存虚拟文本附件：path 以 `memory://` 标记（正文不落盘，仅持久化附件记录）。
+pub(crate) fn is_memory_text_attachment(attachment: &Attachment) -> bool {
+    attachment.path.starts_with("memory://")
+}
+
 pub(crate) enum PastedImageSave {
     Saved {
         path: PathBuf,
@@ -386,6 +399,7 @@ pub(crate) fn save_message_attachments(
             attachment_type: attachment_type_for_name(original_name).to_string(),
             name: original_name.to_string(),
             path: stored_name,
+            content: None,
         });
     }
 
@@ -494,17 +508,23 @@ pub(crate) fn compose_user_content_for_api(
     attachment_dir: Option<&Path>,
 ) -> String {
     let trimmed = content.trim();
-    if attachments.is_empty() {
+    // 虚拟文本附件（memory://）正文已由 text_attachments 通道内联进 API content，
+    // 这里过滤掉，避免再输出一段「Kivio 安全副本路径」造成重复。
+    let real_attachments: Vec<&Attachment> = attachments
+        .iter()
+        .filter(|attachment| !is_memory_text_attachment(attachment))
+        .collect();
+    if real_attachments.is_empty() {
         return trimmed.to_string();
     }
 
-    let has_images = attachments
+    let has_images = real_attachments
         .iter()
         .any(|attachment| attachment.attachment_type == "image");
-    let has_files = attachments
+    let has_files = real_attachments
         .iter()
         .any(|attachment| attachment.attachment_type != "image");
-    let attachment_lines = attachments
+    let attachment_lines = real_attachments
         .iter()
         .map(|attachment| {
             let stored_path = stored_attachment_path_for_prompt(attachment, attachment_dir);
@@ -539,6 +559,50 @@ pub(crate) fn compose_user_content_for_api(
     } else {
         format!("{trimmed}\n\n{attachment_note}")
     }
+}
+
+/// 把内存文本附件（虚拟 txt）正文直接内联进 API 内容：模型直接可见、无需工具读取，
+/// 与磁盘附件的「安全副本 + 工具读取」路径不同。虚拟附件不落盘、不持久化到历史消息。
+pub(crate) fn compose_text_attachments_for_api(
+    content: &str,
+    text_attachments: &[TextAttachmentInput],
+) -> String {
+    if text_attachments.is_empty() {
+        return content.to_string();
+    }
+
+    let attachment_blocks = text_attachments
+        .iter()
+        .map(|attachment| format!("--- 文本附件：{} ---\n{}", attachment.name, attachment.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let note = format!(
+        "[已添加文本附件]\n{}\n\n注意：文本附件正文已直接内联在本消息中，直接阅读使用即可，无需工具读取。",
+        attachment_blocks
+    );
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        note
+    } else {
+        format!("{trimmed}\n\n{note}")
+    }
+}
+
+/// 从已持久化的附件记录还原虚拟文本附件（正文只存在 `attachment.content` 里，
+/// 落库消息的原始 content 不含正文）：发送失败重试 / 重新生成时据此重建请求体。
+pub(crate) fn text_attachments_from_attachments(
+    attachments: &[Attachment],
+) -> Vec<TextAttachmentInput> {
+    attachments
+        .iter()
+        .filter_map(|attachment| {
+            attachment.content.as_ref().map(|content| TextAttachmentInput {
+                name: attachment.name.clone(),
+                content: content.clone(),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn title_source_for_user_message(content: &str, attachments: &[Attachment]) -> String {
@@ -606,6 +670,10 @@ pub(crate) fn stored_file_paths_for_attachments(
     let dir = conversation_attachments_dir(app, conversation_id)?;
     let mut paths = Vec::new();
     for attachment in file_attachments {
+        // 虚拟文本附件（memory://）无磁盘文件，跳过。
+        if is_memory_text_attachment(attachment) {
+            continue;
+        }
         let stored = Path::new(&attachment.path);
         if stored.components().count() != 1 {
             return Err(format!("Invalid attachment path: {}", attachment.path));
@@ -656,6 +724,7 @@ mod tests {
                 attachment_type: "image".to_string(),
                 name: "screen.png".to_string(),
                 path: "att_1-screen.png".to_string(),
+                content: None,
             }],
             None,
         );
@@ -674,6 +743,7 @@ mod tests {
                 attachment_type: "file".to_string(),
                 name: "report.PDF".to_string(),
                 path: "att_1-report.PDF".to_string(),
+                content: None,
             }],
             Some(Path::new("/Users/test/Library/Application Support/com.zmair.kivio/conversations/conv_1_attachments")),
         );
@@ -686,6 +756,40 @@ mod tests {
     }
 
     #[test]
+    fn compose_text_attachments_inlines_body_without_tools_note() {
+        let content = compose_text_attachments_for_api(
+            "分析这段日志",
+            &[TextAttachmentInput {
+                name: "已粘贴的文本.txt".to_string(),
+                content: "line1\nline2".to_string(),
+            }],
+        );
+        assert!(content.contains("分析这段日志"));
+        assert!(content.contains("已粘贴的文本.txt"));
+        assert!(content.contains("line1\nline2"));
+        assert!(content.contains("无需工具读取"));
+    }
+
+    #[test]
+    fn compose_text_attachments_empty_is_passthrough() {
+        let content = compose_text_attachments_for_api("hello", &[]);
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn compose_text_attachments_works_with_blank_prompt() {
+        let content = compose_text_attachments_for_api(
+            "   ",
+            &[TextAttachmentInput {
+                name: "a.txt".to_string(),
+                content: "body".to_string(),
+            }],
+        );
+        assert!(content.contains("a.txt"));
+        assert!(content.contains("body"));
+    }
+
+    #[test]
     fn title_source_uses_attachment_name_when_content_empty() {
         let title = title_source_for_user_message(
             "",
@@ -694,10 +798,37 @@ mod tests {
                 attachment_type: "file".to_string(),
                 name: "notes.pdf".to_string(),
                 path: "att_1-notes.pdf".to_string(),
+                content: None,
             }],
         );
 
         assert_eq!(title, "附件: notes.pdf");
+    }
+
+    #[test]
+    fn text_attachments_from_attachments_restores_inline_bodies() {
+        let restored = text_attachments_from_attachments(&[
+            Attachment {
+                id: "att_1".to_string(),
+                attachment_type: "file".to_string(),
+                name: "日志.txt".to_string(),
+                path: "memory://abc".to_string(),
+                content: Some("日志正文".to_string()),
+            },
+            // 磁盘附件没有正文，不得被还原成虚拟附件。
+            Attachment {
+                id: "att_2".to_string(),
+                attachment_type: "file".to_string(),
+                name: "notes.pdf".to_string(),
+                path: "att_2-notes.pdf".to_string(),
+                content: None,
+            },
+        ]);
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].name, "日志.txt");
+        assert_eq!(restored[0].content, "日志正文");
+        assert!(text_attachments_from_attachments(&[]).is_empty());
     }
 
     #[test]
