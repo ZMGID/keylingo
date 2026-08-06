@@ -214,27 +214,13 @@ body {
   animation: reasoning-tail-pulse 0.22s ease-out;
 }
 
-/* 思考过程「生成中」标签：柔和光带扫过。
-   实现是 mask 扫动而不是 background-clip:text + 透明文字——后者在部分机器的
-   WKWebView/WebView2 上会间歇性失效：clip 不生效时渐变铺满整个元素盒（暗色下
-   表现为文字后面一块亮色底）。mask 失效的退化只是文字变实色，仍可读。 */
+/* 思考过程「生成中」标签：柔和呼吸亮度。
+   不使用 background-clip:text 或 mask-image：两者在部分机器的 WKWebView/WebView2
+   上会退化成文字后面的矩形色块，暗色模式尤其明显。直接动画 opacity 是跨 WebView
+   最稳定的实现，文字始终由自己的前景色绘制。 */
 .reasoning-shimmer-text {
   color: rgb(115, 115, 115);
-  -webkit-mask-image: linear-gradient(
-    100deg,
-    rgba(0, 0, 0, 0.45) 30%,
-    #000 50%,
-    rgba(0, 0, 0, 0.45) 70%
-  );
-  mask-image: linear-gradient(
-    100deg,
-    rgba(0, 0, 0, 0.45) 30%,
-    #000 50%,
-    rgba(0, 0, 0, 0.45) 70%
-  );
-  -webkit-mask-size: 200% 100%;
-  mask-size: 200% 100%;
-  animation: chat-motion-shimmer-sweep 2.4s linear infinite;
+  animation: chat-motion-text-pulse 2.4s ease-in-out infinite;
 }
 
 .dark .reasoning-shimmer-text {
@@ -2093,64 +2079,32 @@ button.chat-composer-status-item:hover {
   }
 }
 
-/* 文字流光扫过：mask 位置左右扫动（思考标签 / autonomous agent / 运行中工具名共用）。
-   见 .reasoning-shimmer-text 的注释：不用 background-clip:text，防止部分机器上
-   clip 失效渲染成整块色底。 */
-@keyframes chat-motion-shimmer-sweep {
-  0% {
-    -webkit-mask-position: 180% 0;
-    mask-position: 180% 0;
-  }
+/* 运行中状态的统一亮度呼吸（避免渐变文字/遮罩在不同 WebView 上产生色块）。 */
+@keyframes chat-motion-text-pulse {
+  0%,
   100% {
-    -webkit-mask-position: -180% 0;
-    mask-position: -180% 0;
+    opacity: 0.68;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
-/* 子 Agent「运行中」状态行：紫色文字上流光扫过（autonomous agent working） */
+/* 子 Agent「运行中」状态行：紫色文字亮度呼吸（autonomous agent working） */
 .chat-motion-subagent-shimmer {
   color: rgb(139, 92, 246);
-  -webkit-mask-image: linear-gradient(
-    100deg,
-    rgba(0, 0, 0, 0.5) 30%,
-    #000 50%,
-    rgba(0, 0, 0, 0.5) 70%
-  );
-  mask-image: linear-gradient(
-    100deg,
-    rgba(0, 0, 0, 0.5) 30%,
-    #000 50%,
-    rgba(0, 0, 0, 0.5) 70%
-  );
-  -webkit-mask-size: 200% 100%;
-  mask-size: 200% 100%;
-  animation: chat-motion-shimmer-sweep 2s linear infinite;
+  animation: chat-motion-text-pulse 2s ease-in-out infinite;
 }
 
 .dark .chat-motion-subagent-shimmer {
   color: rgb(196, 181, 253);
 }
 
-/* 普通工具「运行中」状态：terracotta 工具名上光带扫过，整行不缩放/发光。
-   颜色与已完成 ✓ 的 #C56646 / dark #E39A78 同源。mask 只能调亮度不能换色，
-   原「中性→terracotta」双色渐变改为 terracotta 常驻 + 亮度扫动。 */
+/* 普通工具「运行中」状态：terracotta 工具名亮度呼吸，整行不缩放/发光。
+   颜色与已完成 ✓ 的 #C56646 / dark #E39A78 同源。 */
 .chat-motion-tool-shimmer {
   color: #c56646;
-  -webkit-mask-image: linear-gradient(
-    100deg,
-    rgba(0, 0, 0, 0.55) 30%,
-    #000 50%,
-    rgba(0, 0, 0, 0.55) 70%
-  );
-  mask-image: linear-gradient(
-    100deg,
-    rgba(0, 0, 0, 0.55) 30%,
-    #000 50%,
-    rgba(0, 0, 0, 0.55) 70%
-  );
-  -webkit-mask-size: 200% 100%;
-  mask-size: 200% 100%;
-  animation: chat-motion-shimmer-sweep 2s linear infinite;
+  animation: chat-motion-text-pulse 2s ease-in-out infinite;
 }
 
 .dark .chat-motion-tool-shimmer {
@@ -2431,8 +2385,6 @@ button.chat-composer-status-item:hover {
   .chat-motion-subagent-shimmer,
   .chat-motion-tool-shimmer {
     animation: none;
-    -webkit-mask-image: none;
-    mask-image: none;
     color: inherit;
   }
 
