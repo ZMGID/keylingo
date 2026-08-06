@@ -928,12 +928,28 @@ function MessageBubbleComponent({
   const [copied, setCopied] = useState(false)
   const [toolsExpanded, setToolsExpanded] = useState(false)
   // 消息级悬停：鼠标在这条消息上 → 底部操作/元信息条显示，移走 → 隐藏。
-  // React 合成 onPointerEnter/Leave 直接挂在消息根元素上（React 对非冒泡事件本就
-  // 逐元素挂原生监听），没有 CSS :hover（WKWebView 粘滞）、没有跨元素绑定。
-  // ChatMarkdown/重内容都是 memo 的，悬停切换只重渲染气泡外壳。
+  // 显示走 onPointerEnter（送达可靠）；**隐藏不依赖 pointerleave**——WKWebView 会
+  // 间歇性吞掉边界事件（实测最后一条/重渲染频繁的消息上 leave 不来，状态卡在
+  // 显示）。改为悬停期间挂一个 document 级 pointermove：指针落在消息外即收起。
+  // 移动事件是持续流，漏一帧还有下一帧，不存在"漏发一次就永久卡住"。
+  // 监听只在悬停的那一条上活跃（全局同时至多一个），handler 是一次 contains 判断。
+  const hoverRootRef = useRef<HTMLDivElement>(null)
   const [bubbleHovered, setBubbleHovered] = useState(false)
+  useEffect(() => {
+    if (!bubbleHovered) return
+    const onMove = (event: PointerEvent) => {
+      const root = hoverRootRef.current
+      if (!root || !(event.target instanceof Node) || !root.contains(event.target)) {
+        setBubbleHovered(false)
+      }
+    }
+    document.addEventListener('pointermove', onMove, { passive: true })
+    return () => document.removeEventListener('pointermove', onMove)
+  }, [bubbleHovered])
   const hoverProps = {
+    ref: hoverRootRef,
     onPointerEnter: () => setBubbleHovered(true),
+    // 快路径：leave 真来了立刻收；没来由上面的 pointermove 兜底。
     onPointerLeave: () => setBubbleHovered(false),
   }
   // 工具调用超过 4 个时默认折叠（与思考过程一致）

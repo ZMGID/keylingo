@@ -39,6 +39,18 @@ describe('MessageBubble mount motion', () => {
 
     fireEvent.pointerLeave(root)
     expect(meta).toHaveClass('opacity-0')
+
+    // WKWebView 会间歇性吞掉 pointerleave（实测最后一条消息上状态卡在显示）——
+    // 兜底：悬停期间任何落在消息外的指针移动都收起，不依赖边界事件。
+    fireEvent.pointerEnter(root)
+    expect(meta).toHaveClass('opacity-100')
+    fireEvent.pointerMove(document.body)
+    expect(meta).toHaveClass('opacity-0')
+
+    // 消息内的移动不收起。
+    fireEvent.pointerEnter(root)
+    fireEvent.pointerMove(root)
+    expect(meta).toHaveClass('opacity-100')
   })
 
   // 用户气泡下的三个操作图标（复制/回到这里/建分支）：同一套显隐。
