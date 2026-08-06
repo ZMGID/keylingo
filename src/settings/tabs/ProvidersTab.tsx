@@ -34,7 +34,7 @@ function ProviderList({
   onAddFromPreset: (preset: ProviderPreset) => void
 }) {
   return (
-    <div className="kv-provider-list">
+    <div className="kv-provider-list kv-split-list">
       <button
         type="button"
         onClick={onAdd}

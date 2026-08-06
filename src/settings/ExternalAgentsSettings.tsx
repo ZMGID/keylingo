@@ -172,7 +172,7 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
   return (
     <div className="kv-providers-root">
       <div className="kv-providers">
-        <div className="kv-provider-list">
+        <div className="kv-provider-list kv-split-list">
           {/* 搜索框 + 重新扫描。扫描按钮做成搜索行右边的一个图标：它原来是列表下方一个整
               宽按钮，自带边框和分隔线，在左栏里显得像另一块面板。 */}
           <div className="kv-cli-search">

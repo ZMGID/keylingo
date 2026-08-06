@@ -3023,19 +3023,6 @@ button.chat-composer-status-item:hover {
   }
 }
 
-@container settings-shell (max-width: 560px) {
-  .settings-embedded-header {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-  .settings-embedded-scroll {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-}
-
 @container settings-shell (max-width: 480px) {
   .kv-sidebar {
     width: 52px;
@@ -3232,7 +3219,7 @@ button.chat-composer-status-item:hover {
 /* 页头右侧为三键让位（三键 3×46=138 + 呼吸 12）。只此一处需要 ——
    下方 .kv-scroll 在页头之下，不会钻到带里。 */
 .settings-embedded-under-strip .settings-embedded-header {
-  padding-right: 150px;
+  padding-right: max(150px, var(--settings-content-inset));
 }
 
 .chat-win-controls {
@@ -3525,6 +3512,12 @@ button.chat-composer-status-item:hover {
 .kv-nav-spacer { flex: 1; }
 
 .kv-content {
+  --settings-content-max: 820px;
+  --settings-content-gutter: 20px;
+  --settings-content-inset: max(
+    var(--settings-content-gutter),
+    calc((100% - var(--settings-content-max)) / 2)
+  );
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -3532,8 +3525,11 @@ button.chat-composer-status-item:hover {
   background: var(--bg);
   position: relative;
 }
+.kv-content.settings-embedded-main {
+  --settings-content-gutter: 28px;
+}
 .kv-page-header {
-  padding: 14px 20px 10px;
+  padding: 14px var(--settings-content-inset) 10px;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -3562,7 +3558,7 @@ button.chat-composer-status-item:hover {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 20px 16px;
+  padding: 4px var(--settings-content-inset) 16px;
   scrollbar-gutter: stable;
   min-width: 0;
 }
@@ -3577,6 +3573,12 @@ button.chat-composer-status-item:hover {
   background: var(--text-faint);
   background-clip: padding-box;
   border: 2px solid var(--bg);
+}
+
+@container settings-shell (max-width: 560px) {
+  .kv-content.settings-embedded-main {
+    --settings-content-gutter: 16px;
+  }
 }
 
 .kv-group { padding: 10px 0 6px; }
@@ -5156,6 +5158,26 @@ input[type="password"]::-ms-clear {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+.kv-provider-list.kv-split-list {
+  width: 220px;
+  padding: 0 16px 0 0;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.dark .chat-window-shell .settings-embedded .kv-provider-list.kv-split-list {
+  background: transparent;
+}
+@container settings-shell (max-width: 720px) {
+  .kv-provider-list.kv-split-list {
+    width: 100%;
+    padding: 0 0 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
 }
 .kv-cli-group-head {
   display: flex;
@@ -6817,6 +6839,7 @@ input[type="password"]::-ms-clear {
   cursor: default;
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
+
 /* ---- 生成中状态行的动效 logo（GRD-02 · 回波）。点阵相位在 SVG 里逐点带 --p，
    这里只负责动画与颜色（StreamStatusLine.tsx）。 ---- */
 .kv-stream-logo {
