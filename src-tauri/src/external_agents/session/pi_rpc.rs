@@ -115,6 +115,210 @@ const FIRE_AND_FORGET: &[&str] = &[
     "set_editor_text",
 ];
 
+const BTW_COMMANDS: &[&str] = &[
+    "btw",
+    "btw:tangent",
+    "btw:new",
+    "btw:clear",
+    "btw:inject",
+    "btw:summarize",
+    "btw:model",
+    "btw:thinking",
+];
+const BTW_ENTRY_TYPE: &str = "btw-thread-entry";
+const BTW_COMMAND_PROBE_ID: &str = "kivio-btw-command-probe";
+const BTW_ENTRIES_REQUEST_ID: &str = "kivio-btw-entries";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PiBtwCommand {
+    name: String,
+    question: Option<String>,
+}
+
+fn normalize_space(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_pi_btw_command(prompt: &str) -> Option<PiBtwCommand> {
+    let command = prompt.trim().strip_prefix('/')?;
+    let mut parts = command.splitn(2, char::is_whitespace);
+    let name = parts.next()?.trim();
+    if !BTW_COMMANDS.contains(&name) {
+        return None;
+    }
+
+    let args = parts.next().unwrap_or_default();
+    let question = matches!(name, "btw" | "btw:tangent" | "btw:new")
+        .then(|| {
+            args.split_whitespace()
+                .filter(|part| !matches!(*part, "--save" | "-s"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|value| !value.is_empty());
+
+    Some(PiBtwCommand {
+        name: name.to_string(),
+        question,
+    })
+}
+
+fn response_registers_command(value: &Value, command_name: &str) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("response")
+        && value.get("id").and_then(Value::as_str) == Some(BTW_COMMAND_PROBE_ID)
+        && value.get("success").and_then(Value::as_bool) == Some(true)
+        && value
+            .get("data")
+            .and_then(|data| data.get("commands"))
+            .and_then(Value::as_array)
+            .is_some_and(|commands| {
+                commands.iter().any(|command| {
+                    command.get("name").and_then(Value::as_str) == Some(command_name)
+                        && command.get("source").and_then(Value::as_str) == Some("extension")
+                })
+            })
+}
+
+async fn probe_registered_btw_command<R, W>(
+    reader: &mut tokio::io::Lines<BufReader<R>>,
+    stdin: &mut W,
+    command: &PiBtwCommand,
+) -> bool
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let request = json!({
+        "id": BTW_COMMAND_PROBE_ID,
+        "type": "get_commands",
+    });
+    let Ok(mut line) = serde_json::to_string(&request) else {
+        return false;
+    };
+    line.push('\n');
+    if stdin.write_all(line.as_bytes()).await.is_err() {
+        return false;
+    }
+
+    let started = std::time::Instant::now();
+    while started.elapsed() <= Duration::from_secs(3) {
+        let raw = match timeout(Duration::from_millis(200), reader.next_line()).await {
+            Ok(Ok(Some(raw))) => raw,
+            Ok(Ok(None)) | Ok(Err(_)) => return false,
+            Err(_) => continue,
+        };
+        let Ok(value) = serde_json::from_str::<Value>(raw.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("extension_ui_request") {
+            let _ = reply_extension_ui(stdin, &value).await;
+            continue;
+        }
+        if value.get("id").and_then(Value::as_str) == Some(BTW_COMMAND_PROBE_ID) {
+            return response_registers_command(&value, &command.name);
+        }
+    }
+    false
+}
+
+fn pi_btw_entry_events_from_response(
+    response: &Value,
+    command: &PiBtwCommand,
+) -> Option<(UnifiedAgentEvent, UnifiedAgentEvent)> {
+    let expected_question = command.question.as_deref()?;
+    let entries = response
+        .get("data")
+        .and_then(|data| data.get("entries"))
+        .and_then(Value::as_array)?;
+    let entry = entries.iter().rev().find(|entry| {
+        entry.get("type").and_then(Value::as_str) == Some("custom")
+            && entry.get("customType").and_then(Value::as_str) == Some(BTW_ENTRY_TYPE)
+            && entry
+                .get("data")
+                .and_then(|data| data.get("question"))
+                .and_then(Value::as_str)
+                .is_some_and(|question| {
+                    normalize_space(question) == normalize_space(expected_question)
+                })
+    })?;
+    pi_btw_entry_events(entry, expected_question)
+}
+
+fn pi_btw_entry_events(
+    entry: &Value,
+    expected_question: &str,
+) -> Option<(UnifiedAgentEvent, UnifiedAgentEvent)> {
+    if entry.get("type").and_then(Value::as_str) != Some("custom")
+        || entry.get("customType").and_then(Value::as_str) != Some(BTW_ENTRY_TYPE)
+    {
+        return None;
+    }
+    let data = entry.get("data")?;
+    let question = data.get("question").and_then(Value::as_str)?.trim();
+    let answer = data.get("answer").and_then(Value::as_str)?.trim();
+    if question.is_empty()
+        || answer.is_empty()
+        || normalize_space(question) != normalize_space(expected_question)
+    {
+        return None;
+    }
+
+    let entry_id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let tool_id = format!("pi_btw_{entry_id}");
+    let provider = data
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let model_id = data
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let model = match (provider.is_empty(), model_id.is_empty()) {
+        (false, false) => Some(format!("{provider}/{model_id}")),
+        (true, false) => Some(model_id.to_string()),
+        _ => None,
+    };
+    let usage = data.get("usage").and_then(Value::as_object).map(|usage| {
+        let number = |key: &str| usage.get(key).and_then(Value::as_u64);
+        let input_tokens = number("input")
+            .unwrap_or(0)
+            .saturating_add(number("cacheRead").unwrap_or(0))
+            .saturating_add(number("cacheWrite").unwrap_or(0));
+        json!({
+            "inputTokens": input_tokens,
+            "outputTokens": number("output"),
+            "totalTokens": number("totalTokens"),
+        })
+    });
+    let structured = json!({
+        "type": "subagent",
+        "agentType": "btw",
+        "name": "BTW",
+        "model": model,
+        "depth": 1,
+        "status": "completed",
+        "prompt": question,
+        "result": answer,
+        "usage": usage,
+    });
+
+    Some((
+        UnifiedAgentEvent::ToolUse {
+            id: tool_id.clone(),
+            name: "Agent".to_string(),
+            input: structured,
+        },
+        UnifiedAgentEvent::ToolResult {
+            tool_use_id: tool_id,
+            content: answer.to_string(),
+            is_error: false,
+        },
+    ))
+}
+
 pub fn parse_pi_models(stderr: &str) -> Option<Vec<RuntimeModelOption>> {
     let lines: Vec<&str> = stderr
         .lines()
@@ -382,6 +586,17 @@ pub async fn run_pi_rpc_session(
         .stdout
         .take()
         .ok_or_else(|| "stdout unavailable".to_string())?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    // pi-btw owns its sub-session and persists completed exchanges as custom session entries.
+    // Verify that the slash name is an installed extension command before enabling the adapter:
+    // an uninstalled `/btw ...` is just a normal model prompt and must keep the ordinary stream.
+    let btw_command = match parse_pi_btw_command(prompt) {
+        Some(command) if probe_registered_btw_command(&mut reader, &mut stdin, &command).await => {
+            Some(command)
+        }
+        _ => None,
+    };
 
     let prompt_line = {
         let payload = json!({ "id": 1, "type": "prompt", "message": prompt });
@@ -394,7 +609,14 @@ pub async fn run_pi_rpc_session(
         .await
         .map_err(|e| e.to_string())?;
 
-    let result = drain_pi_rpc_output(stdout, &mut stdin, &mut sink, cancel_check).await;
+    let result = drain_pi_rpc_lines(
+        &mut reader,
+        &mut stdin,
+        &mut sink,
+        cancel_check,
+        btw_command.as_ref(),
+    )
+    .await;
     match &result {
         Err(err) if err == "cancelled" => {
             let _ = child.start_kill();
@@ -411,6 +633,7 @@ pub async fn run_pi_rpc_session(
     result
 }
 
+#[cfg(test)]
 async fn drain_pi_rpc_output<R, W>(
     stdout: R,
     stdin: &mut W,
@@ -422,7 +645,23 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut reader = BufReader::new(stdout).lines();
+    drain_pi_rpc_lines(&mut reader, stdin, sink, cancel_check, None).await
+}
+
+async fn drain_pi_rpc_lines<R, W>(
+    reader: &mut tokio::io::Lines<BufReader<R>>,
+    stdin: &mut W,
+    sink: &mut impl FnMut(UnifiedAgentEvent),
+    cancel_check: impl Fn() -> bool,
+    btw_command: Option<&PiBtwCommand>,
+) -> Result<(), String>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut agent_ended = false;
+    let mut btw_entries_requested = false;
+    let mut btw_entry_emitted = false;
     // Pi emits the failed turn before it announces whether an automatic retry will follow.
     // Defer fatal errors until the final agent_end; otherwise a recovered retry still leaves
     // Kivio's turn permanently marked as failed.
@@ -463,18 +702,108 @@ where
             Err(_) => continue,
         };
 
+        if value.get("type").and_then(Value::as_str) == Some("entry_appended") {
+            if let (Some(command), Some(entry)) = (btw_command, value.get("entry")) {
+                if let Some(question) = command.question.as_deref() {
+                    if let Some((started, completed)) = pi_btw_entry_events(entry, question) {
+                        sink(started);
+                        sink(completed);
+                        btw_entry_emitted = true;
+                    }
+                }
+            }
+            continue;
+        }
+
         if value.get("type").and_then(|v| v.as_str()) == Some("extension_ui_request") {
+            if let Some(command) = btw_command {
+                let method = value
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if method == "notify" {
+                    if let Some(message) = value.get("message").and_then(Value::as_str) {
+                        if value.get("notifyType").and_then(Value::as_str) == Some("error") {
+                            sink(UnifiedAgentEvent::Error {
+                                message: message.to_string(),
+                            });
+                        } else if !message.trim().is_empty() {
+                            sink(UnifiedAgentEvent::TextDelta {
+                                delta: message.to_string(),
+                            });
+                        }
+                    }
+                } else if method == "setStatus" {
+                    if let Some(text) = value
+                        .get("statusText")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                    {
+                        sink(UnifiedAgentEvent::StatusNote {
+                            text: text.to_string(),
+                        });
+                    }
+                } else if method == "setWidget" && command.name.starts_with("btw") {
+                    if let Some(lines) = value.get("widgetLines").and_then(Value::as_array) {
+                        if let Some(last) = lines.iter().rev().find_map(Value::as_str) {
+                            sink(UnifiedAgentEvent::StatusNote {
+                                text: last.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
             reply_extension_ui(stdin, &value).await?;
             continue;
         }
 
         if value.get("type").and_then(|v| v.as_str()) == Some("response") {
+            if value.get("id").and_then(Value::as_str) == Some(BTW_ENTRIES_REQUEST_ID) {
+                if value.get("success").and_then(Value::as_bool) == Some(true) {
+                    if let Some(command) = btw_command {
+                        if let Some((started, completed)) =
+                            pi_btw_entry_events_from_response(&value, command)
+                        {
+                            sink(started);
+                            sink(completed);
+                        }
+                    }
+                }
+                agent_ended = true;
+                ended_at = Some(std::time::Instant::now());
+                let _ = stdin.shutdown().await;
+                continue;
+            }
             if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
                 let err = value
                     .get("error")
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "prompt rejected".to_string());
                 return Err(err);
+            }
+            if !btw_entries_requested
+                && value.get("command").and_then(Value::as_str) == Some("prompt")
+            {
+                if let Some(command) = btw_command {
+                    if command.question.is_none() || btw_entry_emitted {
+                        agent_ended = true;
+                        ended_at = Some(std::time::Instant::now());
+                        let _ = stdin.shutdown().await;
+                        continue;
+                    }
+                    let request = json!({
+                        "id": BTW_ENTRIES_REQUEST_ID,
+                        "type": "get_entries",
+                    });
+                    let mut request_line =
+                        serde_json::to_string(&request).map_err(|error| error.to_string())?;
+                    request_line.push('\n');
+                    stdin
+                        .write_all(request_line.as_bytes())
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    btw_entries_requested = true;
+                }
             }
             continue;
         }
@@ -523,7 +852,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use tokio::io::{duplex, sink};
+    use tokio::io::{duplex, sink, AsyncReadExt};
 
     #[tokio::test]
     #[ignore = "requires live pi CLI on PATH"]
@@ -656,6 +985,199 @@ mod tests {
             map_pi_rpc_event(&value, &mut |_| {}),
             PiRpcOutcome::AgentEnd
         );
+    }
+
+    #[test]
+    fn parses_only_supported_btw_extension_commands() {
+        assert_eq!(
+            parse_pi_btw_command("/btw --save  为什么失败？"),
+            Some(PiBtwCommand {
+                name: "btw".to_string(),
+                question: Some("为什么失败？".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_pi_btw_command("/btw:tangent -s compare A and B"),
+            Some(PiBtwCommand {
+                name: "btw:tangent".to_string(),
+                question: Some("compare A and B".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_pi_btw_command("/btw:clear"),
+            Some(PiBtwCommand {
+                name: "btw:clear".to_string(),
+                question: None,
+            })
+        );
+        assert_eq!(parse_pi_btw_command("/btw-unknown question"), None);
+        assert_eq!(parse_pi_btw_command("explain /btw"), None);
+    }
+
+    #[test]
+    fn command_probe_requires_the_registered_extension_source() {
+        let registered = json!({
+            "id": BTW_COMMAND_PROBE_ID,
+            "type": "response",
+            "command": "get_commands",
+            "success": true,
+            "data": { "commands": [
+                { "name": "btw", "source": "extension" },
+                { "name": "skill:btw", "source": "skill" }
+            ] }
+        });
+        assert!(response_registers_command(&registered, "btw"));
+        assert!(!response_registers_command(&registered, "btw:tangent"));
+
+        let prompt_template = json!({
+            "id": BTW_COMMAND_PROBE_ID,
+            "type": "response",
+            "success": true,
+            "data": { "commands": [{ "name": "btw", "source": "prompt" }] }
+        });
+        assert!(!response_registers_command(&prompt_template, "btw"));
+    }
+
+    #[test]
+    fn maps_completed_btw_entry_to_the_existing_subagent_tool_shape() {
+        let response = json!({
+            "id": BTW_ENTRIES_REQUEST_ID,
+            "type": "response",
+            "command": "get_entries",
+            "success": true,
+            "data": { "entries": [
+                {
+                    "type": "custom",
+                    "id": "entry-7",
+                    "customType": BTW_ENTRY_TYPE,
+                    "data": {
+                        "question": "compare A and B",
+                        "answer": "A is safer; B is faster.",
+                        "provider": "openai",
+                        "model": "gpt-5-mini",
+                        "thinkingLevel": "low",
+                        "usage": {
+                            "input": 100,
+                            "output": 20,
+                            "cacheRead": 30,
+                            "cacheWrite": 5,
+                            "totalTokens": 155
+                        }
+                    }
+                }
+            ] }
+        });
+        let command = PiBtwCommand {
+            name: "btw".to_string(),
+            question: Some("compare   A and B".to_string()),
+        };
+        let (started, completed) =
+            pi_btw_entry_events_from_response(&response, &command).expect("matching BTW entry");
+
+        match started {
+            UnifiedAgentEvent::ToolUse { id, name, input } => {
+                assert_eq!(id, "pi_btw_entry-7");
+                assert_eq!(name, "Agent");
+                assert_eq!(input["type"], "subagent");
+                assert_eq!(input["agentType"], "btw");
+                assert_eq!(input["prompt"], "compare A and B");
+                assert_eq!(input["result"], "A is safer; B is faster.");
+                assert_eq!(input["model"], "openai/gpt-5-mini");
+                assert_eq!(input["usage"]["inputTokens"], 135);
+                assert_eq!(input["usage"]["totalTokens"], 155);
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        assert!(matches!(
+            completed,
+            UnifiedAgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error: false,
+            } if tool_use_id == "pi_btw_entry-7" && content == "A is safer; B is faster."
+        ));
+    }
+
+    #[tokio::test]
+    async fn btw_command_completion_fetches_entries_and_finishes_without_agent_end() {
+        let (stdout_reader, mut stdout_writer) = duplex(8192);
+        let writer = tokio::spawn(async move {
+            for line in [
+                r#"{"id":1,"type":"response","command":"prompt","success":true}"#,
+                r#"{"id":"kivio-btw-entries","type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"custom","id":"e9","customType":"btw-thread-entry","data":{"question":"side question","answer":"side answer","provider":"p","model":"m"}}]}}"#,
+            ] {
+                stdout_writer.write_all(line.as_bytes()).await?;
+                stdout_writer.write_all(b"\n").await?;
+            }
+            stdout_writer.shutdown().await
+        });
+        let (mut stdin_reader, mut stdin_writer) = duplex(4096);
+        let command = PiBtwCommand {
+            name: "btw".to_string(),
+            question: Some("side question".to_string()),
+        };
+        let mut events = Vec::new();
+
+        let result = drain_pi_rpc_lines(
+            &mut BufReader::new(stdout_reader).lines(),
+            &mut stdin_writer,
+            &mut |event| events.push(event),
+            || false,
+            Some(&command),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        let mut requests = String::new();
+        stdin_reader.read_to_string(&mut requests).await.unwrap();
+        assert!(requests.contains(r#""type":"get_entries""#));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::ToolUse { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::ToolResult { .. })));
+    }
+
+    #[tokio::test]
+    async fn btw_entry_event_uses_the_fast_path_without_reading_full_history() {
+        let (stdout_reader, mut stdout_writer) = duplex(8192);
+        let writer = tokio::spawn(async move {
+            for line in [
+                r#"{"type":"entry_appended","entry":{"type":"custom","id":"e10","customType":"btw-thread-entry","data":{"question":"quick aside","answer":"quick answer","provider":"p","model":"m"}}}"#,
+                r#"{"id":1,"type":"response","command":"prompt","success":true}"#,
+            ] {
+                stdout_writer.write_all(line.as_bytes()).await?;
+                stdout_writer.write_all(b"\n").await?;
+            }
+            stdout_writer.shutdown().await
+        });
+        let (mut stdin_reader, mut stdin_writer) = duplex(4096);
+        let command = PiBtwCommand {
+            name: "btw".to_string(),
+            question: Some("quick aside".to_string()),
+        };
+        let mut events = Vec::new();
+
+        let result = drain_pi_rpc_lines(
+            &mut BufReader::new(stdout_reader).lines(),
+            &mut stdin_writer,
+            &mut |event| events.push(event),
+            || false,
+            Some(&command),
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        let mut requests = String::new();
+        stdin_reader.read_to_string(&mut requests).await.unwrap();
+        assert!(!requests.contains(r#""type":"get_entries""#));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolUse { id, .. } if id == "pi_btw_e10"
+        )));
     }
 
     #[test]

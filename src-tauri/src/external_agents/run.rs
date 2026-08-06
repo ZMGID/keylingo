@@ -576,8 +576,10 @@ pub async fn run_external_cli_reply(
                 truncate_for_preview(stderr_output.trim(), 4000)
             )
         } else if stream_outcome == "completed" {
-            if is_slash {
+            if is_slash && tool_calls.is_empty() {
                 format!("{} 命令已执行", def.name)
+            } else if is_slash {
+                String::new()
             } else {
                 stream_outcome = "error".to_string();
                 format!(
