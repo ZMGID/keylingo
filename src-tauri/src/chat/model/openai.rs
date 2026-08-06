@@ -12,8 +12,9 @@ use crate::utils;
 
 use super::{
     openai_messages_from_generate_request, pending_tool_calls_from_openai_message,
-    stream_read_error, GenerateOutput, GenerateRequest, GeneratedImageData, LanguageModelProvider,
-    ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink,
+    stream_read_error, FirstTokenStreamSink, GenerateOutput, GenerateRequest, GeneratedImageData,
+    LanguageModelProvider, ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart,
+    StreamSink,
 };
 
 pub struct OpenAiChatProvider<'a> {
@@ -171,6 +172,7 @@ impl OpenAiChatProvider<'_> {
             started_at,
             started.elapsed(),
             output.usage.clone(),
+            None,
         );
         self.record_debug_success(
             &request,
@@ -191,6 +193,8 @@ impl OpenAiChatProvider<'_> {
         let label = request_label(&request, "Chat stream");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
+        let mut measured_sink = FirstTokenStreamSink::new(sink, started);
+        let sink = &mut measured_sink;
         let mut response = self
             .send_chat_body(&request, true, &label)
             .await
@@ -275,6 +279,7 @@ impl OpenAiChatProvider<'_> {
                         started_at,
                         started.elapsed(),
                         output.usage.clone(),
+                        sink.first_token_ms(),
                     );
                     self.record_debug_success(
                         &request,
@@ -342,6 +347,7 @@ impl OpenAiChatProvider<'_> {
             started_at,
             started.elapsed(),
             output.usage.clone(),
+            sink.first_token_ms(),
         );
         self.record_debug_success(
             &request,
@@ -589,6 +595,7 @@ impl OpenAiChatProvider<'_> {
         started_at: i64,
         duration: std::time::Duration,
         usage: Option<ModelUsage>,
+        first_token_ms: Option<u64>,
     ) {
         let source = request
             .metadata
@@ -613,6 +620,8 @@ impl OpenAiChatProvider<'_> {
                 usage_source: "provider_reported",
                 started_at,
                 duration_ms: duration.as_millis() as u64,
+                first_token_ms,
+                reasoning_effort: crate::usage::reasoning_effort_for_request(request),
                 conversation_id: request.metadata.conversation_id.clone(),
                 message_id: request.metadata.message_id.clone(),
                 error_kind: None,
@@ -651,6 +660,8 @@ impl OpenAiChatProvider<'_> {
                 usage_source: "missing",
                 started_at,
                 duration_ms: duration.as_millis() as u64,
+                first_token_ms: None,
+                reasoning_effort: crate::usage::reasoning_effort_for_request(request),
                 conversation_id: request.metadata.conversation_id.clone(),
                 message_id: request.metadata.message_id.clone(),
                 error_kind: Some(error_kind_from_message(error)),

@@ -494,6 +494,45 @@ pub trait StreamSink: Send {
     fn emit(&mut self, part: StreamPart) -> Result<(), ModelError>;
 }
 
+/// Wraps a stream sink and records time-to-first visible text or reasoning delta.
+pub struct FirstTokenStreamSink<'a> {
+    inner: &'a mut (dyn StreamSink + Send),
+    started: std::time::Instant,
+    first_token_ms: Option<u64>,
+}
+
+impl<'a> FirstTokenStreamSink<'a> {
+    pub fn new(inner: &'a mut (dyn StreamSink + Send), started: std::time::Instant) -> Self {
+        Self {
+            inner,
+            started,
+            first_token_ms: None,
+        }
+    }
+
+    pub fn first_token_ms(&self) -> Option<u64> {
+        self.first_token_ms
+    }
+}
+
+impl StreamSink for FirstTokenStreamSink<'_> {
+    fn emit(&mut self, part: StreamPart) -> Result<(), ModelError> {
+        let is_first_visible_delta = self.first_token_ms.is_none()
+            && match &part {
+                StreamPart::TextDelta { delta } | StreamPart::ReasoningDelta { delta } => {
+                    !delta.is_empty()
+                }
+                _ => false,
+            };
+        let elapsed_ms = is_first_visible_delta.then(|| self.started.elapsed().as_millis() as u64);
+        let result = self.inner.emit(part);
+        if result.is_ok() {
+            self.first_token_ms = self.first_token_ms.or(elapsed_ms);
+        }
+        result
+    }
+}
+
 impl<F> StreamSink for F
 where
     F: FnMut(StreamPart) -> Result<(), ModelError> + Send,
@@ -1072,5 +1111,38 @@ mod tests {
         assert_eq!(content[0]["type"], "input_image");
         assert_eq!(content[0]["image_url"], "data:image/png;base64,AAAA");
         assert_eq!(content[1]["type"], "input_text");
+    }
+
+    #[test]
+    fn first_token_sink_ignores_non_visible_parts_and_records_first_delta() {
+        let mut emitted = Vec::new();
+        let mut downstream = |part| {
+            emitted.push(part);
+            Ok(())
+        };
+        let started = std::time::Instant::now() - std::time::Duration::from_millis(10);
+        let mut sink = FirstTokenStreamSink::new(&mut downstream, started);
+
+        sink.emit(StreamPart::WebSearch {
+            queries: vec!["query".to_string()],
+            citations: Vec::new(),
+        })
+        .expect("web search event");
+        assert_eq!(sink.first_token_ms(), None);
+
+        sink.emit(StreamPart::ReasoningDelta {
+            delta: "thinking".to_string(),
+        })
+        .expect("reasoning delta");
+        let first = sink.first_token_ms().expect("first token timing");
+        assert!(first >= 10);
+
+        sink.emit(StreamPart::TextDelta {
+            delta: "answer".to_string(),
+        })
+        .expect("text delta");
+        assert_eq!(sink.first_token_ms(), Some(first));
+        drop(sink);
+        assert_eq!(emitted.len(), 3);
     }
 }

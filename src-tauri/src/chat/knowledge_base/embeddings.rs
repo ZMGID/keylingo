@@ -126,6 +126,8 @@ pub async fn embed_batch(
                 usage_source: "provider_reported",
                 started_at,
                 duration_ms: clock.elapsed().as_millis() as u64,
+                first_token_ms: None,
+                reasoning_effort: None,
                 conversation_id: None,
                 message_id: None,
                 error_kind,

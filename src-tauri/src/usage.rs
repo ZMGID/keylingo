@@ -12,7 +12,10 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
-    chat::model::ModelUsage, chat::model_metadata, settings::ModelProvider, state::AppState,
+    chat::model::{GenerateRequest, ModelUsage},
+    chat::model_metadata,
+    settings::ModelProvider,
+    state::AppState,
 };
 
 const USAGE_DIR_NAME: &str = "usage";
@@ -26,6 +29,8 @@ pub struct UsageRecord {
     pub created_at: i64,
     pub completed_at: i64,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub first_token_ms: Option<u64>,
     pub source: String,
     pub operation: String,
     pub provider_id: String,
@@ -48,6 +53,8 @@ pub struct UsageRecord {
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
     pub cost_source: String,
@@ -156,6 +163,8 @@ pub struct UsageRecordInput<'a> {
     pub usage_source: &'a str,
     pub started_at: i64,
     pub duration_ms: u64,
+    pub first_token_ms: Option<u64>,
+    pub reasoning_effort: Option<String>,
     pub conversation_id: Option<String>,
     pub message_id: Option<String>,
     pub error_kind: Option<String>,
@@ -198,6 +207,7 @@ pub fn record_model_call(state: &AppState, input: UsageRecordInput<'_>) {
         created_at: input.started_at,
         completed_at,
         duration_ms: input.duration_ms,
+        first_token_ms: input.first_token_ms,
         source: input.source.to_string(),
         operation: input.operation.to_string(),
         provider_id: input.provider.id.clone(),
@@ -217,6 +227,7 @@ pub fn record_model_call(state: &AppState, input: UsageRecordInput<'_>) {
         cached_input_tokens,
         cache_creation_input_tokens,
         reasoning_tokens,
+        reasoning_effort: input.reasoning_effort,
         cost_usd: None,
         cost_source: "unavailable".to_string(),
         conversation_id: input.conversation_id,
@@ -226,6 +237,15 @@ pub fn record_model_call(state: &AppState, input: UsageRecordInput<'_>) {
     apply_cost(input.provider, &mut record);
     if let Err(err) = append_record(&state.usage_dir, &record) {
         eprintln!("Failed to record usage: {err}");
+    }
+}
+
+/// Explicit effort sent for this request. `None` means the provider/model default was used.
+pub fn reasoning_effort_for_request(request: &GenerateRequest) -> Option<String> {
+    if request.options.thinking_enabled {
+        request.options.thinking_level.clone()
+    } else {
+        Some("none".to_string())
     }
 }
 
@@ -893,6 +913,7 @@ mod tests {
             created_at: Local::now().timestamp(),
             completed_at: Local::now().timestamp(),
             duration_ms: 1,
+            first_token_ms: None,
             source: "chat".to_string(),
             operation: "plain".to_string(),
             provider_id: "p".to_string(),
@@ -908,6 +929,7 @@ mod tests {
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
             reasoning_tokens: None,
+            reasoning_effort: None,
             cost_usd: None,
             cost_source: "unavailable".to_string(),
             conversation_id: None,
@@ -929,6 +951,7 @@ mod tests {
             created_at: Local::now().timestamp(),
             completed_at: Local::now().timestamp(),
             duration_ms: 1,
+            first_token_ms: None,
             source: "chat".to_string(),
             operation: "plain".to_string(),
             provider_id: "p".to_string(),
@@ -944,6 +967,7 @@ mod tests {
             cached_input_tokens: Some(800),
             cache_creation_input_tokens: Some(50),
             reasoning_tokens: None,
+            reasoning_effort: None,
             cost_usd: None,
             cost_source: "unavailable".to_string(),
             conversation_id: None,
@@ -966,6 +990,25 @@ mod tests {
         let openai = base_record("openai_chat");
         assert_eq!(record_effective_input_tokens(&openai), 1_000);
         assert_eq!(record_total_tokens(&openai), 1_100); // 落盘 total 优先
+    }
+
+    #[test]
+    fn usage_record_new_fields_are_backward_compatible_and_camel_case() {
+        let mut value = serde_json::to_value(base_record("openai_chat")).expect("serialize");
+        let object = value.as_object_mut().expect("record object");
+        object.remove("firstTokenMs");
+        object.remove("reasoningEffort");
+
+        let old_record: UsageRecord = serde_json::from_value(value).expect("old record");
+        assert_eq!(old_record.first_token_ms, None);
+        assert_eq!(old_record.reasoning_effort, None);
+
+        let mut current = base_record("openai_responses");
+        current.first_token_ms = Some(1_250);
+        current.reasoning_effort = Some("high".to_string());
+        let serialized = serde_json::to_value(current).expect("serialize current record");
+        assert_eq!(serialized["firstTokenMs"], 1_250);
+        assert_eq!(serialized["reasoningEffort"], "high");
     }
 
     #[test]

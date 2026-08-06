@@ -10,9 +10,10 @@ use crate::usage::{
 };
 
 use super::{
-    parse_tool_arguments, stream_read_error, BuiltinWebSearch, GenerateOutput, GenerateRequest,
-    LanguageModelProvider, MessagePart, ModelError, ModelFuture, ModelMessage, ModelRole,
-    ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
+    parse_tool_arguments, stream_read_error, BuiltinWebSearch, FirstTokenStreamSink,
+    GenerateOutput, GenerateRequest, LanguageModelProvider, MessagePart, ModelError, ModelFuture,
+    ModelMessage, ModelRole, ModelTool, ModelUsage, PendingToolCall, StreamPart, StreamSink,
+    WebCitation,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -194,6 +195,7 @@ impl AnthropicMessagesProvider<'_> {
             started_at,
             started.elapsed(),
             output.usage.clone(),
+            None,
         );
         self.record_debug_success(
             &request,
@@ -214,6 +216,8 @@ impl AnthropicMessagesProvider<'_> {
         let label = request_label(&request, "Anthropic stream");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
+        let mut measured_sink = FirstTokenStreamSink::new(sink, started);
+        let sink = &mut measured_sink;
         let body = self.request_body(&request, true);
         let mut response = send_with_failover(
             self.state,
@@ -348,6 +352,7 @@ impl AnthropicMessagesProvider<'_> {
                             started_at,
                             started.elapsed(),
                             output.usage.clone(),
+                            sink.first_token_ms(),
                         );
                         self.record_debug_success(
                             &request,
@@ -380,6 +385,7 @@ impl AnthropicMessagesProvider<'_> {
                             started_at,
                             started.elapsed(),
                             output.usage.clone(),
+                            sink.first_token_ms(),
                         );
                         self.record_debug_success(
                             &request,
@@ -637,6 +643,7 @@ impl AnthropicMessagesProvider<'_> {
         started_at: i64,
         duration: std::time::Duration,
         usage: Option<ModelUsage>,
+        first_token_ms: Option<u64>,
     ) {
         let source = request
             .metadata
@@ -661,6 +668,8 @@ impl AnthropicMessagesProvider<'_> {
                 usage_source: "provider_reported",
                 started_at,
                 duration_ms: duration.as_millis() as u64,
+                first_token_ms,
+                reasoning_effort: crate::usage::reasoning_effort_for_request(request),
                 conversation_id: request.metadata.conversation_id.clone(),
                 message_id: request.metadata.message_id.clone(),
                 error_kind: None,
@@ -699,6 +708,8 @@ impl AnthropicMessagesProvider<'_> {
                 usage_source: "missing",
                 started_at,
                 duration_ms: duration.as_millis() as u64,
+                first_token_ms: None,
+                reasoning_effort: crate::usage::reasoning_effort_for_request(request),
                 conversation_id: request.metadata.conversation_id.clone(),
                 message_id: request.metadata.message_id.clone(),
                 error_kind: Some(error_kind_from_message(error)),

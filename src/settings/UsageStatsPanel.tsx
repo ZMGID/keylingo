@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { ChevronLeft, ChevronRight, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Database, RefreshCw, Trash2 } from 'lucide-react'
 import {
   api,
   type UsageGroupStats,
@@ -93,6 +93,11 @@ function formatTokens(value?: number | null) {
   return Math.round(n).toLocaleString()
 }
 
+function formatOptionalTokens(value?: number | null) {
+  if (value == null || !Number.isFinite(Number(value))) return '--'
+  return formatTokens(value)
+}
+
 function formatCost(value?: number | null) {
   const n = Number(value ?? 0)
   if (!Number.isFinite(n) || n <= 0) return '$0.00'
@@ -124,8 +129,22 @@ function pageRangeLabel(pageIndex: number, pageSize: number, total: number) {
   return `${start}-${end} / ${total}`
 }
 
-function recordTotalTokens(record: UsageRecord) {
-  return record.totalTokens ?? ((record.inputTokens ?? 0) + (record.outputTokens ?? 0))
+function formatReasoningEffort(value: string | null | undefined, lang: string) {
+  if (!value) return '--'
+  const normalized = value.trim().toLowerCase()
+  const zh: Record<string, string> = {
+    none: '关闭',
+    minimal: '极低',
+    low: '低',
+    medium: '中',
+    high: '高',
+    xhigh: '极高',
+    max: '最高',
+    ultra: '超高',
+    ultracode: 'Ultracode',
+  }
+  const en: Record<string, string> = { none: 'Off' }
+  return (lang === 'zh' ? zh : en)[normalized] || normalized.charAt(0).toUpperCase() + normalized.slice(1)
 }
 
 function SummaryTile({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -697,20 +716,29 @@ function LogsTable({ logs, lang }: { logs: UsageRecord[]; lang: string }) {
   }
   return (
     <div className="custom-scrollbar overflow-x-auto rounded-md border border-[var(--border)] bg-[var(--bg-input)]">
-      <table className="min-w-[920px] w-full text-left text-[12px]">
+      <table className="w-full min-w-[1040px] table-fixed text-left text-[12px]">
+        <colgroup>
+          <col className="w-[98px]" />
+          <col className="w-[118px]" />
+          <col className="w-[112px]" />
+          <col className="w-[170px]" />
+          <col className="w-[82px]" />
+          <col className="w-[150px]" />
+          <col className="w-[82px]" />
+          <col className="w-[108px]" />
+          <col className="w-[96px]" />
+        </colgroup>
         <thead className="border-b border-[var(--border)] text-[10.5px] uppercase tracking-wide text-[var(--text-muted)]">
           <tr>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '时间' : 'Time'}</th>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '来源' : 'Source'}</th>
             <th className="px-3 py-2 font-semibold">Provider</th>
             <th className="px-3 py-2 font-semibold">Model</th>
-            <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '输入' : 'Input'}</th>
-            <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '输出' : 'Output'}</th>
+            <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '推理强度' : 'Effort'}</th>
             <th className="px-3 py-2 font-semibold">Token</th>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '成本' : 'Cost'}</th>
-            <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '耗时' : 'Time'}</th>
+            <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '延迟' : 'Latency'}</th>
             <th className="px-3 py-2 font-semibold">{lang === 'zh' ? '状态' : 'Status'}</th>
-            <th className="px-3 py-2 font-semibold">Usage</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
@@ -721,24 +749,65 @@ function LogsTable({ logs, lang }: { logs: UsageRecord[]; lang: string }) {
                 <div className="truncate font-medium">{sourceLabel(record.source, lang)}</div>
                 <div className="truncate text-[10.5px] text-neutral-500 dark:text-neutral-500">{record.operation}</div>
               </td>
-              <td className="max-w-[140px] px-3 py-2 truncate">{record.providerName || record.providerId}</td>
-              <td className="max-w-[180px] px-3 py-2 truncate font-mono text-[11.5px]">{record.model}</td>
-              <td className="px-3 py-2 tabular-nums">{formatTokens(record.inputTokens)}</td>
-              <td className="px-3 py-2 tabular-nums">
-                {record.source === 'knowledge_base' ? '—' : formatTokens(record.outputTokens)}
+              <td className="truncate px-3 py-2" title={record.providerName || record.providerId}>
+                {record.providerName || record.providerId}
               </td>
-              <td className="px-3 py-2 tabular-nums">{formatTokens(recordTotalTokens(record))}</td>
+              <td className="truncate px-3 py-2 font-mono text-[11.5px]" title={record.model}>{record.model}</td>
+              <td className="px-3 py-2 font-medium text-neutral-700 dark:text-neutral-200">
+                {formatReasoningEffort(record.reasoningEffort, lang)}
+              </td>
+              <td className="px-3 py-2 tabular-nums">
+                <div className="flex items-center gap-3 text-neutral-800 dark:text-neutral-100">
+                  <span
+                    className="inline-flex min-w-0 items-center gap-1 text-emerald-700 dark:text-emerald-400"
+                    title={lang === 'zh' ? '输入 Token' : 'Input tokens'}
+                  >
+                    <ArrowDown aria-hidden="true" size={12} strokeWidth={1.8} />
+                    <span className="text-neutral-800 dark:text-neutral-100">{formatOptionalTokens(record.inputTokens)}</span>
+                  </span>
+                  <span
+                    className="inline-flex min-w-0 items-center gap-1 text-violet-600 dark:text-violet-400"
+                    title={lang === 'zh' ? '输出 Token' : 'Output tokens'}
+                  >
+                    <ArrowUp aria-hidden="true" size={12} strokeWidth={1.8} />
+                    <span className="text-neutral-800 dark:text-neutral-100">
+                      {record.source === 'knowledge_base' ? '--' : formatOptionalTokens(record.outputTokens)}
+                    </span>
+                  </span>
+                </div>
+                <div
+                  className="mt-1 flex items-center gap-1 text-[10.5px] text-sky-700 dark:text-sky-400"
+                  title={lang === 'zh' ? '缓存读取 Token' : 'Cache read tokens'}
+                >
+                  <Database aria-hidden="true" size={11} strokeWidth={1.7} />
+                  <span>{formatOptionalTokens(record.cachedInputTokens)}</span>
+                  {(record.cacheCreationInputTokens ?? 0) > 0 && (
+                    <span className="ml-1 text-amber-700 dark:text-amber-400">
+                      {lang === 'zh' ? '写入' : 'write'} {formatTokens(record.cacheCreationInputTokens)}
+                    </span>
+                  )}
+                </div>
+              </td>
               <td className="px-3 py-2 tabular-nums">{record.costUsd == null ? '--' : formatCost(record.costUsd)}</td>
-              <td className="px-3 py-2 tabular-nums">{formatDuration(record.durationMs)}</td>
+              <td className="px-3 py-2 tabular-nums">
+                <div className="border-l-2 border-emerald-500/70 pl-2 leading-[1.45]">
+                  <div>
+                    <span className="mr-1.5 text-[10.5px] text-[var(--text-muted)]">{lang === 'zh' ? '首字' : 'First'}</span>
+                    {formatDuration(record.firstTokenMs)}
+                  </div>
+                  <div>
+                    <span className="mr-1.5 text-[10.5px] text-[var(--text-muted)]">{lang === 'zh' ? '总耗时' : 'Total'}</span>
+                    {formatDuration(record.durationMs)}
+                  </div>
+                </div>
+              </td>
               <td className="px-3 py-2">
                 <span className={`kv-tag ${record.status === 'success' ? 'ok' : record.status === 'cancelled' ? 'warn' : 'danger'}`}>
                   {statusLabel(record.status, lang)}
                 </span>
-              </td>
-              <td className="px-3 py-2">
-                <span className={`kv-tag ${record.usageSource === 'missing' ? 'warn' : 'ok'}`}>
-                  {record.usageSource === 'missing' ? (lang === 'zh' ? '缺失' : 'missing') : 'provider'}
-                </span>
+                <div className={`mt-1 text-[10px] ${record.usageSource === 'missing' ? 'text-amber-700 dark:text-amber-400' : 'text-[var(--text-muted)]'}`}>
+                  {record.usageSource === 'missing' ? (lang === 'zh' ? 'Usage 缺失' : 'Usage missing') : 'provider'}
+                </div>
               </td>
             </tr>
           ))}

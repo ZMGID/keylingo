@@ -1235,6 +1235,7 @@ export type UsageRecord = {
   createdAt: number
   completedAt: number
   durationMs: number
+  firstTokenMs?: number | null
   source: string
   operation: string
   providerId: string
@@ -1250,6 +1251,7 @@ export type UsageRecord = {
   cachedInputTokens?: number | null
   cacheCreationInputTokens?: number | null
   reasoningTokens?: number | null
+  reasoningEffort?: string | null
   costUsd?: number | null
   costSource: string
   conversationId?: string | null

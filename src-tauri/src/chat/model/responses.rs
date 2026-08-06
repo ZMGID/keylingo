@@ -24,8 +24,9 @@ use crate::usage::{
 
 use super::{
     parse_tool_arguments, responses_input_from_model_messages, stream_read_error, BuiltinWebSearch,
-    GenerateOutput, GenerateRequest, GeneratedImageData, LanguageModelProvider, ModelError,
-    ModelFuture, ModelUsage, PendingToolCall, StreamPart, StreamSink, WebCitation,
+    FirstTokenStreamSink, GenerateOutput, GenerateRequest, GeneratedImageData,
+    LanguageModelProvider, ModelError, ModelFuture, ModelUsage, PendingToolCall, StreamPart,
+    StreamSink, WebCitation,
 };
 
 /// UI 档位 → xAI 官方 effort。
@@ -207,6 +208,7 @@ impl OpenAiResponsesProvider<'_> {
                     started_at,
                     started.elapsed(),
                     output.usage.clone(),
+                    None,
                 );
                 self.record_debug_success(
                     &request,
@@ -254,6 +256,7 @@ impl OpenAiResponsesProvider<'_> {
                             started_at,
                             started.elapsed(),
                             output.usage.clone(),
+                            None,
                         );
                         self.record_debug_success(
                             &request,
@@ -296,6 +299,8 @@ impl OpenAiResponsesProvider<'_> {
         let label = request_label(&request, "Responses stream");
         let started_at = chrono::Local::now().timestamp();
         let started = std::time::Instant::now();
+        let mut measured_sink = FirstTokenStreamSink::new(sink, started);
+        let sink = &mut measured_sink;
         let mut response = self
             .send_responses_body(&request, true, &label)
             .await
@@ -370,6 +375,7 @@ impl OpenAiResponsesProvider<'_> {
             started_at,
             started.elapsed(),
             output.usage.clone(),
+            sink.first_token_ms(),
         );
         self.record_debug_success(
             &request,
@@ -628,6 +634,7 @@ impl OpenAiResponsesProvider<'_> {
         started_at: i64,
         duration: std::time::Duration,
         usage: Option<ModelUsage>,
+        first_token_ms: Option<u64>,
     ) {
         let source = request
             .metadata
@@ -652,6 +659,8 @@ impl OpenAiResponsesProvider<'_> {
                 usage_source: "provider_reported",
                 started_at,
                 duration_ms: duration.as_millis() as u64,
+                first_token_ms,
+                reasoning_effort: crate::usage::reasoning_effort_for_request(request),
                 conversation_id: request.metadata.conversation_id.clone(),
                 message_id: request.metadata.message_id.clone(),
                 error_kind: None,
@@ -690,6 +699,8 @@ impl OpenAiResponsesProvider<'_> {
                 usage_source: "missing",
                 started_at,
                 duration_ms: duration.as_millis() as u64,
+                first_token_ms: None,
+                reasoning_effort: crate::usage::reasoning_effort_for_request(request),
                 conversation_id: request.metadata.conversation_id.clone(),
                 message_id: request.metadata.message_id.clone(),
                 error_kind: Some(error_kind_from_message(error)),
