@@ -90,57 +90,60 @@ export function AssistantMessageMeta({
           : null
 
   return (
-    <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-400 dark:text-neutral-500">
+    // 默认隐藏，鼠标悬停在这条消息（父级 .group）上才浮现——同用户气泡的操作行。
+    // focus-within 兜住键盘导航：Tab 到按钮时行必须可见。字号 11px、按钮 xs：
+    // 这是元信息，不能跟正文抢对比度。
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-neutral-400 opacity-0 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 group-hover:opacity-100 dark:text-neutral-500">
       <span className="shrink-0">{formatAssistantMessageTime(timestamp)}</span>
       {runEntryLabel && <span className="shrink-0">{runEntryLabel}</span>}
       {streamOutcomeLabel && <span className="shrink-0">{streamOutcomeLabel}</span>}
 
       <div className="flex items-center gap-0.5">
         <IconButton
-          size="sm"
+          size="xs"
           onClick={() => void handleCopy()}
           label={copied ? '已复制' : '复制'}
         >
-          {copied ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <Copy size={14} strokeWidth={2} />}
+          {copied ? <Check size={13} strokeWidth={2} className="chat-motion-pop" /> : <Copy size={13} strokeWidth={2} />}
         </IconButton>
         <IconButton
-          size="sm"
+          size="xs"
           onClick={() => void handleSaveToNote()}
           disabled={!onSaveToNote}
           label={saved ? '已存为笔记' : '存为笔记'}
         >
-          {saved ? <Check size={14} strokeWidth={2} className="chat-motion-pop" /> : <NotebookPen size={14} strokeWidth={2} />}
+          {saved ? <Check size={13} strokeWidth={2} className="chat-motion-pop" /> : <NotebookPen size={13} strokeWidth={2} />}
         </IconButton>
         <IconButton
-          size="sm"
+          size="xs"
           onClick={onRegenerate}
           disabled={!onRegenerate}
           label="重新生成"
         >
-          <RotateCcw size={14} strokeWidth={2} />
+          <RotateCcw size={13} strokeWidth={2} />
         </IconButton>
         <IconButton
-          size="sm"
+          size="xs"
           onClick={onFork}
           disabled={!onFork}
           label="建分支"
           title="从这里建分支（复制到新对话）"
         >
-          <GitBranch size={14} strokeWidth={2} />
+          <GitBranch size={13} strokeWidth={2} />
         </IconButton>
         <IconButton
-          size="sm"
+          size="xs"
           onClick={onDelete}
           disabled={!onDelete}
           label="删除"
         >
-          <Trash2 size={14} strokeWidth={2} />
+          <Trash2 size={13} strokeWidth={2} />
         </IconButton>
       </div>
 
       {speed != null && (
         <span className="inline-flex items-center gap-1">
-          <Gauge size={13} strokeWidth={2} />
+          <Gauge size={12} strokeWidth={2} />
           <span>{speed} tokens/sec</span>
         </span>
       )}

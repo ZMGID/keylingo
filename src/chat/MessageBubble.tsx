@@ -1041,7 +1041,9 @@ function MessageBubbleComponent({
 
   return (
     <MarkdownStreamingContext.Provider value={messageStreaming}>
-    <div className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
+    {/* `group`：给底部元信息条（AssistantMessageMeta）的 hover 显隐当悬停边界——
+        鼠标在这条消息任意位置时元信息浮现。 */}
+    <div className={`group flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
       <div className="w-full min-w-0">
         {toolCalls.length > 0 && !hasTimelineSegments && (
           <section
