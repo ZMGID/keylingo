@@ -236,11 +236,19 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       ignoreScrollTopRef.current = null
       const scrollTop = viewport.scrollTop
       const gap = getGap()
-      // scroll 可能先于 ResizeObserver delivery 到达。延后一拍再判来源，让 RO 有机会打开
+      // resize 窗口必须在**事件时**同步抓一份：判定被推迟了一拍（下面的 setTimeout），
+      // 而窗口的关闭动作（rAF + 宏任务）和这一拍是竞态 —— 快帧下关闭会抢先执行，
+      // 于是 token 对不上的补偿滚动（浏览器 clamp、滚动锚定、virtua shift 纠正）被误判成
+      // user、gap 又大于容差 → 流式中跟随莫名解除（表现「有时候就直接不跟随了」）。
+      // 补偿滚动派发于 scroll steps、早于当帧 rAF，事件时窗口必然还开着，抓下来是确定的。
+      const resizeWindowAtEvent = resizeWindowRef.current
+      // scroll 也可能先于 ResizeObserver delivery 到达。延后一拍再判来源，让 RO 有机会打开
       // resizeWindow；否则 virtua 的高度补偿会被当成用户滚动，直接解除流式跟随。
+      // 所以判定时还要再看一次窗口 —— 两个时刻任一开着都算 self。
       const timer = setTimeout(() => {
         pendingScrollTimers.delete(timer)
-        const selfInduced = resizeWindowRef.current || scrollTop === token
+        const selfInduced =
+          resizeWindowAtEvent || resizeWindowRef.current || scrollTop === token
         dispatch({
           type: 'scroll',
           gap,
