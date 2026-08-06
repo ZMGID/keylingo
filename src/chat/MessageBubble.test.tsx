@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { MessageBubble } from './MessageBubble'
@@ -25,16 +25,28 @@ describe('MessageBubble mount motion', () => {
     expect(container.firstElementChild).toHaveClass('chat-motion-bubble-in')
   })
 
-  // 元信息条 hover 显隐的接线：根容器必须是 .group、元信息条必须默认 opacity-0 +
-  // group-hover:opacity-100（悬停整条消息才浮现）。断言类名而非 :hover 行为
-  // （jsdom 不跑 CSS），CSS 机制本身已在真实浏览器验证过。
+  // 元信息条 hover 显隐：事件驱动（pointerenter/pointerleave 挂在消息根容器上），
+  // 不用 CSS group-hover——macOS WKWebView 的 :hover 移出后粘滞不消。事件驱动的好处
+  // 之一就是行为在 jsdom 里可直接断言。
   it('hides the assistant meta row until the message is hovered', () => {
     const { container } = render(<MessageBubble message={assistantMessage} />)
-    const root = container.firstElementChild
-    expect(root).toHaveClass('group')
-    const meta = container.querySelector('.group .opacity-0.group-hover\\:opacity-100')
-    expect(meta).not.toBeNull()
-    expect(meta?.querySelector('[aria-label="复制"]')).not.toBeNull()
+    const root = container.firstElementChild as HTMLElement
+    expect(root).toHaveAttribute('data-hover-reveal-root')
+
+    const meta = screen.getByLabelText('复制').closest('.transition-opacity')
+    expect(meta).toHaveClass('opacity-0')
+
+    fireEvent.pointerEnter(root)
+    expect(meta).toHaveClass('opacity-100')
+
+    fireEvent.pointerLeave(root)
+    expect(meta).toHaveClass('opacity-0')
+
+    // 光标甩出窗口漏发 pointerleave 的兜底：窗口失焦一并收起。
+    fireEvent.pointerEnter(root)
+    expect(meta).toHaveClass('opacity-100')
+    fireEvent.blur(window)
+    expect(meta).toHaveClass('opacity-0')
   })
 })
 

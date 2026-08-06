@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, Copy, Gauge, GitBranch, NotebookPen, RotateCcw, Trash2 } from 'lucide-react'
 import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
@@ -54,6 +54,28 @@ export function AssistantMessageMeta({
 }: AssistantMessageMetaProps) {
   const [copied, setCopied] = useState(false)
   const [saved, setSaved] = useState(false)
+  // hover 显隐用显式指针事件而非 CSS :hover（group-hover）：macOS WKWebView 存在
+  // :hover 粘滞——鼠标移出后样式不失效（Chromium 下同一套 CSS 实测正常）。事件派发
+  // 与 :hover 样式失效在 WebKit 里是两条路径，pointerleave 可靠。状态放在本组件、
+  // 监听挂到消息根容器（`data-hover-reveal-root`，见 MessageBubble）：hover 进出只
+  // 重渲染这一小条，不动整个气泡（大消息的渲染成本纪律，见 CLAUDE.md 滚动一节）。
+  const rootRef = useRef<HTMLDivElement>(null)
+  const [hovered, setHovered] = useState(false)
+  useEffect(() => {
+    const host = rootRef.current?.closest('[data-hover-reveal-root]')
+    if (!(host instanceof HTMLElement)) return
+    const show = () => setHovered(true)
+    const hide = () => setHovered(false)
+    host.addEventListener('pointerenter', show)
+    host.addEventListener('pointerleave', hide)
+    // 光标快速甩出窗口时 WebKit 可能漏发 pointerleave——窗口失焦一并收起。
+    window.addEventListener('blur', hide)
+    return () => {
+      host.removeEventListener('pointerenter', show)
+      host.removeEventListener('pointerleave', hide)
+      window.removeEventListener('blur', hide)
+    }
+  }, [])
   // 优先显示 provider 报告的真实用量；provider 不报时回落到 chars 估算（带 ~ 前缀）。
   const realUsage = realUsageTokens(usage)
   const tokenLabel = realUsage
@@ -90,10 +112,13 @@ export function AssistantMessageMeta({
           : null
 
   return (
-    // 默认隐藏，鼠标悬停在这条消息（父级 .group）上才浮现——同用户气泡的操作行。
+    // 默认隐藏，鼠标悬停在这条消息上才浮现（事件驱动，见上方注释）。
     // focus-within 兜住键盘导航：Tab 到按钮时行必须可见。字号 11px、按钮 xs：
     // 这是元信息，不能跟正文抢对比度。
-    <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-neutral-400 opacity-0 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 group-hover:opacity-100 dark:text-neutral-500">
+    <div
+      ref={rootRef}
+      className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-neutral-400 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 dark:text-neutral-500 ${hovered ? 'opacity-100' : 'opacity-0'}`}
+    >
       <span className="shrink-0">{formatAssistantMessageTime(timestamp)}</span>
       {runEntryLabel && <span className="shrink-0">{runEntryLabel}</span>}
       {streamOutcomeLabel && <span className="shrink-0">{streamOutcomeLabel}</span>}
