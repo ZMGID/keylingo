@@ -510,7 +510,9 @@ pub fn run() {
             chat::protocol::chat_sync_state,
             // Chat 模块命令
             chat::commands::catalog::chat_get_conversations,
-            chat::commands::interaction::chat_list_background_commands,
+            chat::commands::interaction::chat_list_background_tasks,
+            chat::commands::interaction::chat_clear_finished_background_tasks,
+            chat::commands::interaction::chat_stop_external_background_task,
             chat::commands::interaction::chat_kill_background_command,
             chat::commands::catalog::chat_search_conversations,
             chat::commands::catalog::chat_get_conversation,

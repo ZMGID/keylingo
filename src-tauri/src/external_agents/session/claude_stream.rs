@@ -112,6 +112,20 @@ fn interrupt_request_line(request_id: &str) -> String {
     )
 }
 
+/// 一行 `stop_task` 控制请求（含结尾换行）。Agent SDK `Query.stopTask()` 的线上形态：
+/// 载荷 `{subtype:"stop_task", task_id}`，`request_id` 与 `interrupt`/`set_model`
+/// 一样在**帧顶层**。CLI 停掉任务后发 `status:"stopped"` 的 `task_notification`。
+fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
+    format!(
+        "{}\n",
+        json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "stop_task", "task_id": task_id },
+        })
+    )
+}
+
 /// 一次 stdout 读的结果。
 enum ReadStep {
     Line(String),
@@ -570,6 +584,11 @@ pub struct ClaudeStreamJsonSession {
     /// 无从分辨。`result` 帧上的 `user_message_uuid` 能直接回答「这条 result 属于哪条用户
     /// 消息」，那才是这个竞态的根治办法；它落地之后这一层可以简化掉。
     stale_frames_left: u32,
+    /// 唤醒轮正文的收集窗口是否打开（轮间见到 `system/init` 开、见到 origin 为
+    /// task-notification 的 `result` 关）。窗口外的空闲帧是取消残留，直接丢。
+    idle_collecting: bool,
+    /// 收集窗口内攒下的唤醒轮正文（TextDelta 累积），收尾时整段落成一条助手消息。
+    idle_wake_text: String,
 }
 
 impl ClaudeStreamJsonSession {
@@ -628,6 +647,8 @@ impl ClaudeStreamJsonSession {
                 active_model: crate::external_agents::defs::claude::claude_model_from_args(args),
                 stderr_tail: Some(stderr_tail),
                 stale_frames_left: 0,
+                idle_collecting: false,
+                idle_wake_text: String::new(),
             }),
             (pipes, exited) => {
                 let msg = exited
@@ -723,6 +744,8 @@ impl ClaudeStreamJsonSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
+                // 换模型握手只有 3s，停任务不急这一下：静默丢掉，用户重点一次即可。
+                Ok(SessionCommand::StopTask { .. }) => {}
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return Err("control channel closed".to_string())
@@ -850,6 +873,16 @@ impl ClaudeStreamJsonSession {
                 }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
+                }
+                // 面板的「停止后台任务」：轮内直接写 `stop_task` 控制请求。CLI 收到后
+                // 会发 `status:"stopped"` 的 `task_notification`，注册表由那帧修正。
+                Ok(SessionCommand::StopTask { task_id }) => {
+                    let line = stop_task_request_line(
+                        &format!("kivio-stop-task-{}", Uuid::new_v4()),
+                        &task_id,
+                    );
+                    let _ = self.stdin.write_all(line.as_bytes()).await;
+                    let _ = self.stdin.flush().await;
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -1006,6 +1039,14 @@ impl ClaudeStreamJsonSession {
             let (drop_stale, next_budget) = stale_frame_verdict(self.stale_frames_left, &value);
             self.stale_frames_left = next_budget;
             if drop_stale {
+                // 唯一豁免：后台任务生命周期。窗口丢的是**轮次内容**，而任务状态是跨轮的
+                // ——task_notification 落进窗口（取消/重新生成后正好撞上，实测）会让面板
+                // 那条永远卡在「运行中」。
+                if let Some(event) =
+                    crate::external_agents::stream::claude::background_task_event(&value)
+                {
+                    let _ = events.send(event).await;
+                }
                 continue;
             }
 
@@ -1100,6 +1141,122 @@ impl ClaudeStreamJsonSession {
         fold_stderr(msg, &tail)
     }
 
+    /// 轮次之间写一条 `stop_task` 控制请求。claude 常驻进程在轮间照常读 stdin，
+    /// 停止立即生效；它发的 `task_notification`（stopped）由轮间空闲读消费进注册表
+    /// （发起方已乐观置 stopped，见 interaction.rs）。
+    pub async fn send_stop_task(&mut self, task_id: &str) {
+        let line = stop_task_request_line(&format!("kivio-stop-task-{}", Uuid::new_v4()), task_id);
+        self.write_control_line(&line).await;
+    }
+
+    /// 往 stdin 写一整行控制帧。只在**不会被 select 取消**的上下文调用（actor 的
+    /// handler 段 / 轮内读循环）——写到一半被取消会留半行破 JSON。
+    async fn write_control_line(&mut self, line: &str) {
+        let _ = self.stdin.write_all(line.as_bytes()).await;
+        let _ = self.stdin.flush().await;
+    }
+
+    /// 轮间空闲读一步：**只读 + 分类，不写**。
+    ///
+    /// 只读的原因：这个 future 挂在 actor 的 `select!` 里，取消发生在 await 点——
+    /// 读用的 `Lines::next_line` 官方保证 cancel-safe，而写到一半被取消会往 stdin
+    /// 留半行破 JSON。所以写回动作（Reply 行）交给调用方在 select 之外执行。
+    /// `next_line` 之后没有任何 await，分类一定跑完。
+    ///
+    /// **唤醒轮正文收集**：唤醒轮以自己的 `system/init` 开场、以带
+    /// `origin.kind=="task-notification"` 的 `result` 收尾。init 打开收集窗口，
+    /// 窗口内的内容帧喂共享解析器攒 TextDelta（复用它的流式/整块去重），收尾时整段
+    /// 交给 sink 落成一条助手消息。窗口外的杂帧（取消残留等）直接丢弃——它们属于
+    /// 已收尾的轮次，攒进正文会污染唤醒消息。
+    async fn read_idle_frame(&mut self) -> IdlePump {
+        let line = match self.next_line().await {
+            ReadStep::Line(line) => line,
+            ReadStep::Idle => return IdlePump::Quiet,
+            // EOF / 不可恢复错误：停止空闲读（别对着死管道忙等）。会话的真实死因
+            // 留给下一轮 RunTurn 的既有失败路径去发现和上报。
+            ReadStep::Eof => return IdlePump::Dead,
+            // 偶发可恢复错误（EINTR 等）：这次当无事发生；连发不停由调用方计数升级 Dead。
+            ReadStep::Fatal(_) => return IdlePump::Hiccup,
+        };
+        if line.trim().is_empty() {
+            return IdlePump::Quiet;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            // 非 JSON 行在轮间没有展示位，丢弃。
+            return IdlePump::Quiet;
+        };
+        match classify_inbound_frame(&value, false) {
+            // can_ask=false ⇒ 一切控制请求都以 error 回复（fail-closed，沉默=挂死）。
+            InboundFrame::Reply(reply) => IdlePump::Reply(reply),
+            InboundFrame::Ask(_) | InboundFrame::CancelAsk(_) | InboundFrame::Ignore => {
+                IdlePump::Quiet
+            }
+            InboundFrame::Stream => self.classify_idle_stream_frame(&value),
+        }
+    }
+
+    /// `read_idle_frame` 的 Stream 分支（纯同步）。
+    fn classify_idle_stream_frame(&mut self, value: &Value) -> IdlePump {
+        use crate::external_agents::stream::claude as claude_stream;
+        // 唤醒轮收尾：把窗口里攒下的正文整段交出去，附上模型与真实用量（出处证明）。
+        if claude_stream::is_task_notification_result(value) {
+            let text = std::mem::take(&mut self.idle_wake_text);
+            self.idle_collecting = false;
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return IdlePump::Quiet;
+            }
+            return IdlePump::Side(IdleSideEffect::WakeMessage {
+                text,
+                model: self.handler.resolved_model().map(str::to_string),
+                usage: claude_stream::result_usage(value),
+            });
+        }
+        // 任务生命周期帧：入面板注册表（与收集窗口无关，started 帧也可能出现在唤醒轮里
+        // ——唤醒轮的模型可以再派新的后台任务）。
+        if let Some(event) = claude_stream::background_task_event(value) {
+            return IdlePump::Side(IdleSideEffect::Task(event));
+        }
+        let obj = value.as_object();
+        let kind = obj
+            .and_then(|o| o.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let subtype = obj
+            .and_then(|o| o.get("subtype"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        // 唤醒轮开场：打开收集窗口。init 每轮都发且先于任何正文（实测，见模块头）。
+        if kind == "system" && subtype == "init" {
+            self.idle_collecting = true;
+            self.idle_wake_text.clear();
+            return IdlePump::Quiet;
+        }
+        if self.idle_collecting {
+            // 喂共享解析器攒正文：复用它的「流式 delta vs 整块 assistant 帧」去重。
+            // 只收 TextDelta；唤醒轮的工具调用/思考在轮间没有承载位，作为 v1 边界丢弃。
+            let ClaudeStreamJsonSession {
+                handler,
+                idle_wake_text,
+                ..
+            } = self;
+            handler.handle_value(value, &mut |event| {
+                if let UnifiedAgentEvent::TextDelta { delta } = event {
+                    idle_wake_text.push_str(&delta);
+                }
+            });
+        }
+        // 窗口外的杂帧（取消残留的迟到帧等）：属于已收尾的轮次，丢弃。
+        IdlePump::Quiet
+    }
+
+    /// 清掉半截的唤醒轮收集状态。轮次开始前调用：用户消息一旦写入，后续帧都属于
+    /// 新轮次，半截唤醒正文没有完整的收尾信号，落一半的消息比不落更糟。
+    fn reset_idle_collector(&mut self) {
+        self.idle_wake_text.clear();
+        self.idle_collecting = false;
+    }
+
     /// 关停 = **关 stdin 然后 `wait()`**，不是 kill。
     ///
     /// 实测 claude 只在 stdin 关闭时退出（exit 0，约 0.5s），正常退出时它会自己收尾
@@ -1132,13 +1289,107 @@ impl ClaudeStreamJsonSession {
     }
 }
 
+/// 轮间空闲读一步的结果（`read_idle_frame`）。
+enum IdlePump {
+    /// 无事发生（超时 / 空行 / 非 JSON / 不需要动作的帧）。
+    Quiet,
+    /// 偶发可恢复读错误：调用方计数，连击超限升级 Dead。
+    Hiccup,
+    /// stdout 已结束/不可恢复：调用方停止空闲读。
+    Dead,
+    /// claude 在等回复的控制请求（fail-closed 的 error 响应行），调用方写回 stdin。
+    Reply(String),
+    /// 需要旁路出口处理的副作用（任务事件 / 唤醒轮正文），调用方喂给 sink。
+    Side(IdleSideEffect),
+}
+
+/// 轮间空闲读产出的副作用，经 `BackgroundTaskSink` 交给宿主（run.rs）处理。
+pub enum IdleSideEffect {
+    /// 后台任务生命周期事件 → AppState 注册表（面板数据源）。
+    Task(UnifiedAgentEvent),
+    /// 唤醒轮（后台任务完成后 CLI 自起的一轮）的完整正文 → 落成一条真正的助手消息。
+    /// claude 在它自己的会话里确实「通知过了」，不落地的话用户永远看不到那句汇报。
+    /// `model`/`usage` 是这条消息的出处证明：不带的话前端只能显示估算的「~N tokens」，
+    /// 看着像脚本拼的而不是模型产出（实测被用户质疑过）。
+    WakeMessage {
+        text: String,
+        model: Option<String>,
+        usage: Option<crate::chat::model::ModelUsage>,
+    },
+}
+
+/// 轮间空闲读副作用的旁路出口。actor 里没有 `AppHandle`（会话层不该有），
+/// 宿主在建会话时把「upsert 注册表 / 追加唤醒消息」包成闭包递进来。
+pub type BackgroundTaskSink = std::sync::Arc<dyn Fn(IdleSideEffect) + Send + Sync>;
+
 /// Spawn the actor task that owns a connected session and serves `SessionCommand`s.
 pub fn spawn_claude_stream_session_actor(
-    mut session: ClaudeStreamJsonSession,
+    session: ClaudeStreamJsonSession,
 ) -> mpsc::Sender<SessionCommand> {
+    spawn_claude_stream_session_actor_with_sink(session, None)
+}
+
+/// 带轮间空闲读的 actor。
+///
+/// **为什么要空闲读**（2026-08-06 实测）：后台任务在两轮之间完成时，claude 自己起一个
+/// 唤醒轮把 `task_notification` + 汇报文字写进 stdout——此前轮间没人读，通知积压到
+/// 下一条用户消息才被消费：面板上一个 5 秒的任务能挂着「运行中」几分钟，唤醒轮的
+/// 汇报文字还会漏进下一个回答的开头。空闲读只干三件事：回掉必须回复的
+/// `control_request`（fail-closed，沉默=挂死）、把任务生命周期事件喂给 `sink`、
+/// 其余内容帧有意丢弃（轮间没有承载位；要接唤醒轮的正文得先有「CLI 自起轮次」的
+/// 消息模型，那是另一个任务）。
+pub fn spawn_claude_stream_session_actor_with_sink(
+    mut session: ClaudeStreamJsonSession,
+    sink: Option<BackgroundTaskSink>,
+) -> mpsc::Sender<SessionCommand> {
+    enum ActorStep {
+        Cmd(Option<SessionCommand>),
+        Idle(IdlePump),
+    }
     let (tx, mut rx) = mpsc::channel::<SessionCommand>(8);
     tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
+        // stdout 死了就停止空闲读（别对着死管道忙等）；会话的真实死因留给下一轮
+        // RunTurn 的既有失败路径去发现和上报，这里不重复造报错出口。
+        let mut idle_dead = false;
+        let mut idle_hiccups = 0u32;
+        loop {
+            // select 里**只读**：读是 cancel-safe 的（`Lines::next_line` 官方保证），
+            // 写回动作放到 select 之外执行，写到一半被取消会留半行破 JSON。
+            let step = if idle_dead {
+                ActorStep::Cmd(rx.recv().await)
+            } else {
+                tokio::select! {
+                    cmd = rx.recv() => ActorStep::Cmd(cmd),
+                    pump = session.read_idle_frame() => ActorStep::Idle(pump),
+                }
+            };
+            let cmd = match step {
+                ActorStep::Idle(pump) => {
+                    match pump {
+                        IdlePump::Quiet => idle_hiccups = 0,
+                        IdlePump::Hiccup => {
+                            idle_hiccups += 1;
+                            if idle_hiccups >= MAX_RECOVERABLE_READ_ERRORS {
+                                idle_dead = true;
+                            }
+                        }
+                        IdlePump::Dead => idle_dead = true,
+                        IdlePump::Reply(line) => {
+                            idle_hiccups = 0;
+                            session.write_control_line(&line).await;
+                        }
+                        IdlePump::Side(effect) => {
+                            idle_hiccups = 0;
+                            if let Some(sink) = sink.as_ref() {
+                                sink(effect);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                ActorStep::Cmd(cmd) => cmd,
+            };
+            let Some(cmd) = cmd else { break };
             match cmd {
                 SessionCommand::RunTurn {
                     prompt,
@@ -1151,6 +1402,8 @@ pub fn spawn_claude_stream_session_actor(
                 } => {
                     // Invariant (A4)：`run_turn` 在返回前发完所有 `event`，mpsc 保序，
                     // 所以调用方在 `done` 之后的 drain 能看到全部事件。`done.send` 永远最后。
+                    // 半截的唤醒轮收集先清掉：prompt 一写入，后续帧都属于新轮次。
+                    session.reset_idle_collector();
                     let result = session
                         .run_turn(
                             &prompt,
@@ -1169,6 +1422,9 @@ pub fn spawn_claude_stream_session_actor(
                     let _ = accepted.send(false);
                 }
                 SessionCommand::Cancel => {} // 轮次之间没有在跑的轮次
+                SessionCommand::StopTask { task_id } => {
+                    session.send_stop_task(&task_id).await;
+                }
                 SessionCommand::Close => {
                     session.close().await;
                     return;
@@ -1336,6 +1592,20 @@ mod tests {
         let a = interrupt_request_line(&format!("kivio-interrupt-{}", Uuid::new_v4()));
         let b = interrupt_request_line(&format!("kivio-interrupt-{}", Uuid::new_v4()));
         assert_ne!(a, b);
+    }
+
+    /// `stop_task` 的线上形态：`request_id` 在帧顶层（与 `interrupt`/`set_model` 一致），
+    /// 载荷 `{subtype:"stop_task", task_id}`。放错层级 = CLI 匹配不到 = 停止静默无效。
+    #[test]
+    fn stop_task_request_matches_the_control_request_envelope() {
+        let line = stop_task_request_line("req-stop", "b2foykvcu");
+        assert!(line.ends_with('\n'), "必须是一整行");
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["type"], serde_json::json!("control_request"));
+        assert_eq!(value["request_id"], serde_json::json!("req-stop"));
+        assert_eq!(value["request"]["subtype"], serde_json::json!("stop_task"));
+        assert_eq!(value["request"]["task_id"], serde_json::json!("b2foykvcu"));
+        assert!(value["request"]["task_id"].is_string());
     }
 
     // ---- 帧分流：对不认识的控制请求必须回复（fail-closed）----

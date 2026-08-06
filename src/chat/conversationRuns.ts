@@ -11,6 +11,8 @@ export interface ConversationStreamSnapshot {
   reasoningDurationMs: number | null
   reasoningStartedAtBySegmentId: Record<string, number>
   reasoningDurationMsBySegmentId: Record<string, number>
+  /** 流状态行上的瞬态一行字（上游重试等，status_note_updated 事件）。正文一恢复流动就清。 */
+  statusNote: string | null
 }
 
 /** 后到的 tool record 覆盖已有的，但**不许用「没有」覆盖「有」**（目前只针对
@@ -78,5 +80,6 @@ export function createEmptyStreamSnapshot(): ConversationStreamSnapshot {
     reasoningDurationMs: null,
     reasoningStartedAtBySegmentId: {},
     reasoningDurationMsBySegmentId: {},
+    statusNote: null,
   }
 }

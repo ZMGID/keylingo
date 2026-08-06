@@ -579,6 +579,12 @@ pub enum ChatRunEvent {
         event: String,
         message: String,
     },
+    /// 生成过程的**瞬态状态一行字**（当前唯一来源：claude 上游重试 `api_retry`）。
+    /// 挂在流状态行（StreamStatusLine）上而不是消息正文——正文一恢复流动前端就清掉。
+    /// `note: None` = 显式清除。
+    StatusNoteUpdated {
+        note: Option<String>,
+    },
     RunCompleted {
         full: String,
         conversation_revision: u64,
@@ -890,6 +896,8 @@ pub struct ChatRunSnapshot {
     pub pending_interactions: Vec<ChatPendingInteractionSnapshot>,
     pub pending_python_requests: Vec<ChatRunPythonPayload>,
     pub warnings: Vec<ChatWarningSnapshot>,
+    /// 流状态行上的瞬态一行字（上游重试等）。见 `ChatRunEvent::StatusNoteUpdated`。
+    pub status_note: Option<String>,
     pub terminal: Option<ChatTerminalSnapshot>,
 }
 
@@ -1017,6 +1025,7 @@ impl ChatProtocolHub {
             pending_interactions: Vec::new(),
             pending_python_requests: Vec::new(),
             warnings: Vec::new(),
+            status_note: None,
             terminal: None,
         };
         self.runs.insert(
@@ -1366,6 +1375,9 @@ fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
             if snapshot.warnings.len() > 20 {
                 snapshot.warnings.remove(0);
             }
+        }
+        ChatRunEvent::StatusNoteUpdated { note } => {
+            snapshot.status_note = note.clone();
         }
         ChatRunEvent::RunCompleted {
             full,
@@ -1727,6 +1739,8 @@ mod tests {
             serde_json::json!({
                 "type": "hook_failed", "hookName": "after", "event": "stop", "message": "failed"
             }),
+            serde_json::json!({"type": "status_note_updated", "note": "上游重试 2/10"}),
+            serde_json::json!({"type": "status_note_updated", "note": null}),
             serde_json::json!({
                 "type": "run_completed", "full": "answer", "conversationRevision": 2
             }),

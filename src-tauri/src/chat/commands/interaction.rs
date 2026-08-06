@@ -175,37 +175,152 @@ pub(crate) fn clear_request_debug_records(state: State<AppState>) {
     crate::chat::request_debug::clear(&state);
 }
 
-/// 列出当前仍在运行的后台命令（chat agent 用 `run_command background:true` 起的）。
-/// 只返回 Running 的——UI 仅在有后台任务时才显示指示器，终止/退出的不必展示。
+/// Background tasks 面板的统一列表：内置 `run_command background:true` 作业 +
+/// 外部 CLI（claude）自报的后台任务（后台 Bash / 后台子代理）。Running 与终态都返回，
+/// 前端分 Running / Finished 两段渲染；`startedAtMs` 供排序，`elapsedSecs` 只对
+/// running 有意义（终态不显示时长，Desktop 面板同款语义）。
+///
+/// **按对话隔离**：面板挂在会话视图里，只展示当前对话自己的任务（换对话/新建对话
+/// 不能看到别人的）。`conversation_id` 为 `None` 时不过滤（诊断用）；内置作业里
+/// 无会话归属的旧条目在过滤模式下不展示。
+///
+/// 外部任务的对账：常驻 CLI 会话没了（回收 / 重连 / 崩溃）⇒ 它的后台任务随进程一起
+/// 消失，但 `task_notification` 永远不会来。列表是唯一的读取口，就在这里把这类
+/// 孤儿 running 条目翻成 stopped（单点收口，不用追每个会话关闭路径）。
 #[tauri::command]
-pub(crate) fn chat_list_background_commands(state: State<AppState>) -> Vec<serde_json::Value> {
-    let map = state.background_commands_handle();
-    let map = map.lock().unwrap_or_else(|e| e.into_inner());
-    let mut jobs: Vec<&crate::native_tools::BackgroundCommand> = map
-        .values()
-        .filter(|j| {
+pub(crate) fn chat_list_background_tasks(
+    state: State<AppState>,
+    conversation_id: Option<String>,
+) -> Vec<serde_json::Value> {
+    let wanted = conversation_id.as_deref();
+    let mut out: Vec<(std::time::SystemTime, serde_json::Value)> = Vec::new();
+
+    {
+        let map = state.background_commands_handle();
+        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        for j in map.values() {
+            if wanted.is_some() && j.conversation_id.as_deref() != wanted {
+                continue;
+            }
+            use crate::native_tools::BackgroundCommandStatus as S;
+            let (status, exit_code) = match &j.status {
+                S::Running => ("running", None),
+                S::Exited { code: Some(0) } => ("completed", Some(0)),
+                S::Exited { code } => ("failed", *code),
+                S::Killed => ("stopped", None),
+                S::Error { .. } => ("failed", None),
+            };
+            let value = serde_json::json!({
+                "id": j.job_id,
+                "source": "builtin",
+                "kind": "bash",
+                "title": j.command,
+                "status": status,
+                "exitCode": exit_code,
+                "pid": j.pid,
+                "cwd": j.cwd,
+                "elapsedSecs": j.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0),
+                "startedAtMs": epoch_ms(j.started_at),
+            });
+            out.push((j.started_at, value));
+        }
+    }
+
+    {
+        let mut map = state
+            .external_background_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for t in map.values_mut() {
+            if wanted.is_some() && Some(t.conversation_id.as_str()) != wanted {
+                continue;
+            }
+            if t.status == "running"
+                && state
+                    .external_live_session_control_any(&t.conversation_id)
+                    .is_none()
+            {
+                t.status = "stopped".to_string();
+                t.ended_at = Some(std::time::SystemTime::now());
+            }
+            let value = serde_json::json!({
+                "id": t.task_id,
+                "source": "external",
+                "kind": t.kind,
+                "title": t.description,
+                "status": t.status,
+                "summary": t.summary,
+                "conversationId": t.conversation_id,
+                "elapsedSecs": t.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0),
+                "startedAtMs": epoch_ms(t.started_at),
+            });
+            out.push((t.started_at, value));
+        }
+    }
+
+    out.sort_by_key(|(started_at, _)| *started_at);
+    out.into_iter().map(|(_, value)| value).collect()
+}
+
+fn epoch_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 面板的「清空 Finished」：两个注册表里**本对话**的终态条目一并移除（`None` = 不过滤）。
+/// 运行中的不动。注意被清的内置作业其 `bash_output` 会开始报「no such job」——用户显式
+/// 清理，可接受；日志文件仍在磁盘（启动 GC 兜底）。
+#[tauri::command]
+pub(crate) fn chat_clear_finished_background_tasks(
+    state: State<AppState>,
+    conversation_id: Option<String>,
+) {
+    let wanted = conversation_id.as_deref();
+    {
+        let map = state.background_commands_handle();
+        let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, j| {
             matches!(
                 j.status,
                 crate::native_tools::BackgroundCommandStatus::Running
+            ) || (wanted.is_some() && j.conversation_id.as_deref() != wanted)
+        });
+    }
+    state
+        .external_background_tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|_, t| {
+            t.status == "running" || (wanted.is_some() && Some(t.conversation_id.as_str()) != wanted)
+        });
+}
+
+/// 面板停止一条外部 CLI 后台任务：往常驻会话 actor 送 `StopTask`（claude 写
+/// `stop_task` 控制请求）。乐观置 stopped —— 确认帧（`task_notification` stopped）
+/// 要到下一次读 stdout 才到，等它面板会像没反应；真没停掉的话下一轮的帧会把状态改回来。
+#[tauri::command]
+pub(crate) async fn chat_stop_external_background_task(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    task_id: String,
+) -> Result<(), String> {
+    if let Some(control) = state.external_live_session_control_any(&conversation_id) {
+        let _ = control
+            .send(
+                crate::external_agents::session::live::SessionCommand::StopTask {
+                    task_id: task_id.clone(),
+                },
             )
-        })
-        .collect();
-    jobs.sort_by_key(|j| j.started_at);
-    jobs.into_iter()
-        .map(|j| {
-            serde_json::json!({
-                "jobId": j.job_id,
-                "command": j.command,
-                "cwd": j.cwd,
-                "pid": j.pid,
-                "elapsedSecs": j.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0),
-            })
-        })
-        .collect()
+            .await;
+    }
+    // 会话已没了 ⇒ 任务随进程消失，同样落到 stopped。
+    state.upsert_external_background_task(&conversation_id, &task_id, "stopped", None, None, None);
+    Ok(())
 }
 
 /// 从 UI 终止一个后台命令。复用 agent 的 `kill_background`（整组杀 + 标记 Killed）。
-/// 用户从 UI 面板显式操作，可跨会话（面板列的是全部作业），故不传会话过滤。
+/// 用户从 UI 面板显式操作（面板已按对话过滤过），不再二次传会话过滤。
 #[tauri::command]
 pub(crate) fn chat_kill_background_command(
     state: State<AppState>,

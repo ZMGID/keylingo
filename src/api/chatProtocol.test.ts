@@ -55,6 +55,7 @@ function snapshot(overrides: Partial<ChatRunSnapshot> = {}): ChatRunSnapshot {
     pendingInteractions: [],
     pendingPythonRequests: [],
     warnings: [],
+    statusNote: null,
     terminal: null,
     ...overrides,
   }

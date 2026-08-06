@@ -1404,6 +1404,60 @@
         },
         {
           "additionalProperties": false,
+          "description": "生成过程的**瞬态状态一行字**（当前唯一来源：claude 上游重试 `api_retry`）。\n挂在流状态行（StreamStatusLine）上而不是消息正文——正文一恢复流动前端就清掉。\n`note: None` = 显式清除。",
+          "properties": {
+            "baseRevision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "messageId": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "protocolVersion": {
+              "const": 1,
+              "type": "integer"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "scope": {
+              "const": "run",
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "status_note_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "protocolVersion",
+            "scope",
+            "conversationId",
+            "runId",
+            "messageId",
+            "seq",
+            "baseRevision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "properties": {
             "baseRevision": {
               "format": "uint64",

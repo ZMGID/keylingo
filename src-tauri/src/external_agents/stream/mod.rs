@@ -67,6 +67,11 @@ impl StreamHandler {
     pub fn last_result_aborted(&self) -> bool {
         self.0.last_result_aborted()
     }
+
+    /// 最近一次 `system/init` 报的模型（claude 常驻会话跨轮记忆）。唤醒消息的模型归属用。
+    pub fn resolved_model(&self) -> Option<&str> {
+        self.0.resolved_model()
+    }
 }
 
 /// 一次 CLI 用量上报的原始分量。各 CLI 只填其中几项，其余走 `..Default::default()`。

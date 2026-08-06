@@ -50,6 +50,7 @@ interface LiveStats {
   elapsedMs: number
   tokens: number
   running: number
+  statusNote: string | null
 }
 
 /**
@@ -76,6 +77,7 @@ export const StreamStatusLine = memo(function StreamStatusLine({ active }: Strea
           (n, tool) => (tool.status === 'running' ? n + 1 : n),
           0,
         ),
+        statusNote: snapshot.statusNote,
       })
     }
     update()
@@ -88,6 +90,7 @@ export const StreamStatusLine = memo(function StreamStatusLine({ active }: Strea
     parts.push(formatElapsed(stats.elapsedMs))
     if (stats.tokens > 0) parts.push(`${formatTokens(stats.tokens)} tokens`)
     if (stats.running > 0) parts.push(`${stats.running} 个任务运行中`)
+    if (stats.statusNote) parts.push(stats.statusNote)
   }
 
   return (

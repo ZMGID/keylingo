@@ -100,6 +100,13 @@ pub enum SessionCommand {
         text: String,
         accepted: oneshot::Sender<bool>,
     },
+    /// 停止 CLI 侧的一个后台任务（Background tasks 面板的停止按钮）。
+    ///
+    /// 目前只有 claude 有协议支持（`control_request` 的 `stop_task` 子型，等价于
+    /// Agent SDK 的 `Query.stopTask()`）；其余 CLI 的 actor 收到后直接忽略。
+    /// 无 ack —— claude 停掉任务后会发 `status:"stopped"` 的 `task_notification`，
+    /// 注册表由那条帧（下一次读到时）修正。
+    StopTask { task_id: String },
     /// Shut the session down (close stdin + kill the child) and end the actor.
     Close,
 }

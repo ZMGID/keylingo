@@ -403,6 +403,7 @@ pub async fn run_external_cli_reply(
         apply_unified_event(
             app,
             &run_id,
+            &conversation_id,
             &compaction_anchor_id,
             &mut content,
             &mut reasoning,
@@ -829,6 +830,7 @@ where
                 sandbox.as_deref(),
                 &mcp_servers,
                 resume_native.clone(),
+                Some(background_task_sink(app, conversation_id)),
             )
             .await
             {
@@ -861,6 +863,7 @@ where
                         sandbox.as_deref(),
                         &mcp_servers,
                         None,
+                        Some(background_task_sink(app, conversation_id)),
                     )
                     .await?
                 }
@@ -1071,6 +1074,7 @@ async fn reconnect_fresh(
         sandbox,
         mcp_servers,
         None,
+        Some(background_task_sink(app, conversation_id)),
     )
     .await?;
     let _ = save_live_handle(
@@ -1830,8 +1834,112 @@ struct PersistentConnection {
     child_pid: Option<u32>,
 }
 
+/// claude 轮间空闲读的副作用旁路：会话层没有（也不该有）`AppHandle`，
+/// 这里把「upsert 注册表 / 追加唤醒消息」包成闭包递给 actor。轮内的同名任务事件走
+/// `apply_unified_event` 的正常事件流，两条路对同一注册表做幂等 upsert。
+fn background_task_sink(
+    app: &AppHandle,
+    conversation_id: &str,
+) -> crate::external_agents::session::claude_stream::BackgroundTaskSink {
+    use crate::external_agents::session::claude_stream::IdleSideEffect;
+    let app = app.clone();
+    let conversation_id = conversation_id.to_string();
+    std::sync::Arc::new(move |effect| match effect {
+        IdleSideEffect::Task(UnifiedAgentEvent::BackgroundTask {
+            task_id,
+            status,
+            kind,
+            description,
+            summary,
+        }) => {
+            app.state::<AppState>().upsert_external_background_task(
+                &conversation_id,
+                &task_id,
+                &status,
+                kind.as_deref(),
+                description.as_deref(),
+                summary.as_deref(),
+            );
+        }
+        IdleSideEffect::Task(_) => {}
+        // sink 是同步闭包，持久化是 async —— 甩给运行时，失败只打日志（唤醒消息
+        // 是锦上添花，不能因为它把会话 actor 拖死）。
+        IdleSideEffect::WakeMessage { text, model, usage } => {
+            let app = app.clone();
+            let conversation_id = conversation_id.clone();
+            tauri::async_runtime::spawn(async move {
+                append_wake_turn_message(app, conversation_id, text, model, usage).await;
+            });
+        }
+    })
+}
+
+/// 把唤醒轮（后台任务完成后 CLI 自起的一轮）的正文落成一条真正的助手消息，
+/// 并走标准 run 协议事件让**打开着的窗口实时看到**。
+///
+/// 合成 run 可行的依据：前端对 `run_started` 的处理是窗口无关的（恢复 / 多窗口场景
+/// 本来就要求它渲染「不是自己发起的 run」，见 Chat.tsx 的 onChatStream——不核对
+/// 发起方，收到就建流快照），`run_completed` 触发它按 `conversation_revision`
+/// 重新拉会话，读到的就是这里持久化的消息。先落盘再发事件：落盘失败时不留幽灵 run。
+async fn append_wake_turn_message(
+    app: AppHandle,
+    conversation_id: String,
+    text: String,
+    model: Option<String>,
+    usage: Option<ModelUsage>,
+) {
+    let message_id = format!("msg_{}", Uuid::new_v4());
+    // ChatMessage 字段全有 serde 默认值，走最小 JSON 构造（与 repository 单测同款），
+    // 免得每加一个字段这里就要跟着改。model/usage 是出处证明：让消息元信息栏显示
+    // 真实模型与用量，而不是估算的「~N tokens」。
+    let message: crate::chat::types::ChatMessage = match serde_json::from_value(serde_json::json!({
+        "id": message_id,
+        "role": "assistant",
+        "content": text,
+        "model": model,
+        "usage": usage,
+        "timestamp": Local::now().timestamp(),
+    })) {
+        Ok(message) => message,
+        Err(err) => {
+            eprintln!("wake-turn message build failed: {err}");
+            return;
+        }
+    };
+    let persisted = match crate::chat::repository::repository(&app)
+        .append_message(&app, &conversation_id, message)
+        .await
+    {
+        Ok(conversation) => conversation,
+        Err(err) => {
+            eprintln!("wake-turn message persist failed: {err:?}");
+            return;
+        }
+    };
+    let run_id = format!("ext-wake-{}", Uuid::new_v4());
+    crate::chat::protocol::register_run(
+        &app,
+        &conversation_id,
+        &run_id,
+        &message_id,
+        persisted.revision.saturating_sub(1),
+    );
+    crate::chat::protocol::emit_run_event(
+        &app,
+        &run_id,
+        crate::chat::protocol::ChatRunEvent::TextDelta {
+            delta: text.clone(),
+            segment: None,
+        },
+    );
+    crate::chat::protocol::finish_run(&app, &run_id, "done", &text, persisted.revision);
+}
+
 /// Connect (or resume) a persistent protocol session, returning its control channel, native id,
 /// and whether a resume actually succeeded. Falls back to a fresh session if resume fails.
+///
+/// `background_task_sink`：claude 轮间空闲读到的后台任务事件旁路（→ AppState 注册表），
+/// 其余协议无后台任务概念，忽略。
 #[allow(clippy::too_many_arguments)]
 async fn connect_persistent_session(
     protocol: StreamFormat,
@@ -1843,10 +1951,11 @@ async fn connect_persistent_session(
     sandbox: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     resume_native: Option<String>,
+    background_task_sink: Option<crate::external_agents::session::claude_stream::BackgroundTaskSink>,
 ) -> Result<PersistentConnection, String> {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
     use crate::external_agents::session::claude_stream::{
-        spawn_claude_stream_session_actor, ClaudeStreamJsonSession,
+        spawn_claude_stream_session_actor_with_sink, ClaudeStreamJsonSession,
     };
     use crate::external_agents::session::codex_app_server::{
         spawn_codex_session_actor, CodexAppServerSession,
@@ -1890,7 +1999,7 @@ async fn connect_persistent_session(
             let id = session.session_id().to_string();
             let child_pid = session.child_pid();
             Ok(PersistentConnection {
-                control: spawn_claude_stream_session_actor(session),
+                control: spawn_claude_stream_session_actor_with_sink(session, background_task_sink),
                 native_id: id,
                 resumed,
                 child_pid,
@@ -2118,6 +2227,7 @@ fn nonzero_exit_is_a_failure(exit_code: Option<i32>, protocol_completed: bool) -
 fn apply_unified_event(
     app: &AppHandle,
     run_id: &str,
+    conversation_id: &str,
     compaction_anchor_id: &str,
     content: &mut String,
     reasoning: &mut String,
@@ -2291,6 +2401,33 @@ fn apply_unified_event(
             tool_map.insert(record.id.clone(), tool_calls.len());
             tool_calls.push(record.clone());
             emit_chat_tool_record(app, run_id, &record);
+        }
+        // 上游重试等瞬态状态 → 流状态行（StreamStatusLine），不进正文。
+        // 前端在下一条正文/思考增量到达时自行清除（重试成功没有显式信号，流恢复即成功）。
+        UnifiedAgentEvent::StatusNote { text } => {
+            crate::chat::protocol::emit_run_event(
+                app,
+                run_id,
+                crate::chat::protocol::ChatRunEvent::StatusNoteUpdated { note: Some(text) },
+            );
+        }
+        // CLI 侧后台任务（后台 Bash / 后台子代理）→ AppState 注册表，
+        // Background tasks 面板轮询读取。不进消息流：任务跨轮存活，run 级事件装不下它。
+        UnifiedAgentEvent::BackgroundTask {
+            task_id,
+            status,
+            kind,
+            description,
+            summary,
+        } => {
+            app.state::<AppState>().upsert_external_background_task(
+                conversation_id,
+                &task_id,
+                &status,
+                kind.as_deref(),
+                description.as_deref(),
+                summary.as_deref(),
+            );
         }
         _ => {}
     }

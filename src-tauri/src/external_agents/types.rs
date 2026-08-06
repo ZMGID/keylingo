@@ -253,6 +253,30 @@ pub enum UnifiedAgentEvent {
         /// 压缩耗时，仅用于诊断日志。
         duration_ms: Option<u64>,
     },
+    /// 生成过程的瞬态状态一行字（当前唯一来源：claude 的 `system/api_retry`——上游
+    /// 429/overloaded 时 CLI 在静默重试）。挂到前端的流状态行，不进消息正文。
+    StatusNote {
+        text: String,
+    },
+    /// CLI 侧后台任务（后台 Bash / 后台子代理）的生命周期更新，喂给 `AppState` 的
+    /// 后台任务注册表（Background tasks 面板的数据源）。
+    ///
+    /// claude 的来源是 `system/task_started`（→ status `running`）与
+    /// `system/task_notification`（→ 终态 `completed`/`failed`/`stopped`），见
+    /// `stream/claude.rs`。其余 CLI 目前没有对应协议，不发这条。
+    BackgroundTask {
+        /// CLI 侧的任务 id（claude 的短 id，如 `b2foykvcu`）。注册表按它 upsert。
+        task_id: String,
+        /// `running` | `completed` | `failed` | `stopped`。
+        status: String,
+        /// 任务类别（claude 的 `task_type`：`local_bash` / `local_agent` / …）。
+        /// 只有 started 帧带；终态帧为 `None`（注册表保留已知值）。
+        kind: Option<String>,
+        /// 任务描述（started 帧的 `description`）。
+        description: Option<String>,
+        /// 终态摘要（notification 帧的 `summary`：命令退出码文案 / 子代理最终回复）。
+        summary: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

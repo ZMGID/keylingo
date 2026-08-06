@@ -306,61 +306,106 @@ fn permission_denials_note(obj: &serde_json::Map<String, Value>) -> Option<Strin
     })
 }
 
-/// `system/task_notification`（官方 `SDKTaskNotificationMessage`）→ 提示文案。
-///
-/// 只对 `failed` / `stopped` 产出：后台任务**失败**在流里没有别的痕迹，不提示等于静默丢失；
-/// `completed` 的产出由该任务自己的 tool_result 承载，再发一条只是重复。
-fn task_notification_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
-    let label = match obj.get("status").and_then(|v| v.as_str()) {
-        Some("failed") => "失败",
-        Some("stopped") => "被中止",
-        _ => return None,
-    };
-    let summary = obj
-        .get("summary")
+/// 帧顶层的一个非空字符串字段（trim 后），没有/空串 = `None`。
+fn nonempty_str(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    Some(match summary {
-        Some(text) => format!("> ⚠️ 后台任务{label}：{text}\n\n"),
-        None => format!("> ⚠️ 后台任务{label}。\n\n"),
-    })
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 这一帧是否是唤醒轮（后台任务完成后 CLI 自起的合成轮次）的 `result`。
+/// 两个调用点：解析器把它从轮次边界里滤掉（防 `completed_result_turns` 跳数）；
+/// claude 会话的轮间空闲读用它作为「唤醒轮收尾、该把攒下的正文落成消息」的信号。
+pub fn is_task_notification_result(value: &Value) -> bool {
+    value.get("type").and_then(|v| v.as_str()) == Some("result")
+        && value
+            .get("origin")
+            .and_then(|origin| origin.get("kind"))
+            .and_then(|kind| kind.as_str())
+            == Some("task-notification")
+}
+
+/// `result` 帧顶层的 `usage` → `ModelUsage`。唤醒消息落地时附上真实用量——
+/// 不带的话前端只能显示估算的「~N tokens」，看着像脚本拼的而不是模型产出。
+pub fn result_usage(value: &Value) -> Option<crate::chat::model::ModelUsage> {
+    let usage = value.get("usage")?;
+    if !usage.is_object() {
+        return None;
+    }
+    Some(super::usage_from_parts(claude_usage_parts(usage)))
+}
+
+/// 从一帧顶层 JSON 提取后台任务生命周期事件（主线的 `system/task_started` /
+/// `system/task_notification`）。
+///
+/// 单独成 pub 函数的原因是**调用点不止解析器一处**：任务生命周期是跨轮状态，不属于
+/// 任何一轮的内容 —— claude 会话的轮间空闲读（`claude_stream` 的 actor）和取消后的
+/// 残帧窗口都必须继续提取它，哪怕整帧的**内容**被丢弃（丢了它的后果是面板条目永远
+/// 卡在「运行中」）。sidechain 帧一律 `None`：子代理内部起的任务由主线自己的
+/// `task_started` 上报。
+pub fn background_task_event(value: &Value) -> Option<UnifiedAgentEvent> {
+    let obj = value.as_object()?;
+    if obj.get("type").and_then(|v| v.as_str()) != Some("system") {
+        return None;
+    }
+    if frame_lane(obj).is_some() {
+        return None;
+    }
+    match obj.get("subtype").and_then(|v| v.as_str()) {
+        // 后台任务开工（官方 `SDKTaskStartedMessage`）：后台 Bash（`run_in_background`）
+        // 或后台子代理（2.1.x 起 Agent 工具默认后台）。
+        Some("task_started") => Some(UnifiedAgentEvent::BackgroundTask {
+            task_id: nonempty_str(obj, "task_id")?,
+            status: "running".to_string(),
+            kind: nonempty_str(obj, "task_type"),
+            // 描述缺失时退回 subagent_type（后台子代理至少能看出角色）。
+            description: nonempty_str(obj, "description")
+                .or_else(|| nonempty_str(obj, "subagent_type")),
+            summary: None,
+        }),
+        // 后台任务终态（官方 `SDKTaskNotificationMessage`）。
+        Some("task_notification") => Some(UnifiedAgentEvent::BackgroundTask {
+            task_id: nonempty_str(obj, "task_id")?,
+            status: nonempty_str(obj, "status").unwrap_or_else(|| "completed".to_string()),
+            kind: None,
+            description: None,
+            summary: nonempty_str(obj, "summary"),
+        }),
+        _ => None,
+    }
 }
 
 /// `{type:"system", subtype:"api_retry", attempt, max_retries, retry_delay_ms, error_status?,
-/// error?}` → 一条给用户看的提示。
+/// error?}` → 流状态行上的一句短话（不进消息正文）。
 ///
 /// **为什么必须接**：上游 429 / overloaded 时 CLI 在**静默重试**，界面上一个字都没有 ——
 /// 这正是「怎么卡住了」的头号成因。而我们刻意不给轮次加超时（spec 第 114 条），反而更依赖
 /// 这条可见信号。官方字段表见 headless 文档 "Handle API retries"。
+/// 曾经是插进正文的整句 blockquote —— 重试一波就往回答里打四五行，改挂状态行后收敛成
+/// 「上游重试 2/10 · overloaded」这样的一段尾巴。
 fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
     let attempt = obj.get("attempt").and_then(|v| v.as_u64())?;
-    let max_retries = obj.get("max_retries").and_then(|v| v.as_u64());
-    let delay = obj
-        .get("retry_delay_ms")
+    let of_max = obj
+        .get("max_retries")
         .and_then(|v| v.as_u64())
-        .map(|ms| format!("，{:.1}s 后重试", ms as f64 / 1000.0))
+        .map(|max| format!("/{max}"))
         .unwrap_or_default();
     let cause = obj
         .get("error")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .or_else(|| {
             obj.get("error_status")
                 .and_then(|v| v.as_u64())
                 .map(|code| format!("HTTP {code}"))
         });
-    let of_max = match max_retries {
-        Some(max) => format!("/{max}"),
-        None => String::new(),
-    };
     Some(match cause {
-        Some(text) => {
-            format!("> ⏳ 上游请求失败（{text}），第 {attempt}{of_max} 次重试中{delay}。\n\n")
-        }
-        None => format!("> ⏳ 上游请求重试中（第 {attempt}{of_max} 次）{delay}。\n\n"),
+        Some(text) => format!("上游重试 {attempt}{of_max} · {text}"),
+        None => format!("上游重试 {attempt}{of_max}"),
     })
 }
 
@@ -542,6 +587,11 @@ pub struct ClaudeStreamState {
 }
 
 impl ClaudeStreamState {
+    /// 最近一次 `system/init` 报的模型（跨轮记忆）。唤醒消息的模型归属用。
+    pub(crate) fn resolved_model(&self) -> Option<&str> {
+        self.resolved_model.as_deref()
+    }
+
     /// 取（或建）某条车道的消息级状态。`None` = 主线。
     fn lane(&mut self, lane: Option<&str>) -> &mut LaneState {
         self.lanes
@@ -674,16 +724,20 @@ impl ClaudeStreamState {
                             self.emit_text(sink, format!("{text}\n"));
                         }
                     }
-                    // 后台任务终态（官方 `SDKTaskNotificationMessage`）。
-                    Some("task_notification") => {
-                        if let Some(note) = task_notification_note(obj) {
-                            sink(UnifiedAgentEvent::TextDelta { delta: note });
+                    // 后台任务生命周期（started / notification）→ 注册表事件，单一来源在
+                    // `background_task_event`（轮间空闲读与残帧窗口共用）。**不注入气泡
+                    // 文案**：这类帧常在正文流式中途到达，TextDelta 会把正在生成的句子
+                    // 拦腰截断（实测），失败与否面板已有展示，claude 的唤醒轮也会口头汇报。
+                    Some("task_started") | Some("task_notification") => {
+                        if let Some(event) = background_task_event(value) {
+                            sink(event);
                         }
                     }
-                    // 上游重试（429 / overloaded）。不接的话用户只看到「卡住了」。
+                    // 上游重试（429 / overloaded）→ 流状态行的瞬态短句，不进正文
+                    // （逐条 blockquote 插正文会把正在生成的回答打得支离破碎，实测被用户点名）。
                     Some("api_retry") => {
-                        if let Some(note) = api_retry_note(obj) {
-                            sink(UnifiedAgentEvent::TextDelta { delta: note });
+                        if let Some(text) = api_retry_note(obj) {
+                            sink(UnifiedAgentEvent::StatusNote { text });
                         }
                     }
                     // ---- 以下 subtype **有意不接**（不是漏了）----
@@ -697,6 +751,12 @@ impl ClaudeStreamState {
                     //
                     // `files_persisted`（`SDKFilesPersistedEvent`）：SDK 的文件上传通道产物，
                     // Kivio 走本地 cwd + `--add-dir`，不用该通道，恒不出现。
+                    //
+                    // `task_updated` / `task_progress` / `background_tasks_changed`：
+                    // ponytail: 后台任务面板 v1 只接 started + notification 两个边沿，够画
+                    // Running/Finished。`task_updated` 的 patch（paused / is_backgrounded）、
+                    // `task_progress` 的 token 计数、`background_tasks_changed` 的全量对账
+                    // （replace 语义，防漏边沿）等面板要显示这些细节时再接。
                     //
                     // 未知 / 未来新增 subtype 一律安全忽略：不 panic、不中断流（spec 第 10 条）。
                     _ => {}
@@ -836,18 +896,13 @@ impl ClaudeStreamState {
                 if sidechain {
                     return;
                 }
-                // 后台任务完成时 CLI 会注入一个**合成的后续轮次**，它自带一条 `result`，
-                // 靠 `origin.kind == "task-notification"` 区分（官方 `SDKResultMessage`
-                // 原话：check this field 以便 route or suppress the latter）。
+                // 后台任务完成时 CLI 会注入一个**合成的后续轮次**（唤醒轮），它自带一条
+                // `result`，靠 `origin.kind == "task-notification"` 区分（官方
+                // `SDKResultMessage` 原话：check this field 以便 route or suppress）。
                 // 不滤掉的话，跑过后台 Bash / 后台 subagent / scheduled task 之后，这条
                 // 合成 result 会让 `completed_result_turns` 提前跳数 ⇒ `run_turn` 误判
                 // 本轮已结束（提前收尾，或把下一轮的开头吃掉）。
-                if obj
-                    .get("origin")
-                    .and_then(|origin| origin.get("kind"))
-                    .and_then(|kind| kind.as_str())
-                    == Some("task-notification")
-                {
+                if is_task_notification_result(value) {
                     return;
                 }
                 // 用户中断的收尾必须**先**豁免：被打断的轮次同样带 `is_error: true`
@@ -1208,6 +1263,67 @@ mod tests {
             UnifiedAgentEvent::SlashCommands { commands }
                 if commands.len() == 2 && commands.iter().any(|c| c.slash == "/compact")
         )));
+    }
+
+    // ---- 后台任务（Background tasks 面板的数据源）----
+    // 帧形状为 claude 2.1.222 本机实测抓包原样（2026-08-06）。
+
+    /// `task_started` → running 条目。后台 Bash 的真实帧。
+    #[test]
+    fn task_started_becomes_a_running_background_task() {
+        let raw = r#"{"type":"system","subtype":"task_started","task_id":"bfkppe2gd","tool_use_id":"toolu_015KH","description":"Sleep 8 seconds then print BGDONE","task_type":"local_bash","uuid":"u","session_id":"s"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::BackgroundTask { task_id, status, kind: Some(kind), description: Some(description), .. }
+                if task_id == "bfkppe2gd" && status == "running"
+                    && kind == "local_bash" && description == "Sleep 8 seconds then print BGDONE"
+        )));
+    }
+
+    /// `task_notification`（completed）→ 终态条目，且**不**发气泡提示
+    /// （completed 的产出由该任务自己的 tool_result / 唤醒轮承载）。后台子代理的真实帧。
+    #[test]
+    fn task_notification_completed_settles_the_task_without_a_note() {
+        let raw = r#"{"type":"system","subtype":"task_notification","task_id":"ad6979fa","tool_use_id":"toolu_016FK","status":"completed","output_file":"/tmp/tasks/ad6979fa.output","summary":"PONG","usage":{"total_tokens":22412,"tool_uses":0,"duration_ms":4830},"uuid":"u","session_id":"s"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert_eq!(events.len(), 1, "completed 只该有注册表事件：{events:?}");
+        assert!(matches!(
+            &events[0],
+            UnifiedAgentEvent::BackgroundTask { task_id, status, summary: Some(summary), .. }
+                if task_id == "ad6979fa" && status == "completed" && summary == "PONG"
+        ));
+    }
+
+    /// `task_notification`（failed）→ 终态条目，同样**不**发气泡（文案会截断流式中的正文，
+    /// 失败状态由面板展示）。
+    #[test]
+    fn task_notification_failed_settles_and_notes() {
+        let raw = r#"{"type":"system","subtype":"task_notification","task_id":"b2x","status":"failed","summary":"exit code 1"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert_eq!(events.len(), 1, "failed 也只有注册表事件：{events:?}");
+        assert!(matches!(
+            &events[0],
+            UnifiedAgentEvent::BackgroundTask { task_id, status, .. }
+                if task_id == "b2x" && status == "failed"
+        ));
+    }
+
+    /// sidechain 的 system 帧照旧整帧丢弃：子代理内部起的任务事件不能穿透
+    /// （其任务由主线自己的 `task_started` 上报）。
+    #[test]
+    fn sidechain_task_frames_stay_suppressed() {
+        let raw = r#"{"type":"system","subtype":"task_started","task_id":"x","task_type":"local_bash","parent_tool_use_id":"toolu_parent"}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert!(events.is_empty(), "sidechain 帧不该产出事件：{events:?}");
     }
 
     /// CLI 自己触发的压缩必须被看见：否则用户只见「对话突然变短」而无任何解释。
@@ -2322,37 +2438,36 @@ mod tests {
         );
     }
 
+    /// `task_notification` 一律**不**产出气泡文案（TextDelta 会把流式中的正文拦腰截断，
+    /// 实测撞过），失败/中止只落面板（BackgroundTask 事件）。
     #[test]
     fn task_notification_reports_only_failure_and_stop() {
         let failed = run(&[
             r#"{"type":"system","subtype":"task_notification","task_id":"t-1","status":"failed",
                "output_file":"/tmp/t1.log","summary":"build 脚本退出码 2"}"#,
         ]);
-        let note = texts(&failed);
-        assert!(
-            note.contains("失败") && note.contains("build 脚本退出码 2"),
-            "{note}"
-        );
+        assert!(texts(&failed).is_empty(), "不许注入气泡：{failed:?}");
+        assert!(failed.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::BackgroundTask { task_id, status, summary: Some(summary), .. }
+                if task_id == "t-1" && status == "failed" && summary == "build 脚本退出码 2"
+        )));
 
         let stopped = run(&[
-            r#"{"type":"system","subtype":"task_notification","status":"stopped","summary":"用户中止"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"t-2","status":"stopped","summary":"用户中止"}"#,
         ]);
-        assert!(texts(&stopped).contains("被中止"));
-
-        // completed 的产出由该任务自己的 tool_result 承载，不重复提示。
-        let completed = run(&[
-            r#"{"type":"system","subtype":"task_notification","status":"completed","summary":"ok"}"#,
-        ]);
-        assert!(
-            completed.is_empty(),
-            "completed 不应额外提示：{completed:?}"
-        );
+        assert!(texts(&stopped).is_empty());
+        assert!(stopped.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::BackgroundTask { status, .. } if status == "stopped"
+        )));
     }
 
+    /// 缺 `task_id` 的 notification 无从入注册表，安全忽略（不 panic、不产出事件）。
     #[test]
     fn task_notification_without_summary_still_reports_the_failure() {
         let events = run(&[r#"{"type":"system","subtype":"task_notification","status":"failed"}"#]);
-        assert!(texts(&events).contains("后台任务失败"));
+        assert!(events.is_empty(), "{events:?}");
     }
 
     /// AC4 / AC5 / spec 第 10 条：未消费的变体一律**安全忽略**——不产出事件、不 panic、

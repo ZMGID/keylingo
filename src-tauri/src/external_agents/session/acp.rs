@@ -1496,6 +1496,8 @@ impl AcpSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
+                // ACP 无后台任务协议（stop_task 是 claude 专属），忽略。
+                Ok(SessionCommand::StopTask { .. }) => {}
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return Err("control channel closed".to_string())
@@ -1682,6 +1684,8 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
                     let _ = accepted.send(false);
                 }
                 SessionCommand::Cancel => {}
+                // ACP 无后台任务协议，忽略。
+                SessionCommand::StopTask { .. } => {}
                 SessionCommand::Close => {
                     session.close().await;
                     return;
@@ -2620,6 +2624,8 @@ mod tests {
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
             UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
+            UnifiedAgentEvent::StatusNote { .. } => "StatusNote",
+            UnifiedAgentEvent::BackgroundTask { .. } => "BackgroundTask",
         }
     }
 

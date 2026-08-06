@@ -1909,6 +1909,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
       if (payload.type === 'run_started') {
         if (payload.restoredFromSnapshot) restoredRunIdsRef.current.add(payload.runId)
+        // 不是本窗口发起的 run（后端自起的唤醒轮 / 别的窗口的 run）：此刻会话必然不在
+        // in-flight（本窗口的 send/regenerate 在 invoke 前就标了）。这类 run 没有
+        // sendMessage 的统一收尾可等，必须走恢复路径在终止帧上立即 finishStreamingRun
+        // ——否则下面的 markConversationInFlight 会让终止分支把收尾推迟给一个永远
+        // 不会返回的 invoke，转圈和停止键永远停不下来（实测：唤醒轮消息落地后卡住）。
+        if (!isConversationInFlight(inFlightConversationsRef.current, payload.conversationId)) {
+          restoredRunIdsRef.current.add(payload.runId)
+        }
         const remainingApprovals = (pendingToolConfirmsRef.current[payload.conversationId] ?? [])
           .filter((item) => item.runId !== payload.runId)
         if (remainingApprovals.length > 0) {
@@ -2003,6 +2011,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const segment = streamPayloadToSegment(payload)
       const textDelta = streamTextDelta(payload)
       const reasoningDelta = streamReasoningDelta(payload)
+      // 正文/思考恢复流动 = 上游重试已经成功（没有显式的成功帧），状态行的重试尾巴即刻清除。
+      if (textDelta || reasoningDelta) snapshot.statusNote = null
       if (segment) {
         snapshot.segments = upsertStreamSegment(
           snapshot.segments,
@@ -2204,6 +2214,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   // Live nested sub-agent progress (P3): merge onto the parent tool card's
   // structuredContent.subagentProgress, addressed by parentToolCallId.
+  // 流状态行的瞬态一行字（上游重试等）：写进会话流快照，StreamStatusLine 每秒读。
+  // 清除有两条路：后端显式 note=null，或正文/思考恢复流动（onChatStream 的 delta 分支）。
+  useTauriEvent(api.onChatStatusNote, (payload) => {
+    const snapshot = streamSnapshotsRef.current[payload.conversationId]
+    if (!snapshot) return
+    if (snapshot.runId && snapshot.runId !== payload.runId) return
+    snapshot.statusNote = payload.note
+    showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
+  }, [showStreamSnapshotIfCurrent])
+
   useTauriEvent(api.onChatSubagent, (payload) => {
       // A subagent progress event must address an existing snapshot for
       // the parent conversation (do NOT create one — that would resurrect a
@@ -3821,6 +3841,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     rememberDockOpen(true)
   }, [])
 
+  // 标题栏后台任务状态灯：展开 Dock 并切到任务页。
+  const handleOpenDockTasks = useCallback(() => {
+    setDockTab('tasks')
+    rememberDockTab('tasks')
+    setDockOpen(true)
+    rememberDockOpen(true)
+  }, [])
+
   const handleDockWidthChange = useCallback((nextWidth: number) => {
     setDockWidth(nextWidth)
     rememberDockWidth(nextWidth)
@@ -4125,7 +4153,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           />
         </div>
         <div className="shrink-0" data-tauri-drag-region="false">
-          <BackgroundJobsIndicator />
+          <BackgroundJobsIndicator
+            conversationId={currentConversation?.id ?? null}
+            onOpen={handleOpenDockTasks}
+          />
         </div>
       </div>
       <div className="min-w-5 flex-1" data-tauri-drag-region />
@@ -4692,6 +4723,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             activeTab={dockTab}
             workdir={dockWorkdir}
             lang={uiLang}
+            conversationId={currentConversation?.id ?? null}
             treeExpanded={treeExpanded}
             revealRequest={dockReveal}
             previewRequest={dockPreview}

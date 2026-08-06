@@ -268,10 +268,31 @@ pub struct AppState {
     /// 或 app 退出 sweep 清理（对齐 Claude Code background bash，dev-server 友好），
     /// 不随发起的 run 取消。仅在 insert/lookup/sweep 时短暂持锁。
     pub background_commands: Arc<Mutex<HashMap<String, crate::native_tools::BackgroundCommand>>>,
+    /// 外部 CLI 自报的后台任务注册表（目前只有 claude：后台 Bash / 后台子代理，
+    /// task_id → 条目）。由 `run.rs` 消费 `UnifiedAgentEvent::BackgroundTask` 时 upsert，
+    /// Background tasks 面板轮询读取。仅内存：任务活在 CLI 进程里，Kivio 重启即失效。
+    pub external_background_tasks: Mutex<HashMap<String, ExternalBackgroundTask>>,
     /// 开发者「请求调试」内存环形缓冲：最近 [`REQUEST_DEBUG_CAPACITY`] 条 provider 调用的
     /// 请求（脱敏 headers + body）+ 响应摘要。默认关闭（`chat_tools.request_debug_enabled`），
     /// 关闭时 adapter 短路、不构造记录。仅内存、不落盘，进程退出即清。
     pub request_debug: Mutex<VecDeque<crate::chat::request_debug::RequestDebugRecord>>,
+}
+
+/// 一条外部 CLI 后台任务（claude 的 `system/task_started` / `task_notification`）。
+/// 任务本体活在 CLI 进程里，Kivio 只有观测与 `stop_task`，没有 pid、没有日志文件。
+#[derive(Debug, Clone)]
+pub struct ExternalBackgroundTask {
+    pub task_id: String,
+    pub conversation_id: String,
+    /// claude 的 `task_type`：`local_bash` / `local_agent` / `remote_agent` / `local_workflow`。
+    pub kind: String,
+    pub description: String,
+    /// `running` | `completed` | `failed` | `stopped`。
+    pub status: String,
+    /// 终态摘要（退出码文案 / 子代理最终回复）。
+    pub summary: Option<String>,
+    pub started_at: std::time::SystemTime,
+    pub ended_at: Option<std::time::SystemTime>,
 }
 
 /// 单个 key 触发 failover 后的冷却时长。
@@ -391,6 +412,7 @@ impl AppState {
             inpainting,
             sub_agents: crate::chat::sub_agent::SubAgentManager::default(),
             background_commands: Arc::new(Mutex::new(HashMap::new())),
+            external_background_tasks: Mutex::new(HashMap::new()),
             request_debug: Mutex::new(VecDeque::new()),
         }
     }
@@ -1058,6 +1080,67 @@ impl AppState {
         &self,
     ) -> Arc<Mutex<HashMap<String, crate::native_tools::BackgroundCommand>>> {
         Arc::clone(&self.background_commands)
+    }
+
+    /// upsert 一条外部 CLI 后台任务。started 帧建条目；终态帧只补 status/summary/ended_at，
+    /// 不覆盖已知的 kind/description（notification 帧不带它们）。超额时先清最老的终态条目。
+    pub fn upsert_external_background_task(
+        &self,
+        conversation_id: &str,
+        task_id: &str,
+        status: &str,
+        kind: Option<&str>,
+        description: Option<&str>,
+        summary: Option<&str>,
+    ) {
+        const MAX_TRACKED_EXTERNAL_TASKS: usize = 64;
+        let terminal = status != "running";
+        let mut map = self
+            .external_background_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = map.get_mut(task_id) {
+            entry.status = status.to_string();
+            if let Some(kind) = kind {
+                entry.kind = kind.to_string();
+            }
+            if let Some(description) = description {
+                entry.description = description.to_string();
+            }
+            if summary.is_some() {
+                entry.summary = summary.map(str::to_string);
+            }
+            if terminal && entry.ended_at.is_none() {
+                entry.ended_at = Some(std::time::SystemTime::now());
+            }
+            return;
+        }
+        while map.len() >= MAX_TRACKED_EXTERNAL_TASKS {
+            let oldest_terminal = map
+                .iter()
+                .filter(|(_, t)| t.status != "running")
+                .min_by_key(|(_, t)| t.started_at)
+                .map(|(id, _)| id.clone());
+            match oldest_terminal {
+                Some(id) => map.remove(&id),
+                // 全在跑（几乎不可能）：不淘汰运行中的，接受超额。
+                None => break,
+            };
+        }
+        let now = std::time::SystemTime::now();
+        map.insert(
+            task_id.to_string(),
+            ExternalBackgroundTask {
+                task_id: task_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                kind: kind.unwrap_or("local_bash").to_string(),
+                description: description.unwrap_or_default().to_string(),
+                status: status.to_string(),
+                summary: summary.map(str::to_string),
+                started_at: now,
+                ended_at: terminal.then_some(now),
+            },
+        );
     }
 
     /// Register a tracked background command. Reaps already-terminated entries

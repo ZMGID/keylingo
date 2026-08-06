@@ -625,13 +625,23 @@ export type SkillDetail = SkillMeta & {
   body: string
 }
 
-/** 一个仍在运行的后台命令（chat agent run_command background:true）。 */
-export type BackgroundCommandInfo = {
-  jobId: string
-  command: string
-  cwd: string
-  pid: number | null
+/** Background tasks 面板的一条任务：内置后台命令或外部 CLI 后台任务（后台 Bash / 后台子代理）。 */
+export type BackgroundTaskInfo = {
+  id: string
+  source: 'builtin' | 'external'
+  /** builtin 恒为 'bash'；external 为 claude 的 task_type（local_bash / local_agent / …）。 */
+  kind: string
+  /** 命令行或任务描述。 */
+  title: string
+  status: 'running' | 'completed' | 'failed' | 'stopped'
+  exitCode?: number | null
+  pid?: number | null
+  cwd?: string
+  summary?: string | null
+  conversationId?: string
+  /** 仅 running 有展示意义（终态不显示时长）。 */
   elapsedSecs: number
+  startedAtMs: number
 }
 
 // Lens 联网搜索状态/结果负载（事件名 lens-web-search）
@@ -2003,6 +2013,20 @@ export const api = {
       })
     })
   },
+  /** 流状态行的瞬态一行字（上游重试等，status_note_updated）。note=null 为显式清除。 */
+  onChatStatusNote: (
+    listener: (payload: { conversationId: string; runId: string; note: string | null }) => void,
+  ) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return onChatProtocol((event) => {
+      if (event.scope !== 'run' || event.type !== 'status_note_updated') return
+      listener({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        note: event.note,
+      })
+    })
+  },
   onChatSubagent: (listener: (payload: ChatSubagentPayload) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return onChatProtocol((event) => {
@@ -2163,9 +2187,13 @@ export const api = {
     invoke<{ success: boolean; path?: string | null; error?: string | null }>(
       'chat_skills_open_folder',
     ),
-  /** 当前仍在运行的后台命令（chat agent run_command background:true 起的）。空数组 = 无。 */
-  chatListBackgroundCommands: () =>
-    invoke<BackgroundCommandInfo[]>('chat_list_background_commands'),
+  /** Background tasks 面板列表（按对话过滤）：内置后台命令 + 外部 CLI 后台任务。 */
+  chatListBackgroundTasks: (conversationId: string) =>
+    invoke<BackgroundTaskInfo[]>('chat_list_background_tasks', { conversationId }),
+  chatClearFinishedBackgroundTasks: (conversationId: string) =>
+    invoke<void>('chat_clear_finished_background_tasks', { conversationId }),
+  chatStopExternalBackgroundTask: (conversationId: string, taskId: string) =>
+    invoke<void>('chat_stop_external_background_task', { conversationId, taskId }),
   chatKillBackgroundCommand: (jobId: string) =>
     invoke<void>('chat_kill_background_command', { jobId }),
   chatMemoryGet: () =>

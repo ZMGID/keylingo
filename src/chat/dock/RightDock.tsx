@@ -1,14 +1,15 @@
-// Right Dock 容器：tab 条（文件树 / Git / 终端）+ 常驻三面板 + 左缘拖拽调宽 + 折叠滑出。
+// Right Dock 容器：tab 条（文件树 / Git / 终端 / 任务）+ 常驻四面板 + 左缘拖拽调宽 + 折叠滑出。
 // 宽度通过 CSS 变量 --chat-dock-width 直写（拖拽过程不触发 React 重渲），松手才持久化。
 import { useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
-import { FolderTree, GitBranch, Terminal, X } from 'lucide-react'
+import { Activity, FolderTree, GitBranch, Terminal, X } from 'lucide-react'
 import { i18n, type Lang } from '../../settings/i18n'
 import { IconButton } from '../../components/Button'
 import { FileTreePanel } from './FileTreePanel'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
+import { BackgroundTasksPanel } from './BackgroundTasksPanel'
 
-export type DockTab = 'files' | 'git' | 'terminal'
+export type DockTab = 'files' | 'git' | 'terminal' | 'tasks'
 
 export const DOCK_MIN_WIDTH = 320
 export const DOCK_MAX_WIDTH = 560
@@ -33,6 +34,8 @@ type RightDockProps = {
   activeTab: DockTab
   workdir: string
   lang: Lang
+  /** 当前对话 id（任务页按对话隔离）。null = 还没有对话。 */
+  conversationId: string | null
   treeExpanded: string[]
   revealRequest: DockRevealRequest
   previewRequest: DockPreviewRequest
@@ -50,6 +53,7 @@ export function RightDock({
   activeTab,
   workdir,
   lang,
+  conversationId,
   treeExpanded,
   revealRequest,
   previewRequest,
@@ -128,6 +132,7 @@ export function RightDock({
             { tab: 'files' as DockTab, label: t.dockTabFiles, icon: FolderTree },
             { tab: 'git' as DockTab, label: t.dockTabGit, icon: GitBranch },
             { tab: 'terminal' as DockTab, label: t.dockTabTerminal, icon: Terminal },
+            { tab: 'tasks' as DockTab, label: t.dockTabTasks, icon: Activity },
           ]
         ).map(({ tab, label, icon: Icon }) => (
           <button
@@ -169,6 +174,13 @@ export function RightDock({
       </div>
       <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'terminal'}>
         <TerminalPanel workdir={workdir} active={terminalActive} lang={lang} />
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'tasks'}>
+        <BackgroundTasksPanel
+          active={open && activeTab === 'tasks'}
+          lang={lang}
+          conversationId={conversationId}
+        />
       </div>
     </aside>
   )

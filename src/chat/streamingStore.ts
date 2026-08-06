@@ -31,6 +31,7 @@ const IDLE_SNAPSHOT: ConversationStreamSnapshot = {
   reasoningDurationMs: null,
   reasoningStartedAtBySegmentId: {},
   reasoningDurationMsBySegmentId: {},
+  statusNote: null,
 }
 
 let snapshot: ConversationStreamSnapshot = IDLE_SNAPSHOT
