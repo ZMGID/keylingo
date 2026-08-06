@@ -4,13 +4,14 @@ import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
 import { estimateTokens, formatTokensK } from '../utils/tokens'
 import { formatAssistantMessageTime } from './messageFormat'
-import { useHoverReveal } from './useHoverReveal'
 import type { MessageUsage } from './types'
 
 interface AssistantMessageMetaProps {
   content: string
   reasoning?: string
   timestamp: number
+  /** 鼠标是否悬停在所属消息上（MessageBubble 持有事件），false 时整行透明。 */
+  visible?: boolean
   tokensPerSec?: number
   runEntry?: string | null
   streamOutcome?: string | null
@@ -44,6 +45,7 @@ export function AssistantMessageMeta({
   content,
   reasoning,
   timestamp,
+  visible = false,
   tokensPerSec,
   runEntry,
   streamOutcome,
@@ -55,9 +57,6 @@ export function AssistantMessageMeta({
 }: AssistantMessageMetaProps) {
   const [copied, setCopied] = useState(false)
   const [saved, setSaved] = useState(false)
-  // hover 显隐：指针停在这一条自己的位置上才浮现（事件驱动，原因见 useHoverReveal）。
-  // 行平时透明但保留占位，可被指针命中。
-  const { ref: rowRef, hovered } = useHoverReveal<HTMLDivElement>()
   // 优先显示 provider 报告的真实用量；provider 不报时回落到 chars 估算（带 ~ 前缀）。
   const realUsage = realUsageTokens(usage)
   const tokenLabel = realUsage
@@ -94,13 +93,10 @@ export function AssistantMessageMeta({
           : null
 
   return (
-    // 默认隐藏，指针停到这一条的位置才浮现（悬停边界就是本行自身）。`py-1 -my-1`
-    // 在不改变视觉布局的前提下扩大命中区，低矮的一行不至于难瞄。
-    // focus-within 兜住键盘导航：Tab 到按钮时行必须可见。字号 11px、按钮 xs：
-    // 这是元信息，不能跟正文抢对比度。
+    // 鼠标悬停在所属消息上（visible）才浮现，移走隐藏；focus-within 兜住键盘导航
+    // （Tab 到按钮时行必须可见）。字号 11px、按钮 xs：元信息不与正文抢对比度。
     <div
-      ref={rowRef}
-      className={`mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 py-1 text-[11px] text-neutral-400 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 dark:text-neutral-500 ${hovered ? 'opacity-100' : 'opacity-0'}`}
+      className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-neutral-400 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 dark:text-neutral-500 ${visible ? 'opacity-100' : 'opacity-0'}`}
     >
       <span className="shrink-0">{formatAssistantMessageTime(timestamp)}</span>
       {runEntryLabel && <span className="shrink-0">{runEntryLabel}</span>}

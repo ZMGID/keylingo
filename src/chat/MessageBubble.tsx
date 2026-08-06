@@ -26,7 +26,6 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { Button, IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
-import { useHoverReveal } from './useHoverReveal'
 import { AssistantMessageMeta } from './AssistantMessageMeta'
 import { ChatAttachments } from './ChatAttachments'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
@@ -928,10 +927,15 @@ function MessageBubbleComponent({
   const hasGeneratedFiles = generatedFileArtifacts.length > 0
   const [copied, setCopied] = useState(false)
   const [toolsExpanded, setToolsExpanded] = useState(false)
-  // 用户气泡下操作行的 hover 显隐（指针停在操作行自身的位置才显示，见 useHoverReveal）。
-  // 放在组件顶层保证 hooks 无条件调用；assistant 分支不用它（AssistantMessageMeta 内
-  // 有自己的实例）。
-  const { ref: userActionsRef, hovered: userActionsHovered } = useHoverReveal<HTMLDivElement>()
+  // 消息级悬停：鼠标在这条消息上 → 底部操作/元信息条显示，移走 → 隐藏。
+  // React 合成 onPointerEnter/Leave 直接挂在消息根元素上（React 对非冒泡事件本就
+  // 逐元素挂原生监听），没有 CSS :hover（WKWebView 粘滞）、没有跨元素绑定。
+  // ChatMarkdown/重内容都是 memo 的，悬停切换只重渲染气泡外壳。
+  const [bubbleHovered, setBubbleHovered] = useState(false)
+  const hoverProps = {
+    onPointerEnter: () => setBubbleHovered(true),
+    onPointerLeave: () => setBubbleHovered(false),
+  }
   // 工具调用超过 4 个时默认折叠（与思考过程一致）
   const toolsCollapsible = toolCalls.length > 4
   const agentPlan = message.agent_plan ?? message.agentPlan ?? agentPlanOverride
@@ -951,7 +955,10 @@ function MessageBubbleComponent({
     const replyModelTags = (sentModels ?? []).filter((m) => (m.model ?? '').trim().length > 0)
     const showModelTags = replyModelTags.length >= 2
     return (
-      <div className={`flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
+      <div
+        {...hoverProps}
+        className={`flex justify-end py-2 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}
+      >
         <div className="flex min-w-0 max-w-[85%] flex-col items-end gap-1">
           {showModelTags && (
             <div className="flex flex-wrap items-center justify-end gap-1.5 pr-0.5">
@@ -983,8 +990,7 @@ function MessageBubbleComponent({
           )}
           {hasText && (
             <div
-              ref={userActionsRef}
-              className={`flex items-center gap-0.5 pr-0.5 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 ${userActionsHovered ? 'opacity-100' : 'opacity-0'}`}
+              className={`flex items-center gap-0.5 pr-0.5 transition-opacity duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] focus-within:opacity-100 ${bubbleHovered ? 'opacity-100' : 'opacity-0'}`}
             >
               <IconButton
                 size="xs"
@@ -1049,7 +1055,10 @@ function MessageBubbleComponent({
 
   return (
     <MarkdownStreamingContext.Provider value={messageStreaming}>
-    <div className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}>
+    <div
+      {...hoverProps}
+      className={`flex justify-start py-3 ${playEntranceAnimation ? 'chat-motion-bubble-in' : ''}`}
+    >
       <div className="w-full min-w-0">
         {toolCalls.length > 0 && !hasTimelineSegments && (
           <section
@@ -1159,6 +1168,7 @@ function MessageBubbleComponent({
             content={message.content}
             reasoning={message.reasoning}
             timestamp={message.timestamp}
+            visible={bubbleHovered}
             tokensPerSec={tokensPerSec}
             runEntry={message.run_entry ?? message.runEntry}
             streamOutcome={message.stream_outcome ?? message.streamOutcome}
