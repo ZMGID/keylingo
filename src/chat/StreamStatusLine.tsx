@@ -55,7 +55,7 @@ interface LiveStats {
 
 /**
  * 消息流末尾常驻的存在标记（对标 Claude Code 的小星号）：闲置时静态 logo，
- * 生成中动效 + 「耗时 · N tokens · K 个任务运行中」。
+ * 生成中动效 + 「耗时 · N tokens · K running」（信息行统一英文，短）。
  *
  * 实时信息不走 props、不订阅 store（那是每帧一响）：每秒从 streamingStore 快照
  * 读一次，token 从已流出的正文 + 思维链估算 —— 任何运行时（内置 / 外部 CLI）都有数，
@@ -89,7 +89,7 @@ export const StreamStatusLine = memo(function StreamStatusLine({ active }: Strea
   if (stats) {
     parts.push(formatElapsed(stats.elapsedMs))
     if (stats.tokens > 0) parts.push(`${formatTokens(stats.tokens)} tokens`)
-    if (stats.running > 0) parts.push(`${stats.running} 个任务运行中`)
+    if (stats.running > 0) parts.push(`${stats.running} running`)
     if (stats.statusNote) parts.push(stats.statusNote)
   }
 
