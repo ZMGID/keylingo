@@ -1,27 +1,30 @@
 import { useEffect, useRef, useState } from 'react'
 
-/** 悬停显隐（事件驱动）：把 `ref` 挂在要显隐的元素上，它会向上找最近的
- *  `[data-hover-reveal-root]` 容器挂 pointerenter/pointerleave，悬停容器时 `hovered`
- *  为 true。
+/** 悬停显隐（事件驱动）：把 `ref` 挂在要显隐的元素上，指针悬停**该元素自身**的
+ *  区域时 `hovered` 为 true。元素平时 opacity-0 但保留布局占位，仍可命中指针。
  *
- *  不用 CSS `:hover`（group-hover）的原因：macOS WKWebView 存在 :hover 粘滞——鼠标
- *  移出后样式不失效（Chromium 下同一套 CSS 实测正常）。事件派发与 :hover 样式失效在
- *  WebKit 里是两条路径，pointerleave 可靠。窗口失焦一并收起，兜住光标快速甩出窗口时
- *  漏发 pointerleave 的场景。 */
+ *  两个刻意选择：
+ *  - 监听挂元素自身而非外层消息容器：交互上「鼠标停到那一条的位置才显示」；
+ *    实现上没有 closest/跨元素绑定，虚拟列表卸载重挂也不会漂（此前挂根容器的
+ *    版本在部分消息上会失联）。
+ *  - 不用 CSS `:hover`：macOS WKWebView 存在 :hover 粘滞——鼠标移出后样式不失效
+ *    （Chromium 下同一套 CSS 实测正常）。事件派发与 :hover 样式失效在 WebKit 里
+ *    是两条路径，pointerleave 可靠。窗口失焦一并收起，兜住光标快速甩出窗口时
+ *    漏发 pointerleave 的场景。 */
 export function useHoverReveal<T extends HTMLElement>() {
   const ref = useRef<T>(null)
   const [hovered, setHovered] = useState(false)
   useEffect(() => {
-    const host = ref.current?.closest('[data-hover-reveal-root]')
-    if (!(host instanceof HTMLElement)) return
+    const el = ref.current
+    if (!el) return
     const show = () => setHovered(true)
     const hide = () => setHovered(false)
-    host.addEventListener('pointerenter', show)
-    host.addEventListener('pointerleave', hide)
+    el.addEventListener('pointerenter', show)
+    el.addEventListener('pointerleave', hide)
     window.addEventListener('blur', hide)
     return () => {
-      host.removeEventListener('pointerenter', show)
-      host.removeEventListener('pointerleave', hide)
+      el.removeEventListener('pointerenter', show)
+      el.removeEventListener('pointerleave', hide)
       window.removeEventListener('blur', hide)
     }
   }, [])

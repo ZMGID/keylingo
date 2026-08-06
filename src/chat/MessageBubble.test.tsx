@@ -25,48 +25,44 @@ describe('MessageBubble mount motion', () => {
     expect(container.firstElementChild).toHaveClass('chat-motion-bubble-in')
   })
 
-  // 元信息条 hover 显隐：事件驱动（pointerenter/pointerleave 挂在消息根容器上），
-  // 不用 CSS group-hover——macOS WKWebView 的 :hover 移出后粘滞不消。事件驱动的好处
-  // 之一就是行为在 jsdom 里可直接断言。
-  it('hides the assistant meta row until the message is hovered', () => {
-    const { container } = render(<MessageBubble message={assistantMessage} />)
-    const root = container.firstElementChild as HTMLElement
-    expect(root).toHaveAttribute('data-hover-reveal-root')
+  // 元信息条 hover 显隐：指针停在这一条自身的位置才显示（事件驱动挂在行元素上，
+  // 不用 CSS group-hover——macOS WKWebView 的 :hover 移出后粘滞不消；也不挂消息
+  // 根容器——虚拟列表重挂载时跨元素绑定会漂）。
+  it('reveals the assistant meta row only while the row itself is hovered', () => {
+    render(<MessageBubble message={assistantMessage} />)
 
-    const meta = screen.getByLabelText('复制').closest('.transition-opacity')
+    const meta = screen.getByLabelText('复制').closest('.transition-opacity') as HTMLElement
     expect(meta).toHaveClass('opacity-0')
 
-    fireEvent.pointerEnter(root)
+    fireEvent.pointerEnter(meta)
     expect(meta).toHaveClass('opacity-100')
 
-    fireEvent.pointerLeave(root)
+    fireEvent.pointerLeave(meta)
     expect(meta).toHaveClass('opacity-0')
 
     // 光标甩出窗口漏发 pointerleave 的兜底：窗口失焦一并收起。
-    fireEvent.pointerEnter(root)
+    fireEvent.pointerEnter(meta)
     expect(meta).toHaveClass('opacity-100')
     fireEvent.blur(window)
     expect(meta).toHaveClass('opacity-0')
   })
 
-  // 用户气泡下的三个操作图标（复制/回到这里/建分支）：同一套事件驱动显隐。
-  it('hides the user bubble actions until the bubble is hovered', () => {
-    const { container } = render(
+  // 用户气泡下的三个操作图标（复制/回到这里/建分支）：同一套显隐。
+  it('reveals the user bubble actions only while the strip itself is hovered', () => {
+    render(
       <MessageBubble
         message={{ ...assistantMessage, id: 'user-hover', role: 'user', content: '你好' }}
         onForkMessage={async () => {}}
       />,
     )
-    const root = container.firstElementChild as HTMLElement
-    expect(root).toHaveAttribute('data-hover-reveal-root')
 
-    const actions = screen.getByLabelText('复制').closest('.transition-opacity')
+    const actions = screen.getByLabelText('复制').closest('.transition-opacity') as HTMLElement
     expect(actions).toHaveClass('opacity-0')
 
-    fireEvent.pointerEnter(root)
+    fireEvent.pointerEnter(actions)
     expect(actions).toHaveClass('opacity-100')
 
-    fireEvent.pointerLeave(root)
+    fireEvent.pointerLeave(actions)
     expect(actions).toHaveClass('opacity-0')
   })
 })
