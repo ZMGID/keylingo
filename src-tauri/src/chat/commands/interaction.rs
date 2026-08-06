@@ -5,6 +5,7 @@ use tauri::{AppHandle, State};
 use tokio::time::{sleep, timeout};
 
 use crate::chat::agent::execute::truncate_chars;
+use crate::chat::attachments::{compose_text_attachments_for_api, TextAttachmentInput};
 use crate::chat::{AgentPlanState, ChatMessageSegment, Conversation, ToolCallRecord};
 use crate::mcp::types::ChatToolArtifact;
 use crate::state::AppState;
@@ -410,7 +411,9 @@ pub(crate) async fn chat_steer_message(
     conversation_id: String,
     steer_id: String,
     content: String,
+    text_attachments: Option<Vec<TextAttachmentInput>>,
 ) -> Result<bool, String> {
+    let content = compose_text_attachments_for_api(&content, &text_attachments.unwrap_or_default());
     let Some(message) = crate::chat::agent::SteeringMessage::new(steer_id, &content) else {
         return Ok(false);
     };

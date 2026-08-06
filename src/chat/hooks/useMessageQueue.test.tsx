@@ -116,12 +116,49 @@ describe('useMessageQueue', () => {
     act(() => { id = result.current.enqueue('conv-1', '改用 rg', [])!.id })
 
     await act(async () => { await result.current.steer('conv-1', id) })
-    expect(mockSteer).toHaveBeenCalledWith('conv-1', id, '改用 rg')
+    expect(mockSteer).toHaveBeenCalledWith('conv-1', id, '改用 rg', [])
     expect(result.current.queued['conv-1']).toHaveLength(1)
     expect(result.current.queued['conv-1'][0].steering).toBe(true)
 
     act(() => { result.current.confirmSteered('conv-1', id) })
     expect(result.current.queued['conv-1']).toBeUndefined()
+  })
+
+  it('立刻引导会把虚拟文本附件交给通用文本协议', async () => {
+    const { result } = setup()
+    const attachment = {
+      id: 'paste-1',
+      type: 'file' as const,
+      name: '已粘贴的文本.txt',
+      path: 'memory://paste-1',
+      content: '很长的正文',
+    }
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '', [attachment])!.id })
+
+    await act(async () => { await result.current.steer('conv-1', id) })
+
+    expect(mockSteer).toHaveBeenCalledWith('conv-1', id, '', [attachment])
+    expect(result.current.queued['conv-1'][0].steering).toBe(true)
+  })
+
+  it('磁盘附件不能通过文本 steering 时留在队列等待正常发送', async () => {
+    const { result } = setup()
+    let id = ''
+    act(() => {
+      id = result.current.enqueue('conv-1', '看附件', [{
+        id: 'disk-1',
+        type: 'file',
+        name: 'report.pdf',
+        path: '/tmp/report.pdf',
+      }])!.id
+    })
+
+    const accepted = await act(async () => await result.current.steer('conv-1', id))
+
+    expect(accepted).toBe(false)
+    expect(mockSteer).not.toHaveBeenCalled()
+    expect(result.current.queued['conv-1'][0].steerRejected).toBe(true)
   })
 
   it('没有活跃 run 时引导失败，条目留着并仍能被自动发送', async () => {

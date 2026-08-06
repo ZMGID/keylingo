@@ -1352,9 +1352,20 @@ export const chatApi = {
     conversationId: string,
     steerId: string,
     content: string,
+    attachments: PendingAttachment[] = [],
   ): Promise<boolean> {
     if (!isTauriRuntime()) return false
-    return await invoke<boolean>('chat_steer_message', { conversationId, steerId, content })
+    const textAttachments = attachments
+      .filter((attachment): attachment is PendingAttachment & { content: string } => (
+        attachment.content !== undefined
+      ))
+      .map((attachment) => ({ name: attachment.name, content: attachment.content }))
+    return await invoke<boolean>('chat_steer_message', {
+      conversationId,
+      steerId,
+      content,
+      textAttachments,
+    })
   },
 
   // 删除对话。返回未能清理的副产物说明（工作区被占用等）——对话本身一定已经删掉了，

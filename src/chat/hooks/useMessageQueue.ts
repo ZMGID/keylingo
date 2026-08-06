@@ -163,7 +163,19 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     )))
     let accepted = false
     try {
-      accepted = await chatApi.steerMessage(conversationId, message.id, message.content)
+      // Steering 的通用协议只有文本信道。虚拟文本附件可由后端复用正常发送时的
+      // 内联合成逻辑；磁盘/图片附件不能静默丢掉，留在队列等本轮结束后正常发送。
+      const hasUnsupportedAttachments = message.attachments.some(
+        (attachment) => attachment.content === undefined,
+      )
+      if (!hasUnsupportedAttachments) {
+        accepted = await chatApi.steerMessage(
+          conversationId,
+          message.id,
+          message.content,
+          message.attachments,
+        )
+      }
     } catch (err) {
       console.error('Failed to steer the running turn:', err)
     }
