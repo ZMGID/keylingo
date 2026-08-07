@@ -1,16 +1,25 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
+
+const { reasoningEffortsForModel } = vi.hoisted(() => ({
+  reasoningEffortsForModel: vi.fn(),
+}))
 
 // api 在 jsdom 无 Tauri 环境，mock 成确定值；等级清单走兜底也是同样结果。
 vi.mock('../api/tauri', () => ({
   api: {
     getSettings: () => Promise.resolve({ providers: [] }),
-    reasoningEffortsForModel: () => Promise.resolve(['low', 'medium', 'high']),
+    reasoningEffortsForModel,
   },
 }))
 
 describe('ThinkingLevelSelector', () => {
+  beforeEach(() => {
+    reasoningEffortsForModel.mockReset()
+    reasoningEffortsForModel.mockResolvedValue(['low', 'medium', 'high'])
+  })
+
   it('value=null 时按默认档显示 High（不再有「跟随全局」）', () => {
     render(
       <ThinkingLevelSelector
@@ -58,5 +67,30 @@ describe('ThinkingLevelSelector', () => {
       fireEvent.click(screen.getByText('Off'))
     })
     expect(onChange).toHaveBeenCalledWith('off')
+  })
+
+  it('能力列表加载完成前不会把 xhigh 回写成 high', async () => {
+    let resolveLevels!: (levels: string[]) => void
+    reasoningEffortsForModel.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveLevels = resolve
+    }))
+    const onChange = vi.fn()
+
+    render(
+      <ThinkingLevelSelector
+        value="xhigh"
+        currentProviderId="p1"
+        currentModel="gpt-5.6-sol"
+        onChange={onChange}
+      />,
+    )
+
+    expect(onChange).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveLevels(['low', 'medium', 'high', 'xhigh'])
+    })
+    expect(screen.getByRole('button')).toHaveTextContent('XHigh')
+    expect(onChange).not.toHaveBeenCalled()
   })
 })

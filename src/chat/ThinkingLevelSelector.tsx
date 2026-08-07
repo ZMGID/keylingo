@@ -40,21 +40,32 @@ function ThinkingLevelSelectorBase({
   const t = useT()
   const [open, setOpen] = useState(false)
   const [levels, setLevels] = useState<string[]>(FALLBACK_LEVELS)
+  const [levelsLoaded, setLevelsLoaded] = useState(false)
 
   // 思考等级清单来自后端（用户在模型详情里的覆盖 → 模型库 reasoningEfforts → 家族兜底）。
   useEffect(() => {
     let alive = true
+    setLevelsLoaded(false)
     void (async () => {
       if (!currentModel) {
-        if (alive) setLevels(FALLBACK_LEVELS)
+        if (alive) {
+          setLevels(FALLBACK_LEVELS)
+          setLevelsLoaded(true)
+        }
         return
       }
       try {
         const got = await api.reasoningEffortsForModel(currentModel, currentProviderId)
         // 空列表是有意义的答案（该模型没有 effort 旋钮），不能再兜底成 FALLBACK_LEVELS。
-        if (alive) setLevels(got)
+        if (alive) {
+          setLevels(got)
+          setLevelsLoaded(true)
+        }
       } catch {
-        if (alive) setLevels(FALLBACK_LEVELS)
+        if (alive) {
+          setLevels(FALLBACK_LEVELS)
+          setLevelsLoaded(true)
+        }
       }
     })()
     return () => {
@@ -73,8 +84,8 @@ function ThinkingLevelSelectorBase({
 
   // 收敛结果要落盘，否则按钮显示 High、请求却仍按存着的 xhigh 发出去，直接吃 provider 的 400。
   useEffect(() => {
-    if (levels.length > 0 && effective !== (value ?? DEFAULT_LEVEL)) onChange(effective)
-  }, [effective, value, levels, onChange])
+    if (levelsLoaded && levels.length > 0 && effective !== (value ?? DEFAULT_LEVEL)) onChange(effective)
+  }, [effective, levelsLoaded, value, levels, onChange])
 
   const options = useMemo<Array<{ value: ThinkingLevel; label: string }>>(
     () => [

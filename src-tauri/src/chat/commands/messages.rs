@@ -284,7 +284,15 @@ pub(crate) async fn push_assistant_message(
     } else if let Some(user_content) = title_from_first_user {
         // 外部对话放宽首轮门槛：它的标题可能已经被兜底成"第一句用户消息"，
         // 卡在 `== "新对话"` 上的话，标题模型这一步压根不会触发。
-        let wants_generation = conversation.messages.len() == 1
+        // 工具型首轮会在生成中落 assistant 草稿快照，不能用 messages.len() == 1
+        // 判断首轮，否则只要首轮用了工具就会永远跳过标题请求。
+        let is_first_user_turn = conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .count()
+            == 1;
+        let wants_generation = is_first_user_turn
             && if is_external {
                 title_looks_auto
             } else {
@@ -292,7 +300,7 @@ pub(crate) async fn push_assistant_message(
             };
         if wants_generation {
             // 被取消的首条回复不值得花一次模型调用生成标题（标题生成是一次
-            // 带 8s 超时的 LLM 请求，会显著拖慢"停止"后 invoke 的返回 / 输入框解锁）。
+            // 带 30s 超时的 LLM 请求，会显著拖慢"停止"后 invoke 的返回 / 输入框解锁）。
             // 用本地启发式标题兜底；下一条正常回复或重命名仍可得到更好的标题。
             if stream_outcome == Some("cancelled") {
                 Some(generate_title(user_content))

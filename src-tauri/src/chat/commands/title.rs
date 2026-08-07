@@ -22,7 +22,7 @@ pub(super) async fn resolve_conversation_title(
         model: conversation.model.as_str(),
     };
     match timeout(
-        Duration::from_secs(8),
+        Duration::from_secs(30),
         generate_title_with_model(
             settings,
             state,
@@ -42,7 +42,7 @@ pub(super) async fn resolve_conversation_title(
             generate_title(user_content)
         }
         Err(_) => {
-            eprintln!("[title] 模型总结 8s 超时，退回截断标题");
+            eprintln!("[title] 模型总结 30s 超时，退回截断标题");
             generate_title(user_content)
         }
     }

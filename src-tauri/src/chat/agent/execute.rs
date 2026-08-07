@@ -411,7 +411,7 @@ pub fn validate_tool_arguments(tool: &ChatToolDefinition, arguments: &Value) -> 
 /// 按 JSON Schema 做宽容 coercion（pi `coerceWithJsonSchema` 的 Rust 移植）：
 /// 类型差一层皮的值在校验前被掰正，语义不明的值原样保留交给校验报错。
 /// 只做无损/明确的转换——字符串数字→数字、"true"/"false"→bool、数字/布尔→字符串、
-/// null→类型零值；对 object/array 递归；anyOf/oneOf 先试原值、再逐成员试 coercion。
+/// 对 object/array 递归；anyOf/oneOf 先试原值、再逐成员试 coercion。
 pub(crate) fn coerce_tool_arguments(schema: &Value, value: Value) -> Value {
     if schema.is_null() || schema.as_object().is_some_and(|object| object.is_empty()) {
         return value;
@@ -451,8 +451,23 @@ fn coerce_with_schema(schema: &Value, mut value: Value) -> Value {
         if let Some(object) = value.as_object_mut() {
             let properties = schema.get("properties").and_then(Value::as_object);
             if let Some(properties) = properties {
+                let required = schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<std::collections::HashSet<_>>();
                 for (key, child_schema) in properties {
                     if let Some(child) = object.remove(key) {
+                        // 模型经常把未设置的 optional 参数显式写成 null。若 schema 本身
+                        // 不接受 null，就应视为省略；转成 0/false/"" 会改变工具语义。
+                        if child.is_null()
+                            && !required.contains(key.as_str())
+                            && validate_schema_value(child_schema, &child, "value").is_err()
+                        {
+                            continue;
+                        }
                         object.insert(key.clone(), coerce_with_schema(child_schema, child));
                     }
                 }
@@ -524,15 +539,16 @@ fn schema_types(schema: &Value) -> Vec<String> {
 fn coerce_primitive_by_type(value: &Value, type_name: &str) -> Option<Value> {
     match type_name {
         "number" => match value {
-            Value::Null => Some(Value::from(0)),
-            Value::String(text) if !text.trim().is_empty() => {
-                text.trim().parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::from)
-            }
+            Value::String(text) if !text.trim().is_empty() => text
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite())
+                .map(Value::from),
             Value::Bool(flag) => Some(Value::from(if *flag { 1 } else { 0 })),
             _ => None,
         },
         "integer" => match value {
-            Value::Null => Some(Value::from(0)),
             Value::String(text) if !text.trim().is_empty() => {
                 text.trim().parse::<i64>().ok().map(Value::from)
             }
@@ -540,7 +556,6 @@ fn coerce_primitive_by_type(value: &Value, type_name: &str) -> Option<Value> {
             _ => None,
         },
         "boolean" => match value {
-            Value::Null => Some(Value::Bool(false)),
             Value::String(text) if text == "true" => Some(Value::Bool(true)),
             Value::String(text) if text == "false" => Some(Value::Bool(false)),
             Value::Number(number) if number.as_i64() == Some(1) => Some(Value::Bool(true)),
@@ -548,7 +563,6 @@ fn coerce_primitive_by_type(value: &Value, type_name: &str) -> Option<Value> {
             _ => None,
         },
         "string" => match value {
-            Value::Null => Some(Value::String(String::new())),
             Value::Number(number) => Some(Value::String(number.to_string())),
             Value::Bool(flag) => Some(Value::String(flag.to_string())),
             _ => None,
@@ -1669,6 +1683,51 @@ mod tests {
         );
         // coercion 后必须能过既有校验（这就是它存在的意义）。
         assert!(validate_schema_value(&schema, &coerced, "arguments").is_ok());
+    }
+
+    #[test]
+    fn coercion_drops_null_optional_properties_instead_of_inventing_defaults() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "domain_type": { "type": "string" },
+                "pub_year_min": { "type": "integer" },
+                "pub_year_max": { "type": "integer" },
+                "nullable_note": { "type": ["string", "null"] }
+            },
+            "required": ["query"]
+        });
+        let coerced = coerce_tool_arguments(
+            &schema,
+            serde_json::json!({
+                "query": "Kivio",
+                "domain_type": "web",
+                "pub_year_min": null,
+                "pub_year_max": null,
+                "nullable_note": null
+            }),
+        );
+        assert_eq!(
+            coerced,
+            serde_json::json!({
+                "query": "Kivio",
+                "domain_type": "web",
+                "nullable_note": null
+            })
+        );
+    }
+
+    #[test]
+    fn coercion_does_not_turn_required_null_into_a_zero_value() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "count": { "type": "integer" } },
+            "required": ["count"]
+        });
+        let coerced = coerce_tool_arguments(&schema, serde_json::json!({ "count": null }));
+        assert_eq!(coerced, serde_json::json!({ "count": null }));
+        assert!(validate_schema_value(&schema, &coerced, "arguments").is_err());
     }
 
     #[test]
