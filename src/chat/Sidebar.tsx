@@ -38,6 +38,8 @@ import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
 import { i18n, useT, type I18n, type Lang } from '../settings/i18n'
 import { conversationMarkdownFilename } from './conversationExport'
+import { isProvisionalTitle } from './conversationTitle'
+import { SwapTitle } from './SwapTitle'
 
 function resolveChatUserProfile(
   chat?: { userDisplayName?: string; userAvatar?: string } | null,
@@ -319,6 +321,7 @@ function SearchDialog({
   query,
   results,
   currentConversationId,
+  generatingConversationIds = new Set(),
   projects,
   sets,
   onQueryChange,
@@ -328,6 +331,7 @@ function SearchDialog({
   query: string
   results: ConversationListItem[]
   currentConversationId?: string
+  generatingConversationIds?: ReadonlySet<string>
   projects: ChatProject[]
   sets: ChatSet[]
   onQueryChange: (query: string) => void
@@ -415,16 +419,20 @@ function SearchDialog({
                       : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.07]'
                   }`}
                 >
-                  <span
+                  <SwapTitle
+                    text={conversation.title}
+                    title={conversation.title}
                     className={`min-w-0 flex-1 truncate text-[13px] ${
                       active
                         ? 'font-semibold text-neutral-950 dark:text-neutral-50'
                         : 'font-medium text-neutral-800 dark:text-neutral-200'
+                    }${
+                      generatingConversationIds.has(conversation.id)
+                      && isProvisionalTitle(conversation.title, conversation.preview)
+                        ? ' kv-title-provisional'
+                        : ''
                     }`}
-                    title={conversation.title}
-                  >
-                    {conversation.title}
-                  </span>
+                  />
                   {setLabel && (
                     <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
                       {t.chatSetPrefix} · {setLabel}
@@ -820,9 +828,15 @@ export const Sidebar = memo(function Sidebar({
 
   const visibleConversations = useMemo(() => {
     if (optimisticConversations.length === 0) return conversations
-    const realConversationIds = new Set(conversations.map((item) => item.id))
+    const realById = new Map(conversations.map((item) => [item.id, item]))
     const visibleOptimisticConversations = optimisticConversations.filter((item) => {
-      return generatingConversationIds.has(item.id) || !realConversationIds.has(item.id)
+      const real = realById.get(item.id)
+      if (!real) return true
+      if (generatingConversationIds.has(item.id)) return true
+      // 真实条目仍是占位标题「新对话」说明它落后于乐观条目（乐观条目持有刚持久化的最新数据）：
+      // 首轮完成后、refetch 落地前，真实列表里这条还是旧快照 —— 直接切过去会让标题动效
+      // 先倒退成「新对话」再跳成生成标题，且行实例销毁重建导致 SwapTitle 过渡不触发。
+      return real.title === '新对话'
     })
     if (visibleOptimisticConversations.length === 0) return conversations
     const optimisticIds = new Set(visibleOptimisticConversations.map((item) => item.id))
@@ -1633,6 +1647,7 @@ export const Sidebar = memo(function Sidebar({
         query={searchQuery}
         results={searchResults}
         currentConversationId={currentConversationId}
+        generatingConversationIds={generatingConversationIds}
         projects={projects}
         sets={sets}
         onQueryChange={setSearchQuery}

@@ -840,6 +840,39 @@ function optimisticConversationListItem(
   }
 }
 
+/** 取会话最后一条 user/assistant 消息文本（侧栏 preview 口径，与 api.ts toListItem 一致）。 */
+function conversationLastMessageContent(conversation: Conversation): string {
+  for (let i = conversation.messages.length - 1; i >= 0; i--) {
+    const message = conversation.messages[i]
+    if (message.role === 'user' || message.role === 'assistant') {
+      return message.content?.trim() ?? ''
+    }
+  }
+  return ''
+}
+
+/** 用持久化后的真实会话替换侧栏乐观条目（同 id 原地替换，行实例不销毁，
+ *  SwapTitle 才能感知标题从「截断第一句」变成「模型标题」并播放替换过渡）。
+ *  keptConversation 为空（发送彻底失败）时退回移除条目。 */
+function settleOptimisticConversationListItem(
+  setOptimistic: (updater: (items: ConversationListItem[]) => ConversationListItem[]) => void,
+  conversationId: string,
+  keptConversation: Conversation | null,
+): void {
+  setOptimistic((items) =>
+    keptConversation
+      ? items.map((item) =>
+          item.id === conversationId
+            ? optimisticConversationListItem(
+                keptConversation,
+                conversationLastMessageContent(keptConversation),
+              )
+            : item,
+        )
+      : items.filter((item) => item.id !== conversationId),
+  )
+}
+
 type SendMessageOptions = {
   forceNewConversation?: boolean
   conversationOverride?: Conversation | null
@@ -3084,7 +3117,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         applyAssistantStreamStats(updatedConv)
         setPendingUserMessage(null)
         setPendingUserMessageConversationId(null)
-        setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
+        // 原地替换而非移除：行不消失，SwapTitle 在标题文字变化时播放替换过渡。
+        settleOptimisticConversationListItem(
+          setOptimisticSidebarConversations,
+          conversationId,
+          updatedConv,
+        )
         applyConversation(updatedConv)
         refreshSidebar()
         if (!locallyCancelledConversationIdRef.current) {
@@ -3105,7 +3143,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           applyConversation(keptConversation)
         }
       }
-      setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
+      // 失败但保留了会话（带用户消息）→ 原地替换保持行存在；彻底失败 → 移除。
+      settleOptimisticConversationListItem(
+        setOptimisticSidebarConversations,
+        conversationId,
+        keptConversation ?? null,
+      )
       if (keptConversation) refreshSidebar()
       const message = typeof err === 'string' ? err : (err as Error).message || '发送失败'
       setStreamErrorForConversation(conversationId, message)

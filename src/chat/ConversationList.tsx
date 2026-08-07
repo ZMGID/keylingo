@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { MoreHorizontal } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
+import { isProvisionalTitle } from './conversationTitle'
+import { SwapTitle } from './SwapTitle'
 import {
   ConversationContextMenu,
   type ConversationMenuAnchor,
@@ -228,7 +230,15 @@ export const ConversationList = memo(function ConversationList({
                 }
               >
                 <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="block min-w-0 flex-1 truncate">{displayTitle}</span>
+                  {/* 模型标题替换乐观截断标题时打字机逐字打出；生成中的临时标题置灰 */}
+                  <SwapTitle
+                    text={displayTitle}
+                    className={`block min-w-0 flex-1 truncate${
+                      isGenerating && isProvisionalTitle(displayTitle, conv.preview)
+                        ? ' kv-title-provisional'
+                        : ''
+                    }`}
+                  />
                   {isFork && (
                     <span
                       className="shrink-0 text-[11px] font-normal text-neutral-400 dark:text-neutral-500"

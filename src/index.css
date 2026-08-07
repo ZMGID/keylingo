@@ -1473,6 +1473,30 @@ button.chat-composer-status-item:hover {
   animation-delay: var(--chat-motion-delay, 0ms);
 }
 
+/* 会话标题替换过渡（打字机）：新标题逐字打出，末尾光标闪烁，由 SwapTitle 组件驱动
+   （打字间隔与 SwapTitle.tsx 的 TYPE_INTERVAL_MS 对应）。打字结束光标即卸载。
+   reduced-motion 由全局 0.01ms 兜底压平（光标静止，打字瞬发完成）。 */
+.kv-title-caret {
+  display: inline-block;
+  width: 1.5px;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  background: currentColor;
+  animation: kv-title-caret-blink 0.9s steps(1, end) infinite;
+}
+@keyframes kv-title-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 生成中的临时标题（第一句消息截断，isProvisionalTitle 判定）置灰，
+   模型标题落地时随打字机过渡一起恢复。 */
+.kv-title-provisional {
+  opacity: 0.55;
+}
+
 /* 右键/上下文菜单：容器 popover 入场后，直接子项（菜单项）再逐项级联进入。
    仅在打开态挂载（关闭走 chat-motion-popover-out，不带此 class，避免退场时重播）。
    纯 CSS nth-child 级联，复用 chat-motion-row 关键帧（reduced-motion 全局兜底覆盖）。 */
