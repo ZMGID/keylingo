@@ -786,6 +786,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   // 草稿相对已落盘基线有 diff → 防抖自动保存（开关/输入共用，避免每个按键打盘）
   useEffect(() => {
     if (!hasUnsavedChanges) return
+    // 自定义请求头的新行会先以空值占位。后端存盘归一化会丢掉这种不完整的行，如果此时发起自动保存，回包会把输入框立刻恢复成消失。等用户填完后再保存。
+    const hasIncompleteCustomHeader = settings?.providers.some((provider) =>
+      (provider.request?.customHeaders ?? []).some((header) =>
+        header.key.trim() === '' || header.value.trim() === '',
+      ),
+    )
+    if (hasIncompleteCustomHeader) return
     if (autosaveTimerRef.current) {
       clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null

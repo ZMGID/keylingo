@@ -58,6 +58,13 @@ function baseSettings(overrides: Partial<Settings> = {}): Settings {
 }
 
 describe('normalizeSettings', () => {
+  it('旧设置缺少 translucentSidebar 时默认关闭', () => {
+    const input = baseSettings()
+    delete (input as Partial<Settings>).translucentSidebar
+
+    expect(normalizeSettings(input).translucentSidebar).toBe(false)
+  })
+
   it('保留 chat.externalCliAgents（回归：重建 chat 时丢掉 → 供应商列表变空）', () => {
     const providers = [
       {

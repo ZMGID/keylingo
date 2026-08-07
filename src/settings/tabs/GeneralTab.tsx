@@ -66,6 +66,15 @@ function FontPicker({ value, systemFonts, placeholder, defaultLabel, emptyText, 
   )
 }
 
+function AppearanceSubsection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="settings-appearance-subsection">
+      <div className="settings-appearance-subsection-title">{title}</div>
+      <div className="settings-appearance-subsection-body">{children}</div>
+    </div>
+  )
+}
+
 /** 外观：语言 / 主题 / 侧边栏材质 / 主题色 / 界面字号 / 界面字体 / 代码字体。 */
 export function AppearanceGroup({
   settings,
@@ -89,110 +98,115 @@ export function AppearanceGroup({
   onCommitUiFontPx: (value: string, commit: boolean) => void
 }) {
   return (
-    <SettingsGroup title={lang === 'zh' ? '外观' : 'Appearance'}>
-      <SettingRow label={t.language}>
-        <Select
-          className="w-36"
-          value={settings.settingsLanguage || 'zh'}
-          onChange={(v) => onUpdateSettings({ settingsLanguage: v as 'zh' | 'en' })}
-          options={[
-            { value: 'zh', label: '中文' },
-            { value: 'en', label: 'English' },
-          ]}
-        />
-      </SettingRow>
-      <SettingRow label={t.theme}>
-        <div className="kv-seg">
-          {[
-            { value: 'system', label: t.themeSystem },
-            { value: 'light', label: t.themeLight },
-            { value: 'dark', label: t.themeDark },
-          ].map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={(settings.theme || 'system') === option.value ? 'active' : ''}
-              onClick={() => onUpdateSettings({ theme: option.value as SettingsData['theme'] })}
-              data-tauri-drag-region="false"
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      </SettingRow>
-      <SettingRow
-        label={lang === 'zh' ? '半透明侧边栏' : 'Translucent sidebar'}
-        description={lang === 'zh' ? '使用系统窗口材质呈现侧边栏' : 'Use the system window material for the sidebar'}
-      >
-        <Toggle
-          checked={settings.translucentSidebar}
-          onChange={(value) => onUpdateSettings({ translucentSidebar: value })}
-          ariaLabel={lang === 'zh' ? '半透明侧边栏' : 'Translucent sidebar'}
-        />
-      </SettingRow>
-      <SettingRow label={t.themeColor}>
-        <div className="kv-seg" role="radiogroup" aria-label={t.themeColor}>
-          {THEME_COLOR_PRESETS.map((preset) => {
-            const active = themeColor === preset.id
-            return (
+    <SettingsGroup title={lang === 'zh' ? '外观' : 'Appearance'} className="settings-appearance-group">
+      <AppearanceSubsection title={lang === 'zh' ? '界面' : 'Interface'}>
+        <SettingRow label={t.language}>
+          <Select
+            className="w-36"
+            value={settings.settingsLanguage || 'zh'}
+            onChange={(v) => onUpdateSettings({ settingsLanguage: v as 'zh' | 'en' })}
+            options={[
+              { value: 'zh', label: '中文' },
+              { value: 'en', label: 'English' },
+            ]}
+          />
+        </SettingRow>
+        <SettingRow label={t.theme}>
+          <div className="kv-seg">
+            {[
+              { value: 'system', label: t.themeSystem },
+              { value: 'light', label: t.themeLight },
+              { value: 'dark', label: t.themeDark },
+            ].map((option) => (
               <button
-                key={preset.id}
+                key={option.value}
                 type="button"
-                className={active ? 'active' : ''}
-                onClick={() => onUpdateSettings({ themeColor: preset.id })}
-                role="radio"
-                aria-checked={active}
+                className={(settings.theme || 'system') === option.value ? 'active' : ''}
+                onClick={() => onUpdateSettings({ theme: option.value as SettingsData['theme'] })}
                 data-tauri-drag-region="false"
               >
-                {preset.labels[lang]}
+                {option.label}
               </button>
-            )
-          })}
-        </div>
-      </SettingRow>
-      <SettingRow
-        label={lang === 'zh' ? '界面字号' : 'UI size'}
-        description={lang === 'zh' ? '调整界面使用的基准字号' : 'Adjust the base UI font size'}
-      >
-        <div className="flex items-center gap-2">
-          <Input
-            type="number"
-            value={uiFontPxInput}
-            onChange={(v) => { onUiFontPxInputChange(v); onCommitUiFontPx(v, false) }}
-            onBlur={() => onCommitUiFontPx(uiFontPxInput, true)}
-            min={UI_FONT_PX_MIN}
-            max={UI_FONT_PX_MAX}
-            className="!w-16 text-center"
+            ))}
+          </div>
+        </SettingRow>
+      </AppearanceSubsection>
+
+      <AppearanceSubsection title={lang === 'zh' ? '材质与颜色' : 'Material & color'}>
+        <SettingRow
+          label={lang === 'zh' ? '半透明侧边栏' : 'Translucent sidebar'}
+          className="settings-appearance-toggle-row"
+        >
+          <Toggle
+            checked={settings.translucentSidebar}
+            onChange={(value) => onUpdateSettings({ translucentSidebar: value })}
+            ariaLabel={lang === 'zh' ? '半透明侧边栏' : 'Translucent sidebar'}
           />
-          <span className="text-[13px] text-neutral-400 dark:text-neutral-500">px</span>
-        </div>
-      </SettingRow>
-      <SettingRow
-        label={lang === 'zh' ? '界面字体' : 'UI font'}
-        description={lang === 'zh' ? '搜索并选择系统已安装的字体，不影响性能' : 'Search and pick an installed system font; no performance cost'}
-      >
-        <FontPicker
-          value={settings.uiFontFamily ?? ''}
-          systemFonts={systemFonts}
-          placeholder={lang === 'zh' ? '搜索字体…' : 'Search fonts…'}
-          defaultLabel={lang === 'zh' ? '系统默认' : 'System default'}
-          emptyText={lang === 'zh' ? '无匹配字体' : 'No matching fonts'}
-          onChange={(v) => onUpdateSettings({ uiFontFamily: v })}
-        />
-      </SettingRow>
-      <SettingRow
-        label={lang === 'zh' ? '代码字体' : 'Code font'}
-        description={lang === 'zh' ? '代码块与等宽文本使用的字体' : 'Font for code blocks and monospace text'}
-      >
-        <FontPicker
-          value={settings.uiFontMono ?? ''}
-          systemFonts={systemFonts}
-          placeholder={lang === 'zh' ? '搜索字体…' : 'Search fonts…'}
-          defaultLabel={lang === 'zh' ? '系统默认' : 'System default'}
-          emptyText={lang === 'zh' ? '无匹配字体' : 'No matching fonts'}
-          onChange={(v) => onUpdateSettings({ uiFontMono: v })}
-        />
-      </SettingRow>
+        </SettingRow>
+        <SettingRow label={t.themeColor}>
+          <div className="kv-seg" role="radiogroup" aria-label={t.themeColor}>
+            {THEME_COLOR_PRESETS.map((preset) => {
+              const active = themeColor === preset.id
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={active ? 'active' : ''}
+                  onClick={() => onUpdateSettings({ themeColor: preset.id })}
+                  role="radio"
+                  aria-checked={active}
+                  data-tauri-drag-region="false"
+                >
+                  {preset.labels[lang]}
+                </button>
+              )
+            })}
+          </div>
+        </SettingRow>
+      </AppearanceSubsection>
+
+      <AppearanceSubsection title={lang === 'zh' ? '字体' : 'Typography'}>
+        <SettingRow
+          label={lang === 'zh' ? '界面字号' : 'UI size'}
+        >
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              value={uiFontPxInput}
+              onChange={(v) => { onUiFontPxInputChange(v); onCommitUiFontPx(v, false) }}
+              onBlur={() => onCommitUiFontPx(uiFontPxInput, true)}
+              min={UI_FONT_PX_MIN}
+              max={UI_FONT_PX_MAX}
+              className="!w-16 text-center"
+            />
+            <span className="text-[13px] text-neutral-400 dark:text-neutral-500">px</span>
+          </div>
+        </SettingRow>
+        <SettingRow
+          label={lang === 'zh' ? '界面字体' : 'UI font'}
+        >
+          <FontPicker
+            value={settings.uiFontFamily ?? ''}
+            systemFonts={systemFonts}
+            placeholder={lang === 'zh' ? '搜索字体…' : 'Search fonts…'}
+            defaultLabel={lang === 'zh' ? '系统默认' : 'System default'}
+            emptyText={lang === 'zh' ? '无匹配字体' : 'No matching fonts'}
+            onChange={(v) => onUpdateSettings({ uiFontFamily: v })}
+          />
+        </SettingRow>
+        <SettingRow
+          label={lang === 'zh' ? '代码字体' : 'Code font'}
+        >
+          <FontPicker
+            value={settings.uiFontMono ?? ''}
+            systemFonts={systemFonts}
+            placeholder={lang === 'zh' ? '搜索字体…' : 'Search fonts…'}
+            defaultLabel={lang === 'zh' ? '系统默认' : 'System default'}
+            emptyText={lang === 'zh' ? '无匹配字体' : 'No matching fonts'}
+            onChange={(v) => onUpdateSettings({ uiFontMono: v })}
+          />
+        </SettingRow>
+      </AppearanceSubsection>
     </SettingsGroup>
   )
 }

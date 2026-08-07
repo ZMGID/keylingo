@@ -1458,7 +1458,7 @@ pub struct Settings {
     pub theme: String,
     #[serde(default = "default_theme_color")]
     pub theme_color: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub translucent_sidebar: bool,
     /// UI 整体缩放（作用于聊天窗口根元素 zoom），范围 0.8–1.4，1.0 为默认。
     #[serde(default = "default_ui_font_scale")]
@@ -1652,7 +1652,7 @@ impl Default for Settings {
             close_chat_hotkey: default_close_chat_hotkey(),
             theme: "system".to_string(),
             theme_color: default_theme_color(),
-            translucent_sidebar: true,
+            translucent_sidebar: false,
             ui_font_scale: default_ui_font_scale(),
             ui_font_family: String::new(),
             ui_font_mono: String::new(),
@@ -3001,10 +3001,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_settings_enable_translucent_sidebar_by_default() {
+    fn legacy_settings_disable_translucent_sidebar_by_default() {
         let settings: Settings =
             serde_json::from_str("{}").expect("legacy settings should deserialize");
-        assert!(settings.translucent_sidebar);
+        assert!(!settings.translucent_sidebar);
     }
 
     #[test]

@@ -3699,6 +3699,52 @@ button.chat-composer-status-item:hover {
   align-items: center;
   gap: 8px;
 }
+
+/* 外观设置按分区纵向堆叠，字段本身保持左标签、右控件的横向行。 */
+.settings-appearance-group {
+  display: block;
+}
+.settings-appearance-subsection {
+  min-width: 0;
+  padding: 0;
+}
+.settings-appearance-subsection + .settings-appearance-subsection {
+  margin-top: 6px;
+  padding-top: 9px;
+  border-top: 1px solid var(--divider);
+}
+.settings-appearance-subsection-title {
+  margin-bottom: 3px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.settings-appearance-subsection-body .kv-row {
+  min-height: 0;
+  padding: 7px 0;
+  flex-direction: row;
+  align-items: center;
+}
+.settings-appearance-subsection-body .kv-row-control {
+  width: auto;
+  justify-content: flex-end;
+}
+.settings-appearance-subsection-body .kv-seg button {
+  min-width: 0;
+  padding-left: 6px;
+  padding-right: 6px;
+  white-space: nowrap;
+}
+.settings-appearance-subsection-body .settings-appearance-toggle-row {
+  flex-direction: row;
+  align-items: center;
+}
+.settings-appearance-toggle-row .kv-row-control {
+  width: auto;
+  margin-left: auto;
+}
+
 .kv-row-stack {
   display: block;
   padding: 9px 0;

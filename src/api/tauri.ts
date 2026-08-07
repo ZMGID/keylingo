@@ -1631,7 +1631,7 @@ export function normalizeSettings(settings: Settings): Settings {
     closeChatHotkey: current.closeChatHotkey ?? 'CommandOrControl+Shift+W',
     theme: current.theme ?? 'system',
     themeColor: normalizeThemeColorId(current.themeColor),
-    translucentSidebar: current.translucentSidebar ?? true,
+    translucentSidebar: current.translucentSidebar ?? false,
     uiFontScale: current.uiFontScale ?? 1,
     uiFontFamily: current.uiFontFamily ?? '',
     uiFontMono: current.uiFontMono ?? '',

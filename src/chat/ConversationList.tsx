@@ -143,12 +143,20 @@ export const ConversationList = memo(function ConversationList({
             isFork && conv.title.endsWith(FORK_SUFFIX)
               ? conv.title.slice(0, -FORK_SUFFIX.length)
               : conv.title
+          const isDragging = reorder?.draggingId === conv.id
 
           if (isRenaming) {
             return (
               <div
                 key={conv.id}
-                className={`${indent ? 'pl-8 pr-1' : 'px-1'} py-0.5`}
+                data-reorder-id={conv.id}
+                className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
+                  isDragging ? 'is-dragging ' : ''
+                }${
+                  active
+                    ? 'bg-black/[0.07] dark:bg-white/[0.11]'
+                    : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                }`}
               >
                 <input
                   ref={renameInputRef}
@@ -165,13 +173,22 @@ export const ConversationList = memo(function ConversationList({
                       setRenamingId(null)
                     }
                   }}
-                  className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none ring-0 focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100"
+                  className={`min-w-0 flex-1 border-0 bg-transparent text-left outline-none focus:ring-0 ${
+                    compact
+                      ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
+                      : 'px-3 py-2 text-[13px]'
+                  } ${
+                    active
+                      ? 'font-semibold text-neutral-900 dark:text-neutral-100'
+                      : compact
+                        ? 'font-medium text-neutral-700 dark:text-neutral-300'
+                        : 'text-neutral-700 dark:text-neutral-300'
+                  }`}
                 />
               </div>
             )
           }
 
-          const isDragging = reorder?.draggingId === conv.id
           return (
             <div
               key={conv.id}
@@ -188,6 +205,11 @@ export const ConversationList = memo(function ConversationList({
               <button
                 type="button"
                 onClick={() => onSelectConversation(conv.id)}
+                onDoubleClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  startRename(conv)
+                }}
                 className={`min-w-0 flex-1 text-left transition-colors ${
                   compact
                     ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
