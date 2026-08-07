@@ -125,6 +125,42 @@ describe('MessageList ← streamingStore 集成', () => {
     expect(screen.getByText(/hello streaming world/)).toBeInTheDocument()
   })
 
+  it('恢复运行时不同时渲染同 messageId 的历史草稿和实时预览', async () => {
+    render(
+      <MessageList
+        conversationId="c-recovered"
+        messages={[{
+          id: 'msg-recovered',
+          role: 'assistant',
+          content: '恢复中的回答',
+          stream_outcome: 'interrupted',
+          timestamp: 1,
+        }]}
+      />,
+    )
+    act(() => {
+      setSnapshot(snapWith({
+        messageId: 'msg-recovered',
+        content: '恢复中的回答',
+        streaming: true,
+      }))
+      setCoarse({ streaming: true, streamFrozen: false })
+    })
+    await flush()
+
+    expect(document.querySelectorAll('[data-message-id="msg-recovered"]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-message-id="streaming-assistant"]')).toHaveLength(1)
+    expect(screen.getByText('恢复中的回答')).toBeInTheDocument()
+
+    act(() => {
+      reset()
+      setCoarse({ streaming: false, streamFrozen: false })
+    })
+    await flush()
+    expect(document.querySelectorAll('[data-message-id="msg-recovered"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-message-id="streaming-assistant"]')).toHaveLength(0)
+  })
+
   it('流式逐帧更新只重渲 MessageList，不波及未订阅的兄弟节点', async () => {
     siblingRenders = 0
     mountList()

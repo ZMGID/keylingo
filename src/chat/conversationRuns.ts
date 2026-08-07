@@ -1,5 +1,7 @@
 export interface ConversationStreamSnapshot {
   runId: string | null
+  /** 当前流对应的持久化 assistant 消息 id。恢复运行时用于避免历史草稿和实时预览双渲染。 */
+  messageId: string | null
   streaming: boolean
   content: string
   reasoning: string
@@ -69,6 +71,7 @@ export function collectGeneratingConversationIds(
 export function createEmptyStreamSnapshot(): ConversationStreamSnapshot {
   return {
     runId: null,
+    messageId: null,
     streaming: true,
     content: '',
     reasoning: '',

@@ -170,6 +170,22 @@ function MessageListBase({
   const streamingToolCalls = snapshot.toolCalls
   const streamingSegments = snapshot.segments
 
+  // 恢复中的 Kivio Agent 会同时有两份状态：后端为崩溃恢复写入的 interrupted
+  // assistant 草稿，以及协议快照驱动的实时预览。它们共用同一个 messageId；实时
+  // 气泡存在时，历史侧不能再把同 id 的消息挂出来，否则整轮回答会显示两次。
+  const historyMessages = useMemo(() => {
+    if (!streaming && !streamFrozen) return messages
+    const activeMessageIds = new Set<string>()
+    if (snapshot.messageId) activeMessageIds.add(snapshot.messageId)
+    if (liveGroup && (streaming || streamFrozen)) {
+      for (const column of liveGroup.columns) {
+        if (!column.messageId.startsWith('pending-')) activeMessageIds.add(column.messageId)
+      }
+    }
+    if (activeMessageIds.size === 0) return messages
+    return messages.filter((message) => !activeMessageIds.has(message.id))
+  }, [liveGroup, messages, snapshot.messageId, streamFrozen, streaming])
+
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const virtualizerRef = useRef<VirtualizerHandle>(null)
   // hook 需要通过 state 拿到元素以便重新绑定监听；virtua 需要 RefObject。回调 ref 同时喂两者。
@@ -214,15 +230,15 @@ function MessageListBase({
   const legacyPlanMessageId = useMemo(() => {
     const legacyPlan = agentPlanState?.plan?.trim()
     if (!isExecutableAgentPlanText(legacyPlan)) return null
-    const hasMessagePlan = messages.some((message) => Boolean(
+    const hasMessagePlan = historyMessages.some((message) => Boolean(
       isExecutableAgentPlanText((message.agent_plan ?? message.agentPlan)?.plan),
     ))
     if (hasMessagePlan) return null
-    return [...messages]
+    return [...historyMessages]
       .reverse()
       .find((message) => message.role === 'assistant' && message.content.trim() === legacyPlan)
       ?.id ?? null
-  }, [agentPlanState, messages])
+  }, [agentPlanState, historyMessages])
 
   const messageIndexById = useMemo(() => {
     const map = new Map<string, number>()
@@ -245,7 +261,7 @@ function MessageListBase({
     return map
   }, [boundaries])
 
-  const folded = useMemo(() => foldMessageGroups(messages), [messages])
+  const folded = useMemo(() => foldMessageGroups(historyMessages), [historyMessages])
 
   const pendingCompactionAfterIndex = useMemo(
     () => (

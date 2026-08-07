@@ -20,6 +20,7 @@ export interface StreamCoarse {
 // 「起一轮新流」用的（streaming:true + startedAt:now）。这里是 reset 的目标常量，引用恒定。
 const IDLE_SNAPSHOT: ConversationStreamSnapshot = {
   runId: null,
+  messageId: null,
   streaming: false,
   content: '',
   reasoning: '',

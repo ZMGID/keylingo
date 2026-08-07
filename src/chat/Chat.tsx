@@ -1986,15 +1986,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           if (column) {
             Object.assign(column, createEmptyStreamSnapshot(), {
               runId: payload.runId,
+              messageId: payload.messageId,
               streaming: true,
               startedAt: Date.now(),
             })
             touchGroup()
           }
+          if (currentConversationIdRef.current === payload.conversationId) {
+            setStreamCoarse({ streaming: true, streamFrozen: false, cancelling: false })
+          }
           return
         }
         const restored = createEmptyStreamSnapshot()
         restored.runId = payload.runId
+        restored.messageId = payload.messageId
         restored.streaming = true
         restored.startedAt = Date.now()
         streamSnapshotsRef.current[payload.conversationId] = restored
@@ -2044,6 +2049,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         if (snapshot.runId && snapshot.runId !== payload.runId) return
         snapshot.runId = payload.runId
       }
+      // 所有 run 事件都带有 messageId；补上它可以覆盖本窗口先创建的空快照，
+      // 也让协议快照恢复时的历史草稿与实时预览能够按同一条消息互斥渲染。
+      if (payload.messageId) snapshot.messageId = payload.messageId
       const segment = streamPayloadToSegment(payload)
       const textDelta = streamTextDelta(payload)
       const reasoningDelta = streamReasoningDelta(payload)
@@ -3020,6 +3028,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     snapshot.reasoningStartedAtBySegmentId = {}
     snapshot.reasoningDurationMsBySegmentId = {}
     snapshot.runId = null
+    snapshot.messageId = null
     syncGeneratingConversationIds()
 
     if (currentConversationIdRef.current === conversationId) {
