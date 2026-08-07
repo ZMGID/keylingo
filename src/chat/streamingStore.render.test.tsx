@@ -192,6 +192,15 @@ describe('MessageList ← streamingStore 集成', () => {
     expect(screen.getByText('boom')).toBeInTheDocument()
   })
 
+  it('流读取错误使用独立错误卡片并保留原始详情', async () => {
+    mountList()
+    act(() => setCoarse({ streamError: 'Chat stream: stream_read_error' }))
+    await flush()
+
+    expect(screen.getByText('超时 / 连接中断')).toBeInTheDocument()
+    expect(screen.getByText('Chat stream: stream_read_error')).toBeInTheDocument()
+  })
+
   it('长列表只挂载可见窗口，而不是把所有历史消息留在 DOM', async () => {
     const messages = Array.from({ length: 100 }, (_, index) => message(index))
     render(<MessageList messages={messages} conversationId="long-c1" />)
@@ -278,6 +287,56 @@ describe('MessageList ← streamingStore 集成', () => {
 
     expect(writes).toBeGreaterThan(0)
     expect(scrollTop).toBe(2400)
+  })
+
+  it('流式快照更新在 ResizeObserver 未报告时仍补钉到底部', async () => {
+    const originalResizeObserver = window.ResizeObserver
+    window.ResizeObserver = class {
+      observe() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver
+
+    try {
+      const { container } = render(
+        <MessageList
+          conversationId="streaming-fallback-pin-c1"
+          messages={[{
+            id: 'streaming-fallback-user',
+            role: 'user',
+            content: 'question',
+            timestamp: 1,
+          }]}
+        />,
+      )
+      await flush()
+
+      const scroller = container.querySelector('.chat-motion-view-in.custom-scrollbar') as HTMLDivElement
+      let scrollTop = 0
+      let writes = 0
+      Object.defineProperties(scroller, {
+        scrollHeight: { configurable: true, get: () => 2400 },
+        clientHeight: { configurable: true, get: () => 500 },
+        scrollTop: {
+          configurable: true,
+          get: () => scrollTop,
+          set: (value: number) => {
+            scrollTop = value
+            writes += 1
+          },
+        },
+      })
+
+      act(() => {
+        setSnapshot(snapWith({ content: 'streaming answer', streaming: true }))
+        setCoarse({ streaming: true })
+      })
+      await flush()
+
+      expect(writes).toBeGreaterThan(0)
+      expect(scrollTop).toBe(2400)
+    } finally {
+      window.ResizeObserver = originalResizeObserver
+    }
   })
 
   it('底部阈值内的小幅向上滚动不会闪现回到底部按钮', async () => {

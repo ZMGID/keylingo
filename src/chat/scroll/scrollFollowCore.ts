@@ -153,7 +153,13 @@ export function reduceFollowEvent(
         // 第三条必须限定 source==='user'：self 来源（内容收缩、我们自己钉底）滚到底部不算
         // 用户意图，否则读者在上方看历史时一次内容收缩就会把他拽回底部。
         // 按住指针期间先不接（拖选文本会带出滚动），松手后下一次滚动再接。
-        const userReturned = event.source === 'user' && !state.pointerHeld
+        // 上滚手势在「贴底容差」内会先经过 wheel(up) 解除跟随，随后才收到一个
+        // gap 仍很小的 scroll(user)。不能把这条同手势事件当成「滚回底部」，否则
+        // following 会在底部十几像素内反复 false/true，回到底部按钮也会闪烁。
+        // 真正从上方滚回底部时，上一条 scroll 的 gap 必须已经离开容差区。
+        const userReturned = event.source === 'user'
+          && !state.pointerHeld
+          && previousGap > config.attachThresholdPx
         if (state.following || now <= state.latchUntil || userReturned) {
           next.following = true
         }

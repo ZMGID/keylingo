@@ -495,6 +495,16 @@ function streamTerminalReason(payload: ChatStreamPayload): 'done' | 'cancelled' 
   return undefined
 }
 
+function hasStreamPreview(snapshot: ConversationStreamSnapshot | null | undefined): boolean {
+  return Boolean(
+    snapshot
+    && (snapshot.content
+      || snapshot.reasoning
+      || snapshot.toolCalls.length > 0
+      || snapshot.segments.length > 0),
+  )
+}
+
 function upsertStreamSegment(
   segments: ChatMessageSegment[],
   incoming: ChatMessageSegment,
@@ -1146,6 +1156,25 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     streamingReasoningRef.current = ''
   }, [cancelPendingFrame])
 
+  const freezeStreamSnapshot = useCallback((conversationId: string): boolean => {
+    const snapshot = streamSnapshotsRef.current[conversationId]
+    if (!hasStreamPreview(snapshot)) return false
+    // 流中断后保留已经收到的正文、思考和工具卡片；只停止动画，不销毁快照。
+    cancelPendingFrame()
+    snapshot.streaming = false
+    snapshot.reasoningStreaming = false
+    syncGeneratingConversationIds()
+    if (currentConversationIdRef.current === conversationId) {
+      setStreamSnapshot(snapshot)
+      setStreamCoarse({ streaming: false, streamFrozen: true, cancelling: false })
+      activeRunIdRef.current = snapshot.runId
+      streamStartedAtRef.current = snapshot.startedAt
+      streamingContentRef.current = snapshot.content
+      streamingReasoningRef.current = snapshot.reasoning
+    }
+    return true
+  }, [cancelPendingFrame, syncGeneratingConversationIds])
+
   const ensureStreamSnapshot = useCallback((conversationId: string) => {
     const existing = streamSnapshotsRef.current[conversationId]
     if (existing) return existing
@@ -1171,7 +1200,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       clearStreamingPreview()
     } else {
       setStreamSnapshot(snapshot)
-      setStreamCoarse({ streaming: snapshot.streaming, streamFrozen: false, cancelling: false })
+      setStreamCoarse({
+        streaming: snapshot.streaming,
+        streamFrozen: !snapshot.streaming && Boolean(streamErrorsRef.current[conversationId]) && hasStreamPreview(snapshot),
+        cancelling: false,
+      })
       activeRunIdRef.current = snapshot.runId
       streamStartedAtRef.current = snapshot.startedAt
       streamingContentRef.current = snapshot.content
@@ -1812,6 +1845,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const finishStreamingRun = useCallback(
     async (payload: { reason?: string; conversationId?: string }) => {
       const conversationId = payload.conversationId ?? currentConversationIdRef.current
+      const preservedPartial = payload.reason === 'error' && conversationId
+        ? freezeStreamSnapshot(conversationId)
+        : false
       // 兜底：run 结束时压缩必然已终止；防御后端遗漏终止事件把"压缩中"状态卡死。
       if (conversationId) markConversationCompacting(conversationId, false)
       if (payload.reason !== 'cancelled') {
@@ -1837,14 +1873,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         clearConversationLocalState(localState(), conversationId, { inFlight: true })
         syncGeneratingConversationIds()
       }
-      if (conversationId && currentConversationIdRef.current === conversationId) {
+      if (conversationId && currentConversationRef.current?.id === conversationId) {
         setPendingToolConfirm(null)
         setPendingSessionConsent(null)
         setPendingUserPrompt(null)
-        clearStreamingPreview()
+        if (!preservedPartial) clearStreamingPreview()
       }
     },
-    [clearStreamingPreview, localState, markConversationCompacting, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+    [clearStreamingPreview, freezeStreamSnapshot, localState, markConversationCompacting, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
   )
 
   const flushPendingStreamDone = useCallback(async (conversationId?: string): Promise<boolean> => {
@@ -3061,10 +3097,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         }
       }
       setOptimisticSidebarConversations((items) => items.filter((item) => item.id !== conversationId))
-      clearStreamSnapshot(conversationId)
       if (keptConversation) refreshSidebar()
       const message = typeof err === 'string' ? err : (err as Error).message || '发送失败'
       setStreamErrorForConversation(conversationId, message)
+      if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
     } finally {
       clearConversationInFlight(conversationId)
       // 多答组收尾：sendMessage 返回时所有臂已结束，持久化后的会话已 applyConversation（含 N 条
@@ -3079,7 +3115,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         // 报错 / 用户按停止的 run 走不到这里：那时队列条目留着，由用户决定要不要发。
         void messageQueueRef.current.drain(persistedConversation)
       } else if (!(await flushPendingStreamDone(conversationId))) {
-        clearStreamSnapshot(conversationId)
+        if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
       }
     }
     return true
@@ -3102,6 +3138,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     ensureStreamSnapshot,
     finishStreamingRunWithConversation,
     flushPendingStreamDone,
+    freezeStreamSnapshot,
     markConversationInFlight,
     refreshSidebar,
     resetLocalCancellation,
@@ -3568,7 +3605,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           conversationId,
           typeof err === 'string' ? err : (err as Error).message || '重新生成失败',
         )
-        clearStreamSnapshot(conversationId)
+        if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
         if (currentConversationIdRef.current === conversationId) {
           void reloadConversation(conversationId)
         }
@@ -3579,11 +3616,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           delete pendingStreamDoneRef.current[conversationId]
           finishStreamingRunWithConversation(conversationId, persistedConversation)
         } else if (!(await flushPendingStreamDone(conversationId))) {
-          clearStreamSnapshot(conversationId)
+          if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
         }
       }
     },
-    [applyAssistantStreamStats, applyConversation, clearConversationInFlight, clearStreamSnapshot, ensureStreamSnapshot, finishStreamingRunWithConversation, flushPendingStreamDone, markConversationInFlight, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+    [applyAssistantStreamStats, applyConversation, clearConversationInFlight, clearStreamSnapshot, ensureStreamSnapshot, finishStreamingRunWithConversation, flushPendingStreamDone, freezeStreamSnapshot, markConversationInFlight, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
   )
 
   const handleRuntimeChange = useCallback(async (runtime: AgentRuntimeConfig) => {

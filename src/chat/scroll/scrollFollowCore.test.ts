@@ -160,6 +160,12 @@ describe('scrollFollowCore', () => {
     expect(state.following).toBe(false)
   })
 
+  it('慢速上滚经过底部容差区时不会被 scroll 事件重新接回', () => {
+    const detached = run([wheelUp({ gap: 4 })]).state
+    const { state } = run([scroll(4, 1, 'user')], detached)
+    expect(state.following).toBe(false)
+  })
+
   it('解除后滚轮下滚到底部重新跟随', () => {
     const detached = run([wheelUp({ gap: 300 })]).state
     // 滚轮下滚且已在底部 → 重新跟随并钉底。

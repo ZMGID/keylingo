@@ -1,8 +1,9 @@
 import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, RotateCw } from 'lucide-react'
 import { Virtualizer, type VirtualizerHandle } from 'virtua'
-import type { AgentPlanState, ChatMessage, ConversationContextState } from './types'
+import type { AgentPlanState, ChatMessage, ConversationContextState, DegradedAnswer } from './types'
 import { MessageBubble } from './MessageBubble'
+import { DegradedAnswerCard } from './DegradedAnswerCard'
 import { MessageGroup } from './MessageGroup'
 import { MessageNavigator } from './ChatMessageNavigator'
 import { MessageContextMenu, type MessageMenuAnchor } from './MessageContextMenu'
@@ -87,6 +88,26 @@ type RenderItem =
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
   | { kind: 'compaction-progress'; key: string; afterIndex: number }
 
+function streamErrorDegraded(error: string): DegradedAnswer {
+  const normalized = error.toLowerCase()
+  const kind: DegradedAnswer['kind'] =
+    normalized.includes('stream_read_error')
+      || normalized.includes('timeout')
+      || normalized.includes('timed out')
+      || normalized.includes('连接')
+      || normalized.includes('网络')
+      ? 'timeout'
+      : normalized.includes('context') || normalized.includes('上下文')
+        ? 'context_overflow'
+        : normalized.includes('rate') || normalized.includes('quota') || normalized.includes('限流')
+          ? 'rate_limited'
+          : 'unknown'
+  const reason = kind === 'timeout'
+    ? '模型流式响应中途断开。'
+    : '回复生成失败。'
+  return { kind, reason, detail: error, text: reason }
+}
+
 // R8（多模型一问多答）：多答组的「本次所发模型」列表，渲染在该组对应 user 消息顶部。
 type GroupModelLabel = { providerId: string | null; model: string | null }
 
@@ -170,11 +191,25 @@ function MessageListBase({
   >(null)
 
   // 底部跟随：contentGrowth 钉底 + 近底历史实挂载，避免与 virtua remeasure 互抢。
-  const { handle: followHandle, following } = useScrollFollow({
+  const { handle: followHandle, following, showJumpButton } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
     trackKeys: true,
   })
+
+  // ResizeObserver 是主要的流式钉底驱动，但虚拟列表/浏览器可能先更新内容和 scrollTop，
+  // 再投递 ResizeObserver，偶尔会漏掉这一轮高度变化。流式快照已经是最新 DOM 的提交信号，
+  // 在 layout effect 里补一次同步；用户滚轮/触摸上移时 followHandle 会先变成 false，
+  // 因此不会把用户主动停留在历史位置的视口重新拽到底部。
+  useLayoutEffect(() => {
+    if (!streaming || !followHandle.isFollowing()) return
+    const viewport = scrollRef.current
+    if (viewport) {
+      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      if (gap <= 1) return
+    }
+    followHandle.stickToBottom()
+  }, [followHandle, snapshot, streaming])
 
   const legacyPlanMessageId = useMemo(() => {
     const legacyPlan = agentPlanState?.plan?.trim()
@@ -877,9 +912,7 @@ function MessageListBase({
         case 'error':
           return (
             <div className="chat-motion-fade-up flex flex-col items-start gap-2 py-3">
-              <p className="max-w-[85%] text-sm leading-relaxed text-red-600 dark:text-red-400">
-                {item.text}
-              </p>
+              <DegradedAnswerCard degraded={streamErrorDegraded(item.text)} />
               {item.retryMessageId && onRetryLastUser && (
                 <button
                   type="button"
@@ -1009,7 +1042,7 @@ function MessageListBase({
           会静默失效（表现就是「加了没效果」）。不走 mask-image：那会让整个滚动容器每帧走遮罩合成，长列表上白给。 */}
       <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-6 bg-gradient-to-b from-[var(--theme-surface-soft)] to-transparent dark:from-[#262629]" />
       <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] h-8 bg-gradient-to-t from-[var(--theme-surface-soft)] to-transparent dark:from-[#262629]" />
-      {!following && (
+      {showJumpButton && (
         <button
           type="button"
           onClick={handleJumpToBottom}

@@ -56,6 +56,11 @@ export type ScrollFollowHandle = {
 const JUMP_BASE_DURATION_MS = 260
 const JUMP_MAX_DURATION_MS = 600
 const JUMP_DISTANCE_DURATION_DIVISOR = 8
+// 跟随解除和按钮显示故意分开：底部附近的微小上滚不应立刻弹出按钮。
+// 用视口高度算「明显离开底部」的距离，再设上下限，避免固定 px 在不同窗口里过早/过晚出现。
+const JUMP_BUTTON_SHOW_RATIO = 0.35
+const JUMP_BUTTON_SHOW_MIN_PX = 240
+const JUMP_BUTTON_SHOW_MAX_PX = 480
 
 function prefersReducedMotion() {
   return (
@@ -77,6 +82,7 @@ export type UseScrollFollowArgs = {
 export function useScrollFollow(args: UseScrollFollowArgs): {
   handle: ScrollFollowHandle
   following: boolean
+  showJumpButton: boolean
 } {
   const { viewport, content = null, listenerRoot = null, enabled = true, trackKeys = false } = args
 
@@ -85,6 +91,7 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   const configRef = useRef<FollowConfig>(DEFAULT_FOLLOW_CONFIG)
   configRef.current = { ...DEFAULT_FOLLOW_CONFIG, ...args.config }
   const [following, setFollowing] = useState(true)
+  const [showJumpButton, setShowJumpButton] = useState(false)
   const jumpRafRef = useRef<number | null>(null)
   const pinRafRef = useRef<number | null>(null)
 
@@ -100,11 +107,26 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   const resizeWindowRef = useRef(false)
   const resizeWindowRafRef = useRef<number | null>(null)
   const resizeWindowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // ResizeObserver delivery can lag behind the scroll event emitted by a virtualizer/browser
+  // compensation. Keep the last geometry so a scroll that coincides with a real height increase
+  // can still be classified as self-induced without relying on timer ordering.
+  const lastScrollHeightRef = useRef<number | null>(null)
+  const lastScrollTopRef = useRef<number | null>(null)
+  const geometrySampledRef = useRef(false)
 
   // 唯一的 scrollTop 写入口：写完立刻读回并登记，别处一律不许直接赋值。
   const applyScrollTop = useCallback((el: HTMLElement, value: number) => {
     el.scrollTop = value
     ignoreScrollTopRef.current = el.scrollTop
+  }, [])
+
+  const jumpButtonThreshold = useCallback(() => {
+    const viewport = boundViewportRef.current
+    const viewportHeight = viewport?.clientHeight ?? 0
+    return Math.min(
+      JUMP_BUTTON_SHOW_MAX_PX,
+      Math.max(JUMP_BUTTON_SHOW_MIN_PX, viewportHeight * JUMP_BUTTON_SHOW_RATIO),
+    )
   }, [])
 
   const cancelJumpAnimation = useCallback(() => {
@@ -143,8 +165,13 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       if (step.state.following !== wasFollowing) {
         setFollowing(step.state.following)
       }
+      // `gap` 是当前事件采样值；没有 gap 的控制事件（forceFollow/release）沿用
+      // 状态里的最近一次采样。只在跨过显示阈值时更新，避免每个 scroll 帧触发重渲。
+      const gap = 'gap' in event ? event.gap : step.state.lastGap
+      const shouldShowJumpButton = !step.state.following && gap > jumpButtonThreshold()
+      setShowJumpButton((visible) => visible === shouldShowJumpButton ? visible : shouldShowJumpButton)
     },
-    [pinToBottom],
+    [jumpButtonThreshold, pinToBottom],
   )
 
   const stickToBottom = useCallback(() => {
@@ -203,7 +230,11 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     boundViewportRef.current = viewport
     stateRef.current = createFollowState()
     setFollowing(true)
+    setShowJumpButton(false)
     pinToBottom()
+    lastScrollHeightRef.current = viewport.scrollHeight
+    lastScrollTopRef.current = viewport.scrollTop
+    geometrySampledRef.current = false
 
     const getGap = () =>
       Math.max(0, viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight)
@@ -242,13 +273,27 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       // user、gap 又大于容差 → 流式中跟随莫名解除（表现「有时候就直接不跟随了」）。
       // 补偿滚动派发于 scroll steps、早于当帧 rAF，事件时窗口必然还开着，抓下来是确定的。
       const resizeWindowAtEvent = resizeWindowRef.current
+      const previousScrollHeight = lastScrollHeightRef.current
+      const previousScrollTop = lastScrollTopRef.current
+      const contentGrewBeforeScroll =
+        geometrySampledRef.current &&
+        previousScrollHeight !== null &&
+        viewport.scrollHeight > previousScrollHeight &&
+        (previousScrollTop === null || scrollTop >= previousScrollTop - 1) &&
+        stateRef.current.following
+      lastScrollHeightRef.current = viewport.scrollHeight
+      lastScrollTopRef.current = scrollTop
+      geometrySampledRef.current = true
       // scroll 也可能先于 ResizeObserver delivery 到达。延后一拍再判来源，让 RO 有机会打开
       // resizeWindow；否则 virtua 的高度补偿会被当成用户滚动，直接解除流式跟随。
       // 所以判定时还要再看一次窗口 —— 两个时刻任一开着都算 self。
       const timer = setTimeout(() => {
         pendingScrollTimers.delete(timer)
         const selfInduced =
-          resizeWindowAtEvent || resizeWindowRef.current || scrollTop === token
+          resizeWindowAtEvent ||
+          resizeWindowRef.current ||
+          scrollTop === token ||
+          contentGrewBeforeScroll
         dispatch({
           type: 'scroll',
           gap,
@@ -374,6 +419,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
               }, 0)
             })
             dispatch({ type: 'contentGrowth', gap: getGap() })
+            lastScrollHeightRef.current = viewport.scrollHeight
+            lastScrollTopRef.current = viewport.scrollTop
+            geometrySampledRef.current = true
           })
     resizeObserver?.observe(viewport)
     if (growthTarget instanceof Element) {
@@ -413,6 +461,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       resizeWindowRef.current = false
       ignoreScrollTopRef.current = null
       boundViewportRef.current = null
+      lastScrollHeightRef.current = null
+      lastScrollTopRef.current = null
+      geometrySampledRef.current = false
     }
   }, [cancelJumpAnimation, content, dispatch, enabled, listenerRoot, pinToBottom, trackKeys, viewport])
 
@@ -426,5 +477,5 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     [jumpToBottom, releaseFollow, stickToBottom],
   )
 
-  return { handle, following }
+  return { handle, following, showJumpButton }
 }

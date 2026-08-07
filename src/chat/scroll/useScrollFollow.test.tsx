@@ -11,10 +11,11 @@ type ResizeObserverHarness = {
 function Harness() {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null)
   const [content, setContent] = useState<HTMLDivElement | null>(null)
-  const { following } = useScrollFollow({ viewport, content })
+  const { following, showJumpButton } = useScrollFollow({ viewport, content })
   return (
     <>
       <output data-testid="following">{String(following)}</output>
+      <output data-testid="show-jump-button">{String(showJumpButton)}</output>
       <div ref={setViewport} data-testid="viewport">
         <div ref={setContent} />
       </div>
@@ -88,6 +89,21 @@ describe('useScrollFollow scroll source timing', () => {
     expect(screen.getByTestId('following')).toHaveTextContent('false')
   })
 
+  it('does not show the jump button until the reader is meaningfully away from bottom', () => {
+    const viewport = mount()
+
+    viewport.scrollTop = 480
+    fireEvent.scroll(viewport)
+    act(() => vi.advanceTimersByTime(1))
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+    expect(screen.getByTestId('show-jump-button')).toHaveTextContent('false')
+
+    viewport.scrollTop = 200
+    fireEvent.scroll(viewport)
+    act(() => vi.advanceTimersByTime(1))
+    expect(screen.getByTestId('show-jump-button')).toHaveTextContent('true')
+  })
+
   // 竞态回归：来源判定被推迟一拍（setTimeout(1)），而 resize 窗口的关闭是 rAF + 宏任务。
   // 真实浏览器里快帧下关闭会抢先于判定执行 —— scroll 事件派发于 scroll steps（窗口还开着），
   // 判定 timer 却在关闭之后才跑。token 对不上的补偿滚动（virtua shift 纠正 / 浏览器 clamp）
@@ -133,4 +149,47 @@ describe('useScrollFollow scroll source timing', () => {
       cafStub.mockRestore()
     }
   })
+
+  it('keeps following when content growth scrolls before ResizeObserver and the pin token is gone', () => {
+    const viewport = mount()
+    let scrollHeight = 1000
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+
+    // Consume the previous programmatic-scroll token without leaving the bottom.
+    viewport.scrollTop = 500
+    fireEvent.scroll(viewport)
+    act(() => vi.advanceTimersByTime(1))
+
+    // Simulate a virtualizer/browser compensation scroll arriving before RO delivery.
+    scrollHeight = 1200
+    viewport.scrollTop = 500
+    fireEvent.scroll(viewport)
+    act(() => vi.advanceTimersByTime(1))
+
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+  })
+
+  it('still releases when the user scrolls up during the same content growth', () => {
+    const viewport = mount()
+    let scrollHeight = 1000
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+
+    viewport.scrollTop = 500
+    fireEvent.scroll(viewport)
+    act(() => vi.advanceTimersByTime(1))
+
+    scrollHeight = 1200
+    viewport.scrollTop = 400
+    fireEvent.scroll(viewport)
+    act(() => vi.advanceTimersByTime(1))
+
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+  })
+
 })
