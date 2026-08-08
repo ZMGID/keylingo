@@ -174,14 +174,15 @@ Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），�
 
 ## 新版本 —— v2.8.8
 
-- **对话库** —— 新增对话管理中心，支持搜索、书架分类、排序分组、多选批量操作与归档；插件管理改到设置页。
-- **提示词缓存** —— 供应商可设置缓存保留时长：关闭 / 短时 / 长时。
-- **扩展中心多语言** —— 助手、技能、MCP、知识库、笔记、插件等页面支持中英文切换。
-- **会话用量与标题** —— 输入栏显示本会话输入、缓存命中与输出用量；标题生成时增加打字效果。
-- **模型识别** —— 新增 Cursor Composer 系列，模型能力与用量展示更准确。
-- **侧栏操作** —— 对话支持钉选与一键归档，完整菜单改为右键；生成中状态指示更清晰。
-- **设置与用量** —— 调整设置导航与记忆页布局；用量统计新增成功率。
-- **稳定性** —— 修复流式失败丢失、消息重复、滚动异常、批量删除残留，以及对话库切换闪白等问题。
+- **对话库** —— 新增对话管理中心：搜索、书架分类、排序分组、多选批量操作、归档。插件管理改到设置页。
+- **提示词缓存时长** —— 供应商可选择关闭、短时或长时缓存。
+- **扩展中心中英文** —— 助手、技能、MCP、知识库、笔记、插件页面支持界面语言切换。
+- **会话用量** —— 输入栏显示本会话的输入、缓存命中与输出 token 用量。
+- **标题动画** —— 模型生成对话标题时，以打字效果替换临时标题。
+- **Cursor Composer** —— 支持 Composer 1 / 1.5 / 2 / 2.5 等模型的上下文窗口与定价显示。
+- **侧栏操作** —— 对话可钉选、一键归档；完整菜单改到右键；生成中显示波浪状态指示。
+- **设置与用量统计** —— 调整设置导航顺序与记忆页布局；用量统计新增请求成功率。
+- **问题修复** —— 修复流式中断后内容丢失、重复消息、滚动异常、批量删除残留，以及对话库切换闪白。
 
 ## v2.8.7
 
@@ -406,14 +407,15 @@ Kivio Desktop checks GitHub Releases for updates shortly after launch (can be di
 
 ## What's New — v2.8.8
 
-- **Conversation library** — a full conversation manager with search, shelves, sort/group, bulk actions, and archive; plugin management moves to Settings.
-- **Prompt-cache retention** — providers can set cache retention to off, short, or long.
-- **Localized extension centers** — Assistant, Skill, MCP, Knowledge, Notes, and Plugin pages support Chinese and English.
-- **Session usage and titles** — the composer shows input, cache-hit, and output usage for the session; generated titles appear with a typewriter effect.
-- **Model recognition** — adds Cursor Composer models, with more accurate capability and usage display.
-- **Sidebar actions** — pin and one-click archive on conversation rows, full menu on right-click, and clearer generating status.
-- **Settings and usage** — cleaner settings navigation and memory layout; usage stats now include success rate.
-- **Stability** — fixes lost stream failures, duplicate recovered messages, scroll glitches, leftover bulk-delete state, and white flashes when switching shelves.
+- **Conversation library** — new conversation manager with search, shelves, sort/group, bulk actions, and archive. Plugin management moves to Settings.
+- **Prompt-cache duration** — set provider cache retention to off, short, or long.
+- **Extension-center languages** — Assistant, Skill, MCP, Knowledge, Notes, and Plugin pages follow the app language.
+- **Session usage** — the composer shows input, cache-hit, and output tokens for the current session.
+- **Title animation** — generated conversation titles replace the temporary title with a typewriter effect.
+- **Cursor Composer** — shows context window and pricing for Composer 1 / 1.5 / 2 / 2.5.
+- **Sidebar actions** — pin and one-click archive; full menu on right-click; wave indicator while generating.
+- **Settings and usage stats** — cleaner settings nav and memory layout; usage stats include request success rate.
+- **Bug fixes** — lost content after stream failures, duplicate messages, scroll glitches, leftover bulk-delete state, and white flashes when switching shelves.
 
 ## v2.8.7
 
