@@ -31,6 +31,7 @@ import { Input, Select } from '../settings/components'
 import { KnowledgeIcon } from '../settings/NavIcons'
 import { resolveModelInfo } from '../data/modelMatching'
 import { KnowledgeRagPanel } from '../settings/KnowledgeRagPanel'
+import { useLang, useT } from '../settings/i18n'
 import { RetrievalTestPanel } from './RetrievalTestPanel'
 import {
   kbCreateLibrary,
@@ -71,17 +72,18 @@ function EmbeddingModelPicker({
   onChange: (providerId: string, model: string) => void
   showBadges?: boolean
 }) {
+  const t = useT()
   const enabled = providers.filter((p) => p.enabled !== false)
   const selected = enabled.find((p) => p.id === providerId)
   const options = [
-    { value: '', label: '选择提供商…' },
+    { value: '', label: t.chatKnowledgeSelectProvider },
     ...enabled.map((p) => ({ value: p.id, label: p.name || p.id })),
   ]
   if (providerId && !options.some((o) => o.value === providerId)) {
     const known = providers.find((p) => p.id === providerId)
     const label = known
-      ? `${known.name || known.id}${known.enabled === false ? '（已停用）' : ''}`
-      : '⚠ 供应商已删除，请重新选择'
+      ? `${known.name || known.id}${known.enabled === false ? `（${t.externalAgentsDisabledGroup}）` : ''}`
+      : t.chatKnowledgeProviderDeleted
     options.unshift({ value: providerId, label })
   }
 
@@ -92,7 +94,7 @@ function EmbeddingModelPicker({
     return Boolean(mi.capabilities?.embedding || mi.dimensions)
   })
   const modelOptions = [
-    { value: '', label: '选择 embedding 模型…' },
+    { value: '', label: t.chatKnowledgeSelectEmbeddingModel },
     ...configuredModels.map((m) => ({ value: m, label: m })),
   ]
   if (model && !modelOptions.some((o) => o.value === model)) {
@@ -111,10 +113,10 @@ function EmbeddingModelPicker({
       {showBadges && isEmbedding && (
         <div className="flex flex-wrap items-center gap-1">
           <span className="rounded-md border border-indigo-300 bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-600 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300">
-            嵌入
+            {t.chatKnowledgeEmbeddingBadge}
           </span>
-          {info?.multilingual && <InfoPill>多语言</InfoPill>}
-          {info?.dimensions ? <InfoPill>{info.dimensions} 维</InfoPill> : null}
+          {info?.multilingual && <InfoPill>{t.chatKnowledgeMultilingual}</InfoPill>}
+          {info?.dimensions ? <InfoPill>{t.chatKnowledgeDimensions.replace('{n}', String(info.dimensions))}</InfoPill> : null}
           {ctxLabel(info?.contextWindow) ? <InfoPill>{ctxLabel(info?.contextWindow)}</InfoPill> : null}
           <InfoPill>RAG</InfoPill>
         </div>
@@ -142,6 +144,7 @@ function DocRow({
   progress?: Progress
   onDelete: () => void
 }) {
+  const t = useT()
   const indexing = doc.status === 'indexing'
   // 有 total 才是「向量化」阶段（可确定进度）；total 未知＝还在解析/OCR（不确定进度）。
   const determinate = indexing && !!progress && progress.total > 0
@@ -156,20 +159,20 @@ function DocRow({
         {indexing && (
           <span className="flex items-center gap-1 text-xs text-indigo-500">
             <Loader2 size={12} className="animate-spin" />
-            {determinate ? `${progress!.indexed}/${progress!.total}` : '处理中'}
+            {determinate ? `${progress!.indexed}/${progress!.total}` : t.chatKnowledgeProcessing}
           </span>
         )}
         {doc.status === 'ready' && (
           <span className="flex items-center gap-1 text-xs text-emerald-500">
-            <CheckCircle2 size={12} /> {doc.chunkCount} 块
+            <CheckCircle2 size={12} /> {t.chatKnowledgeChunks.replace('{n}', String(doc.chunkCount))}
           </span>
         )}
         {doc.status === 'error' && (
           <span className="flex items-center gap-1 text-xs text-red-500" title={doc.error ?? ''}>
-            <AlertCircle size={12} /> 失败
+            <AlertCircle size={12} /> {t.chatBgStatusFailed}
           </span>
         )}
-        <IconButton size="sm" className="danger shrink-0" onClick={onDelete} label={`删除 ${doc.name}`} title="删除文档">
+        <IconButton size="sm" className="danger shrink-0" onClick={onDelete} label={`${t.chatDelete} ${doc.name}`} title={t.chatKnowledgeDeleteDocument}>
           <Trash2 size={13} />
         </IconButton>
       </div>
@@ -200,6 +203,7 @@ function LibraryCard({
   index: number
   onOpen: () => void
 }) {
+  const t = useT()
   return (
     <button
       type="button"
@@ -213,7 +217,7 @@ function LibraryCard({
           <Library size={18} />
         </span>
         <span className="shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[10.5px] tabular-nums text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
-          {lib.docCount} 文档
+          {t.chatKnowledgeDocCount.replace('{n}', String(lib.docCount))}
         </span>
       </div>
       <div className="mt-2.5 min-w-0 flex-1">
@@ -221,18 +225,20 @@ function LibraryCard({
           {lib.name}
         </div>
         <p className="mt-1 truncate text-[12px] leading-[1.45] text-neutral-500 dark:text-neutral-400">
-          {lib.embeddingModel || '未设置 embedding 模型'}
+          {lib.embeddingModel || t.chatKnowledgeNoEmbeddingModel}
         </p>
       </div>
       <div className="mt-2.5 flex min-h-6 items-center gap-2 border-t border-neutral-100 pt-2 text-[11px] tabular-nums text-neutral-400 dark:border-neutral-800/70 dark:text-neutral-500">
-        <span>{lib.chunkCount} 块</span>
-        {lib.embeddingDim > 0 && <span>{lib.embeddingDim} 维</span>}
+        <span>{t.chatKnowledgeChunks.replace('{n}', String(lib.chunkCount))}</span>
+        {lib.embeddingDim > 0 && <span>{t.chatKnowledgeDimensions.replace('{n}', String(lib.embeddingDim))}</span>}
       </div>
     </button>
   )
 }
 
 export function KnowledgeCenter() {
+  const t = useT()
+  const lang = useLang()
   const [settings, setSettings] = useState<Settings | null>(null)
   const [view, setView] = useState<'libraries' | 'rag' | 'test'>('libraries')
   const [libraries, setLibraries] = useState<KnowledgeLibrary[]>([])
@@ -375,7 +381,7 @@ export function KnowledgeCenter() {
 
   const handleCreate = async () => {
     if (!newName.trim() || !newProviderId || !newModel) {
-      setError('请填写名称并选择 embedding 模型')
+      setError(t.chatKnowledgeCreateError)
       return
     }
     setBusy(true)
@@ -412,10 +418,10 @@ export function KnowledgeCenter() {
       await refreshLibraries()
       setBusy(false)
       if (failures.length > 0) {
-        setError(`${failures.length} 个文件导入失败：` + failures.join('; '))
+        setError(t.chatKnowledgeImportFailed.replace('{n}', String(failures.length)) + failures.join('; '))
       }
     },
-    [refreshDocs, refreshLibraries],
+    [refreshDocs, refreshLibraries, t],
   )
 
   const handleUpload = async () => {
@@ -459,7 +465,7 @@ export function KnowledgeCenter() {
             return UPLOAD_EXTS.includes(ext)
           })
           if (paths.length === 0) {
-            setError('拖入的文件类型不受支持')
+            setError(t.chatKnowledgeDropUnsupported)
             return
           }
           void uploadPaths(kbId, paths)
@@ -476,7 +482,7 @@ export function KnowledgeCenter() {
       setDragActive(false)
       unlisten?.()
     }
-  }, [uploadPaths])
+  }, [uploadPaths, t])
 
   const handleImportUrl = async () => {
     if (!selectedId) return
@@ -490,14 +496,14 @@ export function KnowledgeCenter() {
       await refreshDocs(selectedId).catch(() => {})
       await refreshLibraries()
     } catch (e) {
-      setError('网址导入失败：' + String(e))
+      setError(t.chatKnowledgeUrlImportFailed + String(e))
     } finally {
       setBusy(false)
     }
   }
 
   const handleDeleteLibrary = async (kbId: string) => {
-    if (!confirm('删除该知识库及其所有文档？')) return
+    if (!confirm(t.chatKnowledgeDeleteLibraryConfirm)) return
     try {
       await kbDeleteLibrary(kbId)
       if (selectedId === kbId) setSelectedId(null)
@@ -537,7 +543,7 @@ export function KnowledgeCenter() {
   const handleChangeEmbedding = async (providerId: string, model: string) => {
     if (!selected || !providerId || !model) return
     if (providerId === selected.embeddingProviderId && model === selected.embeddingModel) return
-    if (!confirm('更换 embedding 模型会重建整个知识库索引（重新调用 embedding，可能耗时与产生费用）。继续？')) return
+    if (!confirm(t.chatKnowledgeChangeEmbeddingConfirm)) return
     setBusy(true)
     try {
       await kbUpdateEmbedding(selected.id, providerId, model)
@@ -552,7 +558,7 @@ export function KnowledgeCenter() {
 
   const handleReindex = async () => {
     if (!selected) return
-    if (!confirm('重建该知识库的全部索引？')) return
+    if (!confirm(t.chatKnowledgeReindexConfirm)) return
     setBusy(true)
     try {
       await kbReindexLibrary(selected.id)
@@ -573,13 +579,13 @@ export function KnowledgeCenter() {
           <div className="border-b border-neutral-200 pb-5 dark:border-neutral-800">
             <h1 className="flex items-center gap-2.5 text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
               <KnowledgeIcon size={24} className="text-neutral-500" />
-              知识库
+              {t.contextSegmentKnowledgeBase}
             </h1>
             <div className="mt-3.5 flex min-w-0 items-center gap-4">
               <p className="min-w-0 flex-1 text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                导入文档构建本地 RAG，对话中由 agent 检索引用。数据不出本机。
+                {t.chatKnowledgeSubtitle}
               </p>
-              <IconButton size="lg" label="刷新" onClick={() => void refreshLibraries()} data-tauri-drag-region="false">
+              <IconButton size="lg" label={t.dockRefresh} onClick={() => void refreshLibraries()} data-tauri-drag-region="false">
                 <RefreshCw size={17} />
               </IconButton>
             </div>
@@ -587,7 +593,13 @@ export function KnowledgeCenter() {
 
           {/* Tab 行 */}
           <div className="mt-5 flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800">
-            {([['libraries', '知识库'], ['test', '检索'], ['rag', 'RAG 设置']] as const).map(([id, label]) => (
+            {(
+              [
+                ['libraries', t.contextSegmentKnowledgeBase],
+                ['test', t.chatKnowledgeTabTest],
+                ['rag', `RAG ${t.settings}`],
+              ] as const
+            ).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
@@ -613,7 +625,7 @@ export function KnowledgeCenter() {
               <AlertCircle size={14} className="shrink-0" />
               <span className="min-w-0 flex-1 break-words">{error}</span>
               <button type="button" onClick={() => setError(null)} className="shrink-0 text-xs underline" data-tauri-drag-region="false">
-                关闭
+                {t.dockViewerClose}
               </button>
             </div>
           )}
@@ -624,7 +636,7 @@ export function KnowledgeCenter() {
             <div key="rag" className="kv chat-motion-tab-in mt-5 !bg-transparent">
               <KnowledgeRagPanel
                 providers={providers}
-                lang="zh"
+                lang={lang}
                 docProcessing={settings?.documentProcessing}
                 onChangeDocProcessing={(dp: DocumentProcessingConfig) => persistSettingsPatch({ documentProcessing: dp })}
                 kbConfig={settings?.knowledgeBase}
@@ -642,31 +654,31 @@ export function KnowledgeCenter() {
                 <div className="min-w-0 flex-1">
                   <Button variant="ghost" size="sm" onClick={() => setSelectedId(null)} data-tauri-drag-region="false">
                     <ArrowLeft size={14} />
-                    全部知识库
+                    {t.chatKnowledgeAllLibraries}
                   </Button>
                   {renaming ? (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <Input value={renameDraft} onChange={setRenameDraft} className="w-56" placeholder="知识库名称" />
+                      <Input value={renameDraft} onChange={setRenameDraft} className="w-56" placeholder={t.chatKnowledgeNamePlaceholder} />
                       <Button size="sm" disabled={busy || !renameDraft.trim()} onClick={() => void handleRename(selected.id, renameDraft)} data-tauri-drag-region="false">
-                        保存
+                        {t.save}
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => setRenaming(false)} data-tauri-drag-region="false">
-                        取消
+                        {t.cancel}
                       </Button>
                     </div>
                   ) : (
                     <h2 className="mt-2 truncate text-[20px] font-semibold text-neutral-950 dark:text-neutral-50">{selected.name}</h2>
                   )}
                   <p className="mt-1 text-[12.5px] text-neutral-500 dark:text-neutral-400">
-                    {selected.docCount} 个文档 · {selected.chunkCount} 块
-                    {selected.embeddingDim > 0 ? ` · ${selected.embeddingDim} 维` : ''}
+                    {t.chatKnowledgeStatsDocs.replace('{n}', String(selected.docCount))} · {t.chatKnowledgeChunks.replace('{n}', String(selected.chunkCount))}
+                    {selected.embeddingDim > 0 ? ` · ${t.chatKnowledgeDimensions.replace('{n}', String(selected.embeddingDim))}` : ''}
                   </p>
                 </div>
                 {!renaming && (
                   <div className="flex shrink-0 items-center gap-1 pt-9">
                     <IconButton
                       size="sm"
-                      label="重命名"
+                      label={t.chatRename}
                       onClick={() => {
                         setRenaming(true)
                         setRenameDraft(selected.name)
@@ -675,7 +687,7 @@ export function KnowledgeCenter() {
                     >
                       <Pencil size={14} />
                     </IconButton>
-                    <IconButton size="sm" className="danger" label="删除库" onClick={() => void handleDeleteLibrary(selected.id)} data-tauri-drag-region="false">
+                    <IconButton size="sm" className="danger" label={t.chatKnowledgeDeleteLibrary} onClick={() => void handleDeleteLibrary(selected.id)} data-tauri-drag-region="false">
                       <Trash2 size={14} />
                     </IconButton>
                   </div>
@@ -684,7 +696,7 @@ export function KnowledgeCenter() {
 
               {/* Embedding 模型 */}
               <section className="rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
-                <div className="mb-3 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">Embedding 模型</div>
+                <div className="mb-3 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">{t.chatKnowledgeEmbeddingModelSection}</div>
                 <div className="space-y-3">
                   <EmbeddingModelPicker
                     providers={providers}
@@ -703,13 +715,13 @@ export function KnowledgeCenter() {
                       className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white transition-colors duration-[var(--kv-dur-fast)] hover:bg-amber-700 disabled:opacity-50"
                       data-tauri-drag-region="false"
                     >
-                      应用并重建索引
+                      {t.chatKnowledgeApplyAndRebuild}
                     </button>
                   )}
 
                   <div className="border-t border-neutral-100 pt-3 dark:border-neutral-800">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-[13px] text-neutral-700 dark:text-neutral-200">请求文档片段数量</span>
+                      <span className="text-[13px] text-neutral-700 dark:text-neutral-200">{t.chatKnowledgeRequestChunks}</span>
                       <span className="rounded-md border border-neutral-200 bg-white px-2 py-0.5 font-mono text-xs text-neutral-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
                         {batchDraft}
                       </span>
@@ -732,7 +744,7 @@ export function KnowledgeCenter() {
                       <span>{EMBED_BATCH_MAX}</span>
                     </div>
                     <p className="mt-1.5 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
-                      每次向量化请求打包多少个文档片段（默认 {EMBED_BATCH_DEFAULT}）。若 embedding 服务报“批量过大/条数超限”可调小，只影响后续索引、无需重建。
+                      {t.chatKnowledgeBatchHint.replace('{n}', String(EMBED_BATCH_DEFAULT))}
                     </p>
                   </div>
                 </div>
@@ -740,24 +752,24 @@ export function KnowledgeCenter() {
 
               {/* 文档 */}
               <section className="rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
-                <div className="mb-3 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">文档</div>
+                <div className="mb-3 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">{t.chatKnowledgeDocsSection}</div>
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <Button disabled={busy} onClick={() => void handleUpload()} data-tauri-drag-region="false">
-                      <Upload size={14} /> 导入文档
+                      <Upload size={14} /> {t.chatKnowledgeImportDocs}
                     </Button>
                     <Button variant="ghost" disabled={busy || docs.length === 0} onClick={() => void handleReindex()} data-tauri-drag-region="false">
-                      <RefreshCw size={14} /> 重建索引
+                      <RefreshCw size={14} /> {t.chatKnowledgeReindex}
                     </Button>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="relative min-w-[220px] flex-1">
                       <Link2 size={14} className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-neutral-400" />
-                      <Input className="!pl-10" value={urlInput} onChange={setUrlInput} placeholder="粘贴网址导入（https://…）" mono />
+                      <Input className="!pl-10" value={urlInput} onChange={setUrlInput} placeholder={t.chatKnowledgeUrlPlaceholder} mono />
                     </div>
                     <Button variant="ghost" disabled={busy || !urlInput.trim()} onClick={() => void handleImportUrl()} data-tauri-drag-region="false">
-                      <Plus size={14} /> 导入网址
+                      <Plus size={14} /> {t.chatKnowledgeImportUrl}
                     </Button>
                   </div>
 
@@ -775,10 +787,10 @@ export function KnowledgeCenter() {
                   >
                     <Upload size={20} className={dragActive ? 'text-indigo-500' : 'text-neutral-400'} />
                     <span className={`text-sm font-medium ${dragActive ? 'text-indigo-600 dark:text-indigo-300' : 'text-neutral-600 dark:text-neutral-300'}`}>
-                      {dragActive ? '松开以导入' : '点击导入文档'}
+                      {dragActive ? t.chatKnowledgeDropRelease : t.chatKnowledgeClickToImport}
                     </span>
                     <span className="max-w-md text-xs leading-relaxed text-neutral-400">
-                      点击或拖拽文件到此处；支持 txt / md / pdf / docx / xlsx / html、图片（需开启 OCR），或使用上方网址导入
+                      {t.chatKnowledgeDropHint}
                     </span>
                   </button>
 
@@ -797,9 +809,9 @@ export function KnowledgeCenter() {
             <div key="libraries" className="chat-motion-tab-in mt-5 space-y-4">
               {creating && (
                 <div className="chat-motion-search-reveal rounded-xl border border-neutral-200 p-4 dark:border-neutral-800">
-                  <div className="mb-3 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">新建知识库</div>
+                  <div className="mb-3 text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">{t.chatKnowledgeNewLibrary}</div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Input value={newName} onChange={setNewName} placeholder="知识库名称" className="w-44" />
+                    <Input value={newName} onChange={setNewName} placeholder={t.chatKnowledgeNamePlaceholder} className="w-44" />
                     <EmbeddingModelPicker
                       providers={providers}
                       providerId={newProviderId}
@@ -811,14 +823,14 @@ export function KnowledgeCenter() {
                       showBadges={false}
                     />
                     <Button disabled={busy} onClick={() => void handleCreate()} data-tauri-drag-region="false">
-                      <Plus size={14} /> 创建
+                      <Plus size={14} /> {t.chatKnowledgeCreate}
                     </Button>
                     <Button variant="ghost" onClick={() => setCreating(false)} data-tauri-drag-region="false">
-                      取消
+                      {t.cancel}
                     </Button>
                   </div>
                   <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
-                    embedding 模型决定向量维度，建库后更换需重建索引。需选用支持 /embeddings 接口的模型。
+                    {t.chatKnowledgeCreateHint}
                   </p>
                 </div>
               )}
@@ -843,8 +855,8 @@ export function KnowledgeCenter() {
                   <span className="grid size-12 place-items-center rounded-full bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500">
                     <Library size={22} />
                   </span>
-                  <span className="text-[14px] font-medium text-neutral-700 dark:text-neutral-200">还没有知识库</span>
-                  <span className="text-[12.5px] text-neutral-400">点击新建知识库，导入文档后即可在对话中检索引用</span>
+                  <span className="text-[14px] font-medium text-neutral-700 dark:text-neutral-200">{t.chatKnowledgeEmptyTitle}</span>
+                  <span className="text-[12.5px] text-neutral-400">{t.chatKnowledgeEmptyHint}</span>
                 </button>
               ) : (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -860,7 +872,7 @@ export function KnowledgeCenter() {
                       className="chat-motion-fade-up flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-200 text-neutral-400 transition-colors duration-[var(--kv-dur-fast)] hover:border-neutral-300 hover:bg-neutral-50/60 hover:text-neutral-600 dark:border-neutral-800 dark:hover:border-neutral-700 dark:hover:bg-neutral-900/30 dark:hover:text-neutral-300"
                     >
                       <Plus size={20} />
-                      <span className="text-[13px] font-medium">新建知识库</span>
+                      <span className="text-[13px] font-medium">{t.chatKnowledgeNewLibrary}</span>
                     </button>
                   )}
                 </div>

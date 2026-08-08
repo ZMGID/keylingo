@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ArrowUpRight, Check, Loader2, RefreshCw } from 'lucide-react'
 import { Button } from '../components/Button'
+import { useT, type I18n } from '../settings/i18n'
 import { chatApi } from './api'
 import type { ChatProject, ImportableCliSession } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
@@ -29,13 +30,13 @@ interface CliImportDialogProps {
   onOpenConversation: (conversationId: string) => void
 }
 
-function formatWhen(ms?: number | null): string {
+function formatWhen(ms: number | null | undefined, t: I18n): string {
   if (!ms) return ''
   const diff = Date.now() - ms
   const day = 86_400_000
-  if (diff < 3_600_000) return '刚刚'
-  if (diff < day) return `${Math.floor(diff / 3_600_000)} 小时前`
-  if (diff < 30 * day) return `${Math.floor(diff / day)} 天前`
+  if (diff < 3_600_000) return t.chatSkillCliJustNow
+  if (diff < day) return t.chatSkillCliHoursAgo.replace('{n}', String(Math.floor(diff / 3_600_000)))
+  if (diff < 30 * day) return t.chatSkillCliDaysAgo.replace('{n}', String(Math.floor(diff / day)))
   return new Date(ms).toLocaleDateString()
 }
 
@@ -51,6 +52,7 @@ export function CliImportDialog({
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onClose)
+  const t = useT()
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -121,10 +123,9 @@ export function CliImportDialog({
       if (result.failures.length) {
         // 部分失败不隐藏成功的那些——批量导入单条失败不该让整批白做。
         setError(
-          `${result.failures.length} 条导入失败：${result.failures
-            .map((f) => f.error)
-            .slice(0, 2)
-            .join('；')}`,
+          t.chatSkillCliImportFailures
+            .replace('{n}', String(result.failures.length))
+            .replace('{detail}', result.failures.map((f) => f.error).slice(0, 2).join('；')),
         )
         if (ids.length) onImported(ids)
         await load()
@@ -153,21 +154,21 @@ export function CliImportDialog({
         className={`${closing ? 'chat-motion-modal-out' : 'chat-motion-modal-in'} flex max-h-[80vh] w-full max-w-[560px] flex-col rounded-[10px] border border-neutral-200 bg-white shadow-xl dark:border-neutral-700 dark:bg-[#252527]`}
         role="dialog"
         aria-modal="true"
-        aria-label="从 CLI 导入对话"
+        aria-label={t.chatImportFromCli}
         onAnimationEnd={onAnimationEnd}
       >
         <div className="flex items-start justify-between gap-3 border-b border-neutral-200 px-4 py-3 dark:border-neutral-700">
           <div className="min-w-0">
             <h3 className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-50">
-              从 CLI 导入对话
+              {t.chatImportFromCli}
             </h3>
             <p className="mt-0.5 truncate text-[11px] text-neutral-500 dark:text-neutral-400">
-              只显示工作目录是 {rootPath} 的会话；导入后仍由原 CLI 续聊
+              {t.chatSkillCliImportScopeHint.replace('{path}', rootPath)}
             </p>
           </div>
           <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw strokeWidth={1.75} className={loading ? 'animate-spin' : undefined} />
-            重新扫描
+            {t.externalAgentsRescan}
           </Button>
         </div>
 
@@ -175,11 +176,11 @@ export function CliImportDialog({
           {loading ? (
             <div className="flex items-center gap-2 py-8 text-[12px] text-neutral-500 dark:text-neutral-400">
               <Loader2 strokeWidth={1.75} className="animate-spin" />
-              正在扫描本地 CLI（走 ACP 的需要起一次进程，稍慢）…
+              {t.chatSkillCliScanningHint}
             </div>
           ) : !sessions.length ? (
             <p className="py-8 text-center text-[12px] text-neutral-500 dark:text-neutral-400">
-              这个目录下没有找到可导入的会话。
+              {t.chatSkillCliNoSessions}
             </p>
           ) : (
             grouped.map(([agentId, list]) => (
@@ -188,10 +189,10 @@ export function CliImportDialog({
                   <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">
                     {AGENT_LABELS[agentId] ?? agentId}
                   </span>
-                  <span className="text-[11px] text-neutral-400">{list.length} 条</span>
+                  <span className="text-[11px] text-neutral-400">{t.chatSkillCliCount.replace('{n}', String(list.length))}</span>
                   {NO_HISTORY_AGENTS.has(agentId) && (
                     <span className="text-[11px] text-amber-600 dark:text-amber-500">
-                      不提供可读历史，导入后消息区为空，但续聊正常
+                      {t.chatSkillCliNoHistoryHint}
                     </span>
                   )}
                 </div>
@@ -202,13 +203,13 @@ export function CliImportDialog({
                     const bound = Boolean(session.boundConversationId)
                     // 「已导入」和「Kivio 里已经有了」是两回事：后者是 Kivio 自己跑出来的会话，
                     // 用户从没导过它，标成"已导入"是在撒谎。
-                    const boundLabel = session.alreadyImported ? '已导入' : 'Kivio 中已有'
+                    const boundLabel = session.alreadyImported ? t.chatSkillCliImported : t.chatSkillCliBound
                     return (
                       <li key={key}>
                         <button
                           type="button"
                           onClick={() => toggle(session)}
-                          title={bound ? '点击打开 Kivio 中已有的那条对话' : undefined}
+                          title={bound ? t.chatSkillCliOpenBound : undefined}
                           className={`flex w-full items-start gap-2 rounded-[6px] px-2 py-1.5 text-left transition-colors ${
                             bound ? 'opacity-55' : ''
                           } hover:bg-neutral-100 dark:hover:bg-neutral-800`}
@@ -230,13 +231,13 @@ export function CliImportDialog({
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-[12px] text-neutral-800 dark:text-neutral-100">
-                              {session.title || '(无标题)'}
+                              {session.title || t.chatSkillCliUntitled}
                             </span>
                             <span className="mt-0.5 block text-[11px] text-neutral-400">
                               {session.messageCount == null
-                                ? '条数未知'
-                                : `${session.messageCount} 条`}
-                              {formatWhen(session.updatedAt) && ` · ${formatWhen(session.updatedAt)}`}
+                                ? t.chatSkillCliUnknownCount
+                                : t.chatSkillCliCount.replace('{n}', String(session.messageCount))}
+                              {formatWhen(session.updatedAt, t) && ` · ${formatWhen(session.updatedAt, t)}`}
                               {bound && ` · ${boundLabel}`}
                             </span>
                           </span>
@@ -258,11 +259,11 @@ export function CliImportDialog({
 
         <div className="flex items-center justify-end gap-2 border-t border-neutral-200 px-4 py-3 dark:border-neutral-700">
           <Button variant="ghost" size="sm" onClick={startClose} disabled={importing}>
-            取消
+            {t.cancel}
           </Button>
           <Button size="sm" onClick={() => void runImport()} disabled={!selected.size || importing}>
             {importing && <Loader2 strokeWidth={1.75} className="animate-spin" />}
-            导入 {selected.size || ''}
+            {t.chatSkillCliImportAction.replace('{n}', selected.size ? String(selected.size) : '')}
           </Button>
         </div>
       </div>

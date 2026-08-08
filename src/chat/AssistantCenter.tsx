@@ -20,6 +20,7 @@ import { getSettingsCached } from '../api/settingsCache'
 import { Button, IconButton } from '../components/Button'
 import { isProviderEnabled } from '../settings/utils'
 import { Select } from '../settings/components'
+import { useT } from '../settings/i18n'
 import { builtinAssistantGlyph } from './assistantIcons'
 import { AgentIcon } from '../settings/NavIcons'
 import { chatApi } from './api'
@@ -164,6 +165,7 @@ export function AssistantCenter({
   onStartBuilder,
   onApplyAssistant,
 }: AssistantCenterProps) {
+  const t = useT()
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [mcpServers, setMcpServers] = useState<Array<{ id: string; name: string }>>([])
@@ -187,11 +189,11 @@ export function AssistantCenter({
       setSelectedId(selected?.id ?? null)
       setDraft(selected ? normalizeAssistantForDraft(selected) : null)
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err as Error).message || '套件加载失败')
+      setError(typeof err === 'string' ? err : (err as Error).message || t.chatAssistantLoadFailed)
     } finally {
       setLoading(false)
     }
-  }, [currentAssistantId])
+  }, [currentAssistantId, t])
 
   const loadProviders = useCallback(async () => {
     try {
@@ -272,7 +274,7 @@ export function AssistantCenter({
     if (!draft) return null
     const payload = draftPayload(draft)
     if (!payload.name) {
-      setError('套件名称不能为空')
+      setError(t.chatAssistantNameRequired)
       return null
     }
     setSaving(true)
@@ -287,7 +289,7 @@ export function AssistantCenter({
       setDraft(normalizeAssistantForDraft(saved))
       return saved
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err as Error).message || '套件保存失败')
+      setError(typeof err === 'string' ? err : (err as Error).message || t.chatAssistantSaveFailed)
       return null
     } finally {
       setSaving(false)
@@ -306,7 +308,7 @@ export function AssistantCenter({
       setDraft(normalizeAssistantForDraft(copy))
       setView('edit')
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err as Error).message || '复制失败')
+      setError(typeof err === 'string' ? err : (err as Error).message || t.chatAssistantDuplicateFailed)
     } finally {
       setSaving(false)
     }
@@ -321,7 +323,7 @@ export function AssistantCenter({
       setView('list')
       return
     }
-    if (!window.confirm(`确定删除套件「${draft.name}」？已有对话会保留当时的套件快照。`)) return
+    if (!window.confirm(t.chatAssistantDeleteConfirm.replace('{name}', draft.name))) return
     setSaving(true)
     setError('')
     try {
@@ -329,7 +331,7 @@ export function AssistantCenter({
       await loadAssistants(null)
       setView('list')
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err as Error).message || '删除失败')
+      setError(typeof err === 'string' ? err : (err as Error).message || t.chatAssistantDeleteFailed)
     } finally {
       setSaving(false)
     }
@@ -356,7 +358,7 @@ export function AssistantCenter({
       await chatApi.updateAssistant({ ...assistant, installed: next })
       await loadAssistants(assistant.id)
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err as Error).message || '操作失败')
+      setError(typeof err === 'string' ? err : (err as Error).message || t.chatOperationFailed)
     }
   }
 
@@ -364,9 +366,9 @@ export function AssistantCenter({
     <div className="space-y-4">
       <div className="assistant-center-tabs flex min-w-0 items-center gap-1 border-b border-neutral-200 pb-2 dark:border-neutral-800">
           {[
-            ['installed', '常用', installedCount],
-            ['plaza', '套件广场', builtInCount],
-            ['mine', '我的', assistants.length - builtInCount],
+            ['installed', t.chatAssistantTabInstalled, installedCount],
+            ['plaza', t.chatAssistantTabPlaza, builtInCount],
+            ['mine', t.chatAssistantTabMine, assistants.length - builtInCount],
           ].map(([value, label, count]) => (
             <button
               key={value}
@@ -397,7 +399,7 @@ export function AssistantCenter({
             type="text"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索套件..."
+            placeholder={t.chatAssistantSearch}
             className="h-10 w-full rounded-md border border-neutral-200 bg-white pl-10 pr-4 text-[14px] outline-none placeholder:text-neutral-400 focus:border-neutral-300 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
             data-tauri-drag-region="false"
           />
@@ -405,26 +407,26 @@ export function AssistantCenter({
         {onStartBuilder && (
           <Button
             onClick={() => onStartBuilder()}
-            title="通过对话搭建一个新专家"
+            title={t.chatAssistantBuildViaChat}
             data-tauri-drag-region="false"
           >
             <Sparkles size={16} />
-            AI 创建
+            {t.chatAssistantAiCreate}
           </Button>
         )}
         <Button variant="primary" onClick={handleCreate} data-tauri-drag-region="false">
           <Plus size={16} />
-          创建
+          {t.chatAssistantCreate}
         </Button>
       </div>
 
       {loading ? (
-        <div className="grid min-h-[220px] place-items-center text-[13px] text-neutral-400">加载中...</div>
+        <div className="grid min-h-[220px] place-items-center text-[13px] text-neutral-400">{t.chatLoading}</div>
       ) : filteredAssistants.length === 0 ? (
         <div className="grid min-h-[220px] place-items-center rounded-md border border-dashed border-neutral-200 text-[13px] text-neutral-400 dark:border-neutral-800">
           {tab === 'installed' && !query.trim()
-            ? '还没有常用助手，去「套件广场」把常用的添加进来'
-            : '没有匹配的套件'}
+            ? t.chatAssistantEmptyFavorites
+            : t.chatAssistantNoMatch}
         </div>
       ) : (
         <div key={tab} className="chat-motion-tab-in overflow-hidden rounded-md border border-neutral-200 divide-y divide-neutral-200 dark:border-neutral-800 dark:divide-neutral-800">
@@ -441,9 +443,9 @@ export function AssistantCenter({
                   onClick={() => openDetail(assistant)}
                   className="grid size-9 shrink-0 place-items-center rounded-md border border-neutral-200 bg-white text-[15px] font-semibold hover:border-neutral-300 dark:border-neutral-700 dark:bg-neutral-950"
                   style={{ color: assistant.color || '#6A8FBD' }}
-                  aria-label={`打开 ${assistant.name}`}
+                  aria-label={t.chatAssistantOpenNamed.replace('{name}', assistant.name)}
                 >
-                  {builtinAssistantGlyph(assistant.id, 20) ?? (assistant.name.trim().slice(0, 1) || '套')}
+                  {builtinAssistantGlyph(assistant.id, 20) ?? (assistant.name.trim().slice(0, 1) || t.chatAssistantAvatarFallback)}
                 </button>
                 <button
                   type="button"
@@ -456,30 +458,30 @@ export function AssistantCenter({
                     </span>
                     {builtIn && (
                       <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
-                        内置
+                        {t.chatAssistantBuiltin}
                       </span>
                     )}
                     {!builtIn && (
                       <span className="truncate text-[12px] font-medium text-neutral-400 dark:text-neutral-500">
-                        自定义
+                        {t.chatAssistantCustom}
                       </span>
                     )}
                   </div>
                   <p className="mt-0.5 truncate text-[12px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                    {assistant.description || '未设置描述'}
+                    {assistant.description || t.chatAssistantNoDescription}
                   </p>
                   <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-neutral-400 dark:text-neutral-500">
                     <span className="shrink-0">{stats.mcp} MCP</span>
                     <span className="shrink-0 opacity-50">·</span>
-                    <span className="shrink-0">{stats.skills} 技能</span>
+                    <span className="shrink-0">{t.chatAssistantSkillCount.replace('{n}', String(stats.skills))}</span>
                   </div>
                 </button>
                 {(assistant.installed ?? true) === false ? (
                   <IconButton
                     size="md"
                     onClick={() => void handleToggleInstalled(assistant)}
-                    label={`添加 ${assistant.name} 到常用`}
-                    title="添加到常用"
+                    label={t.chatAssistantAddToFavoritesNamed.replace('{name}', assistant.name)}
+                    title={t.chatAssistantAddToFavorites}
                   >
                     <Plus size={18} />
                   </IconButton>
@@ -488,16 +490,16 @@ export function AssistantCenter({
                     <IconButton
                       size="md"
                       onClick={() => void handleStartChat(assistant)}
-                      label={`使用 ${assistant.name} 开始聊天`}
-                      title="开始聊天"
+                      label={t.chatAssistantStartChatNamed.replace('{name}', assistant.name)}
+                      title={t.chatAssistantStartChat}
                     >
                       <Play size={18} />
                     </IconButton>
                     <IconButton
                       size="md"
                       onClick={() => void handleToggleInstalled(assistant)}
-                      label={`将 ${assistant.name} 移出常用`}
-                      title="移出常用"
+                      label={t.chatAssistantRemoveFromFavoritesNamed.replace('{name}', assistant.name)}
+                      title={t.chatAssistantRemoveFromFavorites}
                     >
                       <Minus size={18} />
                     </IconButton>
@@ -527,7 +529,7 @@ export function AssistantCenter({
               size="md"
               onClick={() => setView('list')}
               className="mt-1"
-              label="返回列表"
+              label={t.chatAssistantBackToList}
             >
               <ArrowLeft size={18} />
             </IconButton>
@@ -535,17 +537,17 @@ export function AssistantCenter({
               className="grid size-16 shrink-0 place-items-center rounded-md text-[26px] font-semibold text-white"
               style={{ backgroundColor: assistant.color || '#6A8FBD' }}
             >
-              {builtinAssistantGlyph(assistant.id, 32) ?? (assistant.name.trim().slice(0, 1) || '助')}
+              {builtinAssistantGlyph(assistant.id, 32) ?? (assistant.name.trim().slice(0, 1) || t.chatAssistantAvatarFallbackDetail)}
             </div>
             <div className="min-w-0">
               <h2 className="truncate text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
                 {assistant.name}
               </h2>
               <div className="mt-1 text-[13px] font-medium text-neutral-500">
-                {(assistant.installed ?? true) === false ? '未加入常用' : '已在常用'}
+                {(assistant.installed ?? true) === false ? t.chatAssistantNotInFavorites : t.chatAssistantInFavorites}
               </div>
               <p className="mt-6 max-w-5xl text-[16px] leading-8 text-neutral-700 dark:text-neutral-300">
-                {assistant.description || '这个助手还没有描述。'}
+                {assistant.description || t.chatAssistantDetailNoDescription}
               </p>
             </div>
           </div>
@@ -553,12 +555,12 @@ export function AssistantCenter({
             {(assistant.installed ?? true) === false ? (
               <Button variant="primary" onClick={() => void handleToggleInstalled(assistant)}>
                 <Plus size={15} />
-                添加到常用
+                {t.chatAssistantAddToFavorites}
               </Button>
             ) : (
               <Button variant="ghost" onClick={() => void handleToggleInstalled(assistant)}>
                 <Minus size={15} />
-                移出常用
+                {t.chatAssistantRemoveFromFavorites}
               </Button>
             )}
             <Button
@@ -568,12 +570,12 @@ export function AssistantCenter({
               }}
             >
               <Pencil size={15} />
-              编辑
+              {t.chatAssistantEdit}
             </Button>
             <IconButton
               size="sm"
               onClick={() => void handleDuplicate(assistant)}
-              label="复制助手"
+              label={t.chatAssistantDuplicate}
             >
               <Copy size={15} />
             </IconButton>
@@ -583,7 +585,7 @@ export function AssistantCenter({
                 onClick={() => void handleApplyAssistant(assistant)}
               >
                 <Check size={15} />
-                应用到当前对话
+                {t.chatAssistantApplyToChat}
               </Button>
             )}
             <Button
@@ -591,15 +593,15 @@ export function AssistantCenter({
               onClick={() => void handleStartChat(assistant)}
             >
               <Play size={15} />
-              开始聊天
+              {t.chatAssistantStartChat}
             </Button>
           </div>
         </div>
 
         <section className="space-y-3">
-          <h3 className="text-[17px] font-semibold text-neutral-950 dark:text-neutral-50">系统提示词</h3>
+          <h3 className="text-[17px] font-semibold text-neutral-950 dark:text-neutral-50">{t.chatSystemPrompt}</h3>
           <div className="rounded-md border border-neutral-200 px-4 py-3 text-[13px] leading-relaxed whitespace-pre-wrap text-neutral-700 dark:border-neutral-800 dark:text-neutral-300">
-            {systemPrompt || '未设置系统提示词。'}
+            {systemPrompt || t.chatAssistantNoSystemPrompt}
           </div>
         </section>
 
@@ -611,7 +613,7 @@ export function AssistantCenter({
             </h3>
             <div className="flex flex-wrap gap-1.5">
               {mcpNames.length === 0 ? (
-                <span className="text-[13px] text-neutral-400">未启用任何 MCP</span>
+                <span className="text-[13px] text-neutral-400">{t.chatAssistantNoMcp}</span>
               ) : mcpNames.map((name) => (
                 <span key={name} className="rounded-md bg-neutral-100 px-2.5 py-1 text-[12px] text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
                   {name}
@@ -623,11 +625,11 @@ export function AssistantCenter({
           <section className="space-y-3">
             <h3 className="flex items-center gap-2 text-[17px] font-semibold text-neutral-950 dark:text-neutral-50">
               <BookOpen size={16} className="text-neutral-400" />
-              技能 <span className="text-neutral-400">({skillNames.length})</span>
+              {t.chatAssistantSkills} <span className="text-neutral-400">({skillNames.length})</span>
             </h3>
             <div className="flex flex-wrap gap-1.5">
               {skillNames.length === 0 ? (
-                <span className="text-[13px] text-neutral-400">未启用任何技能</span>
+                <span className="text-[13px] text-neutral-400">{t.chatAssistantNoSkills}</span>
               ) : skillNames.map((name) => (
                 <span key={name} className="rounded-md bg-neutral-100 px-2.5 py-1 text-[12px] text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
                   {name}
@@ -649,14 +651,14 @@ export function AssistantCenter({
             <IconButton
               size="md"
               onClick={() => setView(selectedAssistant ? 'detail' : 'list')}
-              label="返回"
+              label={t.chatAssistantBack}
             >
               <ArrowLeft size={18} />
             </IconButton>
             <div className="min-w-0">
-              <h2 className="truncate text-[24px] font-semibold text-neutral-950 dark:text-neutral-50">编辑套件</h2>
+              <h2 className="truncate text-[24px] font-semibold text-neutral-950 dark:text-neutral-50">{t.chatAssistantEditTitle}</h2>
               <p className="mt-1 truncate text-[13px] text-neutral-500">
-                {draft.built_in ? '内置套件模板' : '自定义套件'}
+                {draft.built_in ? t.chatAssistantBuiltinTemplate : t.chatAssistantCustomSuite}
               </p>
             </div>
           </div>
@@ -666,8 +668,8 @@ export function AssistantCenter({
               variant="danger"
               onClick={() => void handleDelete()}
               disabled={saving}
-              label="删除套件"
-              title="删除"
+              label={t.chatAssistantDeleteTitle}
+              title={t.chatDelete}
             >
               <Trash2 size={15} />
             </IconButton>
@@ -679,7 +681,7 @@ export function AssistantCenter({
               disabled={saving}
             >
               <Save size={15} />
-              保存
+              {t.save}
             </Button>
             <Button
               variant="primary"
@@ -687,7 +689,7 @@ export function AssistantCenter({
               disabled={saving}
             >
               <Play size={15} />
-              开始聊天
+              {t.chatAssistantStartChat}
             </Button>
           </div>
         </div>
@@ -696,7 +698,7 @@ export function AssistantCenter({
           <section className="space-y-5">
             <div className="grid gap-3 sm:grid-cols-[7rem_minmax(0,1fr)]">
               <label className="block">
-                <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">标识</span>
+                <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatAssistantIcon}</span>
                 <input
                   type="text"
                   value={draft.icon ?? ''}
@@ -705,7 +707,7 @@ export function AssistantCenter({
                 />
               </label>
               <label className="block">
-                <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">名称</span>
+                <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatAssistantName}</span>
                 <input
                   type="text"
                   value={draft.name}
@@ -715,7 +717,7 @@ export function AssistantCenter({
               </label>
             </div>
             <label className="block">
-              <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">描述</span>
+              <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatAssistantDescription}</span>
               <input
                 type="text"
                 value={draft.description ?? ''}
@@ -724,7 +726,7 @@ export function AssistantCenter({
               />
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">系统提示词</span>
+              <span className="mb-1.5 block text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatSystemPrompt}</span>
               <textarea
                 value={draft.system_prompt ?? ''}
                 onChange={(event) => updateDraft('system_prompt', event.target.value)}
@@ -735,12 +737,12 @@ export function AssistantCenter({
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[12px] font-medium text-neutral-600 dark:text-neutral-300">MCP 服务器</span>
-                  <span className="text-[11px] text-neutral-400">{draftMcpIds.length} 已选</span>
+                  <span className="text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatAssistantMcpServers}</span>
+                  <span className="text-[11px] text-neutral-400">{t.chatAssistantSelectedCount.replace('{n}', String(draftMcpIds.length))}</span>
                 </div>
                 <div className="custom-scrollbar max-h-56 space-y-1 overflow-y-auto rounded-md border border-neutral-200 p-2 dark:border-neutral-700">
                   {mcpServers.length === 0 ? (
-                    <div className="px-1 py-2 text-[12px] text-neutral-400">未配置 MCP 服务器（在「MCP」设置里添加）</div>
+                    <div className="px-1 py-2 text-[12px] text-neutral-400">{t.chatAssistantNoMcpConfigured}</div>
                   ) : mcpServers.map((server) => (
                     <label key={server.id} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1.5 text-[13px] hover:bg-neutral-50 dark:hover:bg-neutral-800">
                       <input
@@ -756,12 +758,12 @@ export function AssistantCenter({
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[12px] font-medium text-neutral-600 dark:text-neutral-300">技能</span>
-                  <span className="text-[11px] text-neutral-400">{draftSkillIds.length} 已选</span>
+                  <span className="text-[12px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatAssistantSkills}</span>
+                  <span className="text-[11px] text-neutral-400">{t.chatAssistantSelectedCount.replace('{n}', String(draftSkillIds.length))}</span>
                 </div>
                 <div className="custom-scrollbar max-h-56 space-y-1 overflow-y-auto rounded-md border border-neutral-200 p-2 dark:border-neutral-700">
                   {skills.length === 0 ? (
-                    <div className="px-1 py-2 text-[12px] text-neutral-400">没有可用技能</div>
+                    <div className="px-1 py-2 text-[12px] text-neutral-400">{t.chatAssistantNoAvailableSkills}</div>
                   ) : skills.map((skill) => (
                     <label key={skill.id} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1.5 text-[13px] hover:bg-neutral-50 dark:hover:bg-neutral-800">
                       <input
@@ -780,9 +782,9 @@ export function AssistantCenter({
 
           <section className="grid gap-4 lg:grid-cols-3">
             <section className="space-y-3 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
-              <div className="text-[12px] font-semibold text-neutral-700 dark:text-neutral-200">运行设置</div>
+              <div className="text-[12px] font-semibold text-neutral-700 dark:text-neutral-200">{t.chatAssistantRunSettings}</div>
               <label className="block">
-                <span className="mb-1 block text-[11px] text-neutral-500 dark:text-neutral-400">模型供应商</span>
+                <span className="mb-1 block text-[11px] text-neutral-500 dark:text-neutral-400">{t.chatAssistantModelProvider}</span>
                 <Select
                   value={draft.provider_id ?? ''}
                   onChange={(providerId) => {
@@ -791,7 +793,7 @@ export function AssistantCenter({
                     updateDraft('model', providerModels(provider)[0] ?? '')
                   }}
                   options={[
-                    { value: '', label: '跟随聊天默认' },
+                    { value: '', label: t.chatAssistantFollowChatDefault },
                     ...enabledProviders.map((provider) => ({
                       value: provider.id,
                       label: provider.name,
@@ -800,21 +802,21 @@ export function AssistantCenter({
                 />
               </label>
               <label className="block">
-                <span className="mb-1 block text-[11px] text-neutral-500 dark:text-neutral-400">模型</span>
+                <span className="mb-1 block text-[11px] text-neutral-500 dark:text-neutral-400">{t.sectionModel}</span>
                 <Select
                   value={draft.model ?? ''}
                   onChange={(model) => updateDraft('model', model)}
                   options={
                     draft.provider_id
                       ? models.map((model) => ({ value: model, label: model }))
-                      : [{ value: '', label: '跟随聊天默认' }]
+                      : [{ value: '', label: t.chatAssistantFollowChatDefault }]
                   }
                 />
               </label>
             </section>
 
             <section className="space-y-3 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
-              <div className="text-[12px] font-semibold text-neutral-700 dark:text-neutral-200">颜色</div>
+              <div className="text-[12px] font-semibold text-neutral-700 dark:text-neutral-200">{t.chatAssistantColor}</div>
               <div className="flex flex-wrap gap-1.5">
                 {assistantColors.map((color) => (
                   <button
@@ -827,22 +829,22 @@ export function AssistantCenter({
                         : 'border-transparent'
                     }`}
                     style={{ backgroundColor: color }}
-                    aria-label={`选择颜色 ${color}`}
+                    aria-label={t.chatAssistantSelectColorNamed.replace('{name}', color)}
                   />
                 ))}
               </div>
             </section>
 
             <section className="space-y-2 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
-              <div className="text-[12px] font-semibold text-neutral-700 dark:text-neutral-200">当前配置</div>
+              <div className="text-[12px] font-semibold text-neutral-700 dark:text-neutral-200">{t.chatAssistantCurrentConfig}</div>
               <div className="space-y-1 text-[11px] text-neutral-500 dark:text-neutral-400">
-                <div className="truncate">模型：{draft.model || '跟随聊天默认'}</div>
-                <div className="truncate">MCP：{draftMcpIds.length} 个</div>
-                <div className="truncate">技能：{draftSkillIds.length} 个</div>
+                <div className="truncate">{t.chatAssistantConfigModel.replace('{name}', draft.model || t.chatAssistantFollowChatDefault)}</div>
+                <div className="truncate">{t.chatAssistantConfigMcp.replace('{n}', String(draftMcpIds.length))}</div>
+                <div className="truncate">{t.chatAssistantConfigSkills.replace('{n}', String(draftSkillIds.length))}</div>
               </div>
               {providers.length === 0 && (
                 <div className="rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
-                  未读取到模型供应商
+                  {t.chatAssistantNoProviders}
                 </div>
               )}
             </section>
@@ -862,17 +864,17 @@ export function AssistantCenter({
             <header className="border-b border-neutral-200 pb-5 dark:border-neutral-800">
               <h1 className="flex items-center gap-2.5 truncate text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
                 <AgentIcon size={24} className="shrink-0 text-neutral-500" />
-                专家套件
+                {t.chatAssistantTitle}
               </h1>
               <div className="mt-3.5 flex min-w-0 items-center gap-4">
                 <p className="min-w-0 flex-1 text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                  预设人格、模型与工具组合的专家助手，一键开聊或应用到当前对话。
+                  {t.chatAssistantSubtitle}
                 </p>
                 <IconButton
                   size="lg"
                   onClick={() => void loadAssistants(selectedId)}
-                  label="刷新套件"
-                  title="刷新"
+                  label={t.chatAssistantRefresh}
+                  title={t.chatAssistantRefreshShort}
                   data-tauri-drag-region="false"
                 >
                   <RefreshCw size={17} />

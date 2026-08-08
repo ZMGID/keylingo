@@ -1,11 +1,12 @@
 // ClawHub 技能商店内联浏览（无 modal 外壳，供 SkillCenter「技能商店」tab 用）。
 // 排序/搜索/翻页 + 一键安装（下载走后端 chat_skills_install_from_url）。数据层见 ../settings/skillMarket.ts。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Check, Download, ExternalLink, Loader2, Search, Star } from 'lucide-react'
 import { api } from '../api/tauri'
 import { Button, IconButton } from '../components/Button'
 import { Select } from '../settings/components'
+import { useT } from '../settings/i18n'
 import {
   buildClawHubDownloadUrl,
   CLAWHUB_SORT_OPTIONS,
@@ -17,14 +18,13 @@ import {
 } from '../settings/skillMarket'
 
 type Props = {
-  lang?: 'zh' | 'en'
   onInstalled: () => void
 }
 
 const PAGE_LIMIT = 24
 
-export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
-  const zh = lang === 'zh'
+export function SkillStoreBrowser({ onInstalled }: Props) {
+  const t = useT()
   const [sort, setSort] = useState<ClawHubSort>('downloads')
   const [queryInput, setQueryInput] = useState('')
   const [query, setQuery] = useState('')
@@ -93,7 +93,7 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
         const resolved = await resolveClawHubSkillOwner(card)
         const downloadUrl = resolved.downloadUrl ?? buildClawHubDownloadUrl(resolved.slug, resolved.ownerHandle)
         const result = await api.chatSkillsInstallFromUrl(downloadUrl)
-        if (!result.success) throw new Error(result.error || (zh ? '安装失败' : 'Install failed'))
+        if (!result.success) throw new Error(result.error || t.chatSkillInstallFailed)
         setInstalled((prev) => new Set(prev).add(card.slug))
         onInstalled()
       } catch (err) {
@@ -102,13 +102,17 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
         setBusySlug(null)
       }
     },
-    [onInstalled, zh],
+    [onInstalled, t],
   )
 
-  const sortOptions = useMemo(
-    () => CLAWHUB_SORT_OPTIONS.map((o) => ({ value: o.value, label: zh ? o.labelZh : o.labelEn })),
-    [zh],
-  )
+  const sortLabels: Record<ClawHubSort, string> = {
+    downloads: t.chatSkillSortDownloads,
+    stars: t.chatSkillSortStars,
+    installs: t.chatSkillSortInstalls,
+    updated: t.chatSkillSortUpdated,
+    newest: t.chatSkillSortNewest,
+  }
+  const sortOptions = CLAWHUB_SORT_OPTIONS.map((o) => ({ value: o.value, label: sortLabels[o.value] }))
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -120,7 +124,7 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
             type="text"
             value={queryInput}
             onChange={(e) => setQueryInput(e.target.value)}
-            placeholder={zh ? '搜索技能...' : 'Search skills...'}
+            placeholder={t.chatSkillSearchPlaceholder}
             className="h-10 w-full rounded-md border border-neutral-200 bg-white pl-10 pr-4 text-[14px] outline-none placeholder:text-neutral-400 focus:border-neutral-300 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
             data-tauri-drag-region="false"
           />
@@ -134,7 +138,7 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
           onChange={(value) => setSort(value as ClawHubSort)}
           disabled={Boolean(query)}
           options={sortOptions}
-          title={query ? (zh ? '搜索时按相关度排序' : 'Search results are sorted by relevance') : undefined}
+          title={query ? t.chatSkillSortRelevanceHint : undefined}
         />
       </div>
 
@@ -157,7 +161,7 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
             ))}
           </div>
         ) : items.length === 0 ? (
-          <div className="flex h-40 items-center justify-center text-[13px] text-neutral-400">{zh ? '没有匹配的技能' : 'No matching skills'}</div>
+          <div className="flex h-40 items-center justify-center text-[13px] text-neutral-400">{t.chatSkillStoreNoResults}</div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {items.map((card, idx) => {
@@ -177,7 +181,7 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
                     )}
                   </div>
                   <p className="mt-1 line-clamp-2 min-h-[2.4em] text-[12px] leading-[1.45] text-neutral-500 dark:text-neutral-400">
-                    {card.summary || (zh ? '未提供简介' : 'No summary')}
+                    {card.summary || t.chatSkillNoSummary}
                   </p>
                   <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-neutral-100 pt-2.5 dark:border-neutral-800/70">
                     <div className="flex items-center gap-3 text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500">
@@ -187,16 +191,16 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
                     <div className="flex items-center gap-1">
                       {card.webUrl && (
                         <span className="opacity-0 transition-opacity duration-[var(--kv-dur-fast)] focus-within:opacity-100 group-hover:opacity-100">
-                          <IconButton size="sm" variant="ghost" onClick={() => void api.openExternal(card.webUrl!)} label={zh ? '主页' : 'Homepage'}>
+                          <IconButton size="sm" variant="ghost" onClick={() => void api.openExternal(card.webUrl!)} label={t.chatSkillHomepage}>
                             <ExternalLink size={13} />
                           </IconButton>
                         </span>
                       )}
                       {done ? (
-                        <span className="chat-motion-pop inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-2 py-1 text-[12px] font-medium text-emerald-600 dark:text-emerald-400"><Check size={13} />{zh ? '已安装' : 'Installed'}</span>
+                        <span className="chat-motion-pop inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-2 py-1 text-[12px] font-medium text-emerald-600 dark:text-emerald-400"><Check size={13} />{t.chatSkillInstalled}</span>
                       ) : (
                         <Button size="sm" onClick={() => void handleInstall(card)} disabled={busySlug === card.slug}>
-                          {busySlug === card.slug ? <Loader2 size={12} className="animate-spin" /> : zh ? '安装' : 'Install'}
+                          {busySlug === card.slug ? <Loader2 size={12} className="animate-spin" /> : t.chatSkillInstall}
                         </Button>
                       )}
                     </div>
@@ -210,7 +214,7 @@ export function SkillStoreBrowser({ lang = 'zh', onInstalled }: Props) {
         {cursor && !query && !loading && (
           <div className="pt-3">
             <Button size="sm" variant="ghost" onClick={loadMore} disabled={loadingMore} className="w-full">
-              {loadingMore ? <Loader2 size={12} className="animate-spin" /> : zh ? '加载更多' : 'Load more'}
+              {loadingMore ? <Loader2 size={12} className="animate-spin" /> : t.chatSkillLoadMore}
             </Button>
           </div>
         )}

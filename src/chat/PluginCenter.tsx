@@ -17,6 +17,7 @@ import {
 import { refreshSettings } from '../api/settingsCache'
 import { Button, IconButton } from '../components/Button'
 import { Toggle } from '../settings/components'
+import { useT } from '../settings/i18n'
 
 interface PluginCenterProps {
   /** 让 Kivio AI 按规范文档安装：父级开新对话并发送 install brief */
@@ -40,6 +41,7 @@ function PluginCard({
   onToggleEnabled: (id: string, enabled: boolean) => void
   onUninstall: (id: string) => void
 }) {
+  const t = useT()
   return (
     <article className="chat-motion-fade-up flex min-w-0 flex-col gap-3 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm transition-[border-color,box-shadow] duration-[var(--kv-dur-fast)] hover:border-neutral-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:hover:border-neutral-700">
       <div className="flex min-w-0 items-start gap-3">
@@ -66,11 +68,11 @@ function PluginCard({
                     : 'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300'
                 }`}
               >
-                {plugin.enabled ? '已启用' : '已检测到 · 未启用'}
+                {plugin.enabled ? t.chatPluginEnabled : t.chatPluginDetectedNotEnabled}
               </span>
             ) : (
               <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-                未检测到
+                {t.chatPluginNotDetected}
               </span>
             )}
             {plugin.version && (
@@ -88,9 +90,9 @@ function PluginCard({
               </span>
               {' '}MCP
               {plugin.mcpActive ? (
-                <span className="text-emerald-600 dark:text-emerald-400"> · 已注册</span>
+                <span className="text-emerald-600 dark:text-emerald-400">{t.chatPluginMcpRegistered}</span>
               ) : plugin.enabled && (plugin.mcpCount ?? 0) > 0 ? (
-                <span className="text-amber-600 dark:text-amber-400"> · 待注册</span>
+                <span className="text-amber-600 dark:text-amber-400">{t.chatPluginMcpPending}</span>
               ) : null}
             </span>
             <span className="text-neutral-300 dark:text-neutral-600">·</span>
@@ -100,14 +102,14 @@ function PluginCard({
               </span>
               {' '}Skill
               {plugin.skillActive ? (
-                <span className="text-emerald-600 dark:text-emerald-400"> · 已注入</span>
+                <span className="text-emerald-600 dark:text-emerald-400">{t.chatPluginSkillInjected}</span>
               ) : plugin.enabled && (plugin.skillCount ?? 0) > 0 ? (
-                <span className="text-amber-600 dark:text-amber-400"> · 待注入</span>
+                <span className="text-amber-600 dark:text-amber-400">{t.chatPluginSkillPending}</span>
               ) : null}
             </span>
             {(plugin.skillIds?.length ?? 0) > 0 && (
               <span className="text-neutral-400 dark:text-neutral-500">
-                （{plugin.skillIds.join(', ')}）
+                {t.chatPluginSkillIdsWrap.replace('{names}', plugin.skillIds.join(', '))}
               </span>
             )}
             {plugin.mcpServerId && plugin.mcpActive && (
@@ -129,19 +131,23 @@ function PluginCard({
           {plugin.path && (
             <p className="mt-2 truncate font-mono text-[11px] text-neutral-400" title={plugin.path}>
               {plugin.path}
-              {plugin.source === 'system' ? ' · 系统 PATH' : plugin.source === 'kivio' ? ' · Kivio 托管' : ''}
+              {plugin.source === 'system'
+                ? t.chatPluginSourceSystemPath
+                : plugin.source === 'kivio'
+                  ? t.chatPluginSourceKivio
+                  : ''}
             </p>
           )}
         </div>
 
         {plugin.installed && (
           <div className="flex shrink-0 flex-col items-end gap-1 pt-0.5">
-            <span className="text-[11px] text-neutral-400">启用</span>
+            <span className="text-[11px] text-neutral-400">{t.chatPluginEnable}</span>
             <Toggle
               checked={plugin.enabled}
               disabled={busy}
               onChange={(next) => onToggleEnabled(plugin.id, next)}
-              ariaLabel={`启用 ${plugin.name}`}
+              ariaLabel={t.chatPluginEnableNamed.replace('{name}', plugin.name)}
             />
           </div>
         )}
@@ -152,10 +158,10 @@ function PluginCard({
           size="sm"
           disabled={installBusy || busy}
           onClick={() => onAiInstall(plugin.id)}
-          title="开新对话，由 Kivio AI 按安装规范下载安装"
+          title={t.chatPluginAiInstallTitle}
         >
           {installBusy ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-          {plugin.installed ? '让 AI 重装 / 升级' : '让 AI 安装'}
+          {plugin.installed ? t.chatPluginAiReinstall : t.chatPluginAiInstall}
         </Button>
         {plugin.installed && (
           <Button
@@ -163,11 +169,11 @@ function PluginCard({
             variant="ghost"
             disabled={busy}
             onClick={() => onUninstall(plugin.id)}
-            title="彻底卸载：移除 Kivio 配置、MCP、官方二进制与相关 skills"
+            title={t.chatPluginUninstallTitle}
             className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
           >
             <Trash2 size={14} />
-            卸载
+            {t.chatPluginUninstall}
           </Button>
         )}
         <Button size="sm" variant="ghost" onClick={() => void api.openExternal(plugin.repo)}>
@@ -175,32 +181,33 @@ function PluginCard({
           GitHub
         </Button>
         <Button size="sm" variant="ghost" onClick={() => void api.openExternal(plugin.homepage)}>
-          官网
+          {t.chatPluginHomepage}
         </Button>
       </div>
 
       {!plugin.installed && (
         <p className="text-[12px] leading-relaxed text-neutral-400 dark:text-neutral-500">
-          安装由 <strong className="font-medium text-neutral-600 dark:text-neutral-300">Kivio AI</strong>{' '}
-          按规范文档执行（终端下载/配置），不是后台静默下载。装好后回来点「刷新」并打开启用开关。
+          {t.chatPluginInstallNoteLead}{' '}
+          <strong className="font-medium text-neutral-600 dark:text-neutral-300">Kivio AI</strong>{' '}
+          {t.chatPluginInstallNoteTail}
         </p>
       )}
       {plugin.installed && !plugin.enabled && (
         <p className="text-[12px] leading-relaxed text-neutral-400 dark:text-neutral-500">
-          已检测到命令，但未启用。打开右侧
-          <strong className="font-medium text-neutral-600 dark:text-neutral-300">启用</strong>
-          后，Kivio 会自动：
-          {plugin.hasSkill ? ' 注入 Skill' : ''}
-          {plugin.hasMcp ? ' + 注册 stdio MCP（`officecli mcp`，不是 mcp claude）' : ''}
-          + 系统提示。README 里的 `officecli mcp claude/cursor` 不用在 Kivio 里跑。
+          {t.chatPluginDetectedNotEnabledLead}
+          <strong className="font-medium text-neutral-600 dark:text-neutral-300">{t.chatPluginEnable}</strong>
+          {t.chatPluginDetectedNotEnabledTail}
+          {plugin.hasSkill ? t.chatPluginAutoInjectSkill : ''}
+          {plugin.hasMcp ? t.chatPluginAutoRegisterMcp : ''}
+          {t.chatPluginAutoSystemPrompt}
         </p>
       )}
       {plugin.enabled && (
         <p className="text-[12px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-          已启用
-          {plugin.skillActive ? ' · Skill 就绪' : ''}
-          {plugin.mcpActive ? ' · MCP 已写入设置（stdio）' : plugin.hasMcp ? ' · MCP 未注册成功请关开重试' : ''}
-          。新开对话或下一轮 Agent 即可使用；可用终端 `{plugin.binary}` 或 MCP 工具。
+          {t.chatPluginEnabled}
+          {plugin.skillActive ? t.chatPluginSkillReady : ''}
+          {plugin.mcpActive ? t.chatPluginMcpWritten : plugin.hasMcp ? t.chatPluginMcpRegisterRetry : ''}
+          {t.chatPluginEnabledTail.replace('{binary}', plugin.binary)}
         </p>
       )}
     </article>
@@ -209,6 +216,7 @@ function PluginCard({
 
 /** 插件中心：检测状态 + 启用开关；安装交给 Kivio AI。 */
 export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
+  const t = useT()
   const [tab, setTab] = useState<TabId>('plaza')
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [loading, setLoading] = useState(true)
@@ -223,7 +231,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
     if (!isTauriRuntime()) {
       setPlugins([])
       setLoading(false)
-      setError('插件管理需在 Kivio 应用内使用')
+      setError(t.chatPluginRequiresApp)
       return
     }
     setError('')
@@ -236,7 +244,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   // 完整探测（which/--version 子进程，较慢）：仅手动刷新 / 启用 / 卸载后调用，覆盖为精确状态。
   const refresh = useCallback(async () => {
@@ -265,7 +273,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
   const handleAiInstall = useCallback(
     async (id: string) => {
       if (!onRequestAiInstall) {
-        setError('当前界面未接入 AI 安装入口')
+        setError(t.chatPluginAiInstallUnavailable)
         return
       }
       setInstallBusyId(id)
@@ -278,7 +286,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
         setInstallBusyId(null)
       }
     },
-    [onRequestAiInstall],
+    [onRequestAiInstall, t],
   )
 
   const handleToggle = useCallback(
@@ -311,12 +319,17 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
       const plugin = plugins.find((p) => p.id === id)
       const name = plugin?.name ?? id
       const ok = window.confirm(
-        `彻底卸载插件「${name}」？\n\n` +
-          '将删除：\n' +
-          '· Kivio 中的启用状态、MCP 注册、插件数据\n' +
-          '· 本机 officecli 可执行文件与官方安装目录\n' +
-          '· 官方写入的 skills / 相关配置（若存在）\n\n' +
-          '此操作不可撤销。需要时请重新「让 AI 安装」。',
+        t.chatPluginUninstallConfirmTitle.replace('{name}', name) +
+          '\n\n' +
+          t.chatPluginUninstallWillDelete +
+          '\n' +
+          t.chatPluginUninstallItemState +
+          '\n' +
+          t.chatPluginUninstallItemBinary +
+          '\n' +
+          t.chatPluginUninstallItemSkills +
+          '\n\n' +
+          t.chatPluginUninstallIrreversible,
       )
       if (!ok) return
       setBusyId(id)
@@ -331,7 +344,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
         } catch {
           /* ignore */
         }
-        setStatusMsg(result.message || `已从 Kivio 卸载 ${name}`)
+        setStatusMsg(result.message || t.chatPluginUninstalledNamed.replace('{name}', name))
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
         await refresh()
@@ -339,7 +352,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
         setBusyId(null)
       }
     },
-    [plugins, refresh],
+    [plugins, refresh, t],
   )
 
   const installed = useMemo(() => plugins.filter((p) => p.installed), [plugins])
@@ -357,19 +370,20 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
             <div className="flex min-w-0 items-center gap-2">
               <h1 className="flex items-center gap-2.5 text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
                 <Puzzle size={24} className="text-neutral-500" />
-                插件
+                {t.chatNavPlugins}
               </h1>
-              <IconButton size="lg" label="刷新检测" onClick={() => void refresh()} disabled={refreshing}>
+              <IconButton size="lg" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
                 <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
               </IconButton>
             </div>
             <p className="mt-3.5 max-w-2xl text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-              安装交给 <strong className="font-medium text-neutral-700 dark:text-neutral-300">Kivio AI</strong>
-              ：点「让 AI 安装」会开新对话，并要求 AI
-              <strong className="font-medium text-neutral-700 dark:text-neutral-300">先拉取官方 README</strong>
-              （安装/用法权威来源），再按其中步骤用终端安装。装好后你回来
-              <strong className="font-medium text-neutral-700 dark:text-neutral-300">启用</strong>
-              （Skill / MCP 随启用统一开关）。
+              {t.chatPluginIntroLead}{' '}
+              <strong className="font-medium text-neutral-700 dark:text-neutral-300">Kivio AI</strong>
+              {t.chatPluginIntroAiInstall}
+              <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginReadmeFirst}</strong>
+              {t.chatPluginIntroReadmeTail}
+              <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginEnable}</strong>
+              {t.chatPluginIntroTail}
             </p>
           </div>
 
@@ -377,8 +391,8 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
             <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-0.5 dark:bg-neutral-800/80">
               {(
                 [
-                  ['plaza', '插件广场', plugins.length],
-                  ['installed', '已检测', installed.length],
+                  ['plaza', t.chatPluginPlaza, plugins.length],
+                  ['installed', t.chatPluginDetectedTab, installed.length],
                 ] as const
               ).map(([id, label, count]) => (
                 <button
@@ -399,9 +413,8 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
           </div>
 
           <div className="mt-4 rounded-md border border-dashed border-neutral-200 bg-neutral-50/80 px-4 py-3 text-[12.5px] leading-relaxed text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-400">
-            <span className="font-medium text-neutral-700 dark:text-neutral-300">流程：</span>
-            让 AI 安装（先读官方 README → 按文档安装）→ 刷新检测 PATH → 打开「启用」→ Agent 才有命令 / Skill / MCP。
-            关闭启用则全部卸下。
+            <span className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginFlowLabel}</span>
+            {t.chatPluginFlowDesc}
           </div>
 
           {error && (
@@ -418,7 +431,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
           {loading && plugins.length === 0 ? (
             <div className="mt-6 grid gap-4">
               {Array.from({ length: 2 }, (_, i) => (
-                <div key={i} className="rounded-xl border border-neutral-200/80 p-5 dark:border-neutral-800/70">
+                <div key={i} className="rounded-xl border border-neutral-200/80 p-5 dark:border-neutral-700/70">
                   <div className="kv-skeleton h-4 w-1/4 rounded" />
                   <div className="kv-skeleton mt-2.5 h-3 w-3/4 rounded" />
                   <div className="kv-skeleton mt-3 h-7 w-40 rounded" />
@@ -431,7 +444,7 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
                 <Puzzle size={28} strokeWidth={1.5} />
               </div>
               <p className="mt-4 text-[15px] font-medium text-neutral-700 dark:text-neutral-200">
-                {tab === 'installed' ? '还没有检测到已安装插件' : '没有匹配的插件'}
+                {tab === 'installed' ? t.chatPluginEmptyInstalled : t.chatPluginEmptyNoMatch}
               </p>
             </div>
           ) : (

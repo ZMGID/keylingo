@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { AlertCircle, Check, Copy, Search } from 'lucide-react'
 import { copyToClipboard } from '../utils/clipboard'
+import { useT } from '../settings/i18n'
 import {
   kbRetrievalTest,
   type KnowledgeLibrary,
@@ -10,13 +11,6 @@ import {
   type RetrievalCandidate,
   type RetrievalDecision,
 } from './knowledgeBase'
-
-const DECISION_LABEL: Record<RetrievalDecision, string> = {
-  kept: '入选',
-  duplicate: '去重',
-  below_threshold: '低于阈值',
-  truncated: '截断',
-}
 
 const DECISION_CLASS: Record<RetrievalDecision, string> = {
   kept: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300',
@@ -31,6 +25,7 @@ function num(n: number | undefined, digits = 4): string {
 
 // 片段单元格：hover 显示复制按钮，点击复制原文并给对勾反馈。
 function SnippetCell({ text }: { text: string }) {
+  const t = useT()
   const [copied, setCopied] = useState(false)
   const handleCopy = () => {
     void copyToClipboard(text).then((ok) => {
@@ -47,8 +42,8 @@ function SnippetCell({ text }: { text: string }) {
           type="button"
           onClick={handleCopy}
           className="shrink-0 rounded p-1 text-neutral-400 opacity-0 transition-opacity hover:bg-black/[0.05] hover:text-neutral-600 focus-visible:opacity-100 group-hover/snip:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-neutral-200"
-          title={copied ? '已复制' : '复制片段'}
-          aria-label={copied ? '已复制' : '复制片段'}
+          title={copied ? t.lensCopied : t.chatRetrievalCopySnippet}
+          aria-label={copied ? t.lensCopied : t.chatRetrievalCopySnippet}
         >
           {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
         </button>
@@ -62,6 +57,7 @@ function rank(n: number | undefined): string {
 }
 
 export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[] }) {
+  const t = useT()
   const [selected, setSelected] = useState<string[]>([])
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
@@ -87,10 +83,17 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
 
   const cands = result?.candidates ?? []
 
+  const decisionLabel: Record<RetrievalDecision, string> = {
+    kept: t.chatRetrievalDecisionKept,
+    duplicate: t.chatRetrievalDecisionDuplicate,
+    below_threshold: t.chatRetrievalDecisionBelowThreshold,
+    truncated: t.chatRetrievalDecisionTruncated,
+  }
+
   return (
     <div key="test" className="chat-motion-tab-in mt-5 space-y-4">
       {libraries.length === 0 ? (
-        <p className="text-[13px] text-neutral-500 dark:text-neutral-400">先创建并索引一个知识库，再来测试检索。</p>
+        <p className="text-[13px] text-neutral-500 dark:text-neutral-400">{t.chatRetrievalEmptyHint}</p>
       ) : (
         <>
           {/* 选库 */}
@@ -121,7 +124,7 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) run()
               }}
-              placeholder="输入查询…（⌘/Ctrl+Enter 运行）"
+              placeholder={t.chatRetrievalQueryPlaceholder}
               rows={2}
               data-tauri-drag-region="false"
               className="min-w-0 flex-1 resize-none rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-[#C56646] dark:border-neutral-700 dark:bg-neutral-900"
@@ -134,7 +137,7 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
               className="flex shrink-0 items-center gap-1.5 self-stretch rounded-lg bg-[#C56646] px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
             >
               <Search size={14} />
-              {busy ? '检索中…' : '运行'}
+              {busy ? t.chatRetrievalRunning : t.chatRetrievalRun}
             </button>
           </div>
 
@@ -150,32 +153,39 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
               {/* 概览：配置 + 耗时 + rerank 状态 */}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-neutral-500 dark:text-neutral-400">
                 <span>
-                  候选 {result.effectiveConfig.candidateK} · 上下文 {result.effectiveConfig.contextTopK} · 权重 向量
-                  {result.effectiveConfig.weightVector}/关键词{result.effectiveConfig.weightKeyword}
-                  {result.effectiveConfig.minScore > 0 && <> · 阈值 {result.effectiveConfig.minScore}</>}
+                  {t.chatRetrievalOverviewConfig
+                    .replace('{candidates}', String(result.effectiveConfig.candidateK))
+                    .replace('{context}', String(result.effectiveConfig.contextTopK))
+                    .replace('{vector}', String(result.effectiveConfig.weightVector))
+                    .replace('{keyword}', String(result.effectiveConfig.weightKeyword))}
+                  {result.effectiveConfig.minScore > 0 &&
+                    t.chatRetrievalOverviewThreshold.replace('{x}', String(result.effectiveConfig.minScore))}
                 </span>
                 <span className="tabular-nums">
-                  嵌入 {result.timings.embedMs}ms · 检索 {result.timings.searchMs}ms · 重排 {result.timings.rerankMs}ms · 合计{' '}
-                  {result.timings.totalMs}ms
+                  {t.chatRetrievalOverviewTimings
+                    .replace('{embed}', String(result.timings.embedMs))
+                    .replace('{search}', String(result.timings.searchMs))
+                    .replace('{rerank}', String(result.timings.rerankMs))
+                    .replace('{total}', String(result.timings.totalMs))}
                 </span>
                 <RerankBadge status={result.rerankStatus} />
               </div>
 
               {cands.length === 0 ? (
-                <p className="text-[13px] text-neutral-500 dark:text-neutral-400">未召回任何候选（知识库中没有相关内容）。</p>
+                <p className="text-[13px] text-neutral-500 dark:text-neutral-400">{t.chatRetrievalNoCandidates}</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-neutral-200 dark:border-neutral-800">
                   <table className="w-full min-w-[760px] text-left text-[11.5px]">
                     <thead className="bg-neutral-50 text-neutral-500 dark:bg-neutral-900/50 dark:text-neutral-400">
                       <tr className="whitespace-nowrap">
-                        <th className="px-2.5 py-2 font-medium">状态</th>
-                        <th className="px-2.5 py-2 font-medium">来源</th>
-                        <th className="px-2.5 py-2 text-right font-medium">向量#</th>
-                        <th className="px-2.5 py-2 text-right font-medium">向量距离</th>
-                        <th className="px-2.5 py-2 text-right font-medium">关键词#</th>
-                        <th className="px-2.5 py-2 text-right font-medium">融合分</th>
-                        <th className="px-2.5 py-2 text-right font-medium">重排分</th>
-                        <th className="px-2.5 py-2 font-medium">片段</th>
+                        <th className="px-2.5 py-2 font-medium">{t.chatRetrievalColStatus}</th>
+                        <th className="px-2.5 py-2 font-medium">{t.chatRetrievalColSource}</th>
+                        <th className="px-2.5 py-2 text-right font-medium">{t.chatRetrievalColVectorRank}</th>
+                        <th className="px-2.5 py-2 text-right font-medium">{t.chatRetrievalColVectorDistance}</th>
+                        <th className="px-2.5 py-2 text-right font-medium">{t.chatRetrievalColKeywordRank}</th>
+                        <th className="px-2.5 py-2 text-right font-medium">{t.chatRetrievalColFusedScore}</th>
+                        <th className="px-2.5 py-2 text-right font-medium">{t.chatRetrievalColRerankScore}</th>
+                        <th className="px-2.5 py-2 font-medium">{t.chatRetrievalColSnippet}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -187,7 +197,7 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
                           <td className="whitespace-nowrap px-2.5 py-2">
                             <span className={`inline-block rounded px-1.5 py-0.5 text-[10.5px] ${DECISION_CLASS[c.decision]}`}>
                               {c.finalRank != null ? `#${c.finalRank + 1} ` : ''}
-                              {DECISION_LABEL[c.decision]}
+                              {decisionLabel[c.decision]}
                             </span>
                           </td>
                           <td className="px-2.5 py-2 text-neutral-700 dark:text-neutral-300">
@@ -220,11 +230,12 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
 }
 
 function RerankBadge({ status }: { status: RetrievalResponse['rerankStatus'] }) {
-  if (status.state === 'off') return <span className="text-neutral-400">重排：关</span>
-  if (status.state === 'ok') return <span className="text-emerald-600 dark:text-emerald-400">重排：已应用</span>
+  const t = useT()
+  if (status.state === 'off') return <span className="text-neutral-400">{t.chatRetrievalRerankOff}</span>
+  if (status.state === 'ok') return <span className="text-emerald-600 dark:text-emerald-400">{t.chatRetrievalRerankApplied}</span>
   return (
     <span className="text-red-600 dark:text-red-400" title={status.error}>
-      重排：失败（已降级为融合序）
+      {t.chatRetrievalRerankFailed}
     </span>
   )
 }

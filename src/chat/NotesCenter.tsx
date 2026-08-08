@@ -18,6 +18,7 @@ import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
 import { api, isTauriRuntime, type Note, type NoteMeta } from '../api/tauri'
 import { Button, IconButton } from '../components/Button'
+import { useLang, useT } from '../settings/i18n'
 
 const SAVE_DEBOUNCE_MS = 800
 
@@ -58,9 +59,9 @@ function MilkdownNoteEditor({
   return <div ref={rootRef} className="kv-note-editor min-h-full" />
 }
 
-function formatDateTime(iso: string): string {
+function formatDateTime(iso: string, locale: string): string {
   try {
-    return new Date(iso).toLocaleString('zh-CN', {
+    return new Date(iso).toLocaleString(locale, {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -71,11 +72,14 @@ function formatDateTime(iso: string): string {
   }
 }
 
-function displayTitle(title: string | undefined): string {
-  return title?.trim() || '无标题'
+function displayTitle(title: string | undefined, untitled: string): string {
+  return title?.trim() || untitled
 }
 
 export function NotesCenter() {
+  const t = useT()
+  const lang = useLang()
+  const dateLocale = lang === 'en' ? 'en-US' : 'zh-CN'
   const [notes, setNotes] = useState<NoteMeta[]>([])
   const [folders, setFolders] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
@@ -125,11 +129,11 @@ export function NotesCenter() {
   useEffect(() => {
     if (!isTauriRuntime()) {
       setLoading(false)
-      setError('笔记管理需在 Kivio 应用内使用')
+      setError(t.chatNotesAppOnly)
       return
     }
     void loadNotes()
-  }, [loadNotes])
+  }, [loadNotes, t])
 
   /** 库文件夹的笔记数（仅手动笔记）。 */
   const folderCounts = useMemo(() => {
@@ -157,12 +161,12 @@ export function NotesCenter() {
     if (needle) {
       list = list.filter(
         (n) =>
-          displayTitle(n.title).toLowerCase().includes(needle) ||
+          displayTitle(n.title, t.chatNotesUntitled).toLowerCase().includes(needle) ||
           n.preview.toLowerCase().includes(needle),
       )
     }
     return list
-  }, [notes, tab, currentFolder, search])
+  }, [notes, tab, currentFolder, search, t])
 
   /** 立即落盘挂起的编辑（若有变更）。 */
   const flushSave = useCallback(async () => {
@@ -267,7 +271,9 @@ export function NotesCenter() {
   const deleteNote = useCallback(
     async (id: string) => {
       const meta = notes.find((n) => n.id === id)
-      const ok = window.confirm(`删除笔记「${displayTitle(meta?.title)}」？此操作不可撤销。`)
+      const ok = window.confirm(
+        t.chatNotesDeleteNoteConfirm.replace('{title}', displayTitle(meta?.title, t.chatNotesUntitled)),
+      )
       if (!ok) return
       setError('')
       try {
@@ -283,7 +289,7 @@ export function NotesCenter() {
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [editing?.id, notes],
+    [editing?.id, notes, t],
   )
 
   /* ===== 文件夹管理（用原生 prompt/confirm，不做自定义弹窗） ===== */
@@ -342,7 +348,7 @@ export function NotesCenter() {
 
   const deleteFolder = useCallback(
     async (name: string) => {
-      const ok = window.confirm(`删除文件夹「${name}」？其中的笔记会移到库根，不会被删除。`)
+      const ok = window.confirm(t.chatNotesDeleteFolderConfirm.replace('{name}', name))
       if (!ok) return
       setError('')
       try {
@@ -353,7 +359,7 @@ export function NotesCenter() {
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [currentFolder, loadNotes],
+    [currentFolder, loadNotes, t],
   )
 
   const changeTab = useCallback((next: NotesTab) => {
@@ -371,16 +377,16 @@ export function NotesCenter() {
           <div className="flex shrink-0 items-center justify-between gap-3">
             <Button variant="ghost" size="sm" onClick={() => void backToList()}>
               <ArrowLeft size={14} />
-              返回
+              {t.chatNotesBack}
             </Button>
             <div className="flex shrink-0 items-center gap-2">
               <span className="text-[12px] text-neutral-400 dark:text-neutral-500">
-                {saving ? '保存中…' : '已保存'}
+                {saving ? t.annotateSaving : t.saved}
               </span>
               <IconButton
                 size="sm"
                 variant="ghost"
-                label="删除笔记"
+                label={t.chatDelete}
                 onClick={() => void deleteNote(editing.id)}
               >
                 <Trash2 size={15} />
@@ -396,18 +402,20 @@ export function NotesCenter() {
               titleRef.current = e.target.value
               scheduleSave()
             }}
-            placeholder="无标题"
+            placeholder={t.chatNotesUntitled}
             className="mt-5 w-full shrink-0 bg-transparent text-[26px] font-semibold tracking-normal text-neutral-950 placeholder:text-neutral-300 focus:outline-none dark:text-neutral-50 dark:placeholder:text-neutral-600"
           />
           <p className="mt-1.5 shrink-0 text-[12px] text-neutral-400 dark:text-neutral-500">
-            更新于 {formatDateTime(editing.updatedAt)} · {charCount} 字
+            {t.chatNotesUpdatedInfo
+              .replace('{time}', formatDateTime(editing.updatedAt, dateLocale))
+              .replace('{n}', String(charCount))}
           </p>
 
           {isChat && (
             <div className="mt-2.5 flex shrink-0 items-center gap-1.5">
               <span className="inline-flex items-center gap-1.5 rounded-md bg-neutral-100/70 px-2 py-0.5 text-[12.5px] text-neutral-500 dark:bg-neutral-800/60 dark:text-neutral-400">
                 <MessageSquare size={13} />
-                来自对话
+                {t.chatNotesFromChat}
               </span>
             </div>
           )}
@@ -437,12 +445,12 @@ export function NotesCenter() {
 
   const emptyText =
     tab === 'chat'
-      ? '还没有从对话保存的笔记'
+      ? t.chatNotesEmptyChat
       : tab === 'library'
         ? currentFolder
-          ? '这个文件夹还没有笔记'
-          : '库里还没有内容'
-        : '还没有笔记'
+          ? t.chatNotesEmptyFolder
+          : t.chatNotesEmptyLibrary
+        : t.chatNotesEmptyRecent
 
   return (
     <div className="assistant-center-root flex h-full min-h-0 flex-col text-neutral-900 dark:text-neutral-100">
@@ -452,10 +460,10 @@ export function NotesCenter() {
           <div className="border-b border-neutral-200 pb-5 dark:border-neutral-800">
             <h1 className="flex items-center gap-2.5 text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
               <NotebookPen size={24} className="text-neutral-500" />
-              笔记
+              {t.chatNavNotes}
             </h1>
             <p className="mt-3 text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-              随手记录想法与片段，以 .md 存在本机；也可以把对话里的回复一键存为笔记。
+              {t.chatNotesSubtitle}
             </p>
           </div>
 
@@ -464,9 +472,9 @@ export function NotesCenter() {
             <div className="flex shrink-0 items-center gap-1 rounded-lg bg-neutral-100 p-0.5 dark:bg-neutral-800/80">
               {(
                 [
-                  ['recent', '最近'],
-                  ['chat', '聊天保存'],
-                  ['library', '库'],
+                  ['recent', t.chatTabRecent],
+                  ['chat', t.chatNotesTabChat],
+                  ['library', t.chatNotesTabLibrary],
                 ] as const
               ).map(([id, label]) => (
                 <button
@@ -490,13 +498,13 @@ export function NotesCenter() {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="搜索笔记…"
+                placeholder={t.chatNotesSearchPlaceholder}
                 className="w-full rounded-lg border border-neutral-200 bg-white py-1.5 pl-8 pr-3 text-[13px] text-neutral-800 placeholder:text-neutral-400 focus:border-neutral-400 focus:outline-none dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
               />
             </div>
             {visibleNotes.length > 0 && (
               <span className="shrink-0 text-[12px] tabular-nums text-neutral-400 dark:text-neutral-500">
-                {visibleNotes.length} 篇
+                {t.chatNotesCount.replace('{n}', String(visibleNotes.length))}
               </span>
             )}
 
@@ -504,13 +512,13 @@ export function NotesCenter() {
               {inLibraryRoot && (
                 <Button variant="ghost" onClick={() => void createFolder()}>
                   <FolderPlus size={14} />
-                  新建文件夹
+                  {t.dockNewFolder}
                 </Button>
               )}
               {tab !== 'chat' && (
                 <Button onClick={() => void createNote()}>
                   <Plus size={14} />
-                  新建笔记
+                  {t.chatNotesNewNote}
                 </Button>
               )}
             </div>
@@ -524,7 +532,7 @@ export function NotesCenter() {
               className="mt-4 inline-flex items-center gap-1 text-[13px] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200"
             >
               <ChevronLeft size={15} />
-              库
+              {t.chatNotesTabLibrary}
               <span className="text-neutral-300 dark:text-neutral-600">/</span>
               <span className="font-medium text-neutral-700 dark:text-neutral-200">{currentFolder}</span>
             </button>
@@ -572,14 +580,14 @@ export function NotesCenter() {
                           {name}
                         </div>
                         <div className="text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500">
-                          {folderCounts.get(name) ?? 0} 篇
+                          {t.chatNotesCount.replace('{n}', String(folderCounts.get(name) ?? 0))}
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                         <IconButton
                           size="xs"
                           variant="ghost"
-                          label="重命名文件夹"
+                          label={t.chatRename}
                           onClick={(e) => {
                             e.stopPropagation()
                             void renameFolder(name)
@@ -590,7 +598,7 @@ export function NotesCenter() {
                         <IconButton
                           size="xs"
                           variant="ghost"
-                          label="删除文件夹"
+                          label={t.chatDelete}
                           onClick={(e) => {
                             e.stopPropagation()
                             void deleteFolder(name)
@@ -615,11 +623,11 @@ export function NotesCenter() {
                     )}
                   </div>
                   <p className="mt-4 text-[15px] font-medium text-neutral-700 dark:text-neutral-200">
-                    {search.trim() ? '没有匹配的笔记' : emptyText}
+                    {search.trim() ? t.chatNotesNoMatch : emptyText}
                   </p>
                   {!search.trim() && tab === 'chat' && (
                     <p className="mt-1 text-[13px] text-neutral-500 dark:text-neutral-400">
-                      在对话里点回复的「存为笔记」，就会出现在这里
+                      {t.chatNotesSaveHint}
                     </p>
                   )}
                   {!search.trim() && tab !== 'chat' && (
@@ -627,12 +635,12 @@ export function NotesCenter() {
                       {inLibraryRoot && (
                         <Button variant="ghost" onClick={() => void createFolder()}>
                           <FolderPlus size={14} />
-                          新建文件夹
+                          {t.dockNewFolder}
                         </Button>
                       )}
                       <Button onClick={() => void createNote()}>
                         <Plus size={14} />
-                        新建笔记
+                        {t.chatNotesNewNote}
                       </Button>
                     </div>
                   )}
@@ -656,14 +664,14 @@ export function NotesCenter() {
                       >
                         <div className="flex min-w-0 items-start justify-between gap-2">
                           <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-neutral-900 dark:text-neutral-50">
-                            {displayTitle(note.title)}
+                            {displayTitle(note.title, t.chatNotesUntitled)}
                           </h3>
                           <div className="flex shrink-0 items-center gap-0.5">
                             <div className="relative">
                               <IconButton
                                 size="xs"
                                 variant="ghost"
-                                label="移动到文件夹"
+                                label={t.chatNotesMoveToFolder}
                                 className={`transition-opacity ${moveMenuFor === note.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                                 onClick={(e) => {
                                   e.stopPropagation()
@@ -691,7 +699,7 @@ export function NotesCenter() {
                                       onClick={() => void moveNoteToFolder(note.id, '')}
                                     >
                                       {note.folder.trim() === '' && <Check size={12} className="text-[#C56646]" />}
-                                      <span className={note.folder.trim() === '' ? '' : 'ml-[18px]'}>库根目录</span>
+                                      <span className={note.folder.trim() === '' ? '' : 'ml-[18px]'}>{t.chatNotesLibraryRoot}</span>
                                     </button>
                                     {folders.map((f) => (
                                       <button
@@ -714,7 +722,7 @@ export function NotesCenter() {
                                       }}
                                     >
                                       <FolderPlus size={12} />
-                                      新建文件夹…
+                                      {t.chatNotesNewFolderEllipsis}
                                     </button>
                                   </div>
                                 </>
@@ -723,7 +731,7 @@ export function NotesCenter() {
                             <IconButton
                               size="xs"
                               variant="ghost"
-                              label="删除笔记"
+                              label={t.chatDelete}
                               className={`transition-opacity ${moveMenuFor === note.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                               onClick={(e) => {
                                 e.stopPropagation()
@@ -735,17 +743,17 @@ export function NotesCenter() {
                           </div>
                         </div>
                         <p className="line-clamp-3 min-w-0 flex-1 text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                          {note.preview || <span className="text-neutral-300 dark:text-neutral-600">无内容</span>}
+                          {note.preview || <span className="text-neutral-300 dark:text-neutral-600">{t.chatNotesNoContent}</span>}
                         </p>
                         <div className="mt-auto flex shrink-0 items-center justify-between gap-2">
                           <span className="text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500">
-                            {formatDateTime(note.updatedAt)}
+                            {formatDateTime(note.updatedAt, dateLocale)}
                           </span>
                           {/* 最近视图里标注来源/文件夹，便于区分 */}
                           {tab === 'recent' && note.origin === 'chat' && (
                             <span className="inline-flex items-center gap-1 text-[11px] text-neutral-400 dark:text-neutral-500">
                               <MessageSquare size={11} />
-                              对话
+                              {t.chatNotesSourceChat}
                             </span>
                           )}
                           {tab === 'recent' && note.origin !== 'chat' && note.folder.trim() && (
@@ -775,7 +783,7 @@ export function NotesCenter() {
             onMouseDown={(e) => e.stopPropagation()}
           >
             <h3 className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100">
-              {folderDialog.mode === 'create' ? '新建文件夹' : '重命名文件夹'}
+              {folderDialog.mode === 'create' ? t.dockNewFolder : t.chatRename}
             </h3>
             <input
               ref={folderInputRef}
@@ -788,15 +796,15 @@ export function NotesCenter() {
                 }
                 if (e.key === 'Escape') setFolderDialog(null)
               }}
-              placeholder="文件夹名称"
+              placeholder={t.chatNotesFolderNamePlaceholder}
               className="mt-3 w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-[#C56646] dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
             />
             <div className="mt-4 flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setFolderDialog(null)}>
-                取消
+                {t.cancel}
               </Button>
               <Button size="sm" onClick={() => void submitFolderDialog()}>
-                确定
+                {t.chatNotesConfirm}
               </Button>
             </div>
           </div>

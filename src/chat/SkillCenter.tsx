@@ -26,6 +26,7 @@ import {
 } from '../api/tauri'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
 import { Select, Toggle } from '../settings/components'
+import { useT, type I18n } from '../settings/i18n'
 import { Button, IconButton } from '../components/Button'
 import { SkillStoreBrowser } from './SkillStoreBrowser'
 import { SkillIcon } from '../settings/NavIcons'
@@ -69,11 +70,11 @@ function isPluginSkill(skill: SkillMeta): boolean {
   return skill.source === 'plugin'
 }
 
-function skillSourceLabel(skill: SkillMeta): string {
-  if (skill.source === 'builtin') return '内置'
-  if (skill.source === 'plugin') return '插件'
-  if (skill.source === 'external') return '工作区'
-  return '个人'
+function skillSourceLabel(skill: SkillMeta, t: I18n): string {
+  if (skill.source === 'builtin') return t.chatSkillSourceBuiltin
+  if (skill.source === 'plugin') return t.chatSkillSourcePlugin
+  if (skill.source === 'external') return t.chatSkillSourceWorkspace
+  return t.chatSkillSourcePersonal
 }
 
 function skillMatches(skill: SkillMeta, query: string): boolean {
@@ -105,6 +106,7 @@ function SkillCard({
   /** 插件附属：开关在插件页，此处只展示 */
   manageLocked?: boolean
 }) {
+  const t = useT()
   return (
     <div
       role="button"
@@ -117,7 +119,7 @@ function SkillCard({
         }
       }}
       data-tauri-drag-region="false"
-      title="查看完整内容"
+      title={t.chatSkillViewFull}
       style={{ '--chat-motion-delay': `${Math.min(index, 8) * 24}ms` } as CSSProperties}
       className={`chat-motion-fade-up group flex h-full min-w-0 cursor-pointer flex-col rounded-xl border p-3.5 text-left transition-[border-color,box-shadow,transform,background-color] duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/15 dark:focus-visible:ring-white/20 ${
         enabled
@@ -138,9 +140,9 @@ function SkillCard({
         {manageLocked ? (
           <span
             className="shrink-0 pt-0.5 text-[11px] text-neutral-400 dark:text-neutral-500"
-            title="请在 扩展 → 插件 中启用/关闭整包插件"
+            title={t.chatSkillPluginManageHint}
           >
-            {enabled ? '插件已启用' : '随插件关闭'}
+            {enabled ? t.chatSkillPluginEnabled : t.chatSkillPluginDisabled}
           </span>
         ) : (
           <span
@@ -148,7 +150,7 @@ function SkillCard({
             onClick={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
           >
-            <Toggle checked={enabled} onChange={(next) => onToggleEnabled(skill.id, next)} ariaLabel={`启用 ${skill.name}`} />
+            <Toggle checked={enabled} onChange={(next) => onToggleEnabled(skill.id, next)} ariaLabel={t.chatSkillEnableNamed.replace('{name}', skill.name)} />
           </span>
         )}
       </div>
@@ -159,11 +161,11 @@ function SkillCard({
           {skill.name}
         </div>
         <p className="mt-1 line-clamp-2 text-[12px] leading-[1.45] text-neutral-500 dark:text-neutral-400">
-          {skill.description || '未设置描述'}
+          {skill.description || t.chatSkillNoDescription}
         </p>
       </div>
       <div className="mt-2.5 flex min-h-6 items-center gap-1 border-t border-neutral-100 pt-2 text-[11px] text-neutral-400 dark:border-neutral-800/70 dark:text-neutral-500">
-        <span className="truncate">{skillSourceLabel(skill)}</span>
+        <span className="truncate">{skillSourceLabel(skill, t)}</span>
         {onDelete && skill.source === 'user' && !manageLocked ? (
           <span
             className="ml-auto shrink-0 opacity-0 transition-opacity duration-[var(--kv-dur-fast)] focus-within:opacity-100 group-hover:opacity-100"
@@ -174,8 +176,8 @@ function SkillCard({
               size="sm"
               className="danger"
               onClick={() => onDelete(skill)}
-              label={`删除 ${skill.name}`}
-              title="删除技能"
+              label={t.chatSkillDeleteNamed.replace('{name}', skill.name)}
+              title={t.chatSkillDelete}
             >
               <Trash2 size={14} strokeWidth={1.75} />
             </IconButton>
@@ -212,6 +214,7 @@ function SkillSection({
   manageLocked?: boolean
 }) {
   const [collapsed, setCollapsed] = useState(collapsible && defaultCollapsed)
+  const t = useT()
   const enabledCount = skills.filter((skill) => !disabledSkillIds.includes(skill.id)).length
   return (
     <section className="space-y-2.5">
@@ -228,7 +231,7 @@ function SkillSection({
         <h3 className="text-[15px] font-semibold text-neutral-700 dark:text-neutral-200">{title}</h3>
         <span className="text-[14px] font-medium text-neutral-400">{skills.length}</span>
         {collapsed && skills.length > 0 && (
-          <span className="text-[12.5px] text-neutral-400">已启用 {enabledCount}</span>
+          <span className="text-[12.5px] text-neutral-400">{t.chatSkillsEnabledCount.replace('{n}', String(enabledCount))}</span>
         )}
         {note && <span className="ml-auto truncate text-[12.5px] text-neutral-400">{note}</span>}
       </div>
@@ -257,6 +260,7 @@ function SkillSection({
 }
 
 function SkillUrlImport({ onInstalled }: { onInstalled: () => void }) {
+  const t = useT()
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -269,8 +273,8 @@ function SkillUrlImport({ onInstalled }: { onInstalled: () => void }) {
     setDone('')
     try {
       const result = await api.chatSkillsInstallFromUrl(value)
-      if (!result.success) throw new Error(result.error || '安装失败')
-      setDone('已安装')
+      if (!result.success) throw new Error(result.error || t.chatSkillInstallFailed)
+      setDone(t.chatSkillInstalled)
       setUrl('')
       onInstalled()
     } catch (err) {
@@ -278,12 +282,12 @@ function SkillUrlImport({ onInstalled }: { onInstalled: () => void }) {
     } finally {
       setBusy(false)
     }
-  }, [url, onInstalled])
+  }, [t, url, onInstalled])
   return (
     <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
-      <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">从 URL 安装</div>
+      <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">{t.chatSkillInstallFromUrl}</div>
       <p className="mb-2 text-[12px] text-neutral-500 dark:text-neutral-400">
-        粘贴 GitHub 仓库地址或直链 .zip（须含 SKILL.md）。仓库内多个技能只安装第一个。
+        {t.chatSkillUrlImportHint}
       </p>
       <div className="flex items-center gap-2">
         <input
@@ -295,7 +299,7 @@ function SkillUrlImport({ onInstalled }: { onInstalled: () => void }) {
           data-tauri-drag-region="false"
         />
         <Button onClick={() => void install()} disabled={busy || !url.trim()} data-tauri-drag-region="false">
-          {busy ? '安装中…' : '安装'}
+          {busy ? t.chatSkillInstalling : t.chatSkillInstall}
         </Button>
       </div>
       {error && <div className="mt-2 text-[12px] text-red-600 dark:text-red-400">{error}</div>}
@@ -305,6 +309,7 @@ function SkillUrlImport({ onInstalled }: { onInstalled: () => void }) {
 }
 
 export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
+  const t = useT()
   const [settings, setSettings] = useState<Settings | null>(null)
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const [skillsLoading, setSkillsLoading] = useState(false)
@@ -334,14 +339,14 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
         setSkills(result.skills)
         if (result.error) setSkillError(result.error)
       } else {
-        setSkillError(result.error || 'Skill 列表加载失败')
+        setSkillError(result.error || t.chatSkillListLoadFailed)
       }
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     } finally {
       setSkillsLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     let cancelled = false
@@ -425,12 +430,12 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
       if (result.success && result.skill) {
         setSelectedSkillPreview(result.skill)
       } else {
-        setSkillError(result.error || '读取 Skill 失败')
+        setSkillError(result.error || t.chatSkillReadFailed)
       }
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     }
-  }, [])
+  }, [t])
 
   const handleImportSkill = useCallback(async () => {
     try {
@@ -438,7 +443,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
       if (typeof selected !== 'string') return
       const result = await api.chatSkillsImport(selected)
       if (!result.success) {
-        setSkillError(result.error || '导入 Skill 失败')
+        setSkillError(result.error || t.chatSkillImportFailed)
         return
       }
       await refreshChatSkills()
@@ -446,10 +451,10 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     }
-  }, [onSkillsChanged, refreshChatSkills])
+  }, [onSkillsChanged, refreshChatSkills, t])
 
   const handleDeleteSkill = useCallback(async (skill: SkillMeta) => {
-    if (!window.confirm(`确定删除技能「${skill.name}」？此操作不可撤销。`)) return
+    if (!window.confirm(t.chatSkillDeleteConfirm.replace('{name}', skill.name))) return
     setSkillError('')
     try {
       await api.chatSkillsUninstall(skill.id)
@@ -458,7 +463,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     }
-  }, [onSkillsChanged, refreshChatSkills])
+  }, [onSkillsChanged, refreshChatSkills, t])
 
   const handleImportSkillZip = useCallback(async () => {
     try {
@@ -470,7 +475,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
       if (typeof selected !== 'string') return
       const result = await api.chatSkillsImport(selected)
       if (!result.success) {
-        setSkillError(result.error || '导入 Skill 失败')
+        setSkillError(result.error || t.chatSkillImportFailed)
         return
       }
       await refreshChatSkills()
@@ -478,19 +483,19 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     }
-  }, [onSkillsChanged, refreshChatSkills])
+  }, [onSkillsChanged, refreshChatSkills, t])
 
   const handleOpenSkillFolder = useCallback(async () => {
     setSkillError('')
     try {
       const result = await api.chatSkillsOpenFolder()
       if (!result.success) {
-        setSkillError(result.error || '打开 Skill 文件夹失败')
+        setSkillError(result.error || t.chatSkillOpenFolderFailed)
       }
     } catch (err) {
       setSkillError(err instanceof Error ? err.message : String(err))
     }
-  }, [])
+  }, [t])
 
   // 扫描三个 CLI 的技能目录：复用 chat_skills_list 的额外扫描路径（external 源即 CLI 技能），
   // 再按 skill.path 的目录前缀把结果归到对应 CLI 分组。
@@ -509,7 +514,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
       const scanDirs = CLI_SKILL_SOURCES.flatMap((source) => source.dirs.map((dir) => `${home}/${dir}`))
       const result = await api.chatSkillsList(scanDirs)
       if (!result.success) {
-        setSkillError(result.error || 'Skill 扫描失败')
+        setSkillError(result.error || t.chatSkillScanFailed)
         setCliSkills({ claude: [], codex: [], opencode: [] })
         return
       }
@@ -527,7 +532,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     } finally {
       setCliScanning(false)
     }
-  }, [])
+  }, [t])
 
   const toggleCliSelected = useCallback((id: string) => {
     setCliSelected((prev) => {
@@ -553,12 +558,12 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
         const folder = (skill.path as string).replace(/[/\\]+SKILL\.md$/i, '')
         const result = await api.chatSkillsImport(folder)
         if (result.success) imported += 1
-        else setSkillError(result.error || `导入「${skill.name}」失败`)
+        else setSkillError(result.error || t.chatSkillImportNamedFailed.replace('{name}', skill.name))
       }
       await refreshChatSkills()
       onSkillsChanged?.()
       if (imported > 0) {
-        setCliImportDone(`已导入 ${imported} 个技能到「已安装」。`)
+        setCliImportDone(t.chatSkillCliImportDone.replace('{n}', String(imported)))
         setCliSkills(null)
         setCliSelected(new Set())
       }
@@ -567,7 +572,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     } finally {
       setCliImporting(false)
     }
-  }, [cliSkills, cliSelected, onSkillsChanged, refreshChatSkills])
+  }, [cliSkills, cliSelected, onSkillsChanged, refreshChatSkills, t])
 
   const normalizedQuery = query.trim().toLowerCase()
   const builtinSkills = useMemo(
@@ -602,12 +607,12 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
               </h1>
               <div className="mt-3.5 flex min-w-0 items-center gap-4">
               <p className="min-w-0 flex-1 text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                管理内置与用户技能。启用后可在聊天中按需调用。
+                {t.chatSkillPageSubtitle}
               </p>
               <div className="flex shrink-0 items-center gap-0.5">
                 <IconButton
                   size="lg"
-                  label="导入文件夹"
+                  label={t.chatSkillImportFolder}
                   onClick={() => void handleImportSkill()}
                   data-tauri-drag-region="false"
                 >
@@ -615,7 +620,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                 </IconButton>
                 <IconButton
                   size="lg"
-                  label="导入 zip"
+                  label={t.chatSkillImportZip}
                   onClick={() => void handleImportSkillZip()}
                   data-tauri-drag-region="false"
                 >
@@ -623,7 +628,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                 </IconButton>
                 <IconButton
                   size="lg"
-                  label="打开 Skill 文件夹"
+                  label={t.chatSkillOpenSkillFolder}
                   onClick={() => void handleOpenSkillFolder()}
                   data-tauri-drag-region="false"
                 >
@@ -631,7 +636,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                 </IconButton>
                 <IconButton
                   size="lg"
-                  label="刷新列表"
+                  label={t.chatSkillRefreshList}
                   onClick={() => void refreshChatSkills()}
                   disabled={skillsLoading}
                   data-tauri-drag-region="false"
@@ -644,7 +649,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
 
           {/* Tab 行 */}
           <div className="mt-5 flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800">
-            {([['installed', '已安装'], ['store', '技能商店'], ['import', '本地导入'], ['advanced', '高级设置']] as const).map(([id, label]) => (
+            {([['installed', t.chatSkillTabInstalled], ['store', t.chatSkillTabStore], ['import', t.chatSkillTabImport], ['advanced', t.chatSkillTabAdvanced]] as const).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
@@ -673,29 +678,29 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => void handleImportSkill()} data-tauri-drag-region="false">
                   <FolderOpen size={14} />
-                  导入文件夹
+                  {t.chatSkillImportFolder}
                 </Button>
                 <Button onClick={() => void handleImportSkillZip()} data-tauri-drag-region="false">
                   <Download size={14} />
-                  导入 zip
+                  {t.chatSkillImportZip}
                 </Button>
                 <Button onClick={() => void handleOpenSkillFolder()} data-tauri-drag-region="false">
                   <ExternalLink size={14} />
-                  打开 Skill 文件夹
+                  {t.chatSkillOpenSkillFolder}
                 </Button>
               </div>
               <SkillUrlImport onInstalled={() => void refreshChatSkills()} />
               <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">从本地 CLI 导入</div>
+                    <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">{t.chatSkillImportFromCli}</div>
                     <p className="text-[12px] text-neutral-500 dark:text-neutral-400">
-                      扫描本机 Claude Code / Codex / OpenCode 的技能目录，勾选后复制进 Kivio 个人技能目录。
+                      {t.chatSkillCliImportHint}
                     </p>
                   </div>
                   <Button onClick={() => void handleCliScan()} disabled={cliScanning} data-tauri-drag-region="false">
                     <Search size={14} />
-                    {cliScanning ? '扫描中…' : '扫描'}
+                    {cliScanning ? t.chatSkillScanning : t.chatSkillScan}
                   </Button>
                 </div>
 
@@ -705,7 +710,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                     <div className="mt-3 space-y-3">
                       {total === 0 ? (
                         <div className="rounded-md border border-dashed border-neutral-200 px-3 py-2 text-[11.5px] text-neutral-400 dark:border-neutral-800">
-                          未在本机 CLI 技能目录下发现技能。
+                          {t.chatSkillCliNoSkillsFound}
                         </div>
                       ) : (
                         <>
@@ -730,7 +735,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                                       />
                                       <div className="min-w-0 flex-1">
                                         <div className="truncate text-[12.5px] font-medium text-neutral-800 dark:text-neutral-100">{skill.name}</div>
-                                        <div className="truncate text-[11px] text-neutral-400">{skill.description || '未设置描述'}</div>
+                                        <div className="truncate text-[11px] text-neutral-400">{skill.description || t.chatSkillNoDescription}</div>
                                       </div>
                                     </label>
                                   ))}
@@ -743,7 +748,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                             disabled={cliImporting || cliSelected.size === 0}
                             data-tauri-drag-region="false"
                           >
-                            {cliImporting ? '导入中…' : `导入选中 (${cliSelected.size})`}
+                            {cliImporting ? t.chatSkillImporting : t.chatSkillImportSelected.replace('{n}', String(cliSelected.size))}
                           </Button>
                         </>
                       )}
@@ -765,44 +770,44 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
           <section key="advanced" className="chat-motion-tab-in mt-5 overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800">
             <div className="flex w-full items-center gap-2 px-4 py-3">
               <Sliders size={15} className="shrink-0 text-neutral-400" />
-              <span className="text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">高级设置</span>
-              <span className="text-[12px] text-neutral-400">自动匹配 · 降级模式 · 扫描路径</span>
+              <span className="text-[13px] font-semibold text-neutral-800 dark:text-neutral-100">{t.chatSkillTabAdvanced}</span>
+              <span className="text-[12px] text-neutral-400">{t.chatSkillAdvancedSubtitle}</span>
             </div>
             <div>
               <div className="space-y-5 border-t border-neutral-200 px-4 py-4 dark:border-neutral-800">
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <div className="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">自动匹配 Skill</div>
+                    <div className="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">{t.chatSkillAutoMatch}</div>
                     <p className="mt-0.5 text-[12px] text-neutral-500 dark:text-neutral-400">
-                      允许模型根据 description 自动 activate skill
+                      {t.chatSkillAutoMatchHint}
                     </p>
                   </div>
                   <Toggle
                     checked={chatTools.skillAutoMatch !== false}
                     onChange={(skillAutoMatch) => persistChatTools({ skillAutoMatch })}
-                    ariaLabel="自动匹配 Skill"
+                    ariaLabel={t.chatSkillAutoMatch}
                   />
                 </div>
 
                 <div className="min-w-0">
                   <div className="min-w-0">
                     <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">
-                      无 Tools 降级模式
+                      {t.chatSkillFallbackMode}
                     </div>
                     <Select
                       value={chatTools.skillFallbackMode || 'progressive'}
                       onChange={(value) => persistChatTools({ skillFallbackMode: value })}
                       options={[
-                        { value: 'progressive', label: '渐进式（仅 catalog）' },
-                        { value: 'skill_md_only', label: '仅 SKILL.md' },
-                        { value: 'legacy_full_body', label: '旧版全量注入' },
+                        { value: 'progressive', label: t.chatSkillFallbackProgressive },
+                        { value: 'skill_md_only', label: t.chatSkillFallbackSkillMdOnly },
+                        { value: 'legacy_full_body', label: t.chatSkillFallbackLegacyFullBody },
                       ]}
                     />
                   </div>
                 </div>
 
                 <div className="min-w-0">
-                  <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">额外扫描路径</div>
+                  <div className="mb-1.5 text-[13px] font-medium text-neutral-800 dark:text-neutral-100">{t.chatSkillExtraScanPaths}</div>
                   <div className="space-y-1.5">
                     {chatTools.skillScanPaths.map((path, index) => (
                       <div key={`${path}-${index}`} className="flex items-center gap-1.5">
@@ -821,7 +826,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                         <IconButton
                           size="lg"
                           variant="danger"
-                          label="移除路径"
+                          label={t.chatSkillRemovePath}
                           onClick={() => {
                             const next = chatTools.skillScanPaths.filter((_, i) => i !== index)
                             persistChatTools({ skillScanPaths: next })
@@ -845,7 +850,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                       data-tauri-drag-region="false"
                     >
                       <Plus size={13} />
-                      添加扫描路径
+                      {t.chatSkillAddScanPath}
                     </Button>
                   </div>
                 </div>
@@ -861,7 +866,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
               type="text"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索技能..."
+              placeholder={t.chatSkillSearchPlaceholder}
               className="h-10 w-full rounded-md border border-neutral-200 bg-white pl-10 pr-4 text-[14px] outline-none placeholder:text-neutral-400 focus:border-neutral-300 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
               data-tauri-drag-region="false"
             />
@@ -876,16 +881,16 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
           {/* 技能列表 */}
           <div className="mt-6 space-y-5">
             {skillsLoading && skills.length === 0 ? (
-              <div className="grid min-h-[220px] place-items-center text-[13px] text-neutral-400">正在加载 Skill...</div>
+              <div className="grid min-h-[220px] place-items-center text-[13px] text-neutral-400">{t.chatSkillLoading}</div>
             ) : skills.length === 0 ? (
               <div className="grid min-h-[220px] place-items-center rounded-md border border-dashed border-neutral-200 px-6 text-center text-[13px] text-neutral-400 dark:border-neutral-800">
-                暂无 Skill。可导入文件夹/zip，或打开 Skill 文件夹手动添加后刷新。
+                {t.chatSkillEmpty}
               </div>
             ) : (
               <>
                 <SkillSection
-                  title="工作区与个人技能"
-                  emptyText={normalizedQuery ? '没有匹配的技能。' : '当前没有导入的技能。'}
+                  title={t.chatSkillSectionWorkspacePersonal}
+                  emptyText={normalizedQuery ? t.chatSkillNoMatchingSkills : t.chatSkillNoImportedSkills}
                   skills={userSkills}
                   disabledSkillIds={disabledSkillIds}
                   onToggleEnabled={handleToggleSkillEnabled}
@@ -893,9 +898,9 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                   onDelete={handleDeleteSkill}
                 />
                 <SkillSection
-                  title="内置技能"
-                  note="随应用内置提供"
-                  emptyText={normalizedQuery ? '没有匹配的内置技能。' : '当前没有内置技能。'}
+                  title={t.chatSkillSectionBuiltin}
+                  note={t.chatSkillBuiltinNote}
+                  emptyText={normalizedQuery ? t.chatSkillNoMatchingBuiltin : t.chatSkillNoBuiltin}
                   skills={builtinSkills}
                   disabledSkillIds={disabledSkillIds}
                   onToggleEnabled={handleToggleSkillEnabled}
@@ -906,9 +911,9 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                 {/* 插件技能：无插件且未搜索时整段隐藏，避免空框霸占版面 */}
                 {(pluginSkills.length > 0 || normalizedQuery) && (
                   <SkillSection
-                    title="插件技能"
-                    note="由扩展 → 插件 统一启用/关闭"
-                    emptyText="没有匹配的插件技能。"
+                    title={t.chatSkillSectionPlugin}
+                    note={t.chatSkillPluginNote}
+                    emptyText={t.chatSkillNoMatchingPlugin}
                     skills={pluginSkills}
                     disabledSkillIds={disabledSkillIds}
                     onToggleEnabled={handleToggleSkillEnabled}
@@ -950,7 +955,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
               </div>
               <IconButton
                 size="sm"
-                label="关闭"
+                label={t.chatWinClose}
                 onClick={() => setSelectedSkillPreview(null)}
                 data-tauri-drag-region="false"
               >
