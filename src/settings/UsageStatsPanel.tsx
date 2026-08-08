@@ -129,22 +129,12 @@ function pageRangeLabel(pageIndex: number, pageSize: number, total: number) {
   return `${start}-${end} / ${total}`
 }
 
-function formatReasoningEffort(value: string | null | undefined, lang: string) {
+/** 推理强度显示原始 effort 值（Low/Medium/High/XHigh/Ultracode…）：这是模型/API 的
+ *  协议术语，翻译成中文反而对不上文档与调试信息。 */
+function formatReasoningEffort(value: string | null | undefined) {
   if (!value) return '--'
-  const normalized = value.trim().toLowerCase()
-  const zh: Record<string, string> = {
-    none: '关闭',
-    minimal: '极低',
-    low: '低',
-    medium: '中',
-    high: '高',
-    xhigh: '极高',
-    max: '最高',
-    ultra: '超高',
-    ultracode: 'Ultracode',
-  }
-  const en: Record<string, string> = { none: 'Off' }
-  return (lang === 'zh' ? zh : en)[normalized] || normalized.charAt(0).toUpperCase() + normalized.slice(1)
+  const trimmed = value.trim()
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
 }
 
 function SummaryTile({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -754,7 +744,7 @@ function LogsTable({ logs, lang }: { logs: UsageRecord[]; lang: string }) {
               </td>
               <td className="truncate px-3 py-2 font-mono text-[11.5px]" title={record.model}>{record.model}</td>
               <td className="px-3 py-2 font-medium text-neutral-700 dark:text-neutral-200">
-                {formatReasoningEffort(record.reasoningEffort, lang)}
+                {formatReasoningEffort(record.reasoningEffort)}
               </td>
               <td className="px-3 py-2 tabular-nums">
                 <div className="flex items-center gap-3 text-neutral-800 dark:text-neutral-100">
@@ -961,7 +951,13 @@ export function UsageStatsPanel({ lang }: UsageStatsPanelProps) {
             label={lang === 'zh' ? '缓存命中' : 'Cached input'}
             value={formatTokens(summary?.cachedInputTokens)}
           />
-          <SummaryTile label={lang === 'zh' ? '缓存创建' : 'Cache creation'} value={formatTokens(summary?.cacheCreationInputTokens)} />
+          <SummaryTile
+            label={lang === 'zh' ? '成功率' : 'Success rate'}
+            value={summary && summary.totalRequests > 0
+              ? formatPercent(summary.successfulRequests / summary.totalRequests)
+              : '--'}
+            sub={`${formatCount(summary?.successfulRequests)} ${lang === 'zh' ? '成功' : 'ok'} · ${formatCount(summary?.failedRequests)} ${lang === 'zh' ? '失败' : 'failed'}`}
+          />
           <SummaryTile label={lang === 'zh' ? '推理 Token' : 'Reasoning'} value={formatTokens(summary?.reasoningTokens)} />
           <SummaryTile label={lang === 'zh' ? '平均耗时' : 'Avg duration'} value={formatDuration(summary?.averageDurationMs)} />
         </div>

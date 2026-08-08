@@ -1675,6 +1675,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
   const navItems = [
     { id: 'general' as const, label: t.tabGeneral, icon: GeneralIcon },
+    { id: 'providers' as const, label: t.tabModels, icon: ProvidersIcon },
     { id: 'hotkeys' as const, label: t.tabHotkeys, icon: HotkeysIcon },
     { id: 'translate' as const, label: t.tabTranslation, icon: TranslateIcon },
     { id: 'lens' as const, label: t.lensTabLabel, icon: LensIcon },
@@ -1686,7 +1687,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     { id: 'connectors' as const, label: t.tabConnectors, icon: ConnectorsIcon },
     { id: 'webSearch' as const, label: t.tabWebSearch, icon: WebSearchIcon },
     { id: 'usage' as const, label: lang === 'zh' ? '用量统计' : 'Usage', icon: UsageIcon },
-    { id: 'providers' as const, label: t.tabModels, icon: ProvidersIcon },
+    // 关于固定在分类列表最末
+    { id: 'about' as const, label: lang === 'zh' ? '关于' : 'About', icon: AboutIcon },
   ]
   const pageMeta: Record<typeof activeTab, { title: string; subtitle: string; right?: string }> = {
     general: {
@@ -1757,35 +1759,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     },
     about: {
       title: lang === 'zh' ? '关于' : 'About',
-      subtitle: lang === 'zh' ? '版本、更新和应用信息。' : 'Version, updates, and application details.',
+      subtitle: lang === 'zh' ? '应用、版本和更新信息。' : 'Application, version, and update details.',
     },
   }
   const selectedProvider = settings.providers.find((provider) => provider.id === selectedProviderId) ?? settings.providers[0]
   const chatProvider = settings.providers.find((provider) => provider.id === settings.chatProviderId)
     ?? settings.providers.find((provider) => provider.id === settings.lens?.providerId)
     ?? settings.providers.find((provider) => provider.id === settings.translatorProviderId)
-
-  const aboutNavButton = (embedded: boolean) => (
-    <button
-      type="button"
-      onClick={() => setActiveTab('about')}
-      className={
-        embedded
-          ? `settings-embedded-nav-item ${activeTab === 'about' ? 'active' : ''}`
-          : `kv-nav-item ${activeTab === 'about' ? 'active' : ''}`
-      }
-      data-tauri-drag-region="false"
-    >
-      {embedded ? (
-        <span className="settings-embedded-nav-icon">
-          <AboutIcon size={17} strokeWidth={1.75} />
-        </span>
-      ) : (
-        <AboutIcon strokeWidth={1.7} />
-      )}
-      <span>{lang === 'zh' ? '关于' : 'About'}</span>
-    </button>
-  )
 
   const categoryNav =
     variant === 'embedded' ? (
@@ -1808,8 +1788,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
               </button>
             )
           })}
-          {/* 关于紧跟模型，作为分类列表最后一项（不再被 spacer 顶到物理底） */}
-          {aboutNavButton(true)}
         </nav>
         <div className="min-h-0 flex-1" />
         <nav className="settings-embedded-nav-list settings-embedded-nav-list--footer">
@@ -1845,7 +1823,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
               </button>
             )
           })}
-          {aboutNavButton(false)}
         </nav>
 
         <div className="kv-nav-spacer" />

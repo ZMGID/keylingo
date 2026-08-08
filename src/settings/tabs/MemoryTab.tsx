@@ -46,7 +46,7 @@ function MemoryEditor({
   const overLimit = maxBytes !== undefined && bytes > maxBytes
   const dirty = value !== savedValue
   return (
-    <div className="kv-panel">
+    <div className="kv-panel mb-2">
       <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="kv-panel-title !mb-1">
@@ -176,44 +176,41 @@ export function MemoryTab({
         )}
       </SettingsGroup>
 
-      <SettingsGroup title="L1">
-        <MemoryEditor
-          layer="l1"
-          title={lang === 'zh' ? 'L1 在线记忆' : 'L1 Online Memory'}
-          description={lang === 'zh'
-            ? '每次回答都会参考的偏好与约束。'
-            : 'Preferences and constraints applied to every reply.'}
-          value={memoryDrafts.l1}
-          savedValue={memorySnapshots.l1}
-          maxBytes={MEMORY_L1_MAX_BYTES}
-          rows={9}
-          loading={memoryLoading}
-          saving={memorySavingLayer === 'l1'}
-          lang={lang}
-          onChange={(value) => onDraftChange('l1', value)}
-          onSave={() => onSaveLayer('l1')}
-          onReload={onRefresh}
-        />
-      </SettingsGroup>
+      {/* L1 / L2 编辑器自带标题+描述+按钮，面板间用 mb-2 直接留间距（无额外容器层） */}
+      <MemoryEditor
+        layer="l1"
+        title={lang === 'zh' ? 'L1 在线记忆' : 'L1 Online Memory'}
+        description={lang === 'zh'
+          ? '每次回答都会参考的偏好与约束。'
+          : 'Preferences and constraints applied to every reply.'}
+        value={memoryDrafts.l1}
+        savedValue={memorySnapshots.l1}
+        maxBytes={MEMORY_L1_MAX_BYTES}
+        rows={9}
+        loading={memoryLoading}
+        saving={memorySavingLayer === 'l1'}
+        lang={lang}
+        onChange={(value) => onDraftChange('l1', value)}
+        onSave={() => onSaveLayer('l1')}
+        onReload={onRefresh}
+      />
 
-      <SettingsGroup title="L2">
-        <MemoryEditor
-          layer="l2"
-          title={lang === 'zh' ? 'L2 长期记忆' : 'L2 Long-Term Memory'}
-          description={lang === 'zh'
-            ? '长期记录，按需通过 memory 工具读取。'
-            : 'Long-term notes, read on demand via memory tools.'}
-          value={memoryDrafts.l2}
-          savedValue={memorySnapshots.l2}
-          rows={13}
-          loading={memoryLoading}
-          saving={memorySavingLayer === 'l2'}
-          lang={lang}
-          onChange={(value) => onDraftChange('l2', value)}
-          onSave={() => onSaveLayer('l2')}
-          onReload={onRefresh}
-        />
-      </SettingsGroup>
+      <MemoryEditor
+        layer="l2"
+        title={lang === 'zh' ? 'L2 长期记忆' : 'L2 Long-Term Memory'}
+        description={lang === 'zh'
+          ? '长期记录，按需通过 memory 工具读取。'
+          : 'Long-term notes, read on demand via memory tools.'}
+        value={memoryDrafts.l2}
+        savedValue={memorySnapshots.l2}
+        rows={13}
+        loading={memoryLoading}
+        saving={memorySavingLayer === 'l2'}
+        lang={lang}
+        onChange={(value) => onDraftChange('l2', value)}
+        onSave={() => onSaveLayer('l2')}
+        onReload={onRefresh}
+      />
     </>
   )
 }
