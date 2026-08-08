@@ -616,9 +616,15 @@ mod tests {
 
     #[test]
     fn unknown_agent_and_model_yields_no_window_instead_of_fake_200k() {
-        // 改动前这里会返回 200K，进而算出一个假百分比、在错误的点触发压缩阈值。
+        // 模型库收录后，composer-2.5 有官方 200K 上下文（Cursor docs pricing catalog）。
         let (window, estimated) =
             context_window_for_external_model("cursor", "composer-2.5", None, None);
+        assert_eq!(window, Some(200_000));
+        assert!(!estimated);
+
+        // 完全未知的模型 id 仍不能编造 200K 兜底（会触发假百分比 / 错位压缩阈值）。
+        let (window, estimated) =
+            context_window_for_external_model("cursor", "totally-unknown-cursor-model-xyz", None, None);
         assert_eq!(window, None);
         assert!(estimated);
 
@@ -691,7 +697,9 @@ mod tests {
     fn unknown_window_produces_unknown_status_and_no_ratio() {
         let mut conversation = empty_conversation();
         conversation.agent_runtime.external_agent_id = Some("cursor".to_string());
-        conversation.agent_runtime.external_model = Some("composer-2.5".to_string());
+        // composer-2.5 已入库；这里要的是「完全未知模型 → 无窗口」路径。
+        conversation.agent_runtime.external_model =
+            Some("totally-unknown-cursor-model-xyz".to_string());
         conversation.messages.push(message(
             "a1",
             "assistant",
@@ -707,7 +715,7 @@ mod tests {
         let state = compute_external_context_state(
             &conversation,
             "cursor",
-            "composer-2.5",
+            "totally-unknown-cursor-model-xyz",
             None,
             None,
             None,

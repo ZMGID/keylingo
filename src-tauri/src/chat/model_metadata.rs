@@ -99,6 +99,69 @@ fn model_database_entries() -> Option<&'static serde_json::Map<String, Value>> {
         .as_object()
 }
 
+/// 版本分隔符归一化：数据库键用点号（`claude-sonnet-4.6`），不少 provider 返回连字符
+/// （`claude-sonnet-4-6`）。与前端 `src/data/modelMatching.ts` 的 `normalizeSep` 同构。
+fn normalize_model_sep(value: &str) -> String {
+    value.replace('.', "-")
+}
+
+/// 版本延续判定：DB key 以数字结尾，且候选紧跟 1~2 位纯数字分段（`gpt-5` ← `gpt-5-6-luna`）
+/// 时，不能退化到基础版本，否则会把未知次级版本错配成 `gpt-5`。
+/// 日期/快照后缀（≥3 位数字段，如 `claude-opus-4-8-20260101`）不算版本延续。
+/// 与前端 `isVersionContinuation` 同构。
+fn is_version_continuation(key_norm: &str, candidate: &str, end_idx: usize) -> bool {
+    let Some(last) = key_norm.chars().last() else {
+        return false;
+    };
+    if !last.is_ascii_digit() {
+        return false;
+    }
+    if candidate.as_bytes().get(end_idx) != Some(&b'-') {
+        return false;
+    }
+    // `str::split` 至少产出一段（可为空），对齐前端 `[0]`。
+    let next_segment = candidate[end_idx + 1..].split('-').next().unwrap();
+    let len = next_segment.len();
+    (1..=2).contains(&len) && next_segment.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 与前端模块级 `normalizedExact` / `normalizedEntries` 对应：进程内只建一次。
+/// key 的 `&'static str` 来自 `model_database_entries` 的静态 JSON map。
+struct ModelDbNormIndex {
+    /// 归一化键 → 原始库 key（首个占位；当前库无仅靠 `.`/`-` 区分的重复键）
+    exact_norm: std::collections::HashMap<String, &'static str>,
+    /// `(原始 key, 归一化 key)`，供前缀 / 包含匹配复用
+    pairs: Vec<(&'static str, String)>,
+}
+
+fn model_db_norm_index() -> Option<&'static ModelDbNormIndex> {
+    static INDEX: OnceLock<Option<ModelDbNormIndex>> = OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            let entries = model_database_entries()?;
+            let mut exact_norm = std::collections::HashMap::new();
+            let mut pairs = Vec::new();
+            for key in entries.keys() {
+                if key == "_meta" {
+                    continue;
+                }
+                let norm = normalize_model_sep(key);
+                exact_norm.entry(norm.clone()).or_insert(key.as_str());
+                pairs.push((key.as_str(), norm));
+            }
+            Some(ModelDbNormIndex { exact_norm, pairs })
+        })
+        .as_ref()
+}
+
+/// 从内置模型库匹配条目。
+///
+/// 与前端 `matchModel` / `matchModelExact` **同构**（精确 → 归一化精确 → 最长前缀 →
+/// 最长包含；均带版本延续保护）。两边必须命中同一条记录，否则 UI 展示的 efforts/定价
+/// 会和真实请求侧不一致（例如 `claude-sonnet-4-6` 前端认 4.6、后端退化到 4）。
+///
+/// 不做生图命名启发式（那是前端 `matchKnownImageGenerationModel` 的展示层兜底）；
+/// 也不为某个 CLI 别名（如 kimi 的 `k3`）放宽匹配——那会污染所有 provider。
 fn model_database_entry(model: &str) -> Option<&'static Value> {
     let model = model.trim();
     if model.is_empty() {
@@ -107,51 +170,72 @@ fn model_database_entry(model: &str) -> Option<&'static Value> {
 
     let entries = model_database_entries()?;
     let name = model.to_ascii_lowercase();
-    let stripped = name.rsplit('/').next().unwrap_or(&name);
+    let stripped = name.rsplit('/').next().unwrap_or(name.as_str());
 
+    // 1. 精确匹配（含 OpenRouter 风格 `provider/model` 去前缀）
     if let Some(entry) = entries.get(name.as_str()) {
         return Some(entry);
     }
-    if let Some(entry) = entries.get(stripped) {
-        return Some(entry);
+    if stripped != name.as_str() {
+        if let Some(entry) = entries.get(stripped) {
+            return Some(entry);
+        }
     }
 
-    let candidates = if name == stripped {
-        vec![stripped]
+    let index = model_db_norm_index()?;
+
+    // 1b. 分隔符归一化后的精确匹配（`claude-sonnet-4-6` → `claude-sonnet-4.6`）
+    if let Some(orig) = index
+        .exact_norm
+        .get(&normalize_model_sep(&name))
+        .or_else(|| index.exact_norm.get(&normalize_model_sep(stripped)))
+    {
+        return entries.get(*orig);
+    }
+
+    let norm_name = normalize_model_sep(&name);
+    let norm_stripped = normalize_model_sep(stripped);
+    let candidates: Vec<&str> = if norm_name == norm_stripped {
+        vec![norm_stripped.as_str()]
     } else {
-        vec![name.as_str(), stripped]
+        vec![norm_name.as_str(), norm_stripped.as_str()]
     };
 
-    entries
-        .iter()
-        .filter_map(|(key, entry)| {
-            if key == "_meta"
-                || !candidates
-                    .iter()
-                    .any(|candidate| candidate.starts_with(key) && key.len() < candidate.len())
-            {
-                return None;
+    // 2. 前缀匹配（归一化后最长 key 优先，带版本延续保护）
+    let mut best_prefix: Option<(&str, usize)> = None;
+    for (orig, norm) in &index.pairs {
+        let norm_len = norm.len();
+        let hit = candidates.iter().any(|candidate| {
+            candidate.starts_with(norm.as_str())
+                && norm_len < candidate.len()
+                && !is_version_continuation(norm, candidate, norm_len)
+        });
+        if hit && best_prefix.map_or(true, |(_, len)| norm_len > len) {
+            best_prefix = Some((*orig, norm_len));
+        }
+    }
+    if let Some((orig, _)) = best_prefix {
+        return entries.get(orig);
+    }
+
+    // 3. 包含匹配（归一化后最长 key 优先，带版本延续保护）
+    let mut best_contains: Option<(&str, usize)> = None;
+    for (orig, norm) in &index.pairs {
+        let norm_len = norm.len();
+        let hit = candidates.iter().any(|candidate| {
+            if norm.as_str() == *candidate {
+                return false;
             }
-            Some((key.len(), entry))
-        })
-        .max_by_key(|(key_len, _)| *key_len)
-        .map(|(_, entry)| entry)
-        .or_else(|| {
-            entries
-                .iter()
-                .filter_map(|(key, entry)| {
-                    if key == "_meta"
-                        || !candidates
-                            .iter()
-                            .any(|candidate| key != candidate && candidate.contains(key))
-                    {
-                        return None;
-                    }
-                    Some((key.len(), entry))
-                })
-                .max_by_key(|(key_len, _)| *key_len)
-                .map(|(_, entry)| entry)
-        })
+            match candidate.find(norm.as_str()) {
+                Some(idx) => !is_version_continuation(norm, candidate, idx + norm_len),
+                None => false,
+            }
+        });
+        if hit && best_contains.map_or(true, |(_, len)| norm_len > len) {
+            best_contains = Some((*orig, norm_len));
+        }
+    }
+    best_contains.and_then(|(orig, _)| entries.get(orig))
 }
 
 fn model_database_context_window(model: &str) -> Option<usize> {
@@ -506,6 +590,113 @@ mod tests {
     use crate::settings::{ModelInfo, ModelProvider};
 
     use super::*;
+
+    fn db_display_name(model: &str) -> Option<String> {
+        model_database_entry(model)
+            .and_then(|entry| entry.get("displayName"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// 与前端 `src/data/modelMatching.test.ts` 对齐：连字符版本 / 版本延续 / 日期后缀。
+    #[test]
+    fn model_database_matching_is_isomorphic_with_frontend() {
+        // 空白 → 无匹配
+        assert!(model_database_entry("").is_none());
+        assert!(model_database_entry("   ").is_none());
+
+        // 点号键 ↔ 连字符 id
+        assert_eq!(
+            db_display_name("claude-sonnet-4-6").as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(
+            db_display_name("claude-opus-4-8").as_deref(),
+            Some("Claude Opus 4.8")
+        );
+        assert_eq!(
+            db_display_name("claude-opus-4-7").as_deref(),
+            Some("Claude Opus 4.7")
+        );
+        assert_eq!(
+            db_display_name("claude-haiku-4-5").as_deref(),
+            Some("Claude Haiku 4.5")
+        );
+        assert_eq!(db_display_name("kimi-k2-7").as_deref(), Some("Kimi K2.7"));
+
+        // 主版本本身仍命中自己的条目，不能被次级版本抢
+        assert_eq!(
+            db_display_name("claude-sonnet-4").as_deref(),
+            Some("Claude Sonnet 4")
+        );
+        assert_eq!(
+            db_display_name("claude-opus-4").as_deref(),
+            Some("Claude Opus 4")
+        );
+
+        // 日期快照后缀：最长归一化前缀，仍认 4.8（数字段 ≥3 不算版本延续）
+        assert_eq!(
+            db_display_name("claude-opus-4-8-20260101").as_deref(),
+            Some("Claude Opus 4.8")
+        );
+
+        // 版本延续保护：未知次级版本不能退化到 gpt-5
+        assert!(model_database_entry("gpt-5.7-nebula").is_none());
+        // 连字符写法的已知 5.6 变体要认到 5.6 条目，不能落到 gpt-5
+        assert_eq!(
+            db_display_name("gpt-5-6-luna").as_deref(),
+            Some("GPT-5.6 Luna")
+        );
+        assert_eq!(
+            db_display_name("gpt-5.6-luna").as_deref(),
+            Some("GPT-5.6 Luna")
+        );
+        assert_eq!(db_display_name("gpt-5.6-sol").as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(
+            db_display_name("gpt-5.6-terra").as_deref(),
+            Some("GPT-5.6 Terra")
+        );
+        assert_eq!(db_display_name("gpt-5.5").as_deref(), Some("GPT-5.5"));
+        assert_eq!(db_display_name("gpt-5").as_deref(), Some("GPT-5"));
+
+        // provider 前缀（含连字符版本 id）+ 点号键本身
+        assert_eq!(db_display_name("openai/gpt-4o"), db_display_name("gpt-4o"));
+        assert_eq!(
+            db_display_name("anthropic/claude-sonnet-4-6").as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(
+            db_display_name("claude-sonnet-4.6").as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+
+        // 包含匹配路径：带 tag 的变体（`gemma4:31b`）靠前缀/包含吃到 `gemma4`
+        assert_eq!(db_display_name("gemma4:31b").as_deref(), Some("Gemma 4"));
+
+        // 未知模型
+        assert!(model_database_entry("totally-unknown-model-xyz-9999").is_none());
+
+        // 有意不放宽：kimi CLI 短别名 `k3` 不得命中 `kimi-k3`（见 external_agents/context.rs）
+        assert!(model_database_entry("k3").is_none());
+    }
+
+    /// 连字符 id 必须吃到正确条目的 efforts，不能退化到旧主版本的 `[]`。
+    #[test]
+    fn dash_versioned_ids_resolve_correct_reasoning_efforts() {
+        // 4.6 有 low..max；旧 `claude-sonnet-4` 是显式空数组（无旋钮）。
+        assert_eq!(
+            reasoning_efforts_for_model(None, "claude-sonnet-4-6"),
+            vec!["low", "medium", "high", "max"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(None, "anthropic/claude-sonnet-4-6"),
+            vec!["low", "medium", "high", "max"]
+        );
+        assert!(reasoning_efforts_for_model(None, "claude-sonnet-4").is_empty());
+        // haiku-4-5 在库里是 `[]`；旧逻辑连字符 id 会 miss 整条，掉进家族兜底。
+        assert!(reasoning_efforts_for_model(None, "claude-haiku-4-5").is_empty());
+        assert!(reasoning_efforts_for_model(None, "claude-haiku-4.5").is_empty());
+    }
 
     #[test]
     fn user_model_database_overlay_merges_fields_and_normalizes_keys() {

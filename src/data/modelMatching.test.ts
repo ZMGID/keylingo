@@ -78,7 +78,39 @@ describe('matchModel', () => {
     expect(info?.maxOutput).toBe(128_000)
     expect(info?.pricing?.input).toBe(10)
   })
+
+  it('matches Cursor Composer model ids without collapsing versions', () => {
+    // Cursor docs pricing catalog: composer-2.5 base + fast sub-row; supportsImage=true.
+    const c25 = matchModel('composer-2.5')
+    expect(c25?.displayName).toBe('Composer 2.5')
+    expect(c25?.contextWindow).toBe(200_000)
+    expect(c25?.maxOutput).toBeUndefined()
+    expect(c25?.capabilities?.vision).toBe(true)
+    expect(c25?.capabilities?.functionCalling).toBe(true)
+    expect(c25?.capabilities?.reasoning).toBe(true)
+    expect(c25?.capabilities?.streaming).toBe(true)
+    expect(c25?.capabilities?.webSearch).toBe(false)
+    expect(c25?.capabilities?.imageGeneration).toBe(false)
+    expect(c25?.pricing?.input).toBe(0.5)
+    expect(c25?.pricing?.output).toBe(2.5)
+    expect(c25?.pricing?.cachedInput).toBe(0.2)
+    expect(c25?.reasoningEfforts).toEqual([])
+    // Explicit fast sub-row id from the same catalog.
+    expect(matchModel('composer-2.5-fast')?.pricing?.input).toBe(3)
+    expect(matchModel('composer-2.5-fast')?.pricing?.output).toBe(15)
+    expect(matchModel('composer-2.5-fast')?.capabilities?.vision).toBe(true)
+    // Param-style ACP ids still resolve to the base entry (not the -fast sub-row).
+    expect(matchModel('composer-2.5[fast=true]')?.displayName).toBe('Composer 2.5')
+    // Version continuation: composer-2 must not steal composer-2.5.
+    expect(matchModel('composer-2')?.displayName).toBe('Composer 2')
+    expect(matchModel('composer-1.5')?.displayName).toBe('Composer 1.5')
+    expect(matchModel('composer-1')?.displayName).toBe('Composer 1')
+    expect(matchModel('composer-1')?.pricing?.input).toBe(1.25)
+    expect(matchModel('composer-1')?.capabilities?.vision).toBe(true)
+  })
 })
+
+
 
 describe('matchModelExact', () => {
   it('matches exact and provider-prefixed model ids', () => {

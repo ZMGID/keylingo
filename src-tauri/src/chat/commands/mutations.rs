@@ -940,7 +940,16 @@ pub(crate) async fn chat_bulk_delete_conversations(
     let mut deleted = 0usize;
     let mut warnings: Vec<String> = Vec::new();
     for conversation_id in ids {
-        // 与单条删除一致：清运行态 / 后台命令
+        // 与单条删除一致：外部 CLI 会话 / 后台命令 / 运行态小 map 都先清，
+        // 否则工作区被占着时副产物清理会失败，用户体感「删不掉」。
+        state.remove_external_live_session(&conversation_id);
+        crate::external_agents::session::clear_live_handle(&app, &conversation_id);
+        let killed = state.kill_background_commands_for_conversation(&conversation_id);
+        if killed > 0 {
+            eprintln!(
+                "Bulk-deleted conversation {conversation_id}: killed {killed} background command(s)"
+            );
+        }
         state.forget_chat_conversation_runtime(&conversation_id);
         match crate::chat::repository::repository(&app)
             .delete(&app, &conversation_id)

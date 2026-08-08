@@ -4106,7 +4106,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleSidebarConversationDeleted = useCallback(() => {
     forgetRememberedChatRoute()
     applyConversation(null)
-    syncConversationRoute(null)
+    // 对话库/中心页删当前会话时只清会话态，别写 #chat 把中心页冲掉
+    const path = hashPath()
+    if (getRouteConversationId() !== null || path === 'chat' || path === '') {
+      syncConversationRoute(null)
+    }
     refreshSidebar()
   }, [applyConversation, refreshSidebar, syncConversationRoute])
 

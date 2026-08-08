@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-07-17",
+    "version": "2026-08-08",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -16,7 +16,12 @@
       "https://platform.minimax.io/docs/guides/pricing-paygo",
       "https://platform.openai.com/docs/api-reference/images/create",
       "https://openrouter.ai/docs/guides/overview/multimodal/image-generation",
-      "https://docs.x.ai/developers/model-capabilities/images/generation"
+      "https://docs.x.ai/developers/model-capabilities/images/generation",
+      "https://cursor.com/docs/models/cursor-composer-2-5",
+      "https://cursor.com/docs/models/cursor-composer-1",
+      "https://cursor.com/blog/composer-2-5",
+      "https://cursor.com/blog/composer-2",
+      "https://cursor.com/blog/composer-1-5"
     ]
   },
 
@@ -775,6 +780,76 @@
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
     "reasoningEfforts": ["low", "high"],
     "pricing": { "input": 0.30, "output": 0.50 }
+  },
+
+  "composer-2.5": {
+    "displayName": "Composer 2.5",
+    "contextWindow": 200000,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true,
+      "webSearch": false,
+      "imageGeneration": false
+    },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.50, "output": 2.50, "cachedInput": 0.20 }
+  },
+  "composer-2.5-fast": {
+    "displayName": "Composer 2.5 Fast",
+    "contextWindow": 200000,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true,
+      "webSearch": false,
+      "imageGeneration": false
+    },
+    "reasoningEfforts": [],
+    "pricing": { "input": 3.00, "output": 15.00, "cachedInput": 0.50 }
+  },
+  "composer-2": {
+    "displayName": "Composer 2",
+    "contextWindow": 200000,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true,
+      "webSearch": false,
+      "imageGeneration": false
+    },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.50, "output": 2.50 }
+  },
+  "composer-1.5": {
+    "displayName": "Composer 1.5",
+    "contextWindow": 200000,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true,
+      "webSearch": false,
+      "imageGeneration": false
+    },
+    "reasoningEfforts": []
+  },
+  "composer-1": {
+    "displayName": "Composer 1",
+    "contextWindow": 200000,
+    "capabilities": {
+      "vision": true,
+      "functionCalling": true,
+      "reasoning": true,
+      "streaming": true,
+      "webSearch": false,
+      "imageGeneration": false
+    },
+    "reasoningEfforts": [],
+    "pricing": { "input": 1.25, "output": 10.00, "cachedInput": 0.125 }
   },
 
   "grok-imagine-image-quality": {

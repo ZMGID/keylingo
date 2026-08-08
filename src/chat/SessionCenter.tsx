@@ -220,6 +220,8 @@ export function SessionCenter({
   const itemsLenRef = useRef(0)
   itemsLenRef.current = state.items.length
   const loadingMoreRef = useRef(false)
+  /** 书架/筛选切换时丢弃过期响应，避免旧页回写造成闪一下。 */
+  const loadSeqRef = useRef(0)
 
   const loadPage = useCallback(
     async (opts?: { append?: boolean }) => {
@@ -227,9 +229,13 @@ export function SessionCenter({
       if (append) {
         if (loadingMoreRef.current) return
         loadingMoreRef.current = true
+      } else {
+        loadSeqRef.current += 1
       }
+      const seq = loadSeqRef.current
       setState((s) => ({
         ...s,
+        // 已有列表时只标 loading，不先清空，避免书架切换白闪
         loading: !append,
         loadingMore: append,
         error: '',
@@ -241,6 +247,7 @@ export function SessionCenter({
           append ? Promise.resolve(null) : chatApi.getProjects(),
           append ? Promise.resolve(null) : chatApi.getSets(),
         ])
+        if (seq !== loadSeqRef.current) return
         if (!append) {
           if (projectData) setProjects(projectData)
           if (setData) setSets(setData)
@@ -254,6 +261,7 @@ export function SessionCenter({
         }))
         if (!append) setSelected(new Set())
       } catch (err) {
+        if (seq !== loadSeqRef.current) return
         setState((s) => ({
           ...s,
           loading: false,
@@ -261,7 +269,7 @@ export function SessionCenter({
           error: err instanceof Error ? err.message : String(err),
         }))
       } finally {
-        loadingMoreRef.current = false
+        if (append) loadingMoreRef.current = false
       }
     },
     [buildQuery],
