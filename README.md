@@ -172,7 +172,18 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.7
+## 新版本 —— v2.8.8
+
+- **对话库** —— 扩展区插件位改为完整对话库：搜索、书架、排序/分组、多选批量与归档；插件管理迁入设置页。
+- **Prompt 缓存保留时长** —— 供应商 prompt caching 对齐 Pi 风格 none/short/long 保留档，并接上相关请求配置 UI。
+- **扩展中心 i18n** —— 助手 / 技能 / MCP / 知识库 / 笔记 / 插件六个中心页及市场子页改为中英双语。
+- **会话用量与标题动效** —— 输入栏展示本会话 input / cache-hit / output 用量；模型生成标题时以打字机动效替换临时标题。
+- **模型库与匹配对齐** —— 收录 Cursor Composer 系列；后端模型匹配与前端同构（分隔符归一化 + 版本延续保护），避免 UI 能力与真实请求不一致。
+- **侧栏与生成状态** —— 对话行改为钉选 + 一键归档，完整菜单改右键；行尾 G7 慢波浪指示；归档对话不再被乐观合并写回。
+- **设置与用量面板** —— 导航顺序调整、记忆页层级收紧；用量面板展示原始思考档位，并以成功率替代始终为零的 Cache creation。
+- **流式与会话稳定性** —— 保留流式失败、去重恢复消息、稳定滚动控制；批量删除同步清理外部 CLI 会话与后台命令；对话库切换书架不再白闪。
+
+## v2.8.7
 
 - **外部 CLI Agent 能力补齐** —— Claude Code 接入问用户、计划批准、后台任务和子代理实时进度，子代理调用独立显示为卡片；Agent 循环的读文件限制、超窗压缩、空响应判定与用量统计进一步对齐 Pi。
 - **Pi 与 pi-btw 适配** —— Pi 原生供应商配置接入统一外部 CLI 体系，pi-btw 事件映射进共享运行协议；流式中途断开时保留重试能力，并将上游断流与普通进程退出分开呈现。
@@ -393,7 +404,18 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.7
+## What's New — v2.8.8
+
+- **Conversation library** — the extensions plugins slot becomes a full conversation library with search, shelves, sort/group, multi-select bulk actions, and archive; plugin management moves into Settings.
+- **Prompt-cache retention** — provider prompt caching aligns with Pi-style none/short/long retention and wires the related request UI.
+- **Extension-center i18n** — Assistant / Skill / MCP / Knowledge / Notes / Plugin centers and their marketplace sub-panels are bilingual.
+- **Session usage and title motion** — the composer shows per-session input / cache-hit / output usage; model-generated titles replace the provisional title with a typewriter animation.
+- **Model database and matching** — adds Cursor Composer models; backend model matching is now isomorphic with the frontend (separator normalize + version-continuation guard) so UI capabilities stay consistent with real requests.
+- **Sidebar and run status** — conversation rows use pin + one-click archive, with the full menu on right-click; a G7 slow wave indicator at the row edge; archived chats are no longer re-injected by optimistic merge.
+- **Settings and usage panel** — nav order and memory-tab nesting are cleaned up; usage shows raw reasoning-effort labels and replaces the always-zero Cache creation tile with success rate.
+- **Streaming and session stability** — preserves stream failures, deduplicates recovered messages, and stabilizes scroll controls; bulk delete also clears external CLI sessions and background commands; shelf switches in the library no longer flash white.
+
+## v2.8.7
 
 - **Expanded external-CLI agent support** — Claude Code now supports ask-user, plan approval, background tasks, and live subagent progress, with subagent calls rendered as dedicated cards. File-read limits, context compaction, empty-response handling, and usage accounting are further aligned with Pi.
 - **Pi and pi-btw integration** — Pi provider configuration joins the shared external-CLI system, and pi-btw events map into the common run protocol. Mid-stream upstream failures retain retry behavior and are presented separately from ordinary process exits.
