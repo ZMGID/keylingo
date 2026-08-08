@@ -638,6 +638,25 @@ export const Sidebar = memo(function Sidebar({
     }
   }
 
+  /** 归档：侧栏「最近」不再显示；只在对话库「归档」书架可见。 */
+  const handleArchiveConversation = async (id: string) => {
+    // 1) 立刻从侧栏真实列表摘掉
+    setConversations((items) => items.filter((item) => item.id !== id))
+    // 2) 清父组件乐观条目 / in-flight，否则 visibleConversations 会因「真实列表没有」又把乐观项并回来
+    onForceDropConversation?.(id)
+    // 3) 当前打开的就是这条 → 主区清空（与删除一致）
+    if (currentConversationId === id) {
+      onConversationDeleted?.(id)
+    }
+    try {
+      await chatApi.updateConversation(id, { archived: true })
+      await loadSidebarData({ silent: true })
+    } catch (err) {
+      console.error('Failed to archive conversation:', err)
+      await loadSidebarData({ silent: true })
+    }
+  }
+
   const handleDeleteConversation = async (id: string) => {
     if (!window.confirm(t.chatDeleteConversationConfirm)) return
     // B3：删"generating"会话先强制清父组件 in-flight/乐观状态，
@@ -854,22 +873,27 @@ export const Sidebar = memo(function Sidebar({
   }
 
   const visibleConversations = useMemo(() => {
-    if (optimisticConversations.length === 0) return conversations
-    const realById = new Map(conversations.map((item) => [item.id, item]))
+    // 侧栏永不展示已归档（后端 list 也会滤；这里再兜一层防脏数据/旧索引）
+    const active = conversations.filter((item) => !item.archived)
+    if (optimisticConversations.length === 0) return active
+    const realById = new Map(active.map((item) => [item.id, item]))
     const visibleOptimisticConversations = optimisticConversations.filter((item) => {
+      if (item.archived) return false
       const real = realById.get(item.id)
-      if (!real) return true
+      // 真实列表里没有：可能是「刚新建尚未 refetch」的乐观项，也可能是「刚归档/删除」。
+      // 仅当仍在 generating 时才保留乐观项；否则视为已离开侧栏（归档/删除）不再并回。
+      if (!real) return generatingConversationIds.has(item.id)
       if (generatingConversationIds.has(item.id)) return true
       // 真实条目仍是占位标题「新对话」说明它落后于乐观条目（乐观条目持有刚持久化的最新数据）：
       // 首轮完成后、refetch 落地前，真实列表里这条还是旧快照 —— 直接切过去会让标题动效
       // 先倒退成「新对话」再跳成生成标题，且行实例销毁重建导致 SwapTitle 过渡不触发。
       return real.title === '新对话'
     })
-    if (visibleOptimisticConversations.length === 0) return conversations
+    if (visibleOptimisticConversations.length === 0) return active
     const optimisticIds = new Set(visibleOptimisticConversations.map((item) => item.id))
     return [
       ...visibleOptimisticConversations,
-      ...conversations.filter((item) => !optimisticIds.has(item.id)),
+      ...active.filter((item) => !optimisticIds.has(item.id)),
     ]
   }, [conversations, generatingConversationIds, optimisticConversations])
 
@@ -1371,6 +1395,7 @@ export const Sidebar = memo(function Sidebar({
                           }}
                           onRenameConversation={handleRenameConversation}
                           onTogglePinConversation={handleTogglePinConversation}
+                          onArchiveConversation={handleArchiveConversation}
                           onExportConversation={handleExportConversation}
                           onDeleteConversation={handleDeleteConversation}
                           onMoveConversationToProject={handleMoveConversationToProject}
@@ -1520,6 +1545,7 @@ export const Sidebar = memo(function Sidebar({
                               }}
                               onRenameConversation={handleRenameConversation}
                               onTogglePinConversation={handleTogglePinConversation}
+                              onArchiveConversation={handleArchiveConversation}
                               onExportConversation={handleExportConversation}
                               onDeleteConversation={handleDeleteConversation}
                               onMoveConversationToProject={handleMoveConversationToProject}
@@ -1584,6 +1610,7 @@ export const Sidebar = memo(function Sidebar({
                       }}
                       onRenameConversation={handleRenameConversation}
                       onTogglePinConversation={handleTogglePinConversation}
+                      onArchiveConversation={handleArchiveConversation}
                       onExportConversation={handleExportConversation}
                       onDeleteConversation={handleDeleteConversation}
                       onMoveConversationToProject={handleMoveConversationToProject}

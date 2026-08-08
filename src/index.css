@@ -1425,6 +1425,49 @@ button.chat-composer-status-item:hover {
   50% { opacity: 0; }
 }
 
+/* 侧栏对话「生成中」：G7 慢波（四竖线，无圆环） */
+.chat-gen-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 11px;
+  width: 14px;
+  flex-shrink: 0;
+}
+.chat-gen-wave > span {
+  display: block;
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: #71717a;
+  transform-origin: center;
+  animation: chat-gen-wave 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+.dark .chat-gen-wave > span {
+  background: #a1a1aa;
+}
+.chat-gen-wave > span:nth-child(1) { animation-delay: 0s; }
+.chat-gen-wave > span:nth-child(2) { animation-delay: 0.2s; }
+.chat-gen-wave > span:nth-child(3) { animation-delay: 0.4s; }
+.chat-gen-wave > span:nth-child(4) { animation-delay: 0.6s; }
+@keyframes chat-gen-wave {
+  0%, 100% {
+    transform: scaleY(0.32);
+    opacity: 0.4;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-gen-wave > span {
+    animation: none;
+    opacity: 0.7;
+    transform: scaleY(0.65);
+  }
+}
+
 .chat-motion-fade-up {
   animation: chat-motion-fade-up var(--chat-motion-duration, var(--kv-dur-normal)) var(--kv-ease-standard) both;
   animation-delay: var(--chat-motion-delay, 0ms);
@@ -3875,8 +3918,11 @@ button.chat-composer-status-item:hover {
   font-size: 12.5px;
   color: var(--text);
   font-family: inherit;
-  min-width: 140px;
-  max-width: 240px;
+  /* 宽度由外层 wrapper（如 w-[148px]）控制；不要在这里写死 min/max，
+     否则 button.w-full 仍会被 min-width:140px 撑破容器，叠到相邻控件上。 */
+  min-width: 0;
+  max-width: none;
+  width: 100%;
   cursor: default;
   box-shadow: var(--shadow-sm);
 }

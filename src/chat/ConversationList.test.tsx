@@ -15,20 +15,26 @@ const conversation: ConversationListItem = {
   updated_at: 1,
 }
 
+const listProps = {
+  conversations: [conversation] as ConversationListItem[],
+  projects: [] as [],
+  sets: [] as [],
+  lang: 'zh' as const,
+  onSelectConversation: vi.fn(),
+  onRenameConversation: vi.fn(),
+  onTogglePinConversation: vi.fn(),
+  onArchiveConversation: vi.fn(),
+  onExportConversation: vi.fn(),
+  onDeleteConversation: vi.fn(),
+  onMoveConversationToProject: vi.fn(),
+  onMoveConversationToSet: vi.fn(),
+}
+
 function renderList(onRenameConversation = vi.fn()) {
   render(
     <ConversationList
-      conversations={[conversation]}
-      projects={[]}
-      sets={[]}
-      lang="zh"
-      onSelectConversation={vi.fn()}
+      {...listProps}
       onRenameConversation={onRenameConversation}
-      onTogglePinConversation={vi.fn()}
-      onExportConversation={vi.fn()}
-      onDeleteConversation={vi.fn()}
-      onMoveConversationToProject={vi.fn()}
-      onMoveConversationToSet={vi.fn()}
     />,
   )
   return onRenameConversation
@@ -52,53 +58,52 @@ describe('ConversationList inline rename', () => {
   })
 })
 
-describe('ConversationList pin', () => {
+describe('ConversationList pin and archive', () => {
   it('toggles pin from the row pin button', async () => {
     const user = userEvent.setup()
     const onTogglePin = vi.fn()
     render(
       <ConversationList
-        conversations={[conversation]}
-        projects={[]}
-        sets={[]}
-        lang="zh"
-        onSelectConversation={vi.fn()}
-        onRenameConversation={vi.fn()}
+        {...listProps}
         onTogglePinConversation={onTogglePin}
-        onExportConversation={vi.fn()}
-        onDeleteConversation={vi.fn()}
-        onMoveConversationToProject={vi.fn()}
-        onMoveConversationToSet={vi.fn()}
       />,
     )
 
     await user.click(screen.getByRole('button', { name: '置顶聊天' }))
-
     expect(onTogglePin).toHaveBeenCalledOnce()
     expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
   })
 
-  it('shows unpin on the row when already pinned', async () => {
+  it('archives from the row archive button', async () => {
     const user = userEvent.setup()
-    const onTogglePin = vi.fn()
+    const onArchive = vi.fn()
     render(
       <ConversationList
-        conversations={[{ ...conversation, pinned: true }]}
-        projects={[]}
-        sets={[]}
-        lang="zh"
-        onSelectConversation={vi.fn()}
-        onRenameConversation={vi.fn()}
-        onTogglePinConversation={onTogglePin}
-        onExportConversation={vi.fn()}
-        onDeleteConversation={vi.fn()}
-        onMoveConversationToProject={vi.fn()}
-        onMoveConversationToSet={vi.fn()}
+        {...listProps}
+        onArchiveConversation={onArchive}
       />,
     )
 
-    await user.click(screen.getByRole('button', { name: '取消置顶' }))
+    await user.click(screen.getByRole('button', { name: '归档' }))
+    expect(onArchive).toHaveBeenCalledOnce()
+    expect(onArchive).toHaveBeenCalledWith('conversation-1')
+  })
 
-    expect(onTogglePin).toHaveBeenCalledWith('conversation-1', false)
+  it('opens context menu on right-click with pin action', async () => {
+    const user = userEvent.setup()
+    const onTogglePin = vi.fn()
+    const { container } = render(
+      <ConversationList
+        {...listProps}
+        onTogglePinConversation={onTogglePin}
+      />,
+    )
+
+    const row = container.querySelector('.kv-conv-row')
+    expect(row).toBeTruthy()
+    await user.pointer({ keys: '[MouseRight>]', target: row as Element })
+
+    await user.click(screen.getByRole('menuitem', { name: '置顶聊天' }))
+    expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
   })
 })

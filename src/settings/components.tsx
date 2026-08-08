@@ -185,7 +185,7 @@ export function Select({ value, onChange, options, className = '', disabled: dis
             setOpen(true)
           }
         }}
-        className="kv-select kv-select-button relative w-full h-[30px] text-left disabled:opacity-50 disabled:cursor-not-allowed"
+        className="kv-select kv-select-button relative h-[30px] w-full min-w-0 max-w-none text-left disabled:cursor-not-allowed disabled:opacity-50"
         aria-haspopup="listbox"
         aria-expanded={open}
         title={title ?? displayTitle}

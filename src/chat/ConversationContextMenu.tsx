@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronRight, Download, Folder, Layers, Pencil, Trash2 } from 'lucide-react'
+import { ChevronRight, Download, Folder, Layers, Pencil, Pin, PinOff, Trash2 } from 'lucide-react'
 import { i18n, type Lang } from '../settings/i18n'
 import type { ChatProject, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
@@ -16,10 +16,12 @@ interface ConversationContextMenuProps {
   conversationFolder?: string
   conversationProjectId?: string | null
   conversationSetId?: string | null
+  pinned?: boolean
   projects: ChatProject[]
   sets: ChatSet[]
   lang: Lang
   onRename: () => void
+  onTogglePin?: () => void
   onExport: () => void
   onMoveToProject: (projectId: string | undefined) => void
   onMoveToSet: (setId: string | undefined) => void
@@ -32,10 +34,12 @@ export function ConversationContextMenu({
   conversationFolder,
   conversationProjectId,
   conversationSetId,
+  pinned = false,
   projects,
   sets,
   lang,
   onRename,
+  onTogglePin,
   onExport,
   onMoveToProject,
   onMoveToSet,
@@ -86,6 +90,21 @@ export function ConversationContextMenu({
         <Pencil strokeWidth={1.75} />
         {t.chatRename}
       </button>
+
+      {onTogglePin && (
+        <button
+          type="button"
+          role="menuitem"
+          className="kv-menu-item"
+          onClick={() => {
+            onTogglePin()
+            onClose()
+          }}
+        >
+          {pinned ? <PinOff strokeWidth={1.75} /> : <Pin strokeWidth={1.75} />}
+          {pinned ? t.chatUnpin : t.chatPin}
+        </button>
+      )}
 
       <div className="group/sub relative">
         <button

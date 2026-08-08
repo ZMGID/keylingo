@@ -64,13 +64,17 @@ type LayoutTier = {
  * （聊天侧栏 + 书架会让视口宽 ≠ 表格宽）。
  */
 function columnFlags(tableWidth: number, density: ConversationLibraryDensity) {
-  if (density === 'compact' || tableWidth < 520) {
-    return { model: false, owner: false, msgs: false, preview: density === 'comfortable' && tableWidth >= 420 }
+  // 行固定占位约：checkbox7 + gap + title + time14 + menu8 + padding ≈ 120，再加副列
+  if (density === 'compact' || tableWidth < 480) {
+    return { model: false, owner: false, msgs: false, preview: false }
   }
-  if (tableWidth < 680) {
+  if (tableWidth < 560) {
+    return { model: false, owner: false, msgs: false, preview: density === 'comfortable' }
+  }
+  if (tableWidth < 720) {
     return { model: false, owner: true, msgs: false, preview: true }
   }
-  if (tableWidth < 860) {
+  if (tableWidth < 900) {
     return { model: true, owner: true, msgs: false, preview: true }
   }
   return { model: true, owner: true, msgs: true, preview: true }
@@ -662,9 +666,9 @@ export function SessionCenter({
               className="kv-input w-full min-w-0 !pl-8"
             />
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
             <Select
-              className="w-[152px] shrink-0 max-w-full"
+              className="w-[148px] shrink-0"
               value={`${sort}:${order}`}
               onChange={(value) => {
                 const [s, o] = value.split(':') as [ConversationLibrarySort, ConversationLibraryOrder]
@@ -675,20 +679,22 @@ export function SessionCenter({
               title={t.chatLibSort}
             />
             <Select
-              className="w-[132px] shrink-0 max-w-full"
+              className="w-[132px] shrink-0"
               value={groupBy}
               onChange={(value) => setGroupBy(value as ConversationLibraryGroup)}
               options={groupOptions}
             />
             <Select
-              className="w-[108px] shrink-0 max-w-full"
+              className="w-[100px] shrink-0"
               value={density}
               onChange={(value) => setDensity(value as ConversationLibraryDensity)}
               options={densityOptions}
             />
-            <div className="flex h-[30px] shrink-0 items-center gap-2 pl-0.5">
+            <div className="flex h-[30px] shrink-0 items-center gap-2 border-l border-neutral-200 pl-3 dark:border-neutral-700">
               <Toggle checked={fullText} onChange={setFullText} ariaLabel={t.chatLibFullText} />
-              <span className="text-[12.5px] text-neutral-600 dark:text-neutral-300">{t.chatLibFullText}</span>
+              <span className="whitespace-nowrap text-[12.5px] text-neutral-600 dark:text-neutral-300">
+                {t.chatLibFullText}
+              </span>
             </div>
           </div>
         </div>
@@ -844,10 +850,10 @@ export function SessionCenter({
           <div
             ref={listRef}
             onScroll={onScrollList}
-            className="custom-scrollbar min-h-0 flex-1 overflow-y-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950/40"
+            className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950/40"
           >
-            {/* Column header — 列显隐跟表格宽度，标题强制单行 truncate */}
-            <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-neutral-100 bg-neutral-50/95 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-neutral-400 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95">
+            {/* Column header — 列显隐跟表格宽度，标题强制单行 truncate；禁止视口 sm: 再撑开 */}
+            <div className="sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b border-neutral-100 bg-neutral-50/95 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-neutral-400 backdrop-blur dark:border-neutral-800 dark:bg-neutral-900/95">
               <label className="flex w-7 shrink-0 items-center justify-center">
                 <input
                   type="checkbox"
@@ -856,17 +862,17 @@ export function SessionCenter({
                   className="rounded"
                 />
               </label>
-              <span className="min-w-[6rem] flex-1 truncate">{t.chatLibColTitle}</span>
+              <span className="min-w-0 flex-1 truncate">{t.chatLibColTitle}</span>
               {cols.model && (
-                <span className="w-24 shrink-0 truncate sm:w-28">{t.chatLibColModel}</span>
+                <span className="w-24 shrink-0 truncate">{t.chatLibColModel}</span>
               )}
               {cols.owner && (
-                <span className="w-24 shrink-0 truncate sm:w-28">{t.chatLibColOwner}</span>
+                <span className="w-24 shrink-0 truncate">{t.chatLibColOwner}</span>
               )}
               {cols.msgs && (
                 <span className="w-12 shrink-0 text-right">{t.chatLibColMsgs}</span>
               )}
-              <span className="w-14 shrink-0 text-right sm:w-16">{t.chatLibColTime}</span>
+              <span className="w-14 shrink-0 text-right">{t.chatLibColTime}</span>
               <span className="w-8 shrink-0" />
             </div>
 
@@ -959,12 +965,12 @@ export function SessionCenter({
                           )}
                         </div>
                         {cols.model && (
-                          <span className="w-24 shrink-0 truncate text-[12px] text-neutral-500 sm:w-28">
+                          <span className="w-24 shrink-0 truncate text-[12px] text-neutral-500">
                             {shortModelName(c.model)}
                           </span>
                         )}
                         {cols.owner && (
-                          <span className="w-24 shrink-0 truncate text-[12px] text-neutral-500 sm:w-28">
+                          <span className="w-24 shrink-0 truncate text-[12px] text-neutral-500">
                             {owner || '—'}
                           </span>
                         )}
@@ -973,7 +979,7 @@ export function SessionCenter({
                             {c.message_count}
                           </span>
                         )}
-                        <span className="w-14 shrink-0 text-right text-[12px] tabular-nums text-neutral-400 sm:w-16">
+                        <span className="w-14 shrink-0 text-right text-[12px] tabular-nums text-neutral-400">
                           {formatRelativeTime(c.updated_at, t)}
                         </span>
                         <button

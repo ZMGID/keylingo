@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { MoreHorizontal, Pin } from 'lucide-react'
+import { Archive, Pin } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
 import { isProvisionalTitle } from './conversationTitle'
@@ -54,6 +54,8 @@ interface ConversationListProps {
   onSelectConversation: (id: string) => void
   onRenameConversation: (id: string, title: string) => Promise<void>
   onTogglePinConversation: (id: string, pinned: boolean) => Promise<void>
+  /** 一键归档（侧栏默认不再显示归档对话） */
+  onArchiveConversation: (id: string) => Promise<void>
   onExportConversation: (id: string, title: string) => Promise<void>
   onDeleteConversation: (id: string) => Promise<void>
   onMoveConversationToProject: (id: string, projectId: string | undefined) => Promise<void>
@@ -75,6 +77,7 @@ export const ConversationList = memo(function ConversationList({
   onSelectConversation,
   onRenameConversation,
   onTogglePinConversation,
+  onArchiveConversation,
   onExportConversation,
   onDeleteConversation,
   onMoveConversationToProject,
@@ -100,11 +103,11 @@ export const ConversationList = memo(function ConversationList({
     }
   }, [renamingId])
 
-  const openMenu = (conversationId: string, button: HTMLButtonElement) => {
-    const rect = button.getBoundingClientRect()
+  /** 右键在光标处弹出菜单（不再用行尾 ⋯ / 图钉按钮）。 */
+  const openMenuAtPointer = (conversationId: string, clientX: number, clientY: number) => {
     setMenuState({
       conversationId,
-      anchor: { left: rect.right - 200, top: rect.bottom + 4 },
+      anchor: { left: clientX, top: clientY },
     })
   }
 
@@ -198,6 +201,11 @@ export const ConversationList = memo(function ConversationList({
               key={conv.id}
               data-reorder-id={conv.id}
               onPointerDown={reorder ? (e) => reorder.startDrag(e, conv.id) : undefined}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                openMenuAtPointer(conv.id, e.clientX, e.clientY)
+              }}
               className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
                 isDragging ? 'is-dragging ' : ''
               }${
@@ -257,12 +265,6 @@ export const ConversationList = memo(function ConversationList({
                       {folderLabel}
                     </span>
                   )}
-                  {isGenerating && (
-                    <span
-                      className="inline-flex h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-[1.5px] border-neutral-300 border-t-neutral-600 dark:border-neutral-600 dark:border-t-neutral-200"
-                      aria-label={t.chatGenerating}
-                    />
-                  )}
                 </span>
                 {showAssistantName && (conv.assistant_name ?? conv.assistantName) && (
                   <span className="mt-0.5 block truncate text-[11px] font-normal text-neutral-400 dark:text-neutral-500">
@@ -270,40 +272,48 @@ export const ConversationList = memo(function ConversationList({
                   </span>
                 )}
               </button>
-              {/* 置顶直接露在行上：悬停出现；已置顶则常显并加粗，不塞进 ⋯ */}
-              <button
-                type="button"
-                data-no-drag
-                onClick={(e) => {
-                  e.stopPropagation()
-                  void onTogglePinConversation(conv.id, !conv.pinned)
-                }}
-                className={`shrink-0 rounded-md p-0.5 transition-opacity hover:bg-black/[0.06] dark:hover:bg-white/[0.1] ${
-                  conv.pinned
-                    ? 'text-neutral-700 opacity-100 dark:text-neutral-200'
-                    : 'text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-neutral-600 dark:hover:text-neutral-200'
-                }`}
-                aria-label={conv.pinned ? t.chatUnpin : t.chatPin}
-                title={conv.pinned ? t.chatUnpin : t.chatPin}
-              >
-                <Pin size={14} strokeWidth={conv.pinned ? 2.5 : 1.75} />
-              </button>
-              <button
-                type="button"
-                data-no-drag
-                onClick={(e) => {
-                  e.stopPropagation()
-                  openMenu(conv.id, e.currentTarget)
-                }}
-                className={`mr-1 shrink-0 rounded-md p-0.5 text-neutral-400 transition-opacity hover:bg-black/[0.06] hover:text-neutral-600 dark:hover:bg-white/[0.1] dark:hover:text-neutral-200 ${
-                  menuState?.conversationId === conv.id
-                    ? 'opacity-100'
-                    : 'opacity-0 group-hover:opacity-100'
-                }`}
-                aria-label={t.chatConversationActions}
-              >
-                <MoreHorizontal size={15} />
-              </button>
+              {/* 行尾：生成中慢波；悬停/已置顶时换成 PIN + 归档，不叠动画 */}
+              <div className="relative mr-1 flex h-[22px] w-[44px] shrink-0 items-center justify-end">
+                {isGenerating && !conv.pinned && (
+                  <span
+                    className="chat-gen-wave pointer-events-none absolute right-1 opacity-100 transition-opacity group-hover:opacity-0"
+                    aria-label={t.chatGenerating}
+                    role="status"
+                  >
+                    <span /><span /><span /><span />
+                  </span>
+                )}
+                <button
+                  type="button"
+                  data-no-drag
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void onTogglePinConversation(conv.id, !conv.pinned)
+                  }}
+                  className={`shrink-0 rounded-md p-0.5 transition-opacity hover:bg-black/[0.06] dark:hover:bg-white/[0.1] ${
+                    conv.pinned
+                      ? 'text-neutral-700 opacity-100 dark:text-neutral-200'
+                      : 'text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-neutral-600 dark:hover:text-neutral-200'
+                  }`}
+                  aria-label={conv.pinned ? t.chatUnpin : t.chatPin}
+                  title={conv.pinned ? t.chatUnpin : t.chatPin}
+                >
+                  <Pin size={14} strokeWidth={conv.pinned ? 2.5 : 1.75} />
+                </button>
+                <button
+                  type="button"
+                  data-no-drag
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void onArchiveConversation(conv.id)
+                  }}
+                  className="shrink-0 rounded-md p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-black/[0.06] hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-white/[0.1] dark:hover:text-neutral-200"
+                  aria-label={t.chatLibArchive}
+                  title={t.chatLibArchive}
+                >
+                  <Archive size={14} strokeWidth={1.75} />
+                </button>
+              </div>
             </div>
           )
         })}
@@ -315,10 +325,14 @@ export const ConversationList = memo(function ConversationList({
           conversationFolder={menuConversation.folder}
           conversationProjectId={menuConversation.project_id ?? menuConversation.projectId ?? null}
           conversationSetId={menuConversation.set_id ?? menuConversation.setId ?? null}
+          pinned={Boolean(menuConversation.pinned)}
           projects={projects}
           sets={sets}
           lang={lang}
           onRename={() => startRename(menuConversation)}
+          onTogglePin={() =>
+            void onTogglePinConversation(menuConversation.id, !menuConversation.pinned)
+          }
           onExport={() => void onExportConversation(menuConversation.id, menuConversation.title)}
           onMoveToProject={(projectId) => void onMoveConversationToProject(menuConversation.id, projectId)}
           onMoveToSet={(setId) => void onMoveConversationToSet(menuConversation.id, setId)}
