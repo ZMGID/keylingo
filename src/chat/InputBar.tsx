@@ -426,6 +426,8 @@ interface InputBarProps {
   gitLang?: Lang
   /** 胶囊卡片里「在 Git 面板中打开」：打开 Dock 并切到 Git 页 */
   onOpenGitPanel?: () => void
+  /** 功能栏右侧的用量注入区（会话输入/缓存命中/输出）：渲染在模式胶囊与上下文指示器左侧 */
+  usageSlot?: ReactNode
 }
 
 export function InputBar({
@@ -481,6 +483,7 @@ export function InputBar({
   gitWorkdir = null,
   gitLang,
   onOpenGitPanel,
+  usageSlot,
 }: InputBarProps) {
   const t = useT()
   // 生成中的排队模式：Enter 改成入队，且只锁「要打后端」的入口。附件的选择 / 粘贴 / 拖入
@@ -1986,6 +1989,7 @@ export function InputBar({
             )}
 
             <div className="ml-auto flex items-center gap-1.5">
+            {usageSlot}
             {modeEntryEnabled && activeModeOption && (
               <div className="relative shrink-0 self-center">
                 <button

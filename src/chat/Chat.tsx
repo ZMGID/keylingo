@@ -31,6 +31,7 @@ import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import type { AssistantStreamStats } from './MessageList'
 import { InputBar } from './InputBar'
+import { SessionUsageStrip } from './SessionUsageStrip'
 import { ModelSelector } from './ModelSelector'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
@@ -4540,6 +4541,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                       modeOptions={composerModes.options}
                       modeValue={composerModes.current}
                       onModeChange={handleComposerModeChange}
+                      usageSlot={
+                        <SessionUsageStrip
+                          messages={displayMessages}
+                          lang={uiLang}
+                          apiFormats={providerApiFormats}
+                          defaultApiFormat={
+                            currentConversation
+                              ? (providerApiFormats[currentConversation.provider_id] ?? '')
+                              : ''
+                          }
+                        />
+                      }
                     />
                     </div>
                   </div>
@@ -4790,6 +4803,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     modeOptions={composerModes.options}
                     modeValue={composerModes.current}
                     onModeChange={handleComposerModeChange}
+                    usageSlot={
+                      <SessionUsageStrip
+                        messages={displayMessages}
+                        lang={uiLang}
+                        apiFormats={providerApiFormats}
+                        defaultApiFormat={
+                          currentConversation
+                            ? (providerApiFormats[currentConversation.provider_id] ?? '')
+                            : ''
+                        }
+                      />
+                    }
                   />
                     </>
                   )}

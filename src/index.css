@@ -832,6 +832,15 @@ body {
   background: rgba(255, 255, 255, 0.035);
 }
 
+/* 输入框功能栏右侧的用量小字（缓存命中/↑输入/↓输出）：主区容器过窄时直接隐藏，
+   避免和模式胶囊、上下文指示器挤在一行。容器查询挂在 .chat-main-pane 的
+   container-name: chat-main 上，自动扣掉侧栏/Dock 的实际宽度。 */
+@container chat-main (max-width: 640px) {
+  .chat-session-usage {
+    display: none;
+  }
+}
+
 /* 一条排队消息。动作键平时透明（不占注意力也不跳版：仍然挂载、只是不可见），
    指针悬停或键盘聚焦到行内任意控件时才现出来。 */
 .chat-composer-queue-row:hover {
