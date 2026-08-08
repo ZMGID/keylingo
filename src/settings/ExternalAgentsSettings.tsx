@@ -591,8 +591,8 @@ function ProviderSection({
     setImporting(false)
   }
 
-  // opencode / pi / grok 写原生配置；claude / codex 用 Kivio 私有文件（不碰用户家目录）。
-  const nativeOnDisk = agentId === 'opencode' || agentId === 'pi' || agentId === 'grok'
+  // opencode / pi / grok / kimi 写原生配置；claude / codex 用 Kivio 私有文件（不碰用户家目录）。
+  const nativeOnDisk = agentId === 'opencode' || agentId === 'pi' || agentId === 'grok' || agentId === 'kimi'
   const envOnly = agentId !== 'claude' && agentId !== 'codex' && !nativeOnDisk
 
   return (

@@ -44,12 +44,14 @@ export type NativeCliProviderForm = {
   sourceConfigJson: string
 }
 
+// OpenCode custom providers use AI SDK package names as the wire selector:
+// openai-compatible → /v1/chat/completions; openai → /v1/responses.
+// See https://opencode.ai/docs/providers/ ("if a model uses /v1/responses, use @ai-sdk/openai").
 export const OPENCODE_NPM_OPTIONS = [
   '@ai-sdk/openai-compatible',
   '@ai-sdk/openai',
   '@ai-sdk/anthropic',
   '@ai-sdk/google',
-  '@openrouter/ai-sdk-provider',
 ] as const
 
 export const PI_API_OPTIONS = [

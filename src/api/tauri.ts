@@ -505,6 +505,7 @@ export type ExternalCliAgentConfig = {
  * 一个第三方供应商。各 CLI 用到的字段不同：claude / gemini 用 `env`，
  * codex 用 `configToml` + `authJson`（物化成私有 CODEX_HOME）；
  * grok 用 `configToml`（把 models / model 段合并进 `~/.grok/config.toml`）；
+ * kimi 用 `configToml`（把 providers / models / default_model 合并进 `~/.kimi-code/config.toml`）；
  * OpenCode / Pi 用 `configJson` + `authJson` + `defaultModel` 合并进原生全局配置；
  * Pi 另用 `defaultReasoning` 写入终端默认 thinking 档位。
  */

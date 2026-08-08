@@ -64,7 +64,7 @@ describe('CliProviderModal native providers', () => {
       target: { value: 'Local Anthropic' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'OpenAI Compatible' }))
-    fireEvent.click(screen.getByRole('option', { name: 'Anthropic' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Claude' }))
     fireEvent.change(screen.getByLabelText('模型 ID'), {
       target: { value: 'claude-sonnet-4.6' },
     })

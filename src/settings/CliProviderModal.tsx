@@ -82,6 +82,20 @@ import {
   type GrokApiBackend,
   type GrokProviderFields,
 } from './cliGrokPresets'
+import {
+  buildKimiConfigToml,
+  emptyKimiModel,
+  initialKimiToml,
+  kimiProviderIdFromName,
+  kimiTypeNeedsBaseUrl,
+  KIMI_API_TYPE_LABELS,
+  KIMI_API_TYPES,
+  parseKimiConfigToml,
+  setKimiStructuredFields,
+  validateKimiConfigToml,
+  type KimiApiType,
+  type KimiProviderFields,
+} from './cliKimiPresets'
 
 function isPositiveInteger(value: string): boolean {
   return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0
@@ -115,10 +129,9 @@ const BRAND_ICON: Record<PresetBrand, Glyph | null> = {
 
 const OPENCODE_SDK_LABELS: Record<string, string> = {
   '@ai-sdk/openai-compatible': 'OpenAI Compatible',
-  '@ai-sdk/openai': 'OpenAI',
-  '@ai-sdk/anthropic': 'Anthropic',
-  '@ai-sdk/google': 'Google Gemini',
-  '@openrouter/ai-sdk-provider': 'OpenRouter',
+  '@ai-sdk/openai': 'OpenAI Responses',
+  '@ai-sdk/anthropic': 'Claude',
+  '@ai-sdk/google': 'Gemini',
 }
 
 function readEnv(env: EnvPair[], key: string): string {
@@ -217,6 +230,7 @@ function initialClaudeEnv(initial?: ExternalCliProvider | null): EnvPair[] {
  * - claude：预设 + 结构化字段 + JSON / 原始 env
  * - codex：预设 + config.toml / auth.json（物化成私有 CODEX_HOME）
  * - grok：结构化字段 + config.toml（合并进 ~/.grok/config.toml，与 cc-switch 同通道）
+ * - kimi：结构化字段 + config.toml（合并进 ~/.kimi-code/config.toml）
  * - opencode / pi：原生 provider / auth / default model 配置
  * - 其余：手填环境变量
  */
@@ -239,19 +253,22 @@ export function CliProviderModal({
   const isCodex = agentId === 'codex'
   const isClaude = agentId === 'claude'
   const isGrok = agentId === 'grok'
+  const isKimi = agentId === 'kimi'
   const isOpenCode = agentId === 'opencode'
   const isPi = agentId === 'pi'
   const isNative = isOpenCode || isPi
   const nativeAgentId: NativeCliAgentId = isPi ? 'pi' : 'opencode'
   const codexInitial = isCodex ? initialCodexTomlAuth(initial) : null
   const grokInitialToml = isGrok ? initialGrokToml(initial) : ''
+  const kimiInitialToml = isKimi ? initialKimiToml(initial) : ''
   const [name, setName] = useState(initial?.name ?? '')
   const [remark, setRemark] = useState(initial?.remark ?? '')
   const [env, setEnv] = useState<EnvPair[]>(() =>
     isClaude ? initialClaudeEnv(initial) : (initial?.env ?? []),
   )
   const [configToml, setConfigToml] = useState(
-    codexInitial?.configToml ?? (isGrok ? grokInitialToml : initial?.configToml ?? ''),
+    codexInitial?.configToml
+      ?? (isGrok ? grokInitialToml : isKimi ? kimiInitialToml : initial?.configToml ?? ''),
   )
   const [authJson, setAuthJson] = useState(codexInitial?.authJson ?? initial?.authJson ?? '')
   const [nativeForm, setNativeForm] = useState(() =>
@@ -264,6 +281,7 @@ export function CliProviderModal({
   const [fetching, setFetching] = useState(false)
   const [fetchNote, setFetchNote] = useState('')
   const [showGrokAdvanced, setShowGrokAdvanced] = useState(false)
+  const [showKimiAdvanced, setShowKimiAdvanced] = useState(false)
   // null = 跟着上面的字段实时生成；非 null = 用户正在直接编辑这段 JSON。
   const [jsonDraft, setJsonDraft] = useState<string | null>(null)
   const [jsonError, setJsonError] = useState('')
@@ -290,6 +308,13 @@ export function CliProviderModal({
     () => fetchedModels.map((model) => ({ value: model, label: model })),
     [fetchedModels],
   )
+  const kimiModelOptions = useMemo<SelectOption[]>(() => {
+    if (!isKimi) return []
+    return parseKimiConfigToml(configToml).models
+      .map((item) => item.model.trim())
+      .filter(Boolean)
+      .map((model) => ({ value: model, label: model }))
+  }, [configToml, isKimi])
   const nativeModelOptions = useMemo<SelectOption[]>(
     () => normalizeNativeModels(nativeForm.models).map((model) => ({
       value: model.id,
@@ -427,6 +452,9 @@ export function CliProviderModal({
   const patchGrokFields = (patch: Partial<GrokProviderFields>) => {
     setConfigToml((prev) => setGrokStructuredFields(prev, patch))
   }
+  const patchKimiFields = (patch: Partial<KimiProviderFields>) => {
+    setConfigToml((prev) => setKimiStructuredFields(prev, patch))
+  }
 
   const formatAuthJson = () => {
     try {
@@ -442,22 +470,27 @@ export function CliProviderModal({
   const codexModel = isCodex ? (extractCodexModel(configToml) || 'gpt-5.5') : ''
   const codexApiKey = isCodex ? extractOpenAiApiKey(authJson) : ''
   const grokFields = isGrok ? parseGrokConfigToml(configToml) : null
+  const kimiFields = isKimi ? parseKimiConfigToml(configToml) : null
 
   const fetchModels = async () => {
     const url = isCodex
       ? codexBaseUrl
       : isGrok
         ? (grokFields?.baseUrl ?? '')
-        : isNative
-          ? nativeForm.baseUrl
-          : baseUrl
+        : isKimi
+          ? (kimiFields?.baseUrl ?? '')
+          : isNative
+            ? nativeForm.baseUrl
+            : baseUrl
     const key = isCodex
       ? codexApiKey
       : isGrok
         ? (grokFields?.apiKey ?? '')
-        : isNative
-          ? nativeForm.apiKey
-          : readClaudeApiKey(env)
+        : isKimi
+          ? (kimiFields?.apiKey ?? '')
+          : isNative
+            ? nativeForm.apiKey
+            : readClaudeApiKey(env)
     setFetching(true)
     setFetchNote('')
     try {
@@ -469,6 +502,19 @@ export function CliProviderModal({
           models: [emptyNativeModel(nativeAgentId, models[0])],
           defaultModel: prev.defaultModel || models[0],
         }))
+      }
+      if (isKimi && models.length > 0 && kimiFields) {
+        const existing = kimiFields.models.map((m) => m.model.trim()).filter(Boolean)
+        if (existing.length === 0) {
+          patchKimiFields({
+            models: models.slice(0, 8).map((model) => ({
+              model,
+              displayName: '',
+              contextWindow: '128000',
+            })),
+            defaultModel: models[0],
+          })
+        }
       }
       setFetchNote(
         models.length === 0
@@ -579,6 +625,69 @@ export function CliProviderModal({
         env: [],
         configToml: normalized,
         authJson: '',
+      })
+      return
+    }
+    if (isKimi) {
+      const fields = parseKimiConfigToml(configToml)
+      const providerId = fields.providerId.trim()
+        || kimiProviderIdFromName(name)
+        || kimiProviderIdFromName(initial?.id || 'relay')
+      const models = fields.models
+        .map((item) => ({
+          ...item,
+          model: item.model.trim(),
+        }))
+        .filter((item) => item.model)
+      const defaultModel = fields.defaultModel.trim() || models[0]?.model || ''
+      const normalized = buildKimiConfigToml({
+        ...fields,
+        providerId,
+        models: models.length ? models : [emptyKimiModel()],
+        defaultModel,
+      })
+      const tomlErr = validateKimiConfigToml(normalized)
+      if (tomlErr === 'missing-provider-id' || tomlErr === 'invalid-provider-id') {
+        setError(t.externalAgentsKimiProviderIdInvalid)
+        return
+      }
+      if (tomlErr === 'missing-base-url') {
+        setError(t.externalAgentsProviderUrlRequired)
+        return
+      }
+      if (tomlErr === 'missing-api-key') {
+        setError(t.externalAgentsProviderKeyRequired)
+        return
+      }
+      if (tomlErr === 'missing-model') {
+        setError(t.externalAgentsNativeModelsRequired)
+        return
+      }
+      if (tomlErr === 'duplicate-model') {
+        setError(t.externalAgentsNativeModelsDuplicate)
+        return
+      }
+      if (tomlErr === 'invalid-context') {
+        setError(t.externalAgentsKimiContextInvalid)
+        return
+      }
+      if (tomlErr === 'invalid-default') {
+        setError(t.externalAgentsNativeDefaultInvalid)
+        return
+      }
+      if (tomlErr) {
+        setError(t.externalAgentsKimiTomlInvalid)
+        return
+      }
+      onSave({
+        id: initial?.id || `p-${Date.now().toString(36)}`,
+        name: name.trim(),
+        remark: remark.trim(),
+        env: [],
+        configToml: normalized,
+        authJson: '',
+        nativeProviderId: providerId,
+        defaultModel: defaultModel ? `${providerId}/${defaultModel}` : '',
       })
       return
     }
@@ -1161,6 +1270,246 @@ export function CliProviderModal({
     </div>
   )
 
+  const updateKimiModel = (idx: number, patch: Partial<NonNullable<typeof kimiFields>['models'][number]>) => {
+    if (!kimiFields) return
+    const models = kimiFields.models.map((item, i) => (i === idx ? { ...item, ...patch } : item))
+    const previousId = kimiFields.models[idx]?.model ?? ''
+    const nextDefault = kimiFields.defaultModel === previousId && patch.model !== undefined
+      ? patch.model
+      : kimiFields.defaultModel
+    patchKimiFields({ models, defaultModel: nextDefault })
+  }
+
+  const kimiBody = (
+    <div className="kv-native-provider-form">
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeIdentitySection}</h4>
+        </div>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderName} required />
+            <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderRemark} />
+            <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+          </div>
+        </div>
+        <div className="kv-form-block">
+          <FieldLabel text={t.externalAgentsKimiProviderId} required />
+          <Input
+            value={kimiFields?.providerId ?? ''}
+            onChange={(value) => patchKimiFields({ providerId: value })}
+            mono
+            placeholder={kimiProviderIdFromName(name) || 'relay'}
+          />
+          <p className="kv-row-desc">{t.externalAgentsKimiProviderIdHint}</p>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <div>
+            <h4>{t.externalAgentsNativeConnectionSection}</h4>
+            <p>{t.externalAgentsKimiConnectionHint}</p>
+          </div>
+        </div>
+        <div className="kv-form-stack">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsOpenCodeSdkPackage} required />
+            <Select
+              value={kimiFields?.type ?? 'openai'}
+              onChange={(value) => patchKimiFields({ type: value as KimiApiType })}
+              options={KIMI_API_TYPES.map((type) => ({
+                value: type,
+                label: KIMI_API_TYPE_LABELS[type],
+              }))}
+            />
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel
+              text={t.externalAgentsProviderApiUrl}
+              required={kimiTypeNeedsBaseUrl(kimiFields?.type ?? 'openai')}
+            />
+            <Input
+              value={kimiFields?.baseUrl ?? ''}
+              onChange={(value) => patchKimiFields({ baseUrl: value })}
+              mono
+              placeholder="https://api.example.com/v1"
+            />
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiKey} required />
+            <div className="kv-key-field">
+              <Input
+                value={kimiFields?.apiKey ?? ''}
+                onChange={(value) => patchKimiFields({ apiKey: value })}
+                type={showKey ? 'text' : 'password'}
+                mono
+                placeholder="sk-…"
+              />
+              <IconButton
+                size="sm"
+                label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
+                onClick={() => setShowKey((prev) => !prev)}
+              >
+                {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+              </IconButton>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head kv-native-section-head--actions">
+          <div>
+            <h4>{t.externalAgentsNativeModels}</h4>
+            {fetchNote && (
+              <p
+                className={
+                  fetchedModels.length === 0 && fetchNote !== t.externalAgentsProviderModelsEmpty
+                    ? 'kv-form-error-inline'
+                    : undefined
+                }
+              >
+                {fetchNote}
+              </p>
+            )}
+          </div>
+          <div className="kv-native-section-actions">
+            <Button
+              size="sm"
+              onClick={() => void fetchModels()}
+              disabled={fetching || !(kimiFields?.baseUrl ?? '').trim()}
+            >
+              <RefreshCw size={12} className={fetching ? 'animate-spin' : ''} />
+              {fetching ? t.externalAgentsProviderFetchingModels : t.externalAgentsProviderFetchModels}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (!kimiFields) return
+                patchKimiFields({ models: [...kimiFields.models, emptyKimiModel()] })
+              }}
+            >
+              <Plus size={12} />
+              {t.externalAgentsNativeModelAdd}
+            </Button>
+          </div>
+        </div>
+        <div className="kv-form-stack">
+          {(kimiFields?.models ?? [emptyKimiModel()]).map((item, idx) => (
+            <div className="kv-native-model-card" key={`kimi-model-${idx}`}>
+              <div className="kv-form-grid">
+                <div className="kv-form-block">
+                  <FieldLabel text={t.externalAgentsNativeModelId} required />
+                  <SuggestInput
+                    value={item.model}
+                    onChange={(value) => updateKimiModel(idx, { model: value })}
+                    options={modelSelectOptions}
+                    placeholder="gpt-5"
+                    mono
+                    ariaLabel={t.externalAgentsNativeModelId}
+                  />
+                </div>
+                <div className="kv-form-block">
+                  <FieldLabel text={t.externalAgentsNativeModelName} />
+                  <Input
+                    value={item.displayName}
+                    onChange={(value) => updateKimiModel(idx, { displayName: value })}
+                    placeholder={t.externalAgentsGrokDisplayNameHint}
+                  />
+                </div>
+              </div>
+              <div className="kv-form-grid">
+                <div className="kv-form-block">
+                  <FieldLabel text={t.externalAgentsGrokContextWindow} />
+                  <Input
+                    value={item.contextWindow}
+                    onChange={(value) => updateKimiModel(idx, {
+                      contextWindow: value.replace(/[^\d]/g, ''),
+                    })}
+                    mono
+                    placeholder="128000"
+                  />
+                </div>
+                <div className="kv-form-block kv-native-model-actions">
+                  <IconButton
+                    size="sm"
+                    label={t.externalAgentsRemove}
+                    onClick={() => {
+                      if (!kimiFields) return
+                      const models = kimiFields.models.filter((_, i) => i !== idx)
+                      const nextModels = models.length ? models : [emptyKimiModel()]
+                      const removed = item.model.trim()
+                      const defaultModel = kimiFields.defaultModel === removed
+                        ? (nextModels[0]?.model ?? '')
+                        : kimiFields.defaultModel
+                      patchKimiFields({ models: nextModels, defaultModel })
+                    }}
+                    disabled={(kimiFields?.models.length ?? 0) <= 1}
+                  >
+                    <Trash2 size={13} />
+                  </IconButton>
+                </div>
+              </div>
+            </div>
+          ))}
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsCodexDefaultModel} required />
+            <Select
+              value={kimiFields?.defaultModel || kimiModelOptions[0]?.value || ''}
+              onChange={(value) => patchKimiFields({ defaultModel: value })}
+              options={
+                kimiModelOptions.length
+                  ? kimiModelOptions
+                  : [{ value: '', label: t.externalAgentsNativeModelsRequired }]
+              }
+            />
+            <p className="kv-row-desc">{t.externalAgentsNativeDefaultHint}</p>
+          </div>
+        </div>
+      </section>
+
+      <div className="kv-native-provider-advanced">
+        <button
+          type="button"
+          className="kv-disclosure"
+          onClick={() => setShowKimiAdvanced((prev) => !prev)}
+          aria-expanded={showKimiAdvanced}
+          data-tauri-drag-region="false"
+        >
+          <span className={`kv-disclosure-caret ${showKimiAdvanced ? 'open' : ''}`} />
+          {t.externalAgentsKimiAdvanced}
+        </button>
+        {showKimiAdvanced && (
+          <div className="kv-native-provider-advanced-body">
+            <p className="kv-row-desc kv-form-stack-note">{t.externalAgentsKimiWriteHint}</p>
+            <div className="kv-form-block">
+              <div className="kv-field-row">
+                <FieldLabel text="config.toml" />
+                <Button
+                  size="sm"
+                  onClick={() => setConfigToml(buildKimiConfigToml(parseKimiConfigToml(configToml)))}
+                >
+                  {t.externalAgentsGrokRebuildToml}
+                </Button>
+              </div>
+              <TextArea
+                value={configToml}
+                onChange={setConfigToml}
+                rows={12}
+                mono
+              />
+              <p className="kv-row-desc">{t.externalAgentsKimiTomlHint}</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
   const nativeBody = (
     <div className="kv-native-provider-form">
       <section className="kv-native-section">
@@ -1612,7 +1961,7 @@ export function CliProviderModal({
       data-tauri-drag-region="false"
     >
       <div
-        className={`kv kv-modal kv-provider-modal ${isClaude || isCodex || isGrok || isNative ? 'kv-provider-modal--wide' : ''}`}
+        className={`kv kv-modal kv-provider-modal ${isClaude || isCodex || isGrok || isKimi || isNative ? 'kv-provider-modal--wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -1632,6 +1981,8 @@ export function CliProviderModal({
             codexBody
           ) : isGrok ? (
             grokBody
+          ) : isKimi ? (
+            kimiBody
           ) : isNative ? (
             nativeBody
           ) : (

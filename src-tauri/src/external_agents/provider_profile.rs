@@ -18,6 +18,10 @@
 //!    base_url 只能写进 config.toml）。把供应商的 `config_toml` 里的 `[models]` /
 //!    `[model.*]` 合并进现有文件，marketplace / ui / cli 等用户段原样保留；首次接管前
 //!    整份备份，切回「CLI 自身配置」时还原。
+//! 6. **kimi 的 `~/.kimi-code/config.toml`** —— Kimi Code CLI 凭证只认 config.toml（不读
+//!    shell 环境变量）。把供应商片段里的 `default_model` / `[providers.*]` / `[models.*]`
+//!    合并进现有文件；`managed:kimi-code` OAuth 段与其它用户配置原样保留。首次接管前
+//!    整份备份，切回「CLI 自身配置」时还原。
 //!
 //! 物化时机是**保存 / 切换供应商那一次**（`commands::chat_external_cli_provider_apply`），
 //! 不是每轮。ccgui 用的是 per-turn 临时目录 + `Drop` 删除，那套在 Kivio 会把常驻 claude
@@ -220,7 +224,7 @@ pub fn materialize_all() {
     }
 }
 
-/// 把供应商写到盘上。OpenCode / Pi / Grok 即使当前未启用，也要同步（或恢复）原生配置。
+/// 把供应商写到盘上。OpenCode / Pi / Grok / Kimi 即使当前未启用，也要同步（或恢复）原生配置。
 pub fn materialize(agent_id: &str) -> Result<(), String> {
     if matches!(agent_id, "opencode" | "pi") {
         let config = super::overrides::agent_config(agent_id).unwrap_or_default();
@@ -229,6 +233,10 @@ pub fn materialize(agent_id: &str) -> Result<(), String> {
     if agent_id == "grok" {
         let config = super::overrides::agent_config(agent_id).unwrap_or_default();
         return materialize_grok(&config);
+    }
+    if agent_id == "kimi" {
+        let config = super::overrides::agent_config(agent_id).unwrap_or_default();
+        return materialize_kimi(&config);
     }
     let Some(provider) = super::overrides::active_provider(agent_id) else {
         return Ok(());
@@ -450,6 +458,164 @@ fn materialize_grok_at(
     let merged = merge_grok_provider_config(base, &provider.config_toml)?;
     write_private_atomic(path, &merged)?;
     write_grok_state(state_path, &state)
+}
+
+/// Kimi Code CLI 配置路径：`$KIMI_CODE_HOME/config.toml`，否则 `~/.kimi-code/config.toml`。
+fn kimi_config_path() -> Option<PathBuf> {
+    if let Some(home) = nonempty_env_path("KIMI_CODE_HOME") {
+        return Some(home.join("config.toml"));
+    }
+    directories::BaseDirs::new().map(|base| base.home_dir().join(".kimi-code").join("config.toml"))
+}
+
+fn kimi_state_path() -> Option<PathBuf> {
+    Some(profiles_dir()?.join("kimi-native-state.json"))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+struct KimiManagedState {
+    managed: bool,
+    previous_config: Option<String>,
+}
+
+fn read_kimi_state(path: &Path) -> Result<KimiManagedState, String> {
+    if !path.is_file() {
+        return Ok(KimiManagedState::default());
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(KimiManagedState::default());
+    }
+    serde_json::from_str(&text).map_err(|e| format!("解析 {} 失败：{e}", path.display()))
+}
+
+fn write_kimi_state(path: &Path, state: &KimiManagedState) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(state).map_err(|e| e.to_string())? + "\n";
+    write_private_atomic(path, &text)
+}
+
+/// 把供应商 `config_toml` 里的 `default_model` / `providers` / `models` 合并进 base。
+/// 其它段（thinking / services / permission / managed OAuth…）一律保留 base 的。
+fn merge_kimi_provider_config(base: &str, provider_config: &str) -> Result<String, String> {
+    let mut base_doc: toml::Table = if base.trim().is_empty() {
+        toml::Table::new()
+    } else {
+        toml::from_str(base).map_err(|e| format!("现有 Kimi config.toml 解析失败：{e}"))?
+    };
+    let provider_doc: toml::Table = if provider_config.trim().is_empty() {
+        return Err("Kimi 供应商缺少 config.toml".to_string());
+    } else {
+        toml::from_str(provider_config)
+            .map_err(|e| format!("Kimi 供应商 config.toml 解析失败：{e}"))?
+    };
+
+    let providers = provider_doc
+        .get("providers")
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| "Kimi 供应商 config.toml 缺少 [providers.*]".to_string())?;
+    if providers.is_empty() {
+        return Err("Kimi 供应商 config.toml 缺少 [providers.*]".to_string());
+    }
+    let models = provider_doc
+        .get("models")
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| "Kimi 供应商 config.toml 缺少 [models.*]".to_string())?;
+    if models.is_empty() {
+        return Err("Kimi 供应商 config.toml 缺少 [models.*]".to_string());
+    }
+
+    // 从备份合并时：先去掉本片段要接管的 provider id 对应的旧 models，避免残留。
+    // 实际策略更简单——始终基于 previous_config 合并当前供应商，所以只需 overlay。
+    let base_providers = base_doc
+        .entry("providers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "Kimi config.toml 的 [providers] 不是表".to_string())?;
+    for (key, value) in providers {
+        // 永不覆盖 managed:kimi-code（OAuth 托管账号）。
+        if key == "managed:kimi-code" {
+            continue;
+        }
+        base_providers.insert(key.clone(), value.clone());
+    }
+
+    let base_models = base_doc
+        .entry("models".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "Kimi config.toml 的 [models] 不是表".to_string())?;
+    for (key, value) in models {
+        base_models.insert(key.clone(), value.clone());
+    }
+
+    if let Some(default_model) = provider_doc.get("default_model") {
+        base_doc.insert("default_model".to_string(), default_model.clone());
+    }
+
+    let mut rendered =
+        toml::to_string_pretty(&base_doc).map_err(|e| format!("序列化 Kimi config 失败：{e}"))?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    Ok(rendered)
+}
+
+fn materialize_kimi(config: &ExternalCliAgentConfig) -> Result<(), String> {
+    let path = kimi_config_path().ok_or_else(|| "无法定位 Kimi 配置目录".to_string())?;
+    let state_path = kimi_state_path().ok_or_else(|| "无法定位 Kimi 状态文件".to_string())?;
+    let _guard = NATIVE_CONFIG_LOCK
+        .lock()
+        .map_err(|_| "原生 CLI 配置写锁已损坏".to_string())?;
+    materialize_kimi_at(config, &path, &state_path)
+}
+
+fn materialize_kimi_at(
+    config: &ExternalCliAgentConfig,
+    path: &Path,
+    state_path: &Path,
+) -> Result<(), String> {
+    let mut state = read_kimi_state(state_path)?;
+
+    if config.current_provider.trim().is_empty() {
+        if state.managed {
+            if let Some(prev) = state.previous_config.take() {
+                if prev.is_empty() {
+                    if path.is_file() {
+                        std::fs::remove_file(path)
+                            .map_err(|e| format!("删除 {} 失败：{e}", path.display()))?;
+                    }
+                } else {
+                    write_private_atomic(path, &prev)?;
+                }
+            }
+            state.managed = false;
+            write_kimi_state(state_path, &state)?;
+        }
+        return Ok(());
+    }
+
+    let provider = config
+        .providers
+        .iter()
+        .find(|p| p.id == config.current_provider)
+        .ok_or_else(|| format!("当前供应商 {} 不存在", config.current_provider))?;
+    if provider.config_toml.trim().is_empty() {
+        return Err(format!(
+            "供应商 {} 缺少可落盘的 Kimi config.toml",
+            provider.name
+        ));
+    }
+
+    if !state.managed {
+        state.previous_config = Some(read_text_or_empty(path)?);
+        state.managed = true;
+    }
+    let base = state.previous_config.as_deref().unwrap_or("");
+    let merged = merge_kimi_provider_config(base, &provider.config_toml)?;
+    write_private_atomic(path, &merged)?;
+    write_kimi_state(state_path, &state)
 }
 
 #[derive(Debug, Clone)]
@@ -2079,6 +2245,195 @@ api_key = "skb"
         assert!(text.contains("model-b"));
         assert!(!text.contains("model-a"));
         assert!(text.contains("auto_update = true"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn kimi_provider(id: &str, name: &str, config_toml: &str) -> ExternalCliProvider {
+        ExternalCliProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            config_toml: config_toml.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn kimi_merge_preserves_managed_oauth_and_sets_default_model() {
+        let base = r#"default_model = "kimi-code/k3"
+
+[thinking]
+enabled = true
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = ""
+
+[models."kimi-code/k3"]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+"#;
+        let provider = r#"default_model = "relay/gpt-5"
+
+[providers.relay]
+type = "openai"
+base_url = "https://relay.example/v1"
+api_key = "sk-x"
+
+[models."relay/gpt-5"]
+provider = "relay"
+model = "gpt-5"
+max_context_size = 128000
+display_name = "GPT 5"
+"#;
+        let merged = merge_kimi_provider_config(base, provider).unwrap();
+        let doc: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            doc.get("default_model").and_then(|v| v.as_str()),
+            Some("relay/gpt-5")
+        );
+        assert!(
+            doc.get("thinking")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        let managed = doc
+            .get("providers")
+            .and_then(|v| v.get("managed:kimi-code"))
+            .and_then(|v| v.as_table())
+            .expect("managed provider kept");
+        assert_eq!(
+            managed.get("type").and_then(|v| v.as_str()),
+            Some("kimi")
+        );
+        let relay = doc
+            .get("providers")
+            .and_then(|v| v.get("relay"))
+            .and_then(|v| v.as_table())
+            .expect("relay provider");
+        assert_eq!(
+            relay.get("base_url").and_then(|v| v.as_str()),
+            Some("https://relay.example/v1")
+        );
+        let model = doc
+            .get("models")
+            .and_then(|v| v.get("relay/gpt-5"))
+            .and_then(|v| v.as_table())
+            .expect("model entry");
+        assert_eq!(model.get("model").and_then(|v| v.as_str()), Some("gpt-5"));
+        assert_eq!(
+            model.get("max_context_size").and_then(|v| v.as_integer()),
+            Some(128000)
+        );
+    }
+
+    #[test]
+    fn kimi_materialize_restores_previous_config_on_clear() {
+        let root = temp_root("kimi-restore");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let state_path = root.join("state.json");
+        let original = "default_model = \"kimi-code/k3\"\n\n[thinking]\nenabled = true\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut config = ExternalCliAgentConfig {
+            providers: vec![kimi_provider(
+                "relay",
+                "Relay",
+                r#"default_model = "relay/m1"
+
+[providers.relay]
+type = "openai"
+base_url = "https://relay.example/v1"
+api_key = "sk"
+
+[models."relay/m1"]
+provider = "relay"
+model = "m1"
+max_context_size = 128000
+"#,
+            )],
+            current_provider: "relay".to_string(),
+            ..Default::default()
+        };
+        materialize_kimi_at(&config, &path, &state_path).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("relay/m1"));
+        assert!(after.contains("enabled = true"));
+
+        config.current_provider.clear();
+        materialize_kimi_at(&config, &path, &state_path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kimi_switch_providers_starts_from_backup_not_previous_relay() {
+        let root = temp_root("kimi-switch");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let state_path = root.join("state.json");
+        std::fs::write(
+            &path,
+            "[providers.\"managed:kimi-code\"]\ntype = \"kimi\"\n",
+        )
+        .unwrap();
+
+        let mut config = ExternalCliAgentConfig {
+            providers: vec![
+                kimi_provider(
+                    "a",
+                    "A",
+                    r#"default_model = "a/m-a"
+
+[providers.a]
+type = "openai"
+base_url = "https://a.example/v1"
+api_key = "ska"
+
+[models."a/m-a"]
+provider = "a"
+model = "m-a"
+max_context_size = 128000
+"#,
+                ),
+                kimi_provider(
+                    "b",
+                    "B",
+                    r#"default_model = "b/m-b"
+
+[providers.b]
+type = "openai_responses"
+base_url = "https://b.example/v1"
+api_key = "skb"
+
+[models."b/m-b"]
+provider = "b"
+model = "m-b"
+max_context_size = 200000
+"#,
+                ),
+            ],
+            current_provider: "a".to_string(),
+            ..Default::default()
+        };
+        materialize_kimi_at(&config, &path, &state_path).unwrap();
+        config.current_provider = "b".to_string();
+        materialize_kimi_at(&config, &path, &state_path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("m-b"));
+        assert!(text.contains("openai_responses"));
+        // 从备份合并：managed OAuth 还在；A 的 provider 不应残留
+        assert!(text.contains("managed:kimi-code"));
+        assert!(!text.contains("[providers.a]") && !text.contains("providers.a"));
+        // toml pretty 可能写成 [providers.a] 或 nested table — 用解析确认
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        let providers = doc.get("providers").and_then(|v| v.as_table()).unwrap();
+        assert!(providers.get("a").is_none());
+        assert!(providers.get("b").is_some());
+        assert!(providers.get("managed:kimi-code").is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 }
