@@ -16,13 +16,14 @@ import {
 } from './providerRequest'
 import {
   normalizeProviderApiFormat,
-  promptCachingDefault,
   promptCachingSupported,
+  resolvePromptCacheRetention,
+  type PromptCacheRetention,
 } from '../api/tauri'
 import type { I18n, Lang } from './i18n'
 import type { ModelProvider, ProviderRequestConfig } from '../api/tauri'
 
-const RETENTION_OPTIONS = ['short', 'long'] as const
+const RETENTION_OPTIONS: PromptCacheRetention[] = ['none', 'short', 'long']
 
 // 行的稳定标识。只在本组件内部用于 React key 与「动过没有」的记账，不落库。
 let uidCounter = 0
@@ -89,11 +90,9 @@ export function ProviderRequestPanel({
 
   const apiFormat = normalizeProviderApiFormat(provider.apiFormat)
   const isAnthropic = apiFormat === 'anthropic_messages'
-  // Anthropic 打 cache_control 断点，OpenAI Chat / Responses 发 prompt_cache_key 路由提示。
-  // Gemini 服务端隐式缓存、xAI 直接拒收 prompt_cache_key —— 两者都没有可发的字段。
+  // 三态 none|short|long（对齐 pi）。Gemini / xAI 无可发字段，选择器禁用。
   const cachingSupported = promptCachingSupported(provider.apiFormat)
-  // 未显式拨过开关时按协议给默认，与 Rust 的 prompt_caching_enabled 一致。
-  const cachingOn = config.promptCaching ?? promptCachingDefault(provider.apiFormat)
+  const retention = resolvePromptCacheRetention(config)
 
   const patch = (updates: Partial<ProviderRequestConfig>) =>
     onUpdateProvider(provider.id, { request: { ...config, ...updates } })
@@ -177,8 +176,7 @@ export function ProviderRequestPanel({
         />
       </SettingRow>
 
-      {/* 一直显示：藏起来会让人以为没做这个功能。不支持的协议置灰并说明原因，
-              和联网搜索「内置」选项在 Chat Completions 上置灰的处理一致。 */}
+      {/* 一直显示：藏起来会让人以为没做这个功能。不支持的协议置灰并说明原因。 */}
       <SettingRow
         label={t.promptCaching}
         description={
@@ -189,26 +187,24 @@ export function ProviderRequestPanel({
               : t.promptCachingHintOpenAI
         }
       >
-        <Toggle
-          ariaLabel={t.promptCaching}
-          checked={cachingSupported && cachingOn}
+        <Select
+          className="w-48"
+          value={cachingSupported ? retention : 'none'}
           disabled={!cachingSupported}
-          onChange={(promptCaching) => patch({ promptCaching })}
+          onChange={(promptCacheRetention) =>
+            patch({ promptCacheRetention, promptCaching: null })
+          }
+          options={RETENTION_OPTIONS.map((value) => ({
+            value,
+            label:
+              value === 'none'
+                ? t.promptCacheNone
+                : value === 'long'
+                  ? t.promptCacheLong
+                  : t.promptCacheShort,
+          }))}
         />
       </SettingRow>
-      {isAnthropic && cachingOn && (
-        <SettingRow label={t.promptCacheRetention}>
-          <Select
-            className="w-44"
-            value={config.promptCacheRetention === 'long' ? 'long' : 'short'}
-            onChange={(promptCacheRetention) => patch({ promptCacheRetention })}
-            options={RETENTION_OPTIONS.map((value) => ({
-              value,
-              label: value === 'long' ? t.promptCacheLong : t.promptCacheShort,
-            }))}
-          />
-        </SettingRow>
-      )}
 
       {ua.value && (
         <div className="mt-1 rounded-lg bg-black/[0.03] px-3 py-2 dark:bg-white/[0.04]">

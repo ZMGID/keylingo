@@ -72,6 +72,16 @@ import {
   type NativeCliAgentId,
   type PiThinkingLevel,
 } from './cliNativeProviderConfigs'
+import {
+  buildGrokConfigToml,
+  GROK_API_BACKENDS,
+  initialGrokToml,
+  parseGrokConfigToml,
+  setGrokStructuredFields,
+  validateGrokConfigToml,
+  type GrokApiBackend,
+  type GrokProviderFields,
+} from './cliGrokPresets'
 
 function isPositiveInteger(value: string): boolean {
   return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0
@@ -206,6 +216,7 @@ function initialClaudeEnv(initial?: ExternalCliProvider | null): EnvPair[] {
  * 供应商编辑弹窗。**按 CLI 分形态**，因为各 CLI 接第三方的机制根本不同：
  * - claude：预设 + 结构化字段 + JSON / 原始 env
  * - codex：预设 + config.toml / auth.json（物化成私有 CODEX_HOME）
+ * - grok：结构化字段 + config.toml（合并进 ~/.grok/config.toml，与 cc-switch 同通道）
  * - opencode / pi：原生 provider / auth / default model 配置
  * - 其余：手填环境变量
  */
@@ -227,17 +238,21 @@ export function CliProviderModal({
   const t = i18n[lang]
   const isCodex = agentId === 'codex'
   const isClaude = agentId === 'claude'
+  const isGrok = agentId === 'grok'
   const isOpenCode = agentId === 'opencode'
   const isPi = agentId === 'pi'
   const isNative = isOpenCode || isPi
   const nativeAgentId: NativeCliAgentId = isPi ? 'pi' : 'opencode'
   const codexInitial = isCodex ? initialCodexTomlAuth(initial) : null
+  const grokInitialToml = isGrok ? initialGrokToml(initial) : ''
   const [name, setName] = useState(initial?.name ?? '')
   const [remark, setRemark] = useState(initial?.remark ?? '')
   const [env, setEnv] = useState<EnvPair[]>(() =>
     isClaude ? initialClaudeEnv(initial) : (initial?.env ?? []),
   )
-  const [configToml, setConfigToml] = useState(codexInitial?.configToml ?? initial?.configToml ?? '')
+  const [configToml, setConfigToml] = useState(
+    codexInitial?.configToml ?? (isGrok ? grokInitialToml : initial?.configToml ?? ''),
+  )
   const [authJson, setAuthJson] = useState(codexInitial?.authJson ?? initial?.authJson ?? '')
   const [nativeForm, setNativeForm] = useState(() =>
     readNativeCliProvider(nativeAgentId, isNative ? initial : null),
@@ -248,6 +263,7 @@ export function CliProviderModal({
   const [fetchedModels, setFetchedModels] = useState<string[]>([])
   const [fetching, setFetching] = useState(false)
   const [fetchNote, setFetchNote] = useState('')
+  const [showGrokAdvanced, setShowGrokAdvanced] = useState(false)
   // null = 跟着上面的字段实时生成；非 null = 用户正在直接编辑这段 JSON。
   const [jsonDraft, setJsonDraft] = useState<string | null>(null)
   const [jsonError, setJsonError] = useState('')
@@ -408,6 +424,10 @@ export function CliProviderModal({
     }
   }
 
+  const patchGrokFields = (patch: Partial<GrokProviderFields>) => {
+    setConfigToml((prev) => setGrokStructuredFields(prev, patch))
+  }
+
   const formatAuthJson = () => {
     try {
       const parsed = JSON.parse(authJson)
@@ -421,10 +441,23 @@ export function CliProviderModal({
   const codexBaseUrl = isCodex ? extractCodexBaseUrl(configToml) : ''
   const codexModel = isCodex ? (extractCodexModel(configToml) || 'gpt-5.5') : ''
   const codexApiKey = isCodex ? extractOpenAiApiKey(authJson) : ''
+  const grokFields = isGrok ? parseGrokConfigToml(configToml) : null
 
   const fetchModels = async () => {
-    const url = isCodex ? codexBaseUrl : isNative ? nativeForm.baseUrl : baseUrl
-    const key = isCodex ? codexApiKey : isNative ? nativeForm.apiKey : readClaudeApiKey(env)
+    const url = isCodex
+      ? codexBaseUrl
+      : isGrok
+        ? (grokFields?.baseUrl ?? '')
+        : isNative
+          ? nativeForm.baseUrl
+          : baseUrl
+    const key = isCodex
+      ? codexApiKey
+      : isGrok
+        ? (grokFields?.apiKey ?? '')
+        : isNative
+          ? nativeForm.apiKey
+          : readClaudeApiKey(env)
     setFetching(true)
     setFetchNote('')
     try {
@@ -514,6 +547,38 @@ export function CliProviderModal({
         env: [],
         configToml: configToml,
         authJson: authJson.trim(),
+      })
+      return
+    }
+    if (isGrok) {
+      const fields = parseGrokConfigToml(configToml)
+      if (!fields.baseUrl.trim()) {
+        setError(t.externalAgentsProviderUrlRequired)
+        return
+      }
+      if (!fields.apiKey.trim()) {
+        setError(t.externalAgentsProviderKeyRequired)
+        return
+      }
+      if (!fields.model.trim()) {
+        setError(t.externalAgentsGrokModelRequired)
+        return
+      }
+      // 结构化表单可能改过字段但 configToml 还是旧的高级区草稿——以当前 parse 结果重建一份干净片段再存。
+      // 若用户在高级区保留了 marketplace 等段，setGrokStructuredFields 会保住它们。
+      const normalized = setGrokStructuredFields(configToml, fields)
+      const tomlErr = validateGrokConfigToml(normalized)
+      if (tomlErr) {
+        setError(t.externalAgentsGrokTomlInvalid)
+        return
+      }
+      onSave({
+        id: initial?.id || `p-${Date.now().toString(36)}`,
+        name: name.trim(),
+        remark: remark.trim(),
+        env: [],
+        configToml: normalized,
+        authJson: '',
       })
       return
     }
@@ -923,6 +988,177 @@ export function CliProviderModal({
         )}
       </div>
     </>
+  )
+
+  const grokBody = (
+    <div className="kv-native-provider-form">
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeIdentitySection}</h4>
+        </div>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderName} required />
+            <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderRemark} />
+            <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+          </div>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <div>
+            <h4>{t.externalAgentsNativeConnectionSection}</h4>
+            <p>{t.externalAgentsGrokConnectionHint}</p>
+          </div>
+        </div>
+        <div className="kv-form-stack">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiUrl} required />
+            <Input
+              value={grokFields?.baseUrl ?? ''}
+              onChange={(value) => patchGrokFields({ baseUrl: value })}
+              mono
+              placeholder="https://api.example.com/v1"
+            />
+          </div>
+          <div className="kv-form-grid">
+            <div className="kv-form-block">
+              <FieldLabel text={t.externalAgentsProviderApiKey} required />
+              <div className="kv-key-field">
+                <Input
+                  value={grokFields?.apiKey ?? ''}
+                  onChange={(value) => patchGrokFields({ apiKey: value })}
+                  type={showKey ? 'text' : 'password'}
+                  mono
+                  placeholder="sk-…"
+                />
+                <IconButton
+                  size="sm"
+                  label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
+                  onClick={() => setShowKey((prev) => !prev)}
+                >
+                  {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </IconButton>
+              </div>
+            </div>
+            <div className="kv-form-block">
+              <FieldLabel text={t.externalAgentsGrokApiBackend} />
+              <Select
+                value={grokFields?.apiBackend ?? 'responses'}
+                onChange={(value) => patchGrokFields({ apiBackend: value as GrokApiBackend })}
+                options={GROK_API_BACKENDS.map((backend) => ({
+                  value: backend,
+                  label: backend === 'chat_completions'
+                    ? t.externalAgentsGrokBackendChat
+                    : backend === 'responses'
+                      ? t.externalAgentsGrokBackendResponses
+                      : t.externalAgentsGrokBackendMessages,
+                }))}
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head kv-native-section-head--actions">
+          <div>
+            <h4>{t.externalAgentsNativeModels}</h4>
+            {fetchNote && (
+              <p
+                className={
+                  fetchedModels.length === 0 && fetchNote !== t.externalAgentsProviderModelsEmpty
+                    ? 'kv-form-error-inline'
+                    : undefined
+                }
+              >
+                {fetchNote}
+              </p>
+            )}
+          </div>
+          <Button
+            size="sm"
+            onClick={() => void fetchModels()}
+            disabled={fetching || !(grokFields?.baseUrl ?? '').trim()}
+          >
+            <RefreshCw size={12} className={fetching ? 'animate-spin' : ''} />
+            {fetching ? t.externalAgentsProviderFetchingModels : t.externalAgentsProviderFetchModels}
+          </Button>
+        </div>
+        <div className="kv-form-stack">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsCodexDefaultModel} required />
+            <SuggestInput
+              value={grokFields?.model ?? ''}
+              onChange={(value) => patchGrokFields({ model: value })}
+              options={modelSelectOptions}
+              placeholder="grok-4.5"
+              mono
+              ariaLabel={t.externalAgentsCodexDefaultModel}
+            />
+          </div>
+          <div className="kv-form-grid">
+            <div className="kv-form-block">
+              <FieldLabel text={t.externalAgentsGrokDisplayName} />
+              <Input
+                value={grokFields?.displayName ?? ''}
+                onChange={(value) => patchGrokFields({ displayName: value })}
+                placeholder={t.externalAgentsGrokDisplayNameHint}
+              />
+            </div>
+            <div className="kv-form-block">
+              <FieldLabel text={t.externalAgentsGrokContextWindow} />
+              <Input
+                value={grokFields?.contextWindow ?? ''}
+                onChange={(value) => patchGrokFields({ contextWindow: value.replace(/[^\d]/g, '') })}
+                mono
+                placeholder="500000"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div className="kv-native-provider-advanced">
+        <button
+          type="button"
+          className="kv-disclosure"
+          onClick={() => setShowGrokAdvanced((prev) => !prev)}
+          aria-expanded={showGrokAdvanced}
+          data-tauri-drag-region="false"
+        >
+          <span className={`kv-disclosure-caret ${showGrokAdvanced ? 'open' : ''}`} />
+          {t.externalAgentsGrokAdvanced}
+        </button>
+        {showGrokAdvanced && (
+          <div className="kv-native-provider-advanced-body">
+            <p className="kv-row-desc kv-form-stack-note">{t.externalAgentsGrokWriteHint}</p>
+            <div className="kv-form-block">
+              <div className="kv-field-row">
+                <FieldLabel text="config.toml" />
+                <Button
+                  size="sm"
+                  onClick={() => setConfigToml(buildGrokConfigToml(parseGrokConfigToml(configToml)))}
+                >
+                  {t.externalAgentsGrokRebuildToml}
+                </Button>
+              </div>
+              <TextArea
+                value={configToml}
+                onChange={setConfigToml}
+                rows={10}
+                mono
+              />
+              <p className="kv-row-desc">{t.externalAgentsGrokTomlHint}</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   )
 
   const nativeBody = (
@@ -1376,7 +1612,7 @@ export function CliProviderModal({
       data-tauri-drag-region="false"
     >
       <div
-        className={`kv kv-modal kv-provider-modal ${isClaude || isCodex || isNative ? 'kv-provider-modal--wide' : ''}`}
+        className={`kv kv-modal kv-provider-modal ${isClaude || isCodex || isGrok || isNative ? 'kv-provider-modal--wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -1394,6 +1630,8 @@ export function CliProviderModal({
             claudeBody
           ) : isCodex ? (
             codexBody
+          ) : isGrok ? (
+            grokBody
           ) : isNative ? (
             nativeBody
           ) : (

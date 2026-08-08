@@ -478,6 +478,9 @@ pub struct Conversation {
     pub updated_at: i64,
     #[serde(default)]
     pub pinned: bool,
+    /// 对话库归档：侧栏默认隐藏，对话库「归档」书架可见。旧文件缺字段 = false。
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub folder: Option<String>,
     #[serde(default)]
@@ -553,6 +556,9 @@ pub struct ConversationListItem {
     pub updated_at: i64,
     #[serde(default)]
     pub pinned: bool,
+    /// 对话库归档（与 Conversation.archived 同步进 index）。
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub folder: Option<String>,
     #[serde(default)]
@@ -739,6 +745,7 @@ impl From<&Conversation> for ConversationListItem {
             created_at: conv.created_at,
             updated_at: conv.updated_at,
             pinned: conv.pinned,
+            archived: conv.archived,
             folder: conv.folder.clone(),
             project_id: conv.project_id.clone(),
             set_id: conv.set_id.clone(),

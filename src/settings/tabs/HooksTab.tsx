@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Bot, Globe, MessageSquare, Pencil, Plus, RefreshCw, Terminal, Trash2, Wrench, Zap } from 'lucide-react'
 import { HOOK_EVENTS, type HookDef, type HookEvent } from '../../api/tauri'
 import { i18n, type I18n, type Lang } from '../i18n'
@@ -151,16 +152,21 @@ export function HooksTab({ lang, hooks, onChange }: {
         )}
       </SettingsGroup>
 
-      {/* 事件选择：新建时才出现，8 个事件一次看全（不再常驻一根侧栏） */}
-      {picking && (
+      {/* 事件选择：portal 全屏遮罩，避免只盖住内容区留下侧栏/顶栏亮着。 */}
+      {picking && createPortal(
         <div
-          className="kv-modal-backdrop"
+          className="kv-modal-backdrop kv-modal-backdrop--portal"
           data-tauri-drag-region="false"
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) setPicking(false)
           }}
         >
-          <div className="kv-modal max-w-lg space-y-3" role="dialog" aria-modal="true" aria-label={t.hooksPickEvent}>
+          <div
+            className="kv kv-modal max-w-lg space-y-3"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t.hooksPickEvent}
+          >
             <div>
               <h3 className="text-[14px] font-semibold">{t.hooksPickEvent}</h3>
               <p className="kv-row-desc">{t.hooksPickEventHint}</p>
@@ -202,7 +208,8 @@ export function HooksTab({ lang, hooks, onChange }: {
               <Button onClick={() => setPicking(false)} data-tauri-drag-region="false">{t.cancel}</Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {modal && (
@@ -216,9 +223,15 @@ export function HooksTab({ lang, hooks, onChange }: {
         />
       )}
 
-      {confirmDeleteId && (
-        <div className="kv-modal-backdrop" data-tauri-drag-region="false">
-          <div className="kv-modal space-y-3">
+      {confirmDeleteId && createPortal(
+        <div
+          className="kv-modal-backdrop kv-modal-backdrop--portal"
+          data-tauri-drag-region="false"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setConfirmDeleteId(null)
+          }}
+        >
+          <div className="kv kv-modal space-y-3">
             <h3 className="text-[14px] font-semibold">{t.hooksDeleteConfirm}</h3>
             <div className="flex justify-end gap-2 pt-1">
               <Button onClick={() => setConfirmDeleteId(null)} data-tauri-drag-region="false">{t.cancel}</Button>
@@ -234,7 +247,8 @@ export function HooksTab({ lang, hooks, onChange }: {
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   )

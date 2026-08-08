@@ -341,7 +341,7 @@ export function McpCenter() {
                 {id === 'installed' && userServers.length > 0 && (
                   <span className="ml-1.5 text-[11px] tabular-nums text-neutral-400">{userServers.length}</span>
                 )}
-                {view === id && <span className="chat-motion-tab-underline absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-[#C56646] dark:bg-[#E39A78]" />}
+                {view === id && <span className="chat-motion-tab-underline absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-[#2f6ff0] dark:bg-[#5c8df7]" />}
               </button>
             ))}
           </div>
@@ -410,7 +410,7 @@ export function McpCenter() {
                                         type="checkbox"
                                         checked={cliSelected.has(server.id)}
                                         onChange={() => toggleCliSelected(server.id)}
-                                        className="size-3.5 shrink-0 accent-[#C56646]"
+                                        className="size-3.5 shrink-0 accent-[#2f6ff0]"
                                       />
                                       <div className="min-w-0 flex-1">
                                         <div className="flex items-center gap-2">

@@ -53,9 +53,14 @@ pub(super) fn error_rejects_prompt_cache_key(err: &str) -> bool {
     err.contains("prompt_cache_key")
 }
 
+/// 判断错误是否点名拒绝 `prompt_cache_retention`（long 的 24h 字段）。
+pub(super) fn error_rejects_prompt_cache_retention(err: &str) -> bool {
+    err.contains("prompt_cache_retention")
+}
+
 impl OpenAiChatProvider<'_> {
-    /// 发送 chat 请求；若因严格端点拒绝 `prompt_cache_key` 而 400，自动去掉该字段重试一次，
-    /// 并把该 base_url 记入 state（本会话后续 `request_body` 就地跳过，不再触发 / 重试）。
+    /// 发送 chat 请求；若严格端点拒绝 `prompt_cache_key` / `prompt_cache_retention` 而 400，
+    /// 记入 state 后去掉对应字段重试一次（本会话后续 request_body 就地跳过）。
     async fn send_chat_body(
         &self,
         request: &GenerateRequest,
@@ -65,10 +70,21 @@ impl OpenAiChatProvider<'_> {
         let body = self.request_body(request, stream);
         let result = self.post_chat(request, &body, stream, label).await;
         if let Err(ref err) = result {
-            // 仅当本次确实发了 prompt_cache_key、且错误点名了它，才去掉重试（避免误伤别的 400）。
+            let mut learned = false;
+            // key 被拒：key 与 24h 一并消失（24h 只跟 key 一起发）。
             if body.get("prompt_cache_key").is_some() && error_rejects_prompt_cache_key(err) {
                 self.state
                     .mark_prompt_cache_key_unsupported(&self.provider.base_url);
+                learned = true;
+            } else if body.get("prompt_cache_retention").is_some()
+                && error_rejects_prompt_cache_retention(err)
+            {
+                // 只拒 24h：保留 key，停发 retention。
+                self.state
+                    .mark_prompt_cache_retention_unsupported(&self.provider.base_url);
+                learned = true;
+            }
+            if learned {
                 let retry_body = self.request_body(request, stream);
                 return self.post_chat(request, &retry_body, stream, label).await;
             }
@@ -524,14 +540,9 @@ impl OpenAiChatProvider<'_> {
             );
             body["tool_choice"] = Value::String("auto".to_string());
         }
-        // 会话级缓存键（对齐 opencode/AI SDK）：同一对话每轮同值，提升缓存路由命中。
-        // 只发 OpenAI 官方 snake_case 参数 `prompt_cache_key`——**不**发 AI SDK 风格的
-        // 驼峰 `promptCacheKey`：真实 OpenAI / Azure / 校验型代理对未知 body 字段会返回
-        // 400（"Unrecognized request argument"），这正是逼出原生 gemini 适配器的同类问题。
-        // 少数严格端点连 snake_case 也拒（NVIDIA NIM / 智谱 GLM）：首次 400 后由 stream/generate
-        // 自动去掉该字段重试并记入 state.prompt_cache_key_unsupported，本会话后续就地跳过。
-        // 开关关掉时不发这个字段：这就是 OpenAI 侧「prompt 缓存」的全部内容
-        // （官方按稳定前缀 + 该键做缓存路由），Anthropic 那边对应的是 cache_control 断点。
+        // Prompt 缓存 short/long：硬发 `prompt_cache_key`（会话 id）；none 不发。
+        // 严格端点 400 后学习停发。long → `prompt_cache_retention:24h`（对齐 pi，默认能力开）。
+        // 不发驼峰 `promptCacheKey`。Anthropic 走 cache_control，不经这里。
         if self.provider.prompt_caching_enabled()
             && !self
                 .state
@@ -544,6 +555,15 @@ impl OpenAiChatProvider<'_> {
                 .filter(|id| !id.is_empty())
             {
                 body["prompt_cache_key"] = Value::String(conversation_id.to_string());
+                if matches!(
+                    self.provider.cache_retention(),
+                    crate::settings::CacheRetention::Long
+                ) && !self
+                    .state
+                    .prompt_cache_retention_unsupported(&self.provider.base_url)
+                {
+                    body["prompt_cache_retention"] = Value::String("24h".to_string());
+                }
             }
         }
         // UI「Off」→ 显式关闭思考。省略字段在多家默认会落到 high（DeepSeek 文档：
@@ -1380,7 +1400,7 @@ mod tests {
     #[test]
     fn learned_unsupported_endpoint_skips_prompt_cache_key() {
         // 端点被记入 prompt_cache_key_unsupported 后，即便有会话 id 也不再发该字段；
-        // 未记入的端点照常发。这是自动重试学习后的"就地跳过"行为。
+        // 未记入的端点照常硬发。这是「默认开 + 400 自愈」学习后的就地跳过。
         let state =
             AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
         let make = |base_url: &str| {
@@ -1416,7 +1436,7 @@ mod tests {
             adapter.request_body(&request, false)
         };
 
-        // 未学习：正常发送。
+        // 未学习：中转站也硬发。
         assert_eq!(
             make("https://integrate.api.nvidia.com/v1")["prompt_cache_key"],
             "conv_abc"
@@ -1435,16 +1455,16 @@ mod tests {
 
     #[test]
     fn prompt_caching_toggle_gates_the_cache_key() {
-        // OpenAI 侧的「prompt 缓存」就是这个字段，关掉开关必须不发。默认是开的。
+        // retention=none 不发；short 发 key；long 发 key+24h（对齐 pi，不按主机降级）。
         let state =
             AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
-        let body_with = |caching: bool| {
+        let body_with = |base_url: &str, retention: &str| {
             let provider = ModelProvider {
                 id: "test".into(),
                 name: "Test".into(),
                 api_keys: vec!["sk-test".into()],
                 api_key_legacy: None,
-                base_url: "https://api.openai.com/v1".into(),
+                base_url: base_url.into(),
                 available_models: vec!["m".into()],
                 enabled_models: vec!["m".into()],
                 enabled: true,
@@ -1452,7 +1472,7 @@ mod tests {
                 model_overrides: Default::default(),
                 compress_request_body: false,
                 request: crate::settings::ProviderRequestConfig {
-                    prompt_caching: Some(caching),
+                    prompt_cache_retention: retention.into(),
                     ..Default::default()
                 },
             };
@@ -1475,10 +1495,24 @@ mod tests {
                 false,
             )
         };
-        assert_eq!(body_with(true)["prompt_cache_key"], "conv_abc");
-        assert!(body_with(false).get("prompt_cache_key").is_none());
-        // 老配置没有这个字段（None）时按协议给默认：OpenAI 系照旧发（行为不变），
-        // Anthropic 侧不打断点（净新增的线格式变化，不能悄悄替用户开）。
+        let short = body_with("https://api.openai.com/v1", "short");
+        assert_eq!(short["prompt_cache_key"], "conv_abc");
+        assert!(short.get("prompt_cache_retention").is_none());
+        assert!(body_with("https://api.openai.com/v1", "none")
+            .get("prompt_cache_key")
+            .is_none());
+        let long = body_with("https://api.openai.com/v1", "long");
+        assert_eq!(long["prompt_cache_key"], "conv_abc");
+        assert_eq!(long["prompt_cache_retention"], "24h");
+        let relay = body_with("https://api.deepseek.com/v1", "long");
+        assert_eq!(relay["prompt_cache_key"], "conv_abc");
+        assert_eq!(relay["prompt_cache_retention"], "24h");
+        // 学习停发 24h 后仍保留 key。
+        state.mark_prompt_cache_retention_unsupported("https://api.deepseek.com/v1");
+        let after = body_with("https://api.deepseek.com/v1", "long");
+        assert_eq!(after["prompt_cache_key"], "conv_abc");
+        assert!(after.get("prompt_cache_retention").is_none());
+        // 默认 short：OpenAI 与 Anthropic 均启用客户端缓存字段。
         let mut p = ModelProvider {
             id: "x".into(),
             name: "x".into(),
@@ -1493,12 +1527,10 @@ mod tests {
             compress_request_body: false,
             request: Default::default(),
         };
-        assert!(p.request.prompt_caching.is_none());
-        assert!(p.prompt_caching_enabled(), "OpenAI Chat 默认应为开");
-        p.api_format = "openai_responses".into();
-        assert!(p.prompt_caching_enabled(), "OpenAI Responses 默认应为开");
+        assert_eq!(p.request.prompt_cache_retention, "short");
+        assert!(p.prompt_caching_enabled());
         p.api_format = "anthropic_messages".into();
-        assert!(!p.prompt_caching_enabled(), "Anthropic 默认应为关");
+        assert!(p.prompt_caching_enabled(), "Anthropic 默认 short 也应启用");
     }
 
     #[test]

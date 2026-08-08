@@ -22,6 +22,11 @@ import { useT } from '../settings/i18n'
 interface PluginCenterProps {
   /** 让 Kivio AI 按规范文档安装：父级开新对话并发送 install brief */
   onRequestAiInstall?: (pluginId: string) => void | Promise<void>
+  /**
+   * `center`：整页中心（自带大标题）。
+   * `settings`：嵌在设置页内容区（标题由 SettingsShell pageMeta 提供）。
+   */
+  variant?: 'center' | 'settings'
 }
 
 type TabId = 'plaza' | 'installed'
@@ -215,8 +220,9 @@ function PluginCard({
 }
 
 /** 插件中心：检测状态 + 启用开关；安装交给 Kivio AI。 */
-export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
+export function PluginCenter({ onRequestAiInstall, variant = 'center' }: PluginCenterProps) {
   const t = useT()
+  const inSettings = variant === 'settings'
   const [tab, setTab] = useState<TabId>('plaza')
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [loading, setLoading] = useState(true)
@@ -361,108 +367,134 @@ export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
     return tab === 'plaza' ? plugins : installed
   }, [plugins, installed, tab])
 
+  const body = (
+    <>
+      {!inSettings && (
+        <div className="border-b border-neutral-200 pb-5 dark:border-neutral-800">
+          <div className="flex min-w-0 items-center gap-2">
+            <h1 className="flex items-center gap-2.5 text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
+              <Puzzle size={24} className="text-neutral-500" />
+              {t.chatNavPlugins}
+            </h1>
+            <IconButton size="lg" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
+              <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
+            </IconButton>
+          </div>
+          <p className="mt-3.5 max-w-2xl text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
+            {t.chatPluginIntroLead}{' '}
+            <strong className="font-medium text-neutral-700 dark:text-neutral-300">Kivio AI</strong>
+            {t.chatPluginIntroAiInstall}
+            <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginReadmeFirst}</strong>
+            {t.chatPluginIntroReadmeTail}
+            <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginEnable}</strong>
+            {t.chatPluginIntroTail}
+          </p>
+        </div>
+      )}
+
+      {inSettings && (
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <p className="max-w-2xl text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400">
+            {t.chatPluginIntroLead}{' '}
+            <strong className="font-medium text-neutral-700 dark:text-neutral-300">Kivio AI</strong>
+            {t.chatPluginIntroAiInstall}
+            <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginReadmeFirst}</strong>
+            {t.chatPluginIntroReadmeTail}
+            <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginEnable}</strong>
+            {t.chatPluginIntroTail}
+          </p>
+          <IconButton size="md" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
+            <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+          </IconButton>
+        </div>
+      )}
+
+      <div className={`${inSettings ? 'mt-1' : 'mt-6'} flex flex-wrap items-center gap-3`}>
+        <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-0.5 dark:bg-neutral-800/80">
+          {(
+            [
+              ['plaza', t.chatPluginPlaza, plugins.length],
+              ['installed', t.chatPluginDetectedTab, installed.length],
+            ] as const
+          ).map(([id, label, count]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              className={`rounded-md px-3 py-1.5 text-[13px] transition-colors ${
+                tab === id
+                  ? 'bg-white font-medium text-neutral-900 shadow-sm dark:bg-neutral-900 dark:text-neutral-50'
+                  : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200'
+              }`}
+            >
+              {label}
+              <span className="ml-1.5 text-neutral-400">{count}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-dashed border-neutral-200 bg-neutral-50/80 px-4 py-3 text-[12.5px] leading-relaxed text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-400">
+        <span className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginFlowLabel}</span>
+        {t.chatPluginFlowDesc}
+      </div>
+
+      {error && (
+        <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          {error}
+        </div>
+      )}
+      {statusMsg && !error && (
+        <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-[13px] text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
+          {statusMsg}
+        </div>
+      )}
+
+      {loading && plugins.length === 0 ? (
+        <div className="mt-6 grid gap-4">
+          {Array.from({ length: 2 }, (_, i) => (
+            <div key={i} className="rounded-xl border border-neutral-200/80 p-5 dark:border-neutral-700/70">
+              <div className="kv-skeleton h-4 w-1/4 rounded" />
+              <div className="kv-skeleton mt-2.5 h-3 w-3/4 rounded" />
+              <div className="kv-skeleton mt-3 h-7 w-40 rounded" />
+            </div>
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className={`${inSettings ? 'mt-10' : 'mt-16'} flex flex-col items-center justify-center text-center`}>
+          <div className="flex h-14 w-14 items-center justify-center rounded-md bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500">
+            <Puzzle size={28} strokeWidth={1.5} />
+          </div>
+          <p className="mt-4 text-[15px] font-medium text-neutral-700 dark:text-neutral-200">
+            {tab === 'installed' ? t.chatPluginEmptyInstalled : t.chatPluginEmptyNoMatch}
+          </p>
+        </div>
+      ) : (
+        <div key={tab} className="chat-motion-tab-in mt-6 grid gap-4">
+          {filtered.map((plugin) => (
+            <PluginCard
+              key={plugin.id}
+              plugin={plugin}
+              busy={busyId === plugin.id}
+              installBusy={installBusyId === plugin.id}
+              onAiInstall={(id) => void handleAiInstall(id)}
+              onToggleEnabled={(id, enabled) => void handleToggle(id, enabled)}
+              onUninstall={(id) => void handleUninstall(id)}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  )
+
+  if (inSettings) {
+    return <div className="min-w-0 text-neutral-900 dark:text-neutral-100">{body}</div>
+  }
+
   return (
     <div className="assistant-center-root flex h-full min-h-0 flex-col text-neutral-900 dark:text-neutral-100">
-
       <main className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-[1040px] px-9 pb-10 pt-7">
-          <div className="border-b border-neutral-200 pb-5 dark:border-neutral-800">
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="flex items-center gap-2.5 text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
-                <Puzzle size={24} className="text-neutral-500" />
-                {t.chatNavPlugins}
-              </h1>
-              <IconButton size="lg" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
-                <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
-              </IconButton>
-            </div>
-            <p className="mt-3.5 max-w-2xl text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-              {t.chatPluginIntroLead}{' '}
-              <strong className="font-medium text-neutral-700 dark:text-neutral-300">Kivio AI</strong>
-              {t.chatPluginIntroAiInstall}
-              <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginReadmeFirst}</strong>
-              {t.chatPluginIntroReadmeTail}
-              <strong className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginEnable}</strong>
-              {t.chatPluginIntroTail}
-            </p>
-          </div>
-
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-0.5 dark:bg-neutral-800/80">
-              {(
-                [
-                  ['plaza', t.chatPluginPlaza, plugins.length],
-                  ['installed', t.chatPluginDetectedTab, installed.length],
-                ] as const
-              ).map(([id, label, count]) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setTab(id)}
-                  className={`rounded-md px-3 py-1.5 text-[13px] transition-colors ${
-                    tab === id
-                      ? 'bg-white font-medium text-neutral-900 shadow-sm dark:bg-neutral-900 dark:text-neutral-50'
-                      : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200'
-                  }`}
-                >
-                  {label}
-                  <span className="ml-1.5 text-neutral-400">{count}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-md border border-dashed border-neutral-200 bg-neutral-50/80 px-4 py-3 text-[12.5px] leading-relaxed text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-400">
-            <span className="font-medium text-neutral-700 dark:text-neutral-300">{t.chatPluginFlowLabel}</span>
-            {t.chatPluginFlowDesc}
-          </div>
-
-          {error && (
-            <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
-              {error}
-            </div>
-          )}
-          {statusMsg && !error && (
-            <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-[13px] text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
-              {statusMsg}
-            </div>
-          )}
-
-          {loading && plugins.length === 0 ? (
-            <div className="mt-6 grid gap-4">
-              {Array.from({ length: 2 }, (_, i) => (
-                <div key={i} className="rounded-xl border border-neutral-200/80 p-5 dark:border-neutral-700/70">
-                  <div className="kv-skeleton h-4 w-1/4 rounded" />
-                  <div className="kv-skeleton mt-2.5 h-3 w-3/4 rounded" />
-                  <div className="kv-skeleton mt-3 h-7 w-40 rounded" />
-                </div>
-              ))}
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="mt-16 flex flex-col items-center justify-center text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-md bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500">
-                <Puzzle size={28} strokeWidth={1.5} />
-              </div>
-              <p className="mt-4 text-[15px] font-medium text-neutral-700 dark:text-neutral-200">
-                {tab === 'installed' ? t.chatPluginEmptyInstalled : t.chatPluginEmptyNoMatch}
-              </p>
-            </div>
-          ) : (
-            <div key={tab} className="chat-motion-tab-in mt-6 grid gap-4">
-              {filtered.map((plugin) => (
-                <PluginCard
-                  key={plugin.id}
-                  plugin={plugin}
-                  busy={busyId === plugin.id}
-                  installBusy={installBusyId === plugin.id}
-                  onAiInstall={(id) => void handleAiInstall(id)}
-                  onToggleEnabled={(id, enabled) => void handleToggle(id, enabled)}
-                  onUninstall={(id) => void handleUninstall(id)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        <div className="mx-auto w-full max-w-[1040px] px-9 pb-10 pt-7">{body}</div>
       </main>
     </div>
   )

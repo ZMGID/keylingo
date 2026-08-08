@@ -1765,7 +1765,7 @@ export function InputBar({
           data-chat-composer="true"
           className={`chat-composer-shell relative select-none ${modeMenuOpen ? 'z-30' : 'z-10'} rounded-xl border px-3 py-2 transition-[box-shadow,border-color] duration-[var(--kv-dur-normal)] ease-[var(--kv-ease-out)] ${
             dragActive
-              ? 'border-[#e8a090] shadow-[0_2px_12px_rgba(0,0,0,0.06)] ring-2 ring-[#e8a090]/25 dark:border-[#e8a090] dark:shadow-none'
+              ? 'border-[#5c8df7] shadow-[0_2px_12px_rgba(0,0,0,0.06)] ring-2 ring-[#5c8df7]/25 dark:border-[#5c8df7] dark:shadow-none'
               : agentPlanActive
                 ? 'border-emerald-500 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_10px_-4px_rgba(0,0,0,0.06),0_12px_32px_-14px_rgba(0,0,0,0.14)] focus-within:border-emerald-500 focus-within:shadow-[0_1px_3px_rgba(0,0,0,0.05),0_6px_14px_-6px_rgba(0,0,0,0.07),0_18px_44px_-16px_rgba(16,185,129,0.22)] dark:border-emerald-400 dark:shadow-none dark:focus-within:border-emerald-400'
                 : agentOrchestrateActive
@@ -1774,7 +1774,7 @@ export function InputBar({
           }`}
         >
           {dragActive && (
-            <div className="chat-motion-fade-up mb-2 rounded-2xl border border-dashed border-[#e8a090]/70 bg-[#e8a090]/10 px-3 py-2 text-center text-[13px] font-medium text-[#a35f51] dark:text-[#f1b4a7]">
+            <div className="chat-motion-fade-up mb-2 rounded-2xl border border-dashed border-[#5c8df7]/70 bg-[#5c8df7]/10 px-3 py-2 text-center text-[13px] font-medium text-[#2960d8] dark:text-[#9bb8fa]">
               {t.chatDropToAttach}
             </div>
           )}

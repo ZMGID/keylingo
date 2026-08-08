@@ -49,11 +49,13 @@ pub struct ProviderRequestConfig {
     pub custom_headers: Vec<ProviderCustomHeader>,
     /// 是否跟随系统代理。默认 true —— 与加这个开关之前的行为一致；关掉才走直连。
     pub use_system_proxy: bool,
-    /// prompt 缓存。`None` = 跟随协议默认（见 `prompt_caching_enabled`），用户显式拨过才是
-    /// `Some`。之所以不是裸 `bool`：两条协议的安全默认不同，而裸 bool 分不清「用户选了 true」
-    /// 和「serde 填的 true」。
+    /// 遗留 on/off。sanitize 时迁移进 `prompt_cache_retention` 后清空，新配置不再写入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_caching: Option<bool>,
-    /// 缓存时长档位：`short`（默认 5 分钟）| `long`（1 小时，需 beta 头）。仅 Anthropic。
+    /// Prompt 缓存策略（对齐 pi `CacheRetention`）：
+    /// - `none`：不发客户端缓存字段
+    /// - `short`（默认）：OpenAI 发 `prompt_cache_key`；Anthropic 打 ephemeral 断点
+    /// - `long`：在 short 上叠加长保留（Anthropic `ttl:1h` / OpenAI `prompt_cache_retention:24h`）
     pub prompt_cache_retention: String,
     /// CLI 身份伪装：`""` 关闭 | `claude_code` | `codex` | `grok`。
     pub cli_identity: String,
@@ -164,24 +166,41 @@ impl ModelProvider {
         ProviderApiFormat::from_raw(&self.api_format)
     }
 
-    /// 该供应商本次是否启用 prompt 缓存。用户没拨过开关时按协议给默认，取值原则是
-    /// **「不改变加这个开关之前的行为」**：
-    ///
-    /// - OpenAI Chat / Responses：默认**开**。`prompt_cache_key` 本来就一直在发，
-    ///   默认关反而是静默削弱现状。
-    /// - Anthropic：默认**关**。断点是净新增的线格式变化（`system` 从字符串变块数组、
-    ///   tools 与末条消息各加 `cache_control`），而这条路没有 `prompt_cache_key` 那种
-    ///   「被拒就学会并重试」的自愈。第三方 Anthropic 兼容网关严格的直接 400，宽松的
-    ///   把块数组读成空 —— 后者会让系统提示词静默丢失，用户只看到模型突然变笨。
-    ///   想省钱的人自己去二级页打开。
-    /// - Gemini：没有可发的字段，取值无意义。
+    /// Prompt 缓存策略。非法/空串视为 `short`（与 sanitize 一致）。
+    pub fn cache_retention(&self) -> CacheRetention {
+        CacheRetention::parse(&self.request.prompt_cache_retention)
+    }
+
+    /// 是否发送客户端缓存字段（`retention != none`）。
+    /// Gemini / xAI 适配器本身不发字段；此处只表示用户策略。
     pub fn prompt_caching_enabled(&self) -> bool {
-        self.request
-            .prompt_caching
-            .unwrap_or(match self.api_format_kind() {
-                ProviderApiFormat::AnthropicMessages => false,
-                _ => true,
-            })
+        !matches!(self.cache_retention(), CacheRetention::None)
+    }
+}
+
+/// 对齐 pi：`none | short | long`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheRetention {
+    None,
+    Short,
+    Long,
+}
+
+impl CacheRetention {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "none" => Self::None,
+            "long" => Self::Long,
+            _ => Self::Short,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Short => "short",
+            Self::Long => "long",
+        }
     }
 }
 
@@ -644,6 +663,7 @@ pub struct ExternalCliAgentConfig {
 /// 一个第三方供应商（中转站）。**各 CLI 用到的字段不同**：
 /// - claude / gemini / 其余 env 系：只用 `env`（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` …）
 /// - codex：只用 `config_toml` / `auth_json`，物化成一个私有 `CODEX_HOME`
+/// - grok：只用 `config_toml`，把其中的 `[models]` / `[model.*]` 合并进 `~/.grok/config.toml`
 /// - opencode / pi：用 `config_json` / `auth_json` / `default_model` 合并进 CLI 原生全局配置
 /// - pi：另用 `default_reasoning` 写入 `settings.json.defaultThinkingLevel`
 ///
@@ -656,7 +676,7 @@ pub struct ExternalCliProvider {
     pub name: String,
     pub remark: String,
     pub env: Vec<CliEnvVar>,
-    /// 仅 codex：私有 CODEX_HOME 里 config.toml 的全文。
+    /// codex：私有 CODEX_HOME 里 config.toml 的全文；grok：写入原生 `~/.grok/config.toml` 的片段（至少含 models / model）。
     pub config_toml: String,
     /// opencode / pi：单个原生 provider 对象的 JSON（不含 provider id 外层）。
     pub config_json: String,
@@ -1998,10 +2018,21 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             .request
             .custom_headers
             .retain(crate::provider_request::is_usable_header);
-        if !matches!(
+        // Prompt 缓存：合法 none|short|long 优先；旧 bool 仅在 retention 缺失/非法时迁移。
+        let retention_ok = matches!(
             provider.request.prompt_cache_retention.as_str(),
-            "short" | "long"
-        ) {
+            "none" | "short" | "long"
+        );
+        if let Some(enabled) = provider.request.prompt_caching.take() {
+            if !retention_ok {
+                provider.request.prompt_cache_retention = if enabled {
+                    "short".to_string()
+                } else {
+                    "none".to_string()
+                };
+            }
+            // retention 已合法：保留用户/新字段，只丢掉遗留 bool。
+        } else if !retention_ok {
             provider.request.prompt_cache_retention = "short".to_string();
         }
         if !matches!(
@@ -2643,11 +2674,11 @@ pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), Stri
     // CODEX_HOME）必须与设置同生共死。放在这里而不是让前端保存后再调一个命令，是因为
     // 前端只要漏调一次，用户就会得到「选了供应商但没生效」——而这种 bug 完全不报错。
     crate::external_agents::provider_profile::materialize_all();
-    // 供应商可能变了：模型列表（300s）与可用性（600s）两个探测缓存都得作废，
-    // 否则切完供应商还在拿上一个中转站的模型和版本号。设置保存本来就不频繁，无条件清即可。
-    {
-        use tauri::Manager;
-        let state = app.state::<crate::state::AppState>();
+    // 供应商可能变了：模型列表（300s）与可用性（600s）两个探测缓存都得作废。
+    // 首次启动的内置专家迁移会在 AppState manage 之前保存设置，此时还没有缓存可清；
+    // 必须用 try_state，否则新装用户会在启动期 panic。
+    use tauri::Manager;
+    if let Some(state) = app.try_state::<crate::state::AppState>() {
         state.clear_all_external_agent_models_cache();
         state.clear_detected_agents_cache();
     }
@@ -3462,6 +3493,51 @@ mod tests {
 
         assert!(!settings.chat_tools.native_tools.run_command);
         assert_eq!(settings.chat_tools.approval_policy, "always_confirm");
+    }
+
+    #[test]
+    fn sanitize_settings_migrates_prompt_cache_retention() {
+        let mut settings = Settings::default();
+        settings.providers = vec![ModelProvider {
+            id: "p1".into(),
+            name: "P".into(),
+            api_keys: vec!["k".into()],
+            api_key_legacy: None,
+            base_url: "https://api.openai.com/v1".into(),
+            available_models: vec![],
+            enabled_models: vec![],
+            enabled: true,
+            api_format: "openai_chat".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: ProviderRequestConfig {
+                prompt_caching: Some(false),
+                prompt_cache_retention: "garbage".into(),
+                ..Default::default()
+            },
+        }];
+        // 非法 retention + bool false → none
+        let s = sanitize_settings(settings.clone());
+        assert_eq!(s.providers[0].request.prompt_cache_retention, "none");
+        assert!(s.providers[0].request.prompt_caching.is_none());
+
+        // 合法 retention 优先：false + long → 保留 long
+        settings.providers[0].request.prompt_caching = Some(false);
+        settings.providers[0].request.prompt_cache_retention = "long".into();
+        let s = sanitize_settings(settings.clone());
+        assert_eq!(s.providers[0].request.prompt_cache_retention, "long");
+
+        // true + 非法 → short
+        settings.providers[0].request.prompt_caching = Some(true);
+        settings.providers[0].request.prompt_cache_retention = "???".into();
+        let s = sanitize_settings(settings.clone());
+        assert_eq!(s.providers[0].request.prompt_cache_retention, "short");
+
+        // 无 bool、非法 → short
+        settings.providers[0].request.prompt_caching = None;
+        settings.providers[0].request.prompt_cache_retention = "".into();
+        let s = sanitize_settings(settings);
+        assert_eq!(s.providers[0].request.prompt_cache_retention, "short");
     }
 
     #[test]

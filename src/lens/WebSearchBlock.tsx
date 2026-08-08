@@ -61,7 +61,7 @@ export function WebSearchBlock({
         ) : search.status === 'error' ? (
           <AlertCircle className="shrink-0 text-red-500" size={12} strokeWidth={1.9} />
         ) : results.length > 0 ? (
-          <CheckCircle2 className="shrink-0 text-[#C56646] dark:text-[#E39A78]" size={12} strokeWidth={1.9} />
+          <CheckCircle2 className="shrink-0 text-[#2f6ff0] dark:text-[#5c8df7]" size={12} strokeWidth={1.9} />
         ) : (
           <Search className="shrink-0" size={12} strokeWidth={1.85} />
         )}
@@ -95,7 +95,7 @@ export function WebSearchBlock({
                   className="group block w-full min-w-0 text-left rounded-md py-1 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
                 >
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="shrink-0 w-4 text-[10.5px] font-medium tabular-nums text-[#C56646] dark:text-[#E39A78]">
+                    <span className="shrink-0 w-4 text-[10.5px] font-medium tabular-nums text-[#2f6ff0] dark:text-[#5c8df7]">
                       {idx + 1}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-neutral-700 dark:text-neutral-200">

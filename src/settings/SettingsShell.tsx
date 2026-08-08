@@ -29,8 +29,9 @@ import {
 import { i18n } from './i18n'
 import {
   GeneralIcon, HotkeysIcon, TranslateIcon, LensIcon, ChatIcon, MemoryIcon, MixerIcon,
-  AgentIcon, WebSearchIcon, ConnectorsIcon, UsageIcon, ProvidersIcon, AboutIcon, HooksIcon,
+  AgentIcon, WebSearchIcon, ConnectorsIcon, PluginsIcon, UsageIcon, ProvidersIcon, AboutIcon, HooksIcon,
 } from './NavIcons'
+import { PluginCenter } from '../chat/PluginCenter'
 import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, stableStringify } from './utils'
 import { type ProviderPreset } from './providerPresets'
 import { ProviderModelsPicker } from './ProviderModelsPicker'
@@ -66,7 +67,7 @@ import { ConnectorsPanel } from './ConnectorsPanel'
 import { WebSearchPanel } from './WebSearchPanel'
 import { defaultChatTools } from './chatToolsShared'
 
-export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'hooks' | 'webSearch' | 'connectors' | 'usage' | 'providers' | 'about'
+export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'hooks' | 'webSearch' | 'connectors' | 'plugins' | 'usage' | 'providers' | 'about'
 
 type SettingsData = SettingsType
 // UI 字号：以 px 展示、以整体缩放（zoom）实现。CSS 全是 px 硬编码，做不了真正的 rem 基准字号，
@@ -83,6 +84,8 @@ export interface SettingsShellProps {
   initialTab?: SettingsTab
   /** embedded 单页模式：隐藏左侧设置导航，只显示 initialTab 对应页（如从扩展点「知识库」进入） */
   hideNav?: boolean
+  /** 插件页「让 AI 安装」：由 Chat 宿主开新对话并发送 install brief */
+  onRequestPluginAiInstall?: (pluginId: string) => void | Promise<void>
 }
 
 export interface SettingsShellHandle {
@@ -221,7 +224,7 @@ function resolveDefaultModelsAfterModelRemoval(
  * 设置面板主组件（standalone / embedded 双宿主）
  */
 export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>(function SettingsShell(
-  { variant, onClose, onSettingsChange, onReady, reserveTrafficLightSpace = false, initialTab, hideNav = false },
+  { variant, onClose, onSettingsChange, onReady, reserveTrafficLightSpace = false, initialTab, hideNav = false, onRequestPluginAiInstall },
   ref,
 ) {
   const [settings, setSettings] = useState<SettingsData | null>(null)
@@ -1685,6 +1688,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     { id: 'externalAgents' as const, label: t.tabExternalAgents, icon: AgentIcon },
     { id: 'hooks' as const, label: t.tabHooks, icon: HooksIcon },
     { id: 'connectors' as const, label: t.tabConnectors, icon: ConnectorsIcon },
+    { id: 'plugins' as const, label: t.tabPlugins, icon: PluginsIcon },
     { id: 'webSearch' as const, label: t.tabWebSearch, icon: WebSearchIcon },
     { id: 'usage' as const, label: lang === 'zh' ? '用量统计' : 'Usage', icon: UsageIcon },
     // 关于固定在分类列表最末
@@ -1740,6 +1744,12 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       subtitle: lang === 'zh'
         ? '连接外部数据源；凭据存本机。'
         : 'Connect external data sources; credentials stay local.',
+    },
+    plugins: {
+      title: t.tabPlugins,
+      subtitle: lang === 'zh'
+        ? '检测本机能力插件（如 officecli）；启用后自动注入 Skill / MCP。'
+        : 'Detect local capability plugins (e.g. officecli); enable to inject Skills / MCP.',
     },
     webSearch: {
       title: t.tabWebSearch,
@@ -2093,6 +2103,14 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                     return null
                   }
                 }}
+              />
+            )}
+
+            {/* ===== 插件标签页（原扩展 → 插件） ===== */}
+            {activeTab === 'plugins' && (
+              <PluginCenter
+                variant="settings"
+                onRequestAiInstall={onRequestPluginAiInstall}
               />
             )}
 

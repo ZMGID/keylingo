@@ -12,6 +12,8 @@ import type {
   ChatSet,
   Conversation,
   ConversationContextState,
+  ConversationLibraryPage,
+  ConversationLibraryQuery,
   ConversationListItem,
   AgentPlanMode,
   DetectedExternalAgent,
@@ -981,6 +983,71 @@ export const chatApi = {
     return result.success ? result.conversations : []
   },
 
+  /** 对话库统一查询（筛选 / 排序 / 分页 + total） */
+  async queryConversations(query: ConversationLibraryQuery = {}): Promise<ConversationLibraryPage> {
+    if (!isTauriRuntime()) {
+      const all = await mockChatApi.getConversations(0, 500)
+      return { items: all.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 80)), total: all.length }
+    }
+    const result = await invoke<{ success: boolean; items: ConversationListItem[]; total: number }>(
+      'chat_query_conversations',
+      {
+        offset: query.offset ?? 0,
+        limit: query.limit ?? 80,
+        sort: query.sort ?? 'updated',
+        order: query.order ?? 'desc',
+        q: query.q ?? null,
+        fullText: query.fullText ?? true,
+        shelf: query.shelf ?? 'all',
+        projectId: query.projectId ?? null,
+        setId: query.setId ?? null,
+        assistantId: query.assistantId ?? null,
+        providerId: query.providerId ?? null,
+        runtimeKind: query.runtimeKind ?? null,
+      },
+    )
+    if (!result.success) throw new Error('Failed to query conversations')
+    return { items: result.items ?? [], total: result.total ?? 0 }
+  },
+
+  async bulkUpdateConversations(
+    ids: string[],
+    patch: {
+      pinned?: boolean
+      archived?: boolean
+      projectId?: string | null
+      setId?: string | null
+    },
+  ): Promise<number> {
+    if (!isTauriRuntime()) return 0
+    if (ids.length === 0) return 0
+    const hasProject = 'projectId' in patch
+    const hasSet = 'setId' in patch
+    const result = await invoke<{ success: boolean; updated: number }>(
+      'chat_bulk_update_conversations',
+      {
+        ids,
+        pinned: patch.pinned,
+        archived: patch.archived,
+        projectId: hasProject ? patch.projectId ?? '' : undefined,
+        setId: hasSet ? patch.setId ?? '' : undefined,
+      },
+    )
+    if (!result.success) throw new Error('Failed to bulk update conversations')
+    return result.updated ?? 0
+  },
+
+  async bulkDeleteConversations(ids: string[]): Promise<{ deleted: number; warnings: string[] }> {
+    if (!isTauriRuntime()) return { deleted: 0, warnings: [] }
+    if (ids.length === 0) return { deleted: 0, warnings: [] }
+    const result = await invoke<{ success: boolean; deleted: number; warnings: string[] }>(
+      'chat_bulk_delete_conversations',
+      { ids },
+    )
+    if (!result.success) throw new Error('Failed to bulk delete conversations')
+    return { deleted: result.deleted ?? 0, warnings: result.warnings ?? [] }
+  },
+
   // 获取对话详情
   async getConversation(conversationId: string): Promise<Conversation> {
     if (!isTauriRuntime()) return mockChatApi.getConversation(conversationId)
@@ -1391,6 +1458,7 @@ export const chatApi = {
     updates: {
       title?: string
       pinned?: boolean
+      archived?: boolean
       folder?: string
       projectId?: string | null
       setId?: string | null
@@ -1417,6 +1485,7 @@ export const chatApi = {
         conversationId,
         title: updates.title,
         pinned: updates.pinned,
+        archived: updates.archived,
         folder: hasFolderUpdate ? updates.folder ?? '' : undefined,
         projectId: hasProjectUpdate ? updates.projectId ?? '' : undefined,
         setId: hasSetUpdate ? updates.setId ?? '' : undefined,

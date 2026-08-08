@@ -106,7 +106,7 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
                 data-tauri-drag-region="false"
                 className={`rounded-full border px-3 py-1 text-[12px] transition-colors ${
                   selected.includes(l.id)
-                    ? 'border-[#C56646] bg-[#C56646]/10 text-[#C56646] dark:border-[#E39A78] dark:text-[#E39A78]'
+                    ? 'border-[#2f6ff0] bg-[#2f6ff0]/10 text-[#2f6ff0] dark:border-[#5c8df7] dark:text-[#5c8df7]'
                     : 'border-neutral-200 text-neutral-600 hover:border-neutral-300 dark:border-neutral-700 dark:text-neutral-300'
                 }`}
               >
@@ -127,14 +127,14 @@ export function RetrievalTestPanel({ libraries }: { libraries: KnowledgeLibrary[
               placeholder={t.chatRetrievalQueryPlaceholder}
               rows={2}
               data-tauri-drag-region="false"
-              className="min-w-0 flex-1 resize-none rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-[#C56646] dark:border-neutral-700 dark:bg-neutral-900"
+              className="min-w-0 flex-1 resize-none rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-[#2f6ff0] dark:border-neutral-700 dark:bg-neutral-900"
             />
             <button
               type="button"
               onClick={run}
               disabled={busy || !query.trim() || selected.length === 0}
               data-tauri-drag-region="false"
-              className="flex shrink-0 items-center gap-1.5 self-stretch rounded-lg bg-[#C56646] px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              className="flex shrink-0 items-center gap-1.5 self-stretch rounded-lg bg-[#2f6ff0] px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
             >
               <Search size={14} />
               {busy ? t.chatRetrievalRunning : t.chatRetrievalRun}

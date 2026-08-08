@@ -251,6 +251,16 @@ impl ConversationRepository {
         super::storage::search_conversations(app, query, limit).map_err(Into::into)
     }
 
+    /// 对话库查询（筛选/排序/分页 + total）。共享 barrier，不挡单会话写。
+    pub async fn query_library(
+        &self,
+        app: &AppHandle,
+        query: super::storage::ConversationLibraryQuery,
+    ) -> RepositoryResult<super::storage::ConversationLibraryPage> {
+        let _barrier = self.barrier.read().await;
+        super::storage::query_conversations(app, query).map_err(Into::into)
+    }
+
     /// 只读探查，不写。"同一个空对话被两个新建请求同时复用"这条不变式由调用方的
     /// `AppState::chat_create_conversation_lock` 保证（独占 barrier 从来也保证不了它：
     /// 复用一个空对话不会改动它，串行化两次探查照样都会命中同一条）。

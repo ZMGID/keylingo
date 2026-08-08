@@ -70,7 +70,7 @@ export function ApprovalCard({ title, subtitle, detail, actions }: ApprovalCardP
   return (
     <div className="not-prose mx-auto mb-2 w-full rounded-md border border-neutral-200/70 bg-white/90 px-3 py-2.5 text-[12px] leading-5 text-neutral-700 shadow-[0_10px_28px_-26px_rgba(0,0,0,0.45),0_1px_2px_rgba(0,0,0,0.035)] dark:border-neutral-700/70 dark:bg-neutral-900/80 dark:text-neutral-200">
       <div className="flex items-start gap-2">
-        <ShieldQuestion size={16} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
+        <ShieldQuestion size={16} className="mt-0.5 shrink-0 text-[#2f6ff0] dark:text-[#5c8df7]" />
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100">
             {title}

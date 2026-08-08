@@ -536,6 +536,7 @@ pub(crate) async fn chat_fork_conversation(
         created_at: now,
         updated_at: now,
         pinned: false,
+        archived: false,
         folder: source.folder.clone(),
         project_id: source.project_id.clone(),
         set_id: source.set_id.clone(),
@@ -663,13 +664,14 @@ pub(crate) async fn chat_delete_conversation(
     }))
 }
 
-/// 更新对话（标题、置顶、文件夹等）
+/// 更新对话（标题、置顶、归档、文件夹等）
 #[tauri::command]
 pub(crate) async fn chat_update_conversation(
     app: AppHandle,
     conversation_id: String,
     title: Option<String>,
     pinned: Option<bool>,
+    archived: Option<bool>,
     folder: Option<String>,
     project_id: Option<String>,
     set_id: Option<String>,
@@ -690,6 +692,9 @@ pub(crate) async fn chat_update_conversation(
             }
             if let Some(p) = pinned {
                 conversation.pinned = p;
+            }
+            if let Some(a) = archived {
+                conversation.archived = a;
             }
             if let Some(folder) = folder {
                 let trimmed = folder.trim();
@@ -822,6 +827,143 @@ pub(crate) async fn chat_update_conversation(
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,
+    }))
+}
+
+/// 对话库批量更新：收藏/归档/移入集或项目。一次 IPC，走 repository bulk_mutate。
+#[tauri::command]
+pub(crate) async fn chat_bulk_update_conversations(
+    app: AppHandle,
+    ids: Vec<String>,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+    project_id: Option<String>,
+    set_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if ids.is_empty() {
+        return Ok(serde_json::json!({ "success": true, "updated": 0 }));
+    }
+    if ids.len() > 500 {
+        return Err("单次最多批量更新 500 条对话".into());
+    }
+    let id_set: std::collections::HashSet<String> = ids.into_iter().collect();
+
+    // 预解析归属目标（避免在 mutate 闭包里反复查）
+    let project_patch = match project_id.as_deref().map(str::trim) {
+        None => None,
+        Some("") => Some((None, None)),
+        Some(pid) => {
+            let p = find_project_by_id(&app, pid)?;
+            Some((Some(p.id), Some(p.name)))
+        }
+    };
+    let set_patch = match set_id.as_deref().map(str::trim) {
+        None => None,
+        Some("") => Some(None),
+        Some(sid) => {
+            let s = find_set_by_id(&app, sid)?;
+            Some(Some(s.id))
+        }
+    };
+
+    let updated = crate::chat::repository::repository(&app)
+        .bulk_mutate(&app, |conversation| {
+            if !id_set.contains(&conversation.id) {
+                return Ok(false);
+            }
+            let mut changed = false;
+            if let Some(p) = pinned {
+                if conversation.pinned != p {
+                    conversation.pinned = p;
+                    changed = true;
+                }
+            }
+            if let Some(a) = archived {
+                if conversation.archived != a {
+                    conversation.archived = a;
+                    changed = true;
+                }
+            }
+            // 集与项目互斥：若两者都传，set 优先（与单条 update 一致的产品语义可调整；
+            // 前端批量条一次只发一种归属）。
+            if let Some(set_id_opt) = &set_patch {
+                let next = set_id_opt.clone();
+                if conversation.set_id != next {
+                    conversation.set_id = next;
+                    if conversation.set_id.is_some() {
+                        conversation.project_id = None;
+                        conversation.folder = None;
+                    }
+                    changed = true;
+                }
+            } else if let Some((proj_id, folder)) = &project_patch {
+                if conversation.project_id != *proj_id || conversation.folder != *folder {
+                    conversation.project_id = proj_id.clone();
+                    conversation.folder = folder.clone();
+                    if conversation.project_id.is_some() {
+                        conversation.set_id = None;
+                    }
+                    changed = true;
+                }
+            }
+            if changed {
+                conversation.updated_at = chrono::Local::now().timestamp();
+            }
+            Ok(changed)
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "updated": updated,
+    }))
+}
+
+/// 对话库批量删除。
+#[tauri::command]
+pub(crate) async fn chat_bulk_delete_conversations(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if ids.is_empty() {
+        return Ok(serde_json::json!({
+            "success": true,
+            "deleted": 0,
+            "warnings": [],
+        }));
+    }
+    if ids.len() > 500 {
+        return Err("单次最多批量删除 500 条对话".into());
+    }
+    let mut deleted = 0usize;
+    let mut warnings: Vec<String> = Vec::new();
+    for conversation_id in ids {
+        // 与单条删除一致：清运行态 / 后台命令
+        state.forget_chat_conversation_runtime(&conversation_id);
+        match crate::chat::repository::repository(&app)
+            .delete(&app, &conversation_id)
+            .await
+        {
+            Ok(ws) => {
+                deleted += 1;
+                for w in ws {
+                    warnings.push(format!("{conversation_id}: {w}"));
+                }
+            }
+            Err(err) => {
+                warnings.push(format!(
+                    "{conversation_id}: {}",
+                    crate::chat::repository::repository_error(err)
+                ));
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "success": true,
+        "deleted": deleted,
+        "warnings": warnings,
     }))
 }
 

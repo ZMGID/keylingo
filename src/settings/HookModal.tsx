@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { type HookDef } from '../api/tauri'
 import { i18n, type Lang } from './i18n'
@@ -89,16 +90,16 @@ export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }:
     })
   }
 
-  return (
+  return createPortal(
     <div
-      className="kv-modal-backdrop"
+      className="kv-modal-backdrop kv-modal-backdrop--portal"
       data-tauri-drag-region="false"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
     >
       <div
-        className="kv-modal max-w-xl space-y-3"
+        className="kv kv-modal max-w-xl space-y-3"
         role="dialog"
         aria-modal="true"
         aria-label={initial ? t.hooksEdit : t.hooksAdd}
@@ -195,6 +196,7 @@ export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }:
           <Button variant="primary" onClick={handleSave} data-tauri-drag-region="false">{t.save}</Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

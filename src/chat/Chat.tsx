@@ -20,8 +20,10 @@ import {
   isChatNotesPath,
   isChatOnboardingRoute,
   isChatPluginCenterPath,
+  isChatSessionCenterPath,
   isChatSettingsPath,
   isChatSkillCenterPath,
+  setHash,
 } from './chatRoutes'
 import { ChatImageViewer } from './ChatImageViewer'
 import { ApprovalCard } from './ApprovalCard'
@@ -171,8 +173,8 @@ const KnowledgeCenter = lazy(() => import('./KnowledgeCenter').then((module) => 
   default: module.KnowledgeCenter,
 })))
 
-const PluginCenter = lazy(() => import('./PluginCenter').then((module) => ({
-  default: module.PluginCenter,
+const SessionCenter = lazy(() => import('./SessionCenter').then((module) => ({
+  default: module.SessionCenter,
 })))
 
 const NotesCenter = lazy(() => import('./NotesCenter').then((module) => ({
@@ -191,7 +193,7 @@ function MessageListLoading() {
   )
 }
 
-type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'plugins' | 'onboarding'
+type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'sessions' | 'onboarding'
 
 interface ChatProps {
   onSettingsChange: () => void
@@ -892,7 +894,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (isChatMcpCenterPath(path)) return 'mcp'
     if (isChatKnowledgeCenterPath(path)) return 'knowledge'
     if (isChatNotesPath(path)) return 'notes'
-    if (isChatPluginCenterPath(path)) return 'plugins'
+    if (isChatSessionCenterPath(path)) return 'sessions'
+    // 旧 `#chat/plugins`：插件已迁设置，首屏落到设置页
+    if (isChatPluginCenterPath(path)) return 'settings'
     return 'conversation'
   })
   // 首屏就绪只发一次。初始视图是设置页则等 SettingsShell.onReady；否则挂载后即发。
@@ -947,7 +951,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   )
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<string[]>([])
-  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('chat')
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>(() =>
+    isChatPluginCenterPath(hashPath()) ? 'plugins' : 'chat',
+  )
   const [uiLang, setUiLang] = useState<Lang>('zh')
   const [extensionsNavItem, setExtensionsNavItem] = useState<ExtensionsNavItem | null>(null)
   const [enabledTools, setEnabledTools] = useState<ChatToolDefinition[]>([])
@@ -1549,13 +1555,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     reloadConversationRef.current?.(conversationId)
   }, [])
 
+  const openEmbeddedSettingsForPlugins = useCallback(() => {
+    setSettingsInitialTab('plugins')
+    setChatView('settings')
+    setHash('#chat/settings')
+  }, [])
+
   const {
     syncConversationRoute,
     syncSettingsRoute,
     syncOnboardingRoute,
     syncAssistantCenterRoute,
     syncSkillCenterRoute,
-    syncPluginCenterRoute,
+    syncSessionCenterRoute,
     syncMcpCenterRoute,
     syncKnowledgeCenterRoute,
     syncNotesRoute,
@@ -1564,6 +1576,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     onLoadConversation: handleRouteLoadConversation,
     onResetConversation: handleRouteResetConversation,
     currentConversationIdRef,
+    onOpenPluginsSettings: openEmbeddedSettingsForPlugins,
   })
 
   const handleOnboardingExit = useCallback(() => {
@@ -1655,7 +1668,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       void import('./McpCenter')
       void import('./KnowledgeCenter')
       void import('./NotesCenter')
-      void import('./PluginCenter')
+      void import('./SessionCenter')
       void import('./MessageList')
     }, 400)
   }, [])
@@ -1676,10 +1689,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncSkillCenterRoute()
   }, [syncSkillCenterRoute])
 
-  const openPluginCenter = useCallback(() => {
-    setChatView('plugins')
-    syncPluginCenterRoute()
-  }, [syncPluginCenterRoute])
+  const openSessionCenter = useCallback(() => {
+    setChatView('sessions')
+    syncSessionCenterRoute()
+  }, [syncSessionCenterRoute])
 
   const openMcpCenter = useCallback(() => {
     setChatView('mcp')
@@ -1718,11 +1731,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       openNotesCenter()
       return
     }
-    if (item === 'plugins') {
-      openPluginCenter()
+    if (item === 'sessions') {
+      openSessionCenter()
       return
     }
-  }, [openAssistantCenter, openSkillCenter, openMcpCenter, openKnowledgeCenter, openNotesCenter, openPluginCenter])
+  }, [openAssistantCenter, openSkillCenter, openMcpCenter, openKnowledgeCenter, openNotesCenter, openSessionCenter])
 
   const extensionsActive = useMemo<ExtensionsNavItem | null>(() => {
     if (chatView === 'assistants') return 'assistants'
@@ -1730,7 +1743,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (chatView === 'mcp') return 'mcp'
     if (chatView === 'knowledge') return 'knowledge'
     if (chatView === 'notes') return 'notes'
-    if (chatView === 'plugins') return 'plugins'
+    if (chatView === 'sessions') return 'sessions'
     return null
   }, [chatView])
 
@@ -1758,7 +1771,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     const prev = prevChatViewRef.current
     prevChatViewRef.current = chatView
     if (chatView !== 'conversation' || prev === chatView) return
-    if (prev === 'skill' || prev === 'mcp' || prev === 'assistants' || prev === 'plugins' || prev === 'knowledge') {
+    if (prev === 'skill' || prev === 'mcp' || prev === 'assistants' || prev === 'knowledge' || prev === 'settings') {
       void loadSkills()
       void refreshToolIndicator()
     }
@@ -3209,10 +3222,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleSendMessageRef = useRef(handleSendMessage)
   handleSendMessageRef.current = handleSendMessage
 
-  /** 插件页「让 AI 安装」：取规范 brief → 回聊天 → 新开对话并自动发送安装任务 */
+  /** 设置 → 插件「让 AI 安装」：取规范 brief → 回聊天 → 新开对话并自动发送安装任务 */
   const handleRequestPluginAiInstall = useCallback(async (pluginId: string) => {
     const brief = await api.pluginsInstallBrief(pluginId)
     setExtensionsNavItem(null)
+    setSettingsExiting(false)
     setChatView('conversation')
     setAssistantStreamStatsByMessageId({})
     try {
@@ -4351,6 +4365,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                 onClose={handleSettingsClose}
                 onSettingsChange={handleSettingsChange}
                 onReady={emitContentReady}
+                onRequestPluginAiInstall={handleRequestPluginAiInstall}
               />
             </SettingsEnterPane>
           </Suspense>
@@ -4395,11 +4410,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               <NotesCenter />
             </Suspense>
           </div>
-        ) : chatView === 'plugins' ? (
+        ) : chatView === 'sessions' ? (
           <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
-              <PluginCenter onRequestAiInstall={handleRequestPluginAiInstall} />
+              <SessionCenter
+                lang={uiLang}
+                currentConversationId={currentConversation?.id}
+                generatingConversationIds={generatingConversationIds}
+                onSelectConversation={handleSidebarSelectConversation}
+                onConversationDeleted={handleSidebarConversationDeleted}
+                onForceDropConversation={handleSidebarForceDropConversation}
+                onConversationsChanged={refreshSidebar}
+              />
             </Suspense>
           </div>
         ) : (

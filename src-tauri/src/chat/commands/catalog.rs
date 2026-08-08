@@ -98,6 +98,48 @@ pub(crate) async fn chat_search_conversations(
     }))
 }
 
+/// 对话库统一查询（扩展 → 对话库）。返回 `{ items, total }`。
+#[tauri::command]
+pub(crate) async fn chat_query_conversations(
+    app: AppHandle,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    sort: Option<String>,
+    order: Option<String>,
+    q: Option<String>,
+    full_text: Option<bool>,
+    shelf: Option<String>,
+    project_id: Option<String>,
+    set_id: Option<String>,
+    assistant_id: Option<String>,
+    provider_id: Option<String>,
+    runtime_kind: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let query = crate::chat::storage::ConversationLibraryQuery {
+        offset: offset.unwrap_or(0),
+        limit: limit.unwrap_or(80),
+        sort: sort.unwrap_or_else(|| "updated".into()),
+        order: order.unwrap_or_else(|| "desc".into()),
+        q,
+        full_text: full_text.unwrap_or(true),
+        shelf: shelf.unwrap_or_else(|| "all".into()),
+        project_id,
+        set_id,
+        assistant_id,
+        provider_id,
+        runtime_kind,
+    };
+    let page = crate::chat::repository::repository(&app)
+        .query_library(&app, query)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    Ok(serde_json::json!({
+        "success": true,
+        "items": page.items,
+        "total": page.total,
+    }))
+}
+
 /// 获取对话详情
 #[tauri::command]
 pub(crate) async fn chat_get_conversation(
@@ -313,6 +355,7 @@ pub(crate) async fn create_chat_conversation_internal(
                 created_at: now,
                 updated_at: now,
                 pinned: false,
+        archived: false,
                 folder,
                 project_id,
                 set_id,
@@ -677,6 +720,7 @@ pub(crate) async fn chat_create_builder_conversation(
         created_at: now,
         updated_at: now,
         pinned: false,
+        archived: false,
         folder,
         project_id: resolved_project_id,
         set_id: None,

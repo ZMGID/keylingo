@@ -5,6 +5,8 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
+use serde::Serialize;
+
 use super::{
     ChatAssistant, ChatAssistantIndex, ChatAssistantSnapshot, ChatProject, ChatProjectIndex,
     ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem, ConversationPin,
@@ -636,7 +638,7 @@ fn remove_conversation_side_artifacts(
     warnings
 }
 
-/// 获取对话列表（分页）
+/// 获取对话列表（分页）。**默认排除已归档**（侧栏工作台不应出现归档对话）。
 pub fn get_conversations(
     app: &AppHandle,
     offset: usize,
@@ -646,6 +648,8 @@ pub fn get_conversations(
     set_id: Option<String>,
 ) -> Result<Vec<ConversationListItem>, String> {
     let mut index = load_index_or_scan(app)?;
+    // 侧栏 / 常规列表：归档对话不出现
+    index.conversations.retain(|c| !c.archived);
     let set_filter = set_id.and_then(|id| {
         let trimmed = id.trim();
         if trimmed.is_empty() {
@@ -693,6 +697,166 @@ pub fn get_conversations(
     Ok(index.conversations[offset..end].to_vec())
 }
 
+/// 对话库查询参数（扩展 → 对话库）。
+#[derive(Debug, Clone, Default)]
+pub struct ConversationLibraryQuery {
+    pub offset: usize,
+    pub limit: usize,
+    /// updated | created | title | messages
+    pub sort: String,
+    /// asc | desc（默认 desc）
+    pub order: String,
+    pub q: Option<String>,
+    /// 有 q 时是否扫正文（默认 true）
+    pub full_text: bool,
+    /// all | starred | uncategorized | recent7d | archived
+    pub shelf: String,
+    pub project_id: Option<String>,
+    pub set_id: Option<String>,
+    pub assistant_id: Option<String>,
+    pub provider_id: Option<String>,
+    /// builtin | external | 空
+    pub runtime_kind: Option<String>,
+}
+
+/// 对话库分页结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationLibraryPage {
+    pub items: Vec<ConversationListItem>,
+    pub total: usize,
+}
+
+/// 对话库统一查询：在 index 上筛选/排序/分页；`q` 非空时可全文扫正文。
+/// 与 `search_conversations` 一样**不拿写锁**——成本与命中正文的会话数成正比。
+pub fn query_conversations(
+    app: &AppHandle,
+    query: ConversationLibraryQuery,
+) -> Result<ConversationLibraryPage, String> {
+    let limit = query.limit.clamp(1, 200);
+    let offset = query.offset;
+    let mut items = load_index_or_scan(app)?.conversations;
+
+    let shelf = query.shelf.trim().to_ascii_lowercase();
+    // Conversation timestamps are unix seconds (chrono::Local::now().timestamp()).
+    let now_sec = chrono::Local::now().timestamp();
+    let week_ago = now_sec.saturating_sub(7 * 24 * 60 * 60);
+
+    items.retain(|c| match shelf.as_str() {
+        "starred" => c.pinned && !c.archived,
+        "uncategorized" => {
+            !c.archived
+                && c.set_id.as_deref().map(str::is_empty).unwrap_or(true)
+                && c.project_id.as_deref().map(str::is_empty).unwrap_or(true)
+                && c.folder.as_deref().map(str::is_empty).unwrap_or(true)
+        }
+        "recent7d" => !c.archived && c.updated_at >= week_ago,
+        "archived" => c.archived,
+        // all（默认）：未归档
+        _ => !c.archived,
+    });
+
+    if let Some(set_id) = query.set_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        items.retain(|c| c.set_id.as_deref() == Some(set_id));
+    } else if let Some(project_id) = query
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        items.retain(|c| c.project_id.as_deref() == Some(project_id));
+    }
+
+    if let Some(assistant_id) = query
+        .assistant_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        items.retain(|c| c.assistant_id.as_deref() == Some(assistant_id));
+    }
+    if let Some(provider_id) = query
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        items.retain(|c| c.provider_id == provider_id);
+    }
+    if let Some(kind) = query
+        .runtime_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let want_external = kind.eq_ignore_ascii_case("external");
+        items.retain(|c| c.agent_runtime.is_external() == want_external);
+    }
+
+    if let Some(raw_q) = query.q.as_deref() {
+        let needle = raw_q.trim().to_lowercase();
+        if !needle.is_empty() {
+            let full_text = query.full_text;
+            items.retain(|c| {
+                let meta_hit = c.title.to_lowercase().contains(&needle)
+                    || c.preview.to_lowercase().contains(&needle)
+                    || c.folder
+                        .as_deref()
+                        .map(|f| f.to_lowercase().contains(&needle))
+                        .unwrap_or(false)
+                    || c.assistant_name
+                        .as_deref()
+                        .map(|n| n.to_lowercase().contains(&needle))
+                        .unwrap_or(false)
+                    || c.model.to_lowercase().contains(&needle);
+                if meta_hit {
+                    return true;
+                }
+                if full_text {
+                    conversation_content_matches(app, &c.id, &needle)
+                } else {
+                    false
+                }
+            });
+        }
+    }
+
+    let sort = query.sort.trim().to_ascii_lowercase();
+    let asc = query.order.trim().eq_ignore_ascii_case("asc");
+    items.sort_by(|a, b| {
+        // 收藏始终压在分组顶部（与侧栏一致），同组内再按选定键排
+        let pin_ord = b.pinned.cmp(&a.pinned);
+        if pin_ord != std::cmp::Ordering::Equal {
+            return pin_ord;
+        }
+        let primary = match sort.as_str() {
+            "created" => a.created_at.cmp(&b.created_at),
+            "title" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+            "messages" => a.message_count.cmp(&b.message_count),
+            // updated（默认）
+            _ => a.updated_at.cmp(&b.updated_at),
+        };
+        if asc {
+            primary
+        } else {
+            primary.reverse()
+        }
+    });
+
+    let total = items.len();
+    if offset >= total {
+        return Ok(ConversationLibraryPage {
+            items: vec![],
+            total,
+        });
+    }
+    let end = (offset + limit).min(total);
+    Ok(ConversationLibraryPage {
+        items: items[offset..end].to_vec(),
+        total,
+    })
+}
+
 /// 全量索引搜索：在所有对话（不止侧栏默认加载的前 N 个）的标题/预览/文件夹里做大小写
 /// 不敏感子串匹配，按更新时间倒序返回前 limit 个。让侧栏搜索能找到已掉出"最近"列表的老对话。
 /// 元数据命中只读 index.json（轻量）；没命中的才逐个读对话正文做全文匹配——所以这个函数的
@@ -709,6 +873,10 @@ pub fn search_conversations(
     let index = load_index_or_scan(app)?;
     let mut hits: Vec<ConversationListItem> = Vec::new();
     for c in index.conversations {
+        // 侧栏搜索不包含归档
+        if c.archived {
+            continue;
+        }
         let meta_hit = c.title.to_lowercase().contains(&needle)
             || c.preview.to_lowercase().contains(&needle)
             || c.folder

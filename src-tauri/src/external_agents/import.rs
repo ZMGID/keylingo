@@ -1002,6 +1002,7 @@ pub async fn import_one_session(
         created_at: now,
         updated_at: now,
         pinned: false,
+        archived: false,
         folder: None,
         project_id: Some(project_id.to_string()),
         set_id: None,

@@ -490,9 +490,12 @@ impl AnthropicMessagesProvider<'_> {
             .conversation_id
             .as_deref()
             .filter(|id| !id.is_empty())?;
-        Some(PromptCache {
-            long_ttl: self.provider.request.prompt_cache_retention == "long",
-        })
+        // 对齐 pi：long → ttl:1h（默认 supportsLongCacheRetention=true，不做主机名启发式）。
+        let long_ttl = matches!(
+            self.provider.cache_retention(),
+            crate::settings::CacheRetention::Long
+        );
+        Some(PromptCache { long_ttl })
     }
 
     /// 供应商「请求配置」带来的附加头（CLI 身份 / 自定义头）+ prompt 缓存的 beta 头。
@@ -1863,6 +1866,31 @@ mod tests {
     }
 
     #[test]
+    fn long_retention_on_any_host_sends_ttl() {
+        // 对齐 pi：long 默认 supportsLongCacheRetention=true，不做主机名启发式。
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let mut provider = cache_test_provider(true, "long");
+        provider.base_url = "https://api.deepseek.com/anthropic".into();
+        let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
+        let body = adapter.request_body(&cache_test_request(), false);
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        let in_session = crate::chat::model::RequestMetadata {
+            conversation_id: Some("conv_abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            adapter
+                .debug_request_headers(&in_session)
+                .get("anthropic-beta")
+                .map(String::as_str),
+            Some(EXTENDED_CACHE_TTL_BETA)
+        );
+    }
+
+    #[test]
     fn one_shot_calls_get_no_breakpoints_even_with_caching_on() {
         // 翻译器 / 截图翻译 / Lens / 上下文压缩 / 标题总结走同一个生成入口，但都没有
         // conversation_id。给它们打断点 = 按 1.25× 写一份下次内容全变、永远读不到的缓存。
@@ -1886,14 +1914,16 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_caching_is_off_by_default_openai_is_on() {
-        // 老配置没有 request 字段 → prompt_caching = None → 按协议给默认。
-        // Anthropic 关（净新增线格式变化、无自愈兜底），OpenAI 开（本来就一直在发）。
+    fn anthropic_and_openai_default_to_short() {
+        // 统一 short 默认：OpenAI / Anthropic 均启用客户端缓存字段。
         let mut p = cache_test_provider(true, "short");
         p.request.prompt_caching = None;
-        assert!(!p.prompt_caching_enabled(), "Anthropic 默认应为关");
+        p.request.prompt_cache_retention = "short".into();
+        assert!(p.prompt_caching_enabled());
         p.api_format = "openai_chat".into();
-        assert!(p.prompt_caching_enabled(), "OpenAI 默认应为开");
+        assert!(p.prompt_caching_enabled());
+        p.request.prompt_cache_retention = "none".into();
+        assert!(!p.prompt_caching_enabled());
     }
 
     #[test]
@@ -1924,8 +1954,11 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: crate::settings::ProviderRequestConfig {
-                prompt_caching: Some(caching),
-                prompt_cache_retention: retention.into(),
+                prompt_cache_retention: if caching {
+                    retention.into()
+                } else {
+                    "none".into()
+                },
                 ..Default::default()
             },
         }

@@ -2237,12 +2237,12 @@ export default function Lens() {
         }}
       />
 
-      {/* 已截图框：截完保留显示作为视觉标记（橙色边框 + 浅外发光，无挖洞遮罩） */}
+      {/* 已截图框：截完保留显示作为视觉标记（蓝色边框 + 浅外发光，无挖洞遮罩） */}
       {/* 浮动模式下不显示高亮框 */}
       {capturedFrame && stage !== 'select' && keepFullscreen && (
         <>
           <div
-            className="absolute z-[25] box-border border-[2px] border-[#D97757] rounded-md pointer-events-none"
+            className="absolute z-[25] box-border border-[2px] border-[#2f6ff0] rounded-md pointer-events-none"
             style={{
               left: capturedFrame.x,
               top: capturedFrame.y,
@@ -2434,7 +2434,7 @@ export default function Lens() {
           {hoverRect && (
             <>
               <div
-                className="absolute border-[2px] border-[#D97757] rounded-md pointer-events-none"
+                className="absolute border-[2px] border-[#2f6ff0] rounded-md pointer-events-none"
                 style={{
                   left: hoverRect.x,
                   top: hoverRect.y,
@@ -2447,7 +2447,7 @@ export default function Lens() {
           )}
           {dragRect && dragging && (
             <div
-              className="absolute border-[2px] border-[#D97757] rounded-sm pointer-events-none"
+              className="absolute border-[2px] border-[#2f6ff0] rounded-sm pointer-events-none"
               style={{
                 left: dragRect.x,
                 top: dragRect.y,
@@ -2643,7 +2643,7 @@ export default function Lens() {
               disabled={sendDisabled}
               className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 active:scale-95 ${
                 !sendDisabled
-                  ? 'bg-[#D97757] hover:bg-[#C56646] hover:scale-105'
+                  ? 'bg-[#2f6ff0] hover:bg-[#2f6ff0] hover:scale-105'
                   : 'bg-neutral-200 dark:bg-neutral-700 cursor-not-allowed'
               }`}
             >
@@ -2741,7 +2741,7 @@ export default function Lens() {
                   return (
                     <div key={origIdx} className={`mb-3 ${isUser ? 'flex justify-end' : ''}`}>
                       {isUser ? (
-                        <div className="px-3 py-2 rounded-2xl bg-[#D97757]/15 dark:bg-[#D97757]/20 text-[13.5px] text-neutral-800 dark:text-neutral-100 max-w-[88%] whitespace-pre-wrap break-words">
+                        <div className="px-3 py-2 rounded-2xl bg-[#2f6ff0]/15 dark:bg-[#2f6ff0]/20 text-[13.5px] text-neutral-800 dark:text-neutral-100 max-w-[88%] whitespace-pre-wrap break-words">
                           {m.content}
                         </div>
                       ) : (

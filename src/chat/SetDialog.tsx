@@ -5,7 +5,7 @@ import type { ChatAssistant, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
 
 // ponytail: same palette as AssistantCenter so 集/助手 colors match; duplicated 6-element array, not worth sharing
-const setColors = ['#6A8FBD', '#C56646', '#4F9D7A', '#8A6FBD', '#B7791F', '#5E8C6A']
+const setColors = ['#6A8FBD', '#2f6ff0', '#4F9D7A', '#8A6FBD', '#B7791F', '#5E8C6A']
 
 interface SetDialogProps {
   set?: ChatSet | null

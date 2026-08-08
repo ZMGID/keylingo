@@ -6,11 +6,11 @@
 //! - `claude` / `claude-desktop`：`{"env": {...}, 以及一堆 settings.json 偏好}`
 //! - `codex`：`{"auth": {...}, "config": "<config.toml 全文>"}`
 //! - `gemini`：`{"env": {...}, "config": {...}}`
-//! - `grokbuild` / `hermes` / `openclaw`：各自私有形状
+//! - `grokbuild`：`{"config": "<config.toml 全文>"}`（落盘到 `~/.grok/config.toml`）
+//! - `hermes` / `openclaw`：各自私有形状
 //!
-//! ponytail: 只导 Kivio **确实有落地通道**的三类（claude=env / codex=私有 CODEX_HOME /
-//! gemini=env）。grok、hermes 在 Kivio 侧没有注入通道（它们的 base_url 只能写进各自的
-//! config.toml），导进来会是「填了不生效」，所以报成跳过数而不是假装支持。
+//! ponytail: 只导 Kivio **确实有落地通道**的四类（claude=env / codex=私有 CODEX_HOME /
+//! gemini=env / grok=原生 config.toml）。hermes 等没有注入通道的，报成跳过数而不是假装支持。
 //! 也没做 v2 `config.json` 回落：v3 的库存在就够了，缺了直接报「未找到」。
 use crate::settings::CliEnvVar;
 
@@ -19,7 +19,7 @@ use crate::settings::CliEnvVar;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedProvider {
-    /// 映射到 Kivio 的 agent id（claude / codex / gemini）。
+    /// 映射到 Kivio 的 agent id（claude / codex / gemini / grok）。
     pub agent_id: String,
     /// 保留 cc-switch 原 id：二次导入按 id 走更新，不会堆出重复条目。
     pub id: String,
@@ -37,7 +37,7 @@ pub struct ImportedProvider {
 #[serde(rename_all = "camelCase")]
 pub struct ImportScan {
     pub providers: Vec<ImportedProvider>,
-    /// 认得出但 Kivio 没有落地通道而跳过的条数（grok / hermes / openclaw…）。
+    /// 认得出但 Kivio 没有落地通道而跳过的条数（hermes / openclaw…）。
     pub skipped: usize,
 }
 
@@ -51,6 +51,7 @@ fn map_app_type(app_type: &str) -> Option<&'static str> {
         "claude" | "claude-code" | "claude_code" => Some("claude"),
         "codex" => Some("codex"),
         "gemini" => Some("gemini"),
+        "grokbuild" | "grok" | "grok-cli" => Some("grok"),
         _ => None,
     }
 }
@@ -139,6 +140,23 @@ fn convert(
         }
         return Some(out);
     }
+    if agent_id == "grok" {
+        // cc-switch grokbuild：`{"config": "<config.toml 全文>"}`。空壳或只有空白的跳过。
+        let toml = config.get("config")?.as_str()?.to_string();
+        if toml.trim().is_empty() {
+            return None;
+        }
+        // 粗嗅：至少要有 model 路由，否则导进来也落不了盘。
+        if !toml.contains("[model") && !toml.contains("base_url") {
+            return None;
+        }
+        out.config_toml = toml;
+        out.has_api_key = out
+            .config_toml
+            .lines()
+            .any(|line| line.trim_start().starts_with("api_key") && line.contains('=') && !line.contains("\"\""));
+        return Some(out);
+    }
     // claude / gemini：只取 `env`。cc-switch 的 claude 条目里还带着 theme / permissions /
     // enabledPlugins 这些 settings.json 偏好——那是**用户全局配置**，不是供应商路由，
     // 带进来会通过 `--settings` 覆盖掉用户自己的插件和权限设置。
@@ -202,8 +220,50 @@ mod tests {
 
     #[test]
     fn unsupported_app_types_map_to_none() {
-        assert!(map_app_type("grokbuild").is_none());
         assert!(map_app_type("hermes").is_none());
         assert_eq!(map_app_type("claude"), Some("claude"));
+        assert_eq!(map_app_type("grokbuild"), Some("grok"));
+        assert_eq!(map_app_type("grok"), Some("grok"));
+    }
+
+    #[test]
+    fn grok_takes_config_toml() {
+        let config = json!({
+            "config": "[models]\ndefault = \"grok-4.5\"\n\n[model.\"grok-4.5\"]\nmodel = \"grok-4.5\"\nbase_url = \"https://relay.example/v1\"\napi_key = \"sk-x\"\n"
+        });
+        let p = convert(
+            "grok",
+            "g1".into(),
+            "Relay".into(),
+            String::new(),
+            true,
+            &config,
+        )
+        .unwrap();
+        assert!(p.config_toml.contains("base_url"));
+        assert!(p.has_api_key);
+        assert!(p.env.is_empty());
+    }
+
+    #[test]
+    fn grok_empty_config_is_skipped() {
+        assert!(convert(
+            "grok",
+            "g1".into(),
+            "Empty".into(),
+            String::new(),
+            false,
+            &json!({"config": ""})
+        )
+        .is_none());
+        assert!(convert(
+            "grok",
+            "g2".into(),
+            "Official".into(),
+            String::new(),
+            false,
+            &json!({"config": ""})
+        )
+        .is_none());
     }
 }

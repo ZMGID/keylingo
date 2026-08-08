@@ -1935,6 +1935,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             pinned: false,
+            archived: false,
             folder: None,
             project_id: None,
             set_id: None,

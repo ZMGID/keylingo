@@ -698,7 +698,7 @@ export function NotesCenter() {
                                       className="kv-menu-item"
                                       onClick={() => void moveNoteToFolder(note.id, '')}
                                     >
-                                      {note.folder.trim() === '' && <Check size={12} className="text-[#C56646]" />}
+                                      {note.folder.trim() === '' && <Check size={12} className="text-[#2f6ff0]" />}
                                       <span className={note.folder.trim() === '' ? '' : 'ml-[18px]'}>{t.chatNotesLibraryRoot}</span>
                                     </button>
                                     {folders.map((f) => (
@@ -708,7 +708,7 @@ export function NotesCenter() {
                                         className="kv-menu-item truncate"
                                         onClick={() => void moveNoteToFolder(note.id, f)}
                                       >
-                                        {note.folder.trim() === f && <Check size={12} className="text-[#C56646]" />}
+                                        {note.folder.trim() === f && <Check size={12} className="text-[#2f6ff0]" />}
                                         <span className={`truncate ${note.folder.trim() === f ? '' : 'ml-[18px]'}`}>{f}</span>
                                       </button>
                                     ))}
@@ -797,7 +797,7 @@ export function NotesCenter() {
                 if (e.key === 'Escape') setFolderDialog(null)
               }}
               placeholder={t.chatNotesFolderNamePlaceholder}
-              className="mt-3 w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-[#C56646] dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
+              className="mt-3 w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none focus:border-[#2f6ff0] dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100"
             />
             <div className="mt-4 flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setFolderDialog(null)}>

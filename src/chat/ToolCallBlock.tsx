@@ -437,7 +437,7 @@ function CardEyebrow({ running = false }: { running?: boolean }) {
   )
 }
 
-/** 卡片状态标记：完成用中性灰 ✓（不用应用全局那枚 terracotta ✓，保持 STYLE.md 纯灰阶
+/** 卡片状态标记：完成用中性灰 ✓（不用应用全局那枚 accent blue ✓，保持 STYLE.md 纯灰阶
  *  调色板）；出错/取消/跳过沿用 StatusIcon 的中性图标；运行态不在此渲染（由 eyebrow 闪烁 +
  *  状态文字流光表达）。 */
 function CardStatusMark({ status }: { status: ToolCallStatus }) {
@@ -1456,7 +1456,7 @@ function StatusIcon({ status }: { status: ToolCallStatus }) {
   if (isDone) {
     return (
       <CheckCircle2
-        className={`shrink-0 text-[#C56646] dark:text-[#E39A78]${justCompleted ? ' chat-motion-pop' : ''}`}
+        className={`shrink-0 text-[#2f6ff0] dark:text-[#5c8df7]${justCompleted ? ' chat-motion-pop' : ''}`}
         size={14}
         strokeWidth={1.9}
       />

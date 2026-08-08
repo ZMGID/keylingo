@@ -24,6 +24,7 @@ function renderList(onRenameConversation = vi.fn()) {
       lang="zh"
       onSelectConversation={vi.fn()}
       onRenameConversation={onRenameConversation}
+      onTogglePinConversation={vi.fn()}
       onExportConversation={vi.fn()}
       onDeleteConversation={vi.fn()}
       onMoveConversationToProject={vi.fn()}
@@ -48,5 +49,56 @@ describe('ConversationList inline rename', () => {
 
     expect(onRename).toHaveBeenCalledOnce()
     expect(onRename).toHaveBeenCalledWith('conversation-1', '改名后的会话')
+  })
+})
+
+describe('ConversationList pin', () => {
+  it('toggles pin from the row pin button', async () => {
+    const user = userEvent.setup()
+    const onTogglePin = vi.fn()
+    render(
+      <ConversationList
+        conversations={[conversation]}
+        projects={[]}
+        sets={[]}
+        lang="zh"
+        onSelectConversation={vi.fn()}
+        onRenameConversation={vi.fn()}
+        onTogglePinConversation={onTogglePin}
+        onExportConversation={vi.fn()}
+        onDeleteConversation={vi.fn()}
+        onMoveConversationToProject={vi.fn()}
+        onMoveConversationToSet={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '置顶聊天' }))
+
+    expect(onTogglePin).toHaveBeenCalledOnce()
+    expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
+  })
+
+  it('shows unpin on the row when already pinned', async () => {
+    const user = userEvent.setup()
+    const onTogglePin = vi.fn()
+    render(
+      <ConversationList
+        conversations={[{ ...conversation, pinned: true }]}
+        projects={[]}
+        sets={[]}
+        lang="zh"
+        onSelectConversation={vi.fn()}
+        onRenameConversation={vi.fn()}
+        onTogglePinConversation={onTogglePin}
+        onExportConversation={vi.fn()}
+        onDeleteConversation={vi.fn()}
+        onMoveConversationToProject={vi.fn()}
+        onMoveConversationToSet={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '取消置顶' }))
+
+    expect(onTogglePin).toHaveBeenCalledWith('conversation-1', false)
   })
 })

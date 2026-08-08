@@ -9,9 +9,9 @@ import {
   Layers,
   LayoutGrid,
   MoreHorizontal,
+  MessagesSquare,
   NotebookPen,
   Plus,
-  Puzzle,
   Search,
   SquarePen,
 } from 'lucide-react'
@@ -52,7 +52,7 @@ function resolveChatUserProfile(
 
 const modLabel = isMac ? '⌘' : 'Ctrl'
 
-export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'plugins'
+export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'sessions'
 
 const extensionSubItems: Array<{
   id: ExtensionsNavItem
@@ -64,7 +64,7 @@ const extensionSubItems: Array<{
   { id: 'mcp', label: () => 'MCP', icon: McpIcon },
   { id: 'knowledge', label: (t) => t.chatNavKnowledge, icon: KnowledgeIcon },
   { id: 'notes', label: (t) => t.chatNavNotes, icon: (props) => <NotebookPen size={props.size} className={props.className} strokeWidth={1.75} /> },
-  { id: 'plugins', label: (t) => t.chatNavPlugins, icon: (props) => <Puzzle size={props.size} className={props.className} strokeWidth={1.75} /> },
+  { id: 'sessions', label: (t) => t.chatNavSessions, icon: (props) => <MessagesSquare size={props.size} className={props.className} strokeWidth={1.75} /> },
 ]
 
 const PROJECT_PREVIEW_LIMIT = 5
@@ -79,6 +79,19 @@ function conversationBelongsToProject(
 ): boolean {
   const projectId = conversationProjectId(conversation)
   return projectId ? projectId === project.id : conversation.folder === project.name
+}
+
+/** 置顶会话排前，同组内保持原有相对顺序（时间序 / 拖拽钉子）。 */
+function partitionPinnedFirst(
+  conversations: ConversationListItem[],
+): ConversationListItem[] {
+  const pinned: ConversationListItem[] = []
+  const rest: ConversationListItem[] = []
+  for (const item of conversations) {
+    if (item.pinned) pinned.push(item)
+    else rest.push(item)
+  }
+  return pinned.length === 0 ? conversations : [...pinned, ...rest]
 }
 
 function conversationMatchesSearch(conversation: ConversationListItem, query: string): boolean {
@@ -611,6 +624,20 @@ export const Sidebar = memo(function Sidebar({
     }
   }
 
+  const handleTogglePinConversation = async (id: string, pinned: boolean) => {
+    // 乐观更新：侧栏立刻重排，避免等磁盘写回才跳动。
+    setConversations((items) =>
+      items.map((item) => (item.id === id ? { ...item, pinned } : item)),
+    )
+    try {
+      await chatApi.updateConversation(id, { pinned })
+      await loadSidebarData({ silent: true })
+    } catch (err) {
+      console.error('Failed to pin conversation:', err)
+      await loadSidebarData({ silent: true })
+    }
+  }
+
   const handleDeleteConversation = async (id: string) => {
     if (!window.confirm(t.chatDeleteConversationConfirm)) return
     // B3：删"generating"会话先强制清父组件 in-flight/乐观状态，
@@ -854,7 +881,13 @@ export const Sidebar = memo(function Sidebar({
       const inProject = visibleConversations.filter((conversation) =>
         conversationBelongsToProject(conversation, project),
       )
-      map.set(project.id, applyConversationPins(inProject, conversationPins[project.id] ?? []))
+      // 手动拖拽顺序之上，置顶会话始终压在分组顶部。
+      map.set(
+        project.id,
+        partitionPinnedFirst(
+          applyConversationPins(inProject, conversationPins[project.id] ?? []),
+        ),
+      )
     })
     return map
   }, [conversationPins, projects, visibleConversations])
@@ -941,11 +974,13 @@ export const Sidebar = memo(function Sidebar({
     sets.forEach((set) => {
       map.set(
         set.id,
-        applyConversationPins(
-          visibleConversations.filter(
-            (conversation) => (conversation.set_id ?? conversation.setId) === set.id,
+        partitionPinnedFirst(
+          applyConversationPins(
+            visibleConversations.filter(
+              (conversation) => (conversation.set_id ?? conversation.setId) === set.id,
+            ),
+            conversationPins[set.id] ?? [],
           ),
-          conversationPins[set.id] ?? [],
         ),
       )
     })
@@ -955,11 +990,11 @@ export const Sidebar = memo(function Sidebar({
   // 「最近」标签：跨集/项目的全部对话，置顶在前、再按更新时间倒序。
   const recentConversations = useMemo(
     () =>
-      [...visibleConversations].sort((a, b) => {
-        const pin = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
-        if (pin !== 0) return pin
-        return (b.updated_at ?? 0) - (a.updated_at ?? 0)
-      }),
+      partitionPinnedFirst(
+        [...visibleConversations].sort(
+          (a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0),
+        ),
+      ),
     [visibleConversations],
   )
 
@@ -1131,26 +1166,17 @@ export const Sidebar = memo(function Sidebar({
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 {activeTab === 'conversations' && (
-                  <>
-                    <IconButton
-                      ref={sectionMenuButtonRef}
-                      size="sm"
-                      onClick={openSectionMenu}
-                      className={sectionMenuAnchor ? 'bg-black/[0.06] text-neutral-600 dark:bg-white/[0.1] dark:text-neutral-200' : ''}
-                      label={t.chatConversationListActions}
-                      aria-haspopup="menu"
-                      aria-expanded={sectionMenuAnchor !== null}
-                    >
-                      <MoreHorizontal size={15} />
-                    </IconButton>
-                    <IconButton
-                      size="sm"
-                      onClick={onNewConversation}
-                      label={t.chatNewChat}
-                    >
-                      <SquarePen size={15} strokeWidth={1.75} />
-                    </IconButton>
-                  </>
+                  <IconButton
+                    ref={sectionMenuButtonRef}
+                    size="sm"
+                    onClick={openSectionMenu}
+                    className={sectionMenuAnchor ? 'bg-black/[0.06] text-neutral-600 dark:bg-white/[0.1] dark:text-neutral-200' : ''}
+                    label={t.chatConversationListActions}
+                    aria-haspopup="menu"
+                    aria-expanded={sectionMenuAnchor !== null}
+                  >
+                    <MoreHorizontal size={15} />
+                  </IconButton>
                 )}
                 {activeTab === 'sets' && (
                   <>
@@ -1344,6 +1370,7 @@ export const Sidebar = memo(function Sidebar({
                             onSelectConversation(id)
                           }}
                           onRenameConversation={handleRenameConversation}
+                          onTogglePinConversation={handleTogglePinConversation}
                           onExportConversation={handleExportConversation}
                           onDeleteConversation={handleDeleteConversation}
                           onMoveConversationToProject={handleMoveConversationToProject}
@@ -1492,6 +1519,7 @@ export const Sidebar = memo(function Sidebar({
                                 onSelectConversation(id)
                               }}
                               onRenameConversation={handleRenameConversation}
+                              onTogglePinConversation={handleTogglePinConversation}
                               onExportConversation={handleExportConversation}
                               onDeleteConversation={handleDeleteConversation}
                               onMoveConversationToProject={handleMoveConversationToProject}
@@ -1555,6 +1583,7 @@ export const Sidebar = memo(function Sidebar({
                         onSelectConversation(id)
                       }}
                       onRenameConversation={handleRenameConversation}
+                      onTogglePinConversation={handleTogglePinConversation}
                       onExportConversation={handleExportConversation}
                       onDeleteConversation={handleDeleteConversation}
                       onMoveConversationToProject={handleMoveConversationToProject}

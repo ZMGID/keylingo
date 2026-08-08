@@ -229,6 +229,7 @@ mod tests {
             created_at: 1_700_000_000,
             updated_at: 1_700_000_001,
             pinned: false,
+            archived: false,
             folder: None,
             project_id: None,
             set_id: None,

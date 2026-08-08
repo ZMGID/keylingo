@@ -1,6 +1,6 @@
 //! 第三方供应商（中转站）的落地层：把设置页里选中的供应商变成**子进程能看见的东西**。
 //!
-//! Claude / Codex 继续使用 Kivio 私有配置；OpenCode / Pi 按各自官方约定写入原生全局配置：
+//! Claude / Codex 继续使用 Kivio 私有配置；OpenCode / Pi / Grok 按各自官方约定写入原生配置：
 //!
 //! 1. **环境变量** —— claude / gemini / 其余 env 系直接注入 `provider.env`
 //!    （出口是 `overrides::env_for` → `spawn::agent_cli_command` / `cli_command`）。
@@ -14,6 +14,10 @@
 //!    用户自己的 `~/.codex` 一个字节不动。
 //! 4. **opencode / pi 的原生配置** —— 字段级合并 Kivio 管理的 provider、凭据与默认模型；
 //!    其他 provider 和顶层设置原样保留。切回「CLI 自身配置」时恢复 Kivio 接管前的默认模型。
+//! 5. **grok 的 `~/.grok/config.toml`** —— 与 cc-switch 一样落盘（Grok 没有 env 通道，
+//!    base_url 只能写进 config.toml）。把供应商的 `config_toml` 里的 `[models]` /
+//!    `[model.*]` 合并进现有文件，marketplace / ui / cli 等用户段原样保留；首次接管前
+//!    整份备份，切回「CLI 自身配置」时还原。
 //!
 //! 物化时机是**保存 / 切换供应商那一次**（`commands::chat_external_cli_provider_apply`），
 //! 不是每轮。ccgui 用的是 per-turn 临时目录 + `Drop` 删除，那套在 Kivio 会把常驻 claude
@@ -216,11 +220,15 @@ pub fn materialize_all() {
     }
 }
 
-/// 把供应商写到盘上。OpenCode / Pi 即使当前未启用，也要同步已保存列表并恢复原生默认值。
+/// 把供应商写到盘上。OpenCode / Pi / Grok 即使当前未启用，也要同步（或恢复）原生配置。
 pub fn materialize(agent_id: &str) -> Result<(), String> {
     if matches!(agent_id, "opencode" | "pi") {
         let config = super::overrides::agent_config(agent_id).unwrap_or_default();
         return materialize_native(agent_id, &config);
+    }
+    if agent_id == "grok" {
+        let config = super::overrides::agent_config(agent_id).unwrap_or_default();
+        return materialize_grok(&config);
     }
     let Some(provider) = super::overrides::active_provider(agent_id) else {
         return Ok(());
@@ -276,6 +284,172 @@ fn materialize_codex(provider: &ExternalCliProvider) -> Result<(), String> {
         write_private(&home.join("auth.json"), auth)?;
     }
     Ok(())
+}
+
+/// Grok 原生配置路径：`$GROK_HOME/config.toml`，否则 `~/.grok/config.toml`。
+fn grok_config_path() -> Option<PathBuf> {
+    if let Some(home) = nonempty_env_path("GROK_HOME") {
+        return Some(home.join("config.toml"));
+    }
+    directories::BaseDirs::new().map(|base| base.home_dir().join(".grok").join("config.toml"))
+}
+
+fn grok_state_path() -> Option<PathBuf> {
+    Some(profiles_dir()?.join("grok-native-state.json"))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+struct GrokManagedState {
+    /// 是否已由 Kivio 接管过 `config.toml`（有备份可还原）。
+    managed: bool,
+    /// 接管前整份 `config.toml` 原文；切回「CLI 自身配置」时写回。
+    previous_config: Option<String>,
+}
+
+fn read_grok_state(path: &Path) -> Result<GrokManagedState, String> {
+    if !path.is_file() {
+        return Ok(GrokManagedState::default());
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(GrokManagedState::default());
+    }
+    serde_json::from_str(&text).map_err(|e| format!("解析 {} 失败：{e}", path.display()))
+}
+
+fn write_grok_state(path: &Path, state: &GrokManagedState) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(state).map_err(|e| e.to_string())? + "\n";
+    write_private_atomic(path, &text)
+}
+
+fn read_text_or_empty(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(format!("读取 {} 失败：{err}", path.display())),
+    }
+}
+
+/// 把供应商 `config_toml` 里的 `[models]` / `[model.*]` 合并进 base。
+/// 其它段（marketplace / ui / cli / mcp…）一律保留 base 的——对齐「只换路由、不动用户偏好」。
+fn merge_grok_provider_config(base: &str, provider_config: &str) -> Result<String, String> {
+    let mut base_doc: toml::Table = if base.trim().is_empty() {
+        toml::Table::new()
+    } else {
+        toml::from_str(base).map_err(|e| format!("现有 Grok config.toml 解析失败：{e}"))?
+    };
+    let provider_doc: toml::Table = if provider_config.trim().is_empty() {
+        return Err("Grok 供应商缺少 config.toml".to_string());
+    } else {
+        toml::from_str(provider_config)
+            .map_err(|e| format!("Grok 供应商 config.toml 解析失败：{e}"))?
+    };
+
+    // 至少要有 model 表或 models.default，否则落盘等于空操作。
+    let has_models = provider_doc
+        .get("models")
+        .and_then(|v| v.as_table())
+        .is_some_and(|t| t.contains_key("default"));
+    let has_model = provider_doc
+        .get("model")
+        .and_then(|v| v.as_table())
+        .is_some_and(|t| !t.is_empty());
+    if !has_models && !has_model {
+        return Err(
+            "Grok 供应商 config.toml 缺少 [models].default 或 [model.*] 段".to_string(),
+        );
+    }
+
+    if let Some(models) = provider_doc.get("models").and_then(|v| v.as_table()) {
+        let base_models = base_doc
+            .entry("models".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| "Grok config.toml 的 [models] 不是表".to_string())?;
+        for (key, value) in models {
+            base_models.insert(key.clone(), value.clone());
+        }
+    }
+
+    if let Some(model) = provider_doc.get("model").and_then(|v| v.as_table()) {
+        let base_model = base_doc
+            .entry("model".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| "Grok config.toml 的 [model] 不是表".to_string())?;
+        for (key, value) in model {
+            base_model.insert(key.clone(), value.clone());
+        }
+    }
+
+    // toml crate 的 pretty 序列化对 dotted keys 友好；末尾补换行方便 diff。
+    let mut rendered =
+        toml::to_string_pretty(&base_doc).map_err(|e| format!("序列化 Grok config 失败：{e}"))?;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    Ok(rendered)
+}
+
+fn materialize_grok(config: &ExternalCliAgentConfig) -> Result<(), String> {
+    let path = grok_config_path().ok_or_else(|| "无法定位 Grok 配置目录".to_string())?;
+    let state_path = grok_state_path().ok_or_else(|| "无法定位 Grok 状态文件".to_string())?;
+    let _guard = NATIVE_CONFIG_LOCK
+        .lock()
+        .map_err(|_| "原生 CLI 配置写锁已损坏".to_string())?;
+    materialize_grok_at(config, &path, &state_path)
+}
+
+fn materialize_grok_at(
+    config: &ExternalCliAgentConfig,
+    path: &Path,
+    state_path: &Path,
+) -> Result<(), String> {
+    let mut state = read_grok_state(state_path)?;
+
+    // 切回「CLI 自身配置」：把接管前的整份文件还原回去。
+    if config.current_provider.trim().is_empty() {
+        if state.managed {
+            if let Some(prev) = state.previous_config.take() {
+                if prev.is_empty() {
+                    // 接管前文件不存在：删掉我们写过的，回到「无 config.toml」。
+                    if path.is_file() {
+                        std::fs::remove_file(path)
+                            .map_err(|e| format!("删除 {} 失败：{e}", path.display()))?;
+                    }
+                } else {
+                    write_private_atomic(path, &prev)?;
+                }
+            }
+            state.managed = false;
+            write_grok_state(state_path, &state)?;
+        }
+        return Ok(());
+    }
+
+    let provider = config
+        .providers
+        .iter()
+        .find(|p| p.id == config.current_provider)
+        .ok_or_else(|| format!("当前供应商 {} 不存在", config.current_provider))?;
+    if provider.config_toml.trim().is_empty() {
+        return Err(format!(
+            "供应商 {} 缺少可落盘的 Grok config.toml",
+            provider.name
+        ));
+    }
+
+    // 首次接管：备份现有文件，之后切供应商始终基于这份备份合并，避免 A→B 残留 A 的 model 键。
+    if !state.managed {
+        state.previous_config = Some(read_text_or_empty(path)?);
+        state.managed = true;
+    }
+    let base = state.previous_config.as_deref().unwrap_or("");
+    let merged = merge_grok_provider_config(base, &provider.config_toml)?;
+    write_private_atomic(path, &merged)?;
+    write_grok_state(state_path, &state)
 }
 
 #[derive(Debug, Clone)]
@@ -1766,6 +1940,145 @@ mod tests {
         };
         assert!(materialize_native_at("opencode", &config, &paths).is_err());
         assert_eq!(std::fs::read_to_string(&paths.config).unwrap(), "[1, 2, 3]");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn grok_provider(id: &str, name: &str, config_toml: &str) -> ExternalCliProvider {
+        ExternalCliProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            config_toml: config_toml.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grok_merge_preserves_marketplace_and_sets_default_model() {
+        let base = r#"[models]
+default = "old"
+
+[marketplace]
+official_marketplace_auto_installed = true
+
+[ui]
+yolo = false
+"#;
+        let provider = r#"[models]
+default = "grok-4.5"
+
+[model."grok-4.5"]
+model = "grok-4.5"
+base_url = "https://relay.example/v1"
+api_key = "sk-x"
+api_backend = "responses"
+context_window = 500000
+"#;
+        let merged = merge_grok_provider_config(base, provider).unwrap();
+        let doc: toml::Table = toml::from_str(&merged).unwrap();
+        assert_eq!(
+            doc.get("models")
+                .and_then(|v| v.get("default"))
+                .and_then(|v| v.as_str()),
+            Some("grok-4.5")
+        );
+        assert!(doc
+            .get("marketplace")
+            .and_then(|v| v.get("official_marketplace_auto_installed"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false));
+        let model = doc
+            .get("model")
+            .and_then(|v| v.get("grok-4.5"))
+            .and_then(|v| v.as_table())
+            .expect("model entry");
+        assert_eq!(
+            model.get("base_url").and_then(|v| v.as_str()),
+            Some("https://relay.example/v1")
+        );
+        assert_eq!(model.get("api_key").and_then(|v| v.as_str()), Some("sk-x"));
+    }
+
+    #[test]
+    fn grok_materialize_restores_previous_config_on_clear() {
+        let root = temp_root("grok-restore");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let state_path = root.join("state.json");
+        let original = "[models]\ndefault = \"native\"\n\n[ui]\nyolo = true\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut config = ExternalCliAgentConfig {
+            providers: vec![grok_provider(
+                "relay",
+                "Relay",
+                r#"[models]
+default = "relay-model"
+
+[model."relay-model"]
+model = "relay-model"
+base_url = "https://relay.example/v1"
+api_key = "sk"
+"#,
+            )],
+            current_provider: "relay".to_string(),
+            ..Default::default()
+        };
+        materialize_grok_at(&config, &path, &state_path).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("relay-model"));
+        assert!(after.contains("yolo = true"));
+
+        config.current_provider.clear();
+        materialize_grok_at(&config, &path, &state_path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn grok_switch_providers_does_not_accumulate_old_model_keys() {
+        let root = temp_root("grok-switch");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.toml");
+        let state_path = root.join("state.json");
+        std::fs::write(&path, "[cli]\nauto_update = true\n").unwrap();
+
+        let mut config = ExternalCliAgentConfig {
+            providers: vec![
+                grok_provider(
+                    "a",
+                    "A",
+                    r#"[models]
+default = "model-a"
+
+[model."model-a"]
+model = "model-a"
+base_url = "https://a.example/v1"
+api_key = "ska"
+"#,
+                ),
+                grok_provider(
+                    "b",
+                    "B",
+                    r#"[models]
+default = "model-b"
+
+[model."model-b"]
+model = "model-b"
+base_url = "https://b.example/v1"
+api_key = "skb"
+"#,
+                ),
+            ],
+            current_provider: "a".to_string(),
+            ..Default::default()
+        };
+        materialize_grok_at(&config, &path, &state_path).unwrap();
+        config.current_provider = "b".to_string();
+        materialize_grok_at(&config, &path, &state_path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("model-b"));
+        assert!(!text.contains("model-a"));
+        assert!(text.contains("auto_update = true"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

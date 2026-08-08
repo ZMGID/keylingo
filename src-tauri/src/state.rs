@@ -232,6 +232,9 @@ pub struct AppState {
     /// 运行时学习到的"该端点拒绝 `prompt_cache_key`"集合（按 base_url）。
     /// 某端点首次因该字段 400 后记入，本会话后续请求不再发，避免重复触发 + 无谓重试。
     pub prompt_cache_key_unsupported: Mutex<HashSet<String>>,
+    /// 运行时学习到的"该端点拒绝 `prompt_cache_retention`"集合（按 base_url）。
+    /// long 档 24h 被拒时记入，后续只发 key 不发 24h。
+    pub prompt_cache_retention_unsupported: Mutex<HashSet<String>>,
     /// 出图端点自愈缓存：(provider_id, normalized_model) → 上次成功的 [`ImageRoute`]。
     /// 首选端点被 provider 判为端点错配后，换端点成功即记入，下次同模型直达正确端点。
     /// 仅内存、不落盘（`ImageRoute` 是运行时枚举，非配置）。
@@ -399,6 +402,7 @@ impl AppState {
             key_cooldowns: Mutex::new(HashMap::new()),
             active_key_idx: Mutex::new(HashMap::new()),
             prompt_cache_key_unsupported: Mutex::new(HashSet::new()),
+            prompt_cache_retention_unsupported: Mutex::new(HashSet::new()),
             image_route_cache: Mutex::new(HashMap::new()),
             mcp_sessions: tokio::sync::Mutex::new(HashMap::new()),
             mcp_tool_snapshots: Mutex::new(mcp_tool_snapshots),
@@ -1280,6 +1284,22 @@ impl AppState {
     /// 记住该 base_url 拒绝 prompt_cache_key（首次 400 后调用）。
     pub fn mark_prompt_cache_key_unsupported(&self, base_url: &str) {
         self.prompt_cache_key_unsupported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(base_url.to_string());
+    }
+
+    /// 该 base_url 是否已被学习为"拒绝 prompt_cache_retention"。
+    pub fn prompt_cache_retention_unsupported(&self, base_url: &str) -> bool {
+        self.prompt_cache_retention_unsupported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(base_url)
+    }
+
+    /// 记住该 base_url 拒绝 prompt_cache_retention（首次 400 后调用）。
+    pub fn mark_prompt_cache_retention_unsupported(&self, base_url: &str) {
+        self.prompt_cache_retention_unsupported
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(base_url.to_string());

@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { MoreHorizontal } from 'lucide-react'
+import { MoreHorizontal, Pin } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
 import { isProvisionalTitle } from './conversationTitle'
@@ -53,6 +53,7 @@ interface ConversationListProps {
   }
   onSelectConversation: (id: string) => void
   onRenameConversation: (id: string, title: string) => Promise<void>
+  onTogglePinConversation: (id: string, pinned: boolean) => Promise<void>
   onExportConversation: (id: string, title: string) => Promise<void>
   onDeleteConversation: (id: string) => Promise<void>
   onMoveConversationToProject: (id: string, projectId: string | undefined) => Promise<void>
@@ -73,6 +74,7 @@ export const ConversationList = memo(function ConversationList({
   reorder,
   onSelectConversation,
   onRenameConversation,
+  onTogglePinConversation,
   onExportConversation,
   onDeleteConversation,
   onMoveConversationToProject,
@@ -267,6 +269,24 @@ export const ConversationList = memo(function ConversationList({
                     {(conv.assistant_name ?? conv.assistantName)}
                   </span>
                 )}
+              </button>
+              {/* 置顶直接露在行上：悬停出现；已置顶则常显并加粗，不塞进 ⋯ */}
+              <button
+                type="button"
+                data-no-drag
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void onTogglePinConversation(conv.id, !conv.pinned)
+                }}
+                className={`shrink-0 rounded-md p-0.5 transition-opacity hover:bg-black/[0.06] dark:hover:bg-white/[0.1] ${
+                  conv.pinned
+                    ? 'text-neutral-700 opacity-100 dark:text-neutral-200'
+                    : 'text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-neutral-600 dark:hover:text-neutral-200'
+                }`}
+                aria-label={conv.pinned ? t.chatUnpin : t.chatPin}
+                title={conv.pinned ? t.chatUnpin : t.chatPin}
+              >
+                <Pin size={14} strokeWidth={conv.pinned ? 2.5 : 1.75} />
               </button>
               <button
                 type="button"

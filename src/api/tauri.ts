@@ -504,6 +504,7 @@ export type ExternalCliAgentConfig = {
 /**
  * 一个第三方供应商。各 CLI 用到的字段不同：claude / gemini 用 `env`，
  * codex 用 `configToml` + `authJson`（物化成私有 CODEX_HOME）；
+ * grok 用 `configToml`（把 models / model 段合并进 `~/.grok/config.toml`）；
  * OpenCode / Pi 用 `configJson` + `authJson` + `defaultModel` 合并进原生全局配置；
  * Pi 另用 `defaultReasoning` 写入终端默认 thinking 档位。
  */
@@ -877,13 +878,15 @@ export type ProviderRequestConfig = {
   /** 是否跟随系统代理。默认 true；关掉走直连。 */
   useSystemProxy?: boolean
   /**
-   * prompt 缓存。`undefined` = 跟随协议默认（OpenAI Chat/Responses 开、Anthropic 关），
-   * 用户拨过开关才是显式布尔。与 Rust 侧 `ProviderRequestConfig.prompt_caching: Option<bool>`
-   * 一致 —— 裸 boolean 分不清「用户选了 true」和「默认填的 true」。
+   * 遗留 on/off。sanitize/normalize 时迁移进 `promptCacheRetention`，新配置不再写入。
+   * @deprecated 使用 promptCacheRetention
    */
   promptCaching?: boolean | null
-  /** 'short'（5 分钟）| 'long'（1 小时，需 beta 头） */
-  promptCacheRetention?: string
+  /**
+   * Prompt 缓存策略（对齐 pi）：`none` | `short`（默认）| `long`。
+   * short = 发默认档字段；long = 叠加长 TTL（Anthropic 1h / OpenAI 24h）；none = 不发。
+   */
+  promptCacheRetention?: 'none' | 'short' | 'long' | string
   /** '' 关闭 | 'claude_code' | 'codex' | 'grok' */
   cliIdentity?: string
   /** 身份版本号，空则用内置常量 */
@@ -1144,7 +1147,7 @@ export type HimalayaInstallResult = {
   message: string
 }
 
-/** 能力插件（领域 CLI 等）状态 —— 扩展 → 插件 */
+/** 能力插件（领域 CLI 等）状态 —— 设置 → 插件 */
 export type PluginStatus = {
   id: string
   name: string
@@ -1447,10 +1450,7 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
         : [],
       // 默认跟随系统代理 —— 与加这个开关之前的行为一致。
       useSystemProxy: provider.request?.useSystemProxy !== false,
-      // 保持 undefined/null 语义：由协议决定默认，见 promptCachingEnabled。
-      promptCaching: provider.request?.promptCaching ?? null,
-      promptCacheRetention:
-        provider.request?.promptCacheRetention === 'long' ? 'long' : 'short',
+      promptCacheRetention: resolvePromptCacheRetention(provider.request),
       cliIdentity: provider.request?.cliIdentity ?? '',
       cliIdentityVersion: provider.request?.cliIdentityVersion ?? '',
     },
@@ -1471,18 +1471,33 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
  * （gpt-5 在其上开 web_search 会 400）。前端据此把「内置」选项置灰。
  * 与 Rust 侧 `model_metadata::builtin_web_search_supported` 保持一致。
  */
+export type PromptCacheRetention = 'none' | 'short' | 'long'
+
 /**
- * 该协议下 prompt 缓存是否有可发送的字段，以及未显式设置时的默认值。
- * 必须与 Rust 侧 `ModelProvider::prompt_caching_enabled` 一致。
+ * 规范化 / 迁移 prompt 缓存策略（与 Rust sanitize 同序）：
+ * 1) retention 已是 none|short|long → 用之（忽略遗留 bool）
+ * 2) 否则用遗留 bool：false→none，true→short
+ * 3) 否则 short
  */
-export function promptCachingDefault(apiFormat?: string): boolean {
-  return normalizeProviderApiFormat(apiFormat) !== 'anthropic_messages'
+export function resolvePromptCacheRetention(
+  request?: ProviderRequestConfig | null,
+): PromptCacheRetention {
+  const raw = (request?.promptCacheRetention ?? '').trim()
+  if (raw === 'none' || raw === 'short' || raw === 'long') return raw
+  if (request?.promptCaching === false) return 'none'
+  if (request?.promptCaching === true) return 'short'
+  return 'short'
 }
 
+/** 该协议是否有可发送的客户端缓存字段（Gemini / xAI 无）。 */
 export function promptCachingSupported(apiFormat?: string): boolean {
   const kind = normalizeProviderApiFormat(apiFormat)
-  // Gemini 服务端隐式缓存、xAI 直接拒收 prompt_cache_key —— 都没有可发的字段。
   return kind !== 'gemini' && kind !== 'xai_responses'
+}
+
+/** 当前策略是否会发客户端缓存字段。 */
+export function promptCachingEnabled(request?: ProviderRequestConfig | null): boolean {
+  return resolvePromptCacheRetention(request) !== 'none'
 }
 
 export function builtinWebSearchSupported(apiFormat?: string): boolean {

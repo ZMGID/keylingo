@@ -944,11 +944,11 @@ button.chat-composer-status-item:hover {
 }
 
 .chat-composer-send.is-ready {
-  color: #d2755f;
+  color: #2f6ff0;
 }
 
 .chat-composer-send.is-ready:hover {
-  color: #c06249;
+  color: #2960d8;
 }
 
 .chat-composer-send.is-ready:active {
@@ -956,11 +956,11 @@ button.chat-composer-status-item:hover {
 }
 
 .dark .chat-composer-send.is-ready {
-  color: #e8a090;
+  color: #5c8df7;
 }
 
 .dark .chat-composer-send.is-ready:hover {
-  color: #f0b3a5;
+  color: #6f9bf8;
 }
 
 .chat-message-navigator {
@@ -2133,15 +2133,15 @@ button.chat-composer-status-item:hover {
   color: rgb(196, 181, 253);
 }
 
-/* 普通工具「运行中」状态：terracotta 工具名亮度呼吸，整行不缩放/发光。
-   颜色与已完成 ✓ 的 #C56646 / dark #E39A78 同源。 */
+/* 普通工具「运行中」状态：accent blue 工具名亮度呼吸，整行不缩放/发光。
+   颜色与已完成 ✓ 的 #2f6ff0 / dark #5c8df7 同源。 */
 .chat-motion-tool-shimmer {
-  color: #c56646;
+  color: #2f6ff0;
   animation: chat-motion-text-pulse 2s ease-in-out infinite;
 }
 
 .dark .chat-motion-tool-shimmer {
-  color: #e39a78;
+  color: #5c8df7;
 }
 
 .chat-compaction-divider {
@@ -3499,6 +3499,25 @@ button.chat-composer-status-item:hover {
   color: var(--text-muted);
 }
 .kv-nav-item.active svg { color: var(--accent); }
+/* Kivio logo mark：纯黑 PNG，尺寸对齐其它线性图标；暗色反白。 */
+.kv-nav-logo-mark {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  object-fit: contain;
+  opacity: 0.72;
+}
+.kv-nav-item.active .kv-nav-logo-mark {
+  opacity: 1;
+}
+.dark .kv-nav-logo-mark {
+  filter: invert(1);
+}
+.settings-embedded-nav-icon .kv-nav-logo-mark {
+  width: 17px;
+  height: 17px;
+}
 .kv-nav-spacer { flex: 1; }
 
 .kv-content {
@@ -4599,6 +4618,15 @@ input[type="password"]::-ms-clear {
   gap: 10px;
 }
 .kv-form-grid--single { grid-template-columns: minmax(0, 1fr); }
+/* 纵向字段组：全宽字段 + 双列网格上下叠放，间距统一 */
+.kv-form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kv-form-stack-note {
+  margin: 0 0 8px;
+}
 
 .kv-native-provider-form {
   display: flex;
@@ -6904,11 +6932,13 @@ input[type="password"]::-ms-clear {
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
 
-/* ---- 生成中状态行的动效 logo（GRD-02 · 回波）。点阵相位在 SVG 里逐点带 --p，
-   这里只负责动画与颜色（StreamStatusLine.tsx）。 ---- */
+/* ---- 生成中状态行的动效 logo（GRD-02 · 回波）。
+   点阵：等距方格 step=3 / r=1.05（点间隙清晰）；相位 --p = 距中心归一化距离，
+   delay 用 (1-p) 形成从中心向外的回波。颜色与动画只在这里。 ---- */
 .kv-stream-logo {
   display: block;
   overflow: visible;
+  flex-shrink: 0;
   --k: 1; /* 速度倍率 */
   --dot: #1d6bf0; /* 唯一颜色 */
 }

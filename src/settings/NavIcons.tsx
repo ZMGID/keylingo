@@ -89,12 +89,18 @@ export function LensIcon(props: IconProps) {
   )
 }
 
-// AI 客户端：对话气泡
-export function ChatIcon(props: IconProps) {
+// AI 客户端：应用 logo mark（与 RuntimePicker / 内置 Agent 一致）
+export function ChatIcon({ size = 24, className }: IconProps) {
   return (
-    <svg {...svgProps(props)}>
-      <path d="M5 5 H19 A2 2 0 0 1 21 7 V15 A2 2 0 0 1 19 17 H11 L6.5 20.5 V17 H5 A2 2 0 0 1 3 15 V7 A2 2 0 0 1 5 5 Z" />
-    </svg>
+    <img
+      src="/logo-mark.png"
+      alt=""
+      aria-hidden="true"
+      width={size}
+      height={size}
+      className={['kv-nav-logo-mark', className].filter(Boolean).join(' ')}
+      draggable={false}
+    />
   )
 }
 
@@ -169,6 +175,19 @@ export function ConnectorsIcon(props: IconProps) {
       <path d="M9.5 7 H7 A4 4 0 0 0 7 15 H9.5" />
       <path d="M14.5 7 H17 A4 4 0 0 1 17 15 H14.5" />
       <path d="M8.5 11 H15.5" />
+    </svg>
+  )
+}
+
+// 插件：拼图块（与扩展中心里原 Puzzle 语义一致）
+export function PluginsIcon(props: IconProps) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M12 3.5 V6.5" />
+      <path d="M12 17.5 V20.5" />
+      <path d="M3.5 12 H6.5" />
+      <path d="M17.5 12 H20.5" />
+      <path d="M8.5 6.5 H11 A1.5 1.5 0 1 1 14 6.5 H15.5 A2 2 0 0 1 17.5 8.5 V11 A1.5 1.5 0 1 1 17.5 14 V15.5 A2 2 0 0 1 15.5 17.5 H14 A1.5 1.5 0 1 1 11 17.5 H8.5 A2 2 0 0 1 6.5 15.5 V14 A1.5 1.5 0 1 1 6.5 11 V8.5 A2 2 0 0 1 8.5 6.5 Z" />
     </svg>
   )
 }

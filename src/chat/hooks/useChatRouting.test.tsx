@@ -9,11 +9,12 @@ import { useChatRouting } from './useChatRouting'
  *   2. 挂载即执行一次 + 订阅 hashchange 的时序
  *   3. 「已是当前会话则跳过重载」这条防双读逻辑
  */
-function setup(initialHash = '#chat') {
+function setup(initialHash = '#chat', opts?: { onOpenPluginsSettings?: () => void }) {
   window.location.hash = initialHash
   const onViewChange = vi.fn()
   const onLoadConversation = vi.fn()
   const onResetConversation = vi.fn()
+  const onOpenPluginsSettings = opts?.onOpenPluginsSettings ?? vi.fn()
 
   const rendered = renderHook(() => {
     const currentConversationIdRef = useRef<string | null>(null)
@@ -22,11 +23,18 @@ function setup(initialHash = '#chat') {
       onLoadConversation,
       onResetConversation,
       currentConversationIdRef,
+      onOpenPluginsSettings,
     })
     return { routing, currentConversationIdRef }
   })
 
-  return { ...rendered, onViewChange, onLoadConversation, onResetConversation }
+  return {
+    ...rendered,
+    onViewChange,
+    onLoadConversation,
+    onResetConversation,
+    onOpenPluginsSettings,
+  }
 }
 
 describe('useChatRouting 挂载即解析', () => {
@@ -62,7 +70,7 @@ describe('useChatRouting 分支顺序', () => {
     ['#chat/mcp', 'mcp'],
     ['#chat/knowledge', 'knowledge'],
     ['#chat/notes', 'notes'],
-    ['#chat/plugins', 'plugins'],
+    ['#chat/sessions', 'sessions'],
     ['#chat/onboarding', 'onboarding'],
   ]
 
@@ -74,6 +82,13 @@ describe('useChatRouting 分支顺序', () => {
       expect(onResetConversation).not.toHaveBeenCalled()
     })
   }
+
+  it('#chat/plugins → 走设置插件重定向，不当作会话加载', () => {
+    const { onViewChange, onLoadConversation, onOpenPluginsSettings } = setup('#chat/plugins')
+    expect(onOpenPluginsSettings).toHaveBeenCalled()
+    expect(onViewChange).not.toHaveBeenCalled()
+    expect(onLoadConversation).not.toHaveBeenCalled()
+  })
 })
 
 describe('useChatRouting hashchange', () => {
@@ -142,7 +157,7 @@ describe('useChatRouting sync*Route', () => {
       [r.syncOnboardingRoute, '#chat/onboarding'],
       [r.syncAssistantCenterRoute, '#chat/assistants'],
       [r.syncSkillCenterRoute, '#chat/skill'],
-      [r.syncPluginCenterRoute, '#chat/plugins'],
+      [r.syncSessionCenterRoute, '#chat/sessions'],
       [r.syncMcpCenterRoute, '#chat/mcp'],
       [r.syncKnowledgeCenterRoute, '#chat/knowledge'],
       [r.syncNotesRoute, '#chat/notes'],

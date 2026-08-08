@@ -9,6 +9,7 @@ import {
   isChatNotesPath,
   isChatOnboardingRoute,
   isChatPluginCenterPath,
+  isChatSessionCenterPath,
   isChatSettingsPath,
   isChatSkillCenterPath,
   setHash,
@@ -16,7 +17,7 @@ import {
 
 type ChatView =
   | 'conversation' | 'settings' | 'assistants' | 'skill'
-  | 'mcp' | 'knowledge' | 'notes' | 'plugins' | 'onboarding'
+  | 'mcp' | 'knowledge' | 'notes' | 'sessions' | 'onboarding'
 
 interface UseChatRoutingParams {
   onViewChange: (view: ChatView) => void
@@ -26,6 +27,8 @@ interface UseChatRoutingParams {
   onResetConversation: () => void
   /** 读当前会话 id，用于跳过「刚 apply 完又被路由重载一遍」的双读。 */
   currentConversationIdRef: React.MutableRefObject<string | null>
+  /** 旧 `#chat/plugins` 入口：插件已迁入设置，重定向到设置 → 插件。 */
+  onOpenPluginsSettings?: () => void
 }
 
 /**
@@ -41,6 +44,7 @@ export function useChatRouting({
   onLoadConversation,
   onResetConversation,
   currentConversationIdRef,
+  onOpenPluginsSettings,
 }: UseChatRoutingParams) {
   const syncConversationRoute = useCallback((conversationId: string | null) => {
     setHash(conversationHash(conversationId))
@@ -50,7 +54,7 @@ export function useChatRouting({
   const syncOnboardingRoute = useCallback(() => setHash('#chat/onboarding'), [])
   const syncAssistantCenterRoute = useCallback(() => setHash('#chat/assistants'), [])
   const syncSkillCenterRoute = useCallback(() => setHash('#chat/skill'), [])
-  const syncPluginCenterRoute = useCallback(() => setHash('#chat/plugins'), [])
+  const syncSessionCenterRoute = useCallback(() => setHash('#chat/sessions'), [])
   const syncMcpCenterRoute = useCallback(() => setHash('#chat/mcp'), [])
   const syncKnowledgeCenterRoute = useCallback(() => setHash('#chat/knowledge'), [])
   const syncNotesRoute = useCallback(() => setHash('#chat/notes'), [])
@@ -86,8 +90,13 @@ export function useChatRouting({
         onViewChange('notes')
         return
       }
+      if (isChatSessionCenterPath(path)) {
+        onViewChange('sessions')
+        return
+      }
+      // 插件已迁入设置；旧链接 `#chat/plugins` 重定向
       if (isChatPluginCenterPath(path)) {
-        onViewChange('plugins')
+        onOpenPluginsSettings?.()
         return
       }
       onViewChange('conversation')
@@ -105,7 +114,13 @@ export function useChatRouting({
     loadFromRoute()
     window.addEventListener('hashchange', loadFromRoute)
     return () => window.removeEventListener('hashchange', loadFromRoute)
-  }, [currentConversationIdRef, onLoadConversation, onResetConversation, onViewChange])
+  }, [
+    currentConversationIdRef,
+    onLoadConversation,
+    onOpenPluginsSettings,
+    onResetConversation,
+    onViewChange,
+  ])
 
   return {
     syncConversationRoute,
@@ -113,7 +128,7 @@ export function useChatRouting({
     syncOnboardingRoute,
     syncAssistantCenterRoute,
     syncSkillCenterRoute,
-    syncPluginCenterRoute,
+    syncSessionCenterRoute,
     syncMcpCenterRoute,
     syncKnowledgeCenterRoute,
     syncNotesRoute,

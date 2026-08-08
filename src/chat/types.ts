@@ -530,6 +530,8 @@ export interface Conversation {
   created_at: number
   updated_at: number
   pinned?: boolean
+  /** 对话库归档：侧栏默认隐藏 */
+  archived?: boolean
   folder?: string
   project_id?: string | null
   projectId?: string | null
@@ -594,6 +596,7 @@ export interface ConversationListItem {
   created_at: number
   updated_at: number
   pinned?: boolean
+  archived?: boolean
   folder?: string
   project_id?: string | null
   projectId?: string | null
@@ -603,8 +606,43 @@ export interface ConversationListItem {
   assistantId?: string | null
   assistant_name?: string | null
   assistantName?: string | null
+  agent_runtime?: AgentRuntimeConfig
+  agentRuntime?: AgentRuntimeConfig
   forked_from?: ForkOrigin | null
   forkedFrom?: ForkOrigin | null
+}
+
+/** 对话库书架 / 筛选维度 */
+export type ConversationLibraryShelf =
+  | 'all'
+  | 'starred'
+  | 'uncategorized'
+  | 'recent7d'
+  | 'archived'
+
+export type ConversationLibrarySort = 'updated' | 'created' | 'title' | 'messages'
+export type ConversationLibraryOrder = 'asc' | 'desc'
+export type ConversationLibraryGroup = 'none' | 'day' | 'week' | 'project' | 'set'
+export type ConversationLibraryDensity = 'comfortable' | 'compact'
+
+export interface ConversationLibraryQuery {
+  offset?: number
+  limit?: number
+  sort?: ConversationLibrarySort
+  order?: ConversationLibraryOrder
+  q?: string
+  fullText?: boolean
+  shelf?: ConversationLibraryShelf
+  projectId?: string | null
+  setId?: string | null
+  assistantId?: string | null
+  providerId?: string | null
+  runtimeKind?: 'builtin' | 'external' | null
+}
+
+export interface ConversationLibraryPage {
+  items: ConversationListItem[]
+  total: number
 }
 
 export type ChatUserProfile = {

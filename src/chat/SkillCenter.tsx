@@ -663,7 +663,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
               >
                 {label}
                 {view === id && (
-                  <span className="chat-motion-tab-underline absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-[#C56646] dark:bg-[#E39A78]" />
+                  <span className="chat-motion-tab-underline absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-[#2f6ff0] dark:bg-[#5c8df7]" />
                 )}
               </button>
             ))}
@@ -731,7 +731,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                                         type="checkbox"
                                         checked={cliSelected.has(skill.id)}
                                         onChange={() => toggleCliSelected(skill.id)}
-                                        className="size-3.5 shrink-0 accent-[#C56646]"
+                                        className="size-3.5 shrink-0 accent-[#2f6ff0]"
                                       />
                                       <div className="min-w-0 flex-1">
                                         <div className="truncate text-[12.5px] font-medium text-neutral-800 dark:text-neutral-100">{skill.name}</div>
@@ -944,7 +944,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-start gap-2">
-              <Sparkles size={16} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
+              <Sparkles size={16} className="mt-0.5 shrink-0 text-[#2f6ff0] dark:text-[#5c8df7]" />
               <div className="min-w-0 flex-1">
                 <h3 id="skill-preview-title" className="truncate text-[15px] font-semibold text-neutral-900 dark:text-neutral-100">
                   {selectedSkillPreview.name}

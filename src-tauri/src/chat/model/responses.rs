@@ -98,11 +98,8 @@ impl LanguageModelProvider for OpenAiResponsesProvider<'_> {
 }
 
 impl OpenAiResponsesProvider<'_> {
-    /// 发送 Responses 请求；若因严格端点拒绝 `prompt_cache_key` 而 400，自动去掉该字段重试
-    /// 一次，并把该 base_url 记入 state（本会话后续 `request_body` 就地跳过）。
-    ///
-    /// 重试落在**发送层**而不是整轮生成层：整轮重跑会把第一次的失败也记进用量账本与请求调试
-    /// 缓冲，流式路径还会重复吐字。与 openai.rs::send_chat_body 同形状，学习结果也共用。
+    /// 发送 Responses 请求；若严格端点拒绝 `prompt_cache_key` / `prompt_cache_retention`
+    /// 而 400，记入 state 后去掉对应字段重试（与 openai.rs::send_chat_body 同形状）。
     async fn send_responses_body(
         &self,
         request: &GenerateRequest,
@@ -112,12 +109,21 @@ impl OpenAiResponsesProvider<'_> {
         let body = self.request_body(request, stream);
         let result = self.post_responses(request, &body, stream, label).await;
         if let Err(ref err) = result {
-            // 仅当本次确实发了 prompt_cache_key、且错误点名了它，才去掉重试（避免误伤别的 400）。
+            let mut learned = false;
             if body.get("prompt_cache_key").is_some()
                 && super::openai::error_rejects_prompt_cache_key(err)
             {
                 self.state
                     .mark_prompt_cache_key_unsupported(&self.provider.base_url);
+                learned = true;
+            } else if body.get("prompt_cache_retention").is_some()
+                && super::openai::error_rejects_prompt_cache_retention(err)
+            {
+                self.state
+                    .mark_prompt_cache_retention_unsupported(&self.provider.base_url);
+                learned = true;
+            }
+            if learned {
                 let retry_body = self.request_body(request, stream);
                 return self
                     .post_responses(request, &retry_body, stream, label)
@@ -505,15 +511,8 @@ impl OpenAiResponsesProvider<'_> {
                 body["include"] = Value::Array(include);
             }
         }
-        // 会话级缓存键：Responses 与 Chat Completions 认同一个 `prompt_cache_key`
-        // （官方按稳定前缀 + 该键做缓存路由）。同一对话每轮同值，提升命中。
-        // 与 openai.rs 共用 `state.prompt_cache_key_unsupported` 的学习结果——严格端点
-        // 首次 400 后就地跳过，不必两个适配器各踩一遍。
-        //
-        // xAI 不发：它的请求体参数表里确实有 `prompt_cache_key`，但文档描述的缓存机制是
-        // 「Automatic caching of conversation history」——靠 `previous_response_id` 续接
-        // 会话省钱，而不是按这个键做前缀路由。我们不用 previous_response_id，发了拿不到
-        // 任何好处。
+        // Prompt 缓存 short/long：与 Chat Completions 同发 `prompt_cache_key`；
+        // long → `prompt_cache_retention:24h`（对齐 pi）。xAI 永不发（靠 previous_response_id）。
         if !is_xai
             && self.provider.prompt_caching_enabled()
             && !self
@@ -527,6 +526,15 @@ impl OpenAiResponsesProvider<'_> {
                 .filter(|id| !id.is_empty())
             {
                 body["prompt_cache_key"] = Value::String(conversation_id.to_string());
+                if matches!(
+                    self.provider.cache_retention(),
+                    crate::settings::CacheRetention::Long
+                ) && !self
+                    .state
+                    .prompt_cache_retention_unsupported(&self.provider.base_url)
+                {
+                    body["prompt_cache_retention"] = Value::String("24h".to_string());
+                }
             }
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
@@ -1671,7 +1679,61 @@ mod tests {
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["prompt_cache_key"], "conv_abc");
+        assert!(body.get("prompt_cache_retention").is_none());
         assert_eq!(body["input"][0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_prompt_cache_retention_none_long_and_learn() {
+        let state = crate::state::AppState::new_headless(
+            crate::settings::Settings::default(),
+            std::env::temp_dir(),
+        );
+        let body_with = |retention: &str| {
+            let provider = ModelProvider {
+                id: "test".into(),
+                name: "OpenAI".into(),
+                api_keys: vec!["sk-test".into()],
+                api_key_legacy: None,
+                base_url: "https://api.openai.com/v1".into(),
+                available_models: vec!["gpt-5.5".into()],
+                enabled_models: vec!["gpt-5.5".into()],
+                enabled: true,
+                api_format: "openai_responses".into(),
+                model_overrides: Default::default(),
+                compress_request_body: false,
+                request: crate::settings::ProviderRequestConfig {
+                    prompt_cache_retention: retention.into(),
+                    ..Default::default()
+                },
+            };
+            let request = GenerateRequest {
+                model: "gpt-5.5".into(),
+                system: "sys".into(),
+                messages: vec![ModelMessage {
+                    role: ModelRole::User,
+                    content: vec![MessagePart::Text { text: "hi".into() }],
+                }],
+                tools: Vec::new(),
+                options: GenerateOptions::default(),
+                metadata: crate::chat::model::RequestMetadata {
+                    conversation_id: Some("conv_abc".into()),
+                    ..Default::default()
+                },
+            };
+            OpenAiResponsesProvider::new(&state, &provider, 1).request_body(&request, false)
+        };
+        assert!(body_with("none").get("prompt_cache_key").is_none());
+        let short = body_with("short");
+        assert_eq!(short["prompt_cache_key"], "conv_abc");
+        assert!(short.get("prompt_cache_retention").is_none());
+        let long = body_with("long");
+        assert_eq!(long["prompt_cache_key"], "conv_abc");
+        assert_eq!(long["prompt_cache_retention"], "24h");
+        state.mark_prompt_cache_retention_unsupported("https://api.openai.com/v1");
+        let after = body_with("long");
+        assert_eq!(after["prompt_cache_key"], "conv_abc");
+        assert!(after.get("prompt_cache_retention").is_none());
     }
 
     #[test]

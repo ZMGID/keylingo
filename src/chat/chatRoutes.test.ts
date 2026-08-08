@@ -15,6 +15,7 @@ import {
   isChatNotesPath,
   isChatOnboardingRoute,
   isChatPluginCenterPath,
+  isChatSessionCenterPath,
   isChatSettingsPath,
   isChatSkillCenterPath,
   setHash,
@@ -31,6 +32,7 @@ describe('chatRoutes 判定', () => {
       ['chat/assistants', isChatAssistantCenterPath],
       ['chat/skill', isChatSkillCenterPath],
       ['chat/plugins', isChatPluginCenterPath],
+      ['chat/sessions', isChatSessionCenterPath],
       ['chat/mcp', isChatMcpCenterPath],
       ['chat/knowledge', isChatKnowledgeCenterPath],
       ['chat/notes', isChatNotesPath],
@@ -61,8 +63,8 @@ describe('chatRoutes 判定', () => {
     const convPath = 'chat/abc-123'
     for (const predicate of [
       isChatSettingsPath, isChatAssistantCenterPath, isChatSkillCenterPath,
-      isChatPluginCenterPath, isChatMcpCenterPath, isChatKnowledgeCenterPath,
-      isChatNotesPath, isChatOnboardingRoute,
+      isChatPluginCenterPath, isChatSessionCenterPath, isChatMcpCenterPath,
+      isChatKnowledgeCenterPath, isChatNotesPath, isChatOnboardingRoute,
     ]) {
       expect(predicate(convPath)).toBe(false)
     }
@@ -103,18 +105,12 @@ describe('getRouteConversationId', () => {
   })
 
   it('排除清单里的中心页返回 null', () => {
-    for (const seg of ['settings', 'assistants', 'skill', 'knowledge', 'onboarding']) {
+    for (const seg of [
+      'settings', 'assistants', 'skill', 'knowledge', 'onboarding',
+      'mcp', 'notes', 'plugins', 'sessions',
+    ]) {
       withHash(`#chat/${seg}`)
       expect(getRouteConversationId()).toBeNull()
-    }
-  })
-
-  it('mcp / notes / plugins 未在排除清单内（保留搬迁前的既有行为）', () => {
-    // 这三条由 loadFromRoute 更靠前的分支拦截，走不到这里；
-    // 此断言锁住"解析函数本身不排除它们"这一事实，避免后续误以为是遗漏而改坏。
-    for (const seg of ['mcp', 'notes', 'plugins']) {
-      withHash(`#chat/${seg}`)
-      expect(getRouteConversationId()).toBe(seg)
     }
   })
 })

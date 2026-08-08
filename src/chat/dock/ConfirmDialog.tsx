@@ -27,7 +27,7 @@ export function ConfirmDialog({
     <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/20 px-4">
       <div className="w-full max-w-sm rounded-lg border border-neutral-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-neutral-900">
         <div className="mb-3 flex items-start gap-2">
-          <TriangleAlert size={17} className="mt-0.5 shrink-0 text-[#C56646] dark:text-[#E39A78]" />
+          <TriangleAlert size={17} className="mt-0.5 shrink-0 text-[#2f6ff0] dark:text-[#5c8df7]" />
           <div className="min-w-0 flex-1">
             <div className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100">{title}</div>
             <div className="mt-1 break-all text-[12px] text-neutral-500 dark:text-neutral-400">{message}</div>

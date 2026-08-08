@@ -27,8 +27,13 @@ export function isChatSkillCenterPath(path: string): boolean {
   return path === 'chat/skill' || path.startsWith('chat/skill/')
 }
 
+/** @deprecated 插件已迁入设置；保留判定用于把旧 `#chat/plugins` 重定向到设置 → 插件。 */
 export function isChatPluginCenterPath(path: string): boolean {
   return path === 'chat/plugins' || path.startsWith('chat/plugins/')
+}
+
+export function isChatSessionCenterPath(path: string): boolean {
+  return path === 'chat/sessions' || path.startsWith('chat/sessions/')
 }
 
 export function isChatMcpCenterPath(path: string): boolean {
@@ -45,9 +50,7 @@ export function isChatNotesPath(path: string): boolean {
 
 /**
  * 从当前 hash 解析会话 id；非会话路由返回 null。
- *
- * 注意排除清单里没有 mcp / notes / plugins —— 这是搬迁前的既有行为，原样保留。
- * 这三条路由由 loadFromRoute 里更靠前的分支拦截，走不到解析会话这一步。
+ * 中心页（settings / assistants / skill / mcp / notes / sessions / plugins / …）一律排除。
  */
 export function getRouteConversationId(): string | null {
   const path = hashPath()
@@ -57,6 +60,10 @@ export function getRouteConversationId(): string | null {
   if (rest === 'assistants' || rest.startsWith('assistants/')) return null
   if (rest === 'skill' || rest.startsWith('skill/')) return null
   if (rest === 'knowledge' || rest.startsWith('knowledge/')) return null
+  if (rest === 'sessions' || rest.startsWith('sessions/')) return null
+  if (rest === 'plugins' || rest.startsWith('plugins/')) return null
+  if (rest === 'mcp' || rest.startsWith('mcp/')) return null
+  if (rest === 'notes' || rest.startsWith('notes/')) return null
   if (rest === 'onboarding' || rest.startsWith('onboarding/')) return null
   return decodeURIComponent(rest)
 }

@@ -317,7 +317,7 @@ export function ReplaceTranslateOverlay({
           )}
           {/* 复制反馈用独立瞬态胶囊，不遮盖真实状态（避免与 statusTitle 警告提示错配）。 */}
           {copied && (
-            <div className="px-3 py-1.5 rounded-full text-[12px] font-medium bg-[#D97757] text-white shadow-lg backdrop-blur-sm">
+            <div className="px-3 py-1.5 rounded-full text-[12px] font-medium bg-[#2f6ff0] text-white shadow-lg backdrop-blur-sm">
               {copiedLabel}
             </div>
           )}
@@ -342,7 +342,7 @@ export function ReplaceTranslateOverlay({
           />
           {selectionBox && (
             <div
-              className="absolute border border-[#D97757] bg-[#D97757]/15 pointer-events-none"
+              className="absolute border border-[#2f6ff0] bg-[#2f6ff0]/15 pointer-events-none"
               style={{
                 left: selectionBox.x,
                 top: selectionBox.y,
