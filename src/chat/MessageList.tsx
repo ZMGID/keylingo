@@ -33,6 +33,7 @@ import { StreamStatusLine } from './StreamStatusLine'
 import { getActiveGroup, useGroupsVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
 import {
+  estimateMessageRenderHeight,
   estimateMessageRenderCost,
   getCachedRowMeasurement,
   sendReserveHeight,
@@ -91,6 +92,21 @@ type RenderItem =
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
   | { kind: 'compaction-progress'; key: string; afterIndex: number }
+
+function contentRevision(text: string | undefined): string {
+  if (!text) return '0'
+  return `${text.length}:${text.slice(0, 20)}:${text.slice(-20)}`
+}
+
+function measurementKey(item: RenderItem): string {
+  if (item.kind === 'message') {
+    return `${item.key}:${contentRevision(item.message.content)}:${item.message.segments?.length ?? 0}:${item.message.tool_calls?.length ?? item.message.toolCalls?.length ?? 0}`
+  }
+  if (item.kind === 'group') {
+    return `${item.key}:${item.messages.map((message) => `${message.id}:${contentRevision(message.content)}`).join('|')}`
+  }
+  return item.key
+}
 
 function streamErrorDegraded(error: string): DegradedAnswer {
   const normalized = error.toLowerCase()
@@ -441,6 +457,11 @@ function MessageListBase({
   }, [error, messages])
 
   const layoutKey = `${conversationId ?? 'empty'}:${Math.round((viewportEl?.clientWidth ?? 0) / 16) * 16}`
+  const tailMeasurementKey = `tail:${streaming || streamFrozen ? 'live' : 'settled'}`
+  const historyMeasurementRevision = useMemo(
+    () => historyItems.map(measurementKey).join('|'),
+    [historyItems],
+  )
 
   // 计算每一行的初始估算高度。真实高度由 TanStack Virtual 的 measureElement
   // 覆盖；估算只负责首次切换/首次滚动时快速建立窗口，不再把整份历史拆成两套 DOM。
@@ -451,7 +472,8 @@ function MessageListBase({
         map.set(item.key, item.size)
         continue
       }
-      const cached = getCachedRowMeasurement(layoutKey, item.key)
+      const rowKey = measurementKey(item)
+      const cached = getCachedRowMeasurement(layoutKey, rowKey)
       if (cached !== undefined) {
         map.set(item.key, cached)
         continue
@@ -460,6 +482,7 @@ function MessageListBase({
         ? [item.message]
         : item.kind === 'group' ? item.messages : []
       let cost = 0
+      let height = 0
       for (const message of messages) {
         const textSegments = (message.segments ?? []).filter((segment) => segment.kind === 'text')
         const texts = textSegments.length > 0
@@ -475,13 +498,22 @@ function MessageListBase({
           attachmentCount: (message.attachments ?? []).length,
           artifactCount,
         })
+        height += estimateMessageRenderHeight({
+          texts,
+          width: Math.max(280, viewportEl?.clientWidth ?? 760),
+          toolCallCount: toolCalls.length,
+          attachmentCount: (message.attachments ?? []).length,
+          artifactCount,
+        })
       }
       const base = item.kind === 'group' ? 180 : 88
-      map.set(item.key, Math.min(720, Math.max(base, base + Math.round(cost / 12))))
+      // Mount cost decides the virtualized window; row size must be estimated in
+      // rendered pixels so a long answer does not begin hundreds of pixels short.
+      map.set(item.key, Math.max(base, height + (cost > 800 ? 24 : 0)))
     }
-    map.set('tail', getCachedRowMeasurement(layoutKey, 'tail') ?? 96)
+    map.set('tail', getCachedRowMeasurement(layoutKey, tailMeasurementKey) ?? 96)
     return map
-  }, [historyItems, layoutKey])
+  }, [historyItems, layoutKey, tailMeasurementKey, viewportEl?.clientWidth])
 
   const tailItem: RenderItem = { kind: 'tail', key: 'tail' }
   const itemCount = historyItems.length + 1
@@ -506,6 +538,7 @@ function MessageListBase({
     estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
     getItemKey: (index) => itemAt(index)?.key ?? `row-${index}`,
     measureElement: (element, entry, instance) => {
+      followHandle.markLayoutCompensation()
       const measured = measureVirtualElement(element, entry, instance)
       const key = element.dataset.chatItemKey
       if (key) {
@@ -528,25 +561,21 @@ function MessageListBase({
     // real browser immediately replaces it with the measured client rect.
     initialRect: { width: 0, height: viewportEl?.clientHeight || 800 },
     anchorTo: 'end',
-    followOnAppend: 'auto',
+    followOnAppend: false,
     useAnimationFrameWithResizeObserver: true,
     useFlushSync: false,
   })
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
-    // 历史区域测量变化时保留用户当前锚点；跟随到底部时由 follow controller
-    // 负责最终钉底，避免两个滚动写入者互相抢控制权。
-    return item.index < historyItems.length && !instance.isAtEnd()
-      ? delta !== 0
-      : false
-  }
   const virtualItems = virtualizer.getVirtualItems()
   const previousLayoutWidthRef = useRef(0)
+  const previousMeasurementRevisionRef = useRef('')
   useLayoutEffect(() => {
     const width = viewportEl?.clientWidth ?? 0
-    if (width === previousLayoutWidthRef.current) return
+    if (width === previousLayoutWidthRef.current && historyMeasurementRevision === previousMeasurementRevisionRef.current) return
     previousLayoutWidthRef.current = width
+    previousMeasurementRevisionRef.current = historyMeasurementRevision
+    followHandle.markLayoutCompensation()
     virtualizer.measure()
-  }, [viewportEl, virtualizer])
+  }, [followHandle, historyMeasurementRevision, layoutKey, viewportEl, virtualizer])
 
   const navigatorNodes = useMemo(() => {
     // targetRenderIndex 仍是「全历史逻辑下标」，导航时用 data-chat-row-index 查找。
@@ -964,7 +993,7 @@ function MessageListBase({
                   key={virtualItem.key}
                   ref={import.meta.env.MODE === 'test' ? undefined : virtualizer.measureElement}
                   data-index={virtualItem.index}
-                  data-chat-item-key={item.key}
+                  data-chat-item-key={item.kind === 'tail' ? tailMeasurementKey : measurementKey(item)}
                   data-chat-row-index={logicalIndex}
                   data-message-id={item.kind === 'message' ? item.message.id : undefined}
                   data-chat-message-list-item={item.kind}

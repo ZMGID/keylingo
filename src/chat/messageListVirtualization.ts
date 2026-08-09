@@ -171,17 +171,46 @@ export function estimateMessageRenderCost({
  *
  * 这**不是**第二个高度估算器 —— itemSize 是 virtua 自己的输入，我们只是别让它瞎猜。
  */
-const HEIGHT_PER_FENCE_PX = 96
-const HEIGHT_PER_LINE_PX = 24
-const CHARS_PER_LINE = 56
+const HEIGHT_PER_FENCE_PX = 24
+const HEIGHT_PER_LINE_PX = 25
 
-export function estimateRenderHeight(text: string): number {
+export function estimateRenderHeight(text: string, contentWidth = 560): number {
   if (!text) return 0
-  const fences = (text.match(/^\s{0,3}```/gm)?.length ?? 0) / 2
-  const prose = Math.max(0, text.length - fences * 2 * 8)
-  return Math.round(
-    fences * HEIGHT_PER_FENCE_PX + (prose / CHARS_PER_LINE) * HEIGHT_PER_LINE_PX,
-  )
+  const charsPerLine = Math.max(28, Math.min(100, Math.floor(contentWidth / 8)))
+  let height = 0
+  let inCode = false
+  for (const line of text.split('\n')) {
+    if (/^\s{0,3}```/.test(line)) {
+      height += HEIGHT_PER_FENCE_PX
+      inCode = !inCode
+      continue
+    }
+    const wrappedLines = Math.max(1, Math.ceil(Math.max(1, line.length) / charsPerLine))
+    height += wrappedLines * (inCode ? 20 : HEIGHT_PER_LINE_PX)
+  }
+  return Math.round(height)
+}
+
+export type MessageRenderHeightInput = {
+  texts: readonly string[]
+  width: number
+  toolCallCount?: number
+  attachmentCount?: number
+  artifactCount?: number
+}
+
+export function estimateMessageRenderHeight({
+  texts,
+  width,
+  toolCallCount = 0,
+  attachmentCount = 0,
+  artifactCount = 0,
+}: MessageRenderHeightInput): number {
+  return 64
+    + texts.reduce((sum, text) => sum + estimateRenderHeight(text, width), 0)
+    + toolCallCount * 56
+    + attachmentCount * 120
+    + artifactCount * 96
 }
 
 /** virtua 的 itemSize 必须是正数；行全是空的时候给个保守下限。 */

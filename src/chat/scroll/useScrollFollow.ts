@@ -51,6 +51,7 @@ export type ScrollFollowHandle = {
   // 主动脱离跟随（导航跳转到上方消息时用）。
   releaseFollow: () => void
   isFollowing: () => boolean
+  markLayoutCompensation: () => void
 }
 
 const JUMP_BASE_DURATION_MS = 260
@@ -94,6 +95,8 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   const [showJumpButton, setShowJumpButton] = useState(false)
   const jumpRafRef = useRef<number | null>(null)
   const pinRafRef = useRef<number | null>(null)
+  const layoutCompensationTicketRef = useRef(false)
+  const layoutCompensationClearRafRef = useRef<number | null>(null)
 
   // 机制一（对齐 use-stick-to-bottom 的 ignoreScrollToTop）：记下**我们自己写完之后读回来的**
   // scrollTop。下一个 scroll 事件里 el.scrollTop 与之相等 → 这一下是自己弄出来的，不是用户滚的。
@@ -127,6 +130,23 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       cancelAnimationFrame(jumpRafRef.current)
       jumpRafRef.current = null
     }
+  }, [])
+
+  const markLayoutCompensation = useCallback(() => {
+    layoutCompensationTicketRef.current = true
+    if (layoutCompensationClearRafRef.current !== null) {
+      cancelAnimationFrame(layoutCompensationClearRafRef.current)
+    }
+    layoutCompensationClearRafRef.current = requestAnimationFrame(() => {
+      // Scroll events caused by a measurement/anchor correction are delivered
+      // in the scroll steps before the following paint. Keep the ticket through
+      // one extra frame so a ResizeObserver → virtualizer → scroll sequence is
+      // one explicit transaction even when the first rAF also performs pinning.
+      layoutCompensationClearRafRef.current = requestAnimationFrame(() => {
+        layoutCompensationClearRafRef.current = null
+        layoutCompensationTicketRef.current = false
+      })
+    })
   }, [])
 
   const pinToBottom = useCallback(() => {
@@ -268,7 +288,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       lastScrollHeightRef.current = viewport.scrollHeight
       lastScrollTopRef.current = scrollTop
       geometrySampledRef.current = true
-      const selfInduced = scrollTop === token || contentGrewBeforeScroll
+      const layoutCompensation = layoutCompensationTicketRef.current
+      layoutCompensationTicketRef.current = false
+      const selfInduced = scrollTop === token || contentGrewBeforeScroll || layoutCompensation
       dispatch({
         type: 'scroll',
         gap,
@@ -367,6 +389,7 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       typeof ResizeObserver === 'undefined'
         ? null
         : new ResizeObserver(() => {
+            markLayoutCompensation()
             dispatch({ type: 'contentGrowth', gap: getGap() })
             lastScrollHeightRef.current = viewport.scrollHeight
             lastScrollTopRef.current = viewport.scrollTop
@@ -397,13 +420,18 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
         cancelAnimationFrame(pinRafRef.current)
         pinRafRef.current = null
       }
+      if (layoutCompensationClearRafRef.current !== null) {
+        cancelAnimationFrame(layoutCompensationClearRafRef.current)
+        layoutCompensationClearRafRef.current = null
+      }
+      layoutCompensationTicketRef.current = false
       ignoreScrollTopRef.current = null
       boundViewportRef.current = null
       lastScrollHeightRef.current = null
       lastScrollTopRef.current = null
       geometrySampledRef.current = false
     }
-  }, [cancelJumpAnimation, content, dispatch, enabled, listenerRoot, pinToBottom, trackKeys, viewport])
+  }, [cancelJumpAnimation, content, dispatch, enabled, listenerRoot, markLayoutCompensation, pinToBottom, trackKeys, viewport])
 
   const handle = useMemo<ScrollFollowHandle>(
     () => ({
@@ -411,8 +439,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       jumpToBottom,
       releaseFollow,
       isFollowing: () => stateRef.current.following,
+      markLayoutCompensation,
     }),
-    [jumpToBottom, releaseFollow, stickToBottom],
+    [jumpToBottom, markLayoutCompensation, releaseFollow, stickToBottom],
   )
 
   return { handle, following, showJumpButton }

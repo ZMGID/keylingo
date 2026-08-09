@@ -166,6 +166,13 @@ describe('scrollFollowCore', () => {
     expect(state.following).toBe(false)
   })
 
+  it('贴底附近明确上滚后，内容增长不应重新接管视口', () => {
+    const detached = run([wheelUp({ gap: 4 })]).state
+    const { state, pin } = run([growth(4)], detached)
+    expect(state.following).toBe(false)
+    expect(pin).toBe(false)
+  })
+
   it('解除后滚轮下滚到底部重新跟随', () => {
     const detached = run([wheelUp({ gap: 300 })]).state
     // 滚轮下滚且已在底部 → 重新跟随并钉底。
