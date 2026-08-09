@@ -53,3 +53,8 @@ export function resetChatPerformanceFlagsForTests(): void {
   cachedFlags = null
 }
 
+/** Re-read local/global diagnostic overrides without reloading the app. */
+export function refreshChatPerformanceFlags(): ChatPerformanceFlags {
+  cachedFlags = null
+  return getChatPerformanceFlags()
+}

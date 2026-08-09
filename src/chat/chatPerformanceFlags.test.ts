@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   CHAT_PERFORMANCE_FLAG_KEYS,
   getChatPerformanceFlags,
+  refreshChatPerformanceFlags,
   resetChatPerformanceFlagsForTests,
 } from './chatPerformanceFlags'
 
@@ -46,5 +47,11 @@ describe('chat performance flags', () => {
       [CHAT_PERFORMANCE_FLAG_KEYS.tanstackVirtualizer]: true,
     }
     expect(getChatPerformanceFlags().tanstackVirtualizer).toBe(true)
+  })
+
+  it('can refresh diagnostic overrides at runtime', () => {
+    expect(getChatPerformanceFlags().tanstackVirtualizer).toBe(true)
+    window.localStorage.setItem(CHAT_PERFORMANCE_FLAG_KEYS.tanstackVirtualizer, '0')
+    expect(refreshChatPerformanceFlags().tanstackVirtualizer).toBe(false)
   })
 })
