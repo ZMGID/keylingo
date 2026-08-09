@@ -9,6 +9,8 @@ import {
   HEAVY_MIGRATION_STEP,
   MOUNTED_MIN_ITEMS,
   mountedCountForBudget,
+  restoreMeasurementSnapshot,
+  saveMeasurementSnapshot,
   sendReserveHeight,
   splitHistoryForVirtualization,
   VIRTUALIZE_COST_THRESHOLD,
@@ -81,6 +83,20 @@ describe('row measurement cache', () => {
     setCachedRowMeasurement('c1:640', 'm2', Number.NaN)
     expect(getCachedRowMeasurement('c1:640', 'm1')).toBeUndefined()
     expect(getCachedRowMeasurement('c1:640', 'm2')).toBeUndefined()
+  })
+
+  it('按会话、布局和内容 revision 恢复 measured snapshot', () => {
+    saveMeasurementSnapshot('c1', 'viewport:640', 'rev-a', [{
+      index: 2,
+      key: 'm2',
+      start: 180,
+      size: 420,
+      end: 600,
+      lane: 0,
+    }])
+    expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-a')).toHaveLength(1)
+    expect(restoreMeasurementSnapshot('c1', 'viewport:960', 'rev-a')).toHaveLength(0)
+    expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-b')).toHaveLength(0)
   })
 })
 

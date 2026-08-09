@@ -1,3 +1,5 @@
+import type { VirtualItem } from '@tanstack/react-virtual'
+
 /**
  * 聊天列表「部分虚拟化」——对齐 Paseo web 策略（packages/app/src/agent-stream/web-virtualization.ts）：
  *
@@ -28,6 +30,14 @@ type MeasurementBucket = {
 }
 const measurementBuckets = new Map<string, MeasurementBucket>()
 let measurementClock = 0
+
+type MeasurementSnapshot = {
+  layoutKey: string
+  revision: string
+  measurements: VirtualItem[]
+  touchedAt: number
+}
+const measurementSnapshots = new Map<string, MeasurementSnapshot>()
 
 function measurementBucket(layoutKey: string): MeasurementBucket {
   const existing = measurementBuckets.get(layoutKey)
@@ -67,7 +77,47 @@ export function setCachedRowMeasurement(layoutKey: string, rowKey: string, size:
 
 export function clearRowMeasurementCache(): void {
   measurementBuckets.clear()
+  measurementSnapshots.clear()
   measurementClock = 0
+}
+
+export function restoreMeasurementSnapshot(
+  conversationId: string | null | undefined,
+  layoutKey: string,
+  revision: string,
+): VirtualItem[] {
+  if (!conversationId || !layoutKey || !revision) return []
+  const snapshot = measurementSnapshots.get(conversationId)
+  if (!snapshot || snapshot.layoutKey !== layoutKey || snapshot.revision !== revision) return []
+  snapshot.touchedAt = ++measurementClock
+  return snapshot.measurements
+}
+
+export function saveMeasurementSnapshot(
+  conversationId: string | null | undefined,
+  layoutKey: string,
+  revision: string,
+  measurements: VirtualItem[],
+): void {
+  if (!conversationId || !layoutKey || !revision || measurements.length === 0) return
+  measurementSnapshots.delete(conversationId)
+  measurementSnapshots.set(conversationId, {
+    layoutKey,
+    revision,
+    measurements,
+    touchedAt: ++measurementClock,
+  })
+  while (measurementSnapshots.size > MEASUREMENT_CACHE_LIMIT) {
+    let oldestKey: string | null = null
+    let oldestTime = Number.POSITIVE_INFINITY
+    for (const [key, candidate] of measurementSnapshots) {
+      if (candidate.touchedAt < oldestTime) {
+        oldestKey = key
+        oldestTime = candidate.touchedAt
+      }
+    }
+    if (oldestKey) measurementSnapshots.delete(oldestKey)
+  }
 }
 
 /** 底部始终实挂载的最少条数（对齐 Paseo 的 recent window 量级）。 */

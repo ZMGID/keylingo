@@ -1,4 +1,4 @@
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, RotateCw } from 'lucide-react'
 import {
   defaultRangeExtractor,
@@ -37,6 +37,8 @@ import {
   estimateMessageRenderCost,
   getCachedRowMeasurement,
   sendReserveHeight,
+  restoreMeasurementSnapshot,
+  saveMeasurementSnapshot,
   setCachedRowMeasurement,
 } from './messageListVirtualization'
 import type { Lang } from '../settings/i18n'
@@ -544,6 +546,10 @@ function MessageListBase({
     }
     return observeVirtualRect(instance, callback)
   }, [viewportEl])
+  const initialMeasurementsCache = useMemo(
+    () => restoreMeasurementSnapshot(conversationId, layoutKey, historyMeasurementRevision),
+    [conversationId, historyMeasurementRevision, layoutKey],
+  )
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: useTanStackVirtualizer ? itemCount : 0,
     enabled: useTanStackVirtualizer,
@@ -551,13 +557,16 @@ function MessageListBase({
     observeElementRect: observeRect,
     estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
     getItemKey: (index) => itemAt(index)?.key ?? `row-${index}`,
+    initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
       followHandle.markLayoutCompensation()
       const measured = measureVirtualElement(element, entry, instance)
       const key = element.dataset.chatItemKey
       if (key) {
         const size = Math.max(1, measured)
-        estimateSizeRef.current.set(key, size)
+        const index = Number(element.dataset.index)
+        const logicalKey = Number.isInteger(index) ? itemAt(index)?.key : undefined
+        if (logicalKey) estimateSizeRef.current.set(logicalKey, size)
         setCachedRowMeasurement(layoutKey, key, size)
         return size
       }
@@ -579,6 +588,27 @@ function MessageListBase({
     useAnimationFrameWithResizeObserver: true,
     useFlushSync: false,
   })
+  // TanStack's default is the safe baseline: only rows entirely above the
+  // reading anchor move the detached viewport, and re-measurements during
+  // backward scrolling do not adjust it. The one chat-specific exception is
+  // a growing live tail row that straddles the viewport top: its new content is
+  // appended below the reader and must not pull history downward.
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    const viewportTop = (instance.scrollOffset ?? 0) + instance.scrollAdjustments
+    if (item.start >= viewportTop) return false
+    if (instance.itemSizeCache.has(item.key) && instance.scrollDirection === 'backward') return false
+    const liveTail = streaming || streamFrozen || Boolean(liveGroup)
+    if (
+      liveTail
+      && item.index === historyItems.length
+      && delta > 0
+      && item.end > viewportTop
+      && !followHandle.isFollowing()
+    ) {
+      return false
+    }
+    return true
+  }
   const virtualItems = virtualizer.getVirtualItems()
   const previousLayoutWidthRef = useRef(0)
   const previousMeasurementRevisionRef = useRef('')
@@ -590,6 +620,18 @@ function MessageListBase({
     followHandle.markLayoutCompensation()
     virtualizer.measure()
   }, [followHandle, historyMeasurementRevision, layoutKey, viewportEl, virtualizer])
+
+  const saveMeasurementSnapshotRef = useRef<() => void>(() => {})
+  saveMeasurementSnapshotRef.current = () => {
+    if (!useTanStackVirtualizer || !viewportEl) return
+    saveMeasurementSnapshot(
+      conversationId,
+      layoutKey,
+      historyMeasurementRevision,
+      virtualizer.takeSnapshot(),
+    )
+  }
+  useEffect(() => () => saveMeasurementSnapshotRef.current(), [])
 
   useLayoutEffect(() => {
     if (!contentEl) return
