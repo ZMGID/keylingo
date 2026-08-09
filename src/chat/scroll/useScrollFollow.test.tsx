@@ -66,18 +66,12 @@ describe('useScrollFollow scroll source timing', () => {
     return viewport
   }
 
-  it('waits for ResizeObserver before classifying a compensating scroll', () => {
+  it('classifies an ordinary scroll immediately when no layout growth occurred', () => {
     const viewport = mount()
 
     fireEvent.scroll(viewport)
-    expect(screen.getByTestId('following')).toHaveTextContent('true')
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
 
-    act(() => {
-      observers[0].callback([], {} as ResizeObserver)
-      vi.advanceTimersByTime(1)
-    })
-
-    expect(screen.getByTestId('following')).toHaveTextContent('true')
   })
 
   it('still releases follow for a scroll with no resize evidence', () => {
@@ -108,7 +102,7 @@ describe('useScrollFollow scroll source timing', () => {
   // 真实浏览器里快帧下关闭会抢先于判定执行 —— scroll 事件派发于 scroll steps（窗口还开着），
   // 判定 timer 却在关闭之后才跑。token 对不上的补偿滚动（virtua shift 纠正 / 浏览器 clamp）
   // 此时必须仍按 self 记账（窗口状态在事件时同步抓取），否则流式中跟随莫名解除。
-  it('keeps following when the resize window closes between the scroll event and its deferred classification', () => {
+  it('releases when a later scroll is not accompanied by layout growth', () => {
     // rAF 桩成手动队列（mount() 里的 vi.useFakeTimers 会装假 rAF，须在其后再桩，
     // 且要桩 globalThis —— vitest 的 jsdom 环境把全局拷到 globalThis，模块裸调走它）。
     const viewport = mount()
@@ -143,7 +137,7 @@ describe('useScrollFollow scroll source timing', () => {
         vi.advanceTimersByTime(1)
       })
 
-      expect(screen.getByTestId('following')).toHaveTextContent('true')
+      expect(screen.getByTestId('following')).toHaveTextContent('false')
     } finally {
       rafStub.mockRestore()
       cafStub.mockRestore()

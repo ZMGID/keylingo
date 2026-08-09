@@ -1100,12 +1100,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     pendingUserPrompts: pendingUserPromptsRef.current,
   }), [])
 
+  const generatingConversationIdsRef = useRef<Set<string>>(new Set())
   const syncGeneratingConversationIds = useCallback(() => {
-    setGeneratingConversationIds(collectGeneratingConversationIds(
+    const next = collectGeneratingConversationIds(
       inFlightConversationsRef.current,
       streamSnapshotsRef.current,
       pendingToolConfirmsRef.current,
-    ))
+    )
+    const previous = generatingConversationIdsRef.current
+    if (previous.size === next.size && [...previous].every((id) => next.has(id))) return
+    generatingConversationIdsRef.current = next
+    setGeneratingConversationIds(next)
   }, [])
 
   const markConversationInFlight = useCallback((conversationId: string) => {

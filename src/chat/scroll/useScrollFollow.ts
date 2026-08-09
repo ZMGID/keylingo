@@ -100,16 +100,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   // 必须读回：pin 写的是 scrollHeight，浏览器会 clamp 到 scrollHeight - clientHeight，
   // 拿写入值去比永远比不中。
   const ignoreScrollTopRef = useRef<number | null>(null)
-  // 机制二（对齐 use-stick-to-bottom 的 resizeDifference）：内容尺寸变化引起的滚动，其 scroll
-  // 事件**晚于** ResizeObserver 回调到达，且 scrollTop 未必等于我们写的值（浏览器滚动锚定、
-  // virtua 的 shift 纠正都会插一手）。所以 RO 一响就开一个窗口，跨过一帧 + 一个宏任务才关，
-  // 窗口内的 scroll 一律按 self 记账，否则会被误判成用户滚动而解除跟随。
-  const resizeWindowRef = useRef(false)
-  const resizeWindowRafRef = useRef<number | null>(null)
-  const resizeWindowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // ResizeObserver delivery can lag behind the scroll event emitted by a virtualizer/browser
-  // compensation. Keep the last geometry so a scroll that coincides with a real height increase
-  // can still be classified as self-induced without relying on timer ordering.
+  // Keep only geometry evidence for virtualizer/browser compensation. There is no timer-based
+  // "resize window": user intent is recorded by wheel/touch/key events, while a scroll that
+  // arrives with a larger scrollHeight is treated as layout compensation.
   const lastScrollHeightRef = useRef<number | null>(null)
   const lastScrollTopRef = useRef<number | null>(null)
   const geometrySampledRef = useRef(false)
@@ -240,8 +233,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       Math.max(0, viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight)
     const hasOverflow = () =>
       viewport.scrollHeight - viewport.clientHeight > SCROLLABLE_OVERFLOW_MIN_PX
-    const pendingScrollTimers = new Set<ReturnType<typeof setTimeout>>()
-
     const nestedCanConsumeWheelUp = (target: EventTarget | null) => {
       let node = target instanceof Element ? target : null
       while (node && node !== viewport && node !== root) {
@@ -258,7 +249,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     }
 
     const handleScroll = () => {
-      // 来源判定见 ignoreScrollTopRef / resizeWindowRef 的注释。
       // token **读一次就作废**：一次写入只授权一个 scroll 事件。不作废的话会卡死 ——
       // 「底部」这个数值是稳定的（我们 pin 写 scrollHeight，浏览器 clamp 成 max；
       // 用户把滚动条拖到最底，浏览器写进去的也是同一个 max，逐位相等），于是用户
@@ -267,12 +257,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       ignoreScrollTopRef.current = null
       const scrollTop = viewport.scrollTop
       const gap = getGap()
-      // resize 窗口必须在**事件时**同步抓一份：判定被推迟了一拍（下面的 setTimeout），
-      // 而窗口的关闭动作（rAF + 宏任务）和这一拍是竞态 —— 快帧下关闭会抢先执行，
-      // 于是 token 对不上的补偿滚动（浏览器 clamp、滚动锚定、virtua shift 纠正）被误判成
-      // user、gap 又大于容差 → 流式中跟随莫名解除（表现「有时候就直接不跟随了」）。
-      // 补偿滚动派发于 scroll steps、早于当帧 rAF，事件时窗口必然还开着，抓下来是确定的。
-      const resizeWindowAtEvent = resizeWindowRef.current
       const previousScrollHeight = lastScrollHeightRef.current
       const previousScrollTop = lastScrollTopRef.current
       const contentGrewBeforeScroll =
@@ -284,24 +268,13 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       lastScrollHeightRef.current = viewport.scrollHeight
       lastScrollTopRef.current = scrollTop
       geometrySampledRef.current = true
-      // scroll 也可能先于 ResizeObserver delivery 到达。延后一拍再判来源，让 RO 有机会打开
-      // resizeWindow；否则 virtua 的高度补偿会被当成用户滚动，直接解除流式跟随。
-      // 所以判定时还要再看一次窗口 —— 两个时刻任一开着都算 self。
-      const timer = setTimeout(() => {
-        pendingScrollTimers.delete(timer)
-        const selfInduced =
-          resizeWindowAtEvent ||
-          resizeWindowRef.current ||
-          scrollTop === token ||
-          contentGrewBeforeScroll
-        dispatch({
-          type: 'scroll',
-          gap,
-          now: Date.now(),
-          source: selfInduced ? 'self' : 'user',
-        })
-      }, 1)
-      pendingScrollTimers.add(timer)
+      const selfInduced = scrollTop === token || contentGrewBeforeScroll
+      dispatch({
+        type: 'scroll',
+        gap,
+        now: Date.now(),
+        source: selfInduced ? 'self' : 'user',
+      })
     }
 
     const handleWheel = (event: WheelEvent) => {
@@ -394,30 +367,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       typeof ResizeObserver === 'undefined'
         ? null
         : new ResizeObserver(() => {
-            // 开一个「这段时间的滚动都算 self」的窗口。尺寸变化引起的 scroll 事件晚于本回调
-            // 到达，且 scrollTop 未必等于我们写进去的值（浏览器滚动锚定、virtua 的 shift 纠正
-            // 都会插一手 —— virtua 那次写入根本不经过 applyScrollTop，全靠这个窗口兜住），
-            // 所以窗口要跨过一帧 + 一个宏任务才关。
-            //
-            // **每次 resize 都必须把待执行的关闭动作取消重排**（= 尾部 debounce）。只判
-            // rAF 是否在飞不行：连续增长（正是流式）时，第二次 resize 到来的那一刻上一轮的
-            // 关闭定时器可能已经排出去了，它会在本轮的 scroll 事件之前把窗口关掉，
-            // 结果一串 resize 里只有第一个受保护，后面每个都被判成 user → 流式中途莫名解除跟随。
-            resizeWindowRef.current = true
-            if (resizeWindowRafRef.current !== null) {
-              cancelAnimationFrame(resizeWindowRafRef.current)
-            }
-            if (resizeWindowTimerRef.current !== null) {
-              clearTimeout(resizeWindowTimerRef.current)
-              resizeWindowTimerRef.current = null
-            }
-            resizeWindowRafRef.current = requestAnimationFrame(() => {
-              resizeWindowRafRef.current = null
-              resizeWindowTimerRef.current = setTimeout(() => {
-                resizeWindowTimerRef.current = null
-                resizeWindowRef.current = false
-              }, 0)
-            })
             dispatch({ type: 'contentGrowth', gap: getGap() })
             lastScrollHeightRef.current = viewport.scrollHeight
             lastScrollTopRef.current = viewport.scrollTop
@@ -443,22 +392,11 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       }
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       resizeObserver?.disconnect()
-      for (const timer of pendingScrollTimers) clearTimeout(timer)
-      pendingScrollTimers.clear()
       cancelJumpAnimation()
       if (pinRafRef.current !== null) {
         cancelAnimationFrame(pinRafRef.current)
         pinRafRef.current = null
       }
-      if (resizeWindowRafRef.current !== null) {
-        cancelAnimationFrame(resizeWindowRafRef.current)
-        resizeWindowRafRef.current = null
-      }
-      if (resizeWindowTimerRef.current !== null) {
-        clearTimeout(resizeWindowTimerRef.current)
-        resizeWindowTimerRef.current = null
-      }
-      resizeWindowRef.current = false
       ignoreScrollTopRef.current = null
       boundViewportRef.current = null
       lastScrollHeightRef.current = null

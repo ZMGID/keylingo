@@ -672,9 +672,16 @@ body {
   container-type: size;
   container-name: chat-main;
   overflow: hidden;
+  /* Keep Markdown/layout invalidation inside the reading surface when the
+     sidebar or right dock changes the available width. */
+  contain: layout paint;
   /* 左右不留 margin：缝隙由侧栏的 margin-right:8 与 Dock 的 margin-left:8 提供。
      若这里也写 8，相邻处会叠成 16px 双倍缝。两侧收起时各自补 8px（见 .is-collapsed）。 */
   margin: var(--chat-card-top) 0 8px;
+}
+
+.chat-message-list-inner {
+  contain: layout paint;
 }
 
 /* 扩展中心页（助手 / Skill / MCP / 知识库 / 笔记 / 插件）：与会话主区同一张浮起的纸。
