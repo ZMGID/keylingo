@@ -12,16 +12,22 @@ function streamRenderInterval(snapshot: ConversationStreamSnapshot): number {
   // Tests deliberately keep the historical rAF-only semantics. In production,
   // growing Markdown benefits more from a stable 32–220ms cadence than from
   // parsing once per display frame.
-  if (import.meta.env.MODE === 'test') return 0
-  const contentSize = snapshot.content.length + snapshot.reasoning.length
-  const structuredSize = snapshot.toolCalls.length * 512 + snapshot.segments.length * 64
+  const contentSize = (snapshot.content?.length ?? 0) + (snapshot.reasoning?.length ?? 0)
+  const structuredSize = (snapshot.toolCalls?.length ?? 0) * 512 + (snapshot.segments?.length ?? 0) * 64
   const totalSize = contentSize + structuredSize
-  if (totalSize >= 250_000) return 220
-  if (totalSize >= 120_000) return 180
-  if (totalSize >= 60_000) return 140
-  if (snapshot.toolCalls.length > 0 || snapshot.segments.length > 8) return 120
-  if (totalSize >= 12_000) return 80
-  return 32
+  const foregroundInterval = totalSize >= 250_000 ? 220
+    : totalSize >= 120_000 ? 180
+      : totalSize >= 60_000 ? 140
+        : (snapshot.toolCalls?.length ?? 0) > 0 || (snapshot.segments?.length ?? 0) > 8 ? 120
+          : totalSize >= 12_000 ? 80
+            : 32
+  if (typeof document !== 'undefined' && document.hidden) {
+    return Math.min(750, Math.max(160, foregroundInterval * 5))
+  }
+  // Tests deliberately keep the historical rAF-only semantics in the visible
+  // document; hidden-mode tests still exercise the timer branch above.
+  if (import.meta.env.MODE === 'test') return 0
+  return foregroundInterval
 }
 
 /**
@@ -84,6 +90,18 @@ export function useStreamRenderFrame({
     const wait = Math.max(0, streamRenderInterval(pending.snapshot) - (
       performance.now() - lastFlushAtRef.current
     ))
+    if (typeof document !== 'undefined' && document.hidden) {
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null
+        const next = pendingRef.current
+        pendingRef.current = null
+        if (!next) return
+        if (currentConversationIdRef.current !== next.conversationId) return
+        lastFlushAtRef.current = performance.now()
+        applySnapshot(next.snapshot)
+      }, wait)
+      return
+    }
     if (wait > 0) {
       timerRef.current = setTimeout(() => {
         timerRef.current = null

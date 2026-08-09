@@ -19,6 +19,11 @@ function isPlainAppend(previous: string, appended: string): boolean {
     && !/\n\s*\n/.test(appended)
 }
 
+function isSafeOpaqueParagraphAppend(appended: string): boolean {
+  if (/\n\s*\n/.test(appended)) return false
+  return !/(?:^|\n)\s*(?:```|#{1,6}\s|[-+*]\s|\d+\.\s|>\s?)/m.test(appended)
+}
+
 function appendCodeLines(lines: string[], appended: string): string[] {
   const next = [...lines]
   const chunks = appended.split('\n')
@@ -250,6 +255,31 @@ export const LiveMarkdown = memo(function LiveMarkdown({ value }: { value: strin
         return merged
       }
       if (last?.kind === 'paragraph' && isPlainAppend(previous.value, appended)) {
+        const appendedText = appended.replace(/\s+/g, ' ').trim()
+        const separator = appendedText
+          && (/\s$/.test(previous.value) || /^\s/.test(appended))
+          ? ' '
+          : ''
+        const merged = [
+          ...previous.blocks.slice(0, -1),
+          {
+            ...last,
+            text: appendedText ? `${last.text}${separator}${appendedText}` : last.text,
+            endOffset: normalized.length,
+          },
+        ] as LiveBlock[]
+        cacheRef.current = { value: normalized, blocks: merged }
+        return merged
+      }
+      // Once a paragraph is beyond the inline parser's bounded preview size,
+      // it is intentionally rendered as opaque text. Keep appending that block
+      // without reparsing its historical emphasis/link markers; structural
+      // boundaries still fall through to the incremental block parser.
+      if (
+        last?.kind === 'paragraph'
+        && last.text.length > LIVE_INLINE_MARKDOWN_LIMIT
+        && isSafeOpaqueParagraphAppend(appended)
+      ) {
         const appendedText = appended.replace(/\s+/g, ' ').trim()
         const separator = appendedText
           && (/\s$/.test(previous.value) || /^\s/.test(appended))
