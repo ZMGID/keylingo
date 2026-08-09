@@ -7,6 +7,43 @@ afterEach(() => {
 })
 
 if (typeof window !== 'undefined') {
+  // Node 22's jsdom environment may expose window.localStorage as an unavailable
+  // getter unless a --localstorage-file is configured. Keep storage-dependent
+  // UI tests deterministic without requiring a process-wide file.
+  let storageAvailable = false
+  try {
+    storageAvailable = Boolean(window.localStorage)
+  } catch {
+    storageAvailable = false
+  }
+
+  if (!storageAvailable) {
+    const values = new Map<string, string>()
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        get length() {
+          return values.size
+        },
+        key(index: number) {
+          return [...values.keys()][index] ?? null
+        },
+        getItem(key: string) {
+          return values.get(key) ?? null
+        },
+        setItem(key: string, value: string) {
+          values.set(key, String(value))
+        },
+        removeItem(key: string) {
+          values.delete(key)
+        },
+        clear() {
+          values.clear()
+        },
+      } satisfies Storage,
+    })
+  }
+
   Object.defineProperty(window, 'matchMedia', {
     writable: true,
     value: (query: string) => ({

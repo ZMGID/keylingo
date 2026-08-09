@@ -26,7 +26,10 @@ export function ChatHeavyIsland({
   const [hydrated, setHydrated] = useState(eager)
 
   useEffect(() => {
-    if (eager) return
+    if (eager) {
+      setHydrated(true)
+      return
+    }
     let cancelled = false
     const idleWindow = window as IdleWindow
     let idleId: number | undefined
@@ -46,7 +49,7 @@ export function ChatHeavyIsland({
       if (idleId !== undefined) idleWindow.cancelIdleCallback?.(idleId)
       if (timeoutId !== undefined) window.clearTimeout(timeoutId)
     }
-  }, [delayMs])
+  }, [delayMs, eager])
 
   return (
     <div
