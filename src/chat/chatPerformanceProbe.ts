@@ -19,10 +19,29 @@ export type ChatPerfWindowSample = {
   detail?: string
 }
 
+export type ChatPerfReport = {
+  capturedAt: string
+  enabled: boolean
+  buckets: Array<ProbeBucket & { name: string; phase: string; detail: string }>
+  samples: ChatPerfWindowSample[]
+  longTasks: Array<{ durationMs: number; startTime: number }>
+}
+
 const windowSamples: ChatPerfWindowSample[] = []
+const reportSamples: ChatPerfWindowSample[] = []
+const longTaskSamples: Array<{ durationMs: number; startTime: number }> = []
 const buckets = new Map<string, ProbeBucket>()
 let flushTimer: number | null = null
 let enabledCache: boolean | null = null
+
+const MAX_REPORT_SAMPLES = 2_000
+
+declare global {
+  interface Window {
+    __KIVIO_CHAT_PERF_REPORT__?: () => ChatPerfReport
+    __KIVIO_CHAT_PERF_RESET__?: () => void
+  }
+}
 
 function probeEnabled(): boolean {
   if (enabledCache !== null) return enabledCache
@@ -73,12 +92,43 @@ function scheduleFlush() {
   }, 500)
 }
 
+export function getChatPerfReport(): ChatPerfReport {
+  return {
+    capturedAt: new Date().toISOString(),
+    enabled: probeEnabled(),
+    buckets: [...buckets.entries()].map(([name, bucket]) => ({
+      name,
+      ...bucket,
+      phase: bucket.lastPhase,
+      detail: bucket.lastDetail,
+    })),
+    samples: reportSamples.map((sample) => ({ ...sample })),
+    longTasks: longTaskSamples.map((task) => ({ ...task })),
+  }
+}
+
+function appendBounded<T>(list: T[], value: T, limit: number): void {
+  list.push(value)
+  if (list.length > limit) list.splice(0, list.length - limit)
+}
+
 export function recordChatPerfSample(sample: ChatPerfWindowSample): void {
   if (!probeEnabled()) return
-  windowSamples.push({
+  const normalized = {
     ...sample,
     durationMs: Number(Math.max(0, sample.durationMs).toFixed(1)),
-  })
+  }
+  windowSamples.push(normalized)
+  appendBounded(reportSamples, normalized, MAX_REPORT_SAMPLES)
+  scheduleFlush()
+}
+
+export function recordChatPerfLongTask(task: { durationMs: number; startTime: number }): void {
+  if (!probeEnabled()) return
+  appendBounded(longTaskSamples, {
+    durationMs: Number(Math.max(0, task.durationMs).toFixed(1)),
+    startTime: Number(Math.max(0, task.startTime).toFixed(1)),
+  }, MAX_REPORT_SAMPLES)
   scheduleFlush()
 }
 
@@ -103,6 +153,8 @@ export function measureChatSurface(
 export function resetChatPerfProbeForTests(): void {
   buckets.clear()
   windowSamples.length = 0
+  reportSamples.length = 0
+  longTaskSamples.length = 0
   flushTimer = null
   enabledCache = null
 }
@@ -160,10 +212,12 @@ export function useChatPerfLongTaskProbe() {
     try {
       observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          console.warn('[kivio:perf] long task', {
+          const sample = {
             durationMs: Number(entry.duration.toFixed(1)),
             startTime: Number(entry.startTime.toFixed(1)),
-          })
+          }
+          recordChatPerfLongTask(sample)
+          console.warn('[kivio:perf] long task', sample)
         }
       })
       observer.observe({ entryTypes: ['longtask'] })
@@ -172,4 +226,9 @@ export function useChatPerfLongTaskProbe() {
     }
     return () => observer?.disconnect()
   }, [])
+}
+
+if (typeof window !== 'undefined' && import.meta.env.DEV) {
+  window.__KIVIO_CHAT_PERF_REPORT__ = getChatPerfReport
+  window.__KIVIO_CHAT_PERF_RESET__ = resetChatPerfProbeForTests
 }
