@@ -51,7 +51,7 @@ export type ScrollFollowHandle = {
   // 主动脱离跟随（导航跳转到上方消息时用）。
   releaseFollow: () => void
   // 程序化定位（消息导航）唯一的 scrollTop 写入口，不改变 follow 意图。
-  scrollToOffset: (offset: number) => void
+  scrollToOffset: (offset: number, options?: { adjustments?: number; behavior?: ScrollBehavior }) => void
   isFollowing: () => boolean
   markLayoutCompensation: () => void
 }
@@ -155,7 +155,7 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     cancelJumpAnimation()
     const el = boundViewportRef.current
     if (!el) return
-    // 双帧钉底：virtua 估算→实测常在下一帧才把 scrollHeight 写准；
+    // 双帧钉底：virtualizer 估算→实测常在下一帧才把 scrollHeight 写准；
     // 只钉一次会先钉在偏低高度，下一帧再被纠正 → 底部弹一下。
     applyScrollTop(el, el.scrollHeight)
     // 第二帧必须重新问一次「现在还在跟随吗」：流式中 contentGrowth 几乎每帧都钉，
@@ -198,11 +198,17 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     dispatch({ type: 'release' })
   }, [cancelJumpAnimation, dispatch])
 
-  const scrollToOffset = useCallback((offset: number) => {
+  const scrollToOffset = useCallback((offset: number, options?: { adjustments?: number; behavior?: ScrollBehavior }) => {
     cancelJumpAnimation()
     const viewport = boundViewportRef.current
     if (!viewport) return
-    applyScrollTop(viewport, offset)
+    const nextOffset = Math.max(0, offset + (options?.adjustments ?? 0))
+    if (options?.behavior === 'smooth' && typeof viewport.scrollTo === 'function') {
+      viewport.scrollTo({ top: nextOffset, behavior: 'smooth' })
+      ignoreScrollTopRef.current = viewport.scrollTop
+      return
+    }
+    applyScrollTop(viewport, nextOffset)
   }, [applyScrollTop, cancelJumpAnimation])
 
   const jumpToBottom = useCallback(() => {

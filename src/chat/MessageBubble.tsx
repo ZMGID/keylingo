@@ -1019,7 +1019,7 @@ function MessageBubbleComponent({
     document.addEventListener('pointermove', onMove, { passive: true })
     hoverMoveCleanupRef.current = () => document.removeEventListener('pointermove', onMove)
   }
-  // 悬停中整行被 virtua 卸载时，document 监听不能漏。
+  // 悬停中整行被 virtualizer 卸载时，document 监听不能漏。
   useEffect(() => () => {
     hoverMoveCleanupRef.current?.()
     hoverMoveCleanupRef.current = null

@@ -166,11 +166,11 @@ export function estimateMessageRenderCost({
  * 前者估节点数（决定渲染贵不贵），这里估像素（决定滚动条准不准），两者不成比例
  * —— 一个代码块外壳很贵但不高，一段长散文很便宜但很高。
  *
- * 用途只有一个：喂给 virtua 的 `itemSize`。**不给它的话 virtua 会拿已测量的行去外推屏外的行**，
+ * 用途只有一个：喂给 virtualizer 的 `estimateSize`。**不给它的话 virtualizer 会拿已测量的行去外推屏外的行**，
  * 而我们把实挂载尾部砍到 3~4 条之后，它只能拿这几条去推上面十几条；行高差 30 倍，
  * 推出来必然错，错了就是「往上翻历史内容跳」「拖滚动条跳」。
  *
- * 这**不是**第二个高度估算器 —— itemSize 是 virtua 自己的输入，我们只是别让它瞎猜。
+ * 这**不是**第二个高度估算器 —— estimateSize 是 virtualizer 自己的输入，我们只是别让它瞎猜。
  */
 const HEIGHT_PER_FENCE_PX = 24
 const HEIGHT_PER_LINE_PX = 25

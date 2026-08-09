@@ -33,10 +33,11 @@
 成本 ≈ 当前可见 rows + 少量 overscan + 当前 live rows
 ```
 
-当前实现已完成 Phase 0～3 的代码落地，并完成 Phase 4 的缓存、图片占位和
-heavy island 基础能力；Phase 5 仅完成滚动跟随的兼容性加固，尚未删除现有
-`useScrollFollow` 的全部来源判定兼容逻辑。M1/M2 等浏览器实测指标仍需在同一台
-机器、同一窗口尺寸下采集后确认，不能仅凭单元测试宣称达标。
+当前实现已完成 Phase 0～4 的代码落地，并将 Phase 5 收敛为单一 Scroll Authority：
+TanStack 的 index 导航和测量调整也通过 `useScrollFollow` 的 write adapter，旧的
+token、布局 ticket 和双帧 pin 仅作为 authority 内部的浏览器时序保护。M1/M2 等
+浏览器实测指标仍需在同一台机器、同一窗口尺寸下采集后确认，不能仅凭单元测试
+宣称达标。
 
 本 PRD 第一优先级是性能，不以一次性完成全部滚动状态重构为前置条件。
 
@@ -296,11 +297,10 @@ type ScrollMode =
 | live row 高度增长 | `stick-bottom` | 由 end anchor 保持底部 |
 | live row 高度增长 | `free` | 不改变当前阅读位置 |
 
-本次实现没有强行删除这些兼容机制：`useScrollFollow` 仍保留单一写入口、一次性
-`ignoreScrollTopRef` token 和双帧 pin，但增加了 jump 取消、布局补偿与用户回到底部
-识别。原因是 TanStack 的测量修正和浏览器 clamp 仍会产生程序化 scroll 事件；在未完成
-实机滚动验收前直接删除这些保护会扩大回归面。它们属于下一阶段可删的兼容层，而不是
-历史消息渲染热路径。
+本次实现保留这些机制，但它们已经被收敛在 authority 内部：`useScrollFollow` 提供
+唯一的 `scrollToOffset` adapter，TanStack 的 `scrollToFn`、消息导航、底部 pin 和
+jump 动画都从这里写入；一次性 `ignoreScrollTopRef` token、布局补偿 ticket 和双帧
+pin 只负责区分浏览器/测量产生的程序化 scroll 事件，不再由 MessageList 分散处理。
 
 ---
 
@@ -312,11 +312,11 @@ type ScrollMode =
 
 - 建立 F1～F4 会话 fixture。
 - 扩展 `chatPerformanceProbe`：记录切换、折叠、MessageList commit、mounted rows 和 DOM nodes。
-- 增加浏览器性能采集说明或 probe 脚本。
-- 记录当前 `virtua` 方案基线。
+- 增加浏览器性能采集说明、DevTools report API 和 probe 测试。
+- 记录迁移前主列表方案基线；Dock 中的 `virtua` 依赖不属于本次聊天主列表迁移范围。
 
-**出口：** F1～F4 fixture、probe、Profiler/DOM/mounted-row/long-task 采集能力已完成；
- 浏览器实测报告和 M1～M7 的最终数值仍待在目标设备上采集。
+**出口：** F1～F4 fixture、probe、Profiler/DOM/mounted-row/long-task 采集能力和可执行
+浏览器报告出口已完成；M1～M7 的最终数值仍待在目标设备上采集。
 
 ### Phase 1：虚拟化核心与行高缓存（代码已完成）
 
@@ -371,17 +371,18 @@ type ScrollMode =
 **出口：** settled Markdown cache、conversation/layout measurement LRU、图片稳定占位、
  Mermaid/HTML/文件卡片边界和容量上限已完成；第二次打开的收益需实机确认。
 
-### Phase 5：Scroll Authority 收敛与清理（部分完成）
+### Phase 5：Scroll Authority 收敛与清理（代码已完成）
 
 **目标：** 删除兼容期滚动补丁，形成单一所有权。
 
 - 将现有 `useScrollFollow` 收敛为最小 Scroll Authority。
-- 程序化滚动只通过一个 convergence/write 入口。
+- 程序化滚动只通过一个 convergence/write 入口，TanStack `scrollToFn` 也接入该入口。
 - 完成用户上滚、回底、导航跳转、prepend、窗口 resize 回归。
-- 删除 `virtua` 和旧虚拟化辅助代码。
+- 删除聊天主列表遗留的 `virtua` 语义和旧辅助代码；Dock 文件树/文件查看器仍保留其独立依赖。
 
-**出口：** 用户上滚、回底、jump 取消、布局补偿和导航跳转回归已覆盖；完整 Authority
- 收敛及旧兼容层删除尚未完成，M6/M7 仍需实机验收。
+**出口：** 用户上滚、回底、jump 取消、布局补偿、height shrink、same-height offset
+ compensation、连续 ResizeObserver delivery、导航跳转和 TanStack adjustment adapter
+ 回归已覆盖；M6/M7 仍需在目标设备实机验收。
 
 ---
 

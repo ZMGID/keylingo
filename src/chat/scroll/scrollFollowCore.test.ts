@@ -46,7 +46,7 @@ describe('scrollFollowCore', () => {
     expect(pin).toBe(true)
   })
 
-  it('跟随中的小 gap（virtua/DPR 测量噪声）不 pin，避免底部抽搐', () => {
+  it('跟随中的小 gap（virtualizer/DPR 测量噪声）不 pin，避免底部抽搐', () => {
     const { state, pin } = run([scroll(12, 100)])
     expect(state.following).toBe(true)
     expect(pin).toBe(false)

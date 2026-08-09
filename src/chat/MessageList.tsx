@@ -79,11 +79,11 @@ export interface MessageListProps {
 const LIST_EDGE_PADDING_PX = 16
 
 // 导航器高亮同步的最小间隔。这趟同步是 querySelectorAll + 逐行 getBoundingClientRect，
-// 若 virtua 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
+// 若 virtualizer 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
 // 正是滚动不顺滑的主因之一。高亮不需要 120fps，8 次/秒足够。
 const NAVIGATOR_SYNC_INTERVAL_MS = 120
 
-// 列表里每一项的统一形态。整条会话全量喂给虚拟列表（消息都在内存，virtua 只渲可见项），
+// 列表里每一项的统一形态。整条会话全量喂给虚拟列表（消息都在内存，virtualizer 只渲可见项），
 // 屏外的气泡连同其 KaTeX host / Markdown / 图片 DOM 真正从 DOM 卸载。
 type RenderItem =
   | { kind: 'spacer'; key: 'padding-top' | 'padding-bottom'; size: number }
@@ -250,7 +250,7 @@ function MessageListBase({
   }, [liveGroup, messages, snapshot.messageId, streamFrozen, streaming])
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  // hook 需要通过 state 拿到元素以便重新绑定监听；virtua 需要 RefObject。回调 ref 同时喂两者。
+  // hook 需要通过 state 拿到元素以便重新绑定监听；virtualizer 需要 RefObject。回调 ref 同时喂两者。
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null)
   const [contentWidth, setContentWidth] = useState(712)
@@ -296,7 +296,7 @@ function MessageListBase({
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
   >(null)
 
-  // 底部跟随：contentGrowth 钉底 + 近底历史实挂载，避免与 virtua remeasure 互抢。
+  // 底部跟随：contentGrowth 钉底 + 近底历史实挂载，避免与 virtualizer remeasure 互抢。
   const { handle: followHandle, showJumpButton } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
@@ -615,6 +615,10 @@ function MessageListBase({
     count: useTanStackVirtualizer ? itemCount : 0,
     enabled: useTanStackVirtualizer,
     getScrollElement: () => scrollRef.current,
+    // TanStack's index navigation and measurement corrections must share the
+    // same scroll authority as chat navigation and follow pinning. This keeps
+    // programmatic scroll writes source-classified by useScrollFollow.
+    scrollToFn: (offset, options) => followHandle.scrollToOffset(offset, options),
     observeElementRect: observeRect,
     estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
     getItemKey: (index) => itemAt(index)?.key ?? `row-${index}`,
@@ -747,7 +751,7 @@ function MessageListBase({
     if (row && el) {
       // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
       // 瞬时跳转，不用 behavior:'smooth'：top 是按目标行**当前**的几何算出来的，而平滑滚动
-      // 期间上方的行会被 virtua 重测（估算高度换成实测），目标位置在动画途中就挪走了 ——
+      // 期间上方的行会被 virtualizer 重测（估算高度换成实测），目标位置在动画途中就挪走了 ——
       // 距离越远越容易落在错的地方。回到底部按钮不受影响，那个是自己驱动的 rAF，每帧重算目标。
       followHandle.scrollToOffset(
         row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop,

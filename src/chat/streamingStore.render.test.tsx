@@ -21,7 +21,7 @@ function snapWith(partial: Partial<ConversationStreamSnapshot>): ConversationStr
   return { ...createEmptyStreamSnapshot(), ...partial }
 }
 
-// MessageList 现在用 virtua 虚拟化：视口测量 + 可见区间计算发生在 mount 后的一个微任务，
+// MessageList 现在用 TanStack Virtual 虚拟化：视口测量 + 可见区间计算发生在 mount 后的一个微任务，
 // 故断言渲染结果前需让 React 把这次异步更新刷出来。
 async function flush() {
   await act(async () => {

@@ -58,14 +58,14 @@ if (typeof window !== 'undefined') {
     }),
   })
 
-  // virtua 在 jsdom 下需要一个会回调的 ResizeObserver + 非零尺寸，否则测不出可见项
+  // TanStack Virtual 在 jsdom 下需要一个会回调的 ResizeObserver + 非零尺寸，否则测不出可见项
   // （jsdom 无真实布局，默认尺寸全 0，且 offsetParent 恒为 null，虚拟列表会跳过所有测量
   // 项、渲不出任何 item）。这是测试 shim：给虚拟列表喂一个固定视口/项尺寸并伪造
   // offsetParent，让它把项挂载出来供断言。
   const RO_VIEWPORT = 800
   const RO_ITEM = 80
 
-  // virtua 读取 contentRect.height 设置视口/项尺寸，并以 offsetParent 真值过滤未布局元素。
+  // Virtualizer 读取 contentRect.height 设置视口/项尺寸，并以 offsetParent 真值过滤未布局元素。
   Object.defineProperty(window.HTMLElement.prototype, 'offsetParent', {
     configurable: true,
     get() {
@@ -73,7 +73,7 @@ if (typeof window !== 'undefined') {
     },
   })
 
-  // virtua 用第一个被 observe 的元素作为视口；之后的是各项。
+  // Virtualizer 用第一个被 observe 的元素作为视口；之后的是各项。
   class ResizeObserverMock {
     private cb: ResizeObserverCallback
     private isFirst = true
@@ -88,8 +88,8 @@ if (typeof window !== 'undefined') {
         contentRect: { height: size, width: 600 } as DOMRectReadOnly,
       } as unknown as ResizeObserverEntry
       // 浏览器的 ResizeObserver 通知发生在独立的 observer delivery 阶段，
-      // 不能在 React/virtua 正在挂载的 lifecycle 内同步回调。异步投递既更贴近
-      // 真实行为，也避免 virtua 为修正尺寸调用 flushSync 时触发 React 警告。
+      // 不能在 React/virtualizer 正在挂载的 lifecycle 内同步回调。异步投递既更贴近
+      // 真实行为，也避免 virtualizer 为修正尺寸调用 flushSync 时触发 React 警告。
       queueMicrotask(() => this.cb([entry], this as unknown as ResizeObserver))
     }
     unobserve() {}
@@ -98,7 +98,7 @@ if (typeof window !== 'undefined') {
 
   window.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver
 
-  // virtua 读取视口高度走 clientHeight；jsdom 默认 0，给个非零值。
+  // Virtualizer 读取视口高度走 clientHeight；jsdom 默认 0，给个非零值。
   Object.defineProperty(window.HTMLElement.prototype, 'clientHeight', {
     configurable: true,
     get() {

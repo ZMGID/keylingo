@@ -15,11 +15,13 @@ network data and use a fixed timestamp so the same run produces the same row key
 
 ## Collection
 
-Run the UI in development mode with `__KIVIO_CHAT_PERF__ = true`. The existing
-chat probe records React Profiler commits, mounted rows, DOM nodes, conversation
-visibility, sidebar collapse duration, and long tasks. Compare the same fixture
-at the same viewport width with the four `chat.performance.*` flags enabled and
-disabled one at a time.
+Run the UI in development mode with `__KIVIO_CHAT_PERF__ = true`. The chat probe
+records React Profiler commits, mounted rows, DOM nodes, conversation visibility,
+sidebar collapse duration, and long tasks. Compare the same fixture at the same
+viewport width with the four `chat.performance.*` flags enabled and disabled one
+at a time. In DevTools, run
+`window.__KIVIO_CHAT_PERF_REPORT__()` to export the current JSON report; run
+`window.__KIVIO_CHAT_PERF_RESET__()` before each fixture.
 
 The fixture unit tests validate shape and size; browser-level numbers remain
 environment-specific and should be recorded on the same machine and window size.
@@ -31,3 +33,5 @@ environment-specific and should be recorded on the same machine and window size.
 - Sidebar collapse: one width transition, no per-frame main-pane animation.
 - F4 live updates: bounded cadence and no settled-row rerender on content deltas.
 - Repeat navigation to the same conversation: measurement snapshot/cache hit.
+- Scroll authority: navigation, TanStack `scrollToIndex`, measurement adjustments and
+  bottom pin all use the same programmatic scroll writer.

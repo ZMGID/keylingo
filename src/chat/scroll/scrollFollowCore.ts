@@ -175,7 +175,7 @@ export function reduceFollowEvent(
       if (state.following) {
         // 我们自己写的 scrollTop（钉底 / 回到底部动画），或内容尺寸变化引起的滚动：
         // 只做纠正，不改跟随状态。显著 gap 才 pin，小 gap 交给 contentGrowth / 下一帧，
-        // 避免与 virtua remeasure 互抢。
+        // 避免与 virtualizer remeasure 互抢。
         if (event.source === 'self') {
           return { state: next, pin: gap > config.correctionMinPx }
         }

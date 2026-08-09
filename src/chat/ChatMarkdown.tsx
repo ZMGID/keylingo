@@ -462,9 +462,9 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
 
 let mermaidRenderCounter = 0
 
-// 已渲染 mermaid SVG 的缓存：键 = 主题 + 源码。虚拟列表（virtua）会卸载屏外的消息气泡，
+// 已渲染 mermaid SVG 的缓存：键 = 主题 + 源码。虚拟列表会卸载屏外的消息气泡，
 // 往回翻时图会重新挂载；若每次都重新 import+parse+render，会出现 spinner(小)→大SVG 的高度
-// 突变，导致 virtua 纠正滚动 → 抽搐/闪烁。缓存后命中即同步拿到完整 SVG，挂载时高度即确定，
+// 突变，导致 virtualizer 纠正滚动 → 抽搐/闪烁。缓存后命中即同步拿到完整 SVG，挂载时高度即确定，
 // 消除回滚 jank。用外部 Map 而非 useMemo（React 可能在内存压力下丢弃 useMemo 缓存）。
 const mermaidSvgCache = new Map<string, string>()
 const MERMAID_SVG_CACHE_MAX = 80
