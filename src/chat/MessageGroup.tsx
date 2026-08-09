@@ -3,7 +3,7 @@ import { Check, Columns2, Square } from 'lucide-react'
 import type { ChatMessage } from './types'
 import { MessageBubble } from './MessageBubble'
 import { ModelIcon } from './ModelIcon'
-import { getActiveGroup, useGroupsVersion, type GroupColumnSnapshot } from './groupStreamingStore'
+import { getActiveGroup, useGroupVersion, type GroupColumnSnapshot } from './groupStreamingStore'
 import { useMultiAnswerViewMode } from './multiAnswerViewMode'
 
 // 多模型一问多答（任务 06-30 / 步骤 6 + 8）：把同一 group_id 的 N 条 assistant 答案展示出来。
@@ -274,7 +274,7 @@ function MessageGroupBase({
   // 订阅 group store 版本号：流式列内容更新时驱动重渲。
   // 版本号还必须进下面 columns 的 memo deps —— store 是原地 mutate 列对象，
   // liveGroup 引用永不变，只靠 [live, liveGroup, messages] 会让 memo 冻结在首帧。
-  const groupsVersion = useGroupsVersion()
+  const groupsVersion = useGroupVersion(conversationId)
   const liveGroup = conversationId ? getActiveGroup(conversationId) : undefined
   const live = Boolean(liveGroup && liveGroup.groupId === groupId)
 

@@ -2084,7 +2084,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               streaming: true,
               startedAt: Date.now(),
             })
-            touchGroup()
+            touchGroup(payload.conversationId)
           }
           if (currentConversationIdRef.current === payload.conversationId) {
             setStreamCoarse({ streaming: true, streamFrozen: false, cancelling: false })
@@ -2123,7 +2123,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           finalizeReasoningDurationOnDone(column)
           column.streaming = false
           // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
-          flushGroups()
+          flushGroups(payload.conversationId)
           if (restoredRunIdsRef.current.delete(payload.runId)) {
             const group = getActiveGroup(payload.conversationId)
             if (group?.columns.every((item) => !item.streaming)) {
@@ -2133,7 +2133,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           }
         } else {
           // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
-          touchGroup()
+          touchGroup(payload.conversationId)
         }
         // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
         return
@@ -2322,7 +2322,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         if (!column) return
         const record = toolEventToRecord(payload)
         applyToolRecordToSnapshot(column, record)
-        touchGroup()
+        touchGroup(payload.conversationId)
         return
       }
       const snapshot = ensureStreamSnapshot(payload.conversationId)
@@ -3930,9 +3930,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       : null,
     [currentAssistantSnapshot],
   )
-  const composerKnowledgeBaseIds = currentConversation
-    ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? [])
-    : draftKnowledgeBaseIds
+  const composerKnowledgeBaseIds = useMemo(
+    () => currentConversation
+      ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? [])
+      : draftKnowledgeBaseIds,
+    [
+      currentConversation,
+      draftKnowledgeBaseIds,
+    ],
+  )
   const composerForceKnowledgeSearch = currentConversation
     ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false)
     : draftForceKnowledgeSearch
@@ -4477,12 +4483,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     activeBuiltinWebSearchSupported,
     activeReplyModels,
     activeWebSearchMode,
+    composerModes,
     composerContextSlot,
     composerCurrentAssistant,
     composerForceKnowledgeSearch,
     composerKnowledgeBaseIds,
-    composerModes.current,
-    composerModes.options,
     composerUsageSlot,
     conversationProject,
     currentConversation,
@@ -4505,6 +4510,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     handleSidebarSelectSet,
     handleToggleForceKnowledgeSearch,
     handleToggleMcpServer,
+    handleNewConversation,
     isCurrentConversationBusy,
     mcpServers,
     openAssistantCenter,
@@ -4517,6 +4523,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     toolStatusHint,
     sendDisabledReason,
     uiLang,
+    usesExternalRuntime,
   ])
 
   const messageListProps = useMemo<MessageListProps>(() => ({
