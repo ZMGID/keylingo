@@ -108,6 +108,10 @@ function measurementKey(item: RenderItem): string {
   if (item.kind === 'group') {
     return `${item.key}:${item.messages.map((message) => `${message.id}:${contentRevision(message.content)}`).join('|')}`
   }
+  if (item.kind === 'streaming') {
+    const toolCalls = item.message.tool_calls ?? item.message.toolCalls ?? []
+    return `${item.key}:${contentRevision(item.message.content)}:${contentRevision(item.message.reasoning)}:${item.message.segments?.length ?? 0}:${toolCalls.length}`
+  }
   return item.key
 }
 
@@ -156,6 +160,7 @@ function MessageListBase({
 }: MessageListProps) {
   const chatPerfFlags = getChatPerformanceFlags()
   const useTanStackVirtualizer = chatPerfFlags.tanstackVirtualizer
+  const externalizeLiveRow = chatPerfFlags.liveRowExternalization
   useChatPerfRenderProbe('MessageList', {
     conversationId,
     messages: messages.length,
@@ -357,8 +362,51 @@ function MessageListBase({
     pendingCompactionAfterIndex,
   ])
 
-  // 历史项只在消息/压缩边界/组模型身份变化时重建。高频流式文本不进入依赖，
-  // 避免长会话每帧遍历并重新分配整个历史数组。
+  const liveItem = useMemo<RenderItem | null>(() => {
+    const hasLiveGroup = Boolean(liveGroup && (coarse.streaming || coarse.streamFrozen))
+    const hasStreamingPreview =
+      !hasLiveGroup &&
+      (streaming || streamFrozen) &&
+      (streamingContent || streamingReasoning || streamingToolCalls.length > 0 || streamingSegments.length > 0)
+    if (hasLiveGroup && liveGroup) {
+      return { kind: 'live-group', key: `live-group-${liveGroup.groupId}`, groupId: liveGroup.groupId }
+    }
+    if (hasStreamingPreview) {
+      return {
+        kind: 'streaming',
+        key: 'streaming-assistant',
+        messageStreaming: streaming && !streamFrozen,
+        reasoningStreaming: reasoningStreaming && !streamFrozen,
+        message: {
+          id: 'streaming-assistant',
+          role: 'assistant',
+          content: streamingContent,
+          reasoning: streamingReasoning || undefined,
+          artifacts: [],
+          tool_calls: streamingToolCalls,
+          segments: streamingSegments,
+          timestamp: Math.floor(Date.now() / 1000),
+        },
+      }
+    }
+    return null
+  }, [
+    coarse.streaming,
+    coarse.streamFrozen,
+    liveGroup,
+    reasoningStreaming,
+    streamFrozen,
+    streaming,
+    streamingContent,
+    streamingReasoning,
+    streamingSegments,
+    streamingToolCalls,
+  ])
+
+  const fallbackLiveItem = externalizeLiveRow ? null : liveItem
+
+  // 历史项只在消息/压缩边界/组模型身份变化时重建。默认高频流式文本不进入依赖；
+  // 关闭 live row 外置开关时，刻意把 live item 放回 timeline 作为回退路径。
   const historyItems = useMemo<RenderItem[]>(() => {
     const list: RenderItem[] = [
       { kind: 'spacer', key: 'padding-top', size: LIST_EDGE_PADDING_PX },
@@ -417,52 +465,14 @@ function MessageListBase({
       }
     }
 
-    return list
-  }, [folded, liveGroupModels, messageIndexById, appendCompactionSlot])
+    if (fallbackLiveItem) list.push(fallbackLiveItem)
 
-  // 高频变化只更新固定的尾部 slot，不重建历史项。
-  const dynamicItem = useMemo<RenderItem | null>(() => {
-    const hasLiveGroup = Boolean(liveGroup && (coarse.streaming || coarse.streamFrozen))
-    const hasStreamingPreview =
-      !hasLiveGroup &&
-      (streaming || streamFrozen) &&
-      (streamingContent || streamingReasoning || streamingToolCalls.length > 0 || streamingSegments.length > 0)
-    if (hasLiveGroup && liveGroup) {
-      return { kind: 'live-group', key: `live-group-${liveGroup.groupId}`, groupId: liveGroup.groupId }
-    }
-    if (hasStreamingPreview) {
-      return {
-        kind: 'streaming',
-        key: 'streaming-assistant',
-        messageStreaming: streaming && !streamFrozen,
-        reasoningStreaming: reasoningStreaming && !streamFrozen,
-        message: {
-          id: 'streaming-assistant',
-          role: 'assistant',
-          content: streamingContent,
-          reasoning: streamingReasoning || undefined,
-          artifacts: [],
-          tool_calls: streamingToolCalls,
-          segments: streamingSegments,
-          timestamp: Math.floor(Date.now() / 1000),
-        },
-      }
-    }
-    // 首 token 之前没有流式内容项——生成期间的占位/状态由 tailWrap 里常驻的
-    // StreamStatusLine 承担（动效 logo + 耗时/tokens/任务数）。
-    return null
-  }, [
-    liveGroup,
-    coarse.streaming,
-    coarse.streamFrozen,
-    streaming,
-    streamFrozen,
-    streamingContent,
-    streamingReasoning,
-    reasoningStreaming,
-    streamingToolCalls,
-    streamingSegments,
-  ])
+    return list
+  }, [appendCompactionSlot, fallbackLiveItem, folded, liveGroupModels, messageIndexById])
+
+  // 默认路径把高频 live row 放到固定 tail；关闭开关时回退到普通 timeline，
+  // 便于诊断外置 store / tail 测量问题而不改变消息数据和 virtualizer。
+  const dynamicItem = externalizeLiveRow ? liveItem : null
 
   const errorItem = useMemo<RenderItem | null>(() => {
     if (!error) return null
@@ -495,7 +505,9 @@ function MessageListBase({
       }
       const messages = item.kind === 'message'
         ? [item.message]
-        : item.kind === 'group' ? item.messages : []
+        : item.kind === 'group' ? item.messages
+          : item.kind === 'streaming' ? [item.message]
+            : []
       let cost = 0
       let height = 0
       for (const message of messages) {
@@ -597,10 +609,13 @@ function MessageListBase({
     const viewportTop = (instance.scrollOffset ?? 0) + instance.scrollAdjustments
     if (item.start >= viewportTop) return false
     if (instance.itemSizeCache.has(item.key) && instance.scrollDirection === 'backward') return false
-    const liveTail = streaming || streamFrozen || Boolean(liveGroup)
+    const liveRowIndex = externalizeLiveRow
+      ? historyItems.length
+      : historyItems.findIndex((entry) => entry.kind === 'streaming' || entry.kind === 'live-group')
+    const liveTail = liveRowIndex >= 0 && (streaming || streamFrozen || Boolean(liveGroup))
     if (
       liveTail
-      && item.index === historyItems.length
+      && item.index === liveRowIndex
       && delta > 0
       && item.end > viewportTop
       && !followHandle.isFollowing()
