@@ -2,9 +2,9 @@
 
 | 字段 | 内容 |
 |---|---|
-| 文档版本 | v0.1 |
+| 文档版本 | v0.2 |
 | 日期 | 2026-08-09 |
-| 状态 | 待评审 |
+| 状态 | 已实现，待实机性能验收 |
 | 分支 | `codex/chat-performance-prd` |
 | 范围 | Chat 消息列表、会话切换、侧边栏/窗口宽度变化、流式消息渲染 |
 | 关联文档 | [Chat 综合优化 PRD](./chat-optimization-prd.md)、[Chat 架构](../CHAT_ARCHITECTURE.md) |
@@ -33,6 +33,11 @@
 成本 ≈ 当前可见 rows + 少量 overscan + 当前 live rows
 ```
 
+当前实现已完成 Phase 0～3 的代码落地，并完成 Phase 4 的缓存、图片占位和
+heavy island 基础能力；Phase 5 仅完成滚动跟随的兼容性加固，尚未删除现有
+`useScrollFollow` 的全部来源判定兼容逻辑。M1/M2 等浏览器实测指标仍需在同一台
+机器、同一窗口尺寸下采集后确认，不能仅凭单元测试宣称达标。
+
 本 PRD 第一优先级是性能，不以一次性完成全部滚动状态重构为前置条件。
 
 ---
@@ -51,12 +56,15 @@
 
 ### 2.2 当前实现特征
 
-- `virtua@0.49.1` 负责虚拟化和动态高度。
+- `@tanstack/react-virtual` 负责聊天主列表的虚拟化和动态高度；`virtua` 仍被
+  文件树/文件查看器等 Dock 组件使用，因此本阶段没有从整个仓库删除该依赖。
 - `useScrollFollow` 同时监听 `scroll`、`wheel`、`pointer`、`ResizeObserver`，并主动写入 `scrollTop`。
 - `MessageList` 使用历史虚拟化、最近消息保留和流式尾部 slot 的混合结构。
-- `RECENT_MOUNTED_MIN = 24` 会让底部附近至少一批消息保持挂载。
+- 聊天主列表已删除“最近 24 条历史消息强制实挂载”策略，只保留 TanStack 可见区、
+  overscan 和单一尾部 live row。
 - 消息成本模型已证明，渲染成本主要受代码块和结构化内容驱动，而非消息条数。
-- 会话切换通过 `key={conversationId}` 重挂载 `MessageList`，重新建立虚拟化、测量和可见消息子树。
+- 会话切换仍通过会话边界重建列表，但会恢复 conversation/layout 维度的测量快照，
+  并延迟 Mermaid 等 heavy island 的 hydration。
 - 侧边栏折叠已避免逐帧宽度动画，但主区宽度仍会发生一次布局变化，所有已挂载重型内容随之重新换行和测高。
 
 ### 2.3 参考项目结论
@@ -288,18 +296,17 @@ type ScrollMode =
 | live row 高度增长 | `stick-bottom` | 由 end anchor 保持底部 |
 | live row 高度增长 | `free` | 不改变当前阅读位置 |
 
-第一阶段明确移除：
-
-- ResizeObserver 时间窗判断 scroll 来源；
-- `ignoreScrollTopRef` token；
-- 每次流式 snapshot 的双帧 pin；
-- 多处直接赋值 `scrollTop`。
+本次实现没有强行删除这些兼容机制：`useScrollFollow` 仍保留单一写入口、一次性
+`ignoreScrollTopRef` token 和双帧 pin，但增加了 jump 取消、布局补偿与用户回到底部
+识别。原因是 TanStack 的测量修正和浏览器 clamp 仍会产生程序化 scroll 事件；在未完成
+实机滚动验收前直接删除这些保护会扩大回归面。它们属于下一阶段可删的兼容层，而不是
+历史消息渲染热路径。
 
 ---
 
 ## 8. 分阶段实施计划
 
-### Phase 0：性能基线与夹具
+### Phase 0：性能基线与夹具（代码已完成）
 
 **目标：** 在改代码前确认慢在哪里，并建立可重复比较条件。
 
@@ -308,9 +315,10 @@ type ScrollMode =
 - 增加浏览器性能采集说明或 probe 脚本。
 - 记录当前 `virtua` 方案基线。
 
-**出口：** 每个场景都有可重复的基线报告；目标值 M1～M7 完成最终确认。
+**出口：** F1～F4 fixture、probe、Profiler/DOM/mounted-row/long-task 采集能力已完成；
+ 浏览器实测报告和 M1～M7 的最终数值仍待在目标设备上采集。
 
-### Phase 1：虚拟化核心与行高缓存
+### Phase 1：虚拟化核心与行高缓存（代码已完成）
 
 **目标：** 优先解决重会话切换和侧边栏宽度变化。
 
@@ -322,9 +330,10 @@ type ScrollMode =
 - 初次打开增加 layout settle 屏障。
 - 保持现有视觉和消息功能不变。
 
-**出口：** F2/F3 切换和侧边栏折叠达到 M1/M2/M5；无消息缺失。
+**出口：** 单 TanStack virtualizer、动态估高、LRU 快照、heavy island、宽度缓存和
+ 无 blanket `measure()` 已完成；M1/M2/M5 需要浏览器基线确认。
 
-### Phase 2：流式隔离与批量更新
+### Phase 2：流式隔离与批量更新（代码已完成）
 
 **目标：** 流式输出不再拖累历史消息、侧边栏和输入框。
 
@@ -334,9 +343,10 @@ type ScrollMode =
 - 使用 `useSyncExternalStore` 或等价 selector 让 live row 单独订阅。
 - settle/abort/切会话前完成强制 flush。
 
-**出口：** 流式期间 settled row render count 为 0 或仅由明确业务状态触发；达到 M3/M4。
+**出口：** streaming/group store 已按会话订阅、rAF 合帧并在 settle/abort 时 flush；
+ 测试已覆盖 settled row 隔离，M3/M4 的真实刷新频率仍需浏览器采样。
 
-### Phase 3：轻量 Streaming Markdown
+### Phase 3：轻量 Streaming Markdown（代码已完成）
 
 **目标：** 降低长回答、代码回答和工具回答的主线程成本。
 
@@ -346,9 +356,10 @@ type ScrollMode =
 - 流式阶段禁用 Mermaid、完整高亮和重型 preview。
 - settle 后切换完整 Markdown，并确保最终内容一致。
 
-**出口：** F4 流式期间输入和滚动保持可响应；最终 Markdown 回归测试通过。
+**出口：** LiveMarkdown 增量解析、长代码头尾预览、复杂语法轻量 fallback 和完成态
+ 回归已完成；F4 的输入/滚动响应仍需实机采样。
 
-### Phase 4：Settled 缓存与 Heavy Islands
+### Phase 4：Settled 缓存与 Heavy Islands（基础能力已完成）
 
 **目标：** 进一步缩短重复打开重对话的首屏时间。
 
@@ -357,9 +368,10 @@ type ScrollMode =
 - 快速滚动时允许轻量 placeholder。
 - 建立缓存容量、淘汰和失效规则。
 
-**出口：** F2/F3 第二次打开显著快于首次打开；缓存内存受控。
+**出口：** settled Markdown cache、conversation/layout measurement LRU、图片稳定占位、
+ Mermaid/HTML/文件卡片边界和容量上限已完成；第二次打开的收益需实机确认。
 
-### Phase 5：Scroll Authority 收敛与清理
+### Phase 5：Scroll Authority 收敛与清理（部分完成）
 
 **目标：** 删除兼容期滚动补丁，形成单一所有权。
 
@@ -368,7 +380,8 @@ type ScrollMode =
 - 完成用户上滚、回底、导航跳转、prepend、窗口 resize 回归。
 - 删除 `virtua` 和旧虚拟化辅助代码。
 
-**出口：** M6/M7 全部通过；旧滚动补偿代码无残留。
+**出口：** 用户上滚、回底、jump 取消、布局补偿和导航跳转回归已覆盖；完整 Authority
+ 收敛及旧兼容层删除尚未完成，M6/M7 仍需实机验收。
 
 ---
 
@@ -457,9 +470,9 @@ chat.performance.settledMarkdownCache
 
 默认策略：
 
-- Phase 0：全部关闭，仅采集基线。
-- Phase 1：开发环境默认开启 TanStack，新旧实现可切换比较。
-- Phase 2/3：分别独立开关，避免无法判断收益来源。
+- 当前四个开关默认开启，均可通过 localStorage 或全局 flag 单独关闭/刷新，便于同机 A/B。
+- 基线采集时应固定窗口尺寸，分别关闭一个开关进行对照，不要把“默认开启”当成已完成的
+  性能验收。
 - 稳定后删除旧路径和临时开关。
 
 ### 11.2 回滚策略
@@ -485,27 +498,33 @@ chat.performance.settledMarkdownCache
 
 ---
 
-## 13. 评审决策点
+## 13. 评审决策点（已执行决策）
 
-评审需要确认以下事项：
+本次实现按以下决策执行：
 
 1. 是否同意最终虚拟化库定为 `@tanstack/react-virtual`？
 2. 是否同意 Phase 1 优先解决会话切换和侧边栏折叠，而不是先重写全部跟随逻辑？
 3. 是否接受 streaming 与 settled Markdown 短暂使用不同渲染路径？
 4. 是否接受首屏先显示文本、Mermaid/图片/大型工具卡片稍后 hydrate？
 5. 是否同意使用本地性能开关完成分阶段 A/B 后再删除旧路径？
-6. Phase 0 基线确认后，M1 的 50% commit 降幅目标是否需要上调或下调？
+6. M1 的 50% commit 降幅仍作为初始目标，待 Phase 0 实机数据后调整，不作为代码合并前置条件。
 
 ---
 
-## 14. 推荐批准范围
+## 14. 实际交付范围与后续验收
 
-建议本次先批准并实施：
+本分支已交付：
 
 ```text
-Phase 0 性能基线
-Phase 1 TanStack Virtual + live rows + measurements LRU
-Phase 2 流式 store 隔离和批量更新
+Phase 0 fixture / probe / 基线说明
+Phase 1 TanStack Virtual + live row + measurements LRU
+Phase 2 流式 store 隔离、会话级订阅和批量更新
+Phase 3 轻量 Streaming Markdown 与长内容有界预览
+Phase 4 settled cache、图片占位和 heavy island 基础能力
+Phase 5 滚动跟随兼容性加固（非完整清理）
 ```
 
-Phase 3～5 在前两阶段取得明确性能收益后继续。这样能够优先解决用户当前最明显的重对话切换和侧边栏折叠卡顿，同时避免一次性重写全部滚动和 Markdown 系统。
+合并前最后一步是使用 `docs/perf/chat-rendering-baseline.md` 的 F1～F4，在目标机器上
+记录切换、侧栏折叠、首屏、mounted rows、DOM、commit 和 long task 数据；若 M1～M7
+未达标，再依据数据决定是继续调估高/overscan、刷新 cadence，还是收敛剩余 Scroll
+Authority 兼容层。
