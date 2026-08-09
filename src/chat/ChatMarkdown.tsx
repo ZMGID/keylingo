@@ -23,6 +23,7 @@ import { MarkdownStreamingContext } from './markdownStreaming'
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
 import { LiveMarkdown } from './LiveMarkdown'
+import { ChatHeavyIsland } from './ChatHeavyIsland'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -438,7 +439,16 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
   // + lucide svg + svg 内的 rect/path + pre + code = 9 个节点，现在 6 个。
   // 每块省 3 个节点，231 块省约 700 个。
   return (
-    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+    <ChatHeavyIsland
+      minHeight={112}
+      fallback={(
+        <div className="my-3 flex min-h-28 items-center justify-center gap-2 rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] px-4 py-8 text-[13px] text-neutral-400 dark:text-neutral-500">
+          <Loader2 size={15} className="animate-spin" />
+          正在准备图表
+        </div>
+      )}
+    >
+      <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
       <div
         className="kv-code-toolbar absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2"
         data-code-lang={codeLanguageLabel(language)}
@@ -455,7 +465,8 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
       <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-10 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
         <code className="font-mono">{highlighted}</code>
       </pre>
-    </figure>
+      </figure>
+    </ChatHeavyIsland>
   )
 }
 
@@ -652,7 +663,8 @@ function useSettled(value: string, delay: number, assumeSettled: boolean): strin
 
 function HtmlCodePreview({ html }: { html: string }) {
   const [view, setView] = useState<'preview' | 'source'>('preview')
-  const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !useContext(MarkdownStreamingContext))
+  const streaming = useContext(MarkdownStreamingContext)
+  const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !streaming)
   // 一旦定稿过就不再退回源码：生成中途停顿超过 SETTLE_MS 会让预览/源码来回跳。
   const readyRef = useRef(false)
   if (settledHtml === html) readyRef.current = true
@@ -668,13 +680,19 @@ function HtmlCodePreview({ html }: { html: string }) {
   return (
     <>
       {showPreview ? (
-        <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
-          <iframe
-            title="HTML 预览"
-            srcDoc={previewHtml}
-            className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
-          />
-        </div>
+        <ChatHeavyIsland
+          minHeight={520}
+          fallback={<CodeBlock code={html} language="html" />}
+          eager
+        >
+          <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
+            <iframe
+              title="HTML 预览"
+              srcDoc={previewHtml}
+              className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
+            />
+          </div>
+        </ChatHeavyIsland>
       ) : (
         <CodeBlock code={html} language="html" />
       )}

@@ -3,6 +3,7 @@ import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageConte
 
 /** 聊天区内联图的最大显示高度（与旧的 max-h-[420px] 一致）。 */
 const MAX_DISPLAY_HEIGHT_PX = 420
+const UNKNOWN_IMAGE_MIN_HEIGHT_PX = 180
 
 const IMAGE_CLASS =
   'rounded-md border border-neutral-200/90 bg-white object-contain dark:border-neutral-700 dark:bg-neutral-900'
@@ -68,8 +69,9 @@ export function ChatInlineImage({
     // 缩略图与整图比例相同，两个 src 都记一份：懒加载换 src 后仍命中缓存，盒子不动。
     rememberRatio(src, next)
     if (currentSrc && currentSrc !== src) rememberRatio(currentSrc, next)
-    // 只学一次：缩略图→整图切换时比例不变，重设只会引入无谓的重排。
-    setRatio((current) => current ?? next)
+    // 缩略图→整图切换时比例通常不变；若服务端没有尺寸元数据，首帧占位
+    // 使用默认比例，加载后再收敛到真实比例并交给 virtualizer 测量。
+    setRatio(next)
   }, [src])
 
   const boxed = ratio != null
@@ -84,7 +86,7 @@ export function ChatInlineImage({
                 aspectRatio: String(ratio),
                 width: `min(100%, ${Math.round(ratio * MAX_DISPLAY_HEIGHT_PX)}px)`,
               }
-            : undefined
+            : { minHeight: UNKNOWN_IMAGE_MIN_HEIGHT_PX }
         }
         onClick={onOpenViewer}
         onContextMenu={(event) => {

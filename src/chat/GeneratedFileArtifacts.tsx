@@ -6,6 +6,7 @@ import { formatBytes } from '../utils/formatBytes'
 import { IconButton } from '../components/Button'
 import { artifactDataUrl, artifactMimeType, isFileArtifact } from './artifacts'
 import type { ChatToolArtifact } from './types'
+import { ChatHeavyIsland } from './ChatHeavyIsland'
 
 const TEXT_PREVIEW_LIMIT = 260
 
@@ -230,14 +231,22 @@ export function GeneratedFileArtifacts({ artifacts }: { artifacts: ChatToolArtif
   if (fileArtifacts.length === 0) return null
 
   return (
-    <div className="not-prose mt-3 space-y-2">
-      {fileArtifacts.map((artifact, index) => (
-        <GeneratedFileCard
-          key={`${artifact.name}-${index}`}
-          artifact={artifact}
-          index={index}
-        />
-      ))}
-    </div>
+    <ChatHeavyIsland
+      minHeight={Math.min(240, 72 + fileArtifacts.length * 76)}
+      fallback={(
+        <div className="not-prose mt-3 h-16 rounded-lg border border-neutral-200/90 bg-white/70 dark:border-neutral-800 dark:bg-neutral-900/50" />
+      )}
+      eager
+    >
+      <div className="not-prose mt-3 space-y-2">
+        {fileArtifacts.map((artifact, index) => (
+          <GeneratedFileCard
+            key={`${artifact.name}-${index}`}
+            artifact={artifact}
+            index={index}
+          />
+        ))}
+      </div>
+    </ChatHeavyIsland>
   )
 }
