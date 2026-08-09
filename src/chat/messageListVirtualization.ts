@@ -21,6 +21,11 @@ type MeasurementSnapshot = {
 }
 const measurementSnapshots = new Map<string, MeasurementSnapshot>()
 
+/** Prevent TanStack's internal itemSizeCache from crossing width layouts. */
+export function layoutScopedVirtualKey(layoutKey: string, rowKey: string): string {
+  return `${layoutKey}:${rowKey}`
+}
+
 function measurementBucket(layoutKey: string): MeasurementBucket {
   const existing = measurementBuckets.get(layoutKey)
   if (existing) {

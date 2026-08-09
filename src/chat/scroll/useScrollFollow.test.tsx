@@ -246,6 +246,8 @@ describe('useScrollFollow scroll source timing', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'scroll-smooth' }))
     expect(viewport.scrollTop).toBe(240)
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
   })
 
   it('reattaches when the user drags to bottom during a layout compensation ticket', () => {

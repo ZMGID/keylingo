@@ -31,6 +31,7 @@ const windowSamples: ChatPerfWindowSample[] = []
 const reportSamples: ChatPerfWindowSample[] = []
 const longTaskSamples: Array<{ durationMs: number; startTime: number }> = []
 const buckets = new Map<string, ProbeBucket>()
+const reportBuckets = new Map<string, ProbeBucket>()
 let flushTimer: number | null = null
 let enabledCache: boolean | null = null
 
@@ -96,7 +97,7 @@ export function getChatPerfReport(): ChatPerfReport {
   return {
     capturedAt: new Date().toISOString(),
     enabled: probeEnabled(),
-    buckets: [...buckets.entries()].map(([name, bucket]) => ({
+    buckets: [...reportBuckets.entries()].map(([name, bucket]) => ({
       name,
       ...bucket,
       phase: bucket.lastPhase,
@@ -152,6 +153,7 @@ export function measureChatSurface(
 
 export function resetChatPerfProbeForTests(): void {
   buckets.clear()
+  reportBuckets.clear()
   windowSamples.length = 0
   reportSamples.length = 0
   longTaskSamples.length = 0
@@ -159,8 +161,8 @@ export function resetChatPerfProbeForTests(): void {
   enabledCache = null
 }
 
-function bucketFor(name: string): ProbeBucket {
-  const existing = buckets.get(name)
+function bucketFor(name: string, target = buckets): ProbeBucket {
+  const existing = target.get(name)
   if (existing) return existing
   const bucket: ProbeBucket = {
     commits: 0,
@@ -171,15 +173,18 @@ function bucketFor(name: string): ProbeBucket {
     lastPhase: '',
     lastDetail: '',
   }
-  buckets.set(name, bucket)
+  target.set(name, bucket)
   return bucket
 }
 
 function recordRender(name: string, detail?: unknown) {
   if (!probeEnabled()) return
   const bucket = bucketFor(name)
+  const reportBucket = bucketFor(name, reportBuckets)
   bucket.renders += 1
   bucket.lastDetail = formatDetail(detail)
+  reportBucket.renders += 1
+  reportBucket.lastDetail = bucket.lastDetail
   scheduleFlush()
 }
 
@@ -191,11 +196,17 @@ export const onChatPerfProfiler: ProfilerOnRenderCallback = (
 ) => {
   if (!probeEnabled()) return
   const bucket = bucketFor(id)
+  const reportBucket = bucketFor(id, reportBuckets)
   bucket.commits += 1
   bucket.actualMs += actualDuration
   bucket.baseMs += baseDuration
   bucket.maxActualMs = Math.max(bucket.maxActualMs, actualDuration)
   bucket.lastPhase = phase
+  reportBucket.commits += 1
+  reportBucket.actualMs += actualDuration
+  reportBucket.baseMs += baseDuration
+  reportBucket.maxActualMs = Math.max(reportBucket.maxActualMs, actualDuration)
+  reportBucket.lastPhase = phase
   scheduleFlush()
 }
 

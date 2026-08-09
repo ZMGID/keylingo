@@ -4,6 +4,7 @@ import {
   estimateMessageRenderCost,
   estimateRenderCost,
   getCachedRowMeasurement,
+  layoutScopedVirtualKey,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
   sendReserveHeight,
@@ -59,6 +60,10 @@ describe('estimateMessageRenderCost', () => {
 })
 
 describe('row measurement cache', () => {
+  it('uses different TanStack key spaces for different content widths', () => {
+    expect(layoutScopedVirtualKey('c1:640', 'm1')).not.toBe(layoutScopedVirtualKey('c1:960', 'm1'))
+  })
+
   it('按布局 key 隔离同一行在不同宽度下的高度', () => {
     setCachedRowMeasurement('c1:640', 'm1', 240)
     setCachedRowMeasurement('c1:960', 'm1', 160)

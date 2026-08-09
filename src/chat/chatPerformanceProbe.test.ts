@@ -9,6 +9,7 @@ import {
 
 describe('chat performance browser report', () => {
   afterEach(() => {
+    vi.useRealTimers()
     resetChatPerfProbeForTests()
     vi.restoreAllMocks()
     delete (globalThis as { __KIVIO_CHAT_PERF__?: boolean }).__KIVIO_CHAT_PERF__
@@ -65,5 +66,20 @@ describe('chat performance browser report', () => {
     resetChatPerfProbeForTests()
     expect(getChatPerfReport().samples).toHaveLength(0)
     expect(getChatPerfReport().longTasks).toHaveLength(0)
+  })
+
+  it('keeps profiler totals after the console window is flushed', () => {
+    const perfGlobal = globalThis as { __KIVIO_CHAT_PERF__?: boolean }
+    perfGlobal.__KIVIO_CHAT_PERF__ = true
+    vi.useFakeTimers()
+
+    onChatPerfProfiler('MessageList', 'update', 4, 6, 0, 0)
+    vi.advanceTimersByTime(500)
+
+    expect(getChatPerfReport().buckets).toEqual([expect.objectContaining({
+      name: 'MessageList',
+      commits: 1,
+      actualMs: 4,
+    })])
   })
 })

@@ -203,11 +203,10 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     const viewport = boundViewportRef.current
     if (!viewport) return
     const nextOffset = Math.max(0, offset + (options?.adjustments ?? 0))
-    if (options?.behavior === 'smooth' && typeof viewport.scrollTo === 'function') {
-      viewport.scrollTo({ top: nextOffset, behavior: 'smooth' })
-      ignoreScrollTopRef.current = viewport.scrollTop
-      return
-    }
+    // Chat's visible smooth animation is owned by jumpToBottom, which retargets
+    // every frame as content grows. TanStack's scrollToFn and message navigation
+    // stay synchronous so every resulting scroll event matches this authority's
+    // one-shot programmatic token.
     applyScrollTop(viewport, nextOffset)
   }, [applyScrollTop, cancelJumpAnimation])
 

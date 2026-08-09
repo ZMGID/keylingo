@@ -36,6 +36,7 @@ import {
   estimateMessageRenderHeight,
   estimateMessageRenderCost,
   getCachedRowMeasurement,
+  layoutScopedVirtualKey,
   sendReserveHeight,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
@@ -536,6 +537,7 @@ function MessageListBase({
     () => historyItems.map(measurementKey).join('|'),
     [historyItems],
   )
+  const measurementRevision = `${historyMeasurementRevision}|tail=${tailMeasurementKey}`
 
   // 计算每一行的初始估算高度。真实高度由 TanStack Virtual 的 measureElement
   // 覆盖；估算只负责首次切换/首次滚动时快速建立窗口，不再把整份历史拆成两套 DOM。
@@ -608,8 +610,8 @@ function MessageListBase({
     return observeVirtualRect(instance, callback)
   }, [viewportEl])
   const initialMeasurementsCache = useMemo(
-    () => restoreMeasurementSnapshot(conversationId, layoutKey, historyMeasurementRevision),
-    [conversationId, historyMeasurementRevision, layoutKey],
+    () => restoreMeasurementSnapshot(conversationId, layoutKey, measurementRevision),
+    [conversationId, layoutKey, measurementRevision],
   )
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: useTanStackVirtualizer ? itemCount : 0,
@@ -621,15 +623,23 @@ function MessageListBase({
     scrollToFn: (offset, options) => followHandle.scrollToOffset(offset, options),
     observeElementRect: observeRect,
     estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
-    getItemKey: (index) => itemAt(index)?.key ?? `row-${index}`,
+    // Include the measured content width in TanStack's key space. A stable
+    // message key must remain stable within one layout, but a width change is
+    // a different geometry universe: old internal itemSizeCache entries must
+    // not be reused for rows that have not been mounted again yet.
+    getItemKey: (index) => layoutScopedVirtualKey(layoutKey, itemAt(index)?.key ?? `row-${index}`),
     initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
-      followHandle.markLayoutCompensation()
       const measured = measureVirtualElement(element, entry, instance)
       const key = element.dataset.chatItemKey
       if (key) {
         const size = Math.max(1, measured)
         const index = Number(element.dataset.index)
+        const virtualKey = Number.isInteger(index) ? instance.options.getItemKey(index) : key
+        const previousSize = instance.itemSizeCache.get(virtualKey)
+        if (previousSize === undefined || Math.abs(previousSize - size) > 0.5) {
+          followHandle.markLayoutCompensation()
+        }
         const logicalKey = Number.isInteger(index) ? itemAt(index)?.key : undefined
         if (logicalKey) estimateSizeRef.current.set(logicalKey, size)
         setCachedRowMeasurement(layoutKey, key, size)
@@ -694,7 +704,7 @@ function MessageListBase({
     saveMeasurementSnapshot(
       conversationId,
       layoutKey,
-      historyMeasurementRevision,
+      measurementRevision,
       virtualizer.takeSnapshot(),
     )
   }
