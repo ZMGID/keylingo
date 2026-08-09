@@ -11,11 +11,14 @@ type ResizeObserverHarness = {
 function Harness() {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null)
   const [content, setContent] = useState<HTMLDivElement | null>(null)
-  const { following, showJumpButton } = useScrollFollow({ viewport, content })
+  const { handle, following, showJumpButton } = useScrollFollow({ viewport, content })
   return (
     <>
       <output data-testid="following">{String(following)}</output>
       <output data-testid="show-jump-button">{String(showJumpButton)}</output>
+      <button type="button" onClick={handle.jumpToBottom}>jump</button>
+      <button type="button" onClick={handle.releaseFollow}>release</button>
+      <button type="button" onClick={handle.markLayoutCompensation}>mark-layout</button>
       <div ref={setViewport} data-testid="viewport">
         <div ref={setContent} />
       </div>
@@ -184,6 +187,49 @@ describe('useScrollFollow scroll source timing', () => {
     act(() => vi.advanceTimersByTime(1))
 
     expect(screen.getByTestId('following')).toHaveTextContent('false')
+  })
+
+  it('cancels an in-flight jump animation when follow is explicitly released', () => {
+    const viewport = mount()
+    act(() => vi.runOnlyPendingTimers())
+    viewport.scrollTop = 100
+
+    const callbacks = new Map<number, FrameRequestCallback>()
+    let nextHandle = 40
+    const rafStub = vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+      nextHandle += 1
+      callbacks.set(nextHandle, callback)
+      return nextHandle
+    })
+    const cafStub = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((handle) => {
+      callbacks.delete(handle)
+    })
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'jump' }))
+      expect(callbacks.size).toBe(1)
+
+      fireEvent.click(screen.getByRole('button', { name: 'release' }))
+
+      expect(callbacks.size).toBe(0)
+      expect(screen.getByTestId('following')).toHaveTextContent('false')
+    } finally {
+      rafStub.mockRestore()
+      cafStub.mockRestore()
+    }
+  })
+
+  it('reattaches when the user drags to bottom during a layout compensation ticket', () => {
+    const viewport = mount()
+
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+
+    fireEvent.click(screen.getByRole('button', { name: 'mark-layout' }))
+    viewport.scrollTop = 500
+    fireEvent.scroll(viewport)
+
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
   })
 
 })

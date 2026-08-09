@@ -192,8 +192,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   }, [dispatch])
 
   const releaseFollow = useCallback(() => {
+    cancelJumpAnimation()
     dispatch({ type: 'release' })
-  }, [dispatch])
+  }, [cancelJumpAnimation, dispatch])
 
   const jumpToBottom = useCallback(() => {
     const el = boundViewportRef.current
@@ -290,7 +291,12 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       geometrySampledRef.current = true
       const layoutCompensation = layoutCompensationTicketRef.current
       layoutCompensationTicketRef.current = false
-      const selfInduced = scrollTop === token || contentGrewBeforeScroll || layoutCompensation
+      const userReturnedDuringLayout = layoutCompensation
+        && stateRef.current.userDetached
+        && gap <= configRef.current.attachThresholdPx
+        && previousScrollTop !== null
+        && scrollTop > previousScrollTop + 1
+      const selfInduced = scrollTop === token || contentGrewBeforeScroll || (layoutCompensation && !userReturnedDuringLayout)
       dispatch({
         type: 'scroll',
         gap,
