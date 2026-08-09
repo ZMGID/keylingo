@@ -1,7 +1,5 @@
 export type SettledMarkdownCacheEntry = {
   normalized: string
-  hasHeavySyntax: boolean
-  blockCount: number
 }
 
 const MAX_ENTRIES = 96

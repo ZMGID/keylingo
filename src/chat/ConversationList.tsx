@@ -51,7 +51,7 @@ interface ConversationListProps {
     draggingId: string | null
     startDrag: (e: React.PointerEvent<HTMLElement>, id: string) => void
   }
-  onSelectConversation: (id: string) => void
+  onSelectConversation: (id: string, conversation?: ConversationListItem) => void
   onRenameConversation: (id: string, title: string) => Promise<void>
   onTogglePinConversation: (id: string, pinned: boolean) => Promise<void>
   /** 一键归档（侧栏默认不再显示归档对话） */
@@ -216,7 +216,7 @@ export const ConversationList = memo(function ConversationList({
             >
               <button
                 type="button"
-                onClick={() => onSelectConversation(conv.id)}
+                onClick={() => onSelectConversation(conv.id, conv)}
                 onDoubleClick={(e) => {
                   e.preventDefault()
                   e.stopPropagation()

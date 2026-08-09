@@ -38,6 +38,7 @@ import {
   invalidateConversationTransition,
   isCurrentConversationTransition,
 } from './conversationTransitionStore'
+import type { ConversationLoadHint } from './conversationTransitionStore'
 import type { AssistantStreamStats, MessageListProps } from './MessageList'
 import type { InputBarProps } from './InputBar'
 import { SessionUsageStrip } from './SessionUsageStrip'
@@ -2699,8 +2700,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [refreshSidebar, reloadConversation, syncConversationRoute])
 
-  const handleSelectConversation = useCallback(async (conversationId: string) => {
-    const requestId = beginConversationTransition(conversationId)
+  const handleSelectConversation = useCallback(async (
+    conversationId: string,
+    conversationHint?: ConversationLoadHint,
+  ) => {
+    const requestId = beginConversationTransition(conversationId, conversationHint)
     setAssistantStreamStatsByMessageId({})
     setHookWarning(null)
     try {
@@ -4269,8 +4273,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     runAfterLeavingSettings(() => handleSelectSet(set))
   }, [handleSelectSet, runAfterLeavingSettings])
 
-  const handleSidebarSelectConversation = useCallback((id: string) => {
-    runAfterLeavingSettings(() => void handleSelectConversation(id))
+  const handleSidebarSelectConversation = useCallback((id: string, conversation?: ConversationListItem) => {
+    runAfterLeavingSettings(() => void handleSelectConversation(id, {
+      messageCount: conversation?.message_count,
+    }))
   }, [handleSelectConversation, runAfterLeavingSettings])
 
   const handleSidebarNewConversation = useCallback(() => {

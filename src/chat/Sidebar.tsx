@@ -136,7 +136,7 @@ export interface SidebarProps {
   onSelectProject: (project: ChatProject | null) => void
   selectedSet?: ChatSet | null
   onSelectSet: (set: ChatSet | null) => void
-  onSelectConversation: (id: string) => void
+  onSelectConversation: (id: string, conversation?: ConversationListItem) => void
   onNewConversation: () => void
   onConversationDeleted?: (id: string) => void
   onForceDropConversation?: (id: string) => void
@@ -1096,7 +1096,7 @@ export const Sidebar = memo(function Sidebar({
     } else if (selectedProject) {
       onSelectProject(null)
     }
-    onSelectConversation(conversation.id)
+    onSelectConversation(conversation.id, conversation)
     closeSearch()
   }, [closeSearch, onSelectConversation, onSelectProject, projects, selectedProject])
 
@@ -1396,9 +1396,9 @@ export const Sidebar = memo(function Sidebar({
                           compact
                           indent
                           showAssistantName={false}
-                          onSelectConversation={(id) => {
+                          onSelectConversation={(id, conversation) => {
                             if (selectedProject?.id !== project.id) onSelectProject(project)
-                            onSelectConversation(id)
+                            onSelectConversation(id, conversation)
                           }}
                           onRenameConversation={handleRenameConversation}
                           onTogglePinConversation={handleTogglePinConversation}
@@ -1546,9 +1546,9 @@ export const Sidebar = memo(function Sidebar({
                               compact
                               indent
                               showAssistantName={false}
-                              onSelectConversation={(id) => {
+                              onSelectConversation={(id, conversation) => {
                                 if (selectedSet?.id !== set.id) onSelectSet(set)
-                                onSelectConversation(id)
+                                onSelectConversation(id, conversation)
                               }}
                               onRenameConversation={handleRenameConversation}
                               onTogglePinConversation={handleTogglePinConversation}
@@ -1610,10 +1610,10 @@ export const Sidebar = memo(function Sidebar({
                       compact
                       showAssistantName={false}
                       showFolderLabel
-                      onSelectConversation={(id) => {
+                      onSelectConversation={(id, conversation) => {
                         if (selectedProject) onSelectProject(null)
                         if (selectedSet) onSelectSet(null)
-                        onSelectConversation(id)
+                        onSelectConversation(id, conversation)
                       }}
                       onRenameConversation={handleRenameConversation}
                       onTogglePinConversation={handleTogglePinConversation}

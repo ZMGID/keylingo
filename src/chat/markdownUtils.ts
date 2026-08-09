@@ -69,3 +69,24 @@ export function normalizeMarkdownForRender(content: string): string {
     ),
   )
 }
+
+/**
+ * Streamdown deliberately sanitizes file:/relative destinations before custom
+ * link components receive them. Keep those two app-owned link kinds intact via
+ * an internal URI scheme; ChatMarkdown decodes it immediately before handling
+ * the click. Code spans/fences are excluded by the same outsideCode guard used
+ * by the other Markdown repairs.
+ */
+export function preserveLocalMarkdownLinks(content: string): string {
+  return outsideCode(content, (text) =>
+    text.replace(/(!?\[[^\]]*\]\()([^\s)]+)(\))/g, (_match, prefix: string, destination: string, suffix: string) => {
+      if (/^(?:https?:|mailto:|tel:|sms:|data:|blob:|tauri:|asset:|#)/i.test(destination)) {
+        return `${prefix}${destination}${suffix}`
+      }
+      if (/^file:\/\//i.test(destination)) {
+        return `${prefix}https://kivio.local/__kivio-file?target=${encodeURIComponent(destination)}${suffix}`
+      }
+      return `${prefix}https://kivio.local/__kivio-local?target=${encodeURIComponent(destination)}${suffix}`
+    }),
+  )
+}

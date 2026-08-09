@@ -451,34 +451,6 @@ body {
   background-color: rgba(255, 255, 255, 0.32);
 }
 
-/* 关键性能：KaTeX 的视觉 HTML 会生成大量 span。它现在由 ChatMarkdown 挂到每个公式的
-   Shadow DOM 内，避免已完成公式参与页面级样式匹配/布局 invalidation。普通 DOM 里只保留
-   轻量 host；横向滚动与行内对齐也放在 host 上。 */
-.katex-lazy {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  vertical-align: middle;
-  padding: 1px 2px;
-  margin-top: -2px;
-}
-.katex-lazy--pending {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  opacity: 0.85;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.katex-lazy--display {
-  display: block;
-  padding: 0;
-  margin-top: 0;
-  vertical-align: baseline;
-}
-.katex-lazy--pending.katex-lazy--display {
-  min-height: 1.7em;
-}
-
 /* ===== Settings 卡片 / 控件统一令牌 =====
    单点定义阴影/边框/底色，避免内联 box-shadow 在每个 section 重复，
    也让 light/dark 切换的视觉层级一致。 */
@@ -1997,6 +1969,14 @@ button.chat-composer-status-item:hover {
    InputBar 的 `fixed inset-0` 遮罩，任何 transform 都会把它们的包含块钉到本元素上。 */
 .chat-motion-pane-in {
   animation: chat-motion-view-in 260ms var(--kv-ease-standard) backwards;
+}
+
+/* 会话正文切换是高频交互，不需要整页 280ms 的入场动画。
+   保留极短的位移让交接不生硬，但把主区可交互时间提前，避免出现
+   Logo 已结束、正文还在慢慢淡入的拖尾感。 */
+.chat-message-list-switch-in {
+  animation-duration: 120ms;
+  animation-timing-function: var(--kv-ease-out);
 }
 
 /* 设置页入场：从底部轻微上浮。位移用固定 px 而非 %（% 是元素自身高度，整页高度下会变成
@@ -6985,21 +6965,25 @@ input[type="password"]::-ms-clear {
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
 
-/* ---- 生成中状态行的动效 logo（GRD-02 · 回波）。
-   点阵：等距方格 step=3 / r=1.05（点间隙清晰）；相位 --p = 距中心归一化距离，
-   delay 用 (1-p) 形成从中心向外的回波。颜色与动画只在这里。 ---- */
+/* ---- 生成中状态行的动效 logo（GRD-02 · 横向扫光）。
+   点阵：等距方格 step=3 / r=1.05（点间隙清晰）；--dx 是点相对 Logo 中心的
+   横向归一化位置。通过错峰让一条亮波左右往返扫过 Logo，不让整块点阵一起闪烁。
+   颜色与动画只在这里。 ---- */
 .kv-stream-logo {
   display: block;
   overflow: visible;
   flex-shrink: 0;
   width: var(--kv-stream-logo-size, 28px);
   height: var(--kv-stream-logo-size, 28px);
-  --k: 1; /* 速度倍率 */
+  --k: 1; /* 时长倍率：越小越快 */
   --dot: #1d6bf0; /* 唯一颜色 */
 }
 
 .chat-conversation-loading {
   background: var(--theme-surface-soft);
+}
+.chat-conversation-loading .kv-stream-logo {
+  --k: 0.68;
 }
 .kv-stream-logo circle {
   transform-box: fill-box;
@@ -7007,13 +6991,15 @@ input[type="password"]::-ms-clear {
   fill: var(--dot);
 }
 .kv-stream-logo .dt {
-  animation: kv-stream-echo calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
-  animation-delay: calc((1 - var(--p)) * -0.95s * var(--k));
+  animation: kv-stream-sweep calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
+  /* 左侧点（--dx 更小）先进入高亮，随后向右传播；alternate 让下一半周期反向传播。 */
+  animation-delay: calc((1 - var(--dx)) * -0.18s * var(--k));
 }
-@keyframes kv-stream-echo {
+@keyframes kv-stream-sweep {
   0% { fill-opacity: 0.28; transform: scale(0.72); }
-  20% { fill-opacity: 1; transform: scale(1.24); }
-  44%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
+  24% { fill-opacity: 0.34; transform: scale(0.78); }
+  50% { fill-opacity: 1; transform: scale(1.24); }
+  76%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
 }
 @media (prefers-reduced-motion: reduce) {
   .kv-stream-logo circle { animation: none; transform: none; fill-opacity: 1; }

@@ -1,22 +1,14 @@
-import { Fragment, isValidElement, memo, startTransition, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
-import type { Root, RootContent } from 'hast'
-import { toJsxRuntime } from 'hast-util-to-jsx-runtime'
-import { urlAttributes } from 'html-url-attributes'
-import { jsx, jsxs } from 'react/jsx-runtime'
-import type { Components, UrlTransform } from 'react-markdown'
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
+import type { Components, UrlTransform } from 'streamdown'
+import { defaultRemarkPlugins, Streamdown } from 'streamdown'
 import type { PluggableList } from 'unified'
-import { visit } from 'unist-util-visit'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
-// CommonMark 的 flanking 规则对 CJK 是坏的：`**` 一侧贴中文标点、另一侧贴汉字时既不能开
-// 也不能闭，`**一句话总结：**最近` / `一份**“报告”**，共` 会原样吐出星号。模型写中文时天天
-// 撞这个。该扩展只放宽 CJK 的判定，CommonMark 测试集输出不变。
-import remarkCjkFriendly from 'remark-cjk-friendly'
-import katex from 'katex'
-import katexCss from 'katex/dist/katex.min.css?inline'
-import { normalizeMarkdownForRender } from './markdownUtils'
+import { cjk } from '@streamdown/cjk'
+import { code } from '@streamdown/code'
+import { createMathPlugin } from '@streamdown/math'
+import { mermaid } from '@streamdown/mermaid'
+import remarkBreaks from 'remark-breaks'
+import { normalizeMarkdownForRender, preserveLocalMarkdownLinks } from './markdownUtils'
 import { MarkdownErrorBoundary } from './MarkdownErrorBoundary'
 import type { ChatToolArtifact } from './types'
 import { artifactDataUrl } from './artifacts'
@@ -27,9 +19,7 @@ import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
-import { LiveMarkdown } from './LiveMarkdown'
 import { ChatHeavyIsland } from './ChatHeavyIsland'
-import { getCachedMarkdownAst, parseMarkdownAst } from './markdownAstClient'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -688,8 +678,11 @@ function HtmlCodePreview({ html }: { html: string }) {
   // 一旦定稿过就不再退回源码：生成中途停顿超过 SETTLE_MS 会让预览/源码来回跳。
   const readyRef = useRef(false)
   if (settledHtml === html) readyRef.current = true
-  const showPreview = view === 'preview' && readyRef.current
-  const previewHtml = useMemo(() => htmlPreviewSrcDoc(settledHtml ?? ''), [settledHtml])
+  const showPreview = view === 'preview' && !streaming && readyRef.current
+  const previewHtml = useMemo(
+    () => htmlPreviewSrcDoc(streaming ? settledHtml ?? '' : html),
+    [html, settledHtml, streaming],
+  )
 
   const openInBrowser = () => {
     void api.openHtmlPreview(htmlPreviewSrcDoc(html)).catch((err) => {
@@ -795,16 +788,17 @@ function LinkAnchor({
   /** 相对路径链接要靠它在后端解析会话工作目录；没有就只能放弃打开（但仍不导航）。 */
   conversationId?: string | null
 }) {
-  const isWeb = /^https?:\/\//i.test(href)
+  const decodedHref = decodeKivioInternalUrl(href)
+  const isWeb = /^https?:\/\//i.test(decodedHref)
   // 这些 scheme 保留 <a> 默认行为，由系统协议处理器接走（不会导航 webview 自身）。
-  const isSystemScheme = /^(mailto|tel|sms):/i.test(href)
+  const isSystemScheme = /^(mailto|tel|sms):/i.test(decodedHref)
   // 页内锚点（目录跳转）保留默认行为：它不会导航走，只是滚动。
-  const isHashOnly = href.startsWith('#')
+  const isHashOnly = decodedHref.startsWith('#')
   return (
     <a
       // 不能加 target="_blank"：WRY 的 new-window 处理在 WKWebView 委托层，
       // JS preventDefault 拦不住，会和下面的 openExternal 各开一个网页（双开）。
-      href={href || undefined}
+      href={decodedHref || undefined}
       rel="noopener noreferrer"
       onClick={(event) => {
         // 除了系统 scheme 和页内锚点，**一律**掐掉默认导航。<a> 的默认行为会把 Tauri
@@ -814,14 +808,14 @@ function LinkAnchor({
         if (isSystemScheme || isHashOnly) return
         event.preventDefault()
         if (isWeb) {
-          void api.openExternal(href).catch((err) => console.error('openExternal failed', err))
+          void api.openExternal(decodedHref).catch((err) => console.error('openExternal failed', err))
           return
         }
-        if (!href) return
+        if (!decodedHref) return
         // 其余一律当本地文件交给系统默认程序。相对路径的基准由后端按会话工作目录解析
         // （与 agent 写文件的目录同一个解析器），前端不拼路径。
         void api
-          .openLocalFile(href, conversationId)
+          .openLocalFile(decodedHref, conversationId)
           .catch((err) => console.error('openLocalFile failed', err))
       }}
     >
@@ -884,6 +878,11 @@ function safeDecodeURIComponent(value: string): string {
   }
 }
 
+function decodeKivioInternalUrl(value: string): string {
+  const internalLink = /^https:\/\/kivio\.local\/__kivio-(file|local)\?target=(.*)$/i.exec(value)
+  return internalLink ? safeDecodeURIComponent(internalLink[2]) : value
+}
+
 function artifactKey(name: string): string {
   return safeDecodeURIComponent(name)
     .trim()
@@ -900,129 +899,12 @@ function isExternalOrAbsoluteImageSrc(src: string): boolean {
   return /^(https?:|data:|blob:|tauri:|asset:|file:|\/)/i.test(src)
 }
 
-function isSafeImageDataUrl(src: string): boolean {
-  return /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[a-z0-9+/=\s]+$/i.test(src.trim())
-}
-
-const chatMarkdownUrlTransform: UrlTransform = (url, key, node) => {
-  if (key === 'src' && node.tagName === 'img' && isSafeImageDataUrl(url)) {
-    return url
-  }
-  // `defaultUrlTransform` 会把 `file:` 整个剥成空 href（协议白名单里没有它），CLI 写完文件
-  // 给的 `file://…/index.html` 于是变成死链。放行它，点击由 LinkAnchor 交给
-  // `open_local_file`（后端再做扩展名/存在性把关，不是把 file: 当可信输入）。
-  if (key === 'href' && node.tagName === 'a' && /^file:\/\//i.test(url)) {
-    return url
-  }
-  return defaultUrlTransform(url)
-}
-
-function prepareMarkdownAstBlock(root: Root): Root {
-  visit(root, (node, index, parent) => {
-    if (node.type === 'raw' && parent && typeof index === 'number') {
-      parent.children[index] = { type: 'text', value: node.value }
-      return index
-    }
-    if (node.type !== 'element') return undefined
-    for (const key in urlAttributes) {
-      if (!Object.hasOwn(urlAttributes, key) || !Object.hasOwn(node.properties, key)) continue
-      const tags = urlAttributes[key]
-      if (tags !== null && !tags.includes(node.tagName)) continue
-      node.properties[key] = chatMarkdownUrlTransform(
-        String(node.properties[key] || ''),
-        key,
-        node,
-      )
-    }
-    return undefined
-  })
-  return root
-}
-
-const MarkdownAstBlock = memo(function MarkdownAstBlock({
-  node,
-  components,
-}: {
-  node: RootContent
-  components: Components
-}) {
-  return useMemo(() => {
-    const root = prepareMarkdownAstBlock({ type: 'root', children: [node] })
-    return toJsxRuntime(root, {
-      Fragment,
-      components: components as never,
-      ignoreInvalidStyle: true,
-      jsx,
-      jsxs,
-      passKeys: true,
-      passNode: true,
-    })
-  }, [components, node])
-})
-
-function WorkerSettledMarkdown({
-  content,
-  components,
-  citations,
-}: {
-  content: string
-  components: Components
-  citations?: Map<number, KbHitView>
-}) {
-  const citationNumbers = useMemo(
-    () => citations ? [...citations.keys()].sort((a, b) => a - b) : [],
-    [citations],
-  )
-  const citationKey = citationNumbers.join(',')
-  const [tree, setTree] = useState<Root | null>(() => (
-    getCachedMarkdownAst(content, citationNumbers)
-  ))
-  const [failed, setFailed] = useState(false)
-
-  useEffect(() => {
-    const cached = getCachedMarkdownAst(content, citationNumbers)
-    if (cached) {
-      setTree(cached)
-      setFailed(false)
-      return
-    }
-    let cancelled = false
-    setTree(null)
-    setFailed(false)
-    void parseMarkdownAst(content, citationNumbers).then((parsed) => {
-      if (cancelled) return
-      startTransition(() => setTree(parsed))
-    }).catch((err) => {
-      if (cancelled) return
-      console.error('Failed to parse settled Markdown in worker:', err)
-      setFailed(true)
-    })
-    return () => {
-      cancelled = true
-    }
-    // citationKey is the stable semantic dependency; citationNumbers is rebuilt only with citations.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [citationKey, content])
-
-  if (!tree) {
-    return (
-      <div data-chat-markdown-pending={failed ? 'false' : 'true'}>
-        <LiveMarkdown value={content} />
-      </div>
-    )
-  }
-
-  return (
-    <div data-chat-markdown-pending="false">
-      {tree.children.map((node, index) => (
-        <MarkdownAstBlock
-          key={`${node.position?.start.offset ?? index}:${node.position?.end.offset ?? index}`}
-          node={node}
-          components={components}
-        />
-      ))}
-    </div>
-  )
+const chatMarkdownUrlTransform: UrlTransform = (url) => {
+  // LinkAnchor/MarkdownArtifactImage perform the app-level routing and artifact
+  // lookup. Streamdown's default transform intentionally rejects file:/relative
+  // URLs, which would turn those links into its "Blocked URL" placeholder before
+  // our components get a chance to handle them.
+  return url
 }
 
 function buildArtifactLookup(artifacts: ChatToolArtifact[]): Map<string, ChatToolArtifact> {
@@ -1098,168 +980,65 @@ function MarkdownArtifactImage({
   )
 }
 
-const katexShadowCss = `${katexCss}
-:host {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  vertical-align: middle;
-  padding: 1px 2px;
-  margin-top: -2px;
+const streamdownPlugins = {
+  cjk,
+  code,
+  math: createMathPlugin({ singleDollarTextMath: true }),
+  mermaid,
 }
-:host(.katex-lazy--display) {
-  display: block;
-  padding: 0;
-  margin-top: 0;
-  vertical-align: baseline;
-}
-:host(.katex-lazy--display) .katex-display {
-  max-width: 100%;
-  overflow: visible;
-}
-:host(.katex-lazy--display) .katex-display > .katex {
-  display: block;
-  overflow: visible;
-}
-`
+const streamdownRemarkPlugins: PluggableList = [
+  ...Object.values(defaultRemarkPlugins),
+  remarkBreaks,
+]
 
-let katexShadowSheet: CSSStyleSheet | null = null
-let katexShadowSheetUnavailable = false
-
-function getKatexShadowSheet(): CSSStyleSheet | null {
-  if (katexShadowSheetUnavailable || typeof CSSStyleSheet === 'undefined') return null
-  if (katexShadowSheet) return katexShadowSheet
-  try {
-    const sheet = new CSSStyleSheet()
-    sheet.replaceSync(katexShadowCss)
-    katexShadowSheet = sheet
-    return sheet
-  } catch {
-    katexShadowSheetUnavailable = true
-    return null
-  }
-}
-
-function installKatexShadowStyles(root: ShadowRoot) {
-  const sheet = getKatexShadowSheet()
-  if (sheet && 'adoptedStyleSheets' in root) {
-    try {
-      if (!root.adoptedStyleSheets.includes(sheet)) {
-        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet]
-      }
-      return
-    } catch {
-      katexShadowSheetUnavailable = true
+const FullSettledMarkdown = memo(function FullSettledMarkdown({
+  content,
+  components,
+  remarkPlugins,
+  useCache,
+  streaming,
+}: {
+  content: string
+  components: Components
+  remarkPlugins: PluggableList
+  useCache: boolean
+  streaming: boolean
+}) {
+  const normalized = useMemo(() => {
+    const build = () => {
+      const normalizedContent = preserveLocalMarkdownLinks(
+        normalizeMarkdownForRender(normalizeLegacyErrorDetails(content)),
+      )
+      return { normalized: normalizedContent }
     }
-  }
+    return useCache
+      ? getSettledMarkdownCacheEntry(content, build).normalized
+      : build().normalized
+  }, [content, useCache])
 
-  if (root.querySelector('style[data-katex-shadow-style="true"]')) return
-  const style = document.createElement('style')
-  style.dataset.katexShadowStyle = 'true'
-  style.textContent = katexShadowCss
-  root.prepend(style)
-}
-
-function upsertKatexShadowContent(root: ShadowRoot, html: string) {
-  let content = root.querySelector<HTMLElement>('[data-katex-shadow-content="true"]')
-  if (!content) {
-    content = document.createElement('span')
-    content.dataset.katexShadowContent = 'true'
-    root.appendChild(content)
-  }
-  content.innerHTML = html
-}
-
-// KaTeX HTML is visually high fidelity but expands into hundreds of spans. Keep
-// those spans out of the page-level DOM so WebKit global UI invalidations do not
-// repeatedly match styles through every formula descendant.
-function ShadowKatex({ html, display }: { html: string; display: boolean }) {
-  const hostRef = useRef<HTMLSpanElement>(null)
-  const renderedHtmlRef = useRef<string | null>(null)
-
-  useLayoutEffect(() => {
-    const host = hostRef.current
-    if (!host) return
-    const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
-    installKatexShadowStyles(root)
-    if (renderedHtmlRef.current !== html) {
-      upsertKatexShadowContent(root, html)
-      renderedHtmlRef.current = html
-    }
-  }, [html])
-
-  const cls = display ? 'katex-lazy katex-lazy--display' : 'katex-lazy'
-  return <span ref={hostRef} className={cls} data-katex-shadow-host="true" />
-}
-
-// 按 (tex, display) 缓存 KaTeX 渲染结果：流式时每帧重渲会对每个公式重复调用，
-// 同一公式只算一次。简单上限防无界增长(超了清空)。
-const texCache = new Map<string, string>()
-function renderTex(tex: string, display: boolean): string {
-  const key = (display ? 'd:' : 'i:') + tex
-  const cached = texCache.get(key)
-  if (cached != null) return cached
-  let out = ''
-  try {
-    const rendered = katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' })
-    out = rendered.includes('katex-error') ? '' : rendered
-  } catch {
-    out = ''
-  }
-  if (texCache.size > 500) texCache.clear()
-  texCache.set(key, out)
-  return out
-}
-
-function LazyMath({ tex, display }: { tex: string; display: boolean }) {
-  // 即时渲染（不再用 IntersectionObserver 延迟到滚动进视口才渲染）。KaTeX 子树进入
-  // Shadow DOM，避免已完成公式让 WebKit 后续全局 UI 交互反复扫大段普通 DOM。
-  const html = useMemo(() => renderTex(tex, display), [tex, display])
-  if (html) {
-    return <ShadowKatex html={html} display={display} />
-  }
-  const cls = display ? 'katex-lazy katex-lazy--display' : 'katex-lazy'
-  return <span className={`${cls} katex-lazy--pending`}>{tex}</span>
-}
-
-// 模块级稳定组件：remark-math 产出的 <kvmath> → <LazyMath>。无闭包依赖，必须放模块级——
-// 若写成 components useMemo 里的内联函数，每次重建 components（artifacts/citations 变化、或流式每帧）
-// 都是新函数类型，ReactMarkdown 会把 LazyMath 整个卸载重挂（公式 remount 闪烁）。
-function KvMath({ node }: { node?: { properties?: { tex?: string; display?: string } } }) {
-  const props = node?.properties ?? {}
-  return <LazyMath tex={String(props.tex ?? '')} display={props.display === 'true'} />
-}
-
-/** Lightweight streaming path; settled messages keep the full Markdown pipeline. */
-function StreamingMarkdownPreview({ content }: { content: string }) {
-  return <LiveMarkdown value={content} />
-}
-
-function needsSettledStreamingMarkdown(content: string): boolean {
-  return /```\s*(?:html?|css|javascript|js|typescript|ts|jsx|tsx|svg|mermaid)\b/i.test(content)
-    || /!\[[^\]]*\]\([^)]*\)/.test(content)
-    || /(?:\$\$|\\\(|\\\[|\$(?:[^$\n]|\\.)+\$)/.test(content)
-}
-
-// remark-math 产出的 math/inlineMath 节点 → 自定义 <kvmath> 元素(携带 tex + display)，
-// 由下方 components 的 kvmath 映射到 <LazyMath>。替代 rehype-katex 的即时渲染。
-const remarkRehypeOptions = {
-  handlers: {
-    math: (_state: unknown, node: { value?: string }) => ({
-      type: 'element',
-      tagName: 'kvmath',
-      properties: { display: 'true', tex: node.value ?? '' },
-      children: [],
-    }),
-    inlineMath: (_state: unknown, node: { value?: string }) => ({
-      type: 'element',
-      tagName: 'kvmath',
-      properties: { display: 'false', tex: node.value ?? '' },
-      children: [],
-    }),
-  },
-}
+  return (
+    <Streamdown
+      mode={streaming ? 'streaming' : 'static'}
+      dir="auto"
+      parseIncompleteMarkdown={streaming}
+      normalizeHtmlIndentation
+      plugins={streamdownPlugins}
+      remarkPlugins={remarkPlugins}
+      components={components}
+      shikiTheme={['github-light', 'github-dark']}
+      controls={{
+        code: false,
+        mermaid: { copy: !streaming, download: false, fullscreen: !streaming, panZoom: !streaming },
+        table: false,
+      }}
+      animated={false}
+      urlTransform={chatMarkdownUrlTransform}
+      linkSafety={{ enabled: false }}
+    >
+      {normalized}
+    </Streamdown>
+  )
+})
 
 function ChatMarkdownComponent({
   content,
@@ -1271,30 +1050,8 @@ function ChatMarkdownComponent({
 }: ChatMarkdownProps) {
   const streaming = useContext(MarkdownStreamingContext)
   const flags = getChatPerformanceFlags()
-  const useLightweightStreaming = streaming
-    && flags.lightweightStreamingMarkdown
-  const useWorkerSettled = !streaming
-    && typeof Worker !== 'undefined'
-    && import.meta.env.MODE !== 'test'
-  const normalized = useMemo(
-    () => {
-      if (useLightweightStreaming || useWorkerSettled) return content
-      const build = () => {
-        const normalizedContent = normalizeMarkdownForRender(normalizeLegacyErrorDetails(content))
-        return {
-          normalized: normalizedContent,
-          hasHeavySyntax: needsSettledStreamingMarkdown(normalizedContent),
-          blockCount: normalizedContent.split(/\n\s*\n/).length,
-        }
-      }
-      return flags.settledMarkdownCache
-        ? getSettledMarkdownCacheEntry(content, build).normalized
-        : build().normalized
-    },
-    [content, flags.settledMarkdownCache, useLightweightStreaming, useWorkerSettled],
-  )
   const remarkPlugins = useMemo<PluggableList>(() => {
-    const plugins: PluggableList = [remarkGfm, remarkMath, remarkCjkFriendly]
+    const plugins: PluggableList = [...streamdownRemarkPlugins]
     if (citations && citations.size > 0) {
       plugins.push(remarkCitations(new Set(citations.keys())))
     }
@@ -1304,7 +1061,6 @@ function ChatMarkdownComponent({
     const artifactLookup = buildArtifactLookup(artifacts)
     return {
       ...markdownComponents,
-      kvmath: KvMath,
       a: ({ href, children }) => {
         const url = typeof href === 'string' ? href : ''
         const cite = /^#kb-cite-(\d{1,3})$/.exec(url)
@@ -1315,7 +1071,7 @@ function ChatMarkdownComponent({
         return <LinkAnchor href={url} conversationId={conversationId}>{children}</LinkAnchor>
       },
       img: ({ src, alt }) => {
-        const rawSrc = typeof src === 'string' ? src : ''
+        const rawSrc = decodeKivioInternalUrl(typeof src === 'string' ? src : '')
         const altText = alt ?? ''
         const artifact =
           rawSrc && !isExternalOrAbsoluteImageSrc(rawSrc)
@@ -1335,39 +1091,16 @@ function ChatMarkdownComponent({
     }
   }, [artifacts, conversationId, onImageClick, citations])
 
-  if (useLightweightStreaming) {
-    return (
-      <div className={markdownProseClass(variant)}>
-        <StreamingMarkdownPreview content={content} />
-      </div>
-    )
-  }
-
-  if (useWorkerSettled) {
-    return (
-      <div className={markdownProseClass(variant)}>
-        <MarkdownErrorBoundary fallbackText={content}>
-          <WorkerSettledMarkdown
-            content={content}
-            components={components}
-            citations={citations}
-          />
-        </MarkdownErrorBoundary>
-      </div>
-    )
-  }
-
   return (
     <div className={markdownProseClass(variant)}>
       <MarkdownErrorBoundary fallbackText={content}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          remarkRehypeOptions={remarkRehypeOptions as never}
+        <FullSettledMarkdown
+          content={content}
           components={components}
-          urlTransform={chatMarkdownUrlTransform}
-        >
-          {normalized}
-        </ReactMarkdown>
+          remarkPlugins={remarkPlugins}
+          useCache={flags.settledMarkdownCache && !streaming}
+          streaming={streaming}
+        />
       </MarkdownErrorBoundary>
     </div>
   )

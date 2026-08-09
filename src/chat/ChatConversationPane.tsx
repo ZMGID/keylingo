@@ -101,7 +101,8 @@ export const ChatConversationPane = memo(function ChatConversationPane({
   onCloseImageViewer,
   onRender,
 }: ChatConversationPaneProps) {
-  const { loading: conversationLoading } = useConversationTransition()
+  const transition = useConversationTransition()
+  const conversationLoading = transition.loading
   return (
     <div className="chat-motion-pane-in chat-main-pane relative flex min-w-0 flex-1 flex-col">
       {usesNativeTitlebar && (
@@ -241,7 +242,9 @@ export const ChatConversationPane = memo(function ChatConversationPane({
             <InputBar {...inputBarProps} />
           </>
         )}
-        {conversationLoading && <ConversationLoadingState />}
+        {conversationLoading && (
+          <ConversationLoadingState showAnimation={transition.showLoading} />
+        )}
       </div>
 
       {imageViewerItem && (

@@ -278,15 +278,45 @@ function MessageListBase({
       || renderRequestId <= 0
       || committedRenderRequestRef.current === renderRequestId
     ) return
-    const completeIfReady = () => {
-      if (contentEl.querySelector('[data-chat-markdown-pending="true"]')) return false
+    let cancelled = false
+    let readyRaf: number | null = null
+    let previousHeight = -1
+    let stableFrames = 0
+
+    const completeIfReady = (): boolean | null => {
+      if (contentEl.querySelector('[data-chat-markdown-pending="true"]')) {
+        previousHeight = -1
+        stableFrames = 0
+        // null 表示仍在等 Worker，不继续 rAF 轮询；等 MutationObserver
+        // 看到 pending 标记消失后再开始测高度。
+        return null
+      }
+
+      // Markdown AST 已经到位后，虚拟列表还可能在下一帧用真实 DOM 高度
+      // 修正 itemSizeCache / totalSize。至少连续两帧高度不变，才把 Logo
+      // 覆盖层交还给正文，避免用户看到「先显示、再撑开、闪一下」的中间态。
+      const height = contentEl.scrollHeight
+      if (height === previousHeight) stableFrames += 1
+      else {
+        previousHeight = height
+        stableFrames = 0
+      }
+      if (stableFrames < 2) return false
+
       committedRenderRequestRef.current = renderRequestId
       onInitialRender?.(conversationId, renderRequestId)
       return true
     }
-    if (completeIfReady()) return
+    const scheduleReadyCheck = () => {
+      if (cancelled || readyRaf !== null) return
+      readyRaf = requestAnimationFrame(() => {
+        readyRaf = null
+        if (completeIfReady() === false) scheduleReadyCheck()
+      })
+    }
+
     const observer = new MutationObserver(() => {
-      if (completeIfReady()) observer.disconnect()
+      scheduleReadyCheck()
     })
     observer.observe(contentEl, {
       attributes: true,
@@ -294,7 +324,12 @@ function MessageListBase({
       childList: true,
       subtree: true,
     })
-    return () => observer.disconnect()
+    scheduleReadyCheck()
+    return () => {
+      cancelled = true
+      observer.disconnect()
+      if (readyRaf !== null) cancelAnimationFrame(readyRaf)
+    }
   }, [contentEl, conversationId, onInitialRender, renderRequestId])
 
   useLayoutEffect(() => {

@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import './index.css'
+import 'streamdown/styles.css'
 
 // 屏蔽 WebView 原生右键菜单（Back/Reload/Inspect）
 document.addEventListener('contextmenu', (e) => e.preventDefault())

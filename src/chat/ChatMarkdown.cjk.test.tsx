@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { render } from '@testing-library/react'
 import { ChatMarkdown } from './ChatMarkdown'
 
-/** CommonMark 原样的 flanking 规则会让这些中文写法把星号原样吐出来（remark-cjk-friendly 修的就是这个）。 */
+/** Streamdown 的 strong renderer 使用 data-streamdown 标记，而不是原生 strong 标签。 */
 describe('中文强调', () => {
   it.each([
     ['**一句话总结：**最近 AI 圈', '一句话总结：'],
@@ -10,7 +10,7 @@ describe('中文强调', () => {
     ['**结论（重要）**如下', '结论（重要）'],
   ])('%s', (md, bold) => {
     const { container } = render(<ChatMarkdown content={md} />)
-    expect(container.querySelector('strong')?.textContent).toBe(bold)
+    expect(container.querySelector('[data-streamdown="strong"]')?.textContent).toBe(bold)
     expect(container.textContent).not.toContain('**')
   })
 
