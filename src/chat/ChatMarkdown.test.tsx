@@ -1,6 +1,18 @@
 import { render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { ChatMarkdown } from './ChatMarkdown'
+import { clearSettledMarkdownCache, settledMarkdownCacheSize } from './settledMarkdownCache'
+
+describe('ChatMarkdown settled cache', () => {
+  it('reuses a bounded settled normalization entry across remounts', () => {
+    clearSettledMarkdownCache()
+    const content = 'A settled answer with **markdown**.'
+    const first = render(<ChatMarkdown content={content} />)
+    first.unmount()
+    render(<ChatMarkdown content={content} />)
+    expect(settledMarkdownCacheSize()).toBe(1)
+  })
+})
 
 // 回归测试：ChatMarkdown 因 props 变化（如 artifacts/citations 换引用）重渲时，公式（LazyMath）
 // 不能被卸载重挂——否则真机里会闪一下「原始 LaTeX → 公式」。jsdom 无 IntersectionObserver，

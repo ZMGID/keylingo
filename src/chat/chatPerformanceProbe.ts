@@ -10,6 +10,16 @@ type ProbeBucket = {
   lastPhase: string
   lastDetail: string
 }
+
+export type ChatPerfWindowSample = {
+  name: string
+  durationMs: number
+  mountedRows: number
+  domNodes: number
+  detail?: string
+}
+
+const windowSamples: ChatPerfWindowSample[] = []
 const buckets = new Map<string, ProbeBucket>()
 let flushTimer: number | null = null
 let enabledCache: boolean | null = null
@@ -59,8 +69,42 @@ function scheduleFlush() {
       detail: bucket.lastDetail,
     }))
     buckets.clear()
-    console.info('[kivio:perf] chat window', rows)
+    console.info('[kivio:perf] chat window', rows, windowSamples.splice(0, windowSamples.length))
   }, 500)
+}
+
+export function recordChatPerfSample(sample: ChatPerfWindowSample): void {
+  if (!probeEnabled()) return
+  windowSamples.push({
+    ...sample,
+    durationMs: Number(Math.max(0, sample.durationMs).toFixed(1)),
+  })
+  scheduleFlush()
+}
+
+export function measureChatSurface(
+  name: string,
+  root: Element | null,
+  detail?: string,
+): () => void {
+  const startedAt = typeof performance === 'undefined' ? 0 : performance.now()
+  return () => {
+    if (startedAt === 0) return
+    recordChatPerfSample({
+      name,
+      durationMs: performance.now() - startedAt,
+      mountedRows: root?.querySelectorAll('[data-chat-message-list-item]').length ?? 0,
+      domNodes: root?.querySelectorAll('*').length ?? 0,
+      detail,
+    })
+  }
+}
+
+export function resetChatPerfProbeForTests(): void {
+  buckets.clear()
+  windowSamples.length = 0
+  flushTimer = null
+  enabledCache = null
 }
 
 function bucketFor(name: string): ProbeBucket {

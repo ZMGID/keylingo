@@ -144,7 +144,7 @@ import {
 import { compareTimelineSegments, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { applyLiveContextUsage } from './contextPanel'
-import { onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
+import { measureChatSurface, onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
 import { ChatRouteKeepAlive } from './ChatRouteKeepAlive'
 import { ChatConversationPane } from './ChatConversationPane'
 
@@ -3983,8 +3983,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   )
 
   const setSidebarCollapsedPersisted = useCallback((collapsed: boolean) => {
+    const finish = measureChatSurface(
+      'sidebar-collapse',
+      document.querySelector('.chat-window-shell'),
+      collapsed ? 'collapsed' : 'expanded',
+    )
     setSidebarCollapsed(collapsed)
     rememberChatSidebarCollapsed(collapsed)
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(finish))
+    } else {
+      finish()
+    }
   }, [])
 
   // ---------- Right Dock ----------

@@ -20,6 +20,8 @@ import type { KbHitView } from './knowledgeBaseHits'
 import { remarkCitations } from './citations'
 import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
+import { getChatPerformanceFlags } from './chatPerformanceFlags'
+import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -1138,7 +1140,7 @@ function StreamingMarkdownPreview({ content }: { content: string }) {
 function needsSettledStreamingMarkdown(content: string): boolean {
   return /```\s*(?:html?|css|javascript|js|typescript|ts|jsx|tsx|svg|mermaid)\b/i.test(content)
     || /!\[[^\]]*\]\([^)]*\)/.test(content)
-    || /(?:\$\$|\\\(|\\\[)/.test(content)
+    || /(?:\$\$|\\\(|\\\[|\$(?:[^$\n]|\\.)+\$)/.test(content)
 }
 
 // remark-math 产出的 math/inlineMath 节点 → 自定义 <kvmath> 元素(携带 tex + display)，
@@ -1169,9 +1171,26 @@ function ChatMarkdownComponent({
   citations,
 }: ChatMarkdownProps) {
   const streaming = useContext(MarkdownStreamingContext)
+  const flags = getChatPerformanceFlags()
+  const useLightweightStreaming = streaming
+    && flags.lightweightStreamingMarkdown
+    && !needsSettledStreamingMarkdown(content)
   const normalized = useMemo(
-    () => normalizeMarkdownForRender(normalizeLegacyErrorDetails(content)),
-    [content],
+    () => {
+      if (useLightweightStreaming) return content
+      const build = () => {
+        const normalizedContent = normalizeMarkdownForRender(normalizeLegacyErrorDetails(content))
+        return {
+          normalized: normalizedContent,
+          hasHeavySyntax: needsSettledStreamingMarkdown(normalizedContent),
+          blockCount: normalizedContent.split(/\n\s*\n/).length,
+        }
+      }
+      return flags.settledMarkdownCache
+        ? getSettledMarkdownCacheEntry(content, build).normalized
+        : build().normalized
+    },
+    [content, flags.settledMarkdownCache, useLightweightStreaming],
   )
   const remarkPlugins = useMemo<PluggableList>(() => {
     const plugins: PluggableList = [remarkGfm, remarkMath, remarkCjkFriendly]
@@ -1215,7 +1234,7 @@ function ChatMarkdownComponent({
     }
   }, [artifacts, conversationId, onImageClick, citations])
 
-  if (streaming && !needsSettledStreamingMarkdown(normalized)) {
+  if (useLightweightStreaming) {
     return (
       <div className={markdownProseClass(variant)}>
         <StreamingMarkdownPreview content={content} />

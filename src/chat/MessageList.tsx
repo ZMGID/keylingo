@@ -40,7 +40,8 @@ import {
   setCachedRowMeasurement,
 } from './messageListVirtualization'
 import type { Lang } from '../settings/i18n'
-import { useChatPerfRenderProbe } from './chatPerformanceProbe'
+import { measureChatSurface, recordChatPerfSample, useChatPerfRenderProbe } from './chatPerformanceProbe'
+import { getChatPerformanceFlags } from './chatPerformanceFlags'
 
 export interface AssistantStreamStats {
   messageId: string
@@ -151,6 +152,8 @@ function MessageListBase({
   animateCompactionBoundaryId = null,
   lang = 'zh',
 }: MessageListProps) {
+  const chatPerfFlags = getChatPerformanceFlags()
+  const useTanStackVirtualizer = chatPerfFlags.tanstackVirtualizer
   useChatPerfRenderProbe('MessageList', {
     conversationId,
     messages: messages.length,
@@ -218,6 +221,16 @@ function MessageListBase({
     scrollRef.current = el
     setViewportEl(el)
   }, [])
+
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    const finish = measureChatSurface(
+      'conversation-visible',
+      contentEl,
+      conversationId ?? 'empty',
+    )
+    return finish
+  }, [conversationId, contentEl])
   const prevMessageCountRef = useRef(0)
   const [activeNavigatorNodeId, setActiveNavigatorNodeId] = useState<string | null>(null)
   const [visibleNavigatorNodeIds, setVisibleNavigatorNodeIds] = useState<string[]>([])
@@ -532,7 +545,8 @@ function MessageListBase({
     return observeVirtualRect(instance, callback)
   }, [viewportEl])
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
-    count: itemCount,
+    count: useTanStackVirtualizer ? itemCount : 0,
+    enabled: useTanStackVirtualizer,
     getScrollElement: () => scrollRef.current,
     observeElementRect: observeRect,
     estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
@@ -576,6 +590,17 @@ function MessageListBase({
     followHandle.markLayoutCompensation()
     virtualizer.measure()
   }, [followHandle, historyMeasurementRevision, layoutKey, viewportEl, virtualizer])
+
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    recordChatPerfSample({
+      name: 'message-list-window',
+      durationMs: 0,
+      mountedRows: contentEl.querySelectorAll('[data-chat-message-list-item]').length,
+      domNodes: contentEl.querySelectorAll('*').length,
+      detail: `${conversationId ?? 'empty'}:history=${historyItems.length}:visible=${virtualItems.length}`,
+    })
+  }, [contentEl, conversationId, historyItems.length, virtualItems.length])
 
   const navigatorNodes = useMemo(() => {
     // targetRenderIndex 仍是「全历史逻辑下标」，导航时用 data-chat-row-index 查找。
@@ -978,9 +1003,9 @@ function MessageListBase({
         <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
           <div
             className="relative w-full"
-            style={{ height: virtualizer.getTotalSize() }}
+            style={useTanStackVirtualizer ? { height: virtualizer.getTotalSize() } : undefined}
           >
-            {virtualItems.map((virtualItem) => {
+            {useTanStackVirtualizer ? virtualItems.map((virtualItem) => {
               const item = virtualItem.index < historyItems.length
                 ? historyItems[virtualItem.index]
                 : tailItem
@@ -1003,7 +1028,25 @@ function MessageListBase({
                   {item.kind === 'tail' ? renderTail() : renderItem(item)}
                 </div>
               )
-            })}
+            }) : (
+              <>
+                {historyItems.map((item, index) => (
+                  <div
+                    key={item.key}
+                    data-index={index}
+                    data-chat-row-index={index}
+                    data-message-id={item.kind === 'message' ? item.message.id : undefined}
+                    data-chat-message-list-item={item.kind}
+                    className="w-full pb-0.5"
+                  >
+                    {renderItem(item)}
+                  </div>
+                ))}
+                <div data-chat-message-list-item="tail" className="w-full pb-0.5">
+                  {renderTail()}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
