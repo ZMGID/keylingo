@@ -101,15 +101,16 @@ describe('row resize anchoring', () => {
     scrollDirection: null as 'forward' | 'backward' | null,
   }
 
-  it('adjusts a measured row only when it is entirely above the reading anchor', () => {
+  it('adjusts rows that start above the reading anchor (LiveAgent / TanStack default)', () => {
     expect(shouldAdjustChatItemSizeChange(
       { key: 'measured', start: 100, end: 200 },
       base,
     )).toBe(true)
+    // 跨过锚点但仍从上方开始：默认补偿，live 行特例由 MessageList 再裁。
     expect(shouldAdjustChatItemSizeChange(
       { key: 'measured', start: 450, end: 550 },
       base,
-    )).toBe(false)
+    )).toBe(true)
     expect(shouldAdjustChatItemSizeChange(
       { key: 'measured', start: 550, end: 650 },
       base,
@@ -123,10 +124,15 @@ describe('row resize anchoring', () => {
     )).toBe(false)
   })
 
-  it('compensates an unmeasured row above the anchor once', () => {
+  it('compensates an unmeasured row above the anchor once (estimate→actual)', () => {
     expect(shouldAdjustChatItemSizeChange(
       { key: 'unmeasured', start: 300, end: 700 },
       base,
+    )).toBe(true)
+    // 首次测量即使 backward 也要补偿（上游「上滚时条目跳动」修复）。
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'unmeasured', start: 100, end: 200 },
+      { ...base, scrollDirection: 'backward' },
     )).toBe(true)
   })
 })

@@ -173,11 +173,12 @@ export function reduceFollowEvent(
       }
 
       if (state.following) {
-        // 我们自己写的 scrollTop（钉底 / 回到底部动画），或内容尺寸变化引起的滚动：
-        // 只做纠正，不改跟随状态。显著 gap 才 pin，小 gap 交给 contentGrowth / 下一帧，
-        // 避免与 virtualizer remeasure 互抢。
+        // 对齐 LiveAgent：跟随中只要还开着 gap，就立刻纠正钉底。
+        // self 来源（我们写的 pin / TanStack end-anchor 补偿 / 内容增长）只纠正，不改状态。
+        // 旧的 correctionMinPx(32) 门槛会让 1–32px 的 gap 悬着，下一帧再 pin →
+        // 生成内容整段「往下闪」一下。
         if (event.source === 'self') {
-          return { state: next, pin: gap > config.correctionMinPx }
+          return { state: next, pin: gap > config.attachThresholdPx }
         }
         // 外部把视口拉离了底部。能走到这里的是**拿不到手势事件**的那些路径：
         // 拖原生滚动条（原生滚动条不派发 DOM 指针事件，也没有 wheel）、页内查找跳转、

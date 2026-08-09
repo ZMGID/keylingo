@@ -35,34 +35,18 @@ interface ChatMarkdownProps {
   citations?: Map<number, KbHitView>
 }
 
-/* 代码块 / 行内码的底色走 `--bg-hover`：它在亮色下映射 `--theme-surface-hover`
-   （跟着暖/冷/象牙主题走），在 `.dark` 里被显式覆盖成 #2c2c30。
-   **不要直接用 `--theme-surface-*`** —— 那批没有暗色态，直接用会让暗色模式变成亮色底。 */
-const CODE_PROSE =
-  'prose-pre:bg-[var(--bg-hover)] prose-pre:text-[var(--text)]'
-
-const proseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
-
-const reasoningProseClass =
-  `chat-markdown chat-reasoning-markdown prose prose-sm dark:prose-invert max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500 prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-500 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
-
-const lensProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
-
-const lensMutedProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400 prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-600 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
-
-function markdownProseClass(variant: ChatMarkdownProps['variant']): string {
+// 排版只走 Streamdown 默认样式；变体只改外壳字号/颜色。
+// 代码块 / 表格 / 本地链接 / artifact 图仍用 components 做应用能力，不改正文排版。
+function markdownShellClass(variant: ChatMarkdownProps['variant']): string {
   switch (variant) {
     case 'reasoning':
-      return reasoningProseClass
+      return 'chat-markdown chat-reasoning-markdown max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500'
     case 'lens':
-      return lensProseClass
+      return 'chat-markdown max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200'
     case 'lens-muted':
-      return lensMutedProseClass
+      return 'chat-markdown max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400'
     default:
-      return proseClass
+      return 'chat-markdown max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100'
   }
 }
 
@@ -727,26 +711,35 @@ function HtmlCodePreview({ html }: { html: string }) {
   )
 }
 
-const markdownComponents: Components = {
-  pre: ({ children }) => {
-    const child = Array.isArray(children) ? children[0] : children
-    if (isValidElement<{ className?: string; children?: unknown }>(child)) {
-      const languageMatch = /language-([\w-]+)/.exec(child.props.className ?? '')
-      const language = normalizeCodeLanguage(languageMatch?.[1])
-      const code = codeChildrenToString(child.props.children)
-      if (language === 'html') {
-        return <HtmlCodePreview html={code} />
-      }
-      if (language === 'mermaid') {
-        return <MermaidBlock code={code} />
-      }
-      if (language === 'kivio-error-details') {
-        return <ErrorDetails detail={code} />
-      }
-      return <DeferredCodeBlock code={code} language={language} />
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  // 流式中避免 ChatHeavyIsland 延迟 hydrate：fallback(112px) → 真代码块 的高度跳变
+  // 会在贴底 pin 之后再撑开，整段生成内容看起来「往下闪」一下。
+  const streaming = useContext(MarkdownStreamingContext)
+  const child = Array.isArray(children) ? children[0] : children
+  if (isValidElement<{ className?: string; children?: unknown }>(child)) {
+    const languageMatch = /language-([\w-]+)/.exec(child.props.className ?? '')
+    const language = normalizeCodeLanguage(languageMatch?.[1])
+    const code = codeChildrenToString(child.props.children)
+    if (language === 'html') {
+      return <HtmlCodePreview html={code} />
     }
-    return <DeferredCodeBlock code={codeChildrenToString(children)} language="" />
-  },
+    if (language === 'mermaid') {
+      // 流式中只显示源码：异步 mermaid.render 完成后的高度突变同样会触发底部闪动。
+      if (streaming) return <CodeBlock code={code} language="mermaid" />
+      return <MermaidBlock code={code} />
+    }
+    if (language === 'kivio-error-details') {
+      return <ErrorDetails detail={code} />
+    }
+    if (streaming) return <CodeBlock code={code} language={language} />
+    return <DeferredCodeBlock code={code} language={language} />
+  }
+  if (streaming) return <CodeBlock code={codeChildrenToString(children)} language="" />
+  return <DeferredCodeBlock code={codeChildrenToString(children)} language="" />
+}
+
+const markdownComponents: Components = {
+  pre: MarkdownPre,
   // 表格：**每个单元格一个独立圆角块**，横竖都靠 border-spacing 的空隙分隔。
   // **没有任何边框线**，别加 border，也别给容器加外框。
   table: ({ children }) => (
@@ -1016,11 +1009,16 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
       : build().normalized
   }, [content, useCache])
 
+  // 对齐 LiveAgent Markdown：
+  // - 流式消息固定走 Streamdown streaming 模式（块级 memo + parseIncomplete），
+  //   不要在每个 token 上整篇 static 重解析——那会放大行高抖动。
+  // - isAnimating 跟「还在出字」绑定；animated 始终 false（不做字级动画）。
+  // - 模式只由 streaming 上下文决定；settled 后才切 static，避免中途整树重挂。
   return (
     <Streamdown
       mode={streaming ? 'streaming' : 'static'}
       dir="auto"
-      parseIncompleteMarkdown={streaming}
+      parseIncompleteMarkdown
       normalizeHtmlIndentation
       plugins={streamdownPlugins}
       remarkPlugins={remarkPlugins}
@@ -1031,6 +1029,7 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
         mermaid: { copy: !streaming, download: false, fullscreen: !streaming, panZoom: !streaming },
         table: false,
       }}
+      isAnimating={streaming}
       animated={false}
       urlTransform={chatMarkdownUrlTransform}
       linkSafety={{ enabled: false }}
@@ -1092,7 +1091,7 @@ function ChatMarkdownComponent({
   }, [artifacts, conversationId, onImageClick, citations])
 
   return (
-    <div className={markdownProseClass(variant)}>
+    <div className={markdownShellClass(variant)}>
       <MarkdownErrorBoundary fallbackText={content}>
         <FullSettledMarkdown
           content={content}

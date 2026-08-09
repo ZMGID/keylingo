@@ -369,26 +369,15 @@ function MessageListBase({
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
   >(null)
 
-  // 底部跟随：contentGrowth 钉底 + 近底历史实挂载，避免与 virtualizer remeasure 互抢。
+  // 底部跟随：对齐 LiveAgent —— ResizeObserver contentGrowth 是流式钉底驱动；
+  // TanStack `anchorTo: 'end'` 在贴底时按 total-size delta 补偿。不要在每个
+  // streaming snapshot 上再 stickToBottom：那会和 end-anchor / RO 互写 scrollTop，
+  // 生成中内容整段「往下闪」。
   const { handle: followHandle, showJumpButton } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
     trackKeys: true,
   })
-
-  // ResizeObserver 是主要的流式钉底驱动，但虚拟列表/浏览器可能先更新内容和 scrollTop，
-  // 再投递 ResizeObserver，偶尔会漏掉这一轮高度变化。流式快照已经是最新 DOM 的提交信号，
-  // 在 layout effect 里补一次同步；用户滚轮/触摸上移时 followHandle 会先变成 false，
-  // 因此不会把用户主动停留在历史位置的视口重新拽到底部。
-  useLayoutEffect(() => {
-    if (!streaming || !followHandle.isFollowing()) return
-    const viewport = scrollRef.current
-    if (viewport) {
-      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      if (gap <= 1) return
-    }
-    followHandle.stickToBottom()
-  }, [followHandle, snapshot, streaming])
 
   const legacyPlanMessageId = useMemo(() => {
     const legacyPlan = agentPlanState?.plan?.trim()
@@ -665,8 +654,17 @@ function MessageListBase({
     return map
   }, [contentWidth, historyItems, layoutKey, tailMeasurementKey])
 
+  // 真正的 live 外置：流式气泡 + 状态行放在虚拟列表**外面**的文档流里，
+  // 不再作为 virtualizer 的 tail row 被 measureElement。
+  // 否则每个 token 都走 resizeItem + anchorTo:end 补偿，和 contentGrowth pin
+  // 互写 scrollTop → 生成内容整段「往下闪」。LiveAgent 把 live 留在列表里是
+  // 因为它们的 scroll 状态机更简单；Kivio 有 source 分类，不能双通道抢 pin。
+  // 关闭 liveRowExternalization 时回退：tail 仍进 virtualizer（诊断用）。
+  const flowLiveOutsideVirtualizer = useTanStackVirtualizer && externalizeLiveRow
   const tailItem = useMemo<RenderItem>(() => ({ kind: 'tail', key: 'tail' }), [])
-  const itemCount = historyItems.length + 1
+  const itemCount = flowLiveOutsideVirtualizer
+    ? historyItems.length
+    : historyItems.length + 1
   const historyItemsRef = useRef<RenderItem[]>(historyItems)
   historyItemsRef.current = historyItems
   const itemAt = useCallback((index: number) => (
@@ -721,10 +719,13 @@ function MessageListBase({
     },
     rangeExtractor: useCallback((range: Range) => {
       const indexes = defaultRangeExtractor(range)
-      const tailIndex = itemCount - 1
-      if (tailIndex >= 0 && !indexes.includes(tailIndex)) indexes.push(tailIndex)
+      // 旧路径：tail 仍在 virtualizer 内时强制挂载；外置后没有 tail index。
+      if (!flowLiveOutsideVirtualizer) {
+        const tailIndex = itemCount - 1
+        if (tailIndex >= 0 && !indexes.includes(tailIndex)) indexes.push(tailIndex)
+      }
       return indexes
-    }, [itemCount]),
+    }, [flowLiveOutsideVirtualizer, itemCount]),
     overscan: 6,
     // jsdom/test environments have no layout box before the first observer tick;
     // a conservative initial viewport keeps the first render useful while the
@@ -736,11 +737,8 @@ function MessageListBase({
     useAnimationFrameWithResizeObserver: false,
     useFlushSync: false,
   })
-  // TanStack's default is the safe baseline: only rows entirely above the
-  // reading anchor move the detached viewport, and re-measurements during
-  // backward scrolling do not adjust it. The one chat-specific exception is
-  // a growing live tail row that straddles the viewport top: its new content is
-  // appended below the reader and must not pull history downward.
+  // 对齐 LiveAgent createLiveRowScrollAdjustPolicy（仅 fallback：live 仍在列表内）。
+  // 外置路径下 virtualizer 只有历史行，流式增长不再进这个谓词。
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
     const shouldAdjust = shouldAdjustChatItemSizeChange(item, {
       scrollOffset: instance.scrollOffset ?? 0,
@@ -749,14 +747,15 @@ function MessageListBase({
       scrollDirection: instance.scrollDirection,
     })
     if (!shouldAdjust) return false
+    if (flowLiveOutsideVirtualizer) return true
     const viewportTop = (instance.scrollOffset ?? 0) + instance.scrollAdjustments
-    const liveRowIndex = externalizeLiveRow
-      ? historyItems.length
-      : historyItems.findIndex((entry) => entry.kind === 'streaming' || entry.kind === 'live-group')
+    const liveRowIndex = historyItems.findIndex(
+      (entry) => entry.kind === 'streaming' || entry.kind === 'live-group',
+    )
     const liveTail = liveRowIndex >= 0 && (streaming || streamFrozen || Boolean(liveGroup))
     if (
       liveTail
-      && item.index === liveRowIndex
+      && item.index >= liveRowIndex
       && delta > 0
       && item.end > viewportTop
       && !followHandle.isFollowing()
@@ -955,8 +954,8 @@ function MessageListBase({
 
   const closeMsgMenu = useCallback(() => setMsgMenu(null), [])
 
-  // 尾部作为 virtualizer 的单一 live row 挂载。它内部仍保留流式气泡、错误、状态线和
-  // 发送预留，因此增长中的内容只会改变这一个行的测量，不会让整份历史重新参与布局。
+  // 尾部：外置时是 virtualizer 下方的文档流块；回退时仍是 virtualizer 最后一行。
+  // 流式气泡 / 错误 / 状态线 / 发送预留都在这里，历史行不因 token 重测。
   const tailWrapRef = useRef<HTMLDivElement | null>(null)
   const tailSpacerRef = useRef<HTMLDivElement | null>(null)
 
@@ -1200,13 +1199,17 @@ function MessageListBase({
             style={useTanStackVirtualizer ? { height: virtualizer.getTotalSize() } : undefined}
           >
             {useTanStackVirtualizer ? virtualItems.map((virtualItem) => {
-              const item = virtualItem.index < historyItems.length
+              const item = flowLiveOutsideVirtualizer
                 ? historyItems[virtualItem.index]
-                : tailItem
+                : virtualItem.index < historyItems.length
+                  ? historyItems[virtualItem.index]
+                  : tailItem
               if (!item) return null
-              const logicalIndex = virtualItem.index < historyItems.length
-                ? virtualItem.index
-                : undefined
+              const logicalIndex = item.kind === 'tail'
+                ? undefined
+                : virtualItem.index < historyItems.length
+                  ? virtualItem.index
+                  : undefined
               return (
                 <div
                   key={virtualItem.key}
@@ -1242,6 +1245,13 @@ function MessageListBase({
               </>
             )}
           </div>
+          {/* 流式外置：文档流挂在 virtualizer 下方。高度只推 scrollHeight，
+              由 contentGrowth 钉底；不再进 TanStack measure/resizeItem。 */}
+          {flowLiveOutsideVirtualizer && (
+            <div data-chat-message-list-item="tail" className="w-full pb-0.5">
+              {renderTail()}
+            </div>
+          )}
         </div>
       </div>
       {/* 上下边界渐变遮罩，纯覆盖层。颜色必须跟 .chat-main-pane 的底色走（浅色 --theme-surface-soft，暗色 #262629）——

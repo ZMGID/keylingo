@@ -96,7 +96,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   const [following, setFollowing] = useState(true)
   const [showJumpButton, setShowJumpButton] = useState(false)
   const jumpRafRef = useRef<number | null>(null)
-  const pinRafRef = useRef<number | null>(null)
   const layoutCompensationTicketRef = useRef(false)
   const layoutCompensationClearRafRef = useRef<number | null>(null)
 
@@ -152,21 +151,12 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   }, [])
 
   const pinToBottom = useCallback(() => {
+    // 对齐 LiveAgent：瞬时单次写入。双帧 rAF 会在 paint 后再钉一次，
+    // 流式中表现就是生成内容整段「往下闪」。virtualizer 估算→实测的第二下
+    // 高度变化由 ResizeObserver contentGrowth 再钉，节奏已 ≤1/frame。
     cancelJumpAnimation()
     const el = boundViewportRef.current
-    if (!el) return
-    // 双帧钉底：virtualizer 估算→实测常在下一帧才把 scrollHeight 写准；
-    // 只钉一次会先钉在偏低高度，下一帧再被纠正 → 底部弹一下。
-    applyScrollTop(el, el.scrollHeight)
-    // 第二帧必须重新问一次「现在还在跟随吗」：流式中 contentGrowth 几乎每帧都钉，
-    // 用户在这一帧里滚轮上滚会先解除跟随、再被这个待执行的 rAF 拽回底部 —— 滚动被抢走。
-    // 同时合并同帧内的多次钉底请求。
-    if (pinRafRef.current !== null) return
-    pinRafRef.current = requestAnimationFrame(() => {
-      pinRafRef.current = null
-      const viewport = boundViewportRef.current
-      if (viewport && stateRef.current.following) applyScrollTop(viewport, viewport.scrollHeight)
-    })
+    if (el) applyScrollTop(el, el.scrollHeight)
   }, [applyScrollTop, cancelJumpAnimation])
 
   const dispatch = useCallback(
@@ -436,10 +426,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       resizeObserver?.disconnect()
       cancelJumpAnimation()
-      if (pinRafRef.current !== null) {
-        cancelAnimationFrame(pinRafRef.current)
-        pinRafRef.current = null
-      }
       if (layoutCompensationClearRafRef.current !== null) {
         cancelAnimationFrame(layoutCompensationClearRafRef.current)
         layoutCompensationClearRafRef.current = null

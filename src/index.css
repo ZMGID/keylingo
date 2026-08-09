@@ -3,6 +3,14 @@
 /* 导入 TailwindCSS 排版插件 */
 @plugin "@tailwindcss/typography";
 
+/* Streamdown 组件里的 Tailwind class 在 node_modules，必须显式 @source，
+   否则默认样式（text-2xl / my-6 / border-border 等）不会进包。 */
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
+@source "../node_modules/@streamdown/mermaid/dist/*.js";
+@source "../node_modules/@streamdown/cjk/dist/*.js";
+
 /* 使用系统默认字体栈（跨 mac + Win，含 CJK 覆盖），不再内嵌字体以节省每窗口内存 */
 @theme {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
@@ -10,6 +18,20 @@
   /* mono 栈补 CJK 无衬线回退：Windows 上 Consolas 等没有中文字形，
      缺了这段会掉进浏览器默认的宋体（衬线），代码/diff 里的中文很难看。 */
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", monospace;
+
+  /* Streamdown / shadcn 设计 token → 接到 Kivio 主题色（只映射，不改 Streamdown 组件 class） */
+  --color-background: var(--theme-surface, #fdfcfa);
+  --color-foreground: var(--text, #171717);
+  --color-card: var(--theme-surface, #fdfcfa);
+  --color-card-foreground: var(--text, #171717);
+  --color-muted: var(--theme-surface-muted, #f4f3f1);
+  --color-muted-foreground: #737373;
+  --color-border: var(--theme-surface-border, #e2e1df);
+  --color-input: var(--theme-surface-border-strong, #d2d1cf);
+  --color-primary: #171717;
+  --color-primary-foreground: #fafafa;
+  --color-sidebar: var(--theme-surface-soft, #f9f8f6);
+  --color-ring: #a3a3a3;
 }
 
 /* 自定义 dark 变体：通过 .dark 类启用深色模式 */
@@ -75,6 +97,19 @@ body {
   --accent-hover: #6f9bf8;
   --accent-soft: rgba(92, 141, 247, 0.16);
   --text-onaccent: #ffffff;
+  /* Streamdown token 暗色态（@theme 里的 --color-* 读这些） */
+  --color-background: #212121;
+  --color-foreground: #f0f0f3;
+  --color-card: #2a2a2d;
+  --color-card-foreground: #f0f0f3;
+  --color-muted: #2c2c30;
+  --color-muted-foreground: #a1a1aa;
+  --color-border: #3a3a40;
+  --color-input: #3a3a40;
+  --color-primary: #f0f0f3;
+  --color-primary-foreground: #171717;
+  --color-sidebar: #262629;
+  --color-ring: #52525b;
   --danger: #ef6a5a;
   --danger-soft: rgba(239, 106, 90, 0.14);
   --shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.4);
@@ -312,11 +347,6 @@ body {
 
 .dark .reasoning-plain-text {
   color: rgb(161, 161, 170);
-}
-
-.chat-markdown :where(code)::before,
-.chat-markdown :where(code)::after {
-  content: none;
 }
 
 /* 代码块工具条：语言标签用伪元素画，复制图标用伪元素画。
