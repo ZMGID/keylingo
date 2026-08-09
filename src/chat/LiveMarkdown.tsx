@@ -1,11 +1,32 @@
 import { Fragment, memo, useMemo, useRef, type ReactNode } from 'react'
+import { recordLiveMarkdownParsedCharacters } from './liveMarkdownDiagnostics'
 
 type LiveBlock =
   | { kind: 'paragraph'; text: string; startOffset: number; endOffset: number }
   | { kind: 'heading'; level: number; text: string; startOffset: number; endOffset: number }
   | { kind: 'list'; ordered: boolean; items: string[]; startOffset: number; endOffset: number }
   | { kind: 'quote'; text: string; startOffset: number; endOffset: number }
-  | { kind: 'code'; language: string; lines: string[]; startOffset: number; endOffset: number }
+  | { kind: 'code'; language: string; lines: string[]; closed: boolean; startOffset: number; endOffset: number }
+
+const LIVE_CODE_PREVIEW_LIMIT = 12_000
+const LIVE_INLINE_MARKDOWN_LIMIT = 2_048
+
+function isPlainAppend(previous: string, appended: string): boolean {
+  if (appended.length > LIVE_INLINE_MARKDOWN_LIMIT) return false
+  const previousTail = previous.slice(-LIVE_INLINE_MARKDOWN_LIMIT)
+  return !/[`*_#[\]()>+-]/.test(previousTail)
+    && !/[`*_#[\]()>+-]/.test(appended)
+    && !/\n\s*\n/.test(appended)
+}
+
+function appendCodeLines(lines: string[], appended: string): string[] {
+  const next = [...lines]
+  const chunks = appended.split('\n')
+  const lastIndex = Math.max(0, next.length - 1)
+  next[lastIndex] = `${next[lastIndex] ?? ''}${chunks[0] ?? ''}`
+  if (chunks.length > 1) next.push(...chunks.slice(1))
+  return next
+}
 
 function inlineMarkdown(value: string): ReactNode[] {
   const nodes: ReactNode[] = []
@@ -42,6 +63,7 @@ function inlineMarkdown(value: string): ReactNode[] {
 }
 
 function parseBlocks(value: string, offsetBase = 0): LiveBlock[] {
+  recordLiveMarkdownParsedCharacters(value.length)
   const lines = value.split('\n')
   const blocks: LiveBlock[] = []
   let paragraphLines: string[] = []
@@ -97,11 +119,12 @@ function parseBlocks(value: string, offsetBase = 0): LiveBlock[] {
     flushList()
     flushQuote()
   }
-  const flushCode = () => {
+  const flushCode = (closed: boolean) => {
     blocks.push({
       kind: 'code',
       language: codeLanguage,
       lines: codeLines ?? [],
+      closed,
       startOffset: codeStart,
       endOffset: lineStart,
     })
@@ -113,7 +136,7 @@ function parseBlocks(value: string, offsetBase = 0): LiveBlock[] {
     const trimmed = line.trim()
     const fence = trimmed.match(/^```\s*([^\s]*)?\s*$/)
     if (fence) {
-      if (codeLines) flushCode()
+      if (codeLines) flushCode(true)
       else {
         flushFlow()
         codeLines = []
@@ -167,7 +190,7 @@ function parseBlocks(value: string, offsetBase = 0): LiveBlock[] {
     }
     lineStart += line.length + 1
   }
-  if (codeLines) flushCode()
+  if (codeLines) flushCode(false)
   else flushFlow()
   return blocks
 }
@@ -189,13 +212,17 @@ function renderBlock(block: LiveBlock): ReactNode {
   }
   if (block.kind === 'quote') return <blockquote>{inlineMarkdown(block.text)}</blockquote>
   if (block.kind === 'code') {
+    const source = block.lines.join('\n')
+    const visible = source.length > LIVE_CODE_PREVIEW_LIMIT
+      ? `${source.slice(0, 8_000)}\n\n…\n\n${source.slice(-2_000)}`
+      : source
     return (
       <pre>
-        <code data-language={block.language || undefined}>{block.lines.join('\n')}</code>
+        <code data-language={block.language || undefined}>{visible}</code>
       </pre>
     )
   }
-  return <p>{inlineMarkdown(block.text)}</p>
+  return <p>{block.text.length > LIVE_INLINE_MARKDOWN_LIMIT ? block.text : inlineMarkdown(block.text)}</p>
 }
 
 export const LiveMarkdown = memo(function LiveMarkdown({ value }: { value: string }) {
@@ -208,6 +235,37 @@ export const LiveMarkdown = memo(function LiveMarkdown({ value }: { value: strin
       && normalized.length > previous.value.length
       && normalized.startsWith(previous.value)
     ) {
+      const appended = normalized.slice(previous.value.length)
+      const last = previous.blocks.at(-1)
+      if (last?.kind === 'code' && !last.closed && !appended.includes('`')) {
+        const merged = [
+          ...previous.blocks.slice(0, -1),
+          {
+            ...last,
+            lines: appendCodeLines(last.lines, appended),
+            endOffset: normalized.length,
+          },
+        ] as LiveBlock[]
+        cacheRef.current = { value: normalized, blocks: merged }
+        return merged
+      }
+      if (last?.kind === 'paragraph' && isPlainAppend(previous.value, appended)) {
+        const appendedText = appended.replace(/\s+/g, ' ').trim()
+        const separator = appendedText
+          && (/\s$/.test(previous.value) || /^\s/.test(appended))
+          ? ' '
+          : ''
+        const merged = [
+          ...previous.blocks.slice(0, -1),
+          {
+            ...last,
+            text: appendedText ? `${last.text}${separator}${appendedText}` : last.text,
+            endOffset: normalized.length,
+          },
+        ] as LiveBlock[]
+        cacheRef.current = { value: normalized, blocks: merged }
+        return merged
+      }
       const reusable = previous.blocks.slice(0, -1)
       const resumeOffset = Math.min(
         normalized.length,

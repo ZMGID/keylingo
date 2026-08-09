@@ -439,16 +439,7 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
   // + lucide svg + svg 内的 rect/path + pre + code = 9 个节点，现在 6 个。
   // 每块省 3 个节点，231 块省约 700 个。
   return (
-    <ChatHeavyIsland
-      minHeight={112}
-      fallback={(
-        <div className="my-3 flex min-h-28 items-center justify-center gap-2 rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] px-4 py-8 text-[13px] text-neutral-400 dark:text-neutral-500">
-          <Loader2 size={15} className="animate-spin" />
-          正在准备图表
-        </div>
-      )}
-    >
-      <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
       <div
         className="kv-code-toolbar absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2"
         data-code-lang={codeLanguageLabel(language)}
@@ -465,8 +456,7 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
       <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-10 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
         <code className="font-mono">{highlighted}</code>
       </pre>
-      </figure>
-    </ChatHeavyIsland>
+    </figure>
   )
 }
 
@@ -598,7 +588,11 @@ function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+    <ChatHeavyIsland
+      minHeight={112}
+      fallback={<CodeBlock code={normalizedCode} language="mermaid" actions={toggle} />}
+    >
+      <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
       <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2">
         <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">Mermaid</span>
         {toggle}
@@ -614,7 +608,8 @@ function MermaidBlock({ code }: { code: string }) {
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       )}
-    </figure>
+      </figure>
+    </ChatHeavyIsland>
   )
 }
 
@@ -1145,7 +1140,6 @@ function ChatMarkdownComponent({
   const flags = getChatPerformanceFlags()
   const useLightweightStreaming = streaming
     && flags.lightweightStreamingMarkdown
-    && !needsSettledStreamingMarkdown(content)
   const normalized = useMemo(
     () => {
       if (useLightweightStreaming) return content
