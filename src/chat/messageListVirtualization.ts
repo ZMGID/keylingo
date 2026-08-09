@@ -9,7 +9,7 @@
  */
 
 /** 超过此条数才启用上方虚拟化（含 spacer 等 render item）。 */
-export const VIRTUALIZE_THRESHOLD = 48
+export const VIRTUALIZE_THRESHOLD = 36
 
 /**
  * 条数不够但**内容太重**时也要虚拟化。
@@ -19,10 +19,10 @@ export const VIRTUALIZE_THRESHOLD = 48
  * 2 个代码块的对话只有 484 个节点，秒开。**成本由带外壳的块的个数驱动，不是字数。**
  * 所以条数门槛之外再加一条成本门槛，两者取或。
  */
-export const VIRTUALIZE_COST_THRESHOLD = 1500
+export const VIRTUALIZE_COST_THRESHOLD = 1200
 
 /** 底部始终实挂载的最少条数（对齐 Paseo 的 recent window 量级）。 */
-export const RECENT_MOUNTED_MIN = 32
+export const RECENT_MOUNTED_MIN = 24
 
 /** 重会话下实挂载尾部的成本预算，以及无论如何都要留的条数。 */
 export const MOUNTED_COST_BUDGET = 800
@@ -64,11 +64,51 @@ export const HEAVY_MIGRATION_STEP = 1
 const COST_PER_FENCE = 20
 const COST_CHARS_PER_UNIT = 150
 
+/**
+ * MessageBubble 自身与非正文结构的成本。
+ *
+ * 工具组折叠时确实不会挂载组内 ToolCallBlock，但挂载 MessageBubble 仍会遍历 tool_calls / segments，
+ * 做引用匹配、孤立工具筛选、分组和摘要计算；附件/产物还可能直接生成预览 DOM。旧判据只看
+ * Markdown，导致“正文不多、工具很多”的会话被误判成轻会话、整本挂载。
+ *
+ * 这些权重估的是前端处理与摘要 DOM 的相对成本，不代表折叠工具详情已经挂进 DOM。
+ */
+const COST_PER_MESSAGE_SHELL = 6
+const COST_PER_TOOL_CALL = 6
+const COST_PER_TIMELINE_SEGMENT = 2
+const COST_PER_ATTACHMENT = 12
+const COST_PER_ARTIFACT = 12
+
 export function estimateRenderCost(text: string): number {
   if (!text) return 0
   // 行首围栏才算（正文里内联的 ``` 不算）；一对围栏 = 一个代码块。
   const fences = (text.match(/^\s{0,3}```/gm)?.length ?? 0) / 2
   return Math.round(fences * COST_PER_FENCE + text.length / COST_CHARS_PER_UNIT)
+}
+
+export type MessageRenderCostInput = {
+  texts: readonly string[]
+  toolCallCount?: number
+  timelineSegmentCount?: number
+  attachmentCount?: number
+  artifactCount?: number
+}
+
+/** 估算挂载一条 MessageBubble 的总成本：正文 + 消息外壳 + 折叠态仍需处理的结构化数据。 */
+export function estimateMessageRenderCost({
+  texts,
+  toolCallCount = 0,
+  timelineSegmentCount = 0,
+  attachmentCount = 0,
+  artifactCount = 0,
+}: MessageRenderCostInput): number {
+  const textCost = texts.reduce((sum, text) => sum + estimateRenderCost(text), 0)
+  return textCost
+    + COST_PER_MESSAGE_SHELL
+    + toolCallCount * COST_PER_TOOL_CALL
+    + timelineSegmentCount * COST_PER_TIMELINE_SEGMENT
+    + attachmentCount * COST_PER_ATTACHMENT
+    + artifactCount * COST_PER_ARTIFACT
 }
 
 /**

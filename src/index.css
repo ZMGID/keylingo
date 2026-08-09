@@ -725,10 +725,10 @@ body {
 
 .chat-sidebar-shell {
   margin: var(--chat-card-top) 8px 8px;
-  /* 折叠动画：负 margin 把整张卡片滑出左侧，由 .chat-window-shell 的 overflow:hidden 裁剪；
-     width 不变 → 内容不被压缩。 */
+  /* 折叠时只做透明度动画。不要 transition margin-left：它会让 flex 主区在每一帧改变宽度，
+     长聊天里的 Markdown / 代码块随之连续重排，侧栏动画会把聊天区一起拖卡。布局位置一次切换，
+     由外壳 overflow:hidden 裁掉滑出的卡片。 */
   transition:
-    margin-left var(--kv-dur-slow) var(--kv-ease-standard),
     opacity var(--kv-dur-normal) var(--kv-ease-out);
 }
 

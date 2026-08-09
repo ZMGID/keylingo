@@ -33,6 +33,7 @@ import { useInsertionReorder } from '../utils/insertionReorder'
 import { applyConversationPins, withPinAt, type ConversationPin } from './conversationPins'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { chatTitlebarMacInsetClass, isMac, usesNativeTitlebar } from './platform'
+import { useChatPerfRenderProbe } from './chatPerformanceProbe'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
@@ -126,7 +127,7 @@ function conversationProjectLabel(
   return findConversationProject(conversation, projects)?.name ?? conversation.folder ?? ''
 }
 
-interface SidebarProps {
+export interface SidebarProps {
   lang: Lang
   currentConversationId?: string
   generatingConversationIds?: ReadonlySet<string>
@@ -546,6 +547,12 @@ export const Sidebar = memo(function Sidebar({
   const sectionMenuButtonRef = useRef<HTMLButtonElement>(null)
   const sidebarLoadedRef = useRef(false)
   const [userProfile, setUserProfile] = useState(() => resolveChatUserProfile())
+  useChatPerfRenderProbe('Sidebar', {
+    collapsed,
+    settingsActive,
+    activeTab,
+    conversations: conversations.length,
+  })
 
   useEffect(() => {
     let cancelled = false

@@ -406,6 +406,7 @@ export interface ToolGroupSummary {
 export function summarizeToolGroup(
   segments: ChatMessageSegment[],
   toolCalls: ToolCallRecord[],
+  toolCallById?: ReadonlyMap<string, ToolCallRecord>,
 ): ToolGroupSummary {
   const toolSegments = segments.filter((segment) => segment.kind === 'tool')
   // 「步数」按工具步计；纯 reasoning 组（无工具）回退到总段数。
@@ -413,7 +414,9 @@ export function summarizeToolGroup(
   const matchedTools: ToolCallRecord[] = []
   for (const segment of toolSegments) {
     const id = segmentToolCallId(segment)
-    const record = toolCalls.find((tool) => toolRecordId(tool) === id)
+    const record = toolCallById
+      ? toolCallById.get(id)
+      : toolCalls.find((tool) => toolRecordId(tool) === id)
     if (record) matchedTools.push(record)
   }
 

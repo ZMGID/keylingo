@@ -27,7 +27,7 @@ import { getActiveGroup, useGroupsVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
 import {
   earlierBatchStart,
-  estimateRenderCost,
+  estimateMessageRenderCost,
   HEAVY_MIGRATION_STEP,
   LOAD_EARLIER_TRIGGER_PX,
   mountedCountForBudget,
@@ -37,6 +37,7 @@ import {
   type HistorySplit,
 } from './messageListVirtualization'
 import type { Lang } from '../settings/i18n'
+import { useChatPerfRenderProbe } from './chatPerformanceProbe'
 
 export interface AssistantStreamStats {
   messageId: string
@@ -45,7 +46,7 @@ export interface AssistantStreamStats {
   reasoningDurationMsBySegmentId?: Record<string, number>
 }
 
-interface MessageListProps {
+export interface MessageListProps {
   conversationId?: string | null
   messages: ChatMessage[]
   agentPlanState?: AgentPlanState | null
@@ -131,6 +132,10 @@ function MessageListBase({
   animateCompactionBoundaryId = null,
   lang = 'zh',
 }: MessageListProps) {
+  useChatPerfRenderProbe('MessageList', {
+    conversationId,
+    messages: messages.length,
+  })
   // 流式预览状态直接订阅 streamingStore——只有本组件随每帧内容重渲，Chat/侧栏/输入栏不动。
   const coarse = useStreamCoarse()
   const snapshot = useStreamSnapshot()
@@ -440,7 +445,7 @@ function MessageListBase({
   // 这样增长中的那条消息按真实高度测量，钉底精确、不闪。
 
   // 成本感知虚拟化。条数是个坏预算：实测 14 条消息的对话因为塞了 231 个代码块，
-  // 渲染出 5433 个 DOM 节点、切换要等一秒，而条数 14 < 48 门槛 → 完全不虚拟化、全部实挂载。
+  // 渲染出 5433 个 DOM 节点、切换要等一秒，而条数 14 < 36 门槛 → 完全不虚拟化、全部实挂载。
   // 这里按「这条会渲染出多少节点」估个成本，入口和实挂载尾部两处都改成看成本。
   // 只有重会话走这条旁路，普通会话的行为一个字节都不变。
   const historyCosts = useMemo(
@@ -457,7 +462,16 @@ function MessageListBase({
         : item.kind === 'group' ? item.messages : []
       let cost = 0
       for (const message of messages) {
-        for (const text of textsOf(message)) cost += estimateRenderCost(text)
+        const toolCalls = message.tool_calls ?? message.toolCalls ?? []
+        const artifactCount = (message.artifacts ?? []).length
+          + toolCalls.reduce((sum, toolCall) => sum + (toolCall.artifacts ?? []).length, 0)
+        cost += estimateMessageRenderCost({
+          texts: textsOf(message),
+          toolCallCount: toolCalls.length,
+          timelineSegmentCount: (message.segments ?? []).length,
+          attachmentCount: (message.attachments ?? []).length,
+          artifactCount,
+        })
       }
       return cost
     }),

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { WindowControls } from './WindowControls'
 
@@ -33,7 +33,7 @@ type ChatTitlebarProps = {
  * 侧栏卡片 / Dock / 主内容都在带下方开始，所以三键不压内容，
  * 各视图也不必各自留出躲避空间（旧的 `.chat-win-titlebar-safe` 与中心页兜底拖拽带因此删除）。
  */
-export function ChatTitlebar({
+export const ChatTitlebar = memo(function ChatTitlebar({
   sidebarExpanded,
   onToggleSidebar,
   onNewConversation,
@@ -67,4 +67,4 @@ export function ChatTitlebar({
       <WindowControls />
     </div>
   )
-}
+})

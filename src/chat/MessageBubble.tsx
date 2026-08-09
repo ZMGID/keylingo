@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Bot,
@@ -397,17 +397,17 @@ function UserSteerSegment({ toolCall }: { toolCall: ToolCallRecord }) {
 
 function TimelineToolSegment({
   segment,
-  toolCalls,
+  toolCallById,
   artifacts,
   conversationId,
 }: {
   segment: ChatMessageSegment
-  toolCalls: ToolCallRecord[]
+  toolCallById: ReadonlyMap<string, ToolCallRecord>
   artifacts: ChatToolArtifact[]
   conversationId?: string | null
 }) {
   const toolCallId = segmentToolCallId(segment)
-  const toolCall = toolCalls.find((record) => toolRecordId(record) === toolCallId)
+  const toolCall = toolCallById.get(toolCallId)
   if (!toolCall) {
     return <MissingToolSegment toolCallId={toolCallId} />
   }
@@ -461,7 +461,7 @@ function TimelineSegmentNode({
   segment,
   index,
   segmentCount,
-  toolCalls,
+  toolCallById,
   artifacts,
   citations,
   conversationId,
@@ -473,7 +473,7 @@ function TimelineSegmentNode({
   segment: ChatMessageSegment
   index: number
   segmentCount: number
-  toolCalls: ToolCallRecord[]
+  toolCallById: ReadonlyMap<string, ToolCallRecord>
   artifacts: ChatToolArtifact[]
   citations?: Map<number, KbHitView>
   conversationId?: string | null
@@ -486,7 +486,7 @@ function TimelineSegmentNode({
     return (
       <TimelineToolSegment
         segment={segment}
-        toolCalls={toolCalls}
+        toolCallById={toolCallById}
         artifacts={artifacts}
         conversationId={conversationId}
       />
@@ -609,6 +609,7 @@ const GROUP_ICON_BY_CATEGORY: Record<
 function TimelineGroupBlock({
   segments,
   toolCalls,
+  toolCallById,
   artifacts,
   citations,
   conversationId,
@@ -621,6 +622,7 @@ function TimelineGroupBlock({
 }: {
   segments: ChatMessageSegment[]
   toolCalls: ToolCallRecord[]
+  toolCallById: ReadonlyMap<string, ToolCallRecord>
   artifacts: ChatToolArtifact[]
   citations?: Map<number, KbHitView>
   conversationId?: string | null
@@ -632,10 +634,18 @@ function TimelineGroupBlock({
   reasoningSegmentCount: number
 }) {
   const generating = messageStreaming && isLastGroup
-  const summary = summarizeToolGroup(segments, toolCalls)
+  const summary = useMemo(
+    () => summarizeToolGroup(segments, toolCalls, toolCallById),
+    [segments, toolCalls, toolCallById],
+  )
   const SummaryIcon = GROUP_ICON_BY_CATEGORY[summary.icon]
   const [open, setOpen] = useState(generating)
   const userToggledRef = useRef(false)
+
+  // 自动折叠不能等 effect：生成结束后的第一次 render 仍可能带着旧的 open=true，
+  // 先把整棵 ToolCallBlock/Markdown 子树创建出来，effect 下一拍才卸载。用当前生成态
+  // 直接参与渲染，保证结束这一帧就不创建详情树；用户手动操作后再由 open 接管。
+  const renderDetails = userToggledRef.current ? open : generating
 
   // 生成中默认展开、完成自动折叠；用户手动操作后不再覆盖。
   useEffect(() => {
@@ -653,7 +663,7 @@ function TimelineGroupBlock({
       <button
         type="button"
         onClick={handleToggle}
-        aria-expanded={open}
+        aria-expanded={renderDetails}
         data-tauri-drag-region="false"
         className="mb-1 flex w-full items-center gap-1.5 text-left text-[12px] leading-relaxed font-medium text-neutral-400 transition-colors hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
       >
@@ -686,7 +696,7 @@ function TimelineGroupBlock({
           )}
         </div>
       </button>
-      {open && (
+      {renderDetails && (
         <div className="chat-motion-reveal is-open" aria-hidden={false}>
           <div className="space-y-1.5">
             {segments.map((segment, index) => (
@@ -695,7 +705,7 @@ function TimelineGroupBlock({
                   segment={segment}
                   index={index}
                   segmentCount={segments.length}
-                  toolCalls={toolCalls}
+                  toolCallById={toolCallById}
                   artifacts={artifacts}
                   citations={citations}
                   conversationId={conversationId}
@@ -744,32 +754,44 @@ function TimelineSegments({
   reasoningDurationMs?: number | null
   reasoningDurationMsBySegmentId?: Record<string, number>
 }) {
-  const ordered = orderedSegments(segments)
-  const citations = buildCitationMap(toolCalls)
-  const reasoningSegmentCount = ordered.filter((segment) => segment.kind === 'reasoning').length
-  const referencedToolIds = new Set(
-    ordered
-      .filter((segment) => segment.kind === 'tool')
-      .map((segment) => segmentToolCallId(segment))
-      .filter(Boolean),
-  )
-  const orphanTools = toolCalls
-    .filter((toolCall) => {
+  const prepared = useMemo(() => {
+    const ordered = orderedSegments(segments)
+    const toolCallById = new Map<string, ToolCallRecord>()
+    for (const toolCall of toolCalls) {
       const id = toolRecordId(toolCall)
-      return id && !referencedToolIds.has(id)
-    })
-    .sort((left, right) => {
-      const leftStarted = left.startedAt ?? left.started_at ?? 0
-      const rightStarted = right.startedAt ?? right.started_at ?? 0
-      return leftStarted - rightStarted
+      if (id) toolCallById.set(id, toolCall)
+    }
+
+    const citations = buildCitationMap(toolCalls)
+    const reasoningSegmentCount = ordered.filter((segment) => segment.kind === 'reasoning').length
+    const referencedToolIds = new Set(
+      ordered
+        .filter((segment) => segment.kind === 'tool')
+        .map((segment) => segmentToolCallId(segment))
+        .filter(Boolean),
+    )
+    const orphanTools = toolCalls
+      .filter((toolCall) => {
+        const id = toolRecordId(toolCall)
+        return id && !referencedToolIds.has(id)
+      })
+      .sort((left, right) => {
+        const leftStarted = left.startedAt ?? left.started_at ?? 0
+        const rightStarted = right.startedAt ?? right.started_at ?? 0
+        return leftStarted - rightStarted
+      })
+
+    const groupItems = groupTimelineSegments(ordered, (segment) => {
+      const id = segmentToolCallId(segment)
+      if (!id) return false
+      const toolCall = toolCallById.get(id)
+      return toolCall ? isStandaloneToolCard(toolCall) : false
     })
 
-  const groupItems = groupTimelineSegments(ordered, (segment) => {
-    const id = segmentToolCallId(segment)
-    if (!id) return false
-    const toolCall = toolCalls.find((tc) => toolRecordId(tc) === id)
-    return toolCall ? isStandaloneToolCard(toolCall) : false
-  })
+    return { toolCallById, citations, reasoningSegmentCount, orphanTools, groupItems }
+  }, [segments, toolCalls])
+
+  const { toolCallById, citations, reasoningSegmentCount, orphanTools, groupItems } = prepared
   const lastGroupIndex = groupItems.reduce(
     (last, item, index) => (item.type === 'group' ? index : last),
     -1,
@@ -795,7 +817,7 @@ function TimelineSegments({
         if (item.type === 'standaloneTool') {
           // advisor / subagent：专属卡片常驻渲染，不折叠进「调用 N 次工具」组。
           const id = segmentToolCallId(item.segment)
-          const toolCall = toolCalls.find((tc) => toolRecordId(tc) === id)
+          const toolCall = toolCallById.get(id)
           if (!toolCall) return null
           return (
             <div key={item.segment.id} className="chat-motion-fade">
@@ -821,6 +843,7 @@ function TimelineSegments({
             <TimelineGroupBlock
               segments={item.segments}
               toolCalls={toolCalls}
+              toolCallById={toolCallById}
               artifacts={artifacts}
               citations={citations}
               conversationId={conversationId}
@@ -881,50 +904,84 @@ function MessageBubbleComponent({
   // MessageGroup 的**在飞列**正是靠不传它来一次关掉这些入口（见那里的 `!live ? … : undefined`），
   // 去掉它会让还在生成的那一列冒出删除键。（编辑入口已按需求移除，改写消息不再有 UI。）
   const canMutate = Boolean(onUpdateMessage && onDeleteMessage && onRegenerateMessage)
-  const attachments = message.attachments ?? []
-  const toolCalls = message.tool_calls ?? message.toolCalls ?? []
-  // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → null → 不渲染卡片。
-  const degraded = message.degraded ?? null
-  // 降级文案同时走三条路：content、时间线 text 分段、以及这张卡片。卡片已完整表达，
-  // 另外两条都要按文本相等剔掉，否则同一段话在气泡里出现两遍（正是用户看到的样子）。
-  const degradedText = degraded?.text.trim() ?? ''
-  const timelineSegments = orderedSegments(message.segments).filter(
-    (segment) =>
-      !degradedText || segment.kind !== 'text' || segmentText(segment).trim() !== degradedText,
-  )
-  const hasTimelineSegments = timelineSegments.length > 0
-  const messageArtifacts = message.artifacts ?? []
-  const toolArtifacts = toolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])
-  // Markdown 和显式展示引用仍使用全量 artifacts；回答末尾自动区域只兼容旧的无 ID artifact。
-  const renderArtifacts = [...messageArtifacts, ...toolArtifacts]
-  const legacyMessageArtifacts = messageArtifacts.filter((artifact) => !artifactId(artifact))
-  const legacyToolCalls = toolCalls.map((toolCall) => ({
-    ...toolCall,
-    artifacts: (toolCall.artifacts ?? []).filter((artifact) => !artifactId(artifact)),
-  }))
-  const isDirectImageGenerationPending =
-    !isUser && message.content.trim() === DIRECT_IMAGE_GENERATION_PENDING
-  const artifactReferenceContent = [
-    message.content,
-    ...timelineSegments.map((segment) => segmentText(segment)),
-  ].join('\n\n')
-  // 答案下方画廊：只挂「未引用 + 最后一轮截图」，避免 3 轮验收堆 9 张同名图
-  const galleryImageArtifacts = selectGalleryImageArtifacts(
-    legacyMessageArtifacts,
-    legacyToolCalls,
-    artifactReferenceContent,
-  )
-  const generatedFileArtifacts = [...legacyMessageArtifacts, ...legacyToolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])]
-    .filter((artifact) => !isImageArtifact(artifact))
+  const prepared = useMemo(() => {
+    const attachments = message.attachments ?? []
+    const toolCalls = message.tool_calls ?? message.toolCalls ?? []
+    // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → null → 不渲染卡片。
+    const degraded = message.degraded ?? null
+    // 降级文案同时走三条路：content、时间线 text 分段、以及这张卡片。卡片已完整表达，
+    // 另外两条都要按文本相等剔掉，否则同一段话在气泡里出现两遍（正是用户看到的样子）。
+    const degradedText = degraded?.text.trim() ?? ''
+    const timelineSegments = orderedSegments(message.segments).filter(
+      (segment) =>
+        !degradedText || segment.kind !== 'text' || segmentText(segment).trim() !== degradedText,
+    )
+    const hasTimelineSegments = timelineSegments.length > 0
+    const messageArtifacts = message.artifacts ?? []
+    const toolArtifacts = toolCalls.flatMap((toolCall) => toolCall.artifacts ?? [])
+    // Markdown 和显式展示引用仍使用全量 artifacts；回答末尾自动区域只兼容旧的无 ID artifact。
+    const renderArtifacts = [...messageArtifacts, ...toolArtifacts]
+    const legacyMessageArtifacts = messageArtifacts.filter((artifact) => !artifactId(artifact))
+    const legacyToolCalls = toolCalls.map((toolCall) => ({
+      ...toolCall,
+      artifacts: (toolCall.artifacts ?? []).filter((artifact) => !artifactId(artifact)),
+    }))
+    const isDirectImageGenerationPending =
+      !isUser && message.content.trim() === DIRECT_IMAGE_GENERATION_PENDING
+    const artifactReferenceContent = [
+      message.content,
+      ...timelineSegments.map((segment) => segmentText(segment)),
+    ].join('\n\n')
+    // 答案下方画廊：只挂「未引用 + 最后一轮截图」，避免 3 轮验收堆 9 张同名图
+    const galleryImageArtifacts = selectGalleryImageArtifacts(
+      legacyMessageArtifacts,
+      legacyToolCalls,
+      artifactReferenceContent,
+    )
+    const generatedFileArtifacts = [
+      ...legacyMessageArtifacts,
+      ...legacyToolCalls.flatMap((toolCall) => toolCall.artifacts ?? []),
+    ].filter((artifact) => !isImageArtifact(artifact))
+    const hasAnswerContent =
+      !isDirectImageGenerationPending &&
+      message.content.trim().length > 0 &&
+      message.content.trim() !== degradedText
+    const hasGeneratedImages = galleryImageArtifacts.length > 0
+    const hasGeneratedFiles = generatedFileArtifacts.length > 0
+
+    return {
+      attachments,
+      toolCalls,
+      degraded,
+      degradedText,
+      timelineSegments,
+      hasTimelineSegments,
+      renderArtifacts,
+      galleryImageArtifacts,
+      generatedFileArtifacts,
+      isDirectImageGenerationPending,
+      hasAnswerContent,
+      hasGeneratedImages,
+      hasGeneratedFiles,
+    }
+  }, [isUser, message])
+  const {
+    attachments,
+    toolCalls,
+    degraded,
+    timelineSegments,
+    hasTimelineSegments,
+    renderArtifacts,
+    galleryImageArtifacts,
+    generatedFileArtifacts,
+    isDirectImageGenerationPending,
+    hasAnswerContent,
+    hasGeneratedImages,
+    hasGeneratedFiles,
+  } = prepared
   // 后端 recovery.rs 产出的降级描述；旧会话无此字段 → undefined → 不渲染卡片。
   // content 仍保留同一段文本（旧前端 / 外部 CLI 只读 content），但卡片已经完整表达了
   // 同样的信息 —— 这里不再把它当正文渲染，避免一模一样的内容出现两遍。
-  const hasAnswerContent =
-    !isDirectImageGenerationPending &&
-    message.content.trim().length > 0 &&
-    message.content.trim() !== degradedText
-  const hasGeneratedImages = galleryImageArtifacts.length > 0
-  const hasGeneratedFiles = generatedFileArtifacts.length > 0
   const [copied, setCopied] = useState(false)
   const [toolsExpanded, setToolsExpanded] = useState(false)
   // 消息级悬停：鼠标在这条消息上 → 底部操作/元信息条显示，移走 → 隐藏。
@@ -1063,10 +1120,6 @@ function MessageBubbleComponent({
     )
   }
 
-  // 折叠时仅隐藏较早的，始终保留最新 4 个可见
-  const RECENT_TOOL_COUNT = 4
-  const olderToolCalls = toolsCollapsible ? toolCalls.slice(0, toolCalls.length - RECENT_TOOL_COUNT) : []
-  const recentToolCalls = toolsCollapsible ? toolCalls.slice(toolCalls.length - RECENT_TOOL_COUNT) : toolCalls
   const renderToolCall = (toolCall: ToolCallRecord, index: number) => {
     const key = toolCall.id || toolCall.call_id || toolCall.callId || index
     // 无时间线段的旧路径：插话卡照样不能退化成一张写着 user_steer 的工具卡。
@@ -1112,7 +1165,6 @@ function MessageBubbleComponent({
               >
                 <span>
                   工具调用 · {toolCalls.length} 个
-                  {!toolsExpanded ? ` · 显示最新 ${RECENT_TOOL_COUNT} 个` : ''}
                 </span>
               </button>
             ) : (
@@ -1122,12 +1174,10 @@ function MessageBubbleComponent({
             )}
             {toolsCollapsible && toolsExpanded && (
               <div className="chat-motion-reveal is-open">
-                <div>{olderToolCalls.map((toolCall, index) => renderToolCall(toolCall, index))}</div>
+                <div>{toolCalls.map((toolCall, index) => renderToolCall(toolCall, index))}</div>
               </div>
             )}
-            {recentToolCalls.map((toolCall, index) =>
-              renderToolCall(toolCall, olderToolCalls.length + index),
-            )}
+            {!toolsCollapsible && toolCalls.map((toolCall, index) => renderToolCall(toolCall, index))}
           </section>
         )}
 
