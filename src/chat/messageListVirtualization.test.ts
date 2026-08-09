@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   earlierBatchStart,
   estimateMessageRenderCost,
   estimateRenderCost,
   findMountedWindowStart,
+  clearRowMeasurementCache,
+  getCachedRowMeasurement,
   HEAVY_MIGRATION_STEP,
   MOUNTED_MIN_ITEMS,
   mountedCountForBudget,
@@ -11,7 +13,10 @@ import {
   splitHistoryForVirtualization,
   VIRTUALIZE_COST_THRESHOLD,
   VIRTUALIZE_THRESHOLD,
+  setCachedRowMeasurement,
 } from './messageListVirtualization'
+
+beforeEach(() => clearRowMeasurementCache())
 
 function items(kinds: string[]) {
   return kinds.map((kind, i) => ({ kind, key: `${kind}-${i}` }))
@@ -60,6 +65,22 @@ describe('estimateMessageRenderCost', () => {
     })
     expect(textOnly).toBeLessThan(VIRTUALIZE_COST_THRESHOLD)
     expect(withTools).toBeGreaterThan(VIRTUALIZE_COST_THRESHOLD)
+  })
+})
+
+describe('row measurement cache', () => {
+  it('按布局 key 隔离同一行在不同宽度下的高度', () => {
+    setCachedRowMeasurement('c1:640', 'm1', 240)
+    setCachedRowMeasurement('c1:960', 'm1', 160)
+    expect(getCachedRowMeasurement('c1:640', 'm1')).toBe(240)
+    expect(getCachedRowMeasurement('c1:960', 'm1')).toBe(160)
+  })
+
+  it('忽略无效高度，避免污染下一次切换的估算', () => {
+    setCachedRowMeasurement('c1:640', 'm1', 0)
+    setCachedRowMeasurement('c1:640', 'm2', Number.NaN)
+    expect(getCachedRowMeasurement('c1:640', 'm1')).toBeUndefined()
+    expect(getCachedRowMeasurement('c1:640', 'm2')).toBeUndefined()
   })
 })
 

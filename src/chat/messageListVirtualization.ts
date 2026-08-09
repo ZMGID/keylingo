@@ -21,6 +21,55 @@ export const VIRTUALIZE_THRESHOLD = 36
  */
 export const VIRTUALIZE_COST_THRESHOLD = 1200
 
+const MEASUREMENT_CACHE_LIMIT = 8
+type MeasurementBucket = {
+  values: Map<string, number>
+  touchedAt: number
+}
+const measurementBuckets = new Map<string, MeasurementBucket>()
+let measurementClock = 0
+
+function measurementBucket(layoutKey: string): MeasurementBucket {
+  const existing = measurementBuckets.get(layoutKey)
+  if (existing) {
+    existing.touchedAt = ++measurementClock
+    return existing
+  }
+  const bucket: MeasurementBucket = { values: new Map(), touchedAt: ++measurementClock }
+  measurementBuckets.set(layoutKey, bucket)
+  if (measurementBuckets.size > MEASUREMENT_CACHE_LIMIT) {
+    let oldestKey: string | null = null
+    let oldestTime = Number.POSITIVE_INFINITY
+    for (const [key, candidate] of measurementBuckets) {
+      if (candidate.touchedAt < oldestTime) {
+        oldestKey = key
+        oldestTime = candidate.touchedAt
+      }
+    }
+    if (oldestKey) measurementBuckets.delete(oldestKey)
+  }
+  return bucket
+}
+
+/**
+ * Row heights are layout-dependent: the same Markdown wraps differently when the
+ * sidebar changes the content width. Keep a small LRU by conversation + width
+ * bucket so switching back does not remeasure every heavy row from scratch.
+ */
+export function getCachedRowMeasurement(layoutKey: string, rowKey: string): number | undefined {
+  return measurementBucket(layoutKey).values.get(rowKey)
+}
+
+export function setCachedRowMeasurement(layoutKey: string, rowKey: string, size: number): void {
+  if (!Number.isFinite(size) || size <= 0) return
+  measurementBucket(layoutKey).values.set(rowKey, size)
+}
+
+export function clearRowMeasurementCache(): void {
+  measurementBuckets.clear()
+  measurementClock = 0
+}
+
 /** 底部始终实挂载的最少条数（对齐 Paseo 的 recent window 量级）。 */
 export const RECENT_MOUNTED_MIN = 24
 
