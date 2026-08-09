@@ -68,8 +68,12 @@ function makeF3(): ChatMessage[] {
 }
 
 function makeF4(): { messages: ChatMessage[]; streamingContent: string } {
-  const unit = 'Streaming fixture line with a stable token budget.\n'
-  const streamingContent = unit.repeat(Math.ceil(20_000 / unit.length)).slice(0, 20_000)
+  const unit = 'const fixtureLine = "streaming";\n'
+  const prefix = 'Streaming fixture preface.\n\n```typescript\n'
+  const suffix = '\n```'
+  const bodyLength = 20_000 - prefix.length - suffix.length
+  const body = unit.repeat(Math.ceil(bodyLength / unit.length)).slice(0, bodyLength)
+  const streamingContent = `${prefix}${body}${suffix}`
   return {
     messages: [message('f4-user', 'user', 'Generate a very long streaming answer.', 0)],
     streamingContent,

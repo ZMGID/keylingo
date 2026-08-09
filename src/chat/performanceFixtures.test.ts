@@ -33,6 +33,9 @@ describe('chat performance fixtures', () => {
   it('keeps F4 at exactly 20k streaming characters', () => {
     const fixture = createChatPerformanceFixture('F4')
     expect(fixture.streamingContent).toHaveLength(20_000)
+    expect(fixture.streamingContent).toMatch(/^Streaming fixture preface\.\n\n```typescript\n/)
+    expect(fixture.streamingContent).toMatch(/\n```$/)
+    expect(summarizeChatPerformanceFixture(fixture).codeBlockCount).toBe(1)
     expect(summarizeChatPerformanceFixture(fixture).streamingLength).toBe(20_000)
   })
 })
