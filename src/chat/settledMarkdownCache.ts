@@ -34,4 +34,3 @@ export function clearSettledMarkdownCache(): void {
 export function settledMarkdownCacheSize(): number {
   return entries.size
 }
-
