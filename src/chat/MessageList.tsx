@@ -284,17 +284,21 @@ function MessageListBase({
     let stableFrames = 0
 
     const completeIfReady = (): boolean | null => {
-      if (contentEl.querySelector('[data-chat-markdown-pending="true"]')) {
+      // 仍有未就绪的重内容：Markdown worker 占位、或 ChatHeavyIsland 尚未 hydrate。
+      // 这些阶段高度会在稍后猛涨；过早揭开覆盖层就是「代码块没加载全 + 页面抽一下」。
+      if (
+        contentEl.querySelector(
+          '[data-chat-markdown-pending="true"], [data-chat-heavy-hydrated="false"]',
+        )
+      ) {
         previousHeight = -1
         stableFrames = 0
-        // null 表示仍在等 Worker，不继续 rAF 轮询；等 MutationObserver
-        // 看到 pending 标记消失后再开始测高度。
+        // null：停 rAF 轮询，等 MutationObserver 看到标记变化后再测。
         return null
       }
 
-      // Markdown AST 已经到位后，虚拟列表还可能在下一帧用真实 DOM 高度
-      // 修正 itemSizeCache / totalSize。至少连续两帧高度不变，才把 Logo
-      // 覆盖层交还给正文，避免用户看到「先显示、再撑开、闪一下」的中间态。
+      // 重内容到位后，虚拟列表还可能在下一帧用真实 DOM 高度修正 itemSizeCache /
+      // totalSize。至少连续两帧高度不变，才把覆盖层交还给正文。
       const height = contentEl.scrollHeight
       if (height === previousHeight) stableFrames += 1
       else {
@@ -320,7 +324,7 @@ function MessageListBase({
     })
     observer.observe(contentEl, {
       attributes: true,
-      attributeFilter: ['data-chat-markdown-pending'],
+      attributeFilter: ['data-chat-markdown-pending', 'data-chat-heavy-hydrated'],
       childList: true,
       subtree: true,
     })
@@ -833,7 +837,7 @@ function MessageListBase({
       // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
       // 瞬时跳转，不用 behavior:'smooth'：top 是按目标行**当前**的几何算出来的，而平滑滚动
       // 期间上方的行会被 virtualizer 重测（估算高度换成实测），目标位置在动画途中就挪走了 ——
-      // 距离越远越容易落在错的地方。回到底部按钮不受影响，那个是自己驱动的 rAF，每帧重算目标。
+      // 距离越远越容易落在错的地方。回到底部按钮同样瞬时钉底（jumpToBottom → stickToBottom）。
       followHandle.scrollToOffset(
         row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop,
       )

@@ -20,6 +20,7 @@ import { MarkdownStreamingContext } from './markdownStreaming'
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
 import { ChatHeavyIsland } from './ChatHeavyIsland'
+import { useConversationTransition } from './conversationTransitionStore'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -441,6 +442,9 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
 }
 
 function DeferredCodeBlock({ code, language }: { code: string; language: string }) {
+  // 会话切换覆盖层期间同步 hydrate：否则 180ms 后代码块从 112px 占位撑开，
+  // 覆盖层已按「假稳定高度」揭开，用户看到抽一下。覆盖层揭开后仍延迟，减轻回翻历史成本。
+  const { loading: conversationOpening } = useConversationTransition()
   const preview = code.length > 14_000
     ? `${code.slice(0, 10_000)}\n\n…\n\n${code.slice(-2_000)}`
     : code
@@ -448,6 +452,7 @@ function DeferredCodeBlock({ code, language }: { code: string; language: string 
     <ChatHeavyIsland
       minHeight={112}
       delayMs={180}
+      eager={conversationOpening}
       fallback={(
         <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 py-4 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
           <code className="font-mono whitespace-pre-wrap">{preview}</code>
@@ -586,9 +591,11 @@ function MermaidBlock({ code }: { code: string }) {
     )
   }
 
+  const { loading: conversationOpening } = useConversationTransition()
   return (
     <ChatHeavyIsland
       minHeight={112}
+      eager={conversationOpening}
       fallback={<CodeBlock code={normalizedCode} language="mermaid" actions={toggle} />}
     >
       <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">

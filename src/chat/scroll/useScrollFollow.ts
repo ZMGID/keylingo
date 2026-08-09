@@ -46,7 +46,8 @@ function isFollowScrollKey(event: KeyboardEvent) {
 export type ScrollFollowHandle = {
   // 强制跟随并立即钉底（元素未绑定时于视口到位后钉）。
   stickToBottom: () => void
-  // 动画滑到底部后强制跟随。给用户可见的操作（回到底部按钮）用；程序钉底走 stickToBottom 瞬时。
+  // 瞬时跳到底部并强制跟随。给用户可见的操作（回到底部按钮）用；与 stickToBottom 同路径，
+  // 不走平滑动画——长会话 virtualizer 重测补偿会中途打断 rAF 动画，导致要点多次。
   jumpToBottom: () => void
   // 主动脱离跟随（导航跳转到上方消息时用）。
   releaseFollow: () => void
@@ -56,22 +57,11 @@ export type ScrollFollowHandle = {
   markLayoutCompensation: () => void
 }
 
-const JUMP_BASE_DURATION_MS = 260
-const JUMP_MAX_DURATION_MS = 600
-const JUMP_DISTANCE_DURATION_DIVISOR = 8
 // 跟随解除和按钮显示故意分开：底部附近的微小上滚不应立刻弹出按钮。
 // 用视口高度算「明显离开底部」的距离，再设上下限，避免固定 px 在不同窗口里过早/过晚出现。
 const JUMP_BUTTON_SHOW_RATIO = 0.35
 const JUMP_BUTTON_SHOW_MIN_PX = 240
 const JUMP_BUTTON_SHOW_MAX_PX = 480
-
-function prefersReducedMotion() {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  )
-}
 
 export type UseScrollFollowArgs = {
   viewport: HTMLElement | null
@@ -95,7 +85,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   configRef.current = { ...DEFAULT_FOLLOW_CONFIG, ...args.config }
   const [following, setFollowing] = useState(true)
   const [showJumpButton, setShowJumpButton] = useState(false)
-  const jumpRafRef = useRef<number | null>(null)
   const layoutCompensationTicketRef = useRef(false)
   const layoutCompensationClearRafRef = useRef<number | null>(null)
 
@@ -126,13 +115,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     )
   }, [])
 
-  const cancelJumpAnimation = useCallback(() => {
-    if (jumpRafRef.current !== null) {
-      cancelAnimationFrame(jumpRafRef.current)
-      jumpRafRef.current = null
-    }
-  }, [])
-
   const markLayoutCompensation = useCallback(() => {
     layoutCompensationTicketRef.current = true
     if (layoutCompensationClearRafRef.current !== null) {
@@ -154,10 +136,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     // 对齐 LiveAgent：瞬时单次写入。双帧 rAF 会在 paint 后再钉一次，
     // 流式中表现就是生成内容整段「往下闪」。virtualizer 估算→实测的第二下
     // 高度变化由 ResizeObserver contentGrowth 再钉，节奏已 ≤1/frame。
-    cancelJumpAnimation()
     const el = boundViewportRef.current
     if (el) applyScrollTop(el, el.scrollHeight)
-  }, [applyScrollTop, cancelJumpAnimation])
+  }, [applyScrollTop])
 
   const dispatch = useCallback(
     (event: FollowEvent) => {
@@ -184,58 +165,23 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   }, [dispatch])
 
   const releaseFollow = useCallback(() => {
-    cancelJumpAnimation()
     dispatch({ type: 'release' })
-  }, [cancelJumpAnimation, dispatch])
+  }, [dispatch])
 
   const scrollToOffset = useCallback((offset: number, options?: { adjustments?: number; behavior?: ScrollBehavior }) => {
-    cancelJumpAnimation()
     const viewport = boundViewportRef.current
     if (!viewport) return
     const nextOffset = Math.max(0, offset + (options?.adjustments ?? 0))
-    // Chat's visible smooth animation is owned by jumpToBottom, which retargets
-    // every frame as content grows. TanStack's scrollToFn and message navigation
-    // stay synchronous so every resulting scroll event matches this authority's
-    // one-shot programmatic token.
+    // TanStack's scrollToFn and message navigation stay synchronous so every
+    // resulting scroll event matches this authority's one-shot programmatic token.
     applyScrollTop(viewport, nextOffset)
-  }, [applyScrollTop, cancelJumpAnimation])
+  }, [applyScrollTop])
 
+  // Instant jump: force-follow + pin. No rAF animation — long chats remeasure
+  // rows mid-flight and used to cancel the smooth path before stickToBottom ran.
   const jumpToBottom = useCallback(() => {
-    const el = boundViewportRef.current
-    const distance = el ? Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop) : 0
-    if (!el || distance < 2 || prefersReducedMotion()) {
-      stickToBottom()
-      return
-    }
-    cancelJumpAnimation()
-    const startTop = el.scrollTop
-    const duration = Math.min(
-      JUMP_MAX_DURATION_MS,
-      JUMP_BASE_DURATION_MS + distance / JUMP_DISTANCE_DURATION_DIVISOR,
-    )
-    let startTs: number | null = null
-    const tick = (ts: number) => {
-      const viewportEl = boundViewportRef.current
-      if (!viewportEl) {
-        jumpRafRef.current = null
-        return
-      }
-      if (startTs === null) {
-        startTs = ts
-      }
-      const t = Math.min(1, (ts - startTs) / duration)
-      const eased = 1 - (1 - t) ** 3
-      const target = viewportEl.scrollHeight - viewportEl.clientHeight
-      applyScrollTop(viewportEl, startTop + (target - startTop) * eased)
-      if (t >= 1) {
-        jumpRafRef.current = null
-        stickToBottom()
-        return
-      }
-      jumpRafRef.current = requestAnimationFrame(tick)
-    }
-    jumpRafRef.current = requestAnimationFrame(tick)
-  }, [applyScrollTop, cancelJumpAnimation, stickToBottom])
+    stickToBottom()
+  }, [stickToBottom])
 
   useEffect(() => {
     if (!enabled || !viewport) {
@@ -310,9 +256,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     }
 
     const handleWheel = (event: WheelEvent) => {
-      if (isDominantVerticalWheel(event.deltaX, event.deltaY)) {
-        cancelJumpAnimation()
-      }
       dispatch({
         type: 'wheel',
         deltaX: event.deltaX,
@@ -329,7 +272,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       touchY = event.touches[0]?.clientY ?? null
     }
     const handleTouchMove = (event: TouchEvent) => {
-      cancelJumpAnimation()
       const nextY = event.touches[0]?.clientY ?? null
       const previousY = touchY
       touchY = nextY
@@ -367,7 +309,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isHistoryScrollKey(event)) {
-        cancelJumpAnimation()
         dispatch({ type: 'historyKey', hasOverflow: hasOverflow(), now: Date.now() })
       } else if (isFollowScrollKey(event)) {
         dispatch({ type: 'followKey', now: Date.now() })
@@ -425,7 +366,6 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       }
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       resizeObserver?.disconnect()
-      cancelJumpAnimation()
       if (layoutCompensationClearRafRef.current !== null) {
         cancelAnimationFrame(layoutCompensationClearRafRef.current)
         layoutCompensationClearRafRef.current = null
@@ -437,7 +377,7 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       lastScrollTopRef.current = null
       geometrySampledRef.current = false
     }
-  }, [cancelJumpAnimation, content, dispatch, enabled, listenerRoot, markLayoutCompensation, pinToBottom, trackKeys, viewport])
+  }, [content, dispatch, enabled, listenerRoot, markLayoutCompensation, pinToBottom, trackKeys, viewport])
 
   const handle = useMemo<ScrollFollowHandle>(
     () => ({

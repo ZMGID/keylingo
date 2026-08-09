@@ -1,9 +1,19 @@
 import { act, render } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { ChatMarkdown } from './ChatMarkdown'
 import { MarkdownStreamingContext } from './markdownStreaming'
+import {
+  beginConversationTransition,
+  cancelConversationTransition,
+  getConversationTransitionSnapshot,
+} from './conversationTransitionStore'
 
 describe('ChatMarkdown streaming stability', () => {
+  afterEach(() => {
+    const { requestId } = getConversationTransitionSnapshot()
+    if (requestId > 0) cancelConversationTransition(requestId)
+  })
+
   it('流式中未闭合加粗由 Streamdown parseIncomplete 补全', async () => {
     const { container, rerender } = render(
       <MarkdownStreamingContext.Provider value={true}>
@@ -42,5 +52,30 @@ describe('ChatMarkdown streaming stability', () => {
     })
     expect(container.querySelector('[data-chat-heavy-island="true"]')).toBeNull()
     expect(container.querySelector('figure pre code')?.textContent).toContain('const x = 1')
+  })
+
+  it('历史代码块默认延迟 hydrate，会话打开中则立刻 hydrate', async () => {
+    const { container, unmount } = render(
+      <ChatMarkdown content={'```ts\nconst x = 1\n```'} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const island = container.querySelector('[data-chat-heavy-island="true"]')
+    expect(island).not.toBeNull()
+    expect(island?.getAttribute('data-chat-heavy-hydrated')).toBe('false')
+    unmount()
+
+    beginConversationTransition('conv-open', { messageCount: 20 })
+    const opening = render(
+      <ChatMarkdown content={'```ts\nconst y = 2\n```'} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const openIsland = opening.container.querySelector('[data-chat-heavy-island="true"]')
+    expect(openIsland?.getAttribute('data-chat-heavy-hydrated')).toBe('true')
+    expect(opening.container.querySelector('figure pre code')?.textContent).toContain('const y = 2')
+    opening.unmount()
   })
 })
