@@ -22,6 +22,7 @@ import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
+import { LiveMarkdown } from './LiveMarkdown'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -1084,57 +1085,9 @@ function KvMath({ node }: { node?: { properties?: { tex?: string; display?: stri
   return <LazyMath tex={String(props.tex ?? '')} display={props.display === 'true'} />
 }
 
-type LiveMarkdownBlock =
-  | { kind: 'text'; content: string }
-  | { kind: 'code'; language: string; content: string }
-
 /** Lightweight streaming path; settled messages keep the full Markdown pipeline. */
 function StreamingMarkdownPreview({ content }: { content: string }) {
-  const blocks: LiveMarkdownBlock[] = []
-  const textLines: string[] = []
-  const codeLines: string[] = []
-  let language = ''
-  let inCode = false
-
-  const flushText = () => {
-    if (textLines.length === 0) return
-    blocks.push({ kind: 'text', content: textLines.join('\n') })
-    textLines.length = 0
-  }
-  const flushCode = () => {
-    blocks.push({ kind: 'code', language, content: codeLines.join('\n') })
-    codeLines.length = 0
-    language = ''
-  }
-
-  for (const line of content.split('\n')) {
-    const fence = line.match(/^\s*```\s*([^\s]*)\s*$/)
-    if (fence) {
-      if (inCode) flushCode()
-      else {
-        flushText()
-        language = fence[1] ?? ''
-      }
-      inCode = !inCode
-      continue
-    }
-    if (inCode) codeLines.push(line)
-    else textLines.push(line)
-  }
-  if (inCode) blocks.push({ kind: 'code', language, content: codeLines.join('\n') })
-  else flushText()
-
-  return (
-    <div className="whitespace-pre-wrap break-words">
-      {blocks.map((block, index) => block.kind === 'code' ? (
-        <pre key={`code-${index}`} className="my-2 overflow-x-auto rounded-md bg-black/[0.04] p-3 text-[0.9em] dark:bg-white/[0.06]">
-          <code data-language={block.language || undefined}>{block.content}</code>
-        </pre>
-      ) : (
-        <p key={`text-${index}`} className="my-1.5">{block.content}</p>
-      ))}
-    </div>
-  )
+  return <LiveMarkdown value={content} />
 }
 
 function needsSettledStreamingMarkdown(content: string): boolean {
