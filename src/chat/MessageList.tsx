@@ -30,7 +30,7 @@ import {
 } from './messageNavigator'
 import { useStreamCoarse, useStreamSnapshot } from './streamingStore'
 import { StreamStatusLine } from './StreamStatusLine'
-import { getActiveGroup, useGroupsVersion } from './groupStreamingStore'
+import { getActiveGroup, useGroupVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
 import {
   estimateMessageRenderHeight,
@@ -98,19 +98,47 @@ type RenderItem =
 
 function contentRevision(text: string | undefined): string {
   if (!text) return '0'
-  return `${text.length}:${text.slice(0, 20)}:${text.slice(-20)}`
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619)
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`
+}
+
+function messageLayoutRevision(message: ChatMessage): string {
+  const tools = message.tool_calls ?? message.toolCalls ?? []
+  const toolRevision = tools.map((tool) => [
+    tool.id,
+    tool.name ?? tool.tool_name ?? tool.toolName,
+    tool.status,
+    contentRevision(tool.argument_preview ?? tool.argumentPreview ?? tool.argumentsPreview),
+    contentRevision(tool.result_preview ?? tool.resultPreview),
+    (tool.artifacts ?? []).map((artifact) => [
+      artifact.name,
+      artifact.mime_type ?? artifact.mimeType,
+      artifact.path ?? artifact.filePath ?? artifact.localPath,
+      artifact.size_bytes ?? artifact.sizeBytes,
+    ].join(':')).join(','),
+  ].join(':')).join('|')
+  return [
+    contentRevision(message.content),
+    contentRevision(message.reasoning),
+    message.segments?.map((segment) => `${segment.id}:${segment.kind}:${contentRevision(segment.text ?? undefined)}`).join('|') ?? '',
+    message.attachments?.map((attachment) => `${attachment.id}:${attachment.type}:${attachment.name}`).join('|') ?? '',
+    (message.artifacts ?? []).map((artifact) => `${artifact.name}:${artifact.mime_type ?? artifact.mimeType}:${artifact.path ?? artifact.filePath ?? artifact.localPath}:${artifact.size_bytes ?? artifact.sizeBytes}`).join('|'),
+    toolRevision,
+  ].join('::')
 }
 
 function measurementKey(item: RenderItem): string {
   if (item.kind === 'message') {
-    return `${item.key}:${contentRevision(item.message.content)}:${item.message.segments?.length ?? 0}:${item.message.tool_calls?.length ?? item.message.toolCalls?.length ?? 0}`
+    return `${item.key}:${messageLayoutRevision(item.message)}`
   }
   if (item.kind === 'group') {
-    return `${item.key}:${item.messages.map((message) => `${message.id}:${contentRevision(message.content)}`).join('|')}`
+    return `${item.key}:${item.messages.map((message) => `${message.id}:${messageLayoutRevision(message)}`).join('|')}`
   }
   if (item.kind === 'streaming') {
-    const toolCalls = item.message.tool_calls ?? item.message.toolCalls ?? []
-    return `${item.key}:${contentRevision(item.message.content)}:${contentRevision(item.message.reasoning)}:${item.message.segments?.length ?? 0}:${toolCalls.length}`
+    return `${item.key}:${messageLayoutRevision(item.message)}`
   }
   return item.key
 }
@@ -169,7 +197,7 @@ function MessageListBase({
   const coarse = useStreamCoarse()
   const snapshot = useStreamSnapshot()
   // 多答组实时流：订阅 group store 版本号，活跃组列内容更新时驱动重渲（仅需订阅，值本身不用）。
-  useGroupsVersion()
+  useGroupVersion(conversationId)
   const liveGroup = conversationId ? getActiveGroup(conversationId) : undefined
   // Group column objects are mutated in place for every stream delta. Only model
   // identity changes should rebuild historical rows; content deltas stay in the
@@ -224,6 +252,7 @@ function MessageListBase({
   // hook 需要通过 state 拿到元素以便重新绑定监听；virtua 需要 RefObject。回调 ref 同时喂两者。
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null)
+  const [contentWidth, setContentWidth] = useState(712)
   const setScrollEl = useCallback((el: HTMLDivElement | null) => {
     scrollRef.current = el
     setViewportEl(el)
@@ -238,6 +267,23 @@ function MessageListBase({
     )
     return finish
   }, [conversationId, contentEl])
+
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    const updateWidth = (width: number) => {
+      const next = Math.max(280, Math.round(width))
+      setContentWidth((current) => current === next ? current : next)
+    }
+    const rect = contentEl.getBoundingClientRect()
+    updateWidth(Math.max(0, rect.width - 48))
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width
+      if (typeof width === 'number') updateWidth(width)
+    })
+    observer.observe(contentEl)
+    return () => observer.disconnect()
+  }, [contentEl])
   const prevMessageCountRef = useRef(0)
   const [activeNavigatorNodeId, setActiveNavigatorNodeId] = useState<string | null>(null)
   const [visibleNavigatorNodeIds, setVisibleNavigatorNodeIds] = useState<string[]>([])
@@ -481,7 +527,7 @@ function MessageListBase({
     return { kind: 'error', key: 'error', text: error, retryMessageId }
   }, [error, messages])
 
-  const layoutKey = `${conversationId ?? 'empty'}:${Math.round((viewportEl?.clientWidth ?? 0) / 16) * 16}`
+  const layoutKey = `${conversationId ?? 'empty'}:${contentWidth}`
   const tailMeasurementKey = `tail:${streaming || streamFrozen ? 'live' : 'settled'}`
   const historyMeasurementRevision = useMemo(
     () => historyItems.map(measurementKey).join('|'),
@@ -527,7 +573,7 @@ function MessageListBase({
         })
         height += estimateMessageRenderHeight({
           texts,
-          width: Math.max(280, viewportEl?.clientWidth ?? 760),
+          width: contentWidth,
           toolCallCount: toolCalls.length,
           attachmentCount: (message.attachments ?? []).length,
           artifactCount,
@@ -540,9 +586,9 @@ function MessageListBase({
     }
     map.set('tail', getCachedRowMeasurement(layoutKey, tailMeasurementKey) ?? 96)
     return map
-  }, [historyItems, layoutKey, tailMeasurementKey, viewportEl?.clientWidth])
+  }, [contentWidth, historyItems, layoutKey, tailMeasurementKey])
 
-  const tailItem: RenderItem = { kind: 'tail', key: 'tail' }
+  const tailItem = useMemo<RenderItem>(() => ({ kind: 'tail', key: 'tail' }), [])
   const itemCount = historyItems.length + 1
   const historyItemsRef = useRef<RenderItem[]>(historyItems)
   historyItemsRef.current = historyItems
@@ -596,8 +642,9 @@ function MessageListBase({
     // real browser immediately replaces it with the measured client rect.
     initialRect: { width: 0, height: viewportEl?.clientHeight || 800 },
     anchorTo: 'end',
+    scrollEndThreshold: 12,
     followOnAppend: false,
-    useAnimationFrameWithResizeObserver: true,
+    useAnimationFrameWithResizeObserver: false,
     useFlushSync: false,
   })
   // TanStack's default is the safe baseline: only rows entirely above the
@@ -625,16 +672,9 @@ function MessageListBase({
     return true
   }
   const virtualItems = virtualizer.getVirtualItems()
-  const previousLayoutWidthRef = useRef(0)
-  const previousMeasurementRevisionRef = useRef('')
-  useLayoutEffect(() => {
-    const width = viewportEl?.clientWidth ?? 0
-    if (width === previousLayoutWidthRef.current && historyMeasurementRevision === previousMeasurementRevisionRef.current) return
-    previousLayoutWidthRef.current = width
-    previousMeasurementRevisionRef.current = historyMeasurementRevision
-    followHandle.markLayoutCompensation()
-    virtualizer.measure()
-  }, [followHandle, historyMeasurementRevision, layoutKey, viewportEl, virtualizer])
+  // Row ResizeObservers and TanStack's own viewport observer update mounted rows.
+  // Avoid a blanket measure(): it clears the virtualizer's measured cache and makes
+  // detached readers pay the estimate-to-real-height correction for every row.
 
   const saveMeasurementSnapshotRef = useRef<() => void>(() => {})
   saveMeasurementSnapshotRef.current = () => {
