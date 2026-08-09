@@ -1,8 +1,13 @@
-import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, isValidElement, memo, startTransition, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
+import type { Root, RootContent } from 'hast'
+import { toJsxRuntime } from 'hast-util-to-jsx-runtime'
+import { urlAttributes } from 'html-url-attributes'
+import { jsx, jsxs } from 'react/jsx-runtime'
 import type { Components, UrlTransform } from 'react-markdown'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { PluggableList } from 'unified'
+import { visit } from 'unist-util-visit'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 // CommonMark 的 flanking 规则对 CJK 是坏的：`**` 一侧贴中文标点、另一侧贴汉字时既不能开
@@ -24,6 +29,7 @@ import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
 import { LiveMarkdown } from './LiveMarkdown'
 import { ChatHeavyIsland } from './ChatHeavyIsland'
+import { getCachedMarkdownAst, parseMarkdownAst } from './markdownAstClient'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -460,6 +466,25 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
   )
 }
 
+function DeferredCodeBlock({ code, language }: { code: string; language: string }) {
+  const preview = code.length > 14_000
+    ? `${code.slice(0, 10_000)}\n\n…\n\n${code.slice(-2_000)}`
+    : code
+  return (
+    <ChatHeavyIsland
+      minHeight={112}
+      delayMs={180}
+      fallback={(
+        <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 py-4 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
+          <code className="font-mono whitespace-pre-wrap">{preview}</code>
+        </pre>
+      )}
+    >
+      <CodeBlock code={code} language={language} />
+    </ChatHeavyIsland>
+  )
+}
+
 let mermaidRenderCounter = 0
 
 // 已渲染 mermaid SVG 的缓存：键 = 主题 + 源码。虚拟列表会卸载屏外的消息气泡，
@@ -725,9 +750,9 @@ const markdownComponents: Components = {
       if (language === 'kivio-error-details') {
         return <ErrorDetails detail={code} />
       }
-      return <CodeBlock code={code} language={language} />
+      return <DeferredCodeBlock code={code} language={language} />
     }
-    return <CodeBlock code={codeChildrenToString(children)} language="" />
+    return <DeferredCodeBlock code={codeChildrenToString(children)} language="" />
   },
   // 表格：**每个单元格一个独立圆角块**，横竖都靠 border-spacing 的空隙分隔。
   // **没有任何边框线**，别加 border，也别给容器加外框。
@@ -890,6 +915,114 @@ const chatMarkdownUrlTransform: UrlTransform = (url, key, node) => {
     return url
   }
   return defaultUrlTransform(url)
+}
+
+function prepareMarkdownAstBlock(root: Root): Root {
+  visit(root, (node, index, parent) => {
+    if (node.type === 'raw' && parent && typeof index === 'number') {
+      parent.children[index] = { type: 'text', value: node.value }
+      return index
+    }
+    if (node.type !== 'element') return undefined
+    for (const key in urlAttributes) {
+      if (!Object.hasOwn(urlAttributes, key) || !Object.hasOwn(node.properties, key)) continue
+      const tags = urlAttributes[key]
+      if (tags !== null && !tags.includes(node.tagName)) continue
+      node.properties[key] = chatMarkdownUrlTransform(
+        String(node.properties[key] || ''),
+        key,
+        node,
+      )
+    }
+    return undefined
+  })
+  return root
+}
+
+const MarkdownAstBlock = memo(function MarkdownAstBlock({
+  node,
+  components,
+}: {
+  node: RootContent
+  components: Components
+}) {
+  return useMemo(() => {
+    const root = prepareMarkdownAstBlock({ type: 'root', children: [node] })
+    return toJsxRuntime(root, {
+      Fragment,
+      components: components as never,
+      ignoreInvalidStyle: true,
+      jsx,
+      jsxs,
+      passKeys: true,
+      passNode: true,
+    })
+  }, [components, node])
+})
+
+function WorkerSettledMarkdown({
+  content,
+  components,
+  citations,
+}: {
+  content: string
+  components: Components
+  citations?: Map<number, KbHitView>
+}) {
+  const citationNumbers = useMemo(
+    () => citations ? [...citations.keys()].sort((a, b) => a - b) : [],
+    [citations],
+  )
+  const citationKey = citationNumbers.join(',')
+  const [tree, setTree] = useState<Root | null>(() => (
+    getCachedMarkdownAst(content, citationNumbers)
+  ))
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    const cached = getCachedMarkdownAst(content, citationNumbers)
+    if (cached) {
+      setTree(cached)
+      setFailed(false)
+      return
+    }
+    let cancelled = false
+    setTree(null)
+    setFailed(false)
+    void parseMarkdownAst(content, citationNumbers).then((parsed) => {
+      if (cancelled) return
+      startTransition(() => setTree(parsed))
+    }).catch((err) => {
+      if (cancelled) return
+      console.error('Failed to parse settled Markdown in worker:', err)
+      setFailed(true)
+    })
+    return () => {
+      cancelled = true
+    }
+    // citationKey is the stable semantic dependency; citationNumbers is rebuilt only with citations.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [citationKey, content])
+
+  if (!tree) {
+    return (
+      <div data-chat-markdown-pending={failed ? 'false' : 'true'}>
+        <LiveMarkdown value={content} />
+      </div>
+    )
+  }
+
+  return (
+    <div data-chat-markdown-pending="false">
+      {tree.children.map((node, index) => (
+        <MarkdownAstBlock
+          key={`${node.position?.start.offset ?? index}:${node.position?.end.offset ?? index}`}
+          node={node}
+          components={components}
+        />
+      ))}
+    </div>
+  )
 }
 
 function buildArtifactLookup(artifacts: ChatToolArtifact[]): Map<string, ChatToolArtifact> {
@@ -1140,9 +1273,12 @@ function ChatMarkdownComponent({
   const flags = getChatPerformanceFlags()
   const useLightweightStreaming = streaming
     && flags.lightweightStreamingMarkdown
+  const useWorkerSettled = !streaming
+    && typeof Worker !== 'undefined'
+    && import.meta.env.MODE !== 'test'
   const normalized = useMemo(
     () => {
-      if (useLightweightStreaming) return content
+      if (useLightweightStreaming || useWorkerSettled) return content
       const build = () => {
         const normalizedContent = normalizeMarkdownForRender(normalizeLegacyErrorDetails(content))
         return {
@@ -1155,7 +1291,7 @@ function ChatMarkdownComponent({
         ? getSettledMarkdownCacheEntry(content, build).normalized
         : build().normalized
     },
-    [content, flags.settledMarkdownCache, useLightweightStreaming],
+    [content, flags.settledMarkdownCache, useLightweightStreaming, useWorkerSettled],
   )
   const remarkPlugins = useMemo<PluggableList>(() => {
     const plugins: PluggableList = [remarkGfm, remarkMath, remarkCjkFriendly]
@@ -1203,6 +1339,20 @@ function ChatMarkdownComponent({
     return (
       <div className={markdownProseClass(variant)}>
         <StreamingMarkdownPreview content={content} />
+      </div>
+    )
+  }
+
+  if (useWorkerSettled) {
+    return (
+      <div className={markdownProseClass(variant)}>
+        <MarkdownErrorBoundary fallbackText={content}>
+          <WorkerSettledMarkdown
+            content={content}
+            components={components}
+            citations={citations}
+          />
+        </MarkdownErrorBoundary>
       </div>
     )
   }

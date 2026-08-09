@@ -6992,8 +6992,14 @@ input[type="password"]::-ms-clear {
   display: block;
   overflow: visible;
   flex-shrink: 0;
+  width: var(--kv-stream-logo-size, 28px);
+  height: var(--kv-stream-logo-size, 28px);
   --k: 1; /* 速度倍率 */
   --dot: #1d6bf0; /* 唯一颜色 */
+}
+
+.chat-conversation-loading {
+  background: var(--theme-surface-soft);
 }
 .kv-stream-logo circle {
   transform-box: fill-box;

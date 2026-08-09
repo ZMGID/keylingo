@@ -118,6 +118,20 @@ export function saveMeasurementSnapshot(
  */
 const COST_PER_FENCE = 20
 const COST_CHARS_PER_UNIT = 150
+const ESTIMATE_SAMPLE_CHARS = 8_192
+
+function textEstimateSample(text: string): string {
+  if (text.length <= ESTIMATE_SAMPLE_CHARS) return text
+  const half = ESTIMATE_SAMPLE_CHARS / 2
+  return `${text.slice(0, half)}\n${text.slice(-half)}`
+}
+
+function estimatedFenceCount(text: string): number {
+  const sample = textEstimateSample(text)
+  const sampleFences = (sample.match(/^\s{0,3}```/gm)?.length ?? 0) / 2
+  if (sample.length === text.length) return sampleFences
+  return sampleFences * (text.length / sample.length)
+}
 
 /**
  * MessageBubble 自身与非正文结构的成本。
@@ -136,8 +150,8 @@ const COST_PER_ARTIFACT = 12
 
 export function estimateRenderCost(text: string): number {
   if (!text) return 0
-  // 行首围栏才算（正文里内联的 ``` 不算）；一对围栏 = 一个代码块。
-  const fences = (text.match(/^\s{0,3}```/gm)?.length ?? 0) / 2
+  // 只抽样首尾固定字符。估算用于 virtualizer，不值得在会话切换时全量扫描正文。
+  const fences = estimatedFenceCount(text)
   return Math.round(fences * COST_PER_FENCE + text.length / COST_CHARS_PER_UNIT)
 }
 
@@ -183,18 +197,20 @@ const HEIGHT_PER_LINE_PX = 25
 export function estimateRenderHeight(text: string, contentWidth = 560): number {
   if (!text) return 0
   const charsPerLine = Math.max(28, Math.min(100, Math.floor(contentWidth / 8)))
-  let height = 0
-  let inCode = false
-  for (const line of text.split('\n')) {
-    if (/^\s{0,3}```/.test(line)) {
-      height += HEIGHT_PER_FENCE_PX
-      inCode = !inCode
-      continue
-    }
-    const wrappedLines = Math.max(1, Math.ceil(Math.max(1, line.length) / charsPerLine))
-    height += wrappedLines * (inCode ? 20 : HEIGHT_PER_LINE_PX)
-  }
-  return Math.round(height)
+  const sample = textEstimateSample(text)
+  const sampleNewlines = sample.match(/\n/g)?.length ?? 0
+  const estimatedLogicalLines = Math.max(
+    1,
+    (sampleNewlines + 1) * (text.length / Math.max(1, sample.length)),
+  )
+  const estimatedWrappedLines = Math.max(
+    estimatedLogicalLines,
+    Math.ceil(text.length / charsPerLine),
+  )
+  return Math.round(
+    estimatedWrappedLines * HEIGHT_PER_LINE_PX
+    + estimatedFenceCount(text) * HEIGHT_PER_FENCE_PX,
+  )
 }
 
 export type MessageRenderHeightInput = {

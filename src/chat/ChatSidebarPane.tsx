@@ -1,5 +1,6 @@
 import { memo, Profiler, type ProfilerOnRenderCallback } from 'react'
 import { Sidebar, type SidebarProps } from './Sidebar'
+import { useConversationTransition } from './conversationTransitionStore'
 
 export interface ChatSidebarPaneProps extends SidebarProps {
   onRender: ProfilerOnRenderCallback
@@ -13,9 +14,13 @@ export interface ChatSidebarPaneProps extends SidebarProps {
  * 留在这个边界内，便于分别观察侧栏和主区的成本。
  */
 export const ChatSidebarPane = memo(function ChatSidebarPane({ onRender, ...props }: ChatSidebarPaneProps) {
+  const transition = useConversationTransition()
   return (
     <Profiler id="Sidebar" onRender={onRender}>
-      <Sidebar {...props} />
+      <Sidebar
+        {...props}
+        currentConversationId={transition.targetConversationId ?? props.currentConversationId}
+      />
     </Profiler>
   )
 })

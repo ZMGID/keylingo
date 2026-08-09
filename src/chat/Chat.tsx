@@ -1,4 +1,4 @@
-import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ProfilerOnRenderCallback, type ReactNode, type Ref } from 'react'
+import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ProfilerOnRenderCallback, type ReactNode, type Ref } from 'react'
 import { PanelRight } from 'lucide-react'
 import { type ExtensionsNavItem } from './Sidebar'
 import { ChatSidebarPane } from './ChatSidebarPane'
@@ -30,6 +30,14 @@ import { ApprovalCard } from './ApprovalCard'
 import { AskUserBlock } from './AskUserBlock'
 import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
+import {
+  beginConversationTransition,
+  cancelConversationTransition,
+  completeConversationTransition,
+  getConversationTransitionSnapshot,
+  invalidateConversationTransition,
+  isCurrentConversationTransition,
+} from './conversationTransitionStore'
 import type { AssistantStreamStats, MessageListProps } from './MessageList'
 import type { InputBarProps } from './InputBar'
 import { SessionUsageStrip } from './SessionUsageStrip'
@@ -950,9 +958,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     // 其余初始视图（会话/助手/技能/引导）挂载即有骨架，直接发信号。
     if (!initialViewIsSettingsRef.current) emitContentReady()
   }, [emitContentReady])
-  const [currentConversation, setCurrentConversation] = useState<Awaited<
-    ReturnType<typeof chatApi.getConversation>
-  > | null>(null)
+  const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null)
+  const [conversationRenderRequestId, setConversationRenderRequestId] = useState(0)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => getRememberedChatSidebarCollapsed())
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedProject, setSelectedProject] = useState<ChatProject | null>(null)
@@ -1588,14 +1595,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 路由簇抽成 useChatRouting（见 hooks/useChatRouting.ts）。
   // reloadConversation 定义在下方且自身依赖 syncConversationRoute（循环依赖），
   // 故经 ref 间接调用：hook 只读 ref.current，ref 在其定义后赋值。
-  const reloadConversationRef = useRef<((id: string) => void) | null>(null)
+  const reloadConversationRef = useRef<((id: string, transitionRequestId?: number) => void) | null>(null)
   const handleRouteResetConversation = useCallback(() => {
+    invalidateConversationTransition()
     currentConversationIdRef.current = null
     applyConversation(null)
     restoreStreamingPreview(null)
   }, [applyConversation, restoreStreamingPreview])
   const handleRouteLoadConversation = useCallback((conversationId: string) => {
-    reloadConversationRef.current?.(conversationId)
+    const requestId = beginConversationTransition(conversationId)
+    reloadConversationRef.current?.(conversationId, requestId)
   }, [])
 
   const openEmbeddedSettingsForPlugins = useCallback(() => {
@@ -1847,17 +1856,41 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setSidebarProfileRefreshKey((key) => key + 1)
   }, [loadDefaultModel, loadSkills, onSettingsChange, refreshToolIndicator])
 
-  const reloadConversation = useCallback(async (conversationId: string, options?: { force?: boolean }) => {
+  const reloadConversation = useCallback(async (conversationId: string, options?: { force?: boolean; transitionRequestId?: number }) => {
     if (isConversationInFlight(inFlightConversationsRef.current, conversationId) && !options?.force) {
       return
     }
+    const transitionRequestId = options?.transitionRequestId
     try {
       const conv = await chatApi.getConversation(conversationId)
+      const transition = getConversationTransitionSnapshot()
+      if (
+        (transitionRequestId !== undefined
+          && !isCurrentConversationTransition(transitionRequestId, conversationId))
+        || (transition.loading && transition.targetConversationId !== conversationId)
+      ) return
       currentConversationIdRef.current = conversationId
-      applyConversation(conv)
+      const renderRequestId = transitionRequestId
+        ?? (transition.loading && transition.targetConversationId === conversationId
+          ? transition.requestId
+          : 0)
+      startTransition(() => {
+        applyConversation(conv)
+        if (renderRequestId > 0) setConversationRenderRequestId(renderRequestId)
+      })
+      if (renderRequestId > 0 && conv.messages.length === 0) {
+        window.requestAnimationFrame(() => {
+          completeConversationTransition(conversationId, renderRequestId)
+        })
+      }
       restoreStreamingPreview(conversationId)
       setStreamCoarse({ cancelling: false })
     } catch (err) {
+      if (
+        transitionRequestId !== undefined
+        && !isCurrentConversationTransition(transitionRequestId, conversationId)
+      ) return
+      const transition = getConversationTransitionSnapshot()
       console.error('Failed to reload conversation:', err)
       // B2：reload 失败（尤其"对话不存在"）——把 ghost 从乐观列表/in-flight/快照剔除并刷新侧栏。
       dropConversationLocally(conversationId)
@@ -1867,13 +1900,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         applyConversation(null)
         syncConversationRoute(null)
       }
+      if (transitionRequestId !== undefined) {
+        cancelConversationTransition(transitionRequestId)
+      } else if (transition.loading && transition.targetConversationId === conversationId) {
+        cancelConversationTransition(transition.requestId)
+      }
       refreshSidebar()
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
     }
   }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
 
   // 填充上面 useChatRouting 用来打破循环依赖的间接层。
-  reloadConversationRef.current = (id: string) => { void reloadConversation(id, { force: true }) }
+  reloadConversationRef.current = (id: string, transitionRequestId?: number) => {
+    void reloadConversation(id, { force: true, transitionRequestId })
+  }
 
   const refreshContextStats = useCallback(async (conversationId?: string) => {
     const targetConversationId = conversationId ?? currentConversationIdRef.current
@@ -2660,16 +2700,27 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [refreshSidebar, reloadConversation, syncConversationRoute])
 
   const handleSelectConversation = useCallback(async (conversationId: string) => {
+    const requestId = beginConversationTransition(conversationId)
     setAssistantStreamStatsByMessageId({})
     setHookWarning(null)
     try {
       const conv = await chatApi.getConversation(conversationId)
+      if (!isCurrentConversationTransition(requestId, conversationId)) return
       currentConversationIdRef.current = conversationId
-      applyConversation(conv)
+      startTransition(() => {
+        applyConversation(conv)
+        setConversationRenderRequestId(requestId)
+      })
+      if (conv.messages.length === 0) {
+        window.requestAnimationFrame(() => {
+          completeConversationTransition(conversationId, requestId)
+        })
+      }
       restoreStreamingPreview(conversationId)
       syncConversationRoute(conversationId)
       setStreamError('')
     } catch (err) {
+      if (!isCurrentConversationTransition(requestId, conversationId)) return
       console.error('Failed to load conversation:', err)
       // B2：点开一个不存在/加载失败的 ghost——从乐观列表 + in-flight + 快照剔除，
       // 清空当前会话并刷新侧栏，让 ghost 自动消失而不是卡住。
@@ -2682,10 +2733,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       syncConversationRoute(null)
       refreshSidebar()
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
+      cancelConversationTransition(requestId)
     }
   }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
 
+  const handleConversationFirstCommit = useCallback((conversationId: string, requestId: number) => {
+    window.requestAnimationFrame(() => {
+      completeConversationTransition(conversationId, requestId)
+    })
+  }, [])
+
   const handleNewConversation = useCallback(async () => {
+    invalidateConversationTransition()
     setSelectedProject(null)
     setSelectedSet(null)
     setAssistantStreamStatsByMessageId({})
@@ -2714,6 +2773,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   ])
 
   const handleClearChat = useCallback(async () => {
+    invalidateConversationTransition()
     const conversationId = currentConversationIdRef.current
     if (conversationId && isConversationBusy(
       conversationId,
@@ -4529,6 +4589,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const messageListProps = useMemo<MessageListProps>(() => ({
     conversationId: currentConversation?.id,
     messages: displayMessages,
+    renderRequestId: conversationRenderRequestId,
+    onInitialRender: handleConversationFirstCommit,
     agentPlanState: currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null,
     assistantStreamStatsByMessageId,
     onUpdateMessage: handleUpdateMessage,
@@ -4551,7 +4613,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     contextCompressing,
     contextState,
     currentConversation,
+    conversationRenderRequestId,
     displayMessages,
+    handleConversationFirstCommit,
     handleDeleteMessage,
     handleExecuteAgentPlan,
     handleForkMessage,

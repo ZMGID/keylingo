@@ -2,7 +2,9 @@ import { lazy, memo, Profiler, Suspense, type ProfilerOnRenderCallback, type Rea
 import { GitBranch, TriangleAlert, X } from 'lucide-react'
 import { ChatDotGridBackground } from './ChatDotGridBackground'
 import { ChatImageViewer } from './ChatImageViewer'
+import { ConversationLoadingState } from './ConversationLoadingState'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
+import { useConversationTransition } from './conversationTransitionStore'
 import { InputBar, type InputBarProps } from './InputBar'
 import { QueuedMessages } from './QueuedMessages'
 import { TypewriterText } from './TypewriterText'
@@ -99,6 +101,7 @@ export const ChatConversationPane = memo(function ChatConversationPane({
   onCloseImageViewer,
   onRender,
 }: ChatConversationPaneProps) {
+  const { loading: conversationLoading } = useConversationTransition()
   return (
     <div className="chat-motion-pane-in chat-main-pane relative flex min-w-0 flex-1 flex-col">
       {usesNativeTitlebar && (
@@ -131,7 +134,7 @@ export const ChatConversationPane = memo(function ChatConversationPane({
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 flex-1 flex-col">
         {showEmptyHero ? (
           <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-16">
             <ChatDotGridBackground />
@@ -238,6 +241,7 @@ export const ChatConversationPane = memo(function ChatConversationPane({
             <InputBar {...inputBarProps} />
           </>
         )}
+        {conversationLoading && <ConversationLoadingState />}
       </div>
 
       {imageViewerItem && (

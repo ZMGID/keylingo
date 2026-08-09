@@ -57,6 +57,8 @@ export interface AssistantStreamStats {
 export interface MessageListProps {
   conversationId?: string | null
   messages: ChatMessage[]
+  renderRequestId?: number
+  onInitialRender?: (conversationId: string, requestId: number) => void
   agentPlanState?: AgentPlanState | null
   assistantStreamStatsByMessageId?: Record<string, AssistantStreamStats>
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
@@ -100,9 +102,15 @@ type RenderItem =
 
 function contentRevision(text: string | undefined): string {
   if (!text) return '0'
+  // Measurement cache only needs a stable change detector, not a full content digest.
+  // Hashing every character made a cold conversation switch synchronously rescan megabytes
+  // before React could yield back to sidebar input. Sample fixed-size slices instead.
+  const sample = text.length <= 768
+    ? text
+    : `${text.slice(0, 256)}${text.slice(Math.floor(text.length / 2) - 128, Math.floor(text.length / 2) + 128)}${text.slice(-256)}`
   let hash = 2166136261
-  for (let index = 0; index < text.length; index += 1) {
-    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619)
+  for (let index = 0; index < sample.length; index += 1) {
+    hash = Math.imul(hash ^ sample.charCodeAt(index), 16777619)
   }
   return `${text.length}:${(hash >>> 0).toString(36)}`
 }
@@ -171,6 +179,8 @@ type GroupModelLabel = { providerId: string | null; model: string | null }
 function MessageListBase({
   conversationId,
   messages,
+  renderRequestId = 0,
+  onInitialRender,
   agentPlanState = null,
   assistantStreamStatsByMessageId = {},
   onUpdateMessage,
@@ -259,6 +269,33 @@ function MessageListBase({
     scrollRef.current = el
     setViewportEl(el)
   }, [])
+
+  const committedRenderRequestRef = useRef(0)
+  useLayoutEffect(() => {
+    if (
+      !contentEl
+      || !conversationId
+      || renderRequestId <= 0
+      || committedRenderRequestRef.current === renderRequestId
+    ) return
+    const completeIfReady = () => {
+      if (contentEl.querySelector('[data-chat-markdown-pending="true"]')) return false
+      committedRenderRequestRef.current = renderRequestId
+      onInitialRender?.(conversationId, renderRequestId)
+      return true
+    }
+    if (completeIfReady()) return
+    const observer = new MutationObserver(() => {
+      if (completeIfReady()) observer.disconnect()
+    })
+    observer.observe(contentEl, {
+      attributes: true,
+      attributeFilter: ['data-chat-markdown-pending'],
+      childList: true,
+      subtree: true,
+    })
+    return () => observer.disconnect()
+  }, [contentEl, conversationId, onInitialRender, renderRequestId])
 
   useLayoutEffect(() => {
     if (!contentEl) return
