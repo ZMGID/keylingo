@@ -1,28 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
-  earlierBatchStart,
+  clearRowMeasurementCache,
   estimateMessageRenderCost,
   estimateRenderCost,
-  findMountedWindowStart,
-  clearRowMeasurementCache,
   getCachedRowMeasurement,
-  HEAVY_MIGRATION_STEP,
-  MOUNTED_MIN_ITEMS,
-  mountedCountForBudget,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
   sendReserveHeight,
-  splitHistoryForVirtualization,
-  VIRTUALIZE_COST_THRESHOLD,
-  VIRTUALIZE_THRESHOLD,
   setCachedRowMeasurement,
 } from './messageListVirtualization'
 
 beforeEach(() => clearRowMeasurementCache())
-
-function items(kinds: string[]) {
-  return kinds.map((kind, i) => ({ kind, key: `${kind}-${i}` }))
-}
 
 const fence = (body = 'x') => '```ts\n' + body + '\n```\n'
 
@@ -58,15 +46,14 @@ describe('estimateMessageRenderCost', () => {
     expect(toolHeavy).toBeGreaterThan(textOnly + 150)
   })
 
-  it('正文单独低于重会话门槛时，大量工具记录能推动它触发渐进加载', () => {
+  it('大量工具记录会增加估算成本', () => {
     const textOnly = estimateMessageRenderCost({ texts: ['a'.repeat(150_000)] })
     const withTools = estimateMessageRenderCost({
       texts: ['a'.repeat(150_000)],
       toolCallCount: 80,
       timelineSegmentCount: 80,
     })
-    expect(textOnly).toBeLessThan(VIRTUALIZE_COST_THRESHOLD)
-    expect(withTools).toBeGreaterThan(VIRTUALIZE_COST_THRESHOLD)
+    expect(withTools).toBeGreaterThan(textOnly + 150)
   })
 })
 
@@ -97,124 +84,6 @@ describe('row measurement cache', () => {
     expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-a')).toHaveLength(1)
     expect(restoreMeasurementSnapshot('c1', 'viewport:960', 'rev-a')).toHaveLength(0)
     expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-b')).toHaveLength(0)
-  })
-})
-
-describe('mountedCountForBudget', () => {
-  it('累到预算就停', () => {
-    expect(mountedCountForBudget([100, 100, 100, 900], 800)).toBe(MOUNTED_MIN_ITEMS)
-    expect(mountedCountForBudget([500, 300, 300, 300], 800)).toBe(3)
-  })
-
-  it('内容太轻时返回全部（等于不虚拟化）', () => {
-    expect(mountedCountForBudget([1, 1, 1, 1, 1], 800)).toBe(5)
-  })
-
-  it('至少留 MOUNTED_MIN_ITEMS 条，视口要填满', () => {
-    expect(mountedCountForBudget([5000, 5000, 5000, 5000], 800)).toBe(MOUNTED_MIN_ITEMS)
-  })
-})
-
-describe('earlierBatchStart', () => {
-  it('到顶了就返回 0', () => {
-    expect(earlierBatchStart([1, 2, 3], 0)).toBe(0)
-  })
-
-  it('至少揭示一条，哪怕它自己就超预算（否则滚到顶会卡住）', () => {
-    expect(earlierBatchStart([100, 100, 5000, 100], 3, 800)).toBe(2)
-  })
-
-  it('不超预算就继续往前吃', () => {
-    expect(earlierBatchStart([100, 100, 100, 100, 100], 5, 800)).toBe(0)
-    expect(earlierBatchStart([100, 100, 700, 100, 100], 5, 800)).toBe(3)
-  })
-
-  it('每次至少前进一格，不会原地不动', () => {
-    let from = 6
-    const costs = [900, 900, 900, 900, 900, 900]
-    for (let i = 0; i < 6; i += 1) {
-      const next = earlierBatchStart(costs, from, 800)
-      expect(next).toBeLessThan(from)
-      from = next
-    }
-    expect(from).toBe(0)
-  })
-})
-
-describe('findMountedWindowStart', () => {
-  it('短列表从 0 开始', () => {
-    expect(findMountedWindowStart(items(['message', 'message']), 32)).toBe(0)
-  })
-
-  it('长列表从末尾保留 minMounted，并落在 message 边界', () => {
-    const list = items([
-      ...Array.from({ length: 40 }, () => 'message'),
-      'spacer',
-      'message',
-      'message',
-    ])
-    const start = findMountedWindowStart(list, 5)
-    expect(start).toBeLessThanOrEqual(list.length - 5)
-    expect(list[start]?.kind).toBe('message')
-  })
-
-  // 回归：重会话条数很少（14 条消息 ≈ 16 个 render item），按默认步长 16 量化会把边界
-  // 压回 0 —— 边界回到 0 等于没虚拟化，成本预算白算。这就是 migrationStep 存在的理由。
-  it('短列表下默认步长会把边界压回 0，小步长才留得住实挂载窗口', () => {
-    const list = items(Array.from({ length: 16 }, () => 'message'))
-    expect(findMountedWindowStart(list, 3)).toBe(0)
-    expect(findMountedWindowStart(list, 3, HEAVY_MIGRATION_STEP)).toBeGreaterThan(0)
-  })
-})
-
-describe('splitHistoryForVirtualization', () => {
-  it('低于阈值时全部实挂载', () => {
-    const list = items(Array.from({ length: 10 }, () => 'message'))
-    const split = splitHistoryForVirtualization(list)
-    expect(split.useVirtual).toBe(false)
-    expect(split.virtualized).toHaveLength(0)
-    expect(split.mounted).toHaveLength(10)
-  })
-
-  it('超过阈值时拆成上方虚拟 + 底部实挂载', () => {
-    const list = items(Array.from({ length: VIRTUALIZE_THRESHOLD + 20 }, () => 'message'))
-    const split = splitHistoryForVirtualization(list, { minMounted: 24 })
-    expect(split.useVirtual).toBe(true)
-    expect(split.virtualized.length + split.mounted.length).toBe(list.length)
-    expect(split.mounted.length).toBeGreaterThanOrEqual(24)
-    expect(split.mountedStartIndex).toBe(split.virtualized.length)
-  })
-
-  // 重会话旁路：条数远低于 36，但成本判定要虚拟化 → threshold 让位、尾部按预算、步长换小。
-  it('重会话：条数不到 36 也能虚拟化，且只实挂载尾部少数几条', () => {
-    const list = items(Array.from({ length: 16 }, () => 'message'))
-    const split = splitHistoryForVirtualization(list, {
-      threshold: 0,
-      minMounted: MOUNTED_MIN_ITEMS,
-      migrationStep: HEAVY_MIGRATION_STEP,
-    })
-    expect(split.useVirtual).toBe(true)
-    expect(split.mounted.length).toBeLessThan(8)
-    expect(split.virtualized.length + split.mounted.length).toBe(16)
-  })
-
-  it('冻结时新消息只让实挂载区变长，不把已有行挤进虚拟区', () => {
-    const before = items(Array.from({ length: 80 }, () => 'message'))
-    const frozenStart = splitHistoryForVirtualization(before, { minMounted: 24 }).mountedStartIndex
-    const after = items(Array.from({ length: 100 }, () => 'message'))
-
-    const thawed = splitHistoryForVirtualization(after, { minMounted: 24 })
-    expect(thawed.mountedStartIndex).toBeGreaterThan(frozenStart) // 不冻结就会往前挪
-
-    const frozen = splitHistoryForVirtualization(after, { minMounted: 24, frozenStart })
-    expect(frozen.mountedStartIndex).toBe(frozenStart)
-    expect(frozen.mounted.length).toBe(100 - frozenStart)
-  })
-
-  it('冻结期实挂载区超过上限则放弃冻结', () => {
-    const list = items(Array.from({ length: 300 }, () => 'message'))
-    const frozen = splitHistoryForVirtualization(list, { minMounted: 24, frozenStart: 16 })
-    expect(frozen.mountedStartIndex).toBeGreaterThan(16)
   })
 })
 
