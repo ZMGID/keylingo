@@ -214,6 +214,28 @@ export function estimateMessageRenderHeight({
     + artifactCount * 96
 }
 
+export type ChatItemResizeContext = {
+  scrollOffset: number
+  scrollAdjustments: number
+  itemSizeCache: ReadonlyMap<number | string | bigint, number>
+  scrollDirection: 'forward' | 'backward' | null
+}
+
+/**
+ * Keep a detached reader anchored only when a re-measured row is entirely
+ * above the reading anchor. A row that spans the anchor grows below the
+ * reader and must not drag the viewport; backward scrolling is also left to
+ * TanStack's normal convergence path.
+ */
+export function shouldAdjustChatItemSizeChange(
+  item: Pick<VirtualItem, 'key' | 'start' | 'end'>,
+  context: ChatItemResizeContext,
+): boolean {
+  const anchor = context.scrollOffset + context.scrollAdjustments
+  if (!context.itemSizeCache.has(item.key)) return item.start < anchor
+  return item.end <= anchor && context.scrollDirection !== 'backward'
+}
+
 /**
  * 发送后尾部预留的高度。基准是**滚动视口**的实测高度，不是窗口高 —— ask_user 面板吊在输入框
  * 上方、在滚动区之外，它一出现视口就矮一大截，按窗口算的预留会比视口还高、把刚发出的那条消息

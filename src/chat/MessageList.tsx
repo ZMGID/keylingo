@@ -40,6 +40,7 @@ import {
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
   setCachedRowMeasurement,
+  shouldAdjustChatItemSizeChange,
 } from './messageListVirtualization'
 import type { Lang } from '../settings/i18n'
 import { measureChatSurface, recordChatPerfSample, useChatPerfRenderProbe } from './chatPerformanceProbe'
@@ -528,7 +529,9 @@ function MessageListBase({
   }, [error, messages])
 
   const layoutKey = `${conversationId ?? 'empty'}:${contentWidth}`
-  const tailMeasurementKey = `tail:${streaming || streamFrozen ? 'live' : 'settled'}`
+  const tailMeasurementKey = streaming || streamFrozen
+    ? `tail:live:${snapshot.runId ?? snapshot.messageId ?? 'anonymous'}`
+    : `tail:settled:${error ? contentRevision(error) : 'empty'}`
   const historyMeasurementRevision = useMemo(
     () => historyItems.map(measurementKey).join('|'),
     [historyItems],
@@ -653,9 +656,14 @@ function MessageListBase({
   // a growing live tail row that straddles the viewport top: its new content is
   // appended below the reader and must not pull history downward.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    const shouldAdjust = shouldAdjustChatItemSizeChange(item, {
+      scrollOffset: instance.scrollOffset ?? 0,
+      scrollAdjustments: instance.scrollAdjustments,
+      itemSizeCache: instance.itemSizeCache,
+      scrollDirection: instance.scrollDirection,
+    })
+    if (!shouldAdjust) return false
     const viewportTop = (instance.scrollOffset ?? 0) + instance.scrollAdjustments
-    if (item.start >= viewportTop) return false
-    if (instance.itemSizeCache.has(item.key) && instance.scrollDirection === 'backward') return false
     const liveRowIndex = externalizeLiveRow
       ? historyItems.length
       : historyItems.findIndex((entry) => entry.kind === 'streaming' || entry.kind === 'live-group')
@@ -741,13 +749,16 @@ function MessageListBase({
       // 瞬时跳转，不用 behavior:'smooth'：top 是按目标行**当前**的几何算出来的，而平滑滚动
       // 期间上方的行会被 virtua 重测（估算高度换成实测），目标位置在动画途中就挪走了 ——
       // 距离越远越容易落在错的地方。回到底部按钮不受影响，那个是自己驱动的 rAF，每帧重算目标。
-      el.scrollTop = row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+      followHandle.scrollToOffset(
+        row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop,
+      )
       return
     }
 
     // 当前目标未挂载时交给同一个 virtualizer 估算定位；真实行出现后
     // TanStack 会用测量结果收敛位置，不再需要独立的 revealedStart/scrollHeight 补偿链。
     if (node.targetRenderIndex >= 0 && node.targetRenderIndex < historyItems.length) {
+      followHandle.markLayoutCompensation()
       virtualizer.scrollToIndex(node.targetRenderIndex, { align: 'start', behavior: 'auto' })
     }
   }, [contentEl, followHandle, historyItems.length, updateActiveNavigatorNode, virtualizer])

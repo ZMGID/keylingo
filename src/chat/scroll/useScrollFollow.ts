@@ -50,6 +50,8 @@ export type ScrollFollowHandle = {
   jumpToBottom: () => void
   // 主动脱离跟随（导航跳转到上方消息时用）。
   releaseFollow: () => void
+  // 程序化定位（消息导航）唯一的 scrollTop 写入口，不改变 follow 意图。
+  scrollToOffset: (offset: number) => void
   isFollowing: () => boolean
   markLayoutCompensation: () => void
 }
@@ -195,6 +197,13 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     cancelJumpAnimation()
     dispatch({ type: 'release' })
   }, [cancelJumpAnimation, dispatch])
+
+  const scrollToOffset = useCallback((offset: number) => {
+    cancelJumpAnimation()
+    const viewport = boundViewportRef.current
+    if (!viewport) return
+    applyScrollTop(viewport, offset)
+  }, [applyScrollTop, cancelJumpAnimation])
 
   const jumpToBottom = useCallback(() => {
     const el = boundViewportRef.current
@@ -444,10 +453,11 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       stickToBottom,
       jumpToBottom,
       releaseFollow,
+      scrollToOffset,
       isFollowing: () => stateRef.current.following,
       markLayoutCompensation,
     }),
-    [jumpToBottom, markLayoutCompensation, releaseFollow, stickToBottom],
+    [jumpToBottom, markLayoutCompensation, releaseFollow, scrollToOffset, stickToBottom],
   )
 
   return { handle, following, showJumpButton }

@@ -8,6 +8,7 @@ import {
   saveMeasurementSnapshot,
   sendReserveHeight,
   setCachedRowMeasurement,
+  shouldAdjustChatItemSizeChange,
 } from './messageListVirtualization'
 
 beforeEach(() => clearRowMeasurementCache())
@@ -84,6 +85,44 @@ describe('row measurement cache', () => {
     expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-a')).toHaveLength(1)
     expect(restoreMeasurementSnapshot('c1', 'viewport:960', 'rev-a')).toHaveLength(0)
     expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-b')).toHaveLength(0)
+  })
+})
+
+describe('row resize anchoring', () => {
+  const base = {
+    scrollOffset: 500,
+    scrollAdjustments: 0,
+    itemSizeCache: new Map<string, number>([['measured', 100]]),
+    scrollDirection: null as 'forward' | 'backward' | null,
+  }
+
+  it('adjusts a measured row only when it is entirely above the reading anchor', () => {
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 100, end: 200 },
+      base,
+    )).toBe(true)
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 450, end: 550 },
+      base,
+    )).toBe(false)
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 550, end: 650 },
+      base,
+    )).toBe(false)
+  })
+
+  it('does not compensate a measured row while scrolling backward', () => {
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 100, end: 200 },
+      { ...base, scrollDirection: 'backward' },
+    )).toBe(false)
+  })
+
+  it('compensates an unmeasured row above the anchor once', () => {
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'unmeasured', start: 300, end: 700 },
+      base,
+    )).toBe(true)
   })
 })
 

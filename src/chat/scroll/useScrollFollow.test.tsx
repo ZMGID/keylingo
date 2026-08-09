@@ -18,6 +18,7 @@ function Harness() {
       <output data-testid="show-jump-button">{String(showJumpButton)}</output>
       <button type="button" onClick={handle.jumpToBottom}>jump</button>
       <button type="button" onClick={handle.releaseFollow}>release</button>
+      <button type="button" onClick={() => handle.scrollToOffset(240)}>scroll-offset</button>
       <button type="button" onClick={handle.markLayoutCompensation}>mark-layout</button>
       <div ref={setViewport} data-testid="viewport">
         <div ref={setContent} />
@@ -218,6 +219,15 @@ describe('useScrollFollow scroll source timing', () => {
     }
   })
 
+  it('routes programmatic history navigation through the single scroll writer', () => {
+    const viewport = mount()
+
+    fireEvent.click(screen.getByRole('button', { name: 'scroll-offset' }))
+
+    expect(viewport.scrollTop).toBe(240)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+  })
+
   it('reattaches when the user drags to bottom during a layout compensation ticket', () => {
     const viewport = mount()
 
@@ -230,6 +240,40 @@ describe('useScrollFollow scroll source timing', () => {
     fireEvent.scroll(viewport)
 
     expect(screen.getByTestId('following')).toHaveTextContent('true')
+  })
+
+  it('keeps compensation self-classified when height shrinks or offset shifts at the same height', () => {
+    const viewport = mount()
+    let scrollHeight = 1000
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'mark-layout' }))
+    scrollHeight = 900
+    viewport.scrollTop = 300
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'release' }))
+    fireEvent.click(screen.getByRole('button', { name: 'mark-layout' }))
+    scrollHeight = 900
+    viewport.scrollTop = 320
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+  })
+
+  it('does not self-heal after a near-bottom upward wheel gesture', () => {
+    const viewport = mount()
+    viewport.scrollTop = 495
+    fireEvent.wheel(viewport, { deltaY: -8, deltaX: 0 })
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+
+    act(() => {
+      observers[0].callback([], {} as ResizeObserver)
+    })
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
   })
 
 })
