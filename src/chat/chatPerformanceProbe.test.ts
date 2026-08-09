@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getChatPerfReport,
+  evaluateChatPerfReport,
   onChatPerfProfiler,
   recordChatPerfLongTask,
   recordChatPerfSample,
   resetChatPerfProbeForTests,
+  summarizeChatPerfReport,
 } from './chatPerformanceProbe'
 
 describe('chat performance browser report', () => {
@@ -81,5 +83,25 @@ describe('chat performance browser report', () => {
       commits: 1,
       actualMs: 4,
     })])
+  })
+
+  it('summarizes and evaluates exported guardrails', () => {
+    const perfGlobal = globalThis as { __KIVIO_CHAT_PERF__?: boolean }
+    perfGlobal.__KIVIO_CHAT_PERF__ = true
+    recordChatPerfSample({ name: 'message-list-window', durationMs: 20, mountedRows: 12, domNodes: 300 })
+    recordChatPerfLongTask({ durationMs: 80, startTime: 10 })
+
+    const report = getChatPerfReport()
+    expect(summarizeChatPerfReport(report)).toMatchObject({
+      maxMountedRows: 12,
+      maxDomNodes: 300,
+      maxLongTaskMs: 80,
+    })
+    expect(evaluateChatPerfReport(report, {
+      maxMountedRows: 16,
+      maxDomNodes: 400,
+      maxLongTaskMs: 100,
+    })).toEqual([])
+    expect(evaluateChatPerfReport(report, { maxMountedRows: 8 })).toEqual(['mountedRows 12 > 8'])
   })
 })

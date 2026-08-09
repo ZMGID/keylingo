@@ -22,9 +22,58 @@ export type ChatPerfWindowSample = {
 export type ChatPerfReport = {
   capturedAt: string
   enabled: boolean
+  longTaskSupport: 'unknown' | 'supported' | 'unsupported'
   buckets: Array<ProbeBucket & { name: string; phase: string; detail: string }>
   samples: ChatPerfWindowSample[]
   longTasks: Array<{ durationMs: number; startTime: number }>
+}
+
+export type ChatPerfReportSummary = {
+  maxMountedRows: number
+  maxDomNodes: number
+  maxSampleDurationMs: number
+  maxLongTaskMs: number
+  totalProfilerCommits: number
+  totalProfilerActualMs: number
+}
+
+export type ChatPerfReportBudget = {
+  maxMountedRows?: number
+  maxDomNodes?: number
+  maxSampleDurationMs?: number
+  maxLongTaskMs?: number
+}
+
+export function summarizeChatPerfReport(report: ChatPerfReport): ChatPerfReportSummary {
+  return {
+    maxMountedRows: report.samples.reduce((max, sample) => Math.max(max, sample.mountedRows), 0),
+    maxDomNodes: report.samples.reduce((max, sample) => Math.max(max, sample.domNodes), 0),
+    maxSampleDurationMs: report.samples.reduce((max, sample) => Math.max(max, sample.durationMs), 0),
+    maxLongTaskMs: report.longTasks.reduce((max, task) => Math.max(max, task.durationMs), 0),
+    totalProfilerCommits: report.buckets.reduce((sum, bucket) => sum + bucket.commits, 0),
+    totalProfilerActualMs: report.buckets.reduce((sum, bucket) => sum + bucket.actualMs, 0),
+  }
+}
+
+export function evaluateChatPerfReport(
+  report: ChatPerfReport,
+  budget: ChatPerfReportBudget,
+): string[] {
+  const summary = summarizeChatPerfReport(report)
+  const violations: string[] = []
+  if (budget.maxMountedRows !== undefined && summary.maxMountedRows > budget.maxMountedRows) {
+    violations.push(`mountedRows ${summary.maxMountedRows} > ${budget.maxMountedRows}`)
+  }
+  if (budget.maxDomNodes !== undefined && summary.maxDomNodes > budget.maxDomNodes) {
+    violations.push(`domNodes ${summary.maxDomNodes} > ${budget.maxDomNodes}`)
+  }
+  if (budget.maxSampleDurationMs !== undefined && summary.maxSampleDurationMs > budget.maxSampleDurationMs) {
+    violations.push(`sampleDurationMs ${summary.maxSampleDurationMs} > ${budget.maxSampleDurationMs}`)
+  }
+  if (budget.maxLongTaskMs !== undefined && summary.maxLongTaskMs > budget.maxLongTaskMs) {
+    violations.push(`longTaskMs ${summary.maxLongTaskMs} > ${budget.maxLongTaskMs}`)
+  }
+  return violations
 }
 
 const windowSamples: ChatPerfWindowSample[] = []
@@ -32,6 +81,7 @@ const reportSamples: ChatPerfWindowSample[] = []
 const longTaskSamples: Array<{ durationMs: number; startTime: number }> = []
 const buckets = new Map<string, ProbeBucket>()
 const reportBuckets = new Map<string, ProbeBucket>()
+let longTaskSupport: ChatPerfReport['longTaskSupport'] = 'unknown'
 let flushTimer: number | null = null
 let enabledCache: boolean | null = null
 
@@ -97,6 +147,7 @@ export function getChatPerfReport(): ChatPerfReport {
   return {
     capturedAt: new Date().toISOString(),
     enabled: probeEnabled(),
+    longTaskSupport,
     buckets: [...reportBuckets.entries()].map(([name, bucket]) => ({
       name,
       ...bucket,
@@ -157,6 +208,7 @@ export function resetChatPerfProbeForTests(): void {
   windowSamples.length = 0
   reportSamples.length = 0
   longTaskSamples.length = 0
+  longTaskSupport = 'unknown'
   flushTimer = null
   enabledCache = null
 }
@@ -218,7 +270,11 @@ export function useChatPerfRenderProbe(name: string, detail?: unknown) {
 
 export function useChatPerfLongTaskProbe() {
   useEffect(() => {
-    if (!probeEnabled() || typeof PerformanceObserver === 'undefined') return
+    if (!probeEnabled()) return
+    if (typeof PerformanceObserver === 'undefined') {
+      longTaskSupport = 'unsupported'
+      return
+    }
     let observer: PerformanceObserver | null = null
     try {
       observer = new PerformanceObserver((list) => {
@@ -232,8 +288,10 @@ export function useChatPerfLongTaskProbe() {
         }
       })
       observer.observe({ entryTypes: ['longtask'] })
+      longTaskSupport = 'supported'
     } catch {
       // Safari/WebKit may not expose the longtask entry type.
+      longTaskSupport = 'unsupported'
     }
     return () => observer?.disconnect()
   }, [])

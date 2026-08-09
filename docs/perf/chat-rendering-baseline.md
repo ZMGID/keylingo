@@ -22,6 +22,10 @@ viewport width with the four `chat.performance.*` flags enabled and disabled one
 at a time. In DevTools, run
 `window.__KIVIO_CHAT_PERF_REPORT__()` to export the current JSON report; run
 `window.__KIVIO_CHAT_PERF_RESET__()` before each fixture.
+Save that object as `report.json`, then run
+`npm run probe:chat-performance -- report.json` for a repeatable guardrail
+check. The default guardrails are intentionally broad until target-device
+baselines are recorded; they are architecture checks, not product SLAs.
 
 The fixture unit tests validate shape and size; browser-level numbers remain
 environment-specific and should be recorded on the same machine and window size.
