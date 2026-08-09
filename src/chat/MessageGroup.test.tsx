@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageGroup } from './MessageGroup'
