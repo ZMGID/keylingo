@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+
 
 import {
   createFollowState,
@@ -6,9 +7,9 @@ import {
   type FollowConfig,
   type FollowEvent,
   type FollowState,
-  isDominantVerticalWheel,
   reduceFollowEvent,
 } from './scrollFollowCore'
+
 
 // 低于此高度元素无法有效滚动；其上的 wheel/touch 不应改变跟随状态。
 const SCROLLABLE_OVERFLOW_MIN_PX = 4
@@ -70,6 +71,12 @@ export type UseScrollFollowArgs = {
   enabled?: boolean
   trackKeys?: boolean
   config?: Partial<FollowConfig>
+  /**
+   * 流式内容指纹。ResizeObserver 是主路径；外置 live row / jsdom stub 等 RO
+   * 不投递时，跟随时若 scrollHeight 真变了，靠这个信号补 contentGrowth。
+   * 高度没变则 no-op，避免和 RO 双通道每 token 互写。
+   */
+  growthSignal?: string | number | null
 }
 
 export function useScrollFollow(args: UseScrollFollowArgs): {
@@ -77,7 +84,15 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   following: boolean
   showJumpButton: boolean
 } {
-  const { viewport, content = null, listenerRoot = null, enabled = true, trackKeys = false } = args
+  const {
+    viewport,
+    content = null,
+    listenerRoot = null,
+    enabled = true,
+    trackKeys = false,
+    growthSignal = null,
+  } = args
+
 
   const stateRef = useRef<FollowState>(createFollowState())
   const boundViewportRef = useRef<HTMLElement | null>(null)
@@ -378,6 +393,21 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       geometrySampledRef.current = false
     }
   }, [content, dispatch, enabled, listenerRoot, markLayoutCompensation, pinToBottom, trackKeys, viewport])
+
+  // RO 主路径之外的补钉：仅当跟随中且 scrollHeight 真的变了。
+  useLayoutEffect(() => {
+    if (!enabled || !viewport || growthSignal == null) return
+    if (!stateRef.current.following) return
+    const nextHeight = viewport.scrollHeight
+    const prevHeight = lastScrollHeightRef.current
+    if (prevHeight != null && nextHeight === prevHeight) return
+    markLayoutCompensation()
+    const gap = Math.max(0, nextHeight - viewport.scrollTop - viewport.clientHeight)
+    dispatch({ type: 'contentGrowth', gap })
+    lastScrollHeightRef.current = nextHeight
+    lastScrollTopRef.current = viewport.scrollTop
+  }, [dispatch, enabled, growthSignal, markLayoutCompensation, viewport])
+
 
   const handle = useMemo<ScrollFollowHandle>(
     () => ({

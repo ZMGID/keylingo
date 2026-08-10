@@ -459,15 +459,18 @@ function MessageListBase({
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
   >(null)
 
-  // 底部跟随：对齐 LiveAgent —— ResizeObserver contentGrowth 是流式钉底驱动；
-  // TanStack `anchorTo: 'end'` 在贴底时按 total-size delta 补偿。不要在每个
-  // streaming snapshot 上再 stickToBottom：那会和 end-anchor / RO 互写 scrollTop，
-  // 生成中内容整段「往下闪」。
+  // 底部跟随：ResizeObserver contentGrowth 是流式钉底主路径；growthSignal 仅在
+  // scrollHeight 真变且 RO 未投递时补一枪。不要无条件 stickToBottom 每 token 钉底。
+  const streamGrowthSignal = streaming || streamFrozen
+    ? `${streamingContent.length}:${streamingReasoning.length}:${streamingToolCalls.length}:${streamingSegments.length}`
+    : null
   const { handle: followHandle, showJumpButton } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
     trackKeys: true,
+    growthSignal: streamGrowthSignal,
   })
+
 
   const legacyPlanMessageId = useMemo(() => {
     const legacyPlan = agentPlanState?.plan?.trim()

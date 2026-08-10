@@ -746,8 +746,10 @@ function MarkdownPre({ children }: { children?: ReactNode }) {
   return <DeferredCodeBlock code={codeChildrenToString(children)} language="" />
 }
 
-const markdownComponents: Components = {
+// streamdown Components 的 pre 签名在版本间不完全一致；功能组件只消费 children。
+const markdownComponents = {
   pre: MarkdownPre,
+
   // 表格：**每个单元格一个独立圆角块**，横竖都靠 border-spacing 的空隙分隔。
   // **没有任何边框线**，别加 border，也别给容器加外框。
   table: ({ children }) => (
@@ -777,7 +779,8 @@ const markdownComponents: Components = {
     </td>
   ),
   a: ({ href, children }) => <LinkAnchor href={typeof href === 'string' ? href : ''}>{children}</LinkAnchor>,
-}
+} as Components
+
 
 function LinkAnchor({
   href,
@@ -1017,6 +1020,22 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
       : build().normalized
   }, [content, useCache])
 
+  // Streamdown streaming 模式对「非前缀扩展」的整段替换可能卡住旧块（如 frame 0→frame 1）。
+  // 真实流式几乎总是前缀增长；一旦不是，换 key 强制重挂，避免 DOM 停在旧正文。
+  const streamEpochRef = useRef(0)
+  const prevStreamContentRef = useRef(content)
+  if (streaming) {
+    const prev = prevStreamContentRef.current
+    if (prev && content !== prev && !content.startsWith(prev)) {
+      streamEpochRef.current += 1
+
+    }
+    prevStreamContentRef.current = content
+  } else {
+    prevStreamContentRef.current = content
+  }
+  const streamEpoch = streamEpochRef.current
+
   // 对齐 LiveAgent Markdown：
   // - 流式消息固定走 Streamdown streaming 模式（块级 memo + parseIncomplete），
   //   不要在每个 token 上整篇 static 重解析——那会放大行高抖动。
@@ -1024,6 +1043,7 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
   // - 模式只由 streaming 上下文决定；settled 后才切 static，避免中途整树重挂。
   return (
     <Streamdown
+      key={streaming ? `stream-${streamEpoch}` : 'static'}
       mode={streaming ? 'streaming' : 'static'}
       dir="auto"
       parseIncompleteMarkdown
@@ -1046,6 +1066,7 @@ const FullSettledMarkdown = memo(function FullSettledMarkdown({
     </Streamdown>
   )
 })
+
 
 function ChatMarkdownComponent({
   content,
