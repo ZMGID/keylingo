@@ -379,6 +379,8 @@ pub struct Attachment {
 pub enum AgentRuntimeKind {
     #[default]
     Builtin,
+    /// Built-in conversational runtime: research tools only (search/fetch/KB/read-only MCP).
+    Chat,
     External,
 }
 
@@ -418,6 +420,14 @@ impl AgentRuntimeConfig {
                 .external_agent_id
                 .as_ref()
                 .is_some_and(|id| !id.trim().is_empty())
+    }
+
+    pub fn is_chat(&self) -> bool {
+        self.kind == AgentRuntimeKind::Chat
+    }
+
+    pub fn is_builtin_agent(&self) -> bool {
+        self.kind == AgentRuntimeKind::Builtin
     }
 }
 

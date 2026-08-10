@@ -374,8 +374,10 @@ fn check_runtime_switch_allowed(
                 .map(|d| d.name.to_string())
                 .or_else(|| normalize_id(&current.external_agent_id))
                 .unwrap_or_else(|| "当前 CLI".to_string())
+        } else if current.is_chat() {
+            "Kivio Chat".to_string()
         } else {
-            "内置 Agent".to_string()
+            "Kivio Agent".to_string()
         };
         return Err(format!("会话已绑定 {bound_name}，新建会话可切换 Agent"));
     }

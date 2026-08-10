@@ -71,6 +71,7 @@ describe('InputBar 底栏模式胶囊', () => {
     expect(items[0]).toHaveAttribute('aria-checked', 'true')
   })
 
+
   it('本地 CLI 会话显示该 CLI 的档位，点选回传档位 id', () => {
     const runtime: AgentRuntimeConfig = {
       kind: 'external',

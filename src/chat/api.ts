@@ -89,12 +89,23 @@ export const BUILTIN_AGENT_RUNTIME: AgentRuntimeConfig = {
   externalSandbox: null,
 }
 
+export const CHAT_AGENT_RUNTIME: AgentRuntimeConfig = {
+  kind: 'chat',
+  externalAgentId: null,
+  externalModel: null,
+  externalReasoning: null,
+  externalSandbox: null,
+}
+
 export function normalizeAgentRuntime(
   conversation?: Conversation | null,
 ): AgentRuntimeConfig {
   const raw = conversation?.agent_runtime ?? conversation?.agentRuntime
   if (!raw || raw.kind === 'builtin') {
     return { ...BUILTIN_AGENT_RUNTIME }
+  }
+  if (raw.kind === 'chat') {
+    return { ...CHAT_AGENT_RUNTIME }
   }
   return {
     kind: 'external',
@@ -109,12 +120,13 @@ export function agentRuntimesEqual(
   left: AgentRuntimeConfig,
   right: AgentRuntimeConfig,
 ): boolean {
-  const a = left.kind === 'external'
-    ? left
-    : BUILTIN_AGENT_RUNTIME
-  const b = right.kind === 'external'
-    ? right
-    : BUILTIN_AGENT_RUNTIME
+  const normalize = (value: AgentRuntimeConfig): AgentRuntimeConfig => {
+    if (value.kind === 'external') return value
+    if (value.kind === 'chat') return CHAT_AGENT_RUNTIME
+    return BUILTIN_AGENT_RUNTIME
+  }
+  const a = normalize(left)
+  const b = normalize(right)
   return a.kind === b.kind
     && (a.externalAgentId ?? null) === (b.externalAgentId ?? null)
     && (a.externalModel ?? 'default') === (b.externalModel ?? 'default')

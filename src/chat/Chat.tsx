@@ -1369,8 +1369,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [currentConversation, draftAgentRuntime],
   )
   const usesExternalRuntime = activeAgentRuntime.kind === 'external' && !!activeAgentRuntime.externalAgentId
-  // 底栏模式胶囊的档位表：内置会话 = Kivio 的 Act/Plan/Orchestrate；本地 CLI 会话 = 该 CLI
-  // 自己的沙盒/权限档位（Kivio 三档对外部 CLI 不生效）。CLI 没有档位时返回空表 → 胶囊隐藏。
+  // 底栏模式胶囊：内置 Agent = Act/Plan/Orchestrate；Kivio Chat 无此胶囊；本地 CLI = 沙盒档位。
+  // CLI 没有档位时返回空表 → 胶囊隐藏。
   const detectedExternalAgents = useDetectedExternalAgents(currentConversation?.id ?? null)
   const activeAgentPlanMode = currentConversation?.agent_plan_state?.mode
     ?? currentConversation?.agentPlanState?.mode
@@ -3838,7 +3838,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     await handleRuntimeChange(next)
   }, [activeAgentRuntime, handleRuntimeChange])
 
-  // 底栏胶囊选档：本地 CLI 会话写该 CLI 的沙盒档位，内置会话写 Kivio 的 Act/Plan/Orchestrate。
+  // 底栏胶囊选档：本地 CLI 写沙盒档位；内置 Agent 写 Act/Plan/Orchestrate；Chat 运行时无胶囊。
   const handleComposerModeChange = useCallback(async (value: string) => {
     if (usesExternalRuntime) {
       await handleExternalSandboxChange(value)

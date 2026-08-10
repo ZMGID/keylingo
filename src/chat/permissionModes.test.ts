@@ -3,6 +3,7 @@ import { derivePermissionModes } from './permissionModes'
 import type { AgentRuntimeConfig, DetectedExternalAgent } from './types'
 
 const builtinRuntime: AgentRuntimeConfig = { kind: 'builtin' }
+const chatRuntime: AgentRuntimeConfig = { kind: 'chat' }
 
 function externalRuntime(id: string, sandbox?: string | null): AgentRuntimeConfig {
   return { kind: 'external', externalAgentId: id, externalSandbox: sandbox ?? null }
@@ -95,7 +96,7 @@ describe('derivePermissionModes（底栏模式胶囊）', () => {
     }).current).toBe('plan')
   })
 
-  it('内置模型会话给 Kivio 三档', () => {
+  it('内置 Agent 会话给 Kivio 三档', () => {
     const { options, current } = derivePermissionModes({
       target: 'composer',
       agentRuntime: builtinRuntime,
@@ -113,6 +114,15 @@ describe('derivePermissionModes（底栏模式胶囊）', () => {
       agentRuntime: builtinRuntime,
       agentPlanMode: null,
     }).current).toBe('act')
+  })
+
+  it('Kivio Chat 运行时底栏无 Act/Plan/Orchestrate（独立 runtime）', () => {
+    expect(derivePermissionModes({
+      target: 'composer',
+      agentRuntime: chatRuntime,
+      agents,
+      agentPlanMode: 'act',
+    }).options).toEqual([])
   })
 })
 
@@ -146,5 +156,12 @@ describe('derivePermissionModes（顶栏权限按钮）', () => {
         agents,
       }).options).toEqual([])
     }
+  })
+
+  it('Kivio Chat 顶栏也无档位表', () => {
+    expect(derivePermissionModes({
+      target: 'titlebar',
+      agentRuntime: chatRuntime,
+    }).options).toEqual([])
   })
 })

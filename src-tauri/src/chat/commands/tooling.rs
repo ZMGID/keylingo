@@ -169,6 +169,65 @@ pub(super) fn apply_agent_plan_tool_filter(
     blocked
 }
 
+/// Chat mode: conversational research tools only — gated by `ChatModeConfig` toggles.
+/// Blocks local fs mutation, shell, sub-agents, skills, todos, and write-capable MCP.
+pub(super) fn apply_chat_mode_tool_filter(
+    tools: &mut Vec<ChatToolDefinition>,
+    chat_mode: bool,
+    config: &crate::settings::ChatModeConfig,
+) -> Vec<ChatToolDefinition> {
+    if !chat_mode {
+        return Vec::new();
+    }
+    let mut blocked = Vec::new();
+    tools.retain(|tool| {
+        let allowed = chat_mode_allows_tool(tool, config);
+        if !allowed {
+            blocked.push(tool.clone());
+        }
+        allowed
+    });
+    blocked
+}
+
+fn chat_mode_allows_tool(
+    tool: &ChatToolDefinition,
+    config: &crate::settings::ChatModeConfig,
+) -> bool {
+    if tool.source == "native" && crate::chat::ask_user::is_ask_user_tool_name(&tool.name) {
+        return true;
+    }
+    if tool.source == "mcp" {
+        return config.mcp_read_only && tool.is_read_only_tool();
+    }
+    if tool.source != "native" {
+        return false;
+    }
+    match tool.name.as_str() {
+        "web_search" | "search_web" => config.web_search,
+        "web_fetch" => config.web_fetch,
+        "knowledge_search" => config.knowledge_search,
+        "memory_read" | "memory_search" => config.memory_tools,
+        _ => false,
+    }
+}
+
+fn agent_plan_allows_tool(tool: &ChatToolDefinition) -> bool {
+    if tool.source == "native" && crate::chat::ask_user::is_ask_user_tool_name(&tool.name) {
+        return true;
+    }
+    if tool.source == "native" && crate::chat::todo::is_agent_todo_tool_name(&tool.name) {
+        return true;
+    }
+    if tool.source == "native" {
+        return tool.is_read_only_tool();
+    }
+    if tool.source == "mcp" {
+        return tool.is_read_only_tool();
+    }
+    tool.source == "skill" && tool.name == "skill"
+}
+
 /// 会话级三态联网搜索（任务 07-23）：按有效模式收敛第三方 `search_web` 工具的暴露。
 /// - `ThirdParty`：保证 `search_web` 存在（列表因全局开关缺席时，若已配置搜索 key 则补回）。
 /// - `Builtin` / `Off`：移除 `search_web`（内置走请求体注入，Off 完全不联网）。
@@ -192,22 +251,6 @@ pub(super) fn apply_web_search_mode_tool_filter(
             tools.retain(|t| t.id != SEARCH_WEB_ID);
         }
     }
-}
-
-fn agent_plan_allows_tool(tool: &ChatToolDefinition) -> bool {
-    if tool.source == "native" && crate::chat::ask_user::is_ask_user_tool_name(&tool.name) {
-        return true;
-    }
-    if tool.source == "native" && crate::chat::todo::is_agent_todo_tool_name(&tool.name) {
-        return true;
-    }
-    if tool.source == "native" {
-        return tool.is_read_only_tool();
-    }
-    if tool.source == "mcp" {
-        return tool.is_read_only_tool();
-    }
-    tool.source == "skill" && tool.name == "skill"
 }
 
 pub(super) fn apply_inline_code_request_tool_filter(

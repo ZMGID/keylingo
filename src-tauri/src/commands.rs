@@ -72,7 +72,9 @@ pub(crate) fn get_default_prompt_templates() -> serde_json::Value {
       "chatPrompts": {
         "zh": default_chat_system_prompt(false),
         "en": default_chat_system_prompt(false)
-      }
+      },
+      // Single English source — same string the Chat runtime injects when system_prompt is empty.
+      "chatRuntimePrompt": crate::chat::plan::chat_runtime_prompt()
     })
 }
 

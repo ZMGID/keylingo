@@ -342,6 +342,30 @@ export const i18n = {
     mixerFollowChatModel: 'auto（跟随主对话模型）',
     mixerAdvisorOff: '不启用',
     chatToolsSection: '工具与扩展',
+    kivioAgentSection: 'Kivio Agent',
+    kivioAgentSectionHint: '完整智能体：可读写文件、执行命令、派 Subagent',
+    kivioChatSection: 'Kivio Chat',
+    kivioChatSectionHint: '对话模式：联网 / 拉网页 / 知识库 / 只读 MCP',
+    kivioChatSystemPrompt: 'Chat 系统提示词',
+    kivioChatSystemPromptHint: '空则使用内置 Chat runtime 提示词',
+    kivioChatTools: 'Chat 可用能力',
+    kivioChatWebSearch: '联网搜索',
+    kivioChatWebSearchHint: '允许 Chat 调用搜索工具（仍受会话联网模式约束）',
+
+    kivioChatWebFetch: '读取网页',
+    kivioChatWebFetchHint: '按 URL 拉取页面正文',
+
+    kivioChatKnowledge: '知识库检索',
+    kivioChatKnowledgeHint: '会话挂载知识库时可用',
+
+    kivioChatMemory: '记忆只读',
+    kivioChatMemoryHint: 'memory_read / memory_search，不可改写记忆',
+
+    kivioChatMcpReadonly: '只读 MCP',
+    kivioChatMcpReadonlyHint: '仅暴露标注为只读的 MCP 工具',
+
+    kivioChatAgentSystemPrompt: 'Agent 系统提示词',
+
     chatOpenMcp: 'MCP 设置',
     chatOpenSkill: 'Skill 设置',
     chatOpenProviders: '模型供应商',
@@ -1109,6 +1133,7 @@ export const i18n = {
     chatRuntimeAuto: '自动',
     chatRuntimeLocalCli: '本地 CLI',
     chatRuntimeBoundHint: '会话已绑定当前 Agent，新建会话可切换',
+    chatRuntimeBoundShort: '已绑定，新建可切换',
     chatRuntimeAgent: '代理',
     chatRuntimeRefresh: '刷新本机 CLI',
     chatRuntimeDetecting: '正在检测本机 CLI…',
@@ -1854,6 +1879,30 @@ export const i18n = {
     mixerFollowChatModel: 'auto (follow chat model)',
     mixerAdvisorOff: 'Off',
     chatToolsSection: 'Tools & extensions',
+    kivioAgentSection: 'Kivio Agent',
+    kivioAgentSectionHint: 'Full agent: files, shell, sub-agents',
+    kivioChatSection: 'Kivio Chat',
+    kivioChatSectionHint: 'Chat mode: search / fetch / knowledge / read-only MCP',
+    kivioChatSystemPrompt: 'Chat system prompt',
+    kivioChatSystemPromptHint: 'Empty uses the built-in Chat runtime prompt',
+    kivioChatTools: 'Chat capabilities',
+    kivioChatWebSearch: 'Web search',
+    kivioChatWebSearchHint: 'Allow Chat to use search (still gated by session web-search mode)',
+
+    kivioChatWebFetch: 'Web fetch',
+    kivioChatWebFetchHint: 'Fetch page content by URL',
+
+    kivioChatKnowledge: 'Knowledge search',
+    kivioChatKnowledgeHint: 'Available when libraries are mounted on the chat',
+
+    kivioChatMemory: 'Memory (read-only)',
+    kivioChatMemoryHint: 'memory_read / memory_search only',
+
+    kivioChatMcpReadonly: 'Read-only MCP',
+    kivioChatMcpReadonlyHint: 'Only MCP tools marked read-only',
+
+    kivioChatAgentSystemPrompt: 'Agent system prompt',
+
     chatOpenMcp: 'MCP settings',
     chatOpenSkill: 'Skill settings',
     chatOpenProviders: 'Model providers',
@@ -2622,6 +2671,7 @@ export const i18n = {
     chatRuntimeAuto: 'Auto',
     chatRuntimeLocalCli: 'Local CLI',
     chatRuntimeBoundHint: 'This chat is bound to its agent — start a new chat to switch',
+    chatRuntimeBoundShort: 'Bound · new chat to switch',
     chatRuntimeAgent: 'Agent',
     chatRuntimeRefresh: 'Rescan local CLIs',
     chatRuntimeDetecting: 'Scanning for local CLIs…',

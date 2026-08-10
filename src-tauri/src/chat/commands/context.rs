@@ -27,8 +27,8 @@ use super::catalog::{
 use super::sanitization::{sanitize_api_message_for_model, sanitize_image_payloads_for_model};
 use super::{
     append_agent_ask_user_tools, append_agent_todo_tools, apply_agent_plan_tool_filter,
-    apply_inline_code_request_tool_filter, image_content_part, list_tools_for_chat,
-    resolve_forced_skill_id,
+    apply_chat_mode_tool_filter, apply_inline_code_request_tool_filter, image_content_part,
+    list_tools_for_chat, resolve_forced_skill_id,
 };
 use crate::chat::vision::auxiliary_vision_model_for_images;
 
@@ -687,8 +687,13 @@ pub(super) async fn compute_context_state(
         tools.push(crate::mcp::types::native_save_assistant_tool());
     }
     apply_inline_code_request_tool_filter(&mut tools, last_user_api_content);
-    let plan_mode = crate::chat::plan::is_plan_mode(&conversation.agent_plan_state);
-    apply_agent_plan_tool_filter(&mut tools, plan_mode);
+    let chat_mode = conversation.agent_runtime.is_chat();
+    let plan_mode = !chat_mode && crate::chat::plan::is_plan_mode(&conversation.agent_plan_state);
+    if chat_mode {
+        apply_chat_mode_tool_filter(&mut tools, true, &settings.chat.chat_mode);
+    } else {
+        apply_agent_plan_tool_filter(&mut tools, plan_mode);
+    }
     let user_tools_available = tools_capable && !tools.is_empty();
     agent_prepare::apply_skill_fallback_when_tools_unavailable(
         &mut effective_chat_tools,
@@ -696,7 +701,11 @@ pub(super) async fn compute_context_state(
         user_tools_available,
     );
     let ask_user_tools_available = append_agent_ask_user_tools(&mut tools);
-    let todo_tools_available = append_agent_todo_tools(&mut tools);
+    let todo_tools_available = if chat_mode {
+        false
+    } else {
+        append_agent_todo_tools(&mut tools)
+    };
     let runtime_tools_available = !tools.is_empty();
     let available_builtin_tools = agent_prepare::available_builtin_tool_names(&tools);
 

@@ -9,12 +9,24 @@ pub fn mode_from_str(value: &str) -> Result<AgentPlanMode, String> {
     }
 }
 
+
 pub fn is_plan_mode(state: &AgentPlanState) -> bool {
     state.mode == AgentPlanMode::Plan
 }
 
 pub fn is_orchestrate_mode(state: &AgentPlanState) -> bool {
     state.mode == AgentPlanMode::Orchestrate
+}
+
+/// System-prompt section for the dedicated Kivio Chat runtime (not an agent plan mode).
+/// Kept in English like other internal runtime sections (`format_prompt` Act/Plan/Orchestrate).
+pub fn chat_runtime_prompt() -> String {
+    "Chat runtime (internal runtime mode): this conversation uses Kivio Chat, not the full agent. You are a conversational assistant with light research tools only. Prefer clear, direct answers. You may use web search, web_fetch, knowledge_search, ask_user, memory_read/memory_search, and read-only MCP tools when they improve factual accuracy or cite the user's knowledge bases. Do not edit files, run shell commands, spawn sub-agents, activate skills that mutate the workspace, modify memory, or claim to have performed side-effecting work. If the user needs implementation, multi-file changes, or terminal work, say they should switch to Kivio Agent (Act / Plan / Orchestrate). When you use knowledge_search, cite sources with [n] markers.".to_string()
+}
+
+/// Same text for all languages — settings preview and runtime share one English source.
+pub fn chat_runtime_prompt_for_lang(_language: &str) -> String {
+    chat_runtime_prompt()
 }
 
 pub fn with_mode(current: &AgentPlanState, mode: AgentPlanMode) -> AgentPlanState {
@@ -292,6 +304,8 @@ mod tests {
         assert!(mode_from_str("bogus").is_err());
     }
 
+
+
     #[test]
     fn is_orchestrate_mode_detects_mode() {
         let mut state = AgentPlanState::default();
@@ -308,5 +322,14 @@ mod tests {
         let en = format_prompt(&state);
         assert!(en.contains("orchestrate mode"));
         assert!(en.contains("sub-agents"));
+    }
+
+
+    #[test]
+    fn chat_runtime_prompt_mentions_research_tools() {
+        let en = chat_runtime_prompt();
+        assert!(en.contains("Chat runtime"));
+        assert!(en.contains("knowledge_search"));
+        assert!(en.contains("read-only MCP"));
     }
 }

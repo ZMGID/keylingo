@@ -11,6 +11,31 @@ import './runtimePicker.css'
 
 const KIVIO_LOGO_SRC = '/logo-mark.png'
 
+/** Same brand mark as Agent; `variant` only changes color treatment so the shape stays identical. */
+function KivioMark({
+  size = 20,
+  variant = 'agent',
+}: {
+  size?: number
+  variant?: 'agent' | 'chat'
+}) {
+  return (
+    <img
+      src={KIVIO_LOGO_SRC}
+      alt=""
+      aria-hidden="true"
+      className={
+        variant === 'chat'
+          ? 'kv-runtime-picker__builtin-logo kv-runtime-picker__builtin-logo--chat'
+          : 'kv-runtime-picker__builtin-logo'
+      }
+      width={size}
+      height={size}
+      draggable={false}
+    />
+  )
+}
+
 interface RuntimePickerProps {
   agentRuntime: AgentRuntimeConfig
   onRuntimeChange: (runtime: AgentRuntimeConfig) => void
@@ -22,6 +47,13 @@ interface RuntimePickerProps {
 
 const BUILTIN: AgentRuntimeConfig = {
   kind: 'builtin',
+  externalAgentId: null,
+  externalModel: null,
+  externalReasoning: null,
+}
+
+const CHAT: AgentRuntimeConfig = {
+  kind: 'chat',
   externalAgentId: null,
   externalModel: null,
   externalReasoning: null,
@@ -95,6 +127,8 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
   }, [loadAgents])
 
   const usesExternal = agentRuntime.kind === 'external' && !!agentRuntime.externalAgentId
+  const usesChat = agentRuntime.kind === 'chat'
+  const usesBuiltinAgent = agentRuntime.kind === 'builtin' || (!usesExternal && !usesChat)
   const availableAgents = useMemo(
     // 设置页停用的不出现在这里；已经绑定它的旧会话照常（currentAgent 走的是全量 agents）。
     () => agents.filter((agent) => agent.available && !agent.disabled),
@@ -103,13 +137,20 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
   const currentAgent = agents.find((item) => item.id === agentRuntime.externalAgentId)
 
   const label = useMemo(() => {
-    if (!usesExternal) return 'Kivio Agent'
-    return currentAgent?.name ?? agentRuntime.externalAgentId ?? t.chatRuntimeLocalCli
-  }, [agentRuntime.externalAgentId, currentAgent?.name, t, usesExternal])
+    if (usesExternal) return currentAgent?.name ?? agentRuntime.externalAgentId ?? t.chatRuntimeLocalCli
+    if (usesChat) return 'Kivio Chat'
+    return 'Kivio Agent'
+  }, [agentRuntime.externalAgentId, currentAgent?.name, t, usesChat, usesExternal])
 
   const selectBuiltin = () => {
     if (locked) return
     onRuntimeChange(BUILTIN)
+    setOpen(false)
+  }
+
+  const selectChat = () => {
+    if (locked) return
+    onRuntimeChange(CHAT)
     setOpen(false)
   }
 
@@ -129,8 +170,8 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
         type="button"
         onClick={() => setOpen(!open)}
         className={`kv-runtime-picker__chip${open ? ' is-open' : ''}`}
-        title={label}
-        aria-label={label}
+        title={locked ? `${label} · ${t.chatRuntimeBoundHint}` : label}
+        aria-label={locked ? `${label} · ${t.chatRuntimeBoundHint}` : label}
         aria-haspopup="menu"
         aria-expanded={open}
       >
@@ -140,15 +181,7 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
         {usesExternal && agentRuntime.externalAgentId ? (
           <AgentIcon id={agentRuntime.externalAgentId} size={18} />
         ) : (
-          <img
-            src={KIVIO_LOGO_SRC}
-            alt=""
-            aria-hidden="true"
-            className="kv-runtime-picker__builtin-logo"
-            width={18}
-            height={18}
-            draggable={false}
-          />
+          <KivioMark size={18} variant={usesChat ? 'chat' : 'agent'} />
         )}
       </button>
 
@@ -161,14 +194,14 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
             className="kv-runtime-picker__popover chat-motion-popover"
             role="menu"
           >
-            {locked && (
-              <div className="kv-runtime-picker__locked-hint">
-                {t.chatRuntimeBoundHint}
-              </div>
-            )}
             <div className="kv-runtime-picker__row">
               <div className="kv-runtime-picker__agents-head">
                 <span className="kv-runtime-picker__label">{t.chatRuntimeAgent}</span>
+                {locked && (
+                  <span className="kv-runtime-picker__bound-note" title={t.chatRuntimeBoundHint}>
+                    {t.chatRuntimeBoundShort}
+                  </span>
+                )}
                 <IconButton
                   size="xs"
                   variant="ghost"
@@ -187,21 +220,24 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
                 <button
                   type="button"
                   role="radio"
-                  aria-checked={!usesExternal}
-                  disabled={locked && usesExternal}
+                  aria-checked={usesBuiltinAgent}
+                  disabled={locked && !usesBuiltinAgent}
                   onClick={selectBuiltin}
-                  className={`kv-runtime-picker__agent${!usesExternal ? ' is-active' : ''}`}
+                  className={`kv-runtime-picker__agent${usesBuiltinAgent ? ' is-active' : ''}`}
                 >
-                  <img
-                    src={KIVIO_LOGO_SRC}
-                    alt=""
-                    aria-hidden="true"
-                    className="kv-runtime-picker__builtin-logo"
-                    width={20}
-                    height={20}
-                    draggable={false}
-                  />
+                  <KivioMark size={20} variant="agent" />
                   <span className="kv-runtime-picker__agent-name">Kivio Agent</span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={usesChat}
+                  disabled={locked && !usesChat}
+                  onClick={selectChat}
+                  className={`kv-runtime-picker__agent${usesChat ? ' is-active' : ''}`}
+                >
+                  <KivioMark size={20} variant="chat" />
+                  <span className="kv-runtime-picker__agent-name">Kivio Chat</span>
                 </button>
                 {availableAgents.map((agent) => {
                   const active = usesExternal && agentRuntime.externalAgentId === agent.id

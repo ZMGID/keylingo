@@ -155,7 +155,6 @@ type SlashCommandId =
   | 'settings'
   | 'tools'
   | 'attach'
-
 type LocalSlashCommand = SlashCommandDefinition & { id: SlashCommandId; kind: 'action' }
 
 interface ActiveSlashToken {
@@ -1041,6 +1040,7 @@ export const InputBar = memo(function InputBar({
     setAgentPlanMode,
     closeProjectMenu,
   ])
+
 
   const handleSend = () => {
     const trimmed = input.trim()

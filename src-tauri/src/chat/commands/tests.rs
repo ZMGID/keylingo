@@ -32,7 +32,9 @@ use super::mutations::{apply_regenerate_truncation, build_fork_messages};
 use super::reply_runtime::resolve_reply_arms;
 use super::sanitization::sanitize_image_payloads_for_model;
 use super::title::{build_title_summary_prompt, generate_title, sanitize_generated_title};
-use super::tooling::{should_answer_inline_without_file_write, try_apply_skill_slash_trigger};
+use super::tooling::{
+    apply_chat_mode_tool_filter, should_answer_inline_without_file_write, try_apply_skill_slash_trigger,
+};
 use super::*;
 
 #[test]
@@ -345,6 +347,125 @@ fn agent_plan_tool_filter_is_noop_outside_plan_mode() {
     assert!(tools.iter().any(|tool| tool.name == "bash"));
     assert!(blocked.is_empty());
 }
+
+#[test]
+fn chat_mode_tool_filter_keeps_research_tools_only() {
+    let readonly_mcp_tool = ChatToolDefinition {
+        id: "mcp__docs__search".to_string(),
+        name: "search".to_string(),
+        description: "Search docs".to_string(),
+        source: "mcp".to_string(),
+        server_id: Some("docs".to_string()),
+        server_name: Some("Docs".to_string()),
+        input_schema: serde_json::json!({"type": "object"}),
+        sensitive: false,
+        annotations: Some(serde_json::json!({ "readOnlyHint": true })),
+        output_schema: None,
+    };
+    let write_mcp_tool = ChatToolDefinition {
+        id: "mcp__fs__write".to_string(),
+        name: "write".to_string(),
+        description: "Write file".to_string(),
+        source: "mcp".to_string(),
+        server_id: Some("fs".to_string()),
+        server_name: Some("FS".to_string()),
+        input_schema: serde_json::json!({"type": "object"}),
+        sensitive: true,
+        annotations: Some(serde_json::json!({ "readOnlyHint": false })),
+        output_schema: None,
+    };
+    let mut tools = vec![
+        crate::mcp::types::native_web_search_tool(),
+        crate::mcp::types::native_web_fetch_tool(),
+        crate::mcp::types::native_knowledge_search_tool(),
+        crate::mcp::types::native_read_file_tool(),
+        crate::mcp::types::native_write_file_tool(),
+        crate::mcp::types::native_run_command_tool(),
+        crate::mcp::types::native_memory_read_tool(),
+        crate::mcp::types::native_memory_modify_tool(),
+        crate::mcp::types::native_skill_activate_tool(),
+        crate::chat::ask_user::ask_user_tool(),
+        crate::chat::todo::todo_write_tool(),
+        readonly_mcp_tool,
+        write_mcp_tool,
+    ];
+
+    let blocked = apply_chat_mode_tool_filter(&mut tools, true, &crate::settings::ChatModeConfig::default());
+    let names = tools
+        .iter()
+        .map(|tool| tool.openai_tool_name())
+        .collect::<Vec<_>>();
+    let blocked_names = blocked
+        .iter()
+        .map(|tool| tool.openai_tool_name())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"search_web".to_string()) || names.contains(&"web_search".to_string()));
+    assert!(names.contains(&"web_fetch".to_string()));
+    assert!(names.contains(&"knowledge_search".to_string()));
+    assert!(names.contains(&"memory_read".to_string()));
+    assert!(names.contains(&"ask_user".to_string()));
+    assert!(names.contains(&"mcp__docs__search".to_string()));
+    assert!(!names.contains(&"read".to_string()));
+    assert!(!names.contains(&"write".to_string()));
+    assert!(!names.contains(&"bash".to_string()));
+    assert!(!names.contains(&"todo_write".to_string()));
+    assert!(!names.contains(&"skill".to_string()));
+    assert!(!names.contains(&"memory_modify".to_string()));
+    assert!(!names.contains(&"mcp__fs__write".to_string()));
+    assert!(blocked_names.contains(&"read".to_string()));
+    assert!(blocked_names.contains(&"bash".to_string()));
+}
+
+#[test]
+fn chat_mode_tool_filter_is_noop_when_disabled() {
+    let mut tools = vec![
+        crate::mcp::types::native_read_file_tool(),
+        crate::mcp::types::native_write_file_tool(),
+    ];
+    let blocked = apply_chat_mode_tool_filter(&mut tools, false, &crate::settings::ChatModeConfig::default());
+    assert_eq!(tools.len(), 2);
+    assert!(blocked.is_empty());
+}
+
+#[test]
+fn chat_mode_tool_filter_respects_config_toggles() {
+    let mut config = crate::settings::ChatModeConfig::default();
+    config.web_search = false;
+    config.web_fetch = true;
+    config.knowledge_search = false;
+    config.memory_tools = false;
+    config.mcp_read_only = false;
+    let mut tools = vec![
+        crate::mcp::types::native_web_search_tool(),
+        crate::mcp::types::native_web_fetch_tool(),
+        crate::mcp::types::native_knowledge_search_tool(),
+        crate::mcp::types::native_memory_read_tool(),
+        crate::chat::ask_user::ask_user_tool(),
+    ];
+    let readonly_mcp = ChatToolDefinition {
+        id: "mcp__docs__search".to_string(),
+        name: "search".to_string(),
+        description: "Search".to_string(),
+        source: "mcp".to_string(),
+        server_id: Some("docs".to_string()),
+        server_name: Some("Docs".to_string()),
+        input_schema: serde_json::json!({"type": "object"}),
+        sensitive: false,
+        annotations: Some(serde_json::json!({ "readOnlyHint": true })),
+        output_schema: None,
+    };
+    tools.push(readonly_mcp);
+    apply_chat_mode_tool_filter(&mut tools, true, &config);
+    let names: Vec<_> = tools.iter().map(|t| t.openai_tool_name()).collect();
+    assert!(names.contains(&"web_fetch".to_string()));
+    assert!(names.contains(&"ask_user".to_string()));
+    assert!(!names.iter().any(|n| n == "search_web" || n == "web_search"));
+    assert!(!names.contains(&"knowledge_search".to_string()));
+    assert!(!names.contains(&"memory_read".to_string()));
+    assert!(!names.contains(&"mcp__docs__search".to_string()));
+}
+
 
 #[test]
 fn orchestrate_budget_bump_raises_rounds_but_keeps_unlimited() {

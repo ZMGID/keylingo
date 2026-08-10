@@ -41,8 +41,8 @@ use super::reply_runtime::{ArmReplyOutcome, ChatReplyGuard, ReplyArm};
 use super::resolve_thinking;
 use super::tooling::{
     append_agent_ask_user_tools, append_agent_todo_tools, apply_agent_plan_tool_filter,
-    apply_inline_code_request_tool_filter, apply_web_search_mode_tool_filter, list_tools_for_chat,
-    resolve_forced_skill_id,
+    apply_chat_mode_tool_filter, apply_inline_code_request_tool_filter,
+    apply_web_search_mode_tool_filter, list_tools_for_chat, resolve_forced_skill_id,
 };
 
 pub(super) async fn complete_assistant_reply(
@@ -177,8 +177,11 @@ pub(super) async fn complete_assistant_reply_inner(
     } else {
         1
     };
-    let plan_mode = crate::chat::plan::is_plan_mode(&conversation.agent_plan_state);
-    let orchestrate_mode = crate::chat::plan::is_orchestrate_mode(&conversation.agent_plan_state);
+    let chat_mode = conversation.agent_runtime.is_chat();
+    // Plan/Orchestrate only apply to the full Kivio Agent runtime, not Chat.
+    let plan_mode = !chat_mode && crate::chat::plan::is_plan_mode(&conversation.agent_plan_state);
+    let orchestrate_mode =
+        !chat_mode && crate::chat::plan::is_orchestrate_mode(&conversation.agent_plan_state);
     let direct_image_model =
         !plan_mode && model_can_generate_images_directly(&provider, &resolved_model);
     let run_generation = state.next_chat_generation(&conversation.id);
@@ -410,7 +413,11 @@ pub(super) async fn complete_assistant_reply_inner(
         tools.push(crate::mcp::types::native_save_assistant_tool());
     }
     apply_inline_code_request_tool_filter(&mut tools, last_user_api_content);
-    let blocked_tool_calls = apply_agent_plan_tool_filter(&mut tools, plan_mode);
+    let blocked_tool_calls = if chat_mode {
+        apply_chat_mode_tool_filter(&mut tools, true, &settings.chat.chat_mode)
+    } else {
+        apply_agent_plan_tool_filter(&mut tools, plan_mode)
+    };
     // 会话级三态联网搜索（任务 07-23）：按有效模式收敛第三方 `search_web` 的暴露；
     // 内置搜索走 `config.web_search_mode` → 各适配器请求体注入，不在工具列表里。
     // builder 会话已清空工具（只留 save_assistant），不参与搜索门控。
@@ -426,15 +433,19 @@ pub(super) async fn complete_assistant_reply_inner(
         user_tools_available,
     );
     let ask_user_tools_available = append_agent_ask_user_tools(&mut tools);
-    let todo_tools_available = append_agent_todo_tools(&mut tools);
+    let todo_tools_available = if chat_mode {
+        false
+    } else {
+        append_agent_todo_tools(&mut tools)
+    };
     // Resolved here (rather than further down with the other prompt context) so
     // the sub-agent role registry below can reuse the project root instead of
     // resolving the conversation's project a second time.
     let project_prompt_context = project_prompt_context_for(app, conversation);
     // Multi-agent spawn tool (P3): exposure is mode-controlled. Act and
-    // Orchestrate both expose the `agent` tool; Plan mode excludes it (spawn is a
+    // Orchestrate both expose the `agent` tool; Plan / Chat exclude it (spawn is a
     // side-effecting, non-read-only capability).
-    if !plan_mode && !builder_mode {
+    if !plan_mode && !chat_mode && !builder_mode {
         // Load the role registry (built-in + user + project) so the `agent`
         // tool's schema lists the roles that actually exist for this
         // conversation — the model must not have to guess role names.
@@ -459,7 +470,16 @@ pub(super) async fn complete_assistant_reply_inner(
     let agent_todo_prompt =
         crate::chat::todo::format_prompt(&conversation.agent_todo_state, todo_tools_available);
     let agent_ask_user_prompt = crate::chat::ask_user::format_prompt(ask_user_tools_available);
-    let agent_plan_prompt = crate::chat::plan::format_prompt(&conversation.agent_plan_state);
+    let agent_plan_prompt = if chat_mode {
+        let custom = settings.chat.chat_mode.system_prompt.trim();
+        if custom.is_empty() {
+            crate::chat::plan::chat_runtime_prompt()
+        } else {
+            custom.to_string()
+        }
+    } else {
+        crate::chat::plan::format_prompt(&conversation.agent_plan_state)
+    };
     // Default workbench surfaced to the model. It is an ergonomic default, not
     // a sandbox; explicit user paths continue to take precedence.
     let workbench_dir = crate::chat::storage::resolve_conversation_working_directory(

@@ -608,7 +608,7 @@ pub struct ChatConfig {
     /// 响应语言（"zh"/"en" 等）。空字符串表示跟随 Lens 默认语言，再跟随 target_lang。
     #[serde(default)]
     pub default_language: String,
-    /// 自定义 system prompt；空则使用内置 Chat 模板。
+    /// 自定义 system prompt；空则使用内置 Chat 模板（Kivio Agent 运行时）。
     #[serde(default)]
     pub system_prompt: String,
     /// Chat 侧栏显示的用户名；空则前端使用默认文案。
@@ -623,6 +623,38 @@ pub struct ChatConfig {
     /// 本地 CLI Agent 的用户覆盖，key = agent id（claude/codex/…）。缺省 = 全默认。
     #[serde(default)]
     pub external_cli_agents: std::collections::HashMap<String, ExternalCliAgentConfig>,
+    /// Kivio Chat 运行时专属设置（与 Kivio Agent 的工具/提示词分离）。
+    #[serde(default)]
+    pub chat_mode: ChatModeConfig,
+}
+
+/// Kivio Chat runtime settings — conversational tools + optional custom prompt.
+/// Independent from Agent native-tool toggles (write/shell/skills stay Agent-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatModeConfig {
+    /// Empty → built-in `chat_runtime_prompt()` text.
+    pub system_prompt: String,
+    pub web_search: bool,
+    pub web_fetch: bool,
+    pub knowledge_search: bool,
+    /// `memory_read` / `memory_search` in Chat runtime.
+    pub memory_tools: bool,
+    /// Allow MCP tools that pass `is_read_only_tool()`.
+    pub mcp_read_only: bool,
+}
+
+impl Default for ChatModeConfig {
+    fn default() -> Self {
+        Self {
+            system_prompt: String::new(),
+            web_search: true,
+            web_fetch: true,
+            knowledge_search: true,
+            memory_tools: true,
+            mcp_read_only: true,
+        }
+    }
 }
 
 impl Default for ChatConfig {
@@ -637,6 +669,7 @@ impl Default for ChatConfig {
             user_avatar: String::new(),
             default_agent_runtime: crate::chat::AgentRuntimeConfig::default(),
             external_cli_agents: std::collections::HashMap::new(),
+            chat_mode: ChatModeConfig::default(),
         }
     }
 }

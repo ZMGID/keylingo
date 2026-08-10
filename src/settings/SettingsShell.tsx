@@ -118,6 +118,14 @@ function defaultChatConfig(): NonNullable<SettingsData['chat']> {
       externalModel: null,
       externalReasoning: null,
     },
+    chatMode: {
+      systemPrompt: '',
+      webSearch: true,
+      webFetch: true,
+      knowledgeSearch: true,
+      memoryTools: true,
+      mcpReadOnly: true,
+    },
   }
 }
 
@@ -1573,6 +1581,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const lensDefaults = defaultPrompts?.lensPrompts?.[settings?.lens?.defaultLanguage === 'en' ? 'en' : 'zh']
   const chatLangKey = settings?.chat?.defaultLanguage === 'en' ? 'en' : 'zh'
   const chatDefaults = defaultPrompts?.chatPrompts?.[chatLangKey]
+  const chatRuntimeDefaults = defaultPrompts?.chatRuntimePrompt
   const chatConfig = settings?.chat || defaultChatConfig()
   const chatMemory = settings?.chatMemory || defaultChatMemory()
   const chatSystemPromptValue = chatSystemPromptInteracted
@@ -2013,8 +2022,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 chatTools={chatTools}
                 chatMemory={chatMemory}
                 chatDefaults={chatDefaults}
-                chatSystemPromptValue={chatSystemPromptValue}
-                chatSystemPromptInteracted={chatSystemPromptInteracted}
+                chatRuntimeDefaults={chatRuntimeDefaults}
                 chatFallbackMaxOutputTokens={chatFallbackMaxOutputTokens}
                 effectiveChatMaxOutput={effectiveChatMaxOutput}
                 chatMaxOutputSourceLabel={chatMaxOutputSourceLabel}
@@ -2023,7 +2031,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 nativeBuiltinToolsEnabled={nativeBuiltinToolsEnabled}
                 onUpdateChat={updateChat}
                 onUpdateNativeTools={updateNativeTools}
-                onSystemPromptInteractedChange={setChatSystemPromptInteracted}
                 onNavigateTab={setActiveTab}
               />
             )}

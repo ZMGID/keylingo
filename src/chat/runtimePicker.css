@@ -60,6 +60,21 @@
   filter: invert(1);
 }
 
+/*
+ * Kivio Chat 仍用同一 logo-mark 外形，只做颜色处理：
+ * - Agent：默认黑/白 mark
+ * - Chat：染成品牌天蓝（shape 不变，色相变化）
+ */
+.kv-runtime-picker__builtin-logo.kv-runtime-picker__builtin-logo--chat {
+  /* black mark → sky blue; same silhouette as Agent */
+  filter: invert(48%) sepia(92%) saturate(1800%) hue-rotate(170deg) brightness(0.95) contrast(0.95);
+}
+
+.dark .kv-runtime-picker__builtin-logo.kv-runtime-picker__builtin-logo--chat {
+  /* start from original black mark (override invert(1)), recolor to light sky */
+  filter: invert(70%) sepia(60%) saturate(1200%) hue-rotate(170deg) brightness(1.15) contrast(0.95);
+}
+
 .kv-runtime-picker__popover {
   position: absolute;
   top: calc(100% + 8px);
@@ -100,8 +115,32 @@
 .kv-runtime-picker__agents-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
+}
+
+.kv-runtime-picker__agents-head .kv-runtime-picker__label {
+  flex: 0 0 auto;
+}
+
+.kv-runtime-picker__bound-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgb(163 163 163);
+}
+
+.dark .kv-runtime-picker__bound-note {
+  color: rgb(115 115 115);
+}
+
+.kv-runtime-picker__agents-head .kv-icon-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 /* fallback（探测失败降级）提示行：一行文案 + 重试按钮。 */
@@ -148,21 +187,6 @@
   color: rgb(115 115 115);
 }
 
-/* 会话-CLI 绑定锁提示行（R3）。 */
-.kv-runtime-picker__locked-hint {
-  padding: 6px 8px;
-  border: 1px solid rgb(115 115 115 / 0.2);
-  border-radius: 8px;
-  background: rgb(245 245 245);
-  font-size: 12px;
-  color: rgb(82 82 82);
-}
-
-.dark .kv-runtime-picker__locked-hint {
-  border-color: rgb(255 255 255 / 0.12);
-  background: rgb(38 38 38);
-  color: rgb(163 163 163);
-}
 
 .kv-runtime-picker__agent-grid {
   display: grid;

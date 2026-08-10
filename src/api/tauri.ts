@@ -476,6 +476,15 @@ export type AgentRuntimeConfig = {
   external_reasoning?: string | null
 }
 
+export type ChatModeConfig = {
+  systemPrompt?: string
+  webSearch?: boolean
+  webFetch?: boolean
+  knowledgeSearch?: boolean
+  memoryTools?: boolean
+  mcpReadOnly?: boolean
+}
+
 export type ChatConfig = {
   streamEnabled?: boolean
   thinkingEnabled?: boolean
@@ -487,6 +496,8 @@ export type ChatConfig = {
   defaultAgentRuntime?: AgentRuntimeConfig
   /** 本地 CLI Agent 的每-CLI 覆盖，key = agent id。 */
   externalCliAgents?: Record<string, ExternalCliAgentConfig>
+  /** Kivio Chat 运行时专属设置（与 Agent 分离）。 */
+  chatMode?: ChatModeConfig
 }
 
 export type ExternalCliAgentConfig = {
@@ -1671,6 +1682,14 @@ export function normalizeSettings(settings: Settings): Settings {
       // 自动保存回写后「所有供应商」会一直空。
       defaultAgentRuntime: current.chat?.defaultAgentRuntime,
       externalCliAgents: current.chat?.externalCliAgents,
+      chatMode: {
+        systemPrompt: current.chat?.chatMode?.systemPrompt ?? '',
+        webSearch: current.chat?.chatMode?.webSearch ?? true,
+        webFetch: current.chat?.chatMode?.webFetch ?? true,
+        knowledgeSearch: current.chat?.chatMode?.knowledgeSearch ?? true,
+        memoryTools: current.chat?.chatMode?.memoryTools ?? true,
+        mcpReadOnly: current.chat?.chatMode?.mcpReadOnly ?? true,
+      },
     },
     chatMemory: normalizeChatMemory(current.chatMemory),
     providers: Array.isArray(current.providers) ? current.providers.map(normalizeProvider) : [],
@@ -1758,6 +1777,8 @@ export type DefaultPromptTemplates = {
     zh: string
     en: string
   }
+  /** Built-in Kivio Chat runtime prompt (exact string injected when chatMode.systemPrompt is empty). */
+  chatRuntimePrompt?: string
 }
 
 // macOS 权限状态
