@@ -15,7 +15,8 @@ import {
   Search,
   SquarePen,
 } from 'lucide-react'
-import type { ChatAssistant, ChatProject, ChatSet, ConversationListItem } from './types'
+import type { ChatAssistant, ChatProject, ChatSet, ConversationListItem, ConversationSearchHit } from './types'
+import { HighlightText } from './searchHighlight'
 import { AgentIcon, KnowledgeIcon, McpIcon, SkillIcon } from '../settings/NavIcons'
 import { ConversationList } from './ConversationList'
 import { ChatSectionMenu } from './ChatSectionMenu'
@@ -136,7 +137,7 @@ export interface SidebarProps {
   onSelectProject: (project: ChatProject | null) => void
   selectedSet?: ChatSet | null
   onSelectSet: (set: ChatSet | null) => void
-  onSelectConversation: (id: string, conversation?: ConversationListItem) => void
+  onSelectConversation: (id: string, conversation?: ConversationSearchHit | ConversationListItem) => void
   onNewConversation: () => void
   onConversationDeleted?: (id: string) => void
   onForceDropConversation?: (id: string) => void
@@ -343,13 +344,13 @@ function SearchDialog({
   onClose,
 }: {
   query: string
-  results: ConversationListItem[]
+  results: ConversationSearchHit[]
   currentConversationId?: string
   generatingConversationIds?: ReadonlySet<string>
   projects: ChatProject[]
   sets: ChatSet[]
   onQueryChange: (query: string) => void
-  onSelectConversation: (conversation: ConversationListItem) => void
+  onSelectConversation: (conversation: ConversationSearchHit) => void
   onClose: () => void
 }) {
   const t = useT()
@@ -419,6 +420,8 @@ function SearchDialog({
               const projectLabel = conversationProjectLabel(conversation, projects)
               const setId = conversation.set_id ?? conversation.setId ?? null
               const setLabel = setId ? sets.find((s) => s.id === setId)?.name ?? '' : ''
+              const snippet = (conversation.match_snippet ?? conversation.matchSnippet ?? '').trim()
+              const showSnippet = Boolean(normalizedQuery && snippet && snippet !== conversation.title)
               return (
                 <button
                   key={conversation.id}
@@ -427,36 +430,62 @@ function SearchDialog({
                   style={{
                     ['--chat-motion-delay' as string]: `${Math.min(index, 12) * 18}ms`,
                   }}
-                  className={`chat-motion-row group/search-result flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors ${
+                  className={`chat-motion-row group/search-result flex w-full min-w-0 items-start gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors ${
                     active
                       ? 'bg-black/[0.07] dark:bg-white/[0.1]'
                       : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.07]'
                   }`}
                 >
-                  <SwapTitle
-                    text={conversation.title}
-                    title={conversation.title}
-                    className={`min-w-0 flex-1 truncate text-[13px] ${
-                      active
-                        ? 'font-semibold text-neutral-950 dark:text-neutral-50'
-                        : 'font-medium text-neutral-800 dark:text-neutral-200'
-                    }${
-                      generatingConversationIds.has(conversation.id)
-                      && isProvisionalTitle(conversation.title, conversation.preview)
-                        ? ' kv-title-provisional'
-                        : ''
-                    }`}
-                  />
-                  {setLabel && (
-                    <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
-                      {t.chatSetPrefix} · {setLabel}
-                    </span>
-                  )}
-                  {!setLabel && projectLabel && (
-                    <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
-                      {projectLabel}
-                    </span>
-                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {normalizedQuery ? (
+                        <HighlightText
+                          text={conversation.title || t.chatLibUntitled}
+                          query={normalizedQuery}
+                          className={`min-w-0 flex-1 truncate text-[13px] ${
+                            active
+                              ? 'font-semibold text-neutral-950 dark:text-neutral-50'
+                              : 'font-medium text-neutral-800 dark:text-neutral-200'
+                          }${
+                            generatingConversationIds.has(conversation.id)
+                            && isProvisionalTitle(conversation.title, conversation.preview)
+                              ? ' kv-title-provisional'
+                              : ''
+                          }`}
+                        />
+                      ) : (
+                        <SwapTitle
+                          text={conversation.title}
+                          title={conversation.title}
+                          className={`min-w-0 flex-1 truncate text-[13px] ${
+                            active
+                              ? 'font-semibold text-neutral-950 dark:text-neutral-50'
+                              : 'font-medium text-neutral-800 dark:text-neutral-200'
+                          }${
+                            generatingConversationIds.has(conversation.id)
+                            && isProvisionalTitle(conversation.title, conversation.preview)
+                              ? ' kv-title-provisional'
+                              : ''
+                          }`}
+                        />
+                      )}
+                      {setLabel && (
+                        <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
+                          {t.chatSetPrefix} · {setLabel}
+                        </span>
+                      )}
+                      {!setLabel && projectLabel && (
+                        <span className="max-w-[100px] shrink-0 truncate text-[12px] text-neutral-400 dark:text-neutral-500">
+                          {projectLabel}
+                        </span>
+                      )}
+                    </div>
+                    {showSnippet && (
+                      <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-neutral-500 dark:text-neutral-400">
+                        <HighlightText text={snippet} query={normalizedQuery} />
+                      </p>
+                    )}
+                  </div>
                 </button>
               )
             })
@@ -514,7 +543,7 @@ export const Sidebar = memo(function Sidebar({
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   // 后端全量索引搜索结果（覆盖所有对话，不止已加载的前 80）；空查询/非 Tauri 时为空，回退客户端过滤。
-  const [fullSearchResults, setFullSearchResults] = useState<ConversationListItem[]>([])
+  const [fullSearchResults, setFullSearchResults] = useState<ConversationSearchHit[]>([])
   // 侧栏三块改为横排标签页：同一时刻只显示一块（对话/集/项目）。
   const [activeTab, setActiveTab] = useState<'conversations' | 'sets' | 'projects'>('conversations')
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
@@ -1089,7 +1118,7 @@ export const Sidebar = memo(function Sidebar({
     setSearchQuery('')
   }, [onSearchOpenChange])
 
-  const handleSelectSearchConversation = useCallback((conversation: ConversationListItem) => {
+  const handleSelectSearchConversation = useCallback((conversation: ConversationSearchHit) => {
     const project = findConversationProject(conversation, projects)
     if (project) {
       onSelectProject(project)

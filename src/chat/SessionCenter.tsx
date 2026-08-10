@@ -45,9 +45,11 @@ import {
   dayBucket,
   dayBucketLabel,
   formatRelativeTime,
+  libraryTimestamp,
   shortModelName,
   type DayBucket,
 } from './sessionLibrary/format'
+import { HighlightText } from './searchHighlight'
 
 const PAGE_SIZE = 80
 
@@ -459,7 +461,8 @@ export function SessionCenter({
     }
     for (const c of state.items) {
       if (groupBy === 'day' || groupBy === 'week') {
-        const b: DayBucket = dayBucket(c.updated_at)
+        // 按日/周分组与当前排序键对齐：最近创建看 created_at，其余看 updated_at。
+        const b: DayBucket = dayBucket(libraryTimestamp(c, sort))
         // week grouping collapses day buckets into fewer: today/yesterday stay, rest week/older
         const key = groupBy === 'week' && (b === 'today' || b === 'yesterday') ? b : b === 'today' || b === 'yesterday' ? b : b
         push(key, dayBucketLabel(key, t), c)
@@ -476,7 +479,7 @@ export function SessionCenter({
       }
     }
     return [...map.entries()].map(([key, v]) => ({ key, label: v.label, items: v.items }))
-  }, [groupBy, projects, sets, state.items, t])
+  }, [groupBy, projects, sets, sort, state.items, t])
 
   const shelves: Array<{ id: ShelfId; label: string; icon: typeof Star }> = [
     { id: 'all', label: t.chatLibShelfAll, icon: MessagesSquare },
@@ -962,13 +965,17 @@ export function SessionCenter({
                               />
                             ) : (
                               <span className="min-w-0 truncate text-[13.5px] font-medium text-neutral-900 dark:text-neutral-50">
-                                {c.title || t.chatLibUntitled}
+                                {debouncedQ
+                                  ? <HighlightText text={c.title || t.chatLibUntitled} query={debouncedQ} />
+                                  : (c.title || t.chatLibUntitled)}
                               </span>
                             )}
                           </div>
                           {cols.preview && c.preview && (
                             <p className="mt-0.5 truncate text-[12px] text-neutral-500 dark:text-neutral-400">
-                              {c.preview}
+                              {debouncedQ
+                                ? <HighlightText text={c.preview} query={debouncedQ} />
+                                : c.preview}
                             </p>
                           )}
                         </div>
@@ -988,7 +995,7 @@ export function SessionCenter({
                           </span>
                         )}
                         <span className="w-14 shrink-0 text-right text-[12px] tabular-nums text-neutral-400">
-                          {formatRelativeTime(c.updated_at, t)}
+                          {formatRelativeTime(libraryTimestamp(c, sort), t)}
                         </span>
                         <button
                           data-row-chrome

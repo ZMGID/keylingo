@@ -69,6 +69,7 @@ import type {
   ChatAssistant,
   Conversation,
   ConversationListItem,
+  ConversationSearchHit,
   ConversationContextState,
   AgentPlanMode,
   AgentPlanState,
@@ -961,6 +962,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [emitContentReady])
   const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null)
   const [conversationRenderRequestId, setConversationRenderRequestId] = useState(0)
+  /** 全局搜索跳转目标；MessageList 完成滚动后清空。 */
+  const [focusMessageId, setFocusMessageId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => getRememberedChatSidebarCollapsed())
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedProject, setSelectedProject] = useState<ChatProject | null>(null)
@@ -2707,6 +2710,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     const requestId = beginConversationTransition(conversationId, conversationHint)
     setAssistantStreamStatsByMessageId({})
     setHookWarning(null)
+    setFocusMessageId(conversationHint?.focusMessageId ?? null)
     try {
       const conv = await chatApi.getConversation(conversationId)
       if (!isCurrentConversationTransition(requestId, conversationId)) return
@@ -4273,9 +4277,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     runAfterLeavingSettings(() => handleSelectSet(set))
   }, [handleSelectSet, runAfterLeavingSettings])
 
-  const handleSidebarSelectConversation = useCallback((id: string, conversation?: ConversationListItem) => {
+  const handleSidebarSelectConversation = useCallback((id: string, conversation?: ConversationListItem | ConversationSearchHit) => {
+    const focusMessageId =
+      conversation && 'match_message_id' in conversation
+        ? conversation.match_message_id ?? conversation.matchMessageId ?? undefined
+        : conversation && 'matchMessageId' in conversation
+          ? conversation.matchMessageId ?? undefined
+          : undefined
     runAfterLeavingSettings(() => void handleSelectConversation(id, {
       messageCount: conversation?.message_count,
+      focusMessageId: focusMessageId || undefined,
     }))
   }, [handleSelectConversation, runAfterLeavingSettings])
 
@@ -4613,6 +4624,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     compactionInProgress: contextCompressing,
     animateCompactionBoundaryId: animateCompactionBoundaryId,
     lang: uiLang,
+    focusMessageId,
+    onFocusMessageHandled: () => setFocusMessageId(null),
   }), [
     animateCompactionBoundaryId,
     assistantStreamStatsByMessageId,
@@ -4631,6 +4644,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     handleSetGroupSelection,
     handleUpdateMessage,
     uiLang,
+    focusMessageId,
   ])
 
   const forkOrigin = useMemo(() => {

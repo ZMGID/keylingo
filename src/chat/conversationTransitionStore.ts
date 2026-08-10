@@ -10,6 +10,8 @@ export interface ConversationTransitionSnapshot {
 export interface ConversationLoadHint {
   /** 侧栏索引里的消息数量，仅用于决定是否立即显示加载态，不限制实际加载内容。 */
   messageCount?: number
+  /** 全局搜索跳转：打开会话后滚到这条消息并短暂高亮。 */
+  focusMessageId?: string
 }
 
 let requestSequence = 0

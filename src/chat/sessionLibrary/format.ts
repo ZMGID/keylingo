@@ -1,4 +1,4 @@
-import type { ChatProject, ChatSet, ConversationListItem } from '../types'
+import type { ChatProject, ChatSet, ConversationLibrarySort, ConversationListItem } from '../types'
 import type { I18n } from '../../settings/i18n'
 
 /** Unix seconds → 相对时间（对话时间戳是秒）。 */
@@ -15,6 +15,15 @@ export function formatRelativeTime(sec: number, t: I18n, nowSec = Math.floor(Dat
   const day = String(d.getDate()).padStart(2, '0')
   if (y === new Date(nowSec * 1000).getFullYear()) return `${m}-${day}`
   return `${y}-${m}-${day}`
+}
+
+/** 对话库时间列/按日分组：排序键是 created 时用创建时间，其余用更新时间。 */
+export function libraryTimestamp(
+  conv: ConversationListItem,
+  sort: ConversationLibrarySort,
+): number {
+  if (sort === 'created') return conv.created_at || conv.updated_at || 0
+  return conv.updated_at || conv.created_at || 0
 }
 
 export function shortModelName(model: string): string {

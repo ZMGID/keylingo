@@ -577,6 +577,21 @@ pub struct ConversationListItem {
     pub forked_from: Option<ForkOrigin>,
 }
 
+/// 侧栏全局搜索命中：在列表元数据上附带首个匹配位置，供高亮片段与跳转消息。
+/// `#[serde(flatten)]` 保持旧字段扁平，前端可当 ConversationListItem 用。
+#[derive(Debug, Clone, Serialize)]
+pub struct ConversationSearchHit {
+    #[serde(flatten)]
+    pub item: ConversationListItem,
+    /// title | preview | folder | content | reasoning
+    pub match_field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_message_id: Option<String>,
+    /// 围绕关键词的上下文片段（已折叠空白）；标题/文件夹命中时可能为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_snippet: Option<String>,
+}
+
 /// 对话索引文件结构
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConversationIndex {

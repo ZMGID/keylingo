@@ -1569,6 +1569,20 @@ button.chat-composer-status-item:hover {
   opacity: 0.55;
 }
 
+/* 全局搜索跳转到命中消息时的短暂高亮 */
+@keyframes kv-search-focus-flash {
+  0% {
+    box-shadow: inset 0 0 0 9999px rgba(251, 191, 36, 0.28);
+  }
+  100% {
+    box-shadow: inset 0 0 0 9999px rgba(251, 191, 36, 0);
+  }
+}
+.kv-search-focus-flash {
+  animation: kv-search-focus-flash 1.5s ease-out 1;
+  border-radius: 10px;
+}
+
 /* 右键/上下文菜单：容器 popover 入场后，直接子项（菜单项）再逐项级联进入。
    仅在打开态挂载（关闭走 chat-motion-popover-out，不带此 class，避免退场时重播）。
    纯 CSS nth-child 级联，复用 chat-motion-row 关键帧（reduced-motion 全局兜底覆盖）。 */

@@ -15,6 +15,7 @@ import type {
   ConversationLibraryPage,
   ConversationLibraryQuery,
   ConversationListItem,
+  ConversationSearchHit,
   AgentPlanMode,
   DetectedExternalAgent,
   PendingAttachment,
@@ -972,11 +973,11 @@ export const chatApi = {
   },
 
   // 全量索引搜索对话（覆盖所有对话，不止侧栏默认加载的前 N 个）
-  async searchConversations(query: string, limit = 30): Promise<ConversationListItem[]> {
+  async searchConversations(query: string, limit = 30): Promise<ConversationSearchHit[]> {
     if (!isTauriRuntime()) return []
     const trimmed = query.trim()
     if (!trimmed) return []
-    const result = await invoke<{ success: boolean; conversations: ConversationListItem[] }>(
+    const result = await invoke<{ success: boolean; conversations: ConversationSearchHit[] }>(
       'chat_search_conversations',
       { query: trimmed, limit }
     )

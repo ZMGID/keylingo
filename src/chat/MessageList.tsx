@@ -84,6 +84,9 @@ export interface MessageListProps {
   compactionInProgress?: boolean
   animateCompactionBoundaryId?: string | null
   lang?: Lang
+  /** 全局搜索：打开会话后滚到该消息并短暂高亮。 */
+  focusMessageId?: string | null
+  onFocusMessageHandled?: () => void
 }
 
 const LIST_EDGE_PADDING_PX = 16
@@ -224,6 +227,8 @@ function MessageListBase({
   compactionInProgress = false,
   animateCompactionBoundaryId = null,
   lang = 'zh',
+  focusMessageId = null,
+  onFocusMessageHandled,
 }: MessageListProps) {
   const chatPerfFlags = getChatPerformanceFlags()
   const useTanStackVirtualizer = chatPerfFlags.tanstackVirtualizer
@@ -1207,6 +1212,63 @@ function MessageListBase({
     clearNavigatorPrepare()
     resetMessageNavigationStore()
   }, [clearNavigatorPrepare, conversationId])
+
+  // 全局搜索：打开会话后滚到命中消息，并短暂闪一下高亮。
+  useEffect(() => {
+    if (!focusMessageId || !conversationId) return
+    let targetIndex = -1
+    for (let i = 0; i < historyItems.length; i++) {
+      const item = historyItems[i]
+      if (item.kind === 'message' && item.message.id === focusMessageId) {
+        targetIndex = i
+        break
+      }
+      if (item.kind === 'group' && item.messages.some((m) => m.id === focusMessageId)) {
+        targetIndex = i
+        break
+      }
+    }
+    if (targetIndex < 0) {
+      // 消息尚未就绪（或 id 已失效）——等 historyItems 变化再试；若始终找不到则下一轮消息变更后仍可重试。
+      // 空会话或 id 不在列表时清掉，避免卡住。
+      if (messages.length > 0) onFocusMessageHandled?.()
+      return
+    }
+
+    followHandle.releaseFollow()
+    const generation = beginMessageNavigationHydrate()
+    navigatorSettleGenerationRef.current = generation
+    clearNavigatorPrepare()
+    setForceMountRenderIndex(targetIndex)
+    prepareThenJumpToNavigatorNode(generation, targetIndex)
+
+    const flash = () => {
+      const el = contentEl?.querySelector(
+        `[data-message-id="${CSS.escape(focusMessageId)}"]`,
+      ) as HTMLElement | null
+      if (!el) return
+      el.classList.add('kv-search-focus-flash')
+      window.setTimeout(() => el.classList.remove('kv-search-focus-flash'), 1600)
+    }
+    // 等 force-mount + 对齐后再闪
+    const t1 = window.setTimeout(flash, 80)
+    const t2 = window.setTimeout(flash, 240)
+    onFocusMessageHandled?.()
+    return () => {
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+    }
+  }, [
+    clearNavigatorPrepare,
+    contentEl,
+    conversationId,
+    focusMessageId,
+    followHandle,
+    historyItems,
+    messages.length,
+    onFocusMessageHandled,
+    prepareThenJumpToNavigatorNode,
+  ])
 
 
 

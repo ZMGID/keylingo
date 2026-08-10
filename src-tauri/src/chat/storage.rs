@@ -9,7 +9,8 @@ use serde::Serialize;
 
 use super::{
     ChatAssistant, ChatAssistantIndex, ChatAssistantSnapshot, ChatProject, ChatProjectIndex,
-    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem, ConversationPin,
+    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem,
+    ConversationPin, ConversationSearchHit,
 };
 
 const WRITE_RETRY_ATTEMPTS: usize = 3;
@@ -861,38 +862,79 @@ pub fn query_conversations(
 /// 不敏感子串匹配，按更新时间倒序返回前 limit 个。让侧栏搜索能找到已掉出"最近"列表的老对话。
 /// 元数据命中只读 index.json（轻量）；没命中的才逐个读对话正文做全文匹配——所以这个函数的
 /// 成本与对话总数成正比，别放在任何全局写锁里。
+///
+/// 每条命中附带首个匹配位置（`match_field` / `match_message_id` / `match_snippet`），
+/// 供全局搜索高亮片段与「点进结果跳到那条消息」。
 pub fn search_conversations(
     app: &AppHandle,
     query: &str,
     limit: usize,
-) -> Result<Vec<ConversationListItem>, String> {
+) -> Result<Vec<ConversationSearchHit>, String> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Ok(vec![]);
     }
     let index = load_index_or_scan(app)?;
-    let mut hits: Vec<ConversationListItem> = Vec::new();
+    let mut hits: Vec<ConversationSearchHit> = Vec::new();
     for c in index.conversations {
         // 侧栏搜索不包含归档
         if c.archived {
             continue;
         }
-        let meta_hit = c.title.to_lowercase().contains(&needle)
-            || c.preview.to_lowercase().contains(&needle)
-            || c.folder
-                .as_deref()
-                .map(|f| f.to_lowercase().contains(&needle))
-                .unwrap_or(false);
-        // 元数据没命中再全文扫消息正文（用户/助手 content + reasoning）。
-        // ponytail: 逐文件线性扫，几百个会话是几十毫秒级；会话上千再换 FTS 索引。
-        let hit = meta_hit || conversation_content_matches(app, &c.id, &needle);
-        if hit {
-            hits.push(c);
+        if let Some(hit) = match_conversation_for_search(app, c, &needle) {
+            hits.push(hit);
         }
     }
-    hits.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    hits.sort_by(|a, b| b.item.updated_at.cmp(&a.item.updated_at));
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// 构造一条搜索命中：优先标题 → 预览 → 文件夹 → 正文/思考（首条消息）。
+fn match_conversation_for_search(
+    app: &AppHandle,
+    item: ConversationListItem,
+    needle: &str,
+) -> Option<ConversationSearchHit> {
+    if item.title.to_lowercase().contains(needle) {
+        return Some(ConversationSearchHit {
+            match_field: "title".into(),
+            match_message_id: None,
+            match_snippet: Some(item.title.clone()),
+            item,
+        });
+    }
+    if item.preview.to_lowercase().contains(needle) {
+        return Some(ConversationSearchHit {
+            match_snippet: Some(make_search_snippet(&item.preview, needle)),
+            match_field: "preview".into(),
+            match_message_id: None,
+            item,
+        });
+    }
+    if item
+        .folder
+        .as_deref()
+        .map(|f| f.to_lowercase().contains(needle))
+        .unwrap_or(false)
+    {
+        return Some(ConversationSearchHit {
+            match_snippet: item.folder.clone(),
+            match_field: "folder".into(),
+            match_message_id: None,
+            item,
+        });
+    }
+
+    let Ok(conv) = load_conversation(app, &item.id) else {
+        return None;
+    };
+    first_message_match(&conv, needle).map(|(field, message_id, snippet)| ConversationSearchHit {
+        item,
+        match_field: field,
+        match_message_id: Some(message_id),
+        match_snippet: Some(snippet),
+    })
 }
 
 /// 全文匹配：读会话文件，扫所有消息的 content 与 reasoning（大小写不敏感）。
@@ -905,13 +947,58 @@ fn conversation_content_matches(app: &AppHandle, id: &str, needle: &str) -> bool
 }
 
 fn messages_match(conv: &Conversation, needle: &str) -> bool {
-    conv.messages.iter().any(|m| {
-        m.content.to_lowercase().contains(needle)
-            || m.reasoning
-                .as_deref()
-                .map(|r| r.to_lowercase().contains(needle))
-                .unwrap_or(false)
-    })
+    first_message_match(conv, needle).is_some()
+}
+
+fn first_message_match(
+    conv: &Conversation,
+    needle: &str,
+) -> Option<(String, String, String)> {
+    for m in &conv.messages {
+        if m.content.to_lowercase().contains(needle) {
+            return Some((
+                "content".into(),
+                m.id.clone(),
+                make_search_snippet(&m.content, needle),
+            ));
+        }
+        if let Some(r) = m.reasoning.as_deref() {
+            if r.to_lowercase().contains(needle) {
+                return Some((
+                    "reasoning".into(),
+                    m.id.clone(),
+                    make_search_snippet(r, needle),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// 围绕关键词截取一段可读上下文；字符边界安全，折叠换行。
+fn make_search_snippet(text: &str, needle_lower: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lower = flat.to_lowercase();
+    let Some(pos) = lower.find(needle_lower) else {
+        return crate::chat::agent::execute::truncate_chars(&flat, 140);
+    };
+    let start = flat.floor_char_boundary(pos.saturating_sub(48));
+    let end = flat.ceil_char_boundary((pos + needle_lower.len() + 72).min(flat.len()));
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&flat[start..end]);
+    if end < flat.len() {
+        out.push('…');
+    }
+    out
 }
 
 pub fn find_reusable_blank_conversation(

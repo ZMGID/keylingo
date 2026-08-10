@@ -246,7 +246,7 @@ impl ConversationRepository {
         app: &AppHandle,
         query: &str,
         limit: usize,
-    ) -> RepositoryResult<Vec<ConversationListItem>> {
+    ) -> RepositoryResult<Vec<super::ConversationSearchHit>> {
         let _barrier = self.barrier.read().await;
         super::storage::search_conversations(app, query, limit).map_err(Into::into)
     }
@@ -584,11 +584,18 @@ impl ConversationRepository {
         expected_revision: u64,
         state: ConversationContextState,
     ) -> RepositoryResult<Conversation> {
-        self.mutate_expected(app, id, Some(expected_revision), move |conversation| {
-            conversation.context_state = state;
-            Ok(())
-        })
-        .await
+        // Dedicated path (not mutate_expected): context usage is a cache written on
+        // open via chat_get_context_stats. Bumping updated_at there reorders the
+        // 对话库 "最近更新" shelf just because the user clicked a conversation.
+        // Revision still advances so concurrent writers keep their CAS semantics.
+        let _barrier = self.barrier.read().await;
+        let lock = self.conversation_lock(id);
+        let _conversation = lock.lock().await;
+        let mut latest = super::storage::load_conversation(app, id)?;
+        validate_expected_revision(id, latest.revision, Some(expected_revision))?;
+        latest.context_state = state;
+        increment_revision(&mut latest)?;
+        self.persist_locked(app, latest).await
     }
 
     pub async fn update_metadata(

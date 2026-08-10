@@ -612,6 +612,16 @@ export interface ConversationListItem {
   forkedFrom?: ForkOrigin | null
 }
 
+/** 全局搜索命中：列表项 + 首个匹配位置（后端 flatten 序列化）。 */
+export interface ConversationSearchHit extends ConversationListItem {
+  match_field?: string
+  matchField?: string
+  match_message_id?: string | null
+  matchMessageId?: string | null
+  match_snippet?: string | null
+  matchSnippet?: string | null
+}
+
 /** 对话库书架 / 筛选维度 */
 export type ConversationLibraryShelf =
   | 'all'
