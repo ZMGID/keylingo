@@ -7,11 +7,17 @@ import {
   cancelConversationTransition,
   getConversationTransitionSnapshot,
 } from './conversationTransitionStore'
+import {
+  beginMessageNavigationHydrate,
+  endMessageNavigationHydrate,
+  resetMessageNavigationStore,
+} from './messageNavigationStore'
 
 describe('ChatMarkdown streaming stability', () => {
   afterEach(() => {
     const { requestId } = getConversationTransitionSnapshot()
     if (requestId > 0) cancelConversationTransition(requestId)
+    resetMessageNavigationStore()
   })
 
   it('流式中未闭合加粗由 Streamdown parseIncomplete 补全', async () => {
@@ -78,4 +84,20 @@ describe('ChatMarkdown streaming stability', () => {
     expect(opening.container.querySelector('figure pre code')?.textContent).toContain('const y = 2')
     opening.unmount()
   })
+
+  it('消息导航 settle 期间历史代码块立刻 hydrate', async () => {
+    const generation = beginMessageNavigationHydrate()
+    const { container, unmount } = render(
+      <ChatMarkdown content={'```ts\nconst z = 3\n```'} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const island = container.querySelector('[data-chat-heavy-island="true"]')
+    expect(island?.getAttribute('data-chat-heavy-hydrated')).toBe('true')
+    expect(container.querySelector('figure pre code')?.textContent).toContain('const z = 3')
+    unmount()
+    endMessageNavigationHydrate(generation)
+  })
+
 })

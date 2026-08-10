@@ -46,6 +46,11 @@ import {
 import type { Lang } from '../settings/i18n'
 import { measureChatSurface, recordChatPerfSample, useChatPerfRenderProbe } from './chatPerformanceProbe'
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
+import {
+  beginMessageNavigationHydrate,
+  endMessageNavigationHydrate,
+  resetMessageNavigationStore,
+} from './messageNavigationStore'
 
 export interface AssistantStreamStats {
   messageId: string
@@ -85,6 +90,23 @@ const LIST_EDGE_PADDING_PX = 16
 // 若 virtualizer 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
 // 正是滚动不顺滑的主因之一。高亮不需要 120fps，8 次/秒足够。
 const NAVIGATOR_SYNC_INTERVAL_MS = 120
+// 导航跳转后等目标行挂载 + 重内容 hydrate + 高度稳定的上限。
+// 估算 → 实测 的纠正通常 1~3 帧；代码块同步 hydrate 后偶发再撑一帧。
+const NAVIGATOR_SETTLE_MAX_FRAMES = 48
+// 准备阶段：目标行自身高度稳定帧数。
+const NAVIGATOR_SETTLE_STABLE_FRAMES = 3
+// 跳转后 paint 前钉住：邻居重测 + 图片/异步块还会改 translateY。
+const NAVIGATOR_HOLD_MAX_FRAMES = 28
+const NAVIGATOR_HOLD_STABLE_FRAMES = 4
+// 与 virtualizer overscan 对齐，跳转后首屏邻居尽量已测过高。
+const NAVIGATOR_FORCE_MOUNT_RADIUS = 6
+// 收尾再锁几帧，挡住 force-mount 拆除后的迟到测高。
+const NAVIGATOR_UNLOCK_FRAMES = 10
+const NAVIGATOR_PENDING_SELECTOR =
+  '[data-chat-markdown-pending="true"], [data-chat-heavy-hydrated="false"]'
+const NAVIGATOR_ALIGN_EPSILON_PX = 1
+
+
 
 // 列表里每一项的统一形态。整条会话全量喂给虚拟列表（消息都在内存，virtualizer 只渲可见项），
 // 屏外的气泡连同其 KaTeX host / Markdown / 图片 DOM 真正从 DOM 卸载。
@@ -287,9 +309,7 @@ function MessageListBase({
       // 仍有未就绪的重内容：Markdown worker 占位、或 ChatHeavyIsland 尚未 hydrate。
       // 这些阶段高度会在稍后猛涨；过早揭开覆盖层就是「代码块没加载全 + 页面抽一下」。
       if (
-        contentEl.querySelector(
-          '[data-chat-markdown-pending="true"], [data-chat-heavy-hydrated="false"]',
-        )
+        contentEl.querySelector(NAVIGATOR_PENDING_SELECTOR)
       ) {
         previousHeight = -1
         stableFrames = 0
@@ -368,6 +388,39 @@ function MessageListBase({
   const navigatorNodesRef = useRef<MessageNavigatorNode[]>([])
   const activeNavigatorNodeIdRef = useRef<string | null>(null)
   const visibleNavigatorNodeIdsRef = useRef<string[]>([])
+  const navigatorSettleRafRef = useRef<number | null>(null)
+  const navigatorSettleGenerationRef = useRef(0)
+  // 导航「先渲染再跳」：在当前视口不动的前提下，把目标行附近强制挂进 DOM 测高。
+  const [forceMountRenderIndex, setForceMountRenderIndex] = useState<number | null>(null)
+  const forceMountRenderIndexRef = useRef<number | null>(null)
+  forceMountRenderIndexRef.current = forceMountRenderIndex
+  // 导航全程锁：禁止 virtualizer 因测高改 scrollTop（那是上下抽的主因）。
+  const navigationLockRef = useRef(false)
+  // 准备阶段冻结的阅读位置；hold 跳转前绝不能被动挪走。
+  const navigatorFrozenScrollTopRef = useRef<number | null>(null)
+  // 跳转后 paint 前钉住。jumped=false 时只在 layout 里跳一次，避免 rAF 跳完再被测高扯。
+  const navigatorHoldRef = useRef<{
+    generation: number
+    targetIndex: number
+    frames: number
+    stable: number
+    jumped: boolean
+    lastHeight: number
+    lastTotalSize: number
+  } | null>(null)
+  // 「回到底部」落地 hold：代码块/重内容在底部挂载后撑高，需连续钉底到稳定。
+  const bottomHoldRef = useRef<{
+    generation: number
+    frames: number
+    stable: number
+    lastScrollHeight: number
+  } | null>(null)
+  const [navigatorHoldEpoch, setNavigatorHoldEpoch] = useState(0)
+  const [bottomHoldEpoch, setBottomHoldEpoch] = useState(0)
+  const [navigatorLockActive, setNavigatorLockActive] = useState(false)
+
+
+
   // 消息区内置右键菜单（原生菜单被全局屏蔽，见 main.tsx）。
   const [msgMenu, setMsgMenu] = useState<
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
@@ -728,8 +781,20 @@ function MessageListBase({
         const tailIndex = itemCount - 1
         if (tailIndex >= 0 && !indexes.includes(tailIndex)) indexes.push(tailIndex)
       }
+      // 消息导航：目标行附近强制挂载渲染测高，再一次性跳转。
+      // 半径内邻居一起量，减少跳转后 overscan 首次测高引发的 translateY 抖动。
+      const forced = forceMountRenderIndex
+      if (forced != null && itemCount > 0) {
+        const from = Math.max(0, forced - NAVIGATOR_FORCE_MOUNT_RADIUS)
+        const to = Math.min(itemCount - 1, forced + NAVIGATOR_FORCE_MOUNT_RADIUS)
+        for (let index = from; index <= to; index += 1) {
+          if (!indexes.includes(index)) indexes.push(index)
+        }
+      }
       return indexes
-    }, [flowLiveOutsideVirtualizer, itemCount]),
+    }, [flowLiveOutsideVirtualizer, forceMountRenderIndex, itemCount]),
+
+
     overscan: 6,
     // jsdom/test environments have no layout box before the first observer tick;
     // a conservative initial viewport keeps the first render useful while the
@@ -744,6 +809,8 @@ function MessageListBase({
   // 对齐 LiveAgent createLiveRowScrollAdjustPolicy（仅 fallback：live 仍在列表内）。
   // 外置路径下 virtualizer 只有历史行，流式增长不再进这个谓词。
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    // 导航 prepare/hold 期间禁止测高改 scrollTop：那是点导航后上下抽的主因。
+    if (navigationLockRef.current) return false
     const shouldAdjust = shouldAdjustChatItemSizeChange(item, {
       scrollOffset: instance.scrollOffset ?? 0,
       scrollAdjustments: instance.scrollAdjustments,
@@ -768,6 +835,7 @@ function MessageListBase({
     }
     return true
   }
+
   const virtualItems = virtualizer.getVirtualItems()
   // Row ResizeObservers and TanStack's own viewport observer update mounted rows.
   // Avoid a blanket measure(): it clears the virtualizer's measured cache and makes
@@ -823,34 +891,276 @@ function MessageListBase({
     setVisibleNavigatorNodeIds(nodeIds)
   }, [])
 
+  const cancelNavigatorSettle = useCallback(() => {
+    if (navigatorSettleRafRef.current !== null) {
+      cancelAnimationFrame(navigatorSettleRafRef.current)
+      navigatorSettleRafRef.current = null
+    }
+  }, [])
+
+  const setNavigationLock = useCallback((locked: boolean) => {
+    navigationLockRef.current = locked
+    setNavigatorLockActive((current) => (current === locked ? current : locked))
+  }, [])
+
+  const endNavigatorSession = useCallback((generation: number) => {
+    if (generation !== navigatorSettleGenerationRef.current) return
+    navigatorHoldRef.current = null
+    bottomHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+    if (forceMountRenderIndexRef.current != null) {
+      setForceMountRenderIndex(null)
+    }
+    endMessageNavigationHydrate(generation)
+    // force-mount 拆除后还可能有迟到测高；锁多留几帧再开。
+    let remaining = NAVIGATOR_UNLOCK_FRAMES
+    const unlockTick = () => {
+      if (generation !== navigatorSettleGenerationRef.current) return
+      remaining -= 1
+      if (remaining <= 0) {
+        setNavigationLock(false)
+        return
+      }
+      requestAnimationFrame(unlockTick)
+    }
+    requestAnimationFrame(unlockTick)
+  }, [setNavigationLock])
+
+  const clearNavigatorPrepare = useCallback(() => {
+    cancelNavigatorSettle()
+    setNavigationLock(false)
+    navigatorHoldRef.current = null
+    bottomHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+    if (forceMountRenderIndexRef.current != null) {
+      setForceMountRenderIndex(null)
+    }
+  }, [cancelNavigatorSettle, setNavigationLock])
+
+
+  const alignViewportToRowIndex = useCallback((targetRenderIndex: number) => {
+    const el = scrollRef.current
+    const row = contentEl?.querySelector(
+      `[data-chat-row-index="${targetRenderIndex}"]`,
+    ) as HTMLElement | null
+    if (!row || !el) return false
+    const nextOffset =
+      row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+    // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
+    if (Math.abs(el.scrollTop - nextOffset) > NAVIGATOR_ALIGN_EPSILON_PX) {
+      followHandle.scrollToOffset(nextOffset)
+    }
+    return true
+  }, [contentEl, followHandle])
+
+  const rowHasPendingMedia = useCallback((row: HTMLElement) => {
+    if (row.querySelector(NAVIGATOR_PENDING_SELECTOR)) return true
+    // 图片未 decode 完会在跳转后撑高，表现为落地后再抽一下。
+    const images = row.querySelectorAll('img')
+    for (const image of images) {
+      if (!image.complete) return true
+      if (image.naturalWidth === 0 && (image.currentSrc || image.getAttribute('src'))) return true
+    }
+    return false
+  }, [])
+
+  const readNavigatorTargetMetrics = useCallback((targetRenderIndex: number) => {
+    const el = scrollRef.current
+    const row = contentEl?.querySelector(
+      `[data-chat-row-index="${targetRenderIndex}"]`,
+    ) as HTMLElement | null
+    if (!row || !el) {
+      return { ready: false as const, height: 0, offsetPx: Number.POSITIVE_INFINITY }
+    }
+    if (rowHasPendingMedia(row)) {
+      return { ready: false as const, height: 0, offsetPx: Number.POSITIVE_INFINITY }
+    }
+    const rowRect = row.getBoundingClientRect()
+    const viewportRect = el.getBoundingClientRect()
+    const height = rowRect.height
+    if (!(height > 0)) {
+      return { ready: false as const, height: 0, offsetPx: Number.POSITIVE_INFINITY }
+    }
+    return {
+      ready: true as const,
+      height,
+      offsetPx: Math.abs(rowRect.top - viewportRect.top),
+    }
+  }, [contentEl, rowHasPendingMedia])
+
+  /**
+   * 先渲染后跳转：
+   * 1. 准备阶段：强制挂载目标邻域 + eager hydrate。**不锁**测高补偿，
+   *    让当前阅读位置保持稳定（锁住反而会和 force-mount 测高打架上下抽）。
+   * 2. 就绪后上锁，只在 useLayoutEffect 里跳一次。
+   * 3. hold：paint 前钉住，直到 offset/高度/totalSize 都稳定。
+   */
+
+  const prepareThenJumpToNavigatorNode = useCallback((
+    generation: number,
+    targetRenderIndex: number,
+  ) => {
+    cancelNavigatorSettle()
+    // 准备阶段明确解锁：force-mount 上方行测高需要 shouldAdjust 保住当前画面。
+    setNavigationLock(false)
+    navigatorHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+    let frames = 0
+    let previousHeight = -1
+    let stableFrames = 0
+
+    const startHold = () => {
+      if (generation !== navigatorSettleGenerationRef.current) return
+      // 从这一刻起锁住测高改 scroll；真正的跳转只发生在 layout（paint 前）。
+      bottomHoldRef.current = null
+      setNavigationLock(true)
+      navigatorFrozenScrollTopRef.current = null
+      navigatorHoldRef.current = {
+        generation,
+        targetIndex: targetRenderIndex,
+        frames: 0,
+        stable: 0,
+        jumped: false,
+        lastHeight: -1,
+        lastTotalSize: -1,
+      }
+      setNavigatorHoldEpoch((value) => value + 1)
+    }
+
+
+    const tick = () => {
+      navigatorSettleRafRef.current = null
+      if (generation !== navigatorSettleGenerationRef.current) return
+
+      frames += 1
+
+      const { ready, height } = readNavigatorTargetMetrics(targetRenderIndex)
+      if (!ready) {
+        previousHeight = -1
+        stableFrames = 0
+        if (frames < NAVIGATOR_SETTLE_MAX_FRAMES) {
+          navigatorSettleRafRef.current = requestAnimationFrame(tick)
+        } else {
+          startHold()
+        }
+        return
+      }
+
+      if (height === previousHeight) stableFrames += 1
+      else {
+        previousHeight = height
+        stableFrames = 0
+      }
+
+      if (stableFrames >= NAVIGATOR_SETTLE_STABLE_FRAMES || frames >= NAVIGATOR_SETTLE_MAX_FRAMES) {
+        startHold()
+        return
+      }
+      navigatorSettleRafRef.current = requestAnimationFrame(tick)
+    }
+
+    navigatorSettleRafRef.current = requestAnimationFrame(tick)
+  }, [
+    cancelNavigatorSettle,
+    readNavigatorTargetMetrics,
+    setNavigationLock,
+  ])
+
+  // 跳转后、paint 前钉住目标。邻居 measure → translateY 变时，在用户看见前补 scrollTop。
+
+  useLayoutEffect(() => {
+    const hold = navigatorHoldRef.current
+    if (!hold) return
+    if (hold.generation !== navigatorSettleGenerationRef.current) {
+      navigatorHoldRef.current = null
+      return
+    }
+
+    setNavigationLock(true)
+    alignViewportToRowIndex(hold.targetIndex)
+    hold.jumped = true
+    hold.frames += 1
+
+    const metrics = readNavigatorTargetMetrics(hold.targetIndex)
+    const totalSize = useTanStackVirtualizer ? virtualizer.getTotalSize() : 0
+    const geometryStable = metrics.ready
+      && metrics.offsetPx <= NAVIGATOR_ALIGN_EPSILON_PX
+      && metrics.height === hold.lastHeight
+      && totalSize === hold.lastTotalSize
+      && hold.lastHeight > 0
+
+    if (metrics.ready) {
+      hold.lastHeight = metrics.height
+      hold.lastTotalSize = totalSize
+    }
+
+    if (geometryStable) hold.stable += 1
+    else hold.stable = 0
+
+    if (hold.stable >= NAVIGATOR_HOLD_STABLE_FRAMES || hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
+      endNavigatorSession(hold.generation)
+      return
+    }
+
+    const raf = requestAnimationFrame(() => {
+      if (navigatorHoldRef.current?.generation === hold.generation) {
+        setNavigatorHoldEpoch((value) => value + 1)
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [
+    alignViewportToRowIndex,
+    endNavigatorSession,
+    navigatorHoldEpoch,
+    readNavigatorTargetMetrics,
+    setNavigationLock,
+    useTanStackVirtualizer,
+    virtualItems,
+    virtualizer,
+  ])
+
+
   const navigateToNavigatorNode = useCallback((node: MessageNavigatorNode) => {
     // 跳到上方消息：先脱离跟随，否则跟随纠正器会把视口又钉回底部。
     followHandle.releaseFollow()
     updateActiveNavigatorNode(node.id)
 
-    const el = scrollRef.current
-    // data-chat-row-index = 全历史逻辑下标（与 navigator targetRenderIndex 一致）
-    const row = contentEl?.querySelector(
-      `[data-chat-row-index="${node.targetRenderIndex}"]`,
-    ) as HTMLElement | null
-    if (row && el) {
-      // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
-      // 瞬时跳转，不用 behavior:'smooth'：top 是按目标行**当前**的几何算出来的，而平滑滚动
-      // 期间上方的行会被 virtualizer 重测（估算高度换成实测），目标位置在动画途中就挪走了 ——
-      // 距离越远越容易落在错的地方。回到底部按钮同样瞬时钉底（jumpToBottom → stickToBottom）。
-      followHandle.scrollToOffset(
-        row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop,
-      )
+    if (node.targetRenderIndex < 0 || node.targetRenderIndex >= historyItems.length) {
       return
     }
 
-    // 当前目标未挂载时交给同一个 virtualizer 估算定位；真实行出现后
-    // TanStack 会用测量结果收敛位置，不再需要独立的 revealedStart/scrollHeight 补偿链。
-    if (node.targetRenderIndex >= 0 && node.targetRenderIndex < historyItems.length) {
-      followHandle.markLayoutCompensation()
-      virtualizer.scrollToIndex(node.targetRenderIndex, { align: 'start', behavior: 'auto' })
-    }
-  }, [contentEl, followHandle, historyItems.length, updateActiveNavigatorNode, virtualizer])
+    const generation = beginMessageNavigationHydrate()
+    navigatorSettleGenerationRef.current = generation
+    clearNavigatorPrepare()
+    // 准备阶段不锁；force-mount 后由 virtualizer 自己补偿当前画面。
+    setForceMountRenderIndex(node.targetRenderIndex)
+
+    // 先渲染（当前画面不动），就绪后在 layout 里跳一次并 hold 消抽搐。
+    prepareThenJumpToNavigatorNode(generation, node.targetRenderIndex)
+  }, [
+    clearNavigatorPrepare,
+    followHandle,
+    historyItems.length,
+    prepareThenJumpToNavigatorNode,
+    updateActiveNavigatorNode,
+  ])
+
+
+  useEffect(() => () => {
+    clearNavigatorPrepare()
+    resetMessageNavigationStore()
+  }, [clearNavigatorPrepare])
+
+  useEffect(() => {
+    // 切换会话时清掉上一会话未完成的 settle，避免 eager / force-mount 残留。
+    clearNavigatorPrepare()
+    resetMessageNavigationStore()
+  }, [clearNavigatorPrepare, conversationId])
+
+
+
+
+
 
   const handleNavigatorStep = useCallback((direction: -1 | 1) => {
     const nodes = navigatorNodesRef.current
@@ -861,9 +1171,116 @@ function MessageListBase({
     navigateToNavigatorNode(nodes[nextIndex])
   }, [navigateToNavigatorNode])
 
+  /**
+   * 回到底部：同样走「eager hydrate + 钉底 hold」。
+   * 从历史中部一键到底时，尾部消息（尤其代码块）才挂载；若延迟 hydrate，
+   * scrollHeight 会在落地后猛涨，贴底 pin 连跳几次就是抽一下。
+   */
   const handleJumpToBottom = useCallback(() => {
+    cancelNavigatorSettle()
+    navigatorHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+
+    const generation = beginMessageNavigationHydrate()
+    navigatorSettleGenerationRef.current = generation
+    setNavigationLock(true)
+
+    // 强制挂载尾部邻域，让代码块在钉底前就按真高度量好。
+    if (historyItems.length > 0) {
+      setForceMountRenderIndex(historyItems.length - 1)
+    }
+
     followHandle.jumpToBottom()
-  }, [followHandle])
+    bottomHoldRef.current = {
+      generation,
+      frames: 0,
+      stable: 0,
+      lastScrollHeight: -1,
+    }
+    setBottomHoldEpoch((value) => value + 1)
+  }, [
+    cancelNavigatorSettle,
+    followHandle,
+    historyItems.length,
+    setNavigationLock,
+  ])
+
+  // 「回到底部」落地 hold：paint 前连续钉底，直到 scrollHeight / 重内容稳定。
+  useLayoutEffect(() => {
+    const hold = bottomHoldRef.current
+    if (!hold) return
+    if (hold.generation !== navigatorSettleGenerationRef.current) {
+      bottomHoldRef.current = null
+      return
+    }
+
+    setNavigationLock(true)
+    followHandle.jumpToBottom()
+    hold.frames += 1
+
+    const viewport = scrollRef.current
+    if (!viewport) {
+      if (hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
+        endNavigatorSession(hold.generation)
+      } else {
+        const raf = requestAnimationFrame(() => {
+          if (bottomHoldRef.current?.generation === hold.generation) {
+            setBottomHoldEpoch((value) => value + 1)
+          }
+        })
+        return () => cancelAnimationFrame(raf)
+      }
+      return
+    }
+
+    const scrollHeight = viewport.scrollHeight
+    const gap = Math.max(0, scrollHeight - viewport.scrollTop - viewport.clientHeight)
+    const pendingHeavy = Boolean(
+      contentEl?.querySelector(NAVIGATOR_PENDING_SELECTOR),
+    )
+    // 尾部已挂载行里若还有未完成图片，高度还会涨。
+    let pendingMedia = pendingHeavy
+    if (!pendingMedia && contentEl) {
+      const rows = contentEl.querySelectorAll<HTMLElement>('[data-chat-row-index]')
+      const start = Math.max(0, rows.length - 12)
+      for (let index = start; index < rows.length; index += 1) {
+        if (rowHasPendingMedia(rows[index])) {
+          pendingMedia = true
+          break
+        }
+      }
+    }
+
+    const geometryStable = !pendingMedia
+      && gap <= 12
+      && scrollHeight === hold.lastScrollHeight
+      && scrollHeight > 0
+
+    hold.lastScrollHeight = scrollHeight
+    if (geometryStable) hold.stable += 1
+    else hold.stable = 0
+
+    if (hold.stable >= NAVIGATOR_HOLD_STABLE_FRAMES || hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
+      endNavigatorSession(hold.generation)
+      return
+    }
+
+    const raf = requestAnimationFrame(() => {
+      if (bottomHoldRef.current?.generation === hold.generation) {
+        setBottomHoldEpoch((value) => value + 1)
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [
+    bottomHoldEpoch,
+    contentEl,
+    endNavigatorSession,
+    followHandle,
+    rowHasPendingMedia,
+    setNavigationLock,
+    virtualItems,
+  ])
+
 
   // 滚动监听：用 DOM 行几何更新导航器（兼容「上方虚拟 + 底部实挂载」）。
   // 跟随钉底由 useScrollFollow 独立处理。
@@ -937,6 +1354,25 @@ function MessageListBase({
       }, NAVIGATOR_SYNC_INTERVAL_MS)
     })
   }, [syncNavigatorFromDom])
+
+  const handleNavigatorScroll = useCallback(() => {
+    // hold 期间硬钉：消息导航钉目标行；回到底部钉底。
+    if (navigationLockRef.current) {
+      const bottomHold = bottomHoldRef.current
+      if (bottomHold && bottomHold.generation === navigatorSettleGenerationRef.current) {
+        followHandle.jumpToBottom()
+      } else {
+        const hold = navigatorHoldRef.current
+        if (hold?.jumped) {
+          alignViewportToRowIndex(hold.targetIndex)
+        }
+      }
+    }
+    scheduleNavigatorSync()
+  }, [alignViewportToRowIndex, followHandle, scheduleNavigatorSync])
+
+
+
 
   // 消息区右键：读取当前选中文本 + 命中的消息，弹内置菜单。两者都空则不弹（放行给全局屏蔽）。
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -1194,8 +1630,10 @@ function MessageListBase({
       <div
         ref={setScrollEl}
         onContextMenu={handleContextMenu}
-        onScroll={scheduleNavigatorSync}
-        className="chat-motion-view-in custom-scrollbar flex-1 overflow-y-auto"
+        onScroll={handleNavigatorScroll}
+        className={`chat-scroll-viewport chat-motion-view-in custom-scrollbar flex-1 overflow-y-auto ${navigatorLockActive ? 'is-navigator-locking' : ''}`}
+
+
       >
         <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
           <div

@@ -686,6 +686,17 @@ body {
   contain: layout paint;
 }
 
+/* 聊天滚动容器禁用浏览器 overflow-anchor：上方行测高时浏览器会偷偷改 scrollTop，
+   和导航跳转的 paint 前钉住打架，表现为落地后上下抽一下。 */
+.chat-scroll-viewport {
+  overflow-anchor: none;
+}
+.chat-scroll-viewport.is-navigator-locking {
+  /* 锁定期再挡一层，避免系统/插件改滚动节奏 */
+  overscroll-behavior: contain;
+}
+
+
 /* 扩展中心页（助手 / Skill / MCP / 知识库 / 笔记 / 插件）：与会话主区同一张浮起的纸。
    刻意不复用 .chat-main-pane —— 那个带 container-name: chat-main，会把会话布局的容器
    查询接到中心页宽度上。右缝也得自己补：会话页那 8px 由收起态 Dock 的 margin-left 提供，
