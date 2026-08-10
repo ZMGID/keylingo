@@ -40,6 +40,33 @@ describe('buildContextBarSlices', () => {
     expect(slices).toHaveLength(1)
     expect(slices[0].widthPercent).toBeCloseTo(100, 1)
   })
+
+  it('collapses fine-grained segments into system / tools / conversation', () => {
+    const slices = buildContextBarSlices(
+      [
+        { id: 'system_prompt', label: 'System', estimated_tokens: 1_200 },
+        { id: 'assistant', label: 'Assistant', estimated_tokens: 300 },
+        { id: 'tool_definitions', label: 'Tools', estimated_tokens: 4_000 },
+        { id: 'mcp', label: 'MCP', estimated_tokens: 2_500 },
+        { id: 'agent_todo', label: 'Todo', estimated_tokens: 100 },
+        { id: 'conversation', label: 'Chat', estimated_tokens: 16_000 },
+        { id: 'attachments', label: 'Images', estimated_tokens: 500 },
+      ],
+      26_600,
+      1_000_000,
+      t,
+    )
+    const used = slices.filter((slice) => slice.id !== CONTEXT_FREE_SEGMENT_ID)
+    expect(used.map((slice) => slice.id)).toEqual(['system', 'tools', 'conversation'])
+    expect(used.map((slice) => slice.label)).toEqual([
+      t.contextSegmentSystemPrompt,
+      t.contextSegmentTools,
+      t.contextSegmentConversation,
+    ])
+    expect(used.find((s) => s.id === 'system')?.tokens).toBe(1_500)
+    expect(used.find((s) => s.id === 'tools')?.tokens).toBe(6_600)
+    expect(used.find((s) => s.id === 'conversation')?.tokens).toBe(16_500)
+  })
 })
 
 describe('fullnessLabel', () => {

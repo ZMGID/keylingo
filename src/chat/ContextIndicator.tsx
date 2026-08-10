@@ -138,11 +138,7 @@ export function ContextIndicator({
     [contextWindowTokens, estimatedInputTokens, rawSegments, t],
   )
   const legendSlices = useMemo(
-    () =>
-      barSlices
-        .filter((slice) => slice.id !== CONTEXT_FREE_SEGMENT_ID)
-        // 对话消息固定排在图例首位
-        .sort((a, b) => Number(b.id === 'conversation') - Number(a.id === 'conversation')),
+    () => barSlices.filter((slice) => slice.id !== CONTEXT_FREE_SEGMENT_ID),
     [barSlices],
   )
   const fullness = fullnessLabel(usageRatio, isExternalContext, contextWindowTokens, t)

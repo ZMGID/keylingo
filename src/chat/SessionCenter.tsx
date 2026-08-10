@@ -34,7 +34,6 @@ import type {
   ConversationLibraryQuery,
   ConversationLibraryShelf,
   ConversationLibrarySort,
-  ConversationListItem,
   ConversationSearchHit,
 } from './types'
 import { conversationMarkdownFilename } from './conversationExport'

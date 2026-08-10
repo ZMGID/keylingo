@@ -45,6 +45,49 @@ export type ContextBarSlice = {
   widthPercent: number
 }
 
+/** 面板只展示三大类：系统提示词 / 工具 / 对话消息（+ 剩余空间在条上）。 */
+export const CONTEXT_GROUP_SYSTEM = 'system'
+export const CONTEXT_GROUP_TOOLS = 'tools'
+export const CONTEXT_GROUP_CONVERSATION = 'conversation'
+
+const GROUP_COLORS: Record<string, string> = {
+  [CONTEXT_GROUP_SYSTEM]: '#7A7A7A',
+  [CONTEXT_GROUP_TOOLS]: '#7553CF',
+  [CONTEXT_GROUP_CONVERSATION]: '#3B82F6',
+}
+
+/** 把细粒度 segment id 归到三大类。未知段并入对话消息。 */
+export function contextSegmentGroupId(segmentId: string): string {
+  if (
+    segmentId === 'system_prompt'
+    || segmentId === 'assistant'
+    || segmentId === 'set'
+    || segmentId === 'runtime_context'
+    || segmentId === 'memory_l1'
+    || segmentId === 'knowledge_base'
+    || segmentId === 'skills'
+  ) {
+    return CONTEXT_GROUP_SYSTEM
+  }
+  if (
+    segmentId === 'tool_definitions'
+    || segmentId === 'native_tools'
+    || segmentId === 'mcp'
+    || segmentId === 'agent'
+    || segmentId.startsWith('agent_')
+  ) {
+    return CONTEXT_GROUP_TOOLS
+  }
+  // conversation / attachments / summarized_conversation / external-session / …
+  return CONTEXT_GROUP_CONVERSATION
+}
+
+function groupLabel(groupId: string, t: I18n): string {
+  if (groupId === CONTEXT_GROUP_SYSTEM) return t.contextSegmentSystemPrompt
+  if (groupId === CONTEXT_GROUP_TOOLS) return t.contextSegmentTools
+  return t.contextSegmentConversation
+}
+
 export function buildContextBarSlices(
   segments: ContextUsageSegment[],
   estimatedInputTokens: number,
@@ -55,29 +98,27 @@ export function buildContextBarSlices(
   const window = contextWindowTokens ?? 0
   const denominator = window > 0 ? window : Math.max(estimatedInputTokens, 1)
 
-  // Agent 的计划/ask_user/待办段都很碎，合并成一行「Agent」，保留首段颜色与出现位置。
-  const slices: ContextBarSlice[] = []
-  let agentAgg: ContextBarSlice | null = null
+  // 固定顺序：系统 → 工具 → 对话（与参考图一致）
+  const order = [CONTEXT_GROUP_SYSTEM, CONTEXT_GROUP_TOOLS, CONTEXT_GROUP_CONVERSATION]
+  const totals = new Map<string, number>(order.map((id) => [id, 0]))
   for (const segment of active) {
-    const tokens = segmentTokens(segment)
-    const widthPercent = Math.max(0, (tokens / denominator) * 100)
-    if (segment.id.startsWith('agent_')) {
-      if (!agentAgg) {
-        agentAgg = { id: 'agent', label: 'Agent', tokens: 0, color: segment.color || '#7A7A7A', widthPercent: 0 }
-        slices.push(agentAgg)
-      }
-      agentAgg.tokens += tokens
-      agentAgg.widthPercent += widthPercent
-      continue
-    }
+    const groupId = contextSegmentGroupId(segment.id)
+    totals.set(groupId, (totals.get(groupId) ?? 0) + segmentTokens(segment))
+  }
+
+  const slices: ContextBarSlice[] = []
+  for (const groupId of order) {
+    const tokens = totals.get(groupId) ?? 0
+    if (tokens <= 0) continue
     slices.push({
-      id: segment.id,
-      label: localizedSegmentLabel(segment, t),
+      id: groupId,
+      label: groupLabel(groupId, t),
       tokens,
-      color: segment.color || '#7A7A7A',
-      widthPercent,
+      color: GROUP_COLORS[groupId] ?? '#7A7A7A',
+      widthPercent: Math.max(0, (tokens / denominator) * 100),
     })
   }
+
   if (window > 0) {
     const freeTokens = Math.max(0, window - estimatedInputTokens)
     if (freeTokens > 0) {
