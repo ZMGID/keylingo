@@ -469,12 +469,20 @@ function MessageListBase({
   const streamGrowthSignal = streaming || streamFrozen
     ? `${streamingContent.length}:${streamingReasoning.length}:${streamingToolCalls.length}:${streamingSegments.length}`
     : null
-  const { handle: followHandle, showJumpButton } = useScrollFollow({
+  const { handle: followHandle, following, showJumpButton } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
     trackKeys: true,
     growthSignal: streamGrowthSignal,
   })
+
+  // 流式期间是否在跟随：交接时以它为准（不能只看交接瞬间的 isFollowing——
+  // 外置 live 卸载会先把高度砸矮，scroll 可能被误判成 user 解除跟随）。
+  const streamFollowIntentRef = useRef(true)
+  if (streaming || streamFrozen) {
+    streamFollowIntentRef.current = following
+  }
+
 
 
   const legacyPlanMessageId = useMemo(() => {
@@ -1517,6 +1525,7 @@ function MessageListBase({
   // streaming 节点；若仍在跟随，完成这次结构交接后也明确补钉，不能只依赖 ResizeObserver 时序。
   useLayoutEffect(() => {
     const count = messages.length
+
     if (count > prevMessageCountRef.current) {
       const lastRole = messages[count - 1]?.role
       if (lastRole === 'user' || (lastRole === 'assistant' && followHandle.isFollowing())) {
@@ -1525,6 +1534,20 @@ function MessageListBase({
     }
     prevMessageCountRef.current = count
   }, [messages, followHandle])
+
+  // live → 历史 交接钉底。messages.length 常常不变（assistant 流式中已写入 messages，
+  // 只是 historyMessages 按 messageId 过滤掉了），上面那条 count 路径接不住。
+  // 外置 live 卸载时高度骤降，视口会卡在「提问那一行」；若仍打算跟随就 force pin。
+  const liveScrollHandoffRef = useRef(liveRowActive)
+  useLayoutEffect(() => {
+    const wasLive = liveScrollHandoffRef.current
+    liveScrollHandoffRef.current = liveRowActive
+    if (!wasLive || liveRowActive) return
+    if (!streamFollowIntentRef.current && !followHandle.isFollowing()) return
+    followHandle.markLayoutCompensation()
+    followHandle.stickToBottom()
+  }, [followHandle, liveRowActive])
+
 
   // 发送后的尾部预留，两个阶段一处算：
   // - **运行中**：撑在尾部 wrapper 的 minHeight 上（是 min，回答长过它就自然吃掉，不用逐帧算）。
