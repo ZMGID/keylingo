@@ -442,8 +442,8 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
 }
 
 function DeferredCodeBlock({ code, language }: { code: string; language: string }) {
-  // 会话切换覆盖层期间同步 hydrate：否则 180ms 后代码块从 112px 占位撑开，
-  // 覆盖层已按「假稳定高度」揭开，用户看到抽一下。覆盖层揭开后仍延迟，减轻回翻历史成本。
+  // 会话切换 / 导航·回底 settle / 流式结束短窗：同步 hydrate。
+  // 否则 180ms 后代码块从占位撑开，贴底 pin 会再抽一下。平常回翻历史仍延迟，省成本。
   const { loading: conversationOpening } = useConversationTransition()
   const preview = code.length > 14_000
     ? `${code.slice(0, 10_000)}\n\n…\n\n${code.slice(-2_000)}`
@@ -463,6 +463,7 @@ function DeferredCodeBlock({ code, language }: { code: string; language: string 
     </ChatHeavyIsland>
   )
 }
+
 
 let mermaidRenderCounter = 0
 

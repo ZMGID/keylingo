@@ -48,9 +48,11 @@ import { measureChatSurface, recordChatPerfSample, useChatPerfRenderProbe } from
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import {
   beginMessageNavigationHydrate,
+  beginStreamSettleEagerHydrate,
   endMessageNavigationHydrate,
   resetMessageNavigationStore,
 } from './messageNavigationStore'
+
 
 export interface AssistantStreamStats {
   messageId: string
@@ -102,9 +104,12 @@ const NAVIGATOR_HOLD_STABLE_FRAMES = 4
 const NAVIGATOR_FORCE_MOUNT_RADIUS = 6
 // 收尾再锁几帧，挡住 force-mount 拆除后的迟到测高。
 const NAVIGATOR_UNLOCK_FRAMES = 10
-const NAVIGATOR_PENDING_SELECTOR =
-  '[data-chat-markdown-pending="true"], [data-chat-heavy-hydrated="false"]'
+// 只认 heavy island；data-chat-markdown-pending 从未写入，留着只会制造「假覆盖」。
+const NAVIGATOR_PENDING_SELECTOR = '[data-chat-heavy-hydrated="false"]'
 const NAVIGATOR_ALIGN_EPSILON_PX = 1
+// 会话切换遮罩：重内容一直晃也不能无限等，超时强制揭开。
+const OPEN_SETTLE_MAX_MS = 2_000
+
 
 
 
@@ -257,6 +262,15 @@ function MessageListBase({
   ), [liveGroupColumns, liveGroupId, liveGroupModelsKey])
   const streaming = coarse.streaming
   const streamFrozen = coarse.streamFrozen
+  // live → 历史 的同帧：先开短窗 eager，再让本帧新挂的 DeferredCodeBlock 读到 flag。
+  // 必须在 render 期同步调用，useEffect 会晚一帧，首挂仍走 180ms 延迟。
+  const liveRowActive = streaming || streamFrozen
+  const prevLiveRowActiveRef = useRef(liveRowActive)
+  if (prevLiveRowActiveRef.current && !liveRowActive) {
+    beginStreamSettleEagerHydrate()
+  }
+  prevLiveRowActiveRef.current = liveRowActive
+
   const error = coarse.streamError
   const streamingContent = snapshot.content
   const streamingReasoning = snapshot.reasoning
@@ -304,13 +318,22 @@ function MessageListBase({
     let readyRaf: number | null = null
     let previousHeight = -1
     let stableFrames = 0
+    const startedAt = performance.now()
+
+    const completeNow = () => {
+      committedRenderRequestRef.current = renderRequestId
+      onInitialRender?.(conversationId, renderRequestId)
+    }
 
     const completeIfReady = (): boolean | null => {
-      // 仍有未就绪的重内容：Markdown worker 占位、或 ChatHeavyIsland 尚未 hydrate。
-      // 这些阶段高度会在稍后猛涨；过早揭开覆盖层就是「代码块没加载全 + 页面抽一下」。
-      if (
-        contentEl.querySelector(NAVIGATOR_PENDING_SELECTOR)
-      ) {
+      // 超时硬揭开：病理高度抖动 / 异常 pending 不能让遮罩永远盖住。
+      if (performance.now() - startedAt >= OPEN_SETTLE_MAX_MS) {
+        completeNow()
+        return true
+      }
+
+      // 仍有未就绪的 ChatHeavyIsland：高度会在稍后猛涨。
+      if (contentEl.querySelector(NAVIGATOR_PENDING_SELECTOR)) {
         previousHeight = -1
         stableFrames = 0
         // null：停 rAF 轮询，等 MutationObserver 看到标记变化后再测。
@@ -327,8 +350,7 @@ function MessageListBase({
       }
       if (stableFrames < 2) return false
 
-      committedRenderRequestRef.current = renderRequestId
-      onInitialRender?.(conversationId, renderRequestId)
+      completeNow()
       return true
     }
     const scheduleReadyCheck = () => {
@@ -344,17 +366,24 @@ function MessageListBase({
     })
     observer.observe(contentEl, {
       attributes: true,
-      attributeFilter: ['data-chat-markdown-pending', 'data-chat-heavy-hydrated'],
+      attributeFilter: ['data-chat-heavy-hydrated'],
       childList: true,
       subtree: true,
     })
+    // 超时兜底：即使 observer/rAF 路径卡住也要揭开。
+    const timeoutId = window.setTimeout(() => {
+      if (cancelled || committedRenderRequestRef.current === renderRequestId) return
+      completeNow()
+    }, OPEN_SETTLE_MAX_MS)
     scheduleReadyCheck()
     return () => {
       cancelled = true
       observer.disconnect()
       if (readyRaf !== null) cancelAnimationFrame(readyRaf)
+      window.clearTimeout(timeoutId)
     }
   }, [contentEl, conversationId, onInitialRender, renderRequestId])
+
 
   useLayoutEffect(() => {
     if (!contentEl) return
@@ -390,6 +419,10 @@ function MessageListBase({
   const visibleNavigatorNodeIdsRef = useRef<string[]>([])
   const navigatorSettleRafRef = useRef<number | null>(null)
   const navigatorSettleGenerationRef = useRef(0)
+  // endNavigatorSession 的解锁 rAF 链；clear 时必须 cancel，避免卸载后 setState。
+  const navigatorUnlockRafRef = useRef<number | null>(null)
+  const navigatorUnlockGenerationRef = useRef(0)
+
   // 导航「先渲染再跳」：在当前视口不动的前提下，把目标行附近强制挂进 DOM 测高。
   const [forceMountRenderIndex, setForceMountRenderIndex] = useState<number | null>(null)
   const forceMountRenderIndexRef = useRef<number | null>(null)
@@ -898,6 +931,14 @@ function MessageListBase({
     }
   }, [])
 
+  const cancelNavigatorUnlock = useCallback(() => {
+    if (navigatorUnlockRafRef.current !== null) {
+      cancelAnimationFrame(navigatorUnlockRafRef.current)
+      navigatorUnlockRafRef.current = null
+    }
+    navigatorUnlockGenerationRef.current += 1
+  }, [])
+
   const setNavigationLock = useCallback((locked: boolean) => {
     navigationLockRef.current = locked
     setNavigatorLockActive((current) => (current === locked ? current : locked))
@@ -913,21 +954,26 @@ function MessageListBase({
     }
     endMessageNavigationHydrate(generation)
     // force-mount 拆除后还可能有迟到测高；锁多留几帧再开。
+    cancelNavigatorUnlock()
+    const unlockGeneration = navigatorUnlockGenerationRef.current
     let remaining = NAVIGATOR_UNLOCK_FRAMES
     const unlockTick = () => {
+      navigatorUnlockRafRef.current = null
+      if (unlockGeneration !== navigatorUnlockGenerationRef.current) return
       if (generation !== navigatorSettleGenerationRef.current) return
       remaining -= 1
       if (remaining <= 0) {
         setNavigationLock(false)
         return
       }
-      requestAnimationFrame(unlockTick)
+      navigatorUnlockRafRef.current = requestAnimationFrame(unlockTick)
     }
-    requestAnimationFrame(unlockTick)
-  }, [setNavigationLock])
+    navigatorUnlockRafRef.current = requestAnimationFrame(unlockTick)
+  }, [cancelNavigatorUnlock, setNavigationLock])
 
   const clearNavigatorPrepare = useCallback(() => {
     cancelNavigatorSettle()
+    cancelNavigatorUnlock()
     setNavigationLock(false)
     navigatorHoldRef.current = null
     bottomHoldRef.current = null
@@ -935,7 +981,8 @@ function MessageListBase({
     if (forceMountRenderIndexRef.current != null) {
       setForceMountRenderIndex(null)
     }
-  }, [cancelNavigatorSettle, setNavigationLock])
+  }, [cancelNavigatorSettle, cancelNavigatorUnlock, setNavigationLock])
+
 
 
   const alignViewportToRowIndex = useCallback((targetRenderIndex: number) => {
@@ -955,14 +1002,15 @@ function MessageListBase({
 
   const rowHasPendingMedia = useCallback((row: HTMLElement) => {
     if (row.querySelector(NAVIGATOR_PENDING_SELECTOR)) return true
-    // 图片未 decode 完会在跳转后撑高，表现为落地后再抽一下。
+    // 只等「还在加载」的图片。complete && naturalWidth===0 是坏图/空图终态，
+    // 再当 pending 会把导航/回底 hold 拖满帧预算，跳转发粘。
     const images = row.querySelectorAll('img')
     for (const image of images) {
       if (!image.complete) return true
-      if (image.naturalWidth === 0 && (image.currentSrc || image.getAttribute('src'))) return true
     }
     return false
   }, [])
+
 
   const readNavigatorTargetMetrics = useCallback((targetRenderIndex: number) => {
     const el = scrollRef.current

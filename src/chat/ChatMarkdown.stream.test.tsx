@@ -9,6 +9,7 @@ import {
 } from './conversationTransitionStore'
 import {
   beginMessageNavigationHydrate,
+  beginStreamSettleEagerHydrate,
   endMessageNavigationHydrate,
   resetMessageNavigationStore,
 } from './messageNavigationStore'
@@ -100,4 +101,17 @@ describe('ChatMarkdown streaming stability', () => {
     endMessageNavigationHydrate(generation)
   })
 
+  it('流式结束短窗 eager：历史代码块首挂即 hydrate，避免 180ms 再撑高', async () => {
+    beginStreamSettleEagerHydrate()
+    const { container, unmount } = render(
+      <ChatMarkdown content={'```ts\nconst after = 1\n```'} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const island = container.querySelector('[data-chat-heavy-island="true"]')
+    expect(island?.getAttribute('data-chat-heavy-hydrated')).toBe('true')
+    expect(container.querySelector('figure pre code')?.textContent).toContain('const after = 1')
+    unmount()
+  })
 })
