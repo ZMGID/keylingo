@@ -318,6 +318,12 @@ describe('MessageBubble timeline grouping', () => {
     expect(screen.getByText('planning details')).toBeInTheDocument()
     // 展开后组内工具块挂载：Cursor 式动词 Read + 目标（文件名）
     expect(screen.getByText('a.ts')).toBeInTheDocument()
+
+    await user.click(toggle)
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('planning details')).not.toBeInTheDocument()
+    expect(screen.queryByText('a.ts')).not.toBeInTheDocument()
   })
 
   it('keeps many collapsed history tools out of the DOM until expanded', async () => {
@@ -424,6 +430,35 @@ describe('MessageBubble timeline grouping', () => {
     expect(screen.getByRole('button', { name: /执行 1 条命令/ })).toHaveAttribute(
       'aria-expanded',
       'true',
+    )
+  })
+
+  it('unmounts an automatically expanded group when streaming finishes', () => {
+    const message: ChatMessage = {
+      id: 'msg-stream-finish',
+      role: 'assistant',
+      content: '',
+      segments: [
+        { id: 'seg-r', kind: 'reasoning', phase: 'plain', order: 1, text: 'live details' },
+        { id: 'seg-t', kind: 'tool', phase: 'tool_loop', order: 2, tool_call_id: 'tool-1' },
+      ],
+      tool_calls: [
+        { id: 'tool-1', name: 'run_command', source: 'native', status: 'completed' },
+      ],
+      timestamp: 1,
+    }
+
+    const { rerender } = render(<MessageBubble message={message} messageStreaming />)
+    expect(screen.getByText('live details')).toBeInTheDocument()
+    expect(screen.getByText('Run')).toBeInTheDocument()
+
+    rerender(<MessageBubble message={message} messageStreaming={false} />)
+
+    expect(screen.queryByText('live details')).not.toBeInTheDocument()
+    expect(screen.queryByText('Run')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /执行 1 条命令/ })).toHaveAttribute(
+      'aria-expanded',
+      'false',
     )
   })
 

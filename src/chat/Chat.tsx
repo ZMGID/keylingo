@@ -1,6 +1,7 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { GitBranch, PanelRight, TriangleAlert, X } from 'lucide-react'
-import { Sidebar, type ExtensionsNavItem } from './Sidebar'
+import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ProfilerOnRenderCallback, type ReactNode, type Ref } from 'react'
+import { PanelRight } from 'lucide-react'
+import { type ExtensionsNavItem } from './Sidebar'
+import { ChatSidebarPane } from './ChatSidebarPane'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
 import { useMessageQueue } from './hooks/useMessageQueue'
@@ -25,14 +26,21 @@ import {
   isChatSkillCenterPath,
   setHash,
 } from './chatRoutes'
-import { ChatImageViewer } from './ChatImageViewer'
 import { ApprovalCard } from './ApprovalCard'
 import { AskUserBlock } from './AskUserBlock'
-import { QueuedMessages } from './QueuedMessages'
 import { ChatTitlebar } from './ChatTitlebar'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
-import type { AssistantStreamStats } from './MessageList'
-import { InputBar } from './InputBar'
+import {
+  beginConversationTransition,
+  cancelConversationTransition,
+  completeConversationTransition,
+  getConversationTransitionSnapshot,
+  invalidateConversationTransition,
+  isCurrentConversationTransition,
+} from './conversationTransitionStore'
+import type { ConversationLoadHint } from './conversationTransitionStore'
+import type { AssistantStreamStats, MessageListProps } from './MessageList'
+import type { InputBarProps } from './InputBar'
 import { SessionUsageStrip } from './SessionUsageStrip'
 import { ModelSelector } from './ModelSelector'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
@@ -106,14 +114,12 @@ import {
   rememberDockWidth,
   rememberTreeExpanded,
 } from './persistence'
-import { ChatDotGridBackground } from './ChatDotGridBackground'
 import { RightDock, type DockPreviewRequest, type DockRevealRequest, type DockTab } from './dock/RightDock'
 import { dockApi } from './dock/api'
 import { insertTextIntoComposer } from './composerInsert'
 import { onDockDiffPreviewRequest, onDockMarkdownPreviewRequest, onDockPreviewRequest, requestDockMarkdownPreview } from './dock/dockPreview'
 import { IconButton } from '../components/Button'
 import { normalizeToolCallStatus } from './toolStatus'
-import { TypewriterText } from './TypewriterText'
 import { pickRandomChatEmptyGreeting, isTauriRuntime } from './utils'
 import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/chatTools'
 import { onChatImageViewerOpen, type ChatImageViewerItem } from './imageViewer'
@@ -147,6 +153,9 @@ import {
 import { compareTimelineSegments, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { applyLiveContextUsage } from './contextPanel'
+import { measureChatSurface, onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
+import { ChatRouteKeepAlive } from './ChatRouteKeepAlive'
+import { ChatConversationPane } from './ChatConversationPane'
 
 const AssistantCenter = lazy(() => import('./AssistantCenter').then((module) => ({
   default: module.AssistantCenter,
@@ -180,18 +189,6 @@ const SessionCenter = lazy(() => import('./SessionCenter').then((module) => ({
 const NotesCenter = lazy(() => import('./NotesCenter').then((module) => ({
   default: module.NotesCenter,
 })))
-
-const MessageList = lazy(() => import('./MessageList').then((module) => ({
-  default: module.MessageList,
-})))
-
-function MessageListLoading() {
-  return (
-    <div className="chat-themed-surface flex flex-1 items-center justify-center">
-      <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-800 dark:border-neutral-700 dark:border-t-neutral-200" />
-    </div>
-  )
-}
 
 type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'sessions' | 'onboarding'
 
@@ -239,6 +236,54 @@ function SettingsEnterPane({ exiting, className, children }: {
 
   return <div className={`${motion} ${className}`}>{children}</div>
 }
+
+/** 设置区的独立渲染边界。侧栏折叠、聊天流式状态变化不应重新执行设置页大树。 */
+const ChatSettingsPane = memo(function ChatSettingsPane({
+  settingsRef,
+  exiting,
+  className,
+  initialTab,
+  reserveTrafficLightSpace,
+  onClose,
+  onSettingsChange,
+  onReady,
+  onRequestPluginAiInstall,
+  onRender,
+}: {
+  settingsRef: Ref<SettingsShellHandle>
+  exiting: boolean
+  className: string
+  initialTab: SettingsTab
+  reserveTrafficLightSpace: boolean
+  onClose: () => void
+  onSettingsChange: () => void
+  onReady: () => void
+  onRequestPluginAiInstall: (pluginId: string) => void | Promise<void>
+  onRender: ProfilerOnRenderCallback
+}) {
+  return (
+    <Suspense fallback={null}>
+      <SettingsEnterPane
+        key="settings"
+        exiting={exiting}
+        className={className}
+      >
+        <Profiler id="SettingsShell" onRender={onRender}>
+          <SettingsShell
+            ref={settingsRef}
+            variant="embedded"
+            initialTab={initialTab}
+            reserveTrafficLightSpace={reserveTrafficLightSpace}
+            onClose={onClose}
+            onSettingsChange={onSettingsChange}
+            onReady={onReady}
+            onRequestPluginAiInstall={onRequestPluginAiInstall}
+          />
+        </Profiler>
+      </SettingsEnterPane>
+    </Suspense>
+  )
+})
 
 /**
  * 记住用户在顶栏最后一次选的聊天模型与思考等级，作为新会话/空会话的默认（以用户的选择为准，
@@ -885,6 +930,8 @@ type SendMessageOptions = {
 const NO_QUEUED_MESSAGES: QueuedMessage[] = []
 
 export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
+  useChatPerfRenderProbe('Chat', { view: hashPath() })
+  useChatPerfLongTaskProbe()
   const [chatView, setChatView] = useState<ChatView>(() => {
     const path = hashPath()
     if (isChatOnboardingRoute(path)) return 'onboarding'
@@ -912,9 +959,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     // 其余初始视图（会话/助手/技能/引导）挂载即有骨架，直接发信号。
     if (!initialViewIsSettingsRef.current) emitContentReady()
   }, [emitContentReady])
-  const [currentConversation, setCurrentConversation] = useState<Awaited<
-    ReturnType<typeof chatApi.getConversation>
-  > | null>(null)
+  const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null)
+  const [conversationRenderRequestId, setConversationRenderRequestId] = useState(0)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => getRememberedChatSidebarCollapsed())
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedProject, setSelectedProject] = useState<ChatProject | null>(null)
@@ -1062,12 +1108,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     pendingUserPrompts: pendingUserPromptsRef.current,
   }), [])
 
+  const generatingConversationIdsRef = useRef<Set<string>>(new Set())
   const syncGeneratingConversationIds = useCallback(() => {
-    setGeneratingConversationIds(collectGeneratingConversationIds(
+    const next = collectGeneratingConversationIds(
       inFlightConversationsRef.current,
       streamSnapshotsRef.current,
       pendingToolConfirmsRef.current,
-    ))
+    )
+    const previous = generatingConversationIdsRef.current
+    if (previous.size === next.size && [...previous].every((id) => next.has(id))) return
+    generatingConversationIdsRef.current = next
+    setGeneratingConversationIds(next)
   }, [])
 
   const markConversationInFlight = useCallback((conversationId: string) => {
@@ -1545,14 +1596,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 路由簇抽成 useChatRouting（见 hooks/useChatRouting.ts）。
   // reloadConversation 定义在下方且自身依赖 syncConversationRoute（循环依赖），
   // 故经 ref 间接调用：hook 只读 ref.current，ref 在其定义后赋值。
-  const reloadConversationRef = useRef<((id: string) => void) | null>(null)
+  const reloadConversationRef = useRef<((id: string, transitionRequestId?: number) => void) | null>(null)
   const handleRouteResetConversation = useCallback(() => {
+    invalidateConversationTransition()
     currentConversationIdRef.current = null
     applyConversation(null)
     restoreStreamingPreview(null)
   }, [applyConversation, restoreStreamingPreview])
   const handleRouteLoadConversation = useCallback((conversationId: string) => {
-    reloadConversationRef.current?.(conversationId)
+    const requestId = beginConversationTransition(conversationId)
+    reloadConversationRef.current?.(conversationId, requestId)
   }, [])
 
   const openEmbeddedSettingsForPlugins = useCallback(() => {
@@ -1679,6 +1732,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncSettingsRoute()
   }, [syncSettingsRoute])
 
+  const handleOpenChatSettings = useCallback(() => {
+    openEmbeddedSettings('chat')
+  }, [openEmbeddedSettings])
+
   const openAssistantCenter = useCallback(() => {
     setChatView('assistants')
     syncAssistantCenterRoute()
@@ -1800,17 +1857,41 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setSidebarProfileRefreshKey((key) => key + 1)
   }, [loadDefaultModel, loadSkills, onSettingsChange, refreshToolIndicator])
 
-  const reloadConversation = useCallback(async (conversationId: string, options?: { force?: boolean }) => {
+  const reloadConversation = useCallback(async (conversationId: string, options?: { force?: boolean; transitionRequestId?: number }) => {
     if (isConversationInFlight(inFlightConversationsRef.current, conversationId) && !options?.force) {
       return
     }
+    const transitionRequestId = options?.transitionRequestId
     try {
       const conv = await chatApi.getConversation(conversationId)
+      const transition = getConversationTransitionSnapshot()
+      if (
+        (transitionRequestId !== undefined
+          && !isCurrentConversationTransition(transitionRequestId, conversationId))
+        || (transition.loading && transition.targetConversationId !== conversationId)
+      ) return
       currentConversationIdRef.current = conversationId
-      applyConversation(conv)
+      const renderRequestId = transitionRequestId
+        ?? (transition.loading && transition.targetConversationId === conversationId
+          ? transition.requestId
+          : 0)
+      startTransition(() => {
+        applyConversation(conv)
+        if (renderRequestId > 0) setConversationRenderRequestId(renderRequestId)
+      })
+      if (renderRequestId > 0 && conv.messages.length === 0) {
+        window.requestAnimationFrame(() => {
+          completeConversationTransition(conversationId, renderRequestId)
+        })
+      }
       restoreStreamingPreview(conversationId)
       setStreamCoarse({ cancelling: false })
     } catch (err) {
+      if (
+        transitionRequestId !== undefined
+        && !isCurrentConversationTransition(transitionRequestId, conversationId)
+      ) return
+      const transition = getConversationTransitionSnapshot()
       console.error('Failed to reload conversation:', err)
       // B2：reload 失败（尤其"对话不存在"）——把 ghost 从乐观列表/in-flight/快照剔除并刷新侧栏。
       dropConversationLocally(conversationId)
@@ -1820,13 +1901,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         applyConversation(null)
         syncConversationRoute(null)
       }
+      if (transitionRequestId !== undefined) {
+        cancelConversationTransition(transitionRequestId)
+      } else if (transition.loading && transition.targetConversationId === conversationId) {
+        cancelConversationTransition(transition.requestId)
+      }
       refreshSidebar()
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
     }
   }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
 
   // 填充上面 useChatRouting 用来打破循环依赖的间接层。
-  reloadConversationRef.current = (id: string) => { void reloadConversation(id, { force: true }) }
+  reloadConversationRef.current = (id: string, transitionRequestId?: number) => {
+    void reloadConversation(id, { force: true, transitionRequestId })
+  }
 
   const refreshContextStats = useCallback(async (conversationId?: string) => {
     const targetConversationId = conversationId ?? currentConversationIdRef.current
@@ -2037,7 +2125,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               streaming: true,
               startedAt: Date.now(),
             })
-            touchGroup()
+            touchGroup(payload.conversationId)
           }
           if (currentConversationIdRef.current === payload.conversationId) {
             setStreamCoarse({ streaming: true, streamFrozen: false, cancelling: false })
@@ -2076,7 +2164,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           finalizeReasoningDurationOnDone(column)
           column.streaming = false
           // 列结束是终止帧：立即 flush（不等下一帧），让该列完成态尽快可见。
-          flushGroups()
+          flushGroups(payload.conversationId)
           if (restoredRunIdsRef.current.delete(payload.runId)) {
             const group = getActiveGroup(payload.conversationId)
             if (group?.columns.every((item) => !item.streaming)) {
@@ -2086,7 +2174,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           }
         } else {
           // 内容 delta 经 rAF 合帧（N 列高频 delta 不各自打爆 setState）。
-          touchGroup()
+          touchGroup(payload.conversationId)
         }
         // 组的整体「done / 持久化」交给 sendMessage 返回后的统一收尾；这里不触发 finishStreamingRun。
         return
@@ -2275,7 +2363,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         if (!column) return
         const record = toolEventToRecord(payload)
         applyToolRecordToSnapshot(column, record)
-        touchGroup()
+        touchGroup(payload.conversationId)
         return
       }
       const snapshot = ensureStreamSnapshot(payload.conversationId)
@@ -2612,17 +2700,31 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [refreshSidebar, reloadConversation, syncConversationRoute])
 
-  const handleSelectConversation = useCallback(async (conversationId: string) => {
+  const handleSelectConversation = useCallback(async (
+    conversationId: string,
+    conversationHint?: ConversationLoadHint,
+  ) => {
+    const requestId = beginConversationTransition(conversationId, conversationHint)
     setAssistantStreamStatsByMessageId({})
     setHookWarning(null)
     try {
       const conv = await chatApi.getConversation(conversationId)
+      if (!isCurrentConversationTransition(requestId, conversationId)) return
       currentConversationIdRef.current = conversationId
-      applyConversation(conv)
+      startTransition(() => {
+        applyConversation(conv)
+        setConversationRenderRequestId(requestId)
+      })
+      if (conv.messages.length === 0) {
+        window.requestAnimationFrame(() => {
+          completeConversationTransition(conversationId, requestId)
+        })
+      }
       restoreStreamingPreview(conversationId)
       syncConversationRoute(conversationId)
       setStreamError('')
     } catch (err) {
+      if (!isCurrentConversationTransition(requestId, conversationId)) return
       console.error('Failed to load conversation:', err)
       // B2：点开一个不存在/加载失败的 ghost——从乐观列表 + in-flight + 快照剔除，
       // 清空当前会话并刷新侧栏，让 ghost 自动消失而不是卡住。
@@ -2635,10 +2737,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       syncConversationRoute(null)
       refreshSidebar()
       setStreamError(typeof err === 'string' ? err : (err as Error).message || '对话加载失败，已从列表移除')
+      cancelConversationTransition(requestId)
     }
   }, [applyConversation, dropConversationLocally, refreshSidebar, restoreStreamingPreview, syncConversationRoute])
 
+  const handleConversationFirstCommit = useCallback((conversationId: string, requestId: number) => {
+    window.requestAnimationFrame(() => {
+      completeConversationTransition(conversationId, requestId)
+    })
+  }, [])
+
   const handleNewConversation = useCallback(async () => {
+    invalidateConversationTransition()
     setSelectedProject(null)
     setSelectedSet(null)
     setAssistantStreamStatsByMessageId({})
@@ -2667,6 +2777,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   ])
 
   const handleClearChat = useCallback(async () => {
+    invalidateConversationTransition()
     const conversationId = currentConversationIdRef.current
     if (conversationId && isConversationBusy(
       conversationId,
@@ -3875,6 +3986,64 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const showEmptyHero = chatView === 'conversation' && !hasMessages && !streamCoarse.streaming && !streamCoarse.streamError
   const emptyHeroGreetingKey = showEmptyHero ? currentConversation?.id : null
 
+  // 输入栏是聊天主区里除 MessageList 外最大的常驻子树。把它的 slot 和对象值稳定下来，
+  // 配合 InputBar 自身的 memo，侧栏/设置路由等无关状态变化不会再让输入栏重跑整棵树。
+  const composerCurrentAssistant = useMemo(
+    () => currentAssistantSnapshot
+      ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name }
+      : null,
+    [currentAssistantSnapshot],
+  )
+  const composerKnowledgeBaseIds = useMemo(
+    () => currentConversation
+      ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? [])
+      : draftKnowledgeBaseIds,
+    [
+      currentConversation,
+      draftKnowledgeBaseIds,
+    ],
+  )
+  const composerForceKnowledgeSearch = currentConversation
+    ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false)
+    : draftForceKnowledgeSearch
+  const composerContextSlot = useMemo(
+    () => (
+      <ContextIndicator
+        contextState={contextState}
+        messageCount={displayMessages.length}
+        loading={contextLoading}
+        compressing={contextCompressing}
+        error={contextError}
+        usesExternalRuntime={usesExternalRuntime}
+        onRefresh={handleRefreshContext}
+        onCompress={handleCompressContext}
+        lang={uiLang}
+      />
+    ),
+    [
+      contextCompressing,
+      contextError,
+      contextLoading,
+      contextState,
+      displayMessages.length,
+      handleCompressContext,
+      handleRefreshContext,
+      uiLang,
+      usesExternalRuntime,
+    ],
+  )
+  const composerUsageSlot = useMemo(
+    () => (
+      <SessionUsageStrip
+        messages={displayMessages}
+        lang={uiLang}
+        apiFormats={providerApiFormats}
+        defaultApiFormat={currentConversation ? (providerApiFormats[currentConversation.provider_id] ?? '') : ''}
+      />
+    ),
+    [currentConversation, displayMessages, providerApiFormats, uiLang],
+  )
+
   const emptyHeroGreeting = useMemo(
     () => ({
       key: emptyHeroGreetingKey,
@@ -3884,8 +4053,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   )
 
   const setSidebarCollapsedPersisted = useCallback((collapsed: boolean) => {
+    const finish = measureChatSurface(
+      'sidebar-collapse',
+      document.querySelector('.chat-window-shell'),
+      collapsed ? 'collapsed' : 'expanded',
+    )
     setSidebarCollapsed(collapsed)
     rememberChatSidebarCollapsed(collapsed)
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(finish))
+    } else {
+      finish()
+    }
   }, [])
 
   // ---------- Right Dock ----------
@@ -4055,7 +4234,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   useEffect(() => {
     if (!isTauriRuntime()) return
     let cancelled = false
-
     void (async () => {
       const { getCurrentWindow } = await import('@tauri-apps/api/window')
       const { LogicalSize } = await import('@tauri-apps/api/dpi')
@@ -4095,8 +4273,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     runAfterLeavingSettings(() => handleSelectSet(set))
   }, [handleSelectSet, runAfterLeavingSettings])
 
-  const handleSidebarSelectConversation = useCallback((id: string) => {
-    runAfterLeavingSettings(() => void handleSelectConversation(id))
+  const handleSidebarSelectConversation = useCallback((id: string, conversation?: ConversationListItem) => {
+    runAfterLeavingSettings(() => void handleSelectConversation(id, {
+      messageCount: conversation?.message_count,
+    }))
   }, [handleSelectConversation, runAfterLeavingSettings])
 
   const handleSidebarNewConversation = useCallback(() => {
@@ -4207,7 +4387,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   // 会话页顶栏控件。非 mac 渲染进全宽标题栏带（单行 chrome），mac 仍留在主区 52px 顶栏。
   // 抽成变量而非组件：依赖十余个 Chat 局部状态与回调，拆组件只会换来一长串 props。
-  const conversationTitlebarControls = (
+  const conversationTitlebarControls = useMemo(() => (
     <>
       <div className="flex min-w-0 items-center gap-1">
         <div className="shrink-0" data-tauri-drag-region="false">
@@ -4282,13 +4462,279 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         </div>
       </div>
     </>
-  )
+  ), [
+    activeAgentRuntime,
+    activeModel,
+    activeProviderId,
+    approvalPolicy,
+    currentConversation,
+    dockOpen,
+    draftThinkingLevel,
+    handleApprovalPolicyChange,
+    handleExternalModelChange,
+    handleModelChange,
+    handleOpenDockTasks,
+    handleRuntimeChange,
+    handleThinkingLevelChange,
+    handleToggleDock,
+    uiLang,
+    usesExternalRuntime,
+  ])
+
+  const handleTitlebarToggleSidebar = useCallback(() => {
+    if (sidebarCollapsed) setSidebarCollapsedPersisted(false)
+    else handleCollapseSidebar()
+  }, [handleCollapseSidebar, setSidebarCollapsedPersisted, sidebarCollapsed])
+  const handleTitlebarNewConversation = useCallback(() => {
+    runAfterLeavingSettings(() => void handleNewConversation())
+  }, [handleNewConversation, runAfterLeavingSettings])
+  const handleDismissHookWarning = useCallback(() => setHookWarning(null), [])
+  const handleCloseImageViewer = useCallback(() => setImageViewerItem(null), [])
+
+  const inputBarProps = useMemo<InputBarProps>(() => ({
+    onSend: handleSendMessage,
+    onQueue: handleQueueMessage,
+    disabled: isCurrentConversationBusy(),
+    onCancel: handleCancelStream,
+    cancelVisible: streamCoarse.streaming,
+    cancelling: streamCoarse.cancelling,
+    onOpenSettings: handleOpenChatSettings,
+    onOpenTools: openSkillCenter,
+    onNewChat: handleNewConversation,
+    onCompactContext: handleCompressContext,
+    onClearChat: handleClearChat,
+    enabledTools,
+    toolsDisabledReason,
+    toolStatusHint,
+    sendDisabledReason,
+    agentPlanState: currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null,
+    agentTodoState: currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null,
+    onAgentPlanModeChange: handleAgentPlanModeChange,
+    enabledSkills: slashSkills,
+    onOpenSkillSettings: openSkillCenter,
+    selectedProject,
+    conversationProject,
+    onSelectProject: handleSidebarSelectProject,
+    showProjectEntry: true,
+    selectedSet,
+    onSelectSet: handleSidebarSelectSet,
+    currentAssistant: composerCurrentAssistant,
+    onOpenAssistantCenter: openAssistantCenter,
+    onSelectAssistant: handleSelectAssistant,
+    autoFocus: true,
+    usesExternalRuntime,
+    externalAgentName: activeAgentRuntime.externalAgentId ?? null,
+    conversationId: currentConversation?.id ?? null,
+    knowledgeBaseIds: composerKnowledgeBaseIds,
+    onChangeKnowledgeBaseIds: handleChangeKnowledgeBaseIds,
+    forceKnowledgeSearch: composerForceKnowledgeSearch,
+    onToggleForceKnowledgeSearch: handleToggleForceKnowledgeSearch,
+    mcpServers,
+    onToggleMcpServer: handleToggleMcpServer,
+    webSearchMode: activeWebSearchMode,
+    onSetWebSearchMode: handleSetWebSearchMode,
+    builtinWebSearchSupported: activeBuiltinWebSearchSupported,
+    replyModels: activeReplyModels,
+    onChangeReplyModels: handleChangeReplyModels,
+    contextSlot: composerContextSlot,
+    gitWorkdir: dockWorkdir || null,
+    gitLang: uiLang,
+    onOpenGitPanel: handleOpenDockGit,
+    modeOptions: composerModes.options,
+    modeValue: composerModes.current,
+    onModeChange: handleComposerModeChange,
+    usageSlot: composerUsageSlot,
+  }), [
+    activeAgentRuntime.externalAgentId,
+    activeBuiltinWebSearchSupported,
+    activeReplyModels,
+    activeWebSearchMode,
+    composerModes,
+    composerContextSlot,
+    composerCurrentAssistant,
+    composerForceKnowledgeSearch,
+    composerKnowledgeBaseIds,
+    composerUsageSlot,
+    conversationProject,
+    currentConversation,
+    dockWorkdir,
+    enabledTools,
+    handleAgentPlanModeChange,
+    handleCancelStream,
+    handleChangeKnowledgeBaseIds,
+    handleChangeReplyModels,
+    handleClearChat,
+    handleCompressContext,
+    handleComposerModeChange,
+    handleOpenChatSettings,
+    handleOpenDockGit,
+    handleQueueMessage,
+    handleSelectAssistant,
+    handleSendMessage,
+    handleSetWebSearchMode,
+    handleSidebarSelectProject,
+    handleSidebarSelectSet,
+    handleToggleForceKnowledgeSearch,
+    handleToggleMcpServer,
+    handleNewConversation,
+    isCurrentConversationBusy,
+    mcpServers,
+    openAssistantCenter,
+    openSkillCenter,
+    selectedProject,
+    selectedSet,
+    slashSkills,
+    streamCoarse,
+    toolsDisabledReason,
+    toolStatusHint,
+    sendDisabledReason,
+    uiLang,
+    usesExternalRuntime,
+  ])
+
+  const messageListProps = useMemo<MessageListProps>(() => ({
+    conversationId: currentConversation?.id,
+    messages: displayMessages,
+    renderRequestId: conversationRenderRequestId,
+    onInitialRender: handleConversationFirstCommit,
+    agentPlanState: currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null,
+    assistantStreamStatsByMessageId,
+    onUpdateMessage: handleUpdateMessage,
+    onRegenerateMessage: handleRegenerateMessage,
+    onForkMessage: handleForkMessage,
+    onRewindMessage: handleRewindMessage,
+    onDeleteMessage: handleDeleteMessage,
+    onSaveMessageToNote: handleSaveMessageToNote,
+    onRetryLastUser: handleRegenerateMessage,
+    onExecuteAgentPlan: handleExecuteAgentPlan,
+    groupSelections: currentConversation?.group_selections ?? currentConversation?.groupSelections ?? {},
+    onSetGroupSelection: handleSetGroupSelection,
+    contextState,
+    compactionInProgress: contextCompressing,
+    animateCompactionBoundaryId: animateCompactionBoundaryId,
+    lang: uiLang,
+  }), [
+    animateCompactionBoundaryId,
+    assistantStreamStatsByMessageId,
+    contextCompressing,
+    contextState,
+    currentConversation,
+    conversationRenderRequestId,
+    displayMessages,
+    handleConversationFirstCommit,
+    handleDeleteMessage,
+    handleExecuteAgentPlan,
+    handleForkMessage,
+    handleRegenerateMessage,
+    handleRewindMessage,
+    handleSaveMessageToNote,
+    handleSetGroupSelection,
+    handleUpdateMessage,
+    uiLang,
+  ])
+
+  const forkOrigin = useMemo(() => {
+    const origin = currentConversation?.forked_from ?? currentConversation?.forkedFrom
+    if (!origin) return null
+    const sourceId = origin.conversation_id ?? origin.conversationId
+    return sourceId ? { sourceId, title: origin.title } : null
+  }, [currentConversation])
+
+  const pendingSlot = useMemo(() => (
+    (pendingToolConfirm || pendingSessionConsent || pendingUserPrompt) ? (
+    <div className="shrink-0 px-6">
+      <div className="mx-auto w-full max-w-4xl">
+        {pendingUserPrompt && pendingUserPromptRecord && (
+          <AskUserBlock
+            variant="docked"
+            toolCall={pendingUserPromptRecord}
+            onResolved={() => dismissPendingUserPrompt(
+              pendingUserPrompt.conversationId,
+              pendingUserPrompt.toolCallId,
+            )}
+          />
+        )}
+        {pendingToolConfirm && (
+          <ApprovalCard
+            title={toolApprovalTitle(pendingToolConfirm)}
+            subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
+            detail={pendingToolConfirm.argumentsPreview}
+            actions={isPlanApproval(pendingToolConfirm)
+              ? [
+                { label: '拒绝 / 让它改', onSelect: () => resolvePendingToolConfirm(false) },
+                ...PLAN_APPROVAL_ACTIONS.map((action, index) => ({
+                  label: action.label,
+                  primary: index === PLAN_APPROVAL_ACTIONS.length - 1,
+                  hint: index === PLAN_APPROVAL_ACTIONS.length - 1 ? 'Ctrl+↵' : undefined,
+                  onSelect: () => {
+                    resolvePendingToolConfirm(true, false, action.mode)
+                    void handleExternalSandboxChange(action.mode).catch((error) => {
+                      console.error('Failed to persist the post-plan permission mode:', error)
+                    })
+                  },
+                })),
+              ]
+              : isEnterPlanApproval(pendingToolConfirm)
+                ? [
+                  { label: '不用，直接做', onSelect: () => resolvePendingToolConfirm(false) },
+                  {
+                    label: '总是允许',
+                    onSelect: () => {
+                      resolvePendingToolConfirm(true, true)
+                      void handleExternalSandboxChange('plan').catch((error) => {
+                        console.error('Failed to persist the plan permission mode:', error)
+                      })
+                    },
+                  },
+                  {
+                    label: '进入计划模式',
+                    primary: true,
+                    hint: 'Ctrl+↵',
+                    onSelect: () => {
+                      resolvePendingToolConfirm(true)
+                      void handleExternalSandboxChange('plan').catch((error) => {
+                        console.error('Failed to persist the plan permission mode:', error)
+                      })
+                    },
+                  },
+                ]
+                : [
+                  { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
+                  { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
+                  { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
+                ]}
+          />
+        )}
+        {pendingSessionConsent && (
+          <ApprovalCard
+            title="允许本次会话使用文件和命令工具？"
+            subtitle="授权后，本会话内 Kivio 可读写、删除磁盘上的任意文件并执行任意终端命令（包括项目目录之外）。仅本次会话有效，重启后需重新授权。"
+            actions={[
+              { label: '拒绝', onSelect: () => resolvePendingSessionConsent(false) },
+              { label: '允许本次会话', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingSessionConsent(true) },
+            ]}
+          />
+        )}
+      </div>
+    </div>
+    ) : null
+  ), [
+    dismissPendingUserPrompt,
+    handleExternalSandboxChange,
+    pendingSessionConsent,
+    pendingToolConfirm,
+    pendingUserPrompt,
+    pendingUserPromptRecord,
+    resolvePendingSessionConsent,
+    resolvePendingToolConfirm,
+  ])
 
   return (
     <LangContext.Provider value={uiLang}>
-    <div
-      className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
-    >
+    <Profiler id="ChatShell" onRender={onChatPerfProfiler}>
+      <div
+        className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}
+      >
       {!usesNativeTitlebar && (
         <ChatTitlebar
           sidebarExpanded={!sidebarCollapsed}
@@ -4296,13 +4742,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
              只看 sidebarCollapsed 会在设置页多留 240px 空档。 */
           sidebarVisible={!(sidebarCollapsed || settingsPanelActive)}
           settingsMode={settingsPanelActive}
-          onToggleSidebar={() => {
-            if (sidebarCollapsed) setSidebarCollapsedPersisted(false)
-            else handleCollapseSidebar()
-          }}
-          onNewConversation={() => {
-            runAfterLeavingSettings(() => void handleNewConversation())
-          }}
+          onToggleSidebar={handleTitlebarToggleSidebar}
+          onNewConversation={handleTitlebarNewConversation}
         >
           {chatView === 'conversation' ? conversationTitlebarControls : null}
         </ChatTitlebar>
@@ -4313,7 +4754,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
            否则左列会先空一帧、且关闭时侧栏是瞬间 pop 回来的）。退场期保持折叠，
            等视图真正切回会话后再滑入，与会话页入场同时发生 —— 否则侧栏会在设置页
            淡出的同时把它挤窄。 */
-        <Sidebar
+        <ChatSidebarPane
+          onRender={onChatPerfProfiler}
           lang={uiLang}
           currentConversationId={currentConversation?.id}
           generatingConversationIds={generatingConversationIds}
@@ -4341,6 +4783,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         />
         ) : null}
 
+        <ChatRouteKeepAlive
+          activeKey={chatView === 'conversation' || chatView === 'settings' ? chatView : 'center'}
+        >
         {chatView === 'onboarding' ? (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <OnboardingShell
@@ -4350,29 +4795,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             />
           </div>
         ) : chatView === 'settings' ? (
-          /* Suspense 必须包在动画容器外面：放在里面时 fallback=null 会让容器先带着空白挂载、
-             动画播在空白上，lazy 内容晚几帧才 pop 进来（进场看起来"没有动画"）。
-             包在外面则容器与内容一起挂载，动画全程播在真实内容上。 */
-          <Suspense fallback={null}>
-            <SettingsEnterPane
-              key="settings"
-              exiting={settingsExiting}
-              className={`flex min-h-0 min-w-0 flex-1 flex-col${
-                !usesNativeTitlebar && settingsPanelActive ? ' settings-embedded-under-strip' : ''
-              }`}
-            >
-              <SettingsShell
-                ref={settingsRef}
-                variant="embedded"
-                initialTab={settingsInitialTab}
-                reserveTrafficLightSpace={(sidebarCollapsed || extensionsNavItem === null) && usesNativeTitlebar}
-                onClose={handleSettingsClose}
-                onSettingsChange={handleSettingsChange}
-                onReady={emitContentReady}
-                onRequestPluginAiInstall={handleRequestPluginAiInstall}
-              />
-            </SettingsEnterPane>
-          </Suspense>
+          <ChatSettingsPane
+            settingsRef={settingsRef}
+            exiting={settingsExiting}
+            className={`flex min-h-0 min-w-0 flex-1 flex-col${
+              !usesNativeTitlebar && settingsPanelActive ? ' settings-embedded-under-strip' : ''
+            }`}
+            initialTab={settingsInitialTab}
+            reserveTrafficLightSpace={(sidebarCollapsed || extensionsNavItem === null) && usesNativeTitlebar}
+            onClose={handleSettingsClose}
+            onSettingsChange={handleSettingsChange}
+            onReady={emitContentReady}
+            onRequestPluginAiInstall={handleRequestPluginAiInstall}
+            onRender={onChatPerfProfiler}
+          />
         ) : chatView === 'assistants' ? (
           <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
@@ -4430,433 +4866,41 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             </Suspense>
           </div>
         ) : (
-          <div className="chat-motion-pane-in chat-main-pane relative flex min-w-0 flex-1 flex-col">
-            {/* 图片查看器为浮层(见下方 overlay),不替换主面板 —— 否则会卸载 InputBar,
-                丢掉待发送附件 / 草稿。here 起正常内容,始终挂载。 */}
-            <>
-                {/* 非 mac 的顶栏控件已并进全宽标题栏带（见上方 ChatTitlebar），此行只 mac 渲染。 */}
-                {usesNativeTitlebar && (
-                <header
-              className={`chat-titlebar-row ${chatTitlebarRowClass} min-w-0 gap-2 ${
-                sidebarCollapsed
-                  ? `${chatTitlebarMacInsetClass} chat-titlebar-row--collapsed-mac pr-3`
-                  : 'px-6'
-              }`}
-              data-tauri-drag-region
-            >
-              {/* mac 收起态把这两枚按钮借到主区顶栏、给交通灯让位。 */}
-              {sidebarCollapsed && (
-                <ChatTitlebarActions
-                  sidebarExpanded={false}
-                  onToggleSidebar={() => setSidebarCollapsedPersisted(false)}
-                  onNewConversation={() => {
-                    runAfterLeavingSettings(() => void handleNewConversation())
-                  }}
-                />
-              )}
-              {conversationTitlebarControls}
-                </header>
-                )}
-
-                {protocolVersionMismatch && (
-                  <div
-                    className="flex shrink-0 items-center gap-2 border-y border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-900 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-100"
-                    role="alert"
-                  >
-                    <TriangleAlert className="shrink-0" size={15} aria-hidden="true" />
-                    <span>组件版本不一致，请重启 Kivio</span>
-                  </div>
-                )}
-
-                <div className="flex min-h-0 flex-1 flex-col">
-                  {showEmptyHero ? (
-                    <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-16">
-                  <ChatDotGridBackground />
-                  <div className="chat-empty-hero-stack relative z-10 w-full max-w-4xl space-y-8">
-                    <h2
-                      className="chat-motion-fade-up chat-empty-hero-title text-center text-[1.75rem] font-medium leading-snug tracking-[-0.02em] text-neutral-900 dark:text-neutral-50 sm:text-[2rem]"
-                      aria-label={
-                        currentAssistantSnapshot
-                          ? currentAssistantSnapshot.name
-                          : selectedProject
-                            ? `Start in “${selectedProject.name}”`
-                            : selectedSet
-                              ? `Start in “${selectedSet.name}”`
-                              : emptyHeroGreeting.text
-                      }
-                    >
-                      {currentAssistantSnapshot ? (
-                        currentAssistantSnapshot.name
-                      ) : selectedProject ? (
-                        `Start in “${selectedProject.name}”`
-                      ) : selectedSet ? (
-                        `Start in “${selectedSet.name}”`
-                      ) : (
-                        <TypewriterText
-                          key={emptyHeroGreeting.key}
-                          text={emptyHeroGreeting.text}
-                          active={showEmptyHero}
-                        />
-                      )}
-                    </h2>
-                    <div
-                      className="chat-motion-fade-up"
-                      style={{ ['--chat-motion-delay' as string]: '120ms' }}
-                    >
-                    <InputBar
-                      layout="inline"
-                      onSend={(content, attachments) => void handleSendMessage(content, attachments)}
-                      onQueue={handleQueueMessage}
-                      disabled={isCurrentConversationBusy()}
-                      onCancel={() => void handleCancelStream()}
-                      cancelVisible={streamCoarse.streaming}
-                      cancelling={streamCoarse.cancelling}
-                      onOpenSettings={() => openEmbeddedSettings('chat')}
-                      onOpenTools={() => openSkillCenter()}
-                      onNewChat={() => void handleNewConversation()}
-                      onCompactContext={() => void handleCompressContext()}
-                      onClearChat={() => void handleClearChat()}
-                      enabledTools={enabledTools}
-                      toolsDisabledReason={toolsDisabledReason}
-                      toolStatusHint={toolStatusHint}
-                      sendDisabledReason={sendDisabledReason}
-                      agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
-                      agentTodoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null}
-                      onAgentPlanModeChange={handleAgentPlanModeChange}
-                      enabledSkills={slashSkills}
-                      onOpenSkillSettings={openSkillCenter}
-                      selectedProject={selectedProject}
-                      conversationProject={conversationProject}
-                      onSelectProject={handleSidebarSelectProject}
-                      showProjectEntry
-                      selectedSet={selectedSet}
-                      onSelectSet={handleSidebarSelectSet}
-                      currentAssistant={currentAssistantSnapshot ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name } : null}
-                      onOpenAssistantCenter={openAssistantCenter}
-                      onSelectAssistant={handleSelectAssistant}
-                      autoFocus
-                      usesExternalRuntime={usesExternalRuntime}
-                      externalAgentName={activeAgentRuntime.externalAgentId ?? null}
-                      conversationId={currentConversation?.id ?? null}
-                      knowledgeBaseIds={currentConversation ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? []) : draftKnowledgeBaseIds}
-                      onChangeKnowledgeBaseIds={handleChangeKnowledgeBaseIds}
-                      forceKnowledgeSearch={currentConversation ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false) : draftForceKnowledgeSearch}
-                      onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
-                      mcpServers={mcpServers}
-                      onToggleMcpServer={handleToggleMcpServer}
-                      webSearchMode={activeWebSearchMode}
-                      onSetWebSearchMode={handleSetWebSearchMode}
-                      builtinWebSearchSupported={activeBuiltinWebSearchSupported}
-                      replyModels={activeReplyModels}
-                      onChangeReplyModels={handleChangeReplyModels}
-                      contextSlot={
-                        <ContextIndicator
-                          contextState={contextState}
-                          messageCount={displayMessages.length}
-                          loading={contextLoading}
-                          compressing={contextCompressing}
-                          error={contextError}
-                          usesExternalRuntime={usesExternalRuntime}
-                          onRefresh={handleRefreshContext}
-                          onCompress={() => void handleCompressContext()}
-                          lang={uiLang}
-                        />
-                      }
-                      gitWorkdir={dockWorkdir || null}
-                      gitLang={uiLang}
-                      onOpenGitPanel={handleOpenDockGit}
-                      modeOptions={composerModes.options}
-                      modeValue={composerModes.current}
-                      onModeChange={handleComposerModeChange}
-                      usageSlot={
-                        <SessionUsageStrip
-                          messages={displayMessages}
-                          lang={uiLang}
-                          apiFormats={providerApiFormats}
-                          defaultApiFormat={
-                            currentConversation
-                              ? (providerApiFormats[currentConversation.provider_id] ?? '')
-                              : ''
-                          }
-                        />
-                      }
-                    />
-                    </div>
-                  </div>
-                </div>
-                  ) : (
-                    <>
-                  {hookWarning && hookWarning.conversationId === currentConversation?.id && (
-                    <div className="flex items-start gap-2 px-4 pt-2">
-                      <div className="flex min-w-0 flex-1 items-start gap-2 rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] leading-4 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200">
-                        <span className="min-w-0 flex-1">
-                          {i18n[uiLang].chatHookFailed
-                            .replace('{name}', hookWarning.hookName || hookWarning.event)
-                            .replace('{event}', hookWarning.event)}
-                          {` — ${hookWarning.message}`}
-                        </span>
-                        <IconButton
-                          size="xs"
-                          variant="ghost"
-                          label={i18n[uiLang].chatHookDismiss}
-                          onClick={() => setHookWarning(null)}
-                        >
-                          <X size={12} />
-                        </IconButton>
-                      </div>
-                    </div>
-                  )}
-                  {(() => {
-                    const origin = currentConversation?.forked_from ?? currentConversation?.forkedFrom
-                    if (!origin) return null
-                    const sourceId = origin.conversation_id ?? origin.conversationId
-                    if (!sourceId) return null
-                    return (
-                      <div className="flex justify-center px-4 pt-2">
-                        <button
-                          type="button"
-                          onClick={() => void handleSelectConversation(sourceId)}
-                          className="inline-flex max-w-full items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-1 text-[11px] text-neutral-500 transition-colors hover:bg-neutral-200 hover:text-neutral-700 dark:bg-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-neutral-200"
-                          title={`分叉自「${origin.title}」，点击回到源对话`}
-                        >
-                          <GitBranch size={12} strokeWidth={2} className="shrink-0" />
-                          <span className="truncate">分叉自 {origin.title}</span>
-                        </button>
-                      </div>
-                    )
-                  })()}
-                  {importedHistoryStale && (
-                    <div className="flex justify-center px-4 pt-2">
-                      <span
-                        className="inline-flex max-w-full items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-[11px] text-amber-700 dark:bg-amber-500/15 dark:text-amber-400"
-                        title="这条会话在 CLI 那边继续聊过。Kivio 里的历史是导入时的快照，不会自动同步；续聊时 CLI 用的仍是它自己那份完整上下文。"
-                      >
-                        <span className="truncate">
-                          这条会话在 CLI 那边有新内容，此处显示的历史不完整
-                        </span>
-                      </span>
-                    </div>
-                  )}
-                  <Suspense fallback={<MessageListLoading />}>
-                    <MessageList
-                      key={currentConversation?.id ?? 'empty'}
-                      conversationId={currentConversation?.id}
-                      messages={displayMessages}
-                      agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
-                      assistantStreamStatsByMessageId={assistantStreamStatsByMessageId}
-                      onUpdateMessage={handleUpdateMessage}
-                      onRegenerateMessage={handleRegenerateMessage}
-                      onForkMessage={handleForkMessage}
-                      onRewindMessage={handleRewindMessage}
-                      onDeleteMessage={handleDeleteMessage}
-                      onSaveMessageToNote={handleSaveMessageToNote}
-                      onRetryLastUser={handleRegenerateMessage}
-                      onExecuteAgentPlan={handleExecuteAgentPlan}
-                      groupSelections={currentConversation?.group_selections ?? currentConversation?.groupSelections ?? {}}
-                      onSetGroupSelection={handleSetGroupSelection}
-                      contextState={contextState}
-                      compactionInProgress={contextCompressing}
-                      animateCompactionBoundaryId={animateCompactionBoundaryId}
-                      lang={uiLang}
-                    />
-                  </Suspense>
-                  {/* ponytail: 只挂在有消息的分支。审批必然发生在一次 run 里，此时至少已有一条用户消息，空态 hero 不可能出卡。 */}
-                  {(pendingToolConfirm || pendingSessionConsent || pendingUserPrompt) && (
-                    <div className="shrink-0 px-6">
-                      <div className="mx-auto w-full max-w-4xl">
-                        {/* 问用户的面板排在审批卡之前：它是「整轮停在这里等你」的那一件事。 */}
-                        {pendingUserPrompt && pendingUserPromptRecord && (
-                          <AskUserBlock
-                            variant="docked"
-                            toolCall={pendingUserPromptRecord}
-                            onResolved={() => dismissPendingUserPrompt(
-                              pendingUserPrompt.conversationId,
-                              pendingUserPrompt.toolCallId,
-                            )}
-                          />
-                        )}
-                        {pendingToolConfirm && (
-                          <ApprovalCard
-                            title={toolApprovalTitle(pendingToolConfirm)}
-                            subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
-                            detail={pendingToolConfirm.argumentsPreview}
-                            actions={isPlanApproval(pendingToolConfirm)
-                              ? [
-                                // 拒绝 = Claude Code 的「Tell Claude what to change」：不执行，
-                                // 用户在输入框里说要改什么，claude 继续留在计划模式改计划。
-                                { label: '拒绝 / 让它改', onSelect: () => resolvePendingToolConfirm(false) },
-                                ...PLAN_APPROVAL_ACTIONS.map((action, index) => ({
-                                  label: action.label,
-                                  primary: index === PLAN_APPROVAL_ACTIONS.length - 1,
-                                  hint: index === PLAN_APPROVAL_ACTIONS.length - 1 ? 'Ctrl+↵' : undefined,
-                                  onSelect: () => {
-                                    resolvePendingToolConfirm(true, false, action.mode)
-                                    // 会话配置也切过去：CLI 那侧已被 `set_permission_mode` 切档，
-                                    // 配置不跟着改的话底栏胶囊仍显示「计划 (只读)」（与实际不符），
-                                    // 而且下次触发重启时会带着 `--permission-mode plan` 回到只读。
-                                    void handleExternalSandboxChange(action.mode).catch((error) => {
-                                      console.error('Failed to persist the post-plan permission mode:', error)
-                                    })
-                                  },
-                                })),
-                              ]
-                              : isEnterPlanApproval(pendingToolConfirm)
-                                ? [
-                                  { label: '不用，直接做', onSelect: () => resolvePendingToolConfirm(false) },
-                                  // 「总是允许」对齐 Claude Code 普通工具提示里的「别再问」。
-                                  // 代价（写在这里免得以后当 bug 查）：此后被自动放行的那几次
-                                  // 不经过卡片，前端也就没机会写会话档位 —— CLI 已进只读、而底栏
-                                  // 胶囊仍是上一档，直到下次刷新/切会话。用户主动说了「别再问」，
-                                  // 这个滞后可以接受。
-                                  {
-                                    label: '总是允许',
-                                    onSelect: () => {
-                                      resolvePendingToolConfirm(true, true)
-                                      void handleExternalSandboxChange('plan').catch((error) => {
-                                        console.error('Failed to persist the plan permission mode:', error)
-                                      })
-                                    },
-                                  },
-                                  {
-                                    label: '进入计划模式',
-                                    primary: true,
-                                    hint: 'Ctrl+↵',
-                                    onSelect: () => {
-                                      // 放行就够 —— CLI 自己切档（见 claude_stream::is_enter_plan_mode）。
-                                      // 这里只把会话配置跟上，让底栏胶囊与实际一致、重启也不掉回来。
-                                      resolvePendingToolConfirm(true)
-                                      void handleExternalSandboxChange('plan').catch((error) => {
-                                        console.error('Failed to persist the plan permission mode:', error)
-                                      })
-                                    },
-                                  },
-                                ]
-                                : [
-                                  { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
-                                  { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
-                                  { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
-                                ]}
-                          />
-                        )}
-                        {pendingSessionConsent && (
-                          <ApprovalCard
-                            title="允许本次会话使用文件和命令工具？"
-                            subtitle="授权后，本会话内 Kivio 可读写、删除磁盘上的任意文件并执行任意终端命令（包括项目目录之外）。仅本次会话有效，重启后需重新授权。"
-                            actions={[
-                              { label: '拒绝', onSelect: () => resolvePendingSessionConsent(false) },
-                              { label: '允许本次会话', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingSessionConsent(true) },
-                            ]}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {/* 排队中的消息：与审批卡同一个槽位（输入框正上方，视线和手都在的地方）。 */}
-                  {currentQueuedMessages.length > 0 && (
-                    <div className="shrink-0 px-6">
-                      <div className="mx-auto w-full max-w-4xl">
-                        <QueuedMessages
-                          messages={currentQueuedMessages}
-                          canSteer={canSteerCurrentConversation}
-                          onSteer={handleSteerQueuedMessage}
-                          onRemove={handleRemoveQueuedMessage}
-                          onRestore={handleRestoreQueuedMessage}
-                          lang={uiLang}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  <InputBar
-                    onSend={(content, attachments) => void handleSendMessage(content, attachments)}
-                    onQueue={handleQueueMessage}
-                    disabled={isCurrentConversationBusy()}
-                    onCancel={() => void handleCancelStream()}
-                    cancelVisible={streamCoarse.streaming}
-                    cancelling={streamCoarse.cancelling}
-                    onOpenSettings={() => openEmbeddedSettings('chat')}
-                    onOpenTools={() => openSkillCenter()}
-                    onNewChat={() => void handleNewConversation()}
-                    onCompactContext={() => void handleCompressContext()}
-                    onClearChat={() => void handleClearChat()}
-                    enabledTools={enabledTools}
-                    toolsDisabledReason={toolsDisabledReason}
-                    toolStatusHint={toolStatusHint}
-                    sendDisabledReason={sendDisabledReason}
-                    agentPlanState={currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null}
-                    agentTodoState={currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null}
-                    onAgentPlanModeChange={handleAgentPlanModeChange}
-                    enabledSkills={slashSkills}
-                    onOpenSkillSettings={openSkillCenter}
-                    selectedProject={selectedProject}
-                    conversationProject={conversationProject}
-                    onSelectProject={handleSidebarSelectProject}
-                    showProjectEntry
-                    selectedSet={selectedSet}
-                    onSelectSet={handleSidebarSelectSet}
-                    currentAssistant={currentAssistantSnapshot ? { id: currentAssistantSnapshot.id, name: currentAssistantSnapshot.name } : null}
-                    onOpenAssistantCenter={openAssistantCenter}
-                    onSelectAssistant={handleSelectAssistant}
-                    autoFocus
-                    usesExternalRuntime={usesExternalRuntime}
-                    externalAgentName={activeAgentRuntime.externalAgentId ?? null}
-                    conversationId={currentConversation?.id ?? null}
-                    knowledgeBaseIds={currentConversation ? (currentConversation.knowledge_base_ids ?? currentConversation.knowledgeBaseIds ?? []) : draftKnowledgeBaseIds}
-                    onChangeKnowledgeBaseIds={handleChangeKnowledgeBaseIds}
-                    forceKnowledgeSearch={currentConversation ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false) : draftForceKnowledgeSearch}
-                    onToggleForceKnowledgeSearch={handleToggleForceKnowledgeSearch}
-                    mcpServers={mcpServers}
-                    onToggleMcpServer={handleToggleMcpServer}
-                    webSearchMode={activeWebSearchMode}
-                    onSetWebSearchMode={handleSetWebSearchMode}
-                    builtinWebSearchSupported={activeBuiltinWebSearchSupported}
-                    replyModels={activeReplyModels}
-                    onChangeReplyModels={handleChangeReplyModels}
-                    contextSlot={
-                      <ContextIndicator
-                        contextState={contextState}
-                        messageCount={displayMessages.length}
-                        loading={contextLoading}
-                        compressing={contextCompressing}
-                        error={contextError}
-                        usesExternalRuntime={usesExternalRuntime}
-                        onRefresh={handleRefreshContext}
-                        onCompress={() => void handleCompressContext()}
-                        lang={uiLang}
-                      />
-                    }
-                    gitWorkdir={dockWorkdir || null}
-                    gitLang={uiLang}
-                    onOpenGitPanel={handleOpenDockGit}
-                    modeOptions={composerModes.options}
-                    modeValue={composerModes.current}
-                    onModeChange={handleComposerModeChange}
-                    usageSlot={
-                      <SessionUsageStrip
-                        messages={displayMessages}
-                        lang={uiLang}
-                        apiFormats={providerApiFormats}
-                        defaultApiFormat={
-                          currentConversation
-                            ? (providerApiFormats[currentConversation.provider_id] ?? '')
-                            : ''
-                        }
-                      />
-                    }
-                  />
-                    </>
-                  )}
-                </div>
-              </>
-            {imageViewerItem && (
-              <div className="absolute inset-0 z-40 flex flex-col">
-                <ChatImageViewer
-                  item={imageViewerItem}
-                  onClose={() => setImageViewerItem(null)}
-                />
-              </div>
-            )}
-          </div>
+          <ChatConversationPane
+            titlebarControls={conversationTitlebarControls}
+            usesNativeTitlebar={usesNativeTitlebar}
+            sidebarCollapsed={sidebarCollapsed}
+            titlebarRowClass={chatTitlebarRowClass}
+            titlebarMacInsetClass={chatTitlebarMacInsetClass}
+            onToggleSidebar={handleTitlebarToggleSidebar}
+            onNewConversation={handleTitlebarNewConversation}
+            protocolVersionMismatch={protocolVersionMismatch}
+            showEmptyHero={showEmptyHero}
+            currentAssistantName={currentAssistantSnapshot?.name ?? null}
+            selectedProjectName={selectedProject?.name ?? null}
+            selectedSetName={selectedSet?.name ?? null}
+            emptyHeroGreeting={emptyHeroGreeting}
+            inputBarProps={inputBarProps}
+            messageListProps={messageListProps}
+            hookWarning={hookWarning}
+            currentConversationId={currentConversation?.id ?? null}
+            onDismissHookWarning={handleDismissHookWarning}
+            forkOrigin={forkOrigin}
+            onSelectConversation={handleSelectConversation}
+            importedHistoryStale={importedHistoryStale}
+            pendingSlot={pendingSlot}
+            queuedMessages={currentQueuedMessages}
+            canSteerQueuedMessages={canSteerCurrentConversation}
+            onSteerQueuedMessage={handleSteerQueuedMessage}
+            onRemoveQueuedMessage={handleRemoveQueuedMessage}
+            onRestoreQueuedMessage={handleRestoreQueuedMessage}
+            lang={uiLang}
+            imageViewerItem={imageViewerItem}
+            onCloseImageViewer={handleCloseImageViewer}
+            onRender={onChatPerfProfiler}
+          />
         )}
+        </ChatRouteKeepAlive>
         {chatView === 'conversation' && (
           <RightDock
             open={dockOpen}
@@ -4877,7 +4921,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           />
         )}
       </div>
-    </div>
+      </div>
+    </Profiler>
     </LangContext.Provider>
   )
 }

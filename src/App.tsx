@@ -270,7 +270,7 @@ function App() {
     if (isChatPath(hashPath())) {
       const scale = Math.min(1.4, Math.max(0.8, settings.uiFontScale ?? 1))
       // 用原生 webview 缩放（等同浏览器 Cmd+加号），而非 CSS zoom —— CSS zoom 会打乱
-      // 聊天消息列表 virtua 虚拟滚动的 scrollTop/scrollHeight 几何量，导致流式生成时跟随钉底失效。
+      // 聊天消息列表 virtualizer 虚拟滚动的 scrollTop/scrollHeight 几何量，导致流式生成时跟随钉底失效。
       if (isTauriRuntime()) void getCurrentWebview().setZoom(scale).catch(() => {})
       const family = (settings.uiFontFamily ?? '').trim()
       // 默认字体栈与 index.css 的 --font-sans 保持一致；自定义字体拼到最前，缺失时回退系统字体。

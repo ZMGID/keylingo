@@ -30,14 +30,20 @@ export interface ActiveGroupState {
 const activeGroups = new Map<string, ActiveGroupState>()
 
 const subs = new Set<() => void>()
+const conversationSubs = new Map<string, Set<() => void>>()
+const conversationVersions = new Map<string, number>()
 
 // 版本号：任何变更都自增，作为 getSnapshot 的稳定标识，避免每帧分配新对象。
 let version = 0
 
 // 结构性变更（建组/认领列/结束组）立即 emit；内容 delta（touchGroup）经 rAF 合帧，
 // 避免 N 列各自高频 setState（与单流 showStreamSnapshotIfCurrent 的合帧策略一致）。
-function emit() {
+function emit(conversationId?: string) {
   version += 1
+  if (conversationId) {
+    conversationVersions.set(conversationId, (conversationVersions.get(conversationId) ?? 0) + 1)
+    for (const cb of conversationSubs.get(conversationId) ?? []) cb()
+  }
   for (const cb of subs) cb()
 }
 
@@ -105,7 +111,7 @@ export function beginGroup(
     expectedColumns: arms.length,
     columns,
   })
-  emit()
+  emit(conversationId)
 }
 
 /** Rebuild one fan-out arm from protocol recovery metadata after a window reload. */
@@ -136,7 +142,7 @@ export function restoreGroupArm(
   column.messageId = messageId
   column.providerId = providerId
   column.model = model
-  emit()
+  emit(conversationId)
   return column
 }
 
@@ -183,33 +189,45 @@ export function ensureGroupColumn(
 }
 
 /** 列内容被原地 mutate 后，请求一次重渲（rAF 合帧：每帧最多通知订阅者一次）。 */
-export function touchGroup(): void {
+const pendingConversationIds = new Set<string>()
+
+export function touchGroup(conversationId?: string): void {
+  if (conversationId) pendingConversationIds.add(conversationId)
   groupFlushPending = true
   if (groupFlushRaf != null) return
   groupFlushRaf = rafSchedule(() => {
     groupFlushRaf = null
     if (!groupFlushPending) return
     groupFlushPending = false
-    emit()
+    if (pendingConversationIds.size === 0) emit()
+    else {
+      for (const id of pendingConversationIds) emit(id)
+      pendingConversationIds.clear()
+    }
   })
 }
 
 /** 立即 flush 待合帧的内容更新（done / 结束 / 测试需要同步可见时调用）。 */
-export function flushGroups(): void {
+export function flushGroups(conversationId?: string): void {
   if (groupFlushRaf != null) {
     rafCancel(groupFlushRaf)
     groupFlushRaf = null
   }
   if (!groupFlushPending) return
   groupFlushPending = false
-  emit()
+  if (conversationId) pendingConversationIds.add(conversationId)
+  if (pendingConversationIds.size === 0) emit()
+  else {
+    for (const id of pendingConversationIds) emit(id)
+    pendingConversationIds.clear()
+  }
 }
 
 /** 结束并清掉某会话的活跃组（sendMessage 返回 / 错误 / 取消时调用）。 */
 export function endGroup(conversationId: string): void {
-  flushGroups()
+  flushGroups(conversationId)
   if (activeGroups.delete(conversationId)) {
-    emit()
+    emit(conversationId)
   }
 }
 
@@ -222,6 +240,7 @@ export function resetGroups(): void {
   groupFlushPending = false
   if (activeGroups.size > 0) {
     activeGroups.clear()
+    pendingConversationIds.clear()
     emit()
   }
 }
@@ -232,4 +251,27 @@ export function resetGroups(): void {
 // 版本号变化驱动重渲。MessageGroup 内部据列内容渲染，无需快照拷贝。
 export function useGroupsVersion(): number {
   return useSyncExternalStore(subscribeGroups, getGroupsVersion, getGroupsVersion)
+}
+
+export function subscribeGroup(conversationId: string, cb: () => void): () => void {
+  const listeners = conversationSubs.get(conversationId) ?? new Set<() => void>()
+  listeners.add(cb)
+  conversationSubs.set(conversationId, listeners)
+  return () => {
+    listeners.delete(cb)
+    if (listeners.size === 0) conversationSubs.delete(conversationId)
+  }
+}
+
+export function getGroupVersion(conversationId: string): number {
+  return conversationVersions.get(conversationId) ?? 0
+}
+
+export function useGroupVersion(conversationId: string | null | undefined): number {
+  const key = conversationId ?? ''
+  return useSyncExternalStore(
+    (cb) => subscribeGroup(key, cb),
+    () => getGroupVersion(key),
+    () => getGroupVersion(key),
+  )
 }

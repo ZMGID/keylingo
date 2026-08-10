@@ -3,6 +3,14 @@
 /* 导入 TailwindCSS 排版插件 */
 @plugin "@tailwindcss/typography";
 
+/* Streamdown 组件里的 Tailwind class 在 node_modules，必须显式 @source，
+   否则默认样式（text-2xl / my-6 / border-border 等）不会进包。 */
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
+@source "../node_modules/@streamdown/mermaid/dist/*.js";
+@source "../node_modules/@streamdown/cjk/dist/*.js";
+
 /* 使用系统默认字体栈（跨 mac + Win，含 CJK 覆盖），不再内嵌字体以节省每窗口内存 */
 @theme {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
@@ -10,6 +18,20 @@
   /* mono 栈补 CJK 无衬线回退：Windows 上 Consolas 等没有中文字形，
      缺了这段会掉进浏览器默认的宋体（衬线），代码/diff 里的中文很难看。 */
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", monospace;
+
+  /* Streamdown / shadcn 设计 token → 接到 Kivio 主题色（只映射，不改 Streamdown 组件 class） */
+  --color-background: var(--theme-surface, #fdfcfa);
+  --color-foreground: var(--text, #171717);
+  --color-card: var(--theme-surface, #fdfcfa);
+  --color-card-foreground: var(--text, #171717);
+  --color-muted: var(--theme-surface-muted, #f4f3f1);
+  --color-muted-foreground: #737373;
+  --color-border: var(--theme-surface-border, #e2e1df);
+  --color-input: var(--theme-surface-border-strong, #d2d1cf);
+  --color-primary: #171717;
+  --color-primary-foreground: #fafafa;
+  --color-sidebar: var(--theme-surface-soft, #f9f8f6);
+  --color-ring: #a3a3a3;
 }
 
 /* 自定义 dark 变体：通过 .dark 类启用深色模式 */
@@ -75,6 +97,19 @@ body {
   --accent-hover: #6f9bf8;
   --accent-soft: rgba(92, 141, 247, 0.16);
   --text-onaccent: #ffffff;
+  /* Streamdown token 暗色态（@theme 里的 --color-* 读这些） */
+  --color-background: #212121;
+  --color-foreground: #f0f0f3;
+  --color-card: #2a2a2d;
+  --color-card-foreground: #f0f0f3;
+  --color-muted: #2c2c30;
+  --color-muted-foreground: #a1a1aa;
+  --color-border: #3a3a40;
+  --color-input: #3a3a40;
+  --color-primary: #f0f0f3;
+  --color-primary-foreground: #171717;
+  --color-sidebar: #262629;
+  --color-ring: #52525b;
   --danger: #ef6a5a;
   --danger-soft: rgba(239, 106, 90, 0.14);
   --shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.4);
@@ -314,11 +349,6 @@ body {
   color: rgb(161, 161, 170);
 }
 
-.chat-markdown :where(code)::before,
-.chat-markdown :where(code)::after {
-  content: none;
-}
-
 /* 代码块工具条：语言标签用伪元素画，复制图标用伪元素画。
    伪元素不进 DOM 树 —— 一个大对话里有两百多个代码块，每块省下的
    「语言 span + lucide svg + svg 内的 rect/path」是实打实的节点数。
@@ -449,34 +479,6 @@ body {
 .dark .chat-model-selector-menu::-webkit-scrollbar-thumb:hover,
 .dark .chat-popover-scroll::-webkit-scrollbar-thumb:hover {
   background-color: rgba(255, 255, 255, 0.32);
-}
-
-/* 关键性能：KaTeX 的视觉 HTML 会生成大量 span。它现在由 ChatMarkdown 挂到每个公式的
-   Shadow DOM 内，避免已完成公式参与页面级样式匹配/布局 invalidation。普通 DOM 里只保留
-   轻量 host；横向滚动与行内对齐也放在 host 上。 */
-.katex-lazy {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  vertical-align: middle;
-  padding: 1px 2px;
-  margin-top: -2px;
-}
-.katex-lazy--pending {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  opacity: 0.85;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.katex-lazy--display {
-  display: block;
-  padding: 0;
-  margin-top: 0;
-  vertical-align: baseline;
-}
-.katex-lazy--pending.katex-lazy--display {
-  min-height: 1.7em;
 }
 
 /* ===== Settings 卡片 / 控件统一令牌 =====
@@ -672,10 +674,28 @@ body {
   container-type: size;
   container-name: chat-main;
   overflow: hidden;
+  /* Keep Markdown/layout invalidation inside the reading surface when the
+     sidebar or right dock changes the available width. */
+  contain: layout paint;
   /* 左右不留 margin：缝隙由侧栏的 margin-right:8 与 Dock 的 margin-left:8 提供。
      若这里也写 8，相邻处会叠成 16px 双倍缝。两侧收起时各自补 8px（见 .is-collapsed）。 */
   margin: var(--chat-card-top) 0 8px;
 }
+
+.chat-message-list-inner {
+  contain: layout paint;
+}
+
+/* 聊天滚动容器禁用浏览器 overflow-anchor：上方行测高时浏览器会偷偷改 scrollTop，
+   和导航跳转的 paint 前钉住打架，表现为落地后上下抽一下。 */
+.chat-scroll-viewport {
+  overflow-anchor: none;
+}
+.chat-scroll-viewport.is-navigator-locking {
+  /* 锁定期再挡一层，避免系统/插件改滚动节奏 */
+  overscroll-behavior: contain;
+}
+
 
 /* 扩展中心页（助手 / Skill / MCP / 知识库 / 笔记 / 插件）：与会话主区同一张浮起的纸。
    刻意不复用 .chat-main-pane —— 那个带 container-name: chat-main，会把会话布局的容器
@@ -725,10 +745,10 @@ body {
 
 .chat-sidebar-shell {
   margin: var(--chat-card-top) 8px 8px;
-  /* 折叠动画：负 margin 把整张卡片滑出左侧，由 .chat-window-shell 的 overflow:hidden 裁剪；
-     width 不变 → 内容不被压缩。 */
+  /* 折叠时只做透明度动画。不要 transition margin-left：它会让 flex 主区在每一帧改变宽度，
+     长聊天里的 Markdown / 代码块随之连续重排，侧栏动画会把聊天区一起拖卡。布局位置一次切换，
+     由外壳 overflow:hidden 裁掉滑出的卡片。 */
   transition:
-    margin-left var(--kv-dur-slow) var(--kv-ease-standard),
     opacity var(--kv-dur-normal) var(--kv-ease-out);
 }
 
@@ -1990,6 +2010,14 @@ button.chat-composer-status-item:hover {
    InputBar 的 `fixed inset-0` 遮罩，任何 transform 都会把它们的包含块钉到本元素上。 */
 .chat-motion-pane-in {
   animation: chat-motion-view-in 260ms var(--kv-ease-standard) backwards;
+}
+
+/* 会话正文切换是高频交互，不需要整页 280ms 的入场动画。
+   保留极短的位移让交接不生硬，但把主区可交互时间提前，避免出现
+   Logo 已结束、正文还在慢慢淡入的拖尾感。 */
+.chat-message-list-switch-in {
+  animation-duration: 120ms;
+  animation-timing-function: var(--kv-ease-out);
 }
 
 /* 设置页入场：从底部轻微上浮。位移用固定 px 而非 %（% 是元素自身高度，整页高度下会变成
@@ -6978,15 +7006,25 @@ input[type="password"]::-ms-clear {
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
 
-/* ---- 生成中状态行的动效 logo（GRD-02 · 回波）。
-   点阵：等距方格 step=3 / r=1.05（点间隙清晰）；相位 --p = 距中心归一化距离，
-   delay 用 (1-p) 形成从中心向外的回波。颜色与动画只在这里。 ---- */
+/* ---- 生成中状态行的动效 logo（GRD-02 · 横向扫光）。
+   点阵：等距方格 step=3 / r=1.05（点间隙清晰）；--dx 是点相对 Logo 中心的
+   横向归一化位置。通过错峰让一条亮波左右往返扫过 Logo，不让整块点阵一起闪烁。
+   颜色与动画只在这里。 ---- */
 .kv-stream-logo {
   display: block;
   overflow: visible;
   flex-shrink: 0;
-  --k: 1; /* 速度倍率 */
+  width: var(--kv-stream-logo-size, 28px);
+  height: var(--kv-stream-logo-size, 28px);
+  --k: 1; /* 时长倍率：越小越快 */
   --dot: #1d6bf0; /* 唯一颜色 */
+}
+
+.chat-conversation-loading {
+  background: var(--theme-surface-soft);
+}
+.chat-conversation-loading .kv-stream-logo {
+  --k: 0.68;
 }
 .kv-stream-logo circle {
   transform-box: fill-box;
@@ -6994,13 +7032,15 @@ input[type="password"]::-ms-clear {
   fill: var(--dot);
 }
 .kv-stream-logo .dt {
-  animation: kv-stream-echo calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
-  animation-delay: calc((1 - var(--p)) * -0.95s * var(--k));
+  animation: kv-stream-sweep calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
+  /* 左侧点（--dx 更小）先进入高亮，随后向右传播；alternate 让下一半周期反向传播。 */
+  animation-delay: calc((1 - var(--dx)) * -0.18s * var(--k));
 }
-@keyframes kv-stream-echo {
+@keyframes kv-stream-sweep {
   0% { fill-opacity: 0.28; transform: scale(0.72); }
-  20% { fill-opacity: 1; transform: scale(1.24); }
-  44%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
+  24% { fill-opacity: 0.34; transform: scale(0.78); }
+  50% { fill-opacity: 1; transform: scale(1.24); }
+  76%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
 }
 @media (prefers-reduced-motion: reduce) {
   .kv-stream-logo circle { animation: none; transform: none; fill-opacity: 1; }

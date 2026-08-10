@@ -1,6 +1,6 @@
 // Right Dock 容器：tab 条（文件树 / Git / 终端 / 任务）+ 常驻四面板 + 左缘拖拽调宽 + 折叠滑出。
 // 宽度通过 CSS 变量 --chat-dock-width 直写（拖拽过程不触发 React 重渲），松手才持久化。
-import { useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { memo, useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { Activity, FolderTree, GitBranch, Terminal, X } from 'lucide-react'
 import { i18n, type Lang } from '../../settings/i18n'
 import { IconButton } from '../../components/Button'
@@ -47,7 +47,7 @@ type RightDockProps = {
   onRevealInTree: (path: string) => void
 }
 
-export function RightDock({
+export const RightDock = memo(function RightDock({
   open,
   width,
   activeTab,
@@ -184,4 +184,4 @@ export function RightDock({
       </div>
     </aside>
   )
-}
+})

@@ -37,7 +37,7 @@ describe('ChatMarkdown 链接点击', () => {
   })
 
   it('本地文件链接交给 openLocalFile，且不导航 webview', () => {
-    // 附带钉住 urlTransform：react-markdown 默认把 `file:` 剥成空 href（死链）。
+    // Streamdown 默认会把 `file:` 剥成空 href（死链），应用层需要保留并交给后端。
     const event = clickLink('[看板](file:///tmp/board/index.html)')
     expect(event.defaultPrevented).toBe(true)
     expect(openLocalFile).toHaveBeenCalledWith('file:///tmp/board/index.html', null)

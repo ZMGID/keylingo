@@ -46,7 +46,7 @@ describe('scrollFollowCore', () => {
     expect(pin).toBe(true)
   })
 
-  it('跟随中的小 gap（virtua/DPR 测量噪声）不 pin，避免底部抽搐', () => {
+  it('跟随中的小 gap（virtualizer/DPR 测量噪声）不 pin，避免底部抽搐', () => {
     const { state, pin } = run([scroll(12, 100)])
     expect(state.following).toBe(true)
     expect(pin).toBe(false)
@@ -164,6 +164,13 @@ describe('scrollFollowCore', () => {
     const detached = run([wheelUp({ gap: 4 })]).state
     const { state } = run([scroll(4, 1, 'user')], detached)
     expect(state.following).toBe(false)
+  })
+
+  it('贴底附近明确上滚后，内容增长不应重新接管视口', () => {
+    const detached = run([wheelUp({ gap: 4 })]).state
+    const { state, pin } = run([growth(4)], detached)
+    expect(state.following).toBe(false)
+    expect(pin).toBe(false)
   })
 
   it('解除后滚轮下滚到底部重新跟随', () => {

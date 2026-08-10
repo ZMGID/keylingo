@@ -39,6 +39,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -182,5 +183,23 @@ describe('useStreamRenderFrame 取消', () => {
     runFrame()
     expect(applySnapshot).toHaveBeenCalledTimes(1)
     expect(applySnapshot.mock.calls[0][0].content).toBe('y')
+  })
+})
+
+describe('useStreamRenderFrame 后台 cadence', () => {
+  it('后台窗口改用低频 timer，不占用前台 rAF', () => {
+    vi.useFakeTimers()
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    const { result, applySnapshot } = setup()
+
+    act(() => { result.current.frame.showStreamSnapshotIfCurrent('c1', snap('background')) })
+    expect(rafQueue).toHaveLength(0)
+    expect(applySnapshot).not.toHaveBeenCalled()
+
+    act(() => { vi.advanceTimersByTime(800) })
+    runFrame()
+    expect(applySnapshot).toHaveBeenCalledTimes(1)
+
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
   })
 })

@@ -3,14 +3,14 @@ import { Check, Columns2, Square } from 'lucide-react'
 import type { ChatMessage } from './types'
 import { MessageBubble } from './MessageBubble'
 import { ModelIcon } from './ModelIcon'
-import { getActiveGroup, useGroupsVersion, type GroupColumnSnapshot } from './groupStreamingStore'
+import { getActiveGroup, useGroupVersion, type GroupColumnSnapshot } from './groupStreamingStore'
 import { useMultiAnswerViewMode } from './multiAnswerViewMode'
 
 // 多模型一问多答（任务 06-30 / 步骤 6 + 8）：把同一 group_id 的 N 条 assistant 答案展示出来。
 // 两种来源互斥：
 //  - 流式中（sendMessage 未返回）：列来自 groupStreamingStore 的实时列（live=true）。
 //  - 落库后：列来自持久化的 assistant 消息（live=false），各带 group_id / provider_id / model。
-// virtua 把整组当「一行」item 虚拟化（见 MessageList），不破坏滚动/钉底。
+// TanStack Virtual 把整组当「一行」item 虚拟化（见 MessageList），不破坏滚动/钉底。
 //
 // 两种展示模式（全局偏好 useMultiAnswerViewMode，默认 'tabs'）：
 //  - 'tabs'（切换）：一次只整宽显示**当前选中条**（默认第一条），组末尾 footer 切换显示哪条。
@@ -20,7 +20,7 @@ import { useMultiAnswerViewMode } from './multiAnswerViewMode'
 // 性能降级（步骤 8 / R10）：N 列同时全量渲染 reasoning + markdown 是内存/CPU 大头。
 // 「聚焦列」（hover 的列 / tabs 模式当前显示列）展开 reasoning 流式；其余「非聚焦列」把
 // reasoningStreaming 置 false → ReasoningBlock 折叠并把正文从 DOM 卸载（hideBody）。
-// 复用既有 KaTeX Shadow DOM / rAF 合帧（touchGroup）/ virtua 屏外卸载，不重复造轮子。
+// 复用既有 KaTeX Shadow DOM / rAF 合帧（touchGroup）/ virtualizer 屏外卸载，不重复造轮子。
 
 interface MessageGroupProps {
   conversationId?: string | null
@@ -274,7 +274,7 @@ function MessageGroupBase({
   // 订阅 group store 版本号：流式列内容更新时驱动重渲。
   // 版本号还必须进下面 columns 的 memo deps —— store 是原地 mutate 列对象，
   // liveGroup 引用永不变，只靠 [live, liveGroup, messages] 会让 memo 冻结在首帧。
-  const groupsVersion = useGroupsVersion()
+  const groupsVersion = useGroupVersion(conversationId)
   const liveGroup = conversationId ? getActiveGroup(conversationId) : undefined
   const live = Boolean(liveGroup && liveGroup.groupId === groupId)
 

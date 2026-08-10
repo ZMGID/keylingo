@@ -8,14 +8,22 @@ type ResizeObserverHarness = {
   disconnected: boolean
 }
 
+type ScrollToOptions = { top: number; behavior?: ScrollBehavior }
+
 function Harness() {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null)
   const [content, setContent] = useState<HTMLDivElement | null>(null)
-  const { following, showJumpButton } = useScrollFollow({ viewport, content })
+  const { handle, following, showJumpButton } = useScrollFollow({ viewport, content })
   return (
     <>
       <output data-testid="following">{String(following)}</output>
       <output data-testid="show-jump-button">{String(showJumpButton)}</output>
+      <button type="button" onClick={handle.jumpToBottom}>jump</button>
+      <button type="button" onClick={handle.releaseFollow}>release</button>
+      <button type="button" onClick={() => handle.scrollToOffset(240)}>scroll-offset</button>
+      <button type="button" onClick={() => handle.scrollToOffset(240, { adjustments: 12 })}>scroll-adjusted</button>
+      <button type="button" onClick={() => handle.scrollToOffset(240, { behavior: 'smooth' })}>scroll-smooth</button>
+      <button type="button" onClick={handle.markLayoutCompensation}>mark-layout</button>
       <div ref={setViewport} data-testid="viewport">
         <div ref={setContent} />
       </div>
@@ -62,22 +70,22 @@ describe('useScrollFollow scroll source timing', () => {
       },
       scrollHeight: { configurable: true, get: () => 1000 },
       clientHeight: { configurable: true, get: () => 500 },
+      scrollTo: {
+        configurable: true,
+        value: (options: ScrollToOptions) => {
+          scrollTop = options.top
+        },
+      },
     })
     return viewport
   }
 
-  it('waits for ResizeObserver before classifying a compensating scroll', () => {
+  it('classifies an ordinary scroll immediately when no layout growth occurred', () => {
     const viewport = mount()
 
     fireEvent.scroll(viewport)
-    expect(screen.getByTestId('following')).toHaveTextContent('true')
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
 
-    act(() => {
-      observers[0].callback([], {} as ResizeObserver)
-      vi.advanceTimersByTime(1)
-    })
-
-    expect(screen.getByTestId('following')).toHaveTextContent('true')
   })
 
   it('still releases follow for a scroll with no resize evidence', () => {
@@ -106,9 +114,9 @@ describe('useScrollFollow scroll source timing', () => {
 
   // 竞态回归：来源判定被推迟一拍（setTimeout(1)），而 resize 窗口的关闭是 rAF + 宏任务。
   // 真实浏览器里快帧下关闭会抢先于判定执行 —— scroll 事件派发于 scroll steps（窗口还开着），
-  // 判定 timer 却在关闭之后才跑。token 对不上的补偿滚动（virtua shift 纠正 / 浏览器 clamp）
+  // 判定 timer 却在关闭之后才跑。token 对不上的补偿滚动（virtualizer shift 纠正 / 浏览器 clamp）
   // 此时必须仍按 self 记账（窗口状态在事件时同步抓取），否则流式中跟随莫名解除。
-  it('keeps following when the resize window closes between the scroll event and its deferred classification', () => {
+  it('keeps virtualizer compensation self-classified after layout growth', () => {
     // rAF 桩成手动队列（mount() 里的 vi.useFakeTimers 会装假 rAF，须在其后再桩，
     // 且要桩 globalThis —— vitest 的 jsdom 环境把全局拷到 globalThis，模块裸调走它）。
     const viewport = mount()
@@ -132,7 +140,7 @@ describe('useScrollFollow scroll source timing', () => {
         rafQueue.splice(0).forEach((cb) => cb(0))
       })
 
-      // virtua 式直接写 scrollTop（不经过 applyScrollTop，token 对不上），随后 scroll 事件到达：
+      // virtualizer 式直接写 scrollTop（不经过 applyScrollTop，token 对不上），随后 scroll 事件到达：
       // 事件时窗口开着（真实次序如此 —— scroll steps 先于当帧 rAF）。
       viewport.scrollTop = 300
       fireEvent.scroll(viewport)
@@ -189,6 +197,92 @@ describe('useScrollFollow scroll source timing', () => {
     fireEvent.scroll(viewport)
     act(() => vi.advanceTimersByTime(1))
 
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+  })
+
+  it('jumps to bottom instantly and re-enables follow', () => {
+    const viewport = mount()
+    act(() => vi.runOnlyPendingTimers())
+
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+    expect(screen.getByTestId('show-jump-button')).toHaveTextContent('true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'jump' }))
+
+    // Instant pin: no rAF animation. forceFollow → pinToBottom writes scrollHeight.
+    expect(viewport.scrollTop).toBe(1000)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+    expect(screen.getByTestId('show-jump-button')).toHaveTextContent('false')
+  })
+
+  it('routes programmatic history navigation through the single scroll writer', () => {
+    const viewport = mount()
+
+    fireEvent.click(screen.getByRole('button', { name: 'scroll-offset' }))
+
+    expect(viewport.scrollTop).toBe(240)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+  })
+
+  it('applies virtualizer adjustments through the same authority writer', () => {
+    const viewport = mount()
+
+    fireEvent.click(screen.getByRole('button', { name: 'scroll-adjusted' }))
+    expect(viewport.scrollTop).toBe(252)
+
+    fireEvent.click(screen.getByRole('button', { name: 'scroll-smooth' }))
+    expect(viewport.scrollTop).toBe(240)
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+  })
+
+  it('reattaches when the user drags to bottom during a layout compensation ticket', () => {
+    const viewport = mount()
+
+    viewport.scrollTop = 100
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+
+    fireEvent.click(screen.getByRole('button', { name: 'mark-layout' }))
+    viewport.scrollTop = 500
+    fireEvent.scroll(viewport)
+
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+  })
+
+  it('keeps compensation self-classified when height shrinks or offset shifts at the same height', () => {
+    const viewport = mount()
+    let scrollHeight = 1000
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'mark-layout' }))
+    scrollHeight = 900
+    viewport.scrollTop = 300
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'release' }))
+    fireEvent.click(screen.getByRole('button', { name: 'mark-layout' }))
+    scrollHeight = 900
+    viewport.scrollTop = 320
+    fireEvent.scroll(viewport)
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+  })
+
+  it('does not self-heal after a near-bottom upward wheel gesture', () => {
+    const viewport = mount()
+    viewport.scrollTop = 495
+    fireEvent.wheel(viewport, { deltaY: -8, deltaX: 0 })
+    expect(screen.getByTestId('following')).toHaveTextContent('false')
+
+    act(() => {
+      observers[0].callback([], {} as ResizeObserver)
+    })
     expect(screen.getByTestId('following')).toHaveTextContent('false')
   })
 

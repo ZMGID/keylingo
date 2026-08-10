@@ -1,6 +1,13 @@
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, RotateCw } from 'lucide-react'
-import { Virtualizer, type VirtualizerHandle } from 'virtua'
+import {
+  defaultRangeExtractor,
+  measureElement as measureVirtualElement,
+  observeElementRect as observeVirtualRect,
+  useVirtualizer,
+  type Range,
+  type ReactVirtualizerOptions,
+} from '@tanstack/react-virtual'
 import type { AgentPlanState, ChatMessage, ConversationContextState, DegradedAnswer } from './types'
 import { MessageBubble } from './MessageBubble'
 import { DegradedAnswerCard } from './DegradedAnswerCard'
@@ -23,20 +30,29 @@ import {
 } from './messageNavigator'
 import { useStreamCoarse, useStreamSnapshot } from './streamingStore'
 import { StreamStatusLine } from './StreamStatusLine'
-import { getActiveGroup, useGroupsVersion } from './groupStreamingStore'
+import { getActiveGroup, useGroupVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
 import {
-  earlierBatchStart,
-  estimateRenderCost,
-  HEAVY_MIGRATION_STEP,
-  LOAD_EARLIER_TRIGGER_PX,
-  mountedCountForBudget,
+  estimateMessageRenderHeight,
+  estimateMessageRenderCost,
+  getCachedRowMeasurement,
+  layoutScopedVirtualKey,
   sendReserveHeight,
-  splitHistoryForVirtualization,
-  VIRTUALIZE_COST_THRESHOLD,
-  type HistorySplit,
+  restoreMeasurementSnapshot,
+  saveMeasurementSnapshot,
+  setCachedRowMeasurement,
+  shouldAdjustChatItemSizeChange,
 } from './messageListVirtualization'
 import type { Lang } from '../settings/i18n'
+import { measureChatSurface, recordChatPerfSample, useChatPerfRenderProbe } from './chatPerformanceProbe'
+import { getChatPerformanceFlags } from './chatPerformanceFlags'
+import {
+  beginMessageNavigationHydrate,
+  beginStreamSettleEagerHydrate,
+  endMessageNavigationHydrate,
+  resetMessageNavigationStore,
+} from './messageNavigationStore'
+
 
 export interface AssistantStreamStats {
   messageId: string
@@ -45,9 +61,11 @@ export interface AssistantStreamStats {
   reasoningDurationMsBySegmentId?: Record<string, number>
 }
 
-interface MessageListProps {
+export interface MessageListProps {
   conversationId?: string | null
   messages: ChatMessage[]
+  renderRequestId?: number
+  onInitialRender?: (conversationId: string, requestId: number) => void
   agentPlanState?: AgentPlanState | null
   assistantStreamStatsByMessageId?: Record<string, AssistantStreamStats>
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
@@ -71,11 +89,31 @@ interface MessageListProps {
 const LIST_EDGE_PADDING_PX = 16
 
 // 导航器高亮同步的最小间隔。这趟同步是 querySelectorAll + 逐行 getBoundingClientRect，
-// 若 virtua 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
+// 若 virtualizer 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
 // 正是滚动不顺滑的主因之一。高亮不需要 120fps，8 次/秒足够。
 const NAVIGATOR_SYNC_INTERVAL_MS = 120
+// 导航跳转后等目标行挂载 + 重内容 hydrate + 高度稳定的上限。
+// 估算 → 实测 的纠正通常 1~3 帧；代码块同步 hydrate 后偶发再撑一帧。
+const NAVIGATOR_SETTLE_MAX_FRAMES = 48
+// 准备阶段：目标行自身高度稳定帧数。
+const NAVIGATOR_SETTLE_STABLE_FRAMES = 3
+// 跳转后 paint 前钉住：邻居重测 + 图片/异步块还会改 translateY。
+const NAVIGATOR_HOLD_MAX_FRAMES = 28
+const NAVIGATOR_HOLD_STABLE_FRAMES = 4
+// 与 virtualizer overscan 对齐，跳转后首屏邻居尽量已测过高。
+const NAVIGATOR_FORCE_MOUNT_RADIUS = 6
+// 收尾再锁几帧，挡住 force-mount 拆除后的迟到测高。
+const NAVIGATOR_UNLOCK_FRAMES = 10
+// 只认 heavy island；data-chat-markdown-pending 从未写入，留着只会制造「假覆盖」。
+const NAVIGATOR_PENDING_SELECTOR = '[data-chat-heavy-hydrated="false"]'
+const NAVIGATOR_ALIGN_EPSILON_PX = 1
+// 会话切换遮罩：重内容一直晃也不能无限等，超时强制揭开。
+const OPEN_SETTLE_MAX_MS = 2_000
 
-// 列表里每一项的统一形态。整条会话全量喂给虚拟列表（消息都在内存，virtua 只渲可见项），
+
+
+
+// 列表里每一项的统一形态。整条会话全量喂给虚拟列表（消息都在内存，virtualizer 只渲可见项），
 // 屏外的气泡连同其 KaTeX host / Markdown / 图片 DOM 真正从 DOM 卸载。
 type RenderItem =
   | { kind: 'spacer'; key: 'padding-top' | 'padding-bottom'; size: number }
@@ -84,9 +122,63 @@ type RenderItem =
   | { kind: 'live-group'; key: string; groupId: string }
   | { kind: 'streaming'; key: 'streaming-assistant'; message: ChatMessage; messageStreaming: boolean; reasoningStreaming: boolean }
   | { kind: 'error'; key: 'error'; text: string; retryMessageId: string | null }
+  | { kind: 'tail'; key: 'tail' }
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
   | { kind: 'compaction-progress'; key: string; afterIndex: number }
+
+function contentRevision(text: string | undefined): string {
+  if (!text) return '0'
+  // Measurement cache only needs a stable change detector, not a full content digest.
+  // Hashing every character made a cold conversation switch synchronously rescan megabytes
+  // before React could yield back to sidebar input. Sample fixed-size slices instead.
+  const sample = text.length <= 768
+    ? text
+    : `${text.slice(0, 256)}${text.slice(Math.floor(text.length / 2) - 128, Math.floor(text.length / 2) + 128)}${text.slice(-256)}`
+  let hash = 2166136261
+  for (let index = 0; index < sample.length; index += 1) {
+    hash = Math.imul(hash ^ sample.charCodeAt(index), 16777619)
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`
+}
+
+function messageLayoutRevision(message: ChatMessage): string {
+  const tools = message.tool_calls ?? message.toolCalls ?? []
+  const toolRevision = tools.map((tool) => [
+    tool.id,
+    tool.name ?? tool.tool_name ?? tool.toolName,
+    tool.status,
+    contentRevision(tool.argument_preview ?? tool.argumentPreview ?? tool.argumentsPreview),
+    contentRevision(tool.result_preview ?? tool.resultPreview),
+    (tool.artifacts ?? []).map((artifact) => [
+      artifact.name,
+      artifact.mime_type ?? artifact.mimeType,
+      artifact.path ?? artifact.filePath ?? artifact.localPath,
+      artifact.size_bytes ?? artifact.sizeBytes,
+    ].join(':')).join(','),
+  ].join(':')).join('|')
+  return [
+    contentRevision(message.content),
+    contentRevision(message.reasoning),
+    message.segments?.map((segment) => `${segment.id}:${segment.kind}:${contentRevision(segment.text ?? undefined)}`).join('|') ?? '',
+    message.attachments?.map((attachment) => `${attachment.id}:${attachment.type}:${attachment.name}`).join('|') ?? '',
+    (message.artifacts ?? []).map((artifact) => `${artifact.name}:${artifact.mime_type ?? artifact.mimeType}:${artifact.path ?? artifact.filePath ?? artifact.localPath}:${artifact.size_bytes ?? artifact.sizeBytes}`).join('|'),
+    toolRevision,
+  ].join('::')
+}
+
+function measurementKey(item: RenderItem): string {
+  if (item.kind === 'message') {
+    return `${item.key}:${messageLayoutRevision(item.message)}`
+  }
+  if (item.kind === 'group') {
+    return `${item.key}:${item.messages.map((message) => `${message.id}:${messageLayoutRevision(message)}`).join('|')}`
+  }
+  if (item.kind === 'streaming') {
+    return `${item.key}:${messageLayoutRevision(item.message)}`
+  }
+  return item.key
+}
 
 function streamErrorDegraded(error: string): DegradedAnswer {
   const normalized = error.toLowerCase()
@@ -114,6 +206,8 @@ type GroupModelLabel = { providerId: string | null; model: string | null }
 function MessageListBase({
   conversationId,
   messages,
+  renderRequestId = 0,
+  onInitialRender,
   agentPlanState = null,
   assistantStreamStatsByMessageId = {},
   onUpdateMessage,
@@ -131,11 +225,18 @@ function MessageListBase({
   animateCompactionBoundaryId = null,
   lang = 'zh',
 }: MessageListProps) {
+  const chatPerfFlags = getChatPerformanceFlags()
+  const useTanStackVirtualizer = chatPerfFlags.tanstackVirtualizer
+  const externalizeLiveRow = chatPerfFlags.liveRowExternalization
+  useChatPerfRenderProbe('MessageList', {
+    conversationId,
+    messages: messages.length,
+  })
   // 流式预览状态直接订阅 streamingStore——只有本组件随每帧内容重渲，Chat/侧栏/输入栏不动。
   const coarse = useStreamCoarse()
   const snapshot = useStreamSnapshot()
   // 多答组实时流：订阅 group store 版本号，活跃组列内容更新时驱动重渲（仅需订阅，值本身不用）。
-  useGroupsVersion()
+  useGroupVersion(conversationId)
   const liveGroup = conversationId ? getActiveGroup(conversationId) : undefined
   // Group column objects are mutated in place for every stream delta. Only model
   // identity changes should rebuild historical rows; content deltas stay in the
@@ -161,6 +262,15 @@ function MessageListBase({
   ), [liveGroupColumns, liveGroupId, liveGroupModelsKey])
   const streaming = coarse.streaming
   const streamFrozen = coarse.streamFrozen
+  // live → 历史 的同帧：先开短窗 eager，再让本帧新挂的 DeferredCodeBlock 读到 flag。
+  // 必须在 render 期同步调用，useEffect 会晚一帧，首挂仍走 180ms 延迟。
+  const liveRowActive = streaming || streamFrozen
+  const prevLiveRowActiveRef = useRef(liveRowActive)
+  if (prevLiveRowActiveRef.current && !liveRowActive) {
+    beginStreamSettleEagerHydrate()
+  }
+  prevLiveRowActiveRef.current = liveRowActive
+
   const error = coarse.streamError
   const streamingContent = snapshot.content
   const streamingReasoning = snapshot.reasoning
@@ -187,45 +297,180 @@ function MessageListBase({
   }, [liveGroup, messages, snapshot.messageId, streamFrozen, streaming])
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const virtualizerRef = useRef<VirtualizerHandle>(null)
-  // hook 需要通过 state 拿到元素以便重新绑定监听；virtua 需要 RefObject。回调 ref 同时喂两者。
+  // hook 需要通过 state 拿到元素以便重新绑定监听；virtualizer 需要 RefObject。回调 ref 同时喂两者。
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null)
+  const [contentWidth, setContentWidth] = useState(712)
   const setScrollEl = useCallback((el: HTMLDivElement | null) => {
     scrollRef.current = el
     setViewportEl(el)
   }, [])
+
+  const committedRenderRequestRef = useRef(0)
+  useLayoutEffect(() => {
+    if (
+      !contentEl
+      || !conversationId
+      || renderRequestId <= 0
+      || committedRenderRequestRef.current === renderRequestId
+    ) return
+    let cancelled = false
+    let readyRaf: number | null = null
+    let previousHeight = -1
+    let stableFrames = 0
+    const startedAt = performance.now()
+
+    const completeNow = () => {
+      committedRenderRequestRef.current = renderRequestId
+      onInitialRender?.(conversationId, renderRequestId)
+    }
+
+    const completeIfReady = (): boolean | null => {
+      // 超时硬揭开：病理高度抖动 / 异常 pending 不能让遮罩永远盖住。
+      if (performance.now() - startedAt >= OPEN_SETTLE_MAX_MS) {
+        completeNow()
+        return true
+      }
+
+      // 仍有未就绪的 ChatHeavyIsland：高度会在稍后猛涨。
+      if (contentEl.querySelector(NAVIGATOR_PENDING_SELECTOR)) {
+        previousHeight = -1
+        stableFrames = 0
+        // null：停 rAF 轮询，等 MutationObserver 看到标记变化后再测。
+        return null
+      }
+
+      // 重内容到位后，虚拟列表还可能在下一帧用真实 DOM 高度修正 itemSizeCache /
+      // totalSize。至少连续两帧高度不变，才把覆盖层交还给正文。
+      const height = contentEl.scrollHeight
+      if (height === previousHeight) stableFrames += 1
+      else {
+        previousHeight = height
+        stableFrames = 0
+      }
+      if (stableFrames < 2) return false
+
+      completeNow()
+      return true
+    }
+    const scheduleReadyCheck = () => {
+      if (cancelled || readyRaf !== null) return
+      readyRaf = requestAnimationFrame(() => {
+        readyRaf = null
+        if (completeIfReady() === false) scheduleReadyCheck()
+      })
+    }
+
+    const observer = new MutationObserver(() => {
+      scheduleReadyCheck()
+    })
+    observer.observe(contentEl, {
+      attributes: true,
+      attributeFilter: ['data-chat-heavy-hydrated'],
+      childList: true,
+      subtree: true,
+    })
+    // 超时兜底：即使 observer/rAF 路径卡住也要揭开。
+    const timeoutId = window.setTimeout(() => {
+      if (cancelled || committedRenderRequestRef.current === renderRequestId) return
+      completeNow()
+    }, OPEN_SETTLE_MAX_MS)
+    scheduleReadyCheck()
+    return () => {
+      cancelled = true
+      observer.disconnect()
+      if (readyRaf !== null) cancelAnimationFrame(readyRaf)
+      window.clearTimeout(timeoutId)
+    }
+  }, [contentEl, conversationId, onInitialRender, renderRequestId])
+
+
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    const finish = measureChatSurface(
+      'conversation-visible',
+      contentEl,
+      conversationId ?? 'empty',
+    )
+    return finish
+  }, [conversationId, contentEl])
+
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    const updateWidth = (width: number) => {
+      const next = Math.max(280, Math.round(width))
+      setContentWidth((current) => current === next ? current : next)
+    }
+    const rect = contentEl.getBoundingClientRect()
+    updateWidth(Math.max(0, rect.width - 48))
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width
+      if (typeof width === 'number') updateWidth(width)
+    })
+    observer.observe(contentEl)
+    return () => observer.disconnect()
+  }, [contentEl])
   const prevMessageCountRef = useRef(0)
   const [activeNavigatorNodeId, setActiveNavigatorNodeId] = useState<string | null>(null)
   const [visibleNavigatorNodeIds, setVisibleNavigatorNodeIds] = useState<string[]>([])
   const navigatorNodesRef = useRef<MessageNavigatorNode[]>([])
   const activeNavigatorNodeIdRef = useRef<string | null>(null)
   const visibleNavigatorNodeIdsRef = useRef<string[]>([])
+  const navigatorSettleRafRef = useRef<number | null>(null)
+  const navigatorSettleGenerationRef = useRef(0)
+  // endNavigatorSession 的解锁 rAF 链；clear 时必须 cancel，避免卸载后 setState。
+  const navigatorUnlockRafRef = useRef<number | null>(null)
+  const navigatorUnlockGenerationRef = useRef(0)
+
+  // 导航「先渲染再跳」：在当前视口不动的前提下，把目标行附近强制挂进 DOM 测高。
+  const [forceMountRenderIndex, setForceMountRenderIndex] = useState<number | null>(null)
+  const forceMountRenderIndexRef = useRef<number | null>(null)
+  forceMountRenderIndexRef.current = forceMountRenderIndex
+  // 导航全程锁：禁止 virtualizer 因测高改 scrollTop（那是上下抽的主因）。
+  const navigationLockRef = useRef(false)
+  // 准备阶段冻结的阅读位置；hold 跳转前绝不能被动挪走。
+  const navigatorFrozenScrollTopRef = useRef<number | null>(null)
+  // 跳转后 paint 前钉住。jumped=false 时只在 layout 里跳一次，避免 rAF 跳完再被测高扯。
+  const navigatorHoldRef = useRef<{
+    generation: number
+    targetIndex: number
+    frames: number
+    stable: number
+    jumped: boolean
+    lastHeight: number
+    lastTotalSize: number
+  } | null>(null)
+  // 「回到底部」落地 hold：代码块/重内容在底部挂载后撑高，需连续钉底到稳定。
+  const bottomHoldRef = useRef<{
+    generation: number
+    frames: number
+    stable: number
+    lastScrollHeight: number
+  } | null>(null)
+  const [navigatorHoldEpoch, setNavigatorHoldEpoch] = useState(0)
+  const [bottomHoldEpoch, setBottomHoldEpoch] = useState(0)
+  const [navigatorLockActive, setNavigatorLockActive] = useState(false)
+
+
+
   // 消息区内置右键菜单（原生菜单被全局屏蔽，见 main.tsx）。
   const [msgMenu, setMsgMenu] = useState<
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
   >(null)
 
-  // 底部跟随：contentGrowth 钉底 + 近底历史实挂载，避免与 virtua remeasure 互抢。
-  const { handle: followHandle, following, showJumpButton } = useScrollFollow({
+  // 底部跟随：ResizeObserver contentGrowth 是流式钉底主路径；growthSignal 仅在
+  // scrollHeight 真变且 RO 未投递时补一枪。不要无条件 stickToBottom 每 token 钉底。
+  const streamGrowthSignal = streaming || streamFrozen
+    ? `${streamingContent.length}:${streamingReasoning.length}:${streamingToolCalls.length}:${streamingSegments.length}`
+    : null
+  const { handle: followHandle, showJumpButton } = useScrollFollow({
     viewport: viewportEl,
     content: contentEl,
     trackKeys: true,
+    growthSignal: streamGrowthSignal,
   })
 
-  // ResizeObserver 是主要的流式钉底驱动，但虚拟列表/浏览器可能先更新内容和 scrollTop，
-  // 再投递 ResizeObserver，偶尔会漏掉这一轮高度变化。流式快照已经是最新 DOM 的提交信号，
-  // 在 layout effect 里补一次同步；用户滚轮/触摸上移时 followHandle 会先变成 false，
-  // 因此不会把用户主动停留在历史位置的视口重新拽到底部。
-  useLayoutEffect(() => {
-    if (!streaming || !followHandle.isFollowing()) return
-    const viewport = scrollRef.current
-    if (viewport) {
-      const gap = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      if (gap <= 1) return
-    }
-    followHandle.stickToBottom()
-  }, [followHandle, snapshot, streaming])
 
   const legacyPlanMessageId = useMemo(() => {
     const legacyPlan = agentPlanState?.plan?.trim()
@@ -319,8 +564,51 @@ function MessageListBase({
     pendingCompactionAfterIndex,
   ])
 
-  // 历史项只在消息/压缩边界/组模型身份变化时重建。高频流式文本不进入依赖，
-  // 避免长会话每帧遍历并重新分配整个历史数组。
+  const liveItem = useMemo<RenderItem | null>(() => {
+    const hasLiveGroup = Boolean(liveGroup && (coarse.streaming || coarse.streamFrozen))
+    const hasStreamingPreview =
+      !hasLiveGroup &&
+      (streaming || streamFrozen) &&
+      (streamingContent || streamingReasoning || streamingToolCalls.length > 0 || streamingSegments.length > 0)
+    if (hasLiveGroup && liveGroup) {
+      return { kind: 'live-group', key: `live-group-${liveGroup.groupId}`, groupId: liveGroup.groupId }
+    }
+    if (hasStreamingPreview) {
+      return {
+        kind: 'streaming',
+        key: 'streaming-assistant',
+        messageStreaming: streaming && !streamFrozen,
+        reasoningStreaming: reasoningStreaming && !streamFrozen,
+        message: {
+          id: 'streaming-assistant',
+          role: 'assistant',
+          content: streamingContent,
+          reasoning: streamingReasoning || undefined,
+          artifacts: [],
+          tool_calls: streamingToolCalls,
+          segments: streamingSegments,
+          timestamp: Math.floor(Date.now() / 1000),
+        },
+      }
+    }
+    return null
+  }, [
+    coarse.streaming,
+    coarse.streamFrozen,
+    liveGroup,
+    reasoningStreaming,
+    streamFrozen,
+    streaming,
+    streamingContent,
+    streamingReasoning,
+    streamingSegments,
+    streamingToolCalls,
+  ])
+
+  const fallbackLiveItem = externalizeLiveRow ? null : liveItem
+
+  // 历史项只在消息/压缩边界/组模型身份变化时重建。默认高频流式文本不进入依赖；
+  // 关闭 live row 外置开关时，刻意把 live item 放回 timeline 作为回退路径。
   const historyItems = useMemo<RenderItem[]>(() => {
     const list: RenderItem[] = [
       { kind: 'spacer', key: 'padding-top', size: LIST_EDGE_PADDING_PX },
@@ -379,52 +667,14 @@ function MessageListBase({
       }
     }
 
-    return list
-  }, [folded, liveGroupModels, messageIndexById, appendCompactionSlot])
+    if (fallbackLiveItem) list.push(fallbackLiveItem)
 
-  // 高频变化只更新固定的尾部 slot，不重建历史项。
-  const dynamicItem = useMemo<RenderItem | null>(() => {
-    const hasLiveGroup = Boolean(liveGroup && (coarse.streaming || coarse.streamFrozen))
-    const hasStreamingPreview =
-      !hasLiveGroup &&
-      (streaming || streamFrozen) &&
-      (streamingContent || streamingReasoning || streamingToolCalls.length > 0 || streamingSegments.length > 0)
-    if (hasLiveGroup && liveGroup) {
-      return { kind: 'live-group', key: `live-group-${liveGroup.groupId}`, groupId: liveGroup.groupId }
-    }
-    if (hasStreamingPreview) {
-      return {
-        kind: 'streaming',
-        key: 'streaming-assistant',
-        messageStreaming: streaming && !streamFrozen,
-        reasoningStreaming: reasoningStreaming && !streamFrozen,
-        message: {
-          id: 'streaming-assistant',
-          role: 'assistant',
-          content: streamingContent,
-          reasoning: streamingReasoning || undefined,
-          artifacts: [],
-          tool_calls: streamingToolCalls,
-          segments: streamingSegments,
-          timestamp: Math.floor(Date.now() / 1000),
-        },
-      }
-    }
-    // 首 token 之前没有流式内容项——生成期间的占位/状态由 tailWrap 里常驻的
-    // StreamStatusLine 承担（动效 logo + 耗时/tokens/任务数）。
-    return null
-  }, [
-    liveGroup,
-    coarse.streaming,
-    coarse.streamFrozen,
-    streaming,
-    streamFrozen,
-    streamingContent,
-    streamingReasoning,
-    reasoningStreaming,
-    streamingToolCalls,
-    streamingSegments,
-  ])
+    return list
+  }, [appendCompactionSlot, fallbackLiveItem, folded, liveGroupModels, messageIndexById])
+
+  // 默认路径把高频 live row 放到固定 tail；关闭开关时回退到普通 timeline，
+  // 便于诊断外置 store / tail 测量问题而不改变消息数据和 virtualizer。
+  const dynamicItem = externalizeLiveRow ? liveItem : null
 
   const errorItem = useMemo<RenderItem | null>(() => {
     if (!error) return null
@@ -433,131 +683,222 @@ function MessageListBase({
     return { kind: 'error', key: 'error', text: error, retryMessageId }
   }, [error, messages])
 
-  // Virtua's `data + render function` path avoids flattening an O(N) React
-  // children tree every frame. Three fixed tail slot kinds resolve their current
-  // payload in the render callback; the data array changes only with history.
-  // 只有历史项进虚拟列表。流式气泡/错误/底部留白渲染在虚拟列表之外（正常流式 DOM），
-  // 这样增长中的那条消息按真实高度测量，钉底精确、不闪。
+  const layoutKey = `${conversationId ?? 'empty'}:${contentWidth}`
+  const tailMeasurementKey = streaming || streamFrozen
+    ? `tail:live:${snapshot.runId ?? snapshot.messageId ?? 'anonymous'}`
+    : `tail:settled:${error ? contentRevision(error) : 'empty'}`
+  const historyMeasurementRevision = useMemo(
+    () => historyItems.map(measurementKey).join('|'),
+    [historyItems],
+  )
+  const measurementRevision = `${historyMeasurementRevision}|tail=${tailMeasurementKey}`
 
-  // 成本感知虚拟化。条数是个坏预算：实测 14 条消息的对话因为塞了 231 个代码块，
-  // 渲染出 5433 个 DOM 节点、切换要等一秒，而条数 14 < 48 门槛 → 完全不虚拟化、全部实挂载。
-  // 这里按「这条会渲染出多少节点」估个成本，入口和实挂载尾部两处都改成看成本。
-  // 只有重会话走这条旁路，普通会话的行为一个字节都不变。
-  const historyCosts = useMemo(
-    () => historyItems.map((item) => {
-      // MessageBubble 是二选一渲染：有 text 分段就渲染分段，否则渲染 content
-      //（两者是同一份文本的拷贝，都算就翻倍）。tool / thinking 分段在历史消息里折叠、不挂载。
-      const textsOf = (message: ChatMessage): string[] => {
-        const textSegments = (message.segments ?? []).filter((segment) => segment.kind === 'text')
-        if (textSegments.length > 0) return textSegments.map((segment) => segment.text ?? '')
-        return [message.content ?? '']
+  // 计算每一行的初始估算高度。真实高度由 TanStack Virtual 的 measureElement
+  // 覆盖；估算只负责首次切换/首次滚动时快速建立窗口，不再把整份历史拆成两套 DOM。
+  const estimatedSizeByKey = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const item of historyItems) {
+      if (item.kind === 'spacer') {
+        map.set(item.key, item.size)
+        continue
+      }
+      const rowKey = measurementKey(item)
+      const cached = getCachedRowMeasurement(layoutKey, rowKey)
+      if (cached !== undefined) {
+        map.set(item.key, cached)
+        continue
       }
       const messages = item.kind === 'message'
         ? [item.message]
-        : item.kind === 'group' ? item.messages : []
+        : item.kind === 'group' ? item.messages
+          : item.kind === 'streaming' ? [item.message]
+            : []
       let cost = 0
+      let height = 0
       for (const message of messages) {
-        for (const text of textsOf(message)) cost += estimateRenderCost(text)
+        const textSegments = (message.segments ?? []).filter((segment) => segment.kind === 'text')
+        const texts = textSegments.length > 0
+          ? textSegments.map((segment) => segment.text ?? '')
+          : [message.content ?? '']
+        const toolCalls = message.tool_calls ?? message.toolCalls ?? []
+        const artifactCount = (message.artifacts ?? []).length
+          + toolCalls.reduce((sum, toolCall) => sum + (toolCall.artifacts ?? []).length, 0)
+        cost += estimateMessageRenderCost({
+          texts,
+          toolCallCount: toolCalls.length,
+          timelineSegmentCount: (message.segments ?? []).length,
+          attachmentCount: (message.attachments ?? []).length,
+          artifactCount,
+        })
+        height += estimateMessageRenderHeight({
+          texts,
+          width: contentWidth,
+          toolCallCount: toolCalls.length,
+          attachmentCount: (message.attachments ?? []).length,
+          artifactCount,
+        })
       }
-      return cost
-    }),
-    [historyItems],
-  )
-  const totalHistoryCost = useMemo(
-    () => historyCosts.reduce((sum, cost) => sum + cost, 0),
-    [historyCosts],
-  )
-  // 揭示回调在 useCallback 里读它，走 ref 避免把 historyCosts 塞进依赖。
-  const historyCostsRef = useRef<number[]>(historyCosts)
-  historyCostsRef.current = historyCosts
-  // 判定按对话冻结，且只升不降。用户正在翻历史时不切渲染模式：完成消息刚好跨过成本阈值时，
-  // 切到渐进加载会卸载上方 DOM、使 scrollTop 被 clamp，视觉上常落到本轮 user 消息。
-  // 回到底部后再升级，此时上方收缩不可见，下面的 layout effect 还会补钉一次。
-  const heavyRef = useRef<{ id: string | null | undefined; heavy: boolean }>({ id: undefined, heavy: false })
-  if (heavyRef.current.id !== conversationId) {
-    heavyRef.current = { id: conversationId, heavy: false }
-  }
-  if (
-    totalHistoryCost > VIRTUALIZE_COST_THRESHOLD
-    && followHandle.isFollowing()
-  ) {
-    heavyRef.current.heavy = true
-  }
-  const heavyHistory = heavyRef.current.heavy
-  const previousHeavyHistoryRef = useRef(heavyHistory)
-
-  useLayoutEffect(() => {
-    const changed = previousHeavyHistoryRef.current !== heavyHistory
-    previousHeavyHistoryRef.current = heavyHistory
-    if (changed && followHandle.isFollowing()) followHandle.stickToBottom()
-  }, [followHandle, heavyHistory])
-
-  // Paseo 式部分虚拟化：长列表只虚拟化更早历史，最近一段始终实挂载。
-  // 读 isFollowing() 而不是 following state：脱离跟随时冻结边界，且不为跟随状态翻转多渲一次。
-  const lastSplitRef = useRef<HistorySplit<RenderItem> | null>(null)
-  const historySplit = useMemo(
-    () => splitHistoryForVirtualization(historyItems, {
-      frozenStart: followHandle.isFollowing()
-        ? undefined
-        : lastSplitRef.current?.mountedStartIndex,
-      // 重会话：条数门槛让位给成本（已判定要虚拟化），实挂载尾部按成本给预算，
-      // 步长换小 —— 按 16 量化会把这么短的列表的边界压回 0，等于没虚拟化。
-      ...(heavyHistory
-        ? {
-          threshold: 0,
-          minMounted: mountedCountForBudget(historyCosts),
-          migrationStep: HEAVY_MIGRATION_STEP,
-        }
-        : {}),
-    }),
-    [followHandle, heavyHistory, historyCosts, historyItems],
-  )
-  lastSplitRef.current = historySplit
-  const mountedStartIndexRef = useRef(0)
-  mountedStartIndexRef.current = historySplit.mountedStartIndex
-
-  // 重会话走「向上渐进加载」而不是虚拟化（理由见 messageListVirtualization 里 LOAD_EARLIER_TRIGGER_PX
-  // 的注释：行高差三个数量级，virtua 只接受一个标量 itemSize，估算必然错、错了就是滚动跳）。
-  // 只揭示 revealedStart 之后的行，滚到接近顶部再往前揭一批，并用 scrollHeight 差值补偿 scrollTop。
-  const [revealState, setRevealState] = useState<{ id: string | null | undefined; start: number }>(
-    { id: undefined, start: 0 },
-  )
-  // 只会往上长，不会缩回去：新消息把实挂载窗口往后推时，已揭示的行不能被收回。
-  // 切会话时回到按成本算出的初始窗口。
-  const revealedFromState = revealState.id === conversationId
-    ? Math.min(revealState.start, historySplit.mountedStartIndex)
-    : historySplit.mountedStartIndex
-  // 上一帧的值，按会话隔离（视口元素不随会话变，跟随状态会跨会话带过来，不隔离会把新会话整本挂上）。
-  const revealedStartRef = useRef<{ id: string | null | undefined; start: number }>(
-    { id: undefined, start: 0 },
-  )
-  if (revealedStartRef.current.id !== conversationId) {
-    revealedStartRef.current = { id: conversationId, start: revealedFromState }
-  }
-  // **不跟随（= 正在翻历史）时不允许窗口往前滑。** 冻结边界有个上限（重会话下尾部窗口只有 3 条，
-  // 上限被算成 9 条，比普通会话的 96 容易碰到），超了就放弃冻结、重算 mountedStartIndex，
-  // 那一下会往前跳一格 —— 跟着滑就会从上面卸载几行，读者眼前的内容跟着跳。
-  const revealedStart = followHandle.isFollowing()
-    ? revealedFromState
-    : Math.min(revealedFromState, revealedStartRef.current.start)
-  revealedStartRef.current = { id: conversationId, start: revealedStart }
-  // 揭示前记下 scrollHeight，揭示后在 layout effect 里补偿；null = 本次不需要补偿。
-  const revealCompensationRef = useRef<number | null>(null)
-  // 导航跳到还没揭示的行：先揭示到那儿，再在 layout effect 里滚过去。
-  const pendingRevealScrollRef = useRef<number | null>(null)
-  const revealInFlightRef = useRef(false)
-
-  // 回到底部（重新进入跟随）就把揭示的收起来。不收的话，滚到顶看过一遍之后这个对话就
-  // 退化回「全量挂载」，接着聊会越来越卡，只有切走再切回才恢复。
-  // 收起时用户就在底部，上方内容变短 → 浏览器把 scrollTop 夹回去 + 跟随钉底，视觉上不动。
-  const wasFollowingRef = useRef(true)
-  useLayoutEffect(() => {
-    if (following && !wasFollowingRef.current) {
-      // id 置空 → revealedFromState 回到跟随窗口（不是把 start 设成 0）。
-      setRevealState({ id: undefined, start: 0 })
+      const base = item.kind === 'group' ? 180 : 88
+      // Mount cost decides the virtualized window; row size must be estimated in
+      // rendered pixels so a long answer does not begin hundreds of pixels short.
+      map.set(item.key, Math.max(base, height + (cost > 800 ? 24 : 0)))
     }
-    wasFollowingRef.current = following
-  }, [following])
+    map.set('tail', getCachedRowMeasurement(layoutKey, tailMeasurementKey) ?? 96)
+    return map
+  }, [contentWidth, historyItems, layoutKey, tailMeasurementKey])
+
+  // 真正的 live 外置：流式气泡 + 状态行放在虚拟列表**外面**的文档流里，
+  // 不再作为 virtualizer 的 tail row 被 measureElement。
+  // 否则每个 token 都走 resizeItem + anchorTo:end 补偿，和 contentGrowth pin
+  // 互写 scrollTop → 生成内容整段「往下闪」。LiveAgent 把 live 留在列表里是
+  // 因为它们的 scroll 状态机更简单；Kivio 有 source 分类，不能双通道抢 pin。
+  // 关闭 liveRowExternalization 时回退：tail 仍进 virtualizer（诊断用）。
+  const flowLiveOutsideVirtualizer = useTanStackVirtualizer && externalizeLiveRow
+  const tailItem = useMemo<RenderItem>(() => ({ kind: 'tail', key: 'tail' }), [])
+  const itemCount = flowLiveOutsideVirtualizer
+    ? historyItems.length
+    : historyItems.length + 1
+  const historyItemsRef = useRef<RenderItem[]>(historyItems)
+  historyItemsRef.current = historyItems
+  const itemAt = useCallback((index: number) => (
+    index < historyItemsRef.current.length ? historyItemsRef.current[index] : tailItem
+  ), [tailItem])
+  const estimateSizeRef = useRef(estimatedSizeByKey)
+  estimateSizeRef.current = estimatedSizeByKey
+  const observeRect: ReactVirtualizerOptions<HTMLDivElement, HTMLDivElement>['observeElementRect'] = useCallback((instance, callback) => {
+    if (import.meta.env.MODE === 'test') {
+      callback({ width: 1024, height: viewportEl?.clientHeight || 800 })
+      return undefined
+    }
+    return observeVirtualRect(instance, callback)
+  }, [viewportEl])
+  const initialMeasurementsCache = useMemo(
+    () => restoreMeasurementSnapshot(conversationId, layoutKey, measurementRevision),
+    [conversationId, layoutKey, measurementRevision],
+  )
+  const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+    count: useTanStackVirtualizer ? itemCount : 0,
+    enabled: useTanStackVirtualizer,
+    getScrollElement: () => scrollRef.current,
+    // TanStack's index navigation and measurement corrections must share the
+    // same scroll authority as chat navigation and follow pinning. This keeps
+    // programmatic scroll writes source-classified by useScrollFollow.
+    scrollToFn: (offset, options) => followHandle.scrollToOffset(offset, options),
+    observeElementRect: observeRect,
+    estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
+    // Include the measured content width in TanStack's key space. A stable
+    // message key must remain stable within one layout, but a width change is
+    // a different geometry universe: old internal itemSizeCache entries must
+    // not be reused for rows that have not been mounted again yet.
+    getItemKey: (index) => layoutScopedVirtualKey(layoutKey, itemAt(index)?.key ?? `row-${index}`),
+    initialMeasurementsCache,
+    measureElement: (element, entry, instance) => {
+      const measured = measureVirtualElement(element, entry, instance)
+      const key = element.dataset.chatItemKey
+      if (key) {
+        const size = Math.max(1, measured)
+        const index = Number(element.dataset.index)
+        const virtualKey = Number.isInteger(index) ? instance.options.getItemKey(index) : key
+        const previousSize = instance.itemSizeCache.get(virtualKey)
+        if (previousSize === undefined || Math.abs(previousSize - size) > 0.5) {
+          followHandle.markLayoutCompensation()
+        }
+        const logicalKey = Number.isInteger(index) ? itemAt(index)?.key : undefined
+        if (logicalKey) estimateSizeRef.current.set(logicalKey, size)
+        setCachedRowMeasurement(layoutKey, key, size)
+        return size
+      }
+      return measured
+    },
+    rangeExtractor: useCallback((range: Range) => {
+      const indexes = defaultRangeExtractor(range)
+      // 旧路径：tail 仍在 virtualizer 内时强制挂载；外置后没有 tail index。
+      if (!flowLiveOutsideVirtualizer) {
+        const tailIndex = itemCount - 1
+        if (tailIndex >= 0 && !indexes.includes(tailIndex)) indexes.push(tailIndex)
+      }
+      // 消息导航：目标行附近强制挂载渲染测高，再一次性跳转。
+      // 半径内邻居一起量，减少跳转后 overscan 首次测高引发的 translateY 抖动。
+      const forced = forceMountRenderIndex
+      if (forced != null && itemCount > 0) {
+        const from = Math.max(0, forced - NAVIGATOR_FORCE_MOUNT_RADIUS)
+        const to = Math.min(itemCount - 1, forced + NAVIGATOR_FORCE_MOUNT_RADIUS)
+        for (let index = from; index <= to; index += 1) {
+          if (!indexes.includes(index)) indexes.push(index)
+        }
+      }
+      return indexes
+    }, [flowLiveOutsideVirtualizer, forceMountRenderIndex, itemCount]),
+
+
+    overscan: 6,
+    // jsdom/test environments have no layout box before the first observer tick;
+    // a conservative initial viewport keeps the first render useful while the
+    // real browser immediately replaces it with the measured client rect.
+    initialRect: { width: 0, height: viewportEl?.clientHeight || 800 },
+    anchorTo: 'end',
+    scrollEndThreshold: 12,
+    followOnAppend: false,
+    useAnimationFrameWithResizeObserver: false,
+    useFlushSync: false,
+  })
+  // 对齐 LiveAgent createLiveRowScrollAdjustPolicy（仅 fallback：live 仍在列表内）。
+  // 外置路径下 virtualizer 只有历史行，流式增长不再进这个谓词。
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    // 导航 prepare/hold 期间禁止测高改 scrollTop：那是点导航后上下抽的主因。
+    if (navigationLockRef.current) return false
+    const shouldAdjust = shouldAdjustChatItemSizeChange(item, {
+      scrollOffset: instance.scrollOffset ?? 0,
+      scrollAdjustments: instance.scrollAdjustments,
+      itemSizeCache: instance.itemSizeCache,
+      scrollDirection: instance.scrollDirection,
+    })
+    if (!shouldAdjust) return false
+    if (flowLiveOutsideVirtualizer) return true
+    const viewportTop = (instance.scrollOffset ?? 0) + instance.scrollAdjustments
+    const liveRowIndex = historyItems.findIndex(
+      (entry) => entry.kind === 'streaming' || entry.kind === 'live-group',
+    )
+    const liveTail = liveRowIndex >= 0 && (streaming || streamFrozen || Boolean(liveGroup))
+    if (
+      liveTail
+      && item.index >= liveRowIndex
+      && delta > 0
+      && item.end > viewportTop
+      && !followHandle.isFollowing()
+    ) {
+      return false
+    }
+    return true
+  }
+
+  const virtualItems = virtualizer.getVirtualItems()
+  // Row ResizeObservers and TanStack's own viewport observer update mounted rows.
+  // Avoid a blanket measure(): it clears the virtualizer's measured cache and makes
+  // detached readers pay the estimate-to-real-height correction for every row.
+
+  const saveMeasurementSnapshotRef = useRef<() => void>(() => {})
+  saveMeasurementSnapshotRef.current = () => {
+    if (!useTanStackVirtualizer || !viewportEl) return
+    saveMeasurementSnapshot(
+      conversationId,
+      layoutKey,
+      measurementRevision,
+      virtualizer.takeSnapshot(),
+    )
+  }
+  useEffect(() => () => saveMeasurementSnapshotRef.current(), [])
+
+  useLayoutEffect(() => {
+    if (!contentEl) return
+    recordChatPerfSample({
+      name: 'message-list-window',
+      durationMs: 0,
+      mountedRows: contentEl.querySelectorAll('[data-chat-message-list-item]').length,
+      domNodes: contentEl.querySelectorAll('*').length,
+      detail: `${conversationId ?? 'empty'}:history=${historyItems.length}:visible=${virtualItems.length}`,
+    })
+  }, [contentEl, conversationId, historyItems.length, virtualItems.length])
 
   const navigatorNodes = useMemo(() => {
     // targetRenderIndex 仍是「全历史逻辑下标」，导航时用 data-chat-row-index 查找。
@@ -586,91 +927,404 @@ function MessageListBase({
     setVisibleNavigatorNodeIds(nodeIds)
   }, [])
 
+  const cancelNavigatorSettle = useCallback(() => {
+    if (navigatorSettleRafRef.current !== null) {
+      cancelAnimationFrame(navigatorSettleRafRef.current)
+      navigatorSettleRafRef.current = null
+    }
+  }, [])
+
+  const cancelNavigatorUnlock = useCallback(() => {
+    if (navigatorUnlockRafRef.current !== null) {
+      cancelAnimationFrame(navigatorUnlockRafRef.current)
+      navigatorUnlockRafRef.current = null
+    }
+    navigatorUnlockGenerationRef.current += 1
+  }, [])
+
+  const setNavigationLock = useCallback((locked: boolean) => {
+    navigationLockRef.current = locked
+    setNavigatorLockActive((current) => (current === locked ? current : locked))
+  }, [])
+
+  const endNavigatorSession = useCallback((generation: number) => {
+    if (generation !== navigatorSettleGenerationRef.current) return
+    navigatorHoldRef.current = null
+    bottomHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+    if (forceMountRenderIndexRef.current != null) {
+      setForceMountRenderIndex(null)
+    }
+    endMessageNavigationHydrate(generation)
+    // force-mount 拆除后还可能有迟到测高；锁多留几帧再开。
+    cancelNavigatorUnlock()
+    const unlockGeneration = navigatorUnlockGenerationRef.current
+    let remaining = NAVIGATOR_UNLOCK_FRAMES
+    const unlockTick = () => {
+      navigatorUnlockRafRef.current = null
+      if (unlockGeneration !== navigatorUnlockGenerationRef.current) return
+      if (generation !== navigatorSettleGenerationRef.current) return
+      remaining -= 1
+      if (remaining <= 0) {
+        setNavigationLock(false)
+        return
+      }
+      navigatorUnlockRafRef.current = requestAnimationFrame(unlockTick)
+    }
+    navigatorUnlockRafRef.current = requestAnimationFrame(unlockTick)
+  }, [cancelNavigatorUnlock, setNavigationLock])
+
+  const clearNavigatorPrepare = useCallback(() => {
+    cancelNavigatorSettle()
+    cancelNavigatorUnlock()
+    setNavigationLock(false)
+    navigatorHoldRef.current = null
+    bottomHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+    if (forceMountRenderIndexRef.current != null) {
+      setForceMountRenderIndex(null)
+    }
+  }, [cancelNavigatorSettle, cancelNavigatorUnlock, setNavigationLock])
+
+
+
+  const alignViewportToRowIndex = useCallback((targetRenderIndex: number) => {
+    const el = scrollRef.current
+    const row = contentEl?.querySelector(
+      `[data-chat-row-index="${targetRenderIndex}"]`,
+    ) as HTMLElement | null
+    if (!row || !el) return false
+    const nextOffset =
+      row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+    // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
+    if (Math.abs(el.scrollTop - nextOffset) > NAVIGATOR_ALIGN_EPSILON_PX) {
+      followHandle.scrollToOffset(nextOffset)
+    }
+    return true
+  }, [contentEl, followHandle])
+
+  const rowHasPendingMedia = useCallback((row: HTMLElement) => {
+    if (row.querySelector(NAVIGATOR_PENDING_SELECTOR)) return true
+    // 只等「还在加载」的图片。complete && naturalWidth===0 是坏图/空图终态，
+    // 再当 pending 会把导航/回底 hold 拖满帧预算，跳转发粘。
+    const images = row.querySelectorAll('img')
+    for (const image of images) {
+      if (!image.complete) return true
+    }
+    return false
+  }, [])
+
+
+  const readNavigatorTargetMetrics = useCallback((targetRenderIndex: number) => {
+    const el = scrollRef.current
+    const row = contentEl?.querySelector(
+      `[data-chat-row-index="${targetRenderIndex}"]`,
+    ) as HTMLElement | null
+    if (!row || !el) {
+      return { ready: false as const, height: 0, offsetPx: Number.POSITIVE_INFINITY }
+    }
+    if (rowHasPendingMedia(row)) {
+      return { ready: false as const, height: 0, offsetPx: Number.POSITIVE_INFINITY }
+    }
+    const rowRect = row.getBoundingClientRect()
+    const viewportRect = el.getBoundingClientRect()
+    const height = rowRect.height
+    if (!(height > 0)) {
+      return { ready: false as const, height: 0, offsetPx: Number.POSITIVE_INFINITY }
+    }
+    return {
+      ready: true as const,
+      height,
+      offsetPx: Math.abs(rowRect.top - viewportRect.top),
+    }
+  }, [contentEl, rowHasPendingMedia])
+
+  /**
+   * 先渲染后跳转：
+   * 1. 准备阶段：强制挂载目标邻域 + eager hydrate。**不锁**测高补偿，
+   *    让当前阅读位置保持稳定（锁住反而会和 force-mount 测高打架上下抽）。
+   * 2. 就绪后上锁，只在 useLayoutEffect 里跳一次。
+   * 3. hold：paint 前钉住，直到 offset/高度/totalSize 都稳定。
+   */
+
+  const prepareThenJumpToNavigatorNode = useCallback((
+    generation: number,
+    targetRenderIndex: number,
+  ) => {
+    cancelNavigatorSettle()
+    // 准备阶段明确解锁：force-mount 上方行测高需要 shouldAdjust 保住当前画面。
+    setNavigationLock(false)
+    navigatorHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+    let frames = 0
+    let previousHeight = -1
+    let stableFrames = 0
+
+    const startHold = () => {
+      if (generation !== navigatorSettleGenerationRef.current) return
+      // 从这一刻起锁住测高改 scroll；真正的跳转只发生在 layout（paint 前）。
+      bottomHoldRef.current = null
+      setNavigationLock(true)
+      navigatorFrozenScrollTopRef.current = null
+      navigatorHoldRef.current = {
+        generation,
+        targetIndex: targetRenderIndex,
+        frames: 0,
+        stable: 0,
+        jumped: false,
+        lastHeight: -1,
+        lastTotalSize: -1,
+      }
+      setNavigatorHoldEpoch((value) => value + 1)
+    }
+
+
+    const tick = () => {
+      navigatorSettleRafRef.current = null
+      if (generation !== navigatorSettleGenerationRef.current) return
+
+      frames += 1
+
+      const { ready, height } = readNavigatorTargetMetrics(targetRenderIndex)
+      if (!ready) {
+        previousHeight = -1
+        stableFrames = 0
+        if (frames < NAVIGATOR_SETTLE_MAX_FRAMES) {
+          navigatorSettleRafRef.current = requestAnimationFrame(tick)
+        } else {
+          startHold()
+        }
+        return
+      }
+
+      if (height === previousHeight) stableFrames += 1
+      else {
+        previousHeight = height
+        stableFrames = 0
+      }
+
+      if (stableFrames >= NAVIGATOR_SETTLE_STABLE_FRAMES || frames >= NAVIGATOR_SETTLE_MAX_FRAMES) {
+        startHold()
+        return
+      }
+      navigatorSettleRafRef.current = requestAnimationFrame(tick)
+    }
+
+    navigatorSettleRafRef.current = requestAnimationFrame(tick)
+  }, [
+    cancelNavigatorSettle,
+    readNavigatorTargetMetrics,
+    setNavigationLock,
+  ])
+
+  // 跳转后、paint 前钉住目标。邻居 measure → translateY 变时，在用户看见前补 scrollTop。
+
+  useLayoutEffect(() => {
+    const hold = navigatorHoldRef.current
+    if (!hold) return
+    if (hold.generation !== navigatorSettleGenerationRef.current) {
+      navigatorHoldRef.current = null
+      return
+    }
+
+    setNavigationLock(true)
+    alignViewportToRowIndex(hold.targetIndex)
+    hold.jumped = true
+    hold.frames += 1
+
+    const metrics = readNavigatorTargetMetrics(hold.targetIndex)
+    const totalSize = useTanStackVirtualizer ? virtualizer.getTotalSize() : 0
+    const geometryStable = metrics.ready
+      && metrics.offsetPx <= NAVIGATOR_ALIGN_EPSILON_PX
+      && metrics.height === hold.lastHeight
+      && totalSize === hold.lastTotalSize
+      && hold.lastHeight > 0
+
+    if (metrics.ready) {
+      hold.lastHeight = metrics.height
+      hold.lastTotalSize = totalSize
+    }
+
+    if (geometryStable) hold.stable += 1
+    else hold.stable = 0
+
+    if (hold.stable >= NAVIGATOR_HOLD_STABLE_FRAMES || hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
+      endNavigatorSession(hold.generation)
+      return
+    }
+
+    const raf = requestAnimationFrame(() => {
+      if (navigatorHoldRef.current?.generation === hold.generation) {
+        setNavigatorHoldEpoch((value) => value + 1)
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [
+    alignViewportToRowIndex,
+    endNavigatorSession,
+    navigatorHoldEpoch,
+    readNavigatorTargetMetrics,
+    setNavigationLock,
+    useTanStackVirtualizer,
+    virtualItems,
+    virtualizer,
+  ])
+
+
   const navigateToNavigatorNode = useCallback((node: MessageNavigatorNode) => {
     // 跳到上方消息：先脱离跟随，否则跟随纠正器会把视口又钉回底部。
     followHandle.releaseFollow()
     updateActiveNavigatorNode(node.id)
 
-    const el = scrollRef.current
-    // data-chat-row-index = 全历史逻辑下标（与 navigator targetRenderIndex 一致）
-    const row = contentEl?.querySelector(
-      `[data-chat-row-index="${node.targetRenderIndex}"]`,
-    ) as HTMLElement | null
-    if (row && el) {
-      // 只滚这个视口。scrollIntoView 会连带滚动所有可滚祖先。
-      // 瞬时跳转，不用 behavior:'smooth'：top 是按目标行**当前**的几何算出来的，而平滑滚动
-      // 期间上方的行会被 virtua 重测（估算高度换成实测），目标位置在动画途中就挪走了 ——
-      // 距离越远越容易落在错的地方。回到底部按钮不受影响，那个是自己驱动的 rAF，每帧重算目标。
-      el.scrollTop = row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+    if (node.targetRenderIndex < 0 || node.targetRenderIndex >= historyItems.length) {
       return
     }
 
-    // 仅对「上方虚拟段」走 scrollToIndex。mounted 段若 DOM 查询失败不要 clamp 到虚拟末项。
-    const mountedStart = mountedStartIndexRef.current
-    const handle = virtualizerRef.current
-    if (handle && node.targetRenderIndex >= 0 && node.targetRenderIndex < mountedStart) {
-      handle.scrollToIndex(node.targetRenderIndex, { align: 'start' })
-      return
+    const generation = beginMessageNavigationHydrate()
+    navigatorSettleGenerationRef.current = generation
+    clearNavigatorPrepare()
+    // 准备阶段不锁；force-mount 后由 virtualizer 自己补偿当前画面。
+    setForceMountRenderIndex(node.targetRenderIndex)
+
+    // 先渲染（当前画面不动），就绪后在 layout 里跳一次并 hold 消抽搐。
+    prepareThenJumpToNavigatorNode(generation, node.targetRenderIndex)
+  }, [
+    clearNavigatorPrepare,
+    followHandle,
+    historyItems.length,
+    prepareThenJumpToNavigatorNode,
+    updateActiveNavigatorNode,
+  ])
+
+
+  useEffect(() => () => {
+    clearNavigatorPrepare()
+    resetMessageNavigationStore()
+  }, [clearNavigatorPrepare])
+
+  useEffect(() => {
+    // 切换会话时清掉上一会话未完成的 settle，避免 eager / force-mount 残留。
+    clearNavigatorPrepare()
+    resetMessageNavigationStore()
+  }, [clearNavigatorPrepare, conversationId])
+
+
+
+
+
+
+
+
+  /**
+   * 回到底部：同样走「eager hydrate + 钉底 hold」。
+   * 从历史中部一键到底时，尾部消息（尤其代码块）才挂载；若延迟 hydrate，
+   * scrollHeight 会在落地后猛涨，贴底 pin 连跳几次就是抽一下。
+   */
+  const handleJumpToBottom = useCallback(() => {
+    cancelNavigatorSettle()
+    navigatorHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+
+    const generation = beginMessageNavigationHydrate()
+    navigatorSettleGenerationRef.current = generation
+    setNavigationLock(true)
+
+    // 强制挂载尾部邻域，让代码块在钉底前就按真高度量好。
+    if (historyItems.length > 0) {
+      setForceMountRenderIndex(historyItems.length - 1)
     }
 
-    // 渐进加载模式下没有 Virtualizer，未揭示的行不在 DOM 里 —— 先揭示到目标，
-    // 再由下面的 layout effect 滚过去（不揭示的话点刻度会毫无反应）。
-    if (heavyHistory && node.targetRenderIndex >= 0 && node.targetRenderIndex < revealedStartRef.current.start) {
-      pendingRevealScrollRef.current = node.targetRenderIndex
-      revealCompensationRef.current = null
-      setRevealState({ id: conversationId, start: node.targetRenderIndex })
+    followHandle.jumpToBottom()
+    bottomHoldRef.current = {
+      generation,
+      frames: 0,
+      stable: 0,
+      lastScrollHeight: -1,
     }
-  }, [contentEl, conversationId, followHandle, heavyHistory, updateActiveNavigatorNode])
+    setBottomHoldEpoch((value) => value + 1)
+  }, [
+    cancelNavigatorSettle,
+    followHandle,
+    historyItems.length,
+    setNavigationLock,
+  ])
 
-  // 渐进加载：滚到接近顶部就往前揭一批。
-  const revealEarlier = useCallback(() => {
-    if (!heavyHistory) return
-    const from = revealedStartRef.current.start
-    if (from <= 0 || revealInFlightRef.current) return
-    const el = scrollRef.current
-    if (!el || el.scrollTop > LOAD_EARLIER_TRIGGER_PX) return
-    revealInFlightRef.current = true
-    revealCompensationRef.current = el.scrollHeight
-    pendingRevealScrollRef.current = null
-    setRevealState({ id: conversationId, start: earlierBatchStart(historyCostsRef.current, from) })
-  }, [conversationId, heavyHistory])
-
-  // 揭示完成后：要么滚到导航目标，要么把长出来的高度补偿掉，让可视内容原地不动。
-  // 补偿之后 scrollTop 已经远离顶部，所以不会连锁触发下一批 —— 下一批要等用户再往上滚。
+  // 「回到底部」落地 hold：paint 前连续钉底，直到 scrollHeight / 重内容稳定。
   useLayoutEffect(() => {
-    const target = pendingRevealScrollRef.current
-    const previousHeight = revealCompensationRef.current
-    pendingRevealScrollRef.current = null
-    revealCompensationRef.current = null
-    revealInFlightRef.current = false
-    const el = scrollRef.current
-    if (!el) return
-    if (target != null) {
-      const row = contentEl?.querySelector(
-        `[data-chat-row-index="${target}"]`,
-      ) as HTMLElement | null
-      if (row) {
-        el.scrollTop = row.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+    const hold = bottomHoldRef.current
+    if (!hold) return
+    if (hold.generation !== navigatorSettleGenerationRef.current) {
+      bottomHoldRef.current = null
+      return
+    }
+
+    setNavigationLock(true)
+    followHandle.jumpToBottom()
+    hold.frames += 1
+
+    const viewport = scrollRef.current
+    if (!viewport) {
+      if (hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
+        endNavigatorSession(hold.generation)
+      } else {
+        const raf = requestAnimationFrame(() => {
+          if (bottomHoldRef.current?.generation === hold.generation) {
+            setBottomHoldEpoch((value) => value + 1)
+          }
+        })
+        return () => cancelAnimationFrame(raf)
       }
       return
     }
-    if (previousHeight == null) return
-    const delta = el.scrollHeight - previousHeight
-    if (delta > 0) el.scrollTop += delta
-  }, [contentEl, revealedStart])
 
-  const handleNavigatorStep = useCallback((direction: -1 | 1) => {
-    const nodes = navigatorNodesRef.current
-    if (nodes.length === 0) return
-    const currentId = activeNavigatorNodeIdRef.current
-    const currentIndex = Math.max(0, nodes.findIndex((node) => node.id === currentId))
-    const nextIndex = Math.min(nodes.length - 1, Math.max(0, currentIndex + direction))
-    navigateToNavigatorNode(nodes[nextIndex])
-  }, [navigateToNavigatorNode])
+    const scrollHeight = viewport.scrollHeight
+    const gap = Math.max(0, scrollHeight - viewport.scrollTop - viewport.clientHeight)
+    const pendingHeavy = Boolean(
+      contentEl?.querySelector(NAVIGATOR_PENDING_SELECTOR),
+    )
+    // 尾部已挂载行里若还有未完成图片，高度还会涨。
+    let pendingMedia = pendingHeavy
+    if (!pendingMedia && contentEl) {
+      const rows = contentEl.querySelectorAll<HTMLElement>('[data-chat-row-index]')
+      const start = Math.max(0, rows.length - 12)
+      for (let index = start; index < rows.length; index += 1) {
+        if (rowHasPendingMedia(rows[index])) {
+          pendingMedia = true
+          break
+        }
+      }
+    }
 
-  const handleJumpToBottom = useCallback(() => {
-    followHandle.jumpToBottom()
-  }, [followHandle])
+    const geometryStable = !pendingMedia
+      && gap <= 12
+      && scrollHeight === hold.lastScrollHeight
+      && scrollHeight > 0
+
+    hold.lastScrollHeight = scrollHeight
+    if (geometryStable) hold.stable += 1
+    else hold.stable = 0
+
+    if (hold.stable >= NAVIGATOR_HOLD_STABLE_FRAMES || hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
+      endNavigatorSession(hold.generation)
+      return
+    }
+
+    const raf = requestAnimationFrame(() => {
+      if (bottomHoldRef.current?.generation === hold.generation) {
+        setBottomHoldEpoch((value) => value + 1)
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [
+    bottomHoldEpoch,
+    contentEl,
+    endNavigatorSession,
+    followHandle,
+    rowHasPendingMedia,
+    setNavigationLock,
+    virtualItems,
+  ])
+
 
   // 滚动监听：用 DOM 行几何更新导航器（兼容「上方虚拟 + 底部实挂载」）。
   // 跟随钉底由 useScrollFollow 独立处理。
@@ -713,8 +1367,8 @@ function MessageListBase({
     }
   }, [updateActiveNavigatorNode, updateVisibleNavigatorNodes])
 
-  // 滚动回调分两档：渐进加载的触发判断只读 scrollTop（便宜），每帧照跑；
-  // 导航器同步是整列表测量（querySelectorAll + 逐行 gBCR，virtua 同帧写过 DOM 时
+  // 滚动回调只保留导航器的低频同步；虚拟窗口和尺寸补偿由同一个 virtualizer 管理。
+  // 导航器同步是整列表测量（querySelectorAll + 逐行 gBCR，virtualizer 同帧写过 DOM 时
   // 第一下就是强制 reflow），节流到 NAVIGATOR_SYNC_INTERVAL_MS 一次 + 停下后补一次
   // 尾同步，导航器没渲染时完全不跑。
   const navigatorSyncRafRef = useRef<number | null>(null)
@@ -724,7 +1378,6 @@ function MessageListBase({
     if (navigatorSyncRafRef.current !== null) return
     navigatorSyncRafRef.current = requestAnimationFrame(() => {
       navigatorSyncRafRef.current = null
-      revealEarlier()
       if (!navigatorEnabledRef.current) return
       const now = performance.now()
       if (now - navigatorSyncLastTsRef.current >= NAVIGATOR_SYNC_INTERVAL_MS) {
@@ -744,7 +1397,26 @@ function MessageListBase({
         syncNavigatorFromDom()
       }, NAVIGATOR_SYNC_INTERVAL_MS)
     })
-  }, [revealEarlier, syncNavigatorFromDom])
+  }, [syncNavigatorFromDom])
+
+  const handleNavigatorScroll = useCallback(() => {
+    // hold 期间硬钉：消息导航钉目标行；回到底部钉底。
+    if (navigationLockRef.current) {
+      const bottomHold = bottomHoldRef.current
+      if (bottomHold && bottomHold.generation === navigatorSettleGenerationRef.current) {
+        followHandle.jumpToBottom()
+      } else {
+        const hold = navigatorHoldRef.current
+        if (hold?.jumped) {
+          alignViewportToRowIndex(hold.targetIndex)
+        }
+      }
+    }
+    scheduleNavigatorSync()
+  }, [alignViewportToRowIndex, followHandle, scheduleNavigatorSync])
+
+
+
 
   // 消息区右键：读取当前选中文本 + 命中的消息，弹内置菜单。两者都空则不弹（放行给全局屏蔽）。
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -765,6 +1437,11 @@ function MessageListBase({
   }, [messages, streamingContent])
 
   const closeMsgMenu = useCallback(() => setMsgMenu(null), [])
+
+  // 尾部：外置时是 virtualizer 下方的文档流块；回退时仍是 virtualizer 最后一行。
+  // 流式气泡 / 错误 / 状态线 / 发送预留都在这里，历史行不因 token 重测。
+  const tailWrapRef = useRef<HTMLDivElement | null>(null)
+  const tailSpacerRef = useRef<HTMLDivElement | null>(null)
 
   // 切换会话：重置跟随并瞬间定位到底部（ResizeObserver 首次投递也会兜底钉一次）。
   useLayoutEffect(() => {
@@ -796,8 +1473,6 @@ function MessageListBase({
   // 之外，它一出现视口就矮一大截，按窗口算的预留会比视口还高，把上一条消息整个顶出屏幕。
   // 再夹一道 `视口 - 锚点行高`：不管比例给多大，那条刚发出的消息必须留在屏幕里。
   // 只在「本次会话里刚生成完」时接管留白：切换/打开会话不给预留，老会话的样子不变。
-  const tailWrapRef = useRef<HTMLDivElement | null>(null)
-  const tailSpacerRef = useRef<HTMLDivElement | null>(null)
   const reserveHandoffRef = useRef(false)
   useLayoutEffect(() => {
     reserveHandoffRef.current = false
@@ -966,20 +1641,24 @@ function MessageListBase({
     ],
   )
 
-  const renderHistoryRow = useCallback((item: RenderItem, logicalIndex: number) => {
-    const messageId = item.kind === 'message' ? item.message.id : undefined
-    return (
-      <div
-        key={item.key}
-        className={item.kind === 'spacer' ? undefined : 'pb-0.5'}
-        data-chat-message-list-item={item.kind}
-        data-message-id={messageId}
-        data-chat-row-index={logicalIndex}
-      >
-        {renderItem(item)}
-      </div>
-    )
-  }, [renderItem])
+  const renderTail = useCallback(() => (
+    <div ref={tailWrapRef}>
+      {dynamicItem && (
+        <div className="pb-0.5" data-chat-message-list-item={dynamicItem.kind} data-message-id="streaming-assistant">
+          {renderItem(dynamicItem)}
+        </div>
+      )}
+      {errorItem && (
+        <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
+          {renderItem(errorItem)}
+        </div>
+      )}
+      {(messages.length > 0 || streaming) && (
+        <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
+      )}
+      <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
+    </div>
+  ), [dynamicItem, errorItem, liveGroup, messages.length, renderItem, streaming, streamFrozen])
 
   return (
     <div className={`relative flex min-h-0 flex-1 flex-col ${navigatorTurnCount >= 4 ? 'has-message-navigator' : ''}`}>
@@ -989,68 +1668,76 @@ function MessageListBase({
           activeNodeId={activeNavigatorNodeId}
           visibleNodeIds={visibleNavigatorNodeIds}
           onNavigate={navigateToNavigatorNode}
-          onNavigateStep={handleNavigatorStep}
+
         />
       )}
       <div
         ref={setScrollEl}
         onContextMenu={handleContextMenu}
-        onScroll={scheduleNavigatorSync}
-        className="chat-motion-view-in custom-scrollbar flex-1 overflow-y-auto"
+        onScroll={handleNavigatorScroll}
+        className={`chat-scroll-viewport chat-motion-view-in custom-scrollbar flex-1 overflow-y-auto ${navigatorLockActive ? 'is-navigator-locking' : ''}`}
+
+
       >
         <div ref={setContentEl} className="chat-message-list-inner mx-auto w-full max-w-4xl px-6">
-          {/*
-            两种模式：
-            - 普通长会话：部分虚拟化（Paseo）—— 上方 virtualized 交给 virtua，下方 mounted 实 DOM。
-            - 重会话（成本超阈值）：**不虚拟化**，只揭示 revealedStart 之后的行，滚到接近顶部
-              再往前揭一批。行高差三个数量级，virtua 的标量 itemSize 估不准，估不准就是滚动跳。
-            再下方：流式气泡 / 错误（始终实挂载）。
-            滚动监听只挂在外层容器上，virtua 不再重复回调（否则每次滚动量两遍 DOM）。
-          */}
-          {heavyHistory ? (
-            historyItems.slice(revealedStart).map((item, i) => (
-              renderHistoryRow(item, revealedStart + i)
-            ))
-          ) : (
-            <>
-              {historySplit.useVirtual ? (
-                <Virtualizer
-                  ref={virtualizerRef}
-                  scrollRef={scrollRef}
-                  data={historySplit.virtualized}
-                  bufferSize={400}
+          <div
+            className="relative w-full"
+            style={useTanStackVirtualizer ? { height: virtualizer.getTotalSize() } : undefined}
+          >
+            {useTanStackVirtualizer ? virtualItems.map((virtualItem) => {
+              const item = flowLiveOutsideVirtualizer
+                ? historyItems[virtualItem.index]
+                : virtualItem.index < historyItems.length
+                  ? historyItems[virtualItem.index]
+                  : tailItem
+              if (!item) return null
+              const logicalIndex = item.kind === 'tail'
+                ? undefined
+                : virtualItem.index < historyItems.length
+                  ? virtualItem.index
+                  : undefined
+              return (
+                <div
+                  key={virtualItem.key}
+                  ref={import.meta.env.MODE === 'test' ? undefined : virtualizer.measureElement}
+                  data-index={virtualItem.index}
+                  data-chat-item-key={item.kind === 'tail' ? tailMeasurementKey : measurementKey(item)}
+                  data-chat-row-index={logicalIndex}
+                  data-message-id={item.kind === 'message' ? item.message.id : undefined}
+                  data-chat-message-list-item={item.kind}
+                  className="absolute left-0 top-0 w-full pb-0.5"
+                  style={{ transform: `translateY(${virtualItem.start}px)` }}
                 >
-                  {renderHistoryRow}
-                </Virtualizer>
-              ) : null}
-              {historySplit.mounted.map((item, i) => (
-                renderHistoryRow(item, historySplit.mountedStartIndex + i)
-              ))}
-            </>
-          )}
-          {/* 流式气泡/错误/底部留白在列表尾部实挂载，增长高度可精确测量。
-              minHeight（由上方 layout effect 按视口高写入）= 发送后的预留：钉底时这段空盒子撑在
-              最后，刚发出的用户消息因此离输入框有一段距离，回答在盒子顶部往下长、长过预留后这段
-              自然消失；运行结束时预留由 tailSpacer 接住，总高不变、视图不动。 */}
-          <div ref={tailWrapRef}>
-            {dynamicItem && (
-              <div className="pb-0.5" data-chat-message-list-item={dynamicItem.kind} data-message-id="streaming-assistant">
-                {renderItem(dynamicItem)}
-              </div>
+                  {item.kind === 'tail' ? renderTail() : renderItem(item)}
+                </div>
+              )
+            }) : (
+              <>
+                {historyItems.map((item, index) => (
+                  <div
+                    key={item.key}
+                    data-index={index}
+                    data-chat-row-index={index}
+                    data-message-id={item.kind === 'message' ? item.message.id : undefined}
+                    data-chat-message-list-item={item.kind}
+                    className="w-full pb-0.5"
+                  >
+                    {renderItem(item)}
+                  </div>
+                ))}
+                <div data-chat-message-list-item="tail" className="w-full pb-0.5">
+                  {renderTail()}
+                </div>
+              </>
             )}
-            {errorItem && (
-              <div className="pb-0.5" data-chat-message-list-item={errorItem.kind}>
-                {renderItem(errorItem)}
-              </div>
-            )}
-            {/* 消息流末尾常驻的存在标记（对标 Claude Code 的小星号）：有对话就一直在
-                （空会话首页没有），生成中动效 + 耗时/tokens/运行中任务数（组件内部按秒采样）。
-                多答组（live-group）有自己的列内进度，生成期间只保持静态 logo。 */}
-            {(messages.length > 0 || streaming) && (
-              <StreamStatusLine active={streaming && !streamFrozen && !liveGroup} />
-            )}
-            <div ref={tailSpacerRef} aria-hidden="true" style={{ height: LIST_EDGE_PADDING_PX }} />
           </div>
+          {/* 流式外置：文档流挂在 virtualizer 下方。高度只推 scrollHeight，
+              由 contentGrowth 钉底；不再进 TanStack measure/resizeItem。 */}
+          {flowLiveOutsideVirtualizer && (
+            <div data-chat-message-list-item="tail" className="w-full pb-0.5">
+              {renderTail()}
+            </div>
+          )}
         </div>
       </div>
       {/* 上下边界渐变遮罩，纯覆盖层。颜色必须跟 .chat-main-pane 的底色走（浅色 --theme-surface-soft，暗色 #262629）——

@@ -3,6 +3,7 @@ import { ChatImageContextMenu, type ChatImageMenuAnchor } from './ChatImageConte
 
 /** 聊天区内联图的最大显示高度（与旧的 max-h-[420px] 一致）。 */
 const MAX_DISPLAY_HEIGHT_PX = 420
+const UNKNOWN_IMAGE_MIN_HEIGHT_PX = 180
 
 const IMAGE_CLASS =
   'rounded-md border border-neutral-200/90 bg-white object-contain dark:border-neutral-700 dark:bg-neutral-900'
@@ -29,8 +30,8 @@ function rememberRatio(src: string, ratio: number) {
  * 聊天区内联图片。两条渲染路径（markdown 内嵌图 / 生成图画廊）共用，除了右键菜单，
  * 关键职责是**先占位再解码**：
  *
- * 虚拟列表（virtua）按行实测高度定位。图片解码前 <img> 高度为 0，解码后才撑开——这一
- * 次「事后长高」会让 virtua 重测已定位的行，表现为：滚到图片处猛地跳一段、拖到底部
+ * 虚拟列表按行实测高度定位。图片解码前 <img> 高度为 0，解码后才撑开——这一
+ * 次「事后长高」会让 virtualizer 重测已定位的行，表现为：滚到图片处猛地跳一段、拖到底部
  * 松手后弹回、切换会话时图片闪一下归位。
  *
  * 解法是让盒子尺寸只由**宽高比**决定，不依赖自然像素尺寸：
@@ -68,8 +69,9 @@ export function ChatInlineImage({
     // 缩略图与整图比例相同，两个 src 都记一份：懒加载换 src 后仍命中缓存，盒子不动。
     rememberRatio(src, next)
     if (currentSrc && currentSrc !== src) rememberRatio(currentSrc, next)
-    // 只学一次：缩略图→整图切换时比例不变，重设只会引入无谓的重排。
-    setRatio((current) => current ?? next)
+    // 缩略图→整图切换时比例通常不变；若服务端没有尺寸元数据，首帧占位
+    // 使用默认比例，加载后再收敛到真实比例并交给 virtualizer 测量。
+    setRatio(next)
   }, [src])
 
   const boxed = ratio != null
@@ -84,7 +86,7 @@ export function ChatInlineImage({
                 aspectRatio: String(ratio),
                 width: `min(100%, ${Math.round(ratio * MAX_DISPLAY_HEIGHT_PX)}px)`,
               }
-            : undefined
+            : { minHeight: UNKNOWN_IMAGE_MIN_HEIGHT_PX }
         }
         onClick={onOpenViewer}
         onContextMenu={(event) => {

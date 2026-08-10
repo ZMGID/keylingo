@@ -5,10 +5,12 @@ import {
   ensureGroupColumn,
   flushGroups,
   getActiveGroup,
+  getGroupVersion,
   getGroupsVersion,
   hasActiveGroup,
   resetGroups,
   restoreGroupArm,
+  subscribeGroup,
   subscribeGroups,
   touchGroup,
 } from './groupStreamingStore'
@@ -112,6 +114,36 @@ describe('groupStreamingStore', () => {
     expect(sub).toHaveBeenCalledTimes(2)
 
     unsub()
+  })
+
+  it('only notifies subscribers for the conversation whose stream changed', () => {
+    const rafCallbacks: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafCallbacks.push(cb)
+      return rafCallbacks.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+
+    beginGroup('c1', 'g1', [{ providerId: 'p1', model: 'm1' }])
+    beginGroup('c2', 'g2', [{ providerId: 'p2', model: 'm2' }])
+    const c1Subscriber = vi.fn()
+    const c2Subscriber = vi.fn()
+    const unsubscribeC1 = subscribeGroup('c1', c1Subscriber)
+    const unsubscribeC2 = subscribeGroup('c2', c2Subscriber)
+    const c1Version = getGroupVersion('c1')
+    const c2Version = getGroupVersion('c2')
+
+    ensureGroupColumn('c1', 'msg-a')!.content += 'delta'
+    touchGroup('c1')
+    rafCallbacks.splice(0).forEach((callback) => callback(0))
+
+    expect(c1Subscriber).toHaveBeenCalledTimes(1)
+    expect(c2Subscriber).not.toHaveBeenCalled()
+    expect(getGroupVersion('c1')).toBe(c1Version + 1)
+    expect(getGroupVersion('c2')).toBe(c2Version)
+
+    unsubscribeC1()
+    unsubscribeC2()
   })
 
   it('restores fan-out arms by recovery index when snapshots arrive out of order', () => {

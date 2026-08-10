@@ -44,6 +44,7 @@ export type FollowState = {
   pointerHeld: boolean
   latchUntil: number
   lastGap: number
+  userDetached: boolean
 }
 
 export function createFollowState(): FollowState {
@@ -52,6 +53,7 @@ export function createFollowState(): FollowState {
     pointerHeld: false,
     latchUntil: 0,
     lastGap: 0,
+    userDetached: false,
   }
 }
 
@@ -120,12 +122,14 @@ export function reduceFollowEvent(
         const next = { ...state, latchUntil: 0 }
         if (event.hasOverflow && !event.nestedCanConsume) {
           next.following = false
+          next.userDetached = true
         }
         return { state: next, pin: false }
       }
       const next = { ...state, latchUntil: event.now + config.latchMs }
       if (!state.following && isAtBottom(event.gap, config)) {
         next.following = true
+        next.userDetached = false
         return { state: next, pin: true }
       }
       return { state: next, pin: false }
@@ -139,6 +143,7 @@ export function reduceFollowEvent(
       }
       if (event.hasOverflow && (movedAway || event.gap > config.attachThresholdPx)) {
         next.following = false
+        next.userDetached = true
       }
       return { state: next, pin: false }
     }
@@ -162,16 +167,18 @@ export function reduceFollowEvent(
           && previousGap > config.attachThresholdPx
         if (state.following || now <= state.latchUntil || userReturned) {
           next.following = true
+          next.userDetached = false
         }
         return { state: next, pin: false }
       }
 
       if (state.following) {
-        // 我们自己写的 scrollTop（钉底 / 回到底部动画），或内容尺寸变化引起的滚动：
-        // 只做纠正，不改跟随状态。显著 gap 才 pin，小 gap 交给 contentGrowth / 下一帧，
-        // 避免与 virtua remeasure 互抢。
+        // 对齐 LiveAgent：跟随中只要还开着 gap，就立刻纠正钉底。
+        // self 来源（我们写的 pin / TanStack end-anchor 补偿 / 内容增长）只纠正，不改状态。
+        // 旧的 correctionMinPx(32) 门槛会让 1–32px 的 gap 悬着，下一帧再 pin →
+        // 生成内容整段「往下闪」一下。
         if (event.source === 'self') {
-          return { state: next, pin: gap > config.correctionMinPx }
+          return { state: next, pin: gap > config.attachThresholdPx }
         }
         // 外部把视口拉离了底部。能走到这里的是**拿不到手势事件**的那些路径：
         // 拖原生滚动条（原生滚动条不派发 DOM 指针事件，也没有 wheel）、页内查找跳转、
@@ -183,7 +190,7 @@ export function reduceFollowEvent(
         // 单次事件永远累积不到 32，于是一直被下一次 contentGrowth 钉回去、拇指跳回鼠标下。
         // 万一某个 self 事件被误判成 user，代价只是「跟随被解除」，用户滚回底部即可恢复；
         // 反方向（该解除却继续钉底）代价是抽搐。宁可错解除。
-        return { state: { ...next, following: false }, pin: false }
+        return { state: { ...next, following: false, userDetached: true }, pin: false }
       }
 
       const movedTowardBottom = gap < previousGap - config.directionSlopPx
@@ -214,6 +221,7 @@ export function reduceFollowEvent(
       // 只认真正贴底，不恢复原来 192px 的大区 —— 那个区会从很远处硬拽，是底部抽搐的主因之一。
       if (isAtBottom(event.gap, config)) {
         next.following = true
+        next.userDetached = false
         return { state: next, pin: true }
       }
       return { state: next, pin: false }
@@ -223,6 +231,7 @@ export function reduceFollowEvent(
       const next = { ...state, latchUntil: 0 }
       if (event.hasOverflow) {
         next.following = false
+        next.userDetached = true
       }
       return { state: next, pin: false }
     }
@@ -237,7 +246,7 @@ export function reduceFollowEvent(
       // 这是唯一不依赖 source 判定的重跟随入口，用来兜住两条会卡死的路径：
       // 用户滚回底部的那个 scroll 恰好落在 resize 窗口里被记成 self；或者贴底后不再产生
       // 任何 scroll 事件（内容继续长只改 gap 不改 scrollTop）。按住指针期间不接。
-      if (!state.following && !state.pointerHeld && isAtBottom(event.gap, config)) {
+      if (!state.following && !state.userDetached && !state.pointerHeld && isAtBottom(event.gap, config)) {
         next.following = true
         return { state: next, pin: true }
       }
@@ -250,6 +259,7 @@ export function reduceFollowEvent(
           ...state,
           following: true,
           latchUntil: 0,
+          userDetached: false,
         },
         pin: true,
       }
@@ -257,7 +267,7 @@ export function reduceFollowEvent(
 
     case 'release': {
       // Kivio 新增：主动脱离跟随（消息导航器跳转到上方消息时用），不钉底。
-      return { state: { ...state, following: false, latchUntil: 0 }, pin: false }
+      return { state: { ...state, following: false, latchUntil: 0, userDetached: true }, pin: false }
     }
   }
 }

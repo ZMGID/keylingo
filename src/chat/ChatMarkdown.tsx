@@ -1,17 +1,14 @@
-import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
-import type { Components, UrlTransform } from 'react-markdown'
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
+import type { Components, UrlTransform } from 'streamdown'
+import { defaultRemarkPlugins, Streamdown } from 'streamdown'
 import type { PluggableList } from 'unified'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
-// CommonMark 的 flanking 规则对 CJK 是坏的：`**` 一侧贴中文标点、另一侧贴汉字时既不能开
-// 也不能闭，`**一句话总结：**最近` / `一份**“报告”**，共` 会原样吐出星号。模型写中文时天天
-// 撞这个。该扩展只放宽 CJK 的判定，CommonMark 测试集输出不变。
-import remarkCjkFriendly from 'remark-cjk-friendly'
-import katex from 'katex'
-import katexCss from 'katex/dist/katex.min.css?inline'
-import { normalizeMarkdownForRender } from './markdownUtils'
+import { cjk } from '@streamdown/cjk'
+import { code } from '@streamdown/code'
+import { createMathPlugin } from '@streamdown/math'
+import { mermaid } from '@streamdown/mermaid'
+import remarkBreaks from 'remark-breaks'
+import { normalizeMarkdownForRender, preserveLocalMarkdownLinks } from './markdownUtils'
 import { MarkdownErrorBoundary } from './MarkdownErrorBoundary'
 import type { ChatToolArtifact } from './types'
 import { artifactDataUrl } from './artifacts'
@@ -20,6 +17,10 @@ import type { KbHitView } from './knowledgeBaseHits'
 import { remarkCitations } from './citations'
 import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
+import { getChatPerformanceFlags } from './chatPerformanceFlags'
+import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
+import { ChatHeavyIsland } from './ChatHeavyIsland'
+import { useConversationTransition } from './conversationTransitionStore'
 import { api } from '../api/tauri'
 import { copyToClipboard } from '../utils/clipboard'
 import { IconButton } from '../components/Button'
@@ -35,34 +36,18 @@ interface ChatMarkdownProps {
   citations?: Map<number, KbHitView>
 }
 
-/* 代码块 / 行内码的底色走 `--bg-hover`：它在亮色下映射 `--theme-surface-hover`
-   （跟着暖/冷/象牙主题走），在 `.dark` 里被显式覆盖成 #2c2c30。
-   **不要直接用 `--theme-surface-*`** —— 那批没有暗色态，直接用会让暗色模式变成亮色底。 */
-const CODE_PROSE =
-  'prose-pre:bg-[var(--bg-hover)] prose-pre:text-[var(--text)]'
-
-const proseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
-
-const reasoningProseClass =
-  `chat-markdown chat-reasoning-markdown prose prose-sm dark:prose-invert max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500 prose-p:my-1 prose-p:first:mt-0 prose-p:last:mb-0 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-500 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
-
-const lensProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200 prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2 prose-li:my-0.5 prose-table:my-3 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-100 ${CODE_PROSE}`
-
-const lensMutedProseClass =
-  `chat-markdown prose prose-sm dark:prose-invert max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400 prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-pre:my-2 prose-li:my-0.5 prose-table:my-2 prose-table:shadow-none prose-code:rounded prose-code:bg-[var(--bg-hover)] prose-code:px-1 prose-code:py-0.5 prose-code:font-medium prose-code:text-neutral-600 prose-code:before:content-none prose-code:after:content-none dark:prose-code:text-neutral-400 ${CODE_PROSE}`
-
-function markdownProseClass(variant: ChatMarkdownProps['variant']): string {
+// 排版只走 Streamdown 默认样式；变体只改外壳字号/颜色。
+// 代码块 / 表格 / 本地链接 / artifact 图仍用 components 做应用能力，不改正文排版。
+function markdownShellClass(variant: ChatMarkdownProps['variant']): string {
   switch (variant) {
     case 'reasoning':
-      return reasoningProseClass
+      return 'chat-markdown chat-reasoning-markdown max-w-none break-words text-sm leading-relaxed text-neutral-400 dark:text-neutral-500'
     case 'lens':
-      return lensProseClass
+      return 'chat-markdown max-w-none break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200'
     case 'lens-muted':
-      return lensMutedProseClass
+      return 'chat-markdown max-w-none break-words text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400'
     default:
-      return proseClass
+      return 'chat-markdown max-w-none break-words text-[15px] leading-[1.7] text-neutral-900 dark:text-neutral-100'
   }
 }
 
@@ -456,11 +441,35 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
   )
 }
 
+function DeferredCodeBlock({ code, language }: { code: string; language: string }) {
+  // 会话切换 / 导航·回底 settle / 流式结束短窗：同步 hydrate。
+  // 否则 180ms 后代码块从占位撑开，贴底 pin 会再抽一下。平常回翻历史仍延迟，省成本。
+  const { loading: conversationOpening } = useConversationTransition()
+  const preview = code.length > 14_000
+    ? `${code.slice(0, 10_000)}\n\n…\n\n${code.slice(-2_000)}`
+    : code
+  return (
+    <ChatHeavyIsland
+      minHeight={112}
+      delayMs={180}
+      eager={conversationOpening}
+      fallback={(
+        <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 py-4 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
+          <code className="font-mono whitespace-pre-wrap">{preview}</code>
+        </pre>
+      )}
+    >
+      <CodeBlock code={code} language={language} />
+    </ChatHeavyIsland>
+  )
+}
+
+
 let mermaidRenderCounter = 0
 
-// 已渲染 mermaid SVG 的缓存：键 = 主题 + 源码。虚拟列表（virtua）会卸载屏外的消息气泡，
+// 已渲染 mermaid SVG 的缓存：键 = 主题 + 源码。虚拟列表会卸载屏外的消息气泡，
 // 往回翻时图会重新挂载；若每次都重新 import+parse+render，会出现 spinner(小)→大SVG 的高度
-// 突变，导致 virtua 纠正滚动 → 抽搐/闪烁。缓存后命中即同步拿到完整 SVG，挂载时高度即确定，
+// 突变，导致 virtualizer 纠正滚动 → 抽搐/闪烁。缓存后命中即同步拿到完整 SVG，挂载时高度即确定，
 // 消除回滚 jank。用外部 Map 而非 useMemo（React 可能在内存压力下丢弃 useMemo 缓存）。
 const mermaidSvgCache = new Map<string, string>()
 const MERMAID_SVG_CACHE_MAX = 80
@@ -484,6 +493,8 @@ function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState(() => mermaidSvgCache.get(cacheKey) ?? '')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(() => !mermaidSvgCache.has(cacheKey))
+  // hooks 必须在 early return 之前：源码/错误分支也会走到下面的 eager 语义。
+  const { loading: conversationOpening } = useConversationTransition()
 
   if (!renderBaseId.current) {
     mermaidRenderCounter += 1
@@ -584,7 +595,13 @@ function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+
+    <ChatHeavyIsland
+      minHeight={112}
+      eager={conversationOpening}
+      fallback={<CodeBlock code={normalizedCode} language="mermaid" actions={toggle} />}
+    >
+      <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
       <div className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded-md bg-[var(--bg-input)] pl-2">
         <span className="text-[12px] leading-none text-neutral-400 dark:text-neutral-500">Mermaid</span>
         {toggle}
@@ -600,7 +617,8 @@ function MermaidBlock({ code }: { code: string }) {
           dangerouslySetInnerHTML={{ __html: svg }}
         />
       )}
-    </figure>
+      </figure>
+    </ChatHeavyIsland>
   )
 }
 
@@ -649,12 +667,16 @@ function useSettled(value: string, delay: number, assumeSettled: boolean): strin
 
 function HtmlCodePreview({ html }: { html: string }) {
   const [view, setView] = useState<'preview' | 'source'>('preview')
-  const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !useContext(MarkdownStreamingContext))
+  const streaming = useContext(MarkdownStreamingContext)
+  const settledHtml = useSettled(html, HTML_PREVIEW_SETTLE_MS, !streaming)
   // 一旦定稿过就不再退回源码：生成中途停顿超过 SETTLE_MS 会让预览/源码来回跳。
   const readyRef = useRef(false)
   if (settledHtml === html) readyRef.current = true
-  const showPreview = view === 'preview' && readyRef.current
-  const previewHtml = useMemo(() => htmlPreviewSrcDoc(settledHtml ?? ''), [settledHtml])
+  const showPreview = view === 'preview' && !streaming && readyRef.current
+  const previewHtml = useMemo(
+    () => htmlPreviewSrcDoc(streaming ? settledHtml ?? '' : html),
+    [html, settledHtml, streaming],
+  )
 
   const openInBrowser = () => {
     void api.openHtmlPreview(htmlPreviewSrcDoc(html)).catch((err) => {
@@ -665,13 +687,19 @@ function HtmlCodePreview({ html }: { html: string }) {
   return (
     <>
       {showPreview ? (
-        <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
-          <iframe
-            title="HTML 预览"
-            srcDoc={previewHtml}
-            className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
-          />
-        </div>
+        <ChatHeavyIsland
+          minHeight={520}
+          fallback={<CodeBlock code={html} language="html" />}
+          eager
+        >
+          <div className="my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-white dark:bg-neutral-950">
+            <iframe
+              title="HTML 预览"
+              srcDoc={previewHtml}
+              className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
+            />
+          </div>
+        </ChatHeavyIsland>
       ) : (
         <CodeBlock code={html} language="html" />
       )}
@@ -693,26 +721,37 @@ function HtmlCodePreview({ html }: { html: string }) {
   )
 }
 
-const markdownComponents: Components = {
-  pre: ({ children }) => {
-    const child = Array.isArray(children) ? children[0] : children
-    if (isValidElement<{ className?: string; children?: unknown }>(child)) {
-      const languageMatch = /language-([\w-]+)/.exec(child.props.className ?? '')
-      const language = normalizeCodeLanguage(languageMatch?.[1])
-      const code = codeChildrenToString(child.props.children)
-      if (language === 'html') {
-        return <HtmlCodePreview html={code} />
-      }
-      if (language === 'mermaid') {
-        return <MermaidBlock code={code} />
-      }
-      if (language === 'kivio-error-details') {
-        return <ErrorDetails detail={code} />
-      }
-      return <CodeBlock code={code} language={language} />
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  // 流式中避免 ChatHeavyIsland 延迟 hydrate：fallback(112px) → 真代码块 的高度跳变
+  // 会在贴底 pin 之后再撑开，整段生成内容看起来「往下闪」一下。
+  const streaming = useContext(MarkdownStreamingContext)
+  const child = Array.isArray(children) ? children[0] : children
+  if (isValidElement<{ className?: string; children?: unknown }>(child)) {
+    const languageMatch = /language-([\w-]+)/.exec(child.props.className ?? '')
+    const language = normalizeCodeLanguage(languageMatch?.[1])
+    const code = codeChildrenToString(child.props.children)
+    if (language === 'html') {
+      return <HtmlCodePreview html={code} />
     }
-    return <CodeBlock code={codeChildrenToString(children)} language="" />
-  },
+    if (language === 'mermaid') {
+      // 流式中只显示源码：异步 mermaid.render 完成后的高度突变同样会触发底部闪动。
+      if (streaming) return <CodeBlock code={code} language="mermaid" />
+      return <MermaidBlock code={code} />
+    }
+    if (language === 'kivio-error-details') {
+      return <ErrorDetails detail={code} />
+    }
+    if (streaming) return <CodeBlock code={code} language={language} />
+    return <DeferredCodeBlock code={code} language={language} />
+  }
+  if (streaming) return <CodeBlock code={codeChildrenToString(children)} language="" />
+  return <DeferredCodeBlock code={codeChildrenToString(children)} language="" />
+}
+
+// streamdown Components 的 pre 签名在版本间不完全一致；功能组件只消费 children。
+const markdownComponents = {
+  pre: MarkdownPre,
+
   // 表格：**每个单元格一个独立圆角块**，横竖都靠 border-spacing 的空隙分隔。
   // **没有任何边框线**，别加 border，也别给容器加外框。
   table: ({ children }) => (
@@ -742,7 +781,8 @@ const markdownComponents: Components = {
     </td>
   ),
   a: ({ href, children }) => <LinkAnchor href={typeof href === 'string' ? href : ''}>{children}</LinkAnchor>,
-}
+} as Components
+
 
 function LinkAnchor({
   href,
@@ -754,16 +794,17 @@ function LinkAnchor({
   /** 相对路径链接要靠它在后端解析会话工作目录；没有就只能放弃打开（但仍不导航）。 */
   conversationId?: string | null
 }) {
-  const isWeb = /^https?:\/\//i.test(href)
+  const decodedHref = decodeKivioInternalUrl(href)
+  const isWeb = /^https?:\/\//i.test(decodedHref)
   // 这些 scheme 保留 <a> 默认行为，由系统协议处理器接走（不会导航 webview 自身）。
-  const isSystemScheme = /^(mailto|tel|sms):/i.test(href)
+  const isSystemScheme = /^(mailto|tel|sms):/i.test(decodedHref)
   // 页内锚点（目录跳转）保留默认行为：它不会导航走，只是滚动。
-  const isHashOnly = href.startsWith('#')
+  const isHashOnly = decodedHref.startsWith('#')
   return (
     <a
       // 不能加 target="_blank"：WRY 的 new-window 处理在 WKWebView 委托层，
       // JS preventDefault 拦不住，会和下面的 openExternal 各开一个网页（双开）。
-      href={href || undefined}
+      href={decodedHref || undefined}
       rel="noopener noreferrer"
       onClick={(event) => {
         // 除了系统 scheme 和页内锚点，**一律**掐掉默认导航。<a> 的默认行为会把 Tauri
@@ -773,14 +814,14 @@ function LinkAnchor({
         if (isSystemScheme || isHashOnly) return
         event.preventDefault()
         if (isWeb) {
-          void api.openExternal(href).catch((err) => console.error('openExternal failed', err))
+          void api.openExternal(decodedHref).catch((err) => console.error('openExternal failed', err))
           return
         }
-        if (!href) return
+        if (!decodedHref) return
         // 其余一律当本地文件交给系统默认程序。相对路径的基准由后端按会话工作目录解析
         // （与 agent 写文件的目录同一个解析器），前端不拼路径。
         void api
-          .openLocalFile(href, conversationId)
+          .openLocalFile(decodedHref, conversationId)
           .catch((err) => console.error('openLocalFile failed', err))
       }}
     >
@@ -843,6 +884,11 @@ function safeDecodeURIComponent(value: string): string {
   }
 }
 
+function decodeKivioInternalUrl(value: string): string {
+  const internalLink = /^https:\/\/kivio\.local\/__kivio-(file|local)\?target=(.*)$/i.exec(value)
+  return internalLink ? safeDecodeURIComponent(internalLink[2]) : value
+}
+
 function artifactKey(name: string): string {
   return safeDecodeURIComponent(name)
     .trim()
@@ -859,21 +905,12 @@ function isExternalOrAbsoluteImageSrc(src: string): boolean {
   return /^(https?:|data:|blob:|tauri:|asset:|file:|\/)/i.test(src)
 }
 
-function isSafeImageDataUrl(src: string): boolean {
-  return /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[a-z0-9+/=\s]+$/i.test(src.trim())
-}
-
-const chatMarkdownUrlTransform: UrlTransform = (url, key, node) => {
-  if (key === 'src' && node.tagName === 'img' && isSafeImageDataUrl(url)) {
-    return url
-  }
-  // `defaultUrlTransform` 会把 `file:` 整个剥成空 href（协议白名单里没有它），CLI 写完文件
-  // 给的 `file://…/index.html` 于是变成死链。放行它，点击由 LinkAnchor 交给
-  // `open_local_file`（后端再做扩展名/存在性把关，不是把 file: 当可信输入）。
-  if (key === 'href' && node.tagName === 'a' && /^file:\/\//i.test(url)) {
-    return url
-  }
-  return defaultUrlTransform(url)
+const chatMarkdownUrlTransform: UrlTransform = (url) => {
+  // LinkAnchor/MarkdownArtifactImage perform the app-level routing and artifact
+  // lookup. Streamdown's default transform intentionally rejects file:/relative
+  // URLs, which would turn those links into its "Blocked URL" placeholder before
+  // our components get a chance to handle them.
+  return url
 }
 
 function buildArtifactLookup(artifacts: ChatToolArtifact[]): Map<string, ChatToolArtifact> {
@@ -949,157 +986,89 @@ function MarkdownArtifactImage({
   )
 }
 
-const katexShadowCss = `${katexCss}
-:host {
-  display: inline-block;
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  vertical-align: middle;
-  padding: 1px 2px;
-  margin-top: -2px;
+const streamdownPlugins = {
+  cjk,
+  code,
+  math: createMathPlugin({ singleDollarTextMath: true }),
+  mermaid,
 }
-:host(.katex-lazy--display) {
-  display: block;
-  padding: 0;
-  margin-top: 0;
-  vertical-align: baseline;
-}
-:host(.katex-lazy--display) .katex-display {
-  max-width: 100%;
-  overflow: visible;
-}
-:host(.katex-lazy--display) .katex-display > .katex {
-  display: block;
-  overflow: visible;
-}
-`
+const streamdownRemarkPlugins: PluggableList = [
+  ...Object.values(defaultRemarkPlugins),
+  remarkBreaks,
+]
 
-let katexShadowSheet: CSSStyleSheet | null = null
-let katexShadowSheetUnavailable = false
-
-function getKatexShadowSheet(): CSSStyleSheet | null {
-  if (katexShadowSheetUnavailable || typeof CSSStyleSheet === 'undefined') return null
-  if (katexShadowSheet) return katexShadowSheet
-  try {
-    const sheet = new CSSStyleSheet()
-    sheet.replaceSync(katexShadowCss)
-    katexShadowSheet = sheet
-    return sheet
-  } catch {
-    katexShadowSheetUnavailable = true
-    return null
-  }
-}
-
-function installKatexShadowStyles(root: ShadowRoot) {
-  const sheet = getKatexShadowSheet()
-  if (sheet && 'adoptedStyleSheets' in root) {
-    try {
-      if (!root.adoptedStyleSheets.includes(sheet)) {
-        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet]
-      }
-      return
-    } catch {
-      katexShadowSheetUnavailable = true
+const FullSettledMarkdown = memo(function FullSettledMarkdown({
+  content,
+  components,
+  remarkPlugins,
+  useCache,
+  streaming,
+}: {
+  content: string
+  components: Components
+  remarkPlugins: PluggableList
+  useCache: boolean
+  streaming: boolean
+}) {
+  const normalized = useMemo(() => {
+    const build = () => {
+      const normalizedContent = preserveLocalMarkdownLinks(
+        normalizeMarkdownForRender(normalizeLegacyErrorDetails(content)),
+      )
+      return { normalized: normalizedContent }
     }
-  }
+    return useCache
+      ? getSettledMarkdownCacheEntry(content, build).normalized
+      : build().normalized
+  }, [content, useCache])
 
-  if (root.querySelector('style[data-katex-shadow-style="true"]')) return
-  const style = document.createElement('style')
-  style.dataset.katexShadowStyle = 'true'
-  style.textContent = katexShadowCss
-  root.prepend(style)
-}
+  // Streamdown streaming 模式对「非前缀扩展」的整段替换可能卡住旧块（如 frame 0→frame 1）。
+  // 真实流式几乎总是前缀增长；一旦不是，换 key 强制重挂，避免 DOM 停在旧正文。
+  const streamEpochRef = useRef(0)
+  const prevStreamContentRef = useRef(content)
+  if (streaming) {
+    const prev = prevStreamContentRef.current
+    if (prev && content !== prev && !content.startsWith(prev)) {
+      streamEpochRef.current += 1
 
-function upsertKatexShadowContent(root: ShadowRoot, html: string) {
-  let content = root.querySelector<HTMLElement>('[data-katex-shadow-content="true"]')
-  if (!content) {
-    content = document.createElement('span')
-    content.dataset.katexShadowContent = 'true'
-    root.appendChild(content)
-  }
-  content.innerHTML = html
-}
-
-// KaTeX HTML is visually high fidelity but expands into hundreds of spans. Keep
-// those spans out of the page-level DOM so WebKit global UI invalidations do not
-// repeatedly match styles through every formula descendant.
-function ShadowKatex({ html, display }: { html: string; display: boolean }) {
-  const hostRef = useRef<HTMLSpanElement>(null)
-  const renderedHtmlRef = useRef<string | null>(null)
-
-  useLayoutEffect(() => {
-    const host = hostRef.current
-    if (!host) return
-    const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
-    installKatexShadowStyles(root)
-    if (renderedHtmlRef.current !== html) {
-      upsertKatexShadowContent(root, html)
-      renderedHtmlRef.current = html
     }
-  }, [html])
-
-  const cls = display ? 'katex-lazy katex-lazy--display' : 'katex-lazy'
-  return <span ref={hostRef} className={cls} data-katex-shadow-host="true" />
-}
-
-// 按 (tex, display) 缓存 KaTeX 渲染结果：流式时每帧重渲会对每个公式重复调用，
-// 同一公式只算一次。简单上限防无界增长(超了清空)。
-const texCache = new Map<string, string>()
-function renderTex(tex: string, display: boolean): string {
-  const key = (display ? 'd:' : 'i:') + tex
-  const cached = texCache.get(key)
-  if (cached != null) return cached
-  let out = ''
-  try {
-    const rendered = katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' })
-    out = rendered.includes('katex-error') ? '' : rendered
-  } catch {
-    out = ''
+    prevStreamContentRef.current = content
+  } else {
+    prevStreamContentRef.current = content
   }
-  if (texCache.size > 500) texCache.clear()
-  texCache.set(key, out)
-  return out
-}
+  const streamEpoch = streamEpochRef.current
 
-function LazyMath({ tex, display }: { tex: string; display: boolean }) {
-  // 即时渲染（不再用 IntersectionObserver 延迟到滚动进视口才渲染）。KaTeX 子树进入
-  // Shadow DOM，避免已完成公式让 WebKit 后续全局 UI 交互反复扫大段普通 DOM。
-  const html = useMemo(() => renderTex(tex, display), [tex, display])
-  if (html) {
-    return <ShadowKatex html={html} display={display} />
-  }
-  const cls = display ? 'katex-lazy katex-lazy--display' : 'katex-lazy'
-  return <span className={`${cls} katex-lazy--pending`}>{tex}</span>
-}
+  // 对齐 LiveAgent Markdown：
+  // - 流式消息固定走 Streamdown streaming 模式（块级 memo + parseIncomplete），
+  //   不要在每个 token 上整篇 static 重解析——那会放大行高抖动。
+  // - isAnimating 跟「还在出字」绑定；animated 始终 false（不做字级动画）。
+  // - 模式只由 streaming 上下文决定；settled 后才切 static，避免中途整树重挂。
+  return (
+    <Streamdown
+      key={streaming ? `stream-${streamEpoch}` : 'static'}
+      mode={streaming ? 'streaming' : 'static'}
+      dir="auto"
+      parseIncompleteMarkdown
+      normalizeHtmlIndentation
+      plugins={streamdownPlugins}
+      remarkPlugins={remarkPlugins}
+      components={components}
+      shikiTheme={['github-light', 'github-dark']}
+      controls={{
+        code: false,
+        mermaid: { copy: !streaming, download: false, fullscreen: !streaming, panZoom: !streaming },
+        table: false,
+      }}
+      isAnimating={streaming}
+      animated={false}
+      urlTransform={chatMarkdownUrlTransform}
+      linkSafety={{ enabled: false }}
+    >
+      {normalized}
+    </Streamdown>
+  )
+})
 
-// 模块级稳定组件：remark-math 产出的 <kvmath> → <LazyMath>。无闭包依赖，必须放模块级——
-// 若写成 components useMemo 里的内联函数，每次重建 components（artifacts/citations 变化、或流式每帧）
-// 都是新函数类型，ReactMarkdown 会把 LazyMath 整个卸载重挂（公式 remount 闪烁）。
-function KvMath({ node }: { node?: { properties?: { tex?: string; display?: string } } }) {
-  const props = node?.properties ?? {}
-  return <LazyMath tex={String(props.tex ?? '')} display={props.display === 'true'} />
-}
-
-// remark-math 产出的 math/inlineMath 节点 → 自定义 <kvmath> 元素(携带 tex + display)，
-// 由下方 components 的 kvmath 映射到 <LazyMath>。替代 rehype-katex 的即时渲染。
-const remarkRehypeOptions = {
-  handlers: {
-    math: (_state: unknown, node: { value?: string }) => ({
-      type: 'element',
-      tagName: 'kvmath',
-      properties: { display: 'true', tex: node.value ?? '' },
-      children: [],
-    }),
-    inlineMath: (_state: unknown, node: { value?: string }) => ({
-      type: 'element',
-      tagName: 'kvmath',
-      properties: { display: 'false', tex: node.value ?? '' },
-      children: [],
-    }),
-  },
-}
 
 function ChatMarkdownComponent({
   content,
@@ -1109,12 +1078,10 @@ function ChatMarkdownComponent({
   variant = 'default',
   citations,
 }: ChatMarkdownProps) {
-  const normalized = useMemo(
-    () => normalizeMarkdownForRender(normalizeLegacyErrorDetails(content)),
-    [content],
-  )
+  const streaming = useContext(MarkdownStreamingContext)
+  const flags = getChatPerformanceFlags()
   const remarkPlugins = useMemo<PluggableList>(() => {
-    const plugins: PluggableList = [remarkGfm, remarkMath, remarkCjkFriendly]
+    const plugins: PluggableList = [...streamdownRemarkPlugins]
     if (citations && citations.size > 0) {
       plugins.push(remarkCitations(new Set(citations.keys())))
     }
@@ -1124,7 +1091,6 @@ function ChatMarkdownComponent({
     const artifactLookup = buildArtifactLookup(artifacts)
     return {
       ...markdownComponents,
-      kvmath: KvMath,
       a: ({ href, children }) => {
         const url = typeof href === 'string' ? href : ''
         const cite = /^#kb-cite-(\d{1,3})$/.exec(url)
@@ -1135,7 +1101,7 @@ function ChatMarkdownComponent({
         return <LinkAnchor href={url} conversationId={conversationId}>{children}</LinkAnchor>
       },
       img: ({ src, alt }) => {
-        const rawSrc = typeof src === 'string' ? src : ''
+        const rawSrc = decodeKivioInternalUrl(typeof src === 'string' ? src : '')
         const altText = alt ?? ''
         const artifact =
           rawSrc && !isExternalOrAbsoluteImageSrc(rawSrc)
@@ -1156,16 +1122,15 @@ function ChatMarkdownComponent({
   }, [artifacts, conversationId, onImageClick, citations])
 
   return (
-    <div className={markdownProseClass(variant)}>
+    <div className={markdownShellClass(variant)}>
       <MarkdownErrorBoundary fallbackText={content}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          remarkRehypeOptions={remarkRehypeOptions as never}
+        <FullSettledMarkdown
+          content={content}
           components={components}
-          urlTransform={chatMarkdownUrlTransform}
-        >
-          {normalized}
-        </ReactMarkdown>
+          remarkPlugins={remarkPlugins}
+          useCache={flags.settledMarkdownCache && !streaming}
+          streaming={streaming}
+        />
       </MarkdownErrorBoundary>
     </div>
   )

@@ -1,19 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
-  earlierBatchStart,
+  clearRowMeasurementCache,
+  estimateMessageRenderCost,
   estimateRenderCost,
-  findMountedWindowStart,
-  HEAVY_MIGRATION_STEP,
-  MOUNTED_MIN_ITEMS,
-  mountedCountForBudget,
+  getCachedRowMeasurement,
+  layoutScopedVirtualKey,
+  restoreMeasurementSnapshot,
+  saveMeasurementSnapshot,
   sendReserveHeight,
-  splitHistoryForVirtualization,
-  VIRTUALIZE_THRESHOLD,
+  setCachedRowMeasurement,
+  shouldAdjustChatItemSizeChange,
 } from './messageListVirtualization'
 
-function items(kinds: string[]) {
-  return kinds.map((kind, i) => ({ kind, key: `${kind}-${i}` }))
-}
+beforeEach(() => clearRowMeasurementCache())
 
 const fence = (body = 'x') => '```ts\n' + body + '\n```\n'
 
@@ -38,121 +37,103 @@ describe('estimateRenderCost', () => {
   })
 })
 
-describe('mountedCountForBudget', () => {
-  it('累到预算就停', () => {
-    expect(mountedCountForBudget([100, 100, 100, 900], 800)).toBe(MOUNTED_MIN_ITEMS)
-    expect(mountedCountForBudget([500, 300, 300, 300], 800)).toBe(3)
-  })
-
-  it('内容太轻时返回全部（等于不虚拟化）', () => {
-    expect(mountedCountForBudget([1, 1, 1, 1, 1], 800)).toBe(5)
-  })
-
-  it('至少留 MOUNTED_MIN_ITEMS 条，视口要填满', () => {
-    expect(mountedCountForBudget([5000, 5000, 5000, 5000], 800)).toBe(MOUNTED_MIN_ITEMS)
-  })
-})
-
-describe('earlierBatchStart', () => {
-  it('到顶了就返回 0', () => {
-    expect(earlierBatchStart([1, 2, 3], 0)).toBe(0)
-  })
-
-  it('至少揭示一条，哪怕它自己就超预算（否则滚到顶会卡住）', () => {
-    expect(earlierBatchStart([100, 100, 5000, 100], 3, 800)).toBe(2)
-  })
-
-  it('不超预算就继续往前吃', () => {
-    expect(earlierBatchStart([100, 100, 100, 100, 100], 5, 800)).toBe(0)
-    expect(earlierBatchStart([100, 100, 700, 100, 100], 5, 800)).toBe(3)
-  })
-
-  it('每次至少前进一格，不会原地不动', () => {
-    let from = 6
-    const costs = [900, 900, 900, 900, 900, 900]
-    for (let i = 0; i < 6; i += 1) {
-      const next = earlierBatchStart(costs, from, 800)
-      expect(next).toBeLessThan(from)
-      from = next
-    }
-    expect(from).toBe(0)
-  })
-})
-
-describe('findMountedWindowStart', () => {
-  it('短列表从 0 开始', () => {
-    expect(findMountedWindowStart(items(['message', 'message']), 32)).toBe(0)
-  })
-
-  it('长列表从末尾保留 minMounted，并落在 message 边界', () => {
-    const list = items([
-      ...Array.from({ length: 40 }, () => 'message'),
-      'spacer',
-      'message',
-      'message',
-    ])
-    const start = findMountedWindowStart(list, 5)
-    expect(start).toBeLessThanOrEqual(list.length - 5)
-    expect(list[start]?.kind).toBe('message')
-  })
-
-  // 回归：重会话条数很少（14 条消息 ≈ 16 个 render item），按默认步长 16 量化会把边界
-  // 压回 0 —— 边界回到 0 等于没虚拟化，成本预算白算。这就是 migrationStep 存在的理由。
-  it('短列表下默认步长会把边界压回 0，小步长才留得住实挂载窗口', () => {
-    const list = items(Array.from({ length: 16 }, () => 'message'))
-    expect(findMountedWindowStart(list, 3)).toBe(0)
-    expect(findMountedWindowStart(list, 3, HEAVY_MIGRATION_STEP)).toBeGreaterThan(0)
-  })
-})
-
-describe('splitHistoryForVirtualization', () => {
-  it('低于阈值时全部实挂载', () => {
-    const list = items(Array.from({ length: 10 }, () => 'message'))
-    const split = splitHistoryForVirtualization(list)
-    expect(split.useVirtual).toBe(false)
-    expect(split.virtualized).toHaveLength(0)
-    expect(split.mounted).toHaveLength(10)
-  })
-
-  it('超过阈值时拆成上方虚拟 + 底部实挂载', () => {
-    const list = items(Array.from({ length: VIRTUALIZE_THRESHOLD + 20 }, () => 'message'))
-    const split = splitHistoryForVirtualization(list, { minMounted: 32 })
-    expect(split.useVirtual).toBe(true)
-    expect(split.virtualized.length + split.mounted.length).toBe(list.length)
-    expect(split.mounted.length).toBeGreaterThanOrEqual(32)
-    expect(split.mountedStartIndex).toBe(split.virtualized.length)
-  })
-
-  // 重会话旁路：条数远低于 48，但成本判定要虚拟化 → threshold 让位、尾部按预算、步长换小。
-  it('重会话：条数不到 48 也能虚拟化，且只实挂载尾部少数几条', () => {
-    const list = items(Array.from({ length: 16 }, () => 'message'))
-    const split = splitHistoryForVirtualization(list, {
-      threshold: 0,
-      minMounted: MOUNTED_MIN_ITEMS,
-      migrationStep: HEAVY_MIGRATION_STEP,
+describe('estimateMessageRenderCost', () => {
+  it('折叠工具详情虽不挂 DOM，工具记录和时间线处理仍计入消息成本', () => {
+    const textOnly = estimateMessageRenderCost({ texts: ['简短回答'] })
+    const toolHeavy = estimateMessageRenderCost({
+      texts: ['简短回答'],
+      toolCallCount: 20,
+      timelineSegmentCount: 30,
     })
-    expect(split.useVirtual).toBe(true)
-    expect(split.mounted.length).toBeLessThan(8)
-    expect(split.virtualized.length + split.mounted.length).toBe(16)
+    expect(toolHeavy).toBeGreaterThan(textOnly + 150)
   })
 
-  it('冻结时新消息只让实挂载区变长，不把已有行挤进虚拟区', () => {
-    const before = items(Array.from({ length: 80 }, () => 'message'))
-    const frozenStart = splitHistoryForVirtualization(before, { minMounted: 32 }).mountedStartIndex
-    const after = items(Array.from({ length: 100 }, () => 'message'))
+  it('大量工具记录会增加估算成本', () => {
+    const textOnly = estimateMessageRenderCost({ texts: ['a'.repeat(150_000)] })
+    const withTools = estimateMessageRenderCost({
+      texts: ['a'.repeat(150_000)],
+      toolCallCount: 80,
+      timelineSegmentCount: 80,
+    })
+    expect(withTools).toBeGreaterThan(textOnly + 150)
+  })
+})
 
-    const thawed = splitHistoryForVirtualization(after, { minMounted: 32 })
-    expect(thawed.mountedStartIndex).toBeGreaterThan(frozenStart) // 不冻结就会往前挪
-
-    const frozen = splitHistoryForVirtualization(after, { minMounted: 32, frozenStart })
-    expect(frozen.mountedStartIndex).toBe(frozenStart)
-    expect(frozen.mounted.length).toBe(100 - frozenStart)
+describe('row measurement cache', () => {
+  it('uses different TanStack key spaces for different content widths', () => {
+    expect(layoutScopedVirtualKey('c1:640', 'm1')).not.toBe(layoutScopedVirtualKey('c1:960', 'm1'))
   })
 
-  it('冻结期实挂载区超过上限则放弃冻结', () => {
-    const list = items(Array.from({ length: 300 }, () => 'message'))
-    const frozen = splitHistoryForVirtualization(list, { minMounted: 32, frozenStart: 16 })
-    expect(frozen.mountedStartIndex).toBeGreaterThan(16)
+  it('按布局 key 隔离同一行在不同宽度下的高度', () => {
+    setCachedRowMeasurement('c1:640', 'm1', 240)
+    setCachedRowMeasurement('c1:960', 'm1', 160)
+    expect(getCachedRowMeasurement('c1:640', 'm1')).toBe(240)
+    expect(getCachedRowMeasurement('c1:960', 'm1')).toBe(160)
+  })
+
+  it('忽略无效高度，避免污染下一次切换的估算', () => {
+    setCachedRowMeasurement('c1:640', 'm1', 0)
+    setCachedRowMeasurement('c1:640', 'm2', Number.NaN)
+    expect(getCachedRowMeasurement('c1:640', 'm1')).toBeUndefined()
+    expect(getCachedRowMeasurement('c1:640', 'm2')).toBeUndefined()
+  })
+
+  it('按会话、布局和内容 revision 恢复 measured snapshot', () => {
+    saveMeasurementSnapshot('c1', 'viewport:640', 'rev-a', [{
+      index: 2,
+      key: 'm2',
+      start: 180,
+      size: 420,
+      end: 600,
+      lane: 0,
+    }])
+    expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-a')).toHaveLength(1)
+    expect(restoreMeasurementSnapshot('c1', 'viewport:960', 'rev-a')).toHaveLength(0)
+    expect(restoreMeasurementSnapshot('c1', 'viewport:640', 'rev-b')).toHaveLength(0)
+  })
+})
+
+describe('row resize anchoring', () => {
+  const base = {
+    scrollOffset: 500,
+    scrollAdjustments: 0,
+    itemSizeCache: new Map<string, number>([['measured', 100]]),
+    scrollDirection: null as 'forward' | 'backward' | null,
+  }
+
+  it('adjusts rows that start above the reading anchor (LiveAgent / TanStack default)', () => {
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 100, end: 200 },
+      base,
+    )).toBe(true)
+    // 跨过锚点但仍从上方开始：默认补偿，live 行特例由 MessageList 再裁。
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 450, end: 550 },
+      base,
+    )).toBe(true)
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 550, end: 650 },
+      base,
+    )).toBe(false)
+  })
+
+  it('does not compensate a measured row while scrolling backward', () => {
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'measured', start: 100, end: 200 },
+      { ...base, scrollDirection: 'backward' },
+    )).toBe(false)
+  })
+
+  it('compensates an unmeasured row above the anchor once (estimate→actual)', () => {
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'unmeasured', start: 300, end: 700 },
+      base,
+    )).toBe(true)
+    // 首次测量即使 backward 也要补偿（上游「上滚时条目跳动」修复）。
+    expect(shouldAdjustChatItemSizeChange(
+      { key: 'unmeasured', start: 100, end: 200 },
+      { ...base, scrollDirection: 'backward' },
+    )).toBe(true)
   })
 })
 

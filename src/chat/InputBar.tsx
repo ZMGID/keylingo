@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { cloneElement, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -350,7 +350,7 @@ function readFileAsBase64(file: File, readError: string): Promise<string> {
   })
 }
 
-interface InputBarProps {
+export interface InputBarProps {
   onSend: (content: string, attachments: PendingAttachment[]) => void
   disabled?: boolean
   /**
@@ -430,7 +430,7 @@ interface InputBarProps {
   usageSlot?: ReactNode
 }
 
-export function InputBar({
+export const InputBar = memo(function InputBar({
   onSend,
   disabled,
   onQueue,
@@ -2093,4 +2093,4 @@ export function InputBar({
       </div>
     </div>
   )
-}
+})
