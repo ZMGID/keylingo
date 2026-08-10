@@ -1210,14 +1210,7 @@ function MessageListBase({
 
 
 
-  const handleNavigatorStep = useCallback((direction: -1 | 1) => {
-    const nodes = navigatorNodesRef.current
-    if (nodes.length === 0) return
-    const currentId = activeNavigatorNodeIdRef.current
-    const currentIndex = Math.max(0, nodes.findIndex((node) => node.id === currentId))
-    const nextIndex = Math.min(nodes.length - 1, Math.max(0, currentIndex + direction))
-    navigateToNavigatorNode(nodes[nextIndex])
-  }, [navigateToNavigatorNode])
+
 
   /**
    * 回到底部：同样走「eager hydrate + 钉底 hold」。
@@ -1672,7 +1665,7 @@ function MessageListBase({
           activeNodeId={activeNavigatorNodeId}
           visibleNodeIds={visibleNavigatorNodeIds}
           onNavigate={navigateToNavigatorNode}
-          onNavigateStep={handleNavigatorStep}
+
         />
       )}
       <div

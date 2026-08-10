@@ -15,7 +15,6 @@ interface MessageNavigatorProps {
   activeNodeId: string | null
   visibleNodeIds: string[]
   onNavigate: (node: MessageNavigatorNode) => void
-  onNavigateStep: (direction: -1 | 1) => void
 }
 
 function nodesEqual(a: MessageNavigatorNode[], b: MessageNavigatorNode[]): boolean {
@@ -37,11 +36,9 @@ function MessageNavigatorBase({
   activeNodeId,
   visibleNodeIds,
   onNavigate,
-  onNavigateStep,
 }: MessageNavigatorProps) {
   const t = useT()
   const viewportRef = useRef<HTMLDivElement>(null)
-  const lastWheelAtRef = useRef(0)
   const proximityFrameRef = useRef<number | null>(null)
   const proximityPointerYRef = useRef(0)
   const [preview, setPreview] = useState<PreviewAnchor | null>(null)
@@ -49,6 +46,25 @@ function MessageNavigatorBase({
 
   useEffect(() => () => {
     if (proximityFrameRef.current != null) cancelAnimationFrame(proximityFrameRef.current)
+  }, [])
+
+  // 滚轮只滚导航条本身的小横杠列表，绝不切换消息、也绝不带动主列表。
+  // React onWheel 多为 passive，preventDefault 无效；必须非 passive 原生监听，
+  // 自己改 scrollTop，吞掉事件。
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      let delta = event.deltaY
+      if (event.deltaMode === 1) delta *= 13
+      else if (event.deltaMode === 2) delta *= el.clientHeight
+      if (delta === 0) return
+      el.scrollTop += delta
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
   useEffect(() => {
@@ -74,16 +90,6 @@ function MessageNavigatorBase({
       top: Math.min(window.innerHeight - 96, Math.max(96, center)),
       left: Math.max(16, rect.left - 12 - previewWidth),
     })
-  }
-
-  const handleWheel = (event: React.WheelEvent) => {
-    event.preventDefault()
-    event.stopPropagation()
-    if (Math.abs(event.deltaY) < 4) return
-    const now = performance.now()
-    if (now - lastWheelAtRef.current < 150) return
-    lastWheelAtRef.current = now
-    onNavigateStep(event.deltaY > 0 ? 1 : -1)
   }
 
   const applyPointerProximity = () => {
@@ -118,7 +124,6 @@ function MessageNavigatorBase({
         <div
           ref={viewportRef}
           className="chat-message-navigator-viewport"
-          onWheel={handleWheel}
           onMouseMove={handlePointerMove}
           onMouseLeave={clearPointerProximity}
         >
@@ -188,7 +193,6 @@ export const MessageNavigator = memo(
     && prev.visibleNodeIds.length === next.visibleNodeIds.length
     && prev.visibleNodeIds.every((id, index) => id === next.visibleNodeIds[index])
     && prev.onNavigate === next.onNavigate
-    && prev.onNavigateStep === next.onNavigateStep
     && nodesEqual(prev.nodes, next.nodes)
   ),
 )
