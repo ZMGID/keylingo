@@ -651,7 +651,7 @@ export interface ConversationLibraryQuery {
 }
 
 export interface ConversationLibraryPage {
-  items: ConversationListItem[]
+  items: ConversationSearchHit[]
   total: number
 }
 

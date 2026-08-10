@@ -35,6 +35,7 @@ import type {
   ConversationLibraryShelf,
   ConversationLibrarySort,
   ConversationListItem,
+  ConversationSearchHit,
 } from './types'
 import { conversationMarkdownFilename } from './conversationExport'
 import { IconButton, Button } from '../components/Button'
@@ -88,14 +89,14 @@ interface SessionCenterProps {
   lang: Lang
   currentConversationId?: string
   generatingConversationIds?: ReadonlySet<string>
-  onSelectConversation: (id: string) => void
+  onSelectConversation: (id: string, conversation?: ConversationSearchHit) => void
   onConversationDeleted?: (id: string) => void
   onForceDropConversation?: (id: string) => void
   onConversationsChanged?: () => void
 }
 
 interface LibraryState {
-  items: ConversationListItem[]
+  items: ConversationSearchHit[]
   total: number
   loading: boolean
   loadingMore: boolean
@@ -450,8 +451,8 @@ export function SessionCenter({
     if (groupBy === 'none') {
       return [{ key: 'all', label: '', items: state.items }]
     }
-    const map = new Map<string, { label: string; items: ConversationListItem[] }>()
-    const push = (key: string, label: string, c: ConversationListItem) => {
+    const map = new Map<string, { label: string; items: ConversationSearchHit[] }>()
+    const push = (key: string, label: string, c: ConversationSearchHit) => {
       let g = map.get(key)
       if (!g) {
         g = { label, items: [] }
@@ -924,10 +925,10 @@ export function SessionCenter({
                         tabIndex={0}
                         onClick={(e) => {
                           if ((e.target as HTMLElement).closest('[data-row-chrome]')) return
-                          onSelectConversation(c.id)
+                          onSelectConversation(c.id, c)
                         }}
                         onKeyDown={(e: ReactKeyboardEvent) => {
-                          if (e.key === 'Enter') onSelectConversation(c.id)
+                          if (e.key === 'Enter') onSelectConversation(c.id, c)
                         }}
                         className={`group flex cursor-pointer items-center gap-2 border-b border-neutral-50 px-3 ${rowPad} transition-colors hover:bg-neutral-50 dark:border-neutral-900 dark:hover:bg-neutral-900/50 ${
                           isSel ? 'bg-sky-50/80 dark:bg-sky-950/20' : ''
@@ -971,13 +972,22 @@ export function SessionCenter({
                               </span>
                             )}
                           </div>
-                          {cols.preview && c.preview && (
-                            <p className="mt-0.5 truncate text-[12px] text-neutral-500 dark:text-neutral-400">
-                              {debouncedQ
-                                ? <HighlightText text={c.preview} query={debouncedQ} />
-                                : c.preview}
-                            </p>
-                          )}
+                          {(() => {
+                            // 有搜索词时优先展示命中片段（正文/思考），否则回退 index 预览。
+                            const snippet = (c.match_snippet ?? c.matchSnippet ?? '').trim()
+                            const line = debouncedQ
+                              ? (snippet && snippet !== (c.title || '') ? snippet : (c.preview || snippet))
+                              : c.preview
+                            // 搜索命中片段即使紧凑布局也要露出，否则正文匹配看不见高亮。
+                            if (!(cols.preview || debouncedQ) || !line) return null
+                            return (
+                              <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-neutral-500 dark:text-neutral-400">
+                                {debouncedQ
+                                  ? <HighlightText text={line} query={debouncedQ} />
+                                  : line}
+                              </p>
+                            )
+                          })()}
                         </div>
                         {cols.model && (
                           <span className="w-24 shrink-0 truncate text-[12px] text-neutral-500">

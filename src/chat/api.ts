@@ -988,9 +988,10 @@ export const chatApi = {
   async queryConversations(query: ConversationLibraryQuery = {}): Promise<ConversationLibraryPage> {
     if (!isTauriRuntime()) {
       const all = await mockChatApi.getConversations(0, 500)
-      return { items: all.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 80)), total: all.length }
+      const slice = all.slice(query.offset ?? 0, (query.offset ?? 0) + (query.limit ?? 80))
+      return { items: slice as ConversationSearchHit[], total: all.length }
     }
-    const result = await invoke<{ success: boolean; items: ConversationListItem[]; total: number }>(
+    const result = await invoke<{ success: boolean; items: ConversationSearchHit[]; total: number }>(
       'chat_query_conversations',
       {
         offset: query.offset ?? 0,

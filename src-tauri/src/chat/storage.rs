@@ -724,7 +724,8 @@ pub struct ConversationLibraryQuery {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationLibraryPage {
-    pub items: Vec<ConversationListItem>,
+    /// 有搜索词时条目带 match_* 高亮/跳转字段；无搜索词时 match 字段为空。
+    pub items: Vec<ConversationSearchHit>,
     pub total: usize,
 }
 
@@ -794,32 +795,36 @@ pub fn query_conversations(
         items.retain(|c| c.agent_runtime.is_external() == want_external);
     }
 
-    if let Some(raw_q) = query.q.as_deref() {
-        let needle = raw_q.trim().to_lowercase();
-        if !needle.is_empty() {
-            let full_text = query.full_text;
-            items.retain(|c| {
-                let meta_hit = c.title.to_lowercase().contains(&needle)
-                    || c.preview.to_lowercase().contains(&needle)
-                    || c.folder
-                        .as_deref()
-                        .map(|f| f.to_lowercase().contains(&needle))
-                        .unwrap_or(false)
-                    || c.assistant_name
-                        .as_deref()
-                        .map(|n| n.to_lowercase().contains(&needle))
-                        .unwrap_or(false)
-                    || c.model.to_lowercase().contains(&needle);
-                if meta_hit {
-                    return true;
-                }
-                if full_text {
-                    conversation_content_matches(app, &c.id, &needle)
-                } else {
-                    false
-                }
-            });
-        }
+    let needle = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase());
+
+    if let Some(needle) = needle.as_deref() {
+        let full_text = query.full_text;
+        items.retain(|c| {
+            let meta_hit = c.title.to_lowercase().contains(needle)
+                || c.preview.to_lowercase().contains(needle)
+                || c.folder
+                    .as_deref()
+                    .map(|f| f.to_lowercase().contains(needle))
+                    .unwrap_or(false)
+                || c.assistant_name
+                    .as_deref()
+                    .map(|n| n.to_lowercase().contains(needle))
+                    .unwrap_or(false)
+                || c.model.to_lowercase().contains(needle);
+            if meta_hit {
+                return true;
+            }
+            if full_text {
+                conversation_content_matches(app, &c.id, needle)
+            } else {
+                false
+            }
+        });
     }
 
     let sort = query.sort.trim().to_ascii_lowercase();
@@ -852,8 +857,31 @@ pub fn query_conversations(
         });
     }
     let end = (offset + limit).min(total);
+    // 只给当前页补匹配片段（最多 limit 条），避免对全量命中重复读盘。
+    let page = items[offset..end]
+        .iter()
+        .map(|item| {
+            if let Some(needle) = needle.as_deref() {
+                match_conversation_for_search(app, item.clone(), needle).unwrap_or_else(|| {
+                    ConversationSearchHit {
+                        item: item.clone(),
+                        match_field: "meta".into(),
+                        match_message_id: None,
+                        match_snippet: None,
+                    }
+                })
+            } else {
+                ConversationSearchHit {
+                    item: item.clone(),
+                    match_field: String::new(),
+                    match_message_id: None,
+                    match_snippet: None,
+                }
+            }
+        })
+        .collect();
     Ok(ConversationLibraryPage {
-        items: items[offset..end].to_vec(),
+        items: page,
         total,
     })
 }
@@ -890,7 +918,7 @@ pub fn search_conversations(
     Ok(hits)
 }
 
-/// 构造一条搜索命中：优先标题 → 预览 → 文件夹 → 正文/思考（首条消息）。
+/// 构造一条搜索命中：优先标题 → 预览 → 文件夹 → 助手/模型 → 正文/思考（首条消息）。
 fn match_conversation_for_search(
     app: &AppHandle,
     item: ConversationListItem,
@@ -921,6 +949,27 @@ fn match_conversation_for_search(
         return Some(ConversationSearchHit {
             match_snippet: item.folder.clone(),
             match_field: "folder".into(),
+            match_message_id: None,
+            item,
+        });
+    }
+    if item
+        .assistant_name
+        .as_deref()
+        .map(|n| n.to_lowercase().contains(needle))
+        .unwrap_or(false)
+    {
+        return Some(ConversationSearchHit {
+            match_snippet: item.assistant_name.clone(),
+            match_field: "assistant".into(),
+            match_message_id: None,
+            item,
+        });
+    }
+    if item.model.to_lowercase().contains(needle) {
+        return Some(ConversationSearchHit {
+            match_snippet: Some(item.model.clone()),
+            match_field: "model".into(),
             match_message_id: None,
             item,
         });
