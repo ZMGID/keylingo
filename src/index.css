@@ -2780,7 +2780,9 @@ button.chat-composer-status-item:hover {
 }
 
 .settings-embedded-scroll {
-  background: var(--bg-savebar);
+  /* 与 header / content 同色：原先 --bg-savebar（soft）会比顶栏 --bg（surface）深一档，
+     亮色下读成「顶栏一块、底下一块」。暗色两变量本就相同。 */
+  background: var(--bg);
   padding: 8px 28px 20px;
 }
 
