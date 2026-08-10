@@ -493,6 +493,8 @@ function MermaidBlock({ code }: { code: string }) {
   const [svg, setSvg] = useState(() => mermaidSvgCache.get(cacheKey) ?? '')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(() => !mermaidSvgCache.has(cacheKey))
+  // hooks 必须在 early return 之前：源码/错误分支也会走到下面的 eager 语义。
+  const { loading: conversationOpening } = useConversationTransition()
 
   if (!renderBaseId.current) {
     mermaidRenderCounter += 1
@@ -592,8 +594,8 @@ function MermaidBlock({ code }: { code: string }) {
     )
   }
 
-  const { loading: conversationOpening } = useConversationTransition()
   return (
+
     <ChatHeavyIsland
       minHeight={112}
       eager={conversationOpening}
