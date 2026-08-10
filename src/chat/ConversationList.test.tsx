@@ -107,3 +107,40 @@ describe('ConversationList pin and archive', () => {
     expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
   })
 })
+
+describe('ConversationList generating wave', () => {
+  it('puts wave and actions in the same replace slot while generating', () => {
+    const { container } = render(
+      <ConversationList
+        {...listProps}
+        generatingConversationIds={new Set(['conversation-1'])}
+      />,
+    )
+
+    const trailing = container.querySelector('.kv-conv-trailing')
+    expect(trailing).toBeTruthy()
+    // data-busy 存在（值为空串也算）→ CSS 走互斥替换，而不是并排
+    expect(trailing).toHaveAttribute('data-busy')
+    expect(trailing?.querySelector('.kv-conv-wave.chat-gen-wave')).toBeTruthy()
+    expect(trailing?.querySelector('.kv-conv-actions')).toBeTruthy()
+    expect(screen.getByRole('status', { name: '正在生成' })).toBeInTheDocument()
+  })
+
+  it('keeps pin visible when already pinned, without the wave', () => {
+    const { container } = render(
+      <ConversationList
+        {...listProps}
+        conversations={[{ ...conversation, pinned: true }]}
+        generatingConversationIds={new Set(['conversation-1'])}
+      />,
+    )
+
+    const trailing = container.querySelector('.kv-conv-trailing')
+    expect(trailing).not.toHaveAttribute('data-busy')
+    expect(screen.queryByRole('status', { name: '正在生成' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '取消置顶' })).toBeInTheDocument()
+  })
+})
+
+
+

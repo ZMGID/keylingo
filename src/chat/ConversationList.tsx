@@ -272,48 +272,62 @@ export const ConversationList = memo(function ConversationList({
                   </span>
                 )}
               </button>
-              {/* 行尾：生成中慢波；悬停/已置顶时换成 PIN + 归档，不叠动画 */}
-              <div className="relative mr-1 flex h-[22px] w-[44px] shrink-0 items-center justify-end">
+              {/* 行尾：生成中慢波；悬停/已置顶时换成 PIN + 归档。
+                  慢波保持原始 chat-gen-wave（14×11 + absolute right-1），与按钮同槽 visibility 互斥。 */}
+
+              <div
+                className="kv-conv-trailing relative mr-1 flex h-[22px] w-[44px] shrink-0 items-center justify-end"
+                data-busy={isGenerating && !conv.pinned ? '' : undefined}
+              >
                 {isGenerating && !conv.pinned && (
                   <span
-                    className="chat-gen-wave pointer-events-none absolute right-1 opacity-100 transition-opacity group-hover:opacity-0"
+                    className="kv-conv-wave chat-gen-wave pointer-events-none absolute right-1"
                     aria-label={t.chatGenerating}
                     role="status"
                   >
                     <span /><span /><span /><span />
                   </span>
                 )}
-                <button
-                  type="button"
-                  data-no-drag
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void onTogglePinConversation(conv.id, !conv.pinned)
-                  }}
-                  className={`shrink-0 rounded-md p-0.5 transition-opacity hover:bg-black/[0.06] dark:hover:bg-white/[0.1] ${
-                    conv.pinned
-                      ? 'text-neutral-700 opacity-100 dark:text-neutral-200'
-                      : 'text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-neutral-600 dark:hover:text-neutral-200'
-                  }`}
-                  aria-label={conv.pinned ? t.chatUnpin : t.chatPin}
-                  title={conv.pinned ? t.chatUnpin : t.chatPin}
-                >
-                  <Pin size={14} strokeWidth={conv.pinned ? 2.5 : 1.75} />
-                </button>
-                <button
-                  type="button"
-                  data-no-drag
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void onArchiveConversation(conv.id)
-                  }}
-                  className="shrink-0 rounded-md p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-black/[0.06] hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-white/[0.1] dark:hover:text-neutral-200"
-                  aria-label={t.chatLibArchive}
-                  title={t.chatLibArchive}
-                >
-                  <Archive size={14} strokeWidth={1.75} />
-                </button>
+                <div className="kv-conv-actions flex items-center">
+                  <button
+                    type="button"
+                    data-no-drag
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void onTogglePinConversation(conv.id, !conv.pinned)
+                    }}
+                    className={`shrink-0 rounded-md p-0.5 transition-opacity hover:bg-black/[0.06] dark:hover:bg-white/[0.1] ${
+                      conv.pinned
+                        ? 'text-neutral-700 opacity-100 dark:text-neutral-200'
+                        : isGenerating
+                          ? 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200'
+                          : 'text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-neutral-600 dark:hover:text-neutral-200'
+                    }`}
+                    aria-label={conv.pinned ? t.chatUnpin : t.chatPin}
+                    title={conv.pinned ? t.chatUnpin : t.chatPin}
+                  >
+                    <Pin size={14} strokeWidth={conv.pinned ? 2.5 : 1.75} />
+                  </button>
+                  <button
+                    type="button"
+                    data-no-drag
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void onArchiveConversation(conv.id)
+                    }}
+                    className={`shrink-0 rounded-md p-0.5 text-neutral-400 transition-opacity hover:bg-black/[0.06] hover:text-neutral-600 dark:hover:bg-white/[0.1] dark:hover:text-neutral-200 ${
+                      isGenerating && !conv.pinned
+                        ? ''
+                        : 'opacity-0 group-hover:opacity-100'
+                    }`}
+                    aria-label={t.chatLibArchive}
+                    title={t.chatLibArchive}
+                  >
+                    <Archive size={14} strokeWidth={1.75} />
+                  </button>
+                </div>
               </div>
+
             </div>
           )
         })}

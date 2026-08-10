@@ -1488,6 +1488,27 @@ button.chat-composer-status-item:hover {
   }
 }
 
+/* 侧栏会话行尾：慢波 与 pin/归档 互斥替换。
+   慢波保持 .chat-gen-wave 原始 14×11 尺寸 + absolute right-1（与 4a68189 一致），
+   绝不要 width/height:auto 去铺满槽——那会把竖线拉高，动画就不是原来那个了。
+   互斥用 visibility（unlayered），避免 Tailwind group-hover 盖不过 unlayered 样式。 */
+.kv-conv-trailing[data-busy] > .kv-conv-wave {
+  visibility: visible;
+}
+.kv-conv-trailing[data-busy] > .kv-conv-actions {
+  visibility: hidden;
+}
+.kv-conv-row:hover .kv-conv-trailing[data-busy] > .kv-conv-wave,
+.kv-conv-row:focus-within .kv-conv-trailing[data-busy] > .kv-conv-wave {
+  visibility: hidden;
+}
+.kv-conv-row:hover .kv-conv-trailing[data-busy] > .kv-conv-actions,
+.kv-conv-row:focus-within .kv-conv-trailing[data-busy] > .kv-conv-actions {
+  visibility: visible;
+}
+
+
+
 .chat-motion-fade-up {
   animation: chat-motion-fade-up var(--chat-motion-duration, var(--kv-dur-normal)) var(--kv-ease-standard) both;
   animation-delay: var(--chat-motion-delay, 0ms);
