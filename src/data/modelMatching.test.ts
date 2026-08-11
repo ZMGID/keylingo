@@ -79,6 +79,31 @@ describe('matchModel', () => {
     expect(info?.pricing?.input).toBe(10)
   })
 
+  it('matches Claude Opus 5 without collapsing onto Opus 4.x', () => {
+    const info = matchModel('claude-opus-5')
+    expect(info?.displayName).toBe('Claude Opus 5')
+    expect(info?.contextWindow).toBe(1_000_000)
+    expect(info?.maxOutput).toBe(128_000)
+    expect(info?.pricing?.input).toBe(5)
+    expect(info?.pricing?.output).toBe(25)
+    expect(info?.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    // OpenRouter-style provider prefix
+    expect(matchModel('anthropic/claude-opus-5')?.displayName).toBe('Claude Opus 5')
+    // Must not degrade to Opus 4
+    expect(matchModel('claude-opus-5')?.displayName).not.toBe('Claude Opus 4')
+  })
+
+  it('matches latest Gemini Flash family ids', () => {
+    expect(matchModel('gemini-3.6-flash')?.displayName).toBe('Gemini 3.6 Flash')
+    expect(matchModel('gemini-3.6-flash')?.pricing?.output).toBe(7.5)
+    expect(matchModel('gemini-3.5-flash-lite')?.displayName).toBe('Gemini 3.5 Flash-Lite')
+    expect(matchModel('gemini-3.5-flash-lite')?.pricing?.input).toBe(0.3)
+    expect(matchModel('gemini-3.1-flash-lite')?.displayName).toBe('Gemini 3.1 Flash-Lite')
+    expect(matchModel('gemini-3-flash-preview')?.displayName).toBe('Gemini 3 Flash Preview')
+    // Longer lite id must not collapse onto gemini-3.5-flash
+    expect(matchModel('gemini-3.5-flash-lite')?.displayName).not.toBe('Gemini 3.5 Flash')
+  })
+
   it('matches Cursor Composer model ids without collapsing versions', () => {
     // Cursor docs pricing catalog: composer-2.5 base + fast sub-row; supportsImage=true.
     const c25 = matchModel('composer-2.5')

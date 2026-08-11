@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-08-08",
+    "version": "2026-08-11",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -292,6 +292,14 @@
     "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"],
     "pricing": { "input": 10.00, "output": 50.00, "cachedInput": 1.00 }
   },
+  "claude-opus-5": {
+    "displayName": "Claude Opus 5",
+    "contextWindow": 1000000,
+    "maxOutput": 128000,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"],
+    "pricing": { "input": 5.00, "output": 25.00, "cachedInput": 0.50 }
+  },
   "claude-opus-4.8": {
     "displayName": "Claude Opus 4.8",
     "contextWindow": 1000000,
@@ -394,6 +402,13 @@
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
     "pricing": { "input": 0.10, "output": 0.40, "cachedInput": 0.025 }
   },
+  "gemini-3.6-flash": {
+    "displayName": "Gemini 3.6 Flash",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "pricing": { "input": 1.50, "output": 7.50, "cachedInput": 0.15 }
+  },
   "gemini-3.2-pro": {
     "displayName": "Gemini 3.2 Pro",
     "contextWindow": 2000000,
@@ -406,14 +421,35 @@
     "contextWindow": 1048576,
     "maxOutput": 65536,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
-    "pricing": { "input": 2.00, "output": 12.00 }
+    "pricing": { "input": 2.00, "output": 12.00, "cachedInput": 0.20 }
   },
   "gemini-3.5-flash": {
     "displayName": "Gemini 3.5 Flash",
     "contextWindow": 1048576,
     "maxOutput": 65536,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
-    "pricing": { "input": 1.50, "output": 9.00 }
+    "pricing": { "input": 1.50, "output": 9.00, "cachedInput": 0.15 }
+  },
+  "gemini-3.5-flash-lite": {
+    "displayName": "Gemini 3.5 Flash-Lite",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "pricing": { "input": 0.30, "output": 2.50, "cachedInput": 0.03 }
+  },
+  "gemini-3.1-flash-lite": {
+    "displayName": "Gemini 3.1 Flash-Lite",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "pricing": { "input": 0.25, "output": 1.50, "cachedInput": 0.025 }
+  },
+  "gemini-3-flash-preview": {
+    "displayName": "Gemini 3 Flash Preview",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "pricing": { "input": 0.50, "output": 3.00, "cachedInput": 0.05 }
   },
   "gemini-2.0-flash": {
     "displayName": "Gemini 2.0 Flash",
