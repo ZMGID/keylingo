@@ -3,10 +3,36 @@ import {
   applyLiveContextUsage,
   buildContextBarSlices,
   CONTEXT_FREE_SEGMENT_ID,
+  CONTEXT_GROUP_CONVERSATION,
+  CONTEXT_GROUP_SYSTEM,
+  CONTEXT_GROUP_TOOLS,
+  contextSegmentGroupId,
   fullnessLabel,
 } from './contextPanel'
 import { i18n } from '../settings/i18n'
 import type { ConversationContextState } from './types'
+
+describe('contextSegmentGroupId', () => {
+  it('maps fine-grained segments into the three display groups', () => {
+    expect(contextSegmentGroupId('system_prompt')).toBe(CONTEXT_GROUP_SYSTEM)
+    expect(contextSegmentGroupId('assistant')).toBe(CONTEXT_GROUP_SYSTEM)
+    expect(contextSegmentGroupId('skills')).toBe(CONTEXT_GROUP_SYSTEM)
+    expect(contextSegmentGroupId('knowledge_base')).toBe(CONTEXT_GROUP_SYSTEM)
+
+    expect(contextSegmentGroupId('tool_definitions')).toBe(CONTEXT_GROUP_TOOLS)
+    expect(contextSegmentGroupId('mcp')).toBe(CONTEXT_GROUP_TOOLS)
+    expect(contextSegmentGroupId('agent')).toBe(CONTEXT_GROUP_TOOLS)
+    expect(contextSegmentGroupId('agent_todo')).toBe(CONTEXT_GROUP_TOOLS)
+    expect(contextSegmentGroupId('agent_plan')).toBe(CONTEXT_GROUP_TOOLS)
+
+    expect(contextSegmentGroupId('conversation')).toBe(CONTEXT_GROUP_CONVERSATION)
+    expect(contextSegmentGroupId('attachments')).toBe(CONTEXT_GROUP_CONVERSATION)
+    expect(contextSegmentGroupId('summarized_conversation')).toBe(CONTEXT_GROUP_CONVERSATION)
+    // unknown ids must not invent a fourth group
+    expect(contextSegmentGroupId('external-session')).toBe(CONTEXT_GROUP_CONVERSATION)
+    expect(contextSegmentGroupId('something_new')).toBe(CONTEXT_GROUP_CONVERSATION)
+  })
+})
 
 describe('buildContextBarSlices', () => {
   const t = i18n.zh
@@ -68,6 +94,7 @@ describe('buildContextBarSlices', () => {
     expect(used.find((s) => s.id === 'conversation')?.tokens).toBe(16_500)
   })
 })
+
 
 describe('fullnessLabel', () => {
   const t = i18n.zh

@@ -442,9 +442,11 @@ function CodeBlock({ code, language, actions }: { code: string; language: string
 }
 
 function DeferredCodeBlock({ code, language }: { code: string; language: string }) {
-  // 会话切换 / 导航·回底 settle / 流式结束短窗：同步 hydrate。
-  // 否则 180ms 后代码块从占位撑开，贴底 pin 会再抽一下。平常回翻历史仍延迟，省成本。
+  // 会话切换 / 导航·回底 settle / 流式中 / 流式结束短窗：同步 hydrate。
+  // 流式时若仍 180ms 延迟，代码块从占位撑开 → 高度突跳 → 贴底丢帧再抽。
+  // 平常回翻历史仍延迟，省成本。
   const { loading: conversationOpening } = useConversationTransition()
+  const streaming = useContext(MarkdownStreamingContext)
   const preview = code.length > 14_000
     ? `${code.slice(0, 10_000)}\n\n…\n\n${code.slice(-2_000)}`
     : code
@@ -452,7 +454,7 @@ function DeferredCodeBlock({ code, language }: { code: string; language: string 
     <ChatHeavyIsland
       minHeight={112}
       delayMs={180}
-      eager={conversationOpening}
+      eager={conversationOpening || streaming}
       fallback={(
         <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 py-4 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
           <code className="font-mono whitespace-pre-wrap">{preview}</code>

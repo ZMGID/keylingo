@@ -173,24 +173,18 @@ export function reduceFollowEvent(
       }
 
       if (state.following) {
-        // 对齐 LiveAgent：跟随中只要还开着 gap，就立刻纠正钉底。
-        // self 来源（我们写的 pin / TanStack end-anchor 补偿 / 内容增长）只纠正，不改状态。
-        // 旧的 correctionMinPx(32) 门槛会让 1–32px 的 gap 悬着，下一帧再 pin →
-        // 生成内容整段「往下闪」一下。
-        if (event.source === 'self') {
-          return { state: next, pin: gap > config.attachThresholdPx }
-        }
-        // 外部把视口拉离了底部。能走到这里的是**拿不到手势事件**的那些路径：
-        // 拖原生滚动条（原生滚动条不派发 DOM 指针事件，也没有 wheel）、页内查找跳转、
-        // 上方消息里的 focus 滚动、iframe 内部滚动到头后链给外层。
-        // 继续钉底就会和外部反复互写 scrollTop —— 表现是抽搐、滚动条拖不动。
+        // LiveAgent corrector: while following, ANY scroll that leaves a gap
+        // re-pins. Detach is ONLY via explicit user input (wheel-up / touch /
+        // historyKey / release) — never via scroll source classification.
         //
-        // 不再叠 correctionMinPx：上面的 isAtBottom 已经把底部容差区筛掉了，能到这儿就是
-        // 真的离开了底部。叠上去会留一条 12–32px 的死带 —— 慢速拖原生滚动条每帧只挪几 px，
-        // 单次事件永远累积不到 32，于是一直被下一次 contentGrowth 钉回去、拇指跳回鼠标下。
-        // 万一某个 self 事件被误判成 user，代价只是「跟随被解除」，用户滚回底部即可恢复；
-        // 反方向（该解除却继续钉底）代价是抽搐。宁可错解除。
-        return { state: { ...next, following: false, userDetached: true }, pin: false }
+        // Kivio previously detached on source==='user' so native scrollbar
+        // drags could win. That mis-classifies TanStack end-anchor / focus /
+        // layout echoes as "user" during streaming, sets userDetached, and
+        // permanently kills stick-to-bottom (screenshot: content stuck mid-
+        // viewport with empty reserve below). Prefer LiveAgent: a false
+        // re-pin is one frame; a false detach ruins the whole stream.
+        // Scrollbar users still detach with wheel/trackpad (wheel handler).
+        return { state: next, pin: gap > config.attachThresholdPx }
       }
 
       const movedTowardBottom = gap < previousGap - config.directionSlopPx

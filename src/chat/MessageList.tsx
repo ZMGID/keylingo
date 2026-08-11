@@ -52,6 +52,7 @@ import {
   endMessageNavigationHydrate,
   resetMessageNavigationStore,
 } from './messageNavigationStore'
+import { createLiveRowModel, extractLiveRange } from './liveRowModel'
 
 
 export interface AssistantStreamStats {
@@ -123,7 +124,7 @@ type RenderItem =
   | { kind: 'message'; key: string; message: ChatMessage; sentModels?: GroupModelLabel[] }
   | { kind: 'group'; key: string; groupId: string; messages: ChatMessage[] }
   | { kind: 'live-group'; key: string; groupId: string }
-  | { kind: 'streaming'; key: 'streaming-assistant'; message: ChatMessage; messageStreaming: boolean; reasoningStreaming: boolean }
+  | { kind: 'streaming'; key: string; message: ChatMessage; messageStreaming: boolean; reasoningStreaming: boolean }
   | { kind: 'error'; key: 'error'; text: string; retryMessageId: string | null }
   | { kind: 'tail'; key: 'tail' }
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
@@ -271,10 +272,13 @@ function MessageListBase({
   // 必须在 render 期同步调用，useEffect 会晚一帧，首挂仍走 180ms 延迟。
   const liveRowActive = streaming || streamFrozen
   const prevLiveRowActiveRef = useRef(liveRowActive)
-  if (prevLiveRowActiveRef.current && !liveRowActive) {
+  const liveEndingThisFrame = prevLiveRowActiveRef.current && !liveRowActive
+  if (liveEndingThisFrame) {
     beginStreamSettleEagerHydrate()
   }
   prevLiveRowActiveRef.current = liveRowActive
+  // Last measured outside-live height; filled every streaming layout, consumed on settle seed.
+  const liveBubbleHeightRef = useRef(0)
 
   const error = coarse.streamError
   const streamingContent = snapshot.content
@@ -300,6 +304,37 @@ function MessageListBase({
     if (activeMessageIds.size === 0) return messages
     return messages.filter((message) => !activeMessageIds.has(message.id))
   }, [liveGroup, messages, snapshot.messageId, streamFrozen, streaming])
+
+  // Stable live keys for the in-list experiment + twin estimate identity on settle.
+  // Default external path still aliases so the history twin reuses the live key
+  // for measurement cache continuity (DOM is not reused across the outside→inside handoff).
+  const liveRowModelRef = useRef(createLiveRowModel())
+  const liveRowModelConversationRef = useRef<string | null | undefined>(conversationId)
+  if (liveRowModelConversationRef.current !== conversationId) {
+    liveRowModelRef.current.reset()
+    liveRowModelConversationRef.current = conversationId
+  }
+  const historyAssistantIds = useMemo(
+    () => messages.filter((message) => message.role === 'assistant').map((message) => message.id),
+    [messages],
+  )
+  const historyGroupIds = useMemo(() => {
+    const ids: string[] = []
+    for (const message of messages) {
+      const groupId = message.group_id ?? message.groupId
+      if (groupId && message.role === 'assistant' && !ids.includes(groupId)) ids.push(groupId)
+    }
+    return ids
+  }, [messages])
+  const liveRowModel = liveRowModelRef.current
+  const { liveKey: liveRowKey } = liveRowModel.sync({
+    conversationId,
+    liveActive: liveRowActive,
+    liveGroupId: liveGroup && liveRowActive ? liveGroup.groupId : null,
+    preferredTwinId: snapshot.messageId ?? null,
+    historyAssistantIds,
+    historyGroupIds,
+  })
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   // hook 需要通过 state 拿到元素以便重新绑定监听；virtualizer 需要 RefObject。回调 ref 同时喂两者。
@@ -455,6 +490,10 @@ function MessageListBase({
   } | null>(null)
   const [navigatorHoldEpoch, setNavigatorHoldEpoch] = useState(0)
   const [bottomHoldEpoch, setBottomHoldEpoch] = useState(0)
+  // Bumped when bottomHold ends so send-reserve can transfer minHeight → spacer.
+  // Without this, wrap.minHeight stays at the streaming reserve and the answer
+  // jumps up with a huge empty gap under it (live→history settle regression).
+  const [reserveEpoch, setReserveEpoch] = useState(0)
   const [navigatorLockActive, setNavigatorLockActive] = useState(false)
 
 
@@ -464,8 +503,8 @@ function MessageListBase({
     { anchor: MessageMenuAnchor; selectionText: string; messageText: string | null } | null
   >(null)
 
-  // 底部跟随：ResizeObserver contentGrowth 是流式钉底主路径；growthSignal 仅在
-  // scrollHeight 真变且 RO 未投递时补一枪。不要无条件 stickToBottom 每 token 钉底。
+  // 底部跟随：外置 live（默认）时 document-flow 高度变化 → RO contentGrowth 钉底。
+  // growthSignal 在 scrollHeight 真变且 RO 未投递时补一枪（jsdom）。
   const streamGrowthSignal = streaming || streamFrozen
     ? `${streamingContent.length}:${streamingReasoning.length}:${streamingToolCalls.length}:${streamingSegments.length}`
     : null
@@ -577,39 +616,45 @@ function MessageListBase({
     pendingCompactionAfterIndex,
   ])
 
+  // Live content updates every token, but the **row key** is stable (liveRowKey).
+  // Keeping live out of the historyItems useMemo deps means committed rows do not rebuild
+  // per token — same split LiveAgent uses (history cache + live tail).
   const liveItem = useMemo<RenderItem | null>(() => {
-    const hasLiveGroup = Boolean(liveGroup && (coarse.streaming || coarse.streamFrozen))
-    const hasStreamingPreview =
-      !hasLiveGroup &&
-      (streaming || streamFrozen) &&
-      (streamingContent || streamingReasoning || streamingToolCalls.length > 0 || streamingSegments.length > 0)
+    if (!liveRowKey) return null
+    const hasLiveGroup = Boolean(liveGroup && liveRowActive)
     if (hasLiveGroup && liveGroup) {
-      return { kind: 'live-group', key: `live-group-${liveGroup.groupId}`, groupId: liveGroup.groupId }
+      return { kind: 'live-group', key: liveRowKey, groupId: liveGroup.groupId }
     }
-    if (hasStreamingPreview) {
-      return {
-        kind: 'streaming',
-        key: 'streaming-assistant',
-        messageStreaming: streaming && !streamFrozen,
-        reasoningStreaming: reasoningStreaming && !streamFrozen,
-        message: {
-          id: 'streaming-assistant',
-          role: 'assistant',
-          content: streamingContent,
-          reasoning: streamingReasoning || undefined,
-          artifacts: [],
-          tool_calls: streamingToolCalls,
-          segments: streamingSegments,
-          timestamp: Math.floor(Date.now() / 1000),
-        },
-      }
+    const hasStreamingPreview =
+      streamingContent || streamingReasoning || streamingToolCalls.length > 0 || streamingSegments.length > 0
+    // Keep the live row mounted for the whole run even before the first token so the
+    // key is claimed early and the settle twin can adopt it.
+    if (!hasStreamingPreview && !liveRowActive) return null
+    if (!liveRowActive) return null
+    return {
+      kind: 'streaming',
+      key: liveRowKey,
+      messageStreaming: streaming && !streamFrozen,
+      reasoningStreaming: reasoningStreaming && !streamFrozen,
+      message: {
+        // Prefer real message id when known so context-menu / navigator can target it;
+        // the virtualizer row key is still liveRowKey (not this id).
+        id: snapshot.messageId || 'streaming-assistant',
+        role: 'assistant',
+        content: streamingContent,
+        reasoning: streamingReasoning || undefined,
+        artifacts: [],
+        tool_calls: streamingToolCalls,
+        segments: streamingSegments,
+        timestamp: Math.floor(Date.now() / 1000),
+      },
     }
-    return null
   }, [
-    coarse.streaming,
-    coarse.streamFrozen,
     liveGroup,
+    liveRowActive,
+    liveRowKey,
     reasoningStreaming,
+    snapshot.messageId,
     streamFrozen,
     streaming,
     streamingContent,
@@ -618,10 +663,8 @@ function MessageListBase({
     streamingToolCalls,
   ])
 
-  const fallbackLiveItem = externalizeLiveRow ? null : liveItem
-
-  // 历史项只在消息/压缩边界/组模型身份变化时重建。默认高频流式文本不进入依赖；
-  // 关闭 live row 外置开关时，刻意把 live item 放回 timeline 作为回退路径。
+  // 历史项只在消息/压缩边界/组模型身份变化时重建。高频流式文本不进入依赖；
+  // live 行单独挂在 virtualizer 尾部（或外置 rollback 路径）。
   const historyItems = useMemo<RenderItem[]>(() => {
     const list: RenderItem[] = [
       { kind: 'spacer', key: 'padding-top', size: LIST_EDGE_PADDING_PX },
@@ -658,7 +701,7 @@ function MessageListBase({
       if (item.type === 'group') {
         list.push({
           kind: 'group',
-          key: `group-${item.groupId}`,
+          key: liveRowModel.resolveGroupKey(item.groupId),
           groupId: item.groupId,
           messages: item.messages,
         })
@@ -674,20 +717,25 @@ function MessageListBase({
         const message = item.message
         const groupId = message.role === 'user' ? (message.group_id ?? message.groupId ?? null) : null
         const sentModels = groupId ? sentModelsByGroup.get(groupId) : undefined
-        list.push({ kind: 'message', key: message.id, message, sentModels })
+        list.push({ kind: 'message', key: liveRowModel.resolveMessageKey(message.id), message, sentModels })
         const index = messageIndexById.get(message.id)
         if (index != null) appendCompactionSlot(list, index)
       }
     }
 
-    if (fallbackLiveItem) list.push(fallbackLiveItem)
-
     return list
-  }, [appendCompactionSlot, fallbackLiveItem, folded, liveGroupModels, messageIndexById])
+  // liveRowKey / origins intentionally omitted: settle aliases are applied when
+  // historyMessages/folded change (the twin re-enters history). Token frames must
+  // not rebuild committed rows.
+  }, [appendCompactionSlot, folded, liveGroupModels, liveRowModel, messageIndexById])
 
-  // 默认路径把高频 live row 放到固定 tail；关闭开关时回退到普通 timeline，
-  // 便于诊断外置 store / tail 测量问题而不改变消息数据和 virtualizer。
-  const dynamicItem = externalizeLiveRow ? liveItem : null
+  // Default: live rides the chrome tail outside the virtualizer
+  // (`liveRowExternalization=true`). Token growth only moves scrollHeight →
+  // contentGrowth pin. In-virtualizer live (flag false) is an A/B experiment
+  // that reuses a stable live key via liveRowModel + extractLiveRange.
+  // Without TanStack there is no virtualizer: live always rides the chrome tail.
+  const liveInVirtualizer = Boolean(liveItem) && !externalizeLiveRow && useTanStackVirtualizer
+  const dynamicItem = liveItem && !liveInVirtualizer ? liveItem : null
 
   const errorItem = useMemo<RenderItem | null>(() => {
     if (!error) return null
@@ -708,6 +756,24 @@ function MessageListBase({
 
   // 计算每一行的初始估算高度。真实高度由 TanStack Virtual 的 measureElement
   // 覆盖；估算只负责首次切换/首次滚动时快速建立窗口，不再把整份历史拆成两套 DOM。
+  //
+  // Settle frame: seed the twin's height into the row-measurement cache *before*
+  // estimates are read, so the first virtualizer layout matches the outside
+  // bubble (layoutEffect seed is one paint too late → height collapse flash).
+  // Keep this side effect outside useMemo — memo must stay pure.
+  if (liveEndingThisFrame && liveBubbleHeightRef.current > 0) {
+    const settlingId = snapshot.messageId
+      || [...messages].reverse().find((message) => message.role === 'assistant')?.id
+      || null
+    if (settlingId) {
+      const settling = messages.find((message) => message.id === settlingId)
+      if (settling) {
+        const rid = liveRowModel.resolveMessageKey(settling.id)
+        const h = Math.round(liveBubbleHeightRef.current)
+        setCachedRowMeasurement(layoutKey, `${rid}:${messageLayoutRevision(settling)}`, h)
+      }
+    }
+  }
   const estimatedSizeByKey = useMemo(() => {
     const map = new Map<string, number>()
     for (const item of historyItems) {
@@ -757,25 +823,31 @@ function MessageListBase({
       map.set(item.key, Math.max(base, height + (cost > 800 ? 24 : 0)))
     }
     map.set('tail', getCachedRowMeasurement(layoutKey, tailMeasurementKey) ?? 96)
+    // liveEndingThisFrame in deps: re-read cache after the settle-frame seed above.
     return map
-  }, [contentWidth, historyItems, layoutKey, tailMeasurementKey])
+  }, [contentWidth, historyItems, layoutKey, liveEndingThisFrame, tailMeasurementKey])
 
-  // 真正的 live 外置：流式气泡 + 状态行放在虚拟列表**外面**的文档流里，
-  // 不再作为 virtualizer 的 tail row 被 measureElement。
-  // 否则每个 token 都走 resizeItem + anchorTo:end 补偿，和 contentGrowth pin
-  // 互写 scrollTop → 生成内容整段「往下闪」。LiveAgent 把 live 留在列表里是
-  // 因为它们的 scroll 状态机更简单；Kivio 有 source 分类，不能双通道抢 pin。
-  // 关闭 liveRowExternalization 时回退：tail 仍进 virtualizer（诊断用）。
+  // Default externalization: live is NOT a virtualizer row — chrome tail below
+  // carries live + status/error/send-reserve. In-list experiment (flag false)
+  // puts live as the last virtualizer row with a stable key; chrome stays outside
+  // so token growth never remeasures a combined tail.
   const flowLiveOutsideVirtualizer = useTanStackVirtualizer && externalizeLiveRow
-  const tailItem = useMemo<RenderItem>(() => ({ kind: 'tail', key: 'tail' }), [])
-  const itemCount = flowLiveOutsideVirtualizer
-    ? historyItems.length
-    : historyItems.length + 1
+  const liveItemRef = useRef<RenderItem | null>(liveItem)
+  liveItemRef.current = liveItem
+  const itemCount = useTanStackVirtualizer
+    ? historyItems.length + (liveInVirtualizer ? 1 : 0)
+    : 0
   const historyItemsRef = useRef<RenderItem[]>(historyItems)
   historyItemsRef.current = historyItems
-  const itemAt = useCallback((index: number) => (
-    index < historyItemsRef.current.length ? historyItemsRef.current[index] : tailItem
-  ), [tailItem])
+  const liveStartIndex = liveInVirtualizer ? historyItems.length : -1
+  const liveStartIndexRef = useRef(liveStartIndex)
+  liveStartIndexRef.current = liveStartIndex
+  const itemAt = useCallback((index: number) => {
+    const history = historyItemsRef.current
+    if (index < history.length) return history[index]
+    if (liveItemRef.current && index === history.length) return liveItemRef.current
+    return undefined
+  }, [])
   const estimateSizeRef = useRef(estimatedSizeByKey)
   estimateSizeRef.current = estimatedSizeByKey
   const observeRect: ReactVirtualizerOptions<HTMLDivElement, HTMLDivElement>['observeElementRect'] = useCallback((instance, callback) => {
@@ -793,12 +865,22 @@ function MessageListBase({
     count: useTanStackVirtualizer ? itemCount : 0,
     enabled: useTanStackVirtualizer,
     getScrollElement: () => scrollRef.current,
-    // TanStack's index navigation and measurement corrections must share the
-    // same scroll authority as chat navigation and follow pinning. This keeps
-    // programmatic scroll writes source-classified by useScrollFollow.
+    // Share scroll authority with follow pinning (source-classified writes).
+    // LiveAgent keeps anchorTo:end always on; the follow corrector re-pins any
+    // residual gap to true scrollHeight (which includes outside chrome).
+    // Do NOT replace end-anchor with pin-only here — delta compensation is what
+    // keeps token growth smooth; the corrector fixes chrome geometry.
     scrollToFn: (offset, options) => followHandle.scrollToOffset(offset, options),
     observeElementRect: observeRect,
-    estimateSize: (index) => estimateSizeRef.current.get(itemAt(index)?.key ?? 'tail') ?? 96,
+    estimateSize: (index) => {
+      const item = itemAt(index)
+      if (!item) return 96
+      const cached = estimateSizeRef.current.get(item.key)
+      if (cached !== undefined) return cached
+      // Live tail: prefer last measured height under the stable live key.
+      if (item.kind === 'streaming' || item.kind === 'live-group') return 160
+      return 96
+    },
     // Include the measured content width in TanStack's key space. A stable
     // message key must remain stable within one layout, but a width change is
     // a different geometry universe: old internal itemSizeCache entries must
@@ -812,11 +894,13 @@ function MessageListBase({
         const size = Math.max(1, measured)
         const index = Number(element.dataset.index)
         const virtualKey = Number.isInteger(index) ? instance.options.getItemKey(index) : key
+        const logicalKey = Number.isInteger(index) ? itemAt(index)?.key : undefined
         const previousSize = instance.itemSizeCache.get(virtualKey)
         if (previousSize === undefined || Math.abs(previousSize - size) > 0.5) {
+          // Remeasure compensation. Default external live never hits this for
+          // token growth; in-list experiment can remeasure the live tail.
           followHandle.markLayoutCompensation()
         }
-        const logicalKey = Number.isInteger(index) ? itemAt(index)?.key : undefined
         if (logicalKey) estimateSizeRef.current.set(logicalKey, size)
         setCachedRowMeasurement(layoutKey, key, size)
         return size
@@ -824,24 +908,20 @@ function MessageListBase({
       return measured
     },
     rangeExtractor: useCallback((range: Range) => {
-      const indexes = defaultRangeExtractor(range)
-      // 旧路径：tail 仍在 virtualizer 内时强制挂载；外置后没有 tail index。
-      if (!flowLiveOutsideVirtualizer) {
-        const tailIndex = itemCount - 1
-        if (tailIndex >= 0 && !indexes.includes(tailIndex)) indexes.push(tailIndex)
-      }
+      // LiveAgent extractLiveRange: force-mount the live tail for the whole run
+      // so Streamdown/shiki state is never dropped mid-stream.
+      let indexes = extractLiveRange(defaultRangeExtractor(range), liveStartIndexRef.current, itemCount)
       // 消息导航：目标行附近强制挂载渲染测高，再一次性跳转。
-      // 半径内邻居一起量，减少跳转后 overscan 首次测高引发的 translateY 抖动。
       const forced = forceMountRenderIndex
       if (forced != null && itemCount > 0) {
         const from = Math.max(0, forced - NAVIGATOR_FORCE_MOUNT_RADIUS)
         const to = Math.min(itemCount - 1, forced + NAVIGATOR_FORCE_MOUNT_RADIUS)
-        for (let index = from; index <= to; index += 1) {
-          if (!indexes.includes(index)) indexes.push(index)
-        }
+        const set = new Set(indexes)
+        for (let index = from; index <= to; index += 1) set.add(index)
+        indexes = [...set].sort((a, b) => a - b)
       }
       return indexes
-    }, [flowLiveOutsideVirtualizer, forceMountRenderIndex, itemCount]),
+    }, [forceMountRenderIndex, itemCount]),
 
 
     overscan: 6,
@@ -849,6 +929,9 @@ function MessageListBase({
     // a conservative initial viewport keeps the first render useful while the
     // real browser immediately replaces it with the measured client rect.
     initialRect: { width: 0, height: viewportEl?.clientHeight || 800 },
+    // LiveAgent: always end-anchored. While following, live-row growth
+    // compensates by total-size delta; residual gap is corrected by the
+    // follow reducer (pin to full scrollHeight including chrome reserve).
     anchorTo: 'end',
     scrollEndThreshold: 12,
     followOnAppend: false,
@@ -869,12 +952,9 @@ function MessageListBase({
     if (!shouldAdjust) return false
     if (flowLiveOutsideVirtualizer) return true
     const viewportTop = (instance.scrollOffset ?? 0) + instance.scrollAdjustments
-    const liveRowIndex = historyItems.findIndex(
-      (entry) => entry.kind === 'streaming' || entry.kind === 'live-group',
-    )
-    const liveTail = liveRowIndex >= 0 && (streaming || streamFrozen || Boolean(liveGroup))
+    const liveRowIndex = liveStartIndexRef.current
     if (
-      liveTail
+      liveRowIndex >= 0
       && item.index >= liveRowIndex
       && delta > 0
       && item.end > viewportTop
@@ -962,6 +1042,7 @@ function MessageListBase({
 
   const endNavigatorSession = useCallback((generation: number) => {
     if (generation !== navigatorSettleGenerationRef.current) return
+    const hadBottomHold = bottomHoldRef.current != null
     navigatorHoldRef.current = null
     bottomHoldRef.current = null
     navigatorFrozenScrollTopRef.current = null
@@ -969,6 +1050,13 @@ function MessageListBase({
       setForceMountRenderIndex(null)
     }
     endMessageNavigationHydrate(generation)
+    // Streaming kept reserve on wrap.minHeight through bottomHold. Now that hold
+    // is done, re-run send-reserve so minHeight clears and the spacer takes the
+    // remainder — otherwise total height stays inflated and stick-to-bottom
+    // parks the viewport on empty space (content "jumps up").
+    if (hadBottomHold) {
+      setReserveEpoch((value) => value + 1)
+    }
     // force-mount 拆除后还可能有迟到测高；锁多留几帧再开。
     cancelNavigatorUnlock()
     const unlockGeneration = navigatorUnlockGenerationRef.current
@@ -991,11 +1079,15 @@ function MessageListBase({
     cancelNavigatorSettle()
     cancelNavigatorUnlock()
     setNavigationLock(false)
+    const hadBottomHold = bottomHoldRef.current != null
     navigatorHoldRef.current = null
     bottomHoldRef.current = null
     navigatorFrozenScrollTopRef.current = null
     if (forceMountRenderIndexRef.current != null) {
       setForceMountRenderIndex(null)
+    }
+    if (hadBottomHold) {
+      setReserveEpoch((value) => value + 1)
     }
   }, [cancelNavigatorSettle, cancelNavigatorUnlock, setNavigationLock])
 
@@ -1299,9 +1391,10 @@ function MessageListBase({
     navigatorSettleGenerationRef.current = generation
     setNavigationLock(true)
 
-    // 强制挂载尾部邻域，让代码块在钉底前就按真高度量好。
-    if (historyItems.length > 0) {
-      setForceMountRenderIndex(historyItems.length - 1)
+    // 强制挂载尾部邻域（含 live 行），让代码块在钉底前就按真高度量好。
+    const tailIndex = historyItems.length + (liveInVirtualizer ? 1 : 0) - 1
+    if (tailIndex >= 0) {
+      setForceMountRenderIndex(tailIndex)
     }
 
     followHandle.jumpToBottom()
@@ -1316,6 +1409,7 @@ function MessageListBase({
     cancelNavigatorSettle,
     followHandle,
     historyItems.length,
+    liveInVirtualizer,
     setNavigationLock,
   ])
 
@@ -1329,10 +1423,16 @@ function MessageListBase({
     }
 
     setNavigationLock(true)
-    followHandle.jumpToBottom()
     hold.frames += 1
 
     const viewport = scrollRef.current
+    if (viewport) {
+      const preGap = Math.max(0, viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight)
+      // Only hard-pin when actually off-bottom. Pinning every frame at gap≈0
+      // forces scrollTop writes that read as a settle flash.
+      if (preGap > 12) followHandle.jumpToBottom()
+      else followHandle.pinIfFollowing()
+    }
     if (!viewport) {
       if (hold.frames >= NAVIGATOR_HOLD_MAX_FRAMES) {
         endNavigatorSession(hold.generation)
@@ -1494,7 +1594,9 @@ function MessageListBase({
     const targetEl = (e.target as Element | null)?.closest?.('[data-message-id]') as HTMLElement | null
     const id = targetEl?.dataset.messageId ?? null
     let messageText: string | null = null
-    if (id === 'streaming-assistant') {
+    const isLiveBubble = id === 'streaming-assistant'
+      || Boolean(id && liveRowActive && (id === snapshot.messageId || id === liveRowKey))
+    if (isLiveBubble) {
       messageText = streamingContent.trim() || null
     } else if (id) {
       messageText = messages.find((m) => m.id === id)?.content?.trim() || null
@@ -1504,7 +1606,7 @@ function MessageListBase({
     const left = Math.min(e.clientX, window.innerWidth - 184)
     const top = Math.min(e.clientY, window.innerHeight - 96)
     setMsgMenu({ anchor: { left, top }, selectionText, messageText })
-  }, [messages, streamingContent])
+  }, [liveRowActive, liveRowKey, messages, snapshot.messageId, streamingContent])
 
   const closeMsgMenu = useCallback(() => setMsgMenu(null), [])
 
@@ -1535,19 +1637,83 @@ function MessageListBase({
     prevMessageCountRef.current = count
   }, [messages, followHandle])
 
-  // live → 历史 交接钉底。messages.length 常常不变（assistant 流式中已写入 messages，
-  // 只是 historyMessages 按 messageId 过滤掉了），上面那条 count 路径接不住。
-  // 外置 live 卸载时高度骤降，视口会卡在「提问那一行」；若仍打算跟随就 force pin。
+  // live → 历史 交接。
+  //
+  // Primary path: live is OUTSIDE the virtualizer (document flow). Streaming
+  // pin is contentGrowth-only and stable. On settle the outside bubble unmounts
+  // and the twin remounts inside the virtualizer at estimate height — height
+  // collapses then re-expands. Seed cache from the last live height and run the
+  // same multi-frame bottomHold as "jump to bottom" so pin survives hydrate.
+  useLayoutEffect(() => {
+    if (!liveRowActive || !contentEl) return
+    const liveEl = contentEl.querySelector(
+      '[data-chat-message-list-item="streaming"], [data-chat-message-list-item="live-group"]',
+    ) as HTMLElement | null
+    if (!liveEl) return
+    const height = liveEl.getBoundingClientRect().height
+    if (height > 0) liveBubbleHeightRef.current = height
+  }, [contentEl, liveRowActive, streamGrowthSignal])
+
   const liveScrollHandoffRef = useRef(liveRowActive)
   useLayoutEffect(() => {
     const wasLive = liveScrollHandoffRef.current
     liveScrollHandoffRef.current = liveRowActive
     if (!wasLive || liveRowActive) return
     if (!streamFollowIntentRef.current && !followHandle.isFollowing()) return
-    followHandle.markLayoutCompensation()
-    followHandle.stickToBottom()
-  }, [followHandle, liveRowActive])
 
+    const liveHeight = Math.round(liveBubbleHeightRef.current)
+    liveBubbleHeightRef.current = 0
+    if (liveHeight > 0) {
+      const settlingId = snapshot.messageId
+        || [...messages].reverse().find((message) => message.role === 'assistant')?.id
+        || null
+      if (settlingId) {
+        const settling = messages.find((message) => message.id === settlingId)
+        if (settling) {
+          const rowKey = `${liveRowModel.resolveMessageKey(settling.id)}:${messageLayoutRevision(settling)}`
+          setCachedRowMeasurement(layoutKey, rowKey, liveHeight)
+          estimateSizeRef.current.set(liveRowModel.resolveMessageKey(settling.id), liveHeight)
+        }
+      }
+    }
+
+    cancelNavigatorSettle()
+    navigatorHoldRef.current = null
+    navigatorFrozenScrollTopRef.current = null
+
+    const generation = beginMessageNavigationHydrate()
+    navigatorSettleGenerationRef.current = generation
+    setNavigationLock(true)
+
+    if (historyItems.length > 0) {
+      setForceMountRenderIndex(historyItems.length - 1)
+    }
+
+    followHandle.markLayoutCompensation()
+    // Prefer pin-if-following over forceFollow: avoids a hard jump when height
+    // continuity already holds; bottomHold still re-pins while hydrate settles.
+    followHandle.pinIfFollowing()
+    if (followHandle.isFollowing() || streamFollowIntentRef.current) {
+      followHandle.stickToBottom()
+    }
+    bottomHoldRef.current = {
+      generation,
+      frames: 0,
+      stable: 0,
+      lastScrollHeight: -1,
+    }
+    setBottomHoldEpoch((value) => value + 1)
+  }, [
+    cancelNavigatorSettle,
+    followHandle,
+    historyItems.length,
+    layoutKey,
+    liveRowActive,
+    liveRowModel,
+    messages,
+    setNavigationLock,
+    snapshot.messageId,
+  ])
 
   // 发送后的尾部预留，两个阶段一处算：
   // - **运行中**：撑在尾部 wrapper 的 minHeight 上（是 min，回答长过它就自然吃掉，不用逐帧算）。
@@ -1575,20 +1741,29 @@ function MessageListBase({
         : null
       const anchorH = row?.getBoundingClientRect().height ?? 0
       const reserve = sendReserveHeight(viewportEl.clientHeight, anchorH, LIST_EDGE_PADDING_PX)
-      if (streaming) {
+      // Keep the streaming minHeight through settle bottomHold so live unmount
+      // does not collapse the tail for a frame (visible flash).
+      if (streaming || streamFrozen || bottomHoldRef.current) {
         wrap.style.minHeight = `${Math.round(reserve)}px`
         // 留白交还给 minHeight：不还的话上一轮量出来的高度会和 minHeight 叠成两段预留。
         spacer.style.height = `${LIST_EDGE_PADDING_PX}px`
         return
       }
+      const hadStreamingMinHeight = Boolean(wrap.style.minHeight)
       wrap.style.minHeight = ''
       if (!reserveHandoffRef.current || !row) {
         spacer.style.height = `${LIST_EDGE_PADDING_PX}px`
-        return
+      } else {
+        // 跨度用 spacer 自己的顶边量，与 spacer 当前高度无关，避免自反馈。
+        const span = spacer.getBoundingClientRect().top - row.getBoundingClientRect().bottom
+        spacer.style.height = `${Math.max(LIST_EDGE_PADDING_PX, Math.round(reserve - span))}px`
       }
-      // 跨度用 spacer 自己的顶边量，与 spacer 当前高度无关，避免自反馈。
-      const span = spacer.getBoundingClientRect().top - row.getBoundingClientRect().bottom
-      spacer.style.height = `${Math.max(LIST_EDGE_PADDING_PX, Math.round(reserve - span))}px`
+      // minHeight → spacer transfer changes scrollHeight. Re-pin so we don't
+      // freeze on the old (too large) bottom and leave a blank band under the answer.
+      if (hadStreamingMinHeight && (streamFollowIntentRef.current || followHandle.isFollowing())) {
+        followHandle.markLayoutCompensation()
+        followHandle.stickToBottom()
+      }
     }
 
     apply()
@@ -1597,7 +1772,7 @@ function MessageListBase({
     const observer = new ResizeObserver(apply)
     observer.observe(viewportEl)
     return () => observer.disconnect()
-  }, [streaming, messages, contentEl, viewportEl])
+  }, [streaming, streamFrozen, messages, contentEl, viewportEl, reserveEpoch, followHandle])
 
   const renderItem = useCallback(
     (item: RenderItem) => {
@@ -1729,7 +1904,11 @@ function MessageListBase({
   const renderTail = useCallback(() => (
     <div ref={tailWrapRef}>
       {dynamicItem && (
-        <div className="pb-0.5" data-chat-message-list-item={dynamicItem.kind} data-message-id="streaming-assistant">
+        <div
+          className="pb-0.5"
+          data-chat-message-list-item={dynamicItem.kind}
+          data-message-id={dynamicItem.kind === 'streaming' ? dynamicItem.message.id : undefined}
+        >
           {renderItem(dynamicItem)}
         </div>
       )}
@@ -1770,30 +1949,29 @@ function MessageListBase({
             style={useTanStackVirtualizer ? { height: virtualizer.getTotalSize() } : undefined}
           >
             {useTanStackVirtualizer ? virtualItems.map((virtualItem) => {
-              const item = flowLiveOutsideVirtualizer
-                ? historyItems[virtualItem.index]
-                : virtualItem.index < historyItems.length
-                  ? historyItems[virtualItem.index]
-                  : tailItem
+              const item = itemAt(virtualItem.index)
               if (!item) return null
-              const logicalIndex = item.kind === 'tail'
-                ? undefined
-                : virtualItem.index < historyItems.length
-                  ? virtualItem.index
+              const logicalIndex = virtualItem.index < historyItems.length
+                ? virtualItem.index
+                : undefined
+              const messageId = item.kind === 'message'
+                ? item.message.id
+                : item.kind === 'streaming'
+                  ? item.message.id
                   : undefined
               return (
                 <div
                   key={virtualItem.key}
                   ref={import.meta.env.MODE === 'test' ? undefined : virtualizer.measureElement}
                   data-index={virtualItem.index}
-                  data-chat-item-key={item.kind === 'tail' ? tailMeasurementKey : measurementKey(item)}
+                  data-chat-item-key={measurementKey(item)}
                   data-chat-row-index={logicalIndex}
-                  data-message-id={item.kind === 'message' ? item.message.id : undefined}
+                  data-message-id={messageId}
                   data-chat-message-list-item={item.kind}
                   className="absolute left-0 top-0 w-full pb-0.5"
                   style={{ transform: `translateY(${virtualItem.start}px)` }}
                 >
-                  {item.kind === 'tail' ? renderTail() : renderItem(item)}
+                  {renderItem(item)}
                 </div>
               )
             }) : (
@@ -1816,9 +1994,9 @@ function MessageListBase({
               </>
             )}
           </div>
-          {/* 流式外置：文档流挂在 virtualizer 下方。高度只推 scrollHeight，
-              由 contentGrowth 钉底；不再进 TanStack measure/resizeItem。 */}
-          {flowLiveOutsideVirtualizer && (
+          {/* Chrome always outside. Default externalization also mounts live here;
+              in-list experiment keeps live in the virtualizer and only chrome here. */}
+          {useTanStackVirtualizer && (
             <div data-chat-message-list-item="tail" className="w-full pb-0.5">
               {renderTail()}
             </div>

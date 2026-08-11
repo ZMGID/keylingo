@@ -80,3 +80,35 @@ describe('streamingStore content slice', () => {
     expect(getSnapshot().streaming).toBe(false)
   })
 })
+
+/**
+ * Coarse gate: one full turn through the stream store.
+ * Start → deltas → finish → reset must leave idle UI state for the next send.
+ */
+describe('streamingStore turn lifecycle (smoke)', () => {
+  it('start → stream text → finish leaves idle content and non-streaming coarse state', () => {
+    reset()
+    setCoarse({ streaming: true, streamError: null })
+    setSnapshot({
+      ...createEmptyStreamSnapshot(),
+      runId: 'run-1',
+      messageId: 'msg-1',
+      streaming: true,
+    })
+    patchSnapshot({ content: '你好' })
+    patchSnapshot({ content: '你好，世界' })
+    expect(getSnapshot().content).toBe('你好，世界')
+    expect(getCoarse().streaming).toBe(true)
+
+    setCoarse({ streaming: false })
+    patchSnapshot({ streaming: false })
+    expect(getCoarse().streaming).toBe(false)
+    expect(getSnapshot().streaming).toBe(false)
+    expect(getSnapshot().content).toBe('你好，世界')
+
+    reset()
+    expect(getSnapshot().content).toBe('')
+    expect(getCoarse().streaming).toBe(false)
+  })
+})
+

@@ -80,18 +80,18 @@ describe('useScrollFollow scroll source timing', () => {
     return viewport
   }
 
-  it('classifies an ordinary scroll immediately when no layout growth occurred', () => {
+  it('classifies an ordinary wheel-up as user detach', () => {
     const viewport = mount()
 
-    fireEvent.scroll(viewport)
+    // LiveAgent: bare scroll while following re-pins; detach needs wheel/touch/keys.
+    fireEvent.wheel(viewport, { deltaY: -40 })
     expect(screen.getByTestId('following')).toHaveTextContent('false')
-
   })
 
-  it('still releases follow for a scroll with no resize evidence', () => {
+  it('still releases follow for a wheel-up with no resize evidence', () => {
     const viewport = mount()
 
-    fireEvent.scroll(viewport)
+    fireEvent.wheel(viewport, { deltaY: -40 })
     act(() => vi.advanceTimersByTime(1))
 
     expect(screen.getByTestId('following')).toHaveTextContent('false')
@@ -100,6 +100,7 @@ describe('useScrollFollow scroll source timing', () => {
   it('does not show the jump button until the reader is meaningfully away from bottom', () => {
     const viewport = mount()
 
+    fireEvent.wheel(viewport, { deltaY: -40 })
     viewport.scrollTop = 480
     fireEvent.scroll(viewport)
     act(() => vi.advanceTimersByTime(1))
@@ -180,7 +181,7 @@ describe('useScrollFollow scroll source timing', () => {
     expect(screen.getByTestId('following')).toHaveTextContent('true')
   })
 
-  it('still releases when the user scrolls up during the same content growth', () => {
+  it('still releases when the user wheels up during the same content growth', () => {
     const viewport = mount()
     let scrollHeight = 1000
     Object.defineProperty(viewport, 'scrollHeight', {
@@ -188,8 +189,8 @@ describe('useScrollFollow scroll source timing', () => {
       get: () => scrollHeight,
     })
 
-    viewport.scrollTop = 500
-    fireEvent.scroll(viewport)
+    // LiveAgent: detach is explicit wheel-up, not a bare scroll event.
+    fireEvent.wheel(viewport, { deltaY: -40 })
     act(() => vi.advanceTimersByTime(1))
 
     scrollHeight = 1200
@@ -204,6 +205,7 @@ describe('useScrollFollow scroll source timing', () => {
     const viewport = mount()
     act(() => vi.runOnlyPendingTimers())
 
+    fireEvent.wheel(viewport, { deltaY: -40 })
     viewport.scrollTop = 100
     fireEvent.scroll(viewport)
     expect(screen.getByTestId('following')).toHaveTextContent('false')
@@ -241,6 +243,7 @@ describe('useScrollFollow scroll source timing', () => {
   it('reattaches when the user drags to bottom during a layout compensation ticket', () => {
     const viewport = mount()
 
+    fireEvent.wheel(viewport, { deltaY: -40 })
     viewport.scrollTop = 100
     fireEvent.scroll(viewport)
     expect(screen.getByTestId('following')).toHaveTextContent('false')

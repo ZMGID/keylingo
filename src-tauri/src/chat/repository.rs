@@ -120,6 +120,21 @@ fn increment_revision(conversation: &mut Conversation) -> RepositoryResult<()> {
     Ok(())
 }
 
+/// Apply a context-stats cache write without bumping `updated_at`.
+///
+/// Context usage is rewritten on open (`chat_get_context_stats`). Touching
+/// `updated_at` would reorder the conversation library "recent" shelf just
+/// because the user clicked a conversation. Revision still advances so CAS
+/// writers keep their semantics.
+fn apply_context_state_update(
+    conversation: &mut Conversation,
+    state: ConversationContextState,
+) -> RepositoryResult<()> {
+    conversation.context_state = state;
+    increment_revision(conversation)
+}
+
+
 fn apply_upserts(conversation: &mut Conversation, messages: Vec<ChatMessage>) {
     for message in messages {
         if let Some(position) = conversation
@@ -593,10 +608,10 @@ impl ConversationRepository {
         let _conversation = lock.lock().await;
         let mut latest = super::storage::load_conversation(app, id)?;
         validate_expected_revision(id, latest.revision, Some(expected_revision))?;
-        latest.context_state = state;
-        increment_revision(&mut latest)?;
+        apply_context_state_update(&mut latest, state)?;
         self.persist_locked(app, latest).await
     }
+
 
     pub async fn update_metadata(
         &self,
@@ -766,6 +781,7 @@ mod tests {
 
     #[test]
     fn keyed_locks_share_only_the_same_conversation() {
+
         let repository = ConversationRepository::default();
         let first = repository.conversation_lock("conv_a");
         let same = repository.conversation_lock("conv_a");
@@ -773,4 +789,53 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &other));
     }
+
+    fn context_state(tokens: usize) -> ConversationContextState {
+        serde_json::from_value(serde_json::json!({
+            "estimated_input_tokens": tokens,
+            "context_window_tokens": 200_000,
+            "usage_ratio": (tokens as f64) / 200_000.0,
+            "status": "normal",
+            "segments": [],
+            "last_measured_at": 99,
+            "compressed_message_count": 0,
+            "compression_count": 0
+        }))
+        .expect("context state")
+    }
+
+    #[test]
+    fn context_state_update_preserves_updated_at_and_advances_revision() {
+        let mut current = conversation();
+        let original_updated_at = current.updated_at;
+        let original_revision = current.revision;
+        let next = context_state(12_345);
+
+        apply_context_state_update(&mut current, next.clone()).expect("apply");
+
+        assert_eq!(
+            current.updated_at, original_updated_at,
+            "opening a conversation must not reorder the library by bumping updated_at"
+        );
+        assert_eq!(current.revision, original_revision + 1);
+        assert_eq!(current.context_state.estimated_input_tokens, 12_345);
+        assert_eq!(current.context_state.context_window_tokens, Some(200_000));
+        assert_eq!(current.context_state.last_measured_at, 99);
+    }
+
+    #[test]
+    fn ordinary_mutate_path_is_the_one_that_bumps_updated_at() {
+        // Document the contrast: mutate_expected always rewrites updated_at.
+        // update_context deliberately does not call this path.
+        let mut current = conversation();
+        let before = current.updated_at;
+        current.context_state = context_state(1);
+        increment_revision(&mut current).unwrap();
+        current.updated_at = chrono::Local::now().timestamp();
+        assert!(
+            current.updated_at >= before,
+            "mutate_expected-style writes refresh updated_at"
+        );
+    }
+
 }

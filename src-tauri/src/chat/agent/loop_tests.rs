@@ -3552,3 +3552,80 @@ async fn a_successful_run_never_cancels_hooks() {
         "a clean run must not cancel hooks"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Coarse smoke gates — the happy paths a regression would break first.
+// Keep these few and fat; edge-case coverage lives in the tests above.
+// ---------------------------------------------------------------------------
+
+/// Smoke: plain chat with no tools returns a completed answer.
+#[tokio::test]
+async fn run_loop_smoke_plain_answer_completes() {
+    let server = MockModelServer::start(vec![MockResponse::Sse(vec![
+        r#"{"choices":[{"delta":{"content":"你好，我是 Kivio。"}}]}"#.to_string(),
+        "[DONE]".to_string(),
+    ])]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.tools = Vec::new();
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("plain answer must not error");
+
+    assert_eq!(result.stream_outcome, "completed");
+    assert_eq!(result.content, "你好，我是 Kivio。");
+    assert!(result.tool_records.is_empty());
+    assert!(executor.events().is_empty(), "no tools configured");
+}
+
+/// Smoke: tool call → executor runs → tool result is fed back → final answer.
+#[tokio::test]
+async fn run_loop_smoke_tool_then_final_answer_round_trips() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"文件内容已读完。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(2);
+    let host = TestHost::default();
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("tool round-trip must complete");
+
+    assert_eq!(result.stream_outcome, "completed");
+    assert_eq!(result.content, "文件内容已读完。");
+    assert!(
+        result.tool_records.iter().any(|r| r.id == "call_read"),
+        "tool record must land on the run result: {:?}",
+        result.tool_records
+    );
+    assert_eq!(
+        executor.events(),
+        vec!["start:read".to_string(), "finish:read".to_string()],
+        "the native tool must actually execute"
+    );
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 2, "planning + synthesis");
+    // Second request must carry the tool result so the model can answer from it.
+    assert!(
+        bodies[1].contains("result:read") || bodies[1].contains("tool"),
+        "synthesis request must include the tool result; body={}",
+        bodies[1]
+    );
+    assert!(
+        bodies[1].contains("call_read") || bodies[1].contains("\"role\":\"tool\""),
+        "synthesis request must include the tool call id / tool role; body={}",
+        bodies[1]
+    );
+}
+

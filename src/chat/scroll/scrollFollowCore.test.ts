@@ -52,24 +52,27 @@ describe('scrollFollowCore', () => {
     expect(pin).toBe(false)
   })
 
-  // 这条是本模块最容易回归的行为：拖原生滚动条 / 页内查找 / iframe 滚动链都拿不到 wheel，
-  // 只会送来一个 user 来源的 scroll。若继续钉底就会和外部反复互写 scrollTop（抽搐、拖不动）。
-  it('外部把视口拉离底部（user 来源）解除跟随而不是钉回去', () => {
+  // LiveAgent: following + gap → always re-pin, never detach on scroll alone.
+  // Detach is wheel/touch/historyKey only (see those cases). Mis-classified
+  // layout scrolls must not kill stick-to-bottom mid-stream.
+  it('跟随中 user 来源的 gap 也纠正钉底，不解除跟随（对齐 LiveAgent）', () => {
     const { state, pin } = run([scroll(120, 100, 'user')])
-    expect(state.following).toBe(false)
-    expect(pin).toBe(false)
+    expect(state.following).toBe(true)
+    expect(pin).toBe(true)
   })
 
-  it('user 来源但 gap 在纠正阈值内 → 也解除（避免慢速拖滚动条的死带）', () => {
-    // isAtBottom(12) 已经把底部容差筛掉了，走到这里就是真离开了底部。
-    // 若在这里再叠 32px 门槛，慢速拖原生滚动条每帧只挪几 px，会一直被 contentGrowth 钉回去。
+  it('跟随中小阈值外的 user gap 仍 pin（不再靠 source 解除）', () => {
     const { state, pin } = run([scroll(20, 100, 'user')])
-    expect(state.following).toBe(false)
-    expect(pin).toBe(false)
+    expect(state.following).toBe(true)
+    expect(pin).toBe(true)
   })
 
   it('解除后滚回底部（user 来源）自动重新跟随', () => {
-    const detached = run([scroll(300, 0, 'user')]).state
+    // Detach via wheel-up (explicit), not via scroll source.
+    const detached = run([
+      { type: 'wheel', deltaX: 0, deltaY: -40, gap: 0, hasOverflow: true, nestedCanConsume: false, now: 0 },
+      scroll(300, 10, 'user'),
+    ]).state
     expect(detached.following).toBe(false)
     const { state } = run([scroll(2, 50, 'user')], detached)
     expect(state.following).toBe(true)

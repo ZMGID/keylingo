@@ -310,13 +310,15 @@ pub(crate) async fn push_assistant_message(
                 Some(
                     resolve_conversation_title(
                         settings,
-                        state,
+                        state.inner(),
                         conversation,
                         user_content,
                         &stored_content,
                     )
                     .await,
                 )
+
+
             }
         } else {
             None

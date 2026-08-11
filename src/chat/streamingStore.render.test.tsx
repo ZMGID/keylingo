@@ -148,8 +148,9 @@ describe('MessageList ← streamingStore 集成', () => {
     })
     await flush()
 
-    expect(document.querySelectorAll('[data-message-id="msg-recovered"]')).toHaveLength(0)
-    expect(document.querySelectorAll('[data-message-id="streaming-assistant"]')).toHaveLength(1)
+    // Live row reuses the real message id when known (stable virtualizer key is separate).
+    // History twin is filtered out so only one bubble is mounted.
+    expect(document.querySelectorAll('[data-message-id="msg-recovered"]')).toHaveLength(1)
     expect(screen.getByText('恢复中的回答')).toBeInTheDocument()
 
     act(() => {
@@ -158,7 +159,6 @@ describe('MessageList ← streamingStore 集成', () => {
     })
     await flush()
     expect(document.querySelectorAll('[data-message-id="msg-recovered"]')).toHaveLength(1)
-    expect(document.querySelectorAll('[data-message-id="streaming-assistant"]')).toHaveLength(0)
   })
 
   it('流式逐帧更新只重渲 MessageList，不波及未订阅的兄弟节点', async () => {
@@ -323,6 +323,130 @@ describe('MessageList ← streamingStore 集成', () => {
 
     expect(writes).toBeGreaterThan(0)
     expect(scrollTop).toBe(2400)
+  })
+
+  it('live→历史交接后继续钉底，不卡在用户提问', async () => {
+    const user = {
+      id: 'handoff-user',
+      role: 'user' as const,
+      content: 'question',
+      timestamp: 1,
+    }
+    const assistant = {
+      id: 'handoff-answer',
+      role: 'assistant' as const,
+      content: 'long answer body',
+      timestamp: 2,
+    }
+    const { container } = render(
+      <MessageList messages={[user, assistant]} conversationId="handoff-pin-c1" />,
+    )
+    await flush()
+
+    // 流式中 history 过滤同 id 的 assistant；live 外置在 virtualizer 下方。
+    act(() => {
+      setSnapshot(snapWith({
+        content: 'long answer body',
+        streaming: true,
+        messageId: 'handoff-answer',
+      }))
+      setCoarse({ streaming: true, streamFrozen: false })
+    })
+    await flush()
+
+    const scroller = container.querySelector('.chat-motion-view-in.custom-scrollbar') as HTMLDivElement
+    let scrollHeight = 3000
+    let scrollTop = 0
+    let writes = 0
+    Object.defineProperties(scroller, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, get: () => 500 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          // 模拟浏览器 clamp：高度骤降时 scrollTop 被压到新 max。
+          scrollTop = Math.max(0, Math.min(value, Math.max(0, scrollHeight - 500)))
+          writes += 1
+        },
+      },
+    })
+
+    // 流式跟底。
+    act(() => {
+      setSnapshot(snapWith({
+        content: 'long answer body more tokens',
+        streaming: true,
+        messageId: 'handoff-answer',
+      }))
+    })
+    await flush()
+    expect(writes).toBeGreaterThan(0)
+    expect(scrollTop).toBe(2500)
+
+    // LiveAgent path: settle reuses the live row key, so scrollHeight does not
+    // collapse. Keep geometry continuous and assert we stay pinned at the bottom.
+    const writesBeforeHandoff = writes
+    act(() => {
+      setSnapshot(snapWith({
+        content: 'long answer body more tokens',
+        streaming: false,
+        messageId: 'handoff-answer',
+      }))
+      setCoarse({ streaming: false, streamFrozen: false })
+    })
+    await flush()
+
+    expect(writes).toBeGreaterThanOrEqual(writesBeforeHandoff)
+    expect(scrollTop).toBe(2500)
+  })
+
+  it('流式外置 live：只挂一个气泡，结束后落成历史消息', async () => {
+    const user = {
+      id: 'stable-key-user',
+      role: 'user' as const,
+      content: 'question',
+      timestamp: 1,
+    }
+    const assistant = {
+      id: 'stable-key-answer',
+      role: 'assistant' as const,
+      content: 'final answer body',
+      timestamp: 2,
+    }
+    const { container } = render(
+      <MessageList messages={[user, assistant]} conversationId="stable-key-c1" />,
+    )
+    await flush()
+
+    act(() => {
+      setSnapshot(snapWith({
+        content: 'partial answer',
+        streaming: true,
+        messageId: 'stable-key-answer',
+      }))
+      setCoarse({ streaming: true, streamFrozen: false })
+    })
+    await flush()
+
+    // External live: one bubble (history twin filtered), outside virtualizer.
+    expect(container.querySelectorAll('[data-chat-message-list-item="streaming"]')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-message-id="stable-key-answer"]')).toHaveLength(1)
+    expect(screen.getByText('partial answer')).toBeInTheDocument()
+
+    act(() => {
+      setSnapshot(snapWith({
+        content: 'final answer body',
+        streaming: false,
+        messageId: 'stable-key-answer',
+      }))
+      setCoarse({ streaming: false, streamFrozen: false })
+    })
+    await flush()
+
+    expect(container.querySelector('[data-chat-message-list-item="streaming"]')).toBeNull()
+    expect(container.querySelectorAll('[data-message-id="stable-key-answer"]')).toHaveLength(1)
+    expect(screen.getByText('final answer body')).toBeInTheDocument()
   })
 
   it('流式快照更新在 ResizeObserver 未报告时仍补钉到底部', async () => {

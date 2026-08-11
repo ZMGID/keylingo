@@ -14,7 +14,13 @@ export const CHAT_PERFORMANCE_FLAG_KEYS = {
 
 const DEFAULT_FLAGS: ChatPerformanceFlags = {
   tanstackVirtualizer: true,
+  // Primary streaming path: live row OUTSIDE the virtualizer (document flow).
+  // Token growth only moves scrollHeight → contentGrowth pin. Putting live in
+  // the virtualizer (LiveAgent) fights Kivio's outside chrome reserve + source
+  // classification and was the root of "not pinned / 往下抽".
+  // Set false only to A/B the in-list experiment.
   liveRowExternalization: true,
+
   lightweightStreamingMarkdown: true,
   settledMarkdownCache: true,
 }

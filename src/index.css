@@ -2582,7 +2582,8 @@ button.chat-composer-status-item:hover {
 .chat-window-shell .settings-embedded {
   --bg: var(--theme-surface);
   --bg-sidebar: var(--theme-surface-muted);
-  --bg-savebar: var(--theme-surface-soft);
+  /* 与 --bg 同色：避免 header（--bg）与滚动区/存档条（--bg-savebar）亮色下出现色差 */
+  --bg-savebar: var(--theme-surface);
   --bg-input: var(--theme-surface);
   --bg-input-subtle: var(--theme-surface-muted);
   --bg-hover: var(--theme-surface-hover);

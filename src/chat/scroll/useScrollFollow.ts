@@ -56,6 +56,8 @@ export type ScrollFollowHandle = {
   scrollToOffset: (offset: number, options?: { adjustments?: number; behavior?: ScrollBehavior }) => void
   isFollowing: () => boolean
   markLayoutCompensation: () => void
+  // 仅在仍跟随时钉底（不 force re-attach）。live 行测高 / 代码块 hydrate 用。
+  pinIfFollowing: () => void
 }
 
 // 跟随解除和按钮显示故意分开：底部附近的微小上滚不应立刻弹出按钮。
@@ -178,6 +180,11 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
   const stickToBottom = useCallback(() => {
     dispatch({ type: 'forceFollow' })
   }, [dispatch])
+
+  const pinIfFollowing = useCallback(() => {
+    if (!stateRef.current.following) return
+    pinToBottom()
+  }, [pinToBottom])
 
   const releaseFollow = useCallback(() => {
     dispatch({ type: 'release' })
@@ -417,8 +424,9 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
       scrollToOffset,
       isFollowing: () => stateRef.current.following,
       markLayoutCompensation,
+      pinIfFollowing,
     }),
-    [jumpToBottom, markLayoutCompensation, releaseFollow, scrollToOffset, stickToBottom],
+    [jumpToBottom, markLayoutCompensation, pinIfFollowing, releaseFollow, scrollToOffset, stickToBottom],
   )
 
   return { handle, following, showJumpButton }

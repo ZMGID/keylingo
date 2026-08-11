@@ -100,3 +100,30 @@ describe('mergeToolRecord', () => {
       .toEqual({ askUser: { phase: 'answered' } })
   })
 })
+
+/**
+ * Coarse gate: a conversation is "busy" while either in-flight or still streaming.
+ * UI uses this to disable send / show the stop button — if this drifts, double-send
+ * and stuck "generating" indicators come back.
+ */
+describe('busy conversation gate (smoke)', () => {
+  it('treats in-flight OR streaming OR pending tool confirm as generating', () => {
+    const streaming = {
+      'c-stream': { ...createEmptyStreamSnapshot(), streaming: true },
+      'c-idle': { ...createEmptyStreamSnapshot(), streaming: false },
+    }
+    const pending = { 'c-confirm': [{ id: 't1' }], 'c-empty': [] }
+
+    expect(isConversationBusy('c-flight', new Set(['c-flight']), streaming)).toBe(true)
+    expect(isConversationBusy('c-stream', new Set(), streaming)).toBe(true)
+    expect(isConversationBusy('c-idle', new Set(), streaming)).toBe(false)
+
+    const generating = collectGeneratingConversationIds(
+      new Set(['c-flight']),
+      streaming,
+      pending,
+    )
+    expect(Array.from(generating).sort()).toEqual(['c-confirm', 'c-flight', 'c-stream'])
+  })
+})
+

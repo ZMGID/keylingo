@@ -829,25 +829,9 @@ pub fn query_conversations(
 
     let sort = query.sort.trim().to_ascii_lowercase();
     let asc = query.order.trim().eq_ignore_ascii_case("asc");
-    items.sort_by(|a, b| {
-        // 收藏始终压在分组顶部（与侧栏一致），同组内再按选定键排
-        let pin_ord = b.pinned.cmp(&a.pinned);
-        if pin_ord != std::cmp::Ordering::Equal {
-            return pin_ord;
-        }
-        let primary = match sort.as_str() {
-            "created" => a.created_at.cmp(&b.created_at),
-            "title" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-            "messages" => a.message_count.cmp(&b.message_count),
-            // updated（默认）
-            _ => a.updated_at.cmp(&b.updated_at),
-        };
-        if asc {
-            primary
-        } else {
-            primary.reverse()
-        }
-    });
+    items.sort_by(|a, b| compare_library_items(a, b, &sort, asc));
+
+
 
     let total = items.len();
     if offset >= total {
@@ -886,6 +870,32 @@ pub fn query_conversations(
     })
 }
 
+/// 对话库排序键：收藏置顶，同组内按 sort/order。纯函数，便于单测锁契约。
+fn compare_library_items(
+    a: &ConversationListItem,
+    b: &ConversationListItem,
+    sort: &str,
+    asc: bool,
+) -> std::cmp::Ordering {
+    // 收藏始终压在分组顶部（与侧栏一致），同组内再按选定键排
+    let pin_ord = b.pinned.cmp(&a.pinned);
+    if pin_ord != std::cmp::Ordering::Equal {
+        return pin_ord;
+    }
+    let primary = match sort {
+        "created" => a.created_at.cmp(&b.created_at),
+        "title" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+        "messages" => a.message_count.cmp(&b.message_count),
+        // updated（默认）
+        _ => a.updated_at.cmp(&b.updated_at),
+    };
+    if asc {
+        primary
+    } else {
+        primary.reverse()
+    }
+}
+
 /// 全量索引搜索：在所有对话（不止侧栏默认加载的前 N 个）的标题/预览/文件夹里做大小写
 /// 不敏感子串匹配，按更新时间倒序返回前 limit 个。让侧栏搜索能找到已掉出"最近"列表的老对话。
 /// 元数据命中只读 index.json（轻量）；没命中的才逐个读对话正文做全文匹配——所以这个函数的
@@ -898,6 +908,7 @@ pub fn search_conversations(
     query: &str,
     limit: usize,
 ) -> Result<Vec<ConversationSearchHit>, String> {
+
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Ok(vec![]);
@@ -2057,11 +2068,192 @@ mod conversation_workspace_tests {
 
     #[test]
     fn explicit_project_id_is_treated_as_project_binding() {
+
         assert!(has_non_empty_value(Some("proj_missing")));
         assert!(!has_non_empty_value(Some("  ")));
         assert!(!has_non_empty_value(None));
     }
+
+    #[test]
+    fn make_search_snippet_centers_on_match_and_stays_char_safe() {
+        // 长正文 + CJK：窗口落在字符边界，前后省略号齐全，命中词仍在片段里。
+        let prefix: String = "前".repeat(80);
+        let suffix: String = "后".repeat(80);
+        let text = format!("{prefix}关键命中词在这里{suffix}");
+        let snippet = make_search_snippet(&text, "命中词");
+        assert!(snippet.starts_with('…'), "snippet={snippet}");
+        assert!(snippet.ends_with('…'), "snippet={snippet}");
+        assert!(snippet.contains("命中词"), "snippet={snippet}");
+        // 不能 panic / 产出半个码点（floor/ceil_char_boundary 兜住）
+        assert!(snippet.is_char_boundary(0));
+        assert!(snippet.is_char_boundary(snippet.len()));
+    }
+
+    #[test]
+    fn make_search_snippet_collapses_whitespace_and_truncates_misses() {
+        let messy = "line1\n\n  line2\t\tline3";
+        let hit = make_search_snippet(messy, "line2");
+        assert!(!hit.contains('\n'), "snippet={hit}");
+        assert!(!hit.contains('\t'), "snippet={hit}");
+        assert!(hit.contains("line2"), "snippet={hit}");
+
+        let long_miss = "甲".repeat(200);
+        let miss = make_search_snippet(&long_miss, "不存在");
+        // 没命中时走 truncate_chars(140)——正文截到 140 字再拼 "..."
+        assert!(miss.chars().count() <= 143, "miss len={}", miss.chars().count());
+        assert!(miss.ends_with("..."), "miss={miss}");
+
+    }
+
+    #[test]
+    fn first_message_match_returns_field_message_id_and_snippet() {
+        let conv: Conversation = serde_json::from_value(serde_json::json!({
+            "id": "conv_s", "title": "t", "provider_id": "p", "model": "m",
+            "created_at": 1, "updated_at": 1,
+            "messages": [
+                {"id": "m1", "role": "user", "content": "普通开场", "timestamp": 1},
+                {
+                    "id": "m2",
+                    "role": "assistant",
+                    "content": "前面一长段铺垫文字用来撑开窗口，然后出现关键词 Pyodide 沙箱，后面继续补上下文。",
+                    "reasoning": "需要检查 WASM 加载",
+                    "timestamp": 2
+                }
+            ]
+        }))
+        .expect("conversation");
+
+        let (field, message_id, snippet) =
+            first_message_match(&conv, "pyodide").expect("content hit");
+        assert_eq!(field, "content");
+        assert_eq!(message_id, "m2");
+        assert!(snippet.to_lowercase().contains("pyodide"), "snippet={snippet}");
+
+        let (field, message_id, snippet) =
+            first_message_match(&conv, "wasm 加载").expect("reasoning hit");
+        assert_eq!(field, "reasoning");
+        assert_eq!(message_id, "m2");
+        assert!(
+            snippet.contains("WASM") || snippet.to_lowercase().contains("wasm"),
+            "snippet={snippet}"
+        );
+
+        // 同消息 content 与 reasoning 都命中时，content 优先（决定跳转字段）
+        let both: Conversation = serde_json::from_value(serde_json::json!({
+            "id": "conv_s", "title": "t", "provider_id": "p", "model": "m",
+            "created_at": 1, "updated_at": 1,
+            "messages": [{
+                "id": "m9",
+                "role": "assistant",
+                "content": "正文也写了 sandbox",
+                "reasoning": "reasoning 里也有 sandbox",
+                "timestamp": 1
+            }]
+        }))
+        .expect("conversation");
+        let (field, message_id, _) =
+            first_message_match(&both, "sandbox").expect("both hit");
+        assert_eq!(field, "content");
+        assert_eq!(message_id, "m9");
+    }
+
+    #[test]
+    fn first_message_match_prefers_earlier_message() {
+        let conv: Conversation = serde_json::from_value(serde_json::json!({
+            "id": "conv_s", "title": "t", "provider_id": "p", "model": "m",
+            "created_at": 1, "updated_at": 1,
+            "messages": [
+                {"id": "m1", "role": "user", "content": "第一次提到 CDN77", "timestamp": 1},
+                {"id": "m2", "role": "assistant", "content": "又一次 CDN77", "timestamp": 2}
+            ]
+        }))
+        .expect("conversation");
+        let (_, message_id, _) = first_message_match(&conv, "cdn77").expect("hit");
+        assert_eq!(message_id, "m1", "global search jump must land on the first hit");
+
+    }
+
+    fn list_item(partial: serde_json::Value) -> ConversationListItem {
+        let mut base = serde_json::json!({
+            "id": "c",
+            "title": "t",
+            "preview": "",
+            "provider_id": "p",
+            "model": "m",
+            "message_count": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "pinned": false,
+        });
+        if let (Some(base_obj), Some(partial_obj)) = (base.as_object_mut(), partial.as_object()) {
+            for (k, v) in partial_obj {
+                base_obj.insert(k.clone(), v.clone());
+            }
+        }
+        serde_json::from_value(base).expect("list item")
+    }
+
+    #[test]
+    fn compare_library_items_pins_first_then_sorts_by_key() {
+        let pinned = list_item(serde_json::json!({
+            "id": "pinned",
+            "pinned": true,
+            "updated_at": 10,
+            "title": "b"
+        }));
+        let recent = list_item(serde_json::json!({
+            "id": "recent",
+            "updated_at": 100,
+            "title": "a"
+        }));
+        let older = list_item(serde_json::json!({
+            "id": "older",
+            "updated_at": 50,
+            "title": "c",
+            "message_count": 9,
+            "created_at": 9
+        }));
+
+        // pinned always wins regardless of updated_at
+        assert_eq!(
+            compare_library_items(&pinned, &recent, "updated", false),
+            std::cmp::Ordering::Less
+        );
+
+        // default: updated desc
+        assert_eq!(
+            compare_library_items(&recent, &older, "updated", false),
+            std::cmp::Ordering::Less
+        );
+        // updated asc
+        assert_eq!(
+            compare_library_items(&recent, &older, "updated", true),
+            std::cmp::Ordering::Greater
+        );
+
+        // title is case-insensitive
+        let upper = list_item(serde_json::json!({ "id": "U", "title": "Banana" }));
+        let lower = list_item(serde_json::json!({ "id": "L", "title": "apple" }));
+        assert_eq!(
+            compare_library_items(&lower, &upper, "title", true),
+            std::cmp::Ordering::Less
+        );
+
+        // messages desc
+        assert_eq!(
+            compare_library_items(&older, &recent, "messages", false),
+            std::cmp::Ordering::Less
+        );
+
+        // created desc
+        assert_eq!(
+            compare_library_items(&older, &recent, "created", false),
+            std::cmp::Ordering::Less
+        );
+    }
+
 }
+
 
 #[cfg(test)]
 mod builtin_assistant_tests {
