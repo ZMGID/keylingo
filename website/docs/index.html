@@ -195,7 +195,7 @@
 
 <div class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">≡</button>
-  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.8.4</span></a>
+  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.8.9</span></a>
   <div class="spacer"></div>
   <a class="top-link" href="../index.html">← 官网</a>
   <a class="icon-link" href="https://github.com/ZMGID/kivio" target="_blank" rel="noopener" aria-label="GitHub">
@@ -288,9 +288,9 @@
     <article data-page="install" class="hidden">
       <div class="crumb">开始</div>
       <h1>安装</h1>
-      <p class="lead">当前稳定版为 v2.8.4，从 GitHub Releases 获取对应平台安装包。</p>
+      <p class="lead">当前稳定版为 v2.8.9，从 GitHub Releases 获取对应平台安装包。</p>
       <h2 id="install-mac">macOS</h2>
-      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.8.4_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
+      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.8.9_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
       <pre><code>xattr -cr "/Applications/Kivio Desktop.app"</code></pre>
       <p>首次使用以下功能时，系统会请求相应的隐私权限：</p>
       <table>
@@ -302,7 +302,7 @@
       </table>
       <p>在「系统设置 → 隐私与安全性」中为 Kivio Desktop 打开对应开关即可，无需重启应用。</p>
       <h2 id="install-win">Windows</h2>
-      <p>下载并运行 <code>Kivio.Desktop_2.8.4_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
+      <p>下载并运行 <code>Kivio.Desktop_2.8.9_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
       <h2 id="install-update">更新</h2>
       <p>应用启动时会静默检查一次 GitHub Releases 是否有新版本（<code>autoCheckUpdate</code>，默认开启）。也可以在「设置 → 关于」手动检查；发现新版本后可直接在应用内下载安装包并启动安装。若 GitHub API 检查失败，界面会提供 Releases 页面作为手动下载兜底。</p>
     </article>
@@ -310,7 +310,7 @@
     <article data-page="quickstart" class="hidden">
       <div class="crumb">开始</div>
       <h1>快速上手</h1>
-      <p class="lead">从安装 v2.8.4 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
+      <p class="lead">从安装 v2.8.9 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
       <h2 id="qs-install">第一步 · 安装并启动</h2>
       <p>从 <a href="https://github.com/ZMGID/kivio/releases/latest" target="_blank" rel="noopener">GitHub Releases ↗</a> 下载最新版：macOS Apple Silicon 使用 <code>.dmg</code>，Windows x64 使用 NSIS <code>-setup.exe</code>。macOS DMG 未签名，首次启动需要右键 →「打开」。详细权限与更新说明见 <a href="#/install">安装</a>。</p>
       <h2 id="qs-key">第二步 · 完成首次引导</h2>
@@ -751,6 +751,66 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <div class="crumb">更多</div>
       <h1>更新日志</h1>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
+      <h2 id="changelog-289">v2.8.9 · 2026-08-11</h2>
+      <ul>
+        <li><b>长对话性能大修</b> —— 消息列表重做虚拟化与滚动跟随：屏外消息卸载、流式行独立渲染、重内容延迟挂载。长对话打开更快，流式生成与回翻历史更流畅，修复多种滚动跳动与生成结束时的闪动。</li>
+        <li><b>Kivio Chat 独立运行时</b> —— Kivio Chat 成为独立运行时，与 Agent 模式分开配置提示词。</li>
+        <li><b>新模型</b> —— 新增 Claude Opus 5 与最新 Gemini Flash；外部 CLI 新增 Kimi CLI 供应商配置。</li>
+        <li><b>发送与审批体验</b> —— 发送等待期间保留输入草稿与附件，消息真正进入发送流程后才清空；审批卡提交中禁用按钮并显示失败原因，可直接重试。</li>
+        <li><b>对话库与搜索</b> —— 全局搜索显示匹配片段并高亮跳转；修复从对话库打开对话的顺序问题；上下文用量面板收纳为三组。</li>
+        <li><b>界面修复</b> —— 恢复细胶囊滚动条并保持聊天滚动条可见，侧栏列表滚动时自动隐藏；统一设置面板头部与背景；CLI 供应商弹窗改为卡片分区。</li>
+        <li><b>安全与稳定</b> —— HTML 预览 iframe 沙箱化；Lens 覆盖层失活时后端强制关闭兜底；自动保存的设置在关闭窗口时同步到聊天视图。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.9" target="_blank" rel="noopener">查看 v2.8.9 Release notes ↗</a></p>
+      <h2 id="changelog-288">v2.8.8 · 2026-08-08</h2>
+      <ul>
+        <li><b>对话库</b> —— 新增对话管理中心：搜索、书架分类、排序分组、多选批量操作、归档。插件管理改到设置页。</li>
+        <li><b>提示词缓存时长</b> —— 供应商可选择关闭、短时或长时缓存。</li>
+        <li><b>扩展中心中英文</b> —— 助手、技能、MCP、知识库、笔记、插件页面支持界面语言切换。</li>
+        <li><b>会话用量</b> —— 输入栏显示本会话的输入、缓存命中与输出 token 用量。</li>
+        <li><b>标题动画</b> —— 模型生成对话标题时，以打字效果替换临时标题。</li>
+        <li><b>Cursor Composer</b> —— 支持 Composer 1 / 1.5 / 2 / 2.5 等模型的上下文窗口与定价显示。</li>
+        <li><b>侧栏操作</b> —— 对话可钉选、一键归档；完整菜单改到右键；生成中显示波浪状态指示。</li>
+        <li><b>设置与用量统计</b> —— 调整设置导航顺序与记忆页布局；用量统计新增请求成功率。</li>
+        <li><b>问题修复</b> —— 修复流式中断后内容丢失、重复消息、滚动异常、批量删除残留，以及对话库切换闪白。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.8" target="_blank" rel="noopener">查看 v2.8.8 Release notes ↗</a></p>
+      <h2 id="changelog-287">v2.8.7 · 2026-08-06</h2>
+      <ul>
+        <li><b>外部 CLI Agent 能力补齐</b> —— Claude Code 接入问用户、计划批准、后台任务和子代理实时进度；子代理调用独立显示为卡片。内置 Agent 改进读文件输出上限、上下文超窗压缩、空响应判定与用量统计。</li>
+        <li><b>Pi 与 pi-btw 适配</b> —— Pi 原生供应商配置接入统一外部 CLI 体系，pi-btw 的事件映射进共享运行协议；流式中途断开时保留重试能力，并将上游断流与普通进程退出分开呈现。</li>
+        <li><b>长文本粘贴附件</b> —— 超长粘贴内容转换为内存文本附件，可查看和编辑，并完整覆盖持久化、重新生成、外部 CLI、导出和 steering 场景，不再静默丢失正文。</li>
+        <li><b>聊天交互与渲染修复</b> —— 修复 <code>&lt;details&gt;</code> 等标签被原样显示、中文相邻粗体不渲染、问用户答案折叠、图片右键菜单被 WebView 吞掉，以及流式滚动跟随被窗口 resize 竞态解除。</li>
+        <li><b>状态动效和暗色模式</b> —— 消息流末尾新增常驻运行状态行，后台任务计数与侧栏运行指示更准确；修复部分设备尤其暗色模式下的状态动画异常，并降低 WKWebView 悬停显隐引发的重绘成本。</li>
+        <li><b>记忆指令过滤</b> —— 收紧并修正记忆系统对命令字眼的安全匹配，避免正常内容被误过滤，同时清理输入区相关边界状态。</li>
+        <li><b>OpenCode、模型与用量</b> —— 完善 OpenCode 原生供应商配置；外部 CLI 上下文用量按轮更新，新增首 token 延迟和思考档位记录，修复模型映射与统计口径。</li>
+        <li><b>其它体验改进</b> —— 支持生成中消息排队与立即引导，检查更新可就地执行，发送后为新消息留出阅读空间；设置页供应商与 CLI 分栏更紧凑，并修复 Edge/WebView2 密码可见按钮重复。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.7" target="_blank" rel="noopener">查看 v2.8.7 Release notes ↗</a></p>
+      <h2 id="changelog-286">v2.8.6 · 2026-08-04</h2>
+      <ul>
+        <li><b>实时协议版本化</b> —— 聊天实时通信统一为单条 <code>chat-protocol</code> 通道：运行事件带版本与序号，会话事件带 revision，断线后按快照重放，类型与 JSON Schema 由 Rust 侧生成。同时修复会话持久化的并发竞争、侧栏刷新的全量扫盘与独占锁、单个订阅者异常中断整条流。</li>
+        <li><b>从本地 CLI 导入对话</b> —— 已绑定文件夹的项目可导入 claude / codex / grok / kimi / opencode 的原生会话，续聊仍由原 CLI 承担。历史为一次性快照，不与 CLI 同步。</li>
+        <li><b>供应商级请求配置</b> —— 每个供应商可单独设置自定义请求头（支持从 JSON / cURL 导入）、系统代理开关、prompt caching 与客户端身份。prompt 缓存新增覆盖 OpenAI 协议。</li>
+        <li><b>侧栏手动排序与对话钉位</b> —— 集与项目改为拖拽排序，展开后的对话可钉至指定位置，其余按更新时间排列；「最近」列表保持纯时间线。</li>
+        <li><b>Grok (xAI) 独立为接口协议</b> —— 新增 <code>xai_responses</code>，按所选协议而非 <code>base_url</code> 分叉，正确处理 xAI 的字段限制、思考档位与响应留存行为。</li>
+        <li><b>重会话性能与滚动</b> —— 渲染策略改由成本估算决定，重会话切换耗时从约 1 秒降至接近瞬时；滚动跟随改按事件来源判定，修复贴底抖动与滚动条无法拖动。</li>
+        <li><b>聊天界面多语言</b> —— 常驻外壳（侧栏、标题栏、输入栏、顶栏选择器、右键菜单等）接入界面语言开关，新增 145 个中英条目。</li>
+        <li><b>退出清理</b> —— 修复退出时的 panic；此前会跳过外部 CLI 会话、后台命令进程组、OCR sidecar 与插件预览的清理，每次关窗都遗留子进程。</li>
+        <li><b>移除项（不兼容）</b> —— 「流式输出」与「思考模式」开关已移除，两者恒为开启。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.6" target="_blank" rel="noopener">查看 v2.8.6 Release notes ↗</a></p>
+      <h2 id="changelog-285">v2.8.5 · 2026-08-01</h2>
+      <ul>
+        <li><b>输入区与快捷键</b> —— 输入框上的选择器改为紧凑的按钮锚定弹层（助手 / 多模型 / 来源统一），上下文指示器与代码块外框重做；快捷键页新增「关闭聊天窗」，补上恢复默认与占用检测。</li>
+        <li><b>一 agent 一对话</b> —— 内置 Agent 的会话一旦有消息就锁定 agent 切换（此前只有本地 CLI 这么锁，中途换等于换个大脑接着同一段上下文）。</li>
+        <li><b>思考等级不再被静默降档</b> —— 四个适配器原样下发所选档位，能选哪几档由模型库门控，并可在模型详情里逐模型覆盖。</li>
+        <li><b>消息列表部分虚拟化</b> —— 只虚拟化更早的历史，最近一段始终实挂载；钉底不再抢用户滚动，读历史时脚下不再跳。</li>
+        <li><b>macOS 图标适配系统外观</b> —— 感谢 @HappyDIY（<a href="https://github.com/ZMGID/kivio/pull/22" target="_blank" rel="noopener">#22</a>）。</li>
+        <li><b>窗口材质与帧率</b> —— 修好台前调度切窗掉帧（macOS 材质改为常驻，焦点交给 AppKit）；Win10 没有 Mica 时不再误判材质生效、透出桌面。</li>
+        <li><b>运行时选择与界面细节</b> —— Kivio Agent 作为第一张卡片直接排进代理列表；上下文圆环换成 SVG 描边；内嵌设置页与首次引导变成浮起卡片；扩展页互切与弹层展开的第一帧不再闪。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.8.5" target="_blank" rel="noopener">查看 v2.8.5 Release notes ↗</a></p>
       <h2 id="changelog-284">v2.8.4 · 2026-07-31</h2>
       <ul>
         <li><b>右侧 Dock：文件树、Git 审查、真实终端</b> —— 聊天窗右侧新增按工作目录绑定的 IDE 侧栏。文件树支持框选多选、拖拽移动、批量删除、内联新建/重命名与就地查看编辑；Git 面板看改动与 diff；终端是真正的 PTY（forkpty / ConPTY）。工具卡片的 Write/Edit 显示 <code>+N -N</code>，展开是带行号列与词级高亮的 diff，点文件名即在右侧预览。</li>
