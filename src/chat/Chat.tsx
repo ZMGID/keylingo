@@ -1081,6 +1081,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const inFlightConversationsRef = useRef<Set<string>>(new Set())
   const restoredRunIdsRef = useRef<Set<string>>(new Set())
   const pendingStreamDoneRef = useRef<Record<string, () => Promise<void>>>({})
+  /** run 结束但落库 twin 尚未随 startTransition 提交时，冻结的预览等它落地再清（防收尾闪帧）。 */
+  const pendingPreviewClearRef = useRef<{ conversationId: string; messageId: string | null } | null>(null)
+  /** 写 ref 不触发渲染；这个 epoch 保证挂起标记一旦设置，落地 effect 至少跑一次（武装超时兜底）。 */
+  const [previewClearEpoch, setPreviewClearEpoch] = useState(0)
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
   const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload[]>>({})
@@ -1268,6 +1272,31 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
     return true
   }, [cancelPendingFrame, syncGeneratingConversationIds])
+
+  /**
+   * run 收尾时的预览清除（两条收尾路径共用）。⚠️ 不能直接 clearStreamingPreview：
+   * 它的 store 更新走 SyncLane（useSyncExternalStore 防撕裂强制同步刷新），会抢在
+   * applyConversation 的 setState（DefaultLane）/ reloadConversation 的 startTransition
+   * 之前**单独提交一帧** —— 那一帧 live 已卸载、落库 twin 还没进已提交的 messages，
+   * 整条回答消失又出现（实测 Δsh −294～−4288、scrollTop 被钳，就是「生成完闪/沉」）。
+   * 同一同步代码块里先调 applyConversation 也没用，lane 优先级会把顺序反转。
+   * twin 尚未出现在**已提交**的 messages（currentConversationRef 在 render 期赋值，
+   * 语义即「已渲染的会话」）时，先冻结预览 —— 冻结同样是 SyncLane 先上屏，但
+   * frozen=true 让 live 气泡留在原地，那一帧无害；等 pendingPreviewClear effect 看到
+   * twin 真正落地再清，live→twin 就是同一 commit 的原子交换。
+   */
+  const settleStreamingPreview = useCallback((conversationId: string) => {
+    const snapshot = streamSnapshotsRef.current[conversationId]
+    const twinId = snapshot?.messageId ?? null
+    const twinLanded = !twinId
+      || (currentConversationRef.current?.messages ?? []).some((m) => m.id === twinId)
+    if (!twinLanded && freezeStreamSnapshot(conversationId)) {
+      pendingPreviewClearRef.current = { conversationId, messageId: twinId }
+      setPreviewClearEpoch((value) => value + 1)
+    } else {
+      clearStreamingPreview()
+    }
+  }, [clearStreamingPreview, freezeStreamSnapshot])
 
   const ensureStreamSnapshot = useCallback((conversationId: string) => {
     const existing = streamSnapshotsRef.current[conversationId]
@@ -2015,11 +2044,40 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         setPendingToolConfirm(null)
         setPendingSessionConsent(null)
         setPendingUserPrompt(null)
-        if (!preservedPartial) clearStreamingPreview()
+        // 见 settleStreamingPreview 注释：直接清会被 SyncLane 抢跑出一帧空 commit。
+        if (!preservedPartial) settleStreamingPreview(conversationId)
       }
     },
-    [clearStreamingPreview, freezeStreamSnapshot, localState, markConversationCompacting, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
+    [freezeStreamSnapshot, localState, markConversationCompacting, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, settleStreamingPreview, syncGeneratingConversationIds],
   )
+
+  // 冻结预览的延迟清除：等 finishStreamingRun 记下的 twin 真正出现在 messages 里
+  // （transition 提交后）再清，live→twin 就是同一 commit 的原子交换，不再闪帧。
+  // 兜底：切走会话只丢标记（restoreStreamingPreview 接管视图）；1.5s 超时强制清
+  // （防 messageId 与落库 id 不一致时冻结卡死）。
+  useEffect(() => {
+    const pending = pendingPreviewClearRef.current
+    if (!pending) return
+    if (currentConversationIdRef.current !== pending.conversationId || currentConversation?.id !== pending.conversationId) {
+      pendingPreviewClearRef.current = null
+      return
+    }
+    const landed = pending.messageId
+      ? (currentConversation?.messages ?? []).some((m) => m.id === pending.messageId)
+      : true
+    if (landed) {
+      pendingPreviewClearRef.current = null
+      clearStreamingPreview()
+      return
+    }
+    const timeout = window.setTimeout(() => {
+      if (pendingPreviewClearRef.current === pending) {
+        pendingPreviewClearRef.current = null
+        if (currentConversationIdRef.current === pending.conversationId) clearStreamingPreview()
+      }
+    }, 1_500)
+    return () => window.clearTimeout(timeout)
+  }, [clearStreamingPreview, currentConversation, previewClearEpoch])
 
   const flushPendingStreamDone = useCallback(async (conversationId?: string): Promise<boolean> => {
     if (conversationId) {
@@ -2052,9 +2110,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     clearConversationLocalState(localState(), conversationId)
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === conversationId) {
-      clearStreamingPreview()
+      // 见 settleStreamingPreview 注释：applyConversation 的 setState 是 DefaultLane，
+      // 这里直接 clearStreamingPreview（SyncLane）会抢跑出一帧「live 已卸、twin 未至」。
+      settleStreamingPreview(conversationId)
     }
-  }, [applyConversation, clearStreamingPreview, localState, syncGeneratingConversationIds])
+  }, [applyConversation, localState, settleStreamingPreview, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatProtocolIssue, ({ issue, conversationId }) => {
     if (issue === 'version_mismatch') {

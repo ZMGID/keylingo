@@ -512,9 +512,9 @@ function MessageListBase({
   } | null>(null)
   const [navigatorHoldEpoch, setNavigatorHoldEpoch] = useState(0)
   const [bottomHoldEpoch, setBottomHoldEpoch] = useState(0)
-  // Bumped when bottomHold ends so send-reserve can transfer minHeight → spacer.
-  // Without this, wrap.minHeight stays at the streaming reserve and the answer
-  // jumps up with a huge empty gap under it (live→history settle regression).
+  // Bumped when bottomHold ends: send-reserve 的 minHeight→spacer 转移已在 settle 帧
+  // 立即完成（见 apply() 注释），这里只是 hold 期间几何变化后的幂等重算兜底
+  // （hold 中 hydrate/图片可能改 span，结束时再对一次账）。
   const [reserveEpoch, setReserveEpoch] = useState(0)
   const [navigatorLockActive, setNavigatorLockActive] = useState(false)
 
@@ -1812,9 +1812,15 @@ function MessageListBase({
         : null
       const anchorH = row?.getBoundingClientRect().height ?? 0
       const reserve = sendReserveHeight(viewportEl.clientHeight, anchorH, LIST_EDGE_PADDING_PX)
-      // Keep the streaming minHeight through settle bottomHold so live unmount
-      // does not collapse the tail for a frame (visible flash).
-      if (streaming || streamFrozen || bottomHoldRef.current) {
+      // ⚠️ 只在 streaming/frozen 期间保留 minHeight，settle 帧**立即**转移，不等 bottomHold。
+      // 曾经这里多一个 `|| bottomHoldRef.current`：settle 帧 live 气泡已经搬进 virtualizer，
+      // wrapper 里只剩状态线 + spacer（~30px），再压 reserve 的 minHeight 就是往文档里
+      // 凭空插一条 ~45% 视口高的空带 —— 钉底把答案顶上去（闪一下），hold 结束转移时
+      // 又缩回来（抽一下）。立即转移在两种回答长度下总高都恒等：长回答 minHeight 本来
+      // 就被内容吃掉（清掉不变高、row 已虚拟化卸载 → spacer 16px）；短回答 row 还在，
+      // spacer = reserve − span 精确补齐。本 effect 在交接 effect 之后同一 commit 运行，
+      // twin 已在 DOM 里，span 量得到。
+      if (streaming || streamFrozen) {
         wrap.style.minHeight = `${Math.round(reserve)}px`
         // 留白交还给 minHeight：不还的话上一轮量出来的高度会和 minHeight 叠成两段预留。
         spacer.style.height = `${LIST_EDGE_PADDING_PX}px`
