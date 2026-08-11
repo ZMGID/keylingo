@@ -172,7 +172,17 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.8
+## 新版本 —— v2.8.9
+
+- **长对话性能大修** —— 消息列表重做虚拟化与滚动跟随：屏外消息卸载、流式行独立渲染、重内容延迟挂载。长对话打开更快，流式生成与回翻历史更流畅，修复多种滚动跳动与生成结束时的闪动。
+- **Kivio Chat 独立运行时** —— Kivio Chat 成为独立运行时，与 Agent 模式分开配置提示词。
+- **新模型** —— 新增 Claude Opus 5 与最新 Gemini Flash；外部 CLI 新增 Kimi CLI 供应商配置。
+- **发送与审批体验** —— 发送等待期间保留输入草稿与附件，消息真正进入发送流程后才清空；审批卡提交中禁用按钮并显示失败原因，可直接重试。
+- **对话库与搜索** —— 全局搜索显示匹配片段并高亮跳转；修复从对话库打开对话的顺序问题；上下文用量面板收纳为三组。
+- **界面修复** —— 恢复细胶囊滚动条并保持聊天滚动条可见，侧栏列表滚动时自动隐藏；统一设置面板头部与背景；CLI 供应商弹窗改为卡片分区。
+- **安全与稳定** —— HTML 预览 iframe 沙箱化；Lens 覆盖层失活时后端强制关闭兜底；自动保存的设置在关闭窗口时同步到聊天视图。
+
+## v2.8.8
 
 - **对话库** —— 新增对话管理中心：搜索、书架分类、排序分组、多选批量操作、归档。插件管理改到设置页。
 - **提示词缓存时长** —— 供应商可选择关闭、短时或长时缓存。
@@ -405,7 +415,17 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.8
+## What's New — v2.8.9
+
+- **Long-conversation performance overhaul** — the message list rebuilds virtualization and scroll follow: off-screen messages unmount, the streaming row renders independently, and heavy content mounts lazily. Long conversations open faster, streaming and scrolling back through history are smoother, and several scroll jumps and end-of-run flickers are fixed.
+- **Kivio Chat as a separate runtime** — Kivio Chat becomes its own runtime, configured apart from Agent mode with its own prompt.
+- **New models** — adds Claude Opus 5 and the latest Gemini Flash; external CLIs gain a Kimi CLI provider config.
+- **Send and approval experience** — the composer keeps your draft and attachments until the message actually enters the send pipeline; approval cards disable their buttons while submitting and surface failures for retry.
+- **Conversation library and search** — global search shows match snippets with highlight jump; fixes open order from the library; the context-usage panel collapses into three groups.
+- **UI fixes** — restores thin capsule scrollbars and keeps the chat scrollbar visible, with the sidebar list auto-hiding on scroll; unifies the settings panel header and background; the CLI provider modal becomes card sections.
+- **Security and stability** — sandboxes the untrusted HTML preview iframe; adds a backend force-close fallback for a dead Lens overlay webview; autosaved settings propagate to the chat view on close.
+
+## v2.8.8
 
 - **Conversation library** — new conversation manager with search, shelves, sort/group, bulk actions, and archive. Plugin management moves to Settings.
 - **Prompt-cache duration** — set provider cache retention to off, short, or long.
