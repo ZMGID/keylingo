@@ -201,4 +201,44 @@ describe('scrollFollowCore', () => {
     const { pin } = run([growth(800)], released)
     expect(pin).toBe(false)
   })
+
+  // 拖选文本（pointerHeld）期间纠正器豁免：选区自动滚动不能和钉底互抢。
+  it('跟随中按住指针时，显著 gap 的 scroll 不再钉底（拖选自动滚动）', () => {
+    const { state, pin } = run([scroll(120, 100, 'user')], {
+      ...createFollowState(),
+      pointerHeld: true,
+    })
+    expect(state.following).toBe(true)
+    expect(pin).toBe(false)
+  })
+
+  it('跟随中按住指针时，内容增长不钉底', () => {
+    const { state, pin } = run([growth(200)], {
+      ...createFollowState(),
+      pointerHeld: true,
+    })
+    expect(state.following).toBe(true)
+    expect(pin).toBe(false)
+  })
+
+  it('拖选离底后松手：明确脱离跟随，不把选区拽回底部', () => {
+    const { state, pin } = run([{ type: 'pointerRelease', gap: 300 }], {
+      ...createFollowState(),
+      pointerHeld: true,
+      lastGap: 300,
+    })
+    expect(state.following).toBe(false)
+    expect(state.userDetached).toBe(true)
+    expect(pin).toBe(false)
+  })
+
+  it('拖选后在底部松手：重新钉底继续跟随', () => {
+    const { state, pin } = run([{ type: 'pointerRelease', gap: 4 }], {
+      ...createFollowState(),
+      pointerHeld: true,
+      lastGap: 4,
+    })
+    expect(state.following).toBe(true)
+    expect(pin).toBe(true)
+  })
 })

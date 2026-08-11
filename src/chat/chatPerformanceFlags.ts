@@ -1,14 +1,12 @@
 export type ChatPerformanceFlags = {
   tanstackVirtualizer: boolean
   liveRowExternalization: boolean
-  lightweightStreamingMarkdown: boolean
   settledMarkdownCache: boolean
 }
 
 export const CHAT_PERFORMANCE_FLAG_KEYS = {
   tanstackVirtualizer: 'chat.performance.tanstackVirtualizer',
   liveRowExternalization: 'chat.performance.liveRowExternalization',
-  lightweightStreamingMarkdown: 'chat.performance.lightweightStreamingMarkdown',
   settledMarkdownCache: 'chat.performance.settledMarkdownCache',
 } as const
 
@@ -21,7 +19,6 @@ const DEFAULT_FLAGS: ChatPerformanceFlags = {
   // Set false only to A/B the in-list experiment.
   liveRowExternalization: true,
 
-  lightweightStreamingMarkdown: true,
   settledMarkdownCache: true,
 }
 
@@ -49,7 +46,6 @@ export function getChatPerformanceFlags(): ChatPerformanceFlags {
   cachedFlags = {
     tanstackVirtualizer: readOverride(CHAT_PERFORMANCE_FLAG_KEYS.tanstackVirtualizer) ?? DEFAULT_FLAGS.tanstackVirtualizer,
     liveRowExternalization: readOverride(CHAT_PERFORMANCE_FLAG_KEYS.liveRowExternalization) ?? DEFAULT_FLAGS.liveRowExternalization,
-    lightweightStreamingMarkdown: readOverride(CHAT_PERFORMANCE_FLAG_KEYS.lightweightStreamingMarkdown) ?? DEFAULT_FLAGS.lightweightStreamingMarkdown,
     settledMarkdownCache: readOverride(CHAT_PERFORMANCE_FLAG_KEYS.settledMarkdownCache) ?? DEFAULT_FLAGS.settledMarkdownCache,
   }
   return cachedFlags

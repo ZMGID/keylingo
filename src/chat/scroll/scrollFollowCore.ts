@@ -184,7 +184,11 @@ export function reduceFollowEvent(
         // viewport with empty reserve below). Prefer LiveAgent: a false
         // re-pin is one frame; a false detach ruins the whole stream.
         // Scrollbar users still detach with wheel/trackpad (wheel handler).
-        return { state: next, pin: gap > config.attachThresholdPx }
+        //
+        // pointerHeld 豁免：按住指针拖选文本时，选区自动滚动会连续产生 gap 越来越大的
+        // scroll 事件；若照钉，每一下都把视口拽回底部，流式中根本没法向上选字。
+        // 按住期间不纠正，松手时由 pointerRelease 补判（贴底重钉 / 离底脱离）。
+        return { state: next, pin: gap > config.attachThresholdPx && !state.pointerHeld }
       }
 
       const movedTowardBottom = gap < previousGap - config.directionSlopPx
@@ -218,6 +222,14 @@ export function reduceFollowEvent(
         next.userDetached = false
         return { state: next, pin: true }
       }
+      // 松手时离底且原本在跟随：按住期间纠正器被豁免（见 scroll/contentGrowth 的
+      // pointerHeld 分支），视口已停在用户拖到的位置。此刻若保持 following，
+      // 下一个 scroll/growth 就会把人钉回底部 —— 拖选刚完成选区立刻被拽走。
+      // 明确脱离（userDetached），交还给「回到底部」按钮 / 滚回底部重接。
+      if (state.following) {
+        next.following = false
+        next.userDetached = true
+      }
       return { state: next, pin: false }
     }
 
@@ -244,7 +256,8 @@ export function reduceFollowEvent(
         next.following = true
         return { state: next, pin: true }
       }
-      return { state: next, pin: state.following }
+      // 按住指针（拖选）期间同样不钉：流式内容仍在长，钉底会把选区拽走。
+      return { state: next, pin: state.following && !state.pointerHeld }
     }
 
     case 'forceFollow': {

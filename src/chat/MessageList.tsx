@@ -92,6 +92,14 @@ export interface MessageListProps {
 
 const LIST_EDGE_PADDING_PX = 16
 
+// 内容宽度量化桶。layoutKey 里带着 contentWidth：若用原始 px，拖侧栏/Dock/改窗口宽时
+// 每变 1px 就换一个 key 空间 —— TanStack itemSizeCache 全 miss（所有行退回估算高、
+// totalSize 猛变、滚动位置跳），且 measurementBuckets 只留 8 个桶，一次拖动扫过上百个
+// 宽度值会把原宽度的桶也挤掉。旧实现（virtua 时代）有 MIGRATION_STEP 量化，TanStack
+// 重写时丢了（8791000）。行高对 32px 内的宽度差不敏感（换行差 ~4 个拉丁字符），
+// 真实高度由 measureElement 兜底。
+const CONTENT_WIDTH_BUCKET_PX = 32
+
 // 导航器高亮同步的最小间隔。这趟同步是 querySelectorAll + 逐行 getBoundingClientRect，
 // 若 virtualizer 在同一帧里刚写过 DOM，第一下 gBCR 就是整文档强制 reflow——每帧跑一次
 // 正是滚动不顺滑的主因之一。高亮不需要 120fps，8 次/秒足够。
@@ -146,7 +154,17 @@ function contentRevision(text: string | undefined): string {
   return `${text.length}:${(hash >>> 0).toString(36)}`
 }
 
+// 按消息对象缓存布局 revision：流式中 MessageList 每个 delta 重渲一次，render 里每个
+// 挂载行都要 measurementKey(item)（data-chat-item-key）——不缓存的话，工具多的会话
+// 每帧对正文/reasoning/segments/每个 tool_call 重做 FNV hash + 大字符串 join。
+// 消息更新是替换式（落库/协议事件产生新对象），对象命中即 revision 不变；WeakMap
+// 不阻回收，会话卸载后随消息对象一起消失。⚠️ 若未来出现原地 mutate 消息的路径，
+// 这里会吐出过期 revision（漏重测），必须保持替换式更新。
+const layoutRevisionByMessage = new WeakMap<ChatMessage, string>()
+
 function messageLayoutRevision(message: ChatMessage): string {
+  const cached = layoutRevisionByMessage.get(message)
+  if (cached !== undefined) return cached
   const tools = message.tool_calls ?? message.toolCalls ?? []
   const toolRevision = tools.map((tool) => [
     tool.id,
@@ -161,7 +179,7 @@ function messageLayoutRevision(message: ChatMessage): string {
       artifact.size_bytes ?? artifact.sizeBytes,
     ].join(':')).join(','),
   ].join(':')).join('|')
-  return [
+  const revision = [
     contentRevision(message.content),
     contentRevision(message.reasoning),
     message.segments?.map((segment) => `${segment.id}:${segment.kind}:${contentRevision(segment.text ?? undefined)}`).join('|') ?? '',
@@ -169,6 +187,8 @@ function messageLayoutRevision(message: ChatMessage): string {
     (message.artifacts ?? []).map((artifact) => `${artifact.name}:${artifact.mime_type ?? artifact.mimeType}:${artifact.path ?? artifact.filePath ?? artifact.localPath}:${artifact.size_bytes ?? artifact.sizeBytes}`).join('|'),
     toolRevision,
   ].join('::')
+  layoutRevisionByMessage.set(message, revision)
+  return revision
 }
 
 function measurementKey(item: RenderItem): string {
@@ -340,7 +360,8 @@ function MessageListBase({
   // hook 需要通过 state 拿到元素以便重新绑定监听；virtualizer 需要 RefObject。回调 ref 同时喂两者。
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null)
-  const [contentWidth, setContentWidth] = useState(712)
+  // 初值取常见聊天列宽落进的桶（704 = 22×32），首个 RO tick 会立刻校正。
+  const [contentWidth, setContentWidth] = useState(704)
   const setScrollEl = useCallback((el: HTMLDivElement | null) => {
     scrollRef.current = el
     setViewportEl(el)
@@ -438,7 +459,8 @@ function MessageListBase({
   useLayoutEffect(() => {
     if (!contentEl) return
     const updateWidth = (width: number) => {
-      const next = Math.max(280, Math.round(width))
+      // 量化到桶再落 state：拖动过程中只在跨桶时重渲/换 layoutKey（见 CONTENT_WIDTH_BUCKET_PX）。
+      const next = Math.max(280, Math.round(width / CONTENT_WIDTH_BUCKET_PX) * CONTENT_WIDTH_BUCKET_PX)
       setContentWidth((current) => current === next ? current : next)
     }
     const rect = contentEl.getBoundingClientRect()
@@ -825,6 +847,7 @@ function MessageListBase({
     map.set('tail', getCachedRowMeasurement(layoutKey, tailMeasurementKey) ?? 96)
     // liveEndingThisFrame in deps: re-read cache after the settle-frame seed above.
     return map
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- liveEndingThisFrame 刻意入依赖：settle 帧种子写入后强制重建，重读缓存
   }, [contentWidth, historyItems, layoutKey, liveEndingThisFrame, tailMeasurementKey])
 
   // Default externalization: live is NOT a virtualizer row — chrome tail below
@@ -901,8 +924,13 @@ function MessageListBase({
           // token growth; in-list experiment can remeasure the live tail.
           followHandle.markLayoutCompensation()
         }
-        if (logicalKey) estimateSizeRef.current.set(logicalKey, size)
-        setCachedRowMeasurement(layoutKey, key, size)
+        // 行内还有未 hydrate 的 heavy island（Mermaid/HTML 预览等 fallback 与真身
+        // 几何不同）时，只让 TanStack 内部照常测量，不写持久 measurement cache：
+        // fallback 高度一旦入缓存，下次打开该会话会先按错误高度布局、hydrate 后再跳。
+        if (!element.querySelector(NAVIGATOR_PENDING_SELECTOR)) {
+          if (logicalKey) estimateSizeRef.current.set(logicalKey, size)
+          setCachedRowMeasurement(layoutKey, key, size)
+        }
         return size
       }
       return measured
@@ -1314,8 +1342,16 @@ function MessageListBase({
   }, [clearNavigatorPrepare, conversationId])
 
   // 全局搜索：打开会话后滚到命中消息，并短暂闪一下高亮。
+  // 「已处理 id」ref：effect deps 里有 historyItems——处理完到父级清 focusMessageId
+  // 之间若消息列表又变（落库/工具更新），不挡一道会对同一个 id 反复重跳。
+  // prop 回到 null 时重置，同一 id 之后仍可再次聚焦。
+  const handledFocusRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!focusMessageId || !conversationId) return
+    if (!focusMessageId || !conversationId) {
+      handledFocusRef.current = null
+      return
+    }
+    if (handledFocusRef.current === focusMessageId) return
     let targetIndex = -1
     for (let i = 0; i < historyItems.length; i++) {
       const item = historyItems[i]
@@ -1331,10 +1367,14 @@ function MessageListBase({
     if (targetIndex < 0) {
       // 消息尚未就绪（或 id 已失效）——等 historyItems 变化再试；若始终找不到则下一轮消息变更后仍可重试。
       // 空会话或 id 不在列表时清掉，避免卡住。
-      if (messages.length > 0) onFocusMessageHandled?.()
+      if (messages.length > 0) {
+        handledFocusRef.current = focusMessageId
+        onFocusMessageHandled?.()
+      }
       return
     }
 
+    handledFocusRef.current = focusMessageId
     followHandle.releaseFollow()
     const generation = beginMessageNavigationHydrate()
     navigatorSettleGenerationRef.current = generation
@@ -1585,7 +1625,28 @@ function MessageListBase({
     scheduleNavigatorSync()
   }, [alignViewportToRowIndex, followHandle, scheduleNavigatorSync])
 
-
+  // 用户滚轮 = 用户接管视口。回底/导航 hold 期间若继续硬钉：wheel(up) 先解除跟随，
+  // 下一个 scroll 事件又被 handleNavigatorScroll 的 jumpToBottom()（forceFollow）钉回，
+  // gap>12 让 hold 的 stable 计数永不累积，拉锯会跑满 NAVIGATOR_HOLD_MAX_FRAMES(28)
+  // + NAVIGATOR_UNLOCK_FRAMES(10) ≈ 470ms —— 体感就是「点完回底再上滚被反复拽回」。
+  // 任何以纵向为主的滚轮都直接终止当前会话：prepare 阶段取消 settle 循环，hold 阶段
+  // 走 endNavigatorSession（清 hold/force-mount、结束 eager hydrate、几帧后解锁）。
+  // 只挂 wheel：原生滚动条拖动不派发 wheel，本来也进不了这条拉锯（scroll 源分类接管）。
+  useEffect(() => {
+    if (!viewportEl) return
+    const handleWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+      const sessionActive = navigationLockRef.current
+        || navigatorSettleRafRef.current !== null
+        || navigatorHoldRef.current !== null
+        || bottomHoldRef.current !== null
+      if (!sessionActive) return
+      cancelNavigatorSettle()
+      endNavigatorSession(navigatorSettleGenerationRef.current)
+    }
+    viewportEl.addEventListener('wheel', handleWheel, { passive: true })
+    return () => viewportEl.removeEventListener('wheel', handleWheel)
+  }, [cancelNavigatorSettle, endNavigatorSession, viewportEl])
 
 
   // 消息区右键：读取当前选中文本 + 命中的消息，弹内置菜单。两者都空则不弹（放行给全局屏蔽）。
@@ -1644,15 +1705,25 @@ function MessageListBase({
   // and the twin remounts inside the virtualizer at estimate height — height
   // collapses then re-expands. Seed cache from the last live height and run the
   // same multi-frame bottomHold as "jump to bottom" so pin survives hydrate.
+  // live 行高度用 RO 持续跟踪（settle 帧种子消费）。原实现在 layout effect 里每个
+  // token querySelector + getBoundingClientRect —— 每帧一次强制布局读，长回答白白累积。
+  // RO 回调在布局后、绘制前投递，此时读 gBCR 拿的是新鲜布局，不触发额外 reflow。
   useLayoutEffect(() => {
     if (!liveRowActive || !contentEl) return
     const liveEl = contentEl.querySelector(
       '[data-chat-message-list-item="streaming"], [data-chat-message-list-item="live-group"]',
     ) as HTMLElement | null
     if (!liveEl) return
-    const height = liveEl.getBoundingClientRect().height
-    if (height > 0) liveBubbleHeightRef.current = height
-  }, [contentEl, liveRowActive, streamGrowthSignal])
+    const record = () => {
+      const height = liveEl.getBoundingClientRect().height
+      if (height > 0) liveBubbleHeightRef.current = height
+    }
+    record()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(record)
+    observer.observe(liveEl)
+    return () => observer.disconnect()
+  }, [contentEl, liveRowActive])
 
   const liveScrollHandoffRef = useRef(liveRowActive)
   useLayoutEffect(() => {

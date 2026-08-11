@@ -31,8 +31,6 @@ describe('chat performance flags', () => {
     expect(getChatPerformanceFlags()).toEqual({
       tanstackVirtualizer: true,
       liveRowExternalization: true,
-
-      lightweightStreamingMarkdown: true,
       settledMarkdownCache: true,
     })
   })

@@ -295,8 +295,11 @@ const highlightCache = new Map<string, ReactNode[]>()
 const HIGHLIGHT_CACHE_MAX = 400
 
 // 导出给 dock 文件查看器复用（逐行调用，块注释跨行会降级——查看器场景可接受）。
+// cache=false（流式中的增长块）只读不写：增长块每个 token 全文都变、键永 miss，
+// 若照写会把每个前缀版本都灌进 LRU —— 一个长代码块流完能把几百条已定稿条目全部
+// 挤光，回翻历史时整批重扫。
 // eslint-disable-next-line react-refresh/only-export-components -- 纯函数 helper，热更新损失可接受
-export function highlightCode(code: string, language: string) {
+export function highlightCode(code: string, language: string, options?: { cache?: boolean }) {
   const key = `${language}\n${code}`
   const cached = highlightCache.get(key)
   if (cached) {
@@ -310,10 +313,12 @@ export function highlightCode(code: string, language: string) {
       ? <span key={index} className={token.className}>{token.text}</span>
       : token.text
   ))
-  highlightCache.set(key, rendered)
-  if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
-    const oldest = highlightCache.keys().next().value
-    if (oldest !== undefined) highlightCache.delete(oldest)
+  if (options?.cache !== false) {
+    highlightCache.set(key, rendered)
+    if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
+      const oldest = highlightCache.keys().next().value
+      if (oldest !== undefined) highlightCache.delete(oldest)
+    }
   }
   return rendered
 }
@@ -398,9 +403,11 @@ function mermaidThemeVariables(dark: boolean) {
 
 function CodeBlock({ code, language, actions }: { code: string; language: string; actions?: ReactNode }) {
   const normalizedCode = useMemo(() => normalizeCodeBlockText(code), [code])
+  // 流式中的增长块只读缓存不写（见 highlightCode 注释），定稿后首次渲染才入缓存。
+  const streaming = useContext(MarkdownStreamingContext)
   const highlighted = useMemo(
-    () => highlightCode(normalizedCode, language),
-    [normalizedCode, language],
+    () => highlightCode(normalizedCode, language, { cache: !streaming }),
+    [normalizedCode, language, streaming],
   )
   const [copied, setCopied] = useState(false)
 
@@ -447,18 +454,25 @@ function DeferredCodeBlock({ code, language }: { code: string; language: string 
   // 平常回翻历史仍延迟，省成本。
   const { loading: conversationOpening } = useConversationTransition()
   const streaming = useContext(MarkdownStreamingContext)
-  const preview = code.length > 14_000
-    ? `${code.slice(0, 10_000)}\n\n…\n\n${code.slice(-2_000)}`
-    : code
+  // ⚠️ fallback 必须与 CodeBlock 逐像素同几何：同 figure（my-3 + border）、同 pre
+  // padding（pt-10 pb-4 px-4）、同 nowrap 横向滚动、渲染**全文**（不截断）。
+  // 回翻历史时行先按 fallback 首测入列，~180ms 后 hydrate 换真身；backward 滚动中的
+  // re-measure 刻意不做滚动补偿（shouldAdjustChatItemSizeChange 对齐上游默认），
+  // fallback 与真身的任何高度差都会直接变成「翻历史时抽一下」。旧 fallback 是裸
+  // pre（少 24px 外边距/边框、py-4 vs pt-10）+ pre-wrap（长行换行）+ >14k 截断，
+  // 三处全在制造高度差。纯文本是单个 text node，渲染很便宜 —— 贵的是高亮 token
+  // span，所以全文照渲、只延后高亮。
   return (
     <ChatHeavyIsland
       minHeight={112}
       delayMs={180}
       eager={conversationOpening || streaming}
       fallback={(
-        <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 py-4 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
-          <code className="font-mono whitespace-pre-wrap">{preview}</code>
-        </pre>
+        <figure className="not-prose relative my-3 overflow-hidden rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] text-neutral-950 shadow-sm dark:text-neutral-100">
+          <pre className="custom-scrollbar m-0 max-w-full overflow-x-auto bg-transparent px-4 pb-4 pt-10 text-[13px] leading-6 text-neutral-900 dark:text-neutral-100">
+            <code className="font-mono">{normalizeCodeBlockText(code)}</code>
+          </pre>
+        </figure>
       )}
     >
       <CodeBlock code={code} language={language} />

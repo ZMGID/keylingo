@@ -194,6 +194,12 @@ export function estimateMessageRenderCost({
 const HEIGHT_PER_FENCE_PX = 24
 const HEIGHT_PER_LINE_PX = 25
 
+// CJK 字形约等于 2 个拉丁字符宽（15px 字号下 ~15px vs ~8px）。charsPerLine 按 width/8
+// 是拉丁字宽——中文正文直接除会把换行数低估近一半，整条消息估高只有真实一半，
+// 回翻/拖滚动条时估算→实测的纠正幅度巨大。与 Rust 侧 chunking.rs 的 CJK token
+// 估算是同一类修正。范围取常用 CJK 统一表意 + 扩展 A + 兼容表意 + 全角标点/假名。
+const CJK_CHAR_RE = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f]/g
+
 export function estimateRenderHeight(text: string, contentWidth = 560): number {
   if (!text) return 0
   const charsPerLine = Math.max(28, Math.min(100, Math.floor(contentWidth / 8)))
@@ -203,9 +209,13 @@ export function estimateRenderHeight(text: string, contentWidth = 560): number {
     1,
     (sampleNewlines + 1) * (text.length / Math.max(1, sample.length)),
   )
+  // 用样本里的 CJK 占比给全文加权：每个 CJK 字符按 2 个拉丁单位计宽。
+  const cjkCount = sample.match(CJK_CHAR_RE)?.length ?? 0
+  const cjkRatio = cjkCount / Math.max(1, sample.length)
+  const effectiveLength = text.length * (1 + cjkRatio)
   const estimatedWrappedLines = Math.max(
     estimatedLogicalLines,
-    Math.ceil(text.length / charsPerLine),
+    Math.ceil(effectiveLength / charsPerLine),
   )
   return Math.round(
     estimatedWrappedLines * HEIGHT_PER_LINE_PX
