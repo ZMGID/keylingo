@@ -72,10 +72,46 @@ pub(crate) fn request_lens_close(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = active_overlay_window(app) {
         if window.is_visible().ok().unwrap_or(false) {
             let _ = app.emit_to(window.label(), "lens-close-request", ());
+            // 兜底：优雅关闭走"事件 → 前端 JS → lens_close"往返，前端 webview 若已挂死/
+            // 未挂载完成/JS 报错，事件就石沉大海，浮窗永远盖着全屏、只能强杀进程。
+            // watchdog 保证再按一次热键（或全局 Esc）在宽限期后必定强制关掉浮窗。
+            schedule_forced_lens_close(app);
             return Ok(());
         }
     }
     lens_close(app.clone())
+}
+
+/// 优雅关闭的强制兜底：发出 `lens-close-request` 后延迟检查，若同一会话的浮窗仍然可见
+/// （前端没有完成 lens_close 往返，多半是 webview 挂死），直接从 Rust 侧 `lens_close` 强关。
+/// 正常关闭路径（resetBeforeHide + 2 帧 + ≤120ms idle）远快于该宽限期，不会被误伤；
+/// 宽限期内用户重开新会话时 `lens_open_seq` 已变，watchdog 自动作废。
+fn schedule_forced_lens_close(app: &AppHandle) {
+    const FORCE_CLOSE_GRACE_MS: u64 = 800;
+    let seq = app
+        .state::<AppState>()
+        .lens_open_seq
+        .load(Ordering::SeqCst);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(FORCE_CLOSE_GRACE_MS)).await;
+        let state = app.state::<AppState>();
+        if state.lens_open_seq.load(Ordering::SeqCst) != seq {
+            return;
+        }
+        let still_visible = active_overlay_window(&app)
+            .map(|w| w.is_visible().ok().unwrap_or(false))
+            .unwrap_or(false);
+        if !still_visible {
+            return;
+        }
+        eprintln!(
+            "[lens] graceful close did not complete within {FORCE_CLOSE_GRACE_MS}ms; forcing lens_close"
+        );
+        if let Err(err) = lens_close(app.clone()) {
+            eprintln!("[lens] forced lens_close failed: {err}");
+        }
+    });
 }
 
 /// 返回当前可见的浮窗（lens 问答 或 translate 快速翻译）。两窗口互斥，同一时刻至多一个
@@ -107,6 +143,8 @@ fn register_lens_escape_shortcut(app: &AppHandle) {
         };
         if window.is_visible().ok().unwrap_or(false) {
             let _ = app.emit_to(window.label(), "lens-close-request", ());
+            // 与 request_lens_close 相同的兜底：webview 挂死时事件无人处理，宽限期后强关。
+            schedule_forced_lens_close(app);
         }
     }) {
         eprintln!("[lens-esc] failed to register temporary Escape shortcut: {err}");
@@ -117,6 +155,19 @@ fn unregister_lens_escape_shortcut(app: &AppHandle) {
     let shortcuts = app.global_shortcut();
     if shortcuts.is_registered(LENS_ESCAPE_SHORTCUT) {
         let _ = shortcuts.unregister(LENS_ESCAPE_SHORTCUT);
+    }
+}
+
+/// 前端按 stage 切换全局 Esc 兜底的开关。chat 模式在 select 全屏阶段依赖它保证
+/// "webview 没拿到键盘焦点/已挂死时 Esc 依然能退出"；截图落定进入 ready 浮动栏后，
+/// Esc 的语义交还给 webview 内的 JS（流式中取消流 / drawMode 退出画笔），全局注册
+/// 会把按键整个吞掉、语义就丢了，所以离开 select 时必须注销。
+#[tauri::command]
+pub(crate) fn lens_set_escape_guard(app: AppHandle, active: bool) {
+    if active {
+        register_lens_escape_shortcut(&app);
+    } else {
+        unregister_lens_escape_shortcut(&app);
     }
 }
 
@@ -429,16 +480,19 @@ pub(crate) fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), S
     }
 
     let state = app.state::<AppState>();
-    // 自愈：busy=true 但已无浮窗可见（外部强关 / dev 重载等异常），重置 busy
+    // 自愈：busy=true 但已无浮窗可见（外部强关 / dev 重载等异常），重置 busy。
+    // 但要避开"正在开启中"的宽限期——开启过程要截冻结帧（200-500ms），窗口尚不可见，
+    // 此时若清 busy，快速连按热键会并发跑两次本函数（take-once 复位载荷被第二次吞掉）。
     if state.lens_busy.load(Ordering::SeqCst) {
         let visible = active_overlay_window(app).is_some();
-        if !visible {
+        if !visible && !state.lens_open_in_grace() {
             state.lens_busy.store(false, Ordering::SeqCst);
         }
     }
     if state.lens_busy.swap(true, Ordering::SeqCst) {
         return Err("Lens already active".to_string());
     }
+    state.mark_lens_opened();
     cleanup_lens_freeze_frame(app);
     state
         .explain_stream_generation
@@ -534,11 +588,11 @@ pub(crate) fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), S
         let _ = window.show();
         let _ = window.set_focus();
     }
-    if safe_mode == "translate" || safe_mode == "translateText" || safe_mode == "replace" {
-        register_lens_escape_shortcut(app);
-    } else {
-        unregister_lens_escape_shortcut(app);
-    }
+    // 全模式注册全局 Esc 兜底：select 全屏阶段浮窗是模态的，webview 若没拿到键盘焦点
+    // （非激活 NSPanel 的 makeFirstResponder 偶发失败）或已挂死，JS 的 keydown Esc 收不到，
+    // 全局快捷键 + schedule_forced_lens_close 是唯一退路。chat 模式截图落定离开 select 后，
+    // 前端通过 lens_set_escape_guard(false) 把 Esc 语义交还 webview（取消流式 / 退出画笔）。
+    register_lens_escape_shortcut(app);
     let frame = if safe_mode == "translateText" {
         lens_position_text_floating(app, &window);
         None

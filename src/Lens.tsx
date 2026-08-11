@@ -970,6 +970,16 @@ export default function Lens() {
     return () => window.removeEventListener('keydown', handler, true)
   }, [streaming, closeAfterReset])
 
+  // chat 模式的全局 Esc 兜底联动：后端在打开浮窗时对所有模式注册了全局 Esc（保证 select
+  // 全屏阶段即使 webview 没拿到键盘焦点/挂死也能退出）。但 chat 模式截图落定后 Esc 有
+  // 细分语义（流式中取消流 / drawMode 退出画笔，见上方 keydown handler），全局快捷键会把
+  // 按键整个吞掉 —— 所以离开 select 时关掉兜底、回到 select（重新截图）时再开。
+  // 其他模式（translate/translateText/replace/screenshot）Esc 语义始终是"关闭"，保持常开。
+  useEffect(() => {
+    if (mode !== 'chat') return
+    api.lensSetEscapeGuard(stage === 'select').catch(err => console.error('[lens] escape guard sync failed', err))
+  }, [mode, stage])
+
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | undefined

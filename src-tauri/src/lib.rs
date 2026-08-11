@@ -490,6 +490,7 @@ pub fn run() {
             lens_commands::lens_cancel_stream,
             lens_commands::lens_focus_webview,
             lens_commands::lens_close,
+            lens_commands::lens_set_escape_guard,
             lens_commands::lens_take_reset_payload,
             lens_commands::lens_set_floating,
             lens_commands::lens_animate_floating,

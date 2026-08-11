@@ -1189,6 +1189,12 @@ fn lens_is_active(app: &AppHandle) -> bool {
             if any_overlay_visible() {
                 return true;
             }
+            // "刚开启"宽限期内窗口可能还没来得及可见（开启要先截冻结帧，200-500ms）。
+            // 此时既不能清 busy（否则快速连按热键会并发双开 lens_request_internal，
+            // take-once 复位载荷被吞），也不当作 active（避免把正在开启的会话误关）。
+            if state.lens_open_in_grace() {
+                return false;
+            }
             state.lens_busy.store(false, Ordering::SeqCst);
         }
     }

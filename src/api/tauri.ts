@@ -2349,6 +2349,9 @@ export const api = {
   // 让原生把 lens 浮窗内部 WKWebView 设为 first responder（修复复用窗口第二次打开偶尔不聚焦）。
   lensFocusWebview: () => invoke<void>('lens_focus_webview'),
   lensClose: () => invoke<void>('lens_close'),
+  // 全局 Esc 兜底开关：select 全屏阶段由后端全局快捷键保证 Esc 必能退出（webview 未拿到
+  // 键盘焦点/挂死时 JS keydown 收不到）；chat 模式离开 select 后关掉，把 Esc 语义交还 JS。
+  lensSetEscapeGuard: (active: boolean) => invoke<void>('lens_set_escape_guard', { active }),
   // 取走 select 态复位载荷（frame + freezeFrameImageId 的 JSON）。冷挂载兜底用：lens:reset
   // 事件可能早于监听注册被丢，前端挂载时主动拉一次，丢事件也不丢冻结帧。无 pending 返回 null。
   lensTakeResetPayload: () => invoke<string | null>('lens_take_reset_payload'),

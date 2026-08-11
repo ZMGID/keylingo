@@ -126,6 +126,15 @@ pub struct AppState {
     pub explain_images: Mutex<HashMap<String, PathBuf>>,
     pub current_explain_image_id: Mutex<Option<String>>,
     pub lens_busy: AtomicBool,
+    /// Lens 会话代号：每次 `lens_request_internal` 成功开启一个新浮窗会话就 +1。
+    /// 强制关闭 watchdog（`schedule_forced_lens_close`）用它判断"宽限期内是否已开了新会话"，
+    /// 避免迟到的 watchdog 误杀用户刚刚重新打开的浮窗。
+    pub lens_open_seq: AtomicU64,
+    /// 最近一次 Lens 开启的时刻。busy 自愈（busy=true 但无浮窗可见 → 清 busy）必须避开
+    /// "正在开启中"的窗口期：开启过程要截冻结帧（200-500ms），此时窗口尚不可见，若立即
+    /// 自愈会让快速连按热键并发跑两次 lens_request_internal（take-once 复位载荷被吞，
+    /// 前端进入坏状态）。宽限期内（LENS_OPEN_GRACE）不自愈。
+    pub lens_opened_at: Mutex<Option<std::time::Instant>>,
     /// macOS：打开浮窗前记下的前台 App PID（0 = 无 / 前台就是 Kivio 自己），关闭浮窗时据此把
     /// 前台交还给原来的 App，避免 Kivio 变成"前台却无窗口"而触发 RunEvent::Reopen 误开 Chat。
     /// lens（含截图/选词翻译）与输入翻译是各自独立、可同时存在的浮窗，各占一个槽，避免相互覆盖。
@@ -372,6 +381,8 @@ impl AppState {
             explain_images: Mutex::new(HashMap::new()),
             current_explain_image_id: Mutex::new(None),
             lens_busy: AtomicBool::new(false),
+            lens_open_seq: AtomicU64::new(0),
+            lens_opened_at: Mutex::new(None),
             prev_frontmost_pid_lens: AtomicI32::new(0),
             prev_frontmost_pid_main: AtomicI32::new(0),
             explain_stream_generation: AtomicU64::new(0),
@@ -474,6 +485,29 @@ impl AppState {
         self.current_explain_image_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+    /// 标记一次 Lens 浮窗会话开启：会话代号 +1 并记录开启时刻。
+    /// 返回新代号，供强制关闭 watchdog 快照比对。
+    pub fn mark_lens_opened(&self) -> u64 {
+        let seq = self
+            .lens_open_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        *self
+            .lens_opened_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        seq
+    }
+    /// Lens 是否处于"刚开启"宽限期内（窗口可能还没来得及可见）。
+    /// busy 自愈逻辑在宽限期内不得清 busy，否则快速连按热键会并发双开。
+    pub fn lens_open_in_grace(&self) -> bool {
+        const LENS_OPEN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+        self.lens_opened_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|at| at.elapsed() < LENS_OPEN_GRACE)
+            .unwrap_or(false)
     }
 
     /// 选择一个可用的 API Key 索引：
