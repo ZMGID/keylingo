@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode } from 'react'
 
 /** 大小写不敏感拆分：按 needle 切开，保留原文大小写。空 query 原样返回。 */
+// eslint-disable-next-line react-refresh/only-export-components -- 纯工具函数与高亮组件天然同源，拆文件反而割裂
 export function splitHighlightParts(text: string, query: string): Array<{ text: string; match: boolean }> {
   const needle = query.trim()
   if (!text || !needle) return [{ text, match: false }]

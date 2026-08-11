@@ -14,6 +14,12 @@ import { i18n } from '../i18n'
 const t = i18n.zh
 
 type Props = Parameters<typeof ChatTab>[0]
+/** 回调字段替换成 vi.fn Mock，测试里才能用 mockClear / mock.calls。 */
+type MockedProps = Omit<Props, 'onUpdateChat' | 'onUpdateNativeTools' | 'onNavigateTab'> & {
+  onUpdateChat: ReturnType<typeof vi.fn>
+  onUpdateNativeTools: ReturnType<typeof vi.fn>
+  onNavigateTab: ReturnType<typeof vi.fn>
+}
 
 /**
  * 回归重点：
@@ -21,8 +27,8 @@ type Props = Parameters<typeof ChatTab>[0]
  *   2. 最大输出 token 的「生效值 / 来源标签 / 模型名」不串位
  *   3. PromptField：空值显示 defaultText；恢复默认写回 ''
  */
-function renderTab(overrides: Partial<Props> = {}) {
-  const props: Props = {
+function renderTab(overrides: Partial<MockedProps> = {}) {
+  const props: MockedProps = {
     settings: makeSettings({ providers: [makeProvider()] }),
     t,
     lang: 'zh',

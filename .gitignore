@@ -59,3 +59,6 @@ MEMORY.md
 /mcps/
 /output/
 /.playwright-cli/
+
+# 本地手测用的外部仓库克隆（不入库）
+/test-ZMGID/

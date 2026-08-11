@@ -251,7 +251,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const [confirmDeleteProviderId, setConfirmDeleteProviderId] = useState<string | null>(null)
   const [recordingTarget, setRecordingTarget] = useState<HotkeyScopeKey | null>(null)
   const [defaultPrompts, setDefaultPrompts] = useState<DefaultPromptTemplates | null>(null)
-  const [chatSystemPromptInteracted, setChatSystemPromptInteracted] = useState(false)
   const [retryAttemptsInput, setRetryAttemptsInput] = useState('')
   const [uiFontPxInput, setUiFontPxInput] = useState('')
   const [systemFonts, setSystemFonts] = useState<string[]>([])
@@ -406,7 +405,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       currentSettingsSnapshotRef.current = cachedSnapshot
       setSettings(cached)
       setInitialSettingsSnapshot(cachedSnapshot)
-      setChatSystemPromptInteracted(false)
       setLoading(false)
       void refreshSettings()
         .then((fresh) => {
@@ -428,7 +426,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           if (!active) return
           setSettings(data)
           setInitialSettingsSnapshot(stableStringify(data))
-          setChatSystemPromptInteracted(false)
           setLoading(false)
         })
         .catch((err) => {
@@ -1591,9 +1588,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const chatRuntimeDefaults = defaultPrompts?.chatRuntimePrompt
   const chatConfig = settings?.chat || defaultChatConfig()
   const chatMemory = settings?.chatMemory || defaultChatMemory()
-  const chatSystemPromptValue = chatSystemPromptInteracted
-    ? (chatConfig.systemPrompt || '')
-    : (chatConfig.systemPrompt || chatDefaults || '')
   const chatFallbackMaxOutputTokens = chatConfig.maxOutputTokens ?? 8192
   const effectiveChatMaxOutput = settings
     ? resolveEffectiveChatMaxOutput(settings, chatFallbackMaxOutputTokens)

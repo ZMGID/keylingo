@@ -88,7 +88,7 @@ describe('streamingStore content slice', () => {
 describe('streamingStore turn lifecycle (smoke)', () => {
   it('start → stream text → finish leaves idle content and non-streaming coarse state', () => {
     reset()
-    setCoarse({ streaming: true, streamError: null })
+    setCoarse({ streaming: true, streamError: '' })
     setSnapshot({
       ...createEmptyStreamSnapshot(),
       runId: 'run-1',

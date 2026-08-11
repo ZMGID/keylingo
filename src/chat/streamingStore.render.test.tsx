@@ -355,7 +355,7 @@ describe('MessageList ← streamingStore 集成', () => {
     await flush()
 
     const scroller = container.querySelector('.chat-motion-view-in.custom-scrollbar') as HTMLDivElement
-    let scrollHeight = 3000
+    const scrollHeight = 3000
     let scrollTop = 0
     let writes = 0
     Object.defineProperties(scroller, {
