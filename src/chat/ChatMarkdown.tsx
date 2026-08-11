@@ -712,6 +712,10 @@ function HtmlCodePreview({ html }: { html: string }) {
             <iframe
               title="HTML 预览"
               srcDoc={previewHtml}
+              // 模型输出是不可信输入。允许脚本用于交互式预览，但绝不允许 same-origin：
+              // 否则 srcDoc 可直接访问父聊天页及 Tauri 注入的 IPC 全局。
+              sandbox="allow-scripts"
+              referrerPolicy="no-referrer"
               className="h-[520px] w-full border-0 bg-white dark:bg-neutral-950"
             />
           </div>

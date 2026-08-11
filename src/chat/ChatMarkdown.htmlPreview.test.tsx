@@ -36,6 +36,10 @@ describe('HTML 预览挂载时机', () => {
 
   it('历史消息（非流式）首帧直接挂 iframe', () => {
     const { container } = render(<ChatMarkdown content={block('<p>done</p>')} />)
-    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain('<p>done</p>')
+    const iframe = container.querySelector('iframe')
+    expect(iframe?.getAttribute('srcdoc')).toContain('<p>done</p>')
+    expect(iframe).toHaveAttribute('sandbox', 'allow-scripts')
+    expect(iframe?.getAttribute('sandbox')).not.toContain('allow-same-origin')
+    expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer')
   })
 })
