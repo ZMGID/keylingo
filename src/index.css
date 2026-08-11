@@ -4665,16 +4665,42 @@ input[type="password"]::-ms-clear {
 .kv-provider-modal-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 13px 18px;
   border-bottom: 1px solid var(--divider);
 }
-.kv-provider-modal-head h3 {
+.kv-provider-modal-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-input-subtle, var(--bg-hover));
+}
+.kv-provider-modal-titles {
   flex: 1;
   min-width: 0;
-  font-size: 15px;
+}
+.kv-provider-modal-titles h3 {
+  margin: 0;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kv-provider-modal-titles p {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .kv-provider-modal-body {
   flex: 1;
@@ -4743,20 +4769,21 @@ input[type="password"]::-ms-clear {
 .kv-native-provider-form {
   display: flex;
   flex-direction: column;
+  gap: 12px;
 }
+/* 表单分组卡片：供应商信息 / 连接 / 模型 / 启动默认值 各成一块 */
 .kv-native-section {
-  padding-bottom: 12px;
-}
-.kv-native-section + .kv-native-section {
-  padding-top: 14px;
-  border-top: 1px solid var(--divider);
+  padding: 12px 14px 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-input-subtle, var(--bg-hover)) 38%, var(--bg));
 }
 .kv-native-section-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
-  margin-bottom: 9px;
+  margin-bottom: 10px;
 }
 .kv-native-section-head h4 {
   margin: 0;
@@ -4981,26 +5008,11 @@ input[type="password"]::-ms-clear {
   color: #fbbf24;
 }
 
-/* 预设芯片组（官方 + 中转） */
-.kv-preset-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.kv-preset-title {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-  letter-spacing: 0.01em;
-}
+/* 预设芯片组（中转 / 第三方）——在分组卡片里裸排，芯片自带描边 */
 .kv-preset-buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-input-subtle, var(--bg-hover));
 }
 .kv-preset-btn {
   display: inline-flex;
@@ -5117,10 +5129,7 @@ input[type="password"]::-ms-clear {
   font-size: 12px;
 }
 
-.kv-cli-advanced {
-  padding-top: 4px;
-  border-top: 1px solid var(--divider);
-}
+/* 高级区（JSON / 原始 env / config.toml）：卡片外的收纳区 */
 .kv-cli-advanced-body {
   margin-top: 8px;
   display: flex;

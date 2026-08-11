@@ -21,6 +21,7 @@ import OpenCode from '@lobehub/icons/es/OpenCode/components/Mono'
 import LongCat from '@lobehub/icons/es/LongCat/components/Color'
 import XiaomiMiMo from '@lobehub/icons/es/XiaomiMiMo/components/Mono'
 import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono'
+import { AgentIcon } from '../chat/AgentIcon'
 import { Input, Label, Select, SuggestInput, TextArea, Toggle } from './components'
 import { Button, IconButton } from '../components/Button'
 import type { SelectOption } from './utils'
@@ -775,6 +776,11 @@ export function CliProviderModal({
     agentName,
   )
 
+  /** 头部副标题：说明这份配置写到哪、影响范围多大。与列表页底部的 scope 提示同一口径。 */
+  const scopeHint = isNative || isGrok || isKimi
+    ? t.externalAgentsNativeScope
+    : t.externalAgentsProviderScope
+
   const relayPresets = useMemo(
     () => [CLAUDE_CUSTOM_PRESET, ...CLAUDE_RELAY_PRESETS],
     [],
@@ -829,9 +835,14 @@ export function CliProviderModal({
   )
 
   const claudeBody = (
-    <>
-      <div className="kv-preset-group">
-        <div className="kv-preset-title">{t.externalAgentsPresetRelaySection}</div>
+    <div className="kv-native-provider-form">
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <div>
+            <h4>{t.externalAgentsPresetRelaySection}</h4>
+            <p>{t.externalAgentsPresetRelayHint}</p>
+          </div>
+        </div>
         <div className="kv-preset-buttons">
           {relayPresets.map((preset) => (
             <button
@@ -848,62 +859,71 @@ export function CliProviderModal({
             </button>
           ))}
         </div>
-        <p className="kv-row-desc">{t.externalAgentsPresetRelayHint}</p>
-      </div>
+      </section>
 
-      <div className="kv-form-grid">
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderName} required />
-          <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeIdentitySection}</h4>
         </div>
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderRemark} />
-          <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
-        </div>
-      </div>
-
-      <div className="kv-form-grid">
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderApiUrl} required />
-          <Input
-            value={baseUrl}
-            onChange={(value) => {
-              patchEnv(CLAUDE_BASE_URL, value)
-              setActivePreset(detectClaudePresetId({ ANTHROPIC_BASE_URL: value }))
-            }}
-            mono
-            placeholder="https://example.com/anthropic"
-          />
-          <p className="kv-row-desc">{t.externalAgentsProviderApiUrlHint}</p>
-        </div>
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderApiKey} required />
-          <div className="kv-key-field">
-            <Input
-              value={readClaudeApiKey(env)}
-              onChange={(value) => {
-                setEnv((prev) => writeClaudeApiKey(prev, value))
-                setJsonDraft(null)
-              }}
-              type={showKey ? 'text' : 'password'}
-              mono
-              placeholder="sk-…"
-            />
-            <IconButton
-              size="sm"
-              label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
-              onClick={() => setShowKey((prev) => !prev)}
-            >
-              {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
-            </IconButton>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderName} required />
+            <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
           </div>
-          <p className="kv-row-desc">{t.externalAgentsProviderApiKeyHint}</p>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderRemark} />
+            <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div className="kv-form-block">
-        <div className="kv-field-row">
-          <FieldLabel text={t.externalAgentsProviderModels} />
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeConnectionSection}</h4>
+        </div>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiUrl} required />
+            <Input
+              value={baseUrl}
+              onChange={(value) => {
+                patchEnv(CLAUDE_BASE_URL, value)
+                setActivePreset(detectClaudePresetId({ ANTHROPIC_BASE_URL: value }))
+              }}
+              mono
+              placeholder="https://example.com/anthropic"
+            />
+            <p className="kv-row-desc">{t.externalAgentsProviderApiUrlHint}</p>
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiKey} required />
+            <div className="kv-key-field">
+              <Input
+                value={readClaudeApiKey(env)}
+                onChange={(value) => {
+                  setEnv((prev) => writeClaudeApiKey(prev, value))
+                  setJsonDraft(null)
+                }}
+                type={showKey ? 'text' : 'password'}
+                mono
+                placeholder="sk-…"
+              />
+              <IconButton
+                size="sm"
+                label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
+                onClick={() => setShowKey((prev) => !prev)}
+              >
+                {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+              </IconButton>
+            </div>
+            <p className="kv-row-desc">{t.externalAgentsProviderApiKeyHint}</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head kv-native-section-head--actions">
+          <h4>{t.externalAgentsProviderModels}</h4>
           <Button size="sm" onClick={() => void fetchModels()} disabled={fetching || !baseUrl.trim()}>
             <RefreshCw size={12} className={fetching ? 'animate-spin' : ''} />
             {fetching ? t.externalAgentsProviderFetchingModels : t.externalAgentsProviderFetchModels}
@@ -924,9 +944,9 @@ export function CliProviderModal({
         <p className={`kv-row-desc ${fetchNote && fetchedModels.length === 0 && fetchNote !== t.externalAgentsProviderModelsEmpty ? 'kv-form-error-inline' : ''}`}>
           {fetchNote || t.externalAgentsProviderModelsHint}
         </p>
-      </div>
+      </section>
 
-      <div className="kv-form-block kv-cli-advanced">
+      <div className="kv-native-provider-advanced">
         <button
           type="button"
           className="kv-disclosure"
@@ -962,13 +982,18 @@ export function CliProviderModal({
         </button>
         {showRaw && <div className="kv-cli-advanced-body">{envEditor}</div>}
       </div>
-    </>
+    </div>
   )
 
   const codexBody = (
-    <>
-      <div className="kv-preset-group">
-        <div className="kv-preset-title">{t.externalAgentsPresetRelaySection}</div>
+    <div className="kv-native-provider-form">
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <div>
+            <h4>{t.externalAgentsPresetRelaySection}</h4>
+            <p>{t.externalAgentsCodexPresetHint}</p>
+          </div>
+        </div>
         <div className="kv-preset-buttons">
           {codexPresets.map((preset) => (
             <button
@@ -985,56 +1010,65 @@ export function CliProviderModal({
             </button>
           ))}
         </div>
-        <p className="kv-row-desc">{t.externalAgentsCodexPresetHint}</p>
-      </div>
+      </section>
 
-      <div className="kv-form-grid">
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderName} required />
-          <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeIdentitySection}</h4>
         </div>
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderRemark} />
-          <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
-        </div>
-      </div>
-
-      <div className="kv-form-grid">
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderApiUrl} required />
-          <Input
-            value={codexBaseUrl}
-            onChange={(value) => patchCodexFields({ baseUrl: value })}
-            mono
-            placeholder="https://api.example.com/v1"
-          />
-          <p className="kv-row-desc">{t.externalAgentsCodexApiUrlHint}</p>
-        </div>
-        <div className="kv-form-block">
-          <FieldLabel text={t.externalAgentsProviderApiKey} required />
-          <div className="kv-key-field">
-            <Input
-              value={codexApiKey}
-              onChange={(value) => patchCodexFields({ apiKey: value })}
-              type={showKey ? 'text' : 'password'}
-              mono
-              placeholder="sk-…"
-            />
-            <IconButton
-              size="sm"
-              label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
-              onClick={() => setShowKey((prev) => !prev)}
-            >
-              {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
-            </IconButton>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderName} required />
+            <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
           </div>
-          <p className="kv-row-desc">{t.externalAgentsCodexAuthHint}</p>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderRemark} />
+            <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div className="kv-form-block">
-        <div className="kv-field-row">
-          <FieldLabel text={t.externalAgentsCodexDefaultModel} />
+      <section className="kv-native-section">
+        <div className="kv-native-section-head">
+          <h4>{t.externalAgentsNativeConnectionSection}</h4>
+        </div>
+        <div className="kv-form-grid">
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiUrl} required />
+            <Input
+              value={codexBaseUrl}
+              onChange={(value) => patchCodexFields({ baseUrl: value })}
+              mono
+              placeholder="https://api.example.com/v1"
+            />
+            <p className="kv-row-desc">{t.externalAgentsCodexApiUrlHint}</p>
+          </div>
+          <div className="kv-form-block">
+            <FieldLabel text={t.externalAgentsProviderApiKey} required />
+            <div className="kv-key-field">
+              <Input
+                value={codexApiKey}
+                onChange={(value) => patchCodexFields({ apiKey: value })}
+                type={showKey ? 'text' : 'password'}
+                mono
+                placeholder="sk-…"
+              />
+              <IconButton
+                size="sm"
+                label={showKey ? t.externalAgentsProviderHideKey : t.externalAgentsProviderShowKey}
+                onClick={() => setShowKey((prev) => !prev)}
+              >
+                {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+              </IconButton>
+            </div>
+            <p className="kv-row-desc">{t.externalAgentsCodexAuthHint}</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="kv-native-section">
+        <div className="kv-native-section-head kv-native-section-head--actions">
+          <h4>{t.externalAgentsCodexDefaultModel}</h4>
           <Button size="sm" onClick={() => void fetchModels()} disabled={fetching || !codexBaseUrl.trim()}>
             <RefreshCw size={12} className={fetching ? 'animate-spin' : ''} />
             {fetching ? t.externalAgentsProviderFetchingModels : t.externalAgentsProviderFetchModels}
@@ -1051,9 +1085,9 @@ export function CliProviderModal({
         <p className={`kv-row-desc ${fetchNote && fetchedModels.length === 0 && fetchNote !== t.externalAgentsProviderModelsEmpty ? 'kv-form-error-inline' : ''}`}>
           {fetchNote || t.externalAgentsCodexModelHint}
         </p>
-      </div>
+      </section>
 
-      <div className="kv-form-block kv-cli-advanced">
+      <div className="kv-native-provider-advanced">
         <button
           type="button"
           className="kv-disclosure"
@@ -1096,7 +1130,7 @@ export function CliProviderModal({
           </div>
         )}
       </div>
-    </>
+    </div>
   )
 
   const grokBody = (
@@ -1968,7 +2002,13 @@ export function CliProviderModal({
         data-tauri-drag-region="false"
       >
         <div className="kv-provider-modal-head">
-          <h3>{title}</h3>
+          <span className="kv-provider-modal-icon" aria-hidden>
+            <AgentIcon id={agentId} size={17} />
+          </span>
+          <div className="kv-provider-modal-titles">
+            <h3>{title}</h3>
+            <p>{scopeHint}</p>
+          </div>
           <IconButton size="sm" label={t.cancel} onClick={onClose} data-tauri-drag-region="false">
             <X size={15} />
           </IconButton>
@@ -1986,23 +2026,36 @@ export function CliProviderModal({
           ) : isNative ? (
             nativeBody
           ) : (
-            <>
-              <div className="kv-form-grid">
-                <div className="kv-form-block">
-                  <FieldLabel text={t.externalAgentsProviderName} required />
-                  <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+            <div className="kv-native-provider-form">
+              <section className="kv-native-section">
+                <div className="kv-native-section-head">
+                  <h4>{t.externalAgentsNativeIdentitySection}</h4>
                 </div>
-                <div className="kv-form-block">
-                  <FieldLabel text={t.externalAgentsProviderRemark} />
-                  <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+                <div className="kv-form-grid">
+                  <div className="kv-form-block">
+                    <FieldLabel text={t.externalAgentsProviderName} required />
+                    <Input value={name} onChange={setName} placeholder={t.externalAgentsProviderNamePlaceholder} />
+                  </div>
+                  <div className="kv-form-block">
+                    <FieldLabel text={t.externalAgentsProviderRemark} />
+                    <Input value={remark} onChange={setRemark} placeholder={t.externalAgentsProviderRemarkHint} />
+                  </div>
                 </div>
-              </div>
+              </section>
 
-              <div className="kv-form-block">
-                <FieldLabel text={t.externalAgentsProviderRawEnv} required />
+              <section className="kv-native-section">
+                <div className="kv-native-section-head">
+                  <div>
+                    <h4>
+                      {t.externalAgentsProviderRawEnv}
+                      <span className="kv-req"> *</span>
+                    </h4>
+                    <p>{t.externalAgentsProviderEnvOnly}</p>
+                  </div>
+                </div>
                 {envEditor}
-              </div>
-            </>
+              </section>
+            </div>
           )}
         </div>
 
