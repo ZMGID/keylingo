@@ -411,13 +411,11 @@ body {
   display: none;
 }
 
-/* 自定义滚动条 — 悬浮胶囊式（chat 模型/权限等下拉菜单共用） */
-.custom-scrollbar,
-.chat-model-selector-menu,
-.chat-popover-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
-}
+/* 自定义滚动条 — 悬浮胶囊式（chat 模型/权限等下拉菜单共用）。
+   注意：这里绝不能写标准属性 scrollbar-width / scrollbar-color —— 新版 WebKit（Safari 18.2+）
+   与 Chromium 121+ 支持它们，且一旦设置就整体禁用下方 ::-webkit-scrollbar 自定义样式，
+   退化成"始终绘制"的标准滚动条（表现为侧栏滚动条常驻不消失）。
+   默认 thumb 透明 = 平时隐形，容器 hover / 滚动时才浮现。 */
 
 .custom-scrollbar::-webkit-scrollbar,
 .chat-model-selector-menu::-webkit-scrollbar,
@@ -455,12 +453,6 @@ body {
 .chat-popover-scroll::-webkit-scrollbar-thumb:hover {
   background-color: rgba(0, 0, 0, 0.32);
   border-width: 2px;
-}
-
-.dark .custom-scrollbar,
-.dark .chat-model-selector-menu,
-.dark .chat-popover-scroll {
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
 .dark .custom-scrollbar::-webkit-scrollbar-thumb,
