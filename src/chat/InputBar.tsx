@@ -350,7 +350,15 @@ function readFileAsBase64(file: File, readError: string): Promise<string> {
 }
 
 export interface InputBarProps {
-  onSend: (content: string, attachments: PendingAttachment[]) => void
+  /**
+   * 返回 false 表示发送未被接受；此时保留输入草稿和附件。
+   * 长任务应在消息正式进入发送流程时调用 onAccepted，让输入框立即清空，无需等待整轮生成完成。
+   */
+  onSend: (
+    content: string,
+    attachments: PendingAttachment[],
+    options?: { onAccepted?: () => void },
+  ) => boolean | void | Promise<boolean | void>
   disabled?: boolean
   /**
    * 生成中（`disabled`）时的排队入口。传了它 = 运行中不再吞掉发送，而是把这条排进队列，
@@ -488,7 +496,8 @@ export const InputBar = memo(function InputBar({
   // 生成中的排队模式：Enter 改成入队，且只锁「要打后端」的入口。附件的选择 / 粘贴 / 拖入
   // 是纯本地状态，运行中做没有风险，所以走 composerLocked（比 disabled 宽）这道门。
   const queueMode = Boolean(disabled && onQueue)
-  const composerLocked = Boolean(disabled) && !queueMode
+  const [sendPending, setSendPending] = useState(false)
+  const composerLocked = (Boolean(disabled) || sendPending) && !queueMode
   const draftKeyValue = draftKey(conversationId)
   const [input, setInput] = useState(() => getComposerDraft(draftKeyValue)?.input ?? '')
   const [quotes, setQuotes] = useState<string[]>(() => getComposerDraft(draftKeyValue)?.quotes ?? [])
@@ -516,13 +525,21 @@ export const InputBar = memo(function InputBar({
   // 草稿持久化：会话 key 变化（切对话且未卸载）时载入对应草稿；每次内容变化写回内存 store。
   // keyRef 保证写回落到当前会话，不串到刚切走的会话。
   const draftKeyRef = useRef(draftKeyValue)
+  // 发送等待期间如果「新会话占位键」迁移成真实会话 id，清理目标也要跟着迁移；
+  // 但普通切会话没有发生草稿迁移时，绝不能误清新会话自己的草稿。
+  const sendingDraftKeyRef = useRef<string | null>(null)
   useEffect(() => {
     if (draftKeyRef.current === draftKeyValue) return
     const prevKey = draftKeyRef.current
     draftKeyRef.current = draftKeyValue
     // 新建会话刚落库拿到 id（切 plan/orchestrate 模式等会触发）：草稿跟着搬过去，
     // 本地 state 已经是那份内容，直接返回，别当成「切到了另一条会话」把字清掉。
-    if (migrateNewChatDraft(prevKey, draftKeyValue)) return
+    if (migrateNewChatDraft(prevKey, draftKeyValue)) {
+      if (sendingDraftKeyRef.current === prevKey) {
+        sendingDraftKeyRef.current = draftKeyValue
+      }
+      return
+    }
     const d = getComposerDraft(draftKeyValue)
     setInput(d?.input ?? '')
     setQuotes(d?.quotes ?? [])
@@ -1042,9 +1059,26 @@ export const InputBar = memo(function InputBar({
   ])
 
 
-  const handleSend = () => {
+  const clearSentDraft = (sentDraftKey: string) => {
+    setComposerDraft(sentDraftKey, { input: '', quotes: [], attachments: [] })
+    // 等待发送时用户可能已经切到另一条有自己草稿的会话。只清本次提交实际归属的输入框。
+    if (draftKeyRef.current !== sentDraftKey) return
+    setInput('')
+    setQuotes([])
+    setAttachments([])
+    setAttachmentError('')
+    setToolPanelOpen(false)
+    closeProjectMenu()
+    setSlashPanelOpen(false)
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+      textareaRef.current.style.overflowY = 'hidden'
+    }
+  }
+
+  const handleSend = async () => {
     const trimmed = input.trim()
-    if ((!trimmed && quotes.length === 0 && attachments.length === 0) || sendDisabledReason) return
+    if (sendPending || (!trimmed && quotes.length === 0 && attachments.length === 0) || sendDisabledReason) return
     // 生成中：有排队入口就排队（本轮结束后自动发出），没有就照旧什么都不做。
     if (disabled && !onQueue) return
     const quotedBlock = quotes
@@ -1055,25 +1089,30 @@ export const InputBar = memo(function InputBar({
       : trimmed
     if (disabled && onQueue) {
       onQueue(content, attachments)
+      clearSentDraft(draftKeyRef.current)
     } else {
-      onSend(content, attachments)
-    }
-    // 同步清草稿 store，不能只靠下面 setState 后的写回 effect：首次发送常在同一提交里
-    // 把欢迎页 InputBar 卸载（欢迎页→对话页切换），卸载组件的 pending state 被丢弃、
-    // effect 不再跑，残留草稿会被新挂载的 InputBar 回填成「发送后输入框多一份文本」。
-    setComposerDraft(draftKeyRef.current, { input: '', quotes: [], attachments: [] })
-    setInput('')
-    setQuotes([])
-    // 附件已随消息提交：清空输入框附件区。
-    // 虚拟文本附件由后端持久化为 memory:// 附件记录，随已发送消息在气泡中展示。
-    setAttachments([])
-    setAttachmentError('')
-    setToolPanelOpen(false)
-    closeProjectMenu()
-    setSlashPanelOpen(false)
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.overflowY = 'hidden'
+      sendingDraftKeyRef.current = draftKeyRef.current
+      setSendPending(true)
+      let acceptedNotified = false
+      const notifyAccepted = () => {
+        if (acceptedNotified) return
+        acceptedNotified = true
+        clearSentDraft(sendingDraftKeyRef.current ?? draftKeyRef.current)
+        sendingDraftKeyRef.current = null
+        // 后端生成仍在继续，但输入框已经可以接收下一条排队消息。
+        setSendPending(false)
+      }
+      try {
+        const accepted = await onSend(content, attachments, { onAccepted: notifyAccepted })
+        if (accepted === false) return
+        // 兼容没有“已接收”通知的普通 onSend：Promise 完成后再按旧语义清理。
+        notifyAccepted()
+      } catch (error) {
+        console.error('Failed to submit composer message:', error)
+      } finally {
+        sendingDraftKeyRef.current = null
+        setSendPending(false)
+      }
     }
   }
 
@@ -1138,7 +1177,7 @@ export const InputBar = memo(function InputBar({
 
     if (e.key !== 'Enter' || e.shiftKey) return
     e.preventDefault()
-    handleSend()
+    void handleSend()
   }
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1459,6 +1498,7 @@ export const InputBar = memo(function InputBar({
     && !slashPanelOpen
     && (!disabled || queueMode)
     && !sendDisabledReason
+    && !sendPending
   // 发送键与停止键共用输入行右侧那一个槽位（crossfade）。生成中**有东西可发**时把槽位还给
   // 发送键 —— 就是原本那个键、原本的样子，按下去这一条进队列。这一刻停止走 Esc（见
   // handleKeyDown）或清空输入框让停止键回来；否则用户在生成中打完字会发现没有键可按。
@@ -1828,6 +1868,8 @@ export const InputBar = memo(function InputBar({
             <textarea
               ref={textareaRef}
               value={input}
+              readOnly={sendPending}
+              aria-busy={sendPending}
               onChange={handleInput}
               onPaste={(e) => void handlePaste(e)}
               onKeyDown={handleKeyDown}
@@ -1855,7 +1897,7 @@ export const InputBar = memo(function InputBar({
             <div className="chat-composer-send-slot absolute inset-y-0 right-2 my-auto h-7 w-7">
               <button
                 type="button"
-                onClick={handleSend}
+                onClick={() => void handleSend()}
                 disabled={!canSend}
                 tabIndex={-1}
                 title={sendDisabledReason || (canSend ? t.chatSend : t.chatSendHintEmpty)}

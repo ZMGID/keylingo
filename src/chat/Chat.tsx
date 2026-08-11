@@ -925,6 +925,8 @@ function settleOptimisticConversationListItem(
 type SendMessageOptions = {
   forceNewConversation?: boolean
   conversationOverride?: Conversation | null
+  /** 前置校验完成、消息正式进入本地发送流程；输入框可立即清空。 */
+  onAccepted?: () => void
 }
 
 /** 稳定空数组：没有排队消息时不要每次渲染都造一个新引用。 */
@@ -1015,10 +1017,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [toolsRequested, setToolsRequested] = useState(false)
   const [approvalPolicy, setApprovalPolicy] = useState('readonly_auto_sensitive_confirm')
   const [pendingToolConfirm, setPendingToolConfirm] = useState<ChatToolConfirmPayload | null>(null)
+  const [toolConfirmSubmittingId, setToolConfirmSubmittingId] = useState<string | null>(null)
+  const [toolConfirmError, setToolConfirmError] = useState('')
   /** 待答的问用户询问：整张可作答的面板吊在**输入框上方**（与审批卡同一个槽位），
    *  消息流里只留一行痕迹。生成这一刻是停在这里等人的，把它放在视线和手都在的地方。 */
   const [pendingUserPrompt, setPendingUserPrompt] = useState<ChatUserPromptPayload | null>(null)
   const [pendingSessionConsent, setPendingSessionConsent] = useState<ChatSessionConsentPayload | null>(null)
+  const [sessionConsentSubmittingConversationId, setSessionConsentSubmittingConversationId] = useState<string | null>(null)
+  const [sessionConsentError, setSessionConsentError] = useState('')
   const [contextState, setContextState] = useState<ConversationContextState | null>(null)
   const [contextLoading, setContextLoading] = useState(false)
   // 压缩状态必须按会话记，不能用全局 boolean：压缩中切会话会把「压缩中」动画留在
@@ -1088,9 +1094,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const streamSnapshotsRef = useRef<Record<string, ConversationStreamSnapshot>>({})
   const streamErrorsRef = useRef<Record<string, string>>({})
   const pendingToolConfirmsRef = useRef<Record<string, ChatToolConfirmPayload[]>>({})
+  const toolConfirmSubmissionsRef = useRef<Set<string>>(new Set())
   /** 按会话排队（同审批卡）：切会话回来还在等的那条要还在。 */
   const pendingUserPromptsRef = useRef<Record<string, ChatUserPromptPayload[]>>({})
   const pendingSessionConsentsRef = useRef<Record<string, ChatSessionConsentPayload>>({})
+  const sessionConsentSubmissionsRef = useRef<Set<string>>(new Set())
   const streamStartedAtRef = useRef<number | null>(null)
   const streamingContentRef = useRef('')
   const streamingReasoningRef = useRef('')
@@ -1211,13 +1219,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setContextState(conversation?.context_state ?? conversation?.contextState ?? null)
   }, [])
 
+  /** 后台异步结果只能更新它发起时所属的会话，不能把用户后来打开的会话顶掉。 */
+  const applyConversationIfCurrent = useCallback((expectedId: string, conversation: Conversation) => {
+    if (currentConversationIdRef.current !== expectedId) return false
+    applyConversation(conversation)
+    return true
+  }, [applyConversation])
+
   // 纯元数据更新（模型 / 思考等级 / 知识库挂载等）：合并后端返回的新元数据，但**保留现有
   // messages 数组引用**。否则每条消息都变成新对象，击穿 MessageBubble/ChatMarkdown 的 memo，
   // 历史消息里的 LaTeX 会整屏重渲闪一下。这类更新后端不会改 messages，沿用旧引用安全。
   const applyConversationMeta = useCallback((updated: Conversation) => {
     setCurrentConversation((prev) => {
-      if (prev?.id === updated.id && updated.revision < prev.revision) return prev
-      return prev && prev.id === updated.id ? { ...updated, messages: prev.messages } : updated
+      if (!prev || prev.id !== updated.id || updated.revision < prev.revision) return prev
+      return { ...updated, messages: prev.messages }
     })
   }, [])
 
@@ -1315,6 +1330,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
       setPendingUserPrompt(null)
+      setToolConfirmError('')
+      setSessionConsentError('')
       setStreamCoarse({ streamError: '' })
       return
     }
@@ -1337,6 +1354,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setPendingToolConfirm(pendingToolConfirmsRef.current[conversationId]?.[0] ?? null)
     setPendingSessionConsent(pendingSessionConsentsRef.current[conversationId] ?? null)
     setPendingUserPrompt(pendingUserPromptsRef.current[conversationId]?.[0] ?? null)
+    setToolConfirmError('')
+    setSessionConsentError('')
   }, [cancelPendingFrame, clearStreamingPreview])
 
   const applyStreamSnapshotToState = useCallback((snapshot: ConversationStreamSnapshot) => {
@@ -1889,20 +1908,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setSidebarProfileRefreshKey((key) => key + 1)
   }, [loadDefaultModel, loadSkills, onSettingsChange, refreshToolIndicator])
 
-  const reloadConversation = useCallback(async (conversationId: string, options?: { force?: boolean; transitionRequestId?: number }) => {
+  const reloadConversation = useCallback(async (
+    conversationId: string,
+    options?: { force?: boolean; transitionRequestId?: number; allowNavigation?: boolean },
+  ) => {
     if (isConversationInFlight(inFlightConversationsRef.current, conversationId) && !options?.force) {
       return
     }
     const transitionRequestId = options?.transitionRequestId
+    const startingConversationId = currentConversationIdRef.current
+    const canCommitResult = () => {
+      if (transitionRequestId !== undefined) {
+        return isCurrentConversationTransition(transitionRequestId, conversationId)
+      }
+      if (options?.allowNavigation) {
+        return currentConversationIdRef.current === startingConversationId
+          || currentConversationIdRef.current === conversationId
+      }
+      return currentConversationIdRef.current === conversationId
+    }
     try {
       const conv = await chatApi.getConversation(conversationId)
       const transition = getConversationTransitionSnapshot()
       if (
-        (transitionRequestId !== undefined
-          && !isCurrentConversationTransition(transitionRequestId, conversationId))
+        !canCommitResult()
         || (transition.loading && transition.targetConversationId !== conversationId)
       ) return
-      currentConversationIdRef.current = conversationId
+      if (transitionRequestId !== undefined || options?.allowNavigation) {
+        currentConversationIdRef.current = conversationId
+      }
       const renderRequestId = transitionRequestId
         ?? (transition.loading && transition.targetConversationId === conversationId
           ? transition.requestId
@@ -1919,11 +1953,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       restoreStreamingPreview(conversationId)
       setStreamCoarse({ cancelling: false })
     } catch (err) {
-      if (
-        transitionRequestId !== undefined
-        && !isCurrentConversationTransition(transitionRequestId, conversationId)
-      ) return
       const transition = getConversationTransitionSnapshot()
+      if (
+        !canCommitResult()
+        || (transition.loading && transition.targetConversationId !== conversationId)
+      ) return
       console.error('Failed to reload conversation:', err)
       // B2：reload 失败（尤其"对话不存在"）——把 ghost 从乐观列表/in-flight/快照剔除并刷新侧栏。
       dropConversationLocally(conversationId)
@@ -2160,11 +2194,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         }
         if (currentConversationIdRef.current === payload.conversationId) {
           setPendingToolConfirm(remainingApprovals[0] ?? null)
+          setToolConfirmError('')
         }
         if (pendingSessionConsentsRef.current[payload.conversationId]?.runId === payload.runId) {
           delete pendingSessionConsentsRef.current[payload.conversationId]
           if (currentConversationIdRef.current === payload.conversationId) {
             setPendingSessionConsent(null)
+            setSessionConsentError('')
           }
         }
         if (payload.recovery) {
@@ -2577,6 +2613,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncGeneratingConversationIds()
     if (currentConversationIdRef.current === payload.conversationId) {
       setPendingToolConfirm(queue[0] ?? null)
+      setToolConfirmError('')
       // 计划卡一出现就在右侧栏摊开整份计划 —— 卡片上那块小灰框读不完。
       if (isPlanApproval(payload) && payload.argumentsPreview?.trim()) {
         requestDockMarkdownPreview({ title: '计划', text: payload.argumentsPreview })
@@ -2596,37 +2633,94 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (currentConversationIdRef.current === payload.conversationId) {
       setPendingToolConfirm((current) =>
         current?.toolCallId === payload.toolCallId ? rest[0] ?? null : current)
+      setToolConfirmError('')
     }
   }, [syncGeneratingConversationIds])
 
-  const resolvePendingToolConfirm = useCallback((approved: boolean, always = false, permissionMode: string | null = null) => {
-    if (!pendingToolConfirm) return
-    const conversationId = pendingToolConfirm.conversationId
-    const rest = (pendingToolConfirmsRef.current[conversationId] ?? [])
-      .filter((item) => item.toolCallId !== pendingToolConfirm.toolCallId)
-    if (rest.length > 0) {
-      pendingToolConfirmsRef.current[conversationId] = rest
-    } else {
-      delete pendingToolConfirmsRef.current[conversationId]
+  const resolvePendingToolConfirm = useCallback(async (
+    approved: boolean,
+    always = false,
+    permissionMode: string | null = null,
+  ): Promise<boolean> => {
+    const prompt = pendingToolConfirm
+    if (!prompt || toolConfirmSubmissionsRef.current.has(prompt.toolCallId)) return false
+
+    toolConfirmSubmissionsRef.current.add(prompt.toolCallId)
+    setToolConfirmSubmittingId(prompt.toolCallId)
+    setToolConfirmError('')
+    try {
+      await api.chatConfirmToolCall(prompt.toolCallId, approved, always, permissionMode)
+      const rest = (pendingToolConfirmsRef.current[prompt.conversationId] ?? [])
+        .filter((item) => item.toolCallId !== prompt.toolCallId)
+      if (rest.length > 0) {
+        pendingToolConfirmsRef.current[prompt.conversationId] = rest
+      } else {
+        delete pendingToolConfirmsRef.current[prompt.conversationId]
+      }
+      syncGeneratingConversationIds()
+      if (currentConversationIdRef.current === prompt.conversationId) {
+        setPendingToolConfirm(rest[0] ?? null)
+        setToolConfirmError('')
+      }
+      return true
+    } catch (error) {
+      console.error('Failed to submit tool confirmation:', error)
+      const isStillPending = (pendingToolConfirmsRef.current[prompt.conversationId] ?? [])
+        .some((item) => item.toolCallId === prompt.toolCallId)
+      if (currentConversationIdRef.current === prompt.conversationId && isStillPending) {
+        setToolConfirmError(
+          typeof error === 'string' ? error : (error as Error).message || '提交审批失败，请重试',
+        )
+      }
+      return false
+    } finally {
+      toolConfirmSubmissionsRef.current.delete(prompt.toolCallId)
+      setToolConfirmSubmittingId((current) => current === prompt.toolCallId ? null : current)
     }
-    syncGeneratingConversationIds()
-    void api.chatConfirmToolCall(pendingToolConfirm.toolCallId, approved, always, permissionMode)
-    // 队列里还有下一条就接着弹，别让它在后台等到超时。
-    setPendingToolConfirm(rest[0] ?? null)
   }, [pendingToolConfirm, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatSessionConsent, (payload) => {
     pendingSessionConsentsRef.current[payload.conversationId] = payload
     if (currentConversationIdRef.current === payload.conversationId) {
       setPendingSessionConsent(payload)
+      setSessionConsentError('')
     }
   }, [])
 
-  const resolvePendingSessionConsent = useCallback((granted: boolean) => {
-    if (!pendingSessionConsent) return
-    delete pendingSessionConsentsRef.current[pendingSessionConsent.conversationId]
-    void api.chatRespondSessionConsent(pendingSessionConsent.conversationId, granted)
-    setPendingSessionConsent(null)
+  const resolvePendingSessionConsent = useCallback(async (granted: boolean): Promise<boolean> => {
+    const prompt = pendingSessionConsent
+    if (!prompt || sessionConsentSubmissionsRef.current.has(prompt.conversationId)) return false
+
+    sessionConsentSubmissionsRef.current.add(prompt.conversationId)
+    setSessionConsentSubmittingConversationId(prompt.conversationId)
+    setSessionConsentError('')
+    try {
+      await api.chatRespondSessionConsent(prompt.conversationId, granted)
+      if (pendingSessionConsentsRef.current[prompt.conversationId]?.runId === prompt.runId) {
+        delete pendingSessionConsentsRef.current[prompt.conversationId]
+      }
+      if (currentConversationIdRef.current === prompt.conversationId) {
+        setPendingSessionConsent(pendingSessionConsentsRef.current[prompt.conversationId] ?? null)
+        setSessionConsentError('')
+      }
+      return true
+    } catch (error) {
+      console.error('Failed to submit session consent:', error)
+      if (
+        currentConversationIdRef.current === prompt.conversationId
+        && pendingSessionConsentsRef.current[prompt.conversationId]?.runId === prompt.runId
+      ) {
+        setSessionConsentError(
+          typeof error === 'string' ? error : (error as Error).message || '提交会话授权失败，请重试',
+        )
+      }
+      return false
+    } finally {
+      sessionConsentSubmissionsRef.current.delete(prompt.conversationId)
+      setSessionConsentSubmittingConversationId((current) => (
+        current === prompt.conversationId ? null : current
+      ))
+    }
   }, [pendingSessionConsent])
 
   useEffect(() => {
@@ -2745,7 +2839,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (getRouteConversationId() === payload.conversationId) {
         // hash 不变、不会触发 hashchange，按需显式重载。
         if (payload.reload !== false) {
-          void reloadConversation(payload.conversationId, { force: true })
+          void reloadConversation(payload.conversationId, { force: true, allowNavigation: true })
         }
       } else {
         // hash 变化统一走 loadFromRoute 加载；这里再显式 reload 会让同一对话读两遍。
@@ -2871,25 +2965,31 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
       clearConversationLocalState(localState(), conversationId, { streamErrors: true })
       clearConversationInFlight(conversationId)
-      forgetRememberedChatRoute()
-      currentConversationIdRef.current = null
-      setAssistantStreamStatsByMessageId({})
-      setPendingUserMessage(null)
-      setPendingUserMessageConversationId(null)
-      setContextState(null)
-      setContextError('')
-      applyConversation(null)
-      restoreStreamingPreview(null)
-      syncConversationRoute(null)
+      if (currentConversationIdRef.current === conversationId) {
+        forgetRememberedChatRoute()
+        currentConversationIdRef.current = null
+        setAssistantStreamStatsByMessageId({})
+        setPendingUserMessage(null)
+        setPendingUserMessageConversationId(null)
+        setContextState(null)
+        setContextError('')
+        applyConversation(null)
+        restoreStreamingPreview(null)
+        syncConversationRoute(null)
+        setStreamError('')
+      }
       refreshSidebar()
-      setStreamError('')
     } catch (err) {
       console.error('Failed to clear chat:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '清空对话失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '清空对话失败',
+      )
     }
   }, [applyConversation, clearConversationInFlight, localState, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute])
 
   const handleStartAssistantChat = useCallback(async (assistant: ChatAssistant) => {
+    const startingConversationId = currentConversationIdRef.current
     setAssistantStreamStatsByMessageId({})
     try {
       const assistantProviderId = assistant.provider_id ?? assistant.providerId ?? ''
@@ -2902,19 +3002,24 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         assistant.id,
         selectedSet?.id ?? null,
       )
-      currentConversationIdRef.current = conv.id
-      applyConversation(conv)
-      restoreStreamingPreview(conv.id)
-      syncConversationRoute(conv.id)
       refreshSidebar()
-      setStreamError('')
+      if (currentConversationIdRef.current === startingConversationId) {
+        currentConversationIdRef.current = conv.id
+        applyConversation(conv)
+        restoreStreamingPreview(conv.id)
+        syncConversationRoute(conv.id)
+        setStreamError('')
+      }
     } catch (err) {
       console.error('Failed to start assistant conversation:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建助手对话失败')
+      if (currentConversationIdRef.current === startingConversationId) {
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建助手对话失败')
+      }
     }
   }, [activeModel, activeProviderId, applyConversation, refreshSidebar, restoreStreamingPreview, selectedProject?.id, selectedProject?.name, selectedSet?.id, syncConversationRoute])
 
   const handleStartBuilderChat = useCallback(async () => {
+    const startingConversationId = currentConversationIdRef.current
     setAssistantStreamStatsByMessageId({})
     try {
       const conv = await chatApi.createBuilderConversation(
@@ -2922,32 +3027,40 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         activeModel || undefined,
         selectedProject?.id ?? null,
       )
-      currentConversationIdRef.current = conv.id
-      applyConversation(conv)
-      restoreStreamingPreview(conv.id)
-      syncConversationRoute(conv.id)
       refreshSidebar()
-      setStreamError('')
+      if (currentConversationIdRef.current === startingConversationId) {
+        currentConversationIdRef.current = conv.id
+        applyConversation(conv)
+        restoreStreamingPreview(conv.id)
+        syncConversationRoute(conv.id)
+        setStreamError('')
+      }
     } catch (err) {
       console.error('Failed to start builder conversation:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建搭建对话失败')
+      if (currentConversationIdRef.current === startingConversationId) {
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建搭建对话失败')
+      }
     }
   }, [activeModel, activeProviderId, applyConversation, refreshSidebar, restoreStreamingPreview, selectedProject?.id, syncConversationRoute])
 
   const handleApplyAssistant = useCallback(async (assistantId: string | null) => {
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updated = await chatApi.updateConversation(currentConversation.id, {
+      const updated = await chatApi.updateConversation(conversationId, {
         assistantId: assistantId ?? '',
       })
-      applyConversation(updated)
+      applyConversationIfCurrent(conversationId, updated)
       refreshSidebar()
       if (assistantId) void refreshContextStats(updated.id)
     } catch (err) {
       console.error('Failed to update conversation assistant:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '助手切换失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '助手切换失败',
+      )
     }
-  }, [applyConversation, currentConversation, refreshContextStats, refreshSidebar])
+  }, [applyConversationIfCurrent, currentConversation, refreshContextStats, refreshSidebar, setStreamErrorForConversation])
 
   // 底栏弹层选择专家：有会话则切换该会话专家，无会话则以该专家开新对话；null=清除。
   const handleSelectAssistant = useCallback(async (assistant: ChatAssistant | null) => {
@@ -2961,6 +3074,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const ensureConversationForAgentPlan = useCallback(async () => {
     if (currentConversation) return currentConversation
+    const startingConversationId = currentConversationIdRef.current
     let conversation = await chatApi.createConversation(
       activeProviderId || undefined,
       activeModel || undefined,
@@ -2972,25 +3086,37 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (!agentRuntimesEqual(normalizeAgentRuntime(conversation), draftAgentRuntime)) {
       conversation = await chatApi.setAgentRuntime(conversation.id, draftAgentRuntime)
     }
-    currentConversationIdRef.current = conversation.id
-    applyConversation(conversation)
-    syncConversationRoute(conversation.id)
     refreshSidebar()
+    if (currentConversationIdRef.current === startingConversationId) {
+      currentConversationIdRef.current = conversation.id
+      applyConversation(conversation)
+      syncConversationRoute(conversation.id)
+    }
     return conversation
   }, [activeModel, activeProviderId, applyConversation, currentConversation, draftAgentRuntime, refreshSidebar, selectedProject?.id, selectedProject?.name, selectedSet?.id, syncConversationRoute])
 
   const handleAgentPlanModeChange = useCallback(async (mode: AgentPlanMode) => {
+    const startingConversationId = currentConversationIdRef.current
+    let targetConversationId = currentConversation?.id ?? null
     try {
       const conversation = await ensureConversationForAgentPlan()
+      targetConversationId = conversation.id
       const updated = await chatApi.setAgentPlanMode(conversation.id, mode)
-      applyConversation(updated)
+      applyConversationIfCurrent(conversation.id, updated)
       void refreshContextStats(updated.id)
       refreshSidebar()
     } catch (err) {
       console.error('Failed to update agent plan mode:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || 'Plan 模式切换失败')
+      if (targetConversationId) {
+        setStreamErrorForConversation(
+          targetConversationId,
+          typeof err === 'string' ? err : (err as Error).message || 'Plan 模式切换失败',
+        )
+      } else if (currentConversationIdRef.current === startingConversationId) {
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || 'Plan 模式切换失败')
+      }
     }
-  }, [applyConversation, ensureConversationForAgentPlan, refreshContextStats, refreshSidebar])
+  }, [applyConversationIfCurrent, currentConversation?.id, ensureConversationForAgentPlan, refreshContextStats, refreshSidebar, setStreamErrorForConversation])
 
   const handleSelectProject = useCallback((project: ChatProject | null) => {
     setSelectedProject(project)
@@ -3067,9 +3193,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     options: SendMessageOptions = {},
   ) => {
     const trimmed = content.trim()
+    const startingConversationId = currentConversationIdRef.current
     if (!trimmed && attachments.length === 0) return false
     if (!options.forceNewConversation && sendDisabledReason) {
-      const targetId = currentConversationIdRef.current
+      const targetId = options.conversationOverride?.id ?? currentConversationIdRef.current
       if (targetId) {
         setStreamErrorForConversation(targetId, sendDisabledReason)
       } else {
@@ -3098,12 +3225,16 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           undefined,
           selectedSet?.id ?? null,
         )
-        currentConversationIdRef.current = conversation.id
-        applyConversation(conversation)
-        syncConversationRoute(conversation.id)
+        if (currentConversationIdRef.current === startingConversationId) {
+          currentConversationIdRef.current = conversation.id
+          applyConversation(conversation)
+          syncConversationRoute(conversation.id)
+        }
       } catch (err) {
         console.error('Failed to create conversation before send:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建对话失败')
+        if (currentConversationIdRef.current === startingConversationId) {
+          setStreamError(typeof err === 'string' ? err : (err as Error).message || '创建对话失败')
+        }
         return false
       }
     }
@@ -3118,10 +3249,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     ) {
       try {
         conversation = await chatApi.setAgentRuntime(conversation.id, draftAgentRuntime)
-        applyConversation(conversation)
+        applyConversationIfCurrent(conversation.id, conversation)
       } catch (err) {
         console.error('Failed to apply agent runtime before send:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || 'Agent 切换失败')
+        setStreamErrorForConversation(
+          conversation.id,
+          typeof err === 'string' ? err : (err as Error).message || 'Agent 切换失败',
+        )
         return false
       }
     }
@@ -3138,7 +3272,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           conversation = await chatApi.updateConversation(conversation.id, {
             knowledgeBaseIds: draftKnowledgeBaseIds,
           })
-          applyConversation(conversation)
+          applyConversationIfCurrent(conversation.id, conversation)
         } catch (err) {
           console.error('Failed to apply knowledge base draft before send:', err)
         }
@@ -3151,7 +3285,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           conversation = await chatApi.updateConversation(conversation.id, {
             forceKnowledgeSearch: true,
           })
-          applyConversation(conversation)
+          applyConversationIfCurrent(conversation.id, conversation)
         } catch (err) {
           console.error('Failed to apply force-knowledge-search draft before send:', err)
         }
@@ -3167,7 +3301,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           conversation = await chatApi.updateConversation(conversation.id, {
             thinkingLevel: draftThinkingLevel,
           })
-          applyConversation(conversation)
+          applyConversationIfCurrent(conversation.id, conversation)
         } catch (err) {
           console.error('Failed to apply thinking level draft before send:', err)
         }
@@ -3184,7 +3318,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           conversation = await chatApi.updateConversation(conversation.id, {
             webSearchMode: desiredMode,
           })
-          applyConversation(conversation)
+          applyConversationIfCurrent(conversation.id, conversation)
         } catch (err) {
           console.error('Failed to apply web search mode draft before send:', err)
         }
@@ -3204,7 +3338,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           conversation = await chatApi.updateConversation(conversation.id, {
             replyModels: draftReplyModels,
           })
-          applyConversation(conversation)
+          applyConversationIfCurrent(conversation.id, conversation)
         } catch (err) {
           console.error('Failed to apply reply models draft before send:', err)
         }
@@ -3269,6 +3403,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
 
     markConversationInFlight(conversationId)
+    options.onAccepted?.()
     // 多模型一问多答（任务 06-30）：reply_models ≥2 且非 plan/orchestrate 模式时，后端会 fan-out
     // 出 N 条并发流。前端据此建多答组（占位 N 列），流事件按 messageId 路由到对应列。
     // 与后端 resolve_reply_arms 的判定保持一致（≤1 个臂 = 单模型路径，零回归）。
@@ -3365,6 +3500,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     activeProviderId,
     applyAssistantStreamStats,
     applyConversation,
+    applyConversationIfCurrent,
     clearConversationInFlight,
     clearStreamSnapshot,
     currentConversation,
@@ -3399,11 +3535,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   /** 设置 → 插件「让 AI 安装」：取规范 brief → 回聊天 → 新开对话并自动发送安装任务 */
   const handleRequestPluginAiInstall = useCallback(async (pluginId: string) => {
+    const startingConversationId = currentConversationIdRef.current
     const brief = await api.pluginsInstallBrief(pluginId)
+    if (currentConversationIdRef.current !== startingConversationId) return
     setExtensionsNavItem(null)
     setSettingsExiting(false)
     setChatView('conversation')
     setAssistantStreamStatsByMessageId({})
+    let targetConversationId: string | null = null
     try {
       let conv = await chatApi.createConversation(
         activeProviderId || undefined,
@@ -3420,11 +3559,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       } catch {
         // 标题失败不阻断
       }
-      currentConversationIdRef.current = conv.id
-      applyConversation(conv)
-      restoreStreamingPreview(conv.id)
-      syncConversationRoute(conv.id)
+      targetConversationId = conv.id
       refreshSidebar()
+      if (currentConversationIdRef.current === startingConversationId) {
+        currentConversationIdRef.current = conv.id
+        applyConversation(conv)
+        restoreStreamingPreview(conv.id)
+        syncConversationRoute(conv.id)
+      }
       const accepted = await handleSendMessageRef.current(brief.userMessage, [], {
         forceNewConversation: false,
         conversationOverride: conv,
@@ -3434,7 +3576,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     } catch (err) {
       console.error('Failed to start plugin install chat:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '无法开始插件安装对话')
+      if (
+        currentConversationIdRef.current === startingConversationId
+        || currentConversationIdRef.current === targetConversationId
+      ) {
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '无法开始插件安装对话')
+      }
       throw err
     }
   }, [
@@ -3455,6 +3602,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     messages: { role: string; content: string }[],
     attachmentPaths: string[],
   ): Promise<boolean> => {
+    const startingConversationId = currentConversationIdRef.current
     try {
       const conversation = await chatApi.importExternalConversation(
         messages,
@@ -3463,14 +3611,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         activeModel || undefined,
         selectedProject?.id ?? null,
       )
-      currentConversationIdRef.current = conversation.id
-      applyConversation(conversation)
-      syncConversationRoute(conversation.id)
       refreshSidebar()
+      if (currentConversationIdRef.current === startingConversationId) {
+        currentConversationIdRef.current = conversation.id
+        applyConversation(conversation)
+        syncConversationRoute(conversation.id)
+      }
       return true
     } catch (err) {
       console.error('Failed to import external conversation:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '导入对话失败')
+      if (currentConversationIdRef.current === startingConversationId) {
+        setStreamError(typeof err === 'string' ? err : (err as Error).message || '导入对话失败')
+      }
       return false
     }
   }, [activeModel, activeProviderId, applyConversation, refreshSidebar, selectedProject?.id, syncConversationRoute])
@@ -3567,7 +3719,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         conversation.id,
         isExecutableAgentPlanText(messagePlanText) ? messageId : undefined,
       )
-      applyConversation(updated)
+      applyConversationIfCurrent(conversation.id, updated)
       refreshSidebar()
       void refreshContextStats(updated.id)
       void handleSendMessage('按这条计划开始执行。', [], { conversationOverride: updated })
@@ -3579,7 +3731,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       )
     }
   }, [
-    applyConversation,
+    applyConversationIfCurrent,
     currentConversation,
     handleSendMessage,
     refreshContextStats,
@@ -3632,14 +3784,17 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (!conv) return
       try {
         const updated = await chatApi.updateMessage(conv.id, messageId, content)
-        applyConversation(updated)
+        applyConversationIfCurrent(conv.id, updated)
         refreshSidebar()
       } catch (err) {
         console.error('Failed to update message:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || '保存失败')
+        setStreamErrorForConversation(
+          conv.id,
+          typeof err === 'string' ? err : (err as Error).message || '保存失败',
+        )
       }
     },
-    [applyConversation, refreshSidebar],
+    [applyConversationIfCurrent, refreshSidebar, setStreamErrorForConversation],
   )
 
   const handleDeleteMessage = useCallback(
@@ -3649,19 +3804,23 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (!window.confirm('确定删除这条消息吗？')) return
       try {
         const updated = await chatApi.deleteMessage(conv.id, messageId)
-        applyConversation(updated)
-        setAssistantStreamStatsByMessageId((prev) => {
-          const next = { ...prev }
-          delete next[messageId]
-          return next
-        })
+        if (applyConversationIfCurrent(conv.id, updated)) {
+          setAssistantStreamStatsByMessageId((prev) => {
+            const next = { ...prev }
+            delete next[messageId]
+            return next
+          })
+        }
         refreshSidebar()
       } catch (err) {
         console.error('Failed to delete message:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || '删除失败')
+        setStreamErrorForConversation(
+          conv.id,
+          typeof err === 'string' ? err : (err as Error).message || '删除失败',
+        )
       }
     },
-    [applyConversation, refreshSidebar],
+    [applyConversationIfCurrent, refreshSidebar, setStreamErrorForConversation],
   )
 
   // 一键 rewind（「回到这里」）：截掉这条提问及其之后的所有消息，原文塞回输入框，用户改完再自己发。
@@ -3673,19 +3832,24 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       if (!window.confirm('回到这里？这条提问及其之后的所有消息会被删除，原文放回输入框。')) return
       try {
         const { conversation, content } = await chatApi.rewindToMessage(conv.id, messageId)
-        applyConversation(conversation)
-        setAssistantStreamStatsByMessageId({})
-        setStreamError('')
+        const applied = applyConversationIfCurrent(conv.id, conversation)
+        if (applied) {
+          setAssistantStreamStatsByMessageId({})
+          setStreamError('')
+          insertTextIntoComposer(content)
+        }
         refreshSidebar()
-        insertTextIntoComposer(content)
         // 上下文用量后台补算（后端 rewind 故意不算，见那边注释）：几秒的 MCP 列表不该挡住 UI。
         void refreshContextStats(conversation.id)
       } catch (err) {
         console.error('Failed to rewind conversation:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || '回到这里失败')
+        setStreamErrorForConversation(
+          conv.id,
+          typeof err === 'string' ? err : (err as Error).message || '回到这里失败',
+        )
       }
     },
-    [applyConversation, refreshContextStats, refreshSidebar],
+    [applyConversationIfCurrent, refreshContextStats, refreshSidebar, setStreamErrorForConversation],
   )
 
   // 对话分支（方案 B）：在某条消息处建分支——把该消息及之前的消息复制进新对话，
@@ -3694,21 +3858,27 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     async (messageId: string) => {
       const conv = currentConversationRef.current
       if (!conv) return
+      const startingConversationId = conv.id
       try {
         const forked = await chatApi.forkConversation(conv.id, messageId)
-        setAssistantStreamStatsByMessageId({})
-        currentConversationIdRef.current = forked.id
-        applyConversation(forked)
-        restoreStreamingPreview(forked.id)
-        syncConversationRoute(forked.id)
-        setStreamError('')
         refreshSidebar()
+        if (currentConversationIdRef.current === startingConversationId) {
+          setAssistantStreamStatsByMessageId({})
+          currentConversationIdRef.current = forked.id
+          applyConversation(forked)
+          restoreStreamingPreview(forked.id)
+          syncConversationRoute(forked.id)
+          setStreamError('')
+        }
       } catch (err) {
         console.error('Failed to fork conversation:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || '建分支失败')
+        setStreamErrorForConversation(
+          conv.id,
+          typeof err === 'string' ? err : (err as Error).message || '建分支失败',
+        )
       }
     },
-    [applyConversation, refreshSidebar, restoreStreamingPreview, syncConversationRoute],
+    [applyConversation, refreshSidebar, restoreStreamingPreview, setStreamErrorForConversation, syncConversationRoute],
   )
 
   const handleSaveMessageToNote = useCallback(
@@ -3754,10 +3924,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         applyConversationMeta(updated)
       } catch (err) {
         console.error('Failed to set group selection:', err)
-        setStreamError(typeof err === 'string' ? err : (err as Error).message || '选中失败')
+        setStreamErrorForConversation(
+          conv.id,
+          typeof err === 'string' ? err : (err as Error).message || '选中失败',
+        )
       }
     },
-    [applyConversationMeta],
+    [applyConversationMeta, setStreamErrorForConversation],
   )
 
   const handleRegenerateMessage = useCallback(
@@ -3868,14 +4041,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleRuntimeChange = useCallback(async (runtime: AgentRuntimeConfig) => {
     setDraftAgentRuntime(runtime)
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updated = await chatApi.setAgentRuntime(currentConversation.id, runtime)
-      applyConversation(updated)
+      const updated = await chatApi.setAgentRuntime(conversationId, runtime)
+      applyConversationIfCurrent(conversationId, updated)
     } catch (err) {
       console.error('Failed to change agent runtime:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || 'Agent 切换失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || 'Agent 切换失败',
+      )
     }
-  }, [applyConversation, currentConversation])
+  }, [applyConversationIfCurrent, currentConversation, setStreamErrorForConversation])
 
   const handleExternalModelChange = useCallback(async (model: string, reasoning?: string | null) => {
     // Route through handleRuntimeChange so the draft updates even before a conversation exists
@@ -3898,6 +4075,30 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     await handleRuntimeChange(next)
   }, [activeAgentRuntime, handleRuntimeChange])
 
+  const persistApprovedExternalSandbox = useCallback(async (
+    conversationId: string,
+    runtime: AgentRuntimeConfig,
+    sandbox: string,
+  ) => {
+    const next: AgentRuntimeConfig = {
+      ...runtime,
+      kind: 'external',
+      externalSandbox: sandbox,
+    }
+    try {
+      const updated = await chatApi.setAgentRuntime(conversationId, next)
+      if (applyConversationIfCurrent(conversationId, updated)) {
+        setDraftAgentRuntime(next)
+      }
+    } catch (error) {
+      console.error('Failed to persist the post-approval permission mode:', error)
+      setStreamErrorForConversation(
+        conversationId,
+        typeof error === 'string' ? error : (error as Error).message || '权限模式保存失败',
+      )
+    }
+  }, [applyConversationIfCurrent, setStreamErrorForConversation])
+
   // 底栏胶囊选档：本地 CLI 写沙盒档位；内置 Agent 写 Act/Plan/Orchestrate；Chat 运行时无胶囊。
   const handleComposerModeChange = useCallback(async (value: string) => {
     if (usesExternalRuntime) {
@@ -3913,33 +4114,41 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     saveLastModel(providerId, model) // 记住为全局默认
 
     if (!currentConversation) return
+    const conversationId = currentConversation.id
 
     try {
-      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
         providerId,
         model,
       })
       applyConversationMeta(updatedConv)
     } catch (err) {
       console.error('Failed to change model:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '模型切换失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '模型切换失败',
+      )
     }
-  }, [applyConversationMeta, currentConversation])
+  }, [applyConversationMeta, currentConversation, setStreamErrorForConversation])
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevel | null) => {
     setDraftThinkingLevel(level)
     saveLastThinkingLevel(level) // 记住为全局默认，不再回落到 high
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
         thinkingLevel: level,
       })
       applyConversationMeta(updatedConv)
     } catch (err) {
       console.error('Failed to change thinking level:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '思考等级切换失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '思考等级切换失败',
+      )
     }
-  }, [applyConversationMeta, currentConversation])
+  }, [applyConversationMeta, currentConversation, setStreamErrorForConversation])
 
   // 会话级三态联网搜索（任务 07-23）：设置模式,持久化到会话(欢迎页先存草稿),
   // 并记住为全局默认——之后所有新会话/未显式设置的会话自动沿用(与思考等级同款)。
@@ -3947,39 +4156,48 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setDraftWebSearchMode(mode)
     saveLastWebSearchMode(mode)
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
         webSearchMode: mode,
       })
       applyConversationMeta(updatedConv)
     } catch (err) {
       console.error('Failed to change web search mode:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '联网搜索模式切换失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '联网搜索模式切换失败',
+      )
     }
-  }, [applyConversationMeta, currentConversation])
+  }, [applyConversationMeta, currentConversation, setStreamErrorForConversation])
 
   // 多模型一问多答（任务 06-30 / D2）：变更多答模型集，持久化到会话（欢迎页先存草稿）。
   // 上限 4 由 UI 侧约束；这里直落 chatApi.updateConversation({ replyModels })。
   const handleChangeReplyModels = useCallback(async (models: ModelRef[]) => {
     setDraftReplyModels(models)
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
         replyModels: models,
       })
       applyConversationMeta(updatedConv)
     } catch (err) {
       console.error('Failed to update reply models:', err)
-      setStreamError(typeof err === 'string' ? err : (err as Error).message || '多答模型更新失败')
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '多答模型更新失败',
+      )
     }
-  }, [applyConversationMeta, currentConversation])
+  }, [applyConversationMeta, currentConversation, setStreamErrorForConversation])
 
   const handleChangeKnowledgeBaseIds = useCallback(async (ids: string[]) => {
     // the draft is applied when the conversation is created on first send.
     setDraftKnowledgeBaseIds(ids)
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
         knowledgeBaseIds: ids,
       })
       applyConversationMeta(updatedConv)
@@ -3994,8 +4212,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       : draftForceKnowledgeSearch)
     setDraftForceKnowledgeSearch(next)
     if (!currentConversation) return
+    const conversationId = currentConversation.id
     try {
-      const updatedConv = await chatApi.updateConversation(currentConversation.id, {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
         forceKnowledgeSearch: next,
       })
       applyConversationMeta(updatedConv)
@@ -4733,30 +4952,51 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             title={toolApprovalTitle(pendingToolConfirm)}
             subtitle={`${pendingToolConfirm.source}${pendingToolConfirm.serverId ? ` · ${pendingToolConfirm.serverId}` : ''}`}
             detail={pendingToolConfirm.argumentsPreview}
+            error={toolConfirmError}
             actions={isPlanApproval(pendingToolConfirm)
               ? [
-                { label: '拒绝 / 让它改', onSelect: () => resolvePendingToolConfirm(false) },
+                {
+                  label: '拒绝 / 让它改',
+                  disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
+                  onSelect: () => { void resolvePendingToolConfirm(false) },
+                },
                 ...PLAN_APPROVAL_ACTIONS.map((action, index) => ({
                   label: action.label,
                   primary: index === PLAN_APPROVAL_ACTIONS.length - 1,
                   hint: index === PLAN_APPROVAL_ACTIONS.length - 1 ? 'Ctrl+↵' : undefined,
+                  disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
                   onSelect: () => {
-                    resolvePendingToolConfirm(true, false, action.mode)
-                    void handleExternalSandboxChange(action.mode).catch((error) => {
-                      console.error('Failed to persist the post-plan permission mode:', error)
+                    void resolvePendingToolConfirm(true, false, action.mode).then((accepted) => {
+                      if (accepted) {
+                        return persistApprovedExternalSandbox(
+                          pendingToolConfirm.conversationId,
+                          activeAgentRuntime,
+                          action.mode,
+                        )
+                      }
                     })
                   },
                 })),
               ]
               : isEnterPlanApproval(pendingToolConfirm)
                 ? [
-                  { label: '不用，直接做', onSelect: () => resolvePendingToolConfirm(false) },
+                  {
+                    label: '不用，直接做',
+                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
+                    onSelect: () => { void resolvePendingToolConfirm(false) },
+                  },
                   {
                     label: '总是允许',
+                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
                     onSelect: () => {
-                      resolvePendingToolConfirm(true, true)
-                      void handleExternalSandboxChange('plan').catch((error) => {
-                        console.error('Failed to persist the plan permission mode:', error)
+                      void resolvePendingToolConfirm(true, true).then((accepted) => {
+                        if (accepted) {
+                          return persistApprovedExternalSandbox(
+                            pendingToolConfirm.conversationId,
+                            activeAgentRuntime,
+                            'plan',
+                          )
+                        }
                       })
                     },
                   },
@@ -4764,18 +5004,38 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
                     label: '进入计划模式',
                     primary: true,
                     hint: 'Ctrl+↵',
+                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
                     onSelect: () => {
-                      resolvePendingToolConfirm(true)
-                      void handleExternalSandboxChange('plan').catch((error) => {
-                        console.error('Failed to persist the plan permission mode:', error)
+                      void resolvePendingToolConfirm(true).then((accepted) => {
+                        if (accepted) {
+                          return persistApprovedExternalSandbox(
+                            pendingToolConfirm.conversationId,
+                            activeAgentRuntime,
+                            'plan',
+                          )
+                        }
                       })
                     },
                   },
                 ]
                 : [
-                  { label: '拒绝', onSelect: () => resolvePendingToolConfirm(false) },
-                  { label: '总是允许', onSelect: () => resolvePendingToolConfirm(true, true) },
-                  { label: '允许一次', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingToolConfirm(true) },
+                  {
+                    label: '拒绝',
+                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
+                    onSelect: () => { void resolvePendingToolConfirm(false) },
+                  },
+                  {
+                    label: '总是允许',
+                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
+                    onSelect: () => { void resolvePendingToolConfirm(true, true) },
+                  },
+                  {
+                    label: '允许一次',
+                    primary: true,
+                    hint: 'Ctrl+↵',
+                    disabled: toolConfirmSubmittingId === pendingToolConfirm.toolCallId,
+                    onSelect: () => { void resolvePendingToolConfirm(true) },
+                  },
                 ]}
           />
         )}
@@ -4783,9 +5043,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           <ApprovalCard
             title="允许本次会话使用文件和命令工具？"
             subtitle="授权后，本会话内 Kivio 可读写、删除磁盘上的任意文件并执行任意终端命令（包括项目目录之外）。仅本次会话有效，重启后需重新授权。"
+            error={sessionConsentError}
             actions={[
-              { label: '拒绝', onSelect: () => resolvePendingSessionConsent(false) },
-              { label: '允许本次会话', primary: true, hint: 'Ctrl+↵', onSelect: () => resolvePendingSessionConsent(true) },
+              {
+                label: '拒绝',
+                disabled: sessionConsentSubmittingConversationId === pendingSessionConsent.conversationId,
+                onSelect: () => { void resolvePendingSessionConsent(false) },
+              },
+              {
+                label: '允许本次会话',
+                primary: true,
+                hint: 'Ctrl+↵',
+                disabled: sessionConsentSubmittingConversationId === pendingSessionConsent.conversationId,
+                onSelect: () => { void resolvePendingSessionConsent(true) },
+              },
             ]}
           />
         )}
@@ -4793,14 +5064,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     </div>
     ) : null
   ), [
+    activeAgentRuntime,
     dismissPendingUserPrompt,
-    handleExternalSandboxChange,
     pendingSessionConsent,
     pendingToolConfirm,
     pendingUserPrompt,
     pendingUserPromptRecord,
+    persistApprovedExternalSandbox,
     resolvePendingSessionConsent,
     resolvePendingToolConfirm,
+    sessionConsentError,
+    sessionConsentSubmittingConversationId,
+    toolConfirmError,
+    toolConfirmSubmittingId,
   ])
 
   return (

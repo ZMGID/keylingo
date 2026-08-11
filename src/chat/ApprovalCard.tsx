@@ -5,6 +5,7 @@ import { Button } from '../components/Button'
 export type ApprovalAction = {
   label: string
   onSelect: () => void
+  disabled?: boolean
   /** 主动作，额外响应 Ctrl/Cmd+Enter。 */
   primary?: boolean
   /** 按钮上跟在序号后的补充提示（如 `Ctrl+↵`）。 */
@@ -18,6 +19,7 @@ interface ApprovalCardProps {
   detail?: string
   /** 第一项当作「拒绝」：靠左摆放，并绑定 Esc。 */
   actions: ApprovalAction[]
+  error?: string
 }
 
 function isEditableTarget(node: EventTarget | null): boolean {
@@ -33,7 +35,7 @@ function isEditableTarget(node: EventTarget | null): boolean {
  * 键盘：数字键按动作顺序触发，Ctrl/Cmd+Enter 触发主动作，Esc 触发第一项（拒绝）。
  * 挂载时把焦点移到主动作按钮上，否则焦点还在输入框里、数字键会被当成正文输入。
  */
-export function ApprovalCard({ title, subtitle, detail, actions }: ApprovalCardProps) {
+export function ApprovalCard({ title, subtitle, detail, actions, error }: ApprovalCardProps) {
   const actionsRef = useRef(actions)
   actionsRef.current = actions
 
@@ -43,13 +45,13 @@ export function ApprovalCard({ title, subtitle, detail, actions }: ApprovalCardP
       if (isEditableTarget(e.target)) return
       const list = actionsRef.current
       if (e.key === 'Escape') {
-        if (!list.length) return
+        if (!list.length || list[0].disabled) return
         e.preventDefault()
         list[0].onSelect()
         return
       }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        const primary = list.find((action) => action.primary)
+        const primary = list.find((action) => action.primary && !action.disabled)
         if (!primary) return
         e.preventDefault()
         primary.onSelect()
@@ -58,6 +60,7 @@ export function ApprovalCard({ title, subtitle, detail, actions }: ApprovalCardP
       if (e.ctrlKey || e.metaKey || e.altKey) return
       const index = Number(e.key) - 1
       if (!Number.isInteger(index) || index < 0 || index >= list.length) return
+      if (list[index].disabled) return
       e.preventDefault()
       list[index].onSelect()
     }
@@ -87,6 +90,11 @@ export function ApprovalCard({ title, subtitle, detail, actions }: ApprovalCardP
           {detail}
         </pre>
       )}
+      {error && (
+        <div className="mt-2 text-[11.5px] leading-5 text-red-600 dark:text-red-400" role="alert">
+          {error}
+        </div>
+      )}
       <div className="mt-2.5 flex items-center gap-2">
         {deny && <ActionButton action={deny} index={0} />}
         <div className="ml-auto flex items-center gap-2">
@@ -107,6 +115,7 @@ function ActionButton({ action, index }: { action: ApprovalAction; index: number
       // 焦点必须落在卡片上，否则还留在输入框里、数字键会被当成正文输入。
       autoFocus={action.primary}
       onClick={action.onSelect}
+      disabled={action.disabled}
     >
       <span>{action.label}</span>
       <span className="ml-1.5 opacity-55">{index + 1}</span>

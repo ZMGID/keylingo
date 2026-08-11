@@ -1,9 +1,9 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
 import { vi } from 'vitest'
 import { InputBar } from './InputBar'
-import { draftKey, getComposerDraft } from './composerDraft'
+import { draftKey, getComposerDraft, setComposerDraft } from './composerDraft'
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 vi.mock('@tauri-apps/api/webview', () => ({
@@ -28,7 +28,7 @@ function UnmountOnSend({ conversationId }: { conversationId: string }) {
 }
 
 describe('InputBar 发送清草稿', () => {
-  it('onSend 同一提交内卸载 InputBar 时，草稿 store 也被清空（欢迎页首发竞态）', () => {
+  it('onSend 同一提交内卸载 InputBar 时，草稿 store 也被清空（欢迎页首发竞态）', async () => {
     render(<UnmountOnSend conversationId="c-draft-race" />)
     const textarea = screen.getByPlaceholderText('Ask me anything...')
     fireEvent.change(textarea, { target: { value: '我右键无法创建txt文件了' } })
@@ -38,6 +38,85 @@ describe('InputBar 发送清草稿', () => {
 
     // 卸载丢弃了 setInput('') 与写回 effect —— 只有 handleSend 里的同步清 store 能保证这条。
     expect(screen.queryByPlaceholderText('Ask me anything...')).not.toBeInTheDocument()
-    expect(getComposerDraft(draftKey('c-draft-race'))).toBeUndefined()
+    await waitFor(() => {
+      expect(getComposerDraft(draftKey('c-draft-race'))).toBeUndefined()
+    })
+  })
+
+  it('发送未被接受时保留输入草稿', async () => {
+    render(<InputBar onSend={() => Promise.resolve(false)} conversationId="c-send-rejected" />)
+    const textarea = screen.getByPlaceholderText('Ask me anything...')
+    fireEvent.change(textarea, { target: { value: '不要丢掉这条消息' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(textarea).not.toHaveAttribute('aria-busy', 'true'))
+    expect(textarea).toHaveValue('不要丢掉这条消息')
+    expect(getComposerDraft(draftKey('c-send-rejected'))?.input).toBe('不要丢掉这条消息')
+  })
+
+  it('消息进入发送流程后立即清空，不等待整轮生成 Promise 完成', async () => {
+    let resolveGeneration!: (accepted: boolean) => void
+    let generationFinished = false
+    const generation = new Promise<boolean>((resolve) => {
+      resolveGeneration = (accepted) => {
+        generationFinished = true
+        resolve(accepted)
+      }
+    })
+    render(
+      <InputBar
+        conversationId="c-accepted-early"
+        onSend={(_content, _attachments, options) => {
+          options?.onAccepted?.()
+          return generation
+        }}
+      />,
+    )
+    const textarea = screen.getByPlaceholderText('Ask me anything...')
+    fireEvent.change(textarea, { target: { value: '发出后马上清空' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(textarea).toHaveValue(''))
+    expect(textarea).not.toHaveAttribute('aria-busy', 'true')
+    expect(generationFinished).toBe(false)
+
+    await act(async () => { resolveGeneration(true) })
+  })
+
+  it('发送中占位草稿迁移到新会话 id 后，成功时清理迁移后的草稿', async () => {
+    let resolveSend!: (accepted: boolean) => void
+    const send = new Promise<boolean>((resolve) => { resolveSend = resolve })
+    const { rerender } = render(<InputBar onSend={() => send} conversationId={null} />)
+    const textarea = screen.getByPlaceholderText('Ask me anything...')
+    fireEvent.change(textarea, { target: { value: '首条消息' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    rerender(<InputBar onSend={() => send} conversationId="c-created-after-send" />)
+    expect(textarea).toHaveValue('首条消息')
+    await act(async () => { resolveSend(true) })
+
+    await waitFor(() => expect(textarea).toHaveValue(''))
+    expect(getComposerDraft(draftKey('c-created-after-send'))).toBeUndefined()
+  })
+
+  it('等待发送时切到已有草稿的会话，不会清掉新会话草稿', async () => {
+    let resolveSend!: (accepted: boolean) => void
+    const send = new Promise<boolean>((resolve) => { resolveSend = resolve })
+    setComposerDraft(draftKey('c-own-draft'), {
+      input: '另一条会话自己的草稿',
+      quotes: [],
+      attachments: [],
+    })
+    const { rerender } = render(<InputBar onSend={() => send} conversationId="c-sending" />)
+    const textarea = screen.getByPlaceholderText('Ask me anything...')
+    fireEvent.change(textarea, { target: { value: '正在发送的消息' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    rerender(<InputBar onSend={() => send} conversationId="c-own-draft" />)
+    await waitFor(() => expect(textarea).toHaveValue('另一条会话自己的草稿'))
+    await act(async () => { resolveSend(true) })
+
+    expect(textarea).toHaveValue('另一条会话自己的草稿')
+    expect(getComposerDraft(draftKey('c-own-draft'))?.input).toBe('另一条会话自己的草稿')
   })
 })
