@@ -853,7 +853,14 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null
     }
-    if (hasUnsavedChanges) void persistSettingsNow()
+    if (hasUnsavedChanges) {
+      // 先 flush 再关闭：onClose 会切回聊天视图并重挂会话面板，若不等落盘完成，
+      // 面板挂载时读到的还是保存回包前的旧缓存（新配的模型"消失"，要重开窗口才出现）。
+      // flush 是本地 IPC 写盘（毫秒级），await 不产生可感知延迟；失败也照关（错误已
+      // toast + console，与旧行为一致，不把用户困在设置页）。
+      void persistSettingsNow().finally(() => onClose())
+      return
+    }
     onClose()
   }, [hasUnsavedChanges, onClose, persistSettingsNow, recordingTarget])
 

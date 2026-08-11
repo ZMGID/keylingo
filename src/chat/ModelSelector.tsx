@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Star } from 'lucide-react'
 import { type ModelProvider } from '../api/tauri'
-import { getSettingsCached, setFavoriteModelsCached } from '../api/settingsCache'
+import { getSettingsCached, setFavoriteModelsCached, subscribeSettings } from '../api/settingsCache'
 import { useT } from '../settings/i18n'
 import { isProviderEnabled } from '../settings/utils'
 import { ModelIcon } from './ModelIcon'
@@ -58,6 +58,12 @@ function ModelSelectorBase({
 
   useEffect(() => {
     loadSettings()
+    // 设置页自动保存（无保存按钮）与返回聊天视图是并发的：挂载时那次读可能拿到落盘
+    // 回包前的旧快照。订阅缓存更新，保存完成后立即拿到新 providers/收藏。
+    return subscribeSettings((settings) => {
+      setProviders(settings.providers || [])
+      setFavorites(settings.favoriteModels || [])
+    })
   }, [loadSettings])
 
   const activeProviders = providers.filter(isProviderEnabled)

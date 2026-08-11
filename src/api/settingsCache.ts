@@ -25,6 +25,31 @@ import { api, type Settings } from './tauri'
 let cached: Settings | null = null
 let inflight: Promise<Settings> | null = null
 
+/** 缓存更新订阅者。saveSettingsCached / refreshSettings / importSettingsCached 等
+ *  任何写缓存的路径都会广播新 Settings，让"挂载时读一次"的消费方（如 ModelSelector）
+ *  在设置自动保存后立即拿到新值——设置页没有保存按钮，落盘与返回聊天视图是并发的，
+ *  只靠挂载时读缓存会读到保存回包前的旧快照。 */
+type SettingsListener = (settings: Settings) => void
+const listeners = new Set<SettingsListener>()
+
+function notifySettingsUpdated(settings: Settings): void {
+  for (const listener of [...listeners]) {
+    try {
+      listener(settings)
+    } catch (err) {
+      console.error('[settingsCache] listener failed', err)
+    }
+  }
+}
+
+/** 订阅缓存更新；返回取消订阅函数。回调拿到的对象为共享缓存引用，视为只读。 */
+export function subscribeSettings(listener: SettingsListener): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
 /** 同步读缓存；未加载过返回 null。供 SWR 首帧使用。 */
 export function peekSettings(): Settings | null {
   return cached
@@ -50,14 +75,16 @@ export function getSettingsCached(): Promise<Settings> {
 export function refreshSettings(): Promise<Settings> {
   return api.getSettings().then((settings) => {
     cached = settings
+    notifySettingsUpdated(settings)
     return settings
   })
 }
 
-/** saveSettings + 成功写通缓存；失败原样抛出且不动缓存。 */
+/** saveSettings + 成功写通缓存并广播；失败原样抛出且不动缓存。 */
 export async function saveSettingsCached(settings: Settings): Promise<Settings> {
   const saved = await api.saveSettings(settings)
   cached = saved
+  notifySettingsUpdated(saved)
   return saved
 }
 
@@ -68,6 +95,7 @@ export async function saveSettingsCached(settings: Settings): Promise<Settings> 
 export async function importSettingsCached(path: string): Promise<Settings> {
   const imported = await api.importSettings(path)
   cached = imported
+  notifySettingsUpdated(imported)
   return imported
 }
 
@@ -78,7 +106,10 @@ export async function importSettingsCached(path: string): Promise<Settings> {
 export async function setFavoriteModelsCached(models: string[]): Promise<void> {
   await api.setFavoriteModels(models)
   // 后端 set_favorite_models 会按序去重落盘；缓存里也做同样去重，保持与磁盘一致。
-  if (cached) cached = { ...cached, favoriteModels: [...new Set(models)] }
+  if (cached) {
+    cached = { ...cached, favoriteModels: [...new Set(models)] }
+    notifySettingsUpdated(cached)
+  }
 }
 
 /**
@@ -91,6 +122,7 @@ export async function setTranslateCardSizeCached(width: number): Promise<void> {
   const clamped = Math.max(360, Math.min(720, Math.round(width)))
   if (cached) {
     cached = { ...cached, screenshotTranslation: { ...cached.screenshotTranslation, cardWidth: clamped } }
+    notifySettingsUpdated(cached)
   }
 }
 
@@ -98,4 +130,5 @@ export async function setTranslateCardSizeCached(width: number): Promise<void> {
 export function __resetSettingsCacheForTest(): void {
   cached = null
   inflight = null
+  listeners.clear()
 }
