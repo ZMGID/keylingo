@@ -71,6 +71,27 @@ const extensionSubItems: Array<{
 
 const PROJECT_PREVIEW_LIMIT = 5
 
+/** 滚动期间给容器挂 .is-scrolling（停止 1s 后摘除），配合 .kv-scrollbar-autohide
+ *  实现"滚动时才出现"的滚动条。刻意不用 :hover 驱动——hover 的出现/消失时机不可预期。 */
+function useScrollingFlag(ref: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    let timer: number | undefined
+    const onScroll = () => {
+      el.classList.add('is-scrolling')
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => el.classList.remove('is-scrolling'), 1000)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      window.clearTimeout(timer)
+      el.classList.remove('is-scrolling')
+    }
+  }, [ref])
+}
+
 function conversationProjectId(conversation: ConversationListItem): string | null {
   return conversation.project_id ?? conversation.projectId ?? null
 }
@@ -958,6 +979,8 @@ export const Sidebar = memo(function Sidebar({
   // 插入线式拖拽：只有被拖那行浮起，其余行不动，目标位置画线 —— 所以不要求行高相等，
   // 可展开的分组行直接能拖，不需要「拖拽时先全折叠」。
   const groupScrollRef = useRef<HTMLDivElement>(null)
+  // 侧栏会话列表滚动条：滚动时才出现（.kv-scrollbar-autohide + .is-scrolling）
+  useScrollingFlag(groupScrollRef)
   const projectIds = useMemo(() => visibleProjects.map((project) => project.id), [visibleProjects])
   const setIds = useMemo(() => sets.map((set) => set.id), [sets])
 
@@ -1300,7 +1323,7 @@ export const Sidebar = memo(function Sidebar({
 
             <div
               ref={groupScrollRef}
-              className="kv-sidebar-groups custom-scrollbar relative min-h-0 flex-1 overflow-y-auto"
+              className="kv-sidebar-groups custom-scrollbar kv-scrollbar-autohide relative min-h-0 flex-1 overflow-y-auto"
               data-tauri-drag-region="false"
             >
             {(projectDrag.lineTop ?? setDrag.lineTop ?? conversationDrag.lineTop) !== null && (

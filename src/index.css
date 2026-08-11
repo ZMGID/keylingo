@@ -411,11 +411,39 @@ body {
   display: none;
 }
 
-/* 自定义滚动条 — 悬浮胶囊式（chat 模型/权限等下拉菜单共用）。
-   注意：这里绝不能写标准属性 scrollbar-width / scrollbar-color —— 新版 WebKit（Safari 18.2+）
-   与 Chromium 121+ 支持它们，且一旦设置就整体禁用下方 ::-webkit-scrollbar 自定义样式，
-   退化成"始终绘制"的标准滚动条（表现为侧栏滚动条常驻不消失）。
-   默认 thumb 透明 = 平时隐形，容器 hover / 滚动时才浮现。 */
+/* 自定义滚动条（chat 消息列表 / 模型下拉 / 弹层等共用）。
+   新版 WebKit（Safari 18.2+）与 Chromium 121+ 支持标准属性 scrollbar-width / scrollbar-color，
+   且一旦设置就整体禁用下方 ::-webkit-scrollbar 自定义样式 —— 所以在新引擎上实际生效的是
+   这里的标准属性（细条、常显、稳定），::-webkit-* 规则只作为老引擎的回退（hover 胶囊）。
+   需要"滚动时才出现"的容器（如侧栏会话列表）额外挂 .kv-scrollbar-autohide（见下方）。 */
+.custom-scrollbar,
+.chat-model-selector-menu,
+.chat-popover-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+.dark .custom-scrollbar,
+.dark .chat-model-selector-menu,
+.dark .chat-popover-scroll {
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+/* 滚动时才出现的滚动条：默认全透明（gutter 仍占位，出现时无布局抖动），
+   JS 在 scroll 事件期间给容器挂 .is-scrolling（停止后延时摘除）。
+   刻意不用 :hover 驱动 —— hover 出现/消失的时机不可预期，观感不稳定。 */
+.kv-scrollbar-autohide,
+.dark .kv-scrollbar-autohide {
+  scrollbar-color: transparent transparent;
+}
+
+.kv-scrollbar-autohide.is-scrolling {
+  scrollbar-color: rgba(0, 0, 0, 0.25) transparent;
+}
+
+.dark .kv-scrollbar-autohide.is-scrolling {
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
 
 .custom-scrollbar::-webkit-scrollbar,
 .chat-model-selector-menu::-webkit-scrollbar,
