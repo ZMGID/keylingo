@@ -1522,14 +1522,14 @@ export function builtinWebSearchSupported(apiFormat?: string): boolean {
   )
 }
 
-const CHAT_TOOL_DEFAULT_ROUNDS = 20
 const CHAT_TOOL_MIN_ROUNDS = 1
 const CHAT_TOOL_MAX_ROUNDS = 100
 
+// 工具轮次默认不限（null）；缺失/非法输入一律归一到不限，与后端 default 对齐。
 function normalizeMaxToolRounds(value: unknown): number | null {
-  if (value === null) return null
-  const parsed = Number(value ?? CHAT_TOOL_DEFAULT_ROUNDS)
-  if (!Number.isFinite(parsed)) return CHAT_TOOL_DEFAULT_ROUNDS
+  if (value === null || value === undefined) return null
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return null
   return Math.min(CHAT_TOOL_MAX_ROUNDS, Math.max(CHAT_TOOL_MIN_ROUNDS, Math.round(parsed)))
 }
 

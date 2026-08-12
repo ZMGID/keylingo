@@ -60,6 +60,24 @@ function isAttachableClipboardFile(file: File): boolean {
   return Boolean(file.name?.trim()) || file.size > 0
 }
 
+// 输入框自适应高度的唯一实现。量高必须先把 height 塌回 'auto' 才能测出收缩后的
+// scrollHeight，但 textarea rows=1 的 'auto' 是一行高 —— 草稿 ≥2 行时中间态比终值
+// 矮一截。若任由这次塌陷参与整树布局：读 scrollHeight 的强制回流里聊天视口
+// （同一 flex 列里的 flex-1）会瞬间变高、max scrollTop 变小，贴底时浏览器当场把
+// scrollTop 钳下去；恢复高度后底部多出一条 gap，跟随纠正器再钉回。WKWebView 的
+// 异步滚动会把这一去一回画出来 —— 表现就是「贴底 + 两行草稿时每敲一个字整个界面
+// 上下抖，往上滚一点或一行草稿都没事」。所以量高前先把所在行（父元素）的高度锁成
+// 当前值，塌陷只发生在行内，祖先布局全程不动；量完再解锁，净变化只有终值那一次。
+function applyComposerAutoHeight(textarea: HTMLTextAreaElement) {
+  const row = textarea.parentElement instanceof HTMLElement ? textarea.parentElement : null
+  const prevRowHeight = row?.style.height ?? ''
+  if (row) row.style.height = `${row.offsetHeight}px`
+  textarea.style.height = 'auto'
+  textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
+  textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden'
+  if (row) row.style.height = prevRowHeight
+}
+
 function undoAccidentalFilenamePaste(
   textarea: HTMLTextAreaElement,
   valueBeforePaste: string,
@@ -80,9 +98,7 @@ function undoAccidentalFilenamePaste(
     textarea.value = cleaned
     textarea.selectionStart = selectionStart
     textarea.selectionEnd = selectionStart
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
-    textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden'
+    applyComposerAutoHeight(textarea)
   })
 }
 
@@ -695,9 +711,7 @@ export const InputBar = memo(function InputBar({
   const updateTextareaHeight = useCallback(() => {
     const textarea = textareaRef.current
     if (!textarea) return
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
-    textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden'
+    applyComposerAutoHeight(textarea)
   }, [])
 
   // 高度/滚动条是 input 的纯函数，统一在这里跟。原来每条改 input 的路径各自补一次

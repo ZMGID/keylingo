@@ -162,6 +162,8 @@ export interface SidebarProps {
   onNewConversation: () => void
   onConversationDeleted?: (id: string) => void
   onForceDropConversation?: (id: string) => void
+  /** 真实会话列表 refetch 落地后回调（父组件据此剪枝乐观条目，见 visibleConversations 注释）。 */
+  onConversationsLoaded?: () => void
   onOpenSettings: () => void
   onOpenExtensionsItem: (item: ExtensionsNavItem) => void
   onSelectLang: (lang: Lang) => void
@@ -535,6 +537,7 @@ export const Sidebar = memo(function Sidebar({
   onNewConversation,
   onConversationDeleted,
   onForceDropConversation,
+  onConversationsLoaded,
   onOpenSettings,
   onOpenExtensionsItem,
   onSelectLang,
@@ -634,6 +637,10 @@ export const Sidebar = memo(function Sidebar({
       setConversationPins(pinData)
       setAssistants(assistantData)
       setConversations(conversationData)
+      // 真实列表已落地：通知父组件剪掉已被接管的乐观条目。必须在 setConversations 同一批
+      // 更新里发出，两个 state 才会在同一次 commit 中切换——行实例（key=id）无缝从乐观
+      // 条目换到真实条目，SwapTitle 不重挂。
+      onConversationsLoaded?.()
       if (projectForLoad && !projectData.some((project) => project.id === projectForLoad.id)) {
         onSelectProject(null)
       }
@@ -645,7 +652,7 @@ export const Sidebar = memo(function Sidebar({
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [onSelectProject, onSelectSet, selectedProject, selectedSet])
+  }, [onConversationsLoaded, onSelectProject, onSelectSet, selectedProject, selectedSet])
 
   useEffect(() => {
     // 侧栏数据与 selectedProject 无关（loadSidebarData 始终拉全部项目+对话，仅用 selectedProject
@@ -937,9 +944,13 @@ export const Sidebar = memo(function Sidebar({
     const visibleOptimisticConversations = optimisticConversations.filter((item) => {
       if (item.archived) return false
       const real = realById.get(item.id)
-      // 真实列表里没有：可能是「刚新建尚未 refetch」的乐观项，也可能是「刚归档/删除」。
-      // 仅当仍在 generating 时才保留乐观项；否则视为已离开侧栏（归档/删除）不再并回。
-      if (!real) return generatingConversationIds.has(item.id)
+      // 真实列表里没有 → 保留。新会话从创建到首次 refetch 之间只存在于乐观列表；run 刚结束
+      // 的那次 commit 里 generating 已清、refetch 还没落地，此刻若按 generating 判丢弃，
+      // 行会卸载一帧、refetch 后再以最终标题重建 —— SwapTitle 首挂不播，标题打字机整个失效
+      // （这正是「首轮生成完标题打出来」的主场景）。归档/删除的幽灵不再靠这里拦：
+      // 删除/归档路径走 onForceDropConversation 即时摘除，其余由 refetch 落地时父组件的
+      // onConversationsLoaded 剪枝（只留仍在 generating 的乐观项）兜底。
+      if (!real) return true
       if (generatingConversationIds.has(item.id)) return true
       // 真实条目仍是占位标题「新对话」说明它落后于乐观条目（乐观条目持有刚持久化的最新数据）：
       // 首轮完成后、refetch 落地前，真实列表里这条还是旧快照 —— 直接切过去会让标题动效

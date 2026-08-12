@@ -4590,6 +4590,19 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     dropConversationLocally(id)
   }, [dropConversationLocally])
 
+  // 侧栏真实列表 refetch 落地 → 剪掉不再生成中的乐观条目。乐观项的生命期是
+  // 「发送 → settle（原地换成模型标题，SwapTitle 播打字机）→ 下一次 refetch 接管」：
+  // settle 时不能立即剪（refetch 未落地、新会话在真实列表里还没有，剪了行就卸载一帧、
+  // 重建后打字机不播）；refetch 落地后真实条目已就位（同 key 无缝接管），或该会话已被
+  // 归档/删除（不该再并回）——两种情况都该剪。仍在 generating 的保留（长跑 run 期间
+  // 任何无关刷新不得把乐观标题打回「新对话」）。
+  const handleSidebarConversationsLoaded = useCallback(() => {
+    setOptimisticSidebarConversations((prev) => {
+      const next = prev.filter((item) => generatingConversationIdsRef.current.has(item.id))
+      return next.length === prev.length ? prev : next
+    })
+  }, [])
+
   const settingsPanelActive = chatView === 'settings' && extensionsNavItem === null
 
   const handleSidebarOpenExtensionsItem = useCallback((item: ExtensionsNavItem) => {
@@ -5118,6 +5131,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           onNewConversation={handleSidebarNewConversation}
           onConversationDeleted={handleSidebarConversationDeleted}
           onForceDropConversation={handleSidebarForceDropConversation}
+          onConversationsLoaded={handleSidebarConversationsLoaded}
           onOpenExtensionsItem={handleSidebarOpenExtensionsItem}
           onOpenSettings={handleSidebarOpenSettings}
           onSelectLang={handleSidebarSelectLang}

@@ -3,7 +3,8 @@
 
 import { type ChatMcpServer, type ChatToolsConfig, defaultNativeTools } from '../api/tauri'
 
-export const CHAT_TOOL_DEFAULT_ROUNDS = 20
+// 工具轮次默认**不限**（null）。此常量仅供 clamp 兜底与旧值展示，不再是默认值。
+export const CHAT_TOOL_LEGACY_DEFAULT_ROUNDS = 20
 export const CHAT_TOOL_MIN_ROUNDS = 1
 export const CHAT_TOOL_MAX_ROUNDS = 100
 export const CHAT_TOOL_ROUND_PRESETS = [5, 10, 20, 50, 100]
@@ -18,8 +19,8 @@ export const SUB_AGENT_CONCURRENCY_MIN = 1
 export const SUB_AGENT_CONCURRENCY_MAX = 64
 
 export function clampToolRounds(value: string | number | null | undefined): number {
-  const parsed = Number(value ?? CHAT_TOOL_DEFAULT_ROUNDS)
-  if (!Number.isFinite(parsed)) return CHAT_TOOL_DEFAULT_ROUNDS
+  const parsed = Number(value ?? CHAT_TOOL_LEGACY_DEFAULT_ROUNDS)
+  if (!Number.isFinite(parsed)) return CHAT_TOOL_LEGACY_DEFAULT_ROUNDS
   return Math.min(CHAT_TOOL_MAX_ROUNDS, Math.max(CHAT_TOOL_MIN_ROUNDS, Math.round(parsed)))
 }
 
@@ -66,7 +67,7 @@ export function defaultChatTools(): ChatToolsConfig {
     skillAutoMatch: true,
     skillFallbackMode: 'progressive',
     disabledSkillIds: [],
-    maxToolRounds: CHAT_TOOL_DEFAULT_ROUNDS,
+    maxToolRounds: null,
     toolTimeoutMs: 60_000,
     mcpIdleTimeoutMs: 600_000,
     approvalPolicy: 'readonly_auto_sensitive_confirm',
