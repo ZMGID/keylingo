@@ -56,6 +56,17 @@ const modLabel = isMac ? '⌘' : 'Ctrl'
 
 export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'sessions'
 
+/**
+ * 点击会话时要同步切换的侧栏导航上下文。
+ *
+ * 必须和会话选择合并成一次动作：若先调用 onSelectProject/onSelectSet，它们会先把路由
+ * 写成空会话 #chat，hashchange 随后会取消正在加载的目标会话，最终停在新对话页。
+ */
+export interface ConversationSelectionScope {
+  project: ChatProject | null
+  set: ChatSet | null
+}
+
 const extensionSubItems: Array<{
   id: ExtensionsNavItem
   label: (t: I18n) => string
@@ -158,7 +169,11 @@ export interface SidebarProps {
   onSelectProject: (project: ChatProject | null) => void
   selectedSet?: ChatSet | null
   onSelectSet: (set: ChatSet | null) => void
-  onSelectConversation: (id: string, conversation?: ConversationSearchHit | ConversationListItem) => void
+  onSelectConversation: (
+    id: string,
+    conversation?: ConversationSearchHit | ConversationListItem,
+    scope?: ConversationSelectionScope,
+  ) => void
   onNewConversation: () => void
   onConversationDeleted?: (id: string) => void
   onForceDropConversation?: (id: string) => void
@@ -1154,14 +1169,12 @@ export const Sidebar = memo(function Sidebar({
 
   const handleSelectSearchConversation = useCallback((conversation: ConversationSearchHit) => {
     const project = findConversationProject(conversation, projects)
-    if (project) {
-      onSelectProject(project)
-    } else if (selectedProject) {
-      onSelectProject(null)
-    }
-    onSelectConversation(conversation.id, conversation)
+    onSelectConversation(conversation.id, conversation, {
+      project: project ?? null,
+      set: null,
+    })
     closeSearch()
-  }, [closeSearch, onSelectConversation, onSelectProject, projects, selectedProject])
+  }, [closeSearch, onSelectConversation, projects])
 
   const menuProject = projectMenuState
     ? projects.find((project) => project.id === projectMenuState.projectId)
@@ -1460,8 +1473,7 @@ export const Sidebar = memo(function Sidebar({
                           indent
                           showAssistantName={false}
                           onSelectConversation={(id, conversation) => {
-                            if (selectedProject?.id !== project.id) onSelectProject(project)
-                            onSelectConversation(id, conversation)
+                            onSelectConversation(id, conversation, { project, set: null })
                           }}
                           onRenameConversation={handleRenameConversation}
                           onTogglePinConversation={handleTogglePinConversation}
@@ -1610,8 +1622,7 @@ export const Sidebar = memo(function Sidebar({
                               indent
                               showAssistantName={false}
                               onSelectConversation={(id, conversation) => {
-                                if (selectedSet?.id !== set.id) onSelectSet(set)
-                                onSelectConversation(id, conversation)
+                                onSelectConversation(id, conversation, { project: null, set })
                               }}
                               onRenameConversation={handleRenameConversation}
                               onTogglePinConversation={handleTogglePinConversation}
@@ -1674,9 +1685,7 @@ export const Sidebar = memo(function Sidebar({
                       showAssistantName={false}
                       showFolderLabel
                       onSelectConversation={(id, conversation) => {
-                        if (selectedProject) onSelectProject(null)
-                        if (selectedSet) onSelectSet(null)
-                        onSelectConversation(id, conversation)
+                        onSelectConversation(id, conversation, { project: null, set: null })
                       }}
                       onRenameConversation={handleRenameConversation}
                       onTogglePinConversation={handleTogglePinConversation}

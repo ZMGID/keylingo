@@ -1,6 +1,6 @@
 import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ProfilerOnRenderCallback, type ReactNode, type Ref } from 'react'
 import { PanelRight } from 'lucide-react'
-import { type ExtensionsNavItem } from './Sidebar'
+import { type ConversationSelectionScope, type ExtensionsNavItem } from './Sidebar'
 import { ChatSidebarPane } from './ChatSidebarPane'
 import { useChatRouting } from './hooks/useChatRouting'
 import { useExternalSendQueue } from './hooks/useExternalSendQueue'
@@ -4556,17 +4556,29 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     runAfterLeavingSettings(() => handleSelectSet(set))
   }, [handleSelectSet, runAfterLeavingSettings])
 
-  const handleSidebarSelectConversation = useCallback((id: string, conversation?: ConversationListItem | ConversationSearchHit) => {
+  const handleSidebarSelectConversation = useCallback((
+    id: string,
+    conversation?: ConversationListItem | ConversationSearchHit,
+    scope?: ConversationSelectionScope,
+  ) => {
     const focusMessageId =
       conversation && 'match_message_id' in conversation
         ? conversation.match_message_id ?? conversation.matchMessageId ?? undefined
         : conversation && 'matchMessageId' in conversation
           ? conversation.matchMessageId ?? undefined
           : undefined
-    runAfterLeavingSettings(() => void handleSelectConversation(id, {
-      messageCount: conversation?.message_count,
-      focusMessageId: focusMessageId || undefined,
-    }))
+    runAfterLeavingSettings(() => {
+      // 跨项目/集点击必须是一次原子导航。这里仅更新导航上下文，不调用
+      // handleSelectProject/handleSelectSet（两者会清空会话并写 #chat）。
+      if (scope) {
+        setSelectedProject(scope.project)
+        setSelectedSet(scope.set)
+      }
+      void handleSelectConversation(id, {
+        messageCount: conversation?.message_count,
+        focusMessageId: focusMessageId || undefined,
+      })
+    })
   }, [handleSelectConversation, runAfterLeavingSettings])
 
   const handleSidebarNewConversation = useCallback(() => {
