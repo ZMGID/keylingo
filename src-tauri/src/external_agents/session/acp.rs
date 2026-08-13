@@ -1132,6 +1132,52 @@ fn acp_apply_session_update(
     }
 }
 
+/// grok 的 `retry_state` 通知 → 状态行上的一句短话（不进正文）。
+///
+/// **为什么必须接**：上游 503 / 429 时 grok 在**静默重试**（实测 `max_retries: 15`，退避到
+/// 后面单次要等半分钟），界面上一个字都没有 —— 与 claude 的 `api_retry` 完全同一类问题，
+/// 复用同一个 `StatusNote` 出口和同一套文案格式。这条通知走的是厂商私有方法
+/// `_x.ai/session_notification`，不是标准 `session/update`。
+///
+/// 形状（grok 1.0.3 实测）：
+/// `{sessionUpdate:"retry_state", type:"retrying", attempt:1, max_retries:15, reason:"API error …"}`
+/// `type` 非 `retrying`（重试结束）时不发 —— 状态行是瞬态的，本轮继续流就自然被覆盖。
+fn acp_retry_state_note(update: &serde_json::Map<String, Value>) -> Option<String> {
+    if update.get("sessionUpdate").and_then(|v| v.as_str())? != "retry_state" {
+        return None;
+    }
+    if update.get("type").and_then(|v| v.as_str()) != Some("retrying") {
+        return None;
+    }
+    let attempt = update.get("attempt").and_then(|v| v.as_u64())?;
+    let of_max = update
+        .get("max_retries")
+        .and_then(|v| v.as_u64())
+        .map(|max| format!("/{max}"))
+        .unwrap_or_default();
+    let cause = update
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        // reason 是一整句英文错误（含 body 片段），状态行放不下也没必要 —— 截到能认出
+        // 「是什么故障」为止。
+        .map(|s| head_chars(s, 80));
+    Some(match cause {
+        Some(text) => format!("上游重试 {attempt}{of_max} · {text}"),
+        None => format!("上游重试 {attempt}{of_max}"),
+    })
+}
+
+/// 取前 n 个字符（按字符而非字节，避免切裂多字节）。
+fn head_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(n).collect();
+    format!("{head}…")
+}
+
 // ===========================================================================================
 // Persistent ACP session (Phase 2): keep the agent process alive across turns. Reuses the
 // same `apply_acp_session_update` mapping + permission/usage helpers as the one-shot driver.
@@ -1547,6 +1593,21 @@ impl AcpSession {
                     }
                     continue;
                 }
+                // 厂商私有通知。目前只取 grok 的 `retry_state`：上游 503/429 的静默重试是
+                // 「怎么卡住了」的头号成因，不接的话界面在整个重试期（可达数分钟）毫无输出。
+                // 其余 `_x.ai/*`（mcp 进度 / 队列 / 会话列表变更）与本轮回答无关，继续忽略。
+                if method == "_x.ai/session_notification" {
+                    if let Some(update) = value
+                        .get("params")
+                        .and_then(|p| p.get("update"))
+                        .and_then(|v| v.as_object())
+                    {
+                        if let Some(text) = acp_retry_state_note(update) {
+                            let _ = events.send(UnifiedAgentEvent::StatusNote { text }).await;
+                        }
+                    }
+                    continue;
+                }
                 continue;
             }
 
@@ -1700,6 +1761,31 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// grok 上游 503 时的静默重试必须变成一行可见状态。样本取自本机 grok 1.0.3
+    /// `_x.ai/session_notification` 的原样 update。
+    #[test]
+    fn retry_state_becomes_status_note() {
+        let update = json!({
+            "sessionUpdate": "retry_state",
+            "type": "retrying",
+            "attempt": 3,
+            "max_retries": 15,
+            "reason": "API error (status 503 Service Unavailable): api_error: Service temporarily unavailable"
+        });
+        let note = acp_retry_state_note(update.as_object().unwrap()).expect("retry note");
+        assert!(note.starts_with("上游重试 3/15 · "), "got: {note}");
+        assert!(note.contains("503"), "原因要能看出是什么故障: {note}");
+    }
+
+    /// 重试结束（非 `retrying`）不发状态行；别的 update 也不能误命中这条路。
+    #[test]
+    fn retry_state_note_ignores_non_retrying_and_other_updates() {
+        let finished = json!({ "sessionUpdate": "retry_state", "type": "succeeded", "attempt": 4 });
+        assert!(acp_retry_state_note(finished.as_object().unwrap()).is_none());
+        let other = json!({ "sessionUpdate": "model_changed", "model_id": "grok-4.6" });
+        assert!(acp_retry_state_note(other.as_object().unwrap()).is_none());
+    }
 
     /// kimi 的 ACP 确实暴露推理档位——`configOptions` 里 `id="thinking"` /
     /// `category="thought_level"`。此前发现侧完全没读，胶囊上没有档位可选。

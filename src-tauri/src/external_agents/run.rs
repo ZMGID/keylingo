@@ -800,6 +800,16 @@ where
     // resume 已经被摘掉过一次了吗。降级恰好一次（第二次仍失败说明原因不是 resume）。
     let mut dropped_resume = false;
 
+    // 能拿来续接的原生会话 id。**轮内重连必须带上它**：ACP（`session/load`）与 codex
+    // （thread id）的续接走的是这个参数，不像 claude 在 argv 里。不带 = 空白会话 + 一条
+    // 「上下文已重置」，而触发重连的多是上游 503 / 瞬时 RPC 故障，或者用户只是改了个
+    // reasoning 档位（grok 的 `--reasoning-effort` 是启动参数，必须换进程）—— 这些都不该
+    // 让用户丢掉整段上下文。会话 id 不随进程死亡失效：grok 实测（1.0.3）新进程
+    // `session/load` 同一个 id 成功，`initialize` 也声明了 `loadSession: true`。
+    let mut resumable_native: Option<String> = load_live_handle(app, conversation_id)
+        .filter(|h| h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag)
+        .map(|h| h.native_id);
+
     // Establish the control channel: 1. reuse a live session in the registry; 2. resume a
     // persisted one; 3. connect fresh.
     //
@@ -814,11 +824,7 @@ where
     ) {
         Some(control) => (control, reuse_prompt.to_string()),
         None => {
-            let resume_native = load_live_handle(app, conversation_id)
-                .filter(|h| {
-                    h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag
-                })
-                .map(|h| h.native_id);
+            let resume_native = resumable_native.clone();
             // We intended to continue an existing native session iff a matching handle was
             // persisted. If the resume then fails and we fall back to fresh, the prior context
             // is lost and the user must be told (R4) rather than silently getting a blank slate.
@@ -878,6 +884,8 @@ where
                 resumed,
                 child_pid,
             } = connected;
+            // 轮内重连要续的是**这个**会话，不是 handle 里那个（首连开了新会话时两者不同）。
+            resumable_native = Some(native_id.clone()).filter(|id| !id.trim().is_empty());
             let _ = save_live_handle(
                 app,
                 conversation_id,
@@ -980,6 +988,8 @@ where
             // 这里**不重置** `retried_after_failure`：降级本身有独立闸门（`dropped_resume`）。
             PersistentFailureAction::ReconnectWithoutResume => {
                 dropped_resume = true;
+                // 这条路的**全部意义**就是别再续那个死会话了（argv 与协议参数两条都要摘）。
+                resumable_native = None;
                 turn_args = drop_resume_for_fresh_session(
                     app,
                     conversation_id,
@@ -995,7 +1005,7 @@ where
             }
         }
 
-        let (next_control, resumed) = reconnect_fresh(
+        let (next_control, resumed, reconnect_native) = reconnect_fresh(
             app,
             state,
             conversation_id,
@@ -1011,8 +1021,11 @@ where
             sandbox.as_deref(),
             &mcp_servers,
             launch_config,
+            resumable_native.clone(),
         )
         .await?;
+        // 又重连一次时续的是这条会话（续接成功 ⇒ 同一个 id；失败降级成新会话 ⇒ 新 id）。
+        resumable_native = reconnect_native.filter(|id| !id.trim().is_empty());
         // 新会话进了注册表 ⇒ 旧 guard 已经指不到它了，重挂一个（旧的在赋值时落地）。
         _busy = state.mark_external_live_session_busy(conversation_id);
         control = next_control;
@@ -1031,10 +1044,14 @@ where
     }
 }
 
-/// Connect a persistent session for the reconnect paths (no live handle to resume from), persist
-/// its handle, and register it. Returns the control channel plus **whether the CLI actually
-/// continued its native session** — for claude that happens when `args` still carry `--resume`,
-/// and in that case the caller must NOT claim the context was reset (a false alarm is its own bug).
+/// Connect a persistent session for the reconnect paths, persist its handle, and register it.
+/// Returns the control channel, **whether the CLI actually continued its native session** — for
+/// claude that happens when `args` still carry `--resume`, and in that case the caller must NOT
+/// claim the context was reset (a false alarm is its own bug) — and the native session id the
+/// connection ended up on, so a further reconnect continues *that* session.
+///
+/// `resume_native` 是 ACP / codex 的续接凭据（claude 的在 argv 里）。**不传 = 保证开新会话**，
+/// 也就保证了一条「上下文已重置」；而走到这里的原因常常只是上游 503 或改了 reasoning 档位。
 #[allow(clippy::too_many_arguments)]
 async fn reconnect_fresh(
     app: &AppHandle,
@@ -1052,10 +1069,12 @@ async fn reconnect_fresh(
     sandbox: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     launch_config: &LaunchConfig,
+    resume_native: Option<String>,
 ) -> Result<
     (
         tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
         bool,
+        Option<String>,
     ),
     String,
 > {
@@ -1076,7 +1095,7 @@ async fn reconnect_fresh(
         reasoning,
         sandbox,
         mcp_servers,
-        None,
+        resume_native,
         Some(background_task_sink(app, conversation_id)),
     )
     .await?;
@@ -1086,7 +1105,7 @@ async fn reconnect_fresh(
         &LiveSessionHandle {
             agent_id: agent_id.to_string(),
             protocol: protocol_tag.to_string(),
-            native_id,
+            native_id: native_id.clone(),
             cwd: cwd_str.to_string(),
         },
     );
@@ -1103,7 +1122,7 @@ async fn reconnect_fresh(
             busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     );
-    Ok((control, resumed))
+    Ok((control, resumed, Some(native_id)))
 }
 
 /// 本轮的启动配置指纹。
@@ -2031,7 +2050,8 @@ async fn connect_persistent_session(
                 }
                 // C3: resume failed → fall through to fresh so the caller overwrites the stale
                 // live handle (whose native_id is dead) instead of retrying a doomed resume.
-                eprintln!("[external-agent] codex resume failed, connecting fresh");
+                // 同 ACP 那条：原因要留在日志里，否则「上下文已重置」提示查不到根因。
+                eprintln!("[external-agent] codex resume failed (thread {tid}), connecting fresh");
             }
             let session =
                 CodexAppServerSession::connect(resolved_bin, args, cwd, model, sandbox, None)
@@ -2047,7 +2067,7 @@ async fn connect_persistent_session(
         }
         StreamFormat::AcpJsonRpc => {
             if let Some(sid) = resume_native.as_deref() {
-                if let Ok(session) = AcpSession::connect(
+                match AcpSession::connect(
                     resolved_bin,
                     args,
                     cwd,
@@ -2058,18 +2078,27 @@ async fn connect_persistent_session(
                 )
                 .await
                 {
-                    let id = session.session_id().to_string();
-                    let child_pid = session.child_pid();
-                    return Ok(PersistentConnection {
-                        control: spawn_acp_session_actor(session),
-                        native_id: id,
-                        resumed: true,
-                        child_pid,
-                    });
+                    Ok(session) => {
+                        let id = session.session_id().to_string();
+                        let child_pid = session.child_pid();
+                        return Ok(PersistentConnection {
+                            control: spawn_acp_session_actor(session),
+                            native_id: id,
+                            resumed: true,
+                            child_pid,
+                        });
+                    }
+                    // C3: resume failed → connect fresh; the caller's save_live_handle overwrites
+                    // the stale handle so the next turn won't attempt the dead native_id again.
+                    // **原因必须打出来**：这条路的下游是一条「上下文已重置」提示，而用户看到
+                    // 提示时唯一能查的就是日志。之前这里是 `if let Ok(..)`，`session/load` 的
+                    // 报错被整个丢掉，只剩一句「失败了」。
+                    Err(err) => {
+                        eprintln!(
+                            "[external-agent] acp resume failed (session {sid}), connecting fresh: {err}"
+                        );
+                    }
                 }
-                // C3: resume failed → connect fresh; the caller's save_live_handle overwrites the
-                // stale handle so the next turn won't attempt the dead native_id again.
-                eprintln!("[external-agent] acp resume failed, connecting fresh");
             }
             let session =
                 AcpSession::connect(resolved_bin, args, cwd, model, reasoning, mcp_servers, None)
