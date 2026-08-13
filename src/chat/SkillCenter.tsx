@@ -41,6 +41,8 @@ const CLI_SKILL_SOURCES = [
   { key: 'claude', label: 'Claude Code', dirs: ['.claude/skills'] },
   { key: 'codex', label: 'Codex', dirs: ['.codex/skills'] },
   { key: 'opencode', label: 'OpenCode', dirs: ['.config/opencode/skills', '.opencode/skills'] },
+  // Pi 自有技能目录 + 它同样加载的工具无关共享目录 ~/.agents/skills
+  { key: 'pi', label: 'Pi', dirs: ['.pi/agent/skills', '.agents/skills'] },
 ] as const
 
 type CliSkillKey = (typeof CLI_SKILL_SOURCES)[number]['key']
@@ -497,7 +499,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     }
   }, [t])
 
-  // 扫描三个 CLI 的技能目录：复用 chat_skills_list 的额外扫描路径（external 源即 CLI 技能），
+  // 扫描各本地 CLI 的技能目录：复用 chat_skills_list 的额外扫描路径（external 源即 CLI 技能），
   // 再按 skill.path 的目录前缀把结果归到对应 CLI 分组。
   const handleCliScan = useCallback(async () => {
     setCliScanning(true)
@@ -506,20 +508,34 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
     try {
       const home = (await homeDir()).replace(/[/\\]+$/, '')
       const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+      const piAgentDir = (await api.chatPiAgentDir())?.replace(/[/\\]+$/, '')
+      const defaultPiDirs = CLI_SKILL_SOURCES
+        .filter((source) => source.key === 'pi')
+        .flatMap((source) => source.dirs.map((dir) => `${home}/${dir}`))
+      const piSkillDirs = Array.from(new Set([
+        ...(piAgentDir ? [`${piAgentDir}/skills`] : []),
+        ...defaultPiDirs,
+      ].map((dir) => dir.replace(/\\/g, '/'))))
       // 每个 CLI 目录 → 归一化前缀（用于把扫描结果分组）
       const sources = CLI_SKILL_SOURCES.map((source) => ({
         key: source.key,
-        prefixes: source.dirs.map((dir) => norm(`${home}/${dir}`)),
+        prefixes: source.key === 'pi'
+          ? piSkillDirs.map(norm)
+          : source.dirs.map((dir) => norm(`${home}/${dir}`)),
       }))
-      const scanDirs = CLI_SKILL_SOURCES.flatMap((source) => source.dirs.map((dir) => `${home}/${dir}`))
+      const scanDirs = [
+        ...CLI_SKILL_SOURCES.filter((source) => source.key !== 'pi')
+          .flatMap((source) => source.dirs.map((dir) => `${home}/${dir}`)),
+        ...piSkillDirs,
+      ]
       const result = await api.chatSkillsList(scanDirs)
       if (!result.success) {
         setSkillError(result.error || t.chatSkillScanFailed)
-        setCliSkills({ claude: [], codex: [], opencode: [] })
+        setCliSkills({ claude: [], codex: [], opencode: [], pi: [] })
         return
       }
       const scanned = result.skills.filter((skill) => skill.source === 'external' && skill.path)
-      const groups: CliSkillGroups = { claude: [], codex: [], opencode: [] }
+      const groups: CliSkillGroups = { claude: [], codex: [], opencode: [], pi: [] }
       for (const skill of scanned) {
         const path = norm(skill.path as string)
         const source = sources.find((s) => s.prefixes.some((prefix) => path.startsWith(prefix)))
@@ -546,7 +562,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
   // 导入选中技能 = 逐项从 skill.path（.../<id>/SKILL.md）推出文件夹后复制进 Kivio 用户技能目录。
   const handleCliImportSelected = useCallback(async () => {
     if (!cliSkills) return
-    const all = [...cliSkills.claude, ...cliSkills.codex, ...cliSkills.opencode]
+    const all = [...cliSkills.claude, ...cliSkills.codex, ...cliSkills.opencode, ...cliSkills.pi]
     const chosen = all.filter((skill) => cliSelected.has(skill.id) && skill.path)
     if (chosen.length === 0) return
     setCliImporting(true)
@@ -705,7 +721,7 @@ export function SkillCenter({ onSkillsChanged }: SkillCenterProps) {
                 </div>
 
                 {cliSkills && (() => {
-                  const total = cliSkills.claude.length + cliSkills.codex.length + cliSkills.opencode.length
+                  const total = cliSkills.claude.length + cliSkills.codex.length + cliSkills.opencode.length + cliSkills.pi.length
                   return (
                     <div className="mt-3 space-y-3">
                       {total === 0 ? (

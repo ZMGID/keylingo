@@ -75,6 +75,18 @@ pub async fn detect_pi_commands(
         if let Some(list) = list {
             let mut out = Vec::new();
             let mut seen = std::collections::HashSet::new();
+            // pi 内建命令不经 get_commands 上报（rpc.md 明说 built-in TUI commands 不含
+            // 在内，也无法探测），与 codex 的 CODEX_BUILTIN_COMMANDS 同策略：只列 Kivio
+            // 适配层真正会执行的那几个，先播种再合并动态结果（同名以内建为准）。
+            for (name, description) in PI_BUILTIN_COMMANDS {
+                seen.insert((*name).to_string());
+                out.push(ExternalCliSlashCommand {
+                    slash: format!("/{name}"),
+                    name: (*name).to_string(),
+                    description: Some((*description).to_string()),
+                    argument_hint: None,
+                });
+            }
             for raw in list {
                 let Some(name) = raw
                     .get("name")
@@ -114,6 +126,11 @@ const FIRE_AND_FORGET: &[&str] = &[
     "setTitle",
     "set_editor_text",
 ];
+
+/// pi 内建命令白名单（get_commands 不上报内建，rpc.md：built-in TUI commands 走
+/// prompt 不会执行）。只列 Kivio 适配层拦截并转成真 RPC 的命令——列而不适配等于
+/// 骗用户。`/compact` → `{"type":"compact"}`（见 `run_pi_rpc_session`）。
+const PI_BUILTIN_COMMANDS: &[(&str, &str)] = &[("compact", "压缩对话历史")];
 
 const BTW_COMMANDS: &[&str] = &[
     "btw",
@@ -340,9 +357,11 @@ pub fn parse_pi_models(stderr: &str) -> Option<Vec<RuntimeModelOption>> {
             let context_window_tokens = parts
                 .get(2)
                 .and_then(|label| parse_context_window_label(label));
+            // 下拉框标签用「模型 · 供应商」：供应商 id 现在已是短名（relay），
+            // 比 `kivio-p-xxx/model` 整串塞进一行可读得多；id 仍保留完整 provider/model。
             out.push(RuntimeModelOption {
-                id: full_id.clone(),
-                label: full_id,
+                id: full_id,
+                label: format!("{} · {}", parts[1], parts[0]),
                 context_window_tokens,
             });
         }
@@ -352,6 +371,41 @@ pub fn parse_pi_models(stderr: &str) -> Option<Vec<RuntimeModelOption>> {
     } else {
         None
     }
+}
+
+/// 从 `pi --list-models` 表格解析每个模型的 thinking 支持（`thinking` 列 yes/no）。
+/// 按表头定位列号（列序可能随版本变化）；无表头/无该列 → 空表（调用方视为未知，
+/// 不隐藏任何档位）。id 形态与 `parse_pi_models` 一致（`provider/model`）。
+pub fn parse_pi_model_thinking(text: &str) -> std::collections::HashMap<String, bool> {
+    let mut out = std::collections::HashMap::new();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let Some(header) = lines.first() else {
+        return out;
+    };
+    let Some(col) = header
+        .split_whitespace()
+        .position(|c| c.eq_ignore_ascii_case("thinking"))
+    else {
+        return out;
+    };
+    for line in lines.iter().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let Some(flag) = parts.get(col) else {
+            continue;
+        };
+        out.insert(
+            format!("{}/{}", parts[0], parts[1]),
+            flag.eq_ignore_ascii_case("yes"),
+        );
+    }
+    out
 }
 
 pub fn map_pi_rpc_event(value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) -> PiRpcOutcome {
@@ -480,6 +534,37 @@ pub fn map_pi_rpc_event(value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) 
                 });
             }
         }
+        // start 只发状态行；CliCompacted 必须等 end，否则会插一条假分隔线。
+        "compaction_start" => {
+            sink(UnifiedAgentEvent::StatusNote {
+                text: "Pi 正在压缩上下文…".to_string(),
+            });
+        }
+        "compaction_end" => {
+            if let Some(result) = obj.get("result").and_then(|v| v.as_object()) {
+                let reason = obj.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                sink(UnifiedAgentEvent::CliCompacted {
+                    trigger: if reason == "manual" {
+                        "manual".to_string()
+                    } else {
+                        "auto".to_string()
+                    },
+                    pre_tokens: result.get("tokensBefore").and_then(|v| v.as_u64()),
+                    post_tokens: result.get("estimatedTokensAfter").and_then(|v| v.as_u64()),
+                    dropped_tokens: None,
+                    duration_ms: None,
+                });
+            } else if let Some(err) = obj
+                .get("errorMessage")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
+                // 压缩失败不终止轮次（overflow 场景 pi 自己决定重试与否），只报状态行。
+                sink(UnifiedAgentEvent::StatusNote {
+                    text: format!("上下文压缩失败：{err}"),
+                });
+            }
+        }
         "extension_error" => {
             let message = obj
                 .get("error")
@@ -588,18 +673,31 @@ pub async fn run_pi_rpc_session(
         .ok_or_else(|| "stdout unavailable".to_string())?;
     let mut reader = BufReader::new(stdout).lines();
 
+    // 内建 /compact 必须发 type:compact，走 prompt 不会执行。
+    let manual_compact = prompt.trim() == "/compact";
+
     // pi-btw owns its sub-session and persists completed exchanges as custom session entries.
     // Verify that the slash name is an installed extension command before enabling the adapter:
     // an uninstalled `/btw ...` is just a normal model prompt and must keep the ordinary stream.
-    let btw_command = match parse_pi_btw_command(prompt) {
-        Some(command) if probe_registered_btw_command(&mut reader, &mut stdin, &command).await => {
+    let btw_command = if manual_compact {
+        None
+    } else {
+        match parse_pi_btw_command(prompt) {
             Some(command)
+                if probe_registered_btw_command(&mut reader, &mut stdin, &command).await =>
+            {
+                Some(command)
+            }
+            _ => None,
         }
-        _ => None,
     };
 
     let prompt_line = {
-        let payload = json!({ "id": 1, "type": "prompt", "message": prompt });
+        let payload = if manual_compact {
+            json!({ "id": 1, "type": "compact" })
+        } else {
+            json!({ "id": 1, "type": "prompt", "message": prompt })
+        };
         let mut line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
         line.push('\n');
         line
@@ -615,6 +713,7 @@ pub async fn run_pi_rpc_session(
         &mut sink,
         cancel_check,
         btw_command.as_ref(),
+        manual_compact,
     )
     .await;
     match &result {
@@ -645,7 +744,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut reader = BufReader::new(stdout).lines();
-    drain_pi_rpc_lines(&mut reader, stdin, sink, cancel_check, None).await
+    drain_pi_rpc_lines(&mut reader, stdin, sink, cancel_check, None, false).await
 }
 
 async fn drain_pi_rpc_lines<R, W>(
@@ -654,6 +753,9 @@ async fn drain_pi_rpc_lines<R, W>(
     sink: &mut impl FnMut(UnifiedAgentEvent),
     cancel_check: impl Fn() -> bool,
     btw_command: Option<&PiBtwCommand>,
+    // 本次发出的是 `{"type":"compact"}` 而非 prompt：compact RPC 不产生 agent_end，
+    // 以它的 response 作为轮次终点。
+    manual_compact: bool,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -662,6 +764,10 @@ where
     let mut agent_ended = false;
     let mut btw_entries_requested = false;
     let mut btw_entry_emitted = false;
+    // 本轮是否已从 compaction_end 事件发出 CliCompacted（事件是首选的唯一来源）。
+    // 手动 compact 时若 response 先于/代替事件到达，由 response 兜底合成，靠这个
+    // 标志保证两个来源不重复发（重复 = 前端两条分隔线 + 边界计数翻倍）。
+    let mut compaction_emitted = false;
     // Pi emits the failed turn before it announces whether an automatic retry will follow.
     // Defer fatal errors until the final agent_end; otherwise a recovered retry still leaves
     // Kivio's turn permanently marked as failed.
@@ -781,6 +887,25 @@ where
                     .unwrap_or_else(|| "prompt rejected".to_string());
                 return Err(err);
             }
+            // compact RPC 没有 agent_end；事件缺席时从 response 兜底，且只发一条。
+            if manual_compact && value.get("command").and_then(Value::as_str) == Some("compact") {
+                if !compaction_emitted {
+                    let data = value.get("data").and_then(|v| v.as_object());
+                    let field = |key: &str| data.and_then(|d| d.get(key)).and_then(|v| v.as_u64());
+                    sink(UnifiedAgentEvent::CliCompacted {
+                        trigger: "manual".to_string(),
+                        pre_tokens: field("tokensBefore"),
+                        post_tokens: field("estimatedTokensAfter"),
+                        dropped_tokens: None,
+                        duration_ms: None,
+                    });
+                    compaction_emitted = true;
+                }
+                agent_ended = true;
+                ended_at = Some(std::time::Instant::now());
+                let _ = stdin.shutdown().await;
+                continue;
+            }
             if !btw_entries_requested
                 && value.get("command").and_then(Value::as_str) == Some("prompt")
             {
@@ -819,6 +944,10 @@ where
                 if pending_error.is_none() {
                     pending_error = Some(message);
                 }
+            }
+            event @ UnifiedAgentEvent::CliCompacted { .. } => {
+                compaction_emitted = true;
+                sink(event);
             }
             other => sink(other),
         });
@@ -988,6 +1117,55 @@ mod tests {
     }
 
     #[test]
+    fn map_pi_compaction_end_emits_cli_compacted_with_tokens() {
+        let raw = r#"{"type":"compaction_end","reason":"threshold","result":{"summary":"s","tokensBefore":150000,"estimatedTokensAfter":32000},"aborted":false,"willRetry":false}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        assert_eq!(
+            map_pi_rpc_event(&value, &mut |e| events.push(e)),
+            PiRpcOutcome::Continue
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::CliCompacted {
+                trigger,
+                pre_tokens: Some(150000),
+                post_tokens: Some(32000),
+                ..
+            }] if trigger == "auto"
+        ));
+    }
+
+    #[test]
+    fn map_pi_compaction_end_manual_reason_and_failure() {
+        let manual = r#"{"type":"compaction_end","reason":"manual","result":{"tokensBefore":10,"estimatedTokensAfter":5}}"#;
+        let value: Value = serde_json::from_str(manual).unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |e| events.push(e));
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::CliCompacted { trigger, .. }] if trigger == "manual"
+        ));
+
+        // 失败（result:null + errorMessage）不发分隔线，只发状态行。
+        let failed = r#"{"type":"compaction_end","reason":"overflow","result":null,"aborted":false,"errorMessage":"quota exceeded"}"#;
+        let value: Value = serde_json::from_str(failed).unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |e| events.push(e));
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::StatusNote { text }] if text.contains("quota exceeded")
+        ));
+
+        // 中止（result:null、无 errorMessage）什么都不发。
+        let aborted = r#"{"type":"compaction_end","reason":"manual","result":null,"aborted":true}"#;
+        let value: Value = serde_json::from_str(aborted).unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |e| events.push(e));
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn parses_only_supported_btw_extension_commands() {
         assert_eq!(
             parse_pi_btw_command("/btw --save  为什么失败？"),
@@ -1124,6 +1302,7 @@ mod tests {
             &mut |event| events.push(event),
             || false,
             Some(&command),
+            false,
         )
         .await;
 
@@ -1166,6 +1345,7 @@ mod tests {
             &mut |event| events.push(event),
             || false,
             Some(&command),
+            false,
         )
         .await;
 
@@ -1178,6 +1358,92 @@ mod tests {
             event,
             UnifiedAgentEvent::ToolUse { id, .. } if id == "pi_btw_e10"
         )));
+    }
+
+    /// 手动 /compact：compaction_end 事件发分隔线，compact response 收尾轮次，
+    /// response 兜底不得重复发（compaction_emitted 去重）。
+    #[tokio::test]
+    async fn manual_compact_ends_on_response_and_emits_single_divider() {
+        let (stdout_reader, mut stdout_writer) = duplex(8192);
+        let writer = tokio::spawn(async move {
+            for line in [
+                r#"{"type":"compaction_start","reason":"manual"}"#,
+                r#"{"type":"compaction_end","reason":"manual","result":{"summary":"s","tokensBefore":90000,"estimatedTokensAfter":20000},"aborted":false}"#,
+                r#"{"id":1,"type":"response","command":"compact","success":true,"data":{"summary":"s","tokensBefore":90000,"estimatedTokensAfter":20000}}"#,
+            ] {
+                stdout_writer.write_all(line.as_bytes()).await?;
+                stdout_writer.write_all(b"\n").await?;
+            }
+            stdout_writer.shutdown().await
+        });
+        let (_stdin_reader, mut stdin_writer) = duplex(4096);
+        let mut events = Vec::new();
+
+        let result = drain_pi_rpc_lines(
+            &mut BufReader::new(stdout_reader).lines(),
+            &mut stdin_writer,
+            &mut |event| events.push(event),
+            || false,
+            None,
+            true,
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        let dividers = events
+            .iter()
+            .filter(|event| matches!(event, UnifiedAgentEvent::CliCompacted { .. }))
+            .count();
+        assert_eq!(dividers, 1, "恰好一条压缩分隔线：{events:?}");
+        assert!(matches!(
+            events
+                .iter()
+                .find(|e| matches!(e, UnifiedAgentEvent::CliCompacted { .. })),
+            Some(UnifiedAgentEvent::CliCompacted {
+                trigger,
+                pre_tokens: Some(90000),
+                post_tokens: Some(20000),
+                ..
+            }) if trigger == "manual"
+        ));
+    }
+
+    /// compaction_end 事件缺席（或晚于 response 被丢弃）时，从 response 的 data 兜底
+    /// 合成分隔线，保证手动压缩至少有一条可见记录。
+    #[tokio::test]
+    async fn manual_compact_synthesizes_divider_from_response_when_event_missing() {
+        let (stdout_reader, mut stdout_writer) = duplex(8192);
+        let writer = tokio::spawn(async move {
+            let line = r#"{"id":1,"type":"response","command":"compact","success":true,"data":{"summary":"s","tokensBefore":50000,"estimatedTokensAfter":12000}}"#;
+            stdout_writer.write_all(line.as_bytes()).await?;
+            stdout_writer.write_all(b"\n").await?;
+            stdout_writer.shutdown().await
+        });
+        let (_stdin_reader, mut stdin_writer) = duplex(4096);
+        let mut events = Vec::new();
+
+        let result = drain_pi_rpc_lines(
+            &mut BufReader::new(stdout_reader).lines(),
+            &mut stdin_writer,
+            &mut |event| events.push(event),
+            || false,
+            None,
+            true,
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::CliCompacted {
+                trigger,
+                pre_tokens: Some(50000),
+                post_tokens: Some(12000),
+                ..
+            }] if trigger == "manual"
+        ));
     }
 
     #[test]
@@ -1385,5 +1651,18 @@ mod tests {
             .any(|m| m.id == "zmfooogreencloud/minimax-m2.7"));
         // Generic provider models must NOT appear (those were the bogus fallback).
         assert!(!models.iter().any(|m| m.id.starts_with("anthropic/")));
+    }
+
+    #[test]
+    fn parse_pi_model_thinking_reads_column_by_header() {
+        let out = "provider          model          context  max-out  thinking  images\n\
+                   edgefn            DeepSeek-Flash 128K     8.2K     no        no\n\
+                   kivio-p           claude-son-5   1M       128K     yes       yes";
+        let thinking = parse_pi_model_thinking(out);
+        assert_eq!(thinking.get("edgefn/DeepSeek-Flash"), Some(&false));
+        assert_eq!(thinking.get("kivio-p/claude-son-5"), Some(&true));
+        // 表头缺 thinking 列 → 空表（未知，不隐藏档位）。
+        assert!(parse_pi_model_thinking("provider model context\na b 1K").is_empty());
+        assert!(parse_pi_model_thinking("").is_empty());
     }
 }

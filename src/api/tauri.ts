@@ -382,11 +382,12 @@ export type CliMcpGroup = {
   servers: ChatMcpServer[]
 }
 
-/** 从本地 CLI 导入 MCP 的扫描结果（Claude Code / Codex / OpenCode 三组）。 */
+/** 从本地 CLI 导入 MCP 的扫描结果（Claude Code / Codex / OpenCode / Pi 四组）。 */
 export type CliImportScan = {
   claude: CliMcpGroup
   codex: CliMcpGroup
   opencode: CliMcpGroup
+  pi: CliMcpGroup
 }
 
 /** MCP 持久连接状态，与后端 McpServerState（serde tag="kind"）一一对应。 */
@@ -2188,6 +2189,10 @@ export const api = {
     ),
   /** 扫描本机已安装 CLI（Claude Code / Codex / OpenCode）的 MCP 配置，按 CLI 分组返回可导入项。 */
   chatCliImportScan: () => invoke<CliImportScan>('chat_cli_import_scan'),
+  chatPiAgentDir: () => {
+    if (!isTauriRuntime()) return Promise.resolve(null)
+    return invoke<string | null>('chat_external_cli_pi_agent_dir')
+  },
   chatMcpServerStatus: (serverId: string) =>
     invoke<McpServerStatus>('chat_mcp_server_status', { serverId }),
   chatMcpListToolDefs: (serverId: string) =>

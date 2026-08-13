@@ -115,13 +115,22 @@ pub async fn chat_external_cli_provider_cleanup(
     agent_id: String,
     provider_id: String,
     native_provider_id: Option<String>,
+    provider_name: Option<String>,
 ) -> Result<(), String> {
     crate::external_agents::provider_profile::cleanup(
         &agent_id,
         &provider_id,
         native_provider_id.as_deref(),
+        provider_name.as_deref(),
     );
     Ok(())
+}
+
+/// 解析 Pi 实际使用的 agent 目录（认 `PI_CODING_AGENT_DIR`）。
+#[tauri::command]
+pub fn chat_external_cli_pi_agent_dir() -> Option<String> {
+    crate::external_agents::provider_profile::pi_agent_dir()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// 供应商弹窗的「获取模型」：拿填好的 base_url + key 去中转站问模型列表。

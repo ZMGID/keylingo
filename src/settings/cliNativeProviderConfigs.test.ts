@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildNativeCliProvider,
   emptyNativeModel,
+  nativeProviderIdFromName,
   readNativeCliProvider,
   resolveOpenCodeModelMetadata,
   resolvePiModelMetadata,
@@ -157,6 +158,55 @@ describe('cliNativeProviderConfigs', () => {
     })
   })
 
+  it('marks adaptive-generation Claude models with forceAdaptiveThinking on anthropic-messages', () => {
+    const model = (id: string) => ({
+      id,
+      name: '',
+      reasoning: true,
+      vision: true,
+      contextWindow: '200000',
+      maxTokens: '32768',
+    })
+    const built = buildNativeCliProvider('pi', 'Claude Relay', {
+      nativeProviderId: '',
+      baseUrl: 'https://relay.example',
+      apiKey: 'sk-pi',
+      api: 'anthropic-messages',
+      models: [model('claude-opus-4-8'), model('claude-sonnet-4-5'), model('claude-fable-5')],
+      defaultModel: 'claude-opus-4-8',
+      defaultThinkingLevel: 'high',
+      sourceConfigJson: '',
+    })
+    const models = JSON.parse(built.configJson!).models as Array<Record<string, unknown>>
+    // opus ≥4.6 / fable ≥5 是 adaptive 世代 → model 级 compat；sonnet-4-5 是旧世代 → 不打。
+    expect(models[0]).toMatchObject({ id: 'claude-opus-4-8', compat: { forceAdaptiveThinking: true } })
+    expect(models[1].compat).toBeUndefined()
+    expect(models[2]).toMatchObject({ id: 'claude-fable-5', compat: { forceAdaptiveThinking: true } })
+  })
+
+  it('does not mark adaptive compat on non-anthropic wire formats', () => {
+    const built = buildNativeCliProvider('pi', 'Relay', {
+      nativeProviderId: '',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'sk-pi',
+      api: 'openai-completions',
+      models: [{
+        id: 'claude-opus-4-8',
+        name: '',
+        reasoning: true,
+        vision: true,
+        contextWindow: '200000',
+        maxTokens: '32768',
+      }],
+      defaultModel: 'claude-opus-4-8',
+      defaultThinkingLevel: 'high',
+      sourceConfigJson: '',
+    })
+    const models = JSON.parse(built.configJson!).models as Array<Record<string, unknown>>
+    // compat.forceAdaptiveThinking 是 Anthropic Messages 专属；OpenAI 线不发 thinking 块。
+    expect(models[0].compat).toBeUndefined()
+  })
+
   it('fills known Pi model metadata from the local catalog using only the model id', () => {
     const model = emptyNativeModel('pi', 'grok-4.5')
     expect(resolvePiModelMetadata(model)).toMatchObject({
@@ -292,5 +342,11 @@ describe('cliNativeProviderConfigs', () => {
     })
     expect(read.baseUrl).toBe('https://old.example/v1')
     expect(read.apiKey).toBe('sk-old')
+  })
+
+  it('slugs display names like the backend (keeps . and _)', () => {
+    expect(nativeProviderIdFromName('My.Relay')).toBe('my.relay')
+    expect(nativeProviderIdFromName('hello_world')).toBe('hello_world')
+    expect(nativeProviderIdFromName('Relay One')).toBe('relay-one')
   })
 })

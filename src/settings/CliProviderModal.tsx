@@ -706,7 +706,7 @@ export function CliProviderModal({
       const nativeProviderId = nativeForm.nativeProviderId.trim()
         || nativeProviderIdFromName(name)
         || nativeProviderIdFromName(sourceId)
-      if (isOpenCode && !isValidNativeProviderId(nativeProviderId)) {
+      if ((isOpenCode || isPi) && !isValidNativeProviderId(nativeProviderId)) {
         setError(t.externalAgentsOpenCodeProviderIdInvalid)
         return
       }
@@ -752,7 +752,7 @@ export function CliProviderModal({
         remark: remark.trim(),
         env: [],
         configToml: '',
-        nativeProviderId: isOpenCode ? nativeProviderId : initial?.nativeProviderId,
+        nativeProviderId,
         ...native,
       })
       return

@@ -207,7 +207,7 @@ export function McpCenter() {
     }
   }, [mutateServers, t])
 
-  // 从本地 CLI（Claude Code / Codex / OpenCode）扫描已配置的 MCP 服务器。
+  // 从本地 CLI（Claude Code / Codex / OpenCode / Pi）扫描已配置的 MCP 服务器。
   const handleCliScan = useCallback(async () => {
     setCliScanning(true)
     setCliImportDone('')
@@ -236,7 +236,7 @@ export function McpCenter() {
   // 导入选中项 = 复制成 Kivio 自己的 ChatMcpServer（enabled:false，走现有安装流程）。
   const handleCliImportSelected = useCallback(async () => {
     if (!cliScan) return
-    const all = [...cliScan.claude.servers, ...cliScan.codex.servers, ...cliScan.opencode.servers]
+    const all = [...cliScan.claude.servers, ...cliScan.codex.servers, ...cliScan.opencode.servers, ...cliScan.pi.servers]
     const chosen = all.filter((server) => cliSelected.has(server.id))
     if (chosen.length === 0) return
     await mutateServers((list) => [...list, ...chosen])
@@ -383,7 +383,7 @@ export function McpCenter() {
 
                 {cliScan && (
                   <div className="mt-3 space-y-3">
-                    {([['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode']] as const).map(([key, label]) => {
+                    {([['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['pi', 'Pi']] as const).map(([key, label]) => {
                       const group = cliScan[key]
                       return (
                         <div key={key}>

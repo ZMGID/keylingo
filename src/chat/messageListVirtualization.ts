@@ -1,4 +1,5 @@
 import type { VirtualItem } from '@tanstack/react-virtual'
+import type { ChatMessage } from './types'
 
 /**
  * Chat row geometry shared by the TanStack virtualizer:
@@ -20,6 +21,142 @@ type MeasurementSnapshot = {
   touchedAt: number
 }
 const measurementSnapshots = new Map<string, MeasurementSnapshot>()
+
+function contentRevision(text: string | undefined | null): string {
+  if (!text) return '0'
+  // WeakMap-cached per message object; hash the full string so same-length mid-edits
+  // (tool preview / segment rewrite) still invalidate the measurement key.
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619)
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`
+}
+
+// Messages are replaced rather than mutated. WeakMap keeps stream rerenders cheap and
+// lets revisions disappear with their message objects after a conversation is released.
+const bodyLayoutRevisionByMessage = new WeakMap<ChatMessage, string>()
+const layoutRevisionByMessage = new WeakMap<ChatMessage, string>()
+
+/** Fields that can change MessageBubble's body geometry (everything above its meta row). */
+export function chatMessageBodyLayoutRevision(message: ChatMessage): string {
+  const cached = bodyLayoutRevisionByMessage.get(message)
+  if (cached !== undefined) return cached
+
+  const tools = message.tool_calls ?? message.toolCalls ?? []
+  const toolRevision = tools.map((tool) => [
+    tool.id,
+    tool.name ?? tool.tool_name ?? tool.toolName,
+    tool.status,
+    contentRevision(tool.argument_preview ?? tool.argumentPreview ?? tool.argumentsPreview),
+    contentRevision(tool.result_preview ?? tool.resultPreview),
+    contentRevision(tool.error),
+    (tool.artifacts ?? []).map((artifact) => [
+      artifact.id,
+      artifact.name,
+      artifact.mime_type ?? artifact.mimeType,
+      artifact.path ?? artifact.filePath ?? artifact.localPath,
+      artifact.size_bytes ?? artifact.sizeBytes,
+      contentRevision(artifact.data_url ?? artifact.dataUrl),
+    ].join(':')).join(','),
+  ].join(':')).join('|')
+  const agentPlan = message.agent_plan ?? message.agentPlan
+  const degraded = message.degraded
+  const revision = [
+    contentRevision(message.content),
+    contentRevision(message.reasoning),
+    message.segments?.map((segment) => [
+      segment.id,
+      segment.kind,
+      segment.phase,
+      segment.order,
+      segment.step_number ?? segment.stepNumber,
+      segment.round,
+      segment.tool_call_id ?? segment.toolCallId,
+      contentRevision(segment.text),
+    ].join(':')).join('|') ?? '',
+    message.attachments?.map((attachment) => [
+      attachment.id,
+      attachment.type,
+      attachment.name,
+      attachment.path,
+      contentRevision(attachment.content),
+    ].join(':')).join('|') ?? '',
+    (message.artifacts ?? []).map((artifact) => [
+      artifact.id,
+      artifact.name,
+      artifact.mime_type ?? artifact.mimeType,
+      artifact.path ?? artifact.filePath ?? artifact.localPath,
+      artifact.size_bytes ?? artifact.sizeBytes,
+      contentRevision(artifact.data_url ?? artifact.dataUrl),
+    ].join(':')).join('|'),
+    toolRevision,
+    agentPlan ? [agentPlan.mode, agentPlan.status, contentRevision(agentPlan.plan)].join(':') : '',
+    degraded ? [
+      degraded.kind,
+      contentRevision(degraded.reason),
+      contentRevision(degraded.detail),
+      contentRevision(degraded.text),
+      degraded.toolSummaries?.map((summary) => `${summary.name}:${contentRevision(summary.preview)}`).join('|') ?? '',
+    ].join(':') : '',
+  ].join('::')
+  bodyLayoutRevisionByMessage.set(message, revision)
+  return revision
+}
+
+function visibleMetaRevision(message: ChatMessage): string {
+  const runEntry = message.run_entry ?? message.runEntry
+  const streamOutcome = message.stream_outcome ?? message.streamOutcome
+  const usage = message.usage
+  return [
+    runEntry === 'regenerate' ? runEntry : '',
+    streamOutcome === 'cancelled' || streamOutcome === 'error' || streamOutcome === 'interrupted'
+      ? streamOutcome
+      : '',
+    usage ? [
+      usage.input_tokens ?? usage.inputTokens,
+      usage.output_tokens ?? usage.outputTokens,
+      usage.total_tokens ?? usage.totalTokens,
+      usage.cached_input_tokens ?? usage.cachedInputTokens,
+      usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens,
+      usage.reasoning_tokens ?? usage.reasoningTokens,
+    ].join(':') : '',
+  ].join('::')
+}
+
+/** Full geometry revision, including the assistant footer that can wrap onto another line. */
+export function chatMessageLayoutRevision(message: ChatMessage): string {
+  const cached = layoutRevisionByMessage.get(message)
+  if (cached !== undefined) return cached
+  const revision = [
+    chatMessageBodyLayoutRevision(message),
+    visibleMetaRevision(message),
+  ].join('::')
+  layoutRevisionByMessage.set(message, revision)
+  return revision
+}
+
+/** Only inherit the outside live row's height when the settled bubble has identical geometry inputs. */
+export function canReuseLiveRowHeight(live: ChatMessage, settled: ChatMessage): boolean {
+  return chatMessageBodyLayoutRevision(live) === chatMessageBodyLayoutRevision(settled)
+    && visibleMetaRevision(live) === visibleMetaRevision(settled)
+}
+
+/**
+ * A mounted absolute row must correct stale TanStack cache before paint. ResizeObserver
+ * entries remain the cheap steady-state path; callback-ref mounts read the real DOM box.
+ */
+export function measureChatVirtualRow(
+  element: HTMLElement,
+  entry: ResizeObserverEntry | undefined,
+  horizontal = false,
+): number {
+  if (entry?.borderBoxSize) {
+    const box = entry.borderBoxSize[0]
+    if (box) return Math.round(box[horizontal ? 'inlineSize' : 'blockSize'])
+  }
+  return element[horizontal ? 'offsetWidth' : 'offsetHeight']
+}
 
 /** Prevent TanStack's internal itemSizeCache from crossing width layouts. */
 export function layoutScopedVirtualKey(layoutKey: string, rowKey: string): string {

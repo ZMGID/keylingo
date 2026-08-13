@@ -181,6 +181,19 @@ export function resolveOpenCodeModelMetadata(model: NativeCliModel): ResolvedOpe
   }
 }
 
+// Anthropic adaptive-generation Claude 判定：opus ≥4.6 / sonnet ≥4.6 / fable ≥5
+// （对齐 pi-cache-optimizer 的 ADAPTIVE_*_PATTERN；容忍 4.6/4-6 两种写法与日期戳、[1M] 等后缀）。
+// 这些模型走 adaptive thinking（thinking.type:"adaptive"），pi 的自定义 anthropic-messages
+// 渠道必须显式 compat.forceAdaptiveThinking:true，否则 pi 发旧版 budget thinking、
+// 严格上游直接拒（pi models.md「Anthropic Messages Compatibility」；pi-cache-optimizer
+// 对缺失该 compat 的渠道也会弹告警）。
+const PI_ADAPTIVE_CLAUDE_PATTERN =
+  /(^|[/\s:_-])(opus-4[.-][6-9]|opus-4-[1-9][0-9]|opus-([5-9]|[1-9][0-9])|sonnet-4[.-][6-9]|sonnet-4-[1-9][0-9]|sonnet-([5-9]|[1-9][0-9])|fable-([5-9]|[1-9][0-9]))($|[-_.:/\s[])/i
+
+export function isPiAdaptiveThinkingModel(modelId: string): boolean {
+  return PI_ADAPTIVE_CLAUDE_PATTERN.test(modelId)
+}
+
 export function resolvePiModelMetadata(model: NativeCliModel): ResolvedPiModelMetadata {
   const matched = matchModelExact(model.id)
   const matchedReasoning = matched?.capabilities?.reasoning === true
@@ -392,9 +405,9 @@ export function readNativeCliProvider(
     : null
   const supportedThinkingLevels = piThinkingOptionsForModel(defaultPiModel)
   return {
-    nativeProviderId: agentId === 'opencode'
-      ? initial?.nativeProviderId?.trim() || nativeProviderIdFromName(initial?.name ?? '')
-      : '',
+    nativeProviderId: initial?.nativeProviderId?.trim()
+      || nativeProviderIdFromName(initial?.name ?? '')
+      || '',
     baseUrl,
     apiKey,
     api,
@@ -497,6 +510,9 @@ export function buildNativeCliProvider(
             contextWindow: resolved.contextWindow,
             maxTokens: resolved.maxTokens,
             ...(resolved.thinkingLevelMap ? { thinkingLevelMap: resolved.thinkingLevelMap } : {}),
+            ...(form.api === 'anthropic-messages' && isPiAdaptiveThinkingModel(model.id)
+              ? { compat: { forceAdaptiveThinking: true } }
+              : {}),
           }
         }),
       }

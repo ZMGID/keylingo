@@ -451,13 +451,14 @@ pub struct CliMcpGroup {
     servers: Vec<ChatMcpServer>,
 }
 
-/// 三个本地 CLI（Claude Code / Codex / OpenCode）的 MCP 扫描结果。
+/// 四个本地 CLI（Claude Code / Codex / OpenCode / Pi）的 MCP 扫描结果。
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CliImportScan {
     claude: CliMcpGroup,
     codex: CliMcpGroup,
     opencode: CliMcpGroup,
+    pi: CliMcpGroup,
 }
 
 /// Codex `~/.codex/config.toml` 的 `[mcp_servers.<name>]` 子表（全 stdio）。
@@ -655,9 +656,61 @@ fn parse_opencode_mcp(home: &Path) -> CliMcpGroup {
     }
 }
 
-/// 扫描本机已安装的 Claude Code / Codex / OpenCode 配置，解析出可导入的 MCP
-/// 服务器（按 CLI 分组）。缺配置文件 = 该组 `available:false`；单个 CLI 解析
-/// 失败降级为空组，绝不 panic、绝不返回 Err。
+/// 读 Pi 用户级 MCP 配置。自有层认 `PI_CODING_AGENT_DIR`（否则 `~/.pi/agent/mcp.json`），
+/// 再合并 `~/.config/mcp/mcp.json` 与 `~/.agents` 共享层；按优先级去重，单层解析失败跳过。
+fn parse_pi_mcp(home: &Path) -> CliMcpGroup {
+    let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".pi").join("agent"));
+    parse_pi_mcp_layers([
+        agent_dir.join("mcp.json"),
+        home.join(".config").join("mcp").join("mcp.json"),
+        home.join(".agents").join("mcp.json"),
+        home.join(".agents").join("mcp").join("mcp.json"),
+    ])
+}
+
+fn parse_pi_mcp_layers(candidates: impl IntoIterator<Item = std::path::PathBuf>) -> CliMcpGroup {
+    let mut available = false;
+    let mut seen = std::collections::HashSet::new();
+    let mut servers = Vec::new();
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        available = true;
+        let Some(parsed) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<CursorMcpJson>(&raw).ok())
+        else {
+            continue;
+        };
+        // HashMap 迭代序随机，排序保证扫描结果稳定。
+        let mut entries: Vec<_> = parsed.mcp_servers.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, server) in entries {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            servers.push(imported_mcp_server(
+                name,
+                normalize_imported_transport(&server),
+                server.url,
+                server.command,
+                server.args,
+                server.env,
+                server.headers,
+                server.cwd,
+            ));
+        }
+    }
+    CliMcpGroup { available, servers }
+}
+
+/// 扫描本机已安装的 Claude Code / Codex / OpenCode / Pi 配置，解析出可导入的
+/// MCP 服务器（按 CLI 分组）。缺配置文件 = 该组 `available:false`；单个 CLI
+/// 解析失败降级为空组，绝不 panic、绝不返回 Err。
 #[tauri::command]
 pub fn chat_cli_import_scan() -> CliImportScan {
     let Some(base) = directories::BaseDirs::new() else {
@@ -668,6 +721,7 @@ pub fn chat_cli_import_scan() -> CliImportScan {
         claude: parse_claude_mcp(home),
         codex: parse_codex_mcp(home),
         opencode: parse_opencode_mcp(home),
+        pi: parse_pi_mcp(home),
     }
 }
 
@@ -1755,6 +1809,106 @@ FOO = "bar"
         assert!(!parse_claude_mcp(&home).available);
         assert!(!parse_codex_mcp(&home).available);
         assert!(!parse_opencode_mcp(&home).available);
+        assert!(!parse_pi_mcp(&home).available);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_pi_mcp_merges_layers_and_dedupes_by_name() {
+        let home = temp_home("pi");
+        // Pi 自有层：同名 server 应压过共享层。
+        fs::create_dir_all(home.join(".pi").join("agent")).unwrap();
+        fs::write(
+            home.join(".pi").join("agent").join("mcp.json"),
+            r#"{
+              "mcpServers": {
+                "shared": { "command": "pi-owned", "args": ["stdio"] }
+              }
+            }"#,
+        )
+        .unwrap();
+        // 共享层：一个同名（应被去重）+ 一个独有的 http server。
+        fs::create_dir_all(home.join(".config").join("mcp")).unwrap();
+        fs::write(
+            home.join(".config").join("mcp").join("mcp.json"),
+            r#"{
+              "mcpServers": {
+                "shared": { "command": "should-lose" },
+                "remote": { "url": "https://mcp.example.com/mcp", "headers": { "X-Token": "t" } }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let group = parse_pi_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 2);
+        let shared = group
+            .servers
+            .iter()
+            .find(|server| server.name == "shared")
+            .expect("shared server");
+        assert_eq!(shared.command, "pi-owned");
+        assert_eq!(shared.transport, "stdio");
+        let remote = group
+            .servers
+            .iter()
+            .find(|server| server.name == "remote")
+            .expect("remote server");
+        assert_eq!(remote.url, "https://mcp.example.com/mcp");
+        assert_eq!(remote.transport, "streamable_http");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_pi_mcp_skips_corrupt_layer_but_reads_others() {
+        let home = temp_home("pi-corrupt");
+        fs::create_dir_all(home.join(".pi").join("agent")).unwrap();
+        fs::write(home.join(".pi").join("agent").join("mcp.json"), "{ nope").unwrap();
+        fs::create_dir_all(home.join(".agents")).unwrap();
+        fs::write(
+            home.join(".agents").join("mcp.json"),
+            r#"{ "mcpServers": { "ok": { "command": "run" } } }"#,
+        )
+        .unwrap();
+
+        let group = parse_pi_mcp(&home);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 1);
+        assert_eq!(group.servers[0].name, "ok");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn parse_pi_mcp_layers_reads_relocated_agent_dir() {
+        let home = temp_home("pi-relocated");
+        let agent = home.join("custom-pi");
+        fs::create_dir_all(&agent).unwrap();
+        fs::write(
+            agent.join("mcp.json"),
+            r#"{ "mcpServers": { "moved": { "command": "run" } } }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(home.join(".config").join("mcp")).unwrap();
+        fs::write(
+            home.join(".config").join("mcp").join("mcp.json"),
+            r#"{ "mcpServers": { "shared": { "command": "shared" } } }"#,
+        )
+        .unwrap();
+
+        let group = parse_pi_mcp_layers([
+            agent.join("mcp.json"),
+            home.join(".config").join("mcp").join("mcp.json"),
+            home.join(".agents").join("mcp.json"),
+            home.join(".agents").join("mcp").join("mcp.json"),
+        ]);
+        assert!(group.available);
+        assert_eq!(group.servers.len(), 2);
+        assert!(group.servers.iter().any(|server| server.name == "moved"));
+        assert!(group.servers.iter().any(|server| server.name == "shared"));
+
         fs::remove_dir_all(&home).ok();
     }
 

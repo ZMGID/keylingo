@@ -11,6 +11,8 @@ pub fn compact_prompt_for_agent(agent_id: &str) -> Option<&'static str> {
     match agent_id {
         // codex: "/compact" is intercepted in CodexAppServerSession::run_turn and sent as the
         // real `thread/compact/start` RPC (as prompt text the model would just role-play it).
+        // pi: same deal — intercepted in run_pi_rpc_session and sent as the native
+        // `{"type":"compact"}` RPC (pi's rpc.md: built-in commands do not execute via prompt).
         "pi" | "claude" | "opencode" | "grok" | "codex" => Some("/compact"),
         _ => None,
     }

@@ -568,7 +568,12 @@ function ProviderSection({
       providers: providers.filter((p) => p.id !== provider.id),
       ...(current === provider.id ? { currentProvider: '' } : {}),
     })
-    void chatApi.externalCliProviderCleanup(agentId, provider.id, provider.nativeProviderId)
+    void chatApi.externalCliProviderCleanup(
+      agentId,
+      provider.id,
+      provider.nativeProviderId,
+      provider.name,
+    )
   }
 
   const importFromCcSwitch = (items: CcSwitchProvider[]) => {

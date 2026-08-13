@@ -1,20 +1,74 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  canReuseLiveRowHeight,
+  chatMessageLayoutRevision,
   clearRowMeasurementCache,
   estimateMessageRenderCost,
   estimateRenderCost,
   getCachedRowMeasurement,
   layoutScopedVirtualKey,
+  measureChatVirtualRow,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
   sendReserveHeight,
   setCachedRowMeasurement,
   shouldAdjustChatItemSizeChange,
 } from './messageListVirtualization'
+import type { ChatMessage } from './types'
 
 beforeEach(() => clearRowMeasurementCache())
 
 const fence = (body = 'x') => '```ts\n' + body + '\n```\n'
+
+function assistant(overrides: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: 'a1',
+    role: 'assistant',
+    content: '回答',
+    timestamp: 1,
+    ...overrides,
+  }
+}
+
+describe('message layout revision', () => {
+  it('终止状态和 usage 会切换测量 key', () => {
+    const base = assistant()
+    expect(chatMessageLayoutRevision(assistant({ stream_outcome: 'interrupted' })))
+      .not.toBe(chatMessageLayoutRevision(base))
+    expect(chatMessageLayoutRevision(assistant({ usage: { input_tokens: 10, output_tokens: 20 } })))
+      .not.toBe(chatMessageLayoutRevision(base))
+  })
+
+  it('停止后新增元信息时不继承 live 高度', () => {
+    const live = assistant()
+    expect(canReuseLiveRowHeight(live, assistant({ stream_outcome: 'interrupted' }))).toBe(false)
+    expect(canReuseLiveRowHeight(live, assistant({ content: '回答已补全' }))).toBe(false)
+    expect(canReuseLiveRowHeight(live, assistant())).toBe(true)
+  })
+
+  it('同长度中间改写会换测量 key', () => {
+    const prefix = 'x'.repeat(300)
+    const suffix = 'y'.repeat(300)
+    const before = assistant({ content: `${prefix}AAAA${suffix}` })
+    const after = assistant({ content: `${prefix}BBBB${suffix}` })
+    expect(chatMessageLayoutRevision(after)).not.toBe(chatMessageLayoutRevision(before))
+  })
+})
+
+describe('virtual row measurement', () => {
+  it('同步挂载时读取真实 DOM 高度，不复用旧缓存高度', () => {
+    const element = { offsetHeight: 252, offsetWidth: 640 } as HTMLElement
+    expect(measureChatVirtualRow(element, undefined)).toBe(252)
+  })
+
+  it('ResizeObserver 投递时使用 border-box 高度', () => {
+    const element = { offsetHeight: 214, offsetWidth: 640 } as HTMLElement
+    const entry = {
+      borderBoxSize: [{ blockSize: 252, inlineSize: 640 }],
+    } as unknown as ResizeObserverEntry
+    expect(measureChatVirtualRow(element, entry)).toBe(252)
+  })
+})
 
 describe('estimateRenderCost', () => {
   it('代码围栏比同样长度的散文贵得多', () => {

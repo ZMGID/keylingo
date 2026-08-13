@@ -135,10 +135,16 @@ fn opencode_paths() -> Option<NativePaths> {
     })
 }
 
-fn pi_paths() -> Option<NativePaths> {
+pub fn pi_agent_dir() -> Option<PathBuf> {
     let base = directories::BaseDirs::new()?;
-    let agent = nonempty_env_path("PI_CODING_AGENT_DIR")
-        .unwrap_or_else(|| base.home_dir().join(".pi/agent"));
+    Some(
+        nonempty_env_path("PI_CODING_AGENT_DIR")
+            .unwrap_or_else(|| base.home_dir().join(".pi/agent")),
+    )
+}
+
+fn pi_paths() -> Option<NativePaths> {
+    let agent = pi_agent_dir()?;
     Some(NativePaths {
         config: agent.join("models.json"),
         alternate_configs: Vec::new(),
@@ -791,23 +797,16 @@ fn parse_native_entries(
         if provider.config_json.trim().is_empty() {
             continue;
         }
-        let native_id = if provider.native_provider_id.trim().is_empty() {
-            native_provider_id(&provider.id)
-                .ok_or_else(|| format!("供应商 id 无法生成原生 provider id：{}", provider.id))?
-        } else {
-            let configured = provider.native_provider_id.trim();
-            if !valid_explicit_native_provider_id(configured) {
-                return Err(format!(
-                    "供应商 {} 的原生 provider id 无效：{}",
-                    provider.name, configured
-                ));
-            }
-            configured.to_string()
-        };
+        let native_id = resolve_native_provider_id(provider)?;
         if !native_ids.insert(native_id.clone()) {
             return Err(format!("供应商 id 归一化后冲突：{native_id}"));
         }
-        let config = parse_object_text(&provider.config_json, "provider configJson")?;
+        let mut config = parse_object_text(&provider.config_json, "provider configJson")?;
+        // 旧 configJson 可能还没写 forceAdaptiveThinking；同步到 models.json 时补上，
+        // 否则 pi-cache-optimizer 会对 opus≥4.6 / sonnet≥4.6 / fable≥5 弹告警。
+        if agent_id == "pi" {
+            ensure_pi_adaptive_thinking_compat(&mut config);
+        }
         let auth = if provider.auth_json.trim().is_empty() {
             Map::new()
         } else {
@@ -884,6 +883,52 @@ fn validate_pi_thinking_level(
         Err(format!(
             "供应商 {provider_name} 的默认模型不支持 Pi 推理等级 {level}"
         ))
+    }
+}
+
+/// Anthropic adaptive-generation Claude 判定（对齐 pi-cache-optimizer / 前端
+/// `isPiAdaptiveThinkingModel`）：opus ≥4.6 / sonnet ≥4.6 / fable ≥5。
+fn is_pi_adaptive_thinking_model(model_id: &str) -> bool {
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)(^|[/\s:_-])(opus-4[.-][6-9]|opus-4-[1-9][0-9]|opus-([5-9]|[1-9][0-9])|sonnet-4[.-][6-9]|sonnet-4-[1-9][0-9]|sonnet-([5-9]|[1-9][0-9])|fable-([5-9]|[1-9][0-9]))($|[-_.:/\s\[])",
+        )
+        .expect("adaptive thinking model pattern")
+    });
+    RE.is_match(model_id)
+}
+
+/// 给 pi 的 anthropic-messages 渠道里 adaptive 模型补 `compat.forceAdaptiveThinking`。
+/// 已有 true 不覆盖；非 anthropic-messages / 非 adaptive 模型不动。
+fn ensure_pi_adaptive_thinking_compat(config: &mut Map<String, Value>) {
+    if config.get("api").and_then(Value::as_str) != Some("anthropic-messages") {
+        return;
+    }
+    let Some(models) = config.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for model in models {
+        let Some(obj) = model.as_object_mut() else {
+            continue;
+        };
+        let Some(id) = obj.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        if !is_pi_adaptive_thinking_model(&id) {
+            continue;
+        }
+        let compat = obj
+            .entry("compat".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(compat_obj) = compat.as_object_mut() {
+            if compat_obj
+                .get("forceAdaptiveThinking")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                compat_obj.insert("forceAdaptiveThinking".to_string(), Value::Bool(true));
+            }
+        }
     }
 }
 
@@ -974,22 +1019,81 @@ fn validate_native_auth(
     }
 }
 
-fn native_provider_id(id: &str) -> Option<String> {
+/// 解析写入 CLI 原生配置的 provider id：显式 nativeProviderId → 显示名 slug → 内部 id slug。
+fn resolve_native_provider_id(provider: &ExternalCliProvider) -> Result<String, String> {
+    let configured = provider.native_provider_id.trim();
+    if !configured.is_empty() {
+        if !valid_explicit_native_provider_id(configured) {
+            return Err(format!(
+                "供应商 {} 的原生 provider id 无效：{}",
+                provider.name, configured
+            ));
+        }
+        return Ok(configured.to_string());
+    }
+    if let Some(slug) = slugify_provider_key(&provider.name) {
+        return Ok(slug);
+    }
+    if let Some(slug) = slugify_provider_key(&provider.id) {
+        return Ok(slug);
+    }
+    Err(format!(
+        "供应商 id 无法生成原生 provider id：{}",
+        provider.id
+    ))
+}
+
+/// 把名字/内部 id 压成合法 provider key（小写 ascii + `.` `_` `-`），规则对齐前端 `nativeProviderIdFromName`。
+fn slugify_provider_key(raw: &str) -> Option<String> {
     let mut slug = String::new();
-    let mut last_hyphen = false;
-    for ch in id.trim().chars() {
+    for ch in raw.trim().chars() {
         if ch.is_ascii_alphanumeric() {
             slug.push(ch.to_ascii_lowercase());
-            last_hyphen = false;
-        } else if !last_hyphen && !slug.is_empty() {
+        } else if matches!(ch, '.' | '_' | '-') {
+            slug.push(ch);
+        } else if slug.chars().last() != Some('-') {
             slug.push('-');
-            last_hyphen = true;
         }
     }
-    while slug.ends_with('-') {
-        slug.pop();
+    let mut collapsed = String::with_capacity(slug.len());
+    for ch in slug.chars() {
+        if ch == '-' && collapsed.ends_with('-') {
+            continue;
+        }
+        collapsed.push(ch);
     }
-    (!slug.is_empty()).then(|| format!("kivio-{slug}"))
+    let trimmed = collapsed.trim_matches(|c| matches!(c, '.' | '_' | '-'));
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn native_cleanup_ids(
+    provider_id: &str,
+    provider_name: Option<&str>,
+    configured_native_id: Option<&str>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut push = |id: String| {
+        if !id.is_empty() && !ids.iter().any(|existing| existing == &id) {
+            ids.push(id);
+        }
+    };
+    if let Some(id) = configured_native_id
+        .map(str::trim)
+        .filter(|id| valid_explicit_native_provider_id(id))
+    {
+        push(id.to_string());
+    }
+    if let Some(name) = provider_name.map(str::trim).filter(|name| !name.is_empty()) {
+        if let Some(slug) = slugify_provider_key(name) {
+            push(format!("kivio-{slug}"));
+            push(slug);
+        }
+    }
+    if let Some(slug) = slugify_provider_key(provider_id) {
+        push(format!("kivio-{slug}"));
+        push(slug);
+    }
+    ids
 }
 
 fn valid_explicit_native_provider_id(id: &str) -> bool {
@@ -1308,7 +1412,12 @@ fn write_object_if_changed(
 }
 
 /// 删除供应商时清掉它物化出来的文件。失败只记日志：残留一个读不到的旧文件不影响正确性。
-pub fn cleanup(agent_id: &str, provider_id: &str, native_provider_id: Option<&str>) {
+pub fn cleanup(
+    agent_id: &str,
+    provider_id: &str,
+    native_provider_id: Option<&str>,
+    provider_name: Option<&str>,
+) {
     match agent_id {
         "claude" => {
             if let Some(path) = claude_settings_path_for(provider_id) {
@@ -1321,7 +1430,8 @@ pub fn cleanup(agent_id: &str, provider_id: &str, native_provider_id: Option<&st
             }
         }
         "opencode" | "pi" => {
-            if let Err(err) = cleanup_native(agent_id, provider_id, native_provider_id) {
+            if let Err(err) = cleanup_native(agent_id, provider_id, native_provider_id, provider_name)
+            {
                 eprintln!("[external-agent] 清理 {agent_id} 原生供应商失败：{err}");
             }
         }
@@ -1333,6 +1443,7 @@ fn cleanup_native(
     agent_id: &str,
     provider_id: &str,
     native_provider_id: Option<&str>,
+    provider_name: Option<&str>,
 ) -> Result<(), String> {
     let paths = match agent_id {
         "opencode" => opencode_paths(),
@@ -1343,22 +1454,28 @@ fn cleanup_native(
     let _guard = NATIVE_CONFIG_LOCK
         .lock()
         .map_err(|_| "原生 CLI 配置写锁已损坏".to_string())?;
-    cleanup_native_at(agent_id, provider_id, native_provider_id, &paths)
+    cleanup_native_at(
+        agent_id,
+        provider_id,
+        native_provider_id,
+        provider_name,
+        &paths,
+    )
 }
 
 fn cleanup_native_at(
     agent_id: &str,
     provider_id: &str,
     configured_native_id: Option<&str>,
+    provider_name: Option<&str>,
     paths: &NativePaths,
 ) -> Result<(), String> {
-    let native_id = configured_native_id
-        .map(str::trim)
-        .filter(|id| valid_explicit_native_provider_id(id))
-        .map(str::to_string)
-        .or_else(|| native_provider_id(provider_id));
-    let Some(native_id) = native_id else {
+    let native_ids = native_cleanup_ids(provider_id, provider_name, configured_native_id);
+    if native_ids.is_empty() {
         return Ok(());
+    }
+    let matches_id = |value: Option<&str>| {
+        value.is_some_and(|value| native_ids.iter().any(|id| id == value))
     };
     let mut state = read_managed_state(&paths.state)?;
     match agent_id {
@@ -1371,12 +1488,14 @@ fn cleanup_native_at(
                         .get("model")
                         .and_then(Value::as_str)
                         .and_then(|model| model.split_once('/'))
-                        .is_some_and(|(provider, _)| provider == native_id)
+                        .is_some_and(|(provider, _)| matches_id(Some(provider)))
                 {
                     apply_default_fields(&mut config, &mut state, &["model"], None);
                 }
                 if let Some(providers) = config.get_mut("provider").and_then(Value::as_object_mut) {
-                    providers.remove(&native_id);
+                    for id in &native_ids {
+                        providers.remove(id);
+                    }
                 }
                 write_object_if_changed(config_path, before_config, &config)?;
             }
@@ -1385,7 +1504,9 @@ fn cleanup_native_at(
             let mut config = read_object_file(&paths.config, false, false, "原生 provider 配置")?;
             let before_config = config.clone();
             if let Some(providers) = config.get_mut("providers").and_then(Value::as_object_mut) {
-                providers.remove(&native_id);
+                for id in &native_ids {
+                    providers.remove(id);
+                }
             }
             write_object_if_changed(&paths.config, before_config, &config)?;
 
@@ -1394,8 +1515,7 @@ fn cleanup_native_at(
                     read_object_file(settings_path, false, false, "Pi settings.json")?;
                 let before_settings = settings.clone();
                 if state.defaults_managed
-                    && settings.get("defaultProvider").and_then(Value::as_str)
-                        == Some(native_id.as_str())
+                    && matches_id(settings.get("defaultProvider").and_then(Value::as_str))
                 {
                     apply_default_fields(
                         &mut settings,
@@ -1411,9 +1531,13 @@ fn cleanup_native_at(
     }
     let mut auth = read_object_file(&paths.auth, false, true, "原生 auth.json")?;
     let before_auth = auth.clone();
-    auth.remove(&native_id);
+    for id in &native_ids {
+        auth.remove(id);
+    }
     write_object_if_changed(&paths.auth, before_auth, &auth)?;
-    state.managed_provider_ids.retain(|id| id != &native_id);
+    state
+        .managed_provider_ids
+        .retain(|id| !native_ids.iter().any(|candidate| candidate == id));
     write_managed_state(&paths.state, &state)
 }
 
@@ -1523,6 +1647,26 @@ mod tests {
     }
 
     #[test]
+    fn slugify_provider_key_keeps_dot_and_underscore() {
+        assert_eq!(slugify_provider_key("My.Relay").as_deref(), Some("my.relay"));
+        assert_eq!(
+            slugify_provider_key("hello_world").as_deref(),
+            Some("hello_world")
+        );
+        assert_eq!(slugify_provider_key("Relay One").as_deref(), Some("relay-one"));
+        assert_eq!(slugify_provider_key("a--b").as_deref(), Some("a-b"));
+    }
+
+    #[test]
+    fn native_cleanup_ids_prefer_name_slug_and_keep_legacy_aliases() {
+        let ids = native_cleanup_ids("p-msoeiznl", Some("Relay One"), None);
+        assert!(ids.iter().any(|id| id == "relay-one"));
+        assert!(ids.iter().any(|id| id == "kivio-relay-one"));
+        assert!(ids.iter().any(|id| id == "p-msoeiznl"));
+        assert!(ids.iter().any(|id| id == "kivio-p-msoeiznl"));
+    }
+
+    #[test]
     fn opencode_merges_jsonc_and_restores_previous_default() {
         let root = temp_root("opencode-native");
         let paths = test_paths(&root, false);
@@ -1563,18 +1707,18 @@ mod tests {
         assert_eq!(written["mcp"]["keep"], true);
         assert_eq!(written["provider"]["user-relay"]["name"], "Keep me");
         assert_eq!(
-            written["provider"]["kivio-relay-one"]["models"]["gpt-test"]["name"],
+            written["provider"]["relay-one"]["models"]["gpt-test"]["name"],
             "GPT Test"
         );
-        assert_eq!(written["model"], "kivio-relay-one/gpt-test");
+        assert_eq!(written["model"], "relay-one/gpt-test");
         let auth: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.auth).unwrap()).unwrap();
         assert_eq!(auth["user-relay"]["key"], "keep");
-        assert_eq!(auth["kivio-relay-one"]["key"], "sk-test");
+        assert_eq!(auth["relay-one"]["key"], "sk-test");
 
         let mut user_edited = written.clone();
-        user_edited["provider"]["kivio-relay-one"]["headerTimeout"] = serde_json::json!(12_000);
-        user_edited["provider"]["kivio-relay-one"]["models"]["gpt-test"]["variants"] =
+        user_edited["provider"]["relay-one"]["headerTimeout"] = serde_json::json!(12_000);
+        user_edited["provider"]["relay-one"]["models"]["gpt-test"]["variants"] =
             serde_json::json!({ "high": { "reasoningEffort": "high" } });
         std::fs::write(
             &paths.config,
@@ -1585,11 +1729,11 @@ mod tests {
         let merged: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
         assert_eq!(
-            merged["provider"]["kivio-relay-one"]["headerTimeout"],
+            merged["provider"]["relay-one"]["headerTimeout"],
             12_000
         );
         assert_eq!(
-            merged["provider"]["kivio-relay-one"]["models"]["gpt-test"]["variants"]["high"]
+            merged["provider"]["relay-one"]["models"]["gpt-test"]["variants"]["high"]
                 ["reasoningEffort"],
             "high"
         );
@@ -1599,12 +1743,12 @@ mod tests {
         let restored: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
         assert_eq!(restored["model"], "anthropic/claude-old");
-        assert!(restored["provider"]["kivio-relay-one"].is_object());
+        assert!(restored["provider"]["relay-one"].is_object());
 
-        cleanup_native_at("opencode", "Relay One", None, &paths).unwrap();
+        cleanup_native_at("opencode", "p-msoeiznl", None, Some("Relay One"), &paths).unwrap();
         let cleaned: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
-        assert!(cleaned["provider"].get("kivio-relay-one").is_none());
+        assert!(cleaned["provider"].get("relay-one").is_none());
         assert!(cleaned["provider"]["user-relay"].is_object());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1667,6 +1811,7 @@ mod tests {
             "opencode",
             "internal-timestamp-id",
             Some("team-relay"),
+            Some("Relay"),
             &paths,
         )
         .unwrap();
@@ -1758,10 +1903,10 @@ mod tests {
         let lower: Value =
             serde_json::from_str(&std::fs::read_to_string(&lower_path).unwrap()).unwrap();
         assert_eq!(lower["model"], "user/old");
-        assert!(lower["provider"].get("kivio-relay-one").is_none());
+        assert!(lower["provider"].get("relay-one").is_none());
         let higher: Value =
             serde_json::from_str(&std::fs::read_to_string(&higher_path).unwrap()).unwrap();
-        assert_eq!(higher["model"], "kivio-relay-one/gpt-test");
+        assert_eq!(higher["model"], "relay-one/gpt-test");
         assert!(higher["provider"]["top"].is_object());
 
         config.current_provider.clear();
@@ -1802,11 +1947,11 @@ mod tests {
         };
 
         materialize_native_at("opencode", &config, &paths).unwrap();
-        cleanup_native_at("opencode", "Relay One", None, &paths).unwrap();
+        cleanup_native_at("opencode", "p-msoeiznl", None, Some("Relay One"), &paths).unwrap();
         let cleaned: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
         assert_eq!(cleaned["model"], "user-relay/old");
-        assert!(cleaned["provider"].get("kivio-relay-one").is_none());
+        assert!(cleaned["provider"].get("relay-one").is_none());
         let state = read_managed_state(&paths.state).unwrap();
         assert!(!state.defaults_managed);
         let _ = std::fs::remove_dir_all(root);
@@ -1857,7 +2002,7 @@ mod tests {
             &std::fs::read_to_string(paths.settings.as_ref().unwrap()).unwrap(),
         )
         .unwrap();
-        assert_eq!(active["defaultProvider"], "kivio-second");
+        assert_eq!(active["defaultProvider"], "second");
         assert_eq!(active["defaultModel"], "m2");
         assert_eq!(active["defaultThinkingLevel"], "high");
         assert_eq!(active["theme"], "light");
@@ -1874,8 +2019,8 @@ mod tests {
         let models: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
         assert!(models["providers"]["user"].is_object());
-        assert!(models["providers"]["kivio-first"].is_object());
-        assert!(models["providers"]["kivio-second"].is_object());
+        assert!(models["providers"]["first"].is_object());
+        assert!(models["providers"]["second"].is_object());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1915,7 +2060,7 @@ mod tests {
         };
 
         materialize_native_at("pi", &config, &paths).unwrap();
-        cleanup_native_at("pi", "Relay One", None, &paths).unwrap();
+        cleanup_native_at("pi", "p-msoeiznl", None, Some("Relay One"), &paths).unwrap();
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(paths.settings.as_ref().unwrap()).unwrap(),
         )
@@ -1924,9 +2069,46 @@ mod tests {
         assert_eq!(settings["defaultModel"], "old");
         let models: Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
-        assert!(models["providers"].get("kivio-relay-one").is_none());
+        assert!(models["providers"].get("relay-one").is_none());
         let state = read_managed_state(&paths.state).unwrap();
         assert!(!state.defaults_managed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cleanup_removes_legacy_kivio_alias_when_deleting_by_internal_id() {
+        let root = temp_root("pi-cleanup-legacy");
+        let paths = test_paths(&root, true);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &paths.config,
+            r#"{"providers":{"relay-one":{"name":"Relay"},"kivio-p-msoeiznl":{"name":"Legacy"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &paths.auth,
+            r#"{"relay-one":{"type":"api_key","key":"new"},"kivio-p-msoeiznl":{"type":"api_key","key":"old"}}"#,
+        )
+        .unwrap();
+        std::fs::write(paths.settings.as_ref().unwrap(), r#"{"defaultProvider":"relay-one"}"#)
+            .unwrap();
+        std::fs::write(
+            &paths.state,
+            r#"{"managedProviderIds":["relay-one","kivio-p-msoeiznl"],"defaultsManaged":false}"#,
+        )
+        .unwrap();
+
+        cleanup_native_at("pi", "p-msoeiznl", None, Some("Relay One"), &paths).unwrap();
+        let models: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert!(models["providers"].get("relay-one").is_none());
+        assert!(models["providers"].get("kivio-p-msoeiznl").is_none());
+        let auth: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.auth).unwrap()).unwrap();
+        assert!(auth.get("relay-one").is_none());
+        assert!(auth.get("kivio-p-msoeiznl").is_none());
+        let state = read_managed_state(&paths.state).unwrap();
+        assert!(state.managed_provider_ids.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2435,5 +2617,92 @@ max_context_size = 200000
         assert!(providers.get("b").is_some());
         assert!(providers.get("managed:kimi-code").is_some());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pi_adaptive_thinking_model_detection() {
+        for id in [
+            "claude-opus-4-8",
+            "claude-opus-4-6",
+            "claude-opus-4.7",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-opus-4-6[1M]",
+            "claude-sonnet-4-6-20250929",
+            "claude-opus-5",
+        ] {
+            assert!(
+                is_pi_adaptive_thinking_model(id),
+                "expected adaptive: {id}"
+            );
+        }
+        for id in [
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
+            "claude-3-5-sonnet",
+            "gpt-5",
+        ] {
+            assert!(
+                !is_pi_adaptive_thinking_model(id),
+                "expected not adaptive: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_pi_adaptive_thinking_compat_patches_anthropic_models() {
+        let mut config = serde_json::json!({
+            "api": "anthropic-messages",
+            "baseUrl": "https://relay.example",
+            "models": [
+                { "id": "claude-opus-4-8", "reasoning": true },
+                { "id": "claude-sonnet-4-5", "reasoning": true },
+                { "id": "claude-fable-5", "reasoning": true, "compat": { "allowEmptySignature": true } }
+            ]
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        ensure_pi_adaptive_thinking_compat(&mut config);
+        let models = config.get("models").and_then(Value::as_array).unwrap();
+        assert_eq!(
+            models[0]
+                .get("compat")
+                .and_then(|c| c.get("forceAdaptiveThinking"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(models[1].get("compat").is_none());
+        // 已有其它 compat 键时只补 forceAdaptiveThinking，不抹掉原字段。
+        assert_eq!(
+            models[2]
+                .get("compat")
+                .and_then(|c| c.get("forceAdaptiveThinking"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            models[2]
+                .get("compat")
+                .and_then(|c| c.get("allowEmptySignature"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        // OpenAI 线不动。
+        let mut openai = serde_json::json!({
+            "api": "openai-completions",
+            "models": [{ "id": "claude-opus-4-8" }]
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        ensure_pi_adaptive_thinking_compat(&mut openai);
+        assert!(openai
+            .get("models")
+            .and_then(Value::as_array)
+            .unwrap()[0]
+            .get("compat")
+            .is_none());
     }
 }

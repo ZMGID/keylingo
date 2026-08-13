@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { ChevronDown, RotateCw } from 'lucide-react'
 import {
   defaultRangeExtractor,
-  measureElement as measureVirtualElement,
   observeElementRect as observeVirtualRect,
   useVirtualizer,
   type Range,
@@ -33,10 +32,13 @@ import { StreamStatusLine } from './StreamStatusLine'
 import { getActiveGroup, useGroupVersion } from './groupStreamingStore'
 import { useScrollFollow } from './scroll/useScrollFollow'
 import {
+  canReuseLiveRowHeight,
+  chatMessageLayoutRevision,
   estimateMessageRenderHeight,
   estimateMessageRenderCost,
   getCachedRowMeasurement,
   layoutScopedVirtualKey,
+  measureChatVirtualRow,
   sendReserveHeight,
   restoreMeasurementSnapshot,
   saveMeasurementSnapshot,
@@ -141,66 +143,34 @@ type RenderItem =
 
 function contentRevision(text: string | undefined): string {
   if (!text) return '0'
-  // Measurement cache only needs a stable change detector, not a full content digest.
-  // Hashing every character made a cold conversation switch synchronously rescan megabytes
-  // before React could yield back to sidebar input. Sample fixed-size slices instead.
-  const sample = text.length <= 768
-    ? text
-    : `${text.slice(0, 256)}${text.slice(Math.floor(text.length / 2) - 128, Math.floor(text.length / 2) + 128)}${text.slice(-256)}`
   let hash = 2166136261
-  for (let index = 0; index < sample.length; index += 1) {
-    hash = Math.imul(hash ^ sample.charCodeAt(index), 16777619)
+  for (let index = 0; index < text.length; index += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619)
   }
   return `${text.length}:${(hash >>> 0).toString(36)}`
 }
 
-// 按消息对象缓存布局 revision：流式中 MessageList 每个 delta 重渲一次，render 里每个
-// 挂载行都要 measurementKey(item)（data-chat-item-key）——不缓存的话，工具多的会话
-// 每帧对正文/reasoning/segments/每个 tool_call 重做 FNV hash + 大字符串 join。
-// 消息更新是替换式（落库/协议事件产生新对象），对象命中即 revision 不变；WeakMap
-// 不阻回收，会话卸载后随消息对象一起消失。⚠️ 若未来出现原地 mutate 消息的路径，
-// 这里会吐出过期 revision（漏重测），必须保持替换式更新。
-const layoutRevisionByMessage = new WeakMap<ChatMessage, string>()
-
-function messageLayoutRevision(message: ChatMessage): string {
-  const cached = layoutRevisionByMessage.get(message)
-  if (cached !== undefined) return cached
-  const tools = message.tool_calls ?? message.toolCalls ?? []
-  const toolRevision = tools.map((tool) => [
-    tool.id,
-    tool.name ?? tool.tool_name ?? tool.toolName,
-    tool.status,
-    contentRevision(tool.argument_preview ?? tool.argumentPreview ?? tool.argumentsPreview),
-    contentRevision(tool.result_preview ?? tool.resultPreview),
-    (tool.artifacts ?? []).map((artifact) => [
-      artifact.name,
-      artifact.mime_type ?? artifact.mimeType,
-      artifact.path ?? artifact.filePath ?? artifact.localPath,
-      artifact.size_bytes ?? artifact.sizeBytes,
-    ].join(':')).join(','),
-  ].join(':')).join('|')
-  const revision = [
-    contentRevision(message.content),
-    contentRevision(message.reasoning),
-    message.segments?.map((segment) => `${segment.id}:${segment.kind}:${contentRevision(segment.text ?? undefined)}`).join('|') ?? '',
-    message.attachments?.map((attachment) => `${attachment.id}:${attachment.type}:${attachment.name}`).join('|') ?? '',
-    (message.artifacts ?? []).map((artifact) => `${artifact.name}:${artifact.mime_type ?? artifact.mimeType}:${artifact.path ?? artifact.filePath ?? artifact.localPath}:${artifact.size_bytes ?? artifact.sizeBytes}`).join('|'),
-    toolRevision,
-  ].join('::')
-  layoutRevisionByMessage.set(message, revision)
-  return revision
-}
-
 function measurementKey(item: RenderItem): string {
   if (item.kind === 'message') {
-    return `${item.key}:${messageLayoutRevision(item.message)}`
+    return `${item.key}:${chatMessageLayoutRevision(item.message)}`
   }
   if (item.kind === 'group') {
-    return `${item.key}:${item.messages.map((message) => `${message.id}:${messageLayoutRevision(message)}`).join('|')}`
+    return `${item.key}:${item.messages.map((message) => [
+      message.id,
+      message.provider_id ?? message.providerId ?? '',
+      message.model ?? '',
+      chatMessageLayoutRevision(message),
+    ].join(':')).join('|')}`
   }
   if (item.kind === 'streaming') {
-    return `${item.key}:${messageLayoutRevision(item.message)}`
+    return `${item.key}:${chatMessageLayoutRevision(item.message)}`
   }
+  return item.key
+}
+
+function virtualItemIdentity(item: RenderItem): string {
+  // Stable TanStack/React identity. Geometry changes go through measureChatVirtualRow
+  // and the measurement cache; putting the revision in getItemKey remounts settled rows.
   return item.key
 }
 
@@ -299,6 +269,7 @@ function MessageListBase({
   prevLiveRowActiveRef.current = liveRowActive
   // Last measured outside-live height; filled every streaming layout, consumed on settle seed.
   const liveBubbleHeightRef = useRef(0)
+  const lastLiveMessageRef = useRef<ChatMessage | null>(null)
 
   const error = coarse.streamError
   const streamingContent = snapshot.content
@@ -333,6 +304,8 @@ function MessageListBase({
   if (liveRowModelConversationRef.current !== conversationId) {
     liveRowModelRef.current.reset()
     liveRowModelConversationRef.current = conversationId
+    liveBubbleHeightRef.current = 0
+    lastLiveMessageRef.current = null
   }
   const historyAssistantIds = useMemo(
     () => messages.filter((message) => message.role === 'assistant').map((message) => message.id),
@@ -684,6 +657,12 @@ function MessageListBase({
     streamingSegments,
     streamingToolCalls,
   ])
+  if (liveItem?.kind === 'streaming') {
+    lastLiveMessageRef.current = liveItem.message
+  } else if (liveItem?.kind === 'live-group') {
+    // A live multi-answer group does not share the geometry of one settled message.
+    lastLiveMessageRef.current = null
+  }
 
   // 历史项只在消息/压缩边界/组模型身份变化时重建。高频流式文本不进入依赖；
   // live 行单独挂在 virtualizer 尾部（或外置 rollback 路径）。
@@ -789,10 +768,16 @@ function MessageListBase({
       || null
     if (settlingId) {
       const settling = messages.find((message) => message.id === settlingId)
-      if (settling) {
+      const liveMessage = lastLiveMessageRef.current
+      if (
+        settling
+        && liveMessage
+        && !assistantStreamStatsByMessageId[settling.id]
+        && canReuseLiveRowHeight(liveMessage, settling)
+      ) {
         const rid = liveRowModel.resolveMessageKey(settling.id)
         const h = Math.round(liveBubbleHeightRef.current)
-        setCachedRowMeasurement(layoutKey, `${rid}:${messageLayoutRevision(settling)}`, h)
+        setCachedRowMeasurement(layoutKey, `${rid}:${chatMessageLayoutRevision(settling)}`, h)
       }
     }
   }
@@ -908,10 +893,20 @@ function MessageListBase({
     // message key must remain stable within one layout, but a width change is
     // a different geometry universe: old internal itemSizeCache entries must
     // not be reused for rows that have not been mounted again yet.
-    getItemKey: (index) => layoutScopedVirtualKey(layoutKey, itemAt(index)?.key ?? `row-${index}`),
+    getItemKey: (index) => {
+      const item = itemAt(index)
+      return layoutScopedVirtualKey(layoutKey, item ? virtualItemIdentity(item) : `row-${index}`)
+    },
     initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
-      const measured = measureVirtualElement(element, entry, instance)
+      // TanStack's default sync path returns itemSizeCache when present. For
+      // absolutely positioned chat rows that can leave the next row 10s of px
+      // too early, so a mount must synchronously replace cache with real DOM size.
+      const measured = measureChatVirtualRow(
+        element,
+        entry,
+        instance.options.horizontal,
+      )
       const key = element.dataset.chatItemKey
       if (key) {
         const size = Math.max(1, measured)
@@ -1740,8 +1735,14 @@ function MessageListBase({
         || null
       if (settlingId) {
         const settling = messages.find((message) => message.id === settlingId)
-        if (settling) {
-          const rowKey = `${liveRowModel.resolveMessageKey(settling.id)}:${messageLayoutRevision(settling)}`
+        const liveMessage = lastLiveMessageRef.current
+        if (
+          settling
+          && liveMessage
+          && !assistantStreamStatsByMessageId[settling.id]
+          && canReuseLiveRowHeight(liveMessage, settling)
+        ) {
+          const rowKey = `${liveRowModel.resolveMessageKey(settling.id)}:${chatMessageLayoutRevision(settling)}`
           setCachedRowMeasurement(layoutKey, rowKey, liveHeight)
           estimateSizeRef.current.set(liveRowModel.resolveMessageKey(settling.id), liveHeight)
         }
@@ -1775,6 +1776,7 @@ function MessageListBase({
     }
     setBottomHoldEpoch((value) => value + 1)
   }, [
+    assistantStreamStatsByMessageId,
     cancelNavigatorSettle,
     followHandle,
     historyItems.length,

@@ -1772,9 +1772,15 @@ export const chatApi = {
     agentId: string,
     providerId: string,
     nativeProviderId?: string,
+    providerName?: string,
   ): Promise<void> {
     if (!isTauriRuntime()) return
-    await invoke('chat_external_cli_provider_cleanup', { agentId, providerId, nativeProviderId })
+    await invoke('chat_external_cli_provider_cleanup', {
+      agentId,
+      providerId,
+      nativeProviderId,
+      providerName,
+    })
   },
 
   /** 供应商弹窗的「获取模型」：拿 base_url + key 去中转站问模型列表（只作建议用）。 */

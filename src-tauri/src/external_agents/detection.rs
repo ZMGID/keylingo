@@ -117,9 +117,10 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
                 current_model = current_model.or(cm);
                 current_reasoning = current_reasoning.or(cr);
             } else if def.id == "pi" {
-                // pi 的当前模型来自 ~/.pi/agent/settings.json（defaultProvider/defaultModel）。
-                // reasoning 是每次调用参数，不从配置读。
-                current_model = current_model.or_else(read_pi_current_config);
+                // 不传 --thinking 时 pi 用 settings.json 的 defaultThinkingLevel；不读胶囊会恒显示「自动」。
+                let (cm, cr) = read_pi_current_config();
+                current_model = current_model.or(cm);
+                current_reasoning = current_reasoning.or(cr);
             } else if def.id == "kimi" {
                 // kimi 走 ACP 但 session/new 常不上报 currentModelId → 降级读 config.toml。
                 // ACP 对 always_thinking 模型只给 options=[{on}]（已在 extract 里滤掉）；
@@ -277,23 +278,27 @@ fn unquote_toml_scalar(value: &str) -> Option<String> {
     }
 }
 
-/// 读 pi 当前配置：`~/.pi/agent/settings.json` 的 `defaultProvider`+`defaultModel`，拼成
-/// `provider/model`（与 pi --list-models 的 id 形态一致，可回填选择）。缺文件/键 → None。
-fn read_pi_current_config() -> Option<String> {
-    let base = directories::BaseDirs::new()?;
+/// 读 pi settings.json 的当前模型与默认思考档。缺文件/键 → None。
+fn read_pi_current_config() -> (Option<String>, Option<String>) {
+    let Some(base) = directories::BaseDirs::new() else {
+        return (None, None);
+    };
     let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| base.home_dir().join(".pi").join("agent"));
     let path = agent_dir.join("settings.json");
-    let text = std::fs::read_to_string(&path).ok()?;
-    parse_pi_current_model(&text)
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_pi_config(&text),
+        Err(_) => (None, None),
+    }
 }
 
-/// 从 pi settings.json 文本抽取当前模型 id。优先 `defaultProvider/defaultModel` 拼接；provider
-/// 缺失但 defaultModel 自身已含 `/` 则直接用 defaultModel；defaultModel 缺失 → None。
-fn parse_pi_current_model(text: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+/// 从 pi settings.json 抽取 `(当前模型 id, 默认思考档)`。思考档只认 off..max，杂值丢弃。
+fn parse_pi_config(text: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (None, None);
+    };
     let str_field = |key: &str| {
         value
             .get(key)
@@ -301,12 +306,20 @@ fn parse_pi_current_model(text: &str) -> Option<String> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
     };
-    let model = str_field("defaultModel")?;
-    match str_field("defaultProvider") {
+    let model = str_field("defaultModel").and_then(|model| match str_field("defaultProvider") {
         Some(provider) => Some(format!("{provider}/{model}")),
         None if model.contains('/') => Some(model.to_string()),
         None => None,
-    }
+    });
+    let reasoning = str_field("defaultThinkingLevel")
+        .map(str::to_lowercase)
+        .filter(|level| {
+            matches!(
+                level.as_str(),
+                "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        });
+    (model, reasoning)
 }
 
 /// 读 kimi 当前配置：`~/.kimi-code/config.toml`。ACP 探测无 currentModelId 时降级用此。
@@ -729,7 +742,18 @@ async fn probe_models(
             stderr
         };
         return parse_pi_models(text.as_ref())
-            .map(|models| probe_ok(models, None, None, Vec::new(), HashMap::new()))
+            .map(|models| {
+                // `thinking no` 的模型给空档位表 → 前端隐藏 effort 胶囊（pi 对无思考
+                // 模型的 get_available_thinking_levels 也只回 ["off"]，给档位是骗人）。
+                // `thinking yes` 不建表，回落 def 静态档位（off..xhigh 全档）。
+                let reasoning_by_model: HashMap<String, Vec<RuntimeModelOption>> =
+                    crate::external_agents::session::pi_rpc::parse_pi_model_thinking(text.as_ref())
+                        .into_iter()
+                        .filter(|(_, supported)| !supported)
+                        .map(|(id, _)| (id, Vec::new()))
+                        .collect();
+                probe_ok(models, None, None, Vec::new(), reasoning_by_model)
+            })
             .ok_or_else(|| "未从 pi 输出解析出模型".to_string());
     }
 
@@ -1066,27 +1090,50 @@ mod tests {
 
     #[test]
     fn pi_config_joins_provider_and_model() {
-        let model = parse_pi_current_model(
-            "{\"defaultProvider\":\"edgefn\",\"defaultModel\":\"DeepSeek-V4-Flash\"}",
+        let (model, reasoning) = parse_pi_config(
+            "{\"defaultProvider\":\"edgefn\",\"defaultModel\":\"DeepSeek-V4-Flash\",\"defaultThinkingLevel\":\"high\"}",
         );
         assert_eq!(model.as_deref(), Some("edgefn/DeepSeek-V4-Flash"));
+        assert_eq!(reasoning.as_deref(), Some("high"));
     }
 
     #[test]
     fn pi_config_uses_model_alone_when_provider_missing() {
         // provider 缺失但 model 自身已含 `/` → 直接用。
-        let model = parse_pi_current_model("{\"defaultModel\":\"edgefn/DeepSeek-V4-Flash\"}");
+        let (model, _) = parse_pi_config("{\"defaultModel\":\"edgefn/DeepSeek-V4-Flash\"}");
         assert_eq!(model.as_deref(), Some("edgefn/DeepSeek-V4-Flash"));
         // provider 缺失且 model 不含 `/` → None（无法拼出合法 id）。
-        assert!(parse_pi_current_model("{\"defaultModel\":\"gpt\"}").is_none());
+        assert!(parse_pi_config("{\"defaultModel\":\"gpt\"}").0.is_none());
     }
 
     #[test]
     fn pi_config_missing_model_is_none() {
-        assert!(parse_pi_current_model("{\"defaultProvider\":\"edgefn\"}").is_none());
-        assert!(parse_pi_current_model("{}").is_none());
+        assert!(parse_pi_config("{\"defaultProvider\":\"edgefn\"}")
+            .0
+            .is_none());
+        assert!(parse_pi_config("{}").0.is_none());
         // 非法 JSON 也不 panic → None。
-        assert!(parse_pi_current_model("not json").is_none());
+        assert!(parse_pi_config("not json").0.is_none());
+    }
+
+    #[test]
+    fn pi_config_thinking_level_rejects_garbage_and_is_independent_of_model() {
+        // 模型缺失不影响思考档（各自独立抽取）。
+        let (model, reasoning) = parse_pi_config("{\"defaultThinkingLevel\":\"XHigh\"}");
+        assert!(model.is_none());
+        assert_eq!(reasoning.as_deref(), Some("xhigh"));
+        // 不在 pi 档位表里的杂值丢弃（不能让胶囊显示垃圾字符串）。
+        assert!(parse_pi_config("{\"defaultThinkingLevel\":\"turbo\"}")
+            .1
+            .is_none());
+        assert!(parse_pi_config("{\"defaultThinkingLevel\":\"\"}")
+            .1
+            .is_none());
+        // Kivio 表单会写 max，必须能读回来。
+        assert_eq!(
+            parse_pi_config("{\"defaultThinkingLevel\":\"Max\"}").1.as_deref(),
+            Some("max")
+        );
     }
 
     #[test]
