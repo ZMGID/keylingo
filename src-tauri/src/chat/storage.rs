@@ -521,11 +521,15 @@ pub(crate) fn write_conversation_file(
 ) -> Result<Conversation, String> {
     let path = conversation_file_path(app, &conversation.id)?;
     let mut to_save = conversation.clone();
-    if to_save
-        .messages
-        .iter()
-        .any(super::attachments::message_has_inline_image_to_externalize)
-    {
+    // 外置内联图：artifact 的大图 + 两份隐藏转录（`model_messages` / `api_messages`）里
+    // 模型看过的整图 base64。后者是"会话 JSON 绝不含 base64"的关键——它每轮都被整本读写，
+    // 一张图存几份就是几 MB × 每轮 fsync。中断草稿同时持有两份转录，所以两个都要扫。
+    // 三个谓词都是廉价预扫描，没有可外置的图就不必克隆对话。
+    if to_save.messages.iter().any(|message| {
+        super::attachments::message_has_inline_image_to_externalize(message)
+            || super::attachments::message_has_model_message_image_to_externalize(message)
+            || super::attachments::message_has_api_message_image_to_externalize(message)
+    }) {
         let conv_id = to_save.id.clone();
         for message in to_save.messages.iter_mut() {
             super::attachments::externalize_message_artifacts(app, &conv_id, message);

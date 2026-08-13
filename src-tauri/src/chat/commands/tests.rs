@@ -1838,7 +1838,7 @@ fn token_split_returns_none_when_recent_window_covers_all() {
 #[test]
 fn build_chat_api_messages_injects_summary_and_skips_old_raw_messages() {
     let conversation = test_conversation_with_summary(false);
-    let messages = build_chat_api_messages("system", &conversation, None, None, &[])
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
         .expect("messages should build");
     let serialized = serde_json::to_string(&messages).expect("messages serialize");
 
@@ -1854,7 +1854,7 @@ fn build_chat_api_messages_injects_summary_and_skips_old_raw_messages() {
 #[test]
 fn stale_summary_is_ignored_by_message_builder() {
     let conversation = test_conversation_with_summary(true);
-    let messages = build_chat_api_messages("system", &conversation, None, None, &[])
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
         .expect("messages should build");
     let serialized = serde_json::to_string(&messages).expect("messages serialize");
 
@@ -1901,7 +1901,7 @@ fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
     };
     let augmented = user_content_with_auxiliary_vision_result(Some("这是什么？"), &result, "zh");
 
-    let messages = build_chat_api_messages("system", &conversation, Some(0), Some(&augmented), &[])
+    let messages = build_chat_api_messages(None, "system", &conversation, Some(0), Some(&augmented), &[])
         .expect("messages should build");
     let content = &messages[1]["content"];
 
@@ -2093,7 +2093,7 @@ fn build_chat_api_messages_replays_hidden_tool_transcript() {
         agent_runtime: crate::chat::AgentRuntimeConfig::default(),
     };
 
-    let messages = build_chat_api_messages("system", &conversation, None, None, &[])
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
         .expect("messages should build");
 
     assert_eq!(messages.len(), 5);
@@ -2222,7 +2222,7 @@ fn build_chat_api_messages_sanitizes_image_payloads_in_replayed_history() {
             agent_runtime: crate::chat::AgentRuntimeConfig::default(),
         };
 
-    let messages = build_chat_api_messages("system", &conversation, None, None, &[])
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
         .expect("messages should build");
     let serialized = serde_json::to_string(&messages).expect("messages serialize");
 
@@ -2571,7 +2571,7 @@ fn build_chat_api_messages_keeps_only_selected_group_answer() {
     let mut conversation = test_conversation_with_messages(messages);
 
     let built =
-        build_chat_api_messages("system", &conversation, Some(0), None, &[]).expect("build");
+        build_chat_api_messages(None, "system", &conversation, Some(0), None, &[]).expect("build");
     let serialized = serde_json::to_string(&built).unwrap();
     assert!(serialized.contains("answer one"));
     assert!(!serialized.contains("answer two"));
@@ -2582,7 +2582,7 @@ fn build_chat_api_messages_keeps_only_selected_group_answer() {
         .group_selections
         .insert("grp_1".to_string(), "msg_a2".to_string());
     let built =
-        build_chat_api_messages("system", &conversation, Some(0), None, &[]).expect("build");
+        build_chat_api_messages(None, "system", &conversation, Some(0), None, &[]).expect("build");
     let serialized = serde_json::to_string(&built).unwrap();
     assert!(!serialized.contains("answer one"));
     assert!(serialized.contains("answer two"));
@@ -2599,7 +2599,7 @@ fn build_chat_api_messages_default_first_follows_deletion() {
     ];
     let conversation = test_conversation_with_messages(messages);
     let built =
-        build_chat_api_messages("system", &conversation, Some(0), None, &[]).expect("build");
+        build_chat_api_messages(None, "system", &conversation, Some(0), None, &[]).expect("build");
     let serialized = serde_json::to_string(&built).unwrap();
     assert!(serialized.contains("answer two"));
     assert!(!serialized.contains("answer three"));
@@ -2619,7 +2619,7 @@ fn build_chat_api_messages_default_skips_errored_arm() {
     ];
     let conversation = test_conversation_with_messages(messages);
     let built =
-        build_chat_api_messages("system", &conversation, Some(0), None, &[]).expect("build");
+        build_chat_api_messages(None, "system", &conversation, Some(0), None, &[]).expect("build");
     let serialized = serde_json::to_string(&built).unwrap();
     assert!(
         !serialized.contains("arm one failed"),
@@ -2640,7 +2640,7 @@ fn build_chat_api_messages_single_answer_unaffected() {
     ];
     let conversation = test_conversation_with_messages(messages);
     let built =
-        build_chat_api_messages("system", &conversation, Some(0), None, &[]).expect("build");
+        build_chat_api_messages(None, "system", &conversation, Some(0), None, &[]).expect("build");
     let serialized = serde_json::to_string(&built).unwrap();
     assert!(serialized.contains("hello"));
     assert!(serialized.contains("world"));
@@ -2704,7 +2704,7 @@ fn stale_group_selection_falls_back_to_first_remaining() {
         &conversation.messages[1]
     ));
     let built =
-        build_chat_api_messages("system", &conversation, Some(0), None, &[]).expect("build");
+        build_chat_api_messages(None, "system", &conversation, Some(0), None, &[]).expect("build");
     let serialized = serde_json::to_string(&built).unwrap();
     assert!(serialized.contains("answer one"));
 }
@@ -2835,7 +2835,7 @@ fn file_ledger_flows_into_replayed_summary_message() {
         .file_ledger = Some(ledger);
 
     let messages =
-        build_chat_api_messages("system prompt", &conversation, Some(2), None, &[]).unwrap();
+        build_chat_api_messages(None, "system prompt", &conversation, Some(2), None, &[]).unwrap();
 
     // The injected summary system message (index 1) must carry the ledger block.
     let summary_sys = messages

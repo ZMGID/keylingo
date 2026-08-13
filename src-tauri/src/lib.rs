@@ -229,6 +229,9 @@ pub fn run() {
             // 清理上次崩溃 / 强杀 / 旧版本遗留的截图 PNG（24h 之前的，避免误删并发实例的活文件）
             cleanup_orphan_temp_files();
             cleanup_stale_sandbox_exports();
+            // 会话副产物：空/孤儿工作区目录、已删会话残留的附件目录。只碰 Kivio 自己造的
+            // `conv_*` 目录，非空的孤儿工作区只报数不删（里面是用户产物）。
+            chat::gc::sweep_conversation_side_artifacts(app.handle());
 
             // 周期性回收闲置的持久外部 CLI 会话（10 分钟无活动即丢弃 → actor 关闭其子进程），
             // 避免长时间挂着空转进程占内存。注册时也会做一次清扫 + LRU 限流，这里覆盖纯闲置场景。

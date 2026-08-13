@@ -1213,16 +1213,25 @@ fn anthropic_content_blocks(message: &ModelMessage, role: ModelRole) -> Vec<Valu
                 "type": "text",
                 "text": text,
             })),
-            MessagePart::Image { mime_type, data } => {
+            MessagePart::Image {
+                mime_type, data, ..
+            } => {
                 if matches!(role, ModelRole::User) {
-                    blocks.push(serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": mime_type,
-                            "data": data,
-                        }
-                    }));
+                    if data.is_empty() {
+                        blocks.push(serde_json::json!({
+                            "type": "text",
+                            "text": crate::chat::model::MISSING_IMAGE_PLACEHOLDER,
+                        }));
+                    } else {
+                        blocks.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime_type,
+                                "data": data,
+                            }
+                        }));
+                    }
                 }
             }
             MessagePart::ImageUrl { url } => {
@@ -2070,6 +2079,7 @@ mod tests {
                         MessagePart::Image {
                             mime_type: "image/png".to_string(),
                             data: "abc".to_string(),
+                            path: None,
                         },
                     ],
                 },

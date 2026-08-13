@@ -8,6 +8,7 @@ use base64::{engine::general_purpose, Engine as _};
 use tauri::AppHandle;
 use uuid::Uuid;
 
+use crate::chat::model::MessagePart;
 use crate::mcp::types::ChatToolArtifact;
 
 use super::storage::conversation_attachments_dir;
@@ -262,9 +263,365 @@ pub(crate) fn externalize_message_artifacts(
             changed |= externalize_image_artifact(app, conversation_id, artifact);
         }
     }
+    changed |= externalize_model_message_images(app, conversation_id, message);
+    changed |= externalize_api_message_images(app, conversation_id, message);
     changed
 }
 
+/// 图片外置文件名前缀。`msgimg-<sha256 前 16 位>.<ext>`：内容寻址 ⇒ 同一张图被
+/// `read` 看 N 次只落一个文件（实测同图读 3 次曾在 JSON 里存 3 份 2.5MB base64）。
+const MODEL_IMAGE_FILE_PREFIX: &str = "msgimg-";
+
+/// 把 `model_messages` 里 `MessagePart::Image` 的 base64 外置到会话附件目录：
+/// 字节按内容哈希写盘、`path` 置文件名、`data` 清空。返回是否发生修改。
+///
+/// **这是"会话 JSON 里绝不出现 base64"的落地点**。`model_messages` 是模型看到的完整
+/// 转录，模型每看一张图就有一份整图 base64 被追加进去并随消息落盘；`artifacts` 那条
+/// 路径早就外置了，唯独这里漏了，于是一张 1.8MB 截图读三次 = 7.57MB JSON（占文件
+/// 99.8%），而每轮工具执行完的部分快照都要整本读 + clone + 序列化 + fsync 一遍。
+///
+/// 已有 `path` 的部件直接跳过 ⇒ 可重复安全调用（每次落盘都会跑）。写盘失败保守留着
+/// base64 不动：宁可文件大，也不要让模型丢一张已经看过的图。
+fn externalize_model_message_images(
+    app: &AppHandle,
+    conversation_id: &str,
+    message: &mut ChatMessage,
+) -> bool {
+    if !message_has_model_message_image_to_externalize(message) {
+        return false;
+    }
+    let Ok(dir) = conversation_attachments_dir(app, conversation_id) else {
+        return false;
+    };
+    externalize_model_message_images_in_dir(&dir, &mut message.model_messages)
+}
+
+/// [`externalize_model_message_images`] 的纯目录版（可单测，不需要 `AppHandle`）。
+fn externalize_model_message_images_in_dir(
+    dir: &Path,
+    messages: &mut [crate::chat::model::ModelMessage],
+) -> bool {
+    let mut changed = false;
+    for model_message in messages.iter_mut() {
+        for part in model_message.content.iter_mut() {
+            let MessagePart::Image {
+                mime_type,
+                data,
+                path,
+            } = part
+            else {
+                continue;
+            };
+            if path.as_deref().is_some_and(|p| !p.is_empty()) || data.is_empty() {
+                continue;
+            }
+            let Ok(bytes) = general_purpose::STANDARD.decode(data.as_bytes()) else {
+                continue; // 解不出来就别动，保守留着原样
+            };
+            let file_name = format!(
+                "{MODEL_IMAGE_FILE_PREFIX}{}.{}",
+                &sha256_hex(&bytes)[..16],
+                extension_for_image_mime(&normalize_stored_image_mime(mime_type))
+            );
+            let dest = dir.join(&file_name);
+            // 内容寻址：同哈希同内容，已存在就直接复用，不重复写盘。
+            if !dest.exists() && fs::write(&dest, &bytes).is_err() {
+                continue;
+            }
+            *path = Some(file_name);
+            data.clear();
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 廉价预扫描：`model_messages` 里有没有"带 base64 且没 path"的图片部件。
+pub(crate) fn message_has_model_message_image_to_externalize(message: &ChatMessage) -> bool {
+    message.model_messages.iter().any(|model_message| {
+        model_message.content.iter().any(|part| {
+            matches!(
+                part,
+                MessagePart::Image { data, path, .. }
+                    if !data.is_empty() && path.as_deref().is_none_or(|p| p.is_empty())
+            )
+        })
+    })
+}
+
+/// [`externalize_model_message_images`] 的逆操作：按 `path` 读盘把 base64 填回 `data`，
+/// 供回放发给模型。文件缺失/读失败就留空，由适配器换成
+/// [`crate::chat::model::MISSING_IMAGE_PLACEHOLDER`] 文本（绝不发空 base64，provider 会 400）。
+///
+/// 在 `build_chat_api_messages` 展开 `model_messages` 之前调用；只动传入的内存副本。
+pub(crate) fn rehydrate_model_message_images(
+    app: &AppHandle,
+    conversation_id: &str,
+    messages: &mut [crate::chat::model::ModelMessage],
+) {
+    if !messages.iter().any(|model_message| {
+        model_message
+            .content
+            .iter()
+            .any(|part| matches!(part, MessagePart::Image { data, path, .. }
+                if data.is_empty() && path.as_deref().is_some_and(|p| !p.is_empty())))
+    }) {
+        return;
+    }
+    let Ok(dir) = conversation_attachments_dir(app, conversation_id) else {
+        return;
+    };
+    rehydrate_model_message_images_in_dir(&dir, messages);
+}
+
+/// [`rehydrate_model_message_images`] 的纯目录版（可单测，不需要 `AppHandle`）。
+fn rehydrate_model_message_images_in_dir(
+    dir: &Path,
+    messages: &mut [crate::chat::model::ModelMessage],
+) {
+    for model_message in messages.iter_mut() {
+        for part in model_message.content.iter_mut() {
+            let MessagePart::Image { data, path, .. } = part else {
+                continue;
+            };
+            if !data.is_empty() {
+                continue;
+            }
+            let Some(file_name) = path.as_deref().filter(|p| !p.is_empty()) else {
+                continue;
+            };
+            // 只信文件名（外置时我们自己生成的），任何分隔符都拒绝——别让历史脏数据
+            // 变成路径穿越。
+            if Path::new(file_name).components().count() != 1 {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(dir.join(file_name)) {
+                *data = general_purpose::STANDARD.encode(bytes);
+            }
+        }
+    }
+}
+
+/// 外置后写在 `api_messages` 图片部件 url 位置的哨兵 URI：`kivio-attachment://<mime>/<文件名>`。
+///
+/// 为什么要自造一个 scheme 而不是直接塞文件名：`api_messages` 是**原始 wire JSON**
+/// （`Vec<Value>`），没有 `MessagePart` 那样的结构化 `path` 字段可用。哨兵必须
+/// ① 不含 base64、② 能原样还原出 `data:<mime>;base64,<payload>`（mime 不能靠扩展名猜，
+/// `image/jpeg` 与 `.jpg` 不是双射）、③ 一眼能认出不是真 URL（免得漏 rehydrate 时被
+/// 当成远程图发出去）。
+const ATTACHMENT_URI_SCHEME: &str = "kivio-attachment://";
+
+/// `api_messages` 里可能出现的图片部件 `type`（与 `agent::prepare::IMAGE_PART_TYPES` 同口径）。
+const API_IMAGE_PART_TYPES: [&str; 3] = ["image_url", "input_image", "image"];
+
+/// 把 `api_messages`（OpenAI wire 格式的隐藏转录）里的图片 base64 外置。
+///
+/// **为什么它和 `model_messages` 都要处理**：中断草稿（`stream_outcome == "interrupted"`）
+/// 是唯一同时持有两份转录的形态（`commands/messages.rs::persist_partial_assistant_snapshot`
+/// 两个字段都填，因为「继续」要靠它恢复工具上下文）。只外置 `model_messages` 的话，
+/// 「读了图之后点停止」这条路径照样把整张 base64 落进 JSON —— 同一个 bug 的另一半。
+///
+/// 完成态消息走 `build_assistant_message`，`model_messages` 非空时 `api_messages` 会被清空，
+/// 所以那条路径上这个函数是空转（廉价谓词直接返回）。
+fn externalize_api_message_images(
+    app: &AppHandle,
+    conversation_id: &str,
+    message: &mut ChatMessage,
+) -> bool {
+    if !message_has_api_message_image_to_externalize(message) {
+        return false;
+    }
+    let Ok(dir) = conversation_attachments_dir(app, conversation_id) else {
+        return false;
+    };
+    externalize_api_message_images_in_dir(&dir, &mut message.api_messages)
+}
+
+/// [`externalize_api_message_images`] 的纯目录版（可单测，不需要 `AppHandle`）。
+fn externalize_api_message_images_in_dir(dir: &Path, messages: &mut [serde_json::Value]) -> bool {
+    let mut changed = false;
+    for message in messages.iter_mut() {
+        for url_slot in api_message_image_url_slots(message) {
+            let Some(url) = url_slot.as_str() else { continue };
+            let Some((mime, payload)) = parse_data_url(url.trim()) else {
+                continue; // 已经是哨兵 / 远程 URL / 非 base64 → 不动
+            };
+            if !mime.starts_with("image/") {
+                continue;
+            }
+            let Ok(bytes) = general_purpose::STANDARD.decode(payload) else {
+                continue;
+            };
+            let normalized = normalize_stored_image_mime(&mime);
+            let file_name = format!(
+                "{MODEL_IMAGE_FILE_PREFIX}{}.{}",
+                &sha256_hex(&bytes)[..16],
+                extension_for_image_mime(&normalized)
+            );
+            let dest = dir.join(&file_name);
+            // 内容寻址 ⇒ 与 `model_messages` 侧同名同文件，两份转录引用同一张图不重复写盘。
+            if !dest.exists() && fs::write(&dest, &bytes).is_err() {
+                continue;
+            }
+            *url_slot = serde_json::Value::String(format!(
+                "{ATTACHMENT_URI_SCHEME}{normalized}/{file_name}"
+            ));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 廉价预扫描：`api_messages` 里有没有内联 base64 图片。
+pub(crate) fn message_has_api_message_image_to_externalize(message: &ChatMessage) -> bool {
+    message.api_messages.iter().any(|api_message| {
+        let mut probe = api_message.clone();
+        api_message_image_url_slots(&mut probe)
+            .into_iter()
+            .any(|slot| {
+                slot.as_str()
+                    .and_then(|url| parse_data_url(url.trim()))
+                    .is_some_and(|(mime, _)| mime.starts_with("image/"))
+            })
+    })
+}
+
+/// [`externalize_api_message_images`] 的逆操作：把哨兵 URI 还原成 `data:` URL。
+///
+/// 文件读不到就把整个部件换成文本占位符（与 `MessagePart` 侧的
+/// [`crate::chat::model::MISSING_IMAGE_PLACEHOLDER`] 同语义）——绝不把
+/// `kivio-attachment://` 原样发给 provider。
+pub(crate) fn rehydrate_api_message_images(
+    app: &AppHandle,
+    conversation_id: &str,
+    messages: &mut [serde_json::Value],
+) {
+    if !messages.iter().any(api_message_has_attachment_uri) {
+        return;
+    }
+    let Ok(dir) = conversation_attachments_dir(app, conversation_id) else {
+        return;
+    };
+    rehydrate_api_message_images_in_dir(&dir, messages);
+}
+
+fn api_message_has_attachment_uri(message: &serde_json::Value) -> bool {
+    let mut probe = message.clone();
+    api_message_image_url_slots(&mut probe)
+        .into_iter()
+        .any(|slot| {
+            slot.as_str()
+                .is_some_and(|url| url.starts_with(ATTACHMENT_URI_SCHEME))
+        })
+}
+
+/// [`rehydrate_api_message_images`] 的纯目录版（可单测，不需要 `AppHandle`）。
+fn rehydrate_api_message_images_in_dir(dir: &Path, messages: &mut [serde_json::Value]) {
+    for message in messages.iter_mut() {
+        for url_slot in api_message_image_url_slots(message) {
+            let Some(url) = url_slot.as_str() else { continue };
+            let Some((mime, file_name)) = parse_attachment_uri(url) else {
+                continue;
+            };
+            match fs::read(dir.join(file_name)) {
+                Ok(bytes) => {
+                    let encoded = general_purpose::STANDARD.encode(bytes);
+                    *url_slot =
+                        serde_json::Value::String(format!("data:{mime};base64,{encoded}"));
+                }
+                // 读不到：留下人类可读的说明。这里只能改 url 字段（拿不到 part 本体），
+                // 而空 url / 残留哨兵都会被 provider 当成非法图片，所以退化成 data URL 形态的
+                // 1x1 透明 PNG 不可行——直接置空串，由 `sanitize_api_message_for_model`
+                // 之后的适配器按空 url 跳过该部件。
+                Err(_) => {
+                    *url_slot = serde_json::Value::String(String::new());
+                }
+            }
+        }
+    }
+}
+
+/// 解析哨兵 URI → `(mime, 文件名)`。
+///
+/// 严格要求 scheme 之后**恰好三段** `image/<subtype>/<文件名>`：`rsplit_once('/')` 那种松散
+/// 切法会把 `image/png/../../etc/passwd` 切成 mime=`image/png/../..` + file=`passwd`
+/// —— 文件名本身是安全的（单段，join 不会逃出目录），但那个 mime 会被原样拼进
+/// `data:<mime>;base64,` 发给 provider。宁可整条拒绝。
+fn parse_attachment_uri(url: &str) -> Option<(String, &str)> {
+    let rest = url.strip_prefix(ATTACHMENT_URI_SCHEME)?;
+    let mut segments = rest.split('/');
+    let top = segments.next()?;
+    let subtype = segments.next()?;
+    let file_name = segments.next()?;
+    if segments.next().is_some() {
+        return None; // 多于三段 ⇒ 脏数据
+    }
+    if top != "image" || subtype.is_empty() || file_name.is_empty() {
+        return None;
+    }
+    // 文件名是外置时我们自己生成的，必须是单段、不含任何路径分量。
+    if Path::new(file_name).components().count() != 1 {
+        return None;
+    }
+    Some((format!("{top}/{subtype}"), file_name))
+}
+
+/// 收集一条 wire 消息里所有「装着图片 URL 的槽位」的可变引用。
+///
+/// 三种 wire 形状共用一个出口，免得每个调用方各写一遍 match：
+/// - OpenAI Chat：`{type:"image_url", image_url:{url:"data:…"}}`
+/// - Responses：`{type:"input_image", image_url:"data:…"}`（url 直接是字符串）
+/// - 少数中转仿写：`{type:"image", image_url:…}`
+///
+/// Anthropic 的 `source.data` 形状**不在**此列：`api_messages` 按定义是 OpenAI 兼容转录
+/// （`model_messages_from_openai_messages` 只认这几种），Anthropic 的块数组从不落到这里。
+fn api_message_image_url_slots(
+    message: &mut serde_json::Value,
+) -> Vec<&mut serde_json::Value> {
+    let mut slots = Vec::new();
+    let Some(parts) = message.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return slots;
+    };
+    for part in parts.iter_mut() {
+        let is_image = part
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|kind| API_IMAGE_PART_TYPES.contains(&kind));
+        if !is_image {
+            continue;
+        }
+        let Some(image_url) = part.get_mut("image_url") else {
+            continue;
+        };
+        // 对象形（`image_url.url`）与字符串形（`image_url` 本身）都要覆盖。
+        if image_url.is_object() {
+            if let Some(url) = image_url.get_mut("url") {
+                slots.push(url);
+            }
+        } else if image_url.is_string() {
+            slots.push(image_url);
+        }
+    }
+    slots
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// 把 `MessagePart::Image` 的 mime 归一到 `extension_for_image_mime` 认识的形态
+/// （它只匹配全小写、且 `image/jpg` 不在其列）。
+fn normalize_stored_image_mime(mime_type: &str) -> String {
+    let lowered = mime_type.trim().to_ascii_lowercase();
+    if lowered == "image/jpg" {
+        "image/jpeg".to_string()
+    } else {
+        lowered
+    }
+}
 /// 快速判断:消息里是否存在"需要外置"的内联大图(图片 + 无 path + data_url 超阈值)。
 /// 用于会话持久化的廉价预扫描——没有这类 artifact 就完全不必克隆对话。
 pub(crate) fn message_has_inline_image_to_externalize(message: &ChatMessage) -> bool {
@@ -902,5 +1259,298 @@ mod tests {
         // 小图 → 跳过
         let msg = make_message("data:image/png;base64,aGVsbG8=", None);
         assert!(!message_has_inline_image_to_externalize(&msg));
+    }
+
+    /// 造一条只含图片部件的 `model_messages`。
+    fn image_model_messages(
+        parts: Vec<(&str, &str, Option<&str>)>,
+    ) -> Vec<crate::chat::model::ModelMessage> {
+        vec![crate::chat::model::ModelMessage {
+            role: crate::chat::model::ModelRole::User,
+            content: parts
+                .into_iter()
+                .map(|(mime, data, path)| MessagePart::Image {
+                    mime_type: mime.to_string(),
+                    data: data.to_string(),
+                    path: path.map(str::to_string),
+                })
+                .collect(),
+        }]
+    }
+
+    fn image_parts(
+        messages: &[crate::chat::model::ModelMessage],
+    ) -> Vec<(&str, Option<&str>)> {
+        messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|part| match part {
+                MessagePart::Image { data, path, .. } => {
+                    Some((data.as_str(), path.as_deref()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 落盘的会话 JSON 里绝不能出现 base64：图片必须写成附件文件 + `path` 引用。
+    #[test]
+    fn externalize_model_message_images_moves_base64_to_disk() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let payload = general_purpose::STANDARD.encode(b"fake-png-bytes");
+
+        let mut messages = image_model_messages(vec![("image/png", &payload, None)]);
+        assert!(externalize_model_message_images_in_dir(&dir, &mut messages));
+
+        let parts = image_parts(&messages);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].0, "", "base64 必须从内存形态清空");
+        let file_name = parts[0].1.expect("path 必须被填上");
+        assert!(file_name.starts_with(MODEL_IMAGE_FILE_PREFIX));
+        assert!(file_name.ends_with(".png"));
+        assert_eq!(fs::read(dir.join(file_name)).unwrap(), b"fake-png-bytes");
+
+        // 序列化后不含 data 字段（skip_serializing_if）⇒ JSON 里没有 base64。
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(!json.contains(&payload));
+        assert!(!json.contains("\"data\""));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 同一张图被读 N 次只落一个文件（内容寻址）。这是本次修复省得最狠的一处：
+    /// 实测同图读 3 次曾在 JSON 里存 3 份 2.5MB base64。
+    #[test]
+    fn externalize_model_message_images_dedupes_identical_images() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let payload = general_purpose::STANDARD.encode(b"same-image");
+
+        let mut messages = image_model_messages(vec![
+            ("image/png", &payload, None),
+            ("image/png", &payload, None),
+            ("image/png", &payload, None),
+        ]);
+        assert!(externalize_model_message_images_in_dir(&dir, &mut messages));
+
+        let parts = image_parts(&messages);
+        assert_eq!(parts.len(), 3);
+        let names: std::collections::HashSet<_> = parts.iter().map(|(_, p)| *p).collect();
+        assert_eq!(names.len(), 1, "三份相同图片必须指向同一个文件");
+        let files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(files.len(), 1, "磁盘上只该有一个文件，实际 {files:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 已有 path 的部件跳过 ⇒ 每次落盘都跑也是幂等的。
+    #[test]
+    fn externalize_model_message_images_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut messages = image_model_messages(vec![(
+            "image/png",
+            &general_purpose::STANDARD.encode(b"bytes"),
+            None,
+        )]);
+        assert!(externalize_model_message_images_in_dir(&dir, &mut messages));
+        assert!(
+            !externalize_model_message_images_in_dir(&dir, &mut messages),
+            "第二次不该再改动"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回放时按 path 读盘填回 base64，模型看到的内容与当初一字不差。
+    #[test]
+    fn rehydrate_model_message_images_restores_base64_from_disk() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let bytes = b"round-trip-bytes";
+        let payload = general_purpose::STANDARD.encode(bytes);
+
+        let mut messages = image_model_messages(vec![("image/png", &payload, None)]);
+        externalize_model_message_images_in_dir(&dir, &mut messages);
+        assert_eq!(image_parts(&messages)[0].0, "");
+
+        rehydrate_model_message_images_in_dir(&dir, &mut messages);
+        assert_eq!(image_parts(&messages)[0].0, payload, "必须原样还原");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 附件文件被删 → data 留空，由适配器换成占位文本，绝不发空 base64 让 provider 400。
+    #[test]
+    fn rehydrate_tolerates_missing_and_unsafe_paths() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut messages = image_model_messages(vec![
+            ("image/png", "", Some("msgimg-deadbeef.png")),
+            ("image/png", "", Some("../../../etc/passwd")),
+        ]);
+        rehydrate_model_message_images_in_dir(&dir, &mut messages);
+
+        for (data, _) in image_parts(&messages) {
+            assert_eq!(data, "", "读不到就留空");
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `image/jpg`（非标准写法）不能落成 `.image/jpg` 之类的坏扩展名。
+    #[test]
+    fn externalize_normalizes_jpg_mime_to_jpeg_extension() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut messages = image_model_messages(vec![(
+            "IMAGE/JPG",
+            &general_purpose::STANDARD.encode(b"jpeg-bytes"),
+            None,
+        )]);
+        externalize_model_message_images_in_dir(&dir, &mut messages);
+        assert!(image_parts(&messages)[0].1.unwrap().ends_with(".jpg"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 造一条带图的 OpenAI wire 消息（对象形 `image_url.url`）。
+    fn api_image_message(data_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "看这张图" },
+                { "type": "image_url", "image_url": { "url": data_url } },
+            ]
+        })
+    }
+
+    fn api_image_url(message: &serde_json::Value) -> &str {
+        message["content"][1]["image_url"]["url"]
+            .as_str()
+            .expect("url is a string")
+    }
+
+    /// 中断草稿的 `api_messages` 同样不许把 base64 落盘（同一个 bug 的另一半）。
+    #[test]
+    fn externalize_api_message_images_replaces_base64_with_sentinel() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let payload = general_purpose::STANDARD.encode(b"wire-png-bytes");
+
+        let mut messages = vec![api_image_message(&format!("data:image/png;base64,{payload}"))];
+        assert!(externalize_api_message_images_in_dir(&dir, &mut messages));
+
+        let url = api_image_url(&messages[0]);
+        assert!(url.starts_with("kivio-attachment://image/png/msgimg-"));
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(!json.contains(&payload), "JSON 里不许有 base64");
+
+        // 文件真的落盘了，且与 model_messages 侧同名（内容寻址 ⇒ 两份转录共享一个文件）。
+        let file_name = url.rsplit('/').next().unwrap();
+        assert_eq!(fs::read(dir.join(file_name)).unwrap(), b"wire-png-bytes");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 回放前必须还原成 data URL，且 mime 逐字保留（不能靠扩展名猜）。
+    #[test]
+    fn rehydrate_api_message_images_round_trips() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let payload = general_purpose::STANDARD.encode(b"jpeg-wire-bytes");
+        let original = format!("data:image/jpeg;base64,{payload}");
+
+        let mut messages = vec![api_image_message(&original)];
+        externalize_api_message_images_in_dir(&dir, &mut messages);
+        assert!(api_image_url(&messages[0]).starts_with("kivio-attachment://"));
+
+        rehydrate_api_message_images_in_dir(&dir, &mut messages);
+        assert_eq!(api_image_url(&messages[0]), original, "必须逐字还原");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Responses 的 `input_image` 是字符串形（`image_url` 本身就是 url），也要覆盖。
+    #[test]
+    fn externalize_api_message_images_handles_string_image_url() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let payload = general_purpose::STANDARD.encode(b"responses-bytes");
+
+        let mut messages = vec![serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "input_image",
+                "image_url": format!("data:image/png;base64,{payload}"),
+            }]
+        })];
+        assert!(externalize_api_message_images_in_dir(&dir, &mut messages));
+        assert!(messages[0]["content"][0]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("kivio-attachment://"));
+
+        rehydrate_api_message_images_in_dir(&dir, &mut messages);
+        assert!(messages[0]["content"][0]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 文件缺失 ⇒ url 置空（由适配器跳过该部件），**绝不把哨兵原样发给 provider**。
+    #[test]
+    fn rehydrate_api_message_images_blanks_missing_files() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut messages = vec![api_image_message(
+            "kivio-attachment://image/png/msgimg-deadbeef.png",
+        )];
+        rehydrate_api_message_images_in_dir(&dir, &mut messages);
+        assert_eq!(api_image_url(&messages[0]), "");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 哨兵里的文件名必须是单段，路径穿越一律拒绝。
+    #[test]
+    fn parse_attachment_uri_rejects_traversal_and_malformed() {
+        assert_eq!(
+            parse_attachment_uri("kivio-attachment://image/png/msgimg-a.png"),
+            Some(("image/png".to_string(), "msgimg-a.png"))
+        );
+        assert!(parse_attachment_uri("kivio-attachment://image/png/../../etc/passwd").is_none());
+        assert!(parse_attachment_uri("kivio-attachment://noslash").is_none());
+        assert!(parse_attachment_uri("data:image/png;base64,AAAA").is_none());
+    }
+
+    /// 幂等：第二次不该再改动（已是哨兵，不是 data URL）。
+    #[test]
+    fn externalize_api_message_images_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("kivio-extimg-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut messages = vec![api_image_message(&format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(b"bytes")
+        ))];
+        assert!(externalize_api_message_images_in_dir(&dir, &mut messages));
+        assert!(
+            !externalize_api_message_images_in_dir(&dir, &mut messages),
+            "第二次不该再改动"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

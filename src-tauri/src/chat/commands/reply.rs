@@ -537,6 +537,7 @@ pub(super) async fn complete_assistant_reply_inner(
         };
 
     let runtime_messages = match build_chat_api_messages(
+        Some(app),
         &system_prompt,
         conversation,
         last_user_idx,

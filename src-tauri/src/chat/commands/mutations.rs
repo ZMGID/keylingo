@@ -380,6 +380,18 @@ pub(crate) async fn chat_delete_message(
         &context_state,
     );
 
+    // 删消息是附件引用真正消失的时机：清掉不再被任何消息引用的 GC 托管附件
+    // （`msgimg-*` / `artifact-*`）。用户上传的 `att_*` 永不自动删。
+    // 传 id 不传对象：GC 自己从磁盘重读完整转录算引用集合，不受下面 strip 的影响。
+    let (removed_files, freed) =
+        crate::chat::gc::sweep_conversation_attachments(&app, &conversation_id);
+    if removed_files > 0 {
+        eprintln!(
+            "[chat-gc] 删除消息后回收 {removed_files} 个孤儿附件（{:.1} MB）",
+            freed as f64 / (1024.0 * 1024.0)
+        );
+    }
+
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
         "success": true,
@@ -389,8 +401,9 @@ pub(crate) async fn chat_delete_message(
 
 /// 一键 rewind（「回到这里」）：删掉这条用户提问**及其之后**的所有消息，把原文回传给前端塞进输入框。
 /// 与 `chat_regenerate_message` 的区别：不自动重生成，用户可以改完再自己发。
-/// ponytail: 被删消息的附件文件留在会话附件目录里（孤儿）—— 原文回输入框但附件不回，
-/// 清理留给会话删除时的整目录清空。要连附件一起回填再单独做。
+/// ponytail: 用户上传的附件（`att_*`）留在会话附件目录里 —— 原文回输入框但附件不回，
+/// 删掉就找不回来了，清理留给会话删除时的整目录清空。GC 托管的图（`msgimg-*` /
+/// `artifact-*`）在下面按引用对账回收。
 #[tauri::command]
 pub(crate) async fn chat_rewind_to_message(
     app: AppHandle,
@@ -455,6 +468,18 @@ pub(crate) async fn chat_rewind_to_message(
             Err(err) => return Err(crate::chat::repository::repository_error(err)),
         }
     };
+
+    // rewind 一次砍掉一整段历史，是孤儿附件最容易堆积的地方。GC 托管的图（`msgimg-*` /
+    // `artifact-*`）没人引用就回收；用户上传的 `att_*` 一律保留（原文回输入框但附件不回，
+    // 删掉就找不回来了）。传 id 不传对象：GC 自己从磁盘重读完整转录算引用集合。
+    let (removed_files, freed) =
+        crate::chat::gc::sweep_conversation_attachments(&app, &conversation_id);
+    if removed_files > 0 {
+        eprintln!(
+            "[chat-gc] rewind 后回收 {removed_files} 个孤儿附件（{:.1} MB）",
+            freed as f64 / (1024.0 * 1024.0)
+        );
+    }
 
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({

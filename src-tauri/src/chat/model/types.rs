@@ -5,6 +5,11 @@ use serde_json::Value;
 
 use crate::mcp::{self, types::ChatToolArtifact, ChatToolDefinition};
 
+/// 外置图片读不回来时的替身文本。落盘的 `MessagePart::Image` 只有 `path`，回放前
+/// 必须经 `attachments::rehydrate_model_message_images` 填回 `data`；文件被用户删掉
+/// （或历史遗留的坏引用）就走这里，而不是发一个空 base64 让 provider 400。
+pub const MISSING_IMAGE_PLACEHOLDER: &str = "[图片已不可用（附件文件缺失）]";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRole {
@@ -29,9 +34,25 @@ pub enum MessagePart {
     Text {
         text: String,
     },
+    /// 用户/工具上行的一张图。
+    ///
+    /// **落盘时 `data` 必须为空、`path` 必须有值**：图片字节存进
+    /// `<会话id>_attachments/`，JSON 里只留文件名（见
+    /// `attachments::externalize_model_message_images`）。运行期反过来——回放时
+    /// `attachments::rehydrate_model_message_images` 按 `path` 读盘填回 `data`，
+    /// 各 provider 适配器只认 `data`，感知不到这层。
+    ///
+    /// 一张 1.8MB 的截图 base64 后 2.5MB；被 `read` 看三次就是三份，实测把会话
+    /// 文件撑到 7.59MB（99.8% 是同一张图的副本），而每轮工具执行完的快照都要把
+    /// 整本读出来、clone、序列化、fsync 一遍。所以这里绝不能存 base64。
     Image {
         mime_type: String,
+        /// base64 编码的图片字节。**运行期形态**，落盘前会被外置清空。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         data: String,
+        /// 外置后的附件文件名（相对于会话附件目录）。**落盘形态**。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     ImageUrl {
         url: String,
@@ -738,7 +759,11 @@ fn model_message_from_openai_message(message: &Value) -> Option<ModelMessage> {
                                 .and_then(|value| value.as_str())
                                 .unwrap_or_default();
                             if let Some((mime_type, data)) = parse_data_image_url(url) {
-                                parts.push(MessagePart::Image { mime_type, data });
+                                parts.push(MessagePart::Image {
+                                    mime_type,
+                                    data,
+                                    path: None,
+                                });
                             } else if !url.is_empty() {
                                 parts.push(MessagePart::ImageUrl {
                                     url: url.to_string(),
@@ -840,11 +865,21 @@ fn openai_messages_from_model_message(message: &ModelMessage) -> Vec<Value> {
                 text_parts.push(text.clone());
                 multimodal_parts.push(serde_json::json!({ "type": "text", "text": text }));
             }
-            MessagePart::Image { mime_type, data } => {
-                multimodal_parts.push(serde_json::json!({
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:{mime_type};base64,{data}") },
-                }));
+            MessagePart::Image {
+                mime_type, data, ..
+            } => {
+                // data 为空 = 外置了但没 rehydrate（回放路径漏了读盘）。发个占位符
+                // 而不是 `data:image/png;base64,`，免得让 provider 400。
+                if data.is_empty() {
+                    multimodal_parts.push(
+                        serde_json::json!({ "type": "text", "text": MISSING_IMAGE_PLACEHOLDER }),
+                    );
+                } else {
+                    multimodal_parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{mime_type};base64,{data}") },
+                    }));
+                }
             }
             MessagePart::ImageUrl { url } => {
                 multimodal_parts.push(serde_json::json!({
@@ -959,11 +994,19 @@ fn responses_items_from_model_message(message: &ModelMessage, items: &mut Vec<Va
             MessagePart::Text { text } => {
                 content_parts.push(serde_json::json!({ "type": text_part_type, "text": text }));
             }
-            MessagePart::Image { mime_type, data } => {
-                content_parts.push(serde_json::json!({
-                    "type": "input_image",
-                    "image_url": format!("data:{mime_type};base64,{data}"),
-                }));
+            MessagePart::Image {
+                mime_type, data, ..
+            } => {
+                if data.is_empty() {
+                    content_parts.push(
+                        serde_json::json!({ "type": text_part_type, "text": MISSING_IMAGE_PLACEHOLDER }),
+                    );
+                } else {
+                    content_parts.push(serde_json::json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{mime_type};base64,{data}"),
+                    }));
+                }
             }
             MessagePart::ImageUrl { url } => {
                 content_parts.push(serde_json::json!({

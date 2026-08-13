@@ -2172,6 +2172,7 @@ mod tests {
                     MessagePart::Image {
                         mime_type: "image/png".to_string(),
                         data: big_b64.clone(),
+                        path: None,
                     },
                 ],
             },

@@ -400,6 +400,36 @@ impl ConversationRepository {
         self.persist_locked(app, latest).await
     }
 
+    /// 存量迁移：把落盘 `model_messages` 里残留的图片 base64 外置成附件文件引用。
+    ///
+    /// 新写入天然会外置（`write_conversation_file` 每次落盘都跑），所以这里只为一种情况
+    /// 存在：**老会话被打开、但用户没再发消息**——那份几十 MB 的 JSON 会一直躺在盘上，
+    /// 每次打开都要全量 parse。谓词是廉价扫描，绝大多数会话直接返回 `None`、零开销。
+    ///
+    /// **不 bump `updated_at`**（同 `update_context` 的理由：迁移不是用户编辑，不该把会话
+    /// 顶到"最近更新"最前面）。revision 照常推进，并发写方的 CAS 语义不变。
+    /// 返回 `None` = 无需迁移。
+    pub async fn externalize_stored_images(
+        &self,
+        app: &AppHandle,
+        id: &str,
+    ) -> RepositoryResult<Option<Conversation>> {
+        let _barrier = self.barrier.read().await;
+        let lock = self.conversation_lock(id);
+        let _conversation = lock.lock().await;
+        let mut latest = super::storage::load_conversation(app, id)?;
+        if !latest.messages.iter().any(|message| {
+            super::attachments::message_has_model_message_image_to_externalize(message)
+                || super::attachments::message_has_api_message_image_to_externalize(message)
+        })
+        {
+            return Ok(None);
+        }
+        increment_revision(&mut latest)?;
+        // 真正的外置发生在 write_conversation_file 里（唯一的落盘出口）。
+        self.persist_locked(app, latest).await.map(Some)
+    }
+
     pub async fn prepare_ordinary_workspace(
         &self,
         app: &AppHandle,

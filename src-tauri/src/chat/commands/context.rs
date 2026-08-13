@@ -789,6 +789,8 @@ pub(super) async fn compute_context_state(
     );
     let last_user_idx = conversation.messages.iter().rposition(|m| m.role == "user");
     let request_messages = build_chat_api_messages(
+        // 估算路径：不 rehydrate 图片（token 口径不计图片字节，读几 MB 纯浪费）。
+        None,
         &system_prompt,
         conversation,
         last_user_idx,
@@ -1143,7 +1145,10 @@ fn tag_ui_message_id(mut message: Value, ui_message_id: &str) -> Value {
     message
 }
 
+/// `app` 为 `None` 时跳过图片 rehydrate（纯估算调用方不需要真实 base64——token 口径
+/// 本来就不计图片字节）。真正要发给模型的路径必须传 `Some`。
 pub(super) fn build_chat_api_messages(
+    app: Option<&AppHandle>,
     system_prompt: &str,
     conversation: &Conversation,
     last_user_idx: Option<usize>,
@@ -1206,17 +1211,36 @@ pub(super) fn build_chat_api_messages(
         }
         if message.role == "assistant" && !message.model_messages.is_empty() {
             messages.pop();
+            // 落盘的图片部件只有 path，没 base64（见 attachments::externalize_model_message_images）。
+            // 展开成 wire 格式之前先按 path 读盘填回来，模型看到的内容与当初一字不差。
+            let mut model_messages = message.model_messages.clone();
+            if let Some(app) = app {
+                crate::chat::attachments::rehydrate_model_message_images(
+                    app,
+                    &conversation.id,
+                    &mut model_messages,
+                );
+            }
             messages.extend(
-                openai_messages_from_model_messages(&message.model_messages)
+                openai_messages_from_model_messages(&model_messages)
                     .iter()
                     .map(sanitize_api_message_for_model)
                     .map(|expanded| tag_ui_message_id(expanded, &message.id)),
             );
         } else if message.role == "assistant" && !message.api_messages.is_empty() {
             messages.pop();
+            // 与上面 model_messages 同理：中断草稿的 `api_messages` 里图片已被外置成
+            // `kivio-attachment://` 哨兵，发给模型前必须还原成 data URL。
+            let mut api_messages = message.api_messages.clone();
+            if let Some(app) = app {
+                crate::chat::attachments::rehydrate_api_message_images(
+                    app,
+                    &conversation.id,
+                    &mut api_messages,
+                );
+            }
             messages.extend(
-                message
-                    .api_messages
+                api_messages
                     .iter()
                     .map(sanitize_api_message_for_model)
                     .map(|expanded| tag_ui_message_id(expanded, &message.id)),

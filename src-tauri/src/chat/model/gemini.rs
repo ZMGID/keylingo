@@ -638,11 +638,19 @@ fn gemini_parts_from_message(
                     parts.push(serde_json::json!({ "text": text }));
                 }
             }
-            MessagePart::Image { mime_type, data } => {
+            MessagePart::Image {
+                mime_type, data, ..
+            } => {
                 if matches!(message.role, ModelRole::User) {
-                    parts.push(serde_json::json!({
-                        "inlineData": { "mimeType": mime_type, "data": data }
-                    }));
+                    if data.is_empty() {
+                        parts.push(serde_json::json!({
+                            "text": crate::chat::model::MISSING_IMAGE_PLACEHOLDER
+                        }));
+                    } else {
+                        parts.push(serde_json::json!({
+                            "inlineData": { "mimeType": mime_type, "data": data }
+                        }));
+                    }
                 }
             }
             MessagePart::ImageUrl { url } => {

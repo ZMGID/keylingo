@@ -146,10 +146,27 @@ pub(crate) async fn chat_get_conversation(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<serde_json::Value, String> {
-    let mut conversation = crate::chat::repository::repository(&app)
-        .get(&app, &conversation_id)
+    let repository = crate::chat::repository::repository(&app);
+    // 存量迁移：老会话的 `model_messages` 里可能还躺着图片 base64（外置是后来才补的）。
+    // 打开时顺手外置一次，之后这份 JSON 就回到 KB 量级。谓词是廉价扫描，无图零开销；
+    // 迁移失败只记警告——它是优化，绝不该挡住打开会话。
+    let mut conversation = match repository
+        .externalize_stored_images(&app, &conversation_id)
         .await
-        .map_err(crate::chat::repository::repository_error)?;
+    {
+        Ok(Some(migrated)) => migrated,
+        Ok(None) => repository
+            .get(&app, &conversation_id)
+            .await
+            .map_err(crate::chat::repository::repository_error)?,
+        Err(err) => {
+            eprintln!("externalize stored images failed ({conversation_id}): {err}");
+            repository
+                .get(&app, &conversation_id)
+                .await
+                .map_err(crate::chat::repository::repository_error)?
+        }
+    };
     reconcile_conversation_orphan_tool_segments(&mut conversation);
     strip_transcripts_for_frontend(&mut conversation);
     Ok(serde_json::json!({
@@ -192,8 +209,13 @@ pub(super) fn strip_transcripts_for_frontend(conversation: &mut Conversation) {
         if message.role != "assistant" {
             continue;
         }
-        // 中断草稿的转录是「继续」恢复工具上下文所必需的，绝不剥。
+        // 中断草稿的转录是「继续」恢复工具上下文所必需的，绝不剥。但**图片 base64 要剥**：
+        // 一张截图 2.5MB，整份灌进渲染器 JS heap 纯属白占（前端两份转录都从不读）。
+        // 中断草稿是唯一同时持有两份转录的形态（persist_partial_assistant_snapshot 两个都填），
+        // 所以两份都要剥——落盘副本已经外置成引用，这里兜住"还没落盘就发出去"的运行期形态。
         if message.stream_outcome.as_deref() == Some("interrupted") {
+            strip_image_payloads_from_model_messages(&mut message.model_messages);
+            strip_image_payloads_from_api_messages(&mut message.api_messages);
             continue;
         }
         // 两份转录前端都从不读；后端回放走盘上独立副本（build_chat_api_messages 经
@@ -201,6 +223,49 @@ pub(super) fn strip_transcripts_for_frontend(conversation: &mut Conversation) {
         // 但那是磁盘的事，发给前端的副本不需要保留）。legacy 历史转录正是冷加载时最重的一块。
         message.model_messages = Vec::new();
         message.api_messages = Vec::new();
+    }
+}
+
+/// 清掉 `model_messages` 里图片部件的 base64（保留 mime / path，转录结构不变）。
+/// 用于中断草稿：它的转录整份要留给「继续」用，但图片字节没必要过 IPC。
+fn strip_image_payloads_from_model_messages(messages: &mut [crate::chat::model::ModelMessage]) {
+    for model_message in messages.iter_mut() {
+        for part in model_message.content.iter_mut() {
+            if let crate::chat::model::MessagePart::Image { data, .. } = part {
+                data.clear();
+            }
+        }
+    }
+}
+
+/// `strip_image_payloads_from_model_messages` 的 wire-JSON 版：把 `api_messages` 里
+/// 图片部件的 `data:` URL 换成短占位串。**只动发给前端的内存副本**，磁盘上是
+/// `kivio-attachment://` 哨兵（见 `attachments::externalize_api_message_images`）。
+fn strip_image_payloads_from_api_messages(messages: &mut [serde_json::Value]) {
+    for message in messages.iter_mut() {
+        let Some(parts) = message.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            let Some(image_url) = part.get_mut("image_url") else {
+                continue;
+            };
+            // 对象形（`image_url.url`）与字符串形（Responses 的 `input_image`）都要覆盖。
+            let slot = if image_url.is_object() {
+                image_url.get_mut("url")
+            } else if image_url.is_string() {
+                Some(image_url)
+            } else {
+                None
+            };
+            let Some(slot) = slot else { continue };
+            if slot
+                .as_str()
+                .is_some_and(|url| url.starts_with("data:image/"))
+            {
+                *slot = serde_json::Value::String(String::new());
+            }
+        }
     }
 }
 

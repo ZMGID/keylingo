@@ -37,7 +37,7 @@ use crate::external_agents::spawn::{
 use crate::external_agents::types::{
     RuntimeBuildOptions, RuntimeContext, StreamFormat, UnifiedAgentEvent,
 };
-use crate::external_agents::workspace::{extra_allowed_dirs_for_agent, resolve_effective_cwd};
+use crate::external_agents::workspace::{ensure_effective_cwd, extra_allowed_dirs_for_agent};
 use crate::skills::read_skill_detail;
 use crate::state::AppState;
 
@@ -130,7 +130,8 @@ pub async fn run_external_cli_reply(
 
     let def = get_agent_def(&agent_id).ok_or_else(|| format!("未知外部 Agent: {agent_id}"))?;
 
-    let cwd = resolve_effective_cwd(app, &conversation.id, conversation.project_id.as_deref())?;
+    // CLI 要在这个目录里真的跑起来 ⇒ 必须确保存在（唯一需要建目录的路径之一）。
+    let cwd = ensure_effective_cwd(app, &conversation.id, conversation.project_id.as_deref())?;
     // N2：回复路径不再跑完整检测（version/auth/模型探测可达 10-25s）。可用性/auth 的展示
     // 交给列表阶段；这里只解析二进制（唯一必需项），把第 2+ 轮的前置开销压到 <500ms。
     let probe_start = Instant::now();
