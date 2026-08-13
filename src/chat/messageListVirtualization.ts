@@ -22,13 +22,39 @@ type MeasurementSnapshot = {
 }
 const measurementSnapshots = new Map<string, MeasurementSnapshot>()
 
-function contentRevision(text: string | undefined | null): string {
-  if (!text) return '0'
-  // WeakMap-cached per message object; hash the full string so same-length mid-edits
-  // (tool preview / segment rewrite) still invalidate the measurement key.
-  let hash = 2166136261
-  for (let index = 0; index < text.length; index += 1) {
+const CONTENT_REVISION_FULL_HASH_MAX = 8192
+const CONTENT_REVISION_WINDOWS = 32
+const CONTENT_REVISION_WINDOW_CHARS = 128
+
+function fnv1aRange(text: string, start: number, end: number, hash: number): number {
+  const last = Math.min(end, text.length)
+  for (let index = Math.max(0, start); index < last; index += 1) {
     hash = Math.imul(hash ^ text.charCodeAt(index), 16777619)
+  }
+  return hash
+}
+
+/**
+ * Change detector for measurement keys. Full FNV on typical messages; long
+ * blobs hash length + evenly spaced windows so a cold switch does not scan
+ * megabytes. Same-length mid-edits that land in a window still move the key;
+ * mounted rows still correct via measureElement if a gap is missed.
+ */
+export function contentRevision(text: string | undefined | null): string {
+  if (!text) return '0'
+  let hash = 2166136261
+  if (text.length <= CONTENT_REVISION_FULL_HASH_MAX) {
+    hash = fnv1aRange(text, 0, text.length, hash)
+    return `${text.length}:${(hash >>> 0).toString(36)}`
+  }
+  const lastStart = text.length - CONTENT_REVISION_WINDOW_CHARS
+  const span = Math.max(1, lastStart)
+  const lastWindow = CONTENT_REVISION_WINDOWS - 1
+  for (let window = 0; window < CONTENT_REVISION_WINDOWS; window += 1) {
+    const start = window === lastWindow
+      ? lastStart
+      : Math.floor((window * span) / lastWindow)
+    hash = fnv1aRange(text, start, start + CONTENT_REVISION_WINDOW_CHARS, hash)
   }
   return `${text.length}:${(hash >>> 0).toString(36)}`
 }
@@ -136,10 +162,14 @@ export function chatMessageLayoutRevision(message: ChatMessage): string {
   return revision
 }
 
-/** Only inherit the outside live row's height when the settled bubble has identical geometry inputs. */
+/**
+ * Seed the outside live row's height onto the settled twin when the body
+ * matches. Footer extras (usage / stream_outcome / stats) are tens of pixels;
+ * skipping the seed falls back to an estimate that can be hundreds short.
+ * measureElement / RO add the footer delta on the next frame.
+ */
 export function canReuseLiveRowHeight(live: ChatMessage, settled: ChatMessage): boolean {
   return chatMessageBodyLayoutRevision(live) === chatMessageBodyLayoutRevision(settled)
-    && visibleMetaRevision(live) === visibleMetaRevision(settled)
 }
 
 /**

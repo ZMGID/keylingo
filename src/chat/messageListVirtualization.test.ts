@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   canReuseLiveRowHeight,
   chatMessageLayoutRevision,
+  contentRevision,
   clearRowMeasurementCache,
   estimateMessageRenderCost,
   estimateRenderCost,
@@ -39,9 +40,10 @@ describe('message layout revision', () => {
       .not.toBe(chatMessageLayoutRevision(base))
   })
 
-  it('停止后新增元信息时不继承 live 高度', () => {
+  it('正文相同则继承 live 高度，页脚 usage/终止态交给测高补', () => {
     const live = assistant()
-    expect(canReuseLiveRowHeight(live, assistant({ stream_outcome: 'interrupted' }))).toBe(false)
+    expect(canReuseLiveRowHeight(live, assistant({ stream_outcome: 'interrupted' }))).toBe(true)
+    expect(canReuseLiveRowHeight(live, assistant({ usage: { input_tokens: 10, output_tokens: 20 } }))).toBe(true)
     expect(canReuseLiveRowHeight(live, assistant({ content: '回答已补全' }))).toBe(false)
     expect(canReuseLiveRowHeight(live, assistant())).toBe(true)
   })
@@ -52,6 +54,16 @@ describe('message layout revision', () => {
     const before = assistant({ content: `${prefix}AAAA${suffix}` })
     const after = assistant({ content: `${prefix}BBBB${suffix}` })
     expect(chatMessageLayoutRevision(after)).not.toBe(chatMessageLayoutRevision(before))
+  })
+
+  it('超长正文按窗口采样：首尾和窗口内改写换 key，相同大文本稳定', () => {
+    const large = 'x'.repeat(20_000)
+    expect(contentRevision(large)).toBe(contentRevision(large))
+    expect(contentRevision(`AAAA${large.slice(4)}`)).not.toBe(contentRevision(large))
+    expect(contentRevision(`${large.slice(0, -4)}BBBB`)).not.toBe(contentRevision(large))
+    const windowStart = Math.floor((16 * (large.length - 128)) / 31)
+    const midEdited = `${large.slice(0, windowStart)}YYYY${large.slice(windowStart + 4)}`
+    expect(contentRevision(midEdited)).not.toBe(contentRevision(large))
   })
 })
 

@@ -34,6 +34,7 @@ import { useScrollFollow } from './scroll/useScrollFollow'
 import {
   canReuseLiveRowHeight,
   chatMessageLayoutRevision,
+  contentRevision,
   estimateMessageRenderHeight,
   estimateMessageRenderCost,
   getCachedRowMeasurement,
@@ -119,7 +120,7 @@ const NAVIGATOR_FORCE_MOUNT_RADIUS = 6
 // 收尾再锁几帧，挡住 force-mount 拆除后的迟到测高。
 const NAVIGATOR_UNLOCK_FRAMES = 10
 // 只认 heavy island；data-chat-markdown-pending 从未写入，留着只会制造「假覆盖」。
-const NAVIGATOR_PENDING_SELECTOR = '[data-chat-heavy-hydrated="false"]'
+const NAVIGATOR_PENDING_SELECTOR = '[data-chat-heavy-hydrated="false"], [data-chat-async-pending="true"]'
 const NAVIGATOR_ALIGN_EPSILON_PX = 1
 // 会话切换遮罩：重内容一直晃也不能无限等，超时强制揭开。
 const OPEN_SETTLE_MAX_MS = 2_000
@@ -140,15 +141,6 @@ type RenderItem =
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
   | { kind: 'compaction-progress'; key: string; afterIndex: number }
-
-function contentRevision(text: string | undefined): string {
-  if (!text) return '0'
-  let hash = 2166136261
-  for (let index = 0; index < text.length; index += 1) {
-    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619)
-  }
-  return `${text.length}:${(hash >>> 0).toString(36)}`
-}
 
 function measurementKey(item: RenderItem): string {
   if (item.kind === 'message') {
@@ -400,7 +392,7 @@ function MessageListBase({
     })
     observer.observe(contentEl, {
       attributes: true,
-      attributeFilter: ['data-chat-heavy-hydrated'],
+      attributeFilter: ['data-chat-heavy-hydrated', 'data-chat-async-pending'],
       childList: true,
       subtree: true,
     })
@@ -769,12 +761,7 @@ function MessageListBase({
     if (settlingId) {
       const settling = messages.find((message) => message.id === settlingId)
       const liveMessage = lastLiveMessageRef.current
-      if (
-        settling
-        && liveMessage
-        && !assistantStreamStatsByMessageId[settling.id]
-        && canReuseLiveRowHeight(liveMessage, settling)
-      ) {
+      if (settling && liveMessage && canReuseLiveRowHeight(liveMessage, settling)) {
         const rid = liveRowModel.resolveMessageKey(settling.id)
         const h = Math.round(liveBubbleHeightRef.current)
         setCachedRowMeasurement(layoutKey, `${rid}:${chatMessageLayoutRevision(settling)}`, h)
@@ -1736,12 +1723,7 @@ function MessageListBase({
       if (settlingId) {
         const settling = messages.find((message) => message.id === settlingId)
         const liveMessage = lastLiveMessageRef.current
-        if (
-          settling
-          && liveMessage
-          && !assistantStreamStatsByMessageId[settling.id]
-          && canReuseLiveRowHeight(liveMessage, settling)
-        ) {
+        if (settling && liveMessage && canReuseLiveRowHeight(liveMessage, settling)) {
           const rowKey = `${liveRowModel.resolveMessageKey(settling.id)}:${chatMessageLayoutRevision(settling)}`
           setCachedRowMeasurement(layoutKey, rowKey, liveHeight)
           estimateSizeRef.current.set(liveRowModel.resolveMessageKey(settling.id), liveHeight)
@@ -1776,7 +1758,6 @@ function MessageListBase({
     }
     setBottomHoldEpoch((value) => value + 1)
   }, [
-    assistantStreamStatsByMessageId,
     cancelNavigatorSettle,
     followHandle,
     historyItems.length,
