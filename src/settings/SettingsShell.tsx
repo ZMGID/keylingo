@@ -801,6 +801,12 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       ),
     )
     if (hasIncompleteCustomHeader) return
+    // 同理：本地 CLI 的「添加模型」也是先插一行空的再填。sanitize_external_cli_agents 会
+    // retain 掉 id 为空的条目，回包盖回草稿 → 那一行刚出现就消失（表现为「点添加冒一下就没了」）。
+    const hasIncompleteCliModel = Object.values(settings?.chat?.externalCliAgents ?? {}).some(
+      (config) => (config.customModels ?? []).some((model) => model.id.trim() === ''),
+    )
+    if (hasIncompleteCliModel) return
     if (autosaveTimerRef.current) {
       clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null

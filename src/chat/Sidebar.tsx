@@ -160,6 +160,30 @@ function conversationProjectLabel(
   return findConversationProject(conversation, projects)?.name ?? conversation.folder ?? ''
 }
 
+/**
+ * 生成中乐观行会盖住真实行。置顶是用户手势，必须以真实列表为准，
+ * 否则要点到 run 结束、乐观行卸掉才看得见。
+ */
+function overlayOptimisticConversation(
+  optimistic: ConversationListItem,
+  real: ConversationListItem | undefined,
+): ConversationListItem {
+  if (!real || Boolean(real.pinned) === Boolean(optimistic.pinned)) return optimistic
+  return { ...optimistic, pinned: Boolean(real.pinned) }
+}
+
+function applyPinOverrides(
+  items: ConversationListItem[],
+  overrides: Record<string, boolean>,
+): ConversationListItem[] {
+  if (Object.keys(overrides).length === 0) return items
+  return items.map((item) => {
+    const pinned = overrides[item.id]
+    if (pinned === undefined || Boolean(item.pinned) === pinned) return item
+    return { ...item, pinned }
+  })
+}
+
 export interface SidebarProps {
   lang: Lang
   currentConversationId?: string
@@ -579,6 +603,8 @@ export const Sidebar = memo(function Sidebar({
   const [sets, setSets] = useState<ChatSet[]>([])
   // 集/项目里对话的钉住位置：group_id → 钉子表。底座仍是时间序，见 conversationPins.ts。
   const [conversationPins, setConversationPins] = useState<Record<string, ConversationPin[]>>({})
+  // 置顶手势的进行中覆盖：生成中乐观行 / 列表 refetch 都不得把刚点的 PIN 冲掉。
+  const [pinOverrides, setPinOverrides] = useState<Record<string, boolean>>({})
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   // 后端全量索引搜索结果（覆盖所有对话，不止已加载的前 80）；空查询/非 Tauri 时为空，回退客户端过滤。
@@ -705,6 +731,7 @@ export const Sidebar = memo(function Sidebar({
 
   const handleTogglePinConversation = async (id: string, pinned: boolean) => {
     // 乐观更新：侧栏立刻重排，避免等磁盘写回才跳动。
+    setPinOverrides((previous) => (previous[id] === pinned ? previous : { ...previous, [id]: pinned }))
     setConversations((items) =>
       items.map((item) => (item.id === id ? { ...item, pinned } : item)),
     )
@@ -714,6 +741,13 @@ export const Sidebar = memo(function Sidebar({
     } catch (err) {
       console.error('Failed to pin conversation:', err)
       await loadSidebarData({ silent: true })
+    } finally {
+      setPinOverrides((previous) => {
+        if (!(id in previous)) return previous
+        const next = { ...previous }
+        delete next[id]
+        return next
+      })
     }
   }
 
@@ -954,7 +988,7 @@ export const Sidebar = memo(function Sidebar({
   const visibleConversations = useMemo(() => {
     // 侧栏永不展示已归档（后端 list 也会滤；这里再兜一层防脏数据/旧索引）
     const active = conversations.filter((item) => !item.archived)
-    if (optimisticConversations.length === 0) return active
+    if (optimisticConversations.length === 0) return applyPinOverrides(active, pinOverrides)
     const realById = new Map(active.map((item) => [item.id, item]))
     const visibleOptimisticConversations = optimisticConversations.filter((item) => {
       if (item.archived) return false
@@ -971,14 +1005,14 @@ export const Sidebar = memo(function Sidebar({
       // 首轮完成后、refetch 落地前，真实列表里这条还是旧快照 —— 直接切过去会让标题动效
       // 先倒退成「新对话」再跳成生成标题，且行实例销毁重建导致 SwapTitle 过渡不触发。
       return real.title === '新对话'
-    })
-    if (visibleOptimisticConversations.length === 0) return active
+    }).map((item) => overlayOptimisticConversation(item, realById.get(item.id)))
+    if (visibleOptimisticConversations.length === 0) return applyPinOverrides(active, pinOverrides)
     const optimisticIds = new Set(visibleOptimisticConversations.map((item) => item.id))
-    return [
+    return applyPinOverrides([
       ...visibleOptimisticConversations,
       ...active.filter((item) => !optimisticIds.has(item.id)),
-    ]
-  }, [conversations, generatingConversationIds, optimisticConversations])
+    ], pinOverrides)
+  }, [conversations, generatingConversationIds, optimisticConversations, pinOverrides])
 
   const normalizedSearchQuery = searchQuery.trim().toLowerCase()
 

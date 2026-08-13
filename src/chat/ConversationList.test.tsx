@@ -126,6 +126,21 @@ describe('ConversationList generating wave', () => {
     expect(screen.getByRole('status', { name: '正在生成' })).toBeInTheDocument()
   })
 
+  it('still fires pin while generating — the wave must not swallow the click', async () => {
+    const user = userEvent.setup()
+    const onTogglePin = vi.fn()
+    render(
+      <ConversationList
+        {...listProps}
+        generatingConversationIds={new Set(['conversation-1'])}
+        onTogglePinConversation={onTogglePin}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '置顶聊天', hidden: true }))
+    expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
+  })
+
   it('keeps pin visible when already pinned, without the wave', () => {
     const { container } = render(
       <ConversationList

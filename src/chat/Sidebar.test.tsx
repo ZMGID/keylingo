@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSettingsCached } from '../api/settingsCache'
 import { chatApi } from './api'
 import { Sidebar } from './Sidebar'
-import type { ChatProject, ConversationListItem } from './types'
+import type { ChatProject, Conversation, ConversationListItem } from './types'
 
 vi.mock('../api/settingsCache', () => ({
   getSettingsCached: vi.fn().mockResolvedValue({ chat: {} }),
@@ -144,5 +144,53 @@ describe('Sidebar conversation navigation', () => {
       onlyConversation,
       { project: project2, set: null },
     )
+  })
+})
+
+describe('Sidebar pin while generating', () => {
+  it('pins a generating conversation immediately even when the optimistic row is showing', async () => {
+    const user = userEvent.setup()
+    const running = conversation('conversation-run', 'desktop-cc-gui', project1)
+    let persistPinned = false
+    vi.spyOn(chatApi, 'getProjects').mockResolvedValue([project1])
+    vi.spyOn(chatApi, 'getSets').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getAssistants').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getConversations').mockImplementation(async () => [
+      { ...running, pinned: persistPinned },
+    ])
+    vi.spyOn(chatApi, 'getConversationPins').mockResolvedValue({})
+    vi.spyOn(chatApi, 'updateConversation').mockImplementation(async (_id, updates) => {
+      persistPinned = Boolean(updates.pinned)
+      return { id: running.id } as Conversation
+    })
+
+    render(
+      <Sidebar
+        lang="zh"
+        currentConversationId={running.id}
+        generatingConversationIds={new Set([running.id])}
+        optimisticConversations={[{ ...running, pinned: false }]}
+        selectedProject={project1}
+        onSelectProject={vi.fn()}
+        selectedSet={null}
+        onSelectSet={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onOpenExtensionsItem={vi.fn()}
+        onSelectLang={vi.fn()}
+        onCheckUpdate={vi.fn()}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+        refreshKey={0}
+        searchOpen={false}
+        onSearchOpenChange={vi.fn()}
+      />,
+    )
+
+    await user.click(await screen.findByRole('button', { name: '置顶聊天', hidden: true }))
+
+    expect(await screen.findByRole('button', { name: '取消置顶' })).toBeInTheDocument()
+    expect(chatApi.updateConversation).toHaveBeenCalledWith(running.id, { pinned: true })
   })
 })
