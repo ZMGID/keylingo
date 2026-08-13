@@ -39,6 +39,12 @@ describe('scrollFollowCore', () => {
     expect(state.following).toBe(true)
   })
 
+  it('跟随中已贴底的 contentGrowth 不写 scrollTop（避免输入框 RO 空钉抖动）', () => {
+    expect(run([growth(0)]).pin).toBe(false)
+    expect(run([growth(1)]).pin).toBe(false)
+    expect(run([growth(2)]).pin).toBe(true)
+  })
+
   it('自己钉出来的显著 gap 再钉一次纠正，永不解除跟随', () => {
     // 跟随中 self 来源的 gap（钉底写入后高度又变了）→ 应 pin 纠正，仍保持 following。
     const { state, pin } = run([scroll(120, 100)])

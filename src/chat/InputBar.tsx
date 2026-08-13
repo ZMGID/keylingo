@@ -31,6 +31,7 @@ import { PastedTextEditorModal } from './PastedTextEditorModal'
 import { SourcesButton } from './SourcesButton'
 import { onComposerInsert, onComposerTextInsert } from './composerInsert'
 import { draftKey, getComposerDraft, migrateNewChatDraft, setComposerDraft } from './composerDraft'
+import { applyComposerAutoHeight } from './composerAutoHeight'
 import { AssistantPicker } from './AssistantPicker'
 import { MultiModelSelector } from './MultiModelSelector'
 import { GitStatusPill } from './dock/GitStatusPill'
@@ -58,24 +59,6 @@ const PASTE_TEXT_ATTACHMENT_THRESHOLD = 3000
 
 function isAttachableClipboardFile(file: File): boolean {
   return Boolean(file.name?.trim()) || file.size > 0
-}
-
-// 输入框自适应高度的唯一实现。量高必须先把 height 塌回 'auto' 才能测出收缩后的
-// scrollHeight，但 textarea rows=1 的 'auto' 是一行高 —— 草稿 ≥2 行时中间态比终值
-// 矮一截。若任由这次塌陷参与整树布局：读 scrollHeight 的强制回流里聊天视口
-// （同一 flex 列里的 flex-1）会瞬间变高、max scrollTop 变小，贴底时浏览器当场把
-// scrollTop 钳下去；恢复高度后底部多出一条 gap，跟随纠正器再钉回。WKWebView 的
-// 异步滚动会把这一去一回画出来 —— 表现就是「贴底 + 两行草稿时每敲一个字整个界面
-// 上下抖，往上滚一点或一行草稿都没事」。所以量高前先把所在行（父元素）的高度锁成
-// 当前值，塌陷只发生在行内，祖先布局全程不动；量完再解锁，净变化只有终值那一次。
-function applyComposerAutoHeight(textarea: HTMLTextAreaElement) {
-  const row = textarea.parentElement instanceof HTMLElement ? textarea.parentElement : null
-  const prevRowHeight = row?.style.height ?? ''
-  if (row) row.style.height = `${row.offsetHeight}px`
-  textarea.style.height = 'auto'
-  textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`
-  textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden'
-  if (row) row.style.height = prevRowHeight
 }
 
 function undoAccidentalFilenamePaste(
@@ -1084,10 +1067,7 @@ export const InputBar = memo(function InputBar({
     setToolPanelOpen(false)
     closeProjectMenu()
     setSlashPanelOpen(false)
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.overflowY = 'hidden'
-    }
+    if (textareaRef.current) applyComposerAutoHeight(textareaRef.current)
   }
 
   const handleSend = async () => {
@@ -1903,7 +1883,7 @@ export const InputBar = memo(function InputBar({
                  才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
                  不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
                  custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
-              className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 dark:text-neutral-100"
+              className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 [field-sizing:content] dark:text-neutral-100"
             />
 
             {/* 发送 / 停止：绝对定位在输入行右侧。两按钮共存于同一槽位，做 opacity+scale

@@ -821,6 +821,11 @@ body {
   background: var(--theme-surface);
 }
 
+/* 有 field-sizing 时高度跟内容走，避开 JS 把 height 塌成 auto 的回流。 */
+.chat-composer-shell textarea {
+  field-sizing: content;
+}
+
 /* ===== 输入区三层结构 =====
    原来是「一个 28px 大圆角盒子，图标全塞在里面」→ 盒子被撑到 ~100px 高。
    改为三条独立横条（对齐 Claude Code）：
@@ -1196,7 +1201,8 @@ button.chat-composer-status-item:hover {
 .dark .chat-main-pane,
 .dark .chat-center-page,
 .dark .chat-dock-shell,
-.dark .chat-themed-surface {
+.dark .chat-themed-surface,
+.dark .chat-conversation-loading {
   background: #262629;
 }
 
@@ -7084,6 +7090,11 @@ input[type="password"]::-ms-clear {
 
 .chat-conversation-loading {
   background: var(--theme-surface-soft);
+}
+/* --theme-surface-soft 没有暗色态，必须跟 .chat-main-pane 一样写死 #262629，
+   否则切换会话时覆盖层在暗色里铺一层奶白。 */
+.dark .chat-conversation-loading {
+  background: #262629;
 }
 .chat-conversation-loading .kv-stream-logo {
   --k: 0.68;

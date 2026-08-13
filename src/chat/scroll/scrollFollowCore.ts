@@ -257,7 +257,12 @@ export function reduceFollowEvent(
         return { state: next, pin: true }
       }
       // 按住指针（拖选）期间同样不钉：流式内容仍在长，钉底会把选区拽走。
-      return { state: next, pin: state.following && !state.pointerHeld }
+      // gap 几乎为 0 时再写一次 scrollTop 是空操作，但 WebView 异步滚动仍会抖
+      // （贴底打字、输入框 RO 误触发最明显）。有真实缺口才钉。
+      return {
+        state: next,
+        pin: state.following && !state.pointerHeld && event.gap > config.directionSlopPx,
+      }
     }
 
     case 'forceFollow': {
