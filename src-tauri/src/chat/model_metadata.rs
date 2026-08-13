@@ -866,7 +866,7 @@ mod tests {
                 "{model} 不支持 xhigh，不能出现在选择器里"
             );
         }
-        for model in ["gpt-5.4", "gpt-5.6"] {
+        for model in ["gpt-5.4", "gpt-5.6", "grok-4.6"] {
             assert!(
                 reasoning_efforts_for_model(None, model).contains(&"xhigh".to_string()),
                 "{model} 支持 xhigh"

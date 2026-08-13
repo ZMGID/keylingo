@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-08-11",
+    "version": "2026-08-13",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -17,6 +17,8 @@
       "https://platform.openai.com/docs/api-reference/images/create",
       "https://openrouter.ai/docs/guides/overview/multimodal/image-generation",
       "https://docs.x.ai/developers/model-capabilities/images/generation",
+      "https://docs.x.ai/developers/grok-4-6",
+      "https://docs.x.ai/developers/models/grok-4.6",
       "https://cursor.com/docs/models/cursor-composer-2-5",
       "https://cursor.com/docs/models/cursor-composer-1",
       "https://cursor.com/blog/composer-2-5",
@@ -781,6 +783,14 @@
     "pricing": { "input": 0.30, "output": 0.90 }
   },
 
+  "grok-4.6": {
+    "displayName": "Grok 4.6",
+    "contextWindow": 500000,
+    "maxOutput": 128000,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "reasoningEfforts": ["low", "medium", "high", "xhigh"],
+    "pricing": { "input": 2.00, "output": 6.00, "cachedInput": 0.50 }
+  },
   "grok-4.5": {
     "displayName": "Grok 4.5",
     "contextWindow": 500000,

@@ -16,7 +16,11 @@ use super::super::types::{
     SlashStrategy, StreamFormat,
 };
 
-const FALLBACK_MODELS: &[(&str, &str)] = &[("default", "Default"), ("grok-4.5", "Grok 4.5")];
+const FALLBACK_MODELS: &[(&str, &str)] = &[
+    ("default", "Default"),
+    ("grok-4.6", "Grok 4.6"),
+    ("grok-4.5", "Grok 4.5"),
+];
 
 /// Grok reasoning-effort levels (`grok agent --reasoning-effort`). The CLI also accepts
 /// none/minimal/xhigh/max, but the models it ships advertise low/medium/high — keep the

@@ -1239,7 +1239,7 @@ export function CliProviderModal({
               value={grokFields?.model ?? ''}
               onChange={(value) => patchGrokFields({ model: value })}
               options={modelSelectOptions}
-              placeholder="grok-4.5"
+              placeholder="grok-4.6"
               mono
               ariaLabel={t.externalAgentsCodexDefaultModel}
             />

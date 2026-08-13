@@ -26,7 +26,7 @@ export const GROK_API_BACKENDS: GrokApiBackend[] = [
 export const DEFAULT_GROK_FIELDS: GrokProviderFields = {
   baseUrl: 'https://api.example.com/v1',
   apiKey: '',
-  model: 'grok-4.5',
+  model: 'grok-4.6',
   displayName: '',
   apiBackend: 'responses',
   contextWindow: '500000',
@@ -42,7 +42,7 @@ function escapeTomlKey(key: string): string {
 
 /** 生成可落盘的 Grok config.toml 片段（只含 models / model）。 */
 export function buildGrokConfigToml(fields: GrokProviderFields): string {
-  const model = fields.model.trim() || 'grok-4.5'
+  const model = fields.model.trim() || 'grok-4.6'
   const key = escapeTomlKey(model)
   const lines = [
     '[models]',

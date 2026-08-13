@@ -104,6 +104,25 @@ describe('matchModel', () => {
     expect(matchModel('gemini-3.5-flash-lite')?.displayName).not.toBe('Gemini 3.5 Flash')
   })
 
+  it('matches Grok 4.6 official metadata without collapsing onto 4.5', () => {
+    const info = matchModel('grok-4.6')
+    expect(info?.displayName).toBe('Grok 4.6')
+    expect(info?.contextWindow).toBe(500_000)
+    expect(info?.maxOutput).toBe(128_000)
+    expect(info?.capabilities?.vision).toBe(true)
+    expect(info?.capabilities?.functionCalling).toBe(true)
+    expect(info?.capabilities?.reasoning).toBe(true)
+    expect(info?.capabilities?.webSearch).toBe(true)
+    expect(info?.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(info?.pricing?.input).toBe(2)
+    expect(info?.pricing?.output).toBe(6)
+    expect(info?.pricing?.cachedInput).toBe(0.5)
+    expect(matchModel('x-ai/grok-4.6')?.displayName).toBe('Grok 4.6')
+    expect(matchModel('grok-4-6')?.displayName).toBe('Grok 4.6')
+    expect(matchModel('grok-4.6')?.displayName).not.toBe('Grok 4.5')
+    expect(matchModel('grok-4.5')?.displayName).toBe('Grok 4.5')
+  })
+
   it('matches Cursor Composer model ids without collapsing versions', () => {
     // Cursor docs pricing catalog: composer-2.5 base + fast sub-row; supportsImage=true.
     const c25 = matchModel('composer-2.5')
