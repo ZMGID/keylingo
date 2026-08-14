@@ -137,6 +137,37 @@ describe('ExternalModelSelector', () => {
     expect(onModelChange).not.toHaveBeenCalled()
   })
 
+  it('有 CLI 当前模型/推理时胶囊显示真实名字而不是 Auto', async () => {
+    detectModels.mockResolvedValue({
+      models: [
+        { id: 'default', label: 'Default' },
+        { id: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash' },
+      ],
+      reasoningOptions: [
+        { id: 'default', label: 'Default' },
+        { id: 'off', label: 'Off' },
+        { id: 'high', label: 'High' },
+        { id: 'max', label: 'Max' },
+      ],
+      source: 'probed',
+      currentModel: 'deepseek-v4-flash',
+      currentReasoning: 'high',
+    })
+
+    render(
+      <ExternalModelSelector
+        agentRuntime={runtime}
+        onModelChange={() => {}}
+        conversationId={null}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /DeepSeek-V4-Flash/ })).toBeInTheDocument(),
+    )
+    expect(screen.getByLabelText('思考等级：High')).toBeInTheDocument()
+    expect(screen.queryByText('Auto')).not.toBeInTheDocument()
+  })
+
   it('无当前模型概念时胶囊显示「Auto」', async () => {
     detectModels.mockResolvedValue({
       models: [{ id: 'default', label: 'Default' }],

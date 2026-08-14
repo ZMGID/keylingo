@@ -302,6 +302,7 @@ function ExternalModelSelectorBase({
   // CLI 自己当前配置的模型（codex config.toml / ACP currentModelId / claude resolved）。用于胶囊
   // 显示真实名字并在用户未显式选择时自动同步；null = 该 CLI 无「当前」概念 → 显示「自动」。
   const [currentModel, setCurrentModel] = useState<string | null>(null)
+  const [currentReasoning, setCurrentReasoning] = useState<string | null>(null)
   // 请求代际：agent 切换/卸载时使在途请求失效，防止旧结果覆盖新 agent 或卸载后 setState。
   const modelsReqIdRef = useRef(0)
   // 上次探测的 agent：仅在真正切换 agent 时清空 currentModel。模型列表刻意跨请求保留（防闪），
@@ -326,6 +327,7 @@ function ExternalModelSelectorBase({
           setReasoningByModel(result.reasoningByModel ?? {})
           setSource(result.source)
           setCurrentModel(result.currentModel ?? null)
+          setCurrentReasoning(result.currentReasoning ?? null)
           // 自动同步 CLI 当前配置：仅当用户未显式选择（externalModel 空 / 'default'）时。
           const rt = runtimeRef.current
           const explicitModel = !!rt.externalModel && rt.externalModel !== 'default'
@@ -372,6 +374,7 @@ function ExternalModelSelectorBase({
       lastAgentIdRef.current = agentId
       // 换 agent：旧 CLI 的 currentModel 立刻失效（探测中显示「获取中…」而非上个 CLI 的模型名）。
       setCurrentModel(null)
+      setCurrentReasoning(null)
       setReasoningByModel({})
     }
     if (!agentId) {
@@ -414,19 +417,27 @@ function ExternalModelSelectorBase({
 
   const reasoningPillValue = agentRuntime.externalReasoning ?? 'default'
   const currentReasoningLabel = useMemo(() => {
-    const opt = activeReasoningOptions.find((o) => o.id === reasoningPillValue)
-    const raw = opt?.label ?? reasoningPillValue
-    // 未显式选择推理等级（default）时显示「自动」，不再暴露裸 "Default"。
-    // 残留的 on/off 也当自动（不是档位名）。
+    const explicit =
+      !!agentRuntime.externalReasoning && agentRuntime.externalReasoning !== 'default'
+    // 未显式选择时跟模型胶囊同一口径：优先展示 CLI 实际在用的档位，而不是「Auto」。
+    const displayId = explicit
+      ? reasoningPillValue
+      : currentReasoning && currentReasoning !== 'default'
+        ? currentReasoning
+        : reasoningPillValue
+    const opt = activeReasoningOptions.find((o) => o.id === displayId)
+    const raw = opt?.label ?? displayId
+    // 未显式选择且探测也没有档位时显示「自动」，不再暴露裸 "Default"。
+    // 残留的 ACP on/off 开关也当自动（不是档位名）。dsh 的 off 是真档位，会走上面的探测回填。
     if (
       raw === 'Default' ||
-      reasoningPillValue === 'default' ||
-      ['on', 'off', 'true', 'false'].includes(String(reasoningPillValue).toLowerCase())
+      displayId === 'default' ||
+      ['on', 'off', 'true', 'false'].includes(String(displayId).toLowerCase())
     ) {
       return 'Auto'
     }
     return raw
-  }, [activeReasoningOptions, reasoningPillValue])
+  }, [activeReasoningOptions, agentRuntime.externalReasoning, currentReasoning, reasoningPillValue])
   const displayName = useMemo(() => {
     const currentId = agentRuntime.externalModel
     const explicit = !!currentId && currentId !== 'default'

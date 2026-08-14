@@ -437,7 +437,7 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
             format!("{provider}:{model}")
         })
     });
-    let current_reasoning = selected
+    let mut current_reasoning = selected
         .and_then(|selection| selection.reasoning_effort.clone())
         .or_else(|| {
             settings
@@ -453,6 +453,20 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
         if !route.is_empty() && !model.is_empty() {
             current_model = Some(format!("{route}:{model}"));
         }
+    }
+
+    // 与 `dsh_jsonrpc::resolve_model_route_for_turn` / 适配器 `defaultEffort: high` 对齐：
+    // settings.yaml 只有 onboarding、用户也没显式选时，轮次仍会跑 Flash + high。
+    // 不报 current_* 的话前端只能显示 Auto，和实际在用的对不上。
+    if current_model.is_none() {
+        current_model = Some("deepseek-v4-flash".to_string());
+    }
+    if current_reasoning
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|value| value.is_empty() || value == "default")
+    {
+        current_reasoning = Some("high".to_string());
     }
 
     Ok(probe_ok(
@@ -1570,6 +1584,8 @@ llm-pi-ai:
         assert_eq!(defaults.models.len(), 3);
         assert_eq!(defaults.models[1].id, "deepseek-v4-flash");
         assert_eq!(defaults.models[2].id, "deepseek-v4-pro");
+        assert_eq!(defaults.current_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(defaults.current_reasoning.as_deref(), Some("high"));
 
         let empty = parse_dsh_settings_models("llm-deepseek:\n  models: []\n")
             .expect("explicit empty catalog");
@@ -1581,6 +1597,8 @@ llm-pi-ai:
                 .collect::<Vec<_>>(),
             vec!["default"]
         );
+        assert_eq!(empty.current_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(empty.current_reasoning.as_deref(), Some("high"));
     }
 
     #[test]
