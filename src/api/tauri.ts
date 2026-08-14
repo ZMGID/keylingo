@@ -475,6 +475,10 @@ export type AgentRuntimeConfig = {
   external_model?: string | null
   externalReasoning?: string | null
   external_reasoning?: string | null
+  externalSandbox?: string | null
+  external_sandbox?: string | null
+  externalAgentPreset?: string | null
+  external_agent_preset?: string | null
 }
 
 export type ChatModeConfig = {

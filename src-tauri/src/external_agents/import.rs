@@ -1022,6 +1022,7 @@ pub async fn import_one_session(
             external_model: None,
             external_reasoning: None,
             external_sandbox: None,
+            external_agent_preset: None,
         },
     };
     let message_count = conversation.messages.len();

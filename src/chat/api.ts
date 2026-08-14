@@ -44,6 +44,52 @@ export interface CcSwitchScan {
   skipped: number
 }
 
+/** `$DSH_HOME/settings.yaml` 里三个官方插件 namespace 的当前值。`null` 字段 = 沿用 schema 默认。 */
+export interface DshPluginSettingsSnapshot {
+  settingsPath: string
+  shell: {
+    timeoutMs: number | null
+    maxOutputBytes: number | null
+    timeoutMsDefault: number
+    maxOutputBytesDefault: number
+  }
+  agentLoop: {
+    maxParallelToolCalls: number | null
+    maxParallelToolCallsDefault: number
+  }
+  webSearch: {
+    baseUrl: string | null
+    maxUses: number | null
+    apiKeyEnv: string
+    apiKeyConfigured: boolean
+    apiKeyWritable: boolean
+    baseUrlDefault: string
+    maxUsesDefault: number
+  }
+}
+
+/** 只带要改的 namespace。字段 `null` = 恢复默认。 */
+export interface DshPluginSettingsPatch {
+  shell?: {
+    timeoutMs?: number | null
+    maxOutputBytes?: number | null
+  }
+  agentLoop?: {
+    maxParallelToolCalls?: number | null
+  }
+  webSearch?: {
+    baseUrl?: string | null
+    maxUses?: number | null
+    apiKey?: string
+  }
+}
+
+export interface DshPluginEntry {
+  id: string
+  moduleName: string
+  enabled: boolean
+}
+
 /** `chat_external_cli_install_info` 的返回。 */
 export interface ExternalCliInstallInfo {
   agentId: string
@@ -87,6 +133,7 @@ export const BUILTIN_AGENT_RUNTIME: AgentRuntimeConfig = {
   externalModel: null,
   externalReasoning: null,
   externalSandbox: null,
+  externalAgentPreset: null,
 }
 
 export const CHAT_AGENT_RUNTIME: AgentRuntimeConfig = {
@@ -95,6 +142,7 @@ export const CHAT_AGENT_RUNTIME: AgentRuntimeConfig = {
   externalModel: null,
   externalReasoning: null,
   externalSandbox: null,
+  externalAgentPreset: null,
 }
 
 export function normalizeAgentRuntime(
@@ -113,6 +161,7 @@ export function normalizeAgentRuntime(
     externalModel: raw.externalModel ?? raw.external_model ?? 'default',
     externalReasoning: raw.externalReasoning ?? raw.external_reasoning ?? null,
     externalSandbox: raw.externalSandbox ?? raw.external_sandbox ?? null,
+    externalAgentPreset: raw.externalAgentPreset ?? raw.external_agent_preset ?? null,
   }
 }
 
@@ -132,6 +181,7 @@ export function agentRuntimesEqual(
     && (a.externalModel ?? 'default') === (b.externalModel ?? 'default')
     && (a.externalReasoning ?? null) === (b.externalReasoning ?? null)
     && (a.externalSandbox ?? null) === (b.externalSandbox ?? null)
+    && (a.externalAgentPreset ?? null) === (b.externalAgentPreset ?? null)
 }
 
 const mockStorageKey = 'kivio-chat-dev-conversations'
@@ -1764,6 +1814,25 @@ export const chatApi = {
     await invoke('chat_external_cli_open_config_dir', { agentId })
   },
 
+  async dshPluginSettingsGet(): Promise<DshPluginSettingsSnapshot | null> {
+    if (!isTauriRuntime()) return null
+    return await invoke<DshPluginSettingsSnapshot>('chat_dsh_plugin_settings_get')
+  },
+
+  async dshPluginSettingsSave(patch: DshPluginSettingsPatch): Promise<DshPluginSettingsSnapshot> {
+    return await invoke<DshPluginSettingsSnapshot>('chat_dsh_plugin_settings_save', { patch })
+  },
+
+  async dshPluginInventory(): Promise<DshPluginEntry[]> {
+    if (!isTauriRuntime()) return []
+    return await invoke<DshPluginEntry[]>('chat_dsh_plugin_inventory')
+  },
+
+  async dshOpenSettingsFile(): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_dsh_open_settings_file')
+  },
+
   /**
    * 删除供应商后清掉它物化出来的文件。
    * 保存设置时后端会自动物化并清缓存（`persist_settings`），所以只有删除需要显式调用。
@@ -1841,6 +1910,7 @@ export const chatApi = {
       externalModel: agentRuntime.externalModel ?? null,
       externalReasoning: agentRuntime.externalReasoning ?? null,
       externalSandbox: agentRuntime.externalSandbox ?? null,
+      externalAgentPreset: agentRuntime.externalAgentPreset ?? null,
     }
     const result = await invoke<{ success: boolean; conversation: Conversation }>(
       'chat_set_agent_runtime',

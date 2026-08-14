@@ -458,6 +458,7 @@ pub async fn run_external_cli_reply(
             conversation.agent_runtime.external_model.as_deref(),
             conversation.agent_runtime.external_reasoning.as_deref(),
             conversation.agent_runtime.external_sandbox.as_deref(),
+            conversation.agent_runtime.external_agent_preset.as_deref(),
             system_prompt_file
                 .as_ref()
                 .map(|_| stable_prompt_hash(daemon_instructions.trim()))
@@ -476,6 +477,7 @@ pub async fn run_external_cli_reply(
             wire_model.clone(),
             conversation.agent_runtime.external_reasoning.clone(),
             conversation.agent_runtime.external_sandbox.clone(),
+            conversation.agent_runtime.external_agent_preset.clone(),
             persistent_mcp,
             &launch_config,
             &composed.full_prompt,
@@ -775,6 +777,7 @@ async fn run_persistent_turn<E, C>(
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    preset: Option<String>,
     mcp_servers: Vec<AcpMcpServer>,
     launch_config: &LaunchConfig,
     first_prompt: &str,
@@ -854,6 +857,7 @@ where
                 model.as_deref(),
                 reasoning.as_deref(),
                 sandbox.as_deref(),
+                preset.as_deref(),
                 &mcp_servers,
                 resume_native.clone(),
                 Some(background_task_sink(app, conversation_id)),
@@ -887,6 +891,7 @@ where
                         model.as_deref(),
                         reasoning.as_deref(),
                         sandbox.as_deref(),
+                        preset.as_deref(),
                         &mcp_servers,
                         None,
                         Some(background_task_sink(app, conversation_id)),
@@ -1036,6 +1041,7 @@ where
             model.as_deref(),
             reasoning.as_deref(),
             sandbox.as_deref(),
+            preset.as_deref(),
             &mcp_servers,
             launch_config,
             resumable_native.clone(),
@@ -1084,6 +1090,7 @@ async fn reconnect_fresh(
     model: Option<&str>,
     reasoning: Option<&str>,
     sandbox: Option<&str>,
+    preset: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     launch_config: &LaunchConfig,
     resume_native: Option<String>,
@@ -1111,6 +1118,7 @@ async fn reconnect_fresh(
         model,
         reasoning,
         sandbox,
+        preset,
         mcp_servers,
         resume_native,
         Some(background_task_sink(app, conversation_id)),
@@ -1145,7 +1153,7 @@ async fn reconnect_fresh(
 /// 本轮的启动配置指纹。
 ///
 /// Claude and dsh both have process-bound settings. Claude fingerprints launch flags/system prompt;
-/// dsh fingerprints initialize model, profile reasoning/provider, and sandbox environment. Without
+/// dsh fingerprints initialize model, profile reasoning/provider, sandbox, and agent preset. Without
 /// this, the UI can show a new configuration while the resident process keeps running the old one.
 ///
 /// ACP / codex 能在会话内改模型与推理档位（`session/set_config_option` / 每轮 `turn/start`
@@ -1177,15 +1185,17 @@ fn launch_config_for_turn(
     model: Option<&str>,
     reasoning: Option<&str>,
     sandbox: Option<&str>,
+    preset: Option<&str>,
     instructions_hash: Option<&str>,
 ) -> LaunchConfig {
     if matches!(protocol, StreamFormat::DshJsonRpc) {
         return LaunchConfig {
             flags: format!(
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}",
                 model.unwrap_or_default(),
                 reasoning.unwrap_or_default(),
                 sandbox.unwrap_or_default(),
+                crate::external_agents::dsh_profile::normalize_agent_preset(preset),
                 dsh_provider_fingerprint()
             ),
             // dsh 的会话级指令在首轮正文里，不是启动配置；指令变化不需要为了它单独重连。
@@ -2029,6 +2039,7 @@ async fn connect_persistent_session(
     model: Option<&str>,
     reasoning: Option<&str>,
     sandbox: Option<&str>,
+    preset: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     resume_native: Option<String>,
     background_task_sink: Option<
@@ -2184,6 +2195,7 @@ async fn connect_persistent_session(
                 model,
                 reasoning,
                 sandbox,
+                preset,
             )
             .await?;
             let id = session.session_id().to_string();
@@ -3427,38 +3439,45 @@ mod tests {
             Some("opus"),
             Some("high"),
             Some("plan"),
+            None,
             Some("hash-1"),
         );
         // model **不进指纹**：它能在会话内换（`set_model`），不需要换进程。
         assert_eq!(claude.flags, "high|plan");
         assert_eq!(claude.instructions.as_deref(), Some("hash-1"));
 
-        let dsh = |model, reasoning, sandbox| {
+        let dsh = |model, reasoning, sandbox, preset| {
             launch_config_for_turn(
                 StreamFormat::DshJsonRpc,
                 model,
                 reasoning,
                 sandbox,
+                preset,
                 Some("ignored-instructions"),
             )
         };
-        let dsh_base = dsh(Some("deepseek-v4-flash"), Some("off"), Some("read-only"));
+        let dsh_base = dsh(Some("deepseek-v4-flash"), Some("off"), Some("read-only"), None);
         assert!(dsh_base.instructions.is_none());
         assert_ne!(
             dsh_base,
-            dsh(Some("deepseek-v4-pro"), Some("off"), Some("read-only"))
+            dsh(Some("deepseek-v4-pro"), Some("off"), Some("read-only"), None)
         );
         assert_ne!(
             dsh_base,
-            dsh(Some("deepseek-v4-flash"), Some("high"), Some("read-only"))
+            dsh(Some("deepseek-v4-flash"), Some("high"), Some("read-only"), None)
         );
         assert_ne!(
             dsh_base,
             dsh(
                 Some("deepseek-v4-flash"),
                 Some("off"),
-                Some("workspace-write")
+                Some("workspace-write"),
+                None
             )
+        );
+        assert_ne!(
+            dsh_base,
+            dsh(Some("deepseek-v4-flash"), Some("off"), Some("read-only"), Some("minimal"))
         );
         let provider_a = crate::settings::ExternalCliProvider {
             id: "provider-a".to_string(),
@@ -3489,6 +3508,7 @@ mod tests {
                     Some("opus"),
                     Some("high"),
                     Some("plan"),
+                    None,
                     Some("h")
                 ),
                 LaunchConfig::default(),
@@ -3507,6 +3527,7 @@ mod tests {
                 model,
                 reasoning,
                 sandbox,
+                None,
                 hash,
             )
         };
@@ -3535,6 +3556,7 @@ mod tests {
                 model,
                 Some("high"),
                 Some("plan"),
+                None,
                 Some("h1"),
             )
         };

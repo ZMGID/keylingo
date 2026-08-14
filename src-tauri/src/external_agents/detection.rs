@@ -298,20 +298,36 @@ impl DshModelEntry {
     }
 }
 
-fn native_provider_summaries(agent_id: &str) -> Vec<NativeProviderSummary> {
+const DSH_OFFICIAL_PROVIDER_ID: &str = "deepseek-official";
+const DSH_OFFICIAL_PROVIDER_NAME: &str = "DeepSeek";
+const DSH_OFFICIAL_DEFAULT_MODEL_COUNT: usize = 2;
+
+/// 设置页「所有供应商」用的摘要。dsh 的官方 DeepSeek 不在 `llm-pi-ai` 里，
+/// 但官方 UI 会单独列它；缓存命中时也要重读，所以 `pub(crate)`。
+pub(crate) fn native_provider_summaries(agent_id: &str) -> Vec<NativeProviderSummary> {
     if agent_id != "dsh" {
         return Vec::new();
     }
-    let Some(path) = dsh_settings_path() else {
-        return Vec::new();
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    parse_dsh_native_provider_summaries(&text).unwrap_or_default()
+    let text = dsh_settings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    parse_dsh_native_provider_summaries(&text)
+        .unwrap_or_else(|_| vec![official_deepseek_summary(DSH_OFFICIAL_DEFAULT_MODEL_COUNT, true)])
+}
+
+fn official_deepseek_summary(model_count: usize, is_default: bool) -> NativeProviderSummary {
+    NativeProviderSummary {
+        id: DSH_OFFICIAL_PROVIDER_ID.to_string(),
+        name: DSH_OFFICIAL_PROVIDER_NAME.to_string(),
+        base_url: None,
+        api: None,
+        model_count,
+        is_default,
+    }
 }
 
 fn parse_dsh_native_provider_summaries(text: &str) -> Result<Vec<NativeProviderSummary>, String> {
+    let text = if text.trim().is_empty() { "{}" } else { text };
     let settings: DshSettings =
         serde_yaml::from_str(text).map_err(|err| format!("解析 dsh settings.yaml 失败：{err}"))?;
     let selected = settings
@@ -321,37 +337,47 @@ fn parse_dsh_native_provider_summaries(text: &str) -> Result<Vec<NativeProviderS
     let default_provider = selected
         .and_then(|selection| selection.provider.as_deref())
         .map(str::trim)
-        .filter(|provider| !provider.is_empty() && *provider != "deepseek-official")
-        .map(str::to_string);
-    let mut providers: Vec<_> = settings
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or(DSH_OFFICIAL_PROVIDER_ID);
+    let deepseek_model_count = match settings
+        .llm_deepseek
+        .as_ref()
+        .and_then(|section| section.models.as_ref())
+    {
+        Some(entries) => entries.iter().filter(|model| model.parts().is_some()).count(),
+        None => DSH_OFFICIAL_DEFAULT_MODEL_COUNT,
+    };
+    let mut providers = vec![official_deepseek_summary(
+        deepseek_model_count,
+        default_provider == DSH_OFFICIAL_PROVIDER_ID,
+    )];
+    let mut extras: Vec<_> = settings
         .llm_pi_ai
         .map(|section| section.providers.into_iter().collect())
         .unwrap_or_default();
-    providers.sort_by(|(a, _), (b, _)| a.cmp(b));
-    Ok(providers
-        .into_iter()
-        .map(|(id, config)| NativeProviderSummary {
-            is_default: default_provider.as_deref() == Some(id.as_str()),
-            name: config
-                .display_name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| id.clone()),
-            base_url: config
-                .base_url
-                .map(|url| url.trim().to_string())
-                .filter(|url| !url.is_empty()),
-            api: config
-                .api
-                .map(|api| api.trim().to_string())
-                .filter(|api| !api.is_empty()),
-            model_count: config
-                .models
-                .iter()
-                .filter(|model| model.parts().is_some())
-                .count(),
-            id,
-        })
-        .collect())
+    extras.sort_by(|(a, _), (b, _)| a.cmp(b));
+    providers.extend(extras.into_iter().map(|(id, config)| NativeProviderSummary {
+        is_default: default_provider == id.as_str(),
+        name: config
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| id.clone()),
+        base_url: config
+            .base_url
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty()),
+        api: config
+            .api
+            .map(|api| api.trim().to_string())
+            .filter(|api| !api.is_empty()),
+        model_count: config
+            .models
+            .iter()
+            .filter(|model| model.parts().is_some())
+            .count(),
+        id,
+    }));
+    Ok(providers)
 }
 
 fn dsh_settings_path() -> Option<std::path::PathBuf> {
@@ -1646,17 +1672,48 @@ llm-pi-ai:
 "#,
         )
         .expect("parse dsh provider summaries");
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, "xiaobai");
-        assert_eq!(summaries[0].name, "XiaoBai");
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].id, "deepseek-official");
+        assert_eq!(summaries[0].name, "DeepSeek");
+        assert_eq!(summaries[0].model_count, 2);
+        assert!(!summaries[0].is_default);
+        assert_eq!(summaries[1].id, "xiaobai");
+        assert_eq!(summaries[1].name, "XiaoBai");
         assert_eq!(
-            summaries[0].base_url.as_deref(),
+            summaries[1].base_url.as_deref(),
             Some("https://relay.example/v1")
         );
-        assert_eq!(summaries[0].api.as_deref(), Some("openai-responses"));
-        assert_eq!(summaries[0].model_count, 2);
-        assert!(summaries[0].is_default);
+        assert_eq!(summaries[1].api.as_deref(), Some("openai-responses"));
+        assert_eq!(summaries[1].model_count, 2);
+        assert!(summaries[1].is_default);
         let json = serde_json::to_string(&summaries).unwrap();
         assert!(!json.contains("XIAOBAI_API_KEY"));
+    }
+
+    #[test]
+    fn dsh_native_provider_summaries_always_include_official_deepseek() {
+        let empty = parse_dsh_native_provider_summaries("{}").expect("empty dsh settings");
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].id, "deepseek-official");
+        assert_eq!(empty[0].name, "DeepSeek");
+        assert_eq!(empty[0].model_count, 2);
+        assert!(empty[0].is_default);
+
+        let official = parse_dsh_native_provider_summaries(
+            r#"
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-v4-flash
+llm-deepseek:
+  models:
+    - id: deepseek-v4-flash
+    - id: deepseek-v4-pro
+    - id: ""
+"#,
+        )
+        .expect("official dsh settings");
+        assert_eq!(official.len(), 1);
+        assert_eq!(official[0].model_count, 2);
+        assert!(official[0].is_default);
     }
 }

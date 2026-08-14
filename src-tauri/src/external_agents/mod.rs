@@ -5,6 +5,7 @@ pub mod compact;
 pub mod context;
 pub mod defs;
 pub mod detection;
+pub mod dsh_plugins;
 pub mod dsh_profile;
 pub mod errors;
 pub mod import;

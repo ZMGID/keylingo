@@ -21,6 +21,10 @@ vi.mock('../chat/api', () => ({
     externalCliOpenConfigDir: vi.fn(),
     externalCliProviderCleanup: vi.fn(),
     externalCliScanCcSwitch: vi.fn().mockResolvedValue({ providers: [], skipped: 0 }),
+    dshPluginSettingsGet: vi.fn().mockResolvedValue(null),
+    dshPluginSettingsSave: vi.fn(),
+    dshPluginInventory: vi.fn().mockResolvedValue([]),
+    dshOpenSettingsFile: vi.fn(),
   },
   onExternalCliInstallLog: vi.fn().mockResolvedValue(() => {}),
   onExternalAgentsUpdated: vi.fn().mockResolvedValue(() => {}),
@@ -217,6 +221,79 @@ describe('ExternalAgentsSettings', () => {
     await waitFor(() => {
       expect(screen.getByText('所有供应商')).toBeInTheDocument()
     })
-    expect(screen.getByText('暂无第三方配置，点击上方「添加」创建一个。')).toBeInTheDocument()
+    expect(screen.getByText('暂无供应商，点击上方「添加」创建一个。')).toBeInTheDocument()
+  })
+
+  it('lists official DeepSeek as the in-use dsh provider', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.6',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/dsh',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel()
+    await waitFor(() => {
+      expect(screen.getByText('DeepSeek')).toBeInTheDocument()
+    })
+    expect(screen.getByText('官方提供方 · 2 个模型')).toBeInTheDocument()
+    expect(screen.getByText('使用中')).toBeInTheDocument()
+    expect(screen.queryByText('使用 CLI 自身配置')).not.toBeInTheDocument()
+    expect(screen.queryByText('暂无供应商，点击上方「添加」创建一个。')).not.toBeInTheDocument()
+  })
+
+  it('opens dsh plugins on a secondary page', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.6',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/dsh',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel()
+    await waitFor(() => {
+      expect(screen.getByText('所有供应商')).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('tab', { name: '插件配置' })).not.toBeInTheDocument()
+    const plugins = screen.getByText('插件')
+    const providers = screen.getByText('所有供应商')
+    expect(plugins.compareDocumentPosition(providers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    fireEvent.click(plugins.closest('button')!)
+    expect(screen.getByRole('tab', { name: '插件配置' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /返回/ })).toBeInTheDocument()
+    expect(screen.queryByText('所有供应商')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /返回/ }))
+    expect(screen.queryByRole('tab', { name: '插件配置' })).not.toBeInTheDocument()
+    expect(screen.getByText('所有供应商')).toBeInTheDocument()
   })
 })

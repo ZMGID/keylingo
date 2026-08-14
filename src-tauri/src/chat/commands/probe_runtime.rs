@@ -396,6 +396,7 @@ mod tests {
             external_model: Some("sonnet".to_string()),
             external_reasoning: Some("high".to_string()),
             external_sandbox: Some("bypassPermissions".to_string()),
+            external_agent_preset: None,
         };
         apply_external_runtime_overrides(&mut runtime, &req_with(Some("opus"), None, None));
         assert_eq!(runtime.external_model.as_deref(), Some("opus"));

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 
 use crate::external_agents::registry::get_agent_def;
 use crate::proc::NoConsoleWindow;
@@ -119,7 +119,10 @@ fn install_spec(agent_id: &str) -> Option<InstallSpec> {
         },
         "dsh" => InstallSpec {
             npm_package: Some("@deepseek-ai/dsh"),
-            npm_install_args: &[],
+            // `@deepseek-ai/dsh-app-boot` 把 `@deepseek-ai/cordis-plugin-group` 标成
+            // peerDependency，但 CLI 包自己没声明。npm 不会装嵌套 peer，装完
+            // `dsh --version` 直接 `ERR_MODULE_NOT_FOUND`。更新时同样带上。
+            npm_install_args: &["@deepseek-ai/cordis-plugin-group@latest"],
             pypi_package: None,
             script_unix: None,
             script_windows: None,
@@ -220,7 +223,9 @@ fn npm_install_plan(package: &str, extra_args: &[&str], platform: HostPlatform) 
     } else {
         "npm"
     };
-    let mut args = vec!["install", "-g"];
+    // `--progress=false`：npm 默认进度条用 `\r` 刷同一行。按行读会看起来像卡住，
+    // 管道缓冲区填满后安装进程还会死锁。关掉进度条，改走普通日志行。
+    let mut args = vec!["install", "-g", "--progress=false"];
     args.extend_from_slice(extra_args);
     let package = format!("{package}@latest");
     args.push(&package);
@@ -251,6 +256,7 @@ fn managed_package_update_plan(
     package: &str,
     brew_formula: &str,
     platform: HostPlatform,
+    extra_args: &[&str],
 ) -> Option<CommandPlan> {
     let normalized = normalized_resolved_path(path);
     if normalized.contains(&format!("/cellar/{brew_formula}/")) {
@@ -278,7 +284,7 @@ fn managed_package_update_plan(
         || (platform == HostPlatform::Windows
             && matches!(path.extension().and_then(|ext| ext.to_str()), Some("cmd")))
     {
-        return Some(npm_install_plan(package, &[], platform));
+        return Some(npm_install_plan(package, extra_args, platform));
     }
     None
 }
@@ -300,6 +306,7 @@ fn update_plan(
             "@moonshot-ai/kimi-code",
             "kimi-code",
             platform,
+            spec.npm_install_args,
         );
     }
     if agent_id == "gemini" {
@@ -308,10 +315,17 @@ fn update_plan(
             "@google/gemini-cli",
             "gemini-cli",
             platform,
+            spec.npm_install_args,
         );
     }
     if agent_id == "dsh" {
-        return managed_package_update_plan(resolved_path, "@deepseek-ai/dsh", "dsh", platform);
+        return managed_package_update_plan(
+            resolved_path,
+            "@deepseek-ai/dsh",
+            "dsh",
+            platform,
+            spec.npm_install_args,
+        );
     }
     spec.update_args
         .map(|args| CommandPlan::direct(resolved_path.to_string_lossy().into_owned(), args))
@@ -482,6 +496,34 @@ struct InstallLogEvent {
 
 const INSTALL_TIMEOUT_SECS: u64 = 300;
 
+/// 把一块输出拆成日志行。`\n` 和 `\r` 都算换行——npm 进度条只写 `\r`，按 `\n` 读
+/// 会一直等，管道塞满后安装进程自己也写不动。
+fn take_progress_lines(acc: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
+    acc.extend_from_slice(chunk);
+    let mut out = Vec::new();
+    loop {
+        let Some(i) = acc.iter().position(|&b| b == b'\n' || b == b'\r') else {
+            break;
+        };
+        let line = String::from_utf8_lossy(&acc[..i]).trim().to_string();
+        let crlf = acc[i] == b'\r' && acc.get(i + 1) == Some(&b'\n');
+        acc.drain(..i + if crlf { 2 } else { 1 });
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    out
+}
+
+fn flush_progress_line(acc: &mut Vec<u8>) -> Option<String> {
+    if acc.is_empty() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(acc).trim().to_string();
+    acc.clear();
+    (!line.is_empty()).then_some(line)
+}
+
 /// 跑 `install_command` 并把 stdout/stderr 按行流到 `external-cli-install` 事件。
 ///
 /// ponytail: 不支持中途取消——安装是低频一次性动作，超时（300s）就自己结束。
@@ -500,6 +542,10 @@ pub async fn chat_external_cli_install(app: AppHandle, agent_id: String) -> Resu
 
     let mut command = crate::external_agents::spawn::cli_command(&plan.program);
     command.args(&plan.args);
+    // Cursor 会给宿主进程塞 `npm_config_devdir`，子进程 npm 11 只打一行 warn，
+    // 看起来像安装失败。这不是用户的 npm 配置，装 CLI 时剥掉。
+    command.env_remove("npm_config_devdir");
+    command.env_remove("NPM_CONFIG_DEVDIR");
     let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -522,28 +568,62 @@ pub async fn chat_external_cli_install(app: AppHandle, agent_id: String) -> Resu
     };
     emit(format!("$ {command_line}"));
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let mut out_lines = stdout.map(|s| BufReader::new(s).lines());
-    let mut err_lines = stderr.map(|s| BufReader::new(s).lines());
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut out_acc = Vec::new();
+    let mut err_acc = Vec::new();
+    let mut out_buf = [0u8; 1024];
+    let mut err_buf = [0u8; 1024];
 
     let pump = async {
         loop {
             let out = async {
-                match out_lines.as_mut() {
-                    Some(lines) => lines.next_line().await.ok().flatten(),
+                match stdout.as_mut() {
+                    Some(reader) => Some(reader.read(&mut out_buf).await),
                     None => std::future::pending().await,
                 }
             };
             let err = async {
-                match err_lines.as_mut() {
-                    Some(lines) => lines.next_line().await.ok().flatten(),
+                match stderr.as_mut() {
+                    Some(reader) => Some(reader.read(&mut err_buf).await),
                     None => std::future::pending().await,
                 }
             };
             tokio::select! {
-                Some(line) = out => emit(line),
-                Some(line) = err => emit(line),
+                Some(result) = out => match result {
+                    Ok(0) => {
+                        if let Some(line) = flush_progress_line(&mut out_acc) {
+                            emit(line);
+                        }
+                        stdout = None;
+                    }
+                    Ok(n) => {
+                        for line in take_progress_lines(&mut out_acc, &out_buf[..n]) {
+                            emit(line);
+                        }
+                    }
+                    Err(e) => {
+                        emit(format!("读取安装输出失败: {e}"));
+                        stdout = None;
+                    }
+                },
+                Some(result) = err => match result {
+                    Ok(0) => {
+                        if let Some(line) = flush_progress_line(&mut err_acc) {
+                            emit(line);
+                        }
+                        stderr = None;
+                    }
+                    Ok(n) => {
+                        for line in take_progress_lines(&mut err_acc, &err_buf[..n]) {
+                            emit(line);
+                        }
+                    }
+                    Err(e) => {
+                        emit(format!("读取安装输出失败: {e}"));
+                        stderr = None;
+                    }
+                },
                 else => break,
             }
         }
@@ -730,5 +810,49 @@ mod tests {
         for def in crate::external_agents::registry::AGENT_DEFS {
             assert!(install_spec(def.id).is_some(), "缺少安装表: {}", def.id);
         }
+    }
+
+    #[test]
+    fn dsh_install_and_npm_update_pull_in_the_missing_app_boot_peer() {
+        let spec = install_spec("dsh").unwrap();
+        let install = install_plan(&spec, HostPlatform::Windows).unwrap();
+        assert_eq!(install.program, "npm.cmd");
+        assert!(install
+            .args
+            .contains(&"@deepseek-ai/dsh@latest".to_string()));
+        assert!(install
+            .args
+            .contains(&"@deepseek-ai/cordis-plugin-group@latest".to_string()));
+
+        let update = update_plan(
+            "dsh",
+            &spec,
+            Path::new(r"C:\Users\u\AppData\Roaming\npm\dsh.cmd"),
+            HostPlatform::Windows,
+        )
+        .unwrap();
+        assert!(update
+            .args
+            .contains(&"@deepseek-ai/cordis-plugin-group@latest".to_string()));
+    }
+
+    #[test]
+    fn progress_lines_split_on_cr_and_lf() {
+        let mut acc = Vec::new();
+        assert_eq!(
+            take_progress_lines(&mut acc, b"downloading\radded 12 packages\n"),
+            vec!["downloading", "added 12 packages"]
+        );
+        assert!(acc.is_empty());
+
+        assert_eq!(
+            take_progress_lines(&mut acc, b"partial"),
+            Vec::<String>::new()
+        );
+        assert_eq!(flush_progress_line(&mut acc).as_deref(), Some("partial"));
+        assert_eq!(
+            take_progress_lines(&mut acc, b"\r\n  \nwarn\r\n"),
+            vec!["warn"]
+        );
     }
 }

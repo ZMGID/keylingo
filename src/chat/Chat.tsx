@@ -46,7 +46,7 @@ import { ModelSelector } from './ModelSelector'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
 import { PermissionPicker } from './PermissionPicker'
-import { derivePermissionModes, useDetectedExternalAgents } from './permissionModes'
+import { deriveDshPresetModes, derivePermissionModes, useDetectedExternalAgents } from './permissionModes'
 import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
 import { ContextIndicator } from './ContextIndicator'
 import { isExecutableAgentPlanText } from './agentPlan'
@@ -1432,6 +1432,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       agentPlanMode: activeAgentPlanMode,
     }),
     [activeAgentRuntime, detectedExternalAgents, activeAgentPlanMode],
+  )
+  const composerPresets = useMemo(
+    () => deriveDshPresetModes(activeAgentRuntime),
+    [activeAgentRuntime],
   )
   const currentConversationIsBlank = isPlainBlankConversation(currentConversation)
   const activeProviderId = currentConversation && !currentConversationIsBlank
@@ -4095,6 +4099,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     await handleRuntimeChange(next)
   }, [activeAgentRuntime, handleRuntimeChange])
 
+  const handleExternalPresetChange = useCallback(async (preset: string) => {
+    const next: AgentRuntimeConfig = {
+      ...activeAgentRuntime,
+      kind: 'external',
+      externalAgentPreset: preset,
+    }
+    await handleRuntimeChange(next)
+  }, [activeAgentRuntime, handleRuntimeChange])
+
   const persistApprovedExternalSandbox = useCallback(async (
     conversationId: string,
     runtime: AgentRuntimeConfig,
@@ -4884,6 +4897,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     modeOptions: composerModes.options,
     modeValue: composerModes.current,
     onModeChange: handleComposerModeChange,
+    presetOptions: composerPresets.options,
+    presetValue: composerPresets.current,
+    onPresetChange: handleExternalPresetChange,
+    presetLocked: Boolean(currentConversation) && !currentConversationIsBlank,
+    presetLockedReason: i18n[uiLang].chatAgentPresetLocked,
     usageSlot: composerUsageSlot,
   }), [
     activeAgentRuntime.externalAgentId,
@@ -4891,6 +4909,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     activeReplyModels,
     activeWebSearchMode,
     composerModes,
+    composerPresets,
     composerContextSlot,
     composerCurrentAssistant,
     composerForceKnowledgeSearch,
@@ -4898,6 +4917,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     composerUsageSlot,
     conversationProject,
     currentConversation,
+    currentConversationIsBlank,
     dockWorkdir,
     enabledTools,
     handleAgentPlanModeChange,
@@ -4907,6 +4927,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     handleClearChat,
     handleCompressContext,
     handleComposerModeChange,
+    handleExternalPresetChange,
     handleOpenChatSettings,
     handleOpenDockGit,
     handleQueueMessage,

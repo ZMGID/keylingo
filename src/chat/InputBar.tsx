@@ -429,6 +429,13 @@ export interface InputBarProps {
   modeOptions?: ModeOption[]
   modeValue?: string
   onModeChange?: (value: string) => void | Promise<void>
+  /** dsh Agent 模式胶囊，画在权限胶囊左边。空表 = 不渲染。 */
+  presetOptions?: ModeOption[]
+  presetValue?: string
+  onPresetChange?: (value: string) => void | Promise<void>
+  /** 已有对话内容后锁定（dsh 只允许空白 agent 换 preset）。 */
+  presetLocked?: boolean
+  presetLockedReason?: string
   /** Git 状态胶囊：Dock 解析出的工作目录；空则不渲染 */
   gitWorkdir?: string | null
   gitLang?: Lang
@@ -489,6 +496,11 @@ export const InputBar = memo(function InputBar({
   modeOptions = [],
   modeValue = '',
   onModeChange,
+  presetOptions = [],
+  presetValue = '',
+  onPresetChange,
+  presetLocked = false,
+  presetLockedReason,
   gitWorkdir = null,
   gitLang,
   onOpenGitPanel,
@@ -509,6 +521,7 @@ export const InputBar = memo(function InputBar({
   const [dragActive, setDragActive] = useState(false)
   const [toolPanelOpen, setToolPanelOpen] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false)
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [projectOptions, setProjectOptions] = useState<ChatProject[]>([])
   const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
@@ -564,6 +577,7 @@ export const InputBar = memo(function InputBar({
   // 专家入口:欢迎页与对话中都显示,未选时为「选择专家」图标,已选时高亮 + 清除按钮。
   const showAssistantEntry = Boolean(onOpenAssistantCenter)
   const modeEntryEnabled = Boolean(onModeChange) && modeOptions.length > 0
+  const presetEntryEnabled = Boolean(onPresetChange) && presetOptions.length > 0
   // 状态条只放「你在哪」—— 当前项目或集。Git 分支/diff 归下面的工具栏。
   const gitStatusEnabled = Boolean(gitWorkdir && gitLang && onOpenGitPanel)
   const todoBarVisible = (agentTodoState?.items?.length ?? 0) > 0
@@ -572,6 +586,8 @@ export const InputBar = memo(function InputBar({
   )
   const activeModeOption = modeOptions.find((option) => option.value === modeValue) ?? modeOptions[0]
   const activeModePillClass = MODE_PILL_CLASS[activeModeOption?.tone ?? 'neutral']
+  const activePresetOption = presetOptions.find((option) => option.value === presetValue) ?? presetOptions[0]
+  const activePresetPillClass = MODE_PILL_CLASS[activePresetOption?.tone ?? 'neutral']
 
   const closeProjectMenu = useCallback(() => {
     setProjectMenuOpen(false)
@@ -579,6 +595,10 @@ export const InputBar = memo(function InputBar({
 
   const closeModeMenu = useCallback(() => {
     setModeMenuOpen(false)
+  }, [])
+
+  const closePresetMenu = useCallback(() => {
+    setPresetMenuOpen(false)
   }, [])
 
   const attachmentsFromPaths = useCallback(
@@ -934,21 +954,47 @@ export const InputBar = memo(function InputBar({
     setToolPanelOpen(false)
     closeProjectMenu()
     closeModeMenu()
+    closePresetMenu()
     if (value !== modeValue) {
       await onModeChange(value)
     }
     requestAnimationFrame(() => {
       textareaRef.current?.focus({ preventScroll: true })
     })
-  }, [closeModeMenu, closeProjectMenu, disabled, modeValue, onModeChange])
+  }, [closeModeMenu, closePresetMenu, closeProjectMenu, disabled, modeValue, onModeChange])
 
   const toggleModeMenu = useCallback(() => {
     if (disabled || !modeEntryEnabled) return
     setSlashPanelOpen(false)
     setToolPanelOpen(false)
     closeProjectMenu()
+    closePresetMenu()
     setModeMenuOpen((open) => !open)
-  }, [closeProjectMenu, disabled, modeEntryEnabled])
+  }, [closePresetMenu, closeProjectMenu, disabled, modeEntryEnabled])
+
+  const pickPreset = useCallback(async (value: string) => {
+    if (disabled || presetLocked || !onPresetChange) return
+    setSlashPanelOpen(false)
+    setToolPanelOpen(false)
+    closeProjectMenu()
+    closeModeMenu()
+    closePresetMenu()
+    if (value !== presetValue) {
+      await onPresetChange(value)
+    }
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true })
+    })
+  }, [closeModeMenu, closePresetMenu, closeProjectMenu, disabled, onPresetChange, presetLocked, presetValue])
+
+  const togglePresetMenu = useCallback(() => {
+    if (disabled || !presetEntryEnabled) return
+    setSlashPanelOpen(false)
+    setToolPanelOpen(false)
+    closeProjectMenu()
+    closeModeMenu()
+    setPresetMenuOpen((open) => !open)
+  }, [closeModeMenu, closeProjectMenu, disabled, presetEntryEnabled])
 
   // Shift+Tab 在胶囊当前那套档位里循环，跟看得见的控件保持一致。
   const cycleMode = useCallback(async () => {
@@ -2031,6 +2077,86 @@ export const InputBar = memo(function InputBar({
 
             <div className="ml-auto flex items-center gap-1.5">
             {usageSlot}
+            {presetEntryEnabled && activePresetOption && (
+              <div className="relative shrink-0 self-center">
+                <button
+                  type="button"
+                  onClick={togglePresetMenu}
+                  onMouseDown={(event) => event.preventDefault()}
+                  disabled={disabled}
+                  className={`inline-flex h-[26px] max-w-full items-center gap-0.5 rounded-full px-1.5 text-left text-[12px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-300/60 dark:focus-visible:ring-neutral-600 ${
+                    presetMenuOpen
+                      ? 'bg-neutral-200 text-neutral-800 dark:bg-neutral-700 dark:text-neutral-100'
+                      : activePresetPillClass.idle
+                  } disabled:cursor-default disabled:opacity-50`}
+                  aria-expanded={presetMenuOpen}
+                  aria-haspopup="menu"
+                  title={presetLocked && presetLockedReason ? presetLockedReason : t.chatSwitchAgentPreset}
+                >
+                  <activePresetOption.icon
+                    size={13}
+                    strokeWidth={1.9}
+                    className={`shrink-0 ${activePresetPillClass.iconColor}`}
+                  />
+                  <span className="min-w-0 truncate">{activePresetOption.label}</span>
+                  <ChevronDown
+                    size={12}
+                    strokeWidth={2}
+                    className={`shrink-0 text-neutral-400 transition-transform ${
+                      presetMenuOpen ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+                {presetMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={closePresetMenu} aria-hidden />
+                    <div
+                      className={`chat-motion-popover absolute right-0 z-40 w-[min(236px,calc(100vw-32px))] overflow-visible kv-menu ${projectPanelPlacementClass}`}
+                      style={{ ['--chat-popover-origin' as string]: modePanelOrigin }}
+                      data-tauri-drag-region="false"
+                      role="menu"
+                    >
+                      {presetOptions.map((option) => {
+                        const active = option.value === presetValue
+                        const Icon = option.icon
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={active}
+                            disabled={presetLocked && !active}
+                            onClick={() => void pickPreset(option.value)}
+                            className={`kv-menu-row transition-colors ${
+                              active
+                                ? 'bg-neutral-100 text-neutral-950 dark:bg-neutral-800 dark:text-neutral-50'
+                                : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
+                            } disabled:cursor-default disabled:opacity-50`}
+                          >
+                            <Icon
+                              size={14}
+                              strokeWidth={1.8}
+                              className={`shrink-0 ${MODE_PILL_CLASS[option.tone].iconColor}`}
+                            />
+                            <span className="min-w-0 flex-1 leading-tight">
+                              <span className="block truncate text-[12px] font-semibold">{option.label}</span>
+                              {option.description && (
+                                <span className="block truncate text-[10px] font-medium text-neutral-400 dark:text-neutral-500">
+                                  {option.description}
+                                </span>
+                              )}
+                            </span>
+                            {active && (
+                              <Check size={13} strokeWidth={2} className="shrink-0 text-neutral-500 dark:text-neutral-300" />
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             {modeEntryEnabled && activeModeOption && (
               <div className="relative shrink-0 self-center">
                 <button

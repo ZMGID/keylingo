@@ -79,9 +79,11 @@ impl DshJsonRpcSession {
         model: Option<&str>,
         reasoning: Option<&str>,
         sandbox: Option<&str>,
+        preset: Option<&str>,
     ) -> Result<Self, String> {
         let _profile_boot_guard = DSH_PROFILE_BOOT_LOCK.lock().await;
-        crate::external_agents::dsh_profile::ensure_profile_ready(resolved_bin, reasoning).await?;
+        crate::external_agents::dsh_profile::ensure_profile_ready(resolved_bin, reasoning, preset)
+            .await?;
 
         let route = resolve_model_route_for_turn(model)?;
         let session_id = resume_session_id
@@ -96,6 +98,10 @@ impl DshJsonRpcSession {
             .current_dir(cwd)
             .env("DSH_TELEMETRY_DISABLED", "1")
             .env("DSH_PERMISSION_MODE", normalize_sandbox(sandbox))
+            .env(
+                "DSH_AGENT_PRESET",
+                crate::external_agents::dsh_profile::normalize_agent_preset(preset),
+            )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -948,6 +954,7 @@ mod tests {
             Some("deepseek-v4-flash"),
             Some("off"),
             Some("read-only"),
+            None,
         )
         .await
         .expect("connect live dsh");
@@ -1010,6 +1017,7 @@ mod tests {
             Some("deepseek-v4-flash"),
             Some("high"),
             Some("read-only"),
+            None,
         )
         .await
         .expect("connect live dsh");
@@ -1035,6 +1043,7 @@ mod tests {
             Some("deepseek-v4-flash"),
             Some("high"),
             Some("read-only"),
+            None,
         )
         .await
         .expect("resume live dsh");
@@ -1091,6 +1100,7 @@ mod tests {
             Some("deepseek-v4-flash"),
             Some("off"),
             Some("read-only"),
+            None,
         )
         .await
         .expect("connect live dsh");

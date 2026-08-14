@@ -497,6 +497,7 @@ mod tests {
                 external_model: Some("anthropic/claude-sonnet-4-5".to_string()),
                 external_reasoning: None,
                 external_sandbox: None,
+                external_agent_preset: None,
             },
             active_skill_id: None,
             assistant_id: None,

@@ -399,6 +399,9 @@ pub struct AgentRuntimeConfig {
     /// External-CLI sandbox/permission level (claude --permission-mode / codex --sandbox).
     #[serde(default)]
     pub external_sandbox: Option<String>,
+    /// dsh Agent preset：`standard` / `code` / `minimal` / `cordis`。其它 CLI 忽略。
+    #[serde(default)]
+    pub external_agent_preset: Option<String>,
 }
 
 impl Default for AgentRuntimeConfig {
@@ -409,6 +412,7 @@ impl Default for AgentRuntimeConfig {
             external_model: None,
             external_reasoning: None,
             external_sandbox: None,
+            external_agent_preset: None,
         }
     }
 }

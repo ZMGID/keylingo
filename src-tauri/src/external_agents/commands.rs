@@ -2,8 +2,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::chat::types::AgentRuntimeConfig;
 use crate::external_agents::detection::{
-    detect_agent_models, detect_availability_all, AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL,
-    EXTERNAL_AGENT_MODELS_CACHE_TTL, EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+    detect_agent_models, detect_availability_all, native_provider_summaries, AVAILABILITY_CACHE_KEY,
+    AVAILABILITY_CACHE_TTL, EXTERNAL_AGENT_MODELS_CACHE_TTL, EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
 };
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::slash::{cache_key, list_external_cli_slash_commands};
@@ -153,11 +153,16 @@ pub async fn chat_external_cli_scan_cc_switch() -> Result<serde_json::Value, Str
 }
 
 /// 把设置页的「停用」开关盖到（可能来自缓存的）可用性结果上。
+/// dsh 的供应商摘要只是读 `settings.yaml`，跟 binary/auth 探测无关，缓存命中也重读，
+/// 避免官方 DeepSeek / 用户刚改的 llm-pi-ai 要等 10 分钟才出现在「所有供应商」。
 fn stamp_disabled(
     mut agents: Vec<crate::external_agents::types::DetectedAgent>,
 ) -> Vec<crate::external_agents::types::DetectedAgent> {
     for agent in agents.iter_mut() {
         agent.disabled = crate::external_agents::overrides::is_disabled(&agent.id);
+        if agent.id == "dsh" {
+            agent.native_providers = native_provider_summaries(&agent.id);
+        }
     }
     agents
 }
@@ -406,6 +411,7 @@ mod tests {
             external_model: Some(model.to_string()),
             external_reasoning: None,
             external_sandbox: None,
+            external_agent_preset: None,
         }
     }
 

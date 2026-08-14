@@ -463,6 +463,8 @@ export interface AgentRuntimeConfig {
   external_reasoning?: string | null
   externalSandbox?: string | null
   external_sandbox?: string | null
+  externalAgentPreset?: string | null
+  external_agent_preset?: string | null
 }
 
 /// 一条可从本地 CLI 导入的原生会话。后端 `ImportableSession` 的镜像。

@@ -44,8 +44,17 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
   }
 
   async createFreshSession(sessionId) {
-    const record = await super.createSession(sessionId)
-    record.resumed = false
+    const preset = this.agentPreset()
+    const record = {
+      handle: await this.ctx.agents.create({
+        sessionId,
+        meta: { cwd: this.cwd, agentPreset: preset },
+        agentOptions: this.agentOptions(),
+        setup: (agentCtx) => this.mountPreset(agentCtx, preset),
+      }),
+      resumed: false,
+    }
+    this.sessions.set(sessionId, record)
     return record
   }
 
@@ -53,10 +62,26 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     const handle = await this.ctx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: this.agentOptions(),
+      setup: (agentCtx) => {
+        const recorded = agentCtx.agent?.session?.header?.agentPreset
+        return this.mountPreset(agentCtx, recorded || this.agentPreset())
+      },
     })
     const record = { handle, resumed: true }
     this.sessions.set(sessionId, record)
     return record
+  }
+
+  agentPreset() {
+    const raw = process.env.DSH_AGENT_PRESET
+    if (raw === 'code' || raw === 'minimal' || raw === 'cordis') return raw
+    return 'standard'
+  }
+
+  async mountPreset(agentCtx, presetId) {
+    const presets = this.ctx.get('agentPresets')
+    if (!presets) return
+    await presets.mount(agentCtx, presetId)
   }
 
   agentOptions() {
@@ -105,7 +130,7 @@ function requireSessionId(value) {
 }
 
 export const name = 'kivio-dsh-jsonrpc-bridge'
-export const inject = ['agents', 'sessionPersistence']
+export const inject = ['agents', 'sessionPersistence', 'agentPresets']
 export const Config = Schema.object({
   maxTokensAsSuccess: Schema.boolean().default(false),
 })

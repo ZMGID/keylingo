@@ -5454,6 +5454,302 @@ input[type="password"]::-ms-clear {
   flex-shrink: 0;
 }
 
+/* dsh 官方「插件」两栏：配置手风琴 + 只读清单网格。 */
+.kv-dsh-plugins {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.kv-cli-card.kv-dsh-plugins-entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kv-dsh-plugins-entry:hover {
+  border-color: var(--border-strong);
+}
+.kv-dsh-plugins-entry:hover .kv-subpage-entry-go,
+.kv-dsh-plugins-entry:hover .kv-row-label {
+  color: var(--accent, #4f46e5);
+}
+.kv-dsh-plugins-entry-icons {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.kv-dsh-plugins-entry-icons span {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+}
+.kv-dsh-plugins-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.kv-dsh-plugins-toolbar .kv-subpage-back {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.kv-dsh-plugins-copy {
+  flex: 1;
+  min-width: 0;
+}
+.kv-dsh-plugins-tabs {
+  display: flex;
+  width: 100%;
+}
+.kv-dsh-plugins-tabs button {
+  flex: 1;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+.kv-dsh-plugins-status,
+.kv-dsh-plugins-failure {
+  font-size: 12.5px;
+}
+.kv-dsh-plugins-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--danger);
+}
+.kv-dsh-plugins-failure .kv-row-desc {
+  margin-top: 4px;
+  color: var(--text-muted);
+}
+.kv-dsh-config,
+.kv-dsh-inventory {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kv-dsh-config-card,
+.kv-dsh-inventory-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.kv-dsh-config-card.is-open,
+.kv-dsh-inventory-card.is-open {
+  border-color: var(--border-strong);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.kv-dsh-config-card-head,
+.kv-dsh-inventory-card-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kv-dsh-config-card-head:hover,
+.kv-dsh-inventory-card-head:hover,
+.kv-dsh-config-card.is-open .kv-dsh-config-card-head,
+.kv-dsh-inventory-card.is-open .kv-dsh-inventory-card-head {
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+}
+.kv-dsh-config-card-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.kv-dsh-config-card-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kv-dsh-config-card-title,
+.kv-dsh-inventory-name {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  color: var(--text);
+}
+.kv-dsh-inventory-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kv-dsh-chevron {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 0.14s ease;
+}
+.kv-dsh-chevron.is-open {
+  transform: rotate(180deg);
+}
+.kv-dsh-config-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--border);
+}
+.kv-dsh-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kv-dsh-field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kv-dsh-field-label-row .kv-btn {
+  margin-left: auto;
+}
+.kv-dsh-override {
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--accent, #2563eb);
+  background: color-mix(in srgb, var(--accent, #2563eb) 10%, transparent);
+}
+.kv-dsh-field-error {
+  color: var(--danger);
+}
+.kv-dsh-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+.kv-dsh-unsaved {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.kv-dsh-inventory-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kv-dsh-inventory-search > svg {
+  position: absolute;
+  left: 10px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.kv-dsh-inventory-search .kv-input {
+  padding-left: 30px;
+}
+.kv-dsh-inventory-count {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.kv-dsh-inventory-count span:last-child {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.kv-dsh-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.kv-dsh-inventory-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.kv-dsh-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #16a34a;
+}
+.kv-dsh-status-tag {
+  min-height: 20px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-muted);
+  background: var(--bg-sidebar);
+}
+.kv-dsh-status-tag.is-on {
+  color: #15803d;
+  background: color-mix(in srgb, #16a34a 12%, transparent);
+}
+.kv-dsh-inventory-details {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 0;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sidebar);
+}
+.kv-dsh-inventory-details div {
+  display: contents;
+}
+.kv-dsh-inventory-details dt {
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--text-faint);
+}
+.kv-dsh-inventory-details dd {
+  margin: 0;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.kv-dsh-inventory-details code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+@media (max-width: 720px) {
+  .kv-dsh-inventory-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* 设置自动保存失败 / 热键警告：贴主内容区底部的轻量 toast（替代原 savebar） */
 .settings-autosave-toast {
   position: absolute;

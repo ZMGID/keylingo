@@ -25,6 +25,9 @@
 //!   （实测确认它会发 `session/title-llm-request`）
 //! - `llm-deepseek.reasoningEffort`：推理档位**唯一**的入口。它不是启动 flag、也不在
 //!   `initialize` 参数里，所以换档位必须重写这个文件并换进程。
+//! - `agent-presets`：四档 Agent 模式（standard / code / minimal / cordis）。与官方 web
+//!   一样关掉 host 平面工具，改由所选 preset 组装；`dsh --profile` 会把随包的
+//!   `config/agent-presets` 补进 `roots`。
 //! - 当前 Kivio 供应商的 `llm-pi-ai.providers.<route>`：只挂在 `profiles/kivio`，Key 仅以
 //!   `apiKeyEnv` 引用并由 Kivio 注入进程，不写入 YAML。
 //!
@@ -50,6 +53,38 @@ const REQUIRED_PACKAGES: &[&str] = &[
     "@deepseek-ai/dsh-sdk-protocol",
 ];
 
+/// 不要把 `@deepseek-ai/dsh-agent-presets` 装进 kivio profile。
+/// `dsh plugin add` 不带版本会落到 `0.0.1-rc.1`，和本机 dsh 带的 `0.1.0-rc.6` 抢解析，
+/// 然后缺 `@deepseek-ai/dsh-paths`。patch 里只写插件名，让官方 module fallback 用随包那份。
+const PROFILE_PRESET_PACKAGE: &str = "@deepseek-ai/dsh-agent-presets";
+
+/// dsh web 把这些 host 平面工具关掉，改由 agent preset 按会话组装。
+const HOST_PLANE_TOOL_IDS: &[&str] = &[
+    "tool-bash",
+    "tool-pwsh",
+    "tool-jobs",
+    "tool-fs",
+    "tool-fs-search",
+    "tool-str-replace-editor",
+    "skill-filesystem",
+    "tool-skill",
+    "tool-goal",
+    "plan-mode",
+    "compaction-basic",
+    "command-compact",
+    "tool-result-pruner",
+    "tool-subagent-control",
+    "tool-subagent-list-agents",
+    "tool-subagent",
+    "tool-subagent-fork",
+    "workflow-worker-thread",
+    "tool-workflow",
+    "tool-ralph",
+    "agent-instructions",
+    "tool-todo",
+    "tool-web",
+];
+
 /// `$DSH_HOME`，未设时 `~/.dsh`（与上游 `resolveDshHome` 同序）。
 fn dsh_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("DSH_HOME") {
@@ -66,12 +101,22 @@ pub fn profile_dir() -> Option<PathBuf> {
     dsh_home().map(|home| home.join("profiles").join(KIVIO_PROFILE))
 }
 
+/// 合法 preset id；其它值（含空）回落 `standard`。
+pub fn normalize_agent_preset(value: Option<&str>) -> &'static str {
+    match value.map(str::trim) {
+        Some("code") => "code",
+        Some("minimal") => "minimal",
+        Some("cordis") => "cordis",
+        _ => "standard",
+    }
+}
+
 /// profile 的 `cordis.patch.yml` 内容。
 ///
 /// `reasoning` 为 `None` / 空 / `"default"` 时**不写** `llm-deepseek` 那条 —— 让适配器用它
 /// 自己的默认（实测 `defaultEffort: high`）。写一个 `default` 字面量会被 schema 拒（合法值
 /// 只有 `off|high|max`），整棵树起不来。
-fn render_patch(reasoning: Option<&str>) -> String {
+fn render_patch(reasoning: Option<&str>, preset: Option<&str>) -> String {
     let mut out = String::from(
         "# 由 Kivio 生成并维护，请勿手改（每次启动 dsh 会话时按当前设置重写）。\n\
          #\n\
@@ -96,7 +141,24 @@ fn render_patch(reasoning: Option<&str>) -> String {
         out.push('\n');
     }
     out.push_str(
-        "\n# Kivio bridge：保留官方事件流，并补齐跨进程 resume 与协议级 cancel。\n\
+        "\n# 与官方 web 相同：host 平面工具关掉，改由下面的 agent preset 按会话组装。\n",
+    );
+    for id in HOST_PLANE_TOOL_IDS {
+        out.push_str("- id: ");
+        out.push_str(id);
+        out.push_str("\n  disabled: true\n");
+    }
+    out.push_str(
+        "\n# 四档 Agent 模式。随包 roots 由 `dsh --profile` 的 composeProfile 注入。\n\
+         - insert:\n\
+         \x20   - id: agent-presets\n\
+         \x20     name: '@deepseek-ai/dsh-agent-presets'\n\
+         \x20     config:\n\
+         \x20       default: ",
+    );
+    out.push_str(normalize_agent_preset(preset));
+    out.push_str(
+        "\n\n# Kivio bridge：保留官方事件流，并补齐跨进程 resume 与协议级 cancel。\n\
          - insert:\n\
          \x20   - id: kivio-dsh-jsonrpc-bridge\n\
          \x20     name: './kivio-dsh-bridge.mjs'\n",
@@ -193,9 +255,10 @@ fn parse_active_provider(provider: &ExternalCliProvider) -> Result<ActiveDshProv
 
 fn render_patch_with_provider(
     reasoning: Option<&str>,
+    preset: Option<&str>,
     provider: Option<&ExternalCliProvider>,
 ) -> Result<String, String> {
-    let mut out = render_patch(reasoning);
+    let mut out = render_patch(reasoning, preset);
     let Some(provider) = provider else {
         return Ok(out);
     };
@@ -251,13 +314,18 @@ fn packages_installed(dir: &Path) -> bool {
 ///
 /// `Err` 的内容是给用户看的：pnpm 没装、网络不通、目录没权限都会走到这里，
 /// 而这条错误会成为那一轮的失败气泡 —— 所以不写「bootstrap failed」这种查不到根因的话。
-pub async fn ensure_profile_ready(bin: &Path, reasoning: Option<&str>) -> Result<(), String> {
+pub async fn ensure_profile_ready(
+    bin: &Path,
+    reasoning: Option<&str>,
+    preset: Option<&str>,
+) -> Result<(), String> {
     let dir =
         profile_dir().ok_or_else(|| "无法定位 dsh 主目录（$DSH_HOME / ~/.dsh）".to_string())?;
 
     if !packages_installed(&dir) {
         install_packages(bin).await?;
     }
+    strip_profile_agent_presets_dep(&dir);
 
     // patch 在依赖之后写：`dsh plugin` 首次会按模板初始化 profile 目录并写一份占位
     // `cordis.patch.yml`（内容是 `[]`），先写就会被它覆盖掉。
@@ -265,9 +333,34 @@ pub async fn ensure_profile_ready(bin: &Path, reasoning: Option<&str>) -> Result
     std::fs::write(dir.join(BRIDGE_FILENAME), BRIDGE_SOURCE)
         .map_err(|e| format!("写入 Kivio dsh bridge 失败：{e}"))?;
     let provider = crate::external_agents::overrides::active_provider("dsh");
-    let patch = render_patch_with_provider(reasoning, provider.as_ref())?;
+    let patch = render_patch_with_provider(reasoning, preset, provider.as_ref())?;
     std::fs::write(dir.join("cordis.patch.yml"), patch)
         .map_err(|e| format!("写入 dsh profile 配置失败：{e}"))
+}
+
+fn strip_profile_agent_presets_dep(dir: &Path) {
+    let package_json = dir.join("package.json");
+    if let Ok(raw) = std::fs::read_to_string(&package_json) {
+        if let Ok(mut value) = serde_json::from_str::<Value>(&raw) {
+            let removed = value
+                .get_mut("dependencies")
+                .and_then(Value::as_object_mut)
+                .is_some_and(|deps| deps.remove(PROFILE_PRESET_PACKAGE).is_some());
+            if removed {
+                if let Ok(next) = serde_json::to_string_pretty(&value) {
+                    let _ = std::fs::write(&package_json, format!("{next}\n"));
+                }
+            }
+        }
+    }
+    let relative = PROFILE_PRESET_PACKAGE.trim_start_matches('@');
+    if let Some((scope, name)) = relative.split_once('/') {
+        let _ = std::fs::remove_dir_all(
+            dir.join("node_modules")
+                .join(format!("@{scope}"))
+                .join(name),
+        );
+    }
 }
 
 /// `dsh plugin --profile kivio add <pkgs>`。
@@ -404,10 +497,13 @@ mod tests {
     /// 装配 bridge 的 insert 必须在，否则 `initialize` 没有 resumable server 应答。
     #[test]
     fn patch_always_mounts_the_kivio_bridge() {
-        let yml = render_patch(None);
+        let yml = render_patch(None, None);
         assert!(yml.contains("- insert:"));
         assert!(yml.contains("name: './kivio-dsh-bridge.mjs'"));
         assert!(yml.contains("id: kivio-dsh-jsonrpc-bridge"));
+        assert!(yml.contains("name: '@deepseek-ai/dsh-agent-presets'"));
+        assert!(yml.contains("default: standard"));
+        assert!(yml.contains("- id: tool-bash\n  disabled: true"));
     }
 
     #[test]
@@ -416,6 +512,8 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("agent.cancel({ kind: 'user' })"));
         assert!(BRIDGE_SOURCE.contains("process.ppid !== parentPid"));
         assert!(BRIDGE_SOURCE.contains("input.once('end', onInputClosed)"));
+        assert!(BRIDGE_SOURCE.contains("DSH_AGENT_PRESET"));
+        assert!(BRIDGE_SOURCE.contains("agentPresets"));
         assert!(!BRIDGE_SOURCE.contains("@deepseek-ai/dsh-session"));
     }
 
@@ -432,7 +530,7 @@ mod tests {
     #[test]
     fn provider_patch_mounts_llm_pi_ai_without_serializing_the_api_key() {
         let provider = relay_provider();
-        let yml = render_patch_with_provider(Some("high"), Some(&provider)).unwrap();
+        let yml = render_patch_with_provider(Some("high"), None, Some(&provider)).unwrap();
         assert!(yml.contains("- id: llm-pi-ai"));
         assert!(yml.contains("relay-one:"));
         assert!(yml.contains("apiKeyEnv: KIVIO_DSH_RELAY_ONE_API_KEY"));
@@ -447,13 +545,13 @@ mod tests {
     fn provider_patch_rejects_missing_key_and_invalid_default_model() {
         let mut provider = relay_provider();
         provider.env.clear();
-        assert!(render_patch_with_provider(None, Some(&provider))
+        assert!(render_patch_with_provider(None, None, Some(&provider))
             .unwrap_err()
             .contains("KIVIO_DSH_RELAY_ONE_API_KEY"));
 
         let mut provider = relay_provider();
         provider.default_model = "missing".to_string();
-        assert!(render_patch_with_provider(None, Some(&provider))
+        assert!(render_patch_with_provider(None, None, Some(&provider))
             .unwrap_err()
             .contains("默认模型"));
     }
@@ -461,14 +559,65 @@ mod tests {
     /// 两条 disable 是钱和稳定性：标题 LLM 每轮一次白花的调用，hmr 是意外重连。
     #[test]
     fn patch_disables_hmr_and_title_llm() {
-        let yml = render_patch(None);
+        let yml = render_patch(None, None);
         assert!(yml.contains("- id: hmr\n  disabled: true"));
         assert!(yml.contains("- id: session-title-llm\n  disabled: true"));
     }
 
     #[test]
+    fn strip_profile_agent_presets_dep_removes_the_shadowing_copy() {
+        let dir = std::env::temp_dir().join(format!(
+            "kivio-dsh-preset-strip-{}",
+            std::process::id()
+        ));
+        let pkg_dir = dir
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh-agent-presets");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("package.json"), "{}").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"@deepseek-ai/dsh-agent-presets":"0.0.1-rc.1","@deepseek-ai/dsh-sdk-protocol":"0.0.1-rc.1"}}"#,
+        )
+        .unwrap();
+
+        strip_profile_agent_presets_dep(&dir);
+
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert!(value["dependencies"]
+            .get("@deepseek-ai/dsh-agent-presets")
+            .is_none());
+        assert_eq!(
+            value["dependencies"]["@deepseek-ai/dsh-sdk-protocol"],
+            "0.0.1-rc.1"
+        );
+        assert!(!pkg_dir.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalize_agent_preset_accepts_only_the_four_ids() {
+        assert_eq!(normalize_agent_preset(None), "standard");
+        assert_eq!(normalize_agent_preset(Some("")), "standard");
+        assert_eq!(normalize_agent_preset(Some("default")), "standard");
+        assert_eq!(normalize_agent_preset(Some("code")), "code");
+        assert_eq!(normalize_agent_preset(Some("minimal")), "minimal");
+        assert_eq!(normalize_agent_preset(Some("cordis")), "cordis");
+    }
+
+    #[test]
+    fn patch_writes_the_selected_agent_preset() {
+        let yml = render_patch(None, Some("minimal"));
+        assert!(yml.contains("default: minimal"));
+        assert!(!yml.contains("default: standard"));
+    }
+
+    #[test]
     fn patch_writes_reasoning_effort_when_chosen() {
-        let yml = render_patch(Some("max"));
+        let yml = render_patch(Some("max"), None);
         assert!(yml.contains("- id: llm-deepseek"));
         assert!(yml.contains("reasoningEffort: max"));
     }
@@ -478,7 +627,7 @@ mod tests {
     #[test]
     fn patch_omits_reasoning_for_default_and_blank() {
         for value in [None, Some(""), Some("   "), Some("default")] {
-            let yml = render_patch(value);
+            let yml = render_patch(value, None);
             assert!(
                 !yml.contains("reasoningEffort"),
                 "reasoning={value:?} 不该写档位"
@@ -490,7 +639,7 @@ mod tests {
     /// `off` 是合法档位（关思考），不能被当成「不指定」吞掉。
     #[test]
     fn off_is_a_real_effort_not_an_absence() {
-        assert!(render_patch(Some("off")).contains("reasoningEffort: off"));
+        assert!(render_patch(Some("off"), None).contains("reasoningEffort: off"));
     }
 
     /// patch 必须是**顶层 YAML 数组**（上游对这个文件的要求就是 "a top-level YAML array of
@@ -500,7 +649,7 @@ mod tests {
     #[test]
     fn patch_is_a_top_level_sequence() {
         for reasoning in [None, Some("high")] {
-            let yml = render_patch(reasoning);
+            let yml = render_patch(reasoning, None);
             let mut entries = 0;
             for line in yml.lines() {
                 if line.trim().is_empty() || line.trim_start().starts_with('#') {

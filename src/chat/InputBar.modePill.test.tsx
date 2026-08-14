@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { InputBar } from './InputBar'
-import { derivePermissionModes } from './permissionModes'
+import { deriveDshPresetModes, derivePermissionModes } from './permissionModes'
 import type { AgentRuntimeConfig, DetectedExternalAgent } from './types'
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
@@ -107,5 +107,81 @@ describe('InputBar 底栏模式胶囊', () => {
       agents: [{ id: 'opencode', name: 'OpenCode', available: true, models: [], sandboxOptions: [] }],
     }))
     expect(screen.queryByTitle('切换模式')).not.toBeInTheDocument()
+  })
+
+  it('dsh 会话在权限胶囊左边显示 Agent 模式胶囊', () => {
+    const runtime: AgentRuntimeConfig = {
+      kind: 'external',
+      externalAgentId: 'dsh',
+      externalSandbox: 'workspace-write',
+      externalAgentPreset: 'standard',
+    }
+    const onPresetChange = vi.fn()
+    const agents: DetectedExternalAgent[] = [{
+      id: 'dsh',
+      name: 'DeepSeek Harness',
+      available: true,
+      models: [],
+      sandboxOptions: [
+        { id: 'read-only', label: '只读' },
+        { id: 'workspace-write', label: '工作区写 (默认)' },
+        { id: 'danger-full-access', label: '完全' },
+      ],
+    }]
+    const modes = derivePermissionModes({ target: 'composer', agentRuntime: runtime, agents })
+    const presets = deriveDshPresetModes(runtime)
+    render(
+      <InputBar
+        onSend={() => {}}
+        modeOptions={modes.options}
+        modeValue={modes.current}
+        onModeChange={vi.fn()}
+        presetOptions={presets.options}
+        presetValue={presets.current}
+        onPresetChange={onPresetChange}
+      />,
+    )
+    expect(screen.getByTitle('切换 Agent 模式')).toHaveTextContent('标准模式')
+    expect(screen.getByTitle('切换模式')).toHaveTextContent('工作区写 (默认)')
+
+    act(() => {
+      fireEvent.click(screen.getByTitle('切换 Agent 模式'))
+    })
+    const items = screen.getAllByRole('menuitemradio')
+    expect(items.map((item) => item.textContent)).toEqual([
+      '标准模式完整编码 Agent · Full coding agent',
+      'PTC 模式Code Mode SDK · 多步工具写成一个程序',
+      '极简模式仅 bash + 编辑器 · Bash and editor only',
+      '创造模式编写 Agent preset · Author presets',
+    ])
+    act(() => {
+      fireEvent.click(items[2])
+    })
+    expect(onPresetChange).toHaveBeenCalledWith('minimal')
+  })
+
+  it('已有对话时 Agent 模式菜单不可改档', () => {
+    const runtime: AgentRuntimeConfig = { kind: 'external', externalAgentId: 'dsh', externalAgentPreset: 'code' }
+    const onPresetChange = vi.fn()
+    const presets = deriveDshPresetModes(runtime)
+    render(
+      <InputBar
+        onSend={() => {}}
+        presetOptions={presets.options}
+        presetValue={presets.current}
+        onPresetChange={onPresetChange}
+        presetLocked
+        presetLockedReason="已有对话内容后不能切换 Agent 模式"
+      />,
+    )
+    act(() => {
+      fireEvent.click(screen.getByTitle('已有对话内容后不能切换 Agent 模式'))
+    })
+    const items = screen.getAllByRole('menuitemradio')
+    expect(items[0]).toBeDisabled()
+    act(() => {
+      fireEvent.click(items[0])
+    })
+    expect(onPresetChange).not.toHaveBeenCalled()
   })
 })

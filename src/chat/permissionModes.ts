@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Eye, FilePen, ListChecks, Network, ShieldAlert, ShieldCheck, ShieldQuestion, Zap } from 'lucide-react'
+import { Code2, Eye, FilePen, ListChecks, Network, ShieldAlert, ShieldCheck, ShieldQuestion, Sparkles, Terminal, Wand2, Zap } from 'lucide-react'
 import { APPROVAL_POLICY_OPTIONS } from './approvalPolicies'
 import { chatApi } from './api'
 import type { AgentPlanMode, AgentRuntimeConfig, DetectedExternalAgent } from './types'
@@ -47,6 +47,49 @@ export const AGENT_MODE_OPTIONS: ModeOption[] = [
     tone: 'violet',
   },
 ]
+
+/** dsh 四档 Agent 模式 —— 仅 `externalAgentId === 'dsh'` 时显示，画在权限胶囊左边。 */
+export const DSH_PRESET_OPTIONS: ModeOption[] = [
+  {
+    value: 'standard',
+    label: '标准模式',
+    description: '完整编码 Agent · Full coding agent',
+    icon: Sparkles,
+    tone: 'neutral',
+  },
+  {
+    value: 'code',
+    label: 'PTC 模式',
+    description: 'Code Mode SDK · 多步工具写成一个程序',
+    icon: Code2,
+    tone: 'neutral',
+  },
+  {
+    value: 'minimal',
+    label: '极简模式',
+    description: '仅 bash + 编辑器 · Bash and editor only',
+    icon: Terminal,
+    tone: 'neutral',
+  },
+  {
+    value: 'cordis',
+    label: '创造模式',
+    description: '编写 Agent preset · Author presets',
+    icon: Wand2,
+    tone: 'violet',
+  },
+]
+
+export function deriveDshPresetModes(agentRuntime: AgentRuntimeConfig): PermissionModes {
+  const usesDsh = agentRuntime.kind === 'external'
+    && (agentRuntime.externalAgentId ?? agentRuntime.external_agent_id) === 'dsh'
+  if (!usesDsh) return { options: [], current: '' }
+  const selected = agentRuntime.externalAgentPreset ?? agentRuntime.external_agent_preset ?? ''
+  const current = DSH_PRESET_OPTIONS.some((option) => option.value === selected)
+    ? selected
+    : DSH_PRESET_OPTIONS[0].value
+  return { options: DSH_PRESET_OPTIONS, current }
+}
 
 /** Distinct icon per permission level so the capsule reflects the active mode at a glance.
  *  Covers built-in approval policies (by value) and external CLI sandbox levels (by label). */

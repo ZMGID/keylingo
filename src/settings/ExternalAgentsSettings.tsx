@@ -4,12 +4,14 @@ import {
   ChevronRight,
   Download,
   ExternalLink,
+  Globe,
   Pencil,
   Plus,
   RefreshCw,
   Search,
   Terminal,
   Trash2,
+  Workflow,
 } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { AgentIcon } from '../chat/AgentIcon'
@@ -21,10 +23,12 @@ import {
   type DetectedExternalAgent,
   type ExternalCliInstallInfo,
 } from '../chat/api'
+import type { NativeProviderSummary } from '../chat/types'
 import { Input, Toggle } from './components'
 import { i18n, type Lang } from './i18n'
 import { Button, IconButton } from '../components/Button'
 import { CliProviderModal } from './CliProviderModal'
+import { DshPluginsSettings } from './DshPluginsSettings'
 import { CcSwitchImportModal } from './CcSwitchImportModal'
 import type {
   ExternalCliAgentConfig,
@@ -33,6 +37,24 @@ import type {
 } from '../api/tauri'
 
 const EMPTY_CONFIG: ExternalCliAgentConfig = {}
+const DSH_OFFICIAL_PROVIDER_ID = 'deepseek-official'
+
+function withOfficialDshProviders(
+  agentId: string,
+  natives: NativeProviderSummary[],
+): NativeProviderSummary[] {
+  if (agentId !== 'dsh') return natives
+  if (natives.some((provider) => provider.id === DSH_OFFICIAL_PROVIDER_ID)) return natives
+  return [
+    {
+      id: DSH_OFFICIAL_PROVIDER_ID,
+      name: 'DeepSeek',
+      modelCount: 2,
+      isDefault: natives.every((provider) => !provider.isDefault),
+    },
+    ...natives,
+  ]
+}
 
 function IconBox({ id, size }: { id: string; size: number }) {
   return (
@@ -286,6 +308,8 @@ function AgentDetail({
   const install = useInstall(agent.id, reloadAgents)
 
   const [probedModels, setProbedModels] = useState<DetectedExternalAgent['models']>([])
+  const [showPlugins, setShowPlugins] = useState(false)
+  useEffect(() => setShowPlugins(false), [agent.id])
   useEffect(() => {
     if (!agent.available) {
       setProbedModels([])
@@ -336,6 +360,10 @@ function AgentDetail({
     info?.command && !checking && (!agent.available || updateAvailable),
   )
 
+  if (showPlugins && agent.id === 'dsh') {
+    return <DshPluginsSettings lang={lang} onBack={() => setShowPlugins(false)} />
+  }
+
   return (
     <>
       <div className="kv-cli-head">
@@ -378,6 +406,29 @@ function AgentDetail({
           <RefreshCw size={13} className={checking ? 'animate-spin' : ''} />
         </IconButton>
       </div>
+
+      {agent.id === 'dsh' && (
+        <button
+          type="button"
+          onClick={() => setShowPlugins(true)}
+          className="kv-cli-card kv-dsh-plugins-entry"
+          data-tauri-drag-region="false"
+        >
+          <span className="kv-dsh-plugins-entry-icons" aria-hidden="true">
+            <span><Terminal size={13} /></span>
+            <span><Workflow size={13} /></span>
+            <span><Globe size={13} /></span>
+          </span>
+          <span className="kv-row-text">
+            <span className="kv-row-label">{t.externalAgentsDshPlugins}</span>
+            <span className="kv-row-desc">{t.externalAgentsDshPluginsHint}</span>
+          </span>
+          <span className="kv-subpage-entry-go">
+            {lang === 'zh' ? '配置' : 'Edit'}
+            <ChevronRight size={14} aria-hidden="true" />
+          </span>
+        </button>
+      )}
 
       {(log.length > 0 || result) && (
         <div className="kv-cli-card">
@@ -499,6 +550,56 @@ function AgentDetail({
   )
 }
 
+function NativeProviderRow({
+  lang,
+  provider,
+  current,
+  onUseCliConfig,
+}: {
+  lang: Lang
+  provider: NativeProviderSummary
+  current: string
+  onUseCliConfig: () => void
+}) {
+  const t = i18n[lang]
+  const official = provider.id === DSH_OFFICIAL_PROVIDER_ID
+  const usingCliConfig = !current
+  const inUse = usingCliConfig && provider.isDefault
+  const models =
+    provider.modelCount > 0
+      ? t.externalAgentsNativeProviderModels.replace('{count}', String(provider.modelCount))
+      : null
+  const subtitle = official
+    ? [t.externalAgentsDshOfficialProvider, models].filter(Boolean).join(' · ')
+    : [provider.id, provider.baseUrl, models].filter(Boolean).join(' · ')
+  return (
+    <div className="kv-row kv-cli-provider">
+      <span className="kv-cli-monogram">{monogram(provider.name)}</span>
+      <div className="kv-row-text">
+        <div className="kv-row-label">{provider.name}</div>
+        <p className="kv-row-desc truncate">{subtitle}</p>
+      </div>
+      <div className="kv-row-control">
+        {inUse ? (
+          <span className="kv-tag ok">{t.externalAgentsProviderInUse}</span>
+        ) : current && provider.isDefault ? (
+          <Button size="sm" onClick={onUseCliConfig}>
+            {t.externalAgentsProviderActivate}
+          </Button>
+        ) : (
+          <span className={`kv-tag ${provider.isDefault ? 'ok' : ''}`}>
+            {provider.isDefault
+              ? t.externalAgentsNativeProviderDefault
+              : official
+                ? t.externalAgentsDshOfficialProvider
+                : t.externalAgentsNativeProviderBadge}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /** 一个供应商的展示副标题：备注 > base_url > codex 的 model_provider 行。 */
 function providerSubtitle(provider: ExternalCliProvider): string {
   if (provider.remark) return provider.remark
@@ -555,6 +656,8 @@ function ProviderSection({
   const t = i18n[lang]
   const [editing, setEditing] = useState<ExternalCliProvider | null | undefined>(undefined)
   const [importing, setImporting] = useState(false)
+  const listedNatives = withOfficialDshProviders(agentId, nativeProviders)
+  const hideGenericLocal = agentId === 'dsh'
 
   const save = (provider: ExternalCliProvider) => {
     const exists = providers.some((p) => p.id === provider.id)
@@ -618,33 +721,42 @@ function ProviderSection({
         </Button>
       </div>
       <div className="kv-cli-card">
-        {providers.length === 0 && nativeProviders.length === 0 ? (
+        {providers.length === 0 && listedNatives.length === 0 ? (
           // 一条供应商都没有时只留这句话（同 ccgui）：此时「使用 CLI 自身配置」是唯一可能的
           // 状态，把它渲染成一行可选项纯属噪音。
           <p className="kv-row-desc px-3 py-5 text-center">{t.externalAgentsProviderEmpty}</p>
         ) : (
           <>
-            {/* 置顶的伪供应商：仿 ccgui 的 `__local_settings_json__` —— 「不托管」是一个可选项，
-                而不是藏在别处的「停用」按钮。选它就等于切回 CLI 自己的配置。 */}
-            <div className="kv-row kv-cli-provider">
-              <span className="kv-cli-monogram local">
-                <Terminal size={13} />
-              </span>
-              <div className="kv-row-text">
-                <div className="kv-row-label">{t.externalAgentsProviderNone}</div>
-                <p className="kv-row-desc">{t.externalAgentsProviderNoneDesc}</p>
+            {!hideGenericLocal && (
+              <div className="kv-row kv-cli-provider">
+                <span className="kv-cli-monogram local">
+                  <Terminal size={13} />
+                </span>
+                <div className="kv-row-text">
+                  <div className="kv-row-label">{t.externalAgentsProviderNone}</div>
+                  <p className="kv-row-desc">{t.externalAgentsProviderNoneDesc}</p>
+                </div>
+                <div className="kv-row-control">
+                  {!current ? (
+                    <span className="kv-tag ok">{t.externalAgentsProviderInUse}</span>
+                  ) : (
+                    <Button size="sm" onClick={() => onPatch({ currentProvider: '' })}>
+                      {t.externalAgentsProviderActivate}
+                    </Button>
+                  )}
+                  <span className="kv-cli-provider-spacer" />
+                </div>
               </div>
-              <div className="kv-row-control">
-                {!current ? (
-                  <span className="kv-tag ok">{t.externalAgentsProviderInUse}</span>
-                ) : (
-                  <Button size="sm" onClick={() => onPatch({ currentProvider: '' })}>
-                    {t.externalAgentsProviderActivate}
-                  </Button>
-                )}
-                <span className="kv-cli-provider-spacer" />
-              </div>
-            </div>
+            )}
+            {hideGenericLocal && listedNatives.map((provider) => (
+              <NativeProviderRow
+                key={`native-${provider.id}`}
+                lang={lang}
+                provider={provider}
+                current={current}
+                onUseCliConfig={() => onPatch({ currentProvider: '' })}
+              />
+            ))}
             {providers.map((provider) => (
               <div className="kv-row kv-cli-provider" key={provider.id}>
                 <span className="kv-cli-monogram">{monogram(provider.name)}</span>
@@ -669,27 +781,14 @@ function ProviderSection({
                 </div>
               </div>
             ))}
-            {nativeProviders.map((provider) => (
-              <div className="kv-row kv-cli-provider" key={`native-${provider.id}`}>
-                <span className="kv-cli-monogram">{monogram(provider.name)}</span>
-                <div className="kv-row-text">
-                  <div className="kv-row-label">{provider.name}</div>
-                  <p className="kv-row-desc truncate">
-                    {[provider.id, provider.baseUrl, provider.modelCount > 0
-                      ? t.externalAgentsNativeProviderModels.replace('{count}', String(provider.modelCount))
-                      : null]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </p>
-                </div>
-                <div className="kv-row-control">
-                  <span className={`kv-tag ${provider.isDefault ? 'ok' : ''}`}>
-                    {provider.isDefault
-                      ? t.externalAgentsNativeProviderDefault
-                      : t.externalAgentsNativeProviderBadge}
-                  </span>
-                </div>
-              </div>
+            {!hideGenericLocal && listedNatives.map((provider) => (
+              <NativeProviderRow
+                key={`native-${provider.id}`}
+                lang={lang}
+                provider={provider}
+                current={current}
+                onUseCliConfig={() => onPatch({ currentProvider: '' })}
+              />
             ))}
           </>
         )}

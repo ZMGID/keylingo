@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { derivePermissionModes } from './permissionModes'
+import { deriveDshPresetModes, derivePermissionModes } from './permissionModes'
 import type { AgentRuntimeConfig, DetectedExternalAgent } from './types'
 
 const builtinRuntime: AgentRuntimeConfig = { kind: 'builtin' }
@@ -163,5 +163,27 @@ describe('derivePermissionModes（顶栏权限按钮）', () => {
       target: 'titlebar',
       agentRuntime: chatRuntime,
     }).options).toEqual([])
+  })
+})
+
+describe('deriveDshPresetModes（底栏 Agent 模式胶囊）', () => {
+  it('dsh 会话给出四档 Agent 模式，未选时回落 standard', () => {
+    expect(deriveDshPresetModes(externalRuntime('dsh')).options.map((o) => o.value)).toEqual([
+      'standard',
+      'code',
+      'minimal',
+      'cordis',
+    ])
+    expect(deriveDshPresetModes(externalRuntime('dsh')).current).toBe('standard')
+    expect(deriveDshPresetModes({
+      kind: 'external',
+      externalAgentId: 'dsh',
+      externalAgentPreset: 'minimal',
+    }).current).toBe('minimal')
+  })
+
+  it('非 dsh 会话不显示 Agent 模式胶囊', () => {
+    expect(deriveDshPresetModes(externalRuntime('claude')).options).toEqual([])
+    expect(deriveDshPresetModes(builtinRuntime).options).toEqual([])
   })
 })
