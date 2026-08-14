@@ -427,18 +427,21 @@ pub async fn run_external_cli_reply(
 
     let cancel_check = || !state.is_chat_generation_active(&conversation_id, run_generation);
 
-    // 本轮接不接工具审批。**判据取自即将启动的 argv 本身**，而不是再抄一遍「哪些档位会询问」
-    // 的规则：真正决定 CLI 会不会问的就是那个 flag（`--permission-prompt-tool stdio`），
-    // 从 argv 读回来就不可能与 `build_args` 的决定分叉（spec 第 2 条）。
-    let approval_host = turn_asks_for_permission(&args).then(|| ApprovalHost {
+    // 本轮接不接工具审批 / 问用户。claude 的判据取自即将启动的 argv 本身
+    // （`--permission-prompt-tool stdio`），从 argv 读回来就不可能与 `build_args` 分叉。
+    // 没有这条 flag 的 CLI（dsh 的 `session/ask`）靠 `ask_user::needs_host` 开通道，
+    // 否则问用户会卡在 `NO_PROVIDER`。
+    let approval_host = turn_needs_approval_host(&args, &agent_id).then(|| ApprovalHost {
         app,
         state,
         conversation_id: &conversation_id,
         run_id: &run_id,
         generation: run_generation,
+        agent_id: &agent_id,
         auto_allow_tools: std::sync::atomic::AtomicBool::new(
             permission_mode_from_args(&args)
-                .is_some_and(crate::external_agents::defs::claude::claude_mode_auto_allows_tools),
+                .is_some_and(crate::external_agents::defs::claude::claude_mode_auto_allows_tools)
+                || crate::external_agents::ask_user::auto_allow_ordinary_tools(&agent_id),
         ),
     });
 
@@ -1382,6 +1385,13 @@ fn turn_asks_for_permission(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--permission-prompt-tool")
 }
 
+/// 本轮要不要建审批 / 问用户宿主。claude 看 argv 上的 `--permission-prompt-tool`；
+/// 没有这条 flag 的 CLI（dsh 的 `session/ask`）靠 `ask_user::needs_host` —— 加了
+/// codec 就会开通道。
+fn turn_needs_approval_host(args: &[String], agent_id: &str) -> bool {
+    turn_asks_for_permission(args) || crate::external_agents::ask_user::needs_host(agent_id)
+}
+
 /// 本轮 argv 里的权限档位（`--permission-mode` 的值）。
 ///
 /// 与 `turn_asks_for_permission` 同一个理由从 argv 读回来而不是再抄一份规则：决定 CLI 行为
@@ -1549,8 +1559,11 @@ struct ApprovalHost<'a> {
     conversation_id: &'a str,
     run_id: &'a str,
     generation: u64,
+    /// 用来找 `ask_user::codec_for`。问用户按 agent 分发，不按折叠后的工具名
+    /// （`AskUserQuestion` 和 `ask_user_question` 折叠后一样）。
+    agent_id: &'a str,
     /// 普通工具就地放行、不弹卡（「完全」档；见 `claude_mode_auto_allows_tools`）。
-    /// 这一档接上询问通道**只为了** `AskUserQuestion` / `ExitPlanMode`，不是为了开始审批。
+    /// 这一档接上询问通道**只为了**问用户 / 计划卡，不是为了开始审批。
     ///
     /// 可变（`AtomicBool`）是因为用户可以在**轮中**用「批准并自动放行」把整轮切进这一档。
     auto_allow_tools: std::sync::atomic::AtomicBool,
@@ -1587,62 +1600,33 @@ impl ApprovalHost<'_> {
             span_id: None,
             structured_content: None,
         };
-        // `AskUserQuestion` 不是「要不要放行这个工具」，而是「claude 在问用户一个问题」。
-        // 官方答法是从**同一条** `can_use_tool` 通道回 `allow + updatedInput.answers`
-        // （没有第二条控制请求）。宿主这边把它转成 Kivio 已有的问用户卡片 —— 那套 UI 的
-        // 形状（问题 + 选项 + 单选/多选 + 自定义文本）与 claude 的入参一一对得上，
-        // 不该为它再造第二套卡片（spec 第 2 条）。
-        if crate::external_agents::session::claude_stream::is_ask_user_question(&ask.tool_name) {
-            if let Some(prompt) = ask_user_prompt_from_claude_input(&ask.input) {
-                let answered = crate::chat::commands::interaction::request_user_response(
-                    self.app,
-                    self.state,
-                    self.conversation_id,
-                    self.run_id,
-                    self.generation,
-                    &record,
-                    prompt.clone(),
-                )
-                .await;
-                // 答完把**带答案**的记录补发一次，消息流里才留得下「问了什么 + 选了什么」。
-                // 少了这一步，那条工具卡的载荷永远停在「等待作答」，而 claude 随后回的
-                // `tool_result` 又不带结构化内容 ⇒ 看着像「答完什么都没留下」。
-                // 内置 agent 那条路早就这么做了（`agent/execute.rs` 的 ask_user 分支）。
-                let mut answered_record = record.clone();
-                answered_record.status = ToolCallStatus::Success;
-                answered_record.completed_at = Some(chrono::Local::now().timestamp());
-                answered_record.sensitive = false;
-                answered_record.structured_content =
-                    Some(crate::chat::ask_user::structured_content(
-                        &prompt,
-                        &answered.phase,
-                        &answered.answers,
-                    ));
-                crate::chat::commands::interaction::emit_chat_tool_record(
-                    self.app,
-                    self.run_id,
-                    &answered_record,
-                );
-                // 同一份载荷再留一份给**落盘记录**：那条 tool 记录是流解析层建的
-                // （`structured_content` 是 claude 的原始入参），答案只有这里知道。
-                // 不留的话刷新一次「问了什么 + 选了什么」就没了（见 AppState 上的说明）。
-                if let Some(content) = answered_record.structured_content.clone() {
-                    self.state
-                        .answered_ask_user_content
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .insert(answered_record.id.clone(), content);
-                }
-                let approved = answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
+        // 问用户不是「要不要放行这个工具」，而是 CLI 在问用户一个问题。
+        // 官方答法走各 CLI 自己的线（claude: 同一条 `can_use_tool` 回
+        // `allow + updatedInput`；dsh: `session/ask` 回 `{ answers }`），
+        // 卡片是 Kivio 已有的那张 —— 不该为每条 CLI 再造一套（spec 第 2 条）。
+        if let Some(codec) =
+            crate::external_agents::ask_user::codec_for(self.agent_id, &ask.tool_name)
+        {
+            if let Some(prompt) = (codec.parse)(&ask.input) {
+                return self
+                    .present_ask_user(&ask, record, prompt, |prompt, answered| {
+                        (codec.encode)(&ask.input, prompt, answered)
+                    })
+                    .await;
+            }
+            if matches!(
+                codec.unknown_shape,
+                crate::external_agents::ask_user::UnknownAskShape::Reject
+            ) {
+                // 形状不认识：回拒。退审批卡没有意义（这条 CLI 等的不是 allow/deny）。
                 return crate::external_agents::session::live::ApprovalDecision {
                     request_id: ask.request_id,
-                    approved,
-                    updated_input: approved
-                        .then(|| claude_ask_user_updated_input(&ask.input, &answered)),
+                    approved: false,
+                    updated_input: None,
                     set_permission_mode: None,
                 };
             }
-            // 入参形状不认识（CLI 改了 schema）：退回普通审批卡，别静默吞掉这次询问。
+            // FallbackApproval：退回普通审批卡，别静默吞掉这次询问。
         }
         // `ExitPlanMode` = 「计划写完了，批准我照着做」。走普通审批卡（卡片上就是计划正文，
         // 见 `format_tool_approval_summary`），但批准时**必须额外切档位** —— CLI 不会因为这次
@@ -1738,6 +1722,64 @@ impl ApprovalHost<'_> {
         }
     }
 
+    /// 弹 Kivio 已有的问用户卡，答完补发带答案的工具记录并落盘。
+    ///
+    /// 答完把**带答案**的记录补发一次，消息流里才留得下「问了什么 + 选了什么」。
+    /// 少了这一步，那条工具卡的载荷永远停在「等待作答」，而 CLI 随后回的
+    /// `tool_result` 又不带结构化内容 ⇒ 看着像「答完什么都没留下」。
+    /// 内置 agent 那条路早就这么做了（`agent/execute.rs` 的 ask_user 分支）。
+    /// 同一份载荷再留一份给**落盘记录**：流解析层建的 tool 记录只有原始入参，
+    /// 答案只有这里知道。不留的话刷新一次「问了什么 + 选了什么」就没了。
+    async fn present_ask_user(
+        &self,
+        ask: &crate::external_agents::session::live::ApprovalAsk,
+        record: ToolCallRecord,
+        prompt: crate::chat::ask_user::AskUserPromptPayload,
+        encode: impl FnOnce(
+            &crate::chat::ask_user::AskUserPromptPayload,
+            &crate::chat::ask_user::AskUserResponseResult,
+        ) -> serde_json::Value,
+    ) -> crate::external_agents::session::live::ApprovalDecision {
+        let answered = crate::chat::commands::interaction::request_user_response(
+            self.app,
+            self.state,
+            self.conversation_id,
+            self.run_id,
+            self.generation,
+            &record,
+            prompt.clone(),
+        )
+        .await;
+        let mut answered_record = record;
+        answered_record.status = ToolCallStatus::Success;
+        answered_record.completed_at = Some(chrono::Local::now().timestamp());
+        answered_record.sensitive = false;
+        answered_record.structured_content = Some(crate::chat::ask_user::structured_content(
+            &prompt,
+            &answered.phase,
+            &answered.answers,
+        ));
+        crate::chat::commands::interaction::emit_chat_tool_record(
+            self.app,
+            self.run_id,
+            &answered_record,
+        );
+        if let Some(content) = answered_record.structured_content.clone() {
+            self.state
+                .answered_ask_user_content
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(answered_record.id.clone(), content);
+        }
+        let approved = answered.phase == crate::chat::ask_user::ASK_USER_PHASE_ANSWERED;
+        crate::external_agents::session::live::ApprovalDecision {
+            request_id: ask.request_id.clone(),
+            approved,
+            updated_input: approved.then(|| encode(&prompt, &answered)),
+            set_permission_mode: None,
+        }
+    }
+
     /// 扫掉本轮问过的挂起条目。异常出口（EOF / 硬 Close）下 `ask` 的 future 会被直接丢弃，
     /// 它没机会自己清理，不扫就在这张进程级的表里永久留一条。
     ///
@@ -1758,151 +1800,21 @@ impl ApprovalHost<'_> {
                 pending.remove(id);
             }
         }
+        {
+            let mut pending = self
+                .state
+                .pending_chat_user_prompts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for id in tool_call_ids {
+                pending.remove(id);
+            }
+        }
         for id in tool_call_ids {
             crate::chat::commands::interaction::withdraw_tool_confirm(self.app, id);
+            crate::chat::protocol::resolve_user_prompt(self.app, self.run_id, id);
         }
     }
-}
-
-/// claude `AskUserQuestion` 的入参 → Kivio 的问用户卡片载荷。
-///
-/// 入参形状（官方工具 schema）：
-/// `{"questions":[{"question":"…","header":"…","multiSelect":bool,
-///   "options":[{"label":"…","description":"…"}]}]}`
-///
-/// 映射到 Kivio 的 `AskUserQuestion` 时，选项 id 用**下标**（claude 的选项没有 id，
-/// 只有 label），答复时再按同一个下标翻回 label —— 见 `claude_ask_user_updated_input`。
-/// 形状不认识（CLI 改了 schema）返回 `None`，调用方退回普通审批卡。
-fn ask_user_prompt_from_claude_input(
-    input: &serde_json::Value,
-) -> Option<crate::chat::ask_user::AskUserPromptPayload> {
-    let raw = input.get("questions")?.as_array()?;
-    let questions: Vec<crate::chat::ask_user::AskUserQuestion> = raw
-        .iter()
-        .enumerate()
-        .filter_map(|(qi, question)| {
-            let text = question.get("question")?.as_str()?.trim().to_string();
-            if text.is_empty() {
-                return None;
-            }
-            let options: Vec<crate::chat::ask_user::AskUserOption> = question
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|options| {
-                    options
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(oi, option)| {
-                            let label = option.get("label")?.as_str()?.trim().to_string();
-                            if label.is_empty() {
-                                return None;
-                            }
-                            Some(crate::chat::ask_user::AskUserOption {
-                                id: oi.to_string(),
-                                label,
-                                description: option
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .map(str::to_string),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if options.is_empty() {
-                return None;
-            }
-            Some(crate::chat::ask_user::AskUserQuestion {
-                id: qi.to_string(),
-                prompt: text,
-                options,
-                allow_multiple: question
-                    .get("multiSelect")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                // claude 的 schema 里没有「自定义文本」这一档，但用户总该能不选任何预设项
-                // 直接说自己的想法 —— 这是 Kivio 卡片本来就有的能力，白给。
-                allow_custom: true,
-            })
-        })
-        .collect();
-    (!questions.is_empty()).then_some(crate::chat::ask_user::AskUserPromptPayload {
-        title: None,
-        questions,
-    })
-}
-
-/// 用户的选择 → claude 要的 `updatedInput`。
-///
-/// 官方形状：`{"questions": <原样回传>, "answers": {"<问题文本>": "<选中的 label>"}}`。
-/// 多选时把多个 label 用 `, ` 拼起来（官方文档只给了单选的例子，多选的分隔符**未核实**；
-/// 拼串至少保证 claude 拿到的是它认识的字符串类型，而不是一个它可能不接受的数组）。
-/// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
-///
-/// **回的是「原入参 + answers」而不是重新拼一个 `{questions, answers}`**（paseo 的写法：
-/// `{...permission.request.input, answers}`）。`updatedInput` 会**整个替换**这次调用的入参，
-/// 自己拼就意味着 CLI 哪天给 schema 加个字段、我们就静默把它丢了 —— paseo 那边这个坑是
-/// 真踩过的（CHANGELOG #760「Answering an interactive question from a Claude agent now
-/// reaches Claude correctly instead of being dropped」）。
-fn claude_ask_user_updated_input(
-    original_input: &serde_json::Value,
-    answered: &crate::chat::ask_user::AskUserResponseResult,
-) -> serde_json::Value {
-    let mut answers = serde_json::Map::new();
-    let raw = original_input
-        .get("questions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for (qi, question) in raw.iter().enumerate() {
-        let Some(text) = question.get("question").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(answer) = answered.answers.get(&qi.to_string()) else {
-            continue;
-        };
-        if let Some(custom) = answer
-            .custom_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            answers.insert(
-                text.to_string(),
-                serde_json::Value::String(custom.to_string()),
-            );
-            continue;
-        }
-        let labels: Vec<String> = answer
-            .selected_option_ids
-            .iter()
-            .filter_map(|id| {
-                let index: usize = id.parse().ok()?;
-                question
-                    .get("options")?
-                    .as_array()?
-                    .get(index)?
-                    .get("label")?
-                    .as_str()
-                    .map(str::to_string)
-            })
-            .collect();
-        if !labels.is_empty() {
-            answers.insert(
-                text.to_string(),
-                serde_json::Value::String(labels.join(", ")),
-            );
-        }
-    }
-    let mut updated = original_input
-        .as_object()
-        .cloned()
-        .unwrap_or_else(serde_json::Map::new);
-    updated.insert("questions".to_string(), serde_json::Value::Array(raw));
-    updated.insert("answers".to_string(), serde_json::Value::Object(answers));
-    serde_json::Value::Object(updated)
 }
 
 fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
@@ -2929,6 +2841,10 @@ mod tests {
         assert!(!turn_asks_for_permission(&[]));
         // 值出现在别处（比如某个 prompt 里）不算 —— 判据只认 flag 本身。
         assert!(!turn_asks_for_permission(&["stdio".to_string()]));
+        // dsh 没有 `--permission-prompt-tool`：问用户靠 codec 开通道。
+        assert!(turn_needs_approval_host(&[], "dsh"));
+        assert!(!turn_needs_approval_host(&[], "cursor"));
+        assert!(!turn_needs_approval_host(&[], "claude"));
     }
 
     /// 「完全」档接上询问通道之后**用户感知不到差别**：普通工具原地放行，只有问用户卡会弹。
@@ -3361,126 +3277,6 @@ mod tests {
         ));
     }
 
-    /// claude 的 `AskUserQuestion` 入参必须能映射成 Kivio 的问用户卡片，否则这个功能
-    /// 就退回到「当场拒」——claude 在 Kivio 里从此不能反问用户。
-    #[test]
-    fn claude_ask_user_input_maps_to_the_ask_user_card() {
-        let input = serde_json::json!({
-            "questions": [{
-                "question": "用哪种缓存？",
-                "header": "Cache",
-                "multiSelect": false,
-                "options": [
-                    { "label": "Redis", "description": "跨进程共享" },
-                    { "label": "内存", "description": null },
-                ],
-            }],
-        });
-        let prompt = ask_user_prompt_from_claude_input(&input).expect("必须能映射");
-        assert_eq!(prompt.questions.len(), 1);
-        let question = &prompt.questions[0];
-        assert_eq!(question.prompt, "用哪种缓存？");
-        assert!(!question.allow_multiple);
-        // 选项 id 是**下标**（claude 的选项没有 id），答复时按同一个下标翻回 label。
-        assert_eq!(question.options[0].id, "0");
-        assert_eq!(question.options[0].label, "Redis");
-        assert_eq!(
-            question.options[0].description.as_deref(),
-            Some("跨进程共享")
-        );
-        assert_eq!(question.options[1].id, "1");
-        assert!(question.options[1].description.is_none());
-    }
-
-    /// 形状不认识时必须返回 `None` —— 调用方据此退回普通审批卡，而不是静默吞掉询问
-    /// （吞掉 = CLI 那条 promise 永远等不到回复 = 整轮挂死）。
-    #[test]
-    fn unknown_ask_user_shapes_degrade_to_none() {
-        assert!(ask_user_prompt_from_claude_input(&serde_json::json!({})).is_none());
-        // 没有选项的问题不成卡片。
-        assert!(ask_user_prompt_from_claude_input(&serde_json::json!({
-            "questions": [{ "question": "空的", "options": [] }],
-        }))
-        .is_none());
-    }
-
-    /// 答复必须按官方形状回：`{questions: <原样>, answers: {"<问题文本>": "<label>"}}`。
-    /// 键是**问题文本**而不是下标 —— 用错就等于没答，claude 会当成没选。
-    #[test]
-    fn ask_user_answers_use_the_question_text_as_key() {
-        let input = serde_json::json!({
-            "questions": [{
-                "question": "用哪种缓存？",
-                "options": [{ "label": "Redis" }, { "label": "内存" }],
-            }],
-        });
-        let answered = crate::chat::ask_user::AskUserResponseResult {
-            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
-            answers: std::collections::HashMap::from([(
-                "0".to_string(),
-                crate::chat::ask_user::AskUserAnswer {
-                    selected_option_ids: vec!["1".to_string()],
-                    custom_text: None,
-                },
-            )]),
-        };
-        let updated = claude_ask_user_updated_input(&input, &answered);
-        assert_eq!(
-            updated["answers"]["用哪种缓存？"],
-            serde_json::json!("内存")
-        );
-        // 原问题必须原样回传（官方要求）。
-        assert_eq!(updated["questions"], input["questions"]);
-    }
-
-    /// 用户填的自定义文本优先于预设项 —— 那是他真正想说的话。
-    #[test]
-    fn custom_text_wins_over_selected_options() {
-        let input = serde_json::json!({
-            "questions": [{ "question": "怎么做？", "options": [{ "label": "A" }] }],
-        });
-        let answered = crate::chat::ask_user::AskUserResponseResult {
-            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
-            answers: std::collections::HashMap::from([(
-                "0".to_string(),
-                crate::chat::ask_user::AskUserAnswer {
-                    selected_option_ids: vec!["0".to_string()],
-                    custom_text: Some("都不要，换个思路".to_string()),
-                },
-            )]),
-        };
-        let updated = claude_ask_user_updated_input(&input, &answered);
-        assert_eq!(
-            updated["answers"]["怎么做？"],
-            serde_json::json!("都不要，换个思路")
-        );
-    }
-
-    /// `updatedInput` **整个替换**这次调用的入参，所以原入参里我们不认识的字段必须原样带回，
-    /// 不能自己拼一个 `{questions, answers}` 了事 —— 那样 CLI 加个字段我们就静默丢了它
-    /// （paseo 踩过这个坑，见 `claude_ask_user_updated_input` 的说明）。
-    #[test]
-    fn unknown_input_fields_survive_the_round_trip() {
-        let input = serde_json::json!({
-            "questions": [{ "question": "去哪？", "options": [{ "label": "左" }] }],
-            "someFutureField": { "kept": true },
-        });
-        let answered = crate::chat::ask_user::AskUserResponseResult {
-            phase: crate::chat::ask_user::ASK_USER_PHASE_ANSWERED.to_string(),
-            answers: std::collections::HashMap::from([(
-                "0".to_string(),
-                crate::chat::ask_user::AskUserAnswer {
-                    selected_option_ids: vec!["0".to_string()],
-                    custom_text: None,
-                },
-            )]),
-        };
-        let updated = claude_ask_user_updated_input(&input, &answered);
-        assert_eq!(updated["someFutureField"], input["someFutureField"]);
-        assert_eq!(updated["questions"], input["questions"]);
-        assert_eq!(updated["answers"]["去哪？"], serde_json::json!("左"));
-    }
-
     /// Claude fingerprints launch flags/instructions; dsh fingerprints model/reasoning/sandbox/provider.
     /// ACP / codex / pi can apply their relevant settings without this process-level fingerprint.
     #[test]
@@ -3507,15 +3303,30 @@ mod tests {
                 Some("ignored-instructions"),
             )
         };
-        let dsh_base = dsh(Some("deepseek-v4-flash"), Some("off"), Some("read-only"), None);
+        let dsh_base = dsh(
+            Some("deepseek-v4-flash"),
+            Some("off"),
+            Some("read-only"),
+            None,
+        );
         assert!(dsh_base.instructions.is_none());
         assert_ne!(
             dsh_base,
-            dsh(Some("deepseek-v4-pro"), Some("off"), Some("read-only"), None)
+            dsh(
+                Some("deepseek-v4-pro"),
+                Some("off"),
+                Some("read-only"),
+                None
+            )
         );
         assert_ne!(
             dsh_base,
-            dsh(Some("deepseek-v4-flash"), Some("high"), Some("read-only"), None)
+            dsh(
+                Some("deepseek-v4-flash"),
+                Some("high"),
+                Some("read-only"),
+                None
+            )
         );
         assert_ne!(
             dsh_base,
@@ -3528,7 +3339,12 @@ mod tests {
         );
         assert_ne!(
             dsh_base,
-            dsh(Some("deepseek-v4-flash"), Some("off"), Some("read-only"), Some("minimal"))
+            dsh(
+                Some("deepseek-v4-flash"),
+                Some("off"),
+                Some("read-only"),
+                Some("minimal")
+            )
         );
         let provider_a = crate::settings::ExternalCliProvider {
             id: "provider-a".to_string(),

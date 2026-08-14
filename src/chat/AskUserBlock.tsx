@@ -83,9 +83,10 @@ function normalizeQuestions(value: unknown): AskUserQuestion[] {
         .map((option) => normalizeOption(option))
         .filter((option): option is AskUserOption => Boolean(option))
       : []
-    if (!id || !prompt || options.length < 2) continue
     const multiple = question.allow_multiple === true || question.allowMultiple === true
     const custom = question.allow_custom === true || question.allowCustom === true
+    // 内置 ask_user 仍要求至少两个选项；外部 CLI 的纯文本作答靠 allow_custom 放行 0 个选项。
+    if (!id || !prompt || (options.length < 2 && !custom)) continue
     questions.push({
       id,
       prompt,

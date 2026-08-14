@@ -85,6 +85,23 @@ describe('AskUserBlock', () => {
     expect(screen.getAllByRole('option')[2]).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('renders a free-text question when there are no options', () => {
+    render(<AskUserBlock variant="docked" toolCall={askUserCall({
+      phase: 'awaiting',
+      questions: [{
+        id: 'note',
+        prompt: '还有补充吗？',
+        options: [],
+        allow_multiple: false,
+        allow_custom: true,
+      }],
+      answers: {},
+    })} />)
+    expect(screen.getByText('还有补充吗？')).toBeInTheDocument()
+    expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    expect(screen.getByPlaceholderText('自己写一个…')).toBeInTheDocument()
+  })
+
   it('renders answers read-only once the phase is answered', () => {
     render(<AskUserBlock variant="docked" toolCall={askUserCall({
       phase: 'answered',

@@ -101,6 +101,25 @@ describe('groupTimelineSegments', () => {
       source: 'external_cli',
       status: 'running',
     }))).toBe(true)
+    expect(isStandaloneToolCard(tool({
+      id: 'ask-dsh',
+      name: 'ask_user_question',
+      source: 'external_cli',
+      status: 'running',
+    }))).toBe(true)
+    expect(isStandaloneToolCard(tool({
+      id: 'ask-dsh-plan',
+      name: 'exit_plan_mode',
+      source: 'external_cli',
+      status: 'running',
+    }))).toBe(true)
+    // claude 的计划批准也是一次人为决定，但不走问用户卡。
+    expect(isStandaloneToolCard(tool({
+      id: 'plan-exit',
+      name: 'ExitPlanMode',
+      source: 'external_cli',
+      status: 'running',
+    }))).toBe(true)
     // 载荷认得出来也算（工具名被改过/缺失时的兜底）。
     expect(isStandaloneToolCard(tool({
       id: 'ask-3',

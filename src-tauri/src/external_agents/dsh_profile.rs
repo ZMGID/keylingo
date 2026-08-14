@@ -140,9 +140,7 @@ fn render_patch(reasoning: Option<&str>, preset: Option<&str>) -> String {
         out.push_str(effort);
         out.push('\n');
     }
-    out.push_str(
-        "\n# 与官方 web 相同：host 平面工具关掉，改由下面的 agent preset 按会话组装。\n",
-    );
+    out.push_str("\n# 与官方 web 相同：host 平面工具关掉，改由下面的 agent preset 按会话组装。\n");
     for id in HOST_PLANE_TOOL_IDS {
         out.push_str("- id: ");
         out.push_str(id);
@@ -519,6 +517,9 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("input.once('end', onInputClosed)"));
         assert!(BRIDGE_SOURCE.contains("DSH_AGENT_PRESET"));
         assert!(BRIDGE_SOURCE.contains("agentPresets"));
+        assert!(BRIDGE_SOURCE.contains("registerProvider"));
+        assert!(BRIDGE_SOURCE.contains("session/ask"));
+        assert!(BRIDGE_SOURCE.contains("'userQuestions'"));
         assert!(!BRIDGE_SOURCE.contains("@deepseek-ai/dsh-session"));
     }
 
@@ -571,10 +572,8 @@ mod tests {
 
     #[test]
     fn strip_profile_agent_presets_dep_removes_the_shadowing_copy() {
-        let dir = std::env::temp_dir().join(format!(
-            "kivio-dsh-preset-strip-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kivio-dsh-preset-strip-{}", std::process::id()));
         let pkg_dir = dir
             .join("node_modules")
             .join("@deepseek-ai")

@@ -33,6 +33,7 @@ import type { LucideIcon } from 'lucide-react'
 import type { AgentTodoItem, AgentTodoState, AgentTodoStatus, ToolCallRecord, ToolCallStatus } from './types'
 import { normalizeToolCallStatus } from './toolStatus'
 import { formatToolResultPreview } from './toolResultPreview'
+import { hasAskUserStructuredContent, isAskUserToolName } from './askUserTools'
 import { isExternalSubagentToolCall, toolCallDiffStats, toolRecordRawName } from './segments'
 import { requestDockDiffPreview, requestDockPreview } from './dock/dockPreview'
 import { DiffView } from './dock/DiffView'
@@ -118,11 +119,8 @@ const CLI_TOOL_NAME_ALIASES: Record<string, string> = {
   multiedit: 'edit',
   // NotebookEdit 的目标路径在 `notebook_path`，见 `toolPathArgument`。
   notebookedit: 'edit',
-  // claude 的 `AskUserQuestion` 就是 Kivio 的问用户卡片：宿主已经把它的入参映射成 `askUser`
-  // 结构化载荷、答复也走同一条 `chat_submit_user_choice`（`external_agents/run.rs` 的
-  // `ask_user_prompt_from_claude_input` / `claude_ask_user_updated_input`）。少了这条别名，
-  // `isAskUserTool` 认不出它 ⇒ 渲染成一张普通工具卡 ⇒ 用户**没有任何控件可答**，只能看它
-  // 转到 600s 超时、被当成拒绝回给 CLI。整条链路后端全通，唯一的断点就是这一行。
+  // 问用户工具名 → 本文件 `ask_user` 分支（图标等）。识别本身走 `isAskUserToolName`，
+  // 新 CLI 加名字请改 `askUserTools.ts`，不要在这里再加一条。
   askuserquestion: 'ask_user',
 }
 
@@ -233,7 +231,8 @@ function toolGlyph(toolCall: ToolCallRecord): LucideIcon | ComponentType<{ size?
 }
 
 function isAskUserTool(toolCall: ToolCallRecord): boolean {
-  return toolRawName(toolCall) === 'ask_user'
+  return hasAskUserStructuredContent(toolCall.structured_content ?? toolCall.structuredContent)
+    || isAskUserToolName(toolRecordRawName(toolCall))
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {

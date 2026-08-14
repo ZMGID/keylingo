@@ -30,11 +30,11 @@ pub struct ApprovalAsk {
     pub tool_name: String,
     /// 工具入参原文，用于卡片上的摘要。
     pub input: serde_json::Value,
-    /// CLI 标记「这个工具要用户在卡片上直接作答」（`AskUserQuestion` / `ExitPlanMode`）。
-    /// 这两个都已经走通：`AskUserQuestion` 转成 Kivio 的问用户卡片、答复经
-    /// `ApprovalDecision::updated_input` 回去；`ExitPlanMode` 走审批卡、批准时额外经
-    /// `ApprovalDecision::set_permission_mode` 切档位。其余（CLI 将来新增的交互工具）仍当场拒
-    /// （见 `claude_stream::APPROVAL_INTERACTIVE_UNSUPPORTED`）。
+    /// CLI 标记「这个工具要用户在卡片上直接作答」。问用户经 `ask_user::codec_for`
+    /// 转成 Kivio 已有的卡片，答复经 `ApprovalDecision::updated_input` 回去；
+    /// claude 的 `ExitPlanMode` 走审批卡、批准时额外经
+    /// `ApprovalDecision::set_permission_mode` 切档位。其余（CLI 将来新增的
+    /// 交互工具）仍当场拒（见 `claude_stream::APPROVAL_INTERACTIVE_UNSUPPORTED`）。
     pub requires_user_interaction: bool,
 }
 

@@ -351,7 +351,7 @@ fn approval_verdict(ask: &ApprovalAsk) -> Result<(), &'static str> {
 /// claude 内置的「反问用户」工具名。大小写按 CLI 原样（`PascalCase` 有意义，不归一化），
 /// 但比对时放宽 —— 名字是 CLI 给的，不值得为大小写差异丢掉整个功能。
 pub fn is_ask_user_question(tool_name: &str) -> bool {
-    tool_name.eq_ignore_ascii_case("AskUserQuestion")
+    crate::external_agents::ask_user::matches_tool("claude", tool_name)
 }
 
 /// claude 内置的「计划写完了，批准我去做」工具名。同样放宽大小写比对。
@@ -2560,7 +2560,7 @@ text={}",
                         {
                             *saw_multi_task.lock().unwrap_or_else(|e| e.into_inner()) = true;
                         }
-                        // 取前两个选项 —— 这正是生产代码 `claude_ask_user_updated_input` 的拼法。
+                        // 取前两个选项 —— 这正是生产代码 `ask_user::encode_claude` 的拼法。
                         let labels: Vec<String> = question
                             .get("options")
                             .and_then(|v| v.as_array())

@@ -1,4 +1,5 @@
 import type { ChatMessageSegment, ToolCallRecord } from './types'
+import { foldToolName, hasAskUserStructuredContent, isAskUserToolName } from './askUserTools'
 import { normalizeToolCallStatus } from './toolStatus'
 import { isArtifactPresentationToolCall } from './artifactPresentation'
 
@@ -130,13 +131,13 @@ export function isStandaloneToolCard(toolCall: ToolCallRecord): boolean {
     if (type === 'subagent' || type === 'advisor') return true
     // 问用户：载荷里是 `askUser`（没有 `type` 字段）。它记的是「问了什么 + 你选了什么」，
     // 折进「调用 N 次工具」里等于把一次人为决定藏起来 —— 那是这条对话里最该看见的东西。
-    if ('askUser' in (structured as Record<string, unknown>)) return true
+    if (hasAskUserStructuredContent(structured)) return true
   }
   const name = toolRecordRawName(toolCall)
-  // 外部 CLI 报的是自己的工具名（`AskUserQuestion`），所以这条判据不能只认 native。
-  if (name.toLowerCase().replace(/[_\-\s]/g, '') === 'askuserquestion' || name === 'ask_user') {
-    return true
-  }
+  // 外部 CLI 报的是自己的工具名，所以这条判据不能只认 native。
+  if (isAskUserToolName(name)) return true
+  // claude 的 `ExitPlanMode` 是计划审批，不是问用户卡，但同样是一次人为决定。
+  if (foldToolName(name) === 'exitplanmode') return true
   // 外部 CLI 的子代理（claude 的 Agent/Task）：一次完整的委派，同内置 agent 独立成卡，
   // 折进「调用 N 次工具」等于把派活这件事藏起来。
   if (isExternalSubagentToolCall(toolCall)) return true

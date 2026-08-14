@@ -120,6 +120,11 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
         return super.handleRequest(method, params)
     }
   }
+
+  currentSessionId() {
+    const ids = [...this.sessions.keys()]
+    return ids.length === 0 ? '' : ids[ids.length - 1]
+  }
 }
 
 function requireSessionId(value) {
@@ -130,7 +135,7 @@ function requireSessionId(value) {
 }
 
 export const name = 'kivio-dsh-jsonrpc-bridge'
-export const inject = ['agents', 'sessionPersistence', 'agentPresets']
+export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions']
 export const Config = Schema.object({
   maxTokensAsSuccess: Schema.boolean().default(false),
 })
@@ -175,10 +180,66 @@ export function apply(ctx, config) {
     return result
   })
   ctx.effect(() => {
+    return ctx.userQuestions.registerProvider({
+      ask: (request) => askViaHost(transport, server, request),
+    })
+  }, 'kivio-jsonrpc.user-questions')
+  ctx.effect(() => {
     transport.start()
     return async () => {
       await server.shutdown()
       transport.close()
     }
   }, 'kivio-jsonrpc.serve')
+}
+
+function wireQuestions(questions) {
+  if (!Array.isArray(questions)) return []
+  return questions.map((question) => {
+    const item = {
+      id: question.id,
+      question: question.question,
+    }
+    if (question.detail !== undefined) item.detail = question.detail
+    if (question.header !== undefined) item.header = question.header
+    if (question.options !== undefined) item.options = question.options
+    if (question.multiSelect !== undefined) item.multiSelect = question.multiSelect
+    if (question.intent !== undefined) item.intent = question.intent
+    return item
+  })
+}
+
+function asAskAnswer(result) {
+  const answers = Array.isArray(result?.answers) ? result.answers : []
+  return {
+    answers: answers
+      .map((item) => {
+        const id = typeof item?.id === 'string' ? item.id : ''
+        const selected = Array.isArray(item?.selected)
+          ? item.selected.filter((label) => typeof label === 'string')
+          : []
+        const custom = typeof item?.custom === 'string' ? item.custom : undefined
+        return custom === undefined ? { id, selected } : { id, selected, custom }
+      })
+      .filter((item) => item.id !== ''),
+  }
+}
+
+async function askViaHost(transport, server, request) {
+  const sessionId =
+    typeof request.agent?.id === 'string' && request.agent.id.trim() !== ''
+      ? request.agent.id.trim()
+      : server.currentSessionId()
+  if (!sessionId) {
+    throw new Error('ask_user_question requires an agent-owned session')
+  }
+  const result = await transport.request(
+    'session/ask',
+    {
+      sessionId,
+      questions: wireQuestions(request.questions),
+    },
+    request.signal,
+  )
+  return asAskAnswer(result)
 }

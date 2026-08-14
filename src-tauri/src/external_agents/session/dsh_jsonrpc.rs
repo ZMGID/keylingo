@@ -13,6 +13,12 @@
 //! - `session/cancel { sessionId }`
 //! - `shutdown`
 //!
+//! 服务端 → 客户端请求（官方传输层支持，官方 server 自己不发；Kivio bridge 补这一条）：
+//! - `session/ask { sessionId, questions }` → `{ answers: [{ id, selected, custom? }] }`
+//!   这是 `ctx.userQuestions` 的跨进程出口：preset 里的 `ask_user_question` 会停在
+//!   `UserQuestionProvider.ask()`，bridge 把官方问题形状原样转给宿主，等 Kivio 已有的
+//!   问用户卡片作答后再把官方 `AskUserQuestionAnswer` 回给工具。
+//!
 //! 服务端把完整的持久会话日志广播成 `session.event`，另有 `session.status`。一轮工具循环
 //! 会产生多个 step，所以 `assistant/chunk.finish` **不是轮终点**；真正终点是匹配 session 的
 //! `turn/end`，随后 `session.status: idle` 表示整台 agent 静止。
@@ -32,7 +38,9 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::chat::model::ModelUsage;
-use crate::external_agents::session::live::{SessionCommand, CANCELLED_SESSION_LOST};
+use crate::external_agents::session::live::{
+    ApprovalAsk, ApprovalBridge, ApprovalDecision, SessionCommand, CANCELLED_SESSION_LOST,
+};
 use crate::external_agents::types::UnifiedAgentEvent;
 use crate::proc::NoConsoleWindow;
 
@@ -233,6 +241,7 @@ impl DshJsonRpcSession {
         model: Option<&str>,
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
+        mut approvals: Option<&mut ApprovalBridge>,
     ) -> Result<(), String> {
         let requested_route = resolve_model_route_for_turn(model)?;
         if requested_route != self.route {
@@ -259,11 +268,29 @@ impl DshJsonRpcSession {
         let mut cancel_requested = false;
         let mut cancel_id: Option<u64> = None;
         let mut cancel_started: Option<std::time::Instant> = None;
+        let mut pending_asks: std::collections::HashMap<String, Value> =
+            std::collections::HashMap::new();
+        let mut last_user_question_call: Option<(String, String)> = None;
 
         loop {
+            if let Some(bridge) = approvals.as_deref_mut() {
+                while let Ok(decision) = bridge.decisions.try_recv() {
+                    settle_session_ask(&mut self.stdin, &mut pending_asks, decision).await?;
+                }
+            }
+
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => cancel_requested = true,
-                Ok(SessionCommand::Close) => return Err("closed".to_string()),
+                Ok(SessionCommand::Close) => {
+                    reject_pending_asks(
+                        &mut self.stdin,
+                        &mut pending_asks,
+                        "ASK_ABORTED",
+                        "ask_user_question was aborted before the user answered",
+                    )
+                    .await;
+                    return Err("closed".to_string());
+                }
                 Ok(SessionCommand::Steer { accepted, .. }) => {
                     let _ = accepted.send(false);
                 }
@@ -279,6 +306,15 @@ impl DshJsonRpcSession {
 
             // The transport dispatches JSON-RPC lines concurrently. Cancelling before the prompt ACK
             // can hit an idle agent, return success, and then let the prompt start afterwards.
+            if cancel_requested && !pending_asks.is_empty() {
+                reject_pending_asks(
+                    &mut self.stdin,
+                    &mut pending_asks,
+                    "ASK_ABORTED",
+                    "ask_user_question was aborted before the user answered",
+                )
+                .await;
+            }
             if cancel_requested && prompt_acknowledged && cancel_id.is_none() {
                 let id = self.next_id;
                 self.next_id += 1;
@@ -341,6 +377,19 @@ impl DshJsonRpcSession {
                 continue;
             }
 
+            if is_incoming_rpc_request(&value) {
+                handle_incoming_request(
+                    &mut self.stdin,
+                    &self.session_id,
+                    &value,
+                    approvals.as_deref_mut(),
+                    &mut pending_asks,
+                    last_user_question_call.as_ref(),
+                )
+                .await?;
+                continue;
+            }
+
             let Some(method) = value.get("method").and_then(Value::as_str) else {
                 continue;
             };
@@ -354,6 +403,13 @@ impl DshJsonRpcSession {
                 "session.status" => match params.get("status").and_then(Value::as_str) {
                     Some("running") => started = true,
                     Some("idle") if started && terminal.is_some() && cancel_id.is_none() => {
+                        reject_pending_asks(
+                            &mut self.stdin,
+                            &mut pending_asks,
+                            "ASK_ABORTED",
+                            "ask_user_question was aborted before the user answered",
+                        )
+                        .await;
                         return terminal.take().expect("checked above");
                     }
                     _ => {}
@@ -377,6 +433,11 @@ impl DshJsonRpcSession {
                         terminal = Some(result);
                     }
                     for event in mapped {
+                        if let UnifiedAgentEvent::ToolUse { id, name, .. } = &event {
+                            if is_user_question_tool(name) {
+                                last_user_question_call = Some((id.clone(), name.clone()));
+                            }
+                        }
                         let _ = events.send(event).await;
                     }
                 }
@@ -417,10 +478,16 @@ pub fn spawn_dsh_session_actor(mut session: DshJsonRpcSession) -> mpsc::Sender<S
                     images: _,
                     events,
                     done,
-                    approvals: _,
+                    mut approvals,
                 } => {
                     let result = session
-                        .run_turn(&prompt, model.as_deref(), &events, &mut rx)
+                        .run_turn(
+                            &prompt,
+                            model.as_deref(),
+                            &events,
+                            &mut rx,
+                            approvals.as_mut(),
+                        )
                         .await;
                     let _ = done.send(result);
                 }
@@ -440,18 +507,211 @@ pub fn spawn_dsh_session_actor(mut session: DshJsonRpcSession) -> mpsc::Sender<S
     tx
 }
 
-async fn write_rpc(
+const SESSION_ASK_METHOD: &str = "session/ask";
+
+pub fn is_user_question_tool(name: &str) -> bool {
+    crate::external_agents::ask_user::matches_tool("dsh", name)
+}
+
+fn is_incoming_rpc_request(value: &Value) -> bool {
+    value.get("method").and_then(Value::as_str).is_some() && rpc_id(value).is_some()
+}
+
+fn rpc_id(value: &Value) -> Option<Value> {
+    match value.get("id") {
+        Some(id) if id.is_string() || id.is_number() => Some(id.clone()),
+        _ => None,
+    }
+}
+
+fn rpc_id_key(id: &Value) -> Option<String> {
+    match id {
+        Value::String(value) if !value.is_empty() => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+async fn handle_incoming_request(
     stdin: &mut ChildStdin,
-    id: u64,
-    method: &str,
-    params: Value,
+    session_id: &str,
+    value: &Value,
+    approvals: Option<&mut ApprovalBridge>,
+    pending_asks: &mut std::collections::HashMap<String, Value>,
+    last_user_question_call: Option<&(String, String)>,
 ) -> Result<(), String> {
-    let payload = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
+    let Some(id) = rpc_id(value) else {
+        return Ok(());
+    };
+    let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+    if method != SESSION_ASK_METHOD {
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32601,
+            &format!("method not found: {method}"),
+            None,
+        )
+        .await;
+    }
+    let params = value.get("params").unwrap_or(&Value::Null);
+    if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32602,
+            "session/ask sessionId does not match the open session",
+            Some(json!({ "code": "ASK_MISSING_AGENT" })),
+        )
+        .await;
+    }
+    let Some(questions) = params.get("questions").filter(|value| {
+        value
+            .as_array()
+            .is_some_and(|questions| !questions.is_empty())
+    }) else {
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32602,
+            "ask_user_question requires at least one question",
+            Some(json!({ "code": "EMPTY_QUESTIONS" })),
+        )
+        .await;
+    };
+    let Some(bridge) = approvals else {
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32000,
+            "no user-questions provider is registered",
+            Some(json!({ "code": "NO_PROVIDER" })),
+        )
+        .await;
+    };
+    let Some(request_id) = rpc_id_key(&id) else {
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32602,
+            "session/ask is missing a request id",
+            None,
+        )
+        .await;
+    };
+    let (tool_call_id, tool_name) = last_user_question_call
+        .cloned()
+        .unwrap_or_else(|| (request_id.clone(), "ask_user_question".to_string()));
+    pending_asks.insert(request_id.clone(), id.clone());
+    if bridge
+        .requests
+        .send(ApprovalAsk {
+            request_id: request_id.clone(),
+            tool_call_id,
+            tool_name,
+            input: json!({ "questions": questions }),
+            requires_user_interaction: true,
+        })
+        .await
+        .is_err()
+    {
+        pending_asks.remove(&request_id);
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32000,
+            "ask_user_question was aborted before the user answered",
+            Some(json!({ "code": "ASK_ABORTED" })),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn settle_session_ask(
+    stdin: &mut ChildStdin,
+    pending_asks: &mut std::collections::HashMap<String, Value>,
+    decision: ApprovalDecision,
+) -> Result<(), String> {
+    let Some(id) = pending_asks.remove(&decision.request_id) else {
+        return Ok(());
+    };
+    if decision.approved {
+        if let Some(result) = decision.updated_input {
+            return write_rpc_result(stdin, &id, result).await;
+        }
+        return write_rpc_error(
+            stdin,
+            &id,
+            -32000,
+            "ask_user_question returned no answer payload",
+            Some(json!({ "code": "ASK_ABORTED" })),
+        )
+        .await;
+    }
+    write_rpc_error(
+        stdin,
+        &id,
+        -32000,
+        "the user cancelled ask_user_question",
+        Some(json!({ "code": "ASK_CANCELLED" })),
+    )
+    .await
+}
+
+async fn reject_pending_asks(
+    stdin: &mut ChildStdin,
+    pending_asks: &mut std::collections::HashMap<String, Value>,
+    code: &str,
+    message: &str,
+) {
+    let leftover: Vec<Value> = pending_asks.drain().map(|(_, id)| id).collect();
+    for id in leftover {
+        let _ = write_rpc_error(stdin, &id, -32000, message, Some(json!({ "code": code }))).await;
+    }
+}
+
+async fn write_rpc_result(stdin: &mut ChildStdin, id: &Value, result: Value) -> Result<(), String> {
+    write_rpc_frame(
+        stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }),
+    )
+    .await
+}
+
+async fn write_rpc_error(
+    stdin: &mut ChildStdin,
+    id: &Value,
+    code: i64,
+    message: &str,
+    data: Option<Value>,
+) -> Result<(), String> {
+    let mut error = json!({
+        "code": code,
+        "message": message,
     });
+    if let Some(data) = data {
+        error
+            .as_object_mut()
+            .expect("error object")
+            .insert("data".to_string(), data);
+    }
+    write_rpc_frame(
+        stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": error,
+        }),
+    )
+    .await
+}
+
+async fn write_rpc_frame(stdin: &mut ChildStdin, payload: Value) -> Result<(), String> {
     let mut line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     line.push('\n');
     stdin
@@ -459,6 +719,24 @@ async fn write_rpc(
         .await
         .map_err(|e| format!("write dsh: {e}"))?;
     stdin.flush().await.map_err(|e| format!("flush dsh: {e}"))
+}
+
+async fn write_rpc(
+    stdin: &mut ChildStdin,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    write_rpc_frame(
+        stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }),
+    )
+    .await
 }
 
 async fn read_until_response(
@@ -781,6 +1059,29 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_dsh_user_question_tools_and_incoming_ask_requests() {
+        assert!(is_user_question_tool("ask_user_question"));
+        assert!(is_user_question_tool("exit_plan_mode"));
+        assert!(!is_user_question_tool("bash"));
+        let ask = json!({
+            "jsonrpc": "2.0",
+            "id": "req_abc",
+            "method": "session/ask",
+            "params": {
+                "sessionId": "kivio-1",
+                "questions": [{ "id": "q1", "question": "Tea or coffee?" }]
+            }
+        });
+        assert!(is_incoming_rpc_request(&ask));
+        assert_eq!(rpc_id_key(&ask["id"]).as_deref(), Some("req_abc"));
+        assert!(!is_incoming_rpc_request(&json!({
+            "jsonrpc": "2.0",
+            "method": "session.event",
+            "params": { "sessionId": "kivio-1" }
+        })));
+    }
+
+    #[test]
     fn classifies_only_missing_resume_targets_for_fresh_fallback() {
         assert!(is_missing_session_error(
             "dsh session/open: session \"kivio-old\" not found"
@@ -966,6 +1267,7 @@ mod tests {
                 Some("deepseek-v4-flash"),
                 &event_tx,
                 &mut control_rx,
+                None,
             )
             .await
             .expect("live dsh turn");
@@ -1030,6 +1332,7 @@ mod tests {
                 Some("deepseek-v4-flash"),
                 &event_tx,
                 &mut control_rx,
+                None,
             )
             .await
             .expect("first dsh turn");
@@ -1054,6 +1357,7 @@ mod tests {
                 Some("deepseek-v4-flash"),
                 &event_tx,
                 &mut control_rx,
+                None,
             )
             .await
             .expect("second dsh turn after process restart");
@@ -1118,6 +1422,7 @@ mod tests {
                 Some("deepseek-v4-flash"),
                 &event_tx,
                 &mut control_rx,
+                None,
             )
             .await
             .expect_err("cancel must stop the active dsh turn");
@@ -1129,6 +1434,7 @@ mod tests {
                 Some("deepseek-v4-flash"),
                 &event_tx,
                 &mut control_rx,
+                None,
             )
             .await
             .expect("session should remain usable after cancel");

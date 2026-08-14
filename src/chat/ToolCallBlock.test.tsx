@@ -417,6 +417,74 @@ describe('ToolCallBlock', () => {
     expect(screen.queryByText('指数退避')).not.toBeInTheDocument()
   })
 
+  it('does not treat claude ExitPlanMode as the ask-user card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'ExitPlanMode',
+          source: 'external_cli',
+          status: 'running',
+          arguments: { plan: '先改测试再改实现。' },
+        })}
+      />,
+    )
+    expect(screen.queryByText(/等待你回答/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/等待用户确认/)).not.toBeInTheDocument()
+  })
+
+  it('renders dsh exit_plan_mode as the ask-user card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'exit_plan_mode',
+          source: 'external_cli',
+          status: 'running',
+          structured_content: {
+            askUser: {
+              phase: 'awaiting',
+              questions: [{
+                id: 'plan',
+                prompt: '按这份计划执行？',
+                options: [{ id: '0', label: '执行' }, { id: '1', label: '再改改' }],
+                allow_multiple: false,
+                allow_custom: true,
+              }],
+              answers: {},
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText(/等待你回答/)).toBeInTheDocument()
+  })
+
+  it('renders dsh ask_user_question as the same inline ask-user trace', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'ask_user_question',
+          source: 'external_cli',
+          status: 'running',
+          structured_content: {
+            askUser: {
+              phase: 'awaiting',
+              questions: [{
+                id: 'runtime',
+                prompt: '用哪个运行时？',
+                options: [{ id: '0', label: 'Bun' }, { id: '1', label: 'Node' }],
+                allow_multiple: false,
+                allow_custom: true,
+              }],
+              answers: {},
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText(/等待你回答/)).toBeInTheDocument()
+    expect(screen.queryByRole('option')).not.toBeInTheDocument()
+  })
+
   it('maps claude WebFetch / TodoWrite through the snake_case aliases', () => {
     const { unmount } = render(
       <ToolCallBlock
