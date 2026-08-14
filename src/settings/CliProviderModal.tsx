@@ -59,6 +59,7 @@ import {
 } from './cliCodexPresets'
 import {
   buildNativeCliProvider,
+  dshApiKeyEnv,
   emptyNativeModel,
   isValidNativeProviderId,
   nativeProviderIdFromName,
@@ -257,8 +258,10 @@ export function CliProviderModal({
   const isKimi = agentId === 'kimi'
   const isOpenCode = agentId === 'opencode'
   const isPi = agentId === 'pi'
-  const isNative = isOpenCode || isPi
-  const nativeAgentId: NativeCliAgentId = isPi ? 'pi' : 'opencode'
+  const isDsh = agentId === 'dsh'
+  const usesPiSchema = isPi || isDsh
+  const isNative = isOpenCode || usesPiSchema
+  const nativeAgentId: NativeCliAgentId = isDsh ? 'dsh' : isPi ? 'pi' : 'opencode'
   const codexInitial = isCodex ? initialCodexTomlAuth(initial) : null
   const grokInitialToml = isGrok ? initialGrokToml(initial) : ''
   const kimiInitialToml = isKimi ? initialKimiToml(initial) : ''
@@ -319,11 +322,11 @@ export function CliProviderModal({
   const nativeModelOptions = useMemo<SelectOption[]>(
     () => normalizeNativeModels(nativeForm.models).map((model) => ({
       value: model.id,
-      label: isPi
+      label: usesPiSchema
         ? resolvePiModelMetadata(model).displayName
         : resolveOpenCodeModelMetadata(model).displayName,
     })),
-    [isPi, nativeForm.models],
+    [usesPiSchema, nativeForm.models],
   )
   const defaultPiModel = useMemo(
     () => nativeForm.models.find((model) => model.id.trim() === nativeForm.defaultModel.trim()),
@@ -695,18 +698,18 @@ export function CliProviderModal({
     if (isNative) {
       const sourceId = initial?.id || `p-${Date.now().toString(36)}`
       const openCodeNeedsUrl = isOpenCode && nativeForm.api === '@ai-sdk/openai-compatible'
-      if ((isPi || openCodeNeedsUrl) && !nativeForm.baseUrl.trim()) {
+      if ((usesPiSchema || openCodeNeedsUrl) && !nativeForm.baseUrl.trim()) {
         setError(t.externalAgentsProviderUrlRequired)
         return
       }
-      if (isPi && !nativeForm.apiKey.trim()) {
+      if (usesPiSchema && !nativeForm.apiKey.trim()) {
         setError(t.externalAgentsProviderKeyRequired)
         return
       }
       const nativeProviderId = nativeForm.nativeProviderId.trim()
         || nativeProviderIdFromName(name)
         || nativeProviderIdFromName(sourceId)
-      if ((isOpenCode || isPi) && !isValidNativeProviderId(nativeProviderId)) {
+      if ((isOpenCode || usesPiSchema) && !isValidNativeProviderId(nativeProviderId)) {
         setError(t.externalAgentsOpenCodeProviderIdInvalid)
         return
       }
@@ -744,13 +747,16 @@ export function CliProviderModal({
       }
       const native = buildNativeCliProvider(nativeAgentId, name.trim(), {
         ...nativeForm,
+        nativeProviderId,
         models,
       })
       onSave({
         id: sourceId,
         name: name.trim(),
         remark: remark.trim(),
-        env: [],
+        env: isDsh
+          ? [{ key: dshApiKeyEnv(nativeProviderId), value: nativeForm.apiKey.trim() }]
+          : [],
         configToml: '',
         nativeProviderId,
         ...native,
@@ -777,9 +783,11 @@ export function CliProviderModal({
   )
 
   /** 头部副标题：说明这份配置写到哪、影响范围多大。与列表页底部的 scope 提示同一口径。 */
-  const scopeHint = isNative || isGrok || isKimi
-    ? t.externalAgentsNativeScope
-    : t.externalAgentsProviderScope
+  const scopeHint = isDsh
+    ? t.externalAgentsProviderScope
+    : isNative || isGrok || isKimi
+      ? t.externalAgentsNativeScope
+      : t.externalAgentsProviderScope
 
   const relayPresets = useMemo(
     () => [CLAUDE_CUSTOM_PRESET, ...CLAUDE_RELAY_PRESETS],
@@ -1566,7 +1574,7 @@ export function CliProviderModal({
         <div className="kv-native-section-head">
           <h4>{t.externalAgentsNativeConnectionSection}</h4>
         </div>
-        <div className={`kv-native-connection-grid ${isPi ? 'kv-native-connection-grid--pi' : 'kv-native-connection-grid--opencode'}`}>
+        <div className={`kv-native-connection-grid ${usesPiSchema ? 'kv-native-connection-grid--pi' : 'kv-native-connection-grid--opencode'}`}>
           {isOpenCode && (
             <div className="kv-form-block">
               <FieldLabel text={t.externalAgentsOpenCodeSdkPackage} required />
@@ -1590,7 +1598,7 @@ export function CliProviderModal({
           <div className="kv-form-block">
             <FieldLabel
               text={t.externalAgentsProviderApiUrl}
-              required={isPi || nativeForm.api === '@ai-sdk/openai-compatible'}
+              required={usesPiSchema || nativeForm.api === '@ai-sdk/openai-compatible'}
             />
             <Input
               value={nativeForm.baseUrl}
@@ -1600,7 +1608,7 @@ export function CliProviderModal({
             />
           </div>
           <div className="kv-form-block">
-            <FieldLabel text={t.externalAgentsProviderApiKey} required={isPi} />
+            <FieldLabel text={t.externalAgentsProviderApiKey} required={usesPiSchema} />
             <div className="kv-key-field">
               <Input
                 value={nativeForm.apiKey}
@@ -1618,7 +1626,7 @@ export function CliProviderModal({
               </IconButton>
             </div>
           </div>
-          {isPi && (
+          {usesPiSchema && (
             <div className="kv-form-block">
               <FieldLabel text={t.externalAgentsNativeProtocol} required />
               <Select
@@ -1629,7 +1637,7 @@ export function CliProviderModal({
             </div>
           )}
         </div>
-        {isOpenCode && (
+        {(isOpenCode || isDsh) && (
           <div className="kv-native-provider-advanced">
             <button
               type="button"
@@ -1693,7 +1701,7 @@ export function CliProviderModal({
         </div>
 
         <div className="kv-native-model-list">
-          {isPi && (
+          {usesPiSchema && (
             <div className="kv-native-model-columns" aria-hidden>
               <span />
               <span>{t.externalAgentsNativeModelId}</span>
@@ -1702,17 +1710,17 @@ export function CliProviderModal({
             </div>
           )}
           {nativeForm.models.map((model, idx) => {
-            const metadata = isPi
+            const metadata = usesPiSchema
               ? resolvePiModelMetadata(model)
               : resolveOpenCodeModelMetadata(model)
             const expanded = expandedNativeModels.has(idx)
             const automaticLabel = metadata?.matched
               ? t.externalAgentsPiMetadataMatched
-              : isPi ? t.externalAgentsPiMetadataDefault : t.externalAgentsOpenCodeMetadataDefault
+              : usesPiSchema ? t.externalAgentsPiMetadataDefault : t.externalAgentsOpenCodeMetadataDefault
             return (
               <div key={idx} className={`kv-native-model-row ${expanded ? 'is-expanded' : ''}`}>
                 <div className={`kv-native-model-main ${isOpenCode ? 'kv-native-model-main--opencode' : ''}`}>
-                  {isPi && (
+                  {usesPiSchema && (
                     <span className="kv-native-model-index">{String(idx + 1).padStart(2, '0')}</span>
                   )}
                   <SuggestInput
@@ -1802,7 +1810,7 @@ export function CliProviderModal({
                     <div className="kv-native-model-advanced-head">
                       <span>{t.externalAgentsPiModelOverrides}</span>
                       <span>
-                        {isPi
+                        {usesPiSchema
                           ? t.externalAgentsPiModelOverridesHint
                           : t.externalAgentsOpenCodeModelOverridesHint}
                       </span>
@@ -1941,12 +1949,12 @@ export function CliProviderModal({
         )}
       </section>
 
-      {isPi && (
+      {usesPiSchema && (
         <section className="kv-native-section">
           <div className="kv-native-section-head">
             <div>
               <h4>{t.externalAgentsNativeStartupSection}</h4>
-              <p>{t.externalAgentsNativeDefaultHint}</p>
+              <p>{isDsh ? t.externalAgentsDshDefaultHint : t.externalAgentsNativeDefaultHint}</p>
             </div>
           </div>
           <div className="kv-form-grid">
@@ -1959,7 +1967,9 @@ export function CliProviderModal({
                   return {
                     ...prev,
                     defaultModel,
-                    defaultThinkingLevel: recommendedPiThinkingLevel(model),
+                    defaultThinkingLevel: isPi
+                      ? recommendedPiThinkingLevel(model)
+                      : prev.defaultThinkingLevel,
                   }
                 })}
                 options={nativeModelOptions}
@@ -1968,20 +1978,22 @@ export function CliProviderModal({
                 ariaLabel={t.externalAgentsCodexDefaultModel}
               />
             </div>
-            <div className="kv-form-block">
-              <FieldLabel text={t.externalAgentsPiDefaultThinking} required />
-              <Select
-                value={nativeForm.defaultThinkingLevel}
-                onChange={(defaultThinkingLevel) => setNativeForm((prev) => ({
-                  ...prev,
-                  defaultThinkingLevel,
-                }))}
-                options={piThinkingOptions.map((level) => ({
-                  value: level,
-                  label: level === 'off' ? t.externalAgentsPiThinkingOff : level,
-                }))}
-              />
-            </div>
+            {isPi && (
+              <div className="kv-form-block">
+                <FieldLabel text={t.externalAgentsPiDefaultThinking} required />
+                <Select
+                  value={nativeForm.defaultThinkingLevel}
+                  onChange={(defaultThinkingLevel) => setNativeForm((prev) => ({
+                    ...prev,
+                    defaultThinkingLevel,
+                  }))}
+                  options={piThinkingOptions.map((level) => ({
+                    value: level,
+                    label: level === 'off' ? t.externalAgentsPiThinkingOff : level,
+                  }))}
+                />
+              </div>
+            )}
           </div>
         </section>
       )}

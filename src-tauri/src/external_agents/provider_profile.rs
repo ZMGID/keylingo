@@ -22,6 +22,9 @@
 //!    shell 环境变量）。把供应商片段里的 `default_model` / `[providers.*]` / `[models.*]`
 //!    合并进现有文件；`managed:kimi-code` OAuth 段与其它用户配置原样保留。首次接管前
 //!    整份备份，切回「CLI 自身配置」时还原。
+//! 7. **dsh 的 Kivio 私有 profile** —— provider 本体由 `dsh_profile.rs` 写进
+//!    `profiles/kivio/cordis.patch.yml` 的 `llm-pi-ai.providers`；本层只负责把 `apiKeyEnv`
+//!    指向的 Key 注入 Kivio 启动的进程，不改用户的 `settings.yaml` 或其它 profile。
 //!
 //! 物化时机是**保存 / 切换供应商那一次**（`commands::chat_external_cli_provider_apply`），
 //! 不是每轮。ccgui 用的是 per-turn 临时目录 + `Drop` 删除，那套在 Kivio 会把常驻 claude

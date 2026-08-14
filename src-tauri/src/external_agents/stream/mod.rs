@@ -8,9 +8,12 @@ pub mod claude;
 pub fn create_stream_handler(format: StreamFormat) -> StreamHandler {
     match format {
         StreamFormat::ClaudeStreamJson => StreamHandler(claude::ClaudeStreamState::default()),
-        // PiRpc / AcpJsonRpc / CodexAppServer are driven by dedicated session runners in run.rs and
-        // never reach this factory.
-        StreamFormat::PiRpc | StreamFormat::AcpJsonRpc | StreamFormat::CodexAppServer => {
+        // PiRpc / AcpJsonRpc / CodexAppServer / DshJsonRpc are driven by dedicated session
+        // runners in run.rs and never reach this factory.
+        StreamFormat::PiRpc
+        | StreamFormat::AcpJsonRpc
+        | StreamFormat::CodexAppServer
+        | StreamFormat::DshJsonRpc => {
             unreachable!("{format:?} uses a dedicated session runner, not create_stream_handler")
         }
     }

@@ -1,7 +1,7 @@
 import type { ExternalCliProvider } from '../api/tauri'
 import { matchModelExact } from '../data/modelMatching'
 
-export type NativeCliAgentId = 'opencode' | 'pi'
+export type NativeCliAgentId = 'opencode' | 'pi' | 'dsh'
 
 export type NativeCliModel = {
   id: string
@@ -97,6 +97,11 @@ export function nativeProviderIdFromName(name: string): string {
 
 export function isValidNativeProviderId(value: string): boolean {
   return /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(value)
+}
+
+export function dshApiKeyEnv(providerId: string): string {
+  const suffix = providerId.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_') || 'PROVIDER'
+  return `KIVIO_DSH_${suffix}_API_KEY`
 }
 
 export function emptyNativeModel(agentId: NativeCliAgentId, id = ''): NativeCliModel {
@@ -347,12 +352,51 @@ function readLegacyPiModel(item: Record<string, unknown>, id: string): NativeCli
   }
 }
 
+function readLegacyDshModel(item: Record<string, unknown>, id: string): NativeCliModel {
+  const automatic = resolvePiModelMetadata(emptyNativeModel('dsh', id))
+  const configuredName = stringValue(item.name)
+  const configuredContextWindow = positiveIntegerString(item.contextWindow)
+  const configuredMaxTokens = positiveIntegerString(item.maxTokens)
+  const configuredInput = Array.isArray(item.input)
+    ? item.input.filter((value): value is string => typeof value === 'string')
+    : null
+  const configuredVision = configuredInput ? configuredInput.includes('image') : null
+  const efforts = item.reasoningEfforts
+  const configuredReasoning = efforts === false
+    ? false
+    : efforts && typeof efforts === 'object' && !Array.isArray(efforts)
+      ? Object.keys(efforts).length > 0
+      : null
+  return {
+    id,
+    name: configuredName && configuredName !== id && configuredName !== automatic.displayName
+      ? configuredName
+      : '',
+    reasoning: configuredReasoning !== null && configuredReasoning !== automatic.reasoning
+      ? configuredReasoning
+      : null,
+    vision: configuredVision !== null && configuredVision !== automatic.vision
+      ? configuredVision
+      : null,
+    contextWindow: configuredContextWindow
+      && Number(configuredContextWindow) !== automatic.contextWindow
+      ? configuredContextWindow
+      : '',
+    maxTokens: configuredMaxTokens && Number(configuredMaxTokens) !== automatic.maxTokens
+      ? configuredMaxTokens
+      : '',
+  }
+}
+
 export function readNativeCliProvider(
   agentId: NativeCliAgentId,
   initial?: ExternalCliProvider | null,
 ): NativeCliProviderForm {
   const config = objectValue(initial?.configJson)
   const auth = objectValue(initial?.authJson)
+  const nativeProviderId = initial?.nativeProviderId?.trim()
+    || nativeProviderIdFromName(initial?.name ?? '')
+    || ''
   let baseUrl = ''
   let api = 'openai-completions'
   let models: NativeCliModel[] = []
@@ -376,7 +420,8 @@ export function readNativeCliProvider(
         : readLegacyOpenCodeModel(item, id)
     })
   } else {
-    baseUrl = stringValue(config.baseUrl)
+    const isDsh = agentId === 'dsh'
+    baseUrl = stringValue(isDsh ? config.baseURL : config.baseUrl)
     api = PI_API_OPTIONS.includes(config.api as typeof PI_API_OPTIONS[number])
       ? config.api as string
       : 'openai-completions'
@@ -388,13 +433,16 @@ export function readNativeCliProvider(
           if (!id) return []
           return [persistedModels !== null
             ? readPersistedPiModel(persistedModels[id], id)
-            : readLegacyPiModel(item, id)]
+            : isDsh ? readLegacyDshModel(item, id) : readLegacyPiModel(item, id)]
         })
       : []
   }
 
   baseUrl ||= legacyEnv(initial, /BASE_URL$/i)
-  const apiKey = stringValue(auth.key) || legacyEnv(initial, /(API_KEY|AUTH_TOKEN)$/i)
+  const configuredKeyEnv = stringValue(config.apiKeyEnv)
+  const apiKey = agentId === 'dsh'
+    ? initial?.env?.find((pair) => pair.key === (configuredKeyEnv || dshApiKeyEnv(nativeProviderId)))?.value ?? ''
+    : stringValue(auth.key) || legacyEnv(initial, /(API_KEY|AUTH_TOKEN)$/i)
   const normalized = normalizeNativeModels(models)
   const defaultModel = initial?.defaultModel?.trim() || normalized[0]?.id || ''
   const defaultPiModel = normalized.find((model) => model.id === defaultModel)
@@ -405,9 +453,7 @@ export function readNativeCliProvider(
     : null
   const supportedThinkingLevels = piThinkingOptionsForModel(defaultPiModel)
   return {
-    nativeProviderId: initial?.nativeProviderId?.trim()
-      || nativeProviderIdFromName(initial?.name ?? '')
-      || '',
+    nativeProviderId,
     baseUrl,
     apiKey,
     api,
@@ -496,29 +542,53 @@ export function buildNativeCliProvider(
           })),
         }
       })()
-    : {
-        name,
-        baseUrl: form.baseUrl.trim(),
-        api: form.api,
-        models: models.map((model) => {
-          const resolved = resolvePiModelMetadata(model)
-          return {
-            id: model.id,
-            name: resolved.displayName,
-            reasoning: resolved.reasoning,
-            input: resolved.vision ? ['text', 'image'] : ['text'],
-            contextWindow: resolved.contextWindow,
-            maxTokens: resolved.maxTokens,
-            ...(resolved.thinkingLevelMap ? { thinkingLevelMap: resolved.thinkingLevelMap } : {}),
-            ...(form.api === 'anthropic-messages' && isPiAdaptiveThinkingModel(model.id)
-              ? { compat: { forceAdaptiveThinking: true } }
-              : {}),
-          }
-        }),
-      }
+    : agentId === 'dsh'
+      ? {
+          ...sourceConfig,
+          displayName: name,
+          apiKeyEnv: dshApiKeyEnv(form.nativeProviderId),
+          api: form.api,
+          baseURL: form.baseUrl.trim(),
+          models: models.map((model) => {
+            const resolved = resolvePiModelMetadata(model)
+            return {
+              id: model.id,
+              name: resolved.displayName,
+              contextWindow: resolved.contextWindow,
+              maxTokens: resolved.maxTokens,
+              input: resolved.vision ? ['text', 'image'] : ['text'],
+              reasoningEfforts: resolved.reasoning
+                ? Object.fromEntries(resolved.thinkingLevels.map((level) => [
+                    level,
+                    level === 'off' ? null : level,
+                  ]))
+                : false,
+            }
+          }),
+        }
+      : {
+          name,
+          baseUrl: form.baseUrl.trim(),
+          api: form.api,
+          models: models.map((model) => {
+            const resolved = resolvePiModelMetadata(model)
+            return {
+              id: model.id,
+              name: resolved.displayName,
+              reasoning: resolved.reasoning,
+              input: resolved.vision ? ['text', 'image'] : ['text'],
+              contextWindow: resolved.contextWindow,
+              maxTokens: resolved.maxTokens,
+              ...(resolved.thinkingLevelMap ? { thinkingLevelMap: resolved.thinkingLevelMap } : {}),
+              ...(form.api === 'anthropic-messages' && isPiAdaptiveThinkingModel(model.id)
+                ? { compat: { forceAdaptiveThinking: true } }
+                : {}),
+            }
+          }),
+        }
   const auth = agentId === 'opencode'
     ? form.apiKey.trim() ? { type: 'api', key: form.apiKey.trim() } : null
-    : { type: 'api_key', key: form.apiKey.trim() }
+    : agentId === 'dsh' ? null : { type: 'api_key', key: form.apiKey.trim() }
   return {
     configJson: JSON.stringify(config, null, 2),
     authJson: auth ? JSON.stringify(auth, null, 2) : '',

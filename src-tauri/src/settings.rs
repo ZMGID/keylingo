@@ -698,6 +698,7 @@ pub struct ExternalCliAgentConfig {
 /// - codex：只用 `config_toml` / `auth_json`，物化成一个私有 `CODEX_HOME`
 /// - grok：只用 `config_toml`，把其中的 `[models]` / `[model.*]` 合并进 `~/.grok/config.toml`
 /// - opencode / pi：用 `config_json` / `auth_json` / `default_model` 合并进 CLI 原生全局配置
+/// - dsh：用 `config_json` 在 Kivio 私有 profile 中挂载 `llm-pi-ai`，Key 通过 `env` 注入
 /// - pi：另用 `default_reasoning` 写入 `settings.json.defaultThinkingLevel`
 ///
 /// 扁平结构而不是 tagged enum：settings.json 是用户可手改的文件，enum 的 tag 写错整条读不出来。
@@ -717,9 +718,9 @@ pub struct ExternalCliProvider {
     pub auth_json: String,
     /// Kivio 自用的模型覆盖状态；不写入 CLI 原生配置。
     pub model_metadata_json: String,
-    /// opencode / pi：原生配置中可被 `provider/model` 引用的稳定供应商 id。
+    /// opencode / pi / dsh：模型引用使用的稳定供应商 id（dsh wire 为 `provider:model`）。
     pub native_provider_id: String,
-    /// opencode / pi：启用该供应商时写入原生设置的模型 id（不含 provider 前缀）。
+    /// opencode / pi / dsh：启用该供应商时使用的默认模型 id（不含 provider 前缀）。
     pub default_model: String,
     /// pi：终端独立启动时使用的默认 thinking 档位。
     pub default_reasoning: String,

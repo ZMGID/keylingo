@@ -15,6 +15,7 @@ pub mod claude_init;
 /// 常驻 `claude` 会话（B1）：一个会话一个进程。
 pub mod claude_stream;
 pub mod codex_app_server;
+pub mod dsh_jsonrpc;
 pub mod live;
 pub mod pi_rpc;
 

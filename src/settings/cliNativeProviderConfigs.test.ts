@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildNativeCliProvider,
+  dshApiKeyEnv,
   emptyNativeModel,
   nativeProviderIdFromName,
   readNativeCliProvider,
@@ -150,6 +151,66 @@ describe('cliNativeProviderConfigs', () => {
       models: [{
         id: 'gpt-test',
         name: '',
+        reasoning: true,
+        vision: false,
+        contextWindow: '256000',
+        maxTokens: '32768',
+      }],
+    })
+  })
+
+  it('builds and round-trips a dsh llm-pi-ai provider without storing the key in config JSON', () => {
+    const built = buildNativeCliProvider('dsh', 'Relay', {
+      nativeProviderId: 'relay-one',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'sk-dsh',
+      api: 'openai-responses',
+      models: [{
+        id: 'gpt-test',
+        name: 'GPT Test',
+        reasoning: true,
+        vision: false,
+        contextWindow: '256000',
+        maxTokens: '32768',
+      }],
+      defaultModel: 'gpt-test',
+      defaultThinkingLevel: 'off',
+      sourceConfigJson: '',
+    })
+    const config = JSON.parse(built.configJson!)
+    expect(config).toMatchObject({
+      displayName: 'Relay',
+      apiKeyEnv: 'KIVIO_DSH_RELAY_ONE_API_KEY',
+      api: 'openai-responses',
+      baseURL: 'https://relay.example/v1',
+      models: [{
+        id: 'gpt-test',
+        name: 'GPT Test',
+        contextWindow: 256000,
+        maxTokens: 32768,
+        input: ['text'],
+      }],
+    })
+    expect(config.models[0].reasoningEfforts).toMatchObject({ off: null, high: 'high' })
+    expect(JSON.stringify(config)).not.toContain('sk-dsh')
+    expect(built.authJson).toBe('')
+    expect(dshApiKeyEnv('relay-one')).toBe('KIVIO_DSH_RELAY_ONE_API_KEY')
+
+    const read = readNativeCliProvider('dsh', {
+      id: 'p-dsh',
+      name: 'Relay',
+      nativeProviderId: 'relay-one',
+      env: [{ key: 'KIVIO_DSH_RELAY_ONE_API_KEY', value: 'sk-dsh' }],
+      ...built,
+    })
+    expect(read).toMatchObject({
+      nativeProviderId: 'relay-one',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'sk-dsh',
+      api: 'openai-responses',
+      defaultModel: 'gpt-test',
+      models: [{
+        id: 'gpt-test',
         reasoning: true,
         vision: false,
         contextWindow: '256000',

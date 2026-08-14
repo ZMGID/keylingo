@@ -531,8 +531,9 @@ const SCENARIOS = [
 
   {
     name: 'tool-call-shape',
-    desc: '真实工具调用的形态：name=Read、arguments 带 file_path',
+    desc: '真实工具调用的形态：原生 read 工具、arguments 带 file_path',
     async run() {
+      const expectedReadName = AGENT === 'dsh' ? 'read' : 'Read'
       const r = await turn('tool-call-shape', {
         prompt:
           `Use the Read tool to read the file ${SENTINEL_NAME} in the current working directory, ` +
@@ -541,29 +542,31 @@ const SCENARIOS = [
       check(r.streamOutcome === 'completed', '本轮应正常完成', r.streamOutcome)
       const calls = r.toolCalls || []
       check(calls.length > 0, '一次工具调用都没有 —— 模型没读文件，或工具事件没落到消息上', r)
-      const read = calls.find((c) => c.name === 'Read')
+      const read = calls.find((c) => c.name === expectedReadName)
       check(
         !!read,
-        ' 没有名为 Read 的工具调用（claude 的内置工具名是 PascalCase 的 Read，不是 read）',
+        `没有名为 ${expectedReadName} 的工具调用（各 CLI 保留自己的原生工具名）`,
         calls.map((c) => c.name),
       )
       let args = {}
       try {
         args = JSON.parse(read.arguments || '{}')
       } catch {
-        throw new AssertError(`Read 的 arguments 不是合法 JSON\n     实际：${fmt(read.arguments)}`)
+        throw new AssertError(
+          `${expectedReadName} 的 arguments 不是合法 JSON\n     实际：${fmt(read.arguments)}`,
+        )
       }
       check(
         typeof args.file_path === 'string' && args.file_path.length > 0,
-        'Read 的入参里没有 file_path（claude 用 file_path，不是 path）',
+        `${expectedReadName} 的入参里没有 file_path`,
         args,
       )
       check(
         args.file_path.includes(SENTINEL_NAME),
-        `Read 读的不是 ${SENTINEL_NAME}`,
+        `${expectedReadName} 读的不是 ${SENTINEL_NAME}`,
         args.file_path,
       )
-      check(read.status === 'success', 'Read 应执行成功', read)
+      check(read.status === 'success', `${expectedReadName} 应执行成功`, read)
       check(answerOf(r).includes(SENTINEL_TEXT), '回答里没有文件内容 ⇒ 工具结果没回到模型', r.answer)
       // 工具卡应在分段里占一个位置，且顺序在正文分段之前/之间可见。
       const kinds = r.segments || []
@@ -573,25 +576,26 @@ const SCENARIOS = [
 
   {
     name: 'config-reconnect',
-    desc: '启动参数变更触发重连：换 sandbox 档位 → pid 变了 → 但上下文还在',
+    desc:
+      AGENT === 'dsh'
+        ? '启动配置变更触发重连：PID 变化，并明确提示上下文已重置'
+        : '启动参数变更触发重连：换 sandbox 档位 → pid 变了 → 但上下文还在',
     async run() {
+      const dsh = AGENT === 'dsh'
       const t1 = await turn('config-reconnect', {
         prompt: 'Answer with one word only. Remember the number 91.',
-        externalSandbox: 'bypassPermissions',
+        externalSandbox: dsh ? 'read-only' : 'bypassPermissions',
       })
       check(t1.streamOutcome === 'completed', '第 1 轮应正常完成', t1.streamOutcome)
       const pid1 = t1.liveSession.childPid
       check(typeof pid1 === 'number', '第 1 轮应拿到 pid', t1.liveSession)
 
-      // sandbox 是 claude 的**启动 flag**（`--permission-mode`），会话内无从切换 ⇒
-      // `LaunchConfig` 指纹不匹配 ⇒ 轮前丢弃条目、换进程、并带原生 `--resume`。
-      // 选 sandbox 而不是 model 作为变更项：sandbox 只影响指纹这一条路，而 model 还牵动
-      // `resolve_agent_resume_context` 里「要不要开新会话」那条独立判据，两条路混在一个
-      // 场景里，红了分不清是哪条。
+      // sandbox 是进程级配置；LaunchConfig 指纹不匹配时必须轮前丢弃旧条目并换进程。
+      // Claude 能通过原生 --resume 恢复；dsh SDK server 是 create-only，只能明确重置上下文。
       const t2 = await turn('config-reconnect', {
         conversationId: t1.conversationId,
         prompt: 'What number did I ask you to remember? Reply with just the number.',
-        externalSandbox: 'acceptEdits',
+        externalSandbox: dsh ? 'workspace-write' : 'acceptEdits',
       })
       check(t2.streamOutcome === 'completed', '重连后的这一轮应正常完成', t2.streamOutcome)
       check(
@@ -604,17 +608,26 @@ const SCENARIOS = [
         '重连后应是一个新进程（turnsServed 从 1 起算）',
         t2.liveSession,
       )
-      check(
-        answerOf(t2).includes('91'),
-        '重连丢了上下文（应带 --resume 续上原生会话，而不是开新的）',
-        t2.answer,
-      )
-      check(
-        !/上下文已重置|context.*reset/i.test(answerOf(t2)),
-        '真的续上了却发了「上下文已重置」提示 —— 假提示本身就是 bug',
-        t2.answer,
-      )
-    },
+      if (dsh) {
+        check(
+          /上下文已重置|context.*reset/i.test(answerOf(t2)),
+          'dsh 不能跨进程 resume，重连后必须明确提示上下文已重置',
+          t2.answer,
+        )
+        check(!answerOf(t2).includes('91'), 'dsh 已提示重置却又伪装成保留了上下文', t2.answer)
+      } else {
+        check(
+          answerOf(t2).includes('91'),
+          '重连丢了上下文（应带 --resume 续上原生会话，而不是开新的）',
+          t2.answer,
+        )
+        check(
+          !/上下文已重置|context.*reset/i.test(answerOf(t2)),
+          '真的续上了却发了「上下文已重置」提示 —— 假提示本身就是 bug',
+          t2.answer,
+        )
+      }
+    }
   },
 ]
 

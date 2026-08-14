@@ -518,7 +518,8 @@ export type ExternalCliAgentConfig = {
  * codex 用 `configToml` + `authJson`（物化成私有 CODEX_HOME）；
  * grok 用 `configToml`（把 models / model 段合并进 `~/.grok/config.toml`）；
  * kimi 用 `configToml`（把 providers / models / default_model 合并进 `~/.kimi-code/config.toml`）；
- * OpenCode / Pi 用 `configJson` + `authJson` + `defaultModel` 合并进原生全局配置；
+ * OpenCode / Pi 用 `configJson` + `authJson` + `defaultModel` 合并进原生配置；
+ * dsh 用 `configJson` 在 Kivio 私有 profile 中挂载 `llm-pi-ai`，Key 通过 `env` 注入；
  * Pi 另用 `defaultReasoning` 写入终端默认 thinking 档位。
  */
 export type ExternalCliProvider = {
@@ -531,7 +532,7 @@ export type ExternalCliProvider = {
   authJson?: string
   /** Kivio-only model override state; never written into the CLI native config. */
   modelMetadataJson?: string
-  /** Stable provider id used by OpenCode/Pi native config references. */
+  /** Stable route/provider id used by OpenCode, Pi, and dsh model references. */
   nativeProviderId?: string
   defaultModel?: string
   defaultReasoning?: string

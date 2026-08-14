@@ -494,10 +494,20 @@ export interface CliImportResult {
   failures: Array<{ agentId: string; sessionId: string; error: string }>
 }
 
+export interface NativeProviderSummary {
+  id: string
+  name: string
+  baseUrl?: string | null
+  api?: string | null
+  modelCount: number
+  isDefault: boolean
+}
+
 export interface DetectedExternalAgent {
   id: string
   name: string
   available: boolean
+  nativeProviders?: NativeProviderSummary[]
   path?: string | null
   version?: string | null
   models: Array<{ id: string; label: string; contextWindowTokens?: number | null; context_window_tokens?: number | null }>

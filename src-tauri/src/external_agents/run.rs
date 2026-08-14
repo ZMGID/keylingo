@@ -340,11 +340,15 @@ pub async fn run_external_cli_reply(
     let _protocol_guard =
         crate::chat::protocol::RegisteredRunGuard::new(app, &run_id, conversation.revision);
 
-    // Phase 2 / B1: claude、codex app-server 与 ACP 家族都通过 live-session 注册表把进程跨轮
-    // 保活。只剩 `PiRpc` 每轮起一个新子进程（见下面 `_ =>` 分支的注释）。
+    // Phase 2 / B1: claude、codex app-server、ACP 家族与 dsh SDK JSON-RPC 都通过
+    // live-session 注册表把进程跨轮保活。只剩 `PiRpc` 每轮起一个新子进程（见下面
+    // `_ =>` 分支的注释）。
     let persistent = matches!(
         def.stream_format,
-        StreamFormat::ClaudeStreamJson | StreamFormat::CodexAppServer | StreamFormat::AcpJsonRpc
+        StreamFormat::ClaudeStreamJson
+            | StreamFormat::CodexAppServer
+            | StreamFormat::AcpJsonRpc
+            | StreamFormat::DshJsonRpc
     );
     let mut spawned_opt = if persistent {
         None
@@ -1134,13 +1138,43 @@ async fn reconnect_fresh(
 ///
 /// ACP / codex 能在会话内改模型与推理档位（`session/set_config_option` / 每轮 `turn/start`
 /// 带 model），指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。
+///
+/// dsh 相反：model 是进程级 `initialize` 后创建 agent 时固定的，reasoning 是 profile patch，
+/// sandbox 是进程环境变量；三者都没有 session 级修改 RPC。任一变化都必须换进程（Phase 1
+/// 无跨进程 resume，因此会诚实显示「上下文已重置」）。
+fn dsh_provider_fingerprint() -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match crate::external_agents::overrides::active_provider("dsh") {
+        Some(provider) => serde_json::to_string(&provider)
+            .unwrap_or_else(|_| provider.id)
+            .hash(&mut hasher),
+        None => "cli-default".hash(&mut hasher),
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 fn launch_config_for_turn(
     protocol: StreamFormat,
-    _model: Option<&str>,
+    model: Option<&str>,
     reasoning: Option<&str>,
     sandbox: Option<&str>,
     instructions_hash: Option<&str>,
 ) -> LaunchConfig {
+    if matches!(protocol, StreamFormat::DshJsonRpc) {
+        return LaunchConfig {
+            flags: format!(
+                "{}|{}|{}|{}",
+                model.unwrap_or_default(),
+                reasoning.unwrap_or_default(),
+                sandbox.unwrap_or_default(),
+                dsh_provider_fingerprint()
+            ),
+            // dsh 的会话级指令在首轮正文里，不是启动配置；指令变化不需要为了它单独重连。
+            instructions: None,
+        };
+    }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return LaunchConfig::default();
     }
@@ -1841,7 +1875,8 @@ fn persistent_protocol_tag(protocol: StreamFormat) -> &'static str {
         StreamFormat::ClaudeStreamJson => "claude_stream_json",
         StreamFormat::CodexAppServer => "codex_app_server",
         StreamFormat::AcpJsonRpc => "acp_json_rpc",
-        _ => "unknown",
+        StreamFormat::PiRpc => "pi_rpc",
+        StreamFormat::DshJsonRpc => "dsh_json_rpc",
     }
 }
 
@@ -1973,7 +2008,9 @@ async fn connect_persistent_session(
     sandbox: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     resume_native: Option<String>,
-    background_task_sink: Option<crate::external_agents::session::claude_stream::BackgroundTaskSink>,
+    background_task_sink: Option<
+        crate::external_agents::session::claude_stream::BackgroundTaskSink,
+    >,
 ) -> Result<PersistentConnection, String> {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
     use crate::external_agents::session::claude_stream::{
@@ -1981,6 +2018,9 @@ async fn connect_persistent_session(
     };
     use crate::external_agents::session::codex_app_server::{
         spawn_codex_session_actor, CodexAppServerSession,
+    };
+    use crate::external_agents::session::dsh_jsonrpc::{
+        spawn_dsh_session_actor, DshJsonRpcSession,
     };
 
     match protocol {
@@ -2112,7 +2152,29 @@ async fn connect_persistent_session(
                 child_pid,
             })
         }
-        _ => Err("protocol does not support persistent sessions".to_string()),
+        StreamFormat::DshJsonRpc => {
+            // 现有 SDK server 是 create-only：把旧 live handle 的 id 发回去会撞 persisted-log
+            // collision（实测原文："already has a persisted log ... id collision"）。所以 Phase 1
+            // 每个新进程都开新 id、明确 resumed=false；上层看到本来有 handle 会显示既有的
+            // 「上下文已重置」提示，绝不静默假装续上。
+            if let Some(old_id) = resume_native.as_deref() {
+                eprintln!(
+                    "[external-agent] dsh SDK cannot resume session {old_id}; connecting fresh"
+                );
+            }
+            let session =
+                DshJsonRpcSession::connect(resolved_bin, args, cwd, model, reasoning, sandbox)
+                    .await?;
+            let id = session.session_id().to_string();
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: spawn_dsh_session_actor(session),
+                native_id: id,
+                resumed: false,
+                child_pid,
+            })
+        }
+        StreamFormat::PiRpc => Err("protocol does not support persistent sessions".to_string()),
     }
 }
 

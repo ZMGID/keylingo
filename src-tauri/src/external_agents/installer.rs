@@ -117,6 +117,17 @@ fn install_spec(agent_id: &str) -> Option<InstallSpec> {
             docs: "https://docs.x.ai/build/cli",
             config_dir: Some(".grok"),
         },
+        "dsh" => InstallSpec {
+            npm_package: Some("@deepseek-ai/dsh"),
+            npm_install_args: &[],
+            pypi_package: None,
+            script_unix: None,
+            script_windows: None,
+            // dsh 没有自更新命令；`update_plan` 按 npm/pnpm/yarn/bun 安装来源更新。
+            update_args: None,
+            docs: "https://github.com/deepseek-ai/deepseek-harness",
+            config_dir: Some(".dsh"),
+        },
         "hermes" => InstallSpec {
             npm_package: None,
             npm_install_args: &[],
@@ -299,6 +310,9 @@ fn update_plan(
             platform,
         );
     }
+    if agent_id == "dsh" {
+        return managed_package_update_plan(resolved_path, "@deepseek-ai/dsh", "dsh", platform);
+    }
     spec.update_args
         .map(|args| CommandPlan::direct(resolved_path.to_string_lossy().into_owned(), args))
 }
@@ -407,10 +421,17 @@ fn version_is_newer(local: &str, latest: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn existing_config_dir(spec: &InstallSpec) -> Option<String> {
-    let dir: PathBuf = directories::UserDirs::new()?
-        .home_dir()
-        .join(spec.config_dir?);
+fn existing_config_dir(agent_id: &str, spec: &InstallSpec) -> Option<String> {
+    let dir = if agent_id == "dsh" {
+        std::env::var_os("DSH_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().join(".dsh")))?
+    } else {
+        directories::UserDirs::new()?
+            .home_dir()
+            .join(spec.config_dir?)
+    };
     dir.is_dir().then(|| dir.to_string_lossy().into_owned())
 }
 
@@ -437,6 +458,7 @@ pub async fn chat_external_cli_install_info(
         Some(path) => update_plan(&agent_id, &spec, path, host_platform()),
         None => install_plan(&spec, host_platform()),
     };
+    let config_dir = existing_config_dir(&agent_id, &spec);
 
     Ok(InstallInfo {
         agent_id,
@@ -445,7 +467,7 @@ pub async fn chat_external_cli_install_info(
         update_available,
         command: command.map(|plan| plan.display),
         docs_url: spec.docs.to_string(),
-        config_dir: existing_config_dir(&spec),
+        config_dir,
     })
 }
 
@@ -565,7 +587,8 @@ pub async fn chat_external_cli_install(app: AppHandle, agent_id: String) -> Resu
 #[tauri::command]
 pub fn chat_external_cli_open_config_dir(agent_id: String) -> Result<(), String> {
     let spec = install_spec(&agent_id).ok_or_else(|| format!("未知外部 Agent: {agent_id}"))?;
-    let dir = existing_config_dir(&spec).ok_or_else(|| "配置目录还不存在".to_string())?;
+    let dir =
+        existing_config_dir(&agent_id, &spec).ok_or_else(|| "配置目录还不存在".to_string())?;
     open_path(Path::new(&dir))
 }
 

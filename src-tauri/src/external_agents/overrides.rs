@@ -91,7 +91,7 @@ pub fn custom_models(id: &str) -> Vec<CliCustomModel> {
 /// 调用点（大半是测试）。反查是纯函数，且新增 spawn 点自动覆盖，不会漏。
 ///
 /// 只在**确实配了环境变量**的 agent 里找；各 CLI 的可执行名互不重复（claude / codex /
-/// cursor-agent / opencode / gemini / kimi / pi / hermes / grok），所以按文件名匹配是唯一的。
+/// cursor-agent / opencode / gemini / kimi / pi / hermes / grok / dsh），所以按文件名匹配是唯一的。
 pub fn env_for_bin(bin: &std::path::Path) -> HashMap<String, String> {
     // 先只在锁里定位 agent id，出锁再拼环境变量：`env_for` 自己还要读一次这把锁，
     // 持读锁再读会在有写者排队时死锁。

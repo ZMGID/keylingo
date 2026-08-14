@@ -491,6 +491,7 @@ function AgentDetail({
         agentId={agent.id}
         agentName={agent.name}
         providers={config.providers ?? []}
+        nativeProviders={agent.nativeProviders ?? []}
         current={config.currentProvider ?? ''}
         onPatch={onPatch}
       />
@@ -508,6 +509,7 @@ function providerSubtitle(provider: ExternalCliProvider): string {
   try {
     const config = JSON.parse(provider.configJson ?? '{}') as Record<string, unknown>
     if (typeof config.baseUrl === 'string') return config.baseUrl
+    if (typeof config.baseURL === 'string') return config.baseURL
     const options = config.options as Record<string, unknown> | undefined
     if (typeof options?.baseURL === 'string') return options.baseURL
   } catch {
@@ -538,6 +540,7 @@ function ProviderSection({
   agentId,
   agentName,
   providers,
+  nativeProviders,
   current,
   onPatch,
 }: {
@@ -545,6 +548,7 @@ function ProviderSection({
   agentId: string
   agentName: string
   providers: ExternalCliProvider[]
+  nativeProviders: NonNullable<DetectedExternalAgent['nativeProviders']>
   current: string
   onPatch: (patch: Partial<ExternalCliAgentConfig>) => void
 }) {
@@ -596,9 +600,9 @@ function ProviderSection({
     setImporting(false)
   }
 
-  // opencode / pi / grok / kimi 写原生配置；claude / codex 用 Kivio 私有文件（不碰用户家目录）。
+  // opencode / pi / grok / kimi 写原生配置；dsh 写 Kivio 私有 profile；claude / codex 用 Kivio 私有文件。
   const nativeOnDisk = agentId === 'opencode' || agentId === 'pi' || agentId === 'grok' || agentId === 'kimi'
-  const envOnly = agentId !== 'claude' && agentId !== 'codex' && !nativeOnDisk
+  const envOnly = agentId !== 'claude' && agentId !== 'codex' && agentId !== 'dsh' && !nativeOnDisk
 
   return (
     <div className="kv-cli-providers">
@@ -614,7 +618,7 @@ function ProviderSection({
         </Button>
       </div>
       <div className="kv-cli-card">
-        {providers.length === 0 ? (
+        {providers.length === 0 && nativeProviders.length === 0 ? (
           // 一条供应商都没有时只留这句话（同 ccgui）：此时「使用 CLI 自身配置」是唯一可能的
           // 状态，把它渲染成一行可选项纯属噪音。
           <p className="kv-row-desc px-3 py-5 text-center">{t.externalAgentsProviderEmpty}</p>
@@ -662,6 +666,28 @@ function ProviderSection({
                   <IconButton size="sm" label={t.externalAgentsRemove} onClick={() => remove(provider)}>
                     <Trash2 size={13} />
                   </IconButton>
+                </div>
+              </div>
+            ))}
+            {nativeProviders.map((provider) => (
+              <div className="kv-row kv-cli-provider" key={`native-${provider.id}`}>
+                <span className="kv-cli-monogram">{monogram(provider.name)}</span>
+                <div className="kv-row-text">
+                  <div className="kv-row-label">{provider.name}</div>
+                  <p className="kv-row-desc truncate">
+                    {[provider.id, provider.baseUrl, provider.modelCount > 0
+                      ? t.externalAgentsNativeProviderModels.replace('{count}', String(provider.modelCount))
+                      : null]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                </div>
+                <div className="kv-row-control">
+                  <span className={`kv-tag ${provider.isDefault ? 'ok' : ''}`}>
+                    {provider.isDefault
+                      ? t.externalAgentsNativeProviderDefault
+                      : t.externalAgentsNativeProviderBadge}
+                  </span>
                 </div>
               </div>
             ))}

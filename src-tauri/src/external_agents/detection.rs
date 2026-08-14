@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use crate::external_agents::registry::AGENT_DEFS;
 use crate::external_agents::session::acp::detect_acp_models;
 use crate::external_agents::session::claude_init::detect_claude_models;
@@ -12,7 +14,7 @@ use crate::external_agents::session::codex_app_server::{
 use crate::external_agents::session::pi_rpc::parse_pi_models;
 use crate::external_agents::types::{
     default_model_option, fallback_models_from_pairs, reasoning_options_from_pairs, DetectedAgent,
-    ModelProbeStrategy, ModelSource, RuntimeAgentDef, RuntimeModelOption,
+    ModelProbeStrategy, ModelSource, NativeProviderSummary, RuntimeAgentDef, RuntimeModelOption,
 };
 use crate::proc::NoConsoleWindow;
 
@@ -51,6 +53,7 @@ pub async fn detect_availability_single(def: &RuntimeAgentDef) -> DetectedAgent 
         reasoning_options: reasoning_options_from_pairs(def.reasoning_options),
         sandbox_options: sandbox_options_for(def.id),
         auth_status,
+        native_providers: native_provider_summaries(def.id),
         disabled: false,
         supports_steering: def.supports_steering,
     }
@@ -209,6 +212,320 @@ pub async fn detect_agent_models(def: &RuntimeAgentDef, cwd: &Path) -> AgentMode
             }
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DshSettings {
+    #[serde(rename = "agent-default-model")]
+    agent_default_model: Option<DshDefaultModel>,
+    #[serde(rename = "api-gateway")]
+    api_gateway: Option<DshDefaultModel>,
+    #[serde(rename = "llm-deepseek")]
+    llm_deepseek: Option<DshDeepseekSettings>,
+    #[serde(rename = "llm-pi-ai")]
+    llm_pi_ai: Option<DshPiAiSettings>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DshDefaultModel {
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DshDeepseekSettings {
+    /// `None` = 适配器默认 flash/pro；`Some([])` = 用户明确不公布任何模型。
+    models: Option<Vec<DshModelEntry>>,
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DshPiAiSettings {
+    #[serde(default)]
+    providers: HashMap<String, DshProviderSettings>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DshProviderSettings {
+    display_name: Option<String>,
+    #[serde(alias = "baseURL")]
+    base_url: Option<String>,
+    api: Option<String>,
+    #[serde(default)]
+    models: Vec<DshModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DshModelEntry {
+    Id(String),
+    Detail(DshModelDetail),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DshModelDetail {
+    id: String,
+    name: Option<String>,
+    context_window: Option<u32>,
+}
+
+impl DshModelEntry {
+    fn parts(&self) -> Option<(&str, &str, Option<u32>)> {
+        match self {
+            DshModelEntry::Id(id) => {
+                let id = id.trim();
+                (!id.is_empty()).then_some((id, id, None))
+            }
+            DshModelEntry::Detail(detail) => {
+                let id = detail.id.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                let name = detail
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(id);
+                Some((id, name, detail.context_window))
+            }
+        }
+    }
+}
+
+fn native_provider_summaries(agent_id: &str) -> Vec<NativeProviderSummary> {
+    if agent_id != "dsh" {
+        return Vec::new();
+    }
+    let Some(path) = dsh_settings_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    parse_dsh_native_provider_summaries(&text).unwrap_or_default()
+}
+
+fn parse_dsh_native_provider_summaries(text: &str) -> Result<Vec<NativeProviderSummary>, String> {
+    let settings: DshSettings =
+        serde_yaml::from_str(text).map_err(|err| format!("解析 dsh settings.yaml 失败：{err}"))?;
+    let selected = settings
+        .agent_default_model
+        .as_ref()
+        .or(settings.api_gateway.as_ref());
+    let default_provider = selected
+        .and_then(|selection| selection.provider.as_deref())
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty() && *provider != "deepseek-official")
+        .map(str::to_string);
+    let mut providers: Vec<_> = settings
+        .llm_pi_ai
+        .map(|section| section.providers.into_iter().collect())
+        .unwrap_or_default();
+    providers.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(providers
+        .into_iter()
+        .map(|(id, config)| NativeProviderSummary {
+            is_default: default_provider.as_deref() == Some(id.as_str()),
+            name: config
+                .display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| id.clone()),
+            base_url: config
+                .base_url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
+            api: config
+                .api
+                .map(|api| api.trim().to_string())
+                .filter(|api| !api.is_empty()),
+            model_count: config
+                .models
+                .iter()
+                .filter(|model| model.parts().is_some())
+                .count(),
+            id,
+        })
+        .collect())
+}
+
+fn dsh_settings_path() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("DSH_HOME") {
+        let path = std::path::PathBuf::from(home);
+        if !path.as_os_str().is_empty() {
+            return Some(path.join("settings.yaml"));
+        }
+    }
+    directories::BaseDirs::new().map(|base| base.home_dir().join(".dsh").join("settings.yaml"))
+}
+
+fn read_dsh_settings_models() -> Result<ProbeModelsOutput, String> {
+    let path = dsh_settings_path().ok_or_else(|| "无法定位 dsh settings.yaml".to_string())?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取 dsh 设置失败（{}）：{e}", path.display()))?;
+    parse_dsh_settings_models(&text)
+}
+
+fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
+    let settings: DshSettings =
+        serde_yaml::from_str(text).map_err(|e| format!("解析 dsh settings.yaml 失败：{e}"))?;
+    let mut models = vec![default_model_option()];
+    let mut seen = std::collections::HashSet::from(["default".to_string()]);
+
+    let deepseek_defaults = [
+        ("deepseek-v4-flash", "DeepSeek-V4-Flash", Some(1_000_000)),
+        ("deepseek-v4-pro", "DeepSeek-V4-Pro", Some(1_000_000)),
+    ];
+    match settings
+        .llm_deepseek
+        .as_ref()
+        .and_then(|section| section.models.as_ref())
+    {
+        Some(entries) => {
+            for entry in entries {
+                if let Some((id, name, window)) = entry.parts() {
+                    push_dsh_model(&mut models, &mut seen, id, name, window);
+                }
+            }
+        }
+        None => {
+            for (id, name, window) in deepseek_defaults {
+                push_dsh_model(&mut models, &mut seen, id, name, window);
+            }
+        }
+    }
+
+    if let Some(pi_ai) = settings.llm_pi_ai.as_ref() {
+        let mut providers: Vec<_> = pi_ai.providers.iter().collect();
+        providers.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (provider, config) in providers {
+            let provider_label = config
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(provider);
+            for entry in &config.models {
+                let Some((id, name, window)) = entry.parts() else {
+                    continue;
+                };
+                let wire_id = format!("{provider}:{id}");
+                let label = format!("{name} ({provider_label})");
+                push_dsh_model(&mut models, &mut seen, &wire_id, &label, window);
+            }
+        }
+    }
+
+    let selected = settings
+        .agent_default_model
+        .as_ref()
+        .or(settings.api_gateway.as_ref());
+    let mut current_model = selected.and_then(|selection| {
+        let model = selection.model.as_deref()?.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let provider = selection.provider.as_deref().unwrap_or("deepseek-official");
+        Some(if provider == "deepseek-official" {
+            model.to_string()
+        } else {
+            format!("{provider}:{model}")
+        })
+    });
+    let current_reasoning = selected
+        .and_then(|selection| selection.reasoning_effort.clone())
+        .or_else(|| {
+            settings
+                .llm_deepseek
+                .as_ref()
+                .and_then(|section| section.reasoning_effort.clone())
+        });
+
+    if let Some(provider) = crate::external_agents::overrides::active_provider("dsh") {
+        merge_kivio_dsh_provider(&mut models, &mut seen, &provider)?;
+        let route = provider.native_provider_id.trim();
+        let model = provider.default_model.trim();
+        if !route.is_empty() && !model.is_empty() {
+            current_model = Some(format!("{route}:{model}"));
+        }
+    }
+
+    Ok(probe_ok(
+        models,
+        current_model,
+        current_reasoning,
+        Vec::new(),
+        HashMap::new(),
+    ))
+}
+
+fn push_dsh_model(
+    models: &mut Vec<RuntimeModelOption>,
+    seen: &mut std::collections::HashSet<String>,
+    id: &str,
+    label: &str,
+    context_window_tokens: Option<u32>,
+) {
+    if !seen.insert(id.to_string()) {
+        return;
+    }
+    models.push(RuntimeModelOption {
+        id: id.to_string(),
+        label: label.to_string(),
+        context_window_tokens,
+    });
+}
+
+fn merge_kivio_dsh_provider(
+    models: &mut Vec<RuntimeModelOption>,
+    seen: &mut std::collections::HashSet<String>,
+    provider: &crate::settings::ExternalCliProvider,
+) -> Result<(), String> {
+    let route = provider.native_provider_id.trim();
+    if route.is_empty() {
+        return Err(format!("dsh 供应商 {} 缺少原生供应商 ID", provider.name));
+    }
+    let config: serde_json::Value = serde_json::from_str(&provider.config_json)
+        .map_err(|err| format!("解析 dsh 供应商 {} 失败：{err}", provider.name))?;
+    let display_name = config
+        .get("displayName")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(provider.name.as_str());
+    let entries = config
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("dsh 供应商 {} 缺少模型列表", provider.name))?;
+    for entry in entries {
+        let Some(id) = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(id);
+        let window = entry
+            .get("contextWindow")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        let wire_id = format!("{route}:{id}");
+        let label = format!("{name} ({display_name})");
+        push_dsh_model(models, seen, &wire_id, &label, window);
+    }
+    Ok(())
 }
 
 /// 读 codex 当前配置：`~/.codex/config.toml` 顶层 `model` 与 `model_reasoning_effort`。手写扫描
@@ -522,6 +839,7 @@ pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedA
         reasoning_options: reasoning_options_from_pairs(def.reasoning_options),
         sandbox_options: sandbox_options_for(def.id),
         auth_status,
+        native_providers: native_provider_summaries(def.id),
         disabled: false,
         supports_steering: def.supports_steering,
     }
@@ -550,7 +868,7 @@ pub fn sandbox_options_for(agent_id: &str) -> Vec<RuntimeModelOption> {
             ("dontAsk", "不打扰 (只放行安全操作)"),
             ("bypassPermissions", "完全 (默认)"),
         ],
-        "codex" => &[
+        "codex" | "dsh" => &[
             ("read-only", "只读"),
             ("workspace-write", "工作区写 (默认)"),
             ("danger-full-access", "完全"),
@@ -642,6 +960,12 @@ async fn probe_models(
     cwd: &Path,
 ) -> Result<ProbeModelsOutput, String> {
     let bin = path.ok_or_else(|| "CLI 可执行文件未定位".to_string())?;
+
+    // dsh 的模型目录就在 `$DSH_HOME/settings.yaml`，结构化读文件比 boot 整棵 profile 快几秒，
+    // 也不会为打开一个下拉框启动 agent / MCP / watcher。bin 只用于上面的已安装判定。
+    if def.id == "dsh" {
+        return read_dsh_settings_models();
+    }
 
     // OpenCode's native command is the source of truth for merged global/project JSONC config.
     // Older versions without `models` fall through to ACP, then the static definition fallback.
@@ -1131,7 +1455,9 @@ mod tests {
             .is_none());
         // Kivio 表单会写 max，必须能读回来。
         assert_eq!(
-            parse_pi_config("{\"defaultThinkingLevel\":\"Max\"}").1.as_deref(),
+            parse_pi_config("{\"defaultThinkingLevel\":\"Max\"}")
+                .1
+                .as_deref(),
             Some("max")
         );
     }
@@ -1191,5 +1517,128 @@ default_effort = "high"
         let (model, reasoning) = parse_kimi_config(text);
         assert!(model.is_none());
         assert_eq!(reasoning.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn dsh_settings_exposes_deepseek_and_relay_models() {
+        let result = parse_dsh_settings_models(
+            r#"
+agent-default-model:
+  provider: openrouter
+  model: deepseek/deepseek-r1
+  reasoningEffort: max
+llm-deepseek:
+  models:
+    - id: deepseek-v4-pro
+      name: V4 Pro
+      contextWindow: 131072
+llm-pi-ai:
+  providers:
+    openrouter:
+      displayName: OpenRouter
+      models:
+        - id: deepseek/deepseek-r1
+          name: DeepSeek R1
+          contextWindow: 163840
+"#,
+        )
+        .expect("parse dsh settings");
+        assert_eq!(
+            result
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "default",
+                "deepseek-v4-pro",
+                "openrouter:deepseek/deepseek-r1"
+            ]
+        );
+        assert_eq!(result.models[1].context_window_tokens, Some(131_072));
+        assert_eq!(result.models[2].label, "DeepSeek R1 (OpenRouter)");
+        assert_eq!(
+            result.current_model.as_deref(),
+            Some("openrouter:deepseek/deepseek-r1")
+        );
+        assert_eq!(result.current_reasoning.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn dsh_settings_defaults_native_catalog_but_respects_explicit_empty_models() {
+        let defaults = parse_dsh_settings_models("{}").expect("default dsh settings");
+        assert_eq!(defaults.models.len(), 3);
+        assert_eq!(defaults.models[1].id, "deepseek-v4-flash");
+        assert_eq!(defaults.models[2].id, "deepseek-v4-pro");
+
+        let empty = parse_dsh_settings_models("llm-deepseek:\n  models: []\n")
+            .expect("explicit empty catalog");
+        assert_eq!(
+            empty
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default"]
+        );
+    }
+
+    #[test]
+    fn kivio_dsh_provider_models_are_namespaced_by_route() {
+        let provider = crate::settings::ExternalCliProvider {
+            name: "Relay".to_string(),
+            native_provider_id: "relay-one".to_string(),
+            config_json: serde_json::json!({
+                "displayName": "Relay One",
+                "models": [{
+                    "id": "gpt-test",
+                    "name": "GPT Test",
+                    "contextWindow": 256000
+                }]
+            })
+            .to_string(),
+            ..Default::default()
+        };
+        let mut models = vec![default_model_option()];
+        let mut seen = std::collections::HashSet::from(["default".to_string()]);
+        merge_kivio_dsh_provider(&mut models, &mut seen, &provider).unwrap();
+        assert_eq!(models[1].id, "relay-one:gpt-test");
+        assert_eq!(models[1].label, "GPT Test (Relay One)");
+        assert_eq!(models[1].context_window_tokens, Some(256_000));
+    }
+
+    #[test]
+    fn dsh_native_provider_summaries_expose_config_without_secrets() {
+        let summaries = parse_dsh_native_provider_summaries(
+            r#"
+agent-default-model:
+  provider: xiaobai
+  model: gpt-test
+llm-pi-ai:
+  providers:
+    xiaobai:
+      displayName: XiaoBai
+      apiKeyEnv: XIAOBAI_API_KEY
+      api: openai-responses
+      baseURL: https://relay.example/v1
+      models:
+        - id: gpt-test
+          name: GPT Test
+        - id: broken
+"#,
+        )
+        .expect("parse dsh provider summaries");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "xiaobai");
+        assert_eq!(summaries[0].name, "XiaoBai");
+        assert_eq!(
+            summaries[0].base_url.as_deref(),
+            Some("https://relay.example/v1")
+        );
+        assert_eq!(summaries[0].api.as_deref(), Some("openai-responses"));
+        assert_eq!(summaries[0].model_count, 2);
+        assert!(summaries[0].is_default);
+        let json = serde_json::to_string(&summaries).unwrap();
+        assert!(!json.contains("XIAOBAI_API_KEY"));
     }
 }

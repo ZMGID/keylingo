@@ -10,6 +10,14 @@ pub enum StreamFormat {
     PiRpc,
     AcpJsonRpc,
     CodexAppServer,
+    /// DeepSeek Harness (`dsh`) SDK JSON-RPC over stdio —— `@deepseek-ai/dsh-sdk-jsonrpc-server`。
+    ///
+    /// 与 ACP 那条（`dsh-acp`）刻意不同源：dsh 的 ACP 桥是 automation-only，只发
+    /// committed 的 `agent_message_chunk`（本机实测：无 token 级 delta、无 reasoning、
+    /// 无 tool call，`session/load` 直接 `-32601`），接进来工具卡和思考块全是空的。
+    /// 这条 SDK 线反过来把**整条会话事件流**（`assistant/chunk` 的 text-delta /
+    /// reasoning-delta / usage、`tool/call`、`tool/result`、`turn/end`）原样推过来。
+    DshJsonRpc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +101,17 @@ pub struct CachedAgentModels {
     pub current_reasoning: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeProviderSummary {
+    pub id: String,
+    pub name: String,
+    pub base_url: Option<String>,
+    pub api: Option<String>,
+    pub model_count: usize,
+    pub is_default: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedAgent {
@@ -106,6 +125,9 @@ pub struct DetectedAgent {
     #[serde(default)]
     pub sandbox_options: Vec<RuntimeModelOption>,
     pub auth_status: Option<String>,
+    /// CLI 原生配置中的供应商摘要。只含展示所需的非敏感字段，绝不回传 API Key。
+    #[serde(default)]
+    pub native_providers: Vec<NativeProviderSummary>,
     /// 用户在设置页停用了它。**不进可用性缓存**——出缓存时才盖章（`commands.rs`），
     /// 否则改一次开关要等 `AVAILABILITY_CACHE_TTL`（600s）才生效。
     #[serde(default)]

@@ -29,6 +29,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# DeepSeek Harness 的用户设置是 YAML；模型探测必须结构化读取 models/providers 数组，
+# 不能用逐行字符串扫描（注释、引号、嵌套 route 都会误判）。
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 # OpenCode 官方配置允许 JSONC；与 cc-switch 一样用 JSON5 解析器兼容注释与尾逗号。
 json5 = "0.4"
 schemars = "1.2.2"

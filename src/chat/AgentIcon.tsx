@@ -10,6 +10,7 @@ const ICON_EXT: Record<string, 'svg'> = {
   pi: 'svg',
   hermes: 'svg',
   grok: 'svg',
+  dsh: 'svg',
 }
 
 const MONO_ICONS = new Set(['cursor-agent', 'opencode', 'hermes', 'grok'])
