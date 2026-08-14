@@ -402,13 +402,54 @@ pub(crate) fn open_external(app: AppHandle, url: String) -> Result<(), String> {
 /// 没有扩展名的文件也一律拒：类 Unix 下带执行位的裸文件名恰好是最危险的一种。
 const EXECUTABLE_LOCAL_EXTENSIONS: &[&str] = &[
     // macOS / 类 Unix：脚本与可执行包
-    "command", "sh", "bash", "zsh", "csh", "ksh", "fish", "app", "scpt", "applescript",
-    "workflow", "terminal", "action", "jar", "py", "pyw", "rb", "pl", "php", "lua",
+    "command",
+    "sh",
+    "bash",
+    "zsh",
+    "csh",
+    "ksh",
+    "fish",
+    "app",
+    "scpt",
+    "applescript",
+    "workflow",
+    "terminal",
+    "action",
+    "jar",
+    "py",
+    "pyw",
+    "rb",
+    "pl",
+    "php",
+    "lua",
     // Windows：默认处理器就是执行
-    "exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta",
-    "scr", "cpl", "dll", "reg", "lnk", "inf",
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "hta",
+    "scr",
+    "cpl",
+    "dll",
+    "reg",
+    "lnk",
+    "inf",
     // 安装器：点一下就开始装
-    "pkg", "mpkg", "msi", "msp", "dmg", "appx", "msix",
+    "pkg",
+    "mpkg",
+    "msi",
+    "msp",
+    "dmg",
+    "appx",
+    "msix",
 ];
 
 /// 扩展名闸门：`shell().open` 对这些是执行/安装语义，一律不开。空扩展名同样拒。
@@ -433,7 +474,10 @@ fn ensure_openable_extension(path: &std::path::Path) -> Result<(), String> {
 ///
 /// `base` 是相对路径的解析基准（会话工作目录）。给不出 base 时相对路径一律拒绝——猜一个
 /// base 只会开错文件。给了 base 也要挡住 `../../` 逃逸：href 来自模型输出。
-fn local_file_path_from_href(href: &str, base: Option<&std::path::Path>) -> Result<PathBuf, String> {
+fn local_file_path_from_href(
+    href: &str,
+    base: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
     let href = href.trim();
     let raw = if href.len() >= 7 && href[..7].eq_ignore_ascii_case("file://") {
         // 走 url crate 而不是手撕前缀：`file:///a%20b.html` 这类百分号编码得正确还原。
@@ -500,9 +544,7 @@ pub(crate) async fn open_local_file(
     };
     let path = local_file_path_from_href(&href, base.as_deref())?;
     let path_str = path.to_str().ok_or_else(|| "路径不是 UTF-8".to_string())?;
-    app.shell()
-        .open(path_str, None)
-        .map_err(|e| e.to_string())
+    app.shell().open(path_str, None).map_err(|e| e.to_string())
 }
 
 /// data URL → 临时文件名（只保留 basename，挡住 `../` 与目录分隔符）。
@@ -531,7 +573,11 @@ fn temp_file_name_from_artifact_name(name: &str) -> String {
 /// 产物落地就成了可执行文件。
 #[tauri::command]
 #[allow(deprecated)]
-pub(crate) fn open_data_url_file(app: AppHandle, name: String, data_url: String) -> Result<(), String> {
+pub(crate) fn open_data_url_file(
+    app: AppHandle,
+    name: String,
+    data_url: String,
+) -> Result<(), String> {
     let payload = data_url
         .split_once(";base64,")
         .map(|(_, rest)| rest)
@@ -939,7 +985,10 @@ mod tests {
         use super::{ensure_openable_extension, temp_file_name_from_artifact_name};
         use std::path::Path;
 
-        assert_eq!(temp_file_name_from_artifact_name("report.docx"), "report.docx");
+        assert_eq!(
+            temp_file_name_from_artifact_name("report.docx"),
+            "report.docx"
+        );
         // 目录穿越：只保留最后一段。
         assert_eq!(
             temp_file_name_from_artifact_name("../../etc/passwd.txt"),
@@ -953,7 +1002,6 @@ mod tests {
         assert!(ensure_openable_extension(Path::new("/t/x.command")).is_err());
         assert!(ensure_openable_extension(Path::new("/t/file")).is_err());
     }
-
 
     ///
     /// 钉住两件事：① 正常文件（不止 html —— docx/zip/csv 这些都得能开）都放行；
@@ -976,7 +1024,13 @@ mod tests {
         );
 
         // 不止 html：常见的「交给默认程序」文件都要放行。
-        for name in ["report.docx", "data.xlsx", "bundle.zip", "clip.mp4", "notes.md"] {
+        for name in [
+            "report.docx",
+            "data.xlsx",
+            "bundle.zip",
+            "clip.mp4",
+            "notes.md",
+        ] {
             let file = dir.join(name);
             std::fs::write(&file, "x").unwrap();
             assert!(

@@ -342,7 +342,10 @@ fn resolve_override_for_family<'a>(
 
 /// 把 settings/env 映射写到展示名上（cc-gui：改 `model` + `name`，tier id 不变）。
 /// Kivio 的 `RuntimeModelOption` 只有 id/label：id 保持 catalog，label 改成映射后的 runtime id。
-fn apply_claude_model_overrides(models: &mut [RuntimeModelOption], overrides: &ClaudeModelOverrides) {
+fn apply_claude_model_overrides(
+    models: &mut [RuntimeModelOption],
+    overrides: &ClaudeModelOverrides,
+) {
     let has_any = overrides.main.is_some()
         || overrides.fable.is_some()
         || overrides.sonnet.is_some()
@@ -752,7 +755,10 @@ mod tests {
         assert_eq!(haiku.label, "deepseek-v4-flash");
         // 四档都在，不会因映射折叠。
         assert_eq!(
-            models.iter().filter(|m| m.id.starts_with("claude-")).count(),
+            models
+                .iter()
+                .filter(|m| m.id.starts_with("claude-"))
+                .count(),
             4
         );
 
@@ -989,7 +995,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }
 
 #[cfg(test)]

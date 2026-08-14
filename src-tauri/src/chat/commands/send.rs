@@ -5,8 +5,8 @@ use crate::chat::attachments::{
     compose_text_attachments_for_api, compose_user_content_for_api, save_message_attachments,
     stored_image_paths_for_attachments, title_source_for_user_message, TextAttachmentInput,
 };
-use crate::chat::Attachment;
 use crate::chat::storage::{conversation_attachments_dir, load_conversation};
+use crate::chat::Attachment;
 use crate::chat::ChatMessage;
 use crate::skills;
 use crate::state::AppState;

@@ -28,7 +28,8 @@ fn save_availability_snapshot(state: &AppState, agents: &[DetectedAgent]) {
         return;
     };
     let path = availability_snapshot_path(state);
-    if let Err(err) = crate::chat::storage::atomic_write(&path, &content, "外部 CLI 可用性快照") {
+    if let Err(err) = crate::chat::storage::atomic_write(&path, &content, "外部 CLI 可用性快照")
+    {
         eprintln!("[external-agent] 保存可用性快照失败: {err}");
     }
 }

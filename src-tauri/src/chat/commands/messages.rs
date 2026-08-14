@@ -317,8 +317,6 @@ pub(crate) async fn push_assistant_message(
                     )
                     .await,
                 )
-
-
             }
         } else {
             None

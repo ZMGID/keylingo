@@ -164,7 +164,8 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 /// split-turn 前缀摘要 prompt（逐字对齐 pi `TURN_PREFIX_SUMMARIZATION_PROMPT`）：token 尾窗
 /// 把一轮从中间切开时，被裁掉的**本轮前半**用它单独摘要，与历史摘要拼接（历史摘要看不见
 /// 这半轮的细节，直接丢会让模型不知道保留的后半是在干什么）。
-pub(crate) const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = "This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+pub(crate) const TURN_PREFIX_SUMMARIZATION_PROMPT: &str =
+    "This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
 
 Summarize the prefix to provide context for the retained suffix:
 
@@ -2993,10 +2994,20 @@ mod tests {
         assert!(prefix.is_empty());
 
         // 近期窗口以 assistant 开头：切点劈开了 q2 那一轮——前缀从 q2 起到 head 末尾。
-        let head = vec![user("q1"), assistant("a1"), user("q2"), assistant("work"), tool("r")];
+        let head = vec![
+            user("q1"),
+            assistant("a1"),
+            user("q2"),
+            assistant("work"),
+            tool("r"),
+        ];
         let recent = vec![assistant("more work"), tool("r2")];
         let (history, prefix) = split_history_turn_prefix(&head, &recent);
-        assert_eq!(history.len(), 2, "history ends before the split turn's user message");
+        assert_eq!(
+            history.len(),
+            2,
+            "history ends before the split turn's user message"
+        );
         assert_eq!(prefix.len(), 3, "prefix spans user q2 → cut point");
         assert_eq!(prefix[0]["content"], "q2");
 

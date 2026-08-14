@@ -3,11 +3,11 @@ use std::{path::PathBuf, time::Instant};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
+use crate::chat::agent::execute::truncate_chars;
+use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::attachments::{
     compose_text_attachments_for_api, text_attachments_from_attachments,
 };
-use crate::chat::agent::execute::truncate_chars;
-use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model_call::{
     chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
 };

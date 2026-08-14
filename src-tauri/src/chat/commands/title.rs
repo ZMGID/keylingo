@@ -233,10 +233,7 @@ mod tests {
             crate::offline_models::OfflineModelManager::headless(reqwest::Client::new());
         AppState::base(
             Settings::default(),
-            std::env::temp_dir().join(format!(
-                "kivio-title-test-usage-{}",
-                uuid::Uuid::new_v4()
-            )),
+            std::env::temp_dir().join(format!("kivio-title-test-usage-{}", uuid::Uuid::new_v4())),
             reqwest::Client::new(),
             #[cfg(target_os = "macos")]
             crate::macos_ocr::MacOcrClient::disabled(),
@@ -367,6 +364,5 @@ mod tests {
             body.contains("title-model") && body.contains("只负责为对话生成简洁标题"),
             "request should be the Chinese title prompt against title-model; body={body}"
         );
-
     }
 }

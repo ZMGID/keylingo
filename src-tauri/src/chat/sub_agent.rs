@@ -2437,7 +2437,8 @@ mod tests {
         let message = &parsed["choices"][0]["message"];
         let mut events: Vec<String> = Vec::new();
         if let Some(content) = message["content"].as_str().filter(|text| !text.is_empty()) {
-            events.push(serde_json::json!({"choices":[{"delta":{"content": content}}]}).to_string());
+            events
+                .push(serde_json::json!({"choices":[{"delta":{"content": content}}]}).to_string());
         }
         if let Some(tool_calls) = message["tool_calls"].as_array() {
             // 流式约定要 index；参数不切片（测试只关心最终 draft）。
@@ -2450,8 +2451,9 @@ mod tests {
                     call
                 })
                 .collect::<Vec<_>>();
-            events
-                .push(serde_json::json!({"choices":[{"delta":{"tool_calls": deltas}}]}).to_string());
+            events.push(
+                serde_json::json!({"choices":[{"delta":{"tool_calls": deltas}}]}).to_string(),
+            );
         }
         if let Some(finish) = parsed["choices"][0]["finish_reason"].as_str() {
             events.push(
@@ -2469,7 +2471,8 @@ mod tests {
     }
 
     /// A no-tool-call final assistant answer (ends the loop).
-    fn final_answer_json(text: &str) -> String {        serde_json::json!({
+    fn final_answer_json(text: &str) -> String {
+        serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
                 "message": { "role": "assistant", "content": text }

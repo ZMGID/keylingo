@@ -62,7 +62,11 @@ fn extract_ids(value: &serde_json::Value) -> Vec<String> {
 }
 
 /// 依次试候选端点，第一个能解析出模型的就返回。全都不行 → 返回最后一次的错误说明。
-pub async fn fetch(client: &reqwest::Client, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+pub async fn fetch(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, String> {
     let urls = candidates(base_url);
     if urls.is_empty() {
         return Err("请先填 API URL".to_string());

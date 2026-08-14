@@ -486,8 +486,10 @@ impl CodexAppServerSession {
 
         // 已发出、还在等响应的 `turn/steer`（rpc_id → (steer_id, 文本, 回执通道)）。
         // 受理与否只有响应说得准，所以 oneshot 在这里排队、由读循环兑付。
-        let mut pending_steers: std::collections::HashMap<u64, (String, String, oneshot::Sender<bool>)> =
-            std::collections::HashMap::new();
+        let mut pending_steers: std::collections::HashMap<
+            u64,
+            (String, String, oneshot::Sender<bool>),
+        > = std::collections::HashMap::new();
         loop {
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => {
@@ -708,10 +710,8 @@ const CODEX_BUILTIN_COMMANDS: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub struct CodexModelsProbe {
     pub models: Vec<crate::external_agents::types::RuntimeModelOption>,
-    pub reasoning_by_model: std::collections::HashMap<
-        String,
-        Vec<crate::external_agents::types::RuntimeModelOption>,
-    >,
+    pub reasoning_by_model:
+        std::collections::HashMap<String, Vec<crate::external_agents::types::RuntimeModelOption>>,
     pub reasoning_options: Vec<crate::external_agents::types::RuntimeModelOption>,
 }
 
@@ -1339,13 +1339,15 @@ mod tests {
         assert!(!merged.models.iter().any(|m| m.id == "gpt-5.2"));
         // runtime enriches gpt-5.5 label + efforts
         assert_eq!(
-            merged.models.iter().find(|m| m.id == "gpt-5.5").unwrap().label,
+            merged
+                .models
+                .iter()
+                .find(|m| m.id == "gpt-5.5")
+                .unwrap()
+                .label,
             "GPT-5.5"
         );
-        assert_eq!(
-            merged.reasoning_by_model.get("gpt-5.5").unwrap().len(),
-            2
-        );
+        assert_eq!(merged.reasoning_by_model.get("gpt-5.5").unwrap().len(), 2);
         // sol keeps curated ultra ladder
         assert!(merged
             .reasoning_by_model
@@ -1364,9 +1366,18 @@ mod tests {
         assert_eq!(normalize_codex_effort(Some("minimal")), None);
         assert_eq!(normalize_codex_effort(Some("off")), None);
         assert_eq!(normalize_codex_effort(Some("bogus")), None);
-        assert_eq!(normalize_codex_effort(Some("high")).as_deref(), Some("high"));
-        assert_eq!(normalize_codex_effort(Some("XHIGH")).as_deref(), Some("xhigh"));
-        assert_eq!(normalize_codex_effort(Some("ultra")).as_deref(), Some("ultra"));
+        assert_eq!(
+            normalize_codex_effort(Some("high")).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            normalize_codex_effort(Some("XHIGH")).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            normalize_codex_effort(Some("ultra")).as_deref(),
+            Some("ultra")
+        );
     }
 
     #[test]
@@ -1892,7 +1903,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live codex login + network"]
-    async fn codex_app_server_smoke() {        let Some(captured) = live_codex_turn(
+    async fn codex_app_server_smoke() {
+        let Some(captured) = live_codex_turn(
             "Reply with exactly the token SMOKE_OK and nothing else.",
             Duration::from_secs(90),
         )

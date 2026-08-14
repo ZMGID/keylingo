@@ -183,11 +183,7 @@ fn sweep_workspace_root(root: &Path, alive: &HashSet<String>, report: &mut GcRep
 }
 
 /// 扫附件目录：会话已删 ⇒ 整个目录删掉；会话还在 ⇒ 交给按引用对账。
-fn sweep_attachment_dirs(
-    conversations_dir: &Path,
-    alive: &HashSet<String>,
-    report: &mut GcReport,
-) {
+fn sweep_attachment_dirs(conversations_dir: &Path, alive: &HashSet<String>, report: &mut GcReport) {
     let Ok(entries) = fs::read_dir(conversations_dir) else {
         return;
     };
@@ -438,7 +434,10 @@ mod tests {
         assert_eq!(report.kept_orphan_workspaces, 1);
         assert!(!root.join("conv_alive").exists());
         assert!(!root.join("conv_dead_empty").exists());
-        assert!(root.join("conv_dead_full/hello.py").exists(), "用户产物绝不能删");
+        assert!(
+            root.join("conv_dead_full/hello.py").exists(),
+            "用户产物绝不能删"
+        );
         assert!(root.join("__global__").exists(), "__global__ 必须保留");
 
         fs::remove_dir_all(&root).ok();
@@ -464,7 +463,10 @@ mod tests {
 
         assert_eq!(report.orphan_attachments, 2);
         assert_eq!(report.freed_bytes, 5);
-        assert!(alive_dir.join("msgimg-aaa.png").exists(), "活会话附件不能碰");
+        assert!(
+            alive_dir.join("msgimg-aaa.png").exists(),
+            "活会话附件不能碰"
+        );
         assert!(!dead_dir.exists());
 
         fs::remove_dir_all(&root).ok();
@@ -479,7 +481,8 @@ mod tests {
             "artifact-orphan.png".to_string(),
             "att_1-user-upload.pdf".to_string(), // 无引用也必须留
         ];
-        let referenced: HashSet<String> = ["msgimg-referenced.png".to_string()].into_iter().collect();
+        let referenced: HashSet<String> =
+            ["msgimg-referenced.png".to_string()].into_iter().collect();
 
         let mut orphans = unreferenced_attachment_names(&files, &referenced);
         orphans.sort();
@@ -490,10 +493,7 @@ mod tests {
     /// （消息未落盘 / 转录被剥离 / 解析失败），此时删除等于清空用户的图。
     #[test]
     fn unreferenced_returns_nothing_when_reference_set_is_empty() {
-        let files = vec![
-            "msgimg-a.png".to_string(),
-            "artifact-b.png".to_string(),
-        ];
+        let files = vec!["msgimg-a.png".to_string(), "artifact-b.png".to_string()];
         assert!(unreferenced_attachment_names(&files, &HashSet::new()).is_empty());
     }
 

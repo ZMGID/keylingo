@@ -1371,12 +1371,15 @@ mod tests {
         let value: Value = serde_json::from_str(raw).unwrap();
         let mut events = Vec::new();
         ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
-        assert!(matches!(
-            &events[..],
-            [UnifiedAgentEvent::BackgroundTask { task_id, status, summary: Some(summary), .. }]
-                if task_id == "ad6979fa" && status == "running"
-                    && summary == "22.4k tokens · 3 tools · WebSearch"
-        ), "{events:?}");
+        assert!(
+            matches!(
+                &events[..],
+                [UnifiedAgentEvent::BackgroundTask { task_id, status, summary: Some(summary), .. }]
+                    if task_id == "ad6979fa" && status == "running"
+                        && summary == "22.4k tokens · 3 tools · WebSearch"
+            ),
+            "{events:?}"
+        );
     }
 
     /// sidechain 的 system 帧照旧整帧丢弃：子代理内部起的任务事件不能穿透
@@ -2165,7 +2168,8 @@ mod tests {
             "iterations": [{"input_tokens": 900, "output_tokens": 30}]
         });
         assert_eq!(
-            claude_result_usage_snapshot(&with_iterations, true).and_then(|v| v.get("input_tokens")),
+            claude_result_usage_snapshot(&with_iterations, true)
+                .and_then(|v| v.get("input_tokens")),
             Some(&serde_json::json!(900))
         );
     }
@@ -2490,11 +2494,7 @@ mod tests {
         ]);
         let all = usages(&events);
         // 两轮的分子都只来自 message_start（100 / 8900）：两轮的 result 顶层都被闸门拦住。
-        assert_eq!(
-            all.len(),
-            2,
-            "result 不该再报顶层计费总量：{events:?}"
-        );
+        assert_eq!(all.len(), 2, "result 不该再报顶层计费总量：{events:?}");
         assert_eq!(
             all.last().and_then(|u| u.total_tokens),
             Some(8_900),

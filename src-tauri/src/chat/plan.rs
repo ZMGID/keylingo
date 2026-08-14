@@ -9,7 +9,6 @@ pub fn mode_from_str(value: &str) -> Result<AgentPlanMode, String> {
     }
 }
 
-
 pub fn is_plan_mode(state: &AgentPlanState) -> bool {
     state.mode == AgentPlanMode::Plan
 }
@@ -304,8 +303,6 @@ mod tests {
         assert!(mode_from_str("bogus").is_err());
     }
 
-
-
     #[test]
     fn is_orchestrate_mode_detects_mode() {
         let mut state = AgentPlanState::default();
@@ -323,7 +320,6 @@ mod tests {
         assert!(en.contains("orchestrate mode"));
         assert!(en.contains("sub-agents"));
     }
-
 
     #[test]
     fn chat_runtime_prompt_mentions_research_tools() {

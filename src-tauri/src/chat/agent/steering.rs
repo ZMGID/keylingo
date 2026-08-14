@@ -59,10 +59,9 @@ impl SteeringMessage {
 /// 不丢**。工具结果之后紧跟一条 user 文本对三种线格式都安全：Anthropic / Gemini 适配器各有
 /// `merge_consecutive_*_roles` 把它合进同一个 turn，OpenAI 系天然接受连续 user。
 pub(crate) fn inject_steering_messages(env: &LoopEnv<'_>, state: &mut RunState, round: u32) {
-    state.pending_steering.extend(
-        env.host
-            .take_steering_messages(&env.config.conversation_id),
-    );
+    state
+        .pending_steering
+        .extend(env.host.take_steering_messages(&env.config.conversation_id));
     let Some(message) = state.pending_steering.pop_front() else {
         return;
     };
@@ -91,10 +90,9 @@ pub(crate) fn inject_steering_messages(env: &LoopEnv<'_>, state: &mut RunState, 
 /// 话没说完时收束。把信箱新到的拉进本地队列后判空；true ⇒ 调用方把终答落成中间消息并
 /// 继续循环。
 pub(crate) fn steering_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool {
-    state.pending_steering.extend(
-        env.host
-            .take_steering_messages(&env.config.conversation_id),
-    );
+    state
+        .pending_steering
+        .extend(env.host.take_steering_messages(&env.config.conversation_id));
     !state.pending_steering.is_empty()
 }
 

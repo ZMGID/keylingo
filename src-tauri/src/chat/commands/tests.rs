@@ -33,7 +33,8 @@ use super::reply_runtime::resolve_reply_arms;
 use super::sanitization::sanitize_image_payloads_for_model;
 use super::title::{build_title_summary_prompt, generate_title, sanitize_generated_title};
 use super::tooling::{
-    apply_chat_mode_tool_filter, should_answer_inline_without_file_write, try_apply_skill_slash_trigger,
+    apply_chat_mode_tool_filter, should_answer_inline_without_file_write,
+    try_apply_skill_slash_trigger,
 };
 use super::*;
 
@@ -390,7 +391,11 @@ fn chat_mode_tool_filter_keeps_research_tools_only() {
         write_mcp_tool,
     ];
 
-    let blocked = apply_chat_mode_tool_filter(&mut tools, true, &crate::settings::ChatModeConfig::default());
+    let blocked = apply_chat_mode_tool_filter(
+        &mut tools,
+        true,
+        &crate::settings::ChatModeConfig::default(),
+    );
     let names = tools
         .iter()
         .map(|tool| tool.openai_tool_name())
@@ -423,7 +428,11 @@ fn chat_mode_tool_filter_is_noop_when_disabled() {
         crate::mcp::types::native_read_file_tool(),
         crate::mcp::types::native_write_file_tool(),
     ];
-    let blocked = apply_chat_mode_tool_filter(&mut tools, false, &crate::settings::ChatModeConfig::default());
+    let blocked = apply_chat_mode_tool_filter(
+        &mut tools,
+        false,
+        &crate::settings::ChatModeConfig::default(),
+    );
     assert_eq!(tools.len(), 2);
     assert!(blocked.is_empty());
 }
@@ -465,7 +474,6 @@ fn chat_mode_tool_filter_respects_config_toggles() {
     assert!(!names.contains(&"memory_read".to_string()));
     assert!(!names.contains(&"mcp__docs__search".to_string()));
 }
-
 
 #[test]
 fn orchestrate_budget_bump_raises_rounds_but_keeps_unlimited() {
@@ -1901,8 +1909,15 @@ fn auxiliary_vision_result_becomes_text_for_main_chat_model() {
     };
     let augmented = user_content_with_auxiliary_vision_result(Some("这是什么？"), &result, "zh");
 
-    let messages = build_chat_api_messages(None, "system", &conversation, Some(0), Some(&augmented), &[])
-        .expect("messages should build");
+    let messages = build_chat_api_messages(
+        None,
+        "system",
+        &conversation,
+        Some(0),
+        Some(&augmented),
+        &[],
+    )
+    .expect("messages should build");
     let content = &messages[1]["content"];
 
     assert!(content.is_string());

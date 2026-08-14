@@ -360,11 +360,10 @@ pub(crate) fn rehydrate_model_message_images(
     messages: &mut [crate::chat::model::ModelMessage],
 ) {
     if !messages.iter().any(|model_message| {
-        model_message
-            .content
-            .iter()
-            .any(|part| matches!(part, MessagePart::Image { data, path, .. }
-                if data.is_empty() && path.as_deref().is_some_and(|p| !p.is_empty())))
+        model_message.content.iter().any(|part| {
+            matches!(part, MessagePart::Image { data, path, .. }
+                if data.is_empty() && path.as_deref().is_some_and(|p| !p.is_empty()))
+        })
     }) {
         return;
     }
@@ -442,7 +441,9 @@ fn externalize_api_message_images_in_dir(dir: &Path, messages: &mut [serde_json:
     let mut changed = false;
     for message in messages.iter_mut() {
         for url_slot in api_message_image_url_slots(message) {
-            let Some(url) = url_slot.as_str() else { continue };
+            let Some(url) = url_slot.as_str() else {
+                continue;
+            };
             let Some((mime, payload)) = parse_data_url(url.trim()) else {
                 continue; // 已经是哨兵 / 远程 URL / 非 base64 → 不动
             };
@@ -519,15 +520,16 @@ fn api_message_has_attachment_uri(message: &serde_json::Value) -> bool {
 fn rehydrate_api_message_images_in_dir(dir: &Path, messages: &mut [serde_json::Value]) {
     for message in messages.iter_mut() {
         for url_slot in api_message_image_url_slots(message) {
-            let Some(url) = url_slot.as_str() else { continue };
+            let Some(url) = url_slot.as_str() else {
+                continue;
+            };
             let Some((mime, file_name)) = parse_attachment_uri(url) else {
                 continue;
             };
             match fs::read(dir.join(file_name)) {
                 Ok(bytes) => {
                     let encoded = general_purpose::STANDARD.encode(bytes);
-                    *url_slot =
-                        serde_json::Value::String(format!("data:{mime};base64,{encoded}"));
+                    *url_slot = serde_json::Value::String(format!("data:{mime};base64,{encoded}"));
                 }
                 // 读不到：留下人类可读的说明。这里只能改 url 字段（拿不到 part 本体），
                 // 而空 url / 残留哨兵都会被 provider 当成非法图片，所以退化成 data URL 形态的
@@ -575,9 +577,7 @@ fn parse_attachment_uri(url: &str) -> Option<(String, &str)> {
 ///
 /// Anthropic 的 `source.data` 形状**不在**此列：`api_messages` 按定义是 OpenAI 兼容转录
 /// （`model_messages_from_openai_messages` 只认这几种），Anthropic 的块数组从不落到这里。
-fn api_message_image_url_slots(
-    message: &mut serde_json::Value,
-) -> Vec<&mut serde_json::Value> {
+fn api_message_image_url_slots(message: &mut serde_json::Value) -> Vec<&mut serde_json::Value> {
     let mut slots = Vec::new();
     let Some(parts) = message.get_mut("content").and_then(|c| c.as_array_mut()) else {
         return slots;
@@ -930,7 +930,12 @@ pub(crate) fn compose_text_attachments_for_api(
 
     let attachment_blocks = text_attachments
         .iter()
-        .map(|attachment| format!("--- 文本附件：{} ---\n{}", attachment.name, attachment.content))
+        .map(|attachment| {
+            format!(
+                "--- 文本附件：{} ---\n{}",
+                attachment.name, attachment.content
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
     let note = format!(
@@ -954,10 +959,13 @@ pub(crate) fn text_attachments_from_attachments(
     attachments
         .iter()
         .filter_map(|attachment| {
-            attachment.content.as_ref().map(|content| TextAttachmentInput {
-                name: attachment.name.clone(),
-                content: content.clone(),
-            })
+            attachment
+                .content
+                .as_ref()
+                .map(|content| TextAttachmentInput {
+                    name: attachment.name.clone(),
+                    content: content.clone(),
+                })
         })
         .collect()
 }
@@ -1278,16 +1286,12 @@ mod tests {
         }]
     }
 
-    fn image_parts(
-        messages: &[crate::chat::model::ModelMessage],
-    ) -> Vec<(&str, Option<&str>)> {
+    fn image_parts(messages: &[crate::chat::model::ModelMessage]) -> Vec<(&str, Option<&str>)> {
         messages
             .iter()
             .flat_map(|m| m.content.iter())
             .filter_map(|part| match part {
-                MessagePart::Image { data, path, .. } => {
-                    Some((data.as_str(), path.as_deref()))
-                }
+                MessagePart::Image { data, path, .. } => Some((data.as_str(), path.as_deref())),
                 _ => None,
             })
             .collect()
@@ -1446,7 +1450,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let payload = general_purpose::STANDARD.encode(b"wire-png-bytes");
 
-        let mut messages = vec![api_image_message(&format!("data:image/png;base64,{payload}"))];
+        let mut messages = vec![api_image_message(&format!(
+            "data:image/png;base64,{payload}"
+        ))];
         assert!(externalize_api_message_images_in_dir(&dir, &mut messages));
 
         let url = api_image_url(&messages[0]);

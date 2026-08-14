@@ -134,7 +134,6 @@ fn apply_context_state_update(
     increment_revision(conversation)
 }
 
-
 fn apply_upserts(conversation: &mut Conversation, messages: Vec<ChatMessage>) {
     for message in messages {
         if let Some(position) = conversation
@@ -421,8 +420,7 @@ impl ConversationRepository {
         if !latest.messages.iter().any(|message| {
             super::attachments::message_has_model_message_image_to_externalize(message)
                 || super::attachments::message_has_api_message_image_to_externalize(message)
-        })
-        {
+        }) {
             return Ok(None);
         }
         increment_revision(&mut latest)?;
@@ -642,7 +640,6 @@ impl ConversationRepository {
         self.persist_locked(app, latest).await
     }
 
-
     pub async fn update_metadata(
         &self,
         app: &AppHandle,
@@ -811,7 +808,6 @@ mod tests {
 
     #[test]
     fn keyed_locks_share_only_the_same_conversation() {
-
         let repository = ConversationRepository::default();
         let first = repository.conversation_lock("conv_a");
         let same = repository.conversation_lock("conv_a");
@@ -867,5 +863,4 @@ mod tests {
             "mutate_expected-style writes refresh updated_at"
         );
     }
-
 }

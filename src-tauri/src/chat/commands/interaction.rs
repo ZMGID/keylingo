@@ -293,7 +293,8 @@ pub(crate) fn chat_clear_finished_background_tasks(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|_, t| {
-            t.status == "running" || (wanted.is_some() && Some(t.conversation_id.as_str()) != wanted)
+            t.status == "running"
+                || (wanted.is_some() && Some(t.conversation_id.as_str()) != wanted)
         });
 }
 

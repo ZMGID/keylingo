@@ -10,9 +10,9 @@ pub(crate) mod planning;
 pub mod prepare;
 pub(crate) mod recovery;
 pub(crate) mod rounds;
+pub mod steering;
 pub mod stop;
 pub mod stream;
-pub mod steering;
 pub(crate) mod synthesis;
 pub mod types;
 

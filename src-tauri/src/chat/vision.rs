@@ -20,8 +20,7 @@ use super::mcp_image_feedback::{
     select_image_artifacts_for_attach,
 };
 use super::model_call::{
-    chat_missing_model_error, format_chat_missing_api_key_error,
-    session_model_for_conversation,
+    chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
 };
 use super::storage::load_conversation;
 use super::{ToolCallRecord, ToolCallStatus};

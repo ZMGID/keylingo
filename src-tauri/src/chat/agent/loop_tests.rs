@@ -2382,8 +2382,14 @@ async fn run_loop_final_answer_with_pending_steering_continues() {
     let bodies = server.captured_bodies();
     assert_eq!(bodies.len(), 2, "final answer + one continuation round");
     // 续答请求带着：被吸收成中间消息的第一版终答 + 插话。
-    assert!(bodies[1].contains("先答一版"), "absorbed assistant answer replays");
-    assert!(bodies[1].contains("README"), "the late steering message reaches the model");
+    assert!(
+        bodies[1].contains("先答一版"),
+        "absorbed assistant answer replays"
+    );
+    assert!(
+        bodies[1].contains("README"),
+        "the late steering message reaches the model"
+    );
     // run 的最终正文是第二版；第一版存在于段与 api_messages 里（时间线完整）。
     assert_eq!(result.content, "补充完毕。");
     assert!(result.api_messages.iter().any(|message| {
@@ -3167,9 +3173,7 @@ async fn run_loop_stream_builtin_web_search_card_precedes_answer_single_card() {
 /// —— 同样落在答案之前、单卡。
 #[tokio::test]
 async fn run_loop_nonstream_builtin_web_search_card_uses_reserved_slot() {
-    let server = MockModelServer::start(vec![MockResponse::Sse(
-        responses_web_search_sse_events(),
-    )]);
+    let server = MockModelServer::start(vec![MockResponse::Sse(responses_web_search_sse_events())]);
     let state = test_app_state();
     let mut config = test_run_config(&state, &server.base_url, false);
     config.provider.api_format = "openai_responses".to_string();
@@ -3628,4 +3632,3 @@ async fn run_loop_smoke_tool_then_final_answer_round_trips() {
         bodies[1]
     );
 }
-

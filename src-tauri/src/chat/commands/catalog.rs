@@ -420,7 +420,7 @@ pub(crate) async fn create_chat_conversation_internal(
                 created_at: now,
                 updated_at: now,
                 pinned: false,
-        archived: false,
+                archived: false,
                 folder,
                 project_id,
                 set_id,

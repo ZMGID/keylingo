@@ -357,7 +357,7 @@ pub const CLAUDE_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     stream_format: StreamFormat::ClaudeStreamJson,
     resumes_session_via_cli: true,
     supports_native_image: true,
-        supports_steering: false,
+    supports_steering: false,
     image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_claude_args,
 };

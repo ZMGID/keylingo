@@ -1,4 +1,3 @@
-
 use crate::settings::SessionModel;
 
 use super::Conversation;

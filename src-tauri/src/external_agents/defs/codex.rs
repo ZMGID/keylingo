@@ -54,7 +54,7 @@ pub const CODEX_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     stream_format: StreamFormat::CodexAppServer,
     resumes_session_via_cli: false,
     supports_native_image: true,
-        supports_steering: true,
+    supports_steering: true,
     image_mime_whitelist: &[],
     build_args: build_codex_args,
 };

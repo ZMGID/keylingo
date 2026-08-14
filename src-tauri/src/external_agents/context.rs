@@ -623,8 +623,12 @@ mod tests {
         assert!(!estimated);
 
         // 完全未知的模型 id 仍不能编造 200K 兜底（会触发假百分比 / 错位压缩阈值）。
-        let (window, estimated) =
-            context_window_for_external_model("cursor", "totally-unknown-cursor-model-xyz", None, None);
+        let (window, estimated) = context_window_for_external_model(
+            "cursor",
+            "totally-unknown-cursor-model-xyz",
+            None,
+            None,
+        );
         assert_eq!(window, None);
         assert!(estimated);
 

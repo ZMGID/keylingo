@@ -102,7 +102,14 @@ pub fn scan() -> Result<ImportScan, String> {
             skipped += 1;
             continue;
         };
-        match convert(agent_id, id, name, website.unwrap_or_default(), is_current, &config) {
+        match convert(
+            agent_id,
+            id,
+            name,
+            website.unwrap_or_default(),
+            is_current,
+            &config,
+        ) {
             Some(provider) => providers.push(provider),
             None => skipped += 1,
         }
@@ -151,10 +158,9 @@ fn convert(
             return None;
         }
         out.config_toml = toml;
-        out.has_api_key = out
-            .config_toml
-            .lines()
-            .any(|line| line.trim_start().starts_with("api_key") && line.contains('=') && !line.contains("\"\""));
+        out.has_api_key = out.config_toml.lines().any(|line| {
+            line.trim_start().starts_with("api_key") && line.contains('=') && !line.contains("\"\"")
+        });
         return Some(out);
     }
     // claude / gemini：只取 `env`。cc-switch 的 claude 条目里还带着 theme / permissions /
@@ -194,7 +200,15 @@ mod tests {
             "permissions": { "allow": ["Bash"] },
             "enabledPlugins": ["a@b"],
         });
-        let p = convert("claude", "p1".into(), "Relay".into(), String::new(), true, &config).unwrap();
+        let p = convert(
+            "claude",
+            "p1".into(),
+            "Relay".into(),
+            String::new(),
+            true,
+            &config,
+        )
+        .unwrap();
         assert_eq!(p.env.len(), 2);
         assert!(p.has_api_key);
         assert!(p.config_toml.is_empty());
@@ -206,7 +220,15 @@ mod tests {
             "auth": { "OPENAI_API_KEY": "sk-y" },
             "config": "model = \"gpt-5.6\"\nmodel_provider = \"custom\"\n",
         });
-        let p = convert("codex", "c1".into(), "Codex Relay".into(), String::new(), false, &config).unwrap();
+        let p = convert(
+            "codex",
+            "c1".into(),
+            "Codex Relay".into(),
+            String::new(),
+            false,
+            &config,
+        )
+        .unwrap();
         assert!(p.config_toml.contains("model_provider"));
         assert!(p.auth_json.contains("OPENAI_API_KEY"));
         assert!(p.has_api_key);
@@ -215,7 +237,15 @@ mod tests {
     #[test]
     fn env_less_entry_is_skipped() {
         // gemini 条目常常是空壳 `{"env":{},"config":{}}`，导进来是个不能用的空供应商。
-        assert!(convert("gemini", "g1".into(), "G".into(), String::new(), false, &json!({"env":{},"config":{}})).is_none());
+        assert!(convert(
+            "gemini",
+            "g1".into(),
+            "G".into(),
+            String::new(),
+            false,
+            &json!({"env":{},"config":{}})
+        )
+        .is_none());
     }
 
     #[test]

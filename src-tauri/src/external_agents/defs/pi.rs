@@ -82,7 +82,7 @@ pub const PI_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     stream_format: StreamFormat::PiRpc,
     resumes_session_via_cli: true,
     supports_native_image: false,
-        supports_steering: false,
+    supports_steering: false,
     image_mime_whitelist: &[],
     build_args: build_pi_args,
 };

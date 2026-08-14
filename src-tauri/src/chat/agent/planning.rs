@@ -1,9 +1,9 @@
 use serde_json::Value;
 
 use crate::chat::model::{
-    generate_request_from_openai_messages, stream_with_chat_provider,
-    BuiltinWebSearch, GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext,
-    ModelError, PendingToolCall, StreamPart, StreamSink,
+    generate_request_from_openai_messages, stream_with_chat_provider, BuiltinWebSearch,
+    GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext, ModelError,
+    PendingToolCall, StreamPart, StreamSink,
 };
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase};
 use crate::mcp::ChatToolDefinition;

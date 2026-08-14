@@ -29,10 +29,7 @@ pub fn resolve_effective_cwd(
 /// 目录要不要建取决于调用方：真的要往里写（spawn CLI）才建，只是想知道路径
 /// （dock 展示 / 上下文统计）就别建。原来这里无条件 `create_dir_all`，于是每开一个
 /// 新会话都留一个空壳——实测 110 个 conv 目录里 105 个是空的。
-fn conversation_workspace_path(
-    app: &AppHandle,
-    conversation_id: &str,
-) -> Result<PathBuf, String> {
+fn conversation_workspace_path(app: &AppHandle, conversation_id: &str) -> Result<PathBuf, String> {
     Ok(conversations_dir(app)?
         .parent()
         .ok_or_else(|| "chat data root unavailable".to_string())?

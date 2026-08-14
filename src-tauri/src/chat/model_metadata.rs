@@ -651,7 +651,10 @@ mod tests {
             db_display_name("gpt-5.6-luna").as_deref(),
             Some("GPT-5.6 Luna")
         );
-        assert_eq!(db_display_name("gpt-5.6-sol").as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(
+            db_display_name("gpt-5.6-sol").as_deref(),
+            Some("GPT-5.6 Sol")
+        );
         assert_eq!(
             db_display_name("gpt-5.6-terra").as_deref(),
             Some("GPT-5.6 Terra")

@@ -88,10 +88,7 @@ pub(crate) fn request_lens_close(app: &AppHandle) -> Result<(), String> {
 /// 宽限期内用户重开新会话时 `lens_open_seq` 已变，watchdog 自动作废。
 fn schedule_forced_lens_close(app: &AppHandle) {
     const FORCE_CLOSE_GRACE_MS: u64 = 800;
-    let seq = app
-        .state::<AppState>()
-        .lens_open_seq
-        .load(Ordering::SeqCst);
+    let seq = app.state::<AppState>().lens_open_seq.load(Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(FORCE_CLOSE_GRACE_MS)).await;

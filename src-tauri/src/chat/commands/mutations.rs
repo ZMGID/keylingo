@@ -3,8 +3,8 @@ use uuid::Uuid;
 
 use crate::chat::agent::execute::truncate_chars;
 use crate::chat::attachments::{
-    compose_text_attachments_for_api, compose_user_content_for_api, stored_image_paths_for_attachments,
-    text_attachments_from_attachments,
+    compose_text_attachments_for_api, compose_user_content_for_api,
+    stored_image_paths_for_attachments, text_attachments_from_attachments,
 };
 use crate::state::AppState;
 

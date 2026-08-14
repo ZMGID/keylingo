@@ -715,9 +715,10 @@ impl ClaudeStreamJsonSession {
     ) -> Result<(), String> {
         // Catalog id (claude-sonnet-5) → runtime id (settings/env mapped). active_model is
         // always runtime-space (seeded from launch argv which already went through resolve).
-        let Some(runtime) =
-            crate::external_agents::session::claude_init::needs_set_model(self.active_model.as_deref(), model.unwrap_or(""))
-        else {
+        let Some(runtime) = crate::external_agents::session::claude_init::needs_set_model(
+            self.active_model.as_deref(),
+            model.unwrap_or(""),
+        ) else {
             // Auto/empty, or already on the mapped runtime — no control request.
             return Ok(());
         };
@@ -990,7 +991,8 @@ impl ClaudeStreamJsonSession {
                     continue;
                 }
             }
-            match classify_inbound_frame(&value, ask_tx.is_some()) {                // **fail-closed**：认不出来的控制请求也必须回一条 error 响应。沉默会让 claude
+            match classify_inbound_frame(&value, ask_tx.is_some()) {
+                // **fail-closed**：认不出来的控制请求也必须回一条 error 响应。沉默会让 claude
                 // 永远等下去（它那侧没有超时），而本轮的读循环也没有超时 —— 那一轮就永久挂死。
                 InboundFrame::Reply(reply) => {
                     let _ = self.stdin.write_all(reply.as_bytes()).await;
@@ -1555,7 +1557,8 @@ mod tests {
     }
 
     #[test]
-    fn control_response_verdict_matches_only_our_request_id() {        let ok: Value = serde_json::from_str(
+    fn control_response_verdict_matches_only_our_request_id() {
+        let ok: Value = serde_json::from_str(
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"a"}}"#,
         )
         .unwrap();
@@ -2355,7 +2358,7 @@ mod live_tests {
                         request_id: ask.request_id,
                         approved: true,
                         updated_input,
-                            set_permission_mode: None,
+                        set_permission_mode: None,
                     })
                     .await;
                 if sent.is_err() {
@@ -2473,7 +2476,11 @@ text={}",
         .await;
         answerer.abort();
         let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        eprintln!("result={:?}\nasked={asked:?}\ntext={}", out.result, out.text.trim());
+        eprintln!(
+            "result={:?}\nasked={asked:?}\ntext={}",
+            out.result,
+            out.text.trim()
+        );
 
         if out.result.is_err() {
             eprintln!("SKIP: 这一轮失败（未登录 / 网络？）：{:?}", out.result);
@@ -2582,7 +2589,7 @@ text={}",
                         request_id: ask.request_id,
                         approved: true,
                         updated_input,
-                            set_permission_mode: None,
+                        set_permission_mode: None,
                     })
                     .await;
                 if sent.is_err() {
@@ -3035,7 +3042,7 @@ text={}",
                         request_id: ask.request_id,
                         approved: approve,
                         updated_input: None,
-                            set_permission_mode: None,
+                        set_permission_mode: None,
                     })
                     .await;
                 if sent.is_err() {

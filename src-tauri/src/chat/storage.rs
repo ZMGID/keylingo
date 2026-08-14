@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use super::{
     ChatAssistant, ChatAssistantIndex, ChatAssistantSnapshot, ChatProject, ChatProjectIndex,
-    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem,
-    ConversationPin, ConversationSearchHit,
+    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem, ConversationPin,
+    ConversationSearchHit,
 };
 
 const WRITE_RETRY_ATTEMPTS: usize = 3;
@@ -762,7 +762,12 @@ pub fn query_conversations(
         _ => !c.archived,
     });
 
-    if let Some(set_id) = query.set_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(set_id) = query
+        .set_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         items.retain(|c| c.set_id.as_deref() == Some(set_id));
     } else if let Some(project_id) = query
         .project_id
@@ -835,8 +840,6 @@ pub fn query_conversations(
     let asc = query.order.trim().eq_ignore_ascii_case("asc");
     items.sort_by(|a, b| compare_library_items(a, b, &sort, asc));
 
-
-
     let total = items.len();
     if offset >= total {
         return Ok(ConversationLibraryPage {
@@ -868,10 +871,7 @@ pub fn query_conversations(
             }
         })
         .collect();
-    Ok(ConversationLibraryPage {
-        items: page,
-        total,
-    })
+    Ok(ConversationLibraryPage { items: page, total })
 }
 
 /// 对话库排序键：收藏置顶，同组内按 sort/order。纯函数，便于单测锁契约。
@@ -912,7 +912,6 @@ pub fn search_conversations(
     query: &str,
     limit: usize,
 ) -> Result<Vec<ConversationSearchHit>, String> {
-
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Ok(vec![]);
@@ -1014,10 +1013,7 @@ fn messages_match(conv: &Conversation, needle: &str) -> bool {
     first_message_match(conv, needle).is_some()
 }
 
-fn first_message_match(
-    conv: &Conversation,
-    needle: &str,
-) -> Option<(String, String, String)> {
+fn first_message_match(conv: &Conversation, needle: &str) -> Option<(String, String, String)> {
     for m in &conv.messages {
         if m.content.to_lowercase().contains(needle) {
             return Some((
@@ -1232,9 +1228,13 @@ pub fn set_conversation_pins(
     } else {
         all.insert(group_id.to_string(), pins);
     }
-    let content =
-        serde_json::to_string_pretty(&all).map_err(|e| format!("serialize conversation pins: {e}"))?;
-    atomic_write(&conversation_pins_file_path(app)?, &content, "conversation pins")
+    let content = serde_json::to_string_pretty(&all)
+        .map_err(|e| format!("serialize conversation pins: {e}"))?;
+    atomic_write(
+        &conversation_pins_file_path(app)?,
+        &content,
+        "conversation pins",
+    )
 }
 
 pub fn get_assistants(
@@ -2072,7 +2072,6 @@ mod conversation_workspace_tests {
 
     #[test]
     fn explicit_project_id_is_treated_as_project_binding() {
-
         assert!(has_non_empty_value(Some("proj_missing")));
         assert!(!has_non_empty_value(Some("  ")));
         assert!(!has_non_empty_value(None));
@@ -2104,9 +2103,12 @@ mod conversation_workspace_tests {
         let long_miss = "甲".repeat(200);
         let miss = make_search_snippet(&long_miss, "不存在");
         // 没命中时走 truncate_chars(140)——正文截到 140 字再拼 "..."
-        assert!(miss.chars().count() <= 143, "miss len={}", miss.chars().count());
+        assert!(
+            miss.chars().count() <= 143,
+            "miss len={}",
+            miss.chars().count()
+        );
         assert!(miss.ends_with("..."), "miss={miss}");
-
     }
 
     #[test]
@@ -2131,7 +2133,10 @@ mod conversation_workspace_tests {
             first_message_match(&conv, "pyodide").expect("content hit");
         assert_eq!(field, "content");
         assert_eq!(message_id, "m2");
-        assert!(snippet.to_lowercase().contains("pyodide"), "snippet={snippet}");
+        assert!(
+            snippet.to_lowercase().contains("pyodide"),
+            "snippet={snippet}"
+        );
 
         let (field, message_id, snippet) =
             first_message_match(&conv, "wasm 加载").expect("reasoning hit");
@@ -2155,8 +2160,7 @@ mod conversation_workspace_tests {
             }]
         }))
         .expect("conversation");
-        let (field, message_id, _) =
-            first_message_match(&both, "sandbox").expect("both hit");
+        let (field, message_id, _) = first_message_match(&both, "sandbox").expect("both hit");
         assert_eq!(field, "content");
         assert_eq!(message_id, "m9");
     }
@@ -2173,8 +2177,10 @@ mod conversation_workspace_tests {
         }))
         .expect("conversation");
         let (_, message_id, _) = first_message_match(&conv, "cdn77").expect("hit");
-        assert_eq!(message_id, "m1", "global search jump must land on the first hit");
-
+        assert_eq!(
+            message_id, "m1",
+            "global search jump must land on the first hit"
+        );
     }
 
     fn list_item(partial: serde_json::Value) -> ConversationListItem {
@@ -2255,9 +2261,7 @@ mod conversation_workspace_tests {
             std::cmp::Ordering::Less
         );
     }
-
 }
-
 
 #[cfg(test)]
 mod builtin_assistant_tests {
