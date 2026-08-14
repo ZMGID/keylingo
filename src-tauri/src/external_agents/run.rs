@@ -1311,7 +1311,9 @@ fn persistent_failure_action(
     // resume 失效：**必须排在下面那条 auth / retried 之前**。它不是瞬时故障（重连同一份 argv
     // 一定再失败），也不是认证问题，而是一个有确定处置的状态：换个新会话继续。
     // 同样只降级一次 —— 摘掉 resume 之后还失败说明是别的原因。
-    if crate::external_agents::stream::claude::is_missing_session_error(err) {
+    if crate::external_agents::stream::claude::is_missing_session_error(err)
+        || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
+    {
         return if dropped_resume {
             PersistentFailureAction::Fatal
         } else {
@@ -2187,7 +2189,10 @@ async fn connect_persistent_session(
             })
         }
         StreamFormat::DshJsonRpc => {
-            let session = DshJsonRpcSession::connect(
+            // 与 ACP / codex 同口径：续接失败且目标原生会话已经不在，降级开新会话，
+            // 而不是把 session/open 的原文甩成一轮硬失败。resume mismatch / 其它握手错误
+            // 仍 fail-loud（那不是「会话没了」）。
+            let session = match DshJsonRpcSession::connect(
                 resolved_bin,
                 args,
                 cwd,
@@ -2197,7 +2202,33 @@ async fn connect_persistent_session(
                 sandbox,
                 preset,
             )
-            .await?;
+            .await
+            {
+                Ok(session) => session,
+                Err(err)
+                    if resume_native.as_deref().is_some_and(|id| !id.trim().is_empty())
+                        && crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(
+                            &err,
+                        ) =>
+                {
+                    eprintln!(
+                        "[external-agent] dsh resume failed (session {}), connecting fresh: {err}",
+                        resume_native.as_deref().unwrap_or("")
+                    );
+                    DshJsonRpcSession::connect(
+                        resolved_bin,
+                        args,
+                        cwd,
+                        None,
+                        model,
+                        reasoning,
+                        sandbox,
+                        preset,
+                    )
+                    .await?
+                }
+                Err(err) => return Err(err),
+            };
             let id = session.session_id().to_string();
             let resumed = session.resumed();
             let child_pid = session.child_pid();
@@ -3167,6 +3198,26 @@ mod tests {
         assert_eq!(
             persistent_failure_action(REAL_MISSING_SESSION_ERROR, "claude", false, false, true),
             PersistentFailureAction::Fatal
+        );
+    }
+
+    const REAL_DSH_MISSING_SESSION_ERROR: &str =
+        "dsh session/open: session \"kivio-old\" not found";
+
+    #[test]
+    fn a_missing_dsh_resume_target_reconnects_without_resume_exactly_once() {
+        assert_eq!(
+            persistent_failure_action(REAL_DSH_MISSING_SESSION_ERROR, "dsh", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+        assert_eq!(
+            persistent_failure_action(REAL_DSH_MISSING_SESSION_ERROR, "dsh", false, false, true),
+            PersistentFailureAction::Fatal
+        );
+        // 宽到 "Session not found" 会把无关失败拽进降级；dsh 必须带 session/open 前缀。
+        assert_ne!(
+            persistent_failure_action("Session not found: abc", "dsh", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
         );
     }
 

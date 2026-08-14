@@ -73,6 +73,17 @@ function mapDefaultLabel(label: string): string {
   return label === 'Default' ? 'Auto' : label
 }
 
+/** ACP 探测常把思考开关报成 on/off，那不是档位。dsh 的 `off` 是真档位，会跟 high/max 一起出现。 */
+const ACP_SWITCH_IDS = ['on', 'off', 'true', 'false', 'enabled', 'disabled']
+
+function isAcpSwitchId(id: string): boolean {
+  return ACP_SWITCH_IDS.includes(id.toLowerCase())
+}
+
+function isAcpSwitchOnlyList(options: { id: string }[]): boolean {
+  return options.length > 0 && options.every((option) => isAcpSwitchId(option.id))
+}
+
 // 胶囊只显示模型名尾巴，去掉 provider 前缀（"foo/mimo-v2.5-pro" → "mimo-v2.5-pro"），
 // 避免有意义的尾部被截断；下拉列表仍保留完整 id。
 function stripProviderPrefix(label: string): string {
@@ -399,20 +410,11 @@ function ExternalModelSelectorBase({
     if (modelId && Object.prototype.hasOwnProperty.call(reasoningByModel, modelId)) {
       return reasoningByModel[modelId] ?? []
     }
-    // 过滤 ACP 误报的 On-only 开关，避免胶囊显示「On」。
-    const filtered = reasoningOptions.filter(
-      (o) => !['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(o.id.toLowerCase()),
-    )
-    // 若过滤后只剩空、或原来就只有开关——不显示档位。
-    if (
-      reasoningOptions.length > 0 &&
-      reasoningOptions.every((o) =>
-        ['on', 'off', 'true', 'false', 'enabled', 'disabled'].includes(o.id.toLowerCase()),
-      )
-    ) {
+    // 整表都是 ACP 开关才藏档位。不要从混有 high/max 的表里单独抠掉 off——dsh 的 off 是真档位。
+    if (isAcpSwitchOnlyList(reasoningOptions)) {
       return []
     }
-    return filtered.length > 0 ? filtered : reasoningOptions
+    return reasoningOptions
   }, [agentRuntime.externalModel, currentModel, reasoningByModel, reasoningOptions])
 
   const reasoningPillValue = agentRuntime.externalReasoning ?? 'default'
@@ -426,13 +428,16 @@ function ExternalModelSelectorBase({
         ? currentReasoning
         : reasoningPillValue
     const opt = activeReasoningOptions.find((o) => o.id === displayId)
-    const raw = opt?.label ?? displayId
+    if (opt) {
+      return mapDefaultLabel(opt.label || displayId)
+    }
+    const raw = displayId
     // 未显式选择且探测也没有档位时显示「自动」，不再暴露裸 "Default"。
-    // 残留的 ACP on/off 开关也当自动（不是档位名）。dsh 的 off 是真档位，会走上面的探测回填。
+    // 残留的 ACP on/off 开关也当自动（不是档位名）。列表里的 off（dsh）走上面的 opt 分支。
     if (
       raw === 'Default' ||
       displayId === 'default' ||
-      ['on', 'off', 'true', 'false'].includes(String(displayId).toLowerCase())
+      isAcpSwitchId(String(displayId))
     ) {
       return 'Auto'
     }

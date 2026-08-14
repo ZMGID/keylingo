@@ -137,6 +137,63 @@ describe('ExternalModelSelector', () => {
     expect(onModelChange).not.toHaveBeenCalled()
   })
 
+  it('dsh 的 off 是真档位：胶囊显示 Off，菜单里保留 Off', async () => {
+    detectModels.mockResolvedValue({
+      models: [
+        { id: 'default', label: 'Default' },
+        { id: 'deepseek-v4-flash', label: 'DeepSeek-V4-Flash' },
+      ],
+      reasoningOptions: [
+        { id: 'default', label: 'Default' },
+        { id: 'off', label: 'Off' },
+        { id: 'high', label: 'High' },
+        { id: 'max', label: 'Max' },
+      ],
+      source: 'probed',
+      currentModel: 'deepseek-v4-flash',
+      currentReasoning: 'off',
+    })
+
+    render(
+      <ExternalModelSelector
+        agentRuntime={runtime}
+        onModelChange={() => {}}
+        conversationId={null}
+      />,
+    )
+    await waitFor(() =>
+      expect(screen.getByLabelText('思考等级：Off')).toBeInTheDocument(),
+    )
+    act(() => {
+      fireEvent.click(screen.getByLabelText('思考等级：Off'))
+    })
+    expect(screen.getByRole('button', { name: 'Off' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('思考等级：Auto')).not.toBeInTheDocument()
+  })
+
+  it('ACP 只报 on/off 开关时不显示思考档位胶囊', async () => {
+    detectModels.mockResolvedValue({
+      models: [{ id: 'default', label: 'Default' }],
+      reasoningOptions: [
+        { id: 'on', label: 'On' },
+        { id: 'off', label: 'Off' },
+      ],
+      source: 'probed',
+      currentModel: null,
+      currentReasoning: 'off',
+    })
+
+    render(
+      <ExternalModelSelector
+        agentRuntime={runtime}
+        onModelChange={() => {}}
+        conversationId={null}
+      />,
+    )
+    await waitFor(() => expect(screen.getByRole('button')).toHaveTextContent('Auto'))
+    expect(screen.queryByLabelText(/思考等级/)).not.toBeInTheDocument()
+  })
+
   it('有 CLI 当前模型/推理时胶囊显示真实名字而不是 Auto', async () => {
     detectModels.mockResolvedValue({
       models: [

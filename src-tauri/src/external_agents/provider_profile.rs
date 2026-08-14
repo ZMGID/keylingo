@@ -1558,7 +1558,7 @@ fn write_private(path: &Path, content: &str) -> Result<(), String> {
 }
 
 /// 原生配置会被独立 CLI 同时读取：同目录临时文件 fsync 后 rename，避免读到半截 JSON。
-fn write_private_atomic(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_private_atomic(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("创建 {} 失败：{e}", parent.display()))?;

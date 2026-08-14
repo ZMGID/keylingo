@@ -18,6 +18,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_yaml::Mapping;
+use tauri::AppHandle;
+use tauri_plugin_shell::ShellExt;
 use tokio::time::timeout;
 
 use crate::external_agents::dsh_profile::{profile_dir, KIVIO_PROFILE};
@@ -341,7 +343,7 @@ fn write_credential(api_key_env: &str, api_key: &str) -> Result<(), String> {
     );
     let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(root))
         .map_err(|err| format!("序列化 dsh 凭据失败：{err}"))?;
-    crate::chat::storage::atomic_write(&path, &yaml, "dsh credentials")
+    crate::external_agents::provider_profile::write_private_atomic(&path, &yaml)
 }
 
 fn persist_settings(path: &Path, root: Mapping) -> Result<(), String> {
@@ -595,39 +597,16 @@ async fn dump_kivio_config() -> Result<String, String> {
     Ok(stdout)
 }
 
-fn open_settings_file(path: &Path) -> Result<(), String> {
+fn open_settings_file(app: &AppHandle, path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("创建 dsh 配置目录失败：{err}"))?;
     }
     if !path.exists() {
         crate::chat::storage::atomic_write(path, "", "dsh settings.yaml")?;
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .no_console_window()
-            .spawn()
-            .map_err(|err| format!("打开配置文件失败：{err}"))?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .no_console_window()
-            .spawn()
-            .map_err(|err| format!("打开配置文件失败：{err}"))?;
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .no_console_window()
-            .spawn()
-            .map_err(|err| format!("打开配置文件失败：{err}"))?;
-    }
-    Ok(())
+    app.shell()
+        .open(path.display().to_string(), None)
+        .map_err(|err| format!("打开配置文件失败：{err}"))
 }
 
 #[tauri::command]
@@ -681,8 +660,8 @@ pub async fn chat_dsh_plugin_inventory() -> Result<Vec<DshPluginEntry>, String> 
 }
 
 #[tauri::command]
-pub fn chat_dsh_open_settings_file() -> Result<(), String> {
-    open_settings_file(&settings_path()?)
+pub fn chat_dsh_open_settings_file(app: AppHandle) -> Result<(), String> {
+    open_settings_file(&app, &settings_path()?)
 }
 
 #[cfg(test)]

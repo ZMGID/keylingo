@@ -130,14 +130,14 @@ fn render_patch(reasoning: Option<&str>, preset: Option<&str>) -> String {
          - id: session-title-llm\n\
          \x20 disabled: true\n",
     );
-    if let Some(effort) = normalize_choice(reasoning) {
+    if let Some(effort) = normalize_reasoning_effort(reasoning) {
         out.push_str(
             "\n# 推理档位唯一入口（不是启动 flag，也不在 initialize 参数里）。\n\
              - id: llm-deepseek\n\
              \x20 config:\n\
              \x20   reasoningEffort: ",
         );
-        out.push_str(&effort);
+        out.push_str(effort);
         out.push('\n');
     }
     out.push_str(
@@ -285,12 +285,17 @@ pub fn active_provider_default_route() -> Result<Option<(String, String)>, Strin
     Ok(Some((active.route, active.default_model)))
 }
 
-/// 空 / `"default"` 视为「不指定」，与 `types::normalize_model` 同语义。
-fn normalize_choice(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != "default")
-        .map(str::to_string)
+/// 空 / `"default"` / 未知值视为「不指定」，与 `types::normalize_model` 同语义。
+///
+/// 只认 `defs/dsh.rs` 的合法档位 `off|high|max`。其它字符串（含换行）绝不能写进
+/// 共享的 `cordis.patch.yml`：那是顶层 YAML 数组，插一行就能重开 host-plane 工具。
+fn normalize_reasoning_effort(value: Option<&str>) -> Option<&'static str> {
+    match value.map(str::trim) {
+        Some("off") => Some("off"),
+        Some("high") => Some("high"),
+        Some("max") => Some("max"),
+        _ => None,
+    }
 }
 
 /// 该 profile 的依赖是否已装好（两个包都要在 `node_modules` 里）。
@@ -640,6 +645,29 @@ mod tests {
     #[test]
     fn off_is_a_real_effort_not_an_absence() {
         assert!(render_patch(Some("off"), None).contains("reasoningEffort: off"));
+    }
+
+    /// 未知档位（含换行 / YAML 注入）必须整段省略，不能原样插进共享 patch。
+    #[test]
+    fn unknown_reasoning_is_omitted_not_interpolated() {
+        for value in [
+            Some("HIGH"),
+            Some("low"),
+            Some("none"),
+            Some("high\n- id: injected-tool\n  disabled: false"),
+            Some("off\n- insert:\n    - id: evil"),
+        ] {
+            let yml = render_patch(value, None);
+            assert!(
+                !yml.contains("reasoningEffort"),
+                "reasoning={value:?} 不该写档位"
+            );
+            assert!(
+                !yml.contains("injected-tool"),
+                "注入条目不得进 patch：{value:?}"
+            );
+            assert!(!yml.contains("evil"), "注入条目不得进 patch：{value:?}");
+        }
     }
 
     /// patch 必须是**顶层 YAML 数组**（上游对这个文件的要求就是 "a top-level YAML array of

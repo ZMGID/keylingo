@@ -54,6 +54,53 @@ describe('InputBar 发送清草稿', () => {
     expect(getComposerDraft(draftKey('c-send-rejected'))?.input).toBe('不要丢掉这条消息')
   })
 
+  it('onAccepted 之后若发送失败且输入仍空，把原文回填', async () => {
+    render(
+      <InputBar
+        conversationId="c-accepted-then-fail"
+        onSend={(_content, _attachments, options) => {
+          options?.onAccepted?.()
+          return Promise.resolve(false)
+        }}
+      />,
+    )
+    const textarea = screen.getByPlaceholderText('Ask me anything...')
+    fireEvent.change(textarea, { target: { value: '发送失败也要回来' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(textarea).toHaveValue('发送失败也要回来'))
+    expect(getComposerDraft(draftKey('c-accepted-then-fail'))?.input).toBe('发送失败也要回来')
+  })
+
+  it('onAccepted 之后用户已开始打下一句，失败不覆盖新输入', async () => {
+    let finishSend!: (accepted: boolean) => void
+    const send = new Promise<boolean>((resolve) => {
+      finishSend = resolve
+    })
+    render(
+      <InputBar
+        conversationId="c-typed-after-accept"
+        onSend={(_content, _attachments, options) => {
+          options?.onAccepted?.()
+          return send
+        }}
+      />,
+    )
+    const textarea = screen.getByPlaceholderText('Ask me anything...')
+    fireEvent.change(textarea, { target: { value: '第一句' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(textarea).toHaveValue(''))
+
+    fireEvent.change(textarea, { target: { value: '已经在打下一句' } })
+    await waitFor(() => {
+      expect(getComposerDraft(draftKey('c-typed-after-accept'))?.input).toBe('已经在打下一句')
+    })
+    await act(async () => { finishSend(false) })
+
+    expect(textarea).toHaveValue('已经在打下一句')
+    expect(getComposerDraft(draftKey('c-typed-after-accept'))?.input).toBe('已经在打下一句')
+  })
+
   it('消息进入发送流程后立即清空，不等待整轮生成 Promise 完成', async () => {
     let resolveGeneration!: (accepted: boolean) => void
     let generationFinished = false

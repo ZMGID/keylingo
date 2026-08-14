@@ -73,5 +73,7 @@ mod tests {
         assert_eq!(compact_prompt_for_agent("grok"), Some("/compact"));
         assert_eq!(compact_prompt_for_agent("codex"), Some("/compact"));
         assert!(compact_prompt_for_agent("kimi").is_none());
+        // dsh 没有原生 compact RPC；斜杠菜单里的 /compact 只是 prompt 文本，按钮不能假装能压。
+        assert!(compact_prompt_for_agent("dsh").is_none());
     }
 }

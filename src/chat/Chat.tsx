@@ -3452,6 +3452,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         : effectiveSkillId ?? inferSingleAttachmentSkillId(attachments, enabledSkills)
 
     let persistedConversation: Conversation | null = null
+    let sendAccepted = false
     try {
       const updatedConv = await chatApi.sendMessage(
         conversationId,
@@ -3460,6 +3461,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         attachmentSkillId,
       )
       persistedConversation = updatedConv
+      sendAccepted = true
       if (currentConversationIdRef.current === conversationId) {
         applyAssistantStreamStats(updatedConv)
         setPendingUserMessage(null)
@@ -3500,6 +3502,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const message = typeof err === 'string' ? err : (err as Error).message || '发送失败'
       setStreamErrorForConversation(conversationId, message)
       if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
+      // 用户消息已落盘 → 草稿清掉是对的；否则 InputBar 必须把原文回填，不能 return true。
+      sendAccepted = Boolean(keptConversation)
     } finally {
       clearConversationInFlight(conversationId)
       // 多答组收尾：sendMessage 返回时所有臂已结束，持久化后的会话已 applyConversation（含 N 条
@@ -3517,7 +3521,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
       }
     }
-    return true
+    return sendAccepted
   }, [
     activeModel,
     activeProviderId,

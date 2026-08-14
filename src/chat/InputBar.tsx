@@ -1155,22 +1155,44 @@ export const InputBar = memo(function InputBar({
     } else {
       sendingDraftKeyRef.current = draftKeyRef.current
       setSendPending(true)
+      const sentSnapshot = {
+        input,
+        quotes: [...quotes],
+        attachments: [...attachments],
+      }
       let acceptedNotified = false
+      let clearedDraftKey: string | null = null
       const notifyAccepted = () => {
         if (acceptedNotified) return
         acceptedNotified = true
-        clearSentDraft(sendingDraftKeyRef.current ?? draftKeyRef.current)
+        // 必须读 ref：欢迎页首发会把 `__new__` 迁到真实会话 id，冻在发送开始会清错键。
+        clearedDraftKey = sendingDraftKeyRef.current ?? draftKeyRef.current
+        clearSentDraft(clearedDraftKey)
         sendingDraftKeyRef.current = null
         // 后端生成仍在继续，但输入框已经可以接收下一条排队消息。
         setSendPending(false)
       }
+      const restoreRejectedDraft = () => {
+        if (!acceptedNotified || !clearedDraftKey) return
+        const typedAfterAccept = (textareaRef.current?.value ?? '').trim().length > 0
+        if (draftKeyRef.current !== clearedDraftKey || typedAfterAccept) return
+        setComposerDraft(clearedDraftKey, sentSnapshot)
+        setInput(sentSnapshot.input)
+        setQuotes(sentSnapshot.quotes)
+        setAttachments(sentSnapshot.attachments)
+        if (textareaRef.current) applyComposerAutoHeight(textareaRef.current)
+      }
       try {
         const accepted = await onSend(content, attachments, { onAccepted: notifyAccepted })
-        if (accepted === false) return
+        if (accepted === false) {
+          restoreRejectedDraft()
+          return
+        }
         // 兼容没有“已接收”通知的普通 onSend：Promise 完成后再按旧语义清理。
         notifyAccepted()
       } catch (error) {
         console.error('Failed to submit composer message:', error)
+        restoreRejectedDraft()
       } finally {
         sendingDraftKeyRef.current = null
         setSendPending(false)

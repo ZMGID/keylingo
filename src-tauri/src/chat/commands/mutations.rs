@@ -318,6 +318,16 @@ pub(crate) async fn chat_delete_message(
     conversation_id: String,
     message_id: String,
 ) -> Result<serde_json::Value, String> {
+    // 与 rewind 同一把哨兵：生成中途写盘的 `msgimg-*` / `artifact-*` 可能还没进 JSON，
+    // 这时按旧引用集扫附件会把轮次还在用的图当成孤儿删掉。
+    let Some(_send_reservation) = ChatSendReservation::try_acquire(state.inner(), &conversation_id)
+    else {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": CHAT_REPLY_BUSY_ERROR,
+        }));
+    };
+
     let repository = crate::chat::repository::repository(&app);
     let mut snapshot = repository
         .get(&app, &conversation_id)
