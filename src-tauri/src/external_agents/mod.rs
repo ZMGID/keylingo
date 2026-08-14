@@ -1,6 +1,7 @@
 pub mod ask_user;
 pub mod attachments;
 pub mod cc_switch;
+pub mod claude_todo;
 pub mod commands;
 pub mod compact;
 pub mod context;

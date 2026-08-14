@@ -519,6 +519,59 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText('1/2')).toBeInTheDocument()
   })
 
+  it('renders dsh todo_write as the same todo card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'todo_write',
+          source: 'external_cli',
+          arguments: JSON.stringify({
+            todos: [
+              { content: '读协议', status: 'completed' },
+              { content: '接线', status: 'in_progress' },
+            ],
+          }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Update todos')).toBeInTheDocument()
+    expect(within(button).getByText('1/2')).toBeInTheDocument()
+  })
+
+  it('renders claude TaskCreate / TaskUpdate as readable task rows', () => {
+    const { unmount } = render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'TaskCreate',
+          source: 'external_cli',
+          arguments: JSON.stringify({
+            subject: 'Phase 0：安装 .NET 10 SDK',
+            activeForm: '安装 .NET 10 SDK',
+          }),
+        })}
+      />,
+    )
+    let button = screen.getByRole('button')
+    expect(within(button).getByText('Create task')).toBeInTheDocument()
+    expect(within(button).getByText('Phase 0：安装 .NET 10 SDK')).toBeInTheDocument()
+    unmount()
+
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'TaskUpdate',
+          source: 'external_cli',
+          arguments: JSON.stringify({ taskId: '1', status: 'in_progress' }),
+        })}
+      />,
+    )
+    button = screen.getByRole('button')
+    expect(within(button).getByText('Update task')).toBeInTheDocument()
+    expect(within(button).getByText(/进行中/)).toBeInTheDocument()
+    expect(within(button).getByText(/1/)).toBeInTheDocument()
+  })
+
   it('keeps MCP tool names verbatim (normalization must not lowercase the display name)', () => {
     // 归一化只用于 switch 匹配。MCP 工具名的大小写有意义，把它小写化会改坏显示。
     render(

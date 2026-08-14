@@ -2390,7 +2390,24 @@ fn apply_unified_event(
                     {
                         record.structured_content = Some(answered);
                     }
+                    let claude_todo = if !is_error
+                        && crate::external_agents::claude_todo::is_claude_todo_tool(&record.name)
+                    {
+                        Some((
+                            record.name.clone(),
+                            record
+                                .structured_content
+                                .clone()
+                                .unwrap_or(serde_json::Value::Null),
+                            result_content.clone(),
+                        ))
+                    } else {
+                        None
+                    };
                     emit_chat_tool_record(app, run_id, record);
+                    if let Some((name, input, result)) = claude_todo {
+                        persist_claude_todo(app, run_id, conversation_id, name, input, result);
+                    }
                 }
             }
         }
@@ -2500,8 +2517,109 @@ fn apply_unified_event(
                 summary.as_deref(),
             );
         }
+        UnifiedAgentEvent::TodoWrite { todos } => {
+            let Some(state) =
+                crate::external_agents::session::dsh_jsonrpc::todo_state_from_write(&todos)
+            else {
+                return;
+            };
+            crate::chat::protocol::emit_run_event(
+                app,
+                run_id,
+                crate::chat::protocol::ChatRunEvent::TodoUpdated {
+                    todo_state: (&state).into(),
+                },
+            );
+            if let Some(record) = tool_calls
+                .iter_mut()
+                .rev()
+                .find(|record| record.name.eq_ignore_ascii_case("todo_write"))
+            {
+                record.structured_content = Some(serde_json::json!({ "todoState": state }));
+                emit_chat_tool_record(app, run_id, record);
+            }
+            let app = app.clone();
+            let conversation_id = conversation_id.to_string();
+            tauri::async_runtime::spawn(async move {
+                match crate::chat::repository::repository(&app)
+                    .update_todo(&app, &conversation_id, state)
+                    .await
+                {
+                    Ok(persisted) => crate::chat::todo::emit_chat_todo_state(
+                        &app,
+                        &conversation_id,
+                        persisted.revision,
+                        &persisted.agent_todo_state,
+                    ),
+                    Err(err) => {
+                        eprintln!("[external-agent] persist dsh todo failed: {err}");
+                    }
+                }
+            });
+        }
         _ => {}
     }
+}
+
+/// Claude Code 的 Task / 旧 TodoWrite 成功之后，在对话锁里补丁列表再发协议事件。
+///
+/// 必须进 `mutate`：`TaskUpdate` 是补丁，不能拿一份过期快照 `update_todo` 整表盖掉。
+fn persist_claude_todo(
+    app: &AppHandle,
+    run_id: &str,
+    conversation_id: &str,
+    name: String,
+    input: serde_json::Value,
+    result: String,
+) {
+    if crate::external_agents::claude_todo::apply_claude_todo_tool(
+        &crate::chat::types::AgentTodoState::default(),
+        &name,
+        &input,
+        &result,
+    )
+    .is_none()
+    {
+        return;
+    }
+    let app = app.clone();
+    let run_id = run_id.to_string();
+    let conversation_id = conversation_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        match crate::chat::repository::repository(&app)
+            .mutate(&app, &conversation_id, move |conversation| {
+                if let Some(next) = crate::external_agents::claude_todo::apply_claude_todo_tool(
+                    &conversation.agent_todo_state,
+                    &name,
+                    &input,
+                    &result,
+                ) {
+                    conversation.agent_todo_state = next;
+                }
+                Ok(())
+            })
+            .await
+        {
+            Ok(persisted) => {
+                crate::chat::protocol::emit_run_event(
+                    &app,
+                    &run_id,
+                    crate::chat::protocol::ChatRunEvent::TodoUpdated {
+                        todo_state: (&persisted.agent_todo_state).into(),
+                    },
+                );
+                crate::chat::todo::emit_chat_todo_state(
+                    &app,
+                    &conversation_id,
+                    persisted.revision,
+                    &persisted.agent_todo_state,
+                );
+            }
+            Err(err) => {
+                eprintln!("[external-agent] persist claude todo failed: {err}");
+            }
+        }
+    });
 }
 
 /// 本轮的失败判据：读流错误与**协议层自报的失败**（`UnifiedAgentEvent::Error`）共用

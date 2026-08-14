@@ -202,6 +202,9 @@ function toolGlyph(toolCall: ToolCallRecord): LucideIcon | ComponentType<{ size?
       return ScrollText
     case 'todo_write':
     case 'todo_update':
+    case 'taskcreate':
+    case 'taskupdate':
+    case 'tasklist':
       return ListChecks
     case 'memory_read':
     case 'memory_search':
@@ -262,7 +265,8 @@ function normalizeTodoItem(value: unknown): AgentTodoItem | null {
   const status = typeof item.status === 'string' ? item.status : ''
   if (!id && !content) return null
   return {
-    id,
+    // dsh 的 todo_write 没有 id，官方用 content 当身份。
+    id: id || content,
     content,
     status: (status === 'completed' || status === 'in_progress' || status === 'pending'
       ? status
@@ -1202,6 +1206,9 @@ function getToolName(toolCall: ToolCallRecord): string {
   if (raw === 'mixer_vision') return 'Vision'
   if (raw === 'mixer_generate_image') return 'Generate image'
   if (raw === 'todo_write' || raw === 'todo_update') return 'Update todos'
+  if (raw === 'taskcreate') return 'Create task'
+  if (raw === 'taskupdate') return 'Update task'
+  if (raw === 'tasklist') return 'List tasks'
   return displayName
 }
 
@@ -1288,6 +1295,13 @@ function getToolTarget(toolCall: ToolCallRecord): string {
       case 'todo_write': {
         const counts = formatTodoCounts(normalizeTodoItems(args?.todos))
         return counts
+      }
+      case 'taskcreate':
+        return compactText(firstString(args?.subject, args?.content), 140)
+      case 'taskupdate': {
+        const status = typeof args?.status === 'string' ? todoStatusLabel(args.status) : ''
+        const target = firstString(args?.subject, args?.taskId, args?.id, args?.task_id)
+        return [status, compactText(target, 120)].filter(Boolean).join(' · ')
       }
       case 'todo_update':
         return compactText(firstString(args?.content, args?.id), 120)

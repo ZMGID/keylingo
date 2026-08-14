@@ -900,6 +900,13 @@ fn map_session_event(
                 sink(UnifiedAgentEvent::ToolUse { id, name, input });
             }
         }
+        "todo/write" => {
+            if data.get("todos").and_then(Value::as_array).is_some() {
+                sink(UnifiedAgentEvent::TodoWrite {
+                    todos: data.clone(),
+                });
+            }
+        }
         "tool/result" => {
             map_tool_results(data, sink);
         }
@@ -932,6 +939,58 @@ fn map_session_event(
         _ => {}
     }
     None
+}
+
+/// 官方 `todo/write` 快照 → Kivio 对话上的 todo 列表。
+///
+/// 条目没有 id，官方用 **content** 当身份（重复 content 会被 execute 拒）。
+/// 多个 `in_progress` 原样保留（preset 的 `allowParallelInProgress: true`）；
+/// 不要走内置 `normalized_state`，那条会把多余的进行中降成 pending。
+///
+/// ponytail: 官方 web 在 `turn/start` 清掉 standing plan。Kivio 的列表挂在对话上，
+/// 跨轮保留，和内置 `todo_write` 一样。
+pub(crate) fn todo_state_from_write(data: &Value) -> Option<crate::chat::types::AgentTodoState> {
+    let raw = data.get("todos")?.as_array()?;
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in raw {
+        let Some(content) = item
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(content);
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let status = match item.get("status").and_then(Value::as_str) {
+            Some("in_progress") => crate::chat::types::AgentTodoStatus::InProgress,
+            Some("completed") => crate::chat::types::AgentTodoStatus::Completed,
+            Some("pending") => crate::chat::types::AgentTodoStatus::Pending,
+            _ => continue,
+        };
+        items.push(crate::chat::types::AgentTodoItem {
+            id: id.to_string(),
+            content: content.to_string(),
+            status,
+            ..Default::default()
+        });
+    }
+    if items.is_empty() && !raw.is_empty() {
+        return None;
+    }
+    Some(crate::chat::types::AgentTodoState {
+        items,
+        updated_at: chrono::Local::now().timestamp(),
+    })
 }
 
 fn parse_usage(value: Option<&Value>, context_window: Option<u64>) -> Option<ModelUsage> {
@@ -1154,6 +1213,56 @@ mod tests {
         // reasoning 是 output 的子集，不能再加一次：166 + 184 + 1152 = 1502。
         assert_eq!(usage.total_tokens, Some(1502));
         assert_eq!(usage.context_window_tokens, Some(1_000_000));
+    }
+
+    #[test]
+    fn maps_todo_write_snapshot_to_the_conversation_list() {
+        let mut emitted = Vec::new();
+        let mut window = None;
+        map_session_event(
+            "todo/write",
+            &json!({
+                "todos": [
+                    { "content": "读协议", "status": "completed" },
+                    { "content": "接线", "status": "in_progress" },
+                    { "content": "补测试", "status": "pending" },
+                    { "content": "接线", "status": "pending" },
+                    { "content": "  ", "status": "pending" },
+                    { "content": "没状态" },
+                ]
+            }),
+            &mut window,
+            &mut |event| emitted.push(event),
+        );
+        let UnifiedAgentEvent::TodoWrite { todos } = &emitted[0] else {
+            panic!("expected TodoWrite");
+        };
+        let state = todo_state_from_write(todos).expect("必须能映射");
+        assert_eq!(state.items.len(), 3);
+        assert_eq!(state.items[0].id, "读协议");
+        let with_id = todo_state_from_write(&json!({
+            "todos": [{ "id": "a", "content": "有 id", "status": "pending" }]
+        }))
+        .expect("id 优先于 content");
+        assert_eq!(with_id.items[0].id, "a");
+        assert_eq!(with_id.items[0].content, "有 id");
+        assert_eq!(
+            state.items[0].status,
+            crate::chat::types::AgentTodoStatus::Completed
+        );
+        assert_eq!(
+            state.items[1].status,
+            crate::chat::types::AgentTodoStatus::InProgress
+        );
+        assert_eq!(state.items[2].content, "补测试");
+        assert!(state.updated_at > 0);
+        assert!(todo_state_from_write(&json!({})).is_none());
+        let cleared = todo_state_from_write(&json!({ "todos": [] })).expect("空表是合法整表替换");
+        assert!(cleared.items.is_empty());
+        assert!(todo_state_from_write(&json!({
+            "todos": [{ "content": "没状态" }]
+        }))
+        .is_none());
     }
 
     #[test]

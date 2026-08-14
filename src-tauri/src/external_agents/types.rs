@@ -302,6 +302,13 @@ pub enum UnifiedAgentEvent {
         /// 终态摘要（notification 帧的 `summary`：命令退出码文案 / 子代理最终回复）。
         summary: Option<String>,
     },
+    /// dsh `todo_write` 校验通过后写入会话日志的整表快照（`todo/write`）。
+    ///
+    /// 官方 UI 认这条事件，不认 `tool/call` 入参（入参可能随后被 execute 拒掉）。
+    /// 条目只有 `content` + `status`，没有 id。
+    TodoWrite {
+        todos: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
