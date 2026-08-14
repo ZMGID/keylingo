@@ -33,6 +33,8 @@ function agentDisplayName(agentId: string): string {
       return 'Hermes'
     case 'grok':
       return 'Grok CLI'
+    case 'dsh':
+      return 'DeepSeek Harness'
     default:
       return agentId
   }

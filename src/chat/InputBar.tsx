@@ -46,6 +46,7 @@ import {
   buildSlashCommands,
   commandMatches,
   shouldOpenSlashPopover,
+  matchComposerSlashCommand,
   type SlashCommandDefinition,
   type SlashSkill,
 } from './slashCommands'
@@ -537,6 +538,7 @@ export const InputBar = memo(function InputBar({
   const [slashPanelLeft, setSlashPanelLeft] = useState(0)
   const innerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const slashHighlightRef = useRef<HTMLDivElement>(null)
   // 草稿持久化：会话 key 变化（切对话且未卸载）时载入对应草稿；每次内容变化写回内存 store。
   // keyRef 保证写回落到当前会话，不串到刚切走的会话。
   const draftKeyRef = useRef(draftKeyValue)
@@ -815,6 +817,21 @@ export const InputBar = memo(function InputBar({
     )),
     [allSlashCommands, activeSlashToken?.query],
   )
+  const slashHighlight = useMemo(
+    () => matchComposerSlashCommand(input, allSlashCommands),
+    [allSlashCommands, input],
+  )
+
+  const syncSlashHighlightScroll = useCallback(() => {
+    const textarea = textareaRef.current
+    const overlay = slashHighlightRef.current
+    if (!textarea || !overlay) return
+    overlay.scrollTop = textarea.scrollTop
+    overlay.scrollLeft = textarea.scrollLeft
+  }, [])
+  useLayoutEffect(() => {
+    syncSlashHighlightScroll()
+  }, [input, slashHighlight, syncSlashHighlightScroll])
   const visibleProjectOptions = useMemo(() => {
     const query = projectSearchQuery.trim().toLowerCase()
     return [...projectOptions]
@@ -1910,32 +1927,51 @@ export const InputBar = memo(function InputBar({
               这样下面的 `right-2` 和改动前落在同一像素（shell 的 px-3 不随容器查询变，
               这 12px 是常量）。垂直方向仍旧不写死数值——shell 的 py 在容器查询里会变。 */}
           <div className="relative -mr-3 pr-3">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              readOnly={sendPending}
-              aria-busy={sendPending}
-              onChange={handleInput}
-              onPaste={(e) => void handlePaste(e)}
-              onKeyDown={handleKeyDown}
-              onSelect={handleSelect}
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder={
-                usesExternalRuntime
-                  ? t.chatCliCommandPlaceholder.replace('{agent}', cliAgentLabel)
-                  : 'Ask me anything...'
-              }
-              rows={1}
-              /* 宽度用 calc 收 28px（= 发送键 28 宽 + right-2 的 8 − 与滚动条留的 4px 呼吸）而不是
-                 w-full + pr-*：滚动条长在**盒子右边缘**，padding 挡不住它，只有把盒子本身收窄
-                 才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
-                 不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
-                 custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
-              className="custom-scrollbar block max-h-40 min-h-[28px] w-[calc(100%-1.75rem)] select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 outline-none placeholder:text-neutral-400 disabled:opacity-50 [field-sizing:content] dark:text-neutral-100"
-            />
+            <div className="relative w-[calc(100%-1.75rem)]">
+              {slashHighlight && (
+                <div
+                  ref={slashHighlightRef}
+                  aria-hidden
+                  className="chat-composer-highlight py-1.5 pl-1 pr-1 text-[15px] leading-relaxed text-neutral-900 dark:text-neutral-100"
+                >
+                  {slashHighlight.prefix}
+                  <span className="chat-composer-slash">{slashHighlight.command}</span>
+                  {slashHighlight.rest}
+                  {input.endsWith('\n') ? '\u200b' : null}
+                </div>
+              )}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                readOnly={sendPending}
+                aria-busy={sendPending}
+                onChange={handleInput}
+                onPaste={(e) => void handlePaste(e)}
+                onKeyDown={handleKeyDown}
+                onSelect={handleSelect}
+                onScroll={syncSlashHighlightScroll}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={
+                  usesExternalRuntime
+                    ? t.chatCliCommandPlaceholder.replace('{agent}', cliAgentLabel)
+                    : 'Ask me anything...'
+                }
+                rows={1}
+                /* 宽度用 calc 收 28px（= 发送键 28 宽 + right-2 的 8 − 与滚动条留的 4px 呼吸）而不是
+                   w-full + pr-*：滚动条长在**盒子右边缘**，padding 挡不住它，只有把盒子本身收窄
+                   才能让它落到绝对定位的发送键左侧（原来 pr-10 只挡住了文字，滚动条仍压在键下）。
+                   不用 margin —— w-full 是 width:100%，再加 margin 会溢出容器 28px。
+                   custom-scrollbar：与全站同一根 8px 细条，否则这里是 WebView2 原生带箭头的粗条。 */
+                className={`custom-scrollbar block max-h-40 min-h-[28px] w-full select-text resize-none overflow-y-hidden border-0 bg-transparent py-1.5 pl-1 pr-1 text-[15px] leading-relaxed outline-none placeholder:text-neutral-400 disabled:opacity-50 [field-sizing:content] ${
+                  slashHighlight
+                    ? 'is-slash-highlight'
+                    : 'text-neutral-900 dark:text-neutral-100'
+                }`}
+              />
+            </div>
 
             {/* 发送 / 停止：绝对定位在输入行右侧。两按钮共存于同一槽位，做 opacity+scale
                 crossfade。谁占槽位见 `stopOwnsSendSlot`：生成中打了字就归发送键。 */}

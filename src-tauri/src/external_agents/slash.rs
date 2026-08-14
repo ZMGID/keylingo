@@ -142,6 +142,13 @@ pub async fn list_external_cli_slash_commands(
             )),
         ));
     }
+    if def.slash_strategy == SlashStrategy::Dsh {
+        return Ok((
+            true,
+            crate::external_agents::defs::dsh::builtin_slash_commands(),
+            None,
+        ));
+    }
 
     let cwd = resolve_slash_cwd(app, conversation_id)?;
     let key = cache_key(agent_id, &cwd);
@@ -231,7 +238,7 @@ pub async fn list_external_cli_slash_commands(
             .await
             .unwrap_or_default()
         }
-        SlashStrategy::None => unreachable!("None handled above"),
+        SlashStrategy::Dsh | SlashStrategy::None => unreachable!("cheap strategies handled above"),
     };
 
     // R1: cache the result even when empty (negative cache) so切会话/切 agent 不再每次重探。

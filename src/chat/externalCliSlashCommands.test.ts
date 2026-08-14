@@ -13,6 +13,16 @@ describe('mapExternalCliSlashCommands', () => {
     expect(commands.every((item) => item.kind === 'cli')).toBe(true)
   })
 
+  it('maps dsh official commands as passthrough CLI items', () => {
+    const commands = mapExternalCliSlashCommands('dsh', [
+      { name: 'compact', slash: '/compact', description: 'Compact older conversation history' },
+      { name: 'model', slash: '/model', description: '选择本会话使用的模型' },
+    ])
+    expect(commands.every((item) => item.kind === 'cli')).toBe(true)
+    expect(commands.every((item) => item.category === 'DeepSeek Harness')).toBe(true)
+    expect(commands.some((item) => item.slash === '/compact')).toBe(true)
+  })
+
   it('filters by query like builtin slash popover', () => {
     const commands = mapExternalCliSlashCommands('claude', [
       { name: 'compact', slash: '/compact' },

@@ -826,6 +826,30 @@ body {
   field-sizing: content;
 }
 
+/* 斜杠命令高亮：透明字 + 同几何叠层，textarea 只负责光标和选区。 */
+.chat-composer-highlight {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.chat-composer-slash {
+  color: var(--accent);
+}
+
+.chat-composer-shell textarea.is-slash-highlight {
+  color: transparent;
+  caret-color: var(--text, #171717);
+}
+
+.dark .chat-composer-shell textarea.is-slash-highlight {
+  caret-color: var(--text, #f5f5f5);
+}
+
 /* ===== 输入区三层结构 =====
    原来是「一个 28px 大圆角盒子，图标全塞在里面」→ 盒子被撑到 ~100px 高。
    改为三条独立横条（对齐 Claude Code）：

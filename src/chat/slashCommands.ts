@@ -88,3 +88,27 @@ export function commandMatches(command: SlashCommandDefinition, query: string): 
 export function shouldOpenSlashPopover(): boolean {
   return true
 }
+
+export type ComposerSlashHighlight = {
+  prefix: string
+  command: string
+  rest: string
+}
+
+/** Leading `/name` in the composer — the token that should paint as a command. */
+export function splitComposerSlashCommand(value: string): ComposerSlashHighlight | null {
+  const match = value.match(/^(\s*)(\/[^\s/]*)([\s\S]*)$/)
+  if (!match) return null
+  return { prefix: match[1], command: match[2], rest: match[3] }
+}
+
+/** Highlight only when the leading token is an exact known command. */
+export function matchComposerSlashCommand(
+  value: string,
+  commands: readonly { slash: string }[],
+): ComposerSlashHighlight | null {
+  const parts = splitComposerSlashCommand(value)
+  if (!parts || parts.command === '/') return null
+  const name = parts.command.toLowerCase()
+  return commands.some((command) => command.slash.toLowerCase() === name) ? parts : null
+}
