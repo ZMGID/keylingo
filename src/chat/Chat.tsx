@@ -2861,6 +2861,22 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     conversationId: string,
     conversationHint?: ConversationLoadHint,
   ) => {
+    // 重复点击已打开的会话：不重载。原因是全量走一遍会 beginConversationTransition
+    // （>12 条消息还会铺 Logo 加载态）→ IPC 读盘 → applyConversation 换一个新的
+    // conversation 对象；而 applyConversation 的 revision 守卫只挡「回退」
+    // （`<`，同会话重读 revision 相等挡不住），MessageList 的测量缓存与
+    // messageLayoutRevision 都按消息对象身份走，替换式更新会让整条会话重新估高重挂
+    // ——用户看到的就是"又加载了一次"。
+    // 例外：带 focusMessageId 的搜索跳转仍要生效，只是走 focus 而不是重载。
+    if (
+      currentConversationIdRef.current === conversationId
+      && currentConversationRef.current?.id === conversationId
+    ) {
+      setFocusMessageId(conversationHint?.focusMessageId ?? null)
+      // 路由可能因为停留在中心页（技能/MCP/设置…）而偏离当前会话，补一次对齐。
+      syncConversationRoute(conversationId)
+      return
+    }
     const requestId = beginConversationTransition(conversationId, conversationHint)
     setAssistantStreamStatsByMessageId({})
     setHookWarning(null)
