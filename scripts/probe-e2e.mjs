@@ -576,10 +576,7 @@ const SCENARIOS = [
 
   {
     name: 'config-reconnect',
-    desc:
-      AGENT === 'dsh'
-        ? '启动配置变更触发重连：PID 变化，并明确提示上下文已重置'
-        : '启动参数变更触发重连：换 sandbox 档位 → pid 变了 → 但上下文还在',
+    desc: '启动配置变更触发重连：换 sandbox 档位 → pid 变了 → 但上下文还在',
     async run() {
       const dsh = AGENT === 'dsh'
       const t1 = await turn('config-reconnect', {
@@ -590,8 +587,7 @@ const SCENARIOS = [
       const pid1 = t1.liveSession.childPid
       check(typeof pid1 === 'number', '第 1 轮应拿到 pid', t1.liveSession)
 
-      // sandbox 是进程级配置；LaunchConfig 指纹不匹配时必须轮前丢弃旧条目并换进程。
-      // Claude 能通过原生 --resume 恢复；dsh SDK server 是 create-only，只能明确重置上下文。
+      // sandbox 是进程级配置；LaunchConfig 指纹不匹配时必须轮前换进程，再用 native id resume。
       const t2 = await turn('config-reconnect', {
         conversationId: t1.conversationId,
         prompt: 'What number did I ask you to remember? Reply with just the number.',
@@ -608,25 +604,16 @@ const SCENARIOS = [
         '重连后应是一个新进程（turnsServed 从 1 起算）',
         t2.liveSession,
       )
-      if (dsh) {
-        check(
-          /上下文已重置|context.*reset/i.test(answerOf(t2)),
-          'dsh 不能跨进程 resume，重连后必须明确提示上下文已重置',
-          t2.answer,
-        )
-        check(!answerOf(t2).includes('91'), 'dsh 已提示重置却又伪装成保留了上下文', t2.answer)
-      } else {
-        check(
-          answerOf(t2).includes('91'),
-          '重连丢了上下文（应带 --resume 续上原生会话，而不是开新的）',
-          t2.answer,
-        )
-        check(
-          !/上下文已重置|context.*reset/i.test(answerOf(t2)),
-          '真的续上了却发了「上下文已重置」提示 —— 假提示本身就是 bug',
-          t2.answer,
-        )
-      }
+      check(
+        answerOf(t2).includes('91'),
+        '重连丢了上下文（应带 native session id resume，而不是创建新会话）',
+        t2.answer,
+      )
+      check(
+        !/上下文已重置|context.*reset/i.test(answerOf(t2)),
+        '真的续上了却发了「上下文已重置」提示 —— 假提示本身就是 bug',
+        t2.answer,
+      )
     }
   },
 ]

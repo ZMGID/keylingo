@@ -20,8 +20,8 @@
 //! `--profile <kivio profile>`，而那个 profile 由 `dsh_profile.rs` 生成并维护（Kivio 自己的
 //! 目录，绝不改用户的 `profiles/web` 或家目录 `cordis.patch.yml`）。
 //!
-//! 模型 / 推理档位不是启动 flag，而是 `initialize` 的 RPC 参数（模型）与 `settings.yaml` 的
-//! `llm-deepseek.reasoningEffort`（档位）—— 见 `session::dsh_jsonrpc`。
+//! 模型 / 推理档位不是启动 flag，而是 `initialize` 的 RPC 参数（模型）与 Kivio profile
+//! `cordis.patch.yml` 中的 `llm-deepseek.reasoningEffort`（档位）—— 见 `dsh_profile.rs`。
 
 use super::super::types::{
     PromptInputFormat, RuntimeAgentDef, RuntimeBuildOptions, RuntimeContext, SlashStrategy,
@@ -82,8 +82,7 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     models_from_stderr: false,
     model_probe: None,
     model_probe_args: None,
-    // dsh 有 `ctx.commands` 服务，但 SDK JSON-RPC 那条线**不暴露命令列表**（协议里只有
-    // `initialize` / `session/prompt` / `shutdown` 三个方法，实测确认）。不编一张假清单。
+    // dsh 有 `ctx.commands` 服务，但 Kivio bridge 不暴露命令列表；不能编一张假清单。
     slash_strategy: SlashStrategy::None,
     // 遥测默认关：任何非空值都算关（上游的隐私开关刻意「误关优于误开」）。用户想开就
     // 在 `~/.dsh/.env` 里自己设 —— 那份 env 由 dsh 自己加载，覆盖不到这里。
@@ -93,16 +92,14 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     prompt_via_stdin: false,
     prompt_input_format: PromptInputFormat::Text,
     stream_format: StreamFormat::DshJsonRpc,
-    // 会话 id 由**客户端**指定（`session/prompt.sessionId`），不是 CLI 回吐的，也不进 argv。
-    // 所以既不是 `resumes_session_via_cli`（那是 claude 的 `--resume` argv 形状），
-    // 也不靠 `resolve_agent_resume_context` —— 见 `session::dsh_jsonrpc::session_id_for`。
+    // 原生 session id 由 Kivio bridge 的 `session/open` 创建/恢复，不进 argv；因此这里仍不是
+    // `resumes_session_via_cli`（该字段只描述 `--resume` 一类 CLI 参数形状）。
     resumes_session_via_cli: false,
     // `contentBlocks` 的 image 块要求先经 `ctx.attachments` 落库拿引用（`{type:"image",
     // attachment:{attachmentId,…}}`），裸 base64 上不了线，而那个服务在这条 RPC 上没有出口。
     // 于是与 pi / kimi 同路：降级成 prompt 文本里的路径说明。
     supports_native_image: false,
-    // 协议只有三个方法，没有往在飞轮次追加输入的原语（`agent.steer()` 是进程内 API，
-    // 隔着 JSON-RPC 拿不到）。
+    // Bridge 暴露 cancel/resume，但没有追加输入的 `steer` RPC。
     supports_steering: false,
     image_mime_whitelist: &[],
     build_args: build_dsh_args,

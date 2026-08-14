@@ -820,12 +820,25 @@ where
     // 复用判据里含 `launch_config`：模型 / reasoning / sandbox / 系统指令任一变化 ⇒ 不可复用
     // ⇒ 丢弃条目（actor 自行关停旧进程）并走下面的连接分支**带原生 resume**，于是新 flag
     // 生效而上下文不丢（spec 第 8 条：UI 所见必须与会话实际配置一致）。
-    let (mut control, mut prompt) = match state.external_live_session_control(
-        conversation_id,
-        agent_id,
-        &cwd_str,
-        launch_config,
-    ) {
+    let previous_control = state.external_live_session_control_any(conversation_id);
+    let reusable_control =
+        state.external_live_session_control(conversation_id, agent_id, &cwd_str, launch_config);
+    if reusable_control.is_none() {
+        if let Some(stale) = previous_control {
+            // A new dsh process must not resume while the old process can still write the same
+            // native session log. Close the actor and wait for its receiver to disappear first.
+            let _ = stale
+                .send(crate::external_agents::session::live::SessionCommand::Close)
+                .await;
+            if tokio::time::timeout(std::time::Duration::from_secs(5), stale.closed())
+                .await
+                .is_err()
+            {
+                return Err("旧外部 CLI 会话关闭超时，请重试".to_string());
+            }
+        }
+    }
+    let (mut control, mut prompt) = match reusable_control {
         Some(control) => (control, reuse_prompt.to_string()),
         None => {
             let resume_native = resumable_native.clone();
@@ -848,15 +861,15 @@ where
             .await
             {
                 Ok(connected) => connected,
-                // resume 失效也可能在**启动**阶段就暴露：claude 的 `--resume <不存在的 id>`
-                // 会把同一句话写到 stderr 然后 `exit 1`，被 `connect()` 的即时 `try_wait`
-                // 抓成 `claude-init: …` 带 stderr 尾部（实测 2.2s 才退，所以这条更少见 ——
-                // 但只处理流里那条会漏掉这个场景）。降级方式与轮内失败完全一致。
+                // Resume can fail during connect before the first turn: Claude reports a missing
+                // conversation on stderr; dsh returns `session \"...\" not found` from session/open.
+                // Clear the stale handle and retry fresh exactly once, with the normal reset notice.
                 Err(err)
                     if !dropped_resume
-                        && crate::external_agents::stream::claude::is_missing_session_error(
-                            &err,
-                        ) =>
+                        && (crate::external_agents::stream::claude::is_missing_session_error(&err)
+                            || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(
+                                &err,
+                            )) =>
                 {
                     dropped_resume = true;
                     turn_args = drop_resume_for_fresh_session(
@@ -1131,28 +1144,32 @@ async fn reconnect_fresh(
 
 /// 本轮的启动配置指纹。
 ///
-/// 只有 claude 需要它：它的 `--model` / `--effort` / `--permission-mode` /
-/// `--append-system-prompt-file` **全是启动参数**，常驻之后只能靠换进程生效。改动前每轮
-/// spawn 新进程，换配置是「下一轮自动带上新 flag」白捡的；常驻打破了这个便宜，不补上就会
-/// 出现「界面显示一套、会话实际跑另一套」（违反 spec 第 8 条，是功能退步而非缺功能）。
+/// Claude and dsh both have process-bound settings. Claude fingerprints launch flags/system prompt;
+/// dsh fingerprints initialize model, profile reasoning/provider, and sandbox environment. Without
+/// this, the UI can show a new configuration while the resident process keeps running the old one.
 ///
 /// ACP / codex 能在会话内改模型与推理档位（`session/set_config_option` / 每轮 `turn/start`
 /// 带 model），指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。
 ///
 /// dsh 相反：model 是进程级 `initialize` 后创建 agent 时固定的，reasoning 是 profile patch，
-/// sandbox 是进程环境变量；三者都没有 session 级修改 RPC。任一变化都必须换进程（Phase 1
-/// 无跨进程 resume，因此会诚实显示「上下文已重置」）。
-fn dsh_provider_fingerprint() -> String {
+/// sandbox 是进程环境变量；三者都没有 session 级修改 RPC。任一变化都必须换进程，但 Kivio
+/// bridge 会用同一个 native session id 调 `agents.resume()`，所以历史上下文继续保留。
+fn dsh_provider_fingerprint_for(provider: Option<&crate::settings::ExternalCliProvider>) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    match crate::external_agents::overrides::active_provider("dsh") {
-        Some(provider) => serde_json::to_string(&provider)
-            .unwrap_or_else(|_| provider.id)
+    match provider {
+        Some(provider) => serde_json::to_string(provider)
+            .unwrap_or_else(|_| provider.id.clone())
             .hash(&mut hasher),
         None => "cli-default".hash(&mut hasher),
     }
     format!("{:016x}", hasher.finish())
+}
+
+fn dsh_provider_fingerprint() -> String {
+    let provider = crate::external_agents::overrides::active_provider("dsh");
+    dsh_provider_fingerprint_for(provider.as_ref())
 }
 
 fn launch_config_for_turn(
@@ -1227,18 +1244,20 @@ fn is_cancellation(err: &str) -> bool {
 
 /// 这次失败之后，常驻会话能不能留在注册表里继续服下一轮。
 ///
-/// **claude**：`run_turn` 发出协议级 `interrupt` 后**一直读到本轮的 `result` 才返回**
-/// （实测被中断的轮次一定有 result），流位置回到轮次边界、进程完好 ⇒ 可以直接继续用。
-/// 这是常驻改造的核心收益：点一次「停止」不该让用户丢掉整个会话上下文，也不该再花 3.2 秒
-/// 重新拉起进程。
+/// **claude / dsh**：协议级取消会一直读到当前活动完全回到 idle，流位置停在轮次边界、
+/// 进程与原生 session 完好，可以直接继续下一轮。
 ///
 /// **ACP / codex**：`session/cancel` / `turn/interrupt` 发出后立刻返回，reader 停在流中间
-/// （未消费的 prompt 响应 + 后续 update），复用会读到上一轮的残帧 ⇒ 保持原行为（丢弃会话，
-/// 下一轮从落盘 handle 原生 resume）。
+/// （未消费的 prompt 响应 + 后续 update），复用会读到上一轮的残帧，因此丢弃 live 进程，
+/// 下一轮从落盘 handle 原生 resume。
 ///
 /// `CANCELLED_SESSION_LOST`（进程死了 / 取消超时被硬 Close）任何协议都不保留。
 fn cancel_keeps_live_session(err: &str, protocol: StreamFormat) -> bool {
-    err == "cancelled" && matches!(protocol, StreamFormat::ClaudeStreamJson)
+    err == "cancelled"
+        && matches!(
+            protocol,
+            StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc
+        )
 }
 
 /// What `run_persistent_turn` should do after a turn fails. Pure so the retry policy is unit
@@ -1307,8 +1326,8 @@ fn persistent_failure_action(
 /// 2. **会话记录**：`--resume` 的来源是它，不改的话下一轮又拿死 id 去 resume（每轮降级一次）；
 /// 3. **live handle**：它的 `native_id` 也指着那个死会话，留着会在别处兜底成 `--resume`。
 ///
-/// 只对 claude 有意义（会话 flag 在 argv 里）。其余协议的判据文案根本不会命中，
-/// 这里仍按协议分流，免得哪天有人给别的 CLI 复用这条路时静默改错参数。
+/// Claude must also rewrite argv and its stored native id. dsh carries resume only in the live
+/// handle, so clearing that handle is enough; the fresh connection returns and persists a new id.
 fn drop_resume_for_fresh_session(
     app: &AppHandle,
     conversation_id: &str,
@@ -1318,6 +1337,10 @@ fn drop_resume_for_fresh_session(
 ) -> Vec<String> {
     use crate::external_agents::session::{clear_live_handle, replace_stored_session_id};
 
+    if matches!(protocol, StreamFormat::DshJsonRpc) {
+        clear_live_handle(app, conversation_id);
+        return args.to_vec();
+    }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return args.to_vec();
     }
@@ -2153,24 +2176,23 @@ async fn connect_persistent_session(
             })
         }
         StreamFormat::DshJsonRpc => {
-            // 现有 SDK server 是 create-only：把旧 live handle 的 id 发回去会撞 persisted-log
-            // collision（实测原文："already has a persisted log ... id collision"）。所以 Phase 1
-            // 每个新进程都开新 id、明确 resumed=false；上层看到本来有 handle 会显示既有的
-            // 「上下文已重置」提示，绝不静默假装续上。
-            if let Some(old_id) = resume_native.as_deref() {
-                eprintln!(
-                    "[external-agent] dsh SDK cannot resume session {old_id}; connecting fresh"
-                );
-            }
-            let session =
-                DshJsonRpcSession::connect(resolved_bin, args, cwd, model, reasoning, sandbox)
-                    .await?;
+            let session = DshJsonRpcSession::connect(
+                resolved_bin,
+                args,
+                cwd,
+                resume_native.as_deref(),
+                model,
+                reasoning,
+                sandbox,
+            )
+            .await?;
             let id = session.session_id().to_string();
+            let resumed = session.resumed();
             let child_pid = session.child_pid();
             Ok(PersistentConnection {
                 control: spawn_dsh_session_actor(session),
                 native_id: id,
-                resumed: false,
+                resumed,
                 child_pid,
             })
         }
@@ -3244,14 +3266,16 @@ mod tests {
         );
     }
 
-    /// **整个改造的验收点之一**：claude 协议级取消之后常驻会话必须留在注册表里。
-    /// 丢弃条目 ⇒ control sender 落地 ⇒ actor 收到通道关闭 ⇒ 子进程被关停，
-    /// 于是点一次「停止」就等于把会话上下文和 0.1s 冷启动一起扔掉。
+    /// claude / dsh 在协议级取消完整收尾后都必须保留 live session。
     #[test]
-    fn a_claude_cancel_keeps_the_live_session() {
+    fn settled_protocol_cancel_keeps_supported_live_sessions() {
         assert!(cancel_keeps_live_session(
             "cancelled",
             StreamFormat::ClaudeStreamJson
+        ));
+        assert!(cancel_keeps_live_session(
+            "cancelled",
+            StreamFormat::DshJsonRpc
         ));
         // 硬 Close / 进程已死：任何协议都不保留（留着就是个死 actor）。
         assert!(!cancel_keeps_live_session(
@@ -3394,10 +3418,10 @@ mod tests {
         assert_eq!(updated["answers"]["去哪？"], serde_json::json!("左"));
     }
 
-    /// 指纹只对 claude 生效（它的 effort / permission-mode / 系统提示是启动 flag）；
-    /// ACP / codex 恒为默认值 ⇒ 永不触发重连，既有行为不变。
+    /// Claude fingerprints launch flags/instructions; dsh fingerprints model/reasoning/sandbox/provider.
+    /// ACP / codex / pi can apply their relevant settings without this process-level fingerprint.
     #[test]
-    fn launch_config_only_fingerprints_claude() {
+    fn launch_config_fingerprints_process_bound_protocols() {
         let claude = launch_config_for_turn(
             StreamFormat::ClaudeStreamJson,
             Some("opus"),
@@ -3409,6 +3433,51 @@ mod tests {
         assert_eq!(claude.flags, "high|plan");
         assert_eq!(claude.instructions.as_deref(), Some("hash-1"));
 
+        let dsh = |model, reasoning, sandbox| {
+            launch_config_for_turn(
+                StreamFormat::DshJsonRpc,
+                model,
+                reasoning,
+                sandbox,
+                Some("ignored-instructions"),
+            )
+        };
+        let dsh_base = dsh(Some("deepseek-v4-flash"), Some("off"), Some("read-only"));
+        assert!(dsh_base.instructions.is_none());
+        assert_ne!(
+            dsh_base,
+            dsh(Some("deepseek-v4-pro"), Some("off"), Some("read-only"))
+        );
+        assert_ne!(
+            dsh_base,
+            dsh(Some("deepseek-v4-flash"), Some("high"), Some("read-only"))
+        );
+        assert_ne!(
+            dsh_base,
+            dsh(
+                Some("deepseek-v4-flash"),
+                Some("off"),
+                Some("workspace-write")
+            )
+        );
+        let provider_a = crate::settings::ExternalCliProvider {
+            id: "provider-a".to_string(),
+            config_json: "{\"baseURL\":\"https://a.example/v1\"}".to_string(),
+            ..Default::default()
+        };
+        let provider_b = crate::settings::ExternalCliProvider {
+            id: "provider-b".to_string(),
+            config_json: "{\"baseURL\":\"https://b.example/v1\"}".to_string(),
+            ..Default::default()
+        };
+        assert_ne!(
+            dsh_provider_fingerprint_for(Some(&provider_a)),
+            dsh_provider_fingerprint_for(Some(&provider_b))
+        );
+        assert_ne!(
+            dsh_provider_fingerprint_for(None),
+            dsh_provider_fingerprint_for(Some(&provider_a))
+        );
         for protocol in [
             StreamFormat::AcpJsonRpc,
             StreamFormat::CodexAppServer,

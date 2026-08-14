@@ -2,13 +2,15 @@
 //!
 //! dsh 没有「一条命令直接出流式 JSON」的模式，它只能 boot profile。本模块拉起
 //! `dsh --profile kivio`（profile 由 `dsh_profile.rs` 维护），再驱动
-//! `@deepseek-ai/dsh-sdk-jsonrpc-server` 的换行分隔 JSON-RPC 协议。
+//! Kivio 自带的 resumable JSON-RPC bridge（profile 由 `dsh_profile.rs` 维护）。
 //!
 //! # 线协议（0.1.0-rc.6 实测）
 //!
-//! 客户端请求只有三个：
+//! 客户端请求：
 //! - `initialize { cwd, provider, model, maxTokens? }`
+//! - `session/open { sessionId, resume }`
 //! - `session/prompt { sessionId, contentBlocks }`
+//! - `session/cancel { sessionId }`
 //! - `shutdown`
 //!
 //! 服务端把完整的持久会话日志广播成 `session.event`，另有 `session.status`。一轮工具循环
@@ -16,14 +18,8 @@
 //! `turn/end`，随后 `session.status: idle` 表示整台 agent 静止。
 //!
 //! 服务端广播**运行时里的所有 session**（包含子代理），必须按 `params.sessionId` 过滤，
-//! 否则子代理正文会串进父气泡。
-//!
-//! # Phase 1 的两个已知限制
-//!
-//! - 没有 cancel RPC。取消只能杀进程组，返回 `CANCELLED_SESSION_LOST`，注册表丢弃死 actor。
-//! - server 对未知 id 只会 `agents.create()`，不会 `agents.resume()`；同 id 在新进程里会撞
-//!   persisted-log collision。因此每次 connect 都生成新 id，旧 live handle 只用于让宿主
-//!   判断「本来想续聊」并显示已有的「上下文已重置」提示，绝不把旧 id 发回 dsh。
+//! 否则子代理正文会串进父气泡。Kivio bridge 直接调用 dsh 公共的 `agents.resume()` 与
+//! `agent.cancel()`，所以进程重建和用户停止都不会再丢失原生会话。
 
 use std::path::Path;
 use std::time::Duration;
@@ -42,6 +38,7 @@ use crate::proc::NoConsoleWindow;
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(45);
 const READ_POLL: Duration = Duration::from_millis(200);
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_PROVIDER: &str = "deepseek-official";
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
@@ -57,6 +54,7 @@ pub struct DshJsonRpcSession {
     reader: Lines<BufReader<ChildStdout>>,
     stderr_tail: tokio::task::JoinHandle<String>,
     session_id: String,
+    resumed: bool,
     next_id: u64,
     /// `initialize` 时实际固定给 agent 的 route/model。现有 SDK 没有 session 级换模型方法；
     /// 调用方的启动指纹应在变化时换进程，这里再做一道 fail-loud 防线。
@@ -77,6 +75,7 @@ impl DshJsonRpcSession {
         resolved_bin: &Path,
         args: &[String],
         cwd: &Path,
+        resume_session_id: Option<&str>,
         model: Option<&str>,
         reasoning: Option<&str>,
         sandbox: Option<&str>,
@@ -85,6 +84,12 @@ impl DshJsonRpcSession {
         crate::external_agents::dsh_profile::ensure_profile_ready(resolved_bin, reasoning).await?;
 
         let route = resolve_model_route_for_turn(model)?;
+        let session_id = resume_session_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("kivio-{}", Uuid::new_v4()));
+        let wants_resume = resume_session_id.is_some_and(|id| !id.trim().is_empty());
         let mut command = crate::external_agents::spawn::cli_command(resolved_bin);
         command
             .args(args)
@@ -143,24 +148,55 @@ impl DshJsonRpcSession {
                 .and_then(|v| v.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if name != "deepseek-harness-sdk-runtime" {
+            let resumable = result
+                .get("capabilities")
+                .and_then(|value| value.get("resume"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let cancellable = result
+                .get("capabilities")
+                .and_then(|value| value.get("cancel"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if name != "kivio-dsh-sdk-runtime" || !resumable || !cancellable {
                 return Err(format!(
-                    "dsh initialize: unexpected server identity {name:?}"
+                    "dsh initialize: Kivio resumable bridge unavailable (server={name:?})"
                 ));
             }
-            Ok::<(), String>(())
+
+            write_rpc(
+                &mut stdin,
+                2,
+                "session/open",
+                json!({ "sessionId": session_id, "resume": wants_resume }),
+            )
+            .await
+            .map_err(|e| format!("dsh session/open: {e}"))?;
+            let opened = read_until_response(&mut reader, 2, INITIALIZE_TIMEOUT)
+                .await
+                .map_err(|e| format!("dsh session/open: {e}"))?;
+            let resumed = opened
+                .get("resumed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if resumed != wants_resume {
+                return Err(format!(
+                    "dsh session/open: resume mismatch (requested={wants_resume}, actual={resumed})"
+                ));
+            }
+            Ok::<bool, String>(resumed)
         }
         .await;
 
         match handshake {
-            Ok(()) => Ok(Self {
+            Ok(resumed) => Ok(Self {
                 child,
                 stdin,
                 reader,
                 stderr_tail,
-                // 必须每个新进程一个新 id：把旧 id 发给 create-only server 会撞落盘日志。
-                session_id: format!("kivio-{}", Uuid::new_v4()),
-                next_id: 2,
+                session_id,
+                resumed,
+                next_id: 3,
                 route,
                 context_window: None,
             }),
@@ -174,6 +210,10 @@ impl DshJsonRpcSession {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     pub fn child_pid(&self) -> Option<u32> {
@@ -210,16 +250,13 @@ impl DshJsonRpcSession {
         let mut started = false;
         let mut prompt_acknowledged = false;
         let mut terminal: Option<Result<(), String>> = None;
+        let mut cancel_requested = false;
+        let mut cancel_id: Option<u64> = None;
+        let mut cancel_started: Option<std::time::Instant> = None;
 
         loop {
             match control.try_recv() {
-                Ok(SessionCommand::Cancel) => {
-                    // SDK 没有 cancel 方法。reader 留在流中间不能复用，直接杀整棵进程树；
-                    // 返回前 reap 直接子进程，避免 live handle 被移除后短暂留下 zombie。
-                    crate::external_agents::spawn::kill_agent_process_tree(&mut self.child);
-                    let _ = self.child.wait().await;
-                    return Err(CANCELLED_SESSION_LOST.to_string());
-                }
+                Ok(SessionCommand::Cancel) => cancel_requested = true,
                 Ok(SessionCommand::Close) => return Err("closed".to_string()),
                 Ok(SessionCommand::Steer { accepted, .. }) => {
                     let _ = accepted.send(false);
@@ -234,11 +271,40 @@ impl DshJsonRpcSession {
                 }
             }
 
+            // The transport dispatches JSON-RPC lines concurrently. Cancelling before the prompt ACK
+            // can hit an idle agent, return success, and then let the prompt start afterwards.
+            if cancel_requested && prompt_acknowledged && cancel_id.is_none() {
+                let id = self.next_id;
+                self.next_id += 1;
+                if write_rpc(
+                    &mut self.stdin,
+                    id,
+                    "session/cancel",
+                    json!({ "sessionId": self.session_id }),
+                )
+                .await
+                .is_err()
+                {
+                    crate::external_agents::spawn::kill_agent_process_tree(&mut self.child);
+                    let _ = self.child.wait().await;
+                    return Err(CANCELLED_SESSION_LOST.to_string());
+                }
+                cancel_id = Some(id);
+                cancel_started = Some(std::time::Instant::now());
+            }
+
             let line = match timeout(READ_POLL, self.reader.next_line()).await {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => return Err("dsh exited mid-turn".to_string()),
                 Ok(Err(err)) => return Err(format!("read dsh: {err}")),
-                Err(_) => continue,
+                Err(_) => {
+                    if cancel_started.is_some_and(|started| started.elapsed() >= CANCEL_TIMEOUT) {
+                        crate::external_agents::spawn::kill_agent_process_tree(&mut self.child);
+                        let _ = self.child.wait().await;
+                        return Err(CANCELLED_SESSION_LOST.to_string());
+                    }
+                    continue;
+                }
             };
             if line.trim().is_empty() {
                 continue;
@@ -250,6 +316,15 @@ impl DshJsonRpcSession {
                     continue;
                 }
             };
+
+            if cancel_id.is_some() && value.get("id").and_then(Value::as_u64) == cancel_id {
+                if rpc_error_message(&value).is_some() {
+                    crate::external_agents::spawn::kill_agent_process_tree(&mut self.child);
+                    let _ = self.child.wait().await;
+                    return Err(CANCELLED_SESSION_LOST.to_string());
+                }
+                return Err("cancelled".to_string());
+            }
 
             if value.get("id").and_then(Value::as_u64) == Some(prompt_id) {
                 if let Some(error) = rpc_error_message(&value) {
@@ -272,7 +347,7 @@ impl DshJsonRpcSession {
             match method {
                 "session.status" => match params.get("status").and_then(Value::as_str) {
                     Some("running") => started = true,
-                    Some("idle") if started && terminal.is_some() => {
+                    Some("idle") if started && terminal.is_some() && cancel_id.is_none() => {
                         return terminal.take().expect("checked above");
                     }
                     _ => {}
@@ -422,6 +497,12 @@ fn rpc_error_message(value: &Value) -> Option<String> {
             .map(str::to_string)
             .unwrap_or_else(|| error.to_string()),
     )
+}
+
+pub fn is_missing_session_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("dsh session/open:")
+        && (lower.contains("session \"") && lower.contains("\" not found"))
 }
 
 fn resolve_model_route_for_turn(selected: Option<&str>) -> Result<ModelRoute, String> {
@@ -694,6 +775,17 @@ mod tests {
     }
 
     #[test]
+    fn classifies_only_missing_resume_targets_for_fresh_fallback() {
+        assert!(is_missing_session_error(
+            "dsh session/open: session \"kivio-old\" not found"
+        ));
+        assert!(!is_missing_session_error(
+            "dsh session/open: persisted log checksum mismatch"
+        ));
+        assert!(!is_missing_session_error("dsh initialize: auth failed"));
+    }
+
+    #[test]
     fn sandbox_defaults_to_workspace_write() {
         assert_eq!(normalize_sandbox(None), "workspace-write");
         assert_eq!(normalize_sandbox(Some("default")), "workspace-write");
@@ -852,6 +944,7 @@ mod tests {
             &bin,
             &args,
             &cwd,
+            None,
             Some("deepseek-v4-flash"),
             Some("off"),
             Some("read-only"),
@@ -913,6 +1006,7 @@ mod tests {
             &bin,
             &args,
             &cwd,
+            None,
             Some("deepseek-v4-flash"),
             Some("high"),
             Some("read-only"),
@@ -931,6 +1025,20 @@ mod tests {
             )
             .await
             .expect("first dsh turn");
+        session.close().await;
+
+        let mut session = DshJsonRpcSession::connect(
+            &bin,
+            &args,
+            &cwd,
+            Some(&original_id),
+            Some("deepseek-v4-flash"),
+            Some("high"),
+            Some("read-only"),
+        )
+        .await
+        .expect("resume live dsh");
+        assert!(session.resumed(), "bridge created instead of resuming");
         session
             .run_turn(
                 "上一轮的验证码是什么？只回答验证码。",
@@ -939,7 +1047,7 @@ mod tests {
                 &mut control_rx,
             )
             .await
-            .expect("second dsh turn");
+            .expect("second dsh turn after process restart");
         assert_eq!(session.session_id(), original_id);
         drop(event_tx);
         let mut text = String::new();
@@ -963,7 +1071,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires installed dsh; run with DSH_E2E=1"]
-    async fn live_dsh_cancel_kills_unresumable_session() {
+    async fn live_dsh_cancel_preserves_resumable_session() {
         assert_eq!(std::env::var("DSH_E2E").as_deref(), Ok("1"));
         let bin = std::env::var_os("DSH_BIN")
             .map(PathBuf::from)
@@ -979,18 +1087,21 @@ mod tests {
             &bin,
             &args,
             &cwd,
+            None,
             Some("deepseek-v4-flash"),
             Some("off"),
             Some("read-only"),
         )
         .await
         .expect("connect live dsh");
-        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (event_tx, _event_rx) = mpsc::channel(4096);
         let (control_tx, mut control_rx) = mpsc::channel(1);
+        // Queue cancel before run_turn reads the prompt ACK. The client must defer the cancel RPC
+        // until the prompt is durably enqueued, otherwise the bridge can cancel an idle agent.
         control_tx
             .send(SessionCommand::Cancel)
             .await
-            .expect("queue cancel");
+            .expect("queue early cancel");
         let error = session
             .run_turn(
                 "写一篇很长的文章。",
@@ -999,8 +1110,18 @@ mod tests {
                 &mut control_rx,
             )
             .await
-            .expect_err("cancel must lose dsh session");
-        assert_eq!(error, CANCELLED_SESSION_LOST);
-        assert!(session.child.try_wait().expect("child status").is_some());
+            .expect_err("cancel must stop the active dsh turn");
+        assert_eq!(error, "cancelled");
+        assert!(session.child.try_wait().expect("child status").is_none());
+        session
+            .run_turn(
+                "只回答 READY。",
+                Some("deepseek-v4-flash"),
+                &event_tx,
+                &mut control_rx,
+            )
+            .await
+            .expect("session should remain usable after cancel");
+        session.close().await;
     }
 }

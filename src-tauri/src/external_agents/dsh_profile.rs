@@ -19,7 +19,7 @@
 //! # patch 里放什么
 //!
 //! 包含 Kivio profile 的装配与进程级配置：
-//! - `sdk-jsonrpc-server` 一条 insert（这条线的服务端）
+//! - `kivio-dsh-bridge.mjs` 一条 insert（在官方 server 上补 `resume` / `cancel` RPC）
 //! - `hmr` 关掉：那是给开发热重载用的，常驻会话里只会带来意外重连
 //! - `session-title-llm` 关掉：Kivio 自己起标题，留着等于每轮多付一次模型调用
 //!   （实测确认它会发 `session/title-llm-request`）
@@ -41,9 +41,10 @@ use crate::settings::ExternalCliProvider;
 /// Kivio 私有 profile 名。与用户的 `web` / `tui` 并存。
 pub const KIVIO_PROFILE: &str = "kivio";
 
-/// 这条线需要的两个包。`dsh-sdk-protocol` 是 `dsh-sdk-jsonrpc-server` 的 peer，
-/// **必须显式装** —— 本机实测只装前者时启动报
-/// `Cannot find package '@deepseek-ai/dsh-sdk-protocol'`，pnpm 不会自动补 peer。
+const BRIDGE_FILENAME: &str = "kivio-dsh-bridge.mjs";
+const BRIDGE_SOURCE: &str = include_str!("../../resources/dsh/kivio-dsh-bridge.mjs");
+
+/// Bridge 复用官方 server/transport；dsh core API 由运行中的 profile 提供，避免安装第二份 core。
 const REQUIRED_PACKAGES: &[&str] = &[
     "@deepseek-ai/dsh-sdk-jsonrpc-server",
     "@deepseek-ai/dsh-sdk-protocol",
@@ -95,10 +96,10 @@ fn render_patch(reasoning: Option<&str>) -> String {
         out.push('\n');
     }
     out.push_str(
-        "\n# 这条线的服务端。\n\
+        "\n# Kivio bridge：保留官方事件流，并补齐跨进程 resume 与协议级 cancel。\n\
          - insert:\n\
-         \x20   - id: sdk-jsonrpc-server\n\
-         \x20     name: '@deepseek-ai/dsh-sdk-jsonrpc-server'\n",
+         \x20   - id: kivio-dsh-jsonrpc-bridge\n\
+         \x20     name: './kivio-dsh-bridge.mjs'\n",
     );
     out
 }
@@ -261,6 +262,8 @@ pub async fn ensure_profile_ready(bin: &Path, reasoning: Option<&str>) -> Result
     // patch 在依赖之后写：`dsh plugin` 首次会按模板初始化 profile 目录并写一份占位
     // `cordis.patch.yml`（内容是 `[]`），先写就会被它覆盖掉。
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 dsh profile 目录失败：{e}"))?;
+    std::fs::write(dir.join(BRIDGE_FILENAME), BRIDGE_SOURCE)
+        .map_err(|e| format!("写入 Kivio dsh bridge 失败：{e}"))?;
     let provider = crate::external_agents::overrides::active_provider("dsh");
     let patch = render_patch_with_provider(reasoning, provider.as_ref())?;
     std::fs::write(dir.join("cordis.patch.yml"), patch)
@@ -270,8 +273,31 @@ pub async fn ensure_profile_ready(bin: &Path, reasoning: Option<&str>) -> Result
 /// `dsh plugin --profile kivio add <pkgs>`。
 ///
 /// 用探测到的那个绝对二进制（与跑轮次的是同一个），不走 PATH 再查一次。
+fn remove_provider_env_from_install(
+    command: &mut tokio::process::Command,
+    provider: Option<&ExternalCliProvider>,
+) {
+    if let Some(provider) = provider {
+        for env in &provider.env {
+            command.env_remove(&env.key);
+        }
+    }
+}
+
 async fn install_packages(bin: &Path) -> Result<(), String> {
-    let mut command = crate::external_agents::spawn::cli_command(bin);
+    use tokio::io::AsyncReadExt;
+
+    // Installation never needs model credentials. Build a clean command so pnpm and dependency
+    // lifecycle scripts cannot inherit the active Kivio provider API key.
+    let mut command = tokio::process::Command::new(bin);
+    crate::external_agents::spawn::strip_parent_session_env(&mut command);
+    let provider = crate::external_agents::overrides::active_provider("dsh");
+    remove_provider_env_from_install(&mut command, provider.as_ref());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
     command
         .arg("plugin")
         .arg("--profile")
@@ -281,24 +307,57 @@ async fn install_packages(bin: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        // timeout 会 drop output future；让 tokio 同时杀掉仍在安装的直接子进程，避免后台遗留。
-        .kill_on_drop(true)
         .no_console_window();
 
-    let output = tokio::time::timeout(std::time::Duration::from_secs(180), command.output())
-        .await
-        .map_err(|_| "安装 dsh 插件超时（180s）".to_string())?
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("无法执行 dsh plugin：{e}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = stdout {
+            let _ = pipe.read_to_end(&mut bytes).await;
+        }
+        bytes
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = stderr {
+            let _ = pipe.read_to_end(&mut bytes).await;
+        }
+        bytes
+    });
 
-    if output.status.success() {
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(180), child.wait()).await
+    {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => {
+            crate::external_agents::spawn::kill_agent_process_tree(&mut child);
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(format!("等待 dsh plugin 失败：{err}"));
+        }
+        Err(_) => {
+            crate::external_agents::spawn::kill_agent_process_tree(&mut child);
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err("安装 dsh 插件超时（180s）".to_string());
+        }
+    };
+    let _stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
+
+    if status.success() {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&stderr);
     let tail = stderr.trim();
     // `dsh plugin` 就是个 pnpm 转发器，pnpm 不在 PATH 上时它自己会报这句并退 127。
-    // 直接透传那句英文对用户没用 —— 这是最常见的一次性环境问题，给可操作的话。
-    if output.status.code() == Some(127) || tail.contains("pnpm not found") {
+    if status.code() == Some(127) || tail.contains("pnpm not found") {
         return Err(
             "dsh 需要 pnpm 来安装 profile 插件，但 PATH 上没有找到 pnpm。\
              请先安装 pnpm（https://pnpm.io/installation）后重试。"
@@ -342,13 +401,32 @@ mod tests {
         }
     }
 
-    /// 装配那条 insert 必须在，否则 profile 起来没有服务端、`initialize` 无人应答。
+    /// 装配 bridge 的 insert 必须在，否则 `initialize` 没有 resumable server 应答。
     #[test]
-    fn patch_always_mounts_the_jsonrpc_server() {
+    fn patch_always_mounts_the_kivio_bridge() {
         let yml = render_patch(None);
         assert!(yml.contains("- insert:"));
-        assert!(yml.contains("name: '@deepseek-ai/dsh-sdk-jsonrpc-server'"));
-        assert!(yml.contains("id: sdk-jsonrpc-server"));
+        assert!(yml.contains("name: './kivio-dsh-bridge.mjs'"));
+        assert!(yml.contains("id: kivio-dsh-jsonrpc-bridge"));
+    }
+
+    #[test]
+    fn bridge_source_owns_resume_cancel_and_parent_cleanup() {
+        assert!(BRIDGE_SOURCE.contains("ctx.agents.resume"));
+        assert!(BRIDGE_SOURCE.contains("agent.cancel({ kind: 'user' })"));
+        assert!(BRIDGE_SOURCE.contains("process.ppid !== parentPid"));
+        assert!(BRIDGE_SOURCE.contains("input.once('end', onInputClosed)"));
+        assert!(!BRIDGE_SOURCE.contains("@deepseek-ai/dsh-session"));
+    }
+
+    #[test]
+    fn plugin_install_explicitly_removes_provider_key_env() {
+        let provider = relay_provider();
+        let mut command = tokio::process::Command::new("dsh");
+        remove_provider_env_from_install(&mut command, Some(&provider));
+        let key = std::ffi::OsStr::new("KIVIO_DSH_RELAY_ONE_API_KEY");
+        let entry = command.as_std().get_envs().find(|(name, _)| *name == key);
+        assert!(matches!(entry, Some((_, None))));
     }
 
     #[test]
