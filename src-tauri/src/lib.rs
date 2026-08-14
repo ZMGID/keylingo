@@ -618,6 +618,8 @@ pub fn run() {
             notes::notes_folder_create,
             notes::notes_folder_rename,
             notes::notes_folder_delete,
+            notes::notes_open_folder,
+            notes::notes_dir_path,
             skills::chat_skills_list,
             skills::chat_skills_read,
             skills::chat_skills_import,

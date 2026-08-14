@@ -1916,6 +1916,10 @@ export const api = {
     invoke<string[]>('notes_folder_rename', { old: oldName, new: newName }),
   notesFolderDelete: (name: string) => invoke<string[]>('notes_folder_delete', { name }),
   notesDelete: (id: string) => invoke<void>('notes_delete', { id }),
+  /** 在系统文件管理器里打开笔记目录（用户可直接拖入外部 .md）。返回该目录路径。 */
+  notesOpenFolder: () => invoke<string>('notes_open_folder'),
+  /** 笔记目录的绝对路径，用于订阅 workspace:activity 自动刷新。 */
+  notesDirPath: () => invoke<string>('notes_dir_path'),
 
   testHimalayaEmail: (account: EmailAccountConfig, existingAccounts?: EmailAccountConfig[]) =>
     invoke<string>('test_himalaya_email_cmd', { account, existingAccounts }),

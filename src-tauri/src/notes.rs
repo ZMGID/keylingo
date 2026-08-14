@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_shell::ShellExt;
 use uuid::Uuid;
 
 use crate::skills::parse::split_frontmatter;
@@ -376,6 +377,26 @@ pub fn notes_delete(app: AppHandle, id: String) -> Result<(), String> {
         return Err(format!("note not found: {id}"));
     }
     std::fs::remove_file(&path).map_err(|err| format!("delete note failed: {err}"))
+}
+
+/// 笔记目录的绝对路径。前端用它订阅 `workspace:activity`，这样用户往目录里拖进
+/// 外部 `.md` 后列表自己刷新，不需要手动触发。
+#[tauri::command]
+pub fn notes_dir_path(app: AppHandle) -> Result<String, String> {
+    Ok(notes_dir(&app)?.display().to_string())
+}
+
+/// 在系统文件管理器里打开笔记目录，让用户直接拖入外部 `.md`。
+/// 目录是扁平的、解析对手工文件容错（`parse_note` 缺 frontmatter 时回退文件名 +
+/// mtime），所以拖进来的文件会被下一次 `notes_list` 读到，无需导入步骤。
+#[tauri::command]
+pub fn notes_open_folder(app: AppHandle) -> Result<String, String> {
+    let dir = notes_dir(&app)?;
+    let path = dir.display().to_string();
+    app.shell()
+        .open(&path, None)
+        .map_err(|err| format!("open notes dir failed: {err}"))?;
+    Ok(path)
 }
 
 #[cfg(test)]

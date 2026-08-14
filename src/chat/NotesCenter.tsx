@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   Folder,
   FolderInput,
+  FolderOpen,
   FolderPlus,
   MessageSquare,
   NotebookPen,
@@ -18,6 +19,7 @@ import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
 import { api, isTauriRuntime, type Note, type NoteMeta } from '../api/tauri'
 import { Button, IconButton } from '../components/Button'
+import { workspaceActivity } from './dock/workspaceActivity'
 import { useLang, useT } from '../settings/i18n'
 
 const SAVE_DEBOUNCE_MS = 800
@@ -102,6 +104,8 @@ export function NotesCenter() {
 
   // 编辑器态：null 表示列表态
   const [editing, setEditing] = useState<Note | null>(null)
+  // 目录监听回调里读它：编辑期我们自己在写文件，不该被自己的写入触发重读。
+  const editingRef = useRef(false)
   // 标题/文件夹/正文都走 ref 非受控：受控 input 在中文 IME 合成期被 React 写回 value 会打断输入 → 吞字
   const titleRef = useRef('')
   const folderRef = useRef('')
@@ -126,6 +130,20 @@ export function NotesCenter() {
     }
   }, [])
 
+  /**
+   * 打开笔记目录，让用户把外部 `.md` 拖进来。目录是扁平的、`parse_note` 对缺
+   * frontmatter 的手工文件有回退（文件名当标题、mtime 当时间），所以不需要导入
+   * 流程——目录监听（见下方 effect）会在文件落地后自动刷新列表。
+   */
+  const openNotesFolder = useCallback(async () => {
+    setError('')
+    try {
+      await api.notesOpenFolder()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.chatNotesOpenFolderFailed)
+    }
+  }, [t])
+
   useEffect(() => {
     if (!isTauriRuntime()) {
       setLoading(false)
@@ -134,6 +152,41 @@ export function NotesCenter() {
     }
     void loadNotes()
   }, [loadNotes, t])
+
+  useEffect(() => {
+    editingRef.current = editing !== null
+  }, [editing])
+
+  /**
+   * 监听笔记目录本身：用户把外部 `.md` 拖进来（或在别处编辑、删除）后自动重读，
+   * 不需要手动刷新。复用 dock 的 workspace watcher（notify 递归监听 + 250ms 去抖
+   * + 2s 轮询兜底），而不是自己起一份监听——那套去抖/兜底是实测调过的。
+   * 注意 `subscribe` 的后端语义是「整体替换 watch 集合」，而 workspaceActivity
+   * 模块内部按订阅方合并全集，所以这里与 dock 的 workdir 订阅可以共存。
+   */
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+    let unsubscribe: (() => void) | null = null
+    void api
+      .notesDirPath()
+      .then((dir) => {
+        if (cancelled || !dir) return
+        unsubscribe = workspaceActivity.subscribe(dir, (event) => {
+          // 编辑期跳过：正在编辑的笔记是我们自己在防抖写盘，重读会把列表状态
+          // 拽回去；退出编辑时 backToList 已经自己 loadNotes 了。
+          if (editingRef.current) return
+          if (event.fs || event.truncated) void loadNotes()
+        })
+      })
+      .catch(() => {
+        // 拿不到目录就退化为「打开文件夹按钮 + 重进页面刷新」，不打扰用户。
+      })
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [loadNotes])
 
   /** 库文件夹的笔记数（仅手动笔记）。 */
   const folderCounts = useMemo(() => {
@@ -509,6 +562,10 @@ export function NotesCenter() {
             )}
 
             <div className="ml-auto flex shrink-0 items-center gap-2">
+              <Button variant="ghost" onClick={() => void openNotesFolder()}>
+                <FolderOpen size={14} />
+                {t.chatNotesOpenFolder}
+              </Button>
               {inLibraryRoot && (
                 <Button variant="ghost" onClick={() => void createFolder()}>
                   <FolderPlus size={14} />
