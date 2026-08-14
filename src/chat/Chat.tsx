@@ -1417,6 +1417,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [currentConversation, draftAgentRuntime],
   )
   const usesExternalRuntime = activeAgentRuntime.kind === 'external' && !!activeAgentRuntime.externalAgentId
+  const usesChatRuntime = activeAgentRuntime.kind === 'chat'
   // 底栏模式胶囊：内置 Agent = Act/Plan/Orchestrate；Kivio Chat 无此胶囊；本地 CLI = 沙盒档位。
   // CLI 没有档位时返回空表 → 胶囊隐藏。
   const detectedExternalAgents = useDetectedExternalAgents(currentConversation?.id ?? null)
@@ -3440,9 +3441,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         setStreamCoarse({ streaming: true })
       }
     }
-    const attachmentSkillId = options.forceNewConversation
-      ? inferSingleAttachmentSkillId(attachments, enabledSkills)
-      : effectiveSkillId ?? inferSingleAttachmentSkillId(attachments, enabledSkills)
+    const attachmentSkillId = usesChatRuntime
+      ? null
+      : options.forceNewConversation
+        ? inferSingleAttachmentSkillId(attachments, enabledSkills)
+        : effectiveSkillId ?? inferSingleAttachmentSkillId(attachments, enabledSkills)
 
     let persistedConversation: Conversation | null = null
     try {
@@ -3528,6 +3531,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     draftWebSearchMode,
     effectiveSkillId,
     enabledSkills,
+    usesChatRuntime,
     ensureStreamSnapshot,
     finishStreamingRunWithConversation,
     flushPendingStreamDone,
@@ -4771,27 +4775,31 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             onApprovalPolicyChange={handleApprovalPolicyChange}
           />
         </div>
-        <div className="shrink-0" data-tauri-drag-region="false">
-          <BackgroundJobsIndicator
-            conversationId={currentConversation?.id ?? null}
-            onOpen={handleOpenDockTasks}
-          />
-        </div>
+        {!usesChatRuntime && (
+          <div className="shrink-0" data-tauri-drag-region="false">
+            <BackgroundJobsIndicator
+              conversationId={currentConversation?.id ?? null}
+              onOpen={handleOpenDockTasks}
+            />
+          </div>
+        )}
       </div>
       <div className="min-w-5 flex-1" data-tauri-drag-region />
-      <div className="flex min-w-0 shrink items-center justify-end gap-1">
-        <div className="shrink-0" data-tauri-drag-region="false">
-          <IconButton
-            label={i18n[uiLang].dockToggle}
-            size="sm"
-            variant="ghost"
-            className={dockOpen ? 'bg-black/5 text-neutral-800 dark:bg-white/10 dark:text-neutral-100' : ''}
-            onClick={handleToggleDock}
-          >
-            <PanelRight size={15} />
-          </IconButton>
+      {!usesChatRuntime && (
+        <div className="flex min-w-0 shrink items-center justify-end gap-1">
+          <div className="shrink-0" data-tauri-drag-region="false">
+            <IconButton
+              label={i18n[uiLang].dockToggle}
+              size="sm"
+              variant="ghost"
+              className={dockOpen ? 'bg-black/5 text-neutral-800 dark:bg-white/10 dark:text-neutral-100' : ''}
+              onClick={handleToggleDock}
+            >
+              <PanelRight size={15} />
+            </IconButton>
+          </div>
         </div>
-      </div>
+      )}
     </>
   ), [
     activeAgentRuntime,
@@ -4809,6 +4817,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     handleThinkingLevelChange,
     handleToggleDock,
     uiLang,
+    usesChatRuntime,
     usesExternalRuntime,
   ])
 
@@ -4841,7 +4850,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     agentPlanState: currentConversation?.agent_plan_state ?? currentConversation?.agentPlanState ?? null,
     agentTodoState: currentConversation?.agent_todo_state ?? currentConversation?.agentTodoState ?? null,
     onAgentPlanModeChange: handleAgentPlanModeChange,
-    enabledSkills: slashSkills,
+    usesChatRuntime,
+    enabledSkills: usesChatRuntime ? [] : slashSkills,
     onOpenSkillSettings: openSkillCenter,
     selectedProject,
     conversationProject,
@@ -4868,7 +4878,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     replyModels: activeReplyModels,
     onChangeReplyModels: handleChangeReplyModels,
     contextSlot: composerContextSlot,
-    gitWorkdir: dockWorkdir || null,
+    gitWorkdir: usesChatRuntime ? null : dockWorkdir || null,
     gitLang: uiLang,
     onOpenGitPanel: handleOpenDockGit,
     modeOptions: composerModes.options,
@@ -4920,6 +4930,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     toolStatusHint,
     sendDisabledReason,
     uiLang,
+    usesChatRuntime,
     usesExternalRuntime,
   ])
 
@@ -5293,7 +5304,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           />
         )}
         </ChatRouteKeepAlive>
-        {chatView === 'conversation' && (
+        {chatView === 'conversation' && !usesChatRuntime && (
           <RightDock
             open={dockOpen}
             width={dockWidth}

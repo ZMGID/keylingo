@@ -633,7 +633,8 @@ pub struct ChatConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ChatModeConfig {
-    /// Empty → built-in `chat_runtime_prompt()` text.
+    /// Extra Chat instructions stacked on the built-in capability contract.
+    /// Empty → contract only (`chat_runtime_prompt()`).
     pub system_prompt: String,
     pub web_search: bool,
     pub web_fetch: bool,

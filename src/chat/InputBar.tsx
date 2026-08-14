@@ -402,6 +402,8 @@ export interface InputBarProps {
   layout?: 'footer' | 'inline'
   /** 外部 CLI 模式：斜杠命令直通 Agent，不展示 Kivio 弹层 */
   usesExternalRuntime?: boolean
+  /** Kivio Chat：不提供 /plan /orchestrate / 技能斜杠（那些是 Agent 能力） */
+  usesChatRuntime?: boolean
   externalAgentName?: string | null
   conversationId?: string | null
   /** 本会话挂载的知识库 id；缺省时 knowledge_search 检索全部库 */
@@ -469,6 +471,7 @@ export const InputBar = memo(function InputBar({
   autoFocus,
   layout = 'footer',
   usesExternalRuntime = false,
+  usesChatRuntime = false,
   externalAgentName = null,
   conversationId = null,
   knowledgeBaseIds = [],
@@ -745,12 +748,14 @@ export const InputBar = memo(function InputBar({
   }, [closeProjectMenu])
 
   const allSlashCommands = useMemo(
-    () => (
-      usesExternalRuntime
-        ? externalCliSlashCommands
-        : buildSlashCommands(LOCAL_SLASH_COMMANDS, enabledSkills)
-    ),
-    [enabledSkills, externalCliSlashCommands, usesExternalRuntime],
+    () => {
+      if (usesExternalRuntime) return externalCliSlashCommands
+      const local = usesChatRuntime
+        ? LOCAL_SLASH_COMMANDS.filter((command) => command.id !== 'plan' && command.id !== 'orchestrate')
+        : LOCAL_SLASH_COMMANDS
+      return buildSlashCommands(local, usesChatRuntime ? [] : enabledSkills)
+    },
+    [enabledSkills, externalCliSlashCommands, usesChatRuntime, usesExternalRuntime],
   )
 
   useEffect(() => {

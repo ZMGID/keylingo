@@ -17,10 +17,23 @@ pub fn is_orchestrate_mode(state: &AgentPlanState) -> bool {
     state.mode == AgentPlanMode::Orchestrate
 }
 
-/// System-prompt section for the dedicated Kivio Chat runtime (not an agent plan mode).
-/// Kept in English like other internal runtime sections (`format_prompt` Act/Plan/Orchestrate).
+/// Slim Chat capability contract. Settings preview and runtime share this text.
+/// Tool names are not listed here — `native_tools_prompt` already enumerates
+/// what is actually enabled for the turn.
 pub fn chat_runtime_prompt() -> String {
-    "Chat runtime (internal runtime mode): this conversation uses Kivio Chat, not the full agent. You are a conversational assistant with light research tools only. Prefer clear, direct answers. You may use web search, web_fetch, knowledge_search, ask_user, memory_read/memory_search, and read-only MCP tools when they improve factual accuracy or cite the user's knowledge bases. Do not edit files, run shell commands, spawn sub-agents, activate skills that mutate the workspace, modify memory, or claim to have performed side-effecting work. If the user needs implementation, multi-file changes, or terminal work, say they should switch to Kivio Agent (Act / Plan / Orchestrate). When you use knowledge_search, cite sources with [n] markers.".to_string()
+    chat_capability_contract(true)
+}
+
+/// `has_knowledge_search` adds the `[n]` cite rule only when that tool is on.
+pub fn chat_capability_contract(has_knowledge_search: bool) -> String {
+    let mut text = String::from(
+        "You are Kivio Chat, a conversational research assistant. Use enabled tools when they improve factual accuracy. Do not edit files, run shell commands, spawn sub-agents, activate workspace-changing skills, or modify memory. If the user needs implementation or terminal work, tell them to switch to Kivio Agent.",
+    );
+    if has_knowledge_search {
+        text.push_str(" When you use knowledge_search, cite sources with [n].");
+    }
+    text.push_str(" These limits override assistant, set, and additional instructions.");
+    text
 }
 
 /// Same text for all languages — settings preview and runtime share one English source.
@@ -324,8 +337,12 @@ mod tests {
     #[test]
     fn chat_runtime_prompt_mentions_research_tools() {
         let en = chat_runtime_prompt();
-        assert!(en.contains("Chat runtime"));
+        assert!(en.contains("Kivio Chat"));
         assert!(en.contains("knowledge_search"));
-        assert!(en.contains("read-only MCP"));
+        assert!(en.contains("These limits override"));
+        assert!(!en.contains("internal runtime mode"));
+        assert!(!en.contains("Act / Plan / Orchestrate"));
+        let without_kb = chat_capability_contract(false);
+        assert!(!without_kb.contains("knowledge_search"));
     }
 }

@@ -146,12 +146,14 @@ pub fn build_chat_system_prompt(
     assistant_snapshot: Option<&ChatAssistantSnapshot>,
     set_system_prompt: Option<&str>,
     custom_system_prompt: &str,
+    is_chat_runtime: bool,
     memory_prompt: Option<&str>,
     agent_plan_prompt: Option<&str>,
     agent_ask_user_prompt: Option<&str>,
     agent_todo_prompt: Option<&str>,
     project_context: Option<&ProjectPromptContext>,
     workbench_dir: Option<&str>,
+    knowledge_base_prompt: Option<&str>,
     obsidian_vault_path: Option<&str>,
     email_accounts: &[EmailAccountConfig],
     email_accounts_prompt: Option<&str>,
@@ -169,18 +171,49 @@ pub fn build_chat_system_prompt(
         assistant_snapshot,
         set_system_prompt,
         custom_system_prompt,
+        is_chat_runtime,
         memory_prompt,
         agent_plan_prompt,
         agent_ask_user_prompt,
         agent_todo_prompt,
         project_context,
         workbench_dir,
-        None,
+        knowledge_base_prompt,
         obsidian_vault_path,
         email_accounts,
         email_accounts_prompt,
     )
     .0
+}
+
+/// Chat vs Agent identity sources. Chat must not inherit the Agent system
+/// prompt or the Act/Plan/Orchestrate overlay — settings already keeps those
+/// fields separate (`chat.systemPrompt` vs `chat.chatMode.systemPrompt`).
+pub struct RuntimePromptSources {
+    pub custom_system_prompt: String,
+    pub agent_plan_prompt: Option<String>,
+    pub is_chat_runtime: bool,
+}
+
+pub fn resolve_runtime_prompt_sources(
+    chat_mode: bool,
+    agent_system_prompt: &str,
+    chat_mode_system_prompt: &str,
+    plan_state: &crate::chat::types::AgentPlanState,
+) -> RuntimePromptSources {
+    if chat_mode {
+        RuntimePromptSources {
+            custom_system_prompt: chat_mode_system_prompt.trim().to_string(),
+            agent_plan_prompt: None,
+            is_chat_runtime: true,
+        }
+    } else {
+        RuntimePromptSources {
+            custom_system_prompt: agent_system_prompt.to_string(),
+            agent_plan_prompt: Some(crate::chat::plan::format_prompt(plan_state)),
+            is_chat_runtime: false,
+        }
+    }
 }
 
 /// Project binding facts injected into the system prompt so the model knows
@@ -189,6 +222,26 @@ pub fn build_chat_system_prompt(
 pub struct ProjectPromptContext {
     pub name: String,
     pub root_path: Option<String>,
+}
+
+const CHAT_WORK_STYLE: &str = "Be concise. Address only the current request — no filler preamble, no \"here's what I'll do next\". Match length to the task.";
+
+const CHAT_ASK_USER_PROMPT: &str = "Use ask_user when a preference or A/B choice would block this reply. Do not list options in assistant text for the user to type back.";
+
+const CHAT_TOOLS_RUNTIME: &str = "When a request needs a live fact, a URL, a knowledge-base passage, or memory, call the matching enabled tool. Only claim a tool was used after Kivio returns a tool result. Answer date questions from the system date above without tools.";
+
+fn work_style_prompt(available_builtin_tools: &[String]) -> String {
+    let can_edit_files = available_builtin_tools
+        .iter()
+        .any(|tool| matches!(tool.as_str(), "write" | "edit" | "bash"));
+    let file_clause = if can_edit_files {
+        " after editing files you don't need to restate what changed (the user can see it)."
+    } else {
+        ""
+    };
+    format!(
+        "How you work: address only the current request — no filler preamble, no wrap-up postamble, no \"here's what I'll do next\" narration;{file_clause} Match length to the task: answer simple questions in a sentence or two, and expand into structured output only for complex or report-style tasks — don't pad to look thorough. When the user only asks how to do something or whether it's possible, answer first; don't jump to making changes, and don't do work they didn't ask for."
+    )
 }
 
 fn project_context_prompt(project: &ProjectPromptContext) -> String {
@@ -217,6 +270,7 @@ pub fn build_chat_system_prompt_with_segments(
     assistant_snapshot: Option<&ChatAssistantSnapshot>,
     set_system_prompt: Option<&str>,
     custom_system_prompt: &str,
+    is_chat_runtime: bool,
     memory_prompt: Option<&str>,
     agent_plan_prompt: Option<&str>,
     agent_ask_user_prompt: Option<&str>,
@@ -230,30 +284,50 @@ pub fn build_chat_system_prompt_with_segments(
 ) -> (String, Vec<ContextUsageSegment>) {
     let mut prompt = String::new();
     let mut segments = Vec::new();
-    let base_prompt = if custom_system_prompt.trim().is_empty() {
-        default_chat_system_prompt(has_image)
+    if is_chat_runtime {
+        // 自定义人设叠在合同之上，不替换。合同放在专家/集之后，避免被后写指令盖掉。
+        if !custom_system_prompt.trim().is_empty() {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "system_prompt",
+                "System prompt",
+                &format!(
+                    "Additional instructions:\n{}",
+                    custom_system_prompt.trim()
+                ),
+            );
+        }
+        append_context_segment(
+            &mut prompt,
+            &mut segments,
+            "system_prompt",
+            "System prompt",
+            CHAT_WORK_STYLE,
+        );
     } else {
-        custom_system_prompt.trim().to_string()
-    };
-    append_context_segment(
-        &mut prompt,
-        &mut segments,
-        "system_prompt",
-        "System prompt",
-        &base_prompt,
-    );
-    // 工作方式纪律（始终附加，独立于可被自定义人设覆盖的基座）：对齐 opencode 的
-    // Tone/Proactiveness 之「神」——默认简洁、先答后做、不过度、不注水；但刻意不搬其
-    // CLI 硬限制（≤4 行/一个词），保留 Kivio 富文本 GUI 该出的结构化 Markdown/报告能力。
-    let work_style =
-        "How you work: address only the current request — no filler preamble, no wrap-up postamble, no \"here's what I'll do next\" narration; after editing files you don't need to restate what changed (the user can see it). Match length to the task: answer simple questions in a sentence or two, and expand into structured output only for complex or report-style tasks — don't pad to look thorough. When the user only asks how to do something or whether it's possible, answer first; don't jump to making changes, and don't do work they didn't ask for.";
-    append_context_segment(
-        &mut prompt,
-        &mut segments,
-        "system_prompt",
-        "System prompt",
-        work_style,
-    );
+        let base_prompt = if custom_system_prompt.trim().is_empty() {
+            default_chat_system_prompt(has_image)
+        } else {
+            custom_system_prompt.trim().to_string()
+        };
+        append_context_segment(
+            &mut prompt,
+            &mut segments,
+            "system_prompt",
+            "System prompt",
+            &base_prompt,
+        );
+        // 工作方式纪律（始终附加，独立于可被自定义人设覆盖的基座）。
+        // 改文件那句只在真有 write/edit/bash 时出现。
+        append_context_segment(
+            &mut prompt,
+            &mut segments,
+            "system_prompt",
+            "System prompt",
+            &work_style_prompt(available_builtin_tools),
+        );
+    }
     if let Some(assistant) = assistant_snapshot {
         let assistant_prompt = assistant_prompt_segment(assistant);
         if !assistant_prompt.trim().is_empty() {
@@ -280,6 +354,22 @@ pub fn build_chat_system_prompt_with_segments(
             );
         }
     }
+    if is_chat_runtime {
+        let has_knowledge_search = available_builtin_tools
+            .iter()
+            .any(|tool| tool.as_str() == "knowledge_search");
+        let mut contract = crate::chat::plan::chat_capability_contract(has_knowledge_search);
+        if has_image {
+            contract.push_str(" You can use images the user provides.");
+        }
+        append_context_segment(
+            &mut prompt,
+            &mut segments,
+            "system_prompt",
+            "System prompt",
+            &contract,
+        );
+    }
     append_context_segment(
         &mut prompt,
         &mut segments,
@@ -288,14 +378,16 @@ pub fn build_chat_system_prompt_with_segments(
         &crate::settings::chat_current_datetime_context(language),
     );
 
-    if let Some(project) = project_context {
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "runtime_context",
-            "Runtime context",
-            &project_context_prompt(project),
-        );
+    if !is_chat_runtime {
+        if let Some(project) = project_context {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "runtime_context",
+                "Runtime context",
+                &project_context_prompt(project),
+            );
+        }
     }
 
     if let Some(memory) = memory_prompt
@@ -324,54 +416,58 @@ pub fn build_chat_system_prompt_with_segments(
         );
     }
 
-    if let Some(path) = obsidian_vault_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let text = format!(
-            "Obsidian vault path: {path}\n\
+    // Chat 没有文件/shell/skill 激活：这些段会教模型去 list_dir / run_command，
+    // 和「写文件 / Shell 只在 Agent 可用」矛盾，故整段跳过。
+    if !is_chat_runtime {
+        if let Some(path) = obsidian_vault_path
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let text = format!(
+                "Obsidian vault path: {path}\n\
                  This is a local Obsidian markdown vault. Use the native file tools: \
                  list_dir to browse (entries include modified time), glob_files to find *.md by name, \
                  search_files to search by content/keyword, read_file to read a note; \
                  notes cross-reference each other via [[wikilink]].\n\
                  For Obsidian syntax or file-format details, activate the obsidian-markdown / \
                  obsidian-bases / json-canvas / obsidian-cli skills."
-        );
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "runtime_context",
-            "Runtime context",
-            &text,
-        );
-    }
+            );
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "runtime_context",
+                "Runtime context",
+                &text,
+            );
+        }
 
-    if let Some(text) = email_accounts_prompt
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "runtime_context",
-            "Runtime context",
-            text,
-        );
-    }
+        if let Some(text) = email_accounts_prompt
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "runtime_context",
+                "Runtime context",
+                text,
+            );
+        }
 
-    // 能力插件：仅「已安装且启用」时注入短 systemHint；关闭则零注入。
-    if let Some(text) = crate::plugins::enabled_system_prompt()
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "runtime_context",
-            "Runtime context",
-            text,
-        );
+        // 能力插件：仅「已安装且启用」时注入短 systemHint；关闭则零注入。
+        if let Some(text) = crate::plugins::enabled_system_prompt()
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "runtime_context",
+                "Runtime context",
+                text,
+            );
+        }
     }
 
     if let Some(plan) = agent_plan_prompt
@@ -381,7 +477,20 @@ pub fn build_chat_system_prompt_with_segments(
         append_context_segment(&mut prompt, &mut segments, "agent_plan", "Agent plan", plan);
     }
 
-    if let Some(ask_user) = agent_ask_user_prompt
+    if is_chat_runtime {
+        if available_builtin_tools
+            .iter()
+            .any(|tool| tool.as_str() == crate::chat::ask_user::ASK_USER_TOOL_NAME)
+        {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "agent_ask_user",
+                "Agent ask_user",
+                CHAT_ASK_USER_PROMPT,
+            );
+        }
+    } else if let Some(ask_user) = agent_ask_user_prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -402,57 +511,67 @@ pub fn build_chat_system_prompt_with_segments(
     }
 
     if tools_available {
-        let mut action_examples = Vec::new();
-        if available_builtin_tools
-            .iter()
-            .any(|tool| tool.as_str() == crate::chat::ask_user::ASK_USER_TOOL_NAME)
-        {
-            action_examples.push("asking the user a blocking clarification");
+        if is_chat_runtime {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "runtime_context",
+                "Runtime context",
+                CHAT_TOOLS_RUNTIME,
+            );
+        } else {
+            let mut action_examples = Vec::new();
+            if available_builtin_tools
+                .iter()
+                .any(|tool| tool.as_str() == crate::chat::ask_user::ASK_USER_TOOL_NAME)
+            {
+                action_examples.push("asking the user a blocking clarification");
+            }
+            if available_builtin_tools
+                .iter()
+                .any(|tool| matches!(tool.as_str(), "read" | "grep" | "glob"))
+            {
+                action_examples.push("reading or searching project files");
+            }
+            if available_builtin_tools
+                .iter()
+                .any(|tool| matches!(tool.as_str(), "bash" | "run_python"))
+            {
+                action_examples.push("running code or a command");
+            }
+            if available_builtin_tools
+                .iter()
+                .any(|tool| matches!(tool.as_str(), "web_search" | "web_fetch"))
+            {
+                action_examples.push("using the web");
+            }
+            if available_builtin_tools
+                .iter()
+                .any(|tool| tool.as_str() == "mixer_generate_image")
+            {
+                action_examples.push("generating an image");
+            }
+            if action_examples.is_empty() {
+                action_examples.push("using an enabled tool");
+            }
+            let mut runtime = format!(
+                "You have access to tools (functions). When the user's request requires action—such as {}—YOU MUST call the appropriate enabled tool instead of describing what to do. Never say \"I cannot run commands\" or \"you can do it yourself\" when an enabled tool is available for that action. Do not call tools that are not listed as enabled.",
+                action_examples.join(", ")
+            );
+            runtime.push_str(
+                " Only claim that a tool was used, a script was run, a file was read, or the web was searched after Kivio returns an actual tool result in the conversation.",
+            );
+            runtime.push_str(
+                " If the user only asks for today/tomorrow/weekday derivable from the system date above, answer directly without calling tools.",
+            );
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "runtime_context",
+                "Runtime context",
+                &runtime,
+            );
         }
-        if available_builtin_tools
-            .iter()
-            .any(|tool| matches!(tool.as_str(), "read" | "grep" | "glob"))
-        {
-            action_examples.push("reading or searching project files");
-        }
-        if available_builtin_tools
-            .iter()
-            .any(|tool| matches!(tool.as_str(), "bash" | "run_python"))
-        {
-            action_examples.push("running code or a command");
-        }
-        if available_builtin_tools
-            .iter()
-            .any(|tool| matches!(tool.as_str(), "web_search" | "web_fetch"))
-        {
-            action_examples.push("using the web");
-        }
-        if available_builtin_tools
-            .iter()
-            .any(|tool| tool.as_str() == "mixer_generate_image")
-        {
-            action_examples.push("generating an image");
-        }
-        if action_examples.is_empty() {
-            action_examples.push("using an enabled tool");
-        }
-        let mut runtime = format!(
-            "You have access to tools (functions). When the user's request requires action—such as {}—YOU MUST call the appropriate enabled tool instead of describing what to do. Never say \"I cannot run commands\" or \"you can do it yourself\" when an enabled tool is available for that action. Do not call tools that are not listed as enabled.",
-            action_examples.join(", ")
-        );
-        runtime.push_str(
-            " Only claim that a tool was used, a script was run, a file was read, or the web was searched after Kivio returns an actual tool result in the conversation.",
-        );
-        runtime.push_str(
-            " If the user only asks for today/tomorrow/weekday derivable from the system date above, answer directly without calling tools.",
-        );
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "runtime_context",
-            "Runtime context",
-            &runtime,
-        );
         if let Some(native_prompt) = native_tools_prompt(available_builtin_tools, workbench_dir) {
             append_context_segment(
                 &mut prompt,
@@ -497,25 +616,33 @@ pub fn build_chat_system_prompt_with_segments(
                 &roles_prompt,
             );
         }
-        // Generic tool-hygiene rules (all conversations with tools enabled, not
-        // a plugin-specific hint): keep disposable intermediates out of the workbench,
-        // clean up before finishing, and use absolute paths for stdio MCP tools.
-        let tool_hygiene = "Working directory hygiene:\n\
+        // 工作目录卫生只在真能写文件/跑命令时有意义；Chat 检索工具集不要这段。
+        let needs_hygiene = available_builtin_tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "write" | "edit" | "bash" | "run_python"
+            )
+        });
+        if needs_hygiene {
+            let tool_hygiene = "Working directory hygiene:\n\
 - Keep disposable batch/job descriptor JSONs, review screenshots, and scratch drafts in the system temp directory rather than cluttering the default workbench.\n\
 - Before finishing a multi-step task, delete intermediate files you created so the workbench keeps only useful outputs.\n\
 - When passing file paths to MCP tools (stdio servers), always use absolute paths; the server's working directory is unpredictable.";
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "native_tools",
-            "Native tools",
-            tool_hygiene,
-        );
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "native_tools",
+                "Native tools",
+                tool_hygiene,
+            );
+        }
     }
 
-    let include_catalog = chat_tools.skill_auto_match
-        || active_skill_id.is_some()
-        || chat_tools.skill_fallback_mode != "legacy_full_body";
+    // Chat 不能激活 skill / 改工作区，目录和「去调 skill 工具」会直接教错。
+    let include_catalog = !is_chat_runtime
+        && (chat_tools.skill_auto_match
+            || active_skill_id.is_some()
+            || chat_tools.skill_fallback_mode != "legacy_full_body");
     if include_catalog {
         let obsidian_vault_configured = obsidian_vault_path
             .map(|value| !value.trim().is_empty())
@@ -535,57 +662,59 @@ pub fn build_chat_system_prompt_with_segments(
         }
     }
 
-    if !chat_tools.skill_auto_match {
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "skills",
-            "Skills",
-            "Only activate skills that are enabled in Settings (listed in the catalog below).",
-        );
-    }
-
-    let fallback = chat_tools.skill_fallback_mode.as_str();
-    if let Some(skill_id) = active_skill_id.filter(|id| !id.trim().is_empty()) {
-        let mut skill_prompt = format!("User pinned skill for this message: {skill_id}");
-        if tools_available {
-            skill_prompt.push_str(
-                ". Activate it with the skill tool to load its full instructions for this message.",
-            );
-        } else if matches!(fallback, "skill_md_only" | "legacy_full_body") {
-            skill_prompt.push_str(". Follow the Active Skill instructions below.");
-        } else {
-            skill_prompt.push_str(
-                ". Progressive skill loading requires tool support; switch provider or set fallback to SKILL.md only.",
+    if !is_chat_runtime {
+        if !chat_tools.skill_auto_match {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "skills",
+                "Skills",
+                "Only activate skills that are enabled in Settings (listed in the catalog below).",
             );
         }
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "skills",
-            "Skills",
-            &skill_prompt,
-        );
-    } else if tools_available && chat_tools.skill_auto_match {
-        append_context_segment(
-            &mut prompt,
-            &mut segments,
-            "skills",
-            "Skills",
-            "When the task matches a skill's description, call the skill tool for it proactively — you don't need the user to name it; a description match is enough. Activating loads that skill's full step-by-step instructions, which beat improvising. Only skip a skill whose description clearly doesn't fit the current task.",
-        );
-    }
 
-    if matches!(fallback, "skill_md_only" | "legacy_full_body") {
-        if let Some(skill) = active_skill_detail {
-            if !skill.body.trim().is_empty() {
-                append_context_segment(
-                    &mut prompt,
-                    &mut segments,
-                    "skills",
-                    "Skills",
-                    &format!("Active Skill:\n{}", skill.body),
+        let fallback = chat_tools.skill_fallback_mode.as_str();
+        if let Some(skill_id) = active_skill_id.filter(|id| !id.trim().is_empty()) {
+            let mut skill_prompt = format!("User pinned skill for this message: {skill_id}");
+            if tools_available {
+                skill_prompt.push_str(
+                    ". Activate it with the skill tool to load its full instructions for this message.",
                 );
+            } else if matches!(fallback, "skill_md_only" | "legacy_full_body") {
+                skill_prompt.push_str(". Follow the Active Skill instructions below.");
+            } else {
+                skill_prompt.push_str(
+                    ". Progressive skill loading requires tool support; switch provider or set fallback to SKILL.md only.",
+                );
+            }
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "skills",
+                "Skills",
+                &skill_prompt,
+            );
+        } else if tools_available && chat_tools.skill_auto_match {
+            append_context_segment(
+                &mut prompt,
+                &mut segments,
+                "skills",
+                "Skills",
+                "When the task matches a skill's description, call the skill tool for it proactively — you don't need the user to name it; a description match is enough. Activating loads that skill's full step-by-step instructions, which beat improvising. Only skip a skill whose description clearly doesn't fit the current task.",
+            );
+        }
+
+        if matches!(fallback, "skill_md_only" | "legacy_full_body") {
+            if let Some(skill) = active_skill_detail {
+                if !skill.body.trim().is_empty() {
+                    append_context_segment(
+                        &mut prompt,
+                        &mut segments,
+                        "skills",
+                        "Skills",
+                        &format!("Active Skill:\n{}", skill.body),
+                    );
+                }
             }
         }
     }
@@ -763,115 +892,145 @@ fn native_tools_prompt(
         .map(|name| crate::mcp::types::apply_reserved_wire_alias(name))
         .collect::<Vec<_>>()
         .join(", ");
-    // 运行时取值,让同一份 prompt 在不同平台都说真话。Windows 上 bash 实际选哪个
-    // shell 是运行期探测的(见 native_tools::find_git_bash / run_command_shell_hint),
-    // 这里用同一个探测结果分支措辞,保证系统提示词与 run_command 工具描述(R4,
-    // mcp/types.rs::native_run_command_tool)永远一致——不会出现提示词说 PowerShell、
-    // 工具描述说 Git Bash 的自相矛盾。
-    let windows_git_bash =
-        cfg!(target_os = "windows") && !crate::native_tools::run_command_shell_hint().is_empty();
-    let (os_name, shell_name) = if windows_git_bash {
-        ("Windows", "Git Bash")
-    } else if cfg!(target_os = "windows") {
-        ("Windows", "PowerShell")
-    } else if cfg!(target_os = "macos") {
-        ("macOS", "sh")
-    } else {
-        ("Linux", "sh")
-    };
-    let shell_syntax_hint = if windows_git_bash {
-        "Windows via Git Bash: use bash syntax (pipes, heredoc, `$VAR`, `$(seq ...)`), NOT PowerShell cmdlets; write Windows paths with forward slashes (C:/Users/...) — backslashes are escape characters in bash"
-    } else if cfg!(target_os = "windows") {
-        "Windows is PowerShell: use full cmdlet names like `Get-ChildItem`/`Get-Content`, environment variables as `$env:VAR`, chain commands with `;`, do NOT use the removed `wmic`, and do NOT `-Recurse` the whole drive"
-    } else {
-        "Unix: `$VAR`, `ls`, `/`"
-    };
-    let has_web_search = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "web_search");
-    let has_web_fetch = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "web_fetch");
-    let has_image_generation = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "mixer_generate_image");
-    let has_advisor = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "advisor");
-    let has_run_python = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "run_python");
-    let has_present_artifacts = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "present_artifacts");
-    let has_write = native_tool_names
-        .iter()
-        .any(|tool| tool.as_str() == "write");
-    let has_edit = native_tool_names.iter().any(|tool| tool.as_str() == "edit");
-    let has_bash = native_tool_names.iter().any(|tool| tool.as_str() == "bash");
-    // 代码工作纪律：仅当具备改文件/跑命令能力时注入（纯聊天/只读工具集不污染）。
-    // 对齐 opencode 的 Following conventions / Code style / Doing tasks / Tool usage /
-    // Code References，取神不取形（注释用温和的「除非要求不加」）。
-    let code_discipline: &str = if has_write || has_edit || has_bash {
-        "\n- Before changing code, read neighboring files and existing conventions — mimic the current style, naming, and the libraries/frameworks already in use; never assume a library is available without confirming the project already uses it. Do not add code comments unless asked. After code changes, verify when you can (run existing tests, lint/typecheck); never git commit/push unless the user explicitly asks. Reference code locations as `file_path:line_number`. When several independent lookups or commands are needed, call multiple tools in parallel in one message instead of serially."
-    } else {
-        ""
-    };
-    // Surface the resolved workbench whenever an enabled native tool can use it.
+    let has = |name: &str| native_tool_names.iter().any(|tool| tool.as_str() == name);
+    let has_web_search = has("web_search");
+    let has_web_fetch = has("web_fetch");
+    let has_image_generation = has("mixer_generate_image");
+    let has_advisor = has("advisor");
+    let has_run_python = has("run_python");
+    let has_present_artifacts = has("present_artifacts");
+    let has_write = has("write");
+    let has_edit = has("edit");
+    let has_bash = has("bash");
+    let has_memory = has("memory_read") || has("memory_search") || has("memory_modify");
+    let has_file_cwd = has_write
+        || has_edit
+        || has_bash
+        || has_run_python
+        || has("read")
+        || has("grep")
+        || has("glob");
+    let has_host_side_effects = has_write || has_edit || has_bash || has_run_python;
+
+    let mut bullets: Vec<String> = Vec::new();
+    if has_file_cwd {
+        bullets.push(
+            "Relative file paths and omitted command cwd resolve from the current default workbench (the bound project root for project conversations, or the per-conversation workbench otherwise). Explicit absolute or ~/ paths remain unrestricted and always take precedence.".to_string(),
+        );
+    }
+    if has_write || has_edit {
+        bullets.push(
+            "Touch files only when the user explicitly asks to save/modify/delete local files or gives a target path: edit for small edits, write for new files or whole-file overwrites. If asked for a code block without saving, answer inline. After a write, state the path briefly; do not repeat the file content.".to_string(),
+        );
+    }
+    if has_write || has_edit || has_bash || has_memory {
+        bullets.push(if has_write || has_edit || has_bash {
+            if has_memory {
+                "Write/edit tools and bash may need user approval; memory_read (L2 on demand; L1 is auto-injected), memory_search (keyword search over L2; prefer it when you are unsure of the exact heading), and memory_modify do not.".to_string()
+            } else {
+                "Write/edit tools and bash may need user approval.".to_string()
+            }
+        } else {
+            "memory_read (L2 on demand; L1 is auto-injected) and memory_search (keyword search over L2; prefer it when you are unsure of the exact heading) do not require approval.".to_string()
+        });
+    }
+    if has_bash {
+        // 运行时取值,让同一份 prompt 在不同平台都说真话。Windows 上 bash 实际选哪个
+        // shell 是运行期探测的(见 native_tools::find_git_bash / run_command_shell_hint),
+        // 这里用同一个探测结果分支措辞,保证系统提示词与 run_command 工具描述(R4,
+        // mcp/types.rs::native_run_command_tool)永远一致——不会出现提示词说 PowerShell、
+        // 工具描述说 Git Bash 的自相矛盾。
+        let windows_git_bash =
+            cfg!(target_os = "windows") && !crate::native_tools::run_command_shell_hint().is_empty();
+        let (os_name, shell_name) = if windows_git_bash {
+            ("Windows", "Git Bash")
+        } else if cfg!(target_os = "windows") {
+            ("Windows", "PowerShell")
+        } else if cfg!(target_os = "macos") {
+            ("macOS", "sh")
+        } else {
+            ("Linux", "sh")
+        };
+        let shell_syntax_hint = if windows_git_bash {
+            "Windows via Git Bash: use bash syntax (pipes, heredoc, `$VAR`, `$(seq ...)`), NOT PowerShell cmdlets; write Windows paths with forward slashes (C:/Users/...) — backslashes are escape characters in bash"
+        } else if cfg!(target_os = "windows") {
+            "Windows is PowerShell: use full cmdlet names like `Get-ChildItem`/`Get-Content`, environment variables as `$env:VAR`, chain commands with `;`, do NOT use the removed `wmic`, and do NOT `-Recurse` the whole drive"
+        } else {
+            "Unix: `$VAR`, `ls`, `/`"
+        };
+        bullets.push(format!(
+            "Runtime environment: {os_name}; bash runs via {shell_name}. Match that shell's syntax ({shell_syntax_hint}). Each bash call is a fresh process — cwd does NOT persist across calls; switch directories with the `cwd` parameter, not a prior `cd`. To run multi-line or quoted code, write it to a file with write and run that, or use run_python — do not cram it into inline commands like `python -c \"...\"` (inline quotes are fragile across shells). When a tool returns a hard rejection, change strategy instead of retrying variants of the same action; never re-run a failed command unchanged; don't drop one-off probe or cleanup scripts into the project."
+        ));
+        bullets.push(
+            "bash runs on the host shell from the current default workbench; non-zero exit means failure. Paths with spaces must use the `cwd` parameter—never `cd path && command`; do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev commands such as `npm run dev`, `tauri dev`, and `vite` start in the background automatically and return a job_id immediately; do not start the same dev server twice. Explain and get confirmation before destructive, network, or environment-changing commands. Run a skill's bundled scripts with run_python (sandbox) or run_command (host); never use host pip to bypass the run_python sandbox.".to_string(),
+        );
+        bullets.push(
+            "Background commands (bash with background:true, or auto-detected dev servers): the call returns a job_id immediately and hands control back to you — keep working, do NOT poll right away. Read incremental output and exit status with bash_output (pass the job_id; use the returned next_offset for the next read), list all tracked jobs by calling bash_output with no job_id, and stop one with kill_background. Keep polling bounded (≤20 checks); status in history may be stale, so refresh once with bash_output before reporting a background command's result. Background commands survive across turns until you kill them or the app exits, so kill_background a dev server when you no longer need it.".to_string(),
+        );
+    }
+    if has_run_python {
+        bullets.push(
+            "run_python runs in a Pyodide sandbox for data computation, analysis, document processing, charts, and generating files that REQUIRE a Python library (formatted XLSX, PDF, rendered images); never use it to generate or print code answers, and do not call it merely to write out content you already have (use write in the current workbench for that). Write code directly in the answer. No host filesystem access; mount files via the files parameter and use KIVIO_INPUT_FILES[n] paths. numpy, pandas, matplotlib, pillow, openpyxl, pypdf import directly. Save artifacts to relative filenames (report.xlsx, chart.png, summary.csv); Kivio captures them and returns artifact IDs. Generated files remain hidden unless you call present_artifacts at the point where the user should see them. No base64 printing.".to_string(),
+        );
+    }
+    if has_web_search || has_web_fetch {
+        let live_access_hint = match (has_web_search, has_web_fetch, has_host_side_effects) {
+            (true, true, true) => {
+                "Use search_web/web_fetch or the relevant Skill script for live web/API access."
+            }
+            (true, true, false) => "Use search_web/web_fetch for live web/API access.",
+            (true, false, true) => {
+                "Use search_web or the relevant Skill script for live web/API access."
+            }
+            (true, false, false) => "Use search_web for live web/API access.",
+            (false, true, true) => {
+                "Use web_fetch or the relevant Skill script for web page access."
+            }
+            (false, true, false) => "Use web_fetch for web page access.",
+            (false, false, _) => unreachable!(),
+        };
+        bullets.push(live_access_hint.to_string());
+    }
+    if has_present_artifacts {
+        bullets.push(
+            "When the user asks to show, preview, attach, or send a local file or image in the chat, you MUST call present_artifacts at the exact display point. Use artifact_ids for generated files and paths for existing local files. Reading or analyzing a file does NOT display it.".to_string(),
+        );
+    }
     let workbench_dir = workbench_dir
         .map(str::trim)
         .filter(|dir| !dir.is_empty() && (has_write || has_edit || has_bash || has_run_python));
-    let live_access_hint = match (has_web_search, has_web_fetch) {
-        (true, true) => {
-            "Use search_web/web_fetch or the relevant Skill script for live web/API access."
-        }
-        (true, false) => "Use search_web or the relevant Skill script for live web/API access.",
-        (false, true) => "Use web_fetch or the relevant Skill script for web page access.",
-        (false, false) => {
-            "Enable the relevant web tool or use the relevant Skill script for live web/API access."
-        }
-    };
-    let mut prompt = {
-        let image_generation_hint = if has_image_generation {
-            "\n- When the user asks to create, generate, or draw an image, call mixer_generate_image; do not merely describe it."
-        } else {
-            "\n- Image generation is not enabled; if asked, explain that an image model must be configured under Mixer first."
-        };
-        let advisor_hint = if has_advisor {
-            "\n- A stronger advisor model is available via the advisor tool. Consult it when you are stuck, have failed the same approach repeatedly, or face a significant design/architecture decision — pass a specific question plus the relevant context. Do not call it for routine steps you can handle yourself."
-        } else {
-            ""
-        };
-        let presentation_hint = if has_present_artifacts {
-            "
-- When the user asks to show, preview, attach, or send a local file or image in the chat, you MUST call present_artifacts at the exact display point. Use artifact_ids for generated files and paths for existing local files. Reading or analyzing a file does NOT display it."
-        } else {
-            ""
-        };
-        let generated_file_hint = match (workbench_dir, has_run_python) {
-            (Some(dir), true) => format!(
-                "\n- Current default workbench: `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files, basic work, and run_python artifacts land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead. Files produced by write/run_python are registered as artifacts but are not shown automatically. Do not call run_python merely to write out content you already have."
-            ),
-            (Some(dir), false) => format!(
-                "\n- Current default workbench: `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files and basic work land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead."
-            ),
-            (None, true) => "\n- Use run_python for files that require computation, data analysis, charts/plots, or a Python library. Do not call run_python merely to write out content you already have.".to_string(),
-            (None, false) => String::new(),
-        };
-        format!(
-            "Built-in tools enabled: {list}. Only call tools in this list.\n\
-- Relative file paths and omitted command cwd resolve from the current default workbench (the bound project root for project conversations, or the per-conversation workbench otherwise). Explicit absolute or ~/ paths remain unrestricted and always take precedence.\n\
-- Touch files only when the user explicitly asks to save/modify/delete local files or gives a target path: edit for small edits, write for new files or whole-file overwrites. If asked for a code block without saving, answer inline. After a write, state the path briefly; do not repeat the file content.\n\
-- Write/edit tools and bash may need user approval; memory_read (L2 on demand; L1 is auto-injected), memory_search (keyword search over L2; prefer it when you are unsure of the exact heading), and memory_modify do not.\n\
-- Runtime environment: {os_name}; bash runs via {shell_name}. Match that shell's syntax ({shell_syntax_hint}). Each bash call is a fresh process — cwd does NOT persist across calls; switch directories with the `cwd` parameter, not a prior `cd`. To run multi-line or quoted code, write it to a file with write and run that, or use run_python — do not cram it into inline commands like `python -c \"...\"` (inline quotes are fragile across shells). When a tool returns a hard rejection, change strategy instead of retrying variants of the same action; never re-run a failed command unchanged; don't drop one-off probe or cleanup scripts into the project.\n\
-- bash runs on the host shell from the current default workbench; non-zero exit means failure. Paths with spaces must use the `cwd` parameter—never `cd path && command`; do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev commands such as `npm run dev`, `tauri dev`, and `vite` start in the background automatically and return a job_id immediately; do not start the same dev server twice. Explain and get confirmation before destructive, network, or environment-changing commands. Run a skill's bundled scripts with run_python (sandbox) or run_command (host); never use host pip to bypass the run_python sandbox.\n\
-- Background commands (bash with background:true, or auto-detected dev servers): the call returns a job_id immediately and hands control back to you — keep working, do NOT poll right away. Read incremental output and exit status with bash_output (pass the job_id; use the returned next_offset for the next read), list all tracked jobs by calling bash_output with no job_id, and stop one with kill_background. Keep polling bounded (≤20 checks); status in history may be stale, so refresh once with bash_output before reporting a background command's result. Background commands survive across turns until you kill them or the app exits, so kill_background a dev server when you no longer need it.\n\
-- run_python runs in a Pyodide sandbox for data computation, analysis, document processing, charts, and generating files that REQUIRE a Python library (formatted XLSX, PDF, rendered images); never use it to generate or print code answers, and do not call it merely to write out content you already have (use write in the current workbench for that). Write code directly in the answer. No host filesystem access; mount files via the files parameter and use KIVIO_INPUT_FILES[n] paths. numpy, pandas, matplotlib, pillow, openpyxl, pypdf import directly. Save artifacts to relative filenames (report.xlsx, chart.png, summary.csv); Kivio captures them and returns artifact IDs. Generated files remain hidden unless you call present_artifacts at the point where the user should see them. No base64 printing.\n\
-- {live_access_hint}"
-        ) + presentation_hint + &generated_file_hint + image_generation_hint + advisor_hint + code_discipline
-    };
-    if has_image_generation && !prompt.ends_with('.') && !prompt.ends_with('。') {
-        prompt.push('.');
+    match (workbench_dir, has_run_python) {
+        (Some(dir), true) => bullets.push(format!(
+            "Current default workbench: `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files, basic work, and run_python artifacts land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead. Files produced by write/run_python are registered as artifacts but are not shown automatically. Do not call run_python merely to write out content you already have."
+        )),
+        (Some(dir), false) => bullets.push(format!(
+            "Current default workbench: `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files and basic work land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead."
+        )),
+        (None, true) => bullets.push(
+            "Use run_python for files that require computation, data analysis, charts/plots, or a Python library. Do not call run_python merely to write out content you already have.".to_string(),
+        ),
+        (None, false) => {}
+    }
+    if has_image_generation {
+        bullets.push(
+            "When the user asks to create, generate, or draw an image, call mixer_generate_image; do not merely describe it.".to_string(),
+        );
+    }
+    if has_advisor {
+        bullets.push(
+            "A stronger advisor model is available via the advisor tool. Consult it when you are stuck, have failed the same approach repeatedly, or face a significant design/architecture decision — pass a specific question plus the relevant context. Do not call it for routine steps you can handle yourself.".to_string(),
+        );
+    }
+    if has_write || has_edit || has_bash {
+        bullets.push(
+            "Before changing code, read neighboring files and existing conventions — mimic the current style, naming, and the libraries/frameworks already in use; never assume a library is available without confirming the project already uses it. Do not add code comments unless asked. After code changes, verify when you can (run existing tests, lint/typecheck); never git commit/push unless the user explicitly asks. Reference code locations as `file_path:line_number`. When several independent lookups or commands are needed, call multiple tools in parallel in one message instead of serially.".to_string(),
+        );
+    }
+
+    let mut prompt = format!("Built-in tools enabled: {list}. Only call tools in this list.");
+    for bullet in bullets {
+        prompt.push_str("\n- ");
+        prompt.push_str(&bullet);
     }
     Some(prompt)
 }
@@ -941,6 +1100,8 @@ mod tests {
             None,
             None,
             "",
+            false,
+            None,
             None,
             None,
             None,
@@ -976,6 +1137,8 @@ mod tests {
             None,
             None,
             "",
+            false,
+            None,
             None,
             None,
             None,
@@ -1018,12 +1181,14 @@ mod tests {
             None,
             None,
             "",
+            false,
             None,
             None,
             None,
             None,
             None,
             Some("/Users/me/Kivio/workspace/conv_abc"),
+            None,
             None,
             &[],
             None,
@@ -1061,6 +1226,8 @@ mod tests {
             None,
             None,
             "",
+            false,
+            None,
             None,
             None,
             None,
@@ -1096,6 +1263,8 @@ mod tests {
             None,
             None,
             "",
+            false,
+            None,
             None,
             None,
             None,
@@ -1130,6 +1299,8 @@ mod tests {
             None,
             None,
             "",
+            false,
+            None,
             None,
             None,
             None,
@@ -1299,6 +1470,174 @@ mod tests {
         let prompt = native_tools_prompt(&names, None).expect("prompt");
         assert!(prompt.contains("search_web"), "{prompt}");
         assert!(!prompt.contains("web_search"), "{prompt}");
+    }
+
+    #[test]
+    fn native_tools_prompt_omits_shell_essay_for_research_tools() {
+        let names = vec![
+            "web_search".to_string(),
+            "web_fetch".to_string(),
+            "knowledge_search".to_string(),
+            "memory_read".to_string(),
+            "memory_search".to_string(),
+        ];
+        let prompt = native_tools_prompt(&names, None).expect("prompt");
+        assert!(prompt.contains("search_web"), "{prompt}");
+        assert!(prompt.contains("web_fetch"), "{prompt}");
+        assert!(prompt.contains("knowledge_search"), "{prompt}");
+        assert!(prompt.contains("memory_read"), "{prompt}");
+        assert!(!prompt.contains("bash runs"), "{prompt}");
+        assert!(!prompt.contains("Git Bash"), "{prompt}");
+        assert!(!prompt.contains("run_python"), "{prompt}");
+        assert!(!prompt.contains("Touch files"), "{prompt}");
+        assert!(!prompt.contains("npm run dev"), "{prompt}");
+        assert!(!prompt.contains("Skill script"), "{prompt}");
+    }
+
+    #[test]
+    fn chat_runtime_uses_chat_prompt_not_agent_identity() {
+        let registry = skills::SkillRegistry::default();
+        let chat_tools = crate::settings::ChatToolsConfig::default();
+        let research_tools = [
+            "web_search".to_string(),
+            "web_fetch".to_string(),
+            "knowledge_search".to_string(),
+            "memory_read".to_string(),
+            "memory_search".to_string(),
+        ];
+        let prompt = build_chat_system_prompt(
+            "zh-CN",
+            false,
+            true,
+            &registry,
+            &chat_tools,
+            true,
+            &research_tools,
+            None,
+            None,
+            None,
+            None,
+            "",
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        );
+
+        assert!(prompt.contains("Kivio Chat"), "{prompt}");
+        assert!(prompt.contains("conversational research assistant"), "{prompt}");
+        assert!(prompt.contains("These limits override"), "{prompt}");
+        assert!(prompt.contains("cite sources with [n]"), "{prompt}");
+        assert!(!prompt.contains("internal runtime mode"), "{prompt}");
+        assert!(!prompt.contains("I cannot run commands"), "{prompt}");
+        assert!(
+            !prompt.contains("run code for calculations, edit files"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("after editing files"), "{prompt}");
+        assert!(!prompt.contains("bash runs"), "{prompt}");
+        assert!(!prompt.contains("Git Bash"), "{prompt}");
+        assert!(!prompt.contains("run_python"), "{prompt}");
+        assert!(!prompt.contains("<available_skills>"), "{prompt}");
+        assert!(!prompt.contains("Agent plan"), "{prompt}");
+    }
+
+    #[test]
+    fn chat_runtime_stacks_custom_and_drops_kb_cite_when_tool_off() {
+        let registry = skills::SkillRegistry::default();
+        let chat_tools = crate::settings::ChatToolsConfig::default();
+        let prompt = build_chat_system_prompt(
+            "zh-CN",
+            false,
+            true,
+            &registry,
+            &chat_tools,
+            true,
+            &["web_search".to_string(), "web_fetch".to_string()],
+            None,
+            None,
+            None,
+            None,
+            "Speak like a careful editor.",
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert!(prompt.contains("Additional instructions:"), "{prompt}");
+        assert!(prompt.contains("Speak like a careful editor."), "{prompt}");
+        assert!(prompt.contains("These limits override"), "{prompt}");
+        assert!(!prompt.contains("cite sources with [n]"), "{prompt}");
+    }
+
+    #[test]
+    fn chat_runtime_injects_knowledge_base_prompt() {
+        let registry = skills::SkillRegistry::default();
+        let chat_tools = crate::settings::ChatToolsConfig::default();
+        let prompt = build_chat_system_prompt(
+            "zh-CN",
+            false,
+            true,
+            &registry,
+            &chat_tools,
+            true,
+            &["knowledge_search".to_string()],
+            None,
+            None,
+            None,
+            None,
+            "",
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("This conversation has knowledge bases attached: Docs."),
+            None,
+            &[],
+            None,
+        );
+        assert!(
+            prompt.contains("This conversation has knowledge bases attached: Docs."),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_prompt_sources_keeps_chat_and_agent_apart() {
+        let plan = crate::chat::types::AgentPlanState::default();
+        let chat = resolve_runtime_prompt_sources(true, "AGENT IDENTITY", "  ", &plan);
+        assert!(chat.is_chat_runtime);
+        assert!(chat.custom_system_prompt.is_empty());
+        assert!(chat.agent_plan_prompt.is_none());
+
+        let chat_custom =
+            resolve_runtime_prompt_sources(true, "AGENT IDENTITY", "only research", &plan);
+        assert_eq!(chat_custom.custom_system_prompt, "only research");
+        assert!(chat_custom.agent_plan_prompt.is_none());
+
+        let agent = resolve_runtime_prompt_sources(false, "AGENT IDENTITY", "only research", &plan);
+        assert!(!agent.is_chat_runtime);
+        assert_eq!(agent.custom_system_prompt, "AGENT IDENTITY");
+        assert!(agent
+            .agent_plan_prompt
+            .is_some_and(|text| text.contains("act") || text.contains("plan")));
     }
 
     #[test]

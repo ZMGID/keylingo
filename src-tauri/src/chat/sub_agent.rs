@@ -1153,6 +1153,7 @@ pub fn handle_agent_spawn<'a>(
             None,
             None,
             &persona,
+            false,
             None,
             None,
             None,
@@ -1167,6 +1168,7 @@ pub fn handle_agent_spawn<'a>(
             .ok()
             .map(|path| path.display().to_string())
             .as_deref(),
+            None,
             (!settings.obsidian_vault_path.trim().is_empty())
                 .then_some(settings.obsidian_vault_path.as_str()),
             &settings.email_accounts,

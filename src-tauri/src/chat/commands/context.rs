@@ -708,6 +708,12 @@ pub(super) async fn compute_context_state(
     };
     let runtime_tools_available = !tools.is_empty();
     let available_builtin_tools = agent_prepare::available_builtin_tool_names(&tools);
+    let runtime_prompts = agent_prepare::resolve_runtime_prompt_sources(
+        chat_mode,
+        settings.chat.system_prompt.as_str(),
+        settings.chat.chat_mode.system_prompt.as_str(),
+        &conversation.agent_plan_state,
+    );
 
     let route_images_through_auxiliary_vision = auxiliary_vision_model_for_images(
         &settings,
@@ -761,18 +767,22 @@ pub(super) async fn compute_context_state(
         active_skill_detail.as_ref(),
         conversation.assistant_snapshot.as_ref(),
         set_system_prompt.as_deref(),
-        settings.chat.system_prompt.as_str(),
+        runtime_prompts.custom_system_prompt.as_str(),
+        runtime_prompts.is_chat_runtime,
         memory_prompt.as_deref(),
-        Some(&crate::chat::plan::format_prompt(
-            &conversation.agent_plan_state,
-        )),
+        runtime_prompts.agent_plan_prompt.as_deref(),
         Some(&crate::chat::ask_user::format_prompt(
             ask_user_tools_available,
         )),
-        Some(&crate::chat::todo::format_prompt(
-            &conversation.agent_todo_state,
-            todo_tools_available,
-        )),
+        if chat_mode {
+            None
+        } else {
+            Some(crate::chat::todo::format_prompt(
+                &conversation.agent_todo_state,
+                todo_tools_available,
+            ))
+        }
+        .as_deref(),
         project_prompt_context_for(app, conversation).as_ref(),
         crate::chat::storage::resolve_conversation_working_directory(
             app,

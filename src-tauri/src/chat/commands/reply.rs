@@ -467,19 +467,21 @@ pub(super) async fn complete_assistant_reply_inner(
     }
     let runtime_tools_available = !tools.is_empty();
     let available_builtin_tools = agent_prepare::available_builtin_tool_names(&tools);
-    let agent_todo_prompt =
-        crate::chat::todo::format_prompt(&conversation.agent_todo_state, todo_tools_available);
-    let agent_ask_user_prompt = crate::chat::ask_user::format_prompt(ask_user_tools_available);
-    let agent_plan_prompt = if chat_mode {
-        let custom = settings.chat.chat_mode.system_prompt.trim();
-        if custom.is_empty() {
-            crate::chat::plan::chat_runtime_prompt()
-        } else {
-            custom.to_string()
-        }
+    let agent_todo_prompt = if chat_mode {
+        None
     } else {
-        crate::chat::plan::format_prompt(&conversation.agent_plan_state)
+        Some(crate::chat::todo::format_prompt(
+            &conversation.agent_todo_state,
+            todo_tools_available,
+        ))
     };
+    let agent_ask_user_prompt = crate::chat::ask_user::format_prompt(ask_user_tools_available);
+    let runtime_prompts = agent_prepare::resolve_runtime_prompt_sources(
+        chat_mode,
+        settings.chat.system_prompt.as_str(),
+        settings.chat.chat_mode.system_prompt.as_str(),
+        &conversation.agent_plan_state,
+    );
     // Default workbench surfaced to the model. It is an ergonomic default, not
     // a sandbox; explicit user paths continue to take precedence.
     let workbench_dir = crate::chat::storage::resolve_conversation_working_directory(
@@ -505,6 +507,11 @@ pub(super) async fn complete_assistant_reply_inner(
         &settings.email_accounts,
         himalaya_binary.as_deref(),
     );
+    let knowledge_base_prompt = crate::chat::knowledge_base::mount_system_prompt(
+        app,
+        &conversation.knowledge_base_ids,
+        conversation.force_knowledge_search,
+    );
     let system_prompt = agent_prepare::build_chat_system_prompt(
         &language,
         !main_image_paths.is_empty(),
@@ -517,13 +524,15 @@ pub(super) async fn complete_assistant_reply_inner(
         active_skill_detail.as_ref(),
         conversation.assistant_snapshot.as_ref(),
         set_system_prompt.as_deref(),
-        settings.chat.system_prompt.as_str(),
+        runtime_prompts.custom_system_prompt.as_str(),
+        runtime_prompts.is_chat_runtime,
         memory_prompt.as_deref(),
-        Some(&agent_plan_prompt),
+        runtime_prompts.agent_plan_prompt.as_deref(),
         Some(&agent_ask_user_prompt),
-        Some(&agent_todo_prompt),
+        agent_todo_prompt.as_deref(),
         project_prompt_context.as_ref(),
         workbench_dir.as_deref(),
+        knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
         &settings.email_accounts,
         email_accounts_prompt.as_deref(),
@@ -573,16 +582,23 @@ pub(super) async fn complete_assistant_reply_inner(
         active_skill_detail.as_ref(),
         conversation.assistant_snapshot.as_ref(),
         set_system_prompt.as_deref(),
-        settings.chat.system_prompt.as_str(),
+        runtime_prompts.custom_system_prompt.as_str(),
+        runtime_prompts.is_chat_runtime,
         memory_prompt.as_deref(),
-        Some(&agent_plan_prompt),
+        runtime_prompts.agent_plan_prompt.as_deref(),
         Some(&crate::chat::ask_user::format_prompt(false)),
-        Some(&crate::chat::todo::format_prompt(
-            &conversation.agent_todo_state,
-            false,
-        )),
+        if chat_mode {
+            None
+        } else {
+            Some(crate::chat::todo::format_prompt(
+                &conversation.agent_todo_state,
+                false,
+            ))
+        }
+        .as_deref(),
         project_prompt_context.as_ref(),
         workbench_dir.as_deref(),
+        knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
         &settings.email_accounts,
         email_accounts_prompt.as_deref(),
