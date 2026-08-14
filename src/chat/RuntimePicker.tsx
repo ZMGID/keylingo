@@ -7,6 +7,7 @@ import { chatTitlebarPillButtonClass } from './platform'
 import { IconButton } from '../components/Button'
 import { usePopoverMaxHeight } from './usePopoverMaxHeight'
 import type { AgentRuntimeConfig } from './types'
+import { rememberedExternalRuntime } from './lastAgentRuntime'
 import './runtimePicker.css'
 
 const KIVIO_LOGO_SRC = '/logo-mark.png'
@@ -57,15 +58,6 @@ const CHAT: AgentRuntimeConfig = {
   externalAgentId: null,
   externalModel: null,
   externalReasoning: null,
-}
-
-function externalRuntime(agentId: string, model?: string | null): AgentRuntimeConfig {
-  return {
-    kind: 'external',
-    externalAgentId: agentId,
-    externalModel: model ?? 'default',
-    externalReasoning: null,
-  }
 }
 
 // 胶囊显示：把裸 "Default" 映射为「自动」（不再向用户暴露内部占位名）。
@@ -168,10 +160,13 @@ function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, lock
   const selectExternal = (agent: DetectedExternalAgent) => {
     if (locked) return
     if (!agent.available) return
-    // 隐式契约（D3）：后端各探测路径都把合成的 "default" 占位放在 models[0]
-    // （default_model_option / fallback_models 首项），因此这里取 [0] 即「让 CLI 用自己的默认模型」。
-    const defaultModel = agent.models[0]?.id ?? 'default'
-    onRuntimeChange(externalRuntime(agent.id, defaultModel))
+    // 已选中的代理再点一次只关菜单。重发 default 会把用户刚选的模型和思考档清成 Auto。
+    if (agentRuntime.kind === 'external' && agentRuntime.externalAgentId === agent.id) {
+      setOpen(false)
+      return
+    }
+    // 换代理时带回该 CLI 上次的模型/思考档。没有记录才走 default（胶囊显示 Auto）。
+    onRuntimeChange(rememberedExternalRuntime(agent.id))
     setOpen(false)
   }
 

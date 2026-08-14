@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
+import { LAST_AGENT_RUNTIME_KEY } from './lastAgentRuntime'
 import type { AgentRuntimeConfig } from './types'
 
 const detectModels = vi.fn()
@@ -323,6 +324,66 @@ describe('RuntimePicker（一 agent 一对话绑定锁）', () => {
     expect(screen.getByRole('radio', { name: /Cursor Agent/ })).not.toBeDisabled()
   })
 
+
+  it('再点当前外部代理不把模型和思考重置成 default', async () => {
+    const onRuntimeChange = vi.fn()
+    const claudeRuntime: AgentRuntimeConfig = {
+      kind: 'external',
+      externalAgentId: 'claude',
+      externalModel: 'claude-opus-5',
+      externalReasoning: 'high',
+    }
+    render(
+      <RuntimePicker
+        agentRuntime={claudeRuntime}
+        onRuntimeChange={onRuntimeChange}
+        conversationId="c1"
+      />,
+    )
+    await waitFor(() => expect(detectAgents).toHaveBeenCalled())
+    act(() => {
+      fireEvent.click(screen.getAllByRole('button')[0])
+    })
+    act(() => {
+      fireEvent.click(screen.getByRole('radio', { name: /Claude Code/ }))
+    })
+    expect(onRuntimeChange).not.toHaveBeenCalled()
+  })
+
+  it('切到 Claude Code 时带回该代理上次的模型和思考档', async () => {
+    window.localStorage.setItem(LAST_AGENT_RUNTIME_KEY, JSON.stringify({
+      kind: 'external',
+      externalAgentId: 'dsh',
+      externalModel: 'deepseek-v4-flash',
+      byAgent: {
+        claude: { externalModel: 'claude-opus-5', externalReasoning: 'high' },
+      },
+    }))
+    const onRuntimeChange = vi.fn()
+    render(
+      <RuntimePicker
+        agentRuntime={runtime}
+        onRuntimeChange={onRuntimeChange}
+        conversationId={null}
+      />,
+    )
+    await waitFor(() => expect(detectAgents).toHaveBeenCalled())
+    act(() => {
+      fireEvent.click(screen.getAllByRole('button')[0])
+    })
+    act(() => {
+      fireEvent.click(screen.getByRole('radio', { name: /Claude Code/ }))
+    })
+    expect(onRuntimeChange).toHaveBeenCalledWith({
+      kind: 'external',
+      externalAgentId: 'claude',
+      externalModel: 'claude-opus-5',
+      externalReasoning: 'high',
+      externalSandbox: null,
+      externalAgentPreset: null,
+    })
+    window.localStorage.removeItem(LAST_AGENT_RUNTIME_KEY)
+  })
 
   it('未 locked 时切换项可用', async () => {
     const onRuntimeChange = vi.fn()

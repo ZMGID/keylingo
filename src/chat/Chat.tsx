@@ -57,6 +57,7 @@ import {
   normalizeAgentRuntime,
   type AgentRuntimeConfig,
 } from './api'
+import { loadLastAgentRuntime, saveLastAgentRuntime } from './lastAgentRuntime'
 import {
   chatTitlebarMacInsetClass,
   chatTitlebarRowClass,
@@ -998,7 +999,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 多模型一问多答（任务 06-30）：欢迎页（尚无会话）时的多答模型草稿；首次发送建会话时落到会话上。
   const [draftReplyModels, setDraftReplyModels] = useState<ModelRef[]>([])
   const [draftAgentRuntime, setDraftAgentRuntime] = useState<AgentRuntimeConfig>(
-    BUILTIN_AGENT_RUNTIME,
+    () => loadLastAgentRuntime() ?? BUILTIN_AGENT_RUNTIME,
   )
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<string[]>([])
@@ -2934,6 +2935,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setDraftProviderId(activeProviderId)
     setDraftModel(activeModel)
     setDraftAgentRuntime(activeAgentRuntime)
+    saveLastAgentRuntime(activeAgentRuntime)
     setDraftKnowledgeBaseIds([])
     setDraftForceKnowledgeSearch(false)
     currentConversationIdRef.current = null
@@ -4068,6 +4070,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const handleRuntimeChange = useCallback(async (runtime: AgentRuntimeConfig) => {
     setDraftAgentRuntime(runtime)
+    saveLastAgentRuntime(runtime)
     if (!currentConversation) return
     const conversationId = currentConversation.id
     try {
@@ -4126,6 +4129,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       const updated = await chatApi.setAgentRuntime(conversationId, next)
       if (applyConversationIfCurrent(conversationId, updated)) {
         setDraftAgentRuntime(next)
+        saveLastAgentRuntime(next)
       }
     } catch (error) {
       console.error('Failed to persist the post-approval permission mode:', error)
