@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::chat::model::WORKBENCH_LOCATION_PROMPT_HEAD;
 use crate::chat::types::{ChatAssistantSnapshot, ContextUsageSegment};
 use crate::mcp::ChatToolDefinition;
 use crate::settings::{
@@ -246,8 +247,13 @@ fn work_style_prompt(available_builtin_tools: &[String]) -> String {
 
 fn project_context_prompt(project: &ProjectPromptContext) -> String {
     match &project.root_path {
-        Some(root) => format!(
-            "This is a project conversation. Project \"{}\" is bound to folder: {root}. Relative paths in file/command tools resolve from that root; writing an explicit absolute or ~/ path (e.g. ~/Desktop/x.html) targets that global location outside the project.",
+        // Do not interpolate the folder path here. It changes per project (and
+        // Chat Probe rebinds the same project to a new cwd) and would sit in
+        // the static system prefix, breaking tool-schema cache. The absolute
+        // path lives only in the trailing workbench paragraph, which is peeled
+        // onto the first user message.
+        Some(_) => format!(
+            "This is a project conversation. Project \"{}\" is bound to a folder. Relative paths in file/command tools resolve from the current default workbench (that project root); writing an explicit absolute or ~/ path (e.g. ~/Desktop/x.html) targets that global location outside the project.",
             project.name
         ),
         None => format!(
@@ -342,6 +348,7 @@ pub fn build_chat_system_prompt_with_segments(
     }
     // 集的系统提示词：实时注入（不冻结），随集编辑对集内所有对话立即生效。作为独立段落，
     // 与助手段并存（助手段提供人设/工具白名单，集段是这一组对话的统一指令）。
+    // 带与助手相同的标题，避免原文被埋进超长 system prompt 后模型当旁注忽略。
     if let Some(set_prompt) = set_system_prompt {
         let set_prompt = set_prompt.trim();
         if !set_prompt.is_empty() {
@@ -350,7 +357,7 @@ pub fn build_chat_system_prompt_with_segments(
                 &mut segments,
                 "set",
                 "Set instructions",
-                set_prompt,
+                &format!("Set instructions:\n{set_prompt}"),
             );
         }
     }
@@ -510,6 +517,19 @@ pub fn build_chat_system_prompt_with_segments(
         append_context_segment(&mut prompt, &mut segments, "agent_todo", "Agent todo", todo);
     }
 
+    // Per-conversation workbench path (`…/conv_xxx`) is the only system-prompt
+    // bit that changes between ordinary chats. Compute it once, inject the
+    // static tool rules without it, then append the path as the last paragraph
+    // so prefix-cache matching can share role / L1 / skills / tool schemas
+    // across conversations. `generate_request_from_openai_messages` peels this
+    // paragraph off `system` and parks it on the first user message (after tools
+    // in the token stream).
+    let workbench_text = if tools_available {
+        workbench_location_prompt(workbench_dir, available_builtin_tools)
+    } else {
+        None
+    };
+
     if tools_available {
         if is_chat_runtime {
             append_context_segment(
@@ -572,7 +592,9 @@ pub fn build_chat_system_prompt_with_segments(
                 &runtime,
             );
         }
-        if let Some(native_prompt) = native_tools_prompt(available_builtin_tools, workbench_dir) {
+        if let Some(native_prompt) =
+            native_tools_prompt(available_builtin_tools, workbench_text.is_some())
+        {
             append_context_segment(
                 &mut prompt,
                 &mut segments,
@@ -728,6 +750,15 @@ pub fn build_chat_system_prompt_with_segments(
             chat_no_think_instruction(),
         );
     }
+    if let Some(text) = workbench_text.as_deref() {
+        append_context_segment(
+            &mut prompt,
+            &mut segments,
+            "native_tools",
+            "Native tools",
+            text,
+        );
+    }
     (prompt, merge_context_segments(segments))
 }
 
@@ -873,9 +904,29 @@ pub(crate) fn tool_matches_recommended_name(tool: &ChatToolDefinition, recommend
             .unwrap_or(false)
 }
 
+fn workbench_location_prompt(
+    workbench_dir: Option<&str>,
+    available_builtin_tools: &[String],
+) -> Option<String> {
+    let has = |name: &str| available_builtin_tools.iter().any(|tool| tool.as_str() == name);
+    let has_run_python = has("run_python");
+    let dir = workbench_dir.map(str::trim).filter(|dir| {
+        !dir.is_empty() && (has("write") || has("edit") || has("bash") || has_run_python)
+    })?;
+    Some(if has_run_python {
+        format!(
+            "{WORKBENCH_LOCATION_PROMPT_HEAD} `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files, basic work, and run_python artifacts land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead. Files produced by write/run_python are registered as artifacts but are not shown automatically. Do not call run_python merely to write out content you already have."
+        )
+    } else {
+        format!(
+            "{WORKBENCH_LOCATION_PROMPT_HEAD} `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files and basic work land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead."
+        )
+    })
+}
+
 fn native_tools_prompt(
     available_builtin_tools: &[String],
-    workbench_dir: Option<&str>,
+    has_workbench: bool,
 ) -> Option<String> {
     let native_tool_names = available_builtin_tools
         .iter()
@@ -996,20 +1047,10 @@ fn native_tools_prompt(
             "When the user asks to show, preview, attach, or send a local file or image in the chat, you MUST call present_artifacts at the exact display point. Use artifact_ids for generated files and paths for existing local files. Reading or analyzing a file does NOT display it.".to_string(),
         );
     }
-    let workbench_dir = workbench_dir
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty() && (has_write || has_edit || has_bash || has_run_python));
-    match (workbench_dir, has_run_python) {
-        (Some(dir), true) => bullets.push(format!(
-            "Current default workbench: `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files, basic work, and run_python artifacts land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead. Files produced by write/run_python are registered as artifacts but are not shown automatically. Do not call run_python merely to write out content you already have."
-        )),
-        (Some(dir), false) => bullets.push(format!(
-            "Current default workbench: `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files and basic work land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead."
-        )),
-        (None, true) => bullets.push(
+    if !has_workbench && has_run_python {
+        bullets.push(
             "Use run_python for files that require computation, data analysis, charts/plots, or a Python library. Do not call run_python merely to write out content you already have.".to_string(),
-        ),
-        (None, false) => {}
+        );
     }
     if has_image_generation {
         bullets.push(
@@ -1206,6 +1247,100 @@ mod tests {
         );
         // The removed deliver_file tool must not appear anywhere.
         assert!(!prompt.contains("deliver_file"));
+        // Per-conversation path must sit after the static tool/skill rules so
+        // prefix cache can share those across conversations.
+        let path_at = prompt
+            .find("/Users/me/Kivio/workspace/conv_abc")
+            .expect("workbench path");
+        assert!(
+            prompt
+                .find("Built-in tools enabled")
+                .expect("native tool list")
+                < path_at
+        );
+        assert!(
+            prompt
+                .find("Working directory hygiene")
+                .expect("hygiene rules")
+                < path_at
+        );
+        let last = prompt
+            .trim()
+            .rsplit("\n\n")
+            .next()
+            .expect("last paragraph");
+        assert!(
+            last.starts_with(WORKBENCH_LOCATION_PROMPT_HEAD),
+            "workbench path must be the last system-prompt paragraph, got: {last}"
+        );
+    }
+
+    #[test]
+    fn project_folder_path_stays_out_of_static_system_prefix() {
+        let registry = skills::SkillRegistry::default();
+        let mut chat_tools = crate::settings::ChatToolsConfig::default();
+        chat_tools.native_tools.run_python = true;
+        chat_tools.native_tools.write_file = true;
+        let tools = ["run_python".to_string(), "write".to_string()];
+        let build = |root: &str| {
+            let project = ProjectPromptContext {
+                name: "Chat Probe".to_string(),
+                root_path: Some(root.to_string()),
+            };
+            build_chat_system_prompt(
+                "zh-CN",
+                false,
+                false,
+                &registry,
+                &chat_tools,
+                true,
+                &tools,
+                None,
+                None,
+                None,
+                None,
+                "",
+                false,
+                None,
+                None,
+                None,
+                None,
+                Some(&project),
+                Some(root),
+                None,
+                None,
+                &[],
+                None,
+            )
+        };
+
+        let prompt_a = build("/tmp/workbench-alpha");
+        let prompt_b = build("/tmp/workbench-beta");
+        assert!(prompt_a.contains("/tmp/workbench-alpha"));
+        assert!(prompt_b.contains("/tmp/workbench-beta"));
+        assert!(
+            !prompt_a.contains("bound to folder:"),
+            "project paragraph must not embed the absolute path"
+        );
+
+        let idx_a = prompt_a
+            .rfind("\n\n")
+            .expect("workbench paragraph separator");
+        let idx_b = prompt_b
+            .rfind("\n\n")
+            .expect("workbench paragraph separator");
+        let (prefix_a, suffix_a) = (&prompt_a[..idx_a], &prompt_a[idx_a + 2..]);
+        let (prefix_b, suffix_b) = (&prompt_b[..idx_b], &prompt_b[idx_b + 2..]);
+        assert_eq!(
+            prefix_a, prefix_b,
+            "static system prefix must not change when only the project folder path changes"
+        );
+        assert!(suffix_a.starts_with(WORKBENCH_LOCATION_PROMPT_HEAD));
+        assert!(suffix_a.contains("/tmp/workbench-alpha"));
+        assert!(!prefix_a.contains("/tmp/workbench-alpha"));
+        assert!(!prefix_a.contains("/tmp/workbench-beta"));
+        assert!(suffix_b.contains("/tmp/workbench-beta"));
+        assert_ne!(suffix_a, suffix_b);
     }
 
     #[test]
@@ -1313,6 +1448,70 @@ mod tests {
         );
 
         assert!(prompt.contains("Obsidian vault path: /Users/me/Obsidian/MyVault"));
+    }
+
+    #[test]
+    fn chat_prompt_labels_live_set_instructions() {
+        let registry = skills::SkillRegistry::default();
+        let chat_tools = crate::settings::ChatToolsConfig::default();
+
+        let prompt = build_chat_system_prompt(
+            "zh-CN",
+            false,
+            false,
+            &registry,
+            &chat_tools,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            Some("Always answer in 文言文."),
+            "",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        );
+
+        assert!(
+            prompt.contains("Set instructions:\nAlways answer in 文言文."),
+            "{prompt}"
+        );
+
+        let blank = build_chat_system_prompt(
+            "zh-CN",
+            false,
+            false,
+            &registry,
+            &chat_tools,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            Some("   "),
+            "",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert!(!blank.contains("Set instructions:"), "{blank}");
     }
 
     #[test]
@@ -1467,7 +1666,7 @@ mod tests {
         // 提示词必须展示 wire 名（search_web）——与 tools 声明一致，否则模型会调用
         // 未声明的 web_search（且该名会被 Cursor 系上游吞掉）。
         let names = vec!["web_fetch".to_string(), "web_search".to_string()];
-        let prompt = native_tools_prompt(&names, None).expect("prompt");
+        let prompt = native_tools_prompt(&names, false).expect("prompt");
         assert!(prompt.contains("search_web"), "{prompt}");
         assert!(!prompt.contains("web_search"), "{prompt}");
     }
@@ -1481,7 +1680,7 @@ mod tests {
             "memory_read".to_string(),
             "memory_search".to_string(),
         ];
-        let prompt = native_tools_prompt(&names, None).expect("prompt");
+        let prompt = native_tools_prompt(&names, false).expect("prompt");
         assert!(prompt.contains("search_web"), "{prompt}");
         assert!(prompt.contains("web_fetch"), "{prompt}");
         assert!(prompt.contains("knowledge_search"), "{prompt}");
@@ -1645,7 +1844,7 @@ mod tests {
         // 代码工作纪律只在具备 write/edit/bash 时注入；纯只读/无这些工具时不出现，
         // 避免污染纯聊天场景。
         let with_bash = vec!["bash".to_string(), "read".to_string()];
-        let p = native_tools_prompt(&with_bash, None).expect("prompt");
+        let p = native_tools_prompt(&with_bash, false).expect("prompt");
         assert!(
             p.contains("file_path:line_number"),
             "bash present should add discipline: {p}"
@@ -1653,7 +1852,7 @@ mod tests {
 
         // 只有只读工具（无 write/edit/bash）时不注入。
         let read_only = vec!["read".to_string(), "glob".to_string()];
-        let p2 = native_tools_prompt(&read_only, None).expect("prompt");
+        let p2 = native_tools_prompt(&read_only, false).expect("prompt");
         assert!(
             !p2.contains("file_path:line_number"),
             "read-only should omit discipline: {p2}"
