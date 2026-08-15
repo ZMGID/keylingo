@@ -7,7 +7,7 @@ use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model::openai_messages_from_model_messages;
 use crate::chat::model_call::session_model_for_conversation;
 use crate::chat::model_metadata::context_window_for_model;
-use crate::chat::storage::{find_set_by_id, load_conversation};
+use crate::chat::storage::{live_set_system_prompt, load_conversation};
 use crate::chat::{
     ChatMessage, CompactionBoundaryRecord, ContextUsageSegment, Conversation,
     ConversationContextState, ConversationContextSummary,
@@ -735,12 +735,7 @@ pub(super) async fn compute_context_state(
         estimate_image_attachment_tokens(provider.as_ref(), &conversation.model, main_image_paths)
     };
 
-    let set_system_prompt = conversation
-        .set_id
-        .as_deref()
-        .and_then(|id| find_set_by_id(app, id).ok())
-        .map(|set| set.system_prompt)
-        .filter(|prompt| !prompt.trim().is_empty());
+    let set_system_prompt = live_set_system_prompt(app, conversation);
     let knowledge_base_prompt = crate::chat::knowledge_base::mount_system_prompt(
         app,
         &conversation.knowledge_base_ids,

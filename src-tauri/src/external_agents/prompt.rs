@@ -40,7 +40,7 @@ pub fn compose_external_prompt_passthrough(latest_user_message: &str) -> Compose
 /// `--resume` / codex thread / ACP `session/load` / pi `--session-id`), so the CLI itself holds
 /// the conversation history. A turn therefore only ever sends the **latest** user message.
 ///
-/// `daemon_instructions`（系统提示 + Memory + cwd 提示）是**会话级常量**，只在首轮拼进正文，
+/// `daemon_instructions`（全局系统提示 + 集指令 + Memory + cwd 提示）是**会话级常量**，只在首轮拼进正文，
 /// resume 轮由 `skip_instructions` 抑制；走启动 flag 的 CLI（claude，见
 /// `instructions_via_launch_flag`）由调用方直接传空串，完全不进正文。
 ///
@@ -89,6 +89,35 @@ pub fn cwd_hint(cwd: &str) -> String {
     format!(
         "Your working directory is `{cwd}`. Active skill files may appear under `{SKILLS_CWD_ALIAS}/`."
     )
+}
+
+/// Session-level instructions for an external CLI: global system prompt, live
+/// set instructions, Memory, then cwd hint. Empty pieces are omitted; cwd is
+/// always present. Callers skip the first three for slash passthrough by
+/// passing empty strings / `None`.
+pub fn build_external_daemon_instructions(
+    global_system_prompt: &str,
+    set_system_prompt: Option<&str>,
+    memory_body: &str,
+    cwd: &str,
+) -> String {
+    let mut daemon_instructions = String::new();
+    if !global_system_prompt.trim().is_empty() {
+        daemon_instructions.push_str(global_system_prompt.trim());
+        daemon_instructions.push_str("\n\n");
+    }
+    if let Some(set_prompt) = set_system_prompt.map(str::trim).filter(|s| !s.is_empty()) {
+        daemon_instructions.push_str("## Set instructions\n\n");
+        daemon_instructions.push_str(set_prompt);
+        daemon_instructions.push_str("\n\n");
+    }
+    if !memory_body.trim().is_empty() {
+        daemon_instructions.push_str("## Memory\n\n");
+        daemon_instructions.push_str(memory_body.trim());
+        daemon_instructions.push('\n');
+    }
+    daemon_instructions.push_str(&cwd_hint(cwd));
+    daemon_instructions
 }
 
 #[cfg(test)]
@@ -202,5 +231,37 @@ mod tests {
         assert_eq!(composed.full_prompt, "/model gpt-5");
         assert!(composed.instructions_block.is_empty());
         assert!(!composed.full_prompt.contains("# Instructions"));
+    }
+
+    #[test]
+    fn daemon_instructions_include_live_set_prompt() {
+        let instructions = build_external_daemon_instructions(
+            "global identity",
+            Some("Always answer in 文言文."),
+            "remember the vault path",
+            "/tmp/work",
+        );
+        assert!(instructions.contains("global identity"), "{instructions}");
+        assert!(
+            instructions.contains("## Set instructions\n\nAlways answer in 文言文."),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("## Memory\n\nremember the vault path"),
+            "{instructions}"
+        );
+        assert!(instructions.contains("`/tmp/work`"), "{instructions}");
+        let set_at = instructions.find("## Set instructions").expect("set");
+        let memory_at = instructions.find("## Memory").expect("memory");
+        assert!(set_at < memory_at, "set instructions must precede Memory");
+    }
+
+    #[test]
+    fn daemon_instructions_omit_blank_set_and_global_prompt() {
+        let instructions =
+            build_external_daemon_instructions("  ", Some("   "), "", "/home/me/proj");
+        assert!(!instructions.contains("## Set instructions"), "{instructions}");
+        assert!(!instructions.contains("## Memory"), "{instructions}");
+        assert_eq!(instructions, cwd_hint("/home/me/proj"));
     }
 }

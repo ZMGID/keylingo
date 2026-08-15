@@ -1591,6 +1591,18 @@ pub fn find_set_by_id(app: &AppHandle, set_id: &str) -> Result<ChatSet, String> 
         .ok_or_else(|| "集不存在".to_string())
 }
 
+/// Live set-level system prompt for a conversation. Looked up by `set_id` on
+/// every call (not frozen), so editing the set applies to in-set conversations
+/// immediately. Missing set / empty prompt → `None`.
+pub fn live_set_system_prompt(app: &AppHandle, conversation: &Conversation) -> Option<String> {
+    conversation
+        .set_id
+        .as_deref()
+        .and_then(|id| find_set_by_id(app, id).ok())
+        .map(|set| set.system_prompt)
+        .filter(|prompt| !prompt.trim().is_empty())
+}
+
 pub fn create_set(app: &AppHandle, mut set: ChatSet) -> Result<ChatSet, String> {
     validate_set_id(&set.id)?;
     set.name = normalize_set_name(&set.name)?;

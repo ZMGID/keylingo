@@ -14,7 +14,7 @@ use crate::chat::model_call::{
 use crate::chat::model_metadata::{
     chat_max_output_tokens_for_model, model_can_generate_images_directly,
 };
-use crate::chat::storage::find_set_by_id;
+use crate::chat::storage::live_set_system_prompt;
 use crate::chat::vision::{
     analyze_chat_images_with_auxiliary_model, auxiliary_vision_model_for_images,
     auxiliary_vision_tool_record, finish_auxiliary_vision_tool_record,
@@ -492,12 +492,7 @@ pub(super) async fn complete_assistant_reply_inner(
     .ok()
     .map(|path| path.display().to_string());
     // 集的系统提示词：按对话 set_id 实时取（不冻结），随集编辑立即对集内对话生效。
-    let set_system_prompt = conversation
-        .set_id
-        .as_deref()
-        .and_then(|id| find_set_by_id(app, id).ok())
-        .map(|set| set.system_prompt)
-        .filter(|prompt| !prompt.trim().is_empty());
+    let set_system_prompt = live_set_system_prompt(app, conversation);
     let obsidian_vault_path = (!settings.obsidian_vault_path.trim().is_empty())
         .then_some(settings.obsidian_vault_path.as_str());
     let himalaya_binary =

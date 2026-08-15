@@ -12,6 +12,7 @@ use crate::chat::commands::{
 };
 use crate::chat::memory::l1_prompt_block;
 use crate::chat::model::ModelUsage;
+use crate::chat::storage::live_set_system_prompt;
 use crate::chat::types::{
     AgentTodoState, ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase,
     CompactionBoundaryRecord, ToolCallRecord, ToolCallStatus,
@@ -19,8 +20,8 @@ use crate::chat::types::{
 use crate::chat::Conversation;
 use crate::external_agents::defs::claude::append_system_prompt_file_args;
 use crate::external_agents::prompt::{
-    compose_external_prompt, compose_external_prompt_passthrough, cwd_hint,
-    instructions_via_launch_flag, is_cli_slash_input,
+    build_external_daemon_instructions, compose_external_prompt,
+    compose_external_prompt_passthrough, instructions_via_launch_flag, is_cli_slash_input,
 };
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::session::acp::AcpMcpServer;
@@ -61,7 +62,7 @@ fn context_reset_notice_event() -> UnifiedAgentEvent {
 /// 崩溃留下的残渣 24h 后被回收。
 const SYSTEM_PROMPT_FILE_PREFIX: &str = "kivio-extsys-";
 
-/// 把会话级系统指令（用户系统提示 + Memory + cwd 提示）写到一个文件，供 CLI 用
+/// 把会话级系统指令（全局系统提示 + 集指令 + Memory + cwd 提示）写到一个文件，供 CLI 用
 /// `--append-system-prompt-file` 读取（A1）。
 ///
 /// **为什么是 file 而不是内联字符串**：Windows 命令行有 32767 字符上限，而含 Memory 块的
@@ -163,19 +164,21 @@ pub async fn run_external_cli_reply(
         l1_prompt_block(app).unwrap_or(None).unwrap_or_default()
     };
 
-    let mut daemon_instructions = String::new();
-    if !is_slash {
-        if !settings.chat.system_prompt.trim().is_empty() {
-            daemon_instructions.push_str(settings.chat.system_prompt.trim());
-            daemon_instructions.push_str("\n\n");
-        }
-        if !memory_body.trim().is_empty() {
-            daemon_instructions.push_str("## Memory\n\n");
-            daemon_instructions.push_str(memory_body.trim());
-            daemon_instructions.push('\n');
-        }
-    }
-    daemon_instructions.push_str(&cwd_hint(cwd.to_string_lossy().as_ref()));
+    let set_system_prompt = if is_slash {
+        None
+    } else {
+        live_set_system_prompt(app, conversation)
+    };
+    let daemon_instructions = build_external_daemon_instructions(
+        if is_slash {
+            ""
+        } else {
+            settings.chat.system_prompt.as_str()
+        },
+        set_system_prompt.as_deref(),
+        if is_slash { "" } else { memory_body.as_str() },
+        cwd.to_string_lossy().as_ref(),
+    );
 
     // A1：部分 CLI（目前只有 claude）的系统指令走**启动 flag** 而不是 prompt 正文。
     //
