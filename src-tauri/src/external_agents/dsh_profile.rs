@@ -24,8 +24,9 @@
 //! - `hmr` 关掉：那是给开发热重载用的，常驻会话里只会带来意外重连
 //! - `session-title-llm` 关掉：Kivio 自己起标题，留着等于每轮多付一次模型调用
 //!   （实测确认它会发 `session/title-llm-request`）
-//! - `llm-deepseek.reasoningEffort`：推理档位**唯一**的入口。它不是启动 flag、也不在
-//!   `initialize` 参数里，所以换档位必须重写这个文件并换进程。
+//! - `llm-deepseek.reasoningEffort`：官方 DeepSeek 路由的档位（只认 `off|high|max`）。
+//!   第三方 `llm-pi-ai` 路由另写 `providers.<route>.reasoning`（pi-ai 档位表）。
+//!   都不是启动 flag，也不在 `initialize` 参数里，所以换档位必须重写这个文件并换进程。
 //! - `agent-presets`：四档 Agent 模式（standard / code / minimal / cordis）。与官方 web
 //!   一样关掉 host 平面工具，改由所选 preset 组装；`dsh --profile` 会把随包的
 //!   `config/agent-presets` 补进 `roots`。
@@ -266,7 +267,18 @@ fn render_patch_with_provider(
         return Ok(out);
     };
     let active = parse_active_provider(provider)?;
-    let yaml = serde_yaml::to_string(&active.config)
+    let mut config = active.config;
+    if let Some(object) = config.as_object_mut() {
+        if let Some(effort) = normalize_pi_reasoning_effort(reasoning) {
+            object.insert(
+                "reasoning".to_string(),
+                Value::String(effort.to_string()),
+            );
+        } else {
+            object.remove("reasoning");
+        }
+    }
+    let yaml = serde_yaml::to_string(&config)
         .map_err(|err| format!("序列化 dsh 供应商配置失败：{err}"))?;
     out.push_str("\n# 仅挂载到 Kivio profile 的第三方供应商；API Key 只通过环境变量注入。\n");
     out.push_str("- id: llm-pi-ai\n  config:\n    providers:\n      ");
@@ -296,6 +308,21 @@ fn normalize_reasoning_effort(value: Option<&str>) -> Option<&'static str> {
     match value.map(str::trim) {
         Some("off") => Some("off"),
         Some("high") => Some("high"),
+        Some("max") => Some("max"),
+        _ => None,
+    }
+}
+
+/// `llm-pi-ai` 供应商级 `reasoning`：官方档位表 `off|minimal|low|medium|high|xhigh|max`。
+/// 未知值整段省略，避免把任意字符串写进共享 patch。
+fn normalize_pi_reasoning_effort(value: Option<&str>) -> Option<&'static str> {
+    match value.map(str::trim) {
+        Some("off") => Some("off"),
+        Some("minimal") => Some("minimal"),
+        Some("low") => Some("low"),
+        Some("medium") => Some("medium"),
+        Some("high") => Some("high"),
+        Some("xhigh") => Some("xhigh"),
         Some("max") => Some("max"),
         _ => None,
     }
@@ -540,6 +567,7 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("registerProvider"));
         assert!(BRIDGE_SOURCE.contains("session/ask"));
         assert!(BRIDGE_SOURCE.contains("'userQuestions'"));
+        assert!(!BRIDGE_SOURCE.contains("waitForProviderAdapter"));
         assert!(!BRIDGE_SOURCE.contains("@deepseek-ai/dsh-session"));
     }
 
@@ -562,9 +590,25 @@ mod tests {
         assert!(yml.contains("apiKeyEnv: KIVIO_DSH_RELAY_ONE_API_KEY"));
         assert!(yml.contains("baseURL: https://relay.example/v1"));
         assert!(yml.contains("id: gpt-test"));
+        assert!(yml.contains("reasoning: high"));
         assert!(!yml.contains("sk-secret"));
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yml).unwrap();
         assert!(parsed.is_sequence());
+    }
+
+    #[test]
+    fn provider_patch_writes_pi_ai_reasoning_for_custom_efforts() {
+        let provider = relay_provider();
+        let yml = render_patch_with_provider(Some("low"), None, Some(&provider)).unwrap();
+        assert!(yml.contains("reasoning: low"));
+        assert!(!yml.contains("reasoningEffort:"));
+        assert!(!yml.contains("- id: llm-deepseek"));
+
+        let yml = render_patch_with_provider(Some("xhigh"), None, Some(&provider)).unwrap();
+        assert!(yml.contains("reasoning: xhigh"));
+
+        let yml = render_patch_with_provider(Some("default"), None, Some(&provider)).unwrap();
+        assert!(!yml.contains("reasoning:"));
     }
 
     #[test]

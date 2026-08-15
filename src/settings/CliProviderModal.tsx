@@ -64,13 +64,16 @@ import {
   isValidNativeProviderId,
   nativeProviderIdFromName,
   normalizeNativeModels,
+  DSH_API_OPTIONS,
   OPENCODE_NPM_OPTIONS,
   PI_API_OPTIONS,
+  PI_THINKING_OPTIONS,
   piThinkingOptionsForModel,
   readNativeCliProvider,
   recommendedPiThinkingLevel,
   resolveOpenCodeModelMetadata,
   resolvePiModelMetadata,
+  toggleThinkingLevel,
   type NativeCliAgentId,
   type PiThinkingLevel,
 } from './cliNativeProviderConfigs'
@@ -355,7 +358,13 @@ export function CliProviderModal({
 
   const updateNativeModelReasoning = (idx: number, reasoning: boolean | null) => {
     setNativeForm((prev) => {
-      const models = prev.models.map((item, i) => i === idx ? { ...item, reasoning } : item)
+      const models = prev.models.map((item, i) => i === idx
+        ? {
+            ...item,
+            reasoning,
+            thinkingLevels: reasoning === true ? item.thinkingLevels : null,
+          }
+        : item)
       const updated = models[idx]
       if (!isPi || !updated || updated.id.trim() !== prev.defaultModel.trim()) return { ...prev, models }
       const supported = piThinkingOptionsForModel(updated)
@@ -368,6 +377,30 @@ export function CliProviderModal({
           : recommendedPiThinkingLevel(updated),
       }
     })
+  }
+
+  const updateNativeModelVision = (idx: number, vision: boolean | null) => {
+    setNativeForm((prev) => ({
+      ...prev,
+      models: prev.models.map((item, i) => i === idx ? { ...item, vision } : item),
+    }))
+  }
+
+  const toggleNativeModelEffort = (
+    idx: number,
+    level: PiThinkingLevel,
+    current: readonly PiThinkingLevel[],
+  ) => {
+    setNativeForm((prev) => ({
+      ...prev,
+      models: prev.models.map((item, i) => i === idx
+        ? {
+            ...item,
+            reasoning: true,
+            thinkingLevels: toggleThinkingLevel(current, level),
+          }
+        : item),
+    }))
   }
 
   const jsonText =
@@ -704,6 +737,10 @@ export function CliProviderModal({
       }
       if (usesPiSchema && !nativeForm.apiKey.trim()) {
         setError(t.externalAgentsProviderKeyRequired)
+        return
+      }
+      if (isDsh && !DSH_API_OPTIONS.includes(nativeForm.api as typeof DSH_API_OPTIONS[number])) {
+        setError(t.externalAgentsDshProtocolInvalid)
         return
       }
       const nativeProviderId = nativeForm.nativeProviderId.trim()
@@ -1632,7 +1669,14 @@ export function CliProviderModal({
               <Select
                 value={nativeForm.api}
                 onChange={(api) => setNativeForm((prev) => ({ ...prev, api }))}
-                options={PI_API_OPTIONS.map((api) => ({ value: api, label: api }))}
+                options={[
+                  ...(isDsh ? DSH_API_OPTIONS : PI_API_OPTIONS).map((api) => ({ value: api, label: api })),
+                  ...(isDsh
+                    && !DSH_API_OPTIONS.includes(nativeForm.api as typeof DSH_API_OPTIONS[number])
+                    && nativeForm.api
+                    ? [{ value: nativeForm.api, label: nativeForm.api }]
+                    : []),
+                ]}
               />
             </div>
           )}
@@ -1716,7 +1760,9 @@ export function CliProviderModal({
             const expanded = expandedNativeModels.has(idx)
             const automaticLabel = metadata?.matched
               ? t.externalAgentsPiMetadataMatched
-              : usesPiSchema ? t.externalAgentsPiMetadataDefault : t.externalAgentsOpenCodeMetadataDefault
+              : isDsh
+                ? t.externalAgentsDshMetadataDefault
+                : usesPiSchema ? t.externalAgentsPiMetadataDefault : t.externalAgentsOpenCodeMetadataDefault
             return (
               <div key={idx} className={`kv-native-model-row ${expanded ? 'is-expanded' : ''}`}>
                 <div className={`kv-native-model-main ${isOpenCode ? 'kv-native-model-main--opencode' : ''}`}>
@@ -1745,7 +1791,7 @@ export function CliProviderModal({
                     )}
                   </div>
                   <div className="kv-native-model-row-actions">
-                    {isOpenCode && (
+                    {(isOpenCode || isDsh) && (
                       <IconButton
                         size="sm"
                         variant="ghost"
@@ -1805,14 +1851,104 @@ export function CliProviderModal({
                     </IconButton>
                   </div>
                 </div>
+                {isDsh && (
+                  <div className="kv-native-model-caps">
+                    <div className="kv-native-model-switches">
+                      <label>
+                        <Toggle
+                          checked={metadata.vision}
+                          onChange={(vision) => updateNativeModelVision(idx, vision)}
+                          ariaLabel={t.externalAgentsPiVision}
+                        />
+                        <span>{t.externalAgentsPiVision}</span>
+                        {model.vision === null ? (
+                          <small>{t.externalAgentsPiAutomatic}</small>
+                        ) : (
+                          <IconButton
+                            size="xs"
+                            variant="ghost"
+                            label={t.externalAgentsPiRestoreAutomatic}
+                            onClick={() => updateNativeModelVision(idx, null)}
+                          >
+                            <RotateCcw size={11} />
+                          </IconButton>
+                        )}
+                      </label>
+                      <label>
+                        <Toggle
+                          checked={metadata.reasoning}
+                          onChange={(reasoning) => updateNativeModelReasoning(idx, reasoning)}
+                          ariaLabel={t.externalAgentsPiReasoning}
+                        />
+                        <span>{t.externalAgentsPiReasoning}</span>
+                        {model.reasoning === null ? (
+                          <small>{t.externalAgentsPiAutomatic}</small>
+                        ) : (
+                          <IconButton
+                            size="xs"
+                            variant="ghost"
+                            label={t.externalAgentsPiRestoreAutomatic}
+                            onClick={() => updateNativeModelReasoning(idx, null)}
+                          >
+                            <RotateCcw size={11} />
+                          </IconButton>
+                        )}
+                      </label>
+                    </div>
+                    {metadata.reasoning && (
+                      <div className="kv-native-model-efforts">
+                        <span>{t.externalAgentsDshReasoningEfforts}</span>
+                        <div
+                          className="kv-seg"
+                          role="group"
+                          aria-label={t.externalAgentsDshReasoningEfforts}
+                        >
+                          {PI_THINKING_OPTIONS.map((level) => {
+                            const active = metadata.thinkingLevels.includes(level)
+                            return (
+                              <button
+                                key={level}
+                                type="button"
+                                className={active ? 'active' : ''}
+                                aria-pressed={active}
+                                onClick={() => toggleNativeModelEffort(idx, level, metadata.thinkingLevels)}
+                              >
+                                {level === 'off' ? t.externalAgentsPiThinkingOff : level}
+                              </button>
+                            )
+                          })}
+                        </div>
+                        {model.thinkingLevels?.length ? (
+                          <IconButton
+                            size="xs"
+                            variant="ghost"
+                            label={t.externalAgentsPiRestoreAutomatic}
+                            onClick={() => setNativeForm((prev) => ({
+                              ...prev,
+                              models: prev.models.map((item, i) => i === idx
+                                ? { ...item, thinkingLevels: null }
+                                : item),
+                            }))}
+                          >
+                            <RotateCcw size={11} />
+                          </IconButton>
+                        ) : (
+                          <small>{t.externalAgentsPiAutomatic}</small>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {expanded && (
                   <div className="kv-native-model-advanced">
                     <div className="kv-native-model-advanced-head">
                       <span>{t.externalAgentsPiModelOverrides}</span>
                       <span>
-                        {usesPiSchema
-                          ? t.externalAgentsPiModelOverridesHint
-                          : t.externalAgentsOpenCodeModelOverridesHint}
+                        {isDsh
+                          ? t.externalAgentsDshModelOverridesHint
+                          : usesPiSchema
+                            ? t.externalAgentsPiModelOverridesHint
+                            : t.externalAgentsOpenCodeModelOverridesHint}
                       </span>
                     </div>
                     <div className="kv-native-model-advanced-grid">
@@ -1862,6 +1998,7 @@ export function CliProviderModal({
                         />
                       </div>
                     </div>
+                    {!isDsh && (
                     <div className="kv-native-model-switches">
                       <label>
                         <Toggle
@@ -1886,10 +2023,7 @@ export function CliProviderModal({
                       <label>
                         <Toggle
                           checked={metadata.vision}
-                          onChange={(vision) => setNativeForm((prev) => ({
-                            ...prev,
-                            models: prev.models.map((item, i) => i === idx ? { ...item, vision } : item),
-                          }))}
+                          onChange={(vision) => updateNativeModelVision(idx, vision)}
                           ariaLabel={t.externalAgentsPiVision}
                         />
                         <span>{t.externalAgentsPiVision}</span>
@@ -1900,10 +2034,7 @@ export function CliProviderModal({
                             size="xs"
                             variant="ghost"
                             label={t.externalAgentsPiRestoreAutomatic}
-                            onClick={() => setNativeForm((prev) => ({
-                              ...prev,
-                              models: prev.models.map((item, i) => i === idx ? { ...item, vision: null } : item),
-                            }))}
+                            onClick={() => updateNativeModelVision(idx, null)}
                           >
                             <RotateCcw size={11} />
                           </IconButton>
@@ -1938,6 +2069,7 @@ export function CliProviderModal({
                         </label>
                       )}
                     </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1949,12 +2081,12 @@ export function CliProviderModal({
         )}
       </section>
 
-      {usesPiSchema && (
+      {isPi && (
         <section className="kv-native-section">
           <div className="kv-native-section-head">
             <div>
               <h4>{t.externalAgentsNativeStartupSection}</h4>
-              <p>{isDsh ? t.externalAgentsDshDefaultHint : t.externalAgentsNativeDefaultHint}</p>
+              <p>{t.externalAgentsNativeDefaultHint}</p>
             </div>
           </div>
           <div className="kv-form-grid">

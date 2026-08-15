@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -272,6 +272,8 @@ struct DshModelDetail {
     id: String,
     name: Option<String>,
     context_window: Option<u32>,
+    #[serde(default, rename = "reasoningEfforts")]
+    reasoning_efforts: Option<serde_yaml::Value>,
 }
 
 impl DshModelEntry {
@@ -294,6 +296,13 @@ impl DshModelEntry {
                     .unwrap_or(id);
                 Some((id, name, detail.context_window))
             }
+        }
+    }
+
+    fn reasoning_efforts(&self) -> Option<&serde_yaml::Value> {
+        match self {
+            DshModelEntry::Id(_) => None,
+            DshModelEntry::Detail(detail) => detail.reasoning_efforts.as_ref(),
         }
     }
 }
@@ -397,11 +406,92 @@ fn read_dsh_settings_models() -> Result<ProbeModelsOutput, String> {
     parse_dsh_settings_models(&text)
 }
 
+const DSH_PI_EFFORT_ORDER: &[&str] = &[
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+fn dsh_effort_option(id: &str) -> RuntimeModelOption {
+    RuntimeModelOption {
+        id: id.to_string(),
+        label: match id {
+            "default" => "Default",
+            "off" => "Off",
+            "minimal" => "Minimal",
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "xhigh" => "XHigh",
+            "max" => "Max",
+            other => other,
+        }
+        .to_string(),
+        context_window_tokens: None,
+    }
+}
+
+fn dsh_official_reasoning_options() -> Vec<RuntimeModelOption> {
+    ["default", "off", "high", "max"]
+        .into_iter()
+        .map(dsh_effort_option)
+        .collect()
+}
+
+fn dsh_reasoning_options_from_keys<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Vec<RuntimeModelOption> {
+    let set: HashSet<&str> = keys
+        .into_iter()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .collect();
+    let mut options = vec![dsh_effort_option("default")];
+    options.extend(
+        DSH_PI_EFFORT_ORDER
+            .iter()
+            .copied()
+            .filter(|id| set.contains(id))
+            .map(dsh_effort_option),
+    );
+    if options.len() == 1 {
+        Vec::new()
+    } else {
+        options
+    }
+}
+
+fn dsh_reasoning_options_from_yaml(
+    value: Option<&serde_yaml::Value>,
+) -> Option<Vec<RuntimeModelOption>> {
+    match value {
+        None => None,
+        Some(serde_yaml::Value::Bool(false)) => Some(Vec::new()),
+        Some(serde_yaml::Value::Mapping(map)) => {
+            let keys: Vec<&str> = map.keys().filter_map(serde_yaml::Value::as_str).collect();
+            Some(dsh_reasoning_options_from_keys(keys))
+        }
+        _ => Some(Vec::new()),
+    }
+}
+
+fn dsh_reasoning_options_from_json(
+    value: Option<&serde_json::Value>,
+) -> Option<Vec<RuntimeModelOption>> {
+    match value {
+        None => None,
+        Some(serde_json::Value::Bool(false)) => Some(Vec::new()),
+        Some(serde_json::Value::Object(map)) => {
+            Some(dsh_reasoning_options_from_keys(map.keys().map(String::as_str)))
+        }
+        _ => Some(Vec::new()),
+    }
+}
+
 fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
     let settings: DshSettings =
         serde_yaml::from_str(text).map_err(|e| format!("解析 dsh settings.yaml 失败：{e}"))?;
     let mut models = vec![default_model_option()];
     let mut seen = std::collections::HashSet::from(["default".to_string()]);
+    let mut reasoning_by_model = HashMap::new();
 
     let deepseek_defaults = [
         ("deepseek-v4-flash", "DeepSeek-V4-Flash", Some(1_000_000)),
@@ -416,12 +506,14 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
             for entry in entries {
                 if let Some((id, name, window)) = entry.parts() {
                     push_dsh_model(&mut models, &mut seen, id, name, window);
+                    reasoning_by_model.insert(id.to_string(), dsh_official_reasoning_options());
                 }
             }
         }
         None => {
             for (id, name, window) in deepseek_defaults {
                 push_dsh_model(&mut models, &mut seen, id, name, window);
+                reasoning_by_model.insert(id.to_string(), dsh_official_reasoning_options());
             }
         }
     }
@@ -443,6 +535,11 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
                 let wire_id = format!("{provider}:{id}");
                 let label = format!("{name} ({provider_label})");
                 push_dsh_model(&mut models, &mut seen, &wire_id, &label, window);
+                reasoning_by_model.insert(
+                    wire_id,
+                    dsh_reasoning_options_from_yaml(entry.reasoning_efforts())
+                        .unwrap_or_default(),
+                );
             }
         }
     }
@@ -473,7 +570,7 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
         });
 
     if let Some(provider) = crate::external_agents::overrides::active_provider("dsh") {
-        merge_kivio_dsh_provider(&mut models, &mut seen, &provider)?;
+        merge_kivio_dsh_provider(&mut models, &mut seen, &mut reasoning_by_model, &provider)?;
         let route = provider.native_provider_id.trim();
         let model = provider.default_model.trim();
         if !route.is_empty() && !model.is_empty() {
@@ -500,7 +597,7 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
         current_model,
         current_reasoning,
         Vec::new(),
-        HashMap::new(),
+        reasoning_by_model,
     ))
 }
 
@@ -524,6 +621,7 @@ fn push_dsh_model(
 fn merge_kivio_dsh_provider(
     models: &mut Vec<RuntimeModelOption>,
     seen: &mut std::collections::HashSet<String>,
+    reasoning_by_model: &mut HashMap<String, Vec<RuntimeModelOption>>,
     provider: &crate::settings::ExternalCliProvider,
 ) -> Result<(), String> {
     let route = provider.native_provider_id.trim();
@@ -564,6 +662,11 @@ fn merge_kivio_dsh_provider(
         let wire_id = format!("{route}:{id}");
         let label = format!("{name} ({display_name})");
         push_dsh_model(models, seen, &wire_id, &label, window);
+        if let Some(options) = dsh_reasoning_options_from_json(entry.get("reasoningEfforts")) {
+            reasoning_by_model.insert(wire_id, options);
+        } else {
+            reasoning_by_model.entry(wire_id).or_default();
+        }
     }
     Ok(())
 }
@@ -1637,7 +1740,8 @@ llm-pi-ai:
                 "models": [{
                     "id": "gpt-test",
                     "name": "GPT Test",
-                    "contextWindow": 256000
+                    "contextWindow": 256000,
+                    "reasoningEfforts": { "off": null, "low": "low", "high": "high" }
                 }]
             })
             .to_string(),
@@ -1645,10 +1749,81 @@ llm-pi-ai:
         };
         let mut models = vec![default_model_option()];
         let mut seen = std::collections::HashSet::from(["default".to_string()]);
-        merge_kivio_dsh_provider(&mut models, &mut seen, &provider).unwrap();
+        let mut reasoning_by_model = HashMap::new();
+        merge_kivio_dsh_provider(&mut models, &mut seen, &mut reasoning_by_model, &provider)
+            .unwrap();
         assert_eq!(models[1].id, "relay-one:gpt-test");
         assert_eq!(models[1].label, "GPT Test (Relay One)");
         assert_eq!(models[1].context_window_tokens, Some(256_000));
+        assert_eq!(
+            reasoning_by_model
+                .get("relay-one:gpt-test")
+                .map(|items| items
+                    .iter()
+                    .map(|item| item.id.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["default", "off", "low", "high"])
+        );
+    }
+
+    #[test]
+    fn dsh_settings_expose_per_model_reasoning_efforts() {
+        let result = parse_dsh_settings_models(
+            r#"
+llm-pi-ai:
+  providers:
+    gpt:
+      displayName: gpt
+      models:
+        - id: gpt-5.6-sol
+          name: gpt-5.6-sol
+          reasoningEfforts:
+            off:
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+        - id: gpt-image-2
+          name: gpt-image-2
+          reasoningEfforts: false
+        - id: plain
+          name: plain
+"#,
+        )
+        .expect("parse dsh reasoning");
+        let sol = result
+            .reasoning_by_model
+            .get("gpt:gpt-5.6-sol")
+            .expect("sol efforts");
+        assert_eq!(
+            sol.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["default", "off", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            result
+                .reasoning_by_model
+                .get("gpt:gpt-image-2")
+                .map(Vec::is_empty),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .reasoning_by_model
+                .get("gpt:plain")
+                .map(Vec::is_empty),
+            Some(true)
+        );
+        assert_eq!(
+            result
+                .reasoning_by_model
+                .get("deepseek-v4-flash")
+                .map(|items| items
+                    .iter()
+                    .map(|item| item.id.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["default", "off", "high", "max"])
+        );
     }
 
     #[test]

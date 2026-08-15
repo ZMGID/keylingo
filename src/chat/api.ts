@@ -96,6 +96,23 @@ export interface DshOfficialCredential {
   writable: boolean
 }
 
+export interface DshNativeProviderModel {
+  id: string
+  name: string
+}
+
+/** 用户点「修改」时才回读的 `settings.yaml` 第三方供应商，含凭据文件里的密钥。 */
+export interface DshNativeProviderDetail {
+  id: string
+  name: string
+  baseUrl: string
+  api: string
+  apiKey: string
+  apiKeyEnv: string
+  models: DshNativeProviderModel[]
+  defaultModel: string
+}
+
 /** `chat_external_cli_install_info` 的返回。 */
 export interface ExternalCliInstallInfo {
   agentId: string
@@ -1846,6 +1863,15 @@ export const chatApi = {
 
   async dshOfficialCredentialSave(apiKey: string): Promise<DshOfficialCredential> {
     return await invoke<DshOfficialCredential>('chat_dsh_official_credential_save', { apiKey })
+  },
+
+  async dshNativeProviderGet(id: string): Promise<DshNativeProviderDetail> {
+    return await invoke<DshNativeProviderDetail>('chat_dsh_native_provider_get', { id })
+  },
+
+  async dshNativeProviderDelete(id: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_dsh_native_provider_delete', { id })
   },
 
   /**

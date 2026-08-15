@@ -13,6 +13,12 @@
 //!   id / name / disabled；失败则读安装包里的 `dsh-base` / `dsh-agent-presets`
 //!   patch + Kivio 自己的 `cordis.patch.yml`。没有 live host，fiber 相位一律未知；
 //!   启用态以 compose 后的 `disabled` 为准。
+//! - **settings.yaml 里的第三方供应商**：设置页「所有供应商」会列出
+//!   `llm-pi-ai.providers` 摘要。用户点删除时才从这份文件移除该条——这不是把
+//!   Kivio 管理的供应商同步进 web，只处理页面上已经显示的那一行。
+//! - **模型图片 / 推理档位**：官方 web 只认 `settings.yaml` 里的 `input` /
+//!   `defaultInput` / `reasoningEfforts`。Kivio 保存供应商时，只把已存在路由上的
+//!   这几项写回去，不新建供应商、不写密钥。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,12 +35,15 @@ use crate::external_agents::dsh_profile::{profile_dir, KIVIO_PROFILE};
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::spawn::{agent_cli_command, resolve_binary};
 use crate::proc::NoConsoleWindow;
+use crate::settings::ExternalCliProvider;
 
 const SHELL_NS: &str = "shell";
 const AGENT_LOOP_NS: &str = "agent-loop";
 const WEB_SEARCH_NS: &str = "web-search-deepseek";
+const LLM_PI_AI_NS: &str = "llm-pi-ai";
 const CREDENTIALS_FILENAME: &str = ".credentials.yaml";
 const DEFAULT_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+const DSH_OFFICIAL_PROVIDER_ID: &str = "deepseek-official";
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 64_000;
@@ -125,6 +134,28 @@ pub struct DshPluginEntry {
 pub struct DshOfficialCredential {
     pub configured: bool,
     pub writable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DshNativeProviderModel {
+    pub id: String,
+    pub name: String,
+}
+
+/// `settings.yaml` 里一条 `llm-pi-ai` 供应商的编辑稿。探测摘要不带密钥；
+/// 这个命令只在用户点「修改」时才回读 `.credentials.yaml`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DshNativeProviderDetail {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub api: String,
+    pub api_key: String,
+    pub api_key_env: String,
+    pub models: Vec<DshNativeProviderModel>,
+    pub default_model: String,
 }
 
 fn dsh_home() -> Option<PathBuf> {
@@ -680,6 +711,406 @@ pub fn chat_dsh_open_settings_file(app: AppHandle) -> Result<(), String> {
     open_settings_file(&app, &settings_path()?)
 }
 
+fn reject_managed_official_provider(id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("供应商 id 不能为空".to_string());
+    }
+    if id == DSH_OFFICIAL_PROVIDER_ID {
+        return Err("官方 DeepSeek 不能按第三方供应商编辑".to_string());
+    }
+    Ok(())
+}
+
+fn credential_value(path: &Path, api_key_env: &str) -> Option<String> {
+    if api_key_env.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&text).ok()?;
+    mapping_string(value.as_mapping()?, api_key_env)
+}
+
+fn parse_native_models(value: Option<&serde_yaml::Value>) -> Vec<DshNativeProviderModel> {
+    let Some(serde_yaml::Value::Sequence(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            serde_yaml::Value::String(id) => {
+                let id = id.trim();
+                (!id.is_empty()).then(|| DshNativeProviderModel {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                })
+            }
+            serde_yaml::Value::Mapping(map) => {
+                let id = mapping_string(map, "id")?;
+                let name = mapping_string(map, "name").unwrap_or_else(|| id.clone());
+                Some(DshNativeProviderModel { id, name })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn selected_default_model(root: &Mapping) -> (Option<String>, Option<String>) {
+    for key in ["agent-default-model", "api-gateway"] {
+        if let Some(map) = namespace_map(root, key) {
+            return (mapping_string(map, "provider"), mapping_string(map, "model"));
+        }
+    }
+    (None, None)
+}
+
+fn native_provider_detail_at(
+    settings_path: &Path,
+    credentials_path: &Path,
+    id: &str,
+) -> Result<DshNativeProviderDetail, String> {
+    reject_managed_official_provider(id)?;
+    let root = load_root_mapping(settings_path)?;
+    let provider = namespace_map(&root, LLM_PI_AI_NS)
+        .and_then(|pi| namespace_map(pi, "providers"))
+        .and_then(|providers| {
+            providers
+                .get(serde_yaml::Value::String(id.to_string()))
+                .and_then(serde_yaml::Value::as_mapping)
+        })
+        .ok_or_else(|| format!("未找到供应商 {id}"))?;
+    let name = mapping_string(provider, "displayName").unwrap_or_else(|| id.to_string());
+    let base_url = mapping_string(provider, "baseURL").unwrap_or_default();
+    let api = mapping_string(provider, "api").unwrap_or_default();
+    let api_key_env = mapping_string(provider, "apiKeyEnv").unwrap_or_default();
+    let models = parse_native_models(provider.get(serde_yaml::Value::String("models".to_string())));
+    let (default_provider, default_model) = selected_default_model(&root);
+    let default_model = if default_provider.as_deref() == Some(id) {
+        default_model
+            .filter(|model| models.iter().any(|entry| entry.id == *model))
+            .or_else(|| models.first().map(|model| model.id.clone()))
+            .unwrap_or_default()
+    } else {
+        models
+            .first()
+            .map(|model| model.id.clone())
+            .unwrap_or_default()
+    };
+    Ok(DshNativeProviderDetail {
+        id: id.to_string(),
+        name,
+        base_url,
+        api,
+        api_key: credential_value(credentials_path, &api_key_env).unwrap_or_default(),
+        api_key_env,
+        models,
+        default_model,
+    })
+}
+
+fn clear_default_if_matches(root: &mut Mapping, id: &str) {
+    for key in ["agent-default-model", "api-gateway"] {
+        let yaml_key = serde_yaml::Value::String(key.to_string());
+        let matches = root
+            .get(&yaml_key)
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|map| mapping_string(map, "provider"))
+            .as_deref()
+            == Some(id);
+        if matches {
+            root.remove(&yaml_key);
+        }
+    }
+}
+
+fn delete_native_provider_in(root: &mut Mapping, id: &str) {
+    let pi_key = serde_yaml::Value::String(LLM_PI_AI_NS.to_string());
+    let Some(serde_yaml::Value::Mapping(mut pi)) = root.remove(&pi_key) else {
+        return;
+    };
+    let providers_key = serde_yaml::Value::String("providers".to_string());
+    if let Some(serde_yaml::Value::Mapping(mut providers)) = pi.remove(&providers_key) {
+        providers.remove(&serde_yaml::Value::String(id.to_string()));
+        if !providers.is_empty() {
+            pi.insert(providers_key, serde_yaml::Value::Mapping(providers));
+        }
+    }
+    if !pi.is_empty() {
+        root.insert(pi_key, serde_yaml::Value::Mapping(pi));
+    }
+    clear_default_if_matches(root, id);
+}
+
+fn delete_native_provider_at(settings_path: &Path, id: &str) -> Result<(), String> {
+    reject_managed_official_provider(id)?;
+    let mut root = load_root_mapping(settings_path)?;
+    delete_native_provider_in(&mut root, id);
+    persist_settings(settings_path, root)
+}
+
+fn modality_list(has_image: bool) -> serde_yaml::Value {
+    let mut items = vec![serde_yaml::Value::String("text".to_string())];
+    if has_image {
+        items.push(serde_yaml::Value::String("image".to_string()));
+    }
+    serde_yaml::Value::Sequence(items)
+}
+
+fn modality_matches(value: Option<&serde_yaml::Value>, has_image: bool) -> bool {
+    let Some(serde_yaml::Value::Sequence(items)) = value else {
+        return false;
+    };
+    let has_text = items.iter().any(|item| item.as_str() == Some("text"));
+    let image = items.iter().any(|item| item.as_str() == Some("image"));
+    has_text && image == has_image
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReasoningDecl {
+    Disabled,
+    Levels(BTreeMap<String, Option<String>>),
+}
+
+#[derive(Debug, Clone)]
+struct ModelCaps {
+    has_image: bool,
+    reasoning: Option<ReasoningDecl>,
+}
+
+fn parse_reasoning_decl(value: &serde_json::Value) -> Option<ReasoningDecl> {
+    if value.as_bool() == Some(false) {
+        return Some(ReasoningDecl::Disabled);
+    }
+    let object = value.as_object()?;
+    if object.is_empty() {
+        return None;
+    }
+    let mut levels = BTreeMap::new();
+    for (key, item) in object {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let wire = item
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        levels.insert(key.to_string(), wire);
+    }
+    Some(ReasoningDecl::Levels(levels))
+}
+
+fn reasoning_yaml(decl: &ReasoningDecl) -> serde_yaml::Value {
+    match decl {
+        ReasoningDecl::Disabled => serde_yaml::Value::Bool(false),
+        ReasoningDecl::Levels(levels) => {
+            let mut map = Mapping::new();
+            for (key, wire) in levels {
+                map.insert(
+                    serde_yaml::Value::String(key.clone()),
+                    match wire {
+                        Some(value) => serde_yaml::Value::String(value.clone()),
+                        None => serde_yaml::Value::Null,
+                    },
+                );
+            }
+            serde_yaml::Value::Mapping(map)
+        }
+    }
+}
+
+fn reasoning_matches(existing: Option<&serde_yaml::Value>, decl: &ReasoningDecl) -> bool {
+    match (existing, decl) {
+        (Some(serde_yaml::Value::Bool(false)), ReasoningDecl::Disabled) => true,
+        (Some(serde_yaml::Value::Mapping(map)), ReasoningDecl::Levels(levels)) => {
+            if map.len() != levels.len() {
+                return false;
+            }
+            levels.iter().all(|(key, wire)| {
+                match map.get(serde_yaml::Value::String(key.clone())) {
+                    Some(serde_yaml::Value::Null) => wire.is_none(),
+                    Some(serde_yaml::Value::String(value)) => wire.as_deref() == Some(value.as_str()),
+                    _ => false,
+                }
+            })
+        }
+        _ => false,
+    }
+}
+
+fn model_caps_from_config_json(config_json: &str) -> BTreeMap<String, ModelCaps> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config_json) else {
+        return BTreeMap::new();
+    };
+    let Some(models) = value.get("models").and_then(serde_json::Value::as_array) else {
+        return BTreeMap::new();
+    };
+    let mut caps = BTreeMap::new();
+    for model in models {
+        let Some(id) = model
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let has_image = model
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("image")));
+        let reasoning = model.get("reasoningEfforts").and_then(parse_reasoning_decl);
+        caps.insert(id.to_string(), ModelCaps { has_image, reasoning });
+    }
+    caps
+}
+
+fn write_model_caps(map: &mut Mapping, caps: &ModelCaps) -> bool {
+    let mut changed = false;
+    if !modality_matches(
+        map.get(serde_yaml::Value::String("input".to_string())),
+        caps.has_image,
+    ) {
+        map.insert(
+            serde_yaml::Value::String("input".to_string()),
+            modality_list(caps.has_image),
+        );
+        changed = true;
+    }
+    if let Some(reasoning) = &caps.reasoning {
+        if !reasoning_matches(
+            map.get(serde_yaml::Value::String("reasoningEfforts".to_string())),
+            reasoning,
+        ) {
+            map.insert(
+                serde_yaml::Value::String("reasoningEfforts".to_string()),
+                reasoning_yaml(reasoning),
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn apply_model_caps(models: &mut serde_yaml::Value, caps: &BTreeMap<String, ModelCaps>) -> bool {
+    let Some(items) = models.as_sequence_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for item in items.iter_mut() {
+        match item {
+            serde_yaml::Value::String(id) => {
+                let id = id.trim();
+                let Some(model) = caps.get(id) else {
+                    continue;
+                };
+                let mut map = Mapping::new();
+                map.insert(
+                    serde_yaml::Value::String("id".to_string()),
+                    serde_yaml::Value::String(id.to_string()),
+                );
+                write_model_caps(&mut map, model);
+                *item = serde_yaml::Value::Mapping(map);
+                changed = true;
+            }
+            serde_yaml::Value::Mapping(map) => {
+                let Some(id) = mapping_string(map, "id") else {
+                    continue;
+                };
+                let Some(model) = caps.get(&id) else {
+                    continue;
+                };
+                changed |= write_model_caps(map, model);
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn apply_provider_caps(root: &mut Mapping, route: &str, caps: &BTreeMap<String, ModelCaps>) -> bool {
+    let Some(pi) = root
+        .get_mut(serde_yaml::Value::String(LLM_PI_AI_NS.to_string()))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return false;
+    };
+    let Some(providers) = pi
+        .get_mut(serde_yaml::Value::String("providers".to_string()))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return false;
+    };
+    let Some(provider) = providers
+        .get_mut(serde_yaml::Value::String(route.to_string()))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    if let Some(models) = provider.get_mut(serde_yaml::Value::String("models".to_string())) {
+        changed |= apply_model_caps(models, caps);
+    }
+    let default_has_image = caps.values().any(|model| model.has_image);
+    if !modality_matches(
+        provider.get(serde_yaml::Value::String("defaultInput".to_string())),
+        default_has_image,
+    ) {
+        provider.insert(
+            serde_yaml::Value::String("defaultInput".to_string()),
+            modality_list(default_has_image),
+        );
+        changed = true;
+    }
+    changed
+}
+
+fn sync_kivio_model_capabilities_at(
+    settings_path: &Path,
+    providers: &[ExternalCliProvider],
+) -> Result<(), String> {
+    let mut root = load_root_mapping(settings_path)?;
+    let mut changed = false;
+    for provider in providers {
+        let route = provider.native_provider_id.trim();
+        if route.is_empty() || route == DSH_OFFICIAL_PROVIDER_ID {
+            continue;
+        }
+        let caps = model_caps_from_config_json(&provider.config_json);
+        if caps.is_empty() {
+            continue;
+        }
+        changed |= apply_provider_caps(&mut root, route, &caps);
+    }
+    if changed {
+        persist_settings(settings_path, root)?;
+    }
+    Ok(())
+}
+
+/// 把 Kivio 已保存的模型 `input` / `reasoningEfforts` 写回已存在的 `settings.yaml` 路由。
+/// 不新建供应商，也不写密钥；官方 web 的贴图和 effort 选择只认这些字段。
+pub(crate) fn sync_kivio_model_capabilities(providers: &[ExternalCliProvider]) -> Result<(), String> {
+    let Ok(path) = settings_path() else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    sync_kivio_model_capabilities_at(&path, providers)
+}
+
+#[tauri::command]
+pub fn chat_dsh_native_provider_get(id: String) -> Result<DshNativeProviderDetail, String> {
+    native_provider_detail_at(&settings_path()?, &credentials_path()?, id.trim())
+}
+
+#[tauri::command]
+pub fn chat_dsh_native_provider_delete(id: String) -> Result<(), String> {
+    delete_native_provider_at(&settings_path()?, id.trim())
+}
+
 #[tauri::command]
 pub fn chat_dsh_official_credential_status() -> Result<DshOfficialCredential, String> {
     let (configured, writable) = credential_status(DEFAULT_API_KEY_ENV);
@@ -906,6 +1337,162 @@ node: warning this is not yaml
         assert!(text.contains("sk-test"));
         assert!(text.contains("OTHER_KEY"));
         assert!(credentials_contain(&path, DEFAULT_API_KEY_ENV));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_provider_detail_reads_models_and_key_without_touching_neighbors() {
+        let dir = std::env::temp_dir().join(format!("kivio-dsh-native-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.yaml");
+        let credentials = dir.join(".credentials.yaml");
+        std::fs::write(
+            &settings,
+            r#"
+ui-onboarding:
+  welcomeNoticeVersion: keep-me
+agent-default-model:
+  provider: gpt
+  model: gpt-5.6-sol
+llm-pi-ai:
+  providers:
+    gpt:
+      displayName: gpt
+      apiKeyEnv: GPT_API_KEY
+      api: openai-responses
+      baseURL: https://relay.example/v1
+      models:
+        - id: gpt-5.6-luna
+          name: gpt-5.6-luna
+        - id: gpt-5.6-sol
+          name: gpt-5.6-sol
+        - id: ""
+        - {}
+"#,
+        )
+        .unwrap();
+        std::fs::write(&credentials, "GPT_API_KEY: sk-test\nOTHER_KEY: keep-me\n").unwrap();
+
+        let detail = native_provider_detail_at(&settings, &credentials, "gpt").unwrap();
+        assert_eq!(detail.id, "gpt");
+        assert_eq!(detail.name, "gpt");
+        assert_eq!(detail.base_url, "https://relay.example/v1");
+        assert_eq!(detail.api, "openai-responses");
+        assert_eq!(detail.api_key, "sk-test");
+        assert_eq!(detail.api_key_env, "GPT_API_KEY");
+        assert_eq!(detail.default_model, "gpt-5.6-sol");
+        assert_eq!(
+            detail.models,
+            vec![
+                DshNativeProviderModel {
+                    id: "gpt-5.6-luna".into(),
+                    name: "gpt-5.6-luna".into(),
+                },
+                DshNativeProviderModel {
+                    id: "gpt-5.6-sol".into(),
+                    name: "gpt-5.6-sol".into(),
+                },
+            ]
+        );
+        assert!(native_provider_detail_at(&settings, &credentials, DSH_OFFICIAL_PROVIDER_ID).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_provider_delete_removes_route_and_stale_default() {
+        let dir = std::env::temp_dir().join(format!("kivio-dsh-del-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.yaml");
+        std::fs::write(
+            &settings,
+            r#"
+ui-onboarding:
+  welcomeNoticeVersion: keep-me
+agent-default-model:
+  provider: gpt
+  model: gpt-5.6-sol
+llm-pi-ai:
+  providers:
+    gpt:
+      displayName: gpt
+      api: openai-responses
+    keep:
+      displayName: Keep
+"#,
+        )
+        .unwrap();
+
+        delete_native_provider_at(&settings, "gpt").unwrap();
+        let text = std::fs::read_to_string(&settings).unwrap();
+        assert!(text.contains("welcomeNoticeVersion"));
+        assert!(text.contains("Keep"));
+        assert!(!text.contains("displayName: gpt"));
+        assert!(!text.contains("agent-default-model"));
+        assert!(delete_native_provider_at(&settings, DSH_OFFICIAL_PROVIDER_ID).is_err());
+        delete_native_provider_at(&settings, "missing").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kivio_model_caps_write_existing_settings_route_only() {
+        let dir = std::env::temp_dir().join(format!("kivio-dsh-caps-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.yaml");
+        std::fs::write(
+            &settings,
+            r#"
+ui-onboarding:
+  welcomeNoticeVersion: keep-me
+llm-pi-ai:
+  providers:
+    gpt:
+      displayName: gpt
+      api: openai-responses
+      models:
+        - id: gpt-5.6-sol
+          name: gpt-5.6-sol
+        - id: gpt-image-2
+          name: gpt-image-2
+    keep:
+      displayName: Keep
+"#,
+        )
+        .unwrap();
+
+        sync_kivio_model_capabilities_at(
+            &settings,
+            &[ExternalCliProvider {
+                id: "p-dsh-gpt".into(),
+                name: "gpt".into(),
+                native_provider_id: "gpt".into(),
+                config_json: r#"{
+                    "models": [
+                        {
+                            "id":"gpt-5.6-sol",
+                            "input":["text","image"],
+                            "reasoningEfforts":{"off":null,"low":"low","high":"high","xhigh":"xhigh","max":"max"}
+                        },
+                        {
+                            "id":"gpt-image-2",
+                            "input":["text","image"],
+                            "reasoningEfforts":false
+                        }
+                    ]
+                }"#
+                .into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&settings).unwrap();
+        assert!(text.contains("welcomeNoticeVersion"));
+        assert!(text.contains("Keep"));
+        assert!(text.contains("defaultInput"));
+        assert!(text.contains("gpt-5.6-sol"));
+        assert!(text.contains("reasoningEfforts"));
+        assert!(text.contains("xhigh"));
+        assert!(text.matches("image").count() >= 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

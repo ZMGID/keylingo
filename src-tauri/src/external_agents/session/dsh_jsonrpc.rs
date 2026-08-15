@@ -52,6 +52,8 @@ use crate::external_agents::types::UnifiedAgentEvent;
 use crate::proc::NoConsoleWindow;
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(45);
+const ADAPTER_RETRY_ATTEMPTS: u32 = 20;
+const ADAPTER_RETRY_DELAY: Duration = Duration::from_millis(250);
 const READ_POLL: Duration = Duration::from_millis(200);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -237,22 +239,51 @@ impl DshJsonRpcSession {
         };
         let mut reader = BufReader::new(stdout).lines();
 
+        let mut next_rpc_id: u64 = 1;
         let handshake = async {
-            write_rpc(
-                &mut stdin,
-                1,
-                "initialize",
-                json!({
-                    "cwd": cwd.to_string_lossy(),
-                    "provider": route.provider,
-                    "model": route.model,
-                }),
-            )
-            .await
-            .map_err(|e| format!("dsh initialize: {e}"))?;
-            let result = read_until_response(&mut reader, 1, INITIALIZE_TIMEOUT)
-                .await
-                .map_err(|e| format!("dsh initialize: {e}"))?;
+            let init_params = json!({
+                "cwd": cwd.to_string_lossy(),
+                "provider": route.provider,
+                "model": route.model,
+            });
+            // settings.yaml 里的 pi-ai 路由是异步挂上的。第一次 initialize 常会
+            // 立刻回 `no adapter registered`——这是失败，不是成功。按这条错误重试
+            // initialize；其它错误（超时、进程退出、真缺供应商）直接失败给用户。
+            let mut last_adapter_err = None;
+            let result = {
+                let mut initialized = None;
+                for attempt in 0..ADAPTER_RETRY_ATTEMPTS {
+                    let id = next_rpc_id;
+                    next_rpc_id += 1;
+                    write_rpc(&mut stdin, id, "initialize", init_params.clone())
+                        .await
+                        .map_err(|e| format!("dsh initialize: {e}"))?;
+                    match read_until_response(&mut reader, id, INITIALIZE_TIMEOUT).await {
+                        Ok(result) => {
+                            initialized = Some(result);
+                            break;
+                        }
+                        Err(err) if is_adapter_not_registered(&err) => {
+                            last_adapter_err = Some(err);
+                            if attempt + 1 < ADAPTER_RETRY_ATTEMPTS {
+                                tokio::time::sleep(ADAPTER_RETRY_DELAY).await;
+                            }
+                        }
+                        Err(err) => return Err(format!("dsh initialize: {err}")),
+                    }
+                }
+                match initialized {
+                    Some(result) => result,
+                    None => {
+                        return Err(format!(
+                            "dsh initialize: {}",
+                            last_adapter_err.unwrap_or_else(|| {
+                                "no adapter registered for the selected provider".to_string()
+                            })
+                        ));
+                    }
+                }
+            };
             let name = result
                 .get("serverInfo")
                 .and_then(|v| v.get("name"))
@@ -274,15 +305,17 @@ impl DshJsonRpcSession {
                 ));
             }
 
+            let open_id = next_rpc_id;
+            next_rpc_id += 1;
             write_rpc(
                 &mut stdin,
-                2,
+                open_id,
                 "session/open",
                 json!({ "sessionId": session_id, "resume": wants_resume }),
             )
             .await
             .map_err(|e| format!("dsh session/open: {e}"))?;
-            let opened = read_until_response(&mut reader, 2, INITIALIZE_TIMEOUT)
+            let opened = read_until_response(&mut reader, open_id, INITIALIZE_TIMEOUT)
                 .await
                 .map_err(|e| format!("dsh session/open: {e}"))?;
             let resumed = opened
@@ -306,7 +339,7 @@ impl DshJsonRpcSession {
                 stderr_tail,
                 session_id,
                 resumed,
-                next_id: 3,
+                next_id: next_rpc_id,
                 route,
                 context_window: None,
                 map_state: MapSessionState::default(),
@@ -1078,6 +1111,14 @@ pub fn is_missing_session_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("dsh session/open:")
         && (lower.contains("session \"") && lower.contains("\" not found"))
+}
+
+/// Official SDK throws this when initialize names a pi-ai route that settings.yaml
+/// has not registered yet. Transient: retry initialize. Permanent after retries:
+/// the route is missing and the user should see this error.
+fn is_adapter_not_registered(err: &str) -> bool {
+    err.to_ascii_lowercase()
+        .contains("no adapter registered")
 }
 
 fn resolve_model_route_for_turn(selected: Option<&str>) -> Result<ModelRoute, String> {
@@ -1945,6 +1986,19 @@ mod tests {
             "dsh session/open: persisted log checksum mismatch"
         ));
         assert!(!is_missing_session_error("dsh initialize: auth failed"));
+    }
+
+    #[test]
+    fn retries_only_the_official_missing_adapter_error() {
+        assert!(is_adapter_not_registered(
+            r#"no adapter registered for provider "gpt""#
+        ));
+        assert!(is_adapter_not_registered(
+            r#"dsh initialize: no adapter registered for provider "relay""#
+        ));
+        assert!(!is_adapter_not_registered("handshake timeout after 45s"));
+        assert!(!is_adapter_not_registered("dsh exited during handshake"));
+        assert!(!is_adapter_not_registered("missing credential"));
     }
 
     #[test]

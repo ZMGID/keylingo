@@ -66,12 +66,9 @@ const FALLBACK_MODELS: &[(&str, &str)] = &[
     ("deepseek-v4-pro", "DeepSeek-V4-Pro"),
 ];
 
-/// dsh 的推理档位：`off | high | max`（`llm-deepseek` 适配器自报，实测
-/// `resolveModelInfo` 返回 `efforts:[off,high,max], defaultEffort:high`）。
-///
-/// **注意它不是启动 flag，也不在 `initialize` 参数里** —— 唯一入口是 profile patch 里
-/// `llm-deepseek.reasoningEffort`。因此换档位要重写 patch + 换进程，由
-/// `session::dsh_jsonrpc::DshLaunchExtras` 折进启动指纹。
+/// 官方 DeepSeek 路由的兜底档位：`off | high | max`。第三方 `llm-pi-ai` 模型
+/// 的可选档位由 `detection::parse_dsh_settings_models` 按 `reasoningEfforts` 填
+/// `reasoning_by_model`；选中后写进 profile 的 `llm-pi-ai.providers.<route>.reasoning`。
 const REASONING: &[(&str, &str)] = &[
     ("default", "Default"),
     ("off", "Off"),

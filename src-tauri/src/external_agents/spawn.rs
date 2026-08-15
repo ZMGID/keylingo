@@ -132,14 +132,26 @@ pub fn spawn_stderr_tail(stderr: Option<ChildStderr>) -> tokio::task::JoinHandle
 
 const STDERR_CAP_CHARS: usize = 8192;
 
-/// Kill the child (so its stderr hits EOF) and join the drain task to recover the stderr tail.
-/// Used by persistent sessions on a handshake/connect error path (N1 + R2).
+/// How long to wait for stderr EOF after killing the child. `start_kill()` only
+/// terminates the direct child; on Windows `dsh.cmd` → `node` often leaves the
+/// grandchild holding the pipe, so a bare join blocks forever and wedgies the
+/// dsh profile boot lock (every later dsh turn then spins with no error).
+const STDERR_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Kill the child tree (so its stderr hits EOF) and join the drain task to
+/// recover the stderr tail. Used by persistent sessions on a handshake/connect
+/// error path (N1 + R2). Always returns — a stuck grandchild must not block
+/// the caller.
 pub async fn join_stderr_tail(
     child: &mut Child,
     stderr_tail: tokio::task::JoinHandle<String>,
 ) -> String {
-    let _ = child.start_kill();
-    stderr_tail.await.unwrap_or_default()
+    kill_agent_process_tree(child);
+    match timeout(STDERR_JOIN_TIMEOUT, stderr_tail).await {
+        Ok(Ok(tail)) => tail,
+        Ok(Err(_)) => String::new(),
+        Err(_) => String::new(),
+    }
 }
 
 /// Append a drained stderr tail to an error message when non-empty (for R2 diagnostics).
@@ -648,6 +660,35 @@ mod tests {
         assert_eq!(
             first_version_line(&long).map(|v| v.chars().count()),
             Some(VERSION_LINE_CAP)
+        );
+    }
+
+    #[tokio::test]
+    async fn join_stderr_tail_returns_after_killing_a_live_child() {
+        use crate::proc::NoConsoleWindow;
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("ping");
+            command.args(["-t", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .no_console_window()
+            .spawn()
+            .expect("spawn long-lived child");
+        let tail = spawn_stderr_tail(child.stderr.take());
+        let started = std::time::Instant::now();
+        let _ = join_stderr_tail(&mut child, tail).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "join_stderr_tail blocked for {:?}",
+            started.elapsed()
         );
     }
 }

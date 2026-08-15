@@ -28,6 +28,7 @@ import type { NativeProviderSummary } from '../chat/types'
 import { Input, Toggle } from './components'
 import { i18n, type Lang } from './i18n'
 import { Button, IconButton } from '../components/Button'
+import { dshNativeDetailToProvider } from './cliNativeProviderConfigs'
 import { CliProviderModal } from './CliProviderModal'
 import { DshPluginsSettings } from './DshPluginsSettings'
 import { CcSwitchImportModal } from './CcSwitchImportModal'
@@ -562,6 +563,7 @@ function AgentDetail({
         nativeProviders={agent.nativeProviders ?? []}
         current={config.currentProvider ?? ''}
         onPatch={onPatch}
+        reloadAgents={reloadAgents}
       />
     </>
   )
@@ -669,11 +671,15 @@ function NativeProviderRow({
   provider,
   current,
   onUseCliConfig,
+  onEdit,
+  onDelete,
 }: {
   lang: Lang
   provider: NativeProviderSummary
   current: string
   onUseCliConfig: () => void
+  onEdit?: () => void
+  onDelete?: () => void
 }) {
   const t = i18n[lang]
   const official = provider.id === DSH_OFFICIAL_PROVIDER_ID
@@ -708,6 +714,16 @@ function NativeProviderRow({
                 ? t.externalAgentsDshOfficialProvider
                 : t.externalAgentsNativeProviderBadge}
           </span>
+        )}
+        {onEdit && (
+          <IconButton size="sm" label={t.externalAgentsProviderEdit} onClick={onEdit}>
+            <Pencil size={13} />
+          </IconButton>
+        )}
+        {onDelete && (
+          <IconButton size="sm" label={t.externalAgentsRemove} onClick={onDelete}>
+            <Trash2 size={13} />
+          </IconButton>
         )}
       </div>
     </div>
@@ -758,6 +774,7 @@ function ProviderSection({
   nativeProviders,
   current,
   onPatch,
+  reloadAgents,
 }: {
   lang: Lang
   agentId: string
@@ -766,25 +783,46 @@ function ProviderSection({
   nativeProviders: NonNullable<DetectedExternalAgent['nativeProviders']>
   current: string
   onPatch: (patch: Partial<ExternalCliAgentConfig>) => void
+  reloadAgents: (force?: boolean) => Promise<void>
 }) {
   const t = i18n[lang]
   const [editing, setEditing] = useState<ExternalCliProvider | null | undefined>(undefined)
   const [importing, setImporting] = useState(false)
-  const listedNatives = withOfficialDshProviders(agentId, nativeProviders)
+  const adoptedNativeIds = new Set(
+    providers
+      .map((provider) => provider.nativeProviderId?.trim())
+      .filter((id): id is string => Boolean(id)),
+  )
+  const listedNatives = withOfficialDshProviders(agentId, nativeProviders).filter(
+    (provider) => provider.id === DSH_OFFICIAL_PROVIDER_ID || !adoptedNativeIds.has(provider.id),
+  )
   const hideGenericLocal = agentId === 'dsh'
 
   const save = (provider: ExternalCliProvider) => {
     const exists = providers.some((p) => p.id === provider.id)
+    const adoptInUse = agentId === 'dsh'
+      && !current
+      && !exists
+      && Boolean(provider.nativeProviderId)
+      && nativeProviders.some((native) => native.id === provider.nativeProviderId && native.isDefault)
     onPatch({
       providers: exists
         ? providers.map((p) => (p.id === provider.id ? provider : p))
         : [...providers, provider],
+      ...(adoptInUse ? { currentProvider: provider.id } : {}),
     })
     setEditing(undefined)
   }
 
   const remove = (provider: ExternalCliProvider) => {
-    if (!window.confirm(t.externalAgentsProviderDeleteConfirm.replace('{name}', provider.name))) return
+    const deletesNativeFile = Boolean(
+      provider.nativeProviderId
+      && nativeProviders.some((native) => native.id === provider.nativeProviderId),
+    )
+    const confirmText = deletesNativeFile
+      ? t.externalAgentsDshNativeDeleteConfirm
+      : t.externalAgentsProviderDeleteConfirm
+    if (!window.confirm(confirmText.replace('{name}', provider.name))) return
     onPatch({
       providers: providers.filter((p) => p.id !== provider.id),
       ...(current === provider.id ? { currentProvider: '' } : {}),
@@ -795,6 +833,44 @@ function ProviderSection({
       provider.nativeProviderId,
       provider.name,
     )
+    if (agentId === 'dsh' && provider.nativeProviderId) {
+      void chatApi.dshNativeProviderDelete(provider.nativeProviderId)
+        .then(() => reloadAgents(true))
+        .catch(() => {})
+    }
+  }
+
+  const editNative = async (native: NativeProviderSummary) => {
+    try {
+      const detail = await chatApi.dshNativeProviderGet(native.id)
+      setEditing(dshNativeDetailToProvider(detail))
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const removeNative = async (native: NativeProviderSummary) => {
+    if (!window.confirm(t.externalAgentsDshNativeDeleteConfirm.replace('{name}', native.name))) return
+    try {
+      await chatApi.dshNativeProviderDelete(native.id)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+      return
+    }
+    const adopted = providers.find((provider) => provider.nativeProviderId === native.id)
+    if (adopted) {
+      onPatch({
+        providers: providers.filter((provider) => provider.id !== adopted.id),
+        ...(current === adopted.id ? { currentProvider: '' } : {}),
+      })
+      void chatApi.externalCliProviderCleanup(
+        agentId,
+        adopted.id,
+        adopted.nativeProviderId,
+        adopted.name,
+      )
+    }
+    await reloadAgents(true)
   }
 
   const importFromCcSwitch = (items: CcSwitchProvider[]) => {
@@ -869,6 +945,12 @@ function ProviderSection({
                 provider={provider}
                 current={current}
                 onUseCliConfig={() => onPatch({ currentProvider: '' })}
+                onEdit={provider.id === DSH_OFFICIAL_PROVIDER_ID
+                  ? undefined
+                  : () => void editNative(provider)}
+                onDelete={provider.id === DSH_OFFICIAL_PROVIDER_ID
+                  ? undefined
+                  : () => void removeNative(provider)}
               />
             ))}
             {providers.map((provider) => (

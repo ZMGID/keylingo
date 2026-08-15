@@ -4984,6 +4984,34 @@ input[type="password"]::-ms-clear {
   height: 28px;
   font-size: 11px;
 }
+.kv-native-model-caps {
+  margin: 8px 38px 2px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kv-native-model-caps > .kv-native-model-switches {
+  margin-top: 0;
+}
+.kv-native-model-efforts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.kv-native-model-efforts > span:first-child {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.kv-native-model-efforts .kv-seg {
+  display: flex;
+  flex-wrap: wrap;
+}
+.kv-native-model-efforts small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
 .kv-native-model-switches {
   display: flex;
   align-items: center;
@@ -5229,6 +5257,7 @@ input[type="password"]::-ms-clear {
     padding-top: 2px;
     overflow-x: auto;
   }
+  .kv-native-model-caps,
   .kv-native-model-advanced {
     margin: 9px 30px 0 32px;
   }

@@ -11,6 +11,7 @@ export type NativeCliModel = {
   toolCall?: boolean | null
   contextWindow: string
   maxTokens: string
+  thinkingLevels?: PiThinkingLevel[] | null
 }
 
 export type PiThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -59,6 +60,12 @@ export const PI_API_OPTIONS = [
   'openai-responses',
   'anthropic-messages',
   'google-generative-ai',
+] as const
+
+export const DSH_API_OPTIONS = [
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
 ] as const
 
 export const PI_THINKING_OPTIONS = [
@@ -113,7 +120,46 @@ export function emptyNativeModel(agentId: NativeCliAgentId, id = ''): NativeCliM
     toolCall: agentId === 'opencode' ? null : undefined,
     contextWindow: '',
     maxTokens: '',
+    thinkingLevels: null,
   }
+}
+
+export function sanitizeThinkingLevels(levels: readonly string[]): PiThinkingLevel[] {
+  return PI_THINKING_OPTIONS.filter((level) => levels.includes(level))
+}
+
+export function toggleThinkingLevel(
+  current: readonly PiThinkingLevel[],
+  level: PiThinkingLevel,
+): PiThinkingLevel[] {
+  const next = current.includes(level)
+    ? current.filter((item) => item !== level)
+    : sanitizeThinkingLevels([...current, level])
+  return next.length > 0 ? next : [level]
+}
+
+function sameThinkingLevels(
+  left: readonly PiThinkingLevel[],
+  right: readonly PiThinkingLevel[],
+): boolean {
+  return left.length === right.length && left.every((level, index) => level === right[index])
+}
+
+function parseReasoningEffortKeys(value: unknown): PiThinkingLevel[] | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const keys = sanitizeThinkingLevels(Object.keys(value))
+  return keys.length > 0 ? keys : null
+}
+
+function catalogThinkingLevels(modelId: string, reasoning: boolean): PiThinkingLevel[] {
+  if (!reasoning) return ['off']
+  const matched = matchModelExact(modelId)
+  const catalogLevels = PI_MAPPED_THINKING_OPTIONS.filter((level) =>
+    matched?.reasoningEfforts?.includes(level),
+  )
+  return catalogLevels.length > 0
+    ? ['off', ...catalogLevels]
+    : PI_DEFAULT_REASONING_OPTIONS
 }
 
 function objectValue(text?: string): Record<string, unknown> {
@@ -160,6 +206,9 @@ export function normalizeNativeModels(models: NativeCliModel[]): NativeCliModel[
       toolCall: model.toolCall ?? null,
       contextWindow: model.contextWindow.trim(),
       maxTokens: model.maxTokens.trim(),
+      thinkingLevels: model.thinkingLevels?.length
+        ? sanitizeThinkingLevels(model.thinkingLevels)
+        : null,
     })
   }
   return normalized
@@ -211,18 +260,21 @@ export function resolvePiModelMetadata(model: NativeCliModel): ResolvedPiModelMe
     : PI_DEFAULT_MAX_TOKENS
 
   const reasoning = model.reasoning ?? matchedReasoning
-  const catalogThinkingLevels = PI_MAPPED_THINKING_OPTIONS.filter((level) =>
-    matched?.reasoningEfforts?.includes(level),
-  )
+  const overrideLevels = model.thinkingLevels?.length
+    ? sanitizeThinkingLevels(model.thinkingLevels)
+    : []
   const thinkingLevels: PiThinkingLevel[] = !reasoning
     ? ['off']
-    : catalogThinkingLevels.length > 0
-      ? ['off', ...catalogThinkingLevels]
-      : PI_DEFAULT_REASONING_OPTIONS
-  const thinkingLevelMap = reasoning && catalogThinkingLevels.length > 0
+    : overrideLevels.length > 0
+      ? overrideLevels
+      : catalogThinkingLevels(model.id, true)
+  const matchedCatalogLevels = PI_MAPPED_THINKING_OPTIONS.filter((level) =>
+    matched?.reasoningEfforts?.includes(level),
+  )
+  const thinkingLevelMap = reasoning && matchedCatalogLevels.length > 0
     ? Object.fromEntries(PI_MAPPED_THINKING_OPTIONS.map((level) => [
         level,
-        catalogThinkingLevels.includes(level) ? level : null,
+        matchedCatalogLevels.includes(level) ? level : null,
       ])) as PiThinkingLevelMap
     : undefined
 
@@ -248,6 +300,16 @@ export function recommendedPiThinkingLevel(model?: NativeCliModel): PiThinkingLe
   return levels.at(-1) ?? 'off'
 }
 
+function readPersistedThinkingLevels(value: unknown): PiThinkingLevel[] | null {
+  const raw = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : typeof value === 'string'
+      ? value.split(',')
+      : []
+  const levels = sanitizeThinkingLevels(raw)
+  return levels.length > 0 ? levels : null
+}
+
 function readPersistedPiModel(value: unknown, id: string): NativeCliModel {
   const item = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -260,6 +322,7 @@ function readPersistedPiModel(value: unknown, id: string): NativeCliModel {
     toolCall: typeof item.toolCall === 'boolean' ? item.toolCall : null,
     contextWindow: positiveIntegerString(item.contextWindow),
     maxTokens: positiveIntegerString(item.maxTokens),
+    thinkingLevels: readPersistedThinkingLevels(item.thinkingLevels),
   }
 }
 
@@ -367,6 +430,8 @@ function readLegacyDshModel(item: Record<string, unknown>, id: string): NativeCl
     : efforts && typeof efforts === 'object' && !Array.isArray(efforts)
       ? Object.keys(efforts).length > 0
       : null
+  const parsedEfforts = parseReasoningEffortKeys(efforts)
+  const automaticLevels = catalogThinkingLevels(id, configuredReasoning ?? automatic.reasoning)
   return {
     id,
     name: configuredName && configuredName !== id && configuredName !== automatic.displayName
@@ -385,6 +450,9 @@ function readLegacyDshModel(item: Record<string, unknown>, id: string): NativeCl
     maxTokens: configuredMaxTokens && Number(configuredMaxTokens) !== automatic.maxTokens
       ? configuredMaxTokens
       : '',
+    thinkingLevels: parsedEfforts && !sameThinkingLevels(parsedEfforts, automaticLevels)
+      ? parsedEfforts
+      : null,
   }
 }
 
@@ -431,9 +499,17 @@ export function readNativeCliProvider(
           const item = value as Record<string, unknown>
           const id = stringValue(item.id)
           if (!id) return []
-          return [persistedModels !== null
+          const persisted = persistedModels !== null
             ? readPersistedPiModel(persistedModels[id], id)
-            : isDsh ? readLegacyDshModel(item, id) : readLegacyPiModel(item, id)]
+            : null
+          const fromConfig = isDsh ? readLegacyDshModel(item, id) : readLegacyPiModel(item, id)
+          if (!persisted) return [fromConfig]
+          return [{
+            ...persisted,
+            reasoning: persisted.reasoning ?? fromConfig.reasoning,
+            vision: persisted.vision ?? fromConfig.vision,
+            thinkingLevels: persisted.thinkingLevels ?? fromConfig.thinkingLevels,
+          }]
         })
       : []
   }
@@ -470,13 +546,14 @@ export function readNativeCliProvider(
 
 function serializeModelMetadata(models: NativeCliModel[]): string {
   const entries = models.flatMap((model) => {
-    const metadata: Record<string, string | boolean> = {}
+    const metadata: Record<string, string | boolean | string[]> = {}
     if (model.name) metadata.name = model.name
     if (model.reasoning !== null) metadata.reasoning = model.reasoning
     if (model.vision !== null) metadata.vision = model.vision
     if (model.toolCall !== undefined && model.toolCall !== null) metadata.toolCall = model.toolCall
     if (model.contextWindow) metadata.contextWindow = model.contextWindow
     if (model.maxTokens) metadata.maxTokens = model.maxTokens
+    if (model.thinkingLevels?.length) metadata.thinkingLevels = model.thinkingLevels
     return Object.keys(metadata).length > 0 ? [[model.id, metadata] as const] : []
   })
   return JSON.stringify({ version: 1, models: Object.fromEntries(entries) }, null, 2)
@@ -543,13 +620,8 @@ export function buildNativeCliProvider(
         }
       })()
     : agentId === 'dsh'
-      ? {
-          ...sourceConfig,
-          displayName: name,
-          apiKeyEnv: dshApiKeyEnv(form.nativeProviderId),
-          api: form.api,
-          baseURL: form.baseUrl.trim(),
-          models: models.map((model) => {
+      ? (() => {
+          const resolvedModels = models.map((model) => {
             const resolved = resolvePiModelMetadata(model)
             return {
               id: model.id,
@@ -564,8 +636,19 @@ export function buildNativeCliProvider(
                   ]))
                 : false,
             }
-          }),
-        }
+          })
+          return {
+            ...sourceConfig,
+            displayName: name,
+            apiKeyEnv: dshApiKeyEnv(form.nativeProviderId),
+            api: form.api,
+            baseURL: form.baseUrl.trim(),
+            defaultInput: resolvedModels.some((model) => model.input.includes('image'))
+              ? ['text', 'image']
+              : ['text'],
+            models: resolvedModels,
+          }
+        })()
       : {
           name,
           baseUrl: form.baseUrl.trim(),
@@ -595,5 +678,47 @@ export function buildNativeCliProvider(
     modelMetadataJson: serializeModelMetadata(models),
     defaultModel: form.defaultModel.trim(),
     defaultReasoning: agentId === 'pi' ? form.defaultThinkingLevel : '',
+  }
+}
+
+export function dshNativeDetailToProvider(detail: {
+  id: string
+  name: string
+  baseUrl: string
+  api: string
+  apiKey: string
+  models: Array<{ id: string; name: string }>
+  defaultModel?: string
+}): ExternalCliProvider {
+  const api = DSH_API_OPTIONS.includes(detail.api as typeof DSH_API_OPTIONS[number])
+    ? detail.api
+    : 'openai-completions'
+  const models = detail.models
+    .map((model) => ({
+      ...emptyNativeModel('dsh', model.id),
+      name: model.name,
+    }))
+    .filter((model) => model.id)
+  const form: NativeCliProviderForm = {
+    nativeProviderId: detail.id,
+    baseUrl: detail.baseUrl,
+    apiKey: detail.apiKey,
+    api,
+    models: models.length ? models : [emptyNativeModel('dsh')],
+    defaultModel: detail.defaultModel?.trim() || models[0]?.id || '',
+    defaultThinkingLevel: '',
+    sourceConfigJson: JSON.stringify({
+      displayName: detail.name,
+      api,
+      baseURL: detail.baseUrl,
+      models: detail.models,
+    }),
+  }
+  return {
+    id: `p-dsh-${detail.id}`,
+    name: detail.name,
+    nativeProviderId: detail.id,
+    env: [{ key: dshApiKeyEnv(detail.id), value: detail.apiKey }],
+    ...buildNativeCliProvider('dsh', detail.name, form),
   }
 }

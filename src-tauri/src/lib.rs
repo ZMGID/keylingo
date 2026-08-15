@@ -599,6 +599,8 @@ pub fn run() {
             external_agents::dsh_plugins::chat_dsh_open_settings_file,
             external_agents::dsh_plugins::chat_dsh_official_credential_status,
             external_agents::dsh_plugins::chat_dsh_official_credential_save,
+            external_agents::dsh_plugins::chat_dsh_native_provider_get,
+            external_agents::dsh_plugins::chat_dsh_native_provider_delete,
             external_agents::commands::chat_set_agent_runtime,
             external_agents::commands::chat_list_importable_cli_sessions,
             external_agents::commands::chat_import_cli_sessions,

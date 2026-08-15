@@ -23,8 +23,10 @@
 //!    合并进现有文件；`managed:kimi-code` OAuth 段与其它用户配置原样保留。首次接管前
 //!    整份备份，切回「CLI 自身配置」时还原。
 //! 7. **dsh 的 Kivio 私有 profile** —— provider 本体由 `dsh_profile.rs` 写进
-//!    `profiles/kivio/cordis.patch.yml` 的 `llm-pi-ai.providers`；本层只负责把 `apiKeyEnv`
-//!    指向的 Key 注入 Kivio 启动的进程，不改用户的 `settings.yaml` 或其它 profile。
+//!    `profiles/kivio/cordis.patch.yml` 的 `llm-pi-ai.providers`；本层把 `apiKeyEnv`
+//!    指向的 Key 注入 Kivio 启动的进程。`settings.yaml` 只回写已存在路由上的模型
+//!    `input` / `defaultInput` / `reasoningEfforts`（官方 web 贴图与 effort 门控），
+//!    不新建供应商、不写密钥。
 //!
 //! 物化时机是**保存 / 切换供应商那一次**（`commands::chat_external_cli_provider_apply`），
 //! 不是每轮。ccgui 用的是 per-turn 临时目录 + `Drop` 删除，那套在 Kivio 会把常驻 claude
@@ -246,6 +248,10 @@ pub fn materialize(agent_id: &str) -> Result<(), String> {
     if agent_id == "kimi" {
         let config = super::overrides::agent_config(agent_id).unwrap_or_default();
         return materialize_kimi(&config);
+    }
+    if agent_id == "dsh" {
+        let config = super::overrides::agent_config(agent_id).unwrap_or_default();
+        return crate::external_agents::dsh_plugins::sync_kivio_model_capabilities(&config.providers);
     }
     let Some(provider) = super::overrides::active_provider(agent_id) else {
         return Ok(());

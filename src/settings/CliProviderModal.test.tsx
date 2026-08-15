@@ -217,4 +217,98 @@ describe('CliProviderModal native providers', () => {
       maxTokens: 16384,
     })
   })
+
+  it('keeps the dsh provider form to the three supported protocols', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="dsh"
+        agentName="DeepSeek Harness"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'GPT' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'https://relay.example/v1' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), {
+      target: { value: 'sk-dsh' },
+    })
+    fireEvent.change(screen.getByLabelText('模型 ID'), {
+      target: { value: 'gpt-test' },
+    })
+
+    expect(screen.queryByText('启动默认值')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pi 默认值')).not.toBeInTheDocument()
+    expect(screen.getByText('默认值')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '当前默认模型' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'openai-completions' }))
+    expect(screen.getByRole('option', { name: 'openai-responses' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'anthropic-messages' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'google-generative-ai' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(onSave.mock.calls[0][0].configJson)).toMatchObject({
+      api: 'openai-completions',
+      baseURL: 'https://relay.example/v1',
+      models: [{ id: 'gpt-test' }],
+    })
+  })
+
+  it('exposes dsh image input and reasoning efforts on the model row', () => {
+    const onSave = vi.fn()
+    render(
+      <CliProviderModal
+        lang="zh"
+        agentId="dsh"
+        agentName="DeepSeek Harness"
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('例如：我的中转站'), {
+      target: { value: 'GPT' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), {
+      target: { value: 'https://relay.example/v1' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), {
+      target: { value: 'sk-dsh' },
+    })
+    fireEvent.change(screen.getByLabelText('模型 ID'), {
+      target: { value: 'gpt-5.6-sol' },
+    })
+
+    expect(screen.queryByRole('button', { name: '模型高级设置' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: '支持图片输入' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('switch', { name: '支持推理' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('group', { name: '推理档位' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'xhigh' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'max' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const config = JSON.parse(onSave.mock.calls[0][0].configJson)
+    expect(config.defaultInput).toEqual(['text', 'image'])
+    expect(config.models[0]).toMatchObject({
+      id: 'gpt-5.6-sol',
+      input: ['text', 'image'],
+    })
+    expect(config.models[0].reasoningEfforts).toMatchObject({
+      off: null,
+      low: 'low',
+      high: 'high',
+      xhigh: 'xhigh',
+    })
+    expect(config.models[0].reasoningEfforts.max).toBeUndefined()
+  })
 })

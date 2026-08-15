@@ -21,12 +21,15 @@ vi.mock('../chat/api', () => ({
     externalCliOpenConfigDir: vi.fn(),
     externalCliProviderCleanup: vi.fn(),
     externalCliScanCcSwitch: vi.fn().mockResolvedValue({ providers: [], skipped: 0 }),
+    externalCliFetchRelayModels: vi.fn().mockResolvedValue([]),
     dshPluginSettingsGet: vi.fn().mockResolvedValue(null),
     dshPluginSettingsSave: vi.fn(),
     dshPluginInventory: vi.fn().mockResolvedValue([]),
     dshOpenSettingsFile: vi.fn(),
     dshOfficialCredentialStatus: vi.fn().mockResolvedValue({ configured: false, writable: true }),
     dshOfficialCredentialSave: vi.fn(),
+    dshNativeProviderGet: vi.fn(),
+    dshNativeProviderDelete: vi.fn(),
   },
   onExternalCliInstallLog: vi.fn().mockResolvedValue(() => {}),
   onExternalAgentsUpdated: vi.fn().mockResolvedValue(() => {}),
@@ -39,6 +42,8 @@ const mockInstallInfo = vi.mocked(chatApi.externalCliInstallInfo)
 const mockInstall = vi.mocked(chatApi.externalCliInstall)
 const mockOfficialKeyStatus = vi.mocked(chatApi.dshOfficialCredentialStatus)
 const mockOfficialKeySave = vi.mocked(chatApi.dshOfficialCredentialSave)
+const mockNativeGet = vi.mocked(chatApi.dshNativeProviderGet)
+const mockNativeDelete = vi.mocked(chatApi.dshNativeProviderDelete)
 
 function renderPanel(
   chat: Partial<NonNullable<SettingsData['chat']>> = {},
@@ -63,8 +68,11 @@ describe('ExternalAgentsSettings', () => {
     mockInstall.mockReset()
     mockOfficialKeyStatus.mockReset()
     mockOfficialKeySave.mockReset()
+    mockNativeGet.mockReset()
+    mockNativeDelete.mockReset()
     mockOfficialKeyStatus.mockResolvedValue({ configured: false, writable: true })
     mockOfficialKeySave.mockResolvedValue({ configured: true, writable: true })
+    mockNativeDelete.mockResolvedValue(undefined)
     mockDetect.mockResolvedValue([
       {
         id: 'claude',
@@ -294,6 +302,130 @@ describe('ExternalAgentsSettings', () => {
     expect(screen.getByText('使用中')).toBeInTheDocument()
     expect(screen.queryByText('使用 CLI 自身配置')).not.toBeInTheDocument()
     expect(screen.queryByText('暂无供应商，点击上方「添加」创建一个。')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '编辑供应商' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument()
+  })
+
+  it('lets the user edit or delete a native dsh relay', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+        nativeProviders: [
+          { id: 'deepseek-official', name: 'DeepSeek', modelCount: 2, isDefault: false },
+          {
+            id: 'gpt',
+            name: 'gpt',
+            baseUrl: 'https://api.example/v1',
+            modelCount: 4,
+            isDefault: true,
+          },
+        ],
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.6',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/dsh',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+    mockNativeGet.mockResolvedValue({
+      id: 'gpt',
+      name: 'gpt',
+      baseUrl: 'https://api.example/v1',
+      api: 'openai-responses',
+      apiKey: 'sk-native',
+      apiKeyEnv: 'GPT_API_KEY',
+      models: [{ id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' }],
+      defaultModel: 'gpt-5.6-sol',
+    })
+
+    const { updateChat } = renderPanel()
+    await waitFor(() => {
+      expect(screen.getByText('gpt')).toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: '编辑供应商' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑供应商' }))
+    await waitFor(() => {
+      expect(mockNativeGet).toHaveBeenCalledWith('gpt')
+    })
+    expect(await screen.findByText('编辑 DeepSeek Harness 供应商')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('取消'))
+    await waitFor(() => {
+      expect(screen.queryByText('编辑 DeepSeek Harness 供应商')).not.toBeInTheDocument()
+    })
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    await waitFor(() => {
+      expect(mockNativeDelete).toHaveBeenCalledWith('gpt')
+    })
+    expect(updateChat).not.toHaveBeenCalled()
+  })
+
+  it('hides a native dsh relay after it is adopted into Kivio providers', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+        nativeProviders: [
+          { id: 'deepseek-official', name: 'DeepSeek', modelCount: 2, isDefault: false },
+          {
+            id: 'gpt',
+            name: 'gpt',
+            baseUrl: 'https://api.example/v1',
+            modelCount: 4,
+            isDefault: true,
+          },
+        ],
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.6',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/dsh',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel({
+      externalCliAgents: {
+        dsh: {
+          providers: [
+            {
+              id: 'p-dsh-gpt',
+              name: 'gpt',
+              nativeProviderId: 'gpt',
+              env: [{ key: 'KIVIO_DSH_GPT_API_KEY', value: 'sk' }],
+            },
+          ],
+        },
+      },
+    })
+    await waitFor(() => {
+      expect(screen.getByText('gpt')).toBeInTheDocument()
+    })
+    expect(screen.getAllByText('gpt')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: '编辑供应商' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument()
+    expect(screen.queryByText('https://api.example/v1')).not.toBeInTheDocument()
   })
 
   it('opens dsh plugins on a secondary page', async () => {

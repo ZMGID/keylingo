@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildNativeCliProvider,
+  DSH_API_OPTIONS,
   dshApiKeyEnv,
+  dshNativeDetailToProvider,
   emptyNativeModel,
   nativeProviderIdFromName,
+  PI_API_OPTIONS,
   readNativeCliProvider,
   resolveOpenCodeModelMetadata,
   resolvePiModelMetadata,
+  toggleThinkingLevel,
 } from './cliNativeProviderConfigs'
 
 describe('cliNativeProviderConfigs', () => {
@@ -159,6 +163,16 @@ describe('cliNativeProviderConfigs', () => {
     })
   })
 
+  it('limits dsh to the three llm-pi-ai wire protocols', () => {
+    expect(DSH_API_OPTIONS).toEqual([
+      'openai-completions',
+      'openai-responses',
+      'anthropic-messages',
+    ])
+    expect(PI_API_OPTIONS).toContain('google-generative-ai')
+    expect(DSH_API_OPTIONS).not.toContain('google-generative-ai')
+  })
+
   it('builds and round-trips a dsh llm-pi-ai provider without storing the key in config JSON', () => {
     const built = buildNativeCliProvider('dsh', 'Relay', {
       nativeProviderId: 'relay-one',
@@ -191,6 +205,7 @@ describe('cliNativeProviderConfigs', () => {
         input: ['text'],
       }],
     })
+    expect(config.defaultInput).toEqual(['text'])
     expect(config.models[0].reasoningEfforts).toMatchObject({ off: null, high: 'high' })
     expect(JSON.stringify(config)).not.toContain('sk-dsh')
     expect(built.authJson).toBe('')
@@ -216,6 +231,90 @@ describe('cliNativeProviderConfigs', () => {
         contextWindow: '256000',
         maxTokens: '32768',
       }],
+    })
+  })
+
+  it('turns a settings.yaml dsh relay into an editable Kivio provider', () => {
+    const provider = dshNativeDetailToProvider({
+      id: 'gpt',
+      name: 'gpt',
+      baseUrl: 'https://relay.example/v1',
+      api: 'openai-responses',
+      apiKey: 'sk-native',
+      models: [
+        { id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' },
+        { id: 'gpt-5.6-luna', name: 'gpt-5.6-luna' },
+      ],
+      defaultModel: 'gpt-5.6-sol',
+    })
+    expect(provider).toMatchObject({
+      id: 'p-dsh-gpt',
+      name: 'gpt',
+      nativeProviderId: 'gpt',
+      defaultModel: 'gpt-5.6-sol',
+    })
+    expect(provider.env).toEqual([{ key: 'KIVIO_DSH_GPT_API_KEY', value: 'sk-native' }])
+    const read = readNativeCliProvider('dsh', provider)
+    expect(read).toMatchObject({
+      nativeProviderId: 'gpt',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'sk-native',
+      api: 'openai-responses',
+      defaultModel: 'gpt-5.6-sol',
+    })
+    expect(read.models.map((model) => model.id)).toEqual(['gpt-5.6-sol', 'gpt-5.6-luna'])
+  })
+
+  it('writes dsh image input and a custom reasoning effort set', () => {
+    expect(toggleThinkingLevel(['off', 'high'], 'xhigh')).toEqual(['off', 'high', 'xhigh'])
+    expect(toggleThinkingLevel(['off', 'high'], 'high')).toEqual(['off'])
+    expect(toggleThinkingLevel(['high'], 'high')).toEqual(['high'])
+
+    const built = buildNativeCliProvider('dsh', 'GPT', {
+      nativeProviderId: 'gpt',
+      baseUrl: 'https://relay.example/v1',
+      apiKey: 'sk-dsh',
+      api: 'openai-responses',
+      models: [{
+        id: 'gpt-5.6-sol',
+        name: '',
+        reasoning: true,
+        vision: true,
+        contextWindow: '',
+        maxTokens: '',
+        thinkingLevels: ['off', 'low', 'high', 'xhigh'],
+      }],
+      defaultModel: 'gpt-5.6-sol',
+      defaultThinkingLevel: 'off',
+      sourceConfigJson: '',
+    })
+    const config = JSON.parse(built.configJson!)
+    expect(config.defaultInput).toEqual(['text', 'image'])
+    expect(config.models[0]).toMatchObject({
+      id: 'gpt-5.6-sol',
+      input: ['text', 'image'],
+      reasoningEfforts: {
+        off: null,
+        low: 'low',
+        high: 'high',
+        xhigh: 'xhigh',
+      },
+    })
+    expect(config.models[0].reasoningEfforts.medium).toBeUndefined()
+    expect(config.models[0].reasoningEfforts.max).toBeUndefined()
+
+    const read = readNativeCliProvider('dsh', {
+      id: 'p-dsh-gpt',
+      name: 'GPT',
+      nativeProviderId: 'gpt',
+      env: [{ key: 'KIVIO_DSH_GPT_API_KEY', value: 'sk-dsh' }],
+      ...built,
+    })
+    expect(read.models[0]).toMatchObject({
+      id: 'gpt-5.6-sol',
+      reasoning: true,
+      vision: true,
+      thinkingLevels: ['off', 'low', 'high', 'xhigh'],
     })
   })
 
