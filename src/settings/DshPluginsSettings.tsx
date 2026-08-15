@@ -8,6 +8,7 @@ import {
 } from '../chat/api'
 import { Button, IconButton } from '../components/Button'
 import { Input } from './components'
+import { dshPluginShortName } from './dshPluginNames'
 import { i18n, type Lang } from './i18n'
 
 type TabId = 'config' | 'list'
@@ -20,15 +21,6 @@ function errorMessage(err: unknown): string {
     if (typeof message === 'string' && message.trim()) return message
   }
   return ''
-}
-
-export function dshPluginShortName(moduleName: string): string {
-  return (moduleName.startsWith('@')
-    ? moduleName.slice(moduleName.indexOf('/') + 1)
-    : moduleName)
-    .replace(/^cordis:/, '')
-    .replace(/^cordis-plugin-/, '')
-    .replace(/^dsh-(?:host-|client-)?/, '')
 }
 
 function parseOptionalNumber(text: string): { value: number | null; invalid: boolean } {

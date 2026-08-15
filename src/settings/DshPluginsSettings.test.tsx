@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatApi, type DshPluginSettingsSnapshot } from '../chat/api'
-import { DshPluginsSettings, dshPluginShortName } from './DshPluginsSettings'
+import { DshPluginsSettings } from './DshPluginsSettings'
+import { dshPluginShortName } from './dshPluginNames'
 
 vi.mock('../chat/api', () => ({
   chatApi: {

@@ -172,7 +172,16 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.8.9
+## 新版本 —— v2.9.0
+
+- **DeepSeek Harness** —— 新增 dsh 作为外部 CLI：官方供应商、Agent 模式、斜杠命令、工具卡、压缩、Todo、问用户。后台子代理显示实时进度，完成后自动汇报，和官方 web 一致。
+- **外部 CLI 更稳** —— 每个 CLI 记住上次的模型和思考档；轮内重连保留原生会话；发送失败不再丢草稿；顶栏显示实际模型与档位。
+- **Todo 与问用户** —— dsh / Claude Code 的 Todo 接到对话列表；Claude Task 卡立刻显示任务；外部 CLI 问用户收成统一卡片。
+- **笔记** —— 笔记页可打开库文件夹，拖入外部 markdown 自动出现。
+- **新模型** —— 补上 Grok 4.6。
+- **聊天体验** —— 重复点击已打开的会话不再重载；生成中也能置顶；贴底打字不再整屏抖；暗色切会话不闪白；会话不再把图片 base64 写进 JSON。
+
+## v2.8.9
 
 - **长对话性能大修** —— 消息列表重做虚拟化与滚动跟随：屏外消息卸载、流式行独立渲染、重内容延迟挂载。长对话打开更快，流式生成与回翻历史更流畅，修复多种滚动跳动与生成结束时的闪动。
 - **Kivio Chat 独立运行时** —— Kivio Chat 成为独立运行时，与 Agent 模式分开配置提示词。
@@ -415,7 +424,16 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.8.9
+## What's New — v2.9.0
+
+- **DeepSeek Harness** — dsh joins as an external CLI: official provider, Agent modes, slash commands, tool cards, compaction, todos, and ask-user. Background subagents show live progress and report back when they finish, matching official DSH web.
+- **More reliable external CLIs** — each CLI remembers its last model and thinking level; a mid-turn reconnect keeps the native session; a failed send no longer drops the draft; the title bar shows the model and effort actually in use.
+- **Todos and ask-user** — dsh / Claude Code todos land on the conversation list; Claude Task cards show the list immediately; ask-user from external CLIs uses one shared card.
+- **Notes** — the notes page can open the library folder; dropping in an external markdown file makes it appear automatically.
+- **New model** — adds Grok 4.6.
+- **Chat polish** — clicking an already-open conversation no longer reloads it; pinning works while generating; typing at the bottom no longer shakes the screen; switching conversations in dark mode no longer flashes white; conversation JSON no longer stores image base64.
+
+## v2.8.9
 
 - **Long-conversation performance overhaul** — the message list rebuilds virtualization and scroll follow: off-screen messages unmount, the streaming row renders independently, and heavy content mounts lazily. Long conversations open faster, streaming and scrolling back through history are smoother, and several scroll jumps and end-of-run flickers are fixed.
 - **Kivio Chat as a separate runtime** — Kivio Chat becomes its own runtime, configured apart from Agent mode with its own prompt.

@@ -3217,7 +3217,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kivio"
-version = "2.8.9"
+version = "2.9.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
