@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -705,6 +706,127 @@ fn effective_request_provider(
     provider
 }
 
+/// 拉模型列表 / 测连接共用的鉴权：必须跟真实对话请求一致。
+/// Gemini 官方 key 不是 OAuth token，Bearer 会 400/401；Anthropic 要 `x-api-key`。
+fn apply_provider_auth(
+    request: reqwest::RequestBuilder,
+    api_format: ProviderApiFormat,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    match api_format {
+        ProviderApiFormat::AnthropicMessages => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        ProviderApiFormat::Gemini => request.header("x-goog-api-key", api_key),
+        _ => request.bearer_auth(api_key),
+    }
+}
+
+fn resolve_api_format(
+    settings: &Settings,
+    provider_id: &str,
+    provider: Option<&ProviderConnectionInput>,
+) -> ProviderApiFormat {
+    provider
+        .and_then(|p| p.api_format.as_deref())
+        .map(ProviderApiFormat::from_raw)
+        .or_else(|| {
+            settings
+                .get_provider(provider_id)
+                .map(|p| p.api_format_kind())
+        })
+        .unwrap_or(ProviderApiFormat::OpenAiChat)
+}
+
+/// 从 `/models` JSON 抽出模型 id。
+/// OpenAI / Anthropic / Responses：`data[].id`（或 `data[]` 字符串）。
+/// Gemini 原生 ListModels：`models[].name`，形如 `models/gemini-2.5-flash`。
+fn parse_model_list_ids(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    if let Some(msg) = models_api_error_message(value) {
+        return Err(format!("Models API error: {msg}"));
+    }
+
+    let items = value
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.get("models").and_then(|v| v.as_array()))
+        .or_else(|| value.as_array())
+        .ok_or_else(|| {
+            "Invalid response format: expected a 'data' or 'models' array".to_string()
+        })?;
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        if !model_item_is_listable(item) {
+            continue;
+        }
+        let Some(id) = model_item_id(item) else {
+            continue;
+        };
+        if seen.insert(id.clone()) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+fn models_api_error_message(value: &serde_json::Value) -> Option<String> {
+    let err = value.get("error")?;
+    err.as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            err.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .filter(|msg| !msg.trim().is_empty())
+}
+
+fn model_item_id(item: &serde_json::Value) -> Option<String> {
+    if let Some(s) = item.as_str() {
+        return normalize_listed_model_id(s);
+    }
+    item.get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| item.get("name").and_then(|v| v.as_str()))
+        .and_then(normalize_listed_model_id)
+}
+
+fn normalize_listed_model_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Gemini ListModels 的 `name` 是 `models/gemini-2.5-flash`；对话 URL 会再拼一层
+    // `/models/`，这里去掉前缀，和 generateContent 路径去重保持同一口径。
+    let stripped = trimmed.strip_prefix("models/").unwrap_or(trimmed).trim();
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Gemini 原生条目带 `supportedGenerationMethods` 时，只收能 generate 的模型
+///（embedding-only 进聊天选择器没有意义）。中转站 / OpenAI 形没有该字段，原样保留。
+fn model_item_is_listable(item: &serde_json::Value) -> bool {
+    let Some(methods) = item
+        .get("supportedGenerationMethods")
+        .and_then(|v| v.as_array())
+    else {
+        return true;
+    };
+    methods.iter().any(|method| {
+        matches!(
+            method.as_str(),
+            Some("generateContent")
+                | Some("streamGenerateContent")
+                | Some("bidiGenerateContent")
+        )
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn fetch_models(
     state: State<'_, AppState>,
@@ -712,6 +834,7 @@ pub(crate) async fn fetch_models(
     provider: Option<ProviderConnectionInput>,
 ) -> Result<Vec<String>, String> {
     let settings = state.settings_read().clone();
+    let api_format = resolve_api_format(&settings, &provider_id, provider.as_ref());
     let request_override = provider.as_ref().and_then(|p| p.request.clone());
     let (base_url, api_keys) = resolve_provider_credentials(&settings, &provider_id, provider)?;
     let retry_attempts = effective_retry_attempts(&settings);
@@ -721,7 +844,12 @@ pub(crate) async fn fetch_models(
         return Err("Missing API Key".to_string());
     }
 
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let base = base_url.trim_end_matches('/');
+    // Gemini 原生 ListModels 默认每页约 50；官方上限 1000。中转站一般忽略未知 query。
+    let url = match api_format {
+        ProviderApiFormat::Gemini => format!("{base}/models?pageSize=1000"),
+        _ => format!("{base}/models"),
+    };
 
     let response = send_with_failover(
         &state,
@@ -732,10 +860,11 @@ pub(crate) async fn fetch_models(
         |key| {
             // 拉模型列表也走该供应商的请求配置：中转站常按自定义头/UA 决定放行与可见模型。
             let request = crate::provider_request::apply(
-                state
-                    .client_for(&effective)
-                    .get(url.clone())
-                    .bearer_auth(key),
+                apply_provider_auth(
+                    state.client_for(&effective).get(url.clone()),
+                    api_format,
+                    key,
+                ),
                 &effective,
                 None,
             );
@@ -749,23 +878,7 @@ pub(crate) async fn fetch_models(
         .await
         .map_err(|e| format!("Failed to parse models response JSON: {e}"))?;
 
-    let models = value
-        .get("data")
-        .and_then(|data| data.as_array())
-        .ok_or_else(|| "Invalid response format: expected 'data' array".to_string())?
-        .iter()
-        .filter_map(|m| {
-            if let Some(s) = m.as_str() {
-                Some(s.to_string())
-            } else {
-                m.get("id")
-                    .and_then(|id| id.as_str())
-                    .map(|s| s.to_string())
-            }
-        })
-        .collect::<Vec<String>>();
-
-    Ok(models)
+    parse_model_list_ids(&value)
 }
 
 /// 测试供应商连接是否可用
@@ -783,16 +896,7 @@ pub(crate) async fn test_provider_connection(
     let settings = state.settings_read().clone();
     let model = provider.as_ref().and_then(|p| p.model.clone());
     // 协议优先取前端传入（未保存的编辑中配置），缺省回退 settings 里已保存的。
-    let api_format = provider
-        .as_ref()
-        .and_then(|p| p.api_format.as_deref())
-        .map(ProviderApiFormat::from_raw)
-        .or_else(|| {
-            settings
-                .get_provider(&provider_id)
-                .map(|p| p.api_format_kind())
-        })
-        .unwrap_or(ProviderApiFormat::OpenAiChat);
+    let api_format = resolve_api_format(&settings, &provider_id, provider.as_ref());
     let request_override = provider.as_ref().and_then(|p| p.request.clone());
     let (base_url, api_keys) = resolve_provider_credentials(&settings, &provider_id, provider)?;
 
@@ -858,14 +962,11 @@ pub(crate) async fn test_provider_connection(
                 ),
             };
             send_with_retry("Provider API", retry_attempts, || {
-                let request = with_request_config(client.post(url.clone())).json(&body);
-                let request = match api_format {
-                    ProviderApiFormat::AnthropicMessages => request
-                        .header("x-api-key", &api_key)
-                        .header("anthropic-version", "2023-06-01"),
-                    ProviderApiFormat::Gemini => request.header("x-goog-api-key", &api_key),
-                    _ => request.bearer_auth(&api_key),
-                };
+                let request = apply_provider_auth(
+                    with_request_config(client.post(url.clone())).json(&body),
+                    api_format,
+                    &api_key,
+                );
                 with_standard_request_timeout(request).send()
             })
             .await
@@ -874,14 +975,11 @@ pub(crate) async fn test_provider_connection(
             // /models 探测（Gemini 原生同样有 GET /models；Anthropic 也提供 /models）。
             let url = format!("{base}/models");
             send_with_retry("Provider API", retry_attempts, || {
-                let request = with_request_config(client.get(url.clone()));
-                let request = match api_format {
-                    ProviderApiFormat::AnthropicMessages => request
-                        .header("x-api-key", &api_key)
-                        .header("anthropic-version", "2023-06-01"),
-                    ProviderApiFormat::Gemini => request.header("x-goog-api-key", &api_key),
-                    _ => request.bearer_auth(&api_key),
-                };
+                let request = apply_provider_auth(
+                    with_request_config(client.get(url.clone())),
+                    api_format,
+                    &api_key,
+                );
                 with_standard_request_timeout(request).send()
             })
             .await
@@ -977,6 +1075,8 @@ pub(crate) fn open_permission_settings(kind: String) -> Result<(), String> {
 mod tests {
     use super::dedup_preserve_order;
     use super::local_file_path_from_href;
+    use super::parse_model_list_ids;
+    use serde_json::json;
 
     /// 旧 artifact（无 path）落临时文件时的文件名清洗：只取 basename，挡目录穿越。
     /// 扩展名闸门与本地文件链接共用 `ensure_openable_extension`——落盘后同样是「交给默认程序」。
@@ -1090,5 +1190,76 @@ mod tests {
     #[test]
     fn dedup_preserve_order_empty() {
         assert!(dedup_preserve_order(vec![]).is_empty());
+    }
+
+    #[test]
+    fn parse_model_list_openai_data_ids() {
+        let value = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-4o", "object": "model" },
+                { "id": "gpt-4o-mini" },
+                "o4-mini"
+            ]
+        });
+        assert_eq!(
+            parse_model_list_ids(&value).unwrap(),
+            vec!["gpt-4o", "gpt-4o-mini", "o4-mini"]
+        );
+    }
+
+    #[test]
+    fn parse_model_list_gemini_native_names_and_filters_embeddings() {
+        let value = json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-flash",
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                    "name": "models/gemini-embedding-001",
+                    "supportedGenerationMethods": ["embedContent", "countTokens"]
+                },
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "supportedGenerationMethods": ["generateContent"]
+                },
+                { "name": "models/" },
+                "models/gemini-2.0-flash"
+            ]
+        });
+        assert_eq!(
+            parse_model_list_ids(&value).unwrap(),
+            vec!["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+        );
+    }
+
+    #[test]
+    fn parse_model_list_prefers_data_over_models_and_dedups() {
+        let value = json!({
+            "data": [
+                { "id": "gemini-2.5-flash" },
+                { "name": "models/gemini-2.5-flash" }
+            ]
+        });
+        assert_eq!(
+            parse_model_list_ids(&value).unwrap(),
+            vec!["gemini-2.5-flash"]
+        );
+    }
+
+    #[test]
+    fn parse_model_list_surfaces_gemini_error_object() {
+        let value = json!({
+            "error": { "code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT" }
+        });
+        let err = parse_model_list_ids(&value).unwrap_err();
+        assert!(err.contains("API key not valid"), "{err}");
+    }
+
+    #[test]
+    fn parse_model_list_rejects_unknown_shape() {
+        let err = parse_model_list_ids(&json!({ "hello": "world" })).unwrap_err();
+        assert!(err.contains("data") && err.contains("models"), "{err}");
     }
 }

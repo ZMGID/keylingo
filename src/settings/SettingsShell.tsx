@@ -1378,6 +1378,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           id: currentProvider.id,
           baseUrl: currentProvider.baseUrl,
           apiKeys: currentProvider.apiKeys,
+          apiFormat: currentProvider.apiFormat,
           // 草稿可能尚未落盘，这里必须带上编辑中的请求配置，
           // 否则拉列表用的头和真实聊天不一致。
           request: currentProvider.request,

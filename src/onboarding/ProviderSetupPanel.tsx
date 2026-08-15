@@ -274,6 +274,8 @@ export function ProviderSetupPanel({ t, lang, settings, onChange }: ProviderSetu
         id: provider.id,
         baseUrl: provider.baseUrl,
         apiKeys: provider.apiKeys,
+        apiFormat: provider.apiFormat,
+        request: provider.request,
       })
       updateProvider({ availableModels: models })
     } catch (err) {
