@@ -341,13 +341,16 @@ function AgentDetail({
       ? isVersionNewer(localVersion, info.latestVersion)
       : null
   const updateAvailable = versionComparison ?? info?.updateAvailable ?? false
+  const needsRepair = Boolean(agent.available && !localVersion && info?.command)
   const versionStatus = !agent.available
     ? null
     : checking
       ? { label: t.externalAgentsCheckingVersion, tone: '' }
       : !info
         ? { label: t.externalAgentsVersionCheckFailed, tone: 'warn' }
-        : !localVersion || !info.latestVersion
+        : !localVersion
+          ? { label: t.externalAgentsLocalVersionUnknown, tone: 'warn' }
+          : !info.latestVersion
           ? { label: t.externalAgentsLatestVersionUnknown, tone: 'warn' }
           : updateAvailable
             ? {
@@ -359,7 +362,7 @@ function AgentDetail({
               }
             : { label: t.externalAgentsUpToDate, tone: 'ok' }
   const showInstallAction = Boolean(
-    info?.command && !checking && (!agent.available || updateAvailable),
+    info?.command && !checking && (!agent.available || updateAvailable || needsRepair),
   )
 
   if (showPlugins && agent.id === 'dsh') {
@@ -386,7 +389,10 @@ function AgentDetail({
             </a>
           )}
         </span>
-        <span className="kv-cli-pill">{localVersion ?? t.externalAgentsNotInstalled}</span>
+        <span className="kv-cli-pill">
+          {localVersion
+            ?? (agent.available ? t.externalAgentsInstalled : t.externalAgentsNotInstalled)}
+        </span>
         {versionStatus && (
           <span className={`kv-tag ${versionStatus.tone}`}>{versionStatus.label}</span>
         )}
@@ -408,8 +414,32 @@ function AgentDetail({
           <RefreshCw size={13} className={checking ? 'animate-spin' : ''} />
         </IconButton>
       </div>
+      {(running || result) && (
+        <div
+          className={`kv-cli-install-banner ${running ? 'running' : result === 'ok' ? (needsRepair ? 'warn' : 'ok') : 'fail'}`}
+          role="status"
+        >
+          {running
+            ? t.externalAgentsInstalling
+            : result === 'ok'
+              ? (needsRepair ? t.externalAgentsInstallNeedsRepair : t.externalAgentsInstallDone)
+              : t.externalAgentsInstallFailed}
+        </div>
+      )}
       {agent.id === 'dsh' && !agent.available && (
         <p className="kv-row-desc">{t.externalAgentsDshInstallHint}</p>
+      )}
+      {(running || result === 'fail') && (
+        <div className="kv-cli-card">
+          <div className="kv-row-stack">
+            <div className="kv-row-text">
+              <div className="kv-row-label">{t.externalAgentsInstallLog}</div>
+            </div>
+            <pre ref={logRef} className="kv-cli-log">
+              {log.length > 0 ? log.join('\n') : t.externalAgentsInstalling}
+            </pre>
+          </div>
+        </div>
       )}
 
       {agent.id === 'dsh' && <DshOfficialKeyCard lang={lang} />}
@@ -435,26 +465,6 @@ function AgentDetail({
             <ChevronRight size={14} aria-hidden="true" />
           </span>
         </button>
-      )}
-
-      {(log.length > 0 || result) && (
-        <div className="kv-cli-card">
-          <div className="kv-row-stack">
-            <div className="kv-row-text">
-              <div className="kv-row-label">{t.externalAgentsInstallLog}</div>
-              {result && (
-                <p className="kv-row-desc">
-                  {result === 'ok' ? t.externalAgentsInstallDone : t.externalAgentsInstallFailed}
-                </p>
-              )}
-            </div>
-            {log.length > 0 && (
-              <pre ref={logRef} className="kv-cli-log">
-                {log.join('\n')}
-              </pre>
-            )}
-          </div>
-        </div>
       )}
 
       <div className="kv-cli-card">
@@ -928,13 +938,17 @@ function ProviderSection({
   )
 }
 
+/** 切走再回来时还要看得到刚装完的日志，不能跟 AgentDetail 一起卸掉。 */
+const installMemory = new Map<string, { log: string[]; result: 'ok' | 'fail' | null }>()
+
 /** 版本检查 + 一键安装/更新的状态机。只被 AgentDetail 用，抽出来纯粹是别让它涨到 200 行。 */
 function useInstall(agentId: string, reloadAgents: (force?: boolean) => Promise<void>) {
+  const remembered = installMemory.get(agentId)
   const [info, setInfo] = useState<ExternalCliInstallInfo | null>(null)
   const [checking, setChecking] = useState(true)
   const [running, setRunning] = useState(false)
-  const [log, setLog] = useState<string[]>([])
-  const [result, setResult] = useState<'ok' | 'fail' | null>(null)
+  const [log, setLog] = useState<string[]>(() => remembered?.log ?? [])
+  const [result, setResult] = useState<'ok' | 'fail' | null>(() => remembered?.result ?? null)
   const logRef = useRef<HTMLPreElement | null>(null)
 
   const refresh = useCallback(async () => {
@@ -953,13 +967,39 @@ function useInstall(agentId: string, reloadAgents: (force?: boolean) => Promise<
   }, [refresh])
 
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
+    installMemory.set(agentId, { log, result })
+  }, [agentId, log, result])
+
+  useEffect(() => {
+    const node = logRef.current
+    if (node && typeof node.scrollTo === 'function') {
+      node.scrollTo({ top: node.scrollHeight })
+    }
   }, [log])
+
+  useEffect(() => {
+    if (!result && !running) return
+    const node = logRef.current
+    if (node && typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ block: 'nearest' })
+    }
+  }, [result, running])
+
+  useEffect(() => {
+    if (result !== 'ok' || running) return
+    const timer = window.setTimeout(() => {
+      setLog([])
+      setResult(null)
+      installMemory.delete(agentId)
+    }, 4000)
+    return () => window.clearTimeout(timer)
+  }, [agentId, result, running])
 
   const runInstall = async () => {
     setRunning(true)
     setResult(null)
     setLog([])
+    installMemory.set(agentId, { log: [], result: null })
     // 监听要在 invoke 之前挂上：安装命令的头几行（`$ …`）是同步发出来的。
     const unlisten = await onExternalCliInstallLog((event) => {
       if (event.agentId !== agentId) return

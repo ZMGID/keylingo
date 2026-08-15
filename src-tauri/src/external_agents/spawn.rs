@@ -297,6 +297,15 @@ pub fn cached_cli_version(path: &Path) -> Option<String> {
         .and_then(|entry| entry.version.clone())
 }
 
+/// 安装后 `--version` 从失败变成能跑，但 shim 的 mtime/size 往往不变，探活缓存
+/// 会继续返回「能启动、无版本」。装完立刻丢掉这条，下次探测才会重新跑。
+pub fn invalidate_probe_cache(path: &Path) {
+    let prefix = format!("{}|", path.display());
+    if let Ok(mut cache) = PROBE_CACHE.lock() {
+        cache.retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
 /// 一个候选是否**可执行**（不是「是否可用」）。
 ///
 /// 判据刻意宽松——只要进程**起来了**就算存在，不看退出码：

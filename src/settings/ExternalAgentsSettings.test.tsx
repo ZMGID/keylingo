@@ -130,6 +130,8 @@ describe('ExternalAgentsSettings', () => {
       expect(mockInstall).toHaveBeenCalledWith('claude')
       expect(mockDetect).toHaveBeenCalledWith(true)
     })
+    expect(screen.getByRole('status')).toHaveTextContent('安装完成')
+    expect(screen.queryByText('安装日志')).not.toBeInTheDocument()
   })
 
   it('shows up-to-date status without an update action', async () => {
@@ -149,6 +151,36 @@ describe('ExternalAgentsSettings', () => {
       expect(screen.getByText('已是最新')).toBeInTheDocument()
     })
     expect(screen.queryByRole('button', { name: '更新' })).not.toBeInTheDocument()
+  })
+
+  it('offers a repair update when the CLI is on PATH but version cannot be read', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: null,
+      latestVersion: '0.1.0-rc.6',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/deepseek-harness',
+      configDir: null,
+    })
+
+    renderPanel()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '更新' })).toBeInTheDocument()
+    })
+    expect(screen.getAllByText('已安装').length).toBeGreaterThan(0)
+    expect(screen.getByText('已写入但无法启动')).toBeInTheDocument()
+    expect(screen.queryByText('未安装')).not.toBeInTheDocument()
   })
 
   it('does not offer an update when the latest version cannot be checked', async () => {

@@ -5382,6 +5382,34 @@ input[type="password"]::-ms-clear {
   white-space: pre-wrap;
   word-break: break-all;
 }
+.kv-cli-install-banner {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-weight: 550;
+}
+.kv-cli-install-banner.running {
+  background: var(--bg-sidebar);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.kv-cli-install-banner.ok {
+  background: var(--success-soft);
+  color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+}
+.kv-cli-install-banner.warn {
+  background: color-mix(in srgb, var(--warn, #c47b16) 14%, transparent);
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--warn, #c47b16) 35%, transparent);
+}
+.kv-cli-install-banner.fail {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+}
 .kv-cli-search {
   flex-shrink: 0;
   margin-bottom: 6px;

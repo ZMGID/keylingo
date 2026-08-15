@@ -122,10 +122,7 @@ fn install_spec(agent_id: &str) -> Option<InstallSpec> {
         },
         "dsh" => InstallSpec {
             npm_package: Some("@deepseek-ai/dsh"),
-            // `@deepseek-ai/dsh-app-boot` 把 `@deepseek-ai/cordis-plugin-group` 标成
-            // peerDependency，但 CLI 包自己没声明。npm 不会装嵌套 peer，装完
-            // `dsh --version` 直接 `ERR_MODULE_NOT_FOUND`。更新时同样带上。
-            npm_install_args: &["@deepseek-ai/cordis-plugin-group@latest"],
+            npm_install_args: &[],
             pypi_package: None,
             script_unix: None,
             script_windows: None,
@@ -168,15 +165,19 @@ struct CommandPlan {
     program: String,
     args: Vec<String>,
     display: String,
+    current_dir: Option<PathBuf>,
 }
 
 impl CommandPlan {
     fn direct(program: impl Into<String>, args: &[&str]) -> Self {
+        Self::owned(
+            program,
+            args.iter().map(|arg| (*arg).to_string()).collect(),
+        )
+    }
+
+    fn owned(program: impl Into<String>, args: Vec<String>) -> Self {
         let program = program.into();
-        let args = args
-            .iter()
-            .map(|arg| (*arg).to_string())
-            .collect::<Vec<_>>();
         let display = std::iter::once(program.as_str())
             .chain(args.iter().map(String::as_str))
             .map(display_token)
@@ -186,6 +187,7 @@ impl CommandPlan {
             program,
             args,
             display,
+            current_dir: None,
         }
     }
 
@@ -194,6 +196,7 @@ impl CommandPlan {
             program: "bash".to_string(),
             args: vec!["-lc".to_string(), format!("set -o pipefail; {script}")],
             display: script.to_string(),
+            current_dir: None,
         }
     }
 
@@ -208,6 +211,7 @@ impl CommandPlan {
                 script.to_string(),
             ],
             display: script.to_string(),
+            current_dir: None,
         }
     }
 }
@@ -364,6 +368,23 @@ pub(crate) async fn ensure_pnpm_for_dsh() -> Result<(), String> {
     ensure_pnpm(&|line| eprintln!("[dsh] {line}")).await
 }
 
+/// `npm install -g` 仍会读「当前项目」的 `.npmrc`。`tauri dev` 的 cwd 是仓库根，
+/// 仓库 `.npmrc` 写了 `legacy-peer-deps=true`，peer 整包不装。给全局安装一个
+/// 自带 package.json 的空项目，npm 就不会再往上走到仓库。
+fn isolated_npm_cwd() -> PathBuf {
+    let dir = std::env::temp_dir().join("kivio-npm-global");
+    let _ = std::fs::create_dir_all(&dir);
+    let pkg = dir.join("package.json");
+    if !pkg.is_file() {
+        let _ = std::fs::write(pkg, "{\"private\":true,\"name\":\"kivio-npm-global\"}\n");
+    }
+    let npmrc = dir.join(".npmrc");
+    if !npmrc.is_file() {
+        let _ = std::fs::write(npmrc, "legacy-peer-deps=false\n");
+    }
+    dir
+}
+
 fn configure_install_command(command: &mut tokio::process::Command, plan: &CommandPlan) {
     expose_node_on_path();
     command.args(&plan.args);
@@ -371,6 +392,11 @@ fn configure_install_command(command: &mut tokio::process::Command, plan: &Comma
     command.env_remove("NPM_CONFIG_DEVDIR");
     if uses_js_package_manager(plan) {
         pin_official_npm_registry(command);
+        command.env_remove("npm_config_legacy_peer_deps");
+        command.env_remove("NPM_CONFIG_LEGACY_PEER_DEPS");
+        if plan.current_dir.is_none() {
+            command.current_dir(isolated_npm_cwd());
+        }
     }
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
@@ -447,6 +473,18 @@ async fn stream_install_child(
                 }
             };
             tokio::select! {
+                // 进程退了就收工。Windows 上 `npm.cmd` 经常在打印完最后一行后
+                // 仍占着 stdout/stderr（funding 提示、批处理包装），等管道 EOF
+                // 会把前端钉死在「执行中」。
+                status = child.wait() => {
+                    if let Some(line) = flush_progress_line(&mut out_acc) {
+                        emit(line);
+                    }
+                    if let Some(line) = flush_progress_line(&mut err_acc) {
+                        emit(line);
+                    }
+                    break status;
+                }
                 Some(result) = out => match result {
                     Ok(0) => {
                         if let Some(line) = flush_progress_line(&mut out_acc) {
@@ -481,10 +519,8 @@ async fn stream_install_child(
                         stderr = None;
                     }
                 },
-                else => break,
             }
         }
-        child.wait().await
     };
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), pump).await {
@@ -508,6 +544,9 @@ async fn run_logged_plan(
     emit(format!("$ {}", plan.display));
     let mut command = crate::external_agents::spawn::cli_command(&plan.program);
     configure_install_command(&mut command, plan);
+    if let Some(dir) = &plan.current_dir {
+        command.current_dir(dir);
+    }
     let child = command
         .no_console_window()
         .kill_on_drop(true)
@@ -948,6 +987,34 @@ struct InstallLogEvent {
 
 const INSTALL_TIMEOUT_SECS: u64 = 300;
 
+async fn dsh_cli_starts(bin: &Path) -> Result<(), String> {
+    let mut command = crate::external_agents::spawn::cli_command(bin);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .no_console_window()
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(20), command.output())
+        .await
+        .map_err(|_| "dsh --version 超时".to_string())?
+        .map_err(|e| format!("无法启动 dsh：{e}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stderr}\n{stdout}");
+    if output.status.success() && !combined.contains("ERR_MODULE_NOT_FOUND") {
+        return Ok(());
+    }
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .find(|line| !line.is_empty())
+        .unwrap_or("dsh --version 失败");
+    Err(format!(
+        "DeepSeek Harness 已写入，但 `dsh --version` 无法启动：{detail}"
+    ))
+}
+
 async fn finish_dsh_install(
     def: &crate::external_agents::types::RuntimeAgentDef,
     emit: &impl Fn(String),
@@ -958,6 +1025,9 @@ async fn finish_dsh_install(
                 .to_string(),
         );
     };
+    crate::external_agents::spawn::invalidate_probe_cache(&bin);
+    dsh_cli_starts(&bin).await?;
+    emit("dsh --version 已通过".to_string());
     emit("正在初始化 Kivio dsh profile（首次需要下载插件）…".to_string());
     crate::external_agents::dsh_profile::ensure_profile_ready(&bin, None, None).await?;
     emit("dsh profile 已就绪".to_string());
@@ -1054,6 +1124,7 @@ pub async fn chat_external_cli_install(app: AppHandle, agent_id: String) -> Resu
 
     let success = stream_install_child(child, &emit, INSTALL_TIMEOUT_SECS).await;
     if success {
+        emit("安装命令已结束，正在确认能否启动…".to_string());
         // npm -g 刚把 shims 写进 %APPDATA%\npm；装之前这个目录可能还不存在，
         // PATH 里也就没有它。不刷新的话紧接着的探测会说「未安装」。
         expose_node_on_path();
@@ -1232,7 +1303,18 @@ mod tests {
     }
 
     #[test]
-    fn dsh_install_and_npm_update_pull_in_the_missing_app_boot_peer() {
+    fn isolated_npm_cwd_is_its_own_project() {
+        let dir = isolated_npm_cwd();
+        let pkg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(pkg["private"], true);
+        let npmrc = std::fs::read_to_string(dir.join(".npmrc")).unwrap();
+        assert!(npmrc.contains("legacy-peer-deps=false"));
+    }
+
+    #[test]
+    fn dsh_install_is_only_the_official_cli_package() {
         let spec = install_spec("dsh").unwrap();
         let install = install_plan(&spec, HostPlatform::Windows).unwrap();
         assert_eq!(install.program, "npm.cmd");
@@ -1242,12 +1324,16 @@ mod tests {
         assert!(install
             .args
             .contains(&"--registry=https://registry.npmjs.org/".to_string()));
-        assert!(install.args.contains(
-            &"--@deepseek-ai:registry=https://registry.npmjs.org/".to_string()
-        ));
-        assert!(install
-            .args
-            .contains(&"@deepseek-ai/cordis-plugin-group@latest".to_string()));
+        assert!(
+            !install
+                .args
+                .iter()
+                .any(|arg| arg.contains("cordis-plugin-group")
+                    || arg.contains("cordis-plugin-loader")
+                    || arg == "@deepseek-ai/cordis@latest"),
+            "额外 -g peer 会破坏 dsh 启动: {:?}",
+            install.args
+        );
 
         let update = update_plan(
             "dsh",
@@ -1258,10 +1344,13 @@ mod tests {
         .unwrap();
         assert!(update
             .args
-            .contains(&"@deepseek-ai/cordis-plugin-group@latest".to_string()));
-        assert!(update
-            .args
-            .contains(&"--registry=https://registry.npmjs.org/".to_string()));
+            .contains(&"@deepseek-ai/dsh@latest".to_string()));
+        assert!(
+            !update
+                .args
+                .iter()
+                .any(|arg| arg.contains("cordis-plugin-group"))
+        );
     }
 
     #[test]
