@@ -753,12 +753,15 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
       <h2 id="changelog-290">v2.9.0 · 2026-08-15</h2>
       <ul>
-        <li><b>DeepSeek Harness</b> —— 新增 dsh 作为外部 CLI：官方供应商、Agent 模式、斜杠命令、工具卡、压缩、Todo、问用户。后台子代理显示实时进度，完成后自动汇报，和官方 web 一致。</li>
-        <li><b>外部 CLI 更稳</b> —— 每个 CLI 记住上次的模型和思考档；轮内重连保留原生会话；发送失败不再丢草稿；顶栏显示实际模型与档位。</li>
-        <li><b>Todo 与问用户</b> —— dsh / Claude Code 的 Todo 接到对话列表；Claude Task 卡立刻显示任务；外部 CLI 问用户收成统一卡片。</li>
-        <li><b>笔记</b> —— 笔记页可打开库文件夹，拖入外部 markdown 自动出现。</li>
-        <li><b>新模型</b> —— 补上 Grok 4.6。</li>
-        <li><b>聊天体验</b> —— 重复点击已打开的会话不再重载；生成中也能置顶；贴底打字不再整屏抖；暗色切会话不闪白；会话不再把图片 base64 写进 JSON。</li>
+        <li><b>DeepSeek Harness</b> —— 新增 dsh 作为外部 CLI 代理：官方供应商、四档 Agent 模式、插件页、斜杠命令（已知命令高亮）、工具卡、压缩，以及 <code>/compact</code> <code>/goal</code> <code>/feedback</code>。重启或改启动配置后仍续上原生会话；顶栏显示实际模型与思考档。后台子代理显示实时进度，完成后把汇报写回父对话，和官方 web 一致。用量条不再把已排除的缓存输入减第二次。</li>
+        <li><b>外部 CLI 更稳</b> —— 每个 CLI 记住上次的模型和思考档，切走再切回不再重置成 Auto。轮内重连保留原生会话，不再开空白对话。Grok 上游 503/429 的静默重试会显示状态。发送失败回填草稿。找不到原生会话时按 ACP 口径降级，不再硬失败。生成中禁止删消息，避免误回收附件。</li>
+        <li><b>Todo、问用户与工具卡</b> —— dsh / Claude Code 的 Todo 接到对话列表；Claude Task 卡立刻显示任务。外部 CLI 问用户收成统一卡片，下一条 CLI 只需加 codec。dsh 官方工具名、压缩和 job 事件走现成卡片与分隔线，不再当成一句 prompt。</li>
+        <li><b>Pi</b> —— 内置 <code>/compact</code> 走原生 compact，不再当 prompt 发给模型。导入尊重 <code>PI_CODING_AGENT_DIR</code> 和共享 MCP / 技能层；原生会话 id 更短。</li>
+        <li><b>Kivio Chat</b> —— 不再继承 Agent 人设和 shell 长文；发送路径挂上知识库；自定义 / 助手文本不能改写 Chat 契约；dock、技能和 <code>/plan</code> 在 Chat 里保持隐藏。</li>
+        <li><b>笔记</b> —— 笔记页可打开库文件夹，拖入外部 markdown 自动出现；目录变化自动刷新，编辑时不会把自己的保存冲掉列表。</li>
+        <li><b>新模型</b> —— 补上 Grok 4.6（500k 上下文），并把 grok CLI 的默认与回退模型从 4.5 抬到 4.6。</li>
+        <li><b>会话存储</b> —— 会话 JSON 不再存图片 base64，改为内容寻址外置，同一张图看多次只留一个文件；打开即迁移存量大文件。启动回收空工作区和已删会话的孤儿附件，非空工作区与用户上传不自动删。含图会话不再把磁盘和打开时的内存打满。</li>
+        <li><b>聊天体验</b> —— 重复点击已打开的会话不再重载；带图会话打开时等 Mermaid 落地再对齐；长文本不再全量哈希。生成中也能钉住。贴底打字不再整屏抖；暗色切会话不闪白。标题打字机失效已修。设置里添加 CLI 模型不再一闪即消。工具轮次默认不限（旧默认 20 会迁一次）。</li>
       </ul>
       <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.9.0" target="_blank" rel="noopener">查看 v2.9.0 Release notes ↗</a></p>
       <h2 id="changelog-289">v2.8.9 · 2026-08-11</h2>
