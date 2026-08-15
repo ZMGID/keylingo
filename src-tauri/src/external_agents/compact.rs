@@ -13,7 +13,9 @@ pub fn compact_prompt_for_agent(agent_id: &str) -> Option<&'static str> {
         // real `thread/compact/start` RPC (as prompt text the model would just role-play it).
         // pi: same deal — intercepted in run_pi_rpc_session and sent as the native
         // `{"type":"compact"}` RPC (pi's rpc.md: built-in commands do not execute via prompt).
-        "pi" | "claude" | "opencode" | "grok" | "codex" => Some("/compact"),
+        // dsh: intercepted in DshJsonRpcSession::run_turn as `session/command` →
+        // `ctx.commands.execute` (slash text as a prompt only role-plays).
+        "pi" | "claude" | "opencode" | "grok" | "codex" | "dsh" => Some("/compact"),
         _ => None,
     }
 }
@@ -72,8 +74,7 @@ mod tests {
         assert_eq!(compact_prompt_for_agent("claude"), Some("/compact"));
         assert_eq!(compact_prompt_for_agent("grok"), Some("/compact"));
         assert_eq!(compact_prompt_for_agent("codex"), Some("/compact"));
+        assert_eq!(compact_prompt_for_agent("dsh"), Some("/compact"));
         assert!(compact_prompt_for_agent("kimi").is_none());
-        // dsh 没有原生 compact RPC；斜杠菜单里的 /compact 只是 prompt 文本，按钮不能假装能压。
-        assert!(compact_prompt_for_agent("dsh").is_none());
     }
 }

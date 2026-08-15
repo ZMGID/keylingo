@@ -11,6 +11,12 @@ interface SessionUsageStripProps {
   apiFormats?: Record<string, string>
   /** 会话主 provider 的 apiFormat（消息没带 provider_id / 表里没有时的兜底）。 */
   defaultApiFormat?: string
+  /**
+   * 覆盖「input 是否已含缓存」。外部 CLI 的用量形状跟会话挂的 Kivio provider 无关：
+   * dsh / claude / pi 已从 input 里扣掉 cache（再减一次会变成 ↑0、缓存 100%）。
+   * 不传则仍按 apiFormat 判断（Anthropic 不减，其余减）。
+   */
+  cacheIncludedInInput?: boolean
 }
 
 /** 缓存命中率：命中缓存的 token 占输入总量（新鲜 + 缓存）的比例。 */
@@ -36,6 +42,7 @@ export function SessionUsageStrip({
   lang,
   apiFormats = {},
   defaultApiFormat = '',
+  cacheIncludedInInput,
 }: SessionUsageStripProps) {
   const totals = useMemo(() => {
     let input = 0
@@ -51,10 +58,10 @@ export function SessionUsageStrip({
       const rawOutput = usage.output_tokens ?? usage.outputTokens
       const rawCached = usage.cached_input_tokens ?? usage.cachedInputTokens
       if (rawInput != null) {
-        // Anthropic 的 input 已排除缓存；其余家 input 含缓存，减掉后与 Anthropic 同口径。
-        input += apiFormat === 'anthropic_messages'
-          ? rawInput
-          : Math.max(0, rawInput - (rawCached ?? 0))
+        // Anthropic / 外部 CLI（dsh 等）的 input 已排除缓存；OpenAI 系 input 含缓存，减掉后同口径。
+        const included = cacheIncludedInInput
+          ?? (apiFormat !== 'anthropic_messages')
+        input += included ? Math.max(0, rawInput - (rawCached ?? 0)) : rawInput
         hasAny = true
       }
       if (rawOutput != null) {
@@ -67,7 +74,7 @@ export function SessionUsageStrip({
       }
     }
     return { input, cached, output, hasAny }
-  }, [apiFormats, defaultApiFormat, messages])
+  }, [apiFormats, cacheIncludedInInput, defaultApiFormat, messages])
 
   if (!totals.hasAny) return null
 

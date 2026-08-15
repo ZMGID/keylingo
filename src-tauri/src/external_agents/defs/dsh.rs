@@ -28,11 +28,11 @@ use super::super::types::{
     RuntimeContext, SlashStrategy, StreamFormat,
 };
 
-/// Official web `/` menu (name-sorted, same copy as the shipped registrations).
-/// JSON-RPC has no command-list RPC; Kivio lists these and sends the line through.
+/// Commands the Kivio bridge can actually execute via `ctx.commands.execute`.
+/// Official web-only entries (`export` / `model` / `permission` / `plan`) stay
+/// off the menu — Kivio already has model / permission / mode pills.
 const DSH_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     ("compact", "Compact older conversation history", None),
-    ("export", "Download this Session log as a ZIP archive", None),
     (
         "feedback",
         "record feedback about this session",
@@ -43,13 +43,6 @@ const DSH_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "set or view the goal for a long-running task",
         Some("[<objective>|clear|edit <objective>|pause|resume]"),
     ),
-    ("model", "选择本会话使用的模型", None),
-    (
-        "permission",
-        "Switch the permission preset (sandbox mode + approval policy)",
-        Some("<preset>"),
-    ),
-    ("plan", "Enter or leave plan mode", Some("[off|message]")),
 ];
 
 pub fn builtin_slash_commands() -> Vec<ExternalCliSlashCommand> {
@@ -118,7 +111,7 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     models_from_stderr: false,
     model_probe: None,
     model_probe_args: None,
-    // 官方 `/` 菜单：只列名并原样发给 dsh，Kivio 不拦截、不本地执行。
+    // 官方 `/` 菜单：只列能走 `session/command` 的条目；run_turn 拦截后交给 registry。
     slash_strategy: SlashStrategy::Dsh,
     // 遥测默认关：任何非空值都算关（上游的隐私开关刻意「误关优于误开」）。用户想开就
     // 在 `~/.dsh/.env` 里自己设 —— 那份 env 由 dsh 自己加载，覆盖不到这里。
@@ -206,18 +199,7 @@ mod tests {
     fn lists_the_official_slash_menu() {
         let commands = builtin_slash_commands();
         let names: Vec<&str> = commands.iter().map(|command| command.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "compact",
-                "export",
-                "feedback",
-                "goal",
-                "model",
-                "permission",
-                "plan"
-            ]
-        );
+        assert_eq!(names, ["compact", "feedback", "goal"]);
         assert!(commands.iter().all(|command| command.slash.starts_with('/')));
     }
 }

@@ -288,7 +288,9 @@ pub enum UnifiedAgentEvent {
     ///
     /// claude 的来源是 `system/task_started`（→ status `running`）与
     /// `system/task_notification`（→ 终态 `completed`/`failed`/`stopped`），见
-    /// `stream/claude.rs`。其余 CLI 目前没有对应协议，不发这条。
+    /// `stream/claude.rs`。dsh 走 `tool/result` 的 job id、`user/message`
+    /// （`source.plugin=tool-jobs`）终态通知，以及 `subagent.started` /
+    /// `subagent.finished` JSON-RPC 边沿。
     BackgroundTask {
         /// CLI 侧的任务 id（claude 的短 id，如 `b2foykvcu`）。注册表按它 upsert。
         task_id: String,

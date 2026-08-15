@@ -323,6 +323,94 @@ describe('ToolCallBlock', () => {
     expect(within(button).queryByText(/file_path/)).not.toBeInTheDocument()
   })
 
+  it('renders a dsh subagent call as a SUBAGENT consult card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'subagent',
+          source: 'external_cli',
+          status: 'running',
+          arguments: {
+            description: '读协议',
+            prompt: '把 dsh 的 session 事件对上 Kivio',
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('SUBAGENT')).toBeInTheDocument()
+    expect(screen.getByText('读协议')).toBeInTheDocument()
+  })
+
+  it('maps dsh str_replace_editor and job_output off the raw JSON row', () => {
+    const { unmount } = render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'str_replace_editor',
+          source: 'external_cli',
+          arguments: JSON.stringify({
+            command: 'str_replace',
+            path: 'E:/proj/src/chat/segments.ts',
+            old_str: 'a',
+            new_str: 'b',
+          }),
+        })}
+      />,
+    )
+    let button = screen.getByRole('button')
+    expect(within(button).getByText('Edit')).toBeInTheDocument()
+    expect(within(button).getByText('segments.ts')).toBeInTheDocument()
+    expect(within(button).queryByText(/str_replace_editor/)).not.toBeInTheDocument()
+    unmount()
+
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'job_output',
+          source: 'external_cli',
+          arguments: JSON.stringify({ job_id: 'job_12' }),
+        })}
+      />,
+    )
+    button = screen.getByRole('button')
+    expect(within(button).getByText('Run')).toBeInTheDocument()
+    expect(within(button).getByText('job_12')).toBeInTheDocument()
+  })
+
+  it('maps dsh run_code to the Python verb, not the raw name', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'run_code',
+          source: 'external_cli',
+          arguments: JSON.stringify({ code: 'console.log(1)' }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Python')).toBeInTheDocument()
+    expect(within(button).queryByText(/run_code/)).not.toBeInTheDocument()
+  })
+
+  it('maps dsh pwsh to Run + the description, not the raw JSON', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'pwsh',
+          source: 'external_cli',
+          arguments: JSON.stringify({
+            command: 'python -X utf8 -c "print(1)"',
+            description: 'Show sheet structure of three Excel files',
+          }),
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Run')).toBeInTheDocument()
+    expect(within(button).getByText('Show sheet structure of three Excel files')).toBeInTheDocument()
+    expect(within(button).queryByText(/pwsh/)).not.toBeInTheDocument()
+    expect(within(button).queryByText(/"command"/)).not.toBeInTheDocument()
+  })
+
   it('maps claude Bash to Run + the command', () => {
     render(
       <ToolCallBlock

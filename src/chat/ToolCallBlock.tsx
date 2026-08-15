@@ -34,7 +34,7 @@ import type { AgentTodoItem, AgentTodoState, AgentTodoStatus, ToolCallRecord, To
 import { normalizeToolCallStatus } from './toolStatus'
 import { formatToolResultPreview } from './toolResultPreview'
 import { hasAskUserStructuredContent, isAskUserToolName } from './askUserTools'
-import { isExternalSubagentToolCall, toolCallDiffStats, toolRecordRawName } from './segments'
+import { canonicalToolName, isExternalSubagentToolCall, toolCallDiffStats, toolRecordRawName } from './segments'
 import { requestDockDiffPreview, requestDockPreview } from './dock/dockPreview'
 import { DiffView } from './dock/DiffView'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
@@ -106,36 +106,12 @@ function parsedArguments(toolCall: ToolCallRecord): Record<string, unknown> | nu
   }
 }
 
-/** 外部 CLI 的内置工具名 → 本文件各 switch 使用的规范名（Kivio 原生工具的 snake_case）。
- *
- *  key 是「小写 + 去掉下划线/连字符/空格」后的形态，所以 `WebFetch` 与 `web_fetch` 归到
- *  同一个 key。表里**只列本文件确实有对应分支**的工具；其余（`Task` / `Skill` 的独有语义等）
- *  保持原名走 default —— 显示工具本名，比映射到一个语义不符的分支好。 */
-const CLI_TOOL_NAME_ALIASES: Record<string, string> = {
-  webfetch: 'web_fetch',
-  websearch: 'web_search',
-  todowrite: 'todo_write',
-  // claude 的 MultiEdit 用 `edits[]`，正是 `fileToolArgumentPreview` 的 edit 分支已支持的形状。
-  multiedit: 'edit',
-  // NotebookEdit 的目标路径在 `notebook_path`，见 `toolPathArgument`。
-  notebookedit: 'edit',
-  // 问用户工具名 → 本文件 `ask_user` 分支（图标等）。识别本身走 `isAskUserToolName`，
-  // 新 CLI 加名字请改 `askUserTools.ts`，不要在这里再加一条。
-  askuserquestion: 'ask_user',
-}
-
-/** 展示映射用的规范工具名。
- *
- *  `toolRecordRawName` 原样返回工具名、不做归一化，而下面所有 switch 分支写的都是小写
- *  snake_case —— claude Code 的内置工具是 PascalCase 的 `Read` / `Bash` / `Grep` / `Glob` /
- *  `Edit` / `WebFetch` / `TodoWrite`，于是**全部落进 default**：`getToolTarget` 返回 ''，
- *  折叠行退到 `previewValue(arguments)`，显示一坨 220 字符截断的 JSON，完全不可扫读。
+/** 展示映射用的规范工具名（别名表在 `canonicalToolName`）。
  *
  *  **只用于 switch 匹配，不要拿它当显示文案**：MCP 工具名（`mcp__server__toolName`）的
  *  大小写有意义，`getToolName` 的 default 分支必须回落 `toolRecordRawName` 的原名。 */
 function toolRawName(toolCall: ToolCallRecord): string {
-  const lower = toolRecordRawName(toolCall).toLowerCase()
-  return CLI_TOOL_NAME_ALIASES[lower.replace(/[_\-\s]/g, '')] ?? lower
+  return canonicalToolName(toolCall)
 }
 
 /** 文件类工具的目标路径。
@@ -1263,7 +1239,7 @@ function getToolTarget(toolCall: ToolCallRecord): string {
       }
       case 'bash':
       case 'run_command':
-        return compactText(firstString(args?.description, args?.command), 160)
+        return compactText(firstString(args?.description, args?.command, args?.job_id, args?.jobId), 160)
       case 'grep':
       case 'search_files':
         return compactText(firstString(args?.query, args?.pattern), 140)
@@ -1294,7 +1270,7 @@ function getToolTarget(toolCall: ToolCallRecord): string {
         return compactText(firstString(args?.query), 140)
       case 'todo_write': {
         const counts = formatTodoCounts(normalizeTodoItems(args?.todos))
-        return counts
+        return counts || compactText(firstString(args?.objective, args?.content), 140)
       }
       case 'taskcreate':
         return compactText(firstString(args?.subject, args?.content), 140)

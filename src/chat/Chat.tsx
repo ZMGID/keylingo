@@ -4363,9 +4363,21 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         lang={uiLang}
         apiFormats={providerApiFormats}
         defaultApiFormat={currentConversation ? (providerApiFormats[currentConversation.provider_id] ?? '') : ''}
+        cacheIncludedInInput={
+          usesExternalRuntime
+            ? activeAgentRuntime.externalAgentId === 'codex'
+            : undefined
+        }
       />
     ),
-    [currentConversation, displayMessages, providerApiFormats, uiLang],
+    [
+      activeAgentRuntime.externalAgentId,
+      currentConversation,
+      displayMessages,
+      providerApiFormats,
+      uiLang,
+      usesExternalRuntime,
+    ],
   )
 
   const emptyHeroGreeting = useMemo(

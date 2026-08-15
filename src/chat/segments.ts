@@ -11,10 +11,62 @@ export function toolRecordRawName(toolCall: ToolCallRecord): string {
   return toolCall.tool_name || toolCall.toolName || toolCall.name || ''
 }
 
+/**
+ * 展示/分类用的规范工具名：小写 + 去分隔符后查别名。
+ * dsh 在 Windows 上把 bash 报成 `pwsh`；claude 是 PascalCase 的 `Bash` / `Read`。
+ */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  todowrite: 'todo_write',
+  multiedit: 'edit',
+  notebookedit: 'edit',
+  askuserquestion: 'ask_user',
+  pwsh: 'bash',
+  powershell: 'bash',
+  cmd: 'bash',
+  shell: 'bash',
+  joboutput: 'run_command',
+  joblist: 'run_command',
+  jobkill: 'run_command',
+  getgoal: 'todo_write',
+  creategoal: 'todo_write',
+  updategoal: 'todo_write',
+  readimage: 'read',
+  runcode: 'run_python',
+  subagent: 'agent',
+  subagentfork: 'agent',
+  listagents: 'agent',
+  sendmessage: 'agent',
+  interruptagent: 'agent',
+  workflow: 'agent',
+  ralph: 'agent',
+  cordisdefine: 'run_command',
+  cordisrun: 'run_command',
+  cordisstop: 'run_command',
+  cordisundefine: 'run_command',
+}
+
+function foldedToolName(toolCall: ToolCallRecord): string {
+  return toolRecordRawName(toolCall).toLowerCase().replace(/[_\-\s]/g, '')
+}
+
+export function canonicalToolName(toolCall: ToolCallRecord): string {
+  const folded = foldedToolName(toolCall)
+  if (folded === 'strreplaceeditor') {
+    const command = recordString(parsedToolArguments(toolCall)?.command)
+    if (command === 'view') return 'read'
+    if (command === 'create') return 'write'
+    return 'edit'
+  }
+  if (folded.startsWith('cordisinspect')) return 'read'
+  return TOOL_NAME_ALIASES[folded] ?? toolRecordRawName(toolCall).toLowerCase()
+}
+
 /** Edit/Write 类工具名（含外部 CLI 的 Edit/Write/MultiEdit/NotebookEdit 变体）。 */
 function isFileWriteToolName(toolCall: ToolCallRecord): boolean {
-  const name = toolRecordRawName(toolCall).toLowerCase().replace(/[_\-\s]/g, '')
-  return ['write', 'writefile', 'edit', 'editfile', 'multiedit', 'notebookedit'].includes(name)
+  const name = canonicalToolName(toolCall)
+  return name === 'write' || name === 'write_file' || name === 'edit' || name === 'edit_file'
 }
 
 function recordObject(value: unknown): Record<string, unknown> | null {
@@ -77,9 +129,14 @@ export function toolCallDiffStats(toolCall: ToolCallRecord): DiffStats | null {
       additions += lines(recordString(pair?.new_string))
       removals += lines(recordString(pair?.old_string))
     }
-  } else if (recordString(args?.old_string) || recordString(args?.new_string)) {
-    additions = lines(recordString(args?.new_string))
-    removals = lines(recordString(args?.old_string))
+  } else if (
+    recordString(args?.old_string)
+    || recordString(args?.new_string)
+    || recordString(args?.old_str)
+    || recordString(args?.new_str)
+  ) {
+    additions = lines(recordString(args?.new_string) || recordString(args?.new_str))
+    removals = lines(recordString(args?.old_string) || recordString(args?.old_str))
   } else {
     additions = lines(recordString(args?.content) || recordString(args?.text))
   }
@@ -109,12 +166,18 @@ export function userSteerText(toolCall: ToolCallRecord): string {
   return typeof text === 'string' ? text : ''
 }
 
-/** 外部 CLI 的子代理工具调用：claude 新版报 `Agent`、旧版报 `Task`（source 恒为
- *  `external_cli`，CLI 报自己的原始工具名）。精确匹配整名，MCP/native 不受影响。 */
+/** 外部 CLI 的子代理工具调用：claude 新版报 `Agent`、旧版报 `Task`；dsh 报
+ *  `subagent` / `subagent_fork` / `workflow` / `ralph`（source 恒为 `external_cli`）。
+ *  精确匹配整名，MCP/native 不受影响。 */
 export function isExternalSubagentToolCall(toolCall: ToolCallRecord): boolean {
   if (toolCall.source !== 'external_cli') return false
-  const name = toolRecordRawName(toolCall).toLowerCase()
-  return name === 'agent' || name === 'task'
+  const name = foldedToolName(toolCall)
+  return name === 'agent'
+    || name === 'task'
+    || name === 'subagent'
+    || name === 'subagentfork'
+    || name === 'workflow'
+    || name === 'ralph'
 }
 
 /** Tool calls that render as their own dedicated, always-visible card in the
@@ -250,7 +313,7 @@ export type ToolGroupCategory =
 export type ToolGroupIcon = ToolGroupCategory | 'reasoning'
 
 function categorizeTool(toolCall: ToolCallRecord): ToolGroupCategory {
-  const raw = toolRecordRawName(toolCall)
+  const raw = canonicalToolName(toolCall)
   switch (raw) {
     case 'read':
     case 'read_file':

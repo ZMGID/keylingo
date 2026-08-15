@@ -110,12 +110,40 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     return { sessionId, cancelled: true }
   }
 
+  async command(params) {
+    const sessionId = requireSessionId(params.sessionId)
+    const line = typeof params.line === 'string' ? params.line.trim() : ''
+    if (!line.startsWith('/')) {
+      throw new Error('session/command line must start with /')
+    }
+    const record = await this.getOrCreateSession(sessionId)
+    const commands = this.ctx.commands
+    if (!commands || typeof commands.execute !== 'function') {
+      throw new Error('commands registry is not available')
+    }
+    const execution = await commands.execute(
+      record.handle.agent,
+      line,
+      new AbortController().signal,
+    )
+    if (!execution) {
+      throw new Error(`unregistered command: ${line}`)
+    }
+    return {
+      commandId: execution.commandId,
+      kind: execution.result.kind,
+      text: execution.result.text ?? '',
+    }
+  }
+
   async handleRequest(method, params) {
     switch (method) {
       case 'session/open':
         return this.open(params)
       case 'session/cancel':
         return this.cancel(params)
+      case 'session/command':
+        return this.command(params)
       default:
         return super.handleRequest(method, params)
     }
@@ -135,7 +163,7 @@ function requireSessionId(value) {
 }
 
 export const name = 'kivio-dsh-jsonrpc-bridge'
-export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions']
+export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands']
 export const Config = Schema.object({
   maxTokensAsSuccess: Schema.boolean().default(false),
 })

@@ -71,6 +71,24 @@ describe('SessionUsageStrip', () => {
     expect(screen.getByText('缓存 23%')).toBeTruthy()
   })
 
+  it('does not subtract cache from dsh-style input (already exclusive)', () => {
+    render(
+      <SessionUsageStrip
+        lang="zh"
+        defaultApiFormat="openai_chat"
+        cacheIncludedInInput={false}
+        messages={[
+          assistant({ input_tokens: 457, output_tokens: 1442, cached_input_tokens: 51_456 }),
+          assistant({ input_tokens: 122, output_tokens: 600, cached_input_tokens: 54_528 }),
+        ]}
+      />,
+    )
+    // 再减一次会变成 ↑0 / 缓存 100%。新鲜输入 457+122=579。
+    expect(screen.getByText('↑579')).toBeTruthy()
+    expect(screen.getByText('缓存 99%')).toBeTruthy()
+    expect(screen.getByText('↓2.0K')).toBeTruthy()
+  })
+
   it('supports camelCase fields and hides the cache item when no cache was reported', () => {
     render(
       <SessionUsageStrip
