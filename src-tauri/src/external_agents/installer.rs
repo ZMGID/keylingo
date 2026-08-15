@@ -1,10 +1,13 @@
 //! 设置页「本地 CLI Agent」的安装/更新支撑：官方安装方式表、npm registry 最新版查询、
 //! 带流式日志的安装执行、配置目录打开。
 //!
-//! ponytail: 只做「查版本 / 跑一条官方命令 / 打开目录」三件事。**没有**卸载、没有取消、
-//! 没有多后端策略协商（ccgui 那套 1800 行的 installer 里九成是它自己的多引擎场景）。
-//! 需要卸载时再加——用户自己 `npm uninstall -g` 也就一行。
+//! ponytail: 查版本 / 跑官方命令 / 打开目录。**没有**卸载、没有取消、没有多后端策略协商。
+//! npm 系 CLI 在跑命令前会补 Node（dsh 再补 pnpm）：小白机器上没有 Node 时直接
+//! `npm.cmd` 只会丢「找不到文件」。
+//! npm / pnpm / yarn / bun 的安装命令一律钉死 `registry.npmjs.org`：国内镜像经常
+//! 缺 `@deepseek-ai/*` 这类新包，用户自己的 `.npmrc` 不能把安装带跑偏。
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -217,6 +220,429 @@ fn display_token(value: &str) -> String {
     }
 }
 
+const NODE_DOWNLOAD_URL: &str = "https://nodejs.org";
+const NPMJS_REGISTRY: &str = "https://registry.npmjs.org/";
+const NPMJS_REGISTRY_FLAG: &str = "--registry=https://registry.npmjs.org/";
+const DEEPSEEK_SCOPE_REGISTRY_FLAG: &str = "--@deepseek-ai:registry=https://registry.npmjs.org/";
+
+fn uses_npm(plan: &CommandPlan) -> bool {
+    plan.program == "npm" || plan.program == "npm.cmd"
+}
+
+fn uses_js_package_manager(plan: &CommandPlan) -> bool {
+    matches!(
+        plan.program.as_str(),
+        "npm" | "npm.cmd" | "pnpm" | "pnpm.cmd" | "yarn" | "yarn.cmd" | "bun" | "bun.exe"
+    )
+}
+
+/// 覆盖用户 `.npmrc` / `npm_config_registry` 里的淘宝等镜像。CLI `--registry` 盖不住
+/// 作用域配置（`@deepseek-ai:registry=`），所以安装 `@deepseek-ai/*` 时另外带一条。
+pub(crate) fn pin_official_npm_registry(command: &mut tokio::process::Command) {
+    command.env("npm_config_registry", NPMJS_REGISTRY);
+    command.env("NPM_CONFIG_REGISTRY", NPMJS_REGISTRY);
+}
+
+fn needs_deepseek_scope_registry(package: &str, extra_args: &[&str]) -> bool {
+    package.starts_with("@deepseek-ai/")
+        || extra_args
+            .iter()
+            .any(|arg| arg.starts_with("@deepseek-ai/"))
+}
+
+/// `node --version` 输出 → (major, minor, patch)。认 `v24.13.0` / `24.13.0`。
+fn parse_node_version(text: &str) -> Option<(u64, u64, u64)> {
+    let text = text.trim().trim_start_matches('v');
+    let mut parts = text
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty());
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ))
+}
+
+/// dsh 官方 `engines.node`：`^22.19.0 || >=24.0.0`（不含 23）。
+fn node_meets_dsh(version: (u64, u64, u64)) -> bool {
+    let (major, minor, _) = version;
+    (major == 22 && minor >= 19) || major >= 24
+}
+
+fn missing_node_message(for_dsh: bool) -> String {
+    if for_dsh {
+        format!(
+            "安装 DeepSeek Harness 需要 Node.js 22.19+ 或 24+（以及 npm）。\
+             当前电脑没有可用的 Node.js，自动安装也没有成功。\
+             请打开 {NODE_DOWNLOAD_URL} 下载 LTS 版本，装好后重新打开 Kivio 再点安装。"
+        )
+    } else {
+        format!(
+            "安装该 CLI 需要 Node.js 和 npm。当前电脑没有可用的 Node.js，自动安装也没有成功。\
+             请打开 {NODE_DOWNLOAD_URL} 下载 LTS 版本后重试。"
+        )
+    }
+}
+
+fn dsh_node_too_old_message(found: &str) -> String {
+    format!(
+        "当前 Node.js 为 {found}，DeepSeek Harness 需要 22.19+ 或 24+（不含 23）。\
+         请打开 {NODE_DOWNLOAD_URL} 安装匹配的 LTS 版本后重试。"
+    )
+}
+
+fn prepend_path_dirs(dirs: &[PathBuf]) {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let mut extra = Vec::new();
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let value = dir.to_string_lossy().into_owned();
+        let already = extra.iter().any(|item: &String| path_eq(item, &value))
+            || current.split(sep).any(|item| path_eq(item, &value));
+        if !already {
+            extra.push(value);
+        }
+    }
+    if extra.is_empty() {
+        return;
+    }
+    if current.is_empty() {
+        std::env::set_var("PATH", extra.join(&sep.to_string()));
+    } else {
+        extra.push(current);
+        std::env::set_var("PATH", extra.join(&sep.to_string()));
+    }
+}
+
+fn path_eq(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn known_node_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(windows)]
+    {
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(root) = std::env::var(var) {
+                let root = root.trim().trim_end_matches('\\');
+                if !root.is_empty() {
+                    dirs.push(PathBuf::from(root).join("nodejs"));
+                }
+            }
+        }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        dirs.push(PathBuf::from(r"D:\Program Files\nodejs"));
+        dirs.push(PathBuf::from(r"E:\Program Files\nodejs"));
+    }
+    #[cfg(not(windows))]
+    {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        if let Ok(home) = std::env::var("HOME") {
+            dirs.push(PathBuf::from(&home).join(".local").join("bin"));
+        }
+    }
+    dirs
+}
+
+pub(crate) fn expose_node_on_path() {
+    crate::path_env::refresh_path_now();
+    prepend_path_dirs(&known_node_dirs());
+}
+
+pub(crate) async fn ensure_pnpm_for_dsh() -> Result<(), String> {
+    expose_node_on_path();
+    ensure_pnpm(&|line| eprintln!("[dsh] {line}")).await
+}
+
+fn configure_install_command(command: &mut tokio::process::Command, plan: &CommandPlan) {
+    expose_node_on_path();
+    command.args(&plan.args);
+    command.env_remove("npm_config_devdir");
+    command.env_remove("NPM_CONFIG_DEVDIR");
+    if uses_js_package_manager(plan) {
+        pin_official_npm_registry(command);
+    }
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+}
+
+async fn probe_version(program: &str) -> Option<String> {
+    let mut command = crate::external_agents::spawn::cli_command(program);
+    command.arg("--version");
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.no_console_window();
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(8), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let first = text.lines().find(|line| !line.trim().is_empty())?;
+    Some(first.trim().to_string())
+}
+
+async fn first_working_program(names: &[&str]) -> Option<String> {
+    for name in names {
+        if probe_version(name).await.is_some() {
+            return Some((*name).to_string());
+        }
+    }
+    None
+}
+
+async fn probe_node() -> Option<String> {
+    for name in ["node", "node.exe"] {
+        if let Some(version) = probe_version(name).await {
+            return Some(version);
+        }
+    }
+    None
+}
+
+async fn npm_is_ready() -> bool {
+    first_working_program(&["npm.cmd", "npm"]).await.is_some()
+}
+
+async fn pnpm_is_ready() -> bool {
+    first_working_program(&["pnpm.cmd", "pnpm"]).await.is_some()
+}
+
+async fn stream_install_child(
+    mut child: tokio::process::Child,
+    emit: &impl Fn(String),
+    timeout_secs: u64,
+) -> bool {
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut out_acc = Vec::new();
+    let mut err_acc = Vec::new();
+    let mut out_buf = [0u8; 1024];
+    let mut err_buf = [0u8; 1024];
+
+    let pump = async {
+        loop {
+            let out = async {
+                match stdout.as_mut() {
+                    Some(reader) => Some(reader.read(&mut out_buf).await),
+                    None => std::future::pending().await,
+                }
+            };
+            let err = async {
+                match stderr.as_mut() {
+                    Some(reader) => Some(reader.read(&mut err_buf).await),
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                Some(result) = out => match result {
+                    Ok(0) => {
+                        if let Some(line) = flush_progress_line(&mut out_acc) {
+                            emit(line);
+                        }
+                        stdout = None;
+                    }
+                    Ok(n) => {
+                        for line in take_progress_lines(&mut out_acc, &out_buf[..n]) {
+                            emit(line);
+                        }
+                    }
+                    Err(e) => {
+                        emit(format!("读取安装输出失败: {e}"));
+                        stdout = None;
+                    }
+                },
+                Some(result) = err => match result {
+                    Ok(0) => {
+                        if let Some(line) = flush_progress_line(&mut err_acc) {
+                            emit(line);
+                        }
+                        stderr = None;
+                    }
+                    Ok(n) => {
+                        for line in take_progress_lines(&mut err_acc, &err_buf[..n]) {
+                            emit(line);
+                        }
+                    }
+                    Err(e) => {
+                        emit(format!("读取安装输出失败: {e}"));
+                        stderr = None;
+                    }
+                },
+                else => break,
+            }
+        }
+        child.wait().await
+    };
+
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), pump).await {
+        Ok(Ok(status)) => status.success(),
+        Ok(Err(e)) => {
+            emit(format!("安装命令异常结束: {e}"));
+            false
+        }
+        Err(_) => {
+            emit(format!("安装超时（{timeout_secs}s），已放弃"));
+            false
+        }
+    }
+}
+
+async fn run_logged_plan(
+    plan: &CommandPlan,
+    emit: &impl Fn(String),
+    timeout_secs: u64,
+) -> Result<(), String> {
+    emit(format!("$ {}", plan.display));
+    let mut command = crate::external_agents::spawn::cli_command(&plan.program);
+    configure_install_command(&mut command, plan);
+    let child = command
+        .no_console_window()
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("启动命令失败: {e}"))?;
+    if stream_install_child(child, emit, timeout_secs).await {
+        Ok(())
+    } else {
+        Err(format!("命令失败：{}", plan.display))
+    }
+}
+
+async fn bootstrap_node(emit: &impl Fn(String)) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut candidates = vec!["winget".to_string()];
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            candidates.push(
+                PathBuf::from(local)
+                    .join("Microsoft")
+                    .join("WindowsApps")
+                    .join("winget.exe")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        let names: Vec<&str> = candidates.iter().map(String::as_str).collect();
+        if let Some(winget) = first_working_program(&names).await {
+            emit("未检测到 Node.js，正在通过 winget 安装 Node.js LTS…".to_string());
+            let plan = CommandPlan::direct(
+                winget,
+                &[
+                    "install",
+                    "--id",
+                    "OpenJS.NodeJS.LTS",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--disable-interactivity",
+                ],
+            );
+            run_logged_plan(&plan, emit, 300).await?;
+            prepend_path_dirs(&known_node_dirs());
+            return Ok(());
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(brew) =
+            first_working_program(&["brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew"]).await
+        {
+            emit("未检测到 Node.js，正在通过 Homebrew 安装 Node.js…".to_string());
+            let plan = CommandPlan::direct(brew, &["install", "node"]);
+            run_logged_plan(&plan, emit, 300).await?;
+            prepend_path_dirs(&known_node_dirs());
+            return Ok(());
+        }
+    }
+    Err("本机没有可用的 Node.js 安装器（Windows 需要 winget，macOS 需要 Homebrew）".to_string())
+}
+
+async fn ensure_node(for_dsh: bool, emit: &impl Fn(String)) -> Result<(), String> {
+    expose_node_on_path();
+    if let Some(version) = probe_node().await {
+        if npm_is_ready().await {
+            if for_dsh {
+                match parse_node_version(&version) {
+                    Some(parsed) if node_meets_dsh(parsed) => return Ok(()),
+                    _ => return Err(dsh_node_too_old_message(&version)),
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    match bootstrap_node(emit).await {
+        Ok(()) => {}
+        Err(err) => emit(format!("自动安装 Node.js 未成功：{err}")),
+    }
+    expose_node_on_path();
+
+    let Some(version) = probe_node().await else {
+        return Err(missing_node_message(for_dsh));
+    };
+    if !npm_is_ready().await {
+        return Err(missing_node_message(for_dsh));
+    }
+    if for_dsh {
+        match parse_node_version(&version) {
+            Some(parsed) if node_meets_dsh(parsed) => {}
+            _ => return Err(dsh_node_too_old_message(&version)),
+        }
+    }
+    emit(format!("Node.js {version} 已就绪"));
+    Ok(())
+}
+
+async fn ensure_pnpm(emit: &impl Fn(String)) -> Result<(), String> {
+    if pnpm_is_ready().await {
+        return Ok(());
+    }
+    emit("未检测到 pnpm，正在安装（dsh 的插件安装依赖它）…".to_string());
+    let plan = npm_install_plan("pnpm", &[], host_platform());
+    if let Err(err) = run_logged_plan(&plan, emit, 180).await {
+        emit(format!("自动安装 pnpm 未成功：{err}"));
+    }
+    expose_node_on_path();
+    if pnpm_is_ready().await {
+        emit("pnpm 已就绪".to_string());
+        return Ok(());
+    }
+    Err(format!(
+        "DeepSeek Harness 需要 pnpm 来安装 profile 插件，但当前电脑没有 pnpm。\
+         请打开 https://pnpm.io/installation 安装后重试。"
+    ))
+}
+
+async fn prepare_npm_toolchain(
+    agent_id: &str,
+    plan: &CommandPlan,
+    emit: &impl Fn(String),
+) -> Result<(), String> {
+    let for_dsh = agent_id == "dsh";
+    if !uses_npm(plan) && !for_dsh {
+        return Ok(());
+    }
+    ensure_node(for_dsh, emit).await?;
+    if for_dsh {
+        ensure_pnpm(emit).await?;
+    }
+    Ok(())
+}
+
 fn npm_install_plan(package: &str, extra_args: &[&str], platform: HostPlatform) -> CommandPlan {
     let program = if platform == HostPlatform::Windows {
         "npm.cmd"
@@ -225,10 +651,30 @@ fn npm_install_plan(package: &str, extra_args: &[&str], platform: HostPlatform) 
     };
     // `--progress=false`：npm 默认进度条用 `\r` 刷同一行。按行读会看起来像卡住，
     // 管道缓冲区填满后安装进程还会死锁。关掉进度条，改走普通日志行。
-    let mut args = vec!["install", "-g", "--progress=false"];
+    let mut args = vec!["install", "-g", "--progress=false", NPMJS_REGISTRY_FLAG];
+    if needs_deepseek_scope_registry(package, extra_args) {
+        args.push(DEEPSEEK_SCOPE_REGISTRY_FLAG);
+    }
     args.extend_from_slice(extra_args);
     let package = format!("{package}@latest");
     args.push(&package);
+    CommandPlan::direct(program, &args)
+}
+
+fn js_global_add_plan(
+    program: &str,
+    prefix: &[&str],
+    package: &str,
+    extra_args: &[&str],
+) -> CommandPlan {
+    let latest = format!("{package}@latest");
+    let mut args = prefix.to_vec();
+    args.push(NPMJS_REGISTRY_FLAG);
+    if needs_deepseek_scope_registry(package, extra_args) {
+        args.push(DEEPSEEK_SCOPE_REGISTRY_FLAG);
+    }
+    args.extend_from_slice(extra_args);
+    args.push(&latest);
     CommandPlan::direct(program, &args)
 }
 
@@ -263,21 +709,27 @@ fn managed_package_update_plan(
         return Some(CommandPlan::direct("brew", &["upgrade", brew_formula]));
     }
     if normalized.contains("/.pnpm/") || normalized.contains("/pnpm/global/") {
-        return Some(CommandPlan::direct(
+        return Some(js_global_add_plan(
             "pnpm",
-            &["add", "-g", &format!("{package}@latest")],
+            &["add", "-g"],
+            package,
+            extra_args,
         ));
     }
     if normalized.contains("/.config/yarn/global/") || normalized.contains("/.yarn/global/") {
-        return Some(CommandPlan::direct(
+        return Some(js_global_add_plan(
             "yarn",
-            &["global", "add", &format!("{package}@latest")],
+            &["global", "add"],
+            package,
+            extra_args,
         ));
     }
     if normalized.contains("/.bun/install/global/") {
-        return Some(CommandPlan::direct(
+        return Some(js_global_add_plan(
             "bun",
-            &["add", "-g", &format!("{package}@latest")],
+            &["add", "-g"],
+            package,
+            extra_args,
         ));
     }
     if normalized.contains("/node_modules/")
@@ -496,6 +948,22 @@ struct InstallLogEvent {
 
 const INSTALL_TIMEOUT_SECS: u64 = 300;
 
+async fn finish_dsh_install(
+    def: &crate::external_agents::types::RuntimeAgentDef,
+    emit: &impl Fn(String),
+) -> Result<(), String> {
+    let Some(bin) = crate::external_agents::spawn::resolve_binary(def).await else {
+        return Err(
+            "DeepSeek Harness 已装上，但当前进程还找不到 dsh 命令。请关掉 Kivio 再打开，然后重新扫描。"
+                .to_string(),
+        );
+    };
+    emit("正在初始化 Kivio dsh profile（首次需要下载插件）…".to_string());
+    crate::external_agents::dsh_profile::ensure_profile_ready(&bin, None, None).await?;
+    emit("dsh profile 已就绪".to_string());
+    Ok(())
+}
+
 /// 把一块输出拆成日志行。`\n` 和 `\r` 都算换行——npm 进度条只写 `\r`，按 `\n` 读
 /// 会一直等，管道塞满后安装进程自己也写不动。
 fn take_progress_lines(acc: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
@@ -539,22 +1007,17 @@ pub async fn chat_external_cli_install(app: AppHandle, agent_id: String) -> Resu
             .ok_or_else(|| "该 CLI 没有一键安装方式，请按官方文档手动安装".to_string())?,
     };
     let command_line = plan.display.clone();
-
-    let mut command = crate::external_agents::spawn::cli_command(&plan.program);
-    command.args(&plan.args);
-    // Cursor 会给宿主进程塞 `npm_config_devdir`，子进程 npm 11 只打一行 warn，
-    // 看起来像安装失败。这不是用户的 npm 配置，装 CLI 时剥掉。
-    command.env_remove("npm_config_devdir");
-    command.env_remove("NPM_CONFIG_DEVDIR");
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .no_console_window()
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("启动安装命令失败: {e}"))?;
-
+    let emit_done = |success: bool| {
+        let _ = app.emit(
+            "external-cli-install",
+            InstallLogEvent {
+                agent_id: agent_id.clone(),
+                line: None,
+                done: true,
+                success,
+            },
+        );
+    };
     let emit = |line: String| {
         let _ = app.emit(
             "external-cli-install",
@@ -566,86 +1029,42 @@ pub async fn chat_external_cli_install(app: AppHandle, agent_id: String) -> Resu
             },
         );
     };
+
+    if let Err(err) = prepare_npm_toolchain(&agent_id, &plan, &emit).await {
+        emit_done(false);
+        return Err(err);
+    }
+
+    let mut command = crate::external_agents::spawn::cli_command(&plan.program);
+    configure_install_command(&mut command, &plan);
+    let child = command
+        .no_console_window()
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            emit_done(false);
+            if e.kind() == std::io::ErrorKind::NotFound && uses_npm(&plan) {
+                missing_node_message(agent_id == "dsh")
+            } else {
+                format!("启动安装命令失败: {e}")
+            }
+        })?;
+
     emit(format!("$ {command_line}"));
 
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let mut out_acc = Vec::new();
-    let mut err_acc = Vec::new();
-    let mut out_buf = [0u8; 1024];
-    let mut err_buf = [0u8; 1024];
-
-    let pump = async {
-        loop {
-            let out = async {
-                match stdout.as_mut() {
-                    Some(reader) => Some(reader.read(&mut out_buf).await),
-                    None => std::future::pending().await,
-                }
-            };
-            let err = async {
-                match stderr.as_mut() {
-                    Some(reader) => Some(reader.read(&mut err_buf).await),
-                    None => std::future::pending().await,
-                }
-            };
-            tokio::select! {
-                Some(result) = out => match result {
-                    Ok(0) => {
-                        if let Some(line) = flush_progress_line(&mut out_acc) {
-                            emit(line);
-                        }
-                        stdout = None;
-                    }
-                    Ok(n) => {
-                        for line in take_progress_lines(&mut out_acc, &out_buf[..n]) {
-                            emit(line);
-                        }
-                    }
-                    Err(e) => {
-                        emit(format!("读取安装输出失败: {e}"));
-                        stdout = None;
-                    }
-                },
-                Some(result) = err => match result {
-                    Ok(0) => {
-                        if let Some(line) = flush_progress_line(&mut err_acc) {
-                            emit(line);
-                        }
-                        stderr = None;
-                    }
-                    Ok(n) => {
-                        for line in take_progress_lines(&mut err_acc, &err_buf[..n]) {
-                            emit(line);
-                        }
-                    }
-                    Err(e) => {
-                        emit(format!("读取安装输出失败: {e}"));
-                        stderr = None;
-                    }
-                },
-                else => break,
+    let success = stream_install_child(child, &emit, INSTALL_TIMEOUT_SECS).await;
+    if success {
+        // npm -g 刚把 shims 写进 %APPDATA%\npm；装之前这个目录可能还不存在，
+        // PATH 里也就没有它。不刷新的话紧接着的探测会说「未安装」。
+        expose_node_on_path();
+        if agent_id == "dsh" {
+            if let Err(err) = finish_dsh_install(def, &emit).await {
+                emit(err.clone());
+                emit_done(false);
+                return Err(err);
             }
         }
-        child.wait().await
-    };
-
-    let success = match tokio::time::timeout(
-        std::time::Duration::from_secs(INSTALL_TIMEOUT_SECS),
-        pump,
-    )
-    .await
-    {
-        Ok(Ok(status)) => status.success(),
-        Ok(Err(e)) => {
-            emit(format!("安装命令异常结束: {e}"));
-            false
-        }
-        Err(_) => {
-            emit(format!("安装超时（{INSTALL_TIMEOUT_SECS}s），已放弃"));
-            false
-        }
-    };
+    }
 
     let _ = app.emit(
         "external-cli-install",
@@ -822,6 +1241,12 @@ mod tests {
             .contains(&"@deepseek-ai/dsh@latest".to_string()));
         assert!(install
             .args
+            .contains(&"--registry=https://registry.npmjs.org/".to_string()));
+        assert!(install.args.contains(
+            &"--@deepseek-ai:registry=https://registry.npmjs.org/".to_string()
+        ));
+        assert!(install
+            .args
             .contains(&"@deepseek-ai/cordis-plugin-group@latest".to_string()));
 
         let update = update_plan(
@@ -834,6 +1259,63 @@ mod tests {
         assert!(update
             .args
             .contains(&"@deepseek-ai/cordis-plugin-group@latest".to_string()));
+        assert!(update
+            .args
+            .contains(&"--registry=https://registry.npmjs.org/".to_string()));
+    }
+
+    #[test]
+    fn npm_install_pins_official_registry_and_deepseek_scope() {
+        let dsh = npm_install_plan(
+            "@deepseek-ai/dsh",
+            &["@deepseek-ai/cordis-plugin-group@latest"],
+            HostPlatform::Windows,
+        );
+        assert_eq!(dsh.program, "npm.cmd");
+        assert!(dsh
+            .args
+            .contains(&"--registry=https://registry.npmjs.org/".to_string()));
+        assert!(dsh.args.contains(
+            &"--@deepseek-ai:registry=https://registry.npmjs.org/".to_string()
+        ));
+
+        let claude = npm_install_plan("@anthropic-ai/claude-code", &[], HostPlatform::Unix);
+        assert!(claude
+            .args
+            .contains(&"--registry=https://registry.npmjs.org/".to_string()));
+        assert!(!claude
+            .args
+            .iter()
+            .any(|arg| arg.contains("@deepseek-ai:registry")));
+    }
+
+    #[test]
+    fn parse_node_version_reads_common_version_lines() {
+        assert_eq!(parse_node_version("v24.13.0"), Some((24, 13, 0)));
+        assert_eq!(parse_node_version("22.19.1"), Some((22, 19, 1)));
+        assert_eq!(parse_node_version("v22.19.0-pre"), Some((22, 19, 0)));
+        assert_eq!(parse_node_version("not a version"), None);
+    }
+
+    #[test]
+    fn dsh_node_engine_matches_official_range() {
+        assert!(!node_meets_dsh((18, 20, 0)));
+        assert!(!node_meets_dsh((20, 19, 0)));
+        assert!(!node_meets_dsh((22, 18, 0)));
+        assert!(node_meets_dsh((22, 19, 0)));
+        assert!(!node_meets_dsh((23, 0, 0)));
+        assert!(node_meets_dsh((24, 0, 0)));
+        assert!(node_meets_dsh((25, 1, 0)));
+    }
+
+    #[test]
+    fn blank_machine_errors_point_at_the_download_page() {
+        let dsh = missing_node_message(true);
+        assert!(dsh.contains("nodejs.org"));
+        assert!(dsh.contains("22.19"));
+        let other = missing_node_message(false);
+        assert!(other.contains("nodejs.org"));
+        assert!(dsh_node_too_old_message("v18.20.0").contains("v18.20.0"));
     }
 
     #[test]

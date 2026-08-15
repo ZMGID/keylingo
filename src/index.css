@@ -5484,6 +5484,26 @@ input[type="password"]::-ms-clear {
   flex-direction: column;
   gap: 14px;
 }
+.kv-cli-card.kv-dsh-official-key {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 14px;
+}
+.kv-dsh-official-key-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.kv-dsh-official-key-head .kv-row-label {
+  flex: 1;
+  min-width: 0;
+}
+.kv-dsh-official-key-actions {
+  display: flex;
+  justify-content: flex-end;
+}
 .kv-cli-card.kv-dsh-plugins-entry {
   display: flex;
   align-items: center;

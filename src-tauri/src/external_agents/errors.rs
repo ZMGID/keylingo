@@ -69,6 +69,7 @@ fn agent_login_hint(agent_id: &str) -> (&'static str, &'static str) {
         "pi" => ("Pi", "pi"),
         "hermes" => ("Hermes", "hermes"),
         "grok" => ("Grok CLI", "grok"),
+        "dsh" => ("DeepSeek Harness", ""),
         _ => ("外部 Agent", ""),
     }
 }
@@ -108,6 +109,8 @@ fn detect_kind(raw: &str, exit_code: Option<i32>, stderr_tail: &str) -> External
         // Protocol，用户拿不到 `claude /login` 这条可操作提示。
         || hay.contains("authentication_failed")
         || hay.contains("oauth_org_not_allowed")
+        || hay.contains("missing credential")
+        || hay.contains("missing_credential")
         || contains_token(&hay, "401")
     {
         ExternalAgentErrorKind::Auth
@@ -152,7 +155,10 @@ pub fn classify(
 
     let user_message = match kind {
         ExternalAgentErrorKind::Auth => {
-            if login.is_empty() {
+            if agent_id == "dsh" {
+                "DeepSeek Harness 缺少 API 密钥。请到设置 → 本地 CLI 管理 → DeepSeek Harness 填写官方 DeepSeek 密钥后重试。"
+                    .to_string()
+            } else if login.is_empty() {
                 format!("{name} 未登录或登录凭证已失效，请重新登录后重试。")
             } else {
                 format!(
@@ -301,6 +307,17 @@ mod tests {
             classify("invalid session/new response", None, "", "opencode").kind,
             ExternalAgentErrorKind::Protocol
         );
+    }
+
+    #[test]
+    fn classifies_dsh_missing_credential_as_auth() {
+        for raw in ["missing credential", "MISSING_CREDENTIAL"] {
+            let classified = classify(raw, None, "", "dsh");
+            assert_eq!(classified.kind, ExternalAgentErrorKind::Auth, "{raw}");
+            assert!(classified.user_message.contains("API 密钥"), "{raw}");
+            assert!(classified.user_message.contains("本地 CLI 管理"), "{raw}");
+            assert!(!classified.user_message.contains("重新登录"), "{raw}");
+        }
     }
 
     #[test]

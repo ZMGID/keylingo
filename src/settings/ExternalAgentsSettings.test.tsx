@@ -25,6 +25,8 @@ vi.mock('../chat/api', () => ({
     dshPluginSettingsSave: vi.fn(),
     dshPluginInventory: vi.fn().mockResolvedValue([]),
     dshOpenSettingsFile: vi.fn(),
+    dshOfficialCredentialStatus: vi.fn().mockResolvedValue({ configured: false, writable: true }),
+    dshOfficialCredentialSave: vi.fn(),
   },
   onExternalCliInstallLog: vi.fn().mockResolvedValue(() => {}),
   onExternalAgentsUpdated: vi.fn().mockResolvedValue(() => {}),
@@ -35,6 +37,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 const mockDetect = vi.mocked(chatApi.detectExternalAgents)
 const mockInstallInfo = vi.mocked(chatApi.externalCliInstallInfo)
 const mockInstall = vi.mocked(chatApi.externalCliInstall)
+const mockOfficialKeyStatus = vi.mocked(chatApi.dshOfficialCredentialStatus)
+const mockOfficialKeySave = vi.mocked(chatApi.dshOfficialCredentialSave)
 
 function renderPanel(
   chat: Partial<NonNullable<SettingsData['chat']>> = {},
@@ -57,6 +61,10 @@ describe('ExternalAgentsSettings', () => {
     mockDetect.mockReset()
     mockInstallInfo.mockReset()
     mockInstall.mockReset()
+    mockOfficialKeyStatus.mockReset()
+    mockOfficialKeySave.mockReset()
+    mockOfficialKeyStatus.mockResolvedValue({ configured: false, writable: true })
+    mockOfficialKeySave.mockResolvedValue({ configured: true, writable: true })
     mockDetect.mockResolvedValue([
       {
         id: 'claude',
@@ -295,5 +303,42 @@ describe('ExternalAgentsSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: /返回/ }))
     expect(screen.queryByRole('tab', { name: '插件配置' })).not.toBeInTheDocument()
     expect(screen.getByText('所有供应商')).toBeInTheDocument()
+  })
+
+  it('saves the official DeepSeek API key on the dsh page', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.6',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/dsh',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel()
+    const input = await screen.findByLabelText('DeepSeek API 密钥')
+    expect(screen.getByText('未配置')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '获取密钥' })).toHaveAttribute(
+      'href',
+      'https://platform.deepseek.com/api_keys',
+    )
+    fireEvent.change(input, { target: { value: 'sk-test' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存密钥' }))
+    await waitFor(() => {
+      expect(mockOfficialKeySave).toHaveBeenCalledWith('sk-test')
+    })
+    expect(await screen.findByText('已配置')).toBeInTheDocument()
   })
 })

@@ -90,6 +90,12 @@ export interface DshPluginEntry {
   enabled: boolean
 }
 
+/** `$DSH_HOME/.credentials.yaml` 里官方 DeepSeek 模型密钥的状态。不回读密钥本身。 */
+export interface DshOfficialCredential {
+  configured: boolean
+  writable: boolean
+}
+
 /** `chat_external_cli_install_info` 的返回。 */
 export interface ExternalCliInstallInfo {
   agentId: string
@@ -1831,6 +1837,15 @@ export const chatApi = {
   async dshOpenSettingsFile(): Promise<void> {
     if (!isTauriRuntime()) return
     await invoke('chat_dsh_open_settings_file')
+  },
+
+  async dshOfficialCredentialStatus(): Promise<DshOfficialCredential> {
+    if (!isTauriRuntime()) return { configured: false, writable: true }
+    return await invoke<DshOfficialCredential>('chat_dsh_official_credential_status')
+  },
+
+  async dshOfficialCredentialSave(apiKey: string): Promise<DshOfficialCredential> {
+    return await invoke<DshOfficialCredential>('chat_dsh_official_credential_save', { apiKey })
   },
 
   /**

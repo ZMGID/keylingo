@@ -1,10 +1,13 @@
-//! dsh 官方设置页「插件」两栏的本地适配。
+//! dsh 官方设置页「插件」两栏的本地适配，以及官方 DeepSeek 密钥。
 //!
 //! 官方 web 把可配项写进 `$DSH_HOME/settings.yaml` 的三个 namespace
-//!（`shell` / `agent-loop` / `web-search-deepseek`），密钥进 `.credentials.yaml`，
+//!（`shell` / `agent-loop` / `web-search-deepseek`），密钥进 `.credentials.yaml`
+//!（官方 DeepSeek 模型与网页搜索共用 `DEEPSEEK_API_KEY`），
 //! 清单则来自已 compose 的 Loader 树。Kivio 不改 `profiles/kivio/cordis.patch.yml`
 //!（那份由 `dsh_profile::ensure_profile_ready` 每轮重写），所以：
 //!
+//! - **官方密钥**：写入 `.credentials.yaml` 的 `DEEPSEEK_API_KEY`，与官方网页版首次
+//!   填密钥同一条路径；不进 `cordis.patch.yml`。
 //! - **插件配置**：读写 `settings.yaml` + 可选写凭据，热重载后 kivio / web 共用。
 //! - **插件列表**：优先 `dsh --profile kivio --dump-config`（boot-free）解析
 //!   id / name / disabled；失败则读安装包里的 `dsh-base` / `dsh-agent-presets`
@@ -117,6 +120,13 @@ pub struct DshPluginEntry {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshOfficialCredential {
+    pub configured: bool,
+    pub writable: bool,
+}
+
 fn dsh_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("DSH_HOME") {
         let path = PathBuf::from(home);
@@ -167,20 +177,23 @@ fn credential_status(api_key_env: &str) -> (bool, bool) {
     {
         return (true, false);
     }
-    let Ok(path) = credentials_path() else {
-        return (false, true);
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return (false, true);
+    let configured = credentials_path()
+        .ok()
+        .is_some_and(|path| credentials_contain(&path, api_key_env));
+    (configured, true)
+}
+
+fn credentials_contain(path: &Path, api_key_env: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
     };
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
-        return (false, true);
+        return false;
     };
-    let configured = value
+    value
         .as_mapping()
         .and_then(|map| mapping_string(map, api_key_env))
-        .is_some();
-    (configured, true)
+        .is_some()
 }
 
 fn parse_settings_snapshot(text: &str, settings_path: &Path) -> Result<DshPluginSettingsSnapshot, String> {
@@ -323,9 +336,12 @@ fn write_credential(api_key_env: &str, api_key: &str) -> Result<(), String> {
     if !std::env::var_os(api_key_env).is_none_or(|value| value.is_empty()) {
         return Err(format!("{api_key_env} 已由环境变量提供，不能写进凭据文件"));
     }
-    let path = credentials_path()?;
+    write_credential_at(&credentials_path()?, api_key_env, key)
+}
+
+fn write_credential_at(path: &Path, api_key_env: &str, key: &str) -> Result<(), String> {
     let mut root = if path.exists() {
-        let text = std::fs::read_to_string(&path)
+        let text = std::fs::read_to_string(path)
             .map_err(|err| format!("读取 dsh 凭据失败：{err}"))?;
         match serde_yaml::from_str::<serde_yaml::Value>(&text)
             .map_err(|err| format!("解析 dsh 凭据失败：{err}"))?
@@ -343,7 +359,7 @@ fn write_credential(api_key_env: &str, api_key: &str) -> Result<(), String> {
     );
     let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(root))
         .map_err(|err| format!("序列化 dsh 凭据失败：{err}"))?;
-    crate::external_agents::provider_profile::write_private_atomic(&path, &yaml)
+    crate::external_agents::provider_profile::write_private_atomic(path, &yaml)
 }
 
 fn persist_settings(path: &Path, root: Mapping) -> Result<(), String> {
@@ -664,6 +680,29 @@ pub fn chat_dsh_open_settings_file(app: AppHandle) -> Result<(), String> {
     open_settings_file(&app, &settings_path()?)
 }
 
+#[tauri::command]
+pub fn chat_dsh_official_credential_status() -> Result<DshOfficialCredential, String> {
+    let (configured, writable) = credential_status(DEFAULT_API_KEY_ENV);
+    Ok(DshOfficialCredential {
+        configured,
+        writable,
+    })
+}
+
+pub(crate) fn official_deepseek_key_ready() -> bool {
+    credential_status(DEFAULT_API_KEY_ENV).0
+}
+
+#[tauri::command]
+pub fn chat_dsh_official_credential_save(api_key: String) -> Result<DshOfficialCredential, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("请输入 DeepSeek API 密钥".to_string());
+    }
+    write_credential(DEFAULT_API_KEY_ENV, key)?;
+    chat_dsh_official_credential_status()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,5 +887,25 @@ node: warning this is not yaml
             Some("./kivio-dsh-bridge.mjs")
         );
         assert!(entries.contains_key("tool-web"));
+    }
+
+    #[test]
+    fn write_credential_skips_empty_key() {
+        assert!(write_credential(DEFAULT_API_KEY_ENV, "  ").is_ok());
+    }
+
+    #[test]
+    fn official_credential_writes_deepseek_key_and_keeps_neighbors() {
+        let dir = std::env::temp_dir().join(format!("kivio-dsh-cred-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".credentials.yaml");
+        std::fs::write(&path, "OTHER_KEY: keep-me\n").unwrap();
+        write_credential_at(&path, DEFAULT_API_KEY_ENV, "sk-test").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("DEEPSEEK_API_KEY"));
+        assert!(text.contains("sk-test"));
+        assert!(text.contains("OTHER_KEY"));
+        assert!(credentials_contain(&path, DEFAULT_API_KEY_ENV));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

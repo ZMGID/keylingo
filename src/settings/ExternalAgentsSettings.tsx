@@ -21,6 +21,7 @@ import {
   onExternalCliInstallLog,
   type CcSwitchProvider,
   type DetectedExternalAgent,
+  type DshOfficialCredential,
   type ExternalCliInstallInfo,
 } from '../chat/api'
 import type { NativeProviderSummary } from '../chat/types'
@@ -38,6 +39,7 @@ import type {
 
 const EMPTY_CONFIG: ExternalCliAgentConfig = {}
 const DSH_OFFICIAL_PROVIDER_ID = 'deepseek-official'
+const DSH_OFFICIAL_KEY_URL = 'https://platform.deepseek.com/api_keys'
 
 function withOfficialDshProviders(
   agentId: string,
@@ -406,6 +408,11 @@ function AgentDetail({
           <RefreshCw size={13} className={checking ? 'animate-spin' : ''} />
         </IconButton>
       </div>
+      {agent.id === 'dsh' && !agent.available && (
+        <p className="kv-row-desc">{t.externalAgentsDshInstallHint}</p>
+      )}
+
+      {agent.id === 'dsh' && <DshOfficialKeyCard lang={lang} />}
 
       {agent.id === 'dsh' && (
         <button
@@ -547,6 +554,103 @@ function AgentDetail({
         onPatch={onPatch}
       />
     </>
+  )
+}
+
+function DshOfficialKeyCard({ lang }: { lang: Lang }) {
+  const t = i18n[lang]
+  const [status, setStatus] = useState<DshOfficialCredential | null>(null)
+  const [apiKey, setApiKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void chatApi
+      .dshOfficialCredentialStatus()
+      .then((next) => {
+        if (!cancelled) setStatus(next)
+      })
+      .catch(() => {
+        if (!cancelled) setStatus({ configured: false, writable: true })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const writable = status?.writable ?? true
+  const save = async () => {
+    const key = apiKey.trim()
+    if (!key || !writable) return
+    setSaving(true)
+    setError(null)
+    try {
+      setStatus(await chatApi.dshOfficialCredentialSave(key))
+      setApiKey('')
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="kv-cli-card kv-dsh-official-key">
+      <div className="kv-dsh-official-key-head">
+        <label htmlFor="dsh-official-key" className="kv-row-label">
+          {t.externalAgentsDshOfficialKey}
+        </label>
+        {status && !status.configured && writable && (
+          <span className="kv-tag warn">{t.externalAgentsDshOfficialKeyUnsetTag}</span>
+        )}
+        {status?.configured && (
+          <span className="kv-tag ok">{t.externalAgentsDshOfficialKeySetTag}</span>
+        )}
+        <a
+          className="kv-cli-docs"
+          href={DSH_OFFICIAL_KEY_URL}
+          target="_blank"
+          rel="noreferrer"
+          data-tauri-drag-region="false"
+        >
+          <ExternalLink size={12} />
+          {t.externalAgentsDshOfficialKeyGet}
+        </a>
+      </div>
+      <Input
+        id="dsh-official-key"
+        type="password"
+        value={apiKey}
+        onChange={setApiKey}
+        placeholder={
+          status?.configured
+            ? t.externalAgentsDshOfficialKeySet
+            : t.externalAgentsDshOfficialKeyUnset
+        }
+        mono
+        disabled={!writable}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') void save()
+        }}
+      />
+      <p className="kv-row-desc">
+        {writable ? t.externalAgentsDshOfficialKeyHint : t.externalAgentsDshOfficialKeyLocked}
+      </p>
+      {error && <p className="kv-row-desc kv-dsh-field-error">{error}</p>}
+      {writable && (
+        <div className="kv-dsh-official-key-actions">
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={saving || !apiKey.trim()}
+            onClick={() => void save()}
+          >
+            {saving ? t.externalAgentsDshOfficialKeySaving : t.externalAgentsDshOfficialKeySave}
+          </Button>
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -396,6 +396,44 @@ pub fn enrich_path_windows() {
     });
 }
 
+/// Re-read the live registry `Path` into this process.
+///
+/// [`enrich_path_windows`] is once-per-process so startup stays cheap. A Node
+/// installer that writes `D:\Program Files\nodejs` into the registry mid-session
+/// is invisible until this runs — which is exactly the Kivio one-click install
+/// path, and why `npm.cmd` could start while `node ./cnoke.cjs` printed
+/// `'node' 不是内部或外部命令`.
+#[cfg(target_os = "windows")]
+pub fn refresh_path_now() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let system = read_registry_path(true).map(|p| expand_env_vars(&p));
+    let user = read_registry_path(false).map(|p| expand_env_vars(&p));
+    let defaults = common_dirs_windows();
+    let merged = merge_paths_windows(
+        &current,
+        system.as_deref(),
+        user.as_deref(),
+        None,
+        &defaults,
+    );
+    if !merged.is_empty() {
+        std::env::set_var("PATH", merged);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn refresh_path_now() {
+    #[cfg(target_os = "macos")]
+    {
+        let current = std::env::var("PATH").unwrap_or_default();
+        let defaults = common_dirs_macos(std::env::var_os("HOME").map(std::path::PathBuf::from));
+        let merged = merge_paths_unix(&current, None, &defaults);
+        if !merged.is_empty() {
+            std::env::set_var("PATH", merged);
+        }
+    }
+}
+
 /// Merge the process `PATH` with the system + user registry `PATH` values, the
 /// (optional) PowerShell-profile `PATH`, and the fallback `defaults` into a
 /// single `;`-joined string, deduplicated and order-preserving. Windows path
@@ -498,10 +536,14 @@ fn common_dirs_windows() -> Vec<String> {
     let localappdata = std::env::var("LOCALAPPDATA").ok();
 
     push(appdata.clone(), "npm");
+    push(std::env::var("ProgramFiles").ok(), "nodejs");
     push(userprofile.clone(), ".cargo\\bin");
     push(userprofile.clone(), ".bun\\bin");
     push(userprofile.clone(), "scoop\\shims");
     push(localappdata.clone(), "Microsoft\\WinGet\\Links");
+    // 国内小白常把软件装到 D:/E: 的 Program Files；%ProgramFiles% 仍指向 C:。
+    dirs.push(r"D:\Program Files\nodejs".to_string());
+    dirs.push(r"E:\Program Files\nodejs".to_string());
 
     // --- Version-manager stable dirs (second line of defense for the profile
     // probe: used when the probe times out or PowerShell is unavailable). fnm's

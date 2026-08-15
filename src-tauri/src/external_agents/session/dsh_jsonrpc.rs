@@ -181,6 +181,11 @@ impl DshJsonRpcSession {
         preset: Option<&str>,
     ) -> Result<Self, String> {
         let _profile_boot_guard = DSH_PROFILE_BOOT_LOCK.lock().await;
+        if crate::external_agents::overrides::active_provider("dsh").is_none()
+            && !crate::external_agents::dsh_plugins::official_deepseek_key_ready()
+        {
+            return Err("missing credential".to_string());
+        }
         crate::external_agents::dsh_profile::ensure_profile_ready(resolved_bin, reasoning, preset)
             .await?;
 

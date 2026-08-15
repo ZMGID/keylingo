@@ -14,7 +14,8 @@
 //!    那条命令做三件我们自己做会漏的事：按模板初始化 profile（`dsh.profile.bundles` 要写
 //!    `@deepseek-ai/dsh-base`，**少了它 profile 起来没有 agent**）、转发 pnpm、按安装结果回填
 //!    bundle 层列表。本机实测漏掉 bundles 那次的表现是进程能起、`initialize` 能回，
-//!    但一 prompt 就没有任何 agent 接。
+//!    但一 prompt 就没有任何 agent 接。安装前会写 `profiles/kivio/.npmrc` 钉死
+//!    `registry.npmjs.org`，避免用户家目录镜像缺 `@deepseek-ai/*`。
 //!
 //! # patch 里放什么
 //!
@@ -57,6 +58,10 @@ const REQUIRED_PACKAGES: &[&str] = &[
 /// `dsh plugin add` 不带版本会落到 `0.0.1-rc.1`，和本机 dsh 带的 `0.1.0-rc.6` 抢解析，
 /// 然后缺 `@deepseek-ai/dsh-paths`。patch 里只写插件名，让官方 module fallback 用随包那份。
 const PROFILE_PRESET_PACKAGE: &str = "@deepseek-ai/dsh-agent-presets";
+
+/// pnpm 在 profile 目录里读这份，盖过用户家目录 `.npmrc` 的淘宝镜像。
+const PROFILE_NPMRC: &str = "registry=https://registry.npmjs.org/\n\
+@deepseek-ai:registry=https://registry.npmjs.org/\n";
 
 /// dsh web 把这些 host 平面工具关掉，改由 agent preset 按会话组装。
 const HOST_PLANE_TOOL_IDS: &[&str] = &[
@@ -325,6 +330,10 @@ pub async fn ensure_profile_ready(
     let dir =
         profile_dir().ok_or_else(|| "无法定位 dsh 主目录（$DSH_HOME / ~/.dsh）".to_string())?;
 
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 dsh profile 目录失败：{e}"))?;
+    std::fs::write(dir.join(".npmrc"), PROFILE_NPMRC)
+        .map_err(|e| format!("写入 dsh profile npmrc 失败：{e}"))?;
+
     if !packages_installed(&dir) {
         install_packages(bin).await?;
     }
@@ -383,10 +392,14 @@ fn remove_provider_env_from_install(
 async fn install_packages(bin: &Path) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
 
+    crate::external_agents::installer::expose_node_on_path();
+    crate::external_agents::installer::ensure_pnpm_for_dsh().await?;
+
     // Installation never needs model credentials. Build a clean command so pnpm and dependency
     // lifecycle scripts cannot inherit the active Kivio provider API key.
     let mut command = tokio::process::Command::new(bin);
     crate::external_agents::spawn::strip_parent_session_env(&mut command);
+    crate::external_agents::installer::pin_official_npm_registry(&mut command);
     let provider = crate::external_agents::overrides::active_provider("dsh");
     remove_provider_env_from_install(&mut command, provider.as_ref());
     #[cfg(unix)]
@@ -452,11 +465,10 @@ async fn install_packages(bin: &Path) -> Result<(), String> {
 
     let stderr = String::from_utf8_lossy(&stderr);
     let tail = stderr.trim();
-    // `dsh plugin` 就是个 pnpm 转发器，pnpm 不在 PATH 上时它自己会报这句并退 127。
-    if status.code() == Some(127) || tail.contains("pnpm not found") {
+    if pnpm_missing_in_output(status.code(), tail) {
         return Err(
             "dsh 需要 pnpm 来安装 profile 插件，但 PATH 上没有找到 pnpm。\
-             请先安装 pnpm（https://pnpm.io/installation）后重试。"
+             请到设置 → 本地 CLI Agent → DeepSeek Harness 点一次安装，或先运行 npm install -g pnpm 后重试。"
                 .to_string(),
         );
     }
@@ -464,6 +476,14 @@ async fn install_packages(bin: &Path) -> Result<(), String> {
         "安装 dsh 插件失败".to_string(),
         tail,
     ))
+}
+
+fn pnpm_missing_in_output(status_code: Option<i32>, tail: &str) -> bool {
+    status_code == Some(127)
+        || tail.contains("pnpm not found")
+        || tail.contains("pnpm failed")
+        || tail.contains("'pnpm'")
+        || tail.contains("\"pnpm\"")
 }
 
 #[cfg(test)]
@@ -704,5 +724,21 @@ mod tests {
             let shown = dir.to_string_lossy().replace('\\', "/");
             assert!(shown.ends_with("profiles/kivio"), "got {shown}");
         }
+    }
+
+    #[test]
+    fn windows_pnpm_not_on_path_is_recognized_even_when_cmd_garbles_the_rest() {
+        let real = "dsh: initialized profile kivio at C:\\Users\\18758\\.dsh\\profiles\\kivio\n\
+                    'pnpm' \u{fffd}\u{fffd}\u{fffd}\n\
+                    dsh: pnpm failed in profile directory C:\\Users\\18758\\.dsh\\profiles\\kivio";
+        assert!(pnpm_missing_in_output(None, real));
+        assert!(pnpm_missing_in_output(Some(127), "pnpm not found on PATH"));
+        assert!(!pnpm_missing_in_output(Some(1), "network timeout contacting registry"));
+    }
+
+    #[test]
+    fn profile_npmrc_pins_official_registry() {
+        assert!(PROFILE_NPMRC.contains("registry=https://registry.npmjs.org/"));
+        assert!(PROFILE_NPMRC.contains("@deepseek-ai:registry=https://registry.npmjs.org/"));
     }
 }
