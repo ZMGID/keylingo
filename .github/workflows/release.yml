@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish to (e.g. v2.8.0)'
+        description: 'Release tag to publish to (e.g. v2.9.0)'
         required: true
-        default: 'v2.8.0'
+        default: 'v2.9.0'
       ref:
         description: 'Git ref to build from (branch/tag/commit)'
         required: true
@@ -23,10 +23,45 @@ env:
   BUILD_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
 
 jobs:
-  tauri-release-windows:
-    # windows-latest runner → x86_64-pc-windows-msvc NSIS (.exe) installer.
-    # The macOS DMG is built locally on Apple Silicon and uploaded to the same tag.
-    runs-on: windows-latest
+  create-release:
+    # Both platform jobs upload into this release. Creating it first avoids a
+    # race where two tauri-action steps try to open the same tag.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+            exit 0
+          fi
+          extra=()
+          case "$RELEASE_TAG" in
+            *beta*|*alpha*|*rc*) extra+=(--prerelease) ;;
+          esac
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Kivio Desktop $RELEASE_TAG" \
+            --notes "Automated macOS (Apple Silicon) + Windows (x64) build for ${RELEASE_TAG}. Built from: ${BUILD_REF}." \
+            --verify-tag \
+            "${extra[@]}"
+
+  tauri-release:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is Apple Silicon; the DMG name stays *_aarch64.dmg.
+          - platform: macos-latest
+            name: macOS
+            args: --bundles dmg
+          - platform: windows-latest
+            name: Windows
+            args: --bundles nsis
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
@@ -46,11 +81,11 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Swift sidecar stub (non-macOS)
-        # On Windows this writes stub binaries so Tauri externalBin validation passes.
+      - name: Build Swift sidecar
+        # macOS: real kivio-ocr-helper. Windows: empty stub for externalBin.
         run: npm run build:swift
 
-      - name: Build and publish Windows NSIS installer
+      - name: Build and publish ${{ matrix.name }} installer
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -58,14 +93,12 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: Kivio Desktop ${{ env.RELEASE_TAG }}
           releaseBody: |
-            Automated Windows (x64) build for ${{ env.RELEASE_TAG }}.
+            Automated macOS (Apple Silicon / aarch64, unsigned) + Windows (x64) build for ${{ env.RELEASE_TAG }}.
             Built from: ${{ env.BUILD_REF }}
+            - macOS: DMG (unsigned — first launch: right-click → Open, or `xattr -cr "/Applications/Kivio Desktop.app"`)
             - Windows: NSIS installer (.exe)
-
-            macOS DMG (Apple Silicon / aarch64, unsigned — first launch: right-click → Open,
-            or run `xattr -cr "/Applications/Kivio Desktop.app"`) is built locally and uploaded separately.
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, 'beta') || contains(env.RELEASE_TAG, 'alpha') || contains(env.RELEASE_TAG, 'rc') }}
           includeUpdaterJson: false
           tauriScript: npx tauri
-          args: --bundles nsis
+          args: ${{ matrix.args }}

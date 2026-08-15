@@ -6,7 +6,7 @@ This document is the required release checklist for Kivio Desktop installers. Do
 
 Kivio Desktop is packaged by Tauri.
 
-Local packaging:
+Local packaging (debug / inspect only — published installers come from GitHub Actions):
 
 ```bash
 npm ci
@@ -26,48 +26,40 @@ npm run build
    - Vite writes the production frontend to `dist/`.
    - Tauri packages `dist/`, configured `externalBin` files, configured `resources`, and platform icons into DMG / MSI / NSIS bundles.
 
-GitHub release packaging:
+GitHub release packaging (this is the official path — do not build installers locally):
 
 1. Bump versions in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`.
 2. Update README release notes and add the bilingual GitHub body under `docs/releases/vX.Y.Z.md`.
-3. Run the local quality gate:
-   ```bash
-   npm run lint
-   npm run typecheck
-   cargo test --manifest-path src-tauri/Cargo.toml
-   ```
-4. Commit and push `main`.
-5. Create or move the release tag, for example:
+3. Commit and push `main`. Wait for `.github/workflows/ci.yml` on `main` to pass (lint / typecheck / frontend tests / Rust tests).
+4. Create or move the release tag, for example:
    ```bash
    git tag -f vX.Y.Z
    git push origin main
    git push origin -f vX.Y.Z
    ```
-6. Build the macOS DMG (`.dmg`) locally on Apple Silicon, then upload it to the tag's release:
+   Pushing the `v*` tag is what starts packaging. To rebuild an existing tag after a workflow change:
    ```bash
-   npm run build:swift
-   npx tauri build --bundles dmg
-   gh release upload vX.Y.Z "src-tauri/target/release/bundle/dmg/Kivio Desktop_X.Y.Z_aarch64.dmg" --repo ZMGID/kivio
+   gh workflow run release.yml --repo ZMGID/kivio --ref main -f tag=vX.Y.Z -f ref=vX.Y.Z
    ```
-   GitHub normalizes spaces in uploaded release asset names to dots, so the remote download is named `Kivio.Desktop_X.Y.Z_aarch64.dmg`.
-7. `.github/workflows/release.yml` builds the Windows release asset only:
-   - `windows-latest` (x64) with `--bundles nsis`
-   - It creates the GitHub release for the tag and attaches `Kivio.Desktop_X.Y.Z_x64-setup.exe` (NSIS normalizes spaces in `productName` to dots for the asset file name).
+5. `.github/workflows/release.yml` builds **both** installers on GitHub Actions and uploads them to the tag's release:
+   - `macos-latest` (Apple Silicon / aarch64) with `--bundles dmg` → `Kivio.Desktop_X.Y.Z_aarch64.dmg`
+   - `windows-latest` (x64) with `--bundles nsis` → `Kivio.Desktop_X.Y.Z_x64-setup.exe`
+   - GitHub normalizes spaces in `productName` to dots in the asset file names.
    - The macOS DMG is **unsigned** (no signing secrets configured); first launch needs right-click → Open, or `xattr -cr "/Applications/Kivio Desktop.app"`.
-8. Watch the workflow and inspect the release assets:
+6. Watch the workflow and inspect the release assets:
    ```bash
    gh run watch <RUN_ID> --repo ZMGID/kivio --exit-status
    gh release view vX.Y.Z --repo ZMGID/kivio --json url,assets
    ```
-9. **Replace the CI-generated release body with hand-written bilingual notes.** The
-   workflow publishes the release with a boilerplate body ("Automated macOS build…");
+7. **Replace the CI-generated release body with hand-written bilingual notes.** The
+   workflow publishes the release with a boilerplate body ("Automated macOS…");
    overwrite it to match the prior `v2.7.x` release format — title, a `## 下载 / Downloads`
    block (both installers + the macOS "unsigned / first launch" note), a
    `## 新版本亮点 / What's New` bilingual bullet list (中文 + English inline per bullet,
    mirroring the README release notes), and a `完整变更 / Full changelog: …compare/vPREV...vX.Y.Z`
    link:
    ```bash
-   gh release edit vX.Y.Z --repo ZMGID/kivio --notes-file notes.md
+   gh release edit vX.Y.Z --repo ZMGID/kivio --notes-file docs/releases/vX.Y.Z.md
    ```
 
 ## Resources That Must Be Packaged

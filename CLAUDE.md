@@ -285,7 +285,7 @@ Cancellation is via `AppState.explain_stream_generation` (`AtomicU64`) — each 
 
 Releases are built via GitHub Actions (`.github/workflows/release.yml`). Pushing a `v*` tag triggers builds for:
 - **macOS** — DMG bundle (`--bundles dmg`)
-- **Windows** — MSI + NSIS bundles (`--bundles msi,nsis`)
+- **Windows** — NSIS installer (`--bundles nsis`)
 
 Manual releases are also supported via `workflow_dispatch`.
 
