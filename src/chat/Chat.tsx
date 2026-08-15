@@ -94,6 +94,7 @@ import {
   type ChatMcpServer,
   type ChatToolProgressPayload,
   type ChatUserPromptPayload,
+  type ChatSubagentPayload,
 } from '../api/tauri'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
@@ -152,7 +153,7 @@ import {
   restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
-import { compareTimelineSegments, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
+import { compareTimelineSegments, isExternalSubagentToolCall, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { applyLiveContextUsage } from './contextPanel'
 import { measureChatSurface, onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
@@ -751,6 +752,80 @@ function applyToolRecordToSnapshot(
     ? [...snapshot.toolCalls, record]
     : snapshot.toolCalls.map((item, i) => (i === index ? mergeToolRecord(item, record) : item))
   snapshot.segments = upsertToolStreamSegment(snapshot.segments, record)
+}
+
+function messageToolCalls(message: ChatMessage): ToolCallRecord[] {
+  return message.toolCalls ?? message.tool_calls ?? []
+}
+
+function toolStructured(tool: ToolCallRecord): Record<string, unknown> {
+  const value = tool.structuredContent ?? tool.structured_content
+  return value && typeof value === 'object' ? { ...(value as Record<string, unknown>) } : {}
+}
+
+function matchesSubagentTool(tool: ToolCallRecord, payload: ChatSubagentPayload): boolean {
+  if (payload.parentToolCallId && tool.id === payload.parentToolCallId) return true
+  const structured = toolStructured(tool)
+  if (structured.backgroundTaskId === payload.taskId) return true
+  if (structured.childSessionId === payload.taskId) return true
+  const progress = structured.subagentProgress
+  return Boolean(
+    progress
+    && typeof progress === 'object'
+    && (progress as { taskId?: unknown }).taskId === payload.taskId,
+  )
+}
+
+function findSubagentToolIndex(tools: ToolCallRecord[], payload: ChatSubagentPayload): number {
+  const exact = tools.findIndex((item) => matchesSubagentTool(item, payload))
+  if (exact >= 0) return exact
+  // ponytail: dsh 派出回执是 jobId，session.event 是 child session.id。单卡时绑上去。
+  const running = tools
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.status === 'running' && isExternalSubagentToolCall(item))
+  return running.length === 1 ? running[0].index : -1
+}
+
+function mergeSubagentProgress(
+  tool: ToolCallRecord,
+  payload: ChatSubagentPayload,
+): ToolCallRecord {
+  const existing = toolStructured(tool)
+  const previous = existing.subagentProgress && typeof existing.subagentProgress === 'object'
+    ? existing.subagentProgress as { preview?: string; steps?: string[] }
+    : {}
+  const steps = payload.steps?.length ? payload.steps : previous.steps ?? []
+  const preview = payload.preview || previous.preview || ''
+  const nextStructured = {
+    ...existing,
+    ...(payload.taskId
+      && existing.backgroundTaskId !== payload.taskId
+      ? { childSessionId: payload.taskId }
+      : {}),
+    subagentProgress: {
+      taskId: existing.backgroundTaskId ?? payload.taskId,
+      name: payload.name,
+      model: payload.model ?? '',
+      depth: payload.depth,
+      status: payload.status,
+      preview,
+      steps,
+    },
+  }
+  const terminal = payload.status !== 'running'
+  return {
+    ...tool,
+    status: terminal
+      ? payload.status === 'failed'
+        ? 'error'
+        : payload.status === 'cancelled'
+          ? 'cancelled'
+          : 'success'
+      : tool.status,
+    result_preview: terminal && payload.preview ? payload.preview : tool.result_preview,
+    structuredContent: nextStructured,
+    structured_content: nextStructured,
+  }
 }
 
 function normalizeSkill(skill: import('../api/tauri').SkillMeta): SkillMeta {
@@ -2509,49 +2584,40 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [showStreamSnapshotIfCurrent])
 
   useTauriEvent(api.onChatSubagent, (payload) => {
-      // A subagent progress event must address an existing snapshot for
-      // the parent conversation (do NOT create one — that would resurrect a
-      // finalized conversation). Accept whenever the conversation is in-flight
-      // or a snapshot already exists.
-      const existingSnapshot = streamSnapshotsRef.current[payload.parentConversationId]
+      // 父轮还在飞：写流快照。父轮已经收尾后 streamSnapshotsRef 仍可能留着死快照，
+      // 不能再当直播通道，否则步骤写进看不见的对象，卡上永远「运行中…」。
       const inFlight = isConversationInFlight(
         inFlightConversationsRef.current,
         payload.parentConversationId,
       )
-      if (!inFlight && !existingSnapshot) return
-      const snapshot = ensureStreamSnapshot(payload.parentConversationId)
-      // Match the active run when known; only drop when both ids are set and differ.
-      if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
-      const index = snapshot.toolCalls.findIndex((item) => item.id === payload.parentToolCallId)
-      if (index < 0) return
-      const progress = {
-        taskId: payload.taskId,
-        name: payload.name,
-        model: payload.model ?? '',
-        depth: payload.depth,
-        status: payload.status,
-        preview: payload.preview ?? '',
-        steps: payload.steps ?? [],
+      if (inFlight) {
+        const snapshot = ensureStreamSnapshot(payload.parentConversationId)
+        // Match the active run when known; only drop when both ids are set and differ.
+        if (payload.parentRunId && snapshot.runId && snapshot.runId !== payload.parentRunId) return
+        const index = findSubagentToolIndex(snapshot.toolCalls, payload)
+        if (index < 0) return
+        snapshot.toolCalls = snapshot.toolCalls.map((item, i) => (
+          i === index ? mergeSubagentProgress(item, payload) : item
+        ))
+        showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
+        return
       }
-      // Sub-agents run blocking + single-result: the parent tool card transitions
-      // running→done via the tool update flow (the inline result), while these
-      // subagent events drive the live nested progress (steps/preview).
-      snapshot.toolCalls = snapshot.toolCalls.map((item, i) => {
-        if (i !== index) return item
-        const existing =
-          item.structuredContent && typeof item.structuredContent === 'object'
-            ? (item.structuredContent as Record<string, unknown>)
-            : {}
-        const nextStructured: Record<string, unknown> = {
-          ...existing,
-          subagentProgress: progress,
-        }
-        return {
-          ...item,
-          structuredContent: nextStructured,
-        }
+      if (currentConversationIdRef.current !== payload.parentConversationId) return
+      setCurrentConversation((prev) => {
+        if (!prev || prev.id !== payload.parentConversationId) return prev
+        let changed = false
+        const messages = prev.messages.map((message) => {
+          const tools = messageToolCalls(message)
+          const index = findSubagentToolIndex(tools, payload)
+          if (index < 0) return message
+          changed = true
+          const nextTools = tools.map((item, i) => (
+            i === index ? mergeSubagentProgress(item, payload) : item
+          ))
+          return { ...message, toolCalls: nextTools, tool_calls: nextTools }
+        })
+        return changed ? { ...prev, messages } : prev
       })
-      showStreamSnapshotIfCurrent(payload.parentConversationId, snapshot)
   }, [ensureStreamSnapshot, showStreamSnapshotIfCurrent])
 
   useTauriEvent(api.onChatUserPrompt, (payload) => {

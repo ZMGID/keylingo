@@ -393,6 +393,20 @@ function subagentPrompt(args: Record<string, unknown> | null): string {
   return stringValue(args?.prompt)
 }
 
+/** dsh 后台子代理的 tool/result 只是派出回执，不是跑完。 */
+function isSubagentLaunchReceipt(text: string | undefined): boolean {
+  const trimmed = text?.trim() ?? ''
+  return trimmed.startsWith('started subagent ')
+    || trimmed.startsWith('started background subagent task ')
+}
+
+function subagentDisplayStatus(toolCall: ToolCallRecord, status: ToolCallStatus): ToolCallStatus {
+  if (status === 'completed' && isSubagentLaunchReceipt(getResultPreview(toolCall))) {
+    return 'running'
+  }
+  return status
+}
+
 function subagentStatusLine(view: SubagentView | null, status: ToolCallStatus): string {
   if (status === 'completed') return '已完成'
   if (status === 'error') return view?.error ? compactText(view.error, 160) : '运行失败'
@@ -516,14 +530,14 @@ function ConsultCard({
 }
 
 function SubAgentCard({ toolCall }: ToolCallBlockProps) {
-  const status = normalizeToolCallStatus(toolCall.status)
+  const status = subagentDisplayStatus(toolCall, normalizeToolCallStatus(toolCall.status))
   const view = useMemo(() => structuredSubagent(toolCall), [toolCall])
   const args = useMemo(() => parsedArguments(toolCall), [toolCall])
 
   const agentType = subagentAgentType(view, args)
   const name = subagentName(view, args)
   const model = view?.model || ''
-  const duration = formatDuration(getDuration(toolCall))
+  const duration = status === 'running' ? '' : formatDuration(getDuration(toolCall))
   const statusLine = subagentStatusLine(view, status)
   const prompt = subagentPrompt(args)
   // 内置 agent 的最终结果在 structured content 里；外部 CLI（claude Agent/Task）没有

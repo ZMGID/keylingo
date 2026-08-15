@@ -311,6 +311,17 @@ pub enum UnifiedAgentEvent {
     TodoWrite {
         todos: Value,
     },
+    /// dsh 后台子代理（另一个 `sessionId`）的嵌套进度。
+    ///
+    /// 不能走 `TextDelta` / `ToolUse`：那些会进父气泡。前端已有
+    /// `subagent_updated` → `structuredContent.subagentProgress`。
+    /// `task_id` 是子会话 id，对应派出回执 / `subagent.started` 的 `childSessionId`。
+    SubagentProgress {
+        task_id: String,
+        status: String,
+        preview: String,
+        steps: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

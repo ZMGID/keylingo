@@ -1495,6 +1495,24 @@ pub fn register_run_with_recovery(
     }
 }
 
+/// 父轮已经终态之后仍要刷子代理进度。协议 hub 拒收终态 run 的后续事件，
+/// 所以这条只走直播，不进 replay。前端靠 `onChatSubagent` 补到已落库的工具卡上。
+pub fn emit_live_run_event(app: &AppHandle, conversation_id: &str, event: ChatRunEvent) {
+    emit_protocol(
+        app,
+        ChatProtocolEvent::Run(ChatRunEventEnvelope {
+            protocol_version: CHAT_PROTOCOL_VERSION,
+            scope: ChatProtocolScope::Run,
+            conversation_id: conversation_id.to_string(),
+            run_id: String::new(),
+            message_id: String::new(),
+            seq: 0,
+            base_revision: 0,
+            event,
+        }),
+    );
+}
+
 pub fn emit_run_event(app: &AppHandle, run_id: &str, event: ChatRunEvent) {
     let state = app.state::<AppState>();
     let result = state

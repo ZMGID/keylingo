@@ -24,14 +24,17 @@
 //! 会产生多个 step，所以 `assistant/chunk.finish` **不是轮终点**；真正终点是匹配 session 的
 //! `turn/end`，随后 `session.status: idle` 表示整台 agent 静止。
 //!
-//! 服务端广播**运行时里的所有 session**（包含子代理），必须按 `params.sessionId` 过滤，
-//! 否则子代理正文会串进父气泡。`subagent.started` / `subagent.finished` 没有 `sessionId`，
-//! 改按 `parentSessionId` 认父会话。Kivio bridge 直接调用 dsh 公共的 `agents.resume()` 与
-//! `agent.cancel()`，所以进程重建和用户停止都不会再丢失原生会话。
+//! 服务端广播**运行时里的所有 session**（包含子代理）。父会话的正文/工具卡按
+//! `params.sessionId` 过滤；子会话的 `tool/call` / 正文折成 `SubagentProgress`，挂到
+//! 父工具卡上，不进父气泡。`subagent.started` / `subagent.finished` 没有 `sessionId`，
+//! 改按 `parentSessionId` 认父会话。父轮结束后 `tool-jobs` 会对空闲父会话
+//! `followup` 开一轮汇报（和官方 web 同一条路）；空闲读要攒这轮 `TextDelta`，
+//! `turn/end` 时落成一条助手消息，不能只留任务边沿。Kivio bridge 直接调用 dsh
+//! 公共的 `agents.resume()` 与 `agent.cancel()`，所以进程重建和用户停止都不会再丢失原生会话。
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -52,6 +55,11 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(45);
 const READ_POLL: Duration = Duration::from_millis(200);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+const MAX_RECOVERABLE_READ_ERRORS: u32 = 32;
+const CHILD_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(350);
+const CHILD_PREVIEW_MAX_CHARS: usize = 1200;
+const CHILD_STEP_MAX_CHARS: usize = 160;
+const CHILD_STEPS_MAX: usize = 24;
 const DEFAULT_PROVIDER: &str = "deepseek-official";
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
@@ -73,6 +81,12 @@ pub struct DshJsonRpcSession {
     route: ModelRoute,
     /// 最近一条 `request/context.contextWindow`，附到后续 usage 上作为权威分母。
     context_window: Option<u64>,
+    /// 跨轮保留：父轮压缩/后台 call 配对，以及轮间空闲读的 leftover。
+    map_state: MapSessionState,
+    /// 子会话进度。官方 subagent 默认后台，父轮结束后孩子还在跑。
+    child_progress: HashMap<String, ChildProgress>,
+    /// 轮间父会话唤醒轮：`tool-jobs` 对空闲 owner `followup` 之后的正文。
+    idle_wake: IdleWakeState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +112,60 @@ struct PendingCompact {
 struct PendingBackground {
     name: String,
     description: Option<String>,
+}
+
+#[derive(Default)]
+struct ChildProgress {
+    steps: Vec<String>,
+    preview: String,
+    last_emit: Option<Instant>,
+}
+
+/// 轮间空闲读副作用：任务边沿 / 子代理进度 / 唤醒轮正文。会话层没有 `AppHandle`。
+pub enum DshIdleEffect {
+    Event(UnifiedAgentEvent),
+    Wake {
+        text: String,
+        model: Option<String>,
+        usage: Option<ModelUsage>,
+    },
+}
+
+pub type DshIdleSink = std::sync::Arc<dyn Fn(DshIdleEffect) + Send + Sync>;
+
+enum DshIdlePump {
+    Quiet,
+    Hiccup,
+    Dead,
+    Reply(String),
+    Event(UnifiedAgentEvent),
+    Wake {
+        text: String,
+        usage: Option<ModelUsage>,
+    },
+}
+
+#[derive(Default)]
+struct IdleWakeState {
+    collecting: bool,
+    text: String,
+    usage: Option<ModelUsage>,
+}
+
+enum IdleParentFold {
+    Quiet,
+    Event(UnifiedAgentEvent),
+    Wake {
+        text: String,
+        usage: Option<ModelUsage>,
+    },
+}
+
+enum ReadStep {
+    Line(String),
+    Idle,
+    Eof,
+    Fatal,
 }
 
 impl DshJsonRpcSession {
@@ -236,6 +304,9 @@ impl DshJsonRpcSession {
                 next_id: 3,
                 route,
                 context_window: None,
+                map_state: MapSessionState::default(),
+                child_progress: HashMap::new(),
+                idle_wake: IdleWakeState::default(),
             }),
             Err(message) => {
                 let tail =
@@ -272,6 +343,7 @@ impl DshJsonRpcSession {
             return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string());
         }
 
+        self.idle_wake = IdleWakeState::default();
         let prompt_id = self.next_id;
         self.next_id += 1;
         let is_slash = is_cli_slash_input(prompt);
@@ -281,10 +353,7 @@ impl DshJsonRpcSession {
         let mut started = false;
         let mut prompt_acknowledged = false;
         let mut terminal: Option<Result<(), String>> = None;
-        let mut map_state = MapSessionState {
-            context_window: self.context_window,
-            ..Default::default()
-        };
+        self.map_state.context_window = self.context_window;
         let mut cancel_requested = false;
         let mut cancel_id: Option<u64> = None;
         let mut cancel_started: Option<std::time::Instant> = None;
@@ -390,7 +459,7 @@ impl DshJsonRpcSession {
 
             if value.get("id").and_then(Value::as_u64) == Some(prompt_id) {
                 if let Some(error) = rpc_error_message(&value) {
-                    self.context_window = map_state.context_window;
+                    self.context_window = self.map_state.context_window;
                     return Err(error);
                 }
                 prompt_acknowledged = true;
@@ -409,7 +478,7 @@ impl DshJsonRpcSession {
                             })
                             .await;
                     }
-                    self.context_window = map_state.context_window;
+                    self.context_window = self.map_state.context_window;
                     return match command_result_error(result) {
                         Some(message) => Err(message),
                         None => Ok(()),
@@ -443,13 +512,24 @@ impl DshJsonRpcSession {
                 {
                     continue;
                 }
+                if method == "subagent.finished" {
+                    if let Some(child_id) = params.get("childSessionId").and_then(Value::as_str) {
+                        self.child_progress.remove(child_id);
+                    }
+                }
                 if let Some(event) = map_subagent_notification(method, params) {
                     let _ = events.send(event).await;
                 }
                 continue;
             }
             if params.get("sessionId").and_then(Value::as_str) != Some(self.session_id.as_str()) {
-                // 这条协议广播 runtime 中每个 session（子代理也在里面）。严格隔离父会话。
+                // 子会话：折成进度，不进父气泡，也不结束父轮。
+                if method == "session.event" {
+                    if let Some(event) = fold_child_session_params(params, &mut self.child_progress)
+                    {
+                        let _ = events.send(event).await;
+                    }
+                }
                 continue;
             }
 
@@ -464,7 +544,7 @@ impl DshJsonRpcSession {
                             "ask_user_question was aborted before the user answered",
                         )
                         .await;
-                        self.context_window = map_state.context_window;
+                        self.context_window = self.map_state.context_window;
                         return terminal.take().expect("checked above");
                     }
                     _ => {}
@@ -482,12 +562,12 @@ impl DshJsonRpcSession {
                     if let Some(result) = map_session_event(
                         event_type,
                         data,
-                        &mut map_state,
+                        &mut self.map_state,
                         &mut |event| mapped.push(event),
                     ) {
                         terminal = Some(result);
                     }
-                    self.context_window = map_state.context_window;
+                    self.context_window = self.map_state.context_window;
                     for event in mapped {
                         if let UnifiedAgentEvent::ToolUse { id, name, .. } = &event {
                             if is_user_question_tool(name) {
@@ -508,6 +588,94 @@ impl DshJsonRpcSession {
         }
     }
 
+    async fn next_line(&mut self) -> ReadStep {
+        match timeout(READ_POLL, self.reader.next_line()).await {
+            Ok(Ok(Some(line))) => ReadStep::Line(line),
+            Ok(Ok(None)) => ReadStep::Eof,
+            Ok(Err(_)) => ReadStep::Fatal,
+            Err(_) => ReadStep::Idle,
+        }
+    }
+
+    async fn write_control_line(&mut self, line: &str) {
+        let _ = self.stdin.write_all(line.as_bytes()).await;
+        let _ = self.stdin.flush().await;
+    }
+
+    /// 轮间空闲读一步：只读 + 分类，不写。写回（fail-closed 的 ask 回复）交给 actor。
+    async fn read_idle_frame(&mut self) -> DshIdlePump {
+        let line = match self.next_line().await {
+            ReadStep::Line(line) => line,
+            ReadStep::Idle => return DshIdlePump::Quiet,
+            ReadStep::Eof => return DshIdlePump::Dead,
+            ReadStep::Fatal => return DshIdlePump::Hiccup,
+        };
+        if line.trim().is_empty() {
+            return DshIdlePump::Quiet;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            return DshIdlePump::Quiet;
+        };
+        self.classify_idle_value(&value)
+    }
+
+    fn classify_idle_value(&mut self, value: &Value) -> DshIdlePump {
+        if is_incoming_rpc_request(value) {
+            let Some(id) = rpc_id(value) else {
+                return DshIdlePump::Quiet;
+            };
+            return DshIdlePump::Reply(rpc_error_line(
+                &id,
+                -32000,
+                "no user-questions provider is registered",
+                Some(json!({ "code": "NO_PROVIDER" })),
+            ));
+        }
+        let Some(method) = value.get("method").and_then(Value::as_str) else {
+            return DshIdlePump::Quiet;
+        };
+        let params = value.get("params").unwrap_or(&Value::Null);
+        if matches!(method, "subagent.started" | "subagent.finished") {
+            if params.get("parentSessionId").and_then(Value::as_str) != Some(self.session_id.as_str())
+            {
+                return DshIdlePump::Quiet;
+            }
+            if method == "subagent.finished" {
+                if let Some(child_id) = params.get("childSessionId").and_then(Value::as_str) {
+                    self.child_progress.remove(child_id);
+                }
+            }
+            return map_subagent_notification(method, params)
+                .map(DshIdlePump::Event)
+                .unwrap_or(DshIdlePump::Quiet);
+        }
+        if method != "session.event" {
+            return DshIdlePump::Quiet;
+        }
+        if params.get("sessionId").and_then(Value::as_str) != Some(self.session_id.as_str()) {
+            return fold_child_session_params(params, &mut self.child_progress)
+                .map(DshIdlePump::Event)
+                .unwrap_or(DshIdlePump::Quiet);
+        }
+        let Some(event) = params.get("event") else {
+            return DshIdlePump::Quiet;
+        };
+        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let data = event.get("data").unwrap_or(&Value::Null);
+        let folded = fold_idle_parent_session(
+            event_type,
+            data,
+            &mut self.map_state,
+            &mut self.idle_wake,
+        );
+        self.context_window = self.map_state.context_window;
+        match folded {
+            IdleParentFold::Quiet => DshIdlePump::Quiet,
+            IdleParentFold::Event(event) => DshIdlePump::Event(event),
+            IdleParentFold::Wake { text, usage } => DshIdlePump::Wake { text, usage },
+        }
+    }
+
     /// 优先走协议 shutdown，再有界等待；没退出就杀进程组。
     pub async fn close(mut self) {
         let id = self.next_id;
@@ -522,10 +690,73 @@ impl DshJsonRpcSession {
 }
 
 /// actor 与其他常驻协议同契约：所有 event 先入队，`done` 最后发。
-pub fn spawn_dsh_session_actor(mut session: DshJsonRpcSession) -> mpsc::Sender<SessionCommand> {
+pub fn spawn_dsh_session_actor(session: DshJsonRpcSession) -> mpsc::Sender<SessionCommand> {
+    spawn_dsh_session_actor_with_sink(session, None)
+}
+
+/// 带轮间空闲读的 actor。官方 subagent 默认后台，父轮 `turn/end` 之后孩子还在往
+/// stdout 写 `session.event`；不读的话工具卡永远停在「运行中…」。
+pub fn spawn_dsh_session_actor_with_sink(
+    mut session: DshJsonRpcSession,
+    sink: Option<DshIdleSink>,
+) -> mpsc::Sender<SessionCommand> {
+    enum ActorStep {
+        Cmd(Option<SessionCommand>),
+        Idle(DshIdlePump),
+    }
     let (tx, mut rx) = mpsc::channel::<SessionCommand>(8);
     tokio::spawn(async move {
-        while let Some(command) = rx.recv().await {
+        let mut idle_dead = false;
+        let mut idle_hiccups = 0u32;
+        loop {
+            let step = if idle_dead {
+                ActorStep::Cmd(rx.recv().await)
+            } else {
+                tokio::select! {
+                    cmd = rx.recv() => ActorStep::Cmd(cmd),
+                    pump = session.read_idle_frame() => ActorStep::Idle(pump),
+                }
+            };
+            let cmd = match step {
+                ActorStep::Idle(pump) => {
+                    match pump {
+                        DshIdlePump::Quiet => idle_hiccups = 0,
+                        DshIdlePump::Hiccup => {
+                            idle_hiccups += 1;
+                            if idle_hiccups >= MAX_RECOVERABLE_READ_ERRORS {
+                                idle_dead = true;
+                            }
+                        }
+                        DshIdlePump::Dead => idle_dead = true,
+                        DshIdlePump::Reply(line) => {
+                            idle_hiccups = 0;
+                            session.write_control_line(&line).await;
+                        }
+                        DshIdlePump::Event(event) => {
+                            idle_hiccups = 0;
+                            if let Some(sink) = sink.as_ref() {
+                                sink(DshIdleEffect::Event(event));
+                            }
+                        }
+                        DshIdlePump::Wake { text, usage } => {
+                            idle_hiccups = 0;
+                            if let Some(sink) = sink.as_ref() {
+                                sink(DshIdleEffect::Wake {
+                                    text,
+                                    model: Some(session.route.model.clone()),
+                                    usage,
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+                ActorStep::Cmd(cmd) => cmd,
+            };
+            let Some(command) = cmd else {
+                session.close().await;
+                return;
+            };
             match command {
                 SessionCommand::RunTurn {
                     prompt,
@@ -558,7 +789,6 @@ pub fn spawn_dsh_session_actor(mut session: DshJsonRpcSession) -> mpsc::Sender<S
                 }
             }
         }
-        session.close().await;
     });
     tx
 }
@@ -988,9 +1218,7 @@ fn map_session_event(
                         json!({ "raw": raw })
                     }
                 });
-                if is_background_capable_tool(&name)
-                    && input.get("run_in_background").and_then(Value::as_bool) == Some(true)
-                {
+                if tracks_background_call(&name, &input) {
                     state.background_calls.insert(
                         id.clone(),
                         PendingBackground {
@@ -1135,6 +1363,38 @@ fn is_background_capable_tool(name: &str) -> bool {
     matches!(name, "bash" | "pwsh" | "subagent" | "subagent_fork")
 }
 
+fn tracks_background_call(name: &str, input: &Value) -> bool {
+    if !is_background_capable_tool(name) {
+        return false;
+    }
+    match input.get("run_in_background").and_then(Value::as_bool) {
+        Some(flag) => flag,
+        // 官方 subagent 默认后台；没写字段也要记，否则派出回执对不上任务面板。
+        None => matches!(name, "subagent" | "subagent_fork"),
+    }
+}
+
+pub(crate) fn is_subagent_tool_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().replace(['_', '-'], "").as_str(),
+        "subagent" | "subagentfork" | "workflow" | "ralph" | "agent" | "task"
+    )
+}
+
+/// 派出回执（`started subagent <id>`）不是子代理跑完。调用方应保持工具卡 Running。
+pub(crate) fn subagent_launch_task_id(name: &str, content: &str) -> Option<String> {
+    if !is_subagent_tool_name(name) {
+        return None;
+    }
+    let text = content.trim();
+    if !(text.starts_with("started subagent ")
+        || text.starts_with("started background subagent task "))
+    {
+        return None;
+    }
+    parse_background_task_id(text)
+}
+
 fn optional_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -1272,6 +1532,188 @@ fn map_subagent_notification(method: &str, params: &Value) -> Option<UnifiedAgen
         }
         _ => None,
     }
+}
+
+/// 父轮已经收尾后，`tool-jobs` 会对空闲 owner `followup` 再开一轮。
+/// `turn/start` 打开收集窗口，正文进唤醒消息；job notice 仍立刻出任务边沿。
+fn fold_idle_parent_session(
+    event_type: &str,
+    data: &Value,
+    map_state: &mut MapSessionState,
+    wake: &mut IdleWakeState,
+) -> IdleParentFold {
+    if event_type == "turn/start" {
+        wake.collecting = true;
+        wake.text.clear();
+        wake.usage = None;
+    }
+    let mut mapped = Vec::new();
+    let terminal = map_session_event(event_type, data, map_state, &mut |event| {
+        mapped.push(event);
+    });
+    if let Some(index) = mapped
+        .iter()
+        .position(|event| matches!(event, UnifiedAgentEvent::BackgroundTask { .. }))
+    {
+        return IdleParentFold::Event(mapped.remove(index));
+    }
+    if wake.collecting {
+        for event in mapped {
+            match event {
+                UnifiedAgentEvent::TextDelta { delta } => wake.text.push_str(&delta),
+                UnifiedAgentEvent::Usage { usage } => wake.usage = Some(usage),
+                _ => {}
+            }
+        }
+    }
+    if event_type != "turn/end" {
+        return IdleParentFold::Quiet;
+    }
+    wake.collecting = false;
+    let text = std::mem::take(&mut wake.text).trim().to_string();
+    let usage = wake.usage.take();
+    let ok = matches!(terminal, None | Some(Ok(())));
+    if ok && !text.is_empty() {
+        IdleParentFold::Wake { text, usage }
+    } else {
+        IdleParentFold::Quiet
+    }
+}
+
+fn fold_child_session_params(
+    params: &Value,
+    child_progress: &mut HashMap<String, ChildProgress>,
+) -> Option<UnifiedAgentEvent> {
+    let session_id = params.get("sessionId").and_then(Value::as_str)?;
+    let event = params.get("event")?;
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let data = event.get("data").unwrap_or(&Value::Null);
+    fold_child_session_event(session_id, event_type, data, child_progress)
+}
+
+fn fold_child_session_event(
+    session_id: &str,
+    event_type: &str,
+    data: &Value,
+    child_progress: &mut HashMap<String, ChildProgress>,
+) -> Option<UnifiedAgentEvent> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let progress = child_progress
+        .entry(session_id.to_string())
+        .or_default();
+    let mut force = false;
+    match event_type {
+        "tool/call" => {
+            let name = data.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.is_empty() {
+                return None;
+            }
+            let raw = data.get("arguments").and_then(Value::as_str).unwrap_or("");
+            let input = serde_json::from_str(raw).unwrap_or_else(|_| {
+                if raw.is_empty() {
+                    Value::Null
+                } else {
+                    json!({ "raw": raw })
+                }
+            });
+            let step = format_child_tool_step(name, &input);
+            if progress.steps.last() != Some(&step) {
+                progress.steps.push(step);
+                if progress.steps.len() > CHILD_STEPS_MAX {
+                    let drop = progress.steps.len() - CHILD_STEPS_MAX;
+                    progress.steps.drain(0..drop);
+                }
+            }
+            force = true;
+        }
+        "assistant/chunk" => {
+            let chunk = data.get("chunk")?;
+            if chunk.get("type").and_then(Value::as_str) != Some("text-delta") {
+                return None;
+            }
+            let delta = chunk.get("text").and_then(Value::as_str).unwrap_or("");
+            if delta.is_empty() {
+                return None;
+            }
+            progress.preview.push_str(delta);
+            let count = progress.preview.chars().count();
+            if count > CHILD_PREVIEW_MAX_CHARS {
+                let skip = count - CHILD_PREVIEW_MAX_CHARS;
+                progress.preview = progress.preview.chars().skip(skip).collect();
+            }
+        }
+        "assistant/message" => {
+            let text = content_blocks_text(data.get("message").and_then(|value| value.get("content")));
+            if text.is_empty() {
+                return None;
+            }
+            progress.preview = clip_chars(&text, CHILD_PREVIEW_MAX_CHARS);
+            force = true;
+        }
+        _ => return None,
+    }
+    let now = Instant::now();
+    if !force {
+        if let Some(last) = progress.last_emit {
+            if now.duration_since(last) < CHILD_PROGRESS_EMIT_INTERVAL {
+                return None;
+            }
+        }
+    }
+    progress.last_emit = Some(now);
+    Some(UnifiedAgentEvent::SubagentProgress {
+        task_id: session_id.to_string(),
+        status: "running".to_string(),
+        preview: progress.preview.clone(),
+        steps: progress.steps.clone(),
+    })
+}
+
+fn format_child_tool_step(name: &str, input: &Value) -> String {
+    let target = optional_string(input, "path")
+        .or_else(|| optional_string(input, "file_path"))
+        .or_else(|| optional_string(input, "command"))
+        .or_else(|| optional_string(input, "query"))
+        .or_else(|| optional_string(input, "pattern"))
+        .or_else(|| optional_string(input, "description"));
+    let line = match target {
+        Some(target) => format!("{name} {target}"),
+        None => name.to_string(),
+    };
+    clip_chars(&line, CHILD_STEP_MAX_CHARS)
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn rpc_error_line(id: &Value, code: i64, message: &str, data: Option<Value>) -> String {
+    let mut error = json!({
+        "code": code,
+        "message": message,
+    });
+    if let Some(data) = data {
+        error
+            .as_object_mut()
+            .expect("error object")
+            .insert("data".to_string(), data);
+    }
+    let mut line = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": error,
+    }))
+    .unwrap_or_default();
+    line.push('\n');
+    line
 }
 
 /// 官方 `todo/write` 快照 → Kivio 对话上的 todo 列表。
@@ -1841,6 +2283,42 @@ mod tests {
     }
 
     #[test]
+    fn default_background_subagent_launch_emits_a_running_task() {
+        let events = map_events(&[
+            (
+                "tool/call",
+                json!({
+                    "callId": "call_sa",
+                    "name": "subagent",
+                    "arguments": "{\"description\":\"搜索最新AI资讯\",\"prompt\":\"去搜\"}"
+                }),
+            ),
+            (
+                "tool/result",
+                json!({ "message": { "content": [{
+                    "type": "tool-result",
+                    "toolCallId": "call_sa",
+                    "content": [{ "type": "text", "text": "started subagent 018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50" }],
+                    "isError": false
+                }] } }),
+            ),
+        ]);
+        assert!(matches!(
+            events.iter().find(|event| matches!(event, UnifiedAgentEvent::BackgroundTask { .. })),
+            Some(UnifiedAgentEvent::BackgroundTask {
+                task_id,
+                status,
+                kind,
+                description,
+                ..
+            }) if task_id == "018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50"
+                && status == "running"
+                && kind.as_deref() == Some("local_agent")
+                && description.as_deref() == Some("搜索最新AI资讯")
+        ));
+    }
+
+    #[test]
     fn maps_tool_jobs_notice_to_a_terminal_task() {
         let events = map_events(&[(
             "user/message",
@@ -1902,10 +2380,145 @@ mod tests {
                 status,
                 summary,
                 ..
-            }) if task_id == "child-9"
+            })             if task_id == "child-9"
                 && status == "failed"
                 && summary.as_deref() == Some("boom")
         ));
+    }
+
+    #[test]
+    fn child_session_tools_and_text_fold_into_progress() {
+        let mut progress = HashMap::new();
+        let first = fold_child_session_event(
+            "child-9",
+            "tool/call",
+            &json!({
+                "callId": "c1",
+                "name": "web_search",
+                "arguments": "{\"query\":\"最新AI资讯\"}"
+            }),
+            &mut progress,
+        );
+        assert!(matches!(
+            first,
+            Some(UnifiedAgentEvent::SubagentProgress {
+                task_id,
+                status,
+                steps,
+                ..
+            }) if task_id == "child-9"
+                && status == "running"
+                && steps == ["web_search 最新AI资讯".to_string()]
+        ));
+        let second = fold_child_session_event(
+            "child-9",
+            "assistant/chunk",
+            &json!({ "chunk": { "type": "text-delta", "text": "正在检索" } }),
+            &mut progress,
+        );
+        // 紧跟着的正文被节流；下一步工具会带上攒下的 preview。
+        assert!(second.is_none());
+        let third = fold_child_session_event(
+            "child-9",
+            "tool/call",
+            &json!({
+                "callId": "c2",
+                "name": "web_fetch",
+                "arguments": "{\"path\":\"https://example.com\"}"
+            }),
+            &mut progress,
+        );
+        assert!(matches!(
+            third,
+            Some(UnifiedAgentEvent::SubagentProgress {
+                preview,
+                steps,
+                ..
+            }) if preview == "正在检索"
+                && steps == [
+                    "web_search 最新AI资讯".to_string(),
+                    "web_fetch https://example.com".to_string()
+                ]
+        ));
+        assert!(
+            fold_child_session_event(
+                "child-9",
+                "turn/end",
+                &json!({ "reason": { "kind": "completed" } }),
+                &mut progress,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn idle_parent_wake_turn_keeps_the_assistant_reply() {
+        let mut map_state = MapSessionState::default();
+        let mut wake = IdleWakeState::default();
+        assert!(matches!(
+            fold_idle_parent_session(
+                "turn/start",
+                &json!({ "turn": 2 }),
+                &mut map_state,
+                &mut wake,
+            ),
+            IdleParentFold::Quiet
+        ));
+        assert!(matches!(
+            fold_idle_parent_session(
+                "user/message",
+                &json!({
+                    "id": "n1",
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "background job subagent-1 (subagent: 搜索最新AI资讯) finished [status: completed]. Read its output with job_output."
+                    }],
+                    "source": { "kind": "plugin", "plugin": "tool-jobs", "form": "notice" }
+                }),
+                &mut map_state,
+                &mut wake,
+            ),
+            IdleParentFold::Event(UnifiedAgentEvent::BackgroundTask { task_id, status, .. })
+                if task_id == "subagent-1" && status == "completed"
+        ));
+        assert!(matches!(
+            fold_idle_parent_session(
+                "assistant/chunk",
+                &json!({ "chunk": { "type": "text-delta", "text": "12 条资讯" } }),
+                &mut map_state,
+                &mut wake,
+            ),
+            IdleParentFold::Quiet
+        ));
+        assert!(matches!(
+            fold_idle_parent_session(
+                "turn/end",
+                &json!({ "turn": 2, "reason": { "kind": "completed" } }),
+                &mut map_state,
+                &mut wake,
+            ),
+            IdleParentFold::Wake { text, .. } if text == "12 条资讯"
+        ));
+    }
+
+    #[test]
+    fn subagent_launch_receipt_is_not_a_finished_result() {
+        assert_eq!(
+            subagent_launch_task_id(
+                "subagent",
+                "started subagent 018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50"
+            )
+            .as_deref(),
+            Some("018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50")
+        );
+        assert_eq!(
+            subagent_launch_task_id("subagent_fork", "started background subagent task job_9")
+                .as_deref(),
+            Some("job_9")
+        );
+        assert!(subagent_launch_task_id("bash", "started background job bash-3").is_none());
+        assert!(subagent_launch_task_id("subagent", "the child found three sources").is_none());
     }
 
     #[test]

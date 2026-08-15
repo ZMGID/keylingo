@@ -868,6 +868,7 @@ where
                 &mcp_servers,
                 resume_native.clone(),
                 Some(background_task_sink(app, conversation_id)),
+                Some(dsh_idle_sink(app, conversation_id)),
             )
             .await
             {
@@ -902,6 +903,7 @@ where
                         &mcp_servers,
                         None,
                         Some(background_task_sink(app, conversation_id)),
+                        Some(dsh_idle_sink(app, conversation_id)),
                     )
                     .await?
                 }
@@ -1129,6 +1131,7 @@ async fn reconnect_fresh(
         mcp_servers,
         resume_native,
         Some(background_task_sink(app, conversation_id)),
+        Some(dsh_idle_sink(app, conversation_id)),
     )
     .await?;
     let _ = save_live_handle(
@@ -1882,6 +1885,161 @@ fn background_task_sink(
     })
 }
 
+fn dsh_idle_sink(
+    app: &AppHandle,
+    conversation_id: &str,
+) -> crate::external_agents::session::dsh_jsonrpc::DshIdleSink {
+    use crate::external_agents::session::dsh_jsonrpc::DshIdleEffect;
+    let app = app.clone();
+    let conversation_id = conversation_id.to_string();
+    std::sync::Arc::new(move |effect| match effect {
+        DshIdleEffect::Event(event) => apply_idle_dsh_event(&app, &conversation_id, event),
+        DshIdleEffect::Wake { text, model, usage } => {
+            let app = app.clone();
+            let conversation_id = conversation_id.clone();
+            tauri::async_runtime::spawn(async move {
+                append_wake_turn_message(app, conversation_id, text, model, usage).await;
+            });
+        }
+    })
+}
+
+fn apply_idle_dsh_event(app: &AppHandle, conversation_id: &str, event: UnifiedAgentEvent) {
+    match event {
+        UnifiedAgentEvent::BackgroundTask {
+            task_id,
+            status,
+            kind,
+            description,
+            summary,
+        } => {
+            app.state::<AppState>().upsert_external_background_task(
+                conversation_id,
+                &task_id,
+                &status,
+                kind.as_deref(),
+                description.as_deref(),
+                summary.as_deref(),
+            );
+            if status == "running" && summary.is_none() {
+                return;
+            }
+            let preview = summary.clone().unwrap_or_default();
+            emit_live_subagent_progress(
+                app,
+                conversation_id,
+                &task_id,
+                &status,
+                preview.clone(),
+                Vec::new(),
+            );
+            persist_dsh_subagent_card(
+                app.clone(),
+                conversation_id.to_string(),
+                task_id,
+                status,
+                preview,
+                Vec::new(),
+                summary,
+            );
+        }
+        UnifiedAgentEvent::SubagentProgress {
+            task_id,
+            status,
+            preview,
+            steps,
+        } => {
+            emit_live_subagent_progress(
+                app,
+                conversation_id,
+                &task_id,
+                &status,
+                preview.clone(),
+                steps.clone(),
+            );
+            persist_dsh_subagent_card(
+                app.clone(),
+                conversation_id.to_string(),
+                task_id,
+                status,
+                preview,
+                steps,
+                None,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn emit_live_subagent_progress(
+    app: &AppHandle,
+    conversation_id: &str,
+    task_id: &str,
+    status: &str,
+    preview: String,
+    steps: Vec<String>,
+) {
+    crate::chat::protocol::emit_live_run_event(
+        app,
+        conversation_id,
+        crate::chat::protocol::ChatRunEvent::SubagentUpdated {
+            parent_tool_call_id: String::new(),
+            task_id: task_id.to_string(),
+            name: "subagent".to_string(),
+            model: None,
+            depth: 1,
+            status: status.to_string(),
+            preview: (!preview.is_empty()).then_some(preview),
+            steps,
+        },
+    );
+}
+
+fn persist_dsh_subagent_card(
+    app: AppHandle,
+    conversation_id: String,
+    task_id: String,
+    status: String,
+    preview: String,
+    steps: Vec<String>,
+    summary: Option<String>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let now = Local::now().timestamp();
+        if let Err(err) = crate::chat::repository::repository(&app)
+            .mutate(&app, &conversation_id, move |conversation| {
+                for message in conversation.messages.iter_mut().rev() {
+                    let Some(record) = find_dsh_subagent_record(&mut message.tool_calls, &task_id)
+                    else {
+                        continue;
+                    };
+                    if !steps.is_empty() || !preview.is_empty() {
+                        merge_subagent_progress(record, &preview, &steps, &status, &task_id);
+                    } else {
+                        attach_child_session_id(record, &task_id);
+                    }
+                    if status != "running" {
+                        record.status = match status.as_str() {
+                            "failed" => ToolCallStatus::Error,
+                            "stopped" | "cancelled" => ToolCallStatus::Cancelled,
+                            _ => ToolCallStatus::Success,
+                        };
+                        if let Some(summary) = summary.as_ref().filter(|text| !text.is_empty()) {
+                            record.result_preview = Some(truncate_for_preview(summary, 800));
+                        }
+                        record.completed_at = Some(now);
+                    }
+                    return Ok(());
+                }
+                Ok(())
+            })
+            .await
+        {
+            eprintln!("[external-agent] persist dsh subagent card failed: {err}");
+        }
+    });
+}
+
 /// 把唤醒轮（后台任务完成后 CLI 自起的一轮）的正文落成一条真正的助手消息，
 /// 并走标准 run 协议事件让**打开着的窗口实时看到**。
 ///
@@ -1946,8 +2104,8 @@ async fn append_wake_turn_message(
 /// Connect (or resume) a persistent protocol session, returning its control channel, native id,
 /// and whether a resume actually succeeded. Falls back to a fresh session if resume fails.
 ///
-/// `background_task_sink`：claude 轮间空闲读到的后台任务事件旁路（→ AppState 注册表），
-/// 其余协议无后台任务概念，忽略。
+/// `background_task_sink`：claude 轮间空闲读到的后台任务事件旁路（→ AppState 注册表）。
+/// `dsh_idle_sink`：dsh 轮间的任务边沿 + 子代理进度 + 唤醒轮正文。
 #[allow(clippy::too_many_arguments)]
 async fn connect_persistent_session(
     protocol: StreamFormat,
@@ -1963,6 +2121,7 @@ async fn connect_persistent_session(
     background_task_sink: Option<
         crate::external_agents::session::claude_stream::BackgroundTaskSink,
     >,
+    dsh_idle_sink: Option<crate::external_agents::session::dsh_jsonrpc::DshIdleSink>,
 ) -> Result<PersistentConnection, String> {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
     use crate::external_agents::session::claude_stream::{
@@ -1972,7 +2131,7 @@ async fn connect_persistent_session(
         spawn_codex_session_actor, CodexAppServerSession,
     };
     use crate::external_agents::session::dsh_jsonrpc::{
-        spawn_dsh_session_actor, DshJsonRpcSession,
+        spawn_dsh_session_actor_with_sink, DshJsonRpcSession,
     };
 
     match protocol {
@@ -2149,7 +2308,7 @@ async fn connect_persistent_session(
             let resumed = session.resumed();
             let child_pid = session.child_pid();
             Ok(PersistentConnection {
-                control: spawn_dsh_session_actor(session),
+                control: spawn_dsh_session_actor_with_sink(session, dsh_idle_sink),
                 native_id: id,
                 resumed,
                 child_pid,
@@ -2377,13 +2536,7 @@ fn apply_unified_event(
         } => {
             if let Some(idx) = tool_map.get(&tool_use_id).copied() {
                 if let Some(record) = tool_calls.get_mut(idx) {
-                    record.status = if is_error {
-                        ToolCallStatus::Error
-                    } else {
-                        ToolCallStatus::Success
-                    };
-                    record.result_preview = Some(truncate_for_preview(&result_content, 800));
-                    record.completed_at = Some(now);
+                    apply_external_tool_result(record, &result_content, is_error, now);
                     // 问用户答完时留下的 `askUser` 载荷（问题 + 用户选的答案）在这里落进记录，
                     // 覆盖流解析层塞的原始入参 —— 否则消息流里那块刷新一次就只剩一行灰字。
                     if let Some(answered) = app
@@ -2533,6 +2686,47 @@ fn apply_unified_event(
                 description.as_deref(),
                 summary.as_deref(),
             );
+            // dsh 后台子代理的 tool/result 只是派出回执。终态走 BackgroundTask，
+            // 同一轮里把对应工具卡从 Running 收掉（跨轮要靠空闲读，目前 dsh 没有）。
+            if status != "running" {
+                if let Some(record) = find_dsh_subagent_record(tool_calls, &task_id) {
+                    record.status = match status.as_str() {
+                        "failed" => ToolCallStatus::Error,
+                        "stopped" => ToolCallStatus::Cancelled,
+                        _ => ToolCallStatus::Success,
+                    };
+                    if let Some(summary) = summary.filter(|text| !text.is_empty()) {
+                        record.result_preview = Some(truncate_for_preview(&summary, 800));
+                    }
+                    record.completed_at = Some(now);
+                    emit_chat_tool_record(app, run_id, record);
+                }
+            }
+        }
+        UnifiedAgentEvent::SubagentProgress {
+            task_id,
+            status,
+            preview,
+            steps,
+        } => {
+            if let Some(record) = find_dsh_subagent_record(tool_calls, &task_id) {
+                merge_subagent_progress(record, &preview, &steps, &status, &task_id);
+                emit_chat_tool_record(app, run_id, record);
+                crate::chat::protocol::emit_run_event(
+                    app,
+                    run_id,
+                    crate::chat::protocol::ChatRunEvent::SubagentUpdated {
+                        parent_tool_call_id: record.id.clone(),
+                        task_id,
+                        name: record.name.clone(),
+                        model: None,
+                        depth: 1,
+                        status,
+                        preview: (!preview.is_empty()).then_some(preview),
+                        steps,
+                    },
+                );
+            }
         }
         UnifiedAgentEvent::TodoWrite { todos } => {
             let Some(state) =
@@ -2577,6 +2771,146 @@ fn apply_unified_event(
         }
         _ => {}
     }
+}
+
+fn apply_external_tool_result(
+    record: &mut ToolCallRecord,
+    result_content: &str,
+    is_error: bool,
+    now: i64,
+) {
+    if !is_error {
+        if let Some(task_id) = crate::external_agents::session::dsh_jsonrpc::subagent_launch_task_id(
+            &record.name,
+            result_content,
+        ) {
+            record.status = ToolCallStatus::Running;
+            record.completed_at = None;
+            record.result_preview = None;
+            attach_background_task_id(record, &task_id);
+            return;
+        }
+    }
+    record.status = if is_error {
+        ToolCallStatus::Error
+    } else {
+        ToolCallStatus::Success
+    };
+    record.result_preview = Some(truncate_for_preview(result_content, 800));
+    record.completed_at = Some(now);
+}
+
+fn attach_background_task_id(record: &mut ToolCallRecord, task_id: &str) {
+    let mut payload = record
+        .structured_content
+        .clone()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "backgroundTaskId".to_string(),
+            serde_json::Value::String(task_id.to_string()),
+        );
+    }
+    record.structured_content = Some(payload);
+}
+
+fn merge_subagent_progress(
+    record: &mut ToolCallRecord,
+    preview: &str,
+    steps: &[String],
+    status: &str,
+    incoming_task_id: &str,
+) {
+    attach_child_session_id(record, incoming_task_id);
+    let mut payload = record
+        .structured_content
+        .clone()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "subagentProgress".to_string(),
+            serde_json::json!({
+                "taskId": background_task_id(record)
+                    .or_else(|| (!incoming_task_id.is_empty()).then(|| incoming_task_id.to_string())),
+                "name": record.name,
+                "status": status,
+                "preview": preview,
+                "steps": steps,
+                "depth": 1,
+            }),
+        );
+    }
+    record.structured_content = Some(payload);
+}
+
+fn structured_string_field(record: &ToolCallRecord, key: &str) -> Option<String> {
+    record
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn background_task_id(record: &ToolCallRecord) -> Option<String> {
+    structured_string_field(record, "backgroundTaskId")
+}
+
+fn child_session_id(record: &ToolCallRecord) -> Option<String> {
+    structured_string_field(record, "childSessionId")
+}
+
+fn attach_child_session_id(record: &mut ToolCallRecord, task_id: &str) {
+    if task_id.is_empty() || background_task_id(record).as_deref() == Some(task_id) {
+        return;
+    }
+    if child_session_id(record).as_deref() == Some(task_id) {
+        return;
+    }
+    let mut payload = record
+        .structured_content
+        .clone()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "childSessionId".to_string(),
+            serde_json::Value::String(task_id.to_string()),
+        );
+    }
+    record.structured_content = Some(payload);
+}
+
+/// 派出回执是 `jobs` 的 `jobId`（`subagent-1`），子会话 `session.event` 是另一个
+/// `session.id`。对得上就精确绑；对不上且只有一张 Running 子代理卡时绑到那张。
+fn find_dsh_subagent_record<'a>(
+    tool_calls: &'a mut [ToolCallRecord],
+    task_id: &str,
+) -> Option<&'a mut ToolCallRecord> {
+    if !task_id.is_empty() {
+        if let Some(index) = tool_calls.iter().rposition(|record| {
+            background_task_id(record).as_deref() == Some(task_id)
+                || child_session_id(record).as_deref() == Some(task_id)
+        }) {
+            return tool_calls.get_mut(index);
+        }
+    }
+    // ponytail: 并行多个子代理时不猜，避免把 A 的步骤写到 B 上。
+    let running: Vec<usize> = tool_calls
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            record.status == ToolCallStatus::Running
+                && crate::external_agents::session::dsh_jsonrpc::is_subagent_tool_name(&record.name)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if running.len() == 1 {
+        return tool_calls.get_mut(running[0]);
+    }
+    None
 }
 
 /// 立刻把对话 Todo 条和工具卡接到同一份快照上（DSH 整表 / Claude 补丁共用）。
@@ -2753,6 +3087,136 @@ mod tests {
     #[test]
     fn clean_turn_has_no_error() {
         assert_eq!(resolve_turn_error(None, None), None);
+    }
+
+    #[test]
+    fn subagent_launch_receipt_keeps_the_tool_card_running() {
+        let mut record = ToolCallRecord {
+            id: "c1".into(),
+            name: "subagent".into(),
+            source: "external_cli".into(),
+            server_id: None,
+            arguments: "{}".into(),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: Some(1),
+            completed_at: None,
+            round: 1,
+            sensitive: false,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: Some(serde_json::json!({ "description": "搜资讯" })),
+        };
+        apply_external_tool_result(
+            &mut record,
+            "started subagent 018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50",
+            false,
+            99,
+        );
+        assert_eq!(record.status, ToolCallStatus::Running);
+        assert_eq!(record.completed_at, None);
+        assert_eq!(record.result_preview, None);
+        assert_eq!(
+            background_task_id(&record).as_deref(),
+            Some("018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50")
+        );
+    }
+
+    #[test]
+    fn subagent_progress_lands_on_the_parent_tool_card() {
+        let mut record = ToolCallRecord {
+            id: "c1".into(),
+            name: "subagent".into(),
+            source: "external_cli".into(),
+            server_id: None,
+            arguments: "{}".into(),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: Some(1),
+            completed_at: None,
+            round: 1,
+            sensitive: false,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: Some(serde_json::json!({
+                "backgroundTaskId": "child-9",
+                "description": "搜资讯"
+            })),
+        };
+        merge_subagent_progress(
+            &mut record,
+            "正在检索",
+            &["web_search 最新AI".to_string()],
+            "running",
+            "child-9",
+        );
+        let progress = record
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("subagentProgress"))
+            .expect("progress");
+        assert_eq!(progress["taskId"], "child-9");
+        assert_eq!(progress["status"], "running");
+        assert_eq!(progress["preview"], "正在检索");
+        assert_eq!(progress["steps"][0], "web_search 最新AI");
+        assert_eq!(
+            record.structured_content.as_ref().unwrap()["backgroundTaskId"],
+            "child-9"
+        );
+    }
+
+    #[test]
+    fn subagent_progress_binds_child_session_to_the_launch_receipt_card() {
+        let mut tools = vec![ToolCallRecord {
+            id: "c1".into(),
+            name: "subagent".into(),
+            source: "external_cli".into(),
+            server_id: None,
+            arguments: "{}".into(),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: Some(1),
+            completed_at: None,
+            round: 1,
+            sensitive: false,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: Some(serde_json::json!({
+                "backgroundTaskId": "subagent-1",
+                "description": "搜资讯"
+            })),
+        }];
+        {
+            let record = find_dsh_subagent_record(&mut tools, "018b08fc-session").expect("bind");
+            merge_subagent_progress(
+                record,
+                "正在检索",
+                &["web_search 最新AI".to_string()],
+                "running",
+                "018b08fc-session",
+            );
+        }
+        assert_eq!(
+            tools[0].structured_content.as_ref().unwrap()["childSessionId"],
+            "018b08fc-session"
+        );
+        assert_eq!(
+            tools[0].structured_content.as_ref().unwrap()["subagentProgress"]["steps"][0],
+            "web_search 最新AI"
+        );
+        assert!(
+            find_dsh_subagent_record(&mut tools, "018b08fc-session").is_some(),
+            "later events must exact-match the stored child session id"
+        );
     }
 
     /// 端到端：claude 未登录的**真实样本**从流解析一路走到气泡文案。

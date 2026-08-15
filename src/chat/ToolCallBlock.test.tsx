@@ -323,6 +323,55 @@ describe('ToolCallBlock', () => {
     expect(within(button).queryByText(/file_path/)).not.toBeInTheDocument()
   })
 
+  it('shows live dsh subagent steps instead of a frozen 运行中', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'subagent',
+          source: 'external_cli',
+          status: 'running',
+          arguments: {
+            description: '搜索最新AI资讯',
+            prompt: '去网上搜最近的模型发布',
+          },
+          structured_content: {
+            backgroundTaskId: 'child-9',
+            subagentProgress: {
+              taskId: 'child-9',
+              status: 'running',
+              preview: '正在检索…',
+              steps: ['web_search 最新AI资讯'],
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('SUBAGENT')).toBeInTheDocument()
+    expect(screen.getByText('web_search 最新AI资讯')).toBeInTheDocument()
+    expect(screen.queryByText('运行中…')).not.toBeInTheDocument()
+  })
+
+  it('keeps a dsh background subagent launch as running, not completed', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'subagent',
+          source: 'external_cli',
+          status: 'success',
+          arguments: {
+            description: '搜索最新AI资讯',
+            prompt: '去网上搜最近的模型发布',
+          },
+          result_preview: 'started subagent 018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50',
+        })}
+      />,
+    )
+    expect(screen.getByText('SUBAGENT')).toBeInTheDocument()
+    expect(screen.getByText('运行中…')).toBeInTheDocument()
+    expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+    expect(screen.queryByText(/started subagent/)).not.toBeInTheDocument()
+  })
+
   it('renders a dsh subagent call as a SUBAGENT consult card', () => {
     render(
       <ToolCallBlock
