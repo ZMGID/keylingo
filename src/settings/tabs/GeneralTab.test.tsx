@@ -104,8 +104,15 @@ describe('BehaviorGroup', () => {
     const toggles = screen.getAllByRole('switch')
     await userEvent.click(toggles[0])
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ launchAtStartup: true })
-    await userEvent.click(toggles[1])
+    await userEvent.click(toggles[2])
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ retryEnabled: false })
+  })
+
+  it('启动后最小化到托盘开关写 launchMinimizedToTray', async () => {
+    const props = renderGroup()
+    const toggles = screen.getAllByRole('switch')
+    await userEvent.click(toggles[1])
+    expect(props.onUpdateSettings).toHaveBeenCalledWith({ launchMinimizedToTray: true })
   })
 })
 

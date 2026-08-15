@@ -211,7 +211,7 @@ export function AppearanceGroup({
   )
 }
 
-/** 行为：开机自启 / 失败重试。 */
+/** 行为：开机自启 / 启动后最小化到托盘 / 失败重试。 */
 export function BehaviorGroup({
   settings,
   t,
@@ -235,6 +235,12 @@ export function BehaviorGroup({
         <Toggle
           checked={settings.launchAtStartup ?? false}
           onChange={(v) => onUpdateSettings({ launchAtStartup: v })}
+        />
+      </SettingRow>
+      <SettingRow label={t.launchMinimizedToTray} description={t.launchMinimizedToTrayDesc}>
+        <Toggle
+          checked={settings.launchMinimizedToTray ?? false}
+          onChange={(v) => onUpdateSettings({ launchMinimizedToTray: v })}
         />
       </SettingRow>
       <SettingRow label={t.retryEnabled}>

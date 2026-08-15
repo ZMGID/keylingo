@@ -290,6 +290,16 @@ pub fn run() {
             if let Err(err) = apply_launch_at_startup(&app.handle(), settings.launch_at_startup) {
                 eprintln!("Failed to apply launch-at-startup setting: {err}");
             }
+            // 开机自启带 `--from-autostart` 时不弹窗；用户显式打开「启动后最小化到托盘」时
+            // 任何启动路径都不弹（含参数丢失的自启、开始菜单快捷方式）。
+            let skip_chat_on_launch =
+                launched_from_autostart || settings.launch_minimized_to_tray;
+            #[cfg(target_os = "macos")]
+            if skip_chat_on_launch {
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
             let usage_dir = usage::usage_dir(&app.handle()).unwrap_or_else(|err| {
                 eprintln!("Failed to initialize usage ledger dir: {err}");
                 std::env::temp_dir().join("kivio-usage")
@@ -440,8 +450,8 @@ pub fn run() {
                 });
             }
 
-            // 如果不是通过自启动启动的，则默认打开 AI 客户端。
-            if !launched_from_autostart {
+            // 手动启动默认打开聊天窗口；自启 / 「启动后最小化到托盘」则只留托盘常驻。
+            if !skip_chat_on_launch {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(500)).await;

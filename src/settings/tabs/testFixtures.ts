@@ -18,6 +18,7 @@ export function makeSettings(overrides: Partial<SettingsData> = {}): SettingsDat
     targetLang: 'auto',
     autoPaste: false,
     launchAtStartup: false,
+    launchMinimizedToTray: false,
     translatorProviderId: 'p1',
     translatorModel: 'gpt-4o',
     chatProviderId: 'p1',

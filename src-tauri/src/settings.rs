@@ -1534,6 +1534,10 @@ pub struct Settings {
     pub auto_paste: bool,
     #[serde(default = "default_false")]
     pub launch_at_startup: bool,
+    /// 启动后不打开聊天窗口，进程留在托盘。开机自启用户常开这个，避免每次开机弹出界面。
+    /// `--from-autostart` 仍会单独跳过弹窗（插件参数偶发丢失时靠本开关兜底）。
+    #[serde(default = "default_false")]
+    pub launch_minimized_to_tray: bool,
     #[serde(default)]
     pub translator_provider_id: String,
     #[serde(default = "default_openai_model")]
@@ -1722,6 +1726,7 @@ impl Default for Settings {
             target_lang: "auto".to_string(),
             auto_paste: true,
             launch_at_startup: false,
+            launch_minimized_to_tray: false,
             translator_provider_id: "default-translator".to_string(),
             translator_model: "gpt-4o".to_string(),
             chat_provider_id: String::new(),

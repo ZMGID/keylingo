@@ -1016,6 +1016,8 @@ export type Settings = {
   targetLang: string
   autoPaste: boolean
   launchAtStartup: boolean
+  /** 启动后不打开聊天窗口，进程留在托盘（适合开机自启后后台常驻） */
+  launchMinimizedToTray: boolean
   translatorProviderId: string
   translatorModel: string
   chatProviderId: string
@@ -1671,6 +1673,7 @@ export function normalizeSettings(settings: Settings): Settings {
     targetLang: current.targetLang ?? 'auto',
     autoPaste: current.autoPaste ?? true,
     launchAtStartup: current.launchAtStartup ?? false,
+    launchMinimizedToTray: current.launchMinimizedToTray ?? false,
     translatorProviderId: current.translatorProviderId ?? '',
     translatorModel: current.translatorModel ?? '',
     chatProviderId: effectiveChatModel.providerId,
