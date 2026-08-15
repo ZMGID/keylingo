@@ -660,6 +660,32 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText(/1/)).toBeInTheDocument()
   })
 
+  it('renders claude TaskCreate with todoState as the shared todo card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'TaskCreate',
+          source: 'external_cli',
+          status: 'success',
+          arguments: JSON.stringify({ subject: '整理工作目录文件' }),
+          structured_content: {
+            subject: '整理工作目录文件',
+            todoState: {
+              items: [
+                { id: '1', content: '整理工作目录文件', status: 'pending' },
+                { id: '2', content: '写一个示例脚本', status: 'pending' },
+              ],
+              updated_at: 1,
+            },
+          },
+        })}
+      />,
+    )
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('Update todos')).toBeInTheDocument()
+    expect(within(button).getByText('0/2')).toBeInTheDocument()
+  })
+
   it('keeps MCP tool names verbatim (normalization must not lowercase the display name)', () => {
     // 归一化只用于 switch 匹配。MCP 工具名的大小写有意义，把它小写化会改坏显示。
     render(

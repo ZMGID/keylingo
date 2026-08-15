@@ -1182,6 +1182,7 @@ function getToolName(toolCall: ToolCallRecord): string {
   if (raw === 'mixer_vision') return 'Vision'
   if (raw === 'mixer_generate_image') return 'Generate image'
   if (raw === 'todo_write' || raw === 'todo_update') return 'Update todos'
+  if (structuredTodoState(toolCall)) return 'Update todos'
   if (raw === 'taskcreate') return 'Create task'
   if (raw === 'taskupdate') return 'Update task'
   if (raw === 'tasklist') return 'List tasks'
@@ -1269,16 +1270,24 @@ function getToolTarget(toolCall: ToolCallRecord): string {
       case 'knowledge_search':
         return compactText(firstString(args?.query), 140)
       case 'todo_write': {
-        const counts = formatTodoCounts(normalizeTodoItems(args?.todos))
+        const counts = formatTodoCounts(
+          structuredTodoState(toolCall)?.items ?? normalizeTodoItems(args?.todos),
+        )
         return counts || compactText(firstString(args?.objective, args?.content), 140)
       }
-      case 'taskcreate':
-        return compactText(firstString(args?.subject, args?.content), 140)
+      case 'taskcreate': {
+        const counts = formatTodoCounts(structuredTodoState(toolCall)?.items)
+        return counts || compactText(firstString(args?.subject, args?.content), 140)
+      }
       case 'taskupdate': {
+        const counts = formatTodoCounts(structuredTodoState(toolCall)?.items)
+        if (counts) return counts
         const status = typeof args?.status === 'string' ? todoStatusLabel(args.status) : ''
         const target = firstString(args?.subject, args?.taskId, args?.id, args?.task_id)
         return [status, compactText(target, 120)].filter(Boolean).join(' · ')
       }
+      case 'tasklist':
+        return formatTodoCounts(structuredTodoState(toolCall)?.items)
       case 'todo_update':
         return compactText(firstString(args?.content, args?.id), 120)
       case 'mixer_vision': {
@@ -1346,9 +1355,10 @@ function getArgumentPreview(toolCall: ToolCallRecord): string {
 
 function getResultPreview(toolCall: ToolCallRecord): string {
   const rawName = toolRawName(toolCall)
-  if (rawName === 'todo_write' || rawName === 'todo_update') {
+  const todoItems = structuredTodoState(toolCall)?.items
+  if (rawName === 'todo_write' || rawName === 'todo_update' || todoItems) {
     if (normalizeToolCallStatus(toolCall.status) !== 'completed') return ''
-    const counts = formatTodoCounts(structuredTodoState(toolCall)?.items)
+    const counts = formatTodoCounts(todoItems)
     return counts ? `已同步 ${counts}` : '已同步'
   }
   const fileMutation = structuredFileMutation(toolCall)

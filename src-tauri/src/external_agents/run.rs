@@ -13,8 +13,8 @@ use crate::chat::commands::{
 use crate::chat::memory::l1_prompt_block;
 use crate::chat::model::ModelUsage;
 use crate::chat::types::{
-    ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, CompactionBoundaryRecord,
-    ToolCallRecord, ToolCallStatus,
+    AgentTodoState, ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase,
+    CompactionBoundaryRecord, ToolCallRecord, ToolCallStatus,
 };
 use crate::chat::Conversation;
 use crate::external_agents::defs::claude::append_system_prompt_file_args;
@@ -386,6 +386,9 @@ pub async fn run_external_cli_reply(
     let mut segment_order = 0u32;
     let mut segments: Vec<ChatMessageSegment> = Vec::new();
     let mut segment_tracker = StreamSegmentTracker::default();
+    // Claude Task* 是补丁，不是 DSH 那种整表快照。流上按顺序累加，立刻发 TodoUpdated；
+    // 落盘仍走 mutate 补丁，避免并发 spawn 用过期整表把后写的条目盖掉。
+    let mut todo_state = conversation.agent_todo_state.clone();
     let conversation_id = conversation.id.clone();
     let started_at = Instant::now();
     // 缓存 key 用探测 cwd（resolve_detection_cwd，非项目会话 = __global__），与斜杠探测的
@@ -421,6 +424,7 @@ pub async fn run_external_cli_reply(
             &mut segment_order,
             &mut segment_tracker,
             &mut cli_compactions,
+            &mut todo_state,
             event,
         );
     };
@@ -2311,6 +2315,7 @@ fn apply_unified_event(
     segment_order: &mut u32,
     segment_tracker: &mut StreamSegmentTracker,
     cli_compactions: &mut Vec<CompactionBoundaryRecord>,
+    todo_state: &mut AgentTodoState,
     event: UnifiedAgentEvent,
 ) {
     let now = Local::now().timestamp();
@@ -2404,9 +2409,21 @@ fn apply_unified_event(
                     } else {
                         None
                     };
-                    emit_chat_tool_record(app, run_id, record);
                     if let Some((name, input, result)) = claude_todo {
-                        persist_claude_todo(app, run_id, conversation_id, name, input, result);
+                        if let Some(next) = crate::external_agents::claude_todo::apply_claude_todo_tool(
+                            todo_state,
+                            &name,
+                            &input,
+                            &result,
+                        ) {
+                            *todo_state = next;
+                            publish_todo_state(app, run_id, record, todo_state);
+                            persist_claude_todo(app, conversation_id, name, input, result);
+                        } else {
+                            emit_chat_tool_record(app, run_id, record);
+                        }
+                    } else {
+                        emit_chat_tool_record(app, run_id, record);
                     }
                 }
             }
@@ -2523,20 +2540,21 @@ fn apply_unified_event(
             else {
                 return;
             };
-            crate::chat::protocol::emit_run_event(
-                app,
-                run_id,
-                crate::chat::protocol::ChatRunEvent::TodoUpdated {
-                    todo_state: (&state).into(),
-                },
-            );
+            *todo_state = state.clone();
             if let Some(record) = tool_calls
                 .iter_mut()
                 .rev()
                 .find(|record| record.name.eq_ignore_ascii_case("todo_write"))
             {
-                record.structured_content = Some(serde_json::json!({ "todoState": state }));
-                emit_chat_tool_record(app, run_id, record);
+                publish_todo_state(app, run_id, record, todo_state);
+            } else {
+                crate::chat::protocol::emit_run_event(
+                    app,
+                    run_id,
+                    crate::chat::protocol::ChatRunEvent::TodoUpdated {
+                        todo_state: (&state).into(),
+                    },
+                );
             }
             let app = app.clone();
             let conversation_id = conversation_id.to_string();
@@ -2561,12 +2579,39 @@ fn apply_unified_event(
     }
 }
 
+/// 立刻把对话 Todo 条和工具卡接到同一份快照上（DSH 整表 / Claude 补丁共用）。
+fn publish_todo_state(
+    app: &AppHandle,
+    run_id: &str,
+    record: &mut ToolCallRecord,
+    state: &AgentTodoState,
+) {
+    crate::chat::protocol::emit_run_event(
+        app,
+        run_id,
+        crate::chat::protocol::ChatRunEvent::TodoUpdated {
+            todo_state: state.into(),
+        },
+    );
+    let mut payload = record
+        .structured_content
+        .clone()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = payload.as_object_mut() {
+        if let Ok(todo) = serde_json::to_value(state) {
+            object.insert("todoState".to_string(), todo);
+        }
+    }
+    record.structured_content = Some(payload);
+    emit_chat_tool_record(app, run_id, record);
+}
+
 /// Claude Code 的 Task / 旧 TodoWrite 成功之后，在对话锁里补丁列表再发协议事件。
 ///
 /// 必须进 `mutate`：`TaskUpdate` 是补丁，不能拿一份过期快照 `update_todo` 整表盖掉。
 fn persist_claude_todo(
     app: &AppHandle,
-    run_id: &str,
     conversation_id: &str,
     name: String,
     input: serde_json::Value,
@@ -2583,7 +2628,6 @@ fn persist_claude_todo(
         return;
     }
     let app = app.clone();
-    let run_id = run_id.to_string();
     let conversation_id = conversation_id.to_string();
     tauri::async_runtime::spawn(async move {
         match crate::chat::repository::repository(&app)
@@ -2600,21 +2644,12 @@ fn persist_claude_todo(
             })
             .await
         {
-            Ok(persisted) => {
-                crate::chat::protocol::emit_run_event(
-                    &app,
-                    &run_id,
-                    crate::chat::protocol::ChatRunEvent::TodoUpdated {
-                        todo_state: (&persisted.agent_todo_state).into(),
-                    },
-                );
-                crate::chat::todo::emit_chat_todo_state(
-                    &app,
-                    &conversation_id,
-                    persisted.revision,
-                    &persisted.agent_todo_state,
-                );
-            }
+            Ok(persisted) => crate::chat::todo::emit_chat_todo_state(
+                &app,
+                &conversation_id,
+                persisted.revision,
+                &persisted.agent_todo_state,
+            ),
             Err(err) => {
                 eprintln!("[external-agent] persist claude todo failed: {err}");
             }
