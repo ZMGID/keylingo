@@ -1895,7 +1895,7 @@ export function CliProviderModal({
                         )}
                       </label>
                     </div>
-                    {metadata.reasoning && (
+                    {metadata.reasoning && 'thinkingLevels' in metadata && (
                       <div className="kv-native-model-efforts">
                         <span>{t.externalAgentsDshReasoningEfforts}</span>
                         <div
