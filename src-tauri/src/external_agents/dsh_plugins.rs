@@ -7,7 +7,8 @@
 //!（那份由 `dsh_profile::ensure_profile_ready` 每轮重写），所以：
 //!
 //! - **官方密钥**：写入 `.credentials.yaml` 的 `DEEPSEEK_API_KEY`，与官方网页版首次
-//!   填密钥同一条路径；不进 `cordis.patch.yml`。
+//!   填密钥同一条路径；不进 `cordis.patch.yml`。就绪判定对齐官方分层：进程环境 >
+//!   `.credentials.yaml` > 项目 `.env` > `$DSH_HOME/.env`。
 //! - **插件配置**：读写 `settings.yaml` + 可选写凭据，热重载后 kivio / web 共用。
 //! - **插件列表**：优先 `dsh --profile kivio --dump-config`（boot-free）解析
 //!   id / name / disabled；失败则读安装包里的 `dsh-base` / `dsh-agent-presets`
@@ -42,6 +43,7 @@ const AGENT_LOOP_NS: &str = "agent-loop";
 const WEB_SEARCH_NS: &str = "web-search-deepseek";
 const LLM_PI_AI_NS: &str = "llm-pi-ai";
 const CREDENTIALS_FILENAME: &str = ".credentials.yaml";
+const DOTENV_FILENAME: &str = ".env";
 const DEFAULT_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 const DSH_OFFICIAL_PROVIDER_ID: &str = "deepseek-official";
 
@@ -203,15 +205,34 @@ fn namespace_map<'a>(root: &'a Mapping, key: &str) -> Option<&'a Mapping> {
 }
 
 fn credential_status(api_key_env: &str) -> (bool, bool) {
-    if std::env::var_os(api_key_env)
-        .is_some_and(|value| !value.is_empty())
-    {
+    credential_status_with_files(
+        api_key_env,
+        credentials_path().ok().as_deref(),
+        user_dotenv_path().as_deref(),
+        None,
+    )
+}
+
+fn credential_status_with_files(
+    api_key_env: &str,
+    credentials: Option<&Path>,
+    user_env: Option<&Path>,
+    project_env: Option<&Path>,
+) -> (bool, bool) {
+    if std::env::var_os(api_key_env).is_some_and(|value| !value.is_empty()) {
         return (true, false);
     }
-    let configured = credentials_path()
-        .ok()
-        .is_some_and(|path| credentials_contain(&path, api_key_env));
+    if credentials.is_some_and(|path| credentials_contain(path, api_key_env)) {
+        return (true, true);
+    }
+    // Official layering: managed yaml, then project `.env`, then `$DSH_HOME/.env`.
+    let configured = project_env.is_some_and(|path| dotenv_contains(path, api_key_env))
+        || user_env.is_some_and(|path| dotenv_contains(path, api_key_env));
     (configured, true)
+}
+
+fn user_dotenv_path() -> Option<PathBuf> {
+    dsh_home().map(|home| home.join(DOTENV_FILENAME))
 }
 
 fn credentials_contain(path: &Path, api_key_env: &str) -> bool {
@@ -225,6 +246,83 @@ fn credentials_contain(path: &Path, api_key_env: &str) -> bool {
         .as_mapping()
         .and_then(|map| mapping_string(map, api_key_env))
         .is_some()
+}
+
+fn dotenv_contains(path: &Path, api_key_env: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    dotenv_has_key(&text, api_key_env)
+}
+
+fn dotenv_has_key(text: &str, api_key_env: &str) -> bool {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line
+            .strip_prefix("export ")
+            .map(str::trim)
+            .unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != api_key_env {
+            continue;
+        }
+        let value = value.trim();
+        let unquoted = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        if !unquoted.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+fn pi_ai_api_key_env_from_settings(text: &str, provider_id: &str) -> Option<String> {
+    let value = serde_yaml::from_str::<serde_yaml::Value>(text).ok()?;
+    namespace_map(value.as_mapping()?, LLM_PI_AI_NS)
+        .and_then(|pi| namespace_map(pi, "providers"))
+        .and_then(|providers| {
+            providers
+                .get(serde_yaml::Value::String(provider_id.to_string()))
+                .and_then(serde_yaml::Value::as_mapping)
+        })
+        .and_then(|provider| mapping_string(provider, "apiKeyEnv"))
+}
+
+fn native_pi_ai_api_key_env(provider_id: &str) -> Option<String> {
+    let path = settings_path().ok()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    pi_ai_api_key_env_from_settings(&text, provider_id)
+}
+
+/// Connect 前的凭据门：Kivio 托管供应商由调用方另行判断；这里覆盖官方 DeepSeek
+/// 与 `settings.yaml` 里的 `llm-pi-ai` 路由（含 `.env` 兜底）。
+pub(crate) fn credentials_ready_for_provider(provider: &str, cwd: Option<&Path>) -> bool {
+    let api_key_env = if provider.trim().is_empty() || provider == DSH_OFFICIAL_PROVIDER_ID {
+        DEFAULT_API_KEY_ENV.to_string()
+    } else if let Some(env) = native_pi_ai_api_key_env(provider) {
+        env
+    } else {
+        return false;
+    };
+    let project_env = cwd.map(|path| path.join(DOTENV_FILENAME));
+    credential_status_with_files(
+        &api_key_env,
+        credentials_path().ok().as_deref(),
+        user_dotenv_path().as_deref(),
+        project_env.as_deref(),
+    )
+    .0
 }
 
 fn parse_settings_snapshot(text: &str, settings_path: &Path) -> Result<DshPluginSettingsSnapshot, String> {
@@ -1494,5 +1592,89 @@ llm-pi-ai:
         assert!(text.contains("xhigh"));
         assert!(text.matches("image").count() >= 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dotenv_parser_accepts_export_quotes_and_skips_empty() {
+        assert!(dotenv_has_key("DEEPSEEK_API_KEY=sk-test\n", "DEEPSEEK_API_KEY"));
+        assert!(dotenv_has_key(
+            "export DEEPSEEK_API_KEY=sk-test\n",
+            "DEEPSEEK_API_KEY"
+        ));
+        assert!(dotenv_has_key(
+            "DEEPSEEK_API_KEY=\"sk-test\"\n",
+            "DEEPSEEK_API_KEY"
+        ));
+        assert!(dotenv_has_key(
+            "DEEPSEEK_API_KEY='sk-test'\n",
+            "DEEPSEEK_API_KEY"
+        ));
+        assert!(!dotenv_has_key("DEEPSEEK_API_KEY=\n", "DEEPSEEK_API_KEY"));
+        assert!(!dotenv_has_key("DEEPSEEK_API_KEY=\"\"\n", "DEEPSEEK_API_KEY"));
+        assert!(!dotenv_has_key(
+            "# DEEPSEEK_API_KEY=sk-test\n",
+            "DEEPSEEK_API_KEY"
+        ));
+        assert!(!dotenv_has_key("OTHER=sk-test\n", "DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn pi_ai_api_key_env_reads_settings_route() {
+        let yaml = r#"
+llm-pi-ai:
+  providers:
+    gpt:
+      displayName: gpt
+      apiKeyEnv: OPENAI_API_KEY
+"#;
+        assert_eq!(
+            pi_ai_api_key_env_from_settings(yaml, "gpt").as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(pi_ai_api_key_env_from_settings(yaml, "missing"), None);
+        assert_eq!(pi_ai_api_key_env_from_settings("{}", "gpt"), None);
+    }
+
+    #[test]
+    fn credential_status_accepts_dotenv_when_yaml_missing() {
+        let dir = std::env::temp_dir().join(format!("kivio-dsh-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let user_env = dir.join(".env");
+        std::fs::write(&user_env, "DEEPSEEK_API_KEY=sk-from-home\n").unwrap();
+        let (configured, writable) =
+            credential_status_with_files("DEEPSEEK_API_KEY", None, Some(&user_env), None);
+        assert!(configured);
+        assert!(writable);
+
+        let project_env = dir.join("project.env");
+        std::fs::write(&project_env, "GPT_KEY=sk-project\n").unwrap();
+        let (configured, writable) =
+            credential_status_with_files("GPT_KEY", None, None, Some(&project_env));
+        assert!(configured);
+        assert!(writable);
+
+        let credentials = dir.join(".credentials.yaml");
+        std::fs::write(&credentials, "DEEPSEEK_API_KEY: sk-yaml\n").unwrap();
+        let (configured, writable) =
+            credential_status_with_files("DEEPSEEK_API_KEY", Some(&credentials), None, None);
+        assert!(configured);
+        assert!(writable);
+
+        let (configured, _) = credential_status_with_files(
+            "MISSING_KEY",
+            Some(&credentials),
+            Some(&user_env),
+            Some(&project_env),
+        );
+        assert!(!configured);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn official_deepseek_key_ready_matches_credential_status() {
+        assert_eq!(
+            official_deepseek_key_ready(),
+            credential_status(DEFAULT_API_KEY_ENV).0
+        );
     }
 }

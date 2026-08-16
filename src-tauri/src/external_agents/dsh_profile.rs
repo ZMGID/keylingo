@@ -570,6 +570,7 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("'userQuestions'"));
         assert!(BRIDGE_SOURCE.contains("'attachments'"));
         assert!(BRIDGE_SOURCE.contains("'jobs'"));
+        assert!(BRIDGE_SOURCE.contains("'subagents'"));
         assert!(BRIDGE_SOURCE.contains("saveImage"));
         assert!(BRIDGE_SOURCE.contains("session/commands"));
         assert!(BRIDGE_SOURCE.contains("session/stop-job"));

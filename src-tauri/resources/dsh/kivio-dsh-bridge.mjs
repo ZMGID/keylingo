@@ -292,7 +292,7 @@ async function materializeContentBlocks(ctx, blocks) {
 }
 
 export const name = 'kivio-dsh-jsonrpc-bridge'
-export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands', 'attachments', 'jobs']
+export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands', 'attachments', 'jobs', 'subagents']
 export const Config = Schema.object({
   maxTokensAsSuccess: Schema.boolean().default(false),
 })
