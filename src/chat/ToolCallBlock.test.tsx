@@ -1,6 +1,20 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+const openExternal = vi.fn(() => Promise.resolve())
+vi.mock('../api/tauri', () => ({
+  api: {
+    get openExternal() {
+      return openExternal
+    },
+    get openLocalFile() {
+      return vi.fn(() => Promise.resolve())
+    },
+  },
+  isTauriRuntime: () => true,
+}))
+
 import { ToolCallBlock } from './ToolCallBlock'
 import type { ToolCallRecord } from './types'
 
@@ -278,9 +292,10 @@ describe('ToolCallBlock', () => {
     expect(pre?.textContent).toBe(code)
   })
 
-  it('renders the built-in web search record via the default compact card (Web search · provider)', () => {
-    // 任务 07-23:内置搜索复用默认 web_search 工具卡渲染(不再单独做卡片),
-    // 头部显示「Web search · <provider>」,provider 取自 structured_content.provider。
+  it('renders the built-in web search record as a dedicated source card', async () => {
+    // 内置搜索从「默认工具卡」升级为独立 WEB SEARCH 卡：头部带 provider 与来源计数，
+    // 展开后是编号可点的来源目录（标题 / 域名 / 日期 / 摘要）。
+    const user = userEvent.setup()
     render(
       <ToolCallBlock
         toolCall={buildToolCall({
@@ -292,12 +307,84 @@ describe('ToolCallBlock', () => {
             type: 'builtin_web_search',
             provider: 'OpenAI',
             queries: ['kivio release'],
-            citations: [{ title: 'A 站', url: 'https://a.com' }],
+            citations: [
+              { title: 'A 站', url: 'https://a.com' },
+              {
+                title: 'B 站',
+                url: 'https://www.b.com',
+                snippet: '关于 kivio 的发布说明',
+                published_date: '2025-06-01',
+              },
+            ],
           },
         })}
       />,
     )
-    expect(screen.getByText(/Web search · OpenAI/)).toBeInTheDocument()
+    expect(screen.getByText('WEB SEARCH')).toBeInTheDocument()
+    expect(screen.getByText('OpenAI')).toBeInTheDocument()
+    expect(screen.getByText('2 来源')).toBeInTheDocument()
+    // 展开前来源目录不渲染。
+    expect(screen.queryByText('A 站')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /WEB SEARCH/ }))
+    expect(screen.getByText('A 站')).toBeInTheDocument()
+    expect(screen.getByText('a.com')).toBeInTheDocument()
+    expect(screen.getByText(/b\.com · 2025-06-01/)).toBeInTheDocument() // www 前缀剥离 + 日期
+    expect(screen.getByText('关于 kivio 的发布说明')).toBeInTheDocument()
+    expect(screen.getByText(/2025-06-01/)).toBeInTheDocument()
+    // 点来源行 → 浏览器打开（不导航 webview）。
+    await user.click(screen.getByText('A 站'))
+    expect(openExternal).toHaveBeenCalledWith('https://a.com')
+  })
+
+  it('renders third-party search_web sources via the same card', async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'web_search',
+          source: 'native',
+          status: 'success',
+          arguments: JSON.stringify({ query: '天气' }),
+          structured_content: {
+            type: 'third_party_web_search',
+            provider: 'Tavily',
+            queries: ['天气'],
+            citations: [
+              {
+                title: '气象台',
+                url: 'https://weather.example/1',
+                snippet: '今天晴',
+                published_date: '2025-06-02',
+              },
+            ],
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('Tavily')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /WEB SEARCH/ }))
+    expect(screen.getByText(/weather\.example/)).toBeInTheDocument()
+    expect(screen.getByText('今天晴')).toBeInTheDocument()
+  })
+
+  it('falls back to the plain result text when structured citations are absent', async () => {
+    // 旧数据（structured 只有 provider / 外部 CLI 无 structured）→ 结果区原样展示文本。
+    const user = userEvent.setup()
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'web_search',
+          source: 'native',
+          status: 'success',
+          arguments: JSON.stringify({ query: 'x' }),
+          structured_content: { provider: 'Tavily' },
+          result_preview: 'Web search context:\n[1] A\nURL: https://a.com',
+        })}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /WEB SEARCH/ }))
+    expect(screen.getByText(/Web search context/)).toBeInTheDocument()
+    expect(screen.getByText(/URL: https:\/\/a\.com/)).toBeInTheDocument()
   })
 
   // ---- 外部 CLI（claude Code）的内置工具：名字 PascalCase + 字段名 file_path ----

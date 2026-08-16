@@ -273,12 +273,20 @@ pub struct PendingToolCall {
     pub signature: Option<String>,
 }
 
-/// 单条内置搜索引用（服务端托管的原生联网搜索返回的来源）。仅取 {title,url}，
-/// 前端渲染成可点来源脚注（任务 07-23，MVP 只做来源列表、不做正文 `[n]` 锚定）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 单条内置搜索引用（服务端托管的原生联网搜索返回的来源）。{title,url} 是底线，
+/// `snippet` / `published_date` 尽力而为——各家 wire 未必提供（Gemini 的
+/// groundingSupports 有正文片段，第三方搜索有摘要/日期，Responses/Anthropic 大多没有）。
+/// 前端把 citations 渲染成可点来源列表，并把答案正文里的 `[n]` 锚到对应来源。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WebCitation {
     pub title: String,
     pub url: String,
+    /// 来源摘要/支持片段（provider 给了才有；流式累加时按 url 合并补全）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    /// 发布日期（尽力而为的原文日期串；不保证有，也不做二次格式化）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_date: Option<String>,
 }
 
 /// 模型**原生内置联网搜索**的解析产物：模型执行的搜索词 + 来源引用。

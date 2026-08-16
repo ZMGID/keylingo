@@ -194,9 +194,24 @@ impl WebSearchCardTracker {
         }
         for citation in citations {
             let url = citation.url.trim();
-            if !url.is_empty() && !guard.citations.iter().any(|existing| existing.url == url) {
-                guard.citations.push(citation.clone());
+            if url.is_empty() {
+                continue;
             }
+            if let Some(existing) = guard
+                .citations
+                .iter_mut()
+                .find(|existing| existing.url == url)
+            {
+                // 同 url 后到帧带新字段（Gemini 的 groundingSupports 可能晚于 chunk）→ 补全。
+                if existing.snippet.is_none() {
+                    existing.snippet = citation.snippet.clone();
+                }
+                if existing.published_date.is_none() {
+                    existing.published_date = citation.published_date.clone();
+                }
+                continue;
+            }
+            guard.citations.push(citation.clone());
         }
         let record = build_web_search_record(
             &guard.id,
@@ -1167,10 +1182,12 @@ mod tests {
                 WebCitation {
                     title: "A".to_string(),
                     url: "https://a.com".to_string(),
+                    ..Default::default()
                 },
                 WebCitation {
                     title: "dup".to_string(),
                     url: "https://a.com".to_string(),
+                    ..Default::default()
                 },
             ],
         })

@@ -939,6 +939,7 @@ fn collect_anthropic_web_search_results(block: &Value, acc: &mut BuiltinWebSearc
         acc.citations.push(WebCitation {
             title,
             url: url.to_string(),
+            ..Default::default()
         });
     }
 }

@@ -483,12 +483,32 @@ fn call_web_search(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
         let raw = serde_json::to_value(&results).unwrap_or(Value::Null);
         // 带上实际使用的搜索服务名，供前端工具卡片显示「Web search · <provider>」。
         let provider = crate::web_search::provider_label(ctx.settings.lens.web_search.provider);
+        // 与内置搜索卡同构的富引用列表（title/url 必有；snippet/published_date 尽力而为），
+        // 前端据此渲染可点来源目录，并把答案里的 [n] 锚到对应来源。
+        let citations: Vec<serde_json::Value> = results
+            .iter()
+            .map(|result| {
+                let snippet = (!result.content.is_empty())
+                    .then(|| result.content.chars().take(400).collect::<String>());
+                serde_json::json!({
+                    "title": result.title,
+                    "url": result.url,
+                    "snippet": snippet,
+                    "published_date": result.published_date,
+                })
+            })
+            .collect();
         Ok(McpToolCallResult {
             content: crate::web_search::format_web_context(&results),
             is_error: false,
             raw,
             artifacts: Vec::new(),
-            structured_content: Some(serde_json::json!({ "provider": provider })),
+            structured_content: Some(serde_json::json!({
+                "type": "third_party_web_search",
+                "provider": provider,
+                "queries": [query],
+                "citations": citations,
+            })),
             follow_up_user_messages: Vec::new(),
         })
     })

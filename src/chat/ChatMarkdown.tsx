@@ -13,8 +13,8 @@ import { MarkdownErrorBoundary } from './MarkdownErrorBoundary'
 import type { ChatToolArtifact } from './types'
 import { artifactDataUrl } from './artifacts'
 import { loadArtifactDataUrl } from './attachmentPreview'
-import type { KbHitView } from './knowledgeBaseHits'
-import { remarkCitations } from './citations'
+import { remarkCitations, type CitationView } from './citations'
+import { isWebCitation } from './webSearchCitations'
 import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
 import { getChatPerformanceFlags } from './chatPerformanceFlags'
@@ -32,8 +32,8 @@ interface ChatMarkdownProps {
   conversationId?: string | null
   onImageClick?: (src: string, alt: string, name?: string) => void
   variant?: 'default' | 'reasoning' | 'lens' | 'lens-muted'
-  /** 知识库引用：把答案里的 `[n]` 渲染成可点来源片段（n → 命中片段）。 */
-  citations?: Map<number, KbHitView>
+  /** 引用：把答案里的 `[n]` 渲染成可点来源片段（n → KB 命中片段或联网来源）。 */
+  citations?: Map<number, CitationView>
 }
 
 // 排版只走 Streamdown 默认样式；变体只改外壳字号/颜色。
@@ -853,8 +853,9 @@ function LinkAnchor({
   )
 }
 
-/** 知识库引用角标 `[n]`：点击弹出对应来源片段（文档名 · 标题 · 正文）。 */
-function CitationChip({ n, hit }: { n: number; hit?: KbHitView }) {
+/** 引用角标 `[n]`：点击弹出对应来源片段。KB 命中显示「文档 · 标题 · 正文」；
+ *  联网来源显示「标题 · 域名 · 日期 · 摘要」，标题可点直接在浏览器打开。 */
+function CitationChip({ n, hit }: { n: number; hit?: CitationView }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLSpanElement>(null)
   useEffect(() => {
@@ -865,6 +866,7 @@ function CitationChip({ n, hit }: { n: number; hit?: KbHitView }) {
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
+  const web = isWebCitation(hit) ? hit : null
   return (
     <span ref={ref} className="relative inline-block align-baseline">
       <button
@@ -877,7 +879,31 @@ function CitationChip({ n, hit }: { n: number; hit?: KbHitView }) {
       </button>
       {open && (
         <span className="absolute left-0 top-full z-30 mt-1 block w-80 max-w-[80vw] rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] p-2.5 text-left text-xs shadow-lg">
-          {hit ? (
+          {web ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  void api.openExternal(web.url).catch((err) => console.error('openExternal failed', err))
+                }}
+                className="mb-1 flex w-full items-center gap-1 font-medium text-neutral-700 hover:underline dark:text-neutral-200"
+                title={web.url}
+              >
+                <span className="shrink-0 rounded bg-indigo-500/15 px-1 text-indigo-500">[{n}]</span>
+                <span className="min-w-0 flex-1 truncate text-left">{web.title}</span>
+                <ExternalLink size={10.5} className="shrink-0 text-neutral-400 dark:text-neutral-500" />
+              </button>
+              <span className="mb-1 block truncate text-[10.5px] text-neutral-400 dark:text-neutral-500">
+                {web.host}
+                {web.publishedDate ? ` · ${web.publishedDate}` : ''}
+              </span>
+              {web.snippet && (
+                <span className="custom-scrollbar block max-h-48 overflow-auto whitespace-pre-wrap break-words leading-relaxed text-neutral-600 dark:text-neutral-300">
+                  {web.snippet}
+                </span>
+              )}
+            </>
+          ) : hit && !isWebCitation(hit) ? (
             <>
               <span className="mb-1 flex items-center gap-1 font-medium text-neutral-700 dark:text-neutral-200">
                 <span className="shrink-0 rounded bg-indigo-500/15 px-1 text-indigo-500">[{n}]</span>

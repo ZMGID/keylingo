@@ -783,6 +783,7 @@ impl ResponsesStreamState {
             ws.citations.push(WebCitation {
                 title: title.trim().to_string(),
                 url: url.to_string(),
+                ..Default::default()
             });
         }
     }
@@ -1031,19 +1032,15 @@ fn handle_responses_stream_event(
                             // finish() 时无 url_citation 才转正为兜底来源。
                             if let Some(sources) = action.get("sources").and_then(Value::as_array) {
                                 for source in sources {
-                                    let Some(url) = source
-                                        .get("url")
-                                        .and_then(Value::as_str)
-                                        .map(str::trim)
-                                        .filter(|u| !u.is_empty())
-                                    else {
+                                    let Some(citation) = grok_source_citation(source) else {
                                         continue;
                                     };
-                                    if !state.sources_fallback.iter().any(|c| c.url == url) {
-                                        state.sources_fallback.push(WebCitation {
-                                            title: String::new(),
-                                            url: url.to_string(),
-                                        });
+                                    if !state
+                                        .sources_fallback
+                                        .iter()
+                                        .any(|c| c.url == citation.url)
+                                    {
+                                        state.sources_fallback.push(citation);
                                     }
                                 }
                             }
@@ -1293,6 +1290,38 @@ pub fn output_from_responses(
     })
 }
 
+/// 把 grok(xAI) `web_search_call.action.sources[]` 的单项解析成 `WebCitation`。
+/// 尽力而为：url 必须有；title 取 `title`/`name`（都没有则留空，前端按域名兜底），
+/// snippet 取 `description`/`snippet`（截断到 400 字符，防超大载荷拖慢流式卡）。
+fn grok_source_citation(source: &Value) -> Option<WebCitation> {
+    let url = source
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let title = source
+        .get("title")
+        .or_else(|| source.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let snippet = source
+        .get("description")
+        .or_else(|| source.get("snippet"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(400).collect());
+    Some(WebCitation {
+        title,
+        url: url.to_string(),
+        snippet,
+        ..Default::default()
+    })
+}
+
 /// 从 Responses `output[]` 数组解析内置搜索痕迹：`web_search_call` 项取查询词、
 /// `message` 项内容的 `annotations[type=url_citation]` 取来源。任一为空则整体可能为空，
 /// 全空时返回 None（视作没发生可见的内置搜索）。解析尽力而为，绝不 panic。
@@ -1324,19 +1353,11 @@ fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch
                     .and_then(Value::as_array)
                 {
                     for source in sources {
-                        let Some(url) = source
-                            .get("url")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|u| !u.is_empty())
-                        else {
+                        let Some(citation) = grok_source_citation(source) else {
                             continue;
                         };
-                        if !sources_fallback.iter().any(|c| c.url == url) {
-                            sources_fallback.push(WebCitation {
-                                title: String::new(),
-                                url: url.to_string(),
-                            });
+                        if !sources_fallback.iter().any(|c| c.url == citation.url) {
+                            sources_fallback.push(citation);
                         }
                     }
                 }
@@ -1375,6 +1396,7 @@ fn web_search_from_responses_output(output: &[Value]) -> Option<BuiltinWebSearch
                             result.citations.push(WebCitation {
                                 title,
                                 url: url.to_string(),
+                                ..Default::default()
                             });
                         }
                     }

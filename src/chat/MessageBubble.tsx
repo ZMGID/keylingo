@@ -44,7 +44,7 @@ import { ModelIcon } from './ModelIcon'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ToolCallErrorBoundary } from './ToolCallErrorBoundary'
 import type { AgentPlanState, ChatMessage, ChatMessageSegment, ChatToolArtifact, ToolCallRecord } from './types'
-import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
+import { buildCitationMap, type CitationView } from './citations'
 import { compareTimelineSegments, groupTimelineSegments, isStandaloneToolCard, isUserSteerToolCall, segmentToolCallId, summarizeToolGroup, toolRecordId, userSteerText } from './segments'
 import type { TimelineGroupItem, ToolGroupIcon } from './segments'
 
@@ -438,7 +438,7 @@ function TimelineTextSegment({
 }: {
   segment: ChatMessageSegment
   artifacts: ChatToolArtifact[]
-  citations?: Map<number, KbHitView>
+  citations?: Map<number, CitationView>
   conversationId?: string | null
 }) {
   const text = segmentText(segment).trim()
@@ -475,7 +475,7 @@ function TimelineSegmentNode({
   segmentCount: number
   toolCallById: ReadonlyMap<string, ToolCallRecord>
   artifacts: ChatToolArtifact[]
-  citations?: Map<number, KbHitView>
+  citations?: Map<number, CitationView>
   conversationId?: string | null
   reasoningStreaming: boolean
   reasoningDurationMs?: number | null
@@ -624,7 +624,7 @@ function TimelineGroupBlock({
   toolCalls: ToolCallRecord[]
   toolCallById: ReadonlyMap<string, ToolCallRecord>
   artifacts: ChatToolArtifact[]
-  citations?: Map<number, KbHitView>
+  citations?: Map<number, CitationView>
   conversationId?: string | null
   isLastGroup: boolean
   messageStreaming: boolean
@@ -724,18 +724,6 @@ function TimelineGroupBlock({
       )}
     </section>
   )
-}
-
-/** 汇总本条消息所有 knowledge_search 命中，按 n 建索引，供答案里的 `[n]` 角标查源。
- *  多次检索 n 会重叠 —— 后写覆盖（罕见，且只影响弹窗预览内容）。 */
-function buildCitationMap(toolCalls: ToolCallRecord[]): Map<number, KbHitView> {
-  const map = new Map<number, KbHitView>()
-  for (const toolCall of toolCalls) {
-    for (const hit of knowledgeSearchHits(toolCall) ?? []) {
-      map.set(hit.n, hit)
-    }
-  }
-  return map
 }
 
 function TimelineSegments({

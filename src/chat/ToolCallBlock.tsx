@@ -7,6 +7,7 @@ import {
   CircleSlash,
   Copy,
   Download,
+  ExternalLink,
   Eye,
   FileCode2,
   FilePen,
@@ -38,9 +39,11 @@ import { canonicalToolName, isExternalSubagentToolCall, toolCallDiffStats, toolR
 import { requestDockDiffPreview, requestDockPreview } from './dock/dockPreview'
 import { DiffView } from './dock/DiffView'
 import { knowledgeSearchHits, type KbHitView } from './knowledgeBaseHits'
+import { webSearchCardView, type WebCitationView } from './webSearchCitations'
 import { AskUserBlock } from './AskUserBlock'
 import { ChatMarkdown } from './ChatMarkdown'
 import { WebSearchIcon } from '../settings/NavIcons'
+import { api } from '../api/tauri'
 
 export interface ToolCallBlockProps {
   toolCall: ToolCallRecord
@@ -802,6 +805,124 @@ function KnowledgeCard({ toolCall }: ToolCallBlockProps) {
 
 function isPythonRecord(toolCall: ToolCallRecord): boolean {
   return toolCall.source === 'native' && toolRawName(toolCall) === 'run_python'
+}
+
+function isWebSearchRecord(toolCall: ToolCallRecord): boolean {
+  const name = toolRawName(toolCall)
+  return name === 'web_search' || name === 'search_web'
+}
+
+/** 联网搜索来源目录：编号 + 可点标题（浏览器打开）+ 域名/日期 + 摘要。
+ *  行样式对齐 Lens 的 WebSearchBlock，编号与答案正文 `[n]` 角标一致。 */
+function WebSources({ citations }: { citations: WebCitationView[] }) {
+  return (
+    <div className="space-y-0.5">
+      {citations.map((citation) => (
+        <button
+          key={`${citation.n}-${citation.url}`}
+          type="button"
+          onClick={() => {
+            void api.openExternal(citation.url).catch((err) => console.error('openExternal failed', err))
+          }}
+          className="group block w-full min-w-0 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          title={citation.url}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="shrink-0 w-4 text-[10.5px] font-medium tabular-nums text-indigo-500">
+              [{citation.n}]
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-neutral-700 dark:text-neutral-200">
+              {citation.title}
+            </span>
+            <ExternalLink
+              size={10.5}
+              className="shrink-0 text-neutral-300 transition-colors group-hover:text-neutral-500 dark:text-neutral-600 dark:group-hover:text-neutral-300"
+            />
+          </div>
+          <div className="mt-0.5 truncate pl-5 text-[10.5px] leading-4 text-neutral-400 dark:text-neutral-500">
+            {citation.host}
+            {citation.publishedDate ? ` · ${citation.publishedDate}` : ''}
+          </div>
+          {citation.snippet && (
+            <div className="mt-0.5 line-clamp-3 pl-5 whitespace-pre-wrap break-words text-[11px] leading-5 text-neutral-500 dark:text-neutral-400">
+              {citation.snippet}
+            </div>
+          )}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Dedicated card for a `web_search` (builtin hosted search / third-party search_web):
+ *  same consult-card shell as SUBAGENT/ADVISOR/KNOWLEDGE. Body shows the queries plus
+ *  the numbered, clickable source directory; falls back to the plain result text when
+ *  structured citations are absent (old persisted records). */
+function WebSearchCard({ toolCall }: ToolCallBlockProps) {
+  const status = normalizeToolCallStatus(toolCall.status)
+  const args = useMemo(() => parsedArguments(toolCall), [toolCall])
+  const view = useMemo(() => webSearchCardView(toolCall), [toolCall])
+
+  const queries = view?.queries ?? (stringValue(args?.query) ? [stringValue(args?.query)] : [])
+  const citations = view?.citations ?? []
+  const provider = view?.provider || ''
+  const duration = formatDuration(getDuration(toolCall))
+  const resultText = getResultPreview(toolCall)
+  const error = toolCall.error ? compactToolError(toolCall.error) : ''
+  const statusLine =
+    status === 'running' ? '搜索中…' : status === 'error' ? (error || '搜索失败') : ''
+
+  const hasBody = Boolean(
+    queries.length ||
+      citations.length ||
+      (status !== 'running' && status !== 'pending' && resultText) ||
+      error,
+  )
+
+  return (
+    <ConsultCard
+      label="WEB SEARCH"
+      status={status}
+      identityChips={provider ? <CardChip>{provider}</CardChip> : undefined}
+      metricChips={
+        <>
+          {citations.length > 0 && <CardChip tabular>{citations.length} 来源</CardChip>}
+          {duration && status !== 'running' && <CardChip tabular>{duration}</CardChip>}
+        </>
+      }
+      statusLine={statusLine}
+    >
+      {hasBody && (
+        <>
+          {queries.length > 0 && (
+            <CardSection label="Query">
+              <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
+                {compactText(queries.join(' · '), 300)}
+              </div>
+            </CardSection>
+          )}
+          {citations.length > 0 ? (
+            <WebSources citations={citations} />
+          ) : (
+            status !== 'running' &&
+            status !== 'pending' &&
+            resultText && (
+              <CardSection label="结果">
+                <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
+                  {resultText}
+                </div>
+              </CardSection>
+            )
+          )}
+          {error && (
+            <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </ConsultCard>
+  )
 }
 
 /** Dedicated card for `run_python`: same consult-card shell as SUBAGENT/ADVISOR.
@@ -1717,6 +1838,9 @@ function ToolCallBlockComponent(props: ToolCallBlockProps) {
   }
   if (isKnowledgeSearchRecord(props.toolCall)) {
     return <KnowledgeCard {...props} />
+  }
+  if (isWebSearchRecord(props.toolCall)) {
+    return <WebSearchCard {...props} />
   }
   if (isPythonRecord(props.toolCall)) {
     return <PythonCard {...props} />
