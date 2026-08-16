@@ -8,6 +8,7 @@ import { i18n, type Lang } from './settings/i18n'
 import { useWindowInteractionFocus } from './utils/windowFocus'
 import { ChatWindowHost } from './chat/ChatWindowHost'
 import {
+  adoptLegacyRememberedChatRoute,
   getRememberedChatRoute,
   hashPath,
   isChatWindowPlacementVisible,
@@ -239,6 +240,9 @@ function App() {
   useEffect(() => {
     const path = hashPath()
     if (path === 'chat') {
+      // 窗口以 `#chat` 创建说明 Rust 侧没有已存路由（有的话会直接烤进 URL，见
+      // windows.rs::ensure_chat_window）。getRememberedChatRoute() 会自动迁移
+      // localStorage 遗留值（如果有的话），无需显式调用 adoptLegacyRememberedChatRoute。
       const rememberedRoute = getRememberedChatRoute()
       if (rememberedRoute && rememberedRoute !== window.location.hash) {
         window.location.hash = rememberedRoute
@@ -246,6 +250,7 @@ function App() {
       }
       return
     }
+
     if (isChatPath(path)) {
       rememberCurrentChatRoute()
     }

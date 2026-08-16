@@ -467,6 +467,7 @@ pub fn run() {
             windows::chat_window_apply_mica,
             windows::chat_window_set_opaque,
             windows::chat_traffic_light_center_y,
+            windows::chat_remember_last_route,
             fonts::list_system_fonts,
             commands::get_default_prompt_templates,
             commands::save_settings,
