@@ -172,7 +172,16 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.9.0
+## 新版本 —— v2.9.1
+
+- **DeepSeek Harness** —— 补齐图片、附件路径、停任务（含子代理）和斜杠发现；模型图片与推理档写回已有路由；第三方供应商握手不再空转。空白机器可一键安装并填官方密钥。凭据按官方分层识别环境变量、凭据文件和 `.env`，第三方路由用各自的密钥环境变量，不再误拦。
+- **外部 CLI 系统提示** —— 对话所属集的系统提示会注入外部 CLI，切集不再丢掉那一层人设。
+- **供应商模型列表** —— 拉模型按协议鉴权，并解析 Gemini 原生 ListModels。
+- **启动体验** —— 启动后可最小化到托盘；开机自启不再强行弹出聊天窗。
+- **聊天** —— 工作台路径挪到 tools 之后，避免跨会话打穿前缀缓存。
+- **发版** —— GitHub Actions 同时打包 Windows 与 macOS。
+
+## v2.9.0
 
 - **DeepSeek Harness** —— 新增 dsh 作为外部 CLI 代理：官方供应商、四档 Agent 模式、插件页、斜杠命令（已知命令高亮）、工具卡、压缩，以及 `/compact` `/goal` `/feedback`。重启或改启动配置后仍续上原生会话；顶栏显示实际模型与思考档。后台子代理显示实时进度，完成后把汇报写回父对话，和官方 web 一致。用量条不再把已排除的缓存输入减第二次。
 - **外部 CLI 更稳** —— 每个 CLI 记住上次的模型和思考档，切走再切回不再重置成 Auto。轮内重连保留原生会话，不再开空白对话。Grok 上游 503/429 的静默重试会显示状态。发送失败回填草稿。找不到原生会话时按 ACP 口径降级，不再硬失败。生成中禁止删消息，避免误回收附件。
@@ -427,7 +436,16 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.9.0
+## What's New — v2.9.1
+
+- **DeepSeek Harness** — adds images, attachment paths, stop-task (including subagents), and slash discovery; writes model image/reasoning capabilities back onto existing routes; third-party provider handshake no longer spins. A blank machine can one-click install and save the official key. Credentials follow the official layers (env, credentials file, `.env`); third-party routes use their own key env vars instead of being blocked.
+- **External CLI system prompt** — a collection's system prompt is injected into the external CLI, so switching collections no longer drops that identity layer.
+- **Provider model lists** — listing models authenticates per protocol and parses Gemini's native ListModels.
+- **Launch** — can minimize to the tray after start; launch-at-startup no longer forces the chat window open.
+- **Chat** — the workbench path moves after tools, so switching conversations no longer busts the prefix cache.
+- **Release** — GitHub Actions packages Windows and macOS in the same workflow.
+
+## v2.9.0
 
 - **DeepSeek Harness** — dsh joins as an external CLI: official provider, four Agent presets, a plugins page, slash commands (known ones highlighted), tool cards, compaction, and `/compact` `/goal` `/feedback`. Restarts and launch-config changes keep the native session; the title bar shows the model and effort actually in use. Background subagents show live progress and write the report back into the parent conversation when they finish, matching official DSH web. The usage strip no longer subtracts already-excluded cached input a second time.
 - **More reliable external CLIs** — each CLI remembers its last model and thinking level; switching away and back no longer resets the pills to Auto. A mid-turn reconnect keeps the native session instead of opening a blank one. Grok's silent 503/429 retries surface as status notes. A failed send restores the draft. A missing native session degrades the ACP way instead of hard-failing. Messages cannot be deleted while generating, so attachments are not garbage-collected by mistake.

@@ -188,15 +188,18 @@ impl DshJsonRpcSession {
         preset: Option<&str>,
     ) -> Result<Self, String> {
         let _profile_boot_guard = DSH_PROFILE_BOOT_LOCK.lock().await;
+        let route = resolve_model_route_for_turn(model)?;
         if crate::external_agents::overrides::active_provider("dsh").is_none()
-            && !crate::external_agents::dsh_plugins::official_deepseek_key_ready()
+            && !crate::external_agents::dsh_plugins::credentials_ready_for_provider(
+                &route.provider,
+                Some(cwd),
+            )
         {
             return Err("missing credential".to_string());
         }
         crate::external_agents::dsh_profile::ensure_profile_ready(resolved_bin, reasoning, preset)
             .await?;
 
-        let route = resolve_model_route_for_turn(model)?;
         let session_id = resume_session_id
             .map(str::trim)
             .filter(|id| !id.is_empty())
