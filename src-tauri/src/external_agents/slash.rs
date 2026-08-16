@@ -143,6 +143,16 @@ pub async fn list_external_cli_slash_commands(
         ));
     }
     if def.slash_strategy == SlashStrategy::Dsh {
+        if let Ok(cwd) = resolve_slash_cwd(app, conversation_id) {
+            let key = cache_key(agent_id, &cwd);
+            if let Some(cached) = state.get_cached_external_slash_commands(
+                &key,
+                SLASH_COMMANDS_CACHE_TTL,
+                SLASH_COMMANDS_EMPTY_CACHE_TTL,
+            ) {
+                return Ok((true, cached, None));
+            }
+        }
         return Ok((
             true,
             crate::external_agents::defs::dsh::builtin_slash_commands(),

@@ -49,8 +49,8 @@ pub enum SlashStrategy {
     CodexAppServer,
     /// Discover via the Pi RPC `get_commands` request.
     PiRpc,
-    /// Official dsh `/` menu. JSON-RPC has no command-list RPC, so this is the
-    /// shipped names; Kivio only lists them and sends the slash line through.
+    /// Discover via `session/commands` (`ctx.commands.list`) after the kivio
+    /// profile mounts. Builtins are only the pre-connect fallback.
     Dsh,
     /// No discoverable slash commands for this CLI in headless mode.
     None,

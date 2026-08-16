@@ -28,9 +28,10 @@ use super::super::types::{
     RuntimeContext, SlashStrategy, StreamFormat,
 };
 
-/// Commands the Kivio bridge can actually execute via `ctx.commands.execute`.
-/// Official web-only entries (`export` / `model` / `permission` / `plan`) stay
-/// off the menu — Kivio already has model / permission / mode pills.
+/// Fallback `/` menu before a live kivio dsh session has reported
+/// `session/commands`. Official web-only entries that are not registered in
+/// this headless profile stay off the fallback; discovery lists whatever
+/// `ctx.commands.list` actually returns.
 const DSH_SLASH_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     ("compact", "Compact older conversation history", None),
     (
@@ -108,7 +109,7 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     models_from_stderr: false,
     model_probe: None,
     model_probe_args: None,
-    // 官方 `/` 菜单：只列能走 `session/command` 的条目；run_turn 拦截后交给 registry。
+    // 斜杠菜单：先走内建兜底，连上后 `session/commands` 覆盖缓存。
     slash_strategy: SlashStrategy::Dsh,
     // 遥测默认关：任何非空值都算关（上游的隐私开关刻意「误关优于误开」）。用户想开就
     // 在 `~/.dsh/.env` 里自己设 —— 那份 env 由 dsh 自己加载，覆盖不到这里。
@@ -121,13 +122,12 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     // 原生 session id 由 Kivio bridge 的 `session/open` 创建/恢复，不进 argv；因此这里仍不是
     // `resumes_session_via_cli`（该字段只描述 `--resume` 一类 CLI 参数形状）。
     resumes_session_via_cli: false,
-    // `contentBlocks` 的 image 块要求先经 `ctx.attachments` 落库拿引用（`{type:"image",
-    // attachment:{attachmentId,…}}`），裸 base64 上不了线，而那个服务在这条 RPC 上没有出口。
-    // 于是与 pi / kimi 同路：降级成 prompt 文本里的路径说明。
-    supports_native_image: false,
+    // `session/prompt` 的官方 image 块是 `{type:"image", attachment:{attachmentId,…}}`。
+    // Kivio 先发 base64，bridge 经 `ctx.attachments.saveImage` 落库后再改写成引用。
+    supports_native_image: true,
     // Bridge 暴露 cancel/resume，但没有追加输入的 `steer` RPC。
     supports_steering: false,
-    image_mime_whitelist: &[],
+    image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_dsh_args,
 };
 
@@ -186,7 +186,11 @@ mod tests {
         ));
         assert!(matches!(DSH_AGENT_DEF.slash_strategy, SlashStrategy::Dsh));
         assert!(!DSH_AGENT_DEF.supports_steering);
-        assert!(!DSH_AGENT_DEF.supports_native_image);
+        assert!(DSH_AGENT_DEF.supports_native_image);
+        assert_eq!(
+            DSH_AGENT_DEF.image_mime_whitelist,
+            &["image/jpeg", "image/png", "image/gif", "image/webp"] as &[&str]
+        );
         assert!(!DSH_AGENT_DEF.resumes_session_via_cli);
         assert!(DSH_AGENT_DEF.model_probe.is_none());
         assert!(DSH_AGENT_DEF.auth_probe_args.is_none());

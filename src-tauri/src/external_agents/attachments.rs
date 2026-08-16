@@ -107,6 +107,20 @@ pub fn materialize_images_to_tempdir(images: &[ImageBlock]) -> Vec<PathBuf> {
     out
 }
 
+/// 给模型看的磁盘路径：能 canonicalize 就用绝对路径；Windows 摘掉 `\\?\`，
+/// 避免工具把扩展长度前缀当成文件名的一部分。
+fn prompt_path(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy();
+    #[cfg(windows)]
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if !rest.starts_with("UNC\\") {
+            return rest.to_string();
+        }
+    }
+    text.into_owned()
+}
+
 /// 降级：把图片绝对路径拼成一段可追加到 prompt 的文本（协议不支持原生图片时用）。
 /// 空输入返回空串。格式对齐 Paseo 的 `[Image available at: {path}]`。
 pub fn image_paths_note(paths: &[PathBuf]) -> String {
@@ -115,7 +129,7 @@ pub fn image_paths_note(paths: &[PathBuf]) -> String {
     }
     let mut out = String::from("\n\n# 附带图片（用你的读取工具查看）\n");
     for path in paths {
-        out.push_str(&format!("[Image available at: {}]\n", path.display()));
+        out.push_str(&format!("[Image available at: {}]\n", prompt_path(path)));
     }
     out
 }
@@ -136,7 +150,7 @@ pub fn file_attachments_note(paths: &[PathBuf]) -> String {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         out.push_str(&format!(
             "Attached file: {name}\nPath: {}\nMIME: {mime}\nSize: {size} bytes\n\n",
-            path.display()
+            prompt_path(path)
         ));
     }
     out
@@ -210,5 +224,19 @@ mod tests {
         assert!(note.contains("Attached file: report.pdf"));
         assert!(note.contains("Path: /tmp/report.pdf"));
         assert!(note.contains("application/pdf"));
+    }
+
+    #[test]
+    fn file_note_uses_an_absolute_path_for_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("kivio-ext-att-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "hello").expect("write");
+        let note = file_attachments_note(&[path]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(note.contains("Attached file: notes.txt"));
+        assert!(note.contains("Path: "));
+        assert!(!note.contains(r"\\?\"));
+        assert!(note.contains("notes.txt"));
     }
 }

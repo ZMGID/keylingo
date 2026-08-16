@@ -102,10 +102,10 @@ pub enum SessionCommand {
     },
     /// 停止 CLI 侧的一个后台任务（Background tasks 面板的停止按钮）。
     ///
-    /// 目前只有 claude 有协议支持（`control_request` 的 `stop_task` 子型，等价于
-    /// Agent SDK 的 `Query.stopTask()`）；其余 CLI 的 actor 收到后直接忽略。
-    /// 无 ack —— claude 停掉任务后会发 `status:"stopped"` 的 `task_notification`，
-    /// 注册表由那条帧（下一次读到时）修正。
+    /// claude 写 `control_request` 的 `stop_task`；dsh 写 `session/stop-job`
+    ///（bridge：`ctx.jobs.kill`，子代理 `childSessionId` 走 `subagents.interrupt`）。
+    /// 其余 CLI 的 actor 收到后直接忽略。无 ack —— 发起方已乐观置 stopped，
+    /// 注册表由后续任务边沿帧修正。
     StopTask { task_id: String },
     /// Shut the session down (close stdin + kill the child) and end the actor.
     Close,

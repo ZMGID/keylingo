@@ -11,6 +11,8 @@
 //! - `session/open { sessionId, resume }`
 //! - `session/prompt { sessionId, contentBlocks }`
 //! - `session/command { sessionId, line }`（bridge：`ctx.commands.execute`，不进模型）
+//! - `session/commands { sessionId }`（bridge：`ctx.commands.list`，斜杠菜单发现）
+//! - `session/stop-job { sessionId, jobId }`（bridge：`ctx.jobs.kill`，子代理走 `subagents.interrupt`）
 //! - `session/cancel { sessionId }`
 //! - `shutdown`
 //!
@@ -48,10 +50,11 @@ use crate::external_agents::prompt::is_cli_slash_input;
 use crate::external_agents::session::live::{
     ApprovalAsk, ApprovalBridge, ApprovalDecision, SessionCommand, CANCELLED_SESSION_LOST,
 };
-use crate::external_agents::types::UnifiedAgentEvent;
+use crate::external_agents::types::{ExternalCliSlashCommand, UnifiedAgentEvent};
 use crate::proc::NoConsoleWindow;
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(45);
+const SLASH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const ADAPTER_RETRY_ATTEMPTS: u32 = 20;
 const ADAPTER_RETRY_DELAY: Duration = Duration::from_millis(250);
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -89,6 +92,8 @@ pub struct DshJsonRpcSession {
     child_progress: HashMap<String, ChildProgress>,
     /// 轮间父会话唤醒轮：`tool-jobs` 对空闲 owner `followup` 之后的正文。
     idle_wake: IdleWakeState,
+    /// `session/open` 之后 `ctx.commands.list` 的快照。空 = 发现失败，菜单走内建兜底。
+    slash_commands: Vec<ExternalCliSlashCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,12 +332,30 @@ impl DshJsonRpcSession {
                     "dsh session/open: resume mismatch (requested={wants_resume}, actual={resumed})"
                 ));
             }
-            Ok::<bool, String>(resumed)
+            let mut slash_commands = Vec::new();
+            let commands_id = next_rpc_id;
+            next_rpc_id += 1;
+            if write_rpc(
+                &mut stdin,
+                commands_id,
+                "session/commands",
+                json!({ "sessionId": session_id }),
+            )
+            .await
+            .is_ok()
+            {
+                if let Ok(listed) =
+                    read_until_response(&mut reader, commands_id, SLASH_DISCOVERY_TIMEOUT).await
+                {
+                    slash_commands = parse_dsh_slash_commands(&listed);
+                }
+            }
+            Ok::<_, String>((resumed, slash_commands))
         }
         .await;
 
         match handshake {
-            Ok(resumed) => Ok(Self {
+            Ok((resumed, slash_commands)) => Ok(Self {
                 child,
                 stdin,
                 reader,
@@ -345,6 +368,7 @@ impl DshJsonRpcSession {
                 map_state: MapSessionState::default(),
                 child_progress: HashMap::new(),
                 idle_wake: IdleWakeState::default(),
+                slash_commands,
             }),
             Err(message) => {
                 let tail =
@@ -371,6 +395,7 @@ impl DshJsonRpcSession {
         &mut self,
         prompt: &str,
         model: Option<&str>,
+        images: &[crate::external_agents::attachments::ImageBlock],
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
         mut approvals: Option<&mut ApprovalBridge>,
@@ -381,11 +406,13 @@ impl DshJsonRpcSession {
             return Err(crate::external_agents::session::acp::NEEDS_RECONNECT.to_string());
         }
 
+        self.emit_slash_commands(events).await;
+
         self.idle_wake = IdleWakeState::default();
         let prompt_id = self.next_id;
         self.next_id += 1;
         let is_slash = is_cli_slash_input(prompt);
-        let (method, params) = turn_rpc(&self.session_id, prompt);
+        let (method, params) = turn_rpc(&self.session_id, prompt, images);
         write_rpc(&mut self.stdin, prompt_id, method, params).await?;
 
         let mut started = false;
@@ -424,7 +451,9 @@ impl DshJsonRpcSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
-                Ok(SessionCommand::StopTask { .. }) => {}
+                Ok(SessionCommand::StopTask { task_id }) => {
+                    self.send_stop_task(&task_id).await;
+                }
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return Err("control channel closed".to_string());
@@ -640,6 +669,30 @@ impl DshJsonRpcSession {
         let _ = self.stdin.flush().await;
     }
 
+    async fn emit_slash_commands(&self, events: &mpsc::Sender<UnifiedAgentEvent>) {
+        if self.slash_commands.is_empty() {
+            return;
+        }
+        let _ = events
+            .send(UnifiedAgentEvent::SlashCommands {
+                commands: self.slash_commands.clone(),
+            })
+            .await;
+    }
+
+    /// 轮次之间 / 轮内都可写：无 ack，面板已乐观置 stopped。
+    async fn send_stop_task(&mut self, task_id: &str) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let _ = write_rpc(
+            &mut self.stdin,
+            id,
+            "session/stop-job",
+            stop_job_params(&self.session_id, task_id),
+        )
+        .await;
+    }
+
     /// 轮间空闲读一步：只读 + 分类，不写。写回（fail-closed 的 ask 回复）交给 actor。
     async fn read_idle_frame(&mut self) -> DshIdlePump {
         let line = match self.next_line().await {
@@ -746,6 +799,13 @@ pub fn spawn_dsh_session_actor_with_sink(
     tokio::spawn(async move {
         let mut idle_dead = false;
         let mut idle_hiccups = 0u32;
+        if !session.slash_commands.is_empty() {
+            if let Some(sink) = sink.as_ref() {
+                sink(DshIdleEffect::Event(UnifiedAgentEvent::SlashCommands {
+                    commands: session.slash_commands.clone(),
+                }));
+            }
+        }
         loop {
             let step = if idle_dead {
                 ActorStep::Cmd(rx.recv().await)
@@ -800,7 +860,7 @@ pub fn spawn_dsh_session_actor_with_sink(
                     prompt,
                     model,
                     reasoning: _,
-                    images: _,
+                    images,
                     events,
                     done,
                     mut approvals,
@@ -809,6 +869,7 @@ pub fn spawn_dsh_session_actor_with_sink(
                         .run_turn(
                             &prompt,
                             model.as_deref(),
+                            &images,
                             &events,
                             &mut rx,
                             approvals.as_mut(),
@@ -820,7 +881,9 @@ pub fn spawn_dsh_session_actor_with_sink(
                     let _ = accepted.send(false);
                 }
                 SessionCommand::Cancel => {}
-                SessionCommand::StopTask { .. } => {}
+                SessionCommand::StopTask { task_id } => {
+                    session.send_stop_task(&task_id).await;
+                }
                 SessionCommand::Close => {
                     session.close().await;
                     return;
@@ -1165,7 +1228,11 @@ fn normalize_sandbox(sandbox: Option<&str>) -> &'static str {
     }
 }
 
-fn turn_rpc(session_id: &str, prompt: &str) -> (&'static str, Value) {
+fn turn_rpc(
+    session_id: &str,
+    prompt: &str,
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> (&'static str, Value) {
     if is_cli_slash_input(prompt) {
         (
             "session/command",
@@ -1175,11 +1242,30 @@ fn turn_rpc(session_id: &str, prompt: &str) -> (&'static str, Value) {
             }),
         )
     } else {
+        let mut content_blocks = vec![json!({ "type": "text", "text": prompt })];
+        for image in images {
+            let media_type = if image.mime == "image/jpg" {
+                "image/jpeg"
+            } else {
+                image.mime.as_str()
+            };
+            let name = image
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image");
+            content_blocks.push(json!({
+                "type": "image",
+                "data": image.data_base64,
+                "mediaType": media_type,
+                "name": name,
+            }));
+        }
         (
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "contentBlocks": [{ "type": "text", "text": prompt }],
+                "contentBlocks": content_blocks,
             }),
         )
     }
@@ -1487,6 +1573,62 @@ fn parse_background_task_id(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn stop_job_params(session_id: &str, job_id: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "jobId": job_id,
+    })
+}
+
+fn parse_dsh_slash_commands(result: &Value) -> Vec<ExternalCliSlashCommand> {
+    let Some(items) = result.get("commands").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let Some(name) = item
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let argument_hint = item
+            .get("argumentHint")
+            .or_else(|| item.get("argument_hint"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|hint| !hint.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                item.get("input")
+                    .and_then(|input| input.get("hint"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|hint| !hint.is_empty())
+                    .map(str::to_string)
+            });
+        out.push(ExternalCliSlashCommand {
+            slash: format!("/{name}"),
+            name: name.to_string(),
+            description: item
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string),
+            argument_hint,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 fn content_blocks_text(value: Option<&Value>) -> String {
@@ -2582,13 +2724,26 @@ mod tests {
 
     #[test]
     fn slash_turns_use_session_command_not_prompt() {
-        let (method, params) = turn_rpc("kivio-1", "  /compact ");
+        let (method, params) = turn_rpc("kivio-1", "  /compact ", &[]);
         assert_eq!(method, "session/command");
         assert_eq!(params["sessionId"], "kivio-1");
         assert_eq!(params["line"], "/compact");
-        let (method, params) = turn_rpc("kivio-1", "hello");
+        let (method, params) = turn_rpc("kivio-1", "hello", &[]);
         assert_eq!(method, "session/prompt");
         assert_eq!(params["contentBlocks"][0]["text"], "hello");
+        assert_eq!(params["contentBlocks"].as_array().map(Vec::len), Some(1));
+        let image = crate::external_agents::attachments::ImageBlock {
+            data_base64: "Zm9v".to_string(),
+            mime: "image/png".to_string(),
+            path: PathBuf::from("shot.png"),
+        };
+        let (method, params) = turn_rpc("kivio-1", "这是什么", &[image]);
+        assert_eq!(method, "session/prompt");
+        assert_eq!(params["contentBlocks"][0]["text"], "这是什么");
+        assert_eq!(params["contentBlocks"][1]["type"], "image");
+        assert_eq!(params["contentBlocks"][1]["data"], "Zm9v");
+        assert_eq!(params["contentBlocks"][1]["mediaType"], "image/png");
+        assert_eq!(params["contentBlocks"][1]["name"], "shot.png");
         assert_eq!(
             command_result_error(&json!({
                 "kind": "error",
@@ -2598,6 +2753,50 @@ mod tests {
             Some("No compactable history")
         );
         assert!(command_result_error(&json!({ "kind": "success", "text": "ok" })).is_none());
+    }
+
+    #[test]
+    fn parses_discovered_slash_commands_from_the_bridge_list() {
+        let commands = parse_dsh_slash_commands(&json!({
+            "commands": [
+                {
+                    "name": "goal",
+                    "description": "set or view the goal",
+                    "input": { "hint": "[<objective>|clear]" }
+                },
+                { "name": "compact", "description": "Compact older conversation history" },
+                { "name": "feedback", "description": "record feedback", "argumentHint": "<text>" },
+                { "name": "compact" },
+                { "name": "" },
+            ]
+        }));
+        let names: Vec<&str> = commands.iter().map(|command| command.name.as_str()).collect();
+        assert_eq!(names, ["compact", "feedback", "goal"]);
+        assert_eq!(
+            commands
+                .iter()
+                .find(|command| command.name == "goal")
+                .and_then(|command| command.argument_hint.as_deref()),
+            Some("[<objective>|clear]")
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .find(|command| command.name == "feedback")
+                .and_then(|command| command.argument_hint.as_deref()),
+            Some("<text>")
+        );
+        assert!(parse_dsh_slash_commands(&json!({ "commands": [] })).is_empty());
+        assert!(parse_dsh_slash_commands(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn stop_job_rpc_uses_session_and_job_id() {
+        let params = stop_job_params("kivio-1", "bash-3");
+        assert_eq!(params["sessionId"], "kivio-1");
+        assert_eq!(params["jobId"], "bash-3");
+        let child = stop_job_params("kivio-1", "018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50");
+        assert_eq!(child["jobId"], "018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50");
     }
 
     /// 真机协议门：显式 `DSH_E2E=1` 才跑，避免普通测试消耗用户额度。
@@ -2634,6 +2833,7 @@ mod tests {
             .run_turn(
                 "必须调用 bash 工具执行 `printf KIVIO_DSH_E2E`，然后只回答命令输出。",
                 Some("deepseek-v4-flash"),
+                &[],
                 &event_tx,
                 &mut control_rx,
                 None,
@@ -2699,6 +2899,7 @@ mod tests {
             .run_turn(
                 "记住验证码 KIVIO-7429。只回答 ACK。",
                 Some("deepseek-v4-flash"),
+                &[],
                 &event_tx,
                 &mut control_rx,
                 None,
@@ -2724,6 +2925,7 @@ mod tests {
             .run_turn(
                 "上一轮的验证码是什么？只回答验证码。",
                 Some("deepseek-v4-flash"),
+                &[],
                 &event_tx,
                 &mut control_rx,
                 None,
@@ -2789,6 +2991,7 @@ mod tests {
             .run_turn(
                 "写一篇很长的文章。",
                 Some("deepseek-v4-flash"),
+                &[],
                 &event_tx,
                 &mut control_rx,
                 None,
@@ -2801,6 +3004,7 @@ mod tests {
             .run_turn(
                 "只回答 READY。",
                 Some("deepseek-v4-flash"),
+                &[],
                 &event_tx,
                 &mut control_rx,
                 None,

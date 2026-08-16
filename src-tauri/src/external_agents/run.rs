@@ -1240,11 +1240,11 @@ fn launch_config_for_turn(
 
 /// 持久会话「复用 / resume 轮」要发的正文。
 ///
-/// claude 的 `composed.full_prompt` **本身就不含**会话级指令（它们走
-/// `--append-system-prompt-file` 启动 flag，spec 第 1 条），剩下的全是 **per-turn** 内容：
-/// active skill 正文 + 降级附件说明 + 用户消息。这些每轮都必须整份发出去 —— 只发最新用户
-/// 消息会让 skill 正文与附件说明从第 2 轮起静默消失（active skill 是用户可以中途换的
-/// per-turn 选择）。
+/// claude / dsh 的 `composed.full_prompt` **本身就不含**会话级指令（claude 走
+/// `--append-system-prompt-file`，dsh 走 profile；resume 轮再被 `skip_instructions`
+/// 去重），剩下的全是 **per-turn** 内容：active skill 正文 + 附件路径说明 + 用户消息。
+/// 这些每轮都必须整份发出去 —— 只发最新用户消息会让 skill 正文与文件路径从第 2 轮起
+/// 静默消失（dsh 没有 file ContentBlock，非图片只能靠这段路径说明）。
 ///
 /// 其余持久协议（codex / ACP）的 full_prompt 首轮**含**指令，复用轮只发最新用户消息，
 /// 保持现有行为。
@@ -1254,7 +1254,7 @@ fn persistent_turn_prompt<'a>(
     latest_user_message: &'a str,
 ) -> &'a str {
     match protocol {
-        StreamFormat::ClaudeStreamJson => composed_prompt,
+        StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc => composed_prompt,
         _ => latest_user_message,
     }
 }
@@ -1969,6 +1969,16 @@ fn apply_idle_dsh_event(app: &AppHandle, conversation_id: &str, event: UnifiedAg
                 steps,
                 None,
             );
+        }
+        UnifiedAgentEvent::SlashCommands { commands } => {
+            let key = crate::external_agents::workspace::resolve_detection_cwd(
+                app,
+                Some(conversation_id),
+            )
+            .map(|cwd| slash::cache_key("dsh", &cwd.to_string_lossy()))
+            .unwrap_or_else(|_| slash::cache_key("dsh", conversation_id));
+            app.state::<AppState>()
+                .set_cached_external_slash_commands(key, commands);
         }
         _ => {}
     }
@@ -4051,14 +4061,18 @@ mod tests {
         assert!(with(Some("sonnet")).accepts(&with(None)));
     }
 
-    /// claude 每轮都发整份 composed prompt：会话级指令走启动 flag、不在正文里，剩下的
-    /// skill 正文 + 附件说明是 per-turn 的，只发最新用户消息会让它们从第 2 轮起静默消失。
+    /// claude / dsh 每轮都发整份 composed prompt：会话级指令不在正文里，剩下的
+    /// skill 正文 + 附件路径说明是 per-turn 的，只发最新用户消息会让它们从第 2 轮起静默消失。
     #[test]
-    fn claude_sends_the_full_composed_prompt_every_turn() {
-        let composed = "## Skill: pdf\n<body>\n\n用户消息";
+    fn claude_and_dsh_send_the_full_composed_prompt_every_turn() {
+        let composed = "## Skill: pdf\n<body>\n\n# 附带文件\nPath: C:\\\\tmp\\\\a.pdf\n\n用户消息";
         let latest = "用户消息";
         assert_eq!(
             persistent_turn_prompt(StreamFormat::ClaudeStreamJson, composed, latest),
+            composed
+        );
+        assert_eq!(
+            persistent_turn_prompt(StreamFormat::DshJsonRpc, composed, latest),
             composed
         );
         // codex / ACP 的 full_prompt 首轮含指令，复用轮只发最新消息（保持原行为）。

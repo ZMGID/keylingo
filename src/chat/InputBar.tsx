@@ -811,6 +811,21 @@ export const InputBar = memo(function InputBar({
       cancelled = true
     }
   }, [conversationId, externalAgentName, usesExternalRuntime, t])
+
+  useEffect(() => {
+    if (!slashPanelOpen || !usesExternalRuntime || !externalAgentName) return
+    let cancelled = false
+    void chatApi.listExternalCliSlashCommands(externalAgentName, conversationId)
+      .then((result) => {
+        if (cancelled) return
+        setExternalCliSlashCommands(mapExternalCliSlashCommands(externalAgentName, result.commands))
+        setExternalCliSlashHint(result.message ?? null)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [slashPanelOpen, conversationId, externalAgentName, usesExternalRuntime])
   const filteredSlashCommands = useMemo(
     () => allSlashCommands.filter((command) => (
       commandMatches(command, activeSlashToken?.query ?? '')

@@ -299,7 +299,7 @@ pub(crate) fn chat_clear_finished_background_tasks(
 }
 
 /// 面板停止一条外部 CLI 后台任务：往常驻会话 actor 送 `StopTask`（claude 写
-/// `stop_task` 控制请求）。乐观置 stopped —— 确认帧（`task_notification` stopped）
+/// `stop_task` 控制请求；dsh 写 `session/stop-job`）。乐观置 stopped —— 确认帧
 /// 要到下一次读 stdout 才到，等它面板会像没反应；真没停掉的话下一轮的帧会把状态改回来。
 #[tauri::command]
 pub(crate) async fn chat_stop_external_background_task(

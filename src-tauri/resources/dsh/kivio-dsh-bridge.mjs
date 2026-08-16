@@ -136,6 +136,86 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     }
   }
 
+  async listCommands(params) {
+    const sessionId = requireSessionId(params.sessionId)
+    const record = await this.getOrCreateSession(sessionId)
+    const commands = this.ctx.commands
+    if (!commands || typeof commands.list !== 'function') {
+      return { commands: [] }
+    }
+    const listed = commands.list(record.handle.agent)
+    return {
+      commands: (Array.isArray(listed) ? listed : []).flatMap((command) => {
+        const name = typeof command?.name === 'string' ? command.name.trim() : ''
+        if (!name) return []
+        const description =
+          typeof command.description === 'string' ? command.description : ''
+        const hint =
+          typeof command.input?.hint === 'string'
+            ? command.input.hint
+            : typeof command.argumentHint === 'string'
+              ? command.argumentHint
+              : undefined
+        return [
+          {
+            name,
+            description,
+            ...(hint ? { argumentHint: hint } : {}),
+          },
+        ]
+      }),
+    }
+  }
+
+  async stopJob(params) {
+    const sessionId = requireSessionId(params.sessionId)
+    const jobId = typeof params.jobId === 'string' ? params.jobId.trim() : ''
+    if (!jobId) {
+      throw new TypeError('jobId must be a non-empty string')
+    }
+    const record = await this.getOrCreateSession(sessionId)
+    const agent = record.handle.agent
+    const jobs = this.ctx.jobs
+    if (jobs && typeof jobs.kill === 'function') {
+      try {
+        const outcome = jobs.kill(jobId, agent, 'kivio-stop-task')
+        return { sessionId, jobId, outcome, target: 'job' }
+      } catch {
+        // Unknown job ids include childSessionId from subagent.started.
+      }
+    }
+    let subagents
+    try {
+      subagents = this.ctx.subagents
+    } catch {
+      subagents = undefined
+    }
+    if (subagents && typeof subagents.interrupt === 'function') {
+      try {
+        subagents.interrupt(jobId, { kind: 'user', parentSessionId: sessionId })
+        return { sessionId, jobId, outcome: 'requested', target: 'subagent' }
+      } catch {
+        // Fall through to a direct cancel of a live child agent.
+      }
+    }
+    let child
+    try {
+      child = this.ctx.agents?.get?.(jobId)
+    } catch {
+      child = undefined
+    }
+    if (child && child !== agent && typeof child.cancel === 'function') {
+      child.cancel({ kind: 'user' }, { keepInbox: true })
+      return { sessionId, jobId, outcome: 'requested', target: 'agent' }
+    }
+    throw new Error(`unknown job or subagent: ${jobId}`)
+  }
+
+  async prompt(params) {
+    const contentBlocks = await materializeContentBlocks(this.ctx, params?.contentBlocks)
+    return super.prompt({ ...params, contentBlocks })
+  }
+
   async handleRequest(method, params) {
     switch (method) {
       case 'session/open':
@@ -144,6 +224,10 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
         return this.cancel(params)
       case 'session/command':
         return this.command(params)
+      case 'session/commands':
+        return this.listCommands(params)
+      case 'session/stop-job':
+        return this.stopJob(params)
       default:
         return super.handleRequest(method, params)
     }
@@ -162,8 +246,53 @@ function requireSessionId(value) {
   return value.trim()
 }
 
+const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+function normalizeImageMediaType(value) {
+  const mediaType = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (mediaType === 'image/jpg') return 'image/jpeg'
+  if (IMAGE_MEDIA_TYPES.has(mediaType)) return mediaType
+  throw new TypeError(`unsupported image media type: ${value}`)
+}
+
+function decodeImageData(data) {
+  if (typeof data !== 'string' || data.trim() === '') {
+    throw new TypeError('image block data must be a base64 string')
+  }
+  return Uint8Array.from(Buffer.from(data, 'base64'))
+}
+
+async function materializeContentBlocks(ctx, blocks) {
+  if (!Array.isArray(blocks)) return []
+  const attachments = ctx.get('attachments')
+  const out = []
+  for (const block of blocks) {
+    if (!block || block.type !== 'image') {
+      out.push(block)
+      continue
+    }
+    if (block.attachment && typeof block.attachment.attachmentId === 'string') {
+      out.push(block)
+      continue
+    }
+    if (!attachments || typeof attachments.saveImage !== 'function') {
+      throw new Error('dsh image input requires the durable attachment service')
+    }
+    const mediaType = normalizeImageMediaType(block.mediaType || block.mimeType)
+    const ref = await attachments.saveImage({
+      data: decodeImageData(block.data),
+      mediaType,
+      ...(typeof block.name === 'string' && block.name.trim() !== ''
+        ? { name: block.name.trim() }
+        : {}),
+    })
+    out.push({ type: 'image', attachment: ref })
+  }
+  return out
+}
+
 export const name = 'kivio-dsh-jsonrpc-bridge'
-export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands']
+export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands', 'attachments', 'jobs']
 export const Config = Schema.object({
   maxTokensAsSuccess: Schema.boolean().default(false),
 })
