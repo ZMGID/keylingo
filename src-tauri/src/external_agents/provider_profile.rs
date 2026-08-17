@@ -771,6 +771,8 @@ fn migrate_shadowed_opencode_configs(
     previous_ids: &HashSet<String>,
     entries: &[NativeProviderEntry],
 ) -> Result<(), String> {
+            let _settings_lock =
+                crate::external_agents::pi_extensions::lock_settings_file(settings_path)?;
     for path in &paths.alternate_configs {
         let root = read_object_file(path, true, false, "OpenCode shadowed config")?;
         ensure_provider_id_available(&root, "provider", previous_ids, entries)?;

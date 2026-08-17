@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Blocks,
+  BookOpen,
   ChevronDown,
   ChevronRight,
   Download,
@@ -31,6 +33,8 @@ import { Button, IconButton } from '../components/Button'
 import { dshNativeDetailToProvider } from './cliNativeProviderConfigs'
 import { CliProviderModal } from './CliProviderModal'
 import { DshPluginsSettings } from './DshPluginsSettings'
+import { PiExtensionsSettings } from './PiExtensionsSettings'
+import { PiSkillsSettings } from './PiSkillsSettings'
 import { CcSwitchImportModal } from './CcSwitchImportModal'
 import type {
   ExternalCliAgentConfig,
@@ -121,6 +125,8 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [showPiExtensions, setShowPiExtensions] = useState(false)
+  const [showPiSkills, setShowPiSkills] = useState(false)
 
   const overrides = useMemo(
     () => settings.chat?.externalCliAgents ?? {},
@@ -193,6 +199,14 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
     },
     [settings.chat?.externalCliAgents, updateChat],
   )
+
+  if (showPiExtensions) {
+    return <PiExtensionsSettings lang={lang} onBack={() => setShowPiExtensions(false)} />
+  }
+
+  if (showPiSkills) {
+    return <PiSkillsSettings lang={lang} onBack={() => setShowPiSkills(false)} />
+  }
 
   return (
     <div className="kv-providers-root">
@@ -279,6 +293,8 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
               config={overrides[selected.id] ?? EMPTY_CONFIG}
               onPatch={(patch) => patchOverride(selected.id, patch)}
               reloadAgents={loadAgents}
+              onOpenPiExtensions={() => setShowPiExtensions(true)}
+              onOpenPiSkills={() => setShowPiSkills(true)}
             />
           ) : (
             <p className="kv-row-desc py-8 text-center">
@@ -297,12 +313,16 @@ function AgentDetail({
   config,
   onPatch,
   reloadAgents,
+  onOpenPiExtensions,
+  onOpenPiSkills,
 }: {
   agent: DetectedExternalAgent
   lang: Lang
   config: ExternalCliAgentConfig
   onPatch: (patch: Partial<ExternalCliAgentConfig>) => void
   reloadAgents: (force?: boolean) => Promise<void>
+  onOpenPiExtensions: () => void
+  onOpenPiSkills: () => void
 }) {
   const t = i18n[lang]
   const disabled = config.disabled ?? agent.disabled ?? false
@@ -470,6 +490,48 @@ function AgentDetail({
 
       <div className="kv-cli-card">
         <Row label={t.externalAgentsEnable} desc={t.externalAgentsEnableDesc}>
+      {agent.id === 'pi' && agent.available && (
+        <button
+          type="button"
+          onClick={onOpenPiExtensions}
+          className="kv-cli-card kv-pi-extensions-entry"
+          data-tauri-drag-region="false"
+        >
+          <span className="kv-pi-extensions-entry-icon" aria-hidden="true">
+            <Blocks size={16} />
+          </span>
+          <span className="kv-row-text">
+            <span className="kv-row-label">{t.externalAgentsPiExtensions}</span>
+            <span className="kv-row-desc">{t.externalAgentsPiExtensionsHint}</span>
+          </span>
+          <span className="kv-subpage-entry-go">
+            {lang === 'zh' ? '管理' : 'Manage'}
+            <ChevronRight size={14} aria-hidden="true" />
+          </span>
+        </button>
+      )}
+
+      {agent.id === 'pi' && agent.available && (
+        <button
+          type="button"
+          onClick={onOpenPiSkills}
+          className="kv-cli-card kv-pi-skills-entry"
+          data-tauri-drag-region="false"
+        >
+          <span className="kv-pi-skills-entry-icon" aria-hidden="true">
+            <BookOpen size={16} />
+          </span>
+          <span className="kv-row-text">
+            <span className="kv-row-label">{t.externalAgentsPiSkills}</span>
+            <span className="kv-row-desc">{t.externalAgentsPiSkillsHint}</span>
+          </span>
+          <span className="kv-subpage-entry-go">
+            {lang === 'zh' ? '管理' : 'Manage'}
+            <ChevronRight size={14} aria-hidden="true" />
+          </span>
+        </button>
+      )}
+
           <Toggle checked={!disabled} onChange={(on) => onPatch({ disabled: !on })} />
         </Row>
         <Row

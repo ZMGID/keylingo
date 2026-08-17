@@ -113,6 +113,65 @@ export interface DshNativeProviderDetail {
   defaultModel: string
 }
 
+/** PI 全局 Package 与 ~/.pi/agent/extensions 的结构化清单。 */
+export interface PiExtensionInventory {
+  agentDir: string
+  extensionsDir: string
+  packages: PiExtensionPackage[]
+  localExtensions: PiLocalExtension[]
+}
+
+export interface PiExtensionPackage {
+  source: string
+  name: string
+  version: string | null
+  description: string | null
+  path: string | null
+  enabled: boolean
+  canToggle: boolean
+  hasExtensions: boolean
+  extensionEntries: number
+  resources: string[]
+}
+
+export interface PiLocalExtension {
+  relativePath: string
+  name: string
+  path: string
+  enabled: boolean
+  kind: 'file' | 'directory'
+}
+
+export interface PiExtensionCommandResult {
+  output: string
+}
+
+export interface PiSkillInventory {
+  agentDir: string
+  piSkillsDir: string
+  agentsSkillsDir: string
+  skillCommandsEnabled: boolean
+  configuredPaths: PiSkillConfiguredPath[]
+  skills: PiSkillEntry[]
+}
+
+export interface PiSkillConfiguredPath {
+  path: string
+  exists: boolean
+}
+
+export interface PiSkillEntry {
+  name: string
+  description: string | null
+  path: string
+  sourceKind: 'pi' | 'agents' | 'configured' | 'package'
+  packageSource: string | null
+  packageRoot: string | null
+  enabled: boolean
+  canToggle: boolean
+  canRemove: boolean
+}
+
 /** `chat_external_cli_install_info` 的返回。 */
 export interface ExternalCliInstallInfo {
   agentId: string
@@ -1835,6 +1894,90 @@ export const chatApi = {
   async externalCliOpenConfigDir(agentId: string): Promise<void> {
     if (!isTauriRuntime()) return
     await invoke('chat_external_cli_open_config_dir', { agentId })
+  },
+
+  async piExtensionsInventory(): Promise<PiExtensionInventory | null> {
+    if (!isTauriRuntime()) return null
+    return await invoke<PiExtensionInventory>('chat_pi_extensions_inventory')
+  },
+
+  async piExtensionSetEnabled(kind: 'package' | 'local', id: string, enabled: boolean): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_extension_set_enabled', { kind, id, enabled })
+  },
+
+  async piExtensionInstall(source: string): Promise<PiExtensionCommandResult> {
+    return await invoke<PiExtensionCommandResult>('chat_pi_extension_install', { source })
+  },
+
+  async piExtensionUpdate(source?: string): Promise<PiExtensionCommandResult> {
+    return await invoke<PiExtensionCommandResult>('chat_pi_extension_update', {
+      source: source ?? null,
+    })
+  },
+
+  async piExtensionRemove(source: string): Promise<PiExtensionCommandResult> {
+    return await invoke<PiExtensionCommandResult>('chat_pi_extension_remove', { source })
+  },
+
+  async piExtensionOpen(kind: 'package' | 'local', id: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_extension_open', { kind, id })
+  },
+
+  async piExtensionsOpenDir(): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_extensions_open_dir')
+  },
+
+  async piSkillsInventory(): Promise<PiSkillInventory | null> {
+    if (!isTauriRuntime()) return null
+    return await invoke<PiSkillInventory>('chat_pi_skills_inventory')
+  },
+
+  async piSkillSetEnabled(skill: PiSkillEntry, enabled: boolean): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skill_set_enabled', {
+      path: skill.path,
+      packageSource: skill.packageSource,
+      enabled,
+    })
+  },
+
+  async piSkillCommandsSetEnabled(enabled: boolean): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skill_commands_set_enabled', { enabled })
+  },
+
+  async piSkillAddPath(path: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skill_add_path', { path })
+  },
+
+  async piSkillRemovePath(path: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skill_remove_path', { path })
+  },
+
+  async piSkillRemove(skill: PiSkillEntry): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skill_remove', {
+      path: skill.path,
+      packageSource: skill.packageSource,
+    })
+  },
+
+  async piSkillOpen(skill: PiSkillEntry): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skill_open', {
+      path: skill.path,
+      packageSource: skill.packageSource,
+    })
+  },
+
+  async piSkillsOpenDir(kind: 'pi' | 'agents'): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke('chat_pi_skills_open_dir', { kind })
   },
 
   async dshPluginSettingsGet(): Promise<DshPluginSettingsSnapshot | null> {

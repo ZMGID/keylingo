@@ -15,6 +15,8 @@ pub mod import_history;
 pub mod installer;
 pub mod kimi_usage;
 pub mod overrides;
+pub mod pi_extensions;
+pub mod pi_skills;
 pub mod prompt;
 pub mod provider_profile;
 pub mod registry;

@@ -5561,7 +5561,9 @@ input[type="password"]::-ms-clear {
   display: flex;
   justify-content: flex-end;
 }
-.kv-cli-card.kv-dsh-plugins-entry {
+.kv-cli-card.kv-dsh-plugins-entry,
+.kv-cli-card.kv-pi-extensions-entry,
+.kv-cli-card.kv-pi-skills-entry {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -5572,11 +5574,17 @@ input[type="password"]::-ms-clear {
   text-align: left;
   cursor: pointer;
 }
-.kv-dsh-plugins-entry:hover {
+.kv-dsh-plugins-entry:hover,
+.kv-pi-extensions-entry:hover,
+.kv-pi-skills-entry:hover {
   border-color: var(--border-strong);
 }
 .kv-dsh-plugins-entry:hover .kv-subpage-entry-go,
-.kv-dsh-plugins-entry:hover .kv-row-label {
+.kv-dsh-plugins-entry:hover .kv-row-label,
+.kv-pi-extensions-entry:hover .kv-subpage-entry-go,
+.kv-pi-extensions-entry:hover .kv-row-label,
+.kv-pi-skills-entry:hover .kv-subpage-entry-go,
+.kv-pi-skills-entry:hover .kv-row-label {
   color: var(--accent, #4f46e5);
 }
 .kv-dsh-plugins-entry-icons {
@@ -5594,6 +5602,210 @@ input[type="password"]::-ms-clear {
   display: grid;
   place-items: center;
 }
+.kv-pi-extensions-entry-icon,
+.kv-pi-skills-entry-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.kv-pi-extensions {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.kv-pi-extensions-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kv-pi-extensions-toolbar .kv-subpage-back {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.kv-pi-install {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(280px, 1.4fr);
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.kv-pi-install-copy {
+  min-width: 0;
+}
+.kv-pi-install-copy .kv-row-desc {
+  margin-top: 3px;
+}
+.kv-pi-install-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.kv-pi-extension-search {
+  margin: 0;
+}
+.kv-pi-extension-message {
+  max-height: 150px;
+  margin: 0;
+  padding: 9px 11px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+  font: 11px/1.45 var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.kv-pi-extension-message.error {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+  color: var(--danger);
+}
+.kv-pi-extension-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 100px;
+  text-align: center;
+}
+.kv-pi-extension-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.kv-pi-extension-section-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px;
+}
+.kv-pi-extension-row {
+  align-items: flex-start;
+  min-height: 70px;
+}
+.kv-pi-extension-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+}
+.kv-pi-extension-title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.kv-pi-extension-version {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font: 10.5px/1.3 var(--font-mono, ui-monospace, monospace);
+}
+.kv-pi-extension-meta {
+  margin: 3px 0 0;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.kv-pi-extension-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 190px;
+}
+.kv-pi-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.kv-pi-skills-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kv-pi-skills-toolbar .kv-subpage-back {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.kv-pi-skills-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.kv-pi-skills-settings {
+  margin: 0;
+  overflow: hidden;
+}
+.kv-pi-skill-path-row .kv-row-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kv-pi-skill-path {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font: 10.5px/1.4 var(--font-mono, ui-monospace, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kv-pi-skill-search {
+  margin: 0;
+}
+.kv-pi-skill-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.kv-pi-skill-row {
+  align-items: flex-start;
+  gap: 10px;
+}
+.kv-pi-skill-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-sidebar);
+  color: var(--text-muted);
+}
+@media (max-width: 760px) {
+  .kv-pi-install {
+    grid-template-columns: 1fr;
+  }
+  .kv-pi-extension-row,
+  .kv-pi-skill-row {
+    flex-wrap: wrap;
+  }
+  .kv-pi-extension-actions {
+    width: 100%;
+    max-width: none;
+    padding-left: 42px;
+  }
+}
+
 .kv-dsh-plugins-toolbar {
   display: flex;
   align-items: center;
