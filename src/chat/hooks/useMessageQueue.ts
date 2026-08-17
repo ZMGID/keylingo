@@ -10,6 +10,10 @@ export interface QueuedMessage {
   attachments: PendingAttachment[]
   /** 已提交「立刻引导」、等下一个轮次边界生效。仍在队列里（见下方自愈规则）。 */
   steering: boolean
+  /** 正在提交 Pi 原生 follow-up；确认前不能撤回或被普通 drain 抢走。 */
+  followingUp?: boolean
+  /** Pi 拒绝 follow-up 后显示一次降级提示，消息仍由本地队列轮末发送。 */
+  followUpRejected?: boolean
   /**
    * 上一次「立刻引导」没被受理（此刻没有在跑的轮次 / 该轮次不可注入，如 codex 的
    * review、compact 轮）。仅用于在条目上说一句话 —— 消息本身照旧留在队列里等轮末发出。
@@ -52,6 +56,8 @@ function nextQueuedId(): string {
  */
 export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessageQueueParams) {
   const [queued, setQueued] = useState<Record<string, QueuedMessage[]>>({})
+  /** 同步真值源：follow-up ack 与 run 收尾可能同一帧竞争，不能等 React 下一次 render 才更新。 */
+  const queuedRef = useRef(queued)
   /**
    * 已认领待发的条目 id。**同步**认领、发完才释放，用来挡住「同一条被两个 drain 各发一遍」
    * （同会话并发 run、或 React 还没重渲时两次触发读到同一个队首）。
@@ -64,24 +70,22 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
   const callbacksRef = useRef({ onSendMessage, onRestoreToComposer })
   callbacksRef.current = { onSendMessage, onRestoreToComposer }
 
-  /** 读最新队列而不把 queued 列进 useCallback 依赖（drain 要保持稳定身份）。 */
-  const queuedRef = useRef(queued)
-  queuedRef.current = queued
-
   const patch = useCallback((
     conversationId: string,
     update: (items: QueuedMessage[]) => QueuedMessage[],
   ) => {
-    setQueued((previous) => {
-      const next = update(previous[conversationId] ?? [])
-      if (next.length === 0) {
-        if (!(conversationId in previous)) return previous
-        const rest = { ...previous }
-        delete rest[conversationId]
-        return rest
-      }
-      return { ...previous, [conversationId]: next }
-    })
+    const previous = queuedRef.current
+    const nextItems = update(previous[conversationId] ?? [])
+    let next: Record<string, QueuedMessage[]>
+    if (nextItems.length === 0) {
+      if (!(conversationId in previous)) return
+      next = { ...previous }
+      delete next[conversationId]
+    } else {
+      next = { ...previous, [conversationId]: nextItems }
+    }
+    queuedRef.current = next
+    setQueued(next)
   }, [])
 
   const enqueue = useCallback((
@@ -108,7 +112,7 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
   /** 撤回到输入框：出队 + 把内容交还 composer。已提交引导的那条不给撤（后端可能正在注入）。 */
   const restoreToComposer = useCallback((conversationId: string, messageId: string) => {
     const message = (queuedRef.current[conversationId] ?? []).find((item) => item.id === messageId)
-    if (!message || message.steering) return
+    if (!message || message.steering || message.followingUp) return
     patch(conversationId, (items) => items.filter((item) => item.id !== messageId))
     callbacksRef.current.onRestoreToComposer(message)
   }, [patch])
@@ -128,7 +132,7 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
   const drain = useCallback(async (conversation: Conversation) => {
     const conversationId = conversation.id
     const next = (queuedRef.current[conversationId] ?? [])
-      .find((item) => !claimedRef.current.has(item.id))
+      .find((item) => !item.followingUp && !claimedRef.current.has(item.id))
     if (!next) return
     claimedRef.current.add(next.id)
     patch(conversationId, (items) => items.filter((item) => item.id !== next.id))
@@ -156,7 +160,7 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     messageId: string,
   ): Promise<boolean> => {
     const message = (queuedRef.current[conversationId] ?? []).find((item) => item.id === messageId)
-    if (!message || message.steering) return false
+    if (!message || message.steering || message.followingUp) return false
     // 重试时先清掉上次的拒绝标记，避免「点了但界面还写着没成功」。
     patch(conversationId, (items) => items.map((item) => (
       item.id === messageId ? { ...item, steerRejected: false } : item
@@ -187,11 +191,52 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     return accepted
   }, [patch])
 
+  /** Pi 原生 follow-up：成功后由 Pi 继续同一 run；拒绝则保留并立即尝试本地轮末兜底。 */
+  const followUp = useCallback(async (
+    conversation: Conversation,
+    messageId: string,
+  ): Promise<boolean> => {
+    const conversationId = conversation.id
+    const message = (queuedRef.current[conversationId] ?? []).find((item) => item.id === messageId)
+    if (!message || message.steering || message.followingUp) return false
+    patch(conversationId, (items) => items.map((item) => (
+      item.id === messageId
+        ? { ...item, followingUp: true, followUpRejected: false }
+        : item
+    )))
+    let accepted = false
+    try {
+      accepted = await chatApi.followUpMessage(
+        conversationId,
+        message.id,
+        message.content,
+        message.attachments,
+      )
+    } catch (err) {
+      console.error('Failed to queue a Pi follow-up:', err)
+    }
+    if (accepted) {
+      patch(conversationId, (items) => items.filter((item) => item.id !== messageId))
+    } else {
+      patch(conversationId, (items) => items.map((item) => (
+        item.id === messageId
+          ? { ...item, followingUp: false, followUpRejected: true }
+          : item
+      )))
+      await drain(conversation)
+    }
+    return accepted
+  }, [drain, patch])
+
   /** 收到 `user_steer` 卡 = 这条真的进了模型历史，现在才出队。找不到则 no-op（幂等）。 */
   const confirmSteered = useCallback((conversationId: string, steerId: string) => {
     patch(conversationId, (items) => items.filter((item) => item.id !== steerId))
   }, [patch])
 
+  /** follow-up 卡的确认对账；RPC ack 可能已先出队，所以必须幂等。 */
+  const confirmFollowUp = useCallback((conversationId: string, followUpId: string) => {
+    patch(conversationId, (items) => items.filter((item) => item.id !== followUpId))
+  }, [patch])
   return {
     queued,
     enqueue,
@@ -200,6 +245,8 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     clearConversation,
     drain,
     steer,
+    followUp,
     confirmSteered,
+    confirmFollowUp,
   }
 }

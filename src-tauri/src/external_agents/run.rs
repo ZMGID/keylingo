@@ -2707,6 +2707,19 @@ fn apply_unified_event(
             tool_calls.push(record.clone());
             emit_chat_tool_record(app, run_id, &record);
         }
+        UnifiedAgentEvent::UserFollowUp { id, text } => {
+            segment_tracker.reset_text();
+            segment_tracker.reset_reasoning();
+            let Some(message) = crate::chat::agent::SteeringMessage::new(id, &text) else {
+                return;
+            };
+            let record = crate::chat::agent::steering::build_follow_up_record(&message, 1);
+            let segment = push_tool_segment(segments, segment_order, &record.id);
+            emit_chat_stream_delta(app, run_id, "", None, Some(&segment));
+            tool_map.insert(record.id.clone(), tool_calls.len());
+            tool_calls.push(record.clone());
+            emit_chat_tool_record(app, run_id, &record);
+        }
         // 上游重试等瞬态状态 → 流状态行（StreamStatusLine），不进正文。
         // 前端在下一条正文/思考增量到达时自行清除（重试成功没有显式信号，流恢复即成功）。
         UnifiedAgentEvent::StatusNote { text } => {

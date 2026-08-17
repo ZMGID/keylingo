@@ -1581,6 +1581,30 @@ export const chatApi = {
     })
   },
 
+  /** Pi 原生 follow-up。成功表示 Pi 已接管这条消息；失败时调用方保留本地队列兜底。 */
+  async followUpMessage(
+    conversationId: string,
+    followUpId: string,
+    content: string,
+    attachments: PendingAttachment[] = [],
+  ): Promise<boolean> {
+    if (!isTauriRuntime()) return false
+    const diskPaths = attachments.filter((attachment) => attachment.content === undefined)
+      .map((attachment) => attachment.path)
+    const textAttachments = attachments
+      .filter((attachment): attachment is PendingAttachment & { content: string } => (
+        attachment.content !== undefined
+      ))
+      .map((attachment) => ({ name: attachment.name, content: attachment.content }))
+    return await invoke<boolean>('chat_follow_up_message', {
+      conversationId,
+      followUpId,
+      content,
+      attachments: diskPaths,
+      textAttachments,
+    })
+  },
+
   // 删除对话。返回未能清理的副产物说明（工作区被占用等）——对话本身一定已经删掉了，
   // 后端只有在「对话文件 / 索引」这两步失败时才抛错。
   async deleteConversation(conversationId: string): Promise<string[]> {

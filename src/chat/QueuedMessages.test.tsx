@@ -73,6 +73,15 @@ describe('QueuedMessages', () => {
     expect(onRestore).not.toHaveBeenCalled()
   })
 
+  it('Pi follow-up 提交中显示独立状态并锁定操作', () => {
+    const { onRestore } = setup([queued({ followingUp: true })])
+    expect(screen.getByTitle('正在排入 Pi')).toBeTruthy()
+    expect(screen.queryByLabelText(/立刻引导/)).toBeNull()
+    expect(screen.queryByLabelText('移出队列')).toBeNull()
+    screen.getByTitle('正在排入 Pi').click()
+    expect(onRestore).not.toHaveBeenCalled()
+  })
+
   // 撤回只把文字还给输入框，所以带附件的不给撤——否则附件会静默消失。
   it('带附件的条目不能撤回，但仍标出附件数', () => {
     const { onRestore } = setup([queued({
@@ -86,6 +95,12 @@ describe('QueuedMessages', () => {
   it('引导被拒时在条目上说明，按钮仍在（可重试）', () => {
     setup([queued({ steerRejected: true })])
     expect(screen.getByText('插不进这轮')).toBeTruthy()
+    expect(screen.getByLabelText(/立刻引导/)).toBeTruthy()
+  })
+
+  it('Pi follow-up 被拒时说明会降级为轮末发送', () => {
+    setup([queued({ followUpRejected: true })])
+    expect(screen.getByText('Pi 排队失败，轮末发送')).toBeTruthy()
     expect(screen.getByLabelText(/立刻引导/)).toBeTruthy()
   })
 

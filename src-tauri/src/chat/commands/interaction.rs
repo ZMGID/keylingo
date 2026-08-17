@@ -426,6 +426,8 @@ pub(crate) async fn chat_steer_message(
                 crate::external_agents::session::live::SessionCommand::Steer {
                     id: message.id,
                     text: message.text,
+                    images: Vec::new(),
+                    kind: crate::external_agents::session::live::MessageInjectionKind::Steer,
                     accepted: accepted_tx,
                 },
             )
@@ -438,6 +440,62 @@ pub(crate) async fn chat_steer_message(
         return Ok(accepted_rx.await.unwrap_or(false));
     }
     Ok(state.push_chat_steering(&conversation_id, message))
+}
+
+/// Pi 原生 follow-up：把消息排到当前运行结束后，由同一个常驻 Pi 会话继续处理。
+///
+/// 返回 false 时前端保留本地队列，轮末按普通消息发送；只有 Pi RPC 明确响应 success 才返回 true。
+#[tauri::command]
+pub(crate) async fn chat_follow_up_message(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    follow_up_id: String,
+    content: String,
+    attachments: Vec<String>,
+    text_attachments: Option<Vec<TextAttachmentInput>>,
+) -> Result<bool, String> {
+    let mut content =
+        compose_text_attachments_for_api(&content, &text_attachments.unwrap_or_default());
+    let paths: Vec<std::path::PathBuf> = attachments.into_iter().map(Into::into).collect();
+    let (image_paths, file_paths): (Vec<_>, Vec<_>) = paths
+        .into_iter()
+        .partition(|path| crate::external_agents::attachments::image_mime_for_path(path).is_some());
+    let (images, degraded_images) = crate::external_agents::attachments::load_image_blocks(
+        &image_paths,
+        crate::external_agents::defs::pi::PI_AGENT_DEF.image_mime_whitelist,
+    );
+    content.push_str(&crate::external_agents::attachments::image_paths_note(
+        &degraded_images,
+    ));
+    content.push_str(&crate::external_agents::attachments::file_attachments_note(
+        &file_paths,
+    ));
+    if content.trim().is_empty() && images.is_empty() {
+        return Ok(false);
+    }
+    let text = crate::chat::agent::SteeringMessage::new(follow_up_id.clone(), &content)
+        .map(|message| message.text)
+        .unwrap_or_default();
+    let Some(control) = state.external_pi_live_session_control(&conversation_id) else {
+        return Ok(false);
+    };
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let sent = control
+        .send(
+            crate::external_agents::session::live::SessionCommand::Steer {
+                id: follow_up_id,
+                text,
+                images,
+                kind: crate::external_agents::session::live::MessageInjectionKind::FollowUp,
+                accepted: accepted_tx,
+            },
+        )
+        .await
+        .is_ok();
+    if !sent {
+        return Ok(false);
+    }
+    Ok(accepted_rx.await.unwrap_or(false))
 }
 
 /// 前端 Pyodide 执行完成后回传结果。

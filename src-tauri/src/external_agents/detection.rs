@@ -56,6 +56,7 @@ pub async fn detect_availability_single(def: &RuntimeAgentDef) -> DetectedAgent 
         native_providers: native_provider_summaries(def.id),
         disabled: false,
         supports_steering: def.supports_steering,
+        supports_follow_up: def.supports_follow_up,
     }
 }
 
@@ -1003,6 +1004,7 @@ pub async fn detect_single_agent(def: &RuntimeAgentDef, cwd: &Path) -> DetectedA
         native_providers: native_provider_summaries(def.id),
         disabled: false,
         supports_steering: def.supports_steering,
+        supports_follow_up: def.supports_follow_up,
     }
 }
 

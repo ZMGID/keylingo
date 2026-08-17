@@ -41,7 +41,8 @@ export function QueuedMessages({
         {messages.map((message) => {
           // 撤回只把**文字**还给输入框（走 composer 的文本信道），所以带附件的那条不给撤 ——
           // 否则附件会静默消失。它仍能删、仍能立刻引导。
-          const restorable = !message.steering && message.attachments.length === 0
+          const submitted = message.steering || message.followingUp
+          const restorable = !submitted && message.attachments.length === 0
           return (
             <li
               key={message.id}
@@ -50,7 +51,7 @@ export function QueuedMessages({
               {/* 行首这一格是**状态**：等着 → 已提交。宽度固定，切换时不推着文字横跳。
                   刻意不用 CornerDownRight —— 那个图标已经是右边「立刻引导」的意思，
                   同一个图标担两个意思会让人以为整行都是引导键。 */}
-              {message.steering ? (
+              {submitted ? (
                 <Loader2
                   size={12}
                   className="shrink-0 animate-spin text-neutral-400 dark:text-neutral-500"
@@ -66,12 +67,12 @@ export function QueuedMessages({
                 type="button"
                 onClick={() => restorable && onRestore(message.id)}
                 title={
-                  message.steering
-                    ? t.chatSteerPending
+                  submitted
+                    ? message.followingUp ? t.chatFollowUpPending : t.chatSteerPending
                     : restorable ? t.chatQueueRestore : t.chatQueueRestoreBlocked
                 }
                 className={`min-w-0 flex-1 truncate text-left text-[12px] ${
-                  message.steering
+                  submitted
                     ? 'cursor-default text-neutral-400 dark:text-neutral-500'
                     : `text-neutral-700 dark:text-neutral-200 ${restorable ? '' : 'cursor-default'}`
                 }`}
@@ -84,12 +85,17 @@ export function QueuedMessages({
                 )}
               </button>
               {/* 引导被拒：这条得留在原地说话（不能只做 tooltip），否则用户点了按钮什么都看不见。 */}
-              {message.steerRejected && !message.steering && (
+              {message.steerRejected && !submitted && (
                 <span className="shrink-0 pr-1 text-[11px] text-amber-600 dark:text-amber-300">
                   {t.chatSteerRejected}
                 </span>
               )}
-              {!message.steering && (
+              {message.followUpRejected && !submitted && (
+                <span className="shrink-0 pr-1 text-[11px] text-amber-600 dark:text-amber-300">
+                  {t.chatFollowUpRejected}
+                </span>
+              )}
+              {!submitted && (
                 <span className="chat-composer-queue-actions flex shrink-0 items-center gap-0.5">
                   {canSteer && (
                     <IconButton

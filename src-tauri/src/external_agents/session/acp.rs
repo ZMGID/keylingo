@@ -2710,6 +2710,7 @@ mod tests {
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
             UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
+            UnifiedAgentEvent::UserFollowUp { .. } => "UserFollowUp",
             UnifiedAgentEvent::StatusNote { .. } => "StatusNote",
             UnifiedAgentEvent::BackgroundTask { .. } => "BackgroundTask",
             UnifiedAgentEvent::TodoWrite { .. } => "TodoWrite",

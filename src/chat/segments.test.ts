@@ -4,6 +4,7 @@ import {
   compareTimelineSegments,
   groupTimelineSegments,
   isStandaloneToolCard,
+  isUserFollowUpToolCall,
   isUserSteerToolCall,
   segmentToolCallId,
   summarizeToolGroup,
@@ -194,6 +195,17 @@ describe('groupTimelineSegments', () => {
     expect(isUserSteerToolCall(steer)).toBe(true)
     expect(userSteerText(steer)).toBe('改用 rg')
     expect(isStandaloneToolCard(steer)).toBe(true)
+  })
+
+  it('recognizes a native follow-up card as a standalone user message', () => {
+    const followUp = tool({
+      id: 'follow_up_f1',
+      source: 'native',
+      name: 'user_follow_up',
+      structured_content: { type: 'user_follow_up', follow_up_id: 'f1', text: '继续检查测试' },
+    })
+    expect(isUserFollowUpToolCall(followUp)).toBe(true)
+    expect(isStandaloneToolCard(followUp)).toBe(true)
   })
 
   it('does not let a non-native tool spoof a user steering card', () => {

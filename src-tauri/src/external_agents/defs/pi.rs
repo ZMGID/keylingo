@@ -83,6 +83,7 @@ pub const PI_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     resumes_session_via_cli: true,
     supports_native_image: true,
     supports_steering: true,
+    supports_follow_up: true,
     image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_pi_args,
 };
@@ -160,6 +161,7 @@ mod tests {
     #[test]
     fn pi_advertises_rpc_steering_and_native_images() {
         assert!(PI_AGENT_DEF.supports_steering);
+        assert!(PI_AGENT_DEF.supports_follow_up);
         assert!(PI_AGENT_DEF.supports_native_image);
         assert_eq!(
             PI_AGENT_DEF.image_mime_whitelist,

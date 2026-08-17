@@ -45,7 +45,18 @@ import { ToolCallBlock } from './ToolCallBlock'
 import { ToolCallErrorBoundary } from './ToolCallErrorBoundary'
 import type { AgentPlanState, ChatMessage, ChatMessageSegment, ChatToolArtifact, ToolCallRecord } from './types'
 import { buildCitationMap, type CitationView } from './citations'
-import { compareTimelineSegments, groupTimelineSegments, isStandaloneToolCard, isUserSteerToolCall, segmentToolCallId, summarizeToolGroup, toolRecordId, userSteerText } from './segments'
+import {
+  compareTimelineSegments,
+  groupTimelineSegments,
+  isStandaloneToolCard,
+  isUserFollowUpToolCall,
+  isUserSteerToolCall,
+  segmentToolCallId,
+  summarizeToolGroup,
+  toolRecordId,
+  userFollowUpText,
+  userSteerText,
+} from './segments'
 import type { TimelineGroupItem, ToolGroupIcon } from './segments'
 
 const DIRECT_IMAGE_GENERATION_PENDING = '[[KIVIO_DIRECT_IMAGE_GENERATION_PENDING]]'
@@ -379,7 +390,7 @@ function MissingToolSegment({ toolCallId }: { toolCallId: string }) {
  * 渲染成一条右对齐的小气泡，读起来就是「我在这里插了一句」，与时间线上下文的因果关系对得上。
  */
 function UserSteerSegment({ toolCall }: { toolCall: ToolCallRecord }) {
-  const text = userSteerText(toolCall)
+  const text = isUserFollowUpToolCall(toolCall) ? userFollowUpText(toolCall) : userSteerText(toolCall)
   if (!text.trim()) return null
   return (
     <div className="not-prose flex justify-end">
@@ -393,6 +404,10 @@ function UserSteerSegment({ toolCall }: { toolCall: ToolCallRecord }) {
       </div>
     </div>
   )
+}
+
+function isUserInjectedToolCall(toolCall: ToolCallRecord): boolean {
+  return isUserSteerToolCall(toolCall) || isUserFollowUpToolCall(toolCall)
 }
 
 function TimelineToolSegment({
@@ -411,7 +426,7 @@ function TimelineToolSegment({
   if (!toolCall) {
     return <MissingToolSegment toolCallId={toolCallId} />
   }
-  if (isUserSteerToolCall(toolCall)) {
+  if (isUserInjectedToolCall(toolCall)) {
     return <UserSteerSegment toolCall={toolCall} />
   }
   if (isArtifactPresentationToolCall(toolCall)) {
@@ -812,7 +827,7 @@ function TimelineSegments({
           if (!toolCall) return null
           return (
             <div key={item.segment.id} className={messageStreaming ? 'chat-motion-fade' : undefined}>
-              {isUserSteerToolCall(toolCall) ? (
+              {isUserInjectedToolCall(toolCall) ? (
                 <UserSteerSegment toolCall={toolCall} />
               ) : isArtifactPresentationToolCall(toolCall) ? (
                 <ArtifactPresentationBlock
@@ -850,7 +865,7 @@ function TimelineSegments({
       })}
       {orphanTools.map((toolCall, index) => (
         <div key={toolRecordId(toolCall) || `orphan-tool-${index}`} className={messageStreaming ? 'chat-motion-fade' : undefined}>
-          {isUserSteerToolCall(toolCall) ? (
+          {isUserInjectedToolCall(toolCall) ? (
             <UserSteerSegment toolCall={toolCall} />
           ) : isArtifactPresentationToolCall(toolCall) ? (
             <ArtifactPresentationBlock
@@ -1114,7 +1129,7 @@ function MessageBubbleComponent({
   const renderToolCall = (toolCall: ToolCallRecord, index: number) => {
     const key = toolCall.id || toolCall.call_id || toolCall.callId || index
     // 无时间线段的旧路径：插话卡照样不能退化成一张写着 user_steer 的工具卡。
-    if (isUserSteerToolCall(toolCall)) {
+    if (isUserInjectedToolCall(toolCall)) {
       return <UserSteerSegment key={key} toolCall={toolCall} />
     }
     if (isArtifactPresentationToolCall(toolCall)) {

@@ -127,6 +127,7 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     supports_native_image: true,
     // Bridge 暴露 cancel/resume，但没有追加输入的 `steer` RPC。
     supports_steering: false,
+    supports_follow_up: false,
     image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_dsh_args,
 };

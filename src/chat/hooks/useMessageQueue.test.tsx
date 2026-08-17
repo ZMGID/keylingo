@@ -5,10 +5,11 @@ import { chatApi } from '../api'
 import type { Conversation } from '../types'
 
 vi.mock('../api', () => ({
-  chatApi: { steerMessage: vi.fn() },
+  chatApi: { steerMessage: vi.fn(), followUpMessage: vi.fn() },
 }))
 
 const mockSteer = vi.mocked(chatApi.steerMessage)
+const mockFollowUp = vi.mocked(chatApi.followUpMessage)
 
 const conversation = { id: 'conv-1' } as Conversation
 
@@ -29,6 +30,8 @@ function setup(onSendResult = true) {
 beforeEach(() => {
   mockSteer.mockReset()
   mockSteer.mockResolvedValue(true)
+  mockFollowUp.mockReset()
+  mockFollowUp.mockResolvedValue(true)
 })
 
 describe('useMessageQueue', () => {
@@ -124,6 +127,20 @@ describe('useMessageQueue', () => {
     expect(result.current.queued['conv-1']).toBeUndefined()
   })
 
+  it('引导已受理但未收到确认卡时，run 收尾仍降级为普通发送', async () => {
+    const { result, onSendMessage } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '没赶上边界', [])!.id })
+    await act(async () => { await result.current.steer('conv-1', id) })
+
+    await act(async () => { await result.current.drain(conversation) })
+
+    expect(onSendMessage).toHaveBeenCalledWith('没赶上边界', [], {
+      conversationOverride: conversation,
+    })
+    expect(result.current.queued['conv-1']).toBeUndefined()
+  })
+
   it('立刻引导会把虚拟文本附件交给通用文本协议', async () => {
     const { result } = setup()
     const attachment = {
@@ -179,6 +196,61 @@ describe('useMessageQueue', () => {
       conversationOverride: conversation,
     })
     expect(result.current.queued['conv-1']).toBeUndefined()
+  })
+
+  it('Pi follow-up 确认后由 Pi 接管，不再走普通轮末发送', async () => {
+    const { result, onSendMessage } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '稍后再总结', [])!.id })
+
+    const accepted = await act(async () => await result.current.followUp(conversation, id))
+
+    expect(accepted).toBe(true)
+    expect(mockFollowUp).toHaveBeenCalledWith('conv-1', id, '稍后再总结', [])
+    expect(result.current.queued['conv-1']).toBeUndefined()
+    expect(onSendMessage).not.toHaveBeenCalled()
+  })
+
+  it('Pi 拒绝 follow-up 时恢复本地队列并尝试普通发送兜底', async () => {
+    mockFollowUp.mockResolvedValue(false)
+    const { result, onSendMessage } = setup(false)
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '别丢我', [])!.id })
+
+    const accepted = await act(async () => await result.current.followUp(conversation, id))
+
+    expect(accepted).toBe(false)
+    expect(onSendMessage).toHaveBeenCalledWith('别丢我', [], {
+      conversationOverride: conversation,
+    })
+    expect(result.current.queued['conv-1'][0]).toEqual(expect.objectContaining({
+      id,
+      followingUp: false,
+      followUpRejected: true,
+    }))
+  })
+
+  it('follow-up 等确认时普通 drain 不能抢发同一条', async () => {
+    let resolveFollowUp: ((accepted: boolean) => void) | null = null
+    mockFollowUp.mockImplementation(() => new Promise<boolean>((resolve) => {
+      resolveFollowUp = resolve
+    }))
+    const { result, onSendMessage } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '只处理一次', [])!.id })
+
+    let pending!: Promise<boolean>
+    act(() => { pending = result.current.followUp(conversation, id) })
+    expect(result.current.queued['conv-1'][0].followingUp).toBe(true)
+    await act(async () => { await result.current.drain(conversation) })
+    expect(onSendMessage).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveFollowUp?.(true)
+      await pending
+    })
+    expect(result.current.queued['conv-1']).toBeUndefined()
+    expect(onSendMessage).not.toHaveBeenCalled()
   })
 
   it('撤回到输入框：出队并交还内容；已提交引导的不给撤', async () => {

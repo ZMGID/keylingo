@@ -20,6 +20,7 @@ use super::loop_::{LoopEnv, RunState};
 /// structured.type == "user_steer"` 三条一起认——这张卡渲染成「用户说过的话」，
 /// 不能让某个 MCP 服务器的工具结果冒充。
 pub const STEER_TOOL_NAME: &str = "user_steer";
+pub const FOLLOW_UP_TOOL_NAME: &str = "user_follow_up";
 
 /// 单条插话文本上限。与 `ask_user.rs` 那批 `MAX_*_CHARS` 同一取舍：越界截断而不是报错，
 /// 用户已经打完的字不该因为长度被整条丢掉。
@@ -132,6 +133,34 @@ pub fn build_steer_record(message: &SteeringMessage, round: u32) -> ToolCallReco
         structured_content: Some(serde_json::json!({
             "type": "user_steer",
             "steer_id": message.id,
+            "text": message.text,
+        })),
+    }
+}
+
+/// Pi 原生 follow-up 的显示记录。它与 steer 同样渲染成时间线里的用户小气泡，
+/// 但保留独立类型，避免把“当前轮次引导”和“轮末追加”混成一种协议语义。
+pub fn build_follow_up_record(message: &SteeringMessage, round: u32) -> ToolCallRecord {
+    ToolCallRecord {
+        id: format!("follow_up_{}", message.id),
+        name: FOLLOW_UP_TOOL_NAME.to_string(),
+        source: "native".to_string(),
+        server_id: None,
+        arguments: serde_json::json!({ "text": message.text }).to_string(),
+        status: ToolCallStatus::Success,
+        result_preview: Some(message.text.clone()),
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round,
+        sensitive: false,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: Some(serde_json::json!({
+            "type": "user_follow_up",
+            "follow_up_id": message.id,
             "text": message.text,
         })),
     }

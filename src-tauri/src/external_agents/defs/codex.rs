@@ -55,6 +55,7 @@ pub const CODEX_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     resumes_session_via_cli: false,
     supports_native_image: true,
     supports_steering: true,
+    supports_follow_up: false,
     image_mime_whitelist: &[],
     build_args: build_codex_args,
 };

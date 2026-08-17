@@ -47,6 +47,7 @@ const fn acp_def(
         resumes_session_via_cli: false,
         supports_native_image: true,
         supports_steering: false,
+        supports_follow_up: false,
         image_mime_whitelist: &[],
         build_args,
     }

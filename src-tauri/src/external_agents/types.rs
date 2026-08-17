@@ -139,6 +139,9 @@ pub struct DetectedAgent {
     /// 前端据此决定排队条上给不给「立刻引导」。
     #[serde(default)]
     pub supports_steering: bool,
+    /// 协议是否支持把消息排到当前运行之后继续处理。当前只有 Pi RPC `follow_up`。
+    #[serde(default)]
+    pub supports_follow_up: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +191,9 @@ pub struct RuntimeAgentDef {
     /// claude 的 stream-json 输入是顺序处理、ACP 只有 `session/prompt` 与 `session/cancel`，
     /// 因而仍不声明该能力。
     pub supports_steering: bool,
+    /// 该 CLI 的协议能否把一条用户消息排到当前运行完成后继续处理。
+    /// Pi 使用 RPC `follow_up`；其余协议仍由 Kivio 在轮末发起普通新轮次。
+    pub supports_follow_up: bool,
     /// 允许原生注入的图片 MIME 白名单；空 = 不限。Claude stream-json 仅认 jpeg/png/gif/webp，
     /// 超出的图片降级为路径文本（不静默丢弃）。
     pub image_mime_whitelist: &'static [&'static str],
@@ -246,6 +252,13 @@ pub enum UnifiedAgentEvent {
     /// 就留在队列里等轮末自动发送。
     UserSteer {
         /// 前端生成的 id，回到卡片的 `structured_content.steer_id` 供前端对账出队。
+        id: String,
+        text: String,
+    },
+    /// Pi 已接受一条原生 `follow_up`。该事件会生成独立的用户追加卡，既留下可见历史，
+    /// 也让前端确认这条本地排队消息已由 Pi 接管，不再在轮末重复发送。
+    UserFollowUp {
+        /// 前端排队消息 id，回到 `structured_content.follow_up_id` 供前端对账。
         id: String,
         text: String,
     },

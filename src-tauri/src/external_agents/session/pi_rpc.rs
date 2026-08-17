@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 
 use crate::external_agents::context::parse_context_window_label;
+use crate::external_agents::session::live::MessageInjectionKind;
 use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{
     default_model_option, ExternalCliSlashCommand, RuntimeModelOption, UnifiedAgentEvent,
@@ -22,10 +23,23 @@ use crate::proc::NoConsoleWindow;
 type SharedPiWriter<W> = Arc<Mutex<W>>;
 struct PiControlWaiter {
     completion: oneshot::Sender<Result<(), String>>,
-    steer: Option<(String, String)>,
+    injection: Option<(MessageInjectionKind, String, String)>,
 }
 
 type PiControlWaiters = Arc<Mutex<HashMap<String, PiControlWaiter>>>;
+
+fn pi_rpc_images(images: &[crate::external_agents::attachments::ImageBlock]) -> Vec<Value> {
+    images
+        .iter()
+        .map(|image| {
+            json!({
+                "type": "image",
+                "data": image.data_base64,
+                "mimeType": image.mime,
+            })
+        })
+        .collect()
+}
 
 async fn write_rpc_value<W>(stdin: &SharedPiWriter<W>, payload: &Value) -> Result<(), String>
 where
@@ -52,7 +66,7 @@ async fn issue_control_command<W>(
     stdin: &SharedPiWriter<W>,
     waiters: &PiControlWaiters,
     id: String,
-    steer: Option<(String, String)>,
+    injection: Option<(MessageInjectionKind, String, String)>,
     mut payload: Value,
 ) -> Result<oneshot::Receiver<Result<(), String>>, String>
 where
@@ -64,7 +78,7 @@ where
         id.clone(),
         PiControlWaiter {
             completion: tx,
-            steer,
+            injection,
         },
     );
     if let Err(error) = write_rpc_value(stdin, &payload).await {
@@ -799,16 +813,7 @@ where
     let payload = if manual_compact {
         json!({ "id": 1, "type": "compact" })
     } else {
-        let rpc_images: Vec<Value> = images
-            .iter()
-            .map(|image| {
-                json!({
-                    "type": "image",
-                    "data": image.data_base64,
-                    "mimeType": image.mime,
-                })
-            })
-            .collect();
+        let rpc_images = pi_rpc_images(images);
         let mut payload = json!({ "id": 1, "type": "prompt", "message": prompt });
         if !rpc_images.is_empty() {
             payload["images"] = Value::Array(rpc_images);
@@ -1070,8 +1075,15 @@ where
                 if let Some(waiter) = waiters.lock().await.remove(id) {
                     let succeeded = value.get("success").and_then(Value::as_bool) == Some(true);
                     if succeeded {
-                        if let Some((id, text)) = waiter.steer {
-                            sink(UnifiedAgentEvent::UserSteer { id, text });
+                        if let Some((kind, id, text)) = waiter.injection {
+                            match kind {
+                                MessageInjectionKind::Steer => {
+                                    sink(UnifiedAgentEvent::UserSteer { id, text });
+                                }
+                                MessageInjectionKind::FollowUp => {
+                                    sink(UnifiedAgentEvent::UserFollowUp { id, text });
+                                }
+                            }
                         }
                     }
                     let result = if succeeded {
@@ -1444,15 +1456,29 @@ pub fn spawn_pi_rpc_session_actor(
                                         crate::external_agents::spawn::kill_agent_process_tree(&mut session.child);
                                         close_after_turn = true;
                                     }
-                                    Some(SessionCommand::Steer { id, text, accepted }) => {
+                                    Some(SessionCommand::Steer { id, text, images, kind, accepted }) => {
                                         let request_id = format!("kivio-control-{}", next_control_id);
                                         next_control_id = next_control_id.saturating_add(1);
+                                        let command_type = match kind {
+                                            MessageInjectionKind::Steer => "steer",
+                                            MessageInjectionKind::FollowUp => "follow_up",
+                                        };
+                                        let display_text = if text.trim().is_empty() && !images.is_empty() {
+                                            format!("附带图片（{}）", images.len())
+                                        } else {
+                                            text.clone()
+                                        };
+                                        let mut payload = json!({ "type": command_type, "message": text });
+                                        let rpc_images = pi_rpc_images(&images);
+                                        if !rpc_images.is_empty() {
+                                            payload["images"] = Value::Array(rpc_images);
+                                        }
                                         match issue_control_command(
                                             &session.stdin,
                                             &pending_controls,
                                             request_id.clone(),
-                                            Some((id, text.clone())),
-                                            json!({ "type": "steer", "message": text }),
+                                            Some((kind, id, display_text)),
+                                            payload,
                                         )
                                         .await
                                         {
@@ -2253,7 +2279,11 @@ mod tests {
             &stdin,
             &waiters,
             "steer-1".to_string(),
-            Some(("frontend-1".to_string(), "new direction".to_string())),
+            Some((
+                MessageInjectionKind::Steer,
+                "frontend-1".to_string(),
+                "new direction".to_string(),
+            )),
             json!({ "type": "steer", "message": "new direction" }),
         )
         .await
@@ -2283,6 +2313,69 @@ mod tests {
             events.as_slice(),
             [UnifiedAgentEvent::UserSteer { id, text }]
                 if id == "frontend-1" && text == "new direction"
+        ));
+    }
+
+    #[tokio::test]
+    async fn follow_up_command_serializes_images_and_emits_distinct_event() {
+        let (stdout_reader, mut stdout_writer) = duplex(2048);
+        let (command_reader, command_writer) = duplex(2048);
+        let stdin = Arc::new(Mutex::new(command_writer));
+        let waiters: PiControlWaiters = Arc::new(Mutex::new(HashMap::new()));
+        let response = issue_control_command(
+            &stdin,
+            &waiters,
+            "follow-up-1".to_string(),
+            Some((
+                MessageInjectionKind::FollowUp,
+                "frontend-follow-up".to_string(),
+                "附带图片（1）".to_string(),
+            )),
+            json!({
+                "type": "follow_up",
+                "message": "",
+                "images": [{ "type": "image", "data": "abc", "mimeType": "image/png" }]
+            }),
+        )
+        .await
+        .expect("issue follow-up");
+        let mut command_lines = BufReader::new(command_reader).lines();
+        let command: Value = serde_json::from_str(
+            &command_lines
+                .next_line()
+                .await
+                .expect("command line")
+                .expect("command"),
+        )
+        .expect("json command");
+        assert_eq!(command["type"], "follow_up");
+        assert_eq!(command["images"][0]["mimeType"], "image/png");
+
+        stdout_writer
+            .write_all(
+                b"{\"id\":\"follow-up-1\",\"type\":\"response\",\"command\":\"follow_up\",\"success\":true}\n{\"type\":\"agent_settled\"}\n",
+            )
+            .await
+            .expect("events");
+        let mut events = Vec::new();
+        let result = drain_pi_rpc_lines(
+            &mut BufReader::new(stdout_reader).lines(),
+            &stdin,
+            &mut |event| events.push(event),
+            None,
+            Some(&waiters),
+            || false,
+            None,
+            false,
+            true,
+        )
+        .await;
+        assert_eq!(result, Ok(()));
+        assert!(matches!(response.await, Ok(Ok(()))));
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::UserFollowUp { id, text }]
+                if id == "frontend-follow-up" && text == "附带图片（1）"
         ));
     }
 

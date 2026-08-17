@@ -505,7 +505,13 @@ impl CodexAppServerSession {
                     return Err("cancelled".to_string());
                 }
                 Ok(SessionCommand::Close) => return Err("closed".to_string()),
-                Ok(SessionCommand::Steer { id, text, accepted }) => {
+                Ok(SessionCommand::Steer {
+                    id,
+                    text,
+                    kind: crate::external_agents::session::live::MessageInjectionKind::Steer,
+                    accepted,
+                    ..
+                }) => {
                     // `turn/steer` 往**在飞的**这一轮追加用户输入（不新起一轮、不发
                     // turn/started）。`expectedTurnId` 是前置条件，必须等于服务端当前活跃的
                     // turn id —— 那是服务端给的字符串，不是我们的 JSON-RPC 请求 id，所以只能
@@ -535,6 +541,9 @@ impl CodexAppServerSession {
                             let _ = accepted.send(false);
                         }
                     }
+                }
+                Ok(SessionCommand::Steer { accepted, .. }) => {
+                    let _ = accepted.send(false);
                 }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
@@ -1710,6 +1719,7 @@ mod tests {
             UnifiedAgentEvent::SlashCommands { .. } => "SlashCommands",
             UnifiedAgentEvent::CliCompacted { .. } => "CliCompacted",
             UnifiedAgentEvent::UserSteer { .. } => "UserSteer",
+            UnifiedAgentEvent::UserFollowUp { .. } => "UserFollowUp",
             UnifiedAgentEvent::StatusNote { .. } => "StatusNote",
             UnifiedAgentEvent::BackgroundTask { .. } => "BackgroundTask",
             UnifiedAgentEvent::TodoWrite { .. } => "TodoWrite",
@@ -1850,6 +1860,8 @@ mod tests {
                     .send(SessionCommand::Steer {
                         id: "steer-live-1".to_string(),
                         text: "Change of plan: stop counting and reply STEER_OK.".to_string(),
+                        images: Vec::new(),
+                        kind: crate::external_agents::session::live::MessageInjectionKind::Steer,
                         accepted: accepted_tx,
                     })
                     .await

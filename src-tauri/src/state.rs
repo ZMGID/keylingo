@@ -1025,6 +1025,20 @@ impl AppState {
             .map(|session| session.control.clone())
     }
 
+    /// 取出 Pi 常驻会话控制通道。follow-up 是 Pi RPC 专有命令，后端不依赖前端能力门控。
+    pub fn external_pi_live_session_control(
+        &self,
+        conversation_id: &str,
+    ) -> Option<tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>>
+    {
+        self.external_live_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(conversation_id)
+            .filter(|session| session.agent_id == "pi")
+            .map(|session| session.control.clone())
+    }
+
     pub fn register_external_live_session(
         &self,
         conversation_id: String,

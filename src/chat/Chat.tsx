@@ -153,7 +153,7 @@ import {
   restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
-import { compareTimelineSegments, isExternalSubagentToolCall, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
+import { compareTimelineSegments, isExternalSubagentToolCall, isUserFollowUpToolCall, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { applyLiveContextUsage } from './contextPanel'
 import { measureChatSurface, onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
@@ -2561,6 +2561,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         if (typeof steerId === 'string') {
           messageQueueRef.current.confirmSteered(payload.conversationId, steerId)
         }
+      } else if (isUserFollowUpToolCall(record)) {
+        const followUpId = (record.structuredContent as { follow_up_id?: unknown } | undefined)?.follow_up_id
+        if (typeof followUpId === 'string') {
+          messageQueueRef.current.confirmFollowUp(payload.conversationId, followUpId)
+        }
       }
       const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
       snapshot.toolCalls = index < 0
@@ -3758,15 +3763,28 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     const agent = detectedExternalAgents.find((item) => item.id === agentId)
     return Boolean(agent?.supportsSteering ?? agent?.supports_steering)
   }, [activeAgentRuntime.externalAgentId, detectedExternalAgents])
+  const activeExternalAgentSupportsFollowUp = useMemo(() => {
+    const agentId = activeAgentRuntime.externalAgentId
+    if (!agentId) return false
+    const agent = detectedExternalAgents.find((item) => item.id === agentId)
+    return Boolean(agent?.supportsFollowUp ?? agent?.supports_follow_up)
+  }, [activeAgentRuntime.externalAgentId, detectedExternalAgents])
   const canSteerCurrentConversation =
     (usesExternalRuntime ? activeExternalAgentSupportsSteering : true)
     && activeReplyModels.length < 2
+  const canFollowUpCurrentConversation =
+    usesExternalRuntime
+    && activeExternalAgentSupportsFollowUp
+    && activeReplyModels.length < 2
 
   const handleQueueMessage = useCallback((content: string, attachments: PendingAttachment[]) => {
-    const conversationId = currentConversationIdRef.current
-    if (!conversationId) return
-    messageQueueRef.current.enqueue(conversationId, content, attachments)
-  }, [])
+    const conversation = currentConversationRef.current
+    if (!conversation) return
+    const message = messageQueueRef.current.enqueue(conversation.id, content, attachments)
+    if (message && canFollowUpCurrentConversation) {
+      void messageQueueRef.current.followUp(conversation, message.id)
+    }
+  }, [canFollowUpCurrentConversation])
 
   const handleSteerQueuedMessage = useCallback((messageId: string) => {
     const conversationId = currentConversationIdRef.current

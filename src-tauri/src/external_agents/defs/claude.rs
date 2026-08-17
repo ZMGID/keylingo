@@ -358,6 +358,7 @@ pub const CLAUDE_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     resumes_session_via_cli: true,
     supports_native_image: true,
     supports_steering: false,
+    supports_follow_up: false,
     image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_claude_args,
 };

@@ -166,6 +166,21 @@ export function userSteerText(toolCall: ToolCallRecord): string {
   return typeof text === 'string' ? text : ''
 }
 
+export function isUserFollowUpToolCall(toolCall: ToolCallRecord): boolean {
+  if (toolCall.source !== 'native') return false
+  if (toolRecordRawName(toolCall) !== 'user_follow_up') return false
+  const structured = toolCall.structured_content ?? toolCall.structuredContent
+  if (!structured || typeof structured !== 'object') return false
+  return (structured as { type?: unknown }).type === 'user_follow_up'
+}
+
+export function userFollowUpText(toolCall: ToolCallRecord): string {
+  const structured = toolCall.structured_content ?? toolCall.structuredContent
+  if (!structured || typeof structured !== 'object') return ''
+  const text = (structured as { text?: unknown }).text
+  return typeof text === 'string' ? text : ''
+}
+
 /** 外部 CLI 的子代理工具调用：claude 新版报 `Agent`、旧版报 `Task`；dsh 报
  *  `subagent` / `subagent_fork` / `workflow` / `ralph`（source 恒为 `external_cli`）。
  *  精确匹配整名，MCP/native 不受影响。 */
@@ -187,7 +202,7 @@ export function isExternalSubagentToolCall(toolCall: ToolCallRecord): boolean {
  *  structured content arrives). */
 export function isStandaloneToolCard(toolCall: ToolCallRecord): boolean {
   // 用户插话：把它折进「调用 N 次工具」等于把用户自己说的话藏起来，同 ask_user 的理由。
-  if (isUserSteerToolCall(toolCall)) return true
+  if (isUserSteerToolCall(toolCall) || isUserFollowUpToolCall(toolCall)) return true
   const structured = toolCall.structured_content ?? toolCall.structuredContent
   if (structured && typeof structured === 'object') {
     const type = (structured as { type?: unknown }).type

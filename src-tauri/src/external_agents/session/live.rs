@@ -70,6 +70,12 @@ pub struct ApprovalBridge {
     pub decisions: mpsc::Receiver<ApprovalDecision>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageInjectionKind {
+    Steer,
+    FollowUp,
+}
+
 /// A command sent to a live session's actor task.
 pub enum SessionCommand {
     /// Run one turn: write the prompt, stream `UnifiedAgentEvent`s into `events`, and report the
@@ -98,6 +104,8 @@ pub enum SessionCommand {
         /// 前端生成的 id，原样回到 `user_steer` 卡上供前端对账出队。
         id: String,
         text: String,
+        images: Vec<crate::external_agents::attachments::ImageBlock>,
+        kind: MessageInjectionKind,
         accepted: oneshot::Sender<bool>,
     },
     /// 停止 CLI 侧的一个后台任务（Background tasks 面板的停止按钮）。

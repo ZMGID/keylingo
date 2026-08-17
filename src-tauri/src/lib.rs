@@ -565,6 +565,7 @@ pub fn run() {
             chat::commands::interaction::chat_respond_session_consent,
             chat::commands::interaction::chat_submit_user_choice,
             chat::commands::interaction::chat_steer_message,
+            chat::commands::interaction::chat_follow_up_message,
             chat::commands::interaction::chat_python_complete,
             chat::commands::attachments::chat_read_attachment,
             chat::commands::attachments::chat_open_attachment,
