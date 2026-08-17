@@ -891,9 +891,9 @@ function MessageBubbleComponent({
   // 历史消息会被虚拟列表反复卸载/挂载；只让真正的流式预览播放进入动画，
   // 否则滚动时每个重新进入 DOM 的旧气泡都会淡入并上移，看起来像刷新且阻滞滚动。
   const playEntranceAnimation = messageStreaming
-  // 「这条可以改动吗」：门控重新生成 / 删除。`onUpdateMessage` 保留在判据里不是残留——
-  // MessageGroup 的**在飞列**正是靠不传它来一次关掉这些入口（见那里的 `!live ? … : undefined`），
-  // 去掉它会让还在生成的那一列冒出删除键。（编辑入口已按需求移除，改写消息不再有 UI。）
+  // 「这条是否已落盘并允许历史操作」：门控重新生成。`onUpdateMessage` / `onDeleteMessage`
+  // 在这里作为完整可变能力信号；MessageGroup 的在飞列不传它们，从而一次关掉这些入口。
+  // 编辑与删除入口已按需求移除，但底层能力仍保留。
   const canMutate = Boolean(onUpdateMessage && onDeleteMessage && onRegenerateMessage)
   const prepared = useMemo(() => {
     const attachments = message.attachments ?? []
@@ -1261,13 +1261,6 @@ function MessageBubbleComponent({
               onForkMessage
                 ? () => {
                     void onForkMessage(message.id)
-                  }
-                : undefined
-            }
-            onDelete={
-              canMutate
-                ? () => {
-                    void onDeleteMessage!(message.id)
                   }
                 : undefined
             }

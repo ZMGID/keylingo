@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, Copy, Gauge, GitBranch, NotebookPen, RotateCcw, Trash2 } from 'lucide-react'
+import { Check, Copy, Gauge, GitBranch, NotebookPen, RotateCcw } from 'lucide-react'
 import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
 import { estimateTokens, formatTokensK } from '../utils/tokens'
@@ -16,7 +16,6 @@ interface AssistantMessageMetaProps {
   usage?: MessageUsage | null
   onRegenerate?: () => void
   onFork?: () => void
-  onDelete?: () => void
   onSaveToNote?: () => Promise<boolean> | boolean
 }
 
@@ -49,7 +48,6 @@ export function AssistantMessageMeta({
   usage,
   onRegenerate,
   onFork,
-  onDelete,
   onSaveToNote,
 }: AssistantMessageMetaProps) {
   const [copied, setCopied] = useState(false)
@@ -137,14 +135,6 @@ export function AssistantMessageMeta({
           title="从这里建分支（复制到新对话）"
         >
           <GitBranch size={13} strokeWidth={2} />
-        </IconButton>
-        <IconButton
-          size="xs"
-          onClick={onDelete}
-          disabled={!onDelete}
-          label="删除"
-        >
-          <Trash2 size={13} strokeWidth={2} />
         </IconButton>
       </div>
 

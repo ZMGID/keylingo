@@ -1,4 +1,5 @@
-import { isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { isValidElement, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Code2, ExternalLink, Eye, Loader2 } from 'lucide-react'
 import type { Components, UrlTransform } from 'streamdown'
 import { defaultRemarkPlugins, Streamdown } from 'streamdown'
@@ -14,6 +15,7 @@ import type { ChatToolArtifact } from './types'
 import { artifactDataUrl } from './artifacts'
 import { loadArtifactDataUrl } from './attachmentPreview'
 import { remarkCitations, type CitationView } from './citations'
+import { citationPopoverPosition, type CitationPopoverPosition } from './citationPopover'
 import { isWebCitation } from './webSearchCitations'
 import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
@@ -857,28 +859,81 @@ function LinkAnchor({
  *  联网来源显示「标题 · 域名 · 日期 · 摘要」，标题可点直接在浏览器打开。 */
 function CitationChip({ n, hit }: { n: number; hit?: CitationView }) {
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLSpanElement>(null)
+  const [popoverPosition, setPopoverPosition] = useState<CitationPopoverPosition | null>(null)
+  const triggerRef = useRef<HTMLSpanElement>(null)
+  const popoverRef = useRef<HTMLSpanElement>(null)
+  const web = isWebCitation(hit) ? hit : null
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPopoverPosition(null)
+      return
+    }
+
+    const place = () => {
+      const trigger = triggerRef.current
+      const popover = popoverRef.current
+      if (!trigger || !popover) return
+      setPopoverPosition(citationPopoverPosition(
+        trigger.getBoundingClientRect(),
+        popover.getBoundingClientRect(),
+        { width: window.innerWidth, height: window.innerHeight },
+      ))
+    }
+
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, hit])
+
   useEffect(() => {
     if (!open) return
     const onDown = (event: MouseEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target) || popoverRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
   }, [open])
-  const web = isWebCitation(hit) ? hit : null
+
   return (
-    <span ref={ref} className="relative inline-block align-baseline">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="mx-0.5 rounded bg-indigo-500/15 px-1 align-baseline text-[0.82em] font-medium text-indigo-500 transition hover:bg-indigo-500/25"
-        aria-label={`来源 ${n}`}
-      >
-        [{n}]
-      </button>
-      {open && (
-        <span className="absolute left-0 top-full z-30 mt-1 block w-80 max-w-[80vw] rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] p-2.5 text-left text-xs shadow-lg">
+    <>
+      <span ref={triggerRef} className="inline-block align-baseline">
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="mx-0.5 rounded bg-indigo-500/15 px-1 align-baseline text-[0.82em] font-medium text-indigo-500 transition hover:bg-indigo-500/25"
+          aria-label={`来源 ${n}`}
+          aria-expanded={open}
+        >
+          [{n}]
+        </button>
+      </span>
+      {open && createPortal(
+        <span
+          ref={popoverRef}
+          role="dialog"
+          aria-label={`来源 ${n}`}
+          className="fixed z-[200] block max-h-[calc(100vh-1rem)] w-80 max-w-[calc(100vw-1rem)] overflow-auto rounded-lg border border-[var(--border-input)] bg-[var(--bg-input)] p-2.5 text-left text-xs shadow-lg"
+          style={{
+            left: popoverPosition?.left ?? 0,
+            top: popoverPosition?.top ?? 0,
+            visibility: popoverPosition ? 'visible' : 'hidden',
+          }}
+          data-tauri-drag-region="false"
+        >
           {web ? (
             <>
               <button
@@ -919,9 +974,10 @@ function CitationChip({ n, hit }: { n: number; hit?: CitationView }) {
           ) : (
             <span className="text-neutral-400">未找到对应来源片段</span>
           )}
-        </span>
+        </span>,
+        document.body,
       )}
-    </span>
+    </>
   )
 }
 
