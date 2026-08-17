@@ -513,7 +513,7 @@ export type ExternalCliAgentConfig = {
   customModels?: Array<{ id: string; label: string }>
   /** 该 CLI 的第三方供应商（中转站）列表。 */
   providers?: ExternalCliProvider[]
-  /** 当前生效的供应商 id；空 = 用 CLI 自己的配置。 */
+  /** 当前默认供应商 id；Pi / OpenCode / dsh 的 providers 会全部并存。空 = 用 CLI 自己的默认配置。 */
   currentProvider?: string
 }
 
@@ -529,6 +529,8 @@ export type ExternalCliAgentConfig = {
 export type ExternalCliProvider = {
   id: string
   name: string
+  /** Disabled providers stay saved but are not materialized or injected. */
+  disabled?: boolean
   remark?: string
   env?: Array<{ key: string; value: string }>
   configToml?: string

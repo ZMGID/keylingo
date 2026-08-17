@@ -320,8 +320,12 @@ pub(crate) fn native_provider_summaries(agent_id: &str) -> Vec<NativeProviderSum
     let text = dsh_settings_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
-    parse_dsh_native_provider_summaries(&text)
-        .unwrap_or_else(|_| vec![official_deepseek_summary(DSH_OFFICIAL_DEFAULT_MODEL_COUNT, true)])
+    parse_dsh_native_provider_summaries(&text).unwrap_or_else(|_| {
+        vec![official_deepseek_summary(
+            DSH_OFFICIAL_DEFAULT_MODEL_COUNT,
+            true,
+        )]
+    })
 }
 
 fn official_deepseek_summary(model_count: usize, is_default: bool) -> NativeProviderSummary {
@@ -353,7 +357,10 @@ fn parse_dsh_native_provider_summaries(text: &str) -> Result<Vec<NativeProviderS
         .as_ref()
         .and_then(|section| section.models.as_ref())
     {
-        Some(entries) => entries.iter().filter(|model| model.parts().is_some()).count(),
+        Some(entries) => entries
+            .iter()
+            .filter(|model| model.parts().is_some())
+            .count(),
         None => DSH_OFFICIAL_DEFAULT_MODEL_COUNT,
     };
     let mut providers = vec![official_deepseek_summary(
@@ -365,26 +372,28 @@ fn parse_dsh_native_provider_summaries(text: &str) -> Result<Vec<NativeProviderS
         .map(|section| section.providers.into_iter().collect())
         .unwrap_or_default();
     extras.sort_by(|(a, _), (b, _)| a.cmp(b));
-    providers.extend(extras.into_iter().map(|(id, config)| NativeProviderSummary {
-        is_default: default_provider == id.as_str(),
-        name: config
-            .display_name
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| id.clone()),
-        base_url: config
-            .base_url
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty()),
-        api: config
-            .api
-            .map(|api| api.trim().to_string())
-            .filter(|api| !api.is_empty()),
-        model_count: config
-            .models
-            .iter()
-            .filter(|model| model.parts().is_some())
-            .count(),
-        id,
+    providers.extend(extras.into_iter().map(|(id, config)| {
+        NativeProviderSummary {
+            is_default: default_provider == id.as_str(),
+            name: config
+                .display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| id.clone()),
+            base_url: config
+                .base_url
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
+            api: config
+                .api
+                .map(|api| api.trim().to_string())
+                .filter(|api| !api.is_empty()),
+            model_count: config
+                .models
+                .iter()
+                .filter(|model| model.parts().is_some())
+                .count(),
+            id,
+        }
     }));
     Ok(providers)
 }
@@ -406,9 +415,7 @@ fn read_dsh_settings_models() -> Result<ProbeModelsOutput, String> {
     parse_dsh_settings_models(&text)
 }
 
-const DSH_PI_EFFORT_ORDER: &[&str] = &[
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+const DSH_PI_EFFORT_ORDER: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 fn dsh_effort_option(id: &str) -> RuntimeModelOption {
     RuntimeModelOption {
@@ -479,9 +486,9 @@ fn dsh_reasoning_options_from_json(
     match value {
         None => None,
         Some(serde_json::Value::Bool(false)) => Some(Vec::new()),
-        Some(serde_json::Value::Object(map)) => {
-            Some(dsh_reasoning_options_from_keys(map.keys().map(String::as_str)))
-        }
+        Some(serde_json::Value::Object(map)) => Some(dsh_reasoning_options_from_keys(
+            map.keys().map(String::as_str),
+        )),
         _ => Some(Vec::new()),
     }
 }
@@ -537,8 +544,7 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
                 push_dsh_model(&mut models, &mut seen, &wire_id, &label, window);
                 reasoning_by_model.insert(
                     wire_id,
-                    dsh_reasoning_options_from_yaml(entry.reasoning_efforts())
-                        .unwrap_or_default(),
+                    dsh_reasoning_options_from_yaml(entry.reasoning_efforts()).unwrap_or_default(),
                 );
             }
         }
@@ -569,12 +575,24 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
                 .and_then(|section| section.reasoning_effort.clone())
         });
 
-    if let Some(provider) = crate::external_agents::overrides::active_provider("dsh") {
-        merge_kivio_dsh_provider(&mut models, &mut seen, &mut reasoning_by_model, &provider)?;
-        let route = provider.native_provider_id.trim();
-        let model = provider.default_model.trim();
-        if !route.is_empty() && !model.is_empty() {
-            current_model = Some(format!("{route}:{model}"));
+    if let Some(config) = crate::external_agents::overrides::agent_config("dsh") {
+        for provider in config
+            .providers
+            .iter()
+            .filter(|provider| !provider.disabled)
+        {
+            merge_kivio_dsh_provider(&mut models, &mut seen, &mut reasoning_by_model, provider)?;
+        }
+        if let Some(provider) = config
+            .providers
+            .iter()
+            .find(|provider| provider.id == config.current_provider && !provider.disabled)
+        {
+            let route = provider.native_provider_id.trim();
+            let model = provider.default_model.trim();
+            if !route.is_empty() && !model.is_empty() {
+                current_model = Some(format!("{route}:{model}"));
+            }
         }
     }
 

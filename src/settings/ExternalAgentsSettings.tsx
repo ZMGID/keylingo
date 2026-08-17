@@ -332,7 +332,9 @@ function AgentDetail({
 
   const [probedModels, setProbedModels] = useState<DetectedExternalAgent['models']>([])
   const [showPlugins, setShowPlugins] = useState(false)
-  useEffect(() => setShowPlugins(false), [agent.id])
+  useEffect(() => {
+    setShowPlugins(false)
+  }, [agent.id])
   useEffect(() => {
     if (!agent.available) {
       setProbedModels([])
@@ -488,8 +490,6 @@ function AgentDetail({
         </button>
       )}
 
-      <div className="kv-cli-card">
-        <Row label={t.externalAgentsEnable} desc={t.externalAgentsEnableDesc}>
       {agent.id === 'pi' && agent.available && (
         <button
           type="button"
@@ -532,6 +532,8 @@ function AgentDetail({
         </button>
       )}
 
+      <div className="kv-cli-card">
+        <Row label={t.externalAgentsEnable} desc={t.externalAgentsEnableDesc}>
           <Toggle checked={!disabled} onChange={(on) => onPatch({ disabled: !on })} />
         </Row>
         <Row
@@ -732,6 +734,7 @@ function NativeProviderRow({
   lang,
   provider,
   current,
+  coexisting,
   onUseCliConfig,
   onEdit,
   onDelete,
@@ -739,6 +742,7 @@ function NativeProviderRow({
   lang: Lang
   provider: NativeProviderSummary
   current: string
+  coexisting: boolean
   onUseCliConfig: () => void
   onEdit?: () => void
   onDelete?: () => void
@@ -762,7 +766,24 @@ function NativeProviderRow({
         <p className="kv-row-desc truncate">{subtitle}</p>
       </div>
       <div className="kv-row-control">
-        {inUse ? (
+        {coexisting ? (
+          <>
+            <span className={`kv-tag ${inUse ? 'ok' : ''}`}>
+              {inUse
+                ? t.externalAgentsProviderDefault
+                : provider.isDefault
+                  ? t.externalAgentsNativeProviderDefault
+                  : official
+                    ? t.externalAgentsDshOfficialProvider
+                    : t.externalAgentsNativeProviderBadge}
+            </span>
+            {current && provider.isDefault && (
+              <Button size="sm" onClick={onUseCliConfig}>
+                {t.externalAgentsProviderSetDefault}
+              </Button>
+            )}
+          </>
+        ) : inUse ? (
           <span className="kv-tag ok">{t.externalAgentsProviderInUse}</span>
         ) : current && provider.isDefault ? (
           <Button size="sm" onClick={onUseCliConfig}>
@@ -861,25 +882,39 @@ function ProviderSection({
   const hideGenericLocal = agentId === 'dsh'
 
   const save = (provider: ExternalCliProvider) => {
-    const exists = providers.some((p) => p.id === provider.id)
-    const adoptInUse = agentId === 'dsh'
-      && !current
-      && !exists
-      && Boolean(provider.nativeProviderId)
-      && nativeProviders.some((native) => native.id === provider.nativeProviderId && native.isDefault)
+    const existing = providers.find((item) => item.id === provider.id)
+    const saved = {
+      ...provider,
+      disabled: provider.disabled ?? existing?.disabled ?? false,
+    }
+    const adoptInUse =
+      agentId === 'dsh' &&
+      !current &&
+      !existing &&
+      !saved.disabled &&
+      Boolean(saved.nativeProviderId) &&
+      nativeProviders.some((native) => native.id === saved.nativeProviderId && native.isDefault)
     onPatch({
-      providers: exists
-        ? providers.map((p) => (p.id === provider.id ? provider : p))
-        : [...providers, provider],
-      ...(adoptInUse ? { currentProvider: provider.id } : {}),
+      providers: existing
+        ? providers.map((item) => (item.id === saved.id ? saved : item))
+        : [...providers, saved],
+      ...(adoptInUse ? { currentProvider: saved.id } : {}),
     })
     setEditing(undefined)
   }
 
+  const setProviderEnabled = (provider: ExternalCliProvider, enabled: boolean) => {
+    onPatch({
+      providers: providers.map((item) =>
+        item.id === provider.id ? { ...item, disabled: !enabled } : item,
+      ),
+      ...(!enabled && current === provider.id ? { currentProvider: '' } : {}),
+    })
+  }
   const remove = (provider: ExternalCliProvider) => {
     const deletesNativeFile = Boolean(
-      provider.nativeProviderId
-      && nativeProviders.some((native) => native.id === provider.nativeProviderId),
+      provider.nativeProviderId &&
+      nativeProviders.some((native) => native.id === provider.nativeProviderId),
     )
     const confirmText = deletesNativeFile
       ? t.externalAgentsDshNativeDeleteConfirm
@@ -896,7 +931,8 @@ function ProviderSection({
       provider.name,
     )
     if (agentId === 'dsh' && provider.nativeProviderId) {
-      void chatApi.dshNativeProviderDelete(provider.nativeProviderId)
+      void chatApi
+        .dshNativeProviderDelete(provider.nativeProviderId)
         .then(() => reloadAgents(true))
         .catch(() => {})
     }
@@ -912,7 +948,8 @@ function ProviderSection({
   }
 
   const removeNative = async (native: NativeProviderSummary) => {
-    if (!window.confirm(t.externalAgentsDshNativeDeleteConfirm.replace('{name}', native.name))) return
+    if (!window.confirm(t.externalAgentsDshNativeDeleteConfirm.replace('{name}', native.name)))
+      return
     try {
       await chatApi.dshNativeProviderDelete(native.id)
     } catch (err) {
@@ -939,6 +976,7 @@ function ProviderSection({
     // 保留 cc-switch 的原 id：同一条再导一次是更新，不会堆出重复项。
     const merged = [...providers]
     for (const item of items) {
+      const idx = merged.findIndex((provider) => provider.id === item.id)
       const next: ExternalCliProvider = {
         id: item.id,
         name: item.name,
@@ -946,8 +984,8 @@ function ProviderSection({
         env: item.env,
         configToml: item.configToml,
         authJson: item.authJson,
+        disabled: idx >= 0 ? merged[idx].disabled : false,
       }
-      const idx = merged.findIndex((p) => p.id === item.id)
       if (idx >= 0) merged[idx] = next
       else merged.push(next)
     }
@@ -955,8 +993,10 @@ function ProviderSection({
     setImporting(false)
   }
 
-  // opencode / pi / grok / kimi 写原生配置；dsh 写 Kivio 私有 profile；claude / codex 用 Kivio 私有文件。
-  const nativeOnDisk = agentId === 'opencode' || agentId === 'pi' || agentId === 'grok' || agentId === 'kimi'
+  // Pi / OpenCode 的全部供应商写进原生配置，dsh 的全部供应商挂进 Kivio profile；currentProvider 只选默认项。
+  const providersCoexist = agentId === 'pi' || agentId === 'opencode' || agentId === 'dsh'
+  const nativeOnDisk =
+    agentId === 'opencode' || agentId === 'pi' || agentId === 'grok' || agentId === 'kimi'
   const envOnly = agentId !== 'claude' && agentId !== 'codex' && agentId !== 'dsh' && !nativeOnDisk
 
   return (
@@ -990,31 +1030,43 @@ function ProviderSection({
                 </div>
                 <div className="kv-row-control">
                   {!current ? (
-                    <span className="kv-tag ok">{t.externalAgentsProviderInUse}</span>
+                    <span className="kv-tag ok">
+                      {providersCoexist
+                        ? t.externalAgentsProviderDefault
+                        : t.externalAgentsProviderInUse}
+                    </span>
                   ) : (
                     <Button size="sm" onClick={() => onPatch({ currentProvider: '' })}>
-                      {t.externalAgentsProviderActivate}
+                      {providersCoexist
+                        ? t.externalAgentsProviderSetDefault
+                        : t.externalAgentsProviderActivate}
                     </Button>
                   )}
                   <span className="kv-cli-provider-spacer" />
                 </div>
               </div>
             )}
-            {hideGenericLocal && listedNatives.map((provider) => (
-              <NativeProviderRow
-                key={`native-${provider.id}`}
-                lang={lang}
-                provider={provider}
-                current={current}
-                onUseCliConfig={() => onPatch({ currentProvider: '' })}
-                onEdit={provider.id === DSH_OFFICIAL_PROVIDER_ID
-                  ? undefined
-                  : () => void editNative(provider)}
-                onDelete={provider.id === DSH_OFFICIAL_PROVIDER_ID
-                  ? undefined
-                  : () => void removeNative(provider)}
-              />
-            ))}
+            {hideGenericLocal &&
+              listedNatives.map((provider) => (
+                <NativeProviderRow
+                  key={`native-${provider.id}`}
+                  lang={lang}
+                  provider={provider}
+                  current={current}
+                  coexisting={providersCoexist}
+                  onUseCliConfig={() => onPatch({ currentProvider: '' })}
+                  onEdit={
+                    provider.id === DSH_OFFICIAL_PROVIDER_ID
+                      ? undefined
+                      : () => void editNative(provider)
+                  }
+                  onDelete={
+                    provider.id === DSH_OFFICIAL_PROVIDER_ID
+                      ? undefined
+                      : () => void removeNative(provider)
+                  }
+                />
+              ))}
             {providers.map((provider) => (
               <div className="kv-row kv-cli-provider" key={provider.id}>
                 <span className="kv-cli-monogram">{monogram(provider.name)}</span>
@@ -1023,40 +1075,74 @@ function ProviderSection({
                   <p className="kv-row-desc truncate">{providerSubtitle(provider)}</p>
                 </div>
                 <div className="kv-row-control">
-                  {current === provider.id ? (
+                  {providersCoexist ? (
+                    <>
+                      <span
+                        className={`kv-tag ${!provider.disabled && current === provider.id ? 'ok' : ''}`}
+                      >
+                        {provider.disabled
+                          ? t.externalAgentsDisabledGroup
+                          : current === provider.id
+                            ? t.externalAgentsProviderDefault
+                            : t.externalAgentsProviderCoexisting}
+                      </span>
+                      {!provider.disabled && current !== provider.id && (
+                        <Button size="sm" onClick={() => onPatch({ currentProvider: provider.id })}>
+                          {t.externalAgentsProviderSetDefault}
+                        </Button>
+                      )}
+                      <Toggle
+                        checked={!provider.disabled}
+                        onChange={(enabled) => setProviderEnabled(provider, enabled)}
+                        ariaLabel={`${provider.name} ${t.externalAgentsEnable}`}
+                      />
+                    </>
+                  ) : current === provider.id ? (
                     <span className="kv-tag ok">{t.externalAgentsProviderInUse}</span>
                   ) : (
                     <Button size="sm" onClick={() => onPatch({ currentProvider: provider.id })}>
                       {t.externalAgentsProviderActivate}
                     </Button>
                   )}
-                  <IconButton size="sm" label={t.externalAgentsProviderEdit} onClick={() => setEditing(provider)}>
+                  <IconButton
+                    size="sm"
+                    label={t.externalAgentsProviderEdit}
+                    onClick={() => setEditing(provider)}
+                  >
                     <Pencil size={13} />
                   </IconButton>
-                  <IconButton size="sm" label={t.externalAgentsRemove} onClick={() => remove(provider)}>
+                  <IconButton
+                    size="sm"
+                    label={t.externalAgentsRemove}
+                    onClick={() => remove(provider)}
+                  >
                     <Trash2 size={13} />
                   </IconButton>
                 </div>
               </div>
             ))}
-            {!hideGenericLocal && listedNatives.map((provider) => (
-              <NativeProviderRow
-                key={`native-${provider.id}`}
-                lang={lang}
-                provider={provider}
-                current={current}
-                onUseCliConfig={() => onPatch({ currentProvider: '' })}
-              />
-            ))}
+            {!hideGenericLocal &&
+              listedNatives.map((provider) => (
+                <NativeProviderRow
+                  key={`native-${provider.id}`}
+                  lang={lang}
+                  provider={provider}
+                  current={current}
+                  coexisting={providersCoexist}
+                  onUseCliConfig={() => onPatch({ currentProvider: '' })}
+                />
+              ))}
           </>
         )}
       </div>
       <p className="kv-row-desc mt-2">
-        {nativeOnDisk
-          ? t.externalAgentsNativeScope
-          : envOnly
-            ? t.externalAgentsProviderEnvOnly
-            : t.externalAgentsProviderScope}
+        {providersCoexist
+          ? t.externalAgentsProviderCoexistScope
+          : nativeOnDisk
+            ? t.externalAgentsNativeScope
+            : envOnly
+              ? t.externalAgentsProviderEnvOnly
+              : t.externalAgentsProviderScope}
       </p>
 
       {editing !== undefined && (

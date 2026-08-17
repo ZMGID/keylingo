@@ -189,7 +189,13 @@ impl DshJsonRpcSession {
     ) -> Result<Self, String> {
         let _profile_boot_guard = DSH_PROFILE_BOOT_LOCK.lock().await;
         let route = resolve_model_route_for_turn(model)?;
-        if crate::external_agents::overrides::active_provider("dsh").is_none()
+        let managed_provider =
+            crate::external_agents::overrides::agent_config("dsh").is_some_and(|config| {
+                config.providers.iter().any(|provider| {
+                    !provider.disabled && provider.native_provider_id.trim() == route.provider
+                })
+            });
+        if !managed_provider
             && !crate::external_agents::dsh_plugins::credentials_ready_for_provider(
                 &route.provider,
                 Some(cwd),
@@ -629,12 +635,11 @@ impl DshJsonRpcSession {
                         started = true;
                     }
                     let mut mapped = Vec::new();
-                    if let Some(result) = map_session_event(
-                        event_type,
-                        data,
-                        &mut self.map_state,
-                        &mut |event| mapped.push(event),
-                    ) {
+                    if let Some(result) =
+                        map_session_event(event_type, data, &mut self.map_state, &mut |event| {
+                            mapped.push(event)
+                        })
+                    {
                         terminal = Some(result);
                     }
                     self.context_window = self.map_state.context_window;
@@ -730,7 +735,8 @@ impl DshJsonRpcSession {
         };
         let params = value.get("params").unwrap_or(&Value::Null);
         if matches!(method, "subagent.started" | "subagent.finished") {
-            if params.get("parentSessionId").and_then(Value::as_str) != Some(self.session_id.as_str())
+            if params.get("parentSessionId").and_then(Value::as_str)
+                != Some(self.session_id.as_str())
             {
                 return DshIdlePump::Quiet;
             }
@@ -756,12 +762,8 @@ impl DshJsonRpcSession {
         };
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
         let data = event.get("data").unwrap_or(&Value::Null);
-        let folded = fold_idle_parent_session(
-            event_type,
-            data,
-            &mut self.map_state,
-            &mut self.idle_wake,
-        );
+        let folded =
+            fold_idle_parent_session(event_type, data, &mut self.map_state, &mut self.idle_wake);
         self.context_window = self.map_state.context_window;
         match folded {
             IdleParentFold::Quiet => DshIdlePump::Quiet,
@@ -1183,8 +1185,7 @@ pub fn is_missing_session_error(err: &str) -> bool {
 /// has not registered yet. Transient: retry initialize. Permanent after retries:
 /// the route is missing and the user should see this error.
 fn is_adapter_not_registered(err: &str) -> bool {
-    err.to_ascii_lowercase()
-        .contains("no adapter registered")
+    err.to_ascii_lowercase().contains("no adapter registered")
 }
 
 fn resolve_model_route_for_turn(selected: Option<&str>) -> Result<ModelRoute, String> {
@@ -1791,9 +1792,7 @@ fn fold_child_session_event(
     if session_id.is_empty() {
         return None;
     }
-    let progress = child_progress
-        .entry(session_id.to_string())
-        .or_default();
+    let progress = child_progress.entry(session_id.to_string()).or_default();
     let mut force = false;
     match event_type {
         "tool/call" => {
@@ -1836,7 +1835,8 @@ fn fold_child_session_event(
             }
         }
         "assistant/message" => {
-            let text = content_blocks_text(data.get("message").and_then(|value| value.get("content")));
+            let text =
+                content_blocks_text(data.get("message").and_then(|value| value.get("content")));
             if text.is_empty() {
                 return None;
             }
@@ -2349,7 +2349,10 @@ mod tests {
     #[test]
     fn maps_compaction_summary_and_end_to_one_cli_compacted() {
         let events = map_events(&[
-            ("compaction/start", json!({ "compactionId": "c1", "turn": 2 })),
+            (
+                "compaction/start",
+                json!({ "compactionId": "c1", "turn": 2 }),
+            ),
             (
                 "compaction/summary",
                 json!({
@@ -2412,7 +2415,10 @@ mod tests {
     #[test]
     fn compaction_error_is_a_status_note_not_a_divider() {
         let events = map_events(&[
-            ("compaction/start", json!({ "compactionId": "c3", "turn": 1 })),
+            (
+                "compaction/start",
+                json!({ "compactionId": "c3", "turn": 1 }),
+            ),
             (
                 "compaction/end",
                 json!({
@@ -2644,15 +2650,13 @@ mod tests {
                     "web_fetch https://example.com".to_string()
                 ]
         ));
-        assert!(
-            fold_child_session_event(
-                "child-9",
-                "turn/end",
-                &json!({ "reason": { "kind": "completed" } }),
-                &mut progress,
-            )
-            .is_none()
-        );
+        assert!(fold_child_session_event(
+            "child-9",
+            "turn/end",
+            &json!({ "reason": { "kind": "completed" } }),
+            &mut progress,
+        )
+        .is_none());
     }
 
     #[test]
@@ -2773,7 +2777,10 @@ mod tests {
                 { "name": "" },
             ]
         }));
-        let names: Vec<&str> = commands.iter().map(|command| command.name.as_str()).collect();
+        let names: Vec<&str> = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
         assert_eq!(names, ["compact", "feedback", "goal"]);
         assert_eq!(
             commands

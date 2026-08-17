@@ -1175,13 +1175,15 @@ async fn reconnect_fresh(
 /// dsh 相反：model 是进程级 `initialize` 后创建 agent 时固定的，reasoning 是 profile patch，
 /// sandbox 是进程环境变量；三者都没有 session 级修改 RPC。任一变化都必须换进程，但 Kivio
 /// bridge 会用同一个 native session id 调 `agents.resume()`，所以历史上下文继续保留。
-fn dsh_provider_fingerprint_for(provider: Option<&crate::settings::ExternalCliProvider>) -> String {
+fn dsh_provider_fingerprint_for(
+    config: Option<&crate::settings::ExternalCliAgentConfig>,
+) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    match provider {
-        Some(provider) => serde_json::to_string(provider)
-            .unwrap_or_else(|_| provider.id.clone())
+    match config {
+        Some(config) => serde_json::to_string(&(&config.current_provider, &config.providers))
+            .unwrap_or_else(|_| config.current_provider.clone())
             .hash(&mut hasher),
         None => "cli-default".hash(&mut hasher),
     }
@@ -1189,8 +1191,8 @@ fn dsh_provider_fingerprint_for(provider: Option<&crate::settings::ExternalCliPr
 }
 
 fn dsh_provider_fingerprint() -> String {
-    let provider = crate::external_agents::overrides::active_provider("dsh");
-    dsh_provider_fingerprint_for(provider.as_ref())
+    let config = crate::external_agents::overrides::agent_config("dsh");
+    dsh_provider_fingerprint_for(config.as_ref())
 }
 
 fn launch_config_for_turn(
@@ -2576,12 +2578,11 @@ fn apply_unified_event(
                         None
                     };
                     if let Some((name, input, result)) = claude_todo {
-                        if let Some(next) = crate::external_agents::claude_todo::apply_claude_todo_tool(
-                            todo_state,
-                            &name,
-                            &input,
-                            &result,
-                        ) {
+                        if let Some(next) =
+                            crate::external_agents::claude_todo::apply_claude_todo_tool(
+                                todo_state, &name, &input, &result,
+                            )
+                        {
                             *todo_state = next;
                             publish_todo_state(app, run_id, record, todo_state);
                             persist_claude_todo(app, conversation_id, name, input, result);
@@ -3976,23 +3977,37 @@ mod tests {
                 Some("minimal")
             )
         );
-        let provider_a = crate::settings::ExternalCliProvider {
-            id: "provider-a".to_string(),
-            config_json: "{\"baseURL\":\"https://a.example/v1\"}".to_string(),
+        let config_a = crate::settings::ExternalCliAgentConfig {
+            providers: vec![crate::settings::ExternalCliProvider {
+                id: "provider-a".to_string(),
+                config_json: "{\"baseURL\":\"https://a.example/v1\"}".to_string(),
+                ..Default::default()
+            }],
+            current_provider: "provider-a".to_string(),
             ..Default::default()
         };
-        let provider_b = crate::settings::ExternalCliProvider {
-            id: "provider-b".to_string(),
-            config_json: "{\"baseURL\":\"https://b.example/v1\"}".to_string(),
+        let config_b = crate::settings::ExternalCliAgentConfig {
+            providers: vec![crate::settings::ExternalCliProvider {
+                id: "provider-b".to_string(),
+                config_json: "{\"baseURL\":\"https://b.example/v1\"}".to_string(),
+                ..Default::default()
+            }],
+            current_provider: "provider-b".to_string(),
             ..Default::default()
         };
         assert_ne!(
-            dsh_provider_fingerprint_for(Some(&provider_a)),
-            dsh_provider_fingerprint_for(Some(&provider_b))
+            dsh_provider_fingerprint_for(Some(&config_a)),
+            dsh_provider_fingerprint_for(Some(&config_b))
+        );
+        let mut config_disabled = config_a.clone();
+        config_disabled.providers[0].disabled = true;
+        assert_ne!(
+            dsh_provider_fingerprint_for(Some(&config_a)),
+            dsh_provider_fingerprint_for(Some(&config_disabled))
         );
         assert_ne!(
             dsh_provider_fingerprint_for(None),
-            dsh_provider_fingerprint_for(Some(&provider_a))
+            dsh_provider_fingerprint_for(Some(&config_a))
         );
         for protocol in [
             StreamFormat::AcpJsonRpc,

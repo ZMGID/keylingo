@@ -690,7 +690,8 @@ pub struct ExternalCliAgentConfig {
     pub custom_models: Vec<CliCustomModel>,
     /// 该 CLI 的第三方供应商（中转站）列表。每个 CLI 各自一份，同 ccgui 的分桶方式。
     pub providers: Vec<ExternalCliProvider>,
-    /// 当前生效的供应商 id；空 = 不托管，用 CLI 自己的配置（默认）。
+    /// 当前默认供应商 id；空 = 使用 CLI 自己的默认配置。
+    /// Pi / OpenCode / dsh 的 providers 会全部并存，此字段只决定未显式选模型时的默认项。
     pub current_provider: String,
 }
 
@@ -709,6 +710,8 @@ pub struct ExternalCliProvider {
     /// 从 cc-switch 导入时**保留原 id**，这样二次导入走更新而不是新增一条重复的。
     pub id: String,
     pub name: String,
+    /// 仅对支持并存的 CLI 生效；false = 启用（兼容旧配置），true = 不物化、不注入。
+    pub disabled: bool,
     pub remark: String,
     pub env: Vec<CliEnvVar>,
     /// codex：私有 CODEX_HOME 里 config.toml 的全文；grok：写入原生 `~/.grok/config.toml` 的片段（至少含 models / model）。
@@ -2680,7 +2683,7 @@ fn sanitize_external_cli_agents(
         if !cfg
             .providers
             .iter()
-            .any(|provider| provider.id == cfg.current_provider)
+            .any(|provider| provider.id == cfg.current_provider && !provider.disabled)
         {
             cfg.current_provider = String::new();
         }

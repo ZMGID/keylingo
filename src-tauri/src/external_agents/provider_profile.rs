@@ -192,8 +192,38 @@ fn claude_settings_path_for(provider_id: &str) -> Option<PathBuf> {
     Some(profiles_dir()?.join(format!("claude-{}.json", sanitize_segment(provider_id)?)))
 }
 
-/// 要注入这个 CLI 子进程的供应商环境变量。没选供应商 = 空表（保持原样，不托管）。
+fn dsh_provider_env(config: &ExternalCliAgentConfig) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for provider in config
+        .providers
+        .iter()
+        .filter(|provider| !provider.disabled)
+    {
+        for pair in &provider.env {
+            env.insert(pair.key.clone(), pair.value.clone());
+        }
+    }
+    // 重名环境变量无法真正并存；让默认供应商保持旧行为并取得最终优先级。
+    if let Some(provider) = config
+        .providers
+        .iter()
+        .find(|provider| provider.id == config.current_provider && !provider.disabled)
+    {
+        for pair in &provider.env {
+            env.insert(pair.key.clone(), pair.value.clone());
+        }
+    }
+    env
+}
+
+/// 要注入这个 CLI 子进程的供应商环境变量。dsh 合并全部并存供应商，其余 CLI 只用默认项。
 pub fn provider_env(agent_id: &str) -> HashMap<String, String> {
+    if agent_id == "dsh" {
+        return super::overrides::agent_config(agent_id)
+            .map(|config| dsh_provider_env(&config))
+            .unwrap_or_default();
+    }
+
     let Some(provider) = super::overrides::active_provider(agent_id) else {
         return HashMap::new();
     };
@@ -251,7 +281,12 @@ pub fn materialize(agent_id: &str) -> Result<(), String> {
     }
     if agent_id == "dsh" {
         let config = super::overrides::agent_config(agent_id).unwrap_or_default();
-        return crate::external_agents::dsh_plugins::sync_kivio_model_capabilities(&config.providers);
+        let providers: Vec<_> = config
+            .providers
+            .into_iter()
+            .filter(|provider| !provider.disabled)
+            .collect();
+        return crate::external_agents::dsh_plugins::sync_kivio_model_capabilities(&providers);
     }
     let Some(provider) = super::overrides::active_provider(agent_id) else {
         return Ok(());
@@ -668,8 +703,8 @@ fn materialize_native_at(
             .iter()
             .find(|provider| provider.id == config.current_provider)
             .ok_or_else(|| format!("当前供应商 {} 不存在", config.current_provider))?;
-        if provider.config_json.trim().is_empty() {
-            // 升级前的 env-only 条目不参与原生默认值接管，但仍是合法的当前供应商。
+        if provider.disabled || provider.config_json.trim().is_empty() {
+            // 停用项和升级前的 env-only 条目都不参与原生默认值接管。
             None
         } else {
             Some(
@@ -736,6 +771,8 @@ fn materialize_native_at(
                 .settings
                 .as_ref()
                 .ok_or_else(|| "Pi settings.json 路径缺失".to_string())?;
+            let _settings_lock =
+                crate::external_agents::pi_extensions::lock_settings_file(settings_path)?;
             let mut settings = read_object_file(settings_path, false, false, "Pi settings.json")?;
             let before_settings = settings.clone();
             apply_default_fields(
@@ -771,8 +808,6 @@ fn migrate_shadowed_opencode_configs(
     previous_ids: &HashSet<String>,
     entries: &[NativeProviderEntry],
 ) -> Result<(), String> {
-            let _settings_lock =
-                crate::external_agents::pi_extensions::lock_settings_file(settings_path)?;
     for path in &paths.alternate_configs {
         let root = read_object_file(path, true, false, "OpenCode shadowed config")?;
         ensure_provider_id_available(&root, "provider", previous_ids, entries)?;
@@ -801,7 +836,7 @@ fn parse_native_entries(
 ) -> Result<Vec<NativeProviderEntry>, String> {
     let mut entries = Vec::new();
     let mut native_ids = HashSet::new();
-    for provider in providers {
+    for provider in providers.iter().filter(|provider| !provider.disabled) {
         // 兼容升级前创建的 env-only 条目；编辑并保存后才变成原生配置。
         if provider.config_json.trim().is_empty() {
             continue;
@@ -1639,6 +1674,44 @@ mod tests {
     }
 
     #[test]
+    fn dsh_env_includes_all_providers_and_default_wins_conflicts() {
+        let make = |id: &str, unique_key: &str, shared_value: &str| ExternalCliProvider {
+            id: id.to_string(),
+            env: vec![
+                crate::settings::CliEnvVar {
+                    key: unique_key.to_string(),
+                    value: format!("{id}-key"),
+                },
+                crate::settings::CliEnvVar {
+                    key: "SHARED_KEY".to_string(),
+                    value: shared_value.to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut disabled = make("disabled", "DISABLED_KEY", "disabled");
+        disabled.disabled = true;
+        let config = ExternalCliAgentConfig {
+            providers: vec![
+                make("first", "FIRST_KEY", "first"),
+                make("second", "SECOND_KEY", "second"),
+                disabled,
+            ],
+            current_provider: "second".to_string(),
+            ..Default::default()
+        };
+
+        let env = dsh_provider_env(&config);
+        assert_eq!(env.get("FIRST_KEY").map(String::as_str), Some("first-key"));
+        assert_eq!(
+            env.get("SECOND_KEY").map(String::as_str),
+            Some("second-key")
+        );
+        assert!(env.get("DISABLED_KEY").is_none());
+        assert_eq!(env.get("SHARED_KEY").map(String::as_str), Some("second"));
+    }
+
+    #[test]
     fn sanitize_rejects_path_escapes() {
         assert_eq!(
             sanitize_segment("loki-claude").as_deref(),
@@ -2033,6 +2106,13 @@ mod tests {
         assert!(models["providers"]["user"].is_object());
         assert!(models["providers"]["first"].is_object());
         assert!(models["providers"]["second"].is_object());
+
+        config.providers[0].disabled = true;
+        materialize_native_at("pi", &config, &paths).unwrap();
+        let filtered: Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.config).unwrap()).unwrap();
+        assert!(filtered["providers"].get("first").is_none());
+        assert!(filtered["providers"]["second"].is_object());
         let _ = std::fs::remove_dir_all(root);
     }
 
