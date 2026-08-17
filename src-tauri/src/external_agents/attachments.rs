@@ -2,7 +2,7 @@
 //!
 //! 设计（调研 Paseo `getpaseo/paseo` 得出，见任务 07-19 research/）：
 //! - **图片**：支持原生图片块的协议（Claude base64 / ACP image / Codex localImage）直接注入；
-//!   不支持的协议（pi/kimi）或超出 mime 白名单的图片，降级为在 prompt 文本里写出绝对路径。
+//!   不支持的协议（kimi）或超出 mime/大小限制的图片，降级为在 prompt 文本里写出绝对路径。
 //! - **文件**：所有协议一律渲染成「文件名/路径/MIME/大小」文本块（对齐 Paseo `uploaded_file`），
 //!   不 inline 内容——CLI 用自己的 read 工具读该路径（附件目录会加进 allowed-dir）。
 
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose, Engine as _};
 
+const MAX_NATIVE_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
 /// 一张图片编码后的原生块载荷（各协议 adapter 再包成自己的形状）。
 #[derive(Clone)]
 pub struct ImageBlock {
@@ -19,19 +20,20 @@ pub struct ImageBlock {
     pub path: PathBuf,
 }
 
-/// 按扩展名推断图片 MIME（与 GUI 的 `image_mime_for_path` 一致）。
-pub fn image_mime_for_path(path: &Path) -> &'static str {
+/// 按扩展名推断图片 MIME。未知扩展名必须降级，不能把任意字节伪装成 PNG。
+pub fn image_mime_for_path(path: &Path) -> Option<&'static str> {
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => "image/png",
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
     }
 }
 
@@ -69,8 +71,18 @@ pub fn load_image_blocks(paths: &[PathBuf], whitelist: &[&str]) -> (Vec<ImageBlo
     let mut native = Vec::new();
     let mut degraded = Vec::new();
     for path in paths {
-        let mime = image_mime_for_path(path);
+        let Some(mime) = image_mime_for_path(path) else {
+            degraded.push(path.clone());
+            continue;
+        };
         if !mime_allowed(mime, whitelist) {
+            degraded.push(path.clone());
+            continue;
+        }
+        if std::fs::metadata(path)
+            .map(|metadata| metadata.len() > MAX_NATIVE_IMAGE_BYTES)
+            .unwrap_or(false)
+        {
             degraded.push(path.clone());
             continue;
         }
@@ -162,10 +174,10 @@ mod tests {
 
     #[test]
     fn mime_for_path_covers_image_extensions() {
-        assert_eq!(image_mime_for_path(Path::new("a.png")), "image/png");
-        assert_eq!(image_mime_for_path(Path::new("a.JPG")), "image/jpeg");
-        assert_eq!(image_mime_for_path(Path::new("a.webp")), "image/webp");
-        assert_eq!(image_mime_for_path(Path::new("a.bin")), "image/png");
+        assert_eq!(image_mime_for_path(Path::new("a.png")), Some("image/png"));
+        assert_eq!(image_mime_for_path(Path::new("a.JPG")), Some("image/jpeg"));
+        assert_eq!(image_mime_for_path(Path::new("a.webp")), Some("image/webp"));
+        assert_eq!(image_mime_for_path(Path::new("a.bin")), None);
     }
 
     #[test]
@@ -203,6 +215,20 @@ mod tests {
         );
         assert!(native.is_empty());
         assert_eq!(degraded.len(), 1);
+    }
+
+    #[test]
+    fn oversized_native_image_degrades_without_base64_allocation() {
+        let dir = std::env::temp_dir().join(format!("kivio-ext-att-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("large.png");
+        let file = std::fs::File::create(&path).expect("create image");
+        file.set_len(MAX_NATIVE_IMAGE_BYTES + 1)
+            .expect("set sparse length");
+        let (native, degraded) = load_image_blocks(std::slice::from_ref(&path), &["image/png"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(native.is_empty());
+        assert_eq!(degraded, vec![path]);
     }
 
     #[test]

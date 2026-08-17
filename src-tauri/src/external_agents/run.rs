@@ -26,7 +26,6 @@ use crate::external_agents::prompt::{
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::session::acp::AcpMcpServer;
 use crate::external_agents::session::live::LaunchConfig;
-use crate::external_agents::session::pi_rpc::run_pi_rpc_session;
 use crate::external_agents::session::{
     persist_delivered_session, resolve_agent_resume_context, stable_prompt_hash,
 };
@@ -343,15 +342,15 @@ pub async fn run_external_cli_reply(
     let _protocol_guard =
         crate::chat::protocol::RegisteredRunGuard::new(app, &run_id, conversation.revision);
 
-    // Phase 2 / B1: claude、codex app-server、ACP 家族与 dsh SDK JSON-RPC 都通过
-    // live-session 注册表把进程跨轮保活。只剩 `PiRpc` 每轮起一个新子进程（见下面
-    // `_ =>` 分支的注释）。
+    // All rich external protocols, including Pi RPC, use the live-session registry so one child
+    // process serves multiple turns for the same Kivio conversation.
     let persistent = matches!(
         def.stream_format,
         StreamFormat::ClaudeStreamJson
             | StreamFormat::CodexAppServer
             | StreamFormat::AcpJsonRpc
             | StreamFormat::DshJsonRpc
+            | StreamFormat::PiRpc
     );
     let mut spawned_opt = if persistent {
         None
@@ -503,17 +502,13 @@ pub async fn run_external_cli_reply(
         )
         .await
     } else {
-        // 常驻改造（B1）之后，非常驻路径**只剩 `PiRpc`** —— 上面的 `persistent` 谓词把
-        // claude / codex / ACP 全收走了，而 `StreamFormat` 一共就这四个变体。此前这里还留着
-        // `CodexAppServer` / `AcpJsonRpc` / `_` 三条臂（连带 `run_acp_session` 与
-        // `run_codex_app_server_session` 两个一次性驱动，共约 470 行），全部不可达 ——
-        // 那正是 rmcp 那次重构刚在 MCP 上消灭掉的「同一个协议两份实现」。
+        // Defensive fallback for any future protocol intentionally left outside the live registry.
         debug_assert_eq!(def.stream_format, StreamFormat::PiRpc);
         let spawned = spawned_opt
             .as_mut()
             .expect("non-persistent path spawns a child");
         let model = conversation.agent_runtime.external_model.as_deref();
-        run_pi_rpc_session(
+        crate::external_agents::session::pi_rpc::run_pi_rpc_session(
             &mut spawned.child,
             &composed.full_prompt,
             model,
@@ -643,11 +638,16 @@ pub async fn run_external_cli_reply(
         }
     }
 
+    let actual_native_session_id = matches!(def.stream_format, StreamFormat::PiRpc)
+        .then(|| crate::external_agents::session::load_live_handle(app, &conversation_id))
+        .flatten()
+        .map(|handle| handle.native_id);
     persist_delivered_session(
         app,
         &conversation_id,
         def.id,
         &resume_ctx,
+        actual_native_session_id.as_deref(),
         // 哈希只覆盖**会话级常量**（系统提示 + Memory + cwd 提示）。skill 正文是 per-turn 的，
         // 不进哈希——否则换 skill 会被当成「instructions 变了」而重发一遍会话级指令。
         &daemon_instructions,
@@ -1217,6 +1217,18 @@ fn launch_config_for_turn(
             instructions: None,
         };
     }
+    if matches!(protocol, StreamFormat::PiRpc) {
+        return LaunchConfig {
+            // Pi receives model/thinking as process launch flags. Relaunch with the same native
+            // session id when either changes so the live process matches the UI selection.
+            flags: format!(
+                "{}|{}",
+                model.unwrap_or_default(),
+                reasoning.unwrap_or_default()
+            ),
+            instructions: None,
+        };
+    }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return LaunchConfig::default();
     }
@@ -1256,7 +1268,9 @@ fn persistent_turn_prompt<'a>(
     latest_user_message: &'a str,
 ) -> &'a str {
     match protocol {
-        StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc => composed_prompt,
+        StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc | StreamFormat::PiRpc => {
+            composed_prompt
+        }
         _ => latest_user_message,
     }
 }
@@ -1269,7 +1283,7 @@ fn is_cancellation(err: &str) -> bool {
 
 /// 这次失败之后，常驻会话能不能留在注册表里继续服下一轮。
 ///
-/// **claude / dsh**：协议级取消会一直读到当前活动完全回到 idle，流位置停在轮次边界、
+/// **claude / dsh / Pi**：协议级取消会一直读到当前活动完整回到 idle，流位置停在轮次边界、
 /// 进程与原生 session 完好，可以直接继续下一轮。
 ///
 /// **ACP / codex**：`session/cancel` / `turn/interrupt` 发出后立刻返回，reader 停在流中间
@@ -1281,7 +1295,7 @@ fn cancel_keeps_live_session(err: &str, protocol: StreamFormat) -> bool {
     err == "cancelled"
         && matches!(
             protocol,
-            StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc
+            StreamFormat::ClaudeStreamJson | StreamFormat::DshJsonRpc | StreamFormat::PiRpc
         )
 }
 
@@ -2329,7 +2343,26 @@ async fn connect_persistent_session(
                 child_pid,
             })
         }
-        StreamFormat::PiRpc => Err("protocol does not support persistent sessions".to_string()),
+        StreamFormat::PiRpc => {
+            let session = crate::external_agents::session::pi_rpc::PiRpcSession::connect(
+                resolved_bin,
+                args,
+                cwd,
+                resume_native.as_deref(),
+            )
+            .await?;
+            let native_id = session.session_id().to_string();
+            let resumed = session.resumed();
+            let child_pid = session.child_pid();
+            Ok(PersistentConnection {
+                control: crate::external_agents::session::pi_rpc::spawn_pi_rpc_session_actor(
+                    session,
+                ),
+                native_id,
+                resumed,
+                child_pid,
+            })
+        }
     }
 }
 
@@ -3876,7 +3909,7 @@ mod tests {
         );
     }
 
-    /// claude / dsh 在协议级取消完整收尾后都必须保留 live session。
+    /// claude / dsh / Pi 在协议级取消完整收尾后都必须保留 live session。
     #[test]
     fn settled_protocol_cancel_keeps_supported_live_sessions() {
         assert!(cancel_keeps_live_session(
@@ -3887,6 +3920,7 @@ mod tests {
             "cancelled",
             StreamFormat::DshJsonRpc
         ));
+        assert!(cancel_keeps_live_session("cancelled", StreamFormat::PiRpc));
         // 硬 Close / 进程已死：任何协议都不保留（留着就是个死 actor）。
         assert!(!cancel_keeps_live_session(
             CANCELLED_SESSION_LOST,
@@ -4009,11 +4043,7 @@ mod tests {
             dsh_provider_fingerprint_for(None),
             dsh_provider_fingerprint_for(Some(&config_a))
         );
-        for protocol in [
-            StreamFormat::AcpJsonRpc,
-            StreamFormat::CodexAppServer,
-            StreamFormat::PiRpc,
-        ] {
+        for protocol in [StreamFormat::AcpJsonRpc, StreamFormat::CodexAppServer] {
             assert_eq!(
                 launch_config_for_turn(
                     protocol,
@@ -4027,6 +4057,21 @@ mod tests {
                 "{protocol:?} 不该参与启动指纹判定"
             );
         }
+        let pi = |model, reasoning| {
+            launch_config_for_turn(StreamFormat::PiRpc, model, reasoning, None, None, None)
+        };
+        assert_eq!(
+            pi(Some("opus"), Some("high")),
+            pi(Some("opus"), Some("high"))
+        );
+        assert_ne!(
+            pi(Some("opus"), Some("high")),
+            pi(Some("sonnet"), Some("high"))
+        );
+        assert_ne!(
+            pi(Some("opus"), Some("high")),
+            pi(Some("opus"), Some("low"))
+        );
     }
 
     /// 真正的启动 flag 任一变化都要触发重连（`accepts` 为 false）；全都没变则复用。

@@ -157,6 +157,7 @@ pub fn persist_delivered_session(
     conversation_id: &str,
     agent_id: &str,
     resume_ctx: &AgentResumeContext,
+    actual_session_id: Option<&str>,
     instructions: &str,
     is_slash: bool,
 ) -> Result<(), String> {
@@ -168,28 +169,30 @@ pub fn persist_delivered_session(
         return Ok(());
     }
     if !resume_ctx.is_resuming {
-        if let Some(session_id) = resume_ctx.new_session_id.as_ref() {
+        if let Some(session_id) = actual_session_id.or(resume_ctx.new_session_id.as_deref()) {
             save_session(
                 app,
                 &ExternalAgentSession {
                     conversation_id: conversation_id.to_string(),
                     agent_id: agent_id.to_string(),
-                    session_id: session_id.clone(),
+                    session_id: session_id.to_string(),
                     stable_prompt_hash: Some(stable_prompt_hash(instructions)),
                     model: resume_ctx.delivered_model.clone(),
                 },
             )?;
         }
     } else if let Some(mut stored) = load_session(app, conversation_id) {
-        // 记录随「系统提示变了」或「模型换了」任一变化而更新。以前只看提示哈希——换模型走的是
-        // 另一条（丢弃会话）分支，所以看不看模型无所谓；现在换模型也 resume，只看哈希会让存下
-        // 的模型一直停在第一次那个值上。
+        // 记录随系统提示、模型或 live actor 实际使用的原生会话 id 变化而更新。
         let next_hash = stable_prompt_hash(instructions);
         let hash_changed = stored.stable_prompt_hash.as_deref() != Some(next_hash.as_str());
         let model_changed = stored.model != resume_ctx.delivered_model;
-        if hash_changed || model_changed {
+        let session_changed = actual_session_id.is_some_and(|id| stored.session_id != id);
+        if hash_changed || model_changed || session_changed {
             stored.stable_prompt_hash = Some(next_hash);
             stored.model = resume_ctx.delivered_model.clone();
+            if let Some(session_id) = actual_session_id {
+                stored.session_id = session_id.to_string();
+            }
             save_session(app, &stored)?;
         }
     }

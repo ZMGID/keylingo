@@ -34,21 +34,15 @@ mod tests {
         assert!(get_agent_def("unknown").is_none());
     }
 
-    /// 「运行中注入」是**逐协议**的能力，不是可以顺手打开的开关。
-    ///
-    /// 目前只有 codex 有对应原语（`turn/steer` + `expectedTurnId`，真机验证见
-    /// `session::codex_app_server::tests::codex_turn_steer_injects_into_the_running_turn`）。
-    /// 把别的 CLI 标成 true 会让前端亮出一个永远失败的入口；claude 那条更糟 —— 它的
-    /// stream-json 输入是**顺序**处理的，硬写进去会让 CLI 在本轮之后自己再起一轮，
-    /// 把轮次边界搞乱（见 `session::claude_stream` 里那段注释）。
-    /// 要新增一个，先在该协议里做出注入并补一条真机测试，再改这里。
+    /// 「运行中注入」是逐协议能力。Codex 使用 `turn/steer`，Pi 使用 RPC `steer`；两者都必须
+    /// 等对端成功响应后才确认前端队列并发出 `UserSteer`。
     #[test]
-    fn only_codex_claims_mid_turn_steering() {
+    fn codex_and_pi_claim_mid_turn_steering() {
         let steerable: Vec<&str> = AGENT_DEFS
             .iter()
             .filter(|def| def.supports_steering)
             .map(|def| def.id)
             .collect();
-        assert_eq!(steerable, vec!["codex"]);
+        assert_eq!(steerable, vec!["codex", "pi"]);
     }
 }

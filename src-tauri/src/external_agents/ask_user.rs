@@ -60,6 +60,20 @@ const CODECS: &[AskUserCodec] = &[
         auto_allow_ordinary_tools: true,
         opens_host: true,
     },
+    AskUserCodec {
+        agent_id: "pi",
+        tools: &[
+            "PiExtensionConfirm",
+            "PiExtensionSelect",
+            "PiExtensionInput",
+            "PiExtensionEditor",
+        ],
+        parse: parse_pi_extension_ui,
+        encode: encode_pi_extension_ui,
+        unknown_shape: UnknownAskShape::Reject,
+        auto_allow_ordinary_tools: true,
+        opens_host: true,
+    },
 ];
 
 pub fn codec_for(agent_id: &str, tool_name: &str) -> Option<&'static AskUserCodec> {
@@ -122,6 +136,112 @@ fn parse_label_options(question: &Value) -> Vec<AskUserOption> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_pi_extension_ui(input: &Value) -> Option<AskUserPromptPayload> {
+    let method = json_str(input, "method")?;
+    let title = json_str(input, "title").map(str::to_string);
+    let (prompt, options, allow_custom) = match method {
+        "confirm" => (
+            json_str(input, "message")
+                .or_else(|| title.as_deref())?
+                .to_string(),
+            vec![
+                AskUserOption {
+                    id: "confirm".to_string(),
+                    label: "确认".to_string(),
+                    description: None,
+                },
+                AskUserOption {
+                    id: "cancel".to_string(),
+                    label: "取消".to_string(),
+                    description: None,
+                },
+            ],
+            false,
+        ),
+        "select" => {
+            let options = input
+                .get("options")?
+                .as_array()?
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| {
+                    value.as_str().map(|label| AskUserOption {
+                        id: index.to_string(),
+                        label: label.to_string(),
+                        description: None,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if options.is_empty() {
+                return None;
+            }
+            (
+                title
+                    .clone()
+                    .unwrap_or_else(|| "请选择一个选项".to_string()),
+                options,
+                false,
+            )
+        }
+        "input" => (
+            json_str(input, "placeholder")
+                .or_else(|| title.as_deref())
+                .unwrap_or("请输入内容")
+                .to_string(),
+            Vec::new(),
+            true,
+        ),
+        "editor" => (
+            title.clone().unwrap_or_else(|| "请输入内容".to_string()),
+            Vec::new(),
+            true,
+        ),
+        _ => return None,
+    };
+    Some(AskUserPromptPayload {
+        title,
+        questions: vec![AskUserQuestion {
+            id: "0".to_string(),
+            prompt,
+            options,
+            allow_multiple: false,
+            allow_custom,
+        }],
+    })
+}
+
+fn encode_pi_extension_ui(
+    original_input: &Value,
+    _prompt: &AskUserPromptPayload,
+    answered: &AskUserResponseResult,
+) -> Value {
+    let Some(answer) = answered.answers.get("0") else {
+        return serde_json::json!({ "cancelled": true });
+    };
+    match original_input.get("method").and_then(Value::as_str) {
+        Some("confirm") => serde_json::json!({
+            "confirmed": answer.selected_option_ids.iter().any(|id| id == "confirm")
+        }),
+        Some("select") => {
+            let value = answer
+                .selected_option_ids
+                .first()
+                .and_then(|id| id.parse::<usize>().ok())
+                .and_then(|index| original_input.get("options")?.as_array()?.get(index))
+                .and_then(Value::as_str);
+            value
+                .map(|value| serde_json::json!({ "value": value }))
+                .unwrap_or_else(|| serde_json::json!({ "cancelled": true }))
+        }
+        Some("input" | "editor") => answer
+            .custom_text
+            .as_deref()
+            .map(|value| serde_json::json!({ "value": value }))
+            .unwrap_or_else(|| serde_json::json!({ "cancelled": true })),
+        _ => serde_json::json!({ "cancelled": true }),
+    }
 }
 
 /// claude `AskUserQuestion` 的入参 → Kivio 问用户卡片。
@@ -335,6 +455,7 @@ mod tests {
         assert!(needs_host("dsh"));
         assert!(!needs_host("claude"));
         assert!(!needs_host("cursor"));
+        assert!(needs_host("pi"));
         assert!(auto_allow_ordinary_tools("dsh"));
         assert!(!auto_allow_ordinary_tools("claude"));
     }
@@ -352,6 +473,70 @@ mod tests {
                 .expect("dsh codec")
                 .unknown_shape,
             UnknownAskShape::Reject
+        );
+    }
+
+    #[test]
+    fn pi_extension_ui_maps_confirm_select_and_input() {
+        let confirm = serde_json::json!({
+            "method": "confirm",
+            "title": "Delete file?",
+            "message": "This cannot be undone",
+        });
+        let prompt = parse_pi_extension_ui(&confirm).expect("confirm prompt");
+        assert_eq!(prompt.questions[0].options.len(), 2);
+        let answered = AskUserResponseResult {
+            phase: ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: HashMap::from([(
+                "0".to_string(),
+                AskUserAnswer {
+                    selected_option_ids: vec!["cancel".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        assert_eq!(
+            encode_pi_extension_ui(&confirm, &prompt, &answered),
+            serde_json::json!({ "confirmed": false })
+        );
+
+        let select = serde_json::json!({
+            "method": "select",
+            "title": "Runtime",
+            "options": ["Node", "Bun"],
+        });
+        let prompt = parse_pi_extension_ui(&select).expect("select prompt");
+        let answered = AskUserResponseResult {
+            phase: ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: HashMap::from([(
+                "0".to_string(),
+                AskUserAnswer {
+                    selected_option_ids: vec!["1".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        assert_eq!(
+            encode_pi_extension_ui(&select, &prompt, &answered),
+            serde_json::json!({ "value": "Bun" })
+        );
+
+        let input = serde_json::json!({ "method": "input", "title": "Branch" });
+        let prompt = parse_pi_extension_ui(&input).expect("input prompt");
+        assert!(prompt.questions[0].allow_custom);
+        let answered = AskUserResponseResult {
+            phase: ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: HashMap::from([(
+                "0".to_string(),
+                AskUserAnswer {
+                    selected_option_ids: Vec::new(),
+                    custom_text: Some("feature/pi-rpc".to_string()),
+                },
+            )]),
+        };
+        assert_eq!(
+            encode_pi_extension_ui(&input, &prompt, &answered),
+            serde_json::json!({ "value": "feature/pi-rpc" })
         );
     }
 

@@ -81,9 +81,9 @@ pub const PI_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     prompt_input_format: PromptInputFormat::Text,
     stream_format: StreamFormat::PiRpc,
     resumes_session_via_cli: true,
-    supports_native_image: false,
-    supports_steering: false,
-    image_mime_whitelist: &[],
+    supports_native_image: true,
+    supports_steering: true,
+    image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_pi_args,
 };
 
@@ -155,5 +155,15 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w == ["--session-id", "sess-existing"]));
+    }
+
+    #[test]
+    fn pi_advertises_rpc_steering_and_native_images() {
+        assert!(PI_AGENT_DEF.supports_steering);
+        assert!(PI_AGENT_DEF.supports_native_image);
+        assert_eq!(
+            PI_AGENT_DEF.image_mime_whitelist,
+            &["image/jpeg", "image/png", "image/gif", "image/webp"]
+        );
     }
 }

@@ -179,16 +179,14 @@ pub struct RuntimeAgentDef {
     pub prompt_input_format: PromptInputFormat,
     pub stream_format: StreamFormat,
     pub resumes_session_via_cli: bool,
-    /// 该 CLI 是否能通过其协议原生接收图片（Claude base64 / ACP image / Codex localImage）。
-    /// false（pi/kimi）时图片降级为在 prompt 文本里写出路径。
+    /// 该 CLI 是否能通过其协议原生接收图片（Claude/Pi base64 / ACP image / Codex localImage）。
+    /// false（当前主要是 kimi）时图片降级为在 prompt 文本里写出路径。
     pub supports_native_image: bool,
     /// 该 CLI 的协议能否往**在飞的轮次**里追加一条用户输入（「立刻引导」）。
     ///
-    /// 目前只有 codex 能：`turn/steer` + `expectedTurnId`（真机验证见
-    /// `session::codex_app_server` 的 `codex_turn_steer_injects_into_the_running_turn`）。
-    /// claude 的 stream-json 输入是**顺序**处理的、没有注入用的 control_request；
-    /// ACP 只有 `session/prompt` 与 `session/cancel`。这些一律 false —— 前端据此
-    /// 不显示引导入口，排队消息照旧在轮末自动发出。
+    /// Codex 使用 `turn/steer`，Pi 使用 RPC `steer`；两者都只在对端成功响应后确认。
+    /// claude 的 stream-json 输入是顺序处理、ACP 只有 `session/prompt` 与 `session/cancel`，
+    /// 因而仍不声明该能力。
     pub supports_steering: bool,
     /// 允许原生注入的图片 MIME 白名单；空 = 不限。Claude stream-json 仅认 jpeg/png/gif/webp，
     /// 超出的图片降级为路径文本（不静默丢弃）。
