@@ -36,7 +36,7 @@
 //! `turn/end` 时落成一条助手消息，不能只留任务边沿。Kivio bridge 直接调用 dsh
 //! 公共的 `agents.resume()` 与 `agent.cancel()`，所以进程重建和用户停止都不会再丢失原生会话。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -477,7 +477,7 @@ impl DshJsonRpcSession {
         let mut pending_asks: std::collections::HashMap<String, Value> =
             std::collections::HashMap::new();
         let mut pending_steers = PendingSteers::default();
-        let mut last_user_question_call: Option<(String, String)> = None;
+        let mut pending_user_question_calls: VecDeque<PendingUserQuestionCall> = VecDeque::new();
         let mut followup_acked: u32 = 0;
         let mut turns_ended: u32 = 0;
         let mut deferred_idle = false;
@@ -721,7 +721,7 @@ impl DshJsonRpcSession {
                     &value,
                     approvals.as_deref_mut(),
                     &mut pending_asks,
-                    last_user_question_call.as_ref(),
+                    &mut pending_user_question_calls,
                 )
                 .await?;
                 continue;
@@ -816,10 +816,13 @@ impl DshJsonRpcSession {
                     }
                     self.context_window = self.map_state.context_window;
                     for event in mapped {
-                        if let UnifiedAgentEvent::ToolUse { id, name, .. } = &event {
-                            if is_user_question_tool(name) {
-                                last_user_question_call = Some((id.clone(), name.clone()));
-                            }
+                        if let UnifiedAgentEvent::ToolUse { id, name, input } = &event {
+                            remember_user_question_call(
+                                &mut pending_user_question_calls,
+                                id,
+                                name,
+                                input,
+                            );
                         }
                         let _ = events.send(event).await;
                     }
@@ -1076,9 +1079,107 @@ pub fn spawn_dsh_session_actor_with_sink(
 }
 
 const SESSION_ASK_METHOD: &str = "session/ask";
+const ASK_USER_QUESTION_TOOL: &str = "ask_user_question";
+const EXIT_PLAN_MODE_TOOL: &str = "exit_plan_mode";
 
 pub fn is_user_question_tool(name: &str) -> bool {
     crate::external_agents::ask_user::matches_tool("dsh", name)
+}
+
+/// 尚未被 `session/ask` 认领的问用户工具卡。官方 RPC 不带 callId，
+/// 并行 ask 不能共用最后一个槽位，否则两张卡的 `pending_chat_user_prompts`
+/// 会写进同一个 toolCallId。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingUserQuestionCall {
+    id: String,
+    name: String,
+    question_ids: Vec<String>,
+}
+
+fn remember_user_question_call(
+    pending: &mut VecDeque<PendingUserQuestionCall>,
+    id: &str,
+    name: &str,
+    input: &Value,
+) {
+    if !is_user_question_tool(name) {
+        return;
+    }
+    pending.push_back(PendingUserQuestionCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        question_ids: question_ids(input.get("questions")),
+    });
+}
+
+fn question_ids(questions: Option<&Value>) -> Vec<String> {
+    questions
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_plan_review_questions(questions: &Value) -> bool {
+    questions.as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.get("id").and_then(Value::as_str) == Some("plan-review")
+                || item
+                    .get("intent")
+                    .and_then(|intent| intent.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("plan-review")
+        })
+    })
+}
+
+fn expected_ask_tool_name(questions: &Value) -> &'static str {
+    if is_plan_review_questions(questions) {
+        EXIT_PLAN_MODE_TOOL
+    } else {
+        ASK_USER_QUESTION_TOOL
+    }
+}
+
+fn names_match(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+/// 把一条 `session/ask` 绑到一张尚未认领的工具卡上：先对问题 id，再对工具名。
+/// 队列空时退回 RPC request id，避免把答案写进上一张已经在等的卡。
+fn take_user_question_call(
+    pending: &mut VecDeque<PendingUserQuestionCall>,
+    questions: &Value,
+    request_id: &str,
+) -> (String, String) {
+    let ask_ids = question_ids(Some(questions));
+    if !ask_ids.is_empty() {
+        if let Some(index) = pending
+            .iter()
+            .position(|call| !call.question_ids.is_empty() && call.question_ids == ask_ids)
+        {
+            let call = pending.remove(index).expect("index from position");
+            return (call.id, call.name);
+        }
+    }
+    let expected = expected_ask_tool_name(questions);
+    if let Some(index) = pending
+        .iter()
+        .position(|call| names_match(&call.name, expected))
+    {
+        let call = pending.remove(index).expect("index from position");
+        return (call.id, call.name);
+    }
+    if let Some(call) = pending.pop_front() {
+        return (call.id, call.name);
+    }
+    (request_id.to_string(), expected.to_string())
 }
 
 fn is_incoming_rpc_request(value: &Value) -> bool {
@@ -1106,7 +1207,7 @@ async fn handle_incoming_request(
     value: &Value,
     approvals: Option<&mut ApprovalBridge>,
     pending_asks: &mut std::collections::HashMap<String, Value>,
-    last_user_question_call: Option<&(String, String)>,
+    pending_user_question_calls: &mut VecDeque<PendingUserQuestionCall>,
 ) -> Result<(), String> {
     let Some(id) = rpc_id(value) else {
         return Ok(());
@@ -1167,9 +1268,8 @@ async fn handle_incoming_request(
         )
         .await;
     };
-    let (tool_call_id, tool_name) = last_user_question_call
-        .cloned()
-        .unwrap_or_else(|| (request_id.clone(), "ask_user_question".to_string()));
+    let (tool_call_id, tool_name) =
+        take_user_question_call(pending_user_question_calls, questions, &request_id);
     pending_asks.insert(request_id.clone(), id.clone());
     if bridge
         .requests
@@ -1766,18 +1866,30 @@ pub(crate) fn is_subagent_tool_name(name: &str) -> bool {
     )
 }
 
-/// 派出回执（`started subagent <id>`）不是子代理跑完。调用方应保持工具卡 Running。
-pub(crate) fn subagent_launch_task_id(name: &str, content: &str) -> Option<String> {
-    if !is_subagent_tool_name(name) {
-        return None;
-    }
+/// 派出回执不是子代理跑完。调用方应保持工具卡 Running。
+///
+/// 官方 `dsh-tool-subagent`（0.1.0-rc.7）两条：
+/// - 一次性后台：`started background subagent job <jobId>`
+/// - 可续跑：`started subagent <subagentId>`
+/// `… task …` 是早期误读，继续认以免旧回执把卡打成 Success。
+const SUBAGENT_LAUNCH_PREFIXES: &[&str] = &[
+    "started background subagent job ",
+    "started background subagent task ",
+    "started subagent ",
+];
+
+fn is_subagent_launch_receipt(content: &str) -> bool {
     let text = content.trim();
-    if !(text.starts_with("started subagent ")
-        || text.starts_with("started background subagent task "))
-    {
+    SUBAGENT_LAUNCH_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+pub(crate) fn subagent_launch_task_id(name: &str, content: &str) -> Option<String> {
+    if !is_subagent_tool_name(name) || !is_subagent_launch_receipt(content) {
         return None;
     }
-    parse_background_task_id(text)
+    parse_background_task_id(content.trim())
 }
 
 fn optional_string(value: &Value, key: &str) -> Option<String> {
@@ -1809,11 +1921,11 @@ fn parse_background_task_id(content: &str) -> Option<String> {
             }
         }
     }
-    for prefix in [
-        "started background job ",
-        "started background subagent task ",
-        "started subagent ",
-    ] {
+    for prefix in SUBAGENT_LAUNCH_PREFIXES
+        .iter()
+        .copied()
+        .chain(std::iter::once("started background job "))
+    {
         if let Some(rest) = content.strip_prefix(prefix) {
             let id = rest
                 .split_whitespace()
@@ -2295,7 +2407,7 @@ fn map_tool_results(
             .and_then(Value::as_bool)
             .unwrap_or_else(|| data.get("error").is_some());
         if let Some(pending) = state.background_calls.remove(&tool_use_id) {
-            if let Some(task_id) = parse_background_task_id(&content) {
+            if let Some(task_id) = parse_background_task_id(content.trim()) {
                 sink(UnifiedAgentEvent::BackgroundTask {
                     task_id,
                     status: "running".to_string(),
@@ -2369,6 +2481,91 @@ mod tests {
             "method": "session.event",
             "params": { "sessionId": "kivio-1" }
         })));
+    }
+
+    #[test]
+    fn parallel_session_asks_bind_distinct_tool_cards() {
+        let mut pending = VecDeque::new();
+        remember_user_question_call(
+            &mut pending,
+            "call_tea",
+            "ask_user_question",
+            &json!({ "questions": [{ "id": "q-tea", "question": "Tea?" }] }),
+        );
+        remember_user_question_call(
+            &mut pending,
+            "call_coffee",
+            "ask_user_question",
+            &json!({ "questions": [{ "id": "q-coffee", "question": "Coffee?" }] }),
+        );
+        assert_eq!(
+            take_user_question_call(
+                &mut pending,
+                &json!([{ "id": "q-coffee", "question": "Coffee?" }]),
+                "req_coffee",
+            ),
+            ("call_coffee".into(), "ask_user_question".into())
+        );
+        assert_eq!(
+            take_user_question_call(
+                &mut pending,
+                &json!([{ "id": "q-tea", "question": "Tea?" }]),
+                "req_tea",
+            ),
+            ("call_tea".into(), "ask_user_question".into())
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn plan_review_ask_does_not_steal_an_ask_user_question_card() {
+        let mut pending = VecDeque::new();
+        remember_user_question_call(
+            &mut pending,
+            "call_ask",
+            "ask_user_question",
+            &json!({ "questions": [{ "id": "q1", "question": "Ship it?" }] }),
+        );
+        remember_user_question_call(
+            &mut pending,
+            "call_plan",
+            "exit_plan_mode",
+            &json!({ "plan": "# Do the thing\n\n1. Start" }),
+        );
+        assert_eq!(
+            take_user_question_call(
+                &mut pending,
+                &json!([{
+                    "id": "plan-review",
+                    "header": "Plan review",
+                    "question": "Approve this plan and leave plan mode?",
+                    "intent": { "kind": "plan-review", "approve": "Approve" }
+                }]),
+                "req_plan",
+            ),
+            ("call_plan".into(), "exit_plan_mode".into())
+        );
+        assert_eq!(
+            take_user_question_call(
+                &mut pending,
+                &json!([{ "id": "q1", "question": "Ship it?" }]),
+                "req_ask",
+            ),
+            ("call_ask".into(), "ask_user_question".into())
+        );
+    }
+
+    #[test]
+    fn unmatched_session_ask_falls_back_to_the_rpc_request_id() {
+        let mut pending = VecDeque::new();
+        assert_eq!(
+            take_user_question_call(
+                &mut pending,
+                &json!([{ "id": "q1", "question": "Tea or coffee?" }]),
+                "req_orphan",
+            ),
+            ("req_orphan".into(), "ask_user_question".into())
+        );
     }
 
     #[test]
@@ -2778,6 +2975,40 @@ mod tests {
     }
 
     #[test]
+    fn background_subagent_job_receipt_emits_a_running_task() {
+        let events = map_events(&[
+            (
+                "tool/call",
+                json!({
+                    "callId": "call_sa",
+                    "name": "subagent",
+                    "arguments": "{\"description\":\"搜索最新AI资讯\",\"prompt\":\"去搜\"}"
+                }),
+            ),
+            (
+                "tool/result",
+                json!({ "message": { "content": [{
+                    "type": "tool-result",
+                    "toolCallId": "call_sa",
+                    "content": [{ "type": "text", "text": "started background subagent job job_9" }],
+                    "isError": false
+                }] } }),
+            ),
+        ]);
+        assert!(matches!(
+            events.iter().find(|event| matches!(event, UnifiedAgentEvent::BackgroundTask { .. })),
+            Some(UnifiedAgentEvent::BackgroundTask {
+                task_id,
+                status,
+                kind,
+                ..
+            }) if task_id == "job_9"
+                && status == "running"
+                && kind.as_deref() == Some("local_agent")
+        ));
+    }
+
+    #[test]
     fn maps_tool_jobs_notice_to_a_terminal_task() {
         let events = map_events(&[(
             "user/message",
@@ -2968,6 +3199,11 @@ mod tests {
             )
             .as_deref(),
             Some("018b08fc-ee7f-4ea5-b77c-9c5d1c6ecf50")
+        );
+        assert_eq!(
+            subagent_launch_task_id("subagent_fork", "started background subagent job job_9")
+                .as_deref(),
+            Some("job_9")
         );
         assert_eq!(
             subagent_launch_task_id("subagent_fork", "started background subagent task job_9")

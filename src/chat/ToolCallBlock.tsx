@@ -399,8 +399,9 @@ function subagentPrompt(args: Record<string, unknown> | null): string {
 /** dsh 后台子代理的 tool/result 只是派出回执，不是跑完。 */
 function isSubagentLaunchReceipt(text: string | undefined): boolean {
   const trimmed = text?.trim() ?? ''
-  return trimmed.startsWith('started subagent ')
+  return trimmed.startsWith('started background subagent job ')
     || trimmed.startsWith('started background subagent task ')
+    || trimmed.startsWith('started subagent ')
 }
 
 function subagentDisplayStatus(toolCall: ToolCallRecord, status: ToolCallStatus): ToolCallStatus {

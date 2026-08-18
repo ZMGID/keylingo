@@ -459,6 +459,27 @@ describe('ToolCallBlock', () => {
     expect(screen.queryByText(/started subagent/)).not.toBeInTheDocument()
   })
 
+  it('keeps a dsh one-shot background subagent job receipt as running', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'subagent',
+          source: 'external_cli',
+          status: 'success',
+          arguments: {
+            description: '搜索最新AI资讯',
+            prompt: '去网上搜最近的模型发布',
+          },
+          result_preview: 'started background subagent job job_9',
+        })}
+      />,
+    )
+    expect(screen.getByText('SUBAGENT')).toBeInTheDocument()
+    expect(screen.getByText('运行中…')).toBeInTheDocument()
+    expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+    expect(screen.queryByText(/started background subagent job/)).not.toBeInTheDocument()
+  })
+
   it('renders a dsh subagent call as a SUBAGENT consult card', () => {
     render(
       <ToolCallBlock

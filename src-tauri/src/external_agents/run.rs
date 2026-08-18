@@ -3203,6 +3203,39 @@ mod tests {
     }
 
     #[test]
+    fn background_subagent_job_receipt_keeps_the_tool_card_running() {
+        let mut record = ToolCallRecord {
+            id: "c1".into(),
+            name: "subagent".into(),
+            source: "external_cli".into(),
+            server_id: None,
+            arguments: "{}".into(),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: Some(1),
+            completed_at: None,
+            round: 1,
+            sensitive: false,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: Some(serde_json::json!({ "description": "搜资讯" })),
+        };
+        apply_external_tool_result(
+            &mut record,
+            "started background subagent job job_9",
+            false,
+            99,
+        );
+        assert_eq!(record.status, ToolCallStatus::Running);
+        assert_eq!(record.completed_at, None);
+        assert_eq!(record.result_preview, None);
+        assert_eq!(background_task_id(&record).as_deref(), Some("job_9"));
+    }
+
+    #[test]
     fn subagent_progress_lands_on_the_parent_tool_card() {
         let mut record = ToolCallRecord {
             id: "c1".into(),
