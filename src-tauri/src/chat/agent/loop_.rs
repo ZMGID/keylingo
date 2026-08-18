@@ -160,7 +160,7 @@ impl Drop for HookRunGuard<'_> {
             {
                 hooks.cancel();
             }
-            hooks.dispatch(HookEvent::AgentEnd, None, None);
+            hooks.dispatch(HookEvent::AgentEnd, None, None, None);
         }
     }
 }
@@ -184,8 +184,8 @@ impl<'a> HookTurnGuard<'a> {
         // LiveAgent 的 startTurn 同时发这两个：一次 planning step 既是一「轮」的开始，
         // 也是该轮助手消息开始产出的时刻。
         if let Some(hooks) = hooks {
-            hooks.dispatch(HookEvent::TurnStart, None, Some(round));
-            hooks.dispatch(HookEvent::MessageStart, None, Some(round));
+            hooks.dispatch(HookEvent::TurnStart, None, Some(round), None);
+            hooks.dispatch(HookEvent::MessageStart, None, Some(round), None);
         }
         Self {
             hooks,
@@ -201,7 +201,7 @@ impl<'a> HookTurnGuard<'a> {
         }
         self.message_open = false;
         if let Some(hooks) = self.hooks {
-            hooks.dispatch(HookEvent::MessageEnd, None, Some(self.round));
+            hooks.dispatch(HookEvent::MessageEnd, None, Some(self.round), None);
         }
     }
 }
@@ -210,7 +210,7 @@ impl Drop for HookTurnGuard<'_> {
     fn drop(&mut self) {
         self.end_message();
         if let Some(hooks) = self.hooks {
-            hooks.dispatch(HookEvent::TurnEnd, None, Some(self.round));
+            hooks.dispatch(HookEvent::TurnEnd, None, Some(self.round), None);
         }
     }
 }
@@ -264,7 +264,7 @@ pub async fn run_agent_loop(
     let hooks = host.hooks();
     // agent_start 在 guard 之前发：guard 的 Drop 负责成对的 agent_end。
     if let Some(hooks) = hooks {
-        hooks.dispatch(HookEvent::AgentStart, None, None);
+        hooks.dispatch(HookEvent::AgentStart, None, None, None);
     }
     let _hook_guard = HookRunGuard {
         hooks,

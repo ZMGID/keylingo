@@ -30,6 +30,15 @@ function event(seq: number, type: ChatRunEventEnvelope['type'] = 'run_started') 
   if (type === 'run_completed') {
     return { ...common, type, full: 'done', conversationRevision: 2 } as ChatRunEventEnvelope
   }
+  if (type === 'hook_failed') {
+    return {
+      ...common,
+      type,
+      hookName: 'after',
+      event: 'agent_end',
+      message: 'boom',
+    } as ChatRunEventEnvelope
+  }
   return { ...common, type: 'run_started', recovery: null } as ChatRunEventEnvelope
 }
 
@@ -99,6 +108,19 @@ describe('chat protocol sequencing', () => {
     chatProtocolTesting.ingest(event(2, 'run_completed'))
     chatProtocolTesting.ingest(event(3, 'text_delta'))
     expect(seen).toEqual([1, 2])
+  })
+
+  it('still delivers hook_failed after the run is terminal', () => {
+    const seen: string[] = []
+    chatProtocolTesting.subscribe((item) => {
+      if (item.scope === 'run') seen.push(item.type)
+    })
+    chatProtocolTesting.ingest(event(1))
+    chatProtocolTesting.ingest(event(2, 'run_completed'))
+    chatProtocolTesting.ingest(event(3, 'hook_failed'))
+    chatProtocolTesting.ingest(event(0, 'hook_failed'))
+    chatProtocolTesting.ingest(event(4, 'text_delta'))
+    expect(seen).toEqual(['run_started', 'run_completed', 'hook_failed', 'hook_failed'])
   })
 
   it('commits a buffered terminal only after the sequence gap closes', async () => {

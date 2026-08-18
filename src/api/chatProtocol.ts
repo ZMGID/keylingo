@@ -120,6 +120,13 @@ function retrySync(conversationId: string) {
 
 function applyRunEvent(event: ChatRunEventEnvelope) {
   const state = runState(event)
+  // HookFailed 是旁路警告，可在 run 已终态、甚至 hub 已 prune（seq=0 直播帧）之后到达。
+  // 不当成内容序列的缺口，也不因 terminal 丢弃——否则黄条永远出不来。
+  if (event.type === 'hook_failed') {
+    if (event.seq > state.lastSeq) state.lastSeq = event.seq
+    dispatch(event)
+    return
+  }
   if (event.seq <= state.lastSeq) return
   if (state.terminal) return
   if (event.seq > state.lastSeq + 1) {

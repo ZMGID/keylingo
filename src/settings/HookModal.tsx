@@ -1,15 +1,19 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
-import { type HookDef } from '../api/tauri'
+import { HOOK_EVENTS, type HookDef, type HookEvent } from '../api/tauri'
 import { i18n, type Lang } from './i18n'
 import { Input, Label, Select, TextArea } from './components'
 import { Button, IconButton } from '../components/Button'
+import { getPlatform } from './utils'
 
 const TIMEOUT_MIN_MS = 1_000
 const TIMEOUT_MAX_MS = 600_000
 const TIMEOUT_DEFAULT_MS = 60_000
 const METHODS = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE']
+const SCRIPT_PLACEHOLDER = getPlatform() === 'windows'
+  ? 'echo done >> %TEMP%\\kivio-hook.log'
+  : 'echo done >> /tmp/kivio-hook.log'
 
 function headersToText(headers: Record<string, string>): string {
   return Object.entries(headers)
@@ -35,6 +39,7 @@ type Props = {
   /** 新建时绑定的事件；编辑时沿用 hook 自己的事件。 */
   event: string
   eventLabel: string
+  eventOptions: { value: HookEvent; label: string }[]
   initial?: HookDef | null
   onSave: (hook: HookDef) => void
   onClose: () => void
@@ -44,10 +49,11 @@ type Props = {
  * Hook 编辑弹窗。command 分支只有脚本 + 超时，http 分支是 URL + 方法 + 头 + 超时。
  * ponytail: 后端 `HookDef` 没有自定义 body 字段，所以这里也不提供 body 编辑器。
  */
-export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }: Props) {
+export function HookModal({ lang, event, eventLabel, eventOptions, initial, onSave, onClose }: Props) {
   const t = i18n[lang]
   const [name, setName] = useState(initial?.name ?? '')
   const [description, setDescription] = useState(initial?.description ?? '')
+  const [boundEvent, setBoundEvent] = useState<string>(initial?.event ?? event)
   const [kind, setKind] = useState<'command' | 'http'>(initial?.type === 'http' ? 'http' : 'command')
   const [script, setScript] = useState(initial?.script ?? '')
   const [url, setUrl] = useState(initial?.url ?? '')
@@ -79,7 +85,7 @@ export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }:
       id: initial?.id || `hook-${Date.now()}`,
       name: trimmedName,
       description: description.trim(),
-      event: initial?.event ?? event,
+      event: HOOK_EVENTS.includes(boundEvent as HookEvent) ? boundEvent : event,
       enabled: initial?.enabled ?? true,
       type: kind,
       script: kind === 'command' ? script : '',
@@ -108,7 +114,9 @@ export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }:
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1">
             <h3 className="text-[14px] font-semibold">{initial ? t.hooksEdit : t.hooksAdd}</h3>
-            <p className="kv-row-desc">{eventLabel}</p>
+            <p className="kv-row-desc">
+              {eventOptions.find((option) => option.value === boundEvent)?.label ?? eventLabel}
+            </p>
           </div>
           <IconButton size="xs" label={t.cancel} onClick={onClose} data-tauri-drag-region="false">
             <X size={14} />
@@ -116,6 +124,16 @@ export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }:
         </div>
 
         <div className="custom-scrollbar max-h-[60vh] space-y-3 overflow-y-auto pr-0.5">
+          <div className="space-y-1">
+            <Label>{t.hooksEvent}</Label>
+            <Select
+              value={boundEvent}
+              onChange={setBoundEvent}
+              options={eventOptions}
+              className="w-full"
+            />
+          </div>
+
           <div className="space-y-1">
             <Label>{t.hooksName}</Label>
             <Input value={name} onChange={setName} placeholder={t.hooksNamePlaceholder} />
@@ -150,7 +168,7 @@ export function HookModal({ lang, event, eventLabel, initial, onSave, onClose }:
           {kind === 'command' ? (
             <div className="space-y-1">
               <Label>{t.hooksCommandLabel}</Label>
-              <TextArea value={script} onChange={setScript} rows={6} mono placeholder="echo done >> /tmp/kivio-hook.log" />
+              <TextArea value={script} onChange={setScript} rows={6} mono placeholder={SCRIPT_PLACEHOLDER} />
               <p className="kv-row-desc">{t.hooksCommandHint}</p>
             </div>
           ) : (

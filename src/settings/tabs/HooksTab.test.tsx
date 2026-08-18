@@ -73,7 +73,7 @@ describe('HooksTab', () => {
     const { onChange } = renderTab()
     await startAdding('工具执行前')
     await userEvent.type(screen.getByPlaceholderText('lint-guard'), 'probe')
-    await userEvent.type(screen.getByPlaceholderText('echo done >> /tmp/kivio-hook.log'), 'true')
+    await userEvent.type(screen.getByPlaceholderText(/kivio-hook\.log/), 'true')
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(onChange).toHaveBeenCalledWith([
       expect.objectContaining({
@@ -115,6 +115,23 @@ describe('HooksTab', () => {
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(onChange).toHaveBeenCalledWith([
       expect.objectContaining({ type: 'http', url: 'https://example.com/h', method: 'POST' }),
+    ])
+  })
+
+  it('有说明时列表优先显示说明', () => {
+    renderTab([hook({ description: '写审计日志' })])
+    expect(screen.getByText('写审计日志')).toBeTruthy()
+    expect(screen.queryByText('echo done >> /tmp/kivio-hook.log')).toBeNull()
+  })
+
+  it('编辑时可改触发事件', async () => {
+    const { onChange } = renderTab([hook()])
+    await userEvent.click(screen.getByRole('button', { name: '编辑 Hook' }))
+    await userEvent.click(screen.getByRole('button', { name: '对话结束' }))
+    await userEvent.click(screen.getByRole('option', { name: '工具执行前' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(onChange).toHaveBeenCalledWith([
+      expect.objectContaining({ id: 'h1', event: 'tool_execution_start' }),
     ])
   })
 })

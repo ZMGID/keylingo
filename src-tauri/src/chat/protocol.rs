@@ -607,6 +607,10 @@ impl ChatRunEvent {
             Self::RunCompleted { .. } | Self::RunFailed { .. } | Self::RunCancelled { .. }
         )
     }
+
+    fn is_hook_failed(&self) -> bool {
+        matches!(self, Self::HookFailed { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq)]
@@ -1046,7 +1050,9 @@ impl ChatProtocolHub {
             .runs
             .get_mut(run_id)
             .ok_or_else(|| format!("chat protocol run is not registered: {run_id}"))?;
-        if run.terminal_at.is_some() {
+        // HookFailed 是旁路警告（对齐 Pi 的 extension_error），不该被 run 封口绑死。
+        // agent_end 脚本常常在 finish_run 之后才跑完；其它内容事件仍拒绝。
+        if run.terminal_at.is_some() && !event.is_hook_failed() {
             return Err(format!("chat protocol run is already terminal: {run_id}"));
         }
         let seq = run.snapshot.last_seq.saturating_add(1);
@@ -1526,6 +1532,44 @@ pub fn emit_run_event(app: &AppHandle, run_id: &str, event: ChatRunEvent) {
     }
 }
 
+/// Hook 失败警告。run 还在 hub 里就入 replay；已被 prune 则只走直播（黄条仍能出）。
+pub fn emit_hook_failed(
+    app: &AppHandle,
+    conversation_id: &str,
+    run_id: &str,
+    hook_name: String,
+    event: String,
+    message: String,
+) {
+    let event = ChatRunEvent::HookFailed {
+        hook_name,
+        event,
+        message,
+    };
+    let result = app
+        .state::<AppState>()
+        .chat_protocol
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(run_id, event.clone());
+    match result {
+        Ok(envelope) => emit_protocol(app, ChatProtocolEvent::Run(envelope)),
+        Err(_) => emit_protocol(
+            app,
+            ChatProtocolEvent::Run(ChatRunEventEnvelope {
+                protocol_version: CHAT_PROTOCOL_VERSION,
+                scope: ChatProtocolScope::Run,
+                conversation_id: conversation_id.to_string(),
+                run_id: run_id.to_string(),
+                message_id: String::new(),
+                seq: 0,
+                base_revision: 0,
+                event,
+            }),
+        ),
+    }
+}
+
 pub fn finish_run(
     app: &AppHandle,
     run_id: &str,
@@ -1916,6 +1960,65 @@ mod tests {
                 ChatRunEvent::TextDelta {
                     delta: "late".into(),
                     segment: None,
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn accepts_hook_failed_after_terminal() {
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        hub.push(
+            "run",
+            ChatRunEvent::RunCompleted {
+                full: "done".into(),
+                conversation_revision: 3,
+            },
+        )
+        .unwrap();
+        let envelope = hub
+            .push(
+                "run",
+                ChatRunEvent::HookFailed {
+                    hook_name: "after".into(),
+                    event: "agent_end".into(),
+                    message: "boom".into(),
+                },
+            )
+            .expect("hook_failed must land after the run is terminal");
+        assert!(matches!(
+            envelope.event,
+            ChatRunEvent::HookFailed { ref hook_name, .. } if hook_name == "after"
+        ));
+        assert_eq!(
+            hub.runs.get("run").unwrap().snapshot.warnings.len(),
+            1,
+            "post-terminal hook_failed still folds into the snapshot"
+        );
+        assert!(
+            hub.push(
+                "run",
+                ChatRunEvent::TextDelta {
+                    delta: "late".into(),
+                    segment: None,
+                },
+            )
+            .is_err(),
+            "content events stay rejected after terminal"
+        );
+    }
+
+    #[test]
+    fn hook_failed_on_unknown_run_is_not_recorded() {
+        let mut hub = ChatProtocolHub::default();
+        assert!(hub
+            .push(
+                "missing",
+                ChatRunEvent::HookFailed {
+                    hook_name: "after".into(),
+                    event: "agent_end".into(),
+                    message: "boom".into(),
                 },
             )
             .is_err());

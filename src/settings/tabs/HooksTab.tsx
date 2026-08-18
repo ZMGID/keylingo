@@ -54,10 +54,16 @@ function eventDescription(t: I18n, event: HookEvent): string {
   }
 }
 
-/** 单个 Hook 的摘要行。命令取首行、HTTP 取「方法 URL」。 */
+/** 单个 Hook 的摘要行。有说明用说明；否则命令取首行、HTTP 取「方法 URL」。 */
 function hookSummary(hook: HookDef): string {
+  const description = hook.description.trim()
+  if (description) return description
   if (hook.type === 'http') return `${hook.method} ${hook.url}`
   return hook.script.split('\n').find((line) => line.trim()) ?? ''
+}
+
+function hookSummaryIsMono(hook: HookDef): boolean {
+  return !hook.description.trim()
 }
 
 export function HooksTab({ lang, hooks, onChange }: {
@@ -118,7 +124,7 @@ export function HooksTab({ lang, hooks, onChange }: {
                       {eventLabel(t, event)}
                     </span>
                   </span>
-                  <p className="kv-row-desc truncate font-mono">{hookSummary(hook)}</p>
+                  <p className={`kv-row-desc truncate${hookSummaryIsMono(hook) ? ' font-mono' : ''}`}>{hookSummary(hook)}</p>
                 </div>
                 <div className="kv-row-control">
                   <Toggle
@@ -217,6 +223,7 @@ export function HooksTab({ lang, hooks, onChange }: {
           lang={lang}
           event={modal.event}
           eventLabel={eventLabel(t, (modal.editing?.event as HookEvent) ?? modal.event)}
+          eventOptions={HOOK_EVENTS.map((item) => ({ value: item, label: eventLabel(t, item) }))}
           initial={modal.editing}
           onSave={saveHook}
           onClose={() => setModal(null)}
