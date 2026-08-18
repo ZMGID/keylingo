@@ -7,6 +7,7 @@ import { getSettingsCached, setTranslateCardSizeCached } from './api/settingsCac
 import { ChatMarkdown } from './chat/ChatMarkdown'
 import { Button } from './components/Button'
 import { i18n, type Lang } from './settings/i18n'
+import { isWebSearchConfigured } from './settings/webSearch'
 import { copyToClipboard } from './utils/clipboard'
 
 import type { Annotation, AnnotationKind, BarRect, CapturedFrame, HistoryItem, Metrics, Mode, Point, Stage, TranslateCardDrag } from './lens/types'
@@ -340,10 +341,7 @@ export default function Lens() {
       setLang((settings.settingsLanguage as Lang) || 'zh')
       setMessageOrder(settings.lens?.messageOrder === 'desc' ? 'desc' : 'asc')
       const webSearch = settings.lens?.webSearch
-      const hasWebSearchKey = webSearch?.provider === 'exa'
-        ? !!webSearch.exaApiKey?.trim()
-        : !!webSearch?.tavilyApiKey?.trim()
-      const canUseWebSearch = webSearch?.enabled === true && hasWebSearchKey
+      const canUseWebSearch = webSearch?.enabled === true && isWebSearchConfigured(webSearch)
       setWebSearchAvailable(canUseWebSearch)
       setWebSearchEnabled(canUseWebSearch && curMode === 'chat')
       screenshotKeepFullscreenRef.current = settings.screenshotTranslation?.keepFullscreenAfterCapture !== false

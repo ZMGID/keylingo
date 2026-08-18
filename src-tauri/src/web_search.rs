@@ -61,6 +61,154 @@ struct OllamaSearchResult {
 }
 
 #[derive(Debug, Deserialize)]
+struct BraveSearchResponse {
+    #[serde(default)]
+    web: Option<BraveWeb>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveWeb {
+    #[serde(default)]
+    results: Vec<BraveSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveSearchResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    extra_snippets: Vec<String>,
+    #[serde(default)]
+    page_age: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SerperSearchResponse {
+    #[serde(default)]
+    answer_box: Option<SerperAnswerBox>,
+    #[serde(default)]
+    organic: Vec<SerperOrganic>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SerperAnswerBox {
+    #[serde(default)]
+    answer: Option<String>,
+    #[serde(default)]
+    snippet: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    link: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SerperOrganic {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    link: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BochaSearchResponse {
+    #[serde(default)]
+    data: Option<BochaSearchData>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BochaSearchData {
+    #[serde(default)]
+    web_pages: Option<BochaWebPages>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BochaWebPages {
+    #[serde(default)]
+    value: Vec<BochaPage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BochaPage {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    date_published: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZhipuSearchResponse {
+    #[serde(default)]
+    search_result: Vec<ZhipuSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZhipuSearchResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default, alias = "url")]
+    link: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    publish_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearxngSearchResponse {
+    #[serde(default)]
+    results: Vec<SearxngResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearxngResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    published_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TinyfishSearchResponse {
+    #[serde(default)]
+    results: Vec<TinyfishSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TinyfishSearchResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExaSearchResult {
     #[serde(default)]
@@ -87,6 +235,13 @@ pub fn provider_label(provider: WebSearchProvider) -> &'static str {
         WebSearchProvider::ExaMcp => "Exa MCP",
         WebSearchProvider::Ollama => "Ollama",
         WebSearchProvider::Grok => "Grok",
+        WebSearchProvider::Brave => "Brave",
+        WebSearchProvider::Serper => "Serper",
+        WebSearchProvider::Bocha => "Bocha",
+        WebSearchProvider::Zhipu => "Zhipu",
+        WebSearchProvider::Tinyfish => "TinyFish",
+        WebSearchProvider::TinyfishMcp => "TinyFish MCP",
+        WebSearchProvider::Searxng => "SearXNG",
         WebSearchProvider::Unknown => "Web",
     }
 }
@@ -99,6 +254,20 @@ fn normalized_base_url<'a>(configured: &'a str, fallback: &'a str) -> &'a str {
         fallback
     } else {
         trimmed
+    }
+}
+
+fn with_query(base: &str, pairs: &[(&str, &str)]) -> String {
+    let qs = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs.iter().copied())
+        .finish();
+    if qs.is_empty() {
+        return base.to_string();
+    }
+    if base.contains('?') {
+        format!("{base}&{qs}")
+    } else {
+        format!("{base}?{qs}")
     }
 }
 
@@ -119,10 +288,34 @@ pub async fn search_web(
         WebSearchProvider::ExaMcp => search_exa_mcp(state, config, query).await,
         WebSearchProvider::Ollama => search_ollama(state, config, query, retry_attempts).await,
         WebSearchProvider::Grok => search_grok(state, config, query, retry_attempts).await,
+        WebSearchProvider::Brave => search_brave(state, config, query, retry_attempts).await,
+        WebSearchProvider::Serper => search_serper(state, config, query, retry_attempts).await,
+        WebSearchProvider::Bocha => search_bocha(state, config, query, retry_attempts).await,
+        WebSearchProvider::Zhipu => search_zhipu(state, config, query, retry_attempts).await,
+        WebSearchProvider::Tinyfish => search_tinyfish(state, config, query, retry_attempts).await,
+        WebSearchProvider::TinyfishMcp => search_tinyfish_mcp(state, config, query).await,
+        WebSearchProvider::Searxng => search_searxng(state, config, query, retry_attempts).await,
         WebSearchProvider::Unknown => {
             Err("Selected web search provider is not supported yet".to_string())
         }
     }
+}
+
+async fn read_search_json<T: serde::de::DeserializeOwned>(
+    label: &str,
+    response: reqwest::Response,
+) -> Result<T, String> {
+    let raw = response
+        .text()
+        .await
+        .map_err(|err| format!("{label} read body: {err}"))?;
+    serde_json::from_str(&raw).map_err(|err| {
+        format!(
+            "{label} parse JSON: {} (body: {})",
+            err,
+            raw.chars().take(500).collect::<String>()
+        )
+    })
 }
 
 /// Ollama Web Search（Ollama Cloud）：`POST https://ollama.com/api/web_search`，
@@ -326,6 +519,491 @@ fn parse_exa_mcp_text_blocks(text: &str, max_results: usize) -> Vec<WebSearchRes
         });
     }
     results
+}
+
+/// Brave Search API：`GET {base}/res/v1/web/search?q=&count=`，
+/// 鉴权头 `X-Subscription-Token`。
+async fn search_brave(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.brave_api_key.trim();
+    if api_key.is_empty() {
+        return Err("Brave API key is not configured".to_string());
+    }
+    let max_results = config.max_results.clamp(1, 10);
+    let count = max_results.to_string();
+    let base = normalized_base_url(&config.brave_base_url, "https://api.search.brave.com");
+    let url = with_query(
+        &format!("{base}/res/v1/web/search"),
+        &[("q", query), ("count", &count)],
+    );
+    let response = send_with_retry("Brave search", retry_attempts, || {
+        with_standard_request_timeout(
+            state
+                .http
+                .get(&url)
+                .header("X-Subscription-Token", api_key)
+                .header("Accept", "application/json"),
+        )
+        .send()
+    })
+    .await?;
+    let parsed: BraveSearchResponse = read_search_json("Brave search", response).await?;
+    Ok(parsed
+        .web
+        .unwrap_or(BraveWeb {
+            results: Vec::new(),
+        })
+        .results
+        .into_iter()
+        .filter(|result| !result.url.trim().is_empty())
+        .map(|result| {
+            let mut content = result.description.trim().to_string();
+            if !result.extra_snippets.is_empty() {
+                let extra = result.extra_snippets.join("\n");
+                if content.is_empty() {
+                    content = extra;
+                } else {
+                    content = format!("{content}\n{extra}");
+                }
+            }
+            WebSearchResult {
+                title: result.title.trim().to_string(),
+                url: result.url.trim().to_string(),
+                content,
+                published_date: result.page_age.filter(|age| !age.trim().is_empty()),
+                score: None,
+            }
+        })
+        .collect())
+}
+
+/// TinyFish Search：`GET {base}?query=`，头 `X-API-Key`，结果在 `results[]`。
+/// 官方 endpoint 就是根路径（https://api.search.tinyfish.ai），没有 /search 后缀。
+/// Search API 目前不按条数计费；官方没有 count 参数，结果条数在客户端截断。
+async fn search_tinyfish(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.tinyfish_api_key.trim();
+    if api_key.is_empty() {
+        return Err("TinyFish API key is not configured".to_string());
+    }
+    let max_results = config.max_results.clamp(1, 10) as usize;
+    let base = normalized_base_url(&config.tinyfish_base_url, "https://api.search.tinyfish.ai");
+    let url = with_query(base, &[("query", query)]);
+    let response = send_with_retry("TinyFish search", retry_attempts, || {
+        with_standard_request_timeout(
+            state
+                .http
+                .get(&url)
+                .header("X-API-Key", api_key)
+                .header("Accept", "application/json"),
+        )
+        .send()
+    })
+    .await?;
+    let parsed: TinyfishSearchResponse = read_search_json("TinyFish search", response).await?;
+    Ok(tinyfish_web_results(parsed.results, max_results))
+}
+
+/// TinyFish MCP：`https://agent.tinyfish.ai/mcp` 的 `search` 工具。
+/// 不贴 API Key，走 OAuth Bearer（设置页授权，或复用已连接的同 URL MCP server）。
+async fn search_tinyfish_mcp(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+) -> Result<Vec<WebSearchResult>, String> {
+    let base = normalized_base_url(&config.tinyfish_mcp_url, "https://agent.tinyfish.ai/mcp");
+    if base.is_empty() {
+        return Err("TinyFish MCP endpoint is not configured".to_string());
+    }
+    let authorization = tinyfish_mcp_authorization(state, config, base);
+    let mut server = ChatMcpServer {
+        id: "tinyfish-mcp".to_string(),
+        name: "TinyFish MCP".to_string(),
+        enabled: true,
+        transport: "streamable_http".to_string(),
+        url: base.to_string(),
+        ..ChatMcpServer::default()
+    };
+    if let Some(value) = authorization {
+        server.headers.insert("Authorization".to_string(), value);
+    }
+
+    let max_results = config.max_results.clamp(1, 10) as usize;
+    let raw = crate::mcp::conn::call_tool_once(
+        &server,
+        &state.http,
+        "search",
+        serde_json::json!({ "query": query }),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|err| map_tinyfish_mcp_error(&err))?;
+    let result = crate::mcp::result::parse_tool_result(
+        serde_json::to_value(&raw).map_err(|err| err.to_string())?,
+    );
+    if result.is_error {
+        return Err(map_tinyfish_mcp_error(&format!(
+            "TinyFish MCP search failed: {}",
+            result.content
+        )));
+    }
+
+    Ok(parse_tinyfish_mcp_payload(
+        &result.content,
+        result.structured_content.as_ref(),
+        max_results,
+    ))
+}
+
+fn map_tinyfish_mcp_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if err.contains("OAUTH_REQUIRED")
+        || lower.contains("unauthorized")
+        || lower.contains("valid oauth bearer")
+    {
+        "TinyFish MCP requires TinyFish account authorization in the browser (no API key). Open Settings → Web Search → TinyFish MCP and click Authorize.".to_string()
+    } else {
+        err.to_string()
+    }
+}
+
+fn bearer_header(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if token.len() >= 7 && token[..7].eq_ignore_ascii_case("bearer ") {
+        Some(token.to_string())
+    } else {
+        Some(format!("Bearer {token}"))
+    }
+}
+
+fn mcp_url_matches(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/')
+}
+
+fn tinyfish_mcp_authorization(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    endpoint: &str,
+) -> Option<String> {
+    if let Some(auth) = &config.tinyfish_mcp_auth {
+        if let Some(header) = bearer_header(&auth.access_token) {
+            return Some(header);
+        }
+    }
+    let settings = state.settings_read();
+    for server in &settings.chat_tools.servers {
+        if !mcp_url_matches(&server.url, endpoint) {
+            continue;
+        }
+        if let Some(value) = server
+            .headers
+            .get("Authorization")
+            .and_then(|value| bearer_header(value))
+        {
+            return Some(value);
+        }
+        if let Some(auth) = &server.auth {
+            if let Some(value) = bearer_header(&auth.access_token) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn tinyfish_web_results(
+    results: Vec<TinyfishSearchResult>,
+    max_results: usize,
+) -> Vec<WebSearchResult> {
+    results
+        .into_iter()
+        .filter(|result| !result.url.trim().is_empty())
+        .take(max_results)
+        .map(|result| WebSearchResult {
+            title: result.title.trim().to_string(),
+            url: result.url.trim().to_string(),
+            content: result.snippet.trim().to_string(),
+            published_date: result.date.filter(|date| !date.trim().is_empty()),
+            score: None,
+        })
+        .collect()
+}
+
+fn parse_tinyfish_mcp_payload(
+    content: &str,
+    structured: Option<&serde_json::Value>,
+    max_results: usize,
+) -> Vec<WebSearchResult> {
+    if let Some(value) = structured {
+        let parsed = tinyfish_results_from_value(value, max_results);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let parsed = tinyfish_results_from_value(&value, max_results);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    vec![WebSearchResult {
+        title: "TinyFish MCP result".to_string(),
+        url: "https://agent.tinyfish.ai/mcp".to_string(),
+        content: trimmed.chars().take(4000).collect(),
+        published_date: None,
+        score: None,
+    }]
+}
+
+fn tinyfish_results_from_value(
+    value: &serde_json::Value,
+    max_results: usize,
+) -> Vec<WebSearchResult> {
+    if let Ok(parsed) = serde_json::from_value::<TinyfishSearchResponse>(value.clone()) {
+        let results = tinyfish_web_results(parsed.results, max_results);
+        if !results.is_empty() {
+            return results;
+        }
+    }
+    if let Ok(results) = serde_json::from_value::<Vec<TinyfishSearchResult>>(value.clone()) {
+        return tinyfish_web_results(results, max_results);
+    }
+    Vec::new()
+}
+
+/// Serper：`POST {base}/search`，头 `X-API-KEY`，body `{q, num}`，结果在 `organic[]`。
+async fn search_serper(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.serper_api_key.trim();
+    if api_key.is_empty() {
+        return Err("Serper API key is not configured".to_string());
+    }
+    let max_results = config.max_results.clamp(1, 10);
+    let body = serde_json::json!({
+        "q": query,
+        "num": max_results,
+    });
+    let base = normalized_base_url(&config.serper_base_url, "https://google.serper.dev");
+    let url = format!("{base}/search");
+    let response = send_with_retry("Serper search", retry_attempts, || {
+        with_standard_request_timeout(
+            state
+                .http
+                .post(&url)
+                .header("X-API-KEY", api_key)
+                .json(&body),
+        )
+        .send()
+    })
+    .await?;
+    let parsed: SerperSearchResponse = read_search_json("Serper search", response).await?;
+
+    let mut results: Vec<WebSearchResult> = Vec::new();
+    if let Some(box_) = parsed.answer_box {
+        let content = box_
+            .answer
+            .as_deref()
+            .or(box_.snippet.as_deref())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let url = box_
+            .link
+            .as_deref()
+            .unwrap_or("https://serper.dev")
+            .trim()
+            .to_string();
+        if !content.is_empty() {
+            results.push(WebSearchResult {
+                title: box_
+                    .title
+                    .as_deref()
+                    .unwrap_or("Serper answer")
+                    .trim()
+                    .to_string(),
+                url,
+                content,
+                published_date: None,
+                score: None,
+            });
+        }
+    }
+    results.extend(
+        parsed
+            .organic
+            .into_iter()
+            .filter(|result| !result.link.trim().is_empty())
+            .map(|result| WebSearchResult {
+                title: result.title.trim().to_string(),
+                url: result.link.trim().to_string(),
+                content: result.snippet.trim().to_string(),
+                published_date: result.date.filter(|date| !date.trim().is_empty()),
+                score: None,
+            }),
+    );
+    Ok(results)
+}
+
+/// 博查 Web Search：`POST {base}/v1/web-search`，Bearer key，结果在 `data.webPages.value[]`。
+async fn search_bocha(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.bocha_api_key.trim();
+    if api_key.is_empty() {
+        return Err("Bocha API key is not configured".to_string());
+    }
+    let max_results = config.max_results.clamp(1, 10);
+    let body = serde_json::json!({
+        "query": query,
+        "count": max_results,
+        "summary": true,
+        "freshness": "noLimit",
+    });
+    let base = normalized_base_url(&config.bocha_base_url, "https://api.bochaai.com");
+    let url = format!("{base}/v1/web-search");
+    let response = send_with_retry("Bocha search", retry_attempts, || {
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
+    })
+    .await?;
+    let parsed: BochaSearchResponse = read_search_json("Bocha search", response).await?;
+    let pages = parsed
+        .data
+        .and_then(|data| data.web_pages)
+        .map(|pages| pages.value)
+        .unwrap_or_default();
+    Ok(pages
+        .into_iter()
+        .filter(|page| !page.url.trim().is_empty())
+        .map(|page| {
+            let content = if !page.summary.trim().is_empty() {
+                page.summary
+            } else {
+                page.snippet
+            };
+            WebSearchResult {
+                title: page.name.trim().to_string(),
+                url: page.url.trim().to_string(),
+                content: content.trim().to_string(),
+                published_date: page.date_published.filter(|date| !date.trim().is_empty()),
+                score: None,
+            }
+        })
+        .collect())
+}
+
+/// 智谱 Web Search：`POST {base}/web_search`，Bearer key，结果在 `search_result[]`。
+async fn search_zhipu(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.zhipu_api_key.trim();
+    if api_key.is_empty() {
+        return Err("Zhipu API key is not configured".to_string());
+    }
+    let max_results = config.max_results.clamp(1, 10);
+    let body = serde_json::json!({
+        "search_query": query,
+        "search_engine": "search_std",
+        "search_intent": false,
+        "count": max_results,
+        "content_size": "medium",
+    });
+    let base = normalized_base_url(
+        &config.zhipu_base_url,
+        "https://open.bigmodel.cn/api/paas/v4",
+    );
+    let url = format!("{base}/web_search");
+    let response = send_with_retry("Zhipu search", retry_attempts, || {
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
+    })
+    .await?;
+    let parsed: ZhipuSearchResponse = read_search_json("Zhipu search", response).await?;
+    Ok(parsed
+        .search_result
+        .into_iter()
+        .filter(|result| !result.link.trim().is_empty())
+        .map(|result| WebSearchResult {
+            title: result.title.trim().to_string(),
+            url: result.link.trim().to_string(),
+            content: result.content.trim().to_string(),
+            published_date: result.publish_date.filter(|date| !date.trim().is_empty()),
+            score: None,
+        })
+        .collect())
+}
+
+fn searxng_search_url(configured: &str) -> Result<String, String> {
+    let trimmed = configured.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("SearXNG instance URL is not configured".to_string());
+    }
+    if trimmed.ends_with("/search") {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("{trimmed}/search"))
+    }
+}
+
+/// SearXNG 自建实例：`GET {instance}/search?q=&format=json`，无需 API key。
+/// 实例须在 settings.yml 开启 json 输出，公网实例多数默认关闭。
+async fn search_searxng(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let url = searxng_search_url(&config.searxng_base_url)?;
+    let max_results = config.max_results.clamp(1, 10) as usize;
+    let form = [("q", query), ("format", "json")];
+    let response = send_with_retry("SearXNG search", retry_attempts, || {
+        with_standard_request_timeout(
+            state
+                .http
+                .post(&url)
+                .header("Accept", "application/json")
+                .form(&form),
+        )
+        .send()
+    })
+    .await?;
+    let parsed: SearxngSearchResponse = read_search_json("SearXNG search", response).await?;
+    Ok(parsed
+        .results
+        .into_iter()
+        .filter(|result| !result.url.trim().is_empty())
+        .take(max_results)
+        .map(|result| WebSearchResult {
+            title: result.title.trim().to_string(),
+            url: result.url.trim().to_string(),
+            content: result.content.trim().to_string(),
+            published_date: result.published_date.filter(|date| !date.trim().is_empty()),
+            score: None,
+        })
+        .collect())
 }
 
 async fn search_tavily(
@@ -683,8 +1361,10 @@ pub fn format_web_context(results: &[WebSearchResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_web_context, parse_exa_mcp_results, parse_grok_response, ExaSearchResponse,
-        OllamaSearchResponse, TavilySearchResponse, WebSearchResult,
+        format_web_context, parse_exa_mcp_results, parse_grok_response, parse_tinyfish_mcp_payload,
+        searxng_search_url, BochaSearchResponse, BraveSearchResponse, ExaSearchResponse,
+        OllamaSearchResponse, SearxngSearchResponse, SerperSearchResponse, TavilySearchResponse,
+        TinyfishSearchResponse, WebSearchResult, ZhipuSearchResponse,
     };
 
     #[test]
@@ -845,5 +1525,175 @@ mod tests {
         assert_eq!(answer, "Fallback answer.");
         // 去重：重复 URL 只保留一条
         assert_eq!(citations, vec!["https://x.ai/post"]);
+    }
+
+    #[test]
+    fn brave_response_deserializes_web_results() {
+        let raw = r#"{
+            "web": {
+                "results": [
+                    {
+                        "title": "Brave",
+                        "url": "https://brave.com/",
+                        "description": "Independent search",
+                        "extra_snippets": ["snippet two"],
+                        "page_age": "2026-08-01"
+                    }
+                ]
+            }
+        }"#;
+        let parsed: BraveSearchResponse = serde_json::from_str(raw).expect("brave json");
+        let result = &parsed.web.as_ref().unwrap().results[0];
+        assert_eq!(result.title, "Brave");
+        assert_eq!(result.extra_snippets, vec!["snippet two".to_string()]);
+        assert_eq!(result.page_age.as_deref(), Some("2026-08-01"));
+    }
+
+    #[test]
+    fn serper_response_deserializes_answer_box_and_organic() {
+        let raw = r#"{
+            "answerBox": { "answer": "42", "title": "Answer", "link": "https://example.com/a" },
+            "organic": [
+                { "title": "Hit", "link": "https://example.com/b", "snippet": "Body", "date": "Aug 18, 2026" }
+            ]
+        }"#;
+        let parsed: SerperSearchResponse = serde_json::from_str(raw).expect("serper json");
+        assert_eq!(
+            parsed.answer_box.as_ref().unwrap().answer.as_deref(),
+            Some("42")
+        );
+        assert_eq!(parsed.organic[0].link, "https://example.com/b");
+    }
+
+    #[test]
+    fn bocha_response_deserializes_web_pages() {
+        let raw = r#"{
+            "data": {
+                "webPages": {
+                    "value": [
+                        {
+                            "name": "博查",
+                            "url": "https://bochaai.com",
+                            "snippet": "short",
+                            "summary": "long summary",
+                            "datePublished": "2026-08-18"
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let parsed: BochaSearchResponse = serde_json::from_str(raw).expect("bocha json");
+        let page = &parsed.data.unwrap().web_pages.unwrap().value[0];
+        assert_eq!(page.name, "博查");
+        assert_eq!(page.summary, "long summary");
+        assert_eq!(page.date_published.as_deref(), Some("2026-08-18"));
+    }
+
+    #[test]
+    fn zhipu_response_deserializes_search_result() {
+        let raw = r#"{
+            "search_result": [
+                {
+                    "title": "财经",
+                    "link": "https://example.com/news",
+                    "content": "摘要",
+                    "publish_date": "2026-05-23"
+                }
+            ]
+        }"#;
+        let parsed: ZhipuSearchResponse = serde_json::from_str(raw).expect("zhipu json");
+        assert_eq!(parsed.search_result[0].link, "https://example.com/news");
+        assert_eq!(
+            parsed.search_result[0].publish_date.as_deref(),
+            Some("2026-05-23")
+        );
+    }
+
+    #[test]
+    fn tinyfish_response_deserializes_results() {
+        let raw = r#"{
+            "query": "web automation tools",
+            "results": [
+                {
+                    "position": 1,
+                    "site_name": "tinyfish.ai",
+                    "title": "TinyFish",
+                    "url": "https://www.tinyfish.ai/",
+                    "snippet": "Web infrastructure for AI agents",
+                    "date": "2026-08-01"
+                }
+            ]
+        }"#;
+        let parsed: TinyfishSearchResponse = serde_json::from_str(raw).expect("tinyfish json");
+        assert_eq!(parsed.results[0].url, "https://www.tinyfish.ai/");
+        assert_eq!(
+            parsed.results[0].snippet,
+            "Web infrastructure for AI agents"
+        );
+        assert_eq!(parsed.results[0].date.as_deref(), Some("2026-08-01"));
+    }
+
+    #[test]
+    fn tinyfish_mcp_parses_structured_results() {
+        let value = serde_json::json!({
+            "results": [
+                {
+                    "title": "TinyFish",
+                    "url": "https://www.tinyfish.ai/",
+                    "snippet": "Web infrastructure for AI agents"
+                }
+            ]
+        });
+        let results = parse_tinyfish_mcp_payload("", Some(&value), 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://www.tinyfish.ai/");
+        assert_eq!(results[0].content, "Web infrastructure for AI agents");
+    }
+
+    #[test]
+    fn tinyfish_mcp_parses_content_json() {
+        let raw = r#"{"results":[{"title":"Docs","url":"https://docs.tinyfish.ai/","snippet":"MCP"}]}"#;
+        let results = parse_tinyfish_mcp_payload(raw, None, 5);
+        assert_eq!(results[0].url, "https://docs.tinyfish.ai/");
+    }
+
+    #[test]
+    fn searxng_response_deserializes_results() {
+        let raw = r#"{
+            "results": [
+                { "title": "SearXNG", "url": "https://docs.searxng.org/", "content": "metasearch", "publishedDate": "2026-01-01" }
+            ]
+        }"#;
+        let parsed: SearxngSearchResponse = serde_json::from_str(raw).expect("searxng json");
+        assert_eq!(parsed.results[0].url, "https://docs.searxng.org/");
+        assert_eq!(
+            parsed.results[0].published_date.as_deref(),
+            Some("2026-01-01")
+        );
+    }
+
+    #[test]
+    fn searxng_search_url_appends_search_and_rejects_empty() {
+        assert_eq!(
+            searxng_search_url("https://searx.example/").unwrap(),
+            "https://searx.example/search"
+        );
+        assert_eq!(
+            searxng_search_url("https://searx.example/search").unwrap(),
+            "https://searx.example/search"
+        );
+        assert!(searxng_search_url("  ").is_err());
+    }
+
+    #[test]
+    fn with_query_encodes_spaces_and_joins_params() {
+        let url = super::with_query(
+            "https://api.search.brave.com/res/v1/web/search",
+            &[("q", "hello world"), ("count", "5")],
+        );
+        assert_eq!(
+            url,
+            "https://api.search.brave.com/res/v1/web/search?q=hello+world&count=5"
+        );
     }
 }

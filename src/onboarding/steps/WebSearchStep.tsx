@@ -1,8 +1,19 @@
-import type { Settings } from '../../api/tauri'
+import type { Settings, WebSearchProviderId } from '../../api/tauri'
 import { Input, Select, Toggle } from '../../settings/components'
 import type { I18n } from '../../settings/i18n'
+import { isWebSearchConfigured, webSearchKeyField } from '../../settings/webSearch'
 import { OnboardingFormRow } from '../OnboardingFormRow'
 import { OnboardingStepFrame } from '../OnboardingStepFrame'
+
+const ONBOARDING_PROVIDERS: { value: WebSearchProviderId; label: string; placeholder: string }[] = [
+  { value: 'tavily', label: 'Tavily', placeholder: 'tvly-...' },
+  { value: 'exa', label: 'Exa', placeholder: 'exa-...' },
+  { value: 'brave', label: 'Brave', placeholder: 'BSA...' },
+  { value: 'serper', label: 'Serper', placeholder: 'serper key' },
+  { value: 'tinyfish', label: 'TinyFish', placeholder: 'tinyfish key' },
+  { value: 'bocha', label: 'Bocha', placeholder: 'bocha key' },
+  { value: 'zhipu', label: 'Zhipu', placeholder: 'zhipu key' },
+]
 
 type WebSearchStepProps = {
   t: I18n
@@ -20,6 +31,9 @@ export function WebSearchStep({ t, settings, onChange }: WebSearchStepProps) {
     searchDepth: 'basic' as const,
   }
   const chatWebSearchEnabled = settings.chatTools.nativeTools?.webSearch !== false
+  const selected = ONBOARDING_PROVIDERS.find((item) => item.value === webSearch.provider)
+  const keyField = webSearchKeyField(webSearch.provider)
+  const keyValue = keyField ? String(webSearch[keyField] ?? '') : ''
 
   const updateWebSearch = (updates: Partial<NonNullable<Settings['lens']['webSearch']>>) => {
     onChange({
@@ -47,9 +61,7 @@ export function WebSearchStep({ t, settings, onChange }: WebSearchStepProps) {
     })
   }
 
-  const hasApiKey = webSearch.provider === 'exa'
-    ? webSearch.exaApiKey.trim() !== ''
-    : webSearch.tavilyApiKey.trim() !== ''
+  const hasApiKey = isWebSearchConfigured(webSearch)
 
   return (
     <OnboardingStepFrame title={t.onboardingWebSearchTitle} subtitle={t.onboardingWebSearchDesc}>
@@ -60,32 +72,25 @@ export function WebSearchStep({ t, settings, onChange }: WebSearchStepProps) {
             <Select
               className="w-full max-w-[220px]"
               value={webSearch.provider}
-              onChange={(value) => updateWebSearch({ provider: value as 'tavily' | 'exa' })}
-              options={[
-                { value: 'tavily', label: 'Tavily' },
-                { value: 'exa', label: 'Exa' },
-              ]}
+              onChange={(value) => updateWebSearch({ provider: value as WebSearchProviderId })}
+              options={ONBOARDING_PROVIDERS.map((item) => ({ value: item.value, label: item.label }))}
             />
           </OnboardingFormRow>
-          <OnboardingFormRow
-            label={t.lensWebSearchApiKey}
-            hint={!hasApiKey ? t.onboardingWebSearchKeyRequired : undefined}
-            stack
-          >
-            <Input
-              type="password"
-              value={webSearch.provider === 'exa' ? webSearch.exaApiKey : webSearch.tavilyApiKey}
-              onChange={(value) => {
-                if (webSearch.provider === 'exa') {
-                  updateWebSearch({ exaApiKey: value })
-                } else {
-                  updateWebSearch({ tavilyApiKey: value })
-                }
-              }}
-              placeholder={webSearch.provider === 'exa' ? 'exa-...' : 'tvly-...'}
-              mono
-            />
-          </OnboardingFormRow>
+          {keyField && (
+            <OnboardingFormRow
+              label={t.lensWebSearchApiKey}
+              hint={!hasApiKey ? t.onboardingWebSearchKeyRequired : undefined}
+              stack
+            >
+              <Input
+                type="password"
+                value={keyValue}
+                onChange={(value) => updateWebSearch({ [keyField]: value })}
+                placeholder={selected?.placeholder ?? 'API key'}
+                mono
+              />
+            </OnboardingFormRow>
+          )}
         </div>
       </div>
 

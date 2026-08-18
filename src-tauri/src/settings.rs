@@ -405,6 +405,13 @@ pub enum WebSearchProvider {
     ExaMcp,
     Ollama,
     Grok,
+    Brave,
+    Serper,
+    Bocha,
+    Zhipu,
+    Tinyfish,
+    TinyfishMcp,
+    Searxng,
     /// 前端可能列出尚未接入后端的占位服务商；持久化时兜底为未知，避免旧值导致整份设置解析失败。
     #[serde(other)]
     Unknown,
@@ -450,6 +457,33 @@ pub struct LensWebSearchConfig {
     pub grok_base_url: String,
     #[serde(default = "default_grok_system_prompt")]
     pub grok_system_prompt: String,
+    #[serde(default)]
+    pub brave_api_key: String,
+    #[serde(default = "default_brave_base_url")]
+    pub brave_base_url: String,
+    #[serde(default)]
+    pub serper_api_key: String,
+    #[serde(default = "default_serper_base_url")]
+    pub serper_base_url: String,
+    #[serde(default)]
+    pub bocha_api_key: String,
+    #[serde(default = "default_bocha_base_url")]
+    pub bocha_base_url: String,
+    #[serde(default)]
+    pub zhipu_api_key: String,
+    #[serde(default = "default_zhipu_base_url")]
+    pub zhipu_base_url: String,
+    #[serde(default)]
+    pub tinyfish_api_key: String,
+    #[serde(default = "default_tinyfish_base_url")]
+    pub tinyfish_base_url: String,
+    #[serde(default = "default_tinyfish_mcp_url")]
+    pub tinyfish_mcp_url: String,
+    /// TinyFish MCP 走 OAuth 2.1，不贴 API Key。授权结果存在这里，搜索时带 Authorization。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tinyfish_mcp_auth: Option<ConnectorAuth>,
+    #[serde(default)]
+    pub searxng_base_url: String,
     #[serde(default = "default_web_search_max_results")]
     pub max_results: u8,
     #[serde(default = "default_web_search_depth")]
@@ -472,6 +506,19 @@ impl Default for LensWebSearchConfig {
             grok_model: default_grok_model(),
             grok_base_url: default_grok_base_url(),
             grok_system_prompt: default_grok_system_prompt(),
+            brave_api_key: String::new(),
+            brave_base_url: default_brave_base_url(),
+            serper_api_key: String::new(),
+            serper_base_url: default_serper_base_url(),
+            bocha_api_key: String::new(),
+            bocha_base_url: default_bocha_base_url(),
+            zhipu_api_key: String::new(),
+            zhipu_base_url: default_zhipu_base_url(),
+            tinyfish_api_key: String::new(),
+            tinyfish_base_url: default_tinyfish_base_url(),
+            tinyfish_mcp_url: default_tinyfish_mcp_url(),
+            tinyfish_mcp_auth: None,
+            searxng_base_url: String::new(),
             max_results: default_web_search_max_results(),
             search_depth: default_web_search_depth(),
         }
@@ -500,6 +547,30 @@ fn default_grok_model() -> String {
 
 fn default_grok_base_url() -> String {
     "https://api.x.ai/v1".to_string()
+}
+
+fn default_brave_base_url() -> String {
+    "https://api.search.brave.com".to_string()
+}
+
+fn default_serper_base_url() -> String {
+    "https://google.serper.dev".to_string()
+}
+
+fn default_bocha_base_url() -> String {
+    "https://api.bochaai.com".to_string()
+}
+
+fn default_zhipu_base_url() -> String {
+    "https://open.bigmodel.cn/api/paas/v4".to_string()
+}
+
+fn default_tinyfish_base_url() -> String {
+    "https://api.search.tinyfish.ai".to_string()
+}
+
+fn default_tinyfish_mcp_url() -> String {
+    "https://agent.tinyfish.ai/mcp".to_string()
 }
 
 pub fn default_grok_system_prompt() -> String {
@@ -2150,6 +2221,38 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.lens.web_search.ollama_api_key.trim().to_string();
     settings.lens.web_search.grok_api_key =
         settings.lens.web_search.grok_api_key.trim().to_string();
+    settings.lens.web_search.brave_api_key =
+        settings.lens.web_search.brave_api_key.trim().to_string();
+    settings.lens.web_search.serper_api_key =
+        settings.lens.web_search.serper_api_key.trim().to_string();
+    settings.lens.web_search.bocha_api_key =
+        settings.lens.web_search.bocha_api_key.trim().to_string();
+    settings.lens.web_search.zhipu_api_key =
+        settings.lens.web_search.zhipu_api_key.trim().to_string();
+    settings.lens.web_search.tinyfish_api_key =
+        settings.lens.web_search.tinyfish_api_key.trim().to_string();
+    settings.lens.web_search.tinyfish_mcp_url = {
+        let trimmed = settings.lens.web_search.tinyfish_mcp_url.trim();
+        if trimmed.is_empty() {
+            default_tinyfish_mcp_url()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    if let Some(auth) = settings.lens.web_search.tinyfish_mcp_auth.as_mut() {
+        auth.access_token = auth.access_token.trim().to_string();
+    }
+    if settings
+        .lens
+        .web_search
+        .tinyfish_mcp_auth
+        .as_ref()
+        .is_some_and(|auth| auth.access_token.is_empty())
+    {
+        settings.lens.web_search.tinyfish_mcp_auth = None;
+    }
+    settings.lens.web_search.searxng_base_url =
+        settings.lens.web_search.searxng_base_url.trim().to_string();
     settings.lens.web_search.grok_model = {
         let trimmed = settings.lens.web_search.grok_model.trim();
         if trimmed.is_empty() {

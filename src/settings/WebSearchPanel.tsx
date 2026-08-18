@@ -1,13 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { AlertCircle, CheckCircle2, Eye, EyeOff, ExternalLink, Info, Loader2, Play } from 'lucide-react'
-import { api, type Settings } from '../api/tauri'
+import { api, type Settings, type WebSearchMcpAuth, type WebSearchProviderId } from '../api/tauri'
 import type { I18n, Lang } from './i18n'
 import { Input, Select, SettingRow, SettingsGroup, TextArea, Toggle } from './components'
 import { Button } from '../components/Button'
 
 type WebSearchConfig = NonNullable<Settings['lens']['webSearch']>
 /** 后端已接入的搜索源（settings 的 provider 枚举值）。 */
-type ProviderId = 'tavily' | 'exa' | 'exa_mcp' | 'ollama' | 'grok'
+type ProviderId = WebSearchProviderId
 
 type WebSearchPanelProps = {
   t: I18n
@@ -28,6 +28,19 @@ const DEFAULT_WEB_SEARCH: WebSearchConfig = {
   grokBaseUrl: 'https://api.x.ai/v1',
   grokSystemPrompt:
     "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations.",
+  braveApiKey: '',
+  braveBaseUrl: 'https://api.search.brave.com',
+  serperApiKey: '',
+  serperBaseUrl: 'https://google.serper.dev',
+  bochaApiKey: '',
+  bochaBaseUrl: 'https://api.bochaai.com',
+  zhipuApiKey: '',
+  zhipuBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+  tinyfishApiKey: '',
+  tinyfishBaseUrl: 'https://api.search.tinyfish.ai',
+  tinyfishMcpUrl: 'https://agent.tinyfish.ai/mcp',
+  tinyfishMcpAuth: null,
+  searxngBaseUrl: '',
   maxResults: 5,
   searchDepth: 'basic',
 }
@@ -37,16 +50,37 @@ type ProviderDef = {
   name: string
   site: string
   apiKeyUrl?: string
-  /** 使用哪个密钥字段；ExaMCP 无需密钥则留空。 */
-  keyField?: 'tavilyApiKey' | 'exaApiKey' | 'ollamaApiKey' | 'grokApiKey'
+  /** 使用哪个密钥字段；ExaMCP / SearXNG 无需密钥则留空。 */
+  keyField?:
+    | 'tavilyApiKey'
+    | 'exaApiKey'
+    | 'ollamaApiKey'
+    | 'grokApiKey'
+    | 'braveApiKey'
+    | 'serperApiKey'
+    | 'bochaApiKey'
+    | 'zhipuApiKey'
+    | 'tinyfishApiKey'
   /** API Key 输入框占位符。 */
   keyPlaceholder?: string
   /** 可编辑的 API base 字段（代理/自建网关可改）；写入对应 *BaseUrl 设置。 */
-  baseUrlField?: 'tavilyBaseUrl' | 'exaBaseUrl' | 'ollamaBaseUrl'
+  baseUrlField?:
+    | 'tavilyBaseUrl'
+    | 'exaBaseUrl'
+    | 'ollamaBaseUrl'
+    | 'braveBaseUrl'
+    | 'serperBaseUrl'
+    | 'bochaBaseUrl'
+    | 'zhipuBaseUrl'
+    | 'tinyfishBaseUrl'
+    | 'searxngBaseUrl'
   /** base 输入框占位符（也是官方默认值）。 */
   baseUrlPlaceholder?: string
-  /** 可编辑 endpoint（写入 exaMcpUrl，ExaMCP 专用）。 */
-  editableEndpoint?: boolean
+  /** 可编辑 MCP endpoint（写入 exaMcpUrl / tinyfishMcpUrl）。 */
+  endpointField?: 'exaMcpUrl' | 'tinyfishMcpUrl'
+  endpointPlaceholder?: string
+  /** 地址栏下方说明：keyless MCP / 自建实例。 */
+  urlHint?: 'exaMcp' | 'tinyfishMcp' | 'searxng'
   supportsDepth?: boolean
   /** 模型驱动搜索（Grok）：额外显示 型号 / 自定义网址 / 系统提示。 */
   modelBased?: boolean
@@ -83,8 +117,83 @@ const PROVIDERS: ProviderDef[] = [
     name: 'ExaMCP',
     site: 'https://docs.exa.ai/reference/exa-mcp',
     // Exa MCP 无需 API Key，只需 endpoint。
-    editableEndpoint: true,
+    endpointField: 'exaMcpUrl',
+    endpointPlaceholder: 'https://mcp.exa.ai/mcp',
+    urlHint: 'exaMcp',
     icon: '/search-icons/exa.png',
+  },
+  {
+    id: 'brave',
+    name: 'Brave',
+    site: 'https://brave.com/search/api/',
+    apiKeyUrl: 'https://api-dashboard.search.brave.com/app/keys',
+    keyField: 'braveApiKey',
+    keyPlaceholder: 'BSA...',
+    baseUrlField: 'braveBaseUrl',
+    baseUrlPlaceholder: 'https://api.search.brave.com',
+    icon: '/search-icons/brave.svg',
+  },
+  {
+    id: 'serper',
+    name: 'Serper',
+    site: 'https://serper.dev',
+    apiKeyUrl: 'https://serper.dev/api-key',
+    keyField: 'serperApiKey',
+    keyPlaceholder: 'serper key',
+    baseUrlField: 'serperBaseUrl',
+    baseUrlPlaceholder: 'https://google.serper.dev',
+    icon: '/search-icons/serper.png',
+  },
+  {
+    id: 'tinyfish',
+    name: 'TinyFish',
+    site: 'https://www.tinyfish.ai',
+    apiKeyUrl: 'https://agent.tinyfish.ai/api-keys',
+    keyField: 'tinyfishApiKey',
+    keyPlaceholder: 'tinyfish key',
+    baseUrlField: 'tinyfishBaseUrl',
+    baseUrlPlaceholder: 'https://api.search.tinyfish.ai',
+    icon: '/search-icons/tinyfish.png',
+  },
+  {
+    id: 'tinyfish_mcp',
+    name: 'TinyFish MCP',
+    site: 'https://docs.tinyfish.ai/mcp-integration',
+    endpointField: 'tinyfishMcpUrl',
+    endpointPlaceholder: 'https://agent.tinyfish.ai/mcp',
+    urlHint: 'tinyfishMcp',
+    icon: '/search-icons/tinyfish.png',
+  },
+  {
+    id: 'bocha',
+    name: 'Bocha',
+    site: 'https://open.bochaai.com',
+    apiKeyUrl: 'https://open.bochaai.com',
+    keyField: 'bochaApiKey',
+    keyPlaceholder: 'bocha key',
+    baseUrlField: 'bochaBaseUrl',
+    baseUrlPlaceholder: 'https://api.bochaai.com',
+    icon: '/search-icons/bocha.png',
+  },
+  {
+    id: 'zhipu',
+    name: 'Zhipu',
+    site: 'https://open.bigmodel.cn',
+    apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
+    keyField: 'zhipuApiKey',
+    keyPlaceholder: 'zhipu key',
+    baseUrlField: 'zhipuBaseUrl',
+    baseUrlPlaceholder: 'https://open.bigmodel.cn/api/paas/v4',
+    icon: '/search-icons/zhipu.png',
+  },
+  {
+    id: 'searxng',
+    name: 'SearXNG',
+    site: 'https://docs.searxng.org/dev/search_api.html',
+    baseUrlField: 'searxngBaseUrl',
+    baseUrlPlaceholder: 'https://searx.example',
+    urlHint: 'searxng',
+    icon: '/search-icons/searxng.svg',
   },
   {
     id: 'ollama',
@@ -171,6 +280,95 @@ function ApiKeyField({
       </button>
     </div>
   )
+}
+
+function TinyfishMcpAuthRow({
+  t,
+  url,
+  auth,
+  onChange,
+}: {
+  t: I18n
+  url: string
+  auth: WebSearchMcpAuth | null | undefined
+  onChange: (auth: WebSearchMcpAuth | null) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const authorized = (auth?.accessToken ?? '').trim() !== ''
+  const account = auth?.account?.trim()
+
+  const authorize = useCallback(async () => {
+    const endpoint = url.trim() || 'https://agent.tinyfish.ai/mcp'
+    setError(null)
+    setBusy(true)
+    try {
+      const server = await api.connectorOauthConnect({
+        url: endpoint,
+        name: 'TinyFish MCP',
+      })
+      const next = server.auth?.accessToken?.trim()
+        ? server.auth
+        : authFromOauthHeader(server.headers)
+      if (!next) {
+        setError(t.webSearchTinyfishMcpAuthFailed)
+        return
+      }
+      onChange(next)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [onChange, t.webSearchTinyfishMcpAuthFailed, url])
+
+  return (
+    <SettingRow
+      label={t.connectorsAuthOauth}
+      description={
+        authorized
+          ? (account
+            ? t.webSearchTinyfishMcpAuthorizedAs.replace('{account}', account)
+            : t.webSearchTinyfishMcpAuthorized)
+          : t.webSearchTinyfishMcpHint
+      }
+    >
+      <div className="flex flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          {authorized ? (
+            <Button
+              onClick={() => {
+                setError(null)
+                onChange(null)
+              }}
+              data-tauri-drag-region="false"
+            >
+              {t.webSearchTinyfishMcpDisconnect}
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              disabled={busy}
+              onClick={() => void authorize()}
+              data-tauri-drag-region="false"
+            >
+              {busy ? t.webSearchTinyfishMcpAuthorizing : t.webSearchTinyfishMcpAuthorize}
+            </Button>
+          )}
+        </div>
+        {error && (
+          <p className="max-w-[280px] text-right text-[12px] text-red-500">{error}</p>
+        )}
+      </div>
+    </SettingRow>
+  )
+}
+
+function authFromOauthHeader(headers: Record<string, string>): WebSearchMcpAuth | null {
+  const header = Object.entries(headers).find(([key]) => key.toLowerCase() === 'authorization')?.[1] ?? ''
+  const token = header.replace(/^Bearer\s+/i, '').trim()
+  if (!token) return null
+  return { kind: 'oauth', accessToken: token }
 }
 
 type TestState =
@@ -375,27 +573,44 @@ export function WebSearchPanel({ t, lang, webSearch, onChange }: WebSearchPanelP
             {!selected.modelBased && (
               <SettingRow
                 label={t.webSearchApiUrl}
-                description={selected.editableEndpoint ? t.webSearchExaMcpKeyless : undefined}
+                description={
+                  selected.urlHint === 'searxng'
+                    ? t.webSearchSearxngHint
+                    : selected.urlHint === 'exaMcp'
+                      ? t.webSearchExaMcpKeyless
+                      : selected.urlHint === 'tinyfishMcp'
+                        ? t.webSearchTinyfishMcpHint
+                        : undefined
+                }
                 stack
               >
-                {selected.editableEndpoint ? (
+                {selected.endpointField ? (
                   <Input
-                    value={config.exaMcpUrl || ''}
-                    onChange={(value) => onChange({ exaMcpUrl: value })}
-                    placeholder="https://mcp.exa.ai/mcp"
+                    value={config[selected.endpointField] || ''}
+                    onChange={(value) => onChange({ [selected.endpointField!]: value } as Partial<WebSearchConfig>)}
+                    placeholder={selected.endpointPlaceholder}
                     mono
                     className="w-full"
                   />
                 ) : selected.baseUrlField ? (
                   <Input
                     value={config[selected.baseUrlField] ?? ''}
-                    onChange={(value) => onChange({ [selected.baseUrlField!]: value })}
+                    onChange={(value) => onChange({ [selected.baseUrlField!]: value } as Partial<WebSearchConfig>)}
                     placeholder={selected.baseUrlPlaceholder}
                     mono
                     className="w-full"
                   />
                 ) : null}
               </SettingRow>
+            )}
+
+            {selected.urlHint === 'tinyfishMcp' && (
+              <TinyfishMcpAuthRow
+                t={t}
+                url={config.tinyfishMcpUrl || ''}
+                auth={config.tinyfishMcpAuth}
+                onChange={(tinyfishMcpAuth) => onChange({ tinyfishMcpAuth })}
+              />
             )}
 
             {selected.modelBased && (

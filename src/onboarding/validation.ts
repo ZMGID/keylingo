@@ -1,4 +1,5 @@
 import type { Settings } from '../api/tauri'
+import { isWebSearchConfigured } from '../settings/webSearch'
 
 export function providerHasUsableConfig(settings: Settings): boolean {
   return settings.providers.some((provider) =>
@@ -56,10 +57,5 @@ export function canCompleteOnboarding(settings: Settings): boolean {
 }
 
 export function webSearchConfigured(settings: Settings): boolean {
-  const webSearch = settings.lens?.webSearch
-  if (!webSearch) return false
-  if (webSearch.provider === 'exa') {
-    return webSearch.exaApiKey.trim() !== ''
-  }
-  return webSearch.tavilyApiKey.trim() !== ''
+  return isWebSearchConfigured(settings.lens?.webSearch)
 }

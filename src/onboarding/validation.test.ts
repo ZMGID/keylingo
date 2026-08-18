@@ -146,4 +146,37 @@ describe('onboarding validation', () => {
     })
     expect(webSearchConfigured(settings)).toBe(true)
   })
+
+  it('detects configured Brave and SearXNG search sources', () => {
+    expect(webSearchConfigured(baseSettings({
+      lens: {
+        enabled: true,
+        hotkey: 'CommandOrControl+Shift+G',
+        webSearch: {
+          enabled: true,
+          provider: 'brave',
+          tavilyApiKey: '',
+          exaApiKey: '',
+          braveApiKey: 'bsa-test',
+          maxResults: 5,
+          searchDepth: 'basic',
+        },
+      },
+    }))).toBe(true)
+    expect(webSearchConfigured(baseSettings({
+      lens: {
+        enabled: true,
+        hotkey: 'CommandOrControl+Shift+G',
+        webSearch: {
+          enabled: true,
+          provider: 'searxng',
+          tavilyApiKey: '',
+          exaApiKey: '',
+          searxngBaseUrl: 'https://searx.example',
+          maxResults: 5,
+          searchDepth: 'basic',
+        },
+      },
+    }))).toBe(true)
+  })
 })
