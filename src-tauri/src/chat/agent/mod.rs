@@ -19,5 +19,5 @@ pub mod types;
 pub use execute::{ToolExecutionContext, ToolExecutor, ToolExecutorFuture};
 pub use host::{AgentHost, AgentHostFuture};
 pub use loop_::run_agent_loop;
-pub use steering::{SteeringMessage, STEER_TOOL_NAME};
+pub use steering::{SteeringMessage, FOLLOW_UP_TOOL_NAME, STEER_TOOL_NAME};
 pub use types::{AgentRunConfig, AgentRunEntry};

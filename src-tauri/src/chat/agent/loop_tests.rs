@@ -45,6 +45,8 @@ struct TestHost {
     /// 待注入的用户插话（steering），按「批」排队：`take_steering_messages` 每调一次弹出
     /// 一批——模拟真实信箱「取一次清一次、之后新到的下次才取到」的时序。
     steering: Mutex<std::collections::VecDeque<Vec<SteeringMessage>>>,
+    /// 原生 follow-up 信箱，同样按批。只在终答边界被 `take_follow_up_messages` 取走。
+    follow_up: Mutex<std::collections::VecDeque<Vec<SteeringMessage>>>,
 }
 
 impl TestHost {
@@ -87,6 +89,13 @@ impl TestHost {
     fn with_steering_batches(batches: Vec<Vec<SteeringMessage>>) -> Self {
         Self {
             steering: Mutex::new(batches.into()),
+            ..Self::default()
+        }
+    }
+
+    fn with_follow_up_batches(batches: Vec<Vec<SteeringMessage>>) -> Self {
+        Self {
+            follow_up: Mutex::new(batches.into()),
             ..Self::default()
         }
     }
@@ -221,6 +230,14 @@ impl AgentHost for TestHost {
 
     fn take_steering_messages(&self, _conversation_id: &str) -> Vec<SteeringMessage> {
         self.steering
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pop_front()
+            .unwrap_or_default()
+    }
+
+    fn take_follow_up_messages(&self, _conversation_id: &str) -> Vec<SteeringMessage> {
+        self.follow_up
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .pop_front()
@@ -2414,6 +2431,107 @@ async fn run_loop_final_answer_with_pending_steering_continues() {
         .tool_records
         .iter()
         .any(|record| record.name == crate::chat::agent::STEER_TOOL_NAME));
+    assert_eq!(result.stream_outcome, "completed");
+}
+
+/// 内置循环的原生 follow-up：终答时信箱有下一轮消息 ⇒ 吸收终答、注入 `user_follow_up`
+/// 卡、同一 run 续跑。不是 `user_steer`（那会在轮首打断工具循环）。
+#[tokio::test]
+async fn run_loop_final_answer_with_pending_follow_up_continues() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"先答一版。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"补充完毕。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(3);
+    let host = TestHost::with_follow_up_batches(vec![vec![SteeringMessage::new(
+        "follow-late".into(),
+        "顺便把 README 也更新",
+    )
+    .expect("non-blank")]]);
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("run continues past the pending follow-up final answer");
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 2, "final answer + one continuation round");
+    assert!(
+        bodies[1].contains("先答一版"),
+        "absorbed assistant answer replays"
+    );
+    assert!(
+        bodies[1].contains("README"),
+        "the follow-up message reaches the model"
+    );
+    assert_eq!(result.content, "补充完毕。");
+    assert!(result
+        .tool_records
+        .iter()
+        .any(|record| record.name == crate::chat::agent::FOLLOW_UP_TOOL_NAME));
+    assert!(result
+        .tool_records
+        .iter()
+        .all(|record| record.name != crate::chat::agent::STEER_TOOL_NAME));
+    assert_eq!(result.stream_outcome, "completed");
+}
+
+/// follow-up 不能在工具循环的轮首注入：工具轮的请求里没有它，终答之后才进下一轮。
+#[tokio::test]
+async fn run_loop_follow_up_waits_until_final_answer() {
+    let server = MockModelServer::start(vec![
+        MockResponse::Sse(planning_tool_call_sse_events()),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"文件看过了。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+        MockResponse::Sse(vec![
+            r#"{"choices":[{"delta":{"content":"README 也改了。"}}]}"#.to_string(),
+            "[DONE]".to_string(),
+        ]),
+    ]);
+    let state = test_app_state();
+    let mut config = test_run_config(&state, &server.base_url, true);
+    config.effective_chat_tools.max_tool_rounds = Some(4);
+    let host = TestHost::with_follow_up_batches(vec![vec![SteeringMessage::new(
+        "follow-after-tools".into(),
+        "再改 README",
+    )
+    .expect("non-blank")]]);
+    let executor = RecordingExecutor::default();
+
+    let result = run_agent_loop(config, &host, &executor)
+        .await
+        .expect("follow-up after tools completes");
+
+    let bodies = server.captured_bodies();
+    assert_eq!(bodies.len(), 3, "tool round + final answer + follow-up round");
+    assert!(
+        !bodies[0].contains("README"),
+        "follow-up must not enter the tool-call round: {}",
+        bodies[0]
+    );
+    assert!(
+        !bodies[1].contains("README"),
+        "follow-up must not enter the pre-final tool-result round: {}",
+        bodies[1]
+    );
+    assert!(
+        bodies[2].contains("README"),
+        "follow-up reaches the continuation round"
+    );
+    assert!(result
+        .tool_records
+        .iter()
+        .any(|record| record.name == crate::chat::agent::FOLLOW_UP_TOOL_NAME));
     assert_eq!(result.stream_outcome, "completed");
 }
 

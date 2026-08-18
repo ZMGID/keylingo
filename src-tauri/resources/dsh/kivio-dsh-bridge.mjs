@@ -250,6 +250,30 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     return super.prompt({ ...params, contentBlocks })
   }
 
+  // Official SDK only exposes session/prompt → agent.followup() (next turn).
+  // dsh itself has agent.steer() (next-step inbox). Reuse prompt()'s
+  // UserMessage construction by routing followup to steer for this one call.
+  // @deepseek-ai/dsh-llm is a peer of the SDK server, not a kivio profile dep.
+  async steer(params) {
+    const sessionId = requireSessionId(params.sessionId)
+    const contentBlocks = await materializeContentBlocks(this.ctx, params?.contentBlocks)
+    if (contentBlocks.length === 0) {
+      throw new TypeError('session/steer requires contentBlocks')
+    }
+    const record = await this.getOrCreateSession(sessionId)
+    if (this.ctx.agents.get(record.handle.agent.id) !== record.handle.agent) {
+      throw new Error(`session agent was disposed outside the server: ${sessionId}`)
+    }
+    const agent = record.handle.agent
+    const enqueueFollowup = agent.followup.bind(agent)
+    agent.followup = agent.steer.bind(agent)
+    try {
+      return await super.prompt({ sessionId, contentBlocks })
+    } finally {
+      agent.followup = enqueueFollowup
+    }
+  }
+
   async handleRequest(method, params) {
     switch (method) {
       case 'session/open':
@@ -262,6 +286,8 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
         return this.listCommands(params)
       case 'session/stop-job':
         return this.stopJob(params)
+      case 'session/steer':
+        return this.steer(params)
       default:
         return super.handleRequest(method, params)
     }

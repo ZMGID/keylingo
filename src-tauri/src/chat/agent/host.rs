@@ -104,6 +104,12 @@ pub trait AgentHost: Send + Sync {
         Vec::new()
     }
 
+    /// 原生 follow-up：终答边界取走（take 语义）。不在轮首注入，避免打断还在跑的工具循环。
+    /// 默认空；GUI chat 才有这条通道。
+    fn take_follow_up_messages(&self, _conversation_id: &str) -> Vec<super::SteeringMessage> {
+        Vec::new()
+    }
+
     fn wait_for_generation_inactive<'a>(
         &'a self,
         conversation_id: &'a str,

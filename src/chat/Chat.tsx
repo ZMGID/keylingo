@@ -3758,7 +3758,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 「立刻引导」能不能给入口，取决于这一轮由谁在跑：
   //   - 内置 agent 循环 → 能（轮首注入，见 chat/agent/steering.rs）；
   //   - 外部 CLI → 看它的协议支不支持（`supportsSteering`，后端 RuntimeAgentDef 是唯一真源）。
-  //     codex 有 `turn/steer`；claude 的 stream-json 输入是顺序处理的、ACP 只有 prompt/cancel。
+  //     codex 有 `turn/steer`；pi 有 RPC `steer`；dsh 有 bridge `session/steer`。
+  //     claude 的 stream-json 输入是顺序处理的、ACP 只有 prompt/cancel。
   //   - 多模型一问多答 → 一律不给：同会话 N 条并发 run，按 conversation 键的信箱定不到某条臂。
   const activeExternalAgentSupportsSteering = useMemo(() => {
     const agentId = activeAgentRuntime.externalAgentId
@@ -3775,9 +3776,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const canSteerCurrentConversation =
     (usesExternalRuntime ? activeExternalAgentSupportsSteering : true)
     && activeReplyModels.length < 2
+  // 自动 follow-up：内置循环终答后续跑；Pi / dsh 走原生下一轮。多模型一问多答同样不给。
   const canFollowUpCurrentConversation =
-    usesExternalRuntime
-    && activeExternalAgentSupportsFollowUp
+    (usesExternalRuntime ? activeExternalAgentSupportsFollowUp : true)
     && activeReplyModels.length < 2
 
   const handleQueueMessage = useCallback((content: string, attachments: PendingAttachment[]) => {

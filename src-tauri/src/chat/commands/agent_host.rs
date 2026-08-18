@@ -170,6 +170,13 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
         self.state.take_chat_steering(conversation_id)
     }
 
+    fn take_follow_up_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Vec<crate::chat::agent::SteeringMessage> {
+        self.state.take_chat_follow_up(conversation_id)
+    }
+
     fn wait_for_generation_inactive<'a>(
         &'a self,
         conversation_id: &'a str,

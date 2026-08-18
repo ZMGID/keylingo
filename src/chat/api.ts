@@ -1587,7 +1587,7 @@ export const chatApi = {
     })
   },
 
-  /** Pi 原生 follow-up。成功表示 Pi 已接管这条消息；失败时调用方保留本地队列兜底。 */
+  /** 原生 follow-up。成功表示 CLI 已接管这条消息；失败时调用方保留本地队列兜底。 */
   async followUpMessage(
     conversationId: string,
     followUpId: string,

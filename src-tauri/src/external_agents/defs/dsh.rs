@@ -126,9 +126,10 @@ pub const DSH_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     // `session/prompt` 的官方 image 块是 `{type:"image", attachment:{attachmentId,…}}`。
     // Kivio 先发 base64，bridge 经 `ctx.attachments.saveImage` 落库后再改写成引用。
     supports_native_image: true,
-    // Bridge 暴露 cancel/resume，但没有追加输入的 `steer` RPC。
-    supports_steering: false,
-    supports_follow_up: false,
+    // Bridge 补 `session/steer` → `agent.steer()`（next-step inbox，当前轮下一步）。
+    // 官方 `session/prompt` → `agent.followup()`（下一轮 FIFO）。两套都接。
+    supports_steering: true,
+    supports_follow_up: true,
     image_mime_whitelist: &["image/jpeg", "image/png", "image/gif", "image/webp"],
     build_args: build_dsh_args,
 };
@@ -187,7 +188,8 @@ mod tests {
             StreamFormat::DshJsonRpc
         ));
         assert!(matches!(DSH_AGENT_DEF.slash_strategy, SlashStrategy::Dsh));
-        assert!(!DSH_AGENT_DEF.supports_steering);
+        assert!(DSH_AGENT_DEF.supports_steering);
+        assert!(DSH_AGENT_DEF.supports_follow_up);
         assert!(DSH_AGENT_DEF.supports_native_image);
         assert_eq!(
             DSH_AGENT_DEF.image_mime_whitelist,

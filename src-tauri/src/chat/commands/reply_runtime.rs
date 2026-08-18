@@ -115,6 +115,7 @@ impl Drop for ChatReplyGuard<'_> {
         // 没来得及消费的插话不能留给**下一条** run（用户是在对这一轮说话）。
         // 丢在这里不等于丢消息：前端队列里那条要等 `user_steer` 卡才出队，收不到就按普通消息重发。
         self.state.clear_chat_steering(&self.conversation_id);
+        self.state.clear_chat_follow_up(&self.conversation_id);
     }
 }
 

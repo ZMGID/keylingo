@@ -75,10 +75,10 @@ describe('QueuedMessages', () => {
 
   it('Pi follow-up 提交中显示独立状态并锁定操作', () => {
     const { onRestore } = setup([queued({ followingUp: true })])
-    expect(screen.getByTitle('正在排入 Pi')).toBeTruthy()
+    expect(screen.getByTitle('正在排入下一轮')).toBeTruthy()
     expect(screen.queryByLabelText(/立刻引导/)).toBeNull()
     expect(screen.queryByLabelText('移出队列')).toBeNull()
-    screen.getByTitle('正在排入 Pi').click()
+    screen.getByTitle('正在排入下一轮').click()
     expect(onRestore).not.toHaveBeenCalled()
   })
 
@@ -100,7 +100,7 @@ describe('QueuedMessages', () => {
 
   it('Pi follow-up 被拒时说明会降级为轮末发送', () => {
     setup([queued({ followUpRejected: true })])
-    expect(screen.getByText('Pi 排队失败，轮末发送')).toBeTruthy()
+    expect(screen.getByText('排队失败，轮末发送')).toBeTruthy()
     expect(screen.getByLabelText(/立刻引导/)).toBeTruthy()
   })
 

@@ -10,9 +10,9 @@ export interface QueuedMessage {
   attachments: PendingAttachment[]
   /** 已提交「立刻引导」、等下一个轮次边界生效。仍在队列里（见下方自愈规则）。 */
   steering: boolean
-  /** 正在提交 Pi 原生 follow-up；确认前不能撤回或被普通 drain 抢走。 */
+  /** 正在提交原生 follow-up；确认前不能撤回或被普通 drain 抢走。 */
   followingUp?: boolean
-  /** Pi 拒绝 follow-up 后显示一次降级提示，消息仍由本地队列轮末发送。 */
+  /** 对端拒绝 follow-up 后显示一次降级提示，消息仍由本地队列轮末发送。 */
   followUpRejected?: boolean
   /**
    * 上一次「立刻引导」没被受理（此刻没有在跑的轮次 / 该轮次不可注入，如 codex 的
@@ -191,7 +191,7 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
     return accepted
   }, [patch])
 
-  /** Pi 原生 follow-up：成功后由 Pi 继续同一 run；拒绝则保留并立即尝试本地轮末兜底。 */
+  /** 原生 follow-up：成功后由 CLI 继续同一 run；拒绝则保留并立即尝试本地轮末兜底。 */
   const followUp = useCallback(async (
     conversation: Conversation,
     messageId: string,
@@ -213,7 +213,7 @@ export function useMessageQueue({ onSendMessage, onRestoreToComposer }: UseMessa
         message.attachments,
       )
     } catch (err) {
-      console.error('Failed to queue a Pi follow-up:', err)
+      console.error('Failed to queue a follow-up:', err)
     }
     if (accepted) {
       patch(conversationId, (items) => items.filter((item) => item.id !== messageId))

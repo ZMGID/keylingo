@@ -9,10 +9,12 @@
 //! 客户端请求：
 //! - `initialize { cwd, provider, model, maxTokens? }`
 //! - `session/open { sessionId, resume }`
-//! - `session/prompt { sessionId, contentBlocks }`
+//! - `session/prompt { sessionId, contentBlocks }`（官方：`agent.followup()`，下一轮 FIFO；
+//!    用户本轮 `RunTurn` 与运行中 follow-up 都走它）
 //! - `session/command { sessionId, line }`（bridge：`ctx.commands.execute`，不进模型）
 //! - `session/commands { sessionId }`（bridge：`ctx.commands.list`，斜杠菜单发现）
 //! - `session/stop-job { sessionId, jobId }`（bridge：`ctx.jobs.kill`，子代理走 `subagents.interrupt`）
+//! - `session/steer { sessionId, contentBlocks }`（bridge：`agent.steer()`，当前轮 next-step）
 //! - `session/cancel { sessionId }`
 //! - `shutdown`
 //!
@@ -48,7 +50,8 @@ use uuid::Uuid;
 use crate::chat::model::ModelUsage;
 use crate::external_agents::prompt::is_cli_slash_input;
 use crate::external_agents::session::live::{
-    ApprovalAsk, ApprovalBridge, ApprovalDecision, SessionCommand, CANCELLED_SESSION_LOST,
+    ApprovalAsk, ApprovalBridge, ApprovalDecision, MessageInjectionKind, SessionCommand,
+    CANCELLED_SESSION_LOST,
 };
 use crate::external_agents::types::{ExternalCliSlashCommand, UnifiedAgentEvent};
 use crate::proc::NoConsoleWindow;
@@ -119,6 +122,42 @@ struct PendingCompact {
 struct PendingBackground {
     name: String,
     description: Option<String>,
+}
+
+struct PendingSteer {
+    id: String,
+    text: String,
+    kind: MessageInjectionKind,
+    accepted: tokio::sync::oneshot::Sender<bool>,
+}
+
+#[derive(Default)]
+struct PendingSteers {
+    inner: HashMap<u64, PendingSteer>,
+}
+
+impl Drop for PendingSteers {
+    fn drop(&mut self) {
+        for (_, pending) in self.inner.drain() {
+            let _ = pending.accepted.send(false);
+        }
+    }
+}
+
+impl PendingSteers {
+    fn insert(&mut self, rpc_id: u64, pending: PendingSteer) {
+        if let Some(replaced) = self.inner.insert(rpc_id, pending) {
+            let _ = replaced.accepted.send(false);
+        }
+    }
+
+    fn take(&mut self, rpc_id: u64) -> Option<PendingSteer> {
+        self.inner.remove(&rpc_id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 #[derive(Default)]
@@ -400,6 +439,10 @@ impl DshJsonRpcSession {
     }
 
     /// 在同一个 live agent 上执行一轮，直到匹配 session 的 `turn/end` + `status:idle`。
+    ///
+    /// 运行中 `FollowUp` 走官方 `session/prompt`（下一轮 FIFO）。对端若在两轮之间
+    /// 发 `idle`，这里按已 ACK 的 follow-up 数继续读，避免把下一轮丢给空闲泵；
+    /// 没有用户 follow-up 时仍在**第一次** idle 返回，把 tool-jobs 的汇报留给空闲泵。
     pub async fn run_turn(
         &mut self,
         prompt: &str,
@@ -433,7 +476,11 @@ impl DshJsonRpcSession {
         let mut cancel_started: Option<std::time::Instant> = None;
         let mut pending_asks: std::collections::HashMap<String, Value> =
             std::collections::HashMap::new();
+        let mut pending_steers = PendingSteers::default();
         let mut last_user_question_call: Option<(String, String)> = None;
+        let mut followup_acked: u32 = 0;
+        let mut turns_ended: u32 = 0;
+        let mut deferred_idle = false;
 
         loop {
             if let Some(bridge) = approvals.as_deref_mut() {
@@ -454,8 +501,46 @@ impl DshJsonRpcSession {
                     .await;
                     return Err("closed".to_string());
                 }
-                Ok(SessionCommand::Steer { accepted, .. }) => {
-                    let _ = accepted.send(false);
+                Ok(SessionCommand::Steer {
+                    id,
+                    text,
+                    images,
+                    kind,
+                    accepted,
+                }) => {
+                    if !dsh_can_accept_injection(
+                        prompt_acknowledged,
+                        is_slash,
+                        cancel_requested,
+                        kind,
+                    ) {
+                        let _ = accepted.send(false);
+                    } else {
+                        let rpc_id = self.next_id;
+                        self.next_id += 1;
+                        let display_text = if text.trim().is_empty() && !images.is_empty()
+                        {
+                            format!("附带图片（{}）", images.len())
+                        } else {
+                            text.clone()
+                        };
+                        let (method, params) =
+                            dsh_injection_rpc(kind, &self.session_id, &text, &images);
+                        match write_rpc(&mut self.stdin, rpc_id, method, params).await {
+                            Ok(()) => pending_steers.insert(
+                                rpc_id,
+                                PendingSteer {
+                                    id,
+                                    text: display_text,
+                                    kind,
+                                    accepted,
+                                },
+                            ),
+                            Err(_) => {
+                                let _ = accepted.send(false);
+                            }
+                        }
+                    }
                 }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
@@ -534,6 +619,68 @@ impl DshJsonRpcSession {
                     return Err(CANCELLED_SESSION_LOST.to_string());
                 }
                 return Err("cancelled".to_string());
+            }
+
+            if let Some(rpc_id) = value.get("id").and_then(Value::as_u64) {
+                if value.get("method").is_none() {
+                    if let Some(pending) = pending_steers.take(rpc_id) {
+                        let ok = value.get("result").is_some() && value.get("error").is_none();
+                        let _ = pending.accepted.send(ok);
+                        if ok {
+                            if pending.kind == MessageInjectionKind::FollowUp {
+                                followup_acked = followup_acked.saturating_add(1);
+                            }
+                            let event = match pending.kind {
+                                MessageInjectionKind::Steer => UnifiedAgentEvent::UserSteer {
+                                    id: pending.id,
+                                    text: pending.text,
+                                },
+                                MessageInjectionKind::FollowUp => UnifiedAgentEvent::UserFollowUp {
+                                    id: pending.id,
+                                    text: pending.text,
+                                },
+                            };
+                            let _ = events.send(event).await;
+                        }
+                        if deferred_idle
+                            && started
+                            && terminal.is_some()
+                            && cancel_id.is_none()
+                        {
+                            match dsh_idle_action(
+                                pending_steers.is_empty(),
+                                turns_ended,
+                                followup_acked,
+                            ) {
+                                DshIdleAction::Defer => {}
+                                DshIdleAction::Stay => {
+                                    reject_pending_asks(
+                                        &mut self.stdin,
+                                        &mut pending_asks,
+                                        "ASK_ABORTED",
+                                        "ask_user_question was aborted before the user answered",
+                                    )
+                                    .await;
+                                    started = false;
+                                    terminal = None;
+                                    deferred_idle = false;
+                                }
+                                DshIdleAction::Done => {
+                                    reject_pending_asks(
+                                        &mut self.stdin,
+                                        &mut pending_asks,
+                                        "ASK_ABORTED",
+                                        "ask_user_question was aborted before the user answered",
+                                    )
+                                    .await;
+                                    self.context_window = self.map_state.context_window;
+                                    return terminal.take().expect("checked above");
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
             }
 
             if value.get("id").and_then(Value::as_u64) == Some(prompt_id) {
@@ -616,15 +763,36 @@ impl DshJsonRpcSession {
                 "session.status" => match params.get("status").and_then(Value::as_str) {
                     Some("running") => started = true,
                     Some("idle") if started && terminal.is_some() && cancel_id.is_none() => {
-                        reject_pending_asks(
-                            &mut self.stdin,
-                            &mut pending_asks,
-                            "ASK_ABORTED",
-                            "ask_user_question was aborted before the user answered",
-                        )
-                        .await;
-                        self.context_window = self.map_state.context_window;
-                        return terminal.take().expect("checked above");
+                        match dsh_idle_action(
+                            pending_steers.is_empty(),
+                            turns_ended,
+                            followup_acked,
+                        ) {
+                            DshIdleAction::Defer => deferred_idle = true,
+                            DshIdleAction::Stay => {
+                                reject_pending_asks(
+                                    &mut self.stdin,
+                                    &mut pending_asks,
+                                    "ASK_ABORTED",
+                                    "ask_user_question was aborted before the user answered",
+                                )
+                                .await;
+                                started = false;
+                                terminal = None;
+                                deferred_idle = false;
+                            }
+                            DshIdleAction::Done => {
+                                reject_pending_asks(
+                                    &mut self.stdin,
+                                    &mut pending_asks,
+                                    "ASK_ABORTED",
+                                    "ask_user_question was aborted before the user answered",
+                                )
+                                .await;
+                                self.context_window = self.map_state.context_window;
+                                return terminal.take().expect("checked above");
+                            }
+                        }
                     }
                     _ => {}
                 },
@@ -644,6 +812,7 @@ impl DshJsonRpcSession {
                         })
                     {
                         terminal = Some(result);
+                        turns_ended = turns_ended.saturating_add(1);
                     }
                     self.context_window = self.map_state.context_window;
                     for event in mapped {
@@ -886,6 +1055,7 @@ pub fn spawn_dsh_session_actor_with_sink(
                     let _ = done.send(result);
                 }
                 SessionCommand::Steer { accepted, .. } => {
+                    // 空闲时没有在飞轮次：引导和 follow-up 都拒，前端按普通新轮发出。
                     let _ = accepted.send(false);
                 }
                 SessionCommand::PiSession { reply, .. } => {
@@ -1238,6 +1408,98 @@ fn normalize_sandbox(sandbox: Option<&str>) -> &'static str {
     }
 }
 
+fn dsh_can_accept_injection(
+    prompt_acknowledged: bool,
+    is_slash: bool,
+    cancel_requested: bool,
+    kind: MessageInjectionKind,
+) -> bool {
+    prompt_acknowledged
+        && !is_slash
+        && !cancel_requested
+        && matches!(
+            kind,
+            MessageInjectionKind::Steer | MessageInjectionKind::FollowUp
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DshIdleAction {
+    /// 还有引导 / follow-up RPC 没回执：这一帧 idle 先记下，ACK 后再判。
+    Defer,
+    /// 用户 follow-up 还在 FIFO 里，对端只是轮间短暂 idle。
+    Stay,
+    /// 本轮（含已 ACK 的 follow-up 轮）都结束了。
+    Done,
+}
+
+/// `RunTurn` 自己算 1 轮；每 ACK 一条 follow-up 再加一轮。
+/// 没有用户 follow-up 时第一次 idle 就 Done，把 tool-jobs 汇报留给空闲泵。
+fn dsh_idle_action(
+    pending_injections_empty: bool,
+    turns_ended: u32,
+    followup_acked: u32,
+) -> DshIdleAction {
+    if !pending_injections_empty {
+        return DshIdleAction::Defer;
+    }
+    if turns_ended >= 1 + followup_acked {
+        DshIdleAction::Done
+    } else {
+        DshIdleAction::Stay
+    }
+}
+
+fn dsh_injection_rpc(
+    kind: MessageInjectionKind,
+    session_id: &str,
+    text: &str,
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> (&'static str, Value) {
+    let method = match kind {
+        MessageInjectionKind::Steer => "session/steer",
+        MessageInjectionKind::FollowUp => "session/prompt",
+    };
+    (method, steer_rpc(session_id, text, images))
+}
+
+fn prompt_content_blocks(
+    text: &str,
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> Vec<Value> {
+    let mut content_blocks = vec![json!({ "type": "text", "text": text })];
+    for image in images {
+        let media_type = if image.mime == "image/jpg" {
+            "image/jpeg"
+        } else {
+            image.mime.as_str()
+        };
+        let name = image
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image");
+        content_blocks.push(json!({
+            "type": "image",
+            "data": image.data_base64,
+            "mediaType": media_type,
+            "name": name,
+        }));
+    }
+    content_blocks
+}
+
+fn steer_rpc(
+    session_id: &str,
+    text: &str,
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> Value {
+    json!({
+        "sessionId": session_id,
+        "contentBlocks": prompt_content_blocks(text, images),
+    })
+}
+
 fn turn_rpc(
     session_id: &str,
     prompt: &str,
@@ -1252,30 +1514,11 @@ fn turn_rpc(
             }),
         )
     } else {
-        let mut content_blocks = vec![json!({ "type": "text", "text": prompt })];
-        for image in images {
-            let media_type = if image.mime == "image/jpg" {
-                "image/jpeg"
-            } else {
-                image.mime.as_str()
-            };
-            let name = image
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("image");
-            content_blocks.push(json!({
-                "type": "image",
-                "data": image.data_base64,
-                "mediaType": media_type,
-                "name": name,
-            }));
-        }
         (
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "contentBlocks": content_blocks,
+                "contentBlocks": prompt_content_blocks(prompt, images),
             }),
         )
     }
@@ -2766,6 +3009,78 @@ mod tests {
             Some("No compactable history")
         );
         assert!(command_result_error(&json!({ "kind": "success", "text": "ok" })).is_none());
+    }
+
+    #[test]
+    fn steer_rpc_reuses_prompt_content_blocks() {
+        let image = crate::external_agents::attachments::ImageBlock {
+            data_base64: "Zm9v".to_string(),
+            mime: "image/png".to_string(),
+            path: PathBuf::from("shot.png"),
+        };
+        let params = steer_rpc("kivio-1", "改用 rg", &[image]);
+        assert_eq!(params["sessionId"], "kivio-1");
+        assert_eq!(params["contentBlocks"][0]["text"], "改用 rg");
+        assert_eq!(params["contentBlocks"][1]["type"], "image");
+        assert_eq!(params["contentBlocks"][1]["data"], "Zm9v");
+        assert_eq!(params["contentBlocks"][1]["mediaType"], "image/png");
+        assert_eq!(params["contentBlocks"][1]["name"], "shot.png");
+    }
+
+    #[test]
+    fn injection_is_only_accepted_on_an_acknowledged_agent_turn() {
+        assert!(dsh_can_accept_injection(
+            true,
+            false,
+            false,
+            MessageInjectionKind::Steer,
+        ));
+        assert!(dsh_can_accept_injection(
+            true,
+            false,
+            false,
+            MessageInjectionKind::FollowUp,
+        ));
+        assert!(!dsh_can_accept_injection(
+            false,
+            false,
+            false,
+            MessageInjectionKind::Steer,
+        ));
+        assert!(!dsh_can_accept_injection(
+            true,
+            true,
+            false,
+            MessageInjectionKind::FollowUp,
+        ));
+        assert!(!dsh_can_accept_injection(
+            true,
+            false,
+            true,
+            MessageInjectionKind::FollowUp,
+        ));
+    }
+
+    #[test]
+    fn follow_up_reuses_prompt_and_steer_uses_bridge_method() {
+        let (steer_method, steer_params) =
+            dsh_injection_rpc(MessageInjectionKind::Steer, "kivio-1", "改用 rg", &[]);
+        assert_eq!(steer_method, "session/steer");
+        assert_eq!(steer_params["contentBlocks"][0]["text"], "改用 rg");
+        let (follow_method, follow_params) =
+            dsh_injection_rpc(MessageInjectionKind::FollowUp, "kivio-1", "接着做", &[]);
+        assert_eq!(follow_method, "session/prompt");
+        assert_eq!(follow_params["contentBlocks"][0]["text"], "接着做");
+    }
+
+    #[test]
+    fn idle_waits_for_acked_follow_up_turns_but_not_tool_jobs() {
+        assert_eq!(dsh_idle_action(false, 1, 0), DshIdleAction::Defer);
+        assert_eq!(dsh_idle_action(true, 1, 0), DshIdleAction::Done);
+        assert_eq!(dsh_idle_action(true, 1, 1), DshIdleAction::Stay);
+        assert_eq!(dsh_idle_action(true, 2, 1), DshIdleAction::Done);
+        assert_eq!(dsh_idle_action(true, 3, 1), DshIdleAction::Done);
+        assert_eq!(dsh_idle_action(true, 0, 0), DshIdleAction::Stay);
     }
 
     #[test]

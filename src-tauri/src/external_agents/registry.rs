@@ -34,15 +34,27 @@ mod tests {
         assert!(get_agent_def("unknown").is_none());
     }
 
-    /// 「运行中注入」是逐协议能力。Codex 使用 `turn/steer`，Pi 使用 RPC `steer`；两者都必须
-    /// 等对端成功响应后才确认前端队列并发出 `UserSteer`。
+    /// 「运行中注入」是逐协议能力。Codex 使用 `turn/steer`，Pi 使用 RPC `steer`，
+    /// dsh 使用 bridge 的 `session/steer` → `agent.steer()`；都必须等对端成功响应后
+    /// 才确认前端队列并发出 `UserSteer`。
     #[test]
-    fn codex_and_pi_claim_mid_turn_steering() {
+    fn codex_pi_and_dsh_claim_mid_turn_steering() {
         let steerable: Vec<&str> = AGENT_DEFS
             .iter()
             .filter(|def| def.supports_steering)
             .map(|def| def.id)
             .collect();
-        assert_eq!(steerable, vec!["codex", "pi"]);
+        assert_eq!(steerable, vec!["codex", "pi", "dsh"]);
+    }
+
+    /// 原生 follow-up（当前轮结束后自动开下一轮）目前只有 Pi RPC 与 dsh `session/prompt`。
+    #[test]
+    fn pi_and_dsh_claim_native_follow_up() {
+        let follow_up: Vec<&str> = AGENT_DEFS
+            .iter()
+            .filter(|def| def.supports_follow_up)
+            .map(|def| def.id)
+            .collect();
+        assert_eq!(follow_up, vec!["pi", "dsh"]);
     }
 }

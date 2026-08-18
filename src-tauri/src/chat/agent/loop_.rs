@@ -12,7 +12,10 @@ use super::finalize::{
 use super::host::AgentHost;
 use super::planning::{planning_step, PlanningStepOutcome};
 use super::rounds::{run_tool_round, ToolRoundOutcome};
-use super::steering::{absorb_final_answer, inject_steering_messages, steering_pending};
+use super::steering::{
+    absorb_final_answer, follow_up_pending, inject_follow_up_messages, inject_steering_messages,
+    steering_pending,
+};
 use super::stop::patch_system_message;
 use super::synthesis::{synthesis_step, SynthesisFlow};
 use super::types::{AgentRunConfig, AgentRunResult};
@@ -63,6 +66,8 @@ pub(crate) struct RunState {
     /// 这里，`inject_steering_messages` 每个轮次边界只弹一条（one-at-a-time），剩余的由
     /// 后续边界与 FinalAnswer 边界的 `steering_pending` 检查保证送达。
     pub(crate) pending_steering: std::collections::VecDeque<super::steering::SteeringMessage>,
+    /// 原生 follow-up 本地队列。只在 FinalAnswer 边界取信箱、注入，不进轮首——那是 steer。
+    pub(crate) pending_follow_up: std::collections::VecDeque<super::steering::SteeringMessage>,
     pub(crate) skill_cache: skills::SkillRunCache,
     /// 本轮全部模型调用（规划/合成/压缩摘要）的 usage 累计；provider 不报则保持 None。
     pub(crate) usage: Option<crate::chat::model::ModelUsage>,
@@ -235,6 +240,7 @@ pub async fn run_agent_loop(
         planning_final_streamed: false,
         planning_empty_retried: false,
         pending_steering: std::collections::VecDeque::new(),
+        pending_follow_up: std::collections::VecDeque::new(),
         skill_cache: skills::SkillRunCache::default(),
         usage: None,
         last_step_usage: None,
@@ -305,14 +311,19 @@ pub async fn run_agent_loop(
 
             let planned = match planning_step(&env, &mut state, round).await? {
                 PlanningStepOutcome::FinalAnswer => {
-                    // pi 外层 while 的 followUp 语义：终答产生时信箱/队列里还有未送达的
-                    // 插话 ⇒ 终答落成一条**中间** assistant 消息，run 继续跑下一轮（轮首
-                    // 注入下一条插话）。否则 synthesis/finalize 期间到达的插话只能靠前端
-                    // 「重发为普通消息」兜底——用户视角是话被打回重排队、开了一条新 run。
+                    // 立刻引导：终答时还有没送达的插话 ⇒ 吸收终答、下一轮轮首注入。
+                    // 原生 follow-up：等终答，不打断工具循环；吸收后在本边界注入一条再续跑。
                     if steering_pending(&env, &mut state) {
                         if let Some(message) = state.planning_final_message.take() {
                             absorb_final_answer(&mut state, message);
                         }
+                        continue;
+                    }
+                    if follow_up_pending(&env, &mut state) {
+                        if let Some(message) = state.planning_final_message.take() {
+                            absorb_final_answer(&mut state, message);
+                        }
+                        inject_follow_up_messages(&env, &mut state, round);
                         continue;
                     }
                     break;

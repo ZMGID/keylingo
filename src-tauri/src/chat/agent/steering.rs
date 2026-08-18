@@ -66,24 +66,13 @@ pub(crate) fn inject_steering_messages(env: &LoopEnv<'_>, state: &mut RunState, 
     let Some(message) = state.pending_steering.pop_front() else {
         return;
     };
-    let ids = env.ids();
-    state.runtime_messages.push(serde_json::json!({
-        "role": "user",
-        "content": message.text,
-    }));
-    state.generated_api_messages.push(serde_json::json!({
-        "role": "user",
-        "content": message.text,
-    }));
-
-    let record = build_steer_record(&message, round);
-    env.host
-        .emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
-    let order = state.segment_builder.next_order();
-    state
-        .segment_builder
-        .append_existing_segments(vec![build_steer_segment(order, &record.id, round)]);
-    state.tool_records.push(record);
+    append_injected_user_turn(
+        env,
+        state,
+        round,
+        &message,
+        build_steer_record(&message, round),
+    );
 }
 
 /// FinalAnswer 边界的外层检查（对齐 pi agent-loop 的外层 `while`：agent 本要停下时轮询
@@ -95,6 +84,54 @@ pub(crate) fn steering_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool 
         .pending_steering
         .extend(env.host.take_steering_messages(&env.config.conversation_id));
     !state.pending_steering.is_empty()
+}
+
+/// 终答边界才取 follow-up 信箱。轮首不取，避免把「下一轮再问」做成「下一步就插进工具循环」。
+pub(crate) fn follow_up_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool {
+    state
+        .pending_follow_up
+        .extend(env.host.take_follow_up_messages(&env.config.conversation_id));
+    !state.pending_follow_up.is_empty()
+}
+
+/// 终答已被吸收后注入**一条** follow-up（one-at-a-time，与 steer 同一纪律）。
+pub(crate) fn inject_follow_up_messages(env: &LoopEnv<'_>, state: &mut RunState, round: u32) {
+    let Some(message) = state.pending_follow_up.pop_front() else {
+        return;
+    };
+    append_injected_user_turn(
+        env,
+        state,
+        round,
+        &message,
+        build_follow_up_record(&message, round),
+    );
+}
+
+fn append_injected_user_turn(
+    env: &LoopEnv<'_>,
+    state: &mut RunState,
+    round: u32,
+    message: &SteeringMessage,
+    record: ToolCallRecord,
+) {
+    let ids = env.ids();
+    state.runtime_messages.push(serde_json::json!({
+        "role": "user",
+        "content": message.text,
+    }));
+    state.generated_api_messages.push(serde_json::json!({
+        "role": "user",
+        "content": message.text,
+    }));
+
+    env.host
+        .emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
+    let order = state.segment_builder.next_order();
+    state
+        .segment_builder
+        .append_existing_segments(vec![build_steer_segment(order, &record.id, round)]);
+    state.tool_records.push(record);
 }
 
 /// 把本该收束的终答落成一条**中间** assistant 消息（对齐 pi：终答照常成为历史的一部分，
@@ -138,7 +175,7 @@ pub fn build_steer_record(message: &SteeringMessage, round: u32) -> ToolCallReco
     }
 }
 
-/// Pi 原生 follow-up 的显示记录。它与 steer 同样渲染成时间线里的用户小气泡，
+/// 原生 follow-up 的显示记录。它与 steer 同样渲染成时间线里的用户小气泡，
 /// 但保留独立类型，避免把“当前轮次引导”和“轮末追加”混成一种协议语义。
 pub fn build_follow_up_record(message: &SteeringMessage, round: u32) -> ToolCallRecord {
     ToolCallRecord {
@@ -193,5 +230,23 @@ mod tests {
         let long = "字".repeat(MAX_STEER_CHARS + 10);
         let clipped = SteeringMessage::new("b".into(), &long).expect("non-blank");
         assert_eq!(clipped.text.chars().count(), MAX_STEER_CHARS);
+    }
+
+    #[test]
+    fn follow_up_record_is_not_a_steer_card() {
+        let message = SteeringMessage::new("f1".into(), "接着做").expect("non-blank");
+        let record = build_follow_up_record(&message, 2);
+        assert_eq!(record.name, FOLLOW_UP_TOOL_NAME);
+        assert_eq!(
+            record.structured_content.as_ref().and_then(|value| value.get("type")),
+            Some(&serde_json::json!("user_follow_up"))
+        );
+        assert_eq!(
+            record
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("follow_up_id")),
+            Some(&serde_json::json!("f1"))
+        );
     }
 }

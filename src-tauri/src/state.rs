@@ -226,6 +226,10 @@ pub struct AppState {
     /// 无法定向到具体某条臂，所以前端在 `reply_models ≥ 2` 时不给「立刻引导」入口。要支持就把键
     /// 换成 run_id，并让前端把当前 run_id 传进来。
     pub pending_chat_steering: Mutex<HashMap<String, Vec<crate::chat::agent::SteeringMessage>>>,
+    /// 运行中原生 follow-up 信箱：conversation_id → 待在终答后续跑的用户消息。
+    /// 不在轮首注入（那是 `pending_chat_steering`）。仅内存、不持久化。
+    /// 同样按 conversation_id 建键，前端在 `reply_models ≥ 2` 时不给自动 follow-up。
+    pub pending_chat_follow_up: Mutex<HashMap<String, Vec<crate::chat::agent::SteeringMessage>>>,
     /// Lens 启动前抓到的选中文本：放在这里等前端 enterSelect 来取走。
     /// 取一次清一次（take 语义）。无选中 / 取过 / translate 模式 = None。
     pub pending_selection: Mutex<Option<String>>,
@@ -410,6 +414,7 @@ impl AppState {
             external_live_sessions: Mutex::new(HashMap::new()),
             pending_chat_external_sends: Mutex::new(Vec::new()),
             pending_chat_steering: Mutex::new(HashMap::new()),
+            pending_chat_follow_up: Mutex::new(HashMap::new()),
             pending_selection: Mutex::new(None),
             lens_freeze_frame_image_id: Mutex::new(None),
             lens_pending_reset: Mutex::new(None),
@@ -695,6 +700,49 @@ impl AppState {
             .remove(conversation_id);
     }
 
+    /// 用户在运行中排 follow-up：放进终答后续跑的信箱。没有活跃 run 则 false。
+    pub fn push_chat_follow_up(
+        &self,
+        conversation_id: &str,
+        message: crate::chat::agent::SteeringMessage,
+    ) -> bool {
+        if self
+            .chat_active_generations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(conversation_id)
+            .map(|active| active.is_empty())
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        self.pending_chat_follow_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(conversation_id.to_string())
+            .or_default()
+            .push(message);
+        true
+    }
+
+    pub fn take_chat_follow_up(
+        &self,
+        conversation_id: &str,
+    ) -> Vec<crate::chat::agent::SteeringMessage> {
+        self.pending_chat_follow_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conversation_id)
+            .unwrap_or_default()
+    }
+
+    pub fn clear_chat_follow_up(&self, conversation_id: &str) {
+        self.pending_chat_follow_up
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conversation_id);
+    }
+
     /// 对话被删除时清理其按 conversation_id 累积的运行态痕迹：活跃 generation 集合、
     /// 会话级工具同意标记、按工具名的「总是允许」集合。三者都严格按 conversation_id 取键，对话删除后再不会被
     /// 引用，是最无歧义的有界清理点（不影响其它活跃对话）。generation 号本身来自进程级
@@ -713,6 +761,7 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(conv, _)| conv != conversation_id);
         self.clear_chat_steering(conversation_id);
+        self.clear_chat_follow_up(conversation_id);
     }
 
     /// 尝试占用某个对话的某条 run 回复槽位。同会话允许多条 run 并存（多模型一问多答）；
@@ -1057,7 +1106,28 @@ impl AppState {
             .map(|session| session.control.clone())
     }
 
-    /// 取出 Pi 常驻会话控制通道。follow-up 是 Pi RPC 专有命令，后端不依赖前端能力门控。
+    /// 取出宣称 follow-up 能力的常驻会话控制通道，以及该 CLI 的图片 MIME 白名单。
+    /// 没有常驻会话、或该协议不支持 follow-up，都回 `None`（前端按普通轮末发送）。
+    pub fn external_follow_up_live_session(
+        &self,
+        conversation_id: &str,
+    ) -> Option<(
+        tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
+        &'static [&'static str],
+    )> {
+        let map = self
+            .external_live_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let session = map.get(conversation_id)?;
+        let def = crate::external_agents::registry::get_agent_def(&session.agent_id)?;
+        if !def.supports_follow_up {
+            return None;
+        }
+        Some((session.control.clone(), def.image_mime_whitelist))
+    }
+
+    /// 取出 Pi 常驻会话控制通道（session tree / fork / switch）。
     pub fn external_pi_live_session_control(
         &self,
         conversation_id: &str,

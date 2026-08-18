@@ -139,7 +139,8 @@ pub struct DetectedAgent {
     /// 前端据此决定排队条上给不给「立刻引导」。
     #[serde(default)]
     pub supports_steering: bool,
-    /// 协议是否支持把消息排到当前运行之后继续处理。当前只有 Pi RPC `follow_up`。
+    /// 协议是否支持把消息排到当前运行之后继续处理。
+    /// 当前：Pi RPC `follow_up`，dsh 官方 `session/prompt`。
     #[serde(default)]
     pub supports_follow_up: bool,
 }
@@ -187,12 +188,14 @@ pub struct RuntimeAgentDef {
     pub supports_native_image: bool,
     /// 该 CLI 的协议能否往**在飞的轮次**里追加一条用户输入（「立刻引导」）。
     ///
-    /// Codex 使用 `turn/steer`，Pi 使用 RPC `steer`；两者都只在对端成功响应后确认。
+    /// Codex 使用 `turn/steer`，Pi 使用 RPC `steer`，dsh 使用 bridge `session/steer`
+    ///（`agent.steer()`，next-step inbox）。都只在对端成功响应后确认。
     /// claude 的 stream-json 输入是顺序处理、ACP 只有 `session/prompt` 与 `session/cancel`，
     /// 因而仍不声明该能力。
     pub supports_steering: bool,
     /// 该 CLI 的协议能否把一条用户消息排到当前运行完成后继续处理。
-    /// Pi 使用 RPC `follow_up`；其余协议仍由 Kivio 在轮末发起普通新轮次。
+    /// Pi 使用 RPC `follow_up`；dsh 使用官方 `session/prompt` → `agent.followup()`。
+    /// 其余协议仍由 Kivio 在轮末发起普通新轮次。
     pub supports_follow_up: bool,
     /// 允许原生注入的图片 MIME 白名单；空 = 不限。Claude stream-json 仅认 jpeg/png/gif/webp，
     /// 超出的图片降级为路径文本（不静默丢弃）。

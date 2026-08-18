@@ -524,7 +524,7 @@ export interface DetectedExternalAgent {
   /** 该 CLI 的协议能否往在飞的轮次里注入一条用户消息（「立刻引导」）。 */
   supportsSteering?: boolean
   supports_steering?: boolean
-  /** 该 CLI 是否支持在当前运行后原生排队继续处理。当前只有 Pi。 */
+  /** 该 CLI 是否支持在当前运行后原生排队继续处理（Pi / dsh）。 */
   supportsFollowUp?: boolean
   supports_follow_up?: boolean
 }

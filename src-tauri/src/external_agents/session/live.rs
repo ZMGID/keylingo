@@ -117,9 +117,11 @@ pub enum SessionCommand {
     },
     /// Interrupt the in-flight turn without killing the process (protocol-level interrupt).
     Cancel,
-    /// 运行中注入一条用户消息（steering）：不中断在飞的轮次，让 CLI 带着新指示继续。
+    /// 运行中注入一条用户消息：不中断在飞的轮次。
     ///
-    /// `accepted` 回 true 只表示**协议层受理了**（codex 的 `turn/steer` 返回了 result）。
+    /// `kind` 区分立刻引导（当前轮）与 follow-up（下一轮）。`accepted` 回 true 只表示
+    /// 协议层受理了（codex `turn/steer`、Pi `steer` / `follow_up`、dsh `session/steer` /
+    /// `session/prompt`）。
     /// 回 false 的情形都要让调用方把这条消息留在队列里、按普通消息在轮末发出去：
     /// 轮次之间没有可注入的对象、该 CLI 的协议不支持、或者对端明确拒绝
     /// （codex 的 review / compact 轮次不可 steer）。**绝不能悄悄吞掉**。

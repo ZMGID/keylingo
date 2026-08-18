@@ -21,7 +21,7 @@
 //!
 //! 包含 Kivio profile 的装配与进程级配置：
 //! - `kivio-dsh-bridge.mjs` 一条 insert（在官方 server 上补 `resume` / `cancel` / `command` /
-//!   `commands` / `stop-job` RPC）
+//!   `commands` / `stop-job` / `steer` RPC；follow-up 走官方 `session/prompt`）
 //! - `hmr` 关掉：那是给开发热重载用的，常驻会话里只会带来意外重连
 //! - `session-title-llm` 关掉：Kivio 自己起标题，留着等于每轮多付一次模型调用
 //!   （实测确认它会发 `session/title-llm-request`）

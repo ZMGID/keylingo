@@ -400,8 +400,8 @@ pub(crate) fn chat_submit_user_choice(
 ///   - **内置 agent 循环** → 放进 `pending_chat_steering` 信箱，`run_agent_loop` 在下一个轮次
 ///     边界取走（`chat::agent::steering`）。
 ///   - **外部 CLI** → 把 `SessionCommand::Steer` 送进常驻会话的 actor，由各协议自己决定：
-///     codex 走 `turn/steer`（真注入，不中断）；claude 的 stream-json 输入是**顺序**处理的、
-///     没有注入原语，ACP 也没有 —— 那两条会回 false。
+///     codex 走 `turn/steer`（真注入，不中断）；dsh 走 `session/steer` → `agent.steer()`；
+///     claude 的 stream-json 输入是**顺序**处理的、没有注入原语，ACP 也没有 —— 那两条会回 false。
 ///
 /// 返回 `false` = 没进去（此刻没有在跑的轮次 / 该协议不支持 / 对端拒绝），前端据此把这条留在
 /// 队列里，按普通消息在轮末发出去。注意「进去了」不等于「已生效」：真正生效的信号是那张
@@ -442,9 +442,13 @@ pub(crate) async fn chat_steer_message(
     Ok(state.push_chat_steering(&conversation_id, message))
 }
 
-/// Pi 原生 follow-up：把消息排到当前运行结束后，由同一个常驻 Pi 会话继续处理。
+/// 原生 follow-up：把消息排到当前运行结束后，由同一个常驻会话 / 内置循环继续处理。
 ///
-/// 返回 false 时前端保留本地队列，轮末按普通消息发送；只有 Pi RPC 明确响应 success 才返回 true。
+/// 外部 CLI：Pi RPC `follow_up`；dsh 官方 `session/prompt` → `agent.followup()`。
+/// 内置 Kivio Agent / Chat：放进 `pending_chat_follow_up` 信箱，终答边界注入（不打断工具循环）。
+/// 空闲（没有在飞轮次）时回 false，前端再按普通新轮发出。
+///
+/// 返回 false 时前端保留本地队列，轮末按普通消息发送；只有对端明确响应 success 才返回 true。
 #[tauri::command]
 pub(crate) async fn chat_follow_up_message(
     state: State<'_, AppState>,
@@ -460,42 +464,51 @@ pub(crate) async fn chat_follow_up_message(
     let (image_paths, file_paths): (Vec<_>, Vec<_>) = paths
         .into_iter()
         .partition(|path| crate::external_agents::attachments::image_mime_for_path(path).is_some());
-    let (images, degraded_images) = crate::external_agents::attachments::load_image_blocks(
-        &image_paths,
-        crate::external_agents::defs::pi::PI_AGENT_DEF.image_mime_whitelist,
-    );
-    content.push_str(&crate::external_agents::attachments::image_paths_note(
-        &degraded_images,
-    ));
-    content.push_str(&crate::external_agents::attachments::file_attachments_note(
-        &file_paths,
-    ));
-    if content.trim().is_empty() && images.is_empty() {
+    if let Some((control, image_mime_whitelist)) =
+        state.external_follow_up_live_session(&conversation_id)
+    {
+        let (images, degraded_images) = crate::external_agents::attachments::load_image_blocks(
+            &image_paths,
+            image_mime_whitelist,
+        );
+        content.push_str(&crate::external_agents::attachments::image_paths_note(
+            &degraded_images,
+        ));
+        content.push_str(&crate::external_agents::attachments::file_attachments_note(
+            &file_paths,
+        ));
+        if content.trim().is_empty() && images.is_empty() {
+            return Ok(false);
+        }
+        let text = crate::chat::agent::SteeringMessage::new(follow_up_id.clone(), &content)
+            .map(|message| message.text)
+            .unwrap_or_default();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let sent = control
+            .send(
+                crate::external_agents::session::live::SessionCommand::Steer {
+                    id: follow_up_id,
+                    text,
+                    images,
+                    kind: crate::external_agents::session::live::MessageInjectionKind::FollowUp,
+                    accepted: accepted_tx,
+                },
+            )
+            .await
+            .is_ok();
+        if !sent {
+            return Ok(false);
+        }
+        return Ok(accepted_rx.await.unwrap_or(false));
+    }
+    // 内置循环只接文本（含虚拟文本附件）。磁盘/图片走轮末普通发送，避免静默丢附件。
+    if !image_paths.is_empty() || !file_paths.is_empty() {
         return Ok(false);
     }
-    let text = crate::chat::agent::SteeringMessage::new(follow_up_id.clone(), &content)
-        .map(|message| message.text)
-        .unwrap_or_default();
-    let Some(control) = state.external_pi_live_session_control(&conversation_id) else {
+    let Some(message) = crate::chat::agent::SteeringMessage::new(follow_up_id, &content) else {
         return Ok(false);
     };
-    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-    let sent = control
-        .send(
-            crate::external_agents::session::live::SessionCommand::Steer {
-                id: follow_up_id,
-                text,
-                images,
-                kind: crate::external_agents::session::live::MessageInjectionKind::FollowUp,
-                accepted: accepted_tx,
-            },
-        )
-        .await
-        .is_ok();
-    if !sent {
-        return Ok(false);
-    }
-    Ok(accepted_rx.await.unwrap_or(false))
+    Ok(state.push_chat_follow_up(&conversation_id, message))
 }
 
 /// 前端 Pyodide 执行完成后回传结果。
