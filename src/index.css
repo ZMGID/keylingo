@@ -43,7 +43,8 @@ body {
   margin: 0;
   overflow: hidden;
   font-family: var(--font-sans);
-  /* macOS 透明窗口需要明确透明背景 */
+  /* 必须保持透明：暗色 color-scheme / --color-background 一旦落到 canvas，
+     Windows Mica / macOS Menu 会从卡片缝和半透明侧栏里消失。 */
   background-color: transparent;
   background: transparent;
   -webkit-font-smoothing: antialiased;
@@ -85,6 +86,7 @@ body {
   --danger: #c4341c;
   --danger-soft: #fdecea;
   --shadow-sm: 0 1px 1px rgba(15, 15, 20, 0.04);
+  color: var(--text);
 }
 
 .dark {
@@ -113,6 +115,7 @@ body {
   --danger: #ef6a5a;
   --danger-soft: rgba(239, 106, 90, 0.14);
   --shadow-sm: 0 1px 1px rgba(0, 0, 0, 0.4);
+  color: var(--text);
 }
 
 /* ===== Motion tokens =====
@@ -597,6 +600,7 @@ body {
   position: relative;
   height: 100%;
   width: 100%;
+  color: var(--text);
   display: flex;
   /* Windows / Linux：第一行是全宽标题栏带，第二行才是侧栏 + 主区（见 .chat-titlebar-strip）。
      macOS 用系统 Overlay 标题栏、不渲染那条带，此时只有内容一行，column 与 row 等价。 */
@@ -1245,7 +1249,8 @@ button.chat-composer-status-item:hover {
    所以两端都要留，不能像纯透明那样把字直接放到壁纸上。
    主区卡片刻意不透：那是长文本阅读面，正文压在壁纸取色上会掉可读性。
    模糊由系统合成器负责，这里绝不加 backdrop-filter。 */
-.chat-window-host--native-effect .chat-window-shell {
+.chat-window-host--native-effect .chat-window-shell,
+.dark .chat-window-host--native-effect .chat-window-shell {
   background: transparent;
 }
 
@@ -1254,10 +1259,28 @@ button.chat-composer-status-item:hover {
   background: color-mix(in srgb, var(--theme-surface-soft) 72%, transparent);
 }
 
-/* 暗色 scrim 略薄（66% vs 72%）：深底上壁纸取色本身更暗，透多一点仍压得住文字。 */
+/* 暗色 scrim 更薄：深底 Mica 本身偏暗，66% 实色会把壁纸取色吃没，读成「没开半透明」。 */
 .dark .chat-window-host--native-effect .chat-sidebar-shell,
 .dark .chat-window-host--native-effect .chat-dock-shell {
-  background: color-mix(in srgb, #262629 66%, transparent);
+  background: color-mix(in srgb, #262629 48%, transparent);
+}
+
+/* 原生控件的暗色方案只挂在不透明阅读面上，绝不挂 html：
+   WebView2 会给 color-scheme:dark 的根节点铺一层不透明深色 canvas，挡住 Mica。 */
+.chat-main-pane,
+.chat-center-page,
+.settings-embedded,
+.onboarding-shell,
+.window-frosted {
+  color-scheme: light;
+}
+
+.dark .chat-main-pane,
+.dark .chat-center-page,
+.dark .settings-embedded,
+.dark .onboarding-shell,
+.dark .window-frosted {
+  color-scheme: dark;
 }
 
 .dark .chat-composer-shell {
@@ -1671,6 +1694,7 @@ button.chat-composer-status-item:hover {
   border-radius: 10px;
   border: 1px solid var(--theme-surface-border);
   background: var(--theme-surface);
+  color: var(--text);
   box-shadow:
     0 0 0 0.5px rgba(24, 24, 27, 0.04),
     0 4px 12px -4px rgba(24, 24, 27, 0.12),
@@ -2645,15 +2669,16 @@ button.chat-composer-status-item:hover {
   --accent-hover: #1d4ed8;
   --accent-soft: #eff6ff;
   --radius-card: 12px;
+  color: var(--text);
   background: var(--bg);
   overflow: hidden;
   font-size: 13px;
 }
 
 .dark .chat-window-shell .settings-embedded {
-  --bg: #212121;
+  --bg: #1a1a1a;
   --bg-sidebar: #1c1c1e;
-  --bg-savebar: #212121;
+  --bg-savebar: #1a1a1a;
   --bg-input: #2a2a2a;
   --bg-input-subtle: #2a2a2a;
   --bg-hover: rgba(255, 255, 255, 0.06);
@@ -2815,6 +2840,10 @@ button.chat-composer-status-item:hover {
   color: #737373;
 }
 
+.dark .chat-window-shell .settings-embedded-nav-icon {
+  color: #a3a3a3;
+}
+
 .settings-embedded-nav-item.active .settings-embedded-nav-icon {
   color: #525252;
 }
@@ -2848,7 +2877,7 @@ button.chat-composer-status-item:hover {
 
 .settings-embedded-scroll {
   /* 与 header / content 同色：原先 --bg-savebar（soft）会比顶栏 --bg（surface）深一档，
-     亮色下读成「顶栏一块、底下一块」。暗色两变量本就相同。 */
+     亮色下读成「顶栏一块、底下一块」。暗色同样走 --bg，避免标题条单独一块。 */
   background: var(--bg);
   padding: 8px 28px 20px;
 }
@@ -2877,10 +2906,6 @@ button.chat-composer-status-item:hover {
   flex: 1 1 auto;
   min-height: 100%;
   align-items: stretch;
-}
-
-.dark .chat-window-shell .settings-embedded-scroll {
-  background: #1a1a1a;
 }
 
 /* 卡片式分组（Jan 白卡片 + 圆角） */
@@ -6186,6 +6211,7 @@ input[type="password"]::-ms-clear {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg);
+  color: var(--text);
   box-shadow: var(--shadow-md);
   padding: 16px;
 }

@@ -224,3 +224,12 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
     developer: 'Composio',
   },
 ]
+
+/** 插件 MCP（`plugin-<id>` / `connectorId: plugin:<id>`）只出现在「插件」页。
+ *  启用时借用 connectorId 以免出现在 MCP 页，但连接器页必须排除它们。 */
+export function isPluginManagedServer(server: {
+  id: string
+  connectorId?: string | null
+}): boolean {
+  return server.id.startsWith('plugin-') || (server.connectorId?.startsWith('plugin:') ?? false)
+}

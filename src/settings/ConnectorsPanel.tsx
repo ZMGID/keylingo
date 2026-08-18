@@ -10,7 +10,7 @@ import { Check, FolderOpen, Loader2, Trash2, X, Plus } from 'lucide-react'
 import { api, type ChatMcpServer, type ChatToolsConfig } from '../api/tauri'
 import { i18n, type Lang } from './i18n'
 import { SettingsGroup, Input, Select } from './components'
-import { CONNECTOR_CATALOG, type ConnectorCatalogEntry } from './connectorCatalog'
+import { CONNECTOR_CATALOG, isPluginManagedServer, type ConnectorCatalogEntry } from './connectorCatalog'
 import {
   NotionBrandIcon,
   GithubBrandIcon,
@@ -112,7 +112,9 @@ export function ConnectorsPanel({
   >(null)
 
   const connectedById = new Map(
-    servers.filter((s) => s.connectorId).map((s) => [s.connectorId as string, s]),
+    servers
+      .filter((s) => s.connectorId && s.enabled && !isPluginManagedServer(s))
+      .map((s) => [s.connectorId as string, s]),
   )
 
   const writeServer = useCallback(
@@ -312,8 +314,10 @@ export function ConnectorsPanel({
     }
   }, [customAuth, customName, customToken, customUrl, testServer, writeServer])
 
-  // 已连接卡（MCP server；Obsidian 单独渲染）。
-  const connectedServers = servers.filter((s) => s.connectorId)
+  // 已连接卡（MCP server；Obsidian 单独渲染）。插件 MCP 走「插件」页，不在这里出现。
+  const connectedServers = servers.filter(
+    (s) => s.connectorId && s.enabled && !isPluginManagedServer(s),
+  )
   // 目录中尚未连接的项（Obsidian 已配置路径时从可用列表移除）。
   const availableEntries = CONNECTOR_CATALOG.filter((e) => {
     if (e.id === OBSIDIAN_CATALOG_ID) return !obsidianConnected
@@ -342,7 +346,7 @@ export function ConnectorsPanel({
         <div className="flex items-start gap-3">
           <Icon size={22} className="mt-0.5 shrink-0 opacity-90" />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">{server.name}</div>
+            <div className="text-sm font-medium text-[var(--text)]">{server.name}</div>
             <div className="kv-row-desc line-clamp-2 text-[12px]">
               {entry?.description[lang] ?? server.url}
             </div>
@@ -403,7 +407,7 @@ export function ConnectorsPanel({
         <div className="flex items-start gap-3">
           <Icon size={22} className="mt-0.5 shrink-0 opacity-90" />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">{obsidianEntry.name}</div>
+            <div className="text-sm font-medium text-[var(--text)]">{obsidianEntry.name}</div>
             <div className="kv-row-desc line-clamp-2 text-[12px]">{obsidianEntry.description[lang]}</div>
             <div className="kv-row-desc mt-1 truncate font-mono text-[11px] opacity-80">
               {obsidianVaultPath}
@@ -459,7 +463,7 @@ export function ConnectorsPanel({
         <div className="flex items-start gap-3">
           <Icon size={22} className="mt-0.5 shrink-0 opacity-90" />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">{entry.name}</div>
+            <div className="text-sm font-medium text-[var(--text)]">{entry.name}</div>
             <div className="kv-row-desc line-clamp-2 text-[12px]">{entry.description[lang]}</div>
             {entry.composio && (
               <div className="kv-row-desc text-[12px] opacity-70">{t.connectorsThirdParty}</div>

@@ -50,7 +50,7 @@ function FontPicker({ value, systemFonts, placeholder, defaultLabel, emptyText, 
             <button
               key={f}
               type="button"
-              className={`kv-menu-row truncate hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${value === f ? 'bg-black/[0.04] font-semibold dark:bg-white/[0.06]' : 'text-neutral-700 dark:text-neutral-300'}`}
+              className={`kv-menu-row truncate hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${value === f ? 'bg-black/[0.04] font-semibold text-neutral-900 dark:bg-white/[0.06] dark:text-neutral-100' : 'text-neutral-700 dark:text-neutral-300'}`}
               style={{ fontFamily: `"${f}"` }}
               onMouseDown={(e) => { e.preventDefault(); select(f) }}
             >

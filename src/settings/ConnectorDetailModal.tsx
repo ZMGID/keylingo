@@ -138,7 +138,7 @@ export function ConnectorDetailModal({
         <div className="kv-connector-detail-header">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <div className="truncate text-sm font-medium">{Name}</div>
+              <div className="truncate text-sm font-medium text-[var(--text)]">{Name}</div>
               <span
                 className={
                   connected
