@@ -745,6 +745,9 @@ impl ClaudeStreamJsonSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
+                Ok(SessionCommand::PiSession { reply, .. }) => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
+                }
                 // 换模型握手只有 3s，停任务不急这一下：静默丢掉，用户重点一次即可。
                 Ok(SessionCommand::StopTask { .. }) => {}
                 Err(mpsc::error::TryRecvError::Empty) => {}
@@ -874,6 +877,9 @@ impl ClaudeStreamJsonSession {
                 }
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
+                }
+                Ok(SessionCommand::PiSession { reply, .. }) => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
                 }
                 // 面板的「停止后台任务」：轮内直接写 `stop_task` 控制请求。CLI 收到后
                 // 会发 `status:"stopped"` 的 `task_notification`，注册表由那帧修正。
@@ -1422,6 +1428,9 @@ pub fn spawn_claude_stream_session_actor_with_sink(
                 // 轮末按普通消息发出去（绝不静默吞掉）。
                 SessionCommand::Steer { accepted, .. } => {
                     let _ = accepted.send(false);
+                }
+                SessionCommand::PiSession { reply, .. } => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
                 }
                 SessionCommand::Cancel => {} // 轮次之间没有在跑的轮次
                 SessionCommand::StopTask { task_id } => {

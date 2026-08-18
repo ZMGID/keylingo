@@ -163,7 +163,7 @@ const CHAT_DOCK_TREE_EXPANDED_KEY = 'kivio-chat-dock-tree-expanded'
 /** 每项目展开状态 map 的最大项目键数（超出时丢弃最旧的键）。 */
 const DOCK_TREE_EXPANDED_MAX_KEYS = 50
 
-export type RememberedDockTab = 'files' | 'git' | 'terminal' | 'tasks'
+export type RememberedDockTab = 'files' | 'git' | 'terminal' | 'tasks' | 'piSessions'
 
 export function getRememberedDockOpen(): boolean {
   return getLocalStorageItem(CHAT_DOCK_OPEN_KEY) === '1'
@@ -186,7 +186,9 @@ export function rememberDockWidth(width: number) {
 
 export function getRememberedDockTab(): RememberedDockTab {
   const raw = getLocalStorageItem(CHAT_DOCK_TAB_KEY)
-  return raw === 'git' || raw === 'terminal' || raw === 'tasks' ? raw : 'files'
+  return raw === 'git' || raw === 'terminal' || raw === 'tasks' || raw === 'piSessions'
+    ? raw
+    : 'files'
 }
 
 export function rememberDockTab(tab: RememberedDockTab) {

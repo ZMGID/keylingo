@@ -76,6 +76,29 @@ pub enum MessageInjectionKind {
     FollowUp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PiSessionRequest {
+    GetTree,
+    GetEntries { since: Option<String> },
+    GetForkMessages,
+    Fork { entry_id: String },
+    Clone,
+    Switch { session_path: String },
+}
+
+impl PiSessionRequest {
+    pub fn changes_session(&self) -> bool {
+        matches!(self, Self::Fork { .. } | Self::Clone | Self::Switch { .. })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PiSessionRpcResult {
+    pub data: serde_json::Value,
+    /// Mutations are followed by `get_state`; this is Pi's authoritative new identity.
+    pub state: Option<serde_json::Value>,
+}
+
 /// A command sent to a live session's actor task.
 pub enum SessionCommand {
     /// Run one turn: write the prompt, stream `UnifiedAgentEvent`s into `events`, and report the
@@ -107,6 +130,11 @@ pub enum SessionCommand {
         images: Vec<crate::external_agents::attachments::ImageBlock>,
         kind: MessageInjectionKind,
         accepted: oneshot::Sender<bool>,
+    },
+    /// Pi session tree/query/mutation RPC. The Pi actor is the sole stdin/stdout owner.
+    PiSession {
+        request: PiSessionRequest,
+        reply: oneshot::Sender<Result<PiSessionRpcResult, String>>,
     },
     /// 停止 CLI 侧的一个后台任务（Background tasks 面板的停止按钮）。
     ///
@@ -196,6 +224,12 @@ impl TurnBusyGuard {
     pub fn new(busy: Arc<AtomicBool>) -> Self {
         busy.store(true, Ordering::Release);
         Self(busy)
+    }
+
+    pub fn try_new(busy: Arc<AtomicBool>) -> Option<Self> {
+        busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(busy))
     }
 }
 
@@ -351,6 +385,19 @@ mod tests {
             new_session.is_idle(Duration::from_secs(0)),
             "guard 落地即清"
         );
+    }
+
+    #[test]
+    fn a_control_guard_cannot_clear_an_existing_turn_guard() {
+        let (session, _rx) = make("pi", "/proj");
+        let turn_guard = TurnBusyGuard::new(session.busy.clone());
+        assert!(TurnBusyGuard::try_new(session.busy.clone()).is_none());
+        assert!(session.busy.load(Ordering::Acquire));
+        drop(turn_guard);
+        let control_guard = TurnBusyGuard::try_new(session.busy.clone()).expect("idle session");
+        assert!(session.busy.load(Ordering::Acquire));
+        drop(control_guard);
+        assert!(!session.busy.load(Ordering::Acquire));
     }
 
     #[test]

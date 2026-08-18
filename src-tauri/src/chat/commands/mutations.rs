@@ -522,6 +522,15 @@ pub(super) fn build_fork_messages(messages: &[ChatMessage], anchor_idx: usize) -
     out
 }
 
+pub(super) fn build_fork_messages_before_anchor(
+    messages: &[ChatMessage],
+    anchor_idx: usize,
+) -> Vec<ChatMessage> {
+    anchor_idx
+        .checked_sub(1)
+        .map(|index| build_fork_messages(messages, index))
+        .unwrap_or_default()
+}
 /// 分叉成新对话（方案 B）：把源对话某消息及其之前的消息复制进一个全新对话，之后独立继续。
 /// 纯复制 + 打开，不自动发送（决策 Q1）。新对话继承源的会话级配置、深拷被引用的附件/图片
 /// artifact，并记录 `forked_from` 供 UI 面包屑回跳。源对话完全只读、不受影响。
@@ -530,13 +539,18 @@ pub(crate) async fn chat_fork_conversation(
     app: AppHandle,
     conversation_id: String,
     message_id: String,
+    exclude_anchor: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let source = load_conversation(&app, &conversation_id)?;
     let anchor_idx = find_message_index(&source, &message_id)?;
 
     let now = chrono::Local::now().timestamp();
     let new_id = format!("conv_{}", Uuid::new_v4());
-    let messages = build_fork_messages(&source.messages, anchor_idx);
+    let messages = if exclude_anchor.unwrap_or(false) {
+        build_fork_messages_before_anchor(&source.messages, anchor_idx)
+    } else {
+        build_fork_messages(&source.messages, anchor_idx)
+    };
 
     // 深拷被复制消息引用的附件 / 图片 artifact 文件到新对话目录（裸文件名同名拷贝，路径保持有效）。
     // Missing attachment files are warnings rather than fork blockers. Workbench outputs are not copied when forking.

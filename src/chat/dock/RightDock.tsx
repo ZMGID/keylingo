@@ -1,15 +1,17 @@
 // Right Dock 容器：tab 条（文件树 / Git / 终端 / 任务）+ 常驻四面板 + 左缘拖拽调宽 + 折叠滑出。
 // 宽度通过 CSS 变量 --chat-dock-width 直写（拖拽过程不触发 React 重渲），松手才持久化。
 import { memo, useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
-import { Activity, FolderTree, GitBranch, Terminal, X } from 'lucide-react'
+import { Activity, FolderTree, GitBranch, GitFork, Terminal, X } from 'lucide-react'
 import { i18n, type Lang } from '../../settings/i18n'
+import type { Conversation } from '../types'
 import { IconButton } from '../../components/Button'
 import { FileTreePanel } from './FileTreePanel'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
 import { BackgroundTasksPanel } from './BackgroundTasksPanel'
+import { PiSessionTreePanel } from '../PiSessionTreePanel'
 
-export type DockTab = 'files' | 'git' | 'terminal' | 'tasks'
+export type DockTab = 'files' | 'git' | 'terminal' | 'tasks' | 'piSessions'
 
 export const DOCK_MIN_WIDTH = 320
 export const DOCK_MAX_WIDTH = 560
@@ -36,6 +38,7 @@ type RightDockProps = {
   lang: Lang
   /** 当前对话 id（任务页按对话隔离）。null = 还没有对话。 */
   conversationId: string | null
+  piSessionsEnabled: boolean
   treeExpanded: string[]
   revealRequest: DockRevealRequest
   previewRequest: DockPreviewRequest
@@ -44,6 +47,11 @@ type RightDockProps = {
   onClose: () => void
   onTreeExpandedChange: (paths: string[]) => void
   onInsertMention?: (path: string) => void
+  onPiConversationChanged: (
+    conversationId: string,
+    conversation?: Conversation,
+    draft?: string,
+  ) => void
   onRevealInTree: (path: string) => void
 }
 
@@ -54,6 +62,7 @@ export const RightDock = memo(function RightDock({
   workdir,
   lang,
   conversationId,
+  piSessionsEnabled,
   treeExpanded,
   revealRequest,
   previewRequest,
@@ -62,6 +71,7 @@ export const RightDock = memo(function RightDock({
   onClose,
   onTreeExpandedChange,
   onInsertMention,
+  onPiConversationChanged,
   onRevealInTree,
 }: RightDockProps) {
   const t = i18n[lang]
@@ -111,7 +121,7 @@ export const RightDock = memo(function RightDock({
   const filesActive = open && activeTab === 'files'
   const gitActive = open && activeTab === 'git'
   const terminalActive = open && activeTab === 'terminal'
-
+  const piSessionsActive = open && activeTab === 'piSessions' && piSessionsEnabled
   return (
     <aside
       ref={shellRef}
@@ -133,6 +143,9 @@ export const RightDock = memo(function RightDock({
             { tab: 'git' as DockTab, label: t.dockTabGit, icon: GitBranch },
             { tab: 'terminal' as DockTab, label: t.dockTabTerminal, icon: Terminal },
             { tab: 'tasks' as DockTab, label: t.dockTabTasks, icon: Activity },
+            ...(piSessionsEnabled
+              ? [{ tab: 'piSessions' as DockTab, label: t.dockTabPiSessions, icon: GitFork }]
+              : []),
           ]
         ).map(({ tab, label, icon: Icon }) => (
           <button
@@ -155,7 +168,7 @@ export const RightDock = memo(function RightDock({
         </IconButton>
       </div>
 
-      {/* 三面板常驻挂载，inactive 只 hidden（各自 active=false 时停发请求、攒脏标记）。 */}
+      {/* 面板常驻挂载，inactive 只 hidden（各自 active=false 时停发请求、攒脏标记）。 */}
       <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'files'}>
         <FileTreePanel
           workdir={workdir}
@@ -182,6 +195,16 @@ export const RightDock = memo(function RightDock({
           conversationId={conversationId}
         />
       </div>
+      {piSessionsEnabled && (
+        <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'piSessions'}>
+          <PiSessionTreePanel
+            active={piSessionsActive}
+            lang={lang}
+            conversationId={conversationId}
+            onConversationChanged={onPiConversationChanged}
+          />
+        </div>
+      )}
     </aside>
   )
 })

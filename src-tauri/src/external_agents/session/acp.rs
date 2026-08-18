@@ -1542,6 +1542,9 @@ impl AcpSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
+                Ok(SessionCommand::PiSession { reply, .. }) => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
+                }
                 // ACP 无后台任务协议（stop_task 是 claude 专属），忽略。
                 Ok(SessionCommand::StopTask { .. }) => {}
                 Err(mpsc::error::TryRecvError::Empty) => {}
@@ -1745,6 +1748,9 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
                     let _ = accepted.send(false);
                 }
                 SessionCommand::Cancel => {}
+                SessionCommand::PiSession { reply, .. } => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
+                }
                 // ACP 无后台任务协议，忽略。
                 SessionCommand::StopTask { .. } => {}
                 SessionCommand::Close => {

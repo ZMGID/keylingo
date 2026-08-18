@@ -460,6 +460,9 @@ impl DshJsonRpcSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
+                Ok(SessionCommand::PiSession { reply, .. }) => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
+                }
                 Ok(SessionCommand::StopTask { task_id }) => {
                     self.send_stop_task(&task_id).await;
                 }
@@ -884,6 +887,9 @@ pub fn spawn_dsh_session_actor_with_sink(
                 }
                 SessionCommand::Steer { accepted, .. } => {
                     let _ = accepted.send(false);
+                }
+                SessionCommand::PiSession { reply, .. } => {
+                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
                 }
                 SessionCommand::Cancel => {}
                 SessionCommand::StopTask { task_id } => {

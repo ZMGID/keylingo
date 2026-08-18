@@ -5,10 +5,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   forgetRememberedChatRoute,
   getRememberedChatRoute,
+  getRememberedDockTab,
   hashPath,
   isChatPath,
   normalizeStoredChatRoute,
   rememberCurrentChatRoute,
+  rememberDockTab,
 } from './persistence'
 
 
@@ -40,6 +42,14 @@ describe('normalizeStoredChatRoute', () => {
     expect(normalizeStoredChatRoute('#chat/onboarding')).toBeNull()
     expect(normalizeStoredChatRoute('#lens')).toBeNull()
     expect(normalizeStoredChatRoute(null)).toBeNull()
+  })
+})
+
+describe('right dock tab persistence', () => {
+  it('remembers the Pi sessions tab', () => {
+    window.localStorage.clear()
+    rememberDockTab('piSessions')
+    expect(getRememberedDockTab()).toBe('piSessions')
   })
 })
 

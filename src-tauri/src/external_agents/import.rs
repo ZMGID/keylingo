@@ -1054,6 +1054,7 @@ pub async fn import_one_session(
                 agent_id: agent_id.to_string(),
                 protocol: protocol_label(def.stream_format).to_string(),
                 native_id: session_id.to_string(),
+                native_path: None,
                 cwd: root.clone(),
             },
         )?;

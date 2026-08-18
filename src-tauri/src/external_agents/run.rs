@@ -392,6 +392,15 @@ pub async fn run_external_cli_reply(
     // 落盘仍走 mutate 补丁，避免并发 spawn 用过期整表把后写的条目盖掉。
     let mut todo_state = conversation.agent_todo_state.clone();
     let conversation_id = conversation.id.clone();
+    // Keep Pi native-session ownership stable through both the RPC turn and Kivio persistence.
+    // Fork/clone moves the actor only after this guard drops.
+    let pi_operation_lock = matches!(def.stream_format, StreamFormat::PiRpc)
+        .then(|| state.pi_session_control_lock_for(&conversation_id));
+    let _pi_operation = if let Some(lock) = pi_operation_lock.as_ref() {
+        Some(lock.lock().await)
+    } else {
+        None
+    };
     let started_at = Instant::now();
     // 缓存 key 用探测 cwd（resolve_detection_cwd，非项目会话 = __global__），与斜杠探测的
     // 读取 key 一致——运行时从 CLI init 学到的真实命令列表才能覆盖探测缓存（含空负缓存）。
@@ -927,6 +936,7 @@ where
                     agent_id: agent_id.to_string(),
                     protocol: protocol_tag.to_string(),
                     native_id,
+                    native_path: None,
                     cwd: cwd_str.clone(),
                 },
             );
@@ -1144,6 +1154,7 @@ async fn reconnect_fresh(
             agent_id: agent_id.to_string(),
             protocol: protocol_tag.to_string(),
             native_id: native_id.clone(),
+            native_path: None,
             cwd: cwd_str.to_string(),
         },
     );
