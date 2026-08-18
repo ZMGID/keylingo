@@ -566,6 +566,7 @@ fn test_run_config<'a>(
         provider_tools_fallback_system_prompt: String::new(),
         initial_anchor_total_tokens: None,
         initial_anchor_trailing_estimate: 0,
+        skill_project_cwd: None,
     }
 }
 

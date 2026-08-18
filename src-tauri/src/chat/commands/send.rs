@@ -56,8 +56,18 @@ pub(crate) async fn chat_send_message(
         (content, active_skill_id)
     } else {
         let settings = state.settings_read().clone();
-        let registry =
-            skills::build_registry(&app, &settings.chat_tools.skill_scan_paths).unwrap_or_default();
+        let skill_cwd = crate::chat::storage::resolve_conversation_working_directory(
+            &app,
+            &conversation,
+            &settings.chat_tools.native_tools.working_directory,
+        )
+        .ok();
+        let registry = skills::build_registry_in(
+            &app,
+            &settings.chat_tools.skill_scan_paths,
+            skill_cwd.as_deref(),
+        )
+        .unwrap_or_default();
         match try_apply_skill_slash_trigger(
             &registry,
             &settings.chat_tools,

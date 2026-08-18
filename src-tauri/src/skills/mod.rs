@@ -6,8 +6,9 @@ mod types;
 
 pub use catalog::format_catalog;
 pub use discover::{
-    build_registry, build_registry_headless, build_registry_metadata, user_skills_dir,
-    user_skills_dir_headless,
+    build_registry, build_registry_headless, build_registry_headless_in, build_registry_in,
+    build_registry_metadata, build_registry_metadata_in, home_agents_skills_dir,
+    kivio_skills_dir, legacy_app_data_skills_dir, user_skills_dir, user_skills_dir_headless,
 };
 pub use parse::parse_skill_markdown;
 pub use runtime::{
@@ -34,22 +35,30 @@ pub fn chat_skills_list(
     app: AppHandle,
     state: State<'_, AppState>,
     skill_scan_paths: Option<Vec<String>>,
+    project_cwd: Option<String>,
 ) -> SkillListResult {
     let paths = skill_scan_paths
         .unwrap_or_else(|| state.settings_read().chat_tools.skill_scan_paths.clone());
-    match build_registry_metadata(&app, &paths) {
+    let cwd = project_cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    match build_registry_metadata_in(&app, &paths, cwd.as_deref()) {
         Ok(registry) => {
             let settings = state.settings_read();
-            // 插件附属 skill（source=plugin）一并返回，技能页单独分区展示；
+            // 插件附属 skill 一并返回，技能页单独分区展示；
             // 开关仍由「扩展 → 插件」统一管理（前端禁止在技能页改插件 skill）。
             let skills = registry
                 .metas()
                 .into_iter()
-                .filter(|meta| {
-                    if meta.source == "plugin"
-                        || crate::plugins::skill_owned_by_plugin(&meta.id).is_some()
-                    {
-                        return true;
+                .filter_map(|mut meta| {
+                    if crate::plugins::skill_owned_by_plugin(&meta.id).is_some() {
+                        meta.source = "plugin".to_string();
+                        return Some(meta);
+                    }
+                    if meta.source == "plugin" {
+                        return Some(meta);
                     }
                     crate::settings::skill_connector_satisfied(
                         &meta.id,
@@ -57,6 +66,7 @@ pub fn chat_skills_list(
                             &settings.obsidian_vault_path,
                         ),
                     )
+                    .then_some(meta)
                 })
                 .collect();
             SkillListResult {
@@ -84,6 +94,7 @@ pub fn chat_skills_read(
     app: AppHandle,
     state: State<'_, AppState>,
     skill_id: String,
+    project_cwd: Option<String>,
 ) -> SkillReadResult {
     let settings = state.settings_read();
     if let Some(err) = crate::settings::skill_global_unavailable_error(
@@ -98,7 +109,17 @@ pub fn chat_skills_read(
             error: Some(err),
         };
     }
-    match read_skill_detail(&app, &settings.chat_tools.skill_scan_paths, &skill_id) {
+    let cwd = project_cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    match read_skill_detail_in(
+        &app,
+        &settings.chat_tools.skill_scan_paths,
+        &skill_id,
+        cwd.as_deref(),
+    ) {
         Ok(skill) => SkillReadResult {
             success: true,
             skill: Some(skill),
@@ -180,18 +201,24 @@ pub fn chat_skills_import(app: AppHandle, path: String) -> SkillImportResult {
     }
 }
 
-/// 卸载用户技能：删除 user_skills_dir 下对应 id 的目录。
-/// 内置（bundled）与插件技能不在此目录，无法经此删除。id 做路径安全校验，防目录穿越。
+/// 卸载用户技能：先删 `~/.kivio/skills/<id>`，再回退旧 `{app_data}/skills/<id>`。
+/// `~/.agents/skills` 是共享目录，不从这里删。内置与插件技能也无法经此删除。
 #[tauri::command]
 pub fn chat_skills_uninstall(app: AppHandle, id: String) -> Result<(), String> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         return Err("invalid skill id".to_string());
     }
-    let skills_dir = user_skills_dir(&app)?;
-    let dir = skills_dir.join(&id);
-    if !dir.is_dir() {
-        return Err("技能不存在或不可删除（仅个人/导入技能可删除）".to_string());
+    let mut candidates = Vec::new();
+    if let Ok(dir) = user_skills_dir(&app) {
+        candidates.push(dir.join(&id));
     }
+    if let Some(dir) = legacy_app_data_skills_dir() {
+        candidates.push(dir.join(&id));
+    }
+    let dir = candidates
+        .into_iter()
+        .find(|path| path.is_dir())
+        .ok_or_else(|| "技能不存在或不可删除（仅 ~/.kivio/skills 与旧个人目录可删除）".to_string())?;
     fs::remove_dir_all(&dir).map_err(|err| format!("删除技能失败: {err}"))?;
     Ok(())
 }
@@ -279,7 +306,16 @@ pub fn read_skill_detail(
     extra_paths: &[String],
     skill_id: &str,
 ) -> Result<SkillDetail, String> {
-    let registry = build_registry(app, extra_paths)?;
+    read_skill_detail_in(app, extra_paths, skill_id, None)
+}
+
+pub fn read_skill_detail_in(
+    app: &AppHandle,
+    extra_paths: &[String],
+    skill_id: &str,
+    project_cwd: Option<&Path>,
+) -> Result<SkillDetail, String> {
+    let registry = build_registry_in(app, extra_paths, project_cwd)?;
     let record = registry
         .find(skill_id)
         .ok_or_else(|| format!("Skill not found: {skill_id}"))?;

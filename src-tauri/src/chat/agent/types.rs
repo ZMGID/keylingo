@@ -67,6 +67,8 @@ pub struct AgentRunConfig<'a> {
     /// 锚点响应**之后**（不含响应本身，响应用 output 计入锚点）新增消息的字符估算，由 commands.rs
     /// 组装 runtime_messages 时算好。与 `initial_anchor_total_tokens` 配对：`effective = 锚点 + 该 trailing`。
     pub initial_anchor_trailing_estimate: usize,
+    /// 对话工作目录，用于扫描项目 `.kivio/skills` 与 `.agents/skills`。
+    pub skill_project_cwd: Option<std::path::PathBuf>,
 }
 
 impl AgentRunConfig<'_> {

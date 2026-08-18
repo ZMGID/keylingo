@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use super::{
-    discover::build_registry,
+    discover::build_registry_in,
     types::{SkillFileKind, SkillRecord, SkillRegistry},
 };
 use tauri::AppHandle;
@@ -17,12 +17,18 @@ pub struct SkillRunCache {
     /// 当前对话助手允许激活的技能 id 白名单(冻结自助手快照)。
     /// `None` = 无助手限制(全局行为);`Some(ids)` = 仅这些技能可激活,空集合 = 一个都不可。
     allowed_skill_ids: Option<Vec<String>>,
+    /// 对话工作目录：扫描项目 `.kivio/skills` 与 `.agents/skills`（cwd → git 根）。
+    project_cwd: Option<std::path::PathBuf>,
 }
 
 impl SkillRunCache {
     /// 设置助手技能白名单。在 run 启动时由 RunState 依据 assistant_snapshot 调用。
     pub fn set_allowed_skill_ids(&mut self, ids: Option<Vec<String>>) {
         self.allowed_skill_ids = ids;
+    }
+
+    pub fn set_project_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
+        self.project_cwd = cwd;
     }
 
     /// 某技能 id 是否在助手白名单内(无助手 = 不限)。
@@ -40,7 +46,10 @@ impl SkillRunCache {
         app: &AppHandle,
         scan_paths: &[String],
     ) -> Result<&SkillRegistry, String> {
-        self.registry_or_build(|| build_registry(app, scan_paths))
+        let project_cwd = self.project_cwd.clone();
+        self.registry_or_build(|| {
+            build_registry_in(app, scan_paths, project_cwd.as_deref())
+        })
     }
 
     /// Build-once core of `registry_for`, factored out so the caching invariant

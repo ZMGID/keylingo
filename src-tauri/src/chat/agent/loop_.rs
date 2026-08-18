@@ -255,6 +255,9 @@ pub async fn run_agent_loop(
             .as_ref()
             .map(|assistant| assistant.skill_ids.clone()),
     );
+    state
+        .skill_cache
+        .set_project_cwd(config.skill_project_cwd.clone());
     let env = LoopEnv {
         config: &config,
         host,

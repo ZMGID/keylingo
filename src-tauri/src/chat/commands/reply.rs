@@ -357,8 +357,18 @@ pub(super) async fn complete_assistant_reply_inner(
     let last_user_content_for_main = augmented_last_user_content
         .as_deref()
         .or(last_user_api_content);
-    let skill_registry =
-        skills::build_registry(app, &settings.chat_tools.skill_scan_paths).unwrap_or_default();
+    let skill_cwd = crate::chat::storage::resolve_conversation_working_directory(
+        app,
+        conversation,
+        &settings.chat_tools.native_tools.working_directory,
+    )
+    .ok();
+    let skill_registry = skills::build_registry_in(
+        app,
+        &settings.chat_tools.skill_scan_paths,
+        skill_cwd.as_deref(),
+    )
+    .unwrap_or_default();
     let requested_skill_id = active_skill_id.or(conversation.active_skill_id.as_deref());
     let skill_id = resolve_forced_skill_id(
         &settings.chat_tools,
@@ -371,7 +381,13 @@ pub(super) async fn complete_assistant_reply_inner(
         conversation.active_skill_id = None;
     }
     let active_skill_detail = skill_id.as_deref().and_then(|id| {
-        skills::read_skill_detail(app, &settings.chat_tools.skill_scan_paths, id).ok()
+        skills::read_skill_detail_in(
+            app,
+            &settings.chat_tools.skill_scan_paths,
+            id,
+            skill_cwd.as_deref(),
+        )
+        .ok()
     });
     let mut effective_chat_tools = settings.chat_tools.clone();
     if arm.is_some() || probe {
@@ -674,6 +690,7 @@ pub(super) async fn complete_assistant_reply_inner(
             provider_tools_fallback_system_prompt,
             initial_anchor_total_tokens,
             initial_anchor_trailing_estimate,
+            skill_project_cwd: skill_cwd.clone(),
         },
         host,
         &executor,

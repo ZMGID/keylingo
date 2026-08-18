@@ -665,6 +665,8 @@ pub struct SubAgentRequest {
     pub parent_run_id: String,
     pub parent_tool_call_id: String,
     pub parent_generation: u64,
+    /// 父对话工作目录，用于扫描项目 `.kivio/skills` 与 `.agents/skills`。
+    pub skill_project_cwd: Option<std::path::PathBuf>,
 }
 
 /// Run a sub-agent to completion. Builds an isolated config and reuses
@@ -752,6 +754,7 @@ async fn run_sub_agent(app: AppHandle, req: SubAgentRequest) -> Result<AgentRunR
             provider_tools_fallback_system_prompt: req.system_prompt.clone(),
             initial_anchor_total_tokens: None,
             initial_anchor_trailing_estimate: 0,
+            skill_project_cwd: req.skill_project_cwd.clone(),
         };
 
         // No wall-clock cap: a sub-agent now runs to natural completion or until
@@ -1127,9 +1130,18 @@ pub fn handle_agent_spawn<'a>(
         // so the skill tools the filter deliberately keeps had nothing to find).
         // Always the FULL registry: `def.skills` is a preload list, not a
         // visibility narrowing, so the sub-agent can still activate other skills.
-        let skill_registry =
-            crate::skills::build_registry(ctx.app, &settings.chat_tools.skill_scan_paths)
-                .unwrap_or_default();
+        let skill_cwd = crate::chat::storage::resolve_conversation_working_directory(
+            ctx.app,
+            &parent_conversation,
+            &settings.chat_tools.native_tools.working_directory,
+        )
+        .ok();
+        let skill_registry = crate::skills::build_registry_in(
+            ctx.app,
+            &settings.chat_tools.skill_scan_paths,
+            skill_cwd.as_deref(),
+        )
+        .unwrap_or_default();
         let persona =
             compose_persona_with_preloaded_skills(&def.system_prompt, &skill_registry, &def.skills);
         let system_prompt = build_chat_system_prompt(
@@ -1234,6 +1246,7 @@ pub fn handle_agent_spawn<'a>(
             parent_run_id: parent_run_id.clone(),
             parent_tool_call_id: parent_tool_call_id.clone(),
             parent_generation: ctx.native_ctx.generation,
+            skill_project_cwd: skill_cwd.clone(),
         };
 
         // Owned context the finalizer needs.
@@ -2664,6 +2677,7 @@ mod tests {
             provider_tools_fallback_system_prompt: String::new(),
             initial_anchor_total_tokens: None,
             initial_anchor_trailing_estimate: 0,
+            skill_project_cwd: None,
         }
     }
 

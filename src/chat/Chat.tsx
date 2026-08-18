@@ -1804,13 +1804,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [])
 
+  const skillProjectCwdRef = useRef('')
   const loadSkills = useCallback(async () => {
     if (!isTauriRuntime()) {
       setSkills([])
       return
     }
     try {
-      const result = await api.chatSkillsList()
+      const result = await api.chatSkillsList(undefined, skillProjectCwdRef.current || undefined)
       if (result.success) {
         setSkills(result.skills.map(normalizeSkill))
         if (result.error) {
@@ -4524,6 +4525,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [currentConversation?.id, selectedProject?.id, activeAgentRuntime.kind])
 
+  useEffect(() => {
+    const prev = skillProjectCwdRef.current
+    skillProjectCwdRef.current = dockWorkdir
+    if (prev !== dockWorkdir) void loadSkills()
+  }, [dockWorkdir, loadSkills])
+
   // 文件树展开状态按 workdir 持久化，workdir 切换时重新载入。
   useEffect(() => {
     setTreeExpanded(dockWorkdir ? getRememberedTreeExpanded(dockWorkdir) : [])
@@ -5383,7 +5390,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
-              <SkillCenter onSkillsChanged={() => void loadSkills()} />
+              <SkillCenter
+                onSkillsChanged={() => void loadSkills()}
+                projectCwd={dockWorkdir || undefined}
+              />
             </Suspense>
           </div>
         ) : chatView === 'mcp' ? (

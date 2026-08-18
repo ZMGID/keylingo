@@ -38,7 +38,7 @@ use crate::external_agents::types::{
     RuntimeBuildOptions, RuntimeContext, StreamFormat, UnifiedAgentEvent,
 };
 use crate::external_agents::workspace::{ensure_effective_cwd, extra_allowed_dirs_for_agent};
-use crate::skills::read_skill_detail;
+use crate::skills::read_skill_detail_in;
 use crate::state::AppState;
 
 /// Emitted (as a leading text banner) when a persistent-session turn expected to resume a native
@@ -152,7 +152,13 @@ pub async fn run_external_cli_reply(
     let skill_detail = if is_slash {
         None
     } else if let Some(skill_id) = active_skill_id.filter(|s| !s.is_empty()) {
-        read_skill_detail(app, &settings.chat_tools.skill_scan_paths, skill_id).ok()
+        read_skill_detail_in(
+            app,
+            &settings.chat_tools.skill_scan_paths,
+            skill_id,
+            Some(cwd.as_path()),
+        )
+        .ok()
     } else {
         None
     };

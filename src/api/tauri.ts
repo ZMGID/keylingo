@@ -1004,6 +1004,48 @@ export type KnowledgeBaseConfig = {
   minScore: number
 }
 
+export type WebSearchProviderId =
+  | 'tavily'
+  | 'exa'
+  | 'exa_mcp'
+  | 'ollama'
+  | 'grok'
+  | 'brave'
+  | 'serper'
+  | 'bocha'
+  | 'zhipu'
+  | 'tinyfish'
+  | 'searxng'
+
+export type WebSearchConfig = {
+  enabled: boolean
+  provider: WebSearchProviderId
+  tavilyApiKey: string
+  tavilyBaseUrl?: string
+  exaApiKey: string
+  exaBaseUrl?: string
+  exaMcpUrl?: string
+  ollamaApiKey?: string
+  ollamaBaseUrl?: string
+  grokApiKey?: string
+  grokModel?: string
+  grokBaseUrl?: string
+  grokSystemPrompt?: string
+  braveApiKey?: string
+  braveBaseUrl?: string
+  serperApiKey?: string
+  serperBaseUrl?: string
+  bochaApiKey?: string
+  bochaBaseUrl?: string
+  zhipuApiKey?: string
+  zhipuBaseUrl?: string
+  tinyfishApiKey?: string
+  tinyfishBaseUrl?: string
+  searxngBaseUrl?: string
+  maxResults: number
+  searchDepth: 'ultra-fast' | 'fast' | 'basic' | 'advanced'
+}
+
 export type Settings = {
   hotkey: string
   chatHotkey: string
@@ -1097,23 +1139,7 @@ export type Settings = {
     /** 进入截图选择态时是否显示顶部提示（默认 true） */
     showCaptureHint?: boolean
     /** Lens 联网搜索配置 */
-    webSearch?: {
-      enabled: boolean
-      provider: 'tavily' | 'exa' | 'exa_mcp' | 'ollama' | 'grok'
-      tavilyApiKey: string
-      tavilyBaseUrl?: string
-      exaApiKey: string
-      exaBaseUrl?: string
-      exaMcpUrl?: string
-      ollamaApiKey?: string
-      ollamaBaseUrl?: string
-      grokApiKey?: string
-      grokModel?: string
-      grokBaseUrl?: string
-      grokSystemPrompt?: string
-      maxResults: number
-      searchDepth: 'ultra-fast' | 'fast' | 'basic' | 'advanced'
-    }
+    webSearch?: WebSearchConfig
   }
   settingsLanguage?: 'zh' | 'en'
   /** 首次使用引导：`pending` | `completed` | `skipped` */
@@ -1720,6 +1746,17 @@ export function normalizeSettings(settings: Settings): Settings {
         grokBaseUrl: current.lens?.webSearch?.grokBaseUrl ?? 'https://api.x.ai/v1',
         grokSystemPrompt: current.lens?.webSearch?.grokSystemPrompt
           ?? "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations.",
+        braveApiKey: current.lens?.webSearch?.braveApiKey ?? '',
+        braveBaseUrl: current.lens?.webSearch?.braveBaseUrl ?? 'https://api.search.brave.com',
+        serperApiKey: current.lens?.webSearch?.serperApiKey ?? '',
+        serperBaseUrl: current.lens?.webSearch?.serperBaseUrl ?? 'https://google.serper.dev',
+        bochaApiKey: current.lens?.webSearch?.bochaApiKey ?? '',
+        bochaBaseUrl: current.lens?.webSearch?.bochaBaseUrl ?? 'https://api.bochaai.com',
+        zhipuApiKey: current.lens?.webSearch?.zhipuApiKey ?? '',
+        zhipuBaseUrl: current.lens?.webSearch?.zhipuBaseUrl ?? 'https://open.bigmodel.cn/api/paas/v4',
+        tinyfishApiKey: current.lens?.webSearch?.tinyfishApiKey ?? '',
+        tinyfishBaseUrl: current.lens?.webSearch?.tinyfishBaseUrl ?? 'https://api.search.tinyfish.ai',
+        searxngBaseUrl: current.lens?.webSearch?.searxngBaseUrl ?? '',
         maxResults: current.lens?.webSearch?.maxResults ?? 5,
         searchDepth: current.lens?.webSearch?.searchDepth ?? 'basic',
       },
@@ -2177,15 +2214,15 @@ export const api = {
     if (!isTauriRuntime()) return Promise.resolve()
     return invoke<void>('chat_mcp_warmup', { serverIds })
   },
-  chatSkillsList: (skillScanPaths?: string[]) =>
+  chatSkillsList: (skillScanPaths?: string[], projectCwd?: string) =>
     invoke<{ success: boolean; skills: SkillMeta[]; warnings?: string[]; error?: string | null }>(
       'chat_skills_list',
-      { skillScanPaths },
+      { skillScanPaths, projectCwd },
     ),
-  chatSkillsRead: (skillId: string) =>
+  chatSkillsRead: (skillId: string, projectCwd?: string) =>
     invoke<{ success: boolean; skill?: SkillDetail | null; error?: string | null }>(
       'chat_skills_read',
-      { skillId },
+      { skillId, projectCwd },
     ),
   chatSkillsImport: (path: string) =>
     invoke<{ success: boolean; skill?: SkillMeta | null; error?: string | null }>(
