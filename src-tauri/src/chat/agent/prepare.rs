@@ -4,7 +4,7 @@ use crate::chat::model::WORKBENCH_LOCATION_PROMPT_HEAD;
 use crate::chat::types::{ChatAssistantSnapshot, ContextUsageSegment};
 use crate::mcp::ChatToolDefinition;
 use crate::settings::{
-    chat_no_think_instruction, default_chat_system_prompt, ChatToolsConfig, EmailAccountConfig,
+    chat_no_think_instruction, default_chat_system_prompt, ChatToolsConfig,
 };
 use crate::skills;
 
@@ -46,13 +46,11 @@ pub fn skill_allowed_for_conversation(
     chat_tools: &crate::settings::ChatToolsConfig,
     assistant_snapshot: Option<&ChatAssistantSnapshot>,
     skill_id: &str,
-    email_accounts: &[EmailAccountConfig],
     obsidian_vault_configured: bool,
 ) -> bool {
     if !crate::settings::skill_globally_available(
         chat_tools,
         skill_id,
-        email_accounts,
         obsidian_vault_configured,
     ) {
         return false;
@@ -156,8 +154,6 @@ pub fn build_chat_system_prompt(
     workbench_dir: Option<&str>,
     knowledge_base_prompt: Option<&str>,
     obsidian_vault_path: Option<&str>,
-    email_accounts: &[EmailAccountConfig],
-    email_accounts_prompt: Option<&str>,
 ) -> String {
     build_chat_system_prompt_with_segments(
         language,
@@ -181,8 +177,6 @@ pub fn build_chat_system_prompt(
         workbench_dir,
         knowledge_base_prompt,
         obsidian_vault_path,
-        email_accounts,
-        email_accounts_prompt,
     )
     .0
 }
@@ -285,8 +279,6 @@ pub fn build_chat_system_prompt_with_segments(
     workbench_dir: Option<&str>,
     knowledge_base_prompt: Option<&str>,
     obsidian_vault_path: Option<&str>,
-    email_accounts: &[EmailAccountConfig],
-    email_accounts_prompt: Option<&str>,
 ) -> (String, Vec<ContextUsageSegment>) {
     let mut prompt = String::new();
     let mut segments = Vec::new();
@@ -445,19 +437,6 @@ pub fn build_chat_system_prompt_with_segments(
                 "runtime_context",
                 "Runtime context",
                 &text,
-            );
-        }
-
-        if let Some(text) = email_accounts_prompt
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            append_context_segment(
-                &mut prompt,
-                &mut segments,
-                "runtime_context",
-                "Runtime context",
-                text,
             );
         }
 
@@ -675,7 +654,6 @@ pub fn build_chat_system_prompt_with_segments(
                     chat_tools,
                     assistant_snapshot,
                     skill_id,
-                    email_accounts,
                     obsidian_vault_configured,
                 )
             });
@@ -1150,8 +1128,6 @@ mod tests {
             None,
             None,
             None,
-            &[],
-            None,
         );
 
         assert!(prompt.contains("run_python"));
@@ -1186,8 +1162,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            &[],
             None,
         );
 
@@ -1230,8 +1204,6 @@ mod tests {
             None,
             Some("/Users/me/Kivio/workspace/conv_abc"),
             None,
-            None,
-            &[],
             None,
         );
 
@@ -1309,8 +1281,6 @@ mod tests {
                 Some(root),
                 None,
                 None,
-                &[],
-                None,
             )
         };
 
@@ -1370,8 +1340,6 @@ mod tests {
             None,
             None,
             None,
-            &[],
-            None,
         );
 
         assert!(prompt.contains("MUST call present_artifacts"));
@@ -1407,8 +1375,6 @@ mod tests {
             None,
             None,
             None,
-            &[],
-            None,
         );
 
         assert!(prompt.contains("code block"));
@@ -1443,8 +1409,6 @@ mod tests {
             None,
             None,
             Some("/Users/me/Obsidian/MyVault"),
-            &[],
-            None,
         );
 
         assert!(prompt.contains("Obsidian vault path: /Users/me/Obsidian/MyVault"));
@@ -1477,8 +1441,6 @@ mod tests {
             None,
             None,
             None,
-            &[],
-            None,
         );
 
         assert!(
@@ -1507,8 +1469,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            &[],
             None,
         );
         assert!(!blank.contains("Set instructions:"), "{blank}");
@@ -1564,7 +1524,6 @@ mod tests {
             &chat_tools,
             Some(&assistant),
             "doc",
-            &[],
             false,
         ));
         // 不在白名单内的技能被拒。
@@ -1572,7 +1531,6 @@ mod tests {
             &chat_tools,
             Some(&assistant),
             "pdf",
-            &[],
             false,
         ));
         // 无助手 = 不限(只看全局 enable)。
@@ -1580,40 +1538,7 @@ mod tests {
             &chat_tools,
             None,
             "pdf",
-            &[],
             false
-        ));
-    }
-
-    #[test]
-    fn skill_allowed_hides_email_connector_skill_without_accounts() {
-        let chat_tools = crate::settings::ChatToolsConfig::default();
-        assert!(!skill_allowed_for_conversation(
-            &chat_tools,
-            None,
-            crate::settings::EMAIL_CONNECTOR_SKILL_ID,
-            &[],
-            false,
-        ));
-        let account = crate::settings::EmailAccountConfig {
-            id: "a".to_string(),
-            display_name: "Test".to_string(),
-            email: "a@example.com".to_string(),
-            password: "secret".to_string(),
-            imap_host: "imap.example.com".to_string(),
-            imap_port: 993,
-            imap_encryption: "tls".to_string(),
-            smtp_host: "smtp.example.com".to_string(),
-            smtp_port: 465,
-            smtp_encryption: "tls".to_string(),
-            is_default: true,
-        };
-        assert!(skill_allowed_for_conversation(
-            &chat_tools,
-            None,
-            crate::settings::EMAIL_CONNECTOR_SKILL_ID,
-            std::slice::from_ref(&account),
-            false,
         ));
     }
 
@@ -1625,7 +1550,6 @@ mod tests {
             &chat_tools,
             None,
             "obsidian-markdown",
-            &[],
             false,
         ));
         // Vault configured → available.
@@ -1633,7 +1557,6 @@ mod tests {
             &chat_tools,
             None,
             "obsidian-markdown",
-            &[],
             true,
         ));
     }
@@ -1726,8 +1649,6 @@ mod tests {
             None,
             None,
             None,
-            &[],
-            None,
         );
 
         assert!(prompt.contains("Kivio Chat"), "{prompt}");
@@ -1774,8 +1695,6 @@ mod tests {
             None,
             None,
             None,
-            &[],
-            None,
         );
         assert!(prompt.contains("Additional instructions:"), "{prompt}");
         assert!(prompt.contains("Speak like a careful editor."), "{prompt}");
@@ -1808,8 +1727,6 @@ mod tests {
             None,
             None,
             Some("This conversation has knowledge bases attached: Docs."),
-            None,
-            &[],
             None,
         );
         assert!(

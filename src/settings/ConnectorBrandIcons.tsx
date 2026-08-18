@@ -6,7 +6,7 @@
 //   - Linear / Sentry / Atlassian / Obsidian：simple-icons 官方品牌 path（https://cdn.simpleicons.org/<slug>，path 内联）。
 //   - 自定义连接器：通用 link 图标（fallback）。
 
-import { Github, Link2, Mail } from 'lucide-react'
+import { Github, Link2 } from 'lucide-react'
 
 import composioMask from './composio-mask.png'
 
@@ -62,11 +62,6 @@ export function ComposioBrandIcon({ size = 22, className }: BrandIconProps) {
 // 自定义连接器 / 未知：通用 link 图标。
 export function CustomConnectorIcon({ size = 22, className }: BrandIconProps) {
   return <Link2 size={size} className={className} />
-}
-
-// Email：lucide Mail 图标。
-export function EmailBrandIcon({ size = 22, className }: BrandIconProps) {
-  return <Mail size={size} className={className} />
 }
 
 // Linear：simple-icons 官方品牌 path（fill currentColor）。

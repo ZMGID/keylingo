@@ -63,7 +63,6 @@ pub(crate) async fn chat_send_message(
             &settings.chat_tools,
             conversation.assistant_snapshot.as_ref(),
             &content,
-            &settings.email_accounts,
             crate::settings::obsidian_connector_configured(&settings.obsidian_vault_path),
         ) {
             Some((skill_id, rewritten)) => (rewritten, Some(skill_id)),

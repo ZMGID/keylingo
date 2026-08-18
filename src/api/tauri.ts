@@ -1128,45 +1128,6 @@ export type Settings = {
   obsidianVaultPath?: string
   /** 收藏并置顶的模型键（"providerId:model"）；顺序即置顶顺序。chat 模型选择器用。 */
   favoriteModels?: string[]
-  /** Himalaya IMAP/SMTP 邮箱账户 */
-  emailAccounts?: EmailAccountConfig[]
-}
-
-export type EmailAccountConfig = {
-  id: string
-  email: string
-  displayName: string
-  password: string
-  imapHost: string
-  imapPort: number
-  imapEncryption: string
-  smtpHost: string
-  smtpPort: number
-  smtpEncryption: string
-  isDefault: boolean
-}
-
-export type EmailProviderPreset = {
-  id: string
-  label: string
-  imapHost: string
-  imapPort: number
-  imapEncryption: string
-  smtpHost: string
-  smtpPort: number
-  smtpEncryption: string
-}
-
-export type HimalayaStatus = {
-  installed: boolean
-  version: string | null
-  path: string | null
-}
-
-export type HimalayaInstallResult = {
-  ok: boolean
-  alreadyInstalled: boolean
-  message: string
 }
 
 /** 能力插件（领域 CLI 等）状态 —— 设置 → 插件 */
@@ -1770,7 +1731,6 @@ export function normalizeSettings(settings: Settings): Settings {
     imageArchivePath: current.imageArchivePath ?? '',
     obsidianVaultPath: current.obsidianVaultPath ?? '',
     favoriteModels: current.favoriteModels ?? [],
-    emailAccounts: current.emailAccounts ?? [],
   }
 }
 
@@ -1896,13 +1856,6 @@ export const api = {
   listObsidianVaults: () =>
     invoke<{ name: string; path: string }[]>('list_obsidian_vaults_cmd'),
 
-  listEmailProviderPresets: () =>
-    invoke<EmailProviderPreset[]>('list_email_provider_presets'),
-
-  himalayaStatus: () => invoke<HimalayaStatus>('himalaya_status_cmd'),
-
-  himalayaInstall: () => invoke<HimalayaInstallResult>('himalaya_install_cmd'),
-
   /** 能力插件列表（目录 + 安装/启用状态） */
   pluginsList: () => invoke<PluginStatus[]>('plugins_list'),
   // Cached (no-spawn) status for instant first paint; follow with pluginsList to refine.
@@ -1930,9 +1883,6 @@ export const api = {
   notesOpenFolder: () => invoke<string>('notes_open_folder'),
   /** 笔记目录的绝对路径，用于订阅 workspace:activity 自动刷新。 */
   notesDirPath: () => invoke<string>('notes_dir_path'),
-
-  testHimalayaEmail: (account: EmailAccountConfig, existingAccounts?: EmailAccountConfig[]) =>
-    invoke<string>('test_himalaya_email_cmd', { account, existingAccounts }),
 
   // 窗口控制
   /** 给当前（chat）窗口上 Mica，返回材质是否真的生效。Win10 没有 Mica 时为 false —— 这条

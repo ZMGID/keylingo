@@ -653,7 +653,6 @@ pub(super) async fn compute_context_state(
         conversation.assistant_snapshot.as_ref(),
         &skill_registry,
         requested_skill_id,
-        &settings.email_accounts,
         crate::settings::obsidian_connector_configured(&settings.obsidian_vault_path),
     );
     let active_skill_detail = active_skill_id.as_deref().and_then(|id| {
@@ -743,13 +742,6 @@ pub(super) async fn compute_context_state(
     );
     let obsidian_vault_path = (!settings.obsidian_vault_path.trim().is_empty())
         .then_some(settings.obsidian_vault_path.as_str());
-    let himalaya_binary =
-        crate::connectors::himalaya::resolve_himalaya_binary_when_active(&settings.email_accounts)
-            .map(|path| path.display().to_string());
-    let email_accounts_prompt = crate::settings::email_accounts_system_prompt(
-        &settings.email_accounts,
-        himalaya_binary.as_deref(),
-    );
     let (system_prompt, mut segments) = agent_prepare::build_chat_system_prompt_with_segments(
         &language,
         !main_image_paths.is_empty(),
@@ -789,8 +781,6 @@ pub(super) async fn compute_context_state(
         .as_deref(),
         knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
-        &settings.email_accounts,
-        email_accounts_prompt.as_deref(),
     );
     let last_user_idx = conversation.messages.iter().rposition(|m| m.role == "user");
     let request_messages = build_chat_api_messages(

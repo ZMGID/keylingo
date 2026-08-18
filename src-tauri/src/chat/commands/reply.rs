@@ -365,7 +365,6 @@ pub(super) async fn complete_assistant_reply_inner(
         conversation.assistant_snapshot.as_ref(),
         &skill_registry,
         requested_skill_id,
-        &settings.email_accounts,
         crate::settings::obsidian_connector_configured(&settings.obsidian_vault_path),
     );
     if skill_id.is_none() && conversation.active_skill_id.is_some() {
@@ -495,13 +494,6 @@ pub(super) async fn complete_assistant_reply_inner(
     let set_system_prompt = live_set_system_prompt(app, conversation);
     let obsidian_vault_path = (!settings.obsidian_vault_path.trim().is_empty())
         .then_some(settings.obsidian_vault_path.as_str());
-    let himalaya_binary =
-        crate::connectors::himalaya::resolve_himalaya_binary_when_active(&settings.email_accounts)
-            .map(|path| path.display().to_string());
-    let email_accounts_prompt = crate::settings::email_accounts_system_prompt(
-        &settings.email_accounts,
-        himalaya_binary.as_deref(),
-    );
     let knowledge_base_prompt = crate::chat::knowledge_base::mount_system_prompt(
         app,
         &conversation.knowledge_base_ids,
@@ -529,8 +521,6 @@ pub(super) async fn complete_assistant_reply_inner(
         workbench_dir.as_deref(),
         knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
-        &settings.email_accounts,
-        email_accounts_prompt.as_deref(),
     );
     // 从未成功连接的 MCP server：工具没法降级进列表，注一行说明让模型知道
     // "配置了但连不上"，而不是回答"没有这个工具"。
@@ -595,8 +585,6 @@ pub(super) async fn complete_assistant_reply_inner(
         workbench_dir.as_deref(),
         knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
-        &settings.email_accounts,
-        email_accounts_prompt.as_deref(),
     );
 
     let chat_host = ChatAgentHost {

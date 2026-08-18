@@ -6,7 +6,6 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use super::{resolve_tool_existing_dir, NativeToolWorkspace};
-use crate::connectors::himalaya;
 use crate::settings::{CHAT_TOOL_MAX_TIMEOUT_MS, CHAT_TOOL_MIN_TIMEOUT_MS};
 use crate::state::AppState;
 
@@ -62,12 +61,9 @@ fn apply_shell_tool_env(cmd: &mut Command, state: Option<&AppState>) {
         return;
     };
     let settings = state.settings_read();
-    // PATH 合并：启用插件 bin 目录 +（可选）himalaya 目录，再接系统 Path。
-    // 任一侧需要注入时都走统一拼装，避免后写覆盖先写。
+    // PATH 合并：启用插件 bin 目录，再接系统 Path。
     let plugin_dirs = crate::plugins::enabled_bin_dirs();
-    let himalaya_dir = himalaya::kivio_himalaya_path_env_when_active(&settings.email_accounts)
-        .and_then(|_| himalaya::kivio_himalaya_bin_dir());
-    if !plugin_dirs.is_empty() || himalaya_dir.is_some() {
+    if !plugin_dirs.is_empty() {
         #[cfg(windows)]
         let sep = ";";
         #[cfg(not(windows))]
@@ -79,12 +75,6 @@ fn apply_shell_tool_env(cmd: &mut Command, state: Option<&AppState>) {
 
         let mut next = std::ffi::OsString::new();
         for dir in &plugin_dirs {
-            if !next.is_empty() {
-                next.push(sep);
-            }
-            next.push(dir.as_os_str());
-        }
-        if let Some(dir) = himalaya_dir {
             if !next.is_empty() {
                 next.push(sep);
             }

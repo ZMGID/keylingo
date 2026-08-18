@@ -2103,8 +2103,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 updateChatTools={updateChatTools}
                 obsidianVaultPath={settings?.obsidianVaultPath ?? ''}
                 onObsidianVaultPathChange={(path) => updateSettings({ obsidianVaultPath: path })}
-                emailAccounts={settings?.emailAccounts ?? []}
-                onEmailAccountsChange={(accounts) => updateSettings({ emailAccounts: accounts })}
                 lang={lang}
                 testServer={async (server) => {
                   try {

@@ -240,7 +240,7 @@ mod tests {
                 native("read_file"),
                 mcp("notion", "search"),
                 mcp("notion", "create_page"),
-                mcp("himalaya", "list_mail"),
+                mcp("linear", "list_issues"),
             ];
             filter_tools_for_agent(&mut tools, &def(vec![entry]));
             assert_eq!(
@@ -257,10 +257,10 @@ mod tests {
             native("agent"),
             native("read_file"),
             mcp("notion", "search"),
-            mcp("himalaya", "list_mail"),
+            mcp("linear", "list_issues"),
         ];
         filter_tools_for_agent(&mut tools, &def(vec!["mcp__*"]));
-        assert_eq!(names(&tools), vec!["search", "list_mail"]);
+        assert_eq!(names(&tools), vec!["search", "list_issues"]);
     }
 
     #[test]

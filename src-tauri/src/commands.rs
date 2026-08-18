@@ -203,16 +203,6 @@ async fn apply_settings(
         return Err(err);
     }
 
-    let had_email = !previous_settings.email_accounts.is_empty();
-    let has_email = !sanitized.email_accounts.is_empty();
-    if has_email || had_email {
-        if let Err(err) =
-            crate::connectors::himalaya::sync_himalaya_config(&sanitized.email_accounts)
-        {
-            eprintln!("himalaya config sync: {err}");
-        }
-    }
-
     if let Err(err) = setup_tray(app) {
         eprintln!("Failed to update tray: {err}");
     }

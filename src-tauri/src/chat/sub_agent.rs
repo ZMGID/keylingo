@@ -1123,14 +1123,6 @@ pub fn handle_agent_spawn<'a>(
         // Compose the sub-agent system prompt: persona prefix + base chat
         // system prompt. No todo context is injected — the worker is not aware
         // of and cannot touch the parent's todo list.
-        let himalaya_binary = crate::connectors::himalaya::resolve_himalaya_binary_when_active(
-            &settings.email_accounts,
-        )
-        .map(|path| path.display().to_string());
-        let email_accounts_prompt = crate::settings::email_accounts_system_prompt(
-            &settings.email_accounts,
-            himalaya_binary.as_deref(),
-        );
         // Real skill registry (was `SkillRegistry::default()` — an empty catalog,
         // so the skill tools the filter deliberately keeps had nothing to find).
         // Always the FULL registry: `def.skills` is a preload list, not a
@@ -1171,8 +1163,6 @@ pub fn handle_agent_spawn<'a>(
             None,
             (!settings.obsidian_vault_path.trim().is_empty())
                 .then_some(settings.obsidian_vault_path.as_str()),
-            &settings.email_accounts,
-            email_accounts_prompt.as_deref(),
         );
 
         let task_id = format!("agent-{}", uuid::Uuid::new_v4().simple());

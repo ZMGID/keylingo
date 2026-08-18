@@ -24,7 +24,6 @@ pub(super) fn try_apply_skill_slash_trigger(
     chat_tools: &crate::settings::ChatToolsConfig,
     assistant_snapshot: Option<&crate::chat::types::ChatAssistantSnapshot>,
     content: &str,
-    email_accounts: &[crate::settings::EmailAccountConfig],
     obsidian_vault_configured: bool,
 ) -> Option<(String, String)> {
     let trimmed = content.trim_start();
@@ -40,7 +39,6 @@ pub(super) fn try_apply_skill_slash_trigger(
         chat_tools,
         assistant_snapshot,
         &record.meta.id,
-        email_accounts,
         obsidian_vault_configured,
     ) {
         // A disabled or out-of-allow-list skill's slash command is left as ordinary text.
@@ -66,7 +64,6 @@ pub(super) fn resolve_forced_skill_id(
     assistant_snapshot: Option<&crate::chat::types::ChatAssistantSnapshot>,
     registry: &skills::SkillRegistry,
     requested: Option<&str>,
-    email_accounts: &[crate::settings::EmailAccountConfig],
     obsidian_vault_configured: bool,
 ) -> Option<String> {
     let requested = requested.map(str::trim).filter(|id| !id.is_empty())?;
@@ -78,7 +75,6 @@ pub(super) fn resolve_forced_skill_id(
                 chat_tools,
                 assistant_snapshot,
                 &record.meta.id,
-                email_accounts,
                 obsidian_vault_configured,
             )
         })

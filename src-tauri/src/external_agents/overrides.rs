@@ -5,7 +5,7 @@
 //! 都没有 `AppHandle`（它们也被无 Tauri 上下文的路径复用），要把覆盖顺着传下去得改十几个签名。
 //!
 //! ponytail: 只在 `persist_settings` / `load_settings` 两处同步；**故意不挂在 `sanitize_settings`
-//! 上** —— `connectors/himalaya.rs` 用一个临时拼的 partial `Settings` 调它，挂上去会把真实覆盖清空。
+//! 上** —— 校验路径会用临时拼的 partial `Settings` 调它，挂上去会把真实覆盖清空。
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};

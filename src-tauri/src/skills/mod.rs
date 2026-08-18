@@ -53,7 +53,6 @@ pub fn chat_skills_list(
                     }
                     crate::settings::skill_connector_satisfied(
                         &meta.id,
-                        &settings.email_accounts,
                         crate::settings::obsidian_connector_configured(
                             &settings.obsidian_vault_path,
                         ),
@@ -90,7 +89,6 @@ pub fn chat_skills_read(
     if let Some(err) = crate::settings::skill_global_unavailable_error(
         &settings.chat_tools,
         &skill_id,
-        &settings.email_accounts,
         crate::settings::obsidian_connector_configured(&settings.obsidian_vault_path),
         &skill_id,
     ) {

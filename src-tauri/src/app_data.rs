@@ -1,6 +1,6 @@
 //! 无 Tauri handle 的 per-app data 目录解析。
 //!
-//! 部分模块(himalaya 连接器、plugins、skills 的 headless 发现)需要在没有
+//! 部分模块(plugins、skills 的 headless 发现)需要在没有
 //! `AppHandle` 的情况下定位 Kivio 的 per-app data 目录。这里提供与 Tauri
 //! `app_data_dir` 完全一致的纯函数实现。
 

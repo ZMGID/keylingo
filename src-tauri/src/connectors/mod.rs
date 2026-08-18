@@ -5,7 +5,6 @@
 //! OAuth（PKCE + 动态客户端注册 DCR + loopback 回调）+ token 刷新，让 Notion 及
 //! 任意支持 DCR 的远程 MCP 一键授权连接。
 
-pub mod himalaya;
 pub mod oauth;
 pub mod obsidian;
 

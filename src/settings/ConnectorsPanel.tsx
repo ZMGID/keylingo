@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Check, FolderOpen, Loader2, Trash2, X, Plus } from 'lucide-react'
-import { api, type ChatMcpServer, type ChatToolsConfig, type EmailAccountConfig } from '../api/tauri'
+import { api, type ChatMcpServer, type ChatToolsConfig } from '../api/tauri'
 import { i18n, type Lang } from './i18n'
 import { SettingsGroup, Input, Select } from './components'
 import { CONNECTOR_CATALOG, type ConnectorCatalogEntry } from './connectorCatalog'
@@ -20,10 +20,8 @@ import {
   SentryBrandIcon,
   AtlassianBrandIcon,
   ObsidianBrandIcon,
-  EmailBrandIcon,
 } from './ConnectorBrandIcons'
 import { ConnectorDetailModal } from './ConnectorDetailModal'
-import { EmailConnectorModal } from './EmailConnectorModal'
 import { Button } from '../components/Button'
 
 // catalog 项 iconKey → 品牌图标组件查找表；未命中（含自定义连接器）回退到通用 link 图标。
@@ -38,7 +36,6 @@ const CONNECTOR_ICON_BY_KEY: Record<
   sentry: SentryBrandIcon,
   atlassian: AtlassianBrandIcon,
   obsidian: ObsidianBrandIcon,
-  email: EmailBrandIcon,
 }
 
 function connectorIconFor(iconKey: string | undefined) {
@@ -51,14 +48,11 @@ type Props = {
   updateChatTools: (updates: Partial<ChatToolsConfig>) => void
   obsidianVaultPath: string
   onObsidianVaultPathChange: (path: string) => void
-  emailAccounts: EmailAccountConfig[]
-  onEmailAccountsChange: (accounts: EmailAccountConfig[]) => void
   lang: Lang
   testServer: (server: ChatMcpServer) => Promise<{ ok: boolean; message: string; tools: { name: string }[] } | null>
 }
 
 const OBSIDIAN_CATALOG_ID = 'obsidian'
-const EMAIL_CATALOG_ID = 'email'
 
 // 目录项 → 已物化 server 的 id 约定。
 function connectorServerId(catalogId: string): string {
@@ -79,25 +73,19 @@ export function ConnectorsPanel({
   updateChatTools,
   obsidianVaultPath,
   onObsidianVaultPathChange,
-  emailAccounts,
-  onEmailAccountsChange,
   lang,
   testServer,
 }: Props) {
   const t = i18n[lang]
 
   const obsidianEntry = CONNECTOR_CATALOG.find((e) => e.id === OBSIDIAN_CATALOG_ID)
-  const emailEntry = CONNECTOR_CATALOG.find((e) => e.id === EMAIL_CATALOG_ID)
   const obsidianConnected = obsidianVaultPath.trim().length > 0
-  const emailConnected = emailAccounts.length > 0
 
   // Obsidian vault 选择器状态。
   const [vaultInputFor, setVaultInputFor] = useState(false)
   const [vaultDraft, setVaultDraft] = useState('')
   const [vaultOptions, setVaultOptions] = useState<{ name: string; path: string }[]>([])
   const [vaultLoading, setVaultLoading] = useState(false)
-
-  const [emailModalOpen, setEmailModalOpen] = useState(false)
 
   // 哪个目录项正展开 token 输入框。
   const [tokenInputFor, setTokenInputFor] = useState<string | null>(null)
@@ -329,7 +317,6 @@ export function ConnectorsPanel({
   // 目录中尚未连接的项（Obsidian 已配置路径时从可用列表移除）。
   const availableEntries = CONNECTOR_CATALOG.filter((e) => {
     if (e.id === OBSIDIAN_CATALOG_ID) return !obsidianConnected
-    if (e.id === EMAIL_CATALOG_ID) return !emailConnected
     return !connectedById.has(e.id)
   })
 
@@ -445,58 +432,8 @@ export function ConnectorsPanel({
     )
   }
 
-  const renderEmailConnectedCard = () => {
-    if (!emailEntry || !emailConnected) return null
-    const Icon = EmailBrandIcon
-    return (
-      <div
-        key="email-connector"
-        className="kv-panel cursor-pointer transition hover:border-[var(--accent)]"
-        role="button"
-        tabIndex={0}
-        onClick={() => setEmailModalOpen(true)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            setEmailModalOpen(true)
-          }
-        }}
-      >
-        <div className="flex items-start gap-3">
-          <Icon size={22} className="mt-0.5 shrink-0 opacity-90" />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">{emailEntry.name}</div>
-            <div className="kv-row-desc line-clamp-2 text-[12px]">{emailEntry.description[lang]}</div>
-            <div className="kv-row-desc mt-1 text-[12px] opacity-80">
-              {emailAccounts.map((account) => account.email).join(' · ')}
-            </div>
-          </div>
-          <div className="flex shrink-0 flex-col items-end gap-1">
-            <div className="flex items-center gap-1 text-[12px] text-emerald-600 dark:text-emerald-400">
-              <Check size={12} />
-              <span>
-                {emailAccounts.length} {t.connectorsEmailAccountsTitle}
-              </span>
-            </div>
-            <Button
-              size="sm"
-              onClick={(e) => {
-                e.stopPropagation()
-                setEmailModalOpen(true)
-              }}
-              data-tauri-drag-region="false"
-            >
-              {t.connectorsEmailEdit}
-            </Button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   const renderAvailableCard = (entry: ConnectorCatalogEntry) => {
     const isVault = entry.authKind === 'vault'
-    const isEmail = entry.authKind === 'email'
     const isTokenInput = tokenInputFor === entry.id
     const isVaultInput = isVault && vaultInputFor
     const isOauth = entry.authKind === 'oauth'
@@ -510,19 +447,11 @@ export function ConnectorsPanel({
         role="button"
         tabIndex={0}
         onClick={() => {
-          if (entry.id === EMAIL_CATALOG_ID) {
-            setEmailModalOpen(true)
-            return
-          }
           setDetail({ kind: 'entry', entryId: entry.id })
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
-            if (entry.id === EMAIL_CATALOG_ID) {
-              setEmailModalOpen(true)
-              return
-            }
             setDetail({ kind: 'entry', entryId: entry.id })
           }
         }}
@@ -578,19 +507,6 @@ export function ConnectorsPanel({
                 {t.connectorsConnect}
               </Button>
             )
-          ) : isEmail ? (
-            <Button
-              variant="primary"
-              size="sm"
-              className="shrink-0"
-              onClick={(e) => {
-                e.stopPropagation()
-                setEmailModalOpen(true)
-              }}
-              data-tauri-drag-region="false"
-            >
-              {emailConnected ? t.connectorsEmailEdit : t.connectorsConnect}
-            </Button>
           ) : (
             !isTokenInput && (
               <Button
@@ -713,12 +629,11 @@ export function ConnectorsPanel({
   return (
     <>
       <SettingsGroup title={t.connectorsSectionConnected}>
-        {connectedServers.length === 0 && !obsidianConnected && !emailConnected ? (
+        {connectedServers.length === 0 && !obsidianConnected ? (
           <div className="kv-row-desc py-2">{t.connectorsEmptyConnected}</div>
         ) : (
           <div className="grid grid-cols-1 gap-3 py-2 md:grid-cols-2">
             {renderObsidianConnectedCard()}
-            {renderEmailConnectedCard()}
             {connectedServers.map(renderConnectedCard)}
           </div>
         )}
@@ -812,10 +727,6 @@ export function ConnectorsPanel({
             (entry && oauthBusyFor === entry.id) || (server ? busyId === server.id : false)
           const vaultPath =
             entry?.authKind === 'vault' && obsidianConnected ? obsidianVaultPath : undefined
-          if (entry?.id === EMAIL_CATALOG_ID) {
-            setDetail(null)
-            return null
-          }
           return (
             <ConnectorDetailModal
               lang={lang}
@@ -841,9 +752,6 @@ export function ConnectorsPanel({
                   setDetail(null)
                   setVaultDraft(obsidianVaultPath)
                   setVaultInputFor(true)
-                } else if (entry.authKind === 'email') {
-                  setDetail(null)
-                  setEmailModalOpen(true)
                 } else if (entry.authKind === 'oauth') {
                   void connectOauthConnector(entry)
                 } else {
@@ -856,14 +764,6 @@ export function ConnectorsPanel({
             />
           )
         })()}
-
-      <EmailConnectorModal
-        lang={lang}
-        open={emailModalOpen}
-        accounts={emailAccounts}
-        onAccountsChange={onEmailAccountsChange}
-        onClose={() => setEmailModalOpen(false)}
-      />
     </>
   )
 }

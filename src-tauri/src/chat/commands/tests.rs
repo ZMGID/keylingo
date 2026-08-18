@@ -149,7 +149,6 @@ fn slash_trigger_rewrites_body_and_pins_skill() {
         &chat_tools,
         None,
         "/commit fix login",
-        &[],
         false,
     )
     .expect("slash trigger should match");
@@ -167,11 +166,11 @@ fn slash_trigger_ignores_non_slash_and_unknown() {
     let chat_tools = crate::settings::ChatToolsConfig::default();
 
     assert!(
-        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "commit fix", &[], false)
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "commit fix", false)
             .is_none()
     );
     assert!(
-        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/unknown x", &[], false)
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/unknown x", false)
             .is_none()
     );
 }
@@ -183,7 +182,7 @@ fn slash_trigger_skips_disabled_skill() {
     chat_tools.disabled_skill_ids = vec!["commit".to_string()];
 
     assert!(
-        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/commit fix", &[], false)
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/commit fix", false)
             .is_none()
     );
 }
