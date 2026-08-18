@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Select } from '../settings/components'
+import { Bot, Check, Layers, X } from 'lucide-react'
+import { Button, IconButton } from '../components/Button'
+import { useT } from '../settings/i18n'
+import { builtinAssistantGlyph } from './assistantIcons'
 import type { ChatAssistant, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
 
@@ -29,6 +32,7 @@ export function SetDialog({
   onSave,
   onClose,
 }: SetDialogProps) {
+  const t = useT()
   const [name, setName] = useState(set?.name ?? '')
   const [systemPrompt, setSystemPrompt] = useState(
     set?.system_prompt ?? set?.systemPrompt ?? '',
@@ -37,9 +41,14 @@ export function SetDialog({
     set?.default_assistant_id ?? set?.defaultAssistantId ?? '',
   )
   const [color, setColor] = useState<string | null>(set?.color ?? null)
+  const [assistantOpen, setAssistantOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const title = set ? '编辑集' : '新建集'
+  const assistantRef = useRef<HTMLDivElement>(null)
+  const title = set ? t.chatEditSet : t.chatNewSet
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onClose)
+  const selectableAssistants = assistants.filter((a) => !a.archived)
+  const selectedAssistant = selectableAssistants.find((a) => a.id === defaultAssistantId) ?? null
+  const accent = color ?? '#8E8E93'
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -48,11 +57,27 @@ export function SetDialog({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') startClose()
+      if (e.key === 'Escape') {
+        if (assistantOpen) {
+          setAssistantOpen(false)
+          return
+        }
+        startClose()
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [startClose])
+  }, [assistantOpen, startClose])
+
+  useEffect(() => {
+    if (!assistantOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (assistantRef.current?.contains(e.target as Node)) return
+      setAssistantOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [assistantOpen])
 
   const submit = () => {
     const nextName = name.trim()
@@ -60,18 +85,16 @@ export function SetDialog({
     onSave(nextName, systemPrompt.trim(), defaultAssistantId.trim() || null, color)
   }
 
-  const selectableAssistants = assistants.filter((a) => !a.archived)
-
   return createPortal(
     <div
-      className={`${closing ? 'chat-motion-fade-out' : 'chat-motion-fade'} fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-[1px]`}
+      className={`${closing ? 'chat-motion-fade-out' : 'chat-motion-fade'} fixed inset-0 z-[300] flex items-center justify-center bg-black/35 px-4 backdrop-blur-[2px]`}
       data-tauri-drag-region="false"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) startClose()
       }}
     >
       <form
-        className={`${closing ? 'chat-motion-modal-out' : 'chat-motion-modal-in'} w-full max-w-[380px] rounded-[10px] border border-neutral-200 bg-white p-4 shadow-xl dark:border-neutral-700 dark:bg-[#252527]`}
+        className={`${closing ? 'chat-motion-modal-out' : 'chat-motion-modal-in'} w-full max-w-[520px] overflow-hidden rounded-2xl bg-[#f6f5f2] text-neutral-900 shadow-[0_24px_64px_-20px_rgba(0,0,0,0.35)] dark:bg-[#1c1c1e] dark:text-neutral-100`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -81,100 +104,166 @@ export function SetDialog({
           submit()
         }}
       >
-        <h3 className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-50">{title}</h3>
-
-        <label className="mt-3 block text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
-          集名称
-        </label>
-        <input
-          ref={inputRef}
-          type="text"
-          value={name}
-          maxLength={80}
-          onChange={(e) => setName(e.target.value)}
-          className="mt-1.5 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] text-neutral-900 outline-none transition-colors placeholder:text-neutral-400 focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
-          placeholder="例如：写作助手集"
-        />
-
-        <label className="mt-3 block text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
-          系统提示词
-          <span className="ml-1 font-normal text-neutral-400">（集内对话实时套用）</span>
-        </label>
-        <textarea
-          value={systemPrompt}
-          onChange={(e) => setSystemPrompt(e.target.value)}
-          rows={4}
-          className="mt-1.5 max-h-48 w-full resize-y rounded-lg border border-neutral-200 bg-white px-3 py-2 text-[13px] leading-relaxed text-neutral-900 outline-none transition-colors placeholder:text-neutral-400 focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
-          placeholder="给这个集里的对话统一的角色 / 指令…"
-        />
-
-        <label className="mt-3 block text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
-          默认助手
-          <span className="ml-1 font-normal text-neutral-400">（在集下新建对话时使用）</span>
-        </label>
-        <Select
-          value={defaultAssistantId}
-          onChange={setDefaultAssistantId}
-          options={[
-            { value: '', label: '不指定（用全局默认）' },
-            ...selectableAssistants.map((assistant) => ({
-              value: assistant.id,
-              label: assistant.name,
-            })),
-          ]}
-          className="mt-1.5"
-        />
-
-        <label className="mt-3 block text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
-          颜色
-          <span className="ml-1 font-normal text-neutral-400">（侧栏集图标着色）</span>
-        </label>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setColor(null)}
-            className={`grid size-6 place-items-center rounded-full border text-[10px] text-neutral-400 ${
-              color === null
-                ? 'border-neutral-900 ring-2 ring-neutral-300 dark:border-neutral-100 dark:ring-neutral-600'
-                : 'border-neutral-300 dark:border-neutral-600'
-            }`}
-            aria-label="无颜色"
-            title="无颜色"
-          >
-            ✕
-          </button>
-          {setColors.map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => setColor(c)}
-              className={`size-6 rounded-full border ${
-                color === c
-                  ? 'border-neutral-900 ring-2 ring-neutral-300 dark:border-neutral-100 dark:ring-neutral-600'
-                  : 'border-transparent'
-              }`}
-              style={{ backgroundColor: c }}
-              aria-label={`选择颜色 ${c}`}
-            />
-          ))}
+        <div className="flex items-center justify-between px-5 pt-4">
+          <span className="text-[11px] font-medium tracking-[0.14em] text-neutral-400 uppercase dark:text-neutral-500">
+            {title}
+          </span>
+          <IconButton size="xs" label={t.cancel} onClick={startClose}>
+            <X strokeWidth={1.75} />
+          </IconButton>
         </div>
 
-        {error && <p className="mt-2 text-[12px] text-red-600 dark:text-red-400">{error}</p>}
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={startClose}
-            className="rounded-lg px-3 py-1.5 text-[13px] text-neutral-600 transition-colors hover:bg-black/[0.04] dark:text-neutral-300 dark:hover:bg-white/[0.06]"
-          >
-            取消
-          </button>
-          <button
-            type="submit"
-            disabled={!name.trim() || saving}
-            className="rounded-lg bg-neutral-900 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-neutral-800 disabled:cursor-default disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-950 dark:hover:bg-white"
-          >
-            {saving ? '保存中…' : set ? '保存' : '创建'}
-          </button>
+        <div className="px-5 pt-5 pb-4">
+          <div className="flex items-start gap-3.5">
+            <div
+              className={`grid size-12 shrink-0 place-items-center rounded-2xl transition-colors duration-200 ${
+                color ? '' : 'bg-black/[0.05] text-neutral-400 dark:bg-white/[0.07] dark:text-neutral-500'
+              }`}
+              style={color ? { backgroundColor: `${color}24`, color: accent } : undefined}
+            >
+              <Layers size={22} strokeWidth={1.6} />
+            </div>
+            <div className="min-w-0 flex-1 pt-0.5">
+              <input
+                ref={inputRef}
+                type="text"
+                value={name}
+                maxLength={80}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full bg-transparent text-[22px] font-semibold leading-tight tracking-tight text-neutral-900 outline-none placeholder:font-medium placeholder:text-neutral-300 dark:text-neutral-50 dark:placeholder:text-neutral-600"
+                placeholder={t.chatSetNamePlaceholder}
+                aria-label={t.chatSetName}
+              />
+              <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setColor(null)}
+                  className={`grid size-[18px] place-items-center rounded-full border transition-transform ${
+                    color === null
+                      ? 'scale-110 border-neutral-800 dark:border-neutral-200'
+                      : 'border-neutral-300 hover:scale-110 dark:border-neutral-600'
+                  }`}
+                  aria-label={t.chatSetNoColor}
+                  title={t.chatSetNoColor}
+                >
+                  <span className="block h-px w-2.5 rotate-45 bg-neutral-400" />
+                </button>
+                {setColors.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setColor(c)}
+                    className={`size-[18px] rounded-full transition-transform ${
+                      color === c ? 'scale-110 ring-2 ring-neutral-900 ring-offset-2 ring-offset-[#f6f5f2] dark:ring-white dark:ring-offset-[#1c1c1e]' : 'hover:scale-110'
+                    }`}
+                    style={{ backgroundColor: c }}
+                    aria-label={t.chatAssistantSelectColorNamed.replace('{name}', c)}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mx-5 overflow-hidden rounded-xl bg-white dark:bg-[#2a2a2c]">
+          <div className="flex items-center justify-between px-3.5 pt-3">
+            <span className="text-[11px] font-medium text-neutral-400 dark:text-neutral-500">
+              {t.chatSystemPrompt}
+            </span>
+            <span className="text-[10.5px] text-neutral-300 dark:text-neutral-600">
+              {t.chatSetSystemPromptHint}
+            </span>
+          </div>
+          <textarea
+            value={systemPrompt}
+            onChange={(e) => setSystemPrompt(e.target.value)}
+            rows={6}
+            className="min-h-[148px] w-full resize-none bg-transparent px-3.5 pt-2 pb-3.5 text-[13.5px] leading-relaxed text-neutral-800 outline-none placeholder:text-neutral-300 dark:text-neutral-200 dark:placeholder:text-neutral-600"
+            placeholder={t.chatSetSystemPromptPlaceholder}
+            aria-label={t.chatSystemPrompt}
+          />
+        </div>
+
+        {error && <p className="px-5 pt-3 text-[12px] text-red-600 dark:text-red-400">{error}</p>}
+
+        <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-4">
+          <div ref={assistantRef} className="relative min-w-0">
+            <button
+              type="button"
+              onClick={() => setAssistantOpen((open) => !open)}
+              className="flex max-w-[220px] items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12px] text-neutral-600 transition-colors hover:bg-white/80 dark:bg-[#2a2a2c] dark:text-neutral-300 dark:hover:bg-[#323234]"
+              aria-haspopup="listbox"
+              aria-expanded={assistantOpen}
+              title={t.chatSetDefaultAssistantHint}
+            >
+              <span className="grid size-4 shrink-0 place-items-center text-neutral-400 dark:text-neutral-500">
+                {selectedAssistant
+                  ? builtinAssistantGlyph(selectedAssistant.id, 13) ?? <Bot size={13} strokeWidth={1.75} />
+                  : <Bot size={13} strokeWidth={1.75} />}
+              </span>
+              <span className="min-w-0 truncate">
+                {selectedAssistant ? selectedAssistant.name : t.chatSetDefaultAssistantNone}
+              </span>
+            </button>
+            {assistantOpen && (
+              <div
+                className="chat-motion-popover absolute bottom-full left-0 z-50 mb-1.5 w-[240px] overflow-y-auto kv-menu"
+                style={{ ['--chat-popover-origin' as string]: 'bottom left', maxHeight: 260 }}
+                role="listbox"
+              >
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={!selectedAssistant}
+                  onClick={() => {
+                    setDefaultAssistantId('')
+                    setAssistantOpen(false)
+                  }}
+                  className="kv-menu-item"
+                >
+                  <Bot size={13} strokeWidth={1.75} />
+                  {t.chatSetDefaultAssistantNone}
+                  {!selectedAssistant && <Check size={12} strokeWidth={2.5} className="ml-auto" />}
+                </button>
+                {selectableAssistants.map((assistant) => {
+                  const active = assistant.id === defaultAssistantId
+                  return (
+                    <button
+                      key={assistant.id}
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      onClick={() => {
+                        setDefaultAssistantId(assistant.id)
+                        setAssistantOpen(false)
+                      }}
+                      className="kv-menu-item"
+                    >
+                      <span className="grid size-4 shrink-0 place-items-center">
+                        {builtinAssistantGlyph(assistant.id, 13) ?? <Bot size={13} strokeWidth={1.75} />}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{assistant.name}</span>
+                      {active && <Check size={12} strokeWidth={2.5} />}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="flex shrink-0 items-center gap-2">
+            <Button size="sm" onClick={startClose}>
+              {t.cancel}
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              size="sm"
+              disabled={!name.trim() || saving}
+            >
+              {saving ? t.saving : set ? t.save : t.chatSetCreate}
+            </Button>
+          </div>
         </div>
       </form>
     </div>,
