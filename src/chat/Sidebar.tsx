@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from 'react-dom'
 import { save } from '@tauri-apps/plugin-dialog'
 import {
-  ChevronDown,
   ChevronRight,
   Folder,
   FolderPlus,
@@ -13,6 +12,7 @@ import {
   NotebookPen,
   Plus,
   Search,
+  Settings,
   SquarePen,
 } from 'lucide-react'
 import type { ChatAssistant, ChatProject, ChatSet, ConversationListItem, ConversationSearchHit } from './types'
@@ -207,6 +207,7 @@ export interface SidebarProps {
   onOpenExtensionsItem: (item: ExtensionsNavItem) => void
   onSelectLang: (lang: Lang) => void
   onCheckUpdate: () => void
+  onOpenUsage: () => void
   settingsActive?: boolean
   extensionsActive?: ExtensionsNavItem | null
   collapsed: boolean
@@ -224,6 +225,7 @@ function SidebarUserFooter({
   onOpenSettings,
   onSelectLang,
   onCheckUpdate,
+  onOpenUsage,
 }: {
   profile: ChatUserProfile
   lang: Lang
@@ -231,59 +233,69 @@ function SidebarUserFooter({
   onOpenSettings: () => void
   onSelectLang: (lang: Lang) => void
   onCheckUpdate: () => void
+  onOpenUsage: () => void
 }) {
   const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(null)
-  const rowRef = useRef<HTMLButtonElement>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const t = i18n[lang]
+
+  const toggleMenu = () => {
+    if (menuRect) {
+      setMenuRect(null)
+      return
+    }
+    const rect = rowRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setMenuRect({ left: rect.left, top: rect.top, width: rect.width })
+  }
 
   return (
     <div
       className="shrink-0 border-t border-neutral-200/60 p-1.5 dark:border-neutral-800/80"
       data-tauri-drag-region="false"
     >
-      {/* 整行即触发（对齐 Claude）：不再是「名字 + 独立齿轮按钮」，设置折进菜单。 */}
-      <button
+      <div
         ref={rowRef}
-        type="button"
-        onClick={() => {
-          if (menuRect) {
-            setMenuRect(null)
-            return
-          }
-          const rect = rowRef.current?.getBoundingClientRect()
-          if (!rect) return
-          setMenuRect({ left: rect.left, top: rect.top, width: rect.width })
-        }}
-        className={`flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left transition-colors ${
+        className={`flex w-full items-center gap-1 rounded-lg px-1.5 py-1 transition-colors ${
           menuRect || settingsActive
             ? 'bg-black/[0.06] dark:bg-white/[0.1]'
             : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
         }`}
-        aria-haspopup="menu"
-        aria-expanded={menuRect !== null}
       >
-        <UserAvatar profile={profile} size={22} />
-        <span
-          className="min-w-0 flex-1 truncate text-[12.5px] text-neutral-700 dark:text-neutral-300"
-          title={profile.displayName || undefined}
+        <button
+          type="button"
+          onClick={toggleMenu}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-haspopup="menu"
+          aria-expanded={menuRect !== null}
         >
-          {profile.displayName || 'Kivio'}
-        </span>
-        <ChevronDown
-          size={13}
-          strokeWidth={2}
-          className={`shrink-0 text-neutral-400 transition-transform duration-[var(--kv-dur-fast)] dark:text-neutral-500 ${
-            menuRect ? 'rotate-180' : ''
-          }`}
-        />
-      </button>
+          <UserAvatar profile={profile} size={22} />
+          <span
+            className="min-w-0 flex-1 truncate text-[12.5px] text-neutral-700 dark:text-neutral-300"
+            title={profile.displayName || undefined}
+          >
+            {profile.displayName || 'Kivio'}
+          </span>
+        </button>
+        <IconButton
+          size="xs"
+          label={`${t.settings} (${isMac ? '⌘,' : 'Ctrl+,'})`}
+          onClick={() => {
+            setMenuRect(null)
+            onOpenSettings()
+          }}
+        >
+          <Settings strokeWidth={1.75} />
+        </IconButton>
+      </div>
 
       {menuRect && (
         <SidebarAccountMenu
           triggerRect={menuRect}
           lang={lang}
-          onOpenSettings={onOpenSettings}
           onSelectLang={onSelectLang}
           onCheckUpdate={onCheckUpdate}
+          onOpenUsage={onOpenUsage}
           onClose={() => setMenuRect(null)}
         />
       )}
@@ -581,6 +593,7 @@ export const Sidebar = memo(function Sidebar({
   onOpenExtensionsItem,
   onSelectLang,
   onCheckUpdate,
+  onOpenUsage,
   settingsActive = false,
   extensionsActive = null,
   collapsed,
@@ -1745,6 +1758,7 @@ export const Sidebar = memo(function Sidebar({
         onOpenSettings={onOpenSettings}
         onSelectLang={onSelectLang}
         onCheckUpdate={onCheckUpdate}
+        onOpenUsage={onOpenUsage}
       />
 
       {projectMenuState && menuProject && (

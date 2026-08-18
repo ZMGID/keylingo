@@ -20,3 +20,14 @@ export function formatTokens(n: number): string {
 export function formatTokensK(n: number): string {
   return formatTokens(n).replace('k', 'K')
 }
+
+/**
+ * 窄处用量缩写。满 1000 收成 k、满 1_000_000 收成 m；一位小数，整数档去掉 `.0`
+ * （1000 → `1k`，不是 `1.0k`）。
+ */
+export function formatTokensCompact(n: number): string {
+  const value = Number.isFinite(n) ? Math.max(0, n) : 0
+  if (value < 1000) return `${Math.round(value)}`
+  const [divisor, suffix] = value >= 1_000_000 ? [1_000_000, 'm'] : [1000, 'k']
+  return `${(value / divisor).toFixed(1).replace(/\.0$/, '')}${suffix}`
+}

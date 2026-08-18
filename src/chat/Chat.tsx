@@ -4797,7 +4797,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     openEmbeddedSettings('chat')
   }, [chatView, extensionsNavItem, handleSettingsClose, openEmbeddedSettings])
 
-  // 侧栏账户菜单：语言切换 / 检查更新。都是全局行为，所以留在 Chat 这层，
+  // 侧栏账户菜单：语言切换 / 检查更新 / 用量。都是全局行为，所以留在 Chat 这层，
   // 侧栏只负责触发（它拿不到 settings 也不该自己全量保存）。
   const handleSidebarSelectLang = useCallback((next: Lang) => {
     setUiLang(next)
@@ -4816,6 +4816,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleSidebarCheckUpdate = useCallback(() => {
     setExtensionsNavItem(null)
     openEmbeddedSettings('about')
+  }, [openEmbeddedSettings])
+
+  const handleSidebarOpenUsage = useCallback(() => {
+    setExtensionsNavItem(null)
+    openEmbeddedSettings('usage')
   }, [openEmbeddedSettings])
 
   const handleSidebarSearchOpenChange = useCallback((open: boolean) => {
@@ -5323,6 +5328,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           onOpenSettings={handleSidebarOpenSettings}
           onSelectLang={handleSidebarSelectLang}
           onCheckUpdate={handleSidebarCheckUpdate}
+          onOpenUsage={handleSidebarOpenUsage}
           settingsActive={settingsPanelActive}
           extensionsActive={extensionsActive}
           collapsed={sidebarCollapsed || settingsPanelActive}
