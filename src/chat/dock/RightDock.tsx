@@ -1,17 +1,17 @@
-// Right Dock 容器：tab 条（文件树 / Git / 终端 / 任务）+ 常驻四面板 + 左缘拖拽调宽 + 折叠滑出。
+// Right Dock 容器：tab 条（文件树 / Git / 终端 / 任务 / 轨迹）+ 常驻面板 + 左缘拖拽调宽 + 折叠滑出。
 // 宽度通过 CSS 变量 --chat-dock-width 直写（拖拽过程不触发 React 重渲），松手才持久化。
 import { memo, useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
-import { Activity, FolderTree, GitBranch, GitFork, Terminal, X } from 'lucide-react'
+import { Activity, FolderTree, GitBranch, Route, Terminal, X } from 'lucide-react'
 import { i18n, type Lang } from '../../settings/i18n'
-import type { Conversation } from '../types'
+import type { ChatMessage, Conversation } from '../types'
 import { IconButton } from '../../components/Button'
 import { FileTreePanel } from './FileTreePanel'
 import { GitPanel } from './GitPanel'
 import { TerminalPanel } from './TerminalPanel'
 import { BackgroundTasksPanel } from './BackgroundTasksPanel'
-import { PiSessionTreePanel } from '../PiSessionTreePanel'
+import { TrajectoryPanel } from '../TrajectoryPanel'
 
-export type DockTab = 'files' | 'git' | 'terminal' | 'tasks' | 'piSessions'
+export type DockTab = 'files' | 'git' | 'terminal' | 'tasks' | 'trajectory'
 
 export const DOCK_MIN_WIDTH = 320
 export const DOCK_MAX_WIDTH = 560
@@ -38,7 +38,9 @@ type RightDockProps = {
   lang: Lang
   /** 当前对话 id（任务页按对话隔离）。null = 还没有对话。 */
   conversationId: string | null
-  piSessionsEnabled: boolean
+  conversation: Conversation | null
+  messages: ChatMessage[]
+  piNativeEnabled: boolean
   treeExpanded: string[]
   revealRequest: DockRevealRequest
   previewRequest: DockPreviewRequest
@@ -52,6 +54,7 @@ type RightDockProps = {
     conversation?: Conversation,
     draft?: string,
   ) => void
+  onFocusMessage: (messageId: string) => void
   onRevealInTree: (path: string) => void
 }
 
@@ -62,7 +65,9 @@ export const RightDock = memo(function RightDock({
   workdir,
   lang,
   conversationId,
-  piSessionsEnabled,
+  conversation,
+  messages,
+  piNativeEnabled,
   treeExpanded,
   revealRequest,
   previewRequest,
@@ -72,6 +77,7 @@ export const RightDock = memo(function RightDock({
   onTreeExpandedChange,
   onInsertMention,
   onPiConversationChanged,
+  onFocusMessage,
   onRevealInTree,
 }: RightDockProps) {
   const t = i18n[lang]
@@ -121,7 +127,7 @@ export const RightDock = memo(function RightDock({
   const filesActive = open && activeTab === 'files'
   const gitActive = open && activeTab === 'git'
   const terminalActive = open && activeTab === 'terminal'
-  const piSessionsActive = open && activeTab === 'piSessions' && piSessionsEnabled
+  const trajectoryActive = open && activeTab === 'trajectory'
   return (
     <aside
       ref={shellRef}
@@ -143,9 +149,7 @@ export const RightDock = memo(function RightDock({
             { tab: 'git' as DockTab, label: t.dockTabGit, icon: GitBranch },
             { tab: 'terminal' as DockTab, label: t.dockTabTerminal, icon: Terminal },
             { tab: 'tasks' as DockTab, label: t.dockTabTasks, icon: Activity },
-            ...(piSessionsEnabled
-              ? [{ tab: 'piSessions' as DockTab, label: t.dockTabPiSessions, icon: GitFork }]
-              : []),
+            { tab: 'trajectory' as DockTab, label: t.dockTabTrajectory, icon: Route },
           ]
         ).map(({ tab, label, icon: Icon }) => (
           <button
@@ -168,7 +172,7 @@ export const RightDock = memo(function RightDock({
         </IconButton>
       </div>
 
-      {/* 面板常驻挂载，inactive 只 hidden（各自 active=false 时停发请求、攒脏标记）。 */}
+      {/* 文件 / Git / 终端 / 任务常驻挂载，inactive 只 hidden。轨迹按需挂载：打开才算、才拉。 */}
       <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'files'}>
         <FileTreePanel
           workdir={workdir}
@@ -195,12 +199,15 @@ export const RightDock = memo(function RightDock({
           conversationId={conversationId}
         />
       </div>
-      {piSessionsEnabled && (
-        <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'piSessions'}>
-          <PiSessionTreePanel
-            active={piSessionsActive}
+      {trajectoryActive && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <TrajectoryPanel
+            active
             lang={lang}
-            conversationId={conversationId}
+            conversation={conversation}
+            messages={messages}
+            piNativeEnabled={piNativeEnabled}
+            onFocusMessage={onFocusMessage}
             onConversationChanged={onPiConversationChanged}
           />
         </div>

@@ -46,10 +46,12 @@ describe('normalizeStoredChatRoute', () => {
 })
 
 describe('right dock tab persistence', () => {
-  it('remembers the Pi sessions tab', () => {
+  it('remembers the trajectory tab and migrates the old Pi sessions key', () => {
     window.localStorage.clear()
-    rememberDockTab('piSessions')
-    expect(getRememberedDockTab()).toBe('piSessions')
+    rememberDockTab('trajectory')
+    expect(getRememberedDockTab()).toBe('trajectory')
+    window.localStorage.setItem('kivio-chat-dock-tab', 'piSessions')
+    expect(getRememberedDockTab()).toBe('trajectory')
   })
 })
 

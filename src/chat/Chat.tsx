@@ -1007,6 +1007,8 @@ type SendMessageOptions = {
 
 /** 稳定空数组：没有排队消息时不要每次渲染都造一个新引用。 */
 const NO_QUEUED_MESSAGES: QueuedMessage[] = []
+/** 轨迹未打开时不要把 displayMessages 灌进 Dock，避免流式每帧带动右侧栏。 */
+const NO_TRAJECTORY_MESSAGES: ChatMessage[] = []
 
 export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   useChatPerfRenderProbe('Chat', { view: hashPath() })
@@ -4495,15 +4497,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [treeExpanded, setTreeExpanded] = useState<string[]>([])
   const [dockReveal, setDockReveal] = useState<DockRevealRequest>(null)
   const [dockPreview, setDockPreview] = useState<DockPreviewRequest>(null)
-  const piSessionsEnabled = usesExternalRuntime
+  const piNativeEnabled = usesExternalRuntime
     && activeAgentRuntime.externalAgentId === 'pi'
     && Boolean(currentConversation?.id)
-
-  useEffect(() => {
-    if (dockTab !== 'piSessions' || piSessionsEnabled) return
-    setDockTab('files')
-    rememberDockTab('files')
-  }, [dockTab, piSessionsEnabled])
+  const trajectoryLive = dockOpen && dockTab === 'trajectory'
   // 工作目录跟随当前会话 / 选中项目 / agent runtime 变化，由后端 dock_resolve_cwd 解析
   // （外部 agent 与内置 runtime 的实际写入目录不同，runtime 切换必须重解析）。
   useEffect(() => {
@@ -5463,7 +5460,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             workdir={dockWorkdir}
             lang={uiLang}
             conversationId={currentConversation?.id ?? null}
-            piSessionsEnabled={piSessionsEnabled}
+            conversation={trajectoryLive ? currentConversation : null}
+            messages={trajectoryLive ? displayMessages : NO_TRAJECTORY_MESSAGES}
+            piNativeEnabled={trajectoryLive && piNativeEnabled}
             treeExpanded={treeExpanded}
             revealRequest={dockReveal}
             previewRequest={dockPreview}
@@ -5473,6 +5472,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             onTreeExpandedChange={handleTreeExpandedChange}
             onInsertMention={handleInsertFileMention}
             onPiConversationChanged={handlePiConversationChanged}
+            onFocusMessage={setFocusMessageId}
             onRevealInTree={handleDockRevealInTree}
           />
         )}
