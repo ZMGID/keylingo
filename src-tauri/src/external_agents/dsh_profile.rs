@@ -31,6 +31,8 @@
 //! - `agent-presets`：四档 Agent 模式（standard / code / minimal / cordis）。与官方 web
 //!   一样关掉 host 平面工具，改由所选 preset 组装；`dsh --profile` 会把随包的
 //!   `config/agent-presets` 补进 `roots`。
+//! - `storage` / `workspace`：与官方 web 共用 `$DSH_HOME/storages`。Kivio 创建的原生会话
+//!   必须挂进 Host Workspace，否则 dsh web 把它们全部丢进「其他项目」。
 //! - 当前 Kivio 供应商的 `llm-pi-ai.providers.<route>`：只挂在 `profiles/kivio`，Key 仅以
 //!   `apiKeyEnv` 引用并由 Kivio 注入进程，不写入 YAML。
 //!
@@ -163,7 +165,23 @@ fn render_patch(reasoning: Option<&str>, preset: Option<&str>) -> String {
     );
     out.push_str(normalize_agent_preset(preset));
     out.push_str(
-        "\n\n# Kivio bridge：保留官方事件流，并补齐跨进程 resume 与协议级 cancel。\n\
+        "\n\n# 与官方 web 共用 $DSH_HOME/storages，把 Kivio 会话挂进 Host Workspace。\n\
+         # 只写插件名，包从本机 dsh 安装解析，不 `plugin add` 进 kivio profile。\n\
+         - insert:\n\
+         \x20   - id: storage\n\
+         \x20     name: '@deepseek-ai/dsh-storage'\n\
+         \x20   - id: storage-json\n\
+         \x20     name: '@deepseek-ai/dsh-storage-json'\n\
+         \x20     config:\n\
+         \x20       root: !!js dshHomePath('storages')\n\
+         \x20   - id: storage-domain\n\
+         \x20     name: '@deepseek-ai/dsh-storage-domain'\n\
+         \x20     config:\n\
+         \x20       backend: json\n\
+         \x20   - id: workspace\n\
+         \x20     name: '@deepseek-ai/dsh-workspace'\n\
+         \n\
+         # Kivio bridge：保留官方事件流，并补齐跨进程 resume 与协议级 cancel。\n\
          - insert:\n\
          \x20   - id: kivio-dsh-jsonrpc-bridge\n\
          \x20     name: './kivio-dsh-bridge.mjs'\n",
@@ -568,7 +586,20 @@ mod tests {
         assert!(yml.contains("id: kivio-dsh-jsonrpc-bridge"));
         assert!(yml.contains("name: '@deepseek-ai/dsh-agent-presets'"));
         assert!(yml.contains("default: standard"));
+        assert!(yml.contains("name: '@deepseek-ai/dsh-workspace'"));
+        assert!(yml.contains("dshHomePath('storages')"));
         assert!(yml.contains("- id: tool-bash\n  disabled: true"));
+    }
+
+    #[test]
+    fn patch_mounts_the_shared_dsh_workspace_registry() {
+        let yml = render_patch(None, None);
+        assert!(yml.contains("name: '@deepseek-ai/dsh-storage'"));
+        assert!(yml.contains("name: '@deepseek-ai/dsh-storage-json'"));
+        assert!(yml.contains("name: '@deepseek-ai/dsh-storage-domain'"));
+        assert!(yml.contains("name: '@deepseek-ai/dsh-workspace'"));
+        assert!(yml.contains("root: !!js dshHomePath('storages')"));
+        assert!(yml.contains("backend: json"));
     }
 
     #[test]
@@ -591,6 +622,11 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("commands.list"));
         assert!(BRIDGE_SOURCE.contains("jobs.kill"));
         assert!(BRIDGE_SOURCE.contains("subagents.interrupt"));
+        assert!(BRIDGE_SOURCE.contains("workspaceRegistry"));
+        assert!(BRIDGE_SOURCE.contains("attachSession"));
+        assert!(BRIDGE_SOURCE.contains("shouldAttachWorkspace"));
+        assert!(BRIDGE_SOURCE.contains("process.chdir(this.cwd)"));
+        assert!(BRIDGE_SOURCE.contains("[kivio-dsh] workspace attach failed:"));
         assert!(!BRIDGE_SOURCE.contains("waitForProviderAdapter"));
         assert!(!BRIDGE_SOURCE.contains("@deepseek-ai/dsh-session"));
     }

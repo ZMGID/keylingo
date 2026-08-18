@@ -18,7 +18,8 @@
 //!
 //! dsh 没有「一条命令直接出流式 JSON」的模式，它**只能 boot profile**。所以启动参数是
 //! `--profile <kivio profile>`，而那个 profile 由 `dsh_profile.rs` 生成并维护（Kivio 自己的
-//! 目录，绝不改用户的 `profiles/web` 或家目录 `cordis.patch.yml`）。
+//! 目录，绝不改用户的 `profiles/web` 或家目录 `cordis.patch.yml`）。进程 cwd、`initialize.cwd`
+//! 与 Host Workspace 挂载都指向 Kivio 项目根；不只是提示词里写一条路径。
 //!
 //! 模型 / 推理档位不是启动 flag，而是 `initialize` 的 RPC 参数（模型）与 Kivio profile
 //! `cordis.patch.yml` 中的 `llm-deepseek.reasoningEffort`（档位）—— 见 `dsh_profile.rs`。

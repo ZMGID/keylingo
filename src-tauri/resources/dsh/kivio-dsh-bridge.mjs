@@ -5,6 +5,14 @@ import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
   async initialize(params) {
     const result = await super.initialize(params)
+    // Session tools read header.cwd; sandbox-policy falls back to process.cwd()
+    // when a header has none. Align the process with initialize.cwd so this
+    // one-session process is actually rooted in the Kivio project directory.
+    try {
+      process.chdir(this.cwd)
+    } catch {
+      // header.cwd still drives tools even if chdir is refused.
+    }
     return {
       ...result,
       serverInfo: {
@@ -45,16 +53,18 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
 
   async createFreshSession(sessionId) {
     const preset = this.agentPreset()
+    const cwd = this.cwd
     const record = {
       handle: await this.ctx.agents.create({
         sessionId,
-        meta: { cwd: this.cwd, agentPreset: preset },
+        meta: { cwd, agentPreset: preset },
         agentOptions: this.agentOptions(),
         setup: (agentCtx) => this.mountPreset(agentCtx, preset),
       }),
       resumed: false,
     }
     this.sessions.set(sessionId, record)
+    await this.attachToWorkspace(sessionId, cwd)
     return record
   }
 
@@ -69,7 +79,31 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     })
     const record = { handle, resumed: true }
     this.sessions.set(sessionId, record)
+    await this.attachToWorkspace(
+      sessionId,
+      handle.agent?.session?.header?.cwd || this.cwd,
+    )
     return record
+  }
+
+  /**
+   * Official web groups sessions by Host Workspace membership, not by
+   * session.header.cwd. `agents.create({ meta.cwd })` alone leaves the
+   * session in the ungrouped bucket ("其他项目" / 未分组). Mirror
+   * session.create: ensure the directory is a workspace, then attach.
+   *
+   * Per-conversation Kivio workbenches stay ungrouped so they do not
+   * flood the web sidebar with uuid folders.
+   */
+  async attachToWorkspace(sessionId, cwd) {
+    if (!shouldAttachWorkspace(cwd)) return
+    try {
+      const workspace = await this.ctx.workspaceRegistry.create(cwd)
+      await workspace.attachSession(sessionId)
+    } catch (error) {
+      // Grouping is best-effort; a failed attach must not drop the turn.
+      console.error('[kivio-dsh] workspace attach failed:', error)
+    }
   }
 
   agentPreset() {
@@ -246,6 +280,12 @@ function requireSessionId(value) {
   return value.trim()
 }
 
+function shouldAttachWorkspace(cwd) {
+  if (typeof cwd !== 'string' || cwd.trim() === '') return false
+  const normalized = cwd.replace(/\\/g, '/')
+  return !/(^|\/)chat-workspaces\//.test(normalized)
+}
+
 const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 function normalizeImageMediaType(value) {
@@ -292,7 +332,7 @@ async function materializeContentBlocks(ctx, blocks) {
 }
 
 export const name = 'kivio-dsh-jsonrpc-bridge'
-export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands', 'attachments', 'jobs', 'subagents']
+export const inject = ['agents', 'sessionPersistence', 'agentPresets', 'userQuestions', 'commands', 'attachments', 'jobs', 'subagents', 'workspaceRegistry']
 export const Config = Schema.object({
   maxTokensAsSuccess: Schema.boolean().default(false),
 })

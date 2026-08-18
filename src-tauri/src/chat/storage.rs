@@ -1482,7 +1482,13 @@ fn normalize_project_root_path(
         return Err("项目文件夹不存在或不是文件夹。".to_string());
     }
     fs::canonicalize(path)
-        .map(|path| Some(path.to_string_lossy().to_string()))
+        .map(|path| {
+            Some(
+                crate::utils::strip_windows_verbatim_prefix(path)
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        })
         .map_err(|err| format!("解析项目文件夹失败：{err}"))
 }
 

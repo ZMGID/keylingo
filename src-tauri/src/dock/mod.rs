@@ -64,8 +64,11 @@ pub async fn dock_resolve_cwd(
         {
             if let Ok(project) = crate::chat::storage::find_project_by_id(&app, project_id) {
                 if let Some(root) = project.root_path.filter(|p| !p.trim().is_empty()) {
-                    let path = std::path::PathBuf::from(root);
-                    if path.is_dir() {
+                    if let Some(path) =
+                        crate::external_agents::workspace::cli_dir_if_exists(std::path::PathBuf::from(
+                            root,
+                        ))
+                    {
                         return Ok(path.to_string_lossy().to_string());
                     }
                 }

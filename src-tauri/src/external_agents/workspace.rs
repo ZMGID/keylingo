@@ -2,26 +2,50 @@ use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
 
-use crate::chat::storage::{conversations_dir, find_project_by_id, load_conversation};
+use crate::chat::storage::{
+    conversations_dir, find_project_by_id, load_conversation, resolve_conversation_project,
+};
+use crate::chat::types::ChatProject;
 use crate::external_agents::types::RuntimeAgentDef;
+use crate::utils::strip_windows_verbatim_prefix;
 
 pub fn resolve_effective_cwd(
     app: &AppHandle,
     conversation_id: &str,
     project_id: Option<&str>,
 ) -> Result<PathBuf, String> {
-    if let Some(project_id) = project_id.filter(|id| !id.trim().is_empty()) {
-        if let Ok(project) = find_project_by_id(app, project_id) {
-            if let Some(root) = project.root_path.filter(|p| !p.trim().is_empty()) {
-                let path = PathBuf::from(root);
-                if path.is_dir() {
-                    return Ok(path);
-                }
-            }
-        }
+    if let Some(path) = project_cli_root_for_conversation(app, conversation_id, project_id) {
+        return Ok(path);
     }
 
     conversation_workspace_path(app, conversation_id)
+}
+
+fn project_cli_root_for_conversation(
+    app: &AppHandle,
+    conversation_id: &str,
+    project_id: Option<&str>,
+) -> Option<PathBuf> {
+    if let Ok(conversation) = load_conversation(app, conversation_id) {
+        if let Ok(Some(project)) = resolve_conversation_project(app, &conversation) {
+            return cli_dir_if_exists_from_project(project);
+        }
+        return None;
+    }
+    let project_id = project_id.filter(|id| !id.trim().is_empty())?;
+    cli_dir_if_exists_from_project(find_project_by_id(app, project_id).ok()?)
+}
+
+fn cli_dir_if_exists_from_project(project: ChatProject) -> Option<PathBuf> {
+    let root = project.root_path.filter(|path| !path.trim().is_empty())?;
+    cli_dir_if_exists(PathBuf::from(root))
+}
+
+/// Project roots are stored via `fs::canonicalize` (`\\?\E:\...` on Windows).
+/// External CLIs (Node `dsh` especially) need the non-verbatim spelling.
+pub fn cli_dir_if_exists(path: PathBuf) -> Option<PathBuf> {
+    let stripped = strip_windows_verbatim_prefix(path);
+    stripped.is_dir().then_some(stripped)
 }
 
 /// 会话工作区路径，**不创建目录**。
@@ -64,21 +88,8 @@ pub fn resolve_detection_cwd(
     conversation_id: Option<&str>,
 ) -> Result<PathBuf, String> {
     if let Some(conversation_id) = conversation_id.filter(|id| !id.trim().is_empty()) {
-        if let Ok(conversation) = load_conversation(app, conversation_id) {
-            if let Some(project_id) = conversation
-                .project_id
-                .as_deref()
-                .filter(|id| !id.trim().is_empty())
-            {
-                if let Ok(project) = find_project_by_id(app, project_id) {
-                    if let Some(root) = project.root_path.filter(|p| !p.trim().is_empty()) {
-                        let path = PathBuf::from(root);
-                        if path.is_dir() {
-                            return Ok(path);
-                        }
-                    }
-                }
-            }
+        if let Some(path) = project_cli_root_for_conversation(app, conversation_id, None) {
+            return Ok(path);
         }
     }
     let base = conversations_dir(app)?
@@ -102,4 +113,37 @@ pub fn extra_allowed_dirs_for_agent(
         .filter(|p| !p.trim().is_empty() && Path::new(p).is_dir())
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cli_dir_if_exists;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cli_dir_if_exists_rejects_missing_paths() {
+        assert_eq!(
+            cli_dir_if_exists(PathBuf::from(
+                r"\\?\E:\this-folder-does-not-exist-kivio-cwd-test"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn cli_dir_if_exists_accepts_a_real_directory() {
+        let cwd = std::env::current_dir().expect("cwd");
+        #[cfg(windows)]
+        let verbatim = PathBuf::from(format!(r"\\?\{}", cwd.display()));
+        #[cfg(not(windows))]
+        let verbatim = cwd.clone();
+        let resolved = cli_dir_if_exists(verbatim).expect("cwd is a directory");
+        assert!(resolved.is_dir());
+        #[cfg(windows)]
+        assert!(
+            !resolved.to_string_lossy().starts_with(r"\\?\"),
+            "cli cwd must not keep a verbatim prefix: {}",
+            resolved.display()
+        );
+    }
 }
