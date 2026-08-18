@@ -3637,7 +3637,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleSendMessageRef = useRef(handleSendMessage)
   handleSendMessageRef.current = handleSendMessage
 
-  /** 设置 → 插件「让 AI 安装」：取规范 brief → 回聊天 → 新开对话并自动发送安装任务 */
+  /** 设置 → 插件「让 AI 代装」：取规范 brief → 回聊天 → 新开对话并自动发送安装任务 */
   const handleRequestPluginAiInstall = useCallback(async (pluginId: string) => {
     const startingConversationId = currentConversationIdRef.current
     const brief = await api.pluginsInstallBrief(pluginId)

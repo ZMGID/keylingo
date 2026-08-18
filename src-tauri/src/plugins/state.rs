@@ -287,12 +287,28 @@ fn path_sep() -> &'static str {
 /// 已启用插件的附属 Skill 扫描根（每个 skill 目录内含 SKILL.md）。
 /// 关闭插件后不再返回，registry 下次构建即消失。
 ///
-/// **兼容性：** 不在每次扫描时全量 `load_skill`（OfficeCLI 十几个 skill 会反复拉起 CLI、拖慢工具列表）。
-/// 仅当声明的 skill 文件不齐时才补同步；完整同步发生在插件「启用」时。
+/// 官方共享目录型插件（OfficeCLI / Cua Driver）不拷贝：discover 已扫 `~/.agents/skills`。
+/// 这里只补插件目录残留，以及 `~/.cua-driver/skills` 等不在全局扫描列表里的官方落点。
+/// ego lite 仍写在插件目录，缺文件时才补下载/写入。
 pub fn enabled_skill_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for plugin in PLUGIN_CATALOG {
         if !is_enabled(plugin.id) || !is_installed(plugin.id) {
+            continue;
+        }
+        if plugin.uses_shared_skill_dirs() {
+            for skill_id in plugin.skill_ids {
+                if let Some(dir) = skill_dir(plugin.id, skill_id) {
+                    if dir.join("SKILL.md").is_file() {
+                        roots.push(dir);
+                    }
+                }
+                if let Some(dir) = super::install::official_skill_dir(skill_id) {
+                    if !roots.iter().any(|existing| existing == &dir) {
+                        roots.push(dir);
+                    }
+                }
+            }
             continue;
         }
         if !plugin_skill_files_complete(plugin) {

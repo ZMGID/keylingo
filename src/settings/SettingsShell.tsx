@@ -84,7 +84,7 @@ export interface SettingsShellProps {
   initialTab?: SettingsTab
   /** embedded 单页模式：隐藏左侧设置导航，只显示 initialTab 对应页（如从扩展点「知识库」进入） */
   hideNav?: boolean
-  /** 插件页「让 AI 安装」：由 Chat 宿主开新对话并发送 install brief */
+  /** 插件页「让 AI 代装」：由 Chat 宿主开新对话并发送 install brief */
   onRequestPluginAiInstall?: (pluginId: string) => void | Promise<void>
 }
 
@@ -1765,8 +1765,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     plugins: {
       title: t.tabPlugins,
       subtitle: lang === 'zh'
-        ? '检测本机能力插件（如 officecli）；启用后自动注入 Skill / MCP。'
-        : 'Detect local capability plugins (e.g. officecli); enable to inject Skills / MCP.',
+        ? '检测本机能力插件（OfficeCLI / Cua Driver / ego lite）；启用后自动注入 Skill / MCP。'
+        : 'Detect local capability plugins (OfficeCLI / Cua Driver / ego lite); enable to inject Skills / MCP.',
     },
     webSearch: {
       title: t.tabWebSearch,

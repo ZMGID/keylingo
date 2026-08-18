@@ -1,8 +1,9 @@
-//! 能力插件（领域 CLI 等）：**安装由 Kivio AI 按规范文档执行**；启用开关由插件页统一管理。
+//! 能力插件（领域 CLI 等）：**优先用官方安装器**；启用开关由插件页统一管理。
 //!
-//! - 「让 AI 安装」→ 前端开对话，把 `install_doc` 交给 Agent（run_command 下载/安装）
+//! - 点「安装」→ 运行 catalog 里 GitHub README 的官方命令（按平台）
+//! - 「让 AI 代装」可选：前端开对话，把 `install_doc` 交给 Agent
 //! - 检测 PATH / 托管目录判断是否已安装
-//! - **启用** 后才注入 PATH 提示、Skill、MCP；关闭则全部卸下
+//! - **启用** 后才注入 PATH 提示、Skill 门闸、MCP；关闭则全部卸下
 //! - 与独立 Skill 页、连接器 MCP 分离
 
 mod catalog;
@@ -14,8 +15,8 @@ mod state;
 pub use catalog::{catalog_plugin, CatalogPlugin, PLUGIN_CATALOG};
 pub use install::{
     get_install_brief, list_plugin_statuses, list_plugin_statuses_cached_with_state,
-    list_plugin_statuses_with_state, set_plugin_enabled, uninstall_plugin, PluginActionResult,
-    PluginInstallBrief, PluginStatus,
+    list_plugin_statuses_with_state, run_official_install, set_plugin_enabled, uninstall_plugin,
+    PluginActionResult, PluginInstallBrief, PluginStatus,
 };
 pub use lifecycle::{
     ensure_officecli_mcp_flush_env, plugin_skill_available, skill_owned_by_plugin,
@@ -45,6 +46,12 @@ pub fn plugins_list_cached(state: State<'_, AppState>) -> Result<Vec<PluginStatu
 #[tauri::command]
 pub fn plugins_install_brief(id: String) -> Result<PluginInstallBrief, String> {
     get_install_brief(&id)
+}
+
+/// 运行当前系统对应的 GitHub README 安装命令。
+#[tauri::command]
+pub async fn plugins_run_official_install(id: String) -> Result<PluginActionResult, String> {
+    run_official_install(&id).await
 }
 
 #[tauri::command]

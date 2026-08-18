@@ -1,6 +1,7 @@
-//! 插件状态列表、启用/卸载、以及 **给 AI 的安装 brief**。
+//! 插件状态列表、启用/卸载、以及运行官方 README 安装命令。
 //!
-//! 安装本身不由后端静默下载：前端点「让 AI 安装」→ 开对话 → Agent 按 install_doc 执行。
+//! 点「安装」会执行 catalog 里对应平台的 GitHub README 命令（允许名单，不是用户输入）。
+//! Skill 已在 `~/.agents/skills` 时不必再拷贝。
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -18,6 +19,10 @@ use crate::proc::NoConsoleWindow;
 use crate::state::AppState;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
+
+const OFFICIAL_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+const OFFICIAL_INSTALL_OUTPUT_CAP: usize = 8_000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +54,8 @@ pub struct PluginStatus {
     pub mcp_active: bool,
     /// 启用后 MCP 的 server id（如 plugin-officecli）
     pub mcp_server_id: Option<String>,
+    /// 当前系统对应的 GitHub README 安装命令；本机无对应平台时为 None
+    pub install_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,16 +125,10 @@ fn build_status(
     let enabled = is_enabled(catalog.id) && installed;
     let skill_count = catalog.skill_ids.len() as u32;
     let mcp_count = if catalog.mcp.is_some() { 1 } else { 0 };
-    // 有 skill_ids 即声明附属 skill（正文可来自 skill_md 或官方 CLI 同步）
+    // 有 skill_ids 即声明附属 skill（插件目录、或官方 ~/.agents 等共享目录）
     let has_skill = skill_count > 0;
     let has_mcp = mcp_count > 0;
-    let skill_active = enabled
-        && has_skill
-        && catalog.skill_ids.iter().any(|sid| {
-            super::state::skill_dir(catalog.id, sid)
-                .map(|d| d.join("SKILL.md").is_file())
-                .unwrap_or(false)
-        });
+    let skill_active = enabled && has_skill && plugin_has_any_official_or_copied_skill(catalog);
     // MCP 是否已挂到 settings 由 fill_mcp_active 再补
     let mcp_server_id = has_mcp.then(|| plugin_mcp_server_id(catalog.id));
     PluginStatus {
@@ -151,6 +152,7 @@ fn build_status(
         skill_active,
         mcp_active: false,
         mcp_server_id,
+        install_command: catalog.host_install_command().map(str::to_string),
     }
 }
 
@@ -257,7 +259,7 @@ Kivio **不会**用后台脚本静默下载插件。本任务由 **你（Kivio A
 
 | 阶段 | 谁做 | 你要做什么 |
 |------|------|------------|
-| **A. 安装（本对话）** | **你（AI）** | ① 按 README 安装官方 `{binary}` ② 用官方 CLI **安装官方 Skills** ③ 验收并汇报 |
+| **A. 安装（本对话）** | **你（AI）** | ① 按 README 安装官方 `{binary}` ② 若 `~/.agents/skills` 已有官方 Skill 则跳过，否则补 `skills install` ③ 验收并汇报 |
 | **B. 检测** | 用户点插件页「刷新」 | 你只需保证 PATH/默认目录里能跑 `{binary}` |
 | **C. 启用** | **用户**打开插件开关 | **不要**手改 Kivio settings；启用后 Kivio **自动**挂上官方 MCP（`… mcp` stdio）并把官方 Skill 接入对话 |
 | **D. 关闭** | 用户 | 卸下 MCP / Skill / 系统提示 |
@@ -271,36 +273,15 @@ Kivio **不会**用后台脚本静默下载插件。本任务由 **你（Kivio A
   - 用户 **启用** 插件后，Kivio 会注册：`command=<绝对路径>`，`args=["mcp"]`（id 形如 `plugin-{id}`）。
 - 你在安装阶段**不要**声称「MCP 已在 Kivio 里可用」——那要等用户启用。
 
-### 3.2 Skill：必须由你用官方 CLI **全量**装好（不要跳过、不要只装常用三个）
+### 3.2 Skill：官方安装器写入 `~/.agents/skills`，Kivio 直接扫描
 
-官方技能包由 CLI 管理。安装二进制之后，**必须把列表里每一个 skill 都装上**（用户期望装插件 = 功能齐套）：
+官网安装器 / `{binary} skills install` 会把 Skill 写到 `~/.agents/skills`（以及 `~/.claude/skills` 等）。Kivio **直接扫描这些目录**，不要再拷进插件目录、不要手写 stub。
 
-1. **base**：
-   ```
-   {binary} skills install
-   ```
-2. **全部领域 skill**（逐个 `skills install <name>`，缺一不可）：
-   `pptx` `word` `excel` `morph-ppt` `morph-ppt-3d` `pitch-deck` `academic-paper` `data-dashboard` `financial-model` `word-form`
+若本机已经有对应 SKILL.md：**跳过** skills install。只有缺文件时才按 **§5** 补装。
 
-   PowerShell 示例：
-   ```
-   foreach ($s in @('pptx','word','excel','morph-ppt','morph-ppt-3d','pitch-deck','academic-paper','data-dashboard','financial-model','word-form')) {{ {binary} skills install $s }}
-   ```
-3. 验收：
-   ```
-   {binary} skills list
-   {binary} load_skill pptx
-   {binary} load_skill pitch-deck
-   ```
-   - `skills list` 中上列 skill **全部**为 installed（允许额外 skill 也装）。
-   - `load_skill` 抽查应打出完整 SKILL 正文。
-
-说明：
-
-- **禁止**只装 pptx/word/excel 就收工。
 - **禁止**自己编写「精简 SKILL.md」代替官方内容。
-- **禁止**用 python-docx 等替代本插件。
-- 用户启用后，Kivio 接入全部官方 skill，供对话里 `skill` 激活。
+- **禁止**用其它库替代本插件。
+- 用户启用插件后，这些官方 skill 才对 Agent 放行。
 
 ## 4. 安装步骤清单（按序执行）
 
@@ -314,9 +295,9 @@ Kivio **不会**用后台脚本静默下载插件。本任务由 **你（Kivio A
    尽量给出可执行文件完整路径。
 3. 若已安装且 version 正常：报告版本与路径，**不要重复安装**（除非用户要求升级）。
 
-### 4.2 官方 Skills（本对话内由你执行）
+### 4.2 官方 Skills
 
-见 §3.2。装完 base + **全部**领域 skill，并用 `skills list` 确认全为 installed。
+见 §5。若 `~/.agents/skills` 里已有官方 SKILL.md 则跳过；否则按该节补装。
 
 ### 4.3 收尾对用户说
 
@@ -347,6 +328,103 @@ PATH 若仅新终端生效：请用户在插件页点刷新，或重启 Kivio。
         conversation_title: format!("安装插件 · {}", catalog.name),
         readme_urls,
         user_message,
+    })
+}
+
+fn official_install_program_args(script: &str) -> (&'static str, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "powershell.exe",
+            vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-Command".into(),
+                script.to_string(),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        ("bash", vec!["-lc".into(), script.to_string()])
+    }
+}
+
+fn trim_install_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let out = String::from_utf8_lossy(stdout);
+    let err = String::from_utf8_lossy(stderr);
+    let mut parts = Vec::new();
+    if !out.trim().is_empty() {
+        parts.push(out.trim().to_string());
+    }
+    if !err.trim().is_empty() {
+        parts.push(err.trim().to_string());
+    }
+    let mut text = parts.join("\n");
+    if text.len() > OFFICIAL_INSTALL_OUTPUT_CAP {
+        let start = text.len() - OFFICIAL_INSTALL_OUTPUT_CAP;
+        text = format!("…{}", &text[start..]);
+    }
+    text
+}
+
+/// 运行 catalog 里当前系统的 GitHub README 安装命令（允许名单）。
+pub async fn run_official_install(id: &str) -> Result<PluginActionResult, String> {
+    let catalog = catalog_plugin(id).ok_or_else(|| format!("unknown plugin: {id}"))?;
+    let script = catalog
+        .host_install_command()
+        .ok_or_else(|| "当前系统没有对应的 GitHub README 安装命令".to_string())?;
+    if !catalog.install_commands.iter().any(|cmd| cmd.command == script) {
+        return Err("install command is not in the plugin catalog".to_string());
+    }
+
+    let (program, args) = official_install_program_args(script);
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .no_console_window();
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("启动安装命令失败: {e}"))?;
+    let output = tokio::time::timeout(OFFICIAL_INSTALL_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| "安装超时（10 分钟）。可再点一次安装。".to_string())?
+        .map_err(|e| format!("安装命令执行失败: {e}"))?;
+
+    let detail = trim_install_output(&output.stdout, &output.stderr);
+    refresh_process_path_for_detection();
+    let status = status_for(catalog);
+
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        return Err(if detail.is_empty() {
+            format!("官方安装命令退出码 {code}")
+        } else {
+            format!("官方安装命令退出码 {code}\n{detail}")
+        });
+    }
+
+    let message = if status.installed {
+        format!("已运行官方安装命令，检测到 {}。请打开启用。", catalog.name)
+    } else {
+        format!(
+            "官方安装命令已结束，但尚未检测到 {}。请点刷新；若安装器刚改 PATH，再点一次刷新。",
+            catalog.name
+        )
+    };
+    Ok(PluginActionResult {
+        ok: true,
+        message: if detail.is_empty() {
+            message
+        } else {
+            format!("{message}\n{detail}")
+        },
+        status,
     })
 }
 
@@ -436,7 +514,7 @@ pub async fn set_plugin_enabled(
     let resolved = resolve_binary_for_status(id);
     if enabled && resolved.is_none() {
         return Err(
-            "尚未检测到插件命令。请先点「让 AI 安装」，装完后点刷新；若已装在默认目录，刷新应能识别。".to_string(),
+            "尚未检测到插件命令。请在终端运行卡片上的官方安装命令（来自 GitHub README），装完后点刷新。".to_string(),
         );
     }
 
@@ -473,14 +551,16 @@ pub async fn set_plugin_enabled(
                 );
             }
         }
-        // Skill 同步失败不阻断 MCP 启用；提示用户走「让 AI 安装」补 Skills
-        if let Err(err) = write_skill_files(catalog) {
-            skill_sync_err = Some(err);
-            eprintln!(
-                "[plugins] skill sync on enable {}: {}",
-                id,
-                skill_sync_err.as_deref().unwrap_or("")
-            );
+        // 共享目录型不拷贝；其余（skill_md / 旧路径）仍写入插件目录。
+        if !catalog.uses_shared_skill_dirs() {
+            if let Err(err) = write_skill_files(catalog) {
+                skill_sync_err = Some(err);
+                eprintln!(
+                    "[plugins] skill sync on enable {}: {}",
+                    id,
+                    skill_sync_err.as_deref().unwrap_or("")
+                );
+            }
         }
         apply_enable_side_effects(app, state, id)?;
     } else {
@@ -496,13 +576,8 @@ pub async fn set_plugin_enabled(
             .iter()
             .any(|s| s.id == sid && s.enabled);
     }
-    status.skill_active = enabled
-        && status.has_skill
-        && catalog.skill_ids.iter().any(|sid| {
-            super::state::skill_dir(catalog.id, sid)
-                .map(|d| d.join("SKILL.md").is_file())
-                .unwrap_or(false)
-        });
+    status.skill_active =
+        enabled && status.has_skill && plugin_has_any_official_or_copied_skill(catalog);
 
     let message = if enabled {
         let mut parts = vec![format!("已启用 {}", catalog.name)];
@@ -517,7 +592,7 @@ pub async fn set_plugin_enabled(
                 .map(|e| format!("（{e}）"))
                 .unwrap_or_default();
             parts.push(format!(
-                "Skill 尚未接入{detail}：请点「让 AI 安装」，让 AI 执行官方 `skills install`（base + 全部领域 skill）后重新启用"
+                "Skill 尚未接入{detail}：请确认已运行 GitHub README 安装命令（写入 ~/.agents/skills）后刷新并重新启用"
             ));
         }
         if status.has_mcp {
@@ -557,7 +632,18 @@ pub async fn uninstall_plugin(
     if id == "officecli" {
         crate::plugins::stop_all_previews();
         kill_named_processes("officecli");
-        // 给进程退出一点时间
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    if id == "cua-driver" {
+        if let Some(bin) = resolved.as_ref() {
+            let _ = Command::new(bin)
+                .args(["autostart", "disable"])
+                .no_console_window()
+                .output();
+        }
+        kill_named_processes("cua-driver");
+        #[cfg(target_os = "macos")]
+        kill_named_processes("CuaDriver");
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
@@ -583,9 +669,12 @@ pub async fn uninstall_plugin(
     }
     cleaned.extend(remove_known_binary_locations(catalog));
 
-    // 3) OfficeCLI 残留：配置与写入各 Agent 的官方 skills
+    // 3) 官方配置 / 写入各 Agent 的 skills / 安装器目录
     if id == "officecli" {
         cleaned.extend(remove_officecli_residuals());
+    }
+    if id == "cua-driver" {
+        cleaned.extend(remove_cua_driver_residuals());
     }
 
     refresh_process_path_for_detection();
@@ -717,6 +806,7 @@ fn remove_officecli_residuals() -> Vec<String> {
 
     let skill_roots = [
         home.join(".agents").join("skills"),
+        home.join(".kivio").join("skills"),
         home.join(".claude").join("skills"),
         home.join(".cursor").join("skills"),
         home.join(".copilot").join("skills"),
@@ -766,6 +856,64 @@ fn remove_officecli_residuals() -> Vec<String> {
     out
 }
 
+fn remove_named_dir(path: PathBuf, label: &str, out: &mut Vec<String>) {
+    if !path.exists() {
+        return;
+    }
+    match if path.is_dir() {
+        std::fs::remove_dir_all(&path)
+    } else {
+        std::fs::remove_file(&path)
+    } {
+        Ok(()) => out.push(format!("{label} {}", path.display())),
+        Err(e) => out.push(format!("{label} {} 删除失败: {e}", path.display())),
+    }
+}
+
+/// Cua Driver 配置、官方 skill 链接、Windows 安装器目录、macOS app bundle。
+fn remove_cua_driver_residuals() -> Vec<String> {
+    let mut out = Vec::new();
+    let home = match std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        Some(h) => PathBuf::from(h),
+        None => return out,
+    };
+
+    remove_named_dir(home.join(".cua-driver"), "配置", &mut out);
+
+    let skill_roots = [
+        home.join(".agents").join("skills"),
+        home.join(".kivio").join("skills"),
+        home.join(".claude").join("skills"),
+        home.join(".cursor").join("skills"),
+        home.join(".codex").join("skills"),
+        home.join(".hermes").join("skills"),
+        home.join(".openclaw").join("skills"),
+        home.join(".opencode").join("skills"),
+    ];
+    for root in skill_roots {
+        remove_named_dir(root.join("cua-driver"), "Skill", &mut out);
+    }
+
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        remove_named_dir(
+            PathBuf::from(local).join("Programs").join("Cua"),
+            "安装目录",
+            &mut out,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        remove_named_dir(
+            PathBuf::from("/Applications/CuaDriver.app"),
+            "应用",
+            &mut out,
+        );
+    }
+
+    out
+}
+
 fn kill_named_processes(name: &str) {
     #[cfg(windows)]
     {
@@ -792,15 +940,81 @@ fn kill_named_processes(name: &str) {
     }
 }
 
-/// 将插件附属 Skill 落到 `plugins/<id>/skills/`。
-/// - 若 `skill_md` 非空：写入每个 skill_id（旧路径 / 简单插件）
-/// - OfficeCLI：`skill_md` 为空 → 从**官方二进制**同步 base + 领域 skill（禁止 Kivio 手写 stub）
-pub(crate) fn write_skill_files(catalog: &CatalogPlugin) -> Result<(), String> {
-    if catalog.skill_ids.is_empty() {
-        return Ok(());
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// 官方 `officecli skills install` 把领域 skill 写到 `~/.agents/skills/<folder>`，
+/// folder 是 `pptx` 而 catalog 里的 skill_id 是 `officecli-pptx`。
+fn officecli_skill_folder(skill_id: &str) -> &str {
+    OFFICECLI_DOMAIN_SKILLS
+        .iter()
+        .find(|(_, id)| *id == skill_id)
+        .map(|(folder, _)| *folder)
+        .unwrap_or(skill_id)
+}
+
+fn skill_folder_names(skill_id: &str) -> Vec<&str> {
+    let alias = officecli_skill_folder(skill_id);
+    if alias == skill_id {
+        vec![skill_id]
+    } else {
+        vec![skill_id, alias]
     }
-    if catalog.id == "officecli" && catalog.skill_md.trim().is_empty() {
-        return sync_officecli_official_skills();
+}
+
+fn home_agent_skill_parents() -> Vec<PathBuf> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        home.join(".agents").join("skills"),
+        home.join(".kivio").join("skills"),
+        home.join(".claude").join("skills"),
+        home.join(".cursor").join("skills"),
+        home.join(".codex").join("skills"),
+        home.join(".copilot").join("skills"),
+        home.join(".hermes").join("skills"),
+        home.join(".openclaw").join("skills"),
+        home.join(".opencode").join("skills"),
+        home.join(".cua-driver").join("skills"),
+    ]
+}
+
+/// 官方安装器 / `skills install` 写入的 skill 目录（含 `SKILL.md`）。
+pub(crate) fn official_skill_dir(skill_id: &str) -> Option<PathBuf> {
+    for folder in skill_folder_names(skill_id) {
+        for parent in home_agent_skill_parents() {
+            let dir = parent.join(folder);
+            if dir.join("SKILL.md").is_file() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn plugin_skill_present(plugin_id: &str, skill_id: &str) -> bool {
+    skill_dir(plugin_id, skill_id)
+        .map(|dir| dir.join("SKILL.md").is_file())
+        .unwrap_or(false)
+        || official_skill_dir(skill_id).is_some()
+}
+
+fn plugin_has_any_official_or_copied_skill(catalog: &CatalogPlugin) -> bool {
+    catalog
+        .skill_ids
+        .iter()
+        .any(|id| plugin_skill_present(catalog.id, id))
+}
+
+/// 将插件附属 Skill 落到 `plugins/<id>/skills/`。
+/// 官方共享目录型（OfficeCLI / Cua Driver）不拷贝：discover 已扫 `~/.agents/skills`。
+pub(crate) fn write_skill_files(catalog: &CatalogPlugin) -> Result<(), String> {
+    if catalog.skill_ids.is_empty() || catalog.uses_shared_skill_dirs() {
+        return Ok(());
     }
     if catalog.skill_md.trim().is_empty() {
         return Ok(());
@@ -815,140 +1029,47 @@ pub(crate) fn write_skill_files(catalog: &CatalogPlugin) -> Result<(), String> {
     Ok(())
 }
 
-/// 从已安装的 `officecli` 拉取官方 Skill，写入 Kivio 插件 skill 目录。
-///
-/// - base `officecli`：官方 `skills install` 落到各 Agent 目录的 SKILL.md（复制进来）
-/// - 领域 `pptx` / `word` / `excel`：`officecli load_skill <name>` 导出全文
-fn sync_officecli_official_skills() -> Result<(), String> {
-    let binary = resolve_binary_for_status("officecli")
-        .or_else(|| resolve_binary("officecli"))
-        .ok_or_else(|| "officecli binary not found; cannot sync official skills".to_string())?;
-
-    // 不在这里静默执行 `skills install`：安装阶段由「Kivio AI 安装」对话按 install_brief 执行。
-    // 启用时只把 AI/官方已装好的 skill 接入 Kivio 目录。
-    let base_md = find_official_officecli_base_skill()
-        .ok_or_else(|| {
-            "official officecli base skill not found. Use 扩展 → 插件 → 让 AI 安装, and ensure the agent ran `officecli skills install` (base), then re-enable.".to_string()
-        })?;
-    write_plugin_skill_md("officecli", "officecli", &base_md)?;
-
-    // 全量领域 skill：CLI 名 → frontmatter id（见 catalog::OFFICECLI_DOMAIN_SKILLS）
-    let mut errors: Vec<String> = Vec::new();
-    for (cli_name, skill_id) in OFFICECLI_DOMAIN_SKILLS {
-        let output = Command::new(&binary)
-            .args(["load_skill", cli_name])
-            .no_console_window()
-            .output()
-            .map_err(|e| format!("officecli load_skill {cli_name}: {e}"))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            errors.push(format!("{cli_name}: {}", err.trim()));
-            continue;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        match extract_skill_markdown(&text) {
-            Some(md) => {
-                if let Err(e) = write_plugin_skill_md("officecli", skill_id, md) {
-                    errors.push(format!("{cli_name}: {e}"));
-                }
-            }
-            None => errors.push(format!("{cli_name}: output missing SKILL.md frontmatter")),
-        }
-    }
-    if !errors.is_empty() {
-        return Err(format!(
-            "some official skills failed to sync: {}",
-            errors.join("; ")
-        ));
-    }
-    Ok(())
-}
-
-fn write_plugin_skill_md(plugin_id: &str, skill_id: &str, body: &str) -> Result<(), String> {
-    let dir = skill_dir(plugin_id, skill_id)
-        .ok_or_else(|| "app data directory unavailable".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create skill dir: {e}"))?;
-    std::fs::write(dir.join("SKILL.md"), body)
-        .map_err(|e| format!("write skill {skill_id}: {e}"))?;
-    Ok(())
-}
-
-/// 官方 base skill 常见落点（`officecli skills install` / 安装器写入）。
-fn find_official_officecli_base_skill() -> Option<String> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)?;
-    let candidates = [
-        home.join(".agents")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-        home.join(".claude")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-        home.join(".cursor")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-        home.join(".copilot")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-        home.join(".codex")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-        home.join(".hermes")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-        home.join(".openclaw")
-            .join("skills")
-            .join("officecli")
-            .join("SKILL.md"),
-    ];
-    for path in candidates {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if raw.contains("name: officecli") || raw.contains("name:officecli") {
-                return Some(raw);
-            }
-        }
-    }
-    None
-}
-
-/// 从 `load_skill` stdout 取出以 YAML frontmatter 开头的 SKILL.md 正文。
-fn extract_skill_markdown(stdout: &str) -> Option<&str> {
-    let trimmed = stdout.trim();
-    if trimmed.starts_with("---") {
-        return Some(trimmed);
-    }
-    // 若前面有 banner，取第一个 frontmatter 起
-    if let Some(idx) = trimmed.find("\n---\n") {
-        return Some(trimmed[idx + 1..].trim());
-    }
-    if let Some(idx) = trimmed.find("\r\n---\r\n") {
-        return Some(trimmed[idx + 2..].trim());
-    }
-    None
-}
-
 #[cfg(test)]
 mod skill_sync_tests {
-    use super::extract_skill_markdown;
+    use super::{get_install_brief, officecli_skill_folder, official_install_program_args};
 
     #[test]
-    fn extract_skill_from_plain_stdout() {
-        let s = "---\nname: officecli-pptx\n---\n\n# Hi\n";
-        assert!(extract_skill_markdown(s).unwrap().starts_with("---"));
+    fn official_install_wraps_readme_command() {
+        let script = "irm https://example.invalid/install.ps1 | iex";
+        let (program, args) = official_install_program_args(script);
+        #[cfg(windows)]
+        {
+            assert_eq!(program, "powershell.exe");
+            assert!(args.windows(2).any(|pair| pair == ["-Command", script]));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(program, "bash");
+            assert_eq!(args, vec!["-lc".to_string(), script.to_string()]);
+        }
     }
 
     #[test]
-    fn extract_skill_skips_banner() {
-        let s = "Loading...\n---\nname: officecli-pptx\n---\n\n# Hi\n";
-        let md = extract_skill_markdown(s).unwrap();
-        assert!(md.starts_with("---"));
-        assert!(md.contains("officecli-pptx"));
+    fn officecli_folder_alias_maps_domain_ids() {
+        assert_eq!(officecli_skill_folder("officecli-pptx"), "pptx");
+        assert_eq!(officecli_skill_folder("officecli-docx"), "word");
+        assert_eq!(officecli_skill_folder("officecli"), "officecli");
+        assert_eq!(officecli_skill_folder("cua-driver"), "cua-driver");
+    }
+
+    #[test]
+    fn cua_driver_brief_is_not_officecli_domain_skills() {
+        let brief = get_install_brief("cua-driver").expect("brief");
+        assert!(!brief.user_message.contains("morph-ppt"));
+        assert!(!brief.user_message.contains("pitch-deck"));
+        assert!(brief.user_message.contains("cua-driver skills install"));
+        assert!(brief.user_message.contains("plugin-cua-driver"));
+    }
+
+    #[test]
+    fn officecli_brief_still_lists_domain_skills() {
+        let brief = get_install_brief("officecli").expect("brief");
+        assert!(brief.user_message.contains("pitch-deck"));
+        assert!(brief.user_message.contains("officecli skills install"));
     }
 }

@@ -649,6 +649,7 @@ pub fn run() {
             plugins::plugins_list,
             plugins::plugins_list_cached,
             plugins::plugins_install_brief,
+            plugins::plugins_run_official_install,
             plugins::plugins_set_enabled,
             plugins::plugins_uninstall,
             notes::notes_list,

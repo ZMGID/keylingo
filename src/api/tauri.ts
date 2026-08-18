@@ -1015,7 +1015,10 @@ export type WebSearchProviderId =
   | 'bocha'
   | 'zhipu'
   | 'tinyfish'
+  | 'tinyfish_mcp'
   | 'searxng'
+
+export type WebSearchMcpAuth = NonNullable<ChatMcpServer['auth']>
 
 export type WebSearchConfig = {
   enabled: boolean
@@ -1041,6 +1044,8 @@ export type WebSearchConfig = {
   zhipuBaseUrl?: string
   tinyfishApiKey?: string
   tinyfishBaseUrl?: string
+  tinyfishMcpUrl?: string
+  tinyfishMcpAuth?: WebSearchMcpAuth | null
   searxngBaseUrl?: string
   maxResults: number
   searchDepth: 'ultra-fast' | 'fast' | 'basic' | 'advanced'
@@ -1185,6 +1190,8 @@ export type PluginStatus = {
   /** 启用后 MCP 是否已写入 settings 且 enabled */
   mcpActive: boolean
   mcpServerId: string | null
+  /** 当前系统对应的 GitHub README 安装命令 */
+  installCommand?: string | null
 }
 
 export type PluginActionResult = {
@@ -1756,6 +1763,8 @@ export function normalizeSettings(settings: Settings): Settings {
         zhipuBaseUrl: current.lens?.webSearch?.zhipuBaseUrl ?? 'https://open.bigmodel.cn/api/paas/v4',
         tinyfishApiKey: current.lens?.webSearch?.tinyfishApiKey ?? '',
         tinyfishBaseUrl: current.lens?.webSearch?.tinyfishBaseUrl ?? 'https://api.search.tinyfish.ai',
+        tinyfishMcpUrl: current.lens?.webSearch?.tinyfishMcpUrl ?? 'https://agent.tinyfish.ai/mcp',
+        tinyfishMcpAuth: current.lens?.webSearch?.tinyfishMcpAuth ?? null,
         searxngBaseUrl: current.lens?.webSearch?.searxngBaseUrl ?? '',
         maxResults: current.lens?.webSearch?.maxResults ?? 5,
         searchDepth: current.lens?.webSearch?.searchDepth ?? 'basic',
@@ -1897,8 +1906,11 @@ export const api = {
   pluginsList: () => invoke<PluginStatus[]>('plugins_list'),
   // Cached (no-spawn) status for instant first paint; follow with pluginsList to refine.
   pluginsListCached: () => invoke<PluginStatus[]>('plugins_list_cached'),
-  /** 取「让 AI 安装」任务 brief（含标准化安装文档） */
+  /** 取可选「让 AI 代装」任务 brief（含标准化安装文档） */
   pluginsInstallBrief: (id: string) => invoke<PluginInstallBrief>('plugins_install_brief', { id }),
+  /** 运行当前系统对应的 GitHub README 安装命令 */
+  pluginsRunOfficialInstall: (id: string) =>
+    invoke<PluginActionResult>('plugins_run_official_install', { id }),
   pluginsSetEnabled: (id: string, enabled: boolean) =>
     invoke<PluginActionResult>('plugins_set_enabled', { id, enabled }),
   pluginsUninstall: (id: string) => invoke<PluginActionResult>('plugins_uninstall', { id }),
