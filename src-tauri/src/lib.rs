@@ -115,11 +115,16 @@ pub fn run() {
     // inherited from Finder/Dock. Windows: explorer's PATH is a stale login-time
     // snapshot, so read the current value from the registry, then also run the
     // user's PowerShell profile to pick up version-manager dirs (fnm/nvm) that
-    // never touch the registry. No-op on Linux. See `path_env` module docs.
+    // never touch the registry. No-op on Linux. Locale is the other half of
+    // the same gap (see ensure_utf8_locale below). See `path_env` module docs.
     #[cfg(target_os = "macos")]
     path_env::enrich_path_macos();
     #[cfg(target_os = "windows")]
     path_env::enrich_path_windows();
+    // Same GUI-launch gap as PATH: Finder/Dock often hands us no LANG, so libc
+    // stays in C and BSD `ls` prints `?` for CJK filenames. One process-wide
+    // fix is inherited by the dock PTY, run_command, MCP, and CLI probes.
+    path_env::ensure_utf8_locale();
 
     let autostart_plugin = {
         #[cfg(target_os = "macos")]

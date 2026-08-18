@@ -759,7 +759,9 @@ pub fn gemini_function_declarations(tools: &[ModelTool]) -> Vec<Value> {
 }
 
 /// Gemini 只收 OpenAPI 子集：剥 JSON Schema 专有键（`$schema`/`additionalProperties`/
-/// `$defs` 等），nullable `anyOf` 折成非空分支。递归处理 properties/items。
+/// `$defs` 等），nullable `anyOf` 折成非空分支。递归处理 properties/items/组合子。
+/// `required` 只允许出现在 `type: object` 上，否则 Gemini 400
+///（`required: only allowed for OBJECT type`，issue #33）。
 fn normalize_gemini_schema(schema: Value) -> Value {
     match schema {
         Value::Object(mut map) => {
@@ -813,6 +815,23 @@ fn normalize_gemini_schema(schema: Value) -> Value {
             }
             if let Some(items) = map.get("items").cloned() {
                 map.insert("items".into(), normalize_gemini_schema(items));
+            }
+            // 留下的 typed anyOf/oneOf/allOf 也要递归，否则分支里的非 object
+            // `required` 会原样透传给 Gemini。
+            for key in ["anyOf", "oneOf", "allOf"] {
+                if let Some(branches) = map.get(key).and_then(|v| v.as_array()).cloned() {
+                    let normalized: Vec<Value> =
+                        branches.into_iter().map(normalize_gemini_schema).collect();
+                    map.insert(key.into(), Value::Array(normalized));
+                }
+            }
+            // 有 properties 却没写 type 的 MCP schema：补成 object，required 才合法。
+            if map.contains_key("properties") && map.get("type").is_none() {
+                map.insert("type".into(), Value::String("object".into()));
+            }
+            let is_object = map.get("type").and_then(|v| v.as_str()) == Some("object");
+            if !is_object {
+                map.remove("required");
             }
             Value::Object(map)
         }
@@ -1717,6 +1736,49 @@ mod tests {
         assert_eq!(branches.len(), 2);
         assert_eq!(branches[0]["type"], "string");
         assert_eq!(branches[1]["type"], "integer");
+    }
+
+    #[test]
+    fn normalize_strips_required_unless_type_object() {
+        // Gemini: `required` is only legal on OBJECT. MCP schemas often park it
+        // on string / untyped nodes (and inside typed anyOf branches).
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "required": ["query"]
+                },
+                "payload": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": { "id": { "type": "string" } },
+                            "required": ["id"]
+                        },
+                        { "type": "string", "required": ["id"] }
+                    ]
+                }
+            },
+            "required": ["query"]
+        });
+        let out = normalize_gemini_schema(schema);
+        assert!(out["properties"]["query"].get("required").is_none());
+        assert_eq!(out["required"], serde_json::json!(["query"]));
+        let branches = out["properties"]["payload"]["anyOf"].as_array().unwrap();
+        assert_eq!(branches[0]["required"], serde_json::json!(["id"]));
+        assert!(branches[1].get("required").is_none());
+    }
+
+    #[test]
+    fn normalize_infers_object_type_when_properties_present() {
+        let schema = serde_json::json!({
+            "properties": { "q": { "type": "string" } },
+            "required": ["q"]
+        });
+        let out = normalize_gemini_schema(schema);
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["required"], serde_json::json!(["q"]));
     }
 
     fn image_request(model: &str) -> GenerateRequest {

@@ -293,6 +293,17 @@ fn create_session(
     // 父进程（比如从 CI/工具环境启动 dev）可能带 NO_COLOR=1，chalk 系的 CLI
     // （claude 等）见到它就输出全灰——终端是给人看的，强制摘除。
     cmd.env_remove("NO_COLOR");
+    // Finder/Dock 起的 GUI 进程经常没有 UTF-8 locale。BSD `ls` 把 C locale 下
+    // 的「不可打印」字符（包括中文）替换成 `?`。与 PATH 补齐同一类缺口：这里
+    // 显式写到 PTY，避免继承来的 LC_ALL=C 盖掉进程里刚补上的 LANG。
+    let locale = crate::path_env::utf8_locale_overrides();
+    cmd.env("LANG", locale.lang);
+    if locale.remove_lc_all {
+        cmd.env_remove("LC_ALL");
+    }
+    if locale.remove_lc_ctype {
+        cmd.env_remove("LC_CTYPE");
+    }
     let child = pair
         .slave
         .spawn_command(cmd)

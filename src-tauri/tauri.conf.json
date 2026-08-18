@@ -46,7 +46,8 @@
         "version": "2.8.2"
       },
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installMode": "both"
       }
     },
     "macOS": {

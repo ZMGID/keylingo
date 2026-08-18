@@ -114,12 +114,12 @@ pub struct ModelTool {
 
 impl ModelTool {
     pub fn openai_tool_name(&self) -> String {
-        match self.source.as_str() {
-            "native" | "skill" | "mixer" => mcp::types::apply_reserved_wire_alias(
-                &mcp::types::sanitize_openai_tool_name(&self.name),
-            ),
-            _ => mcp::types::sanitize_openai_tool_name(&self.id),
-        }
+        mcp::types::wire_tool_name(
+            &self.source,
+            &self.name,
+            &self.id,
+            self.server_id.as_deref(),
+        )
     }
 
     pub fn to_openai_tool(&self) -> Value {

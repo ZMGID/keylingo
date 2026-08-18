@@ -71,14 +71,12 @@ pub struct ChatToolDefinition {
 
 impl ChatToolDefinition {
     pub fn openai_tool_name(&self) -> String {
-        match self.source.as_str() {
-            // Native and Skill tools are model-facing APIs owned by Kivio. Keep their names
-            // aligned with the system prompt so models can call exactly what we instruct.
-            "native" | "skill" | "mixer" => {
-                apply_reserved_wire_alias(&sanitize_openai_tool_name(&self.name))
-            }
-            _ => sanitize_openai_tool_name(&self.id),
-        }
+        wire_tool_name(
+            &self.source,
+            &self.name,
+            &self.id,
+            self.server_id.as_deref(),
+        )
     }
 
     pub fn to_openai_tool(&self) -> serde_json::Value {
@@ -866,6 +864,58 @@ pub fn list_native_builtin_tool_defs(
         .collect()
 }
 
+/// OpenAI / Gemini / Anthropic function names share a 64-char cap
+/// (`^[a-zA-Z0-9_-]{1,64}$`). Naive left-truncate turns
+/// `mcp__<uuid>__ui_to_artifact` and `mcp__<uuid>__ui_diff_check` into the
+/// same `...-ui` and Gemini silently drops the rest.
+const MAX_WIRE_TOOL_NAME: usize = 64;
+const WIRE_NAME_HASH_LEN: usize = 8;
+/// Server ids longer than this eat the 64-char budget; replace with a hash.
+const LONG_MCP_SERVER_ID: usize = 16;
+
+/// Shared wire-name builder for [`ChatToolDefinition`] and `ModelTool`.
+pub fn wire_tool_name(source: &str, name: &str, id: &str, server_id: Option<&str>) -> String {
+    match source {
+        // Native and Skill tools are model-facing APIs owned by Kivio. Keep their names
+        // aligned with the system prompt so models can call exactly what we instruct.
+        "native" | "skill" | "mixer" => {
+            apply_reserved_wire_alias(&sanitize_openai_tool_name(name))
+        }
+        _ => sanitize_openai_tool_name(&compact_mcp_tool_id(id, server_id)),
+    }
+}
+
+/// `mcp__<very-long-server-id>__<tool>` → `mcp__<8-hex>__<tool>` so the
+/// distinguishing tool suffix survives the 64-char cap. Short / already-compact
+/// ids are left alone. `sanitize_openai_tool_name` still hash-suffixes if the
+/// compact form itself exceeds 64.
+fn compact_mcp_tool_id(id: &str, server_id: Option<&str>) -> String {
+    let Some(server_id) =
+        server_id.filter(|s| !s.is_empty() && s.chars().count() > LONG_MCP_SERVER_ID)
+    else {
+        return id.to_string();
+    };
+    let prefix = format!("mcp__{server_id}__");
+    let Some(tool) = id.strip_prefix(&prefix).filter(|t| !t.is_empty()) else {
+        return id.to_string();
+    };
+    format!("mcp__{}__{tool}", short_stable_hash(server_id))
+}
+
+fn short_stable_hash(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    digest
+        .iter()
+        .flat_map(|byte| [hex_digit(byte >> 4), hex_digit(byte & 0x0f)])
+        .take(WIRE_NAME_HASH_LEN)
+        .collect()
+}
+
+fn hex_digit(nibble: u8) -> char {
+    b"0123456789abcdef"[nibble as usize] as char
+}
+
 pub fn sanitize_openai_tool_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
@@ -877,10 +927,17 @@ pub fn sanitize_openai_tool_name(name: &str) -> String {
     }
     let trimmed = out.trim_matches('_');
     if trimmed.is_empty() {
-        "tool".to_string()
-    } else {
-        trimmed.chars().take(64).collect()
+        return "tool".to_string();
     }
+    if trimmed.chars().count() <= MAX_WIRE_TOOL_NAME {
+        return trimmed.to_string();
+    }
+    // Left-truncate used to collide (issue #33). Keep a stable unique suffix:
+    // `<prefix>_<8-hex>` always 64 chars, deterministic, legal on the wire.
+    let digest = short_stable_hash(trimmed);
+    let prefix_len = MAX_WIRE_TOOL_NAME - 1 - WIRE_NAME_HASH_LEN;
+    let prefix: String = trimmed.chars().take(prefix_len).collect();
+    format!("{prefix}_{digest}")
 }
 
 pub fn looks_sensitive_tool(name: &str) -> bool {
@@ -1253,5 +1310,72 @@ mod tests {
         assert_eq!(canonical_tool_name("read"), "read");
         assert_eq!(canonical_tool_name("glob"), "glob");
         assert_eq!(canonical_tool_name("bash"), "bash");
+    }
+
+    #[test]
+    fn sanitize_keeps_short_names_and_hash_suffixes_long_ones() {
+        assert_eq!(sanitize_openai_tool_name("search.web"), "search_web");
+        assert_eq!(sanitize_openai_tool_name("read_file"), "read_file");
+        let long = "a".repeat(80);
+        let wire = sanitize_openai_tool_name(&long);
+        assert_eq!(wire.chars().count(), MAX_WIRE_TOOL_NAME);
+        assert!(wire.contains('_'), "{wire}");
+        assert_ne!(
+            sanitize_openai_tool_name(&format!("{}x", "a".repeat(79))),
+            wire,
+            "distinct inputs must not collapse after the 64-char cap"
+        );
+    }
+
+    #[test]
+    fn uuid_mcp_server_tools_keep_distinct_wire_names() {
+        // Issue #33: `mcp__<uuid>__zai-mcp-server-ui_*` all left-truncated to
+        // the same `...-ui` and Gemini dropped the duplicates.
+        let server = ChatMcpServer {
+            id: "mcp-d1ad400e-e2c7-4f34-9cd0-4e4cf1afa728".to_string(),
+            name: "zhipu".to_string(),
+            enabled: true,
+            transport: "stdio".to_string(),
+            url: String::new(),
+            command: "demo".to_string(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            connector_id: None,
+            auth: None,
+        };
+        let names = [
+            "zai-mcp-server-ui_to_artifact",
+            "zai-mcp-server-ui_diff_check",
+            "zai-mcp-server-analyze_data_visualization",
+            "zai-mcp-server-analyze_image",
+            "zai-mcp-server-analyze_video",
+        ];
+        let mut wires = std::collections::HashSet::new();
+        for name in names {
+            let tool = tool_definition_from_mcp(
+                &server,
+                McpTool {
+                    name: name.to_string(),
+                    description: String::new(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    output_schema: None,
+                    annotations: None,
+                },
+            );
+            let wire = tool.openai_tool_name();
+            assert!(
+                wire.chars().count() <= MAX_WIRE_TOOL_NAME,
+                "{wire} exceeds 64"
+            );
+            assert!(
+                wire.contains("zai-mcp-server"),
+                "tool suffix should stay visible: {wire}"
+            );
+            assert!(wires.insert(wire.clone()), "collided: {wire}");
+        }
+        assert_eq!(wires.len(), names.len());
     }
 }
