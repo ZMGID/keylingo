@@ -880,7 +880,8 @@ async fn latest_version(http: &reqwest::Client, spec: &InstallSpec) -> Option<St
 }
 
 /// `--version` 输出里抓语义化版本号：CLI 们的首行格式各不相同
-/// （`2.1.207 (Claude Code)` / `codex-cli 0.146.0` / 裸 `0.53.1`），只比对版本号本身。
+/// （`2.1.207 (Claude Code)` / `codex-cli 0.146.0` / 裸 `0.53.1` / `0.1.0-rc.7`）。
+/// 保留 prerelease（dsh 目前全是 rc），丢掉 `+build` metadata。
 fn extract_semver(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut start = None;
@@ -889,41 +890,145 @@ fn extract_semver(text: &str) -> Option<String> {
             if start.is_none() {
                 start = Some(idx);
             }
-        } else if ch != '.' {
+        } else if ch == '.' {
+            continue;
+        } else if ch == '-' {
             if let Some(s) = start {
-                let candidate = &text[s..idx];
-                if candidate.matches('.').count() >= 2 {
-                    return Some(candidate.to_string());
+                let core = &text[s..idx];
+                if is_numeric_core(core) {
+                    let pre_len = prerelease_len(&text[idx + 1..]);
+                    if pre_len > 0 {
+                        return Some(text[s..idx + 1 + pre_len].to_string());
+                    }
+                    return Some(core.to_string());
                 }
+            }
+            start = None;
+        } else if let Some(s) = start {
+            let candidate = &text[s..idx];
+            if is_numeric_core(candidate) {
+                return Some(candidate.to_string());
             }
             start = None;
         }
     }
     let s = start?;
     let candidate = std::str::from_utf8(&bytes[s..]).ok()?;
-    (candidate.matches('.').count() >= 2).then(|| candidate.to_string())
+    is_numeric_core(candidate).then(|| candidate.to_string())
+}
+
+fn is_numeric_core(value: &str) -> bool {
+    let mut parts = 0u32;
+    for part in value.split('.') {
+        if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        parts += 1;
+    }
+    parts >= 3
+}
+
+fn prerelease_len(rest: &str) -> usize {
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].trim_end_matches(['.', '-']).len()
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum PreIdent {
+    Num(u64),
+    Text(String),
+}
+
+impl Ord for PreIdent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Num(a), Self::Num(b)) => a.cmp(b),
+            (Self::Num(_), Self::Text(_)) => std::cmp::Ordering::Less,
+            (Self::Text(_), Self::Num(_)) => std::cmp::Ordering::Greater,
+            (Self::Text(a), Self::Text(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for PreIdent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct ParsedVersion {
+    core: Vec<u64>,
+    pre: Option<Vec<PreIdent>>,
+}
+
+fn parse_version(version: &str) -> Option<ParsedVersion> {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let version = version
+        .split_once('+')
+        .map(|(core, _)| core)
+        .unwrap_or(version);
+    let (core_str, pre_str) = match version.split_once('-') {
+        Some((core, pre)) if !pre.is_empty() => (core, Some(pre)),
+        _ => (version, None),
+    };
+    let core = core_str
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if core.len() < 3 {
+        return None;
+    }
+    let pre = pre_str.map(|value| {
+        value
+            .split('.')
+            .map(|ident| {
+                if !ident.is_empty() && ident.chars().all(|c| c.is_ascii_digit()) {
+                    ident
+                        .parse::<u64>()
+                        .map(PreIdent::Num)
+                        .unwrap_or_else(|_| PreIdent::Text(ident.to_string()))
+                } else {
+                    PreIdent::Text(ident.to_string())
+                }
+            })
+            .collect()
+    });
+    Some(ParsedVersion { core, pre })
+}
+
+fn cmp_versions(left: &ParsedVersion, right: &ParsedVersion) -> std::cmp::Ordering {
+    let length = left.core.len().max(right.core.len());
+    for index in 0..length {
+        let left_part = left.core.get(index).copied().unwrap_or(0);
+        let right_part = right.core.get(index).copied().unwrap_or(0);
+        if left_part != right_part {
+            return left_part.cmp(&right_part);
+        }
+    }
+    match (&left.pre, &right.pre) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(left_pre), Some(right_pre)) => {
+            let n = left_pre.len().min(right_pre.len());
+            for index in 0..n {
+                let order = left_pre[index].cmp(&right_pre[index]);
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+            left_pre.len().cmp(&right_pre.len())
+        }
+    }
 }
 
 fn version_is_newer(local: &str, latest: &str) -> bool {
-    let parse = |version: &str| -> Option<Vec<u64>> {
-        let parts = version
-            .split('.')
-            .map(str::parse::<u64>)
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        (parts.len() >= 3).then_some(parts)
-    };
-    let (Some(local), Some(latest)) = (parse(local), parse(latest)) else {
+    let (Some(local), Some(latest)) = (parse_version(local), parse_version(latest)) else {
         return false;
     };
-    let length = local.len().max(latest.len());
-    (0..length)
-        .find_map(|index| {
-            let local_part = local.get(index).copied().unwrap_or(0);
-            let latest_part = latest.get(index).copied().unwrap_or(0);
-            (local_part != latest_part).then_some(latest_part > local_part)
-        })
-        .unwrap_or(false)
+    cmp_versions(&local, &latest) == std::cmp::Ordering::Less
 }
 
 fn existing_config_dir(agent_id: &str, spec: &InstallSpec) -> Option<String> {
@@ -1193,7 +1298,12 @@ mod tests {
             Some("0.146.0")
         );
         assert_eq!(extract_semver("0.53.1").as_deref(), Some("0.53.1"));
-        assert_eq!(extract_semver("v1.2.3-beta").as_deref(), Some("1.2.3"));
+        assert_eq!(extract_semver("v1.2.3-beta").as_deref(), Some("1.2.3-beta"));
+        assert_eq!(extract_semver("0.1.0-rc.7").as_deref(), Some("0.1.0-rc.7"));
+        assert_eq!(
+            extract_semver("dsh 0.1.0-rc.7").as_deref(),
+            Some("0.1.0-rc.7")
+        );
         assert_eq!(extract_semver("no version here"), None);
         // 两段号不是版本号，别把它当成版本报给用户。
         assert_eq!(extract_semver("cli 1.2"), None);
@@ -1205,6 +1315,12 @@ mod tests {
         assert!(!version_is_newer("1.18.13", "1.18.13"));
         assert!(!version_is_newer("1.19.0", "1.18.13"));
         assert!(!version_is_newer("1.18.13.0", "1.18.13"));
+        assert!(version_is_newer("0.1.0-rc.6", "0.1.0-rc.7"));
+        assert!(!version_is_newer("0.1.0-rc.7", "0.1.0-rc.7"));
+        assert!(!version_is_newer("0.1.0-rc.7", "0.1.0-rc.6"));
+        assert!(version_is_newer("0.1.0-rc.7", "0.1.0"));
+        assert!(!version_is_newer("0.1.0", "0.1.0-rc.7"));
+        assert!(version_is_newer("0.1.0-rc.7", "0.1.1"));
     }
 
     #[test]

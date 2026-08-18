@@ -92,24 +92,66 @@ function Row({
   )
 }
 
-/** 比较 CLI 常见的数字版本号；缺段按 0 处理，解析失败时交回后端结果兜底。 */
-function isVersionNewer(localVersion: string, latestVersion: string): boolean | null {
-  const parse = (value: string) => {
-    const match = value.match(/\d+(?:\.\d+){2,}/)?.[0]
-    if (!match) return null
-    const parts = match.split('.').map(Number)
-    return parts.every(Number.isSafeInteger) ? parts : null
-  }
-  const local = parse(localVersion)
-  const latest = parse(latestVersion)
-  if (!local || !latest) return null
+type ParsedCliVersion = {
+  core: number[]
+  pre: Array<number | string> | null
+}
+
+/** 抓 `x.y.z` 以及可选 `-rc.7`；解析失败时交回后端结果兜底。 */
+function parseCliVersion(value: string): ParsedCliVersion | null {
+  const match = value.match(/v?(\d+(?:\.\d+){2,})(?:-([0-9A-Za-z.-]+))?/)
+  if (!match) return null
+  const core = match[1].split('.').map(Number)
+  if (!core.every(Number.isSafeInteger)) return null
+  const pre = match[2]
+    ? match[2].replace(/[.-]+$/, '').split('.').map((ident) => (
+      /^\d+$/.test(ident) ? Number(ident) : ident
+    ))
+    : null
+  return { core, pre }
+}
+
+function compareCore(local: number[], latest: number[]): number {
   const length = Math.max(local.length, latest.length)
   for (let index = 0; index < length; index += 1) {
     const currentPart = local[index] ?? 0
     const latestPart = latest[index] ?? 0
-    if (latestPart !== currentPart) return latestPart > currentPart
+    if (currentPart !== latestPart) return currentPart < latestPart ? -1 : 1
   }
-  return false
+  return 0
+}
+
+function comparePreIdent(local: number | string, latest: number | string): number {
+  const localNum = typeof local === 'number'
+  const latestNum = typeof latest === 'number'
+  if (localNum && latestNum) return local === latest ? 0 : local < latest ? -1 : 1
+  if (localNum) return -1
+  if (latestNum) return 1
+  return local === latest ? 0 : String(local) < String(latest) ? -1 : 1
+}
+
+function comparePrerelease(
+  local: Array<number | string> | null,
+  latest: Array<number | string> | null,
+): number {
+  if (local == null) return latest == null ? 0 : 1
+  if (latest == null) return -1
+  const length = Math.min(local.length, latest.length)
+  for (let index = 0; index < length; index += 1) {
+    const order = comparePreIdent(local[index], latest[index])
+    if (order !== 0) return order
+  }
+  return local.length - latest.length
+}
+
+/** 比较 CLI 版本号（含 prerelease）；缺段按 0 处理，解析失败时交回后端结果兜底。 */
+function isVersionNewer(localVersion: string, latestVersion: string): boolean | null {
+  const local = parseCliVersion(localVersion)
+  const latest = parseCliVersion(latestVersion)
+  if (!local || !latest) return null
+  const core = compareCore(local.core, latest.core)
+  if (core !== 0) return core < 0
+  return comparePrerelease(local.pre, latest.pre) < 0
 }
 
 interface ExternalAgentsSettingsProps {

@@ -169,6 +169,69 @@ describe('ExternalAgentsSettings', () => {
     expect(screen.queryByText('安装日志')).not.toBeInTheDocument()
   })
 
+  it('shows the prerelease suffix and offers an update from rc.6 to rc.7', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.7',
+      updateAvailable: true,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/deepseek-harness',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('0.1.0-rc.6')).toBeInTheDocument()
+    })
+    expect(screen.getByText('可更新到 0.1.0-rc.7')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '更新' })).toBeInTheDocument()
+    expect(screen.queryByText('已是最新')).not.toBeInTheDocument()
+  })
+
+  it('keeps a matching prerelease as up to date', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.7',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.7',
+      latestVersion: '0.1.0-rc.7',
+      updateAvailable: false,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/deepseek-harness',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel()
+
+    await waitFor(() => {
+      expect(screen.getByText('0.1.0-rc.7')).toBeInTheDocument()
+    })
+    expect(screen.getByText('已是最新')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '更新' })).not.toBeInTheDocument()
+  })
+
   it('shows up-to-date status without an update action', async () => {
     mockInstallInfo.mockResolvedValue({
       agentId: 'claude',
