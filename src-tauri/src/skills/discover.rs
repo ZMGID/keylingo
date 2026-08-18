@@ -43,12 +43,6 @@ pub fn user_skills_dir(_app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub fn user_skills_dir_headless() -> Option<PathBuf> {
-    let dir = kivio_skills_dir()?;
-    let _ = fs::create_dir_all(&dir);
-    Some(dir)
-}
-
 /// 从 `cwd` 向上收集项目技能目录（近的在前）。碰到 `.git` 或家目录停止。
 /// 每一层先 `.kivio/skills`（Kivio 自己的，对齐 `.claude/skills`），再 `.agents/skills`（共享）。
 /// 跳过全局 `~/.kivio/skills` 与 `~/.agents/skills`，避免把家目录当成项目。
@@ -141,35 +135,6 @@ fn scan_root_entries(
     Ok(roots)
 }
 
-fn scan_root_entries_headless(
-    extra_paths: &[String],
-    project_cwd: Option<&Path>,
-) -> Vec<SkillScanRoot> {
-    let mut roots = Vec::new();
-    if let Some(path) = bundled_skills_dir_headless() {
-        push_root(&mut roots, path, "builtin");
-    }
-    if let Some(cwd) = project_cwd {
-        for path in project_skill_dirs(cwd) {
-            push_root(&mut roots, path, "project");
-        }
-    }
-    for path in crate::plugins::enabled_skill_roots() {
-        push_root(&mut roots, path, "plugin");
-    }
-    if let Some(path) = kivio_skills_dir() {
-        push_root(&mut roots, path, "user");
-    }
-    if let Some(path) = legacy_app_data_skills_dir() {
-        push_root(&mut roots, path, "user");
-    }
-    if let Some(path) = home_agents_skills_dir() {
-        push_root(&mut roots, path, "agents");
-    }
-    append_external_roots(&mut roots, extra_paths);
-    roots
-}
-
 fn push_root(roots: &mut Vec<SkillScanRoot>, path: PathBuf, source: &'static str) {
     if !path.is_dir() {
         return;
@@ -178,35 +143,6 @@ fn push_root(roots: &mut Vec<SkillScanRoot>, path: PathBuf, source: &'static str
         return;
     }
     roots.push(SkillScanRoot { path, source });
-}
-
-/// Best-effort location of bundled skills next to the executable when running
-/// headless (no Tauri `resource_dir`). Checks `<exe_dir>/skills` and, for the
-/// macOS app-bundle layout, `<exe_dir>/../Resources/skills`. Returns `None`
-/// when neither exists (e.g. plain `cargo run`), which is fine — the CLI then
-/// surfaces only user skills.
-fn bundled_skills_dir_headless() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    bundled_skills_dir_from_exe(&exe)
-}
-
-/// Pure path logic for [`bundled_skills_dir_headless`]: given an executable
-/// path, canonicalize it (so a PATH symlink resolves to the real binary's
-/// directory) and probe the bundled-skills candidates next to it.
-///
-/// `current_exe()` does not resolve symlinks on macOS, so a PATH symlink
-/// (e.g. `~/.cargo/bin/kivio-code -> target/debug/kivio-code`) would otherwise
-/// point `exe_dir` at the symlink's directory — where `skills/` doesn't exist —
-/// and built-in skills would silently go missing. Canonicalizing reaches the
-/// real binary's directory.
-fn bundled_skills_dir_from_exe(exe: &Path) -> Option<PathBuf> {
-    let real = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-    let exe_dir = real.parent()?;
-    let candidates = [
-        exe_dir.join("skills"),
-        exe_dir.join("..").join("Resources").join("skills"),
-    ];
-    candidates.into_iter().find(|dir| dir.is_dir())
 }
 
 fn append_external_roots(roots: &mut Vec<SkillScanRoot>, extra_paths: &[String]) {
@@ -250,21 +186,6 @@ fn build_registry_inner(
 ) -> Result<SkillRegistry, String> {
     let roots = scan_root_entries(app, extra_paths, project_cwd)?;
     Ok(build_registry_from_roots(roots, include_files))
-}
-
-/// Headless registry builder (no `AppHandle`): discovers bundled + `.agents` +
-/// `extra_paths` skills exactly like [`build_registry`], indexing skill files so
-/// the activated skill's `<skill_resources>` list is populated. Used by the
-/// `kivio-code` CLI.
-pub fn build_registry_headless(extra_paths: &[String]) -> SkillRegistry {
-    build_registry_headless_in(extra_paths, None)
-}
-
-pub fn build_registry_headless_in(extra_paths: &[String], project_cwd: Option<&Path>) -> SkillRegistry {
-    build_registry_from_roots(
-        scan_root_entries_headless(extra_paths, project_cwd),
-        true,
-    )
 }
 
 fn build_registry_from_roots(roots: Vec<SkillScanRoot>, include_files: bool) -> SkillRegistry {
@@ -466,41 +387,6 @@ description: Test skill.
         assert_eq!(full_record.meta.files[0].relative_path, "scripts/run.sh");
 
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Regression test for non-deterministic bundled-skill discovery: a PATH
-    /// symlink to the real binary must still resolve `skills/` next to the real
-    /// binary (macOS `current_exe()` does not resolve symlinks).
-    #[cfg(unix)]
-    #[test]
-    fn bundled_skills_dir_resolves_through_path_symlink() {
-        let base =
-            std::env::temp_dir().join(format!("kivio-skill-symlink-{}", uuid::Uuid::new_v4()));
-        // Real binary lives in `bin_dir`, with `bin_dir/skills/<name>/SKILL.md`.
-        let bin_dir = base.join("real");
-        let skills_dir = bin_dir.join("skills").join("demo");
-        fs::create_dir_all(&skills_dir).unwrap();
-        fs::write(skills_dir.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
-        let real_bin = bin_dir.join("kivio-code");
-        fs::write(&real_bin, "#!/bin/sh\n").unwrap();
-
-        // Symlink in a separate dir (e.g. ~/.cargo/bin) with NO skills/ alongside.
-        let link_dir = base.join("path");
-        fs::create_dir_all(&link_dir).unwrap();
-        let link = link_dir.join("kivio-code");
-        std::os::unix::fs::symlink(&real_bin, &link).unwrap();
-
-        // Resolving via the symlink must reach the real binary's skills dir.
-        let found = bundled_skills_dir_from_exe(&link).unwrap();
-        assert_eq!(
-            fs::canonicalize(found).unwrap(),
-            fs::canonicalize(bin_dir.join("skills")).unwrap()
-        );
-
-        // And of course resolving via the real path also works.
-        assert!(bundled_skills_dir_from_exe(&real_bin).is_some());
-
-        fs::remove_dir_all(base).unwrap();
     }
 
     fn write_skill(dir: &Path, id: &str) {

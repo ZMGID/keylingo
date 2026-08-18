@@ -54,7 +54,6 @@ pub struct AgentRunConfig<'a> {
     /// 会话级联网搜索有效模式（任务 07-23）。由 `effective_web_search_mode` 解析后传入。
     /// 决定本 run 是否暴露 `search_web`（ThirdParty）或请求内置搜索（Builtin，且模型支持）。
     pub web_search_mode: crate::chat::types::WebSearchMode,
-    pub stream_enabled: bool,
     pub max_output_tokens: u32,
     pub retry_attempts: usize,
     pub assistant_snapshot: Option<ChatAssistantSnapshot>,

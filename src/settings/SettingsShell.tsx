@@ -2122,7 +2122,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {/* ===== 插件标签页（原扩展 → 插件） ===== */}
             {activeTab === 'plugins' && (
               <PluginCenter
-                variant="settings"
                 onRequestAiInstall={onRequestPluginAiInstall}
               />
             )}

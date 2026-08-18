@@ -1616,11 +1616,6 @@ export const chatApi = {
     return invoke<PiSessionTreeSnapshot>('chat_pi_session_tree', { conversationId })
   },
 
-  async piSessionEntries(conversationId: string, since?: string): Promise<{ entries: unknown[]; leafId: string | null }> {
-    if (!isTauriRuntime()) return { entries: [], leafId: null }
-    return invoke('chat_pi_session_entries', { conversationId, since: since ?? null })
-  },
-
   async piForkMessages(conversationId: string): Promise<PiForkMessage[]> {
     if (!isTauriRuntime()) return []
     const result = await invoke<{ messages?: PiForkMessage[] }>('chat_pi_fork_messages', { conversationId })
@@ -1947,11 +1942,6 @@ export const chatApi = {
   async externalCliInstall(agentId: string): Promise<void> {
     if (!isTauriRuntime()) return
     await invoke('chat_external_cli_install', { agentId })
-  },
-
-  async externalCliOpenConfigDir(agentId: string): Promise<void> {
-    if (!isTauriRuntime()) return
-    await invoke('chat_external_cli_open_config_dir', { agentId })
   },
 
   async piExtensionsInventory(): Promise<PiExtensionInventory | null> {

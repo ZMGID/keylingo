@@ -26,11 +26,6 @@ import { copyToClipboard } from '../utils/clipboard'
 interface PluginCenterProps {
   /** 让 Kivio AI 按规范文档安装：父级开新对话并发送 install brief */
   onRequestAiInstall?: (pluginId: string) => void | Promise<void>
-  /**
-   * `center`：整页中心（自带大标题）。
-   * `settings`：嵌在设置页内容区（标题由 SettingsShell pageMeta 提供）。
-   */
-  variant?: 'center' | 'settings'
 }
 
 type TabId = 'plaza' | 'installed'
@@ -264,9 +259,8 @@ function PluginCard({
 }
 
 /** 插件中心：点安装运行 README 命令；启用开关控制 MCP / Skill。 */
-export function PluginCenter({ onRequestAiInstall, variant = 'center' }: PluginCenterProps) {
+export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
   const t = useT()
-  const inSettings = variant === 'settings'
   const [tab, setTab] = useState<TabId>('plaza')
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [loading, setLoading] = useState(true)
@@ -433,35 +427,16 @@ export function PluginCenter({ onRequestAiInstall, variant = 'center' }: PluginC
 
   const body = (
     <>
-      {!inSettings && (
-        <div className="border-b border-neutral-200 pb-5 dark:border-neutral-800">
-          <div className="flex min-w-0 items-center gap-2">
-            <h1 className="flex items-center gap-2.5 text-[28px] font-semibold tracking-normal text-neutral-950 dark:text-neutral-50">
-              <Puzzle size={24} className="text-neutral-500" />
-              {t.chatNavPlugins}
-            </h1>
-            <IconButton size="lg" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
-              <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
-            </IconButton>
-          </div>
-          <p className="mt-3.5 max-w-2xl text-[14px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-            {t.chatPluginIntro}
-          </p>
-        </div>
-      )}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-2xl text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400">
+          {t.chatPluginIntro}
+        </p>
+        <IconButton size="md" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
+          <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+        </IconButton>
+      </div>
 
-      {inSettings && (
-        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-          <p className="max-w-2xl text-[13px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-            {t.chatPluginIntro}
-          </p>
-          <IconButton size="md" label={t.chatPluginRefreshDetection} onClick={() => void refresh()} disabled={refreshing}>
-            <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
-          </IconButton>
-        </div>
-      )}
-
-      <div className={`${inSettings ? 'mt-1' : 'mt-6'} flex flex-wrap items-center gap-3`}>
+      <div className="mt-1 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1 rounded-lg bg-neutral-100 p-0.5 dark:bg-neutral-800/80">
           {(
             [
@@ -513,7 +488,7 @@ export function PluginCenter({ onRequestAiInstall, variant = 'center' }: PluginC
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <div className={`${inSettings ? 'mt-10' : 'mt-16'} flex flex-col items-center justify-center text-center`}>
+        <div className="mt-10 flex flex-col items-center justify-center text-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-md bg-neutral-100 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-500">
             <Puzzle size={28} strokeWidth={1.5} />
           </div>
@@ -540,15 +515,5 @@ export function PluginCenter({ onRequestAiInstall, variant = 'center' }: PluginC
     </>
   )
 
-  if (inSettings) {
-    return <div className="min-w-0 text-neutral-900 dark:text-neutral-100">{body}</div>
-  }
-
-  return (
-    <div className="assistant-center-root flex h-full min-h-0 flex-col text-neutral-900 dark:text-neutral-100">
-      <main className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-[1040px] px-9 pb-10 pt-7">{body}</div>
-      </main>
-    </div>
-  )
+  return <div className="min-w-0 text-neutral-900 dark:text-neutral-100">{body}</div>
 }

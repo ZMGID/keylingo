@@ -18,7 +18,6 @@ vi.mock('../chat/api', () => ({
       configDir: '/home/u/.claude',
     }),
     externalCliInstall: vi.fn(),
-    externalCliOpenConfigDir: vi.fn(),
     externalCliProviderCleanup: vi.fn(),
     externalCliScanCcSwitch: vi.fn().mockResolvedValue({ providers: [], skipped: 0 }),
     externalCliFetchRelayModels: vi.fn().mockResolvedValue([]),

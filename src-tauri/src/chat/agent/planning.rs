@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::chat::model::{
-    generate_request_from_openai_messages, stream_with_chat_provider, BuiltinWebSearch,
+    generate_request_from_openai_messages, stream_with_chat_provider,
     GenerateOptions, GenerateOutput, GenerateRequest, GenerateRequestContext, ModelError,
     PendingToolCall, StreamPart, StreamSink,
 };
@@ -9,7 +9,7 @@ use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ChatMessage
 use crate::mcp::ChatToolDefinition;
 
 use super::finalize::{
-    cancelled_run_result_from_state, cancelled_tool_round_run_result, emit_builtin_web_search_card,
+    cancelled_run_result_from_state, cancelled_tool_round_run_result,
     tool_planning_failed_run_result, RunResultBuilder,
 };
 use super::host::AgentHost;
@@ -171,176 +171,136 @@ pub(crate) async fn planning_step(
     } else {
         None
     };
-    // 本轮内置搜索引用（**仅非流式路径**会有值）：流式路径由实时卡追踪器边流边合成，
-    // 故此处只承接非流式 `generate` 的解析结果，稍后与 take_card 二选一落盘（不双卡）。
-    let mut planning_web_search: Option<BuiltinWebSearch> = None;
-    let planning_result = if config.stream_enabled {
-        // 断流 → 重连同一条流式请求（见 `STREAM_INTERRUPT_RETRIES`），不降级非流式。
-        let mut interrupt_attempt = 0u32;
-        loop {
-            match stream_scoped_chat_completion_inner(
-                config.state,
-                host,
-                &config.provider,
-                &config.model,
-                send_messages.clone(),
-                Some(&active_tools),
-                config.retry_attempts,
-                config.thinking_enabled,
-                config.thinking_level.clone(),
-                config.builtin_web_search_active(),
-                config.max_output_tokens,
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                config.generation,
-                "Chat tools planning",
-                stream_policy,
-                Some(planning_text_segment.clone()),
-                Some(planning_reasoning_segment.clone()),
-                Some(planning_tool_drafts.clone()),
-                planning_web_search_tracker.clone(),
-            )
-            .await
-            {
-                Ok(mut stream) => {
-                    if stream.cancelled {
-                        let partial = sanitize_assistant_text_response(&stream.content);
-                        if partial.trim().is_empty() || planning_tool_drafts.has_started() {
-                            // No preservable partial answer (empty text, or tool-arg
-                            // drafting had started and is now incomplete). The stream
-                            // layer already emitted the single done("cancelled") event,
-                            // so build the cancelled result WITHOUT re-emitting — but
-                            // still end with Ok(cancelled_result) carrying the rounds
-                            // already accumulated, so the turn is persisted instead of
-                            // dropped via a bare Err("cancelled").
-                            return Ok(PlanningStepOutcome::Cancelled(
-                                cancelled_tool_round_run_result(
-                                    &config.language,
-                                    &state.planning_reasoning_parts,
-                                    std::mem::take(&mut state.tool_records),
-                                    std::mem::take(&mut state.segment_builder).all(),
-                                    std::mem::take(&mut state.generated_api_messages),
-                                ),
-                            ));
-                        }
-                        // Partial plain text was already streamed to the frontend and the
-                        // stream layer already emitted the single done("cancelled") event;
-                        // preserve the generated text instead of dropping the whole turn.
-                        // Append the reasoning segment first (its reserved order is lower
-                        // than the text segment's) so the persisted timeline keeps reasoning
-                        // above the answer; otherwise normalize_assistant_segments would add
-                        // a trailing reasoning segment that renders below the text.
-                        if let Some(reasoning_text) = stream
-                            .reasoning
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                        {
-                            let mut reasoning_segment = planning_reasoning_segment.clone();
-                            reasoning_segment.phase = ChatMessageSegmentPhase::Plain;
-                            state.segment_builder.append_text_from_template(
-                                &reasoning_segment,
-                                reasoning_text.to_string(),
-                            );
-                        }
-                        let mut segment = planning_text_segment.clone();
-                        segment.phase = ChatMessageSegmentPhase::Plain;
+    // 内置搜索由实时卡追踪器边流边合成（take_card 落 Success 终态卡）。
+    let mut interrupt_attempt = 0u32;
+    let planning_result = loop {
+        match stream_scoped_chat_completion_inner(
+            config.state,
+            host,
+            &config.provider,
+            &config.model,
+            send_messages.clone(),
+            Some(&active_tools),
+            config.retry_attempts,
+            config.thinking_enabled,
+            config.thinking_level.clone(),
+            config.builtin_web_search_active(),
+            config.max_output_tokens,
+            &config.conversation_id,
+            &config.run_id,
+            &config.message_id,
+            config.generation,
+            "Chat tools planning",
+            stream_policy,
+            Some(planning_text_segment.clone()),
+            Some(planning_reasoning_segment.clone()),
+            Some(planning_tool_drafts.clone()),
+            planning_web_search_tracker.clone(),
+        )
+        .await
+        {
+            Ok(mut stream) => {
+                if stream.cancelled {
+                    let partial = sanitize_assistant_text_response(&stream.content);
+                    if partial.trim().is_empty() || planning_tool_drafts.has_started() {
+                        // No preservable partial answer (empty text, or tool-arg
+                        // drafting had started and is now incomplete). The stream
+                        // layer already emitted the single done("cancelled") event,
+                        // so build the cancelled result WITHOUT re-emitting — but
+                        // still end with Ok(cancelled_result) carrying the rounds
+                        // already accumulated, so the turn is persisted instead of
+                        // dropped via a bare Err("cancelled").
                         return Ok(PlanningStepOutcome::Cancelled(
-                            RunResultBuilder::new(host, env.ids(), partial)
-                                .segment(&segment)
-                                .api_reasoning(stream.reasoning.clone())
-                                .reasoning_tail(stream.reasoning)
-                                .outcome("cancelled")
-                                .finish(
-                                    std::mem::take(&mut state.segment_builder),
-                                    &state.planning_reasoning_parts,
-                                    std::mem::take(&mut state.tool_records),
-                                    std::mem::take(&mut state.generated_api_messages),
-                                ),
+                            cancelled_tool_round_run_result(
+                                &config.language,
+                                &state.planning_reasoning_parts,
+                                std::mem::take(&mut state.tool_records),
+                                std::mem::take(&mut state.segment_builder).all(),
+                                std::mem::take(&mut state.generated_api_messages),
+                            ),
                         ));
                     }
-                    state.merge_usage(stream.usage.clone());
-                    state.generated_images.append(&mut stream.images);
-                    break Ok(ChatPlanningStep {
-                        message: stream.to_openai_compatible_message(),
-                        streamed: true,
-                    });
+                    // Partial plain text was already streamed to the frontend and the
+                    // stream layer already emitted the single done("cancelled") event;
+                    // preserve the generated text instead of dropping the whole turn.
+                    // Append the reasoning segment first (its reserved order is lower
+                    // than the text segment's) so the persisted timeline keeps reasoning
+                    // above the answer; otherwise normalize_assistant_segments would add
+                    // a trailing reasoning segment that renders below the text.
+                    if let Some(reasoning_text) = stream
+                        .reasoning
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        let mut reasoning_segment = planning_reasoning_segment.clone();
+                        reasoning_segment.phase = ChatMessageSegmentPhase::Plain;
+                        state.segment_builder.append_text_from_template(
+                            &reasoning_segment,
+                            reasoning_text.to_string(),
+                        );
+                    }
+                    let mut segment = planning_text_segment.clone();
+                    segment.phase = ChatMessageSegmentPhase::Plain;
+                    return Ok(PlanningStepOutcome::Cancelled(
+                        RunResultBuilder::new(host, env.ids(), partial)
+                            .segment(&segment)
+                            .api_reasoning(stream.reasoning.clone())
+                            .reasoning_tail(stream.reasoning)
+                            .outcome("cancelled")
+                            .finish(
+                                std::mem::take(&mut state.segment_builder),
+                                &state.planning_reasoning_parts,
+                                std::mem::take(&mut state.tool_records),
+                                std::mem::take(&mut state.generated_api_messages),
+                            ),
+                    ));
                 }
-                Err(err) if planning_tool_drafts.has_started() => {
-                    eprintln!(
+                state.merge_usage(stream.usage.clone());
+                state.generated_images.append(&mut stream.images);
+                break Ok(ChatPlanningStep {
+                    message: stream.to_openai_compatible_message(),
+                    streamed: true,
+                });
+            }
+            Err(err) if planning_tool_drafts.has_started() => {
+                eprintln!(
                     "Chat tools planning stream interrupted while generating tool arguments; surfacing tool draft error without retry: {}",
                     err
                 );
-                    return Ok(PlanningStepOutcome::DraftFailed(
-                        tool_planning_failed_run_result(
-                            host,
-                            config,
-                            std::mem::take(&mut state.segment_builder),
-                            planning_text_segment.clone(),
-                            planning_tool_drafts,
-                            &state.planning_reasoning_parts,
-                            std::mem::take(&mut state.generated_api_messages),
-                            err.to_string(),
-                        ),
-                    ));
-                }
-                Err(err)
-                    if err.is_stream_read_interrupted()
-                        && interrupt_attempt < STREAM_INTERRUPT_RETRIES =>
-                {
-                    interrupt_attempt += 1;
-                    eprintln!(
-                    "Chat tools planning stream interrupted; reconnecting the stream ({interrupt_attempt}/{STREAM_INTERRUPT_RETRIES}): {err}"
-                );
-                    // 退避必须接取消：否则用户点停止后要等满退避 + 下一次完整流。
-                    tokio::select! {
-                        _ = tokio::time::sleep(STREAM_INTERRUPT_BACKOFF * interrupt_attempt) => {}
-                        _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
-                            return Ok(PlanningStepOutcome::Cancelled(
-                                cancelled_run_result_from_state(env, state),
-                            ));
-                        }
-                    }
-                    continue;
-                }
-                Err(err) => break Err(err.to_string()),
-            }
-        }
-    } else {
-        tokio::select! {
-            result = call_chat_completion_output_with_usage(
-                config.state,
-                &config.provider,
-                &config.model,
-                send_messages.clone(),
-                Some(&active_tools),
-                config.retry_attempts,
-                config.thinking_enabled,
-                config.thinking_level.clone(),
-                config.builtin_web_search_active(),
-                config.max_output_tokens,
-                &config.conversation_id,
-                &config.message_id,
-                "Chat tools planning",
-            ) => result.map(|(message, usage, web_search, images)| {
-                state.merge_usage(usage);
-                planning_web_search = web_search;
-                state.generated_images.extend(images);
-                ChatPlanningStep {
-                    message,
-                    streamed: false,
-                }
-            }),
-            _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
-                // Cancelled during the (non-streaming) planning call. Preserve the
-                // rounds already accumulated by ending with Ok(cancelled_result)
-                // instead of a bare Err("cancelled") that dropped the whole turn.
-                // The helper emits the single done("cancelled") event itself.
-                return Ok(PlanningStepOutcome::Cancelled(
-                    cancelled_run_result_from_state(env, state),
+                return Ok(PlanningStepOutcome::DraftFailed(
+                    tool_planning_failed_run_result(
+                        host,
+                        config,
+                        std::mem::take(&mut state.segment_builder),
+                        planning_text_segment.clone(),
+                        planning_tool_drafts,
+                        &state.planning_reasoning_parts,
+                        std::mem::take(&mut state.generated_api_messages),
+                        err.to_string(),
+                    ),
                 ));
             }
+            Err(err)
+                if err.is_stream_read_interrupted()
+                    && interrupt_attempt < STREAM_INTERRUPT_RETRIES =>
+            {
+                interrupt_attempt += 1;
+                eprintln!(
+                    "Chat tools planning stream interrupted; reconnecting the stream ({interrupt_attempt}/{STREAM_INTERRUPT_RETRIES}): {err}"
+                );
+                // 退避必须接取消：否则用户点停止后要等满退避 + 下一次完整流。
+                tokio::select! {
+                    _ = tokio::time::sleep(STREAM_INTERRUPT_BACKOFF * interrupt_attempt) => {}
+                    _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
+                        return Ok(PlanningStepOutcome::Cancelled(
+                            cancelled_run_result_from_state(env, state),
+                        ));
+                    }
+                }
+                continue;
+            }
+            Err(err) => break Err(err.to_string()),
         }
     };
     let message = match planning_result {
@@ -405,9 +365,7 @@ pub(crate) async fn planning_step(
             return Err(err);
         }
     };
-    // 内置搜索（服务端托管）发生过 ⇒ 一张「网络搜索」卡落盘（预留槽 = 答案文本之前）。
-    // 两条路径互斥：流式由实时卡追踪器边流边合成（take_card 落 Success 终态卡）；
-    // 非流式只在拿到完整答案后合成（planning_web_search 才有值）。绝不双卡。
+    // 内置搜索：实时卡追踪器边流边合成（take_card 落 Success 终态卡）。
     if let Some(tracker) = planning_web_search_tracker.as_ref() {
         if let Some((record, segment)) = tracker.take_card() {
             state
@@ -415,18 +373,6 @@ pub(crate) async fn planning_step(
                 .append_existing_segments(vec![segment]);
             state.tool_records.push(record);
         }
-    }
-    if let Some(web_search) = planning_web_search.as_ref() {
-        emit_builtin_web_search_card(
-            host,
-            env.ids(),
-            state,
-            web_search,
-            &config.provider.name,
-            ChatMessageSegmentPhase::ToolLoop,
-            Some(round),
-            Some(web_search_order),
-        );
     }
     let tool_calls = extract_tool_calls(&message);
     if tool_calls.is_empty() {
@@ -491,16 +437,6 @@ pub(crate) async fn planning_step(
             .append_text_from_template(&planning_text_segment, planning_text);
     }
     if let Some(reasoning) = extract_reasoning_content(&message) {
-        if !config.stream_enabled {
-            host.emit_stream_delta(
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                "",
-                Some(&reasoning),
-                Some(&planning_reasoning_segment),
-            );
-        }
         state
             .segment_builder
             .append_text_from_template(&planning_reasoning_segment, reasoning.clone());

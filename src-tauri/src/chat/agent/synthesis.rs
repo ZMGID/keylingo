@@ -1,20 +1,18 @@
 use serde_json::{json, Value};
 
-use crate::chat::model::BuiltinWebSearch;
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ToolCallStatus};
 
 use super::finalize::{
-    emit_builtin_web_search_card, empty_synthesis_fallback_response, segment_phase_for_agent_phase,
+    empty_synthesis_fallback_response, segment_phase_for_agent_phase,
     stopped_generation_content, synthesis_failed_fallback_response, RunResultBuilder,
 };
 use super::loop_::{LoopEnv, RunState};
 use super::planning::{
-    call_chat_completion_message_with_usage, call_chat_completion_output_with_usage,
-    stream_scoped_chat_completion_inner,
+    call_chat_completion_message_with_usage, stream_scoped_chat_completion_inner,
 };
 use super::recovery::{self, RecoveryAction};
 use super::stop::{
-    empty_assistant_response_error, extract_reasoning_content, final_assistant_api_message,
+    empty_assistant_response_error, final_assistant_api_message,
     merge_reasoning, sanitize_assistant_text_response,
 };
 use super::stream::{ChatStreamOutput, WebSearchCardTracker};
@@ -82,92 +80,66 @@ pub(crate) async fn synthesis_step(
         None
     };
 
-    // 内置搜索引用（**仅非流式路径**会有值）：流式路径由实时卡追踪器边流边合成，
-    // 此处只承接非流式 `generate` 的解析结果。初值 None 仅为满足声明（流式分支不赋值）。
-    #[allow(unused_assignments)]
-    let mut synth_web_search: Option<BuiltinWebSearch> = None;
-    let (response, reasoning, response_reasoning) = if config.stream_enabled {
-        let stream = stream_scoped_chat_completion_inner(
-            config.state,
-            host,
-            &config.provider,
-            &config.model,
-            send_messages,
-            None,
-            config.retry_attempts,
-            config.thinking_enabled,
-            config.thinking_level.clone(),
-            config.builtin_web_search_active(),
-            config.max_output_tokens,
-            &config.conversation_id,
-            &config.run_id,
-            &config.message_id,
-            config.generation,
-            "Chat stream",
-            synthesis_stream_policy,
-            Some(response_segment.clone()),
-            Some(response_reasoning_segment.clone()),
-            None,
-            synth_web_search_tracker.clone(),
-        )
-        .await
-        .map_err(|err| err.to_string());
-        let mut stream = match stream {
-            Ok(stream) => stream,
-            Err(err) if !state.tool_records.is_empty() => {
-                eprintln!("Chat synthesis stream failed after tool records; recovering: {err}");
-                let recovered = recover_synthesis(env, state, &err).await;
-                let content = if recovered.trim().is_empty() {
-                    synthesis_failed_fallback_response(&config.language)
-                } else {
-                    recovered
-                };
-                return Ok(SynthesisFlow::Early(
-                    RunResultBuilder::new(host, env.ids(), content)
-                        .segment(&response_segment)
-                        .emit_done("done")
-                        .outcome("recovered")
-                        .degraded(state.degraded.take())
-                        .finish(
-                            std::mem::take(&mut state.segment_builder),
-                            &state.planning_reasoning_parts,
-                            std::mem::take(&mut state.tool_records),
-                            std::mem::take(&mut state.generated_api_messages),
-                        ),
-                ));
-            }
-            Err(err) => return Err(err),
-        };
-        if stream.cancelled {
-            if !state.tool_records.is_empty() {
-                let stored_content = if stream.content.trim().is_empty() {
-                    stopped_generation_content(&config.language)
-                } else {
-                    stream.content.clone()
-                };
-                return Ok(SynthesisFlow::Early(
-                    RunResultBuilder::new(host, env.ids(), stored_content)
-                        .segment(&response_segment)
-                        .api_reasoning(stream.reasoning.clone())
-                        .reasoning_tail(stream.reasoning)
-                        .outcome("cancelled")
-                        .finish(
-                            std::mem::take(&mut state.segment_builder),
-                            &state.planning_reasoning_parts,
-                            std::mem::take(&mut state.tool_records),
-                            std::mem::take(&mut state.generated_api_messages),
-                        ),
-                ));
-            }
-            let partial = sanitize_assistant_text_response(&stream.content);
-            if partial.trim().is_empty() {
-                return Err("cancelled".to_string());
-            }
-            // Plain-text streaming was cancelled after partial output; the stream
-            // layer already emitted the single done("cancelled") event. Preserve
-            // the generated text instead of dropping the whole turn.
+    let stream = stream_scoped_chat_completion_inner(
+        config.state,
+        host,
+        &config.provider,
+        &config.model,
+        send_messages,
+        None,
+        config.retry_attempts,
+        config.thinking_enabled,
+        config.thinking_level.clone(),
+        config.builtin_web_search_active(),
+        config.max_output_tokens,
+        &config.conversation_id,
+        &config.run_id,
+        &config.message_id,
+        config.generation,
+        "Chat stream",
+        synthesis_stream_policy,
+        Some(response_segment.clone()),
+        Some(response_reasoning_segment.clone()),
+        None,
+        synth_web_search_tracker.clone(),
+    )
+    .await
+    .map_err(|err| err.to_string());
+    let mut stream = match stream {
+        Ok(stream) => stream,
+        Err(err) if !state.tool_records.is_empty() => {
+            eprintln!("Chat synthesis stream failed after tool records; recovering: {err}");
+            let recovered = recover_synthesis(env, state, &err).await;
+            let content = if recovered.trim().is_empty() {
+                synthesis_failed_fallback_response(&config.language)
+            } else {
+                recovered
+            };
             return Ok(SynthesisFlow::Early(
-                RunResultBuilder::new(host, env.ids(), partial)
+                RunResultBuilder::new(host, env.ids(), content)
+                    .segment(&response_segment)
+                    .emit_done("done")
+                    .outcome("recovered")
+                    .degraded(state.degraded.take())
+                    .finish(
+                        std::mem::take(&mut state.segment_builder),
+                        &state.planning_reasoning_parts,
+                        std::mem::take(&mut state.tool_records),
+                        std::mem::take(&mut state.generated_api_messages),
+                    ),
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+    if stream.cancelled {
+        if !state.tool_records.is_empty() {
+            let stored_content = if stream.content.trim().is_empty() {
+                stopped_generation_content(&config.language)
+            } else {
+                stream.content.clone()
+            };
+            return Ok(SynthesisFlow::Early(
+                RunResultBuilder::new(host, env.ids(), stored_content)
                     .segment(&response_segment)
                     .api_reasoning(stream.reasoning.clone())
                     .reasoning_tail(stream.reasoning)
@@ -180,121 +152,35 @@ pub(crate) async fn synthesis_step(
                     ),
             ));
         }
-        state.merge_usage(stream.usage.clone());
-        state.generated_images.append(&mut stream.images);
-        let final_reasoning_for_api = stream.reasoning.clone();
-        let reasoning = merge_reasoning(&state.planning_reasoning_parts, stream.reasoning.clone());
-        let response = sanitize_assistant_text_response(&stream.content);
-        if response.trim().is_empty() {
-            if !state.tool_records.is_empty() {
-                log_empty_synthesis_output(config, phase, &stream, state.tool_records.len());
-                let recovered = recover_synthesis(env, state, "").await;
-                let content = if recovered.trim().is_empty() {
-                    empty_synthesis_fallback_response(&config.language)
-                } else {
-                    recovered
-                };
-                let fallback = RunResultBuilder::new(host, env.ids(), content)
-                    .emit_segment_opt(Some(response_segment.clone()))
-                    .api_reasoning(final_reasoning_for_api.clone())
-                    .emit_done("done")
-                    .emit_and_record(&mut state.generated_api_messages);
-                (fallback, reasoning, final_reasoning_for_api)
-            } else {
-                return Err(empty_assistant_response_error("Chat stream"));
-            }
-        } else {
-            if !state.generated_api_messages.is_empty() {
-                state
-                    .generated_api_messages
-                    .push(final_assistant_api_message(
-                        &response,
-                        final_reasoning_for_api.as_deref(),
-                    ));
-            }
-            (response, reasoning, final_reasoning_for_api)
+        let partial = sanitize_assistant_text_response(&stream.content);
+        if partial.trim().is_empty() {
+            return Err("cancelled".to_string());
         }
-    } else {
-        // 有意行为统一：此前非流式分支发送原始 state.runtime_messages（历史 quirk），
-        // 接入压缩后改为与流式分支相同的发送视图（send_messages 即压缩后的发送视图），
-        // 保证两条合成路径在超限场景行为一致。
-        let runtime_messages = send_messages.clone();
-        let message_result = tokio::select! {
-            result = call_chat_completion_output_with_usage(
-                config.state,
-                &config.provider,
-                &config.model,
-                runtime_messages,
-                None,
-                config.retry_attempts,
-                config.thinking_enabled,
-                config.thinking_level.clone(),
-                config.builtin_web_search_active(),
-                config.max_output_tokens,
-                &config.conversation_id,
-                &config.message_id,
-                "Chat API",
-            ) => result,
-            _ = host.wait_for_generation_inactive(&config.conversation_id, config.generation) => {
-                return Err("cancelled".to_string());
-            }
-        };
-        let message = match message_result {
-            Ok((message, usage, web_search, images)) => {
-                state.merge_usage(usage);
-                synth_web_search = web_search;
-                state.generated_images.extend(images);
-                message
-            }
-            Err(err) if !state.tool_records.is_empty() => {
-                eprintln!("Chat synthesis request failed after tool records; recovering: {err}");
-                let recovered = recover_synthesis(env, state, &err).await;
-                let content = if recovered.trim().is_empty() {
-                    synthesis_failed_fallback_response(&config.language)
-                } else {
-                    recovered
-                };
-                return Ok(SynthesisFlow::Early(
-                    RunResultBuilder::new(host, env.ids(), content)
-                        .segment(&response_segment)
-                        .emit_done("done")
-                        .outcome("recovered")
-                        .degraded(state.degraded.take())
-                        .finish(
-                            std::mem::take(&mut state.segment_builder),
-                            &state.planning_reasoning_parts,
-                            std::mem::take(&mut state.tool_records),
-                            std::mem::take(&mut state.generated_api_messages),
-                        ),
-                ));
-            }
-            Err(err) => return Err(err),
-        };
-        let response = sanitize_assistant_text_response(
-            message
-                .get("content")
-                .and_then(|content| content.as_str())
-                .unwrap_or_default(),
-        );
-        let reasoning = merge_reasoning(
-            &state.planning_reasoning_parts,
-            extract_reasoning_content(&message),
-        );
-        let response_reasoning = extract_reasoning_content(&message);
-        if response.trim().is_empty() && !state.tool_records.is_empty() {
-            eprintln!(
-                "Chat agent empty synthesis fallback: conversation_id={} run_id={} provider_id={} model={} phase={:?} stream=false tool_records={} finish_reason={}",
-                config.conversation_id,
-                config.run_id,
-                config.provider.id,
-                config.model,
-                phase,
-                state.tool_records.len(),
-                message
-                    .get("finish_reason")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("unknown"),
-            );
+        // Plain-text streaming was cancelled after partial output; the stream
+        // layer already emitted the single done("cancelled") event. Preserve
+        // the generated text instead of dropping the whole turn.
+        return Ok(SynthesisFlow::Early(
+            RunResultBuilder::new(host, env.ids(), partial)
+                .segment(&response_segment)
+                .api_reasoning(stream.reasoning.clone())
+                .reasoning_tail(stream.reasoning)
+                .outcome("cancelled")
+                .finish(
+                    std::mem::take(&mut state.segment_builder),
+                    &state.planning_reasoning_parts,
+                    std::mem::take(&mut state.tool_records),
+                    std::mem::take(&mut state.generated_api_messages),
+                ),
+        ));
+    }
+    state.merge_usage(stream.usage.clone());
+    state.generated_images.append(&mut stream.images);
+    let final_reasoning_for_api = stream.reasoning.clone();
+    let reasoning = merge_reasoning(&state.planning_reasoning_parts, stream.reasoning.clone());
+    let response = sanitize_assistant_text_response(&stream.content);
+    let (response, reasoning, response_reasoning) = if response.trim().is_empty() {
+        if !state.tool_records.is_empty() {
+            log_empty_synthesis_output(config, phase, &stream, state.tool_records.len());
             let recovered = recover_synthesis(env, state, "").await;
             let content = if recovered.trim().is_empty() {
                 empty_synthesis_fallback_response(&config.language)
@@ -303,30 +189,26 @@ pub(crate) async fn synthesis_step(
             };
             let fallback = RunResultBuilder::new(host, env.ids(), content)
                 .emit_segment_opt(Some(response_segment.clone()))
-                .api_reasoning(extract_reasoning_content(&message))
+                .api_reasoning(final_reasoning_for_api.clone())
                 .emit_done("done")
                 .emit_and_record(&mut state.generated_api_messages);
-            (fallback, reasoning, response_reasoning)
-        } else if response.trim().is_empty() {
-            return Err(empty_assistant_response_error("Chat API"));
+            (fallback, reasoning, final_reasoning_for_api)
         } else {
-            host.emit_stream_delta(
-                &config.conversation_id,
-                &config.run_id,
-                &config.message_id,
-                &response,
-                None,
-                Some(&response_segment),
-            );
-            if !state.generated_api_messages.is_empty() {
-                state.generated_api_messages.push(message);
-            }
-            (response, reasoning, response_reasoning)
+            return Err(empty_assistant_response_error("Chat stream"));
         }
+    } else {
+        if !state.generated_api_messages.is_empty() {
+            state
+                .generated_api_messages
+                .push(final_assistant_api_message(
+                    &response,
+                    final_reasoning_for_api.as_deref(),
+                ));
+        }
+        (response, reasoning, final_reasoning_for_api)
     };
 
-    // 内置搜索（服务端托管）发生过 ⇒ 一张来源卡落盘（预留槽 = 答案文本之前）。
-    // 与 planning 同款互斥：流式 take_card 落 Success 终态卡；非流式才用 synth_web_search 合成。
+    // 内置搜索：实时卡追踪器边流边合成（take_card 落 Success 终态卡）。
     if let Some(tracker) = synth_web_search_tracker.as_ref() {
         if let Some((record, segment)) = tracker.take_card() {
             state
@@ -334,18 +216,6 @@ pub(crate) async fn synthesis_step(
                 .append_existing_segments(vec![segment]);
             state.tool_records.push(record);
         }
-    }
-    if let Some(web_search) = synth_web_search.as_ref() {
-        emit_builtin_web_search_card(
-            host,
-            env.ids(),
-            state,
-            web_search,
-            &config.provider.name,
-            response_phase.clone(),
-            None,
-            Some(web_search_order),
-        );
     }
 
     Ok(SynthesisFlow::Completed(SynthesisCompleted {

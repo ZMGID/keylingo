@@ -2753,7 +2753,7 @@ fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::
 
 /**
  * 从存储文件加载设置
- * 执行清理迁移；若 settings.json 中无 API Key，则从旧版 keyring 一次性迁移
+ * 执行清理迁移（legacy identifier 目录、sanitize）
  */
 pub fn load_settings(app: &AppHandle) -> Settings {
     // 入口先把旧 identifier 目录的数据搬到新目录（幂等）

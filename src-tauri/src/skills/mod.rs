@@ -6,9 +6,8 @@ mod types;
 
 pub use catalog::format_catalog;
 pub use discover::{
-    build_registry, build_registry_headless, build_registry_headless_in, build_registry_in,
-    build_registry_metadata, build_registry_metadata_in, home_agents_skills_dir,
-    kivio_skills_dir, legacy_app_data_skills_dir, user_skills_dir, user_skills_dir_headless,
+    build_registry, build_registry_in, build_registry_metadata, build_registry_metadata_in,
+    home_agents_skills_dir, kivio_skills_dir, legacy_app_data_skills_dir, user_skills_dir,
 };
 pub use parse::parse_skill_markdown;
 pub use runtime::{

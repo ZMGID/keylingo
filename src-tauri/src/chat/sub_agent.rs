@@ -718,7 +718,6 @@ async fn run_sub_agent(app: AppHandle, req: SubAgentRequest) -> Result<AgentRunR
         let executor = SubAgentToolExecutor { app: app.clone() };
 
         let thinking_enabled = req.settings.chat.thinking_enabled;
-        let stream_enabled = req.settings.chat.stream_enabled;
         let max_output_tokens = req.max_output_tokens;
         let retry_attempts = if req.settings.retry_enabled {
             req.settings.retry_attempts as usize
@@ -747,7 +746,6 @@ async fn run_sub_agent(app: AppHandle, req: SubAgentRequest) -> Result<AgentRunR
             thinking_level: None,
             // 子代理不做联网搜索（父代理的搜索结果已在上下文里）。
             web_search_mode: crate::chat::types::WebSearchMode::Off,
-            stream_enabled,
             max_output_tokens,
             retry_attempts,
             assistant_snapshot: None,
@@ -2433,8 +2431,7 @@ mod tests {
     /// 把一份非流式 chat-completion JSON 固件转成 SSE 响应体。
     ///
     /// 「要完整结果」的模型调用现在**一律走流式线**（见 planning.rs 上
-    /// `call_chat_completion_output_with_usage` 的注释），`stream_enabled=false` 只表示
-    /// 「不往 host 发增量」。固件用非流式 JSON 写着更好读，所以在出口做一次机械转换
+    /// `call_chat_completion_output_with_usage` 的注释）。固件用非流式 JSON 写着更好读，所以在出口做一次机械转换
     /// （与 `agent/loop_tests.rs::sse_from_completion_json` 同形；两个测试模块互不可见，
     /// 为二十行搭一个共享 test-util 模块不划算）。
     fn sse_body_from_completion_json(body: &str) -> String {
@@ -2670,7 +2667,6 @@ mod tests {
             thinking_level: None,
             // 子代理不做联网搜索（父代理的搜索结果已在上下文里）。
             web_search_mode: crate::chat::types::WebSearchMode::Off,
-            stream_enabled: false,
             max_output_tokens: 1024,
             retry_attempts: 1,
             assistant_snapshot: None,

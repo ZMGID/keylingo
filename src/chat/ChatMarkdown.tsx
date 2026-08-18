@@ -19,7 +19,6 @@ import { citationPopoverPosition, type CitationPopoverPosition } from './citatio
 import { isWebCitation } from './webSearchCitations'
 import { ChatInlineImage } from './ChatInlineImage'
 import { MarkdownStreamingContext } from './markdownStreaming'
-import { getChatPerformanceFlags } from './chatPerformanceFlags'
 import { getSettledMarkdownCacheEntry } from './settledMarkdownCache'
 import { ChatHeavyIsland } from './ChatHeavyIsland'
 import { useConversationTransition } from './conversationTransitionStore'
@@ -1184,7 +1183,6 @@ function ChatMarkdownComponent({
   citations,
 }: ChatMarkdownProps) {
   const streaming = useContext(MarkdownStreamingContext)
-  const flags = getChatPerformanceFlags()
   const remarkPlugins = useMemo<PluggableList>(() => {
     const plugins: PluggableList = [...streamdownRemarkPlugins]
     if (citations && citations.size > 0) {
@@ -1233,7 +1231,7 @@ function ChatMarkdownComponent({
           content={content}
           components={components}
           remarkPlugins={remarkPlugins}
-          useCache={flags.settledMarkdownCache && !streaming}
+          useCache={!streaming}
           streaming={streaming}
         />
       </MarkdownErrorBoundary>

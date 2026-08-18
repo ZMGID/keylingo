@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::chat::model::{BuiltinWebSearch, PendingToolCall, WebCitation};
+use crate::chat::model::{PendingToolCall, WebCitation};
 use crate::chat::types::{
     ChatMessageSegment, ChatMessageSegmentKind, ChatMessageSegmentPhase, ToolCallRecord,
     ToolCallStatus,
@@ -522,44 +522,6 @@ pub(crate) fn cancelled_run_result_from_state(
         std::mem::take(&mut state.segment_builder).all(),
         std::mem::take(&mut state.generated_api_messages),
     )
-}
-
-/// 把 provider 服务端托管的**内置联网搜索**可视化成一张工具卡（复用 `ToolCallRecord` +
-/// 前端 `ToolCallBlock`）。内置搜索不进 agent 工具循环（服务端直接执行、无客户端工具调用），
-/// 故这里在拿到含引用的答案后**合成**一条 Success 记录 + 一个 Tool 段。
-///
-/// `order`：`Some` = 用调用方在 reasoning 与正文之间预留的槽位（任务 07-23 实时卡定位），
-/// 使卡渲染在答案文本**之前**；`None` = 向后兼容旧行为，取 `next_order()`（答案下方脚注）。
-/// 无查询也无引用则跳过。emit 事件 + 入 `state`，随本轮 finalize 落盘。
-pub(crate) fn emit_builtin_web_search_card(
-    host: &dyn AgentHost,
-    ids: RunIds<'_>,
-    state: &mut RunState,
-    web_search: &BuiltinWebSearch,
-    provider_label: &str,
-    phase: ChatMessageSegmentPhase,
-    round: Option<u32>,
-    order: Option<u32>,
-) {
-    if web_search.is_empty() {
-        return;
-    }
-    let id = format!("websearch_{}", uuid::Uuid::new_v4());
-    let record = build_web_search_record(
-        &id,
-        provider_label,
-        &web_search.queries,
-        &web_search.citations,
-        ToolCallStatus::Success,
-        round,
-    );
-    host.emit_tool_record(ids.conversation_id, ids.run_id, ids.message_id, &record);
-    let order = order.unwrap_or_else(|| state.segment_builder.next_order());
-    let segment = build_web_search_segment(order, &id, phase, round);
-    state
-        .segment_builder
-        .append_existing_segments(vec![segment]);
-    state.tool_records.push(record);
 }
 
 /// 构造一张「内置联网搜索」工具卡的 `ToolCallRecord`。流式实时卡（Running）与流结束合成卡

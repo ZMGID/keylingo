@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createLiveRowModel, extractLiveRange } from './liveRowModel'
+import { createLiveRowModel } from './liveRowModel'
 
 function sync(
   model: ReturnType<typeof createLiveRowModel>,
@@ -134,15 +134,5 @@ describe('createLiveRowModel', () => {
     })
     expect(next.liveKey).toMatch(/^live-turn-/)
     expect(model.resolveMessageKey('a1')).toBe('a1')
-  })
-})
-
-describe('extractLiveRange', () => {
-  it('force-mounts every index at or after the live boundary', () => {
-    expect(extractLiveRange([0, 1, 2], 4, 6)).toEqual([0, 1, 2, 4, 5])
-  })
-
-  it('is a no-op when idle', () => {
-    expect(extractLiveRange([0, 1], -1, 4)).toEqual([0, 1])
   })
 })

@@ -4,7 +4,7 @@
 //! 下次调模型之前）把用户那句话塞进模型历史，模型带着新指示继续。
 //!
 //! 显示走「合成一条 display-only `ToolCallRecord` + 一个 Tool 段」这条已验证的路子（与内置联网
-//! 搜索卡同构，见 `finalize::emit_builtin_web_search_card`）：因此**不新增 segment kind、不动
+//! 搜索卡同构，见 `finalize::build_web_search_record`）：因此**不新增 segment kind、不动
 //! protocol.rs**，落盘（assistant 消息的 `tool_calls` + `segments`）与实时流两条路都是现成的。
 
 use serde::{Deserialize, Serialize};

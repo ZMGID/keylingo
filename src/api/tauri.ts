@@ -2219,8 +2219,6 @@ export const api = {
     invoke<McpServerStatus>('chat_mcp_server_status', { serverId }),
   chatMcpListToolDefs: (serverId: string) =>
     invoke<{ name: string; description: string }[]>('chat_mcp_list_tool_defs', { serverId }),
-  chatMcpReloadServer: (serverId: string) =>
-    invoke<void>('chat_mcp_reload_server', { serverId }),
   /** 后台预热 MCP 连接（fire-and-forget）：不传 = 全部启用的 server；结果走 onMcpServerState 推送。 */
   chatMcpWarmup: (serverIds?: string[]) => {
     if (!isTauriRuntime()) return Promise.resolve()

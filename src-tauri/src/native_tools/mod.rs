@@ -151,16 +151,6 @@ pub fn user_home_dir() -> Result<PathBuf, String> {
     }
 }
 
-/// Legacy standalone resolver. Runtime tool calls should use the workspace-aware
-/// helpers below. There is no path confinement: absolute/`~` paths are honored.
-pub fn resolve_workspace_path(
-    raw_path: &str,
-    _workspace_roots: &[String],
-) -> Result<PathBuf, String> {
-    let candidate = candidate_path(raw_path)?;
-    fs_canonicalize_existing_or_self(&candidate)
-}
-
 pub fn resolve_tool_read_path(
     workspace: &NativeToolWorkspace,
     raw_path: &str,
@@ -275,6 +265,8 @@ pub fn workspace_display_path(workspace: &NativeToolWorkspace, path: &Path) -> S
     path.display().to_string()
 }
 
+/// Legacy standalone resolver. Runtime tool calls should use the workspace-aware
+/// helpers above. There is no path confinement: absolute/`~` paths are honored.
 pub fn resolve_read_path(raw_path: &str) -> Result<PathBuf, String> {
     let candidate = candidate_path(raw_path)?;
     fs_canonicalize_existing_or_self(&candidate)
@@ -396,7 +388,7 @@ mod tests {
     fn parent_dir_traversal_is_allowed_no_boundary() {
         // No-boundary model: `..` is no longer rejected. The path resolves to an
         // absolute, canonical form (access is gated by session consent instead).
-        let resolved = resolve_workspace_path("../", &[]).expect("`..` resolves under no-boundary");
+        let resolved = resolve_read_path("../").expect("`..` resolves under no-boundary");
         assert!(resolved.is_absolute());
     }
 
@@ -428,26 +420,6 @@ mod tests {
             .to_string_lossy();
         let tilde_path = format!("~/{}/sample.csv", rel);
         let resolved = resolve_read_path(&tilde_path).expect("resolve tilde path");
-        assert_eq!(resolved, fs::canonicalize(&file).expect("canonical file"));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_workspace_path_expands_tilde_prefix() {
-        let home = user_home_dir().expect("home");
-        let dir = home.join(format!(".kivio_tilde_ws_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("mkdir");
-        let file = dir.join("note.txt");
-        fs::write(&file, "ok").expect("write");
-
-        let rel = dir
-            .strip_prefix(&home)
-            .expect("dir under home")
-            .to_string_lossy();
-        let tilde_root = format!("~/{rel}");
-        let resolved =
-            resolve_workspace_path(&format!("~/{rel}/note.txt"), &[tilde_root]).expect("resolve");
         assert_eq!(resolved, fs::canonicalize(&file).expect("canonical file"));
 
         let _ = fs::remove_dir_all(&dir);

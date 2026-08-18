@@ -8,8 +8,9 @@ use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::attachments::{
     compose_text_attachments_for_api, text_attachments_from_attachments,
 };
-use crate::chat::model_call::{
+use crate::chat::{
     chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
+    Conversation, ToolCallStatus,
 };
 use crate::chat::model_metadata::{
     chat_max_output_tokens_for_model, model_can_generate_images_directly,
@@ -20,7 +21,6 @@ use crate::chat::vision::{
     auxiliary_vision_tool_record, finish_auxiliary_vision_tool_record,
     user_content_with_auxiliary_vision_result,
 };
-use crate::chat::{Conversation, ToolCallStatus};
 use crate::skills;
 use crate::state::AppState;
 
@@ -164,7 +164,6 @@ pub(super) async fn complete_assistant_reply_inner(
 
     let last_user_idx = conversation.messages.iter().rposition(|m| m.role == "user");
     let language = crate::settings::resolve_chat_language(&settings);
-    let stream_enabled = settings.chat.stream_enabled;
     // 思考：每对话等级覆盖全局开关。None=跟随全局（现状）；"off"=强制关；low/medium/high=按家族注入。
     let (thinking_enabled, thinking_level) = resolve_thinking(
         conversation.thinking_level.as_deref(),
@@ -683,7 +682,6 @@ pub(super) async fn complete_assistant_reply_inner(
             thinking_enabled,
             thinking_level,
             web_search_mode,
-            stream_enabled,
             max_output_tokens,
             retry_attempts,
             assistant_snapshot: conversation.assistant_snapshot.clone(),

@@ -19,11 +19,11 @@ use super::mcp_image_feedback::{
     append_tool_result_note, data_url_image_part, image_extension_for_mime,
     select_image_artifacts_for_attach,
 };
-use super::model_call::{
-    chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
-};
 use super::storage::load_conversation;
-use super::{ToolCallRecord, ToolCallStatus};
+use super::{
+    chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
+    ToolCallRecord, ToolCallStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AuxiliaryVisionModel {

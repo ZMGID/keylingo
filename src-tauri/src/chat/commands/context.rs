@@ -5,7 +5,7 @@ use tauri::{AppHandle, State};
 
 use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::model::openai_messages_from_model_messages;
-use crate::chat::model_call::session_model_for_conversation;
+use crate::chat::session_model_for_conversation;
 use crate::chat::model_metadata::context_window_for_model;
 use crate::chat::storage::{live_set_system_prompt, load_conversation};
 use crate::chat::{

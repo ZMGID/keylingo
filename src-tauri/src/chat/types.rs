@@ -429,10 +429,6 @@ impl AgentRuntimeConfig {
     pub fn is_chat(&self) -> bool {
         self.kind == AgentRuntimeKind::Chat
     }
-
-    pub fn is_builtin_agent(&self) -> bool {
-        self.kind == AgentRuntimeKind::Builtin
-    }
 }
 
 /// 会话级联网搜索模式（任务 07-23）。

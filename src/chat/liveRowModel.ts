@@ -3,12 +3,11 @@
  *
  * Assign a stable virtualizer row key at run start (`live-turn-N` /
  * `live-group-<id>`). On settle, alias the committed twin onto that key so the
- * in-list experiment can reconcile in place.
+ * first history mount reuses the live estimate/cache identity.
  *
- * Default Kivio path externalizes live outside the virtualizer
- * (`liveRowExternalization=true`); key continuity then mainly stabilizes
- * estimate/cache identity for the twin's first history mount, not DOM reuse.
- * Pure and DOM-free — MessageList feeds run/history facts each render.
+ * Live rides outside the virtualizer; key continuity stabilizes the twin's
+ * first history mount, not DOM reuse. Pure and DOM-free — MessageList feeds
+ * run/history facts each render.
  */
 
 export type LiveRowSyncInput = {
@@ -176,22 +175,4 @@ export function createLiveRowModel(): LiveRowModel {
   const resolveGroupKey = (groupId: string) => groupOrigins.get(groupId) ?? `group-${groupId}`
 
   return { sync, resolveMessageKey, resolveGroupKey, reset }
-}
-
-/**
- * Force-mount every index at or after `liveStartIndex` (LiveAgent extractLiveRange).
- * Streaming rows must not unmount mid-run — that drops Streamdown/shiki state and
- * re-parses the whole answer on remount.
- */
-export function extractLiveRange(
-  baseIndexes: number[],
-  liveStartIndex: number,
-  count: number,
-): number[] {
-  if (liveStartIndex < 0 || liveStartIndex >= count) return baseIndexes
-  const indexes = new Set(baseIndexes)
-  for (let index = liveStartIndex; index < count; index += 1) {
-    indexes.add(index)
-  }
-  return [...indexes].sort((a, b) => a - b)
 }
