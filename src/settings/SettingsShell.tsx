@@ -271,7 +271,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   // 更新检查状态：'idle' / 'checking' / 'up-to-date' / 'available' / 'check-failed'
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'up-to-date' | 'available' | 'check-failed'>('idle')
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
-  // 下载/安装两段式状态机:idle → downloading(进度条) → downloaded(显示安装按钮) → 用户点击 → 应用退出
+  // 下载后立刻静默安装:idle → downloading → (downloaded 一闪) → installer 拉起并退出
+  // 安装失败才停在 downloaded / failed，让用户点「安装并重启」或重试。
   // failed 时显示错误 + 重试 + 跳 GitHub 兜底
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'downloaded' | 'failed'>('idle')
   const [downloadPercent, setDownloadPercent] = useState(0)
@@ -563,7 +564,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     }
   }, [updateInfo])
 
-  /** 下载新版安装包到 temp dir,期间监听 update-download-progress 事件刷新进度条 */
+  /** 下载安装包后立刻静默安装并退出。Windows 走 NSIS `/S /UPDATE /R`，装完会自己拉起。 */
   const handleDownloadAndInstall = useCallback(async () => {
     if (!updateInfo?.version) return
     setDownloadState('downloading')
@@ -577,8 +578,9 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       const path = await api.downloadUpdate(updateInfo.version)
       setDownloadedPath(path)
       setDownloadState('downloaded')
+      await api.installUpdate(path)
     } catch (err) {
-      console.error('Download update failed:', err)
+      console.error('Download or install update failed:', err)
       setDownloadError(typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err)))
       setDownloadState('failed')
     } finally {
@@ -586,7 +588,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     }
   }, [updateInfo])
 
-  /** 启动 installer 并退出当前应用。Rust 端会在 macOS 上 cp 新 .app + open,在 Windows spawn NSIS exe */
+  /** 已下载的安装包再装一次（下载成功但拉起 installer 失败时用）。 */
   const handleInstall = useCallback(async () => {
     if (!downloadedPath) return
     try {

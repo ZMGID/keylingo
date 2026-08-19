@@ -274,9 +274,56 @@ pub(crate) async fn download_update_asset(
     Ok(dest.to_string_lossy().to_string())
 }
 
+/// NSIS 静默更新参数（与 tauri-plugin-updater Quiet 一致）。
+/// `/S` 无界面，`/UPDATE` 按已装位置覆盖，`/R` 装完用 `RunAsUser` 拉起新进程。
+/// 这些 flag 只有 `installMode: currentUser` 的安装包能不用 UAC 跑通；`both` /
+/// `perMachine` 会给 exe 打上 requireAdministrator，CreateProcess 报 740，静默模式也无法自己提权。
+fn nsis_silent_update_params() -> &'static str {
+    "/S /UPDATE /R"
+}
+
+/// 用 ShellExecute `open` 拉起 NSIS，而不是 CreateProcess。
+/// 当前用户安装包不需要提权，静默参数可以直接跑；若安装包仍带 requireAdministrator
+/// （旧的 `installMode: both`），Shell 会弹出 UAC，而不会像 CreateProcess 那样直接 740。
+#[cfg(target_os = "windows")]
+fn launch_nsis_silent_update(path: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::{ffi::OsStr, path::Path};
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = Path::new(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let params: Vec<u16> = OsStr::new(nsis_silent_update_params())
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        return Err(format!(
+            "启动 installer 失败: Windows Shell 错误码 {}",
+            result.0 as isize
+        ));
+    }
+    Ok(())
+}
+
 /// 启动安装包并退出当前应用。
 /// - macOS（.dmg）：hdiutil 挂载 → cp Kivio Desktop.app 到 /Applications → 卸载 → open 新版 → app.exit(0)
-/// - Windows（.exe）：spawn NSIS installer，立即 exit 让 installer 能写 exe
+/// - Windows（.exe）：ShellExecute 跑 NSIS 静默更新，立即 exit 让 installer 能覆盖正在运行的 exe
 #[tauri::command]
 pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
@@ -366,10 +413,7 @@ pub(crate) fn install_update_and_quit(app: AppHandle, path: String) -> Result<()
 
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
-        Command::new(&path)
-            .spawn()
-            .map_err(|e| format!("启动 installer 失败: {e}"))?;
+        launch_nsis_silent_update(&path)?;
         app.exit(0);
         return Ok(());
     }
@@ -495,5 +539,10 @@ mod tests {
             ),
             "https://github.com/ZMGID/kivio/releases/download/v2.8.1/Kivio.Desktop_2.8.1_aarch64.dmg"
         );
+    }
+
+    #[test]
+    fn nsis_silent_update_matches_tauri_quiet_flags() {
+        assert_eq!(nsis_silent_update_params(), "/S /UPDATE /R");
     }
 }

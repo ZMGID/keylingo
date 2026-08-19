@@ -47,7 +47,7 @@
       },
       "nsis": {
         "installerIcon": "icons/icon.ico",
-        "installMode": "both"
+        "installMode": "currentUser"
       }
     },
     "macOS": {

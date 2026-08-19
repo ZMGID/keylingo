@@ -178,7 +178,7 @@ Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），�
 - **DeepSeek Harness** —— 生成中可引导或排队；会话绑到项目工作目录；关窗和取消真正停掉。
 - **联网搜索** —— 来源目录可点，答案 `[n]` 跳转；新增 Brave、Serper、智谱、TinyFish 等。
 - **插件与技能** —— 一键跑官方安装命令；技能扫描 `~/.kivio` 与 `~/.agents`。
-- **其它** —— CLI 供应商可与 CLI 自带配置并存；账户菜单显示今日用量；重启记住当前对话。去掉 Email 连接器。
+- **其它** —— CLI 供应商可与 CLI 自带配置并存；账户菜单显示今日用量；重启记住当前对话。Windows 应用内更新静默安装。去掉 Email 连接器。
 
 完整历史见 [GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
@@ -381,7 +381,7 @@ Kivio Desktop checks GitHub Releases for updates shortly after launch (can be di
 - **DeepSeek Harness** — steer or queue while generating; sessions bind to the project working directory; close and cancel actually stop.
 - **Web search** — clickable source directory and `[n]` jump; adds Brave, Serper, Zhipu, TinyFish, and more.
 - **Plugins and skills** — one-click official install; Skills scan `~/.kivio` and `~/.agents`.
-- **More** — CLI providers can coexist with the CLI's own config; account menu shows today's usage; restart remembers the current conversation. Email connector removed.
+- **More** — CLI providers can coexist with the CLI's own config; account menu shows today's usage; restart remembers the current conversation. Windows in-app updates install silently. Email connector removed.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 
