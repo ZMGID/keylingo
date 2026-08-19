@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Check,
-  Copy,
   ExternalLink,
   FileSpreadsheet,
   Loader2,
@@ -21,7 +19,6 @@ import { refreshSettings } from '../api/settingsCache'
 import { Button, IconButton } from '../components/Button'
 import { Toggle } from '../settings/components'
 import { useT } from '../settings/i18n'
-import { copyToClipboard } from '../utils/clipboard'
 
 interface PluginCenterProps {
   /** 让 Kivio AI 按规范文档安装：父级开新对话并发送 install brief */
@@ -48,16 +45,7 @@ function PluginCard({
   onUninstall: (id: string) => void
 }) {
   const t = useT()
-  const [copied, setCopied] = useState(false)
-  const installCommand = plugin.installCommand?.trim() || ''
-
-  const copyInstallCommand = async () => {
-    if (!installCommand) return
-    const ok = await copyToClipboard(installCommand)
-    if (!ok) return
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1600)
-  }
+  const canInstall = plugin.canInstall === true
 
   return (
     <article className="chat-motion-fade-up flex min-w-0 flex-col gap-3 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm transition-[border-color,box-shadow] duration-[var(--kv-dur-fast)] hover:border-neutral-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:hover:border-neutral-700">
@@ -131,7 +119,7 @@ function PluginCard({
                 {t.chatPluginSkillIdsWrap.replace('{names}', plugin.skillIds.join(', '))}
               </span>
             )}
-            {plugin.mcpServerId && plugin.mcpActive && (
+            {plugin.mcpServerId && (
               <span className="font-mono text-[11px] text-neutral-400">
                 {plugin.mcpServerId}
               </span>
@@ -172,23 +160,7 @@ function PluginCard({
         )}
       </div>
 
-      {installCommand ? (
-        <div className="flex min-w-0 items-start gap-2 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-neutral-800 dark:bg-neutral-900/60">
-          <div className="min-w-0 flex-1">
-            <p className="text-[11px] text-neutral-500 dark:text-neutral-400">{t.chatPluginInstallCommand}</p>
-            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed text-neutral-800 dark:text-neutral-200">
-              {installCommand}
-            </pre>
-          </div>
-          <IconButton
-            size="sm"
-            label={copied ? t.chatPluginCopied : t.chatPluginCopyCommand}
-            onClick={() => void copyInstallCommand()}
-          >
-            {copied ? <Check size={14} /> : <Copy size={14} />}
-          </IconButton>
-        </div>
-      ) : !plugin.installed ? (
+      {!plugin.installed && !canInstall ? (
         <p className="text-[12px] leading-relaxed text-neutral-400 dark:text-neutral-500">
           {t.chatPluginInstallUnavailable}
         </p>
@@ -197,7 +169,7 @@ function PluginCard({
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          disabled={!installCommand || installBusy || busy}
+          disabled={!canInstall || installBusy || busy}
           onClick={() => onRunInstall(plugin.id)}
           title={t.chatPluginRunInstallTitle}
         >
@@ -242,7 +214,7 @@ function PluginCard({
           <strong className="font-medium text-neutral-600 dark:text-neutral-300">{t.chatPluginEnable}</strong>
           {t.chatPluginDetectedNotEnabledTail}
           {plugin.hasSkill ? t.chatPluginAutoInjectSkill : ''}
-          {plugin.hasMcp ? t.chatPluginAutoRegisterMcp.replace('{binary}', plugin.binary) : ''}
+          {plugin.hasMcp ? t.chatPluginAutoRegisterMcp : ''}
           {t.chatPluginAutoSystemPrompt}
         </p>
       )}
@@ -251,14 +223,14 @@ function PluginCard({
           {t.chatPluginEnabled}
           {plugin.skillActive ? t.chatPluginSkillReady : ''}
           {plugin.mcpActive ? t.chatPluginMcpWritten : plugin.hasMcp ? t.chatPluginMcpRegisterRetry : ''}
-          {t.chatPluginEnabledTail.replace('{binary}', plugin.binary)}
+          {t.chatPluginEnabledTail}
         </p>
       )}
     </article>
   )
 }
 
-/** 插件中心：点安装运行 README 命令；启用开关控制 MCP / Skill。 */
+/** 插件中心：安装 / 启用开关控制 MCP / Skill。 */
 export function PluginCenter({ onRequestAiInstall }: PluginCenterProps) {
   const t = useT()
   const [tab, setTab] = useState<TabId>('plaza')

@@ -225,11 +225,28 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
   },
 ]
 
-/** 插件 MCP（`plugin-<id>` / `connectorId: plugin:<id>`）只出现在「插件」页。
- *  启用时借用 connectorId 以免出现在 MCP 页，但连接器页必须排除它们。 */
+/** 插件 MCP（`plugin-<id>` / `connectorId: plugin:<id>`）。
+ *  连接器页排除；MCP 已安装列表与普通服务器一起展示，带「插件」标记，只读。 */
 export function isPluginManagedServer(server: {
   id: string
   connectorId?: string | null
 }): boolean {
   return server.id.startsWith('plugin-') || (server.connectorId?.startsWith('plugin:') ?? false)
+}
+
+/** MCP 页保存时钉住插件条目：开关 / 删除 / 改命令只走「扩展 → 插件」。 */
+export function preservePluginManagedServers<T extends { id: string; connectorId?: string | null }>(
+  previous: T[],
+  next: T[],
+): T[] {
+  const locked = new Map(
+    previous.filter(isPluginManagedServer).map((server) => [server.id, server] as const),
+  )
+  if (locked.size === 0) return next
+  const out = next.map((server) => locked.get(server.id) ?? server)
+  const present = new Set(out.map((server) => server.id))
+  for (const [id, server] of locked) {
+    if (!present.has(id)) out.push(server)
+  }
+  return out
 }

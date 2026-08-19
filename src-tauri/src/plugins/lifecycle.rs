@@ -18,7 +18,7 @@ pub fn plugin_mcp_server_id(plugin_id: &str) -> String {
     format!("plugin-{plugin_id}")
 }
 
-/// connector_id 标记：MCP 设置页会隐藏 `connectorId` 非空的项（与连接器同逻辑）
+/// connector_id 标记插件归属：连接器页排除；MCP 已安装列表展示但只读（开关在插件页）。
 pub fn plugin_mcp_connector_id(plugin_id: &str) -> String {
     format!("plugin:{plugin_id}")
 }

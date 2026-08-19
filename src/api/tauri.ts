@@ -1190,8 +1190,8 @@ export type PluginStatus = {
   /** 启用后 MCP 是否已写入 settings 且 enabled */
   mcpActive: boolean
   mcpServerId: string | null
-  /** 当前系统对应的 GitHub README 安装命令 */
-  installCommand?: string | null
+  /** 当前系统是否可自动安装（安装命令不回传前端） */
+  canInstall?: boolean
 }
 
 export type PluginActionResult = {

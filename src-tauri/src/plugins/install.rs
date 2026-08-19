@@ -4,7 +4,7 @@
 //! Skill 已在 `~/.agents/skills` 时不必再拷贝。
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::catalog::{catalog_plugin, CatalogPlugin, OFFICECLI_DOMAIN_SKILLS, PLUGIN_CATALOG};
 use super::lifecycle::{
@@ -17,12 +17,16 @@ use super::state::{
 };
 use crate::proc::NoConsoleWindow;
 use crate::state::AppState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 const OFFICIAL_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+const SKILLS_INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const OFFICIAL_INSTALL_OUTPUT_CAP: usize = 8_000;
+
+static OFFICIAL_SKILL_SYNC: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,8 +58,8 @@ pub struct PluginStatus {
     pub mcp_active: bool,
     /// 启用后 MCP 的 server id（如 plugin-officecli）
     pub mcp_server_id: Option<String>,
-    /// 当前系统对应的 GitHub README 安装命令；本机无对应平台时为 None
-    pub install_command: Option<String>,
+    /// 当前系统是否有可自动执行的官方安装器（命令本身不回传前端）
+    pub can_install: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,7 +156,7 @@ fn build_status(
         skill_active,
         mcp_active: false,
         mcp_server_id,
-        install_command: catalog.host_install_command().map(str::to_string),
+        can_install: catalog.host_install_command().is_some(),
     }
 }
 
@@ -188,15 +192,17 @@ pub fn list_plugin_statuses_with_state(state: &AppState) -> Result<Vec<PluginSta
     refresh_process_path_for_detection();
     let mut list: Vec<PluginStatus> = PLUGIN_CATALOG.iter().map(status_for).collect();
     fill_mcp_active(&mut list, state);
+    spawn_missing_official_skills(&list);
     Ok(list)
 }
 
-/// 缓存态 + mcp_active（无 spawn）。前端首屏用。
+/// 缓存态 + mcp_active（无探测子进程）。已启用但缺 Skill 的插件会后台补装。
 pub fn list_plugin_statuses_cached_with_state(
     state: &AppState,
 ) -> Result<Vec<PluginStatus>, String> {
     let mut list = list_plugin_statuses_cached()?;
     fill_mcp_active(&mut list, state);
+    spawn_missing_official_skills(&list);
     Ok(list)
 }
 
@@ -374,9 +380,9 @@ pub async fn run_official_install(id: &str) -> Result<PluginActionResult, String
     let catalog = catalog_plugin(id).ok_or_else(|| format!("unknown plugin: {id}"))?;
     let script = catalog
         .host_install_command()
-        .ok_or_else(|| "当前系统没有对应的 GitHub README 安装命令".to_string())?;
+        .ok_or_else(|| "当前系统暂不支持自动安装该插件".to_string())?;
     if !catalog.install_commands.iter().any(|cmd| cmd.command == script) {
-        return Err("install command is not in the plugin catalog".to_string());
+        return Err("安装失败，请稍后重试。".to_string());
     }
 
     let (program, args) = official_install_program_args(script);
@@ -390,40 +396,36 @@ pub async fn run_official_install(id: &str) -> Result<PluginActionResult, String
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("启动安装命令失败: {e}"))?;
+        .map_err(|_| "无法开始安装".to_string())?;
     let output = tokio::time::timeout(OFFICIAL_INSTALL_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| "安装超时（10 分钟）。可再点一次安装。".to_string())?
-        .map_err(|e| format!("安装命令执行失败: {e}"))?;
+        .map_err(|_| "安装失败，请稍后重试。".to_string())?;
 
     let detail = trim_install_output(&output.stdout, &output.stderr);
+    if !detail.is_empty() {
+        eprintln!("[plugins] official install {}:\n{detail}", catalog.id);
+    }
     refresh_process_path_for_detection();
-    let status = status_for(catalog);
 
     if !output.status.success() {
-        let code = output.status.code().unwrap_or(-1);
-        return Err(if detail.is_empty() {
-            format!("官方安装命令退出码 {code}")
-        } else {
-            format!("官方安装命令退出码 {code}\n{detail}")
-        });
+        return Err("安装失败，请稍后重试。".to_string());
     }
 
+    spawn_official_skill_sync(id);
+
+    let status = status_for(catalog);
     let message = if status.installed {
-        format!("已运行官方安装命令，检测到 {}。请打开启用。", catalog.name)
+        format!("已安装 {}。打开启用后即可使用。", catalog.name)
     } else {
         format!(
-            "官方安装命令已结束，但尚未检测到 {}。请点刷新；若安装器刚改 PATH，再点一次刷新。",
+            "安装已结束，但尚未检测到 {}。请点刷新后再试。",
             catalog.name
         )
     };
     Ok(PluginActionResult {
         ok: true,
-        message: if detail.is_empty() {
-            message
-        } else {
-            format!("{message}\n{detail}")
-        },
+        message,
         status,
     })
 }
@@ -513,9 +515,7 @@ pub async fn set_plugin_enabled(
     // 启用前强制再探测（含官方默认安装目录 + 刷新 PATH）
     let resolved = resolve_binary_for_status(id);
     if enabled && resolved.is_none() {
-        return Err(
-            "尚未检测到插件命令。请在终端运行卡片上的官方安装命令（来自 GitHub README），装完后点刷新。".to_string(),
-        );
+        return Err("尚未检测到插件。请先点「安装」，完成后再启用。".to_string());
     }
 
     let mut meta = read_meta(id).unwrap_or_else(|| PluginMeta {
@@ -538,31 +538,25 @@ pub async fn set_plugin_enabled(
     }
     write_meta(&meta)?;
 
-    let mut skill_sync_err: Option<String> = None;
     if enabled {
-        // 下载型插件（如 ego lite）：从仓库拉 Skill 到插件目录；失败不阻断启用，提示用户。
+        // 下载型插件（如 ego lite）：从仓库拉 Skill 到插件目录；失败不阻断启用。
         if let Some(url) = catalog.skill_download_url {
             if let Err(err) = download_plugin_skill(catalog, url).await {
-                skill_sync_err = Some(err);
-                eprintln!(
-                    "[plugins] skill download on enable {}: {}",
-                    id,
-                    skill_sync_err.as_deref().unwrap_or("")
-                );
+                eprintln!("[plugins] skill download on enable {id}: {err}");
             }
-        }
-        // 共享目录型不拷贝；其余（skill_md / 旧路径）仍写入插件目录。
-        if !catalog.uses_shared_skill_dirs() {
+        } else if !catalog.uses_shared_skill_dirs() {
             if let Err(err) = write_skill_files(catalog) {
-                skill_sync_err = Some(err);
-                eprintln!(
-                    "[plugins] skill sync on enable {}: {}",
-                    id,
-                    skill_sync_err.as_deref().unwrap_or("")
-                );
+                eprintln!("[plugins] skill sync on enable {id}: {err}");
             }
         }
+        // 先挂 MCP / PATH / 提示，再后台补官方 Skill。`skills install` 可能要下包，不能挡启用。
         apply_enable_side_effects(app, state, id)?;
+        if catalog.mcp.is_some() {
+            spawn_plugin_mcp_warmup(app, plugin_mcp_server_id(id));
+        }
+        if catalog.uses_shared_skill_dirs() {
+            spawn_official_skill_sync(id);
+        }
     } else {
         apply_disable_side_effects(app, state, id, false).await?;
     }
@@ -582,31 +576,18 @@ pub async fn set_plugin_enabled(
     let message = if enabled {
         let mut parts = vec![format!("已启用 {}", catalog.name)];
         if status.skill_active {
-            parts.push(format!(
-                "官方 Skill 已接入：{}",
-                catalog.skill_ids.join(", ")
-            ));
+            parts.push("官方 Skill 已接入".to_string());
         } else if status.has_skill {
-            let detail = skill_sync_err
-                .as_deref()
-                .map(|e| format!("（{e}）"))
-                .unwrap_or_default();
-            parts.push(format!(
-                "Skill 尚未接入{detail}：请确认已运行 GitHub README 安装命令（写入 ~/.agents/skills）后刷新并重新启用"
-            ));
+            parts.push("官方 Skill 正在接入，稍后刷新即可".to_string());
         }
         if status.has_mcp {
             if status.mcp_active {
-                parts.push(format!(
-                    "官方 MCP 已注册（`{} mcp`，id={}）——无需 mcp claude/cursor",
-                    catalog.binary,
-                    status.mcp_server_id.as_deref().unwrap_or("?")
-                ));
+                parts.push("官方 MCP 已注册".to_string());
             } else {
                 parts.push("MCP 注册失败，请重试启用".to_string());
             }
         }
-        parts.push("系统提示已挂载；请新开对话使用".to_string());
+        parts.push("新开对话或下一轮即可使用".to_string());
         parts.join("。")
     } else {
         format!("已关闭 {}（Skill / MCP / 系统提示均已卸下）", catalog.name)
@@ -1003,6 +984,140 @@ pub(crate) fn plugin_skill_present(plugin_id: &str, skill_id: &str) -> bool {
         || official_skill_dir(skill_id).is_some()
 }
 
+fn official_skill_install_argvs(plugin: &CatalogPlugin) -> Vec<Vec<&'static str>> {
+    match plugin.id {
+        "cua-driver" => vec![vec!["skills", "install", "--all-platforms"]],
+        "officecli" => vec![vec!["skills", "install"]],
+        _ => Vec::new(),
+    }
+}
+
+/// 磁盘上已有任意一个官方 Skill 就不再跑 CLI。OfficeCLI catalog 有 12 个 id，
+/// 缺 morph-ppt-3d 不应每次启用都重装整包。
+fn official_skills_need_install(catalog: &CatalogPlugin) -> bool {
+    catalog.uses_shared_skill_dirs()
+        && !catalog.skill_ids.is_empty()
+        && !official_skill_install_argvs(catalog).is_empty()
+        && !plugin_has_any_official_or_copied_skill(catalog)
+}
+
+fn claim_official_skill_sync(id: &str) -> bool {
+    OFFICIAL_SKILL_SYNC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.to_string())
+}
+
+fn release_official_skill_sync(id: &str) {
+    OFFICIAL_SKILL_SYNC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(id);
+}
+
+fn spawn_missing_official_skills(list: &[PluginStatus]) {
+    for status in list {
+        if status.enabled && status.has_skill && !status.skill_active {
+            spawn_official_skill_sync(&status.id);
+        }
+    }
+}
+
+fn spawn_official_skill_sync(plugin_id: &str) {
+    let Some(catalog) = catalog_plugin(plugin_id) else {
+        return;
+    };
+    if !official_skills_need_install(catalog) {
+        return;
+    }
+    let Some(bin) = resolve_binary(plugin_id).or_else(|| resolve_binary_for_status(plugin_id)) else {
+        return;
+    };
+    if !claim_official_skill_sync(catalog.id) {
+        return;
+    }
+    let plugin_id = catalog.id;
+    tauri::async_runtime::spawn(async move {
+        let result = ensure_official_skills(catalog, &bin).await;
+        release_official_skill_sync(plugin_id);
+        if let Err(err) = result {
+            eprintln!("[plugins] official skills {plugin_id}: {err}");
+        }
+    });
+}
+
+/// 官方一键安装器只装二进制；启用 / 列表 / 安装后后台补跑 `skills install`。
+async fn ensure_official_skills(catalog: &CatalogPlugin, binary: &Path) -> Result<(), String> {
+    if !official_skills_need_install(catalog) {
+        return Ok(());
+    }
+    for args in official_skill_install_argvs(catalog) {
+        let mut cmd = tokio::process::Command::new(binary);
+        cmd.args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .no_console_window();
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                eprintln!("[plugins] skills install spawn {}: {err}", catalog.id);
+                break;
+            }
+        };
+        match tokio::time::timeout(SKILLS_INSTALL_TIMEOUT, child.wait_with_output()).await {
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    let detail = trim_install_output(&output.stdout, &output.stderr);
+                    eprintln!(
+                        "[plugins] skills install {} {:?} exit {:?}: {detail}",
+                        catalog.id,
+                        args,
+                        output.status.code()
+                    );
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("[plugins] skills install {}: {err}", catalog.id);
+            }
+            Err(_) => {
+                eprintln!("[plugins] skills install {} timed out", catalog.id);
+            }
+        }
+        if plugin_has_any_official_or_copied_skill(catalog) {
+            break;
+        }
+    }
+    if plugin_has_any_official_or_copied_skill(catalog) {
+        Ok(())
+    } else {
+        Err("官方 Skill 尚未就绪".to_string())
+    }
+}
+
+fn spawn_plugin_mcp_warmup(app: &AppHandle, server_id: String) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let server = {
+            let settings = state.settings_read();
+            settings
+                .chat_tools
+                .servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .cloned()
+        };
+        let Some(server) = server else {
+            return;
+        };
+        if let Err(err) = state.mcp_list_tools(Some(&app), &server).await {
+            eprintln!("[plugins] MCP warmup for {} failed: {err}", server.id);
+        }
+    });
+}
+
 fn plugin_has_any_official_or_copied_skill(catalog: &CatalogPlugin) -> bool {
     catalog
         .skill_ids
@@ -1031,7 +1146,10 @@ pub(crate) fn write_skill_files(catalog: &CatalogPlugin) -> Result<(), String> {
 
 #[cfg(test)]
 mod skill_sync_tests {
-    use super::{get_install_brief, officecli_skill_folder, official_install_program_args};
+    use super::{
+        build_status, catalog_plugin, get_install_brief, officecli_skill_folder,
+        official_install_program_args, official_skill_install_argvs, official_skills_need_install,
+    };
 
     #[test]
     fn official_install_wraps_readme_command() {
@@ -1071,5 +1189,35 @@ mod skill_sync_tests {
         let brief = get_install_brief("officecli").expect("brief");
         assert!(brief.user_message.contains("pitch-deck"));
         assert!(brief.user_message.contains("officecli skills install"));
+    }
+
+    #[test]
+    fn cua_driver_skill_install_uses_all_platforms() {
+        let p = catalog_plugin("cua-driver").expect("cua-driver");
+        assert_eq!(
+            official_skill_install_argvs(p),
+            vec![vec!["skills", "install", "--all-platforms"]]
+        );
+        let office = catalog_plugin("officecli").expect("officecli");
+        assert_eq!(
+            official_skill_install_argvs(office),
+            vec![vec!["skills", "install"]]
+        );
+        let ego = catalog_plugin("ego-lite").expect("ego-lite");
+        assert!(official_skill_install_argvs(ego).is_empty());
+        assert!(!official_skills_need_install(ego));
+        assert!(office.skill_ids.len() > 1);
+    }
+
+    #[test]
+    fn plugin_status_does_not_expose_install_command() {
+        let catalog = catalog_plugin("cua-driver").expect("cua-driver");
+        let status = build_status(catalog, &None, None, false, None);
+        let value = serde_json::to_value(&status).expect("serialize");
+        assert!(value.get("installCommand").is_none());
+        assert_eq!(
+            value["canInstall"],
+            serde_json::Value::Bool(catalog.host_install_command().is_some())
+        );
     }
 }

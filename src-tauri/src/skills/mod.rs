@@ -71,11 +71,7 @@ pub fn chat_skills_list(
             SkillListResult {
                 success: true,
                 skills,
-                error: if registry.warnings.is_empty() {
-                    None
-                } else {
-                    Some(registry.warnings.join("\n"))
-                },
+                error: None,
                 warnings: registry.warnings,
             }
         }

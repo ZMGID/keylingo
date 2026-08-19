@@ -19,6 +19,7 @@ import { ChatMarkdown } from './ChatMarkdown'
 import {
   api,
   defaultNativeTools,
+  isTauriRuntime,
   type ChatToolsConfig,
   type Settings,
   type SkillDetail,
@@ -217,6 +218,7 @@ function SkillSection({
   collapsible = false,
   defaultCollapsed = false,
   manageLocked = false,
+  lockedActiveIds,
 }: {
   title: string
   note?: string
@@ -229,10 +231,13 @@ function SkillSection({
   collapsible?: boolean
   defaultCollapsed?: boolean
   manageLocked?: boolean
+  lockedActiveIds?: Set<string>
 }) {
   const [collapsed, setCollapsed] = useState(collapsible && defaultCollapsed)
   const t = useT()
-  const enabledCount = skills.filter((skill) => !disabledSkillIds.includes(skill.id)).length
+  const enabledCount = skills.filter((skill) =>
+    manageLocked ? Boolean(lockedActiveIds?.has(skill.id)) : !disabledSkillIds.includes(skill.id),
+  ).length
   return (
     <section className="space-y-2.5">
       <div
@@ -263,7 +268,11 @@ function SkillSection({
               key={skill.id}
               skill={skill}
               index={index}
-              enabled={manageLocked ? true : !disabledSkillIds.includes(skill.id)}
+              enabled={
+                manageLocked
+                  ? Boolean(lockedActiveIds?.has(skill.id))
+                  : !disabledSkillIds.includes(skill.id)
+              }
               onToggleEnabled={onToggleEnabled}
               onPreview={onPreview}
               onDelete={onDelete}
@@ -340,6 +349,7 @@ export function SkillCenter({ onSkillsChanged, projectCwd }: SkillCenterProps) {
   const [cliSelected, setCliSelected] = useState<Set<string>>(new Set())
   const [cliImporting, setCliImporting] = useState(false)
   const [cliImportDone, setCliImportDone] = useState('')
+  const [enabledPluginSkillIds, setEnabledPluginSkillIds] = useState<Set<string>>(() => new Set())
 
   const settingsRef = useRef<Settings | null>(null)
   const saveTimer = useRef<number | null>(null)
@@ -351,13 +361,25 @@ export function SkillCenter({ onSkillsChanged, projectCwd }: SkillCenterProps) {
     setSkillsLoading(true)
     setSkillError('')
     try {
+      if (isTauriRuntime()) {
+        try {
+          const plugins = await api.pluginsListCached()
+          const ids = new Set<string>()
+          for (const plugin of plugins) {
+            if (!plugin.enabled) continue
+            for (const skillId of plugin.skillIds ?? []) ids.add(skillId)
+          }
+          setEnabledPluginSkillIds(ids)
+        } catch {
+          /* 插件列表失败不挡技能列表 */
+        }
+      }
       const result = await api.chatSkillsList(
         scanPaths ?? settingsRef.current?.chatTools?.skillScanPaths,
         projectCwd || undefined,
       )
       if (result.success) {
         setSkills(result.skills)
-        if (result.error) setSkillError(result.error)
       } else {
         setSkillError(result.error || t.chatSkillListLoadFailed)
       }
@@ -951,6 +973,17 @@ export function SkillCenter({ onSkillsChanged, projectCwd }: SkillCenterProps) {
                   onPreview={handlePreviewSkill}
                   onDelete={handleDeleteSkill}
                 />
+                <SkillSection
+                  title={t.chatSkillSectionPlugin}
+                  note={t.chatSkillPluginNote}
+                  emptyText={normalizedQuery ? t.chatSkillNoMatchingPlugin : t.chatSkillNoPluginSkills}
+                  skills={pluginSkills}
+                  disabledSkillIds={disabledSkillIds}
+                  onToggleEnabled={handleToggleSkillEnabled}
+                  onPreview={handlePreviewSkill}
+                  manageLocked
+                  lockedActiveIds={enabledPluginSkillIds}
+                />
                 {(globalSkills.length > 0 || normalizedQuery) && (
                   <SkillSection
                     title={t.chatSkillSectionGlobal}
@@ -973,19 +1006,6 @@ export function SkillCenter({ onSkillsChanged, projectCwd }: SkillCenterProps) {
                   collapsible
                   defaultCollapsed
                 />
-                {/* 插件技能：无插件且未搜索时整段隐藏，避免空框霸占版面 */}
-                {(pluginSkills.length > 0 || normalizedQuery) && (
-                  <SkillSection
-                    title={t.chatSkillSectionPlugin}
-                    note={t.chatSkillPluginNote}
-                    emptyText={t.chatSkillNoMatchingPlugin}
-                    skills={pluginSkills}
-                    disabledSkillIds={disabledSkillIds}
-                    onToggleEnabled={handleToggleSkillEnabled}
-                    onPreview={handlePreviewSkill}
-                    manageLocked
-                  />
-                )}
               </>
             )}
           </div>

@@ -1,6 +1,7 @@
 // MCP 整页（Chat 窗口「扩展 → MCP」）。全量管理：已安装（启用/删除/连接状态 + 展开编辑
 // transport/url/命令/env/headers + 测试连接 + OAuth 授权）、市场（内联注册表浏览）、导入 mcp.json、
-// 高级设置（Kivio 内置工具 + 工具运行参数）。取代原「设置 → MCP」页。
+// 高级设置（Kivio 内置工具 + 工具运行参数）。插件 MCP 同列表展示，只读（开关在「扩展 → 插件」）。
+// 取代原「设置 → MCP」页。
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { ChevronDown, FolderOpen, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react'
@@ -38,6 +39,7 @@ import {
   textToArgs,
   textToEnv,
 } from '../settings/chatToolsShared'
+import { isPluginManagedServer, preservePluginManagedServers } from '../settings/connectorCatalog'
 
 type TestFeedback = { ok: boolean; message: string }
 
@@ -163,7 +165,8 @@ export function McpCenter() {
   const mutateServers = useCallback(async (fn: (servers: ChatMcpServer[]) => ChatMcpServer[]) => {
     try {
       const fresh = await refreshSettings()
-      const nextServers = fn(fresh.chatTools?.servers ?? [])
+      const prevServers = fresh.chatTools?.servers ?? []
+      const nextServers = preservePluginManagedServers(prevServers, fn(prevServers))
       const merged: Settings = {
         ...fresh,
         chatTools: { ...(fresh.chatTools ?? defaultChatTools()), servers: nextServers },
@@ -183,6 +186,8 @@ export function McpCenter() {
   // 启用即连：先落设置（后端按 settings 判定 eligible），再后台预热该 server。
   // 状态点随 onMcpServerState 推送变绿/红，无需手动「测试连接」或发起对话。
   const toggleServerEnabled = useCallback((id: string, enabled: boolean) => {
+    const current = settingsRef.current?.chatTools?.servers?.find((s) => s.id === id)
+    if (current && isPluginManagedServer(current)) return
     void mutateServers((list) => list.map((s) => (s.id === id ? { ...s, enabled } : s))).then(() => {
       if (enabled) void api.chatMcpWarmup([id])
     })
@@ -286,7 +291,7 @@ export function McpCenter() {
     }
   }, [handleTest, mutateServers])
 
-  const userServers = servers.filter((s) => !s.connectorId)
+  const listedServers = servers.filter((s) => !s.connectorId || isPluginManagedServer(s))
 
   const renderRuntimeSelect = (
     label: string,
@@ -338,8 +343,8 @@ export function McpCenter() {
                 }`}
               >
                 {label}
-                {id === 'installed' && userServers.length > 0 && (
-                  <span className="ml-1.5 text-[11px] tabular-nums text-neutral-400">{userServers.length}</span>
+                {id === 'installed' && listedServers.length > 0 && (
+                  <span className="ml-1.5 text-[11px] tabular-nums text-neutral-400">{listedServers.length}</span>
                 )}
                 {view === id && <span className="chat-motion-tab-underline absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-[#2f6ff0] dark:bg-[#5c8df7]" />}
               </button>
@@ -516,15 +521,16 @@ export function McpCenter() {
                     </div>
                   ))}
                 </div>
-              ) : userServers.length === 0 ? (
+              ) : listedServers.length === 0 ? (
                 <div className="grid min-h-[220px] place-items-center rounded-md border border-dashed border-neutral-200 px-6 text-center text-[13px] text-neutral-400 dark:border-neutral-800">
                   {t.chatMcpNoServers}
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {userServers.map((server, idx) => {
+                  {listedServers.map((server, idx) => {
                     const expanded = expandedId === server.id
                     const isHttp = server.transport === 'streamable_http'
+                    const pluginManaged = isPluginManagedServer(server)
                     const feedback = testFeedback[server.id]
                     return (
                       <div
@@ -544,6 +550,9 @@ export function McpCenter() {
                               <div className="flex items-center gap-2">
                                 <span className="truncate text-[13.5px] font-medium">{server.name}</span>
                                 <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">{isHttp ? 'http' : 'stdio'}</span>
+                                {pluginManaged && (
+                                  <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">{t.chatSkillSourcePlugin}</span>
+                                )}
                               </div>
                               <div className="mt-0.5 flex items-center gap-3">
                                 {server.enabled ? <StatusDot state={states[server.id]} /> : <span className="text-[11.5px] text-neutral-400">{t.chatMcpDisabled}</span>}
@@ -551,14 +560,42 @@ export function McpCenter() {
                               </div>
                             </div>
                           </button>
-                          <Toggle checked={server.enabled} onChange={(enabled) => toggleServerEnabled(server.id, enabled)} />
-                          <IconButton size="sm" variant="danger" label={t.chatDelete} onClick={() => void mutateServers((list) => list.filter((s) => s.id !== server.id))} data-tauri-drag-region="false">
-                            <Trash2 size={14} />
-                          </IconButton>
+                          <span title={pluginManaged ? t.chatMcpPluginNote : undefined}>
+                            <Toggle
+                              checked={server.enabled}
+                              disabled={pluginManaged}
+                              onChange={(enabled) => toggleServerEnabled(server.id, enabled)}
+                              ariaLabel={pluginManaged ? t.chatMcpPluginNote : undefined}
+                            />
+                          </span>
+                          {pluginManaged ? null : (
+                            <IconButton size="sm" variant="danger" label={t.chatDelete} onClick={() => void mutateServers((list) => list.filter((s) => s.id !== server.id))} data-tauri-drag-region="false">
+                              <Trash2 size={14} />
+                            </IconButton>
+                          )}
                         </div>
 
                         {expanded && (
                           <div className="chat-motion-search-reveal space-y-3 border-t border-neutral-100 px-4 py-3 dark:border-neutral-800/70">
+                            {pluginManaged ? (
+                              <>
+                                <p className="text-[12px] leading-relaxed text-neutral-500 dark:text-neutral-400">
+                                  {t.chatMcpPluginNote}
+                                </p>
+                                <div className="font-mono text-[12px] text-neutral-500 dark:text-neutral-400">
+                                  {isHttp ? server.url : [server.command, ...server.args].filter(Boolean).join(' ')}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Button size="sm" onClick={() => void handleTest(server)} disabled={testingId === server.id} data-tauri-drag-region="false">
+                                    {testingId === server.id ? <Loader2 size={12} className="animate-spin" /> : t.chatMcpTestConnection}
+                                  </Button>
+                                </div>
+                                {feedback && (
+                                  <div className={`text-[12px] ${feedback.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{feedback.message}</div>
+                                )}
+                              </>
+                            ) : (
+                              <>
                             <div>
                               <label className="mb-1 block text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300">{t.chatMcpName}</label>
                               <Input value={server.name} onChange={(name) => updateServer(server.id, { name })} />
@@ -608,6 +645,8 @@ export function McpCenter() {
                             </div>
                             {feedback && (
                               <div className={`text-[12px] ${feedback.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>{feedback.message}</div>
+                            )}
+                              </>
                             )}
                           </div>
                         )}

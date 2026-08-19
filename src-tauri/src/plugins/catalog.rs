@@ -3,7 +3,7 @@
 //! CLI 插件（OfficeCLI、Cua Driver）用**官方安装器**；Skill 落在 `~/.agents/skills`，
 //! Kivio 直接扫描。「让 AI 代装」只是可选。ego lite 仍在启用时从仓库下载 Skill。
 
-/// 官方 README 里的安装命令（按平台）。插件页展示可复制命令，不打开官网。
+/// 官方 README 里的安装命令（按平台）。只给后端自动执行，不展示给用户。
 #[derive(Debug, Clone)]
 pub struct PluginInstallCommand {
     /// windows | unix | macos | linux | any

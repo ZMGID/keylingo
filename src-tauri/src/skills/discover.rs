@@ -211,11 +211,16 @@ fn dedup_records(records: &mut Vec<super::types::SkillRecord>, warnings: &mut Ve
     let mut out: Vec<super::types::SkillRecord> = Vec::new();
     for record in records.drain(..) {
         let key = record.meta.id.clone();
-        if let Some(index) = seen.get(&key) {
-            warnings.push(format!(
-                "Skill {} shadowed duplicate id {}",
-                out[*index].meta.name, record.meta.name
-            ));
+        if let Some(&index) = seen.get(&key) {
+            // 近处覆盖远处是扫描顺序的设计：内置 / 项目 / 插件 / 个人 / ~/.agents 同 id 只留一份。
+            // 跨源 overlay 不必报给用户（Cursor 的 frontend-design 与内置撞名是常态）。
+            // 同一源里出现两份才是真冲突。
+            if out[index].meta.source == record.meta.source {
+                warnings.push(format!(
+                    "Skill {} shadowed duplicate id {}",
+                    out[index].meta.name, record.meta.name
+                ));
+            }
             continue;
         }
         seen.insert(key, out.len());
@@ -458,6 +463,43 @@ description: Test skill.
         );
         assert_eq!(registry.records.len(), 1);
         assert_eq!(registry.records[0].meta.source, "project");
+        assert!(
+            registry.warnings.is_empty(),
+            "cross-source overlay is expected, not a user warning: {:?}",
+            registry.warnings
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn same_source_duplicate_id_warns() {
+        let base = std::env::temp_dir().join(format!("kivio-agents-samedup-{}", uuid::Uuid::new_v4()));
+        let one = base.join("a");
+        let two = base.join("b");
+        write_skill(&one.join("shared"), "shared");
+        write_skill(&two.join("shared"), "shared");
+
+        let registry = build_registry_from_roots(
+            vec![
+                SkillScanRoot {
+                    path: one,
+                    source: "user",
+                },
+                SkillScanRoot {
+                    path: two,
+                    source: "user",
+                },
+            ],
+            false,
+        );
+        assert_eq!(registry.records.len(), 1);
+        assert_eq!(registry.warnings.len(), 1);
+        assert!(
+            registry.warnings[0].contains("shadowed duplicate id"),
+            "{:?}",
+            registry.warnings
+        );
 
         fs::remove_dir_all(base).unwrap();
     }
