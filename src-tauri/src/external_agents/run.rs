@@ -887,6 +887,7 @@ where
                 resume_native.clone(),
                 Some(background_task_sink(app, conversation_id)),
                 Some(dsh_idle_sink(app, conversation_id)),
+                dsh_idle_approvals_for(protocol, app, conversation_id),
             )
             .await
             {
@@ -922,6 +923,7 @@ where
                         None,
                         Some(background_task_sink(app, conversation_id)),
                         Some(dsh_idle_sink(app, conversation_id)),
+                        dsh_idle_approvals_for(protocol, app, conversation_id),
                     )
                     .await?
                 }
@@ -1151,6 +1153,7 @@ async fn reconnect_fresh(
         resume_native,
         Some(background_task_sink(app, conversation_id)),
         Some(dsh_idle_sink(app, conversation_id)),
+        dsh_idle_approvals_for(protocol, app, conversation_id),
     )
     .await?;
     let _ = save_live_handle(
@@ -1940,6 +1943,129 @@ fn dsh_idle_sink(
     })
 }
 
+fn dsh_idle_approvals_for(
+    protocol: StreamFormat,
+    app: &AppHandle,
+    conversation_id: &str,
+) -> Option<crate::external_agents::session::live::ApprovalBridge> {
+    matches!(protocol, StreamFormat::DshJsonRpc)
+        .then(|| spawn_dsh_idle_approval_bridge(app, conversation_id))
+}
+
+fn spawn_dsh_idle_approval_bridge(
+    app: &AppHandle,
+    conversation_id: &str,
+) -> crate::external_agents::session::live::ApprovalBridge {
+    use crate::external_agents::session::live::{ApprovalAsk, ApprovalBridge, ApprovalDecision};
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ApprovalAsk>(8);
+    let (decision_tx, decision_rx) = tokio::sync::mpsc::channel::<ApprovalDecision>(8);
+    let app = app.clone();
+    let conversation_id = conversation_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        while let Some(ask) = request_rx.recv().await {
+            let decision =
+                present_dsh_idle_ask(app.clone(), conversation_id.clone(), ask).await;
+            if decision_tx.send(decision).await.is_err() {
+                break;
+            }
+        }
+    });
+    ApprovalBridge {
+        requests: request_tx,
+        decisions: decision_rx,
+    }
+}
+
+/// 父轮已经结束后，后台子代理仍可能 `session/ask`。`request_user_response` 在
+/// generation 已失效时会立刻当取消，所以这里开一条新的可取消 generation，并落一条
+/// 助手工具卡，让问用户 UI 有挂载点。
+async fn present_dsh_idle_ask(
+    app: AppHandle,
+    conversation_id: String,
+    ask: crate::external_agents::session::live::ApprovalAsk,
+) -> crate::external_agents::session::live::ApprovalDecision {
+    let state = app.state::<AppState>();
+    let generation = state.next_chat_generation(&conversation_id);
+    let run_id = format!("dsh-ask-{}", Uuid::new_v4());
+    let message_id = format!("msg_{}", Uuid::new_v4());
+    let arguments =
+        serde_json::to_string(&ask.input).unwrap_or_else(|_| "{}".to_string());
+    let persisted = persist_dsh_idle_ask_message(
+        &app,
+        &conversation_id,
+        &message_id,
+        &ask.tool_call_id,
+        &ask.tool_name,
+        &arguments,
+    )
+    .await;
+    if let Some(revision) = persisted {
+        crate::chat::protocol::register_run(
+            &app,
+            &conversation_id,
+            &run_id,
+            &message_id,
+            revision.saturating_sub(1),
+        );
+    }
+    let host = ApprovalHost {
+        app: &app,
+        state: &*state,
+        conversation_id: &conversation_id,
+        run_id: &run_id,
+        generation,
+        agent_id: "dsh",
+        auto_allow_tools: std::sync::atomic::AtomicBool::new(true),
+    };
+    let decision = host.ask(ask).await;
+    state.end_chat_generation(&conversation_id, generation);
+    if let Some(revision) = persisted {
+        crate::chat::protocol::finish_run(&app, &run_id, "done", "", revision);
+    }
+    decision
+}
+
+async fn persist_dsh_idle_ask_message(
+    app: &AppHandle,
+    conversation_id: &str,
+    message_id: &str,
+    tool_call_id: &str,
+    tool_name: &str,
+    arguments: &str,
+) -> Option<u64> {
+    let message: crate::chat::types::ChatMessage = match serde_json::from_value(serde_json::json!({
+        "id": message_id,
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": tool_call_id,
+            "name": tool_name,
+            "source": "external_cli",
+            "arguments": arguments,
+            "status": "running",
+            "sensitive": true,
+            "round": 1
+        }],
+        "timestamp": Local::now().timestamp(),
+    })) {
+        Ok(message) => message,
+        Err(err) => {
+            eprintln!("[external-agent] dsh idle ask message build failed: {err}");
+            return None;
+        }
+    };
+    match crate::chat::repository::repository(app)
+        .append_message(app, conversation_id, message)
+        .await
+    {
+        Ok(conversation) => Some(conversation.revision),
+        Err(err) => {
+            eprintln!("[external-agent] dsh idle ask persist failed: {err:?}");
+            None
+        }
+    }
+}
+
 fn apply_idle_dsh_event(app: &AppHandle, conversation_id: &str, event: UnifiedAgentEvent) {
     match event {
         UnifiedAgentEvent::BackgroundTask {
@@ -2168,6 +2294,7 @@ async fn connect_persistent_session(
         crate::external_agents::session::claude_stream::BackgroundTaskSink,
     >,
     dsh_idle_sink: Option<crate::external_agents::session::dsh_jsonrpc::DshIdleSink>,
+    dsh_idle_approvals: Option<crate::external_agents::session::live::ApprovalBridge>,
 ) -> Result<PersistentConnection, String> {
     use crate::external_agents::session::acp::{spawn_acp_session_actor, AcpSession};
     use crate::external_agents::session::claude_stream::{
@@ -2354,7 +2481,11 @@ async fn connect_persistent_session(
             let resumed = session.resumed();
             let child_pid = session.child_pid();
             Ok(PersistentConnection {
-                control: spawn_dsh_session_actor_with_sink(session, dsh_idle_sink),
+                control: spawn_dsh_session_actor_with_sink(
+                    session,
+                    dsh_idle_sink,
+                    dsh_idle_approvals,
+                ),
                 native_id: id,
                 resumed,
                 child_pid,

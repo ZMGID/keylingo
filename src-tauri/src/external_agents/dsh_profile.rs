@@ -612,6 +612,8 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("agentPresets"));
         assert!(BRIDGE_SOURCE.contains("registerProvider"));
         assert!(BRIDGE_SOURCE.contains("session/ask"));
+        assert!(BRIDGE_SOURCE.contains("withExclusiveAgentCall"));
+        assert!(BRIDGE_SOURCE.contains("agent.followup = agent.steer.bind(agent)"));
         assert!(BRIDGE_SOURCE.contains("'userQuestions'"));
         assert!(BRIDGE_SOURCE.contains("'attachments'"));
         assert!(BRIDGE_SOURCE.contains("'jobs'"));

@@ -247,13 +247,20 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
 
   async prompt(params) {
     const contentBlocks = await materializeContentBlocks(this.ctx, params?.contentBlocks)
-    return super.prompt({ ...params, contentBlocks })
+    const patched = { ...params, contentBlocks }
+    if (typeof params?.sessionId !== 'string' || params.sessionId.trim() === '') {
+      return super.prompt(patched)
+    }
+    const record = await this.getOrCreateSession(params.sessionId)
+    return withExclusiveAgentCall(record.handle.agent, () => super.prompt(patched))
   }
 
   // Official SDK only exposes session/prompt → agent.followup() (next turn).
   // dsh itself has agent.steer() (next-step inbox). Reuse prompt()'s
   // UserMessage construction by routing followup to steer for this one call.
   // @deepseek-ai/dsh-llm is a peer of the SDK server, not a kivio profile dep.
+  // prompt() and steer() share a per-agent queue so a concurrent prompt cannot
+  // run while followup is patched to steer.
   async steer(params) {
     const sessionId = requireSessionId(params.sessionId)
     const contentBlocks = await materializeContentBlocks(this.ctx, params?.contentBlocks)
@@ -265,13 +272,15 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
       throw new Error(`session agent was disposed outside the server: ${sessionId}`)
     }
     const agent = record.handle.agent
-    const enqueueFollowup = agent.followup.bind(agent)
-    agent.followup = agent.steer.bind(agent)
-    try {
-      return await super.prompt({ sessionId, contentBlocks })
-    } finally {
-      agent.followup = enqueueFollowup
-    }
+    return withExclusiveAgentCall(agent, async () => {
+      const enqueueFollowup = agent.followup.bind(agent)
+      agent.followup = agent.steer.bind(agent)
+      try {
+        return await super.prompt({ sessionId, contentBlocks })
+      } finally {
+        agent.followup = enqueueFollowup
+      }
+    })
   }
 
   async handleRequest(method, params) {
@@ -304,6 +313,21 @@ function requireSessionId(value) {
     throw new TypeError('sessionId must be a non-empty string')
   }
   return value.trim()
+}
+
+const agentCallTails = new WeakMap()
+
+function withExclusiveAgentCall(agent, fn) {
+  const prev = agentCallTails.get(agent) ?? Promise.resolve()
+  const next = prev.then(fn, fn)
+  agentCallTails.set(
+    agent,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  )
+  return next
 }
 
 function shouldAttachWorkspace(cwd) {

@@ -179,11 +179,13 @@ pub enum DshIdleEffect {
 
 pub type DshIdleSink = std::sync::Arc<dyn Fn(DshIdleEffect) + Send + Sync>;
 
+#[derive(Debug)]
 enum DshIdlePump {
     Quiet,
     Hiccup,
     Dead,
     Reply(String),
+    Ask(Value),
     Event(UnifiedAgentEvent),
     Wake {
         text: String,
@@ -376,6 +378,14 @@ impl DshJsonRpcSession {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             if resumed != wants_resume {
+                // requested=true but actual=false is the official "this native id is gone"
+                // shape from our own handshake. Phrase it as a missing session so
+                // `is_missing_session_error` / fresh-connect fallback can fire.
+                if wants_resume && !resumed {
+                    return Err(format!(
+                        "dsh session/open: session \"{session_id}\" not found"
+                    ));
+                }
                 return Err(format!(
                     "dsh session/open: resume mismatch (requested={wants_resume}, actual={resumed})"
                 ));
@@ -654,27 +664,15 @@ impl DshJsonRpcSession {
                             ) {
                                 DshIdleAction::Defer => {}
                                 DshIdleAction::Stay => {
-                                    reject_pending_asks(
-                                        &mut self.stdin,
-                                        &mut pending_asks,
-                                        "ASK_ABORTED",
-                                        "ask_user_question was aborted before the user answered",
-                                    )
-                                    .await;
                                     started = false;
                                     terminal = None;
                                     deferred_idle = false;
                                 }
                                 DshIdleAction::Done => {
-                                    reject_pending_asks(
-                                        &mut self.stdin,
-                                        &mut pending_asks,
-                                        "ASK_ABORTED",
-                                        "ask_user_question was aborted before the user answered",
-                                    )
-                                    .await;
-                                    self.context_window = self.map_state.context_window;
-                                    return terminal.take().expect("checked above");
+                                    if pending_asks.is_empty() {
+                                        self.context_window = self.map_state.context_window;
+                                        return terminal.take().expect("checked above");
+                                    }
                                 }
                             }
                         }
@@ -770,27 +768,15 @@ impl DshJsonRpcSession {
                         ) {
                             DshIdleAction::Defer => deferred_idle = true,
                             DshIdleAction::Stay => {
-                                reject_pending_asks(
-                                    &mut self.stdin,
-                                    &mut pending_asks,
-                                    "ASK_ABORTED",
-                                    "ask_user_question was aborted before the user answered",
-                                )
-                                .await;
                                 started = false;
                                 terminal = None;
                                 deferred_idle = false;
                             }
                             DshIdleAction::Done => {
-                                reject_pending_asks(
-                                    &mut self.stdin,
-                                    &mut pending_asks,
-                                    "ASK_ABORTED",
-                                    "ask_user_question was aborted before the user answered",
-                                )
-                                .await;
-                                self.context_window = self.map_state.context_window;
-                                return terminal.take().expect("checked above");
+                                if pending_asks.is_empty() {
+                                    self.context_window = self.map_state.context_window;
+                                    return terminal.take().expect("checked above");
+                                }
                             }
                         }
                     }
@@ -895,15 +881,7 @@ impl DshJsonRpcSession {
 
     fn classify_idle_value(&mut self, value: &Value) -> DshIdlePump {
         if is_incoming_rpc_request(value) {
-            let Some(id) = rpc_id(value) else {
-                return DshIdlePump::Quiet;
-            };
-            return DshIdlePump::Reply(rpc_error_line(
-                &id,
-                -32000,
-                "no user-questions provider is registered",
-                Some(json!({ "code": "NO_PROVIDER" })),
-            ));
+            return classify_idle_incoming_rpc(value);
         }
         let Some(method) = value.get("method").and_then(Value::as_str) else {
             return DshIdlePump::Quiet;
@@ -962,23 +940,31 @@ impl DshJsonRpcSession {
 
 /// actor 与其他常驻协议同契约：所有 event 先入队，`done` 最后发。
 pub fn spawn_dsh_session_actor(session: DshJsonRpcSession) -> mpsc::Sender<SessionCommand> {
-    spawn_dsh_session_actor_with_sink(session, None)
+    spawn_dsh_session_actor_with_sink(session, None, None)
 }
 
 /// 带轮间空闲读的 actor。官方 subagent 默认后台，父轮 `turn/end` 之后孩子还在往
 /// stdout 写 `session.event`；不读的话工具卡永远停在「运行中…」。
+///
+/// `idle_approvals`：父轮已经结束时，后台子代理的 `session/ask` 仍要弹问用户卡。
+/// 通道挂在会话寿命上；没有它时 idle `session/ask` 仍回 `NO_PROVIDER`。
 pub fn spawn_dsh_session_actor_with_sink(
     mut session: DshJsonRpcSession,
     sink: Option<DshIdleSink>,
+    mut idle_approvals: Option<ApprovalBridge>,
 ) -> mpsc::Sender<SessionCommand> {
     enum ActorStep {
         Cmd(Option<SessionCommand>),
         Idle(DshIdlePump),
+        IdleDecision(Option<ApprovalDecision>),
     }
     let (tx, mut rx) = mpsc::channel::<SessionCommand>(8);
     tokio::spawn(async move {
         let mut idle_dead = false;
         let mut idle_hiccups = 0u32;
+        let mut idle_pending_asks: HashMap<String, Value> = HashMap::new();
+        let mut idle_pending_user_question_calls: VecDeque<PendingUserQuestionCall> =
+            VecDeque::new();
         if !session.slash_commands.is_empty() {
             if let Some(sink) = sink.as_ref() {
                 sink(DshIdleEffect::Event(UnifiedAgentEvent::SlashCommands {
@@ -993,9 +979,29 @@ pub fn spawn_dsh_session_actor_with_sink(
                 tokio::select! {
                     cmd = rx.recv() => ActorStep::Cmd(cmd),
                     pump = session.read_idle_frame() => ActorStep::Idle(pump),
+                    decision = async {
+                        match idle_approvals.as_mut() {
+                            Some(bridge) => bridge.decisions.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => ActorStep::IdleDecision(decision),
                 }
             };
             let cmd = match step {
+                ActorStep::IdleDecision(decision) => {
+                    if let Some(decision) = decision {
+                        if let Err(err) = settle_session_ask(
+                            &mut session.stdin,
+                            &mut idle_pending_asks,
+                            decision,
+                        )
+                        .await
+                        {
+                            eprintln!("[external-agent] dsh idle session/ask settle failed: {err}");
+                        }
+                    }
+                    continue;
+                }
                 ActorStep::Idle(pump) => {
                     match pump {
                         DshIdlePump::Quiet => idle_hiccups = 0,
@@ -1005,10 +1011,34 @@ pub fn spawn_dsh_session_actor_with_sink(
                                 idle_dead = true;
                             }
                         }
-                        DshIdlePump::Dead => idle_dead = true,
+                        DshIdlePump::Dead => {
+                            idle_dead = true;
+                            reject_pending_asks(
+                                &mut session.stdin,
+                                &mut idle_pending_asks,
+                                "ASK_ABORTED",
+                                "ask_user_question was aborted before the user answered",
+                            )
+                            .await;
+                        }
                         DshIdlePump::Reply(line) => {
                             idle_hiccups = 0;
                             session.write_control_line(&line).await;
+                        }
+                        DshIdlePump::Ask(value) => {
+                            idle_hiccups = 0;
+                            if let Err(err) = handle_incoming_request(
+                                &mut session.stdin,
+                                &session.session_id,
+                                &value,
+                                idle_approvals.as_mut(),
+                                &mut idle_pending_asks,
+                                &mut idle_pending_user_question_calls,
+                            )
+                            .await
+                            {
+                                eprintln!("[external-agent] dsh idle session/ask failed: {err}");
+                            }
                         }
                         DshIdlePump::Event(event) => {
                             idle_hiccups = 0;
@@ -1186,6 +1216,29 @@ fn is_incoming_rpc_request(value: &Value) -> bool {
     value.get("method").and_then(Value::as_str).is_some() && rpc_id(value).is_some()
 }
 
+/// 空闲泵收到的入站 RPC：`session/ask` 交给宿主审批通道，其余仍 fail-close。
+fn classify_idle_incoming_rpc(value: &Value) -> DshIdlePump {
+    let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+    if method == SESSION_ASK_METHOD {
+        return DshIdlePump::Ask(value.clone());
+    }
+    let Some(id) = rpc_id(value) else {
+        return DshIdlePump::Quiet;
+    };
+    DshIdlePump::Reply(rpc_error_line(
+        &id,
+        -32000,
+        "no user-questions provider is registered",
+        Some(json!({ "code": "NO_PROVIDER" })),
+    ))
+}
+
+/// 本进程只服务这一条 Kivio 对话。`askViaHost` 会带 `request.agent.id`（子代理
+/// 自己的 session id），不能要求它等于父 `session/open` 的 id。
+fn session_ask_id_accepted(ask_session_id: Option<&str>) -> bool {
+    ask_session_id.is_some_and(|id| !id.trim().is_empty())
+}
+
 fn rpc_id(value: &Value) -> Option<Value> {
     match value.get("id") {
         Some(id) if id.is_string() || id.is_number() => Some(id.clone()),
@@ -1224,12 +1277,13 @@ async fn handle_incoming_request(
         .await;
     }
     let params = value.get("params").unwrap_or(&Value::Null);
-    if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+    let _ = session_id;
+    if !session_ask_id_accepted(params.get("sessionId").and_then(Value::as_str)) {
         return write_rpc_error(
             stdin,
             &id,
             -32602,
-            "session/ask sessionId does not match the open session",
+            "session/ask sessionId must be a non-empty string",
             Some(json!({ "code": "ASK_MISSING_AGENT" })),
         )
         .await;
@@ -1453,8 +1507,18 @@ fn rpc_error_message(value: &Value) -> Option<String> {
 
 pub fn is_missing_session_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
-    lower.contains("dsh session/open:")
-        && (lower.contains("session \"") && lower.contains("\" not found"))
+    if !lower.contains("dsh session/open:") {
+        return false;
+    }
+    // Checksum / auth failures are not "the native id is gone" — fail loud.
+    if lower.contains("checksum") {
+        return false;
+    }
+    let not_found = lower.contains("not found")
+        || lower.contains("no such session")
+        || lower.contains("unknown session");
+    let resume_miss = lower.contains("resume mismatch") && lower.contains("requested=true");
+    not_found || resume_miss
 }
 
 /// Official SDK throws this when initialize names a pi-ai route that settings.yaml
@@ -2573,10 +2637,62 @@ mod tests {
         assert!(is_missing_session_error(
             "dsh session/open: session \"kivio-old\" not found"
         ));
+        assert!(is_missing_session_error(
+            "dsh session/open: session 'kivio-old' not found"
+        ));
+        assert!(is_missing_session_error(
+            "dsh session/open: Session kivio-old not found"
+        ));
+        assert!(is_missing_session_error(
+            "dsh session/open: resume mismatch (requested=true, actual=false)"
+        ));
+        assert!(!is_missing_session_error(
+            "dsh session/open: resume mismatch (requested=false, actual=true)"
+        ));
         assert!(!is_missing_session_error(
             "dsh session/open: persisted log checksum mismatch"
         ));
         assert!(!is_missing_session_error("dsh initialize: auth failed"));
+    }
+
+    #[test]
+    fn idle_session_ask_is_parked_instead_of_no_provider() {
+        let ask = json!({
+            "jsonrpc": "2.0",
+            "id": "req_idle",
+            "method": "session/ask",
+            "params": {
+                "sessionId": "child-agent-1",
+                "questions": [{ "id": "q1", "question": "Ship it?" }]
+            }
+        });
+        match classify_idle_incoming_rpc(&ask) {
+            DshIdlePump::Ask(value) => {
+                assert_eq!(value["id"], "req_idle");
+                assert_eq!(value["method"], "session/ask");
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+        match classify_idle_incoming_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/unknown",
+            "params": {}
+        })) {
+            DshIdlePump::Reply(line) => {
+                assert!(line.contains("NO_PROVIDER"));
+            }
+            other => panic!("expected Reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_ask_accepts_any_non_empty_session_id_from_this_process() {
+        assert!(session_ask_id_accepted(Some("kivio-parent")));
+        assert!(session_ask_id_accepted(Some("child-subagent-9")));
+        assert!(!session_ask_id_accepted(Some("")));
+        assert!(!session_ask_id_accepted(Some("   ")));
+        assert!(!session_ask_id_accepted(None));
     }
 
     #[test]
