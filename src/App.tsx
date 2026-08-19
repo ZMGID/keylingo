@@ -8,7 +8,6 @@ import { i18n, type Lang } from './settings/i18n'
 import { useWindowInteractionFocus } from './utils/windowFocus'
 import { ChatWindowHost } from './chat/ChatWindowHost'
 import {
-  adoptLegacyRememberedChatRoute,
   getRememberedChatRoute,
   hashPath,
   isChatWindowPlacementVisible,
