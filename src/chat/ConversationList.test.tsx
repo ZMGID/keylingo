@@ -22,6 +22,7 @@ const listProps = {
   lang: 'zh' as const,
   onSelectConversation: vi.fn(),
   onRenameConversation: vi.fn(),
+  onRegenerateConversationTitle: vi.fn(),
   onTogglePinConversation: vi.fn(),
   onArchiveConversation: vi.fn(),
   onExportConversation: vi.fn(),
@@ -105,6 +106,24 @@ describe('ConversationList pin and archive', () => {
 
     await user.click(screen.getByRole('menuitem', { name: '置顶聊天' }))
     expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
+  })
+
+  it('regenerates title from the context menu', async () => {
+    const user = userEvent.setup()
+    const onRegenerate = vi.fn()
+    const { container } = render(
+      <ConversationList
+        {...listProps}
+        onRegenerateConversationTitle={onRegenerate}
+      />,
+    )
+
+    const row = container.querySelector('.kv-conv-row')
+    expect(row).toBeTruthy()
+    await user.pointer({ keys: '[MouseRight>]', target: row as Element })
+
+    await user.click(screen.getByRole('menuitem', { name: '重新生成标题' }))
+    expect(onRegenerate).toHaveBeenCalledWith('conversation-1')
   })
 })
 

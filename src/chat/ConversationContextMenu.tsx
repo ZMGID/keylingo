@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronRight, Download, Folder, Layers, Pencil, Pin, PinOff, Trash2 } from 'lucide-react'
+import { ChevronRight, Download, Folder, Layers, Pencil, Pin, PinOff, RotateCcw, Trash2 } from 'lucide-react'
 import { i18n, type Lang } from '../settings/i18n'
 import type { ChatProject, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
@@ -20,7 +20,10 @@ interface ConversationContextMenuProps {
   projects: ChatProject[]
   sets: ChatSet[]
   lang: Lang
+  canRegenerateTitle?: boolean
+  regeneratingTitle?: boolean
   onRename: () => void
+  onRegenerateTitle: () => void
   onTogglePin?: () => void
   onExport: () => void
   onMoveToProject: (projectId: string | undefined) => void
@@ -38,7 +41,10 @@ export function ConversationContextMenu({
   projects,
   sets,
   lang,
+  canRegenerateTitle = true,
+  regeneratingTitle = false,
   onRename,
+  onRegenerateTitle,
   onTogglePin,
   onExport,
   onMoveToProject,
@@ -89,6 +95,20 @@ export function ConversationContextMenu({
       >
         <Pencil strokeWidth={1.75} />
         {t.chatRename}
+      </button>
+
+      <button
+        type="button"
+        role="menuitem"
+        className="kv-menu-item"
+        disabled={!canRegenerateTitle || regeneratingTitle}
+        onClick={() => {
+          onRegenerateTitle()
+          onClose()
+        }}
+      >
+        <RotateCcw strokeWidth={1.75} />
+        {t.chatRegenerateTitle}
       </button>
 
       {onTogglePin && (

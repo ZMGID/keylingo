@@ -839,6 +839,30 @@ const mockChatApi = {
     saveMockConversations(loadMockConversations().filter((item) => item.id !== conversationId))
   },
 
+  async regenerateConversationTitle(conversationId: string): Promise<Conversation> {
+    const conversations = loadMockConversations()
+    const index = conversations.findIndex((item) => item.id === conversationId)
+    if (index < 0) throw new Error('Conversation not found')
+    const conversation = conversations[index]
+    const user = conversation.messages.find((message) => message.role === 'user')
+    const userContent = user?.content?.trim() ?? ''
+    if (!userContent && !(user?.attachments?.length)) {
+      throw new Error('对话还没有可用于生成标题的内容')
+    }
+    const compact = userContent.replace(/\s+/g, ' ').trim()
+    let title = compact ? (compact.length > 14 ? compact.slice(0, 14) : compact) : conversation.title
+    const isFork = Boolean(conversation.forked_from ?? conversation.forkedFrom)
+    if (isFork && !title.endsWith('（分支）')) title = `${title}（分支）`
+    const updated = {
+      ...conversation,
+      title,
+      updated_at: nowSeconds(),
+    }
+    conversations[index] = updated
+    saveMockConversations(conversations)
+    return updated
+  },
+
   async updateConversation(
     conversationId: string,
     updates: {
@@ -1704,6 +1728,18 @@ export const chatApi = {
     )
     if (!result.success) {
       throw new Error('Failed to update conversation')
+    }
+    return result.conversation
+  },
+
+  async regenerateConversationTitle(conversationId: string): Promise<Conversation> {
+    if (!isTauriRuntime()) return mockChatApi.regenerateConversationTitle(conversationId)
+    const result = await invoke<{ success: boolean; conversation: Conversation }>(
+      'chat_regenerate_title',
+      { conversationId },
+    )
+    if (!result.success) {
+      throw new Error('Failed to regenerate conversation title')
     }
     return result.conversation
   },

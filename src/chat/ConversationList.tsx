@@ -33,6 +33,7 @@ interface ConversationListProps {
   conversations: ConversationListItem[]
   currentConversationId?: string
   generatingConversationIds?: ReadonlySet<string>
+  titleGeneratingConversationIds?: ReadonlySet<string>
   projects: ChatProject[]
   sets: ChatSet[]
   lang: Lang
@@ -53,6 +54,7 @@ interface ConversationListProps {
   }
   onSelectConversation: (id: string, conversation?: ConversationListItem) => void
   onRenameConversation: (id: string, title: string) => Promise<void>
+  onRegenerateConversationTitle: (id: string) => Promise<void>
   onTogglePinConversation: (id: string, pinned: boolean) => Promise<void>
   /** 一键归档（侧栏默认不再显示归档对话） */
   onArchiveConversation: (id: string) => Promise<void>
@@ -66,6 +68,7 @@ export const ConversationList = memo(function ConversationList({
   conversations,
   currentConversationId,
   generatingConversationIds = new Set(),
+  titleGeneratingConversationIds = new Set(),
   projects,
   sets,
   lang,
@@ -76,6 +79,7 @@ export const ConversationList = memo(function ConversationList({
   reorder,
   onSelectConversation,
   onRenameConversation,
+  onRegenerateConversationTitle,
   onTogglePinConversation,
   onArchiveConversation,
   onExportConversation,
@@ -139,6 +143,7 @@ export const ConversationList = memo(function ConversationList({
         {conversations.map((conv) => {
           const active = currentConversationId === conv.id
           const isGenerating = generatingConversationIds.has(conv.id)
+          const isTitleGenerating = titleGeneratingConversationIds.has(conv.id)
           const isRenaming = renamingId === conv.id
           const folderLabel = showFolderLabel ? conversationFolderLabel(conv, projects, sets, t) : ''
           // 分支对话：把「（分支）」后缀从可截断的标题里拆出，做成不缩的固定标签，
@@ -234,7 +239,7 @@ export const ConversationList = memo(function ConversationList({
                       : 'text-neutral-700 dark:text-neutral-300'
                 }`}
                 title={
-                  isGenerating
+                  isGenerating || isTitleGenerating
                     ? t.chatTitleGenerating.replace('{title}', conv.title)
                     : conv.title
                 }
@@ -244,7 +249,8 @@ export const ConversationList = memo(function ConversationList({
                   <SwapTitle
                     text={displayTitle}
                     className={`block min-w-0 flex-1 truncate${
-                      isGenerating && isProvisionalTitle(displayTitle, conv.preview)
+                      isTitleGenerating
+                      || (isGenerating && isProvisionalTitle(displayTitle, conv.preview))
                         ? ' kv-title-provisional'
                         : ''
                     }`}
@@ -344,6 +350,9 @@ export const ConversationList = memo(function ConversationList({
           sets={sets}
           lang={lang}
           onRename={() => startRename(menuConversation)}
+          canRegenerateTitle={(menuConversation.message_count ?? 0) > 0}
+          regeneratingTitle={titleGeneratingConversationIds.has(menuConversation.id)}
+          onRegenerateTitle={() => void onRegenerateConversationTitle(menuConversation.id)}
           onTogglePin={() =>
             void onTogglePinConversation(menuConversation.id, !menuConversation.pinned)
           }

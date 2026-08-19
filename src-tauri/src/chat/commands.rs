@@ -16,7 +16,7 @@ pub(crate) mod context;
 
 pub(crate) mod interaction;
 
-mod title;
+pub(crate) mod title;
 
 mod tooling;
 

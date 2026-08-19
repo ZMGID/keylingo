@@ -1,10 +1,13 @@
 use std::time::Duration;
 
+use tauri::{AppHandle, State};
 use tokio::time::timeout;
 
 use crate::chat::agent::{execute::truncate_chars, stop as agent_stop};
+use crate::chat::attachments::title_source_for_user_message;
 use crate::chat::model_metadata::model_can_generate_images_directly;
-use crate::chat::Conversation;
+use crate::chat::repository::ConversationMetadataMutation;
+use crate::chat::{ChatMessage, Conversation};
 use crate::settings::{SessionModel, Settings};
 use crate::state::AppState;
 
@@ -199,6 +202,80 @@ pub(super) fn sanitize_generated_title(raw: &str) -> Option<String> {
     Some(generate_title(&title))
 }
 
+const FORK_TITLE_SUFFIX: &str = "（分支）";
+
+/// 首轮用户消息 + 第一条非空助手回复，供标题模型使用。
+/// 空对话、或首条用户消息既无正文也无附件时返回 `None`。
+pub(super) fn first_turn_title_inputs(messages: &[ChatMessage]) -> Option<(String, String)> {
+    let user = messages.iter().find(|message| message.role == "user")?;
+    if user.content.trim().is_empty() && user.attachments.is_empty() {
+        return None;
+    }
+    let user_content = title_source_for_user_message(&user.content, &user.attachments);
+    let assistant_content = messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .map(|message| message.content.trim())
+        .find(|content| !content.is_empty())
+        .unwrap_or("")
+        .to_string();
+    Some((user_content, assistant_content))
+}
+
+pub(super) fn apply_fork_title_suffix(title: &str, is_fork: bool) -> String {
+    if !is_fork || title.ends_with(FORK_TITLE_SUFFIX) {
+        return title.to_string();
+    }
+    format!("{title}{FORK_TITLE_SUFFIX}")
+}
+
+/// 按用户请求重新生成对话标题。会覆盖手动重命名；空对话报错。
+#[tauri::command]
+pub(crate) async fn chat_regenerate_title(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<serde_json::Value, String> {
+    let snapshot = crate::chat::repository::repository(&app)
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    let (user_content, assistant_content) = first_turn_title_inputs(&snapshot.messages)
+        .ok_or_else(|| "对话还没有可用于生成标题的内容".to_string())?;
+
+    let settings = state.settings_read().clone();
+    let mut title = resolve_conversation_title(
+        &settings,
+        state.inner(),
+        &snapshot,
+        &user_content,
+        &assistant_content,
+    )
+    .await;
+    if title.trim().is_empty() {
+        title = generate_title(&user_content);
+    }
+    if title.trim().is_empty() {
+        return Err("无法生成标题".to_string());
+    }
+    title = apply_fork_title_suffix(&title, snapshot.forked_from.is_some());
+
+    let mut conversation = crate::chat::repository::repository(&app)
+        .update_metadata(
+            &app,
+            &conversation_id,
+            ConversationMetadataMutation::Title(title),
+        )
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+
+    super::catalog::strip_transcripts_for_frontend(&mut conversation);
+    Ok(serde_json::json!({
+        "success": true,
+        "conversation": conversation,
+    }))
+}
+
 /// 生成对话标题（本地兜底截断）
 pub(super) fn generate_title(content: &str) -> String {
     let trimmed = content.trim();
@@ -363,6 +440,71 @@ mod tests {
         assert!(
             body.contains("title-model") && body.contains("只负责为对话生成简洁标题"),
             "request should be the Chinese title prompt against title-model; body={body}"
+        );
+    }
+
+    fn test_chat_message(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: format!("msg_{role}"),
+            role: role.to_string(),
+            content: content.to_string(),
+            attachments: Vec::new(),
+            reasoning: None,
+            artifacts: Vec::new(),
+            tool_calls: Vec::new(),
+            segments: Vec::new(),
+            agent_plan: None,
+            api_messages: Vec::new(),
+            model_messages: Vec::new(),
+            active_skill_id: None,
+            run_entry: None,
+            stream_outcome: None,
+            usage: None,
+            anchor_usage: None,
+            group_id: None,
+            provider_id: None,
+            model: None,
+            timestamp: 1,
+            degraded: None,
+        }
+    }
+
+    #[test]
+    fn first_turn_title_inputs_requires_a_user_message() {
+        assert_eq!(first_turn_title_inputs(&[]), None);
+        assert_eq!(
+            first_turn_title_inputs(&[test_chat_message("assistant", "hello")]),
+            None
+        );
+        assert_eq!(
+            first_turn_title_inputs(&[test_chat_message("user", "")]),
+            None
+        );
+    }
+
+    #[test]
+    fn first_turn_title_inputs_uses_first_user_and_first_nonempty_assistant() {
+        let messages = vec![
+            test_chat_message("user", "今天下雨吗，吉林市"),
+            test_chat_message("assistant", ""),
+            test_chat_message("assistant", "吉林市今天有小雨"),
+        ];
+        assert_eq!(
+            first_turn_title_inputs(&messages),
+            Some((
+                "今天下雨吗，吉林市".to_string(),
+                "吉林市今天有小雨".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn apply_fork_title_suffix_appends_once() {
+        assert_eq!(apply_fork_title_suffix("吉林天气", false), "吉林天气");
+        assert_eq!(apply_fork_title_suffix("吉林天气", true), "吉林天气（分支）");
+        assert_eq!(
+            apply_fork_title_suffix("吉林天气（分支）", true),
+            "吉林天气（分支）"
         );
     }
 }

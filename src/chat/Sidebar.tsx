@@ -618,6 +618,7 @@ export const Sidebar = memo(function Sidebar({
   const [conversationPins, setConversationPins] = useState<Record<string, ConversationPin[]>>({})
   // 置顶手势的进行中覆盖：生成中乐观行 / 列表 refetch 都不得把刚点的 PIN 冲掉。
   const [pinOverrides, setPinOverrides] = useState<Record<string, boolean>>({})
+  const [titleGeneratingIds, setTitleGeneratingIds] = useState<Set<string>>(() => new Set())
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   // 后端全量索引搜索结果（覆盖所有对话，不止已加载的前 80）；空查询/非 Tauri 时为空，回退客户端过滤。
@@ -739,6 +740,40 @@ export const Sidebar = memo(function Sidebar({
       await loadSidebarData({ silent: true })
     } catch (err) {
       console.error('Failed to rename conversation:', err)
+    }
+  }
+
+  const handleRegenerateConversationTitle = async (id: string) => {
+    setTitleGeneratingIds((previous) => {
+      if (previous.has(id)) return previous
+      const next = new Set(previous)
+      next.add(id)
+      return next
+    })
+    try {
+      const updated = await chatApi.regenerateConversationTitle(id)
+      setTitleGeneratingIds((previous) => {
+        if (!previous.has(id)) return previous
+        const next = new Set(previous)
+        next.delete(id)
+        return next
+      })
+      setConversations((items) =>
+        items.map((item) => (item.id === id ? { ...item, title: updated.title } : item)),
+      )
+      await loadSidebarData({ silent: true })
+    } catch (err) {
+      console.error('Failed to regenerate conversation title:', err)
+      window.alert(
+        t.chatRegenerateTitleFailed + (err instanceof Error ? err.message : String(err)),
+      )
+    } finally {
+      setTitleGeneratingIds((previous) => {
+        if (!previous.has(id)) return previous
+        const next = new Set(previous)
+        next.delete(id)
+        return next
+      })
     }
   }
 
@@ -1513,6 +1548,7 @@ export const Sidebar = memo(function Sidebar({
                           reorder={conversationReorderFor(project.id)}
                           currentConversationId={currentConversationId}
                           generatingConversationIds={generatingConversationIds}
+                          titleGeneratingConversationIds={titleGeneratingIds}
                           projects={projects}
                           sets={sets}
                           lang={lang}
@@ -1523,6 +1559,7 @@ export const Sidebar = memo(function Sidebar({
                             onSelectConversation(id, conversation, { project, set: null })
                           }}
                           onRenameConversation={handleRenameConversation}
+                          onRegenerateConversationTitle={handleRegenerateConversationTitle}
                           onTogglePinConversation={handleTogglePinConversation}
                           onArchiveConversation={handleArchiveConversation}
                           onExportConversation={handleExportConversation}
@@ -1662,6 +1699,7 @@ export const Sidebar = memo(function Sidebar({
                               reorder={conversationReorderFor(set.id)}
                               currentConversationId={currentConversationId}
                               generatingConversationIds={generatingConversationIds}
+                              titleGeneratingConversationIds={titleGeneratingIds}
                               projects={projects}
                               sets={sets}
                               lang={lang}
@@ -1672,6 +1710,7 @@ export const Sidebar = memo(function Sidebar({
                                 onSelectConversation(id, conversation, { project: null, set })
                               }}
                               onRenameConversation={handleRenameConversation}
+                              onRegenerateConversationTitle={handleRegenerateConversationTitle}
                               onTogglePinConversation={handleTogglePinConversation}
                               onArchiveConversation={handleArchiveConversation}
                               onExportConversation={handleExportConversation}
@@ -1725,6 +1764,7 @@ export const Sidebar = memo(function Sidebar({
                       conversations={recentConversations}
                       currentConversationId={currentConversationId}
                       generatingConversationIds={generatingConversationIds}
+                      titleGeneratingConversationIds={titleGeneratingIds}
                       projects={projects}
                       sets={sets}
                       lang={lang}
@@ -1735,6 +1775,7 @@ export const Sidebar = memo(function Sidebar({
                         onSelectConversation(id, conversation, { project: null, set: null })
                       }}
                       onRenameConversation={handleRenameConversation}
+                      onRegenerateConversationTitle={handleRegenerateConversationTitle}
                       onTogglePinConversation={handleTogglePinConversation}
                       onArchiveConversation={handleArchiveConversation}
                       onExportConversation={handleExportConversation}

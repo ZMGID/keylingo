@@ -415,6 +415,25 @@ export function SessionCenter({
     [currentConversationId, loadPage, notify, onConversationDeleted],
   )
 
+  const regenerateTitle = useCallback(
+    async (id: string) => {
+      setBusy(true)
+      setMenu(null)
+      try {
+        await chatApi.regenerateConversationTitle(id)
+        notify()
+        await loadPage({ append: false })
+      } catch (err) {
+        window.alert(
+          t.chatRegenerateTitleFailed + (err instanceof Error ? err.message : String(err)),
+        )
+      } finally {
+        setBusy(false)
+      }
+    },
+    [loadPage, notify, t],
+  )
+
   const deleteOne = useCallback(
     async (id: string) => {
       if (!window.confirm(t.chatDeleteConversationConfirm)) return
@@ -1070,6 +1089,12 @@ export function SessionCenter({
               }}
             />
             <MenuItem
+              label={t.chatRegenerateTitle}
+              icon={<RefreshCw size={13} />}
+              disabled={(menuConv.message_count ?? 0) === 0 || busy}
+              onClick={() => void regenerateTitle(menuConv.id)}
+            />
+            <MenuItem
               label={menuConv.archived ? t.chatLibUnarchive : t.chatLibArchive}
               icon={menuConv.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
               onClick={() => void patchOne(menuConv.id, { archived: !menuConv.archived })}
@@ -1108,18 +1133,21 @@ function MenuItem({
   onClick,
   icon,
   danger,
+  disabled,
 }: {
   label: string
   onClick: () => void
   icon?: React.ReactNode
   danger?: boolean
+  disabled?: boolean
 }) {
   // icon optional
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-neutral-50 dark:hover:bg-white/[0.06] ${
+      disabled={disabled}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-neutral-50 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/[0.06] ${
         danger ? 'text-red-600 dark:text-red-400' : 'text-neutral-700 dark:text-neutral-200'
       }`}
     >
