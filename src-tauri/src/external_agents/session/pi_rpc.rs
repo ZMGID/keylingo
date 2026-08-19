@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -1198,6 +1198,10 @@ where
                 continue;
             }
             if value.get("id").and_then(Value::as_str) == Some(BTW_ENTRIES_REQUEST_ID) {
+                if !btw_entries_requested {
+                    continue;
+                }
+                let mut painted = false;
                 if value.get("success").and_then(Value::as_bool) == Some(true) {
                     if let Some(command) = btw_command {
                         if let Some((started, completed)) =
@@ -1205,15 +1209,20 @@ where
                         {
                             sink(started);
                             sink(completed);
+                            btw_entry_emitted = true;
+                            painted = true;
                         }
                     }
                 }
-                if persistent {
-                    break;
+                btw_entries_requested = false;
+                if painted {
+                    if persistent {
+                        break;
+                    }
+                    agent_ended = true;
+                    ended_at = Some(std::time::Instant::now());
+                    shutdown_rpc_writer(stdin).await;
                 }
-                agent_ended = true;
-                ended_at = Some(std::time::Instant::now());
-                shutdown_rpc_writer(stdin).await;
                 continue;
             }
             if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
@@ -1249,21 +1258,14 @@ where
                 && value.get("command").and_then(Value::as_str) == Some("prompt")
             {
                 if let Some(command) = btw_command {
-                    if command.question.is_none() || btw_entry_emitted {
-                        if persistent {
-                            break;
-                        }
-                        agent_ended = true;
-                        ended_at = Some(std::time::Instant::now());
-                        shutdown_rpc_writer(stdin).await;
-                        continue;
+                    if command.question.is_some() && !btw_entry_emitted {
+                        let request = json!({
+                            "id": BTW_ENTRIES_REQUEST_ID,
+                            "type": "get_entries",
+                        });
+                        write_rpc_value(stdin, &request).await?;
+                        btw_entries_requested = true;
                     }
-                    let request = json!({
-                        "id": BTW_ENTRIES_REQUEST_ID,
-                        "type": "get_entries",
-                    });
-                    write_rpc_value(stdin, &request).await?;
-                    btw_entries_requested = true;
                 }
             }
             continue;
@@ -1290,6 +1292,9 @@ where
         match outcome {
             PiRpcOutcome::AgentSettled => {
                 if persistent && !current_turn_seen {
+                    continue;
+                }
+                if btw_entries_requested {
                     continue;
                 }
                 if let Some(message) = pending_error.take() {
@@ -1354,6 +1359,37 @@ fn persistent_session_args(
         .ok_or_else(|| "Pi persistent session requires --session-id".to_string())?;
     Ok((effective_args, session_id, resume_native.is_some()))
 }
+
+/// Pi `--session-id` is create-or-resume. Claiming `resumed` from the id alone would send only
+/// the latest user message into a blank native session after the JSONL was deleted.
+pub fn is_missing_pi_session_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    (lower.contains("pi session")
+        || lower.contains("pi rpc")
+        || lower.contains("--session-id")
+        || lower.contains("native session"))
+        && (lower.contains("not found")
+            || lower.contains("no such session")
+            || lower.contains("unknown session")
+            || lower.contains("is gone"))
+}
+
+fn pi_native_session_present(session_id: &str) -> bool {
+    pi_session_file_candidates(session_id).into_iter().any(|path| path.is_file())
+}
+
+fn pi_session_file_candidates(session_id: &str) -> Vec<PathBuf> {
+    let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) else {
+        return Vec::new();
+    };
+    let sessions = home.join(".pi").join("agent").join("sessions");
+    vec![
+        sessions.join(format!("{session_id}.jsonl")),
+        sessions.join(session_id).join("session.jsonl"),
+        sessions.join(session_id).join(format!("{session_id}.jsonl")),
+    ]
+}
+
 /// A live Pi RPC connection. The actor owns the child process while stdin/stdout are shared with
 /// the in-flight turn task so control commands can still be received during generation.
 pub struct PiRpcSession {
@@ -1375,7 +1411,9 @@ impl PiRpcSession {
     ) -> Result<Self, String> {
         // The persisted live handle is the authoritative binding for this Kivio conversation.
         // It can exist even when the regular binding was not flushed before a crash.
-        let (effective_args, session_id, resumed) = persistent_session_args(args, resume_native)?;
+        let (effective_args, session_id, claimed_resume) =
+            persistent_session_args(args, resume_native)?;
+        let resumed = claimed_resume && pi_native_session_present(&session_id);
 
         let mut child = crate::external_agents::spawn::cli_command(bin)
             .args(&effective_args)
@@ -2046,6 +2084,7 @@ mod tests {
             for line in [
                 r#"{"type":"entry_appended","entry":{"type":"custom","id":"e10","customType":"btw-thread-entry","data":{"question":"quick aside","answer":"quick answer","provider":"p","model":"m"}}}"#,
                 r#"{"id":1,"type":"response","command":"prompt","success":true}"#,
+                r#"{"type":"agent_end"}"#,
             ] {
                 stdout_writer.write_all(line.as_bytes()).await?;
                 stdout_writer.write_all(b"\n").await?;
@@ -2091,6 +2130,7 @@ mod tests {
             for line in [
                 r#"{"id":1,"type":"response","command":"prompt","success":true}"#,
                 r#"{"id":"kivio-btw-entries","type":"response","command":"get_entries","success":true,"data":{"entries":[]}}"#,
+                r#"{"type":"agent_settled"}"#,
             ] {
                 stdout_writer.write_all(line.as_bytes()).await?;
                 stdout_writer.write_all(b"\n").await?;
@@ -3001,6 +3041,106 @@ mod tests {
         .expect("prompt turn");
         server.await.expect("server");
         assert_eq!(text, "real answer");
+    }
+
+    #[tokio::test]
+    async fn leftover_btw_entries_cannot_finish_the_next_prompt() {
+        let (client_stdin, server_stdin) = duplex(4096);
+        let (client_stdout, mut server_stdout) = duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut requests = BufReader::new(server_stdin).lines();
+            let _first = requests
+                .next_line()
+                .await
+                .expect("first prompt")
+                .expect("first line");
+            for event in [
+                json!({"id": 1, "type": "response", "command": "prompt", "success": true}),
+                json!({"id": "kivio-btw-entries", "type": "response", "command": "get_entries", "success": true, "data": {"entries": []}}),
+                json!({"type": "agent_settled"}),
+                json!({"id": "kivio-btw-entries", "type": "response", "command": "get_entries", "success": true, "data": {"entries": []}}),
+            ] {
+                server_stdout
+                    .write_all(format!("{event}\n").as_bytes())
+                    .await
+                    .expect("write first turn");
+            }
+
+            let prompt = loop {
+                let line = requests
+                    .next_line()
+                    .await
+                    .expect("follow-up request")
+                    .expect("request line");
+                let value: Value = serde_json::from_str(&line).expect("request json");
+                // /btw with a question also writes get_entries on the same stdin; skip it.
+                if value.get("type").and_then(Value::as_str) == Some("get_entries") {
+                    continue;
+                }
+                break value;
+            };
+            assert_eq!(prompt["type"], "prompt");
+            assert_eq!(prompt["message"], "follow up");
+            for event in [
+                json!({"id": 1, "type": "response", "command": "prompt", "success": true}),
+                json!({
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "still here"},
+                }),
+                json!({"type": "agent_end"}),
+                json!({"type": "agent_settled"}),
+            ] {
+                server_stdout
+                    .write_all(format!("{event}\n").as_bytes())
+                    .await
+                    .expect("write second turn");
+            }
+        });
+
+        let mut reader = BufReader::new(client_stdout).lines();
+        let stdin = Arc::new(Mutex::new(client_stdin));
+        run_pi_rpc_io(
+            &mut reader,
+            &stdin,
+            "/btw leftover",
+            &[],
+            &mut |_| {},
+            None,
+            None,
+            || false,
+            true,
+        )
+        .await
+        .expect("btw turn");
+        let mut text = String::new();
+        run_pi_rpc_io(
+            &mut reader,
+            &stdin,
+            "follow up",
+            &[],
+            &mut |event| {
+                if let UnifiedAgentEvent::TextDelta { delta } = event {
+                    text.push_str(&delta);
+                }
+            },
+            None,
+            None,
+            || false,
+            true,
+        )
+        .await
+        .expect("follow-up turn");
+        server.await.expect("server");
+        assert_eq!(text, "still here");
+    }
+
+    #[test]
+    fn missing_pi_session_file_is_not_a_successful_resume() {
+        assert!(!pi_native_session_present("kivio-missing-session-id-for-test"));
+        assert!(is_missing_pi_session_error(
+            "Pi session \"abc\" not found"
+        ));
+        assert!(!is_missing_pi_session_error("Pi RPC timed out"));
     }
 
     #[test]

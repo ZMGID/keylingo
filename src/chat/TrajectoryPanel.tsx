@@ -50,6 +50,7 @@ function labels(lang: Lang) {
         open: '打开',
         cancel: '取消',
         cancelled: '扩展取消了这次会话操作',
+        loadFailed: '无法加载 Pi 原生会话',
       }
     : {
         search: 'Search trajectory',
@@ -65,6 +66,7 @@ function labels(lang: Lang) {
         open: 'Open',
         cancel: 'Cancel',
         cancelled: 'An extension cancelled this session operation',
+        loadFailed: 'Could not load the Pi native session',
       }
 }
 
@@ -154,22 +156,25 @@ export function TrajectoryPanel({
     } catch {
       if (loadEpochRef.current !== epoch || conversationIdRef.current !== requestedConversationId) return
       setForkMessages([])
+      setSessionFile(null)
+      setSessionId('')
+      setSwitchPath('')
+      setError(copy.loadFailed)
     } finally {
       if (loadEpochRef.current === epoch) setLoadingPi(false)
     }
-  }, [conversationId, piNativeEnabled])
+  }, [conversationId, copy.loadFailed, piNativeEnabled])
 
   useEffect(() => {
     setQuery('')
     setSelectedId(null)
     setError(null)
     setSwitchOpen(false)
+    setForkMessages([])
+    setSessionFile(null)
+    setSessionId('')
+    setSwitchPath('')
     if (active && piNativeEnabled) void loadPi()
-    if (!piNativeEnabled) {
-      setForkMessages([])
-      setSessionFile(null)
-      setSessionId('')
-    }
   }, [active, conversationId, loadPi, piNativeEnabled])
 
   const runMutation = useCallback(async (action: () => Promise<PiSessionMutationResult>) => {

@@ -900,6 +900,9 @@ where
                         && (crate::external_agents::stream::claude::is_missing_session_error(&err)
                             || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(
                                 &err,
+                            )
+                            || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(
+                                &err,
                             )) =>
                 {
                     dropped_resume = true;
@@ -1238,16 +1241,7 @@ fn launch_config_for_turn(
         };
     }
     if matches!(protocol, StreamFormat::PiRpc) {
-        return LaunchConfig {
-            // Pi receives model/thinking as process launch flags. Relaunch with the same native
-            // session id when either changes so the live process matches the UI selection.
-            flags: format!(
-                "{}|{}",
-                model.unwrap_or_default(),
-                reasoning.unwrap_or_default()
-            ),
-            instructions: None,
-        };
+        return LaunchConfig::for_pi(model, reasoning);
     }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return LaunchConfig::default();
@@ -1298,7 +1292,9 @@ fn persistent_turn_prompt<'a>(
 /// 本轮错误是否代表「用户取消」——出口走 cancelled（不弹错误气泡、不发上下文重置提示、
 /// 更不会重发这一轮 prompt）。
 fn is_cancellation(err: &str) -> bool {
-    err == "cancelled" || err == crate::external_agents::session::live::CANCELLED_SESSION_LOST
+    err == "cancelled"
+        || err == "closed"
+        || err == crate::external_agents::session::live::CANCELLED_SESSION_LOST
 }
 
 /// 这次失败之后，常驻会话能不能留在注册表里继续服下一轮。
@@ -1362,6 +1358,7 @@ fn persistent_failure_action(
     // 同样只降级一次 —— 摘掉 resume 之后还失败说明是别的原因。
     if crate::external_agents::stream::claude::is_missing_session_error(err)
         || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
+        || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(err)
     {
         return if dropped_resume {
             PersistentFailureAction::Fatal
@@ -1401,6 +1398,12 @@ fn drop_resume_for_fresh_session(
     if matches!(protocol, StreamFormat::DshJsonRpc) {
         clear_live_handle(app, conversation_id);
         return args.to_vec();
+    }
+    if matches!(protocol, StreamFormat::PiRpc) {
+        let fresh_id = uuid::Uuid::new_v4().to_string();
+        replace_stored_session_id(app, conversation_id, agent_id, &fresh_id);
+        clear_live_handle(app, conversation_id);
+        return crate::external_agents::defs::pi::pi_args_fresh_session(args, &fresh_id);
     }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return args.to_vec();
@@ -3995,6 +3998,24 @@ mod tests {
         );
     }
 
+    const REAL_PI_MISSING_SESSION_ERROR: &str = "Pi session \"abc\" not found";
+
+    #[test]
+    fn a_missing_pi_resume_target_reconnects_without_resume_exactly_once() {
+        assert_eq!(
+            persistent_failure_action(REAL_PI_MISSING_SESSION_ERROR, "pi", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+        assert_eq!(
+            persistent_failure_action(REAL_PI_MISSING_SESSION_ERROR, "pi", false, false, true),
+            PersistentFailureAction::Fatal
+        );
+        assert_ne!(
+            persistent_failure_action("Pi RPC timed out", "pi", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+    }
+
     /// 启动阶段暴露的那条（`connect()` 的 `try_wait` 抓到「立刻退出」+ stderr 尾部）
     /// 必须命中同一条判据 —— 判据是 `contains`，不是全等。
     #[test]
@@ -4094,6 +4115,7 @@ mod tests {
     #[test]
     fn both_cancel_flavours_are_cancellations() {
         assert!(is_cancellation("cancelled"));
+        assert!(is_cancellation("closed"));
         assert!(is_cancellation(CANCELLED_SESSION_LOST));
         assert!(!is_cancellation("ACP session exited mid-turn"));
         assert!(!is_cancellation(""));

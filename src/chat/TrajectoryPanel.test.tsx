@@ -236,4 +236,69 @@ describe('TrajectoryPanel', () => {
     expect(screen.queryByText('Inspect the parser')).toBeNull()
     expect(screen.getByText('New conversation')).toBeTruthy()
   })
+
+  it('clears Pi identity and shows an error when native session load fails', async () => {
+    mockTree.mockRejectedValue(new Error('boom'))
+    const current = conversation({
+      agent_runtime: { kind: 'external', externalAgentId: 'pi' },
+    })
+    render(
+      <TrajectoryPanel
+        active
+        conversation={current}
+        messages={current.messages}
+        lang="zh"
+        piNativeEnabled
+        onFocusMessage={onFocusMessage}
+        onConversationChanged={onConversationChanged}
+      />,
+    )
+    expect(await screen.findByText('无法加载 Pi 原生会话')).toBeTruthy()
+    expect(screen.getByLabelText('克隆当前分支')).toBeDisabled()
+  })
+
+  it('does not keep the previous conversation Pi identity while the next load is in flight', async () => {
+    let resolveSecond!: (value: typeof snapshot) => void
+    mockTree.mockImplementation((id) => {
+      if (id === 'conv-1') return Promise.resolve(snapshot)
+      return new Promise((resolve) => { resolveSecond = resolve })
+    })
+    mockForkMessages.mockResolvedValue([])
+    const first = conversation({
+      agent_runtime: { kind: 'external', externalAgentId: 'pi' },
+    })
+    const second = conversation({
+      id: 'conv-2',
+      agent_runtime: { kind: 'external', externalAgentId: 'pi' },
+      messages: [{ id: 'new-u1', role: 'user', content: 'New conversation', timestamp: 3 }],
+    })
+    const { rerender } = render(
+      <TrajectoryPanel
+        active
+        conversation={first}
+        messages={first.messages}
+        lang="en"
+        piNativeEnabled
+        onFocusMessage={onFocusMessage}
+        onConversationChanged={onConversationChanged}
+      />,
+    )
+    expect(await screen.findByLabelText('Clone current branch')).not.toBeDisabled()
+    rerender(
+      <TrajectoryPanel
+        active
+        conversation={second}
+        messages={second.messages}
+        lang="en"
+        piNativeEnabled
+        onFocusMessage={onFocusMessage}
+        onConversationChanged={onConversationChanged}
+      />,
+    )
+    expect(screen.getByLabelText('Clone current branch')).toBeDisabled()
+    await act(async () => {
+      resolveSecond({ ...snapshot, sessionId: 'session-new', sessionFile: '/tmp/new.jsonl' })
+    })
+    expect(await screen.findByLabelText('Clone current branch')).not.toBeDisabled()
+  })
 })

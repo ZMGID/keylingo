@@ -99,4 +99,39 @@ describe('Pi session tree model', () => {
     expect(mapped.get('u1')).toBe('e1')
     expect(mapped.get('u2')).toBe('e3')
   })
+
+  it('skips unmatched Kivio user turns without consuming later Pi fork entries', () => {
+    const mapped = mapPiForkEntriesToMessages(
+      [
+        { id: 'u1', content: 'hello' },
+        { id: 'u-compact', content: '/compact' },
+        { id: 'u2', content: 'world' },
+      ],
+      [
+        { entryId: 'e1', text: 'hello' },
+        { entryId: 'e2', text: 'world' },
+      ],
+    )
+    expect(mapped.get('u1')).toBe('e1')
+    expect(mapped.get('u2')).toBe('e2')
+    expect(mapped.has('u-compact')).toBe(false)
+  })
+
+  it('maps duplicate prompts by occurrence when Pi has an extra unmatched turn', () => {
+    const mapped = mapPiForkEntriesToMessages(
+      [
+        { id: 'u1', content: 'A' },
+        { id: 'u2', content: 'A' },
+        { id: 'u3', content: 'A' },
+      ],
+      [
+        { entryId: 'e1', text: 'A' },
+        { entryId: 'e-extra', text: 'side' },
+        { entryId: 'e3', text: 'A' },
+      ],
+    )
+    expect(mapped.get('u1')).toBe('e1')
+    expect(mapped.get('u2')).toBe('e3')
+    expect(mapped.has('u3')).toBe(false)
+  })
 })

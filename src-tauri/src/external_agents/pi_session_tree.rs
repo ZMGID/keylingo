@@ -266,13 +266,6 @@ fn kivio_anchor_for_fork_entry(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
-    if let Some((id, _)) = user_messages
-        .get(selected_index)
-        .copied()
-        .filter(|(_, content)| content.trim() == selected_text)
-    {
-        return Ok((id.to_string(), selected_text.to_string()));
-    }
     let occurrence = pi_messages[..selected_index]
         .iter()
         .filter(|message| {
@@ -619,6 +612,20 @@ mod tests {
         assert_eq!(
             kivio_anchor_for_fork_entry(&pi, "e2", &users).unwrap(),
             ("u1".to_string(), "hello".to_string())
+        );
+    }
+
+    #[test]
+    fn extra_pi_unmatched_turn_maps_second_duplicate_to_last_match() {
+        let pi = [
+            msg("e1", "A"),
+            msg("e-extra", "side"),
+            msg("e3", "A"),
+        ];
+        let users = [("u1", "A"), ("u2", "A"), ("u3", "A")];
+        assert_eq!(
+            kivio_anchor_for_fork_entry(&pi, "e3", &users).unwrap(),
+            ("u2".to_string(), "A".to_string())
         );
     }
 

@@ -105,18 +105,14 @@ export function mapPiForkEntriesToMessages(
   forkMessages: readonly PiForkMessage[],
 ): Map<string, string> {
   const next = new Map<string, string>()
-  let forkIdx = 0
-  for (const message of userMessages) {
+  for (const [messageIndex, message] of userMessages.entries()) {
     const text = message.content.trim()
     if (!text) continue
-    while (forkIdx < forkMessages.length) {
-      const fork = forkMessages[forkIdx]
-      forkIdx += 1
-      if (fork.text.trim() === text) {
-        next.set(message.id, fork.entryId)
-        break
-      }
-    }
+    const occurrence = userMessages
+      .slice(0, messageIndex)
+      .filter((entry) => entry.content.trim() === text).length
+    const fork = forkMessages.filter((entry) => entry.text.trim() === text)[occurrence]
+    if (fork) next.set(message.id, fork.entryId)
   }
   return next
 }

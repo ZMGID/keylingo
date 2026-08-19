@@ -461,6 +461,8 @@ impl DshJsonRpcSession {
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
         mut approvals: Option<&mut ApprovalBridge>,
+        mut idle_approvals: Option<&mut ApprovalBridge>,
+        idle_pending_asks: &mut std::collections::HashMap<String, Value>,
     ) -> Result<(), String> {
         let requested_route = resolve_model_route_for_turn(model)?;
         if requested_route != self.route {
@@ -485,7 +487,7 @@ impl DshJsonRpcSession {
         let mut cancel_id: Option<u64> = None;
         let mut cancel_started: Option<std::time::Instant> = None;
         let mut pending_asks: std::collections::HashMap<String, Value> =
-            std::collections::HashMap::new();
+            std::mem::take(idle_pending_asks);
         let mut pending_steers = PendingSteers::default();
         let mut pending_user_question_calls: VecDeque<PendingUserQuestionCall> = VecDeque::new();
         let mut followup_acked: u32 = 0;
@@ -493,11 +495,13 @@ impl DshJsonRpcSession {
         let mut deferred_idle = false;
 
         loop {
-            if let Some(bridge) = approvals.as_deref_mut() {
-                while let Ok(decision) = bridge.decisions.try_recv() {
-                    settle_session_ask(&mut self.stdin, &mut pending_asks, decision).await?;
-                }
-            }
+            drain_ask_decisions(
+                &mut self.stdin,
+                &mut pending_asks,
+                approvals.as_deref_mut(),
+                idle_approvals.as_deref_mut(),
+            )
+            .await?;
 
             match control.try_recv() {
                 Ok(SessionCommand::Cancel) => cancel_requested = true,
@@ -1083,9 +1087,16 @@ pub fn spawn_dsh_session_actor_with_sink(
                             &events,
                             &mut rx,
                             approvals.as_mut(),
+                            idle_approvals.as_mut(),
+                            &mut idle_pending_asks,
                         )
                         .await;
+                    let closed = matches!(&result, Err(err) if err == "closed" || err == CANCELLED_SESSION_LOST);
                     let _ = done.send(result);
+                    if closed {
+                        session.close().await;
+                        return;
+                    }
                 }
                 SessionCommand::Steer { accepted, .. } => {
                     // 空闲时没有在飞轮次：引导和 follow-up 都拒，前端按普通新轮发出。
@@ -1346,6 +1357,22 @@ async fn handle_incoming_request(
             Some(json!({ "code": "ASK_ABORTED" })),
         )
         .await;
+    }
+    Ok(())
+}
+
+async fn drain_ask_decisions(
+    stdin: &mut ChildStdin,
+    pending_asks: &mut std::collections::HashMap<String, Value>,
+    mut turn_approvals: Option<&mut ApprovalBridge>,
+    mut idle_approvals: Option<&mut ApprovalBridge>,
+) -> Result<(), String> {
+    for bridge in [&mut turn_approvals, &mut idle_approvals] {
+        if let Some(bridge) = bridge.as_deref_mut() {
+            while let Ok(decision) = bridge.decisions.try_recv() {
+                settle_session_ask(stdin, pending_asks, decision).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -3520,6 +3547,8 @@ mod tests {
                 &event_tx,
                 &mut control_rx,
                 None,
+                None,
+                &mut std::collections::HashMap::new(),
             )
             .await
             .expect("live dsh turn");
@@ -3586,6 +3615,8 @@ mod tests {
                 &event_tx,
                 &mut control_rx,
                 None,
+                None,
+                &mut std::collections::HashMap::new(),
             )
             .await
             .expect("first dsh turn");
@@ -3612,6 +3643,8 @@ mod tests {
                 &event_tx,
                 &mut control_rx,
                 None,
+                None,
+                &mut std::collections::HashMap::new(),
             )
             .await
             .expect("second dsh turn after process restart");
@@ -3678,6 +3711,8 @@ mod tests {
                 &event_tx,
                 &mut control_rx,
                 None,
+                None,
+                &mut std::collections::HashMap::new(),
             )
             .await
             .expect_err("cancel must stop the active dsh turn");
@@ -3691,6 +3726,8 @@ mod tests {
                 &event_tx,
                 &mut control_rx,
                 None,
+                None,
+                &mut std::collections::HashMap::new(),
             )
             .await
             .expect("session should remain usable after cancel");

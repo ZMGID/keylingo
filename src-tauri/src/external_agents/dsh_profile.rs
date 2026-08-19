@@ -613,6 +613,13 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("registerProvider"));
         assert!(BRIDGE_SOURCE.contains("session/ask"));
         assert!(BRIDGE_SOURCE.contains("withExclusiveAgentCall"));
+        let cancel_at = BRIDGE_SOURCE
+            .find("async cancel(params)")
+            .expect("cancel handler");
+        assert!(
+            BRIDGE_SOURCE[cancel_at..cancel_at.saturating_add(700)].contains("withExclusiveAgentCall"),
+            "session/cancel must join the prompt/steer exclusive queue",
+        );
         assert!(BRIDGE_SOURCE.contains("agent.followup = agent.steer.bind(agent)"));
         assert!(BRIDGE_SOURCE.contains("'userQuestions'"));
         assert!(BRIDGE_SOURCE.contains("'attachments'"));

@@ -139,9 +139,12 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     const sessionId = requireSessionId(params.sessionId)
     const record = this.sessions.get(sessionId)
     if (!record) throw new Error(`session "${sessionId}" is not open`)
-    record.handle.agent.cancel({ kind: 'user' })
-    await record.handle.agent.whenIdle()
-    return { sessionId, cancelled: true }
+    const agent = record.handle.agent
+    return withExclusiveAgentCall(agent, async () => {
+      agent.cancel({ kind: 'user' })
+      await agent.whenIdle()
+      return { sessionId, cancelled: true }
+    })
   }
 
   async command(params) {
