@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { buildModelPairOptions, formatHotkey, modelPairValue, parseModelPairValue } from './utils'
+import {
+  buildModelPairOptions,
+  formatHotkey,
+  modelPairValue,
+  parseModelPairValue,
+  resolveSettingsSaveEcho,
+} from './utils'
 import type { ModelProvider } from '../api/tauri'
 
 describe('formatHotkey', () => {
@@ -58,5 +64,30 @@ describe('buildModelPairOptions', () => {
   it('keeps only models passing the filter predicate', () => {
     const opts = buildModelPairOptions([provider], (_p, model) => model.includes('image'))
     expect(opts.map(o => o.value)).toEqual([modelPairValue('p1', 'gemini-3.1-flash-image')])
+  })
+})
+
+describe('resolveSettingsSaveEcho', () => {
+  it('applies an identical save echo and advances the baseline', () => {
+    expect(resolveSettingsSaveEcho('draft', 'draft', 'draft')).toEqual({
+      applySaved: true,
+      baselineSnapshot: 'draft',
+    })
+  })
+
+  it('does not clobber the on-screen draft when sanitize dropped placeholder rows', () => {
+    // 送出带空 key 的草稿，回包被 sanitize 丢掉空行 —— 不能 setState 回包，
+    // 否则「添加 Key / 请求头 / 模型」刚出现的输入框会秒消失。
+    expect(resolveSettingsSaveEcho('draft-with-empty-row', 'sanitized', 'draft-with-empty-row')).toEqual({
+      applySaved: false,
+      baselineSnapshot: 'draft-with-empty-row',
+    })
+  })
+
+  it('never applies the echo when the user kept editing during the round-trip', () => {
+    expect(resolveSettingsSaveEcho('sent', 'saved', 'newer-draft')).toEqual({
+      applySaved: false,
+      baselineSnapshot: 'saved',
+    })
   })
 })

@@ -32,7 +32,7 @@ import {
   AgentIcon, WebSearchIcon, ConnectorsIcon, PluginsIcon, UsageIcon, ProvidersIcon, AboutIcon, HooksIcon,
 } from './NavIcons'
 import { PluginCenter } from '../chat/PluginCenter'
-import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, stableStringify } from './utils'
+import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, resolveSettingsSaveEcho, stableStringify } from './utils'
 import { type ProviderPreset } from './providerPresets'
 import { ProviderModelsPicker } from './ProviderModelsPicker'
 import { ScreenshotTranslationSettings } from './ScreenshotTranslationSettings'
@@ -766,15 +766,15 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       const savedSettings = await saveSettingsCached(draft)
       const savedSnapshot = stableStringify(savedSettings)
       const latestSnapshot = settingsRef.current ? stableStringify(settingsRef.current) : ''
-      // 用户在请求飞行中继续改了 → 只推进“已落盘基线”，别用服务端回包盖掉本地草稿
-      if (latestSnapshot === draftSnapshot) {
+      const echo = resolveSettingsSaveEcho(draftSnapshot, savedSnapshot, latestSnapshot)
+      // sanitize 可能丢掉尚未填完的占位行。回包与草稿不同时保留屏幕上的草稿，
+      // 否则「添加 Key / 请求头 / CLI 模型」刚出现的输入框会被盖没。
+      if (echo.applySaved) {
         setSettings(savedSettings)
-        setInitialSettingsSnapshot(savedSnapshot)
         settingsRef.current = savedSettings
         currentSettingsSnapshotRef.current = savedSnapshot
-      } else {
-        setInitialSettingsSnapshot(savedSnapshot)
       }
+      setInitialSettingsSnapshot(echo.baselineSnapshot)
       onSettingsChange()
       return true
     } catch (err) {
@@ -794,21 +794,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   }, [initialSettingsSnapshot, lang, onSettingsChange])
 
   // 草稿相对已落盘基线有 diff → 防抖自动保存（开关/输入共用，避免每个按键打盘）
+  // 占位空行会照常送去保存；sanitize 丢掉它们之后由 resolveSettingsSaveEcho 决定
+  // 不把回包盖回草稿，所以这里不再按字段拦自动保存。
   useEffect(() => {
     if (!hasUnsavedChanges) return
-    // 自定义请求头的新行会先以空值占位。后端存盘归一化会丢掉这种不完整的行，如果此时发起自动保存，回包会把输入框立刻恢复成消失。等用户填完后再保存。
-    const hasIncompleteCustomHeader = settings?.providers.some((provider) =>
-      (provider.request?.customHeaders ?? []).some((header) =>
-        header.key.trim() === '' || header.value.trim() === '',
-      ),
-    )
-    if (hasIncompleteCustomHeader) return
-    // 同理：本地 CLI 的「添加模型」也是先插一行空的再填。sanitize_external_cli_agents 会
-    // retain 掉 id 为空的条目，回包盖回草稿 → 那一行刚出现就消失（表现为「点添加冒一下就没了」）。
-    const hasIncompleteCliModel = Object.values(settings?.chat?.externalCliAgents ?? {}).some(
-      (config) => (config.customModels ?? []).some((model) => model.id.trim() === ''),
-    )
-    if (hasIncompleteCliModel) return
     if (autosaveTimerRef.current) {
       clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null

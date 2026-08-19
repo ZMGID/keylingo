@@ -160,6 +160,34 @@ export const stableStringify = (value: unknown): string =>
     return v
   })
 
+/**
+ * 自动保存回包怎么盖回草稿。
+ *
+ * `save_settings` 会跑 `sanitize_settings`，丢掉尚未填完的占位行（空 API Key、
+ * 空自定义请求头、空 CLI 模型 id、空 env key……）。若把回包整份 setState 回去，
+ * 刚点「添加」出来的输入框会秒消失。按字段拦自动保存治标不治本——每多一种
+ * 「先插空行再填」的 UI 就要再加一条白名单。
+ *
+ * 规则：
+ * - 用户在飞行中继续改了 → 绝不盖草稿；基线推进到已落盘回包。
+ * - 回包与送出的草稿相同 → 可以盖（sanitize 无实质改动）。
+ * - 回包改了草稿 → 屏幕上的草稿保留；基线也钉在草稿上，避免立刻再存一遍
+ *   （再存仍会被丢掉，空行又被回包盖没）。
+ */
+export function resolveSettingsSaveEcho(
+  draftSnapshot: string,
+  savedSnapshot: string,
+  latestSnapshot: string,
+): { applySaved: boolean; baselineSnapshot: string } {
+  if (latestSnapshot !== draftSnapshot) {
+    return { applySaved: false, baselineSnapshot: savedSnapshot }
+  }
+  if (savedSnapshot === draftSnapshot) {
+    return { applySaved: true, baselineSnapshot: savedSnapshot }
+  }
+  return { applySaved: false, baselineSnapshot: draftSnapshot }
+}
+
 type HotkeyErrorPayload = {
   kind: 'conflict' | 'duplicate' | 'empty' | 'other'
   scope:
