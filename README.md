@@ -174,84 +174,13 @@ Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），�
 
 ## 新版本 —— v2.9.2
 
-- **Pi** —— 常驻会话补齐问用户、原生图片、轮内引导和下一轮排队，控制不再每轮丢掉。右侧 Dock「轨迹」可查看、分叉、克隆分支成新对话。设置里管理 Pi Package（npm / git / 本地）和本地扩展，以及 `~/.pi`、共享 `~/.agents`、Package 和额外扫描路径里的 Skill（可挂 Claude Code / Codex 目录，不复制文件）。
-- **DeepSeek Harness** —— 生成中可立刻引导当前轮，或把下一条排进下一轮。Kivio 建的会话绑到项目工作目录，和官方 web 的 Host Workspace 对得上。并行问用户不再互相覆盖，后台子代理保持在跑。关窗会停掉会话，取消真正取消；找不到原生会话时降级而不是硬失败。预发布版本号（如 `0.1.0-rc.x`）不再被当成已是最新。
-- **轨迹 Dock** —— 每个运行时都能在右侧 Dock 看这条对话的轨迹：用户、助手、工具和压缩按轮列出，可搜索并跳到对应消息。
-- **联网搜索** —— 内置和第三方共用带来源目录的搜索卡（标题、域名、日期、摘要），答案里的 `[n]` 可点开来源。新增 Brave、Serper、Bocha、智谱、TinyFish、SearXNG；TinyFish MCP 用浏览器登录授权，不用填密钥。
-- **插件与技能** —— 插件页一键跑 GitHub README 里的官方安装命令；启用后后台同步官方 Skill，插件 MCP 只在插件页开关、不出现在连接器。Kivio 技能扫描 `~/.kivio/skills`、项目 `.kivio/skills` 和共享 `~/.agents/skills`，导入写到 `~/.kivio/skills`。
-- **外部 CLI 供应商** —— Kivio 配的供应商可以和 CLI 自己的配置并存，已启用的都保持可选；「默认」只决定没选手动模型时用哪一个。
-- **聊天体验** —— Kivio Agent 的跟进等到本轮答完再发，不打断正在跑的工具。集编辑器换成更大的卡片。账户菜单显示今日用量。切对话后退出，重开还是你离开时那条。引用角标不再被裁切。沙箱导出和附件文件名保留中文。
-- **安装** —— Windows 安装可选每用户或整机（装到 Program Files 可提权）。长 MCP 服务名不再撞名。去掉 Email 连接器。
+- **Pi** —— 问用户、原生图片、轮内引导和下一轮排队；Dock「轨迹」可分叉克隆；设置里管理扩展与 Skill。
+- **DeepSeek Harness** —— 生成中可引导或排队；会话绑到项目工作目录；关窗和取消真正停掉。
+- **联网搜索** —— 来源目录可点，答案 `[n]` 跳转；新增 Brave、Serper、智谱、TinyFish 等。
+- **插件与技能** —— 一键跑官方安装命令；技能扫描 `~/.kivio` 与 `~/.agents`。
+- **其它** —— CLI 供应商可与 CLI 自带配置并存；账户菜单显示今日用量；重启记住当前对话。去掉 Email 连接器。
 
-## v2.9.1
-
-- **DeepSeek Harness** —— 补齐图片、附件路径、停任务（含子代理）和斜杠发现；模型图片与推理档写回已有路由；第三方供应商握手不再空转。空白机器可一键安装并填官方密钥。凭据按官方分层识别环境变量、凭据文件和 `.env`，第三方路由用各自的密钥环境变量，不再误拦。
-- **外部 CLI 系统提示** —— 对话所属集的系统提示会注入外部 CLI，切集不再丢掉那一层人设。
-- **供应商模型列表** —— 拉模型按协议鉴权，并解析 Gemini 原生 ListModels。
-- **启动体验** —— 启动后可最小化到托盘；开机自启不再强行弹出聊天窗。
-- **聊天** —— 工作台路径挪到 tools 之后，避免跨会话打穿前缀缓存。
-
-## v2.9.0
-
-- **DeepSeek Harness** —— 新增 dsh 作为外部 CLI 代理：官方供应商、四档 Agent 模式、插件页、斜杠命令（已知命令高亮）、工具卡、压缩，以及 `/compact` `/goal` `/feedback`。重启或改启动配置后仍续上原生会话；顶栏显示实际模型与思考档。后台子代理显示实时进度，完成后把汇报写回父对话，和官方 web 一致。用量条不再把已排除的缓存输入减第二次。
-- **外部 CLI 更稳** —— 每个 CLI 记住上次的模型和思考档，切走再切回不再重置成 Auto。轮内重连保留原生会话，不再开空白对话。Grok 上游 503/429 的静默重试会显示状态。发送失败回填草稿。找不到原生会话时按 ACP 口径降级，不再硬失败。生成中禁止删消息，避免误回收附件。
-- **Todo、问用户与工具卡** —— dsh / Claude Code 的 Todo 接到对话列表；Claude Task 卡立刻显示任务。外部 CLI 问用户收成统一卡片，下一条 CLI 只需加 codec。dsh 官方工具名、压缩和 job 事件走现成卡片与分隔线，不再当成一句 prompt。
-- **Pi** —— 内置 `/compact` 走原生 compact，不再当 prompt 发给模型。导入尊重 `PI_CODING_AGENT_DIR` 和共享 MCP / 技能层；原生会话 id 更短。
-- **Kivio Chat** —— 不再继承 Agent 人设和 shell 长文；发送路径挂上知识库；自定义 / 助手文本不能改写 Chat 契约；dock、技能和 `/plan` 在 Chat 里保持隐藏。
-- **笔记** —— 笔记页可打开库文件夹，拖入外部 markdown 自动出现；目录变化自动刷新，编辑时不会把自己的保存冲掉列表。
-- **新模型** —— 补上 Grok 4.6（500k 上下文），并把 grok CLI 的默认与回退模型从 4.5 抬到 4.6。
-- **会话存储** —— 会话 JSON 不再存图片 base64，改为内容寻址外置，同一张图看多次只留一个文件；打开即迁移存量大文件。启动回收空工作区和已删会话的孤儿附件，非空工作区与用户上传不自动删。含图会话不再把磁盘和打开时的内存打满。
-- **聊天体验** —— 重复点击已打开的会话不再重载；带图会话打开时等 Mermaid 落地再对齐；长文本不再全量哈希。生成中也能钉住。贴底打字不再整屏抖；暗色切会话不闪白。标题打字机失效已修。设置里添加 CLI 模型不再一闪即消。工具轮次默认不限（旧默认 20 会迁一次）。
-
-## v2.8.9
-
-- **长对话性能大修** —— 消息列表重做虚拟化与滚动跟随：屏外消息卸载、流式行独立渲染、重内容延迟挂载。长对话打开更快，流式生成与回翻历史更流畅，修复多种滚动跳动与生成结束时的闪动。
-- **Kivio Chat 独立运行时** —— Kivio Chat 成为独立运行时，与 Agent 模式分开配置提示词。
-- **新模型** —— 新增 Claude Opus 5 与最新 Gemini Flash；外部 CLI 新增 Kimi CLI 供应商配置。
-- **发送与审批体验** —— 发送等待期间保留输入草稿与附件，消息真正进入发送流程后才清空；审批卡提交中禁用按钮并显示失败原因，可直接重试。
-- **对话库与搜索** —— 全局搜索显示匹配片段并高亮跳转；修复从对话库打开对话的顺序问题；上下文用量面板收纳为三组。
-- **界面修复** —— 恢复细胶囊滚动条并保持聊天滚动条可见，侧栏列表滚动时自动隐藏；统一设置面板头部与背景；CLI 供应商弹窗改为卡片分区。
-- **安全与稳定** —— HTML 预览 iframe 沙箱化；Lens 覆盖层失活时后端强制关闭兜底；自动保存的设置在关闭窗口时同步到聊天视图。
-
-## v2.8.8
-
-- **对话库** —— 新增对话管理中心：搜索、书架分类、排序分组、多选批量操作、归档。插件管理改到设置页。
-- **提示词缓存时长** —— 供应商可选择关闭、短时或长时缓存。
-- **扩展中心中英文** —— 助手、技能、MCP、知识库、笔记、插件页面支持界面语言切换。
-- **会话用量** —— 输入栏显示本会话的输入、缓存命中与输出 token 用量。
-- **标题动画** —— 模型生成对话标题时，以打字效果替换临时标题。
-- **Cursor Composer** —— 支持 Composer 1 / 1.5 / 2 / 2.5 等模型的上下文窗口与定价显示。
-- **侧栏操作** —— 对话可钉选、一键归档；完整菜单改到右键；生成中显示波浪状态指示。
-- **设置与用量统计** —— 调整设置导航顺序与记忆页布局；用量统计新增请求成功率。
-- **问题修复** —— 修复流式中断后内容丢失、重复消息、滚动异常、批量删除残留，以及对话库切换闪白。
-
-## v2.8.7
-
-- **外部 CLI Agent 能力补齐** —— Claude Code 接入问用户、计划批准、后台任务和子代理实时进度，子代理调用独立显示为卡片；内置 Agent 改进读文件输出上限、上下文超窗压缩、空响应判定与用量统计。
-- **Pi 与 pi-btw 适配** —— Pi 原生供应商配置接入统一外部 CLI 体系，pi-btw 事件映射进共享运行协议；流式中途断开时保留重试能力，并将上游断流与普通进程退出分开呈现。
-- **长文本粘贴附件** —— 超长粘贴内容转换为可查看、编辑的内存文本附件，并完整覆盖持久化、重新生成、外部 CLI、导出和 steering，不再静默丢失正文。
-- **聊天交互与渲染修复** —— 修复 `<details>` 标签原样显示、中文相邻粗体不渲染、问用户答案折叠、图片右键菜单被 WebView 吞掉，以及窗口 resize 竞态解除流式滚动跟随。
-- **状态动效和暗色模式** —— 消息流末尾新增常驻运行状态行，后台任务计数与侧栏运行指示更准确；修复部分设备尤其暗色模式下的状态动画异常，并降低 WKWebView 悬停显隐引发的重绘成本。
-- **记忆指令过滤** —— 收紧并修正记忆系统对命令字眼的安全匹配，避免正常内容被误过滤，同时清理输入区相关边界状态。
-- **OpenCode、模型与用量** —— 完善 OpenCode 原生供应商配置；外部 CLI 上下文用量按轮更新，新增首 token 延迟和思考档位记录，修复模型映射与统计口径。
-- **其它体验改进** —— 支持生成中消息排队与立即引导，检查更新可就地执行，发送后为新消息留出阅读空间；设置页供应商与 CLI 分栏更紧凑，并修复 Edge/WebView2 密码可见按钮重复。
-
-## v2.8.6
-
-- **实时协议版本化** —— 聊天的实时通信收进单条 `chat-protocol` 通道：运行事件带版本与序号，会话事件带 revision，断线可按快照重放，TypeScript 类型与 JSON Schema 由 Rust 侧生成后提交（`npm run protocol:check` 进 CI 门禁）。配套修掉会话持久化的并发竞争、侧栏刷新的全量扫盘与独占锁、一个订阅者抛错毒死整条实时流、空 delta 的段占位事件被吞。
-- **从本地 CLI 导入对话** —— 绑定了文件夹的项目新增「从 CLI 导入对话」：列出工作目录等于项目根的原生会话，导入成 Kivio 对话，续聊仍由原 CLI 承担，支持 claude / codex / grok / kimi / opencode。导入的对话钉死在原 CLI 与原工作目录，历史是一次性快照、不与 CLI 同步（附过期提示）；claude 的项目目录编码有损，改为读 jsonl 里的明文 cwd。
-- **每个供应商单独的请求配置** —— 供应商详情「测试连接」下方新增「请求配置 ›」：自定义请求头（行内编辑 + 校验 + 从 JSON / cURL 粘贴导入，中转站要的 X-Title / HTTP-Referer 之类终于有地方填）、跟随系统代理开关（关掉走直连）、prompt caching、按 Claude Code / Codex / Grok 注入整套客户端身份头。prompt 缓存不再只有 Anthropic，OpenAI 协议一并覆盖；测试连接读的是**编辑中**的配置，不再出现「测试通过、聊天 403」。
-- **侧栏可手排，对话可钉位** —— 集与项目改为拖拽排序，索引里的数组顺序就是显示顺序（此前项目每次按 `updated_at` 倒序重排且不落盘，而那个字段只在显式改名/改色时写，作为「最近使用」是假信号）。展开后的对话也能拖：时间序仍是底座，拖过的钉在放下的那一行，其余按更新时间填空位。拖拽是插入线式、按每行真实位置命中，因此不要求行高相等；「最近」平铺列表保持纯时间线。
-- **Grok (xAI) 独立为一种接口协议** —— xAI 的 Responses 端点严格拒收一批 OpenAI 专有字段（instructions / store / prompt_cache_key …），思考档位也是自己一套。新增 `xai_responses` 协议后不再每个会话白扔一次 400；**按用户选的协议分叉，不按 base_url 猜**（中转站可以把 grok 挂在任意域名上）。系统提示词写入 `input[0]` 的 `role:system` 项，`store:false` 显式下发 —— xAI 默认把响应存 30 天，而 Kivio 从不用 `previous_response_id`。
-- **修一批流式、删除与渲染缺陷** —— 断流回落非流式的总超时 60s → 600s（high reasoning + 十万 token 输入根本不可能在 60 秒内答完，三次重试白烧 195 秒必然失败）；同一张图被 read 两次不再在历史里留两份 base64（实测占请求体 74%，而 token 估算故意不计图片、压缩层永远看不见）；新增 Timeout 失败分类并带上剥壳后的供应商原始报错；流式表格不再被贪婪正则四行只切一刀退化成段落；删除对话改为先摘文件与索引条目，Windows 上 dev server 钉住工作区不再让整个删除中止、刷新后对话又冒回来。
-- **重会话切换从约 1 秒降到接近瞬时** —— 渲染策略的判据从「消息条数」换成成本估算：实测一个 14 条消息的对话因 7 条回答里塞了 231 个代码块，渲出 5433 个 DOM 节点，条数少不代表便宜。重会话走向上渐进加载而不是虚拟化 —— 本应用行高差三个数量级（提问 6~21px，回答 6885~11992px），virtua 只接受一个标量 itemSize，按消息粒度虚拟化结构性地做不到不跳。另外代码块外壳瘦身（语言标签与复制图标改走伪元素）、高亮结果加 LRU 缓存。
-- **底部跟随不再抽搐或卡死** —— 滚动跟随改为按事件来源判定：拖原生滚动条、页内查找、focus 滚动、iframe 滚到头后的链式滚动都产生不了 wheel，此前这些情况下 following 恒为 true，又在 gap>32 时钉回底部，和外部反复互写 scrollTop —— 表现是贴底时整个列表抽搐、滚动条拖不动。
-- **聊天界面接上语言开关** —— 聊天窗从来没做过 i18n（687 个键里只有 dock 的 78 个在用），设置切到 EN 而聊天仍是中文。常驻外壳搬进字符串表：侧栏、标题栏与窗口按钮、输入栏、顶栏各选择器、四个右键菜单、后台命令指示器、轮次导航条，共 145 个新键、中英双侧，取文案走新增的 `LangContext` 而不是给十九个组件各加一个 prop。
-- **退出不再漏孤儿子进程** —— 退出清理里 `tokio::time::timeout(..)` 当参数传给 `block_on`，参数在进入运行时**之前**求值，而 `Sleep` 构造就要求时间驱动在场 —— 每次退出 panic「there is no reactor running」、退出码 101，且 panic 让它之后的整段清理全部不执行：外部 CLI 会话、后台命令进程组、OCR sidecar、插件预览每次关窗都在漏，讽刺的是这些清理的注释都写着「不同步等就会留下孤儿」。
-- **外部 CLI 模型选单与其它** —— Claude Code 不再堆别名与具体版本，只保留四档家族 catalog 并应用 settings/env 映射，Codex 以精选四模型为主；修 Claude 多轮模型映射与 Codex effort 边界。HTML 预览在生成中只渲染源码、静默 600ms 才挂 iframe，指针在预览里滚也能带动聊天列表。Off 思考档显式下发 `none`/`disabled` 而不是默认 high；设置页齐边铺满；Mica 拖窗与缩放时不再闪；最大化图标在非整数缩放下不再缺边。
-- **移除项（不兼容）** —— AI 客户端设置「响应」下的「流式输出」与「思考模式」两个开关删除，行为固定为开启；此前手动关掉过的用户下次启动会被 `sanitize_settings` 改回开启，界面上不再有关掉它们的入口（结构体字段保留，serde 向下兼容）。
-
-完整历史:[GitHub Releases](https://github.com/ZMGID/kivio/releases)。
+完整历史见 [GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
 ## 开发
 
@@ -448,82 +377,11 @@ Kivio Desktop checks GitHub Releases for updates shortly after launch (can be di
 
 ## What's New — v2.9.2
 
-- **Pi** — the resident session now keeps ask-user, native images, mid-turn steer, and next-turn follow-up instead of dropping controls every round. The right-dock Trajectory tab inspects, forks, and clones branches as new conversations. Settings manages Pi Packages (npm / git / local) and local extensions, plus Skills from `~/.pi`, shared `~/.agents`, Packages, and extra scan paths (Claude Code / Codex directories can be mounted without copying files).
-- **DeepSeek Harness** — steer injects into the current turn; follow-up queues the next one. Sessions Kivio creates bind to the project working directory, matching official web Host Workspace membership. Parallel ask-user prompts no longer overwrite each other, and background subagents stay running. Closing the window stops the session; cancel actually cancels. A missing native session degrades instead of hard-failing. Prerelease versions such as `0.1.0-rc.x` are no longer treated as already latest.
-- **Trajectory dock** — every runtime gets a searchable turn ledger of user, assistant, tool, and compaction steps, with jump-to-message.
-- **Web search** — built-in and third-party search share a numbered source directory (title, domain, date, snippet); answer `[n]` chips open the source. Adds Brave, Serper, Bocha, Zhipu, TinyFish, and SearXNG; TinyFish MCP authorizes in the browser, no API key.
-- **Plugins and skills** — the plugins page runs the official GitHub README install command; enabling a plugin syncs official Skills in the background, and plugin MCP stays on the plugins page (not Connectors). Kivio Skills scan `~/.kivio/skills`, project `.kivio/skills`, and shared `~/.agents/skills`; imports write to `~/.kivio/skills`.
-- **External CLI providers** — Kivio-configured providers can coexist with the CLI's own; every enabled provider stays available, and Default only picks the fallback when no model is selected.
-- **Chat polish** — Kivio Agent holds follow-ups until the final answer so they do not interrupt the current tool round. The set editor becomes a larger card. The account menu shows today's usage. Restarting restores the conversation you actually left on. Citation chips no longer clip. Sandbox exports and attachment filenames keep Chinese characters.
-- **Install** — the Windows installer can be per-user or machine-wide (Program Files can elevate). Long MCP server names no longer collide. The Email connector is removed.
-
-## v2.9.1
-
-- **DeepSeek Harness** — adds images, attachment paths, stop-task (including subagents), and slash discovery; writes model image/reasoning capabilities back onto existing routes; third-party provider handshake no longer spins. A blank machine can one-click install and save the official key. Credentials follow the official layers (env, credentials file, `.env`); third-party routes use their own key env vars instead of being blocked.
-- **External CLI system prompt** — a collection's system prompt is injected into the external CLI, so switching collections no longer drops that identity layer.
-- **Provider model lists** — listing models authenticates per protocol and parses Gemini's native ListModels.
-- **Launch** — can minimize to the tray after start; launch-at-startup no longer forces the chat window open.
-- **Chat** — the workbench path moves after tools, so switching conversations no longer busts the prefix cache.
-
-## v2.9.0
-
-- **DeepSeek Harness** — dsh joins as an external CLI: official provider, four Agent presets, a plugins page, slash commands (known ones highlighted), tool cards, compaction, and `/compact` `/goal` `/feedback`. Restarts and launch-config changes keep the native session; the title bar shows the model and effort actually in use. Background subagents show live progress and write the report back into the parent conversation when they finish, matching official DSH web. The usage strip no longer subtracts already-excluded cached input a second time.
-- **More reliable external CLIs** — each CLI remembers its last model and thinking level; switching away and back no longer resets the pills to Auto. A mid-turn reconnect keeps the native session instead of opening a blank one. Grok's silent 503/429 retries surface as status notes. A failed send restores the draft. A missing native session degrades the ACP way instead of hard-failing. Messages cannot be deleted while generating, so attachments are not garbage-collected by mistake.
-- **Todos, ask-user, and tool cards** — dsh / Claude Code todos land on the conversation list; Claude Task cards show the list immediately. Ask-user from external CLIs uses one shared card — the next CLI only needs a codec. Official dsh tool names, compaction, and job events reuse the existing cards and dividers instead of being treated as a prompt.
-- **Pi** — built-in `/compact` uses native compact instead of sending a prompt. Import honors `PI_CODING_AGENT_DIR` and the shared MCP / skill layers; native session ids are shorter.
-- **Kivio Chat** — no longer inherits Agent identity or the shell essay; the send path mounts the knowledge base; custom / assistant text cannot override the Chat contract; the dock, skills, and `/plan` stay hidden in Chat.
-- **Notes** — the notes page can open the library folder; dropping in an external markdown file makes it appear automatically. Directory changes refresh the list; saving while editing does not yank the list back.
-- **New model** — adds Grok 4.6 (500k context) and lifts the grok CLI default and fallback list from 4.5 to 4.6.
-- **Conversation storage** — conversation JSON no longer stores image base64; images are content-addressed on disk, so reading the same file N times keeps one copy. Opening a conversation migrates existing oversized files. Startup reclaims empty workspaces and orphan attachments from deleted conversations; non-empty workspaces and user uploads are never auto-deleted. Image-heavy conversations no longer blow disk or memory on open.
-- **Chat polish** — clicking an already-open conversation no longer reloads it; opening a conversation with diagrams waits for Mermaid before aligning; long text is no longer fully hashed. Pinning works while generating. Typing at the bottom no longer shakes the screen; switching conversations in dark mode no longer flashes white. The title typewriter works again. Adding a CLI model in settings no longer flashes away. Tool rounds default to unlimited (the old default of 20 migrates once).
-
-## v2.8.9
-
-- **Long-conversation performance overhaul** — the message list rebuilds virtualization and scroll follow: off-screen messages unmount, the streaming row renders independently, and heavy content mounts lazily. Long conversations open faster, streaming and scrolling back through history are smoother, and several scroll jumps and end-of-run flickers are fixed.
-- **Kivio Chat as a separate runtime** — Kivio Chat becomes its own runtime, configured apart from Agent mode with its own prompt.
-- **New models** — adds Claude Opus 5 and the latest Gemini Flash; external CLIs gain a Kimi CLI provider config.
-- **Send and approval experience** — the composer keeps your draft and attachments until the message actually enters the send pipeline; approval cards disable their buttons while submitting and surface failures for retry.
-- **Conversation library and search** — global search shows match snippets with highlight jump; fixes open order from the library; the context-usage panel collapses into three groups.
-- **UI fixes** — restores thin capsule scrollbars and keeps the chat scrollbar visible, with the sidebar list auto-hiding on scroll; unifies the settings panel header and background; the CLI provider modal becomes card sections.
-- **Security and stability** — sandboxes the untrusted HTML preview iframe; adds a backend force-close fallback for a dead Lens overlay webview; autosaved settings propagate to the chat view on close.
-
-## v2.8.8
-
-- **Conversation library** — new conversation manager with search, shelves, sort/group, bulk actions, and archive. Plugin management moves to Settings.
-- **Prompt-cache duration** — set provider cache retention to off, short, or long.
-- **Extension-center languages** — Assistant, Skill, MCP, Knowledge, Notes, and Plugin pages follow the app language.
-- **Session usage** — the composer shows input, cache-hit, and output tokens for the current session.
-- **Title animation** — generated conversation titles replace the temporary title with a typewriter effect.
-- **Cursor Composer** — shows context window and pricing for Composer 1 / 1.5 / 2 / 2.5.
-- **Sidebar actions** — pin and one-click archive; full menu on right-click; wave indicator while generating.
-- **Settings and usage stats** — cleaner settings nav and memory layout; usage stats include request success rate.
-- **Bug fixes** — lost content after stream failures, duplicate messages, scroll glitches, leftover bulk-delete state, and white flashes when switching shelves.
-
-## v2.8.7
-
-- **Expanded external-CLI agent support** — Claude Code now supports ask-user, plan approval, background tasks, and live subagent progress, with subagent calls rendered as dedicated cards. The built-in agent improves file-read output limits, context-window compaction, empty-response handling, and usage accounting.
-- **Pi and pi-btw integration** — Pi provider configuration joins the shared external-CLI system, and pi-btw events map into the common run protocol. Mid-stream upstream failures retain retry behavior and are presented separately from ordinary process exits.
-- **Long-paste attachments** — oversized pasted text becomes an editable in-memory attachment, with complete support across persistence, regeneration, external CLIs, export, and steering, so its body is no longer silently lost.
-- **Chat interaction and rendering fixes** — fixes raw `<details>` tags, adjacent Chinese bold text not rendering, ask-user answers collapsing, image context menus being swallowed by the WebView, and a window-resize race that disabled streaming scroll follow.
-- **Status motion and dark mode** — the message stream gains a persistent run-status row, with more accurate background-task counts and sidebar activity. Status animation issues seen on some machines, especially in dark mode, are fixed, while WebView hover redraw cost is reduced.
-- **Memory-command filtering** — tightens and corrects safety matching for command-like wording so normal content is not mistakenly filtered, and cleans up related composer edge states.
-- **OpenCode, models, and usage** — completes native OpenCode provider configuration; external-CLI context usage now updates per turn, records time to first token and effort level, and fixes model mapping and accounting boundaries.
-- **More polish** — supports queued messages and immediate steering during generation, runs update checks in place, leaves reading space below newly sent messages, tightens the provider/CLI settings layout, and fixes duplicate password-visibility controls in Edge/WebView2.
-
-## v2.8.6
-
-- **Versioned realtime protocol** — chat realtime traffic moved onto a single `chat-protocol` channel: run events carry a version and a sequence number, conversation events carry a revision, a dropped connection replays from a snapshot, and the TypeScript types and JSON Schemas are generated from Rust and committed (`npm run protocol:check` gates CI). Along with it: conversation persistence is concurrency-safe, sidebar refresh no longer scans the whole disk or takes an exclusive lock, one throwing subscriber no longer poisons the realtime stream, and empty-delta segment placeholders are no longer swallowed.
-- **Import conversations from a local CLI** — projects bound to a folder gain "import conversation from CLI": it lists native sessions whose working directory equals the project root and imports them as Kivio conversations, with the original CLI still driving the continuation, for claude / codex / grok / kimi / opencode. An imported conversation is pinned to its original CLI and working directory, and history is a one-time snapshot rather than a live sync (with a staleness note); claude's project-directory encoding is lossy, so the plain `cwd` inside the jsonl is read instead.
-- **Per-provider request configuration** — provider detail gains a "Request config ›" page below "test connection": custom headers (inline editing plus validation, importable by pasting JSON or cURL, so relay-required headers like X-Title / HTTP-Referer finally have a home), a follow-system-proxy toggle (off means a direct connection), prompt caching, and a full client-identity header set for Claude Code / Codex / Grok. Prompt caching is no longer Anthropic-only; the OpenAI protocols are covered too. Test-connection reads the config **being edited**, so "test passes, chat 403" is gone.
-- **Hand-ordered sidebar and pinned conversations** — sets and projects are drag-reordered and the array order in the index is the display order (projects used to be re-sorted by `updated_at` on every read without persisting, and that field is only written on an explicit rename or color change, making it a fake recency signal). Expanded conversations can be dragged too: time order is still the base, a dragged conversation pins to the row you dropped it on, and the rest fill the remaining slots by update time. Dragging is insertion-line style and hit-tests real row positions, so rows need not be equal height; the flat "Recent" list stays a pure timeline.
-- **Grok (xAI) is its own wire protocol** — xAI's Responses endpoint strictly rejects a set of OpenAI-only fields (instructions / store / prompt_cache_key / …) and has its own effort ladder. With the new `xai_responses` protocol no conversation burns a 400 to learn that, and the fork is **keyed on the protocol you picked, never guessed from `base_url`** (a relay can host grok on any domain). The system prompt is written as a `role:system` item in `input[0]`, and `store:false` is sent explicitly — xAI keeps responses for 30 days by default and Kivio never uses `previous_response_id`.
-- **A batch of streaming, deletion, and rendering fixes** — the non-streaming fallback timeout went from 60s to 600s (high reasoning over a 100k-token input cannot possibly finish in 60 seconds, so three retries burned 195 seconds to fail for certain); reading the same image twice no longer leaves two base64 copies in history (measured at 74% of the request body, and the token estimate deliberately skips images so the compaction layer never saw it); a new Timeout failure class carries the provider's unwrapped raw error; streaming tables are no longer collapsed into a paragraph by a greedy regex that cut once across four rows; and deleting a conversation now detaches the file and index entry first, so on Windows a dev server pinning the workspace no longer aborts the whole deletion and leaves the conversation to reappear on refresh.
-- **Switching into a heavy conversation dropped from ~1s to near-instant** — the render strategy is chosen by estimated cost instead of message count: one 14-message conversation packed 231 code blocks into 7 answers and rendered 5433 DOM nodes, so few messages does not mean cheap. Heavy conversations use progressive upward loading rather than virtualization — row heights here span three orders of magnitude (6–21px questions, 6885–11992px answers) and virtua accepts a single scalar `itemSize`, so per-message virtualization structurally cannot avoid jumping. Code-block chrome is slimmer (language label and copy icon are pseudo-elements) and highlight results are LRU-cached.
-- **Pin-to-bottom no longer twitches or locks up** — scroll follow is decided by event source: dragging the native scrollbar, in-page find, focus scrolling, and scroll chaining out of an iframe all produce no wheel event, so `following` stayed true forever and the 32px re-pin fought whoever else was writing `scrollTop` — the list twitched at the bottom and the scrollbar would not move.
-- **The chat UI honors the language switch** — the chat window never had i18n (only 78 of 687 keys, all in the dock, were used), so switching settings to EN left chat in Chinese. The persistent shell moved into the string table: sidebar, titlebar and window buttons, composer, top-bar pickers, four context menus, the background-command indicator, and turn navigation — 145 new keys in both languages, read through a new `LangContext` rather than adding a prop to nineteen components.
-- **No more orphaned child processes on exit** — the exit cleanup passed `tokio::time::timeout(..)` as an argument to `block_on`; arguments are evaluated **before** entering the runtime, and constructing `Sleep` requires the time driver to be present, so every exit panicked with "there is no reactor running" and exit code 101 — and the panic meant everything after that line never ran: external CLI sessions, background command process groups, the OCR sidecar, and plugin previews leaked on every window close, while each of those cleanups carried a comment saying it must be awaited or it orphans children.
-- **External CLI model menus, and more** — Claude Code no longer piles up aliases and point versions, keeping four family entries and applying settings/env mapping, while Codex leads with four curated models; Claude's multi-turn model mapping and Codex effort bounds are fixed. HTML preview renders as source while generating and only mounts the iframe after 600ms of silence, and scrolling with the pointer inside the preview moves the chat list too. The Off effort level sends `none`/`disabled` explicitly instead of defaulting to high, the settings page fills edge to edge, Mica no longer flashes while dragging or resizing, and the maximize glyph no longer loses an edge at fractional display scaling.
-- **Removed (breaking)** — the "streaming" and "thinking mode" toggles under AI-client Response settings are gone and both behaviors are permanently on; anyone who had turned one off will have it set back on by `sanitize_settings` at next launch, and there is no longer any UI to disable them (the struct fields remain for serde compatibility).
+- **Pi** — ask-user, native images, mid-turn steer and next-turn follow-up; Dock Trajectory can fork/clone; Settings manages extensions and Skills.
+- **DeepSeek Harness** — steer or queue while generating; sessions bind to the project working directory; close and cancel actually stop.
+- **Web search** — clickable source directory and `[n]` jump; adds Brave, Serper, Zhipu, TinyFish, and more.
+- **Plugins and skills** — one-click official install; Skills scan `~/.kivio` and `~/.agents`.
+- **More** — CLI providers can coexist with the CLI's own config; account menu shows today's usage; restart remembers the current conversation. Email connector removed.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 
