@@ -47,8 +47,20 @@ body {
      Windows Mica / macOS Menu 会从卡片缝和半透明侧栏里消失。 */
   background-color: transparent;
   background: transparent;
+}
+
+/* macOS Retina 上灰度抗锯齿比默认亚像素更干净。不要套到 Windows：
+   WebView2/DirectWrite 的 antialiased 会关掉 ClearType，Win10 小字发虚。 */
+html.macos,
+html.macos body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+html.windows,
+html.windows body {
+  -webkit-font-smoothing: auto;
+  text-rendering: auto;
 }
 
 :root {
@@ -3506,8 +3518,6 @@ button.chat-composer-status-item:hover {
   font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.4;
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
 
 /* 主题色令牌不在此重复定义：--theme-surface* 是自定义属性，会从 :root 继承进本作用域，

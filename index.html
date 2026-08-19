@@ -6,6 +6,13 @@
     <link rel="icon" type="image/png" href="/icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kivio Desktop</title>
+    <script>
+      (function () {
+        var ua = navigator.userAgent
+        if (/Windows/i.test(ua)) document.documentElement.classList.add('windows')
+        else if (/Mac|iPhone|iPad|iPod/i.test(ua)) document.documentElement.classList.add('macos')
+      })()
+    </script>
   </head>
   <body>
     <!-- React 应用的挂载根节点 -->
