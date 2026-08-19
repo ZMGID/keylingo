@@ -172,7 +172,17 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.9.1
+## 新版本 —— v2.9.2
+
+- **Pi** —— 常驻会话补齐原生控制与跟进排队；右侧 Dock「轨迹」可查看、分叉、克隆分支成新对话；设置里管理 Pi 扩展与技能。
+- **DeepSeek Harness** —— 轮内插话与下一轮排队走原生协议；会话绑到项目工作目录；空闲问用户、并行提问与后台子代理不再互相覆盖；关闭或取消会真正停掉。
+- **轨迹 Dock** —— 每个运行时都有可读的轮次账本，打开该页才加载。
+- **联网搜索** —— 内置与第三方共用带来源目录的搜索卡，答案 [n] 可点开。新增 Brave、Serper、Bocha、智谱、TinyFish、SearXNG；TinyFish MCP 走浏览器 OAuth。
+- **插件与技能** —— 插件页一键跑官方 README 安装命令；技能扫描 `~/.kivio/skills`、项目 `.kivio/skills` 和共享 `~/.agents/skills`。
+- **外部 CLI 供应商** —— 同一 CLI 可并存多套供应商配置。
+- **聊天与安装** —— 集编辑器换成更大的卡片；账户菜单显示今日用量；重启不再恢复到旧对话；沙箱与附件文件名保留中文。Windows 安装可选每用户或整机。去掉 Email 连接器。
+
+## v2.9.1
 
 - **DeepSeek Harness** —— 补齐图片、附件路径、停任务（含子代理）和斜杠发现；模型图片与推理档写回已有路由；第三方供应商握手不再空转。空白机器可一键安装并填官方密钥。凭据按官方分层识别环境变量、凭据文件和 `.env`，第三方路由用各自的密钥环境变量，不再误拦。
 - **外部 CLI 系统提示** —— 对话所属集的系统提示会注入外部 CLI，切集不再丢掉那一层人设。
@@ -435,7 +445,17 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.9.1
+## What's New — v2.9.2
+
+- **Pi** — persistent native controls and follow-up queueing; the right-dock Trajectory tab inspects, forks, and clones branches as new conversations; Settings manages Pi extensions and skills.
+- **DeepSeek Harness** — mid-turn steer and next-turn queueing use the native protocol; sessions bind to the project working directory; idle asks, parallel asks, and background subagents no longer overwrite each other; close and cancel actually stop the actor.
+- **Trajectory dock** — every runtime gets a readable turn ledger, loaded only when the tab is open.
+- **Web search** — built-in and third-party search share a numbered source directory (title/domain/date/snippet); answer `[n]` chips open the source. Adds Brave, Serper, Bocha, Zhipu, TinyFish, and SearXNG; TinyFish MCP uses browser OAuth.
+- **Plugins and skills** — the plugins page runs each catalog's official README install command; skill discovery scans `~/.kivio/skills`, project `.kivio/skills`, and shared `~/.agents/skills`.
+- **External CLI providers** — multiple provider configs can coexist for the same CLI.
+- **Chat and install** — the set editor becomes a larger card; the account menu shows today's usage; restart no longer restores an old conversation; sandbox and attachment filenames keep CJK characters. Windows install can be per-user or machine-wide. The Email connector is removed.
+
+## v2.9.1
 
 - **DeepSeek Harness** — adds images, attachment paths, stop-task (including subagents), and slash discovery; writes model image/reasoning capabilities back onto existing routes; third-party provider handshake no longer spins. A blank machine can one-click install and save the official key. Credentials follow the official layers (env, credentials file, `.env`); third-party routes use their own key env vars instead of being blocked.
 - **External CLI system prompt** — a collection's system prompt is injected into the external CLI, so switching collections no longer drops that identity layer.

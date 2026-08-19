@@ -195,7 +195,7 @@
 
 <div class="topbar">
   <button class="menu-btn" id="menuBtn" aria-label="Menu">≡</button>
-  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.9.1</span></a>
+  <a class="brand" href="../index.html"><img src="../assets/logo.png" alt="" />KIVIO DESKTOP<span class="docs-tag">DOCS · v2.9.2</span></a>
   <div class="spacer"></div>
   <a class="top-link" href="../index.html">← 官网</a>
   <a class="icon-link" href="https://github.com/ZMGID/kivio" target="_blank" rel="noopener" aria-label="GitHub">
@@ -288,9 +288,9 @@
     <article data-page="install" class="hidden">
       <div class="crumb">开始</div>
       <h1>安装</h1>
-      <p class="lead">当前稳定版为 v2.9.1，从 GitHub Releases 获取对应平台安装包。</p>
+      <p class="lead">当前稳定版为 v2.9.2，从 GitHub Releases 获取对应平台安装包。</p>
       <h2 id="install-mac">macOS</h2>
-      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.9.1_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
+      <p>Apple Silicon 下载 <code>Kivio.Desktop_2.9.2_aarch64.dmg</code>，打开后拖入 Applications。系统要求 macOS 13 及以上（屏幕捕获基于 ScreenCaptureKit）。当前 DMG 未签名，首次启动请在 Finder 中右键 Kivio Desktop →「打开」，或执行：</p>
       <pre><code>xattr -cr "/Applications/Kivio Desktop.app"</code></pre>
       <p>首次使用以下功能时，系统会请求相应的隐私权限：</p>
       <table>
@@ -302,7 +302,7 @@
       </table>
       <p>在「系统设置 → 隐私与安全性」中为 Kivio Desktop 打开对应开关即可，无需重启应用。</p>
       <h2 id="install-win">Windows</h2>
-      <p>下载并运行 <code>Kivio.Desktop_2.9.1_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
+      <p>下载并运行 <code>Kivio.Desktop_2.9.2_x64-setup.exe</code>（NSIS），支持 Windows 10/11 x64。手动启动默认打开 AI 客户端；勾选开机自启后，启动时会附带 <code>--from-autostart</code> 参数直接进入后台，不弹出窗口。</p>
       <h2 id="install-update">更新</h2>
       <p>应用启动时会静默检查一次 GitHub Releases 是否有新版本（<code>autoCheckUpdate</code>，默认开启）。也可以在「设置 → 关于」手动检查；发现新版本后可直接在应用内下载安装包并启动安装。若 GitHub API 检查失败，界面会提供 Releases 页面作为手动下载兜底。</p>
     </article>
@@ -310,7 +310,7 @@
     <article data-page="quickstart" class="hidden">
       <div class="crumb">开始</div>
       <h1>快速上手</h1>
-      <p class="lead">从安装 v2.9.1 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
+      <p class="lead">从安装 v2.9.2 到第一轮智能体对话，再试一次屏幕工具与本地 Agent。</p>
       <h2 id="qs-install">第一步 · 安装并启动</h2>
       <p>从 <a href="https://github.com/ZMGID/kivio/releases/latest" target="_blank" rel="noopener">GitHub Releases ↗</a> 下载最新版：macOS Apple Silicon 使用 <code>.dmg</code>，Windows x64 使用 NSIS <code>-setup.exe</code>。macOS DMG 未签名，首次启动需要右键 →「打开」。详细权限与更新说明见 <a href="#/install">安装</a>。</p>
       <h2 id="qs-key">第二步 · 完成首次引导</h2>
@@ -751,6 +751,17 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <div class="crumb">更多</div>
       <h1>更新日志</h1>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
+      <h2 id="changelog-292">v2.9.2 · 2026-08-19</h2>
+      <ul>
+        <li><b>Pi</b> —— 常驻会话补齐原生控制与跟进排队；右侧 Dock「轨迹」可查看、分叉、克隆分支成新对话；设置里管理 Pi 扩展与技能。</li>
+        <li><b>DeepSeek Harness</b> —— 轮内插话与下一轮排队走原生协议；会话绑到项目工作目录；空闲问用户、并行提问与后台子代理不再互相覆盖；关闭或取消会真正停掉。</li>
+        <li><b>轨迹 Dock</b> —— 每个运行时都有可读的轮次账本，打开该页才加载。</li>
+        <li><b>联网搜索</b> —— 内置与第三方共用带来源目录的搜索卡，答案 [n] 可点开。新增 Brave、Serper、Bocha、智谱、TinyFish、SearXNG；TinyFish MCP 走浏览器 OAuth。</li>
+        <li><b>插件与技能</b> —— 插件页一键跑官方 README 安装命令；技能扫描 <code>~/.kivio/skills</code>、项目 <code>.kivio/skills</code> 和共享 <code>~/.agents/skills</code>。</li>
+        <li><b>外部 CLI 供应商</b> —— 同一 CLI 可并存多套供应商配置。</li>
+        <li><b>聊天与安装</b> —— 集编辑器换成更大的卡片；账户菜单显示今日用量；重启不再恢复到旧对话；沙箱与附件文件名保留中文。Windows 安装可选每用户或整机。去掉 Email 连接器。</li>
+      </ul>
+      <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.9.2" target="_blank" rel="noopener">查看 v2.9.2 Release notes ↗</a></p>
       <h2 id="changelog-291">v2.9.1 · 2026-08-16</h2>
       <ul>
         <li><b>DeepSeek Harness</b> —— 补齐图片、附件路径、停任务（含子代理）和斜杠发现；模型图片与推理档写回已有路由；第三方供应商握手不再空转。空白机器可一键安装并填官方密钥。凭据按官方分层识别环境变量、凭据文件和 <code>.env</code>，第三方路由用各自的密钥环境变量，不再误拦。</li>
