@@ -50,10 +50,12 @@ fn sanitize_python_input_name(path: &Path) -> String {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("input");
+    // Keep Unicode letters/digits so a host file like 销售报表.xlsx is still
+    // that name inside Pyodide (`KIVIO_INPUT_FILES`), not ________.xlsx.
     let sanitized = raw
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
+            if ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
                 ch
             } else {
                 '_'
@@ -1412,6 +1414,11 @@ pub(super) async fn run_python_via_pyodide(
                         for exported in &exported_artifacts {
                             if let Some(artifact) = artifacts.get_mut(exported.artifact_index) {
                                 artifact.path = Some(exported.path.display().to_string());
+                                if let Some(name) =
+                                    exported.path.file_name().and_then(|value| value.to_str())
+                                {
+                                    artifact.name = name.to_string();
+                                }
                             }
                         }
                         let export_note =
@@ -1457,6 +1464,27 @@ pub(super) async fn run_python_via_pyodide(
 mod tests {
     use super::*;
     use crate::native_tools::ReadFileResult;
+    use std::path::Path;
+
+    #[test]
+    fn python_input_name_keeps_unicode_letters() {
+        assert_eq!(
+            sanitize_python_input_name(Path::new("销售报表.xlsx")),
+            "销售报表.xlsx"
+        );
+        assert_eq!(
+            sanitize_python_input_name(Path::new("/tmp/Q1 销售.csv")),
+            "Q1 销售.csv"
+        );
+        assert_eq!(
+            sanitize_python_input_name(Path::new("../secret?.png")),
+            "secret_.png"
+        );
+        assert_eq!(
+            sanitize_python_input_name(Path::new("chart.png")),
+            "chart.png"
+        );
+    }
 
     #[test]
     fn read_file_tool_result_preserves_structured_content() {

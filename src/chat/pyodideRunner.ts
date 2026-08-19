@@ -403,6 +403,14 @@ function pythonStringLiteral(value: string): string {
   return JSON.stringify(value)
 }
 
+export function sanitizePythonInputName(name: string): string {
+  const base = name.split(/[/\\]/).pop()?.trim() ?? ''
+  const sanitized = base
+    .replace(/[^\p{L}\p{N}._ -]/gu, '_')
+    .replace(/^[. _-]+|[. _-]+$/g, '')
+  return sanitized || 'input'
+}
+
 export function wrapPythonUserCode(code: string): string {
   return `
 import traceback as _kivio_traceback
@@ -858,7 +866,7 @@ async function mountPythonInputFiles(
     if (!bytes) {
       throw new Error(`Invalid run_python input file payload: ${file.name}`)
     }
-    const safeName = file.name.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[. _-]+|[. _-]+$/g, '') || 'input'
+    const safeName = sanitizePythonInputName(file.name)
     const virtualPath = `${inputDir}/${index + 1}-${safeName}`
     fs.writeFile(virtualPath, bytes)
     mountedPaths.push(virtualPath)

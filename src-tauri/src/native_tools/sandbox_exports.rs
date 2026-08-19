@@ -228,10 +228,14 @@ fn sanitize_export_filename(name: &str) -> String {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("output");
+    // Keep Unicode letters/digits (CJK, etc.). NTFS/APFS already accept them.
+    // Only strip path separators, Windows reserved punctuation, and other
+    // non-identifier junk — `is_ascii_alphanumeric` was collapsing 销售报表.xlsx
+    // into ________.xlsx on the no-workspace Pyodide export path.
     let sanitized = base
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            if ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_') {
                 ch
             } else {
                 '_'
@@ -602,6 +606,57 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(target.join("keep.txt")).unwrap(), "keep");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sanitize_export_filename_keeps_unicode_letters() {
+        assert_eq!(sanitize_export_filename("销售报表.xlsx"), "销售报表.xlsx");
+        assert_eq!(sanitize_export_filename("Q1销售.xlsx"), "Q1销售.xlsx");
+        assert_eq!(
+            sanitize_export_filename("C25月度汇总.xlsx"),
+            "C25月度汇总.xlsx"
+        );
+        assert_eq!(sanitize_export_filename("chart.png"), "chart.png");
+    }
+
+    #[test]
+    fn sanitize_export_filename_strips_path_and_reserved_chars() {
+        assert_eq!(sanitize_export_filename("../报表.xlsx"), "报表.xlsx");
+        assert_eq!(sanitize_export_filename("a<>b?.xlsx"), "a__b_.xlsx");
+        assert_eq!(sanitize_export_filename("___"), "output.bin");
+    }
+
+    #[test]
+    fn export_preserves_cjk_filename_on_disk() {
+        let dir = temp_dir("cjk_export");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let png = general_purpose::STANDARD.encode([137u8, 80, 78, 71, 13, 10, 26, 10]);
+        let ctx = SandboxExportContext {
+            conversation_id: "conv_cjk".to_string(),
+            message_id: "msg_cjk".to_string(),
+            tool_call_id: None,
+            output_directory: dir.clone(),
+        };
+        let exported = export_sandbox_artifacts(
+            &ctx,
+            &[ChatToolArtifact {
+                id: None,
+                name: "销售报表.xlsx".to_string(),
+                mime_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    .to_string(),
+                data_url: format!("data:image/png;base64,{png}"),
+                size_bytes: Some(8),
+                path: None,
+            }],
+        )
+        .expect("export");
+        assert_eq!(exported.len(), 1);
+        assert_eq!(
+            exported[0].path.file_name().and_then(|value| value.to_str()),
+            Some("销售报表.xlsx")
+        );
+        assert!(dir.join("销售报表.xlsx").is_file());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

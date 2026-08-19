@@ -764,10 +764,13 @@ pub(crate) fn save_message_attachments(
 }
 
 fn sanitize_attachment_name(name: &str) -> String {
+    // Keep Unicode letters/digits (CJK, etc.). Only replace path separators and
+    // other non-identifier junk — ASCII-only used to store 销售报表.xlsx as
+    // att_<id>-________.xlsx (or even lose the extension after trim).
     let sanitized: String = name
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
                 c
             } else {
                 '_'
@@ -1078,6 +1081,8 @@ mod tests {
     fn sanitize_attachment_name_removes_path_like_characters() {
         assert_eq!(sanitize_attachment_name("../secret?.png"), "secret_.png");
         assert_eq!(sanitize_attachment_name("   "), "attachment");
+        assert_eq!(sanitize_attachment_name("销售报表.xlsx"), "销售报表.xlsx");
+        assert_eq!(sanitize_attachment_name("Q1 销售.xlsx"), "Q1 销售.xlsx");
     }
 
     #[test]
