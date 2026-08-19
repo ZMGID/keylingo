@@ -144,6 +144,37 @@ describe('TrajectoryPanel', () => {
     ))
   })
 
+  it('maps duplicate user prompts to distinct Pi fork entries in order', async () => {
+    mockForkMessages.mockResolvedValue([
+      { entryId: 'e1', text: 'Same prompt' },
+      { entryId: 'e2', text: 'Same prompt' },
+    ])
+    const current = conversation({
+      agent_runtime: { kind: 'external', externalAgentId: 'pi' },
+      messages: [
+        { id: 'u1', role: 'user', content: 'Same prompt', timestamp: 1 },
+        { id: 'a1', role: 'assistant', content: 'First', timestamp: 2 },
+        { id: 'u2', role: 'user', content: 'Same prompt', timestamp: 3 },
+        { id: 'a2', role: 'assistant', content: 'Second', timestamp: 4 },
+      ],
+    })
+    render(
+      <TrajectoryPanel
+        active
+        conversation={current}
+        messages={current.messages}
+        lang="zh"
+        piNativeEnabled
+        onFocusMessage={onFocusMessage}
+        onConversationChanged={onConversationChanged}
+      />,
+    )
+    const buttons = await screen.findAllByLabelText('从这里分叉')
+    expect(buttons).toHaveLength(2)
+    await act(async () => { buttons[0].click() })
+    await waitFor(() => expect(mockFork).toHaveBeenCalledWith('conv-1', 'e1'))
+  })
+
   it('clones the current Pi branch', async () => {
     const current = conversation({
       agent_runtime: { kind: 'external', externalAgentId: 'pi' },

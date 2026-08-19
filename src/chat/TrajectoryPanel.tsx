@@ -11,7 +11,7 @@ import {
   type TrajectoryKind,
   type TrajectoryStep,
 } from './trajectory'
-import type { PiSessionMutationResult } from './piSessionTree'
+import { mapPiForkEntriesToMessages, type PiForkMessage, type PiSessionMutationResult } from './piSessionTree'
 
 type TrajectoryPanelProps = {
   active: boolean
@@ -105,7 +105,7 @@ export function TrajectoryPanel({
   )
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [forkTexts, setForkTexts] = useState<Map<string, string>>(new Map())
+  const [forkMessages, setForkMessages] = useState<PiForkMessage[]>([])
   const [sessionFile, setSessionFile] = useState<string | null>(null)
   const [sessionId, setSessionId] = useState('')
   const [loadingPi, setLoadingPi] = useState(false)
@@ -119,27 +119,22 @@ export function TrajectoryPanel({
   if (conversationIdRef.current !== conversationId) loadEpochRef.current += 1
   conversationIdRef.current = conversationId
   const visibleSteps = useMemo(() => filterTrajectorySteps(steps, query), [query, steps])
-  const userTextById = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const step of steps) {
-      if (step.kind === 'user') map.set(step.messageId, step.preview)
-    }
-    return map
-  }, [steps])
-  const forkByMessageId = useMemo(() => {
-    const next = new Map<string, string>()
-    for (const [messageId, preview] of userTextById) {
-      const entryId = forkTexts.get(preview)
-      if (entryId) next.set(messageId, entryId)
-    }
-    return next
-  }, [forkTexts, userTextById])
+  const forkByMessageId = useMemo(
+    () => mapPiForkEntriesToMessages(
+      messages.filter((message) => message.role === 'user').map((message) => ({
+        id: message.id,
+        content: message.content,
+      })),
+      forkMessages,
+    ),
+    [forkMessages, messages],
+  )
 
   const loadPi = useCallback(async () => {
     const requestedConversationId = conversationId
     const epoch = ++loadEpochRef.current
     if (!requestedConversationId || !piNativeEnabled) {
-      setForkTexts(new Map())
+      setForkMessages([])
       setSessionFile(null)
       setSessionId('')
       return
@@ -152,13 +147,13 @@ export function TrajectoryPanel({
         chatApi.piForkMessages(requestedConversationId),
       ])
       if (loadEpochRef.current !== epoch || conversationIdRef.current !== requestedConversationId) return
-      setForkTexts(new Map(forkMessages.map((item) => [item.text.trim(), item.entryId])))
+      setForkMessages(forkMessages)
       setSessionFile(snapshot.sessionFile)
       setSessionId(snapshot.sessionId)
       setSwitchPath(snapshot.sessionFile ?? '')
     } catch {
       if (loadEpochRef.current !== epoch || conversationIdRef.current !== requestedConversationId) return
-      setForkTexts(new Map())
+      setForkMessages([])
     } finally {
       if (loadEpochRef.current === epoch) setLoadingPi(false)
     }
@@ -171,7 +166,7 @@ export function TrajectoryPanel({
     setSwitchOpen(false)
     if (active && piNativeEnabled) void loadPi()
     if (!piNativeEnabled) {
-      setForkTexts(new Map())
+      setForkMessages([])
       setSessionFile(null)
       setSessionId('')
     }

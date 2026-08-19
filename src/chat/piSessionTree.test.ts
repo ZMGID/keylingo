@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   flattenPiSessionTree,
   isPiForkableEntry,
+  mapPiForkEntriesToMessages,
   piSessionEntryText,
   piSessionLeafPath,
   type PiSessionTreeNode,
@@ -64,5 +65,38 @@ describe('Pi session tree model', () => {
     expect(isPiForkableEntry(tree[0].entry, ids)).toBe(true)
     expect(isPiForkableEntry(tree[0].children[0].entry, ids)).toBe(false)
     expect(isPiForkableEntry({ type: 'message', id: 'u2', message: { role: 'user' } }, ids)).toBe(false)
+  })
+
+  it('maps duplicate user prompts to distinct fork entries in order', () => {
+    const mapped = mapPiForkEntriesToMessages(
+      [
+        { id: 'u1', content: 'Same prompt' },
+        { id: 'u2', content: 'Same prompt' },
+      ],
+      [
+        { entryId: 'e1', text: 'Same prompt' },
+        { entryId: 'e2', text: 'Same prompt' },
+      ],
+    )
+    expect([...mapped.entries()]).toEqual([
+      ['u1', 'e1'],
+      ['u2', 'e2'],
+    ])
+  })
+
+  it('skips unmatched Pi fork messages until the next matching user turn', () => {
+    const mapped = mapPiForkEntriesToMessages(
+      [
+        { id: 'u1', content: 'First' },
+        { id: 'u2', content: 'Third' },
+      ],
+      [
+        { entryId: 'e1', text: 'First' },
+        { entryId: 'e-extra', text: 'Only in Pi' },
+        { entryId: 'e3', text: 'Third' },
+      ],
+    )
+    expect(mapped.get('u1')).toBe('e1')
+    expect(mapped.get('u2')).toBe('e3')
   })
 })

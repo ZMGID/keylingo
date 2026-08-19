@@ -96,9 +96,11 @@ async fn ensure_pi_control(
         new_session_id: None,
         include_partial_messages: false,
     };
+    let model = conversation.agent_runtime.external_model.clone();
+    let reasoning = conversation.agent_runtime.external_reasoning.clone();
     let options = RuntimeBuildOptions {
-        model: stored.as_ref().and_then(|session| session.model.clone()),
-        reasoning: None,
+        model: model.clone(),
+        reasoning: reasoning.clone(),
         sandbox: None,
     };
     let args = (PI_AGENT_DEF.build_args)(&runtime, &options, None);
@@ -130,7 +132,7 @@ async fn ensure_pi_control(
             control: control.clone(),
             agent_id: "pi".to_string(),
             cwd: cwd_string,
-            launch_config: LaunchConfig::default(),
+            launch_config: LaunchConfig::for_pi(model.as_deref(), reasoning.as_deref()),
             last_activity: Instant::now(),
             child_pid,
             turns_served: 0,
@@ -240,35 +242,55 @@ async fn resolve_fork_anchor(
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(|| "Pi get_fork_messages returned no messages".to_string())?;
-    let selected_index = messages
+    let conversation = crate::chat::storage::load_conversation(app, conversation_id)?;
+    let user_messages: Vec<(&str, &str)> = conversation
+        .messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| (message.id.as_str(), message.content.as_str()))
+        .collect();
+    kivio_anchor_for_fork_entry(messages, entry_id, &user_messages)
+}
+
+fn kivio_anchor_for_fork_entry(
+    pi_messages: &[Value],
+    entry_id: &str,
+    user_messages: &[(&str, &str)],
+) -> Result<(String, String), String> {
+    let selected_index = pi_messages
         .iter()
         .position(|message| message.get("entryId").and_then(Value::as_str) == Some(entry_id))
         .ok_or_else(|| "Pi fork entry is no longer available".to_string())?;
-    let selected_text = messages[selected_index]
+    let selected_text = pi_messages[selected_index]
         .get("text")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
-    let conversation = crate::chat::storage::load_conversation(app, conversation_id)?;
-    let user_messages: Vec<_> = conversation
-        .messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .collect();
-    if let Some(message) = user_messages
+    if let Some((id, _)) = user_messages
         .get(selected_index)
-        .filter(|message| message.content.trim() == selected_text)
+        .copied()
+        .filter(|(_, content)| content.trim() == selected_text)
     {
-        return Ok((message.id.clone(), selected_text.to_string()));
+        return Ok((id.to_string(), selected_text.to_string()));
     }
-    let matching: Vec<_> = user_messages
-        .into_iter()
-        .filter(|message| message.content.trim() == selected_text)
-        .collect();
-    if matching.len() == 1 {
-        return Ok((matching[0].id.clone(), selected_text.to_string()));
-    }
-    Err("无法把这个 Pi 节点可靠映射到 Kivio 消息；源对话未被修改".to_string())
+    let occurrence = pi_messages[..selected_index]
+        .iter()
+        .filter(|message| {
+            message
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                == selected_text
+        })
+        .count();
+    user_messages
+        .iter()
+        .copied()
+        .filter(|(_, content)| content.trim() == selected_text)
+        .nth(occurrence)
+        .map(|(id, _)| (id.to_string(), selected_text.to_string()))
+        .ok_or_else(|| "无法把这个 Pi 节点可靠映射到 Kivio 消息；源对话未被修改".to_string())
 }
 
 fn clone_anchor(app: &AppHandle, conversation_id: &str) -> Result<String, String> {
@@ -561,4 +583,49 @@ pub async fn chat_pi_session_switch(
     Ok(PiSessionSwitchResult {
         conversation_id: bound_conversation_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn msg(entry_id: &str, text: &str) -> Value {
+        json!({ "entryId": entry_id, "text": text })
+    }
+
+    #[test]
+    fn duplicate_user_prompts_map_to_the_matching_occurrence() {
+        let pi = [msg("e1", "Same prompt"), msg("e2", "Same prompt")];
+        let users = [("u1", "Same prompt"), ("u2", "Same prompt")];
+        assert_eq!(
+            kivio_anchor_for_fork_entry(&pi, "e1", &users).unwrap(),
+            ("u1".to_string(), "Same prompt".to_string())
+        );
+        assert_eq!(
+            kivio_anchor_for_fork_entry(&pi, "e2", &users).unwrap(),
+            ("u2".to_string(), "Same prompt".to_string())
+        );
+    }
+
+    #[test]
+    fn extra_kivio_user_message_still_maps_by_occurrence() {
+        let pi = [msg("e1", "hello"), msg("e2", "hello")];
+        let users = [
+            ("u0", "hello"),
+            ("u-other", "something else"),
+            ("u1", "hello"),
+        ];
+        assert_eq!(
+            kivio_anchor_for_fork_entry(&pi, "e2", &users).unwrap(),
+            ("u1".to_string(), "hello".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_entry_is_an_error() {
+        let pi = [msg("e1", "hello")];
+        let users = [("u1", "hello")];
+        assert!(kivio_anchor_for_fork_entry(&pi, "missing", &users).is_err());
+    }
 }

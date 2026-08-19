@@ -100,6 +100,27 @@ export function piSessionEntryText(entry: PiSessionEntry): string {
   return entry.type || entry.id || 'entry'
 }
 
+export function mapPiForkEntriesToMessages(
+  userMessages: Array<{ id: string; content: string }>,
+  forkMessages: readonly PiForkMessage[],
+): Map<string, string> {
+  const next = new Map<string, string>()
+  let forkIdx = 0
+  for (const message of userMessages) {
+    const text = message.content.trim()
+    if (!text) continue
+    while (forkIdx < forkMessages.length) {
+      const fork = forkMessages[forkIdx]
+      forkIdx += 1
+      if (fork.text.trim() === text) {
+        next.set(message.id, fork.entryId)
+        break
+      }
+    }
+  }
+  return next
+}
+
 export function flattenPiSessionTree(
   tree: PiSessionTreeNode[],
   expanded: ReadonlySet<string>,

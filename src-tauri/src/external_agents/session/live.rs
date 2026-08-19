@@ -164,9 +164,9 @@ pub const CANCELLED_SESSION_LOST: &str = "__cancelled_session_lost__";
 /// 界面显示一套、会话实际跑另一套，这**违反 spec 第 8 条**（UI 所见必须与会话实际配置一致），
 /// 是功能退步而不是缺功能。指纹变了就换个进程。
 ///
-/// 只有把这些配置放在**启动参数**里的 CLI 需要它（目前只有 claude：`--model` / `--effort` /
-/// `--permission-mode` / `--append-system-prompt-file` 全是启动 flag）。ACP / codex 能在会话内
-/// 改模型与推理档位，指纹恒为 `default()`，永不触发重连，行为不变。
+/// 只有把这些配置放在**启动参数**里的 CLI 需要它（claude：`--model` / `--effort` /
+/// `--permission-mode` / `--append-system-prompt-file`；Pi：`--model` / `--thinking`）。
+/// ACP / codex 能在会话内改模型与推理档位，指纹恒为 `default()`，永不触发重连，行为不变。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchConfig {
     /// `model|reasoning|sandbox`，恒可知。
@@ -178,6 +178,20 @@ pub struct LaunchConfig {
 }
 
 impl LaunchConfig {
+    /// Pi receives model/thinking as process launch flags. Empty selection still
+    /// fingerprints as `"|"` so it matches chat-turn fingerprints,
+    /// not `Default` (`flags == ""`).
+    pub fn for_pi(model: Option<&str>, reasoning: Option<&str>) -> Self {
+        Self {
+            flags: format!(
+                "{}|{}",
+                model.unwrap_or_default(),
+                reasoning.unwrap_or_default()
+            ),
+            instructions: None,
+        }
+    }
+
     /// 已建立的会话（`self`，注册时的配置）能否服务配置为 `incoming` 的这一轮。
     pub fn accepts(&self, incoming: &LaunchConfig) -> bool {
         if self.flags != incoming.flags {
@@ -348,10 +362,23 @@ mod tests {
         assert!(established.accepts(&cfg("opus||", None)));
     }
 
-    /// 非 claude 协议指纹恒为默认值 ⇒ 永不触发重连，既有行为不变。
+    /// 非 claude / Pi 协议指纹恒为默认值 ⇒ 永不触发重连，既有行为不变。
     #[test]
     fn default_launch_config_always_accepts() {
         assert!(LaunchConfig::default().accepts(&LaunchConfig::default()));
+    }
+
+    #[test]
+    fn pi_launch_config_matches_chat_turns_even_with_empty_selection() {
+        let idle = LaunchConfig::for_pi(None, None);
+        assert_eq!(idle.flags, "|");
+        assert_ne!(idle, LaunchConfig::default());
+        assert!(idle.accepts(&LaunchConfig::for_pi(None, None)));
+        assert!(!LaunchConfig::default().accepts(&idle));
+        assert!(LaunchConfig::for_pi(Some("opus"), Some("high"))
+            .accepts(&LaunchConfig::for_pi(Some("opus"), Some("high"))));
+        assert!(!LaunchConfig::for_pi(Some("opus"), Some("high"))
+            .accepts(&LaunchConfig::for_pi(Some("opus"), Some("low"))));
     }
 
     /// 轮内重连之后，guard 必须重新挂到**新**会话上。

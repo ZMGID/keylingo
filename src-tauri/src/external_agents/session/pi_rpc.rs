@@ -324,7 +324,6 @@ const BTW_COMMANDS: &[&str] = &[
     "btw:thinking",
 ];
 const BTW_ENTRY_TYPE: &str = "btw-thread-entry";
-const BTW_COMMAND_PROBE_ID: &str = "kivio-btw-command-probe";
 const BTW_ENTRIES_REQUEST_ID: &str = "kivio-btw-entries";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,58 +360,50 @@ fn parse_pi_btw_command(prompt: &str) -> Option<PiBtwCommand> {
     })
 }
 
-fn response_registers_command(value: &Value, command_name: &str) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("response")
-        && value.get("id").and_then(Value::as_str) == Some(BTW_COMMAND_PROBE_ID)
-        && value.get("success").and_then(Value::as_bool) == Some(true)
-        && value
-            .get("data")
-            .and_then(|data| data.get("commands"))
-            .and_then(Value::as_array)
-            .is_some_and(|commands| {
-                commands.iter().any(|command| {
-                    command.get("name").and_then(Value::as_str) == Some(command_name)
-                        && command.get("source").and_then(Value::as_str) == Some("extension")
-                })
-            })
+fn flatten_pi_tool_content(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(pi_tool_content_block_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| other.to_string()),
+    }
 }
 
-async fn probe_registered_btw_command<R, W>(
-    reader: &mut tokio::io::Lines<BufReader<R>>,
-    stdin: &SharedPiWriter<W>,
-    command: &PiBtwCommand,
-) -> bool
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let request = json!({
-        "id": BTW_COMMAND_PROBE_ID,
-        "type": "get_commands",
-    });
-    if write_rpc_value(stdin, &request).await.is_err() {
-        return false;
+fn pi_tool_content_block_text(block: &Value) -> Option<String> {
+    if let Some(text) = block.as_str() {
+        return Some(text.to_string());
     }
+    match block.get("type").and_then(Value::as_str).unwrap_or("text") {
+        "image" => {
+            let mime = block
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or("image");
+            Some(format!("[image: {mime}]"))
+        }
+        _ => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
 
-    let started = std::time::Instant::now();
-    while started.elapsed() <= Duration::from_secs(3) {
-        let raw = match timeout(Duration::from_millis(200), reader.next_line()).await {
-            Ok(Ok(Some(raw))) => raw,
-            Ok(Ok(None)) | Ok(Err(_)) => return false,
-            Err(_) => continue,
-        };
-        let Ok(value) = serde_json::from_str::<Value>(raw.trim()) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) == Some("extension_ui_request") {
-            let _ = reject_extension_ui(stdin, &value).await;
-            continue;
-        }
-        if value.get("id").and_then(Value::as_str) == Some(BTW_COMMAND_PROBE_ID) {
-            return response_registers_command(&value, &command.name);
-        }
+async fn fail_pending_controls(waiters: &PiControlWaiters, error: &str) {
+    let leftover: Vec<PiControlWaiter> = waiters
+        .lock()
+        .await
+        .drain()
+        .map(|(_, waiter)| waiter)
+        .collect();
+    for waiter in leftover {
+        let _ = waiter.completion.send(Err(error.to_string()));
     }
-    false
 }
 
 fn pi_btw_entry_events_from_response(
@@ -692,13 +683,10 @@ pub fn map_pi_rpc_event(value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) 
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let result = obj.get("result").and_then(|v| v.as_object());
-            let content = result
-                .and_then(|r| r.get("content"))
-                .map(|c| match c {
-                    Value::String(s) => s.clone(),
-                    _ => c.to_string(),
-                })
+            let content = obj
+                .get("result")
+                .and_then(|result| result.get("content"))
+                .map(flatten_pi_tool_content)
                 .unwrap_or_default();
             let is_error = obj
                 .get("isError")
@@ -903,17 +891,14 @@ where
     let manual_compact = prompt.trim() == "/compact";
 
     // pi-btw owns its sub-session and persists completed exchanges as custom session entries.
-    // Verify that the slash name is an installed extension command before enabling the adapter:
-    // an uninstalled `/btw ...` is just a normal model prompt and must keep the ordinary stream.
+    // Official RPC says extension commands go out as an ordinary `prompt`; enable the card
+    // adapter from the slash shape and only paint a card if a `btw-thread-entry` actually
+    // arrives. Do not probe `get_commands` first — that stalls the prompt up to 3s and can
+    // swallow leftover stdout from the resident session.
     let btw_command = if manual_compact {
         None
     } else {
-        match parse_pi_btw_command(prompt) {
-            Some(command) if probe_registered_btw_command(reader, stdin, &command).await => {
-                Some(command)
-            }
-            _ => None,
-        }
+        parse_pi_btw_command(prompt)
     };
 
     let payload = if manual_compact {
@@ -1582,22 +1567,21 @@ pub fn spawn_pi_rpc_session_actor(
                                         match issue_control_command(
                                             &session.stdin,
                                             &pending_controls,
-                                            request_id.clone(),
+                                            request_id,
                                             Some((kind, id, display_text)),
                                             payload,
                                         )
                                         .await
                                         {
                                             Ok(response) => {
-                                                let waiters = pending_controls.clone();
+                                                // Do not time out and drop the waiter. Drain may be
+                                                // blocked on extension UI, so the ack can legally
+                                                // arrive later; dropping it would ignore a success
+                                                // and let the frontend resend the same text as a
+                                                // new prompt. If the turn ends first,
+                                                // fail_pending_controls unblocks this wait as false.
                                                 tokio::spawn(async move {
-                                                    let ok = matches!(
-                                                        timeout(Duration::from_secs(10), response).await,
-                                                        Ok(Ok(Ok(())))
-                                                    );
-                                                    if !ok {
-                                                        waiters.lock().await.remove(&request_id);
-                                                    }
+                                                    let ok = matches!(response.await, Ok(Ok(())));
                                                     let _ = accepted.send(ok);
                                                 });
                                             }
@@ -1617,6 +1601,11 @@ pub fn spawn_pi_rpc_session_actor(
                             }
                         }
                     };
+                    fail_pending_controls(
+                        &pending_controls,
+                        "Pi turn ended before the control command was acknowledged",
+                    )
+                    .await;
                     let session_lost = close_after_turn
                         || matches!(turn_result.as_ref(), Err(error) if error != "cancelled");
                     if session_lost {
@@ -1794,6 +1783,58 @@ mod tests {
     }
 
     #[test]
+    fn map_pi_tool_execution_end_flattens_content_blocks() {
+        let raw = r#"{"type":"tool_execution_end","toolCallId":"call_1","toolName":"bash","result":{"content":[{"type":"text","text":"total 48\nfile.txt"}]},"isError":false}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |e| events.push(e));
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error
+            }] if tool_use_id == "call_1" && content == "total 48\nfile.txt" && !*is_error
+        ));
+    }
+
+    #[test]
+    fn map_pi_tool_execution_end_keeps_legacy_string_content() {
+        let raw = r#"{"type":"tool_execution_end","toolCallId":"call_2","result":{"content":"plain"},"isError":true}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        map_pi_rpc_event(&value, &mut |e| events.push(e));
+        assert!(matches!(
+            events.as_slice(),
+            [UnifiedAgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error
+            }] if tool_use_id == "call_2" && content == "plain" && *is_error
+        ));
+    }
+
+    #[test]
+    fn flatten_pi_tool_content_joins_text_blocks() {
+        assert_eq!(
+            flatten_pi_tool_content(&json!([
+                {"type": "text", "text": "one"},
+                {"type": "text", "text": "two"},
+                {"type": "image", "mimeType": "image/png"}
+            ])),
+            "one\ntwo\n[image: image/png]"
+        );
+        assert_eq!(
+            flatten_pi_tool_content(&json!([{"type": "text", "text": "total 48"}])),
+            "total 48"
+        );
+        assert_ne!(
+            flatten_pi_tool_content(&json!([{"type": "text", "text": "total 48"}])),
+            json!([{"type": "text", "text": "total 48"}]).to_string()
+        );
+    }
+
+    #[test]
     fn map_pi_text_delta() {
         let raw = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"hi"}}"#;
         let value: Value = serde_json::from_str(raw).unwrap();
@@ -1889,30 +1930,6 @@ mod tests {
         );
         assert_eq!(parse_pi_btw_command("/btw-unknown question"), None);
         assert_eq!(parse_pi_btw_command("explain /btw"), None);
-    }
-
-    #[test]
-    fn command_probe_requires_the_registered_extension_source() {
-        let registered = json!({
-            "id": BTW_COMMAND_PROBE_ID,
-            "type": "response",
-            "command": "get_commands",
-            "success": true,
-            "data": { "commands": [
-                { "name": "btw", "source": "extension" },
-                { "name": "skill:btw", "source": "skill" }
-            ] }
-        });
-        assert!(response_registers_command(&registered, "btw"));
-        assert!(!response_registers_command(&registered, "btw:tangent"));
-
-        let prompt_template = json!({
-            "id": BTW_COMMAND_PROBE_ID,
-            "type": "response",
-            "success": true,
-            "data": { "commands": [{ "name": "btw", "source": "prompt" }] }
-        });
-        assert!(!response_registers_command(&prompt_template, "btw"));
     }
 
     #[test]
@@ -2065,6 +2082,49 @@ mod tests {
             event,
             UnifiedAgentEvent::ToolUse { id, .. } if id == "pi_btw_e10"
         )));
+    }
+
+    #[tokio::test]
+    async fn btw_slash_sends_prompt_without_get_commands_probe() {
+        let (stdout_reader, mut stdout_writer) = duplex(8192);
+        let writer = tokio::spawn(async move {
+            for line in [
+                r#"{"id":1,"type":"response","command":"prompt","success":true}"#,
+                r#"{"id":"kivio-btw-entries","type":"response","command":"get_entries","success":true,"data":{"entries":[]}}"#,
+            ] {
+                stdout_writer.write_all(line.as_bytes()).await?;
+                stdout_writer.write_all(b"\n").await?;
+            }
+            stdout_writer.shutdown().await
+        });
+        let (mut stdin_reader, stdin_writer) = duplex(4096);
+        let stdin_writer = Arc::new(Mutex::new(stdin_writer));
+        let mut events = Vec::new();
+
+        let result = run_pi_rpc_io(
+            &mut BufReader::new(stdout_reader).lines(),
+            &stdin_writer,
+            "/btw side question",
+            &[],
+            &mut |event| events.push(event),
+            None,
+            None,
+            || false,
+            true,
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(writer.await.unwrap().is_ok());
+        drop(stdin_writer);
+        let mut requests = String::new();
+        stdin_reader.read_to_string(&mut requests).await.unwrap();
+        assert!(
+            !requests.contains("get_commands"),
+            "btw must not stall on a command probe: {requests}"
+        );
+        assert!(requests.contains(r#""type":"prompt""#));
+        assert!(requests.contains("/btw side question"));
     }
 
     /// 手动 /compact：compaction_end 事件发分隔线，compact response 收尾轮次，
@@ -2456,6 +2516,36 @@ mod tests {
             events.as_slice(),
             [UnifiedAgentEvent::UserSteer { id, text }]
                 if id == "frontend-1" && text == "new direction"
+        ));
+    }
+
+    #[tokio::test]
+    async fn leftover_control_waiters_are_failed_when_the_turn_ends() {
+        let stdin = Arc::new(Mutex::new(sink()));
+        let waiters: PiControlWaiters = Arc::new(Mutex::new(HashMap::new()));
+        let response = issue_control_command(
+            &stdin,
+            &waiters,
+            "steer-late".to_string(),
+            Some((
+                MessageInjectionKind::Steer,
+                "frontend-1".to_string(),
+                "hello".to_string(),
+            )),
+            json!({ "type": "steer", "message": "hello" }),
+        )
+        .await
+        .expect("issue steer");
+        assert!(waiters.lock().await.contains_key("steer-late"));
+        fail_pending_controls(
+            &waiters,
+            "Pi turn ended before the control command was acknowledged",
+        )
+        .await;
+        assert!(waiters.lock().await.is_empty());
+        assert!(matches!(
+            response.await,
+            Ok(Err(error)) if error.contains("turn ended")
         ));
     }
 
