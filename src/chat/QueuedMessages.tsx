@@ -1,6 +1,6 @@
 import { Clock3, CornerDownRight, Loader2, X } from 'lucide-react'
 import { IconButton } from '../components/Button'
-import type { QueuedMessage } from './hooks/useMessageQueue'
+import { isQueuedSubmitted, type QueuedMessage } from './hooks/useMessageQueue'
 import type { Lang } from '../settings/i18n'
 import { i18n } from '../settings/i18n'
 
@@ -41,7 +41,7 @@ export function QueuedMessages({
         {messages.map((message) => {
           // 撤回只把**文字**还给输入框（走 composer 的文本信道），所以带附件的那条不给撤 ——
           // 否则附件会静默消失。它仍能删、仍能立刻引导。
-          const submitted = message.steering || message.followingUp
+          const submitted = isQueuedSubmitted(message)
           const restorable = !submitted && message.attachments.length === 0
           return (
             <li

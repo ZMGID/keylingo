@@ -153,7 +153,7 @@ import {
   restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
-import { compareTimelineSegments, isExternalSubagentToolCall, isUserFollowUpToolCall, isUserSteerToolCall, segmentStepNumber, segmentToolCallId } from './segments'
+import { compareTimelineSegments, isExternalSubagentToolCall, segmentStepNumber, segmentToolCallId, userFollowUpId, userSteerId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { applyLiveContextUsage } from './contextPanel'
 import { measureChatSurface, onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
@@ -2559,17 +2559,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       snapshot.reasoningStreaming = false
       // 插话卡到了 = 那条「立刻引导」真的进了模型历史，现在才把它从队列里摘掉。
       // （在此之前它一直留着，好让「没赶上轮次边界」退化成运行结束后的自动发送。）
-      if (isUserSteerToolCall(record)) {
-        const steerId = (record.structuredContent as { steer_id?: unknown } | undefined)?.steer_id
-        if (typeof steerId === 'string') {
-          messageQueueRef.current.confirmSteered(payload.conversationId, steerId)
-        }
-      } else if (isUserFollowUpToolCall(record)) {
-        const followUpId = (record.structuredContent as { follow_up_id?: unknown } | undefined)?.follow_up_id
-        if (typeof followUpId === 'string') {
-          messageQueueRef.current.confirmFollowUp(payload.conversationId, followUpId)
-        }
-      }
+      const injectionId = userSteerId(record) ?? userFollowUpId(record)
+      if (injectionId) messageQueueRef.current.confirm(payload.conversationId, injectionId)
       const index = snapshot.toolCalls.findIndex((item) => item.id === record.id)
       snapshot.toolCalls = index < 0
         ? [...snapshot.toolCalls, record]
@@ -3590,11 +3581,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         // 丢弃被延后的 finishStreamingRun(它会再次全量 reloadConversation),避免每轮随历史线性变慢。
         delete pendingStreamDoneRef.current[conversationId]
         finishStreamingRunWithConversation(conversationId, persistedConversation)
-        // 这一轮正常收尾 → 发出排队里的下一条（只发一条，它自己再跑一轮）。
-        // 报错 / 用户按停止的 run 走不到这里：那时队列条目留着，由用户决定要不要发。
-        void messageQueueRef.current.drain(persistedConversation)
-      } else if (!(await flushPendingStreamDone(conversationId))) {
-        if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
+        // 含取消：后端 cancelled 也回 success+conversation。硬失败走 else，只解开不自动发。
+        void messageQueueRef.current.settleAfterRun(conversationId, persistedConversation)
+      } else {
+        messageQueueRef.current.settleAfterRun(conversationId)
+        if (!(await flushPendingStreamDone(conversationId))) {
+          if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
+        }
       }
     }
     return sendAccepted
@@ -3776,9 +3769,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const canSteerCurrentConversation =
     (usesExternalRuntime ? activeExternalAgentSupportsSteering : true)
     && activeReplyModels.length < 2
-  // 自动 follow-up：内置循环终答后续跑；Pi / dsh 走原生下一轮。多模型一问多答同样不给。
+  // 自动 follow-up 只给原生支持「下一轮排队」的外部 CLI（Pi / dsh）。
+  // 内置循环不自动 follow-up：要留着可见队列和「立刻引导」。多模型一问多答同样不给。
   const canFollowUpCurrentConversation =
-    (usesExternalRuntime ? activeExternalAgentSupportsFollowUp : true)
+    usesExternalRuntime
+    && activeExternalAgentSupportsFollowUp
     && activeReplyModels.length < 2
 
   const handleQueueMessage = useCallback((content: string, attachments: PendingAttachment[]) => {
@@ -4148,8 +4143,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           // 同 handleSend:已有持久化对话,丢弃延后的全量重拉,直接套用。
           delete pendingStreamDoneRef.current[conversationId]
           finishStreamingRunWithConversation(conversationId, persistedConversation)
-        } else if (!(await flushPendingStreamDone(conversationId))) {
-          if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
+          void messageQueueRef.current.settleAfterRun(conversationId, persistedConversation)
+        } else {
+          messageQueueRef.current.settleAfterRun(conversationId)
+          if (!(await flushPendingStreamDone(conversationId))) {
+            if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
+          }
         }
       }
     },

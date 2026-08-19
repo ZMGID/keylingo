@@ -8,6 +8,8 @@ import {
   isUserSteerToolCall,
   segmentToolCallId,
   summarizeToolGroup,
+  userFollowUpId,
+  userSteerId,
   userSteerText,
 } from './segments'
 
@@ -194,7 +196,14 @@ describe('groupTimelineSegments', () => {
     })
     expect(isUserSteerToolCall(steer)).toBe(true)
     expect(userSteerText(steer)).toBe('改用 rg')
+    expect(userSteerId(steer)).toBe('s1')
     expect(isStandaloneToolCard(steer)).toBe(true)
+    expect(userSteerId(tool({
+      id: 'steer_camel',
+      source: 'native',
+      name: 'user_steer',
+      structuredContent: { type: 'user_steer', steerId: 's2', text: 'camel' },
+    }))).toBe('s2')
   })
 
   it('recognizes a native follow-up card as a standalone user message', () => {
@@ -205,6 +214,7 @@ describe('groupTimelineSegments', () => {
       structured_content: { type: 'user_follow_up', follow_up_id: 'f1', text: '继续检查测试' },
     })
     expect(isUserFollowUpToolCall(followUp)).toBe(true)
+    expect(userFollowUpId(followUp)).toBe('f1')
     expect(isStandaloneToolCard(followUp)).toBe(true)
   })
 

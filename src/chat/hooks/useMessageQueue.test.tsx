@@ -17,8 +17,8 @@ const conversation = { id: 'conv-1' } as Conversation
  * 回归重点：
  *   1. 逐条交付 —— 一次 drain 只发队首一条（不合并、不一口气清空）
  *   2. 发送被拒时条目留在队首
- *   3. steer 成功只标记不出队；出队必须等 confirmSteered（收不到卡片就退化成自动发送）
- *   4. steer 失败（无活跃 run）条目原样留着，仍会被 drain 发出去
+ *   3. steer / follow-up 成功只标记不出队；出队必须等 confirm
+ *   4. 收不到卡走 settleAfterRun（落库对账 + 解开 + drain）；硬失败只解开
  */
 function setup(onSendResult = true) {
   const onSendMessage = vi.fn().mockResolvedValue(onSendResult)
@@ -123,7 +123,7 @@ describe('useMessageQueue', () => {
     expect(result.current.queued['conv-1']).toHaveLength(1)
     expect(result.current.queued['conv-1'][0].steering).toBe(true)
 
-    act(() => { result.current.confirmSteered('conv-1', id) })
+    act(() => { result.current.confirm('conv-1', id) })
     expect(result.current.queued['conv-1']).toBeUndefined()
   })
 
@@ -133,7 +133,7 @@ describe('useMessageQueue', () => {
     act(() => { id = result.current.enqueue('conv-1', '没赶上边界', [])!.id })
     await act(async () => { await result.current.steer('conv-1', id) })
 
-    await act(async () => { await result.current.drain(conversation) })
+    await act(async () => { await result.current.settleAfterRun('conv-1', conversation) })
 
     expect(onSendMessage).toHaveBeenCalledWith('没赶上边界', [], {
       conversationOverride: conversation,
@@ -198,7 +198,7 @@ describe('useMessageQueue', () => {
     expect(result.current.queued['conv-1']).toBeUndefined()
   })
 
-  it('Pi follow-up 确认后由 Pi 接管，不再走普通轮末发送', async () => {
+  it('Pi follow-up 成功只标记 followingUp，不出队；确认后才出队', async () => {
     const { result, onSendMessage } = setup()
     let id = ''
     act(() => { id = result.current.enqueue('conv-1', '稍后再总结', [])!.id })
@@ -207,6 +207,12 @@ describe('useMessageQueue', () => {
 
     expect(accepted).toBe(true)
     expect(mockFollowUp).toHaveBeenCalledWith('conv-1', id, '稍后再总结', [])
+    expect(result.current.queued['conv-1']).toHaveLength(1)
+    expect(result.current.queued['conv-1'][0].followingUp).toBe(true)
+    await act(async () => { await result.current.drain(conversation) })
+    expect(onSendMessage).not.toHaveBeenCalled()
+
+    act(() => { result.current.confirm('conv-1', id) })
     expect(result.current.queued['conv-1']).toBeUndefined()
     expect(onSendMessage).not.toHaveBeenCalled()
   })
@@ -249,8 +255,71 @@ describe('useMessageQueue', () => {
       resolveFollowUp?.(true)
       await pending
     })
+    expect(result.current.queued['conv-1'][0].followingUp).toBe(true)
+    expect(onSendMessage).not.toHaveBeenCalled()
+
+    act(() => { result.current.confirm('conv-1', id) })
+    expect(result.current.queued['conv-1']).toBeUndefined()
+  })
+
+  it('follow-up 已受理但未收到确认卡时，run 收尾降级为普通发送', async () => {
+    const { result, onSendMessage } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '没吐卡', [])!.id })
+    await act(async () => { await result.current.followUp(conversation, id) })
+
+    await act(async () => { await result.current.settleAfterRun('conv-1', conversation) })
+
+    expect(onSendMessage).toHaveBeenCalledWith('没吐卡', [], {
+      conversationOverride: conversation,
+    })
+    expect(result.current.queued['conv-1']).toBeUndefined()
+  })
+
+  it('落库对话已有插话卡时先对账出队，收尾不再重发', async () => {
+    const { result, onSendMessage } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '已经在历史上', [])!.id })
+    await act(async () => { await result.current.followUp(conversation, id) })
+
+    await act(async () => {
+      await result.current.settleAfterRun('conv-1', {
+        id: 'conv-1',
+        messages: [{
+          toolCalls: [{
+            source: 'native',
+            name: 'user_follow_up',
+            structured_content: { type: 'user_follow_up', follow_up_id: id, text: '已经在历史上' },
+          }],
+        }],
+      } as Conversation)
+    })
+
     expect(result.current.queued['conv-1']).toBeUndefined()
     expect(onSendMessage).not.toHaveBeenCalled()
+  })
+
+  it('失败收尾解开已提交条目，转圈条可以再撤或再发', async () => {
+    const { result, onRestoreToComposer } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '解开我', [])!.id })
+    await act(async () => { await result.current.steer('conv-1', id) })
+    expect(result.current.queued['conv-1'][0].steering).toBe(true)
+
+    act(() => { result.current.settleAfterRun('conv-1') })
+    act(() => { result.current.restoreToComposer('conv-1', id) })
+    expect(onRestoreToComposer).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '解开我' }),
+    )
+  })
+
+  it('已提交的条目不能直接移出队列', async () => {
+    const { result } = setup()
+    let id = ''
+    act(() => { id = result.current.enqueue('conv-1', '别删', [])!.id })
+    await act(async () => { await result.current.steer('conv-1', id) })
+    act(() => { result.current.remove('conv-1', id) })
+    expect(result.current.queued['conv-1']).toHaveLength(1)
   })
 
   it('撤回到输入框：出队并交还内容；已提交引导的不给撤', async () => {
