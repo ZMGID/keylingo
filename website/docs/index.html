@@ -753,13 +753,14 @@ kivio code --no-approve -p "审查当前项目"</code></pre>
       <p class="lead">每个版本的变化。完整发布记录见 <a href="https://github.com/ZMGID/kivio/releases" target="_blank" rel="noopener" style="border-bottom:1px solid var(--fg)">GitHub Releases ↗</a>。</p>
       <h2 id="changelog-292">v2.9.2 · 2026-08-19</h2>
       <ul>
-        <li><b>Pi</b> —— 常驻会话补齐原生控制与跟进排队；右侧 Dock「轨迹」可查看、分叉、克隆分支成新对话；设置里管理 Pi 扩展与技能。</li>
-        <li><b>DeepSeek Harness</b> —— 轮内插话与下一轮排队走原生协议；会话绑到项目工作目录；空闲问用户、并行提问与后台子代理不再互相覆盖；关闭或取消会真正停掉。</li>
-        <li><b>轨迹 Dock</b> —— 每个运行时都有可读的轮次账本，打开该页才加载。</li>
-        <li><b>联网搜索</b> —— 内置与第三方共用带来源目录的搜索卡，答案 [n] 可点开。新增 Brave、Serper、Bocha、智谱、TinyFish、SearXNG；TinyFish MCP 走浏览器 OAuth。</li>
-        <li><b>插件与技能</b> —— 插件页一键跑官方 README 安装命令；技能扫描 <code>~/.kivio/skills</code>、项目 <code>.kivio/skills</code> 和共享 <code>~/.agents/skills</code>。</li>
-        <li><b>外部 CLI 供应商</b> —— 同一 CLI 可并存多套供应商配置。</li>
-        <li><b>聊天与安装</b> —— 集编辑器换成更大的卡片；账户菜单显示今日用量；重启不再恢复到旧对话；沙箱与附件文件名保留中文。Windows 安装可选每用户或整机。去掉 Email 连接器。</li>
+        <li><b>Pi</b> —— 常驻会话补齐问用户、原生图片、轮内引导和下一轮排队，控制不再每轮丢掉。右侧 Dock「轨迹」可查看、分叉、克隆分支成新对话。设置里管理 Pi Package（npm / git / 本地）和本地扩展，以及 <code>~/.pi</code>、共享 <code>~/.agents</code>、Package 和额外扫描路径里的 Skill（可挂 Claude Code / Codex 目录，不复制文件）。</li>
+        <li><b>DeepSeek Harness</b> —— 生成中可立刻引导当前轮，或把下一条排进下一轮。Kivio 建的会话绑到项目工作目录，和官方 web 的 Host Workspace 对得上。并行问用户不再互相覆盖，后台子代理保持在跑。关窗会停掉会话，取消真正取消；找不到原生会话时降级而不是硬失败。预发布版本号（如 <code>0.1.0-rc.x</code>）不再被当成已是最新。</li>
+        <li><b>轨迹 Dock</b> —— 每个运行时都能在右侧 Dock 看这条对话的轨迹：用户、助手、工具和压缩按轮列出，可搜索并跳到对应消息。</li>
+        <li><b>联网搜索</b> —— 内置和第三方共用带来源目录的搜索卡（标题、域名、日期、摘要），答案里的 <code>[n]</code> 可点开来源。新增 Brave、Serper、Bocha、智谱、TinyFish、SearXNG；TinyFish MCP 用浏览器登录授权，不用填密钥。</li>
+        <li><b>插件与技能</b> —— 插件页一键跑 GitHub README 里的官方安装命令；启用后后台同步官方 Skill，插件 MCP 只在插件页开关、不出现在连接器。Kivio 技能扫描 <code>~/.kivio/skills</code>、项目 <code>.kivio/skills</code> 和共享 <code>~/.agents/skills</code>，导入写到 <code>~/.kivio/skills</code>。</li>
+        <li><b>外部 CLI 供应商</b> —— Kivio 配的供应商可以和 CLI 自己的配置并存，已启用的都保持可选；「默认」只决定没选手动模型时用哪一个。</li>
+        <li><b>聊天体验</b> —— Kivio Agent 的跟进等到本轮答完再发，不打断正在跑的工具。集编辑器换成更大的卡片。账户菜单显示今日用量。切对话后退出，重开还是你离开时那条。引用角标不再被裁切。沙箱导出和附件文件名保留中文。</li>
+        <li><b>安装</b> —— Windows 安装可选每用户或整机（装到 Program Files 可提权）。长 MCP 服务名不再撞名。去掉 Email 连接器。</li>
       </ul>
       <p><a href="https://github.com/ZMGID/kivio/releases/tag/v2.9.2" target="_blank" rel="noopener">查看 v2.9.2 Release notes ↗</a></p>
       <h2 id="changelog-291">v2.9.1 · 2026-08-16</h2>
