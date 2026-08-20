@@ -13,9 +13,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 
 use crate::external_agents::context::parse_context_window_label;
-use crate::external_agents::session::live::{
-    MessageInjectionKind, PiSessionRequest, PiSessionRpcResult,
-};
+use crate::external_agents::session::live::MessageInjectionKind;
 use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{
     default_model_option, ExternalCliSlashCommand, RuntimeModelOption, UnifiedAgentEvent,
@@ -90,109 +88,6 @@ where
     Ok(rx)
 }
 
-fn pi_session_request_payload(request: &PiSessionRequest) -> Value {
-    match request {
-        PiSessionRequest::GetTree => json!({ "type": "get_tree" }),
-        PiSessionRequest::GetEntries { since } => {
-            let mut payload = json!({ "type": "get_entries" });
-            if let Some(since) = since
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                payload["since"] = Value::String(since.to_string());
-            }
-            payload
-        }
-        PiSessionRequest::GetForkMessages => json!({ "type": "get_fork_messages" }),
-        PiSessionRequest::Fork { entry_id } => {
-            json!({ "type": "fork", "entryId": entry_id })
-        }
-        PiSessionRequest::Clone => json!({ "type": "clone" }),
-        PiSessionRequest::Switch { session_path } => {
-            json!({ "type": "switch_session", "sessionPath": session_path })
-        }
-    }
-}
-
-async fn run_idle_rpc_request<R, W>(
-    reader: &mut tokio::io::Lines<BufReader<R>>,
-    stdin: &SharedPiWriter<W>,
-    id: &str,
-    mut payload: Value,
-) -> Result<Value, String>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    payload["id"] = Value::String(id.to_string());
-    write_rpc_value(stdin, &payload).await?;
-    loop {
-        let raw = reader
-            .next_line()
-            .await
-            .map_err(|error| format!("read Pi RPC response: {error}"))?
-            .ok_or_else(|| "Pi RPC exited before session response".to_string())?;
-        if raw.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(raw.trim())
-            .map_err(|error| format!("parse Pi RPC response: {error}"))?;
-        if value.get("type").and_then(Value::as_str) == Some("extension_ui_request") {
-            reject_extension_ui(stdin, &value).await?;
-            continue;
-        }
-        if value.get("type").and_then(Value::as_str) != Some("response")
-            || value.get("id").and_then(Value::as_str) != Some(id)
-        {
-            continue;
-        }
-        if value.get("success").and_then(Value::as_bool) != Some(true) {
-            return Err(value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("Pi session command failed")
-                .to_string());
-        }
-        return Ok(value.get("data").cloned().unwrap_or(Value::Null));
-    }
-}
-
-async fn run_idle_pi_session_request<R, W>(
-    reader: &mut tokio::io::Lines<BufReader<R>>,
-    stdin: &SharedPiWriter<W>,
-    request_id: &str,
-    request: &PiSessionRequest,
-) -> Result<PiSessionRpcResult, String>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let data = run_idle_rpc_request(
-        reader,
-        stdin,
-        request_id,
-        pi_session_request_payload(request),
-    )
-    .await?;
-    let changed =
-        request.changes_session() && data.get("cancelled").and_then(Value::as_bool) != Some(true);
-    let needs_state = changed || matches!(request, PiSessionRequest::GetTree);
-    let state = if needs_state {
-        Some(
-            run_idle_rpc_request(
-                reader,
-                stdin,
-                &format!("{request_id}-state"),
-                json!({ "type": "get_state" }),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    Ok(PiSessionRpcResult { data, state })
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PiRpcOutcome {
     Continue,
@@ -1631,9 +1526,6 @@ pub fn spawn_pi_rpc_session_actor(
                                     Some(SessionCommand::RunTurn { done, .. }) => {
                                         let _ = done.send(Err("Pi RPC session is busy".to_string()));
                                     }
-                                    Some(SessionCommand::PiSession { reply, .. }) => {
-                                        let _ = reply.send(Err("Pi session is busy; wait for the current run to finish".to_string()));
-                                    }
                                     Some(SessionCommand::StopTask { .. }) => {}
                                 }
                             }
@@ -1650,40 +1542,6 @@ pub fn spawn_pi_rpc_session_actor(
                         session.close().await;
                         return;
                     }
-                }
-                SessionCommand::PiSession { request, reply } => {
-                    let request_id = format!("kivio-session-{}", next_control_id);
-                    next_control_id = next_control_id.saturating_add(1);
-                    let result = {
-                        let mut reader = session.reader.lock().await;
-                        match timeout(
-                            Duration::from_secs(15),
-                            run_idle_pi_session_request(
-                                &mut reader,
-                                &session.stdin,
-                                &request_id,
-                                &request,
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err("Pi session command timed out".to_string()),
-                        }
-                    };
-                    if let Ok(result) = &result {
-                        if let Some(session_id) = result
-                            .state
-                            .as_ref()
-                            .and_then(|state| state.get("sessionId"))
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                        {
-                            session.session_id = session_id.to_string();
-                        }
-                    }
-                    let _ = reply.send(result);
                 }
                 SessionCommand::Steer { accepted, .. } => {
                     let _ = accepted.send(false);
@@ -2587,119 +2445,6 @@ mod tests {
             response.await,
             Ok(Err(error)) if error.contains("turn ended")
         ));
-    }
-
-    #[test]
-    fn session_request_payloads_match_pi_rpc_contract() {
-        assert_eq!(
-            pi_session_request_payload(&PiSessionRequest::GetEntries {
-                since: Some("entry-1".to_string()),
-            }),
-            json!({ "type": "get_entries", "since": "entry-1" })
-        );
-        assert_eq!(
-            pi_session_request_payload(&PiSessionRequest::GetForkMessages),
-            json!({ "type": "get_fork_messages" })
-        );
-        assert_eq!(
-            pi_session_request_payload(&PiSessionRequest::Clone),
-            json!({ "type": "clone" })
-        );
-        assert_eq!(
-            pi_session_request_payload(&PiSessionRequest::Switch {
-                session_path: "/tmp/session.jsonl".to_string(),
-            }),
-            json!({ "type": "switch_session", "sessionPath": "/tmp/session.jsonl" })
-        );
-    }
-
-    #[tokio::test]
-    async fn idle_tree_request_returns_tree_and_authoritative_state() {
-        let (client_stdin, server_stdin) = duplex(4096);
-        let (client_stdout, mut server_stdout) = duplex(4096);
-        let server = tokio::spawn(async move {
-            let mut requests = BufReader::new(server_stdin).lines();
-            let tree = requests.next_line().await.unwrap().unwrap();
-            let tree: Value = serde_json::from_str(&tree).unwrap();
-            assert_eq!(tree["type"], "get_tree");
-            assert_eq!(tree["id"], "tree-1");
-            server_stdout
-                .write_all(
-                    b"{\"id\":\"tree-1\",\"type\":\"response\",\"command\":\"get_tree\",\"success\":true,\"data\":{\"tree\":[],\"leafId\":null}}\n",
-                )
-                .await
-                .unwrap();
-            let state = requests.next_line().await.unwrap().unwrap();
-            let state: Value = serde_json::from_str(&state).unwrap();
-            assert_eq!(state["type"], "get_state");
-            server_stdout
-                .write_all(
-                    format!(
-                        "{{\"id\":{},\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{{\"sessionId\":\"s1\",\"sessionFile\":\"/tmp/s1.jsonl\"}}}}\n",
-                        serde_json::to_string(&state["id"]).unwrap()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-        });
-        let stdin = Arc::new(Mutex::new(client_stdin));
-        let result = run_idle_pi_session_request(
-            &mut BufReader::new(client_stdout).lines(),
-            &stdin,
-            "tree-1",
-            &PiSessionRequest::GetTree,
-        )
-        .await
-        .unwrap();
-        server.await.unwrap();
-        assert_eq!(result.data["tree"], json!([]));
-        assert_eq!(result.state.unwrap()["sessionId"], "s1");
-    }
-
-    #[tokio::test]
-    async fn idle_fork_request_uses_entry_id_and_reads_new_session_identity() {
-        let (client_stdin, server_stdin) = duplex(4096);
-        let (client_stdout, mut server_stdout) = duplex(4096);
-        let server = tokio::spawn(async move {
-            let mut requests = BufReader::new(server_stdin).lines();
-            let fork = requests.next_line().await.unwrap().unwrap();
-            let fork: Value = serde_json::from_str(&fork).unwrap();
-            assert_eq!(fork["type"], "fork");
-            assert_eq!(fork["entryId"], "user-2");
-            server_stdout
-                .write_all(
-                    b"{\"id\":\"fork-1\",\"type\":\"response\",\"command\":\"fork\",\"success\":true,\"data\":{\"text\":\"second prompt\",\"cancelled\":false}}\n",
-                )
-                .await
-                .unwrap();
-            let state = requests.next_line().await.unwrap().unwrap();
-            let state: Value = serde_json::from_str(&state).unwrap();
-            server_stdout
-                .write_all(
-                    format!(
-                        "{{\"id\":{},\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{{\"sessionId\":\"forked\",\"sessionFile\":\"/tmp/forked.jsonl\"}}}}\n",
-                        serde_json::to_string(&state["id"]).unwrap()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-        });
-        let stdin = Arc::new(Mutex::new(client_stdin));
-        let result = run_idle_pi_session_request(
-            &mut BufReader::new(client_stdout).lines(),
-            &stdin,
-            "fork-1",
-            &PiSessionRequest::Fork {
-                entry_id: "user-2".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        server.await.unwrap();
-        assert_eq!(result.data["text"], "second prompt");
-        assert_eq!(result.state.unwrap()["sessionId"], "forked");
     }
 
     #[tokio::test]

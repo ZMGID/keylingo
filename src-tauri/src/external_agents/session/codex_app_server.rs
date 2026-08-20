@@ -548,9 +548,6 @@ impl CodexAppServerSession {
                 Ok(SessionCommand::RunTurn { done, .. }) => {
                     let _ = done.send(Err("session busy".to_string()));
                 }
-                Ok(SessionCommand::PiSession { reply, .. }) => {
-                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
-                }
                 // codex 无后台任务协议（stop_task 是 claude 专属），忽略。
                 Ok(SessionCommand::StopTask { .. }) => {}
                 Err(mpsc::error::TryRecvError::Empty) => {}
@@ -1215,9 +1212,6 @@ pub fn spawn_codex_session_actor(
                 // 轮末按普通消息发出去（绝不静默吞掉）。
                 SessionCommand::Steer { accepted, .. } => {
                     let _ = accepted.send(false);
-                }
-                SessionCommand::PiSession { reply, .. } => {
-                    let _ = reply.send(Err("Pi session commands are unsupported".to_string()));
                 }
                 SessionCommand::Cancel => {} // no active turn between turns
                 // codex 无后台任务协议，忽略。

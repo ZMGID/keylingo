@@ -22,12 +22,6 @@ import type {
 } from './types'
 import type { ThinkingLevel, WebSearchMode, ModelRef } from './types'
 import type { CliImportResult, ImportableCliSession } from './types'
-import type {
-  PiForkMessage,
-  PiSessionMutationResult,
-  PiSessionTreeSnapshot,
-  PiSessionSwitchResult,
-} from './piSessionTree'
 
 export type { DetectedExternalAgent, AgentRuntimeConfig }
 
@@ -1640,29 +1634,6 @@ export const chatApi = {
       attachments: diskPaths,
       textAttachments,
     })
-  },
-
-  async piSessionTree(conversationId: string): Promise<PiSessionTreeSnapshot> {
-    if (!isTauriRuntime()) return { tree: [], leafId: null, sessionId: '', sessionFile: null }
-    return invoke<PiSessionTreeSnapshot>('chat_pi_session_tree', { conversationId })
-  },
-
-  async piForkMessages(conversationId: string): Promise<PiForkMessage[]> {
-    if (!isTauriRuntime()) return []
-    const result = await invoke<{ messages?: PiForkMessage[] }>('chat_pi_fork_messages', { conversationId })
-    return result.messages ?? []
-  },
-
-  async piSessionFork(conversationId: string, entryId: string): Promise<PiSessionMutationResult> {
-    return invoke<PiSessionMutationResult>('chat_pi_session_fork', { conversationId, entryId })
-  },
-
-  async piSessionClone(conversationId: string): Promise<PiSessionMutationResult> {
-    return invoke<PiSessionMutationResult>('chat_pi_session_clone', { conversationId })
-  },
-
-  async piSessionSwitch(conversationId: string, sessionPath: string): Promise<PiSessionSwitchResult> {
-    return invoke<PiSessionSwitchResult>('chat_pi_session_switch', { conversationId, sessionPath })
   },
 
   // 删除对话。返回未能清理的副产物说明（工作区被占用等）——对话本身一定已经删掉了，

@@ -200,8 +200,6 @@ pub struct AppState {
     // ponytail: 无上限增长，每 (agent, cwd) 一项（会话×agent 级，量很小）；若日后 key 基数变大，
     // 改成带容量上限的 LRU 或探测完即移除空闲锁。
     pub model_probe_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    /// Pi tree panel lazy-connect single-flight, keyed by Kivio conversation id.
-    pub pi_session_control_locks: Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     /// Phase 2 持久会话注册表：conversation_id → 活会话（仅持有控制通道，不持有 Child）。
     /// 仅在 get/insert/remove 时短暂持锁，绝不跨 turn await 持锁。
     pub external_live_sessions:
@@ -400,7 +398,6 @@ impl AppState {
             external_detected_agents_cache: Mutex::new(HashMap::new()),
             availability_probe_lock: tokio::sync::Mutex::new(()),
             model_probe_locks: Mutex::new(HashMap::new()),
-            pi_session_control_locks: Mutex::new(HashMap::new()),
             external_live_sessions: Mutex::new(HashMap::new()),
             pending_chat_external_sends: Mutex::new(Vec::new()),
             pending_chat_steering: Mutex::new(HashMap::new()),
@@ -1001,20 +998,6 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner());
         locks
             .entry(key.to_string())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
-    pub fn pi_session_control_lock_for(
-        &self,
-        conversation_id: &str,
-    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .pi_session_control_locks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        locks
-            .entry(conversation_id.to_string())
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     }
