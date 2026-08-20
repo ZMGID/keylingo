@@ -642,7 +642,7 @@ pub fn map_pi_rpc_event(value: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) 
                 .and_then(|v| v.as_u64())
                 .unwrap_or(attempt);
             sink(UnifiedAgentEvent::StatusNote {
-                text: format!("Pi 正在自动重试（{attempt}/{max_attempts}）…"),
+                text: format!("retry {attempt}/{max_attempts}"),
             });
         }
         "auto_retry_end" if obj.get("success").and_then(|v| v.as_bool()) == Some(false) => {
@@ -1270,7 +1270,9 @@ pub fn is_missing_pi_session_error(err: &str) -> bool {
 }
 
 fn pi_native_session_present(session_id: &str) -> bool {
-    pi_session_file_candidates(session_id).into_iter().any(|path| path.is_file())
+    pi_session_file_candidates(session_id)
+        .into_iter()
+        .any(|path| path.is_file())
 }
 
 fn pi_session_file_candidates(session_id: &str) -> Vec<PathBuf> {
@@ -1281,7 +1283,9 @@ fn pi_session_file_candidates(session_id: &str) -> Vec<PathBuf> {
     vec![
         sessions.join(format!("{session_id}.jsonl")),
         sessions.join(session_id).join("session.jsonl"),
-        sessions.join(session_id).join(format!("{session_id}.jsonl")),
+        sessions
+            .join(session_id)
+            .join(format!("{session_id}.jsonl")),
     ]
 }
 
@@ -1399,6 +1403,7 @@ pub fn spawn_pi_rpc_session_actor(
                     approvals,
                     model: _,
                     reasoning: _,
+                    extra_writable_roots: _,
                 } => {
                     let cancelled = Arc::new(AtomicBool::new(false));
                     let turn_cancelled = cancelled.clone();
@@ -2881,10 +2886,10 @@ mod tests {
 
     #[test]
     fn missing_pi_session_file_is_not_a_successful_resume() {
-        assert!(!pi_native_session_present("kivio-missing-session-id-for-test"));
-        assert!(is_missing_pi_session_error(
-            "Pi session \"abc\" not found"
+        assert!(!pi_native_session_present(
+            "kivio-missing-session-id-for-test"
         ));
+        assert!(is_missing_pi_session_error("Pi session \"abc\" not found"));
         assert!(!is_missing_pi_session_error("Pi RPC timed out"));
     }
 

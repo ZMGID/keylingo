@@ -1164,8 +1164,8 @@ fn acp_retry_state_note(update: &serde_json::Map<String, Value>) -> Option<Strin
         // 「是什么故障」为止。
         .map(|s| head_chars(s, 80));
     Some(match cause {
-        Some(text) => format!("上游重试 {attempt}{of_max} · {text}"),
-        None => format!("上游重试 {attempt}{of_max}"),
+        Some(text) => format!("retry {attempt}{of_max} · {text}"),
+        None => format!("retry {attempt}{of_max}"),
     })
 }
 
@@ -1723,6 +1723,7 @@ pub fn spawn_acp_session_actor(mut session: AcpSession) -> mpsc::Sender<SessionC
                     // 通道从来不会被建起来（`run.rs::turn_asks_for_permission` 只对带
                     // `--permission-prompt-tool` 的 argv 为真，那是 claude 专属 flag）。
                     approvals: _,
+                    extra_writable_roots: _,
                 } => {
                     // Invariant (A4): `run_turn` sends all its `events` before returning, and mpsc
                     // preserves order, so every event is already queued when `done` fires — the
@@ -1774,7 +1775,7 @@ mod tests {
             "reason": "API error (status 503 Service Unavailable): api_error: Service temporarily unavailable"
         });
         let note = acp_retry_state_note(update.as_object().unwrap()).expect("retry note");
-        assert!(note.starts_with("上游重试 3/15 · "), "got: {note}");
+        assert!(note.starts_with("retry 3/15 · "), "got: {note}");
         assert!(note.contains("503"), "原因要能看出是什么故障: {note}");
     }
 
@@ -1970,6 +1971,7 @@ mod tests {
                     model: None,
                     reasoning: None,
                     images: vec![],
+                    extra_writable_roots: vec![],
                     events: etx,
                     done: dtx,
                     approvals: None,
@@ -2787,6 +2789,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 images: Vec::new(),
+                extra_writable_roots: Vec::new(),
                 events: events_tx,
                 done: done_tx,
                 approvals: None,
@@ -2896,6 +2899,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 images: Vec::new(),
+                extra_writable_roots: Vec::new(),
                 events: events_tx,
                 done: done_tx,
                 approvals: None,

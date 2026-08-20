@@ -74,6 +74,15 @@ const CODECS: &[AskUserCodec] = &[
         auto_allow_ordinary_tools: true,
         opens_host: true,
     },
+    AskUserCodec {
+        agent_id: "codex",
+        tools: &["requestUserInput"],
+        parse: parse_codex,
+        encode: encode_codex,
+        unknown_shape: UnknownAskShape::Reject,
+        auto_allow_ordinary_tools: true,
+        opens_host: true,
+    },
 ];
 
 pub fn codec_for(agent_id: &str, tool_name: &str) -> Option<&'static AskUserCodec> {
@@ -435,6 +444,85 @@ fn encode_dsh(
     serde_json::json!({ "answers": answers })
 }
 
+/// Codex `item/tool/requestUserInput` 的入参 → Kivio 问用户卡片。
+///
+/// 官方形状（app-server v2）：`{ questions: [{ id, header, question, isOther?,
+///   isSecret?, options?: [{ label, description }] }] }`。
+/// 选项 id 用下标，答复时再翻回 **label**（响应是 `{ answers: { <id>: { answers: [label…] } } }`）。
+/// `isOther` 或没有预设项时开放自定义文本。
+fn parse_codex(input: &Value) -> Option<AskUserPromptPayload> {
+    let raw = input.get("questions")?.as_array()?;
+    let mut title = None;
+    let questions: Vec<AskUserQuestion> = raw
+        .iter()
+        .filter_map(|question| {
+            let id = json_str(question, "id")?.to_string();
+            let text = json_str(question, "question")?.to_string();
+            if title.is_none() {
+                title = json_str(question, "header").map(str::to_string);
+            }
+            let options = parse_label_options(question);
+            Some(AskUserQuestion {
+                id,
+                prompt: text,
+                options,
+                allow_multiple: json_bool(question, &["multiSelect", "multi_select"]),
+                allow_custom: json_bool(question, &["isOther", "is_other"])
+                    || question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| options.is_empty())
+                        .unwrap_or(true),
+            })
+        })
+        .collect();
+    (!questions.is_empty()).then_some(AskUserPromptPayload { title, questions })
+}
+
+/// 用户的选择 → Codex `ToolRequestUserInputResponse`。
+///
+/// `{ answers: { "<questionId>": { "answers": ["<label or custom>", …] } } }`。
+fn encode_codex(
+    _original_input: &Value,
+    prompt: &AskUserPromptPayload,
+    answered: &AskUserResponseResult,
+) -> Value {
+    let mut answers = serde_json::Map::new();
+    for question in &prompt.questions {
+        let Some(answer) = answered.answers.get(&question.id) else {
+            answers.insert(question.id.clone(), serde_json::json!({ "answers": [] }));
+            continue;
+        };
+        let custom = answer
+            .custom_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let mut labels: Vec<String> = answer
+            .selected_option_ids
+            .iter()
+            .filter_map(|id| {
+                question
+                    .options
+                    .iter()
+                    .find(|option| option.id == *id)
+                    .map(|option| option.label.clone())
+            })
+            .collect();
+        if let Some(custom) = custom {
+            if !question.allow_multiple {
+                labels.clear();
+            }
+            labels.push(custom.to_string());
+        }
+        answers.insert(
+            question.id.clone(),
+            serde_json::json!({ "answers": labels }),
+        );
+    }
+    serde_json::json!({ "answers": answers })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,11 +540,15 @@ mod tests {
         assert!(codec_for("dsh", "AskUserQuestion").is_none());
         assert!(codec_for("dsh", "bash").is_none());
         assert!(codec_for("cursor", "AskUserQuestion").is_none());
+        assert!(codec_for("codex", "requestUserInput").is_some());
+        assert!(codec_for("codex", "AskUserQuestion").is_none());
         assert!(needs_host("dsh"));
         assert!(!needs_host("claude"));
         assert!(!needs_host("cursor"));
         assert!(needs_host("pi"));
+        assert!(needs_host("codex"));
         assert!(auto_allow_ordinary_tools("dsh"));
+        assert!(auto_allow_ordinary_tools("codex"));
         assert!(!auto_allow_ordinary_tools("claude"));
     }
 
@@ -776,6 +868,100 @@ mod tests {
                 "selected": ["Rust", "Go"],
                 "custom": "也写 TS"
             })
+        );
+    }
+
+    #[test]
+    fn codex_request_user_input_maps_ids_options_and_free_text() {
+        let input = serde_json::json!({
+            "itemId": "item-1",
+            "questions": [{
+                "id": "runtime",
+                "header": "Runtime",
+                "question": "用哪个运行时？",
+                "isOther": false,
+                "options": [
+                    { "label": "Bun", "description": "更快" },
+                    { "label": "Node" },
+                ],
+            }, {
+                "id": "note",
+                "header": "Note",
+                "question": "还有补充吗？",
+                "isOther": true,
+            }],
+        });
+        let prompt = parse_codex(&input).expect("必须能映射");
+        assert_eq!(prompt.title.as_deref(), Some("Runtime"));
+        assert_eq!(prompt.questions.len(), 2);
+        assert_eq!(prompt.questions[0].id, "runtime");
+        assert_eq!(prompt.questions[0].options[0].label, "Bun");
+        assert!(!prompt.questions[0].allow_custom);
+        assert_eq!(prompt.questions[1].id, "note");
+        assert!(prompt.questions[1].allow_custom);
+    }
+
+    #[test]
+    fn unknown_codex_ask_user_shapes_degrade_to_none() {
+        assert!(parse_codex(&serde_json::json!({})).is_none());
+        assert!(parse_codex(&serde_json::json!({
+            "questions": [{ "question": "没有 id" }],
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn codex_answers_use_question_ids_and_labels() {
+        let input = serde_json::json!({
+            "questions": [{
+                "id": "drink",
+                "question": "喝什么？",
+                "options": [{ "label": "茶" }, { "label": "咖啡" }],
+            }],
+        });
+        let prompt = parse_codex(&input).expect("必须能映射");
+        let answered = AskUserResponseResult {
+            phase: ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: HashMap::from([(
+                "drink".to_string(),
+                AskUserAnswer {
+                    selected_option_ids: vec!["1".to_string()],
+                    custom_text: None,
+                },
+            )]),
+        };
+        let payload = encode_codex(&input, &prompt, &answered);
+        assert_eq!(
+            payload["answers"]["drink"],
+            serde_json::json!({ "answers": ["咖啡"] })
+        );
+    }
+
+    #[test]
+    fn codex_custom_text_replaces_single_select() {
+        let input = serde_json::json!({
+            "questions": [{
+                "id": "drink",
+                "question": "喝什么？",
+                "isOther": true,
+                "options": [{ "label": "茶" }],
+            }],
+        });
+        let prompt = parse_codex(&input).expect("必须能映射");
+        let answered = AskUserResponseResult {
+            phase: ASK_USER_PHASE_ANSWERED.to_string(),
+            answers: HashMap::from([(
+                "drink".to_string(),
+                AskUserAnswer {
+                    selected_option_ids: vec!["0".to_string()],
+                    custom_text: Some("白开水".to_string()),
+                },
+            )]),
+        };
+        let payload = encode_codex(&input, &prompt, &answered);
+        assert_eq!(
+            payload["answers"]["drink"],
+            serde_json::json!({ "answers": ["白开水"] })
         );
     }
 }

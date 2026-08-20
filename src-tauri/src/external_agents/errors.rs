@@ -120,6 +120,9 @@ fn detect_kind(raw: &str, exit_code: Option<i32>, stderr_tail: &str) -> External
         || hay.contains("stream read error")
         || hay.contains("stream ended unexpectedly")
         || hay.contains("stream ended before")
+        || hay.contains("reconnecting")
+        || hay.contains("responsestreamdisconnected")
+        || hay.contains("responsestreamconnectionfailed")
     {
         ExternalAgentErrorKind::Transport
     } else if hay.contains("exited")
@@ -179,7 +182,18 @@ pub fn classify(
             None => format!("{name} 进程意外退出，请确认 CLI 可正常启动后重试。"),
         },
         ExternalAgentErrorKind::Protocol => {
-            format!("{name} 通信出错，请重试；若持续失败请检查 CLI 版本与登录状态。")
+            let lower = raw.to_lowercase();
+            if agent_id == "codex"
+                && (lower.contains("usagelimitexceeded") || lower.contains("sessionbudgetexceeded"))
+            {
+                "Codex CLI 已达到用量上限，请稍后再试或检查配额。".to_string()
+            } else if agent_id == "codex" && lower.contains("contextwindowexceeded") {
+                "Codex CLI 上下文已满，请压缩对话或开新会话。".to_string()
+            } else if agent_id == "codex" && lower.contains("responsetoomanyfailedattempts") {
+                "Codex CLI 多次重连仍失败，请稍后重试。".to_string()
+            } else {
+                format!("{name} 通信出错，请重试；若持续失败请检查 CLI 版本与登录状态。")
+            }
         }
     };
 
@@ -203,6 +217,29 @@ pub fn classify(
 pub fn is_auth_error(raw: &str, agent_id: &str) -> bool {
     let _ = agent_id;
     detect_kind(raw, None, "") == ExternalAgentErrorKind::Auth
+}
+
+/// Codex 用量 / 窗口 / 非法请求重试没有意义，再发一次同一条 prompt 只会再烧配额。
+pub fn is_non_retryable_codex_error(raw: &str, agent_id: &str) -> bool {
+    if agent_id != "codex" {
+        return false;
+    }
+    let hay = raw.to_ascii_lowercase();
+    hay.contains("usagelimitexceeded")
+        || hay.contains("sessionbudgetexceeded")
+        || hay.contains("contextwindowexceeded")
+        || hay.contains("misalignmentpolicyviolation")
+        || hay.contains("badrequest")
+        || hay.contains("responsetoomanyfailedattempts")
+}
+
+/// `thread/resume` 的目标 thread 在 Codex 那边已经不存在。
+pub fn is_missing_codex_thread_error(raw: &str) -> bool {
+    let hay = raw.to_ascii_lowercase();
+    hay.contains("thread not found")
+        || hay.contains("unknown thread")
+        || hay.contains("no such thread")
+        || hay.contains("thread does not exist")
 }
 
 #[cfg(test)]
@@ -357,6 +394,10 @@ mod tests {
         assert_eq!(c.kind, ExternalAgentErrorKind::Transport);
         assert!(c.user_message.contains("流式响应中途断开"));
         assert!(!c.user_message.contains("进程意外退出"));
+        assert_eq!(
+            classify("Reconnecting... 50/50", None, "", "codex").kind,
+            ExternalAgentErrorKind::Transport
+        );
     }
 
     #[test]
@@ -381,5 +422,46 @@ mod tests {
     fn is_auth_error_matches_classify() {
         assert!(is_auth_error("Authentication required", "grok"));
         assert!(!is_auth_error("ACP handshake timeout", "grok"));
+    }
+
+    #[test]
+    fn codex_usage_and_window_errors_are_not_retried() {
+        assert!(is_non_retryable_codex_error(
+            "UsageLimitExceeded: quota",
+            "codex"
+        ));
+        assert!(is_non_retryable_codex_error(
+            "ContextWindowExceeded: too long",
+            "codex"
+        ));
+        assert!(!is_non_retryable_codex_error(
+            "ResponseStreamDisconnected",
+            "codex"
+        ));
+        assert!(is_non_retryable_codex_error(
+            "ResponseTooManyFailedAttempts",
+            "codex"
+        ));
+        assert!(!is_non_retryable_codex_error(
+            "UsageLimitExceeded",
+            "claude"
+        ));
+        assert!(classify("UsageLimitExceeded: quota", None, "", "codex")
+            .user_message
+            .contains("用量上限"));
+        assert!(
+            classify("ResponseTooManyFailedAttempts", None, "", "codex")
+                .user_message
+                .contains("多次重连")
+        );
+    }
+
+    #[test]
+    fn missing_codex_thread_is_recognized() {
+        assert!(is_missing_codex_thread_error("thread not found: thr_abc"));
+        assert!(is_missing_codex_thread_error("Unknown thread"));
+        assert!(!is_missing_codex_thread_error(
+            "codex app-server exited mid-turn"
+        ));
     }
 }

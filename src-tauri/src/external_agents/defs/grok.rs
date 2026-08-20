@@ -208,6 +208,7 @@ mod tests {
                 // 不一致会走 ReasoningAction::Reconnect 直接返回 NEEDS_RECONNECT，一轮都跑不到。
                 reasoning: Some("low".to_string()),
                 images: Vec::new(),
+                extra_writable_roots: Vec::new(),
                 events: events_tx,
                 done: done_tx,
                 approvals: None,

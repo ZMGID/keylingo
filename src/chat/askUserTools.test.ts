@@ -12,6 +12,7 @@ describe('askUserTools', () => {
     expect(isAskUserToolName('ask_user')).toBe(true)
     expect(isAskUserToolName('AskUserQuestion')).toBe(true)
     expect(isAskUserToolName('ask_user_question')).toBe(true)
+    expect(isAskUserToolName('requestUserInput')).toBe(true)
     expect(isAskUserToolName('exit_plan_mode')).toBe(true)
     expect(isAskUserToolName('ExitPlanMode')).toBe(false)
     expect(isAskUserToolName('EnterPlanMode')).toBe(false)

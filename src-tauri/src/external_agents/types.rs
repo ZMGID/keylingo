@@ -292,8 +292,8 @@ pub enum UnifiedAgentEvent {
         /// 压缩耗时，仅用于诊断日志。
         duration_ms: Option<u64>,
     },
-    /// 生成过程的瞬态状态一行字（当前唯一来源：claude 的 `system/api_retry`——上游
-    /// 429/overloaded 时 CLI 在静默重试）。挂到前端的流状态行，不进消息正文。
+    /// 生成过程的瞬态状态一行字（claude `api_retry`、codex `Reconnecting... N/M`、
+    /// grok `retry_state`、dsh `llm/retry-started`）。挂到前端的流状态行，不进消息正文。
     StatusNote {
         text: String,
     },

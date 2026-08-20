@@ -430,7 +430,7 @@ fn task_progress_line(obj: &serde_json::Map<String, Value>) -> Option<String> {
 /// 这正是「怎么卡住了」的头号成因。而我们刻意不给轮次加超时（spec 第 114 条），反而更依赖
 /// 这条可见信号。官方字段表见 headless 文档 "Handle API retries"。
 /// 曾经是插进正文的整句 blockquote —— 重试一波就往回答里打四五行，改挂状态行后收敛成
-/// 「上游重试 2/10 · overloaded」这样的一段尾巴。
+/// `retry 2/10 · overloaded` 这样的一段尾巴（StreamStatusLine 统一英文）。
 fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
     let attempt = obj.get("attempt").and_then(|v| v.as_u64())?;
     let of_max = obj
@@ -450,8 +450,8 @@ fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
                 .map(|code| format!("HTTP {code}"))
         });
     Some(match cause {
-        Some(text) => format!("上游重试 {attempt}{of_max} · {text}"),
-        None => format!("上游重试 {attempt}{of_max}"),
+        Some(text) => format!("retry {attempt}{of_max} · {text}"),
+        None => format!("retry {attempt}{of_max}"),
     })
 }
 
@@ -470,6 +470,10 @@ fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
 ///
 /// 返回的第一项决定出口：`true` 走 `UnifiedAgentEvent::Error`（交给 `errors::classify`
 /// 给可操作中文，spec 第 5 条），`false` 走 `TextDelta` 提示（回答本身仍然有效，只是不完整）。
+///
+/// `rate_limit` / `overloaded` / `server_error` **不在这里**：它们和 Codex 的
+/// `Reconnecting...` 同一类 —— CLI 还会 `api_retry`。写成 Error 会钉死 `stream_error`，
+/// 重试成功后本轮仍被标成失败。见 `is_retryable_assistant_error`。
 fn assistant_error_report(kind: &str) -> Option<(bool, String)> {
     let note = |text: &str| Some((false, format!("> ⚠️ {text}\n\n")));
     match kind {
@@ -477,19 +481,20 @@ fn assistant_error_report(kind: &str) -> Option<(bool, String)> {
         // 丢掉已经流出来的半截回答。
         "max_output_tokens" => note("回答达到模型的输出上限被截断，内容可能不完整。"),
         "aborted" => note("本轮回答被中止。"),
-        // 认证 / 计费 / 上游故障：交给 errors::classify 出可操作中文（Auth 附登录命令）。
+        // 认证 / 计费 / 非法请求：交给 errors::classify 出可操作中文（Auth 附登录命令）。
         "authentication_failed"
         | "oauth_org_not_allowed"
         | "billing_error"
-        | "rate_limit"
-        | "overloaded"
         | "invalid_request"
-        | "model_not_found"
-        | "server_error" => Some((true, format!("claude 报告错误：{kind}"))),
+        | "model_not_found" => Some((true, format!("claude 报告错误：{kind}"))),
         // `unknown` 与未来新增值：仍要可见（静默是最坏的），但不足以判定整轮失败。
         "" => None,
         other => note(&format!("claude 报告了一个错误：{other}。")),
     }
+}
+
+fn is_retryable_assistant_error(kind: &str) -> bool {
+    matches!(kind, "rate_limit" | "overloaded" | "server_error")
 }
 
 /// `system/status` 的压缩终态（`compact_result` / `compact_error`）→ 提示文案。
@@ -837,7 +842,12 @@ impl ClaudeStreamState {
                 if let Some(kind) = error_kind {
                     // 同一次失败常在多条 assistant 帧上重复出现，且 result 往往还会再报一次。
                     if self.reported_assistant_errors.insert(kind.clone()) {
-                        if let Some((fatal, message)) = assistant_error_report(&kind) {
+                        if is_retryable_assistant_error(&kind) {
+                            // CLI 还在 `api_retry`：挂状态行，不要钉 `stream_error`。
+                            sink(UnifiedAgentEvent::StatusNote {
+                                text: format!("retry · {kind}"),
+                            });
+                        } else if let Some((fatal, message)) = assistant_error_report(&kind) {
                             if fatal {
                                 sink(UnifiedAgentEvent::Error { message });
                             } else {
@@ -1702,6 +1712,16 @@ mod tests {
             .collect()
     }
 
+    fn notes(events: &[UnifiedAgentEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                UnifiedAgentEvent::StatusNote { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// **本机实测原样本**（2026-07-27，嵌套 claude 未登录，
     /// `claude -p "say hi" --output-format stream-json --include-partial-messages --verbose`）。
     /// 逐字保留：`subtype` 是 `success` 而 `is_error` 为 true，错误文案在 `result` 字段里。
@@ -2075,7 +2095,9 @@ mod tests {
             );
             let events = run(&[&raw]);
             assert!(
-                !errors(&events).is_empty() || !texts(&events).is_empty(),
+                !errors(&events).is_empty()
+                    || !texts(&events).is_empty()
+                    || !notes(&events).is_empty(),
                 "{kind} 被静默吞掉：{events:?}"
             );
         }
@@ -2089,13 +2111,30 @@ mod tests {
     }
 
     /// 同一次失败常在多条 assistant 帧上重复出现——只报一次。
+    /// `rate_limit` 是可重试故障：走状态行，不能钉 `stream_error`。
     #[test]
     fn repeated_assistant_errors_are_reported_once_per_turn() {
         let events = run(&[
             r#"{"type":"assistant","error":"rate_limit","message":{"id":"m-1","role":"assistant","content":[]}}"#,
             r#"{"type":"assistant","error":"rate_limit","message":{"id":"m-2","role":"assistant","content":[]}}"#,
         ]);
-        assert_eq!(errors(&events).len(), 1, "{events:?}");
+        assert_eq!(notes(&events).len(), 1, "{events:?}");
+        assert!(errors(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn api_retry_is_a_status_note_not_an_error() {
+        let events = run(&[
+            r#"{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"error":"overloaded"}"#,
+            r#"{"type":"assistant","error":"overloaded","message":{"id":"m-1","role":"assistant","content":[]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ]);
+        assert!(notes(&events).iter().any(|text| text == "retry 2/10 · overloaded"));
+        assert!(notes(&events).iter().any(|text| text == "retry · overloaded"));
+        assert!(
+            errors(&events).is_empty(),
+            "可重试故障不能钉 stream_error：{events:?}"
+        );
     }
 
     /// 正常 assistant 帧（无 error / aborted）一个提示都不该多。
@@ -2475,9 +2514,13 @@ mod tests {
             r#"{"type":"assistant","error":"rate_limit","message":{"id":"m-2","role":"assistant","content":[]}}"#,
         ]);
         assert_eq!(
-            errors(&events).len(),
+            notes(&events).len(),
             2,
             "第 2 轮的同类错误被上一轮的去重表吞掉了：{events:?}"
+        );
+        assert!(
+            errors(&events).is_empty(),
+            "rate_limit 不能钉 stream_error：{events:?}"
         );
     }
 

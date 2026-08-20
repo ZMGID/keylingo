@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -8,11 +8,12 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use crate::external_agents::session::live::SessionCommand;
+use crate::external_agents::session::live::{ApprovalAsk, ApprovalBridge, SessionCommand};
 use crate::external_agents::spawn::{fold_stderr, join_stderr_tail};
 use crate::external_agents::stream::{usage_from_parts, CliUsageParts};
 use crate::external_agents::types::{ExternalCliSlashCommand, UnifiedAgentEvent};
 use crate::proc::NoConsoleWindow;
+use crate::utils::strip_windows_verbatim_prefix;
 
 /// Codex `app-server` speaks newline-delimited JSON-RPC over stdio (one JSON object per line,
 /// no `Content-Length` framing). Responses omit the `jsonrpc` field, so we never require it.
@@ -54,9 +55,59 @@ async fn write_rpc_result(
         .map_err(|e| e.to_string())
 }
 
+async fn write_rpc_error(
+    stdin: &mut tokio::process::ChildStdin,
+    id: &Value,
+    code: i64,
+    message: &str,
+) -> Result<(), String> {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    });
+    let mut line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    line.push('\n');
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// JSON-RPC notification (no `id`). Required after `initialize` — newer app-server rejects
+/// subsequent requests until it sees `initialized`.
+async fn write_rpc_notification(
+    stdin: &mut tokio::process::ChildStdin,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+    });
+    let mut line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    line.push('\n');
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn rpc_id_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Server → client approval requests are auto-approved. Each request method maps to a different
 /// response shape (see the `*RequestApprovalResponse` schemas); return the matching approve value.
-fn approval_response(method: &str) -> Option<Value> {
+///
+/// `item/permissions/requestApproval` must **echo the requested `permissions`** — an empty object
+/// grants nothing and the turn stalls on the next filesystem/network tool.
+fn approval_response(method: &str, params: &Value) -> Option<Value> {
     match method {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             Some(json!({ "decision": "acceptForSession" }))
@@ -66,20 +117,36 @@ fn approval_response(method: &str) -> Option<Value> {
             Some(json!({ "decision": "approved_for_session" }))
         }
         "item/permissions/requestApproval" => {
-            Some(json!({ "permissions": {}, "scope": "session" }))
+            let permissions = params.get("permissions").cloned().unwrap_or(json!({}));
+            Some(json!({ "permissions": permissions, "scope": "session" }))
         }
+        "mcpServer/elicitation/request" => Some(json!({ "action": "decline", "content": null })),
         _ => None,
     }
 }
 
-/// Map a single codex app-server notification to zero or more `UnifiedAgentEvent`s. Returns `true`
-/// when the notification signals the turn has ended (completed / failed).
+/// Outcome of mapping one app-server notification. Failed turns must bubble as `Err` so
+/// `run_persistent_turn` can RetryFresh; emitting `Error` and returning `Ok` would skip retry
+/// and still poison `stream_error` if a later reconnect succeeds.
+///
+/// Mid-turn `error` / `thread/realtime/error` is **not** a turn end: Codex retries the
+/// upstream stream in-process (`stream_max_retries`, default 5) and keeps emitting
+/// `Reconnecting... N/M` until `turn/completed`. Treating those as `TurnFailed` kills the
+/// still-running CLI and shows "通信出错" while Codex is still thinking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexMapResult {
+    Continue,
+    TurnEnded,
+    TurnFailed(String),
+}
+
+/// Map a single codex app-server notification to zero or more `UnifiedAgentEvent`s.
 fn map_codex_notification(
     method: &str,
     params: &Value,
     emitted_tools: &mut HashSet<String>,
     sink: &mut dyn FnMut(UnifiedAgentEvent),
-) -> bool {
+) -> CodexMapResult {
     match method {
         "item/agentMessage/delta" => {
             if let Some(delta) = params.get("delta").and_then(|v| v.as_str()) {
@@ -105,12 +172,27 @@ fn map_codex_notification(
         }
         "item/started" => {
             if let Some(item) = params.get("item").and_then(|v| v.as_object()) {
-                emit_command_execution(item, emitted_tools, sink, false);
+                emit_thread_item(item, emitted_tools, sink, false);
             }
         }
         "item/completed" => {
             if let Some(item) = params.get("item").and_then(|v| v.as_object()) {
-                emit_command_execution(item, emitted_tools, sink, true);
+                emit_thread_item(item, emitted_tools, sink, true);
+            }
+        }
+        "turn/plan/updated" => emit_plan_update(params, sink),
+        "model/safetyBuffering/updated" => {
+            if params.get("showBufferingUi").and_then(Value::as_bool) == Some(true) {
+                sink(UnifiedAgentEvent::StatusNote {
+                    text: "模型正在安全审核，请稍候…".to_string(),
+                });
+            }
+        }
+        "model/rerouted" => {
+            if let Some(to) = params.get("toModel").and_then(Value::as_str) {
+                sink(UnifiedAgentEvent::StatusNote {
+                    text: format!("已改道到 {to}"),
+                });
             }
         }
         "thread/tokenUsage/updated" => {
@@ -169,36 +251,473 @@ fn map_codex_notification(
         "turn/completed" => {
             if let Some(turn) = params.get("turn").and_then(|v| v.as_object()) {
                 if turn.get("status").and_then(|v| v.as_str()) == Some("failed") {
-                    let message = turn
-                        .get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Codex turn failed");
-                    sink(UnifiedAgentEvent::Error {
-                        message: message.to_string(),
-                    });
+                    return CodexMapResult::TurnFailed(codex_error_message(
+                        turn.get("error").unwrap_or(&Value::Null),
+                    ));
                 }
             }
-            return true;
+            return CodexMapResult::TurnEnded;
         }
-        // There is no `turn/failed` notification in the app-server protocol; failures arrive
-        // either as a failed `turn/completed` (handled above) or as a top-level `error` /
-        // `thread/realtime/error` notification. Surface those and end the loop.
+        // Mid-turn `error` / `thread/realtime/error` **precedes** `turn/completed` (app-server
+        // README). Codex uses this for stream reconnect (`Reconnecting... 7/50`); the TUI
+        // keeps thinking. Do **not** end the Kivio turn here — returning `TurnFailed` kills
+        // the live process (RetryFresh) while Codex is still retrying. Quota / window /
+        // exhausted-retry stay fail-closed; everything else is an English status-line note
+        // (`reconnect 7/50`) until `turn/completed`.
         "error" | "thread/realtime/error" => {
-            let message = params
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|v| v.as_str())
-                .or_else(|| params.get("message").and_then(|v| v.as_str()))
-                .unwrap_or("Codex error");
-            sink(UnifiedAgentEvent::Error {
-                message: message.to_string(),
+            let message = codex_error_message(params);
+            if crate::external_agents::errors::is_non_retryable_codex_error(&message, "codex") {
+                return CodexMapResult::TurnFailed(message);
+            }
+            sink(UnifiedAgentEvent::StatusNote {
+                text: mid_turn_error_status_note(&message),
             });
-            return true;
+            return CodexMapResult::Continue;
+        }
+        "thread/compacted" => {
+            // Deprecated in current app-server; still emitted by older CLIs.
+            sink(UnifiedAgentEvent::CliCompacted {
+                trigger: "auto".to_string(),
+                pre_tokens: None,
+                post_tokens: None,
+                dropped_tokens: None,
+                duration_ms: None,
+            });
         }
         _ => {}
     }
-    false
+    CodexMapResult::Continue
+}
+
+fn map_str<'a>(item: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
+    item.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn json_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn item_id(item: &serde_json::Map<String, Value>) -> Option<String> {
+    item.get("id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn value_as_text(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+fn item_failed(item: &serde_json::Map<String, Value>) -> bool {
+    matches!(
+        item.get("status").and_then(|v| v.as_str()),
+        Some("failed") | Some("declined")
+    )
+}
+
+/// Codex TUI / app-server progress: `Reconnecting... 7/50` or the same with a parenthetical
+/// cause. Also accepts the Chinese TUI string `正在重新连接 12/50`.
+fn parse_reconnect_progress(raw: &str) -> Option<(u64, u64)> {
+    let lower = raw.to_ascii_lowercase();
+    let start = lower
+        .find("reconnecting")
+        .or_else(|| raw.find("正在重新连接"))?;
+    let rest = raw.get(start..)?;
+    let digit_at = rest.find(|c: char| c.is_ascii_digit())?;
+    let digits = rest.get(digit_at..)?;
+    let attempt_len = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if attempt_len == 0 {
+        return None;
+    }
+    let attempt: u64 = digits.get(..attempt_len)?.parse().ok()?;
+    let after_attempt = digits.get(attempt_len..)?.trim_start();
+    let after_slash = after_attempt.strip_prefix('/')?.trim_start();
+    let max_len = after_slash
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_slash.len());
+    if max_len == 0 {
+        return None;
+    }
+    let max: u64 = after_slash.get(..max_len)?.parse().ok()?;
+    if attempt == 0 || max == 0 {
+        return None;
+    }
+    Some((attempt, max))
+}
+
+fn head_chars(s: &str, n: usize) -> String {
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i >= n {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Status-line copy for a mid-turn Codex error. StreamStatusLine is English and short
+/// (`elapsed · tokens · running`), so this matches: `reconnect 7/50`.
+fn mid_turn_error_status_note(raw: &str) -> String {
+    if let Some((attempt, max)) = parse_reconnect_progress(raw) {
+        return format!("reconnect {attempt}/{max}");
+    }
+    let hay = raw.to_ascii_lowercase();
+    if hay.contains("reconnecting")
+        || raw.contains("正在重新连接")
+        || hay.contains("responsestreamdisconnected")
+        || hay.contains("responsestreamconnectionfailed")
+        || hay.contains("httpconnectionfailed")
+    {
+        return "reconnect".to_string();
+    }
+    let cause = head_chars(raw.trim(), 80);
+    if cause.is_empty() {
+        "retry".to_string()
+    } else {
+        format!("retry · {cause}")
+    }
+}
+
+fn is_codex_reconnect_progress(raw: &str) -> bool {
+    parse_reconnect_progress(raw).is_some()
+        || raw.to_ascii_lowercase().contains("reconnecting")
+        || raw.contains("正在重新连接")
+}
+
+/// Fold `codexErrorInfo` (string variant or tagged object) into the message so retry
+/// classification can see `UsageLimitExceeded` even when `message` is generic.
+fn codex_error_message(error: &Value) -> String {
+    let err = error.get("error").unwrap_or(error);
+    let message = err
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let info = match err.get("codexErrorInfo") {
+        Some(Value::String(s)) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+        Some(Value::Object(map)) => map
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| map.keys().next().cloned()),
+        _ => None,
+    };
+    match (info.as_deref(), message) {
+        (Some(info), "") => info.to_string(),
+        (Some(info), msg) => format!("{info}: {msg}"),
+        (None, "") => "Codex error".to_string(),
+        (None, msg) => msg.to_string(),
+    }
+}
+
+fn emit_thread_item(
+    item: &serde_json::Map<String, Value>,
+    emitted_tools: &mut HashSet<String>,
+    sink: &mut dyn FnMut(UnifiedAgentEvent),
+    include_result: bool,
+) {
+    match item.get("type").and_then(|v| v.as_str()) {
+        Some("commandExecution") => {
+            emit_command_execution(item, emitted_tools, sink, include_result)
+        }
+        Some("fileChange") => emit_named_tool(
+            item,
+            emitted_tools,
+            sink,
+            include_result,
+            "Edit",
+            json!({
+                "changes": item.get("changes").cloned().unwrap_or(Value::Null),
+            }),
+            file_change_result(item),
+        ),
+        Some("mcpToolCall") => {
+            let server = map_str(item, "server").unwrap_or("mcp");
+            let tool = map_str(item, "tool").unwrap_or("tool");
+            let name = format!("mcp__{server}__{tool}");
+            let input = item.get("arguments").cloned().unwrap_or(Value::Null);
+            let result = if item_failed(item) {
+                value_as_text(item.get("error"))
+            } else {
+                value_as_text(item.get("result"))
+            };
+            emit_named_tool(
+                item,
+                emitted_tools,
+                sink,
+                include_result,
+                &name,
+                input,
+                result,
+            );
+        }
+        Some("webSearch") => {
+            let query = map_str(item, "query")
+                .or_else(|| item.get("action").and_then(|a| json_str(a, "query")))
+                .unwrap_or("");
+            let result = {
+                let text = value_as_text(item.get("results"));
+                if text.is_empty() {
+                    query.to_string()
+                } else {
+                    text
+                }
+            };
+            emit_named_tool(
+                item,
+                emitted_tools,
+                sink,
+                include_result,
+                "web_search",
+                json!({ "query": query }),
+                result,
+            );
+        }
+        Some("collabToolCall") | Some("collabAgentToolCall") => {
+            emit_collab_tool_call(item, emitted_tools, sink, include_result);
+        }
+        Some("subAgentActivity") => emit_subagent_activity(item, sink),
+        Some("contextCompaction") => {
+            if include_result {
+                sink(UnifiedAgentEvent::CliCompacted {
+                    trigger: "auto".to_string(),
+                    pre_tokens: None,
+                    post_tokens: None,
+                    dropped_tokens: None,
+                    duration_ms: None,
+                });
+            }
+        }
+        Some("imageView") => {
+            let path = map_str(item, "path").unwrap_or("");
+            emit_named_tool(
+                item,
+                emitted_tools,
+                sink,
+                include_result,
+                "image_view",
+                json!({ "path": path }),
+                path.to_string(),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn file_change_result(item: &serde_json::Map<String, Value>) -> String {
+    let paths: Vec<String> = item
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .filter_map(|change| json_str(change, "path").map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if paths.is_empty() {
+        item.get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("completed")
+            .to_string()
+    } else {
+        paths.join("\n")
+    }
+}
+
+fn emit_named_tool(
+    item: &serde_json::Map<String, Value>,
+    emitted_tools: &mut HashSet<String>,
+    sink: &mut dyn FnMut(UnifiedAgentEvent),
+    include_result: bool,
+    name: &str,
+    input: Value,
+    result: String,
+) {
+    let Some(id) = item_id(item) else {
+        return;
+    };
+    if emitted_tools.insert(id.clone()) {
+        sink(UnifiedAgentEvent::ToolUse {
+            id: id.clone(),
+            name: name.to_string(),
+            input,
+        });
+    }
+    if !include_result {
+        return;
+    }
+    sink(UnifiedAgentEvent::ToolResult {
+        tool_use_id: id,
+        content: result,
+        is_error: item_failed(item),
+    });
+}
+
+fn emit_plan_update(params: &Value, sink: &mut dyn FnMut(UnifiedAgentEvent)) {
+    let Some(plan) = params.get("plan").and_then(Value::as_array) else {
+        return;
+    };
+    let todos: Vec<Value> = plan
+        .iter()
+        .filter_map(|entry| {
+            let step = json_str(entry, "step")?;
+            let status = match entry.get("status").and_then(Value::as_str) {
+                Some("inProgress") | Some("in_progress") => "in_progress",
+                Some("completed") => "completed",
+                Some("pending") => "pending",
+                _ => "pending",
+            };
+            Some(json!({ "content": step, "status": status }))
+        })
+        .collect();
+    if todos.is_empty() && !plan.is_empty() {
+        return;
+    }
+    sink(UnifiedAgentEvent::TodoWrite {
+        todos: json!({ "todos": todos }),
+    });
+}
+
+fn collab_tool_kind(item: &serde_json::Map<String, Value>) -> String {
+    item.get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .replace('-', "_")
+        .to_ascii_lowercase()
+}
+
+fn collab_child_id(item: &serde_json::Map<String, Value>) -> Option<String> {
+    map_str(item, "newThreadId")
+        .or_else(|| map_str(item, "receiverThreadId"))
+        .map(str::to_string)
+        .or_else(|| {
+            item.get("receiverThreadIds")
+                .and_then(Value::as_array)
+                .and_then(|ids| {
+                    ids.iter()
+                        .find_map(|id| id.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                        .map(str::to_string)
+                })
+        })
+}
+
+fn collab_is_spawn(kind: &str) -> bool {
+    matches!(kind, "spawn_agent" | "spawnagent")
+}
+
+fn emit_collab_tool_call(
+    item: &serde_json::Map<String, Value>,
+    emitted_tools: &mut HashSet<String>,
+    sink: &mut dyn FnMut(UnifiedAgentEvent),
+    include_result: bool,
+) {
+    let Some(id) = item_id(item) else {
+        return;
+    };
+    let kind = collab_tool_kind(item);
+    let child_id = collab_child_id(item);
+    let task_id = child_id.clone().unwrap_or_else(|| id.clone());
+    let prompt = map_str(item, "prompt").unwrap_or("");
+    if emitted_tools.insert(id.clone()) {
+        sink(UnifiedAgentEvent::ToolUse {
+            id: id.clone(),
+            name: "subagent".to_string(),
+            input: json!({
+                "tool": item.get("tool").cloned().unwrap_or(Value::Null),
+                "prompt": prompt,
+                "receiverThreadId": child_id,
+            }),
+        });
+        if collab_is_spawn(&kind) {
+            sink(UnifiedAgentEvent::BackgroundTask {
+                task_id: task_id.clone(),
+                status: "running".to_string(),
+                kind: Some("local_agent".to_string()),
+                description: (!prompt.is_empty()).then(|| prompt.to_string()),
+                summary: None,
+            });
+        }
+    }
+    if !include_result {
+        return;
+    }
+    let failed = item_failed(item);
+    let content = if collab_is_spawn(&kind) && !failed {
+        format!("started subagent {task_id}")
+    } else if let Some(status) = map_str(item, "agentStatus") {
+        status.to_string()
+    } else {
+        item.get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("completed")
+            .to_string()
+    };
+    sink(UnifiedAgentEvent::ToolResult {
+        tool_use_id: id,
+        content,
+        is_error: failed,
+    });
+    let final_status = if failed {
+        "failed"
+    } else if matches!(kind.as_str(), "wait" | "close_agent" | "closeagent") {
+        "completed"
+    } else {
+        "running"
+    };
+    sink(UnifiedAgentEvent::BackgroundTask {
+        task_id: task_id.clone(),
+        status: final_status.to_string(),
+        kind: Some("local_agent".to_string()),
+        description: None,
+        summary: map_str(item, "agentStatus").map(str::to_string),
+    });
+    if !failed {
+        sink(UnifiedAgentEvent::SubagentProgress {
+            task_id,
+            status: final_status.to_string(),
+            preview: prompt.to_string(),
+            steps: Vec::new(),
+        });
+    }
+}
+
+fn emit_subagent_activity(
+    item: &serde_json::Map<String, Value>,
+    sink: &mut dyn FnMut(UnifiedAgentEvent),
+) {
+    let task_id = collab_child_id(item)
+        .or_else(|| item_id(item))
+        .unwrap_or_else(|| "codex-subagent".to_string());
+    let preview = map_str(item, "text")
+        .or_else(|| map_str(item, "preview"))
+        .or_else(|| map_str(item, "message"))
+        .or_else(|| map_str(item, "activity"))
+        .unwrap_or("")
+        .to_string();
+    sink(UnifiedAgentEvent::SubagentProgress {
+        task_id,
+        status: "running".to_string(),
+        preview,
+        steps: Vec::new(),
+    });
 }
 
 /// A `commandExecution` ThreadItem (camelCase wire shape) maps to a Bash tool use / result.
@@ -282,12 +801,17 @@ pub fn normalize_codex_effort(raw: Option<&str>) -> Option<String> {
 /// Build the `turn/start` params, applying the per-turn `model` / reasoning `effort` (R4: codex
 /// applies both every turn, so a mid-session switch takes effect on the next turn). Pure so the
 /// per-turn application is unit-testable.
+///
+/// Extra writable roots become `sandboxPolicy.workspaceWrite.writableRoots`. Do **not** also send
+/// the legacy `sandbox` string — app-server rejects combining them. Empty extra list = omit the
+/// field so the thread's existing sandbox stays in force.
 fn build_codex_turn_params(
     thread_id: &str,
     cwd: &str,
     input: Vec<Value>,
     model: Option<&str>,
     effort: Option<&str>,
+    extra_writable_roots: &[String],
 ) -> Value {
     let mut turn_params = json!({
         "threadId": thread_id,
@@ -301,7 +825,41 @@ fn build_codex_turn_params(
     if let Some(model) = model {
         turn_params["model"] = json!(model);
     }
+    let extra: Vec<String> = extra_writable_roots
+        .iter()
+        .map(|path| {
+            strip_windows_verbatim_prefix(PathBuf::from(path))
+                .to_string_lossy()
+                .to_string()
+        })
+        .filter(|path| !path.is_empty())
+        .collect();
+    if !extra.is_empty() {
+        let mut roots = Vec::new();
+        let cwd_stripped = strip_windows_verbatim_prefix(PathBuf::from(cwd))
+            .to_string_lossy()
+            .to_string();
+        if !cwd_stripped.is_empty() {
+            roots.push(cwd_stripped);
+        }
+        for path in extra {
+            if !roots.iter().any(|existing| existing == &path) {
+                roots.push(path);
+            }
+        }
+        turn_params["sandboxPolicy"] = json!({
+            "type": "workspaceWrite",
+            "writableRoots": roots,
+        });
+    }
     turn_params
+}
+
+fn local_image_items(images: &[crate::external_agents::attachments::ImageBlock]) -> Vec<Value> {
+    crate::external_agents::attachments::materialize_images_to_tempdir(images)
+        .into_iter()
+        .map(|path| json!({ "type": "localImage", "path": path.to_string_lossy() }))
+        .collect()
 }
 
 /// A live Codex app-server connection: one `thread/start` (or `thread/resume`), then many
@@ -379,6 +937,9 @@ impl CodexAppServerSession {
             read_until_response(&mut reader, &mut stdin, 1, CODEX_INITIALIZE_TIMEOUT)
                 .await
                 .map_err(|e| format!("initialize: {e}"))?;
+            write_rpc_notification(&mut stdin, "initialized", json!({}))
+                .await
+                .map_err(|e| format!("initialized: {e}"))?;
 
             let (method, mut params) = match resume_thread.filter(|t| !t.is_empty()) {
                 Some(tid) => ("thread/resume", json!({ "threadId": tid })),
@@ -449,8 +1010,10 @@ impl CodexAppServerSession {
         model: Option<&str>,
         reasoning: Option<&str>,
         images: &[crate::external_agents::attachments::ImageBlock],
+        extra_writable_roots: &[String],
         events: &mpsc::Sender<UnifiedAgentEvent>,
         control: &mut mpsc::Receiver<SessionCommand>,
+        mut approvals: Option<&mut ApprovalBridge>,
     ) -> Result<(), String> {
         let chosen_model = model.filter(|m| !m.is_empty() && *m != "default");
         let chosen_effort = normalize_codex_effort(reasoning);
@@ -471,15 +1034,14 @@ impl CodexAppServerSession {
             // Codex reads images as `localImage` items pointing at on-disk files; copy each into a
             // private temp dir (its sandbox can't reach the conversation attachments dir).
             let mut input = vec![json!({ "type": "text", "text": prompt })];
-            for path in crate::external_agents::attachments::materialize_images_to_tempdir(images) {
-                input.push(json!({ "type": "localImage", "path": path.to_string_lossy() }));
-            }
+            input.extend(local_image_items(images));
             let turn_params = build_codex_turn_params(
                 &self.thread_id,
                 &self.cwd,
                 input,
                 chosen_model,
                 chosen_effort.as_deref(),
+                extra_writable_roots,
             );
             write_rpc(&mut self.stdin, turn_id, "turn/start", turn_params).await?;
         }
@@ -508,9 +1070,9 @@ impl CodexAppServerSession {
                 Ok(SessionCommand::Steer {
                     id,
                     text,
+                    images: steer_images,
                     kind: crate::external_agents::session::live::MessageInjectionKind::Steer,
                     accepted,
-                    ..
                 }) => {
                     // `turn/steer` 往**在飞的**这一轮追加用户输入（不新起一轮、不发
                     // turn/started）。`expectedTurnId` 是前置条件，必须等于服务端当前活跃的
@@ -521,9 +1083,11 @@ impl CodexAppServerSession {
                         Some(expected_turn_id) => {
                             let rpc_id = self.next_id;
                             self.next_id += 1;
+                            let mut input = vec![json!({ "type": "text", "text": text })];
+                            input.extend(local_image_items(&steer_images));
                             let params = json!({
                                 "threadId": self.thread_id,
-                                "input": [{ "type": "text", "text": text }],
+                                "input": input,
                                 "expectedTurnId": expected_turn_id,
                             });
                             match write_rpc(&mut self.stdin, rpc_id, "turn/steer", params).await {
@@ -574,9 +1138,18 @@ impl CodexAppServerSession {
                 value.get("method").and_then(|v| v.as_str()),
                 value.get("id"),
             ) {
-                if let Some(result) = approval_response(method) {
-                    write_rpc_result(&mut self.stdin, id, result).await?;
-                }
+                let params = value.get("params").cloned().unwrap_or(Value::Null);
+                answer_codex_server_request(
+                    &mut self.stdin,
+                    method,
+                    id,
+                    &params,
+                    approvals.as_deref_mut(),
+                    control,
+                    &self.thread_id,
+                    &mut self.next_id,
+                )
+                .await?;
                 continue;
             }
             if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
@@ -587,16 +1160,23 @@ impl CodexAppServerSession {
                     self.active_turn_id = Some(turn.to_string());
                 }
                 let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
-                let ended =
+                let mapped =
                     map_codex_notification(method, &params, &mut self.emitted_tools, &mut |e| {
                         buf.push(e)
                     });
                 for e in buf {
                     let _ = events.send(e).await;
                 }
-                if ended {
-                    self.active_turn_id = None;
-                    return Ok(());
+                match mapped {
+                    CodexMapResult::Continue => {}
+                    CodexMapResult::TurnEnded => {
+                        self.active_turn_id = None;
+                        return Ok(());
+                    }
+                    CodexMapResult::TurnFailed(message) => {
+                        self.active_turn_id = None;
+                        return Err(message);
+                    }
                 }
                 continue;
             }
@@ -625,11 +1205,17 @@ impl CodexAppServerSession {
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
                     .unwrap_or_else(|| err.to_string());
-                let _ = events
-                    .send(UnifiedAgentEvent::Error {
-                        message: message.clone(),
-                    })
-                    .await;
+                // Same as the `error` notification: Codex may surface reconnect progress as a
+                // JSON-RPC error object while the turn is still running. Killing the reader
+                // here is the "掐线" the TUI never does.
+                if is_codex_reconnect_progress(&message) {
+                    let _ = events
+                        .send(UnifiedAgentEvent::StatusNote {
+                            text: mid_turn_error_status_note(&message),
+                        })
+                        .await;
+                    continue;
+                }
                 return Err(message);
             }
             // Response to turn/start (or a stale id): the turn is now running — keep reading.
@@ -645,8 +1231,107 @@ impl CodexAppServerSession {
     }
 }
 
+/// Answer a server→client JSON-RPC request. Known approvals auto-accept; `requestUserInput`
+/// goes through the ask-user host; everything else is fail-closed so the turn cannot hang.
+async fn answer_codex_server_request(
+    stdin: &mut ChildStdin,
+    method: &str,
+    id: &Value,
+    params: &Value,
+    approvals: Option<&mut ApprovalBridge>,
+    control: &mut mpsc::Receiver<SessionCommand>,
+    thread_id: &str,
+    next_id: &mut u64,
+) -> Result<(), String> {
+    if method == "item/tool/requestUserInput" {
+        return answer_codex_user_input(stdin, id, params, approvals, control, thread_id, next_id)
+            .await;
+    }
+    if let Some(result) = approval_response(method, params) {
+        return write_rpc_result(stdin, id, result).await;
+    }
+    write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await
+}
+
+async fn answer_codex_user_input(
+    stdin: &mut ChildStdin,
+    id: &Value,
+    params: &Value,
+    approvals: Option<&mut ApprovalBridge>,
+    control: &mut mpsc::Receiver<SessionCommand>,
+    thread_id: &str,
+    next_id: &mut u64,
+) -> Result<(), String> {
+    let Some(bridge) = approvals else {
+        return write_rpc_error(stdin, id, -32603, "ask-user host unavailable").await;
+    };
+    let request_id = rpc_id_key(id);
+    let tool_call_id = json_str(params, "itemId")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("codex-ask-{request_id}"));
+    let ask = ApprovalAsk {
+        request_id: request_id.clone(),
+        tool_call_id,
+        tool_name: "requestUserInput".to_string(),
+        input: params.clone(),
+        requires_user_interaction: true,
+    };
+    if bridge.requests.send(ask).await.is_err() {
+        return write_rpc_error(stdin, id, -32603, "ask-user host closed").await;
+    }
+    loop {
+        match control.try_recv() {
+            Ok(SessionCommand::Cancel) => {
+                let _ = write_rpc_error(stdin, id, -32603, "cancelled").await;
+                let iid = *next_id;
+                *next_id += 1;
+                let _ = write_rpc(
+                    stdin,
+                    iid,
+                    "turn/interrupt",
+                    json!({ "threadId": thread_id }),
+                )
+                .await;
+                return Err("cancelled".to_string());
+            }
+            Ok(SessionCommand::Close) => {
+                let _ = write_rpc_error(stdin, id, -32603, "closed").await;
+                return Err("closed".to_string());
+            }
+            Ok(SessionCommand::RunTurn { done, .. }) => {
+                let _ = done.send(Err("session busy".to_string()));
+            }
+            Ok(SessionCommand::Steer { accepted, .. }) => {
+                let _ = accepted.send(false);
+            }
+            Ok(SessionCommand::StopTask { .. }) => {}
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                let _ = write_rpc_error(stdin, id, -32603, "control channel closed").await;
+                return Err("control channel closed".to_string());
+            }
+        }
+        match timeout(Duration::from_millis(200), bridge.decisions.recv()).await {
+            Ok(Some(decision)) if decision.request_id == request_id => {
+                if decision.approved {
+                    let payload = decision
+                        .updated_input
+                        .unwrap_or_else(|| json!({ "answers": {} }));
+                    return write_rpc_result(stdin, id, payload).await;
+                }
+                return write_rpc_error(stdin, id, -32603, "user declined").await;
+            }
+            Ok(Some(_)) | Err(_) => continue,
+            Ok(None) => {
+                return write_rpc_error(stdin, id, -32603, "ask-user host closed").await;
+            }
+        }
+    }
+}
+
 /// Read JSON-RPC lines until the response with `target_id` arrives, auto-answering any
-/// server→client approval requests and skipping notifications.
+/// server→client approval requests and skipping notifications. Unknown requests are
+/// fail-closed so handshake cannot hang.
 async fn read_until_response(
     reader: &mut Lines<BufReader<ChildStdout>>,
     stdin: &mut ChildStdin,
@@ -675,8 +1360,11 @@ async fn read_until_response(
             value.get("method").and_then(|v| v.as_str()),
             value.get("id"),
         ) {
-            if let Some(result) = approval_response(method) {
+            let params = value.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(result) = approval_response(method, &params) {
                 write_rpc_result(stdin, id, result).await?;
+            } else {
+                write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await?;
             }
             continue;
         }
@@ -906,6 +1594,9 @@ pub async fn detect_codex_models(
         && read_until_response(&mut reader, &mut stdin, 1, overall)
             .await
             .is_ok()
+        && write_rpc_notification(&mut stdin, "initialized", json!({}))
+            .await
+            .is_ok()
         && write_rpc(&mut stdin, 2, "model/list", json!({}))
             .await
             .is_ok();
@@ -1126,6 +1817,9 @@ pub async fn detect_codex_commands(
                 && read_until_response(&mut reader, &mut stdin, 1, overall)
                     .await
                     .is_ok()
+                && write_rpc_notification(&mut stdin, "initialized", json!({}))
+                    .await
+                    .is_ok()
                 && write_rpc(&mut stdin, 2, "skills/list", json!({}))
                     .await
                     .is_ok();
@@ -1186,12 +1880,10 @@ pub fn spawn_codex_session_actor(
                     model,
                     reasoning,
                     images,
+                    extra_writable_roots,
                     events,
                     done,
-                    // codex 侧还没有权限审批（目前只有 claude 走 stdio 控制通道），忽略即可 ——
-                    // 通道从来不会被建起来（`run.rs::turn_asks_for_permission` 只对带
-                    // `--permission-prompt-tool` 的 argv 为真，那是 claude 专属 flag）。
-                    approvals: _,
+                    mut approvals,
                 } => {
                     // Invariant (A4): `run_turn` sends every `event` before returning, and mpsc
                     // preserves order, so the caller's post-`done` drain sees them all. `done.send`
@@ -1202,8 +1894,10 @@ pub fn spawn_codex_session_actor(
                             model.as_deref(),
                             reasoning.as_deref(),
                             &images,
+                            &extra_writable_roots,
                             &events,
                             &mut rx,
+                            approvals.as_mut(),
                         )
                         .await;
                     let _ = done.send(result);
@@ -1231,12 +1925,12 @@ pub fn spawn_codex_session_actor(
 mod tests {
     use super::*;
 
-    fn collect(method: &str, raw: &str) -> (Vec<UnifiedAgentEvent>, bool) {
+    fn collect(method: &str, raw: &str) -> (Vec<UnifiedAgentEvent>, CodexMapResult) {
         let params: Value = serde_json::from_str(raw).unwrap();
         let mut events = Vec::new();
         let mut tools = HashSet::new();
-        let ended = map_codex_notification(method, &params, &mut tools, &mut |e| events.push(e));
-        (events, ended)
+        let mapped = map_codex_notification(method, &params, &mut tools, &mut |e| events.push(e));
+        (events, mapped)
     }
 
     /// Shape mirrors live `codex app-server` → `model/list` (2026-08 probe).
@@ -1438,6 +2132,7 @@ mod tests {
                     model: None,
                     reasoning: None,
                     images: vec![],
+                    extra_writable_roots: vec![],
                     events: etx,
                     done: dtx,
                     approvals: None,
@@ -1508,7 +2203,7 @@ mod tests {
             "item/agentMessage/delta",
             r#"{"delta":"hi","itemId":"i","threadId":"t","turnId":"u"}"#,
         );
-        assert!(!ended);
+        assert_eq!(ended, CodexMapResult::Continue);
         assert!(matches!(
             events.first(),
             Some(UnifiedAgentEvent::TextDelta { delta }) if delta == "hi"
@@ -1681,30 +2376,103 @@ mod tests {
             "turn/completed",
             r#"{"threadId":"t","turn":{"id":"u","items":[],"status":"completed"}}"#,
         );
-        assert!(ended);
+        assert_eq!(ended, CodexMapResult::TurnEnded);
     }
 
     #[test]
-    fn turn_failed_emits_error_and_ends() {
+    fn turn_failed_returns_err_without_error_event() {
         let (events, ended) = collect(
             "turn/completed",
-            r#"{"threadId":"t","turn":{"id":"u","items":[],"status":"failed","error":{"message":"boom"}}}"#,
+            r#"{"threadId":"t","turn":{"id":"u","items":[],"status":"failed","error":{"message":"boom","codexErrorInfo":"UsageLimitExceeded"}}}"#,
         );
-        assert!(ended);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            UnifiedAgentEvent::Error { message, .. } if message == "boom"
-        )));
+        assert_eq!(
+            ended,
+            CodexMapResult::TurnFailed("UsageLimitExceeded: boom".to_string())
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Error { .. })));
     }
 
     #[test]
-    fn error_notification_emits_error_and_ends() {
+    fn reconnecting_error_stays_on_the_status_line() {
+        let (events, ended) = collect(
+            "error",
+            r#"{"error":{"message":"Reconnecting... 7/50 (stream disconnected before completion)"}}"#,
+        );
+        assert_eq!(ended, CodexMapResult::Continue);
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::StatusNote { text }) if text == "reconnect 7/50"
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Error { .. })));
+    }
+
+    #[test]
+    fn realtime_error_reconnecting_is_also_progress() {
+        let (events, ended) = collect(
+            "thread/realtime/error",
+            r#"{"threadId":"t","message":"Reconnecting... 12/50"}"#,
+        );
+        assert_eq!(ended, CodexMapResult::Continue);
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::StatusNote { text }) if text == "reconnect 12/50"
+        ));
+    }
+
+    #[test]
+    fn stream_disconnect_mid_turn_does_not_end_the_turn() {
+        let (events, ended) = collect(
+            "error",
+            r#"{"error":{"message":"stream disconnected","codexErrorInfo":"ResponseStreamDisconnected"}}"#,
+        );
+        assert_eq!(ended, CodexMapResult::Continue);
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::StatusNote { text }) if text == "reconnect"
+        ));
+    }
+
+    #[test]
+    fn generic_mid_turn_error_waits_for_turn_completed() {
         let (events, ended) = collect("error", r#"{"error":{"message":"fatal"}}"#);
-        assert!(ended);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            UnifiedAgentEvent::Error { message, .. } if message == "fatal"
-        )));
+        assert_eq!(ended, CodexMapResult::Continue);
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::StatusNote { text }) if text.contains("fatal")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Error { .. })));
+    }
+
+    #[test]
+    fn usage_limit_error_notification_still_fails_closed() {
+        let (events, ended) = collect(
+            "error",
+            r#"{"error":{"message":"quota","codexErrorInfo":"UsageLimitExceeded"}}"#,
+        );
+        assert_eq!(
+            ended,
+            CodexMapResult::TurnFailed("UsageLimitExceeded: quota".to_string())
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, UnifiedAgentEvent::Error { .. })));
+    }
+
+    #[test]
+    fn parse_reconnect_progress_reads_attempt_and_max() {
+        assert_eq!(parse_reconnect_progress("Reconnecting... 7/50"), Some((7, 50)));
+        assert_eq!(
+            parse_reconnect_progress("Reconnecting... 1/5 (stream disconnected before completion)"),
+            Some((1, 5))
+        );
+        assert_eq!(parse_reconnect_progress("正在重新连接 12/50"), Some((12, 50)));
+        assert_eq!(parse_reconnect_progress("stream disconnected"), None);
     }
 
     fn event_variant(event: &UnifiedAgentEvent) -> &'static str {
@@ -1770,6 +2538,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 images: Vec::new(),
+                extra_writable_roots: Vec::new(),
                 events: events_tx,
                 done: done_tx,
                 approvals: None,
@@ -1842,6 +2611,7 @@ mod tests {
                 model: None,
                 reasoning: None,
                 images: Vec::new(),
+                extra_writable_roots: Vec::new(),
                 events: events_tx,
                 done: done_tx,
                 approvals: None,
@@ -2026,6 +2796,7 @@ mod tests {
             vec![json!({ "type": "text", "text": "hi" })],
             Some("gpt-5.3-codex"),
             Some("high"),
+            &[],
         );
         assert_eq!(params["threadId"], json!("thread-1"));
         assert_eq!(params["model"], json!("gpt-5.3-codex"));
@@ -2041,25 +2812,165 @@ mod tests {
             vec![json!({ "type": "text", "text": "hi" })],
             None,
             None,
+            &[],
         );
         assert!(params.get("model").is_none());
         assert!(params.get("effort").is_none());
+        assert!(params.get("sandboxPolicy").is_none());
+        assert!(params.get("sandbox").is_none());
+    }
+
+    #[test]
+    fn build_codex_turn_params_adds_writable_roots_without_sandbox_string() {
+        let params = build_codex_turn_params(
+            "thread-1",
+            "/work",
+            vec![json!({ "type": "text", "text": "hi" })],
+            None,
+            None,
+            &["/tmp/attach".to_string()],
+        );
+        assert_eq!(
+            params["sandboxPolicy"],
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/work", "/tmp/attach"],
+            })
+        );
+        assert!(params.get("sandbox").is_none());
     }
 
     #[test]
     fn approval_response_shapes() {
+        let empty = json!({});
         assert_eq!(
-            approval_response("item/commandExecution/requestApproval"),
+            approval_response("item/commandExecution/requestApproval", &empty),
             Some(json!({ "decision": "acceptForSession" }))
         );
         assert_eq!(
-            approval_response("item/fileChange/requestApproval"),
+            approval_response("item/fileChange/requestApproval", &empty),
             Some(json!({ "decision": "acceptForSession" }))
         );
         assert_eq!(
-            approval_response("item/permissions/requestApproval"),
-            Some(json!({ "permissions": {}, "scope": "session" }))
+            approval_response(
+                "item/permissions/requestApproval",
+                &json!({ "permissions": { "network": { "enabled": true } } }),
+            ),
+            Some(json!({
+                "permissions": { "network": { "enabled": true } },
+                "scope": "session"
+            }))
         );
-        assert!(approval_response("item/started").is_none());
+        assert!(approval_response("item/started", &empty).is_none());
+        assert!(approval_response("item/tool/requestUserInput", &empty).is_none());
+    }
+
+    #[test]
+    fn plan_update_emits_todo_write_with_normalized_status() {
+        let (events, mapped) = collect(
+            "turn/plan/updated",
+            r#"{"turnId":"u","plan":[{"step":"读文件","status":"inProgress"},{"step":"改代码","status":"pending"}]}"#,
+        );
+        assert_eq!(mapped, CodexMapResult::Continue);
+        let UnifiedAgentEvent::TodoWrite { todos } = &events[0] else {
+            panic!("expected TodoWrite");
+        };
+        assert_eq!(todos["todos"][0]["status"], json!("in_progress"));
+        assert_eq!(todos["todos"][0]["content"], json!("读文件"));
+        let state = crate::external_agents::session::dsh_jsonrpc::todo_state_from_write(todos)
+            .expect("must map");
+        assert_eq!(state.items.len(), 2);
+    }
+
+    #[test]
+    fn file_change_emits_edit_tool() {
+        let started = json!({
+            "item": {
+                "type": "fileChange",
+                "id": "fc-1",
+                "status": "inProgress",
+                "changes": [{ "path": "src/main.rs", "kind": "update", "diff": "@@" }]
+            }
+        });
+        let completed = json!({
+            "item": {
+                "type": "fileChange",
+                "id": "fc-1",
+                "status": "completed",
+                "changes": [{ "path": "src/main.rs", "kind": "update", "diff": "@@" }]
+            }
+        });
+        let mut events = Vec::new();
+        let mut tools = HashSet::new();
+        map_codex_notification("item/started", &started, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        map_codex_notification("item/completed", &completed, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::ToolUse { id, name, .. }) if id == "fc-1" && name == "Edit"
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { tool_use_id, is_error, .. }
+                if tool_use_id == "fc-1" && !*is_error
+        )));
+    }
+
+    #[test]
+    fn collab_spawn_keeps_subagent_card_running() {
+        let started = json!({
+            "item": {
+                "type": "collabToolCall",
+                "id": "col-1",
+                "tool": "spawn_agent",
+                "status": "inProgress",
+                "prompt": "search docs"
+            }
+        });
+        let completed = json!({
+            "item": {
+                "type": "collabToolCall",
+                "id": "col-1",
+                "tool": "spawn_agent",
+                "status": "completed",
+                "newThreadId": "thr_child",
+                "prompt": "search docs"
+            }
+        });
+        let mut events = Vec::new();
+        let mut tools = HashSet::new();
+        map_codex_notification("item/started", &started, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        map_codex_notification("item/completed", &completed, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::ToolUse { name, .. }) if name == "subagent"
+        ));
+        let result = events.iter().find_map(|event| match event {
+            UnifiedAgentEvent::ToolResult {
+                content, is_error, ..
+            } => Some((content.as_str(), *is_error)),
+            _ => None,
+        });
+        assert_eq!(result, Some(("started subagent thr_child", false)));
+        assert_eq!(
+            crate::external_agents::session::dsh_jsonrpc::subagent_launch_task_id(
+                "subagent",
+                "started subagent thr_child"
+            )
+            .as_deref(),
+            Some("thr_child")
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::BackgroundTask { task_id, status, .. }
+                if task_id == "thr_child" && status == "running"
+        )));
     }
 }

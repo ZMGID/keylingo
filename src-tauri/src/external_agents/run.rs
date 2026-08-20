@@ -279,6 +279,15 @@ pub async fn run_external_cli_reply(
             extra_dirs.push(dir.to_string_lossy().to_string());
         }
     }
+    // Codex `workspace-write` 锁在 cwd：附件目录和 localImage 临时文件必须作为
+    // `sandboxPolicy.writableRoots` 下发。其它协议忽略这个字段。
+    let extra_writable_roots = {
+        let mut roots = extra_dirs.clone();
+        if !image_blocks.is_empty() {
+            roots.push(std::env::temp_dir().to_string_lossy().to_string());
+        }
+        roots
+    };
     let runtime_ctx = RuntimeContext {
         extra_allowed_dirs: extra_dirs,
         resume_session_id: resume_ctx.resume_session_id.clone(),
@@ -502,6 +511,7 @@ pub async fn run_external_cli_reply(
                 latest_user_message,
             ),
             &image_blocks,
+            &extra_writable_roots,
             &mut emit_event,
             &cancel_check,
             approval_host.as_ref(),
@@ -799,6 +809,7 @@ async fn run_persistent_turn<E, C>(
     first_prompt: &str,
     reuse_prompt: &str,
     images: &[crate::external_agents::attachments::ImageBlock],
+    extra_writable_roots: &[String],
     emit: &mut E,
     cancel: &C,
     // 本轮的工具审批出口。`None` = 不接（协议不支持 / 用户没选会询问的权限档位）——
@@ -894,7 +905,8 @@ where
                             )
                             || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(
                                 &err,
-                            )) =>
+                            )
+                            || crate::external_agents::errors::is_missing_codex_thread_error(&err)) =>
                 {
                     dropped_resume = true;
                     turn_args = drop_resume_for_fresh_session(
@@ -994,6 +1006,7 @@ where
             model.clone(),
             reasoning.clone(),
             images,
+            extra_writable_roots,
             emit,
             cancel,
             approvals,
@@ -1047,6 +1060,9 @@ where
             // Transient failure → drop the stale handle and reconnect fresh once.
             PersistentFailureAction::RetryFresh => {
                 retried_after_failure = true;
+                emit(UnifiedAgentEvent::StatusNote {
+                    text: "reconnect".to_string(),
+                });
                 clear_live_handle(app, conversation_id);
             }
         }
@@ -1350,6 +1366,7 @@ fn persistent_failure_action(
     if crate::external_agents::stream::claude::is_missing_session_error(err)
         || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
         || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(err)
+        || crate::external_agents::errors::is_missing_codex_thread_error(err)
     {
         return if dropped_resume {
             PersistentFailureAction::Fatal
@@ -1359,6 +1376,9 @@ fn persistent_failure_action(
     }
     // Auth is never auto-retried (a doomed retry could trigger a login storm).
     if crate::external_agents::errors::is_auth_error(err, agent_id) {
+        return PersistentFailureAction::Fatal;
+    }
+    if crate::external_agents::errors::is_non_retryable_codex_error(err, agent_id) {
         return PersistentFailureAction::Fatal;
     }
     if retried_after_failure {
@@ -1387,6 +1407,10 @@ fn drop_resume_for_fresh_session(
     use crate::external_agents::session::{clear_live_handle, replace_stored_session_id};
 
     if matches!(protocol, StreamFormat::DshJsonRpc) {
+        clear_live_handle(app, conversation_id);
+        return args.to_vec();
+    }
+    if matches!(protocol, StreamFormat::CodexAppServer) {
         clear_live_handle(app, conversation_id);
         return args.to_vec();
     }
@@ -1451,6 +1475,7 @@ async fn drive_persistent_turn<E, C>(
     model: Option<String>,
     reasoning: Option<String>,
     images: &[crate::external_agents::attachments::ImageBlock],
+    extra_writable_roots: &[String],
     emit: &mut E,
     cancel: &C,
     approvals: Option<&ApprovalHost<'_>>,
@@ -1490,6 +1515,7 @@ where
             model,
             reasoning,
             images: images.to_vec(),
+            extra_writable_roots: extra_writable_roots.to_vec(),
             events: events_tx,
             done: done_tx,
             approvals: bridge,
@@ -1957,8 +1983,7 @@ fn spawn_dsh_idle_approval_bridge(
     let conversation_id = conversation_id.to_string();
     tauri::async_runtime::spawn(async move {
         while let Some(ask) = request_rx.recv().await {
-            let decision =
-                present_dsh_idle_ask(app.clone(), conversation_id.clone(), ask).await;
+            let decision = present_dsh_idle_ask(app.clone(), conversation_id.clone(), ask).await;
             if decision_tx.send(decision).await.is_err() {
                 break;
             }
@@ -1982,8 +2007,7 @@ async fn present_dsh_idle_ask(
     let generation = state.next_chat_generation(&conversation_id);
     let run_id = format!("dsh-ask-{}", Uuid::new_v4());
     let message_id = format!("msg_{}", Uuid::new_v4());
-    let arguments =
-        serde_json::to_string(&ask.input).unwrap_or_else(|_| "{}".to_string());
+    let arguments = serde_json::to_string(&ask.input).unwrap_or_else(|_| "{}".to_string());
     let persisted = persist_dsh_idle_ask_message(
         &app,
         &conversation_id,
@@ -3695,6 +3719,7 @@ mod tests {
         assert!(!turn_asks_for_permission(&["stdio".to_string()]));
         // dsh 没有 `--permission-prompt-tool`：问用户靠 codec 开通道。
         assert!(turn_needs_approval_host(&[], "dsh"));
+        assert!(turn_needs_approval_host(&[], "codex"));
         assert!(!turn_needs_approval_host(&[], "cursor"));
         assert!(!turn_needs_approval_host(&[], "claude"));
     }
@@ -4004,6 +4029,50 @@ mod tests {
         assert_ne!(
             persistent_failure_action("Pi RPC timed out", "pi", false, false, false),
             PersistentFailureAction::ReconnectWithoutResume
+        );
+    }
+
+    #[test]
+    fn a_missing_codex_thread_reconnects_without_resume_exactly_once() {
+        assert_eq!(
+            persistent_failure_action("thread not found: thr_abc", "codex", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+        assert_eq!(
+            persistent_failure_action("thread not found: thr_abc", "codex", false, false, true),
+            PersistentFailureAction::Fatal
+        );
+    }
+
+    #[test]
+    fn codex_usage_and_window_errors_are_fatal() {
+        assert_eq!(
+            persistent_failure_action("UsageLimitExceeded: quota", "codex", false, false, false),
+            PersistentFailureAction::Fatal
+        );
+        assert_eq!(
+            persistent_failure_action(
+                "ContextWindowExceeded: too long",
+                "codex",
+                false,
+                false,
+                false
+            ),
+            PersistentFailureAction::Fatal
+        );
+        assert_eq!(
+            persistent_failure_action("ResponseStreamDisconnected", "codex", false, false, false),
+            PersistentFailureAction::RetryFresh
+        );
+        assert_eq!(
+            persistent_failure_action(
+                "ResponseTooManyFailedAttempts",
+                "codex",
+                false,
+                false,
+                false
+            ),
+            PersistentFailureAction::Fatal
         );
     }
 

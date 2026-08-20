@@ -555,7 +555,7 @@ pub enum ChatRunEvent {
         event: String,
         message: String,
     },
-    /// 生成过程的**瞬态状态一行字**（当前唯一来源：claude 上游重试 `api_retry`）。
+    /// 生成过程的**瞬态状态一行字**（claude `api_retry`、codex 重连进度等）。
     /// 挂在流状态行（StreamStatusLine）上而不是消息正文——正文一恢复流动前端就清掉。
     /// `note: None` = 显式清除。
     StatusNoteUpdated {
@@ -1179,7 +1179,6 @@ impl ChatProtocolHub {
             )
         });
     }
-
 }
 
 fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
@@ -1726,7 +1725,7 @@ mod tests {
             serde_json::json!({
                 "type": "hook_failed", "hookName": "after", "event": "stop", "message": "failed"
             }),
-            serde_json::json!({"type": "status_note_updated", "note": "上游重试 2/10"}),
+            serde_json::json!({"type": "status_note_updated", "note": "retry 2/10"}),
             serde_json::json!({"type": "status_note_updated", "note": null}),
             serde_json::json!({
                 "type": "run_completed", "full": "answer", "conversationRevision": 2
