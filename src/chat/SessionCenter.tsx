@@ -561,9 +561,7 @@ export function SessionCenter({
   const shelfNavVertical = (
     <>
       <nav className="flex flex-col gap-0.5">
-        <div className="mb-1 px-2 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
-          {t.chatLibShelf}
-        </div>
+        <div className="mb-1 px-2 text-[12px] text-neutral-400">{t.chatLibShelf}</div>
         {shelves.map(({ id, label, icon: Icon }) => {
           const active = shelf === id && !projectId && !setId
           return (
@@ -586,7 +584,7 @@ export function SessionCenter({
 
       {sets.length > 0 && (
         <nav className="flex flex-col gap-0.5">
-          <div className="mb-1 flex items-center gap-1 px-2 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+          <div className="mb-1 flex items-center gap-1 px-2 text-[12px] text-neutral-400">
             <Layers size={11} /> {t.chatTabSets}
           </div>
           {sets.map((s) => {
@@ -611,7 +609,7 @@ export function SessionCenter({
 
       {projects.length > 0 && (
         <nav className="flex flex-col gap-0.5">
-          <div className="mb-1 flex items-center gap-1 px-2 text-[11px] font-medium uppercase tracking-wide text-neutral-400">
+          <div className="mb-1 flex items-center gap-1 px-2 text-[12px] text-neutral-400">
             <FolderKanban size={11} /> {t.chatTabProjects}
           </div>
           {projects.map((p) => {
@@ -648,29 +646,17 @@ export function SessionCenter({
       ref={rootRef}
       className="assistant-center-root flex h-full min-h-0 flex-col text-neutral-900 dark:text-neutral-100"
     >
-      {/* Header */}
-      <div
-        className={`shrink-0 border-b border-neutral-200 pb-3 pt-5 dark:border-white/[0.07] ${
-          compactPad ? 'px-3' : 'px-6 pb-4 pt-6'
-        }`}
-      >
-        <div className="mx-auto flex w-full max-w-[1200px] items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h1
-              className={`flex min-w-0 items-center gap-2 font-semibold tracking-normal text-neutral-950 dark:text-neutral-50 ${
-                compactPad ? 'text-[20px]' : 'gap-2.5 text-[26px]'
-              }`}
-            >
-              <MessagesSquare size={compactPad ? 18 : 22} className="shrink-0 text-neutral-500" />
-              <span className="truncate">{t.chatNavSessions}</span>
-            </h1>
-            {!compactPad && (
-              <p className="mt-2 max-w-2xl text-[13.5px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                {t.chatSessionSubtitle}
-              </p>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-2 pt-0.5">
+      <div className={`shrink-0 ${compactPad ? 'px-3 pb-2.5 pt-4' : 'px-6 pb-3 pt-5'}`}>
+        <div className="mx-auto flex w-full max-w-[1200px] items-center justify-between gap-3">
+          <h1
+            className={`flex min-w-0 items-center gap-2 font-semibold tracking-tight text-neutral-950 dark:text-neutral-50 ${
+              compactPad ? 'text-[18px]' : 'gap-2.5 text-[22px]'
+            }`}
+          >
+            <MessagesSquare size={compactPad ? 17 : 20} className="shrink-0 text-neutral-500" />
+            <span className="truncate">{t.chatNavSessions}</span>
+          </h1>
+          <div className="flex shrink-0 items-center gap-2">
             <span className="hidden text-[12px] tabular-nums text-neutral-400 sm:inline">
               {state.loading
                 ? t.chatLoading
@@ -681,65 +667,18 @@ export function SessionCenter({
             </IconButton>
           </div>
         </div>
-
-        {/* Toolbar：Input + Select + Toggle，与技能商店/知识库/设置同一套组件 */}
-        <div className="mx-auto mt-3 flex w-full max-w-[1200px] flex-col gap-2">
-          <div className="relative w-full min-w-0">
-            <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 z-[1] -translate-y-1/2 text-neutral-400" />
-            <input
-              ref={searchInputRef}
-              type="search"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder={t.chatSessionSearchPlaceholder}
-              data-tauri-drag-region="false"
-              className="kv-input w-full min-w-0 !pl-8"
-            />
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <Select
-              className="w-[148px] shrink-0"
-              value={`${sort}:${order}`}
-              onChange={(value) => {
-                const [s, o] = value.split(':') as [ConversationLibrarySort, ConversationLibraryOrder]
-                setSort(s)
-                setOrder(o)
-              }}
-              options={sortOptions}
-              title={t.chatLibSort}
-            />
-            <Select
-              className="w-[132px] shrink-0"
-              value={groupBy}
-              onChange={(value) => setGroupBy(value as ConversationLibraryGroup)}
-              options={groupOptions}
-            />
-            <Select
-              className="w-[100px] shrink-0"
-              value={density}
-              onChange={(value) => setDensity(value as ConversationLibraryDensity)}
-              options={densityOptions}
-            />
-            <div className="flex h-[30px] shrink-0 items-center gap-2 border-l border-neutral-200 pl-3 dark:border-white/[0.08]">
-              <Toggle checked={fullText} onChange={setFullText} ariaLabel={t.chatLibFullText} />
-              <span className="whitespace-nowrap text-[12.5px] text-neutral-600 dark:text-neutral-300">
-                {t.chatLibFullText}
-              </span>
-            </div>
-          </div>
-        </div>
       </div>
 
       {/* Body */}
       <div
         ref={bodyRef}
-        className={`mx-auto flex min-h-0 w-full max-w-[1200px] flex-1 ${
-          shelfAsChips ? 'flex-col' : 'flex-row'
-        } ${compactPad ? 'gap-2 px-2 pb-2 pt-2' : 'gap-0 px-4 pb-4 pt-3'}`}
+        className={`mx-auto flex min-h-0 w-full max-w-[1200px] flex-1 flex-col ${
+          compactPad ? 'gap-2 px-2 pb-2' : 'gap-3 px-4 pb-4'
+        }`}
       >
         {/* 窄屏：书架 / 集 / 项目 → 横向 chip，不占死 200px */}
         {shelfAsChips ? (
-          <div className="custom-scrollbar shrink-0 overflow-x-auto pb-1">
+          <div className="custom-scrollbar shrink-0 overflow-x-auto">
             <div className="flex min-w-min items-center gap-1.5">
               {shelves.map(({ id, label }) => (
                 <button
@@ -783,10 +722,13 @@ export function SessionCenter({
               )}
             </div>
           </div>
-        ) : (
+        ) : null}
+
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-neutral-200 bg-white dark:border-white/[0.08] dark:bg-[var(--bg-input)]">
+        {!shelfAsChips && (
           <aside
-            className={`custom-scrollbar flex shrink-0 flex-col gap-4 overflow-y-auto border-r border-neutral-200 pr-3 dark:border-white/[0.07] ${
-              layout.page < 900 ? 'w-[148px]' : 'w-[180px]'
+            className={`custom-scrollbar flex shrink-0 flex-col gap-4 overflow-y-auto border-r border-neutral-200/80 bg-neutral-50/70 px-2 py-3 dark:border-white/[0.07] dark:bg-white/[0.02] ${
+              layout.page < 900 ? 'w-[152px]' : 'w-[176px]'
             }`}
           >
             {shelfNavVertical}
@@ -796,10 +738,53 @@ export function SessionCenter({
         {/* Main list */}
         <div
           ref={tableHostRef}
-          className={`flex min-h-0 min-w-0 flex-1 flex-col ${shelfAsChips ? '' : 'pl-3'}`}
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
         >
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-neutral-100 px-3 py-2 dark:border-white/[0.06]">
+            <div className="relative min-w-[200px] flex-1">
+              <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 z-[1] -translate-y-1/2 text-neutral-400" />
+              <input
+                ref={searchInputRef}
+                type="search"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder={t.chatSessionSearchPlaceholder}
+                data-tauri-drag-region="false"
+                className="kv-input w-full min-w-0 !h-[32px] !pl-8"
+              />
+            </div>
+            <Select
+              className="w-[148px] shrink-0"
+              value={`${sort}:${order}`}
+              onChange={(value) => {
+                const [s, o] = value.split(':') as [ConversationLibrarySort, ConversationLibraryOrder]
+                setSort(s)
+                setOrder(o)
+              }}
+              options={sortOptions}
+              title={t.chatLibSort}
+            />
+            <Select
+              className="w-[132px] shrink-0"
+              value={groupBy}
+              onChange={(value) => setGroupBy(value as ConversationLibraryGroup)}
+              options={groupOptions}
+            />
+            <Select
+              className="w-[100px] shrink-0"
+              value={density}
+              onChange={(value) => setDensity(value as ConversationLibraryDensity)}
+              options={densityOptions}
+            />
+            <label className="flex h-[30px] shrink-0 items-center gap-2">
+              <Toggle checked={fullText} onChange={setFullText} ariaLabel={t.chatLibFullText} />
+              <span className="whitespace-nowrap text-[12.5px] text-neutral-600 dark:text-neutral-300">
+                {t.chatLibFullText}
+              </span>
+            </label>
+          </div>
           {selected.size > 0 && (
-            <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2 dark:border-white/[0.08] dark:bg-white/[0.04]">
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-neutral-100 bg-neutral-50/90 px-3 py-1.5 dark:border-white/[0.06] dark:bg-white/[0.03]">
               <span className="text-[12.5px] font-medium text-neutral-700 dark:text-neutral-200">
                 {t.chatLibSelected.replace('{n}', String(selected.size))}
               </span>
@@ -872,41 +857,38 @@ export function SessionCenter({
           )}
 
           {state.error && (
-            <div className="mb-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+            <div className="shrink-0 border-b border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
               {state.error}
             </div>
           )}
 
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white dark:border-white/[0.08] dark:bg-[var(--bg-input)]">
+          <div className="flex min-w-0 shrink-0 items-center gap-2 border-b border-neutral-200/70 bg-neutral-50 px-3 py-[7px] text-[12px] font-medium text-neutral-500 dark:border-white/[0.07] dark:bg-white/[0.03] dark:text-neutral-400">
+            <label className="flex w-7 shrink-0 items-center justify-center">
+              <input
+                type="checkbox"
+                checked={state.items.length > 0 && selected.size === state.items.length}
+                onChange={(e) => (e.target.checked ? selectAllVisible() : clearSelection())}
+                className="rounded"
+              />
+            </label>
+            <span className="min-w-0 flex-1 truncate">{t.chatLibColTitle}</span>
+            {cols.model && (
+              <span className="w-24 shrink-0 truncate">{t.chatLibColModel}</span>
+            )}
+            {cols.owner && (
+              <span className="w-24 shrink-0 truncate">{t.chatLibColOwner}</span>
+            )}
+            {cols.msgs && (
+              <span className="w-12 shrink-0 text-right">{t.chatLibColMsgs}</span>
+            )}
+            <span className="w-14 shrink-0 text-right">{t.chatLibColTime}</span>
+            <span className="w-8 shrink-0" />
+          </div>
           <div
             ref={listRef}
             onScroll={onScrollList}
             className="custom-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto"
           >
-            {/* Column header — 列显隐跟表格宽度，标题强制单行 truncate；禁止视口 sm: 再撑开。
-               圆角裁在外层 overflow-hidden：sticky + backdrop-blur 在滚动容器上裁不掉顶角。 */}
-            <div className="sticky top-0 z-10 flex min-w-0 items-center gap-2 border-b border-neutral-100 bg-neutral-50/95 px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-neutral-400 backdrop-blur dark:border-white/[0.06] dark:bg-[var(--bg-hover)]/95">
-              <label className="flex w-7 shrink-0 items-center justify-center">
-                <input
-                  type="checkbox"
-                  checked={state.items.length > 0 && selected.size === state.items.length}
-                  onChange={(e) => (e.target.checked ? selectAllVisible() : clearSelection())}
-                  className="rounded"
-                />
-              </label>
-              <span className="min-w-0 flex-1 truncate">{t.chatLibColTitle}</span>
-              {cols.model && (
-                <span className="w-24 shrink-0 truncate">{t.chatLibColModel}</span>
-              )}
-              {cols.owner && (
-                <span className="w-24 shrink-0 truncate">{t.chatLibColOwner}</span>
-              )}
-              {cols.msgs && (
-                <span className="w-12 shrink-0 text-right">{t.chatLibColMsgs}</span>
-              )}
-              <span className="w-14 shrink-0 text-right">{t.chatLibColTime}</span>
-              <span className="w-8 shrink-0" />
-            </div>
 
             {state.loading && state.items.length === 0 ? (
               <div className="flex flex-col gap-2 p-4">
@@ -915,20 +897,18 @@ export function SessionCenter({
                 ))}
               </div>
             ) : state.items.length === 0 ? (
-              <div className="flex flex-col items-center justify-center px-6 py-20 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-md bg-neutral-100 text-neutral-400 dark:bg-white/[0.06]">
-                  <MessagesSquare size={28} strokeWidth={1.5} />
-                </div>
-                <p className="mt-4 text-[15px] font-medium text-neutral-700 dark:text-neutral-200">
+              <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+                <MessagesSquare size={22} strokeWidth={1.5} className="text-neutral-300 dark:text-neutral-600" />
+                <p className="mt-3 text-[13.5px] text-neutral-500">
                   {debouncedQ ? t.chatSessionEmptySearch : t.chatSessionEmpty}
                 </p>
-                <p className="mt-1.5 max-w-sm text-[13px] text-neutral-500">{t.chatLibEmptyHint}</p>
+                <p className="mt-1 max-w-sm text-[12.5px] text-neutral-400">{t.chatLibEmptyHint}</p>
               </div>
             ) : (
               grouped.map((group) => (
                 <div key={group.key}>
                   {group.label && (
-                    <div className="sticky top-[33px] z-[5] border-b border-neutral-100 bg-neutral-50/90 px-3 py-1.5 text-[11px] font-medium text-neutral-500 backdrop-blur dark:border-white/[0.06] dark:bg-[var(--bg-hover)]/90">
+                    <div className="sticky top-0 z-[5] border-b border-neutral-100 bg-white/95 px-3 py-1.5 text-[12px] font-medium text-neutral-500 backdrop-blur dark:border-white/[0.06] dark:bg-[var(--bg-input)]/95">
                       {group.label}
                       <span className="ml-1.5 tabular-nums text-neutral-400">{group.items.length}</span>
                     </div>
