@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Code2, Eye, FilePen, ListChecks, Network, ShieldAlert, ShieldCheck, ShieldQuestion, Sparkles, Terminal, Wand2, Zap } from 'lucide-react'
+import { Code2, Eye, FilePen, Layers, ListChecks, Network, ShieldAlert, ShieldCheck, ShieldQuestion, Sparkles, Terminal, Wand2, Zap } from 'lucide-react'
 import { APPROVAL_POLICY_OPTIONS } from './approvalPolicies'
-import { chatApi } from './api'
+import { chatApi, type DshAgentPresetOption } from './api'
 import type { AgentPlanMode, AgentRuntimeConfig, DetectedExternalAgent } from './types'
 
 /** 胶囊配色语义：Act=neutral、Plan=emerald、Orchestrate=violet；本地 CLI 档位统一 neutral。 */
@@ -80,15 +80,68 @@ export const DSH_PRESET_OPTIONS: ModeOption[] = [
   },
 ]
 
-export function deriveDshPresetModes(agentRuntime: AgentRuntimeConfig): PermissionModes {
+export function deriveDshPresetModes(
+  agentRuntime: AgentRuntimeConfig,
+  customPresets: DshAgentPresetOption[] = [],
+): PermissionModes {
   const usesDsh = agentRuntime.kind === 'external'
     && (agentRuntime.externalAgentId ?? agentRuntime.external_agent_id) === 'dsh'
   if (!usesDsh) return { options: [], current: '' }
+
+  const options = [...DSH_PRESET_OPTIONS]
+  const seen = new Set(options.map((option) => option.value))
+  for (const preset of customPresets) {
+    const id = preset.id.trim()
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    options.push({
+      value: id,
+      label: (preset.label || id).trim() || id,
+      description: preset.description?.trim() || '自定义 Agent preset · Custom preset',
+      icon: Layers,
+      tone: 'neutral',
+    })
+  }
+
   const selected = agentRuntime.externalAgentPreset ?? agentRuntime.external_agent_preset ?? ''
-  const current = DSH_PRESET_OPTIONS.some((option) => option.value === selected)
+  if (selected && !seen.has(selected)) {
+    options.push({
+      value: selected,
+      label: selected,
+      description: '自定义 Agent preset · Custom preset',
+      icon: Layers,
+      tone: 'neutral',
+    })
+  }
+  const current = options.some((option) => option.value === selected)
     ? selected
     : DSH_PRESET_OPTIONS[0].value
-  return { options: DSH_PRESET_OPTIONS, current }
+  return { options, current }
+}
+
+/** dsh 会话挂载时扫一遍用户 preset 目录；失败则只保留官方四档。 */
+export function useDshCustomPresets(agentRuntime: AgentRuntimeConfig): DshAgentPresetOption[] {
+  const isDsh = agentRuntime.kind === 'external'
+    && (agentRuntime.externalAgentId ?? agentRuntime.external_agent_id) === 'dsh'
+  const [presets, setPresets] = useState<DshAgentPresetOption[]>([])
+  useEffect(() => {
+    if (!isDsh) {
+      setPresets([])
+      return
+    }
+    let active = true
+    void chatApi.listDshAgentPresets()
+      .then((list) => {
+        if (active) setPresets(Array.isArray(list) ? list : [])
+      })
+      .catch(() => {
+        if (active) setPresets([])
+      })
+    return () => {
+      active = false
+    }
+  }, [isDsh])
+  return isDsh ? presets : []
 }
 
 /** Distinct icon per permission level so the capsule reflects the active mode at a glance.

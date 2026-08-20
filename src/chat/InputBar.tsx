@@ -2166,11 +2166,6 @@ export const InputBar = memo(function InputBar({
                   aria-haspopup="menu"
                   title={presetLocked && presetLockedReason ? presetLockedReason : t.chatSwitchAgentPreset}
                 >
-                  <activePresetOption.icon
-                    size={13}
-                    strokeWidth={1.9}
-                    className={`shrink-0 ${activePresetPillClass.iconColor}`}
-                  />
                   <span className="min-w-0 truncate">{activePresetOption.label}</span>
                   <ChevronDown
                     size={12}
@@ -2191,7 +2186,6 @@ export const InputBar = memo(function InputBar({
                     >
                       {presetOptions.map((option) => {
                         const active = option.value === presetValue
-                        const Icon = option.icon
                         return (
                           <button
                             key={option.value}
@@ -2206,11 +2200,6 @@ export const InputBar = memo(function InputBar({
                                 : 'text-neutral-800 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800'
                             } disabled:cursor-default disabled:opacity-50`}
                           >
-                            <Icon
-                              size={14}
-                              strokeWidth={1.8}
-                              className={`shrink-0 ${MODE_PILL_CLASS[option.tone].iconColor}`}
-                            />
                             <span className="min-w-0 flex-1 leading-tight">
                               <span className="block truncate text-[12px] font-semibold">{option.label}</span>
                               {option.description && (

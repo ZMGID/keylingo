@@ -28,9 +28,10 @@
 //! - `llm-deepseek.reasoningEffort`：官方 DeepSeek 路由的档位（只认 `off|high|max`）。
 //!   第三方 `llm-pi-ai` 路由另写 `providers.<route>.reasoning`（pi-ai 档位表）。
 //!   都不是启动 flag，也不在 `initialize` 参数里，所以换档位必须重写这个文件并换进程。
-//! - `agent-presets`：四档 Agent 模式（standard / code / minimal / cordis）。与官方 web
-//!   一样关掉 host 平面工具，改由所选 preset 组装；`dsh --profile` 会把随包的
-//!   `config/agent-presets` 补进 `roots`。
+//! - `agent-presets`：官方四档（standard / code / minimal / cordis）加上
+//!   `$DSH_HOME/.agent-presets` 里用户自己写的 preset。与官方 web 一样关掉 host
+//!   平面工具，改由所选 preset 组装；`dsh --profile` 会把随包的 `config/agent-presets`
+//!   补进 `roots`，`includeUserRoot: true` 再挂上用户目录。
 //! - `storage` / `workspace`：与官方 web 共用 `$DSH_HOME/storages`。Kivio 创建的原生会话
 //!   必须挂进 Host Workspace，否则 dsh web 把它们全部丢进「其他项目」。
 //! - 当前 Kivio 供应商的 `llm-pi-ai.providers.<route>`：只挂在 `profiles/kivio`，Key 仅以
@@ -41,6 +42,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::proc::NoConsoleWindow;
@@ -110,14 +112,129 @@ pub fn profile_dir() -> Option<PathBuf> {
     dsh_home().map(|home| home.join("profiles").join(KIVIO_PROFILE))
 }
 
-/// 合法 preset id；其它值（含空）回落 `standard`。
-pub fn normalize_agent_preset(value: Option<&str>) -> &'static str {
-    match value.map(str::trim) {
-        Some("code") => "code",
-        Some("minimal") => "minimal",
-        Some("cordis") => "cordis",
-        _ => "standard",
+const USER_PRESET_DIR: &str = ".agent-presets";
+const COMPOSITION_FILE: &str = "agent.cordis.yml";
+const METADATA_FILE: &str = "preset.yml";
+const BUILTIN_PRESET_IDS: &[&str] = &["standard", "code", "minimal", "cordis"];
+
+/// 底栏胶囊里一条用户 preset（官方四档由前端写死，不走这条）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DshAgentPresetOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `$DSH_HOME/.agent-presets`。官方 web 的「创造模式」把自定义 preset 写在这里。
+pub fn user_preset_root() -> Option<PathBuf> {
+    dsh_home().map(|home| home.join(USER_PRESET_DIR))
+}
+
+/// 列出用户根目录里可加载的自定义 Agent preset（不含官方四档）。
+pub fn list_user_agent_presets() -> Vec<DshAgentPresetOption> {
+    user_preset_root()
+        .map(|root| list_user_agent_presets_in(&root))
+        .unwrap_or_default()
+}
+
+pub fn list_user_agent_presets_in(root: &Path) -> Vec<DshAgentPresetOption> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(id) = name.to_str().map(str::trim) else {
+            continue;
+        };
+        if !is_valid_preset_id(id) || is_builtin_preset_id(id) || !is_loadable_preset_dir(&path) {
+            continue;
+        }
+        let (label, description) = read_preset_metadata(&path);
+        out.push(DshAgentPresetOption {
+            id: id.to_string(),
+            label: label.unwrap_or_else(|| id.to_string()),
+            description,
+        });
     }
+    out.sort_by(|left, right| left.id.cmp(&right.id));
+    out
+}
+
+/// 合法 preset id；其它值（含空、未知自定义）回落 `standard`。
+///
+/// 自定义 id 必须同时满足官方目录名规则 `[a-z0-9][a-z0-9-]*`，并且
+/// `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml` 存在——否则写进 patch 会让
+/// dsh 起不来，未知字符串也绝不能原样插进 YAML。
+pub fn normalize_agent_preset(value: Option<&str>) -> String {
+    resolve_agent_preset(value, user_preset_root().as_deref())
+}
+
+fn resolve_agent_preset(value: Option<&str>, user_root: Option<&Path>) -> String {
+    let Some(id) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return "standard".to_string();
+    };
+    if is_builtin_preset_id(id) {
+        return id.to_string();
+    }
+    if is_valid_preset_id(id)
+        && user_root.is_some_and(|root| is_loadable_preset_dir(&root.join(id)))
+    {
+        return id.to_string();
+    }
+    "standard".to_string()
+}
+
+fn is_builtin_preset_id(id: &str) -> bool {
+    BUILTIN_PRESET_IDS.contains(&id)
+}
+
+/// 官方 `copy()` 校验：`[a-z0-9][a-z0-9-]*`。顺带封顶长度，挡住 YAML 注入。
+fn is_valid_preset_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 128 {
+        return false;
+    }
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn is_loadable_preset_dir(dir: &Path) -> bool {
+    dir.join(COMPOSITION_FILE).is_file()
+}
+
+fn read_preset_metadata(dir: &Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(dir.join(METADATA_FILE)) else {
+        return (None, None);
+    };
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+        return (None, None);
+    };
+    let Some(map) = value.as_mapping() else {
+        return (None, None);
+    };
+    let field = |key: &str| {
+        map.get(serde_yaml::Value::String(key.to_string()))
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    (field("name"), field("description"))
+}
+
+#[tauri::command]
+pub fn chat_dsh_list_agent_presets() -> Vec<DshAgentPresetOption> {
+    list_user_agent_presets()
 }
 
 /// profile 的 `cordis.patch.yml` 内容。
@@ -156,14 +273,17 @@ fn render_patch(reasoning: Option<&str>, preset: Option<&str>) -> String {
         out.push_str("\n  disabled: true\n");
     }
     out.push_str(
-        "\n# 四档 Agent 模式。随包 roots 由 `dsh --profile` 的 composeProfile 注入。\n\
+        "\n# Agent 模式：随包四档 + $DSH_HOME/.agent-presets 用户 preset。\n\
+         # 随包 roots 由 `dsh --profile` 的 composeProfile 注入；includeUserRoot\n\
+         # 让官方 web 写的自定义 preset 在 kivio profile 里也能挂上。\n\
          - insert:\n\
          \x20   - id: agent-presets\n\
          \x20     name: '@deepseek-ai/dsh-agent-presets'\n\
          \x20     config:\n\
+         \x20       includeUserRoot: true\n\
          \x20       default: ",
     );
-    out.push_str(normalize_agent_preset(preset));
+    out.push_str(&normalize_agent_preset(preset));
     out.push_str(
         "\n\n# 与官方 web 共用 $DSH_HOME/storages，把 Kivio 会话挂进 Host Workspace。\n\
          # 只写插件名，包从本机 dsh 安装解析，不 `plugin add` 进 kivio profile。\n\
@@ -768,20 +888,76 @@ mod tests {
     }
 
     #[test]
-    fn normalize_agent_preset_accepts_only_the_four_ids() {
+    fn normalize_agent_preset_accepts_builtins_and_rejects_unknown() {
         assert_eq!(normalize_agent_preset(None), "standard");
         assert_eq!(normalize_agent_preset(Some("")), "standard");
         assert_eq!(normalize_agent_preset(Some("default")), "standard");
         assert_eq!(normalize_agent_preset(Some("code")), "code");
         assert_eq!(normalize_agent_preset(Some("minimal")), "minimal");
         assert_eq!(normalize_agent_preset(Some("cordis")), "cordis");
+        assert_eq!(normalize_agent_preset(Some("missing-custom")), "standard");
+        assert_eq!(
+            normalize_agent_preset(Some("x\n- id: injected-tool")),
+            "standard"
+        );
     }
 
     #[test]
     fn patch_writes_the_selected_agent_preset() {
         let yml = render_patch(None, Some("minimal"));
+        assert!(yml.contains("includeUserRoot: true"));
         assert!(yml.contains("default: minimal"));
         assert!(!yml.contains("default: standard"));
+    }
+
+    #[test]
+    fn unknown_preset_is_not_interpolated_into_the_patch() {
+        let yml = render_patch(None, Some("x\n- id: injected-tool\n  disabled: false"));
+        assert!(yml.contains("default: standard"));
+        assert!(!yml.contains("injected-tool"));
+    }
+
+    fn write_user_preset(root: &Path, id: &str, metadata: Option<&str>, composition: bool) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        if composition {
+            std::fs::write(dir.join(COMPOSITION_FILE), "- name: tool-bash\n").unwrap();
+        }
+        if let Some(text) = metadata {
+            std::fs::write(dir.join(METADATA_FILE), text).unwrap();
+        }
+    }
+
+    #[test]
+    fn lists_user_presets_and_normalizes_existing_custom_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "kivio-dsh-presets-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        write_user_preset(
+            &root,
+            "code-review",
+            Some("name: 代码审查\ndescription: 只读评审\n"),
+            true,
+        );
+        write_user_preset(&root, "standard", None, true);
+        write_user_preset(&root, "empty-one", None, false);
+        write_user_preset(&root, "Bad_ID", None, true);
+
+        let listed = list_user_agent_presets_in(&root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "code-review");
+        assert_eq!(listed[0].label, "代码审查");
+        assert_eq!(listed[0].description.as_deref(), Some("只读评审"));
+
+        assert_eq!(
+            resolve_agent_preset(Some("code-review"), Some(&root)),
+            "code-review"
+        );
+        assert_eq!(resolve_agent_preset(Some("missing"), Some(&root)), "standard");
+        assert_eq!(resolve_agent_preset(Some("Bad_ID"), Some(&root)), "standard");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

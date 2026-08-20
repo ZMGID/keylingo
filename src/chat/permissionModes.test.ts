@@ -182,6 +182,35 @@ describe('deriveDshPresetModes（底栏 Agent 模式胶囊）', () => {
     }).current).toBe('minimal')
   })
 
+  it('把用户自定义 preset 接到官方四档后面', () => {
+    const modes = deriveDshPresetModes(externalRuntime('dsh'), [
+      { id: 'code-review', label: '代码审查', description: '只读评审' },
+      { id: 'standard', label: '应被跳过' },
+    ])
+    expect(modes.options.map((o) => o.value)).toEqual([
+      'standard',
+      'code',
+      'minimal',
+      'cordis',
+      'code-review',
+    ])
+    expect(modes.options.at(-1)).toMatchObject({
+      value: 'code-review',
+      label: '代码审查',
+      description: '只读评审',
+    })
+  })
+
+  it('当前值是尚未扫到的自定义 id 时仍显示该项，不回落 standard', () => {
+    const modes = deriveDshPresetModes({
+      kind: 'external',
+      externalAgentId: 'dsh',
+      externalAgentPreset: 'my-writer',
+    })
+    expect(modes.current).toBe('my-writer')
+    expect(modes.options.map((o) => o.value)).toContain('my-writer')
+  })
+
   it('非 dsh 会话不显示 Agent 模式胶囊', () => {
     expect(deriveDshPresetModes(externalRuntime('claude')).options).toEqual([])
     expect(deriveDshPresetModes(builtinRuntime).options).toEqual([])

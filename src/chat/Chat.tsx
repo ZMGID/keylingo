@@ -46,7 +46,7 @@ import { ModelSelector } from './ModelSelector'
 import { ThinkingLevelSelector } from './ThinkingLevelSelector'
 import { ExternalModelSelector, RuntimePicker } from './RuntimePicker'
 import { PermissionPicker } from './PermissionPicker'
-import { deriveDshPresetModes, derivePermissionModes, useDetectedExternalAgents } from './permissionModes'
+import { deriveDshPresetModes, derivePermissionModes, useDetectedExternalAgents, useDshCustomPresets } from './permissionModes'
 import { BackgroundJobsIndicator } from './BackgroundJobsIndicator'
 import { ContextIndicator } from './ContextIndicator'
 import { isExecutableAgentPlanText } from './agentPlan'
@@ -1511,9 +1511,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }),
     [activeAgentRuntime, detectedExternalAgents, activeAgentPlanMode],
   )
+  const dshCustomPresets = useDshCustomPresets(activeAgentRuntime)
   const composerPresets = useMemo(
-    () => deriveDshPresetModes(activeAgentRuntime),
-    [activeAgentRuntime],
+    () => deriveDshPresetModes(activeAgentRuntime, dshCustomPresets),
+    [activeAgentRuntime, dshCustomPresets],
   )
   const currentConversationIsBlank = isPlainBlankConversation(currentConversation)
   const activeProviderId = currentConversation && !currentConversationIsBlank

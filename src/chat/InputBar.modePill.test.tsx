@@ -154,6 +154,10 @@ describe('InputBar 底栏模式胶囊', () => {
       '极简模式仅 bash + 编辑器 · Bash and editor only',
       '创造模式编写 Agent preset · Author presets',
     ])
+    const custom = deriveDshPresetModes(runtime, [
+      { id: 'code-review', label: '代码审查', description: '只读评审' },
+    ])
+    expect(custom.options.map((option) => option.value)).toContain('code-review')
     act(() => {
       fireEvent.click(items[2])
     })
