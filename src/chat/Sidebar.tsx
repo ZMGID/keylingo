@@ -206,7 +206,6 @@ export interface SidebarProps {
   onOpenSettings: () => void
   onOpenExtensionsItem: (item: ExtensionsNavItem) => void
   onSelectLang: (lang: Lang) => void
-  onCheckUpdate: () => void
   onOpenUsage: () => void
   settingsActive?: boolean
   extensionsActive?: ExtensionsNavItem | null
@@ -224,7 +223,6 @@ function SidebarUserFooter({
   settingsActive,
   onOpenSettings,
   onSelectLang,
-  onCheckUpdate,
   onOpenUsage,
 }: {
   profile: ChatUserProfile
@@ -232,7 +230,6 @@ function SidebarUserFooter({
   settingsActive: boolean
   onOpenSettings: () => void
   onSelectLang: (lang: Lang) => void
-  onCheckUpdate: () => void
   onOpenUsage: () => void
 }) {
   const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(null)
@@ -294,7 +291,6 @@ function SidebarUserFooter({
           triggerRect={menuRect}
           lang={lang}
           onSelectLang={onSelectLang}
-          onCheckUpdate={onCheckUpdate}
           onOpenUsage={onOpenUsage}
           onClose={() => setMenuRect(null)}
         />
@@ -592,7 +588,6 @@ export const Sidebar = memo(function Sidebar({
   onOpenSettings,
   onOpenExtensionsItem,
   onSelectLang,
-  onCheckUpdate,
   onOpenUsage,
   settingsActive = false,
   extensionsActive = null,
@@ -1798,7 +1793,6 @@ export const Sidebar = memo(function Sidebar({
         settingsActive={settingsActive}
         onOpenSettings={onOpenSettings}
         onSelectLang={onSelectLang}
-        onCheckUpdate={onCheckUpdate}
         onOpenUsage={onOpenUsage}
       />
 

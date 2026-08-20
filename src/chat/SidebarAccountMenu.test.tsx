@@ -7,7 +7,6 @@ import { SidebarAccountMenu } from './SidebarAccountMenu'
 vi.mock('../api/tauri', () => ({
   api: {
     usageGetStats: vi.fn(),
-    checkUpdate: vi.fn(),
   },
 }))
 
@@ -24,13 +23,13 @@ describe('SidebarAccountMenu usage', () => {
         triggerRect={{ left: 0, top: 200, width: 220 }}
         lang="zh"
         onSelectLang={vi.fn()}
-        onCheckUpdate={vi.fn()}
         onOpenUsage={onOpenUsage}
         onClose={vi.fn()}
       />,
     )
 
     expect(await screen.findByText('1.5k')).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /检查更新/ })).not.toBeInTheDocument()
     expect(api.usageGetStats).toHaveBeenCalledWith({ range: 'today', limit: 0 })
 
     await user.click(screen.getByRole('menuitem', { name: /模型用量/ }))

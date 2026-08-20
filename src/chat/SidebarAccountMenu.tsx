@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { BarChart3, Check, Globe, RefreshCw } from 'lucide-react'
+import { BarChart3, Globe } from 'lucide-react'
 import { useCloseAnimation } from './useCloseAnimation'
 import { i18n, type Lang } from '../settings/i18n'
 import { api } from '../api/tauri'
@@ -11,12 +11,6 @@ interface SidebarAccountMenuProps {
   triggerRect: { left: number; top: number; width: number }
   lang: Lang
   onSelectLang: (lang: Lang) => void
-  /**
-   * 打开设置里的更新页。**只在真有事可做时调用** —— 有新版（那里才有下载/安装 UI）
-   * 或检查失败（那里有「去 GitHub 手动看」的兜底）。「已是最新」就地显示，不开窗口：
-   * 点一下弹进设置、还得在里面再点一次「检查更新」，是纯粹的多余一步。
-   */
-  onCheckUpdate: () => void
   /** 打开设置「用量统计」页。行右侧另显示今日 token，点整行进详情。 */
   onOpenUsage: () => void
   onClose: () => void
@@ -26,7 +20,6 @@ export function SidebarAccountMenu({
   triggerRect,
   lang,
   onSelectLang,
-  onCheckUpdate,
   onOpenUsage,
   onClose: onCloseProp,
 }: SidebarAccountMenuProps) {
@@ -34,27 +27,7 @@ export function SidebarAccountMenu({
   const menuRef = useRef<HTMLDivElement>(null)
   const { closing, startClose, onAnimationEnd } = useCloseAnimation(onCloseProp)
   const onClose = startClose
-  const [updateState, setUpdateState] = useState<'idle' | 'checking' | 'up-to-date'>('idle')
   const [todayTokens, setTodayTokens] = useState<number | null>(null)
-
-  // 就地检查：只有「有新版 / 检查失败」才值得跳到设置页（那里才有下载安装和手动兜底）。
-  const checkUpdate = async () => {
-    if (updateState === 'checking') return
-    setUpdateState('checking')
-    try {
-      const info = await api.checkUpdate()
-      if (info.available || info.checkFailed) {
-        onCheckUpdate()
-        onClose()
-        return
-      }
-      setUpdateState('up-to-date')
-    } catch (err) {
-      console.error('Check update failed:', err)
-      onCheckUpdate()
-      onClose()
-    }
-  }
 
   useEffect(() => {
     let cancelled = false
@@ -104,25 +77,6 @@ export function SidebarAccountMenu({
       role="menu"
       onAnimationEnd={onAnimationEnd}
     >
-      <button
-        type="button"
-        role="menuitem"
-        className="kv-menu-item"
-        disabled={updateState === 'checking'}
-        onClick={() => void checkUpdate()}
-      >
-        {updateState === 'up-to-date' ? (
-          <Check strokeWidth={1.75} />
-        ) : (
-          <RefreshCw strokeWidth={1.75} className={updateState === 'checking' ? 'animate-spin' : undefined} />
-        )}
-        {updateState === 'checking'
-          ? t.checkingUpdate
-          : updateState === 'up-to-date'
-            ? t.upToDate
-            : t.checkUpdate}
-      </button>
-
       <button
         type="button"
         role="menuitem"
