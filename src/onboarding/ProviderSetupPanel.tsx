@@ -9,6 +9,7 @@ import type { I18n } from '../settings/i18n'
 import type { Lang } from '../settings/i18n'
 import { PROVIDER_PRESETS, type ProviderPreset } from '../settings/providerPresets'
 import { isProviderEnabled } from '../settings/utils'
+import { ProviderIcon } from '../chat/ModelIcon'
 
 type ProviderSetupPanelProps = {
   t: I18n
@@ -91,7 +92,7 @@ function freshPresetProvider(preset: ProviderPreset, id: string): ModelProvider 
     availableModels: [],
     enabledModels: [],
     enabled: true,
-    apiFormat: 'openai_chat',
+    apiFormat: preset.apiFormat ?? 'openai_chat',
   }
 }
 
@@ -340,6 +341,7 @@ export function ProviderSetupPanel({ t, lang, settings, onChange }: ProviderSetu
               onClick={() => selectProvider(item.id)}
               data-tauri-drag-region="false"
             >
+              <ProviderIcon name={item.name} baseUrl={item.baseUrl} size={14} />
               {item.name.trim() || item.id}
             </button>
           ))}
@@ -351,7 +353,7 @@ export function ProviderSetupPanel({ t, lang, settings, onChange }: ProviderSetu
               onClick={() => handleAddPreset(preset)}
               data-tauri-drag-region="false"
             >
-              <Plus size={12} />
+              <ProviderIcon name={preset.name} baseUrl={preset.baseUrl} size={14} />
               {preset.name}
             </button>
           ))}

@@ -155,6 +155,46 @@ describe('ProvidersTab', () => {
     expect(props.onAddProvider).toHaveBeenCalled()
   })
 
+  it('供应商名称上方有预设入口，左侧不再放快速添加', () => {
+    renderTab()
+    expect(screen.getByRole('button', { name: new RegExp(t.presetProviders) })).toBeTruthy()
+    expect(screen.queryByText(t.presetProvidersHint)).toBeTruthy()
+    expect(document.querySelector('.kv-provider-list-presets')).toBeNull()
+    expect(document.querySelectorAll('.kv-provider-item')).toHaveLength(1)
+  })
+
+  it('点预设入口弹出选择层，点一项走 onAddProviderFromPreset', async () => {
+    const props = renderTab()
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.presetProviders) }))
+    expect(screen.getByRole('dialog', { name: t.presetProviders })).toBeTruthy()
+    const presetRows = [...document.querySelectorAll('.kv-provider-preset-row')]
+    expect(presetRows.length).toBeGreaterThan(15)
+    expect(presetRows[0]?.textContent).toMatch(/Kimi for Coding/)
+    expect(presetRows.at(-2)?.textContent).toMatch(/ModelScope/)
+    expect(presetRows.at(-1)?.textContent).toMatch(/GitHub Models/)
+    expect(screen.getByRole('button', { name: /GLM Coding Plan/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Xiaomi Token Plan/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /MiniMax Token Plan/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /OpenCode Go/ })).toBeTruthy()
+    expect(screen.queryByText('已添加')).toBeNull()
+    expect(screen.getByText(t.baseUrl)).toBeTruthy()
+
+    await userEvent.click(screen.getByRole('button', { name: /DeepSeek/ }))
+    expect(props.onAddProviderFromPreset).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' }),
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('预设弹层点关闭后详情仍在', async () => {
+    renderTab()
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.presetProviders) }))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByText(t.baseUrl)).toBeTruthy()
+  })
+
   it('「请求配置」入口进二级页，返回后回到一级页', async () => {
     renderTab()
     expect(screen.queryByText(t.customHeaders)).toBeNull()

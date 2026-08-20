@@ -11,8 +11,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import ChatGLM from '@lobehub/icons/es/ChatGLM/components/Color'
-import Moonshot from '@lobehub/icons/es/Moonshot/components/Mono'
+import Zhipu from '@lobehub/icons/es/Zhipu/components/Color'
+import Kimi from '@lobehub/icons/es/Kimi/components/Color'
 import DeepSeek from '@lobehub/icons/es/DeepSeek/components/Color'
 import Minimax from '@lobehub/icons/es/Minimax/components/Color'
 import Bailian from '@lobehub/icons/es/Bailian/components/Color'
@@ -119,8 +119,8 @@ type PresetBrand = ClaudePresetBrand | CodexPresetBrand
 
 const BRAND_ICON: Record<PresetBrand, Glyph | null> = {
   claude: null,
-  zhipu: G(ChatGLM),
-  kimi: G(Moonshot),
+  zhipu: G(Zhipu),
+  kimi: G(Kimi),
   deepseek: G(DeepSeek),
   minimax: G(Minimax),
   xiaomi: G(XiaomiMiMo),

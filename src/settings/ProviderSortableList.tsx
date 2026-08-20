@@ -1,4 +1,4 @@
-import { useMemo, useRef, type ReactNode } from 'react'
+import { useMemo, useRef } from 'react'
 import { GripHorizontal } from 'lucide-react'
 import type { ModelProvider } from '../api/tauri'
 import { ProviderIcon } from '../chat/ModelIcon'
@@ -14,8 +14,6 @@ type ProviderSortableListProps = {
   icons?: Record<string, string>
   onSelect: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
-  /** 追加在真实供应商项之后、同一列表容器内的节点（如快速预设项），保证连续排列不被撑到底部。 */
-  trailing?: ReactNode
 }
 
 export function ProviderSortableList({
@@ -26,7 +24,6 @@ export function ProviderSortableList({
   icons,
   onSelect,
   onReorder,
-  trailing,
 }: ProviderSortableListProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const ids = useMemo(() => providers.map((p) => p.id), [providers])
@@ -86,7 +83,6 @@ export function ProviderSortableList({
           </div>
         )
       })}
-      {trailing}
     </div>
   )
 }
