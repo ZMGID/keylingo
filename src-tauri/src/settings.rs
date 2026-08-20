@@ -767,8 +767,10 @@ pub struct ExternalCliAgentConfig {
 }
 
 /// 一个第三方供应商（中转站）。**各 CLI 用到的字段不同**：
-/// - claude / gemini / 其余 env 系：只用 `env`（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` …）
-/// - codex：只用 `config_toml` / `auth_json`，物化成一个私有 `CODEX_HOME`
+/// - claude / gemini / 其余 env 系：只用 `env`（`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` …）；
+///   claude 聊天选模按 cc-switch 写入 `~/.claude/settings.json` 的 `model` / `env.ANTHROPIC_MODEL`
+/// - codex：只用 `config_toml` / `auth_json`，物化成一个私有 `CODEX_HOME`；聊天选模写入
+///   `~/.codex/config.toml` 顶层 `model`（文件已存在时）以及 CLI 正在读的那份
 /// - grok：只用 `config_toml`，把其中的 `[models]` / `[model.*]` 合并进 `~/.grok/config.toml`
 /// - opencode / pi：用 `config_json` / `auth_json` / `default_model` 合并进 CLI 原生全局配置
 /// - dsh：用 `config_json` 在 Kivio 私有 profile 中挂载 `llm-pi-ai`，Key 通过 `env` 注入

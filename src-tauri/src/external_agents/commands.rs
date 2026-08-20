@@ -2,8 +2,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::chat::types::AgentRuntimeConfig;
 use crate::external_agents::detection::{
-    detect_agent_models, detect_availability_all, native_provider_summaries, AVAILABILITY_CACHE_KEY,
-    AVAILABILITY_CACHE_TTL, EXTERNAL_AGENT_MODELS_CACHE_TTL, EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
+    detect_agent_models, detect_availability_all, native_provider_summaries,
+    AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL, EXTERNAL_AGENT_MODELS_CACHE_TTL,
+    EXTERNAL_AGENT_MODELS_FALLBACK_TTL,
 };
 use crate::external_agents::registry::get_agent_def;
 use crate::external_agents::slash::{cache_key, list_external_cli_slash_commands};
@@ -339,6 +340,9 @@ pub async fn chat_set_agent_runtime(
     conversation_id: String,
     agent_runtime: AgentRuntimeConfig,
 ) -> Result<serde_json::Value, String> {
+    let persist_agent = agent_runtime.external_agent_id.clone();
+    let persist_model = agent_runtime.external_model.clone();
+    let persist_reasoning = agent_runtime.external_reasoning.clone();
     let conversation = crate::chat::repository::repository(&app)
         .mutate(&app, &conversation_id, |conversation| {
             check_runtime_switch_allowed(
@@ -351,6 +355,15 @@ pub async fn chat_set_agent_runtime(
         })
         .await
         .map_err(crate::chat::repository::repository_error)?;
+    if let Some(agent_id) = persist_agent.as_deref() {
+        if let Err(err) = crate::external_agents::provider_profile::persist_selected_model(
+            agent_id,
+            persist_model.as_deref(),
+            persist_reasoning.as_deref(),
+        ) {
+            eprintln!("[external-agent] 模型落盘失败（{agent_id}）：{err}");
+        }
+    }
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,

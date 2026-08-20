@@ -9,7 +9,7 @@
 //! 1. **复用用户的 `$DSH_HOME`**（默认 `~/.dsh`），因为 `settings.yaml` 里的供应商配置与
 //!    `.credentials.yaml` / `.env` 里的 key 都在那儿 —— 换一个私有 home 就等于要求用户再配一遍。
 //! 2. **只写 `profiles/kivio/`**。用户自己的 `profiles/web`、`profiles/tui` 与家目录那份
-//!    `cordis.patch.yml` 一律不碰（同 Kivio 从不改写 `~/.claude` / `~/.codex` 的既有红线）。
+//!    `cordis.patch.yml` 一律不碰（同 Kivio 不改写 `~/.claude` / `~/.codex` 的凭证与路由）。
 //! 3. **依赖安装走官方 `dsh plugin --profile` 通道**，不自己写 `package.json` + `pnpm install`。
 //!    那条命令做三件我们自己做会漏的事：按模板初始化 profile（`dsh.profile.bundles` 要写
 //!    `@deepseek-ai/dsh-base`，**少了它 profile 起来没有 agent**）、转发 pnpm、按安装结果回填
@@ -737,7 +737,8 @@ mod tests {
             .find("async cancel(params)")
             .expect("cancel handler");
         assert!(
-            BRIDGE_SOURCE[cancel_at..cancel_at.saturating_add(700)].contains("withExclusiveAgentCall"),
+            BRIDGE_SOURCE[cancel_at..cancel_at.saturating_add(700)]
+                .contains("withExclusiveAgentCall"),
             "session/cancel must join the prompt/steer exclusive queue",
         );
         assert!(BRIDGE_SOURCE.contains("agent.followup = agent.steer.bind(agent)"));
@@ -930,10 +931,7 @@ mod tests {
 
     #[test]
     fn lists_user_presets_and_normalizes_existing_custom_ids() {
-        let root = std::env::temp_dir().join(format!(
-            "kivio-dsh-presets-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("kivio-dsh-presets-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         write_user_preset(
             &root,
@@ -955,8 +953,14 @@ mod tests {
             resolve_agent_preset(Some("code-review"), Some(&root)),
             "code-review"
         );
-        assert_eq!(resolve_agent_preset(Some("missing"), Some(&root)), "standard");
-        assert_eq!(resolve_agent_preset(Some("Bad_ID"), Some(&root)), "standard");
+        assert_eq!(
+            resolve_agent_preset(Some("missing"), Some(&root)),
+            "standard"
+        );
+        assert_eq!(
+            resolve_agent_preset(Some("Bad_ID"), Some(&root)),
+            "standard"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
