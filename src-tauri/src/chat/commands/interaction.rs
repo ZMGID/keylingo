@@ -7,7 +7,6 @@ use tokio::time::{sleep, timeout};
 use crate::chat::agent::execute::truncate_chars;
 use crate::chat::attachments::{compose_text_attachments_for_api, TextAttachmentInput};
 use crate::chat::{AgentPlanState, ChatMessageSegment, Conversation, ToolCallRecord};
-use crate::mcp::types::ChatToolArtifact;
 use crate::state::AppState;
 
 use super::catalog::strip_transcripts_for_frontend;
@@ -509,32 +508,6 @@ pub(crate) async fn chat_follow_up_message(
         return Ok(false);
     };
     Ok(state.push_chat_follow_up(&conversation_id, message))
-}
-
-/// 前端 Pyodide 执行完成后回传结果。
-#[tauri::command]
-pub(crate) fn chat_python_complete(
-    app: AppHandle,
-    state: State<AppState>,
-    run_id: String,
-    content: String,
-    is_error: bool,
-    artifacts: Option<Vec<ChatToolArtifact>>,
-) -> Result<(), String> {
-    let pending = state
-        .pending_python_runs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&run_id);
-    if let Some(pending) = pending {
-        crate::chat::protocol::detach_python_request(&app, &run_id);
-        let _ = pending.sender.send(crate::mcp::types::PythonRunResult {
-            content,
-            is_error,
-            artifacts: artifacts.unwrap_or_default(),
-        });
-    }
-    Ok(())
 }
 
 pub(super) fn emit_chat_plan_state(

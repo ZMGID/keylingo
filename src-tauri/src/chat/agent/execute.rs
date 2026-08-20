@@ -810,7 +810,7 @@ fn effective_tool_timeout_ms(
     if tool.source == "mixer" && tool.name == "mixer_generate_image" {
         return default_timeout_ms.max(crate::chat::image_generation::IMAGE_GENERATION_TIMEOUT_MS);
     }
-    if tool.source == "native" && matches!(tool.name.as_str(), "bash" | "run_python") {
+    if tool.source == "native" && tool.name == "bash" {
         return arguments
             .get("timeout_ms")
             .and_then(|value| value.as_u64())

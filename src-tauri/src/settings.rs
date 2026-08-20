@@ -1036,8 +1036,6 @@ pub struct ChatNativeToolsConfig {
     pub edit_file: bool,
     #[serde(default)]
     pub run_command: bool,
-    #[serde(default)]
-    pub run_python: bool,
     #[serde(default = "default_true")]
     pub knowledge_search: bool,
     /// Default root for ordinary (non-project) conversation workbenches.
@@ -1059,7 +1057,6 @@ impl ChatNativeToolsConfig {
             || self.write_file
             || self.edit_file
             || self.run_command
-            || self.run_python
             || self.knowledge_search
     }
 }
@@ -1080,7 +1077,6 @@ impl Default for ChatNativeToolsConfig {
             write_file: true,
             edit_file: true,
             run_command: true,
-            run_python: true,
             knowledge_search: true,
             working_directory: default_chat_working_directory(),
             workspace_roots: Vec::new(),
@@ -2374,7 +2370,6 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         native.write_file = true;
         native.edit_file = true;
         native.run_command = true;
-        native.run_python = true;
         native.web_fetch = true;
         native.web_search = true;
         if settings.chat_tools.approval_policy == LEGACY_DEFAULT_APPROVAL_POLICY {

@@ -38,7 +38,7 @@
 
 ## Kivio Desktop 是什么？
 
-Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而不只是自己的窗口里。在任何地方按下热键：翻译你输入的、翻译你选中的、翻译你看到的，或者框选屏幕任意区域直接向 AI 提问。从托盘打开 AI 客户端，则是一个完整的 Agent 聊天应用：工具调用、子代理、Skills、MCP、知识库、Python 沙箱、多模型并排回答。
+Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而不只是自己的窗口里。在任何地方按下热键：翻译你输入的、翻译你选中的、翻译你看到的，或者框选屏幕任意区域直接向 AI 提问。从托盘打开 AI 客户端，则是一个完整的 Agent 聊天应用：工具调用、子代理、Skills、MCP、知识库、多模型并排回答。
 
 代码里落实的三条设计原则：
 
@@ -65,7 +65,6 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 | 网络 | `web_search`、`web_fetch` |
 | 文件 | `read`（文件、目录、图片）、`grep`、`glob`、`write`、`edit` |
 | 终端 | `bash`，支持可追踪的后台任务（`bash_output`、`kill_background`） |
-| Python | `run_python` —— 离线 Pyodide 沙箱，随包内置 numpy、pandas、matplotlib、pillow、micropip |
 | 知识库 | `knowledge_search`，回答带 `[n]` 引用 |
 | 记忆 | `memory_read` / `memory_modify` / `memory_search` 长期记忆 |
 | Agent | `agent`（子代理）、`todo_write`、`ask_user`、图片生成 |
@@ -189,7 +188,6 @@ Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），�
 | 后端 | Rust · Tauri v2 |
 | 前端 | React 18 · TypeScript · Vite · TailwindCSS v4 |
 | OCR | Apple Vision（Swift sidecar）· Windows.Media.Ocr · RapidOCR（ONNX） |
-| Python 沙箱 | Pyodide，随包离线 |
 
 ```bash
 npm install
@@ -241,7 +239,7 @@ GPL-3.0-or-later © ZM。见 [LICENSE](LICENSE)。
 
 ## What is Kivio Desktop?
 
-Kivio Desktop lives in your tray / menu bar and works at the level of your *screen*, not just inside its own window. Press a hotkey anywhere to translate what you typed, translate what you selected, translate what you see, or capture any region and ask AI about it. Open the AI client from the tray and you get a full agentic chat app: tool calls, sub-agents, Skills, MCP servers, a knowledge base, a Python sandbox, and side-by-side multi-model answers.
+Kivio Desktop lives in your tray / menu bar and works at the level of your *screen*, not just inside its own window. Press a hotkey anywhere to translate what you typed, translate what you selected, translate what you see, or capture any region and ask AI about it. Open the AI client from the tray and you get a full agentic chat app: tool calls, sub-agents, Skills, MCP servers, a knowledge base, and side-by-side multi-model answers.
 
 Design principles, as implemented in code:
 
@@ -268,7 +266,6 @@ A provider-agnostic agent runtime with a real tool loop, not a thin chat wrapper
 | Web | `web_search`, `web_fetch` |
 | Files | `read` (files, directories, images), `grep`, `glob`, `write`, `edit` |
 | Shell | `bash` with tracked background jobs (`bash_output`, `kill_background`) |
-| Python | `run_python` — offline Pyodide sandbox, bundled with numpy, pandas, matplotlib, pillow, micropip |
 | Knowledge | `knowledge_search` with `[n]` citations |
 | Memory | `memory_read` / `memory_modify` / `memory_search` long-term memory |
 | Agent | `agent` (sub-agents), `todo_write`, `ask_user`, image generation |
@@ -392,7 +389,6 @@ Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 | Backend | Rust · Tauri v2 |
 | Frontend | React 18 · TypeScript · Vite · TailwindCSS v4 |
 | OCR | Apple Vision (Swift sidecar) · Windows.Media.Ocr · RapidOCR (ONNX) |
-| Python sandbox | Pyodide, bundled offline |
 
 ```bash
 npm install

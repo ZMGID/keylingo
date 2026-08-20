@@ -4,7 +4,6 @@ import type {
   ChatRunSnapshot,
 } from '../generated/chatProtocol'
 import {
-  acceptChatPythonPayload,
   chatProtocolTesting,
   subscribeChatProtocolIssues,
   syncChatProtocol,
@@ -62,7 +61,6 @@ function snapshot(overrides: Partial<ChatRunSnapshot> = {}): ChatRunSnapshot {
     todoState: null,
     planState: null,
     pendingInteractions: [],
-    pendingPythonRequests: [],
     warnings: [],
     statusNote: null,
     terminal: null,
@@ -289,21 +287,6 @@ describe('chat protocol sequencing', () => {
     })).toBe(false)
   })
 
-  it('deduplicates Python requests by stable runId', () => {
-    const request = {
-      protocolVersion: 1,
-      runId: 'python-run',
-      parentConversationId: 'conversation',
-      parentRunId: 'run',
-      parentMessageId: 'message',
-      code: '1 + 1',
-      timeoutMs: 1000,
-      files: [],
-    }
-    expect(acceptChatPythonPayload(request)).not.toBeNull()
-    expect(acceptChatPythonPayload(request)).toBeNull()
-  })
-
   it('restores the complete segment timeline from a run snapshot', () => {
     const seen: ChatRunEventEnvelope[] = []
     chatProtocolTesting.subscribe((item) => {
@@ -363,25 +346,6 @@ describe('chat protocol sequencing', () => {
       },
     }))
     expect(errors).toEqual(['provider disconnected'])
-  })
-
-  it('replays a pending Python snapshot request once per JS lifecycle', () => {
-    const requests: string[] = []
-    chatProtocolTesting.subscribePython((request) => requests.push(request.runId))
-    const request = {
-      protocolVersion: 1 as const,
-      runId: 'python-pending',
-      parentConversationId: 'conversation',
-      parentRunId: 'run',
-      parentMessageId: 'message',
-      code: 'print(1)',
-      timeoutMs: 1000,
-      files: [],
-    }
-    const pending = snapshot({ pendingPythonRequests: [request] })
-    chatProtocolTesting.applySnapshot(pending)
-    chatProtocolTesting.applySnapshot(pending)
-    expect(requests).toEqual(['python-pending'])
   })
 
   it('validates the complete sync result and rejects extra fields', () => {

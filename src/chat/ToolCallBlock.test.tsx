@@ -251,47 +251,6 @@ describe('ToolCallBlock', () => {
     expect(screen.getByText('[1]')).toBeInTheDocument()
   })
 
-  it('renders a run_python record as a PYTHON consult card with code and output', async () => {
-    const user = userEvent.setup()
-    render(
-      <ToolCallBlock
-        toolCall={buildToolCall({
-          toolName: 'run_python',
-          source: 'native',
-          status: 'success',
-          result_preview: 'hello from stdout',
-          arguments: { code: 'print("hello from stdout")' },
-        })}
-      />,
-    )
-    expect(screen.getByText('PYTHON')).toBeInTheDocument()
-    await user.click(screen.getByRole('button'))
-    expect(screen.getByText('Code')).toBeInTheDocument()
-    expect(screen.getByText('print("hello from stdout")')).toBeInTheDocument()
-    expect(screen.getByText('Output')).toBeInTheDocument()
-    expect(screen.getByText('hello from stdout')).toBeInTheDocument()
-  })
-
-  it('preserves newlines/indentation in the PYTHON card code block', async () => {
-    const user = userEvent.setup()
-    const code = 'def f():\n    return 1'
-    const { container } = render(
-      <ToolCallBlock
-        toolCall={buildToolCall({
-          toolName: 'run_python',
-          source: 'native',
-          status: 'success',
-          arguments: { code },
-        })}
-      />,
-    )
-    await user.click(screen.getByRole('button'))
-    // Code must NOT be whitespace-collapsed (regression guard against compactText):
-    // assert the raw newline + indentation survive in the <pre> textContent.
-    const pre = container.querySelector('pre')
-    expect(pre?.textContent).toBe(code)
-  })
-
   it('renders the built-in web search record as a dedicated source card', async () => {
     // 内置搜索从「默认工具卡」升级为独立 WEB SEARCH 卡：头部带 provider 与来源计数，
     // 展开后是编号可点的来源目录（标题 / 域名 / 日期 / 摘要）。
@@ -533,7 +492,23 @@ describe('ToolCallBlock', () => {
     expect(within(button).getByText('job_12')).toBeInTheDocument()
   })
 
-  it('maps dsh run_code to the Python verb, not the raw name', () => {
+  it('renders historical run_python as a generic tool row, not a PYTHON card', () => {
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'run_python',
+          source: 'native',
+          arguments: JSON.stringify({ code: 'print(1)' }),
+          result_preview: '1',
+        })}
+      />,
+    )
+    expect(screen.queryByText('PYTHON')).not.toBeInTheDocument()
+    const button = screen.getByRole('button')
+    expect(within(button).getByText('run_python')).toBeInTheDocument()
+  })
+
+  it('maps dsh run_code to Run, not the raw name', () => {
     render(
       <ToolCallBlock
         toolCall={buildToolCall({
@@ -544,7 +519,7 @@ describe('ToolCallBlock', () => {
       />,
     )
     const button = screen.getByRole('button')
-    expect(within(button).getByText('Python')).toBeInTheDocument()
+    expect(within(button).getByText('Run')).toBeInTheDocument()
     expect(within(button).queryByText(/run_code/)).not.toBeInTheDocument()
   })
 

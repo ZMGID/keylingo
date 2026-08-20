@@ -41,7 +41,7 @@ use super::types::{
     native_kill_background_tool, native_knowledge_search_tool, native_list_dir_tool,
     native_memory_modify_tool, native_memory_read_tool, native_memory_search_tool,
     native_present_artifacts_tool, native_read_file_tool, native_run_command_tool,
-    native_run_python_tool, native_save_assistant_tool, native_search_files_tool,
+    native_save_assistant_tool, native_search_files_tool,
     native_web_fetch_tool, native_web_search_tool, native_write_file_tool, ChatToolArtifact,
     ChatToolDefinition, McpToolCallResult,
 };
@@ -77,7 +77,7 @@ pub enum NativeToolCall {
     BlockingText(fn(&NativeToolWorkspace, &Value) -> Result<String, String>),
     /// spawn_blocking, structured `FileMutationResult` (write_file/edit_file).
     BlockingMutation(fn(&NativeToolWorkspace, &Value) -> Result<FileMutationResult, String>),
-    /// Full-context async call (web/memory/shell/python).
+    /// Full-context async call (web/memory/shell).
     Async(for<'a> fn(NativeCallCtx<'a>) -> NativeToolFuture<'a>),
     /// Conversation-scoped call (todo tools): runs before workspace
     /// resolution because it only needs the conversation id, matching the
@@ -278,16 +278,6 @@ pub static NATIVE_TOOLS: &[NativeToolEntry] = &[
         call: NativeToolCall::Async(call_save_assistant),
     },
     NativeToolEntry {
-        name: "run_python",
-        def: native_run_python_tool,
-        enabled: |native, _, _| native.run_python,
-        parallel_safe: false,
-        bypasses_approval: false,
-        read_only: false,
-        requires_session_consent: false,
-        call: NativeToolCall::Async(call_run_python),
-    },
-    NativeToolEntry {
         name: "present_artifacts",
         def: native_present_artifacts_tool,
         enabled: |_, _, _| true,
@@ -437,8 +427,7 @@ fn call_read_file(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     })
 }
 
-/// PDF/Word/Excel 由内置 skill + `run_python` 解析（pypdf / python-docx /
-/// openpyxl），read 工具不读二进制文档；命中时返回引导提示而非 UTF-8 报错。
+/// PDF/Word/Excel 由内置 skill + 主机命令解析；read 工具不读二进制文档；命中时返回引导提示而非 UTF-8 报错。
 fn skill_backed_document_hint(path: &std::path::Path) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let (skill, kind) = match ext.as_str() {
@@ -452,7 +441,7 @@ fn skill_backed_document_hint(path: &std::path::Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .unwrap_or("file");
     Some(format!(
-        "{name} 是{kind}，read 工具不解析此类文件。请改用「{skill}」skill：调用 run_python，把该文件的绝对路径作为 files 传入，用对应库提取内容。"
+        "{name} 是{kind}，read 工具不解析此类文件。请改用「{skill}」skill：用 bash 在主机上提取内容（若本机有对应 CLI 或 Python）；没有可用工具时如实告诉用户。"
     ))
 }
 
@@ -948,20 +937,6 @@ fn call_present_artifacts(
     })
 }
 
-fn call_run_python(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
-    Box::pin(async move {
-        super::registry::run_python_via_pyodide(
-            ctx.app,
-            ctx.state,
-            ctx.settings,
-            ctx.workspace,
-            ctx.arguments,
-            ctx.native_ctx.cloned(),
-        )
-        .await
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,7 +974,6 @@ mod tests {
         "bash_output",
         "kill_background",
         "save_assistant",
-        "run_python",
         "present_artifacts",
         "memory_read",
         "memory_modify",
@@ -1038,7 +1012,7 @@ mod tests {
         // The predicate agrees with the flag, and non-file tools are excluded.
         assert!(native_tool_requires_session_consent("bash"));
         assert!(!native_tool_requires_session_consent("web_search"));
-        assert!(!native_tool_requires_session_consent("run_python"));
+        assert!(!native_tool_requires_session_consent("present_artifacts"));
         assert!(!native_tool_requires_session_consent("memory_read"));
     }
 
@@ -1146,7 +1120,6 @@ mod tests {
             write_file: true,
             edit_file: true,
             run_command: true,
-            run_python: true,
             knowledge_search: true,
             working_directory: String::new(),
             workspace_roots: Vec::new(),
@@ -1195,7 +1168,6 @@ mod tests {
             write_file: false,
             edit_file: false,
             run_command: false,
-            run_python: false,
             knowledge_search: false,
             working_directory: String::new(),
             workspace_roots: Vec::new(),
@@ -1248,7 +1220,6 @@ mod tests {
             write_file: true,
             edit_file: true,
             run_command: true,
-            run_python: true,
             knowledge_search: true,
             working_directory: String::new(),
             workspace_roots: Vec::new(),
@@ -1267,7 +1238,6 @@ mod tests {
                 "bash",
                 "bash_output",
                 "kill_background",
-                "run_python",
                 "present_artifacts",
                 "memory_read",
                 "memory_modify",

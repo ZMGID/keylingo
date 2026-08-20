@@ -167,11 +167,11 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = concat!(
-        "<|DSML|tool_calls><|DSML|invoke name=\"run_python\">",
-        "<|DSML|parameter name=\"files\" string=\"false\">",
-        r#"["a.pdf","b.pdf"]"#,
+        "<|DSML|tool_calls><|DSML|invoke name=\"bash\">",
+        "<|DSML|parameter name=\"cwd\" string=\"false\">",
+        r#""/tmp""#,
         "</|DSML|parameter>",
-        "<|DSML|parameter name=\"code\" string=\"true\">print(1)</|DSML|parameter>",
+        "<|DSML|parameter name=\"command\" string=\"true\">echo 1</|DSML|parameter>",
         "</|DSML|invoke></|DSML|tool_calls>",
     );
 
@@ -179,15 +179,15 @@ mod tests {
     fn extracts_multi_param_tool_from_dsml() {
         let calls = extract_dsml_tool_calls(SAMPLE);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "run_python");
+        assert_eq!(calls[0].name, "bash");
         assert_eq!(
-            calls[0].arguments.get("code").and_then(|v| v.as_str()),
-            Some("print(1)")
+            calls[0].arguments.get("command").and_then(|v| v.as_str()),
+            Some("echo 1")
         );
         assert!(calls[0]
             .arguments
-            .get("files")
-            .and_then(|v| v.as_array())
+            .get("cwd")
+            .and_then(|v| v.as_str())
             .is_some());
     }
 

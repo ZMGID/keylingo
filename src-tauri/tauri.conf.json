@@ -4,7 +4,7 @@
   "version": "2.9.2",
   "identifier": "com.zmair.kivio",
   "build": {
-    "beforeDevCommand": "npm run prepare:pyodide && npm run dev:ui",
+    "beforeDevCommand": "npm run dev:ui",
     "beforeBuildCommand": "npm run build:ui",
     "devUrl": "http://localhost:5713",
     "frontendDist": "../dist"

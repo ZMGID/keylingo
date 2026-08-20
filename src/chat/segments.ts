@@ -33,7 +33,7 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   creategoal: 'todo_write',
   updategoal: 'todo_write',
   readimage: 'read',
-  runcode: 'run_python',
+  runcode: 'bash',
   subagent: 'agent',
   subagentfork: 'agent',
   listagents: 'agent',
@@ -335,7 +335,6 @@ export type ToolGroupCategory =
   | 'runCommand'
   | 'webFetch'
   | 'webSearch'
-  | 'runPython'
   | 'listDir'
   | 'fileOps'
   | 'todo'
@@ -375,8 +374,6 @@ function categorizeTool(toolCall: ToolCallRecord): ToolGroupCategory {
       return 'webFetch'
     case 'web_search':
       return 'webSearch'
-    case 'run_python':
-      return 'runPython'
     case 'ls':
     case 'list_dir':
       return 'listDir'
@@ -457,8 +454,6 @@ function categoryFragment(category: ToolGroupCategory, count: number): string {
       return '搜索网络'
     case 'globFiles':
       return '查找文件'
-    case 'runPython':
-      return '运行代码'
     case 'todo':
       return '更新任务清单'
     case 'memory':

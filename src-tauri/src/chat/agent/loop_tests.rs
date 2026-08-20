@@ -12,7 +12,7 @@ use crate::chat::agent::SteeringMessage;
 use crate::chat::model::{StreamPart, StreamSink as _};
 use crate::chat::types::ToolCallStatus;
 use crate::mcp::types::{
-    native_read_file_tool, native_run_python_tool, native_web_fetch_tool, native_write_file_tool,
+    native_read_file_tool, native_run_command_tool, native_web_fetch_tool, native_write_file_tool,
     McpToolCallResult,
 };
 use crate::settings::{ChatToolsConfig, ModelProvider};
@@ -684,7 +684,7 @@ fn test_tool_arguments(function_name: &str) -> Value {
     match function_name.to_ascii_lowercase().as_str() {
         "read" => serde_json::json!({ "path": "/tmp/kivio-test.txt" }),
         "web_fetch" => serde_json::json!({ "url": "https://example.com" }),
-        "run_python" => serde_json::json!({ "code": "print(1)" }),
+        "bash" | "run_command" => serde_json::json!({ "command": "echo 1" }),
         "ask_user" => serde_json::json!({
             "questions": [
                 {
@@ -704,10 +704,10 @@ fn test_tool_arguments(function_name: &str) -> Value {
 #[test]
 fn visible_tool_segment_calls_skip_hidden_disabled_builtin_feedback() {
     let tools = vec![native_read_file_tool()];
-    let blocked = vec![native_run_python_tool()];
+    let blocked = vec![native_run_command_tool()];
     let calls = vec![
         pending_tool_call("call_read", "read"),
-        pending_tool_call("call_blocked", "run_python"),
+        pending_tool_call("call_blocked", "bash"),
         pending_tool_call("call_hidden_disabled", "web_search"),
         pending_tool_call("call_unknown", "mcp__server__tool"),
     ];
@@ -1155,7 +1155,7 @@ async fn tool_round_records_plan_blocked_tool_as_skipped() {
     let executor = RecordingExecutor::default();
     let settings = Settings::default();
     let tools = vec![native_read_file_tool()];
-    let blocked = vec![native_run_python_tool()];
+    let blocked = vec![native_run_command_tool()];
     let mut skill_cache = skills::SkillRunCache::default();
 
     let result = execute_tool_round(
@@ -1165,7 +1165,7 @@ async fn tool_round_records_plan_blocked_tool_as_skipped() {
         test_round_context(),
         &tools,
         &blocked,
-        vec![pending_tool_call("call_py", "run_python")],
+        vec![pending_tool_call("call_bash", "bash")],
         &mut skill_cache,
     )
     .await;
@@ -1179,8 +1179,8 @@ async fn tool_round_records_plan_blocked_tool_as_skipped() {
         .contains("blocked in Plan mode"));
     assert_eq!(result.tool_records.len(), 1);
     let record = &result.tool_records[0];
-    assert_eq!(record.id, "call_py");
-    assert_eq!(record.name, "run_python");
+    assert_eq!(record.id, "call_bash");
+    assert_eq!(record.name, "bash");
     assert!(matches!(record.status, ToolCallStatus::Skipped));
     assert!(record
         .error
@@ -1188,7 +1188,7 @@ async fn tool_round_records_plan_blocked_tool_as_skipped() {
         .unwrap_or_default()
         .contains("blocked in Plan mode"));
     assert_eq!(record.trace_id.as_deref(), Some("run"));
-    assert_eq!(record.span_id.as_deref(), Some("tool_round_1_call_py"));
+    assert_eq!(record.span_id.as_deref(), Some("tool_round_1_call_bash"));
 }
 
 #[tokio::test]
@@ -1196,7 +1196,7 @@ async fn tool_round_cancels_unstarted_calls_after_running_tool_is_cancelled() {
     let host = TestHost::cancelling_after(Duration::from_millis(5));
     let executor = RecordingExecutor::default();
     let settings = Settings::default();
-    let tools = vec![native_read_file_tool(), native_run_python_tool()];
+    let tools = vec![native_read_file_tool(), native_run_command_tool()];
     let mut skill_cache = skills::SkillRunCache::default();
 
     let result = execute_tool_round(
@@ -1208,7 +1208,7 @@ async fn tool_round_cancels_unstarted_calls_after_running_tool_is_cancelled() {
         &[],
         vec![
             pending_tool_call("call_read", "read"),
-            pending_tool_call("call_py", "run_python"),
+            pending_tool_call("call_bash", "bash"),
         ],
         &mut skill_cache,
     )
@@ -1217,7 +1217,7 @@ async fn tool_round_cancels_unstarted_calls_after_running_tool_is_cancelled() {
     assert!(result.cancelled);
     assert_eq!(
         tool_call_ids(&result.response_messages),
-        vec!["call_read", "call_py"]
+        vec!["call_read", "call_bash"]
     );
     assert_eq!(
         result
@@ -1225,7 +1225,7 @@ async fn tool_round_cancels_unstarted_calls_after_running_tool_is_cancelled() {
             .iter()
             .map(|record| record.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["call_read", "call_py"]
+        vec!["call_read", "call_bash"]
     );
     assert!(result
         .tool_records
@@ -1337,7 +1337,7 @@ async fn tool_round_keeps_serial_only_tools_non_overlapping() {
     let host = TestHost::default();
     let executor = RecordingExecutor::default();
     let settings = Settings::default();
-    let tools = vec![native_run_python_tool()];
+    let tools = vec![native_run_command_tool()];
     let mut skill_cache = skills::SkillRunCache::default();
 
     let result = execute_tool_round(
@@ -1348,8 +1348,8 @@ async fn tool_round_keeps_serial_only_tools_non_overlapping() {
         &tools,
         &[],
         vec![
-            pending_tool_call("call_py_1", "run_python"),
-            pending_tool_call("call_py_2", "run_python"),
+            pending_tool_call("call_bash_1", "bash"),
+            pending_tool_call("call_bash_2", "bash"),
         ],
         &mut skill_cache,
     )
@@ -1359,10 +1359,10 @@ async fn tool_round_keeps_serial_only_tools_non_overlapping() {
     assert_eq!(
         executor.events(),
         vec![
-            "start:run_python",
-            "finish:run_python",
-            "start:run_python",
-            "finish:run_python"
+            "start:bash",
+            "finish:bash",
+            "start:bash",
+            "finish:bash"
         ]
     );
     assert_eq!(result.response_messages.len(), 2);
@@ -1370,13 +1370,13 @@ async fn tool_round_keeps_serial_only_tools_non_overlapping() {
         result.response_messages[0]
             .get("tool_call_id")
             .and_then(Value::as_str),
-        Some("call_py_1")
+        Some("call_bash_1")
     );
     assert_eq!(
         result.response_messages[1]
             .get("tool_call_id")
             .and_then(Value::as_str),
-        Some("call_py_2")
+        Some("call_bash_2")
     );
 }
 

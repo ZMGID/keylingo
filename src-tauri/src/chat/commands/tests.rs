@@ -293,7 +293,6 @@ fn agent_plan_tool_filter_keeps_only_read_only_and_agent_state_tools() {
         crate::mcp::types::native_read_file_tool(),
         crate::mcp::types::native_write_file_tool(),
         crate::mcp::types::native_run_command_tool(),
-        crate::mcp::types::native_run_python_tool(),
         crate::mcp::types::native_memory_read_tool(),
         crate::mcp::types::native_memory_modify_tool(),
         crate::mcp::types::mixer_generate_image_tool(),
@@ -322,13 +321,11 @@ fn agent_plan_tool_filter_keeps_only_read_only_and_agent_state_tools() {
     assert!(names.contains(&"mcp__docs__search".to_string()));
     assert!(!names.contains(&"write".to_string()));
     assert!(!names.contains(&"bash".to_string()));
-    assert!(!names.contains(&"run_python".to_string()));
     assert!(!names.contains(&"memory_modify".to_string()));
     assert!(!names.contains(&"mixer_generate_image".to_string()));
     assert!(!names.contains(&"mcp__fs__write".to_string()));
     assert!(blocked_names.contains(&"write".to_string()));
     assert!(blocked_names.contains(&"bash".to_string()));
-    assert!(blocked_names.contains(&"run_python".to_string()));
     assert!(blocked_names.contains(&"memory_modify".to_string()));
     assert!(blocked_names.contains(&"mixer_generate_image".to_string()));
     assert!(blocked_names.contains(&"mcp__fs__write".to_string()));
@@ -719,15 +716,15 @@ fn assistant_model_messages_marks_failed_tool_results_as_error() {
                 "id": "call_error",
                 "type": "function",
                 "function": {
-                    "name": "run_python",
-                    "arguments": "{\"code\":\"print(1/0)\"}"
+                    "name": "bash",
+                    "arguments": "{\"command\":\"echo 1\"}"
                 }
             }]
         }),
         serde_json::json!({
             "role": "tool",
             "tool_call_id": "call_error",
-            "content": "Python 执行失败：ZeroDivisionError: division by zero"
+            "content": "command failed: exit 1"
         }),
         serde_json::json!({
             "role": "assistant",
@@ -736,13 +733,13 @@ fn assistant_model_messages_marks_failed_tool_results_as_error() {
     ];
     let tool_calls = vec![ToolCallRecord {
         id: "call_error".to_string(),
-        name: "run_python".to_string(),
+        name: "bash".to_string(),
         source: "native".to_string(),
         server_id: None,
-        arguments: "{\"code\":\"print(1/0)\"}".to_string(),
+        arguments: "{\"command\":\"echo 1\"}".to_string(),
         status: ToolCallStatus::Error,
         result_preview: None,
-        error: Some("Python 执行失败：ZeroDivisionError: division by zero".to_string()),
+        error: Some("command failed: exit 1".to_string()),
         duration_ms: Some(31),
         started_at: Some(1),
         completed_at: Some(2),
@@ -777,7 +774,7 @@ fn test_tool_record(id: &str, source: &str, round: u32, status: ToolCallStatus) 
         name: if source == "mixer" {
             "mixer_vision".to_string()
         } else {
-            "run_python".to_string()
+            "run_command".to_string()
         },
         source: source.to_string(),
         server_id: None,
@@ -827,7 +824,7 @@ fn reconcile_orphan_tool_segments_synthesizes_cancelled_record_with_recovered_me
         "tool_calls": [{
             "id": "fc_call_function_4agzr50pp9go_1",
             "type": "function",
-            "function": { "name": "run_python", "arguments": "{\"code\":\"1\"}" }
+            "function": { "name": "bash", "arguments": "{\"command\":\"echo 1\"}" }
         }]
     })];
 
@@ -844,10 +841,10 @@ fn reconcile_orphan_tool_segments_synthesizes_cancelled_record_with_recovered_me
         .expect("synthesized record present");
     assert!(matches!(synthesized.status, ToolCallStatus::Cancelled));
     assert_eq!(
-        synthesized.name, "run_python",
+        synthesized.name, "bash",
         "name recovered from api_messages"
     );
-    assert_eq!(synthesized.arguments, "{\"code\":\"1\"}");
+    assert_eq!(synthesized.arguments, "{\"command\":\"echo 1\"}");
     assert_eq!(synthesized.round, 2);
     assert!(synthesized.error.is_some());
 }

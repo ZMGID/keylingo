@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import Ajv2020 from 'ajv/dist/2020'
 import schema from '../generated/chatProtocol.schema.json'
-import pythonSchema from '../generated/chatPython.schema.json'
 import syncSchema from '../generated/chatSync.schema.json'
 import {
   CHAT_PROTOCOL_VERSION,
@@ -11,7 +10,6 @@ import {
   type ChatRunEventEnvelope,
   type ChatRunSnapshot,
   type ChatSyncResult,
-  type ChatRunPythonPayload,
 } from '../generated/chatProtocol'
 
 export type ChatProtocolIssue = 'version_mismatch' | 'invalid_event' | 'resync_required'
@@ -33,10 +31,7 @@ const ajv = new Ajv2020({
   formats: { float: true, uint8: true, uint32: true, uint64: true, int64: true },
 })
 const validateEvent = ajv.compile(schema)
-const validatePython = ajv.compile(pythonSchema)
 const validateSync = ajv.compile(syncSchema)
-const seenPythonRequests = new Set<string>()
-const pythonSubscribers = new Set<(request: ChatRunPythonPayload) => void>()
 const subscribers = new Set<Subscriber>()
 const issueSubscribers = new Set<(issue: ChatProtocolIssue, conversationId?: string) => void>()
 const runs = new Map<string, RunState>()
@@ -46,7 +41,6 @@ const conversationRevisions = new Map<string, number>()
 const syncRetryAttempts = new Map<string, number>()
 const syncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let nativeListener: Promise<() => void> | null = null
-let nativePythonListener: Promise<() => void> | null = null
 
 function reportIssue(issue: ChatProtocolIssue, conversationId?: string) {
   for (const subscriber of issueSubscribers) subscriber(issue, conversationId)
@@ -244,12 +238,6 @@ function syntheticEnvelope(snapshot: ChatRunSnapshot, event: ChatRunEvent): Chat
   }
 }
 
-function dispatchPython(payload: unknown) {
-  const request = acceptChatPythonPayload(payload)
-  if (!request) return
-  for (const subscriber of pythonSubscribers) subscriber(request)
-}
-
 function applySnapshot(snapshot: ChatRunSnapshot) {
   const state: RunState = {
     conversationId: snapshot.conversationId,
@@ -308,7 +296,6 @@ function applySnapshot(snapshot: ChatRunSnapshot) {
   for (const pending of snapshot.pendingInteractions) {
     dispatch(syntheticEnvelope(snapshot, pending), restored)
   }
-  for (const request of snapshot.pendingPythonRequests) dispatchPython(request)
   for (const warning of snapshot.warnings) {
     dispatch(syntheticEnvelope(snapshot, warning), restored)
   }
@@ -338,11 +325,6 @@ async function ensureListener() {
   await nativeListener
 }
 
-async function ensurePythonListener() {
-  nativePythonListener ??= listen<unknown>('chat-run-python', ({ payload }) => dispatchPython(payload))
-  await nativePythonListener
-}
-
 export async function subscribeChatProtocol(subscriber: Subscriber) {
   subscribers.add(subscriber)
   await ensureListener()
@@ -354,12 +336,6 @@ export function subscribeChatProtocolIssues(
 ) {
   issueSubscribers.add(subscriber)
   return () => issueSubscribers.delete(subscriber)
-}
-
-export async function subscribeChatPython(subscriber: (request: ChatRunPythonPayload) => void) {
-  pythonSubscribers.add(subscriber)
-  await ensurePythonListener()
-  return () => pythonSubscribers.delete(subscriber)
 }
 
 export async function syncChatProtocol(conversationId: string) {
@@ -446,17 +422,6 @@ export async function syncChatProtocol(conversationId: string) {
   }
 }
 
-export function acceptChatPythonPayload(payload: unknown): ChatRunPythonPayload | null {
-  if (!validatePython(payload)) {
-    console.error('Rejected invalid chat Python request', validatePython.errors, payload)
-    return null
-  }
-  const request = payload as ChatRunPythonPayload
-  if (seenPythonRequests.has(request.runId)) return null
-  seenPythonRequests.add(request.runId)
-  return request
-}
-
 export const chatProtocolTesting = {
   reset() {
     runs.clear()
@@ -468,25 +433,16 @@ export const chatProtocolTesting = {
     syncRetryTimers.clear()
     subscribers.clear()
     issueSubscribers.clear()
-    pythonSubscribers.clear()
-    seenPythonRequests.clear()
   },
   subscribe(subscriber: Subscriber) {
     subscribers.add(subscriber)
     return () => subscribers.delete(subscriber)
-  },
-  subscribePython(subscriber: (request: ChatRunPythonPayload) => void) {
-    pythonSubscribers.add(subscriber)
-    return () => pythonSubscribers.delete(subscriber)
   },
   ingest(event: ChatProtocolEvent) {
     applyEvent(event)
   },
   applySnapshot(snapshot: ChatRunSnapshot) {
     applySnapshot(snapshot)
-  },
-  ingestPython(payload: unknown) {
-    dispatchPython(payload)
   },
   validate(payload: unknown) {
     return validateEvent(payload)

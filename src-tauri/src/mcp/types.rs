@@ -150,15 +150,6 @@ pub struct ChatToolArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PythonRunResult {
-    pub content: String,
-    #[serde(alias = "isError")]
-    pub is_error: bool,
-    #[serde(default)]
-    pub artifacts: Vec<ChatToolArtifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
     pub name: String,
     #[serde(default)]
@@ -255,7 +246,7 @@ pub fn native_skill_activate_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "skill__activate".to_string(),
         name: "skill".to_string(),
-        description: "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt. Injects the skill's instructions and resources into the current conversation — the output may contain detailed workflow guidance plus references to scripts and files in the skill directory (read them with `read`, run scripts with `run_python` or `run_command`). The skill name must match one listed in available_skills.".to_string(),
+        description: "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt. Injects the skill's instructions and resources into the current conversation — the output may contain detailed workflow guidance plus references to scripts and files in the skill directory (read them with `read`, run scripts with `run_command`). The skill name must match one listed in available_skills.".to_string(),
         source: "skill".to_string(),
         server_id: None,
         server_name: Some("Skill".to_string()),
@@ -445,7 +436,7 @@ pub fn native_run_command_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__run_command".to_string(),
         name: "bash".to_string(),
-        description: format!("Run a host shell command (build, test, etc.).{shell_hint} In a project conversation, the command starts from the bound project root by default; any explicit cwd is only a startup directory and is validated as workspace-local. Do not use `cd path && command` when the path contains spaces—pass `cwd` and run only the remaining command. Do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev servers such as `npm run dev`, `npm run tauri dev`, and `vite` are started in the background automatically and return immediately with a pid. This is a sensitive host-shell capability, not the same boundary as the file tools: obey user constraints and explain or seek confirmation before cross-directory, destructive, network, or environment-changing commands. A non-zero exit code is returned as a tool error with stdout/stderr. Do not use pip to bypass run_python sandbox failures; host Python package installs require an explicit user request and allow_host_python_package_install=true."),
+        description: format!("Run a host shell command (build, test, etc.).{shell_hint} In a project conversation, the command starts from the bound project root by default; any explicit cwd is only a startup directory and is validated as workspace-local. Do not use `cd path && command` when the path contains spaces—pass `cwd` and run only the remaining command. Do not combine `cwd` with a leading `cd ... &&` prefix. Long-running dev servers such as `npm run dev`, `npm run tauri dev`, and `vite` are started in the background automatically and return immediately with a pid. This is a sensitive host-shell capability, not the same boundary as the file tools: obey user constraints and explain or seek confirmation before cross-directory, destructive, network, or environment-changing commands. A non-zero exit code is returned as a tool error with stdout/stderr. Host Python package installs require an explicit user request and allow_host_python_package_install=true."),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),
@@ -569,34 +560,6 @@ pub fn native_present_artifacts_tool() -> ChatToolDefinition {
             // 不用顶层 anyOf 表达“二选一必填”：grok/Vertex/Anthropic 都会拒或需剥离，
             // call_present_artifacts 在运行时校验，模型侧靠 description 提示即可。
             "additionalProperties": false
-        }),
-        sensitive: false,
-        annotations: None,
-        output_schema: None,
-    }
-}
-
-pub fn native_run_python_tool() -> ChatToolDefinition {
-    ChatToolDefinition {
-        id: "native__run_python".to_string(),
-        name: "run_python".to_string(),
-        description: "Execute Python code in a Pyodide sandbox with no direct host filesystem access. Use for computation, statistics, data analysis (numpy/pandas), reading and analyzing documents (PDF/XLSX), charts and plots (matplotlib), sandbox-compatible package installs, and generating files that REQUIRE a Python library to produce (formatted XLSX, PDF, rendered images). Its generated files are registered as artifacts but are not shown automatically; call present_artifacts with the returned artifact IDs when the user should see them. Do NOT use run_python merely to write a file from content you already have — for that, use write_file (to the current workbench, or to an explicit path requested by the user), then call present_artifacts only for files that should be shown in chat. Bundled packages auto-load on import: numpy, matplotlib, pandas, pillow, seaborn, openpyxl, xlrd, et_xmlfile, pypdf, micropip. Prefer plain import statements; do not write await micropip.install in sync code. To analyze local files, pass paths in files using the same syntax as the read tool; in project conversations these resolve from the project root by default. Mounted paths appear in KIVIO_INPUT_FILES. Save outputs to relative filenames in the Pyodide cwd (e.g. report.xlsx, chart.png, summary.csv); do not write host paths such as /Users or ~/Desktop inside Python. Kivio auto-captures images plus csv/json/md/txt/html/xlsx artifacts into the current default workbench and returns artifact IDs; use present_artifacts to place selected artifacts in the response. In chart text (titles, labels, legends, annotations) use only Latin and Chinese/Japanese/Korean characters; the sandbox bundles only a CJK+Latin font and has no emoji or symbol fonts, so emoji and decorative glyphs render as empty boxes—omit them. stdout/stderr are returned.".to_string(),
-        source: "native".to_string(),
-        server_id: None,
-        server_name: Some("Kivio".to_string()),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "code": { "type": "string", "description": "Python source code" },
-                "files": {
-                    "type": "array",
-                    "description": "Optional readable local file paths to copy into the Pyodide filesystem for this run",
-                    "items": { "type": "string" },
-                    "maxItems": 8
-                },
-                "timeout_ms": { "type": "integer", "description": "Timeout in ms (optional, max 300000)" }
-            },
-            "required": ["code"]
         }),
         sensitive: false,
         annotations: None,
@@ -995,7 +958,6 @@ mod tests {
     fn native_file_and_web_tools_have_expected_sensitivity() {
         assert!(!native_read_file_tool().sensitive);
         assert!(!native_web_fetch_tool().sensitive);
-        assert!(!native_run_python_tool().sensitive);
         assert!(!native_memory_read_tool().sensitive);
         assert!(!native_memory_modify_tool().sensitive);
         assert!(native_write_file_tool().sensitive);
@@ -1037,32 +999,6 @@ mod tests {
         assert!(tool
             .description
             .contains("structured file mutation metadata"));
-    }
-
-    #[test]
-    fn run_python_tool_description_scopes_to_compute_deliverables() {
-        let tool = native_run_python_tool();
-
-        // Compute/analysis/chart power is retained.
-        assert!(tool.description.contains("computation"));
-        assert!(tool.description.contains("data analysis"));
-        assert!(tool.description.contains("charts and plots"));
-        assert!(tool.description.contains("REQUIRE a Python library"));
-        assert!(tool.description.contains("report.xlsx"));
-        assert!(tool.description.contains("Kivio auto-captures"));
-        // The old "just write a file" catch-all language is gone, and it now
-        // points at write for content you already have.
-        assert!(!tool
-            .description
-            .contains("user-requested chat deliverable files"));
-        assert!(!tool
-            .description
-            .contains("does not need to mention Python or run_python"));
-        // No reference to the removed deliver_file tool; deliverables are a
-        // path-driven channel via write into the conversation workbench.
-        assert!(!tool.description.contains("deliver_file"));
-        assert!(tool.description.contains("use write_file"));
-        assert!(tool.description.contains("current workbench"));
     }
 
     #[test]

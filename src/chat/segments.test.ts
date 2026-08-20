@@ -405,7 +405,7 @@ describe('summarizeToolGroup', () => {
     expect(summarizeToolGroup(
       [toolSegment('t1', 1, 'c1')],
       [tool({ id: 'c1', name: 'run_code' })],
-    ).text).toBe('运行代码')
+    ).text).toBe('执行 1 条命令')
     expect(summarizeToolGroup(
       [toolSegment('t1', 1, 'c1')],
       [tool({ id: 'c1', name: 'read_image' })],

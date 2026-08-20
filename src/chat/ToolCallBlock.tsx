@@ -9,7 +9,6 @@ import {
   Download,
   ExternalLink,
   Eye,
-  FileCode2,
   FilePen,
   FilePlus2,
   FileSearch,
@@ -170,8 +169,6 @@ function toolGlyph(toolCall: ToolCallRecord): LucideIcon | ComponentType<{ size?
     case 'stat':
     case 'stat_path':
       return FileSearch
-    case 'run_python':
-      return FileCode2
     case 'web_search':
       return WebSearchIcon
     case 'web_fetch':
@@ -804,10 +801,6 @@ function KnowledgeCard({ toolCall }: ToolCallBlockProps) {
   )
 }
 
-function isPythonRecord(toolCall: ToolCallRecord): boolean {
-  return toolCall.source === 'native' && toolRawName(toolCall) === 'run_python'
-}
-
 function isWebSearchRecord(toolCall: ToolCallRecord): boolean {
   const name = toolRawName(toolCall)
   return name === 'web_search' || name === 'search_web'
@@ -916,59 +909,6 @@ function WebSearchCard({ toolCall }: ToolCallBlockProps) {
             )
           )}
           {error && (
-            <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
-              {error}
-            </div>
-          )}
-        </>
-      )}
-    </ConsultCard>
-  )
-}
-
-/** Dedicated card for `run_python`: same consult-card shell as SUBAGENT/ADVISOR.
- *  Body shows the executed code and stdout/stderr. Generated files/images are
- *  rendered separately at the message level (GeneratedImageArtifacts /
- *  GeneratedFileArtifacts), so here they only surface as a count chip. */
-function PythonCard({ toolCall }: ToolCallBlockProps) {
-  const status = normalizeToolCallStatus(toolCall.status)
-  const args = useMemo(() => parsedArguments(toolCall), [toolCall])
-
-  const code = stringValue(args?.code)
-  const output = getResultPreview(toolCall)
-  const error = toolCall.error ? compactToolError(toolCall.error) : ''
-  const duration = formatDuration(getDuration(toolCall))
-  const artifactCount = toolCall.artifacts?.length ?? 0
-  const statusLine =
-    status === 'running' ? '运行中…' : status === 'error' ? (error || '运行失败') : ''
-
-  const hasBody = Boolean(code || output || error)
-
-  return (
-    <ConsultCard
-      label="PYTHON"
-      status={status}
-      identityChips={artifactCount > 0 ? <CardChip>{artifactCount} 个产物</CardChip> : undefined}
-      metricChips={duration ? <CardChip tabular>{duration}</CardChip> : undefined}
-      statusLine={statusLine}
-    >
-      {hasBody && (
-        <>
-          {code && (
-            <CardSection label="Code">
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/[0.08] bg-black/[0.02] p-2 font-mono text-[11px] text-neutral-600 dark:border-white/[0.1] dark:bg-white/[0.03] dark:text-neutral-300">
-                {code.length > 4000 ? `${code.slice(0, 4000)}…` : code}
-              </pre>
-            </CardSection>
-          )}
-          {output && (
-            <CardSection label="Output">
-              <div className="whitespace-pre-wrap break-words font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
-                {output}
-              </div>
-            </CardSection>
-          )}
-          {error && !output && (
             <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
               {error}
             </div>
@@ -1306,7 +1246,6 @@ function getToolName(toolCall: ToolCallRecord): string {
     default:
       break
   }
-  if (raw === 'run_python') return 'Python'
   if (raw === 'web_search') {
     // 结果里带了实际使用的搜索服务名（后端 structured_content.provider），显示为「Web search · Ollama」。
     const structured = objectValue(toolCall.structured_content ?? toolCall.structuredContent) ?? {}
@@ -1437,9 +1376,6 @@ function getToolTarget(toolCall: ToolCallRecord): string {
     }
   })()
   if (primary) return primary
-  // run_python 只显示动词「Python」，不追加目标；其余工具（含参数尚未解析出的情况）
-  // 回退到已有的输入参数摘要（todo / mixer / skill / MCP 及流式占位 argumentPreview）。
-  if (raw === 'run_python') return ''
   return getArgumentPreview(toolCall)
 }
 
@@ -1512,60 +1448,7 @@ function getResultPreview(toolCall: ToolCallRecord): string {
   return formatToolResultPreview(raw)
 }
 
-function stripPythonFailurePrefix(message: string): string {
-  return message
-    .replace(/^Python\s*(?:执行失败|语法错误|执行超时|沙盒调用失败)(?:（[^）]+）)?[：:]\s*/i, '')
-    .trim()
-}
-
-function cleanPythonExceptionSnippet(message: string): string {
-  const normalized = stripPythonFailurePrefix(message).replace(/\s+/g, ' ').trim()
-  const stackBoundary = normalized.search(
-    /\s+(?=Traceback \(most recent call last\):|File\s+"|File\s+'|await CodeRunner\(|coroutine =|new_error@|[0-9]+@wasm-function|\^+)/,
-  )
-  const clipped = stackBoundary >= 0 ? normalized.slice(0, stackBoundary) : normalized
-  return compactText(clipped, 260)
-}
-
-function extractPythonException(message: string): string {
-  const cleaned = message
-    .replace(/\bstderr:\s*/gi, '\n')
-    .replace(/\bstdout:\s*/gi, '\n')
-  const stackNoise = /(pyodide\.asm\.js|wasm-function|new_error@|_pyodide)/i
-  const exceptionName = /^[A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt|Exit|Fault|Found|Denied|Timeout)\b/
-  const lines = cleaned
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-  const tracebackLine = [...lines]
-    .reverse()
-    .find((line) => exceptionName.test(line) && !stackNoise.test(line) && !line.startsWith('PythonError: Traceback'))
-  if (tracebackLine) return cleanPythonExceptionSnippet(tracebackLine)
-
-  const inlineMatches = [
-    ...cleaned.matchAll(
-      /\b([A-Za-z_][\w.]*(?:Error|Exception|Warning|Interrupt|Exit|Fault|Found|Denied|Timeout)\b(?::\s*[^。\r\n]+)?)/g,
-    ),
-  ]
-    .map((match) => cleanPythonExceptionSnippet(match[1] || ''))
-    .filter((value) => value && !stackNoise.test(value) && !value.startsWith('PythonError: Traceback'))
-  const inline = inlineMatches.reverse()[0]
-  return inline || ''
-}
-
 function compactToolError(error: string): string {
-  const lower = error.toLowerCase()
-  if (
-    lower.includes('pyodide.asm.js') ||
-    lower.includes('wasm-function') ||
-    lower.includes('traceback (most recent call last)') ||
-    lower.includes('pythonerror: traceback') ||
-    lower.includes('_pyodide/')
-  ) {
-    const exception = extractPythonException(error)
-    if (exception) return `Python 执行失败：${exception}`
-    return 'Python 执行失败。详情已隐藏，请查看最终回答。'
-  }
   return compactText(error, 260)
 }
 
@@ -1842,9 +1725,6 @@ function ToolCallBlockComponent(props: ToolCallBlockProps) {
   }
   if (isWebSearchRecord(props.toolCall)) {
     return <WebSearchCard {...props} />
-  }
-  if (isPythonRecord(props.toolCall)) {
-    return <PythonCard {...props} />
   }
   return <DefaultToolCallBlock {...props} />
 }

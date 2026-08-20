@@ -305,7 +305,7 @@ pub async fn run_command(
         for denied in HOST_PYTHON_PACKAGE_INSTALL_PATTERNS {
             if lowered.contains(denied) {
                 return Err(
-                    "run_command cannot install Python packages or modify the host Python environment unless allow_host_python_package_install is true. Do not retry with variants — use run_python for sandboxed Python, or (if the user explicitly wants host installs) create/activate a venv and pass allow_host_python_package_install=true."
+                    "run_command cannot install Python packages or modify the host Python environment unless allow_host_python_package_install is true. Do not retry with variants — if the user explicitly wants host installs, create/activate a venv and pass allow_host_python_package_install=true."
                         .to_string(),
                 );
             }

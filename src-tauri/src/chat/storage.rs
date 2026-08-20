@@ -422,11 +422,11 @@ pub fn builtin_assistant_definitions(now: i64) -> Vec<ChatAssistant> {
             "数据分析",
             "📊",
             "#7A9A57",
-            "读 PDF / Excel / Word，用 Python 做数据清洗、统计与可视化，结论落到数字和图。",
-            "你是数据分析师，能读 PDF、Excel/CSV、Word 里的数据，用 Python 沙箱做清洗、统计和画图。\
+            "读 PDF / Excel / Word，做数据清洗、统计与可视化，结论落到数字和图。",
+            "你是数据分析师，能读 PDF、Excel/CSV、Word 里的数据，做清洗、统计和画图。\
 先摸清数据长什么样、要回答什么问题，再动手；过程要可复现，关键步骤讲清楚。\
 结论要落到具体数字和图表上，别停在「大致上升」这种空话；数据有质量问题、或你做了什么假设，主动摆出来。\
-读附件用 pdf/docx/xlsx 技能，画图表关系可用 diagram 技能。拿不准的地方标清楚，不替数据编故事。",
+读附件用 pdf/docx/xlsx 技能，画图表关系可用 diagram 技能。本机有 Python 时可以用 bash 跑分析脚本，没有就直说。拿不准的地方标清楚，不替数据编故事。",
             &["pdf", "docx", "xlsx", "diagram"],
         ),
         make(
@@ -2019,12 +2019,12 @@ mod conversation_workspace_tests {
             "id": "conv_s", "title": "t", "provider_id": "p", "model": "m",
             "created_at": 1, "updated_at": 1,
             "messages": [
-                {"id": "m1", "role": "user", "content": "帮我看看 Pyodide 沙箱", "timestamp": 1},
+                {"id": "m1", "role": "user", "content": "帮我看看知识库配置", "timestamp": 1},
                 {"id": "m2", "role": "assistant", "content": "好的", "reasoning": "需要检查 WASM 加载", "timestamp": 2}
             ]
         }))
         .expect("conversation");
-        assert!(messages_match(&conv, "pyodide")); // content，大小写不敏感
+        assert!(messages_match(&conv, "知识库")); // content，大小写不敏感
         assert!(messages_match(&conv, "wasm 加载")); // reasoning
         assert!(!messages_match(&conv, "不存在的词"));
     }
@@ -2139,7 +2139,7 @@ mod conversation_workspace_tests {
                 {
                     "id": "m2",
                     "role": "assistant",
-                    "content": "前面一长段铺垫文字用来撑开窗口，然后出现关键词 Pyodide 沙箱，后面继续补上下文。",
+                    "content": "前面一长段铺垫文字用来撑开窗口，然后出现关键词知识库配置，后面继续补上下文。",
                     "reasoning": "需要检查 WASM 加载",
                     "timestamp": 2
                 }
@@ -2148,11 +2148,11 @@ mod conversation_workspace_tests {
         .expect("conversation");
 
         let (field, message_id, snippet) =
-            first_message_match(&conv, "pyodide").expect("content hit");
+            first_message_match(&conv, "知识库").expect("content hit");
         assert_eq!(field, "content");
         assert_eq!(message_id, "m2");
         assert!(
-            snippet.to_lowercase().contains("pyodide"),
+            snippet.contains("知识库"),
             "snippet={snippet}"
         );
 

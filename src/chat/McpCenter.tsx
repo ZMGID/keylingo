@@ -90,7 +90,6 @@ export function McpCenter() {
     { key: 'writeFile', label: t.chatMcpNativeWriteFile },
     { key: 'editFile', label: t.chatMcpNativeEditFile },
     { key: 'runCommand', label: t.chatMcpNativeRunCommand },
-    { key: 'runPython', label: t.chatMcpNativeRunPython },
     { key: 'skillRuntime', label: t.chatMcpNativeSkillRuntime, defaultOn: true },
     { key: 'webSearch', label: t.chatMcpNativeWebSearch },
     { key: 'webFetch', label: t.chatMcpNativeWebFetch },

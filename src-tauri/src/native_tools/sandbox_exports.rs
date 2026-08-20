@@ -12,9 +12,8 @@ use base64::{engine::general_purpose, Engine as _};
 /// a unified workbench. Nothing writes here anymore; existing data is migrated
 /// lazily or removed with its conversation.
 const OUTPUTS_ROOT: &str = "Kivio/outputs";
-/// Legacy ephemeral exports tree from prior versions (`run_python` used to write
-/// here under `<conversation>/<message>/`). Still GC'd at startup so old runs go
-/// away; nothing writes here anymore.
+/// Legacy ephemeral exports tree from prior versions. Still GC'd at startup so
+/// old runs go away; nothing writes here anymore.
 const LEGACY_RUNS_ROOT: &str = "Kivio/runs";
 const LEGACY_RUNS_RETENTION_DAYS: u64 = 7;
 const MAX_EXPORT_FILE_BYTES: u64 = 12 * 1024 * 1024;
@@ -231,7 +230,7 @@ fn sanitize_export_filename(name: &str) -> String {
     // Keep Unicode letters/digits (CJK, etc.). NTFS/APFS already accept them.
     // Only strip path separators, Windows reserved punctuation, and other
     // non-identifier junk — `is_ascii_alphanumeric` was collapsing 销售报表.xlsx
-    // into ________.xlsx on the no-workspace Pyodide export path.
+    // into ________.xlsx on the no-workspace export path.
     let sanitized = base
         .chars()
         .map(|ch| {
@@ -273,7 +272,7 @@ fn unique_export_path(dir: &Path, filename: &str) -> PathBuf {
     dir.join(format!("{stem}-{}", uuid::Uuid::new_v4()))
 }
 
-/// Export Pyodide artifacts into the current default workbench. The caller
+/// Export artifacts into the current default workbench. The caller
 /// resolves that directory from the ordinary conversation or bound project.
 pub fn export_sandbox_artifacts(
     ctx: &SandboxExportContext,

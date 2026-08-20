@@ -5,10 +5,6 @@ export type JsonValue = unknown
 
 export type ChatProtocolScope = "run" | "conversation";
 
-export type ChatPythonInputFile = { name: string, dataBase64: string, sizeBytes: number, };
-
-export type ChatRunPythonPayload = { protocolVersion: typeof CHAT_PROTOCOL_VERSION, runId: string, parentConversationId: string | null, parentRunId: string | null, parentMessageId: string | null, code: string, timeoutMs: number, files: Array<ChatPythonInputFile>, };
-
 export type ChatSegmentKind = "text" | "reasoning" | "tool";
 
 export type ChatSegmentPhase = "auxiliary" | "plain" | "tool_loop" | "synthesis";
@@ -73,7 +69,7 @@ export type ChatWarningSnapshot = { "type": "hook_failed", hookName: string, eve
 
 export type ChatTerminalSnapshot = { "type": "run_completed", full: string, conversationRevision: number, } | { "type": "run_failed", error: string, full: string, conversationRevision: number, } | { "type": "run_cancelled", full: string, conversationRevision: number, };
 
-export type ChatRunSnapshot = { protocolVersion: typeof CHAT_PROTOCOL_VERSION, conversationId: string, runId: string, messageId: string, lastSeq: number, baseRevision: number, recovery: ChatRunRecoveryMetadata | null, status: ChatRunStatus, content: string, reasoning: string, segments: Array<ChatSegmentPayload>, tools: Array<ChatToolPayload>, contextUsage: ChatContextUsagePayload | null, subagents: Array<ChatSubagentSnapshot>, compaction: ChatCompactionSnapshot | null, todoState: ChatTodoStatePayload | null, planState: ChatPlanStatePayload | null, pendingInteractions: Array<ChatPendingInteractionSnapshot>, pendingPythonRequests: Array<ChatRunPythonPayload>, warnings: Array<ChatWarningSnapshot>, 
+export type ChatRunSnapshot = { protocolVersion: typeof CHAT_PROTOCOL_VERSION, conversationId: string, runId: string, messageId: string, lastSeq: number, baseRevision: number, recovery: ChatRunRecoveryMetadata | null, status: ChatRunStatus, content: string, reasoning: string, segments: Array<ChatSegmentPayload>, tools: Array<ChatToolPayload>, contextUsage: ChatContextUsagePayload | null, subagents: Array<ChatSubagentSnapshot>, compaction: ChatCompactionSnapshot | null, todoState: ChatTodoStatePayload | null, planState: ChatPlanStatePayload | null, pendingInteractions: Array<ChatPendingInteractionSnapshot>, warnings: Array<ChatWarningSnapshot>, 
 /**
  * 流状态行上的瞬态一行字（上游重试等）。见 `ChatRunEvent::StatusNoteUpdated`。
  */

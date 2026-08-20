@@ -24,30 +24,6 @@ pub enum ChatProtocolScope {
     Conversation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(rename_all = "camelCase")]
-pub struct ChatPythonInputFile {
-    pub name: String,
-    pub data_base64: String,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[ts(rename_all = "camelCase")]
-pub struct ChatRunPythonPayload {
-    #[ts(type = "typeof CHAT_PROTOCOL_VERSION")]
-    pub protocol_version: u32,
-    pub run_id: String,
-    pub parent_conversation_id: Option<String>,
-    pub parent_run_id: Option<String>,
-    pub parent_message_id: Option<String>,
-    pub code: String,
-    pub timeout_ms: u64,
-    pub files: Vec<ChatPythonInputFile>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -898,7 +874,6 @@ pub struct ChatRunSnapshot {
     pub todo_state: Option<ChatTodoStatePayload>,
     pub plan_state: Option<ChatPlanStatePayload>,
     pub pending_interactions: Vec<ChatPendingInteractionSnapshot>,
-    pub pending_python_requests: Vec<ChatRunPythonPayload>,
     pub warnings: Vec<ChatWarningSnapshot>,
     /// 流状态行上的瞬态一行字（上游重试等）。见 `ChatRunEvent::StatusNoteUpdated`。
     pub status_note: Option<String>,
@@ -1027,7 +1002,6 @@ impl ChatProtocolHub {
             todo_state: None,
             plan_state: None,
             pending_interactions: Vec::new(),
-            pending_python_requests: Vec::new(),
             warnings: Vec::new(),
             status_note: None,
             terminal: None,
@@ -1206,36 +1180,6 @@ impl ChatProtocolHub {
         });
     }
 
-    fn attach_python_request(&mut self, request: ChatRunPythonPayload) -> Result<(), String> {
-        let Some(parent_run_id) = request.parent_run_id.as_deref() else {
-            return Ok(());
-        };
-        let run = self.runs.get_mut(parent_run_id).ok_or_else(|| {
-            format!("chat protocol parent run is not registered: {parent_run_id}")
-        })?;
-        if run.terminal_at.is_some() {
-            return Err(format!(
-                "chat protocol parent run is already terminal: {parent_run_id}"
-            ));
-        }
-        if !run
-            .snapshot
-            .pending_python_requests
-            .iter()
-            .any(|pending| pending.run_id == request.run_id)
-        {
-            run.snapshot.pending_python_requests.push(request);
-        }
-        Ok(())
-    }
-
-    fn detach_python_request(&mut self, run_id: &str) {
-        for run in self.runs.values_mut() {
-            run.snapshot
-                .pending_python_requests
-                .retain(|pending| pending.run_id != run_id);
-        }
-    }
 }
 
 fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
@@ -1398,7 +1342,6 @@ fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
                 conversation_revision: *conversation_revision,
             });
             snapshot.pending_interactions.clear();
-            snapshot.pending_python_requests.clear();
         }
         ChatRunEvent::RunFailed {
             error,
@@ -1415,7 +1358,6 @@ fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
                 conversation_revision: *conversation_revision,
             });
             snapshot.pending_interactions.clear();
-            snapshot.pending_python_requests.clear();
         }
         ChatRunEvent::RunCancelled {
             full,
@@ -1430,7 +1372,6 @@ fn fold_snapshot(snapshot: &mut ChatRunSnapshot, event: &ChatRunEvent) {
                 conversation_revision: *conversation_revision,
             });
             snapshot.pending_interactions.clear();
-            snapshot.pending_python_requests.clear();
         }
         _ => {}
     }
@@ -1638,22 +1579,6 @@ impl Drop for RegisteredRunGuard {
             );
         }
     }
-}
-
-pub fn attach_python_request(app: &AppHandle, request: ChatRunPythonPayload) -> Result<(), String> {
-    app.state::<AppState>()
-        .chat_protocol
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .attach_python_request(request)
-}
-
-pub fn detach_python_request(app: &AppHandle, run_id: &str) {
-    app.state::<AppState>()
-        .chat_protocol
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .detach_python_request(run_id);
 }
 
 pub fn withdraw_tool_approval(app: &AppHandle, tool_call_id: &str) {
@@ -2298,26 +2223,6 @@ mod tests {
             }],
         });
         assert!(matches!(result.runs[0], ChatRunSync::Snapshot { .. }));
-    }
-
-    #[test]
-    fn pending_python_request_is_folded_and_removed_from_snapshot() {
-        let mut hub = ChatProtocolHub::default();
-        hub.register("conv", "run", "message", 0).unwrap();
-        let request = ChatRunPythonPayload {
-            protocol_version: CHAT_PROTOCOL_VERSION,
-            run_id: "python".into(),
-            parent_conversation_id: Some("conv".into()),
-            parent_run_id: Some("run".into()),
-            parent_message_id: Some("message".into()),
-            code: "1 + 1".into(),
-            timeout_ms: 1_000,
-            files: Vec::new(),
-        };
-        hub.attach_python_request(request).unwrap();
-        assert_eq!(hub.runs["run"].snapshot.pending_python_requests.len(), 1);
-        hub.detach_python_request("python");
-        assert!(hub.runs["run"].snapshot.pending_python_requests.is_empty());
     }
 
     #[test]

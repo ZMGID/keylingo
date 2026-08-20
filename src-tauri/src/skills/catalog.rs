@@ -31,7 +31,7 @@ pub fn format_catalog(
     skills.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
 
     let header = if tools_available {
-        "The following Agent Skills are specialized playbooks for specific kinds of work. When the current task matches a skill's description, call the skill tool for that skill proactively — you do NOT need the user to name it or ask for it; matching the description is enough. Activating a skill loads its full step-by-step instructions and bundled resources, which produce markedly better results than improvising. After activating: read the skill's bundled files with `read` and run its scripts with `run_python` (sandbox) or `run_command` (host).\n\n"
+        "The following Agent Skills are specialized playbooks for specific kinds of work. When the current task matches a skill's description, call the skill tool for that skill proactively — you do NOT need the user to name it or ask for it; matching the description is enough. Activating a skill loads its full step-by-step instructions and bundled resources, which produce markedly better results than improvising. After activating: read the skill's bundled files with `read` and run its scripts with `run_command`.\n\n"
     } else {
         "The following Agent Skills are available for reference. The current model does not support tools, so the skill tool is unavailable. Use the catalog only as guidance, switch to a tools-capable provider for progressive loading, or set Skill fallback to SKILL.md only when a skill is selected.\n\n"
     };

@@ -577,7 +577,6 @@ pub fn run() {
             external_agents::pi_session_tree::chat_pi_session_fork,
             external_agents::pi_session_tree::chat_pi_session_clone,
             external_agents::pi_session_tree::chat_pi_session_switch,
-            chat::commands::interaction::chat_python_complete,
             chat::commands::attachments::chat_read_attachment,
             chat::commands::attachments::chat_open_attachment,
             chat::commands::attachments::chat_open_generated_artifact,

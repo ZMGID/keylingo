@@ -1,14 +1,12 @@
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::oneshot;
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     native_tools::{
-        resolve_tool_read_path, resolve_tool_write_path, FileMutationResult, NativeToolWorkspace,
+        resolve_tool_write_path, FileMutationResult, NativeToolWorkspace,
         ReadFileResult,
     },
     settings::{ChatMcpServer, WebSearchProvider},
@@ -33,87 +31,6 @@ pub struct NativeToolContext {
     pub generation: u64,
     /// Sub-agent nesting depth of the issuing agent loop (0 = top-level).
     pub depth: u8,
-}
-const MAX_PYTHON_INPUT_FILE_BYTES: u64 = 100 * 1024 * 1024;
-const MAX_PYTHON_INPUT_FILES: usize = 8;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PythonInputFilePayload {
-    name: String,
-    data_base64: String,
-    size_bytes: u64,
-}
-
-fn sanitize_python_input_name(path: &Path) -> String {
-    let raw = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("input");
-    // Keep Unicode letters/digits so a host file like 销售报表.xlsx is still
-    // that name inside Pyodide (`KIVIO_INPUT_FILES`), not ________.xlsx.
-    let sanitized = raw
-        .chars()
-        .map(|ch| {
-            if ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let trimmed = sanitized.trim_matches(['.', ' ', '_']).trim();
-    if trimmed.is_empty() {
-        "input".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn collect_python_input_files(
-    _app: &AppHandle,
-    workspace: &NativeToolWorkspace,
-    arguments: &Value,
-) -> Result<Vec<PythonInputFilePayload>, String> {
-    let Some(files) = arguments.get("files") else {
-        return Ok(Vec::new());
-    };
-    let files = files
-        .as_array()
-        .ok_or_else(|| "run_python files must be an array of file paths".to_string())?;
-    if files.len() > MAX_PYTHON_INPUT_FILES {
-        return Err(format!(
-            "run_python supports at most {MAX_PYTHON_INPUT_FILES} input files"
-        ));
-    }
-
-    let mut payloads = Vec::new();
-    for file in files {
-        let raw_path = file
-            .as_str()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "run_python files entries must be non-empty strings".to_string())?;
-        let path = resolve_tool_read_path(workspace, raw_path)?;
-        if !path.is_file() {
-            return Err(format!("run_python input is not a file: {raw_path}"));
-        }
-        let metadata =
-            fs::metadata(&path).map_err(|err| format!("Read input metadata failed: {err}"))?;
-        if metadata.len() > MAX_PYTHON_INPUT_FILE_BYTES {
-            return Err(format!(
-                "run_python input file too large: {} bytes (max {MAX_PYTHON_INPUT_FILE_BYTES})",
-                metadata.len()
-            ));
-        }
-        let bytes = fs::read(&path).map_err(|err| format!("Read input file failed: {err}"))?;
-        payloads.push(PythonInputFilePayload {
-            name: sanitize_python_input_name(&path),
-            data_base64: general_purpose::STANDARD.encode(bytes),
-            size_bytes: metadata.len(),
-        });
-    }
-    Ok(payloads)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1309,182 +1226,10 @@ async fn resolve_native_workspace(
     ))
 }
 
-pub(super) async fn run_python_via_pyodide(
-    app: &AppHandle,
-    state: &AppState,
-    settings: &crate::settings::Settings,
-    workspace: &NativeToolWorkspace,
-    arguments: &Value,
-    native_ctx: Option<NativeToolContext>,
-) -> Result<McpToolCallResult, String> {
-    let code = arguments
-        .get("code")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "run_python requires code".to_string())?;
-
-    let timeout_ms = arguments
-        .get("timeout_ms")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(settings.chat_tools.tool_timeout_ms)
-        .clamp(1_000, 300_000);
-    let input_files = collect_python_input_files(app, workspace, arguments)?;
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let parent = native_ctx.clone();
-    let output_directory = workspace.default_output_directory()?;
-    let export_ctx = native_ctx
-        .map(|ctx| crate::native_tools::SandboxExportContext {
-            conversation_id: ctx.conversation_id,
-            message_id: ctx.message_id,
-            tool_call_id: ctx.tool_call_id,
-            output_directory: output_directory.clone(),
-        })
-        .unwrap_or_else(|| crate::native_tools::SandboxExportContext {
-            conversation_id: "standalone".to_string(),
-            message_id: run_id.clone(),
-            tool_call_id: None,
-            output_directory,
-        });
-    let (tx, rx) = oneshot::channel();
-    let payload = crate::chat::protocol::ChatRunPythonPayload {
-        protocol_version: crate::chat::protocol::CHAT_PROTOCOL_VERSION,
-        run_id: run_id.clone(),
-        parent_conversation_id: parent.as_ref().map(|ctx| ctx.conversation_id.clone()),
-        parent_run_id: parent.as_ref().map(|ctx| ctx.run_id.clone()),
-        parent_message_id: parent.as_ref().map(|ctx| ctx.message_id.clone()),
-        code: code.to_string(),
-        timeout_ms,
-        files: input_files
-            .into_iter()
-            .map(|file| crate::chat::protocol::ChatPythonInputFile {
-                name: file.name,
-                data_base64: file.data_base64,
-                size_bytes: file.size_bytes,
-            })
-            .collect(),
-    };
-    {
-        let mut pending = state
-            .pending_python_runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        pending.insert(
-            run_id.clone(),
-            crate::state::PendingPythonRun {
-                sender: tx,
-                export_ctx: export_ctx.clone(),
-            },
-        );
-    }
-    if let Err(error) = crate::chat::protocol::attach_python_request(app, payload.clone()) {
-        eprintln!("Failed to attach Python request to chat snapshot: {error}");
-    }
-    let emit_result = app.emit("chat-run-python", payload);
-    if let Err(err) = emit_result {
-        let mut pending = state
-            .pending_python_runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        pending.remove(&run_id);
-        crate::chat::protocol::detach_python_request(app, &run_id);
-        return Err(format!("Failed to start Python runner: {err}"));
-    }
-
-    // The Worker gives cold Pyodide initialization a 10s grace and resets itself
-    // at timeout_ms + 10s. Keep the Rust receiver slightly later so the frontend
-    // always gets the first chance to terminate the memory-heavy Worker and send
-    // a structured completion instead of continuing after this command returns.
-    const PYODIDE_FRONTEND_GRACE_MS: u64 = 10_000;
-    const PYODIDE_COMPLETION_TRANSPORT_GRACE_MS: u64 = 2_000;
-    let wait_ms = timeout_ms
-        .saturating_add(PYODIDE_FRONTEND_GRACE_MS)
-        .saturating_add(PYODIDE_COMPLETION_TRANSPORT_GRACE_MS);
-    let wait = tokio::time::timeout(Duration::from_millis(wait_ms), rx).await;
-
-    match wait {
-        Ok(Ok(result)) => {
-            if result.is_error {
-                Err(result.content)
-            } else {
-                let mut content = result.content;
-                let mut artifacts = result.artifacts;
-                match crate::native_tools::export_sandbox_artifacts(&export_ctx, &artifacts) {
-                    Ok(exported_artifacts) => {
-                        for exported in &exported_artifacts {
-                            if let Some(artifact) = artifacts.get_mut(exported.artifact_index) {
-                                artifact.path = Some(exported.path.display().to_string());
-                                if let Some(name) =
-                                    exported.path.file_name().and_then(|value| value.to_str())
-                                {
-                                    artifact.name = name.to_string();
-                                }
-                            }
-                        }
-                        let export_note =
-                            crate::native_tools::format_exported_paths(&exported_artifacts);
-                        if !export_note.is_empty() {
-                            if !content.trim().is_empty() {
-                                content.push_str("\n\n");
-                            }
-                            content.push_str(&export_note);
-                        }
-                    }
-                    Err(err) => {
-                        if !content.trim().is_empty() {
-                            content.push_str("\n\n");
-                        }
-                        content.push_str(&crate::native_tools::format_export_error(&err));
-                    }
-                }
-                Ok(McpToolCallResult {
-                    content,
-                    is_error: false,
-                    raw: Value::Null,
-                    artifacts,
-                    structured_content: None,
-                    follow_up_user_messages: Vec::new(),
-                })
-            }
-        }
-        Ok(Err(_)) => Err("Python runner channel closed".to_string()),
-        Err(_) => {
-            let mut pending = state
-                .pending_python_runs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            pending.remove(&run_id);
-            crate::chat::protocol::detach_python_request(app, &run_id);
-            Err(format!("Python execution timed out after {timeout_ms}ms"))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::native_tools::ReadFileResult;
-    use std::path::Path;
-
-    #[test]
-    fn python_input_name_keeps_unicode_letters() {
-        assert_eq!(
-            sanitize_python_input_name(Path::new("销售报表.xlsx")),
-            "销售报表.xlsx"
-        );
-        assert_eq!(
-            sanitize_python_input_name(Path::new("/tmp/Q1 销售.csv")),
-            "Q1 销售.csv"
-        );
-        assert_eq!(
-            sanitize_python_input_name(Path::new("../secret?.png")),
-            "secret_.png"
-        );
-        assert_eq!(
-            sanitize_python_input_name(Path::new("chart.png")),
-            "chart.png"
-        );
-    }
 
     #[test]
     fn read_file_tool_result_preserves_structured_content() {

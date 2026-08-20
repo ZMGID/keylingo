@@ -2804,53 +2804,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   }, [currentConversation?.id])
 
   useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-    let clientPromise: Promise<typeof import('./pyodideClient')> | null = null
-
-    const setupListener = async () => {
-      unlisten = await api.onChatRunPython((payload) => {
-        if (cancelled) return
-        void (async () => {
-          try {
-            clientPromise ??= import('./pyodideClient')
-            const { runPythonInSandbox } = await clientPromise
-            const outcome = await runPythonInSandbox(payload.code, payload.timeoutMs, payload.files)
-            await api.chatPythonComplete(
-              payload.runId,
-              outcome.content,
-              outcome.isError,
-              outcome.artifacts,
-            )
-          } catch (err) {
-            const message = err instanceof Error
-              ? err.message || err.stack || err.name
-              : String(err)
-            await api.chatPythonComplete(
-              payload.runId,
-              `Python 沙盒调用失败：${message || 'Unknown error'}。不要使用 run_command/pip 安装或修改本机 Python 环境来绕过沙盒；请直接基于已有数据回答，除非用户明确要求修改本机环境。`,
-              true,
-              [],
-            )
-          }
-        })()
-      })
-      if (cancelled) {
-        unlisten()
-      }
-    }
-
-    setupListener()
-    return () => {
-      cancelled = true
-      unlisten?.()
-      void clientPromise
-        ?.then(({ disposePythonSandbox }) => disposePythonSandbox())
-        .catch(() => {})
-    }
-  }, [])
-
-  useEffect(() => {
     currentConversationIdRef.current = currentConversation?.id ?? null
   }, [currentConversation?.id])
 

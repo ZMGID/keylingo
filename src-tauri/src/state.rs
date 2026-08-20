@@ -16,8 +16,7 @@ use crate::inpainting::InpaintingClient;
 #[cfg(target_os = "macos")]
 use crate::macos_ocr::MacOcrClient;
 use crate::mcp::manager::McpSession;
-use crate::mcp::types::{McpTool, PythonRunResult};
-use crate::native_tools::SandboxExportContext;
+use crate::mcp::types::McpTool;
 use crate::offline_models::OfflineModelManager;
 use crate::rapidocr::RapidOcrClient;
 use crate::settings::Settings;
@@ -29,12 +28,6 @@ pub struct PendingChatExternalAttachment {
     pub r#type: String,
     pub name: String,
     pub path: String,
-}
-
-#[derive(Debug)]
-pub struct PendingPythonRun {
-    pub sender: oneshot::Sender<PythonRunResult>,
-    pub export_ctx: SandboxExportContext,
 }
 
 /// 一条挂起的会话级授权。run_id 用来在应答/取消/超时时撤掉快照里的授权卡。
@@ -184,8 +177,6 @@ pub struct AppState {
     /// ponytail: 只在 `ToolResult` 落地时消费一次并移除；那一轮死在半路的残留会留到进程退出
     /// （一条询问一个小 JSON，量级可忽略）。真要收严就在轮末按 run 清一次。
     pub answered_ask_user_content: Mutex<HashMap<String, serde_json::Value>>,
-    /// 等待前端 Pyodide 完成的 run_python 调用。
-    pub pending_python_runs: Mutex<HashMap<String, PendingPythonRun>>,
     /// 保护 Chat 空白会话复用的短临界区，避免快速多次新建时并发创建多个空白对话。
     pub chat_create_conversation_lock: tokio::sync::Mutex<()>,
     /// 外部 CLI 斜杠命令探测缓存（agent_id:cwd → 命令列表）。
@@ -403,7 +394,6 @@ impl AppState {
             chat_consent_prompt_lock: tokio::sync::Mutex::new(()),
             pending_chat_user_prompts: Mutex::new(HashMap::new()),
             answered_ask_user_content: Mutex::new(HashMap::new()),
-            pending_python_runs: Mutex::new(HashMap::new()),
             chat_create_conversation_lock: tokio::sync::Mutex::new(()),
             external_slash_commands_cache: Mutex::new(HashMap::new()),
             external_agent_models_cache: Mutex::new(HashMap::new()),

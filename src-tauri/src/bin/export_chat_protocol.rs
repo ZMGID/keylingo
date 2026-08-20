@@ -7,8 +7,8 @@ use kivio::chat::protocol::{
     ChatContextSummaryPayload, ChatContextUsagePayload, ChatContextUsageSegmentPayload,
     ChatConversationEvent, ChatConversationEventEnvelope, ChatFileLedgerPayload,
     ChatPendingInteractionSnapshot, ChatPlanMode, ChatPlanStatePayload, ChatPlanStatus,
-    ChatProtocolEvent, ChatProtocolScope, ChatPythonInputFile, ChatRunCursor, ChatRunEvent,
-    ChatRunEventEnvelope, ChatRunPythonPayload, ChatRunRecoveryMetadata, ChatRunSnapshot,
+    ChatProtocolEvent, ChatProtocolScope, ChatRunCursor, ChatRunEvent,
+    ChatRunEventEnvelope, ChatRunRecoveryMetadata, ChatRunSnapshot,
     ChatRunStatus, ChatRunSync, ChatSegmentKind, ChatSegmentPayload, ChatSegmentPhase,
     ChatSubagentSnapshot, ChatSyncRequest, ChatSyncResult, ChatTerminalSnapshot,
     ChatTodoItemPayload, ChatTodoStatePayload, ChatTodoStatus, ChatToolArtifactPayload,
@@ -29,8 +29,6 @@ fn typescript() -> String {
     let config = Config::default().with_large_int("number");
     let declarations = [
         ChatProtocolScope::decl(&config),
-        ChatPythonInputFile::decl(&config),
-        ChatRunPythonPayload::decl(&config),
         ChatSegmentKind::decl(&config),
         ChatSegmentPhase::decl(&config),
         ChatSegmentPayload::decl(&config),
@@ -213,22 +211,6 @@ fn sync_schema() -> String {
     )
 }
 
-fn python_schema() -> String {
-    let mut schema = serde_json::to_value(schema_for!(ChatRunPythonPayload))
-        .expect("chat python schema must serialize");
-    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-        properties.insert(
-            "protocolVersion".to_string(),
-            serde_json::json!({ "type": "integer", "const": CHAT_PROTOCOL_VERSION }),
-        );
-    }
-    close_objects(&mut schema);
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&schema).expect("chat python schema must encode")
-    )
-}
-
 fn write_or_check(path: &Path, expected: &str, check: bool) -> Result<(), String> {
     if check {
         let actual = fs::read_to_string(path).map_err(|_| {
@@ -285,11 +267,6 @@ fn main() {
         write_or_check(
             &directory.join("chatProtocol.schema.json"),
             &schema(),
-            check,
-        ),
-        write_or_check(
-            &directory.join("chatPython.schema.json"),
-            &python_schema(),
             check,
         ),
         write_or_check(

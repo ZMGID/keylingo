@@ -20,9 +20,9 @@ describe('splitHighlightParts', () => {
   })
 
   it('highlights CJK needles without splitting surrounding characters', () => {
-    expect(splitHighlightParts('请检查 Pyodide 沙箱配置', '沙箱')).toEqual([
-      { text: '请检查 Pyodide ', match: false },
-      { text: '沙箱', match: true },
+    expect(splitHighlightParts('请检查知识库配置', '知识库')).toEqual([
+      { text: '请检查', match: false },
+      { text: '知识库', match: true },
       { text: '配置', match: false },
     ])
   })

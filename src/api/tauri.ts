@@ -9,7 +9,6 @@ import { normalizeThemeColorId } from '../themeColors'
 import {
   subscribeChatProtocol,
   subscribeChatProtocolIssues,
-  subscribeChatPython,
   syncChatProtocol,
   type ChatProtocolDelivery,
   type ChatProtocolIssue,
@@ -18,7 +17,6 @@ import type {
   ChatProtocolEvent,
   ChatRunEventEnvelope,
   ChatSegmentPayload as GeneratedChatSegmentPayload,
-  ChatRunPythonPayload as GeneratedChatRunPythonPayload,
 } from '../generated/chatProtocol'
 
 // ========== 类型定义 ==========
@@ -420,14 +418,11 @@ export type ChatNativeToolsConfig = {
   writeFile?: boolean
   editFile?: boolean
   runCommand?: boolean
-  runPython?: boolean
   knowledgeSearch?: boolean
   workingDirectory?: string
   /** Legacy settings compatibility only. */
   workspaceRoots?: string[]
 }
-
-export type ChatRunPythonPayload = GeneratedChatRunPythonPayload
 
 export type ChatPastedImageResult = {
   success: boolean
@@ -454,7 +449,6 @@ export function defaultNativeTools(): ChatNativeToolsConfig {
     writeFile: true,
     editFile: true,
     runCommand: true,
-    runPython: true,
     knowledgeSearch: true,
     workingDirectory: '',
     workspaceRoots: [],
@@ -2291,17 +2285,6 @@ export const api = {
     skipped = false,
   ) =>
     invoke<void>('chat_submit_user_choice', { toolCallId, answers, skipped }),
-  chatPythonComplete: (
-    runId: string,
-    content: string,
-    isError: boolean,
-    artifacts: ChatToolArtifact[] = [],
-  ) =>
-    invoke<void>('chat_python_complete', { runId, content, isError, artifacts }),
-  onChatRunPython: (listener: (payload: ChatRunPythonPayload) => void) => {
-    if (!isTauriRuntime()) return Promise.resolve(() => {})
-    return subscribeChatPython(listener)
-  },
   onChatAssistantsChanged: (listener: (assistantId: string) => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<string>('chat-assistants-changed', (payload) => listener(payload))
