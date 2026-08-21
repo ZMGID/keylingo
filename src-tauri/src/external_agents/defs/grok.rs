@@ -1,6 +1,7 @@
 //! Grok CLI (xAI "Grok Build") external agent definition.
 //!
-//! Grok speaks the Agent Client Protocol over `grok agent stdio` (verified against v0.2.103):
+//! Grok speaks the Agent Client Protocol over `grok agent stdio` (ACP handshake verified
+//! against v0.2.103–0.2.114; launch flags re-checked on grok 1.0.4, changelog through 1.0.5):
 //! `initialize` → `session/new` (result carries `models.availableModels`) → `session/set_model`
 //! → `session/prompt`, with `agent_thought_chunk` / `agent_message_chunk` / `tool_call` /
 //! `tool_call_update` session updates and an async `available_commands_update` push — all
@@ -10,6 +11,9 @@
 //!   has non-empty `reasoning_options` and a dynamic `build_args`;
 //! - the model can also be pinned at launch via `-m` (session/set_model still works and is
 //!   harmless duplication for the fresh-session path).
+//!
+//! 1.0.x 起 `grok agent` 会按 `[cli] use_leader` 挂到共享 leader。Kivio 每条对话要自己的
+//! 进程（取消杀树、会话隔离），所以 argv 里永远带 `--no-leader`。
 
 use super::super::types::{
     ModelProbeStrategy, PromptInputFormat, RuntimeAgentDef, RuntimeBuildOptions, RuntimeContext,
@@ -57,6 +61,9 @@ pub fn build_grok_args(
     // Headless driver auto-answers permission requests anyway; --always-approve skips the
     // round-trips entirely (same spirit as claude's bypassPermissions default).
     args.push("--always-approve".to_string());
+    // 必须在 `stdio` 之前：这是 `grok agent` 的 option，不是 stdio 子命令的。
+    // 官方 agent-mode 文档：`--no-leader` = 即使 config 开了 leader 也起本地进程。
+    args.push("--no-leader".to_string());
     args.push("stdio".to_string());
     args
 }
@@ -75,7 +82,9 @@ pub const GROK_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     list_models_timeout_secs: Some(15),
     models_from_stderr: false,
     model_probe: Some(ModelProbeStrategy::Acp),
-    model_probe_args: Some(&["agent", "stdio"]),
+    // 与 `build_grok_args` 的默认 argv 对齐：探测若漏掉 `--no-leader`，会挂上用户
+    // 正在跑的 TUI leader，在别人的会话里 `session/new`。
+    model_probe_args: Some(&["agent", "--always-approve", "--no-leader", "stdio"]),
     slash_strategy: SlashStrategy::Acp,
     env: &[],
     max_prompt_arg_bytes: None,
@@ -121,6 +130,16 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-m", "grok-4.5"]));
         assert!(args.windows(2).any(|w| w == ["--reasoning-effort", "high"]));
         assert!(args.contains(&"--always-approve".to_string()));
+        assert!(args.contains(&"--no-leader".to_string()));
+        let stdio = args.iter().position(|a| a == "stdio").expect("stdio");
+        let no_leader = args
+            .iter()
+            .position(|a| a == "--no-leader")
+            .expect("no-leader");
+        assert!(
+            no_leader < stdio,
+            "--no-leader 必须是 agent 的 option，不能落在 stdio 后面：{args:?}"
+        );
     }
 
     #[test]
@@ -134,7 +153,10 @@ mod tests {
             },
             None,
         );
-        assert_eq!(args, vec!["agent", "--always-approve", "stdio"]);
+        assert_eq!(
+            args,
+            vec!["agent", "--always-approve", "--no-leader", "stdio"]
+        );
     }
 
     #[test]
@@ -149,7 +171,7 @@ mod tests {
         ));
         assert_eq!(
             GROK_AGENT_DEF.model_probe_args,
-            Some(&["agent", "stdio"][..])
+            Some(&["agent", "--always-approve", "--no-leader", "stdio"][..])
         );
         assert!(matches!(GROK_AGENT_DEF.slash_strategy, SlashStrategy::Acp));
     }
