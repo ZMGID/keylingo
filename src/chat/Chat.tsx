@@ -153,6 +153,7 @@ import {
   restoreGroupArm,
   touchGroup,
 } from './groupStreamingStore'
+import { assistantTurnSpan } from './messageGroups'
 import { compareTimelineSegments, isExternalSubagentToolCall, segmentStepNumber, segmentToolCallId, userFollowUpId, userSteerId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
 import { latestClearBoundaryId, mergeClearContextState } from './contextClearBoundary'
@@ -4133,6 +4134,92 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     [applyAssistantStreamStats, applyConversation, clearConversationInFlight, clearStreamSnapshot, ensureStreamSnapshot, finishStreamingRunWithConversation, flushPendingStreamDone, freezeStreamSnapshot, markConversationInFlight, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation, syncGeneratingConversationIds],
   )
 
+  const handleReplyWithModel = useCallback(
+    async (messageId: string, providerId: string, model: string) => {
+      const conv = currentConversationRef.current
+      if (!conv) return
+      const conversationId = conv.id
+      if (isConversationInFlight(inFlightConversationsRef.current, conversationId)) {
+        setStreamErrorForConversation(conversationId, '该对话正在生成中，请稍后再试')
+        return
+      }
+      const span = assistantTurnSpan(conv.messages, messageId)
+      if (!span || span.end !== conv.messages.length - 1) {
+        setStreamErrorForConversation(conversationId, '只能对最后一轮回答换模型')
+        return
+      }
+      const groupId = span.groupId || `grp_${crypto.randomUUID()}`
+      const sessionProvider = conv.provider_id ?? ''
+      const sessionModel = conv.model ?? ''
+      resetLocalCancellation()
+      beginGroup(
+        conversationId,
+        groupId,
+        [
+          ...span.siblings.map((message) => ({
+            providerId: message.provider_id ?? message.providerId ?? sessionProvider,
+            model: message.model ?? sessionModel,
+            messageId: message.id,
+            streaming: false,
+            content: message.content,
+            reasoning: message.reasoning,
+            toolCalls: message.tool_calls ?? message.toolCalls ?? [],
+            segments: message.segments ?? [],
+          })),
+          { providerId, model },
+        ],
+      )
+      if (currentConversationIdRef.current === conversationId) {
+        resetStreamStore()
+        setStreamCoarse({ streaming: true })
+        setStreamErrorForConversation(conversationId, '')
+        activeRunIdRef.current = null
+      }
+      markConversationInFlight(conversationId)
+      let persistedConversation: Conversation | null = null
+      try {
+        const updated = await chatApi.replyWithModel(
+          conversationId,
+          messageId,
+          providerId,
+          model,
+          groupId,
+        )
+        persistedConversation = updated
+        if (currentConversationIdRef.current === conversationId) {
+          applyAssistantStreamStats(updated)
+          applyConversation(updated)
+          refreshSidebar()
+        } else {
+          refreshSidebar()
+        }
+      } catch (err) {
+        console.error('Failed to reply with model:', err)
+        setStreamErrorForConversation(
+          conversationId,
+          typeof err === 'string' ? err : (err as Error).message || '换模型回答失败',
+        )
+        if (currentConversationIdRef.current === conversationId) {
+          void reloadConversation(conversationId)
+        }
+      } finally {
+        clearConversationInFlight(conversationId)
+        endGroup(conversationId)
+        if (persistedConversation) {
+          delete pendingStreamDoneRef.current[conversationId]
+          finishStreamingRunWithConversation(conversationId, persistedConversation)
+          void messageQueueRef.current.settleAfterRun(conversationId, persistedConversation)
+        } else {
+          messageQueueRef.current.settleAfterRun(conversationId)
+          if (!(await flushPendingStreamDone(conversationId))) {
+            if (!freezeStreamSnapshot(conversationId)) clearStreamSnapshot(conversationId)
+          }
+        }
+      }
+    },
+    [applyAssistantStreamStats, applyConversation, clearConversationInFlight, clearStreamSnapshot, finishStreamingRunWithConversation, flushPendingStreamDone, freezeStreamSnapshot, markConversationInFlight, refreshSidebar, reloadConversation, resetLocalCancellation, setStreamErrorForConversation],
+  )
+
   const handleRuntimeChange = useCallback(async (runtime: AgentRuntimeConfig) => {
     setDraftAgentRuntime(runtime)
     saveLastAgentRuntime(runtime)
@@ -5057,6 +5144,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     assistantStreamStatsByMessageId,
     onUpdateMessage: handleUpdateMessage,
     onRegenerateMessage: handleRegenerateMessage,
+    onReplyWithModel: (
+      usesExternalRuntime || activeAgentPlanMode !== 'act'
+        ? undefined
+        : handleReplyWithModel
+    ),
+    sessionProviderId: currentConversation?.provider_id,
+    sessionModel: currentConversation?.model,
     onForkMessage: handleForkMessage,
     onRewindMessage: handleRewindMessage,
     onDeleteMessage: handleDeleteMessage,
@@ -5086,12 +5180,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     handleExecuteAgentPlan,
     handleForkMessage,
     handleRegenerateMessage,
+    handleReplyWithModel,
     handleRewindMessage,
     handleSaveMessageToNote,
     handleSetGroupSelection,
     handleUpdateMessage,
     uiLang,
     focusMessageId,
+    usesExternalRuntime,
+    activeAgentPlanMode,
   ])
 
   const forkOrigin = useMemo(() => {

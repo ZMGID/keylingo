@@ -95,16 +95,36 @@ function makeColumn(
   }
 }
 
+export type GroupArmSeed = {
+  providerId: string | null
+  model: string | null
+  messageId?: string
+  streaming?: boolean
+  content?: string
+  reasoning?: string
+  toolCalls?: import('./types').ToolCallRecord[]
+  segments?: import('./types').ChatMessageSegment[]
+}
+
 /** 起一个多答组：登记会话、group_id、期望列数（先放 N 个占位骨架列）。 */
 export function beginGroup(
   conversationId: string,
   groupId: string,
-  arms: { providerId: string | null; model: string | null }[],
+  arms: GroupArmSeed[],
 ): void {
-  const columns = arms.map((arm, index) =>
-    // 占位列用一个临时 messageId（pending-<index>），真实 message_id 到达后认领。
-    makeColumn(`pending-${groupId}-${index}`, arm.providerId, arm.model),
-  )
+  const columns = arms.map((arm, index) => {
+    const column = makeColumn(
+      arm.messageId || `pending-${groupId}-${index}`,
+      arm.providerId,
+      arm.model,
+    )
+    if (arm.streaming === false) column.streaming = false
+    if (arm.content) column.content = arm.content
+    if (arm.reasoning) column.reasoning = arm.reasoning
+    if (arm.toolCalls) column.toolCalls = arm.toolCalls
+    if (arm.segments) column.segments = arm.segments
+    return column
+  })
   activeGroups.set(conversationId, {
     conversationId,
     groupId,

@@ -1,6 +1,6 @@
 import { memo, useMemo, useState, type ReactNode } from 'react'
 import { Check, Columns2, Square } from 'lucide-react'
-import type { ChatMessage } from './types'
+import type { ChatMessage, ModelRef } from './types'
 import { MessageBubble } from './MessageBubble'
 import { ModelIcon } from './ModelIcon'
 import { getActiveGroup, useGroupVersion, type GroupColumnSnapshot } from './groupStreamingStore'
@@ -32,6 +32,8 @@ interface MessageGroupProps {
   onSelectColumn?: (groupId: string, messageId: string) => void
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
   onRegenerateMessage?: (messageId: string) => Promise<void>
+  onReplyWithModel?: (messageId: string, providerId: string, model: string) => Promise<void>
+  replyOccupiedModels?: ModelRef[]
   onForkMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
   onSaveMessageToNote?: (messageId: string) => Promise<boolean>
@@ -88,6 +90,8 @@ function GroupColumnView({
   onSelectColumn,
   onUpdateMessage,
   onRegenerateMessage,
+  onReplyWithModel,
+  replyOccupiedModels,
   onForkMessage,
   onDeleteMessage,
   onSaveMessageToNote,
@@ -104,6 +108,8 @@ function GroupColumnView({
   onSelectColumn?: (groupId: string, messageId: string) => void
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
   onRegenerateMessage?: (messageId: string) => Promise<void>
+  onReplyWithModel?: (messageId: string, providerId: string, model: string) => Promise<void>
+  replyOccupiedModels?: ModelRef[]
   onForkMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
   onSaveMessageToNote?: (messageId: string) => Promise<boolean>
@@ -162,6 +168,8 @@ function GroupColumnView({
             reasoningStreaming={streaming && isFocused}
             onUpdateMessage={!live ? onUpdateMessage : undefined}
             onRegenerateMessage={!live ? onRegenerateMessage : undefined}
+            onReplyWithModel={!live ? onReplyWithModel : undefined}
+            replyOccupiedModels={!live ? replyOccupiedModels : undefined}
             onForkMessage={!live ? onForkMessage : undefined}
             onDeleteMessage={!live ? onDeleteMessage : undefined}
             onSaveMessageToNote={!live ? onSaveMessageToNote : undefined}
@@ -176,6 +184,8 @@ function GroupColumnView({
           reasoningStreaming={streaming && isFocused}
           onUpdateMessage={!live ? onUpdateMessage : undefined}
           onRegenerateMessage={!live ? onRegenerateMessage : undefined}
+          onReplyWithModel={!live ? onReplyWithModel : undefined}
+          replyOccupiedModels={!live ? replyOccupiedModels : undefined}
           onForkMessage={!live ? onForkMessage : undefined}
           onDeleteMessage={!live ? onDeleteMessage : undefined}
           onSaveMessageToNote={!live ? onSaveMessageToNote : undefined}
@@ -267,6 +277,8 @@ function MessageGroupBase({
   onSelectColumn,
   onUpdateMessage,
   onRegenerateMessage,
+  onReplyWithModel,
+  replyOccupiedModels,
   onForkMessage,
   onDeleteMessage,
   onSaveMessageToNote,
@@ -337,6 +349,8 @@ function MessageGroupBase({
               onSelectColumn={onSelectColumn}
               onUpdateMessage={onUpdateMessage}
               onRegenerateMessage={onRegenerateMessage}
+              onReplyWithModel={onReplyWithModel}
+              replyOccupiedModels={replyOccupiedModels}
               onForkMessage={onForkMessage}
               onDeleteMessage={onDeleteMessage}
               onSaveMessageToNote={onSaveMessageToNote}
@@ -357,6 +371,8 @@ function MessageGroupBase({
           onSelectColumn={onSelectColumn}
           onUpdateMessage={onUpdateMessage}
           onRegenerateMessage={onRegenerateMessage}
+          onReplyWithModel={onReplyWithModel}
+          replyOccupiedModels={replyOccupiedModels}
           onForkMessage={onForkMessage}
           onDeleteMessage={onDeleteMessage}
           onSaveMessageToNote={onSaveMessageToNote}

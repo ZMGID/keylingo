@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { foldMessageGroups } from './messageGroups'
+import { foldMessageGroups, assistantTurnSpan, isLastAssistantTurn, occupiedReplyModels } from './messageGroups'
 import type { ChatMessage } from './types'
 
 function msg(id: string, role: 'user' | 'assistant', groupId?: string): ChatMessage {
@@ -71,5 +71,44 @@ describe('foldMessageGroups', () => {
       msg('a3', 'assistant'),
     ])
     expect(items.map((i) => i.type)).toEqual(['message', 'group', 'message', 'message'])
+  })
+})
+
+describe('assistantTurnSpan', () => {
+  it('ungrouped last reply is a one-message turn', () => {
+    const messages = [
+      msg('u1', 'user'),
+      msg('a1', 'assistant'),
+      msg('u2', 'user'),
+      msg('a2', 'assistant'),
+    ]
+    const span = assistantTurnSpan(messages, 'a2')
+    expect(span?.siblings.map((m) => m.id)).toEqual(['a2'])
+    expect(isLastAssistantTurn(messages, 'a2')).toBe(true)
+    expect(isLastAssistantTurn(messages, 'a1')).toBe(false)
+  })
+
+  it('grouped siblings share one turn', () => {
+    const messages = [
+      msg('u1', 'user'),
+      msg('a1', 'assistant', 'g1'),
+      msg('a2', 'assistant', 'g1'),
+    ]
+    const span = assistantTurnSpan(messages, 'a1')
+    expect(span?.siblings.map((m) => m.id)).toEqual(['a1', 'a2'])
+    expect(isLastAssistantTurn(messages, 'a1')).toBe(true)
+  })
+
+  it('occupied models fall back to the session model', () => {
+    const messages = [
+      msg('u1', 'user'),
+      { ...msg('a1', 'assistant'), provider_id: 'p1', model: 'm1' },
+    ]
+    expect(occupiedReplyModels(messages, 'a1', 'p0', 'm0')).toEqual([
+      { provider_id: 'p1', model: 'm1' },
+    ])
+    expect(occupiedReplyModels([msg('u1', 'user'), msg('a1', 'assistant')], 'a1', 'p0', 'm0')).toEqual([
+      { provider_id: 'p0', model: 'm0' },
+    ])
   })
 })

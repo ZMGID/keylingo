@@ -19,9 +19,12 @@ use super::catalog::{reconcile_conversation_orphan_tool_segments, strip_transcri
 use super::context::{
     compute_context_state, emit_chat_context_state, mark_summary_stale_if_needed,
 };
-use super::messages::replace_final_text_segments_for_edit;
+use super::messages::{
+    build_error_arm_message, replace_final_text_segments_for_edit, upsert_assistant_message,
+};
 use super::{
-    complete_assistant_reply, ChatSendReservation, CHAT_REPLY_BUSY_ERROR, MAX_REPLY_MODELS,
+    agent_run_entry_label, complete_assistant_reply, complete_assistant_reply_inner,
+    ChatSendReservation, ReplyArm, CHAT_REPLY_BUSY_ERROR, MAX_REPLY_MODELS,
 };
 
 fn find_message_index(conversation: &Conversation, message_id: &str) -> Result<usize, String> {
@@ -30,6 +33,192 @@ fn find_message_index(conversation: &Conversation, message_id: &str) -> Result<u
         .iter()
         .position(|m| m.id == message_id)
         .ok_or_else(|| "消息不存在".to_string())
+}
+
+/// Validated turn for 「换模型回答」: add another model's answer as a sibling
+/// column on the last user question, without replacing the existing reply.
+#[derive(Debug)]
+pub(super) struct ReplyWithModelPrep {
+    pub group_id: String,
+    pub user_index: usize,
+    pub sibling_ids: Vec<String>,
+    pub arm_index: usize,
+    pub group_size: usize,
+    pub user_skill_id: Option<String>,
+}
+
+fn assistant_arm_key(
+    message: &ChatMessage,
+    fallback_provider: &str,
+    fallback_model: &str,
+) -> (String, String) {
+    let provider = message
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_provider);
+    let model = message
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_model);
+    (provider.to_string(), model.to_string())
+}
+
+fn same_reply_group(target: &ChatMessage, other: &ChatMessage) -> bool {
+    match (
+        target.group_id.as_deref().filter(|id| !id.is_empty()),
+        other.group_id.as_deref().filter(|id| !id.is_empty()),
+    ) {
+        (Some(target_group), Some(other_group)) => target_group == other_group,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Inclusive sibling span of the assistant turn that contains `message_id`.
+fn assistant_turn_span(
+    conversation: &Conversation,
+    message_id: &str,
+) -> Result<(usize, usize, usize), String> {
+    let target_idx = find_message_index(conversation, message_id)?;
+    if conversation.messages[target_idx].role != "assistant" {
+        return Err("仅支持对助手回复换模型回答".to_string());
+    }
+    let user_idx = conversation.messages[..target_idx]
+        .iter()
+        .rposition(|message| message.role == "user")
+        .ok_or_else(|| "缺少对应的用户消息，无法换模型回答".to_string())?;
+    let target = &conversation.messages[target_idx];
+    let mut start = target_idx;
+    while start > user_idx + 1 {
+        let previous = &conversation.messages[start - 1];
+        if previous.role != "assistant" || !same_reply_group(target, previous) {
+            break;
+        }
+        start -= 1;
+    }
+    let mut end = target_idx;
+    while end + 1 < conversation.messages.len() {
+        let next = &conversation.messages[end + 1];
+        if next.role != "assistant" || !same_reply_group(target, next) {
+            break;
+        }
+        end += 1;
+    }
+    Ok((user_idx, start, end))
+}
+
+pub(super) fn prepare_reply_with_model(
+    conversation: &Conversation,
+    message_id: &str,
+    provider_id: &str,
+    model: &str,
+    preferred_group_id: Option<&str>,
+) -> Result<ReplyWithModelPrep, String> {
+    if conversation.agent_runtime.is_external() {
+        return Err("换模型回答仅支持 Kivio Agent 和 Kivio Chat".to_string());
+    }
+    if crate::chat::plan::is_plan_mode(&conversation.agent_plan_state)
+        || crate::chat::plan::is_orchestrate_mode(&conversation.agent_plan_state)
+    {
+        return Err("规划模式下无法换模型回答".to_string());
+    }
+    let provider_id = provider_id.trim();
+    let model = model.trim();
+    if provider_id.is_empty() || model.is_empty() {
+        return Err("请选择要回答的模型".to_string());
+    }
+    let (user_idx, start, end) = assistant_turn_span(conversation, message_id)?;
+    if end + 1 != conversation.messages.len() {
+        return Err("只能对最后一轮回答换模型".to_string());
+    }
+    let siblings = &conversation.messages[start..=end];
+    if siblings.len() >= MAX_REPLY_MODELS {
+        return Err(format!(
+            "同一问题最多同时保留 {MAX_REPLY_MODELS} 个模型回答"
+        ));
+    }
+    let occupied: Vec<(String, String)> = siblings
+        .iter()
+        .map(|message| {
+            assistant_arm_key(message, &conversation.provider_id, &conversation.model)
+        })
+        .collect();
+    if occupied
+        .iter()
+        .any(|(existing_provider, existing_model)| {
+            existing_provider == provider_id && existing_model == model
+        })
+    {
+        return Err("该模型已经回答过此问题".to_string());
+    }
+    let group_id = siblings
+        .iter()
+        .find_map(|message| {
+            message
+                .group_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            preferred_group_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("grp_{}", Uuid::new_v4()));
+    Ok(ReplyWithModelPrep {
+        group_id,
+        user_index: user_idx,
+        sibling_ids: siblings.iter().map(|message| message.id.clone()).collect(),
+        arm_index: siblings.len(),
+        group_size: siblings.len() + 1,
+        user_skill_id: conversation.messages[user_idx].active_skill_id.clone(),
+    })
+}
+
+pub(super) fn apply_reply_with_model_result(
+    conversation: &mut Conversation,
+    prep: &ReplyWithModelPrep,
+    message: ChatMessage,
+) {
+    for sibling_id in &prep.sibling_ids {
+        if let Some(existing) = conversation
+            .messages
+            .iter_mut()
+            .find(|item| item.id == *sibling_id)
+        {
+            existing.group_id = Some(prep.group_id.clone());
+            if existing
+                .provider_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                existing.provider_id = Some(conversation.provider_id.clone());
+            }
+            if existing
+                .model
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                existing.model = Some(conversation.model.clone());
+            }
+        }
+    }
+    let new_id = message.id.clone();
+    upsert_assistant_message(conversation, message);
+    conversation
+        .group_selections
+        .insert(prep.group_id.clone(), new_id);
 }
 
 /// 更新单条消息（仅助手回复）
@@ -1060,5 +1249,249 @@ pub(crate) async fn chat_set_group_selection(
     Ok(serde_json::json!({
         "success": true,
         "conversation": conversation,
+    }))
+}
+
+/// 对最后一轮同一问题再请一个模型作答。已有回答保留，新回答作为多答组的一列。
+#[tauri::command]
+pub(crate) async fn chat_reply_with_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    message_id: String,
+    provider_id: String,
+    model: String,
+    group_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let Some(_send_reservation) = ChatSendReservation::try_acquire(state.inner(), &conversation_id)
+    else {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": CHAT_REPLY_BUSY_ERROR,
+        }));
+    };
+
+    let repository = crate::chat::repository::repository(&app);
+    let conversation = repository
+        .get(&app, &conversation_id)
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+    let prep = match prepare_reply_with_model(
+        &conversation,
+        &message_id,
+        &provider_id,
+        &model,
+        group_id.as_deref(),
+    ) {
+        Ok(prep) => prep,
+        Err(err) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": err,
+            }));
+        }
+    };
+    {
+        let settings = state.settings_read();
+        if settings.get_provider(provider_id.trim()).is_none() {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "Chat provider not found",
+            }));
+        }
+    }
+
+    let user_message = &conversation.messages[prep.user_index];
+    let attachment_dir = if user_message.attachments.is_empty() {
+        None
+    } else {
+        conversation_attachments_dir(&app, &conversation_id).ok()
+    };
+    let mut last_user_api_content = compose_user_content_for_api(
+        &user_message.content,
+        &user_message.attachments,
+        attachment_dir.as_deref(),
+    );
+    let text_attachments = text_attachments_from_attachments(&user_message.attachments);
+    if !text_attachments.is_empty() {
+        last_user_api_content =
+            compose_text_attachments_for_api(&last_user_api_content, &text_attachments);
+    }
+    let last_user_image_paths =
+        stored_image_paths_for_attachments(&app, &conversation_id, &user_message.attachments)?;
+    let user_skill_id = prep.user_skill_id.clone();
+
+    let mut arm_conversation = conversation.clone();
+    arm_conversation.messages.truncate(prep.user_index + 1);
+
+    let arm = ReplyArm {
+        group_id: prep.group_id.clone(),
+        group_size: prep.group_size,
+        arm_index: prep.arm_index,
+        provider_id: provider_id.trim().to_string(),
+        model: model.trim().to_string(),
+    };
+    let run_entry = agent_run_entry_label(crate::chat::agent::AgentRunEntry::Send);
+    let outcome = complete_assistant_reply_inner(
+        &app,
+        &state,
+        &mut arm_conversation,
+        None,
+        Some(last_user_api_content.as_str()),
+        &last_user_image_paths,
+        user_skill_id.as_deref(),
+        crate::chat::agent::AgentRunEntry::Send,
+        Some(&arm),
+        false,
+    )
+    .await;
+
+    let (produced, terminal) = match outcome {
+        Ok(result) if result.message.is_some() => {
+            let message = result.message.expect("checked");
+            let outcome_label = message
+                .stream_outcome
+                .clone()
+                .unwrap_or_else(|| "completed".to_string());
+            let content = message.content.clone();
+            (Some(message), result.run_id.map(|id| (id, outcome_label, content)))
+        }
+        Ok(result) if result.error.as_deref() == Some("cancelled") => {
+            if let Some(run_id) = result.run_id {
+                crate::chat::protocol::finish_run(
+                    &app,
+                    &run_id,
+                    "cancelled",
+                    "",
+                    conversation.revision,
+                );
+            }
+            let mut latest = repository
+                .get(&app, &conversation_id)
+                .await
+                .map_err(crate::chat::repository::repository_error)?;
+            strip_transcripts_for_frontend(&mut latest);
+            return Ok(serde_json::json!({
+                "success": true,
+                "conversation": latest,
+            }));
+        }
+        Ok(result) => {
+            let err = result
+                .error
+                .unwrap_or_else(|| "换模型回答失败".to_string());
+            let message = build_error_arm_message(
+                &prep.group_id,
+                arm.provider_id.clone(),
+                arm.model.clone(),
+                err,
+                run_entry,
+                user_skill_id.as_deref(),
+            );
+            let content = message.content.clone();
+            (
+                Some(message),
+                result.run_id.map(|id| (id, "error".to_string(), content)),
+            )
+        }
+        Err(err) if err == "cancelled" => {
+            let mut latest = repository
+                .get(&app, &conversation_id)
+                .await
+                .map_err(crate::chat::repository::repository_error)?;
+            strip_transcripts_for_frontend(&mut latest);
+            return Ok(serde_json::json!({
+                "success": true,
+                "conversation": latest,
+            }));
+        }
+        Err(err) => {
+            let message = build_error_arm_message(
+                &prep.group_id,
+                arm.provider_id.clone(),
+                arm.model.clone(),
+                err,
+                run_entry,
+                user_skill_id.as_deref(),
+            );
+            (Some(message), None)
+        }
+    };
+
+    let Some(produced) = produced else {
+        let mut latest = repository
+            .get(&app, &conversation_id)
+            .await
+            .map_err(crate::chat::repository::repository_error)?;
+        strip_transcripts_for_frontend(&mut latest);
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": "换模型回答失败",
+            "conversation": latest,
+        }));
+    };
+
+    let group_id_for_apply = prep.group_id.clone();
+    let mut latest = repository
+        .mutate(&app, &conversation_id, move |latest| {
+            let prep = prepare_reply_with_model(
+                latest,
+                &message_id,
+                &provider_id,
+                &model,
+                Some(&group_id_for_apply),
+            )?;
+            apply_reply_with_model_result(latest, &prep, produced);
+            Ok(())
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+
+    for attempt in 0..2 {
+        match compute_context_state(&app, &state, &latest, None, &[]).await {
+            Ok(context_state) => {
+                match repository
+                    .update_context(&app, &conversation_id, latest.revision, context_state)
+                    .await
+                {
+                    Ok(next) => {
+                        latest = next;
+                        emit_chat_context_state(
+                            &app,
+                            &latest.id,
+                            latest.revision,
+                            &latest.context_state,
+                        );
+                        break;
+                    }
+                    Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
+                        if attempt == 0 =>
+                    {
+                        latest = repository
+                            .get(&app, &conversation_id)
+                            .await
+                            .map_err(crate::chat::repository::repository_error)?;
+                    }
+                    Err(err) => {
+                        eprintln!("Context state commit failed after reply-with-model: {err}");
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("Context usage estimate failed after reply-with-model: {err}");
+                break;
+            }
+        }
+    }
+
+    if let Some((run_id, outcome, content)) = terminal {
+        crate::chat::protocol::finish_run(&app, &run_id, &outcome, &content, latest.revision);
+    }
+
+    strip_transcripts_for_frontend(&mut latest);
+    Ok(serde_json::json!({
+        "success": true,
+        "conversation": latest,
     }))
 }

@@ -35,6 +35,19 @@ describe('groupStreamingStore', () => {
     expect(group?.columns[1].model).toBe('m2')
   })
 
+  it('beginGroup can seed settled columns with real message ids', () => {
+    beginGroup('c1', 'g1', [
+      { providerId: 'p1', model: 'm1', messageId: 'msg_a', streaming: false, content: 'old' },
+      { providerId: 'p2', model: 'm2' },
+    ])
+    const group = getActiveGroup('c1')
+    expect(group?.columns[0].messageId).toBe('msg_a')
+    expect(group?.columns[0].streaming).toBe(false)
+    expect(group?.columns[0].content).toBe('old')
+    expect(group?.columns[1].messageId.startsWith('pending-')).toBe(true)
+    expect(group?.columns[1].streaming).toBe(true)
+  })
+
   it('ensureGroupColumn 第一次见到 messageId 时认领占位列、绑定真实 id', () => {
     beginGroup('c1', 'g1', [
       { providerId: 'p1', model: 'm1' },

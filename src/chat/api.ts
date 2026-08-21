@@ -1037,6 +1037,59 @@ const mockChatApi = {
     return conversation
   },
 
+  async replyWithModel(
+    conversationId: string,
+    messageId: string,
+    providerId: string,
+    model: string,
+    groupId?: string,
+  ): Promise<Conversation> {
+    const conversations = loadMockConversations()
+    const index = conversations.findIndex((item) => item.id === conversationId)
+    if (index < 0) throw new Error('Conversation not found')
+    const conversation = { ...conversations[index] }
+    const messageIndex = conversation.messages.findIndex((message) => message.id === messageId)
+    if (messageIndex < 0) throw new Error('消息不存在')
+    const target = conversation.messages[messageIndex]
+    if (target.role !== 'assistant') throw new Error('仅支持对助手回复换模型回答')
+    if (messageIndex !== conversation.messages.length - 1
+      && conversation.messages.slice(messageIndex + 1).some((message) => message.role !== 'assistant')) {
+      throw new Error('只能对最后一轮回答换模型')
+    }
+    const resolvedGroup = target.group_id ?? target.groupId ?? groupId ?? `grp_dev_${crypto.randomUUID()}`
+    conversation.messages = conversation.messages.map((message, idx) => {
+      if (idx < messageIndex) return message
+      if (message.role !== 'assistant') return message
+      return {
+        ...message,
+        group_id: resolvedGroup,
+        provider_id: message.provider_id ?? message.providerId ?? conversation.provider_id,
+        model: message.model ?? conversation.model,
+      }
+    })
+    const newId = `msg_dev_${crypto.randomUUID()}`
+    conversation.messages = [
+      ...conversation.messages,
+      {
+        id: newId,
+        role: 'assistant',
+        content: `（换模型预览 · ${model}）`,
+        timestamp: nowSeconds(),
+        group_id: resolvedGroup,
+        provider_id: providerId,
+        model,
+      },
+    ]
+    conversation.group_selections = {
+      ...(conversation.group_selections ?? conversation.groupSelections ?? {}),
+      [resolvedGroup]: newId,
+    }
+    conversation.updated_at = nowSeconds()
+    conversations[index] = conversation
+    saveMockConversations(conversations)
+    return conversation
+  },
+
   async rewindToMessage(
     conversationId: string,
     messageId: string,
@@ -1821,6 +1874,33 @@ export const chatApi = {
     }>('chat_regenerate_message', { conversationId, messageId, newContent: newContent ?? null })
     if (!result.success || !result.conversation) {
       throw new Error(result.error || 'Failed to regenerate message')
+    }
+    return result.conversation
+  },
+
+  async replyWithModel(
+    conversationId: string,
+    messageId: string,
+    providerId: string,
+    model: string,
+    groupId?: string,
+  ): Promise<Conversation> {
+    if (!isTauriRuntime()) {
+      return mockChatApi.replyWithModel(conversationId, messageId, providerId, model, groupId)
+    }
+    const result = await invoke<{
+      success: boolean
+      conversation?: Conversation
+      error?: string
+    }>('chat_reply_with_model', {
+      conversationId,
+      messageId,
+      providerId,
+      model,
+      groupId: groupId ?? null,
+    })
+    if (!result.success || !result.conversation) {
+      throw new Error(result.error || 'Failed to reply with model')
     }
     return result.conversation
   },

@@ -4,7 +4,8 @@ import { IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
 import { estimateTokens, formatTokensK } from '../utils/tokens'
 import { formatAssistantMessageTime } from './messageFormat'
-import type { MessageUsage } from './types'
+import { ReplyWithModelButton } from './ReplyWithModelButton'
+import type { MessageUsage, ModelRef } from './types'
 
 interface AssistantMessageMetaProps {
   content: string
@@ -15,6 +16,8 @@ interface AssistantMessageMetaProps {
   streamOutcome?: string | null
   usage?: MessageUsage | null
   onRegenerate?: () => void
+  onReplyWithModel?: (providerId: string, model: string) => void
+  replyOccupiedModels?: ModelRef[]
   onFork?: () => void
   onSaveToNote?: () => Promise<boolean> | boolean
 }
@@ -47,6 +50,8 @@ export function AssistantMessageMeta({
   streamOutcome,
   usage,
   onRegenerate,
+  onReplyWithModel,
+  replyOccupiedModels = [],
   onFork,
   onSaveToNote,
 }: AssistantMessageMetaProps) {
@@ -127,6 +132,12 @@ export function AssistantMessageMeta({
         >
           <RotateCcw size={13} strokeWidth={2} />
         </IconButton>
+        {onReplyWithModel && (
+          <ReplyWithModelButton
+            occupied={replyOccupiedModels}
+            onSelect={onReplyWithModel}
+          />
+        )}
         <IconButton
           size="xs"
           onClick={onFork}

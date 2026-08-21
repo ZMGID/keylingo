@@ -39,6 +39,7 @@ pub(crate) use vision_compat::{attach_image_artifacts_for_model, read_image_as_t
 
 mod reply;
 use reply::{agent_run_entry_label, complete_assistant_reply, complete_assistant_reply_inner};
+use reply_runtime::ReplyArm;
 
 mod direct_image;
 

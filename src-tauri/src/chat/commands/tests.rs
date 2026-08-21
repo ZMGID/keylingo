@@ -29,7 +29,8 @@ use super::messages::{
     reconcile_orphan_tool_segments, replace_final_text_segments_for_edit,
 };
 use super::mutations::{
-    apply_regenerate_truncation, build_fork_messages, build_fork_messages_before_anchor,
+    apply_regenerate_truncation, apply_reply_with_model_result, build_fork_messages,
+    build_fork_messages_before_anchor, prepare_reply_with_model,
 };
 use super::reply_runtime::resolve_reply_arms;
 use super::sanitization::sanitize_image_payloads_for_model;
@@ -2050,6 +2051,88 @@ fn regenerate_truncation_rejects_bad_edit_targets() {
     apply_regenerate_truncation(&mut plain, 3, None).unwrap();
     assert_eq!(plain.messages.len(), 3);
     assert_eq!(plain.messages.last().unwrap().id, "msg_user_2");
+}
+
+#[test]
+fn prepare_reply_with_model_tags_last_turn_and_rejects_duplicates() {
+    let mut conversation = test_conversation_with_summary(false);
+    conversation.context_state.summary = None;
+    let prep = prepare_reply_with_model(
+        &conversation,
+        "msg_assistant_2",
+        "other-provider",
+        "other-model",
+        Some("grp_preferred"),
+    )
+    .expect("prep");
+    assert_eq!(prep.group_id, "grp_preferred");
+    assert_eq!(prep.sibling_ids, vec!["msg_assistant_2"]);
+    assert_eq!(prep.arm_index, 1);
+    assert_eq!(prep.user_index, 2);
+
+    let err = prepare_reply_with_model(
+        &conversation,
+        "msg_assistant_2",
+        "provider",
+        "model",
+        None,
+    )
+    .expect_err("session model already answered");
+    assert!(err.contains("已经回答"));
+
+    let err = prepare_reply_with_model(
+        &conversation,
+        "msg_assistant_1",
+        "other-provider",
+        "other-model",
+        None,
+    )
+    .expect_err("not last turn");
+    assert!(err.contains("最后一轮"));
+
+    conversation.agent_runtime.kind = crate::chat::AgentRuntimeKind::External;
+    conversation.agent_runtime.external_agent_id = Some("claude".to_string());
+    let err = prepare_reply_with_model(
+        &conversation,
+        "msg_assistant_2",
+        "other-provider",
+        "other-model",
+        None,
+    )
+    .expect_err("external");
+    assert!(err.contains("Kivio Agent"));
+}
+
+#[test]
+fn apply_reply_with_model_result_groups_existing_answer() {
+    let mut conversation = test_conversation_with_summary(false);
+    conversation.context_state.summary = None;
+    let prep = prepare_reply_with_model(
+        &conversation,
+        "msg_assistant_2",
+        "other-provider",
+        "other-model",
+        Some("grp_new"),
+    )
+    .unwrap();
+    let mut extra = test_chat_message("msg_assistant_3", "assistant", "from other model", 5);
+    extra.group_id = Some("grp_new".to_string());
+    extra.provider_id = Some("other-provider".to_string());
+    extra.model = Some("other-model".to_string());
+    apply_reply_with_model_result(&mut conversation, &prep, extra);
+    assert_eq!(
+        conversation.messages[3].group_id.as_deref(),
+        Some("grp_new")
+    );
+    assert_eq!(
+        conversation.messages[3].provider_id.as_deref(),
+        Some("provider")
+    );
+    assert_eq!(conversation.messages[4].id, "msg_assistant_3");
+    assert_eq!(
+        conversation.group_selections.get("grp_new").map(String::as_str),
+        Some("msg_assistant_3")
+    );
 }
 
 #[test]

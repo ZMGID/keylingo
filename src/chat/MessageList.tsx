@@ -22,7 +22,7 @@ import { ContextClearDivider } from './ContextClearDivider'
 import { resolveCompactionBoundaries, resolvePendingCompactionAfterIndex, type CompactionBoundaryView } from './compactionBoundary'
 import { resolveClearBoundaries, type ContextClearBoundaryView } from './contextClearBoundary'
 import { isExecutableAgentPlanText } from './agentPlan'
-import { foldMessageGroups } from './messageGroups'
+import { foldMessageGroups, isLastAssistantTurn, occupiedReplyModels } from './messageGroups'
 import {
   activeMessageNavigatorNodeId,
   buildMessageNavigatorNodes,
@@ -75,6 +75,9 @@ export interface MessageListProps {
   assistantStreamStatsByMessageId?: Record<string, AssistantStreamStats>
   onUpdateMessage?: (messageId: string, content: string) => Promise<void>
   onRegenerateMessage?: (messageId: string, newContent?: string) => Promise<void>
+  onReplyWithModel?: (messageId: string, providerId: string, model: string) => Promise<void>
+  sessionProviderId?: string
+  sessionModel?: string
   onForkMessage?: (messageId: string) => Promise<void>
   onRewindMessage?: (messageId: string) => Promise<void>
   onDeleteMessage?: (messageId: string) => Promise<void>
@@ -201,6 +204,9 @@ function MessageListBase({
   assistantStreamStatsByMessageId = {},
   onUpdateMessage,
   onRegenerateMessage,
+  onReplyWithModel,
+  sessionProviderId = '',
+  sessionModel = '',
   onForkMessage,
   onRewindMessage,
   onDeleteMessage,
@@ -1846,6 +1852,19 @@ function MessageListBase({
               // 本地取消后 send invoke 尚未返回，此窗口内触发只会被 in-flight 兜底静默吞掉
               // （编辑文本会被无声丢弃），所以从入口处直接收起。
               onRegenerateMessage={streaming || streamFrozen ? undefined : onRegenerateMessage}
+              onReplyWithModel={
+                onReplyWithModel
+                  && !streaming
+                  && !streamFrozen
+                  && isLastAssistantTurn(messages, msg.id)
+                  ? onReplyWithModel
+                  : undefined
+              }
+              replyOccupiedModels={
+                isLastAssistantTurn(messages, msg.id)
+                  ? occupiedReplyModels(messages, msg.id, sessionProviderId, sessionModel)
+                  : undefined
+              }
               onForkMessage={streaming || streamFrozen ? undefined : onForkMessage}
               onRewindMessage={streaming || streamFrozen ? undefined : onRewindMessage}
               onDeleteMessage={onDeleteMessage}
@@ -1866,6 +1885,19 @@ function MessageListBase({
               onSelectColumn={onSetGroupSelection}
               onUpdateMessage={onUpdateMessage}
               onRegenerateMessage={streaming || streamFrozen ? undefined : onRegenerateMessage}
+              onReplyWithModel={
+                onReplyWithModel
+                  && !streaming
+                  && !streamFrozen
+                  && item.messages.some((message) => isLastAssistantTurn(messages, message.id))
+                  ? onReplyWithModel
+                  : undefined
+              }
+              replyOccupiedModels={
+                item.messages[0]
+                  ? occupiedReplyModels(messages, item.messages[0].id, sessionProviderId, sessionModel)
+                  : undefined
+              }
               onForkMessage={streaming || streamFrozen ? undefined : onForkMessage}
               onDeleteMessage={onDeleteMessage}
               onSaveMessageToNote={onSaveMessageToNote}
@@ -1942,6 +1974,9 @@ function MessageListBase({
       legacyPlanMessageId,
       onUpdateMessage,
       onRegenerateMessage,
+      onReplyWithModel,
+      sessionProviderId,
+      sessionModel,
       onForkMessage,
       onRewindMessage,
       onDeleteMessage,
@@ -1950,6 +1985,7 @@ function MessageListBase({
       onRetryLastUser,
       streaming,
       streamFrozen,
+      messages,
       groupSelections,
       onSetGroupSelection,
       streamingReasoningDurationMs,
