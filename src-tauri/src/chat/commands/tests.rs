@@ -1856,7 +1856,11 @@ fn build_chat_api_messages_skips_cleared_messages_without_summary() {
         .expect("messages should build");
     let serialized = serde_json::to_string(&messages).expect("messages serialize");
 
-    assert_eq!(messages.len(), 1, "only the system prompt remains after a tail clear");
+    assert_eq!(
+        messages.len(),
+        1,
+        "only the system prompt remains after a tail clear"
+    );
     assert!(!serialized.contains("Previous conversation summary"));
     assert!(!serialized.contains("old user content"));
     assert!(!serialized.contains("recent assistant content"));
@@ -2070,14 +2074,8 @@ fn prepare_reply_with_model_tags_last_turn_and_rejects_duplicates() {
     assert_eq!(prep.arm_index, 1);
     assert_eq!(prep.user_index, 2);
 
-    let err = prepare_reply_with_model(
-        &conversation,
-        "msg_assistant_2",
-        "provider",
-        "model",
-        None,
-    )
-    .expect_err("session model already answered");
+    let err = prepare_reply_with_model(&conversation, "msg_assistant_2", "provider", "model", None)
+        .expect_err("session model already answered");
     assert!(err.contains("已经回答"));
 
     let err = prepare_reply_with_model(
@@ -2130,7 +2128,10 @@ fn apply_reply_with_model_result_groups_existing_answer() {
     );
     assert_eq!(conversation.messages[4].id, "msg_assistant_3");
     assert_eq!(
-        conversation.group_selections.get("grp_new").map(String::as_str),
+        conversation
+            .group_selections
+            .get("grp_new")
+            .map(String::as_str),
         Some("msg_assistant_3")
     );
 }

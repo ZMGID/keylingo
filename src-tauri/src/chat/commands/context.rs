@@ -312,16 +312,19 @@ fn summary_message(summary: &ConversationContextSummary) -> Value {
 }
 
 fn prune_clear_boundaries_if_needed(conversation: &mut Conversation) {
-    conversation.context_state.clear_boundaries.retain(|boundary| {
-        conversation
-            .messages
-            .iter()
-            .any(|message| message.id == boundary.source_until_message_id)
-            || conversation
+    conversation
+        .context_state
+        .clear_boundaries
+        .retain(|boundary| {
+            conversation
                 .messages
                 .iter()
-                .any(|message| message.timestamp > boundary.created_at)
-    });
+                .any(|message| message.id == boundary.source_until_message_id)
+                || conversation
+                    .messages
+                    .iter()
+                    .any(|message| message.timestamp > boundary.created_at)
+        });
 }
 
 pub(super) fn mark_summary_stale_if_needed(conversation: &mut Conversation, changed_index: usize) {

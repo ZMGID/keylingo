@@ -1731,8 +1731,8 @@ async fn compact_conversation_inner(
     };
     let window = context_window_for_model(Some(&provider), &model).0;
 
-    let previous_summary = crate::chat::commands::context::active_summary(conversation)
-        .map(|s| s.content.clone());
+    let previous_summary =
+        crate::chat::commands::context::active_summary(conversation).map(|s| s.content.clone());
     let serialized_head = serialize_chat_messages_for_summary(&old_segment);
     let message_id = source_until_message_id.clone();
     let summary_text = match compact_with_summary_model(
@@ -2807,14 +2807,13 @@ mod tests {
             .map(|id| chat_msg(id, "user", "x"))
             .collect();
         let mut conversation = test_conversation(messages);
-        conversation
-            .context_state
-            .clear_boundaries
-            .push(crate::chat::types::ContextClearBoundaryRecord {
+        conversation.context_state.clear_boundaries.push(
+            crate::chat::types::ContextClearBoundaryRecord {
                 id: "clr".to_string(),
                 source_until_message_id: "a".to_string(),
                 created_at: 1,
-            });
+            },
+        );
         assert_eq!(accumulate_source_ids(&conversation, "c"), vec!["b", "c"]);
     }
 

@@ -143,16 +143,11 @@ pub(super) fn prepare_reply_with_model(
     }
     let occupied: Vec<(String, String)> = siblings
         .iter()
-        .map(|message| {
-            assistant_arm_key(message, &conversation.provider_id, &conversation.model)
-        })
+        .map(|message| assistant_arm_key(message, &conversation.provider_id, &conversation.model))
         .collect();
-    if occupied
-        .iter()
-        .any(|(existing_provider, existing_model)| {
-            existing_provider == provider_id && existing_model == model
-        })
-    {
+    if occupied.iter().any(|(existing_provider, existing_model)| {
+        existing_provider == provider_id && existing_model == model
+    }) {
         return Err("该模型已经回答过此问题".to_string());
     }
     let group_id = siblings
@@ -1354,7 +1349,10 @@ pub(crate) async fn chat_reply_with_model(
                 .clone()
                 .unwrap_or_else(|| "completed".to_string());
             let content = message.content.clone();
-            (Some(message), result.run_id.map(|id| (id, outcome_label, content)))
+            (
+                Some(message),
+                result.run_id.map(|id| (id, outcome_label, content)),
+            )
         }
         Ok(result) if result.error.as_deref() == Some("cancelled") => {
             if let Some(run_id) = result.run_id {
@@ -1377,9 +1375,7 @@ pub(crate) async fn chat_reply_with_model(
             }));
         }
         Ok(result) => {
-            let err = result
-                .error
-                .unwrap_or_else(|| "换模型回答失败".to_string());
+            let err = result.error.unwrap_or_else(|| "换模型回答失败".to_string());
             let message = build_error_arm_message(
                 &prep.group_id,
                 arm.provider_id.clone(),
@@ -1464,9 +1460,9 @@ pub(crate) async fn chat_reply_with_model(
                         );
                         break;
                     }
-                    Err(crate::chat::repository::ConversationRepositoryError::Conflict { .. })
-                        if attempt == 0 =>
-                    {
+                    Err(crate::chat::repository::ConversationRepositoryError::Conflict {
+                        ..
+                    }) if attempt == 0 => {
                         latest = repository
                             .get(&app, &conversation_id)
                             .await

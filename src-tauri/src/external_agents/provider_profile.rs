@@ -3244,8 +3244,7 @@ max_context_size = 200000
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["env"]["ANTHROPIC_MODEL"], "claude-sonnet-5");
         assert_eq!(
-            value["env"]["ANTHROPIC_DEFAULT_MODEL"],
-            "",
+            value["env"]["ANTHROPIC_DEFAULT_MODEL"], "",
             "切供应商后新会话默认模型不该从旧 overlay 填回来：{value}"
         );
         let _ = std::fs::remove_dir_all(&root);

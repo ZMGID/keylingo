@@ -76,7 +76,10 @@ const FALLBACK_MODELS: &[(&str, &str)] = &[
     ("default", "Default"),
     ("deepseek-v4-flash", "DeepSeek-V4-Flash"),
     ("deepseek-v4-pro", "DeepSeek-V4-Pro"),
-    ("deepseek-v4-flash-vision-exp", "DeepSeek-V4-Flash-Vision-Exp"),
+    (
+        "deepseek-v4-flash-vision-exp",
+        "DeepSeek-V4-Flash-Vision-Exp",
+    ),
 ];
 
 /// 官方 DeepSeek 路由的兜底档位：`off | low | high | max`（rc.7 起有 `low`）。

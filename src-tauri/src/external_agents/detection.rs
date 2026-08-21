@@ -1739,10 +1739,7 @@ llm-pi-ai:
         assert_eq!(defaults.models[1].id, "deepseek-v4-flash");
         assert_eq!(defaults.models[2].id, "deepseek-v4-pro");
         assert_eq!(defaults.models[3].id, "deepseek-v4-flash-vision-exp");
-        assert_eq!(
-            defaults.models[3].label,
-            "DeepSeek-V4-Flash-Vision-Exp"
-        );
+        assert_eq!(defaults.models[3].label, "DeepSeek-V4-Flash-Vision-Exp");
         assert_eq!(defaults.current_model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(defaults.current_reasoning.as_deref(), Some("high"));
 
