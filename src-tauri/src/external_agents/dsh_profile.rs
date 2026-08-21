@@ -25,7 +25,7 @@
 //! - `hmr` 关掉：那是给开发热重载用的，常驻会话里只会带来意外重连
 //! - `session-title-llm` 关掉：Kivio 自己起标题，留着等于每轮多付一次模型调用
 //!   （实测确认它会发 `session/title-llm-request`）
-//! - `llm-deepseek.reasoningEffort`：官方 DeepSeek 路由的档位（只认 `off|high|max`）。
+//! - `llm-deepseek.reasoningEffort`：官方 DeepSeek 路由的档位（只认 `off|low|high|max`）。
 //!   第三方 `llm-pi-ai` 路由另写 `providers.<route>.reasoning`（pi-ai 档位表）。
 //!   都不是启动 flag，也不在 `initialize` 参数里，所以换档位必须重写这个文件并换进程。
 //! - `agent-presets`：官方四档（standard / code / minimal / cordis）加上
@@ -241,7 +241,7 @@ pub fn chat_dsh_list_agent_presets() -> Vec<DshAgentPresetOption> {
 ///
 /// `reasoning` 为 `None` / 空 / `"default"` 时**不写** `llm-deepseek` 那条 —— 让适配器用它
 /// 自己的默认（实测 `defaultEffort: high`）。写一个 `default` 字面量会被 schema 拒（合法值
-/// 只有 `off|high|max`），整棵树起不来。
+/// 只有 `off|low|high|max`），整棵树起不来。
 fn render_patch(reasoning: Option<&str>, preset: Option<&str>) -> String {
     let mut out = String::from(
         "# 由 Kivio 生成并维护，请勿手改（每次启动 dsh 会话时按当前设置重写）。\n\
@@ -455,11 +455,12 @@ pub fn active_provider_default_route() -> Result<Option<(String, String)>, Strin
 
 /// 空 / `"default"` / 未知值视为「不指定」，与 `types::normalize_model` 同语义。
 ///
-/// 只认 `defs/dsh.rs` 的合法档位 `off|high|max`。其它字符串（含换行）绝不能写进
+/// 只认 `defs/dsh.rs` 的合法档位 `off|low|high|max`。其它字符串（含换行）绝不能写进
 /// 共享的 `cordis.patch.yml`：那是顶层 YAML 数组，插一行就能重开 host-plane 工具。
 fn normalize_reasoning_effort(value: Option<&str>) -> Option<&'static str> {
     match value.map(str::trim) {
         Some("off") => Some("off"),
+        Some("low") => Some("low"),
         Some("high") => Some("high"),
         Some("max") => Some("max"),
         _ => None,
@@ -750,6 +751,9 @@ mod tests {
         assert!(BRIDGE_SOURCE.contains("session/commands"));
         assert!(BRIDGE_SOURCE.contains("session/stop-job"));
         assert!(BRIDGE_SOURCE.contains("commands.list"));
+        assert!(BRIDGE_SOURCE.contains("executeCommand"));
+        assert!(BRIDGE_SOURCE.contains("encodedCommandImages"));
+        assert!(BRIDGE_SOURCE.contains("commandExecuteTakesImages"));
         assert!(BRIDGE_SOURCE.contains("jobs.kill"));
         assert!(BRIDGE_SOURCE.contains("subagents.interrupt"));
         assert!(BRIDGE_SOURCE.contains("workspaceRegistry"));
@@ -823,11 +827,16 @@ mod tests {
         let provider = relay_provider();
         let yml = render_patch_with_providers(Some("low"), None, &[provider.clone()]).unwrap();
         assert!(yml.contains("reasoning: low"));
+        assert!(yml.contains("reasoningEffort: low"));
+
+        let yml = render_patch_with_providers(Some("minimal"), None, &[provider.clone()]).unwrap();
+        assert!(yml.contains("reasoning: minimal"));
         assert!(!yml.contains("reasoningEffort:"));
         assert!(!yml.contains("- id: llm-deepseek"));
 
         let yml = render_patch_with_providers(Some("xhigh"), None, &[provider.clone()]).unwrap();
         assert!(yml.contains("reasoning: xhigh"));
+        assert!(!yml.contains("reasoningEffort:"));
 
         let yml = render_patch_with_providers(Some("default"), None, &[provider]).unwrap();
         assert!(!yml.contains("reasoning:"));
@@ -972,7 +981,7 @@ mod tests {
     }
 
     /// `default` 是 Kivio 侧的「不指定」哨兵，**不是** dsh 的合法档位值
-    /// （schema 只认 `off|high|max`）。写进去整棵配置树会在启动时被拒。
+    /// （schema 只认 `off|low|high|max`）。写进去整棵配置树会在启动时被拒。
     #[test]
     fn patch_omits_reasoning_for_default_and_blank() {
         for value in [None, Some(""), Some("   "), Some("default")] {
@@ -989,6 +998,7 @@ mod tests {
     #[test]
     fn off_is_a_real_effort_not_an_absence() {
         assert!(render_patch(Some("off"), None).contains("reasoningEffort: off"));
+        assert!(render_patch(Some("low"), None).contains("reasoningEffort: low"));
     }
 
     /// 未知档位（含换行 / YAML 注入）必须整段省略，不能原样插进共享 patch。
@@ -996,7 +1006,6 @@ mod tests {
     fn unknown_reasoning_is_omitted_not_interpolated() {
         for value in [
             Some("HIGH"),
-            Some("low"),
             Some("none"),
             Some("high\n- id: injected-tool\n  disabled: false"),
             Some("off\n- insert:\n    - id: evil"),

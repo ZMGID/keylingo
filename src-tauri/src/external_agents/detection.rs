@@ -238,7 +238,7 @@ struct DshDefaultModel {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DshDeepseekSettings {
-    /// `None` = 适配器默认 flash/pro；`Some([])` = 用户明确不公布任何模型。
+    /// `None` = 适配器默认 flash / pro / vision-exp；`Some([])` = 用户明确不公布任何模型。
     models: Option<Vec<DshModelEntry>>,
     reasoning_effort: Option<String>,
 }
@@ -310,7 +310,7 @@ impl DshModelEntry {
 
 const DSH_OFFICIAL_PROVIDER_ID: &str = "deepseek-official";
 const DSH_OFFICIAL_PROVIDER_NAME: &str = "DeepSeek";
-const DSH_OFFICIAL_DEFAULT_MODEL_COUNT: usize = 2;
+const DSH_OFFICIAL_DEFAULT_MODEL_COUNT: usize = 3;
 
 /// 设置页「所有供应商」用的摘要。dsh 的官方 DeepSeek 不在 `llm-pi-ai` 里，
 /// 但官方 UI 会单独列它；缓存命中时也要重读，所以 `pub(crate)`。
@@ -438,7 +438,7 @@ fn dsh_effort_option(id: &str) -> RuntimeModelOption {
 }
 
 fn dsh_official_reasoning_options() -> Vec<RuntimeModelOption> {
-    ["default", "off", "high", "max"]
+    ["default", "off", "low", "high", "max"]
         .into_iter()
         .map(dsh_effort_option)
         .collect()
@@ -504,6 +504,11 @@ fn parse_dsh_settings_models(text: &str) -> Result<ProbeModelsOutput, String> {
     let deepseek_defaults = [
         ("deepseek-v4-flash", "DeepSeek-V4-Flash", Some(1_000_000)),
         ("deepseek-v4-pro", "DeepSeek-V4-Pro", Some(1_000_000)),
+        (
+            "deepseek-v4-flash-vision-exp",
+            "DeepSeek-V4-Flash-Vision-Exp",
+            Some(1_000_000),
+        ),
     ];
     match settings
         .llm_deepseek
@@ -1730,9 +1735,14 @@ llm-pi-ai:
     #[test]
     fn dsh_settings_defaults_native_catalog_but_respects_explicit_empty_models() {
         let defaults = parse_dsh_settings_models("{}").expect("default dsh settings");
-        assert_eq!(defaults.models.len(), 3);
+        assert_eq!(defaults.models.len(), 4);
         assert_eq!(defaults.models[1].id, "deepseek-v4-flash");
         assert_eq!(defaults.models[2].id, "deepseek-v4-pro");
+        assert_eq!(defaults.models[3].id, "deepseek-v4-flash-vision-exp");
+        assert_eq!(
+            defaults.models[3].label,
+            "DeepSeek-V4-Flash-Vision-Exp"
+        );
         assert_eq!(defaults.current_model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(defaults.current_reasoning.as_deref(), Some("high"));
 
@@ -1748,6 +1758,46 @@ llm-pi-ai:
         );
         assert_eq!(empty.current_model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(empty.current_reasoning.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn dsh_settings_keep_official_vision_catalog_fields() {
+        let result = parse_dsh_settings_models(
+            r#"
+llm-deepseek:
+  models:
+    - id: deepseek-v4-flash
+      name: DeepSeek-V4-Flash
+    - id: deepseek-v4-flash-vision-exp
+      name: DeepSeek-V4-Flash-Vision-Exp
+      inputModalities: [text, image]
+      imagePixelBudget: 3317760
+      imageMaxBytes: 20971520
+"#,
+        )
+        .expect("parse official vision catalog");
+        assert_eq!(
+            result
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "default",
+                "deepseek-v4-flash",
+                "deepseek-v4-flash-vision-exp"
+            ]
+        );
+        assert_eq!(
+            result
+                .reasoning_by_model
+                .get("deepseek-v4-flash-vision-exp")
+                .map(|items| items
+                    .iter()
+                    .map(|item| item.id.as_str())
+                    .collect::<Vec<_>>()),
+            Some(vec!["default", "off", "low", "high", "max"])
+        );
     }
 
     #[test]
@@ -1842,7 +1892,7 @@ llm-pi-ai:
                     .iter()
                     .map(|item| item.id.as_str())
                     .collect::<Vec<_>>()),
-            Some(vec!["default", "off", "high", "max"])
+            Some(vec!["default", "off", "low", "high", "max"])
         );
     }
 
@@ -1870,7 +1920,7 @@ llm-pi-ai:
         assert_eq!(summaries.len(), 2);
         assert_eq!(summaries[0].id, "deepseek-official");
         assert_eq!(summaries[0].name, "DeepSeek");
-        assert_eq!(summaries[0].model_count, 2);
+        assert_eq!(summaries[0].model_count, 3);
         assert!(!summaries[0].is_default);
         assert_eq!(summaries[1].id, "xiaobai");
         assert_eq!(summaries[1].name, "XiaoBai");
@@ -1891,7 +1941,7 @@ llm-pi-ai:
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].id, "deepseek-official");
         assert_eq!(empty[0].name, "DeepSeek");
-        assert_eq!(empty[0].model_count, 2);
+        assert_eq!(empty[0].model_count, 3);
         assert!(empty[0].is_default);
 
         let official = parse_dsh_native_provider_summaries(

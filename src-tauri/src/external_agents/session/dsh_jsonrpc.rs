@@ -4,14 +4,15 @@
 //! `dsh --profile kivio`（profile 由 `dsh_profile.rs` 维护），再驱动
 //! Kivio 自带的 resumable JSON-RPC bridge（profile 由 `dsh_profile.rs` 维护）。
 //!
-//! # 线协议（0.1.0-rc.6 实测）
+//! # 线协议（0.1.0-rc.6 实测；rc.8 斜杠命令补了 `images`）
 //!
 //! 客户端请求：
 //! - `initialize { cwd, provider, model, maxTokens? }`
 //! - `session/open { sessionId, resume }`
 //! - `session/prompt { sessionId, contentBlocks }`（官方：`agent.followup()`，下一轮 FIFO；
 //!    用户本轮 `RunTurn` 与运行中 follow-up 都走它）
-//! - `session/command { sessionId, line }`（bridge：`ctx.commands.execute`，不进模型）
+//! - `session/command { sessionId, line, images? }`（bridge：`ctx.commands.execute`，
+//!    不进模型；rc.8 起 `images` 是 `EncodedImageAttachment[]`，给 `/goal` `/plan` 带图）
 //! - `session/commands { sessionId }`（bridge：`ctx.commands.list`，斜杠菜单发现）
 //! - `session/stop-job { sessionId, jobId }`（bridge：`ctx.jobs.kill`，子代理走 `subagents.interrupt`）
 //! - `session/steer { sessionId, contentBlocks }`（bridge：`agent.steer()`，当前轮 next-step）
@@ -1667,6 +1668,32 @@ fn prompt_content_blocks(
     content_blocks
 }
 
+/// rc.8 `CommandRuntime.execute` 的 `EncodedImageAttachment[]`：`mediaType` + base64 `data`。
+fn encoded_command_images(
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> Vec<Value> {
+    images
+        .iter()
+        .map(|image| {
+            let media_type = if image.mime == "image/jpg" {
+                "image/jpeg"
+            } else {
+                image.mime.as_str()
+            };
+            let name = image
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image");
+            json!({
+                "mediaType": media_type,
+                "data": image.data_base64,
+                "name": name,
+            })
+        })
+        .collect()
+}
+
 fn steer_rpc(
     session_id: &str,
     text: &str,
@@ -1689,6 +1716,7 @@ fn turn_rpc(
             json!({
                 "sessionId": session_id,
                 "line": prompt.trim(),
+                "images": encoded_command_images(images),
             }),
         )
     } else {
@@ -3350,6 +3378,7 @@ mod tests {
         assert_eq!(method, "session/command");
         assert_eq!(params["sessionId"], "kivio-1");
         assert_eq!(params["line"], "/compact");
+        assert_eq!(params["images"].as_array().map(Vec::len), Some(0));
         let (method, params) = turn_rpc("kivio-1", "hello", &[]);
         assert_eq!(method, "session/prompt");
         assert_eq!(params["contentBlocks"][0]["text"], "hello");
@@ -3375,6 +3404,22 @@ mod tests {
             Some("No compactable history")
         );
         assert!(command_result_error(&json!({ "kind": "success", "text": "ok" })).is_none());
+    }
+
+    #[test]
+    fn slash_turns_forward_encoded_command_images() {
+        let image = crate::external_agents::attachments::ImageBlock {
+            data_base64: "Zm9v".to_string(),
+            mime: "image/jpg".to_string(),
+            path: PathBuf::from("shot.jpg"),
+        };
+        let (method, params) = turn_rpc("kivio-1", "/goal rebuild the cathedral", &[image]);
+        assert_eq!(method, "session/command");
+        assert_eq!(params["line"], "/goal rebuild the cathedral");
+        assert_eq!(params["images"][0]["data"], "Zm9v");
+        assert_eq!(params["images"][0]["mediaType"], "image/jpeg");
+        assert_eq!(params["images"][0]["name"], "shot.jpg");
+        assert!(params["contentBlocks"].is_null());
     }
 
     #[test]

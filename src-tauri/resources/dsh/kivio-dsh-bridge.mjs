@@ -158,10 +158,11 @@ class KivioHarnessSdkJsonRpcServer extends HarnessSdkJsonRpcServer {
     if (!commands || typeof commands.execute !== 'function') {
       throw new Error('commands registry is not available')
     }
-    const execution = await commands.execute(
+    const execution = await executeCommand(
+      commands,
       record.handle.agent,
       line,
-      new AbortController().signal,
+      encodedCommandImages(params),
     )
     if (!execution) {
       throw new Error(`unregistered command: ${line}`)
@@ -353,6 +354,54 @@ function decodeImageData(data) {
     throw new TypeError('image block data must be a base64 string')
   }
   return Uint8Array.from(Buffer.from(data, 'base64'))
+}
+
+function encodedImageAttachment(item) {
+  if (!item || typeof item !== 'object') {
+    throw new TypeError('image attachment must be an object')
+  }
+  const mediaType = normalizeImageMediaType(item.mediaType || item.mimeType)
+  const data = typeof item.data === 'string' ? item.data.trim() : ''
+  if (!data) {
+    throw new TypeError('image attachment data must be a base64 string')
+  }
+  const name =
+    typeof item.name === 'string' && item.name.trim() !== ''
+      ? item.name.trim()
+      : undefined
+  return name ? { mediaType, data, name } : { mediaType, data }
+}
+
+function encodedCommandImages(params) {
+  const raw = Array.isArray(params?.images)
+    ? params.images
+    : Array.isArray(params?.contentBlocks)
+      ? params.contentBlocks.filter((block) => block?.type === 'image')
+      : []
+  return raw.map(encodedImageAttachment)
+}
+
+function commandExecuteTakesImages(commands) {
+  const candidates = [Object.getPrototypeOf(commands)?.execute, commands?.execute]
+  for (const fn of candidates) {
+    if (typeof fn !== 'function') continue
+    if (fn.length >= 4) return true
+    if (fn.length === 3) return false
+  }
+  return true
+}
+
+function executeCommand(commands, agent, line, images) {
+  const signal = new AbortController().signal
+  if (commandExecuteTakesImages(commands)) {
+    return commands.execute(agent, line, images, signal)
+  }
+  if (images.length > 0) {
+    throw new Error(
+      'this DeepSeek Harness build does not accept images on slash commands; update to 0.1.0-rc.8 or later',
+    )
+  }
+  return commands.execute(agent, line, signal)
 }
 
 async function materializeContentBlocks(ctx, blocks) {
