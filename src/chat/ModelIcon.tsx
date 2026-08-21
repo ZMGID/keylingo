@@ -100,7 +100,7 @@ const MODEL_ICON_MAP: Array<[RegExp, Glyph]> = [
   [/grok/, G(Grok)],
   [/kimi/, G(Kimi)],
   [/moonshot/, G(Moonshot)],
-  [/glm|chatglm|zhipu/, G(Zhipu)],
+  [/glm|chatglm|zhipu|ox-alpha/, G(Zhipu)],
   [/mistral|mixtral|codestral|pixtral|ministral|magistral|devstral/, G(Mistral)],
   [/llama|llava/, G(Meta)],
   [/(?:^|[-/])yi-/, G(Yi)],

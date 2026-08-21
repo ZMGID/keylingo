@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-08-13",
+    "version": "2026-08-21",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -651,6 +651,14 @@
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": ["high", "max"],
     "pricing": { "input": 6.00, "output": 24.00 }
+  },
+  "ox-alpha": {
+    "displayName": "Ox Alpha",
+    "contextWindow": 1048576,
+    "maxOutput": 16000,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["high", "max"],
+    "pricing": { "input": 0, "output": 0 }
   },
 
   "minimax-m3": {

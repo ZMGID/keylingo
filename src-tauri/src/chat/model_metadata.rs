@@ -672,6 +672,11 @@ mod tests {
             db_display_name("claude-sonnet-4.6").as_deref(),
             Some("Claude Sonnet 4.6")
         );
+        assert_eq!(db_display_name("ox-alpha").as_deref(), Some("Ox Alpha"));
+        assert_eq!(
+            db_display_name("stealth/ox-alpha").as_deref(),
+            Some("Ox Alpha")
+        );
 
         // 包含匹配路径：带 tag 的变体（`gemma4:31b`）靠前缀/包含吃到 `gemma4`
         assert_eq!(db_display_name("gemma4:31b").as_deref(), Some("Gemma 4"));

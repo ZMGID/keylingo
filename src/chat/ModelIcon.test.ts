@@ -66,6 +66,8 @@ describe('ProviderIcon provider→brand mapping', () => {
   it('maps glm/kimi models to Zhipu/Kimi, not the old ChatGLM/Moonshot marks', () => {
     expect(matchGlyph('glm-4')).toBe(PROVIDER_BRANDS.Zhipu)
     expect(matchGlyph('glm-4')).not.toBe(PROVIDER_BRANDS.ChatGLM)
+    expect(matchGlyph('ox-alpha')).toBe(PROVIDER_BRANDS.Zhipu)
+    expect(matchGlyph('stealth/ox-alpha')).toBe(PROVIDER_BRANDS.Zhipu)
     expect(matchGlyph('kimi-k2')).toBe(PROVIDER_BRANDS.Kimi)
     expect(matchGlyph('kimi-k2')).not.toBe(PROVIDER_BRANDS.Moonshot)
     expect(matchGlyph('moonshot-v1-8k')).toBe(PROVIDER_BRANDS.Moonshot)

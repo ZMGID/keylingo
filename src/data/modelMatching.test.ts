@@ -152,6 +152,21 @@ describe('matchModel', () => {
     expect(matchModel('composer-1')?.pricing?.input).toBe(1.25)
     expect(matchModel('composer-1')?.capabilities?.vision).toBe(true)
   })
+
+  it('matches Ox Alpha as GLM multimodal with a 1M window', () => {
+    const info = matchModel('ox-alpha')
+    expect(info?.displayName).toBe('Ox Alpha')
+    expect(info?.contextWindow).toBe(1_048_576)
+    expect(info?.maxOutput).toBe(16_000)
+    expect(info?.capabilities?.vision).toBe(true)
+    expect(info?.capabilities?.functionCalling).toBe(true)
+    expect(info?.capabilities?.reasoning).toBe(true)
+    expect(info?.capabilities?.streaming).toBe(true)
+    expect(info?.reasoningEfforts).toEqual(['high', 'max'])
+    expect(info?.pricing?.input).toBe(0)
+    expect(info?.pricing?.output).toBe(0)
+    expect(matchModel('stealth/ox-alpha')).toEqual(info)
+  })
 })
 
 
