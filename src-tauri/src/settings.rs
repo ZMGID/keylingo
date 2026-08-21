@@ -704,8 +704,9 @@ pub struct ChatConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ChatModeConfig {
-    /// Extra Chat instructions stacked on the built-in capability contract.
-    /// Empty → contract only (`chat_runtime_prompt()`).
+    /// Optional extra Chat instructions. Empty → no Chat identity essay;
+    /// runtime still injects date plus conversation context (assistant / set /
+    /// memory / knowledge base). File/shell limits are the tool filter, not prompt.
     pub system_prompt: String,
     pub web_search: bool,
     pub web_fetch: bool,

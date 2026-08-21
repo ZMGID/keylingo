@@ -17,26 +17,15 @@ pub fn is_orchestrate_mode(state: &AgentPlanState) -> bool {
     state.mode == AgentPlanMode::Orchestrate
 }
 
-/// Slim Chat capability contract. Settings preview and runtime share this text.
-/// Tool names are not listed here — `native_tools_prompt` already enumerates
-/// what is actually enabled for the turn.
+/// Built-in Chat system text shown in Settings as the empty-state preview.
+/// Runtime injects none of this: Chat has no identity/contract essay — date,
+/// optional extra instructions, and conversation context only. Tools are the
+/// request's tool list, not prompt prohibitions.
 pub fn chat_runtime_prompt() -> String {
-    chat_capability_contract(true)
+    String::new()
 }
 
-/// `has_knowledge_search` adds the `[n]` cite rule only when that tool is on.
-pub fn chat_capability_contract(has_knowledge_search: bool) -> String {
-    let mut text = String::from(
-        "You are Kivio Chat, a conversational research assistant. Use enabled tools when they improve factual accuracy. Do not edit files, run shell commands, spawn sub-agents, activate workspace-changing skills, or modify memory. If the user needs implementation or terminal work, tell them to switch to Kivio Agent.",
-    );
-    if has_knowledge_search {
-        text.push_str(" When you use knowledge_search, cite sources with [n].");
-    }
-    text.push_str(" These limits override assistant, set, and additional instructions.");
-    text
-}
-
-/// Same text for all languages — settings preview and runtime share one English source.
+/// Same text for all languages — settings preview and runtime share one source.
 pub fn chat_runtime_prompt_for_lang(_language: &str) -> String {
     chat_runtime_prompt()
 }
@@ -335,14 +324,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_runtime_prompt_mentions_research_tools() {
+    fn chat_runtime_prompt_is_empty() {
         let en = chat_runtime_prompt();
-        assert!(en.contains("Kivio Chat"));
-        assert!(en.contains("knowledge_search"));
-        assert!(en.contains("These limits override"));
+        assert!(en.is_empty(), "{en}");
         assert!(!en.contains("internal runtime mode"));
         assert!(!en.contains("Act / Plan / Orchestrate"));
-        let without_kb = chat_capability_contract(false);
-        assert!(!without_kb.contains("knowledge_search"));
+        assert_eq!(chat_runtime_prompt_for_lang("zh"), en);
     }
 }

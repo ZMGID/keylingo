@@ -74,7 +74,7 @@ pub(crate) fn get_default_prompt_templates() -> serde_json::Value {
         "zh": default_chat_system_prompt(false),
         "en": default_chat_system_prompt(false)
       },
-      // Single English source — same string the Chat runtime injects when system_prompt is empty.
+      // Chat has no built-in identity essay; empty preview matches runtime.
       "chatRuntimePrompt": crate::chat::plan::chat_runtime_prompt()
     })
 }
@@ -810,9 +810,7 @@ fn model_item_is_listable(item: &serde_json::Value) -> bool {
     methods.iter().any(|method| {
         matches!(
             method.as_str(),
-            Some("generateContent")
-                | Some("streamGenerateContent")
-                | Some("bidiGenerateContent")
+            Some("generateContent") | Some("streamGenerateContent") | Some("bidiGenerateContent")
         )
     })
 }
