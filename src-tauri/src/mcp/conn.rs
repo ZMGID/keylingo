@@ -26,7 +26,7 @@ use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{
         CallToolRequest, CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo,
-        ClientRequest, Implementation, ProtocolVersion, ServerResult,
+        ClientRequest, Implementation, PingRequest, ProtocolVersion, ServerResult,
     },
     service::{NotificationContext, PeerRequestOptions, RoleClient, RunningService},
     transport::{
@@ -57,6 +57,12 @@ fn discover_lifecycle() -> ClientLifecycleMode {
     }
 }
 
+/// 对端以 JSON-RPC `-32601` / "method not found" 拒掉了这次请求。
+pub fn is_method_not_found(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("-32601") || lower.contains("method not found")
+}
+
 /// 这次握手失败，是不是因为对端**根本没有 `initialize` 这个方法**？
 ///
 /// 规范 2026-07-28 把 `initialize` / `notifications/initialized` 整个删掉了，改成
@@ -66,8 +72,7 @@ fn discover_lifecycle() -> ClientLifecycleMode {
 /// **刻意只认这一个信号**：其他失败（服务器起不来、认证失败、超时）再试一次纯属浪费，
 /// stdio 还要多起一个子进程。
 fn suggests_new_protocol(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("-32601") || lower.contains("method not found")
+    is_method_not_found(err)
 }
 
 /// `tools/list` 的整体超时上限。工具清单不该慢过这个数，慢了就是服务器有问题。
@@ -80,6 +85,9 @@ pub const LIST_TOOLS_TIMEOUT: Duration = Duration::from_secs(30);
 /// 脚本卡在读 stdin、二进制版本不匹配）会永久占住 `McpSession` 的会话锁，连带让退出钩子
 /// 里的 `mcp_disconnect_all` 永远拿不到锁 ⇒ 应用关不掉。
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// HTTP 保活用的 `ping` 超时。失败不应拖住空闲扫描。
+pub const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 握手失败时，最多花这么久去把子进程 stderr 上的错误信息捞出来贴进报错。
 const STDERR_PEEK_TIMEOUT: Duration = Duration::from_millis(300);
@@ -418,6 +426,23 @@ pub async fn call_tool(
     }
 }
 
+/// 发一次 MCP `ping`。HTTP 保活扫描用：对端还活着就续 last_used；
+/// `-32601` 表示这台服务器没有 ping，上层应记住并不再打。
+pub async fn ping(service: &McpService, timeout: Duration) -> Result<(), String> {
+    let handle = service
+        .send_cancellable_request(
+            ClientRequest::PingRequest(PingRequest::default()),
+            PeerRequestOptions::with_timeout(timeout),
+        )
+        .await
+        .map_err(|err| classify_error("ping", &err))?;
+    handle
+        .await_response()
+        .await
+        .map_err(|err| classify_error("ping", &err))?;
+    Ok(())
+}
+
 /// 列全部工具，带整体超时。
 ///
 /// rmcp 的 `list_all_tools` 会跟着 `nextCursor` 一直翻页，**没有页数上限**（手写版有
@@ -500,6 +525,15 @@ pub fn classify_error<E: StdError>(context: &str, err: &E) -> String {
     }
 }
 
+/// 这条错误要不要走 OAuth 补救（刷新 token / 引导重新授权）。
+///
+/// 同时认 `OAUTH_REQUIRED:` 前缀（本函数自己打的）和尚未分类的 rmcp 原文，
+/// 这样连接池路径和一次性 `call_tool_once` 都能在 401 后强制刷新。
+pub fn is_oauth_error(err: &str) -> bool {
+    let trimmed = err.trim();
+    trimmed.starts_with("OAUTH_REQUIRED:") || requires_oauth(trimmed)
+}
+
 fn is_timeout(chain: &str) -> bool {
     chain.to_ascii_lowercase().contains("request timeout after")
 }
@@ -528,6 +562,12 @@ fn requires_oauth(chain: &str) -> bool {
         let challenge = lower[idx + AUTH_REQUIRED.len()..].trim();
         return challenge.is_empty() || challenge.contains("bearer");
     }
+    // WorkerTransport 把 AuthRequiredError 包成
+    // "Auth required, when send initialize request"，质询串经常不在 Display 链上。
+    // 远程 OAuth MCP 的 401 就是这句，旧匹配漏掉之后既不标 OAUTH_REQUIRED、也不触发刷新。
+    if lower.contains("auth required") {
+        return !(lower.contains("basic realm") || lower.contains("digest realm"));
+    }
     // 403 + insufficient_scope：重新授权（申请更多 scope）确实是正确的补救，保持引导。
     if lower.contains("insufficient scope") {
         return true;
@@ -543,6 +583,7 @@ mod tests {
         AuthRequiredError, InsufficientScopeError, StreamableHttpError,
     };
     use std::borrow::Cow;
+    use std::error::Error as StdError;
 
     use super::*;
 
@@ -628,6 +669,30 @@ mod tests {
         // 顶层 Display 只有 "Auth required"，质询串在 source 里 —— 必须带出来，
         // 否则用户看不到是哪个 realm 要授权。
         assert!(classify_error("connect", &err).contains("notion"));
+    }
+
+    #[test]
+    fn oauth_prefix_on_worker_transport_auth_required_display() {
+        // TinyFish 实测：WorkerTransport 只把 "Auth required, when send initialize
+        // request" 写进 Display，质询串不在 source 链上。旧匹配只认
+        // "authorization required:"，于是既不打 OAUTH_REQUIRED、也不触发刷新。
+        #[derive(Debug)]
+        struct WorkerAuthErr;
+        impl std::fmt::Display for WorkerAuthErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "Send message error Transport [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker<reqwest::async_impl::client::Client>>] error: Auth required, when send initialize request"
+                )
+            }
+        }
+        impl StdError for WorkerAuthErr {}
+        let text = classify_error("connect", &WorkerAuthErr);
+        assert!(text.starts_with("OAUTH_REQUIRED: "), "{text}");
+        assert!(is_oauth_error(&text));
+        assert!(is_oauth_error(
+            "MCP connect failed: Send message error Transport [...] error: Auth required, when send initialize request"
+        ));
     }
 
     /// 「换新协议再试一次」的判据只认 `-32601`。放宽会让每一次普通的连接失败都多跑一次

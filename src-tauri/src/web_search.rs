@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{send_with_retry, with_standard_request_timeout},
-    settings::{ChatMcpServer, LensWebSearchConfig, WebSearchProvider},
+    settings::{ChatMcpServer, ConnectorAuth, LensWebSearchConfig, WebSearchProvider},
     state::AppState,
 };
 
@@ -276,6 +276,7 @@ pub async fn search_web(
     config: &LensWebSearchConfig,
     query: &str,
     retry_attempts: usize,
+    app: Option<&tauri::AppHandle>,
 ) -> Result<Vec<WebSearchResult>, String> {
     let query = query.trim();
     if query.is_empty() {
@@ -293,7 +294,7 @@ pub async fn search_web(
         WebSearchProvider::Bocha => search_bocha(state, config, query, retry_attempts).await,
         WebSearchProvider::Zhipu => search_zhipu(state, config, query, retry_attempts).await,
         WebSearchProvider::Tinyfish => search_tinyfish(state, config, query, retry_attempts).await,
-        WebSearchProvider::TinyfishMcp => search_tinyfish_mcp(state, config, query).await,
+        WebSearchProvider::TinyfishMcp => search_tinyfish_mcp(state, config, query, app).await,
         WebSearchProvider::Searxng => search_searxng(state, config, query, retry_attempts).await,
         WebSearchProvider::Unknown => {
             Err("Selected web search provider is not supported yet".to_string())
@@ -614,41 +615,31 @@ async fn search_tinyfish(
 
 /// TinyFish MCP：`https://agent.tinyfish.ai/mcp` 的 `search` 工具。
 /// 不贴 API Key，走 OAuth Bearer（设置页授权，或复用已连接的同 URL MCP server）。
+///
+/// 走 MCP 连接池（`mcp_call_tool`），与聊天里其它远程 OAuth MCP 同一套预刷新、
+/// 401 重试和 HTTP 保活。不要再走 `call_tool_once`。
 async fn search_tinyfish_mcp(
     state: &AppState,
     config: &LensWebSearchConfig,
     query: &str,
+    app: Option<&tauri::AppHandle>,
 ) -> Result<Vec<WebSearchResult>, String> {
     let base = normalized_base_url(&config.tinyfish_mcp_url, "https://agent.tinyfish.ai/mcp");
     if base.is_empty() {
         return Err("TinyFish MCP endpoint is not configured".to_string());
     }
-    let authorization = tinyfish_mcp_authorization(state, config, base);
-    let mut server = ChatMcpServer {
-        id: "tinyfish-mcp".to_string(),
-        name: "TinyFish MCP".to_string(),
-        enabled: true,
-        transport: "streamable_http".to_string(),
-        url: base.to_string(),
-        ..ChatMcpServer::default()
-    };
-    if let Some(value) = authorization {
-        server.headers.insert("Authorization".to_string(), value);
-    }
+    let server = tinyfish_mcp_server(state, config, &base);
 
     let max_results = config.max_results.clamp(1, 10) as usize;
-    let raw = crate::mcp::conn::call_tool_once(
-        &server,
-        &state.http,
-        "search",
-        serde_json::json!({ "query": query }),
-        std::time::Duration::from_secs(30),
-    )
-    .await
-    .map_err(|err| map_tinyfish_mcp_error(&err))?;
-    let result = crate::mcp::result::parse_tool_result(
-        serde_json::to_value(&raw).map_err(|err| err.to_string())?,
-    );
+    let result = state
+        .mcp_call_tool(
+            app,
+            &server,
+            "search",
+            serde_json::json!({ "query": query }),
+        )
+        .await
+        .map_err(|err| map_tinyfish_mcp_error(&err))?;
     if result.is_error {
         return Err(map_tinyfish_mcp_error(&format!(
             "TinyFish MCP search failed: {}",
@@ -665,7 +656,7 @@ async fn search_tinyfish_mcp(
 
 fn map_tinyfish_mcp_error(err: &str) -> String {
     let lower = err.to_ascii_lowercase();
-    if err.contains("OAUTH_REQUIRED")
+    if crate::mcp::conn::is_oauth_error(err)
         || lower.contains("unauthorized")
         || lower.contains("valid oauth bearer")
     {
@@ -689,6 +680,67 @@ fn bearer_header(token: &str) -> Option<String> {
 
 fn mcp_url_matches(left: &str, right: &str) -> bool {
     left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/')
+}
+
+fn tinyfish_mcp_server(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    endpoint: &str,
+) -> ChatMcpServer {
+    if let Some(server) = existing_enabled_mcp_server(state, endpoint) {
+        return server;
+    }
+    let mut server = ChatMcpServer {
+        id: "tinyfish-mcp".to_string(),
+        name: "TinyFish MCP".to_string(),
+        enabled: true,
+        transport: "streamable_http".to_string(),
+        url: endpoint.to_string(),
+        ..ChatMcpServer::default()
+    };
+    if let Some(auth) = tinyfish_mcp_auth(state, config, endpoint) {
+        if let Some(header) = bearer_header(&auth.access_token) {
+            server.headers.insert("Authorization".to_string(), header);
+        }
+        server.auth = Some(auth);
+    } else if let Some(header) = tinyfish_mcp_authorization(state, config, endpoint) {
+        server.headers.insert("Authorization".to_string(), header);
+    }
+    server
+}
+
+fn existing_enabled_mcp_server(state: &AppState, endpoint: &str) -> Option<ChatMcpServer> {
+    let settings = state.settings_read();
+    settings
+        .chat_tools
+        .servers
+        .iter()
+        .find(|server| server.enabled && mcp_url_matches(&server.url, endpoint))
+        .cloned()
+}
+
+fn tinyfish_mcp_auth(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    endpoint: &str,
+) -> Option<ConnectorAuth> {
+    if let Some(auth) = &config.tinyfish_mcp_auth {
+        if !auth.access_token.trim().is_empty() || crate::connectors::oauth::can_refresh(auth) {
+            return Some(auth.clone());
+        }
+    }
+    let settings = state.settings_read();
+    for server in &settings.chat_tools.servers {
+        if !mcp_url_matches(&server.url, endpoint) {
+            continue;
+        }
+        if let Some(auth) = &server.auth {
+            if !auth.access_token.trim().is_empty() || crate::connectors::oauth::can_refresh(auth) {
+                return Some(auth.clone());
+            }
+        }
+    }
+    None
 }
 
 fn tinyfish_mcp_authorization(
@@ -1366,6 +1418,17 @@ mod tests {
         OllamaSearchResponse, SearxngSearchResponse, SerperSearchResponse, TavilySearchResponse,
         TinyfishSearchResponse, WebSearchResult, ZhipuSearchResponse,
     };
+
+    #[test]
+    fn tinyfish_mcp_maps_auth_required_initialize_to_authorize_prompt() {
+        let err = "MCP connect failed: Send message error Transport [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker<reqwest::async_impl::client::Client>>] error: Auth required, when send initialize request";
+        let mapped = super::map_tinyfish_mcp_error(err);
+        assert!(mapped.contains("Authorize"), "{mapped}");
+        assert!(
+            !mapped.contains("WorkerTransport"),
+            "raw transport dump must not leak to the user: {mapped}"
+        );
+    }
 
     #[test]
     fn tavily_response_deserializes_results_and_answer() {

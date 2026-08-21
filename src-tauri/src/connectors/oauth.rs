@@ -28,6 +28,9 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 /// access_token 还剩多少秒内将过期就提前刷新（避免临界值连接失败）。
 pub const REFRESH_LEEWAY_SECS: i64 = 60;
+/// 授权服务器没给 `expires_in` 时的保守寿命。多数 OAuth access token 是 1h；
+/// 写成绝对时间后 `needs_refresh` 才能在 401 之前换票，而不是等握手失败。
+pub const DEFAULT_ACCESS_TOKEN_SECS: i64 = 3600;
 
 /// 授权服务器元数据（从 well-known 发现得到）。
 #[derive(Debug, Clone)]
@@ -275,37 +278,93 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 /// 计算 access_token 的绝对过期时间戳（unix 秒）。`expires_in` 为相对秒数。
+/// 服务端没给或给了非正数时，按 [`DEFAULT_ACCESS_TOKEN_SECS`] 记一笔，这样所有
+/// OAuth MCP 都能走预刷新，而不是只有返回 `expires_in` 的那几家。
 pub fn compute_expires_at(now_unix: i64, expires_in: Option<i64>) -> Option<i64> {
-    expires_in.map(|secs| now_unix + secs)
+    let secs = expires_in
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_ACCESS_TOKEN_SECS);
+    Some(now_unix + secs)
+}
+
+/// 是否具备刷新条件（oauth + 非空 refresh_token + token_endpoint）。
+/// 与是否已经过期无关：401 后的强制刷新用这个，不能只靠 `needs_refresh`。
+pub fn can_refresh(auth: &ConnectorAuth) -> bool {
+    auth.kind == "oauth"
+        && auth
+            .refresh_token
+            .as_deref()
+            .map(|token| !token.trim().is_empty())
+            .unwrap_or(false)
+        && auth
+            .token_endpoint
+            .as_deref()
+            .map(|endpoint| !endpoint.trim().is_empty())
+            .unwrap_or(false)
+}
+
+/// Incoming `None` means the user cleared the slot. If both sides have oauth
+/// tokens and they differ, keep whichever expires later (a backend refresh
+/// usually wins over a stale settings draft; a just-completed re-auth in the
+/// UI usually has the newer `expires_at` and wins).
+pub fn prefer_live_oauth_auth(
+    incoming: Option<&ConnectorAuth>,
+    live: Option<&ConnectorAuth>,
+) -> Option<ConnectorAuth> {
+    match (incoming, live) {
+        (None, _) => None,
+        (Some(incoming), None) => Some(incoming.clone()),
+        (Some(incoming), Some(live)) => {
+            if incoming.access_token.trim() == live.access_token.trim() {
+                Some(incoming.clone())
+            } else if live.expires_at.unwrap_or(0) >= incoming.expires_at.unwrap_or(0) {
+                Some(live.clone())
+            } else {
+                Some(incoming.clone())
+            }
+        }
+    }
 }
 
 /// 是否需要刷新：oauth 类型、有 refresh_token，且 expires_at 已过期或将在 leeway 内过期。
-/// 无 expires_at（服务端没给）则保守判断为不需要刷新（用现有 token 试连）。
+/// 无 expires_at（旧设置 / 服务端当时没给）也预刷新——否则永远要等 401。
 pub fn needs_refresh(auth: &ConnectorAuth, now_unix: i64, leeway_secs: i64) -> bool {
-    if auth.kind != "oauth" {
-        return false;
-    }
-    if auth
-        .refresh_token
-        .as_deref()
-        .map(|t| t.trim().is_empty())
-        .unwrap_or(true)
-    {
-        return false;
-    }
-    if auth
-        .token_endpoint
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-    {
+    if !can_refresh(auth) {
         return false;
     }
     match auth.expires_at {
         Some(expires_at) => now_unix + leeway_secs >= expires_at,
-        None => false,
+        None => true,
     }
+}
+
+/// 把 token 端点的刷新结果写回 `ConnectorAuth`。多数实现 refresh 不回新的
+/// refresh_token；只在确实下发非空值时替换（轮换场景）。
+pub fn apply_refreshed_token(auth: &mut ConnectorAuth, token: &TokenResponse, now_unix: i64) {
+    auth.access_token = token.access_token.clone();
+    if let Some(refresh) = token
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        auth.refresh_token = Some(refresh.to_string());
+    }
+    auth.expires_at = compute_expires_at(now_unix, token.expires_in);
+}
+
+/// 把 access_token 写成 Authorization: Bearer，供 MCP HTTP 传输使用。
+pub fn apply_auth_header(server: &mut ChatMcpServer, access_token: &str) {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return;
+    }
+    let value = if token.len() >= 7 && token[..7].eq_ignore_ascii_case("bearer ") {
+        token.to_string()
+    } else {
+        format!("Bearer {token}")
+    };
+    server.headers.insert("Authorization".to_string(), value);
 }
 
 /// 构造 refresh_token 授权的表单字段（application/x-www-form-urlencoded 的键值）。
@@ -978,7 +1037,7 @@ mod tests {
     #[test]
     fn computes_expires_at() {
         assert_eq!(compute_expires_at(1000, Some(3600)), Some(4600));
-        assert_eq!(compute_expires_at(1000, None), None);
+        assert_eq!(compute_expires_at(1000, None), Some(4600));
     }
 
     fn oauth_auth(refresh: Option<&str>, expires_at: Option<i64>) -> ConnectorAuth {
@@ -1021,16 +1080,49 @@ mod tests {
             now,
             REFRESH_LEEWAY_SECS
         ));
-        // 无 expires_at → 不刷新（保守用旧 token）。
-        assert!(!needs_refresh(
-            &oauth_auth(Some("rt"), None),
-            now,
-            REFRESH_LEEWAY_SECS
-        ));
+        // 无 expires_at → 预刷新（很多 OAuth MCP 不回 expires_in）。
+        let no_expiry = oauth_auth(Some("rt"), None);
+        assert!(needs_refresh(&no_expiry, now, REFRESH_LEEWAY_SECS));
+        assert!(can_refresh(&no_expiry));
         // token 类（非 oauth）→ 不刷新。
         let mut token = oauth_auth(Some("rt"), Some(900));
         token.kind = "token".to_string();
         assert!(!needs_refresh(&token, now, REFRESH_LEEWAY_SECS));
+        assert!(!can_refresh(&token));
+    }
+
+    #[test]
+    fn prefer_live_oauth_auth_keeps_newer_token_and_honors_clear() {
+        let mut stale = oauth_auth(Some("rt"), Some(1000));
+        stale.access_token = "old".to_string();
+        let mut fresh = oauth_auth(Some("rt"), Some(9000));
+        fresh.access_token = "new".to_string();
+        let picked = prefer_live_oauth_auth(Some(&stale), Some(&fresh)).expect("auth");
+        assert_eq!(picked.access_token, "new");
+        assert!(prefer_live_oauth_auth(None, Some(&fresh)).is_none());
+        let mut reauth = oauth_auth(Some("rt"), Some(12_000));
+        reauth.access_token = "reauth".to_string();
+        let picked = prefer_live_oauth_auth(Some(&reauth), Some(&fresh)).expect("auth");
+        assert_eq!(picked.access_token, "reauth");
+    }
+
+    #[test]
+    fn apply_refreshed_token_keeps_old_refresh_when_omitted() {
+        let mut auth = oauth_auth(Some("rt-old"), Some(1000));
+        apply_refreshed_token(
+            &mut auth,
+            &TokenResponse {
+                access_token: "at-new".to_string(),
+                refresh_token: None,
+                expires_in: Some(3600),
+                scope: None,
+                account: None,
+            },
+            2000,
+        );
+        assert_eq!(auth.access_token, "at-new");
+        assert_eq!(auth.refresh_token.as_deref(), Some("rt-old"));
+        assert_eq!(auth.expires_at, Some(5600));
     }
 
     #[test]

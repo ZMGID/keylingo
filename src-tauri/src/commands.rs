@@ -88,7 +88,7 @@ pub(crate) async fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    apply_settings(&app, &state, settings).await
+    apply_settings(&app, &state, settings, true).await
 }
 
 /// trim + 去空 + 去重（保序）。
@@ -151,9 +151,13 @@ async fn apply_settings(
     app: &AppHandle,
     state: &State<'_, AppState>,
     settings: Settings,
+    preserve_oauth: bool,
 ) -> Result<Settings, String> {
     let previous_settings = state.settings_read().clone();
-    let sanitized = sanitize_settings(settings);
+    let mut sanitized = sanitize_settings(settings);
+    if preserve_oauth {
+        crate::mcp::manager::preserve_live_oauth(&mut sanitized, &previous_settings);
+    }
     apply_launch_at_startup(app, sanitized.launch_at_startup)?;
     {
         let mut guard = state.settings_write();
@@ -246,7 +250,7 @@ pub(crate) async fn import_settings(
         .ok_or_else(|| "备份文件缺少 settings 字段".to_string())?;
     let settings: Settings = serde_json::from_value(settings_value.clone())
         .map_err(|e| format!("备份内容无法解析: {e}"))?;
-    apply_settings(&app, &state, settings).await
+    apply_settings(&app, &state, settings, false).await
 }
 
 #[tauri::command]
@@ -984,6 +988,7 @@ pub(crate) async fn test_provider_connection(
 /// 供设置页「测试搜索」用，验证 key/endpoint 是否可用。
 #[tauri::command]
 pub(crate) async fn test_web_search(
+    app: AppHandle,
     state: State<'_, AppState>,
     config: crate::settings::LensWebSearchConfig,
     query: String,
@@ -994,7 +999,7 @@ pub(crate) async fn test_web_search(
     }
     let settings = state.settings_read().clone();
     let retry_attempts = effective_retry_attempts(&settings);
-    match crate::web_search::search_web(&state, &config, query, retry_attempts).await {
+    match crate::web_search::search_web(&state, &config, query, retry_attempts, Some(&app)).await {
         Ok(results) => Ok(serde_json::json!({
             "success": true,
             "provider": crate::web_search::provider_label(config.provider),

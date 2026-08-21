@@ -467,6 +467,7 @@ fn call_web_search(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
             &ctx.settings.lens.web_search,
             &query,
             retry_attempts,
+            Some(ctx.app),
         )
         .await?;
         let raw = serde_json::to_value(&results).unwrap_or(Value::Null);

@@ -375,8 +375,9 @@ pub fn run() {
                 }
             });
 
-            // MCP 持久连接空闲回收 reaper：每 60s 扫描连接池，回收 last_used 超过
-            // 设置 mcp_idle_timeout_ms 的会话（Drop 杀子进程），发 Disconnected 事件。
+            // MCP 持久连接空闲回收 + HTTP 保活：每 60s 扫描连接池。stdio 空闲会话
+            // Drop 杀子进程；活着的 HTTP 会话不收，改发 ping（失败则按握手配置重连，
+            // 含 OAuth 刷新）。
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -398,6 +399,7 @@ pub fn run() {
                                 }),
                             );
                         }
+                        state.mcp_keepalive_http(Some(&app_handle)).await;
                     }
                 });
             }

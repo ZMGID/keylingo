@@ -120,6 +120,11 @@ pub struct McpSession {
     revision_source: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// stderr 尾巴任务，换连接时 abort 掉旧的。
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    /// 最近一次成功握手用的 server 配置（含 OAuth）。HTTP 保活断线后按这份重连，
+    /// 不必回 settings 按 id 查找——联网搜索合成的临时 id 不在 `chat_tools.servers` 里。
+    server_config: Option<ChatMcpServer>,
+    /// 对端没有 MCP `ping` 时不再打，连接仍留在池里。
+    ping_unsupported: bool,
 }
 
 impl Drop for McpSession {
@@ -147,6 +152,8 @@ impl McpSession {
             child_pid: None,
             revision_source: None,
             stderr_task: None,
+            server_config: None,
+            ping_unsupported: false,
         }
     }
 
@@ -214,6 +221,35 @@ impl AppState {
         Duration::from_millis(ms)
     }
 
+    /// 调用方手里的 server 可能是旧快照。用 settings 里同 id / 同 URL 的 OAuth 盖一层。
+    fn overlay_oauth_from_settings(&self, server: &ChatMcpServer) -> ChatMcpServer {
+        let settings = self.settings_read();
+        let mut out = server.clone();
+        let mut best = out.auth.clone();
+        for existing in &settings.chat_tools.servers {
+            let same = existing.id == out.id
+                || (mcp_url_matches(&existing.url, &out.url)
+                    && existing
+                        .auth
+                        .as_ref()
+                        .is_some_and(|auth| auth.kind == "oauth"));
+            if same {
+                best = newer_oauth_auth(best, existing.auth.as_ref());
+            }
+        }
+        if mcp_url_matches(
+            settings.lens.web_search.tinyfish_mcp_url.trim(),
+            out.url.trim(),
+        ) {
+            best = newer_oauth_auth(best, settings.lens.web_search.tinyfish_mcp_auth.as_ref());
+        }
+        if let Some(auth) = best {
+            crate::connectors::oauth::apply_auth_header(&mut out, &auth.access_token);
+            out.auth = Some(auth);
+        }
+        out
+    }
+
     /// 命中已连接会话则克隆 Arc 返回；否则建立连接（握手一次）。
     ///
     /// 关键：算 fingerprint / 命中判断在持外层池锁时完成，确定要新建后插入
@@ -235,8 +271,9 @@ impl AppState {
         // 连接前钩子：远程 MCP 的 OAuth token 若临近/已过期，先用 refresh_token 刷新，
         // 更新 server 的 Authorization header 与 auth，并持久化新 token。失败则用旧
         // token 继续连接（记录错误，不 panic）。StreamableHttpMcpClient 不变（仍只发 header）。
-        let refreshed = self.refresh_oauth_if_needed(sink, server).await;
-        let server = refreshed.as_ref().unwrap_or(server);
+        let overlaid = self.overlay_oauth_from_settings(server);
+        let refreshed = self.refresh_mcp_oauth(sink, &overlaid, false).await;
+        let server = refreshed.as_ref().unwrap_or(&overlaid);
         let fingerprint = config_fingerprint(server);
 
         // 单飞门闩：在持外层池锁时完成「命中已有会话」或「插入 Connecting 占位」二选一，
@@ -310,21 +347,30 @@ impl AppState {
         }
     }
 
-    /// OAuth token 刷新钩子：若该 server 是 OAuth 连接器且 token 临近/已过期，用
-    /// refresh_token 换新 token，返回更新后的 server（headers + auth）。无需刷新或刷新
-    /// 失败则返回 None（调用方用原 server 继续）。成功刷新时把新 token 持久化回 settings。
-    async fn refresh_oauth_if_needed(
+    /// OAuth token 刷新。`force=false`：仅在 `needs_refresh`（临近/已过期，或没有
+    /// `expires_at`）时刷新。`force=true`：只要 `can_refresh` 就刷新 —— 给握手 /
+    /// `tools/call` 收到 401 或 `Auth required` 用。
+    ///
+    /// 成功则返回更新后的 server（headers + auth），并写回 settings 里所有绑在
+    /// 同一 resource URL 上的 OAuth 槽（`chat_tools.servers` + 脱离列表的凭证）。
+    pub(crate) async fn refresh_mcp_oauth(
         &self,
         sink: McpEventSink<'_>,
         server: &ChatMcpServer,
+        force: bool,
     ) -> Option<ChatMcpServer> {
         let auth = server.auth.as_ref()?;
         let now = now_unix();
-        if !crate::connectors::oauth::needs_refresh(
-            auth,
-            now,
-            crate::connectors::oauth::REFRESH_LEEWAY_SECS,
-        ) {
+        let should_refresh = if force {
+            crate::connectors::oauth::can_refresh(auth)
+        } else {
+            crate::connectors::oauth::needs_refresh(
+                auth,
+                now,
+                crate::connectors::oauth::REFRESH_LEEWAY_SECS,
+            )
+        };
+        if !should_refresh {
             return None;
         }
         let token_endpoint = auth.token_endpoint.clone()?;
@@ -344,22 +390,10 @@ impl AppState {
             Ok(token) => {
                 let mut updated = server.clone();
                 let mut new_auth = updated.auth.take().unwrap_or_default();
-                new_auth.access_token = token.access_token.clone();
-                // 多数实现 refresh 不回新的 refresh_token；只在确实下发时替换（轮换场景）。
-                if let Some(rt) = token.refresh_token {
-                    new_auth.refresh_token = Some(rt);
-                }
-                new_auth.expires_at =
-                    crate::connectors::oauth::compute_expires_at(now, token.expires_in);
+                crate::connectors::oauth::apply_refreshed_token(&mut new_auth, &token, now);
+                crate::connectors::oauth::apply_auth_header(&mut updated, &token.access_token);
                 updated.auth = Some(new_auth);
-                updated.headers.insert(
-                    "Authorization".to_string(),
-                    format!("Bearer {}", token.access_token),
-                );
-                // 持久化新 token：仅在拿得到 AppHandle 时（生产路径）。
-                if let Some(app) = sink {
-                    self.persist_refreshed_server(app, &updated);
-                }
+                self.store_refreshed_server(sink, &updated);
                 Some(updated)
             }
             Err(err) => {
@@ -372,31 +406,25 @@ impl AppState {
         }
     }
 
-    /// 把刷新后的 server 写回 settings（内存 + 落盘）。在 settings.chat_tools.servers 里
-    /// 按 id 定位并替换。失败仅记录，不影响本次连接。
-    fn persist_refreshed_server(&self, app: &AppHandle, server: &ChatMcpServer) {
-        let updated_settings = {
+    /// 把刷新后的 auth 写回内存 settings；有 AppHandle 时再落盘。
+    fn store_refreshed_server(&self, sink: McpEventSink<'_>, server: &ChatMcpServer) {
+        let snapshot = {
             let mut guard = self.settings_write();
-            let found = guard
-                .chat_tools
-                .servers
-                .iter_mut()
-                .find(|existing| existing.id == server.id);
-            match found {
-                Some(slot) => {
-                    slot.headers = server.headers.clone();
-                    slot.auth = server.auth.clone();
-                    guard.clone()
-                }
-                None => return,
+            if !apply_refreshed_auth_to_settings(&mut guard, server) {
+                return;
             }
+            guard.clone()
         };
-        if let Err(err) = crate::settings::persist_settings(app, &updated_settings) {
+        let Some(app) = sink else {
+            return;
+        };
+        if let Err(err) = crate::settings::persist_settings(app, &snapshot) {
             eprintln!("Failed to persist refreshed OAuth token: {err}");
         }
     }
 
     /// 在持有会话锁的前提下完成一次握手（不持外层池锁）。失败时写 Error 状态并返回错误。
+    /// 握手若是 OAuth 401，强制 refresh_token 换新再握一次，避免用户反复点「重新授权」。
     async fn connect_session(
         &self,
         sink: McpEventSink<'_>,
@@ -405,16 +433,19 @@ impl AppState {
     ) -> Result<(), String> {
         match self.mcp_connect_into(server, guard).await {
             Ok(()) => {
-                guard.state = McpServerState::Connected;
-                guard.handshake_count = guard.handshake_count.saturating_add(1);
-                guard.consecutive_connect_failures = 0;
-                guard.discovery_retry_after = None;
-                guard.last_used = Instant::now();
-                self.remember_mcp_tools(server, &guard.tools);
-                emit_server_state(sink, server, &McpServerState::Connected);
+                self.mark_session_connected(sink, server, guard);
                 Ok(())
             }
             Err(err) => {
+                if conn::is_oauth_error(&err) {
+                    if let Some(updated) = self.refresh_mcp_oauth(sink, server, true).await {
+                        guard.config_fingerprint = config_fingerprint(&updated);
+                        if self.mcp_connect_into(&updated, guard).await.is_ok() {
+                            self.mark_session_connected(sink, &updated, guard);
+                            return Ok(());
+                        }
+                    }
+                }
                 let stderr_tail = guard.stderr_tail_text().await;
                 let message = if stderr_tail.trim().is_empty() {
                     err
@@ -440,6 +471,22 @@ impl AppState {
                 Err(message)
             }
         }
+    }
+
+    fn mark_session_connected(
+        &self,
+        sink: McpEventSink<'_>,
+        server: &ChatMcpServer,
+        guard: &mut McpSession,
+    ) {
+        guard.state = McpServerState::Connected;
+        guard.handshake_count = guard.handshake_count.saturating_add(1);
+        guard.consecutive_connect_failures = 0;
+        guard.discovery_retry_after = None;
+        guard.last_used = Instant::now();
+        guard.server_config = Some(server.clone());
+        self.remember_mcp_tools(server, &guard.tools);
+        emit_server_state(sink, server, &McpServerState::Connected);
     }
 
     /// 建立 transport 并完成握手，把元数据写入会话（不改 state）。
@@ -486,7 +533,8 @@ impl AppState {
         name: &str,
         arguments: Value,
     ) -> Result<McpToolCallResult, String> {
-        let session = self.mcp_get_or_connect(sink, server).await?;
+        let server = self.overlay_oauth_from_settings(server);
+        let session = self.mcp_get_or_connect(sink, &server).await?;
         let timeout_dur = self.mcp_tool_timeout();
 
         // 会话锁只保护生命周期状态迁移：拿到 Arc 后必须先释放锁再 await 响应。
@@ -502,8 +550,8 @@ impl AppState {
             if dead {
                 guard.take_transport();
                 guard.state = McpServerState::Connecting;
-                emit_server_state(sink, server, &McpServerState::Connecting);
-                self.connect_session(sink, server, &mut guard).await?;
+                emit_server_state(sink, &server, &McpServerState::Connecting);
+                self.connect_session(sink, &server, &mut guard).await?;
             }
             // 请求开始时也刷一次 last_used，否则空闲回收器会把一个正在跑的长请求
             // 误判成闲置会话。
@@ -528,9 +576,25 @@ impl AppState {
                 // 服务器可能已经执行完了，`ServiceError::TransportClosed` 这时同样会出现
                 // —— 用户点「重连」或空闲回收把连接掐掉就是这条路，光看错误串分不出来。
                 // 只靠 `connection_is_gone` 判断的话，这里会把写文件 / 发消息跑两遍。
-                if !failure.replay_safe || !conn::connection_is_gone(&service, &failure.message) {
+                //
+                // OAuth 401 / Auth required：请求被拒，工具没执行。刷新 token 后重连再发。
+                let oauth = conn::is_oauth_error(&failure.message);
+                let gone = conn::connection_is_gone(&service, &failure.message);
+                if !(oauth || (failure.replay_safe && gone)) {
                     Err(failure.message)
                 } else {
+                    let retry_server = if oauth {
+                        self.refresh_mcp_oauth(sink, &server, true)
+                            .await
+                            .unwrap_or_else(|| server.clone())
+                    } else {
+                        session
+                            .lock()
+                            .await
+                            .server_config
+                            .clone()
+                            .unwrap_or_else(|| server.clone())
+                    };
                     let retry_service = {
                         let mut guard = session.lock().await;
                         let must_reconnect = guard
@@ -541,10 +605,10 @@ impl AppState {
                         if must_reconnect {
                             guard.take_transport();
                             guard.state = McpServerState::Connecting;
-                            emit_server_state(sink, server, &McpServerState::Connecting);
+                            emit_server_state(sink, &retry_server, &McpServerState::Connecting);
                             // 重连失败时别把「工具为什么挂了」换成「重连为什么失败」。
                             if let Err(reconnect_err) =
-                                self.connect_session(sink, server, &mut guard).await
+                                self.connect_session(sink, &retry_server, &mut guard).await
                             {
                                 return Err(format!(
                                     "{} (reconnect also failed: {reconnect_err})",
@@ -695,8 +759,12 @@ impl AppState {
         emit_disconnected(sink, server_id);
     }
 
-    /// 空闲回收：移除 last_used 超过 idle_timeout 的会话。锁内只收集+移除，无 await。
-    /// 返回被回收的 server_id（供发 Disconnected 事件）。
+    /// 空闲回收：移除 last_used 超过 idle_timeout 的会话。
+    ///
+    /// stdio 必须收：Drop 才能杀掉子进程。Streamable HTTP 没有子进程，回收只会让
+    /// MCP 页状态点闪成「未连接」，下次握手还可能踩过期 OAuth token。活着的 HTTP
+    /// 会话留给 ping 保活、session 过期重握手、主动 reload、退出 disconnect_all。
+    /// Error / 占位会话仍回收，避免失败条目永远占着池。
     pub async fn mcp_reap_idle(
         &self,
         idle_timeout: Duration,
@@ -712,9 +780,16 @@ impl AppState {
         let mut expired_ids = Vec::new();
         for (id, session) in &candidates {
             let guard = session.lock().await;
-            if now.duration_since(guard.last_used) > idle_timeout {
-                expired_ids.push(id.clone());
+            if now.duration_since(guard.last_used) <= idle_timeout {
+                continue;
             }
+            let live_http = matches!(guard.state, McpServerState::Connected)
+                && guard.child_pid.is_none()
+                && guard.transport.is_some();
+            if live_http {
+                continue;
+            }
+            expired_ids.push(id.clone());
         }
         if expired_ids.is_empty() {
             return evicted;
@@ -731,6 +806,50 @@ impl AppState {
             shutdown_session(session).await;
         }
         evicted
+    }
+
+    /// HTTP 会话保活：对池里活着的 Streamable HTTP 连接发 MCP `ping`。
+    /// 成功续 last_used；对端没有 ping 则记住不再打；其余失败只摘掉连接，
+    /// 下次工具调用再握手（定时器里重连会每分钟打一轮 initialize）。
+    pub async fn mcp_keepalive_http(&self, sink: McpEventSink<'_>) {
+        let candidates: Vec<(String, Arc<Mutex<McpSession>>)> = {
+            let pool = self.mcp_sessions.lock().await;
+            pool.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        for (id, session) in candidates {
+            let (service, skip_ping) = {
+                let guard = session.lock().await;
+                let live_http = matches!(guard.state, McpServerState::Connected)
+                    && guard.child_pid.is_none()
+                    && guard.transport.is_some();
+                if !live_http {
+                    continue;
+                }
+                (guard.transport.clone(), guard.ping_unsupported)
+            };
+            let Some(service) = service else {
+                continue;
+            };
+            if skip_ping {
+                continue;
+            }
+            match conn::ping(&service, conn::PING_TIMEOUT).await {
+                Ok(()) => {
+                    session.lock().await.last_used = Instant::now();
+                }
+                Err(err) if conn::is_method_not_found(&err) => {
+                    let mut guard = session.lock().await;
+                    guard.ping_unsupported = true;
+                    guard.last_used = Instant::now();
+                }
+                Err(_) => {
+                    let mut guard = session.lock().await;
+                    guard.take_transport();
+                    guard.state = McpServerState::Disconnected;
+                    emit_disconnected(sink, &id);
+                }
+            }
+        }
     }
 
     /// 排干连接池：每个会话 Drop transport 触发 abort task + kill 子进程。退出钩子用。
@@ -840,6 +959,115 @@ pub fn config_fingerprint(server: &ChatMcpServer) -> String {
     format!("{:x}", Sha256::digest(serialized))
 }
 
+fn mcp_url_matches(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/')
+}
+
+/// 把刷新后的 OAuth 写回 settings：`chat_tools.servers`（按 id，以及同 URL 的 oauth
+/// 连接器）和任何挂在同一 resource URL 上、存在列表外的凭证槽。
+pub(crate) fn apply_refreshed_auth_to_settings(
+    settings: &mut crate::settings::Settings,
+    server: &ChatMcpServer,
+) -> bool {
+    let mut changed = false;
+    for existing in &mut settings.chat_tools.servers {
+        let same_id = existing.id == server.id;
+        let same_oauth_url = mcp_url_matches(&existing.url, &server.url)
+            && existing
+                .auth
+                .as_ref()
+                .is_some_and(|auth| auth.kind == "oauth");
+        if same_id || same_oauth_url {
+            existing.auth = server.auth.clone();
+            if let Some(value) = server.headers.get("Authorization") {
+                existing
+                    .headers
+                    .insert("Authorization".to_string(), value.clone());
+            }
+            changed = true;
+        }
+    }
+    if let Some(slot) = settings.detached_oauth_auth_for_url_mut(&server.url) {
+        if let Some(auth) = server.auth.clone() {
+            *slot = Some(auth);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn newer_oauth_auth(
+    current: Option<crate::settings::ConnectorAuth>,
+    other: Option<&crate::settings::ConnectorAuth>,
+) -> Option<crate::settings::ConnectorAuth> {
+    match (current, other) {
+        (None, other) => other.filter(|auth| auth.kind == "oauth").cloned(),
+        (Some(current), None) => Some(current),
+        (Some(current), Some(other)) => {
+            if other.kind == "oauth"
+                && other.expires_at.unwrap_or(0) > current.expires_at.unwrap_or(0)
+            {
+                Some(other.clone())
+            } else {
+                Some(current)
+            }
+        }
+    }
+}
+
+/// 设置页整份草稿保存时，不要把内存里刚刷新的 OAuth 盖回旧 token。
+/// 用户清空该槽（incoming 为 None）仍尊重；导入备份不要走这条。
+pub(crate) fn preserve_live_oauth(
+    incoming: &mut crate::settings::Settings,
+    live: &crate::settings::Settings,
+) {
+    for live_server in &live.chat_tools.servers {
+        let Some(live_auth) = live_server
+            .auth
+            .as_ref()
+            .filter(|auth| auth.kind == "oauth")
+        else {
+            continue;
+        };
+        for incoming_server in &mut incoming.chat_tools.servers {
+            let same = incoming_server.id == live_server.id
+                || (mcp_url_matches(&incoming_server.url, &live_server.url)
+                    && incoming_server
+                        .auth
+                        .as_ref()
+                        .is_some_and(|auth| auth.kind == "oauth"));
+            if !same {
+                continue;
+            }
+            let Some(chosen) = crate::connectors::oauth::prefer_live_oauth_auth(
+                incoming_server.auth.as_ref(),
+                Some(live_auth),
+            ) else {
+                continue;
+            };
+            if incoming_server
+                .auth
+                .as_ref()
+                .is_some_and(|auth| auth.access_token == chosen.access_token)
+            {
+                continue;
+            }
+            crate::connectors::oauth::apply_auth_header(incoming_server, &chosen.access_token);
+            incoming_server.auth = Some(chosen);
+        }
+    }
+    let url = incoming.lens.web_search.tinyfish_mcp_url.clone();
+    if !mcp_url_matches(url.trim(), live.lens.web_search.tinyfish_mcp_url.trim()) {
+        return;
+    }
+    if let Some(slot) = incoming.detached_oauth_auth_for_url_mut(&url) {
+        *slot = crate::connectors::oauth::prefer_live_oauth_auth(
+            slot.as_ref(),
+            live.lens.web_search.tinyfish_mcp_auth.as_ref(),
+        );
+    }
+}
+
 /// 当前 unix 时间戳（秒），用于 OAuth token 过期判断。
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -868,6 +1096,135 @@ mod tests {
         let credential_fingerprint = config_fingerprint(&server);
         assert_eq!(credential_fingerprint.len(), 64);
         assert!(!credential_fingerprint.contains("top-secret"));
+    }
+
+    #[test]
+    fn apply_refreshed_auth_writes_detached_oauth_slot_and_matching_server() {
+        use crate::settings::{ConnectorAuth, Settings};
+
+        let oauth = ConnectorAuth {
+            kind: "oauth".to_string(),
+            access_token: "old".to_string(),
+            refresh_token: Some("rt".to_string()),
+            expires_at: Some(1),
+            token_endpoint: Some("https://auth.example/token".to_string()),
+            client_id: Some("client".to_string()),
+            scopes: Vec::new(),
+            account: None,
+        };
+        let mut settings = Settings::default();
+        settings.lens.web_search.tinyfish_mcp_url = "https://agent.tinyfish.ai/mcp".to_string();
+        settings.lens.web_search.tinyfish_mcp_auth = Some(oauth.clone());
+        let mut connector = ChatMcpServer {
+            id: "connector-tinyfish".to_string(),
+            name: "TinyFish".to_string(),
+            enabled: true,
+            transport: "streamable_http".to_string(),
+            url: "https://agent.tinyfish.ai/mcp".to_string(),
+            ..ChatMcpServer::default()
+        };
+        connector.auth = Some(oauth);
+        connector
+            .headers
+            .insert("X-Custom".to_string(), "keep".to_string());
+        settings.chat_tools.servers.push(connector);
+
+        let mut refreshed = ChatMcpServer {
+            id: "tinyfish-mcp".to_string(),
+            name: "TinyFish MCP".to_string(),
+            enabled: true,
+            transport: "streamable_http".to_string(),
+            url: "https://agent.tinyfish.ai/mcp".to_string(),
+            ..ChatMcpServer::default()
+        };
+        refreshed
+            .headers
+            .insert("Authorization".to_string(), "Bearer new".to_string());
+        refreshed.auth = Some(ConnectorAuth {
+            kind: "oauth".to_string(),
+            access_token: "new".to_string(),
+            refresh_token: Some("rt".to_string()),
+            expires_at: Some(9_999),
+            token_endpoint: Some("https://auth.example/token".to_string()),
+            client_id: Some("client".to_string()),
+            scopes: Vec::new(),
+            account: None,
+        });
+
+        assert!(apply_refreshed_auth_to_settings(&mut settings, &refreshed));
+        assert_eq!(
+            settings
+                .lens
+                .web_search
+                .tinyfish_mcp_auth
+                .as_ref()
+                .unwrap()
+                .access_token,
+            "new"
+        );
+        assert_eq!(
+            settings.chat_tools.servers[0]
+                .auth
+                .as_ref()
+                .unwrap()
+                .access_token,
+            "new"
+        );
+        assert_eq!(
+            settings.chat_tools.servers[0]
+                .headers
+                .get("Authorization")
+                .map(String::as_str),
+            Some("Bearer new")
+        );
+        assert_eq!(
+            settings.chat_tools.servers[0]
+                .headers
+                .get("X-Custom")
+                .map(String::as_str),
+            Some("keep")
+        );
+    }
+
+    #[test]
+    fn preserve_live_oauth_keeps_newer_token_on_stale_draft() {
+        use crate::settings::{ConnectorAuth, Settings};
+
+        let mut live = Settings::default();
+        let mut incoming = Settings::default();
+        let mut server = ChatMcpServer {
+            id: "s1".to_string(),
+            name: "S".to_string(),
+            enabled: true,
+            transport: "streamable_http".to_string(),
+            url: "https://mcp.example/mcp".to_string(),
+            ..ChatMcpServer::default()
+        };
+        server.auth = Some(ConnectorAuth {
+            kind: "oauth".to_string(),
+            access_token: "old".to_string(),
+            refresh_token: Some("rt".to_string()),
+            expires_at: Some(10),
+            token_endpoint: Some("https://auth.example/token".to_string()),
+            client_id: Some("c".to_string()),
+            scopes: Vec::new(),
+            account: None,
+        });
+        incoming.chat_tools.servers.push(server.clone());
+        server.auth.as_mut().unwrap().access_token = "new".to_string();
+        server.auth.as_mut().unwrap().expires_at = Some(9_999);
+        crate::connectors::oauth::apply_auth_header(&mut server, "new");
+        live.chat_tools.servers.push(server);
+
+        preserve_live_oauth(&mut incoming, &live);
+        assert_eq!(
+            incoming.chat_tools.servers[0]
+                .auth
+                .as_ref()
+                .unwrap()
+                .access_token,
+            "new"
+        );
     }
 
     #[test]
@@ -1089,6 +1446,64 @@ mod tests {
         let parsed = result::parse_tool_result(serde_json::to_value(&raw).expect("serialize"));
         assert_eq!(parsed.content, "echo: ok");
         assert!(state.mcp_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_reap_keeps_live_http_sessions() {
+        let url = spawn_test_http_mcp_server(200).await;
+        let state = test_app_state();
+        let server = http_server(url);
+        state
+            .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
+            .await
+            .expect("call ok");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let evicted = state.mcp_reap_idle(Duration::from_millis(1)).await;
+        assert!(
+            evicted.is_empty(),
+            "live HTTP MCP sessions must not idle-reap (UI would flash Disconnected)"
+        );
+        {
+            let pool = state.mcp_sessions.lock().await;
+            assert!(
+                pool.contains_key(&server.id),
+                "HTTP session should stay pooled"
+            );
+        }
+        state.mcp_disconnect_all().await;
+    }
+
+    #[tokio::test]
+    async fn http_keepalive_ping_reuses_session() {
+        let url = spawn_test_http_mcp_server(200).await;
+        let state = test_app_state();
+        let server = http_server(url);
+        state
+            .mcp_call_tool(None, &server, "echo", serde_json::json!({}))
+            .await
+            .expect("call ok");
+        let handshake_before = {
+            let pool = state.mcp_sessions.lock().await;
+            let session = pool.get(&server.id).expect("pooled").clone();
+            drop(pool);
+            let count = session.lock().await.handshake_count;
+            count
+        };
+        state.mcp_keepalive_http(None).await;
+        {
+            let session = {
+                let pool = state.mcp_sessions.lock().await;
+                pool.get(&server.id).expect("pooled").clone()
+            };
+            let guard = session.lock().await;
+            assert_eq!(
+                guard.handshake_count, handshake_before,
+                "live HTTP ping must not re-handshake"
+            );
+            assert!(matches!(guard.state, McpServerState::Connected));
+            assert!(guard.transport.is_some());
+        }
+        state.mcp_disconnect_all().await;
     }
 
     /// fake HTTP MCP server：始终 200，计数收到的 initialize 次数（用于断言会话复用）。

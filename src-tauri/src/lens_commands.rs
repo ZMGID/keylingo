@@ -943,6 +943,7 @@ pub(crate) async fn lens_ask(
                 &settings.lens.web_search,
                 &plan.query,
                 retry_attempts,
+                Some(&app),
             )
             .await
             {

@@ -1673,6 +1673,22 @@ impl Settings {
             None
         }
     }
+
+    /// Extra OAuth tokens stored outside `chat_tools.servers`, keyed by MCP resource URL.
+    /// The MCP manager persists a refreshed token to every slot bound to that URL
+    /// without knowing each product name.
+    pub(crate) fn detached_oauth_auth_for_url_mut(
+        &mut self,
+        resource_url: &str,
+    ) -> Option<&mut Option<ConnectorAuth>> {
+        fn url_matches(left: &str, right: &str) -> bool {
+            left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/')
+        }
+        if url_matches(self.lens.web_search.tinyfish_mcp_url.trim(), resource_url) {
+            return Some(&mut self.lens.web_search.tinyfish_mcp_auth);
+        }
+        None
+    }
 }
 
 impl Default for Settings {
