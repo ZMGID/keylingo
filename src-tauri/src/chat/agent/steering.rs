@@ -88,9 +88,10 @@ pub(crate) fn steering_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool 
 
 /// 终答边界才取 follow-up 信箱。轮首不取，避免把「下一轮再问」做成「下一步就插进工具循环」。
 pub(crate) fn follow_up_pending(env: &LoopEnv<'_>, state: &mut RunState) -> bool {
-    state
-        .pending_follow_up
-        .extend(env.host.take_follow_up_messages(&env.config.conversation_id));
+    state.pending_follow_up.extend(
+        env.host
+            .take_follow_up_messages(&env.config.conversation_id),
+    );
     !state.pending_follow_up.is_empty()
 }
 
@@ -238,7 +239,10 @@ mod tests {
         let record = build_follow_up_record(&message, 2);
         assert_eq!(record.name, FOLLOW_UP_TOOL_NAME);
         assert_eq!(
-            record.structured_content.as_ref().and_then(|value| value.get("type")),
+            record
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("type")),
             Some(&serde_json::json!("user_follow_up"))
         );
         assert_eq!(

@@ -362,21 +362,25 @@ mod tests {
         assert!(p.install_commands.iter().any(|c| {
             c.platform == "windows" && c.command.contains("cua.ai/driver/install.ps1")
         }));
-        assert!(p.install_commands.iter().any(|c| {
-            c.platform == "unix" && c.command.contains("cua.ai/driver/install.sh")
-        }));
+        assert!(p
+            .install_commands
+            .iter()
+            .any(|c| { c.platform == "unix" && c.command.contains("cua.ai/driver/install.sh") }));
         let office = catalog_plugin("officecli").unwrap();
-        assert!(office.install_commands.iter().any(|c| {
-            c.command.contains("iOfficeAI/OfficeCLI/main/install.ps1")
-        }));
-        assert!(office.install_commands.iter().any(|c| {
-            c.command.contains("iOfficeAI/OfficeCLI/main/install.sh")
-        }));
+        assert!(office
+            .install_commands
+            .iter()
+            .any(|c| { c.command.contains("iOfficeAI/OfficeCLI/main/install.ps1") }));
+        assert!(office
+            .install_commands
+            .iter()
+            .any(|c| { c.command.contains("iOfficeAI/OfficeCLI/main/install.sh") }));
         let ego = catalog_plugin("ego-lite").unwrap();
         assert!(ego
             .install_commands
             .iter()
-            .any(|c| c.platform == "macos" && c.command.contains("npx skills add citrolabs/ego-lite")));
+            .any(|c| c.platform == "macos"
+                && c.command.contains("npx skills add citrolabs/ego-lite")));
         assert!(p.uses_shared_skill_dirs());
         assert!(office.uses_shared_skill_dirs());
         assert!(!ego.uses_shared_skill_dirs());

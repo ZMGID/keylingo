@@ -501,7 +501,10 @@ mod tests {
     #[test]
     fn apply_fork_title_suffix_appends_once() {
         assert_eq!(apply_fork_title_suffix("吉林天气", false), "吉林天气");
-        assert_eq!(apply_fork_title_suffix("吉林天气", true), "吉林天气（分支）");
+        assert_eq!(
+            apply_fork_title_suffix("吉林天气", true),
+            "吉林天气（分支）"
+        );
         assert_eq!(
             apply_fork_title_suffix("吉林天气（分支）", true),
             "吉林天气（分支）"

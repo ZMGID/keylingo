@@ -213,7 +213,9 @@ pub fn chat_skills_uninstall(app: AppHandle, id: String) -> Result<(), String> {
     let dir = candidates
         .into_iter()
         .find(|path| path.is_dir())
-        .ok_or_else(|| "技能不存在或不可删除（仅 ~/.kivio/skills 与旧个人目录可删除）".to_string())?;
+        .ok_or_else(|| {
+            "技能不存在或不可删除（仅 ~/.kivio/skills 与旧个人目录可删除）".to_string()
+        })?;
     fs::remove_dir_all(&dir).map_err(|err| format!("删除技能失败: {err}"))?;
     Ok(())
 }

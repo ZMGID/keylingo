@@ -2151,10 +2151,7 @@ mod conversation_workspace_tests {
             first_message_match(&conv, "知识库").expect("content hit");
         assert_eq!(field, "content");
         assert_eq!(message_id, "m2");
-        assert!(
-            snippet.contains("知识库"),
-            "snippet={snippet}"
-        );
+        assert!(snippet.contains("知识库"), "snippet={snippet}");
 
         let (field, message_id, snippet) =
             first_message_match(&conv, "wasm 加载").expect("reasoning hit");

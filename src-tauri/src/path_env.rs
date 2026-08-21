@@ -1217,14 +1217,8 @@ mod tests {
 
     #[test]
     fn normalize_apple_locale_drops_script_tag() {
-        assert_eq!(
-            normalize_apple_locale("zh_Hans_CN"),
-            Some("zh_CN".into())
-        );
-        assert_eq!(
-            normalize_apple_locale("zh_Hant_TW"),
-            Some("zh_TW".into())
-        );
+        assert_eq!(normalize_apple_locale("zh_Hans_CN"), Some("zh_CN".into()));
+        assert_eq!(normalize_apple_locale("zh_Hant_TW"), Some("zh_TW".into()));
         assert_eq!(normalize_apple_locale("en_US"), Some("en_US".into()));
         assert_eq!(normalize_apple_locale("zh-Hans-CN"), Some("zh_CN".into()));
         assert_eq!(normalize_apple_locale("en"), None);

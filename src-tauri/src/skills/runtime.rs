@@ -47,9 +47,7 @@ impl SkillRunCache {
         scan_paths: &[String],
     ) -> Result<&SkillRegistry, String> {
         let project_cwd = self.project_cwd.clone();
-        self.registry_or_build(|| {
-            build_registry_in(app, scan_paths, project_cwd.as_deref())
-        })
+        self.registry_or_build(|| build_registry_in(app, scan_paths, project_cwd.as_deref()))
     }
 
     /// Build-once core of `registry_for`, factored out so the caching invariant

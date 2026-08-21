@@ -25,8 +25,9 @@ const OFFICIAL_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 const SKILLS_INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const OFFICIAL_INSTALL_OUTPUT_CAP: usize = 8_000;
 
-static OFFICIAL_SKILL_SYNC: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static OFFICIAL_SKILL_SYNC: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -381,7 +382,11 @@ pub async fn run_official_install(id: &str) -> Result<PluginActionResult, String
     let script = catalog
         .host_install_command()
         .ok_or_else(|| "当前系统暂不支持自动安装该插件".to_string())?;
-    if !catalog.install_commands.iter().any(|cmd| cmd.command == script) {
+    if !catalog
+        .install_commands
+        .iter()
+        .any(|cmd| cmd.command == script)
+    {
         return Err("安装失败，请稍后重试。".to_string());
     }
 
@@ -394,9 +399,7 @@ pub async fn run_official_install(id: &str) -> Result<PluginActionResult, String
         .kill_on_drop(true)
         .no_console_window();
 
-    let child = cmd
-        .spawn()
-        .map_err(|_| "无法开始安装".to_string())?;
+    let child = cmd.spawn().map_err(|_| "无法开始安装".to_string())?;
     let output = tokio::time::timeout(OFFICIAL_INSTALL_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| "安装超时（10 分钟）。可再点一次安装。".to_string())?
@@ -1030,7 +1033,8 @@ fn spawn_official_skill_sync(plugin_id: &str) {
     if !official_skills_need_install(catalog) {
         return;
     }
-    let Some(bin) = resolve_binary(plugin_id).or_else(|| resolve_binary_for_status(plugin_id)) else {
+    let Some(bin) = resolve_binary(plugin_id).or_else(|| resolve_binary_for_status(plugin_id))
+    else {
         return;
     };
     if !claim_official_skill_sync(catalog.id) {

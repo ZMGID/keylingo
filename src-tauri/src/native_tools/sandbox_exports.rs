@@ -651,7 +651,10 @@ mod tests {
         .expect("export");
         assert_eq!(exported.len(), 1);
         assert_eq!(
-            exported[0].path.file_name().and_then(|value| value.to_str()),
+            exported[0]
+                .path
+                .file_name()
+                .and_then(|value| value.to_str()),
             Some("销售报表.xlsx")
         );
         assert!(dir.join("销售报表.xlsx").is_file());

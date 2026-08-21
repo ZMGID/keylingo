@@ -260,7 +260,10 @@ mod tests {
     fn daemon_instructions_omit_blank_set_and_global_prompt() {
         let instructions =
             build_external_daemon_instructions("  ", Some("   "), "", "/home/me/proj");
-        assert!(!instructions.contains("## Set instructions"), "{instructions}");
+        assert!(
+            !instructions.contains("## Set instructions"),
+            "{instructions}"
+        );
         assert!(!instructions.contains("## Memory"), "{instructions}");
         assert_eq!(instructions, cwd_hint("/home/me/proj"));
     }

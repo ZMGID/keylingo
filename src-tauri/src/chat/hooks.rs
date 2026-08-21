@@ -691,7 +691,12 @@ mod tests {
         ));
         let (dispatcher, failures) =
             dispatcher(&[hook], dir.path().to_path_buf()).expect("dispatcher");
-        dispatcher.dispatch(HookEvent::AgentEnd, Some("write_file"), Some(2), Some("call-1"));
+        dispatcher.dispatch(
+            HookEvent::AgentEnd,
+            Some("write_file"),
+            Some(2),
+            Some("call-1"),
+        );
         dispatcher.drain().await;
 
         let payload: serde_json::Value =
@@ -923,18 +928,15 @@ mod tests {
 
     #[tokio::test]
     async fn http_non_2xx_is_reported() {
-        let url = spawn_http_once("500 Internal Server Error", std::time::Duration::ZERO, None)
-            .await;
+        let url =
+            spawn_http_once("500 Internal Server Error", std::time::Duration::ZERO, None).await;
         let (dispatcher, failures) =
             dispatcher(&[http_hook(&url, "POST")], std::env::temp_dir()).expect("dispatcher");
         dispatcher.dispatch(HookEvent::AgentEnd, None, None, None);
         dispatcher.drain().await;
         let failure = failures.try_recv().expect("failure reported");
         let message = failure["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("500"),
-            "unexpected message: {message}"
-        );
+        assert!(message.contains("500"), "unexpected message: {message}");
     }
 
     #[tokio::test]
@@ -946,10 +948,7 @@ mod tests {
         dispatcher.drain().await;
         let failure = failures.try_recv().expect("3xx must fail");
         let message = failure["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("302"),
-            "unexpected message: {message}"
-        );
+        assert!(message.contains("302"), "unexpected message: {message}");
     }
 
     #[tokio::test]
@@ -963,8 +962,7 @@ mod tests {
         .await;
         let mut slow = http_hook(&url, "POST");
         slow.timeout_ms = 60_000;
-        let (dispatcher, failures) =
-            dispatcher(&[slow], std::env::temp_dir()).expect("dispatcher");
+        let (dispatcher, failures) = dispatcher(&[slow], std::env::temp_dir()).expect("dispatcher");
         dispatcher.dispatch(HookEvent::AgentEnd, None, None, None);
         for _ in 0..200 {
             if accepted.load(Ordering::SeqCst) {

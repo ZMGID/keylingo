@@ -449,11 +449,9 @@ mod tests {
         assert!(classify("UsageLimitExceeded: quota", None, "", "codex")
             .user_message
             .contains("用量上限"));
-        assert!(
-            classify("ResponseTooManyFailedAttempts", None, "", "codex")
-                .user_message
-                .contains("多次重连")
-        );
+        assert!(classify("ResponseTooManyFailedAttempts", None, "", "codex")
+            .user_message
+            .contains("多次重连"));
     }
 
     #[test]

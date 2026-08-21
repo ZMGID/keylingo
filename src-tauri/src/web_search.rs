@@ -1652,7 +1652,8 @@ mod tests {
 
     #[test]
     fn tinyfish_mcp_parses_content_json() {
-        let raw = r#"{"results":[{"title":"Docs","url":"https://docs.tinyfish.ai/","snippet":"MCP"}]}"#;
+        let raw =
+            r#"{"results":[{"title":"Docs","url":"https://docs.tinyfish.ai/","snippet":"MCP"}]}"#;
         let results = parse_tinyfish_mcp_payload(raw, None, 5);
         assert_eq!(results[0].url, "https://docs.tinyfish.ai/");
     }

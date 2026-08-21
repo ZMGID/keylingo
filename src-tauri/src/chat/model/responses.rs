@@ -1035,10 +1035,7 @@ fn handle_responses_stream_event(
                                     let Some(citation) = grok_source_citation(source) else {
                                         continue;
                                     };
-                                    if !state
-                                        .sources_fallback
-                                        .iter()
-                                        .any(|c| c.url == citation.url)
+                                    if !state.sources_fallback.iter().any(|c| c.url == citation.url)
                                     {
                                         state.sources_fallback.push(citation);
                                     }

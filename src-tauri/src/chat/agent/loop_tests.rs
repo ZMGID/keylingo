@@ -546,10 +546,7 @@ fn test_provider(base_url: &str) -> ModelProvider {
     }
 }
 
-fn test_run_config<'a>(
-    state: &'a AppState,
-    base_url: &str,
-) -> AgentRunConfig<'a> {
+fn test_run_config<'a>(state: &'a AppState, base_url: &str) -> AgentRunConfig<'a> {
     AgentRunConfig {
         state,
         conversation_id: "conversation".to_string(),
@@ -1358,12 +1355,7 @@ async fn tool_round_keeps_serial_only_tools_non_overlapping() {
     assert_eq!(executor.max_active(), 1);
     assert_eq!(
         executor.events(),
-        vec![
-            "start:bash",
-            "finish:bash",
-            "start:bash",
-            "finish:bash"
-        ]
+        vec!["start:bash", "finish:bash", "start:bash", "finish:bash"]
     );
     assert_eq!(result.response_messages.len(), 2);
     assert_eq!(
@@ -2509,7 +2501,11 @@ async fn run_loop_follow_up_waits_until_final_answer() {
         .expect("follow-up after tools completes");
 
     let bodies = server.captured_bodies();
-    assert_eq!(bodies.len(), 3, "tool round + final answer + follow-up round");
+    assert_eq!(
+        bodies.len(),
+        3,
+        "tool round + final answer + follow-up round"
+    );
     assert!(
         !bodies[0].contains("README"),
         "follow-up must not enter the tool-call round: {}",

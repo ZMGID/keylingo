@@ -6,8 +6,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::{
     native_tools::{
-        resolve_tool_write_path, FileMutationResult, NativeToolWorkspace,
-        ReadFileResult,
+        resolve_tool_write_path, FileMutationResult, NativeToolWorkspace, ReadFileResult,
     },
     settings::{ChatMcpServer, WebSearchProvider},
     state::AppState,

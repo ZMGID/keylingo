@@ -971,7 +971,9 @@ fn web_search_from_gemini_value(value: &Value) -> Option<BuiltinWebSearch> {
             else {
                 continue;
             };
-            let Some(indices) = support.get("groundingChunkIndices").and_then(Value::as_array)
+            let Some(indices) = support
+                .get("groundingChunkIndices")
+                .and_then(Value::as_array)
             else {
                 continue;
             };
@@ -981,7 +983,8 @@ fn web_search_from_gemini_value(value: &Value) -> Option<BuiltinWebSearch> {
                     continue;
                 };
                 if result.citations[citation_index].snippet.is_none() {
-                    result.citations[citation_index].snippet = Some(text.chars().take(400).collect());
+                    result.citations[citation_index].snippet =
+                        Some(text.chars().take(400).collect());
                 }
             }
         }
@@ -1383,7 +1386,10 @@ mod tests {
         assert_eq!(parsed.citations[0].url, "https://a.com");
         assert_eq!(parsed.citations[0].snippet.as_deref(), Some("长春今天晴。"));
         assert_eq!(parsed.citations[1].title, "https://b.com");
-        assert_eq!(parsed.citations[1].snippet.as_deref(), Some("来源见气象台。"));
+        assert_eq!(
+            parsed.citations[1].snippet.as_deref(),
+            Some("来源见气象台。")
+        );
         assert!(parsed.citations[0].published_date.is_none());
     }
 

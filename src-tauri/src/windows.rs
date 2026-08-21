@@ -324,7 +324,11 @@ const CHAT_LAST_ROUTE_FILE: &str = "chat-last-route.json";
 /// 路由校验与前端 `normalizeStoredChatRoute` 保持一致：
 /// 必须是 chat 路由；settings / onboarding 不算「上次对话」。
 fn is_valid_chat_last_route(route: &str) -> bool {
-    let path = route.trim_start_matches('#').split('?').next().unwrap_or("");
+    let path = route
+        .trim_start_matches('#')
+        .split('?')
+        .next()
+        .unwrap_or("");
     if path != "chat" && !path.starts_with("chat/") {
         return false;
     }

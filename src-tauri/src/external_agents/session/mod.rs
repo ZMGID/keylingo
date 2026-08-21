@@ -290,7 +290,9 @@ pub fn find_live_binding_by_native_path(
         };
         let candidate = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         let matches = if cfg!(target_os = "windows") {
-            candidate.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy())
+            candidate
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&target.to_string_lossy())
         } else {
             candidate == target
         };

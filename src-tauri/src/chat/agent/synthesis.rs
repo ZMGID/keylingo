@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 use crate::chat::types::{ChatMessageSegment, ChatMessageSegmentKind, ToolCallStatus};
 
 use super::finalize::{
-    empty_synthesis_fallback_response, segment_phase_for_agent_phase,
-    stopped_generation_content, synthesis_failed_fallback_response, RunResultBuilder,
+    empty_synthesis_fallback_response, segment_phase_for_agent_phase, stopped_generation_content,
+    synthesis_failed_fallback_response, RunResultBuilder,
 };
 use super::loop_::{LoopEnv, RunState};
 use super::planning::{
@@ -12,8 +12,8 @@ use super::planning::{
 };
 use super::recovery::{self, RecoveryAction};
 use super::stop::{
-    empty_assistant_response_error, final_assistant_api_message,
-    merge_reasoning, sanitize_assistant_text_response,
+    empty_assistant_response_error, final_assistant_api_message, merge_reasoning,
+    sanitize_assistant_text_response,
 };
 use super::stream::{ChatStreamOutput, WebSearchCardTracker};
 use super::types::{AgentPhase, AgentRunConfig, AgentRunResult, AgentStreamPolicy};

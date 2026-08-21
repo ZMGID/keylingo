@@ -185,7 +185,9 @@ fn credentials_path() -> Result<PathBuf, String> {
 fn mapping_u64(map: &Mapping, key: &str) -> Option<u64> {
     let value = map.get(serde_yaml::Value::String(key.to_string()))?;
     match value {
-        serde_yaml::Value::Number(n) => n.as_u64().or_else(|| n.as_i64().and_then(|v| u64::try_from(v).ok())),
+        serde_yaml::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|v| u64::try_from(v).ok())),
         serde_yaml::Value::String(text) => text.trim().parse().ok(),
         _ => None,
     }
@@ -261,10 +263,7 @@ fn dotenv_has_key(text: &str, api_key_env: &str) -> bool {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let line = line
-            .strip_prefix("export ")
-            .map(str::trim)
-            .unwrap_or(line);
+        let line = line.strip_prefix("export ").map(str::trim).unwrap_or(line);
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -325,7 +324,10 @@ pub(crate) fn credentials_ready_for_provider(provider: &str, cwd: Option<&Path>)
     .0
 }
 
-fn parse_settings_snapshot(text: &str, settings_path: &Path) -> Result<DshPluginSettingsSnapshot, String> {
+fn parse_settings_snapshot(
+    text: &str,
+    settings_path: &Path,
+) -> Result<DshPluginSettingsSnapshot, String> {
     let root = if text.trim().is_empty() {
         Mapping::new()
     } else {
@@ -353,7 +355,8 @@ fn parse_settings_snapshot(text: &str, settings_path: &Path) -> Result<DshPlugin
             max_output_bytes_default: DEFAULT_MAX_OUTPUT_BYTES,
         },
         agent_loop: DshAgentLoopSettings {
-            max_parallel_tool_calls: agent_loop.and_then(|map| mapping_u64(map, "maxParallelToolCalls")),
+            max_parallel_tool_calls: agent_loop
+                .and_then(|map| mapping_u64(map, "maxParallelToolCalls")),
             max_parallel_tool_calls_default: DEFAULT_MAX_PARALLEL,
         },
         web_search: DshWebSearchSettings {
@@ -470,8 +473,8 @@ fn write_credential(api_key_env: &str, api_key: &str) -> Result<(), String> {
 
 fn write_credential_at(path: &Path, api_key_env: &str, key: &str) -> Result<(), String> {
     let mut root = if path.exists() {
-        let text = std::fs::read_to_string(path)
-            .map_err(|err| format!("读取 dsh 凭据失败：{err}"))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|err| format!("读取 dsh 凭据失败：{err}"))?;
         match serde_yaml::from_str::<serde_yaml::Value>(&text)
             .map_err(|err| format!("解析 dsh 凭据失败：{err}"))?
         {
@@ -569,8 +572,8 @@ fn parse_plugin_manifest(
     out: &mut BTreeMap<String, DshPluginEntry>,
 ) -> Result<(), String> {
     let neutralized = neutralize_js_tags(text);
-    let value: serde_yaml::Value = serde_yaml::from_str(&neutralized)
-        .map_err(|err| format!("解析插件清单失败：{err}"))?;
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&neutralized).map_err(|err| format!("解析插件清单失败：{err}"))?;
     collect_entries(&value, out);
     Ok(())
 }
@@ -652,7 +655,10 @@ fn find_bundle_patch(start: &Path, package: &str) -> Option<PathBuf> {
     None
 }
 
-fn merge_manifest_file(path: &Path, out: &mut BTreeMap<String, DshPluginEntry>) -> Result<(), String> {
+fn merge_manifest_file(
+    path: &Path,
+    out: &mut BTreeMap<String, DshPluginEntry>,
+) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("读取 {} 失败：{err}", path.display()))?;
     parse_plugin_manifest(&text, out)
@@ -758,7 +764,8 @@ fn open_settings_file(app: &AppHandle, path: &Path) -> Result<(), String> {
 pub fn chat_dsh_plugin_settings_get() -> Result<DshPluginSettingsSnapshot, String> {
     let path = settings_path()?;
     let text = if path.exists() {
-        std::fs::read_to_string(&path).map_err(|err| format!("读取 dsh settings.yaml 失败：{err}"))?
+        std::fs::read_to_string(&path)
+            .map_err(|err| format!("读取 dsh settings.yaml 失败：{err}"))?
     } else {
         String::new()
     };
@@ -781,10 +788,7 @@ pub fn chat_dsh_plugin_settings_save(
             write_credential(&snapshot.web_search.api_key_env, api_key)?;
         }
     }
-    parse_settings_snapshot(
-        &std::fs::read_to_string(&path).unwrap_or_default(),
-        &path,
-    )
+    parse_settings_snapshot(&std::fs::read_to_string(&path).unwrap_or_default(), &path)
 }
 
 #[tauri::command]
@@ -856,7 +860,10 @@ fn parse_native_models(value: Option<&serde_yaml::Value>) -> Vec<DshNativeProvid
 fn selected_default_model(root: &Mapping) -> (Option<String>, Option<String>) {
     for key in ["agent-default-model", "api-gateway"] {
         if let Some(map) = namespace_map(root, key) {
-            return (mapping_string(map, "provider"), mapping_string(map, "model"));
+            return (
+                mapping_string(map, "provider"),
+                mapping_string(map, "model"),
+            );
         }
     }
     (None, None)
@@ -1025,13 +1032,15 @@ fn reasoning_matches(existing: Option<&serde_yaml::Value>, decl: &ReasoningDecl)
             if map.len() != levels.len() {
                 return false;
             }
-            levels.iter().all(|(key, wire)| {
-                match map.get(serde_yaml::Value::String(key.clone())) {
+            levels.iter().all(
+                |(key, wire)| match map.get(serde_yaml::Value::String(key.clone())) {
                     Some(serde_yaml::Value::Null) => wire.is_none(),
-                    Some(serde_yaml::Value::String(value)) => wire.as_deref() == Some(value.as_str()),
+                    Some(serde_yaml::Value::String(value)) => {
+                        wire.as_deref() == Some(value.as_str())
+                    }
                     _ => false,
-                }
-            })
+                },
+            )
         }
         _ => false,
     }
@@ -1059,7 +1068,13 @@ fn model_caps_from_config_json(config_json: &str) -> BTreeMap<String, ModelCaps>
             .and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("image")));
         let reasoning = model.get("reasoningEfforts").and_then(parse_reasoning_decl);
-        caps.insert(id.to_string(), ModelCaps { has_image, reasoning });
+        caps.insert(
+            id.to_string(),
+            ModelCaps {
+                has_image,
+                reasoning,
+            },
+        );
     }
     caps
 }
@@ -1127,7 +1142,11 @@ fn apply_model_caps(models: &mut serde_yaml::Value, caps: &BTreeMap<String, Mode
     changed
 }
 
-fn apply_provider_caps(root: &mut Mapping, route: &str, caps: &BTreeMap<String, ModelCaps>) -> bool {
+fn apply_provider_caps(
+    root: &mut Mapping,
+    route: &str,
+    caps: &BTreeMap<String, ModelCaps>,
+) -> bool {
     let Some(pi) = root
         .get_mut(serde_yaml::Value::String(LLM_PI_AI_NS.to_string()))
         .and_then(serde_yaml::Value::as_mapping_mut)
@@ -1189,7 +1208,9 @@ fn sync_kivio_model_capabilities_at(
 
 /// 把 Kivio 已保存的模型 `input` / `reasoningEfforts` 写回已存在的 `settings.yaml` 路由。
 /// 不新建供应商，也不写密钥；官方 web 的贴图和 effort 选择只认这些字段。
-pub(crate) fn sync_kivio_model_capabilities(providers: &[ExternalCliProvider]) -> Result<(), String> {
+pub(crate) fn sync_kivio_model_capabilities(
+    providers: &[ExternalCliProvider],
+) -> Result<(), String> {
     let Ok(path) = settings_path() else {
         return Ok(());
     };
@@ -1351,10 +1372,16 @@ web-search-deepseek:
         let entries = parse_inventory_dump(dump).unwrap();
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[0].id, "group-tools");
-        assert!(entries.iter().any(|entry| entry.id == "include" && entry.enabled));
-        assert!(entries.iter().any(|entry| entry.id == "tool-bash" && !entry.enabled));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == "include" && entry.enabled));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == "tool-bash" && !entry.enabled));
         // !!js 清成 null：不当成 disabled。
-        assert!(entries.iter().any(|entry| entry.id == "tool-web" && entry.enabled));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == "tool-web" && entry.enabled));
     }
 
     #[test]
@@ -1373,8 +1400,12 @@ node: warning this is not yaml
 "#;
         let entries = parse_inventory_dump(dump).unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|entry| entry.id == "timer" && entry.enabled));
-        assert!(entries.iter().any(|entry| entry.id == "tool-bash" && !entry.enabled));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == "timer" && entry.enabled));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == "tool-bash" && !entry.enabled));
     }
 
     #[test]
@@ -1492,7 +1523,9 @@ llm-pi-ai:
                 },
             ]
         );
-        assert!(native_provider_detail_at(&settings, &credentials, DSH_OFFICIAL_PROVIDER_ID).is_err());
+        assert!(
+            native_provider_detail_at(&settings, &credentials, DSH_OFFICIAL_PROVIDER_ID).is_err()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1596,7 +1629,10 @@ llm-pi-ai:
 
     #[test]
     fn dotenv_parser_accepts_export_quotes_and_skips_empty() {
-        assert!(dotenv_has_key("DEEPSEEK_API_KEY=sk-test\n", "DEEPSEEK_API_KEY"));
+        assert!(dotenv_has_key(
+            "DEEPSEEK_API_KEY=sk-test\n",
+            "DEEPSEEK_API_KEY"
+        ));
         assert!(dotenv_has_key(
             "export DEEPSEEK_API_KEY=sk-test\n",
             "DEEPSEEK_API_KEY"
@@ -1610,7 +1646,10 @@ llm-pi-ai:
             "DEEPSEEK_API_KEY"
         ));
         assert!(!dotenv_has_key("DEEPSEEK_API_KEY=\n", "DEEPSEEK_API_KEY"));
-        assert!(!dotenv_has_key("DEEPSEEK_API_KEY=\"\"\n", "DEEPSEEK_API_KEY"));
+        assert!(!dotenv_has_key(
+            "DEEPSEEK_API_KEY=\"\"\n",
+            "DEEPSEEK_API_KEY"
+        ));
         assert!(!dotenv_has_key(
             "# DEEPSEEK_API_KEY=sk-test\n",
             "DEEPSEEK_API_KEY"

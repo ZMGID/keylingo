@@ -68,7 +68,10 @@ fn project_skill_dirs_inner(cwd: &Path, skip: &[PathBuf]) -> Vec<PathBuf> {
         if current.join(".git").exists() {
             break;
         }
-        if home.as_ref().is_some_and(|home| paths_eq(&current, Some(home))) {
+        if home
+            .as_ref()
+            .is_some_and(|home| paths_eq(&current, Some(home)))
+        {
             break;
         }
         let Some(parent) = current.parent() else {
@@ -408,7 +411,10 @@ description: Test skill.
         let base = std::env::temp_dir().join(format!("kivio-agents-walk-{}", uuid::Uuid::new_v4()));
         let root = base.join("repo");
         let nested = root.join("packages").join("app");
-        write_skill(&root.join(".agents").join("skills").join("root-skill"), "root-skill");
+        write_skill(
+            &root.join(".agents").join("skills").join("root-skill"),
+            "root-skill",
+        );
         write_skill(
             &nested.join(".agents").join("skills").join("nested-skill"),
             "nested-skill",
@@ -442,7 +448,8 @@ description: Test skill.
 
     #[test]
     fn same_id_prefers_project_over_agents() {
-        let base = std::env::temp_dir().join(format!("kivio-agents-dedup-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("kivio-agents-dedup-{}", uuid::Uuid::new_v4()));
         let project_root = base.join("project").join(".agents").join("skills");
         let agents_root = base.join("home").join(".agents").join("skills");
         write_skill(&project_root.join("shared"), "shared");
@@ -474,7 +481,8 @@ description: Test skill.
 
     #[test]
     fn same_source_duplicate_id_warns() {
-        let base = std::env::temp_dir().join(format!("kivio-agents-samedup-{}", uuid::Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("kivio-agents-samedup-{}", uuid::Uuid::new_v4()));
         let one = base.join("a");
         let two = base.join("b");
         write_skill(&one.join("shared"), "shared");

@@ -8,10 +8,6 @@ use crate::chat::agent::prepare as agent_prepare;
 use crate::chat::attachments::{
     compose_text_attachments_for_api, text_attachments_from_attachments,
 };
-use crate::chat::{
-    chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
-    Conversation, ToolCallStatus,
-};
 use crate::chat::model_metadata::{
     chat_max_output_tokens_for_model, model_can_generate_images_directly,
 };
@@ -20,6 +16,10 @@ use crate::chat::vision::{
     analyze_chat_images_with_auxiliary_model, auxiliary_vision_model_for_images,
     auxiliary_vision_tool_record, finish_auxiliary_vision_tool_record,
     user_content_with_auxiliary_vision_result,
+};
+use crate::chat::{
+    chat_missing_model_error, format_chat_missing_api_key_error, session_model_for_conversation,
+    Conversation, ToolCallStatus,
 };
 use crate::skills;
 use crate::state::AppState;

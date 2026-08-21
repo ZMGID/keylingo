@@ -170,10 +170,7 @@ struct CommandPlan {
 
 impl CommandPlan {
     fn direct(program: impl Into<String>, args: &[&str]) -> Self {
-        Self::owned(
-            program,
-            args.iter().map(|arg| (*arg).to_string()).collect(),
-        )
+        Self::owned(program, args.iter().map(|arg| (*arg).to_string()).collect())
     }
 
     fn owned(program: impl Into<String>, args: Vec<String>) -> Self {
@@ -1458,15 +1455,11 @@ mod tests {
             HostPlatform::Windows,
         )
         .unwrap();
-        assert!(update
+        assert!(update.args.contains(&"@deepseek-ai/dsh@latest".to_string()));
+        assert!(!update
             .args
-            .contains(&"@deepseek-ai/dsh@latest".to_string()));
-        assert!(
-            !update
-                .args
-                .iter()
-                .any(|arg| arg.contains("cordis-plugin-group"))
-        );
+            .iter()
+            .any(|arg| arg.contains("cordis-plugin-group")));
     }
 
     #[test]
@@ -1480,9 +1473,9 @@ mod tests {
         assert!(dsh
             .args
             .contains(&"--registry=https://registry.npmjs.org/".to_string()));
-        assert!(dsh.args.contains(
-            &"--@deepseek-ai:registry=https://registry.npmjs.org/".to_string()
-        ));
+        assert!(dsh
+            .args
+            .contains(&"--@deepseek-ai:registry=https://registry.npmjs.org/".to_string()));
 
         let claude = npm_install_plan("@anthropic-ai/claude-code", &[], HostPlatform::Unix);
         assert!(claude

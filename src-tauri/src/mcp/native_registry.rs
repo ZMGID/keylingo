@@ -41,9 +41,9 @@ use super::types::{
     native_kill_background_tool, native_knowledge_search_tool, native_list_dir_tool,
     native_memory_modify_tool, native_memory_read_tool, native_memory_search_tool,
     native_present_artifacts_tool, native_read_file_tool, native_run_command_tool,
-    native_save_assistant_tool, native_search_files_tool,
-    native_web_fetch_tool, native_web_search_tool, native_write_file_tool, ChatToolArtifact,
-    ChatToolDefinition, McpToolCallResult,
+    native_save_assistant_tool, native_search_files_tool, native_web_fetch_tool,
+    native_web_search_tool, native_write_file_tool, ChatToolArtifact, ChatToolDefinition,
+    McpToolCallResult,
 };
 
 /// Gate signature mirrors `list_native_builtin_tool_defs(native,

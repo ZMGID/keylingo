@@ -841,9 +841,7 @@ pub fn wire_tool_name(source: &str, name: &str, id: &str, server_id: Option<&str
     match source {
         // Native and Skill tools are model-facing APIs owned by Kivio. Keep their names
         // aligned with the system prompt so models can call exactly what we instruct.
-        "native" | "skill" | "mixer" => {
-            apply_reserved_wire_alias(&sanitize_openai_tool_name(name))
-        }
+        "native" | "skill" | "mixer" => apply_reserved_wire_alias(&sanitize_openai_tool_name(name)),
         _ => sanitize_openai_tool_name(&compact_mcp_tool_id(id, server_id)),
     }
 }
