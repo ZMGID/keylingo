@@ -490,6 +490,51 @@ fn emit_thread_item(
                 result,
             );
         }
+        // 0.148 schema：插件 / 动态工具；以前落进 `_` 整张卡消失。
+        Some("dynamicToolCall") => {
+            let tool = map_str(item, "tool").unwrap_or("tool");
+            let name = match map_str(item, "namespace") {
+                Some(ns) => format!("{ns}__{tool}"),
+                None => tool.to_string(),
+            };
+            let input = item.get("arguments").cloned().unwrap_or(Value::Null);
+            emit_named_tool(
+                item,
+                emitted_tools,
+                sink,
+                include_result,
+                &name,
+                input,
+                dynamic_tool_result(item),
+            );
+        }
+        Some("imageGeneration") => {
+            let prompt = map_str(item, "revisedPrompt").unwrap_or("");
+            emit_named_tool(
+                item,
+                emitted_tools,
+                sink,
+                include_result,
+                "image_generation",
+                json!({ "prompt": prompt }),
+                image_generation_result(item),
+            );
+        }
+        Some("sleep") => {
+            let duration_ms = item.get("durationMs").cloned().unwrap_or(Value::Null);
+            emit_named_tool(
+                item,
+                emitted_tools,
+                sink,
+                include_result,
+                "sleep",
+                json!({ "durationMs": duration_ms }),
+                match duration_ms.as_u64() {
+                    Some(ms) => format!("{ms}ms"),
+                    None => duration_ms.to_string(),
+                },
+            );
+        }
         Some("collabToolCall") | Some("collabAgentToolCall") => {
             emit_collab_tool_call(item, emitted_tools, sink, include_result);
         }
@@ -519,6 +564,39 @@ fn emit_thread_item(
         }
         _ => {}
     }
+}
+
+fn dynamic_tool_result(item: &serde_json::Map<String, Value>) -> String {
+    if let Some(items) = item.get("contentItems").and_then(Value::as_array) {
+        let texts: Vec<String> = items
+            .iter()
+            .filter_map(|entry| json_str(entry, "text").map(str::to_string))
+            .collect();
+        if !texts.is_empty() {
+            return texts.join("\n");
+        }
+    }
+    if item_failed(item) {
+        return "failed".to_string();
+    }
+    item.get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed")
+        .to_string()
+}
+
+fn image_generation_result(item: &serde_json::Map<String, Value>) -> String {
+    if let Some(path) = map_str(item, "savedPath") {
+        return path.to_string();
+    }
+    let result = value_as_text(item.get("result"));
+    if !result.is_empty() {
+        return result;
+    }
+    item.get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed")
+        .to_string()
 }
 
 fn file_change_result(item: &serde_json::Map<String, Value>) -> String {
@@ -2466,12 +2544,18 @@ mod tests {
 
     #[test]
     fn parse_reconnect_progress_reads_attempt_and_max() {
-        assert_eq!(parse_reconnect_progress("Reconnecting... 7/50"), Some((7, 50)));
+        assert_eq!(
+            parse_reconnect_progress("Reconnecting... 7/50"),
+            Some((7, 50))
+        );
         assert_eq!(
             parse_reconnect_progress("Reconnecting... 1/5 (stream disconnected before completion)"),
             Some((1, 5))
         );
-        assert_eq!(parse_reconnect_progress("正在重新连接 12/50"), Some((12, 50)));
+        assert_eq!(
+            parse_reconnect_progress("正在重新连接 12/50"),
+            Some((12, 50))
+        );
         assert_eq!(parse_reconnect_progress("stream disconnected"), None);
     }
 
@@ -2916,6 +3000,99 @@ mod tests {
             event,
             UnifiedAgentEvent::ToolResult { tool_use_id, is_error, .. }
                 if tool_use_id == "fc-1" && !*is_error
+        )));
+    }
+
+    #[test]
+    fn dynamic_tool_call_emits_namespaced_tool() {
+        let started = json!({
+            "item": {
+                "type": "dynamicToolCall",
+                "id": "dyn-1",
+                "tool": "summarize",
+                "namespace": "office",
+                "status": "inProgress",
+                "arguments": { "file": "a.docx" }
+            }
+        });
+        let completed = json!({
+            "item": {
+                "type": "dynamicToolCall",
+                "id": "dyn-1",
+                "tool": "summarize",
+                "namespace": "office",
+                "status": "completed",
+                "arguments": { "file": "a.docx" },
+                "contentItems": [{ "type": "inputText", "text": "ok" }]
+            }
+        });
+        let mut events = Vec::new();
+        let mut tools = HashSet::new();
+        map_codex_notification("item/started", &started, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        map_codex_notification("item/completed", &completed, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::ToolUse { id, name, .. })
+                if id == "dyn-1" && name == "office__summarize"
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { tool_use_id, content, is_error, .. }
+                if tool_use_id == "dyn-1" && content == "ok" && !*is_error
+        )));
+    }
+
+    #[test]
+    fn image_generation_and_sleep_emit_tool_cards() {
+        let image = json!({
+            "item": {
+                "type": "imageGeneration",
+                "id": "img-1",
+                "status": "completed",
+                "result": "done",
+                "revisedPrompt": "a cat",
+                "savedPath": "/tmp/cat.png"
+            }
+        });
+        let sleep = json!({
+            "item": {
+                "type": "sleep",
+                "id": "slp-1",
+                "status": "completed",
+                "durationMs": 1500
+            }
+        });
+        let mut events = Vec::new();
+        let mut tools = HashSet::new();
+        map_codex_notification("item/started", &image, &mut tools, &mut |e| events.push(e));
+        map_codex_notification("item/completed", &image, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        map_codex_notification("item/started", &sleep, &mut tools, &mut |e| events.push(e));
+        map_codex_notification("item/completed", &sleep, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolUse { name, .. } if name == "image_generation"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { tool_use_id, content, .. }
+                if tool_use_id == "img-1" && content == "/tmp/cat.png"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolUse { name, .. } if name == "sleep"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { tool_use_id, content, .. }
+                if tool_use_id == "slp-1" && content == "1500ms"
         )));
     }
 

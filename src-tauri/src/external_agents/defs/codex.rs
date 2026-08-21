@@ -1,3 +1,9 @@
+//! Codex CLI external agent: `codex app-server` JSON-RPC (stdio).
+//!
+//! Handshake / turn / steer last verified against the 0.148.0 schema (`thread/start` still
+//! takes the kebab `sandbox` string; `turn/start` uses `sandboxPolicy`). 0.149 rejects the
+//! obsolete `permissionProfile` field — Kivio never sent it.
+
 use super::super::types::{
     PromptInputFormat, RuntimeAgentDef, RuntimeBuildOptions, RuntimeContext, StreamFormat,
 };
