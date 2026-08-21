@@ -93,6 +93,11 @@ pub const CLAUDE_ROUTING_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_MODEL",
+    // 2.1.236：新会话默认模型（`/model` 仍覆盖并持久化）。不列入路由键的话，
+    // 切供应商时会留下上一套的默认模型。
+    // **不要**放进 `CLAUDE_CHAT_MODEL_ENV_KEYS`：那一轮会从 overlay / live
+    // settings 把空串盖回去，路由空值等于没写。
+    "ANTHROPIC_DEFAULT_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -107,6 +112,9 @@ pub const CLAUDE_ROUTING_ENV_KEYS: &[&str] = &[
 ];
 
 /// 聊天选模相关的 env 键：供应商没给值时，从已有 overlay / live settings 补回来。
+///
+/// `ANTHROPIC_DEFAULT_MODEL` 不在这里：它是新会话默认，不是当前聊天选中的模型。
+/// 放进来会把路由键刚补的空串盖掉，切供应商后 Auto 仍走上一套中转的默认模型。
 const CLAUDE_CHAT_MODEL_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
@@ -3211,6 +3219,35 @@ max_context_size = 200000
         assert_eq!(value["env"]["ANTHROPIC_MODEL"], "claude-sonnet-5");
         assert_eq!(value["env"]["ANTHROPIC_BASE_URL"], "https://relay.example");
         assert_eq!(value["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_materialize_blanks_stale_default_model_instead_of_preserving_it() {
+        let root = temp_root("claude-default-model");
+        let path = root.join("claude-relay.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"env":{"ANTHROPIC_DEFAULT_MODEL":"old-relay-opus","ANTHROPIC_MODEL":"claude-sonnet-5"}}"#,
+        )
+        .unwrap();
+        let provider = ExternalCliProvider {
+            id: "relay".to_string(),
+            env: vec![crate::settings::CliEnvVar {
+                key: "ANTHROPIC_BASE_URL".to_string(),
+                value: "https://relay.example".to_string(),
+            }],
+            ..Default::default()
+        };
+        materialize_claude_to(&path, &provider).unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["env"]["ANTHROPIC_MODEL"], "claude-sonnet-5");
+        assert_eq!(
+            value["env"]["ANTHROPIC_DEFAULT_MODEL"],
+            "",
+            "切供应商后新会话默认模型不该从旧 overlay 填回来：{value}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

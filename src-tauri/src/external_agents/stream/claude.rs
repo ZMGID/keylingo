@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -455,6 +456,102 @@ fn api_retry_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
     })
 }
 
+/// `system/init.mcp_server_errors`（2.1.219）：`--mcp-config` 校验失败被跳过的条目。
+/// 终端会打 stderr 警告；SDK/宿主把 stderr 吃掉时，只有这个字段能看见。
+///
+/// 官方形状：`{name, type, message}`。`type` 是跳过类别（`unknown_type` /
+/// `url_missing_type` / `invalid_config` / `reserved_name` …），未识别的当普通跳过。
+/// 键在无错误时省略，所以空数组和缺失都不当成故障。
+fn mcp_server_errors_note(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    let errors = obj.get("mcp_server_errors")?.as_array()?;
+    if errors.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for error in errors {
+        let name = error
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("mcp");
+        let kind = error
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("invalid_config");
+        let message = error
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("skipped");
+        parts.push(format!("{name} ({kind}): {message}"));
+    }
+    if parts.len() == 1 {
+        Some(format!("MCP skipped · {}", parts[0]))
+    } else {
+        Some(format!(
+            "MCP skipped {} · {}",
+            parts.len(),
+            parts.join(" · ")
+        ))
+    }
+}
+
+const SIDECHAIN_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(350);
+const SIDECHAIN_PREVIEW_MAX_CHARS: usize = 1200;
+const SIDECHAIN_STEPS_MAX: usize = 24;
+const SIDECHAIN_STEP_MAX_CHARS: usize = 80;
+
+#[derive(Default)]
+struct SidechainProgress {
+    preview: String,
+    steps: Vec<String>,
+    last_emit: Option<Instant>,
+}
+
+fn is_claude_spawn_tool(name: &str) -> bool {
+    matches!(name, "Task" | "Agent")
+}
+
+fn clip_sidechain_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn sidechain_tool_step(name: &str, input: &Value) -> String {
+    let target = [
+        "file_path",
+        "path",
+        "command",
+        "query",
+        "pattern",
+        "description",
+        "prompt",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    let line = match target {
+        Some(target) => format!("{name} {target}"),
+        None => name.to_string(),
+    };
+    clip_sidechain_chars(&line, SIDECHAIN_STEP_MAX_CHARS)
+}
+
 /// `assistant` 帧上的 `error` 值 → (是否算「本轮失败」, 提示文案)。
 ///
 /// **协议事实**（claude 2.1.220 反查二进制核实）：`error` 与 `aborted` 挂在 assistant 帧的
@@ -535,16 +632,17 @@ struct PendingContentBlock {
 
 /// 一条帧属于哪条**消息流**（"车道"）：主线，或某个 `Task` 子会话（sidechain）。
 ///
-/// **协议事实**（claude 2.1.220，`grep -a` 反查本机二进制核实）：子 agent 的消息与主线消息
-/// 混在**同一条 stdout 流**里，唯一的区分是帧顶层的 `parent_tool_use_id`
-/// （schema `v.string().nullable()`）：非空 = 属于那个 `Task` 调用内部的子会话。CLI 自己也是
-/// 这么分的 —— 二进制里多处形如 `if(...parent_tool_use_id!==null)return;` /
+/// **协议事实**（claude 2.1.220 反查；2.1.211 起 `--forward-subagent-text` 补上
+/// 子代理 text/thinking，2.1.219 起嵌套子代理同样带这个字段）：子 agent 的消息与
+/// 主线消息混在**同一条 stdout 流**里，唯一的区分是帧顶层的 `parent_tool_use_id`
+/// （schema `v.string().nullable()`）：非空 = 属于那个 `Task`/`Agent` 调用内部的子会话。
+/// CLI 自己也是这么分的 —— 二进制里多处形如 `if(...parent_tool_use_id!==null)return;` /
 /// `parent_tool_use_id===null&&…message.model!==…`（连"当前模型"都只从主线读）。
 ///
 /// 实测承载该字段的帧：`assistant`（附带 `subagent_type` / `task_description`）、`user`、
-/// `tool_progress`。**`stream_event` 的九处构造点全是 `parent_tool_use_id:null`** ——
-/// 2.1.220 的子会话内容以**整块** assistant / user 帧到达，不走增量通道；但 schema 允许非空，
-/// 所以解析侧按"任何帧都可能带"处理（见 `ClaudeStreamState::lanes`）。
+/// `tool_progress`；打开 `--forward-subagent-text` + `--include-partial-messages` 后
+/// `stream_event` 也可以非空（嵌套子代理的 `parent_tool_use_id` 是派出它的那次
+/// Agent `tool_use` id，不一定是主线 Task）。
 ///
 /// 空串与缺失都算主线：真实样本里主线写的是 `"parent_tool_use_id": null`。
 fn frame_lane(obj: &serde_json::Map<String, Value>) -> Option<&str> {
@@ -635,6 +733,13 @@ pub struct ClaudeStreamState {
     /// 重复出现，且 `result` 往往还会再报一次。
     reported_assistant_errors: HashSet<String>,
     streamed_tool_use_ids: HashSet<String>,
+    /// 嵌套子代理的 tool_use id → 主线 Task/Agent id。depth-2+ 的
+    /// `parent_tool_use_id` 指向中间那次 Agent 调用，折到顶层卡片上。
+    sidechain_root: HashMap<String, String>,
+    /// 按顶层 Task/Agent id 攒的子代理预览 / 步骤。
+    sidechain_progress: HashMap<String, SidechainProgress>,
+    /// 已经报过的 `mcp_server_errors` 文案。init 每轮都发，同样的跳过只提示一次。
+    last_mcp_errors_note: Option<String>,
 }
 
 impl ClaudeStreamState {
@@ -660,6 +765,108 @@ impl ClaudeStreamState {
         sink(UnifiedAgentEvent::TextDelta { delta });
     }
 
+    fn resolve_sidechain_root(&self, parent: &str) -> String {
+        if self.streamed_tool_use_ids.contains(parent) {
+            return parent.to_string();
+        }
+        self.sidechain_root
+            .get(parent)
+            .cloned()
+            .unwrap_or_else(|| parent.to_string())
+    }
+
+    fn push_sidechain_preview(
+        &mut self,
+        parent: &str,
+        text: &str,
+        force: bool,
+        sink: &mut dyn FnMut(UnifiedAgentEvent),
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let root = self.resolve_sidechain_root(parent);
+        {
+            let progress = self.sidechain_progress.entry(root.clone()).or_default();
+            progress.preview.push_str(text);
+            let count = progress.preview.chars().count();
+            if count > SIDECHAIN_PREVIEW_MAX_CHARS {
+                let skip = count - SIDECHAIN_PREVIEW_MAX_CHARS;
+                progress.preview = progress.preview.chars().skip(skip).collect();
+            }
+        }
+        self.emit_sidechain_progress(&root, force, sink);
+    }
+
+    fn push_sidechain_step(
+        &mut self,
+        parent: &str,
+        child_id: Option<&str>,
+        name: &str,
+        input: &Value,
+        sink: &mut dyn FnMut(UnifiedAgentEvent),
+    ) {
+        let root = self.resolve_sidechain_root(parent);
+        if is_claude_spawn_tool(name) {
+            if let Some(id) = child_id.filter(|id| !id.is_empty()) {
+                self.sidechain_root.insert(id.to_string(), root.clone());
+            }
+        }
+        {
+            let progress = self.sidechain_progress.entry(root.clone()).or_default();
+            let step = sidechain_tool_step(name, input);
+            if progress
+                .steps
+                .last()
+                .map(|last| last != &step)
+                .unwrap_or(true)
+            {
+                progress.steps.push(step);
+                if progress.steps.len() > SIDECHAIN_STEPS_MAX {
+                    let drop = progress.steps.len() - SIDECHAIN_STEPS_MAX;
+                    progress.steps.drain(0..drop);
+                }
+            }
+        }
+        self.emit_sidechain_progress(&root, true, sink);
+    }
+
+    fn emit_sidechain_progress(
+        &mut self,
+        root: &str,
+        force: bool,
+        sink: &mut dyn FnMut(UnifiedAgentEvent),
+    ) {
+        let Some(progress) = self.sidechain_progress.get_mut(root) else {
+            return;
+        };
+        if progress.preview.is_empty() && progress.steps.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        if !force {
+            if let Some(last) = progress.last_emit {
+                if now.duration_since(last) < SIDECHAIN_PROGRESS_EMIT_INTERVAL {
+                    return;
+                }
+            }
+        }
+        progress.last_emit = Some(now);
+        sink(UnifiedAgentEvent::SubagentProgress {
+            task_id: root.to_string(),
+            status: "running".to_string(),
+            preview: progress.preview.clone(),
+            steps: progress.steps.clone(),
+        });
+    }
+
+    fn flush_sidechain_progress(&mut self, sink: &mut dyn FnMut(UnifiedAgentEvent)) {
+        let roots: Vec<String> = self.sidechain_progress.keys().cloned().collect();
+        for root in roots {
+            self.emit_sidechain_progress(&root, true, sink);
+        }
+    }
+
     /// 本会话已收完的 `result` 轮次数（>0 即读到过协议层完成标志）。
     pub fn completed_result_turns(&self) -> u32 {
         self.completed_result_turns
@@ -675,10 +882,10 @@ impl ClaudeStreamState {
             Some(o) => o,
             None => return,
         };
-        // 这一帧属于主线还是某个 `Task` 子会话（见 `frame_lane`）。子会话的内容**一律不进主线**：
-        // 它的正文不是给用户看的回答，它的工具调用也不是主时间线上的动作（一个 Task 里跑 20 个
-        // Read，平铺出来就是 20 张看不出层级的平级卡片）。子 agent 的产出由那个 `Task` 工具
-        // 自己的 `tool_result` 承载 —— 那条是主线帧，照常渲染。
+        // 这一帧属于主线还是某个 `Task` 子会话（见 `frame_lane`）。子会话的内容**不进主线**：
+        // 正文不是给用户看的回答，工具调用也不是主时间线上的动作。有
+        // `--forward-subagent-text` 时折成 `SubagentProgress`，挂到派出它的 Task/Agent 卡上。
+        // 子 agent 的最终产出仍由那个工具自己的 `tool_result` 承载。
         let lane = frame_lane(obj);
         let sidechain = lane.is_some();
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -703,6 +910,12 @@ impl ClaudeStreamState {
                         let commands = parse_slash_commands_from_init(value);
                         if !commands.is_empty() {
                             sink(UnifiedAgentEvent::SlashCommands { commands });
+                        }
+                        if let Some(text) = mcp_server_errors_note(obj) {
+                            if self.last_mcp_errors_note.as_deref() != Some(text.as_str()) {
+                                self.last_mcp_errors_note = Some(text.clone());
+                                sink(UnifiedAgentEvent::StatusNote { text });
+                            }
                         }
                     }
                     // claude 自己触发的上下文压缩。`compact_metadata` 在 claude 2.1.220 里是
@@ -866,8 +1079,19 @@ impl ClaudeStreamState {
                             };
                             match block.get("type").and_then(|v| v.as_str()) {
                                 Some("text") => {
-                                    // 子 agent 的自述不是主回答的一部分。
+                                    // 子 agent 的自述不是主回答；有 `--forward-subagent-text`
+                                    // 时折进派出它的 Task/Agent 卡。
                                     if sidechain {
+                                        if !self.lane(lane).text_streamed {
+                                            if let (Some(parent), Some(text)) =
+                                                (lane, block.get("text").and_then(|v| v.as_str()))
+                                            {
+                                                let parent = parent.to_string();
+                                                self.push_sidechain_preview(
+                                                    &parent, text, true, sink,
+                                                );
+                                            }
+                                        }
                                         continue;
                                     }
                                     if !self.lane(lane).text_streamed {
@@ -881,6 +1105,19 @@ impl ClaudeStreamState {
                                 Some("tool_use") => {
                                     // 子 agent 的工具调用不是主时间线上的动作。
                                     if sidechain {
+                                        if let Some(parent) = lane {
+                                            let parent = parent.to_string();
+                                            let id = block.get("id").and_then(|v| v.as_str());
+                                            let name = block
+                                                .get("name")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("tool");
+                                            let input =
+                                                block.get("input").cloned().unwrap_or(Value::Null);
+                                            self.push_sidechain_step(
+                                                &parent, id, name, &input, sink,
+                                            );
+                                        }
                                         continue;
                                     }
                                     let id = block
@@ -1042,6 +1279,9 @@ impl ClaudeStreamState {
                 // 车道是 per-turn 的：sidechain 随它的 `Task` 一起结束，主线的消息状态也会由
                 // 下一轮的 `message_start` 重建。不清的话常驻会话里每派一次子任务就多一条
                 // 永不回收的车道。
+                self.flush_sidechain_progress(sink);
+                self.sidechain_root.clear();
+                self.sidechain_progress.clear();
                 self.lanes.clear();
             }
             "error" => {
@@ -1080,11 +1320,9 @@ impl ClaudeStreamState {
 
     /// 处理一条增量事件。`lane` 来自**外层帧**的 `parent_tool_use_id`（`None` = 主线）。
     ///
-    /// claude 2.1.220 的 `stream_event` 恒为主线（九处构造点全写死 `parent_tool_use_id:null`，
-    /// 子会话内容以整块 assistant/user 帧到达），但 schema 是 `nullable()` 而非 `null` ——
-    /// 一次 CLI 升级把子会话的增量也放进来，全局单值的消息状态就会当场散架：并行子会话的
-    /// `message_start` 会互相复位「已流式发过」标志（主线正文重发一遍），块序号又都从 0 起
-    /// （工具参数串到别的卡上）。按车道寻址后这两件事在结构上不可能发生，代价是一个 HashMap。
+    /// 2.1.220 的 `stream_event` 实测恒为主线；schema 是 `nullable()` 而非恒 `null`。
+    /// 2.1.211 起 `--forward-subagent-text` + `--include-partial-messages` 会把子会话
+    /// 增量也放进来。按车道寻址后并行子会话不会互相复位「已流式发过」、也不会撞块序号。
     fn handle_stream_event(
         &mut self,
         lane: Option<&str>,
@@ -1184,6 +1422,9 @@ impl ClaudeStreamState {
                                 self.lane(lane).text_streamed = true;
                                 if !sidechain {
                                     self.emit_text(sink, text.to_string());
+                                } else if let Some(parent) = lane {
+                                    let parent = parent.to_string();
+                                    self.push_sidechain_preview(&parent, text, false, sink);
                                 }
                             }
                         }
@@ -1223,14 +1464,10 @@ impl ClaudeStreamState {
                 let Some(state) = removed else {
                     return;
                 };
-                // 子会话的工具调用不进主时间线（块已从本车道摘掉，不泄漏）。
-                if sidechain || state.block_type != "tool_use" {
+                if state.block_type != "tool_use" {
                     return;
                 }
                 let id = state.id.unwrap_or_else(|| "tool".to_string());
-                if self.streamed_tool_use_ids.contains(&id) {
-                    return;
-                }
                 let name = state.name.unwrap_or_else(|| "tool".to_string());
                 let input = if !state.input_json.trim().is_empty() {
                     serde_json::from_str(&state.input_json)
@@ -1238,6 +1475,17 @@ impl ClaudeStreamState {
                 } else {
                     state.input_value.unwrap_or(Value::Null)
                 };
+                // 子会话的工具调用不进主时间线；有转发时折进派出它的 Task/Agent 卡。
+                if sidechain {
+                    if let Some(parent) = lane {
+                        let parent = parent.to_string();
+                        self.push_sidechain_step(&parent, Some(&id), &name, &input, sink);
+                    }
+                    return;
+                }
+                if self.streamed_tool_use_ids.contains(&id) {
+                    return;
+                }
                 self.streamed_tool_use_ids.insert(id.clone());
                 sink(UnifiedAgentEvent::ToolUse { id, name, input });
             }
@@ -1320,6 +1568,45 @@ mod tests {
             UnifiedAgentEvent::SlashCommands { commands }
                 if commands.len() == 2 && commands.iter().any(|c| c.slash == "/compact")
         )));
+    }
+
+    /// 2.1.219：init 上的 `mcp_server_errors` 必须变成状态行，不能 silently drop。
+    /// 同样的清单每轮 init 都会再发一遍，只提示一次。
+    #[test]
+    fn mcp_server_errors_on_init_become_a_status_note_once() {
+        let raw = r#"{"type":"system","subtype":"init","model":"claude-sonnet-5","slash_commands":[],"mcp_server_errors":[{"name":"docs","type":"url_missing_type","message":"url server is missing type"}]}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut state = ClaudeStreamState::default();
+        let mut events = Vec::new();
+        state.handle_value(&value, &mut |e| events.push(e));
+        state.handle_value(&value, &mut |e| events.push(e));
+        let notes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                UnifiedAgentEvent::StatusNote { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "同样的 MCP 跳过被提示了两次：{events:?}");
+        assert!(
+            notes[0].contains("docs") && notes[0].contains("url_missing_type"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn empty_mcp_server_errors_are_not_a_status_note() {
+        let raw =
+            r#"{"type":"system","subtype":"init","slash_commands":[],"mcp_server_errors":[]}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut events = Vec::new();
+        ClaudeStreamState::default().handle_value(&value, &mut |e| events.push(e));
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, UnifiedAgentEvent::StatusNote { .. })),
+            "{events:?}"
+        );
     }
 
     // ---- 后台任务（Background tasks 面板的数据源）----
@@ -2129,8 +2416,12 @@ mod tests {
             r#"{"type":"assistant","error":"overloaded","message":{"id":"m-1","role":"assistant","content":[]}}"#,
             r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#,
         ]);
-        assert!(notes(&events).iter().any(|text| text == "retry 2/10 · overloaded"));
-        assert!(notes(&events).iter().any(|text| text == "retry · overloaded"));
+        assert!(notes(&events)
+            .iter()
+            .any(|text| text == "retry 2/10 · overloaded"));
+        assert!(notes(&events)
+            .iter()
+            .any(|text| text == "retry · overloaded"));
         assert!(
             errors(&events).is_empty(),
             "可重试故障不能钉 stream_error：{events:?}"
@@ -2695,6 +2986,69 @@ mod tests {
             tool_result_ids(&events),
             vec!["toolu-task-a".to_string(), "toolu-task-b".to_string()],
             "子 agent 的 tool_result 进了主线：{events:?}"
+        );
+        // 4）子代理正文/工具折进派出它的 Task 卡，而不是消失。
+        let progress: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                UnifiedAgentEvent::SubagentProgress {
+                    task_id,
+                    preview,
+                    steps,
+                    ..
+                } => Some((task_id.as_str(), preview.as_str(), steps.as_slice())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            progress
+                .iter()
+                .any(|(id, preview, steps)| *id == "toolu-task-a"
+                    && preview.contains("子 agent A")
+                    && steps.iter().any(|step| step.contains("Read"))),
+            "Task A 的过程没折进卡片：{events:?}"
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|(id, preview, steps)| *id == "toolu-task-b"
+                    && preview.contains("子 agent B")
+                    && steps
+                        .iter()
+                        .any(|step| step.contains("Read") || step.contains("b.txt"))),
+            "Task B 的过程没折进卡片：{events:?}"
+        );
+    }
+
+    /// 嵌套子代理（2.1.219）：`parent_tool_use_id` 是中间那次 Agent 调用，不是主线 Task。
+    /// 过程仍应折到顶层 Task 卡上，否则 depth-2 的正文谁也看不见。
+    #[test]
+    fn nested_sidechain_progress_folds_onto_the_root_task() {
+        let events = run(&[
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m-main"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu-task-a","name":"Task"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-task-a","message":{"id":"m-a","content":[{"type":"tool_use","id":"toolu-nested","name":"Agent","input":{"subagent_type":"Explore","prompt":"再挖一层"}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu-nested","message":{"id":"m-n","content":[{"type":"text","text":"嵌套子代理的结论"}]}}"#,
+        ]);
+        assert!(
+            texts(&events).is_empty(),
+            "嵌套子代理正文漏进了主回答：{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                UnifiedAgentEvent::SubagentProgress { task_id, preview, .. }
+                    if task_id == "toolu-task-a" && preview.contains("嵌套子代理的结论")
+            )),
+            "嵌套进度没折到顶层 Task：{events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                UnifiedAgentEvent::SubagentProgress { task_id, .. } if task_id == "toolu-nested"
+            )),
+            "嵌套进度挂到了中间那次 Agent（主线没有这张卡）：{events:?}"
         );
     }
 

@@ -3089,7 +3089,10 @@ fn child_session_id(record: &ToolCallRecord) -> Option<String> {
 }
 
 fn attach_child_session_id(record: &mut ToolCallRecord, task_id: &str) {
-    if task_id.is_empty() || background_task_id(record).as_deref() == Some(task_id) {
+    if task_id.is_empty()
+        || task_id == record.id
+        || background_task_id(record).as_deref() == Some(task_id)
+    {
         return;
     }
     if child_session_id(record).as_deref() == Some(task_id) {
@@ -3117,7 +3120,8 @@ fn find_dsh_subagent_record<'a>(
 ) -> Option<&'a mut ToolCallRecord> {
     if !task_id.is_empty() {
         if let Some(index) = tool_calls.iter().rposition(|record| {
-            background_task_id(record).as_deref() == Some(task_id)
+            record.id == task_id
+                || background_task_id(record).as_deref() == Some(task_id)
                 || child_session_id(record).as_deref() == Some(task_id)
         }) {
             return tool_calls.get_mut(index);
@@ -3428,6 +3432,50 @@ mod tests {
             record.structured_content.as_ref().unwrap()["backgroundTaskId"],
             "child-9"
         );
+    }
+
+    #[test]
+    fn claude_task_progress_matches_the_parent_tool_use_id() {
+        let mut tools = vec![ToolCallRecord {
+            id: "toolu-task-a".into(),
+            name: "Task".into(),
+            source: "external_cli".into(),
+            server_id: None,
+            arguments: "{}".into(),
+            status: ToolCallStatus::Running,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            started_at: Some(1),
+            completed_at: None,
+            round: 1,
+            sensitive: false,
+            artifacts: vec![],
+            trace_id: None,
+            span_id: None,
+            structured_content: Some(serde_json::json!({
+                "subagent_type": "Explore",
+                "prompt": "查 A"
+            })),
+        }];
+        let record = find_dsh_subagent_record(&mut tools, "toolu-task-a").expect("claude task");
+        merge_subagent_progress(
+            record,
+            "子 agent A，先读一下文件。",
+            &["Read a.txt".to_string()],
+            "running",
+            "toolu-task-a",
+        );
+        let payload = tools[0].structured_content.as_ref().unwrap();
+        assert!(
+            payload.get("childSessionId").is_none(),
+            "parent tool_use_id 不该再写成 childSessionId：{payload}"
+        );
+        assert_eq!(
+            payload["subagentProgress"]["preview"],
+            "子 agent A，先读一下文件。"
+        );
+        assert_eq!(payload["subagentProgress"]["steps"][0], "Read a.txt");
     }
 
     #[test]

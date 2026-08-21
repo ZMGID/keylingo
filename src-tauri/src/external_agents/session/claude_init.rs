@@ -183,7 +183,8 @@ pub async fn probe_claude_init(
 /// - **不起进程**（`resolved_bin` / `cwd` 仅保留签名兼容；slash 探测另走 `probe_claude_init`）
 /// - 4 档 builtin + settings/env 覆盖改写 label（展示名）
 /// - 头上多一个 `default`（Kivio Auto：不传 `--model`）
-/// - `current_model`：读 `settings.json` 的 `model` / `ANTHROPIC_MODEL`（不 spawn）
+/// - `current_model`：读 `settings.json` 的 `model` / `ANTHROPIC_MODEL` /
+///    `ANTHROPIC_DEFAULT_MODEL`（不 spawn）
 pub async fn detect_claude_models(
     _resolved_bin: &Path,
     _cwd: &Path,
@@ -442,7 +443,8 @@ pub fn map_claude_config_to_catalog_id(raw: &str) -> Option<String> {
     }
 }
 
-/// 胶囊「当前模型」：settings.json 顶层 `model`，否则 `ANTHROPIC_MODEL` / main 覆盖。
+/// 胶囊「当前模型」：settings.json 顶层 `model`，否则 `ANTHROPIC_MODEL`，再否则
+/// 2.1.236 的 `ANTHROPIC_DEFAULT_MODEL`（只影响新会话起点，`/model` 仍覆盖并持久化）。
 /// 能映射到 catalog 的返回 catalog id（便于 RuntimePicker 回填）；否则返回 raw 仅展示。
 /// 不 spawn CLI（cc-gui 同样不起进程）。
 fn claude_configured_current_model(overrides: &ClaudeModelOverrides) -> Option<String> {
@@ -468,7 +470,22 @@ fn claude_configured_current_model(overrides: &ClaudeModelOverrides) -> Option<S
     } else {
         None
     }
-    .or_else(|| overrides.main.clone())?;
+    .or_else(|| overrides.main.clone())
+    .or_else(|| {
+        normalize_non_empty(std::env::var("ANTHROPIC_DEFAULT_MODEL").ok()).or_else(|| {
+            claude_config_dir()
+                .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
+                .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+                .and_then(|root| {
+                    normalize_non_empty(
+                        root.get("env")
+                            .and_then(|env| env.get("ANTHROPIC_DEFAULT_MODEL"))
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    )
+                })
+        })
+    })?;
 
     Some(map_claude_config_to_catalog_id(&raw).unwrap_or(raw))
 }
@@ -669,6 +686,7 @@ mod tests {
         std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
         for key in [
             "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_MODEL",
             "ANTHROPIC_DEFAULT_FABLE_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -685,6 +703,18 @@ mod tests {
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 2.1.236：没有顶层 `model` / `ANTHROPIC_MODEL` 时，新会话走 `ANTHROPIC_DEFAULT_MODEL`。
+    #[test]
+    fn default_model_env_fills_current_when_no_forced_model() {
+        let _guard = env_lock();
+        let (dir, prev) = isolate_claude_config();
+        std::env::set_var("ANTHROPIC_DEFAULT_MODEL", "claude-sonnet-5");
+        let (_, current) = build_claude_model_catalog();
+        assert_eq!(current.as_deref(), Some("claude-sonnet-5"));
+        std::env::remove_var("ANTHROPIC_DEFAULT_MODEL");
+        restore_claude_config(dir, prev);
     }
 
     #[test]
@@ -732,6 +762,7 @@ mod tests {
         std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
         for key in [
             "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_MODEL",
             "ANTHROPIC_DEFAULT_FABLE_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",

@@ -15,11 +15,11 @@ const FALLBACK_MODELS: &[(&str, &str)] = &[
 
 /// Claude Code 的思考档位。大部分走 `--effort <level>`，两个例外见 `claude_thinking_args`。
 ///
-/// 全部取值均为 claude 2.1.220 本机核实（spec 第 12 条）：
-/// - `--effort` 的 `--help` 明写「(low, medium, high, xhigh, max)」；
-/// - `off` 走 `--thinking disabled`（**隐藏 flag**，见 `claude_thinking_args` 的说明）；
-/// - `ultracode` 是 `--effort` 认的一个别名，实测 CLI 自己的 `/effort` 用法串就是
-///   `Usage: /effort <low|medium|high|xhigh|max|ultracode|auto>`。
+/// 取值在 claude 2.1.220 核实、2.1.238 官方 CLI 表仍成立：
+/// - `--effort` 公开选项是 `low|medium|high|xhigh|max|ultracode`；
+/// - `off` 走 `--thinking disabled`（**隐藏 flag**，官方文档表已不列，见
+///   `claude_thinking_args`）；
+/// - `ultracode` 是 `--effort` 的取值，不是独立 flag。
 const REASONING: &[(&str, &str)] = &[
     ("default", "Default"),
     ("off", "Off (no thinking)"),
@@ -33,20 +33,21 @@ const REASONING: &[(&str, &str)] = &[
 
 /// 一个思考档位对应的启动参数。纯函数，便于单测拼装结果。
 ///
-/// 三条分支，每条的语义都在 claude 2.1.220 上核实过（spec 第 12 条：传 flag 前先核实）：
+/// 三条分支（spec 第 12 条：传 flag 前先核实）：
 ///
 /// 1. **`default` / 空 ⇒ 不传任何东西**，让 CLI 用它自己的默认档（每个模型的
 ///    `default_effort` 不同，我们不该替它决定）。
 ///
-/// 2. **`off` ⇒ `--thinking disabled`**。`--thinking <mode>` 是**隐藏 flag**（`--help`
-///    里没有），零副作用探针确认存在：不给值报 `error: option '--thinking <mode>'
-///    argument missing`，而胡编的 flag 报 `error: unknown option '--totally-bogus-flag-xyz'`。
-///    二进制里的 commander 定义是
+/// 2. **`off` ⇒ `--thinking disabled`**。`--thinking <mode>` 是**隐藏 flag**：
+///    `--help` 和官方 CLI 文档表（至少到 2.1.238）都不列它，靠 commander
+///    `.hideHelp()`。零副作用探针：不给值报 `error: option '--thinking <mode>'
+///    argument missing`，胡编 flag 报 `error: unknown option '…'`。
+///    二进制定义是
 ///    `new id("--thinking <mode>", "Thinking mode: enabled (equivalent to adaptive), disabled")
 ///     .choices(["enabled","adaptive","disabled"]).hideHelp()`，
-///    官方 Agent SDK 也是用 `{type:"disabled"}` → `--thinking disabled`。
-///    真机验收（同一 prompt、同一模型）：`--thinking enabled` 得到 2 个 thinking 块 / 3 条
-///    thinking delta，`--thinking disabled` 得到 **0 / 0**。
+///    官方 Agent SDK 也是 `{type:"disabled"}` → `--thinking disabled`。
+///    真机验收（2.1.220，同一 prompt、同一模型）：`--thinking enabled` 得到 2 个
+///    thinking 块 / 3 条 thinking delta，`--thinking disabled` 得到 **0 / 0**。
 ///    **这一档不传 `--effort`**：语义是「不要思考」，再叠一个思考强度自相矛盾。
 ///
 /// 3. **其余 ⇒ `--effort <值>`**，含 `ultracode`。
@@ -108,6 +109,11 @@ pub fn build_claude_args(
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
+        // 2.1.211：把子代理的 text / thinking 放进 stream-json；2.1.219 起深度 ≥2
+        // 的嵌套子代理也走同一条通道，帧顶层 `parent_tool_use_id` 是派出它的
+        // Agent/Task `tool_use` id。不传的话子代理只有 tool_use / tool_result，
+        // 卡片上看不到过程。官方文档表有这一项（与隐藏的 `--thinking` 不同）。
+        "--forward-subagent-text".to_string(),
     ];
     if ctx.include_partial_messages {
         args.push("--include-partial-messages".to_string());
@@ -350,7 +356,10 @@ pub const CLAUDE_AGENT_DEF: RuntimeAgentDef = RuntimeAgentDef {
     model_probe: Some(ModelProbeStrategy::ClaudeInit),
     model_probe_args: None,
     slash_strategy: super::super::types::SlashStrategy::ClaudeInit,
-    env: &[],
+    // 2.1.233：Sonnet 5 / Fable 5 / Mythos 5 / Opus 4.8 及更新模型默认拆掉
+    // TaskCreate/Get/Update/List 和 TodoWrite。Kivio 对话 Todo 条靠这些工具
+    // 驱动，必须显式要回来。用户覆盖 `env_for("claude")` 可以关掉。
+    env: &[("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")],
     max_prompt_arg_bytes: None,
     prompt_via_stdin: true,
     prompt_input_format: PromptInputFormat::StreamJson,
@@ -529,6 +538,52 @@ mod tests {
                 .count(),
             1,
             "{twice:?}"
+        );
+    }
+
+    /// 子代理正文靠 `--forward-subagent-text` 才会进 stream-json（否则只有
+    /// tool_use / tool_result）。探测路径经由 `ephemeral_probe_args` 套在同一份
+    /// argv 上，也会带上——探测只读 init，多这一个 boolean flag 无副作用。
+    #[test]
+    fn build_args_forwards_subagent_text() {
+        let args = build_claude_args(
+            &RuntimeContext {
+                extra_allowed_dirs: vec![],
+                resume_session_id: None,
+                new_session_id: Some("sess-1".to_string()),
+                include_partial_messages: true,
+            },
+            &RuntimeBuildOptions {
+                model: None,
+                reasoning: None,
+                sandbox: None,
+            },
+            None,
+        );
+        assert!(
+            args.contains(&"--forward-subagent-text".to_string()),
+            "缺了子代理转发 flag，Task 卡上看不到过程：{args:?}"
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|a| *a == "--forward-subagent-text")
+                .count(),
+            1,
+            "{args:?}"
+        );
+    }
+
+    /// 2.1.233 起新模型默认没有 Todo 工具。这一项必须在 `def.env` 里，探测和
+    /// 真回复都走 `agent_cli_command`，只写进某一条 spawn 路径会漏。
+    #[test]
+    fn spawn_env_reenables_todo_tools() {
+        assert!(
+            CLAUDE_AGENT_DEF
+                .env
+                .iter()
+                .any(|(key, value)| *key == "CLAUDE_CODE_ENABLE_TODO_TOOLS" && *value == "1"),
+            "缺 CLAUDE_CODE_ENABLE_TODO_TOOLS=1：{env:?}",
+            env = CLAUDE_AGENT_DEF.env
         );
     }
 
