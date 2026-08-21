@@ -1,4 +1,4 @@
-import { Archive, RefreshCw } from 'lucide-react'
+import { Archive, Eraser, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -14,7 +14,7 @@ import { i18n, type I18n, type Lang } from '../settings/i18n'
 import { formatTokensK } from '../utils/tokens'
 import type { ConversationContextState } from './types'
 
-const PANEL_WIDTH = 240
+const PANEL_WIDTH = 280
 const PANEL_GAP = 8
 const VIEW_MARGIN = 8
 // 弹层尽量贴底栏，限制高度，少盖住上方对话消息。
@@ -26,12 +26,15 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
 interface ContextIndicatorProps {
   contextState?: ConversationContextState | null
   messageCount?: number
+  lastMessageId?: string
   loading?: boolean
   compressing?: boolean
+  generating?: boolean
   error?: string
   usesExternalRuntime?: boolean
   onRefresh?: () => void
   onCompress?: () => void
+  onClear?: () => void
   placement?: 'up' | 'down'
   lang?: Lang
 }
@@ -76,12 +79,15 @@ function freeSliceClassName(isDark: boolean): string {
 export function ContextIndicator({
   contextState,
   messageCount = 0,
+  lastMessageId,
   loading = false,
   compressing = false,
+  generating = false,
   error = '',
   usesExternalRuntime = false,
   onRefresh,
   onCompress,
+  onClear,
   placement: _placement = 'down',
   lang = 'zh',
 }: ContextIndicatorProps) {
@@ -154,7 +160,20 @@ export function ContextIndicator({
     ? (isCliReported ? t.contextSourceCliReported : t.contextSourceCliEstimated)
     : (isProviderReported ? t.contextSourceProviderReported : t.contextSourceKivio)
   const ringRatio = usageRatio == null ? 0 : Math.max(0, Math.min(1, usageRatio))
-  const canCompress = Boolean(onCompress) && !compressing && !loading && messageCount > 2
+  const lastClearUntilId = (
+    contextState?.clear_boundaries ?? contextState?.clearBoundaries ?? []
+  ).at(-1)?.source_until_message_id
+    ?? (contextState?.clear_boundaries ?? contextState?.clearBoundaries ?? []).at(-1)?.sourceUntilMessageId
+    ?? null
+  const liveContextEmpty = lastMessageId != null && lastMessageId === lastClearUntilId
+  const canCompress = Boolean(onCompress) && !compressing && !loading && messageCount > 2 && !liveContextEmpty
+  const canClear = Boolean(onClear)
+    && !compressing
+    && !loading
+    && !generating
+    && messageCount > 0
+    && lastMessageId != null
+    && !liveContextEmpty
   const compressLabel = isExternalContext
     ? (compressing ? t.contextCliCompacting : t.contextCliCompact)
     : (compressing ? t.contextCompressing : t.contextCompress)
@@ -263,6 +282,22 @@ export function ContextIndicator({
               <Archive size={13} strokeWidth={1.9} />
               <span>{compressLabel}</span>
             </button>
+            {onClear && (
+              <button
+                type="button"
+                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-neutral-200 dark:hover:bg-neutral-800"
+                aria-label={t.contextClearAria}
+                title={t.contextClearAria}
+                onClick={() => {
+                  onClear()
+                  setOpen(false)
+                }}
+                disabled={!canClear}
+              >
+                <Eraser size={13} strokeWidth={1.9} />
+                <span>{t.contextClear}</span>
+              </button>
+            )}
           </div>
 
           <div className="relative mb-1">

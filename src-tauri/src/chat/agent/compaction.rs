@@ -1644,23 +1644,11 @@ fn context_included_indices(conversation: &Conversation, summary_start: usize) -
 /// 与 L2 run 结束写回（commands.rs）**共用**，防止两处累积口径分叉。
 /// 找不到 `until_id` → 仅返回旧 ids（防御，不 panic）。
 pub(crate) fn accumulate_source_ids(conversation: &Conversation, until_id: &str) -> Vec<String> {
-    let prev = conversation
-        .context_state
-        .summary
-        .as_ref()
-        .filter(|s| !s.stale);
+    let prev = crate::chat::commands::context::active_summary(conversation);
     let mut ids = prev
         .map(|s| s.source_message_ids.clone())
         .unwrap_or_default();
-    let summary_start = prev
-        .and_then(|s| {
-            conversation
-                .messages
-                .iter()
-                .position(|m| m.id == s.source_until_message_id)
-        })
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
+    let summary_start = crate::chat::commands::context::context_replay_start_index(conversation);
     let Some(until_idx) = conversation.messages.iter().position(|m| m.id == until_id) else {
         return ids;
     };
@@ -1699,20 +1687,8 @@ async fn compact_conversation_inner(
     trigger: &str,
     focus: Option<&str>,
 ) -> Result<(), String> {
-    // 上一份落盘 summary 之后才进 old_segment；其之前已被摘要覆盖，不重复进。
-    let summary_start = conversation
-        .context_state
-        .summary
-        .as_ref()
-        .filter(|s| !s.stale)
-        .and_then(|s| {
-            conversation
-                .messages
-                .iter()
-                .position(|m| m.id == s.source_until_message_id)
-        })
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
+    // 上一份落盘 summary / 清空切点之后才进 old_segment；其之前不重复进。
+    let summary_start = crate::chat::commands::context::context_replay_start_index(conversation);
 
     // 参与压缩的消息：summary_start 之后、且**未被多答组排除**的原始下标（与
     // build_chat_api_messages 同谓词——排除臂不进 replay，也不该进摘要输入/token 预算）。
@@ -1755,11 +1731,7 @@ async fn compact_conversation_inner(
     };
     let window = context_window_for_model(Some(&provider), &model).0;
 
-    let previous_summary = conversation
-        .context_state
-        .summary
-        .as_ref()
-        .filter(|s| !s.stale)
+    let previous_summary = crate::chat::commands::context::active_summary(conversation)
         .map(|s| s.content.clone());
     let serialized_head = serialize_chat_messages_for_summary(&old_segment);
     let message_id = source_until_message_id.clone();
@@ -1861,19 +1833,7 @@ fn session_model_for(conversation: &Conversation) -> crate::settings::SessionMod
 /// 落盘路径「是否有可压缩旧段」判定（供 `should_auto_compress_context` 用）：
 /// 在上一份未过期 summary 之后、按 `RECENT_KEEP_TOKENS` 尾窗切分后，是否还存在 old_segment。
 pub(crate) fn has_compressible_old_segment(conversation: &Conversation) -> bool {
-    let summary_start = conversation
-        .context_state
-        .summary
-        .as_ref()
-        .filter(|s| !s.stale)
-        .and_then(|s| {
-            conversation
-                .messages
-                .iter()
-                .position(|m| m.id == s.source_until_message_id)
-        })
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
+    let summary_start = crate::chat::commands::context::context_replay_start_index(conversation);
     // 与 compact_conversation_inner 同口径：过滤多答排除臂后再判断是否还有可摘要旧段。
     let included = context_included_indices(conversation, summary_start);
     token_split_over_indices(&conversation.messages, &included, RECENT_KEEP_TOKENS).is_some()
@@ -2838,6 +2798,24 @@ mod tests {
         let conversation = test_conversation(messages);
         // 无旧 summary → 从头累积到 until_id。
         assert_eq!(accumulate_source_ids(&conversation, "b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn accumulate_source_ids_starts_after_context_clear() {
+        let messages: Vec<ChatMessage> = ["a", "b", "c"]
+            .iter()
+            .map(|id| chat_msg(id, "user", "x"))
+            .collect();
+        let mut conversation = test_conversation(messages);
+        conversation
+            .context_state
+            .clear_boundaries
+            .push(crate::chat::types::ContextClearBoundaryRecord {
+                id: "clr".to_string(),
+                source_until_message_id: "a".to_string(),
+                created_at: 1,
+            });
+        assert_eq!(accumulate_source_ids(&conversation, "c"), vec!["b", "c"]);
     }
 
     /// 构造带一个多答组（选中臂 A、排除臂 B）的会话，供批次 C 排除测试复用。

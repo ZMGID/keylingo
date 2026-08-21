@@ -33,13 +33,15 @@ export type ChatPlanStatePayload = { mode: ChatPlanMode, status: ChatPlanStatus,
 
 export type ChatCompactionBoundaryPayload = { id: string, sourceUntilMessageId: string, displayAfterMessageId: string | null, tokenEstimateBefore: number, tokenEstimateAfter: number, summaryContent: string, trigger: string, createdAt: number, };
 
+export type ChatContextClearBoundaryPayload = { id: string, sourceUntilMessageId: string, createdAt: number, };
+
 export type ChatContextUsageSegmentPayload = { id: string, label: string, estimatedTokens: number, color: string | null, };
 
 export type ChatFileLedgerPayload = { readFiles: Array<string>, modifiedFiles: Array<string>, omittedCount: number, };
 
 export type ChatContextSummaryPayload = { id: string, content: string, sourceMessageIds: Array<string>, sourceUntilMessageId: string, tokenEstimateBefore: number, tokenEstimateAfter: number, createdAt: number, providerId: string, model: string, stale: boolean, fileLedger: ChatFileLedgerPayload | null, };
 
-export type ChatContextStatePayload = { estimatedInputTokens: number, contextWindowTokens: number | null, contextWindowEstimated: boolean, usageRatio: number | null, status: string, segments: Array<ChatContextUsageSegmentPayload>, lastMeasuredAt: number, lastCompressedAt: number | null, compressedMessageCount: number, compressionCount: number, summary: ChatContextSummaryPayload | null, compactionBoundaries: Array<ChatCompactionBoundaryPayload>, warning: string | null, contextSource: string | null, tokenCountSource: string | null, sessionInputTokens: number | null, sessionOutputTokens: number | null, externalAgentId: string | null, externalModel: string | null, };
+export type ChatContextStatePayload = { estimatedInputTokens: number, contextWindowTokens: number | null, contextWindowEstimated: boolean, usageRatio: number | null, status: string, segments: Array<ChatContextUsageSegmentPayload>, lastMeasuredAt: number, lastCompressedAt: number | null, compressedMessageCount: number, compressionCount: number, summary: ChatContextSummaryPayload | null, compactionBoundaries: Array<ChatCompactionBoundaryPayload>, clearBoundaries: Array<ChatContextClearBoundaryPayload>, warning: string | null, contextSource: string | null, tokenCountSource: string | null, sessionInputTokens: number | null, sessionOutputTokens: number | null, externalAgentId: string | null, externalModel: string | null, };
 
 export type ChatAskUserOptionPayload = { id: string, label: string, description: string | null, };
 

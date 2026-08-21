@@ -313,6 +313,25 @@ impl From<&crate::chat::CompactionBoundaryRecord> for ChatCompactionBoundaryPayl
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(rename_all = "camelCase")]
+pub struct ChatContextClearBoundaryPayload {
+    pub id: String,
+    pub source_until_message_id: String,
+    pub created_at: i64,
+}
+
+impl From<&crate::chat::ContextClearBoundaryRecord> for ChatContextClearBoundaryPayload {
+    fn from(value: &crate::chat::ContextClearBoundaryRecord) -> Self {
+        Self {
+            id: value.id.clone(),
+            source_until_message_id: value.source_until_message_id.clone(),
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(rename_all = "camelCase")]
 pub struct ChatContextUsageSegmentPayload {
     pub id: String,
     pub label: String,
@@ -362,6 +381,7 @@ pub struct ChatContextStatePayload {
     pub compression_count: u64,
     pub summary: Option<ChatContextSummaryPayload>,
     pub compaction_boundaries: Vec<ChatCompactionBoundaryPayload>,
+    pub clear_boundaries: Vec<ChatContextClearBoundaryPayload>,
     pub warning: Option<String>,
     pub context_source: Option<String>,
     pub token_count_source: Option<String>,
@@ -417,6 +437,7 @@ impl From<&crate::chat::ConversationContextState> for ChatContextStatePayload {
                         }),
                 }),
             compaction_boundaries: state.compaction_boundaries.iter().map(Into::into).collect(),
+            clear_boundaries: state.clear_boundaries.iter().map(Into::into).collect(),
             warning: state.warning.clone(),
             context_source: state.context_source.clone(),
             token_count_source: state.token_count_source.clone(),

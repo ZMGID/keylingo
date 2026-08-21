@@ -561,6 +561,7 @@ pub fn run() {
             chat::commands::catalog::chat_delete_set,
             chat::commands::context::chat_get_context_stats,
             chat::commands::context::chat_compress_context,
+            chat::commands::context::chat_clear_context,
             chat::commands::interaction::chat_take_external_sends,
             chat::commands::interaction::chat_set_agent_plan_mode,
             chat::commands::interaction::chat_execute_agent_plan,

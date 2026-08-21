@@ -174,9 +174,11 @@ pub(crate) fn build_for_boundary(
         .messages
         .iter()
         .position(|m| m.id == source_until_message_id);
+    let start = conversation.context_clear_start_index();
     let msgs: Vec<&ChatMessage> = match end {
-        Some(idx) => conversation.messages[..=idx].iter().collect(),
-        None => conversation.messages.iter().collect(),
+        Some(idx) if idx >= start => conversation.messages[start..=idx].iter().collect(),
+        Some(_) => Vec::new(),
+        None => conversation.messages.get(start..).map(|slice| slice.iter().collect()).unwrap_or_default(),
     };
     build_from(&msgs)
 }

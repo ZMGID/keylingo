@@ -1,4 +1,5 @@
 import type { CompactionBoundaryView } from './compactionBoundary'
+import type { ContextClearBoundaryView } from './contextClearBoundary'
 import { compactionRecordTokens } from './compactionBoundary'
 import type { MessageListItem } from './messageGroups'
 import type { ChatMessage } from './types'
@@ -15,6 +16,14 @@ export type MessageNavigatorNode =
     }
   | {
       kind: 'compaction'
+      id: string
+      targetRenderIndex: number
+      title: string
+      answerPreview: string
+      modelLabel: ''
+    }
+  | {
+      kind: 'clear'
       id: string
       targetRenderIndex: number
       title: string
@@ -68,12 +77,14 @@ function finishTurn(draft: TurnDraft | null): MessageNavigatorNode | null {
 export interface BuildMessageNavigatorNodesOptions {
   folded: MessageListItem[]
   boundaries: CompactionBoundaryView[]
+  clearBoundaries?: ContextClearBoundaryView[]
   renderIndexByKey: ReadonlyMap<string, number>
 }
 
 export function buildMessageNavigatorNodes({
   folded,
   boundaries,
+  clearBoundaries = [],
   renderIndexByKey,
 }: BuildMessageNavigatorNodesOptions): MessageNavigatorNode[] {
   const nodes: MessageNavigatorNode[] = []
@@ -104,6 +115,19 @@ export function buildMessageNavigatorNodes({
       targetRenderIndex,
       title: '已压缩此前上下文',
       answerPreview: normalizeMessageNavigatorPreview(compactionRecordTokens(boundary.record).summary),
+      modelLabel: '',
+    })
+  }
+
+  for (const boundary of clearBoundaries) {
+    const targetRenderIndex = renderIndexByKey.get(`context-clear-divider-${boundary.record.id}`)
+    if (targetRenderIndex == null) continue
+    nodes.push({
+      kind: 'clear',
+      id: `clear-${boundary.record.id}`,
+      targetRenderIndex,
+      title: '清空上下文',
+      answerPreview: '',
       modelLabel: '',
     })
   }

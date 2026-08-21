@@ -39,6 +39,17 @@ pub struct CompactionBoundaryRecord {
     pub created_at: i64,
 }
 
+/// Timeline marker for a manual context clear. Messages through
+/// `source_until_message_id` stay visible in the UI but are dropped from the
+/// model replay window and from later compaction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextClearBoundaryRecord {
+    pub id: String,
+    /// Last UI message discarded from the live model context (inclusive).
+    pub source_until_message_id: String,
+    pub created_at: i64,
+}
+
 /// Deterministic, machine-tracked record of files read/modified by tool calls
 /// in the summarized history. Rendered under the LLM summary as a factual floor
 /// so compaction can't silently forget which files an agent touched.
@@ -109,6 +120,10 @@ pub struct ConversationContextState {
     pub summary: Option<ConversationContextSummary>,
     #[serde(default)]
     pub compaction_boundaries: Vec<CompactionBoundaryRecord>,
+    /// Manual clear cutoffs, oldest → newest. The last entry is the live floor:
+    /// replay and compaction start after it. Earlier entries stay as timeline markers.
+    #[serde(default)]
+    pub clear_boundaries: Vec<ContextClearBoundaryRecord>,
     #[serde(default)]
     pub warning: Option<String>,
     /// `kivio_builtin` or `external_cli`.
@@ -528,6 +543,46 @@ pub struct Conversation {
     /// serde default ⇒ 旧对话 JSON 缺字段正常反序列化。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkOrigin>,
+}
+
+impl Conversation {
+    /// Inclusive index of the last message discarded by the latest context clear.
+    ///
+    /// If the cutoff message was deleted but later messages remain, fall back to
+    /// the last remaining message at or before the clear timestamp. If the user
+    /// rewound past the clear (cutoff gone and no later messages), returns `None`
+    /// so those restored messages re-enter the live context.
+    pub(crate) fn context_clear_until_index(&self) -> Option<usize> {
+        let last = self.context_state.clear_boundaries.last()?;
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .position(|message| message.id == last.source_until_message_id)
+        {
+            return Some(idx);
+        }
+        let has_later = self
+            .messages
+            .iter()
+            .any(|message| message.timestamp > last.created_at);
+        if !has_later {
+            return None;
+        }
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.timestamp <= last.created_at)
+            .map(|(idx, _)| idx)
+            .last()
+    }
+
+    /// First message index that still belongs to the live model context after a clear.
+    /// Equal to `len` when the cutoff is the last message (empty live window).
+    pub(crate) fn context_clear_start_index(&self) -> usize {
+        self.context_clear_until_index()
+            .map(|idx| idx + 1)
+            .unwrap_or(0)
+    }
 }
 
 /// 一次回答所用的 (provider, model) 引用。多模型一问多答的会话级模型集元素。

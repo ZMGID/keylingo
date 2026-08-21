@@ -1125,6 +1125,40 @@ const mockChatApi = {
     saveMockConversations(conversations)
     return { contextState: conversation.context_state, conversation }
   },
+
+  async clearContext(conversationId: string): Promise<{ contextState: ConversationContextState; conversation: Conversation }> {
+    const conversations = loadMockConversations()
+    const index = conversations.findIndex((item) => item.id === conversationId)
+    if (index < 0) throw new Error('Conversation not found')
+    const conversation = { ...conversations[index] }
+    const last = conversation.messages[conversation.messages.length - 1]
+    if (!last) throw new Error('没有可清空的上下文')
+    const priorClears = conversation.context_state?.clear_boundaries
+      ?? conversation.contextState?.clearBoundaries
+      ?? []
+    const lastClear = priorClears[priorClears.length - 1]
+    const lastClearUntil = lastClear?.source_until_message_id ?? lastClear?.sourceUntilMessageId
+    if (lastClearUntil === last.id) throw new Error('当前已是空上下文')
+    const boundary = {
+      id: `ctxclr_dev_${crypto.randomUUID()}`,
+      source_until_message_id: last.id,
+      created_at: nowSeconds(),
+    }
+    const baseState = estimateMockContext(conversation)
+    conversation.context_state = {
+      ...baseState,
+      summary: null,
+      compressed_message_count: 0,
+      clear_boundaries: [...priorClears, boundary],
+      compaction_boundaries: conversation.context_state?.compaction_boundaries
+        ?? conversation.contextState?.compactionBoundaries
+        ?? [],
+    }
+    conversation.contextState = conversation.context_state
+    conversations[index] = conversation
+    saveMockConversations(conversations)
+    return { contextState: conversation.context_state, conversation }
+  },
 }
 
 export const chatApi = {
@@ -1851,6 +1885,20 @@ export const chatApi = {
     }>('chat_compress_context', { conversationId })
     if (!result.success || !result.contextState || !result.conversation) {
       throw new Error(result.error || 'Failed to compress context')
+    }
+    return { contextState: result.contextState, conversation: result.conversation }
+  },
+
+  async clearContext(conversationId: string): Promise<{ contextState: ConversationContextState; conversation: Conversation }> {
+    if (!isTauriRuntime()) return mockChatApi.clearContext(conversationId)
+    const result = await invoke<{
+      success: boolean
+      contextState?: ConversationContextState
+      conversation?: Conversation
+      error?: string
+    }>('chat_clear_context', { conversationId })
+    if (!result.success || !result.contextState || !result.conversation) {
+      throw new Error(result.error || 'Failed to clear context')
     }
     return { contextState: result.contextState, conversation: result.conversation }
   },

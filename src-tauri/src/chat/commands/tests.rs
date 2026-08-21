@@ -16,9 +16,9 @@ use crate::skills;
 
 use super::catalog::{assistant_from_builder_args, strip_transcripts_for_frontend};
 use super::context::{
-    build_chat_api_messages, count_tokens_in_value, estimate_image_tokens_for_dimensions,
-    group_answer_excluded_from_context, mark_summary_stale_if_needed, resolve_usage_anchor,
-    should_auto_compress_context,
+    apply_context_clear, build_chat_api_messages, count_tokens_in_value,
+    estimate_image_tokens_for_dimensions, group_answer_excluded_from_context,
+    mark_summary_stale_if_needed, resolve_usage_anchor, should_auto_compress_context,
 };
 use super::interaction::{
     approve_agent_plan_for_execution, format_tool_approval_summary, stream_delta_event_kinds,
@@ -144,14 +144,9 @@ fn slash_trigger_rewrites_body_and_pins_skill() {
     let registry = slash_skill_registry(slash_skill_record("commit", "Commit", vec!["/commit"]));
     let chat_tools = crate::settings::ChatToolsConfig::default();
 
-    let (skill_id, rewritten) = try_apply_skill_slash_trigger(
-        &registry,
-        &chat_tools,
-        None,
-        "/commit fix login",
-        false,
-    )
-    .expect("slash trigger should match");
+    let (skill_id, rewritten) =
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/commit fix login", false)
+            .expect("slash trigger should match");
 
     assert_eq!(skill_id, "commit");
     assert!(rewritten.starts_with("[Skill: Commit]\n\n"));
@@ -166,12 +161,10 @@ fn slash_trigger_ignores_non_slash_and_unknown() {
     let chat_tools = crate::settings::ChatToolsConfig::default();
 
     assert!(
-        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "commit fix", false)
-            .is_none()
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "commit fix", false).is_none()
     );
     assert!(
-        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/unknown x", false)
-            .is_none()
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/unknown x", false).is_none()
     );
 }
 
@@ -182,8 +175,7 @@ fn slash_trigger_skips_disabled_skill() {
     chat_tools.disabled_skill_ids = vec!["commit".to_string()];
 
     assert!(
-        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/commit fix", false)
-            .is_none()
+        try_apply_skill_slash_trigger(&registry, &chat_tools, None, "/commit fix", false).is_none()
     );
 }
 
@@ -840,10 +832,7 @@ fn reconcile_orphan_tool_segments_synthesizes_cancelled_record_with_recovered_me
         .find(|r| r.id == "fc_call_function_4agzr50pp9go_1")
         .expect("synthesized record present");
     assert!(matches!(synthesized.status, ToolCallStatus::Cancelled));
-    assert_eq!(
-        synthesized.name, "bash",
-        "name recovered from api_messages"
-    );
+    assert_eq!(synthesized.name, "bash", "name recovered from api_messages");
     assert_eq!(synthesized.arguments, "{\"command\":\"echo 1\"}");
     assert_eq!(synthesized.round, 2);
     assert!(synthesized.error.is_some());
@@ -1855,6 +1844,66 @@ fn build_chat_api_messages_injects_summary_and_skips_old_raw_messages() {
     assert!(!serialized.contains("old assistant content"));
     assert!(serialized.contains("recent user content"));
     assert!(serialized.contains("recent assistant content"));
+}
+
+#[test]
+fn build_chat_api_messages_skips_cleared_messages_without_summary() {
+    let mut conversation = test_conversation_with_summary(false);
+    conversation.context_state.summary = None;
+    apply_context_clear(&mut conversation).expect("clear");
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
+        .expect("messages should build");
+    let serialized = serde_json::to_string(&messages).expect("messages serialize");
+
+    assert_eq!(messages.len(), 1, "only the system prompt remains after a tail clear");
+    assert!(!serialized.contains("Previous conversation summary"));
+    assert!(!serialized.contains("old user content"));
+    assert!(!serialized.contains("recent assistant content"));
+}
+
+#[test]
+fn build_chat_api_messages_ignores_summary_covered_by_clear() {
+    let mut conversation = test_conversation_with_summary(false);
+    apply_context_clear(&mut conversation).expect("clear drops the live summary");
+    assert!(conversation.context_state.summary.is_none());
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
+        .expect("messages should build");
+    let serialized = serde_json::to_string(&messages).expect("messages serialize");
+    assert!(!serialized.contains("Previous conversation summary"));
+    assert!(!serialized.contains("summary of older messages"));
+    assert!(!serialized.contains("recent user content"));
+}
+
+#[test]
+fn apply_context_clear_rejects_external_runtime() {
+    let mut conversation = test_conversation_with_summary(false);
+    conversation.agent_runtime.kind = crate::chat::AgentRuntimeKind::External;
+    conversation.agent_runtime.external_agent_id = Some("claude".to_string());
+    let err = apply_context_clear(&mut conversation).expect_err("external");
+    assert!(err.contains("Kivio Agent"));
+}
+
+#[test]
+fn apply_context_clear_is_idempotent_at_the_tail() {
+    let mut conversation = test_conversation_with_summary(false);
+    apply_context_clear(&mut conversation).expect("first clear");
+    let err = apply_context_clear(&mut conversation).expect_err("already clear");
+    assert!(err.contains("空上下文"));
+}
+
+#[test]
+fn rewind_past_clear_restores_live_context() {
+    let mut conversation = test_conversation_with_summary(false);
+    conversation.context_state.summary = None;
+    apply_context_clear(&mut conversation).expect("clear");
+    conversation.messages.truncate(2);
+    mark_summary_stale_if_needed(&mut conversation, 0);
+    assert!(conversation.context_state.clear_boundaries.is_empty());
+    let messages = build_chat_api_messages(None, "system", &conversation, None, None, &[])
+        .expect("messages should build");
+    let serialized = serde_json::to_string(&messages).expect("messages serialize");
+    assert!(serialized.contains("old user content"));
+    assert!(serialized.contains("old assistant content"));
 }
 
 #[test]

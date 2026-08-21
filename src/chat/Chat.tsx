@@ -155,6 +155,7 @@ import {
 } from './groupStreamingStore'
 import { compareTimelineSegments, isExternalSubagentToolCall, segmentStepNumber, segmentToolCallId, userFollowUpId, userSteerId } from './segments'
 import { latestCompactionBoundaryId, mergeCompactionContextState } from './compactionBoundary'
+import { latestClearBoundaryId, mergeClearContextState } from './contextClearBoundary'
 import { applyLiveContextUsage } from './contextPanel'
 import { measureChatSurface, onChatPerfProfiler, useChatPerfLongTaskProbe, useChatPerfRenderProbe } from './chatPerformanceProbe'
 import { ChatRouteKeepAlive } from './ChatRouteKeepAlive'
@@ -1122,6 +1123,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     ? compactingConversationIds.has(currentConversation.id)
     : false
   const [animateCompactionBoundaryId, setAnimateCompactionBoundaryId] = useState<string | null>(null)
+  const [animateClearBoundaryId, setAnimateClearBoundaryId] = useState<string | null>(null)
   const [contextError, setContextError] = useState('')
   // Hook 执行失败：非阻断警告条。ponytail: 只留最新一条 —— Hook 是旁路观测，
   // 堆一个可滚动的失败列表没有对应的用户动作。
@@ -1314,7 +1316,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   const patchContextState = useCallback((nextState: ConversationContextState) => {
     setContextState((prev) => {
-      const merged = mergeCompactionContextState(prev, nextState)
+      const merged = mergeClearContextState(prev, mergeCompactionContextState(prev, nextState))
       setCurrentConversation((conversation) => conversation
         ? { ...conversation, context_state: merged, contextState: merged }
         : conversation)
@@ -2125,6 +2127,30 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       markConversationCompacting(conversationId, false)
     }
   }, [compactingConversationIds, markConversationCompacting, patchContextState, refreshSidebar])
+
+  const handleClearContext = useCallback(async () => {
+    const conversationId = currentConversationIdRef.current
+    if (!conversationId) return
+    setContextError('')
+    try {
+      const result = await chatApi.clearContext(conversationId)
+      if (currentConversationIdRef.current === conversationId) {
+        const latestId = latestClearBoundaryId(result.contextState)
+        if (latestId) {
+          setAnimateClearBoundaryId(latestId)
+          window.setTimeout(() => {
+            setAnimateClearBoundaryId((current) => (current === latestId ? null : current))
+          }, 1800)
+        }
+        patchContextState(result.contextState)
+        refreshSidebar()
+      }
+    } catch (err) {
+      if (currentConversationIdRef.current === conversationId) {
+        setContextError(typeof err === 'string' ? err : (err as Error).message || '清空上下文失败')
+      }
+    }
+  }, [patchContextState, refreshSidebar])
 
   const finishStreamingRun = useCallback(
     async (payload: { reason?: string; conversationId?: string }) => {
@@ -4374,12 +4400,15 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       <ContextIndicator
         contextState={contextState}
         messageCount={displayMessages.length}
+        lastMessageId={displayMessages[displayMessages.length - 1]?.id}
         loading={contextLoading}
         compressing={contextCompressing}
+        generating={streamCoarse.streaming}
         error={contextError}
         usesExternalRuntime={usesExternalRuntime}
         onRefresh={handleRefreshContext}
         onCompress={handleCompressContext}
+        onClear={usesExternalRuntime ? undefined : handleClearContext}
         lang={uiLang}
       />
     ),
@@ -4388,9 +4417,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       contextError,
       contextLoading,
       contextState,
-      displayMessages.length,
+      displayMessages,
+      handleClearContext,
       handleCompressContext,
       handleRefreshContext,
+      streamCoarse.streaming,
       uiLang,
       usesExternalRuntime,
     ],
@@ -5037,11 +5068,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     contextState,
     compactionInProgress: contextCompressing,
     animateCompactionBoundaryId: animateCompactionBoundaryId,
+    animateClearBoundaryId: animateClearBoundaryId,
     lang: uiLang,
     focusMessageId,
     onFocusMessageHandled: () => setFocusMessageId(null),
   }), [
     animateCompactionBoundaryId,
+    animateClearBoundaryId,
     assistantStreamStatsByMessageId,
     contextCompressing,
     contextState,

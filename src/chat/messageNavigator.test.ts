@@ -101,6 +101,34 @@ describe('message navigator model', () => {
     expect(nodes[1]).toMatchObject({ kind: 'compaction', answerPreview: '此前摘要' })
   })
 
+  it('上下文清空生成独立特殊节点并按 render index 排序', () => {
+    const clearBoundaries = [{
+      afterIndex: 1,
+      record: {
+        id: 'clr1',
+        source_until_message_id: 'a1',
+        created_at: 10,
+      },
+    }]
+    const nodes = buildMessageNavigatorNodes({
+      folded: foldMessageGroups([
+        msg('u1', 'user', '问题一'),
+        msg('a1', 'assistant', '回答一'),
+        msg('u2', 'user', '问题二'),
+      ]),
+      boundaries: [],
+      clearBoundaries,
+      renderIndexByKey: indexes([
+        ['u1', 1],
+        ['a1', 2],
+        ['context-clear-divider-clr1', 3],
+        ['u2', 4],
+      ]),
+    })
+    expect(nodes.map((node) => node.id)).toEqual(['turn-u1', 'clear-clr1', 'turn-u2'])
+    expect(nodes[1]).toMatchObject({ kind: 'clear', title: '清空上下文' })
+  })
+
   it('阅读索引取不晚于基准线的最近节点', () => {
     const nodes = buildMessageNavigatorNodes({
       folded: foldMessageGroups([

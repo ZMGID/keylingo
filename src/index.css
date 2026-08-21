@@ -2390,6 +2390,15 @@ button.chat-composer-status-item:hover {
   color: rgba(120, 120, 120, 0.72);
 }
 
+.chat-context-clear-badge {
+  border: 1px solid rgba(120, 120, 120, 0.28);
+  border-radius: 999px;
+  padding: 2px 10px;
+  line-height: 1.4;
+  color: var(--color-neutral-500, #737373);
+  background: var(--bg-primary, transparent);
+}
+
 .chat-compaction-progress {
   display: flex;
   align-items: center;

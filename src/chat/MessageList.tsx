@@ -18,7 +18,9 @@ import { copyToClipboard } from '../utils/clipboard'
 import { CompactionDivider } from './CompactionDivider'
 import { CompactionInProgress } from './CompactionInProgress'
 import { CompactionSummaryPanel } from './CompactionSummaryPanel'
+import { ContextClearDivider } from './ContextClearDivider'
 import { resolveCompactionBoundaries, resolvePendingCompactionAfterIndex, type CompactionBoundaryView } from './compactionBoundary'
+import { resolveClearBoundaries, type ContextClearBoundaryView } from './contextClearBoundary'
 import { isExecutableAgentPlanText } from './agentPlan'
 import { foldMessageGroups } from './messageGroups'
 import {
@@ -86,6 +88,7 @@ export interface MessageListProps {
   contextState?: ConversationContextState | null
   compactionInProgress?: boolean
   animateCompactionBoundaryId?: string | null
+  animateClearBoundaryId?: string | null
   lang?: Lang
   /** 全局搜索：打开会话后滚到该消息并短暂高亮。 */
   focusMessageId?: string | null
@@ -140,6 +143,7 @@ type RenderItem =
   | { kind: 'compaction-divider'; key: string; boundary: CompactionBoundaryView; animate: boolean }
   | { kind: 'compaction-summary'; key: string; boundary: CompactionBoundaryView }
   | { kind: 'compaction-progress'; key: string; afterIndex: number }
+  | { kind: 'context-clear-divider'; key: string; boundary: ContextClearBoundaryView; animate: boolean }
 
 function measurementKey(item: RenderItem): string {
   if (item.kind === 'message') {
@@ -208,6 +212,7 @@ function MessageListBase({
   contextState = null,
   compactionInProgress = false,
   animateCompactionBoundaryId = null,
+  animateClearBoundaryId = null,
   lang = 'zh',
   focusMessageId = null,
   onFocusMessageHandled,
@@ -531,6 +536,11 @@ function MessageListBase({
     [contextState, messages],
   )
 
+  const clearBoundaries = useMemo(
+    () => resolveClearBoundaries(messages, contextState),
+    [contextState, messages],
+  )
+
   const boundariesByAfterIndex = useMemo(() => {
     const map = new Map<number, CompactionBoundaryView[]>()
     for (const boundary of boundaries) {
@@ -540,6 +550,16 @@ function MessageListBase({
     }
     return map
   }, [boundaries])
+
+  const clearBoundariesByAfterIndex = useMemo(() => {
+    const map = new Map<number, ContextClearBoundaryView[]>()
+    for (const boundary of clearBoundaries) {
+      const existing = map.get(boundary.afterIndex) ?? []
+      existing.push(boundary)
+      map.set(boundary.afterIndex, existing)
+    }
+    return map
+  }, [clearBoundaries])
 
   const folded = useMemo(() => foldMessageGroups(historyMessages), [historyMessages])
 
@@ -592,9 +612,22 @@ function MessageListBase({
       return
     }
     appendCompactionItems(list, afterIndex)
+    const clears = clearBoundariesByAfterIndex.get(afterIndex)
+    if (!clears) return
+    for (const boundary of clears) {
+      const recordId = boundary.record.id
+      list.push({
+        kind: 'context-clear-divider',
+        key: `context-clear-divider-${recordId}`,
+        boundary,
+        animate: animateClearBoundaryId === recordId,
+      })
+    }
   }, [
     appendCompactionItems,
+    animateClearBoundaryId,
     boundariesByAfterIndex,
+    clearBoundariesByAfterIndex,
     compactionInProgress,
     pendingCompactionAfterIndex,
   ])
@@ -964,8 +997,8 @@ function MessageListBase({
   const navigatorNodes = useMemo(() => {
     // targetRenderIndex 仍是「全历史逻辑下标」，导航时用 data-chat-row-index 查找。
     const renderIndexByKey = new Map(historyItems.map((item, index) => [item.key, index]))
-    return buildMessageNavigatorNodes({ folded, boundaries, renderIndexByKey })
-  }, [boundaries, folded, historyItems])
+    return buildMessageNavigatorNodes({ folded, boundaries, clearBoundaries, renderIndexByKey })
+  }, [boundaries, clearBoundaries, folded, historyItems])
   navigatorNodesRef.current = navigatorNodes
   const navigatorTurnCount = navigatorNodes.reduce(
     (count, node) => count + (node.kind === 'turn' ? 1 : 0),
@@ -1876,6 +1909,14 @@ function MessageListBase({
           )
         case 'compaction-progress':
           return <CompactionInProgress lang={lang} />
+        case 'context-clear-divider':
+          return (
+            <ContextClearDivider
+              boundary={item.boundary}
+              lang={lang}
+              animate={item.animate}
+            />
+          )
         case 'error':
           return (
             <div className="chat-motion-fade-up flex flex-col items-start gap-2 py-3">

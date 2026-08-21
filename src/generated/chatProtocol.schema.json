@@ -121,9 +121,36 @@
       ],
       "type": "object"
     },
+    "ChatContextClearBoundaryPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "sourceUntilMessageId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sourceUntilMessageId",
+        "createdAt"
+      ],
+      "type": "object"
+    },
     "ChatContextStatePayload": {
       "additionalProperties": false,
       "properties": {
+        "clearBoundaries": {
+          "items": {
+            "$ref": "#/$defs/ChatContextClearBoundaryPayload"
+          },
+          "type": "array"
+        },
         "compactionBoundaries": {
           "items": {
             "$ref": "#/$defs/ChatCompactionBoundaryPayload"
@@ -248,7 +275,8 @@
         "lastMeasuredAt",
         "compressedMessageCount",
         "compressionCount",
-        "compactionBoundaries"
+        "compactionBoundaries",
+        "clearBoundaries"
       ],
       "type": "object"
     },
@@ -1404,7 +1432,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "生成过程的**瞬态状态一行字**（当前唯一来源：claude 上游重试 `api_retry`）。\n挂在流状态行（StreamStatusLine）上而不是消息正文——正文一恢复流动前端就清掉。\n`note: None` = 显式清除。",
+          "description": "生成过程的**瞬态状态一行字**（claude `api_retry`、codex 重连进度等）。\n挂在流状态行（StreamStatusLine）上而不是消息正文——正文一恢复流动前端就清掉。\n`note: None` = 显式清除。",
           "properties": {
             "baseRevision": {
               "format": "uint64",

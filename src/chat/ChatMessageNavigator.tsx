@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Boxes } from 'lucide-react'
+import { Boxes, Eraser } from 'lucide-react'
 import { useT } from '../settings/i18n'
 import { messageNavigatorProximityWidth, type MessageNavigatorNode } from './messageNavigator'
 
@@ -135,21 +135,23 @@ function MessageNavigatorBase({
                   key={node.id}
                   type="button"
                   data-message-navigator-id={node.id}
-                  className={`chat-message-navigator-node ${active ? 'is-active' : ''} ${visibleNodeIdSet.has(node.id) ? 'is-visible' : ''} ${node.kind === 'compaction' ? 'is-compaction' : ''}`}
+                  className={`chat-message-navigator-node ${active ? 'is-active' : ''} ${visibleNodeIdSet.has(node.id) ? 'is-visible' : ''} ${node.kind === 'compaction' || node.kind === 'clear' ? 'is-compaction' : ''}`}
                   aria-current={active ? 'location' : undefined}
                   aria-label={
                     node.kind === 'compaction'
                       ? t.chatCompactionSummaryLabel
-                      : t.chatTurnLabel
-                          .replace('{n}', String(index + 1))
-                          .replace('{title}', node.title)
+                      : node.kind === 'clear'
+                        ? t.contextClearDividerAria
+                        : t.chatTurnLabel
+                            .replace('{n}', String(index + 1))
+                            .replace('{title}', node.title)
                   }
                   onClick={() => onNavigate(node)}
                   onMouseEnter={(event) => showPreview(node, event.currentTarget)}
                   onFocus={(event) => showPreview(node, event.currentTarget)}
                   onBlur={() => setPreview(null)}
                 >
-                  {node.kind === 'compaction' ? (
+                  {node.kind === 'compaction' || node.kind === 'clear' ? (
                     <span className="chat-message-navigator-compaction-mark" aria-hidden="true">
                       <span />
                       <span />
@@ -171,6 +173,7 @@ function MessageNavigatorBase({
         >
           <div className="chat-message-navigator-preview-title">
             {preview.node.kind === 'compaction' && <Boxes size={14} aria-hidden="true" />}
+            {preview.node.kind === 'clear' && <Eraser size={14} aria-hidden="true" />}
             <span>{preview.node.title || t.chatUntitledMessage}</span>
           </div>
           {preview.node.answerPreview && (

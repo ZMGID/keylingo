@@ -367,6 +367,14 @@ export interface CompactionBoundaryRecord {
   createdAt?: number
 }
 
+export interface ContextClearBoundaryRecord {
+  id: string
+  source_until_message_id?: string
+  sourceUntilMessageId?: string
+  created_at?: number
+  createdAt?: number
+}
+
 export interface ConversationContextSummary {
   id: string
   content: string
@@ -408,6 +416,8 @@ export interface ConversationContextState {
   summary?: ConversationContextSummary | null
   compaction_boundaries?: CompactionBoundaryRecord[]
   compactionBoundaries?: CompactionBoundaryRecord[]
+  clear_boundaries?: ContextClearBoundaryRecord[]
+  clearBoundaries?: ContextClearBoundaryRecord[]
   warning?: string | null
   warningMessage?: string | null
   context_source?: 'kivio_builtin' | 'external_cli' | string
