@@ -211,6 +211,7 @@ export const PROVIDER_BRANDS: Record<string, Glyph> = {
 }
 
 /** 图标选择器顺序：Coding 套餐靠前，ChatGLM 旧标不展示，魔搭/GitHub 沉底。ChatGLM 仍留在 PROVIDER_BRANDS 里，旧的手选记录还能显示。 */
+// eslint-disable-next-line react-refresh/only-export-components -- 选择器顺序与图标表同源
 export const PROVIDER_PICKER_KEYS: string[] = [
   'Kimi',
   'Zhipu',

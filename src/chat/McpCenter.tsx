@@ -323,7 +323,7 @@ export function McpCenter() {
     } finally {
       setOauthId(null)
     }
-  }, [handleTest, mutateServers])
+  }, [handleTest, mutateServers, t])
 
   const lockedNote = (kind: McpInstalledKind) =>
     kind === 'plugin' ? t.chatMcpPluginNote
