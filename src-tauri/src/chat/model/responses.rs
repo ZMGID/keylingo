@@ -395,7 +395,24 @@ impl OpenAiResponsesProvider<'_> {
     }
 
     fn responses_url(&self) -> String {
-        format!("{}/responses", self.provider.base_url.trim_end_matches('/'))
+        let base = self.provider.base_url.trim_end_matches('/');
+        // 官方 DeepSeek 文档是 `POST https://api.deepseek.com/responses`。
+        // Chat Completions 预设常带 `/v1`，直接拼接会打到 `/v1/responses`；剥掉 `/v1`。
+        // `/anthropic` 不能走这条（那边是 Messages，不是 Responses）。
+        if crate::utils::is_official_deepseek_api(base)
+            && !crate::utils::is_official_deepseek_anthropic_api(base)
+        {
+            let origin = if base.to_ascii_lowercase().ends_with("/v1") {
+                base[..base.len() - 3].trim_end_matches('/')
+            } else {
+                base
+            };
+            if origin.ends_with("/responses") {
+                return origin.to_string();
+            }
+            return format!("{origin}/responses");
+        }
+        format!("{base}/responses")
     }
 
     fn request_body(&self, request: &GenerateRequest, stream: bool) -> Value {
@@ -1198,11 +1215,16 @@ pub fn output_from_responses(
     raw: &str,
     label: &str,
 ) -> Result<GenerateOutput, ModelError> {
-    if let Some(error) = value.get("error") {
-        return Err(ModelError::new(format!(
-            "{label}: {}",
-            responses_error_message(error)
-        )));
+    // DeepSeek / OpenAI Responses 成功体带 `"error": null`，不能当成失败。
+    match value.get("error") {
+        None | Some(Value::Null) => {}
+        Some(error) if error.as_object().is_some_and(|obj| obj.is_empty()) => {}
+        Some(error) => {
+            return Err(ModelError::new(format!(
+                "{label}: {}",
+                responses_error_message(error)
+            )));
+        }
     }
     let output = value
         .get("output")
@@ -2222,6 +2244,20 @@ mod tests {
         let err = output_from_responses(&value, "{}", "Chat planning").expect_err("error");
         assert!(err.to_string().contains("boom"), "got {err}");
         assert!(!err.to_string().contains("Unknown"));
+    }
+
+    #[test]
+    fn output_from_responses_ignores_null_error_on_success() {
+        let value = serde_json::json!({
+            "status": "completed",
+            "error": serde_json::Value::Null,
+            "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "ok" }]
+            }]
+        });
+        let output = output_from_responses(&value, "{}", "test").expect("output");
+        assert_eq!(output.text, "ok");
     }
 
     /// Gap 4: error message extraction falls through message → code → type → JSON, and

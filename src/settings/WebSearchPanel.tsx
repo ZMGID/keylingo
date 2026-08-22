@@ -245,6 +245,7 @@ const PROVIDERS: ProviderDef[] = [
     baseUrlField: 'deepseekBaseUrl',
     baseUrlPlaceholder: 'https://api.deepseek.com',
     systemPromptField: 'deepseekSystemPrompt',
+    icon: '/search-icons/deepseek.svg',
   },
 ]
 

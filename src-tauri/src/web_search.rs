@@ -1297,23 +1297,79 @@ async fn search_grok(
     Ok(results)
 }
 
+/// 官方文档是 `POST {base}/responses`，`base_url` 为 `https://api.deepseek.com`（无 `/v1`）。
+/// 已带 `/responses` 的自定义地址原样使用；官方 Chat Completions 供应商常填 `/v1`，这里剥掉。
+/// 中转站的 `/v1` 不能剥——它们往往只挂了 `/v1/responses`。
 fn responses_url(base: &str) -> String {
     let base = base.trim().trim_end_matches('/');
     if base.ends_with("/responses") {
-        base.to_string()
+        return base.to_string();
+    }
+    let base = if crate::utils::is_official_deepseek_api(base)
+        && !crate::utils::is_official_deepseek_anthropic_api(base)
+        && base.to_ascii_lowercase().ends_with("/v1")
+    {
+        base[..base.len() - 3].trim_end_matches('/')
     } else {
-        format!("{base}/responses")
+        base
+    };
+    format!("{base}/responses")
+}
+
+/// Responses 成功体也带 `"error": null`（官方 DeepSeek / OpenAI 同形）。
+/// `null`、空对象、全空字段都不能当成失败，否则测试搜索会显示 `unknown error`。
+fn hosted_search_error(value: &serde_json::Value) -> Option<String> {
+    let err = value.get("error")?;
+    if err.is_null() {
+        return None;
+    }
+    for key in ["message", "code", "type"] {
+        if let Some(text) = err.get(key).and_then(|v| v.as_str()).map(str::trim) {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    if let Some(text) = err.as_str().map(str::trim) {
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    let serialized = err.to_string();
+    if serialized == "{}" || serialized == "\"\"" || serialized.is_empty() {
+        return None;
+    }
+    // `{"message":null,"code":null}` 也是成功占位，不当失败。
+    if err.as_object().is_some_and(|obj| {
+        obj.values()
+            .all(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()))
+    }) {
+        return None;
+    }
+    Some(serialized)
+}
+
+/// 文档：`status` 为 `completed` / `incomplete` / `failed`；`error` 仅在失败时有对象，成功为 `null`。
+fn hosted_search_failure(value: &serde_json::Value) -> Option<String> {
+    if let Some(message) = hosted_search_error(value) {
+        return Some(message);
+    }
+    match value.get("status").and_then(|v| v.as_str()) {
+        Some("failed") => Some("response failed".to_string()),
+        _ => None,
     }
 }
 
-fn hosted_search_error(value: &serde_json::Value) -> Option<String> {
-    let err = value.get("error")?;
-    let message = err
-        .get("message")
+fn hosted_search_incomplete_reason(value: &serde_json::Value) -> Option<&str> {
+    if value.get("status").and_then(|v| v.as_str()) != Some("incomplete") {
+        return None;
+    }
+    value
+        .pointer("/incomplete_details/reason")
         .and_then(|v| v.as_str())
-        .or_else(|| err.as_str())
-        .unwrap_or("unknown error");
-    Some(message.trim().to_string())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .or(Some("incomplete"))
 }
 
 /// DeepSeek 官方 API 的服务端 web_search：走 Responses `POST {base}/responses`，
@@ -1355,8 +1411,9 @@ async fn search_deepseek(
         "tool_choice": { "type": "web_search" },
     });
 
+    // 服务端 web_search 会连跑多轮检索 + 思考，60s 标准超时会把成功请求砍掉。
     let response = send_with_retry("DeepSeek search", retry_attempts, || {
-        with_standard_request_timeout(
+        crate::api::with_chat_request_timeout(
             state
                 .http
                 .post(url.clone())
@@ -1378,12 +1435,15 @@ async fn search_deepseek(
             raw.chars().take(500).collect::<String>()
         )
     })?;
-    if let Some(message) = hosted_search_error(&value) {
+    if let Some(message) = hosted_search_failure(&value) {
         return Err(format!("DeepSeek search: {message}"));
     }
 
     let (answer, citations) = parse_hosted_web_search_response(&value);
     if answer.is_empty() && citations.is_empty() {
+        if let Some(reason) = hosted_search_incomplete_reason(&value) {
+            return Err(format!("DeepSeek search incomplete ({reason})"));
+        }
         return Err(format!(
             "DeepSeek search returned no answer (body: {})",
             raw.chars().take(300).collect::<String>()
@@ -1471,7 +1531,13 @@ fn parse_hosted_web_search_response(value: &serde_json::Value) -> (String, Vec<S
             };
             let mut parts: Vec<String> = Vec::new();
             for chunk in content {
-                if take_text && !from_output_text {
+                // 文档：message 的 content 是 `output_text`；reasoning 是 `reasoning_text`。
+                // Grok 偶发不写 part type，无 type 时仍收 text。
+                let part_type = chunk.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let take_part = take_text
+                    && !from_output_text
+                    && (part_type.is_empty() || part_type == "output_text");
+                if take_part {
                     if let Some(text) = chunk.get("text").and_then(|v| v.as_str()) {
                         if !text.trim().is_empty() {
                             parts.push(text.trim().to_string());
@@ -1831,6 +1897,14 @@ mod tests {
             "https://api.deepseek.com/responses"
         );
         assert_eq!(
+            super::responses_url("https://api.deepseek.com/v1"),
+            "https://api.deepseek.com/responses"
+        );
+        assert_eq!(
+            super::responses_url("https://relay.example/v1"),
+            "https://relay.example/v1/responses"
+        );
+        assert_eq!(
             super::responses_url("https://relay.example/v1/responses"),
             "https://relay.example/v1/responses"
         );
@@ -1846,6 +1920,66 @@ mod tests {
             Some("web_search tool must be present in tools")
         );
         assert_eq!(super::hosted_search_error(&serde_json::json!({})), None);
+        assert_eq!(
+            super::hosted_search_error(&serde_json::json!({"error": serde_json::Value::Null})),
+            None,
+            "Responses success bodies carry error: null"
+        );
+        assert_eq!(
+            super::hosted_search_error(&serde_json::json!({"error": {}})),
+            None
+        );
+        assert_eq!(
+            super::hosted_search_error(&serde_json::json!({
+                "error": { "message": null, "code": null }
+            })),
+            None
+        );
+        assert_eq!(
+            super::hosted_search_error(&serde_json::json!({
+                "error": { "code": "server_error" }
+            }))
+            .as_deref(),
+            Some("server_error")
+        );
+        assert_eq!(
+            super::hosted_search_failure(&serde_json::json!({
+                "status": "completed",
+                "error": serde_json::Value::Null,
+                "output": []
+            })),
+            None
+        );
+        assert_eq!(
+            super::hosted_search_failure(&serde_json::json!({
+                "status": "failed",
+                "error": serde_json::Value::Null
+            }))
+            .as_deref(),
+            Some("response failed")
+        );
+        assert_eq!(
+            super::hosted_search_incomplete_reason(&serde_json::json!({
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" }
+            })),
+            Some("max_output_tokens")
+        );
+    }
+
+    #[test]
+    fn hosted_search_success_ignores_null_error_field() {
+        let value = serde_json::json!({
+            "error": serde_json::Value::Null,
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Baidu is a search engine." }]
+            }]
+        });
+        assert!(super::hosted_search_error(&value).is_none());
+        let (answer, _) = parse_hosted_web_search_response(&value);
+        assert_eq!(answer, "Baidu is a search engine.");
     }
 
     #[test]
