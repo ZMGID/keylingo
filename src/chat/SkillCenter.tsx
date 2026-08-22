@@ -730,6 +730,9 @@ export function SkillCenter({ onSkillsChanged, projectCwd }: SkillCenterProps) {
                 }`}
               >
                 {label}
+                {id === 'installed' && skills.length > 0 && (
+                  <span className="ml-1.5 text-[11px] tabular-nums text-neutral-400">{skills.length}</span>
+                )}
                 {view === id && (
                   <span className="chat-motion-tab-underline absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-[#2f6ff0] dark:bg-[#5c8df7]" />
                 )}
