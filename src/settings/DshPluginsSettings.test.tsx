@@ -69,9 +69,10 @@ describe('DshPluginsSettings', () => {
     expect(screen.getByText('已覆盖')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '恢复默认' })).toBeInTheDocument()
 
-    const timeout = screen.getByLabelText('命令超时（毫秒）')
+    const timeout = screen.getByRole('textbox', { name: '命令超时（毫秒）' })
     fireEvent.change(timeout, { target: { value: '45000' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(timeout).toHaveValue('45000')
+    fireEvent.click(await screen.findByRole('button', { name: '保存' }))
     await waitFor(() =>
       expect(chatApi.dshPluginSettingsSave).toHaveBeenCalledWith({
         shell: { timeoutMs: 45000, maxOutputBytes: null },
