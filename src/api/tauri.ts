@@ -1004,6 +1004,7 @@ export type WebSearchProviderId =
   | 'exa_mcp'
   | 'ollama'
   | 'grok'
+  | 'deepseek'
   | 'brave'
   | 'serper'
   | 'bocha'
@@ -1028,6 +1029,10 @@ export type WebSearchConfig = {
   grokModel?: string
   grokBaseUrl?: string
   grokSystemPrompt?: string
+  deepseekApiKey?: string
+  deepseekModel?: string
+  deepseekBaseUrl?: string
+  deepseekSystemPrompt?: string
   braveApiKey?: string
   braveBaseUrl?: string
   serperApiKey?: string
@@ -1477,10 +1482,35 @@ export function normalizeProviderApiFormat(apiFormat?: string): string {
 
 /**
  * 当前 provider 是否支持模型原生内置联网搜索（任务 07-23）。
- * OpenAI Responses / Gemini / Anthropic Messages 支持；Chat Completions 不支持
- * （gpt-5 在其上开 web_search 会 400）。前端据此把「内置」选项置灰。
+ * OpenAI Responses / Gemini / Anthropic Messages 支持；Chat Completions 一般不支持
+ * （gpt-5 在其上开 web_search 会 400）。例外：官方 DeepSeek API（api.deepseek.com）
+ * 即使协议仍是 Chat Completions，也可以开内置（请求改走 Responses 的服务端 web_search）。
  * 与 Rust 侧 `model_metadata::builtin_web_search_supported` 保持一致。
  */
+export function isOfficialDeepSeekApi(baseUrl?: string): boolean {
+  const raw = (baseUrl ?? '').trim()
+  if (!raw) return false
+  try {
+    const host = new URL(raw.includes('://') ? raw : `https://${raw}`).hostname.toLowerCase()
+    return host === 'api.deepseek.com'
+  } catch {
+    return false
+  }
+}
+
+export function builtinWebSearchSupported(apiFormat?: string, baseUrl?: string): boolean {
+  const kind = normalizeProviderApiFormat(apiFormat)
+  if (
+    kind === 'openai_responses' ||
+    kind === 'xai_responses' ||
+    kind === 'gemini' ||
+    kind === 'anthropic_messages'
+  ) {
+    return true
+  }
+  return kind === 'openai_chat' && isOfficialDeepSeekApi(baseUrl)
+}
+
 export type PromptCacheRetention = 'none' | 'short' | 'long'
 
 /**
@@ -1508,16 +1538,6 @@ export function promptCachingSupported(apiFormat?: string): boolean {
 /** 当前策略是否会发客户端缓存字段。 */
 export function promptCachingEnabled(request?: ProviderRequestConfig | null): boolean {
   return resolvePromptCacheRetention(request) !== 'none'
-}
-
-export function builtinWebSearchSupported(apiFormat?: string): boolean {
-  const kind = normalizeProviderApiFormat(apiFormat)
-  return (
-    kind === 'openai_responses' ||
-    kind === 'xai_responses' ||
-    kind === 'gemini' ||
-    kind === 'anthropic_messages'
-  )
 }
 
 const CHAT_TOOL_MIN_ROUNDS = 1
@@ -1746,6 +1766,11 @@ export function normalizeSettings(settings: Settings): Settings {
         grokModel: current.lens?.webSearch?.grokModel ?? 'grok-4-1-fast-non-reasoning',
         grokBaseUrl: current.lens?.webSearch?.grokBaseUrl ?? 'https://api.x.ai/v1',
         grokSystemPrompt: current.lens?.webSearch?.grokSystemPrompt
+          ?? "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations.",
+        deepseekApiKey: current.lens?.webSearch?.deepseekApiKey ?? '',
+        deepseekModel: current.lens?.webSearch?.deepseekModel ?? 'deepseek-v4-flash',
+        deepseekBaseUrl: current.lens?.webSearch?.deepseekBaseUrl ?? 'https://api.deepseek.com',
+        deepseekSystemPrompt: current.lens?.webSearch?.deepseekSystemPrompt
           ?? "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations.",
         braveApiKey: current.lens?.webSearch?.braveApiKey ?? '',
         braveBaseUrl: current.lens?.webSearch?.braveBaseUrl ?? 'https://api.search.brave.com',

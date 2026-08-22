@@ -404,16 +404,19 @@ pub(crate) fn model_can_generate_images_directly(provider: &ModelProvider, model
 
 /// 当前 provider 是否支持模型**原生内置联网搜索**（任务 07-23）。
 /// 依 `api_format`：OpenAI Responses / Gemini / Anthropic Messages 支持；OpenAI Chat
-/// Completions 不支持（gpt-5 在其上开 `web_search` 会 400）。前端据此把「内置」选项置灰。
+/// Completions 一般不支持（gpt-5 在其上开 `web_search` 会 400）。例外：官方 DeepSeek
+/// API（`api.deepseek.com`）的 Chat Completions 供应商仍可开内置——请求改走 Responses
+/// 的服务端 `web_search`（官方 Chat Completions 只收 `function` 工具）。
+/// 前端据此把「内置」选项置灰。
 pub(crate) fn builtin_web_search_supported(provider: &ModelProvider) -> bool {
     use crate::settings::ProviderApiFormat::{
-        AnthropicMessages, Gemini, OpenAiResponses, XaiResponses,
+        AnthropicMessages, Gemini, OpenAiChat, OpenAiResponses, XaiResponses,
     };
     // xAI 的 Responses 同样有服务端 web_search（还多 x_search），与 OpenAI Responses 同形。
-    matches!(
-        provider.api_format_kind(),
-        OpenAiResponses | XaiResponses | Gemini | AnthropicMessages
-    )
+    match provider.api_format_kind() {
+        OpenAiResponses | XaiResponses | Gemini | AnthropicMessages => true,
+        OpenAiChat => crate::utils::is_official_deepseek_api(&provider.base_url),
+    }
 }
 
 pub(crate) fn image_generation_model_for_session(
@@ -933,6 +936,18 @@ mod tests {
                 "should be supported: {fmt:?}"
             );
         }
+
+        p.api_format = "openai_chat".into();
+        p.base_url = "https://api.deepseek.com/v1".into();
+        assert!(
+            builtin_web_search_supported(&p),
+            "official DeepSeek Chat Completions can host-search via Responses"
+        );
+        p.base_url = "https://relay.example/v1".into();
+        assert!(
+            !builtin_web_search_supported(&p),
+            "relays must not inherit DeepSeek hosted search"
+        );
     }
 
     #[test]

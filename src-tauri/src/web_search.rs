@@ -235,6 +235,7 @@ pub fn provider_label(provider: WebSearchProvider) -> &'static str {
         WebSearchProvider::ExaMcp => "Exa MCP",
         WebSearchProvider::Ollama => "Ollama",
         WebSearchProvider::Grok => "Grok",
+        WebSearchProvider::Deepseek => "DeepSeek",
         WebSearchProvider::Brave => "Brave",
         WebSearchProvider::Serper => "Serper",
         WebSearchProvider::Bocha => "Bocha",
@@ -289,6 +290,7 @@ pub async fn search_web(
         WebSearchProvider::ExaMcp => search_exa_mcp(state, config, query).await,
         WebSearchProvider::Ollama => search_ollama(state, config, query, retry_attempts).await,
         WebSearchProvider::Grok => search_grok(state, config, query, retry_attempts).await,
+        WebSearchProvider::Deepseek => search_deepseek(state, config, query, retry_attempts).await,
         WebSearchProvider::Brave => search_brave(state, config, query, retry_attempts).await,
         WebSearchProvider::Serper => search_serper(state, config, query, retry_attempts).await,
         WebSearchProvider::Bocha => search_bocha(state, config, query, retry_attempts).await,
@@ -1261,7 +1263,7 @@ async fn search_grok(
         )
     })?;
 
-    let (answer, citations) = parse_grok_response(&value);
+    let (answer, citations) = parse_hosted_web_search_response(&value);
     if answer.is_empty() && citations.is_empty() {
         return Err(format!(
             "Grok search returned no answer (body: {})",
@@ -1295,25 +1297,154 @@ async fn search_grok(
     Ok(results)
 }
 
-/// 从 xAI Responses API（或退化的 chat completions）返回体里尽力提取「答案文本」和
-/// 「引用 URL 列表」。字段形态随版本变化，故做多路径兜底：
-/// - 答案：`output_text` → `output[].content[].text`（type=output_text）→ `choices[0].message.content`
-/// - 引用：顶层 `citations` 数组 → `output[].content[].annotations[].url`
-fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
+fn responses_url(base: &str) -> String {
+    let base = base.trim().trim_end_matches('/');
+    if base.ends_with("/responses") {
+        base.to_string()
+    } else {
+        format!("{base}/responses")
+    }
+}
+
+fn hosted_search_error(value: &serde_json::Value) -> Option<String> {
+    let err = value.get("error")?;
+    let message = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| err.as_str())
+        .unwrap_or("unknown error");
+    Some(message.trim().to_string())
+}
+
+/// DeepSeek 官方 API 的服务端 web_search：走 Responses `POST {base}/responses`，
+/// `tools: [{type:"web_search"}]`，由 DeepSeek 在服务端检索并写回 `web_search_call`。
+/// 文档：https://api-docs.deepseek.com/guides/responses_api/
+async fn search_deepseek(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.deepseek_api_key.trim();
+    if api_key.is_empty() {
+        return Err("DeepSeek API key is not configured".to_string());
+    }
+    let base = normalized_base_url(&config.deepseek_base_url, "https://api.deepseek.com");
+    let model = {
+        let trimmed = config.deepseek_model.trim();
+        if trimmed.is_empty() {
+            "deepseek-v4-flash"
+        } else {
+            trimmed
+        }
+    };
+    let system = {
+        let trimmed = config.deepseek_system_prompt.trim();
+        if trimmed.is_empty() {
+            "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations."
+        } else {
+            trimmed
+        }
+    };
+    let url = responses_url(base);
+    let body = serde_json::json!({
+        "model": model,
+        "instructions": system,
+        "input": query,
+        "tools": [ { "type": "web_search" } ],
+        "tool_choice": { "type": "web_search" },
+    });
+
+    let response = send_with_retry("DeepSeek search", retry_attempts, || {
+        with_standard_request_timeout(
+            state
+                .http
+                .post(url.clone())
+                .bearer_auth(api_key)
+                .json(&body),
+        )
+        .send()
+    })
+    .await?;
+
+    let raw = response
+        .text()
+        .await
+        .map_err(|err| format!("DeepSeek search read body: {err}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
+        format!(
+            "DeepSeek search parse JSON: {} (body: {})",
+            err,
+            raw.chars().take(500).collect::<String>()
+        )
+    })?;
+    if let Some(message) = hosted_search_error(&value) {
+        return Err(format!("DeepSeek search: {message}"));
+    }
+
+    let (answer, citations) = parse_hosted_web_search_response(&value);
+    if answer.is_empty() && citations.is_empty() {
+        return Err(format!(
+            "DeepSeek search returned no answer (body: {})",
+            raw.chars().take(300).collect::<String>()
+        ));
+    }
+
+    let mut results: Vec<WebSearchResult> = Vec::new();
+    if !answer.is_empty() {
+        results.push(WebSearchResult {
+            title: "DeepSeek answer".to_string(),
+            url: citations
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "https://www.deepseek.com".to_string()),
+            content: answer,
+            published_date: None,
+            score: None,
+        });
+    }
+    let max_results = config.max_results.clamp(1, 10) as usize;
+    for citation in citations.into_iter().take(max_results) {
+        results.push(WebSearchResult {
+            title: citation.clone(),
+            url: citation,
+            content: String::new(),
+            published_date: None,
+            score: None,
+        });
+    }
+    Ok(results)
+}
+
+fn normalize_citation_url(url: &str) -> &str {
+    let url = url.trim();
+    match url.find("#ws_call_id=") {
+        Some(idx) => url[..idx].trim_end_matches('#').trim(),
+        None => url,
+    }
+}
+
+/// 从 xAI / DeepSeek Responses API（或退化的 chat completions）返回体里尽力提取
+/// 「答案文本」和「引用 URL 列表」。字段形态随版本变化，故做多路径兜底：
+/// - 答案：`output_text` → 最后一条 `message` 的 `content[].text` → `choices[0].message.content`
+///   （跳过 `reasoning`，DeepSeek 服务端会连跑多轮 search+message）
+/// - 引用：顶层 `citations` → `url_citation` 注解 → `web_search_call.action.sources[]` / `action.url`
+fn parse_hosted_web_search_response(value: &serde_json::Value) -> (String, Vec<String>) {
     let mut answer_parts: Vec<String> = Vec::new();
     let mut citations: Vec<String> = Vec::new();
 
     let mut push_citation = |url: &str| {
-        let url = url.trim();
+        let url = normalize_citation_url(url);
         if !url.is_empty() && !citations.iter().any(|c| c == url) {
             citations.push(url.to_string());
         }
     };
 
-    // 顶层便捷字段
+    let mut from_output_text = false;
     if let Some(text) = value.get("output_text").and_then(|v| v.as_str()) {
         if !text.trim().is_empty() {
             answer_parts.push(text.trim().to_string());
+            from_output_text = true;
         }
     }
     if let Some(list) = value.get("citations").and_then(|v| v.as_array()) {
@@ -1326,16 +1457,25 @@ fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
         }
     }
 
-    // Responses API：output[].content[]
     if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
+        let mut message_texts: Vec<String> = Vec::new();
         for item in output {
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if item_type == "web_search_call" {
+                collect_web_search_action_urls(item, &mut push_citation);
+            }
+            // Grok 固件有时不写 type；DeepSeek 的 reasoning 块也带 text，不能当答案。
+            let take_text = item_type.is_empty() || item_type == "message";
             let Some(content) = item.get("content").and_then(|v| v.as_array()) else {
                 continue;
             };
+            let mut parts: Vec<String> = Vec::new();
             for chunk in content {
-                if let Some(text) = chunk.get("text").and_then(|v| v.as_str()) {
-                    if !text.trim().is_empty() {
-                        answer_parts.push(text.trim().to_string());
+                if take_text && !from_output_text {
+                    if let Some(text) = chunk.get("text").and_then(|v| v.as_str()) {
+                        if !text.trim().is_empty() {
+                            parts.push(text.trim().to_string());
+                        }
                     }
                 }
                 if let Some(annotations) = chunk.get("annotations").and_then(|v| v.as_array()) {
@@ -1346,10 +1486,17 @@ fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
                     }
                 }
             }
+            if take_text && !parts.is_empty() {
+                message_texts.push(parts.join("\n"));
+            }
+        }
+        if !from_output_text {
+            if let Some(last) = message_texts.pop() {
+                answer_parts.push(last);
+            }
         }
     }
 
-    // 退化：chat completions 形态
     if answer_parts.is_empty() {
         if let Some(text) = value
             .get("choices")
@@ -1366,6 +1513,30 @@ fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
     }
 
     (answer_parts.join("\n\n"), citations)
+}
+
+fn collect_web_search_action_urls(item: &serde_json::Value, push: &mut impl FnMut(&str)) {
+    let Some(action) = item.get("action") else {
+        return;
+    };
+    if let Some(url) = action.get("url").and_then(|v| v.as_str()) {
+        push(url);
+    }
+    let Some(sources) = action.get("sources").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for source in sources {
+        if let Some(url) = source.as_str() {
+            push(url);
+        } else if let Some(url) = source.get("url").and_then(|v| v.as_str()) {
+            push(url);
+        }
+    }
+}
+
+#[cfg(test)]
+fn parse_grok_response(value: &serde_json::Value) -> (String, Vec<String>) {
+    parse_hosted_web_search_response(value)
 }
 
 /// Render web search results into the textual context block injected into the
@@ -1413,10 +1584,11 @@ pub fn format_web_context(results: &[WebSearchResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_web_context, parse_exa_mcp_results, parse_grok_response, parse_tinyfish_mcp_payload,
-        searxng_search_url, BochaSearchResponse, BraveSearchResponse, ExaSearchResponse,
-        OllamaSearchResponse, SearxngSearchResponse, SerperSearchResponse, TavilySearchResponse,
-        TinyfishSearchResponse, WebSearchResult, ZhipuSearchResponse,
+        format_web_context, parse_exa_mcp_results, parse_grok_response,
+        parse_hosted_web_search_response, parse_tinyfish_mcp_payload, searxng_search_url,
+        BochaSearchResponse, BraveSearchResponse, ExaSearchResponse, OllamaSearchResponse,
+        SearxngSearchResponse, SerperSearchResponse, TavilySearchResponse, TinyfishSearchResponse,
+        WebSearchResult, ZhipuSearchResponse,
     };
 
     #[test]
@@ -1588,6 +1760,135 @@ mod tests {
         assert_eq!(answer, "Fallback answer.");
         // 去重：重复 URL 只保留一条
         assert_eq!(citations, vec!["https://x.ai/post"]);
+    }
+
+    #[test]
+    fn deepseek_parses_web_search_call_sources_and_url_citations() {
+        let raw = r#"{
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "rust tutorials",
+                        "sources": [
+                            { "type": "url", "url": "https://doc.rust-lang.org/book/" },
+                            "https://www.rust-lang.org/learn"
+                        ]
+                    }
+                },
+                {
+                    "type": "web_search_call",
+                    "action": { "type": "open_page", "url": "https://doc.rust-lang.org/book/ch01-00-getting-started.html" }
+                },
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Start with the official book.",
+                            "annotations": [
+                                { "type": "url_citation", "url": "https://doc.rust-lang.org/book/" }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let (answer, citations) = parse_hosted_web_search_response(&value);
+        assert_eq!(answer, "Start with the official book.");
+        assert_eq!(
+            citations,
+            vec![
+                "https://doc.rust-lang.org/book/",
+                "https://www.rust-lang.org/learn",
+                "https://doc.rust-lang.org/book/ch01-00-getting-started.html",
+            ]
+        );
+    }
+
+    #[test]
+    fn deepseek_provider_roundtrips_snake_case() {
+        let parsed: crate::settings::WebSearchProvider =
+            serde_json::from_str("\"deepseek\"").expect("provider");
+        assert_eq!(parsed, crate::settings::WebSearchProvider::Deepseek);
+        assert_eq!(
+            serde_json::to_string(&crate::settings::WebSearchProvider::Deepseek).unwrap(),
+            "\"deepseek\""
+        );
+    }
+
+    #[test]
+    fn responses_url_appends_path_unless_already_present() {
+        assert_eq!(
+            super::responses_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/responses"
+        );
+        assert_eq!(
+            super::responses_url("https://api.deepseek.com/"),
+            "https://api.deepseek.com/responses"
+        );
+        assert_eq!(
+            super::responses_url("https://relay.example/v1/responses"),
+            "https://relay.example/v1/responses"
+        );
+    }
+
+    #[test]
+    fn hosted_search_error_reads_deepseek_error_object() {
+        let value = serde_json::json!({
+            "error": { "message": "web_search tool must be present in tools", "type": "invalid_request_error" }
+        });
+        assert_eq!(
+            super::hosted_search_error(&value).as_deref(),
+            Some("web_search tool must be present in tools")
+        );
+        assert_eq!(super::hosted_search_error(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn hosted_search_skips_reasoning_and_strips_ws_call_id() {
+        let raw = r#"{
+            "output": [
+                {
+                    "type": "reasoning",
+                    "content": [{ "type": "reasoning_text", "text": "thinking out loud" }]
+                },
+                {
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "draft answer" }]
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "open_page",
+                        "url": "https://api-docs.deepseek.com/news#ws_call_id=call_99"
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Final DeepSeek answer.",
+                        "annotations": [
+                            { "type": "url_citation", "url": "https://www.deepseek.com/#ws_call_id=call_01" }
+                        ]
+                    }]
+                }
+            ]
+        }"#;
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let (answer, citations) = parse_hosted_web_search_response(&value);
+        assert_eq!(answer, "Final DeepSeek answer.");
+        assert_eq!(
+            citations,
+            vec![
+                "https://api-docs.deepseek.com/news",
+                "https://www.deepseek.com/",
+            ]
+        );
     }
 
     #[test]

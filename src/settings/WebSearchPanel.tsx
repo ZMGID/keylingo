@@ -28,6 +28,11 @@ const DEFAULT_WEB_SEARCH: WebSearchConfig = {
   grokBaseUrl: 'https://api.x.ai/v1',
   grokSystemPrompt:
     "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations.",
+  deepseekApiKey: '',
+  deepseekModel: 'deepseek-v4-flash',
+  deepseekBaseUrl: 'https://api.deepseek.com',
+  deepseekSystemPrompt:
+    "You are a helpful search assistant. Search the web to find accurate and up-to-date information for the user's query. Provide a comprehensive answer with citations.",
   braveApiKey: '',
   braveBaseUrl: 'https://api.search.brave.com',
   serperApiKey: '',
@@ -56,6 +61,7 @@ type ProviderDef = {
     | 'exaApiKey'
     | 'ollamaApiKey'
     | 'grokApiKey'
+    | 'deepseekApiKey'
     | 'braveApiKey'
     | 'serperApiKey'
     | 'bochaApiKey'
@@ -74,6 +80,8 @@ type ProviderDef = {
     | 'zhipuBaseUrl'
     | 'tinyfishBaseUrl'
     | 'searxngBaseUrl'
+    | 'grokBaseUrl'
+    | 'deepseekBaseUrl'
   /** base 输入框占位符（也是官方默认值）。 */
   baseUrlPlaceholder?: string
   /** 可编辑 MCP endpoint（写入 exaMcpUrl / tinyfishMcpUrl）。 */
@@ -82,8 +90,11 @@ type ProviderDef = {
   /** 地址栏下方说明：keyless MCP / 自建实例。 */
   urlHint?: 'exaMcp' | 'tinyfishMcp' | 'searxng'
   supportsDepth?: boolean
-  /** 模型驱动搜索（Grok）：额外显示 型号 / 自定义网址 / 系统提示。 */
+  /** 模型驱动搜索（Grok / DeepSeek）：额外显示 型号 / 自定义网址 / 系统提示。 */
   modelBased?: boolean
+  modelField?: 'grokModel' | 'deepseekModel'
+  modelPlaceholder?: string
+  systemPromptField?: 'grokSystemPrompt' | 'deepseekSystemPrompt'
   /** 本地品牌图标路径（public/），无则回退到文字标。 */
   icon?: string
 }
@@ -214,7 +225,26 @@ const PROVIDERS: ProviderDef[] = [
     keyField: 'grokApiKey',
     keyPlaceholder: 'xai-...',
     modelBased: true,
+    modelField: 'grokModel',
+    modelPlaceholder: 'grok-4-1-fast-non-reasoning',
+    baseUrlField: 'grokBaseUrl',
+    baseUrlPlaceholder: 'https://api.x.ai/v1',
+    systemPromptField: 'grokSystemPrompt',
     icon: '/search-icons/grok.png',
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    site: 'https://api-docs.deepseek.com/guides/responses_api/',
+    apiKeyUrl: 'https://platform.deepseek.com/api_keys',
+    keyField: 'deepseekApiKey',
+    keyPlaceholder: 'sk-...',
+    modelBased: true,
+    modelField: 'deepseekModel',
+    modelPlaceholder: 'deepseek-v4-flash',
+    baseUrlField: 'deepseekBaseUrl',
+    baseUrlPlaceholder: 'https://api.deepseek.com',
+    systemPromptField: 'deepseekSystemPrompt',
   },
 ]
 
@@ -613,30 +643,31 @@ export function WebSearchPanel({ t, lang, webSearch, onChange }: WebSearchPanelP
               />
             )}
 
-            {selected.modelBased && (
+            {selected.modelBased && selected.modelField && selected.systemPromptField && (
               <>
                 <SettingRow label={t.webSearchModel} stack>
                   <Input
-                    value={config.grokModel || ''}
-                    onChange={(value) => onChange({ grokModel: value })}
-                    placeholder="grok-4-1-fast-non-reasoning"
+                    value={String(config[selected.modelField] || '')}
+                    onChange={(value) => onChange({ [selected.modelField!]: value } as Partial<WebSearchConfig>)}
+                    placeholder={selected.modelPlaceholder}
                     mono
                     className="w-full"
                   />
                 </SettingRow>
                 <SettingRow label={t.webSearchCustomUrl} stack>
                   <Input
-                    value={config.grokBaseUrl || ''}
-                    onChange={(value) => onChange({ grokBaseUrl: value })}
-                    placeholder="https://api.x.ai/v1"
+                    value={selected.baseUrlField ? String(config[selected.baseUrlField] ?? '') : ''}
+                    onChange={(value) => selected.baseUrlField
+                      && onChange({ [selected.baseUrlField]: value } as Partial<WebSearchConfig>)}
+                    placeholder={selected.baseUrlPlaceholder}
                     mono
                     className="w-full"
                   />
                 </SettingRow>
                 <SettingRow label={t.webSearchSystemPrompt} stack>
                   <TextArea
-                    value={config.grokSystemPrompt || ''}
-                    onChange={(value) => onChange({ grokSystemPrompt: value })}
+                    value={String(config[selected.systemPromptField] || '')}
+                    onChange={(value) => onChange({ [selected.systemPromptField!]: value } as Partial<WebSearchConfig>)}
                     rows={4}
                   />
                 </SettingRow>
@@ -670,7 +701,7 @@ export function WebSearchPanel({ t, lang, webSearch, onChange }: WebSearchPanelP
               确保测试的是"正在查看"的服务商，而非已保存的默认服务商。 */}
           <TestSearch key={selected.id} t={t} config={{ ...config, provider: selected.id }} />
 
-          {/* 结果数量对模型驱动搜索（Grok，返回合成答案）无意义，故隐藏。 */}
+          {/* 结果数量对模型驱动搜索（Grok / DeepSeek，返回合成答案）无意义，故隐藏。 */}
           {!selected.modelBased && (
             <SettingsGroup title={t.webSearchGeneralSection}>
               <SettingRow label={t.lensWebSearchMaxResults}>

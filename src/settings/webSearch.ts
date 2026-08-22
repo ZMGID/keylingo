@@ -14,6 +14,8 @@ export function isWebSearchConfigured(webSearch: WebSearchConfig | undefined): b
       return (webSearch.ollamaApiKey ?? '').trim() !== ''
     case 'grok':
       return (webSearch.grokApiKey ?? '').trim() !== ''
+    case 'deepseek':
+      return (webSearch.deepseekApiKey ?? '').trim() !== ''
     case 'brave':
       return (webSearch.braveApiKey ?? '').trim() !== ''
     case 'serper':
@@ -42,6 +44,7 @@ export function webSearchKeyField(
   | 'exaApiKey'
   | 'ollamaApiKey'
   | 'grokApiKey'
+  | 'deepseekApiKey'
   | 'braveApiKey'
   | 'serperApiKey'
   | 'bochaApiKey'
@@ -57,6 +60,8 @@ export function webSearchKeyField(
       return 'ollamaApiKey'
     case 'grok':
       return 'grokApiKey'
+    case 'deepseek':
+      return 'deepseekApiKey'
     case 'brave':
       return 'braveApiKey'
     case 'serper':

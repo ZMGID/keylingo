@@ -405,6 +405,7 @@ pub enum WebSearchProvider {
     ExaMcp,
     Ollama,
     Grok,
+    Deepseek,
     Brave,
     Serper,
     Bocha,
@@ -458,6 +459,14 @@ pub struct LensWebSearchConfig {
     #[serde(default = "default_grok_system_prompt")]
     pub grok_system_prompt: String,
     #[serde(default)]
+    pub deepseek_api_key: String,
+    #[serde(default = "default_deepseek_model")]
+    pub deepseek_model: String,
+    #[serde(default = "default_deepseek_base_url")]
+    pub deepseek_base_url: String,
+    #[serde(default = "default_grok_system_prompt")]
+    pub deepseek_system_prompt: String,
+    #[serde(default)]
     pub brave_api_key: String,
     #[serde(default = "default_brave_base_url")]
     pub brave_base_url: String,
@@ -506,6 +515,10 @@ impl Default for LensWebSearchConfig {
             grok_model: default_grok_model(),
             grok_base_url: default_grok_base_url(),
             grok_system_prompt: default_grok_system_prompt(),
+            deepseek_api_key: String::new(),
+            deepseek_model: default_deepseek_model(),
+            deepseek_base_url: default_deepseek_base_url(),
+            deepseek_system_prompt: default_grok_system_prompt(),
             brave_api_key: String::new(),
             brave_base_url: default_brave_base_url(),
             serper_api_key: String::new(),
@@ -547,6 +560,14 @@ fn default_grok_model() -> String {
 
 fn default_grok_base_url() -> String {
     "https://api.x.ai/v1".to_string()
+}
+
+fn default_deepseek_model() -> String {
+    "deepseek-v4-flash".to_string()
+}
+
+fn default_deepseek_base_url() -> String {
+    "https://api.deepseek.com".to_string()
 }
 
 fn default_brave_base_url() -> String {
@@ -2236,6 +2257,8 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.lens.web_search.ollama_api_key.trim().to_string();
     settings.lens.web_search.grok_api_key =
         settings.lens.web_search.grok_api_key.trim().to_string();
+    settings.lens.web_search.deepseek_api_key =
+        settings.lens.web_search.deepseek_api_key.trim().to_string();
     settings.lens.web_search.brave_api_key =
         settings.lens.web_search.brave_api_key.trim().to_string();
     settings.lens.web_search.serper_api_key =
@@ -2292,6 +2315,31 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         .is_empty()
     {
         settings.lens.web_search.grok_system_prompt = default_grok_system_prompt();
+    }
+    settings.lens.web_search.deepseek_model = {
+        let trimmed = settings.lens.web_search.deepseek_model.trim();
+        if trimmed.is_empty() {
+            default_deepseek_model()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    settings.lens.web_search.deepseek_base_url = {
+        let trimmed = settings.lens.web_search.deepseek_base_url.trim();
+        if trimmed.is_empty() {
+            default_deepseek_base_url()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    if settings
+        .lens
+        .web_search
+        .deepseek_system_prompt
+        .trim()
+        .is_empty()
+    {
+        settings.lens.web_search.deepseek_system_prompt = default_grok_system_prompt();
     }
     settings.lens.web_search.exa_mcp_url = {
         let trimmed = settings.lens.web_search.exa_mcp_url.trim();

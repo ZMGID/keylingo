@@ -1090,6 +1090,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [webSearchEnabled, setWebSearchEnabled] = useState(true)
   // provider id → apiFormat（任务 07-23）：用于判断当前模型是否支持内置搜索。
   const [providerApiFormats, setProviderApiFormats] = useState<Record<string, string>>({})
+  const [providerBaseUrls, setProviderBaseUrls] = useState<Record<string, string>>({})
   const [enabledToolCount, setEnabledToolCount] = useState<number | null>(null)
   const [toolsDisabledReason, setToolsDisabledReason] = useState('')
   const [toolsRequested, setToolsRequested] = useState(false)
@@ -1538,8 +1539,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     return webSearchEnabled ? 'third_party' : 'off'
   }, [currentConversation, currentConversationIsBlank, draftWebSearchMode, webSearchEnabled])
   const activeBuiltinWebSearchSupported = useMemo(
-    () => builtinWebSearchSupported(providerApiFormats[activeProviderId ?? '']),
-    [providerApiFormats, activeProviderId],
+    () => builtinWebSearchSupported(
+      providerApiFormats[activeProviderId ?? ''],
+      providerBaseUrls[activeProviderId ?? ''],
+    ),
+    [providerApiFormats, providerBaseUrls, activeProviderId],
   )
   // 多模型一问多答（任务 06-30）：当前生效的多答模型集（会话级持久 reply_models，欢迎页用草稿）。
   const activeReplyModels = useMemo<ModelRef[]>(
@@ -1615,6 +1619,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       setWebSearchEnabled(chatTools?.nativeTools?.webSearch !== false)
       setProviderApiFormats(
         Object.fromEntries((settings.providers ?? []).map((p) => [p.id, p.apiFormat ?? ''])),
+      )
+      setProviderBaseUrls(
+        Object.fromEntries((settings.providers ?? []).map((p) => [p.id, p.baseUrl ?? ''])),
       )
       setApprovalPolicy(chatTools?.approvalPolicy || 'readonly_auto_sensitive_confirm')
       const nextDisabledSkillIds = chatTools?.disabledSkillIds ?? []

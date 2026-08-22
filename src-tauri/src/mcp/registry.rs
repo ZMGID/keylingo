@@ -872,6 +872,7 @@ pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> boo
         WebSearchProvider::ExaMcp => !settings.lens.web_search.exa_mcp_url.trim().is_empty(),
         WebSearchProvider::Ollama => !settings.lens.web_search.ollama_api_key.trim().is_empty(),
         WebSearchProvider::Grok => !settings.lens.web_search.grok_api_key.trim().is_empty(),
+        WebSearchProvider::Deepseek => !settings.lens.web_search.deepseek_api_key.trim().is_empty(),
         WebSearchProvider::Brave => !settings.lens.web_search.brave_api_key.trim().is_empty(),
         WebSearchProvider::Serper => !settings.lens.web_search.serper_api_key.trim().is_empty(),
         WebSearchProvider::Bocha => !settings.lens.web_search.bocha_api_key.trim().is_empty(),

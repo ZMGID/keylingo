@@ -17,6 +17,8 @@ function config(overrides: Partial<WebSearchConfig> = {}): WebSearchConfig {
 describe('isWebSearchConfigured', () => {
   it('requires the matching credential for each REST provider', () => {
     expect(isWebSearchConfigured(config({ provider: 'tavily', tavilyApiKey: 'tvly' }))).toBe(true)
+    expect(isWebSearchConfigured(config({ provider: 'grok', grokApiKey: 'xai' }))).toBe(true)
+    expect(isWebSearchConfigured(config({ provider: 'deepseek', deepseekApiKey: 'sk' }))).toBe(true)
     expect(isWebSearchConfigured(config({ provider: 'brave', braveApiKey: 'bsa' }))).toBe(true)
     expect(isWebSearchConfigured(config({ provider: 'serper', serperApiKey: 's' }))).toBe(true)
     expect(isWebSearchConfigured(config({ provider: 'bocha', bochaApiKey: 'b' }))).toBe(true)
@@ -50,5 +52,7 @@ describe('webSearchKeyField', () => {
     expect(webSearchKeyField('searxng')).toBeNull()
     expect(webSearchKeyField('bocha')).toBe('bochaApiKey')
     expect(webSearchKeyField('tinyfish')).toBe('tinyfishApiKey')
+    expect(webSearchKeyField('deepseek')).toBe('deepseekApiKey')
+    expect(webSearchKeyField('grok')).toBe('grokApiKey')
   })
 })

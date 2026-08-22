@@ -29,6 +29,34 @@ pub fn provider_supports_thinking_field(base_url: &str) -> bool {
     lower.contains("deepseek.com") || lower.contains("moonshot.cn")
 }
 
+/// 是否官方 DeepSeek API 主机（`api.deepseek.com`）。
+/// 中转 / 文档站不算：hosted `web_search` 只在这条线上可靠。
+pub fn is_official_deepseek_api(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    let host = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(lower.as_str());
+    let host = host.split('/').next().unwrap_or(host);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    host == "api.deepseek.com"
+}
+
+/// 官方 DeepSeek 的 Anthropic / Claude 协议端点（`https://api.deepseek.com/anthropic`）。
+pub fn is_official_deepseek_anthropic_api(base_url: &str) -> bool {
+    if !is_official_deepseek_api(base_url) {
+        return false;
+    }
+    let lower = base_url.trim().to_ascii_lowercase();
+    let rest = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(lower.as_str());
+    let path = rest.split_once('/').map(|(_, path)| path).unwrap_or("");
+    path == "anthropic" || path.starts_with("anthropic/")
+}
+
 /**
  * 解析目标语言
  * 当设置为 "auto" 时，根据文本内容自动判断：
@@ -72,8 +100,36 @@ pub fn language_name(code: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_windows_verbatim_prefix;
+    use super::{
+        is_official_deepseek_anthropic_api, is_official_deepseek_api, strip_windows_verbatim_prefix,
+    };
     use std::path::PathBuf;
+
+    #[test]
+    fn official_deepseek_api_matches_host_only() {
+        assert!(is_official_deepseek_api("https://api.deepseek.com"));
+        assert!(is_official_deepseek_api("https://api.deepseek.com/v1"));
+        assert!(is_official_deepseek_api("https://api.deepseek.com/anthropic"));
+        assert!(!is_official_deepseek_api("https://docs.deepseek.com"));
+        assert!(!is_official_deepseek_api("https://relay.example/deepseek.com/v1"));
+        assert!(!is_official_deepseek_api("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn official_deepseek_anthropic_api_matches_path() {
+        assert!(is_official_deepseek_anthropic_api(
+            "https://api.deepseek.com/anthropic"
+        ));
+        assert!(is_official_deepseek_anthropic_api(
+            "https://api.deepseek.com/anthropic/v1"
+        ));
+        assert!(!is_official_deepseek_anthropic_api(
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(!is_official_deepseek_anthropic_api(
+            "https://api.anthropic.com"
+        ));
+    }
 
     #[cfg(windows)]
     #[test]
