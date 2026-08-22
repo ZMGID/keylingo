@@ -90,6 +90,32 @@ describe('ConversationList pin and archive', () => {
     expect(onArchive).toHaveBeenCalledWith('conversation-1')
   })
 
+  it('collapses the archived row without remounting the rows below it', async () => {
+    const user = userEvent.setup()
+    const second: ConversationListItem = {
+      ...conversation,
+      id: 'conversation-2',
+      title: '留下的对话',
+    }
+    const { container } = render(
+      <ConversationList
+        {...listProps}
+        conversations={[conversation, second]}
+      />,
+    )
+
+    await user.click(screen.getAllByRole('button', { name: '归档' })[0])
+
+    const exiting = container.querySelector('.kv-conv-exit.is-exiting')
+    expect(exiting).toBeTruthy()
+    expect(exiting).toHaveTextContent('原会话标题')
+    expect(screen.queryByRole('button', { name: '原会话标题' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '留下的对话' })).toBeInTheDocument()
+    const remainingWrap = screen.getByRole('button', { name: '留下的对话' }).closest('.kv-conv-exit')
+    expect(remainingWrap).toBeTruthy()
+    expect(remainingWrap).not.toHaveClass('is-exiting')
+  })
+
   it('opens context menu on right-click with pin action', async () => {
     const user = userEvent.setup()
     const onTogglePin = vi.fn()

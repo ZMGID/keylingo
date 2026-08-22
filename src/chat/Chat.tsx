@@ -4815,8 +4815,10 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (getRouteConversationId() !== null || path === 'chat' || path === '') {
       syncConversationRoute(null)
     }
-    refreshSidebar()
-  }, [applyConversation, refreshSidebar, syncConversationRoute])
+    // 不在这里 refreshSidebar。归档会在 persist 之前就清当前会话；提前 refetch
+    // 会把尚未 archived 的条目写回侧栏，下面的行跟着上下抽一截。调用方在写盘
+    // 之后自己 loadSidebarData / onConversationsChanged。
+  }, [applyConversation, syncConversationRoute])
 
   const handleSidebarForceDropConversation = useCallback((id: string) => {
     // B3：侧栏删除时强制清掉该会话的 in-flight/快照/乐观项，

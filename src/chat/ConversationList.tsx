@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Archive, Pin } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
@@ -27,6 +27,16 @@ function conversationFolderLabel(
     ? projects.find((p) => p.id === projectId)
     : projects.find((p) => conv.folder === p.name)
   return project?.name ?? conv.folder ?? ''
+}
+
+/** 归档退场：比 `--kv-dur-fast`（150ms）略长，给 transitionend 漏触发时兜底卸行。 */
+const ARCHIVE_EXIT_MS = 240
+
+type ExitingRow = {
+  item: ConversationListItem
+  index: number
+  /** 父列表已经摘掉过这一行；若之后又出现，视为归档失败，取消退场。 */
+  detached: boolean
 }
 
 interface ConversationListProps {
@@ -95,10 +105,63 @@ export const ConversationList = memo(function ConversationList({
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
+  const exitingRef = useRef<Map<string, ExitingRow>>(new Map())
+  const exitTimersRef = useRef<Map<string, number>>(new Map())
+  const [exitingIds, setExitingIds] = useState<ReadonlySet<string>>(() => new Set())
+
+  const finishExit = useCallback((id: string) => {
+    const timer = exitTimersRef.current.get(id)
+    if (timer !== undefined) {
+      window.clearTimeout(timer)
+      exitTimersRef.current.delete(id)
+    }
+    exitingRef.current.delete(id)
+    setExitingIds((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }, [])
+
+  const displayedConversations = useMemo(() => {
+    if (exitingIds.size === 0) return conversations
+    const present = new Set(conversations.map((item) => item.id))
+    const extras = [...exitingRef.current.values()]
+      .filter((row) => !present.has(row.item.id))
+      .sort((a, b) => a.index - b.index)
+    if (extras.length === 0) return conversations
+    const list = [...conversations]
+    for (const row of extras) {
+      list.splice(Math.min(row.index, list.length), 0, row.item)
+    }
+    return list
+  }, [conversations, exitingIds])
 
   const menuConversation = menuState
-    ? conversations.find((c) => c.id === menuState.conversationId)
+    ? displayedConversations.find((c) => c.id === menuState.conversationId)
     : undefined
+
+  useEffect(() => {
+    if (exitingIds.size === 0) return
+    const present = new Set(conversations.map((item) => item.id))
+    for (const id of exitingIds) {
+      const row = exitingRef.current.get(id)
+      if (!row) continue
+      if (!present.has(id)) {
+        row.detached = true
+        continue
+      }
+      if (row.detached) finishExit(id)
+    }
+  }, [conversations, exitingIds, finishExit])
+
+  useEffect(() => {
+    const timers = exitTimersRef.current
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer)
+    }
+  }, [])
 
   useEffect(() => {
     if (renamingId) {
@@ -130,7 +193,23 @@ export const ConversationList = memo(function ConversationList({
     await onRenameConversation(conversationId, nextTitle)
   }
 
-  if (conversations.length === 0) {
+  const beginArchive = (conv: ConversationListItem, index: number) => {
+    if (!exitingRef.current.has(conv.id)) {
+      exitingRef.current.set(conv.id, { item: conv, index, detached: false })
+      setExitingIds((prev) => {
+        const next = new Set(prev)
+        next.add(conv.id)
+        return next
+      })
+      exitTimersRef.current.set(
+        conv.id,
+        window.setTimeout(() => finishExit(conv.id), ARCHIVE_EXIT_MS),
+      )
+    }
+    void onArchiveConversation(conv.id)
+  }
+
+  if (displayedConversations.length === 0) {
     return null
   }
 
@@ -140,11 +219,12 @@ export const ConversationList = memo(function ConversationList({
         className={compact ? 'space-y-0.5 py-0.5' : 'space-y-0.5 py-1'}
         data-reorder-scope={reorder?.scopeId}
       >
-        {conversations.map((conv) => {
+        {displayedConversations.map((conv, index) => {
           const active = currentConversationId === conv.id
           const isGenerating = generatingConversationIds.has(conv.id)
           const isTitleGenerating = titleGeneratingConversationIds.has(conv.id)
           const isRenaming = renamingId === conv.id
+          const isExiting = exitingIds.has(conv.id)
           const folderLabel = showFolderLabel ? conversationFolderLabel(conv, projects, sets, t) : ''
           // 分支对话：把「（分支）」后缀从可截断的标题里拆出，做成不缩的固定标签，
           // 避免侧栏窄宽时被省略号吃掉（forked_from 字段判定，不依赖标题文字）。
@@ -161,7 +241,73 @@ export const ConversationList = memo(function ConversationList({
             return (
               <div
                 key={conv.id}
+                className={`kv-conv-exit${isExiting ? ' is-exiting' : ''}`}
+                aria-hidden={isExiting || undefined}
+              >
+                <div
+                  data-reorder-id={conv.id}
+                  className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
+                    isDragging ? 'is-dragging ' : ''
+                  }${
+                    active
+                      ? 'bg-black/[0.07] dark:bg-white/[0.11]'
+                      : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                  }`}
+                >
+                  <input
+                    ref={renameInputRef}
+                    type="text"
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onBlur={() => void commitRename(conv.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        void commitRename(conv.id)
+                      }
+                      if (e.key === 'Escape') {
+                        setRenamingId(null)
+                      }
+                    }}
+                    className={`min-w-0 flex-1 border-0 bg-transparent text-left outline-none focus:ring-0 ${
+                      compact
+                        ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
+                        : 'px-3 py-2 text-[13px]'
+                    } ${
+                      active
+                        ? 'font-semibold text-neutral-900 dark:text-neutral-100'
+                        : compact
+                          ? 'font-medium text-neutral-700 dark:text-neutral-300'
+                          : 'text-neutral-700 dark:text-neutral-300'
+                    }`}
+                  />
+                </div>
+              </div>
+            )
+          }
+
+          return (
+            <div
+              key={conv.id}
+              className={`kv-conv-exit${isExiting ? ' is-exiting' : ''}`}
+              aria-hidden={isExiting || undefined}
+              onTransitionEnd={(event) => {
+                if (event.target !== event.currentTarget) return
+                if (
+                  event.propertyName !== 'grid-template-rows'
+                  && event.propertyName !== 'opacity'
+                ) return
+                finishExit(conv.id)
+              }}
+            >
+              <div
                 data-reorder-id={conv.id}
+                onPointerDown={reorder ? (e) => reorder.startDrag(e, conv.id) : undefined}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  openMenuAtPointer(conv.id, e.clientX, e.clientY)
+                }}
                 className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
                   isDragging ? 'is-dragging ' : ''
                 }${
@@ -170,55 +316,6 @@ export const ConversationList = memo(function ConversationList({
                     : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
                 }`}
               >
-                <input
-                  ref={renameInputRef}
-                  type="text"
-                  value={renameDraft}
-                  onChange={(e) => setRenameDraft(e.target.value)}
-                  onBlur={() => void commitRename(conv.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      void commitRename(conv.id)
-                    }
-                    if (e.key === 'Escape') {
-                      setRenamingId(null)
-                    }
-                  }}
-                  className={`min-w-0 flex-1 border-0 bg-transparent text-left outline-none focus:ring-0 ${
-                    compact
-                      ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
-                      : 'px-3 py-2 text-[13px]'
-                  } ${
-                    active
-                      ? 'font-semibold text-neutral-900 dark:text-neutral-100'
-                      : compact
-                        ? 'font-medium text-neutral-700 dark:text-neutral-300'
-                        : 'text-neutral-700 dark:text-neutral-300'
-                  }`}
-                />
-              </div>
-            )
-          }
-
-          return (
-            <div
-              key={conv.id}
-              data-reorder-id={conv.id}
-              onPointerDown={reorder ? (e) => reorder.startDrag(e, conv.id) : undefined}
-              onContextMenu={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                openMenuAtPointer(conv.id, e.clientX, e.clientY)
-              }}
-              className={`kv-conv-row group relative flex min-w-0 items-center rounded-lg ${
-                isDragging ? 'is-dragging ' : ''
-              }${
-                active
-                  ? 'bg-black/[0.07] dark:bg-white/[0.11]'
-                  : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
-              }`}
-            >
               <button
                 type="button"
                 onClick={() => onSelectConversation(conv.id, conv)}
@@ -319,7 +416,7 @@ export const ConversationList = memo(function ConversationList({
                     data-no-drag
                     onClick={(e) => {
                       e.stopPropagation()
-                      void onArchiveConversation(conv.id)
+                      beginArchive(conv, index)
                     }}
                     className={`shrink-0 rounded-md p-0.5 text-neutral-400 transition-opacity hover:bg-black/[0.06] hover:text-neutral-600 dark:hover:bg-white/[0.1] dark:hover:text-neutral-200 ${
                       isGenerating && !conv.pinned
@@ -334,6 +431,7 @@ export const ConversationList = memo(function ConversationList({
                 </div>
               </div>
 
+              </div>
             </div>
           )
         })}

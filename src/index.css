@@ -722,6 +722,9 @@ html.windows body {
 .chat-scroll-viewport {
   overflow-anchor: none;
 }
+.kv-sidebar-groups {
+  overflow-anchor: none;
+}
 .chat-scroll-viewport.is-navigator-locking {
   /* 锁定期再挡一层，避免系统/插件改滚动节奏 */
   overscroll-behavior: contain;
@@ -1587,6 +1590,26 @@ button.chat-composer-status-item:hover {
   visibility: visible;
 }
 
+/* 侧栏归档退场：高度收到 0，下面的行跟着滑上来，而不是瞬间塌洞抽一下。
+   1fr→0fr 与 .chat-motion-reveal 同一套；wrap 无 position，不改 .kv-conv-row 的 offsetParent。 */
+.kv-conv-exit {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--kv-dur-fast) var(--kv-ease-standard),
+    opacity var(--kv-dur-fast) var(--kv-ease-out);
+}
+.kv-conv-exit.is-exiting {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+.kv-conv-exit > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
 
 
 .chat-motion-fade-up {
@@ -2269,7 +2292,9 @@ button.chat-composer-status-item:hover {
 /* 页内 tab 内容切换（中心页 已安装/市场/…、侧栏 最近/集/项目）：
    比整页 view-in 轻一档的 6px 上浮，快进快停；包裹节点需 key={tab} 以便每次切换重播。 */
 .chat-motion-tab-in {
-  animation: chat-motion-tab-in 200ms var(--kv-ease-standard) both;
+  /* backwards：播完卸掉 transform，避免 fill-mode:both 把 translateY(0) 留在层上，
+     子节点增删时整列合成层闪一下（侧栏归档最明显）。 */
+  animation: chat-motion-tab-in 200ms var(--kv-ease-standard) backwards;
 }
 
 @keyframes chat-motion-tab-in {

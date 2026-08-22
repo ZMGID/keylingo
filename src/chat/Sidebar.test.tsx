@@ -194,3 +194,90 @@ describe('Sidebar pin while generating', () => {
     expect(chatApi.updateConversation).toHaveBeenCalledWith(running.id, { pinned: true })
   })
 })
+
+describe('Sidebar archive race', () => {
+  it('does not flash an archived row back when a refresh races persist', async () => {
+    const user = userEvent.setup()
+    const leaving = conversation('conversation-archive', '要归档的对话', project1)
+    const staying = conversation('conversation-keep', '留下的对话', project1)
+    let persisted = false
+    let releasePersist!: () => void
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve
+    })
+
+    vi.spyOn(chatApi, 'getProjects').mockResolvedValue([project1])
+    vi.spyOn(chatApi, 'getSets').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getAssistants').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getConversations').mockImplementation(async () => (
+      persisted ? [staying] : [leaving, staying]
+    ))
+    vi.spyOn(chatApi, 'getConversationPins').mockResolvedValue({})
+    vi.spyOn(chatApi, 'updateConversation').mockImplementation(async () => {
+      await persistGate
+      persisted = true
+      return { id: leaving.id } as Conversation
+    })
+
+    const onConversationDeleted = vi.fn()
+    const { rerender } = render(
+      <Sidebar
+        lang="zh"
+        currentConversationId={leaving.id}
+        selectedProject={project1}
+        onSelectProject={vi.fn()}
+        selectedSet={null}
+        onSelectSet={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onConversationDeleted={onConversationDeleted}
+        onOpenSettings={vi.fn()}
+        onOpenExtensionsItem={vi.fn()}
+        onSelectLang={vi.fn()}
+        onOpenUsage={vi.fn()}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+        refreshKey={0}
+        searchOpen={false}
+        onSearchOpenChange={vi.fn()}
+      />,
+    )
+
+    await screen.findByRole('button', { name: /要归档的对话/ })
+    await user.click(screen.getAllByRole('button', { name: '归档' })[0])
+    expect(onConversationDeleted).toHaveBeenCalledWith(leaving.id)
+    expect(screen.queryByRole('button', { name: /要归档的对话/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /留下的对话/ })).toBeInTheDocument()
+
+    rerender(
+      <Sidebar
+        lang="zh"
+        currentConversationId={undefined}
+        selectedProject={project1}
+        onSelectProject={vi.fn()}
+        selectedSet={null}
+        onSelectSet={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onConversationDeleted={onConversationDeleted}
+        onOpenSettings={vi.fn()}
+        onOpenExtensionsItem={vi.fn()}
+        onSelectLang={vi.fn()}
+        onOpenUsage={vi.fn()}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+        refreshKey={1}
+        searchOpen={false}
+        onSearchOpenChange={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => expect(vi.mocked(chatApi.getConversations).mock.calls.length).toBeGreaterThan(1))
+    expect(screen.queryByRole('button', { name: /要归档的对话/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /留下的对话/ })).toBeInTheDocument()
+
+    releasePersist()
+    await waitFor(() => expect(persisted).toBe(true))
+    expect(screen.queryByRole('button', { name: /要归档的对话/ })).not.toBeInTheDocument()
+  })
+})

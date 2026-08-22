@@ -613,6 +613,10 @@ export const Sidebar = memo(function Sidebar({
   const [conversationPins, setConversationPins] = useState<Record<string, ConversationPin[]>>({})
   // 置顶手势的进行中覆盖：生成中乐观行 / 列表 refetch 都不得把刚点的 PIN 冲掉。
   const [pinOverrides, setPinOverrides] = useState<Record<string, boolean>>({})
+  /** 归档已乐观摘掉、但 persist/refetch 尚未落地：挡住过期 list 把条目写回来（其余行会跟着上下抽）。 */
+  const [suppressedConversationIds, setSuppressedConversationIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
   const [titleGeneratingIds, setTitleGeneratingIds] = useState<Set<string>>(() => new Set())
   const [assistants, setAssistants] = useState<ChatAssistant[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -796,6 +800,12 @@ export const Sidebar = memo(function Sidebar({
 
   /** 归档：侧栏「最近」不再显示；只在对话库「归档」书架可见。 */
   const handleArchiveConversation = async (id: string) => {
+    setSuppressedConversationIds((prev) => {
+      if (prev.has(id)) return prev
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
     // 1) 立刻从侧栏真实列表摘掉
     setConversations((items) => items.filter((item) => item.id !== id))
     // 2) 清父组件乐观条目 / in-flight，否则 visibleConversations 会因「真实列表没有」又把乐观项并回来
@@ -810,6 +820,13 @@ export const Sidebar = memo(function Sidebar({
     } catch (err) {
       console.error('Failed to archive conversation:', err)
       await loadSidebarData({ silent: true })
+    } finally {
+      setSuppressedConversationIds((prev) => {
+        if (!prev.has(id)) return prev
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
   }
 
@@ -1030,11 +1047,13 @@ export const Sidebar = memo(function Sidebar({
 
   const visibleConversations = useMemo(() => {
     // 侧栏永不展示已归档（后端 list 也会滤；这里再兜一层防脏数据/旧索引）
-    const active = conversations.filter((item) => !item.archived)
+    const active = conversations.filter(
+      (item) => !item.archived && !suppressedConversationIds.has(item.id),
+    )
     if (optimisticConversations.length === 0) return applyPinOverrides(active, pinOverrides)
     const realById = new Map(active.map((item) => [item.id, item]))
     const visibleOptimisticConversations = optimisticConversations.filter((item) => {
-      if (item.archived) return false
+      if (item.archived || suppressedConversationIds.has(item.id)) return false
       const real = realById.get(item.id)
       // 真实列表里没有 → 保留。新会话从创建到首次 refetch 之间只存在于乐观列表；run 刚结束
       // 的那次 commit 里 generating 已清、refetch 还没落地，此刻若按 generating 判丢弃，
@@ -1055,7 +1074,7 @@ export const Sidebar = memo(function Sidebar({
       ...visibleOptimisticConversations,
       ...active.filter((item) => !optimisticIds.has(item.id)),
     ], pinOverrides)
-  }, [conversations, generatingConversationIds, optimisticConversations, pinOverrides])
+  }, [conversations, generatingConversationIds, optimisticConversations, pinOverrides, suppressedConversationIds])
 
   const normalizedSearchQuery = searchQuery.trim().toLowerCase()
 
