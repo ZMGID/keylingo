@@ -408,7 +408,8 @@ export function estimateMessageRenderHeight({
   return 64
     + texts.reduce((sum, text) => sum + estimateRenderHeight(text, width), 0)
     + toolCallCount * 56
-    + attachmentCount * 120
+    // 附件卡固定 64px 高（与输入框同一形态），不再按原图像素估 120。
+    + attachmentCount * 80
     + artifactCount * 96
 }
 
