@@ -44,6 +44,7 @@ GitHub release packaging (this is the official path — do not build installers 
 5. `.github/workflows/release.yml` builds **both** installers on GitHub Actions and uploads them to the tag's release:
    - `macos-latest` (Apple Silicon / aarch64) with `--bundles dmg` → `Kivio.Desktop_X.Y.Z_aarch64.dmg`
    - `windows-latest` (x64) with `--bundles nsis` → `Kivio.Desktop_X.Y.Z_x64-setup.exe`
+   - After the NSIS build, Windows also packs `scripts/package-windows-portable.ps1` → `Kivio.Desktop_X.Y.Z_x64-portable.zip` (unzip and run `Kivio Desktop.exe`; no Start Menu). In-app update still downloads the NSIS installer.
    - GitHub normalizes spaces in `productName` to dots in the asset file names.
    - The macOS DMG is **unsigned** (no signing secrets configured); first launch needs right-click → Open, or `xattr -cr "/Applications/Kivio Desktop.app"`.
 6. Watch the workflow and inspect the release assets:
@@ -54,7 +55,7 @@ GitHub release packaging (this is the official path — do not build installers 
 7. **Replace the CI-generated release body with hand-written bilingual notes.** The
    workflow publishes the release with a boilerplate body ("Automated macOS…");
    overwrite it to match the prior `v2.7.x` release format — title, a `## 下载 / Downloads`
-   block (both installers + the macOS "unsigned / first launch" note), a
+   block (Windows NSIS + Windows portable zip + macOS DMG, plus the macOS "unsigned / first launch" note), a
    `## 新版本亮点 / What's New` bilingual bullet list (中文 + English inline per bullet,
    mirroring the README release notes), and a `完整变更 / Full changelog: …compare/vPREV...vX.Y.Z`
    link:

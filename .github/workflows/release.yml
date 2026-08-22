@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Release tag to publish to (e.g. v2.9.0)'
         required: true
-        default: 'v2.9.0'
+        default: 'v2.9.3'
       ref:
         description: 'Git ref to build from (branch/tag/commit)'
         required: true
@@ -44,7 +44,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Kivio Desktop $RELEASE_TAG" \
-            --notes "Automated macOS (Apple Silicon) + Windows (x64) build for ${RELEASE_TAG}. Built from: ${BUILD_REF}." \
+            --notes "Automated macOS (Apple Silicon) + Windows (x64 installer and portable zip) build for ${RELEASE_TAG}. Built from: ${BUILD_REF}." \
             --verify-tag \
             "${extra[@]}"
 
@@ -96,9 +96,21 @@ jobs:
             Automated macOS (Apple Silicon / aarch64, unsigned) + Windows (x64) build for ${{ env.RELEASE_TAG }}.
             Built from: ${{ env.BUILD_REF }}
             - macOS: DMG (unsigned — first launch: right-click → Open, or `xattr -cr "/Applications/Kivio Desktop.app"`)
-            - Windows: NSIS installer (.exe)
+            - Windows: NSIS installer (.exe) and portable zip (unzip and run)
           releaseDraft: false
           prerelease: ${{ contains(env.RELEASE_TAG, 'beta') || contains(env.RELEASE_TAG, 'alpha') || contains(env.RELEASE_TAG, 'rc') }}
           includeUpdaterJson: false
           tauriScript: npx tauri
           args: ${{ matrix.args }}
+
+      - name: Package and upload Windows portable zip
+        if: matrix.platform == 'windows-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ver = $env:RELEASE_TAG.TrimStart('v')
+          & ./scripts/package-windows-portable.ps1 -Version $ver
+          $zip = "src-tauri/target/release/bundle/portable/Kivio.Desktop_${ver}_x64-portable.zip"
+          if (-not (Test-Path -LiteralPath $zip)) { throw "portable zip not found: $zip" }
+          gh release upload $env:RELEASE_TAG $zip --clobber --repo $env:GITHUB_REPOSITORY

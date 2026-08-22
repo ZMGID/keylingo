@@ -160,7 +160,7 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 ## 快速开始
 
-1. **[下载最新版](https://github.com/ZMGID/kivio/releases/latest)** —— macOS：Apple Silicon `.dmg` · Windows：NSIS `-setup.exe`。
+1. **[下载最新版](https://github.com/ZMGID/kivio/releases/latest)** —— macOS：Apple Silicon `.dmg` · Windows：NSIS `-setup.exe`，或解压即用的 `-portable.zip`。
 2. **安装并启动。** DMG 未签名，首次打开请右键 → 打开，或执行：
    ```bash
    xattr -cr "/Applications/Kivio Desktop.app"
@@ -171,13 +171,13 @@ Kivio Desktop 常驻托盘 / 菜单栏，工作在整个**屏幕**层面，而�
 
 Kivio Desktop 启动后会检查 GitHub Releases 的新版本（可关闭），并支持应用内直接下载安装更新。
 
-## 新版本 —— v2.9.2
+## 新版本 —— v2.9.3
 
-- **Pi** —— 问用户、原生图片、轮内引导和下一轮排队；设置里管理扩展与 Skill。
-- **DeepSeek Harness** —— 生成中可引导或排队；会话绑到项目工作目录；关窗和取消真正停掉。
-- **联网搜索** —— 来源目录可点，答案 `[n]` 跳转；新增 Brave、Serper、智谱、TinyFish 等。
-- **插件与技能** —— 一键跑官方安装命令；技能扫描 `~/.kivio` 与 `~/.agents`。
-- **其它** —— CLI 供应商可与 CLI 自带配置并存；账户菜单显示今日用量；重启记住当前对话。Windows 应用内更新静默安装。去掉 Email 连接器。
+- **便携版** —— Windows 增加解压即用的 zip。
+- **DeepSeek 搜索** —— 官方搜索与内置托管搜索；Responses 解析修好。
+- **MCP / 外部 CLI** —— 服务按来源分组；跟上 Claude Code 2.1.238、Codex 0.148、dsh rc.8。Codex 沙箱逃逸改为询问。
+- **聊天** —— 附件保持小卡片；最后一轮可换模型再答；可切断上下文；侧栏可重生标题。
+- **其它** —— Ox Alpha；编程计划预设弹窗。去掉轨迹 Dock 与捆绑 Pyodide。
 
 完整历史见 [GitHub Releases](https://github.com/ZMGID/kivio/releases)。
 
@@ -361,7 +361,7 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 ## Quick Start
 
-1. **[Download the latest release](https://github.com/ZMGID/kivio/releases/latest)** — macOS: Apple Silicon `.dmg` · Windows: NSIS `-setup.exe`.
+1. **[Download the latest release](https://github.com/ZMGID/kivio/releases/latest)** — macOS: Apple Silicon `.dmg` · Windows: NSIS `-setup.exe` or unzip-and-run `-portable.zip`.
 2. **Install and launch.** The DMG is unsigned; on first launch right-click → Open, or run:
    ```bash
    xattr -cr "/Applications/Kivio Desktop.app"
@@ -372,13 +372,13 @@ All hotkeys act as toggles and are remappable in Settings (with conflict detecti
 
 Kivio Desktop checks GitHub Releases for updates shortly after launch (can be disabled) and can download and install the update in-app.
 
-## What's New — v2.9.2
+## What's New — v2.9.3
 
-- **Pi** — ask-user, native images, mid-turn steer and next-turn follow-up; Settings manages extensions and Skills.
-- **DeepSeek Harness** — steer or queue while generating; sessions bind to the project working directory; close and cancel actually stop.
-- **Web search** — clickable source directory and `[n]` jump; adds Brave, Serper, Zhipu, TinyFish, and more.
-- **Plugins and skills** — one-click official install; Skills scan `~/.kivio` and `~/.agents`.
-- **More** — CLI providers can coexist with the CLI's own config; account menu shows today's usage; restart remembers the current conversation. Windows in-app updates install silently. Email connector removed.
+- **Portable Windows build** — unzip-and-run zip, no installer.
+- **DeepSeek search** — official and hosted builtin search; Responses parsing fixed.
+- **MCP / external CLIs** — servers grouped by source; catch up Claude Code 2.1.238, Codex 0.148, dsh rc.8. Codex sandbox escapes ask first.
+- **Chat** — compact attachment cards after send; reply with another model; context cutoff; regenerate titles from the sidebar.
+- **More** — Ox Alpha; coding-plan presets in a modal. Trajectory dock and bundled Pyodide removed.
 
 Full history: [GitHub Releases](https://github.com/ZMGID/kivio/releases).
 
