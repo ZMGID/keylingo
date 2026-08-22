@@ -1791,7 +1791,7 @@ mod tests {
                     "contextWindowEstimated": false, "usageRatio": null, "status": "idle",
                     "segments": [], "lastMeasuredAt": 1, "lastCompressedAt": null,
                     "compressedMessageCount": 0, "compressionCount": 0, "summary": null,
-                    "compactionBoundaries": [], "warning": null, "contextSource": null,
+                    "compactionBoundaries": [], "clearBoundaries": [], "warning": null, "contextSource": null,
                     "tokenCountSource": null, "sessionInputTokens": null,
                     "sessionOutputTokens": null, "externalAgentId": null, "externalModel": null
                 }
