@@ -280,7 +280,7 @@ pub async fn run_external_cli_reply(
         }
     }
     // Codex `workspace-write` 锁在 cwd：附件目录和 localImage 临时文件必须作为
-    // `sandboxPolicy.writableRoots` 下发。其它协议忽略这个字段。
+    // `runtimeWorkspaceRoots` 下发。其它协议忽略这个字段。
     let extra_writable_roots = {
         let mut roots = extra_dirs.clone();
         if !image_blocks.is_empty() {
@@ -1199,8 +1199,8 @@ async fn reconnect_fresh(
 /// dsh fingerprints initialize model, profile reasoning/provider, sandbox, and agent preset. Without
 /// this, the UI can show a new configuration while the resident process keeps running the old one.
 ///
-/// ACP / codex 能在会话内改模型与推理档位（`session/set_config_option` / 每轮 `turn/start`
-/// 带 model），指纹恒为 `default()` ⇒ 永不触发重连，既有行为不变。
+/// ACP 能在会话内改模型与推理档位，指纹恒为 `default()`。Codex 的 sandbox 只在
+/// `thread/start` 生效，所以 sandbox 进指纹；model / effort 每轮都能带，不进指纹。
 ///
 /// dsh 相反：model 是进程级 `initialize` 后创建 agent 时固定的，reasoning 是 profile patch，
 /// sandbox 是进程环境变量；三者都没有 session 级修改 RPC。任一变化都必须换进程，但 Kivio
@@ -1249,6 +1249,18 @@ fn launch_config_for_turn(
     }
     if matches!(protocol, StreamFormat::PiRpc) {
         return LaunchConfig::for_pi(model, reasoning);
+    }
+    if matches!(protocol, StreamFormat::CodexAppServer) {
+        // sandbox / approvalPolicy 只在 `thread/start` 生效；`turn/start` 不能改 kebab
+        // `sandbox`。不进指纹的话，底栏从「工作区写」切到「完全」胶囊变了、进程还是旧档。
+        // model / effort 每轮都能带，不进指纹。
+        return LaunchConfig {
+            flags: crate::external_agents::session::codex_app_server::normalize_codex_sandbox(
+                sandbox,
+            )
+            .to_string(),
+            instructions: None,
+        };
     }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return LaunchConfig::default();
@@ -1638,8 +1650,9 @@ struct ApprovalHost<'a> {
 impl ApprovalHost<'_> {
     /// 问用户一次。返回的 `ApprovalDecision` 带回 `request_id`，会话据它回 `control_response`。
     ///
-    /// 超时 / 用户点停止时 `request_tool_approval` 自己会返回 false 并清掉挂起条目
-    /// —— 也就是**默认拒**，这正是 fail-closed 想要的。
+    /// 用户点停止 / 通道断开时 `request_tool_approval` 返回 false 并清掉挂起条目
+    /// —— **默认拒**。不设墙钟超时：60s 会把晚到的「允许」变成 Codex 的
+    /// `Rejected("rejected by user")`，原生 CLI 不会这样。
     async fn ask(
         &self,
         ask: crate::external_agents::session::live::ApprovalAsk,
@@ -4266,8 +4279,8 @@ mod tests {
         ));
     }
 
-    /// Claude fingerprints launch flags/instructions; dsh fingerprints model/reasoning/sandbox/provider.
-    /// ACP / codex / pi can apply their relevant settings without this process-level fingerprint.
+    /// Claude fingerprints reasoning/sandbox/instructions; dsh fingerprints
+    /// model/reasoning/sandbox/provider; Codex fingerprints sandbox only; ACP stays default.
     #[test]
     fn launch_config_fingerprints_process_bound_protocols() {
         let claude = launch_config_for_turn(
@@ -4367,20 +4380,18 @@ mod tests {
             dsh_provider_fingerprint_for(None),
             dsh_provider_fingerprint_for(Some(&config_a))
         );
-        for protocol in [StreamFormat::AcpJsonRpc, StreamFormat::CodexAppServer] {
-            assert_eq!(
-                launch_config_for_turn(
-                    protocol,
-                    Some("opus"),
-                    Some("high"),
-                    Some("plan"),
-                    None,
-                    Some("h")
-                ),
-                LaunchConfig::default(),
-                "{protocol:?} 不该参与启动指纹判定"
-            );
-        }
+        assert_eq!(
+            launch_config_for_turn(
+                StreamFormat::AcpJsonRpc,
+                Some("opus"),
+                Some("high"),
+                Some("plan"),
+                None,
+                Some("h")
+            ),
+            LaunchConfig::default(),
+            "ACP 不该参与启动指纹判定"
+        );
         let pi = |model, reasoning| {
             launch_config_for_turn(StreamFormat::PiRpc, model, reasoning, None, None, None)
         };
@@ -4443,6 +4454,37 @@ mod tests {
         };
         assert!(with(Some("opus")).accepts(&with(Some("sonnet"))));
         assert!(with(Some("sonnet")).accepts(&with(None)));
+    }
+
+    /// Codex sandbox 只在 thread 握手时生效：未选与「工作区写」是同一档，切「完全」必须换进程。
+    /// model / effort 每轮都能带，换它们不该重连。
+    #[test]
+    fn codex_sandbox_change_forces_a_reconnect() {
+        let with = |model, reasoning, sandbox| {
+            launch_config_for_turn(
+                StreamFormat::CodexAppServer,
+                model,
+                reasoning,
+                sandbox,
+                None,
+                Some("ignored"),
+            )
+        };
+        let workspace = with(None, None, None);
+        assert_eq!(workspace.flags, "workspace-write");
+        assert!(workspace.instructions.is_none());
+        assert!(workspace.accepts(&with(None, None, Some("workspace-write"))));
+        assert!(workspace.accepts(&with(Some("gpt-5.6-sol"), Some("high"), None)));
+        assert!(!workspace.accepts(&with(None, None, Some("danger-full-access"))));
+        assert!(!workspace.accepts(&with(None, None, Some("read-only"))));
+        let full = with(None, None, Some("danger-full-access"));
+        assert_eq!(full.flags, "danger-full-access");
+        assert!(full.accepts(&with(
+            Some("gpt-5.5"),
+            Some("low"),
+            Some("danger-full-access")
+        )));
+        assert!(!full.accepts(&workspace));
     }
 
     /// claude / dsh 每轮都发整份 composed prompt：会话级指令不在正文里，剩下的

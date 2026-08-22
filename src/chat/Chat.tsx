@@ -465,12 +465,19 @@ const TOOL_APPROVAL_VERBS: Record<string, { verb: string; path?: boolean }> = {
  */
 function toolApprovalTitle(payload: ChatToolConfirmPayload): string {
   const name = (payload.name || '').toLowerCase()
+  const target = payload.target?.trim()
   // claude 的计划批准：批的是卡片上那份计划，不是「一个叫 ExitPlanMode 的工具」。
   if (name === 'exitplanmode') return '批准这份计划，开始执行？'
   // claude 自己要求进入计划档：先探索、出方案，这一轮不动代码。
   if (name === 'enterplanmode') return '让 claude 先出方案，暂不改动代码？'
+  if (name === 'request_permissions' || name === 'permissions') {
+    const wantsNetwork = (payload.argumentsPreview || '').includes('Network access')
+    if (wantsNetwork && target) return `允许 Codex 联网并使用工作区 ${target}？`
+    if (wantsNetwork) return '允许 Codex 联网？'
+    if (target) return `允许 Codex 使用工作区 ${target}？`
+    return '允许 Codex 使用工作区 / 执行环境？'
+  }
   const spec = TOOL_APPROVAL_VERBS[name]
-  const target = payload.target?.trim()
   if (!spec || !target) return `允许调用工具 ${payload.name}？`
   const shown = spec.path ? target.split(/[\\/]/).filter(Boolean).pop() || target : target
   return `允许${spec.verb} ${shown}？`

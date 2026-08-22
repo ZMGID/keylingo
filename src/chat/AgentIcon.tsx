@@ -13,7 +13,7 @@ const ICON_EXT: Record<string, 'svg'> = {
   dsh: 'svg',
 }
 
-const MONO_ICONS = new Set(['cursor-agent', 'opencode', 'hermes', 'grok'])
+const MONO_ICONS = new Set(['codex', 'cursor-agent', 'opencode', 'hermes', 'grok'])
 
 interface AgentIconProps {
   id: string

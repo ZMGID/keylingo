@@ -88,6 +88,17 @@ function stripParenthetical(label: string): string {
   return label.replace(/\s*\([^)]*\)\s*$/, '').trim() || label
 }
 
+/** Codex `model/list` used to label efforts `high — Greater reasoning depth…`. Keep the name. */
+function stripEffortDescription(id: string, label: string): string {
+  const text = (label || id).trim()
+  const sep = ' — '
+  const cut = text.indexOf(sep)
+  if (cut <= 0) return text
+  const head = text.slice(0, cut)
+  if (head === id || head.toLowerCase() === id.toLowerCase()) return id
+  return text
+}
+
 function RuntimePickerBase({ agentRuntime, onRuntimeChange, conversationId, locked = false }: RuntimePickerProps) {
   const t = useT()
   const [open, setOpen] = useState(false)
@@ -424,7 +435,7 @@ function ExternalModelSelectorBase({
         : reasoningPillValue
     const opt = activeReasoningOptions.find((o) => o.id === displayId)
     if (opt) {
-      return mapDefaultLabel(opt.label || displayId)
+      return mapDefaultLabel(stripEffortDescription(opt.id, opt.label || displayId))
     }
     const raw = displayId
     // 未显式选择且探测也没有档位时显示「自动」，不再暴露裸 "Default"。
@@ -585,7 +596,9 @@ function ExternalModelSelectorBase({
                       }`}
                     >
                       <span className="min-w-0 truncate">
-                        {option.id === 'default' ? t.chatRuntimeAutoCliDefault : option.label}
+                        {option.id === 'default'
+                          ? t.chatRuntimeAutoCliDefault
+                          : stripEffortDescription(option.id, option.label)}
                       </span>
                       {active && <Check size={15} className="shrink-0 text-neutral-500" />}
                     </button>

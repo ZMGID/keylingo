@@ -87,7 +87,7 @@ pub enum SessionCommand {
         /// 本轮用户消息的原生图片块（ACP → image content block；Codex → localImage 临时文件）。空=无图。
         images: Vec<crate::external_agents::attachments::ImageBlock>,
         /// Codex `workspace-write` 默认锁在 cwd：附件目录 / 临时图片必须作为
-        /// `sandboxPolicy.writableRoots` 下发，否则 CLI 读不到。其它协议忽略。
+        /// `runtimeWorkspaceRoots` 下发，否则 CLI 读不到。其它协议忽略。
         extra_writable_roots: Vec<String>,
         events: mpsc::Sender<UnifiedAgentEvent>,
         done: oneshot::Sender<Result<(), String>>,
@@ -139,9 +139,9 @@ pub const CANCELLED_SESSION_LOST: &str = "__cancelled_session_lost__";
 /// 界面显示一套、会话实际跑另一套，这**违反 spec 第 8 条**（UI 所见必须与会话实际配置一致），
 /// 是功能退步而不是缺功能。指纹变了就换个进程。
 ///
-/// 只有把这些配置放在**启动参数**里的 CLI 需要它（claude：`--model` / `--effort` /
-/// `--permission-mode` / `--append-system-prompt-file`；Pi：`--model` / `--thinking`）。
-/// ACP / codex 能在会话内改模型与推理档位，指纹恒为 `default()`，永不触发重连，行为不变。
+/// 只有启动时锁死、会话内改不了的配置才进指纹（claude：`--effort` / `--permission-mode`；
+/// Pi：`--model` / `--thinking`；codex：sandbox / approvalPolicy，只在 `thread/start`）。
+/// ACP 能在会话内改相关项，指纹恒为 `default()`。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchConfig {
     /// `model|reasoning|sandbox`，恒可知。
@@ -337,7 +337,7 @@ mod tests {
         assert!(established.accepts(&cfg("opus||", None)));
     }
 
-    /// 非 claude / Pi 协议指纹恒为默认值 ⇒ 永不触发重连，既有行为不变。
+    /// 两边都是默认指纹时互相接受（ACP 仍走这条）。
     #[test]
     fn default_launch_config_always_accepts() {
         assert!(LaunchConfig::default().accepts(&LaunchConfig::default()));

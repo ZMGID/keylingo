@@ -157,8 +157,9 @@ pub(crate) fn chat_confirm_tool_call(
                 .filter(|mode| !mode.is_empty()),
         });
         crate::chat::protocol::withdraw_tool_approval(&app, &tool_call_id);
+        return Ok(());
     }
-    Ok(())
+    Err("这条审批已经失效".to_string())
 }
 
 /// 返回开发者「请求调试」缓冲快照（最新在前）。仅内存，未开启开关时通常为空。
@@ -653,8 +654,10 @@ pub(crate) async fn request_tool_approval_outcome(
             sensitivity: "sensitive".to_string(),
         },
     );
+    // 墙钟超时会把晚到的「允许」变成 Codex 的 `Rejected("rejected by user")`：卡片撤了，
+    // 点允许是空操作。原生 CLI 一直等到用户点或取消，这里对齐。
     let result = tokio::select! {
-        result = timeout(Duration::from_secs(60), rx) => result,
+        result = rx => result,
         _ = wait_for_chat_cancel(state, conversation_id, generation) => {
             let mut pending = state
                 .pending_chat_tool_approvals
@@ -667,17 +670,14 @@ pub(crate) async fn request_tool_approval_outcome(
         }
     };
     match result {
-        Ok(Ok(value)) => value,
-        _ => {
+        Ok(value) => value,
+        Err(_) => {
             let mut pending = state
                 .pending_chat_tool_approvals
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             pending.remove(&record.id);
             drop(pending);
-            // 超时/通道断开 ⇒ 这条已经按拒绝处理了。必须把卡片撤掉，否则用户回来点
-            // 「允许」是个静默空操作（`chat_confirm_tool_call` 找不到条目就直接 Ok），
-            // 他会以为自己批准了，而工具早就被拒了。
             withdraw_tool_confirm(app, &record.id);
             crate::state::ToolApprovalOutcome::default()
         }
@@ -917,6 +917,52 @@ pub(super) fn format_tool_approval_summary(record: &ToolCallRecord) -> ToolAppro
                 target: None,
                 detail: String::new(),
             };
+        }
+        "request_permissions" | "permissions" => {
+            if let Some(cwd) = field(&["cwd", "working_directory"]) {
+                target = Some(cwd.clone());
+                lines.push(format!("Working directory: {cwd}"));
+            }
+            if let Some(reason) = field(&["reason"]) {
+                if target.is_none() {
+                    target = Some(truncate_chars(&reason, 120));
+                }
+                lines.push(reason);
+            }
+            if parsed
+                .as_ref()
+                .and_then(|value| value.pointer("/permissions/network/enabled"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                lines.push("Network access".to_string());
+            }
+            if let Some(writes) = parsed
+                .as_ref()
+                .and_then(|value| value.pointer("/permissions/fileSystem/write"))
+                .and_then(Value::as_array)
+            {
+                for path in writes.iter().filter_map(Value::as_str) {
+                    lines.push(format!("Write: {path}"));
+                }
+            }
+            if let Some(entries) = parsed
+                .as_ref()
+                .and_then(|value| value.pointer("/permissions/fileSystem/entries"))
+                .and_then(Value::as_array)
+            {
+                for entry in entries {
+                    let access = entry
+                        .get("access")
+                        .and_then(Value::as_str)
+                        .unwrap_or("access");
+                    if let Some(kind) = entry.pointer("/path/value/kind").and_then(Value::as_str) {
+                        lines.push(format!("{access}: {kind}"));
+                    } else if let Some(path) = entry.pointer("/path/path").and_then(Value::as_str) {
+                        lines.push(format!("{access}: {path}"));
+                    }
+                }
+            }
         }
         _ => {}
     }

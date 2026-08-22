@@ -1,8 +1,17 @@
 //! Codex CLI external agent: `codex app-server` JSON-RPC (stdio).
 //!
 //! Handshake / turn / steer last verified against the 0.148.0 schema (`thread/start` still
-//! takes the kebab `sandbox` string; `turn/start` uses `sandboxPolicy`). 0.149 rejects the
-//! obsolete `permissionProfile` field — Kivio never sent it.
+//! takes the kebab `sandbox` string; `turn/start` uses `sandboxPolicy` only as a last-resort
+//! override). 0.149 rejects the obsolete `permissionProfile` field — Kivio never sent it.
+//!
+//! Approval: workspace-write / read-only send `approvalPolicy: "on-request"` and route
+//! command/file/permissions RPCs through the existing tool-approval card. The 「完全」档
+//! (`danger-full-access`) keeps `never` and auto-allows.
+//!
+//! Workspace / execution-environment grants need `capabilities.experimentalApi` plus
+//! `runtimeWorkspaceRoots` on `thread/start` (and extra attachment dirs on `turn/start`).
+//! Echoing `item/permissions/requestApproval` without those roots leaves `:workspace_roots`
+//! empty — native Codex TUI sets them, which is why "同意一路下去" works there and not here.
 
 use super::super::types::{
     PromptInputFormat, RuntimeAgentDef, RuntimeBuildOptions, RuntimeContext, StreamFormat,

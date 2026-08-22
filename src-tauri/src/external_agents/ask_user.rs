@@ -80,7 +80,9 @@ const CODECS: &[AskUserCodec] = &[
         parse: parse_codex,
         encode: encode_codex,
         unknown_shape: UnknownAskShape::Reject,
-        auto_allow_ordinary_tools: true,
+        // Command / file / permissions approvals must reach the host card. requestUserInput
+        // still goes through this codec; ordinary tools no longer auto-allow.
+        auto_allow_ordinary_tools: false,
         opens_host: true,
     },
 ];
@@ -548,7 +550,7 @@ mod tests {
         assert!(needs_host("pi"));
         assert!(needs_host("codex"));
         assert!(auto_allow_ordinary_tools("dsh"));
-        assert!(auto_allow_ordinary_tools("codex"));
+        assert!(!auto_allow_ordinary_tools("codex"));
         assert!(!auto_allow_ordinary_tools("claude"));
     }
 

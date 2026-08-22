@@ -644,6 +644,58 @@ fn format_tool_approval_summary_highlights_run_command() {
 }
 
 #[test]
+fn tool_approval_does_not_fail_closed_after_sixty_seconds() {
+    let src = include_str!("interaction.rs");
+    let start = src
+        .find("pub(crate) async fn request_tool_approval_outcome")
+        .expect("request_tool_approval_outcome");
+    let rest = &src[start..];
+    let end = rest
+        .find("pub(crate) fn withdraw_tool_confirm")
+        .expect("withdraw_tool_confirm");
+    let body = &rest[..end];
+    assert!(
+        !body.contains("from_secs(60)"),
+        "a 60s wall-clock deny is what Codex reports as Rejected(\"rejected by user\")"
+    );
+    assert!(
+        body.contains("result = rx => result"),
+        "tool approval must wait on the user oneshot until cancel"
+    );
+}
+
+#[test]
+fn format_tool_approval_summary_shows_workspace_permission_grant() {
+    let record = ToolCallRecord {
+        id: "call_1".to_string(),
+        name: "request_permissions".to_string(),
+        source: "external_cli".to_string(),
+        server_id: None,
+        arguments: r#"{"reason":"Select a workspace root","cwd":"/work","permissions":{"fileSystem":{"write":["/work"]},"network":{"enabled":true}}}"#.to_string(),
+        status: ToolCallStatus::Pending,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        started_at: None,
+        completed_at: None,
+        round: 1,
+        sensitive: true,
+        artifacts: Vec::new(),
+        trace_id: None,
+        span_id: None,
+        structured_content: None,
+    };
+
+    let summary = format_tool_approval_summary(&record);
+    assert_eq!(summary.target.as_deref(), Some("/work"));
+    assert!(summary.detail.contains("Select a workspace root"));
+    assert!(summary.detail.contains("Working directory: /work"));
+    assert!(summary.detail.contains("Write: /work"));
+    assert!(summary.detail.contains("Network access"));
+    assert!(!summary.detail.contains("Raw arguments"));
+}
+
+#[test]
 fn format_tool_approval_summary_highlights_file_path() {
     let record = ToolCallRecord {
         id: "call_1".to_string(),

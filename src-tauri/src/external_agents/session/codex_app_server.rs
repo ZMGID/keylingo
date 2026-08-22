@@ -74,6 +74,66 @@ async fn write_rpc_error(
         .map_err(|e| e.to_string())
 }
 
+fn codex_initialize_params() -> Value {
+    json!({
+        "clientInfo": { "name": "kivio", "title": "kivio", "version": "0" },
+        // `runtimeWorkspaceRoots` / command `additionalPermissions` are experimental.
+        // Without this flag app-server strips them, so agreeing to a permission card
+        // never materializes `:workspace_roots` and the model reports the workspace
+        // as still locked.
+        "capabilities": { "experimentalApi": true },
+    })
+}
+
+fn absolute_workspace_path(path: &str) -> String {
+    strip_windows_verbatim_prefix(PathBuf::from(path))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn runtime_workspace_roots(cwd: &str, extra: &[String]) -> Vec<String> {
+    let mut roots = Vec::new();
+    let cwd = absolute_workspace_path(cwd);
+    if !cwd.is_empty() {
+        roots.push(cwd);
+    }
+    for path in extra {
+        let path = absolute_workspace_path(path);
+        if !path.is_empty() && !roots.iter().any(|existing| existing == &path) {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+/// `thread/start` and `thread/resume` share cwd / sandbox / approval / workspace roots.
+/// `runtimeWorkspaceRoots` is what materializes `:workspace_roots` / `project_roots`
+/// when the model asks for workspace permission — echoing the grant is not enough
+/// if this list is empty.
+fn build_codex_thread_params(
+    cwd: &str,
+    sandbox_mode: &str,
+    approval_policy: &str,
+    model: Option<&str>,
+    resume_thread: Option<&str>,
+) -> (&'static str, Value) {
+    let cwd_abs = absolute_workspace_path(cwd);
+    let (method, mut params) = match resume_thread.filter(|tid| !tid.is_empty()) {
+        Some(tid) => ("thread/resume", json!({ "threadId": tid })),
+        None => ("thread/start", json!({})),
+    };
+    if !cwd_abs.is_empty() {
+        params["cwd"] = json!(cwd_abs);
+        params["runtimeWorkspaceRoots"] = json!([cwd_abs]);
+    }
+    params["sandbox"] = json!(sandbox_mode);
+    params["approvalPolicy"] = json!(approval_policy);
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
+    (method, params)
+}
+
 /// JSON-RPC notification (no `id`). Required after `initialize` — newer app-server rejects
 /// subsequent requests until it sees `initialized`.
 async fn write_rpc_notification(
@@ -102,11 +162,56 @@ fn rpc_id_key(id: &Value) -> String {
     }
 }
 
-/// Server → client approval requests are auto-approved. Each request method maps to a different
-/// response shape (see the `*RequestApprovalResponse` schemas); return the matching approve value.
-///
-/// `item/permissions/requestApproval` must **echo the requested `permissions`** — an empty object
-/// grants nothing and the turn stalls on the next filesystem/network tool.
+/// Same three ids the picker sends (`detection.rs`). Blank / unknown → 工作区写.
+pub(crate) fn normalize_codex_sandbox(sandbox: Option<&str>) -> &'static str {
+    match sandbox.map(str::trim) {
+        Some("danger-full-access") => "danger-full-access",
+        Some("read-only") => "read-only",
+        _ => "workspace-write",
+    }
+}
+
+/// Native Codex TUI default is `on-request`: the sandbox still applies, but escapes
+/// (network, writes outside the workspace, untrusted commands) ask the host.
+/// `danger-full-access` keeps `never` so the 「完全」档 stays silent.
+fn codex_approval_policy(sandbox: Option<&str>) -> &'static str {
+    match normalize_codex_sandbox(sandbox) {
+        "danger-full-access" => "never",
+        _ => "on-request",
+    }
+}
+
+fn is_codex_tool_approval(method: &str) -> bool {
+    matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/permissions/requestApproval"
+            | "execCommandApproval"
+            | "applyPatchApproval"
+    )
+}
+
+/// Echo the requested grant. Codex only turns network on when both the request
+/// and the grant have `network.enabled = true`; a boolean `true` does not count.
+/// Empty object grants nothing.
+fn granted_codex_permissions(params: &Value) -> Value {
+    let mut permissions = params.get("permissions").cloned().unwrap_or(json!({}));
+    let network_enabled = matches!(permissions.get("network"), Some(Value::Bool(true)))
+        || permissions.pointer("/network/enabled") == Some(&Value::Bool(true))
+        || matches!(
+            params.pointer("/additionalPermissions/network"),
+            Some(Value::Bool(true))
+        )
+        || params.pointer("/additionalPermissions/network/enabled") == Some(&Value::Bool(true));
+    if network_enabled {
+        permissions["network"] = json!({ "enabled": true });
+    }
+    permissions
+}
+
+/// Approve payload when the user allows (or the 「完全」档 auto-allows). Each method
+/// maps to a different response shape (see the `*RequestApprovalResponse` schemas).
 fn approval_response(method: &str, params: &Value) -> Option<Value> {
     match method {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
@@ -116,12 +221,86 @@ fn approval_response(method: &str, params: &Value) -> Option<Value> {
         "execCommandApproval" | "applyPatchApproval" => {
             Some(json!({ "decision": "approved_for_session" }))
         }
-        "item/permissions/requestApproval" => {
-            let permissions = params.get("permissions").cloned().unwrap_or(json!({}));
-            Some(json!({ "permissions": permissions, "scope": "session" }))
-        }
+        "item/permissions/requestApproval" => Some(json!({
+            "permissions": granted_codex_permissions(params),
+            "scope": "session"
+        })),
         "mcpServer/elicitation/request" => Some(json!({ "action": "decline", "content": null })),
         _ => None,
+    }
+}
+
+/// Deny payload. `interrupt` maps to Codex's cancel/abort (stop the turn); otherwise the
+/// agent continues and tries something else.
+fn approval_deny_response(method: &str, interrupt: bool) -> Option<Value> {
+    match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            Some(json!({
+                "decision": if interrupt { "cancel" } else { "decline" }
+            }))
+        }
+        "execCommandApproval" | "applyPatchApproval" => Some(if interrupt {
+            json!({ "decision": "abort" })
+        } else {
+            json!({ "decision": { "denied": { "rejection": "user declined" } } })
+        }),
+        "item/permissions/requestApproval" => Some(json!({
+            "permissions": {},
+            "scope": "turn"
+        })),
+        "mcpServer/elicitation/request" => Some(json!({ "action": "decline", "content": null })),
+        _ => None,
+    }
+}
+
+fn approval_ask_from_params(method: &str, id: &Value, params: &Value) -> ApprovalAsk {
+    let request_id = rpc_id_key(id);
+    // `approvalId` is the callback id when several prompts share one `itemId`.
+    let tool_call_id = json_str(params, "approvalId")
+        .filter(|value| !value.is_empty())
+        .or_else(|| json_str(params, "itemId"))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("codex-approve-{request_id}"));
+    let (tool_name, input) = match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => {
+            let command = json_str(params, "command").unwrap_or("");
+            let reason = json_str(params, "reason").unwrap_or("");
+            let display = if command.is_empty() { reason } else { command };
+            (
+                "Bash",
+                json!({
+                    "command": display,
+                    "cwd": params.get("cwd").cloned().unwrap_or(Value::Null),
+                    "reason": reason,
+                }),
+            )
+        }
+        "item/fileChange/requestApproval" | "applyPatchApproval" => (
+            "Edit",
+            json!({
+                "path": json_str(params, "grantRoot").unwrap_or(""),
+                "reason": json_str(params, "reason").unwrap_or(""),
+            }),
+        ),
+        "item/permissions/requestApproval" => (
+            // Not Bash: a prior 「总是允许」Bash must not swallow workspace grants,
+            // and the card copy has to say this is a workspace / environment grant.
+            "request_permissions",
+            json!({
+                "reason": json_str(params, "reason").unwrap_or("请求工作区 / 执行环境权限"),
+                "cwd": params.get("cwd").cloned().unwrap_or(Value::Null),
+                "environmentId": params.get("environmentId").cloned().unwrap_or(Value::Null),
+                "permissions": params.get("permissions").cloned().unwrap_or(json!({})),
+            }),
+        ),
+        _ => ("Bash", params.clone()),
+    };
+    ApprovalAsk {
+        request_id,
+        tool_call_id,
+        tool_name: tool_name.to_string(),
+        input,
+        requires_user_interaction: false,
     }
 }
 
@@ -880,9 +1059,14 @@ pub fn normalize_codex_effort(raw: Option<&str>) -> Option<String> {
 /// applies both every turn, so a mid-session switch takes effect on the next turn). Pure so the
 /// per-turn application is unit-testable.
 ///
-/// Extra writable roots become `sandboxPolicy.workspaceWrite.writableRoots`. Do **not** also send
-/// the legacy `sandbox` string — app-server rejects combining them. Empty extra list = omit the
-/// field so the thread's existing sandbox stays in force.
+/// Extra writable roots become `runtimeWorkspaceRoots` (cwd + extras). Do **not** replace
+/// the thread sandbox with a `sandboxPolicy` object — that object defaults
+/// `networkAccess: false` and drops the environment-scoped workspace roots, which is
+/// exactly the "工作区权限没放开" failure mode. Empty extra list = omit the field so
+/// the thread's existing roots stay in force.
+///
+/// `approval_policy` is sent every turn so a live thread that started under `never` still
+/// picks up `on-request` after this adapter change (and the 「完全」档 can switch back).
 fn build_codex_turn_params(
     thread_id: &str,
     cwd: &str,
@@ -890,12 +1074,13 @@ fn build_codex_turn_params(
     model: Option<&str>,
     effort: Option<&str>,
     extra_writable_roots: &[String],
+    approval_policy: &str,
 ) -> Value {
     let mut turn_params = json!({
         "threadId": thread_id,
         "input": input,
         "cwd": cwd,
-        "approvalPolicy": "never",
+        "approvalPolicy": approval_policy,
     });
     if let Some(effort) = normalize_codex_effort(effort) {
         turn_params["effort"] = json!(effort);
@@ -903,32 +1088,12 @@ fn build_codex_turn_params(
     if let Some(model) = model {
         turn_params["model"] = json!(model);
     }
-    let extra: Vec<String> = extra_writable_roots
+    if extra_writable_roots
         .iter()
-        .map(|path| {
-            strip_windows_verbatim_prefix(PathBuf::from(path))
-                .to_string_lossy()
-                .to_string()
-        })
-        .filter(|path| !path.is_empty())
-        .collect();
-    if !extra.is_empty() {
-        let mut roots = Vec::new();
-        let cwd_stripped = strip_windows_verbatim_prefix(PathBuf::from(cwd))
-            .to_string_lossy()
-            .to_string();
-        if !cwd_stripped.is_empty() {
-            roots.push(cwd_stripped);
-        }
-        for path in extra {
-            if !roots.iter().any(|existing| existing == &path) {
-                roots.push(path);
-            }
-        }
-        turn_params["sandboxPolicy"] = json!({
-            "type": "workspaceWrite",
-            "writableRoots": roots,
-        });
+        .any(|path| !path.trim().is_empty())
+    {
+        turn_params["runtimeWorkspaceRoots"] =
+            json!(runtime_workspace_roots(cwd, extra_writable_roots));
     }
     turn_params
 }
@@ -955,6 +1120,8 @@ pub struct CodexAppServerSession {
     active_turn_id: Option<String>,
     /// Ring-buffered stderr tail (N1), joined on close / error for diagnostics.
     stderr_tail: tokio::task::JoinHandle<String>,
+    /// `on-request` (workspace-write / read-only) asks the host; `never` (完全) auto-allows.
+    approval_policy: &'static str,
 }
 
 /// Handshake timeouts (缺陷 4 / R3): 30s each, up from 15/20s.
@@ -1002,44 +1169,44 @@ impl CodexAppServerSession {
 
         let cwd_str = cwd.to_string_lossy().to_string();
         let chosen_model = model.filter(|m| !m.is_empty() && *m != "default");
+        let sandbox_mode = normalize_codex_sandbox(sandbox);
+        let approval_policy = codex_approval_policy(Some(sandbox_mode));
 
         let handshake = async {
-            write_rpc(
-                &mut stdin,
-                1,
-                "initialize",
-                json!({ "clientInfo": { "name": "kivio", "title": "kivio", "version": "0" } }),
-            )
-            .await
-            .map_err(|e| format!("initialize: {e}"))?;
-            read_until_response(&mut reader, &mut stdin, 1, CODEX_INITIALIZE_TIMEOUT)
+            let mut next_id = 1u64;
+            write_rpc(&mut stdin, next_id, "initialize", codex_initialize_params())
                 .await
                 .map_err(|e| format!("initialize: {e}"))?;
+            read_until_response(&mut reader, &mut stdin, next_id, CODEX_INITIALIZE_TIMEOUT)
+                .await
+                .map_err(|e| format!("initialize: {e}"))?;
+            next_id += 1;
             write_rpc_notification(&mut stdin, "initialized", json!({}))
                 .await
                 .map_err(|e| format!("initialized: {e}"))?;
 
-            let (method, mut params) = match resume_thread.filter(|t| !t.is_empty()) {
-                Some(tid) => ("thread/resume", json!({ "threadId": tid })),
-                None => (
-                    "thread/start",
-                    json!({
-                        "cwd": cwd_str,
-                        "sandbox": sandbox.filter(|s| !s.is_empty()).unwrap_or("workspace-write"),
-                        "approvalPolicy": "never",
-                    }),
-                ),
-            };
-            if let Some(m) = chosen_model {
-                params["model"] = json!(m);
-            }
-            write_rpc(&mut stdin, 2, method, params)
+            ensure_windows_sandbox(&mut reader, &mut stdin, &cwd_str, &mut next_id).await;
+
+            let (method, params) = build_codex_thread_params(
+                &cwd_str,
+                sandbox_mode,
+                approval_policy,
+                chosen_model,
+                resume_thread.filter(|t| !t.is_empty()),
+            );
+            let thread_rpc_id = next_id;
+            next_id += 1;
+            write_rpc(&mut stdin, thread_rpc_id, method, params)
                 .await
                 .map_err(|e| format!("thread-start: {e}"))?;
-            let result =
-                read_until_response(&mut reader, &mut stdin, 2, CODEX_THREAD_START_TIMEOUT)
-                    .await
-                    .map_err(|e| format!("thread-start: {e}"))?;
+            let result = read_until_response(
+                &mut reader,
+                &mut stdin,
+                thread_rpc_id,
+                CODEX_THREAD_START_TIMEOUT,
+            )
+            .await
+            .map_err(|e| format!("thread-start: {e}"))?;
             let thread_id = result
                 .get("thread")
                 .and_then(|t| t.get("id"))
@@ -1047,21 +1214,22 @@ impl CodexAppServerSession {
                 .or_else(|| result.get("threadId").and_then(|v| v.as_str()))
                 .map(str::to_string)
                 .ok_or_else(|| format!("thread-start: invalid {method} response"))?;
-            Ok::<_, String>(thread_id)
+            Ok::<_, String>((thread_id, next_id))
         }
         .await;
 
         match handshake {
-            Ok(thread_id) => Ok(Self {
+            Ok((thread_id, next_id)) => Ok(Self {
                 child,
                 stdin,
                 reader,
                 thread_id,
                 cwd: cwd_str,
-                next_id: 3,
+                next_id,
                 emitted_tools: HashSet::new(),
                 active_turn_id: None,
                 stderr_tail,
+                approval_policy,
             }),
             Err(msg) => {
                 let tail = join_stderr_tail(&mut child, stderr_tail).await;
@@ -1120,6 +1288,7 @@ impl CodexAppServerSession {
                 chosen_model,
                 chosen_effort.as_deref(),
                 extra_writable_roots,
+                self.approval_policy,
             );
             write_rpc(&mut self.stdin, turn_id, "turn/start", turn_params).await?;
         }
@@ -1226,6 +1395,7 @@ impl CodexAppServerSession {
                     control,
                     &self.thread_id,
                     &mut self.next_id,
+                    self.approval_policy != "never",
                 )
                 .await?;
                 continue;
@@ -1309,8 +1479,12 @@ impl CodexAppServerSession {
     }
 }
 
-/// Answer a server→client JSON-RPC request. Known approvals auto-accept; `requestUserInput`
-/// goes through the ask-user host; everything else is fail-closed so the turn cannot hang.
+/// Answer a server→client JSON-RPC request.
+///
+/// `requestUserInput` always goes through the ask-user host. Command / file / permissions
+/// approvals ask the host when the session is `on-request`; the 「完全」档 (`never`) still
+/// auto-allows so picking that capsule stays silent. Handshake auto-accepts because there
+/// is no UI yet. Unknown requests are fail-closed so the turn cannot hang.
 async fn answer_codex_server_request(
     stdin: &mut ChildStdin,
     method: &str,
@@ -1320,15 +1494,117 @@ async fn answer_codex_server_request(
     control: &mut mpsc::Receiver<SessionCommand>,
     thread_id: &str,
     next_id: &mut u64,
+    asks_for_approval: bool,
 ) -> Result<(), String> {
     if method == "item/tool/requestUserInput" {
         return answer_codex_user_input(stdin, id, params, approvals, control, thread_id, next_id)
             .await;
     }
+    if is_codex_tool_approval(method) {
+        return answer_codex_tool_approval(
+            stdin,
+            method,
+            id,
+            params,
+            approvals,
+            control,
+            thread_id,
+            next_id,
+            asks_for_approval,
+        )
+        .await;
+    }
     if let Some(result) = approval_response(method, params) {
         return write_rpc_result(stdin, id, result).await;
     }
     write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await
+}
+
+async fn answer_codex_tool_approval(
+    stdin: &mut ChildStdin,
+    method: &str,
+    id: &Value,
+    params: &Value,
+    approvals: Option<&mut ApprovalBridge>,
+    control: &mut mpsc::Receiver<SessionCommand>,
+    thread_id: &str,
+    next_id: &mut u64,
+    asks_for_approval: bool,
+) -> Result<(), String> {
+    if !asks_for_approval {
+        let result = approval_response(method, params)
+            .ok_or_else(|| format!("no approve payload for {method}"))?;
+        return write_rpc_result(stdin, id, result).await;
+    }
+    let Some(bridge) = approvals else {
+        let denied = approval_deny_response(method, false)
+            .ok_or_else(|| format!("no deny payload for {method}"))?;
+        return write_rpc_result(stdin, id, denied).await;
+    };
+    let ask = approval_ask_from_params(method, id, params);
+    let request_id = ask.request_id.clone();
+    if bridge.requests.send(ask).await.is_err() {
+        let denied = approval_deny_response(method, false)
+            .ok_or_else(|| format!("no deny payload for {method}"))?;
+        return write_rpc_result(stdin, id, denied).await;
+    }
+    loop {
+        match control.try_recv() {
+            Ok(SessionCommand::Cancel) => {
+                if let Some(denied) = approval_deny_response(method, true) {
+                    let _ = write_rpc_result(stdin, id, denied).await;
+                }
+                let iid = *next_id;
+                *next_id += 1;
+                let _ = write_rpc(
+                    stdin,
+                    iid,
+                    "turn/interrupt",
+                    json!({ "threadId": thread_id }),
+                )
+                .await;
+                return Err("cancelled".to_string());
+            }
+            Ok(SessionCommand::Close) => {
+                if let Some(denied) = approval_deny_response(method, true) {
+                    let _ = write_rpc_result(stdin, id, denied).await;
+                }
+                return Err("closed".to_string());
+            }
+            Ok(SessionCommand::RunTurn { done, .. }) => {
+                let _ = done.send(Err("session busy".to_string()));
+            }
+            Ok(SessionCommand::Steer { accepted, .. }) => {
+                let _ = accepted.send(false);
+            }
+            Ok(SessionCommand::StopTask { .. }) => {}
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                if let Some(denied) = approval_deny_response(method, true) {
+                    let _ = write_rpc_result(stdin, id, denied).await;
+                }
+                return Err("control channel closed".to_string());
+            }
+        }
+        match timeout(Duration::from_millis(200), bridge.decisions.recv()).await {
+            Ok(Some(decision)) if decision.request_id == request_id => {
+                if decision.approved {
+                    let result = approval_response(method, params)
+                        .ok_or_else(|| format!("no approve payload for {method}"))?;
+                    return write_rpc_result(stdin, id, result).await;
+                }
+                let denied = approval_deny_response(method, false)
+                    .ok_or_else(|| format!("no deny payload for {method}"))?;
+                return write_rpc_result(stdin, id, denied).await;
+            }
+            Ok(Some(_)) | Err(_) => continue,
+            Ok(None) => {
+                let denied = approval_deny_response(method, false)
+                    .ok_or_else(|| format!("no deny payload for {method}"))?;
+                return write_rpc_result(stdin, id, denied).await;
+            }
+        }
+    }
 }
 
 async fn answer_codex_user_input(
@@ -1439,11 +1715,7 @@ async fn read_until_response(
             value.get("id"),
         ) {
             let params = value.get("params").cloned().unwrap_or(Value::Null);
-            if let Some(result) = approval_response(method, &params) {
-                write_rpc_result(stdin, id, result).await?;
-            } else {
-                write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await?;
-            }
+            answer_handshake_request(stdin, method, id, &params).await?;
             continue;
         }
         if value.get("method").is_some() {
@@ -1458,6 +1730,106 @@ async fn read_until_response(
         }
         if value.get("id").and_then(|v| v.as_u64()) == Some(target_id) {
             return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+}
+
+async fn answer_handshake_request(
+    stdin: &mut ChildStdin,
+    method: &str,
+    id: &Value,
+    params: &Value,
+) -> Result<(), String> {
+    if let Some(result) = approval_response(method, params) {
+        write_rpc_result(stdin, id, result).await
+    } else {
+        write_rpc_error(stdin, id, -32601, &format!("Method not found: {method}")).await
+    }
+}
+
+/// Native Codex TUI sets up the Windows sandbox (UAC + ACLs) before the first
+/// workspace-write turn. App-server does not do that by itself; without this
+/// call the model reports that the execution environment is still locked.
+async fn ensure_windows_sandbox(
+    reader: &mut Lines<BufReader<ChildStdout>>,
+    stdin: &mut ChildStdin,
+    cwd: &str,
+    next_id: &mut u64,
+) {
+    #[cfg(not(windows))]
+    {
+        let _ = (reader, stdin, cwd, next_id);
+    }
+    #[cfg(windows)]
+    {
+        let _ = ensure_windows_sandbox_inner(reader, stdin, cwd, next_id).await;
+    }
+}
+
+#[cfg(windows)]
+async fn ensure_windows_sandbox_inner(
+    reader: &mut Lines<BufReader<ChildStdout>>,
+    stdin: &mut ChildStdin,
+    cwd: &str,
+    next_id: &mut u64,
+) -> Result<(), String> {
+    let ready_id = *next_id;
+    *next_id += 1;
+    write_rpc(stdin, ready_id, "windowsSandbox/readiness", json!({})).await?;
+    let status = match read_until_response(reader, stdin, ready_id, Duration::from_secs(8)).await {
+        Ok(result) => result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        Err(_) => return Ok(()),
+    };
+    if status == "ready" {
+        return Ok(());
+    }
+
+    let setup_id = *next_id;
+    *next_id += 1;
+    let mut params = json!({ "mode": "elevated" });
+    let cwd_abs = absolute_workspace_path(cwd);
+    if !cwd_abs.is_empty() {
+        params["cwd"] = json!(cwd_abs);
+    }
+    write_rpc(stdin, setup_id, "windowsSandbox/setupStart", params).await?;
+    match read_until_response(reader, stdin, setup_id, Duration::from_secs(15)).await {
+        Ok(result) if result.get("started").and_then(Value::as_bool) == Some(true) => {}
+        _ => return Ok(()),
+    }
+
+    let start = std::time::Instant::now();
+    let overall = Duration::from_secs(90);
+    loop {
+        if start.elapsed() > overall {
+            return Ok(());
+        }
+        let line = match timeout(Duration::from_millis(200), reader.next_line()).await {
+            Ok(Ok(Some(l))) => l,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(_)) => return Ok(()),
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(line.trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let (Some(method), Some(id)) = (
+            value.get("method").and_then(|v| v.as_str()),
+            value.get("id"),
+        ) {
+            let params = value.get("params").cloned().unwrap_or(Value::Null);
+            let _ = answer_handshake_request(stdin, method, id, &params).await;
+            continue;
+        }
+        if value.get("method").and_then(|v| v.as_str()) == Some("windowsSandbox/setupCompleted") {
+            return Ok(());
         }
     }
 }
@@ -1830,16 +2202,12 @@ fn parse_codex_reasoning_efforts(
         if !seen.insert(id.to_string()) {
             continue;
         }
-        let label = level
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|d| format!("{id} — {d}"))
-            .unwrap_or_else(|| title_case_effort(id));
+        // Codex ships marketing copy in `description` ("Fast responses with lighter
+        // reasoning"). The picker only wants the effort id; those sentences blow out
+        // the 64px pill and the menu.
         out.push(RuntimeModelOption {
             id: id.to_string(),
-            label,
+            label: title_case_effort(id),
             context_window_tokens: None,
         });
     }
@@ -2064,6 +2432,11 @@ mod tests {
         let gpt55 = probe.reasoning_by_model.get("gpt-5.5").unwrap();
         assert_eq!(gpt55.len(), 4);
         assert!(gpt55.iter().any(|e| e.id == "xhigh"));
+        assert_eq!(
+            gpt55.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+            vec!["Low", "Medium", "High", "Xhigh"]
+        );
+        assert!(gpt55.iter().all(|e| !e.label.contains('—')));
         let mini = probe.reasoning_by_model.get("gpt-5.4-mini").unwrap();
         assert_eq!(mini.len(), 2);
         // flat options come from the default model
@@ -2881,11 +3254,12 @@ mod tests {
             Some("gpt-5.3-codex"),
             Some("high"),
             &[],
+            "on-request",
         );
         assert_eq!(params["threadId"], json!("thread-1"));
         assert_eq!(params["model"], json!("gpt-5.3-codex"));
         assert_eq!(params["effort"], json!("high"));
-        assert_eq!(params["approvalPolicy"], json!("never"));
+        assert_eq!(params["approvalPolicy"], json!("on-request"));
     }
 
     #[test]
@@ -2897,11 +3271,13 @@ mod tests {
             None,
             None,
             &[],
+            "on-request",
         );
         assert!(params.get("model").is_none());
         assert!(params.get("effort").is_none());
         assert!(params.get("sandboxPolicy").is_none());
         assert!(params.get("sandbox").is_none());
+        assert!(params.get("runtimeWorkspaceRoots").is_none());
     }
 
     #[test]
@@ -2913,15 +3289,54 @@ mod tests {
             None,
             None,
             &["/tmp/attach".to_string()],
+            "on-request",
         );
         assert_eq!(
-            params["sandboxPolicy"],
-            json!({
-                "type": "workspaceWrite",
-                "writableRoots": ["/work", "/tmp/attach"],
-            })
+            params["runtimeWorkspaceRoots"],
+            json!(["/work", "/tmp/attach"]),
         );
+        assert!(params.get("sandboxPolicy").is_none());
         assert!(params.get("sandbox").is_none());
+    }
+
+    #[test]
+    fn build_codex_thread_params_sends_workspace_roots() {
+        let (method, params) = build_codex_thread_params(
+            "/work",
+            "workspace-write",
+            "on-request",
+            Some("gpt-5.6-sol"),
+            None,
+        );
+        assert_eq!(method, "thread/start");
+        assert_eq!(params["cwd"], json!("/work"));
+        assert_eq!(params["sandbox"], json!("workspace-write"));
+        assert_eq!(params["approvalPolicy"], json!("on-request"));
+        assert_eq!(params["model"], json!("gpt-5.6-sol"));
+        assert_eq!(params["runtimeWorkspaceRoots"], json!(["/work"]));
+        assert!(params.get("threadId").is_none());
+    }
+
+    #[test]
+    fn build_codex_thread_params_resume_keeps_workspace_roots() {
+        let (method, params) = build_codex_thread_params(
+            "/work",
+            "workspace-write",
+            "on-request",
+            None,
+            Some("thr_1"),
+        );
+        assert_eq!(method, "thread/resume");
+        assert_eq!(params["threadId"], json!("thr_1"));
+        assert_eq!(params["runtimeWorkspaceRoots"], json!(["/work"]));
+        assert_eq!(params["sandbox"], json!("workspace-write"));
+    }
+
+    #[test]
+    fn initialize_opts_into_experimental_api() {
+        let params = codex_initialize_params();
+        assert_eq!(params["capabilities"]["experimentalApi"], json!(true));
+        assert_eq!(params["clientInfo"]["name"], json!("kivio"));
     }
 
     #[test]
@@ -2945,8 +3360,115 @@ mod tests {
                 "scope": "session"
             }))
         );
+        assert_eq!(
+            approval_response(
+                "item/permissions/requestApproval",
+                &json!({ "permissions": { "network": true } }),
+            ),
+            Some(json!({
+                "permissions": { "network": { "enabled": true } },
+                "scope": "session"
+            }))
+        );
         assert!(approval_response("item/started", &empty).is_none());
         assert!(approval_response("item/tool/requestUserInput", &empty).is_none());
+        assert_eq!(
+            approval_deny_response("item/commandExecution/requestApproval", false),
+            Some(json!({ "decision": "decline" }))
+        );
+        assert_eq!(
+            approval_deny_response("item/commandExecution/requestApproval", true),
+            Some(json!({ "decision": "cancel" }))
+        );
+        assert_eq!(
+            approval_deny_response("item/permissions/requestApproval", false),
+            Some(json!({ "permissions": {}, "scope": "turn" }))
+        );
+    }
+
+    #[test]
+    fn workspace_write_asks_and_full_access_does_not() {
+        assert_eq!(codex_approval_policy(None), "on-request");
+        assert_eq!(codex_approval_policy(Some("workspace-write")), "on-request");
+        assert_eq!(codex_approval_policy(Some("read-only")), "on-request");
+        assert_eq!(codex_approval_policy(Some("danger-full-access")), "never");
+    }
+
+    #[test]
+    fn normalize_codex_sandbox_collapses_blank_and_unknown_to_workspace_write() {
+        assert_eq!(normalize_codex_sandbox(None), "workspace-write");
+        assert_eq!(normalize_codex_sandbox(Some("")), "workspace-write");
+        assert_eq!(normalize_codex_sandbox(Some("default")), "workspace-write");
+        assert_eq!(
+            normalize_codex_sandbox(Some("workspace-write")),
+            "workspace-write"
+        );
+        assert_eq!(normalize_codex_sandbox(Some("read-only")), "read-only");
+        assert_eq!(
+            normalize_codex_sandbox(Some("danger-full-access")),
+            "danger-full-access"
+        );
+    }
+
+    #[test]
+    fn command_approval_ask_uses_bash_command_for_the_card() {
+        let ask = approval_ask_from_params(
+            "item/commandExecution/requestApproval",
+            &json!(7),
+            &json!({
+                "itemId": "item-1",
+                "command": "curl https://example.com",
+                "cwd": "/work",
+                "reason": "network"
+            }),
+        );
+        assert_eq!(ask.tool_name, "Bash");
+        assert_eq!(ask.tool_call_id, "item-1");
+        assert_eq!(ask.input["command"], json!("curl https://example.com"));
+        assert_eq!(ask.input["cwd"], json!("/work"));
+        assert!(!ask.requires_user_interaction);
+    }
+
+    #[test]
+    fn command_approval_ask_prefers_approval_id_when_present() {
+        let ask = approval_ask_from_params(
+            "item/commandExecution/requestApproval",
+            &json!(8),
+            &json!({
+                "itemId": "item-1",
+                "approvalId": "cb-9",
+                "command": "curl https://example.com",
+            }),
+        );
+        assert_eq!(ask.tool_call_id, "cb-9");
+    }
+
+    #[test]
+    fn permissions_approval_ask_is_not_a_bash_card() {
+        let ask = approval_ask_from_params(
+            "item/permissions/requestApproval",
+            &json!(61),
+            &json!({
+                "itemId": "call_123",
+                "environmentId": "local",
+                "cwd": "/work",
+                "reason": "Select a workspace root",
+                "permissions": {
+                    "fileSystem": {
+                        "write": ["/work"]
+                    }
+                }
+            }),
+        );
+        assert_eq!(ask.tool_name, "request_permissions");
+        assert_eq!(ask.tool_call_id, "call_123");
+        assert_eq!(ask.input["reason"], json!("Select a workspace root"));
+        assert_eq!(ask.input["cwd"], json!("/work"));
+        assert_eq!(
+            ask.input["permissions"]["fileSystem"]["write"],
+            json!(["/work"])
+        );
+        assert_ne!(ask.tool_name, "Bash");
     }
 
     #[test]

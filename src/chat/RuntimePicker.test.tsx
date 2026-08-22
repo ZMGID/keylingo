@@ -226,6 +226,47 @@ describe('ExternalModelSelector', () => {
     expect(screen.queryByText('Auto')).not.toBeInTheDocument()
   })
 
+  it('Codex effort 营销文案只保留档位名', async () => {
+    detectModels.mockResolvedValue({
+      models: [
+        { id: 'default', label: 'Default' },
+        { id: 'gpt-5.6-sol', label: 'GPT-5.6-Sol' },
+      ],
+      reasoningOptions: [
+        {
+          id: 'high',
+          label: 'high — Greater reasoning depth for complex problems',
+        },
+        {
+          id: 'ultra',
+          label: 'ultra — Maximum reasoning with automatic task delegation',
+        },
+      ],
+      source: 'probed',
+      currentModel: 'gpt-5.6-sol',
+      currentReasoning: 'high',
+    })
+
+    render(
+      <ExternalModelSelector
+        agentRuntime={{
+          ...runtime,
+          externalAgentId: 'codex',
+          externalReasoning: 'high',
+        }}
+        onModelChange={() => {}}
+        conversationId={null}
+      />,
+    )
+    const pill = await screen.findByLabelText('思考等级：high')
+    expect(pill).toBeInTheDocument()
+    expect(pill).not.toHaveTextContent('Greater')
+    fireEvent.click(pill)
+    expect(screen.getByText('ultra')).toBeInTheDocument()
+    expect(screen.queryByText(/Greater reasoning/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/automatic task delegation/)).not.toBeInTheDocument()
+  })
+
   it('无当前模型概念时胶囊显示「Auto」', async () => {
     detectModels.mockResolvedValue({
       models: [{ id: 'default', label: 'Default' }],
