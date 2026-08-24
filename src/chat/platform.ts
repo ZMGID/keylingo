@@ -16,7 +16,7 @@ export const chatTitlebarRowClass = usesNativeTitlebar
  * 窗口左缘交通灯留白（仅侧栏顶栏、收起态主顶栏；约 66px 灯区 + 间距）。
  * 侧栏顶栏在悬浮卡片内部，坐标原点已随卡片右移 8px，而灯的 x 也 +8（windows.rs），
  * 两者抵消 → 这里保持 92px。收起态主顶栏在主区卡片内，而收起时主区卡片左缘同样在 x=8
- * （`.chat-sidebar-shell.is-collapsed` 的 -240px 留出那道左缝），所以收起态也是 92px，
+ * （`.chat-sidebar-shell.is-collapsed` 用负侧栏宽留出那道左缝），所以收起态也是 92px，
  * `.chat-titlebar-row--collapsed-mac` 不再补 8px。
  * 垂直：不在这里定 —— 整条顶栏线对到 `--chat-traffic-center-y`（交通灯中心的实测值，
  * 由 ChatWindowHost 量出来写进 documentElement），见 index.css。

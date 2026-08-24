@@ -281,3 +281,67 @@ describe('Sidebar archive race', () => {
     expect(screen.queryByRole('button', { name: /要归档的对话/ })).not.toBeInTheDocument()
   })
 })
+
+describe('Sidebar resize handle', () => {
+  function renderSidebar(onWidthChange: (width: number) => void, collapsed = false) {
+    return render(
+      <Sidebar
+        lang="zh"
+        selectedProject={null}
+        onSelectProject={vi.fn()}
+        selectedSet={null}
+        onSelectSet={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onOpenExtensionsItem={vi.fn()}
+        onSelectLang={vi.fn()}
+        onOpenUsage={vi.fn()}
+        collapsed={collapsed}
+        onToggleCollapsed={vi.fn()}
+        width={240}
+        onWidthChange={onWidthChange}
+        refreshKey={0}
+        searchOpen={false}
+        onSearchOpenChange={vi.fn()}
+      />,
+    )
+  }
+
+  beforeEach(() => {
+    vi.spyOn(chatApi, 'getProjects').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getSets').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getAssistants').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getConversations').mockResolvedValue([])
+    vi.spyOn(chatApi, 'getConversationPins').mockResolvedValue({})
+  })
+
+  it('shows a drag handle when expanded and hides it when collapsed', async () => {
+    const { container, rerender } = renderSidebar(vi.fn())
+    await waitFor(() => expect(chatApi.getConversations).toHaveBeenCalled())
+    expect(container.querySelector('.chat-sidebar-resize')).toBeTruthy()
+
+    rerender(
+      <Sidebar
+        lang="zh"
+        selectedProject={null}
+        onSelectProject={vi.fn()}
+        selectedSet={null}
+        onSelectSet={vi.fn()}
+        onSelectConversation={vi.fn()}
+        onNewConversation={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onOpenExtensionsItem={vi.fn()}
+        onSelectLang={vi.fn()}
+        onOpenUsage={vi.fn()}
+        collapsed
+        onToggleCollapsed={vi.fn()}
+        width={240}
+        refreshKey={0}
+        searchOpen={false}
+        onSearchOpenChange={vi.fn()}
+      />,
+    )
+    expect(container.querySelector('.chat-sidebar-resize')).toBeNull()
+  })
+})

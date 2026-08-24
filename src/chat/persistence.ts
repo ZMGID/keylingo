@@ -5,8 +5,15 @@ import { isWindows } from './platform'
 export const CHAT_DEFAULT_SIZE = { width: 1280, height: 800 }
 /** 侧栏收起时可缩到的最小尺寸 */
 export const CHAT_MIN_SIZE_COLLAPSED = { width: 400, height: 400 }
-/** 侧栏展开时整窗最小尺寸（240px 侧栏 + 主内容区） */
-export const CHAT_MIN_SIZE_EXPANDED = { width: 640, height: 400 }
+/** 左侧栏默认 / 拖拽上下限（与 `.chat-sidebar-shell` 的 CSS 变量同步）。 */
+export const SIDEBAR_DEFAULT_WIDTH = 240
+export const SIDEBAR_MIN_WIDTH = 200
+export const SIDEBAR_MAX_WIDTH = 400
+/** 侧栏展开时整窗最小尺寸（默认侧栏宽 + 主内容区） */
+export const CHAT_MIN_SIZE_EXPANDED = {
+  width: CHAT_MIN_SIZE_COLLAPSED.width + SIDEBAR_DEFAULT_WIDTH,
+  height: 400,
+}
 export const CHAT_MIN_SIZE = CHAT_MIN_SIZE_COLLAPSED
 
 export type ChatWindowGeometry = {
@@ -152,6 +159,31 @@ export function getRememberedChatSidebarCollapsed(): boolean {
 
 export function rememberChatSidebarCollapsed(collapsed: boolean) {
   setLocalStorageItem(CHAT_SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0')
+}
+
+const CHAT_SIDEBAR_WIDTH_KEY = 'kivio-chat-sidebar-width'
+
+/** 左侧栏宽度夹紧：绝对上下限，再按视口给主区留出最小宽度。 */
+export function clampSidebarWidth(width: number, viewportWidth?: number): number {
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH
+  const rounded = Math.round(width)
+  const viewportMax =
+    viewportWidth !== undefined && Number.isFinite(viewportWidth)
+      ? Math.max(SIDEBAR_MIN_WIDTH, Math.round(viewportWidth - CHAT_MIN_SIZE_COLLAPSED.width))
+      : SIDEBAR_MAX_WIDTH
+  return Math.min(SIDEBAR_MAX_WIDTH, viewportMax, Math.max(SIDEBAR_MIN_WIDTH, rounded))
+}
+
+export function getRememberedSidebarWidth(): number {
+  const parsed = Number(getLocalStorageItem(CHAT_SIDEBAR_WIDTH_KEY))
+  const raw = Number.isFinite(parsed) && parsed > 0 ? parsed : SIDEBAR_DEFAULT_WIDTH
+  const viewportWidth = typeof window === 'undefined' ? undefined : window.innerWidth
+  return clampSidebarWidth(raw, viewportWidth)
+}
+
+export function rememberSidebarWidth(width: number) {
+  if (!Number.isFinite(width) || width <= 0) return
+  setLocalStorageItem(CHAT_SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(width)))
 }
 
 // ---------- Right Dock 持久化 ----------

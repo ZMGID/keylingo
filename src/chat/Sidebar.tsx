@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { save } from '@tauri-apps/plugin-dialog'
 import {
@@ -34,6 +34,7 @@ import { useInsertionReorder } from '../utils/insertionReorder'
 import { applyConversationPins, withPinAt, type ConversationPin } from './conversationPins'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { chatTitlebarMacInsetClass, isMac, usesNativeTitlebar } from './platform'
+import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from './persistence'
 import { useChatPerfRenderProbe } from './chatPerformanceProbe'
 import type { ConversationMenuAnchor } from './ConversationContextMenu'
 import type { ChatUserProfile } from './types'
@@ -211,6 +212,9 @@ export interface SidebarProps {
   extensionsActive?: ExtensionsNavItem | null
   collapsed: boolean
   onToggleCollapsed: () => void
+  /** 展开态宽度。拖拽过程只写 CSS 变量，松手才回传。 */
+  width?: number
+  onWidthChange?: (width: number) => void
   refreshKey: number
   profileRefreshKey?: number
   searchOpen: boolean
@@ -571,6 +575,22 @@ function SearchDialog({
   )
 }
 
+function applySidebarWidthCss(aside: HTMLElement | null, nextWidth: number) {
+  const px = `${nextWidth}px`
+  aside?.style.setProperty('--chat-sidebar-width', px)
+  const shell = aside?.closest('.chat-window-shell')
+  if (shell instanceof HTMLElement) {
+    shell.style.setProperty('--chat-sidebar-width', px)
+  }
+}
+
+function setSidebarResizing(aside: HTMLElement | null, resizing: boolean) {
+  const shell = aside?.closest('.chat-window-shell')
+  if (shell instanceof HTMLElement) {
+    shell.classList.toggle('is-sidebar-resizing', resizing)
+  }
+}
+
 export const Sidebar = memo(function Sidebar({
   lang,
   currentConversationId,
@@ -593,6 +613,8 @@ export const Sidebar = memo(function Sidebar({
   extensionsActive = null,
   collapsed,
   onToggleCollapsed,
+  width = SIDEBAR_DEFAULT_WIDTH,
+  onWidthChange,
   refreshKey,
   profileRefreshKey = 0,
   searchOpen,
@@ -600,12 +622,55 @@ export const Sidebar = memo(function Sidebar({
 }: SidebarProps) {
   const t = i18n[lang]
   const asideRef = useRef<HTMLElement>(null)
+  const dragStateRef = useRef<{ startX: number; startWidth: number; width: number; raf: number } | null>(null)
   // 折叠后侧栏仍挂载（用于滑出动画），用 inert 让其退出 tab 序 / 不可点击 / 不进 a11y 树。
   // useLayoutEffect：在绘制前与 JSX 里的 aria-hidden 原子地一起生效，避免短暂可聚焦窗口。
   useLayoutEffect(() => {
     const el = asideRef.current
     if (el) el.inert = collapsed
   }, [collapsed])
+  useLayoutEffect(() => {
+    applySidebarWidthCss(asideRef.current, width)
+  }, [width])
+  const handleResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      const aside = asideRef.current
+      const measured = aside?.getBoundingClientRect().width ?? 0
+      const startWidth = measured > 0 ? measured : width
+      dragStateRef.current = { startX: event.clientX, startWidth, width: startWidth, raf: 0 }
+      setSidebarResizing(aside, true)
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const state = dragStateRef.current
+        if (!state) return
+        const nextWidth = clampSidebarWidth(state.startWidth + (moveEvent.clientX - state.startX), window.innerWidth)
+        state.width = nextWidth
+        if (!state.raf) {
+          state.raf = window.requestAnimationFrame(() => {
+            state.raf = 0
+            applySidebarWidthCss(asideRef.current, state.width)
+          })
+        }
+      }
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        const state = dragStateRef.current
+        dragStateRef.current = null
+        setSidebarResizing(asideRef.current, false)
+        if (!state) return
+        if (state.raf) window.cancelAnimationFrame(state.raf)
+        applySidebarWidthCss(asideRef.current, state.width)
+        if (state.width !== Math.round(startWidth)) onWidthChange?.(state.width)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [onWidthChange, width],
+  )
   const [conversations, setConversations] = useState<ConversationListItem[]>([])
   const [projects, setProjects] = useState<ChatProject[]>([])
   const [sets, setSets] = useState<ChatSet[]>([])
@@ -1280,11 +1345,18 @@ export const Sidebar = memo(function Sidebar({
     <>
       <aside
         ref={asideRef}
-        className={`chat-sidebar-shell flex w-[240px] shrink-0 flex-col overflow-hidden${
+        className={`chat-sidebar-shell relative flex shrink-0 flex-col overflow-hidden${
           collapsed ? ' is-collapsed' : ''
         }${settingsActive ? ' is-settings-cover' : ''}`}
         aria-hidden={collapsed}
       >
+        {!collapsed && (
+          <div
+            className="chat-sidebar-resize"
+            data-tauri-drag-region="false"
+            onPointerDown={handleResizeStart}
+          />
+        )}
         {/* 侧栏内顶栏行只在 macOS 存在：那两枚按钮要贴着系统交通灯排。
             Windows / Linux 已把它们常驻到全宽标题栏带（见 ChatTitlebar），此处渲染会重复。 */}
         {usesNativeTitlebar && (

@@ -6,11 +6,17 @@ import {
   forgetRememberedChatRoute,
   getRememberedChatRoute,
   getRememberedDockTab,
+  getRememberedSidebarWidth,
   hashPath,
   isChatPath,
+  clampSidebarWidth,
   normalizeStoredChatRoute,
   rememberCurrentChatRoute,
   rememberDockTab,
+  rememberSidebarWidth,
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
 } from './persistence'
 
 
@@ -93,5 +99,26 @@ describe('last route memory (Rust-persisted, auto-migrates from localStorage)', 
   it('falls back to the legacy localStorage value only when the cache is empty', () => {
     window.localStorage.setItem('kivio-chat-last-route', '#chat/conv-legacy')
     expect(getRememberedChatRoute()).toBe('#chat/conv-legacy')
+  })
+})
+
+describe('sidebar width persistence', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('defaults to 240 and clamps to [200, 400]', () => {
+    expect(getRememberedSidebarWidth()).toBe(SIDEBAR_DEFAULT_WIDTH)
+    rememberSidebarWidth(180)
+    expect(getRememberedSidebarWidth()).toBe(SIDEBAR_MIN_WIDTH)
+    rememberSidebarWidth(480)
+    expect(getRememberedSidebarWidth()).toBe(SIDEBAR_MAX_WIDTH)
+    rememberSidebarWidth(320)
+    expect(getRememberedSidebarWidth()).toBe(320)
+  })
+
+  it('does not let the sidebar steal the main pane’s minimum width', () => {
+    expect(clampSidebarWidth(360, 500)).toBe(SIDEBAR_MIN_WIDTH)
+    expect(clampSidebarWidth(360, 900)).toBe(360)
   })
 })

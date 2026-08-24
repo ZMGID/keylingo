@@ -103,18 +103,19 @@ import { i18n, LangContext, type Lang } from '../settings/i18n'
 import { estimateTokens } from '../utils/tokens'
 import {
   CHAT_MIN_SIZE_COLLAPSED,
-  CHAT_MIN_SIZE_EXPANDED,
   forgetRememberedChatRoute,
   getRememberedChatSidebarCollapsed,
   getRememberedDockOpen,
   getRememberedDockTab,
   getRememberedDockWidth,
+  getRememberedSidebarWidth,
   getRememberedTreeExpanded,
   rememberChatSidebarCollapsed,
   rememberChatSize,
   rememberDockOpen,
   rememberDockTab,
   rememberDockWidth,
+  rememberSidebarWidth,
   rememberTreeExpanded,
 } from './persistence'
 import { RightDock, type DockPreviewRequest, type DockRevealRequest, type DockTab } from './dock/RightDock'
@@ -1052,6 +1053,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   /** 全局搜索跳转目标；MessageList 完成滚动后清空。 */
   const [focusMessageId, setFocusMessageId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => getRememberedChatSidebarCollapsed())
+  const [sidebarWidth, setSidebarWidth] = useState(() => getRememberedSidebarWidth())
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedProject, setSelectedProject] = useState<ChatProject | null>(null)
   const [selectedSet, setSelectedSet] = useState<ChatSet | null>(null)
@@ -4574,6 +4576,18 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [])
 
+  const handleSidebarWidthChange = useCallback((nextWidth: number) => {
+    setSidebarWidth(nextWidth)
+    rememberSidebarWidth(nextWidth)
+  }, [])
+
+  useLayoutEffect(() => {
+    const shell = document.querySelector('.chat-window-shell')
+    if (shell instanceof HTMLElement) {
+      shell.style.setProperty('--chat-sidebar-width', `${sidebarWidth}px`)
+    }
+  }, [sidebarWidth])
+
   // ---------- Right Dock ----------
   const [dockOpen, setDockOpen] = useState(() => getRememberedDockOpen())
   const [dockWidth, setDockWidth] = useState(() => getRememberedDockWidth())
@@ -4749,7 +4763,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     void (async () => {
       const { getCurrentWindow } = await import('@tauri-apps/api/window')
       const { LogicalSize } = await import('@tauri-apps/api/dpi')
-      const min = sidebarCollapsed ? CHAT_MIN_SIZE_COLLAPSED : CHAT_MIN_SIZE_EXPANDED
+      const min = sidebarCollapsed
+        ? CHAT_MIN_SIZE_COLLAPSED
+        : {
+            width: CHAT_MIN_SIZE_COLLAPSED.width + sidebarWidth,
+            height: CHAT_MIN_SIZE_COLLAPSED.height,
+          }
       const win = getCurrentWindow()
       // 最大化/全屏时不要动 min-size 或 size：Windows 上 setMinSize 会触发重排、把最大化状态取消掉
       // （表现为切换侧边栏后窗口退出最大化）。尺寸约束对铺满屏幕的窗口也没意义，等恢复到可调窗口再应用。
@@ -4775,7 +4794,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     return () => {
       cancelled = true
     }
-  }, [sidebarCollapsed])
+  }, [sidebarCollapsed, sidebarWidth])
 
   const handleSidebarSelectProject = useCallback((project: ChatProject | null) => {
     runAfterLeavingSettings(() => handleSelectProject(project))
@@ -5370,7 +5389,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         <ChatTitlebar
           sidebarExpanded={!sidebarCollapsed}
           /* 与下方 <Sidebar collapsed> 取反同源：设置页里侧栏也是收起的，
-             只看 sidebarCollapsed 会在设置页多留 240px 空档。 */
+             只看 sidebarCollapsed 会在设置页多留一侧栏宽的空档。 */
           sidebarVisible={!(sidebarCollapsed || settingsPanelActive)}
           settingsMode={settingsPanelActive}
           onToggleSidebar={handleTitlebarToggleSidebar}
@@ -5408,6 +5427,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
           extensionsActive={extensionsActive}
           collapsed={sidebarCollapsed || settingsPanelActive}
           onToggleCollapsed={handleCollapseSidebar}
+          width={sidebarWidth}
+          onWidthChange={handleSidebarWidthChange}
           refreshKey={sidebarRefreshKey}
           profileRefreshKey={sidebarProfileRefreshKey}
           searchOpen={searchOpen}

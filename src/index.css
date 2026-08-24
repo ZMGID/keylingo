@@ -778,12 +778,57 @@ html.windows body {
 }
 
 .chat-sidebar-shell {
+  width: var(--chat-sidebar-width, 240px);
   margin: var(--chat-card-top) 8px 8px;
   /* 折叠时只做透明度动画。不要 transition margin-left：它会让 flex 主区在每一帧改变宽度，
      长聊天里的 Markdown / 代码块随之连续重排，侧栏动画会把聊天区一起拖卡。布局位置一次切换，
-     由外壳 overflow:hidden 裁掉滑出的卡片。 */
+     由外壳 overflow:hidden 裁掉滑出的卡片。也不要 transition width：拖拽调宽走 rAF 直写变量。 */
   transition:
     opacity var(--kv-dur-normal) var(--kv-ease-out);
+}
+
+/* 右缘拖拽手柄：6px 命中区，hover / 拖动时才露出细线，避免常驻一条分割线。 */
+.chat-sidebar-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.chat-sidebar-resize::after {
+  content: '';
+  position: absolute;
+  top: 16%;
+  right: 0;
+  bottom: 16%;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background-color var(--kv-dur-instant) linear;
+}
+
+.chat-sidebar-resize:hover::after,
+.chat-window-shell.is-sidebar-resizing .chat-sidebar-resize::after {
+  background: rgba(24, 24, 27, 0.22);
+}
+
+.dark .chat-sidebar-resize:hover::after,
+.dark .chat-window-shell.is-sidebar-resizing .chat-sidebar-resize::after {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.chat-window-shell.is-sidebar-resizing,
+.chat-window-shell.is-sidebar-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.chat-window-shell.is-sidebar-resizing .chat-titlebar-strip-nav {
+  transition: none;
 }
 
 /* 侧栏顶栏：只上移那俩图标，卡片本身仍四周 margin:8 悬浮。
@@ -804,16 +849,16 @@ html.windows body {
 }
 
 .chat-sidebar-shell.is-collapsed {
-  /* -240 而非 -(240+8)：卡片 border box 落在 [-240, 0] 已完全出屏，同时布局推进
-     = -240 + 240 + margin-right 8 = 8，把那 8px 留给主区卡片当左缝。 */
-  margin-left: -240px;
+  /* 负 margin 等于侧栏宽、不加那 8px：卡片 border box 完全出屏，同时布局推进
+     = -W + W + margin-right 8 = 8，把那 8px 留给主区卡片当左缝。 */
+  margin-left: calc(-1 * var(--chat-sidebar-width, 240px));
   opacity: 0;
   pointer-events: none;
 }
 
 /* 设置页齐边铺满：不再需要会话浮卡那 8px 左缝，否则会在导航栏左边露一条
    透底（Mica/透明外壳下直接看到桌面）。收成 0 布局占位：
-   -240 + 240 + 0 = 0（普通折叠是 -240 + 240 + 8 = 8）。 */
+   -W + W + 0 = 0（普通折叠是 -W + W + 8 = 8）。 */
 .chat-sidebar-shell.is-collapsed.is-settings-cover {
   margin-right: 0;
 }
@@ -3306,10 +3351,10 @@ button.chat-composer-status-item:hover {
   );
 }
 
-/* 侧栏收起时顶栏行回到主区。收起态主区卡片左缘也在 x=8（`.is-collapsed` 用 -240px 而非
-   -248px，刻意把那 8px 留成左缝），与展开态侧栏卡片的左缘同位；灯 x 也按「卡片内」算过
+/* 侧栏收起时顶栏行回到主区。收起态主区卡片左缘也在 x=8（`.is-collapsed` 用 -W 而非
+   -(W+8)，刻意把那 8px 留成左缝），与展开态侧栏卡片的左缘同位；灯 x 也按「卡片内」算过
    （windows.rs 里 x = 14 + 8）。所以两态用同一个 92px，收起态不再额外 +8 ——
-   多补的话图标就比展开态右移 8px（历史回归：-248 → -240 时这里没跟着减）。 */
+   多补的话图标就比展开态右移 8px（历史回归：-248 → -W 时这里没跟着减）。 */
 .chat-titlebar-row--collapsed-mac {
   padding-left: 92px;
 }
@@ -3389,8 +3434,8 @@ button.chat-composer-status-item:hover {
 
 /* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，
    把业务控件推到主区卡片左缘 —— 否则控件压在侧栏卡片上方，读作错位。
-   宽度 = 主区卡片左缘 256（侧栏 margin 8 + w-[240px] + margin 8）− 带自身 padding-left 8 = 248，
-   与 `.chat-sidebar-shell` 的 w-[240px] + margin:8 同步（改一处必改另一处）。
+   宽度 = 主区卡片左缘（侧栏 margin 8 + 宽 + margin 8）− 带自身 padding-left 8
+        = var(--chat-sidebar-width) + 8，与 `.chat-sidebar-shell` 同步。
    用 min-width 而非 width 做过渡：width 的收起态是 auto（按钮自然宽），auto 不可插值、
    动画会直接跳；min-width 两端都是具体值，且 max(内容宽, min-width) 天然贴合按钮宽度，
    不必把「两枚 28px 钮 + 2px 间距」这种数字硬编码进来。
@@ -3405,7 +3450,7 @@ button.chat-composer-status-item:hover {
 }
 
 .chat-titlebar-strip-nav--reserve {
-  min-width: 248px;
+  min-width: calc(var(--chat-sidebar-width, 240px) + 8px);
 }
 
 /* 设置页：带浮起、不占行高，让 200/52px 灰导航栏自己从 y=0 画起（见 ChatTitlebar 注释）。
