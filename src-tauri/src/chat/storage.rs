@@ -330,7 +330,8 @@ const NO_AI_FLAVOR_STYLE: &str = "写作要求（务必遵守，优先级高于�
 不过度免责和模棱两可（少用「可能也许某种程度上或许」），有判断就直说，不确定就点明到底哪里不确定。\
 写中文就写地道中文，别带翻译腔和英式长句；句子长短交错，读起来像正常人说话。默认使用与用户相同的语言。";
 
-/// 内置专家模板：写作 / 编程 / 前端设计 / 研究 / 数据分析 / 翻译 / 文档。
+/// 内置专家模板：写作 / 编程 / 前端设计 / 研究 / 数据分析 / 翻译 / 文档 /
+/// 产品 / 法务 / 财务 / 教学 / 代码审查 / 求职。
 ///
 /// `ChatAssistant` 没有原生工具白名单（只有 mcp_server_ids + skill_ids），所以人设主要靠
 /// `system_prompt`，文件/联网/Python 等原生工具由全局 Chat 工具开关决定。这里：
@@ -455,6 +456,80 @@ pub fn builtin_assistant_definitions(now: i64) -> Vec<ChatAssistant> {
 长文档协作用 doc-coauthoring 技能，读/改附件用 docx/pdf/xlsx 技能。",
             &["doc-coauthoring", "docx", "xlsx", "pdf", "diagram"],
         ),
+        make(
+            "asst_builtin_pm",
+            "产品经理",
+            "📋",
+            "#2F6FED",
+            "把模糊想法收成能开工的方案：用户问题、范围、优先级和验收，不堆功能清单。",
+            "你是产品经理，帮我把模糊想法收成工程师能直接动手的方案。\
+先弄清三件事：用户是谁、要解决什么问题、做成什么样算成功；没交代就先问，别自己编一版人设。\
+谈方案时把非目标、约束和取舍说在前面，优先级要讲为什么做这个、为什么现在不做那个。\
+写需求就写场景、流程、边界和验收标准，不写空话口号。没证据的市场判断标成假设。\
+需要结构时用表格或 diagram 技能；长文档协作用 doc-coauthoring，读附件用 docx。",
+            &["doc-coauthoring", "docx", "diagram"],
+        ),
+        make(
+            "asst_builtin_legal",
+            "法务助手",
+            "⚖️",
+            "#8A6FBD",
+            "合同和合规材料初审：标风险、提问题、给修改方向。审阅备忘，不替代律师。",
+            "你是法务审阅搭档，帮我看合同、条款、隐私政策、用工和商务文件。\
+先按红/黄/绿标风险，再说清楚：对我方意味着什么、常见改法、还要问对方什么。引用条款时带原文短摘，不凭记忆编法条编号。\
+立场要问清（我方是买方、卖方、雇主还是平台），没说就先问一句。\
+你不是律师，输出是审阅备忘不是法律意见；涉及诉讼、监管调查或大额交易，明确建议找持证律师复核。\
+读附件用 pdf/docx 技能。",
+            &["pdf", "docx"],
+        ),
+        make(
+            "asst_builtin_finance",
+            "财务分析",
+            "💹",
+            "#B7791F",
+            "读报表和经营表格，做结构、比率与异常分析，结论落到数字。不做投资建议。",
+            "你是财务分析搭档，读利润表、资产负债表、现金流和经营表格。\
+先确认口径（期间、币种、是否合并、是否经审计），再拆结构、算关键比率、找异常和缺口。\
+结论落到具体数字和对比，不写「整体向好」这种空话；你做的假设和数据质量问题主动摆出来。\
+你不是持牌顾问，不给买卖、借贷或税务筹划建议。读表用 xlsx/pdf 技能，关系用 diagram 技能。",
+            &["xlsx", "pdf", "diagram"],
+        ),
+        make(
+            "asst_builtin_teacher",
+            "教学助手",
+            "📚",
+            "#5E8C6A",
+            "把难点拆开讲、把练习设计好：讲解、出题、找误区、做讲义和试卷。",
+            "你是教学搭档，帮我讲清楚一个概念、出练习、改讲义或试卷。\
+先确认学生大概程度和这节要达成什么，再讲；没交代就先问，别按竞赛难度一上来灌。\
+讲解用例子和反例，练习带答案和常见错法，一次只攻一个难点。\
+材料可做成讲义或试卷。读/写文档用 docx/pdf 技能，流程或知识结构用 diagram 技能。",
+            &["docx", "pdf", "diagram"],
+        ),
+        make(
+            "asst_builtin_reviewer",
+            "代码审查",
+            "🔎",
+            "#3D5A80",
+            "像资深工程师审变更：找能过测试却在生产炸掉的问题，按严重程度说。",
+            "你是代码审查搭档，专找能过测试却在生产炸掉的问题：并发、错误处理、边界、权限、数据丢失、不可逆操作。\
+先读变更和相关上下文，再按严重程度列问题；能给补丁就给小而聚焦的补丁，不借机重构。\
+风格之争让给项目已有约定。没看过的代码不装看过，不确定的行为去代码里核实。\
+架构或数据流需要讲清时用 diagram 技能。",
+            &["diagram"],
+        ),
+        make(
+            "asst_builtin_career",
+            "求职教练",
+            "🧳",
+            "#7D6B5A",
+            "简历、求职信和面试：按目标岗位改，写成可验证的事实，不编经历。",
+            "你是求职教练，改简历、求职信、面试回答。\
+先问目标岗位和真实经历要点，再按那个岗位改，不用万能模板。经历写成可验证的事实和结果，删掉空形容词。\
+面试题给回答骨架和可能的追问，不替我编没做过的事。拿不准的空窗期或跳槽理由先问我。\
+读原简历用 pdf/docx 技能。",
+            &["pdf", "docx"],
+        ),
     ]
 }
 
@@ -500,6 +575,12 @@ pub fn merge_builtin_assistants_v2(app: &AppHandle, now: i64) -> Result<(), Stri
     let existing = load_assistant_index(app)?.assistants;
     let merged = merge_builtin_definitions(existing, builtin_assistant_definitions(now));
     save_assistant_index(app, &ChatAssistantIndex { assistants: merged })
+}
+
+/// 非破坏性内置专家迁移（v3）：与 v2 同一套 upsert，补齐产品/法务/财务/教学/审查/求职。
+/// 幂等由调用方通过 `settings.builtin_assistants_seeded_v3` 标记保证。
+pub fn merge_builtin_assistants_v3(app: &AppHandle, now: i64) -> Result<(), String> {
+    merge_builtin_assistants_v2(app, now)
 }
 
 /// 加载对话详情
@@ -2302,7 +2383,7 @@ mod builtin_assistant_tests {
     #[test]
     fn builtin_assistants_are_valid_built_in_personas() {
         let defs = builtin_assistant_definitions(1_700_000_000);
-        assert_eq!(defs.len(), 7, "expected exactly 7 built-in assistants");
+        assert_eq!(defs.len(), 13, "expected exactly 13 built-in assistants");
 
         let mut ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
         ids.sort();
@@ -2348,11 +2429,17 @@ mod builtin_assistant_tests {
                 "missing skill {skill}"
             );
         }
-        // 新增的三个专家在册，且 id 唯一（数量断言在上一个测试）。
+        // v2/v3 新增的专家在册，且 id 唯一（数量断言在上一个测试）。
         for id in [
             "asst_builtin_frontend",
             "asst_builtin_translator",
             "asst_builtin_docsmith",
+            "asst_builtin_pm",
+            "asst_builtin_legal",
+            "asst_builtin_finance",
+            "asst_builtin_teacher",
+            "asst_builtin_reviewer",
+            "asst_builtin_career",
         ] {
             assert!(defs.iter().any(|d| d.id == id), "missing {id}");
         }
@@ -2364,6 +2451,19 @@ mod builtin_assistant_tests {
                 d.id
             );
         }
+        let legal = defs.iter().find(|d| d.id == "asst_builtin_legal").unwrap();
+        assert!(
+            legal.system_prompt.contains("不是律师"),
+            "legal persona must disclaim it is not a lawyer"
+        );
+        let finance = defs
+            .iter()
+            .find(|d| d.id == "asst_builtin_finance")
+            .unwrap();
+        assert!(
+            finance.system_prompt.contains("不是持牌顾问"),
+            "finance persona must disclaim it is not a licensed advisor"
+        );
     }
 
     #[test]
@@ -2401,9 +2501,10 @@ mod builtin_assistant_tests {
         assert!(w.system_prompt.contains("像具体的人写的"));
         // 新增内置补齐。
         assert!(merged.iter().any(|a| a.id == "asst_builtin_translator"));
-        // 7 内置 + 1 用户，无重复。
-        assert_eq!(merged.len(), 8);
-        assert_eq!(merged.iter().filter(|a| a.built_in).count(), 7);
+        assert!(merged.iter().any(|a| a.id == "asst_builtin_pm"));
+        // 13 内置 + 1 用户，无重复。
+        assert_eq!(merged.len(), 14);
+        assert_eq!(merged.iter().filter(|a| a.built_in).count(), 13);
     }
 
     #[test]

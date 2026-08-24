@@ -1583,6 +1583,10 @@ pub struct Settings {
     /// 更新旧内置、补齐新增，**保留用户自建**。已 seed v1 的老用户靠它拿到新专家；置 true 后不再跑。
     #[serde(default)]
     pub builtin_assistants_seeded_v2: bool,
+    /// 一次性迁移标记（v3，非破坏性）：按 id upsert 补齐产品/法务/财务/教学/审查/求职。
+    /// 已 seed v2 的老用户靠它拿到新专家；置 true 后不再跑。
+    #[serde(default)]
+    pub builtin_assistants_seeded_v3: bool,
     /// 一次性迁移标记：把 pre-green-light 安装（原生工具默认全关 + 旧 approval_policy）
     /// 带到新默认——原生文件/命令工具置 true，且仅当 approval_policy 仍是旧默认时改 "auto"。
     /// 幂等：置 true 后不再翻转，尊重用户此后手动关闭某工具或改 policy 的选择。
@@ -1751,6 +1755,7 @@ impl Default for Settings {
             retry_attempts: default_retry_attempts(),
             builtin_assistants_seeded_v1: false,
             builtin_assistants_seeded_v2: false,
+            builtin_assistants_seeded_v3: false,
             chat_tools_greenlit_v1: false,
             onboarding_status: default_onboarding_status(),
             auto_check_update: true,

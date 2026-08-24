@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
 import {
   ArrowLeft,
   BookOpen,
@@ -156,6 +156,106 @@ function suiteStats(assistant: ChatAssistant) {
     mcp: assistantMcpIds(assistant).length,
     skills: assistantSkillIds(assistant).length,
   }
+}
+
+function AssistantSuiteCard({
+  assistant,
+  index,
+  onOpen,
+  onStartChat,
+  onToggleInstalled,
+}: {
+  assistant: ChatAssistant
+  index: number
+  onOpen: (assistant: ChatAssistant) => void
+  onStartChat: (assistant: ChatAssistant) => void
+  onToggleInstalled: (assistant: ChatAssistant) => void
+}) {
+  const t = useT()
+  const stats = suiteStats(assistant)
+  const builtIn = assistant.built_in ?? assistant.builtIn ?? false
+  const inFavorites = (assistant.installed ?? true) !== false
+
+  return (
+    <article
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(assistant)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen(assistant)
+        }
+      }}
+      data-tauri-drag-region="false"
+      aria-label={t.chatAssistantOpenNamed.replace('{name}', assistant.name)}
+      style={{ '--chat-motion-delay': `${Math.min(index, 8) * 24}ms` } as CSSProperties}
+      className="chat-motion-fade-up group flex h-full min-w-0 cursor-pointer flex-col rounded-xl border border-neutral-200 bg-white p-3.5 text-left shadow-sm transition-[border-color,box-shadow,transform] duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-standard)] hover:-translate-y-0.5 hover:border-neutral-300 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/15 dark:border-neutral-800 dark:bg-neutral-950/40 dark:hover:border-neutral-700 dark:focus-visible:ring-white/20"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span
+            className="grid size-9 shrink-0 place-items-center rounded-lg border border-neutral-200 bg-white text-[15px] font-semibold dark:border-neutral-700 dark:bg-neutral-950"
+            style={{ color: assistant.color || '#6A8FBD' }}
+          >
+            {builtinAssistantGlyph(assistant.id, 18) ?? (assistant.name.trim().slice(0, 1) || t.chatAssistantAvatarFallback)}
+          </span>
+          <span className="truncate text-[13.5px] font-semibold leading-tight text-neutral-950 dark:text-neutral-50">
+            {assistant.name}
+          </span>
+        </div>
+        {!builtIn && (
+          <span className="shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[10.5px] font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+            {t.chatAssistantCustom}
+          </span>
+        )}
+      </div>
+      <p className="mt-1.5 line-clamp-2 min-h-[2.4em] flex-1 text-[12px] leading-[1.45] text-neutral-500 dark:text-neutral-400">
+        {assistant.description || t.chatAssistantNoDescription}
+      </p>
+      <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-neutral-100 pt-2.5 dark:border-neutral-800/70">
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px] tabular-nums text-neutral-400 dark:text-neutral-500">
+          <span className="shrink-0">{stats.mcp} MCP</span>
+          <span className="shrink-0 opacity-50">·</span>
+          <span className="shrink-0">{t.chatAssistantSkillCount.replace('{n}', String(stats.skills))}</span>
+        </div>
+        <div
+          className="flex shrink-0 items-center gap-1"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          {inFavorites ? (
+            <>
+              <IconButton
+                size="sm"
+                onClick={() => onStartChat(assistant)}
+                label={t.chatAssistantStartChatNamed.replace('{name}', assistant.name)}
+                title={t.chatAssistantStartChat}
+              >
+                <Play size={14} />
+              </IconButton>
+              <IconButton
+                size="sm"
+                onClick={() => onToggleInstalled(assistant)}
+                label={t.chatAssistantRemoveFromFavoritesNamed.replace('{name}', assistant.name)}
+                title={t.chatAssistantRemoveFromFavorites}
+              >
+                <Minus size={14} />
+              </IconButton>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => onToggleInstalled(assistant)}
+              title={t.chatAssistantAddToFavorites}
+            >
+              {t.chatAssistantAdd}
+            </Button>
+          )}
+        </div>
+      </div>
+    </article>
+  )
 }
 
 export function AssistantCenter({
@@ -421,7 +521,16 @@ export function AssistantCenter({
       </div>
 
       {loading ? (
-        <div className="grid min-h-[220px] place-items-center text-[13px] text-neutral-400">{t.chatLoading}</div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+          {Array.from({ length: 6 }, (_, i) => (
+            <div key={i} className="flex flex-col rounded-xl border border-neutral-200/80 p-3.5 dark:border-neutral-800/70">
+              <div className="kv-skeleton h-4 w-2/5 rounded" />
+              <div className="kv-skeleton mt-2.5 h-3 w-full rounded" />
+              <div className="kv-skeleton mt-1.5 h-3 w-3/4 rounded" />
+              <div className="kv-skeleton mt-3 h-7 w-full rounded" />
+            </div>
+          ))}
+        </div>
       ) : filteredAssistants.length === 0 ? (
         <div className="grid min-h-[220px] place-items-center rounded-md border border-dashed border-neutral-200 text-[13px] text-neutral-400 dark:border-neutral-800">
           {tab === 'installed' && !query.trim()
@@ -429,85 +538,17 @@ export function AssistantCenter({
             : t.chatAssistantNoMatch}
         </div>
       ) : (
-        <div key={tab} className="chat-motion-tab-in overflow-hidden rounded-md border border-neutral-200 divide-y divide-neutral-200 dark:border-neutral-800 dark:divide-neutral-800">
-          {filteredAssistants.map((assistant) => {
-            const stats = suiteStats(assistant)
-            const builtIn = assistant.built_in ?? assistant.builtIn ?? false
-            return (
-              <article
-                key={assistant.id}
-                className="flex min-w-0 items-center gap-3 px-3 py-2.5 transition-colors hover:bg-neutral-50 dark:hover:bg-neutral-900/60"
-              >
-                <button
-                  type="button"
-                  onClick={() => openDetail(assistant)}
-                  className="grid size-9 shrink-0 place-items-center rounded-md border border-neutral-200 bg-white text-[15px] font-semibold hover:border-neutral-300 dark:border-neutral-700 dark:bg-neutral-950"
-                  style={{ color: assistant.color || '#6A8FBD' }}
-                  aria-label={t.chatAssistantOpenNamed.replace('{name}', assistant.name)}
-                >
-                  {builtinAssistantGlyph(assistant.id, 20) ?? (assistant.name.trim().slice(0, 1) || t.chatAssistantAvatarFallback)}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openDetail(assistant)}
-                  className="min-w-0 flex-1 text-left"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-[14px] font-semibold text-neutral-950 dark:text-neutral-50">
-                      {assistant.name}
-                    </span>
-                    {builtIn && (
-                      <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
-                        {t.chatAssistantBuiltin}
-                      </span>
-                    )}
-                    {!builtIn && (
-                      <span className="truncate text-[12px] font-medium text-neutral-400 dark:text-neutral-500">
-                        {t.chatAssistantCustom}
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-0.5 truncate text-[12px] leading-relaxed text-neutral-500 dark:text-neutral-400">
-                    {assistant.description || t.chatAssistantNoDescription}
-                  </p>
-                  <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-neutral-400 dark:text-neutral-500">
-                    <span className="shrink-0">{stats.mcp} MCP</span>
-                    <span className="shrink-0 opacity-50">·</span>
-                    <span className="shrink-0">{t.chatAssistantSkillCount.replace('{n}', String(stats.skills))}</span>
-                  </div>
-                </button>
-                {(assistant.installed ?? true) === false ? (
-                  <IconButton
-                    size="md"
-                    onClick={() => void handleToggleInstalled(assistant)}
-                    label={t.chatAssistantAddToFavoritesNamed.replace('{name}', assistant.name)}
-                    title={t.chatAssistantAddToFavorites}
-                  >
-                    <Plus size={18} />
-                  </IconButton>
-                ) : (
-                  <>
-                    <IconButton
-                      size="md"
-                      onClick={() => void handleStartChat(assistant)}
-                      label={t.chatAssistantStartChatNamed.replace('{name}', assistant.name)}
-                      title={t.chatAssistantStartChat}
-                    >
-                      <Play size={18} />
-                    </IconButton>
-                    <IconButton
-                      size="md"
-                      onClick={() => void handleToggleInstalled(assistant)}
-                      label={t.chatAssistantRemoveFromFavoritesNamed.replace('{name}', assistant.name)}
-                      title={t.chatAssistantRemoveFromFavorites}
-                    >
-                      <Minus size={18} />
-                    </IconButton>
-                  </>
-                )}
-              </article>
-            )
-          })}
+        <div key={tab} className="chat-motion-tab-in grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+          {filteredAssistants.map((assistant, index) => (
+            <AssistantSuiteCard
+              key={assistant.id}
+              assistant={assistant}
+              index={index}
+              onOpen={openDetail}
+              onStartChat={(item) => void handleStartChat(item)}
+              onToggleInstalled={(item) => void handleToggleInstalled(item)}
+            />
+          ))}
         </div>
       )}
     </div>

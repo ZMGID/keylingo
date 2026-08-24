@@ -292,6 +292,23 @@ pub fn run() {
                     Err(err) => eprintln!("Failed to merge built-in assistants v2: {err}"),
                 }
             }
+            // 非破坏性内置专家迁移（v3）：按 id upsert 补齐产品/法务/财务/教学/审查/求职，
+            // 保留用户自建。已 seed v2 的老用户靠它拿到新专家；新装用户 v1 已装全套，此处为幂等 no-op。
+            if !settings.builtin_assistants_seeded_v3 {
+                let now = chrono::Local::now().timestamp();
+                match chat::storage::merge_builtin_assistants_v3(&app.handle(), now) {
+                    Ok(()) => {
+                        settings.builtin_assistants_seeded_v3 = true;
+                        if let Err(err) = settings::persist_settings(&app.handle(), &settings) {
+                            eprintln!(
+                                "Failed to persist settings after merging built-in assistants v3: {err}"
+                            );
+                            settings.builtin_assistants_seeded_v3 = false;
+                        }
+                    }
+                    Err(err) => eprintln!("Failed to merge built-in assistants v3: {err}"),
+                }
+            }
             if let Err(err) = apply_launch_at_startup(&app.handle(), settings.launch_at_startup) {
                 eprintln!("Failed to apply launch-at-startup setting: {err}");
             }

@@ -78,6 +78,57 @@ const BUILTIN_ASSISTANT_GLYPHS: Record<string, (size: number) => ReactElement> =
       <path d="M9 16h6" />
     </svg>
   ),
+  // 产品经理：看板三列
+  asst_builtin_pm: (size) => (
+    <svg width={size} height={size} {...baseProps}>
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <path d="M9.2 5v14" />
+      <path d="M14.8 5v14" />
+      <path d="M5.5 8.5h2" />
+      <path d="M11 8.5h2" />
+      <path d="M16.5 8.5h2" />
+    </svg>
+  ),
+  // 法务助手：天平
+  asst_builtin_legal: (size) => (
+    <svg width={size} height={size} {...baseProps}>
+      <path d="M12 4v13" />
+      <path d="M7 20h10" />
+      <path d="M4 8h16" />
+      <path d="M6 8c0 2.8-2 5-2 5h4s-2-2.2-2-5" />
+      <path d="M18 8c0 2.8 2 5 2 5h-4s2-2.2 2-5" />
+    </svg>
+  ),
+  // 财务分析：折线向上
+  asst_builtin_finance: (size) => (
+    <svg width={size} height={size} {...baseProps}>
+      <path d="M4 4v16h16" />
+      <polyline points="7 14 11 10 14 12.5 20 7" />
+    </svg>
+  ),
+  // 教学助手：打开的书
+  asst_builtin_teacher: (size) => (
+    <svg width={size} height={size} {...baseProps}>
+      <path d="M3 5h6a4 4 0 0 1 4 4v11a3 3 0 0 0-3-3H3z" />
+      <path d="M21 5h-6a4 4 0 0 0-4 4v11a3 3 0 0 1 3-3h7z" />
+    </svg>
+  ),
+  // 代码审查：勾选的变更
+  asst_builtin_reviewer: (size) => (
+    <svg width={size} height={size} {...baseProps}>
+      <path d="M8 5h9.5A2.5 2.5 0 0 1 20 7.5v11A2.5 2.5 0 0 1 17.5 21H8a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
+      <path d="M10 4.5h5V3h-5z" />
+      <path d="m10.5 13 2 2 4-4" />
+    </svg>
+  ),
+  // 求职教练：公文包
+  asst_builtin_career: (size) => (
+    <svg width={size} height={size} {...baseProps}>
+      <rect x="3.5" y="8" width="17" height="12" rx="2" />
+      <path d="M8 8V6.5A1.5 1.5 0 0 1 9.5 5h5A1.5 1.5 0 0 1 16 6.5V8" />
+      <path d="M3.5 13h17" />
+    </svg>
+  ),
 }
 
 /** 返回内置专家的 SVG 图标；非内置（无映射）返回 null，调用处回退到首字头像。 */
