@@ -1616,10 +1616,20 @@ button.chat-composer-status-item:hover {
   }
 }
 
-/* 侧栏会话行尾：慢波 与 pin/归档 互斥替换。
+/* 侧栏会话行尾：短龄 / 慢波 / pin+归档 互斥替换。
+   平时显示 2m/13h；悬停或焦点让给按钮；生成中优先慢波（悬停同样让给按钮）。
+   已置顶时针常驻左侧，短龄叠在右侧归档位上，悬停换成归档。
    慢波保持 .chat-gen-wave 原始 14×11 尺寸 + absolute right-1（与 4a68189 一致），
    绝不要 width/height:auto 去铺满槽——那会把竖线拉高，动画就不是原来那个了。
    互斥用 visibility（unlayered），避免 Tailwind group-hover 盖不过 unlayered 样式。 */
+.kv-conv-age {
+  visibility: visible;
+}
+.kv-conv-row:hover .kv-conv-age,
+.kv-conv-row:focus-within .kv-conv-age,
+.kv-conv-trailing[data-busy] > .kv-conv-age {
+  visibility: hidden;
+}
 .kv-conv-trailing[data-busy] > .kv-conv-wave {
   visibility: visible;
 }

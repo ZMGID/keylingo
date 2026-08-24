@@ -229,5 +229,21 @@ describe('ConversationList generating wave', () => {
   })
 })
 
+describe('ConversationList compact age', () => {
+  it('shows last-activity age in the trailing slot', () => {
+    const nowSec = Math.floor(Date.now() / 1000)
+    const { container } = render(
+      <ConversationList
+        {...listProps}
+        conversations={[{ ...conversation, updated_at: nowSec - 2 * 3600 }]}
+      />,
+    )
+
+    const age = container.querySelector('.kv-conv-age')
+    expect(age).toHaveTextContent('2h')
+    expect(age).toHaveAttribute('aria-label', '2 小时前')
+  })
+})
+
 
 

@@ -3,6 +3,7 @@ import {
   conversationOwnerLabel,
   dayBucket,
   dayBucketLabel,
+  formatCompactAge,
   formatRelativeTime,
   libraryTimestamp,
   shortModelName,
@@ -39,6 +40,30 @@ describe('libraryTimestamp', () => {
   it('falls back when the preferred field is missing', () => {
     expect(libraryTimestamp(item({ created_at: 0 }), 'created')).toBe(200)
     expect(libraryTimestamp(item({ updated_at: 0 }), 'updated')).toBe(100)
+  })
+})
+
+describe('formatCompactAge', () => {
+  const now = 1_700_000_000
+
+  it('returns empty for missing timestamps', () => {
+    expect(formatCompactAge(0, now)).toBe('')
+  })
+
+  it('uses compact m / h / d buckets', () => {
+    expect(formatCompactAge(now - 10, now)).toBe('1m')
+    expect(formatCompactAge(now - 120, now)).toBe('2m')
+    expect(formatCompactAge(now - 7200, now)).toBe('2h')
+    expect(formatCompactAge(now - 3 * 86400, now)).toBe('3d')
+  })
+
+  it('falls back to unpadded calendar form outside a week', () => {
+    const nowSameYear = Math.floor(new Date(2023, 11, 1, 12, 0, 0).getTime() / 1000)
+    const sameYear = Math.floor(new Date(2023, 5, 15, 12, 0, 0).getTime() / 1000)
+    expect(formatCompactAge(sameYear, nowSameYear)).toBe('6/15')
+
+    const older = Math.floor(new Date(2020, 0, 2, 12, 0, 0).getTime() / 1000)
+    expect(formatCompactAge(older, nowSameYear)).toBe('20/1/2')
   })
 })
 

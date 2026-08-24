@@ -9,6 +9,7 @@ import {
   ConversationContextMenu,
   type ConversationMenuAnchor,
 } from './ConversationContextMenu'
+import { formatCompactAge, formatRelativeTime } from './sessionLibrary/format'
 
 /** 对话所属分组标签：优先「集 · 名」，否则项目名（按 project_id，退回 folder===项目名）。
  *  与 Sidebar 搜索弹层的显示逻辑一致。无归属时返回空串。 */
@@ -116,6 +117,11 @@ export const ConversationList = memo(function ConversationList({
   const exitingRef = useRef<Map<string, ExitingRow>>(new Map())
   const exitTimersRef = useRef<Map<string, number>>(new Map())
   const [exitingIds, setExitingIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const id = window.setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
 
   const finishExit = useCallback((id: string) => {
     const timer = exitTimersRef.current.get(id)
@@ -273,6 +279,9 @@ export const ConversationList = memo(function ConversationList({
               ? conv.title.slice(0, -FORK_SUFFIX.length)
               : conv.title
           const isDragging = reorder?.draggingId === conv.id
+          const updatedAt = conv.updated_at ?? 0
+          const compactAge = formatCompactAge(updatedAt, nowSec)
+          const ageLabel = formatRelativeTime(updatedAt, t, nowSec)
 
           if (isRenaming) {
             return (
@@ -412,13 +421,21 @@ export const ConversationList = memo(function ConversationList({
                   </span>
                 )}
               </button>
-              {/* 行尾：生成中慢波；悬停/已置顶时换成 PIN + 归档。
-                  慢波保持原始 chat-gen-wave（14×11 + absolute right-1），与按钮同槽 visibility 互斥。 */}
+              {/* 行尾：平时短龄；悬停让给 PIN + 归档；生成中优先慢波。
+                  短龄叠在槽右侧（置顶时针占左、龄占右）。慢波保持原始 chat-gen-wave。 */}
 
               <div
                 className="kv-conv-trailing relative mr-1 flex h-[22px] w-[44px] shrink-0 items-center justify-end"
                 data-busy={isGenerating && !conv.pinned ? '' : undefined}
               >
+                {compactAge && (
+                  <span
+                    className="kv-conv-age pointer-events-none absolute right-0.5 flex h-full items-center text-[11px] tabular-nums leading-none text-neutral-400 dark:text-neutral-500"
+                    aria-label={ageLabel || undefined}
+                  >
+                    {compactAge}
+                  </span>
+                )}
                 {isGenerating && !conv.pinned && (
                   <span
                     className="kv-conv-wave chat-gen-wave pointer-events-none absolute right-1"

@@ -1,6 +1,20 @@
 import type { ChatProject, ChatSet, ConversationLibrarySort, ConversationListItem } from '../types'
 import type { I18n } from '../../settings/i18n'
 
+/** Unix seconds → 侧栏行尾短龄（`2m` / `13h` / `3d` / `3/12`），中英共用。 */
+export function formatCompactAge(sec: number, nowSec = Math.floor(Date.now() / 1000)): string {
+  if (!sec) return ''
+  const diff = Math.max(0, nowSec - sec)
+  if (diff < 3600) return `${Math.max(1, Math.floor(diff / 60))}m`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d`
+  const d = new Date(sec * 1000)
+  const month = d.getMonth() + 1
+  const day = d.getDate()
+  if (d.getFullYear() === new Date(nowSec * 1000).getFullYear()) return `${month}/${day}`
+  return `${String(d.getFullYear()).slice(-2)}/${month}/${day}`
+}
+
 /** Unix seconds → 相对时间（对话时间戳是秒）。 */
 export function formatRelativeTime(sec: number, t: I18n, nowSec = Math.floor(Date.now() / 1000)): string {
   if (!sec) return ''
