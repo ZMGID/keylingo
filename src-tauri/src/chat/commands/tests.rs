@@ -63,13 +63,22 @@ fn resolve_thinking_maps_levels_and_defaults_to_high() {
 
 #[test]
 fn resolve_thinking_drops_level_for_models_without_effort_knob() {
-    // 模型库里 `reasoningEfforts: []` = 没有 effort 旋钮。Claude 4.5 及更早不认
-    // `output_config.effort`（传了 400），这里就得把等级抹成 None，适配器自然不发。
-    for model in ["claude-sonnet-4.5", "claude-opus-4", "claude-haiku-4.5"] {
+    // 模型库里 `reasoningEfforts: []` = 没有思考深度旋钮。
+    assert_eq!(
+        resolve_thinking(Some("high"), true, None, "claude-3.5-haiku"),
+        (true, None)
+    );
+    // Claude 4：UI 档位会下发（适配器再映射成 budget_tokens / adaptive+effort）。
+    for model in [
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-opus-4.5",
+        "claude-sonnet-4.5",
+    ] {
         assert_eq!(
             resolve_thinking(Some("high"), true, None, model),
-            (true, None),
-            "{model} 不该带 effort"
+            (true, Some("high".to_string())),
+            "{model}"
         );
     }
     // 4.6+ 反过来必须带上。

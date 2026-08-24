@@ -30,6 +30,8 @@ describe('matchModel', () => {
     expect(matchModel('claude-sonnet-4-6')?.displayName).toBe('Claude Sonnet 4.6')
     expect(matchModel('claude-opus-4-8')?.displayName).toBe('Claude Opus 4.8')
     expect(matchModel('claude-opus-4-7')?.displayName).toBe('Claude Opus 4.7')
+    expect(matchModel('claude-opus-4-5')?.displayName).toBe('Claude Opus 4.5')
+    expect(matchModel('claude-opus-4-5')?.reasoningEfforts).toEqual(['low', 'medium', 'high'])
     expect(matchModel('claude-haiku-4-5')?.displayName).toBe('Claude Haiku 4.5')
   })
 

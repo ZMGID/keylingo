@@ -287,11 +287,13 @@ fn model_database_image_generation(model: &str) -> Option<bool> {
 /// 三层优先级：
 /// 1. provider 的 `model_overrides[model].reasoningEfforts`（模型详情抽屉里手填，改完即生效）；
 /// 2. 模型库 `reasoningEfforts` 显式列表（各家支持不构成单调子集，故逐模型列举）；
-/// 3. 都没有才按家族兜底：Anthropic 给全档(low..max)，其余给通用安全子集 low/medium/high。
+/// 3. 都没有才按家族兜底：能认出的 Claude 代际用官方档位表；认不出的 Anthropic 给
+///    安全子集 low/medium/high（不要发明 xhigh/max）；其余同样是 low/medium/high。
 ///
-/// 前两层的**显式空数组 = 该模型没有 effort 旋钮**（Anthropic 4.6 以下、GLM-4.7、Kimi K2.x、
-/// 通义……），上游 `resolve_thinking` 据此不下发任何等级字段。
-/// 始终只保留已知合法值并去重，避免脏数据进入请求。
+/// 前两层的**显式空数组 = 该模型没有思考深度旋钮**（GLM-4.7 / Kimi K2.x / 通义 / Claude 3.x
+/// 等），上游 `resolve_thinking` 据此不下发任何等级字段。Claude 4 的 UI 档位由 Anthropic
+/// 适配器映射：4.5 及更早 → `budget_tokens`（Opus 4.5 另带 `output_config.effort`），
+/// 4.6+ → adaptive + effort。始终只保留已知合法值并去重，避免脏数据进入请求。
 pub fn reasoning_efforts_for_model(provider: Option<&ModelProvider>, model: &str) -> Vec<String> {
     if let Some(list) = provider
         .and_then(|provider| override_model_info(provider, model))
@@ -308,12 +310,248 @@ pub fn reasoning_efforts_for_model(provider: Option<&ModelProvider>, model: &str
     if provider.map(ModelProvider::api_format_kind)
         == Some(crate::settings::ProviderApiFormat::AnthropicMessages)
     {
-        return REASONING_EFFORT_LEVELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        if let Some(profile) = claude_thinking_profile(model) {
+            return profile.ui_effort_levels();
+        }
     }
     vec!["low".into(), "medium".into(), "high".into()]
+}
+
+/// Claude 思考线格式。对照官方 per-model 表：
+/// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeThinkingKind {
+    /// Claude 3 / 3.5：没有 thinking，发任何 type 都会 400。
+    Unsupported,
+    /// 4.5 及更早（含 3.7 / Opus 4 / Sonnet 4）：`type: "enabled"` + `budget_tokens`。
+    Extended,
+    /// 4.6+：`type: "adaptive"` + `output_config.effort`。4.7+ 发 `enabled` 会 400。
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeThinkingProfile {
+    pub kind: ClaudeThinkingKind,
+    /// 官方 `output_config.effort`。Opus 4.5 是 extended-only 里唯一认 effort 的模型。
+    pub supports_output_effort: bool,
+    supports_xhigh: bool,
+    supports_max: bool,
+    /// Sonnet 5 / Opus 5 默认思考开着，Off 必须显式 `type: "disabled"`。
+    pub(crate) send_disabled_on_off: bool,
+    /// Fable/Mythos/Preview / Opus 4.7+ / Sonnet 5：非默认 temperature 一律 400。
+    pub(crate) forbid_temperature: bool,
+}
+
+impl ClaudeThinkingProfile {
+    fn ui_effort_levels(self) -> Vec<String> {
+        if self.kind == ClaudeThinkingKind::Unsupported {
+            return Vec::new();
+        }
+        let mut out = vec!["low".into(), "medium".into(), "high".into()];
+        if self.supports_xhigh {
+            out.push("xhigh".into());
+        }
+        if self.supports_max {
+            out.push("max".into());
+        }
+        out
+    }
+
+    pub(crate) fn clamp_effort(self, level: &str) -> &str {
+        match level {
+            "xhigh" if !self.supports_xhigh => {
+                if self.supports_max {
+                    "max"
+                } else {
+                    "high"
+                }
+            }
+            "max" if !self.supports_max => "high",
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeFamily {
+    Opus,
+    Sonnet,
+    Haiku,
+    Fable,
+    Mythos,
+}
+
+impl ClaudeFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Opus => "opus",
+            Self::Sonnet => "sonnet",
+            Self::Haiku => "haiku",
+            Self::Fable => "fable",
+            Self::Mythos => "mythos",
+        }
+    }
+}
+
+/// 从模型 id 识别 Claude 代际。覆盖官方 id、日期快照、Bedrock 点分 id、2api 短名（`opus-4.5`）。
+/// 认不出则返回 None（适配器按 adaptive 兜底；UI 档位走安全子集）。
+pub(crate) fn claude_thinking_profile(model: &str) -> Option<ClaudeThinkingProfile> {
+    let id = normalize_claude_model_id(model);
+    if id.contains("mythos-preview") {
+        return Some(ClaudeThinkingProfile {
+            kind: ClaudeThinkingKind::Adaptive,
+            supports_output_effort: true,
+            supports_xhigh: false,
+            supports_max: true,
+            send_disabled_on_off: false,
+            forbid_temperature: true,
+        });
+    }
+    if id.contains("3-7-sonnet") || id.contains("sonnet-3-7") {
+        return Some(extended_budget_only());
+    }
+    if is_legacy_claude3(&id) {
+        return Some(unsupported_thinking());
+    }
+    let (family, major, minor) = parse_claude_family_version(&id)?;
+    if major < 4 {
+        return Some(unsupported_thinking());
+    }
+    Some(profile_for_claude_version(family, major, minor))
+}
+
+fn is_legacy_claude3(id: &str) -> bool {
+    id.contains("3-5-")
+        || id.contains("sonnet-3-5")
+        || id.contains("haiku-3-5")
+        || id.contains("3-haiku")
+        || id.contains("3-opus")
+        || id.contains("3-sonnet")
+}
+
+fn unsupported_thinking() -> ClaudeThinkingProfile {
+    ClaudeThinkingProfile {
+        kind: ClaudeThinkingKind::Unsupported,
+        supports_output_effort: false,
+        supports_xhigh: false,
+        supports_max: false,
+        send_disabled_on_off: false,
+        forbid_temperature: false,
+    }
+}
+
+fn extended_budget_only() -> ClaudeThinkingProfile {
+    ClaudeThinkingProfile {
+        kind: ClaudeThinkingKind::Extended,
+        supports_output_effort: false,
+        supports_xhigh: false,
+        supports_max: false,
+        send_disabled_on_off: false,
+        forbid_temperature: false,
+    }
+}
+
+fn normalize_claude_model_id(model: &str) -> String {
+    let name = normalize_model_name(model);
+    let stripped = name.rsplit('/').next().unwrap_or(name.as_str());
+    let stripped = stripped
+        .strip_prefix("anthropic.")
+        .unwrap_or(stripped)
+        .strip_prefix("anthropic-")
+        .unwrap_or(stripped);
+    normalize_model_sep(stripped).replace(':', "-")
+}
+
+fn parse_claude_family_version(id: &str) -> Option<(ClaudeFamily, u32, u32)> {
+    for family in [
+        ClaudeFamily::Opus,
+        ClaudeFamily::Sonnet,
+        ClaudeFamily::Haiku,
+        ClaudeFamily::Fable,
+        ClaudeFamily::Mythos,
+    ] {
+        let key = family.as_str();
+        let rest = if let Some(stripped) = id.strip_prefix(&format!("{key}-")) {
+            stripped
+        } else if let Some(idx) = id.find(&format!("-{key}-")) {
+            &id[idx + key.len() + 2..]
+        } else {
+            continue;
+        };
+        let mut parts = rest.split('-');
+        let major = version_segment(parts.next()?)?;
+        let minor = parts.next().and_then(version_segment).unwrap_or(0);
+        return Some((family, major, minor));
+    }
+    None
+}
+
+fn version_segment(part: &str) -> Option<u32> {
+    if (1..=2).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit()) {
+        part.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn version_at_least(major: u32, minor: u32, req_major: u32, req_minor: u32) -> bool {
+    major > req_major || (major == req_major && minor >= req_minor)
+}
+
+/// 档位名单来自官方 Effort 页：
+/// xhigh = Fable 5 / Mythos 5 / Opus 5 / Opus 4.8 / Opus 4.7 / Sonnet 5
+/// max = 上述 + Mythos Preview / Opus 4.6 / Sonnet 4.6
+/// effort 本体 = 上述 + Opus 4.5
+fn profile_for_claude_version(
+    family: ClaudeFamily,
+    major: u32,
+    minor: u32,
+) -> ClaudeThinkingProfile {
+    // 官方表没有 Haiku 4.6+，也没有任何 Haiku 在 effort 名单里。
+    if family == ClaudeFamily::Haiku {
+        return extended_budget_only();
+    }
+    let adaptive = match family {
+        ClaudeFamily::Fable | ClaudeFamily::Mythos => major >= 5,
+        ClaudeFamily::Opus | ClaudeFamily::Sonnet => version_at_least(major, minor, 4, 6),
+        _ => false,
+    };
+    let kind = if adaptive {
+        ClaudeThinkingKind::Adaptive
+    } else {
+        ClaudeThinkingKind::Extended
+    };
+    let supports_output_effort = match family {
+        ClaudeFamily::Opus => version_at_least(major, minor, 4, 5),
+        ClaudeFamily::Sonnet => version_at_least(major, minor, 4, 6),
+        ClaudeFamily::Fable | ClaudeFamily::Mythos => major >= 5,
+        _ => false,
+    };
+    let supports_xhigh = match family {
+        ClaudeFamily::Fable | ClaudeFamily::Mythos => major >= 5,
+        ClaudeFamily::Opus => version_at_least(major, minor, 4, 7),
+        ClaudeFamily::Sonnet => major >= 5,
+        _ => false,
+    };
+    let supports_max = match family {
+        ClaudeFamily::Fable | ClaudeFamily::Mythos => major >= 5,
+        ClaudeFamily::Opus | ClaudeFamily::Sonnet => version_at_least(major, minor, 4, 6),
+        _ => false,
+    };
+    ClaudeThinkingProfile {
+        kind,
+        supports_output_effort,
+        supports_xhigh,
+        supports_max,
+        send_disabled_on_off: matches!(family, ClaudeFamily::Opus | ClaudeFamily::Sonnet)
+            && major >= 5,
+        forbid_temperature: match family {
+            ClaudeFamily::Fable | ClaudeFamily::Mythos => major >= 5,
+            ClaudeFamily::Opus => version_at_least(major, minor, 4, 7),
+            ClaudeFamily::Sonnet => major >= 5,
+            _ => false,
+        },
+    }
 }
 
 const REASONING_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -625,6 +863,14 @@ mod tests {
             db_display_name("claude-haiku-4-5").as_deref(),
             Some("Claude Haiku 4.5")
         );
+        assert_eq!(
+            db_display_name("claude-opus-4-5").as_deref(),
+            Some("Claude Opus 4.5")
+        );
+        assert_eq!(
+            db_display_name("claude-opus-4-5-20251101").as_deref(),
+            Some("Claude Opus 4.5")
+        );
         assert_eq!(db_display_name("kimi-k2-7").as_deref(), Some("Kimi K2.7"));
 
         // 主版本本身仍命中自己的条目，不能被次级版本抢
@@ -694,7 +940,7 @@ mod tests {
     /// 连字符 id 必须吃到正确条目的 efforts，不能退化到旧主版本的 `[]`。
     #[test]
     fn dash_versioned_ids_resolve_correct_reasoning_efforts() {
-        // 4.6 有 low..max；旧 `claude-sonnet-4` 是显式空数组（无旋钮）。
+        // 4.6 有 low..max；`claude-sonnet-4` 走 extended 档位 low/medium/high。
         assert_eq!(
             reasoning_efforts_for_model(None, "claude-sonnet-4-6"),
             vec!["low", "medium", "high", "max"]
@@ -703,10 +949,22 @@ mod tests {
             reasoning_efforts_for_model(None, "anthropic/claude-sonnet-4-6"),
             vec!["low", "medium", "high", "max"]
         );
-        assert!(reasoning_efforts_for_model(None, "claude-sonnet-4").is_empty());
-        // haiku-4-5 在库里是 `[]`；旧逻辑连字符 id 会 miss 整条，掉进家族兜底。
-        assert!(reasoning_efforts_for_model(None, "claude-haiku-4-5").is_empty());
-        assert!(reasoning_efforts_for_model(None, "claude-haiku-4.5").is_empty());
+        assert_eq!(
+            reasoning_efforts_for_model(None, "claude-sonnet-4"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(None, "claude-haiku-4-5"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(None, "claude-haiku-4.5"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(None, "claude-opus-4-5"),
+            vec!["low", "medium", "high"]
+        );
     }
 
     #[test]
@@ -772,15 +1030,14 @@ mod tests {
         // 库里没有 + 非 Anthropic → 安全子集 low/medium/high。
         let unknown = reasoning_efforts_for_model(None, "some-random-model");
         assert_eq!(unknown, vec!["low", "medium", "high"]);
-        // Anthropic 家族兜底 → 全档。api_format 用设置里真实存的别名 "anthropic"（不是
-        // 规范名），归一化后同样命中。
+        // 认不出的 Anthropic 模型同样走安全子集，不要发明 xhigh/max。
         let mut anthropic = test_provider_with_overrides(HashMap::new());
         for raw in ["anthropic", "anthropic_messages"] {
             anthropic.api_format = raw.to_string();
-            let anth = reasoning_efforts_for_model(Some(&anthropic), "whatever");
-            assert!(
-                anth.contains(&"xhigh".to_string()) && anth.contains(&"max".to_string()),
-                "{raw}: {anth:?}"
+            assert_eq!(
+                reasoning_efforts_for_model(Some(&anthropic), "whatever"),
+                vec!["low", "medium", "high"],
+                "{raw}"
             );
         }
         // Kimi K3：reasoning_effort 只认 low/high/max（无 medium/xhigh）。
@@ -837,13 +1094,10 @@ mod tests {
     #[test]
     fn explicit_empty_list_means_no_effort_knob() {
         // 显式 `[]` 必须原样返回空，不能掉进家族兜底 —— 上游 `resolve_thinking` 靠它判定
-        // 「这个模型没有 effort 旋钮」。Claude 4.5 及更早传 output_config.effort 会 400。
+        // 「这个模型没有思考深度旋钮」。Claude 4.5 走 budget_tokens，库里是 low/medium/high。
         let mut anthropic = test_provider_with_overrides(HashMap::new());
         anthropic.api_format = "anthropic".to_string();
         for model in [
-            "claude-sonnet-4.5",
-            "claude-opus-4",
-            "claude-haiku-4.5",
             "claude-3.5-haiku",
             "glm-4.7",     // 思考是模式控制，没有 effort
             "kimi-k2.7",   // 思考强制开，无 effort
@@ -855,6 +1109,34 @@ mod tests {
                 "{model} 应为空档位"
             );
         }
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "claude-opus-4"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "claude-sonnet-4"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "claude-sonnet-4.5"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "claude-haiku-4.5"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "claude-3-5-sonnet-20241022"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "claude-3-haiku-20240307"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(Some(&anthropic), "opus-4.5"),
+            vec!["low", "medium", "high"]
+        );
         // 4.6 与 4.7 的分界：4.6 止步 max，没有 xhigh。
         assert_eq!(
             reasoning_efforts_for_model(Some(&anthropic), "claude-opus-4.6"),
@@ -864,6 +1146,60 @@ mod tests {
             reasoning_efforts_for_model(Some(&anthropic), "claude-opus-4.7"),
             vec!["low", "medium", "high", "xhigh", "max"]
         );
+    }
+
+    #[test]
+    fn claude_thinking_profile_follows_official_generation_split() {
+        use super::{claude_thinking_profile, ClaudeThinkingKind};
+
+        let opus45 = claude_thinking_profile("claude-opus-4-5-20251101").unwrap();
+        assert_eq!(opus45.kind, ClaudeThinkingKind::Extended);
+        assert!(opus45.supports_output_effort);
+
+        let alias = claude_thinking_profile("opus-4.5").unwrap();
+        assert_eq!(alias.kind, ClaudeThinkingKind::Extended);
+        assert!(alias.supports_output_effort);
+
+        let sonnet45 = claude_thinking_profile("claude-sonnet-4.5").unwrap();
+        assert_eq!(sonnet45.kind, ClaudeThinkingKind::Extended);
+        assert!(!sonnet45.supports_output_effort);
+
+        let haiku45 = claude_thinking_profile("claude-haiku-4-5").unwrap();
+        assert_eq!(haiku45.kind, ClaudeThinkingKind::Extended);
+        assert!(!haiku45.supports_output_effort);
+
+        let opus46 = claude_thinking_profile("claude-opus-4.6").unwrap();
+        assert_eq!(opus46.kind, ClaudeThinkingKind::Adaptive);
+        assert!(opus46.supports_output_effort);
+
+        let opus47 = claude_thinking_profile("anthropic/claude-opus-4-7").unwrap();
+        assert_eq!(opus47.kind, ClaudeThinkingKind::Adaptive);
+
+        let fable = claude_thinking_profile("claude-fable-5").unwrap();
+        assert_eq!(fable.kind, ClaudeThinkingKind::Adaptive);
+        assert!(!fable.send_disabled_on_off);
+        assert!(fable.forbid_temperature);
+
+        let sonnet5 = claude_thinking_profile("claude-sonnet-5").unwrap();
+        assert_eq!(sonnet5.kind, ClaudeThinkingKind::Adaptive);
+        assert!(sonnet5.send_disabled_on_off);
+        assert!(sonnet5.forbid_temperature);
+
+        let haiku46 = claude_thinking_profile("claude-haiku-4.6").unwrap();
+        assert_eq!(haiku46.kind, ClaudeThinkingKind::Extended);
+
+        for model in [
+            "claude-3.5-haiku",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-haiku-20240307",
+        ] {
+            assert_eq!(
+                claude_thinking_profile(model).unwrap().kind,
+                ClaudeThinkingKind::Unsupported,
+                "{model}"
+            );
+        }
+        assert!(claude_thinking_profile("gpt-5.6").is_none());
     }
 
     #[test]

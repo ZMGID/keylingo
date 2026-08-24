@@ -95,7 +95,7 @@ function ThinkingLevelSelectorBase({
     [levels],
   )
 
-  // 该模型没有思考等级可调（Claude 4.5 及更早、GLM-4.7、Kimi K2.x…）→ 不显示这个旋钮。
+  // 该模型没有思考等级可调（Claude 3.5 / GLM-4.7 / Kimi K2.x…）→ 不显示这个旋钮。
   if (levels.length === 0) return null
 
   return (

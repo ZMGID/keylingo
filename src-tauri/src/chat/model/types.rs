@@ -167,13 +167,16 @@ pub struct GenerateOptions {
     pub max_tokens: u32,
     /// 思考开关。UI「Off」时为 false：适配器**必须显式**下发关闭信号
     /// （OpenAI Chat → `reasoning_effort:"none"`；DeepSeek/Kimi → `thinking.type=disabled`；
-    /// Responses → `reasoning.effort:"none"`），不能靠省略字段——多家默认 effort=high。
+    /// Responses → `reasoning.effort:"none"`；Anthropic Sonnet 5 / Opus 5 →
+    /// `thinking.type:disabled`；Fable/Mythos 始终开着，Off 只省略字段），
+    /// 不能靠省略字段——多家默认 effort=high。
     pub thinking_enabled: bool,
     /// 每对话「思考等级」(`"low"|"medium"|"high"|…`)。`None` = 未设档：
     /// - `thinking_enabled=false` 时必为 None（`resolve_thinking` 保证），走关闭分支；
-    /// - `thinking_enabled=true` 时 None = 模型无 effort 旋钮，不发等级字段。
-    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic→`output_config.effort`，
-    /// Responses→`reasoning.effort`，Gemini→`thinkingLevel`。
+    /// - `thinking_enabled=true` 时 None = 模型无思考深度旋钮，不发等级字段。
+    /// 选了等级时由适配器按家族映射：OpenAI→`reasoning_effort`，Anthropic 4.6+→`adaptive`+
+    /// `output_config.effort`、4.5→`enabled`+`budget_tokens`，Responses→`reasoning.effort`，
+    /// Gemini→`thinkingLevel`。
     #[serde(default)]
     pub thinking_level: Option<String>,
     /// 是否请求模型的**原生内置联网搜索**（任务 07-23）。仅在会话为 Builtin 模式且当前

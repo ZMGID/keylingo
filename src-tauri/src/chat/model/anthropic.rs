@@ -427,12 +427,15 @@ impl AnthropicMessagesProvider<'_> {
             "messages": anthropic_messages_from_generate_request(request),
             "max_tokens": request.options.max_tokens,
         });
-        if let Some(temperature) = crate::chat::model_metadata::temperature_for_request(
-            request.options.temperature,
-            Some(self.provider),
-            &request.model,
-        ) {
-            body["temperature"] = serde_json::json!(temperature);
+        let profile = crate::chat::model_metadata::claude_thinking_profile(&request.model);
+        if !profile.is_some_and(|profile| profile.forbid_temperature) {
+            if let Some(temperature) = crate::chat::model_metadata::temperature_for_request(
+                request.options.temperature,
+                Some(self.provider),
+                &request.model,
+            ) {
+                body["temperature"] = serde_json::json!(temperature);
+            }
         }
         if !request.system.trim().is_empty() {
             body["system"] = Value::String(request.system.clone());
@@ -451,14 +454,13 @@ impl AnthropicMessagesProvider<'_> {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
-        // 思考等级 → adaptive thinking + `output_config.effort`，原样下发。
-        // `output_config.effort` 只有 4.6+ / 5 代（Fable5、Sonnet5、Opus 4.6/4.7/4.8…）认，
-        // 4.5 及更早传了会 400 —— 这些模型在模型库里是 `reasoningEfforts: []`，
-        // 上游 `resolve_thinking` 已把等级抹成 None，故这里的 `if let` 自然不成立。
-        // budget_tokens 已被移除（发了 400）。
-        if let Some(effort) = request.options.thinking_level.as_deref() {
-            body["thinking"] = serde_json::json!({ "type": "adaptive" });
-            body["output_config"] = serde_json::json!({ "effort": effort });
+        apply_anthropic_thinking(&mut body, request, profile);
+        // 4.5/4.6 开思考时 temperature 会 400；有 thinking 块就去掉。
+        // https://platform.claude.com/docs/en/build-with-claude/thinking
+        if body.get("thinking").is_some() {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("temperature");
+            }
         }
         if let Some(overrides) = request.options.provider_options.as_object() {
             for (key, value) in overrides {
@@ -719,6 +721,88 @@ impl AnthropicMessagesProvider<'_> {
             },
         );
     }
+}
+
+/// 按官方代际表下发 thinking。https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+fn apply_anthropic_thinking(
+    body: &mut Value,
+    request: &GenerateRequest,
+    profile: Option<crate::chat::model_metadata::ClaudeThinkingProfile>,
+) {
+    use crate::chat::model_metadata::ClaudeThinkingKind;
+
+    if !request.options.thinking_enabled {
+        if profile.is_some_and(|profile| profile.send_disabled_on_off) {
+            body["thinking"] = serde_json::json!({ "type": "disabled" });
+        }
+        return;
+    }
+    let Some(level) = request.options.thinking_level.as_deref() else {
+        return;
+    };
+    let kind = profile
+        .map(|profile| profile.kind)
+        .unwrap_or(ClaudeThinkingKind::Adaptive);
+    if kind == ClaudeThinkingKind::Unsupported {
+        return;
+    }
+    let level = profile
+        .map(|profile| profile.clamp_effort(level))
+        .unwrap_or(level);
+
+    match kind {
+        ClaudeThinkingKind::Extended => {
+            let Some(budget) = clamp_extended_thinking_budget(
+                extended_thinking_budget_for_level(level),
+                request.options.max_tokens,
+            ) else {
+                return;
+            };
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+                "display": "summarized",
+            });
+            // Opus 4.5：官方要求 budget 管思考深度、effort 管整体认真程度，两者一起设。
+            if profile.is_some_and(|profile| profile.supports_output_effort)
+                && matches!(level, "low" | "medium" | "high")
+            {
+                body["output_config"]["effort"] = serde_json::json!(level);
+            }
+        }
+        ClaudeThinkingKind::Adaptive => {
+            body["thinking"] = serde_json::json!({
+                "type": "adaptive",
+                "display": "summarized",
+            });
+            body["output_config"]["effort"] = serde_json::json!(level);
+        }
+        ClaudeThinkingKind::Unsupported => {}
+    }
+}
+
+/// 官方 budget 起点，不是 Anthropic 定义的 effort→token 表：
+/// 最小 1024；文档示例 10000；复杂任务从 16000 起。
+/// https://platform.claude.com/docs/en/build-with-claude/extended-thinking#budget-rules-and-tuning
+const EXTENDED_THINKING_BUDGET_MIN: u32 = 1024;
+const EXTENDED_THINKING_BUDGET_EXAMPLE: u32 = 10_000;
+const EXTENDED_THINKING_BUDGET_COMPLEX: u32 = 16_000;
+
+fn extended_thinking_budget_for_level(level: &str) -> u32 {
+    match level {
+        "low" => EXTENDED_THINKING_BUDGET_MIN,
+        "medium" => EXTENDED_THINKING_BUDGET_EXAMPLE,
+        _ => EXTENDED_THINKING_BUDGET_COMPLEX,
+    }
+}
+
+/// `budget_tokens` 必须 ≥1024 且 < `max_tokens`，并给最终回答留空。
+fn clamp_extended_thinking_budget(budget: u32, max_tokens: u32) -> Option<u32> {
+    if max_tokens <= EXTENDED_THINKING_BUDGET_MIN {
+        return None;
+    }
+    let cap = (max_tokens - 1).min(max_tokens.saturating_sub(EXTENDED_THINKING_BUDGET_MIN));
+    Some(budget.min(cap).max(EXTENDED_THINKING_BUDGET_MIN))
 }
 
 fn anthropic_headers(api_key: &str) -> Result<HeaderMap, String> {
@@ -1671,6 +1755,36 @@ mod tests {
         provider_temperature: Option<f64>,
         request_temperature: Option<f64>,
     ) -> Value {
+        build_anthropic_body_for(
+            "claude-opus-4-8",
+            thinking_level,
+            provider_temperature,
+            request_temperature,
+        )
+    }
+
+    fn build_anthropic_body_for(
+        model: &str,
+        thinking_level: Option<&str>,
+        provider_temperature: Option<f64>,
+        request_temperature: Option<f64>,
+    ) -> Value {
+        build_anthropic_body_with(
+            model,
+            thinking_level,
+            thinking_level.is_some(),
+            provider_temperature,
+            request_temperature,
+        )
+    }
+
+    fn build_anthropic_body_with(
+        model: &str,
+        thinking_level: Option<&str>,
+        thinking_enabled: bool,
+        provider_temperature: Option<f64>,
+        request_temperature: Option<f64>,
+    ) -> Value {
         let state = crate::state::AppState::new_headless(
             crate::settings::Settings::default(),
             std::env::temp_dir(),
@@ -1678,7 +1792,7 @@ mod tests {
         let mut model_overrides = std::collections::HashMap::new();
         if let Some(temperature) = provider_temperature {
             model_overrides.insert(
-                "claude-opus-4-8".into(),
+                model.to_string(),
                 ModelInfo {
                     temperature: Some(temperature),
                     ..ModelInfo::default()
@@ -1691,8 +1805,8 @@ mod tests {
             api_keys: vec!["sk-test".into()],
             api_key_legacy: None,
             base_url: "https://api.anthropic.com".into(),
-            available_models: vec!["claude-opus-4-8".into()],
-            enabled_models: vec!["claude-opus-4-8".into()],
+            available_models: vec![model.to_string()],
+            enabled_models: vec![model.to_string()],
             enabled: true,
             api_format: "anthropic_messages".into(),
             model_overrides,
@@ -1701,7 +1815,7 @@ mod tests {
         };
         let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
-            model: "claude-opus-4-8".into(),
+            model: model.into(),
             system: "sys".into(),
             messages: vec![ModelMessage {
                 role: ModelRole::User,
@@ -1711,6 +1825,7 @@ mod tests {
             options: GenerateOptions {
                 temperature: request_temperature,
                 thinking_level: thinking_level.map(|s| s.to_string()),
+                thinking_enabled,
                 ..Default::default()
             },
             metadata: Default::default(),
@@ -1725,27 +1840,115 @@ mod tests {
         assert!(none.get("thinking").is_none(), "body: {none}");
         assert!(none.get("output_config").is_none(), "body: {none}");
 
-        // 选了等级 → adaptive thinking + output_config.effort（4.6+ 正确写法，非 budget_tokens）。
+        // 4.6+：adaptive + output_config.effort + display summarized（4.7+ 默认 omitted）。
         let high = build_anthropic_body(Some("high"), None, None);
         eprintln!("[anthropic effort=high] {high}");
         assert_eq!(high["thinking"]["type"], "adaptive");
+        assert_eq!(high["thinking"]["display"], "summarized");
         assert_eq!(high["output_config"]["effort"], "high");
         assert!(
-            high.get("budget_tokens").is_none(),
+            high["thinking"].get("budget_tokens").is_none(),
             "must not send budget_tokens"
         );
     }
 
     #[test]
+    fn opus_4_5_uses_extended_thinking_with_effort() {
+        // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
+        // Opus 4.5：enabled + budget_tokens；官方还要求同时设 effort。
+        let body = build_anthropic_body_for("claude-opus-4-5-20251101", Some("high"), None, None);
+        assert_eq!(body["thinking"]["type"], "enabled", "body: {body}");
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert_eq!(body["thinking"]["budget_tokens"], 7168); // 16000 clamped under max_tokens=8192
+        assert_eq!(body["output_config"]["effort"], "high");
+
+        let alias = build_anthropic_body_for("opus-4.5", Some("low"), None, None);
+        assert_eq!(alias["thinking"]["type"], "enabled");
+        assert_eq!(alias["thinking"]["budget_tokens"], 1024);
+        assert_eq!(alias["output_config"]["effort"], "low");
+    }
+
+    #[test]
+    fn sonnet_4_5_uses_extended_thinking_without_effort() {
+        // Sonnet/Haiku 4.5 不在官方 effort 支持名单，只能 budget_tokens。
+        let body = build_anthropic_body_for("claude-sonnet-4.5", Some("medium"), None, None);
+        assert_eq!(body["thinking"]["type"], "enabled", "body: {body}");
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert_eq!(body["thinking"]["budget_tokens"], 7168); // 10000 clamped under 8192
+        assert!(
+            body.get("output_config").is_none(),
+            "sonnet 4.5 must not send output_config.effort: {body}"
+        );
+    }
+
+    #[test]
+    fn thinking_enabled_strips_temperature() {
+        let body = build_anthropic_body_for("claude-opus-4-5", Some("high"), Some(0.4), None);
+        assert!(body.get("temperature").is_none(), "body: {body}");
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
     fn request_body_temperature_is_optional_and_model_scoped() {
-        let default_body = build_anthropic_body(None, None, None);
+        // 4.6 关思考时仍允许 temperature；4.7+ 一律不能带。
+        let default_body = build_anthropic_body_for("claude-opus-4-6", None, None, None);
         assert!(default_body.get("temperature").is_none());
 
-        let configured_body = build_anthropic_body(None, Some(0.4), None);
+        let configured_body = build_anthropic_body_for("claude-opus-4-6", None, Some(0.4), None);
         assert_eq!(configured_body["temperature"], serde_json::json!(0.4));
 
-        let explicit_body = build_anthropic_body(None, Some(0.4), Some(1.2));
+        let explicit_body = build_anthropic_body_for("claude-opus-4-6", None, Some(0.4), Some(1.2));
         assert_eq!(explicit_body["temperature"], serde_json::json!(1.2));
+    }
+
+    #[test]
+    fn newer_models_omit_temperature_even_without_thinking() {
+        let body = build_anthropic_body_for("claude-opus-4-8", None, Some(0.4), None);
+        assert!(body.get("temperature").is_none(), "body: {body}");
+    }
+
+    #[test]
+    fn sonnet_5_off_sends_disabled() {
+        let body = build_anthropic_body_with("claude-sonnet-5", None, false, None, None);
+        assert_eq!(body["thinking"]["type"], "disabled", "body: {body}");
+    }
+
+    #[test]
+    fn always_on_models_omit_thinking_when_off() {
+        let body = build_anthropic_body_with("claude-fable-5", None, false, None, None);
+        assert!(body.get("thinking").is_none(), "body: {body}");
+    }
+
+    #[test]
+    fn claude_3_does_not_send_thinking() {
+        for model in [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-haiku-20240307",
+            "claude-3.5-haiku",
+        ] {
+            let body = build_anthropic_body_for(model, Some("high"), None, None);
+            assert!(
+                body.get("thinking").is_none(),
+                "{model} must not send thinking: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_xhigh_clamps_to_supported_effort() {
+        let body = build_anthropic_body_for("claude-opus-4-6", Some("xhigh"), None, None);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn opus_4_uses_extended_thinking_without_effort() {
+        let body = build_anthropic_body_for("claude-opus-4", Some("high"), None, None);
+        assert_eq!(body["thinking"]["type"], "enabled", "body: {body}");
+        assert!(
+            body.get("output_config").is_none(),
+            "opus 4 must not send output_config.effort: {body}"
+        );
     }
 
     #[test]

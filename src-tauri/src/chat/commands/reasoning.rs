@@ -14,11 +14,12 @@ use crate::state::AppState;
 ///   reasoning_effort / reasoning.effort / output_config.effort / thinkingLevel）。
 /// - `None` 或其它未知值 → 默认档「high」（与前端 `ThinkingLevelSelector` 的 DEFAULT_LEVEL 一致）。
 ///
-/// **这里是「模型有没有 effort 旋钮」的唯一门控**：`reasoning_efforts_for_model` 解析出空列表时
-/// （用户在模型详情里清空，或模型库标了空数组：Anthropic 4.6 以下不认 `output_config.effort`、
-/// GLM-4.7 / Kimi K2.x / 通义走别的机制），开思考但不带等级，四个适配器的 `if let Some(effort)`
-/// 自然全部跳过。等级**是否被这个模型接受**同样只看这份数据（前端选择器渲染的就是它），
-/// 选错档直接吃 provider 的 400，不做静默收敛。
+/// **这里是「模型有没有思考深度旋钮」的唯一门控**：`reasoning_efforts_for_model` 解析出空列表时
+/// （用户在模型详情里清空，或模型库标了空数组：Claude 3.x / GLM-4.7 / Kimi K2.x /
+/// 通义走别的机制），开思考但不带等级，四个适配器的 `if let Some(effort)`
+/// 自然全部跳过。Claude 4 的档位由 Anthropic 适配器映射为 `budget_tokens` / `adaptive`+effort。
+/// 等级**是否被这个模型接受**同样只看这份数据（前端选择器渲染的就是它）；适配器会把
+/// 会话残留的非法档（如 4.7 的 xhigh 切到 4.6）裁到该模型最高合法档。
 pub(crate) fn resolve_thinking(
     conv_level: Option<&str>,
     _global_enabled: bool,

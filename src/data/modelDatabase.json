@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-08-21",
+    "version": "2026-08-24",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -326,12 +326,20 @@
     "reasoningEfforts": ["low", "medium", "high", "max"],
     "pricing": { "input": 5.00, "output": 25.00, "cachedInput": 0.50 }
   },
+  "claude-opus-4.5": {
+    "displayName": "Claude Opus 4.5",
+    "contextWindow": 200000,
+    "maxOutput": 64000,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 5.00, "output": 25.00, "cachedInput": 0.50 }
+  },
   "claude-opus-4": {
     "displayName": "Claude Opus 4",
     "contextWindow": 200000,
     "maxOutput": 32000,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
-    "reasoningEfforts": [],
+    "reasoningEfforts": ["low", "medium", "high"],
     "pricing": { "input": 15.00, "output": 75.00, "cachedInput": 1.50 }
   },
   "claude-sonnet-5": {
@@ -355,7 +363,7 @@
     "contextWindow": 1000000,
     "maxOutput": 64000,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
-    "reasoningEfforts": [],
+    "reasoningEfforts": ["low", "medium", "high"],
     "pricing": { "input": 3.00, "output": 15.00, "cachedInput": 0.30 }
   },
   "claude-sonnet-4": {
@@ -363,7 +371,7 @@
     "contextWindow": 1000000,
     "maxOutput": 64000,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
-    "reasoningEfforts": [],
+    "reasoningEfforts": ["low", "medium", "high"],
     "pricing": { "input": 3.00, "output": 15.00, "cachedInput": 0.30 }
   },
   "claude-haiku-4.5": {
@@ -371,7 +379,7 @@
     "contextWindow": 200000,
     "maxOutput": 64000,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
-    "reasoningEfforts": [],
+    "reasoningEfforts": ["low", "medium", "high"],
     "pricing": { "input": 1.00, "output": 5.00, "cachedInput": 0.10 }
   },
   "claude-3.5-haiku": {
