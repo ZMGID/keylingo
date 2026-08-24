@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -16,6 +16,10 @@ use crate::external_agents::types::{
 use crate::proc::NoConsoleWindow;
 
 const ACP_PROTOCOL_VERSION: i64 = 1;
+
+fn cli_protocol_cwd(bin: &Path, cwd: &Path) -> PathBuf {
+    crate::external_agents::wsl::path_for_cli(bin, cwd)
+}
 
 /// ACP 模型探测结果：模型列表 + CLI 当前配置的模型/推理等级（用于胶囊回填，见 R "同步 CLI 当前配置"）。
 pub struct AcpModelsProbe {
@@ -559,7 +563,7 @@ pub async fn detect_acp_models(
                 &mut stdin,
                 next_id,
                 "session/new",
-                build_session_new_params(cwd, &[]),
+                build_session_new_params(&cli_protocol_cwd(bin, cwd), &[]),
             )
             .await
             .ok()?;
@@ -744,7 +748,7 @@ pub async fn detect_acp_commands(
                 &mut stdin,
                 next_id,
                 "session/new",
-                build_session_new_params(cwd, &[]),
+                build_session_new_params(&cli_protocol_cwd(bin, cwd), &[]),
             )
             .await
             .ok()?;
@@ -1355,11 +1359,15 @@ impl AcpSession {
             let mut next_id: u64 = 2;
             let (method, params) = match resume_session.filter(|s| !s.is_empty()) {
                 Some(sid) => {
-                    let mut p = build_session_new_params(cwd, mcp_servers);
+                    let mut p =
+                        build_session_new_params(&cli_protocol_cwd(resolved_bin, cwd), mcp_servers);
                     p["sessionId"] = json!(sid);
                     ("session/load", p)
                 }
-                None => ("session/new", build_session_new_params(cwd, mcp_servers)),
+                None => (
+                    "session/new",
+                    build_session_new_params(&cli_protocol_cwd(resolved_bin, cwd), mcp_servers),
+                ),
             };
             write_rpc(&mut stdin, next_id, method, params)
                 .await
@@ -3083,7 +3091,7 @@ pub async fn probe_acp_sessions(
         return None;
     }
 
-    let cwd_text = cwd.to_string_lossy().to_string();
+    let cwd_text = cli_protocol_cwd(bin, cwd).to_string_lossy().into_owned();
     let mut sessions = Vec::new();
     let mut cursor: Option<String> = None;
     let mut next_id: u64 = 2;

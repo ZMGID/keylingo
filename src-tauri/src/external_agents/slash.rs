@@ -189,7 +189,7 @@ pub async fn list_external_cli_slash_commands(
             let detected = detect_availability_single(def).await;
             if !detected.available {
                 return Err(format!(
-                    "{} 未安装或不可用，请确认 CLI 在 PATH 中。",
+                    "{} 未安装或不可用，请确认 CLI 在 PATH 中，或已安装到 WSL。",
                     def.name
                 ));
             }
@@ -208,7 +208,7 @@ pub async fn list_external_cli_slash_commands(
             let detected = detect_availability_single(def).await;
             if !detected.available {
                 return Err(format!(
-                    "{} 未安装或不可用，请确认 CLI 在 PATH 中。",
+                    "{} 未安装或不可用，请确认 CLI 在 PATH 中，或已安装到 WSL。",
                     def.name
                 ));
             }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::Local;
@@ -60,6 +60,16 @@ fn context_reset_notice_event() -> UnifiedAgentEvent {
 /// 系统提示落盘文件的前缀。启动 GC 也认这个前缀（`screenshot::cleanup_orphan_temp_files`），
 /// 崩溃留下的残渣 24h 后被回收。
 const SYSTEM_PROMPT_FILE_PREFIX: &str = "kivio-extsys-";
+
+fn translate_cli_dirs(cli_bin: &Path, dirs: Vec<String>) -> Vec<String> {
+    dirs.into_iter()
+        .map(|dir| {
+            crate::external_agents::wsl::path_for_cli(cli_bin, Path::new(&dir))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
 
 /// 把会话级系统指令（全局系统提示 + 集指令 + Memory + cwd 提示）写到一个文件，供 CLI 用
 /// `--append-system-prompt-file` 读取（A1）。
@@ -135,9 +145,12 @@ pub async fn run_external_cli_reply(
     // N2：回复路径不再跑完整检测（version/auth/模型探测可达 10-25s）。可用性/auth 的展示
     // 交给列表阶段；这里只解析二进制（唯一必需项），把第 2+ 轮的前置开销压到 <500ms。
     let probe_start = Instant::now();
-    let resolved_bin = resolve_binary(def)
-        .await
-        .ok_or_else(|| format!("{} 未安装或不可用，请确认 CLI 在 PATH 中。", def.name))?;
+    let resolved_bin = resolve_binary(def).await.ok_or_else(|| {
+        format!(
+            "{} 未安装或不可用，请确认 CLI 在 PATH 中，或已安装到 WSL。",
+            def.name
+        )
+    })?;
     // 计时日志仅 debug 构建输出（供 <500ms 验收测量），release 不刷 stderr。
     if cfg!(debug_assertions) {
         eprintln!(
@@ -262,14 +275,16 @@ pub async fn run_external_cli_reply(
     if !is_slash {
         composed
             .full_prompt
-            .push_str(&crate::external_agents::attachments::image_paths_note(
+            .push_str(&crate::external_agents::attachments::image_paths_note_for(
+                Some(&resolved_bin),
                 &degraded_image_paths,
             ));
-        composed
-            .full_prompt
-            .push_str(&crate::external_agents::attachments::file_attachments_note(
+        composed.full_prompt.push_str(
+            &crate::external_agents::attachments::file_attachments_note_for(
+                Some(&resolved_bin),
                 file_paths,
-            ));
+            ),
+        );
     }
 
     let mut extra_dirs = extra_allowed_dirs_for_agent(def, &settings.chat_tools.skill_scan_paths);
@@ -288,6 +303,8 @@ pub async fn run_external_cli_reply(
         }
         roots
     };
+    let extra_dirs = translate_cli_dirs(&resolved_bin, extra_dirs);
+    let extra_writable_roots = translate_cli_dirs(&resolved_bin, extra_writable_roots);
     let runtime_ctx = RuntimeContext {
         extra_allowed_dirs: extra_dirs,
         resume_session_id: resume_ctx.resume_session_id.clone(),

@@ -133,15 +133,32 @@ fn prompt_path(path: &Path) -> String {
     text.into_owned()
 }
 
+fn prompt_path_for_cli(cli_bin: Option<&Path>, path: &Path) -> String {
+    let host = prompt_path(path);
+    let Some(bin) = cli_bin else {
+        return host;
+    };
+    crate::external_agents::wsl::path_for_cli(bin, Path::new(&host))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// 降级：把图片绝对路径拼成一段可追加到 prompt 的文本（协议不支持原生图片时用）。
 /// 空输入返回空串。格式对齐 Paseo 的 `[Image available at: {path}]`。
 pub fn image_paths_note(paths: &[PathBuf]) -> String {
+    image_paths_note_for(None, paths)
+}
+
+pub fn image_paths_note_for(cli_bin: Option<&Path>, paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         return String::new();
     }
     let mut out = String::from("\n\n# 附带图片（用你的读取工具查看）\n");
     for path in paths {
-        out.push_str(&format!("[Image available at: {}]\n", prompt_path(path)));
+        out.push_str(&format!(
+            "[Image available at: {}]\n",
+            prompt_path_for_cli(cli_bin, path)
+        ));
     }
     out
 }
@@ -149,6 +166,10 @@ pub fn image_paths_note(paths: &[PathBuf]) -> String {
 /// 非图片文件说明块（所有协议通用，对齐 Paseo `uploaded_file`）：文件名/路径/MIME/大小。
 /// 不 inline 内容，CLI 自读路径。空输入返回空串。
 pub fn file_attachments_note(paths: &[PathBuf]) -> String {
+    file_attachments_note_for(None, paths)
+}
+
+pub fn file_attachments_note_for(cli_bin: Option<&Path>, paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         return String::new();
     }
@@ -162,7 +183,7 @@ pub fn file_attachments_note(paths: &[PathBuf]) -> String {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         out.push_str(&format!(
             "Attached file: {name}\nPath: {}\nMIME: {mime}\nSize: {size} bytes\n\n",
-            prompt_path(path)
+            prompt_path_for_cli(cli_bin, path)
         ));
     }
     out
@@ -242,6 +263,28 @@ mod tests {
         let note = image_paths_note(&[PathBuf::from("/tmp/a.png")]);
         assert!(note.contains("/tmp/a.png"));
         assert!(note.contains("Image available at"));
+    }
+
+    #[test]
+    fn image_note_translates_windows_path_for_wsl_cli() {
+        let note = image_paths_note_for(
+            Some(Path::new(r"\\wsl$\Ubuntu\usr\bin\claude")),
+            &[PathBuf::from(r"E:\ZM database\kivioC\shot.png")],
+        );
+        assert!(
+            note.contains("/mnt/e/ZM database/kivioC/shot.png"),
+            "{note}"
+        );
+        assert!(!note.contains(r"E:\"));
+    }
+
+    #[test]
+    fn image_note_keeps_windows_path_for_win32_cli() {
+        let note = image_paths_note_for(
+            Some(Path::new(r"C:\Users\me\AppData\Roaming\npm\claude.cmd")),
+            &[PathBuf::from(r"E:\ZM database\kivioC\shot.png")],
+        );
+        assert!(note.contains(r"E:\ZM database\kivioC\shot.png"), "{note}");
     }
 
     #[test]

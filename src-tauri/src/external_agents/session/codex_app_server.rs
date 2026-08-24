@@ -1098,10 +1098,16 @@ fn build_codex_turn_params(
     turn_params
 }
 
-fn local_image_items(images: &[crate::external_agents::attachments::ImageBlock]) -> Vec<Value> {
+fn local_image_items(
+    cli_bin: &Path,
+    images: &[crate::external_agents::attachments::ImageBlock],
+) -> Vec<Value> {
     crate::external_agents::attachments::materialize_images_to_tempdir(images)
         .into_iter()
-        .map(|path| json!({ "type": "localImage", "path": path.to_string_lossy() }))
+        .map(|path| {
+            let path = crate::external_agents::wsl::path_for_cli(cli_bin, &path);
+            json!({ "type": "localImage", "path": path.to_string_lossy() })
+        })
         .collect()
 }
 
@@ -1113,6 +1119,7 @@ pub struct CodexAppServerSession {
     reader: Lines<BufReader<ChildStdout>>,
     thread_id: String,
     cwd: String,
+    cli_bin: PathBuf,
     next_id: u64,
     emitted_tools: HashSet<String>,
     /// 服务端当前活跃轮次的 turn id（取自任意一条带 `turnId` 的通知）。
@@ -1167,7 +1174,9 @@ impl CodexAppServerSession {
         };
         let mut reader = BufReader::new(stdout).lines();
 
-        let cwd_str = cwd.to_string_lossy().to_string();
+        let cwd_str = crate::external_agents::wsl::path_for_cli(resolved_bin, cwd)
+            .to_string_lossy()
+            .into_owned();
         let chosen_model = model.filter(|m| !m.is_empty() && *m != "default");
         let sandbox_mode = normalize_codex_sandbox(sandbox);
         let approval_policy = codex_approval_policy(Some(sandbox_mode));
@@ -1185,7 +1194,9 @@ impl CodexAppServerSession {
                 .await
                 .map_err(|e| format!("initialized: {e}"))?;
 
-            ensure_windows_sandbox(&mut reader, &mut stdin, &cwd_str, &mut next_id).await;
+            if !crate::external_agents::wsl::is_wsl_target(resolved_bin) {
+                ensure_windows_sandbox(&mut reader, &mut stdin, &cwd_str, &mut next_id).await;
+            }
 
             let (method, params) = build_codex_thread_params(
                 &cwd_str,
@@ -1225,6 +1236,7 @@ impl CodexAppServerSession {
                 reader,
                 thread_id,
                 cwd: cwd_str,
+                cli_bin: resolved_bin.to_path_buf(),
                 next_id,
                 emitted_tools: HashSet::new(),
                 active_turn_id: None,
@@ -1280,7 +1292,7 @@ impl CodexAppServerSession {
             // Codex reads images as `localImage` items pointing at on-disk files; copy each into a
             // private temp dir (its sandbox can't reach the conversation attachments dir).
             let mut input = vec![json!({ "type": "text", "text": prompt })];
-            input.extend(local_image_items(images));
+            input.extend(local_image_items(&self.cli_bin, images));
             let turn_params = build_codex_turn_params(
                 &self.thread_id,
                 &self.cwd,
@@ -1331,7 +1343,7 @@ impl CodexAppServerSession {
                             let rpc_id = self.next_id;
                             self.next_id += 1;
                             let mut input = vec![json!({ "type": "text", "text": text })];
-                            input.extend(local_image_items(&steer_images));
+                            input.extend(local_image_items(&self.cli_bin, &steer_images));
                             let params = json!({
                                 "threadId": self.thread_id,
                                 "input": input,

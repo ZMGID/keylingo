@@ -44,6 +44,10 @@ pub async fn chat_detect_external_agents(
 ) -> Result<serde_json::Value, String> {
     let _ = &conversation_id; // 可用性与 cwd 无关；参数保留为兼容前端签名。
     let force = force_refresh.unwrap_or(false);
+    if force {
+        crate::external_agents::wsl::invalidate_locator_cache();
+        crate::external_agents::spawn::clear_probe_cache();
+    }
     if !force {
         if let Some(agents) =
             state.get_cached_detected_agents(AVAILABILITY_CACHE_KEY, AVAILABILITY_CACHE_TTL)

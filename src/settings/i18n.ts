@@ -630,7 +630,8 @@ export const i18n = {
     externalAgentsBinarySection: '可执行文件',
     externalAgentsBinaryPath: '自定义路径',
     externalAgentsBinaryPathPlaceholder: '留空 = 自动从 PATH 查找',
-    externalAgentsBinaryPathDesc: '填了就只认这个路径；指错会直接显示未安装，不会悄悄回退到 PATH。',
+    externalAgentsBinaryPathDesc:
+      '填了就只认这个路径；指错会直接显示未安装，不会悄悄回退到 PATH。Windows 上也可填 \\\\wsl$\\Ubuntu\\usr\\bin\\claude 指向 WSL 里的 CLI。',
     externalAgentsBrowse: '选择…',
     externalAgentsCopyPath: '复制路径',
     externalAgentsCopied: '已复制',
@@ -2350,7 +2351,8 @@ export const i18n = {
     externalAgentsBinarySection: 'Executable',
     externalAgentsBinaryPath: 'Custom path',
     externalAgentsBinaryPathPlaceholder: 'Empty = look up on PATH',
-    externalAgentsBinaryPathDesc: 'Once set, only this path is used — a wrong path reports "not installed" rather than silently falling back to PATH.',
+    externalAgentsBinaryPathDesc:
+      'Once set, only this path is used — a wrong path reports "not installed" rather than silently falling back to PATH. On Windows you can also point at a WSL binary, e.g. \\\\wsl$\\Ubuntu\\usr\\bin\\claude.',
     externalAgentsBrowse: 'Browse…',
     externalAgentsCopyPath: 'Copy path',
     externalAgentsCopied: 'Copied',
