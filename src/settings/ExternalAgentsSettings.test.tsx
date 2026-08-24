@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { ExternalAgentsSettings } from './ExternalAgentsSettings'
-import { chatApi } from '../chat/api'
+import { chatApi, onExternalCliInstallLog } from '../chat/api'
+import { resetCliInstallJobsForTests } from './cliInstallJobs'
 import type { Settings as SettingsData } from '../api/tauri'
 
 vi.mock('../chat/api', () => ({
@@ -66,6 +67,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 const mockDetect = vi.mocked(chatApi.detectExternalAgents)
 const mockInstallInfo = vi.mocked(chatApi.externalCliInstallInfo)
 const mockInstall = vi.mocked(chatApi.externalCliInstall)
+const mockOnInstallLog = vi.mocked(onExternalCliInstallLog)
 const mockOfficialKeyStatus = vi.mocked(chatApi.dshOfficialCredentialStatus)
 const mockOfficialKeySave = vi.mocked(chatApi.dshOfficialCredentialSave)
 const mockNativeGet = vi.mocked(chatApi.dshNativeProviderGet)
@@ -89,9 +91,11 @@ function renderPanel(
 
 describe('ExternalAgentsSettings', () => {
   beforeEach(() => {
+    resetCliInstallJobsForTests()
     mockDetect.mockReset()
     mockInstallInfo.mockReset()
     mockInstall.mockReset()
+    mockOnInstallLog.mockReset()
     mockOfficialKeyStatus.mockReset()
     mockOfficialKeySave.mockReset()
     mockNativeGet.mockReset()
@@ -126,6 +130,7 @@ describe('ExternalAgentsSettings', () => {
       configDir: '/home/u/.claude',
     })
     mockInstall.mockResolvedValue()
+    mockOnInstallLog.mockResolvedValue(() => {})
   })
 
   it('groups agents by install state and selects the first available one', async () => {
@@ -165,7 +170,93 @@ describe('ExternalAgentsSettings', () => {
       expect(mockDetect).toHaveBeenCalledWith(true)
     })
     expect(screen.getByRole('status')).toHaveTextContent('安装完成')
+    expect(screen.getByRole('status')).not.toHaveTextContent('DeepSeek')
     expect(screen.queryByText('安装日志')).not.toBeInTheDocument()
+  })
+
+  it('keeps an in-flight update visible after switching CLIs and coming back', async () => {
+    let finishInstall: () => void = () => {}
+    mockInstall.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishInstall = resolve
+        }),
+    )
+    let emit:
+      | ((event: {
+          agentId: string
+          line: string | null
+          done: boolean
+          success: boolean
+        }) => void)
+      | undefined
+    mockOnInstallLog.mockImplementation(async (handler) => {
+      emit = handler
+      return () => {}
+    })
+
+    renderPanel()
+    fireEvent.click(await screen.findByRole('button', { name: '更新' }))
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent('执行中')
+    })
+    expect(screen.getByLabelText('执行中…')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Codex'))
+    await waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+    expect(screen.getByLabelText('执行中…')).toBeInTheDocument()
+
+    emit?.({
+      agentId: 'claude',
+      line: '$ npm install -g @anthropic-ai/claude-code@latest',
+      done: false,
+      success: false,
+    })
+
+    fireEvent.click(screen.getByText('Claude Code'))
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent('执行中')
+    })
+    expect(
+      screen.getByText('$ npm install -g @anthropic-ai/claude-code@latest'),
+    ).toBeInTheDocument()
+
+    finishInstall()
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent('安装完成')
+    })
+    expect(screen.getByRole('status')).not.toHaveTextContent('DeepSeek')
+  })
+
+  it('reminds about the DeepSeek key only after a dsh install finishes', async () => {
+    mockDetect.mockResolvedValue([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        available: true,
+        path: 'C:\\npm\\dsh.cmd',
+        version: '0.1.0-rc.6',
+        models: [],
+        authStatus: 'ok',
+      },
+    ])
+    mockInstallInfo.mockResolvedValue({
+      agentId: 'dsh',
+      localVersion: '0.1.0-rc.6',
+      latestVersion: '0.1.0-rc.7',
+      updateAvailable: true,
+      command: 'npm install -g @deepseek-ai/dsh@latest',
+      docsUrl: 'https://github.com/deepseek-ai/deepseek-harness',
+      configDir: 'C:\\Users\\u\\.dsh',
+    })
+
+    renderPanel()
+    fireEvent.click(await screen.findByRole('button', { name: '更新' }))
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent('DeepSeek')
+    })
   })
 
   it('shows the prerelease suffix and offers an update from rc.6 to rc.7', async () => {

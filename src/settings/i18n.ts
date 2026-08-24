@@ -657,9 +657,11 @@ export const i18n = {
     externalAgentsInstall: '安装',
     externalAgentsUpdate: '更新',
     externalAgentsInstalling: '执行中…',
-    externalAgentsInstallDone: '安装完成，版本已刷新。若要用官方 DeepSeek，请在下方保存密钥。',
+    externalAgentsInstallDone: '安装完成，版本已刷新。',
+    externalAgentsInstallDoneDsh: '安装完成，版本已刷新。若要用官方 DeepSeek，请在下方保存密钥。',
     externalAgentsInstallFailed: '安装失败。原因在下面的日志里。',
     externalAgentsInstallNeedsRepair: '文件已写入，但 dsh 还无法启动。请再点一次「更新」。',
+    externalAgentsInstallNeedsRepairGeneric: '文件已写入，但还无法启动。请再点一次「更新」。',
     externalAgentsLocalVersionUnknown: '已写入但无法启动',
     externalAgentsDshInstallHint:
       '需要 Node.js 22.19+ 或 24+，以及 pnpm。本机没有时，点安装会先尝试自动装好再装 DeepSeek Harness。安装走 npm 官方源，不用国内镜像。',
@@ -2382,9 +2384,13 @@ export const i18n = {
     externalAgentsInstall: 'Install',
     externalAgentsUpdate: 'Update',
     externalAgentsInstalling: 'Running…',
-    externalAgentsInstallDone: 'Installed. Version refreshed. Save an official DeepSeek key below if you need it.',
+    externalAgentsInstallDone: 'Installed. Version refreshed.',
+    externalAgentsInstallDoneDsh:
+      'Installed. Version refreshed. Save an official DeepSeek key below if you need it.',
     externalAgentsInstallFailed: 'Install failed. See the log below.',
     externalAgentsInstallNeedsRepair: 'Files were written, but dsh still cannot start. Click Update again.',
+    externalAgentsInstallNeedsRepairGeneric:
+      'Files were written, but the CLI still cannot start. Click Update again.',
     externalAgentsLocalVersionUnknown: 'Written, but cannot start',
     externalAgentsDshInstallHint:
       'Needs Node.js 22.19+ or 24+, plus pnpm. If this machine has neither, Install will try to set them up before DeepSeek Harness. Uses the official npm registry, not a Chinese mirror.',

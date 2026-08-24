@@ -20,7 +20,6 @@ import { AgentIcon } from '../chat/AgentIcon'
 import {
   chatApi,
   onExternalAgentsUpdated,
-  onExternalCliInstallLog,
   type CcSwitchProvider,
   type DetectedExternalAgent,
   type DshOfficialCredential,
@@ -36,6 +35,12 @@ import { DshPluginsSettings } from './DshPluginsSettings'
 import { PiExtensionsSettings } from './PiExtensionsSettings'
 import { PiSkillsSettings } from './PiSkillsSettings'
 import { CcSwitchImportModal } from './CcSwitchImportModal'
+import {
+  clearCliInstallJob,
+  getCliInstallJob,
+  startCliInstall,
+  subscribeCliInstallJobs,
+} from './cliInstallJobs'
 import type {
   ExternalCliAgentConfig,
   ExternalCliProvider,
@@ -169,6 +174,7 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [showPiExtensions, setShowPiExtensions] = useState(false)
   const [showPiSkills, setShowPiSkills] = useState(false)
+  useCliInstallJobs()
 
   const overrides = useMemo(
     () => settings.chat?.externalCliAgents ?? {},
@@ -307,11 +313,18 @@ export function ExternalAgentsSettings({ lang, settings, updateChat }: ExternalA
                             <IconBox id={agent.id} size={22} />
                             <span className="kv-provider-name">{agent.name}</span>
                           </span>
-                          <span
-                            className={`kv-provider-dot ${
-                              off || !agent.available ? 'off' : 'on'
-                            }`}
-                          />
+                          {getCliInstallJob(agent.id).running ? (
+                            <span
+                              className="kv-cli-updating-dot"
+                              aria-label={t.externalAgentsInstalling}
+                            />
+                          ) : (
+                            <span
+                              className={`kv-provider-dot ${
+                                off || !agent.available ? 'off' : 'on'
+                              }`}
+                            />
+                          )}
                         </button>
                       )
                     })}
@@ -427,7 +440,8 @@ function AgentDetail({
               }
             : { label: t.externalAgentsUpToDate, tone: 'ok' }
   const showInstallAction = Boolean(
-    info?.command && !checking && (!agent.available || updateAvailable || needsRepair),
+    running ||
+      (info?.command && !checking && (!agent.available || updateAvailable || needsRepair)),
   )
 
   if (showPlugins && agent.id === 'dsh') {
@@ -487,7 +501,7 @@ function AgentDetail({
           {running
             ? t.externalAgentsInstalling
             : result === 'ok'
-              ? (needsRepair ? t.externalAgentsInstallNeedsRepair : t.externalAgentsInstallDone)
+              ? installDoneLabel(agent.id, needsRepair, t)
               : t.externalAgentsInstallFailed}
         </div>
       )}
@@ -1210,18 +1224,32 @@ function ProviderSection({
   )
 }
 
-/** 切走再回来时还要看得到刚装完的日志，不能跟 AgentDetail 一起卸掉。 */
-const installMemory = new Map<string, { log: string[]; result: 'ok' | 'fail' | null }>()
+function useCliInstallJobs() {
+  const [, setVersion] = useState(0)
+  useEffect(() => subscribeCliInstallJobs(() => setVersion((n) => n + 1)), [])
+}
 
-/** 版本检查 + 一键安装/更新的状态机。只被 AgentDetail 用，抽出来纯粹是别让它涨到 200 行。 */
+function installDoneLabel(
+  agentId: string,
+  needsRepair: boolean,
+  t: (typeof i18n)[Lang],
+): string {
+  if (needsRepair) {
+    return agentId === 'dsh'
+      ? t.externalAgentsInstallNeedsRepair
+      : t.externalAgentsInstallNeedsRepairGeneric
+  }
+  return agentId === 'dsh' ? t.externalAgentsInstallDoneDsh : t.externalAgentsInstallDone
+}
+
+/** 版本检查 + 一键安装/更新。任务本身在 `cliInstallJobs`，切走详情不能把进度卸掉。 */
 function useInstall(agentId: string, reloadAgents: (force?: boolean) => Promise<void>) {
-  const remembered = installMemory.get(agentId)
+  useCliInstallJobs()
+  const job = getCliInstallJob(agentId)
   const [info, setInfo] = useState<ExternalCliInstallInfo | null>(null)
   const [checking, setChecking] = useState(true)
-  const [running, setRunning] = useState(false)
-  const [log, setLog] = useState<string[]>(() => remembered?.log ?? [])
-  const [result, setResult] = useState<'ok' | 'fail' | null>(() => remembered?.result ?? null)
   const logRef = useRef<HTMLPreElement | null>(null)
+  const { running, log, result } = job
 
   const refresh = useCallback(async () => {
     setChecking(true)
@@ -1237,10 +1265,6 @@ function useInstall(agentId: string, reloadAgents: (force?: boolean) => Promise<
   useEffect(() => {
     void refresh()
   }, [refresh])
-
-  useEffect(() => {
-    installMemory.set(agentId, { log, result })
-  }, [agentId, log, result])
 
   useEffect(() => {
     const node = logRef.current
@@ -1260,41 +1284,19 @@ function useInstall(agentId: string, reloadAgents: (force?: boolean) => Promise<
   useEffect(() => {
     if (result !== 'ok' || running) return
     const timer = window.setTimeout(() => {
-      setLog([])
-      setResult(null)
-      installMemory.delete(agentId)
+      clearCliInstallJob(agentId)
     }, 4000)
     return () => window.clearTimeout(timer)
   }, [agentId, result, running])
 
-  const runInstall = async () => {
-    setRunning(true)
-    setResult(null)
-    setLog([])
-    installMemory.set(agentId, { log: [], result: null })
-    // 监听要在 invoke 之前挂上：安装命令的头几行（`$ …`）是同步发出来的。
-    const unlisten = await onExternalCliInstallLog((event) => {
-      if (event.agentId !== agentId) return
-      if (event.done) {
-        setRunning(false)
-        setResult(event.success ? 'ok' : 'fail')
-        return
-      }
-      if (event.line !== null) setLog((prev) => [...prev, event.line as string])
+  const runInstall = () =>
+    startCliInstall(agentId, {
+      install: (id) => chatApi.externalCliInstall(id),
+      afterDone: async () => {
+        await refresh()
+        await reloadAgents(true)
+      },
     })
-    try {
-      await chatApi.externalCliInstall(agentId)
-      setResult('ok')
-    } catch (err) {
-      setLog((prev) => [...prev, String(err)])
-      setResult('fail')
-    } finally {
-      setRunning(false)
-      unlisten()
-      await refresh()
-      await reloadAgents(true)
-    }
-  }
 
   return { info, checking, running, log, result, logRef, refresh, runInstall }
 }
