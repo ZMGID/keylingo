@@ -245,6 +245,7 @@ impl DshJsonRpcSession {
         {
             return Err("missing credential".to_string());
         }
+        crate::external_agents::dsh_plugins::heal_credentials_store()?;
         crate::external_agents::dsh_profile::ensure_profile_ready(resolved_bin, reasoning, preset)
             .await?;
 
