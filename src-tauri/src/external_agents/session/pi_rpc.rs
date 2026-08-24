@@ -1275,6 +1275,12 @@ fn pi_native_session_present(session_id: &str) -> bool {
         .any(|path| path.is_file())
 }
 
+fn pi_resume_is_live(bin: &Path, session_id: &str) -> bool {
+    // WSL Pi 把 JSONL 写在 Linux `$HOME/.pi`；Windows 的 `~/.pi` 探测看不见它。
+    // 此时信任落盘的 native id，避免每次重连都被当成空白会话、把整段历史再灌进已续上的 JSONL。
+    crate::external_agents::wsl::is_wsl_target(bin) || pi_native_session_present(session_id)
+}
+
 fn pi_session_file_candidates(session_id: &str) -> Vec<PathBuf> {
     let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) else {
         return Vec::new();
@@ -1312,7 +1318,7 @@ impl PiRpcSession {
         // It can exist even when the regular binding was not flushed before a crash.
         let (effective_args, session_id, claimed_resume) =
             persistent_session_args(args, resume_native)?;
-        let resumed = claimed_resume && pi_native_session_present(&session_id);
+        let resumed = claimed_resume && pi_resume_is_live(bin, &session_id);
 
         let mut child = crate::external_agents::spawn::cli_command(bin)
             .args(&effective_args)
@@ -2887,6 +2893,14 @@ mod tests {
     #[test]
     fn missing_pi_session_file_is_not_a_successful_resume() {
         assert!(!pi_native_session_present(
+            "kivio-missing-session-id-for-test"
+        ));
+        assert!(!pi_resume_is_live(
+            std::path::Path::new(r"C:\npm\pi.cmd"),
+            "kivio-missing-session-id-for-test"
+        ));
+        assert!(pi_resume_is_live(
+            std::path::Path::new(r"\\wsl$\Ubuntu\usr\bin\pi"),
             "kivio-missing-session-id-for-test"
         ));
         assert!(is_missing_pi_session_error("Pi session \"abc\" not found"));

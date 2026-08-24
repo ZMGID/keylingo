@@ -97,7 +97,7 @@ const HOST_PLANE_TOOL_IDS: &[&str] = &[
 ];
 
 /// `$DSH_HOME`，未设时 `~/.dsh`（与上游 `resolveDshHome` 同序）。
-fn dsh_home() -> Option<PathBuf> {
+pub(crate) fn dsh_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("DSH_HOME") {
         let path = PathBuf::from(home);
         if !path.as_os_str().is_empty() {

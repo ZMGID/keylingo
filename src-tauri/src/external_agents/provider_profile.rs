@@ -16,7 +16,9 @@
 //!    环境变量通道。物化一个私有 home（config.toml + auth.json）后注入 `CODEX_HOME`，
 //!    用户自己的 `~/.codex` 凭证与供应商表不动。聊天里选的模型按 cc-switch live 口径写入
 //!    `~/.codex/config.toml` 顶层 `model`（文件已存在时），并同步 CLI 正在读的那份
-//!    （挂了中转 = 私有 home）。
+//!    （挂了中转 = 私有 home）。**会话 jsonl** 仍接到用户 `~/.codex/sessions`，这样
+//!    Codex CLI / TUI 的 `/resume` 能看见 Kivio 里聊过的原生会话。WSL 二进制在没有
+//!    私有 home 时直接把 `CODEX_HOME` 指到 Windows 的 `~/.codex`。
 //! 4. **opencode / pi 的原生配置** —— 字段级合并 Kivio 管理的 provider、凭据与默认模型；
 //!    其他 provider 和顶层设置原样保留。切回「CLI 自身配置」时恢复 Kivio 接管前的默认模型。
 //! 5. **grok 的 `~/.grok/config.toml`** —— 与 cc-switch 一样落盘（Grok 没有 env 通道，
@@ -208,6 +210,38 @@ fn sanitize_segment(id: &str) -> Option<String> {
 
 fn codex_home_for(provider_id: &str) -> Option<PathBuf> {
     Some(profiles_dir()?.join(format!("codex-{}", sanitize_segment(provider_id)?)))
+}
+
+/// Codex CLI / TUI 读的那份用户 home（`~/.codex`）。Kivio 进程在 Windows 上时就是
+/// `%USERPROFILE%\.codex`，与用户在终端里跑 `codex` 看到的是同一处。
+pub fn native_codex_home() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|base| base.home_dir().join(".codex"))
+}
+
+/// WSL 里的 Codex 若继承 Windows 环境、自己却把会话写到 Linux `~/.codex`，
+/// TUI 在 Windows 上看不见。没有私有供应商 home 时，把 `CODEX_HOME` 指到用户那份。
+///
+/// 返回的是 **host 路径**；注入子进程时由 `spawn::apply_env_for_cli` 再翻成 `/mnt/...`。
+pub fn wsl_shared_codex_home(cli_bin: &Path) -> Option<PathBuf> {
+    if !crate::external_agents::wsl::is_wsl_target(cli_bin) {
+        return None;
+    }
+    native_codex_home()
+}
+
+/// 中转私有 home 的 `sessions/` 接到用户 `~/.codex/sessions`。保存供应商时物化一次，
+/// 拉起 Codex 时再补一次，这样升级前已经写在私有目录里的 rollout 也会露给 TUI。
+pub fn ensure_private_codex_sessions_shared() {
+    let Some(home) = provider_env("codex").get("CODEX_HOME").cloned() else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    if !is_kivio_private_codex_home(&home) {
+        return;
+    }
+    if let Err(err) = share_codex_sessions_with_user_home(&home) {
+        eprintln!("[external-agent] Codex 会话目录未能接到用户 ~/.codex：{err}");
+    }
 }
 
 fn claude_settings_path_for(provider_id: &str) -> Option<PathBuf> {
@@ -412,7 +446,145 @@ fn materialize_codex(provider: &ExternalCliProvider) -> Result<(), String> {
             .map_err(|e| format!("auth.json 解析失败：{e}"))?;
         write_private(&home.join("auth.json"), auth)?;
     }
+    if let Err(err) = share_codex_sessions_with_user_home(&home) {
+        eprintln!("[external-agent] Codex 会话目录未能接到用户 ~/.codex：{err}");
+    }
     Ok(())
+}
+
+/// 私有 `CODEX_HOME` 只承载中转 config/auth；把 `sessions/` 接到用户 `~/.codex/sessions`，
+/// 这样 Codex CLI / TUI 默认扫描的目录里能看到 Kivio 写下的 rollout。
+fn share_codex_sessions_with_user_home(private_home: &Path) -> Result<(), String> {
+    let Some(user_sessions) = native_codex_home().map(|home| home.join("sessions")) else {
+        return Ok(());
+    };
+    share_codex_sessions_dir(private_home, &user_sessions)
+}
+
+fn is_kivio_private_codex_home(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.starts_with("codex-")
+        && path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some("external-cli-providers")
+}
+
+fn share_codex_sessions_dir(private_home: &Path, user_sessions: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(user_sessions)
+        .map_err(|e| format!("创建 {} 失败：{e}", user_sessions.display()))?;
+    std::fs::create_dir_all(private_home)
+        .map_err(|e| format!("创建 {} 失败：{e}", private_home.display()))?;
+    let private_sessions = private_home.join("sessions");
+    if paths_point_to_same_dir(&private_sessions, user_sessions) {
+        return Ok(());
+    }
+    if is_reparse_point(&private_sessions) {
+        unlink_directory_link(&private_sessions);
+    } else if private_sessions.is_dir() {
+        merge_dir_contents(&private_sessions, user_sessions)?;
+        let _ = std::fs::remove_dir_all(&private_sessions);
+    } else if private_sessions.exists() {
+        let _ = std::fs::remove_file(&private_sessions);
+    }
+    create_directory_link(&private_sessions, user_sessions)
+}
+
+fn paths_point_to_same_dir(left: &Path, right: &Path) -> bool {
+    let Ok(left) = std::fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right) = std::fs::canonicalize(right) else {
+        return false;
+    };
+    left == right
+}
+
+fn is_reparse_point(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+fn unlink_directory_link(path: &Path) {
+    if !is_reparse_point(path) {
+        return;
+    }
+    let _ = std::fs::remove_dir(path);
+    let _ = std::fs::remove_file(path);
+}
+
+fn merge_dir_contents(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("创建 {} 失败：{e}", to.display()))?;
+    let entries = match std::fs::read_dir(from) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        let dest = to.join(entry.file_name());
+        if src.is_dir() {
+            merge_dir_contents(&src, &dest)?;
+        } else if !dest.exists() {
+            std::fs::rename(&src, &dest)
+                .or_else(|_| std::fs::copy(&src, &dest).map(|_| ()))
+                .map_err(|e| format!("迁移 {} 失败：{e}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn create_directory_link(link: &Path, target: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::proc::NoConsoleWindow;
+        // mklink 是 cmd 内建；整条命令塞进一个 `/C` 参数会被 Rust 再包一层引号，
+        // 路径末尾的 `\` 会把收尾引号吃掉（「文件名、目录名或卷标语法不正确」）。
+        let output = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .no_console_window()
+            .output()
+            .map_err(|e| format!("创建会话目录联接失败：{e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return Ok(());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "创建会话目录联接失败（{} → {}）：{}{}",
+            link.display(),
+            target.display(),
+            stdout.trim(),
+            stderr.trim()
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(target, link)
+            .map_err(|e| format!("创建会话目录符号链接失败：{e}"))
+    }
 }
 
 /// 整份覆盖 `config.toml` 之后，把聊天里选过的顶层 `model` / `model_reasoning_effort` 写回去。
@@ -513,7 +685,7 @@ fn claude_native_settings_path() -> Option<PathBuf> {
 }
 
 fn codex_native_config_path() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|base| base.home_dir().join(".codex").join("config.toml"))
+    native_codex_home().map(|home| home.join("config.toml"))
 }
 
 fn codex_effective_config_path() -> Option<PathBuf> {
@@ -1835,6 +2007,9 @@ pub fn cleanup(
         }
         "codex" => {
             if let Some(home) = codex_home_for(provider_id) {
+                // `sessions/` 可能是接到用户 ~/.codex/sessions 的 junction；必须先拆掉
+                // 联接再删私有 home，否则 remove_dir_all 可能顺着联接把用户会话清掉。
+                unlink_directory_link(&home.join("sessions"));
                 let _ = std::fs::remove_dir_all(home);
             }
         }
@@ -3312,5 +3487,96 @@ max_context_size = 200000
         persist_selected_model("claude", Some(""), None).unwrap();
         persist_selected_model("claude", None, None).unwrap();
         persist_selected_model("pi", Some("gpt-test"), None).unwrap();
+    }
+
+    #[test]
+    fn native_codex_home_is_user_dot_codex() {
+        let home = native_codex_home().expect("home dir");
+        assert_eq!(
+            home.file_name().and_then(|name| name.to_str()),
+            Some(".codex")
+        );
+    }
+
+    #[test]
+    fn wsl_shared_codex_home_is_host_path_only_for_wsl_codex() {
+        let wsl = PathBuf::from(r"\\wsl$\Ubuntu\usr\bin\codex");
+        let win = PathBuf::from(r"C:\codex.exe");
+        assert!(wsl_shared_codex_home(&win).is_none());
+        let home = wsl_shared_codex_home(&wsl).expect("wsl shares the host Codex home");
+        assert_eq!(
+            home.file_name().and_then(|name| name.to_str()),
+            Some(".codex")
+        );
+        assert!(!home
+            .to_string_lossy()
+            .replace('\\', "/")
+            .starts_with("/mnt/"));
+    }
+
+    #[test]
+    fn kivio_private_codex_home_is_the_materialized_dir() {
+        assert!(is_kivio_private_codex_home(Path::new(
+            r"C:\Users\me\AppData\Roaming\com.zmair.kivio\external-cli-providers\codex-relay"
+        )));
+        assert!(!is_kivio_private_codex_home(Path::new(
+            r"C:\Users\me\.codex"
+        )));
+        assert!(!is_kivio_private_codex_home(Path::new(
+            r"C:\Users\me\external-cli-providers\other"
+        )));
+    }
+
+    #[test]
+    fn share_codex_sessions_dir_migrates_private_rollouts_then_links() {
+        let root = temp_root("codex-share-sessions");
+        let private_home = root.join("external-cli-providers").join("codex-relay");
+        let user_sessions = root.join("user-codex").join("sessions");
+        let nested = private_home
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("24");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("rollout-kivio.jsonl"), "kivio\n").unwrap();
+        std::fs::create_dir_all(user_sessions.join("2026")).unwrap();
+        std::fs::write(user_sessions.join("2026").join("keep-me.jsonl"), "tui\n").unwrap();
+
+        share_codex_sessions_dir(&private_home, &user_sessions).unwrap();
+        share_codex_sessions_dir(&private_home, &user_sessions).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(
+                user_sessions
+                    .join("2026")
+                    .join("08")
+                    .join("24")
+                    .join("rollout-kivio.jsonl")
+            )
+            .unwrap(),
+            "kivio\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user_sessions.join("2026").join("keep-me.jsonl")).unwrap(),
+            "tui\n"
+        );
+        assert!(paths_point_to_same_dir(
+            &private_home.join("sessions"),
+            &user_sessions
+        ));
+        std::fs::write(
+            private_home.join("sessions").join("via-link.jsonl"),
+            "linked\n",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(user_sessions.join("via-link.jsonl")).unwrap(),
+            "linked\n"
+        );
+
+        unlink_directory_link(&private_home.join("sessions"));
+        std::fs::write(user_sessions.join("still-there.jsonl"), "ok\n").unwrap();
+        assert!(user_sessions.join("still-there.jsonl").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

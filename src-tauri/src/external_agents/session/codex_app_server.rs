@@ -106,10 +106,15 @@ fn runtime_workspace_roots(cwd: &str, extra: &[String]) -> Vec<String> {
     roots
 }
 
-/// `thread/start` and `thread/resume` share cwd / sandbox / approval / workspace roots.
+/// `thread/start` needs cwd / sandbox / approval / workspace roots.
 /// `runtimeWorkspaceRoots` is what materializes `:workspace_roots` / `project_roots`
 /// when the model asks for workspace permission — echoing the grant is not enough
 /// if this list is empty.
+///
+/// `thread/resume` sends **only** `threadId`. Extra cwd / sandbox / experimental roots
+/// made Codex reject a perfectly good rollout (Windows vs WSL path, or a capsule that
+/// did not exist when the thread was created). Model / sandbox for this turn go on
+/// `turn/start`.
 fn build_codex_thread_params(
     cwd: &str,
     sandbox_mode: &str,
@@ -117,11 +122,11 @@ fn build_codex_thread_params(
     model: Option<&str>,
     resume_thread: Option<&str>,
 ) -> (&'static str, Value) {
+    if let Some(tid) = resume_thread.filter(|tid| !tid.is_empty()) {
+        return ("thread/resume", json!({ "threadId": tid }));
+    }
     let cwd_abs = absolute_workspace_path(cwd);
-    let (method, mut params) = match resume_thread.filter(|tid| !tid.is_empty()) {
-        Some(tid) => ("thread/resume", json!({ "threadId": tid })),
-        None => ("thread/start", json!({})),
-    };
+    let mut params = json!({});
     if !cwd_abs.is_empty() {
         params["cwd"] = json!(cwd_abs);
         params["runtimeWorkspaceRoots"] = json!([cwd_abs]);
@@ -131,7 +136,7 @@ fn build_codex_thread_params(
     if let Some(model) = model {
         params["model"] = json!(model);
     }
-    (method, params)
+    ("thread/start", params)
 }
 
 /// JSON-RPC notification (no `id`). Required after `initialize` — newer app-server rejects
@@ -494,9 +499,66 @@ fn item_id(item: &serde_json::Map<String, Value>) -> Option<String> {
 fn value_as_text(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) | None => String::new(),
         Some(other) => other.to_string(),
-        None => String::new(),
     }
+}
+
+/// Codex `webSearch` items are `{id, query, action?}` — there is no `results` field.
+/// Serializing JSON `null` produced the literal `"null"` in the tool card.
+fn web_search_result(item: &serde_json::Map<String, Value>) -> String {
+    if let Some(results) = item.get("results") {
+        match results {
+            Value::Null => {}
+            Value::String(s) if s.is_empty() || s == "null" => {}
+            Value::Array(entries) if entries.is_empty() => {}
+            other => {
+                let text = value_as_text(Some(other));
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    if let Some(action) = item.get("action") {
+        let kind = json_str(action, "type").unwrap_or("");
+        let from_action = match kind {
+            "openPage" | "open_page" => json_str(action, "url").unwrap_or("").to_string(),
+            "findInPage" | "find_in_page" => {
+                let url = json_str(action, "url").unwrap_or("");
+                let pattern = json_str(action, "pattern").unwrap_or("");
+                [url, pattern]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }
+            _ => json_str(action, "query")
+                .or_else(|| {
+                    action
+                        .get("queries")
+                        .and_then(Value::as_array)
+                        .and_then(|queries| {
+                            queries
+                                .iter()
+                                .find_map(|q| q.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                        })
+                })
+                .unwrap_or("")
+                .to_string(),
+        };
+        if !from_action.is_empty() {
+            return from_action;
+        }
+    }
+    let query = map_str(item, "query").unwrap_or("");
+    if !query.is_empty() {
+        return query.to_string();
+    }
+    item.get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed")
+        .to_string()
 }
 
 fn item_failed(item: &serde_json::Map<String, Value>) -> bool {
@@ -651,14 +713,6 @@ fn emit_thread_item(
             let query = map_str(item, "query")
                 .or_else(|| item.get("action").and_then(|a| json_str(a, "query")))
                 .unwrap_or("");
-            let result = {
-                let text = value_as_text(item.get("results"));
-                if text.is_empty() {
-                    query.to_string()
-                } else {
-                    text
-                }
-            };
             emit_named_tool(
                 item,
                 emitted_tools,
@@ -666,7 +720,7 @@ fn emit_thread_item(
                 include_result,
                 "web_search",
                 json!({ "query": query }),
-                result,
+                web_search_result(item),
             );
         }
         // 0.148 schema：插件 / 动态工具；以前落进 `_` 整张卡消失。
@@ -1134,6 +1188,9 @@ pub struct CodexAppServerSession {
 /// Handshake timeouts (缺陷 4 / R3): 30s each, up from 15/20s.
 const CODEX_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_THREAD_START_TIMEOUT: Duration = Duration::from_secs(30);
+/// Resume replays the on-disk rollout. A long project thread can exceed the start
+/// timeout; treating that as "thread missing" opens a blank session.
+const CODEX_THREAD_RESUME_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl CodexAppServerSession {
     /// Spawn `codex app-server`, `initialize`, then create or resume a thread. The process and
@@ -1210,14 +1267,15 @@ impl CodexAppServerSession {
             write_rpc(&mut stdin, thread_rpc_id, method, params)
                 .await
                 .map_err(|e| format!("thread-start: {e}"))?;
-            let result = read_until_response(
-                &mut reader,
-                &mut stdin,
-                thread_rpc_id,
-                CODEX_THREAD_START_TIMEOUT,
-            )
-            .await
-            .map_err(|e| format!("thread-start: {e}"))?;
+            let thread_timeout = if method == "thread/resume" {
+                CODEX_THREAD_RESUME_TIMEOUT
+            } else {
+                CODEX_THREAD_START_TIMEOUT
+            };
+            let result =
+                read_until_response(&mut reader, &mut stdin, thread_rpc_id, thread_timeout)
+                    .await
+                    .map_err(|e| format!("thread-start: {e}"))?;
             let thread_id = result
                 .get("thread")
                 .and_then(|t| t.get("id"))
@@ -1482,12 +1540,17 @@ impl CodexAppServerSession {
         }
     }
 
-    /// Close stdin and kill the process.
+    /// Close stdin and give Codex a moment to flush the rollout before killing.
     pub async fn close(mut self) {
         let _ = self.stdin.shutdown().await;
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
-        let _ = self.stderr_tail.await;
+        match timeout(Duration::from_secs(3), self.child.wait()).await {
+            Ok(_) => {}
+            Err(_) => {
+                crate::external_agents::spawn::kill_agent_process_tree(&mut self.child);
+                let _ = self.child.wait().await;
+            }
+        }
+        let _ = timeout(Duration::from_secs(2), self.stderr_tail).await;
     }
 }
 
@@ -2719,6 +2782,51 @@ mod tests {
     }
 
     #[test]
+    fn web_search_null_results_use_query_not_literal_null() {
+        let started = json!({
+            "item": {
+                "type": "webSearch",
+                "id": "ws-1",
+                "query": "openai status",
+                "results": null,
+                "status": "inProgress"
+            }
+        });
+        let completed = json!({
+            "item": {
+                "type": "webSearch",
+                "id": "ws-1",
+                "query": "openai status",
+                "action": { "type": "search", "query": "openai status" },
+                "results": null,
+                "status": "completed"
+            }
+        });
+        let mut events = Vec::new();
+        let mut tools = HashSet::new();
+        map_codex_notification("item/started", &started, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        map_codex_notification("item/completed", &completed, &mut tools, &mut |e| {
+            events.push(e)
+        });
+        assert!(matches!(
+            events.first(),
+            Some(UnifiedAgentEvent::ToolUse { id, name, .. })
+                if id == "ws-1" && name == "web_search"
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "ws-1" && content == "openai status" && !*is_error
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { content, .. } if content == "null"
+        )));
+    }
+
+    #[test]
     fn token_usage_emits_usage() {
         let (events, _) = collect(
             "thread/tokenUsage/updated",
@@ -3330,18 +3438,16 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_thread_params_resume_keeps_workspace_roots() {
+    fn build_codex_thread_params_resume_sends_only_thread_id() {
         let (method, params) = build_codex_thread_params(
             "/work",
             "workspace-write",
             "on-request",
-            None,
+            Some("gpt-5.6-sol"),
             Some("thr_1"),
         );
         assert_eq!(method, "thread/resume");
-        assert_eq!(params["threadId"], json!("thr_1"));
-        assert_eq!(params["runtimeWorkspaceRoots"], json!(["/work"]));
-        assert_eq!(params["sandbox"], json!("workspace-write"));
+        assert_eq!(params, json!({ "threadId": "thr_1" }));
     }
 
     #[test]

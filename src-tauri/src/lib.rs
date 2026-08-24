@@ -238,8 +238,8 @@ pub fn run() {
             // `conv_*` 目录，非空的孤儿工作区只报数不删（里面是用户产物）。
             chat::gc::sweep_conversation_side_artifacts(app.handle());
 
-            // 周期性回收闲置的持久外部 CLI 会话（10 分钟无活动即丢弃 → actor 关闭其子进程），
-            // 避免长时间挂着空转进程占内存。注册时也会做一次清扫 + LRU 限流，这里覆盖纯闲置场景。
+            // 周期性回收闲置的持久外部 CLI **进程**（10 分钟无活动即丢弃 → actor 关闭子进程）。
+            // 原生会话 id 仍落在 disk 上，下一轮（或重新打开这条对话）必须 resume，不是开新会话。
             {
                 let sweeper = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -250,7 +250,9 @@ pub fn run() {
                         let Some(state) = sweeper.try_state::<AppState>() else {
                             continue;
                         };
-                        state.sweep_idle_external_live_sessions(std::time::Duration::from_secs(600));
+                        state.sweep_idle_external_live_sessions(
+                            crate::external_agents::session::live::LIVE_SESSION_IDLE_TTL,
+                        );
                     }
                 });
             }

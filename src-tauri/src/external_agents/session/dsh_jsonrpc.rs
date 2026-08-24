@@ -263,7 +263,16 @@ impl DshJsonRpcSession {
             .env(
                 "DSH_AGENT_PRESET",
                 crate::external_agents::dsh_profile::normalize_agent_preset(preset),
-            )
+            );
+        if crate::external_agents::wsl::is_wsl_target(resolved_bin) {
+            if let Some(home) = crate::external_agents::dsh_profile::dsh_home() {
+                command.env(
+                    "DSH_HOME",
+                    crate::external_agents::wsl::path_for_cli(resolved_bin, &home),
+                );
+            }
+        }
+        command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -297,8 +306,9 @@ impl DshJsonRpcSession {
 
         let mut next_rpc_id: u64 = 1;
         let handshake = async {
+            let init_cwd = crate::external_agents::wsl::path_for_cli(resolved_bin, cwd);
             let init_params = json!({
-                "cwd": cwd.to_string_lossy(),
+                "cwd": init_cwd.to_string_lossy(),
                 "provider": route.provider,
                 "model": route.model,
             });

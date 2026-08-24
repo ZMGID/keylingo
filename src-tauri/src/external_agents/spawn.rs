@@ -69,15 +69,67 @@ fn command_for_program(program: &OsStr) -> Command {
     Command::new(program)
 }
 
+fn apply_env_for_cli(command: &mut Command, program: &Path, key: &str, value: String) {
+    let value = crate::external_agents::wsl::env_value_for_cli(program, key, value);
+    command.env(key, value);
+}
+
+fn is_codex_cli_bin(bin: &Path) -> bool {
+    bin.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| {
+            stem.eq_ignore_ascii_case("codex") || stem.eq_ignore_ascii_case("codex-app-server")
+        })
+}
+
+/// WSL Codex 在没有私有 `CODEX_HOME` 时改读用户那份 `~/.codex`，否则会话写进 Linux 家目录，
+/// Windows 上的 Codex CLI / TUI 看不见。
+fn extra_codex_home_for_spawn(
+    cli_bin: &Path,
+    agent_id: Option<&str>,
+    already_has_codex_home: bool,
+) -> Option<PathBuf> {
+    if already_has_codex_home {
+        return None;
+    }
+    if agent_id != Some("codex") && !is_codex_cli_bin(cli_bin) {
+        return None;
+    }
+    crate::external_agents::provider_profile::wsl_shared_codex_home(cli_bin)
+}
+
+fn finish_codex_home(
+    command: &mut Command,
+    program: &Path,
+    agent_id: Option<&str>,
+    already_has_codex_home: bool,
+) {
+    if already_has_codex_home {
+        crate::external_agents::provider_profile::ensure_private_codex_sessions_shared();
+        return;
+    }
+    if let Some(home) = extra_codex_home_for_spawn(program, agent_id, false) {
+        apply_env_for_cli(
+            command,
+            program,
+            "CODEX_HOME",
+            home.to_string_lossy().into_owned(),
+        );
+    }
+}
+
 pub fn cli_command(program: impl AsRef<OsStr>) -> Command {
     let program = program.as_ref();
     let mut command = command_for_program(program);
     strip_parent_session_env(&mut command);
     // 设置页里针对这个 CLI 填的环境变量覆盖（`ANTHROPIC_BASE_URL` 之类），按二进制名反查。
     // 必须用原始路径（UNC 的 file_stem 仍是 `claude`），不能用改写后的 `wsl.exe`。
-    for (key, value) in crate::external_agents::overrides::env_for_bin(Path::new(program)) {
-        command.env(key, value);
+    let extra = crate::external_agents::overrides::env_for_bin(Path::new(program));
+    let has_codex_home = extra.contains_key("CODEX_HOME");
+    for (key, value) in extra {
+        apply_env_for_cli(&mut command, Path::new(program), &key, value);
     }
+    finish_codex_home(&mut command, Path::new(program), None, has_codex_home);
     command
 }
 
@@ -89,12 +141,21 @@ pub fn agent_cli_command(def: &RuntimeAgentDef, program: impl AsRef<OsStr>) -> C
     let program = program.as_ref();
     let mut command = command_for_program(program);
     strip_parent_session_env(&mut command);
+    let mut has_codex_home = false;
     for (key, value) in def.env {
-        command.env(key, value);
+        has_codex_home |= *key == "CODEX_HOME";
+        apply_env_for_cli(&mut command, Path::new(program), key, value.to_string());
     }
     for (key, value) in crate::external_agents::overrides::env_for(def.id) {
-        command.env(key, value);
+        has_codex_home |= key == "CODEX_HOME";
+        apply_env_for_cli(&mut command, Path::new(program), &key, value);
     }
+    finish_codex_home(
+        &mut command,
+        Path::new(program),
+        Some(def.id),
+        has_codex_home,
+    );
     command
 }
 
@@ -636,6 +697,26 @@ mod tests {
                 .unwrap(),
             "claude"
         );
+    }
+
+    #[test]
+    fn extra_codex_home_for_spawn_only_fills_wsl_without_private_home() {
+        let wsl = PathBuf::from(r"\\wsl$\Ubuntu\usr\bin\codex");
+        let win = PathBuf::from(r"C:\codex.exe");
+        let claude = PathBuf::from(r"\\wsl$\Ubuntu\usr\bin\claude");
+        assert!(extra_codex_home_for_spawn(&win, Some("codex"), false).is_none());
+        assert!(extra_codex_home_for_spawn(&wsl, Some("codex"), true).is_none());
+        assert!(extra_codex_home_for_spawn(&claude, None, false).is_none());
+        let home =
+            extra_codex_home_for_spawn(&wsl, None, false).expect("wsl codex shares host home");
+        assert_eq!(
+            home.file_name().and_then(|name| name.to_str()),
+            Some(".codex")
+        );
+        assert!(!home
+            .to_string_lossy()
+            .replace('\\', "/")
+            .starts_with("/mnt/"));
     }
 
     #[cfg(windows)]

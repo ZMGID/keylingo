@@ -459,6 +459,9 @@ mod tests {
         assert!(is_missing_codex_thread_error("thread not found: thr_abc"));
         assert!(is_missing_codex_thread_error("Unknown thread"));
         assert!(!is_missing_codex_thread_error(
+            "codex app-server handshake timeout"
+        ));
+        assert!(!is_missing_codex_thread_error(
             "codex app-server exited mid-turn"
         ));
     }

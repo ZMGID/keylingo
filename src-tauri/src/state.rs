@@ -1119,7 +1119,6 @@ impl AppState {
         conversation_id: String,
         session: crate::external_agents::session::live::LiveSession,
     ) {
-        const IDLE_TTL: Duration = Duration::from_secs(600);
         const MAX_LIVE_SESSIONS: usize = 6;
         let mut map = self
             .external_live_sessions
@@ -1127,7 +1126,7 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner());
         // Reclaim idle sessions (dropping each entry closes its actor + child) and any whose
         // actor already exited. 有在飞轮次的会话不参与回收（见 `LiveSession::busy`）。
-        map.retain(|_, s| !s.is_idle(IDLE_TTL));
+        map.retain(|_, s| !s.is_idle(crate::external_agents::session::live::LIVE_SESSION_IDLE_TTL));
         // Bound concurrent live processes: evict least-recently-used until under the cap.
         // 同样跳过在飞的 —— 正在跑长轮次的那条恰好 `last_activity` 最旧，不排除就一定被它选中。
         while map.len() >= MAX_LIVE_SESSIONS {

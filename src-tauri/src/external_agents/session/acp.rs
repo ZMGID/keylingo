@@ -66,6 +66,32 @@ fn build_session_new_params(cwd: &Path, mcp_servers: &[AcpMcpServer]) -> Value {
     })
 }
 
+fn build_session_load_params(cwd: &Path, session_id: &str, mcp_servers: &[AcpMcpServer]) -> Value {
+    let mut params = build_session_new_params(cwd, mcp_servers);
+    params["sessionId"] = json!(session_id);
+    params
+}
+
+/// `session/load` 的目标会话在 CLI 那边已经不存在。握手超时 / Method not found 不是这个。
+pub fn is_missing_acp_session_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("timeout")
+        || lower.contains("method not found")
+        || lower.contains("-32601")
+        || lower.contains("exited during handshake")
+    {
+        return false;
+    }
+    let mentions_session =
+        lower.contains("session") || lower.contains("sessionid") || lower.contains("session/load");
+    let gone = lower.contains("not found")
+        || lower.contains("no such")
+        || lower.contains("unknown session")
+        || lower.contains("does not exist")
+        || lower.contains("is gone");
+    mentions_session && gone
+}
+
 async fn write_rpc(
     stdin: &mut tokio::process::ChildStdin,
     id: u64,
@@ -1356,35 +1382,72 @@ impl AcpSession {
                 .map_err(|e| format!("initialize: {e}"))?;
 
             // session/new for a fresh session, session/load to resume a prior one.
+            // One Kivio conversation ↔ one native session id: load failure must
+            // surface (caller only starts fresh when the CLI says the id is gone).
             let mut next_id: u64 = 2;
-            let (method, params) = match resume_session.filter(|s| !s.is_empty()) {
+            let (result, session_id) = match resume_session.filter(|s| !s.is_empty()) {
                 Some(sid) => {
-                    let mut p =
-                        build_session_new_params(&cli_protocol_cwd(resolved_bin, cwd), mcp_servers);
-                    p["sessionId"] = json!(sid);
-                    ("session/load", p)
+                    let mut last_err = None;
+                    let mut loaded = None;
+                    for cwd_try in
+                        crate::external_agents::wsl::cwd_spellings_for_cli(resolved_bin, cwd)
+                    {
+                        let params = build_session_load_params(&cwd_try, sid, mcp_servers);
+                        write_rpc(&mut stdin, next_id, "session/load", params)
+                            .await
+                            .map_err(|e| format!("session/load: {e}"))?;
+                        match acp_read_until_id(
+                            &mut reader,
+                            &mut stdin,
+                            next_id,
+                            ACP_SESSION_NEW_TIMEOUT,
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                loaded = Some(result);
+                                next_id += 1;
+                                break;
+                            }
+                            Err(err) if is_missing_acp_session_error(&err) => {
+                                last_err = Some(format!("session/load: {err}"));
+                                next_id += 1;
+                            }
+                            Err(err) => {
+                                return Err(format!("session/load: {err}"));
+                            }
+                        }
+                    }
+                    let result = loaded.ok_or_else(|| {
+                        last_err.unwrap_or_else(|| format!("session/load: session {sid} not found"))
+                    })?;
+                    (result, sid.to_string())
                 }
-                None => (
-                    "session/new",
-                    build_session_new_params(&cli_protocol_cwd(resolved_bin, cwd), mcp_servers),
-                ),
-            };
-            write_rpc(&mut stdin, next_id, method, params)
-                .await
-                .map_err(|e| format!("session-new: {e}"))?;
-            let result =
-                acp_read_until_id(&mut reader, &mut stdin, next_id, ACP_SESSION_NEW_TIMEOUT)
+                None => {
+                    write_rpc(
+                        &mut stdin,
+                        next_id,
+                        "session/new",
+                        build_session_new_params(&cli_protocol_cwd(resolved_bin, cwd), mcp_servers),
+                    )
                     .await
                     .map_err(|e| format!("session-new: {e}"))?;
-            next_id += 1;
-
-            let session_id = match resume_session.filter(|s| !s.is_empty()) {
-                Some(sid) => sid.to_string(),
-                None => result
-                    .get("sessionId")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .ok_or_else(|| "session-new: invalid session/new response".to_string())?,
+                    let result = acp_read_until_id(
+                        &mut reader,
+                        &mut stdin,
+                        next_id,
+                        ACP_SESSION_NEW_TIMEOUT,
+                    )
+                    .await
+                    .map_err(|e| format!("session-new: {e}"))?;
+                    next_id += 1;
+                    let session_id = result
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| "session-new: invalid session/new response".to_string())?;
+                    (result, session_id)
+                }
             };
 
             let (model_config_id, reasoning_config_id) = find_config_ids(&result);
@@ -1794,6 +1857,28 @@ mod tests {
         assert!(acp_retry_state_note(finished.as_object().unwrap()).is_none());
         let other = json!({ "sessionUpdate": "model_changed", "model_id": "grok-4.6" });
         assert!(acp_retry_state_note(other.as_object().unwrap()).is_none());
+    }
+
+    #[test]
+    fn session_load_params_carry_session_id_and_cwd() {
+        let params = build_session_load_params(Path::new("/mnt/e/proj"), "sess-1", &[]);
+        assert_eq!(params["sessionId"], json!("sess-1"));
+        assert_eq!(params["cwd"], json!("/mnt/e/proj"));
+        assert_eq!(params["mcpServers"], json!([]));
+    }
+
+    #[test]
+    fn missing_acp_session_is_recognized() {
+        assert!(is_missing_acp_session_error(
+            "session/load: Session not found"
+        ));
+        assert!(is_missing_acp_session_error("unknown session id"));
+        assert!(!is_missing_acp_session_error("ACP handshake timeout"));
+        assert!(!is_missing_acp_session_error("Method not found"));
+        assert!(!is_missing_acp_session_error(
+            "ACP agent exited during handshake"
+        ));
+        assert!(!is_missing_acp_session_error("ACP session exited mid-turn"));
     }
 
     /// kimi 的 ACP 确实暴露推理档位——`configOptions` 里 `id="thinking"` /
@@ -3234,7 +3319,7 @@ pub async fn probe_acp_session_history(
         "session/load",
         json!({
             "sessionId": session_id,
-            "cwd": cwd.to_string_lossy(),
+            "cwd": cli_protocol_cwd(bin, cwd).to_string_lossy(),
             "mcpServers": [],
         }),
     )

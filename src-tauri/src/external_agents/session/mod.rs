@@ -256,6 +256,18 @@ pub struct LiveSessionHandle {
     pub cwd: String,
 }
 
+impl LiveSessionHandle {
+    /// Same Kivio conversation + same CLI protocol ⇒ resume this native id.
+    ///
+    /// Cwd is **not** part of the match. The file is already keyed by conversation_id;
+    /// requiring a byte-identical cwd string (Windows `E:\` vs `E:/`, WSL `/mnt/e/...`)
+    /// dropped the id, started a blank thread, and overwrote the binding — so reopening
+    /// the conversation could not continue the original native session.
+    pub fn can_resume(&self, agent_id: &str, protocol: &str) -> bool {
+        self.agent_id == agent_id && self.protocol == protocol && !self.native_id.trim().is_empty()
+    }
+}
+
 fn live_handle_path(app: &AppHandle, conversation_id: &str) -> Result<PathBuf, String> {
     Ok(sessions_dir(app)?.join(format!("live-{conversation_id}.json")))
 }
@@ -348,4 +360,36 @@ pub fn remove_all_bindings(app: &AppHandle, conversation_id: &str) -> Vec<String
         }
     }
     warnings
+}
+
+#[cfg(test)]
+mod live_handle_tests {
+    use super::LiveSessionHandle;
+
+    fn handle(cwd: &str) -> LiveSessionHandle {
+        LiveSessionHandle {
+            agent_id: "codex".to_string(),
+            protocol: "codex_app_server".to_string(),
+            native_id: "thr_keep".to_string(),
+            native_path: None,
+            cwd: cwd.to_string(),
+        }
+    }
+
+    #[test]
+    fn resume_ignores_cwd_string_differences() {
+        let stored = handle(r"E:\proj");
+        assert!(stored.can_resume("codex", "codex_app_server"));
+        let slash = handle("E:/proj");
+        assert!(slash.can_resume("codex", "codex_app_server"));
+    }
+
+    #[test]
+    fn resume_rejects_other_agent_or_blank_id() {
+        let mut stored = handle(r"E:\proj");
+        assert!(!stored.can_resume("claude", "codex_app_server"));
+        assert!(!stored.can_resume("codex", "acp_json_rpc"));
+        stored.native_id.clear();
+        assert!(!stored.can_resume("codex", "codex_app_server"));
+    }
 }

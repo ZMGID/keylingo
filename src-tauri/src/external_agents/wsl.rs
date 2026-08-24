@@ -148,6 +148,33 @@ pub fn path_for_cli(cli_bin: &Path, host_path: &Path) -> PathBuf {
         .unwrap_or_else(|| host_path.to_path_buf())
 }
 
+/// Protocol `cwd` spellings a WSL CLI might have stored the native session under.
+/// Translated Linux path first (current spawn), then the host path (sessions created
+/// before WSL translation). Non-WSL bins yield a single host path.
+pub fn cwd_spellings_for_cli(cli_bin: &Path, host_cwd: &Path) -> Vec<PathBuf> {
+    let protocol = path_for_cli(cli_bin, host_cwd);
+    let host = host_cwd.to_path_buf();
+    if protocol != host {
+        vec![protocol, host]
+    } else {
+        vec![protocol]
+    }
+}
+
+/// Path-valued env vars that a WSL CLI will misread if they stay as `C:\...`.
+const PATH_ENV_KEYS: &[&str] = &["CODEX_HOME", "DSH_HOME", "CLAUDE_CONFIG_DIR"];
+
+/// Translate a host env value into the path the CLI process actually understands.
+pub fn env_value_for_cli(cli_bin: &Path, key: &str, value: String) -> String {
+    if PATH_ENV_KEYS.iter().any(|candidate| *candidate == key) {
+        path_for_cli(cli_bin, Path::new(&value))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        value
+    }
+}
+
 pub fn is_windows_drive_mount(linux_path: &str) -> bool {
     let Some(rest) = linux_path.strip_prefix("/mnt/") else {
         return false;
@@ -518,6 +545,41 @@ mod tests {
         let host = Path::new(r"E:\proj");
         assert_eq!(path_for_cli(&wsl_bin, host), PathBuf::from("/mnt/e/proj"));
         assert_eq!(path_for_cli(&win_bin, host), host.to_path_buf());
+        assert_eq!(
+            cwd_spellings_for_cli(&wsl_bin, host),
+            vec![PathBuf::from("/mnt/e/proj"), host.to_path_buf()]
+        );
+        assert_eq!(
+            cwd_spellings_for_cli(&win_bin, host),
+            vec![host.to_path_buf()]
+        );
+    }
+
+    #[test]
+    fn env_value_for_cli_translates_path_homes_only_on_wsl() {
+        let wsl = PathBuf::from(r"\\wsl$\Ubuntu\usr\bin\codex");
+        let win = PathBuf::from(r"C:\codex.exe");
+        let home = r"C:\Users\me\AppData\Roaming\kivio\codex-p1";
+        assert_eq!(
+            env_value_for_cli(&wsl, "CODEX_HOME", home.to_string()),
+            "/mnt/c/Users/me/AppData/Roaming/kivio/codex-p1"
+        );
+        assert_eq!(
+            env_value_for_cli(&win, "CODEX_HOME", home.to_string()),
+            home
+        );
+        assert_eq!(
+            env_value_for_cli(&wsl, "DSH_HOME", r"C:\Users\me\.dsh".into()),
+            "/mnt/c/Users/me/.dsh"
+        );
+        assert_eq!(
+            env_value_for_cli(&wsl, "CLAUDE_CONFIG_DIR", r"C:\Users\me\.claude".into()),
+            "/mnt/c/Users/me/.claude"
+        );
+        assert_eq!(
+            env_value_for_cli(&wsl, "ANTHROPIC_BASE_URL", "https://x".into()),
+            "https://x"
+        );
     }
 
     #[test]

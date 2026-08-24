@@ -15,6 +15,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::external_agents::types::UnifiedAgentEvent;
 
+/// How long an unused live CLI **process** may sit before the sweeper drops it.
+///
+/// This is only a memory cap. The native session id stays on disk (`live-*.json`) and
+/// the next turn — 40 minutes later, or after the app restarts — must `thread/resume`
+/// / `--resume` that same id. Do not treat this TTL as a context lifetime.
+pub const LIVE_SESSION_IDLE_TTL: Duration = Duration::from_secs(600);
+
 /// 一条待用户答复的工具审批询问（claude 的 `control_request` / `can_use_tool`）。
 ///
 /// 会话侧只负责把它送出去、并在收到 `ApprovalDecision` 后回一条 `control_response`；

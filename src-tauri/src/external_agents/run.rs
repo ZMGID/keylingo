@@ -195,7 +195,9 @@ pub async fn run_external_cli_reply(
         },
         set_system_prompt.as_deref(),
         if is_slash { "" } else { memory_body.as_str() },
-        cwd.to_string_lossy().as_ref(),
+        crate::external_agents::wsl::path_for_cli(&resolved_bin, &cwd)
+            .to_string_lossy()
+            .as_ref(),
     );
 
     // A1：部分 CLI（目前只有 claude）的系统指令走**启动 flag** 而不是 prompt 正文。
@@ -353,7 +355,8 @@ pub async fn run_external_cli_reply(
     let args = match system_prompt_file.as_deref() {
         Some(path) => {
             let mut args = args;
-            args.extend(append_system_prompt_file_args(path));
+            let cli_path = crate::external_agents::wsl::path_for_cli(&resolved_bin, path);
+            args.extend(append_system_prompt_file_args(&cli_path));
             args
         }
         None => args,
@@ -838,9 +841,7 @@ where
     C: Fn() -> bool,
 {
     use crate::external_agents::session::live::LiveSession;
-    use crate::external_agents::session::{
-        clear_live_handle, load_live_handle, save_live_handle, LiveSessionHandle,
-    };
+    use crate::external_agents::session::{load_live_handle, save_live_handle, LiveSessionHandle};
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let protocol_tag = persistent_protocol_tag(protocol);
@@ -858,7 +859,7 @@ where
     // 让用户丢掉整段上下文。会话 id 不随进程死亡失效：grok 实测（1.0.3）新进程
     // `session/load` 同一个 id 成功，`initialize` 也声明了 `loadSession: true`。
     let mut resumable_native: Option<String> = load_live_handle(app, conversation_id)
-        .filter(|h| h.agent_id == agent_id && h.cwd == cwd_str && h.protocol == protocol_tag)
+        .filter(|h| h.can_resume(agent_id, protocol_tag))
         .map(|h| h.native_id);
 
     // Establish the control channel: 1. reuse a live session in the registry; 2. resume a
@@ -914,17 +915,7 @@ where
                 // Resume can fail during connect before the first turn: Claude reports a missing
                 // conversation on stderr; dsh returns `session \"...\" not found` from session/open.
                 // Clear the stale handle and retry fresh exactly once, with the normal reset notice.
-                Err(err)
-                    if !dropped_resume
-                        && (crate::external_agents::stream::claude::is_missing_session_error(&err)
-                            || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(
-                                &err,
-                            )
-                            || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(
-                                &err,
-                            )
-                            || crate::external_agents::errors::is_missing_codex_thread_error(&err)) =>
-                {
+                Err(err) if !dropped_resume && is_missing_resume_target(&err) => {
                     dropped_resume = true;
                     turn_args = drop_resume_for_fresh_session(
                         app,
@@ -1051,9 +1042,11 @@ where
         ) {
             // Cancelled keeps the persisted handle so a later turn can resume the native session.
             PersistentFailureAction::Cancelled => return Err(err),
-            // Auth / exhausted retries → drop the handle (process likely dead) and surface the error.
+            // Auth / exhausted retries → surface the error. Keep the disk handle so the
+            // next send (after login, quota reset, or reopening the conversation) still
+            // resumes the same native session. Clearing it here is what made a failed
+            // turn permanently un-continuable.
             PersistentFailureAction::Fatal => {
-                clear_live_handle(app, conversation_id);
                 return Err(err);
             }
             // Launch-flag config change (reasoning) → relaunch fresh with the new `args`.
@@ -1074,13 +1067,14 @@ where
                     &turn_args,
                 );
             }
-            // Transient failure → drop the stale handle and reconnect fresh once.
+            // Transient failure → reconnect once, still holding the native id in memory
+            // *and* on disk. Clearing the handle first meant a failed reconnect unbound
+            // the conversation forever.
             PersistentFailureAction::RetryFresh => {
                 retried_after_failure = true;
                 emit(UnifiedAgentEvent::StatusNote {
                     text: "reconnect".to_string(),
                 });
-                clear_live_handle(app, conversation_id);
             }
         }
 
@@ -1392,11 +1386,7 @@ fn persistent_failure_action(
     // resume 失效：**必须排在下面那条 auth / retried 之前**。它不是瞬时故障（重连同一份 argv
     // 一定再失败），也不是认证问题，而是一个有确定处置的状态：换个新会话继续。
     // 同样只降级一次 —— 摘掉 resume 之后还失败说明是别的原因。
-    if crate::external_agents::stream::claude::is_missing_session_error(err)
-        || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
-        || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(err)
-        || crate::external_agents::errors::is_missing_codex_thread_error(err)
-    {
+    if is_missing_resume_target(err) {
         return if dropped_resume {
             PersistentFailureAction::Fatal
         } else {
@@ -1417,6 +1407,14 @@ fn persistent_failure_action(
     }
 }
 
+fn is_missing_resume_target(err: &str) -> bool {
+    crate::external_agents::stream::claude::is_missing_session_error(err)
+        || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
+        || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(err)
+        || crate::external_agents::errors::is_missing_codex_thread_error(err)
+        || crate::external_agents::session::acp::is_missing_acp_session_error(err)
+}
+
 /// resume 失效的降级：换一个新的原生会话 id，把它写进落盘记录，并返回改写后的启动参数。
 ///
 /// 三件事必须一起做，少一件就会留一个坑：
@@ -1435,11 +1433,10 @@ fn drop_resume_for_fresh_session(
 ) -> Vec<String> {
     use crate::external_agents::session::{clear_live_handle, replace_stored_session_id};
 
-    if matches!(protocol, StreamFormat::DshJsonRpc) {
-        clear_live_handle(app, conversation_id);
-        return args.to_vec();
-    }
-    if matches!(protocol, StreamFormat::CodexAppServer) {
+    if matches!(
+        protocol,
+        StreamFormat::DshJsonRpc | StreamFormat::CodexAppServer | StreamFormat::AcpJsonRpc
+    ) {
         clear_live_handle(app, conversation_id);
         return args.to_vec();
     }
@@ -2322,7 +2319,8 @@ async fn append_wake_turn_message(
 }
 
 /// Connect (or resume) a persistent protocol session, returning its control channel, native id,
-/// and whether a resume actually succeeded. Falls back to a fresh session if resume fails.
+/// and whether a resume actually succeeded. A failed resume does **not** mint a new native id
+/// unless the CLI says that session is gone (`is_missing_resume_target`).
 ///
 /// `background_task_sink`：claude 轮间空闲读到的后台任务事件旁路（→ AppState 注册表）。
 /// `dsh_idle_sink`：dsh 轮间的任务边沿 + 子代理进度 + 唤醒轮正文。
@@ -2400,8 +2398,17 @@ async fn connect_persistent_session(
             })
         }
         StreamFormat::CodexAppServer => {
-            if let Some(tid) = resume_native.as_deref() {
-                if let Ok(session) = CodexAppServerSession::connect(
+            if let Some(tid) = resume_native
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                // Resume failure must surface to the caller. Swallowing it and starting
+                // a blank thread made `save_live_handle` overwrite the real id — the next
+                // time the user opened this conversation, we resumed the empty one.
+                // Missing-thread is classified one layer up (`is_missing_codex_thread_error`)
+                // and only then do we drop the binding and start fresh.
+                let session = CodexAppServerSession::connect(
                     resolved_bin,
                     args,
                     cwd,
@@ -2410,20 +2417,18 @@ async fn connect_persistent_session(
                     Some(tid),
                 )
                 .await
-                {
-                    let id = session.thread_id().to_string();
-                    let child_pid = session.child_pid();
-                    return Ok(PersistentConnection {
-                        control: spawn_codex_session_actor(session),
-                        native_id: id,
-                        resumed: true,
-                        child_pid,
-                    });
-                }
-                // C3: resume failed → fall through to fresh so the caller overwrites the stale
-                // live handle (whose native_id is dead) instead of retrying a doomed resume.
-                // 同 ACP 那条：原因要留在日志里，否则「上下文已重置」提示查不到根因。
-                eprintln!("[external-agent] codex resume failed (thread {tid}), connecting fresh");
+                .map_err(|err| {
+                    eprintln!("[external-agent] codex resume failed (thread {tid}): {err}");
+                    err
+                })?;
+                let id = session.thread_id().to_string();
+                let child_pid = session.child_pid();
+                return Ok(PersistentConnection {
+                    control: spawn_codex_session_actor(session),
+                    native_id: id,
+                    resumed: true,
+                    child_pid,
+                });
             }
             let session =
                 CodexAppServerSession::connect(resolved_bin, args, cwd, model, sandbox, None)
@@ -2438,8 +2443,14 @@ async fn connect_persistent_session(
             })
         }
         StreamFormat::AcpJsonRpc => {
-            if let Some(sid) = resume_native.as_deref() {
-                match AcpSession::connect(
+            if let Some(sid) = resume_native
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                // Same contract as Codex: resume failure must surface. Swallowing it
+                // and calling session/new made save_live_handle overwrite the real id.
+                let session = AcpSession::connect(
                     resolved_bin,
                     args,
                     cwd,
@@ -2449,28 +2460,18 @@ async fn connect_persistent_session(
                     Some(sid),
                 )
                 .await
-                {
-                    Ok(session) => {
-                        let id = session.session_id().to_string();
-                        let child_pid = session.child_pid();
-                        return Ok(PersistentConnection {
-                            control: spawn_acp_session_actor(session),
-                            native_id: id,
-                            resumed: true,
-                            child_pid,
-                        });
-                    }
-                    // C3: resume failed → connect fresh; the caller's save_live_handle overwrites
-                    // the stale handle so the next turn won't attempt the dead native_id again.
-                    // **原因必须打出来**：这条路的下游是一条「上下文已重置」提示，而用户看到
-                    // 提示时唯一能查的就是日志。之前这里是 `if let Ok(..)`，`session/load` 的
-                    // 报错被整个丢掉，只剩一句「失败了」。
-                    Err(err) => {
-                        eprintln!(
-                            "[external-agent] acp resume failed (session {sid}), connecting fresh: {err}"
-                        );
-                    }
-                }
+                .map_err(|err| {
+                    eprintln!("[external-agent] acp resume failed (session {sid}): {err}");
+                    err
+                })?;
+                let id = session.session_id().to_string();
+                let child_pid = session.child_pid();
+                return Ok(PersistentConnection {
+                    control: spawn_acp_session_actor(session),
+                    native_id: id,
+                    resumed: true,
+                    child_pid,
+                });
             }
             let session =
                 AcpSession::connect(resolved_bin, args, cwd, model, reasoning, mcp_servers, None)
@@ -4119,6 +4120,34 @@ mod tests {
         assert_eq!(
             persistent_failure_action("thread not found: thr_abc", "codex", false, false, true),
             PersistentFailureAction::Fatal
+        );
+    }
+
+    #[test]
+    fn a_missing_acp_session_reconnects_without_resume_exactly_once() {
+        assert_eq!(
+            persistent_failure_action(
+                "session/load: Session not found",
+                "grok",
+                false,
+                false,
+                false
+            ),
+            PersistentFailureAction::ReconnectWithoutResume
+        );
+        assert_eq!(
+            persistent_failure_action(
+                "session/load: Session not found",
+                "cursor-agent",
+                false,
+                false,
+                true
+            ),
+            PersistentFailureAction::Fatal
+        );
+        assert_ne!(
+            persistent_failure_action("ACP handshake timeout", "grok", false, false, false),
+            PersistentFailureAction::ReconnectWithoutResume
         );
     }
 
