@@ -1,6 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { chatApi } from './api'
 import { ConversationList } from './ConversationList'
 import type { ConversationListItem } from './types'
 
@@ -40,6 +41,10 @@ function renderList(onRenameConversation = vi.fn()) {
   )
   return onRenameConversation
 }
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('ConversationList inline rename', () => {
   it('opens rename input on double click and commits with Enter', async () => {
@@ -116,13 +121,34 @@ describe('ConversationList pin and archive', () => {
     expect(remainingWrap).not.toHaveClass('is-exiting')
   })
 
-  it('opens context menu on right-click with pin action', async () => {
+  it('opens context menu on right-click without rename, pin, or native session', async () => {
     const user = userEvent.setup()
-    const onTogglePin = vi.fn()
+    const { container } = render(<ConversationList {...listProps} />)
+
+    const row = container.querySelector('.kv-conv-row')
+    expect(row).toBeTruthy()
+    await user.pointer({ keys: '[MouseRight>]', target: row as Element })
+
+    expect(screen.getByRole('menuitem', { name: '重新生成标题' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '重命名' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '置顶聊天' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /原生会话/ })).not.toBeInTheDocument()
+  })
+
+  it('shows the bound native session id for local CLI conversations', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(chatApi, 'getExternalNativeSessionId').mockResolvedValue(
+      '0194abcd-61e2-7113-b077-58d3d91fb3d7',
+    )
     const { container } = render(
       <ConversationList
         {...listProps}
-        onTogglePinConversation={onTogglePin}
+        conversations={[
+          {
+            ...conversation,
+            agent_runtime: { kind: 'external', externalAgentId: 'codex' },
+          },
+        ]}
       />,
     )
 
@@ -130,8 +156,9 @@ describe('ConversationList pin and archive', () => {
     expect(row).toBeTruthy()
     await user.pointer({ keys: '[MouseRight>]', target: row as Element })
 
-    await user.click(screen.getByRole('menuitem', { name: '置顶聊天' }))
-    expect(onTogglePin).toHaveBeenCalledWith('conversation-1', true)
+    await waitFor(() => {
+      expect(screen.getByRole('menuitem', { name: /原生会话/ })).toHaveTextContent('0194abcd')
+    })
   })
 
   it('regenerates title from the context menu', async () => {

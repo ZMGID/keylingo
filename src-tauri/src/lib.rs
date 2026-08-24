@@ -651,6 +651,7 @@ pub fn run() {
             external_agents::commands::chat_list_importable_cli_sessions,
             external_agents::commands::chat_import_cli_sessions,
             external_agents::commands::chat_imported_history_stale,
+            external_agents::commands::chat_external_native_session_id,
             chat::memory::chat_memory_get,
             chat::memory::chat_memory_save,
             chat::memory::chat_memory_open_folder,

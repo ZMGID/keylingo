@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Archive, Pin } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
+import { chatApi, normalizeAgentRuntime } from './api'
 import { isProvisionalTitle } from './conversationTitle'
 import { SwapTitle } from './SwapTitle'
 import {
@@ -31,6 +32,11 @@ function conversationFolderLabel(
 
 /** 归档退场：比 `--kv-dur-fast`（150ms）略长，给 transitionend 漏触发时兜底卸行。 */
 const ARCHIVE_EXIT_MS = 240
+
+function conversationUsesExternalAgent(conv: ConversationListItem): boolean {
+  const runtime = normalizeAgentRuntime(conv)
+  return runtime.kind === 'external' && Boolean(runtime.externalAgentId)
+}
 
 type ExitingRow = {
   item: ConversationListItem
@@ -101,6 +107,8 @@ export const ConversationList = memo(function ConversationList({
     conversationId: string
     anchor: ConversationMenuAnchor
   } | null>(null)
+  const [menuNativeSessionId, setMenuNativeSessionId] = useState<string | null>(null)
+  const [menuNativeSessionLoading, setMenuNativeSessionLoading] = useState(false)
   const t = i18n[lang]
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
@@ -141,6 +149,35 @@ export const ConversationList = memo(function ConversationList({
   const menuConversation = menuState
     ? displayedConversations.find((c) => c.id === menuState.conversationId)
     : undefined
+  const menuUsesExternalAgent = Boolean(
+    menuConversation && conversationUsesExternalAgent(menuConversation),
+  )
+
+  useEffect(() => {
+    if (!menuConversation || !menuUsesExternalAgent) {
+      setMenuNativeSessionId(null)
+      setMenuNativeSessionLoading(false)
+      return
+    }
+    const conversationId = menuConversation.id
+    let cancelled = false
+    setMenuNativeSessionLoading(true)
+    setMenuNativeSessionId(null)
+    void chatApi
+      .getExternalNativeSessionId(conversationId)
+      .then((id) => {
+        if (!cancelled) setMenuNativeSessionId(id)
+      })
+      .catch(() => {
+        if (!cancelled) setMenuNativeSessionId(null)
+      })
+      .finally(() => {
+        if (!cancelled) setMenuNativeSessionLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [menuConversation, menuUsesExternalAgent])
 
   useEffect(() => {
     if (exitingIds.size === 0) return
@@ -443,17 +480,15 @@ export const ConversationList = memo(function ConversationList({
           conversationFolder={menuConversation.folder}
           conversationProjectId={menuConversation.project_id ?? menuConversation.projectId ?? null}
           conversationSetId={menuConversation.set_id ?? menuConversation.setId ?? null}
-          pinned={Boolean(menuConversation.pinned)}
           projects={projects}
           sets={sets}
           lang={lang}
-          onRename={() => startRename(menuConversation)}
           canRegenerateTitle={(menuConversation.message_count ?? 0) > 0}
           regeneratingTitle={titleGeneratingConversationIds.has(menuConversation.id)}
+          showNativeSession={menuUsesExternalAgent}
+          nativeSessionId={menuNativeSessionId}
+          nativeSessionLoading={menuNativeSessionLoading}
           onRegenerateTitle={() => void onRegenerateConversationTitle(menuConversation.id)}
-          onTogglePin={() =>
-            void onTogglePinConversation(menuConversation.id, !menuConversation.pinned)
-          }
           onExport={() => void onExportConversation(menuConversation.id, menuConversation.title)}
           onMoveToProject={(projectId) => void onMoveConversationToProject(menuConversation.id, projectId)}
           onMoveToSet={(setId) => void onMoveConversationToSet(menuConversation.id, setId)}

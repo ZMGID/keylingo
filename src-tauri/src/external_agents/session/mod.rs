@@ -277,6 +277,34 @@ pub fn load_live_handle(app: &AppHandle, conversation_id: &str) -> Option<LiveSe
     serde_json::from_str(&raw).ok()
 }
 
+/// Prefer the live handle (current binding); Claude's older `{conversation_id}.json` is fallback.
+pub fn bound_native_session_id(app: &AppHandle, conversation_id: &str) -> Option<String> {
+    pick_bound_native_session_id(
+        load_live_handle(app, conversation_id)
+            .as_ref()
+            .map(|handle| handle.native_id.as_str()),
+        load_session(app, conversation_id)
+            .as_ref()
+            .map(|session| session.session_id.as_str()),
+    )
+}
+
+pub(crate) fn pick_bound_native_session_id(
+    live_native_id: Option<&str>,
+    stored_session_id: Option<&str>,
+) -> Option<String> {
+    live_native_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            stored_session_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+}
+
 pub fn find_live_binding_by_native_path(
     app: &AppHandle,
     native_path: &std::path::Path,
@@ -391,5 +419,18 @@ mod live_handle_tests {
         assert!(!stored.can_resume("codex", "acp_json_rpc"));
         stored.native_id.clear();
         assert!(!stored.can_resume("codex", "codex_app_server"));
+    }
+
+    #[test]
+    fn bound_id_prefers_live_handle_over_stored_session() {
+        assert_eq!(
+            super::pick_bound_native_session_id(Some(" thr_live "), Some("old")),
+            Some("thr_live".into())
+        );
+        assert_eq!(
+            super::pick_bound_native_session_id(Some("  "), Some("ses_claude")),
+            Some("ses_claude".into())
+        );
+        assert!(super::pick_bound_native_session_id(None, None).is_none());
     }
 }

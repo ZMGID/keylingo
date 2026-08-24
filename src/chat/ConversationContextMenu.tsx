@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronRight, Download, Folder, Layers, Pencil, Pin, PinOff, RotateCcw, Trash2 } from 'lucide-react'
+import { ChevronRight, Copy, Download, Folder, Hash, Layers, RotateCcw, Trash2 } from 'lucide-react'
 import { i18n, type Lang } from '../settings/i18n'
 import type { ChatProject, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
@@ -16,15 +16,15 @@ interface ConversationContextMenuProps {
   conversationFolder?: string
   conversationProjectId?: string | null
   conversationSetId?: string | null
-  pinned?: boolean
   projects: ChatProject[]
   sets: ChatSet[]
   lang: Lang
   canRegenerateTitle?: boolean
   regeneratingTitle?: boolean
-  onRename: () => void
+  showNativeSession?: boolean
+  nativeSessionId?: string | null
+  nativeSessionLoading?: boolean
   onRegenerateTitle: () => void
-  onTogglePin?: () => void
   onExport: () => void
   onMoveToProject: (projectId: string | undefined) => void
   onMoveToSet: (setId: string | undefined) => void
@@ -32,20 +32,25 @@ interface ConversationContextMenuProps {
   onClose: () => void
 }
 
+function shortNativeId(id: string): string {
+  if (id.length <= 22) return id
+  return `${id.slice(0, 8)}…${id.slice(-6)}`
+}
+
 export function ConversationContextMenu({
   anchor,
   conversationFolder,
   conversationProjectId,
   conversationSetId,
-  pinned = false,
   projects,
   sets,
   lang,
   canRegenerateTitle = true,
   regeneratingTitle = false,
-  onRename,
+  showNativeSession = false,
+  nativeSessionId = null,
+  nativeSessionLoading = false,
   onRegenerateTitle,
-  onTogglePin,
   onExport,
   onMoveToProject,
   onMoveToSet,
@@ -88,19 +93,6 @@ export function ConversationContextMenu({
         type="button"
         role="menuitem"
         className="kv-menu-item"
-        onClick={() => {
-          onRename()
-          onClose()
-        }}
-      >
-        <Pencil strokeWidth={1.75} />
-        {t.chatRename}
-      </button>
-
-      <button
-        type="button"
-        role="menuitem"
-        className="kv-menu-item"
         disabled={!canRegenerateTitle || regeneratingTitle}
         onClick={() => {
           onRegenerateTitle()
@@ -110,21 +102,6 @@ export function ConversationContextMenu({
         <RotateCcw strokeWidth={1.75} />
         {t.chatRegenerateTitle}
       </button>
-
-      {onTogglePin && (
-        <button
-          type="button"
-          role="menuitem"
-          className="kv-menu-item"
-          onClick={() => {
-            onTogglePin()
-            onClose()
-          }}
-        >
-          {pinned ? <PinOff strokeWidth={1.75} /> : <Pin strokeWidth={1.75} />}
-          {pinned ? t.chatUnpin : t.chatPin}
-        </button>
-      )}
 
       <div className="group/sub relative">
         <button
@@ -267,6 +244,36 @@ export function ConversationContextMenu({
         <Trash2 strokeWidth={1.75} />
         {t.chatDelete}
       </button>
+
+      {showNativeSession && (
+        <>
+          <div className="my-1 border-t border-neutral-200/80 dark:border-neutral-700" />
+          <button
+            type="button"
+            role="menuitem"
+            className="kv-menu-item"
+            disabled={!nativeSessionId}
+            title={nativeSessionId ? t.chatNativeSessionCopy : undefined}
+            onClick={() => {
+              if (!nativeSessionId) return
+              void navigator.clipboard.writeText(nativeSessionId)
+              onClose()
+            }}
+          >
+            {nativeSessionId ? <Copy strokeWidth={1.75} /> : <Hash strokeWidth={1.75} />}
+            <span className="min-w-0 flex-1 truncate">
+              {t.chatNativeSessionId}
+              <span className="ml-1.5 font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
+                {nativeSessionLoading
+                  ? '…'
+                  : nativeSessionId
+                    ? shortNativeId(nativeSessionId)
+                    : t.chatNativeSessionUnbound}
+              </span>
+            </span>
+          </button>
+        </>
+      )}
     </div>
   )
 

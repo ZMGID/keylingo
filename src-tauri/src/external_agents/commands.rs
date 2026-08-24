@@ -594,3 +594,12 @@ pub async fn chat_import_cli_sessions(
 pub fn chat_imported_history_stale(app: AppHandle, conversation_id: String) -> bool {
     crate::external_agents::import::imported_history_is_stale(&app, &conversation_id)
 }
+
+/// 本地 CLI 对话绑定的原生会话 id（live handle，否则 Claude 的 `{id}.json`）。
+#[tauri::command]
+pub fn chat_external_native_session_id(
+    app: AppHandle,
+    conversation_id: String,
+) -> Option<String> {
+    crate::external_agents::session::bound_native_session_id(&app, &conversation_id)
+}

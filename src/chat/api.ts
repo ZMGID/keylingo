@@ -2328,4 +2328,11 @@ export const chatApi = {
     if (!isTauriRuntime()) return false
     return invoke<boolean>('chat_imported_history_stale', { conversationId })
   },
+
+  /** 本地 CLI 对话绑定的原生会话 id；未聊过 / 无绑定文件时为 null。 */
+  async getExternalNativeSessionId(conversationId: string): Promise<string | null> {
+    if (!isTauriRuntime()) return null
+    const id = await invoke<string | null>('chat_external_native_session_id', { conversationId })
+    return id && id.trim() ? id : null
+  },
 }

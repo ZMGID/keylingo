@@ -7,7 +7,13 @@ function renderMenu(
   lang: 'zh' | 'en',
   onExport = vi.fn(),
   onClose = vi.fn(),
-  extra: { onRegenerateTitle?: () => void; canRegenerateTitle?: boolean } = {},
+  extra: {
+    onRegenerateTitle?: () => void
+    canRegenerateTitle?: boolean
+    showNativeSession?: boolean
+    nativeSessionId?: string | null
+    nativeSessionLoading?: boolean
+  } = {},
 ) {
   render(
     <ConversationContextMenu
@@ -15,7 +21,6 @@ function renderMenu(
       projects={[]}
       sets={[]}
       lang={lang}
-      onRename={vi.fn()}
       canRegenerateTitle={extra.canRegenerateTitle}
       onRegenerateTitle={extra.onRegenerateTitle ?? vi.fn()}
       onExport={onExport}
@@ -23,6 +28,9 @@ function renderMenu(
       onMoveToSet={vi.fn()}
       onDelete={vi.fn()}
       onClose={onClose}
+      showNativeSession={extra.showNativeSession}
+      nativeSessionId={extra.nativeSessionId}
+      nativeSessionLoading={extra.nativeSessionLoading}
     />,
   )
   return { onExport, onClose, onRegenerateTitle: extra.onRegenerateTitle }
@@ -63,5 +71,46 @@ describe('ConversationContextMenu regenerate title', () => {
   it('disables regenerate when the conversation has no messages', () => {
     renderMenu('zh', vi.fn(), vi.fn(), { canRegenerateTitle: false })
     expect(screen.getByRole('menuitem', { name: '重新生成标题' })).toBeDisabled()
+  })
+})
+
+describe('ConversationContextMenu removed actions', () => {
+  it('does not offer rename or pin', () => {
+    renderMenu('zh')
+    expect(screen.queryByRole('menuitem', { name: '重命名' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: '置顶聊天' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /原生会话/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('ConversationContextMenu native session', () => {
+  it('shows the unbound native session id for local CLI conversations', () => {
+    renderMenu('zh', vi.fn(), vi.fn(), { showNativeSession: true, nativeSessionId: null })
+    const item = screen.getByRole('menuitem', { name: /原生会话/ })
+    expect(item).toHaveTextContent('尚未绑定')
+    expect(item).toBeDisabled()
+  })
+
+  it('copies the bound native session id', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const onClose = vi.fn()
+    const sessionId = '0194abcd-61e2-7113-b077-58d3d91fb3d7'
+    renderMenu('zh', vi.fn(), onClose, { showNativeSession: true, nativeSessionId: sessionId })
+    await user.click(screen.getByRole('menuitem', { name: /原生会话/ }))
+    expect(writeText).toHaveBeenCalledWith(sessionId)
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  })
+
+  it('renders the English native session label', () => {
+    renderMenu('en', vi.fn(), vi.fn(), {
+      showNativeSession: true,
+      nativeSessionId: 'thr_live',
+    })
+    expect(screen.getByRole('menuitem', { name: /Native session/ })).toBeInTheDocument()
   })
 })
