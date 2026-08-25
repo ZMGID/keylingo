@@ -274,13 +274,71 @@ describe('MessageBubble timeline grouping', () => {
     }
 
     render(<MessageBubble message={message} />)
-    expect(screen.getByText(/读取 1 个文件/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Worked/ })).toBeInTheDocument()
     // collapsed historical groups keep only the summary mounted
     expect(screen.getByLabelText('过程分组')).toHaveAttribute('aria-label', '过程分组')
     expect(screen.queryByText('planning')).not.toBeInTheDocument()
     expect(screen.queryByText('read_file')).not.toBeInTheDocument()
     // final answer text still renders
     expect(screen.getByText('answer')).toBeInTheDocument()
+  })
+
+  it('uses a Worked-for duration title when tool timestamps are present', () => {
+    const message: ChatMessage = {
+      id: 'msg-worked',
+      role: 'assistant',
+      content: 'answer',
+      segments: [
+        { id: 'seg-t', kind: 'tool', phase: 'tool_loop', order: 1, tool_call_id: 'tool-1' },
+        { id: 'seg-text', kind: 'text', phase: 'synthesis', order: 2, text: 'answer' },
+      ],
+      tool_calls: [
+        {
+          id: 'tool-1',
+          name: 'read_file',
+          source: 'native',
+          status: 'completed',
+          started_at: 1_700_000_000,
+          completed_at: 1_700_000_012,
+        },
+      ],
+      timestamp: 1,
+    }
+
+    render(<MessageBubble message={message} />)
+    expect(screen.getByRole('button', { name: /Worked for 12s/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('answer')).toBeInTheDocument()
+  })
+
+  it('folds tool-loop commentary into the collapsed working shell', async () => {
+    const user = userEvent.setup()
+    const message: ChatMessage = {
+      id: 'msg-commentary',
+      role: 'assistant',
+      content: 'answer',
+      segments: [
+        { id: 'seg-t', kind: 'tool', phase: 'tool_loop', order: 1, tool_call_id: 'tool-1' },
+        { id: 'seg-note', kind: 'text', phase: 'tool_loop', order: 2, text: 'looking around' },
+        { id: 'seg-text', kind: 'text', phase: 'synthesis', order: 3, text: 'answer' },
+      ],
+      tool_calls: [
+        {
+          id: 'tool-1',
+          name: 'read_file',
+          source: 'native',
+          status: 'completed',
+        },
+      ],
+      timestamp: 1,
+    }
+
+    render(<MessageBubble message={message} />)
+    expect(screen.queryByText('looking around')).not.toBeInTheDocument()
+    expect(screen.getByText('answer')).toBeInTheDocument()
+    expect(screen.getAllByLabelText('过程分组')).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: /Worked/ }))
+    expect(screen.getByText('looking around')).toBeInTheDocument()
   })
 
   it('mounts completed group details only after the user expands it', async () => {
@@ -307,7 +365,7 @@ describe('MessageBubble timeline grouping', () => {
     }
 
     render(<MessageBubble message={message} />)
-    const toggle = screen.getByRole('button', { name: /读取 1 个文件/ })
+    const toggle = screen.getByRole('button', { name: /Worked/ })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('planning details')).not.toBeInTheDocument()
     expect(screen.queryByText('read_file')).not.toBeInTheDocument()
@@ -367,7 +425,7 @@ describe('MessageBubble timeline grouping', () => {
 
     render(<MessageBubble message={message} />)
 
-    expect(screen.getByRole('button', { name: /编辑 20 个文件/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /Worked/ })).toHaveAttribute(
       'aria-expanded',
       'false',
     )
@@ -375,13 +433,13 @@ describe('MessageBubble timeline grouping', () => {
     expect(screen.queryByText('diff payload 0')).not.toBeInTheDocument()
     expect(screen.getByText('final answer')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /编辑 20 个文件/ }))
+    await user.click(screen.getByRole('button', { name: /Worked/ }))
 
     expect(screen.getAllByText('Write')).toHaveLength(toolCount)
     expect(screen.getAllByText('file-0.ts').length).toBeGreaterThan(0)
   })
 
-  it('renders tool → text → tool as two separate groups', () => {
+  it('renders tool → text → tool as one working shell', () => {
     const message: ChatMessage = {
       id: 'msg-3',
       role: 'assistant',
@@ -399,8 +457,8 @@ describe('MessageBubble timeline grouping', () => {
     }
 
     render(<MessageBubble message={message} />)
-    expect(screen.getAllByLabelText('过程分组')).toHaveLength(2)
-    expect(screen.getByText('middle')).toBeInTheDocument()
+    expect(screen.getAllByLabelText('过程分组')).toHaveLength(1)
+    expect(screen.queryByText('middle')).not.toBeInTheDocument()
   })
 
   it('keeps the last group expanded while the message is streaming', () => {
@@ -424,10 +482,10 @@ describe('MessageBubble timeline grouping', () => {
     }
 
     render(<MessageBubble message={message} messageStreaming />)
-    expect(screen.getByText(/执行 1 条命令/)).toBeInTheDocument()
+    expect(screen.getByText('Working')).toBeInTheDocument()
     // 展开态：组内工具块细节仍渲染（动词 Run）
     expect(screen.getByText('Run')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /执行 1 条命令/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Working' })).toHaveAttribute(
       'aria-expanded',
       'true',
     )
@@ -456,7 +514,7 @@ describe('MessageBubble timeline grouping', () => {
 
     expect(screen.queryByText('live details')).not.toBeInTheDocument()
     expect(screen.queryByText('Run')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /执行 1 条命令/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /Worked/ })).toHaveAttribute(
       'aria-expanded',
       'false',
     )
@@ -469,11 +527,18 @@ describe('MessageBubble timeline grouping', () => {
       content: '',
       segments: [
         { id: 'g1', kind: 'tool', phase: 'tool_loop', order: 1, tool_call_id: 'c1' },
-        { id: 'txt', kind: 'text', phase: 'plain', order: 2, text: 'middle' },
+        { id: 'present', kind: 'tool', phase: 'tool_loop', order: 2, tool_call_id: 'present-1' },
         { id: 'g2', kind: 'tool', phase: 'tool_loop', order: 3, tool_call_id: 'c2' },
       ],
       tool_calls: [
         { id: 'c1', name: 'run_command', source: 'native', status: 'completed' },
+        {
+          id: 'present-1',
+          name: 'present_artifacts',
+          source: 'native',
+          status: 'completed',
+          structured_content: { type: 'artifact_presentation', artifactIds: [] },
+        },
         { id: 'c2', name: 'web_fetch', source: 'native', status: 'running' },
       ],
       timestamp: 1,
@@ -482,12 +547,12 @@ describe('MessageBubble timeline grouping', () => {
     render(<MessageBubble message={message} messageStreaming />)
     const groups = screen.getAllByLabelText('过程分组')
     expect(groups).toHaveLength(2)
-    // 前组（被正文打断、非末组）折叠；末组展开
-    expect(screen.getByRole('button', { name: /执行 1 条命令/ })).toHaveAttribute(
+    // standalone 产物卡打断分组：前组折叠，末组展开
+    expect(screen.getByRole('button', { name: /Worked/ })).toHaveAttribute(
       'aria-expanded',
       'false',
     )
-    expect(screen.getByRole('button', { name: /正在读取 1 个网页/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Working' })).toHaveAttribute(
       'aria-expanded',
       'true',
     )
@@ -509,7 +574,7 @@ describe('MessageBubble timeline grouping', () => {
 
     // messageStreaming 默认 false（历史消息）→ 末组也折叠
     render(<MessageBubble message={message} />)
-    expect(screen.getByRole('button', { name: /执行 1 条命令/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: /Worked/ })).toHaveAttribute(
       'aria-expanded',
       'false',
     )

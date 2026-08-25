@@ -1,28 +1,15 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
-  Bot,
-  Brain,
   Check,
+  ChevronRight,
   Copy,
   CornerDownRight,
-  FilePen,
-  FileSearch,
-  FileText,
-  FolderInput,
-  FolderOpen,
-  Globe,
   GitBranch,
-  ImagePlus,
   ListChecks,
   Play,
-  Plug,
   RotateCcw,
-  ScrollText,
-  Search,
-  SquareTerminal,
 } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
 import { Button, IconButton } from '../components/Button'
 import { copyToClipboard } from '../utils/clipboard'
 import { AssistantMessageMeta } from './AssistantMessageMeta'
@@ -46,7 +33,10 @@ import type { AgentPlanState, ChatMessage, ChatMessageSegment, ChatToolArtifact,
 import { buildCitationMap, type CitationView } from './citations'
 import {
   compareTimelineSegments,
+  formatWorkDuration,
   groupTimelineSegments,
+  groupWorkDurationMs,
+  isProcessCommentaryText,
   isStandaloneToolCard,
   isUserFollowUpToolCall,
   isUserSteerToolCall,
@@ -56,7 +46,7 @@ import {
   userFollowUpText,
   userSteerText,
 } from './segments'
-import type { TimelineGroupItem, ToolGroupIcon } from './segments'
+import type { TimelineGroupItem } from './segments'
 
 const DIRECT_IMAGE_GENERATION_PENDING = '[[KIVIO_DIRECT_IMAGE_GENERATION_PENDING]]'
 
@@ -451,15 +441,17 @@ function TimelineTextSegment({
   artifacts,
   citations,
   conversationId,
+  process = false,
 }: {
   segment: ChatMessageSegment
   artifacts: ChatToolArtifact[]
   citations?: Map<number, CitationView>
   conversationId?: string | null
+  process?: boolean
 }) {
   const text = segmentText(segment).trim()
   if (!text) return null
-  const isProcessText = segment.phase === 'tool_loop' || segment.phase === 'auxiliary'
+  const isProcessText = process || isProcessCommentaryText(segment)
   return (
     <div className={isProcessText ? 'text-neutral-600 dark:text-neutral-300' : undefined}>
       <ChatMarkdown
@@ -529,30 +521,8 @@ function TimelineSegmentNode({
       artifacts={artifacts}
       citations={citations}
       conversationId={conversationId}
+      process
     />
-  )
-}
-
-function TimelineStepsIcon({ size = 16, className }: { size?: number; className?: string }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-    >
-      <circle cx="3.5" cy="4" r="1.6" />
-      <circle cx="3.5" cy="12" r="1.6" />
-      <path d="M3.5 5.6v4.8" />
-      <path d="M8 4h5" />
-      <path d="M8 12h3.5" />
-    </svg>
   )
 }
 
@@ -584,42 +554,18 @@ function TimelineSpinner({ size = 16, className }: { size?: number; className?: 
   )
 }
 
-/**
- * 分组头折叠态图标：按摘要代表类别选 lucide 图标，与 ToolCallBlock 的单工具图标观感一致。
- * `other`（通用/混合兜底）保留自绘 TimelineStepsIcon。
- */
-const GROUP_ICON_BY_CATEGORY: Record<
-  ToolGroupIcon,
-  LucideIcon | typeof TimelineStepsIcon
-> = {
-  read: FileText,
-  codeSearch: Search,
-  globFiles: FileSearch,
-  fileWrite: FilePen,
-  runCommand: SquareTerminal,
-  webFetch: Globe,
-  webSearch: Search,
-  listDir: FolderOpen,
-  fileOps: FolderInput,
-  todo: ListChecks,
-  memory: Brain,
-  subAgent: Bot,
-  skill: ScrollText,
-  image: ImagePlus,
-  notion: Plug,
-  mcp: Plug,
-  reasoning: Brain,
-  other: TimelineStepsIcon,
+function workingGroupTitle(generating: boolean, durationMs: number | null): string {
+  if (generating) return 'Working'
+  if (durationMs != null && durationMs > 0) return `Worked for ${formatWorkDuration(durationMs)}`
+  return 'Worked'
 }
 
 /**
- * 一组「连续的 thinking + tool 段」= 单一可折叠单元。
- * - 「生成中」= 这条消息还在流式生成、且这是末组（messageStreaming && isLastGroup）：
- *   始终保持展开，不受工具间隙/reasoning 是否在流影响，避免抖动。
- * - 后面出现正文/别的块（非末组）或消息流式结束（含历史消息）→ 折叠成一行摘要。
- * - 用户手动点过开关后以用户操作为准（userToggledRef，参考 ReasoningBlock）。
- * - 历史折叠态只保留摘要 header，不挂载组内 ReasoningBlock / ToolCallBlock；
- *   展开后再原样平铺，避免重历史消息默认挂满工具/Markdown/Diff 子树。
+ * 一轮过程 = 一个 Codex 式 Working 壳。
+ * - 「生成中」= 这条消息还在流式、且这是末组：始终展开，避免抖动。
+ * - 后面出现终稿/standalone（非末组）或流式结束 → 收成一行 Worked for Xs。
+ * - 用户手动点过开关后以用户操作为准（userToggledRef）。
+ * - 折叠态只留 header，不挂组内 ReasoningBlock / ToolCallBlock / 过程旁白。
  */
 function TimelineGroupBlock({
   segments,
@@ -653,7 +599,11 @@ function TimelineGroupBlock({
     () => summarizeToolGroup(segments, toolCalls, toolCallById),
     [segments, toolCalls, toolCallById],
   )
-  const SummaryIcon = GROUP_ICON_BY_CATEGORY[summary.icon]
+  const durationMs = useMemo(
+    () => groupWorkDurationMs(segments, toolCalls, toolCallById, reasoningDurationMs),
+    [segments, toolCalls, toolCallById, reasoningDurationMs],
+  )
+  const title = workingGroupTitle(generating, durationMs)
   const [open, setOpen] = useState(generating)
   const userToggledRef = useRef(false)
 
@@ -685,7 +635,13 @@ function TimelineGroupBlock({
         {generating ? (
           <TimelineSpinner size={16} className="shrink-0 text-neutral-400 dark:text-neutral-500" />
         ) : (
-          <SummaryIcon size={16} className="shrink-0" />
+          <ChevronRight
+            size={14}
+            strokeWidth={2}
+            className={`shrink-0 transition-transform duration-[var(--kv-dur-fast)] ease-[var(--kv-ease-out)] ${
+              renderDetails ? 'rotate-90' : ''
+            }`}
+          />
         )}
         <div className="flex min-w-0 items-center gap-1.5">
           <span
@@ -693,20 +649,12 @@ function TimelineGroupBlock({
               generating ? 'chat-motion-tool-shimmer' : ''
             }`}
           >
-            {summary.text}
+            {title}
           </span>
           {summary.diffStats && (
             <span className="shrink-0 font-mono text-[11px] tabular-nums">
               <span className="text-emerald-600 dark:text-emerald-400">+{summary.diffStats.additions}</span>
               <span className="ml-1 text-red-500/80 dark:text-red-400/80">-{summary.diffStats.removals}</span>
-            </span>
-          )}
-          {summary.categories.length > 1 && (
-            <span className="flex shrink-0 items-center gap-1" aria-hidden="true">
-              {summary.categories.map((category) => {
-                const CategoryIcon = GROUP_ICON_BY_CATEGORY[category]
-                return <CategoryIcon key={category} size={14} />
-              })}
             </span>
           )}
         </div>

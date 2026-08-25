@@ -291,31 +291,55 @@ export type TimelineGroupItem =
   | { type: 'group'; segments: ChatMessageSegment[] }
   | { type: 'standaloneTool'; segment: ChatMessageSegment }
 
+/** Codex commentary：工具循环旁白，进 Working 壳，不是终稿。 */
+export function isProcessCommentaryText(segment: ChatMessageSegment): boolean {
+  return segment.kind === 'text' && (segment.phase === 'tool_loop' || segment.phase === 'auxiliary')
+}
+
+function isGroupableProcess(
+  segment: ChatMessageSegment,
+  isStandalone?: (segment: ChatMessageSegment) => boolean,
+): boolean {
+  if (segment.kind === 'reasoning') return true
+  if (segment.kind === 'tool') return !isStandalone?.(segment)
+  return isProcessCommentaryText(segment)
+}
+
 /**
- * 以正文(text)段为分隔，把两条正文之间连续的非 text 段（reasoning + tool）聚成一个组。
- * - 纯函数：输入有序 segments → 输出渲染项数组，便于单测。
- * - text 段单独成项（原样渲染正文），永远打断分组。
- * - `tool → text → tool` ⇒ 两个组。
- * - 空白 reasoning/text 段先过滤，避免产生空组或多余分隔。
- * - `isStandalone(segment)` 命中的 tool 段（如 advisor / subagent）像 text 一样单独成项、
- *   打断分组，交给调用方以专属卡片常驻渲染（不被折叠进「调用 N 次工具」组）。
+ * 把一轮里的过程收进 Working 组，终稿留在外面（对标 Codex App 的 Working / Worked for）。
+ * - 过程：reasoning、非 standalone 的 tool、`tool_loop`/`auxiliary` 正文，以及后面还有过程的
+ *   `plain`/`synthesis` 旁白（模型在工具之间写的话）。
+ * - 终稿：最后一个过程之后的 `plain`/`synthesis` 正文，始终展开。
+ * - `isStandalone` 命中的 tool（ask_user / subagent / 产物卡）常驻打断，不进壳。
+ * - 空白 reasoning/text 先过滤，避免空组或假分隔。
  */
 export function groupTimelineSegments(
   orderedSegments: ChatMessageSegment[],
   isStandalone?: (segment: ChatMessageSegment) => boolean,
 ): TimelineGroupItem[] {
+  let lastProcessIndex = -1
+  for (let index = 0; index < orderedSegments.length; index++) {
+    const segment = orderedSegments[index]
+    if (!segmentHasContent(segment)) continue
+    if (isGroupableProcess(segment, isStandalone)) lastProcessIndex = index
+  }
+
   const items: TimelineGroupItem[] = []
   let current: ChatMessageSegment[] | null = null
-  for (const segment of orderedSegments) {
+  for (let index = 0; index < orderedSegments.length; index++) {
+    const segment = orderedSegments[index]
     if (!segmentHasContent(segment)) continue
-    if (segment.kind === 'text') {
-      current = null
-      items.push({ type: 'text', segment })
-      continue
-    }
     if (segment.kind === 'tool' && isStandalone?.(segment)) {
       current = null
       items.push({ type: 'standaloneTool', segment })
+      continue
+    }
+    const foldText =
+      segment.kind === 'text' &&
+      (isProcessCommentaryText(segment) || index < lastProcessIndex)
+    if (segment.kind === 'text' && !foldText) {
+      current = null
+      items.push({ type: 'text', segment })
       continue
     }
     if (!current) {
@@ -325,6 +349,66 @@ export function groupTimelineSegments(
     current.push(segment)
   }
   return items
+}
+
+/** 后端 `started_at` 是 unix 秒；个别路径会写毫秒。 */
+function timestampToMs(value: number): number {
+  return value < 1e12 ? value * 1000 : value
+}
+
+function matchedGroupTools(
+  segments: ChatMessageSegment[],
+  toolCalls: ToolCallRecord[],
+  toolCallById?: ReadonlyMap<string, ToolCallRecord>,
+): ToolCallRecord[] {
+  const matched: ToolCallRecord[] = []
+  for (const segment of segments) {
+    if (segment.kind !== 'tool') continue
+    const id = segmentToolCallId(segment)
+    const record = toolCallById
+      ? toolCallById.get(id)
+      : toolCalls.find((tool) => toolRecordId(tool) === id)
+    if (record) matched.push(record)
+  }
+  return matched
+}
+
+/**
+ * 一组过程的墙钟耗时（Codex「Worked for Xs」）。
+ * 取组内工具最早 start → 最晚 complete；没有时间戳时回退思考耗时。
+ */
+export function groupWorkDurationMs(
+  segments: ChatMessageSegment[],
+  toolCalls: ToolCallRecord[],
+  toolCallById?: ReadonlyMap<string, ToolCallRecord>,
+  reasoningDurationMs?: number | null,
+): number | null {
+  let minStart: number | null = null
+  let maxEnd: number | null = null
+  for (const tool of matchedGroupTools(segments, toolCalls, toolCallById)) {
+    const start = tool.started_at ?? tool.startedAt
+    const end = tool.completed_at ?? tool.completedAt
+    if (typeof start === 'number') {
+      minStart = minStart == null ? start : Math.min(minStart, start)
+    }
+    if (typeof end === 'number') {
+      maxEnd = maxEnd == null ? end : Math.max(maxEnd, end)
+    }
+  }
+  if (minStart != null && maxEnd != null && maxEnd >= minStart) {
+    const delta = timestampToMs(maxEnd) - timestampToMs(minStart)
+    if (delta > 0) return delta
+  }
+  if (reasoningDurationMs != null && reasoningDurationMs > 0) return reasoningDurationMs
+  return null
+}
+
+export function formatWorkDuration(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000))
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
 }
 
 export type ToolGroupCategory =
@@ -508,14 +592,7 @@ export function summarizeToolGroup(
   const toolSegments = segments.filter((segment) => segment.kind === 'tool')
   // 「步数」按工具步计；纯 reasoning 组（无工具）回退到总段数。
   const stepCount = toolSegments.length || segments.length
-  const matchedTools: ToolCallRecord[] = []
-  for (const segment of toolSegments) {
-    const id = segmentToolCallId(segment)
-    const record = toolCallById
-      ? toolCallById.get(id)
-      : toolCalls.find((tool) => toolRecordId(tool) === id)
-    if (record) matchedTools.push(record)
-  }
+  const matchedTools = matchedGroupTools(segments, toolCalls, toolCallById)
 
   const categories = matchedTools.map((tool) => categorizeTool(tool))
   const meaningful = meaningfulCategories(categories)
