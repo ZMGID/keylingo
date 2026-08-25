@@ -198,6 +198,7 @@ impl crate::chat::agent::AgentHost for ChatAgentHost<'_> {
 /// 消息内联读取，不靠事件）。generation 相关沿用标准机制，保证超时/取消能生效。
 #[cfg(debug_assertions)]
 pub(super) struct ProbeAgentHost<'a> {
+    pub(super) app: AppHandle,
     pub(super) state: &'a AppState,
 }
 
@@ -221,6 +222,32 @@ impl crate::chat::agent::AgentHost for ProbeAgentHost<'_> {
         _message_id: &str,
         _record: &ToolCallRecord,
     ) {
+    }
+
+    /// 与 GUI host 同一份草稿落盘(append-only 草稿日志)。probe 的定位是「和 chat 窗口
+    /// 完全相同的生成路径」,持久化侧路径也该一致,probe:e2e 才能覆盖草稿日志的生命周期。
+    fn persist_partial_assistant<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        message_id: &'a str,
+        tool_records: &'a [ToolCallRecord],
+        segments: &'a [ChatMessageSegment],
+        api_messages: &'a [Value],
+    ) -> crate::chat::agent::AgentHostFuture<'a, ()> {
+        Box::pin(async move {
+            if let Err(err) = persist_partial_assistant_snapshot(
+                &self.app,
+                conversation_id,
+                message_id,
+                tool_records,
+                segments,
+                api_messages,
+            )
+            .await
+            {
+                eprintln!("probe: persist partial assistant snapshot failed: {err}");
+            }
+        })
     }
 
     fn request_tool_approval<'a>(
