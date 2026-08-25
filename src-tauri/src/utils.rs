@@ -109,9 +109,13 @@ mod tests {
     fn official_deepseek_api_matches_host_only() {
         assert!(is_official_deepseek_api("https://api.deepseek.com"));
         assert!(is_official_deepseek_api("https://api.deepseek.com/v1"));
-        assert!(is_official_deepseek_api("https://api.deepseek.com/anthropic"));
+        assert!(is_official_deepseek_api(
+            "https://api.deepseek.com/anthropic"
+        ));
         assert!(!is_official_deepseek_api("https://docs.deepseek.com"));
-        assert!(!is_official_deepseek_api("https://relay.example/deepseek.com/v1"));
+        assert!(!is_official_deepseek_api(
+            "https://relay.example/deepseek.com/v1"
+        ));
         assert!(!is_official_deepseek_api("https://api.openai.com/v1"));
     }
 

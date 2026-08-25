@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 use kivio::chat::protocol::{
     ChatAskUserOptionPayload, ChatAskUserPromptPayload, ChatAskUserQuestionPayload,
     ChatCompactionBoundaryPayload, ChatCompactionSnapshot, ChatContextClearBoundaryPayload,
-    ChatContextStatePayload,
-    ChatContextSummaryPayload, ChatContextUsagePayload, ChatContextUsageSegmentPayload,
-    ChatConversationEvent, ChatConversationEventEnvelope, ChatFileLedgerPayload,
-    ChatPendingInteractionSnapshot, ChatPlanMode, ChatPlanStatePayload, ChatPlanStatus,
-    ChatProtocolEvent, ChatProtocolScope, ChatRunCursor, ChatRunEvent, ChatRunEventEnvelope,
-    ChatRunRecoveryMetadata, ChatRunSnapshot, ChatRunStatus, ChatRunSync, ChatSegmentKind,
-    ChatSegmentPayload, ChatSegmentPhase, ChatSubagentSnapshot, ChatSyncRequest, ChatSyncResult,
-    ChatTerminalSnapshot, ChatTodoItemPayload, ChatTodoStatePayload, ChatTodoStatus,
-    ChatToolArtifactPayload, ChatToolPayload, ChatWarningSnapshot, CHAT_PROTOCOL_VERSION,
+    ChatContextStatePayload, ChatContextSummaryPayload, ChatContextUsagePayload,
+    ChatContextUsageSegmentPayload, ChatConversationEvent, ChatConversationEventEnvelope,
+    ChatFileLedgerPayload, ChatPendingInteractionSnapshot, ChatPlanMode, ChatPlanStatePayload,
+    ChatPlanStatus, ChatProtocolEvent, ChatProtocolScope, ChatRunCursor, ChatRunEvent,
+    ChatRunEventEnvelope, ChatRunRecoveryMetadata, ChatRunSnapshot, ChatRunStatus, ChatRunSync,
+    ChatSegmentKind, ChatSegmentPayload, ChatSegmentPhase, ChatSubagentSnapshot, ChatSyncRequest,
+    ChatSyncResult, ChatTerminalSnapshot, ChatTodoItemPayload, ChatTodoStatePayload,
+    ChatTodoStatus, ChatToolArtifactPayload, ChatToolPayload, ChatWarningSnapshot,
+    CHAT_PROTOCOL_VERSION,
 };
 use schemars::schema_for;
 use serde_json::Value;

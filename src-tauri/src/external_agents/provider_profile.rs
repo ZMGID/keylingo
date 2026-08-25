@@ -3516,15 +3516,15 @@ max_context_size = 200000
 
     #[test]
     fn kivio_private_codex_home_is_the_materialized_dir() {
-        assert!(is_kivio_private_codex_home(Path::new(
-            r"C:\Users\me\AppData\Roaming\com.zmair.kivio\external-cli-providers\codex-relay"
-        )));
-        assert!(!is_kivio_private_codex_home(Path::new(
-            r"C:\Users\me\.codex"
-        )));
-        assert!(!is_kivio_private_codex_home(Path::new(
-            r"C:\Users\me\external-cli-providers\other"
-        )));
+        // Join so macOS CI Path semantics match Windows (`\` is not a separator on Unix).
+        let private = Path::new("com.zmair.kivio")
+            .join("external-cli-providers")
+            .join("codex-relay");
+        assert!(is_kivio_private_codex_home(&private));
+        assert!(!is_kivio_private_codex_home(Path::new(".codex")));
+        assert!(!is_kivio_private_codex_home(
+            &Path::new("external-cli-providers").join("other")
+        ));
     }
 
     #[test]

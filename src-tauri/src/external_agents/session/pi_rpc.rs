@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -1269,30 +1270,79 @@ pub fn is_missing_pi_session_error(err: &str) -> bool {
             || lower.contains("is gone"))
 }
 
-fn pi_native_session_present(session_id: &str) -> bool {
-    pi_session_file_candidates(session_id)
-        .into_iter()
-        .any(|path| path.is_file())
+fn pi_sessions_root() -> Option<PathBuf> {
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join(".pi").join("agent").join("sessions"))
 }
 
-fn pi_resume_is_live(bin: &Path, session_id: &str) -> bool {
+/// Pi CLI encodes cwd as `--${resolved.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`.
+fn encode_pi_session_cwd(cwd: &Path) -> String {
+    let text = cwd.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text.as_ref());
+    let stripped = text.trim_start_matches(['/', '\\']);
+    format!("--{}--", stripped.replace(['/', '\\', ':'], "-"))
+}
+
+fn pi_jsonl_matches_session(path: &Path, session_id: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if name == format!("{session_id}.jsonl") || name.ends_with(&format!("_{session_id}.jsonl")) {
+        return true;
+    }
+    name == "session.jsonl"
+        && path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some(session_id)
+}
+
+fn pi_native_session_present_in(
+    sessions_root: &Path,
+    session_id: &str,
+    cwd: Option<&Path>,
+) -> bool {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return false;
+    }
+    let mut dirs = Vec::new();
+    if let Some(cwd) = cwd {
+        dirs.push(sessions_root.join(encode_pi_session_cwd(cwd)));
+        if let Ok(canon) = cwd.canonicalize() {
+            let encoded = sessions_root.join(encode_pi_session_cwd(&canon));
+            if !dirs.iter().any(|dir| dir == &encoded) {
+                dirs.push(encoded);
+            }
+        }
+    }
+    dirs.push(sessions_root.to_path_buf());
+    dirs.push(sessions_root.join(session_id));
+    dirs.dedup();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        if entries.flatten().any(|entry| {
+            let path = entry.path();
+            path.is_file() && pi_jsonl_matches_session(&path, session_id)
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn pi_native_session_present(session_id: &str, cwd: &Path) -> bool {
+    pi_sessions_root()
+        .is_some_and(|root| pi_native_session_present_in(&root, session_id, Some(cwd)))
+}
+
+fn pi_resume_is_live(bin: &Path, session_id: &str, cwd: &Path) -> bool {
     // WSL Pi 把 JSONL 写在 Linux `$HOME/.pi`；Windows 的 `~/.pi` 探测看不见它。
     // 此时信任落盘的 native id，避免每次重连都被当成空白会话、把整段历史再灌进已续上的 JSONL。
-    crate::external_agents::wsl::is_wsl_target(bin) || pi_native_session_present(session_id)
-}
-
-fn pi_session_file_candidates(session_id: &str) -> Vec<PathBuf> {
-    let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) else {
-        return Vec::new();
-    };
-    let sessions = home.join(".pi").join("agent").join("sessions");
-    vec![
-        sessions.join(format!("{session_id}.jsonl")),
-        sessions.join(session_id).join("session.jsonl"),
-        sessions
-            .join(session_id)
-            .join(format!("{session_id}.jsonl")),
-    ]
+    crate::external_agents::wsl::is_wsl_target(bin) || pi_native_session_present(session_id, cwd)
 }
 
 /// A live Pi RPC connection. The actor owns the child process while stdin/stdout are shared with
@@ -1318,7 +1368,7 @@ impl PiRpcSession {
         // It can exist even when the regular binding was not flushed before a crash.
         let (effective_args, session_id, claimed_resume) =
             persistent_session_args(args, resume_native)?;
-        let resumed = claimed_resume && pi_resume_is_live(bin, &session_id);
+        let resumed = claimed_resume && pi_resume_is_live(bin, &session_id, cwd);
 
         let mut child = crate::external_agents::spawn::cli_command(bin)
             .args(&effective_args)
@@ -2893,18 +2943,63 @@ mod tests {
     #[test]
     fn missing_pi_session_file_is_not_a_successful_resume() {
         assert!(!pi_native_session_present(
-            "kivio-missing-session-id-for-test"
+            "kivio-missing-session-id-for-test",
+            Path::new(r"E:\ZM database\kivioC"),
         ));
         assert!(!pi_resume_is_live(
-            std::path::Path::new(r"C:\npm\pi.cmd"),
-            "kivio-missing-session-id-for-test"
+            Path::new(r"C:\npm\pi.cmd"),
+            "kivio-missing-session-id-for-test",
+            Path::new(r"E:\ZM database\kivioC"),
         ));
         assert!(pi_resume_is_live(
-            std::path::Path::new(r"\\wsl$\Ubuntu\usr\bin\pi"),
-            "kivio-missing-session-id-for-test"
+            Path::new(r"\\wsl$\Ubuntu\usr\bin\pi"),
+            "kivio-missing-session-id-for-test",
+            Path::new(r"E:\ZM database\kivioC"),
         ));
         assert!(is_missing_pi_session_error("Pi session \"abc\" not found"));
         assert!(!is_missing_pi_session_error("Pi RPC timed out"));
+    }
+
+    #[test]
+    fn encode_pi_session_cwd_matches_pi_cli() {
+        assert_eq!(
+            encode_pi_session_cwd(Path::new(r"E:\ZM database\kivioC")),
+            "--E--ZM database-kivioC--"
+        );
+        assert_eq!(
+            encode_pi_session_cwd(Path::new(
+                r"C:\Users\11028\AppData\Roaming\com.zmair.kivio\chat-workspaces\conv_7a684c05-38f0-484e-9b5c-3a38c2c38289"
+            )),
+            "--C--Users-11028-AppData-Roaming-com.zmair.kivio-chat-workspaces-conv_7a684c05-38f0-484e-9b5c-3a38c2c38289--"
+        );
+    }
+
+    #[test]
+    fn pi_native_session_present_finds_cwd_encoded_timestamp_jsonl() {
+        let root = std::env::temp_dir().join(format!(
+            "kivio-pi-sess-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let cwd = Path::new(r"E:\ZM database\kivioC");
+        let dir = root.join(encode_pi_session_cwd(cwd));
+        std::fs::create_dir_all(&dir).expect("session dir");
+        let id = "01a032ac-ca3e-74c1-86c8-97a023960553";
+        std::fs::write(
+            dir.join(format!("2026-08-24T07-29-39-902Z_{id}.jsonl")),
+            "{}\n",
+        )
+        .expect("jsonl");
+        assert!(pi_native_session_present_in(&root, id, Some(cwd)));
+        assert!(!pi_native_session_present_in(
+            &root,
+            id,
+            Some(Path::new(r"E:\other-project"))
+        ));
+        assert!(!pi_native_session_present_in(&root, "other-id", Some(cwd)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

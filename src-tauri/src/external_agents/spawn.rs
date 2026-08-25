@@ -74,12 +74,22 @@ fn apply_env_for_cli(command: &mut Command, program: &Path, key: &str, value: St
     command.env(key, value);
 }
 
-fn is_codex_cli_bin(bin: &Path) -> bool {
+fn cli_bin_stem(bin: &Path) -> Option<String> {
+    if let Some(target) = crate::external_agents::wsl::parse_wsl_target(bin) {
+        return Path::new(&target.linux_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string);
+    }
     bin.file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| {
-            stem.eq_ignore_ascii_case("codex") || stem.eq_ignore_ascii_case("codex-app-server")
-        })
+        .map(str::to_string)
+}
+
+fn is_codex_cli_bin(bin: &Path) -> bool {
+    cli_bin_stem(bin).is_some_and(|stem| {
+        stem.eq_ignore_ascii_case("codex") || stem.eq_ignore_ascii_case("codex-app-server")
+    })
 }
 
 /// WSL Codex 在没有私有 `CODEX_HOME` 时改读用户那份 `~/.codex`，否则会话写进 Linux 家目录，
@@ -691,11 +701,10 @@ mod tests {
         assert_eq!(&args[..5], ["-d", "Ubuntu", "-e", "/bin/bash", "-c"]);
         assert_eq!(args[6], "/usr/bin/claude");
         // 环境覆盖必须仍按原始二进制名 `claude` 查找，不能变成 `wsl`。
+        // UNC 在 Unix Path 里是单个分量，要用 linux 路径取 stem。
         assert_eq!(
-            std::path::Path::new(r"\\wsl$\Ubuntu\usr\bin\claude")
-                .file_stem()
-                .unwrap(),
-            "claude"
+            cli_bin_stem(Path::new(r"\\wsl$\Ubuntu\usr\bin\claude")).as_deref(),
+            Some("claude")
         );
     }
 

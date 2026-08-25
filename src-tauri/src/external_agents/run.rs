@@ -915,7 +915,7 @@ where
                 // Resume can fail during connect before the first turn: Claude reports a missing
                 // conversation on stderr; dsh returns `session \"...\" not found` from session/open.
                 // Clear the stale handle and retry fresh exactly once, with the normal reset notice.
-                Err(err) if !dropped_resume && is_missing_resume_target(&err) => {
+                Err(err) if !dropped_resume && is_missing_resume_target(&err, agent_id) => {
                     dropped_resume = true;
                     turn_args = drop_resume_for_fresh_session(
                         app,
@@ -1386,7 +1386,7 @@ fn persistent_failure_action(
     // resume 失效：**必须排在下面那条 auth / retried 之前**。它不是瞬时故障（重连同一份 argv
     // 一定再失败），也不是认证问题，而是一个有确定处置的状态：换个新会话继续。
     // 同样只降级一次 —— 摘掉 resume 之后还失败说明是别的原因。
-    if is_missing_resume_target(err) {
+    if is_missing_resume_target(err, agent_id) {
         return if dropped_resume {
             PersistentFailureAction::Fatal
         } else {
@@ -1407,12 +1407,27 @@ fn persistent_failure_action(
     }
 }
 
-fn is_missing_resume_target(err: &str) -> bool {
-    crate::external_agents::stream::claude::is_missing_session_error(err)
-        || crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
-        || crate::external_agents::session::pi_rpc::is_missing_pi_session_error(err)
-        || crate::external_agents::errors::is_missing_codex_thread_error(err)
-        || crate::external_agents::session::acp::is_missing_acp_session_error(err)
+fn is_missing_resume_target(err: &str, agent_id: &str) -> bool {
+    // Classifiers are per-protocol. OR-ing them let ACP's generic
+    // "session" + "not found" treat Claude/dsh noise as a resume miss.
+    match get_agent_def(agent_id).map(|def| def.stream_format) {
+        Some(StreamFormat::ClaudeStreamJson) => {
+            crate::external_agents::stream::claude::is_missing_session_error(err)
+        }
+        Some(StreamFormat::DshJsonRpc) => {
+            crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(err)
+        }
+        Some(StreamFormat::PiRpc) => {
+            crate::external_agents::session::pi_rpc::is_missing_pi_session_error(err)
+        }
+        Some(StreamFormat::CodexAppServer) => {
+            crate::external_agents::errors::is_missing_codex_thread_error(err)
+        }
+        Some(StreamFormat::AcpJsonRpc) => {
+            crate::external_agents::session::acp::is_missing_acp_session_error(err)
+        }
+        None => false,
+    }
 }
 
 /// resume 失效的降级：换一个新的原生会话 id，把它写进落盘记录，并返回改写后的启动参数。
@@ -2486,46 +2501,53 @@ async fn connect_persistent_session(
             })
         }
         StreamFormat::DshJsonRpc => {
-            // 与 ACP / codex 同口径：续接失败且目标原生会话已经不在，降级开新会话，
-            // 而不是把 session/open 的原文甩成一轮硬失败。resume mismatch / 其它握手错误
-            // 仍 fail-loud（那不是「会话没了」）。
-            let session = match DshJsonRpcSession::connect(
+            if let Some(sid) = resume_native
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                // Same contract as Codex / ACP: resume failure must surface. Swallowing
+                // `session/open` and creating a fresh `kivio-*` id made save_live_handle
+                // overwrite the real binding. Missing-session is classified one layer up.
+                let session = DshJsonRpcSession::connect(
+                    resolved_bin,
+                    args,
+                    cwd,
+                    Some(sid),
+                    model,
+                    reasoning,
+                    sandbox,
+                    preset,
+                )
+                .await
+                .map_err(|err| {
+                    eprintln!("[external-agent] dsh resume failed (session {sid}): {err}");
+                    err
+                })?;
+                let id = session.session_id().to_string();
+                let child_pid = session.child_pid();
+                return Ok(PersistentConnection {
+                    control: spawn_dsh_session_actor_with_sink(
+                        session,
+                        dsh_idle_sink,
+                        dsh_idle_approvals,
+                    ),
+                    native_id: id,
+                    resumed: true,
+                    child_pid,
+                });
+            }
+            let session = DshJsonRpcSession::connect(
                 resolved_bin,
                 args,
                 cwd,
-                resume_native.as_deref(),
+                None,
                 model,
                 reasoning,
                 sandbox,
                 preset,
             )
-            .await
-            {
-                Ok(session) => session,
-                Err(err)
-                    if resume_native.as_deref().is_some_and(|id| !id.trim().is_empty())
-                        && crate::external_agents::session::dsh_jsonrpc::is_missing_session_error(
-                            &err,
-                        ) =>
-                {
-                    eprintln!(
-                        "[external-agent] dsh resume failed (session {}), connecting fresh: {err}",
-                        resume_native.as_deref().unwrap_or("")
-                    );
-                    DshJsonRpcSession::connect(
-                        resolved_bin,
-                        args,
-                        cwd,
-                        None,
-                        model,
-                        reasoning,
-                        sandbox,
-                        preset,
-                    )
-                    .await?
-                }
-                Err(err) => return Err(err),
-            };
+            .await?;
             let id = session.session_id().to_string();
             let resumed = session.resumed();
             let child_pid = session.child_pid();
