@@ -510,7 +510,19 @@ impl ConversationRepository {
         let _barrier = self.barrier.read().await;
         let lock = self.conversation_lock(id);
         let _conversation = lock.lock().await;
-        let mut latest = super::storage::load_conversation(app, id)?;
+        // 整文件读取 + 反序列化移去阻塞线程池：多对话并发的工具轮里，这段同步 IO
+        // 直接跑在 async worker 上会把还在读 SSE / 发协议事件的 runtime 一起堵住。
+        let mut latest = {
+            let app = app.clone();
+            let id = id.to_string();
+            tauri::async_runtime::spawn_blocking(move || {
+                super::storage::load_conversation(&app, &id)
+            })
+            .await
+            .map_err(|error| {
+                ConversationRepositoryError::Storage(format!("load conversation join: {error}"))
+            })??
+        };
         validate_expected_revision(id, latest.revision, expected_revision)?;
         mutation(&mut latest)?;
         increment_revision(&mut latest)?;
@@ -518,27 +530,48 @@ impl ConversationRepository {
         self.persist_locked(app, latest).await
     }
 
+    /// pretty 序列化 + `atomic_write`（含 fsync）都是毫秒级同步 IO，全部走
+    /// `spawn_blocking`——锁的持有顺序（会话锁 → index_lock）不变，只是阻塞
+    /// 发生在阻塞线程池而不是 async worker 上。
     async fn persist_locked(
         &self,
         app: &AppHandle,
         conversation: Conversation,
     ) -> RepositoryResult<Conversation> {
-        let persisted = super::storage::write_conversation_file(app, &conversation)?;
+        let persisted = {
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                super::storage::write_conversation_file(&app, &conversation)
+            })
+            .await
+            .map_err(|error| {
+                ConversationRepositoryError::Storage(format!("write conversation join: {error}"))
+            })??
+        };
         let _index = self.index_lock.lock().await;
         // 读侧的 `load_index_or_scan` 只读不写（否则会绕开这把锁 lost update），所以残缺索引
         // 的落盘自愈只能在这里发生：这一步既拿到了对账过的索引，末尾的 save_index 又把它写回。
-        let mut index = super::storage::load_index_or_scan(app)?;
         let item = ConversationListItem::from(&persisted);
-        if let Some(position) = index
-            .conversations
-            .iter()
-            .position(|candidate| candidate.id == persisted.id)
         {
-            index.conversations[position] = item;
-        } else {
-            index.conversations.insert(0, item);
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+                let mut index = super::storage::load_index_or_scan(&app)?;
+                if let Some(position) = index
+                    .conversations
+                    .iter()
+                    .position(|candidate| candidate.id == item.id)
+                {
+                    index.conversations[position] = item;
+                } else {
+                    index.conversations.insert(0, item);
+                }
+                super::storage::save_index(&app, &index)
+            })
+            .await
+            .map_err(|error| {
+                ConversationRepositoryError::Storage(format!("save index join: {error}"))
+            })??;
         }
-        super::storage::save_index(app, &index)?;
         Ok(persisted)
     }
 

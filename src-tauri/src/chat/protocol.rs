@@ -15,6 +15,12 @@ const MAX_REPLAY_EVENTS: usize = 512;
 const MAX_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 const COMPLETED_RUN_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_COMPLETED_RUNS: usize = 32;
+/// Text/Reasoning delta 的合帧窗口。多对话并发时「每 token 一条 IPC 事件」是压垮
+/// WebView 主线程和协议锁的主因；窗口内的同段 delta 合并成一条再入库+emit。
+/// 前端渲染本身按 50–220ms 合帧，25ms 的后端窗口对观感不可见。
+const DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(25);
+/// 单条合帧缓冲的尺寸上限：SSE 偶发的大块（整段贴文）不该在缓冲里再攒一份。
+const DELTA_COALESCE_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -949,11 +955,46 @@ pub struct ChatSyncResult {
     pub runs: Vec<ChatRunSync>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingDeltaKind {
+    Text,
+    Reasoning,
+}
+
+/// 合帧缓冲：还没入库（没有 seq、不在 replay/snapshot 里）的流式增量。
+/// 只有「同 kind + 段 payload 完全相等」的连续 delta 会并进来，所以冲刷时
+/// 折叠结果与逐条入库逐字节一致。
+#[derive(Debug)]
+struct PendingDelta {
+    kind: PendingDeltaKind,
+    delta: String,
+    segment: Option<ChatSegmentPayload>,
+    buffered_at: Instant,
+}
+
+impl PendingDelta {
+    fn into_event(self) -> ChatRunEvent {
+        match self.kind {
+            PendingDeltaKind::Text => ChatRunEvent::TextDelta {
+                delta: self.delta,
+                segment: self.segment,
+            },
+            PendingDeltaKind::Reasoning => ChatRunEvent::ReasoningDelta {
+                delta: self.delta,
+                segment: self.segment,
+            },
+        }
+    }
+}
+
 struct RunState {
     snapshot: ChatRunSnapshot,
     replay: VecDeque<(usize, ChatRunEventEnvelope)>,
     replay_bytes: usize,
     terminal_at: Option<Instant>,
+    pending_delta: Option<PendingDelta>,
+    /// 已有一个延迟冲刷任务在飞，别再叠加计时器。
+    flush_scheduled: bool,
 }
 
 #[derive(Default)]
@@ -1034,6 +1075,8 @@ impl ChatProtocolHub {
                 replay: VecDeque::new(),
                 replay_bytes: 0,
                 terminal_at: None,
+                pending_delta: None,
+                flush_scheduled: false,
             },
         );
         self.push(run_id, ChatRunEvent::RunStarted { recovery })
@@ -1066,9 +1109,7 @@ impl ChatProtocolHub {
         if envelope.event.is_terminal() {
             run.terminal_at = Some(Instant::now());
         }
-        let bytes = serde_json::to_vec(&envelope)
-            .map(|value| value.len())
-            .unwrap_or(0);
+        let bytes = replay_bytes_estimate(&envelope);
         run.replay.push_back((bytes, envelope.clone()));
         run.replay_bytes = run.replay_bytes.saturating_add(bytes);
         while run.replay.len() > MAX_REPLAY_EVENTS || run.replay_bytes > MAX_REPLAY_BYTES {
@@ -1082,6 +1123,69 @@ impl ChatProtocolHub {
             self.prune();
         }
         Ok(envelope)
+    }
+
+    /// 把该 run 的合帧缓冲作为一条正式事件入库（拿 seq、进 replay/snapshot），
+    /// 返回待 emit 的 envelope。没有缓冲或 run 已不在时是 no-op。
+    fn flush_pending_delta(&mut self, run_id: &str) -> Option<ChatRunEventEnvelope> {
+        let pending = self.runs.get_mut(run_id)?.pending_delta.take()?;
+        self.push(run_id, pending.into_event()).ok()
+    }
+
+    /// 尝试把一条流式 delta 并入合帧缓冲。`Err` 把 delta 原样退回，让调用方走常规
+    /// `push`——run 不存在 / 已终态的错误信息是 push 的对外契约，不在这里复刻。
+    /// `Ok` 返回（需要立即 emit 的已入库事件, 是否要调度一次延迟冲刷）。
+    fn buffer_delta(
+        &mut self,
+        run_id: &str,
+        pending: PendingDelta,
+    ) -> Result<(Vec<ChatRunEventEnvelope>, bool), PendingDelta> {
+        let now = pending.buffered_at;
+        let (previous, flush_now, schedule_flush) = {
+            let Some(run) = self.runs.get_mut(run_id) else {
+                return Err(pending);
+            };
+            if run.terminal_at.is_some() {
+                return Err(pending);
+            }
+            let previous = match run.pending_delta.as_mut() {
+                Some(current)
+                    if current.kind == pending.kind && current.segment == pending.segment =>
+                {
+                    current.delta.push_str(&pending.delta);
+                    None
+                }
+                // 段位或种类切换：旧缓冲先按原顺序入库，再另起新缓冲。
+                _ => {
+                    let previous = run.pending_delta.take();
+                    run.pending_delta = Some(pending);
+                    previous
+                }
+            };
+            let current = run
+                .pending_delta
+                .as_ref()
+                .expect("pending delta was just set");
+            let flush_now = current.delta.len() >= DELTA_COALESCE_MAX_BYTES
+                || now.duration_since(current.buffered_at) >= DELTA_COALESCE_WINDOW;
+            let schedule_flush = !flush_now && !run.flush_scheduled;
+            if schedule_flush {
+                run.flush_scheduled = true;
+            }
+            (previous, flush_now, schedule_flush)
+        };
+        let mut envelopes = Vec::new();
+        if let Some(previous) = previous {
+            if let Ok(envelope) = self.push(run_id, previous.into_event()) {
+                envelopes.push(envelope);
+            }
+        }
+        if flush_now {
+            if let Some(envelope) = self.flush_pending_delta(run_id) {
+                envelopes.push(envelope);
+            }
+        }
+        Ok((envelopes, schedule_flush))
     }
 
     fn sync(&mut self, request: &ChatSyncRequest) -> ChatSyncResult {
@@ -1404,9 +1508,12 @@ fn upsert_segment(
 ) {
     let Some(segment) = segment else { return };
     if let Some(existing) = segments.iter_mut().find(|item| item.id == segment.id) {
-        let accumulated = existing.text.clone().unwrap_or_default();
+        // move + push_str，不 clone：clone+format 是 O(已累积长度)，长答案下每个
+        // delta 都整段拷贝，多对话并发时在协议锁内滚成显著 CPU。
+        let mut accumulated = existing.text.take().unwrap_or_default();
+        accumulated.push_str(delta);
         *existing = segment.clone();
-        existing.text = Some(format!("{accumulated}{delta}"));
+        existing.text = Some(accumulated);
     } else {
         let mut segment = segment.clone();
         let base = segment.text.take().unwrap_or_default();
@@ -1480,16 +1587,122 @@ pub fn emit_live_run_event(app: &AppHandle, conversation_id: &str, event: ChatRu
     );
 }
 
+/// replay 预算用的字节估算。delta 事件每秒成百上千条，为算长度整包 `serde_json::to_vec`
+/// 一遍纯属浪费——按字段长度估；低频事件（工具卡、终态携带全文）才实序列化拿准数。
+fn replay_bytes_estimate(envelope: &ChatRunEventEnvelope) -> usize {
+    const ENVELOPE_OVERHEAD: usize = 128;
+    const SEGMENT_OVERHEAD: usize = 160;
+    let base = ENVELOPE_OVERHEAD
+        + envelope.conversation_id.len()
+        + envelope.run_id.len()
+        + envelope.message_id.len();
+    match &envelope.event {
+        ChatRunEvent::TextDelta { delta, segment } | ChatRunEvent::ReasoningDelta { delta, segment } => {
+            let segment_bytes = segment.as_ref().map_or(0, |segment| {
+                SEGMENT_OVERHEAD
+                    + segment.id.len()
+                    + segment.text.as_ref().map_or(0, |text| text.len())
+            });
+            base + delta.len() + segment_bytes
+        }
+        _ => serde_json::to_vec(envelope)
+            .map(|value| value.len())
+            .unwrap_or(0)
+            .max(base),
+    }
+}
+
+/// 能进合帧缓冲的 delta 拆出来；其余事件原样退回。段 payload 自带 `text` 的 delta 不合
+/// 帧——fold 的 `ends_with` 去重语义对「合并后的 delta」不再成立，宁可单发。
+fn split_coalescible_delta(event: ChatRunEvent) -> Result<PendingDelta, ChatRunEvent> {
+    let has_inline_text = |segment: &Option<ChatSegmentPayload>| {
+        segment
+            .as_ref()
+            .is_some_and(|segment| segment.text.is_some())
+    };
+    match event {
+        ChatRunEvent::TextDelta { delta, segment } if !has_inline_text(&segment) => {
+            Ok(PendingDelta {
+                kind: PendingDeltaKind::Text,
+                delta,
+                segment,
+                buffered_at: Instant::now(),
+            })
+        }
+        ChatRunEvent::ReasoningDelta { delta, segment } if !has_inline_text(&segment) => {
+            Ok(PendingDelta {
+                kind: PendingDeltaKind::Reasoning,
+                delta,
+                segment,
+                buffered_at: Instant::now(),
+            })
+        }
+        other => Err(other),
+    }
+}
+
+/// 合帧窗口到点后的兜底冲刷：没有后续事件（模型停顿、流已结束但终态还没到）时，
+/// 缓冲里的尾巴也必须在 ~25ms 内上屏。
+fn schedule_delta_flush(app: &AppHandle, run_id: &str) {
+    let app = app.clone();
+    let run_id = run_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(DELTA_COALESCE_WINDOW).await;
+        let state = app.state::<AppState>();
+        // emit 必须在锁内：本任务与 emit_run_event 并发时，锁外 emit 会把已按 seq
+        // 入库的事件乱序发出（前端会误判丢事件、白触发一次 sync）。
+        let mut hub = state
+            .chat_protocol
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(run) = hub.runs.get_mut(&run_id) {
+            run.flush_scheduled = false;
+        }
+        if let Some(envelope) = hub.flush_pending_delta(&run_id) {
+            emit_protocol(&app, ChatProtocolEvent::Run(envelope));
+        }
+    });
+}
+
 pub fn emit_run_event(app: &AppHandle, run_id: &str, event: ChatRunEvent) {
     let state = app.state::<AppState>();
-    let result = state
-        .chat_protocol
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .push(run_id, event);
-    match result {
-        Ok(event) => emit_protocol(app, ChatProtocolEvent::Run(event)),
-        Err(error) => eprintln!("Failed to record chat protocol event: {error}"),
+    let mut schedule = false;
+    {
+        // emit 留在锁内：入库（拿 seq）与发出必须是同一个临界区，否则与
+        // 延迟冲刷任务并发时事件会乱序到达前端。合帧后事件频率已经很低，
+        // 锁内一次 payload 序列化不构成争用点。
+        let mut hub = state
+            .chat_protocol
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let passthrough = match split_coalescible_delta(event) {
+            Ok(pending) => match hub.buffer_delta(run_id, pending) {
+                Ok((envelopes, schedule_flush)) => {
+                    for envelope in envelopes {
+                        emit_protocol(app, ChatProtocolEvent::Run(envelope));
+                    }
+                    schedule = schedule_flush;
+                    None
+                }
+                Err(pending) => Some(pending.into_event()),
+            },
+            Err(event) => {
+                // 非 delta 事件必须先把缓冲按原顺序入库，seq 才与到达顺序一致。
+                if let Some(envelope) = hub.flush_pending_delta(run_id) {
+                    emit_protocol(app, ChatProtocolEvent::Run(envelope));
+                }
+                Some(event)
+            }
+        };
+        if let Some(event) = passthrough {
+            match hub.push(run_id, event) {
+                Ok(envelope) => emit_protocol(app, ChatProtocolEvent::Run(envelope)),
+                Err(error) => eprintln!("Failed to record chat protocol event: {error}"),
+            }
+        }
+    }
+    if schedule {
+        schedule_delta_flush(app, run_id);
     }
 }
 
@@ -2219,6 +2432,107 @@ mod tests {
             .collect();
         sequences.sort_unstable();
         assert_eq!(sequences, (2..=17).collect::<Vec<_>>());
+    }
+
+    fn pending_text(delta: &str, segment: Option<ChatSegmentPayload>) -> PendingDelta {
+        PendingDelta {
+            kind: PendingDeltaKind::Text,
+            delta: delta.to_string(),
+            segment,
+            buffered_at: Instant::now(),
+        }
+    }
+
+    fn text_segment(id: &str) -> ChatSegmentPayload {
+        ChatSegmentPayload {
+            id: id.to_string(),
+            kind: ChatSegmentKind::Text,
+            phase: ChatSegmentPhase::Plain,
+            order: 0,
+            step_number: None,
+            round: None,
+            text: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn buffered_deltas_merge_into_single_event_with_identical_fold() {
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        let (envelopes, schedule) = hub.buffer_delta("run", pending_text("你好", None)).unwrap();
+        assert!(envelopes.is_empty());
+        assert!(schedule);
+        let (envelopes, schedule) = hub
+            .buffer_delta("run", pending_text("，世界", None))
+            .unwrap();
+        assert!(envelopes.is_empty());
+        // 已有一个在飞的延迟冲刷，不重复调度。
+        assert!(!schedule);
+        // 缓冲期间不占 seq、不进快照。
+        assert_eq!(hub.runs["run"].snapshot.last_seq, 1);
+        assert_eq!(hub.runs["run"].snapshot.content, "");
+        let flushed = hub.flush_pending_delta("run").unwrap();
+        assert_eq!(flushed.seq, 2);
+        assert!(matches!(
+            &flushed.event,
+            ChatRunEvent::TextDelta { delta, .. } if delta == "你好，世界"
+        ));
+        assert_eq!(hub.runs["run"].snapshot.content, "你好，世界");
+        assert!(hub.flush_pending_delta("run").is_none());
+    }
+
+    #[test]
+    fn segment_switch_flushes_previous_buffer_in_arrival_order() {
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        hub.buffer_delta("run", pending_text("a", Some(text_segment("seg_1"))))
+            .unwrap();
+        let (envelopes, _) = hub
+            .buffer_delta("run", pending_text("b", Some(text_segment("seg_2"))))
+            .unwrap();
+        // 段位切换：旧缓冲立即入库，seq 在新缓冲之前。
+        assert_eq!(envelopes.len(), 1);
+        assert!(matches!(
+            &envelopes[0].event,
+            ChatRunEvent::TextDelta { delta, segment: Some(segment) }
+                if delta == "a" && segment.id == "seg_1"
+        ));
+        let flushed = hub.flush_pending_delta("run").unwrap();
+        assert!(flushed.seq > envelopes[0].seq);
+        assert!(matches!(
+            &flushed.event,
+            ChatRunEvent::TextDelta { delta, segment: Some(segment) }
+                if delta == "b" && segment.id == "seg_2"
+        ));
+    }
+
+    #[test]
+    fn oversized_buffer_flushes_immediately() {
+        let mut hub = ChatProtocolHub::default();
+        hub.register("conv", "run", "message", 0).unwrap();
+        let (envelopes, schedule) = hub
+            .buffer_delta("run", pending_text(&"x".repeat(DELTA_COALESCE_MAX_BYTES), None))
+            .unwrap();
+        assert_eq!(envelopes.len(), 1);
+        assert!(!schedule);
+        assert!(hub.runs["run"].pending_delta.is_none());
+    }
+
+    #[test]
+    fn buffer_delta_refuses_unknown_and_terminal_runs() {
+        let mut hub = ChatProtocolHub::default();
+        assert!(hub.buffer_delta("missing", pending_text("x", None)).is_err());
+        hub.register("conv", "run", "message", 0).unwrap();
+        hub.push(
+            "run",
+            ChatRunEvent::RunCompleted {
+                full: String::new(),
+                conversation_revision: 1,
+            },
+        )
+        .unwrap();
+        assert!(hub.buffer_delta("run", pending_text("x", None)).is_err());
     }
 
     #[test]
