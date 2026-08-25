@@ -1379,11 +1379,28 @@ pub(crate) async fn maybe_compact_send_view(env: &LoopEnv<'_>, state: &mut RunSt
     // Kivio footer 也含 `estimate_tool_segments`）。工具定义随每次请求发送、provider 会计入，漏算会
     // 让无锚点的首轮低估数千 token、压缩过晚——故这里补上（与 footer `count_tokens_in_value` 同口径，
     // 都基于 `estimate_value_tokens(tool.to_openai_tool())`）。
-    let tool_schema_tokens: usize = state
-        .tools
-        .iter()
-        .map(|tool| estimate_value_tokens(&tool.to_openai_tool()))
-        .sum();
+    // 按「工具名集合哈希」做轮间缓存：每轮为上百个工具重建整份 schema JSON 只为估个
+    // token 数太浪费；工具集只在 Skill 激活时变（同名工具的 schema run 内稳定）。
+    let tool_schema_tokens = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for tool in &state.tools {
+            tool.name.hash(&mut hasher);
+        }
+        let fingerprint = hasher.finish();
+        match state.tool_schema_tokens_cache {
+            Some((cached_fingerprint, cached)) if cached_fingerprint == fingerprint => cached,
+            _ => {
+                let estimated: usize = state
+                    .tools
+                    .iter()
+                    .map(|tool| estimate_value_tokens(&tool.to_openai_tool()))
+                    .sum();
+                state.tool_schema_tokens_cache = Some((fingerprint, estimated));
+                estimated
+            }
+        }
+    };
     let estimate_full =
         estimate_messages_tokens(&state.runtime_messages).saturating_add(tool_schema_tokens);
     let (anchor_prompt, trailing) = if let Some(usage) = &state.last_step_usage {

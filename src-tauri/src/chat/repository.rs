@@ -362,7 +362,7 @@ impl ConversationRepository {
             }
             increment_revision(&mut conversation)?;
             conversation.updated_at = chrono::Local::now().timestamp();
-            let persisted = super::storage::write_conversation_file(app, &conversation)?;
+            let persisted = super::storage::write_conversation_file(app, conversation)?;
             let item = ConversationListItem::from(&persisted);
             if let Some(position) = index
                 .conversations
@@ -541,7 +541,7 @@ impl ConversationRepository {
         let persisted = {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                super::storage::write_conversation_file(&app, &conversation)
+                super::storage::write_conversation_file(&app, conversation)
             })
             .await
             .map_err(|error| {

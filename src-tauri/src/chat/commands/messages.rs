@@ -24,6 +24,34 @@ use super::{
 /// 多答组的列标识：(group_id, provider_id, model)。单模型为 None（字段写 None）。
 type AssistantGroupMeta = (String, String, String);
 
+/// 中断草稿落盘的节流窗口。草稿是纯 crash-safety（用户停止 / 正常完成都走最终写），
+/// 不需要每个工具轮都付一次「整会话 load + pretty… 现在是 compact 序列化 + fsync +
+/// 全局索引重写」：同一条 message 3 秒内最多落一次盘，多对话工具密集并发时把写盘
+/// 频率砍掉大半。代价契约：进程崩溃最多丢最近 3 秒内完成的轮次。
+const PARTIAL_PERSIST_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+static LAST_PARTIAL_PERSIST: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// true = 该 message 刚落过盘，本轮跳过。记录发生在放行时（而非成功后），
+/// 持续失败的场景下也不会退化成每轮重试风暴。
+fn partial_persist_throttled(message_id: &str) -> bool {
+    let now = std::time::Instant::now();
+    let mut map = LAST_PARTIAL_PERSIST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(last) = map.get(message_id) {
+        if now.duration_since(*last) < PARTIAL_PERSIST_MIN_INTERVAL {
+            return true;
+        }
+    }
+    // 条目跨 run 累积（每次生成一条），顺手清理陈旧项；量小，线性扫够用。
+    map.retain(|_, at| now.duration_since(*at) < std::time::Duration::from_secs(3600));
+    map.insert(message_id.to_string(), now);
+    false
+}
+
 /// 反向对账:给「有工具分段但无对应记录」的孤立 `tool_call_id` 合成一条中断态
 /// (`Cancelled`)占位记录,追加进 `tool_calls`。
 ///
@@ -436,6 +464,9 @@ pub(super) async fn persist_partial_assistant_snapshot(
     api_messages: &[Value],
 ) -> Result<(), String> {
     if tool_records.is_empty() && segments.is_empty() {
+        return Ok(());
+    }
+    if partial_persist_throttled(message_id) {
         return Ok(());
     }
     let segments = segments.to_vec();

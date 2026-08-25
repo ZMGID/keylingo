@@ -104,6 +104,11 @@ pub(crate) struct RunState {
     /// 本轮若走了降级兜底（模型失败但已有工具结果），这里带结构化描述，
     /// 最终落到 `ChatMessage.degraded` 让前端渲染成独立卡片而非混进正文。
     pub(crate) degraded: Option<crate::chat::agent::recovery::DegradedAnswer>,
+    /// 工具 schema token 估算的轮间缓存：`(工具名集合的哈希, 估算值)`。
+    /// `maybe_compact_send_view` 每个 planning 轮都要这项，而不缓存的话每轮要为
+    /// 每个工具重建整份 `to_openai_tool()` JSON 再估 token——工具集在轮间基本不变
+    /// （只有 Skill 激活会改），按名字哈希失效足够。
+    pub(crate) tool_schema_tokens_cache: Option<(u64, usize)>,
 }
 
 /// 连续「需要压缩但压不下去」多少轮后停止工具循环、优雅收尾（Gap 2，Layer 3 anti-thrashing）。
@@ -252,6 +257,7 @@ pub async fn run_agent_loop(
         pending_compaction_summary: None,
         generated_images: Vec::new(),
         degraded: None,
+        tool_schema_tokens_cache: None,
     };
     // 把助手的技能白名单冻结进 skill_cache,作为 skill_activate 执行派发的硬 gate。
     // 无助手 = None = 不限(全局行为)。

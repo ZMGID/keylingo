@@ -266,8 +266,7 @@ fn load_index_in_dir(dir: &Path) -> Result<ConversationIndex, String> {
 /// 保存对话索引
 pub(crate) fn save_index(app: &AppHandle, index: &ConversationIndex) -> Result<(), String> {
     let path = index_file_path(app)?;
-    let content =
-        serde_json::to_string_pretty(index).map_err(|e| format!("serialize index: {e}"))?;
+    let content = serde_json::to_string(index).map_err(|e| format!("serialize index: {e}"))?;
     atomic_write(&path, &content, "index")
 }
 
@@ -598,29 +597,30 @@ pub fn load_conversation(app: &AppHandle, id: &str) -> Result<Conversation, Stri
 /// `ConversationRepository`; this function deliberately does not touch the index.
 pub(crate) fn write_conversation_file(
     app: &AppHandle,
-    conversation: &Conversation,
+    mut conversation: Conversation,
 ) -> Result<Conversation, String> {
     let path = conversation_file_path(app, &conversation.id)?;
-    let mut to_save = conversation.clone();
     // 外置内联图：artifact 的大图 + 两份隐藏转录（`model_messages` / `api_messages`）里
     // 模型看过的整图 base64。后者是"会话 JSON 绝不含 base64"的关键——它每轮都被整本读写，
     // 一张图存几份就是几 MB × 每轮 fsync。中断草稿同时持有两份转录，所以两个都要扫。
-    // 三个谓词都是廉价预扫描，没有可外置的图就不必克隆对话。
-    if to_save.messages.iter().any(|message| {
+    // 参数取 owned（调用方本来就持有所有权），省掉此前每次落盘的整会话 clone。
+    if conversation.messages.iter().any(|message| {
         super::attachments::message_has_inline_image_to_externalize(message)
             || super::attachments::message_has_model_message_image_to_externalize(message)
             || super::attachments::message_has_api_message_image_to_externalize(message)
     }) {
-        let conv_id = to_save.id.clone();
-        for message in to_save.messages.iter_mut() {
+        let conv_id = conversation.id.clone();
+        for message in conversation.messages.iter_mut() {
             super::attachments::externalize_message_artifacts(app, &conv_id, message);
         }
     }
 
-    let content = serde_json::to_string_pretty(&to_save)
+    // compact 而非 pretty：长对话数 MB 级,pretty 徒增 ~30-50% 体积与序列化时间,
+    // 且每个工具轮都要整本重写。人读导出走 export.rs,不靠这份文件的排版。
+    let content = serde_json::to_string(&conversation)
         .map_err(|e| format!("serialize conversation: {e}"))?;
     atomic_write(&path, &content, "conversation")?;
-    Ok(to_save)
+    Ok(conversation)
 }
 
 /// 删除对话。

@@ -313,7 +313,10 @@ async function ensureListener() {
       reportIssue('version_mismatch')
       return
     }
-    if (!validateEvent(payload)) {
+    // Ajv 全量校验只在 dev 跑：事件由同进程 Rust 端生成（protocol.rs 是唯一源），
+    // 生产环境每条 live 事件 ~10µs 的 schema 校验是纯税,多对话并发时全落在主线程。
+    // 低频的 sync 快照仍始终校验（syncChatProtocol 里的 validateSync）。
+    if (import.meta.env.DEV && !validateEvent(payload)) {
       console.error('Rejected invalid chat protocol event', validateEvent.errors, payload)
       const conversationId = (payload as { conversationId?: unknown }).conversationId
       reportIssue('invalid_event', typeof conversationId === 'string' ? conversationId : undefined)
