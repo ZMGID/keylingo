@@ -235,7 +235,7 @@ export const CHAT_AGENT_RUNTIME: AgentRuntimeConfig = {
 }
 
 export function normalizeAgentRuntime(
-  conversation?: Conversation | null,
+  conversation?: Pick<Conversation, 'agent_runtime' | 'agentRuntime'> | Pick<ConversationListItem, 'agent_runtime' | 'agentRuntime'> | null,
 ): AgentRuntimeConfig {
   const raw = conversation?.agent_runtime ?? conversation?.agentRuntime
   if (!raw || raw.kind === 'builtin') {
