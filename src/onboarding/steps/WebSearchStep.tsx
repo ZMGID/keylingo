@@ -13,6 +13,7 @@ const ONBOARDING_PROVIDERS: { value: WebSearchProviderId; label: string; placeho
   { value: 'tinyfish', label: 'TinyFish', placeholder: 'tinyfish key' },
   { value: 'bocha', label: 'Bocha', placeholder: 'bocha key' },
   { value: 'zhipu', label: 'Zhipu', placeholder: 'zhipu key' },
+  { value: 'kimi', label: 'Kimi', placeholder: 'sk-...' },
   { value: 'deepseek', label: 'DeepSeek', placeholder: 'sk-...' },
 ]
 

@@ -191,6 +191,26 @@ struct SearxngResult {
 }
 
 #[derive(Debug, Deserialize)]
+struct KimiSearchResponse {
+    #[serde(default)]
+    search_results: Vec<KimiSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiSearchResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TinyfishSearchResponse {
     #[serde(default)]
     results: Vec<TinyfishSearchResult>,
@@ -243,6 +263,7 @@ pub fn provider_label(provider: WebSearchProvider) -> &'static str {
         WebSearchProvider::Tinyfish => "TinyFish",
         WebSearchProvider::TinyfishMcp => "TinyFish MCP",
         WebSearchProvider::Searxng => "SearXNG",
+        WebSearchProvider::Kimi => "Kimi",
         WebSearchProvider::Unknown => "Web",
     }
 }
@@ -298,6 +319,7 @@ pub async fn search_web(
         WebSearchProvider::Tinyfish => search_tinyfish(state, config, query, retry_attempts).await,
         WebSearchProvider::TinyfishMcp => search_tinyfish_mcp(state, config, query, app).await,
         WebSearchProvider::Searxng => search_searxng(state, config, query, retry_attempts).await,
+        WebSearchProvider::Kimi => search_kimi(state, config, query, retry_attempts).await,
         WebSearchProvider::Unknown => {
             Err("Selected web search provider is not supported yet".to_string())
         }
@@ -1022,6 +1044,96 @@ fn searxng_search_url(configured: &str) -> Result<String, String> {
     }
 }
 
+/// 官方搜索地址（kimi-cli `moonshot_search.base_url`）：
+/// - 订阅套餐：`https://api.kimi.com/coding/v1/search`
+/// - 国内开放平台：`https://api.moonshot.cn/v1/search`
+/// - 国际站：`https://api.moonshot.ai/v1/search`
+///
+/// 用户常把聊天 base（`…/v1`）贴进来；官方 host 一律落到 `/v1/search`。
+/// 已带 `/search` 的地址原样使用；其它自定义网关只补 `/search`。
+fn kimi_search_url(configured: &str) -> String {
+    let trimmed = configured.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "https://api.kimi.com/coding/v1/search".to_string();
+    }
+    if trimmed
+        .rsplit('/')
+        .next()
+        .is_some_and(|seg| seg.eq_ignore_ascii_case("search"))
+    {
+        return trimmed.to_string();
+    }
+    if let Some(canonical) = canonical_kimi_search_url(trimmed) {
+        return canonical;
+    }
+    format!("{trimmed}/search")
+}
+
+fn canonical_kimi_search_url(base: &str) -> Option<String> {
+    let rest = base
+        .strip_prefix("https://")
+        .or_else(|| base.strip_prefix("http://"))
+        .unwrap_or(base);
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .to_ascii_lowercase();
+    match host.as_str() {
+        "api.kimi.com" => Some("https://api.kimi.com/coding/v1/search".to_string()),
+        "api.moonshot.cn" => Some("https://api.moonshot.cn/v1/search".to_string()),
+        "api.moonshot.ai" => Some("https://api.moonshot.ai/v1/search".to_string()),
+        _ => None,
+    }
+}
+
+/// Kimi / Moonshot 联网搜索：`POST {search_url}`，Bearer key，
+/// body `{text_query, limit, enable_page_crawling, timeout_seconds}`，
+/// 结果在 `search_results[]`。官方实现见 kimi-cli SearchWeb。
+async fn search_kimi(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+    retry_attempts: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let api_key = config.kimi_api_key.trim();
+    if api_key.is_empty() {
+        return Err("Kimi API key is not configured".to_string());
+    }
+    let max_results = config.max_results.clamp(1, 10);
+    let url = kimi_search_url(&config.kimi_base_url);
+    let body = serde_json::json!({
+        "text_query": query,
+        "limit": max_results,
+        "enable_page_crawling": false,
+        "timeout_seconds": 30,
+    });
+    let response = send_with_retry("Kimi search", retry_attempts, || {
+        with_standard_request_timeout(state.http.post(&url).bearer_auth(api_key).json(&body)).send()
+    })
+    .await?;
+    let parsed: KimiSearchResponse = read_search_json("Kimi search", response).await?;
+    Ok(parsed
+        .search_results
+        .into_iter()
+        .filter(|result| !result.url.trim().is_empty())
+        .map(|result| {
+            let content = if !result.content.trim().is_empty() {
+                result.content
+            } else {
+                result.snippet
+            };
+            WebSearchResult {
+                title: result.title.trim().to_string(),
+                url: result.url.trim().to_string(),
+                content: content.trim().to_string(),
+                published_date: result.date.filter(|date| !date.trim().is_empty()),
+                score: None,
+            }
+        })
+        .collect())
+}
+
 /// SearXNG 自建实例：`GET {instance}/search?q=&format=json`，无需 API key。
 /// 实例须在 settings.yml 开启 json 输出，公网实例多数默认关闭。
 async fn search_searxng(
@@ -1652,9 +1764,9 @@ mod tests {
     use super::{
         format_web_context, parse_exa_mcp_results, parse_grok_response,
         parse_hosted_web_search_response, parse_tinyfish_mcp_payload, searxng_search_url,
-        BochaSearchResponse, BraveSearchResponse, ExaSearchResponse, OllamaSearchResponse,
-        SearxngSearchResponse, SerperSearchResponse, TavilySearchResponse, TinyfishSearchResponse,
-        WebSearchResult, ZhipuSearchResponse,
+        BochaSearchResponse, BraveSearchResponse, ExaSearchResponse, KimiSearchResponse,
+        OllamaSearchResponse, SearxngSearchResponse, SerperSearchResponse, TavilySearchResponse,
+        TinyfishSearchResponse, WebSearchResult, ZhipuSearchResponse,
     };
 
     #[test]
@@ -2182,6 +2294,78 @@ mod tests {
             "https://searx.example/search"
         );
         assert!(searxng_search_url("  ").is_err());
+    }
+
+    #[test]
+    fn kimi_response_deserializes_search_results() {
+        let raw = r#"{
+            "search_results": [
+                {
+                    "site_name": "kimi.com",
+                    "title": "Kimi",
+                    "url": "https://www.kimi.com/",
+                    "snippet": "Kimi assistant",
+                    "content": "longer page text",
+                    "date": "2026-08-25"
+                }
+            ]
+        }"#;
+        let parsed: KimiSearchResponse = serde_json::from_str(raw).expect("kimi json");
+        assert_eq!(parsed.search_results[0].url, "https://www.kimi.com/");
+        assert_eq!(parsed.search_results[0].snippet, "Kimi assistant");
+        assert_eq!(parsed.search_results[0].content, "longer page text");
+        assert_eq!(parsed.search_results[0].date.as_deref(), Some("2026-08-25"));
+    }
+
+    #[test]
+    fn kimi_search_url_canonicalizes_official_hosts() {
+        assert_eq!(
+            super::kimi_search_url(""),
+            "https://api.kimi.com/coding/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://api.kimi.com/coding/v1/search"),
+            "https://api.kimi.com/coding/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://api.kimi.com/coding/v1"),
+            "https://api.kimi.com/coding/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://api.kimi.com/coding/"),
+            "https://api.kimi.com/coding/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://api.moonshot.cn/v1"),
+            "https://api.moonshot.cn/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://api.moonshot.cn"),
+            "https://api.moonshot.cn/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://api.moonshot.ai/v1"),
+            "https://api.moonshot.ai/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://relay.example/v1"),
+            "https://relay.example/v1/search"
+        );
+        assert_eq!(
+            super::kimi_search_url("https://relay.example/v1/search"),
+            "https://relay.example/v1/search"
+        );
+    }
+
+    #[test]
+    fn kimi_provider_roundtrips_snake_case() {
+        let parsed: crate::settings::WebSearchProvider =
+            serde_json::from_str("\"kimi\"").expect("provider");
+        assert_eq!(parsed, crate::settings::WebSearchProvider::Kimi);
+        assert_eq!(
+            serde_json::to_string(&crate::settings::WebSearchProvider::Kimi).unwrap(),
+            "\"kimi\""
+        );
     }
 
     #[test]

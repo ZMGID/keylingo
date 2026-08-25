@@ -1012,6 +1012,7 @@ export type WebSearchProviderId =
   | 'tinyfish'
   | 'tinyfish_mcp'
   | 'searxng'
+  | 'kimi'
 
 export type WebSearchMcpAuth = NonNullable<ChatMcpServer['auth']>
 
@@ -1046,6 +1047,8 @@ export type WebSearchConfig = {
   tinyfishMcpUrl?: string
   tinyfishMcpAuth?: WebSearchMcpAuth | null
   searxngBaseUrl?: string
+  kimiApiKey?: string
+  kimiBaseUrl?: string
   maxResults: number
   searchDepth: 'ultra-fast' | 'fast' | 'basic' | 'advanced'
 }
@@ -1788,6 +1791,8 @@ export function normalizeSettings(settings: Settings): Settings {
         tinyfishMcpUrl: current.lens?.webSearch?.tinyfishMcpUrl ?? 'https://agent.tinyfish.ai/mcp',
         tinyfishMcpAuth: current.lens?.webSearch?.tinyfishMcpAuth ?? null,
         searxngBaseUrl: current.lens?.webSearch?.searxngBaseUrl ?? '',
+        kimiApiKey: current.lens?.webSearch?.kimiApiKey ?? '',
+        kimiBaseUrl: current.lens?.webSearch?.kimiBaseUrl ?? 'https://api.kimi.com/coding/v1/search',
         maxResults: current.lens?.webSearch?.maxResults ?? 5,
         searchDepth: current.lens?.webSearch?.searchDepth ?? 'basic',
       },

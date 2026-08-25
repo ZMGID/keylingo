@@ -46,6 +46,8 @@ const DEFAULT_WEB_SEARCH: WebSearchConfig = {
   tinyfishMcpUrl: 'https://agent.tinyfish.ai/mcp',
   tinyfishMcpAuth: null,
   searxngBaseUrl: '',
+  kimiApiKey: '',
+  kimiBaseUrl: 'https://api.kimi.com/coding/v1/search',
   maxResults: 5,
   searchDepth: 'basic',
 }
@@ -67,6 +69,7 @@ type ProviderDef = {
     | 'bochaApiKey'
     | 'zhipuApiKey'
     | 'tinyfishApiKey'
+    | 'kimiApiKey'
   /** API Key 输入框占位符。 */
   keyPlaceholder?: string
   /** 可编辑的 API base 字段（代理/自建网关可改）；写入对应 *BaseUrl 设置。 */
@@ -82,13 +85,14 @@ type ProviderDef = {
     | 'searxngBaseUrl'
     | 'grokBaseUrl'
     | 'deepseekBaseUrl'
+    | 'kimiBaseUrl'
   /** base 输入框占位符（也是官方默认值）。 */
   baseUrlPlaceholder?: string
   /** 可编辑 MCP endpoint（写入 exaMcpUrl / tinyfishMcpUrl）。 */
   endpointField?: 'exaMcpUrl' | 'tinyfishMcpUrl'
   endpointPlaceholder?: string
   /** 地址栏下方说明：keyless MCP / 自建实例。 */
-  urlHint?: 'exaMcp' | 'tinyfishMcp' | 'searxng'
+  urlHint?: 'exaMcp' | 'tinyfishMcp' | 'searxng' | 'kimi'
   supportsDepth?: boolean
   /** 模型驱动搜索（Grok / DeepSeek）：额外显示 型号 / 自定义网址 / 系统提示。 */
   modelBased?: boolean
@@ -196,6 +200,18 @@ const PROVIDERS: ProviderDef[] = [
     baseUrlField: 'zhipuBaseUrl',
     baseUrlPlaceholder: 'https://open.bigmodel.cn/api/paas/v4',
     icon: '/search-icons/zhipu.png',
+  },
+  {
+    id: 'kimi',
+    name: 'Kimi',
+    site: 'https://www.kimi.com/code',
+    apiKeyUrl: 'https://www.kimi.com/code/console',
+    keyField: 'kimiApiKey',
+    keyPlaceholder: 'sk-...',
+    baseUrlField: 'kimiBaseUrl',
+    baseUrlPlaceholder: 'https://api.kimi.com/coding/v1/search',
+    urlHint: 'kimi',
+    icon: '/search-icons/kimi.svg',
   },
   {
     id: 'searxng',
@@ -611,7 +627,9 @@ export function WebSearchPanel({ t, lang, webSearch, onChange }: WebSearchPanelP
                       ? t.webSearchExaMcpKeyless
                       : selected.urlHint === 'tinyfishMcp'
                         ? t.webSearchTinyfishMcpHint
-                        : undefined
+                        : selected.urlHint === 'kimi'
+                          ? t.webSearchKimiHint
+                          : undefined
                 }
                 stack
               >

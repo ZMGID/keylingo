@@ -31,6 +31,8 @@ export function isWebSearchConfigured(webSearch: WebSearchConfig | undefined): b
         && (webSearch.tinyfishMcpAuth?.accessToken ?? '').trim() !== ''
     case 'searxng':
       return (webSearch.searxngBaseUrl ?? '').trim() !== ''
+    case 'kimi':
+      return (webSearch.kimiApiKey ?? '').trim() !== ''
     default:
       return false
   }
@@ -50,6 +52,7 @@ export function webSearchKeyField(
   | 'bochaApiKey'
   | 'zhipuApiKey'
   | 'tinyfishApiKey'
+  | 'kimiApiKey'
 > | null {
   switch (provider) {
     case 'tavily':
@@ -72,6 +75,8 @@ export function webSearchKeyField(
       return 'zhipuApiKey'
     case 'tinyfish':
       return 'tinyfishApiKey'
+    case 'kimi':
+      return 'kimiApiKey'
     case 'exa_mcp':
     case 'tinyfish_mcp':
     case 'searxng':

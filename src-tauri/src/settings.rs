@@ -413,6 +413,7 @@ pub enum WebSearchProvider {
     Tinyfish,
     TinyfishMcp,
     Searxng,
+    Kimi,
     /// 前端可能列出尚未接入后端的占位服务商；持久化时兜底为未知，避免旧值导致整份设置解析失败。
     #[serde(other)]
     Unknown,
@@ -493,6 +494,10 @@ pub struct LensWebSearchConfig {
     pub tinyfish_mcp_auth: Option<ConnectorAuth>,
     #[serde(default)]
     pub searxng_base_url: String,
+    #[serde(default)]
+    pub kimi_api_key: String,
+    #[serde(default = "default_kimi_base_url")]
+    pub kimi_base_url: String,
     #[serde(default = "default_web_search_max_results")]
     pub max_results: u8,
     #[serde(default = "default_web_search_depth")]
@@ -532,6 +537,8 @@ impl Default for LensWebSearchConfig {
             tinyfish_mcp_url: default_tinyfish_mcp_url(),
             tinyfish_mcp_auth: None,
             searxng_base_url: String::new(),
+            kimi_api_key: String::new(),
+            kimi_base_url: default_kimi_base_url(),
             max_results: default_web_search_max_results(),
             search_depth: default_web_search_depth(),
         }
@@ -592,6 +599,10 @@ fn default_tinyfish_base_url() -> String {
 
 fn default_tinyfish_mcp_url() -> String {
     "https://agent.tinyfish.ai/mcp".to_string()
+}
+
+fn default_kimi_base_url() -> String {
+    "https://api.kimi.com/coding/v1/search".to_string()
 }
 
 pub fn default_grok_system_prompt() -> String {

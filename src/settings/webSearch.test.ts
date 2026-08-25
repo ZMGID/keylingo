@@ -23,6 +23,7 @@ describe('isWebSearchConfigured', () => {
     expect(isWebSearchConfigured(config({ provider: 'serper', serperApiKey: 's' }))).toBe(true)
     expect(isWebSearchConfigured(config({ provider: 'bocha', bochaApiKey: 'b' }))).toBe(true)
     expect(isWebSearchConfigured(config({ provider: 'zhipu', zhipuApiKey: 'z' }))).toBe(true)
+    expect(isWebSearchConfigured(config({ provider: 'kimi', kimiApiKey: 'sk' }))).toBe(true)
     expect(isWebSearchConfigured(config({ provider: 'tinyfish', tinyfishApiKey: 'tf' }))).toBe(true)
     expect(isWebSearchConfigured(config({
       provider: 'tinyfish_mcp',
@@ -54,5 +55,6 @@ describe('webSearchKeyField', () => {
     expect(webSearchKeyField('tinyfish')).toBe('tinyfishApiKey')
     expect(webSearchKeyField('deepseek')).toBe('deepseekApiKey')
     expect(webSearchKeyField('grok')).toBe('grokApiKey')
+    expect(webSearchKeyField('kimi')).toBe('kimiApiKey')
   })
 })

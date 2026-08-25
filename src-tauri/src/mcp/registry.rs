@@ -880,6 +880,7 @@ pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> boo
         WebSearchProvider::Tinyfish => !settings.lens.web_search.tinyfish_api_key.trim().is_empty(),
         WebSearchProvider::TinyfishMcp => tinyfish_mcp_configured(settings),
         WebSearchProvider::Searxng => !settings.lens.web_search.searxng_base_url.trim().is_empty(),
+        WebSearchProvider::Kimi => !settings.lens.web_search.kimi_api_key.trim().is_empty(),
         WebSearchProvider::Unknown => false,
     }
 }
