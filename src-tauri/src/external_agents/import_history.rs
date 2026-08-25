@@ -914,7 +914,11 @@ fn apply_acp_tool_status(pending: &mut Pending, out: &mut Vec<ImportedMessage>, 
     let status = update.get("status").and_then(Value::as_str).unwrap_or("");
     let text = update
         .get("content")
-        .map(collect_acp_tool_output)
+        .map(|value| {
+            crate::external_agents::session::acp::explain_acp_agent_policy_error(
+                &crate::external_agents::session::acp::flatten_acp_tool_content(value),
+            )
+        })
         .unwrap_or_default();
     if status.is_empty() && text.is_empty() {
         return;
@@ -941,35 +945,41 @@ fn apply_acp_tool_status(pending: &mut Pending, out: &mut Vec<ImportedMessage>, 
     resolve_tool_result(pending, out, id, truncate_tool_result(&text), is_error);
 }
 
-fn collect_acp_tool_output(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| {
-                item.get("text").and_then(Value::as_str).or_else(|| {
-                    item.get("content")
-                        .and_then(|c| c.get("text"))
-                        .and_then(Value::as_str)
-                })
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(_) => content
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        _ => String::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn jsonl(lines: &[&str]) -> String {
         lines.join("\n")
+    }
+
+    #[test]
+    fn acp_glob_policy_error_is_explained_on_import() {
+        let updates = vec![
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "glob-1",
+                "title": "Glob",
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "glob-1",
+                "status": "failed",
+                "content": [{
+                    "type": "content",
+                    "content": {
+                        "type": "text",
+                        "text": "ACP runtime only supports interactive Bash tool processes"
+                    }
+                }],
+            }),
+        ];
+        let msgs = parse_acp_updates(&updates);
+        let call = &msgs[0].message.tool_calls[0];
+        assert_eq!(call.status, ToolCallStatus::Error);
+        let error = call.error.as_deref().unwrap();
+        assert!(error.contains("不会把 Glob/Grep 交给宿主"), "error={error}");
+        assert!(error.contains("ACP runtime only supports interactive Bash tool processes"));
     }
 
     #[test]

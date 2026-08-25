@@ -1,8 +1,11 @@
 //! ACP client `terminal/*` methods.
 //!
-//! Kimi / Cursor / OpenCode / Gemini 等 ACP agent 的 Bash / Glob / Grep 不在
-//! CLI 进程里自己 exec，而是问宿主要终端能力。握手里 `clientCapabilities.terminal`
-//! 为 false（或方法没实现）时，它们会直接报 `ACP terminal capability is unavailable`。
+//! 规格里这是可选能力：agent **可以**把 shell 交给宿主 `terminal/create`，也可以继续
+//! 本地 exec。OpenCode / Gemini 的 glob/grep（以及多数 bash）仍在 CLI 进程里跑；
+//! **Kimi Code 0.37** 则在 `terminal: true` 时把**全部** `process.spawn` 换成问宿主
+//! 要终端，并且只放行 `bash -c`（Glob/Grep 的 `fd`/`rg` 在发 RPC 前就被扔掉）。
+//! 握手里 `terminal` 为 false（或方法没实现）时，Kimi 会报
+//! `ACP terminal capability is unavailable`——Bash 也会一起死，并不会回到 TUI 后端。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,6 +54,9 @@ pub struct AcpTerminalHost {
     pending_waits: HashMap<String, Vec<Value>>,
     aborted_waits: Vec<(Value, i64, String)>,
     completed_waits: Vec<(Value, Value)>,
+    /// Spec: after `terminal/release` the RPC id is gone, but the Client SHOULD
+    /// keep showing the captured output on the tool card.
+    released_output: HashMap<String, String>,
     exit_tx: mpsc::UnboundedSender<(String, TerminalExit)>,
     exit_rx: mpsc::UnboundedReceiver<(String, TerminalExit)>,
 }
@@ -65,9 +71,25 @@ impl AcpTerminalHost {
             pending_waits: HashMap::new(),
             aborted_waits: Vec::new(),
             completed_waits: Vec::new(),
+            released_output: HashMap::new(),
             exit_tx,
             exit_rx,
         }
+    }
+
+    /// Last captured stdout/stderr for a live or already-released terminal.
+    pub fn preview_output(&self, terminal_id: &str) -> Option<String> {
+        if let Some(term) = self.terminals.get(terminal_id) {
+            let (output, _) = snapshot_output(&term.output);
+            return Some(output);
+        }
+        self.released_output.get(terminal_id).cloned()
+    }
+
+    #[cfg(test)]
+    pub fn seed_output(&mut self, terminal_id: &str, output: impl Into<String>) {
+        self.released_output
+            .insert(terminal_id.to_string(), output.into());
     }
 
     pub fn set_extra_roots(&mut self, _roots: &[String]) {
@@ -277,6 +299,10 @@ impl AcpTerminalHost {
         let Some(term) = self.terminals.remove(terminal_id) else {
             return unknown_terminal();
         };
+        let (output, _) = snapshot_output(&term.output);
+        if !output.is_empty() {
+            self.released_output.insert(terminal_id.to_string(), output);
+        }
         if let Some(exit) = term.exit {
             self.finish_waits(terminal_id, &exit);
         } else {
@@ -578,6 +604,13 @@ mod tests {
             TerminalReply::Result(_) => {}
             other => panic!("release failed: {other:?}"),
         }
+        let preview = host
+            .preview_output(&terminal_id)
+            .expect("release must keep captured output for the tool card");
+        assert!(
+            preview.contains("kivio-acp-term"),
+            "preview after release={preview:?}"
+        );
         match host.handle(
             "terminal/output",
             &json!({ "terminalId": terminal_id }),

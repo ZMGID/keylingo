@@ -996,24 +996,105 @@ fn acp_is_terminal_failure(status: &str) -> bool {
     )
 }
 
-fn acp_result_content(update: &serde_json::Map<String, Value>) -> String {
-    update
+fn acp_result_content(
+    update: &serde_json::Map<String, Value>,
+    terminals: Option<&AcpTerminalHost>,
+) -> String {
+    let Some(value) = update
         .get("content")
         .or_else(|| update.get("output"))
         .or_else(|| update.get("result"))
-        .map(|value| {
-            if let Some(text) = value.as_str() {
-                text.to_string()
-            } else {
-                value.to_string()
-            }
-        })
-        .unwrap_or_else(|| acp_tool_name(update))
+    else {
+        return acp_tool_name(update);
+    };
+    let text = explain_acp_agent_policy_error(&flatten_acp_tool_blocks(value, terminals));
+    if text.is_empty() {
+        acp_tool_name(update)
+    } else {
+        text
+    }
+}
+
+/// Pull readable text out of ACP `tool_call` content (string, text blocks, or a
+/// `{type:"terminal"}` block whose stdout lives on the host).
+pub(crate) fn flatten_acp_tool_content(content: &Value) -> String {
+    flatten_acp_tool_blocks(content, None)
+}
+
+fn flatten_acp_tool_blocks(content: &Value, terminals: Option<&AcpTerminalHost>) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| acp_tool_block_text(item, terminals))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(_) => acp_tool_block_text(content, terminals).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn acp_tool_block_text(block: &Value, terminals: Option<&AcpTerminalHost>) -> Option<String> {
+    if let Some(text) = block.as_str() {
+        return Some(text.to_string());
+    }
+    match block.get("type").and_then(Value::as_str).unwrap_or("") {
+        "terminal" => {
+            let id = block
+                .get("terminalId")
+                .or_else(|| block.get("terminal_id"))
+                .and_then(Value::as_str)?;
+            terminals
+                .and_then(|host| host.preview_output(id))
+                .filter(|output| !output.is_empty())
+        }
+        "content" => block
+            .get("content")
+            .and_then(|inner| acp_tool_block_text(inner, terminals)),
+        "diff" => None,
+        _ => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// Kimi 0.37 在广告 `terminal` 后把全部 spawn 换成宿主终端，又只放行 `bash -c`。
+/// 原文看起来像 Kivio 没接好，其实是 agent 策略。
+pub(crate) fn explain_acp_agent_policy_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return raw.to_string();
+    }
+    if trimmed.contains("Kimi 在 ACP 下") || trimmed.contains("Kimi 需要宿主提供 ACP 终端")
+    {
+        return raw.to_string();
+    }
+    if trimmed.contains("ACP runtime only supports interactive Bash tool processes") {
+        return format!(
+            "Kimi 在 ACP 下只用 Bash 执行命令，不会把 Glob/Grep 交给宿主。可用 Bash 查找或搜索。\n\n{trimmed}"
+        );
+    }
+    if trimmed.contains("ACP terminal capability is unavailable") {
+        return format!(
+            "Kimi 需要宿主提供 ACP 终端才能跑命令。当前会话没有广告该能力，Bash 也会失败。\n\n{trimmed}"
+        );
+    }
+    raw.to_string()
 }
 
 fn apply_acp_session_update(
     update: &serde_json::Map<String, Value>,
     emitted_tool_ids: &mut HashSet<String>,
+    sink: &mut impl FnMut(UnifiedAgentEvent),
+) -> bool {
+    apply_acp_session_update_ex(update, emitted_tool_ids, None, sink)
+}
+
+fn apply_acp_session_update_ex(
+    update: &serde_json::Map<String, Value>,
+    emitted_tool_ids: &mut HashSet<String>,
+    terminals: Option<&AcpTerminalHost>,
     sink: &mut impl FnMut(UnifiedAgentEvent),
 ) -> bool {
     let session_update = update
@@ -1050,7 +1131,7 @@ fn apply_acp_session_update(
                 if acp_is_terminal_success(&status) || acp_is_terminal_failure(&status) {
                     sink(UnifiedAgentEvent::ToolResult {
                         tool_use_id: id,
-                        content: acp_result_content(update),
+                        content: acp_result_content(update, terminals),
                         is_error: acp_is_terminal_failure(&status),
                     });
                 }
@@ -1133,6 +1214,15 @@ fn acp_apply_session_update(
     state: &mut AcpUpdateState,
     sink: &mut dyn FnMut(UnifiedAgentEvent),
 ) {
+    acp_apply_session_update_ex(update, state, None, sink);
+}
+
+fn acp_apply_session_update_ex(
+    update: &serde_json::Map<String, Value>,
+    state: &mut AcpUpdateState,
+    terminals: Option<&AcpTerminalHost>,
+    sink: &mut dyn FnMut(UnifiedAgentEvent),
+) {
     let session_update = update
         .get("sessionUpdate")
         .and_then(|v| v.as_str())
@@ -1170,7 +1260,9 @@ fn acp_apply_session_update(
         _ => {
             // tool_call / tool_call_update 是消息边界:发出工具事件后,重置正文与思考游标,
             // 使其后到来的累积快照被识别为新消息起点。
-            if apply_acp_session_update(update, &mut state.emitted_tools, &mut |e| sink(e)) {
+            if apply_acp_session_update_ex(update, &mut state.emitted_tools, terminals, &mut |e| {
+                sink(e)
+            }) {
                 state.text.on_boundary();
                 state.thought.on_boundary();
             }
@@ -1671,7 +1763,12 @@ impl AcpSession {
                         .and_then(|v| v.as_object())
                     {
                         let mut buf: Vec<UnifiedAgentEvent> = Vec::new();
-                        acp_apply_session_update(update, &mut update_state, &mut |e| buf.push(e));
+                        acp_apply_session_update_ex(
+                            update,
+                            &mut update_state,
+                            Some(&self.terminals),
+                            &mut |e| buf.push(e),
+                        );
                         for e in buf {
                             let _ = events.send(e).await;
                         }
@@ -2267,6 +2364,104 @@ mod tests {
             UnifiedAgentEvent::ToolResult { tool_use_id, content, is_error }
                 if tool_use_id == "acp-1" && content == "done" && !*is_error
         )));
+    }
+
+    #[test]
+    fn flatten_acp_tool_content_prefers_text_blocks_over_json() {
+        assert_eq!(
+            flatten_acp_tool_content(&json!([{
+                "type": "content",
+                "content": { "type": "text", "text": "hello" }
+            }])),
+            "hello"
+        );
+        assert_eq!(
+            flatten_acp_tool_content(&json!([{
+                "type": "terminal",
+                "terminalId": "term_missing"
+            }])),
+            ""
+        );
+    }
+
+    #[test]
+    fn flatten_acp_tool_content_resolves_terminal_output() {
+        let mut host = AcpTerminalHost::new(std::env::temp_dir());
+        host.seed_output("term_1", "KIVIO_ACP_TERMINAL_OK\n");
+        let finished = serde_json::Map::from_iter([
+            ("sessionUpdate".to_string(), json!("tool_call_update")),
+            ("toolCallId".to_string(), json!("bash-1")),
+            ("title".to_string(), json!("Bash")),
+            ("status".to_string(), json!("completed")),
+            (
+                "content".to_string(),
+                json!([{ "type": "terminal", "terminalId": "term_1" }]),
+            ),
+        ]);
+        let mut emitted = HashSet::new();
+        let mut events = Vec::new();
+        assert!(apply_acp_session_update_ex(
+            &finished,
+            &mut emitted,
+            Some(&host),
+            &mut |event| events.push(event),
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            UnifiedAgentEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "bash-1"
+                    && content.contains("KIVIO_ACP_TERMINAL_OK")
+                    && !*is_error
+        )));
+    }
+
+    #[test]
+    fn kimi_glob_policy_error_is_explained() {
+        let finished = serde_json::Map::from_iter([
+            ("sessionUpdate".to_string(), json!("tool_call_update")),
+            ("toolCallId".to_string(), json!("glob-1")),
+            ("title".to_string(), json!("Glob")),
+            ("status".to_string(), json!("failed")),
+            (
+                "content".to_string(),
+                json!([{
+                    "type": "content",
+                    "content": {
+                        "type": "text",
+                        "text": "ACP runtime only supports interactive Bash tool processes"
+                    }
+                }]),
+            ),
+        ]);
+        let mut emitted = HashSet::new();
+        let mut events = Vec::new();
+        assert!(apply_acp_session_update(
+            &finished,
+            &mut emitted,
+            &mut |event| events.push(event),
+        ));
+        let content = events.iter().find_map(|event| match event {
+            UnifiedAgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if tool_use_id == "glob-1" && *is_error => Some(content.clone()),
+            _ => None,
+        });
+        let content = content.expect("failed Glob result");
+        assert!(
+            content.contains("不会把 Glob/Grep 交给宿主"),
+            "content={content}"
+        );
+        assert!(content.contains("ACP runtime only supports interactive Bash tool processes"));
+    }
+
+    #[test]
+    fn explain_acp_agent_policy_error_is_idempotent() {
+        let once = explain_acp_agent_policy_error(
+            "ACP runtime only supports interactive Bash tool processes",
+        );
+        assert_eq!(explain_acp_agent_policy_error(&once), once);
     }
 
     // ---- AcpTextAssembler / shared update-dedup (Step 2) ----
