@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import Ajv2020 from 'ajv/dist/2020'
 import schema from '../generated/chatProtocol.schema.json'
 import syncSchema from '../generated/chatSync.schema.json'
@@ -302,29 +301,39 @@ function applySnapshot(snapshot: ChatRunSnapshot) {
   if (snapshot.terminal) dispatch(syntheticEnvelope(snapshot, snapshot.terminal), restored)
 }
 
+function handleLiveEvent(payload: unknown) {
+  if (typeof payload !== 'object' || payload === null) {
+    reportIssue('invalid_event')
+    return
+  }
+  const version = (payload as { protocolVersion?: unknown }).protocolVersion
+  if (version !== CHAT_PROTOCOL_VERSION) {
+    reportIssue('version_mismatch')
+    return
+  }
+  // Ajv 全量校验只在 dev 跑：事件由同进程 Rust 端生成（protocol.rs 是唯一源），
+  // 生产环境每条 live 事件 ~10µs 的 schema 校验是纯税,多对话并发时全落在主线程。
+  // 低频的 sync 快照仍始终校验（syncChatProtocol 里的 validateSync）。
+  if (import.meta.env.DEV && !validateEvent(payload)) {
+    console.error('Rejected invalid chat protocol event', validateEvent.errors, payload)
+    const conversationId = (payload as { conversationId?: unknown }).conversationId
+    reportIssue('invalid_event', typeof conversationId === 'string' ? conversationId : undefined)
+    if (typeof conversationId === 'string') void syncChatProtocol(conversationId)
+    return
+  }
+  applyEvent(payload as ChatProtocolEvent)
+}
+
 async function ensureListener() {
-  nativeListener ??= listen<unknown>('chat-protocol', ({ payload }) => {
-    if (typeof payload !== 'object' || payload === null) {
-      reportIssue('invalid_event')
-      return
-    }
-    const version = (payload as { protocolVersion?: unknown }).protocolVersion
-    if (version !== CHAT_PROTOCOL_VERSION) {
-      reportIssue('version_mismatch')
-      return
-    }
-    // Ajv 全量校验只在 dev 跑：事件由同进程 Rust 端生成（protocol.rs 是唯一源），
-    // 生产环境每条 live 事件 ~10µs 的 schema 校验是纯税,多对话并发时全落在主线程。
-    // 低频的 sync 快照仍始终校验（syncChatProtocol 里的 validateSync）。
-    if (import.meta.env.DEV && !validateEvent(payload)) {
-      console.error('Rejected invalid chat protocol event', validateEvent.errors, payload)
-      const conversationId = (payload as { conversationId?: unknown }).conversationId
-      reportIssue('invalid_event', typeof conversationId === 'string' ? conversationId : undefined)
-      if (typeof conversationId === 'string') void syncChatProtocol(conversationId)
-      return
-    }
-    applyEvent(payload as ChatProtocolEvent)
-  })
+  // 实时协议走 Tauri ipc Channel（点对点、保序），不再经过全局事件总线的
+  // 广播 + 逐 WebView 反序列化。WebView 重载后模块级单例归零，重新订阅即替换
+  // 后端单槽；订阅空窗期丢掉的事件由挂载时的 chat_sync_state 对账补齐。
+  nativeListener ??= (async () => {
+    const channel = new Channel<unknown>()
+    channel.onmessage = handleLiveEvent
+    await invoke('chat_protocol_subscribe', { channel })
+    return () => {}
+  })()
   await nativeListener
 }
 

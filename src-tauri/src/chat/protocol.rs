@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(debug_assertions)]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 use ts_rs::TS;
 
 use crate::state::AppState;
@@ -1527,10 +1529,39 @@ fn upsert_segment(
     }
 }
 
+/// 实时协议的唯一出口。生产路径走 Tauri ipc `Channel`(点对点、保序、绕过全局事件总线,
+/// 不再向每个 WebView 广播+反序列化);channel 未订阅(chat 窗口未建/已销毁)时事件直接
+/// 丢弃——协议本就为此设计了 sync/replay,前端挂载时 `chat_sync_state` 全量对账补齐。
+/// debug 构建额外广播到全局事件总线,喂 chat probe(probe.rs 靠 `app.listen` 收实时载荷)。
 fn emit_protocol(app: &AppHandle, event: ChatProtocolEvent) {
-    if let Err(error) = app.emit(CHAT_PROTOCOL_EVENT, event) {
+    #[cfg(debug_assertions)]
+    if let Err(error) = app.emit(CHAT_PROTOCOL_EVENT, &event) {
         eprintln!("Failed to emit {CHAT_PROTOCOL_EVENT}: {error}");
     }
+    let state = app.state::<AppState>();
+    let mut slot = state
+        .chat_protocol_channel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(channel) = slot.as_ref() {
+        // send 失败 = WebView 已销毁:清槽,后续事件不再白序列化,窗口重建后重新订阅。
+        if channel.send(event).is_err() {
+            *slot = None;
+        }
+    }
+}
+
+/// Chat 窗口挂载时调用,把协议直连通道注册进单槽(新 WebView 挂载/重载替换旧槽)。
+/// 订阅后前端立即对每个打开的会话跑 `chat_sync_state`,补齐订阅空窗期的事件。
+#[tauri::command]
+pub fn chat_protocol_subscribe(
+    state: tauri::State<'_, AppState>,
+    channel: tauri::ipc::Channel<ChatProtocolEvent>,
+) {
+    *state
+        .chat_protocol_channel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(channel);
 }
 
 pub fn register_run(

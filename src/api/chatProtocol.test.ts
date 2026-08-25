@@ -10,8 +10,14 @@ import {
 } from './chatProtocol'
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
-vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: invokeMock,
+  // 生产代码经 Channel 订阅实时事件;测试用 chatProtocolTesting.ingest 直灌,
+  // 这里只要一个能被 new 的空壳。
+  Channel: class {
+    onmessage: ((payload: unknown) => void) | null = null
+  },
+}))
 
 function event(seq: number, type: ChatRunEventEnvelope['type'] = 'run_started') {
   const common = {

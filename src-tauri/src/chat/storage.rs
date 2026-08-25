@@ -238,6 +238,13 @@ pub fn conversation_file_path(app: &AppHandle, id: &str) -> Result<PathBuf, Stri
     Ok(conversations_dir(app)?.join(format!("{}.json", id)))
 }
 
+/// 中断草稿日志路径(`{id}.draft.jsonl`,见 `chat::draft_journal`)。
+/// 扩展名刻意不是 `.json`:`conversation_file_ids_in_dir` 的扫描不会把它当会话文件。
+pub(crate) fn draft_journal_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    validate_conversation_id(id)?;
+    Ok(conversations_dir(app)?.join(format!("{id}.draft.jsonl")))
+}
+
 /// 获取对话附件目录
 pub fn conversation_attachments_dir(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     validate_conversation_id(id)?;
@@ -676,6 +683,9 @@ pub(crate) fn delete_conversation(app: &AppHandle, id: &str) -> Result<Vec<Strin
     save_index(app, &index)?;
 
     // ② 副产物尽力清，失败只记账。
+    if let Ok(draft) = draft_journal_path(app, id) {
+        let _ = fs::remove_file(draft);
+    }
     let attachments_dir = match conversations_dir(app) {
         Ok(dir) => Some(dir.join(format!("{}_attachments", id))),
         Err(e) => {

@@ -249,6 +249,15 @@ pub fn run() {
             // `conv_*` 目录，非空的孤儿工作区只报数不删（里面是用户产物）。
             chat::gc::sweep_conversation_side_artifacts(app.handle());
 
+            // 崩溃残留的中断草稿日志:按每个 message_id 的最后一行合并回会话文件后删除。
+            // setup 阶段不可能有活跃 run,没有并发写冲突。
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    chat::draft_journal::recover_orphan_drafts(&handle).await;
+                });
+            }
+
             // 周期性回收闲置的持久外部 CLI **进程**（10 分钟无活动即丢弃 → actor 关闭子进程）。
             // 原生会话 id 仍落在 disk 上，下一轮（或重新打开这条对话）必须 resume，不是开新会话。
             {
@@ -560,6 +569,7 @@ pub fn run() {
             chat::commands::interaction::get_request_debug_records,
             chat::commands::interaction::clear_request_debug_records,
             chat::protocol::chat_sync_state,
+            chat::protocol::chat_protocol_subscribe,
             // Chat 模块命令
             chat::commands::catalog::chat_get_conversations,
             chat::commands::interaction::chat_list_background_tasks,
