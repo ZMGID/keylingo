@@ -167,7 +167,7 @@ export function ChatTab({
                 </span>
               </div>
               <p className="kv-row-desc mt-1 min-w-0 break-all">
-                {lang === 'zh' ? '当前聊天模型：' : 'Current chat model: '}
+                {lang === 'zh' ? '聊天所选模型：' : 'Chat model: '}
                 {chatMaxOutputModelLabel}
               </p>
             </div>

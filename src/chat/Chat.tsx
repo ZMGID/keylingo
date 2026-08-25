@@ -58,6 +58,7 @@ import {
   type AgentRuntimeConfig,
 } from './api'
 import { loadLastAgentRuntime, saveLastAgentRuntime } from './lastAgentRuntime'
+import { loadLastModel, resolvePreferredChatModel, saveLastModel } from './lastModel'
 import {
   chatTitlebarMacInsetClass,
   chatTitlebarRowClass,
@@ -96,7 +97,8 @@ import {
   type ChatUserPromptPayload,
   type ChatSubagentPayload,
 } from '../api/tauri'
-import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
+import { getSettingsCached, refreshSettings, saveSettingsCached, subscribeSettings } from '../api/settingsCache'
+import { isPluginManagedServer, preservePluginManagedServers } from '../settings/connectorCatalog'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
 import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
 import { i18n, LangContext, type Lang } from '../settings/i18n'
@@ -292,35 +294,10 @@ const ChatSettingsPane = memo(function ChatSettingsPane({
 })
 
 /**
- * 记住用户在顶栏最后一次选的聊天模型与思考等级，作为新会话/空会话的默认（以用户的选择为准，
- * 取代旧的「默认模型」设置，也不再把思考等级硬回落到 high）。仅前端偏好，存 localStorage。
+ * 记住用户在顶栏最后一次选的思考等级，作为新会话/空会话草稿（以用户的选择为准，
+ * 也不再把思考等级硬回落到 high）。仅前端偏好，存 localStorage。聊天模型见 lastModel.ts。
  */
-const LAST_MODEL_KEY = 'kivio.chat.lastModel'
 const LAST_THINKING_KEY = 'kivio.chat.lastThinkingLevel'
-
-function loadLastModel(): { providerId: string; model: string } | null {
-  try {
-    const raw = window.localStorage.getItem(LAST_MODEL_KEY)
-    if (!raw) return null
-    const v = JSON.parse(raw)
-    if (v && typeof v.providerId === 'string' && typeof v.model === 'string' && v.providerId) {
-      return v
-    }
-  } catch {
-    /* ignore */
-  }
-  return null
-}
-
-function saveLastModel(providerId: string, model: string): void {
-  try {
-    if (providerId) {
-      window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify({ providerId, model }))
-    }
-  } catch {
-    /* ignore */
-  }
-}
 
 const VALID_THINKING_LEVELS: ReadonlySet<string> = new Set([
   'off',
@@ -368,6 +345,27 @@ function saveLastThinkingLevel(level: ThinkingLevel | null): void {
     else window.localStorage.removeItem(LAST_THINKING_KEY)
   } catch {
     /* ignore */
+  }
+}
+
+/** 把聊天里刚选的模型同步进 settings，供 Mixer / 后端回落，不当作引导里的「默认模型」。 */
+async function persistLastChatModelToSettings(providerId: string, model: string): Promise<void> {
+  if (!providerId.trim()) return
+  try {
+    const settings = await refreshSettings()
+    const current = settings.defaultModels?.chat
+    if (current?.providerId === providerId && current?.model === model) return
+    await saveSettingsCached({
+      ...settings,
+      defaultModels: {
+        ...settings.defaultModels,
+        chat: { providerId, model },
+      },
+      chatProviderId: providerId,
+      chatModel: model,
+    })
+  } catch (err) {
+    console.error('Failed to persist last chat model:', err)
   }
 }
 
@@ -1699,8 +1697,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       // 读-改-写：现读后端最新态，避免用缓存快照 map servers[] 时把后端刚 OAuth 刷新的
       // token 覆盖回旧值（见 handleApprovalPolicyChange 注释）。
       const settings = await refreshSettings()
-      const servers = (settings.chatTools?.servers ?? []).map((server) =>
-        server.id === serverId ? { ...server, enabled: !server.enabled } : server,
+      const prevServers = settings.chatTools?.servers ?? []
+      const current = prevServers.find((server) => server.id === serverId)
+      if (current && isPluginManagedServer(current)) return
+      const servers = preservePluginManagedServers(
+        prevServers,
+        prevServers.map((server) =>
+          server.id === serverId ? { ...server, enabled: !server.enabled } : server,
+        ),
       )
       // 乐观更新本地列表（开关即时反馈），保存后由 refreshToolIndicator 校正。
       setMcpServers(servers)
@@ -1797,24 +1801,35 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     try {
       const settings = await getSettingsCached()
       setUiLang((settings.settingsLanguage as Lang) || 'zh')
-      // 以用户最后一次在顶栏选的模型为默认；provider 仍存在时才用。localStorage 为空时
-      // （首次运行）回落到 onboarding 写入的 defaultModels.chat，再回落 lens / 翻译模型。
       const last = loadLastModel()
-      const lastProviderOk =
-        last && (settings.providers || []).some((p) => p.id === last.providerId)
-      const chatDefault = settings.defaultModels?.chat
-      if (last && lastProviderOk) {
-        setDraftProviderId(last.providerId)
-        setDraftModel(last.model)
-      } else if (chatDefault?.providerId) {
-        setDraftProviderId(chatDefault.providerId)
-        setDraftModel(chatDefault.model || '')
-      } else if (settings.lens?.providerId) {
-        setDraftProviderId(settings.lens.providerId)
-        setDraftModel(settings.lens.model || '')
-      } else {
-        setDraftProviderId(settings.translatorProviderId || '')
-        setDraftModel(settings.translatorModel || '')
+      const preferred = resolvePreferredChatModel({
+        providers: settings.providers || [],
+        last,
+        storedChat: settings.defaultModels?.chat ?? { providerId: '', model: '' },
+        legacyChat: {
+          providerId: settings.chatProviderId || '',
+          model: settings.chatModel || '',
+        },
+        lens: {
+          providerId: settings.lens?.providerId || '',
+          model: settings.lens?.model || '',
+        },
+        translator: {
+          providerId: settings.translatorProviderId || '',
+          model: settings.translatorModel || '',
+        },
+      })
+      setDraftProviderId(preferred.providerId)
+      setDraftModel(preferred.model)
+      // 聊天里选过的模型才写回 settings，避免把 Lens/翻译回落误当成 Chat 默认。
+      const stored = settings.defaultModels?.chat
+      if (
+        last
+        && last.providerId === preferred.providerId
+        && last.model === preferred.model
+        && (stored?.providerId !== last.providerId || stored?.model !== last.model)
+      ) {
+        void persistLastChatModelToSettings(last.providerId, last.model)
       }
     } catch {
       setDraftProviderId('dev-provider')
@@ -1857,6 +1872,13 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       void refreshToolIndicator()
     }, 1500)
   }, [refreshToolIndicator])
+
+  useEffect(() => {
+    return subscribeSettings((next) => {
+      setMcpServers(next.chatTools?.servers ?? [])
+      setUiLang((next.settingsLanguage as Lang) || 'zh')
+    })
+  }, [])
 
   // 开窗预热：后台把所有启用的 MCP server 连接并抓一次工具清单（fire-and-forget，
   // 连接池单飞保证幂等），首轮对话的工具收集不再现场握手。
@@ -4320,7 +4342,8 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const handleModelChange = useCallback(async (providerId: string, model: string) => {
     setDraftProviderId(providerId)
     setDraftModel(model)
-    saveLastModel(providerId, model) // 记住为全局默认
+    saveLastModel(providerId, model)
+    void persistLastChatModelToSettings(providerId, model)
 
     if (!currentConversation) return
     const conversationId = currentConversation.id
@@ -4893,7 +4916,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setUiLang(next)
     void (async () => {
       try {
-        const settings = await getSettingsCached()
+        const settings = await refreshSettings()
         await saveSettingsCached({ ...settings, settingsLanguage: next })
       } catch (err) {
         console.error('Failed to save UI language:', err)

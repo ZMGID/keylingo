@@ -90,6 +90,21 @@ describe('webSearchLoadedMcps', () => {
 })
 
 describe('buildInstalledMcpList', () => {
+  it('shows a disabled plugin MCP as off and still locked to the plugin page', () => {
+    const list = buildInstalledMcpList([
+      server({
+        id: 'plugin-cua-driver',
+        name: 'Cua Driver',
+        connectorId: 'plugin:cua-driver',
+        enabled: false,
+      }),
+    ])
+    expect(list).toHaveLength(1)
+    expect(list[0]?.kind).toBe('plugin')
+    expect(list[0]?.manageLocked).toBe(true)
+    expect(list[0]?.server.enabled).toBe(false)
+  })
+
   it('includes connector and plugin servers instead of hiding them', () => {
     const list = buildInstalledMcpList([
       server({ id: 'plugin-cua', name: 'Cua Driver', connectorId: 'plugin:cua-driver' }),

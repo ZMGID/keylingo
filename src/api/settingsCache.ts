@@ -11,12 +11,13 @@ import { api, type Settings } from './tauri'
  * （用完销毁），缓存随之丢弃；settings 编辑入口只存在于 chat 窗口内，其他窗口存活
  * 期间不会写 settings，因此接受理论上的窗口间 staleness，不做跨窗口失效广播。
  *
- * 已知局限（后端旁路写）：后端 OAuth 令牌刷新（mcp/manager.rs persist_refreshed_server）
- * 会直接改写 settings.chat_tools.servers[].auth/headers 并落盘，不经前端 saveSettings，
+ * 已知局限（后端旁路写）：后端会直接改 settings 并落盘、不经前端 saveSettings——
+ * OAuth 令牌刷新（mcp/manager.rs persist_refreshed_server）改 servers[].auth/headers；
+ * 插件启用/停用（plugins::set_plugin_enabled）改 plugin-* MCP 的 enabled。
  * 本缓存无对应失效。因此“读-改-写整个 Settings”的调用方必须用 refreshSettings()（现读）
- * 而非缓存快照，否则可能把刚刷新的 token 覆盖回旧值——Chat 的审批策略/ MCP 开关、
- * SkillCenter 保存均已如此处理。SettingsShell 可编辑 servers，其长驻草稿与后端刷新的
- * 字段级竞态属既有问题，靠 SWR pristine 校准缓解，非本缓存新引入。
+ * 而非缓存快照，否则可能把刚刷新的 token / 插件开关覆盖回旧值——Chat 的审批策略/ MCP 开关、
+ * SkillCenter 保存均已如此处理。SettingsShell 可编辑 servers，其长驻草稿必须在
+ * refreshSettings 后采用后端的 plugin MCP 行，否则 keep-alive 整份保存会把插件开关盖回去。
  *
  * 失败语义：读失败不写缓存（下次重试）、保存失败不动缓存——与 SettingsShell
  * “加载失败不合成默认值，避免错误状态下自动保存覆盖磁盘真实数据”的既有约定一致。

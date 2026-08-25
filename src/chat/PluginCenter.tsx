@@ -96,7 +96,7 @@ function PluginCard({
                 {plugin.mcpCount ?? (plugin.hasMcp ? 1 : 0)}
               </span>
               {' '}MCP
-              {plugin.mcpActive ? (
+              {plugin.enabled && plugin.mcpActive ? (
                 <span className="text-emerald-600 dark:text-emerald-400">{t.chatPluginMcpRegistered}</span>
               ) : plugin.enabled && (plugin.mcpCount ?? 0) > 0 ? (
                 <span className="text-amber-600 dark:text-amber-400">{t.chatPluginMcpPending}</span>

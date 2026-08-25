@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { isPluginManagedServer, preservePluginManagedServers } from './connectorCatalog'
+import {
+  adoptFreshPluginManagedServers,
+  isPluginManagedServer,
+  preservePluginManagedServers,
+} from './connectorCatalog'
 
 describe('isPluginManagedServer', () => {
   it('hides plugin MCP rows from the connectors page', () => {
@@ -37,5 +41,33 @@ describe('preservePluginManagedServers', () => {
 
   it('puts a deleted plugin row back', () => {
     expect(preservePluginManagedServers([plugin, user], [user])).toEqual([user, plugin])
+  })
+})
+
+describe('adoptFreshPluginManagedServers', () => {
+  const plugin = { id: 'plugin-cua-driver', connectorId: 'plugin:cua-driver', enabled: true, command: 'cua-driver' }
+  const user = { id: 'my-mcp', connectorId: null, enabled: true, command: 'npx' }
+
+  it('takes plugin enabled from fresh so a settings draft cannot revive a disabled plugin', () => {
+    const freshPlugin = { ...plugin, enabled: false }
+    expect(adoptFreshPluginManagedServers([plugin, user], [freshPlugin, user])).toEqual([
+      freshPlugin,
+      user,
+    ])
+  })
+
+  it('drops a plugin row that the backend uninstalled and appends a newly registered one', () => {
+    const office = { id: 'plugin-officecli', connectorId: 'plugin:officecli', enabled: true }
+    expect(adoptFreshPluginManagedServers([plugin, user], [office, user])).toEqual([user, office])
+  })
+
+  it('returns the same array when plugin rows are already the fresh objects', () => {
+    const draft = [plugin, user]
+    expect(adoptFreshPluginManagedServers(draft, draft)).toBe(draft)
+  })
+
+  it('returns the draft when fresh plugin rows are clones with the same switch state', () => {
+    const draft = [plugin, user]
+    expect(adoptFreshPluginManagedServers(draft, [{ ...plugin }, user])).toBe(draft)
   })
 })

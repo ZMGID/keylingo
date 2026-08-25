@@ -35,7 +35,6 @@ export function DoneStep({ t, settings }: DoneStepProps) {
   const modelRows = [
     { label: t.onboardingDoneQuickTranslateModel, providerId: settings.screenshotTranslation?.providerId || '', model: settings.screenshotTranslation?.model || '' },
     { label: t.onboardingDoneLensModel, providerId: settings.lens?.providerId || '', model: settings.lens?.model || '' },
-    { label: t.onboardingDoneChatModel, providerId: settings.defaultModels.chat.providerId, model: settings.defaultModels.chat.model },
   ]
 
   const hotkeyRows = [

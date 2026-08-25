@@ -100,8 +100,21 @@ describe('onboarding validation', () => {
     expect(validateProviderStep(settings).ok).toBe(false)
   })
 
-  it('requires quick translate, lens, and chat model bindings', () => {
+  it('requires quick translate and lens model bindings', () => {
     const settings = baseSettings(configuredBindings)
+    expect(canCompleteOnboarding(settings)).toBe(true)
+  })
+
+  it('does not require a Chat default model', () => {
+    const settings = baseSettings({
+      ...configuredBindings,
+      defaultModels: {
+        ...configuredBindings.defaultModels,
+        chat: { providerId: '', model: '' },
+      },
+      chatProviderId: '',
+      chatModel: '',
+    })
     expect(canCompleteOnboarding(settings)).toBe(true)
   })
 

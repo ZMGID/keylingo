@@ -19,7 +19,8 @@ pub use install::{
     PluginActionResult, PluginInstallBrief, PluginStatus,
 };
 pub use lifecycle::{
-    ensure_officecli_mcp_flush_env, plugin_skill_available, skill_owned_by_plugin,
+    ensure_officecli_mcp_flush_env, heal_and_persist_disabled_plugin_mcp, plugin_skill_available,
+    skill_owned_by_plugin,
 };
 pub use preview::{note_after_officecli_tool, stop_all_previews};
 pub use state::{

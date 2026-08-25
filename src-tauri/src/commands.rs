@@ -47,7 +47,8 @@ pub(crate) fn apply_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<
 
 /// 获取当前应用设置
 #[tauri::command]
-pub(crate) fn get_settings(state: State<AppState>) -> Settings {
+pub(crate) fn get_settings(app: AppHandle, state: State<AppState>) -> Settings {
+    crate::plugins::heal_and_persist_disabled_plugin_mcp(&app, &state);
     state.settings_read().clone()
 }
 

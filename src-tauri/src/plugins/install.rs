@@ -99,14 +99,16 @@ pub fn list_plugin_statuses_cached() -> Result<Vec<PluginStatus>, String> {
 
 /// 填充 mcp_active（settings 里该 server 是否已注册且 enabled）。纯 settings 读，无 spawn。
 fn fill_mcp_active(list: &mut [PluginStatus], state: &AppState) {
+    super::lifecycle::heal_disabled_plugin_mcp(state);
     let settings = state.settings_read();
     for status in list.iter_mut() {
         if let Some(sid) = status.mcp_server_id.as_deref() {
-            status.mcp_active = settings
-                .chat_tools
-                .servers
-                .iter()
-                .any(|s| s.id == sid && s.enabled && !s.command.trim().is_empty());
+            status.mcp_active = status.enabled
+                && settings
+                    .chat_tools
+                    .servers
+                    .iter()
+                    .any(|s| s.id == sid && s.enabled && !s.command.trim().is_empty());
         }
     }
 }

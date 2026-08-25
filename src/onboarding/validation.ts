@@ -43,12 +43,6 @@ export function validateProviderStep(settings: Settings): { ok: boolean; reason?
     return { ok: false, reason: 'missing_lens_model' }
   }
 
-  const chatProviderId = settings.defaultModels.chat.providerId.trim()
-  const chatModel = settings.defaultModels.chat.model.trim()
-  if (!isProviderModelBindingUsable(settings, chatProviderId, chatModel)) {
-    return { ok: false, reason: 'missing_chat_model' }
-  }
-
   return { ok: true }
 }
 

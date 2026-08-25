@@ -112,16 +112,6 @@ function maybeAutoBindDefaults(settings: Settings, provider: ModelProvider): Set
     }
   }
 
-  const chatEmpty = !next.defaultModels.chat.providerId.trim() || !next.defaultModels.chat.model.trim()
-  if (chatEmpty) {
-    next.defaultModels = {
-      ...next.defaultModels,
-      chat: { providerId: provider.id, model: primaryModel },
-    }
-    next.chatProviderId = provider.id
-    next.chatModel = primaryModel
-  }
-
   const lensEmpty = !next.lens?.providerId?.trim() || !next.lens?.model?.trim()
   if (lensEmpty) {
     next.lens = {
@@ -517,27 +507,6 @@ export function ProviderSetupPanel({ t, lang, settings, onChange }: ProviderSetu
                 }}
               />
               <p className="onboarding-field-hint">{t.onboardingProviderLensHint}</p>
-            </div>
-            <div className="onboarding-default-cell">
-              <span className="onboarding-field-label">{t.onboardingProviderChatModel}</span>
-              <ModelPairSelect
-                providerId={settings.defaultModels.chat.providerId}
-                model={settings.defaultModels.chat.model}
-                providers={settings.providers}
-                className="w-full"
-                onChange={(providerId, model) => {
-                  onChange({
-                    ...settings,
-                    defaultModels: {
-                      ...settings.defaultModels,
-                      chat: { providerId, model },
-                    },
-                    chatProviderId: providerId,
-                    chatModel: model,
-                  })
-                }}
-              />
-              <p className="onboarding-field-hint">{t.onboardingProviderChatHint}</p>
             </div>
           </div>
         </div>

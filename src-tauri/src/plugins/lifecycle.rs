@@ -18,6 +18,64 @@ pub fn plugin_mcp_server_id(plugin_id: &str) -> String {
     format!("plugin-{plugin_id}")
 }
 
+/// 插件 meta 已关闭时，把对应 plugin MCP 的 `enabled` 关掉。
+/// 设置页 keep-alive 草稿曾把关闭盖回 settings；读 settings / 列插件时收口。
+pub fn disable_mcp_for_plugins(settings: &mut Settings, plugin_ids: &[&str]) -> bool {
+    let mut changed = false;
+    for plugin_id in plugin_ids {
+        let server_id = plugin_mcp_server_id(plugin_id);
+        if let Some(slot) = settings
+            .chat_tools
+            .servers
+            .iter_mut()
+            .find(|server| server.id == server_id)
+        {
+            if slot.enabled {
+                slot.enabled = false;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+pub fn heal_disabled_plugin_mcp(state: &AppState) -> bool {
+    let disabled: Vec<&str> = PLUGIN_CATALOG
+        .iter()
+        .filter(|plugin| plugin.mcp.is_some() && !is_enabled(plugin.id))
+        .map(|plugin| plugin.id)
+        .collect();
+    if disabled.is_empty() {
+        return false;
+    }
+    let needs = {
+        let guard = state.settings_read();
+        disabled.iter().any(|plugin_id| {
+            let server_id = plugin_mcp_server_id(plugin_id);
+            guard
+                .chat_tools
+                .servers
+                .iter()
+                .any(|server| server.id == server_id && server.enabled)
+        })
+    };
+    if !needs {
+        return false;
+    }
+    let mut guard = state.settings_write();
+    disable_mcp_for_plugins(&mut guard, &disabled)
+}
+
+pub fn heal_and_persist_disabled_plugin_mcp(app: &AppHandle, state: &AppState) {
+    if !heal_disabled_plugin_mcp(state) {
+        return;
+    }
+    let snapshot = state.settings_read().clone();
+    if let Err(err) = persist_settings(app, &snapshot) {
+        eprintln!("[plugins] persist healed plugin MCP: {err}");
+    }
+}
+
 /// connector_id 标记插件归属：连接器页排除；MCP 已安装列表展示但只读（开关在插件页）。
 pub fn plugin_mcp_connector_id(plugin_id: &str) -> String {
     format!("plugin:{plugin_id}")
@@ -186,4 +244,37 @@ pub fn ensure_officecli_mcp_flush_env(app: &AppHandle, state: &AppState) {
         let state = app2.state::<AppState>();
         state.mcp_disconnect_server(&sid).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{disable_mcp_for_plugins, plugin_mcp_server_id};
+    use crate::settings::{ChatMcpServer, Settings};
+
+    #[test]
+    fn disable_mcp_for_plugins_turns_off_named_plugin_servers_only() {
+        let mut settings = Settings::default();
+        settings.chat_tools.servers = vec![
+            ChatMcpServer {
+                id: plugin_mcp_server_id("cua-driver"),
+                name: "Cua Driver (插件)".into(),
+                enabled: true,
+                command: "cua-driver".into(),
+                connector_id: Some("plugin:cua-driver".into()),
+                ..Default::default()
+            },
+            ChatMcpServer {
+                id: "user-mcp".into(),
+                name: "Mine".into(),
+                enabled: true,
+                command: "npx".into(),
+                ..Default::default()
+            },
+        ];
+
+        assert!(disable_mcp_for_plugins(&mut settings, &["cua-driver"]));
+        assert!(!settings.chat_tools.servers[0].enabled);
+        assert!(settings.chat_tools.servers[1].enabled);
+        assert!(!disable_mcp_for_plugins(&mut settings, &["cua-driver"]));
+    }
 }

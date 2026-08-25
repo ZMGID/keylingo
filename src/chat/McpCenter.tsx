@@ -16,7 +16,7 @@ import {
   type McpServerState,
   type Settings,
 } from '../api/tauri'
-import { getSettingsCached, refreshSettings, saveSettingsCached } from '../api/settingsCache'
+import { peekSettings, refreshSettings, saveSettingsCached, subscribeSettings } from '../api/settingsCache'
 import { Toggle, Select, Input } from '../settings/components'
 import { Button, IconButton } from '../components/Button'
 import { McpRegistryBrowser } from './McpRegistryBrowser'
@@ -37,7 +37,7 @@ import {
   textToArgs,
   textToEnv,
 } from '../settings/chatToolsShared'
-import { isPluginManagedServer, preservePluginManagedServers } from '../settings/connectorCatalog'
+import { adoptFreshPluginManagedServers, isPluginManagedServer, preservePluginManagedServers } from '../settings/connectorCatalog'
 import {
   buildInstalledMcpList,
   entriesOfKind,
@@ -112,7 +112,13 @@ export function McpCenter() {
 
   const loadSettings = useCallback(async () => {
     try {
-      const loaded = await getSettingsCached()
+      const cached = peekSettings()
+      if (cached) {
+        settingsRef.current = cached
+        setSettings(cached)
+        setLoading(false)
+      }
+      const loaded = await refreshSettings()
       settingsRef.current = loaded
       setSettings(loaded)
     } catch (err) {
@@ -125,6 +131,23 @@ export function McpCenter() {
   useEffect(() => {
     void loadSettings()
   }, [loadSettings])
+
+  useEffect(() => {
+    return subscribeSettings((fresh) => {
+      setSettings((prev) => {
+        if (!prev) return fresh
+        const prevServers = prev.chatTools?.servers ?? []
+        const nextServers = adoptFreshPluginManagedServers(prevServers, fresh.chatTools?.servers ?? [])
+        if (nextServers === prevServers) return prev
+        const next = {
+          ...prev,
+          chatTools: { ...(prev.chatTools ?? defaultChatTools()), servers: nextServers },
+        }
+        settingsRef.current = next
+        return next
+      })
+    })
+  }, [])
 
   // 连接状态：订阅推送 + 已启用服务器初次快照
   useEffect(() => {
