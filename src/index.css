@@ -251,19 +251,6 @@ html.windows body {
     0 20px 52px -22px rgba(0, 0, 0, 0.82);
 }
 
-@keyframes reasoning-tail-pulse {
-  from {
-    opacity: 0.72;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-.reasoning-stream-tail {
-  animation: reasoning-tail-pulse 0.22s ease-out;
-}
-
 /* 思考过程「生成中」标签：柔和呼吸亮度。
    不使用 background-clip:text 或 mask-image：两者在部分机器的 WKWebView/WebView2
    上会退化成文字后面的矩形色块，暗色模式尤其明显。直接动画 opacity 是跨 WebView
@@ -2695,6 +2682,11 @@ button.chat-composer-status-item:hover {
   .chat-motion-tool-shimmer {
     animation: none;
     color: inherit;
+  }
+
+  .kv-stream-logo {
+    animation: none;
+    opacity: 1;
   }
 
   .subagent-sparkle.is-running::before {
@@ -7816,10 +7808,9 @@ input[type="password"]::-ms-clear {
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
 
-/* ---- 生成中状态行的动效 logo（GRD-02 · 横向扫光）。
-   点阵：等距方格 step=3 / r=1.05（点间隙清晰）；--dx 是点相对 Logo 中心的
-   横向归一化位置。通过错峰让一条亮波左右往返扫过 Logo，不让整块点阵一起闪烁。
-   颜色与动画只在这里。 ---- */
+/* ---- 生成中状态行的 logo。
+   点阵只是静态形状。动效是整颗 SVG 一段呼吸，不要给 128 个圆各自挂
+   animation：WebView2 会按元素提合成层，思考一轮 GPU 进程就能到 20%+。 ---- */
 .kv-stream-logo {
   display: block;
   overflow: visible;
@@ -7827,7 +7818,8 @@ input[type="password"]::-ms-clear {
   width: var(--kv-stream-logo-size, 28px);
   height: var(--kv-stream-logo-size, 28px);
   --k: 1; /* 时长倍率：越小越快 */
-  --dot: #1d6bf0; /* 唯一颜色 */
+  --dot: #1d6bf0;
+  animation: kv-stream-logo-pulse calc(1.6s * var(--k)) ease-in-out infinite;
 }
 
 .chat-conversation-loading {
@@ -7842,23 +7834,14 @@ input[type="password"]::-ms-clear {
   --k: 0.68;
 }
 .kv-stream-logo circle {
-  transform-box: fill-box;
-  transform-origin: 50% 50%;
   fill: var(--dot);
 }
-.kv-stream-logo .dt {
-  animation: kv-stream-sweep calc(1.55s * var(--k)) cubic-bezier(0.4, 0, 0.3, 1) infinite alternate;
-  /* 左侧点（--dx 更小）先进入高亮，随后向右传播；alternate 让下一半周期反向传播。 */
-  animation-delay: calc((1 - var(--dx)) * -0.18s * var(--k));
-}
-@keyframes kv-stream-sweep {
-  0% { fill-opacity: 0.28; transform: scale(0.72); }
-  24% { fill-opacity: 0.34; transform: scale(0.78); }
-  50% { fill-opacity: 1; transform: scale(1.24); }
-  76%, 100% { fill-opacity: 0.28; transform: scale(0.72); }
+@keyframes kv-stream-logo-pulse {
+  0%, 100% { opacity: 0.42; }
+  50% { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .kv-stream-logo circle { animation: none; transform: none; fill-opacity: 1; }
+  .kv-stream-logo { animation: none; opacity: 1; }
 }
 /* 闲置常驻态：动画停、点阵满亮（与 reduced-motion 同形）。 */
-.kv-stream-status-idle .kv-stream-logo .dt { animation: none; transform: none; fill-opacity: 1; }
+.kv-stream-status-idle .kv-stream-logo { animation: none; opacity: 1; }

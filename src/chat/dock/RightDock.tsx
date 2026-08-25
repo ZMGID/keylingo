@@ -1,6 +1,6 @@
 // Right Dock 容器：tab 条（文件树 / Git / 终端 / 任务）+ 常驻面板 + 左缘拖拽调宽 + 折叠滑出。
 // 宽度通过 CSS 变量 --chat-dock-width 直写（拖拽过程不触发 React 重渲），松手才持久化。
-import { memo, useCallback, useRef, type PointerEvent as ReactPointerEvent } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Activity, FolderTree, GitBranch, Terminal, X } from 'lucide-react'
 import { i18n, type Lang } from '../../settings/i18n'
 import { IconButton } from '../../components/Button'
@@ -111,6 +111,12 @@ export const RightDock = memo(function RightDock({
   const filesActive = open && activeTab === 'files'
   const gitActive = open && activeTab === 'git'
   const terminalActive = open && activeTab === 'terminal'
+  // 终端面板一挂载就建 PTY + xterm/WebGL（约 25MB PowerShell + GPU 画布），
+  // 且切 tab 不断会话。没点过「终端」就不要挂，避免每个会话窗口白送一份常驻壳。
+  const [terminalMounted, setTerminalMounted] = useState(() => activeTab === 'terminal')
+  useEffect(() => {
+    if (terminalActive) setTerminalMounted(true)
+  }, [terminalActive])
   return (
     <aside
       ref={shellRef}
@@ -172,7 +178,9 @@ export const RightDock = memo(function RightDock({
         <GitPanel workdir={workdir} active={gitActive} lang={lang} onRevealInTree={onRevealInTree} />
       </div>
       <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'terminal'}>
-        <TerminalPanel workdir={workdir} active={terminalActive} lang={lang} />
+        {terminalMounted && (
+          <TerminalPanel workdir={workdir} active={terminalActive} lang={lang} />
+        )}
       </div>
       <div className="flex min-h-0 flex-1 flex-col" hidden={activeTab !== 'tasks'}>
         <BackgroundTasksPanel

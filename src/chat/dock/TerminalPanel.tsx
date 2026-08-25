@@ -197,6 +197,12 @@ export function TerminalPanel({ workdir, active, lang }: TerminalPanelProps) {
     return () => window.cancelAnimationFrame(frame)
   }, [active, syncResize])
 
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.cursorBlink = active
+  }, [active, restartNonce])
+
   const handleRestart = useCallback(() => {
     setRestartNonce((nonce) => nonce + 1)
   }, [])

@@ -6,7 +6,8 @@ const GRID_SPACING = 20
 const DOT_RADIUS = 1
 const PATTERN_MIN_SEC = 7
 const PATTERN_MAX_SEC = 12
-const TARGET_FRAME_MS = 1000 / 20
+// Windows WebView2 的 GPU 进程对全幅 canvas 更敏感；10fps 仍是慢扫，CPU 大约砍半。
+const TARGET_FRAME_MS = isWindows ? 1000 / 10 : 1000 / 20
 const MAX_CANVAS_DPR = 1.5
 const MAX_CANVAS_DPR_WINDOWS = 1
 const ALPHA_BUCKETS = 12
@@ -232,13 +233,18 @@ export function ChatDotGridBackground() {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    // ponytail: 不开 desynchronized —— 这块画布本来就按 20fps 跑（TARGET_FRAME_MS），
+    // ponytail: 不开 desynchronized —— 这块画布按 10–20fps 跑（TARGET_FRAME_MS），
     // 低延迟直通路径一点收益没有，却会在「transparent(true) 窗口 + 圆角 overflow:hidden 祖先」
     // 下被 WebView2 降级成不透明黑层，把整个主区涂黑。
     const ctx = canvas.getContext('2d', { alpha: true })
     if (!ctx) return
     const buckets = bucketsRef.current
     let disposed = false
+    let unfocused = false
+    let offscreen = false
+
+    const isPaused = () =>
+      disposed || document.hidden || unfocused || offscreen || reducedMotionRef.current
 
     const clearScheduledFrame = () => {
       if (frameRef.current) {
@@ -329,9 +335,8 @@ export function ChatDotGridBackground() {
 
     const startAnimation = () => {
       clearScheduledFrame()
-      if (disposed || document.hidden) return
-      if (reducedMotionRef.current) {
-        draw(performance.now())
+      if (isPaused()) {
+        if (!disposed && !document.hidden && !offscreen) draw(performance.now())
         return
       }
       frameRef.current = window.requestAnimationFrame(loop)
@@ -340,7 +345,7 @@ export function ChatDotGridBackground() {
     const loop = (time: number) => {
       draw(time)
       frameTimerRef.current = window.setTimeout(() => {
-        if (!disposed && !document.hidden && !reducedMotionRef.current) {
+        if (!isPaused()) {
           frameRef.current = window.requestAnimationFrame(loop)
         }
       }, TARGET_FRAME_MS)
@@ -381,12 +386,33 @@ export function ChatDotGridBackground() {
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
 
+    const onWindowBlur = () => {
+      unfocused = true
+      clearScheduledFrame()
+    }
+    const onWindowFocus = () => {
+      unfocused = false
+      startAnimation()
+    }
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('focus', onWindowFocus)
+
+    const intersectionObserver = new IntersectionObserver((entries) => {
+      offscreen = entries.every((entry) => !entry.isIntersecting)
+      if (offscreen) clearScheduledFrame()
+      else startAnimation()
+    })
+    intersectionObserver.observe(canvas)
+
     return () => {
       disposed = true
       resizeObserver.disconnect()
       themeObserver.disconnect()
+      intersectionObserver.disconnect()
       motionMedia.removeEventListener('change', onMotionChange)
       document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('focus', onWindowFocus)
       clearScheduledFrame()
       patternRef.current = null
       dotsRef.current = []

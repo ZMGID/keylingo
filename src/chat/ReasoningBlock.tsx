@@ -20,7 +20,6 @@ function formatThinkingDuration(durationMs: number | null | undefined): string {
 export function ReasoningBlock({ reasoning, streaming = false, durationMs = null }: ReasoningBlockProps) {
   const collapsible = reasoning.trim().length > 0
   const [open, setOpen] = useState(false)
-  const [contentPulse, setContentPulse] = useState(false)
   const [bodyMaxHeight, setBodyMaxHeight] = useState<number | null>(null)
   const [liveDurationMs, setLiveDurationMs] = useState(0)
   const userExpandedRef = useRef(false)
@@ -31,13 +30,6 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
   const showCollapsed = collapsible && !open
   /** 生成完毕的折叠态只留标题行，正文完全隐藏 */
   const hideBody = !streaming && showCollapsed
-
-  useEffect(() => {
-    if (!streaming) return
-    setContentPulse(true)
-    const timer = window.setTimeout(() => setContentPulse(false), 220)
-    return () => window.clearTimeout(timer)
-  }, [reasoning, streaming])
 
   useEffect(() => {
     if (!streaming || !collapsible) {
@@ -96,7 +88,6 @@ export function ReasoningBlock({ reasoning, streaming = false, durationMs = null
   const scrollClass = [
     'reasoning-scroll-box custom-scrollbar',
     streaming ? 'is-streaming' : 'is-expanded',
-    contentPulse ? 'reasoning-stream-tail' : '',
   ].join(' ')
 
   const handleToggle = () => {

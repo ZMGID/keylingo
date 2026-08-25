@@ -36,6 +36,7 @@ describe('ReasoningBlock', () => {
 
     rerender(<ReasoningBlock reasoning={'alpha\nbeta\ngamma'} streaming />)
     expect(body.style.maxHeight).toBe('')
+    expect(container.querySelector('.reasoning-stream-tail')).toBeNull()
   })
 
   it('renders markdown and code fences as plain thinking text', () => {

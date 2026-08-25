@@ -10,7 +10,7 @@ interface UseStreamRenderFrameParams {
 
 function streamRenderInterval(snapshot: ConversationStreamSnapshot): number {
   // Tests deliberately keep the historical rAF-only semantics. In production,
-  // growing Markdown benefits more from a stable 32–220ms cadence than from
+  // growing Markdown benefits more from a stable 50–220ms cadence than from
   // parsing once per display frame.
   const contentSize = (snapshot.content?.length ?? 0) + (snapshot.reasoning?.length ?? 0)
   const structuredSize = (snapshot.toolCalls?.length ?? 0) * 512 + (snapshot.segments?.length ?? 0) * 64
@@ -20,7 +20,7 @@ function streamRenderInterval(snapshot: ConversationStreamSnapshot): number {
       : totalSize >= 60_000 ? 140
         : (snapshot.toolCalls?.length ?? 0) > 0 || (snapshot.segments?.length ?? 0) > 8 ? 120
           : totalSize >= 12_000 ? 80
-            : 32
+            : 50
   if (typeof document !== 'undefined' && document.hidden) {
     return Math.min(750, Math.max(160, foregroundInterval * 5))
   }

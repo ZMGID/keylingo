@@ -32,7 +32,7 @@ export function ChatTitlebarActions({
         <ToggleIcon
           size={15}
           strokeWidth={1.75}
-          className={`transition-transform duration-300 ease-out will-change-transform group-hover:scale-110 group-active:scale-90 ${
+          className={`transition-transform duration-300 ease-out group-hover:scale-110 group-active:scale-90 ${
             sidebarExpanded ? 'group-hover:-translate-x-0.5' : 'group-hover:translate-x-0.5'
           }`}
         />
@@ -47,7 +47,7 @@ export function ChatTitlebarActions({
         <SquarePen
           size={15}
           strokeWidth={1.75}
-          className="transition-transform duration-300 ease-out will-change-transform group-hover:-rotate-6 group-hover:scale-110 group-active:scale-90"
+          className="transition-transform duration-300 ease-out group-hover:-rotate-6 group-hover:scale-110 group-active:scale-90"
         />
       </button>
     </div>
