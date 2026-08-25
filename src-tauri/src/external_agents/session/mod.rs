@@ -11,6 +11,7 @@ use tauri::Manager;
 use crate::external_agents::types::ExternalAgentSession;
 
 pub mod acp;
+mod acp_terminal;
 pub mod claude_init;
 /// 常驻 `claude` 会话（B1）：一个会话一个进程。
 pub mod claude_stream;
