@@ -208,6 +208,10 @@ async fn apply_settings(
         return Err(err);
     }
 
+    if previous_settings.keep_chat_window_alive && !sanitized.keep_chat_window_alive {
+        crate::shortcuts::destroy_hidden_chat_window(app);
+    }
+
     if let Err(err) = setup_tray(app) {
         eprintln!("Failed to update tray: {err}");
     }

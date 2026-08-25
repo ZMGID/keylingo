@@ -1526,6 +1526,10 @@ pub struct Settings {
     /// `--from-autostart` 仍会单独跳过弹窗（插件参数偶发丢失时靠本开关兜底）。
     #[serde(default = "default_false")]
     pub launch_minimized_to_tray: bool,
+    /// 关闭聊天窗口时隐藏复用（默认 false = 销毁 WebView 回收内存）。
+    /// 高频开关 / 低配机可避免每次冷创建的启动延迟和风扇起来。
+    #[serde(default = "default_false")]
+    pub keep_chat_window_alive: bool,
     #[serde(default)]
     pub translator_provider_id: String,
     #[serde(default = "default_openai_model")]
@@ -1732,6 +1736,7 @@ impl Default for Settings {
             auto_paste: true,
             launch_at_startup: false,
             launch_minimized_to_tray: false,
+            keep_chat_window_alive: false,
             translator_provider_id: "default-translator".to_string(),
             translator_model: "gpt-4o".to_string(),
             chat_provider_id: String::new(),
@@ -3079,6 +3084,13 @@ mod tests {
         let settings: Settings =
             serde_json::from_str("{}").expect("legacy settings should deserialize");
         assert!(!settings.translucent_sidebar);
+    }
+
+    #[test]
+    fn legacy_settings_keep_chat_window_alive_off_by_default() {
+        let settings: Settings =
+            serde_json::from_str("{}").expect("legacy settings should deserialize");
+        assert!(!settings.keep_chat_window_alive);
     }
 
     #[test]

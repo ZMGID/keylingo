@@ -1066,6 +1066,8 @@ export type Settings = {
   launchAtStartup: boolean
   /** 启动后不打开聊天窗口，进程留在托盘（适合开机自启后后台常驻） */
   launchMinimizedToTray: boolean
+  /** 关闭聊天窗口时隐藏复用（默认 false = 销毁）。下次打开无需重新加载，占用更多内存。 */
+  keepChatWindowAlive?: boolean
   translatorProviderId: string
   translatorModel: string
   chatProviderId: string
@@ -1684,6 +1686,7 @@ export function normalizeSettings(settings: Settings): Settings {
     autoPaste: current.autoPaste ?? true,
     launchAtStartup: current.launchAtStartup ?? false,
     launchMinimizedToTray: current.launchMinimizedToTray ?? false,
+    keepChatWindowAlive: current.keepChatWindowAlive ?? false,
     translatorProviderId: current.translatorProviderId ?? '',
     translatorModel: current.translatorModel ?? '',
     chatProviderId: effectiveChatModel.providerId,

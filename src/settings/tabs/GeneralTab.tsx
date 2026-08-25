@@ -211,7 +211,7 @@ export function AppearanceGroup({
   )
 }
 
-/** 行为：开机自启 / 启动后最小化到托盘 / 失败重试。 */
+/** 行为：开机自启 / 启动后最小化到托盘 / 关闭时保持聊天窗口 / 失败重试。 */
 export function BehaviorGroup({
   settings,
   t,
@@ -241,6 +241,13 @@ export function BehaviorGroup({
         <Toggle
           checked={settings.launchMinimizedToTray ?? false}
           onChange={(v) => onUpdateSettings({ launchMinimizedToTray: v })}
+        />
+      </SettingRow>
+      <SettingRow label={t.keepChatWindowAlive} description={t.keepChatWindowAliveDesc}>
+        <Toggle
+          checked={settings.keepChatWindowAlive ?? false}
+          onChange={(v) => onUpdateSettings({ keepChatWindowAlive: v })}
+          ariaLabel={t.keepChatWindowAlive}
         />
       </SettingRow>
       <SettingRow label={t.retryEnabled}>

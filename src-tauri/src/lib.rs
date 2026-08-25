@@ -57,8 +57,8 @@ use settings::load_settings;
 #[cfg(target_os = "macos")]
 use shortcuts::set_macos_regular_activation_policy;
 use shortcuts::{
-    display_hotkey_errors, open_chat_window, open_settings_window_for_activation, register_hotkeys,
-    setup_tray,
+    display_hotkey_errors, hide_chat_window, open_chat_window, open_settings_window_for_activation,
+    register_hotkeys, setup_tray,
 };
 use state::AppState;
 use updates::check_github_latest_release;
@@ -155,6 +155,18 @@ pub fn run() {
         .plugin(autostart_plugin)
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == "chat" {
+                    let keep_alive = window
+                        .app_handle()
+                        .state::<AppState>()
+                        .settings_read()
+                        .keep_chat_window_alive;
+                    if keep_alive {
+                        api.prevent_close();
+                        hide_chat_window(window.app_handle(), window);
+                    }
+                    return;
+                }
                 if window.label() == "lens" || window.label() == "translate" {
                     api.prevent_close();
                     // Windows：原生关闭（Alt+F4 等 WM_CLOSE）也要走完整清理 + destroy，回收内存，
@@ -213,10 +225,9 @@ pub fn run() {
         .setup(|app| {
             let launched_from_autostart = std::env::args().any(|arg| arg == AUTOSTART_ARG);
 
-            // Windows：退出后台执行速度节流（EcoQoS）。本应用所有窗口都可关闭（关闭即销毁,
-            // 空闲降到 ~50MB），无窗口时进程会被 Win11 当后台空闲进程节流,饿死全局热键的
-            // WM_HOTKEY 消息泵 → 热键失灵（托盘点击是 shell 唤醒故仍可用）。退出 EXECUTION_SPEED
-            // 节流后,即便无窗口空闲也保持正常调度,热键消息泵持续工作。
+            // Windows：退出后台执行速度节流（EcoQoS）。无可见窗口时进程会被 Win11 当后台空闲
+            // 进程节流,饿死全局热键的 WM_HOTKEY 消息泵 → 热键失灵（托盘点击是 shell 唤醒故仍
+            // 可用）。退出 EXECUTION_SPEED 节流后,即便无窗口空闲也保持正常调度,热键消息泵持续工作。
             #[cfg(target_os = "windows")]
             disable_process_power_throttling();
 

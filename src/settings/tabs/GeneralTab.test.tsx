@@ -104,7 +104,7 @@ describe('BehaviorGroup', () => {
     const toggles = screen.getAllByRole('switch')
     await userEvent.click(toggles[0])
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ launchAtStartup: true })
-    await userEvent.click(toggles[2])
+    await userEvent.click(toggles[3])
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ retryEnabled: false })
   })
 
@@ -113,6 +113,12 @@ describe('BehaviorGroup', () => {
     const toggles = screen.getAllByRole('switch')
     await userEvent.click(toggles[1])
     expect(props.onUpdateSettings).toHaveBeenCalledWith({ launchMinimizedToTray: true })
+  })
+
+  it('关闭时保持聊天窗口开关写 keepChatWindowAlive', async () => {
+    const props = renderGroup()
+    await userEvent.click(screen.getByRole('switch', { name: t.keepChatWindowAlive }))
+    expect(props.onUpdateSettings).toHaveBeenCalledWith({ keepChatWindowAlive: true })
   })
 })
 
