@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Release tag to publish to (e.g. v2.9.0)'
         required: true
-        default: 'v2.9.3'
+        default: 'v2.9.4'
       ref:
         description: 'Git ref to build from (branch/tag/commit)'
         required: true

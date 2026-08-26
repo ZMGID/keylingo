@@ -88,12 +88,12 @@ xattr -cr "/Applications/Kivio Desktop.app"
 
 macOS 需要辅助功能与屏幕录制权限。启动后按引导填服务商即可。
 
-## 新版本 —— v2.9.3
+## 新版本 —— v2.9.4
 
-- Windows 便携版（解压即用）
-- DeepSeek 官方 / 内置搜索
-- 附件发送后保持小卡片；最后一轮可换模型再答
-- 外部 CLI 跟上 Claude Code 2.1.238、Codex 0.148、dsh rc.8
+- 过程收成 Codex 式 Working 行；侧栏可拖宽，并显示上次活跃
+- 替换翻译按段落铺底板盖原文，不再透残影
+- Kimi 官方搜索；关闭时可选保持聊天窗口
+- 六个内置助手；Windows 找不到 CLI 时走 WSL
 
 完整记录：[Releases](https://github.com/ZMGID/kivio/releases)
 

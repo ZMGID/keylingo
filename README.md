@@ -88,12 +88,12 @@ xattr -cr "/Applications/Kivio Desktop.app"
 
 macOS needs Accessibility and Screen Recording. Then follow the onboarding wizard.
 
-## What's New — v2.9.3
+## What's New — v2.9.4
 
-- Windows portable zip
-- Official / hosted DeepSeek search
-- Compact attachment cards; reply to the last turn with another model
-- External CLI catch-up: Claude Code 2.1.238, Codex 0.148, dsh rc.8
+- Codex-style Working process row; resizable sidebar with last-active age
+- Replace translation covers each paragraph with one plate (no ghost text)
+- Official Kimi search; optional keep-alive for the chat window
+- Six built-in assistants; Windows falls back to WSL when a CLI is missing
 
 [Releases](https://github.com/ZMGID/kivio/releases)
 
