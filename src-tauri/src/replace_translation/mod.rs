@@ -44,7 +44,9 @@ mod e2e_tests {
         let spans = super::layout::filter_replaceable_spans(image.width(), &spans);
         let geometry = super::layout::build_replace_geometry(&image, &spans);
         let started = std::time::Instant::now();
-        let filled = super::mask::plate_fill(&image, &spans);
+        // 与 lens_replace_translate 同一份聚块逻辑：按翻译组聚块后再盖板。
+        let blocks = super::mask::blocks_from_groups(&geometry.groups, &spans);
+        let filled = super::mask::plate_fill(&image, &blocks);
         let png = super::encode_rgb_png(filled).expect("encode plate fill");
         eprintln!(
             "replace pipeline: {} spans, {} regions, plate fill {:?}",
