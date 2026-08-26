@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatApi, type DshPluginSettingsSnapshot } from '../chat/api'
 import { DshPluginsSettings } from './DshPluginsSettings'
@@ -58,6 +59,7 @@ describe('DshPluginsSettings', () => {
   })
 
   it('renders official config cards and saves a shell override', async () => {
+    const user = userEvent.setup()
     vi.mocked(chatApi.dshPluginSettingsSave).mockResolvedValue({
       ...snapshot,
       shell: { ...snapshot.shell, timeoutMs: 45000 },
@@ -69,10 +71,11 @@ describe('DshPluginsSettings', () => {
     expect(screen.getByText('已覆盖')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '恢复默认' })).toBeInTheDocument()
 
-    const timeout = screen.getByRole('textbox', { name: '命令超时（毫秒）' })
-    fireEvent.change(timeout, { target: { value: '45000' } })
-    expect(timeout).toHaveValue('45000')
-    fireEvent.click(await screen.findByRole('button', { name: '保存' }))
+    const timeout = await screen.findByRole('textbox', { name: '命令超时（毫秒）' })
+    await user.clear(timeout)
+    await user.type(timeout, '45000')
+    await waitFor(() => expect(timeout).toHaveValue('45000'))
+    await user.click(await screen.findByRole('button', { name: '保存' }))
     await waitFor(() =>
       expect(chatApi.dshPluginSettingsSave).toHaveBeenCalledWith({
         shell: { timeoutMs: 45000, maxOutputBytes: null },
