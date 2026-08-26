@@ -708,7 +708,7 @@ export type LensReplaceStreamPayload = {
   groups: LensReplaceGroup[]
   slots: LensReplaceRenderSlot[]
   cleanedImage?: string | null
-  // 硬失败（整张替换翻译不可用）才带 error；局部降级（如修复回退、个别区域回退原文）只带 warning。
+  // 硬失败（整张替换翻译不可用）才带 error；局部降级（如个别区域缺少译文回退原文）只带 warning。
   error?: string | null
   warning?: string | null
 }

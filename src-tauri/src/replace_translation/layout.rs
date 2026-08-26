@@ -41,10 +41,6 @@ pub enum ReplaceTextAlign {
 /// the OCR payload into a second, drifting representation.
 pub type OcrLeaf = RapidOcrLine;
 
-/// The pixel mask is produced independently from translation grouping and
-/// render slots. Kivio uses 255 for pixels to erase and 0 for pixels to keep.
-pub type EraseMask = crate::inpainting::InpaintMask;
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationGroup {
@@ -147,10 +143,12 @@ fn build_translation_layout_drafts(
     drafts.into_iter().map(finalize_region).collect()
 }
 
-/// Build independent translation groups and render slots. A paragraph may be
-/// translated with full multi-line context while retaining one slot per source
-/// visual line, so grouping can never move the first line or turn a menu into
-/// one vertically centred rectangle.
+/// Build translation groups and render slots. Paragraph regions become ONE
+/// group (whole-paragraph translation, coherent across source line breaks)
+/// with one render slot per source visual line — the frontend flows the
+/// translation through those slots (`layoutReplaceTextFlow`), so line geometry
+/// never moves and a menu can never collapse into one vertically centred
+/// rectangle. Headings and standalone lines stay exact-line groups.
 pub fn build_replace_geometry(image: &RgbImage, leaves: &[OcrLeaf]) -> ReplaceGeometry {
     let regions = build_translation_layout_drafts(image, leaves);
     let leaves_by_id: HashMap<&str, &OcrLeaf> =
@@ -183,22 +181,37 @@ pub fn build_replace_geometry(image: &RgbImage, leaves: &[OcrLeaf]) -> ReplaceGe
                 region.align,
                 RenderVerticalAlign::Center,
             ));
+        } else if region.kind == ReplaceRegionKind::Paragraph {
+            // 段落整段成组：全文一次翻译（跨行语义连贯，逐行翻译会把一句话
+            // 拦腰截成碎片），译文由前端 layoutReplaceTextFlow 依次流过每行
+            // 槽位——行几何不动、整组字号统一；盖板层按组聚块，整段一块
+            // 连续面而不是逐行灰条。
+            let group_id = format!("r{:04}", geometry.groups.len());
+            geometry.groups.push(TranslationGroup {
+                id: group_id.clone(),
+                leaf_ids: region.span_ids.clone(),
+                source_text: region.source_text.clone(),
+                translated: region.source_text.clone(),
+            });
+            for (slot_index, line) in visual_lines(&region_leaves).into_iter().enumerate() {
+                let bounds = line_slot_bounds(&line, region.bounds);
+                geometry.slots.push(render_slot(
+                    image,
+                    &group_id,
+                    slot_index,
+                    line,
+                    bounds,
+                    ReplaceRegionKind::Paragraph,
+                    RenderFlow::ParagraphFlow,
+                    ReplaceTextAlign::Left,
+                    RenderVerticalAlign::Top,
+                ));
+            }
         } else {
-            // Without an explicit semantic provider, exact source-line geometry
-            // is the only safe default. The prompt still receives every group
-            // in one batch for page context, but translated text never flows
-            // from one OCR line into another line's position.
+            // 独立行/标题/菜单行保持精确行几何：没有段落语义时，逐行翻译
+            // 且译文绝不流动到别的行位置，是唯一安全的默认。
             for line in visual_lines(&region_leaves) {
-                let raw = spans_bounds(&line);
-                let x = (raw.x - 2.0).max(region.bounds.x);
-                let y = (raw.y - 2.0).max(region.bounds.y);
-                let right = (region.bounds.x + region.bounds.width).max(raw.x + raw.width + 2.0);
-                let bounds = ReplaceBounds {
-                    x,
-                    y,
-                    width: (right - x).max(raw.width),
-                    height: (raw.height + 4.0).max(1.0),
-                };
+                let bounds = line_slot_bounds(&line, region.bounds);
                 let group_id = format!("r{:04}", geometry.groups.len());
                 let source_text = join_spans(&line);
                 geometry.groups.push(TranslationGroup {
@@ -226,6 +239,20 @@ pub fn build_replace_geometry(image: &RgbImage, leaves: &[OcrLeaf]) -> ReplaceGe
         }
     }
     geometry
+}
+
+/// 行槽位边界：贴合该行墨迹，右缘放宽到区域右缘（译文长度可能超过原行）。
+fn line_slot_bounds(line: &[OcrLeaf], region: ReplaceBounds) -> ReplaceBounds {
+    let raw = spans_bounds(line);
+    let x = (raw.x - 2.0).max(region.x);
+    let y = (raw.y - 2.0).max(region.y);
+    let right = (region.x + region.width).max(raw.x + raw.width + 2.0);
+    ReplaceBounds {
+        x,
+        y,
+        width: (right - x).max(raw.width),
+        height: (raw.height + 4.0).max(1.0),
+    }
 }
 
 fn visual_lines(leaves: &[OcrLeaf]) -> Vec<Vec<OcrLeaf>> {
@@ -819,13 +846,25 @@ fn estimate_source_color(image: &RgbImage, spans: &[RapidOcrLine]) -> String {
         }
         .into();
     }
+    // 只平均对比度最强的核心墨迹：反锯齿边缘像素占比很高，把它们一起平均
+    // 会把浅字深底的字色拉成中灰（实测比原文明显发暗），深字浅底同理发灰。
+    let max_deviation = candidates
+        .iter()
+        .map(|pixel| (luma(*pixel) - background).abs())
+        .fold(0.0f32, f32::max);
+    let core_threshold = max_deviation * 0.6;
     let mut sum = [0u64; 3];
+    let mut count = 0u64;
     for pixel in &candidates {
+        if (luma(*pixel) - background).abs() < core_threshold {
+            continue;
+        }
         for channel in 0..3 {
             sum[channel] += pixel[channel] as u64;
         }
+        count += 1;
     }
-    let count = candidates.len() as u64;
+    let count = count.max(1);
     format!(
         "#{:02x}{:02x}{:02x}",
         sum[0] / count,
@@ -1111,8 +1150,10 @@ mod tests {
         assert!(groups.contains(&vec!["s4".into()]));
     }
 
+    /// 换行段落 = 一个翻译组（整段一次翻译）+ 每行一个 paragraph_flow 槽。
+    /// 槽位仍锚定各自源行（行几何不动），前端把整组译文流过这些槽。
     #[test]
-    fn conservative_default_keeps_wrapped_rows_as_independent_exact_line_groups() {
+    fn wrapped_rows_form_one_paragraph_group_flowing_through_per_line_slots() {
         let image = RgbImage::from_pixel(720, 700, image::Rgb([255, 255, 255]));
         let spans = vec![
             span("s0", "hekaixin66-sketch/DFOX-", 129.0, 312.0, 340.0, 37.0),
@@ -1126,18 +1167,20 @@ mod tests {
             ),
         ];
         let geometry = build_replace_geometry(&image, &spans);
-        assert_eq!(geometry.groups.len(), 2);
-        assert_eq!(geometry.groups[0].leaf_ids, vec!["s0"]);
-        assert_eq!(geometry.groups[1].leaf_ids, vec!["s1"]);
+        assert_eq!(geometry.groups.len(), 1);
+        assert_eq!(geometry.groups[0].leaf_ids, vec!["s0", "s1"]);
         assert_eq!(geometry.slots.len(), 2);
-        assert_eq!(geometry.slots[0].group_id, geometry.groups[0].id);
-        assert_eq!(geometry.slots[1].group_id, geometry.groups[1].id);
+        assert!(geometry
+            .slots
+            .iter()
+            .all(|slot| slot.group_id == geometry.groups[0].id));
         assert_eq!(geometry.slots[0].leaf_ids, vec!["s0"]);
         assert_eq!(geometry.slots[1].leaf_ids, vec!["s1"]);
         assert_eq!(geometry.slots[0].anchor.y, 312.0);
         assert_eq!(geometry.slots[1].anchor.y, 354.0);
         assert!(geometry.slots.iter().all(|slot| {
-            slot.flow == RenderFlow::ExactLine && slot.vertical_align == RenderVerticalAlign::Top
+            slot.flow == RenderFlow::ParagraphFlow
+                && slot.vertical_align == RenderVerticalAlign::Top
         }));
     }
 

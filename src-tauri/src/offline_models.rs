@@ -1,7 +1,7 @@
 //! Shared offline-model manifest, verified downloader, and ONNX Runtime bootstrap.
 //!
-//! RapidOCR and replace-translation inpainting intentionally share one model root
-//! (`{app_data_dir}/rapidocr-models`) and one process-wide ONNX Runtime instance.
+//! All offline ONNX consumers share one model root (`{app_data_dir}/rapidocr-models`)
+//! and one process-wide ONNX Runtime instance.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -27,8 +27,6 @@ use windows::{
         LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
     },
 };
-
-pub const MIGAN_RELATIVE_PATH: &str = "inpainting/migan_pipeline_v2.onnx";
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_ATTEMPTS: u8 = 3;
@@ -193,18 +191,6 @@ const HIGH_KEYS: ModelFile = ModelFile {
         sha256: "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
     },
 };
-const MIGAN: ModelFile = ModelFile {
-    component_id: "migan",
-    relative_path: MIGAN_RELATIVE_PATH,
-    installed_size: 28_079_181,
-    installed_sha256: "6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b",
-    source: ModelSource::Direct {
-        url: "https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx",
-        size: 28_079_181,
-        sha256: "6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b",
-    },
-};
-
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const RUNTIME_SOURCE: ModelSource = ModelSource::Archive {
     cache_key: "onnxruntime-osx-arm64-1.24.4.tgz",
@@ -293,12 +279,6 @@ fn ocr_files(tier: OcrModelTier) -> Vec<ModelFile> {
 fn rapidocr_pack(tier: OcrModelTier) -> Vec<ModelFile> {
     let mut files = runtime_files();
     files.extend(ocr_files(tier));
-    files
-}
-
-fn replace_translation_pack(tier: OcrModelTier) -> Vec<ModelFile> {
-    let mut files = rapidocr_pack(tier);
-    files.push(MIGAN);
     files
 }
 
@@ -440,17 +420,6 @@ impl OfflineModelManager {
             .join("rapidocr-models"))
     }
 
-    pub fn migan_path(&self) -> Result<PathBuf, String> {
-        Ok(self.model_dir()?.join(MIGAN_RELATIVE_PATH))
-    }
-
-    pub fn migan_ready(&self) -> bool {
-        let Ok(path) = self.migan_path() else {
-            return false;
-        };
-        self.validation_state(&path, &MIGAN) == ValidationState::Ready
-    }
-
     pub fn rapidocr_ready(&self, tier: OcrModelTier) -> bool {
         let Ok(dir) = self.model_dir() else {
             return false;
@@ -460,19 +429,21 @@ impl OfflineModelManager {
         })
     }
 
+    /// 替换翻译离线包 = RapidOCR 包（ONNX Runtime + 检测/识别模型 + 字典）。
+    /// 曾额外含 MI-GAN 修复模型；擦除改为块级盖板后不再需要任何修复模型。
     pub fn replace_translation_status(&self, tier: OcrModelTier) -> ReplaceTranslationPackStatus {
         let Ok(dir) = self.model_dir() else {
             return ReplaceTranslationPackStatus {
                 tier: tier.as_str().into(),
                 ready: false,
-                total_bytes: pack_download_size(&replace_translation_pack(tier)),
+                total_bytes: pack_download_size(&rapidocr_pack(tier)),
                 ready_bytes: 0,
-                missing_bytes: pack_download_size(&replace_translation_pack(tier)),
+                missing_bytes: pack_download_size(&rapidocr_pack(tier)),
                 model_dir: None,
                 files: Vec::new(),
             };
         };
-        self.status_for_files(tier, &dir, &replace_translation_pack(tier))
+        self.status_for_files(tier, &dir, &rapidocr_pack(tier))
     }
 
     pub async fn install_rapidocr(&self, tier: OcrModelTier) -> OfflineModelInstallResult {
@@ -492,7 +463,7 @@ impl OfflineModelManager {
         self.install(
             OfflineModelPack::ReplaceTranslation,
             tier,
-            replace_translation_pack(tier),
+            rapidocr_pack(tier),
             "替换翻译离线包下载完成",
         )
         .await
@@ -1363,12 +1334,11 @@ mod tests {
 
     #[test]
     fn pack_size_deduplicates_shared_archives() {
-        let files = replace_translation_pack(OcrModelTier::High);
+        let files = rapidocr_pack(OcrModelTier::High);
         let expected = RUNTIME_SOURCE.size()
             + HIGH_DET.source.size()
             + HIGH_REC.source.size()
-            + HIGH_KEYS.source.size()
-            + MIGAN.source.size();
+            + HIGH_KEYS.source.size();
         assert_eq!(pack_download_size(&files), expected);
     }
 

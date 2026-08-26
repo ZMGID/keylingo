@@ -10,7 +10,6 @@ pub mod connectors;
 pub mod dock;
 pub mod external_agents;
 pub mod fonts;
-pub mod inpainting;
 pub mod lens;
 pub mod lens_commands;
 #[cfg(target_os = "macos")]
@@ -351,7 +350,6 @@ pub fn run() {
 
             let offline_models =
                 offline_models::OfflineModelManager::new(&app.handle(), build_http_client());
-            let inpainting = inpainting::InpaintingClient::new(offline_models.clone());
             app.manage(AppState::base(
                 settings,
                 usage_dir,
@@ -360,7 +358,6 @@ pub fn run() {
                 macos_ocr::MacOcrClient::new(&app.handle()),
                 offline_models.clone(),
                 rapidocr::RapidOcrClient::new(offline_models),
-                inpainting,
             ));
             app.manage(chat::repository::ConversationRepository::default());
             // Dock 的 workspace 文件监听服务（文件树 / Git 面板的秒级刷新源）。

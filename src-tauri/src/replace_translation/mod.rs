@@ -4,6 +4,19 @@ pub mod mask;
 #[cfg(test)]
 mod visual_fixtures;
 
+use std::io::Cursor;
+
+use image::{DynamicImage, ImageFormat, RgbImage};
+
+/// RGB → PNG 的唯一编码入口（替换翻译清理图走这里）。
+pub fn encode_rgb_png(image: RgbImage) -> Result<Vec<u8>, String> {
+    let mut cursor = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(image)
+        .write_to(&mut cursor, ImageFormat::Png)
+        .map_err(|error| format!("encode cleaned image: {error}"))?;
+    Ok(cursor.into_inner())
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod e2e_tests {
     #[tokio::test]
@@ -30,23 +43,11 @@ mod e2e_tests {
         let image = image::open(&image_path).expect("open image").to_rgb8();
         let spans = super::layout::filter_replaceable_spans(image.width(), &spans);
         let geometry = super::layout::build_replace_geometry(&image, &spans);
-        let analysis = super::mask::analyze_text_regions(&image, &spans).expect("analyze");
-        let complexity = analysis.complexity;
-        let mask = analysis.mask;
-        eprintln!("background complexity: {complexity:?}");
         let started = std::time::Instant::now();
-        let png = if complexity == super::mask::BackgroundComplexity::Low {
-            let filled = super::mask::deterministic_fill(&image, &spans, &mask);
-            crate::inpainting::encode_rgb_png(filled).expect("encode deterministic fill")
-        } else {
-            crate::inpainting::InpaintingClient::new(manager)
-                .inpaint_png(std::sync::Arc::new(image), mask)
-                .await
-                .expect("run inpainting")
-                .png
-        };
+        let filled = super::mask::plate_fill(&image, &spans);
+        let png = super::encode_rgb_png(filled).expect("encode plate fill");
         eprintln!(
-            "replace pipeline: {} spans, {} regions, inpainting {:?}",
+            "replace pipeline: {} spans, {} regions, plate fill {:?}",
             spans.len(),
             geometry.groups.len(),
             started.elapsed()

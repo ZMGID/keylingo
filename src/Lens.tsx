@@ -160,7 +160,7 @@ export default function Lens() {
   const [replaceCleanedImage, setReplaceCleanedImage] = useState('')
   const [replacePhase, setReplacePhase] = useState<'ocr' | 'processing' | 'done' | 'error' | ''>('')
   const [replaceError, setReplaceError] = useState('')
-  // 局部降级提示（修复回退、个别区域回退原文等）：非错误，随 done 一起展示。
+  // 局部降级提示（个别区域缺少译文回退原文等）：非错误，随 done 一起展示。
   const [replaceWarning, setReplaceWarning] = useState('')
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
   const [translateNow, setTranslateNow] = useState(() => Date.now())
@@ -1408,7 +1408,7 @@ export default function Lens() {
     let unlisten: (() => void) | undefined
     api.onLensReplaceStream((payload: LensReplaceStreamPayload) => {
       if (payload.imageId !== imageIdRef.current) return
-      // error 只在硬失败时出现；局部降级（修复回退/个别区域回退原文）走 warning，不当错误展示。
+      // error 只在硬失败时出现；局部降级（个别区域缺少译文回退原文）走 warning，不当错误展示。
       if (payload.error) setReplaceError(payload.error)
       if (payload.warning) setReplaceWarning(payload.warning)
       if (payload.groups?.length) setReplaceGroups(payload.groups)

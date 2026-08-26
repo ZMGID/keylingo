@@ -35,9 +35,7 @@ use crate::prompts::{
 use crate::replace_translation::layout::{
     build_replace_geometry, filter_replaceable_spans, RenderSlot, TranslationGroup,
 };
-use crate::replace_translation::mask::{
-    analyze_text_regions, deterministic_fill, BackgroundComplexity,
-};
+use crate::replace_translation::mask::{blocks_from_groups, plate_fill};
 use crate::screenshot::cleanup_temp_file;
 use crate::settings::{self, default_question_prompt, ExplainMessage, OcrMode};
 use crate::shortcuts::{capture_active_selection, get_mouse_position, open_chat_window};
@@ -1988,7 +1986,7 @@ async fn local_ocr_then_translate(
     }))
 }
 
-/// `warning` 仅表示非致命降级（如 MI-GAN 回退到确定性填充），随 `done` 一起发送；
+/// `warning` 仅表示非致命降级（如个别区域缺少译文回退显示原文），随 `done` 一起发送；
 /// `error` 只用于硬失败，此时 phase 固定为 `error` 且不携带清理后图片。
 fn emit_replace_stream(
     app: &AppHandle,
@@ -2073,7 +2071,7 @@ pub(crate) async fn lens_replace_translate(
         return fail("OCR 未识别到文字");
     }
 
-    // 解码、布局聚合与掩膜/复杂度分析都是纯 CPU 工作，整体挪进阻塞线程池。
+    // 解码与布局聚合都是纯 CPU 工作，整体挪进阻塞线程池。
     let prepared = tokio::task::spawn_blocking(move || {
         let source_image = image::open(&temp_path)
             .map_err(|error| format!("load replace translation image: {error}"))?
@@ -2086,18 +2084,14 @@ pub(crate) async fn lens_replace_translate(
         if geometry.groups.is_empty() || geometry.slots.is_empty() {
             return Err("layout_no_regions".to_string());
         }
-        let analysis =
-            analyze_text_regions(&source_image, &ocr_lines).map_err(|error| error.message)?;
-        Ok((source_image, geometry, analysis))
+        Ok((source_image, geometry, ocr_lines))
     })
     .await
     .map_err(|error| format!("replace prepare worker failed: {error}"))?;
-    let (source_image, mut geometry, analysis) = match prepared {
+    let (source_image, mut geometry, replace_spans) = match prepared {
         Ok(prepared) => prepared,
         Err(msg) => return fail(&msg),
     };
-    let mask = analysis.mask;
-    let complexity = analysis.complexity;
     // 中间阶段只驱动状态提示；groups/slots 只在最终事件发送一次，避免重复序列化大载荷。
     emit_replace_stream(&app, &image_id, "ocr", &[], &[], None, None, None);
     emit_replace_stream(&app, &image_id, "processing", &[], &[], None, None, None);
@@ -2122,7 +2116,6 @@ pub(crate) async fn lens_replace_translate(
 
     let source_image = std::sync::Arc::new(source_image);
     let source_for_cleaning = source_image.clone();
-    let inpainting = state.inpainting.clone();
     let translation_future = call_openai_text(
         &state,
         &provider,
@@ -2133,32 +2126,19 @@ pub(crate) async fn lens_replace_translate(
         "screenshot_translation",
         "replace_translate",
     );
-    // deterministic_fill + PNG 编码同样是 CPU 密集路径，必须 spawn_blocking，
+    // 盖板按翻译组聚块（同组多行一块连续面），与生产渲染同一份分组。
+    let plate_blocks = blocks_from_groups(&geometry.groups, &replace_spans);
+    // 盖板填充 + PNG 编码是 CPU 密集路径，必须 spawn_blocking，
     // 否则 tokio::join! 无法真正让本地擦除与云端翻译并行。
-    let deterministic_fill_png =
-        move |source: std::sync::Arc<image::RgbImage>, mask: crate::inpainting::InpaintMask| async move {
-            tokio::task::spawn_blocking(move || {
-                crate::inpainting::encode_rgb_png(deterministic_fill(&source, &[], &mask))
-            })
-            .await
-            .map_err(|error| format!("deterministic fill worker failed: {error}"))?
-        };
     let cleaning_future = async move {
-        if complexity == BackgroundComplexity::Low {
-            return deterministic_fill_png(source_for_cleaning, mask)
-                .await
-                .map(|png| (png, None));
-        }
-        // inpaint_png 内部自带 spawn_blocking；失败时回退确定性填充并记为非致命警告。
-        match inpainting
-            .inpaint_png(source_for_cleaning.clone(), mask.clone())
-            .await
-        {
-            Ok(result) => Ok((result.png, None)),
-            Err(error) => deterministic_fill_png(source_for_cleaning, mask)
-                .await
-                .map(|png| (png, Some(error.message))),
-        }
+        tokio::task::spawn_blocking(move || {
+            crate::replace_translation::encode_rgb_png(plate_fill(
+                &source_for_cleaning,
+                &plate_blocks,
+            ))
+        })
+        .await
+        .map_err(|error| format!("plate fill worker failed: {error}"))?
     };
     let (translation_result, cleaned_result) = tokio::join!(translation_future, cleaning_future);
 
@@ -2195,13 +2175,10 @@ pub(crate) async fn lens_replace_translate(
             group.translated = translated.clone();
         }
     }
-    let (cleaned_png, inpainting_warning) = match cleaned_result {
-        Ok(result) => result,
+    let cleaned_png = match cleaned_result {
+        Ok(png) => png,
         Err(error) => return fail(&error),
     };
-    if let Some(warning) = inpainting_warning {
-        warnings.push(warning);
-    }
     let cleaned_image = format!(
         "data:image/png;base64,{}",
         general_purpose::STANDARD.encode(cleaned_png)

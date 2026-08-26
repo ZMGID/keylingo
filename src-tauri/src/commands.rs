@@ -642,7 +642,7 @@ pub(crate) async fn rapidocr_install(
     Ok(client.install(tier).await)
 }
 
-/// 查询替换翻译完整离线包（ONNX Runtime + RapidOCR + MI-GAN）的校验状态与实际字节数。
+/// 查询替换翻译完整离线包（ONNX Runtime + RapidOCR）的校验状态与实际字节数。
 /// async + spawn_blocking:同 rapidocr_status,SHA-256 校验不能占用主线程。
 #[tauri::command]
 pub(crate) async fn replace_translation_pack_status(

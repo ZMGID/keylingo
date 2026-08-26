@@ -3,8 +3,8 @@ import { initialReplacePackProgressState, reduceReplacePackProgress } from './re
 
 const progress = {
   pack: 'replace_translation' as const,
-  componentId: 'migan',
-  fileName: 'inpainting/migan.onnx',
+  componentId: 'rapidocr-high',
+  fileName: 'high/det.onnx',
   downloadedBytes: 50,
   fileTotalBytes: 100,
   overallDownloadedBytes: 70,

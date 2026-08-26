@@ -2,10 +2,9 @@
 //!
 //! Unlike the frontend metric unit tests (which feed hand-made numbers into the
 //! metric functions), this module runs each fixture's fixed ground-truth OCR
-//! leaves and its `source.png` through the REAL layout and mask pipeline
-//! (`filter_replaceable_spans` + `build_replace_geometry` +
-//! `analyze_text_regions`) and compares the actual render-slot anchors against
-//! `expected_geometry.json`.
+//! leaves and its `source.png` through the REAL layout and erase pipeline
+//! (`filter_replaceable_spans` + `build_replace_geometry` + `plate_fill`) and
+//! compares the actual render-slot anchors against `expected_geometry.json`.
 //!
 //! The expected anchors are produced by the fixture generator from the exact
 //! drawing coordinates (see `scripts/generate-replace-visual-fixtures.mjs`), not
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::layout::{build_replace_geometry, filter_replaceable_spans};
-use super::mask::analyze_text_regions;
+use super::mask::{blocks_from_groups, plate_fill};
 use crate::rapidocr::{RapidOcrLine, RapidOcrPoint};
 
 #[derive(Deserialize)]
@@ -141,7 +140,7 @@ fn anchor_tolerance(scene: &str) -> f32 {
 }
 
 #[test]
-fn fixtures_reproduce_ground_truth_anchors_and_glyph_masks() {
+fn fixtures_reproduce_ground_truth_anchors_and_ghost_free_plates() {
     let root = fixtures_root();
     let dirs = fixture_dirs(&root);
     assert!(
@@ -171,8 +170,7 @@ fn fixtures_reproduce_ground_truth_anchors_and_glyph_masks() {
         // Run the REAL pipeline read-only.
         let spans = filter_replaceable_spans(image.width(), &leaves);
         let geometry = build_replace_geometry(&image, &spans);
-        let analysis = analyze_text_regions(&image, &spans)
-            .unwrap_or_else(|error| panic!("[{name}] analyze_text_regions: {error:?}"));
+        let filled = plate_fill(&image, &blocks_from_groups(&geometry.groups, &spans));
 
         // Anti-collapse gate: a list/table must not degenerate into one slot,
         // and no source line may be dropped or invented.
@@ -222,42 +220,59 @@ fn fixtures_reproduce_ground_truth_anchors_and_glyph_masks() {
             );
         }
 
-        // Mask sanity: the glyph-derived erase mask must cover the text inside
-        // each leaf polygon but must NOT flood the whole polygon rectangle.
-        let width = analysis.mask.width as usize;
+        // Erase gate: the plate must leave no readable ink inside any leaf box.
+        // Compare each pixel against its own ROW median so gradient plates and
+        // restored separator rows agree with themselves, while ghost glyphs
+        // (which deviate from the surrounding row) get counted as residue.
         for leaf in &spans {
-            let x0 = leaf.x.floor().max(0.0) as usize;
-            let y0 = leaf.y.floor().max(0.0) as usize;
-            let x1 = ((leaf.x + leaf.width).ceil() as usize).min(analysis.mask.width as usize);
-            let y1 = ((leaf.y + leaf.height).ceil() as usize).min(analysis.mask.height as usize);
-            let mut masked = 0usize;
-            let mut total = 0usize;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    total += 1;
-                    if analysis.mask.data[y * width + x] == 255 {
-                        masked += 1;
-                    }
-                }
-            }
+            let x0 = leaf.x.floor().max(0.0) as u32;
+            let y0 = leaf.y.floor().max(0.0) as u32;
+            let x1 = ((leaf.x + leaf.width).ceil() as u32).min(filled.width());
+            let y1 = ((leaf.y + leaf.height).ceil() as u32).min(filled.height());
             assert!(
-                total > 0,
+                x1 > x0 && y1 > y0,
                 "[{name}] leaf {} has an empty bounding box",
                 leaf.id
             );
-            let ratio = masked as f32 / total as f32;
+            let mut residue = 0usize;
+            let mut total = 0usize;
+            for y in y0..y1 {
+                let mut row: Vec<[u8; 3]> = (x0..x1).map(|x| filled.get_pixel(x, y).0).collect();
+                let median = row_median(&mut row);
+                for x in x0..x1 {
+                    total += 1;
+                    if channel_distance(filled.get_pixel(x, y).0, median) > 48.0 {
+                        residue += 1;
+                    }
+                }
+            }
+            let ratio = residue as f32 / total.max(1) as f32;
             assert!(
-                ratio > 0.02,
-                "[{name}] leaf {} erase mask covers almost no text ({:.1}%)",
-                leaf.id,
-                ratio * 100.0
-            );
-            assert!(
-                ratio < 0.98,
-                "[{name}] leaf {} erase mask floods the whole polygon rectangle ({:.1}%)",
+                ratio < 0.05,
+                "[{name}] leaf {} still shows ghost ink after plate fill ({:.1}% residue)",
                 leaf.id,
                 ratio * 100.0
             );
         }
     }
+}
+
+fn row_median(row: &mut [[u8; 3]]) -> [u8; 3] {
+    let mut channels = [Vec::new(), Vec::new(), Vec::new()];
+    for pixel in row.iter() {
+        for channel in 0..3 {
+            channels[channel].push(pixel[channel]);
+        }
+    }
+    [0, 1, 2].map(|channel| {
+        channels[channel].sort_unstable();
+        channels[channel][channels[channel].len() / 2]
+    })
+}
+
+fn channel_distance(a: [u8; 3], b: [u8; 3]) -> f64 {
+    let dr = a[0] as f64 - b[0] as f64;
+    let dg = a[1] as f64 - b[1] as f64;
+    let db = a[2] as f64 - b[2] as f64;
+    (dr * dr + dg * dg + db * db).sqrt()
 }

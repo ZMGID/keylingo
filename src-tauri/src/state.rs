@@ -12,7 +12,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::inpainting::InpaintingClient;
 #[cfg(target_os = "macos")]
 use crate::macos_ocr::MacOcrClient;
 use crate::mcp::manager::McpSession;
@@ -271,8 +270,6 @@ pub struct AppState {
     /// RapidOCR 离线 OCR 客户端。模型 + onnxruntime dylib 都由用户在设置页面下载到 app data 目录,
     /// 安装包不带任何 ONNX Runtime 二进制。`status()` 检查 4 个文件齐不齐, 不齐让前端引导下载。
     pub rapidocr: std::sync::Arc<RapidOcrClient>,
-    /// MI-GAN 惰性 session；只在替换翻译调用且离线包已显式下载后加载。
-    pub inpainting: std::sync::Arc<InpaintingClient>,
     /// 多 agent / 子 agent 任务表（P3）：spawn 的子 agent 状态、按名寻址、并发上限。
     pub sub_agents: crate::chat::sub_agent::SubAgentManager,
     /// 后台 run_command 进程注册表：job_id → 跟踪中的后台命令。
@@ -373,7 +370,6 @@ impl AppState {
         #[cfg(target_os = "macos")] macos_ocr: std::sync::Arc<MacOcrClient>,
         offline_models: std::sync::Arc<OfflineModelManager>,
         rapidocr: std::sync::Arc<RapidOcrClient>,
-        inpainting: std::sync::Arc<InpaintingClient>,
     ) -> Self {
         let mcp_tool_snapshots = load_mcp_tool_snapshots(&usage_dir);
         AppState {
@@ -425,7 +421,6 @@ impl AppState {
             macos_ocr,
             offline_models,
             rapidocr,
-            inpainting,
             sub_agents: crate::chat::sub_agent::SubAgentManager::default(),
             background_commands: Arc::new(Mutex::new(HashMap::new())),
             external_background_tasks: Mutex::new(HashMap::new()),
@@ -448,8 +443,7 @@ impl AppState {
             #[cfg(target_os = "macos")]
             MacOcrClient::headless(),
             offline_models.clone(),
-            RapidOcrClient::headless(offline_models.clone()),
-            InpaintingClient::new(offline_models),
+            RapidOcrClient::headless(offline_models),
         )
     }
     /// 该供应商应当使用的 HTTP 客户端。默认跟随系统代理（与加这个开关之前一致），
@@ -1486,8 +1480,7 @@ pub(crate) fn test_app_state() -> AppState {
         #[cfg(target_os = "macos")]
         MacOcrClient::disabled(),
         offline_models.clone(),
-        RapidOcrClient::new(offline_models.clone()),
-        InpaintingClient::new(offline_models),
+        RapidOcrClient::new(offline_models),
     )
 }
 

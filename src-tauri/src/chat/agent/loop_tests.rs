@@ -524,8 +524,7 @@ fn test_app_state() -> AppState {
         #[cfg(target_os = "macos")]
         crate::macos_ocr::MacOcrClient::disabled(),
         offline_models.clone(),
-        crate::rapidocr::RapidOcrClient::new(offline_models.clone()),
-        crate::inpainting::InpaintingClient::new(offline_models),
+        crate::rapidocr::RapidOcrClient::new(offline_models),
     )
 }
 

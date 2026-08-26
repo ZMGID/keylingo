@@ -12,7 +12,7 @@ type ReplaceTranslateOverlayProps = {
   slots: LensReplaceRenderSlot[]
   phase: 'ocr' | 'processing' | 'done' | 'error' | ''
   statusLabel: string
-  // 局部降级详情（如修复回退、个别区域回退原文）：非错误，挂在状态胶囊 title 上。
+  // 局部降级详情（如个别区域缺少译文回退原文）：非错误，挂在状态胶囊 title 上。
   statusTitle?: string
   escHint: string
   interactHint: string
