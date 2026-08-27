@@ -2,9 +2,18 @@ name: CI
 
 on:
   pull_request:
+    # README / docs 改动不跑完整质量门（macOS + cargo test ~20min）。
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
   push:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
 
 jobs:
   quality:
