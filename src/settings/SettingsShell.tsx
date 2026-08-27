@@ -155,16 +155,16 @@ function resolveEffectiveChatModel(settings: SettingsData): { provider?: ModelPr
   }
 }
 
-function resolveEffectiveChatMaxOutput(settings: SettingsData, fallbackTokens: number) {
+function resolveEffectiveChatMaxOutput(settings: SettingsData) {
   const { provider, model } = resolveEffectiveChatModel(settings)
   const override = model ? provider?.modelOverrides?.[model]?.maxOutput : undefined
   const modelInfo = model ? resolveModelInfo(model, provider?.modelOverrides) : {}
-  const maxOutput = override || modelInfo.maxOutput || fallbackTokens
-  const source: 'override' | 'database' | 'fallback' = override
+  const maxOutput = override || modelInfo.maxOutput || 0
+  const source: 'override' | 'database' | 'omit' = override
     ? 'override'
     : modelInfo.maxOutput
       ? 'database'
-      : 'fallback'
+      : 'omit'
 
   return { maxOutput, source, model, provider }
 }
@@ -1608,13 +1608,13 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const chatMemory = settings?.chatMemory || defaultChatMemory()
   const chatFallbackMaxOutputTokens = chatConfig.maxOutputTokens ?? 8192
   const effectiveChatMaxOutput = settings
-    ? resolveEffectiveChatMaxOutput(settings, chatFallbackMaxOutputTokens)
-    : { maxOutput: chatFallbackMaxOutputTokens, source: 'fallback' as const, model: '', provider: undefined }
+    ? resolveEffectiveChatMaxOutput(settings)
+    : { maxOutput: 0, source: 'omit' as const, model: '', provider: undefined }
   const chatMaxOutputSourceLabel = effectiveChatMaxOutput.source === 'override'
     ? (lang === 'zh' ? '模型参数' : 'Model override')
     : effectiveChatMaxOutput.source === 'database'
       ? (lang === 'zh' ? '内置模型库' : 'Model database')
-      : (lang === 'zh' ? '兜底设置' : 'Fallback setting')
+      : (lang === 'zh' ? '未收录，不发送' : 'Unknown model, not sent')
   const chatMaxOutputModelLabel = effectiveChatMaxOutput.model
     ? (effectiveChatMaxOutput.provider?.name
       ? `${effectiveChatMaxOutput.provider.name} / ${effectiveChatMaxOutput.model}`

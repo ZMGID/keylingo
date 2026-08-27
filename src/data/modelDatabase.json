@@ -1,18 +1,27 @@
 {
   "_meta": {
-    "version": "2026-08-24",
+    "version": "2026-08-27",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
       "https://openai.com/api/pricing/",
       "https://docs.anthropic.com/en/docs/about-claude/models",
       "https://ai.google.dev/gemini-api/docs/models",
+      "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-7-flash",
       "https://api-docs.deepseek.com/quick_start/pricing",
       "https://platform.moonshot.ai/docs/models",
       "https://platform.moonshot.ai/docs/guide/kimi-k3-quickstart",
       "https://platform.moonshot.ai/docs/pricing/chat-k3",
       "https://platform.moonshot.ai/docs/pricing/chat-k27-code",
+      "https://docs.z.ai/guides/llm/glm-5.3",
+      "https://docs.z.ai/guides/vlm/glm-5.3-flash",
+      "https://docs.z.ai/guides/overview/pricing",
+      "https://docs.z.ai/guides/overview/concept-param",
       "https://open.bigmodel.cn/pricing",
+      "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+      "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+      "https://help.aliyun.com/zh/model-studio/qwen3-8-27b",
+      "https://help.aliyun.com/zh/model-studio/qwen3-7-flash",
       "https://platform.minimax.io/docs/guides/pricing-paygo",
       "https://platform.openai.com/docs/api-reference/images/create",
       "https://openrouter.ai/docs/guides/overview/multimodal/image-generation",
@@ -412,6 +421,13 @@
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
     "pricing": { "input": 0.10, "output": 0.40, "cachedInput": 0.025 }
   },
+  "gemini-3.7-flash": {
+    "displayName": "Gemini 3.7 Flash",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": true },
+    "pricing": { "input": 0.75, "output": 3.75, "cachedInput": 0.075 }
+  },
   "gemini-3.6-flash": {
     "displayName": "Gemini 3.6 Flash",
     "contextWindow": 1048576,
@@ -644,21 +660,61 @@
     "reasoningEfforts": [],
     "pricing": { "input": 2.00, "output": 8.00 }
   },
+  "glm-5.3-flash": {
+    "displayName": "GLM-5.3 Flash",
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high", "max"],
+    "pricing": { "input": 0.075, "output": 0.25, "cachedInput": 0.015 }
+  },
+  "glm-5.3": {
+    "displayName": "GLM-5.3",
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high", "max"],
+    "pricing": { "input": 1.40, "output": 4.40, "cachedInput": 0.26 }
+  },
   "glm-5.2": {
     "displayName": "GLM-5.2",
     "contextWindow": 1000000,
-    "maxOutput": 16000,
-    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
-    "reasoningEfforts": ["high", "max"],
-    "pricing": { "input": 6.00, "output": 24.00 }
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high", "max"],
+    "pricing": { "input": 1.40, "output": 4.40, "cachedInput": 0.26 }
   },
   "glm-5.1": {
     "displayName": "GLM-5.1",
     "contextWindow": 200000,
-    "maxOutput": 16000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high", "max"],
+    "pricing": { "input": 1.40, "output": 4.40, "cachedInput": 0.26 }
+  },
+  "glm-5v-turbo": {
+    "displayName": "GLM-5V Turbo",
+    "contextWindow": 200000,
+    "maxOutput": 131072,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
-    "reasoningEfforts": ["high", "max"],
-    "pricing": { "input": 6.00, "output": 24.00 }
+    "reasoningEfforts": [],
+    "pricing": { "input": 1.20, "output": 4.00, "cachedInput": 0.24 }
+  },
+  "glm-5-turbo": {
+    "displayName": "GLM-5 Turbo",
+    "contextWindow": 200000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 1.20, "output": 4.00, "cachedInput": 0.24 }
+  },
+  "glm-5": {
+    "displayName": "GLM-5",
+    "contextWindow": 200000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 1.00, "output": 3.20, "cachedInput": 0.20 }
   },
   "ox-alpha": {
     "displayName": "Ox Alpha",
@@ -692,6 +748,30 @@
     "pricing": { "input": 0.20, "output": 1.10 }
   },
 
+  "qwen3.8-max": {
+    "displayName": "Qwen3.8 Max",
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 2.00, "output": 6.00, "cachedInput": 0.25 }
+  },
+  "qwen3.8-flash": {
+    "displayName": "Qwen3.8 Flash",
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.15, "output": 0.47, "cachedInput": 0.016 }
+  },
+  "qwen3.8-27b": {
+    "displayName": "Qwen3.8 27B",
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.425, "output": 2.55, "cachedInput": 0.085 }
+  },
   "qwen3.7-plus": {
     "displayName": "Qwen3.7 Plus",
     "contextWindow": 1000000,
@@ -739,6 +819,14 @@
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": [],
     "pricing": { "input": 1.25, "output": 3.75 }
+  },
+  "qwen3.7-flash": {
+    "displayName": "Qwen3.7 Flash",
+    "contextWindow": 1000000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.03, "output": 0.13, "cachedInput": 0.006 }
   },
   "qwen3.6-plus": {
     "displayName": "Qwen3.6 Plus",

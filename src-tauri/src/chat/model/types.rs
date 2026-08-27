@@ -164,6 +164,8 @@ impl From<&ChatToolDefinition> for ModelTool {
 pub struct GenerateOptions {
     /// 显式的单次请求覆盖；None 时由 provider/model 元数据解析，仍缺省则不发送。
     pub temperature: Option<f64>,
+    /// 输出上限。`0` = 协议允许时不发该字段（未收录模型不要猜一个兜底值）。
+    /// Anthropic Messages 强制要求 `max_tokens`，适配器在 0 时用代码默认。
     pub max_tokens: u32,
     /// 思考开关。UI「Off」时为 false：适配器**必须显式**下发关闭信号
     /// （OpenAI Chat → `reasoning_effort:"none"`；DeepSeek/Kimi → `thinking.type=disabled`；

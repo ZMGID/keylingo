@@ -515,8 +515,10 @@ impl OpenAiChatProvider<'_> {
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": openai_messages_from_generate_request(request),
-            "max_tokens": request.options.max_tokens,
         });
+        if request.options.max_tokens > 0 {
+            body["max_tokens"] = Value::from(request.options.max_tokens);
+        }
         if let Some(temperature) = crate::chat::model_metadata::temperature_for_request(
             request.options.temperature,
             Some(self.provider),
@@ -1261,6 +1263,55 @@ mod tests {
     fn request_body_omits_temperature_by_default() {
         let body = build_openai_temperature_body(None, None);
         assert!(body.get("temperature").is_none(), "body: {body}");
+    }
+
+    #[test]
+    fn request_body_omits_max_tokens_when_zero() {
+        let state =
+            AppState::new_headless(crate::settings::Settings::default(), std::env::temp_dir());
+        let provider = ModelProvider {
+            id: "test".into(),
+            name: "Test".into(),
+            api_keys: vec!["sk-test".into()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".into(),
+            available_models: vec!["glm-5.3".into()],
+            enabled_models: vec!["glm-5.3".into()],
+            enabled: true,
+            api_format: "openai_chat".into(),
+            model_overrides: Default::default(),
+            compress_request_body: false,
+            request: Default::default(),
+        };
+        let adapter = OpenAiChatProvider::new(&state, &provider, 1);
+        let request = GenerateRequest {
+            model: "glm-5.3".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions {
+                max_tokens: 0,
+                ..Default::default()
+            },
+            metadata: Default::default(),
+        };
+        let body = adapter.request_body(&request, true);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "max_tokens=0 must omit the field: {body}"
+        );
+        let capped = GenerateRequest {
+            options: GenerateOptions {
+                max_tokens: 16_384,
+                ..Default::default()
+            },
+            ..request
+        };
+        let capped_body = adapter.request_body(&capped, true);
+        assert_eq!(capped_body["max_tokens"], 16_384);
     }
 
     #[test]

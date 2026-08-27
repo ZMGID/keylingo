@@ -96,6 +96,11 @@ describe('matchModel', () => {
   })
 
   it('matches latest Gemini Flash family ids', () => {
+    expect(matchModel('gemini-3.7-flash')?.displayName).toBe('Gemini 3.7 Flash')
+    expect(matchModel('gemini-3.7-flash')?.contextWindow).toBe(1_048_576)
+    expect(matchModel('gemini-3.7-flash')?.maxOutput).toBe(65_536)
+    expect(matchModel('gemini-3.7-flash')?.pricing?.input).toBe(0.75)
+    expect(matchModel('gemini-3.7-flash')?.pricing?.output).toBe(3.75)
     expect(matchModel('gemini-3.6-flash')?.displayName).toBe('Gemini 3.6 Flash')
     expect(matchModel('gemini-3.6-flash')?.pricing?.output).toBe(7.5)
     expect(matchModel('gemini-3.5-flash-lite')?.displayName).toBe('Gemini 3.5 Flash-Lite')
@@ -104,6 +109,7 @@ describe('matchModel', () => {
     expect(matchModel('gemini-3-flash-preview')?.displayName).toBe('Gemini 3 Flash Preview')
     // Longer lite id must not collapse onto gemini-3.5-flash
     expect(matchModel('gemini-3.5-flash-lite')?.displayName).not.toBe('Gemini 3.5 Flash')
+    expect(matchModel('gemini-3.7-flash')?.displayName).not.toBe('Gemini 3.6 Flash')
   })
 
   it('matches Grok 4.6 official metadata without collapsing onto 4.5', () => {
@@ -168,6 +174,54 @@ describe('matchModel', () => {
     expect(info?.pricing?.input).toBe(0)
     expect(info?.pricing?.output).toBe(0)
     expect(matchModel('stealth/ox-alpha')).toEqual(info)
+  })
+
+  it('matches GLM-5.3 family without collapsing onto 5.2 or 5', () => {
+    const glm53 = matchModel('glm-5.3')
+    expect(glm53?.displayName).toBe('GLM-5.3')
+    expect(glm53?.contextWindow).toBe(1_000_000)
+    expect(glm53?.maxOutput).toBe(131_072)
+    expect(glm53?.capabilities?.vision).toBe(false)
+    expect(glm53?.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(glm53?.pricing?.input).toBe(1.4)
+    expect(glm53?.pricing?.output).toBe(4.4)
+    expect(matchModel('z-ai/glm-5.3')?.displayName).toBe('GLM-5.3')
+    expect(matchModel('glm-5-3')?.displayName).toBe('GLM-5.3')
+
+    const flash = matchModel('glm-5.3-flash')
+    expect(flash?.displayName).toBe('GLM-5.3 Flash')
+    expect(flash?.capabilities?.vision).toBe(true)
+    expect(flash?.maxOutput).toBe(131_072)
+    expect(flash?.pricing?.input).toBe(0.075)
+    expect(matchModel('glm-5.3-flash')?.displayName).not.toBe('GLM-5.3')
+
+    expect(matchModel('glm-5.2')?.maxOutput).toBe(131_072)
+    expect(matchModel('glm-5.2')?.capabilities?.vision).toBe(false)
+    expect(matchModel('glm-5')?.displayName).toBe('GLM-5')
+    expect(matchModel('glm-5')?.contextWindow).toBe(200_000)
+    expect(matchModel('glm-5-turbo')?.displayName).toBe('GLM-5 Turbo')
+    expect(matchModel('glm-5v-turbo')?.displayName).toBe('GLM-5V Turbo')
+    expect(matchModel('glm-5v-turbo')?.capabilities?.vision).toBe(true)
+    expect(matchModel('glm-5.3')?.displayName).not.toBe('GLM-5')
+    expect(matchModel('glm-5.3')?.displayName).not.toBe('GLM-5.2')
+  })
+
+  it('matches Qwen 3.8 family without collapsing onto 3.7', () => {
+    const max = matchModel('qwen3.8-max')
+    expect(max?.displayName).toBe('Qwen3.8 Max')
+    expect(max?.contextWindow).toBe(1_000_000)
+    expect(max?.maxOutput).toBe(131_072)
+    expect(max?.capabilities?.vision).toBe(true)
+    expect(max?.pricing?.input).toBe(2)
+    expect(max?.pricing?.output).toBe(6)
+    expect(matchModel('qwen/qwen3.8-max')?.displayName).toBe('Qwen3.8 Max')
+
+    expect(matchModel('qwen3.8-flash')?.displayName).toBe('Qwen3.8 Flash')
+    expect(matchModel('qwen3.8-flash')?.maxOutput).toBe(131_072)
+    expect(matchModel('qwen3.8-27b')?.displayName).toBe('Qwen3.8 27B')
+    expect(matchModel('qwen3.7-flash')?.displayName).toBe('Qwen3.7 Flash')
+    expect(matchModel('qwen3.8-max')?.displayName).not.toBe('Qwen3.7 Max')
+    expect(matchModel('qwen3.8-flash')?.displayName).not.toBe('Qwen3.7 Flash')
   })
 })
 

@@ -89,12 +89,13 @@ describe('ChatTab', () => {
     expect(screen.getByText(/p1 \/ gpt-4o/)).toBeTruthy()
   })
 
-  it('source=fallback 时来源标签用警示色', () => {
+  it('source=omit 时来源标签用警示色且显示不发送', () => {
     renderTab({
-      effectiveChatMaxOutput: { maxOutput: 8192, source: 'fallback' },
-      chatMaxOutputSourceLabel: '兜底值',
+      effectiveChatMaxOutput: { maxOutput: 0, source: 'omit' },
+      chatMaxOutputSourceLabel: '未收录，不发送',
     })
-    expect(screen.getByText('兜底值').className).toContain('warn')
+    expect(screen.getByText('不发送')).toBeTruthy()
+    expect(screen.getByText('未收录，不发送').className).toContain('warn')
   })
 
   it('Agent 提示词为空时显示内置 defaultText（英文原文）', () => {

@@ -160,9 +160,11 @@ export function ChatTab({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[15px] font-medium text-neutral-900 dark:text-neutral-50">
-                  {formatTokenCount(effectiveChatMaxOutput.maxOutput)}
+                  {effectiveChatMaxOutput.source === 'omit' || !effectiveChatMaxOutput.maxOutput
+                    ? (lang === 'zh' ? '不发送' : 'Not sent')
+                    : formatTokenCount(effectiveChatMaxOutput.maxOutput)}
                 </span>
-                <span className={`kv-tag ${effectiveChatMaxOutput.source === 'fallback' ? 'warn' : 'ok'}`}>
+                <span className={`kv-tag ${effectiveChatMaxOutput.source === 'omit' ? 'warn' : 'ok'}`}>
                   {chatMaxOutputSourceLabel}
                 </span>
               </div>
@@ -170,6 +172,13 @@ export function ChatTab({
                 {lang === 'zh' ? '聊天所选模型：' : 'Chat model: '}
                 {chatMaxOutputModelLabel}
               </p>
+              {effectiveChatMaxOutput.source === 'omit' ? (
+                <p className="kv-row-desc mt-1">
+                  {lang === 'zh'
+                    ? '未收录的模型不发送输出上限，由供应商默认。Anthropic 等必须带该字段的协议仍使用右侧档位。'
+                    : 'Unlisted models omit the output cap. Anthropic still sends the fallback because the field is required.'}
+                </p>
+              ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <span className="kv-row-desc whitespace-nowrap">

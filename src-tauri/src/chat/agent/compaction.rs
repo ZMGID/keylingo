@@ -773,7 +773,11 @@ fn extract_summary_text(response: &str) -> String {
 }
 
 /// 摘要调用的最大输出 token：`min(config.max_output_tokens, SUMMARY_OUTPUT_TOKENS)`（R9）。
+/// `0` = 未收录模型不发上限，摘要仍用本常数封顶，避免产出 0。
 fn summary_output_tokens(config_max: u32) -> u32 {
+    if config_max == 0 {
+        return SUMMARY_OUTPUT_TOKENS;
+    }
     config_max.min(SUMMARY_OUTPUT_TOKENS)
 }
 
@@ -1487,11 +1491,8 @@ pub(crate) async fn maybe_compact_send_view(env: &LoopEnv<'_>, state: &mut RunSt
         window,
         // 用模型真实 max output（而非 run 的 config.max_output_tokens），与持久化路径
         // compact_conversation 口径统一——否则 run 配的小输出会把摘要卡短、9 段产出被截。
-        chat_max_output_tokens_for_model(
-            Some(&config.provider),
-            &config.model,
-            config.max_output_tokens,
-        ),
+        chat_max_output_tokens_for_model(Some(&config.provider), &config.model)
+            .unwrap_or(SUMMARY_OUTPUT_TOKENS),
         config.retry_attempts,
         &config.conversation_id,
         &config.message_id,
@@ -1763,7 +1764,7 @@ async fn compact_conversation_inner(
         // 一轮，边界天然不劈开 turn，无需 TurnPrefix。
         SummaryKind::History,
         window,
-        chat_max_output_tokens_for_model(Some(&provider), &model, settings.chat.max_output_tokens),
+        chat_max_output_tokens_for_model(Some(&provider), &model).unwrap_or(SUMMARY_OUTPUT_TOKENS),
         retry_attempts,
         &conversation.id,
         &message_id,
@@ -3114,6 +3115,7 @@ mod tests {
         // 大 config_max → 封顶到 SUMMARY_OUTPUT_TOKENS；小 config_max → 保留 min() 语义。
         assert_eq!(summary_output_tokens(100_000), SUMMARY_OUTPUT_TOKENS);
         assert_eq!(summary_output_tokens(1_000), 1_000);
+        assert_eq!(summary_output_tokens(0), SUMMARY_OUTPUT_TOKENS);
     }
 
     #[test]

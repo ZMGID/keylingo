@@ -332,10 +332,11 @@ impl GeminiProvider<'_> {
         // 注意：Gemini 的 model/method/stream 都在 URL 上，不在 body 里。
         let mut body = serde_json::json!({
             "contents": gemini_contents_from_generate_request(request),
-            "generationConfig": {
-                "maxOutputTokens": request.options.max_tokens,
-            },
+            "generationConfig": {},
         });
+        if request.options.max_tokens > 0 {
+            body["generationConfig"]["maxOutputTokens"] = Value::from(request.options.max_tokens);
+        }
         if let Some(temperature) = crate::chat::model_metadata::temperature_for_request(
             request.options.temperature,
             Some(self.provider),
@@ -1544,6 +1545,32 @@ mod tests {
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("stream_options").is_none());
         assert!(body.get("model").is_none()); // model 在 URL，不在 body
+    }
+
+    #[test]
+    fn request_body_omits_max_output_tokens_when_zero() {
+        let mut request = GenerateRequest {
+            model: "gemini-3.1-flash-lite".into(),
+            system: String::new(),
+            messages: vec![ModelMessage {
+                role: ModelRole::User,
+                content: vec![MessagePart::Text { text: "hi".into() }],
+            }],
+            tools: Vec::new(),
+            options: GenerateOptions {
+                max_tokens: 0,
+                ..Default::default()
+            },
+            metadata: Default::default(),
+        };
+        let body = body_for(&request, false);
+        assert!(
+            body["generationConfig"].get("maxOutputTokens").is_none(),
+            "unknown models must not invent a cap: {body}"
+        );
+        request.options.max_tokens = 8192;
+        let capped = body_for(&request, false);
+        assert_eq!(capped["generationConfig"]["maxOutputTokens"], 8192);
     }
 
     #[test]

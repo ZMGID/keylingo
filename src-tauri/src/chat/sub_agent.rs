@@ -1219,7 +1219,7 @@ pub fn handle_agent_spawn<'a>(
 
         // Model-aware output cap: prefer the model library / provider override
         // (matching top-level chat); the raw setting is only a fallback.
-        let max_output_tokens = crate::chat::model_metadata::chat_max_output_tokens_for_model(
+        let max_output_tokens = crate::chat::model_metadata::chat_max_output_tokens_on_wire(
             Some(&provider),
             &model,
             settings.chat.max_output_tokens,

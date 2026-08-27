@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use crate::settings::{ModelInfo, ModelPricing, ModelProvider};
+use crate::settings::{ModelInfo, ModelPricing, ModelProvider, ProviderApiFormat};
 
 const FALLBACK_CONTEXT_WINDOW_TOKENS: usize = 200_000;
 const MIN_TEMPERATURE: f64 = 0.0;
@@ -778,14 +778,32 @@ pub(crate) fn context_window_for_model(
     (FALLBACK_CONTEXT_WINDOW_TOKENS, true)
 }
 
+/// 模型级最大输出。覆盖 → 内置模型库；都没有就返回 `None`。
+///
+/// **不要**用设置里的「兜底最大输出」填这个空：那会给未收录的思考模型
+/// 硬塞 16k/32k，思考把额度吃光后规划报「空助手响应」。对齐 temperature：没元数据就不发。
 pub(crate) fn chat_max_output_tokens_for_model(
     provider: Option<&ModelProvider>,
     model: &str,
-    fallback: u32,
-) -> u32 {
+) -> Option<u32> {
     max_output_from_model_info(provider.and_then(|provider| provider.model_overrides.get(model)))
         .or_else(|| model_database_max_output(model))
-        .unwrap_or(fallback)
+}
+
+/// 写入请求体的输出上限。有模型元数据就用；未收录的 OpenAI/Gemini/Responses 返回 0（不发字段）。
+/// Anthropic Messages 强制要 `max_tokens`，未收录时才用 `anthropic_fallback`。
+pub(crate) fn chat_max_output_tokens_on_wire(
+    provider: Option<&ModelProvider>,
+    model: &str,
+    anthropic_fallback: u32,
+) -> u32 {
+    if let Some(tokens) = chat_max_output_tokens_for_model(provider, model) {
+        return tokens;
+    }
+    match provider.map(ModelProvider::api_format_kind) {
+        Some(ProviderApiFormat::AnthropicMessages) => anthropic_fallback,
+        _ => 0,
+    }
 }
 
 /// 解析模型级 temperature。用户显式清空优先于数据库值；所有来源都缺省时不发送。
@@ -1376,12 +1394,12 @@ mod tests {
     #[test]
     fn chat_max_output_uses_builtin_model_database_defaults() {
         assert_eq!(
-            chat_max_output_tokens_for_model(None, "deepseek-v4-flash", 32_768),
-            131_072
+            chat_max_output_tokens_for_model(None, "deepseek-v4-flash"),
+            Some(131_072)
         );
         assert_eq!(
-            chat_max_output_tokens_for_model(None, "kimi-k3", 32_768),
-            1_048_576
+            chat_max_output_tokens_for_model(None, "kimi-k3"),
+            Some(1_048_576)
         );
     }
 
@@ -1398,16 +1416,52 @@ mod tests {
         let provider = test_provider_with_overrides(overrides);
 
         assert_eq!(
-            chat_max_output_tokens_for_model(Some(&provider), "deepseek-v4-flash", 32_768),
-            65_536
+            chat_max_output_tokens_for_model(Some(&provider), "deepseek-v4-flash"),
+            Some(65_536)
         );
     }
 
     #[test]
-    fn chat_max_output_falls_back_to_setting_when_metadata_missing() {
+    fn chat_max_output_is_absent_when_metadata_is_missing() {
+        assert_eq!(chat_max_output_tokens_for_model(None, "custom-model"), None);
         assert_eq!(
-            chat_max_output_tokens_for_model(None, "custom-model", 32_768),
-            32_768
+            chat_max_output_tokens_for_model(None, "totally-unknown-model-xyz-9999"),
+            None
+        );
+    }
+
+    #[test]
+    fn chat_max_output_uses_glm_53_database_cap() {
+        assert_eq!(
+            chat_max_output_tokens_for_model(None, "glm-5.3"),
+            Some(131_072)
+        );
+        assert_eq!(
+            chat_max_output_tokens_for_model(None, "glm-5.3-flash"),
+            Some(131_072)
+        );
+    }
+
+    #[test]
+    fn chat_max_output_on_wire_omits_for_unlisted_openai_models() {
+        let provider = test_provider_with_overrides(HashMap::new());
+        assert_eq!(
+            chat_max_output_tokens_on_wire(Some(&provider), "custom-model", 16_384),
+            0
+        );
+        assert_eq!(
+            chat_max_output_tokens_on_wire(Some(&provider), "glm-5.3", 16_384),
+            131_072
+        );
+    }
+
+    #[test]
+    fn chat_max_output_on_wire_keeps_anthropic_fallback() {
+        let mut provider = test_provider_with_overrides(HashMap::new());
+        provider.api_format = "anthropic_messages".into();
+        assert_eq!(
+            chat_max_output_tokens_on_wire(Some(&provider), "claude-mystery", 16_384),
+            16_384
         );
     }
 

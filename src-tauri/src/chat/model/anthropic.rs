@@ -422,10 +422,11 @@ impl AnthropicMessagesProvider<'_> {
     }
 
     fn request_body(&self, request: &GenerateRequest, stream: bool) -> Value {
+        let max_tokens = anthropic_required_max_tokens(request.options.max_tokens);
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": anthropic_messages_from_generate_request(request),
-            "max_tokens": request.options.max_tokens,
+            "max_tokens": max_tokens,
         });
         let profile = crate::chat::model_metadata::claude_thinking_profile(&request.model);
         if !profile.is_some_and(|profile| profile.forbid_temperature) {
@@ -754,7 +755,7 @@ fn apply_anthropic_thinking(
         ClaudeThinkingKind::Extended => {
             let Some(budget) = clamp_extended_thinking_budget(
                 extended_thinking_budget_for_level(level),
-                request.options.max_tokens,
+                anthropic_required_max_tokens(request.options.max_tokens),
             ) else {
                 return;
             };
@@ -778,6 +779,15 @@ fn apply_anthropic_thinking(
             body["output_config"]["effort"] = serde_json::json!(level);
         }
         ClaudeThinkingKind::Unsupported => {}
+    }
+}
+
+/// Anthropic Messages 的 `max_tokens` 是必填字段，0（未收录模型、不猜上限）时用代码默认。
+fn anthropic_required_max_tokens(requested: u32) -> u32 {
+    if requested > 0 {
+        requested
+    } else {
+        crate::settings::default_chat_max_output_tokens()
     }
 }
 

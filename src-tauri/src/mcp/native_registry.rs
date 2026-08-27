@@ -696,11 +696,10 @@ fn call_advisor(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
         } else {
             1
         };
-        // Model-aware output cap (matches sub-agents / top-level chat): a small
-        // advisor model may have a real ceiling far below the global chat cap;
-        // sending the raw cap makes strict providers 400. Prefer the model
-        // library / provider override, fall back to the global setting.
-        let max_output_tokens = crate::chat::model_metadata::chat_max_output_tokens_for_model(
+        // Model-aware output cap (matching top-level chat). Unlisted OpenAI/Gemini
+        // models omit the field (0). Anthropic still sends the settings fallback
+        // because `max_tokens` is required.
+        let max_output_tokens = crate::chat::model_metadata::chat_max_output_tokens_on_wire(
             Some(&provider),
             &model,
             ctx.settings.chat.max_output_tokens,
