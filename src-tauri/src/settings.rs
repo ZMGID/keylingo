@@ -668,11 +668,13 @@ fn default_message_order() -> String {
 }
 
 pub fn default_chat_max_output_tokens() -> u32 {
-    32768
+    16_384
 }
 
-pub(crate) fn clamp_chat_max_output_tokens(value: u32) -> u32 {
-    value.clamp(512, 65_536)
+pub(crate) fn clamp_chat_max_output_tokens(_value: u32) -> u32 {
+    // 对齐 Pi：maxTokens 写在模型目录上，没有用户档位。自定义模型没填时缺省 16384。
+    // Kivio 有库用库；未收录一律发这个 16k，不按协议省略。
+    default_chat_max_output_tokens()
 }
 
 impl Default for LensConfig {
@@ -705,7 +707,7 @@ pub struct ChatConfig {
     pub stream_enabled: bool,
     #[serde(default = "default_true")]
     pub thinking_enabled: bool,
-    /// Chat 模型最终回答最大输出 tokens。
+    /// 未收录模型的输出上限兜底（对齐 Pi 自定义模型缺省 16384；有库/覆盖时用库值）。
     #[serde(default = "default_chat_max_output_tokens")]
     pub max_output_tokens: u32,
     /// 响应语言（"zh"/"en" 等）。空字符串表示跟随 Lens 默认语言，再跟随 target_lang。
@@ -3176,12 +3178,12 @@ mod tests {
         let mut s = Settings::default();
         s.chat.max_output_tokens = 0;
         let s = sanitize_settings(s);
-        assert_eq!(s.chat.max_output_tokens, 512);
+        assert_eq!(s.chat.max_output_tokens, 16_384);
 
         let mut s = Settings::default();
-        s.chat.max_output_tokens = 100_000;
+        s.chat.max_output_tokens = 32_768;
         let s = sanitize_settings(s);
-        assert_eq!(s.chat.max_output_tokens, 65_536);
+        assert_eq!(s.chat.max_output_tokens, 16_384);
     }
 
     #[test]

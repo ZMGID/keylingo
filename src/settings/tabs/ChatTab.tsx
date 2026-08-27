@@ -15,8 +15,8 @@ import type {
   ChatModeConfig,
 } from '../../api/tauri'
 
-/** 兜底最大输出 token 的可选档位。 */
-const CHAT_MAX_OUTPUT_TOKEN_OPTIONS = [2048, 8192, 16384, 32768]
+/** 对齐 Pi：自定义模型未填 maxTokens 时的缺省，也是唯一的协议兜底。 */
+const CHAT_FALLBACK_MAX_OUTPUT_TOKENS = 16384
 
 function formatTokenCount(tokens?: number): string {
   if (!tokens || !Number.isFinite(tokens)) return ''
@@ -45,7 +45,6 @@ interface ChatTabProps {
   chatDefaults: string | undefined
   /** Built-in Chat runtime prompt (exact string used when chatMode.systemPrompt is empty). */
   chatRuntimeDefaults: string | undefined
-  chatFallbackMaxOutputTokens: number
   effectiveChatMaxOutput: { maxOutput: number; source: string }
   chatMaxOutputSourceLabel: string
   chatMaxOutputModelLabel: string
@@ -66,7 +65,6 @@ export function ChatTab({
   chatMemory,
   chatDefaults,
   chatRuntimeDefaults,
-  chatFallbackMaxOutputTokens,
   effectiveChatMaxOutput,
   chatMaxOutputSourceLabel,
   chatMaxOutputModelLabel,
@@ -160,11 +158,9 @@ export function ChatTab({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[15px] font-medium text-neutral-900 dark:text-neutral-50">
-                  {effectiveChatMaxOutput.source === 'omit' || !effectiveChatMaxOutput.maxOutput
-                    ? (lang === 'zh' ? '不发送' : 'Not sent')
-                    : formatTokenCount(effectiveChatMaxOutput.maxOutput)}
+                  {formatTokenCount(effectiveChatMaxOutput.maxOutput)}
                 </span>
-                <span className={`kv-tag ${effectiveChatMaxOutput.source === 'omit' ? 'warn' : 'ok'}`}>
+                <span className={`kv-tag ${effectiveChatMaxOutput.source === 'fallback' ? 'warn' : 'ok'}`}>
                   {chatMaxOutputSourceLabel}
                 </span>
               </div>
@@ -172,27 +168,14 @@ export function ChatTab({
                 {lang === 'zh' ? '聊天所选模型：' : 'Chat model: '}
                 {chatMaxOutputModelLabel}
               </p>
-              {effectiveChatMaxOutput.source === 'omit' ? (
-                <p className="kv-row-desc mt-1">
-                  {lang === 'zh'
-                    ? '未收录的模型不发送输出上限，由供应商默认。Anthropic 等必须带该字段的协议仍使用右侧档位。'
-                    : 'Unlisted models omit the output cap. Anthropic still sends the fallback because the field is required.'}
-                </p>
-              ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <span className="kv-row-desc whitespace-nowrap">
                 {lang === 'zh' ? '兜底' : 'Fallback'}
               </span>
-              <Select
-                className="w-44"
-                value={String(chatFallbackMaxOutputTokens)}
-                onChange={(maxOutputTokens) => onUpdateChat({ maxOutputTokens: Number(maxOutputTokens) })}
-                options={CHAT_MAX_OUTPUT_TOKEN_OPTIONS.map((tokens) => ({
-                  value: String(tokens),
-                  label: formatTokenCount(tokens),
-                }))}
-              />
+              <span className="text-[13px] tabular-nums text-neutral-800 dark:text-neutral-200">
+                {formatTokenCount(CHAT_FALLBACK_MAX_OUTPUT_TOKENS)}
+              </span>
             </div>
           </div>
         </SettingRow>

@@ -773,7 +773,7 @@ fn extract_summary_text(response: &str) -> String {
 }
 
 /// 摘要调用的最大输出 token：`min(config.max_output_tokens, SUMMARY_OUTPUT_TOKENS)`（R9）。
-/// `0` = 未收录模型不发上限，摘要仍用本常数封顶，避免产出 0。
+/// `0` 仍用本常数封顶（适配器层 0=省略字段；摘要路径不要产出 0）。
 fn summary_output_tokens(config_max: u32) -> u32 {
     if config_max == 0 {
         return SUMMARY_OUTPUT_TOKENS;

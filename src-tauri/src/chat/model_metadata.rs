@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use crate::settings::{ModelInfo, ModelPricing, ModelProvider, ProviderApiFormat};
+use crate::settings::{ModelInfo, ModelPricing, ModelProvider};
 
 const FALLBACK_CONTEXT_WINDOW_TOKENS: usize = 200_000;
 const MIN_TEMPERATURE: f64 = 0.0;
@@ -779,9 +779,6 @@ pub(crate) fn context_window_for_model(
 }
 
 /// 模型级最大输出。覆盖 → 内置模型库；都没有就返回 `None`。
-///
-/// **不要**用设置里的「兜底最大输出」填这个空：那会给未收录的思考模型
-/// 硬塞 16k/32k，思考把额度吃光后规划报「空助手响应」。对齐 temperature：没元数据就不发。
 pub(crate) fn chat_max_output_tokens_for_model(
     provider: Option<&ModelProvider>,
     model: &str,
@@ -790,20 +787,14 @@ pub(crate) fn chat_max_output_tokens_for_model(
         .or_else(|| model_database_max_output(model))
 }
 
-/// 写入请求体的输出上限。有模型元数据就用；未收录的 OpenAI/Gemini/Responses 返回 0（不发字段）。
-/// Anthropic Messages 强制要 `max_tokens`，未收录时才用 `anthropic_fallback`。
+/// 写入请求体的输出上限。有模型元数据就用；没有就用 `fallback`。
+/// 对齐 Pi：自定义模型没填 maxTokens 时一律 16384，不按协议省略。
 pub(crate) fn chat_max_output_tokens_on_wire(
     provider: Option<&ModelProvider>,
     model: &str,
-    anthropic_fallback: u32,
+    fallback: u32,
 ) -> u32 {
-    if let Some(tokens) = chat_max_output_tokens_for_model(provider, model) {
-        return tokens;
-    }
-    match provider.map(ModelProvider::api_format_kind) {
-        Some(ProviderApiFormat::AnthropicMessages) => anthropic_fallback,
-        _ => 0,
-    }
+    chat_max_output_tokens_for_model(provider, model).unwrap_or(fallback)
 }
 
 /// 解析模型级 temperature。用户显式清空优先于数据库值；所有来源都缺省时不发送。
@@ -1443,11 +1434,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_max_output_on_wire_omits_for_unlisted_openai_models() {
+    fn chat_max_output_on_wire_uses_fallback_for_unlisted_models() {
         let provider = test_provider_with_overrides(HashMap::new());
         assert_eq!(
             chat_max_output_tokens_on_wire(Some(&provider), "custom-model", 16_384),
-            0
+            16_384
         );
         assert_eq!(
             chat_max_output_tokens_on_wire(Some(&provider), "glm-5.3", 16_384),
@@ -1456,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_max_output_on_wire_keeps_anthropic_fallback() {
+    fn chat_max_output_on_wire_keeps_fallback_for_anthropic_too() {
         let mut provider = test_provider_with_overrides(HashMap::new());
         provider.api_format = "anthropic_messages".into();
         assert_eq!(

@@ -46,8 +46,7 @@ function renderTab(overrides: Partial<MockedProps> = {}) {
     chatMemory: { enabled: false } as Props['chatMemory'],
     chatDefaults: 'You are the AI assistant inside Kivio.',
     chatRuntimeDefaults: 'Chat runtime (internal runtime mode): this conversation uses Kivio Chat.',
-    chatFallbackMaxOutputTokens: 8192,
-    effectiveChatMaxOutput: { maxOutput: 16384, source: 'override' },
+    effectiveChatMaxOutput: { maxOutput: 131072, source: 'override' },
     chatMaxOutputSourceLabel: '来自模型覆盖',
     chatMaxOutputModelLabel: 'p1 / gpt-4o',
     skillRuntimeEnabled: true,
@@ -84,18 +83,21 @@ describe('ChatTab', () => {
 
   it('最大输出 token 显示生效值 + 来源标签 + 模型名（三者不串）', () => {
     renderTab()
-    expect(screen.getByText('16,384 tokens')).toBeTruthy()
+    expect(screen.getByText('131,072 tokens')).toBeTruthy()
     expect(screen.getByText('来自模型覆盖')).toBeTruthy()
     expect(screen.getByText(/p1 \/ gpt-4o/)).toBeTruthy()
+    expect(screen.getByText('兜底')).toBeTruthy()
+    expect(screen.getByText('16,384 tokens')).toBeTruthy()
   })
 
-  it('source=omit 时来源标签用警示色且显示不发送', () => {
+  it('source=fallback 时来源标签用警示色且左右同为 16,384', () => {
     renderTab({
-      effectiveChatMaxOutput: { maxOutput: 0, source: 'omit' },
-      chatMaxOutputSourceLabel: '未收录，不发送',
+      effectiveChatMaxOutput: { maxOutput: 16384, source: 'fallback' },
+      chatMaxOutputSourceLabel: '兜底设置',
     })
-    expect(screen.getByText('不发送')).toBeTruthy()
-    expect(screen.getByText('未收录，不发送').className).toContain('warn')
+    expect(screen.getAllByText('16,384 tokens')).toHaveLength(2)
+    expect(screen.getByText('兜底设置').className).toContain('warn')
+    expect(screen.getByText('兜底')).toBeTruthy()
   })
 
   it('Agent 提示词为空时显示内置 defaultText（英文原文）', () => {

@@ -110,7 +110,7 @@ function defaultChatConfig(): NonNullable<SettingsData['chat']> {
   return {
     streamEnabled: true,
     thinkingEnabled: true,
-    maxOutputTokens: 8192,
+    maxOutputTokens: 16384,
     defaultLanguage: '',
     systemPrompt: '',
     userDisplayName: '',
@@ -155,16 +155,16 @@ function resolveEffectiveChatModel(settings: SettingsData): { provider?: ModelPr
   }
 }
 
-function resolveEffectiveChatMaxOutput(settings: SettingsData) {
+function resolveEffectiveChatMaxOutput(settings: SettingsData, fallbackTokens: number) {
   const { provider, model } = resolveEffectiveChatModel(settings)
   const override = model ? provider?.modelOverrides?.[model]?.maxOutput : undefined
   const modelInfo = model ? resolveModelInfo(model, provider?.modelOverrides) : {}
-  const maxOutput = override || modelInfo.maxOutput || 0
-  const source: 'override' | 'database' | 'omit' = override
+  const maxOutput = override || modelInfo.maxOutput || fallbackTokens
+  const source: 'override' | 'database' | 'fallback' = override
     ? 'override'
     : modelInfo.maxOutput
       ? 'database'
-      : 'omit'
+      : 'fallback'
 
   return { maxOutput, source, model, provider }
 }
@@ -1606,15 +1606,15 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
   const chatRuntimeDefaults = defaultPrompts?.chatRuntimePrompt
   const chatConfig = settings?.chat || defaultChatConfig()
   const chatMemory = settings?.chatMemory || defaultChatMemory()
-  const chatFallbackMaxOutputTokens = chatConfig.maxOutputTokens ?? 8192
+  const chatFallbackMaxOutputTokens = chatConfig.maxOutputTokens ?? 16384
   const effectiveChatMaxOutput = settings
-    ? resolveEffectiveChatMaxOutput(settings)
-    : { maxOutput: 0, source: 'omit' as const, model: '', provider: undefined }
+    ? resolveEffectiveChatMaxOutput(settings, chatFallbackMaxOutputTokens)
+    : { maxOutput: chatFallbackMaxOutputTokens, source: 'fallback' as const, model: '', provider: undefined }
   const chatMaxOutputSourceLabel = effectiveChatMaxOutput.source === 'override'
     ? (lang === 'zh' ? '模型参数' : 'Model override')
     : effectiveChatMaxOutput.source === 'database'
       ? (lang === 'zh' ? '内置模型库' : 'Model database')
-      : (lang === 'zh' ? '未收录，不发送' : 'Unknown model, not sent')
+      : (lang === 'zh' ? '兜底设置' : 'Fallback setting')
   const chatMaxOutputModelLabel = effectiveChatMaxOutput.model
     ? (effectiveChatMaxOutput.provider?.name
       ? `${effectiveChatMaxOutput.provider.name} / ${effectiveChatMaxOutput.model}`
@@ -2042,7 +2042,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 chatMemory={chatMemory}
                 chatDefaults={chatDefaults}
                 chatRuntimeDefaults={chatRuntimeDefaults}
-                chatFallbackMaxOutputTokens={chatFallbackMaxOutputTokens}
                 effectiveChatMaxOutput={effectiveChatMaxOutput}
                 chatMaxOutputSourceLabel={chatMaxOutputSourceLabel}
                 chatMaxOutputModelLabel={chatMaxOutputModelLabel}

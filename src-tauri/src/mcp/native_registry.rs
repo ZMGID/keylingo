@@ -696,9 +696,8 @@ fn call_advisor(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
         } else {
             1
         };
-        // Model-aware output cap (matching top-level chat). Unlisted OpenAI/Gemini
-        // models omit the field (0). Anthropic still sends the settings fallback
-        // because `max_tokens` is required.
+        // Model-aware output cap (matching top-level chat). Unlisted models use
+        // the Pi-style 16k fallback, including OpenAI-compatible endpoints.
         let max_output_tokens = crate::chat::model_metadata::chat_max_output_tokens_on_wire(
             Some(&provider),
             &model,

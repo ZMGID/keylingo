@@ -782,7 +782,7 @@ fn apply_anthropic_thinking(
     }
 }
 
-/// Anthropic Messages 的 `max_tokens` 是必填字段，0（未收录模型、不猜上限）时用代码默认。
+/// Anthropic Messages 的 `max_tokens` 是必填字段，0 时用代码默认（16384）。
 fn anthropic_required_max_tokens(requested: u32) -> u32 {
     if requested > 0 {
         requested

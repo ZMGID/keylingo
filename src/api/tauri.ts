@@ -1698,7 +1698,7 @@ export function normalizeSettings(settings: Settings): Settings {
     chat: {
       streamEnabled: current.chat?.streamEnabled ?? current.lens?.streamEnabled ?? true,
       thinkingEnabled: current.chat?.thinkingEnabled ?? current.lens?.thinkingEnabled ?? true,
-      maxOutputTokens: current.chat?.maxOutputTokens ?? 8192,
+      maxOutputTokens: current.chat?.maxOutputTokens ?? 16384,
       defaultLanguage: current.chat?.defaultLanguage ?? '',
       systemPrompt: current.chat?.systemPrompt ?? '',
       userDisplayName: current.chat?.userDisplayName ?? '',
