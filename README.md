@@ -37,8 +37,7 @@
 <a href="https://hezubus.cc"><img src="docs/sponsors/hezubus.png" alt="合租巴士 Hezubus" width="150"></a>
 </td>
 <td>
-感谢 <a href="https://hezubus.cc">合租巴士</a> 赞助本项目。<a href="https://hezubus.cc">合租巴士</a> 提供 GPT / Claude 等多款模型的官方稳定极速 API 中转服务，支持企业级定制、报销开票、7×16h 专属技术支持，更有独家适配的 WebSocket 连接方式，畅享极速首字速度。Codex 补贴倍率低至 0.08。<a href="https://hezubus.cc">点此注册</a>。<br><br>
-在 Kivio 中：设置 → 供应商 → <strong>添加驱动</strong>，选带爱心标记的 <strong>Hezubus</strong>，会预填 <code>https://hezubus.cc/</code>。
+感谢 <a href="https://hezubus.cc">合租巴士</a> 赞助本项目。<a href="https://hezubus.cc">合租巴士</a> 提供 GPT / Claude 等多款模型的官方稳定极速 API 中转服务，支持企业级定制、报销开票、7×16h 专属技术支持，更有独家适配的 WebSocket 连接方式，畅享极速首字速度。Codex 补贴倍率低至 0.08。<a href="https://hezubus.cc">点此注册</a>。
 </td>
 </tr>
 </table>

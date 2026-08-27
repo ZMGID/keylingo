@@ -288,7 +288,7 @@ Releases are built via GitHub Actions (`.github/workflows/release.yml`). Pushing
 
 Manual releases are also supported via `workflow_dispatch`.
 
-Bundled document Skills (`pdf` / `docx` / `xlsx`) tell the model to use host `read`/`bash`; they do not ship a Python runtime. Before publishing, inspect the final DMG / MSI / NSIS artifacts and verify that `skills/pdf|docx|xlsx` are inside the installed app resources. Follow `docs/RELEASE_PACKAGING.md` for the exact flow; do not publish releases from memory.
+Bundled document Skills (`pdf` / `docx` / `xlsx`) tell the model to use host `read`/`bash`; they do not ship a Python runtime. Before publishing, inspect the final DMG / MSI / NSIS artifacts and verify that `skills/pdf|docx|xlsx` are inside the installed app resources. Follow `docs/RELEASE_PACKAGING.md` for the exact flow; do not publish releases from memory. README layout is frozen in that file (`README format`): Chinese-first `README.md` + `README.en.md`, sponsor block, star history at the end; a release only bumps the 功能 / Features version pointer.
 
 ## Code Style
 

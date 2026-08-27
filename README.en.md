@@ -37,8 +37,7 @@ Bring your own keys. No account, no proxy, no telemetry. Data stays on disk.
 <a href="https://hezubus.cc"><img src="docs/sponsors/hezubus.png" alt="Hezubus" width="150"></a>
 </td>
 <td>
-Thanks to <a href="https://hezubus.cc">Hezubus</a> for sponsoring this project. <a href="https://hezubus.cc">Hezubus</a> provides official, stable, high-speed API relay for GPT, Claude, and other models, with enterprise customization, invoicing, and 7×16h dedicated support. It also offers a purpose-built WebSocket connection for faster time-to-first-token. Codex subsidy rates go as low as 0.08×. <a href="https://hezubus.cc">Register here</a>.<br><br>
-In Kivio: Settings → Providers → <strong>Add</strong>, pick the heart-marked <strong>Hezubus</strong> preset. It prefills <code>https://hezubus.cc/</code>.
+Thanks to <a href="https://hezubus.cc">Hezubus</a> for sponsoring this project. <a href="https://hezubus.cc">Hezubus</a> provides official, stable, high-speed API relay for GPT, Claude, and other models, with enterprise customization, invoicing, and 7×16h dedicated support. It also offers a purpose-built WebSocket connection for faster time-to-first-token. Codex subsidy rates go as low as 0.08×. <a href="https://hezubus.cc">Register here</a>.
 </td>
 </tr>
 </table>
