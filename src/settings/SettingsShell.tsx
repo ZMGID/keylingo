@@ -1408,12 +1408,8 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
   const openModelPicker = (providerId: string) => {
     if (!settings) return
-    const provider = settings.providers.find((p) => p.id === providerId)
-    if (!provider) return
+    if (!settings.providers.some((p) => p.id === providerId)) return
     setModelPickerProviderId(providerId)
-    if (provider.availableModels.length === 0 && fetchingProviderId !== providerId) {
-      void fetchModels(providerId)
-    }
   }
 
   /**
@@ -2189,7 +2185,6 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
                 selectedProvider={selectedProvider}
                 revealedKeys={revealedKeys}
                 gzipInfoOpen={gzipInfoOpen}
-                fetchingProviderId={fetchingProviderId}
                 onSelectProvider={setSelectedProviderId}
                 onReorderProviders={reorderProviders}
                 onAddProvider={addProvider}
@@ -2274,7 +2269,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             fetching: t.fetching,
             addModel: t.addModel,
             manualAddModel: t.manualAddModel,
-            noModels: lang === 'zh' ? '尚未获取模型，请点击上方按钮拉取。' : 'No models yet. Click the button above to fetch.',
+            noModels: lang === 'zh' ? '没有可用模型。点刷新重试，或手动添加。' : 'No models yet. Refresh or add one manually.',
             noSearchResults: lang === 'zh' ? '没有匹配的模型' : 'No matching models',
             enabled: lang === 'zh' ? '已启用' : 'On',
             addAllModels: lang === 'zh' ? '添加当前列表中的全部模型' : 'Add all models in the current list',

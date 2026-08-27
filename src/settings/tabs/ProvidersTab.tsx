@@ -1,5 +1,5 @@
-import { ChevronRight, Plus, Trash2, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { ArrowDownAZ, Heart, Plus, Search, Trash2, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Toggle, Input, SettingsGroup } from '../components'
 import { IconButton } from '../../components/Button'
@@ -14,7 +14,7 @@ import type {
   ModelProvider,
 } from '../../api/tauri'
 
-/** 左栏：新增 + 可拖拽排序的已添加供应商。预设走弹层，不和真实供应商挤在一起。 */
+/** 左栏：一个添加按钮打开预设弹层（含自定义），下面是可拖拽的已添加供应商。 */
 function ProviderList({
   settings,
   t,
@@ -22,7 +22,7 @@ function ProviderList({
   selectedProvider,
   onSelect,
   onReorder,
-  onAdd,
+  onOpenPresets,
 }: {
   settings: SettingsData
   t: I18n
@@ -30,19 +30,22 @@ function ProviderList({
   selectedProvider: ModelProvider | undefined
   onSelect: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
-  onAdd: () => void
+  onOpenPresets: () => void
 }) {
   return (
     <div className="kv-provider-list kv-split-list">
-      <button
-        type="button"
-        onClick={onAdd}
-        className="kv-provider-add"
-        data-tauri-drag-region="false"
-      >
-        <Plus />
-        {t.addProvider}
-      </button>
+      <div className="kv-provider-list-actions">
+        <button
+          type="button"
+          onClick={onOpenPresets}
+          className="kv-provider-add kv-provider-add--preset"
+          title={t.presetProvidersHint}
+          data-tauri-drag-region="false"
+        >
+          <Plus />
+          {t.addProvider}
+        </button>
+      </div>
 
       <ProviderSortableList
         providers={settings.providers}
@@ -64,7 +67,6 @@ interface ProvidersTabProps {
   selectedProvider: ModelProvider | undefined
   revealedKeys: Set<string>
   gzipInfoOpen: Set<string>
-  fetchingProviderId: string | null
   onSelectProvider: (id: string) => void
   onReorderProviders: (fromId: string, toId: string) => void
   onAddProvider: () => void
@@ -88,7 +90,6 @@ export function ProvidersTab({
   selectedProvider,
   revealedKeys,
   gzipInfoOpen,
-  fetchingProviderId,
   onSelectProvider,
   onReorderProviders,
   onAddProvider,
@@ -106,35 +107,48 @@ export function ProvidersTab({
   const configured = selectedProvider?.apiKeys.some((key) => key.trim())
   const [iconPickerOpen, setIconPickerOpen] = useState(false)
   const [presetPickerOpen, setPresetPickerOpen] = useState(false)
+  const [presetQuery, setPresetQuery] = useState('')
+  const [presetSortAz, setPresetSortAz] = useState(false)
   // 切供应商时收起：展开着的选择器 / 预设弹层会直接作用到新选中的那个上。
   useEffect(() => {
     setIconPickerOpen(false)
     setPresetPickerOpen(false)
+    setPresetQuery('')
+    setPresetSortAz(false)
   }, [selectedProvider?.id])
 
-  const closePresetPicker = () => setPresetPickerOpen(false)
+  const closePresetPicker = () => {
+    setPresetPickerOpen(false)
+    setPresetQuery('')
+    setPresetSortAz(false)
+  }
 
   const addFromPreset = (preset: ProviderPreset) => {
     onAddProviderFromPreset(preset)
     closePresetPicker()
   }
 
-  const presetEntry = (
-    <button
-      type="button"
-      onClick={() => setPresetPickerOpen(true)}
-      className="kv-subpage-entry kv-provider-preset-entry"
-      data-tauri-drag-region="false"
-    >
-      <span className="kv-subpage-entry-body">
-        <span className="kv-subpage-entry-title">{t.presetProviders}</span>
-        <span className="kv-subpage-entry-hint">{t.presetProvidersHint}</span>
-      </span>
-      <span className="kv-subpage-entry-go">
-        <ChevronRight size={14} aria-hidden="true" />
-      </span>
-    </button>
-  )
+  const addCustomProvider = () => {
+    onAddProvider()
+    closePresetPicker()
+  }
+
+  const presetMatches = useMemo(() => {
+    const q = presetQuery.trim().toLowerCase()
+    let list = PROVIDER_PRESETS
+    if (q) {
+      list = list.filter(
+        (preset) =>
+          preset.name.toLowerCase().includes(q) || preset.baseUrl.toLowerCase().includes(q),
+      )
+    }
+    const sponsored = list.filter((preset) => preset.sponsored)
+    const rest = list.filter((preset) => !preset.sponsored)
+    if (presetSortAz) {
+      rest.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    }
+    return [...sponsored, ...rest]
+  }, [presetQuery, presetSortAz])
 
   const presetPicker = presetPickerOpen
     ? createPortal(
@@ -154,9 +168,12 @@ export function ProvidersTab({
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="kv-provider-preset-picker-header">
-              <h3 id="kv-provider-preset-picker-title" className="kv-provider-preset-picker-title">
-                {t.presetProviders}
-              </h3>
+              <div className="kv-provider-preset-picker-heading">
+                <h3 id="kv-provider-preset-picker-title" className="kv-provider-preset-picker-title">
+                  {t.presetProviders}
+                </h3>
+                <p className="kv-provider-preset-picker-hint">{t.presetProvidersHint}</p>
+              </div>
               <IconButton
                 size="xs"
                 onClick={closePresetPicker}
@@ -166,23 +183,64 @@ export function ProvidersTab({
                 <X size={14} />
               </IconButton>
             </div>
+            <div className="kv-provider-preset-picker-toolbar">
+              <div className="kv-provider-preset-picker-search">
+                <Search size={14} className="kv-provider-preset-picker-search-icon" />
+                <Input
+                  value={presetQuery}
+                  onChange={setPresetQuery}
+                  placeholder={t.presetProvidersSearch}
+                  mono={false}
+                />
+              </div>
+              <IconButton
+                size="sm"
+                className={presetSortAz ? 'is-active' : ''}
+                onClick={() => setPresetSortAz((on) => !on)}
+                data-tauri-drag-region="false"
+                aria-pressed={presetSortAz}
+                label={t.presetSortAz}
+              >
+                <ArrowDownAZ size={14} />
+              </IconButton>
+            </div>
             <div className="kv-provider-preset-picker-body custom-scrollbar">
-              {PROVIDER_PRESETS.map((preset) => (
+              <button
+                type="button"
+                className="kv-provider-preset-tile is-custom"
+                onClick={addCustomProvider}
+                data-tauri-drag-region="false"
+              >
+                <Plus size={16} strokeWidth={2.25} />
+                <span className="kv-provider-preset-tile-name">{t.presetCustom}</span>
+              </button>
+              {presetMatches.map((preset) => (
                 <button
                   key={preset.name}
                   type="button"
-                  className="kv-provider-preset-row"
+                  className="kv-provider-preset-tile"
+                  title={preset.baseUrl}
                   onClick={() => addFromPreset(preset)}
                   data-tauri-drag-region="false"
                 >
-                  <ProviderIcon name={preset.name} baseUrl={preset.baseUrl} size={22} />
-                  <span className="kv-provider-preset-row-body">
-                    <span className="kv-provider-preset-row-name">{preset.name}</span>
-                    <span className="kv-provider-preset-row-url">{preset.baseUrl}</span>
-                  </span>
+                  <ProviderIcon name={preset.name} baseUrl={preset.baseUrl} size={18} />
+                  <span className="kv-provider-preset-tile-name">{preset.name}</span>
+                  {preset.sponsored ? (
+                    <Heart
+                      size={12}
+                      strokeWidth={2}
+                      fill="currentColor"
+                      className="kv-provider-preset-tile-heart"
+                      aria-label={t.presetSponsored}
+                    />
+                  ) : null}
                 </button>
               ))}
+              {presetMatches.length === 0 && (
+                <p className="kv-provider-preset-picker-empty">{t.presetNoSearchResults}</p>
+              )}
             </div>
+            <p className="kv-provider-preset-picker-foot">{t.presetCustomHint}</p>
           </div>
         </div>,
         document.body,
@@ -199,7 +257,7 @@ export function ProvidersTab({
           selectedProvider={selectedProvider}
           onSelect={onSelectProvider}
           onReorder={onReorderProviders}
-          onAdd={onAddProvider}
+          onOpenPresets={() => setPresetPickerOpen(true)}
         />
 
         <div className="kv-provider-detail">
@@ -213,7 +271,6 @@ export function ProvidersTab({
                     onChange={(enabled) => onUpdateProvider(selectedProvider.id, { enabled })}
                   />
                 </div>
-                {presetEntry}
                 <div className="kv-provider-header-toolbar">
                   <span className="kv-row-label">{t.providerName}</span>
                   <div className="kv-provider-header-actions">
@@ -295,12 +352,9 @@ export function ProvidersTab({
                 )}
               </div>
             ) : (
-              <>
-                {presetEntry}
-                <p className="kv-provider-empty-hint">
-                  {lang === 'zh' ? '在左侧选择供应商，或点上方「添加」新建。' : 'Select a provider on the left, or click “Add” above.'}
-                </p>
-              </>
+              <p className="kv-provider-empty-hint">
+                {lang === 'zh' ? '在左侧选择供应商，或点「添加驱动」从预设加入。' : 'Select a provider on the left, or click Add to pick a preset.'}
+              </p>
             )}
           </SettingsGroup>
 
@@ -311,7 +365,6 @@ export function ProvidersTab({
               lang={lang}
               revealedKeys={revealedKeys}
               gzipInfoOpen={gzipInfoOpen}
-              fetchingProviderId={fetchingProviderId}
               onUpdateProvider={onUpdateProvider}
               onToggleGzipInfo={onToggleGzipInfo}
               onToggleKeyReveal={onToggleKeyReveal}

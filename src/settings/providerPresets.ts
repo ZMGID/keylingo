@@ -9,10 +9,18 @@ export type ProviderPreset = {
   apiKeyUrl?: string
   /** 接口协议，省略即 openai_chat。Grok 之类有专属协议的必须写明，否则一键添加出来是错的。 */
   apiFormat?: string
+  /** 赞助位：预设网格置顶并打标。 */
+  sponsored?: boolean
 }
 
-/** 顺序：国内 Coding / Token 套餐 → 一线实验室 → 云厂商/聚合 → 本地 → 少用的。 */
+/** 顺序：赞助中转 → 国内 Coding / Token 套餐 → 一线实验室 → 云厂商/聚合 → 本地 → 少用的。 */
 export const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    name: 'Hezubus',
+    baseUrl: 'https://hezubus.cc/',
+    apiKeyUrl: 'https://hezubus.cc/console',
+    sponsored: true,
+  },
   {
     name: 'Kimi for Coding',
     baseUrl: 'https://api.kimi.com/coding/v1',

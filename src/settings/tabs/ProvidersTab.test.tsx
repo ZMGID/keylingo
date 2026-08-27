@@ -29,7 +29,6 @@ function buildProps(overrides: Partial<Props> = {}): Props {
     selectedProvider: provider,
     revealedKeys: new Set<string>(),
     gzipInfoOpen: new Set<string>(),
-    fetchingProviderId: null,
     onSelectProvider: vi.fn(),
     onReorderProviders: vi.fn(),
     onAddProvider: vi.fn(),
@@ -150,6 +149,9 @@ describe('ProvidersTab', () => {
     await userEvent.click(screen.getByRole('button', { name: t.testConnection }))
     expect(props.onOpenModelTest).toHaveBeenCalledWith('p1')
     expect(props.onOpenModelPicker).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByRole('button', { name: /管理模型/ }))
+    expect(props.onOpenModelPicker).toHaveBeenCalledWith('p1')
   })
 
   it('点击已启用模型打开抽屉，带 providerId + model', async () => {
@@ -165,29 +167,35 @@ describe('ProvidersTab', () => {
     expect(props.onOpenModelDrawer).not.toHaveBeenCalled()
   })
 
-  it('新增供应商按钮走 onAddProvider', async () => {
+  it('左侧添加按钮打开预设弹层，不直接新建空白供应商', async () => {
     const props = renderTab()
-    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.addProvider) }))
-    expect(props.onAddProvider).toHaveBeenCalled()
-  })
-
-  it('供应商名称上方有预设入口，左侧不再放快速添加', () => {
-    renderTab()
-    expect(screen.getByRole('button', { name: new RegExp(t.presetProviders) })).toBeTruthy()
-    expect(screen.queryByText(t.presetProvidersHint)).toBeTruthy()
+    const addBtn = screen.getByRole('button', { name: t.addProvider })
+    expect(addBtn).toHaveClass('kv-provider-add--preset')
+    expect(addBtn.closest('.kv-provider-list')).toBeTruthy()
+    expect(screen.queryByText(t.presetProvidersHint)).toBeNull()
     expect(document.querySelector('.kv-provider-list-presets')).toBeNull()
     expect(document.querySelectorAll('.kv-provider-item')).toHaveLength(1)
+
+    await userEvent.click(addBtn)
+    expect(props.onAddProvider).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: t.presetProviders })).toBeTruthy()
   })
 
   it('点预设入口弹出选择层，点一项走 onAddProviderFromPreset', async () => {
     const props = renderTab()
-    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.presetProviders) }))
+    await userEvent.click(screen.getByRole('button', { name: t.addProvider }))
     expect(screen.getByRole('dialog', { name: t.presetProviders })).toBeTruthy()
-    const presetRows = [...document.querySelectorAll('.kv-provider-preset-row')]
-    expect(presetRows.length).toBeGreaterThan(15)
-    expect(presetRows[0]?.textContent).toMatch(/Kimi for Coding/)
-    expect(presetRows.at(-2)?.textContent).toMatch(/ModelScope/)
-    expect(presetRows.at(-1)?.textContent).toMatch(/GitHub Models/)
+    expect(screen.getByText(t.presetProvidersHint)).toBeTruthy()
+    const tiles = [...document.querySelectorAll('.kv-provider-preset-tile')]
+    expect(tiles[0]?.textContent).toMatch(t.presetCustom)
+    const presetTiles = tiles.slice(1)
+    expect(presetTiles.length).toBeGreaterThan(15)
+    expect(presetTiles[0]?.textContent).toMatch(/Hezubus/)
+    expect(presetTiles[0]?.querySelector('.kv-provider-preset-tile-heart')).toBeTruthy()
+    expect(presetTiles[0]?.textContent).not.toMatch(/赞助/)
+    expect(presetTiles[1]?.textContent).toMatch(/Kimi for Coding/)
+    expect(presetTiles.at(-2)?.textContent).toMatch(/ModelScope/)
+    expect(presetTiles.at(-1)?.textContent).toMatch(/GitHub Models/)
     expect(screen.getByRole('button', { name: /GLM Coding Plan/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Xiaomi Token Plan/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /MiniMax Token Plan/ })).toBeTruthy()
@@ -195,16 +203,39 @@ describe('ProvidersTab', () => {
     expect(screen.queryByText('已添加')).toBeNull()
     expect(screen.getByText(t.baseUrl)).toBeTruthy()
 
-    await userEvent.click(screen.getByRole('button', { name: /DeepSeek/ }))
+    await userEvent.click(screen.getByRole('button', { name: /Hezubus/ }))
     expect(props.onAddProviderFromPreset).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' }),
+      expect.objectContaining({
+        name: 'Hezubus',
+        baseUrl: 'https://hezubus.cc/',
+        sponsored: true,
+      }),
     )
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  it('预设网格第一项是自定义配置，点了走空白供应商', async () => {
+    const props = renderTab()
+    await userEvent.click(screen.getByRole('button', { name: t.addProvider }))
+    await userEvent.click(screen.getByRole('button', { name: t.presetCustom }))
+    expect(props.onAddProvider).toHaveBeenCalled()
+    expect(props.onAddProviderFromPreset).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('预设网格支持搜索过滤', async () => {
+    renderTab()
+    await userEvent.click(screen.getByRole('button', { name: t.addProvider }))
+    const dialog = screen.getByRole('dialog', { name: t.presetProviders })
+    await userEvent.type(screen.getByPlaceholderText(t.presetProvidersSearch), 'kimi')
+    expect(dialog.querySelectorAll('.kv-provider-preset-tile')).toHaveLength(2)
+    expect(dialog.textContent).toMatch(/Kimi for Coding/)
+    expect(dialog.textContent).not.toMatch(/DeepSeek/)
+  })
+
   it('预设弹层点关闭后详情仍在', async () => {
     renderTab()
-    await userEvent.click(screen.getByRole('button', { name: new RegExp(t.presetProviders) }))
+    await userEvent.click(screen.getByRole('button', { name: t.addProvider }))
     expect(screen.getByRole('dialog')).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: '关闭' }))
     expect(screen.queryByRole('dialog')).toBeNull()

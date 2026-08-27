@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   Plus, Minus, Trash2, RefreshCw, Eye, EyeOff, Wrench, Brain,
-  ArrowLeft, ChevronRight, SlidersHorizontal,
+  ArrowLeft, ChevronRight, SlidersHorizontal, List,
   Image as ImageIcon,
 } from 'lucide-react'
 import { Select, Input, SettingsGroup, FieldBlock, Toggle } from '../components'
@@ -21,7 +21,6 @@ export function ProviderDetail({
   lang,
   revealedKeys,
   gzipInfoOpen,
-  fetchingProviderId,
   onUpdateProvider,
   onToggleGzipInfo,
   onToggleKeyReveal,
@@ -35,7 +34,6 @@ export function ProviderDetail({
   lang: Lang
   revealedKeys: Set<string>
   gzipInfoOpen: Set<string>
-  fetchingProviderId: string | null
   onUpdateProvider: (id: string, updates: Partial<ModelProvider>) => void
   onToggleGzipInfo: (id: string) => void
   onToggleKeyReveal: (keyId: string) => void
@@ -207,10 +205,8 @@ export function ProviderDetail({
             onClick={() => onOpenModelPicker(provider.id)}
             data-tauri-drag-region="false"
           >
-            <RefreshCw size={10} className={fetchingProviderId === provider.id ? 'animate-spin' : ''} />
-            {provider.availableModels.length > 0
-              ? (lang === 'zh' ? '管理模型' : 'Models')
-              : t.fetchModels}
+            <List size={12} />
+            {lang === 'zh' ? '管理模型' : 'Models'}
           </Button>
           <Button
             size="sm"
@@ -262,7 +258,7 @@ export function ProviderDetail({
         <ul className="kv-enabled-model-list">
           {provider.enabledModels.length === 0 && (
             <li className="kv-enabled-model-empty">
-              {lang === 'zh' ? '点击上方「获取模型列表」拉取并添加模型。' : 'Use "Fetch Models" above to load and add models.'}
+              {lang === 'zh' ? '打开「管理模型」拉取并添加。' : 'Open “Models” to fetch and add models.'}
             </li>
           )}
           {provider.enabledModels.map(model => {

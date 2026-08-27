@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronDown, Minus, Plus, RefreshCw, Search, X } from 'lucide-react'
 import type { ModelProvider } from '../api/tauri'
@@ -53,6 +53,12 @@ export function ProviderModelsPicker({
   const [groupOpen, setGroupOpen] = useState(true)
   const [manualOpen, setManualOpen] = useState(false)
   const [manualValue, setManualValue] = useState('')
+
+  // 每次打开都拉一次：缓存列表可能已经过期，不能只在 availableModels 为空时才请求。
+  useEffect(() => {
+    onFetch()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在挂载时刷新；手动刷新走按钮。
+  }, [])
 
   const enabledSet = useMemo(
     () => new Set(provider.enabledModels.map(modelKey)),
@@ -123,37 +129,35 @@ export function ProviderModelsPicker({
           </IconButton>
         </div>
 
-        <div className="kv-model-picker-search">
-          <Search size={14} className="kv-model-picker-search-icon" />
-          <Input
-            value={query}
-            onChange={setQuery}
-            placeholder={labels.searchPlaceholder}
-            mono={false}
-          />
-        </div>
-
         <div className="kv-model-picker-toolbar">
-          <Button
+          <div className="kv-model-picker-search">
+            <Search size={14} className="kv-model-picker-search-icon" />
+            <Input
+              value={query}
+              onChange={setQuery}
+              placeholder={labels.searchPlaceholder}
+              mono={false}
+            />
+          </div>
+          <IconButton
             size="sm"
-            className="kv-model-picker-fetch"
             onClick={onFetch}
             disabled={fetching}
             data-tauri-drag-region="false"
+            label={fetching ? labels.fetching : labels.fetchModels}
           >
-            <RefreshCw size={12} className={fetching ? 'animate-spin' : ''} />
-            {fetching ? labels.fetching : labels.fetchModels}
-          </Button>
-          <Button
+            <RefreshCw size={14} className={fetching ? 'animate-spin' : ''} />
+          </IconButton>
+          <IconButton
             size="sm"
-            className="kv-model-picker-add-toggle"
+            className={manualOpen ? 'is-active' : ''}
             onClick={() => setManualOpen((open) => !open)}
             data-tauri-drag-region="false"
             aria-expanded={manualOpen}
-            aria-label={labels.addModel}
+            label={labels.manualAddModel}
           >
             <Plus size={14} strokeWidth={2.25} />
-          </Button>
+          </IconButton>
         </div>
 
         {manualOpen && (
@@ -198,16 +202,15 @@ export function ProviderModelsPicker({
               <span className="kv-tag">{filteredModels.length}</span>
             </button>
             {addableModels.length > 0 && (
-              <button
-                type="button"
-                className="kv-model-picker-row-btn add shrink-0"
+              <IconButton
+                size="sm"
+                className="shrink-0"
                 onClick={() => onAddAll(addableModels)}
                 data-tauri-drag-region="false"
-                aria-label={labels.addAllModels}
-                title={labels.addAllModels}
+                label={labels.addAllModels}
               >
                 <Plus size={14} strokeWidth={2.25} />
-              </button>
+              </IconButton>
             )}
           </div>
 
@@ -232,19 +235,19 @@ export function ProviderModelsPicker({
                     {isEnabled ? (
                       <span className="kv-tag ok shrink-0">{labels.enabled}</span>
                     ) : null}
-                    <button
-                      type="button"
-                      className={`kv-model-picker-row-btn ${isEnabled ? 'remove' : 'add'}`}
+                    <IconButton
+                      size="sm"
+                      variant={isEnabled ? 'danger' : 'default'}
                       onClick={() => (isEnabled ? onRemove(model) : onAdd(model))}
                       data-tauri-drag-region="false"
-                      aria-label={
+                      label={
                         isEnabled
                           ? (lang === 'zh' ? `移除 ${model}` : `Remove ${model}`)
                           : (lang === 'zh' ? `添加 ${model}` : `Add ${model}`)
                       }
                     >
                       {isEnabled ? <Minus size={14} /> : <Plus size={14} strokeWidth={2.25} />}
-                    </button>
+                    </IconButton>
                   </li>
                 )
               })}

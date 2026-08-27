@@ -89,6 +89,31 @@ function XiaomiMiMoMark({ size = 16, style }: { size?: number; style?: CSSProper
   )
 }
 
+/** 合租巴士 / Hezubus 没有 lobehub 标，用品牌黄橙巴士缩成格子图标。 */
+function HezubusMark({ size = 16, style }: { size?: number; style?: CSSProperties }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      style={{ flexShrink: 0, display: 'block', ...style }}
+      aria-hidden
+    >
+      <rect x="3.2" y="3.6" width="17.6" height="13.6" rx="3.2" fill="#F5C400" />
+      <rect x="6.2" y="5" width="11.6" height="2.1" rx="0.6" fill="#3B3B3B" />
+      <rect x="8.4" y="5.4" width="3.6" height="1.3" rx="0.3" fill="#fff" />
+      <rect x="5.6" y="7.8" width="12.8" height="5.1" rx="1.1" fill="#8EC8F0" />
+      <path d="M3.2 13.4h17.6v2.6c0 1.5-1.2 2.6-2.7 2.6H5.9c-1.5 0-2.7-1.1-2.7-2.6z" fill="#F26A21" />
+      <circle cx="7.4" cy="15.7" r="1.05" fill="#fff" />
+      <circle cx="16.6" cy="15.7" r="1.05" fill="#fff" />
+      <rect x="1.5" y="8.2" width="2" height="2.5" rx="0.55" fill="#3B3B3B" />
+      <rect x="20.5" y="8.2" width="2" height="2.5" rx="0.55" fill="#3B3B3B" />
+      <rect x="5.4" y="18.6" width="3.4" height="2.2" rx="0.7" fill="#3B3B3B" />
+      <rect x="15.2" y="18.6" width="3.4" height="2.2" rx="0.7" fill="#3B3B3B" />
+    </svg>
+  )
+}
+
 // First match wins; tested case-insensitively against the model id.
 const MODEL_ICON_MAP: Array<[RegExp, Glyph]> = [
   [/gpt|chatgpt|openai|codex|dall[-·]?e|(?:^|[-/])o[134](?:-|$)/, G(OpenAI)],
@@ -208,6 +233,7 @@ export const PROVIDER_BRANDS: Record<string, Glyph> = {
   Voyage: G(Voyage),
   XiaomiMiMo: XiaomiMiMoMark,
   OpenCode: G(OpenCode),
+  Hezubus: HezubusMark,
 }
 
 /** 图标选择器顺序：Coding 套餐靠前，ChatGLM 旧标不展示，魔搭/GitHub 沉底。ChatGLM 仍留在 PROVIDER_BRANDS 里，旧的手选记录还能显示。 */
@@ -218,6 +244,7 @@ export const PROVIDER_PICKER_KEYS: string[] = [
   'XiaomiMiMo',
   'Minimax',
   'OpenCode',
+  'Hezubus',
   'DeepSeek',
   'OpenAI',
   'Claude',
@@ -271,6 +298,7 @@ export const PROVIDER_PICKER_KEYS: string[] = [
 // 自动匹配：先按 baseUrl 的域名，再按名字。用户改名成「小白」也能靠域名认出来。
 const PROVIDER_ICON_MAP: Array<[RegExp, string]> = [
   [/openrouter/, 'OpenRouter'],
+  [/hezubus|合租巴士/, 'Hezubus'],
   [/opencode/, 'OpenCode'],
   [/xiaomi|xiaomimimo|mimo\.mi|token-plan/, 'XiaomiMiMo'],
   [/siliconflow|siliconcloud|硅基/, 'SiliconCloud'],

@@ -48,6 +48,7 @@ describe('ProviderIcon provider→brand mapping', () => {
       ['https://generativelanguage.googleapis.com/v1beta', 'Google'],
       ['https://token-plan-cn.xiaomimimo.com/v1', 'XiaomiMiMo'],
       ['https://opencode.ai/zen/go/v1', 'OpenCode'],
+      ['https://hezubus.cc/', 'Hezubus'],
     ]
     for (const [url, brand] of cases) {
       expect(matchProviderGlyph(`${url} 小白`), url).toBe(PROVIDER_BRANDS[brand])
@@ -88,7 +89,7 @@ describe('ProviderIcon provider→brand mapping', () => {
   })
 
   it('icon picker puts coding brands first, hides ChatGLM, and buries ModelScope/Github', () => {
-    expect(PROVIDER_PICKER_KEYS.slice(0, 5)).toEqual(['Kimi', 'Zhipu', 'XiaomiMiMo', 'Minimax', 'OpenCode'])
+    expect(PROVIDER_PICKER_KEYS.slice(0, 6)).toEqual(['Kimi', 'Zhipu', 'XiaomiMiMo', 'Minimax', 'OpenCode', 'Hezubus'])
     expect(PROVIDER_PICKER_KEYS).not.toContain('ChatGLM')
     expect(PROVIDER_PICKER_KEYS.slice(-3)).toEqual(['ModelScope', 'GiteeAI', 'Github'])
     for (const key of PROVIDER_PICKER_KEYS) {

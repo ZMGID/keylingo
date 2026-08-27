@@ -307,9 +307,6 @@ export function ProviderSetupPanel({ t, lang, settings, onChange }: ProviderSetu
   const openModelPicker = () => {
     if (!provider) return
     setModelPickerOpen(true)
-    if (provider.availableModels.length === 0 && !fetching) {
-      void fetchModels()
-    }
   }
 
   const hasAnyEnabledModels = settings.providers.some((item) => item.enabledModels.length > 0)
@@ -553,7 +550,7 @@ export function ProviderSetupPanel({ t, lang, settings, onChange }: ProviderSetu
             fetching: t.fetching,
             addModel: t.addModel,
             manualAddModel: t.manualAddModel,
-            noModels: lang === 'zh' ? '尚未获取模型，请点击上方按钮拉取，或使用手动添加。' : 'No models yet. Fetch from API or add manually.',
+            noModels: lang === 'zh' ? '没有可用模型。点刷新重试，或手动添加。' : 'No models yet. Refresh or add one manually.',
             noSearchResults: lang === 'zh' ? '没有匹配的模型' : 'No matching models',
             enabled: t.enabled,
             addAllModels: lang === 'zh' ? '添加当前列表中的全部模型' : 'Add all models in the current list',
