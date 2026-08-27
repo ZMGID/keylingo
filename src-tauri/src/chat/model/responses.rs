@@ -570,7 +570,7 @@ impl OpenAiResponsesProvider<'_> {
         metadata: &crate::chat::model::RequestMetadata,
     ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
-        if let Some(key) = self.provider.api_keys.first() {
+        if let Some(key) = self.provider.preferred_api_key() {
             headers.insert("Authorization".to_string(), format!("Bearer {key}"));
         }
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
@@ -1544,6 +1544,7 @@ mod tests {
             model_overrides,
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let request = GenerateRequest {
             model: model.into(),
@@ -1590,6 +1591,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let request = GenerateRequest {
             model: model.into(),
@@ -1697,6 +1699,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let request = GenerateRequest {
             model: "gpt-5.5".into(),
@@ -1747,6 +1750,7 @@ mod tests {
                     prompt_cache_retention: retention.into(),
                     ..Default::default()
                 },
+                active_key_index: 0,
             };
             let request = GenerateRequest {
                 model: "gpt-5.5".into(),
@@ -1796,6 +1800,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let base = GenerateRequest {
             model: "gpt-5.5".into(),

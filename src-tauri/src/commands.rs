@@ -208,6 +208,8 @@ async fn apply_settings(
         return Err(err);
     }
 
+    state.sync_preferred_api_keys(&previous_settings, &sanitized);
+
     if previous_settings.keep_chat_window_alive && !sanitized.keep_chat_window_alive {
         crate::shortcuts::destroy_hidden_chat_window(app);
     }
@@ -693,6 +695,7 @@ fn effective_request_provider(
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
     if let Some(request) = request_override {
         provider.request = request;
@@ -833,12 +836,16 @@ pub(crate) async fn fetch_models(
     let settings = state.settings_read().clone();
     let api_format = resolve_api_format(&settings, &provider_id, provider.as_ref());
     let request_override = provider.as_ref().and_then(|p| p.request.clone());
+    let preferred_idx = provider.as_ref().and_then(|p| p.active_key_index);
     let (base_url, api_keys) = resolve_provider_credentials(&settings, &provider_id, provider)?;
     let retry_attempts = effective_retry_attempts(&settings);
     let effective = effective_request_provider(&settings, &provider_id, request_override);
 
     if api_keys.is_empty() {
         return Err("Missing API Key".to_string());
+    }
+    if let Some(idx) = preferred_idx {
+        state.prefer_key(&provider_id, idx.min(api_keys.len() - 1));
     }
 
     let base = base_url.trim_end_matches('/');
@@ -879,7 +886,7 @@ pub(crate) async fn fetch_models(
 }
 
 /// 测试供应商连接是否可用
-/// 多 key：测试时只用第一个 key（避免一次连接测试遍历多 key 让用户困惑）
+/// 多 key：测试时只用用户点选的当前 Key（避免一次连接测试遍历多 key 让用户困惑）
 /// 有 model 时发一条极小对话请求，比 /models 更能反映“能不能调模型”，
 /// 也不依赖供应商支持 /models；无 model 时回退到 /models 探测。
 /// 请求按供应商的 api_format 走对应协议（URL + 鉴权 + body），
@@ -895,11 +902,20 @@ pub(crate) async fn test_provider_connection(
     // 协议优先取前端传入（未保存的编辑中配置），缺省回退 settings 里已保存的。
     let api_format = resolve_api_format(&settings, &provider_id, provider.as_ref());
     let request_override = provider.as_ref().and_then(|p| p.request.clone());
+    let preferred_idx = provider
+        .as_ref()
+        .and_then(|p| p.active_key_index)
+        .or_else(|| {
+            settings
+                .get_provider(&provider_id)
+                .map(|p| p.clamped_active_key_index())
+        })
+        .unwrap_or(0);
     let (base_url, api_keys) = resolve_provider_credentials(&settings, &provider_id, provider)?;
 
-    let api_key = match api_keys.first() {
-        Some(k) if !k.trim().is_empty() => k.clone(),
-        _ => {
+    let api_key = match crate::api::pick_key_at(&api_keys, preferred_idx) {
+        Some(k) => k,
+        None => {
             return Ok(serde_json::json!({
               "success": false,
               "error": "Missing API Key"

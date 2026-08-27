@@ -92,7 +92,23 @@ describe('ProvidersTab', () => {
     const props = renderTab()
     const removes = document.querySelectorAll<HTMLButtonElement>('.kv-icon-btn[aria-label="移除"]')
     await userEvent.click(removes[1])
-    expect(props.onUpdateProvider).toHaveBeenCalledWith('p1', { apiKeys: ['sk-aaa'] })
+    expect(props.onUpdateProvider).toHaveBeenCalledWith('p1', { apiKeys: ['sk-aaa'], activeKeyIndex: 0 })
+  })
+
+  it('点备用 Key 的开关切到该条，不改密钥顺序', async () => {
+    const props = renderTab()
+    const current = screen.getByRole('switch', { name: t.apiKeyCurrent })
+    const backup = screen.getByRole('switch', { name: t.apiKeyUse })
+    expect(current.getAttribute('aria-checked')).toBe('true')
+    expect(backup.getAttribute('aria-checked')).toBe('false')
+    await userEvent.click(backup)
+    expect(props.onUpdateProvider).toHaveBeenCalledWith('p1', { activeKeyIndex: 1 })
+  })
+
+  it('单条密钥时不显示切换开关', () => {
+    renderTab({ selectedProvider: makeProvider({ apiKeys: ['sk-only'] }) })
+    expect(screen.queryByRole('switch', { name: t.apiKeyCurrent })).toBeNull()
+    expect(screen.queryByRole('switch', { name: t.apiKeyUse })).toBeNull()
   })
 
   it('新增密钥追加空串而非覆盖', async () => {

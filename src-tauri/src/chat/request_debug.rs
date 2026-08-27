@@ -438,6 +438,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let request = GenerateRequest {
             model: "gpt-5".into(),

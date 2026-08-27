@@ -559,8 +559,8 @@ impl AnthropicMessagesProvider<'_> {
         metadata: &crate::chat::model::RequestMetadata,
     ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
-        if let Some(key) = self.provider.api_keys.first() {
-            headers.insert("x-api-key".to_string(), key.clone());
+        if let Some(key) = self.provider.preferred_api_key() {
+            headers.insert("x-api-key".to_string(), key.to_string());
         }
         headers.insert(
             "anthropic-version".to_string(),
@@ -1822,6 +1822,7 @@ mod tests {
             model_overrides,
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1980,6 +1981,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = AnthropicMessagesProvider::new(&state, &provider, 1);
         let base = GenerateRequest {
@@ -2184,6 +2186,7 @@ mod tests {
                 },
                 ..Default::default()
             },
+            active_key_index: 0,
         }
     }
 

@@ -372,6 +372,11 @@ impl AppState {
         rapidocr: std::sync::Arc<RapidOcrClient>,
     ) -> Self {
         let mcp_tool_snapshots = load_mcp_tool_snapshots(&usage_dir);
+        let active_key_idx = settings
+            .providers
+            .iter()
+            .map(|p| (p.id.clone(), p.clamped_active_key_index()))
+            .collect();
         AppState {
             settings: RwLock::new(settings),
             explain_images: Mutex::new(HashMap::new()),
@@ -408,7 +413,7 @@ impl AppState {
             lens_freeze_frame_image_id: Mutex::new(None),
             lens_pending_reset: Mutex::new(None),
             key_cooldowns: Mutex::new(HashMap::new()),
-            active_key_idx: Mutex::new(HashMap::new()),
+            active_key_idx: Mutex::new(active_key_idx),
             prompt_cache_key_unsupported: Mutex::new(HashSet::new()),
             prompt_cache_retention_unsupported: Mutex::new(HashSet::new()),
             image_route_cache: Mutex::new(HashMap::new()),
@@ -1466,6 +1471,50 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner());
         active.insert(provider_id.to_string(), idx);
     }
+
+    /// 用户点选当前 Key：立刻切过去，并清掉该供应商全部冷却，避免刚选中的槽还在 401 冷却里被跳过。
+    pub fn prefer_key(&self, provider_id: &str, idx: usize) {
+        let mut cooldowns = self.key_cooldowns.lock().unwrap_or_else(|e| e.into_inner());
+        cooldowns.retain(|(id, _), _| id != provider_id);
+        drop(cooldowns);
+        let mut active = self
+            .active_key_idx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        active.insert(provider_id.to_string(), idx);
+    }
+
+    /// 设置保存后：密钥池或点选下标变了才覆盖进程内 failover 指针；其它设置改动不打断正在用的备用 Key。
+    pub fn sync_preferred_api_keys(&self, previous: &Settings, next: &Settings) {
+        let next_ids: std::collections::HashSet<&str> =
+            next.providers.iter().map(|p| p.id.as_str()).collect();
+        {
+            let mut active = self
+                .active_key_idx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            active.retain(|id, _| next_ids.contains(id.as_str()));
+        }
+        {
+            let mut cooldowns = self.key_cooldowns.lock().unwrap_or_else(|e| e.into_inner());
+            cooldowns.retain(|(id, _), _| next_ids.contains(id.as_str()));
+        }
+        for provider in &next.providers {
+            let preferred = provider.clamped_active_key_index();
+            let changed = previous
+                .providers
+                .iter()
+                .find(|old| old.id == provider.id)
+                .map(|old| {
+                    old.api_keys != provider.api_keys
+                        || old.active_key_index != provider.active_key_index
+                })
+                .unwrap_or(true);
+            if changed {
+                self.prefer_key(&provider.id, preferred);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1800,6 +1849,14 @@ mod tests {
         let st = test_state();
         st.mark_key_ok("p", 2);
         assert_eq!(st.pick_active_key("p", 3, &HashSet::new()), Some(2));
+    }
+
+    #[test]
+    fn prefer_key_sets_active_and_clears_cooldowns() {
+        let st = test_state();
+        st.mark_key_failed("p", 1);
+        st.prefer_key("p", 1);
+        assert_eq!(st.pick_active_key("p", 3, &HashSet::new()), Some(1));
     }
 
     #[test]

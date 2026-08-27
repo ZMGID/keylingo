@@ -1389,6 +1389,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
           id: currentProvider.id,
           baseUrl: currentProvider.baseUrl,
           apiKeys: currentProvider.apiKeys,
+          activeKeyIndex: currentProvider.activeKeyIndex,
           apiFormat: currentProvider.apiFormat,
           // 草稿可能尚未落盘，这里必须带上编辑中的请求配置，
           // 否则拉列表用的头和真实聊天不一致。
@@ -2309,6 +2310,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             providerId={p.id}
             baseUrl={p.baseUrl}
             apiKeys={p.apiKeys}
+            activeKeyIndex={p.activeKeyIndex}
             apiFormat={p.apiFormat}
             request={p.request}
             models={p.enabledModels}

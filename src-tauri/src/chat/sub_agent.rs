@@ -2253,6 +2253,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         }
     }
 
@@ -2341,6 +2342,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         }
     }
 

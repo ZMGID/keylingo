@@ -419,7 +419,7 @@ impl OpenAiChatProvider<'_> {
         metadata: &crate::chat::model::RequestMetadata,
     ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
-        if let Some(key) = self.provider.api_keys.first() {
+        if let Some(key) = self.provider.preferred_api_key() {
             headers.insert("Authorization".to_string(), format!("Bearer {key}"));
         }
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
@@ -1148,6 +1148,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1197,6 +1198,7 @@ mod tests {
             model_overrides,
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1282,6 +1284,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1354,6 +1357,7 @@ mod tests {
             model_overrides,
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let request = GenerateRequest {
@@ -1403,6 +1407,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let adapter = OpenAiChatProvider::new(&state, &provider, 1);
         let tool = crate::chat::model::ModelTool {
@@ -1468,6 +1473,7 @@ mod tests {
                 model_overrides: Default::default(),
                 compress_request_body: false,
                 request: Default::default(),
+                active_key_index: 0,
             };
             let adapter = OpenAiChatProvider::new(&state, &provider, 1);
             let request = GenerateRequest {
@@ -1526,6 +1532,7 @@ mod tests {
                     prompt_cache_retention: retention.into(),
                     ..Default::default()
                 },
+                active_key_index: 0,
             };
             let adapter = OpenAiChatProvider::new(&state, &provider, 1);
             adapter.request_body(
@@ -1577,6 +1584,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         assert_eq!(p.request.prompt_cache_retention, "short");
         assert!(p.prompt_caching_enabled());

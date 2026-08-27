@@ -395,8 +395,8 @@ impl GeminiProvider<'_> {
         metadata: &crate::chat::model::RequestMetadata,
     ) -> std::collections::BTreeMap<String, String> {
         let mut headers = std::collections::BTreeMap::new();
-        if let Some(key) = self.provider.api_keys.first() {
-            headers.insert("x-goog-api-key".to_string(), key.clone());
+        if let Some(key) = self.provider.preferred_api_key() {
+            headers.insert("x-goog-api-key".to_string(), key.to_string());
         }
         headers.insert("content-type".to_string(), "application/json".to_string());
         headers.insert("Accept-Encoding".to_string(), "identity".to_string());
@@ -1257,6 +1257,7 @@ mod tests {
             model_overrides: Default::default(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         }
     }
 

@@ -884,8 +884,8 @@ export type ModelInfo = {
 }
 
 // AI 模型提供商配置
-// apiKeys 支持多 key failover：第一个为主 key，其余为备用 key；
-// 当某个 key 触发限流/配额/鉴权失败时后端会自动切下一个。
+// apiKeys 是密钥池；activeKeyIndex 是用户点选的当前 Key。
+// 鉴权/配额失败时后端仍会自动切到池里其它 Key。
 export type ProviderRequestConfig = {
   /** 附加到该供应商所有请求上的自定义头。同名时覆盖 CLI 身份预设。 */
   customHeaders?: { key: string; value: string }[]
@@ -911,6 +911,8 @@ export type ModelProvider = {
   id: string
   name: string
   apiKeys: string[]
+  /** 用户点选的当前 Key 下标。缺省 / 越界按 0。 */
+  activeKeyIndex?: number
   baseUrl: string
   availableModels: string[]
   enabledModels: string[]
@@ -929,6 +931,8 @@ export type ProviderConnectionInput = {
   id?: string
   baseUrl: string
   apiKeys: string[]
+  /** 测试 / 拉模型时用这条；不传则后端回落已保存的点选下标。 */
+  activeKeyIndex?: number
   model?: string
   apiFormat?: string
   /** 编辑中（可能尚未保存）的请求配置。不传则后端回落已保存的那份。 */
@@ -1456,9 +1460,11 @@ export type OfflineModelProgress = {
 }
 
 function normalizeProvider(provider: ModelProvider): ModelProvider {
+  const apiKeys = Array.isArray(provider.apiKeys) ? provider.apiKeys : []
   return {
     ...provider,
-    apiKeys: Array.isArray(provider.apiKeys) ? provider.apiKeys : [],
+    apiKeys,
+    activeKeyIndex: clampedActiveKeyIndex(apiKeys, provider.activeKeyIndex),
     availableModels: Array.isArray(provider.availableModels) ? provider.availableModels : [],
     enabledModels: Array.isArray(provider.enabledModels) ? provider.enabledModels : [],
     enabled: provider.enabled !== false,
@@ -1475,6 +1481,21 @@ function normalizeProvider(provider: ModelProvider): ModelProvider {
       cliIdentityVersion: provider.request?.cliIdentityVersion ?? '',
     },
   }
+}
+
+/** 把点选下标夹到密钥池范围内；空池为 0。 */
+export function clampedActiveKeyIndex(apiKeys: string[], index?: number): number {
+  if (apiKeys.length <= 0) return 0
+  if (!Number.isFinite(index) || (index ?? 0) < 0) return 0
+  return Math.min(Math.floor(index ?? 0), apiKeys.length - 1)
+}
+
+/** 删掉一条 Key 后，当前点选下标怎么跟着挪。 */
+export function activeKeyIndexAfterRemove(current: number, removedIdx: number, remaining: number): number {
+  if (remaining <= 0) return 0
+  if (removedIdx < current) return Math.max(0, current - 1)
+  if (removedIdx === current) return Math.min(current, remaining - 1)
+  return Math.min(current, remaining - 1)
 }
 
 export function normalizeProviderApiFormat(apiFormat?: string): string {

@@ -1065,6 +1065,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
 
         assert_eq!(
@@ -1100,6 +1101,7 @@ mod tests {
         // api.openai.com / api.x.ai 上的裸名仍被早退排除（走各自 images API，不走 chat）。
         let openai = ModelProvider {
             base_url: "https://api.openai.com/v1".to_string(),
+            active_key_index: 0,
             ..proxy.clone()
         };
         assert_eq!(
@@ -1108,6 +1110,7 @@ mod tests {
         );
         let xai = ModelProvider {
             base_url: "https://api.x.ai/v1".to_string(),
+            active_key_index: 0,
             ..proxy.clone()
         };
         assert_eq!(
@@ -1144,6 +1147,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         assert_eq!(
             resolve_image_route(&openrouter, "google/gemini-3.1-flash-image-preview"),
@@ -1257,6 +1261,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
 
         assert!(uses_xai_images_api(&provider, "grok-imagine-image-quality"));
@@ -1281,13 +1286,16 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         };
         let openrouter = ModelProvider {
             base_url: "https://openrouter.ai/api/v1".to_string(),
+            active_key_index: 0,
             ..openai.clone()
         };
         let openrouter_compatible_relay = ModelProvider {
             base_url: "https://relay.example.com/v1".to_string(),
+            active_key_index: 0,
             ..openai.clone()
         };
 
@@ -1327,6 +1335,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         }
     }
 
@@ -1407,6 +1416,7 @@ mod tests {
 
         let anthropic = ModelProvider {
             api_format: "anthropic_messages".to_string(),
+            active_key_index: 0,
             ..gemini_provider()
         };
         assert!(validate_provider(&anthropic).is_err());

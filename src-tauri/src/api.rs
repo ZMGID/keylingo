@@ -65,6 +65,9 @@ pub struct ProviderConnectionInput {
     /// **正在编辑**的这份，否则「测试通过、聊天 403」，用户完全查不出原因。
     #[serde(default)]
     pub request: Option<crate::settings::ProviderRequestConfig>,
+    /// 用户点选的当前 Key 下标。测试连接只用这一条，不遍历整池。
+    #[serde(default)]
+    pub active_key_index: Option<usize>,
 }
 
 impl ProviderConnectionInput {
@@ -86,6 +89,19 @@ impl ProviderConnectionInput {
         }
         keys
     }
+}
+
+/// 按用户点选的下标取一条非空 Key；该槽为空则退回池里第一条非空。
+pub fn pick_key_at(keys: &[String], idx: usize) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let clamped = idx.min(keys.len() - 1);
+    let at = keys[clamped].trim();
+    if !at.is_empty() {
+        return Some(keys[clamped].clone());
+    }
+    keys.iter().find(|k| !k.trim().is_empty()).cloned()
 }
 
 /// 解析供应商的凭据信息（base_url + 多 key 列表）

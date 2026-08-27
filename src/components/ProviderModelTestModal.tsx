@@ -17,6 +17,7 @@ export function ProviderModelTestModal({
   providerId,
   baseUrl,
   apiKeys,
+  activeKeyIndex,
   apiFormat,
   request,
   models,
@@ -26,6 +27,7 @@ export function ProviderModelTestModal({
   providerId: string
   baseUrl: string
   apiKeys: string[]
+  activeKeyIndex?: number
   apiFormat: string
   /** 编辑中的请求配置：测试必须和真实聊天带一样的头，否则「测试通过、聊天 403」。 */
   request?: ProviderRequestConfig
@@ -75,6 +77,7 @@ export function ProviderModelTestModal({
             id: providerId,
             baseUrl,
             apiKeys,
+            activeKeyIndex,
             apiFormat,
             model,
             request,

@@ -79,8 +79,9 @@ impl Default for ProviderRequestConfig {
 /**
  * AI 模型提供商配置
  *
- * api_keys 支持多 key failover：第一个为主 key，后续为备用 key；
- * 当某个 key 触发配额/限流/鉴权失败时会自动切换到下一个。
+ * api_keys 是密钥池；`active_key_index` 是用户点选的当前 Key。
+ * 鉴权/配额失败时仍会自动切到池里其它 Key（进程内 `active_key_idx`），
+ * 重启或用户再次点选后回到这里保存的索引。
  *
  * api_key_legacy 字段仅用于反序列化兼容旧版（v2.3.1 及之前）单 key 配置，
  * sanitize_settings 会把它合并到 api_keys[0]。
@@ -119,6 +120,9 @@ pub struct ModelProvider {
     /// 「请求配置」：自定义头 / 代理 / prompt 缓存 / CLI 身份。
     #[serde(default)]
     pub request: ProviderRequestConfig,
+    /// 用户点选的当前 Key 下标。缺省 / 越界时按 0 处理。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub active_key_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +168,29 @@ impl ProviderApiFormat {
 impl ModelProvider {
     pub fn api_format_kind(&self) -> ProviderApiFormat {
         ProviderApiFormat::from_raw(&self.api_format)
+    }
+
+    /// 夹到现有密钥池范围内；空池为 0。
+    pub fn clamped_active_key_index(&self) -> usize {
+        match self.api_keys.len() {
+            0 => 0,
+            n => self.active_key_index.min(n - 1),
+        }
+    }
+
+    /// 当前点选的 Key；该槽为空时退回池里第一条非空。
+    pub fn preferred_api_key(&self) -> Option<&str> {
+        let idx = self.clamped_active_key_index();
+        self.api_keys
+            .get(idx)
+            .map(String::as_str)
+            .filter(|k| !k.trim().is_empty())
+            .or_else(|| {
+                self.api_keys
+                    .iter()
+                    .map(String::as_str)
+                    .find(|k| !k.trim().is_empty())
+            })
     }
 
     /// Prompt 缓存策略。非法/空串视为 `short`（与 sanitize 一致）。
@@ -1960,6 +1987,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
                 model_overrides: std::collections::HashMap::new(),
                 compress_request_body: false,
                 request: Default::default(),
+                active_key_index: 0,
             });
             settings.translator_provider_id = "default-translator".to_string();
             settings.translator_model = old_openai.model;
@@ -1985,6 +2013,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
                 model_overrides: std::collections::HashMap::new(),
                 compress_request_body: false,
                 request: Default::default(),
+                active_key_index: 0,
             });
             settings.screenshot_translation.provider_id = "default-ocr".to_string();
             settings.screenshot_translation.model = old_ocr.model;
@@ -1998,14 +2027,31 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             let trimmed = legacy.trim().to_string();
             if !trimmed.is_empty() && !provider.api_keys.contains(&trimmed) {
                 provider.api_keys.insert(0, trimmed);
+                provider.active_key_index = provider.active_key_index.saturating_add(1);
             }
         }
-        // 去重 + 去空
+        // 去重 + 去空，并跟着挪 active_key_index（删掉当前槽前面的空/重复项时不能还指着旧下标）。
+        let old_active = provider.active_key_index;
         let mut seen = std::collections::HashSet::new();
-        provider.api_keys.retain(|k| {
+        let mut kept: Vec<String> = Vec::with_capacity(provider.api_keys.len());
+        let mut mapped_active: Option<usize> = None;
+        for (i, k) in provider.api_keys.iter().enumerate() {
             let trimmed = k.trim();
-            !trimmed.is_empty() && seen.insert(trimmed.to_string())
-        });
+            if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+                continue;
+            }
+            if i == old_active {
+                mapped_active = Some(kept.len());
+            }
+            kept.push(k.clone());
+        }
+        provider.api_keys = kept;
+        provider.active_key_index = match provider.api_keys.len() {
+            0 => 0,
+            n => mapped_active
+                .unwrap_or_else(|| old_active.min(n - 1))
+                .min(n - 1),
+        };
 
         // 请求配置归一：settings.json 是用户可以手改的文件，非法头名会让 reqwest
         // 构造请求时直接失败，头值里的 CR/LF 是 header 注入，这里一并丢掉。
@@ -2749,10 +2795,8 @@ pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), Stri
     mirror_explicit_chat_default_for_persistence(&mut to_persist);
 
     for provider in &mut to_persist.providers {
-        if let Some(primary) = provider.api_keys.first() {
-            if !primary.trim().is_empty() {
-                provider.api_key_legacy = Some(primary.clone());
-            }
+        if let Some(primary) = provider.preferred_api_key() {
+            provider.api_key_legacy = Some(primary.to_string());
         }
     }
 
@@ -2965,6 +3009,10 @@ pub fn default_question_prompt(language: &str, has_image: bool) -> String {
 }
 
 // ========== 默认值辅助函数 ==========
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
 
 fn default_true() -> bool {
     true
@@ -3361,6 +3409,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "cloud".to_string(),
@@ -3375,6 +3424,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "apple".to_string();
         s.translator_model = "apple-foundation".to_string();
@@ -3427,6 +3477,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         let s = sanitize_settings(s);
         let p = s.get_provider("p").unwrap();
@@ -3450,6 +3501,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         let s = sanitize_settings(s);
         let p = s.get_provider("p").unwrap();
@@ -3476,10 +3528,65 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         let s = sanitize_settings(s);
         let p = s.get_provider("p").unwrap();
         assert_eq!(p.api_keys, vec!["sk-1".to_string()]);
+    }
+
+    #[test]
+    fn sanitize_settings_remaps_active_key_index_when_empty_keys_dropped() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec![
+                "  ".to_string(),
+                "sk-keep".to_string(),
+                "sk-current".to_string(),
+            ],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+            request: Default::default(),
+            active_key_index: 2,
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(
+            p.api_keys,
+            vec!["sk-keep".to_string(), "sk-current".to_string()]
+        );
+        assert_eq!(p.active_key_index, 1);
+    }
+
+    #[test]
+    fn sanitize_settings_clamps_active_key_index_past_end() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec!["sk-a".to_string(), "sk-b".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+            api_format: "openai".to_string(),
+            enabled: true,
+            model_overrides: std::collections::HashMap::new(),
+            compress_request_body: false,
+            request: Default::default(),
+            active_key_index: 9,
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(p.active_key_index, 1);
     }
 
     #[test]
@@ -3608,6 +3715,7 @@ mod tests {
                 prompt_cache_retention: "garbage".into(),
                 ..Default::default()
             },
+            active_key_index: 0,
         }];
         // 非法 retention + bool false → none
         let s = sanitize_settings(settings.clone());
@@ -3846,6 +3954,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "p".to_string();
         s.screenshot_translation.provider_id = "p".to_string();
@@ -3874,6 +3983,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "lens".to_string(),
@@ -3888,6 +3998,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "translator".to_string();
         s.translator_model = "gpt-4o".to_string();
@@ -3919,6 +4030,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "lens".to_string(),
@@ -3933,6 +4045,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "translator".to_string();
         s.translator_model = "gpt-4o".to_string();
@@ -3978,6 +4091,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         settings.providers.push(ModelProvider {
             id: "session".to_string(),
@@ -3992,6 +4106,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         settings.default_models.chat.provider_id = "global".to_string();
         settings.default_models.chat.model = "gemini-3.1-flash-lite".to_string();
@@ -4031,6 +4146,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.chat_provider_id = "chat".to_string();
         s.chat_model = "m2".to_string();
@@ -4058,6 +4174,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "vision".to_string(),
@@ -4072,6 +4189,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "title".to_string(),
@@ -4086,6 +4204,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "compression".to_string(),
@@ -4100,6 +4219,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "image".to_string(),
@@ -4114,6 +4234,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "chat".to_string();
         s.translator_model = "chat-model".to_string();
@@ -4169,6 +4290,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "chat".to_string();
         s.translator_model = "m1".to_string();
@@ -4215,6 +4337,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "lens".to_string(),
@@ -4229,6 +4352,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "translator".to_string();
         s.translator_model = "gpt-4o".to_string();
@@ -4386,6 +4510,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.lens.provider_id = "nonexistent".to_string();
         s.lens.model = "ghost-model".to_string();
@@ -4411,6 +4536,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         let s = sanitize_settings(s);
         assert_eq!(s.onboarding_status, "completed");
@@ -4439,6 +4565,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         let s = sanitize_settings(s);
         assert_eq!(s.onboarding_status, "pending");
@@ -4460,6 +4587,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.providers.push(ModelProvider {
             id: "active".to_string(),
@@ -4474,6 +4602,7 @@ mod tests {
             model_overrides: std::collections::HashMap::new(),
             compress_request_body: false,
             request: Default::default(),
+            active_key_index: 0,
         });
         s.translator_provider_id = "disabled".to_string();
         s.translator_model = "off-model".to_string();
