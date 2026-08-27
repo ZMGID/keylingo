@@ -4,30 +4,10 @@ import { api } from '../api/tauri'
 import type { ProviderRequestConfig } from '../api/tauri'
 import { ModelIcon } from '../chat/ModelIcon'
 import { Button, IconButton } from './Button'
+import { MODEL_TEST_CONCURRENCY, runPool } from './providerModelTestPool'
 
 type Lang = 'zh' | 'en'
 type Result = { status: 'queued' | 'testing' | 'ok' | 'fail'; error?: string }
-
-/** 同时打太多模型会卡住 WebView（IPC + 旋转图标 + 网关限流）。 */
-export const MODEL_TEST_CONCURRENCY = 10
-
-export async function runPool<T>(
-  items: T[],
-  limit: number,
-  worker: (item: T) => Promise<void>,
-): Promise<void> {
-  let next = 0
-  const n = Math.max(1, Math.min(limit, items.length))
-  await Promise.all(
-    Array.from({ length: n }, async () => {
-      while (true) {
-        const i = next++
-        if (i >= items.length) return
-        await worker(items[i])
-      }
-    }),
-  )
-}
 
 /**
  * 供应商「测试连接」弹窗：勾选已添加的模型批量测试。

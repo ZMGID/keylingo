@@ -2,11 +2,8 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/tauri'
-import {
-  MODEL_TEST_CONCURRENCY,
-  ProviderModelTestModal,
-  runPool,
-} from './ProviderModelTestModal'
+import { ProviderModelTestModal } from './ProviderModelTestModal'
+import { MODEL_TEST_CONCURRENCY, runPool } from './providerModelTestPool'
 
 vi.mock('../api/tauri', () => ({
   api: {
