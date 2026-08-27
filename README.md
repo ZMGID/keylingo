@@ -14,7 +14,7 @@
 
 **中文** · [English](README.en.md) · [更新日志](https://github.com/ZMGID/kivio/releases)
 
-[下载](https://github.com/ZMGID/kivio/releases/latest) · [功能](#功能) · [文档](#文档) · QQ 群 **1104450740**
+[下载](https://github.com/ZMGID/kivio/releases/latest) · [功能](#功能) · [帮助](#帮助) · QQ 群 **1104450740**
 
 <img src="docs/screenshots/qq-group.png" width="220" alt="Kivio QQ 群 1104450740">
 
@@ -124,21 +124,11 @@ xattr -cr "/Applications/Kivio Desktop.app"
 
 macOS 需要**辅助功能**与**屏幕录制**权限。启动后按引导填供应商即可。
 
-## 文档
+## 帮助
 
-| 文档 | 说明 |
-|---|---|
-| [领域术语](CONTEXT.md) | 产品用词（外部 CLI 代理、内置运行时、原生会话、集 / 项目……） |
-| [架构决策](docs/adr/) | 已采纳的 ADR（导入会话、侧栏顺序等） |
-| [聊天架构](docs/CHAT_ARCHITECTURE.md) | 聊天子系统设计 |
-| [Agent 运行时](docs/CHAT_AGENT_RUNTIME_PRD.md) | Agent 循环与工具 |
-| [Chat Probe](docs/chat-probe.md) | debug 构建的无头测试通道 |
-| [发版打包](docs/RELEASE_PACKAGING.md) | DMG / NSIS 发布清单 |
-| [版本说明](docs/releases/) | 各版本亮点 |
-| [渲染基线](docs/perf/chat-rendering-baseline.md) | 聊天渲染性能标定 |
-| [开发说明](CLAUDE.md) | 仓库结构、命令与实现约束 |
-
-模型适配器契约：[src-tauri/src/chat/model/README.md](src-tauri/src/chat/model/README.md)
+- [更新日志](https://github.com/ZMGID/kivio/releases) — 各版本下载与亮点
+- [问题反馈](https://github.com/ZMGID/kivio/issues)
+- QQ 群 **1104450740**
 
 ## 快速开始
 
@@ -255,7 +245,7 @@ npm run protocol:check
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ZMGID/kivio&type=Date)](https://www.star-history.com/#ZMGID/kivio&Date)
+[![Star History Chart](docs/star-history.svg)](https://github.com/ZMGID/kivio/stargazers)
 
 ## License
 

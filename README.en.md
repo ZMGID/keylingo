@@ -14,7 +14,7 @@
 
 [中文](README.md) · **English** · [Changelog](https://github.com/ZMGID/kivio/releases)
 
-[Download](https://github.com/ZMGID/kivio/releases/latest) · [Features](#features) · [Docs](#documentation) · QQ **1104450740**
+[Download](https://github.com/ZMGID/kivio/releases/latest) · [Features](#features) · [Help](#help) · QQ **1104450740**
 
 <img src="docs/screenshots/qq-group.png" width="220" alt="Kivio QQ group 1104450740">
 
@@ -124,21 +124,11 @@ xattr -cr "/Applications/Kivio Desktop.app"
 
 macOS needs **Accessibility** and **Screen Recording**. Then follow the onboarding wizard.
 
-## Documentation
+## Help
 
-| Doc | What it is |
-|---|---|
-| [Glossary](CONTEXT.md) | Domain terms (external CLI agent, built-in runtime, native session, set / project, …) |
-| [ADRs](docs/adr/) | Accepted decisions (imported sessions, sidebar order, …) |
-| [Chat architecture](docs/CHAT_ARCHITECTURE.md) | Chat subsystem design |
-| [Agent runtime](docs/CHAT_AGENT_RUNTIME_PRD.md) | Agent loop and tools |
-| [Chat probe](docs/chat-probe.md) | Debug-only headless test channel |
-| [Release packaging](docs/RELEASE_PACKAGING.md) | DMG / NSIS checklist |
-| [Release notes](docs/releases/) | Per-version highlights |
-| [Rendering baseline](docs/perf/chat-rendering-baseline.md) | Measured chat-rendering baseline |
-| [Contributor notes](CLAUDE.md) | Layout, commands, and implementation constraints |
-
-Provider adapter contract: [src-tauri/src/chat/model/README.md](src-tauri/src/chat/model/README.md)
+- [Changelog](https://github.com/ZMGID/kivio/releases) — downloads and highlights
+- [Issues](https://github.com/ZMGID/kivio/issues)
+- QQ group **1104450740**
 
 ## Quick start
 
@@ -255,7 +245,7 @@ Open an issue first for larger features. Tracker conventions: [docs/agents/issue
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ZMGID/kivio&type=Date)](https://www.star-history.com/#ZMGID/kivio&Date)
+[![Star History Chart](docs/star-history.svg)](https://github.com/ZMGID/kivio/stargazers)
 
 ## License
 

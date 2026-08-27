@@ -1,0 +1,36 @@
+# Refresh the README star-history chart.
+# Public star-history.com embeds broke after GitHub restricted the stargazers API
+# to a repo's own collaborators; this job uses GITHUB_TOKEN on this repo.
+name: Star history
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Draw chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/update-star-history.mjs
+      - name: Commit if changed
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/star-history.svg
+          if git diff --cached --quiet; then
+            echo 'no change'
+            exit 0
+          fi
+          git commit -m 'chore: refresh star-history chart'
+          git push

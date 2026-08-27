@@ -132,7 +132,7 @@ Keep `README.md` and `README.en.md` in lockstep. A release bump that edits one m
 
 ### Section order (do not reorder)
 
-1. Centered header: `public/icon.png`, title, one-line tagline, badges (release / platform / Tauri / downloads / license), language switcher, download + 功能/文档 + QQ **1104450740**, QQ group image.
+1. Centered header: `public/icon.png`, title, one-line tagline, badges (release / platform / Tauri / downloads / license), language switcher, download + 功能/帮助 + QQ **1104450740**, QQ group image.
 2. Two-paragraph pitch (tray / agent / bring-your-own-key). No LINUX DO or other 友链.
 3. **❤️ 赞助 / Sponsor** — `<details open>`. Table: logo 150px in the left cell (`docs/sponsors/…`), sponsor-provided copy in the right cell. Copy is the sponsor's; do not append in-app setup steps (“设置 → 供应商 → 添加驱动…”). Contact line stays GitHub Issues + QQ.
 4. 为什么用 Kivio / Why Kivio
@@ -140,12 +140,12 @@ Keep `README.md` and `README.en.md` in lockstep. A release bump that edits one m
 6. 功能 / Features — link [Releases](https://github.com/ZMGID/kivio/releases) **and** `docs/releases/vX.Y.Z.md`. **This version pointer is the only README line a release should change.** Do not paste the changelog into README.
 7. 热键 / Hotkeys
 8. 下载安装 / Download
-9. 文档 / Documentation (table of repo docs)
+9. 帮助 / Help — Releases + Issues + QQ only. **Do not** list PRDs, architecture drafts, Chat Probe, packaging checklists, perf baselines, `CLAUDE.md`, or the model-adapter contract. Those stay in the repo for contributors (see 开发).
 10. 快速开始 / Quick start
 11. 常见问题 / FAQ (`<details>`)
 12. 开发 / Development (`<details>`)
 13. 贡献 / Contributing
-14. **Star History** at the end (chart, then License). Do not move it into the header as the only star widget.
+14. **Star History** at the end — embed the committed chart `docs/star-history.svg` (refreshed by `.github/workflows/star-history.yml`). Do not use `api.star-history.com`; GitHub locked the public stargazers API and that URL now renders a “restricted access” placeholder. Then License.
 
 ### Release bump (example)
 
