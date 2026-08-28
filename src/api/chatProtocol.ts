@@ -39,12 +39,22 @@ const liveDuringSync = new Map<string, ChatRunEventEnvelope[]>()
 const conversationRevisions = new Map<string, number>()
 const syncRetryAttempts = new Map<string, number>()
 const syncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
-let nativeListener: Promise<() => void> | null = null
+let nativeListener: Promise<void> | null = null
 let subscribeConversationId: string | null = null
+let subscribeGeneration = 0
+let channelResetHooked = false
+
+const CHAT_PROTOCOL_CHANNEL_RESET_EVENT = 'chat-protocol-channel-reset'
 
 /** 弹出窗在订阅前调用：该 WebView 的通道只收这一条对话。主窗不要调。 */
 export function configureChatProtocolFilter(conversationId: string | null) {
+  if (subscribeConversationId === conversationId) return
   subscribeConversationId = conversationId
+  // 已经订过 All 的话必须重订，否则 nativeListener 单例会把错误的 filter 钉死到窗口关掉。
+  if (nativeListener) {
+    nativeListener = null
+    void ensureListener()
+  }
 }
 
 function reportIssue(issue: ChatProtocolIssue, conversationId?: string) {
@@ -330,21 +340,56 @@ function handleLiveEvent(payload: unknown) {
   applyEvent(payload as ChatProtocolEvent)
 }
 
+function hookChannelResetListener() {
+  if (channelResetHooked) return
+  channelResetHooked = true
+  void import('@tauri-apps/api/event').then(({ listen }) => listen(CHAT_PROTOCOL_CHANNEL_RESET_EVENT, () => {
+    void resubscribeChatProtocol()
+  })).catch(() => {
+    channelResetHooked = false
+  })
+}
+
+async function startListener() {
+  const generation = ++subscribeGeneration
+  const channel = new Channel<unknown>()
+  channel.onmessage = handleLiveEvent
+  const conversationId = subscribeConversationId
+  await invoke('chat_protocol_subscribe', {
+    channel,
+    conversationId,
+  })
+  hookChannelResetListener()
+  if (generation !== subscribeGeneration) return
+}
+
 async function ensureListener() {
   // 实时协议走 Tauri ipc Channel（点对点、保序），不再经过全局事件总线的
   // 广播 + 逐 WebView 反序列化。WebView 重载后模块级单例归零，重新订阅即替换
   // 该窗口 label 的槽；弹出窗带 conversationId 只收自己那条对话。
   // 订阅空窗期丢掉的事件由挂载时的 chat_sync_state 对账补齐。
-  nativeListener ??= (async () => {
-    const channel = new Channel<unknown>()
-    channel.onmessage = handleLiveEvent
-    await invoke('chat_protocol_subscribe', {
-      channel,
-      conversationId: subscribeConversationId,
-    })
-    return () => {}
-  })()
+  nativeListener ??= startListener().catch((error) => {
+    nativeListener = null
+    throw error
+  })
   await nativeListener
+}
+
+/** Channel 投递失败或 filter 订错后重建通道，再对已知会话 sync。 */
+let resubscribeInFlight = false
+export async function resubscribeChatProtocol() {
+  if (resubscribeInFlight) return
+  resubscribeInFlight = true
+  try {
+    subscribeGeneration += 1
+    nativeListener = null
+    await ensureListener()
+    const ids = new Set(conversationRevisions.keys())
+    if (subscribeConversationId) ids.add(subscribeConversationId)
+    await Promise.all([...ids].map((id) => syncChatProtocol(id)))
+  } finally {
+    resubscribeInFlight = false
+  }
 }
 
 export async function subscribeChatProtocol(subscriber: Subscriber) {
@@ -455,6 +500,12 @@ export const chatProtocolTesting = {
     syncRetryTimers.clear()
     subscribers.clear()
     issueSubscribers.clear()
+    subscribeConversationId = null
+    resubscribeInFlight = false
+  },
+  resetNativeListener() {
+    nativeListener = null
+    subscribeGeneration += 1
   },
   subscribe(subscriber: Subscriber) {
     subscribers.add(subscriber)

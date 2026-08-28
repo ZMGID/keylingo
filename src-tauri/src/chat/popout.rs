@@ -104,6 +104,22 @@ pub fn close_popout_for_conversation(app: &AppHandle, conversation_id: &str) {
     }
 }
 
+/// 弹出窗以窗口 label 为协议过滤的权威来源。前端漏传 `conversationId` 时也不能订成 All，
+/// 否则独占路由会把高频 token 丢掉，多窗口同时生成时弹出窗表现为直接断。
+pub fn protocol_filter_for_window(
+    label: &str,
+    conversation_id: Option<String>,
+) -> protocol::ChatProtocolFilter {
+    if let Some(id) = conversation_id_from_label(label) {
+        protocol::ChatProtocolFilter::Conversation(id.to_string())
+    } else {
+        match conversation_id {
+            Some(id) if !id.trim().is_empty() => protocol::ChatProtocolFilter::Conversation(id),
+            _ => protocol::ChatProtocolFilter::All,
+        }
+    }
+}
+
 fn reveal_popout(app: &AppHandle, window: &WebviewWindow) {
     crate::windows::apply_chat_window_chrome(window);
     crate::windows::normalize_chat_window_behavior(window);
@@ -203,6 +219,22 @@ mod tests {
         assert_eq!(conversation_id_from_label(&label), Some(id));
         assert!(!is_popout_label("chat"));
         assert!(conversation_id_from_label("chat").is_none());
+    }
+
+    #[test]
+    fn popout_label_forces_conversation_filter_even_without_js_id() {
+        assert_eq!(
+            protocol_filter_for_window("chat-popout-conv_abc", None),
+            protocol::ChatProtocolFilter::Conversation("conv_abc".into()),
+        );
+        assert_eq!(
+            protocol_filter_for_window("chat", None),
+            protocol::ChatProtocolFilter::All,
+        );
+        assert_eq!(
+            protocol_filter_for_window("chat", Some("conv_abc".into())),
+            protocol::ChatProtocolFilter::Conversation("conv_abc".into()),
+        );
     }
 
     #[test]

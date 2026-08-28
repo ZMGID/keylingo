@@ -1,18 +1,18 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(debug_assertions)]
-use tauri::Emitter;
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use ts_rs::TS;
 
 use crate::state::AppState;
 
 pub const CHAT_PROTOCOL_VERSION: u32 = 1;
 pub const CHAT_PROTOCOL_EVENT: &str = "chat-protocol";
+/// Channel 投递失败但窗口还在时，请该 WebView 重建通道并 `chat_sync_state`。
+pub const CHAT_PROTOCOL_CHANNEL_RESET_EVENT: &str = "chat-protocol-channel-reset";
 const MAX_REPLAY_EVENTS: usize = 512;
 const MAX_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 const COMPLETED_RUN_TTL: Duration = Duration::from_secs(5 * 60);
@@ -720,15 +720,13 @@ pub enum ChatProtocolFilter {
 }
 
 impl ChatProtocolFilter {
-    pub fn accepts(
-        &self,
-        conversation_id: &str,
-        high_frequency: bool,
-        exclusive_conversations: &HashSet<String>,
-    ) -> bool {
+    /// `exclusive_live`：此刻已有窗口以 `Conversation(id)` 订了这条对话。
+    /// 不能用「弹出窗是否存在」代替——窗口已建但通道订成 `All`、或 Channel 已死时，
+    /// 再按窗口集合跳过 All 会把 token 投进黑洞，弹出窗表现为生成直接断。
+    pub fn accepts(&self, conversation_id: &str, high_frequency: bool, exclusive_live: bool) -> bool {
         match self {
             Self::Conversation(id) => id == conversation_id,
-            Self::All => !(high_frequency && exclusive_conversations.contains(conversation_id)),
+            Self::All => !(high_frequency && exclusive_live),
         }
     }
 }
@@ -742,16 +740,29 @@ pub fn matching_subscriber_labels(
     subscribers: &HashMap<String, ChatProtocolSubscriber>,
     conversation_id: &str,
     high_frequency: bool,
-    exclusive_conversations: &HashSet<String>,
 ) -> Vec<String> {
-    subscribers
-        .iter()
-        .filter(|(_, subscriber)| {
-            subscriber
-                .filter
-                .accepts(conversation_id, high_frequency, exclusive_conversations)
-        })
-        .map(|(label, _)| label.clone())
+    labels_matching_filters(
+        subscribers
+            .iter()
+            .map(|(label, subscriber)| (label.as_str(), &subscriber.filter)),
+        conversation_id,
+        high_frequency,
+    )
+}
+
+fn labels_matching_filters<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a ChatProtocolFilter)>,
+    conversation_id: &str,
+    high_frequency: bool,
+) -> Vec<String> {
+    let entries: Vec<_> = entries.into_iter().collect();
+    let exclusive_live = entries.iter().any(|(_, filter)| {
+        matches!(filter, ChatProtocolFilter::Conversation(id) if id == conversation_id)
+    });
+    entries
+        .into_iter()
+        .filter(|(_, filter)| filter.accepts(conversation_id, high_frequency, exclusive_live))
+        .map(|(label, _)| label.to_string())
         .collect()
 }
 
@@ -1617,7 +1628,8 @@ fn upsert_segment(
 /// 实时协议的唯一出口。生产路径走 Tauri ipc `Channel`(点对点、保序、绕过全局事件总线,
 /// 不再向每个 WebView 广播+反序列化);无人订阅时事件直接丢弃——协议本就为此设计了
 /// sync/replay,前端挂载时 `chat_sync_state` 全量对账补齐。
-/// 多窗口：按 label 分槽，弹出窗只收自己那条对话；已拉出的对话的高频事件不再投给主窗 `All`。
+/// 多窗口：按 label 分槽，弹出窗只收自己那条对话；仅当该对话已有活着的 `Conversation`
+/// 订阅者时，才跳过主窗 All 的高频事件。按「窗口已打开」跳过会在通道未订上/已死时黑洞。
 /// debug 构建额外广播到全局事件总线,喂 chat probe(probe.rs 靠 `app.listen` 收实时载荷)。
 fn emit_protocol(app: &AppHandle, event: ChatProtocolEvent) {
     #[cfg(debug_assertions)]
@@ -1627,31 +1639,27 @@ fn emit_protocol(app: &AppHandle, event: ChatProtocolEvent) {
     let conversation_id = event.conversation_id().to_string();
     let high_frequency = event.is_high_frequency();
     let state = app.state::<AppState>();
-    let exclusive = state
-        .chat_popout_conversations
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let mut slots = state
-        .chat_protocol_subscribers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let labels = matching_subscriber_labels(
-        &slots,
-        &conversation_id,
-        high_frequency,
-        &exclusive,
-    );
-    if labels.is_empty() {
+    let targets: Vec<(String, tauri::ipc::Channel<ChatProtocolEvent>)> = {
+        let slots = state
+            .chat_protocol_subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        matching_subscriber_labels(&slots, &conversation_id, high_frequency)
+            .into_iter()
+            .filter_map(|label| {
+                slots
+                    .get(&label)
+                    .map(|subscriber| (label, subscriber.channel.clone()))
+            })
+            .collect()
+    };
+    if targets.is_empty() {
         return;
     }
     let mut dead = Vec::new();
     let mut payload = Some(event);
-    let last = labels.len();
-    for (index, label) in labels.iter().enumerate() {
-        let Some(subscriber) = slots.get(label) else {
-            continue;
-        };
+    let last = targets.len();
+    for (index, (label, channel)) in targets.iter().enumerate() {
         let next = if index + 1 == last {
             payload.take().expect("protocol event still owned")
         } else {
@@ -1660,17 +1668,39 @@ fn emit_protocol(app: &AppHandle, event: ChatProtocolEvent) {
                 .expect("protocol event still owned")
                 .clone()
         };
-        if subscriber.channel.send(next).is_err() {
-            dead.push(label.clone());
+        if channel.send(next).is_err() {
+            dead.push((label.clone(), channel.id()));
         }
     }
-    for label in dead {
-        slots.remove(&label);
+    if dead.is_empty() {
+        return;
+    }
+    let mut reset = Vec::new();
+    {
+        let mut slots = state
+            .chat_protocol_subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (label, channel_id) in dead {
+            let still_dead = slots
+                .get(&label)
+                .is_some_and(|subscriber| subscriber.channel.id() == channel_id);
+            if still_dead {
+                slots.remove(&label);
+                reset.push(label);
+            }
+        }
+    }
+    for label in reset {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.emit(CHAT_PROTOCOL_CHANNEL_RESET_EVENT, ());
+        }
     }
 }
 
 /// Chat / 弹出窗挂载时调用。同一窗口 label 再订阅会替换旧槽（WebView 重载）。
-/// `conversation_id` 有值 = 只收该对话；缺省 = 主聊天窗订全部。
+/// 弹出窗以窗口 label 为准订自己那条对话（不信任前端漏传 `conversation_id`）。
+/// 其它窗口：`conversation_id` 有值 = 只收该对话；缺省 = 主聊天窗订全部。
 /// 订阅后前端立即对打开的会话跑 `chat_sync_state`,补齐订阅空窗期的事件。
 #[tauri::command]
 pub fn chat_protocol_subscribe(
@@ -1679,10 +1709,7 @@ pub fn chat_protocol_subscribe(
     channel: tauri::ipc::Channel<ChatProtocolEvent>,
     conversation_id: Option<String>,
 ) {
-    let filter = match conversation_id {
-        Some(id) if !id.trim().is_empty() => ChatProtocolFilter::Conversation(id),
-        _ => ChatProtocolFilter::All,
-    };
+    let filter = crate::chat::popout::protocol_filter_for_window(window.label(), conversation_id);
     state
         .chat_protocol_subscribers
         .lock()
@@ -2820,22 +2847,58 @@ mod tests {
     fn all_filter_accepts_every_conversation_until_exclusive_high_frequency() {
         let all = ChatProtocolFilter::All;
         let popout = ChatProtocolFilter::Conversation("conv-a".into());
-        let exclusive = HashSet::from(["conv-a".to_string()]);
 
-        assert!(all.accepts("conv-a", false, &HashSet::new()));
-        assert!(all.accepts("conv-b", true, &HashSet::new()));
-        assert!(popout.accepts("conv-a", true, &exclusive));
-        assert!(!popout.accepts("conv-b", true, &exclusive));
+        assert!(all.accepts("conv-a", false, false));
+        assert!(all.accepts("conv-b", true, false));
+        assert!(popout.accepts("conv-a", true, true));
+        assert!(!popout.accepts("conv-b", true, true));
 
         assert!(
-            all.accepts("conv-a", false, &exclusive),
+            all.accepts("conv-a", false, true),
             "lifecycle edges still reach the main window"
         );
         assert!(
-            !all.accepts("conv-a", true, &exclusive),
+            !all.accepts("conv-a", true, true),
             "token stream of a popped conversation stays off the main window"
         );
-        assert!(all.accepts("conv-b", true, &exclusive));
+        assert!(all.accepts("conv-b", true, false));
+        assert!(
+            all.accepts("conv-a", true, false),
+            "no live Conversation subscriber → do not black-hole tokens"
+        );
+    }
+
+    #[test]
+    fn popped_conversation_does_not_black_hole_when_popout_subscribed_as_all() {
+        let all = ChatProtocolFilter::All;
+        let popout = ChatProtocolFilter::Conversation("conv-a".into());
+        let both_all = labels_matching_filters(
+            [("chat", &all), ("chat-popout-conv-a", &all)],
+            "conv-a",
+            true,
+        );
+        assert_eq!(
+            both_all,
+            vec!["chat".to_string(), "chat-popout-conv-a".to_string()],
+            "a popout that subscribed as All must still receive tokens"
+        );
+
+        let exclusive = labels_matching_filters(
+            [("chat", &all), ("chat-popout-conv-a", &popout)],
+            "conv-a",
+            true,
+        );
+        assert_eq!(exclusive, vec!["chat-popout-conv-a".to_string()]);
+
+        let lifecycle = labels_matching_filters(
+            [("chat", &all), ("chat-popout-conv-a", &popout)],
+            "conv-a",
+            false,
+        );
+        assert_eq!(
+            lifecycle,
+            vec!["chat".to_string(), "chat-popout-conv-a".to_string()]
+        );
     }
 
     #[test]

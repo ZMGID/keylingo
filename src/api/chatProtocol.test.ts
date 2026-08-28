@@ -5,6 +5,7 @@ import type {
 } from '../generated/chatProtocol'
 import {
   chatProtocolTesting,
+  configureChatProtocolFilter,
   subscribeChatProtocolIssues,
   syncChatProtocol,
 } from './chatProtocol'
@@ -374,9 +375,10 @@ describe('chat protocol sync', () => {
     missingRunIds: [],
     runs: [],
   })
-  const sentCursors = (call: number) => (
-    invokeMock.mock.calls[call][1] as { request: { cursors: unknown } }
-  ).request.cursors
+  const sentCursors = (call: number) => {
+    const syncCalls = invokeMock.mock.calls.filter((item) => item[0] === 'chat_sync_state')
+    return (syncCalls[call][1] as { request: { cursors: unknown } }).request.cursors
+  }
 
   beforeEach(() => {
     chatProtocolTesting.reset()
@@ -410,5 +412,16 @@ describe('chat protocol sync', () => {
     chatProtocolTesting.ingest(event(2, 'run_completed'))
     await syncChatProtocol('conversation')
     expect(sentCursors(1)).toEqual([{ runId: 'live-run', lastSeq: 1 }])
+  })
+
+  it('subscribes with the configured conversation filter', async () => {
+    chatProtocolTesting.resetNativeListener()
+    configureChatProtocolFilter('conv_popout')
+    invokeMock.mockResolvedValue(syncResult())
+    await syncChatProtocol('conv_popout')
+    expect(invokeMock).toHaveBeenCalledWith(
+      'chat_protocol_subscribe',
+      expect.objectContaining({ conversationId: 'conv_popout' }),
+    )
   })
 })

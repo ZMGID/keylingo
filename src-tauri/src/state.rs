@@ -151,10 +151,13 @@ pub struct AppState {
     /// Sequenced, replayable realtime chat protocol state keyed by run id.
     pub chat_protocol: Mutex<crate::chat::protocol::ChatProtocolHub>,
     /// 协议直连通道：按窗口 label 分槽。主聊天窗 filter=All，弹出窗只订一条对话。
-    /// 同 label 再订阅替换旧槽；send 失败（WebView 已销毁）时从 map 摘掉。
+    /// 同 label 再订阅替换旧槽；send 失败且窗口已销毁时从 map 摘掉；窗口还在则发
+    /// `chat-protocol-channel-reset` 让前端重建通道。
     pub chat_protocol_subscribers:
         Mutex<HashMap<String, crate::chat::protocol::ChatProtocolSubscriber>>,
-    /// 当前已拉出独立窗口的对话 id。emit 时对这些对话的高频 run 事件跳过主窗 All 槽。
+    /// 当前已拉出独立窗口的对话 id，供 `chat-popouts-changed` 与主窗占位同步。
+    /// 高频事件是否跳过主窗 All，看的是活着的 `Conversation` 订阅者，不用这个集合
+    /// （窗口已建但通道订成 All / 已死时按窗口集合跳过会把 token 投进黑洞）。
     pub chat_popout_conversations: Mutex<HashSet<String>>,
     /// 等待用户确认的敏感 Chat tool 调用（key = tool_call_id）。
     pub pending_chat_tool_approvals: Mutex<HashMap<String, PendingToolApproval>>,

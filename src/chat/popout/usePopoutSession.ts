@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/tauri'
-import { syncChatProtocol } from '../../api/chatProtocol'
+import { resubscribeChatProtocol, syncChatProtocol } from '../../api/chatProtocol'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../../api/settingsCache'
 import {
   agentRuntimesEqual,
@@ -59,6 +59,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
   const inFlightRef = useRef(false)
   const pendingDoneRef = useRef<(() => Promise<void>) | null>(null)
   const restoredRunIdsRef = useRef(new Set<string>())
+  const lastProtocolAtRef = useRef(0)
   const streamCoarse = useStreamCoarse()
 
   const applySnapshot = useCallback((snapshot: ConversationStreamSnapshot) => {
@@ -121,6 +122,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
 
   useTauriEvent(api.onChatStream, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
+    lastProtocolAtRef.current = Date.now()
     const terminal = isStreamTerminal(payload)
     if (payload.type === 'run_started') {
       const restored = createEmptyStreamSnapshot()
@@ -134,6 +136,10 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
       setPendingToolConfirm(null)
       setPendingSessionConsent(null)
       showStreamSnapshotIfCurrent(payload.conversationId, restored)
+      return
+    }
+    if (!snapshotRef.current && !inFlightRef.current) {
+      if (terminal) void finishRun()
       return
     }
     const snapshot = snapshotRef.current ?? createEmptyStreamSnapshot()
@@ -159,8 +165,19 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     }
   }, [finishRun, showStreamSnapshotIfCurrent])
 
+  useEffect(() => {
+    if (!streamCoarse.streaming) return
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastProtocolAtRef.current < 3000) return
+      lastProtocolAtRef.current = Date.now()
+      void resubscribeChatProtocol().catch(() => {})
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [conversationId, streamCoarse.streaming])
+
   useTauriEvent(api.onChatTool, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
+    lastProtocolAtRef.current = Date.now()
     const snapshot = snapshotRef.current ?? createEmptyStreamSnapshot()
     snapshotRef.current = snapshot
     applyToolRecordToSnapshot(snapshot, toolEventToRecord(payload))
@@ -202,6 +219,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
 
   useTauriEvent(api.onChatStatusNote, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
+    lastProtocolAtRef.current = Date.now()
     const snapshot = snapshotRef.current
     if (!snapshot) return
     snapshot.statusNote = payload.note
@@ -234,6 +252,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     const conv = conversation
     if (!conv) return false
     inFlightRef.current = true
+    lastProtocolAtRef.current = Date.now()
     setPendingUserMessage({
       id: `pending_${Date.now()}`,
       role: 'user',

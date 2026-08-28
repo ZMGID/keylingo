@@ -166,6 +166,10 @@ export default function ChatPopout({ onContentReady }: ChatPopoutProps) {
   const readyRef = useRef(false)
 
   useLayoutEffect(() => {
+    if (popoutConversationId) configureChatProtocolFilter(popoutConversationId)
+  }, [])
+
+  useLayoutEffect(() => {
     if (readyRef.current) return
     readyRef.current = true
     onContentReady?.()
