@@ -216,7 +216,7 @@ mod tests {
             None,
         );
         // 走生产用的常驻 actor（此前这里驱动的是只被真机测试吊着命的一次性 `run_acp_session`）。
-        let session = AcpSession::connect(&bin, &args, &cwd, None, Some("low"), &[], None)
+        let session = AcpSession::connect(&bin, &args, &cwd, None, Some("low"), &[], None, &[])
             .await
             .expect("connect grok acp session");
         let control = spawn_acp_session_actor(session);

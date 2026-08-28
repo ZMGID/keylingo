@@ -574,6 +574,8 @@ export interface Conversation {
   knowledgeBaseIds?: string[]
   force_knowledge_search?: boolean
   forceKnowledgeSearch?: boolean
+  additional_directories?: AdditionalDirectory[]
+  additionalDirectories?: AdditionalDirectory[]
   thinking_level?: ThinkingLevel | null
   thinkingLevel?: ThinkingLevel | null
   /** 会话级三态联网搜索（任务 07-23）。缺省/null = 跟随全局 nativeTools.webSearch。 */
@@ -598,6 +600,13 @@ export interface ForkOrigin {
   messageId?: string
   title: string
 }
+
+export interface AdditionalDirectory {
+  path: string
+  name?: string | null
+}
+
+export const MAX_ADDITIONAL_DIRECTORIES = 8
 
 /** 一次回答所用的 (provider, model) 引用。多模型一问多答的会话级模型集元素。 */
 export interface ModelRef {

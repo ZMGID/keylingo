@@ -83,6 +83,7 @@ import type {
   ThinkingLevel,
   ModelRef,
   WebSearchMode,
+  AdditionalDirectory,
 } from './types'
 import {
   api,
@@ -863,6 +864,19 @@ function toolMatchesRecommendation(tool: ChatToolDefinition, recommended: string
   )
 }
 
+function additionalDirectoriesOf(conversation: Conversation | null | undefined): AdditionalDirectory[] {
+  return conversation?.additional_directories ?? conversation?.additionalDirectories ?? []
+}
+
+function sameAdditionalDirectories(left: AdditionalDirectory[], right: AdditionalDirectory[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((entry, index) =>
+      entry.path === right[index]?.path && (entry.name ?? '') === (right[index]?.name ?? '')
+    )
+  )
+}
+
 function attachmentExtension(name: string): string {
   return name.split('.').pop()?.toLowerCase() ?? ''
 }
@@ -1076,6 +1090,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   // 欢迎页（尚无会话）时挂载的知识库草稿；首次发送建会话时落到会话上。
   const [draftKnowledgeBaseIds, setDraftKnowledgeBaseIds] = useState<string[]>([])
   const [draftForceKnowledgeSearch, setDraftForceKnowledgeSearch] = useState(false)
+  const [draftAdditionalDirectories, setDraftAdditionalDirectories] = useState<AdditionalDirectory[]>([])
   // 欢迎页思考等级草稿；首次发送建会话时落到会话上。null=跟随全局。
   const [draftThinkingLevel, setDraftThinkingLevel] = useState<ThinkingLevel | null>(loadLastThinkingLevel)
   // 欢迎页联网搜索模式草稿（任务 07-23）；首次发送建会话时落到会话上。undefined=跟随全局。
@@ -3020,6 +3035,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     saveLastAgentRuntime(activeAgentRuntime)
     setDraftKnowledgeBaseIds([])
     setDraftForceKnowledgeSearch(false)
+    setDraftAdditionalDirectories([])
     currentConversationIdRef.current = null
     forgetRememberedChatRoute()
     applyConversation(null)
@@ -3397,6 +3413,20 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       }
     }
 
+    {
+      const convDirs = additionalDirectoriesOf(conversation)
+      if (draftAdditionalDirectories.length > 0 && !sameAdditionalDirectories(convDirs, draftAdditionalDirectories)) {
+        try {
+          conversation = await chatApi.updateConversation(conversation.id, {
+            additionalDirectories: draftAdditionalDirectories,
+          })
+          applyConversationIfCurrent(conversation.id, conversation)
+        } catch (err) {
+          console.error('Failed to apply additional directory draft before send:', err)
+        }
+      }
+    }
+
     // 把全局默认思考等级套到「从未显式设过等级」的会话上（新会话 / 旧的 null 会话）。
     // 只在 convLevel 为 null 时应用——绝不覆盖用户为某个会话显式选的等级。
     if (draftThinkingLevel) {
@@ -3620,6 +3650,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     draftAgentRuntime,
     draftKnowledgeBaseIds,
     draftForceKnowledgeSearch,
+    draftAdditionalDirectories,
     draftThinkingLevel,
     draftReplyModels,
     draftWebSearchMode,
@@ -4438,6 +4469,24 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     }
   }, [applyConversationMeta, currentConversation])
 
+  const handleChangeAdditionalDirectories = useCallback(async (directories: AdditionalDirectory[]) => {
+    setDraftAdditionalDirectories(directories)
+    if (!currentConversation) return
+    const conversationId = currentConversation.id
+    try {
+      const updatedConv = await chatApi.updateConversation(conversationId, {
+        additionalDirectories: directories,
+      })
+      applyConversationMeta(updatedConv)
+    } catch (err) {
+      console.error('Failed to update additional directories:', err)
+      setStreamErrorForConversation(
+        conversationId,
+        typeof err === 'string' ? err : (err as Error).message || '附加目录更新失败',
+      )
+    }
+  }, [applyConversationMeta, currentConversation, setStreamErrorForConversation])
+
   const handleToggleForceKnowledgeSearch = useCallback(async () => {
     const next = !(currentConversation
       ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false)
@@ -4521,6 +4570,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const composerForceKnowledgeSearch = currentConversation
     ? (currentConversation.force_knowledge_search ?? currentConversation.forceKnowledgeSearch ?? false)
     : draftForceKnowledgeSearch
+  const composerAdditionalDirectories = useMemo(
+    () => currentConversation
+      ? additionalDirectoriesOf(currentConversation)
+      : draftAdditionalDirectories,
+    [currentConversation, draftAdditionalDirectories],
+  )
   const composerContextSlot = useMemo(
     () => (
       <ContextIndicator
@@ -5121,6 +5176,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     onChangeKnowledgeBaseIds: handleChangeKnowledgeBaseIds,
     forceKnowledgeSearch: composerForceKnowledgeSearch,
     onToggleForceKnowledgeSearch: handleToggleForceKnowledgeSearch,
+    additionalDirectories: composerAdditionalDirectories,
+    onChangeAdditionalDirectories: handleChangeAdditionalDirectories,
+    additionalDirectoryPrimaryRoot: selectedProject?.root_path ?? selectedProject?.rootPath ?? null,
     mcpServers,
     onToggleMcpServer: handleToggleMcpServer,
     webSearchMode: activeWebSearchMode,
@@ -5152,6 +5210,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     composerCurrentAssistant,
     composerForceKnowledgeSearch,
     composerKnowledgeBaseIds,
+    composerAdditionalDirectories,
     composerUsageSlot,
     conversationProject,
     currentConversation,
@@ -5161,6 +5220,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     handleAgentPlanModeChange,
     handleCancelStream,
     handleChangeKnowledgeBaseIds,
+    handleChangeAdditionalDirectories,
     handleChangeReplyModels,
     handleClearChat,
     handleCompressContext,

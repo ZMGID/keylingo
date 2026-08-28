@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import { ChatAttachments } from './ChatAttachments'
 import { PastedTextEditorModal } from './PastedTextEditorModal'
+import { ComposerAddMenu } from './ComposerAddMenu'
 import { SourcesButton } from './SourcesButton'
 import { onComposerInsert, onComposerTextInsert } from './composerInsert'
 import { draftKey, getComposerDraft, migrateNewChatDraft, setComposerDraft } from './composerDraft'
@@ -41,7 +42,7 @@ import { Button, IconButton } from '../components/Button'
 import { useT, type I18n, type Lang } from '../settings/i18n'
 import { api, type ChatToolDefinition, type ChatMcpServer } from '../api/tauri'
 import { chatApi } from './api'
-import type { AgentPlanMode, AgentPlanState, AgentTodoState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
+import type { AdditionalDirectory, AgentPlanMode, AgentPlanState, AgentTodoState, ChatAssistant, ChatProject, ChatSet, ModelRef, PendingAttachment, WebSearchMode } from './types'
 import {
   buildSlashCommands,
   commandMatches,
@@ -423,6 +424,10 @@ export interface InputBarProps {
   /** 多答模型集（会话级 reply_models / replyModels；0/1 个=单模型，≥2=一问多答） */
   replyModels?: ModelRef[]
   onChangeReplyModels?: (models: ModelRef[]) => void | Promise<void>
+  additionalDirectories?: AdditionalDirectory[]
+  onChangeAdditionalDirectories?: (directories: AdditionalDirectory[]) => void | Promise<void>
+  /** 当前项目主目录；附加目录列表会排除它。 */
+  additionalDirectoryPrimaryRoot?: string | null
   /** 上下文用量指示器：由 Chat 注入 <ContextIndicator>，渲染在底栏右侧 Act 右边 */
   contextSlot?: ReactNode
   /** 底栏模式胶囊的档位表，由 Chat 算好传入（内置会话 = Kivio 三档；本地 CLI 会话 =
@@ -493,6 +498,9 @@ export const InputBar = memo(function InputBar({
   builtinWebSearchSupported = false,
   replyModels = [],
   onChangeReplyModels,
+  additionalDirectories = [],
+  onChangeAdditionalDirectories,
+  additionalDirectoryPrimaryRoot = null,
   contextSlot,
   modeOptions = [],
   modeValue = '',
@@ -2052,17 +2060,22 @@ export const InputBar = memo(function InputBar({
         {/* ③ 功能栏：移出输入框，裸露坐在窗口底色上（无背景无边框）。
             这样输入框高度只由文本决定，能收到单行 —— 原来图标在盒内，盒子被撑到 ~100px。 */}
         <div className="chat-composer-tools" data-tauri-drag-region="false">
-            <IconButton
-              size="sm"
-              shape="circle"
-              label={t.chatAddAttachment}
-              onClick={() => void openAttachmentPicker()}
+            <ComposerAddMenu
+              onAddAttachment={() => void openAttachmentPicker()}
+              directories={additionalDirectories}
+              onChangeAdditionalDirectories={onChangeAdditionalDirectories}
+              primaryRootPath={additionalDirectoryPrimaryRoot}
+              externalAgentId={usesExternalRuntime ? externalAgentName : null}
               disabled={disabled}
-              tabIndex={-1}
-              className="shrink-0 disabled:opacity-40"
-            >
-              <Plus size={18} strokeWidth={1.75} />
-            </IconButton>
+              layout={layout}
+              onBeforeOpen={() => {
+                setSlashPanelOpen(false)
+                setToolPanelOpen(false)
+                closeProjectMenu()
+                closeModeMenu()
+                closePresetMenu()
+              }}
+            />
 
             {onChangeKnowledgeBaseIds && onSetWebSearchMode && (
               <SourcesButton

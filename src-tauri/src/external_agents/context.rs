@@ -516,6 +516,7 @@ mod tests {
             agent_todo_state: AgentTodoState::default(),
             knowledge_base_ids: Vec::new(),
             force_knowledge_search: false,
+            additional_directories: Vec::new(),
             thinking_level: None,
             web_search_mode: None,
             reply_models: Vec::new(),

@@ -20,7 +20,7 @@ import type {
   DetectedExternalAgent,
   PendingAttachment,
 } from './types'
-import type { ThinkingLevel, WebSearchMode, ModelRef } from './types'
+import type { ThinkingLevel, WebSearchMode, ModelRef, AdditionalDirectory } from './types'
 import type { CliImportResult, ImportableCliSession } from './types'
 
 export type { DetectedExternalAgent, AgentRuntimeConfig }
@@ -875,6 +875,7 @@ const mockChatApi = {
       model?: string
       activeSkillId?: string | null
       assistantId?: string | null
+      additionalDirectories?: AdditionalDirectory[]
     }
   ): Promise<Conversation> {
     const conversations = loadMockConversations()
@@ -929,6 +930,10 @@ const mockChatApi = {
       }
     }
     conversation.activeSkillId = conversation.active_skill_id
+    if (updates.additionalDirectories !== undefined) {
+      conversation.additional_directories = updates.additionalDirectories
+      conversation.additionalDirectories = updates.additionalDirectories
+    }
     const contextState = estimateMockContext(conversation)
     conversation.context_state = contextState
     conversation.contextState = contextState
@@ -1756,6 +1761,7 @@ export const chatApi = {
       assistantId?: string | null
       knowledgeBaseIds?: string[]
       forceKnowledgeSearch?: boolean
+      additionalDirectories?: AdditionalDirectory[]
       thinkingLevel?: ThinkingLevel | null
       webSearchMode?: WebSearchMode | null
       replyModels?: ModelRef[]
@@ -1783,6 +1789,7 @@ export const chatApi = {
         assistantId: updates.assistantId,
         knowledgeBaseIds: updates.knowledgeBaseIds,
         forceKnowledgeSearch: updates.forceKnowledgeSearch,
+        additionalDirectories: updates.additionalDirectories,
         // null/未知 → 空串，后端解析为 None（回到「跟随全局」）。
         thinkingLevel: hasThinkingUpdate ? updates.thinkingLevel ?? '' : undefined,
         // 会话级三态联网搜索（任务 07-23）：null/未知 → 空串，后端回退全局开关。

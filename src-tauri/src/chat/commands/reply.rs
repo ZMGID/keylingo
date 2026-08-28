@@ -536,6 +536,7 @@ pub(super) async fn complete_assistant_reply_inner(
         workbench_dir.as_deref(),
         knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
+        &conversation.additional_directories,
     );
     // 从未成功连接的 MCP server：工具没法降级进列表，注一行说明让模型知道
     // "配置了但连不上"，而不是回答"没有这个工具"。
@@ -600,6 +601,7 @@ pub(super) async fn complete_assistant_reply_inner(
         workbench_dir.as_deref(),
         knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
+        &conversation.additional_directories,
     );
 
     let chat_host = ChatAgentHost {

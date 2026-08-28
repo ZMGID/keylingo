@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::chat::model::WORKBENCH_LOCATION_PROMPT_HEAD;
-use crate::chat::types::{ChatAssistantSnapshot, ContextUsageSegment};
+use crate::chat::types::{AdditionalDirectory, ChatAssistantSnapshot, ContextUsageSegment};
 use crate::mcp::ChatToolDefinition;
 use crate::settings::{chat_no_think_instruction, default_chat_system_prompt, ChatToolsConfig};
 use crate::skills;
@@ -148,6 +148,7 @@ pub fn build_chat_system_prompt(
     workbench_dir: Option<&str>,
     knowledge_base_prompt: Option<&str>,
     obsidian_vault_path: Option<&str>,
+    additional_directories: &[AdditionalDirectory],
 ) -> String {
     build_chat_system_prompt_with_segments(
         language,
@@ -171,6 +172,7 @@ pub fn build_chat_system_prompt(
         workbench_dir,
         knowledge_base_prompt,
         obsidian_vault_path,
+        additional_directories,
     )
     .0
 }
@@ -267,6 +269,7 @@ pub fn build_chat_system_prompt_with_segments(
     workbench_dir: Option<&str>,
     knowledge_base_prompt: Option<&str>,
     obsidian_vault_path: Option<&str>,
+    additional_directories: &[AdditionalDirectory],
 ) -> (String, Vec<ContextUsageSegment>) {
     let mut prompt = String::new();
     let mut segments = Vec::new();
@@ -456,7 +459,11 @@ pub fn build_chat_system_prompt_with_segments(
     // paragraph off `system` and parks it on the first user message (after tools
     // in the token stream).
     let workbench_text = if tools_available {
-        workbench_location_prompt(workbench_dir, available_builtin_tools)
+        workbench_location_prompt(
+            workbench_dir,
+            additional_directories,
+            available_builtin_tools,
+        )
     } else {
         None
     };
@@ -823,6 +830,7 @@ pub(crate) fn tool_matches_recommended_name(tool: &ChatToolDefinition, recommend
 
 fn workbench_location_prompt(
     workbench_dir: Option<&str>,
+    additional_directories: &[AdditionalDirectory],
     available_builtin_tools: &[String],
 ) -> Option<String> {
     let has = |name: &str| {
@@ -833,9 +841,23 @@ fn workbench_location_prompt(
     let dir = workbench_dir
         .map(str::trim)
         .filter(|dir| !dir.is_empty() && (has("write") || has("edit") || has("bash")))?;
-    Some(format!(
+    let mut text = format!(
         "{WORKBENCH_LOCATION_PROMPT_HEAD} `{dir}`. When the user does not specify a location, use relative paths or the default cwd so files and basic work land here. This is NOT a sandbox or access restriction: if the user names Desktop, an absolute path, `~/...`, or another directory, use that exact location instead."
-    ))
+    );
+    if !additional_directories.is_empty() {
+        text.push_str(" Additional directories attached to this conversation (not the default workbench — use these absolute paths; do not reach them with `../` from the default workbench):");
+        for directory in additional_directories {
+            text.push_str(&format!(
+                "\n- {} — `{}`",
+                directory.display_name(),
+                directory.path
+            ));
+        }
+        text.push_str(
+            "\nSearch tools (glob/grep) without an explicit path stay in the default workbench.",
+        );
+    }
+    Some(text)
 }
 
 fn native_tools_prompt(available_builtin_tools: &[String], _has_workbench: bool) -> Option<String> {
@@ -1045,6 +1067,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
 
         assert!(prompt.contains("bash"));
@@ -1080,6 +1103,7 @@ mod tests {
             Some("/Users/me/Kivio/workspace/conv_abc"),
             None,
             None,
+            &[],
         );
 
         // Workbench + write: surface the absolute workbench path
@@ -1116,6 +1140,57 @@ mod tests {
     }
 
     #[test]
+    fn chat_prompt_lists_additional_directories_in_workbench_paragraph() {
+        let registry = skills::SkillRegistry::default();
+        let mut chat_tools = crate::settings::ChatToolsConfig::default();
+        chat_tools.native_tools.write_file = true;
+        let extra = [crate::chat::types::AdditionalDirectory {
+            path: "/Users/me/biz-a".to_string(),
+            name: Some("biz-a".to_string()),
+        }];
+
+        let prompt = build_chat_system_prompt(
+            "zh-CN",
+            false,
+            false,
+            &registry,
+            &chat_tools,
+            true,
+            &["write".to_string()],
+            None,
+            None,
+            None,
+            None,
+            "",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("/Users/me/Kivio/workspace/conv_abc"),
+            None,
+            None,
+            &extra,
+        );
+
+        let last = prompt.trim().rsplit("\n\n").next().expect("last paragraph");
+        assert!(
+            last.starts_with(WORKBENCH_LOCATION_PROMPT_HEAD),
+            "additional directories must stay in the last workbench paragraph, got: {last}"
+        );
+        assert!(last.contains("/Users/me/Kivio/workspace/conv_abc"));
+        assert!(last.contains("/Users/me/biz-a"));
+        assert!(last.contains("biz-a"));
+        assert!(last.contains("glob/grep"));
+        let prefix = &prompt[..prompt.rfind("\n\n").expect("separator")];
+        assert!(
+            !prefix.contains("/Users/me/biz-a"),
+            "additional directories must not sit in the static system prefix"
+        );
+    }
+
+    #[test]
     fn project_folder_path_stays_out_of_static_system_prefix() {
         let registry = skills::SkillRegistry::default();
         let mut chat_tools = crate::settings::ChatToolsConfig::default();
@@ -1148,6 +1223,7 @@ mod tests {
                 Some(root),
                 None,
                 None,
+                &[],
             )
         };
 
@@ -1207,6 +1283,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
 
         assert!(prompt.contains("MUST call present_artifacts"));
@@ -1242,6 +1319,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
 
         assert!(prompt.contains("code block"));
@@ -1276,6 +1354,7 @@ mod tests {
             None,
             None,
             Some("/Users/me/Obsidian/MyVault"),
+            &[],
         );
 
         assert!(prompt.contains("Obsidian vault path: /Users/me/Obsidian/MyVault"));
@@ -1308,6 +1387,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
 
         assert!(
@@ -1337,6 +1417,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
         assert!(!blank.contains("Set instructions:"), "{blank}");
     }
@@ -1517,6 +1598,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
 
         assert!(prompt.contains("当前日期"), "{prompt}");
@@ -1569,6 +1651,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         );
         assert!(prompt.contains("Speak like a careful editor."), "{prompt}");
         assert!(!prompt.contains("Additional instructions:"), "{prompt}");
@@ -1604,6 +1687,7 @@ mod tests {
             None,
             Some("This conversation has knowledge bases attached: Docs."),
             None,
+            &[],
         );
         assert!(
             prompt.contains("This conversation has knowledge bases attached: Docs."),

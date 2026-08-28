@@ -7,8 +7,9 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::{Mutex, RwLock};
 
 use super::{
-    AgentPlanState, AgentRuntimeConfig, AgentTodoState, ChatAssistantSnapshot, ChatMessage,
-    Conversation, ConversationContextState, ConversationListItem, ModelRef, WebSearchMode,
+    AdditionalDirectory, AgentPlanState, AgentRuntimeConfig, AgentTodoState, ChatAssistantSnapshot,
+    ChatMessage, Conversation, ConversationContextState, ConversationListItem, ModelRef,
+    WebSearchMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +71,7 @@ pub enum ConversationMetadataMutation {
         ids: Vec<String>,
         force_search: bool,
     },
+    AdditionalDirectories(Vec<AdditionalDirectory>),
     ThinkingLevel(Option<String>),
     WebSearchMode(Option<WebSearchMode>),
     ReplyModels(Vec<ModelRef>),
@@ -712,6 +714,9 @@ impl ConversationRepository {
                 ConversationMetadataMutation::KnowledgeBases { ids, force_search } => {
                     conversation.knowledge_base_ids = ids;
                     conversation.force_knowledge_search = force_search;
+                }
+                ConversationMetadataMutation::AdditionalDirectories(value) => {
+                    conversation.additional_directories = value
                 }
                 ConversationMetadataMutation::ThinkingLevel(value) => {
                     conversation.thinking_level = value

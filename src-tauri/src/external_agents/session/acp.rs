@@ -48,7 +48,11 @@ pub struct AcpMcpServer {
     pub env: Vec<(String, String)>,
 }
 
-fn build_session_new_params(cwd: &Path, mcp_servers: &[AcpMcpServer]) -> Value {
+fn build_session_new_params(
+    cwd: &Path,
+    mcp_servers: &[AcpMcpServer],
+    additional_directories: Option<&[String]>,
+) -> Value {
     let servers: Vec<Value> = mcp_servers
         .iter()
         .map(|s| {
@@ -61,14 +65,23 @@ fn build_session_new_params(cwd: &Path, mcp_servers: &[AcpMcpServer]) -> Value {
             })
         })
         .collect();
-    json!({
+    let mut params = json!({
         "cwd": cwd.to_string_lossy(),
         "mcpServers": servers,
-    })
+    });
+    if let Some(dirs) = additional_directories {
+        params["additionalDirectories"] = json!(dirs);
+    }
+    params
 }
 
-fn build_session_load_params(cwd: &Path, session_id: &str, mcp_servers: &[AcpMcpServer]) -> Value {
-    let mut params = build_session_new_params(cwd, mcp_servers);
+fn build_session_load_params(
+    cwd: &Path,
+    session_id: &str,
+    mcp_servers: &[AcpMcpServer],
+    additional_directories: Option<&[String]>,
+) -> Value {
+    let mut params = build_session_new_params(cwd, mcp_servers, additional_directories);
     params["sessionId"] = json!(session_id);
     params
 }
@@ -148,6 +161,20 @@ async fn write_rpc_error(
         .write_all(line.as_bytes())
         .await
         .map_err(|e| e.to_string())
+}
+
+fn agent_supports_additional_directories(initialize_result: &Value) -> bool {
+    if initialize_result
+        .pointer("/agentCapabilities/sessionCapabilities/additionalDirectories")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    initialize_result
+        .pointer("/capabilities/session/additionalDirectories")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn acp_initialize_params(terminal: bool) -> Value {
@@ -614,7 +641,7 @@ pub async fn detect_acp_models(
                 &mut stdin,
                 next_id,
                 "session/new",
-                build_session_new_params(&cli_protocol_cwd(bin, cwd), &[]),
+                build_session_new_params(&cli_protocol_cwd(bin, cwd), &[], None),
             )
             .await
             .ok()?;
@@ -790,7 +817,7 @@ pub async fn detect_acp_commands(
                 &mut stdin,
                 next_id,
                 "session/new",
-                build_session_new_params(&cli_protocol_cwd(bin, cwd), &[]),
+                build_session_new_params(&cli_protocol_cwd(bin, cwd), &[], None),
             )
             .await
             .ok()?;
@@ -1443,6 +1470,7 @@ impl AcpSession {
         reasoning: Option<&str>,
         mcp_servers: &[AcpMcpServer],
         resume_session: Option<&str>,
+        additional_directories: &[String],
     ) -> Result<Self, String> {
         let mut child = crate::external_agents::spawn::cli_command(resolved_bin)
             .args(args)
@@ -1478,7 +1506,7 @@ impl AcpSession {
             write_rpc(&mut stdin, 1, "initialize", acp_initialize_params(true))
                 .await
                 .map_err(|e| format!("initialize: {e}"))?;
-            acp_read_until_id(
+            let init_result = acp_read_until_id(
                 &mut reader,
                 &mut stdin,
                 &mut terminals,
@@ -1487,6 +1515,8 @@ impl AcpSession {
             )
             .await
             .map_err(|e| format!("initialize: {e}"))?;
+            let additional_directories = agent_supports_additional_directories(&init_result)
+                .then_some(additional_directories);
 
             // session/new for a fresh session, session/load to resume a prior one.
             // One Kivio conversation ↔ one native session id: load failure must
@@ -1499,7 +1529,12 @@ impl AcpSession {
                     for cwd_try in
                         crate::external_agents::wsl::cwd_spellings_for_cli(resolved_bin, cwd)
                     {
-                        let params = build_session_load_params(&cwd_try, sid, mcp_servers);
+                        let params = build_session_load_params(
+                            &cwd_try,
+                            sid,
+                            mcp_servers,
+                            additional_directories,
+                        );
                         write_rpc(&mut stdin, next_id, "session/load", params)
                             .await
                             .map_err(|e| format!("session/load: {e}"))?;
@@ -1536,7 +1571,11 @@ impl AcpSession {
                         &mut stdin,
                         next_id,
                         "session/new",
-                        build_session_new_params(&cli_protocol_cwd(resolved_bin, cwd), mcp_servers),
+                        build_session_new_params(
+                            &cli_protocol_cwd(resolved_bin, cwd),
+                            mcp_servers,
+                            additional_directories,
+                        ),
                     )
                     .await
                     .map_err(|e| format!("session-new: {e}"))?;
@@ -2050,10 +2089,41 @@ mod tests {
 
     #[test]
     fn session_load_params_carry_session_id_and_cwd() {
-        let params = build_session_load_params(Path::new("/mnt/e/proj"), "sess-1", &[]);
+        let params = build_session_load_params(Path::new("/mnt/e/proj"), "sess-1", &[], None);
         assert_eq!(params["sessionId"], json!("sess-1"));
         assert_eq!(params["cwd"], json!("/mnt/e/proj"));
         assert_eq!(params["mcpServers"], json!([]));
+        assert!(params.get("additionalDirectories").is_none());
+    }
+
+    #[test]
+    fn session_new_omits_additional_directories_unless_advertised() {
+        let params = build_session_new_params(Path::new("/tmp"), &[], None);
+        assert!(params.get("additionalDirectories").is_none());
+        let params = build_session_new_params(
+            Path::new("/tmp"),
+            &[],
+            Some(&["/home/me/biz-a".to_string()]),
+        );
+        assert_eq!(params["additionalDirectories"], json!(["/home/me/biz-a"]));
+        let params = build_session_new_params(Path::new("/tmp"), &[], Some(&[]));
+        assert_eq!(params["additionalDirectories"], json!([]));
+    }
+
+    #[test]
+    fn additional_directories_capability_reads_v1_and_v2() {
+        assert!(agent_supports_additional_directories(&json!({
+            "agentCapabilities": {
+                "sessionCapabilities": { "additionalDirectories": true }
+            }
+        })));
+        assert!(agent_supports_additional_directories(&json!({
+            "capabilities": { "session": { "additionalDirectories": true } }
+        })));
+        assert!(!agent_supports_additional_directories(&json!({
+            "agentCapabilities": { "loadSession": true }
+        })));
+        assert!(!agent_supports_additional_directories(&json!({})));
     }
 
     #[test]
@@ -2252,9 +2322,10 @@ mod tests {
 
         let bin = which_bin("cursor-agent").expect("cursor-agent on PATH");
         let cwd = std::env::temp_dir();
-        let session = AcpSession::connect(&bin, &["acp".to_string()], &cwd, None, None, &[], None)
-            .await
-            .expect("connect cursor-agent acp");
+        let session =
+            AcpSession::connect(&bin, &["acp".to_string()], &cwd, None, None, &[], None, &[])
+                .await
+                .expect("connect cursor-agent acp");
         let sid = session.session_id().to_string();
         assert!(!sid.is_empty());
         let control = spawn_acp_session_actor(session);
@@ -3128,23 +3199,16 @@ mod tests {
             return;
         };
         let cwd = std::env::temp_dir();
-        let session = match AcpSession::connect(
-            &bin,
-            &["acp".to_string()],
-            &cwd,
-            None,
-            None,
-            &[],
-            None,
-        )
-        .await
-        {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
-                return;
-            }
-        };
+        let session =
+            match AcpSession::connect(&bin, &["acp".to_string()], &cwd, None, None, &[], None, &[])
+                .await
+            {
+                Ok(session) => session,
+                Err(err) => {
+                    eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
+                    return;
+                }
+            };
         let control = spawn_acp_session_actor(session);
         let captured = run_one_live_turn(
             &control,
@@ -3266,23 +3330,16 @@ mod tests {
         };
         let cwd = std::env::temp_dir();
         // 走生产用的常驻 actor（此前驱动的是只被真机测试吊着命的一次性 `run_acp_session`）。
-        let session = match AcpSession::connect(
-            &bin,
-            &["acp".to_string()],
-            &cwd,
-            None,
-            None,
-            &[],
-            None,
-        )
-        .await
-        {
-            Ok(session) => session,
-            Err(err) => {
-                eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
-                return;
-            }
-        };
+        let session =
+            match AcpSession::connect(&bin, &["acp".to_string()], &cwd, None, None, &[], None, &[])
+                .await
+            {
+                Ok(session) => session,
+                Err(err) => {
+                    eprintln!("SKIP: 连接失败（未登录 / 网络？）：{err}");
+                    return;
+                }
+            };
         let control = spawn_acp_session_actor(session);
         // 这里不用 `run_one_live_turn`：它的墙钟超时是 panic，而 opencode 密钥失效导致的
         // 挂起是**环境**问题不是本层回归，必须按 SKIP 处理。

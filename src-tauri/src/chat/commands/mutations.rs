@@ -10,10 +10,12 @@ use crate::state::AppState;
 
 use super::super::storage::{
     assistant_snapshot, conversation_attachments_dir, find_project_by_id, find_project_by_name,
-    find_set_by_id, load_conversation,
+    find_set_by_id, load_conversation, normalize_additional_directories,
+    resolve_conversation_working_directory,
 };
 use super::super::{
-    AgentPlanState, AgentTodoState, ChatMessage, Conversation, ConversationContextState, ForkOrigin,
+    AdditionalDirectory, AgentPlanState, AgentTodoState, ChatMessage, Conversation,
+    ConversationContextState, ForkOrigin,
 };
 use super::catalog::{reconcile_conversation_orphan_tool_segments, strip_transcripts_for_frontend};
 use super::context::{
@@ -778,6 +780,7 @@ pub(crate) async fn chat_fork_conversation(
         agent_plan_state: AgentPlanState::default(),
         knowledge_base_ids: source.knowledge_base_ids.clone(),
         force_knowledge_search: source.force_knowledge_search,
+        additional_directories: source.additional_directories.clone(),
         thinking_level: source.thinking_level.clone(),
         web_search_mode: source.web_search_mode,
         reply_models: source.reply_models.clone(),
@@ -914,6 +917,7 @@ pub(crate) async fn chat_update_conversation(
     assistant_id: Option<String>,
     knowledge_base_ids: Option<Vec<String>>,
     force_knowledge_search: Option<bool>,
+    additional_directories: Option<Vec<AdditionalDirectory>>,
     thinking_level: Option<String>,
     web_search_mode: Option<String>,
     reply_models: Option<Vec<crate::chat::ModelRef>>,
@@ -1004,6 +1008,18 @@ pub(crate) async fn chat_update_conversation(
             }
             if let Some(force) = force_knowledge_search {
                 conversation.force_knowledge_search = force;
+            }
+            if let Some(entries) = additional_directories {
+                let settings = crate::settings::load_settings(&app);
+                let primary = resolve_conversation_working_directory(
+                    &app,
+                    conversation,
+                    &settings.chat_tools.native_tools.working_directory,
+                )
+                .ok()
+                .map(|path| path.to_string_lossy().to_string());
+                conversation.additional_directories =
+                    normalize_additional_directories(entries, primary.as_deref())?;
             }
             if let Some(level) = thinking_level {
                 // 仅接受已知值；空串/未知 → 清除（回到「跟随全局」）。

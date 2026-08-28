@@ -8,9 +8,9 @@ use tauri::{AppHandle, Manager};
 use serde::Serialize;
 
 use super::{
-    ChatAssistant, ChatAssistantIndex, ChatAssistantSnapshot, ChatProject, ChatProjectIndex,
-    ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem, ConversationPin,
-    ConversationSearchHit,
+    AdditionalDirectory, ChatAssistant, ChatAssistantIndex, ChatAssistantSnapshot, ChatProject,
+    ChatProjectIndex, ChatSet, ChatSetIndex, Conversation, ConversationIndex, ConversationListItem,
+    ConversationPin, ConversationSearchHit, MAX_ADDITIONAL_DIRECTORIES,
 };
 
 const WRITE_RETRY_ATTEMPTS: usize = 3;
@@ -624,8 +624,8 @@ pub(crate) fn write_conversation_file(
 
     // compact 而非 pretty：长对话数 MB 级,pretty 徒增 ~30-50% 体积与序列化时间,
     // 且每个工具轮都要整本重写。人读导出走 export.rs,不靠这份文件的排版。
-    let content = serde_json::to_string(&conversation)
-        .map_err(|e| format!("serialize conversation: {e}"))?;
+    let content =
+        serde_json::to_string(&conversation).map_err(|e| format!("serialize conversation: {e}"))?;
     atomic_write(&path, &content, "conversation")?;
     Ok(conversation)
 }
@@ -1581,6 +1581,98 @@ fn normalize_project_root_path(
             )
         })
         .map_err(|err| format!("解析项目文件夹失败：{err}"))
+}
+
+/// Canonicalize, name, and cap a conversation's additional directories.
+/// Drops the primary working directory (relative paths already resolve there).
+/// Duplicate paths keep the first entry. Missing paths fail instead of silently vanishing.
+pub fn normalize_additional_directories(
+    entries: Vec<AdditionalDirectory>,
+    primary_root: Option<&str>,
+) -> Result<Vec<AdditionalDirectory>, String> {
+    if entries.len() > MAX_ADDITIONAL_DIRECTORIES {
+        return Err(format!(
+            "一条对话最多附加 {MAX_ADDITIONAL_DIRECTORIES} 个目录。"
+        ));
+    }
+    let primary = primary_root
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .and_then(|path| canonicalize_existing_dir(path).ok());
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in entries {
+        let normalized = normalize_additional_directory_path(entry.path)?;
+        if primary
+            .as_ref()
+            .is_some_and(|root| paths_equal(root, &normalized))
+        {
+            continue;
+        }
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        let name = entry
+            .name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                Path::new(&normalized)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_string())
+            });
+        out.push(AdditionalDirectory {
+            path: normalized,
+            name,
+        });
+    }
+    if out.len() > MAX_ADDITIONAL_DIRECTORIES {
+        return Err(format!(
+            "一条对话最多附加 {MAX_ADDITIONAL_DIRECTORIES} 个目录。"
+        ));
+    }
+    Ok(out)
+}
+
+fn canonicalize_existing_dir(raw: &str) -> Result<String, String> {
+    let expanded = expand_home_prefix(raw.trim())?;
+    let path = Path::new(&expanded);
+    if !path.is_absolute() {
+        return Err("附加目录必须是绝对路径。".to_string());
+    }
+    if !path.is_dir() {
+        if path.exists() {
+            return Err(format!("附加路径不是文件夹：{expanded}"));
+        }
+        return Err(format!("附加目录不存在：{expanded}"));
+    }
+    fs::canonicalize(path)
+        .map(|path| {
+            crate::utils::strip_windows_verbatim_prefix(path)
+                .to_string_lossy()
+                .to_string()
+        })
+        .map_err(|err| format!("解析附加目录失败：{err}"))
+}
+
+fn normalize_additional_directory_path(raw: String) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("附加目录路径不能为空。".to_string());
+    }
+    canonicalize_existing_dir(trimmed)
+}
+
+fn paths_equal(left: &str, right: &str) -> bool {
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(right)
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(left) == Path::new(right)
+    }
 }
 
 fn expand_home_prefix(raw_path: &str) -> Result<String, String> {
@@ -2755,6 +2847,95 @@ mod delete_side_artifact_tests {
         )
         .is_empty());
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn conversation_without_additional_directories_deserializes() {
+        let conversation: crate::chat::types::Conversation =
+            serde_json::from_value(serde_json::json!({
+                "id": "conv_old",
+                "revision": 1,
+                "title": "legacy",
+                "provider_id": "p",
+                "model": "m",
+                "created_at": 1,
+                "updated_at": 1,
+                "messages": []
+            }))
+            .unwrap();
+        assert!(conversation.additional_directories.is_empty());
+    }
+
+    #[test]
+    fn normalize_additional_directories_skips_primary_and_duplicates() {
+        let root = temp_dir();
+        let primary = root.join("primary");
+        let extra = root.join("biz");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&extra).unwrap();
+        let primary_s =
+            crate::utils::strip_windows_verbatim_prefix(fs::canonicalize(&primary).unwrap())
+                .to_string_lossy()
+                .to_string();
+        let extra_s =
+            crate::utils::strip_windows_verbatim_prefix(fs::canonicalize(&extra).unwrap())
+                .to_string_lossy()
+                .to_string();
+
+        let out = normalize_additional_directories(
+            vec![
+                AdditionalDirectory {
+                    path: extra_s.clone(),
+                    name: Some("biz".to_string()),
+                },
+                AdditionalDirectory {
+                    path: primary_s.clone(),
+                    name: None,
+                },
+                AdditionalDirectory {
+                    path: extra_s.clone(),
+                    name: Some("dup".to_string()),
+                },
+            ],
+            Some(&primary_s),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, extra_s);
+        assert_eq!(out[0].name.as_deref(), Some("biz"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn normalize_additional_directories_errors_on_missing_path() {
+        let missing = std::env::temp_dir().join("kivio-additional-dir-does-not-exist-xyz");
+        let err = normalize_additional_directories(
+            vec![AdditionalDirectory {
+                path: missing.to_string_lossy().to_string(),
+                name: None,
+            }],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("不存在"), "{err}");
+    }
+
+    #[test]
+    fn normalize_additional_directories_caps_at_eight() {
+        let root = temp_dir();
+        let entries: Vec<_> = (0..9)
+            .map(|i| {
+                let dir = root.join(format!("d{i}"));
+                fs::create_dir_all(&dir).unwrap();
+                AdditionalDirectory {
+                    path: dir.to_string_lossy().to_string(),
+                    name: None,
+                }
+            })
+            .collect();
+        let err = normalize_additional_directories(entries, None).unwrap_err();
+        assert!(err.contains("8"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 }

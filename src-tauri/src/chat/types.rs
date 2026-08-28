@@ -525,6 +525,11 @@ pub struct Conversation {
     /// 强制检索：开启后系统提示要求模型回答前必须先调用 `knowledge_search`。默认关。
     #[serde(default)]
     pub force_knowledge_search: bool,
+    /// Folders this conversation may read/write besides the project working
+    /// directory. Does not change which 项目 the conversation belongs to, and
+    /// does not change the working directory used to import/resume a native session.
+    #[serde(default)]
+    pub additional_directories: Vec<AdditionalDirectory>,
     /// 每对话「思考等级」：`"off"|"low"|"medium"|"high"`，`None` = 跟随全局思考开关。
     #[serde(default)]
     pub thinking_level: Option<String>,
@@ -662,6 +667,34 @@ pub struct ConversationSearchHit {
 pub struct ConversationIndex {
     pub conversations: Vec<ConversationListItem>,
 }
+
+/// A folder attached to one conversation in addition to the project working directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdditionalDirectory {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl AdditionalDirectory {
+    pub fn display_name(&self) -> &str {
+        if let Some(name) = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return name;
+        }
+        std::path::Path::new(&self.path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.path.as_str())
+    }
+}
+
+pub const MAX_ADDITIONAL_DIRECTORIES: usize = 8;
 
 /// Chat 项目。`folder` 保留用于旧对话兼容，真实项目归属使用 `project_id`。
 #[derive(Debug, Clone, Serialize, Deserialize)]

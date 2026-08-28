@@ -1,3 +1,4 @@
+use crate::chat::types::AdditionalDirectory;
 use crate::external_agents::skill_stage::{with_skill_root_preamble, SKILLS_CWD_ALIAS};
 
 pub struct ComposedExternalPrompt {
@@ -85,10 +86,23 @@ pub fn compose_external_prompt(
     }
 }
 
-pub fn cwd_hint(cwd: &str) -> String {
-    format!(
+pub fn cwd_hint(cwd: &str, additional_directories: &[AdditionalDirectory]) -> String {
+    let mut text = format!(
         "Your working directory is `{cwd}`. Active skill files may appear under `{SKILLS_CWD_ALIAS}/`."
-    )
+    );
+    if !additional_directories.is_empty() {
+        text.push_str(
+            " Additional directories attached to this conversation (not the working directory — use these absolute paths; relative paths still resolve in the working directory):",
+        );
+        for directory in additional_directories {
+            text.push_str(&format!(
+                "\n- {} — `{}`",
+                directory.display_name(),
+                directory.path
+            ));
+        }
+    }
+    text
 }
 
 /// Session-level instructions for an external CLI: global system prompt, live
@@ -100,6 +114,7 @@ pub fn build_external_daemon_instructions(
     set_system_prompt: Option<&str>,
     memory_body: &str,
     cwd: &str,
+    additional_directories: &[AdditionalDirectory],
 ) -> String {
     let mut daemon_instructions = String::new();
     if !global_system_prompt.trim().is_empty() {
@@ -116,7 +131,7 @@ pub fn build_external_daemon_instructions(
         daemon_instructions.push_str(memory_body.trim());
         daemon_instructions.push('\n');
     }
-    daemon_instructions.push_str(&cwd_hint(cwd));
+    daemon_instructions.push_str(&cwd_hint(cwd, additional_directories));
     daemon_instructions
 }
 
@@ -240,6 +255,7 @@ mod tests {
             Some("Always answer in 文言文."),
             "remember the vault path",
             "/tmp/work",
+            &[],
         );
         assert!(instructions.contains("global identity"), "{instructions}");
         assert!(
@@ -259,12 +275,25 @@ mod tests {
     #[test]
     fn daemon_instructions_omit_blank_set_and_global_prompt() {
         let instructions =
-            build_external_daemon_instructions("  ", Some("   "), "", "/home/me/proj");
+            build_external_daemon_instructions("  ", Some("   "), "", "/home/me/proj", &[]);
         assert!(
             !instructions.contains("## Set instructions"),
             "{instructions}"
         );
         assert!(!instructions.contains("## Memory"), "{instructions}");
-        assert_eq!(instructions, cwd_hint("/home/me/proj"));
+        assert_eq!(instructions, cwd_hint("/home/me/proj", &[]));
+    }
+
+    #[test]
+    fn daemon_instructions_list_additional_directories() {
+        let extra = [AdditionalDirectory {
+            path: "/home/me/biz-a".to_string(),
+            name: Some("biz-a".to_string()),
+        }];
+        let instructions =
+            build_external_daemon_instructions("", None, "", "/home/me/proj", &extra);
+        assert!(instructions.contains("`/home/me/proj`"), "{instructions}");
+        assert!(instructions.contains("`/home/me/biz-a`"), "{instructions}");
+        assert!(instructions.contains("biz-a"), "{instructions}");
     }
 }

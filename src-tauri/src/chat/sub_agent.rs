@@ -1173,6 +1173,7 @@ pub fn handle_agent_spawn<'a>(
             None,
             (!settings.obsidian_vault_path.trim().is_empty())
                 .then_some(settings.obsidian_vault_path.as_str()),
+            &parent_conversation.additional_directories,
         );
 
         let task_id = format!("agent-{}", uuid::Uuid::new_v4().simple());

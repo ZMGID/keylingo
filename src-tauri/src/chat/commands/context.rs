@@ -897,6 +897,7 @@ pub(super) async fn compute_context_state(
         .as_deref(),
         knowledge_base_prompt.as_deref(),
         obsidian_vault_path,
+        &conversation.additional_directories,
     );
     let last_user_idx = conversation.messages.iter().rposition(|m| m.role == "user");
     let request_messages = build_chat_api_messages(

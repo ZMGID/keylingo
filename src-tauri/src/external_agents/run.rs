@@ -198,6 +198,7 @@ pub async fn run_external_cli_reply(
         crate::external_agents::wsl::path_for_cli(&resolved_bin, &cwd)
             .to_string_lossy()
             .as_ref(),
+        &conversation.additional_directories,
     );
 
     // A1：部分 CLI（目前只有 claude）的系统指令走**启动 flag** 而不是 prompt 正文。
@@ -296,6 +297,11 @@ pub async fn run_external_cli_reply(
             extra_dirs.push(dir.to_string_lossy().to_string());
         }
     }
+    for directory in &conversation.additional_directories {
+        if !directory.path.trim().is_empty() {
+            extra_dirs.push(directory.path.clone());
+        }
+    }
     // Codex `workspace-write` 锁在 cwd：附件目录和 localImage 临时文件必须作为
     // `runtimeWorkspaceRoots` 下发。其它协议忽略这个字段。
     let extra_writable_roots = {
@@ -307,6 +313,16 @@ pub async fn run_external_cli_reply(
     };
     let extra_dirs = translate_cli_dirs(&resolved_bin, extra_dirs);
     let extra_writable_roots = translate_cli_dirs(&resolved_bin, extra_writable_roots);
+    let additional_cli_dirs = translate_cli_dirs(
+        &resolved_bin,
+        conversation
+            .additional_directories
+            .iter()
+            .map(|directory| directory.path.clone())
+            .filter(|path| !path.trim().is_empty())
+            .collect(),
+    );
+    let additional_dirs_key = additional_cli_dirs.join("\n");
     let runtime_ctx = RuntimeContext {
         extra_allowed_dirs: extra_dirs,
         resume_session_id: resume_ctx.resume_session_id.clone(),
@@ -507,6 +523,7 @@ pub async fn run_external_cli_reply(
                 .as_ref()
                 .map(|_| stable_prompt_hash(daemon_instructions.trim()))
                 .as_deref(),
+            &additional_dirs_key,
         );
         run_persistent_turn(
             app,
@@ -532,6 +549,7 @@ pub async fn run_external_cli_reply(
             ),
             &image_blocks,
             &extra_writable_roots,
+            &additional_cli_dirs,
             &mut emit_event,
             &cancel_check,
             approval_host.as_ref(),
@@ -830,6 +848,7 @@ async fn run_persistent_turn<E, C>(
     reuse_prompt: &str,
     images: &[crate::external_agents::attachments::ImageBlock],
     extra_writable_roots: &[String],
+    additional_directories: &[String],
     emit: &mut E,
     cancel: &C,
     // 本轮的工具审批出口。`None` = 不接（协议不支持 / 用户没选会询问的权限档位）——
@@ -905,6 +924,7 @@ where
                 preset.as_deref(),
                 &mcp_servers,
                 resume_native.clone(),
+                additional_directories,
                 Some(background_task_sink(app, conversation_id)),
                 Some(dsh_idle_sink(app, conversation_id)),
                 dsh_idle_approvals_for(protocol, app, conversation_id),
@@ -935,6 +955,7 @@ where
                         preset.as_deref(),
                         &mcp_servers,
                         None,
+                        additional_directories,
                         Some(background_task_sink(app, conversation_id)),
                         Some(dsh_idle_sink(app, conversation_id)),
                         dsh_idle_approvals_for(protocol, app, conversation_id),
@@ -1096,6 +1117,7 @@ where
             &mcp_servers,
             launch_config,
             resumable_native.clone(),
+            additional_directories,
         )
         .await?;
         // 又重连一次时续的是这条会话（续接成功 ⇒ 同一个 id；失败降级成新会话 ⇒ 新 id）。
@@ -1145,6 +1167,7 @@ async fn reconnect_fresh(
     mcp_servers: &[AcpMcpServer],
     launch_config: &LaunchConfig,
     resume_native: Option<String>,
+    additional_directories: &[String],
 ) -> Result<
     (
         tokio::sync::mpsc::Sender<crate::external_agents::session::live::SessionCommand>,
@@ -1172,6 +1195,7 @@ async fn reconnect_fresh(
         preset,
         mcp_servers,
         resume_native,
+        additional_directories,
         Some(background_task_sink(app, conversation_id)),
         Some(dsh_idle_sink(app, conversation_id)),
         dsh_idle_approvals_for(protocol, app, conversation_id),
@@ -1243,6 +1267,7 @@ fn launch_config_for_turn(
     sandbox: Option<&str>,
     preset: Option<&str>,
     instructions_hash: Option<&str>,
+    additional_dirs_key: &str,
 ) -> LaunchConfig {
     if matches!(protocol, StreamFormat::DshJsonRpc) {
         return LaunchConfig {
@@ -1273,6 +1298,12 @@ fn launch_config_for_turn(
             instructions: None,
         };
     }
+    if matches!(protocol, StreamFormat::AcpJsonRpc) {
+        return LaunchConfig {
+            flags: additional_dirs_key.to_string(),
+            instructions: None,
+        };
+    }
     if !matches!(protocol, StreamFormat::ClaudeStreamJson) {
         return LaunchConfig::default();
     }
@@ -1287,11 +1318,19 @@ fn launch_config_for_turn(
         // `applyFlagSettings({effortLevel})`，wire 形状**没有核实过**；`--permission-mode`
         // 更换还会改变要不要带 `--permission-prompt-tool stdio`（见
         // `defs::claude::claude_permission_prompt_args`），那是启动参数的事，会话内切不了。
-        flags: format!(
-            "{}|{}",
-            reasoning.unwrap_or_default(),
-            sandbox.unwrap_or_default()
-        ),
+        flags: if additional_dirs_key.is_empty() {
+            format!(
+                "{}|{}",
+                reasoning.unwrap_or_default(),
+                sandbox.unwrap_or_default()
+            )
+        } else {
+            format!(
+                "{}|{}|{additional_dirs_key}",
+                reasoning.unwrap_or_default(),
+                sandbox.unwrap_or_default()
+            )
+        },
         instructions: instructions_hash.map(str::to_string),
     }
 }
@@ -2351,6 +2390,7 @@ async fn connect_persistent_session(
     preset: Option<&str>,
     mcp_servers: &[AcpMcpServer],
     resume_native: Option<String>,
+    additional_directories: &[String],
     background_task_sink: Option<
         crate::external_agents::session::claude_stream::BackgroundTaskSink,
     >,
@@ -2473,6 +2513,7 @@ async fn connect_persistent_session(
                     reasoning,
                     mcp_servers,
                     Some(sid),
+                    additional_directories,
                 )
                 .await
                 .map_err(|err| {
@@ -2488,9 +2529,17 @@ async fn connect_persistent_session(
                     child_pid,
                 });
             }
-            let session =
-                AcpSession::connect(resolved_bin, args, cwd, model, reasoning, mcp_servers, None)
-                    .await?;
+            let session = AcpSession::connect(
+                resolved_bin,
+                args,
+                cwd,
+                model,
+                reasoning,
+                mcp_servers,
+                None,
+                additional_directories,
+            )
+            .await?;
             let id = session.session_id().to_string();
             let child_pid = session.child_pid();
             Ok(PersistentConnection {
@@ -4358,6 +4407,7 @@ mod tests {
             Some("plan"),
             None,
             Some("hash-1"),
+            "",
         );
         // model **不进指纹**：它能在会话内换（`set_model`），不需要换进程。
         assert_eq!(claude.flags, "high|plan");
@@ -4371,6 +4421,7 @@ mod tests {
                 sandbox,
                 preset,
                 Some("ignored-instructions"),
+                "",
             )
         };
         let dsh_base = dsh(
@@ -4455,13 +4506,27 @@ mod tests {
                 Some("high"),
                 Some("plan"),
                 None,
-                Some("h")
+                Some("h"),
+                ""
             ),
             LaunchConfig::default(),
-            "ACP 不该参与启动指纹判定"
+            "ACP 空附加目录不该换进程"
+        );
+        assert_ne!(
+            launch_config_for_turn(
+                StreamFormat::AcpJsonRpc,
+                Some("opus"),
+                Some("high"),
+                Some("plan"),
+                None,
+                Some("h"),
+                "/home/me/biz-a",
+            ),
+            LaunchConfig::default(),
+            "ACP 附加目录变化必须换进程，session/new 才能重发 additionalDirectories"
         );
         let pi = |model, reasoning| {
-            launch_config_for_turn(StreamFormat::PiRpc, model, reasoning, None, None, None)
+            launch_config_for_turn(StreamFormat::PiRpc, model, reasoning, None, None, None, "")
         };
         assert_eq!(
             pi(Some("opus"), Some("high")),
@@ -4489,6 +4554,7 @@ mod tests {
                 sandbox,
                 None,
                 hash,
+                "",
             )
         };
         let established = base(Some("opus"), Some("high"), Some("plan"), Some("h1"));
@@ -4518,6 +4584,7 @@ mod tests {
                 Some("plan"),
                 None,
                 Some("h1"),
+                "",
             )
         };
         assert!(with(Some("opus")).accepts(&with(Some("sonnet"))));
@@ -4536,6 +4603,7 @@ mod tests {
                 sandbox,
                 None,
                 Some("ignored"),
+                "",
             )
         };
         let workspace = with(None, None, None);

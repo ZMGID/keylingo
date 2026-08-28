@@ -238,6 +238,7 @@ mod tests {
             agent_plan_state: AgentPlanState::default(),
             knowledge_base_ids: vec![],
             force_knowledge_search: false,
+            additional_directories: Vec::new(),
             thinking_level: None,
             web_search_mode: None,
             reply_models: vec![],
