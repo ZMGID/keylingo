@@ -1,4 +1,5 @@
 import { isChatOnboardingPath } from './persistence'
+import { isChatPopoutPath } from './popout/popoutRoutes'
 
 /**
  * 聊天窗口的 hash 路由判定与解析。
@@ -65,7 +66,12 @@ export function getRouteConversationId(): string | null {
   if (rest === 'mcp' || rest.startsWith('mcp/')) return null
   if (rest === 'notes' || rest.startsWith('notes/')) return null
   if (rest === 'onboarding' || rest.startsWith('onboarding/')) return null
+  if (rest === 'popout' || rest.startsWith('popout/')) return null
   return decodeURIComponent(rest)
+}
+
+export function isChatPopoutRoute(path: string): boolean {
+  return isChatPopoutPath(path)
 }
 
 /** 把 hash 换成目标值；已是目标值则不写（避免多余的 hashchange）。 */

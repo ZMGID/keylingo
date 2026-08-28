@@ -74,10 +74,13 @@ const USER_WINDOW_LABELS: &[&str] = &["chat", "main"];
 
 #[cfg(target_os = "macos")]
 fn first_visible_user_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
-    USER_WINDOW_LABELS.iter().find_map(|label| {
-        app.get_webview_window(label)
-            .filter(|window| window.is_visible().ok().unwrap_or(false))
-    })
+    USER_WINDOW_LABELS
+        .iter()
+        .find_map(|label| {
+            app.get_webview_window(label)
+                .filter(|window| window.is_visible().ok().unwrap_or(false))
+        })
+        .or_else(|| crate::chat::popout::first_visible_popout(app))
 }
 
 /// Windows：让本进程退出 EcoQoS 执行速度节流，使其在无窗口/后台空闲时仍保持正常调度，
@@ -166,6 +169,10 @@ pub fn run() {
                     }
                     return;
                 }
+                if crate::chat::popout::is_popout_label(window.label()) {
+                    // 弹出窗关即销毁，不走主聊天窗 keep-alive。
+                    return;
+                }
                 if window.label() == "lens" || window.label() == "translate" {
                     api.prevent_close();
                     // Windows：原生关闭（Alt+F4 等 WM_CLOSE）也要走完整清理 + destroy，回收内存，
@@ -208,15 +215,24 @@ pub fn run() {
                 }
             }
             tauri::WindowEvent::Destroyed => {
-                // macOS：Dock 图标身份由 Chat 窗口撑起（open/reveal 时切 Regular）。Chat
-                // 销毁后切回 Accessory 隐藏 Dock 图标，回到后台常驻形态；其余窗口
-                // （translator/lens/translate）本就是 Accessory 友好的浮层，不占 Dock。
-                // 下次打开 Chat 时 open_chat_window/reveal_chat_window 会再切回 Regular。
+                // macOS：Dock 图标身份由 Chat / 弹出窗撑起。全部销毁后切回 Accessory。
                 #[cfg(target_os = "macos")]
-                if window.label() == "chat" {
-                    let _ = window
-                        .app_handle()
-                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                {
+                    if crate::chat::popout::is_popout_label(window.label()) {
+                        crate::chat::popout::on_popout_destroyed(
+                            window.app_handle(),
+                            window.label(),
+                        );
+                    }
+                    if window.label() == "chat"
+                        || crate::chat::popout::is_popout_label(window.label())
+                    {
+                        crate::chat::popout::sync_macos_activation_policy(window.app_handle());
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                if crate::chat::popout::is_popout_label(window.label()) {
+                    crate::chat::popout::on_popout_destroyed(window.app_handle(), window.label());
                 }
             }
             _ => {}
@@ -567,6 +583,9 @@ pub fn run() {
             chat::commands::interaction::clear_request_debug_records,
             chat::protocol::chat_sync_state,
             chat::protocol::chat_protocol_subscribe,
+            chat::popout::chat_open_conversation_popout,
+            chat::popout::chat_focus_conversation_popout,
+            chat::popout::chat_list_conversation_popouts,
             // Chat 模块命令
             chat::commands::catalog::chat_get_conversations,
             chat::commands::interaction::chat_list_background_tasks,

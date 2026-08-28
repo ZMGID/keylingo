@@ -887,6 +887,7 @@ pub(crate) async fn chat_delete_conversation(
     if killed > 0 {
         eprintln!("Deleted conversation {conversation_id}: killed {killed} background command(s)");
     }
+    crate::chat::popout::close_popout_for_conversation(&app, &conversation_id);
     // 顺手清掉该对话在内存里按 conversation_id 累积的运行态小 map（stream 代际计数 /
     // 会话级工具同意），它们只插不删、严格无界——对话删了便永远不会再被引用。
     state.forget_chat_conversation_runtime(&conversation_id);
@@ -1200,6 +1201,7 @@ pub(crate) async fn chat_bulk_delete_conversations(
             );
         }
         state.forget_chat_conversation_runtime(&conversation_id);
+        crate::chat::popout::close_popout_for_conversation(&app, &conversation_id);
         match crate::chat::repository::repository(&app)
             .delete(&app, &conversation_id)
             .await

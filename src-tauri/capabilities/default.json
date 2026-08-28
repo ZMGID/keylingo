@@ -3,9 +3,10 @@
   "description": "Default capabilities for the main window",
   "windows": [
     "main",
-    "chat",
-    "lens",
-    "translate"
+      "chat",
+      "chat-popout-*",
+      "lens",
+      "translate"
   ],
   "permissions": [
     "core:default",

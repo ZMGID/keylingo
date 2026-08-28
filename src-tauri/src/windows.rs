@@ -338,6 +338,9 @@ fn is_valid_chat_last_route(route: &str) -> bool {
     if path == "chat/onboarding" || path.starts_with("chat/onboarding/") {
         return false;
     }
+    if path == "chat/popout" || path.starts_with("chat/popout/") {
+        return false;
+    }
     true
 }
 
@@ -471,6 +474,87 @@ pub fn ensure_chat_window_with_hash(app: &AppHandle, hash: &str) -> Result<Webvi
     }
 
     builder.build().map_err(|e| e.to_string())
+}
+
+const POPOUT_DEFAULT_INNER_WIDTH: f64 = 440.0;
+const POPOUT_DEFAULT_INNER_HEIGHT: f64 = 640.0;
+const POPOUT_MIN_INNER_WIDTH: f64 = 360.0;
+const POPOUT_MIN_INNER_HEIGHT: f64 = 480.0;
+
+/// 一条对话的独立聊天窗。关即销毁，不走主聊天窗的 hide-and-reuse。
+pub fn ensure_chat_popout_window(
+    app: &AppHandle,
+    label: &str,
+    conversation_id: &str,
+) -> Result<WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window(label) {
+        return Ok(window);
+    }
+
+    let url = format!(
+        "index.html#chat/popout/{}",
+        urlencoding_conversation_id(conversation_id)
+    );
+    let (min_width, min_height) =
+        chat_window_size_for_visible_content(POPOUT_MIN_INNER_WIDTH, POPOUT_MIN_INNER_HEIGHT);
+    let (default_width, default_height) =
+        chat_window_size_for_visible_content(POPOUT_DEFAULT_INNER_WIDTH, POPOUT_DEFAULT_INNER_HEIGHT);
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        .title("Kivio")
+        .inner_size(default_width, default_height)
+        .min_inner_size(min_width, min_height)
+        .resizable(true)
+        .visible_on_all_workspaces(false)
+        .skip_taskbar(false)
+        .visible(false);
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .decorations(true)
+            .title_bar_style(TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(LogicalPosition::new(
+                CHAT_TRAFFIC_LIGHT_X,
+                CHAT_TRAFFIC_LIGHT_INSET_Y,
+            ))
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .shadow(true);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder
+            .decorations(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .shadow(true);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        builder = builder
+            .decorations(false)
+            .transparent(false)
+            .background_color(Color(255, 255, 255, 255))
+            .shadow(false);
+    }
+
+    builder.build().map_err(|e| e.to_string())
+}
+
+fn urlencoding_conversation_id(conversation_id: &str) -> String {
+    conversation_id
+        .chars()
+        .flat_map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                vec![c]
+            } else {
+                format!("%{:02X}", c as u32).chars().collect()
+            }
+        })
+        .collect()
 }
 
 /**
@@ -1070,6 +1154,8 @@ mod tests {
         assert!(!is_valid_chat_last_route("chat/settings"));
         assert!(!is_valid_chat_last_route("#chat/settings?tab=general"));
         assert!(!is_valid_chat_last_route("chat/onboarding"));
+        assert!(!is_valid_chat_last_route("chat/popout/conv_abc"));
+        assert!(!is_valid_chat_last_route("#chat/popout/conv_abc"));
         assert!(!is_valid_chat_last_route("lens"));
         assert!(!is_valid_chat_last_route(""));
     }

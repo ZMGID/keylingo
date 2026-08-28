@@ -52,6 +52,56 @@ describe('ConversationContextMenu export', () => {
   })
 })
 
+describe('ConversationContextMenu popout', () => {
+  it('renders the localized Chinese action and closes after opening', async () => {
+    const user = userEvent.setup()
+    const onOpenInPopout = vi.fn()
+    const onClose = vi.fn()
+    render(
+      <ConversationContextMenu
+        anchor={{ left: 0, top: 0 }}
+        projects={[]}
+        sets={[]}
+        lang="zh"
+        onRegenerateTitle={vi.fn()}
+        onExport={vi.fn()}
+        onMoveToProject={vi.fn()}
+        onMoveToSet={vi.fn()}
+        onOpenInPopout={onOpenInPopout}
+        onDelete={vi.fn()}
+        onClose={onClose}
+      />,
+    )
+    await user.click(screen.getByRole('menuitem', { name: '在新窗口打开' }))
+    expect(onOpenInPopout).toHaveBeenCalledOnce()
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  })
+
+  it('renders the English action', () => {
+    render(
+      <ConversationContextMenu
+        anchor={{ left: 0, top: 0 }}
+        projects={[]}
+        sets={[]}
+        lang="en"
+        onRegenerateTitle={vi.fn()}
+        onExport={vi.fn()}
+        onMoveToProject={vi.fn()}
+        onMoveToSet={vi.fn()}
+        onOpenInPopout={vi.fn()}
+        onDelete={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('menuitem', { name: 'Open in new window' })).toBeInTheDocument()
+  })
+
+  it('hides the action when no handler is provided', () => {
+    renderMenu('zh')
+    expect(screen.queryByRole('menuitem', { name: '在新窗口打开' })).not.toBeInTheDocument()
+  })
+})
+
 describe('ConversationContextMenu regenerate title', () => {
   it('renders the localized Chinese action and closes after regenerate', async () => {
     const user = userEvent.setup()

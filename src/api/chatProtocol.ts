@@ -40,6 +40,12 @@ const conversationRevisions = new Map<string, number>()
 const syncRetryAttempts = new Map<string, number>()
 const syncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let nativeListener: Promise<() => void> | null = null
+let subscribeConversationId: string | null = null
+
+/** 弹出窗在订阅前调用：该 WebView 的通道只收这一条对话。主窗不要调。 */
+export function configureChatProtocolFilter(conversationId: string | null) {
+  subscribeConversationId = conversationId
+}
 
 function reportIssue(issue: ChatProtocolIssue, conversationId?: string) {
   for (const subscriber of issueSubscribers) subscriber(issue, conversationId)
@@ -327,11 +333,15 @@ function handleLiveEvent(payload: unknown) {
 async function ensureListener() {
   // 实时协议走 Tauri ipc Channel（点对点、保序），不再经过全局事件总线的
   // 广播 + 逐 WebView 反序列化。WebView 重载后模块级单例归零，重新订阅即替换
-  // 后端单槽；订阅空窗期丢掉的事件由挂载时的 chat_sync_state 对账补齐。
+  // 该窗口 label 的槽；弹出窗带 conversationId 只收自己那条对话。
+  // 订阅空窗期丢掉的事件由挂载时的 chat_sync_state 对账补齐。
   nativeListener ??= (async () => {
     const channel = new Channel<unknown>()
     channel.onmessage = handleLiveEvent
-    await invoke('chat_protocol_subscribe', { channel })
+    await invoke('chat_protocol_subscribe', {
+      channel,
+      conversationId: subscribeConversationId,
+    })
     return () => {}
   })()
   await nativeListener

@@ -2342,4 +2342,19 @@ export const chatApi = {
     const id = await invoke<string | null>('chat_external_native_session_id', { conversationId })
     return id && id.trim() ? id : null
   },
+
+  async openConversationPopout(conversationId: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke<void>('chat_open_conversation_popout', { conversationId })
+  },
+
+  async focusConversationPopout(conversationId: string): Promise<boolean> {
+    if (!isTauriRuntime()) return false
+    return invoke<boolean>('chat_focus_conversation_popout', { conversationId })
+  },
+
+  async listConversationPopouts(): Promise<string[]> {
+    if (!isTauriRuntime()) return []
+    return invoke<string[]>('chat_list_conversation_popouts')
+  },
 }

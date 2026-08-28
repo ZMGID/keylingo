@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronRight, Copy, Download, Folder, Hash, Layers, RotateCcw, Trash2 } from 'lucide-react'
+import { ChevronRight, Copy, Download, Folder, Hash, Layers, RotateCcw, SquareArrowOutUpRight, Trash2 } from 'lucide-react'
 import { i18n, type Lang } from '../settings/i18n'
 import type { ChatProject, ChatSet } from './types'
 import { useCloseAnimation } from './useCloseAnimation'
@@ -28,6 +28,7 @@ interface ConversationContextMenuProps {
   onExport: () => void
   onMoveToProject: (projectId: string | undefined) => void
   onMoveToSet: (setId: string | undefined) => void
+  onOpenInPopout?: () => void
   onDelete: () => void
   onClose: () => void
 }
@@ -54,6 +55,7 @@ export function ConversationContextMenu({
   onExport,
   onMoveToProject,
   onMoveToSet,
+  onOpenInPopout,
   onDelete,
   onClose: onCloseProp,
 }: ConversationContextMenuProps) {
@@ -102,6 +104,21 @@ export function ConversationContextMenu({
         <RotateCcw strokeWidth={1.75} />
         {t.chatRegenerateTitle}
       </button>
+
+      {onOpenInPopout && (
+        <button
+          type="button"
+          role="menuitem"
+          className="kv-menu-item"
+          onClick={() => {
+            onOpenInPopout()
+            onClose()
+          }}
+        >
+          <SquareArrowOutUpRight strokeWidth={1.75} />
+          {t.chatOpenInNewWindow}
+        </button>
+      )}
 
       <div className="group/sub relative">
         <button

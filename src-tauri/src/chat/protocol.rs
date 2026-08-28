@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(debug_assertions)]
 use tauri::Emitter;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
 use ts_rs::TS;
 
 use crate::state::AppState;
@@ -616,6 +616,24 @@ impl ChatRunEvent {
     fn is_hook_failed(&self) -> bool {
         matches!(self, Self::HookFailed { .. })
     }
+
+    /// Token / 工具卡 / 子代理进度：弹出窗独占该对话时主窗 `All` 订阅者不应再收。
+    /// 生命周期边沿（started/completed/failed/cancelled）和审批询问仍给主窗，侧栏生成中指示才准。
+    fn is_high_frequency(&self) -> bool {
+        matches!(
+            self,
+            Self::TextDelta { .. }
+                | Self::ReasoningDelta { .. }
+                | Self::ToolUpdated { .. }
+                | Self::SubagentUpdated { .. }
+                | Self::ContextUsageUpdated { .. }
+                | Self::CompactionUpdated { .. }
+                | Self::TodoUpdated { .. }
+                | Self::PlanUpdated { .. }
+                | Self::StatusNoteUpdated { .. }
+                | Self::HookFailed { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq)]
@@ -676,6 +694,73 @@ pub struct ChatConversationEventEnvelope {
 pub enum ChatProtocolEvent {
     Run(ChatRunEventEnvelope),
     Conversation(ChatConversationEventEnvelope),
+}
+
+impl ChatProtocolEvent {
+    fn conversation_id(&self) -> &str {
+        match self {
+            Self::Run(event) => &event.conversation_id,
+            Self::Conversation(event) => &event.conversation_id,
+        }
+    }
+
+    fn is_high_frequency(&self) -> bool {
+        match self {
+            Self::Run(event) => event.event.is_high_frequency(),
+            Self::Conversation(_) => true,
+        }
+    }
+}
+
+/// 协议通道过滤：主聊天窗订全部；弹出窗只订自己那条对话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatProtocolFilter {
+    All,
+    Conversation(String),
+}
+
+impl ChatProtocolFilter {
+    pub fn accepts(
+        &self,
+        conversation_id: &str,
+        high_frequency: bool,
+        exclusive_conversations: &HashSet<String>,
+    ) -> bool {
+        match self {
+            Self::Conversation(id) => id == conversation_id,
+            Self::All => !(high_frequency && exclusive_conversations.contains(conversation_id)),
+        }
+    }
+}
+
+pub struct ChatProtocolSubscriber {
+    pub filter: ChatProtocolFilter,
+    pub channel: tauri::ipc::Channel<ChatProtocolEvent>,
+}
+
+pub fn matching_subscriber_labels(
+    subscribers: &HashMap<String, ChatProtocolSubscriber>,
+    conversation_id: &str,
+    high_frequency: bool,
+    exclusive_conversations: &HashSet<String>,
+) -> Vec<String> {
+    subscribers
+        .iter()
+        .filter(|(_, subscriber)| {
+            subscriber
+                .filter
+                .accepts(conversation_id, high_frequency, exclusive_conversations)
+        })
+        .map(|(label, _)| label.clone())
+        .collect()
+}
+
+pub fn unsubscribe_label(state: &AppState, label: &str) {
+    state
+        .chat_protocol_subscribers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(label);
 }
 
 impl<'de> Deserialize<'de> for ChatProtocolEvent {
@@ -1530,38 +1615,82 @@ fn upsert_segment(
 }
 
 /// 实时协议的唯一出口。生产路径走 Tauri ipc `Channel`(点对点、保序、绕过全局事件总线,
-/// 不再向每个 WebView 广播+反序列化);channel 未订阅(chat 窗口未建/已销毁)时事件直接
-/// 丢弃——协议本就为此设计了 sync/replay,前端挂载时 `chat_sync_state` 全量对账补齐。
+/// 不再向每个 WebView 广播+反序列化);无人订阅时事件直接丢弃——协议本就为此设计了
+/// sync/replay,前端挂载时 `chat_sync_state` 全量对账补齐。
+/// 多窗口：按 label 分槽，弹出窗只收自己那条对话；已拉出的对话的高频事件不再投给主窗 `All`。
 /// debug 构建额外广播到全局事件总线,喂 chat probe(probe.rs 靠 `app.listen` 收实时载荷)。
 fn emit_protocol(app: &AppHandle, event: ChatProtocolEvent) {
     #[cfg(debug_assertions)]
     if let Err(error) = app.emit(CHAT_PROTOCOL_EVENT, &event) {
         eprintln!("Failed to emit {CHAT_PROTOCOL_EVENT}: {error}");
     }
+    let conversation_id = event.conversation_id().to_string();
+    let high_frequency = event.is_high_frequency();
     let state = app.state::<AppState>();
-    let mut slot = state
-        .chat_protocol_channel
+    let exclusive = state
+        .chat_popout_conversations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut slots = state
+        .chat_protocol_subscribers
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(channel) = slot.as_ref() {
-        // send 失败 = WebView 已销毁:清槽,后续事件不再白序列化,窗口重建后重新订阅。
-        if channel.send(event).is_err() {
-            *slot = None;
+    let labels = matching_subscriber_labels(
+        &slots,
+        &conversation_id,
+        high_frequency,
+        &exclusive,
+    );
+    if labels.is_empty() {
+        return;
+    }
+    let mut dead = Vec::new();
+    let mut payload = Some(event);
+    let last = labels.len();
+    for (index, label) in labels.iter().enumerate() {
+        let Some(subscriber) = slots.get(label) else {
+            continue;
+        };
+        let next = if index + 1 == last {
+            payload.take().expect("protocol event still owned")
+        } else {
+            payload
+                .as_ref()
+                .expect("protocol event still owned")
+                .clone()
+        };
+        if subscriber.channel.send(next).is_err() {
+            dead.push(label.clone());
         }
+    }
+    for label in dead {
+        slots.remove(&label);
     }
 }
 
-/// Chat 窗口挂载时调用,把协议直连通道注册进单槽(新 WebView 挂载/重载替换旧槽)。
-/// 订阅后前端立即对每个打开的会话跑 `chat_sync_state`,补齐订阅空窗期的事件。
+/// Chat / 弹出窗挂载时调用。同一窗口 label 再订阅会替换旧槽（WebView 重载）。
+/// `conversation_id` 有值 = 只收该对话；缺省 = 主聊天窗订全部。
+/// 订阅后前端立即对打开的会话跑 `chat_sync_state`,补齐订阅空窗期的事件。
 #[tauri::command]
 pub fn chat_protocol_subscribe(
+    window: WebviewWindow,
     state: tauri::State<'_, AppState>,
     channel: tauri::ipc::Channel<ChatProtocolEvent>,
+    conversation_id: Option<String>,
 ) {
-    *state
-        .chat_protocol_channel
+    let filter = match conversation_id {
+        Some(id) if !id.trim().is_empty() => ChatProtocolFilter::Conversation(id),
+        _ => ChatProtocolFilter::All,
+    };
+    state
+        .chat_protocol_subscribers
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(channel);
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            window.label().to_string(),
+            ChatProtocolSubscriber { filter, channel },
+        );
 }
 
 pub fn register_run(
@@ -2685,5 +2814,57 @@ mod tests {
             Some(Instant::now() - COMPLETED_RUN_TTL - Duration::from_secs(1));
         hub.prune();
         assert!(!hub.runs.contains_key(&expired));
+    }
+
+    #[test]
+    fn all_filter_accepts_every_conversation_until_exclusive_high_frequency() {
+        let all = ChatProtocolFilter::All;
+        let popout = ChatProtocolFilter::Conversation("conv-a".into());
+        let exclusive = HashSet::from(["conv-a".to_string()]);
+
+        assert!(all.accepts("conv-a", false, &HashSet::new()));
+        assert!(all.accepts("conv-b", true, &HashSet::new()));
+        assert!(popout.accepts("conv-a", true, &exclusive));
+        assert!(!popout.accepts("conv-b", true, &exclusive));
+
+        assert!(
+            all.accepts("conv-a", false, &exclusive),
+            "lifecycle edges still reach the main window"
+        );
+        assert!(
+            !all.accepts("conv-a", true, &exclusive),
+            "token stream of a popped conversation stays off the main window"
+        );
+        assert!(all.accepts("conv-b", true, &exclusive));
+    }
+
+    #[test]
+    fn run_delta_is_high_frequency_but_run_started_is_not() {
+        let delta = ChatProtocolEvent::Run(ChatRunEventEnvelope {
+            protocol_version: CHAT_PROTOCOL_VERSION,
+            scope: ChatProtocolScope::Run,
+            conversation_id: "conv-a".into(),
+            run_id: "run".into(),
+            message_id: "msg".into(),
+            seq: 2,
+            base_revision: 0,
+            event: ChatRunEvent::TextDelta {
+                delta: "x".into(),
+                segment: None,
+            },
+        });
+        let started = ChatProtocolEvent::Run(ChatRunEventEnvelope {
+            protocol_version: CHAT_PROTOCOL_VERSION,
+            scope: ChatProtocolScope::Run,
+            conversation_id: "conv-a".into(),
+            run_id: "run".into(),
+            message_id: "msg".into(),
+            seq: 1,
+            base_revision: 0,
+            event: ChatRunEvent::RunStarted { recovery: None },
+        });
+        assert!(delta.is_high_frequency());
+        assert!(!started.is_high_frequency());
+        assert_eq!(delta.conversation_id(), "conv-a");
     }
 }

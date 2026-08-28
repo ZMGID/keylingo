@@ -80,7 +80,7 @@ export function normalizeStoredChatRoute(value: string | null): string | null {
   if (!value) return null
   const route = value.startsWith('#') ? value : `#${value}`
   const path = route.replace('#', '').split('?')[0]
-  if (!isChatPath(path) || isChatSettingsPath(path) || isChatOnboardingPath(path)) return null
+  if (!isChatPath(path) || isChatSettingsPath(path) || isChatOnboardingPath(path) || path === 'chat/popout' || path.startsWith('chat/popout/')) return null
   return route
 }
 
@@ -101,7 +101,7 @@ let lastRouteCache: string | null = null
 
 export function rememberCurrentChatRoute() {
   const path = hashPath()
-  if (!path.startsWith('chat/') || isChatSettingsPath(path) || isChatOnboardingPath(path)) return
+  if (!path.startsWith('chat/') || isChatSettingsPath(path) || isChatOnboardingPath(path) || path === 'chat/popout' || path.startsWith('chat/popout/')) return
   const route = window.location.hash || '#chat'
   lastRouteCache = route
   api.rememberChatLastRoute(route).catch((err) => {

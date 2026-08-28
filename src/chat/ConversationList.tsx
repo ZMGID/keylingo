@@ -79,6 +79,7 @@ interface ConversationListProps {
   onDeleteConversation: (id: string) => Promise<void>
   onMoveConversationToProject: (id: string, projectId: string | undefined) => Promise<void>
   onMoveConversationToSet: (id: string, setId: string | undefined) => Promise<void>
+  onOpenInPopout?: (id: string) => void | Promise<void>
 }
 
 export const ConversationList = memo(function ConversationList({
@@ -103,6 +104,7 @@ export const ConversationList = memo(function ConversationList({
   onDeleteConversation,
   onMoveConversationToProject,
   onMoveConversationToSet,
+  onOpenInPopout,
 }: ConversationListProps) {
   const [menuState, setMenuState] = useState<{
     conversationId: string
@@ -509,6 +511,7 @@ export const ConversationList = memo(function ConversationList({
           onExport={() => void onExportConversation(menuConversation.id, menuConversation.title)}
           onMoveToProject={(projectId) => void onMoveConversationToProject(menuConversation.id, projectId)}
           onMoveToSet={(setId) => void onMoveConversationToSet(menuConversation.id, setId)}
+          onOpenInPopout={onOpenInPopout ? () => void onOpenInPopout(menuConversation.id) : undefined}
           onDelete={() => void onDeleteConversation(menuConversation.id)}
           onClose={() => setMenuState(null)}
         />

@@ -18,6 +18,7 @@ pub mod plan;
 #[cfg(debug_assertions)]
 pub mod probe;
 pub mod protocol;
+pub mod popout;
 pub mod repository;
 pub mod request_debug;
 pub mod storage;

@@ -150,11 +150,12 @@ pub struct AppState {
     pub chat_active_replies: Mutex<HashMap<String, HashSet<String>>>,
     /// Sequenced, replayable realtime chat protocol state keyed by run id.
     pub chat_protocol: Mutex<crate::chat::protocol::ChatProtocolHub>,
-    /// Chat 窗口的协议直连通道(Tauri ipc `Channel`,点对点、保序、绕过全局事件总线)。
-    /// `chat_protocol_subscribe` 写入(WebView 挂载/重载时替换旧槽);send 失败(WebView
-    /// 已销毁)时清空。None 期间的事件直接丢弃——前端挂载时靠 `chat_sync_state` 对账补齐。
-    pub chat_protocol_channel:
-        Mutex<Option<tauri::ipc::Channel<crate::chat::protocol::ChatProtocolEvent>>>,
+    /// 协议直连通道：按窗口 label 分槽。主聊天窗 filter=All，弹出窗只订一条对话。
+    /// 同 label 再订阅替换旧槽；send 失败（WebView 已销毁）时从 map 摘掉。
+    pub chat_protocol_subscribers:
+        Mutex<HashMap<String, crate::chat::protocol::ChatProtocolSubscriber>>,
+    /// 当前已拉出独立窗口的对话 id。emit 时对这些对话的高频 run 事件跳过主窗 All 槽。
+    pub chat_popout_conversations: Mutex<HashSet<String>>,
     /// 等待用户确认的敏感 Chat tool 调用（key = tool_call_id）。
     pub pending_chat_tool_approvals: Mutex<HashMap<String, PendingToolApproval>>,
     /// 本对话已按工具名授予的「总是允许」集合：`(conversation_id, 小写工具名)`。
@@ -391,7 +392,8 @@ impl AppState {
             chat_active_generations: Mutex::new(HashMap::new()),
             chat_active_replies: Mutex::new(HashMap::new()),
             chat_protocol: Mutex::new(crate::chat::protocol::ChatProtocolHub::default()),
-            chat_protocol_channel: Mutex::new(None),
+            chat_protocol_subscribers: Mutex::new(HashMap::new()),
+            chat_popout_conversations: Mutex::new(HashSet::new()),
             pending_chat_tool_approvals: Mutex::new(HashMap::new()),
             chat_tool_always_allow: Mutex::new(HashSet::new()),
             chat_session_consent: Mutex::new(HashSet::new()),

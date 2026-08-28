@@ -2226,6 +2226,10 @@ export const api = {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<{ conversationId: string; reload?: boolean | null; error?: string | null }>('chat-open-conversation', (payload) => listener(payload))
   },
+  onConversationPopoutsChanged: (listener: (payload: { conversationIds: string[] }) => void) => {
+    if (!isTauriRuntime()) return Promise.resolve(() => {})
+    return on<{ conversationIds: string[] }>('chat-popouts-changed', (payload) => listener(payload))
+  },
   onChatExternalSendReady: (listener: () => void) => {
     if (!isTauriRuntime()) return Promise.resolve(() => {})
     return on<unknown>('chat-external-send-ready', () => listener())
