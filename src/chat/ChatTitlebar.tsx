@@ -20,6 +20,8 @@ type ChatTitlebarProps = {
    * 「返回对话」导航栏底部已有一枚，不重复放。带保持全宽透明，故窗口拖拽区不丢。
    */
   settingsMode?: boolean
+  /** 弹出窗：不渲染侧栏开合 / 新建，带仍占行高（不要用 settingsMode，那会浮到正文上）。 */
+  hideNav?: boolean
   /** 会话页的业务控件（模型 / 思考档位 / 权限 / Dock 等）。中心页传 null，带内只剩导航与三键。 */
   children?: ReactNode
 }
@@ -39,14 +41,15 @@ export const ChatTitlebar = memo(function ChatTitlebar({
   onNewConversation,
   sidebarVisible = false,
   settingsMode = false,
+  hideNav = false,
   children,
 }: ChatTitlebarProps) {
   return (
     <div
-      className={`chat-titlebar-strip${settingsMode ? ' chat-titlebar-strip--settings' : ''}`}
+      className={`chat-titlebar-strip${settingsMode ? ' chat-titlebar-strip--settings' : ''}${hideNav && !settingsMode ? ' chat-titlebar-strip--solid' : ''}`}
       data-tauri-drag-region
     >
-      {!settingsMode && (
+      {!settingsMode && !hideNav && (
         <div
           className={`chat-titlebar-strip-nav${sidebarVisible ? ' chat-titlebar-strip-nav--reserve' : ''}`}
           data-tauri-drag-region

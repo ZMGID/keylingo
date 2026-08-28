@@ -700,6 +700,12 @@ html.windows body {
   margin: var(--chat-card-top) 0 8px;
 }
 
+/* 弹出窗没有侧栏 / Dock，自己补左右 8px，否则卡片贴窗口边。 */
+.chat-main-pane--lone {
+  margin-left: 8px;
+  margin-right: 8px;
+}
+
 .chat-message-list-inner {
   contain: layout paint;
 }
@@ -3436,6 +3442,13 @@ button.chat-composer-status-item:hover {
   gap: 2px;
   height: 44px;
   padding-left: 8px;
+}
+
+/* 弹出窗：带不透明，挡住 Mica / 正文透上来叠在标题上。主聊天仍透出窗口底色。 */
+.chat-titlebar-strip--solid {
+  position: relative;
+  z-index: 20;
+  background: var(--theme-surface);
 }
 
 /* 带内导航区（侧栏开合 + 新建）。侧栏展开时撑到侧栏那一列的宽度，

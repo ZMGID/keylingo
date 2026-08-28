@@ -36,10 +36,7 @@ function TitlebarPills({
 
   return (
     <>
-      <div className="min-w-0 max-w-[28%] shrink truncate px-1 text-[13px] font-medium text-neutral-700 dark:text-neutral-200" title={title}>
-        {title}
-      </div>
-      <div className="flex min-w-0 items-center gap-1">
+      <div className="flex min-w-0 items-center gap-1" data-popout-pills>
         <div className="shrink-0" data-tauri-drag-region="false">
           <RuntimePicker
             agentRuntime={runtime}
@@ -81,7 +78,14 @@ function TitlebarPills({
           />
         </div>
       </div>
-      <div className="min-w-4 flex-1" data-tauri-drag-region />
+      <div className="min-w-4 flex-1 self-stretch" data-tauri-drag-region />
+      <div
+        data-popout-title
+        className="min-w-0 max-w-[42%] shrink truncate px-2 text-right text-[13px] font-medium text-neutral-700 dark:text-neutral-200"
+        title={title}
+      >
+        {title}
+      </div>
     </>
   )
 }
@@ -91,7 +95,7 @@ export function PopoutTitlebar(props: PopoutTitlebarProps) {
     return (
       <ChatTitlebar
         sidebarExpanded={false}
-        settingsMode
+        hideNav
         onToggleSidebar={() => {}}
         onNewConversation={() => {}}
       >

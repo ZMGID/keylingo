@@ -476,12 +476,15 @@ pub fn ensure_chat_window_with_hash(app: &AppHandle, hash: &str) -> Result<Webvi
     builder.build().map_err(|e| e.to_string())
 }
 
-const POPOUT_DEFAULT_INNER_WIDTH: f64 = 440.0;
-const POPOUT_DEFAULT_INNER_HEIGHT: f64 = 640.0;
-const POPOUT_MIN_INNER_WIDTH: f64 = 360.0;
-const POPOUT_MIN_INNER_HEIGHT: f64 = 480.0;
+const POPOUT_DEFAULT_INNER_WIDTH: f64 = 720.0;
+const POPOUT_DEFAULT_INNER_HEIGHT: f64 = 800.0;
+const POPOUT_MIN_INNER_WIDTH: f64 = 480.0;
+const POPOUT_MIN_INNER_HEIGHT: f64 = 560.0;
 
 /// 一条对话的独立聊天窗。关即销毁，不走主聊天窗的 hide-and-reuse。
+///
+/// 调用方必须是 **async** Tauri command（或事件循环线程），不能是同步 IPC
+/// 命令：Windows 上 `build()` 会在同步命令里和 WebView2 死锁。
 pub fn ensure_chat_popout_window(
     app: &AppHandle,
     label: &str,

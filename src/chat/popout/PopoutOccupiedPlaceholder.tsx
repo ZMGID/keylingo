@@ -7,6 +7,7 @@ import type { ReactNode } from 'react'
 type PopoutOccupiedPlaceholderProps = {
   lang: Lang
   onFocus: () => void
+  onDock: () => void
   sidebarCollapsed: boolean
   titlebarControls: ReactNode
   onToggleSidebar: () => void
@@ -16,6 +17,7 @@ type PopoutOccupiedPlaceholderProps = {
 export function PopoutOccupiedPlaceholder({
   lang,
   onFocus,
+  onDock,
   sidebarCollapsed,
   titlebarControls,
   onToggleSidebar,
@@ -47,9 +49,10 @@ export function PopoutOccupiedPlaceholder({
         <p className="max-w-sm text-center text-[13px] text-neutral-500 dark:text-neutral-400">
           {t.chatPopoutOccupied}
         </p>
-        <Button variant="primary" size="sm" onClick={onFocus}>
-          {t.chatPopoutFocus}
-        </Button>
+        <div className="flex items-center justify-center gap-2">
+          <Button onClick={onFocus}>{t.chatPopoutFocus}</Button>
+          <Button variant="primary" onClick={onDock}>{t.chatPopoutDock}</Button>
+        </div>
       </div>
     </div>
   )

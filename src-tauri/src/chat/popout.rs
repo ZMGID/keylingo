@@ -118,8 +118,14 @@ fn reveal_popout(app: &AppHandle, window: &WebviewWindow) {
     let _ = app;
 }
 
+/// 打开一条对话的独立窗口。
+///
+/// **必须是 async command。** Windows 上同步 IPC 命令里调用
+/// `WebviewWindowBuilder::build()` 会和 WebView2 的 `WebMessageReceived`
+/// 死锁：前端 `invoke` 永不返回，聊天窗整窗卡住、点击像没反应。
+/// 见 `tauri::WebviewWindowBuilder` Known issues / wry#583。
 #[tauri::command]
-pub fn chat_open_conversation_popout(
+pub async fn chat_open_conversation_popout(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<(), String> {
@@ -149,8 +155,10 @@ pub fn chat_open_conversation_popout(
     Ok(())
 }
 
+/// 把已打开的弹出窗提到前台。同样走 async：`show`/`set_focus` 在 Windows
+/// 上也不该从同步 IPC 回调里调。
 #[tauri::command]
-pub fn chat_focus_conversation_popout(
+pub async fn chat_focus_conversation_popout(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<bool, String> {
@@ -159,6 +167,22 @@ pub fn chat_focus_conversation_popout(
     };
     reveal_popout(&app, &window);
     Ok(true)
+}
+
+/// 关掉独立窗口，把对话收回主聊天。`destroy` 走 async，避免 Windows 上
+/// 同步 IPC 里动 WebView 窗口卡住（同 open/focus）。
+#[tauri::command]
+pub async fn chat_close_conversation_popout(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<(), String> {
+    close_popout_for_conversation(&app, &conversation_id);
+    if let Some(chat) = app.get_webview_window("chat") {
+        let _ = chat.unminimize();
+        let _ = chat.show();
+        let _ = chat.set_focus();
+    }
+    Ok(())
 }
 
 #[tauri::command]

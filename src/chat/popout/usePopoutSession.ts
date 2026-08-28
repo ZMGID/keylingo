@@ -30,9 +30,9 @@ import {
   setSnapshot as setStreamSnapshot,
   useStreamCoarse,
 } from '../streamingStore'
-import type { InputBarProps } from '../InputBar'
 import type { MessageListProps } from '../MessageList'
-import type { Conversation, PendingAttachment, ThinkingLevel } from '../types'
+import type { AgentPlanState, AgentTodoState, Conversation, PendingAttachment, ThinkingLevel } from '../types'
+import { usePopoutComposer } from './usePopoutComposer'
 import type {
   ChatSessionConsentPayload,
   ChatToolConfirmPayload,
@@ -208,6 +208,22 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     showStreamSnapshotIfCurrent(payload.conversationId, snapshot)
   }, [showStreamSnapshotIfCurrent])
 
+  useTauriEvent(api.onChatTodo, (payload) => {
+    if (payload.conversationId !== conversationIdRef.current) return
+    const todoState = payload.todoState as AgentTodoState
+    setConversation((current) => current
+      ? { ...current, agent_todo_state: todoState, agentTodoState: todoState }
+      : current)
+  }, [])
+
+  useTauriEvent(api.onChatPlan, (payload) => {
+    if (payload.conversationId !== conversationIdRef.current) return
+    const planState = payload.planState as AgentPlanState
+    setConversation((current) => current
+      ? { ...current, agent_plan_state: planState, agentPlanState: planState }
+      : current)
+  }, [])
+
   const handleSend = useCallback(async (
     content: string,
     attachments: PendingAttachment[] = [],
@@ -356,20 +372,22 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     return [...messages, pendingUserMessage]
   }, [conversation?.messages, pendingUserMessage])
 
-  const inputBarProps: InputBarProps = {
+  const inputBarProps = usePopoutComposer({
+    conversation,
+    setConversation,
+    conversationId,
+    lang,
+    displayMessages,
+    streaming: streamCoarse.streaming,
+    usesChatRuntime,
+    usesExternalRuntime,
+    runtime,
     onSend: handleSend,
-    disabled: streamCoarse.streaming,
     onCancel: handleCancel,
     cancelVisible: streamCoarse.streaming,
     cancelling: streamCoarse.cancelling,
-    autoFocus: true,
-    conversationId,
-    usesChatRuntime,
-    usesExternalRuntime,
-    externalAgentName: runtime.externalAgentId ?? null,
-    modeOptions: [],
-    showProjectEntry: false,
-  }
+    disabled: streamCoarse.streaming,
+  })
 
   const messageListProps: MessageListProps = {
     conversationId,

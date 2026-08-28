@@ -525,7 +525,7 @@ function App() {
   )
   if (mode === 'chat-popout') {
     return (
-      <ChatWindowHost translucentSidebar={false}>
+      <ChatWindowHost translucentSidebar={translucentSidebar}>
         <Suspense fallback={chatSuspenseFallback}>
           <ChatErrorBoundary>
             <ChatPopout onContentReady={revealChatWindowNow} />

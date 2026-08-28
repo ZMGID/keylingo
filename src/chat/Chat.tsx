@@ -5340,6 +5340,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             onFocus={() => {
               if (currentConversation?.id) void chatApi.focusConversationPopout(currentConversation.id)
             }}
+            onDock={() => {
+              if (currentConversation?.id) void chatApi.closeConversationPopout(currentConversation.id)
+            }}
             sidebarCollapsed={sidebarCollapsed}
             titlebarControls={conversationTitlebarControls}
             onToggleSidebar={handleTitlebarToggleSidebar}

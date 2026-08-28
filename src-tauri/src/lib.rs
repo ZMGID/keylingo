@@ -585,6 +585,7 @@ pub fn run() {
             chat::protocol::chat_protocol_subscribe,
             chat::popout::chat_open_conversation_popout,
             chat::popout::chat_focus_conversation_popout,
+            chat::popout::chat_close_conversation_popout,
             chat::popout::chat_list_conversation_popouts,
             // Chat 模块命令
             chat::commands::catalog::chat_get_conversations,

@@ -2353,6 +2353,11 @@ export const chatApi = {
     return invoke<boolean>('chat_focus_conversation_popout', { conversationId })
   },
 
+  async closeConversationPopout(conversationId: string): Promise<void> {
+    if (!isTauriRuntime()) return
+    await invoke<void>('chat_close_conversation_popout', { conversationId })
+  },
+
   async listConversationPopouts(): Promise<string[]> {
     if (!isTauriRuntime()) return []
     return invoke<string[]>('chat_list_conversation_popouts')

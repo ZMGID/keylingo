@@ -4,10 +4,8 @@ import { configureChatProtocolFilter } from '../../api/chatProtocol'
 import { ApprovalCard } from '../ApprovalCard'
 import { AskUserBlock } from '../AskUserBlock'
 import { InputBar } from '../InputBar'
-import {
-  chatTitlebarMacInsetClass,
-  usesNativeTitlebar,
-} from '../platform'
+import { ChatTitlebar } from '../ChatTitlebar'
+import { usesNativeTitlebar } from '../platform'
 import { LangContext, type Lang } from '../../settings/i18n'
 import {
   isEnterPlanApproval,
@@ -118,37 +116,47 @@ function ChatPopoutBody({
   lang: Lang
 }) {
   const session = usePopoutSession(conversationId, lang)
-  return (
-    <div className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}>
-      <PopoutTitlebar
-        conversation={session.conversation}
-        runtime={session.runtime}
-        usesExternalRuntime={session.usesExternalRuntime}
-        approvalPolicy={session.approvalPolicy}
-        onRuntimeChange={session.handleRuntimeChange}
-        onModelChange={session.handleModelChange}
-        onExternalModelChange={session.handleExternalModelChange}
-        onThinkingLevelChange={session.handleThinkingLevelChange}
-        onApprovalPolicyChange={session.handleApprovalPolicyChange}
-      />
-      {session.loadError ? (
-        <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-[13px] text-neutral-500 dark:text-neutral-400">
-          {session.loadError}
-        </div>
-      ) : (
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {session.streamError && (
-            <div className="shrink-0 px-4 pt-2 text-center text-[12px] text-red-600 dark:text-red-400">
-              {session.streamError}
-            </div>
-          )}
-          <Suspense fallback={<MessageListLoading />}>
-            <MessageList key={conversationId} {...session.messageListProps} />
-          </Suspense>
-          <PopoutPendingSlot session={session} />
-          <InputBar {...session.inputBarProps} />
+  const titlebar = (
+    <PopoutTitlebar
+      conversation={session.conversation}
+      runtime={session.runtime}
+      usesExternalRuntime={session.usesExternalRuntime}
+      approvalPolicy={session.approvalPolicy}
+      onRuntimeChange={session.handleRuntimeChange}
+      onModelChange={session.handleModelChange}
+      onExternalModelChange={session.handleExternalModelChange}
+      onThinkingLevelChange={session.handleThinkingLevelChange}
+      onApprovalPolicyChange={session.handleApprovalPolicyChange}
+    />
+  )
+  const pane = session.loadError ? (
+    <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-[13px] text-neutral-500 dark:text-neutral-400">
+      {session.loadError}
+    </div>
+  ) : (
+    <>
+      {session.streamError && (
+        <div className="shrink-0 px-4 pt-2 text-center text-[12px] text-red-600 dark:text-red-400">
+          {session.streamError}
         </div>
       )}
+      <Suspense fallback={<MessageListLoading />}>
+        <MessageList key={conversationId} {...session.messageListProps} />
+      </Suspense>
+      <PopoutPendingSlot session={session} />
+      <InputBar {...session.inputBarProps} />
+    </>
+  )
+
+  return (
+    <div className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}>
+      {!usesNativeTitlebar && titlebar}
+      <div className="flex min-h-0 w-full flex-1">
+        <div className="chat-motion-pane-in chat-main-pane chat-main-pane--lone relative flex min-w-0 flex-1 flex-col">
+          {usesNativeTitlebar && titlebar}
+          {pane}
+        </div>
+      </div>
     </div>
   )
 }
@@ -175,12 +183,20 @@ export default function ChatPopout({ onContentReady }: ChatPopoutProps) {
   if (!popoutConversationId) {
     return (
       <div className={`chat-window-shell${usesNativeTitlebar ? ' chat-window-shell--native-titlebar' : ''}`}>
-        <header
-          className={`chat-titlebar-row flex h-[52px] shrink-0 items-center ${usesNativeTitlebar ? chatTitlebarMacInsetClass : ''} px-3`}
-          data-tauri-drag-region
-        />
-        <div className="flex flex-1 items-center justify-center px-6 text-center text-[13px] text-neutral-500">
-          无法打开独立对话窗口：缺少对话 id
+        {!usesNativeTitlebar && (
+          <ChatTitlebar
+            hideNav
+            sidebarExpanded={false}
+            onToggleSidebar={() => {}}
+            onNewConversation={() => {}}
+          />
+        )}
+        <div className="flex min-h-0 w-full flex-1">
+          <div className="chat-main-pane chat-main-pane--lone relative flex min-w-0 flex-1 flex-col">
+            <div className="flex flex-1 items-center justify-center px-6 text-center text-[13px] text-neutral-500">
+              无法打开独立对话窗口：缺少对话 id
+            </div>
+          </div>
         </div>
       </div>
     )
