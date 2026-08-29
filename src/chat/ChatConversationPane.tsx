@@ -1,13 +1,14 @@
 import { lazy, memo, Profiler, Suspense, type ProfilerOnRenderCallback, type ReactNode } from 'react'
 import { GitBranch, TriangleAlert, X } from 'lucide-react'
-import { ChatDotGridBackground } from './ChatDotGridBackground'
 import { ChatImageViewer } from './ChatImageViewer'
 import { ConversationLoadingState } from './ConversationLoadingState'
 import { ChatTitlebarActions } from './ChatTitlebarActions'
 import { useConversationTransition } from './conversationTransitionStore'
 import { InputBar, type InputBarProps } from './InputBar'
-import { QueuedMessages } from './QueuedMessages'
+import { KivioBlob } from './KivioBlob'
+import { emptyHeroLine } from './emptyHero'
 import { TypewriterText } from './TypewriterText'
+import { QueuedMessages } from './QueuedMessages'
 import { IconButton } from '../components/Button'
 import type { QueuedMessage } from './hooks/useMessageQueue'
 import type { MessageListProps } from './MessageList'
@@ -41,7 +42,6 @@ export interface ChatConversationPaneProps {
   currentAssistantName: string | null
   selectedProjectName: string | null
   selectedSetName: string | null
-  emptyHeroGreeting: { key: string | null | undefined; text: string }
   inputBarProps: InputBarProps
   messageListProps: MessageListProps
   hookWarning: ChatHookPayload | null
@@ -81,7 +81,6 @@ export const ChatConversationPane = memo(function ChatConversationPane({
   currentAssistantName,
   selectedProjectName,
   selectedSetName,
-  emptyHeroGreeting,
   inputBarProps,
   messageListProps,
   hookWarning,
@@ -137,32 +136,24 @@ export const ChatConversationPane = memo(function ChatConversationPane({
 
       <div className="relative flex min-h-0 flex-1 flex-col">
         {showEmptyHero ? (
-          <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-16">
-            <ChatDotGridBackground />
-            <div className="chat-empty-hero-stack relative z-10 w-full max-w-4xl space-y-8">
-              <h2
-                className="chat-motion-fade-up chat-empty-hero-title text-center text-[1.75rem] font-medium leading-snug tracking-[-0.02em] text-neutral-900 dark:text-neutral-50 sm:text-[2rem]"
-                aria-label={
-                  currentAssistantName
-                    ?? (selectedProjectName ? `Start in “${selectedProjectName}”` : null)
-                    ?? (selectedSetName ? `Start in “${selectedSetName}”` : null)
-                    ?? emptyHeroGreeting.text
-                }
-              >
-                {currentAssistantName ? (
-                  currentAssistantName
-                ) : selectedProjectName ? (
-                  `Start in “${selectedProjectName}”`
-                ) : selectedSetName ? (
-                  `Start in “${selectedSetName}”`
-                ) : (
+          <div className="chat-empty-hero flex flex-1 flex-col items-center justify-center px-6 pb-10">
+            <div className="chat-empty-hero-stack relative z-10 w-full max-w-4xl">
+              <div className="chat-motion-fade-up chat-empty-hero-heading">
+                <KivioBlob size={56} mood="idle" />
+                <h2 className="chat-empty-hero-title">
                   <TypewriterText
-                    key={emptyHeroGreeting.key}
-                    text={emptyHeroGreeting.text}
+                    key={`${lang}:${currentConversationId}:${currentAssistantName}:${selectedProjectName}:${selectedSetName}`}
+                    text={emptyHeroLine({
+                      lang,
+                      assistantName: currentAssistantName,
+                      projectName: selectedProjectName,
+                      setName: selectedSetName,
+                      seed: currentConversationId,
+                    })}
                     active={showEmptyHero}
                   />
-                )}
-              </h2>
+                </h2>
+              </div>
               <div className="chat-motion-fade-up" style={{ ['--chat-motion-delay' as string]: '120ms' }}>
                 <InputBar {...inputBarProps} layout="inline" />
               </div>

@@ -123,7 +123,7 @@ import { dockApi } from './dock/api'
 import { insertTextIntoComposer } from './composerInsert'
 import { onDockDiffPreviewRequest, onDockMarkdownPreviewRequest, onDockPreviewRequest, requestDockMarkdownPreview } from './dock/dockPreview'
 import { IconButton } from '../components/Button'
-import { pickRandomChatEmptyGreeting, isTauriRuntime } from './utils'
+import { isTauriRuntime } from './utils'
 import { hasEnabledNativeBuiltinTool, hasEnabledSkillRuntime } from '../utils/chatTools'
 import { onChatImageViewerOpen, type ChatImageViewerItem } from './imageViewer'
 import {
@@ -4264,7 +4264,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     && !hasMessages
     && !streamCoarse.streaming
     && !streamCoarse.streamError
-  const emptyHeroGreetingKey = showEmptyHero ? currentConversation?.id : null
 
   // 输入栏是聊天主区里除 MessageList 外最大的常驻子树。把它的 slot 和对象值稳定下来，
   // 配合 InputBar 自身的 memo，侧栏/设置路由等无关状态变化不会再让输入栏重跑整棵树。
@@ -4345,14 +4344,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       uiLang,
       usesExternalRuntime,
     ],
-  )
-
-  const emptyHeroGreeting = useMemo(
-    () => ({
-      key: emptyHeroGreetingKey,
-      text: pickRandomChatEmptyGreeting(),
-    }),
-    [emptyHeroGreetingKey],
   )
 
   const setSidebarCollapsedPersisted = useCallback((collapsed: boolean) => {
@@ -5384,7 +5375,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             currentAssistantName={currentAssistantSnapshot?.name ?? null}
             selectedProjectName={selectedProject?.name ?? null}
             selectedSetName={selectedSet?.name ?? null}
-            emptyHeroGreeting={emptyHeroGreeting}
             inputBarProps={inputBarProps}
             messageListProps={messageListProps}
             hookWarning={hookWarning}

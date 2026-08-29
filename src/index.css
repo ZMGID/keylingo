@@ -1429,11 +1429,6 @@ button.chat-composer-status-item:hover {
     padding-bottom: 1.5rem;
   }
 
-  .chat-empty-hero-title {
-    font-size: 1.3rem !important;
-    line-height: 1.35;
-  }
-
   .chat-empty-hero-stack {
     gap: 1.25rem !important;
   }
@@ -1467,7 +1462,7 @@ button.chat-composer-status-item:hover {
   }
 
   .chat-empty-hero-title {
-    font-size: 1.25rem !important;
+    font-size: 1.25rem;
   }
 }
 
@@ -1479,11 +1474,6 @@ button.chat-composer-status-item:hover {
 
   .chat-empty-hero-stack {
     gap: 0.75rem !important;
-  }
-
-  .chat-empty-hero-title {
-    font-size: 1.125rem !important;
-    line-height: 1.3;
   }
 
   .chat-composer-shell {
@@ -1521,12 +1511,10 @@ button.chat-composer-status-item:hover {
   }
 }
 
-/* 空对话页：固定点阵 + 每点明暗呼吸（Canvas 绘制，preview 03 风格） */
+/* 空对话页 */
 .chat-empty-hero {
   position: relative;
   overflow: hidden;
-  isolation: isolate;
-  /* 主区卡片的满幅子元素，底色必须与卡片一致（点阵 canvas 是透明叠在上面的）。 */
   background-color: var(--theme-surface-soft);
 }
 
@@ -1543,10 +1531,32 @@ button.chat-composer-status-item:hover {
   pointer-events: none;
 }
 
+.chat-empty-hero-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.chat-empty-hero-heading {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding-left: 4px;
+}
+
 .chat-empty-hero-title {
-  font-family: inherit;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  margin: 0;
+  min-width: 0;
+  font-size: 1.375rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: #171717;
+}
+
+.dark .chat-empty-hero-title {
+  color: #fafafa;
 }
 
 .chat-typewriter-cursor {
@@ -2690,9 +2700,15 @@ button.chat-composer-status-item:hover {
     color: inherit;
   }
 
-  .kv-stream-logo {
+  .kv-stream-logo,
+  .kv-stream-dot-logo {
     animation: none;
     opacity: 1;
+  }
+
+  .chat-typewriter-cursor {
+    display: none;
+    animation: none;
   }
 
   .subagent-sparkle.is-running::before {
@@ -2712,11 +2728,6 @@ button.chat-composer-status-item:hover {
   .chat-motion-reasoning-body.is-collapsed,
   .chat-motion-reasoning-body.is-open {
     max-height: none;
-  }
-
-  .chat-typewriter-cursor {
-    display: none;
-    animation: none;
   }
 
   .image-generation-pending-indicator {
@@ -7864,18 +7875,33 @@ input[type="password"]::-ms-clear {
 }
 .kv-quote-chip-remove:hover { color: var(--text); background: var(--bg-hover); }
 
-/* ---- 生成中状态行的 logo。
-   点阵只是静态形状。动效是整颗 SVG 一段呼吸，不要给 128 个圆各自挂
-   animation：WebView2 会按元素提合成层，思考一轮 GPU 进程就能到 20%+。 ---- */
+/* ---- 状态行墨团 + 会话切换点阵。身体/点阵都用这一套尺寸；
+   脉冲只挂在 .kv-stream-dot-logo 上，不要给 128 个圆各自挂 animation。 ---- */
 .kv-stream-logo {
   display: block;
   overflow: visible;
   flex-shrink: 0;
   width: var(--kv-stream-logo-size, 28px);
   height: var(--kv-stream-logo-size, 28px);
-  --k: 1; /* 时长倍率：越小越快 */
+  pointer-events: none;
+}
+.kv-stream-dot-logo {
+  --k: 1;
   --dot: #1d6bf0;
   animation: kv-stream-logo-pulse calc(1.6s * var(--k)) ease-in-out infinite;
+}
+.chat-conversation-loading .kv-stream-dot-logo {
+  --k: 0.68;
+}
+.kv-stream-dot-logo circle {
+  fill: var(--dot);
+}
+@keyframes kv-stream-logo-pulse {
+  0%, 100% { opacity: 0.42; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kv-stream-dot-logo { animation: none; opacity: 1; }
 }
 
 .chat-conversation-loading {
@@ -7886,18 +7912,3 @@ input[type="password"]::-ms-clear {
 .dark .chat-conversation-loading {
   background: #262629;
 }
-.chat-conversation-loading .kv-stream-logo {
-  --k: 0.68;
-}
-.kv-stream-logo circle {
-  fill: var(--dot);
-}
-@keyframes kv-stream-logo-pulse {
-  0%, 100% { opacity: 0.42; }
-  50% { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .kv-stream-logo { animation: none; opacity: 1; }
-}
-/* 闲置常驻态：动画停、点阵满亮（与 reduced-motion 同形）。 */
-.kv-stream-status-idle .kv-stream-logo { animation: none; opacity: 1; }
