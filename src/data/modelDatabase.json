@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "version": "2026-08-27",
+    "version": "2026-08-29",
     "description": "AI model database for Kivio. Keyed by model ID patterns. Used for auto-filling model info when adding models.",
     "sources": [
       "https://openrouter.ai/api/v1/models",
@@ -32,7 +32,16 @@
       "https://cursor.com/docs/models/cursor-composer-1",
       "https://cursor.com/blog/composer-2-5",
       "https://cursor.com/blog/composer-2",
-      "https://cursor.com/blog/composer-1-5"
+      "https://cursor.com/blog/composer-1-5",
+      "https://www.tencent.com/zh-cn/tencent-releases-and-open-sources-tencent-hy4-preview/",
+      "https://github.com/Tencent-Hunyuan/Hy4-preview",
+      "https://openrouter.ai/tencent/hy4-preview",
+      "https://openrouter.ai/tencent/hy3",
+      "https://cloud.tencent.com/document/product/1823/130051",
+      "https://openrouter.ai/bytedance-seed",
+      "https://openrouter.ai/bytedance-seed/seed-2.0-code",
+      "https://ai.volcengine.com/model",
+      "https://research.doubao.com/zh/seed2_1"
     ]
   },
 
@@ -528,13 +537,21 @@
     "pricing": { "input": 0.00, "output": 0.00 }
   },
 
+  "deepseek-v4-flash-vision-exp": {
+    "displayName": "DeepSeek V4 Flash Vision Exp",
+    "contextWindow": 1048576,
+    "maxOutput": 384000,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high", "xhigh", "max"],
+    "pricing": { "input": 0.44, "output": 1.32, "cachedInput": 0.014 }
+  },
   "deepseek-v4-flash": {
     "displayName": "DeepSeek V4 Flash",
     "contextWindow": 1048576,
-    "maxOutput": 131072,
-    "capabilities": { "vision": false, "functionCalling": true, "reasoning": false, "streaming": true, "webSearch": false },
+    "maxOutput": 384000,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": ["low", "high", "xhigh", "max"],
-    "pricing": { "input": 0.10, "output": 0.20, "cachedInput": 0.003 }
+    "pricing": { "input": 0.44, "output": 1.32, "cachedInput": 0.014 }
   },
   "deepseek-v4-pro": {
     "displayName": "DeepSeek V4 Pro",
@@ -542,7 +559,7 @@
     "maxOutput": 384000,
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": ["low", "high", "xhigh", "max"],
-    "pricing": { "input": 0.43, "output": 0.87 }
+    "pricing": { "input": 1.32, "output": 3.96, "cachedInput": 0.044 }
   },
   "gemma4": {
     "displayName": "Gemma 4",
@@ -648,22 +665,125 @@
   "glm-4-flashx": {
     "displayName": "GLM-4 FlashX",
     "contextWindow": 128000,
-    "maxOutput": 4096,
+    "maxOutput": 16384,
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": false, "streaming": true, "webSearch": false },
     "pricing": { "input": 0.10, "output": 0.10 }
+  },
+  "glm-4.7-flashx": {
+    "displayName": "GLM-4.7 FlashX",
+    "contextWindow": 200000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.07, "output": 0.40, "cachedInput": 0.01 }
+  },
+  "glm-4.7-flash": {
+    "displayName": "GLM-4.7 Flash",
+    "contextWindow": 200000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0, "output": 0 }
   },
   "glm-4.7": {
     "displayName": "GLM-4.7",
     "contextWindow": 200000,
-    "maxOutput": 16000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.60, "output": 2.20, "cachedInput": 0.11 }
+  },
+  "glm-4.6v-flashx": {
+    "displayName": "GLM-4.6V FlashX",
+    "contextWindow": 128000,
+    "maxOutput": 32768,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": [],
-    "pricing": { "input": 2.00, "output": 8.00 }
+    "pricing": { "input": 0.04, "output": 0.40, "cachedInput": 0.004 }
+  },
+  "glm-4.6v-flash": {
+    "displayName": "GLM-4.6V Flash",
+    "contextWindow": 128000,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0, "output": 0 }
+  },
+  "glm-4.6v": {
+    "displayName": "GLM-4.6V",
+    "contextWindow": 128000,
+    "maxOutput": 32768,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.30, "output": 0.90, "cachedInput": 0.05 }
+  },
+  "glm-4.6": {
+    "displayName": "GLM-4.6",
+    "contextWindow": 200000,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.60, "output": 2.20, "cachedInput": 0.11 }
+  },
+  "glm-4.5v": {
+    "displayName": "GLM-4.5V",
+    "contextWindow": 64000,
+    "maxOutput": 16384,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.60, "output": 1.80, "cachedInput": 0.11 }
+  },
+  "glm-4.5-airx": {
+    "displayName": "GLM-4.5 AirX",
+    "contextWindow": 128000,
+    "maxOutput": 98304,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 1.10, "output": 4.50, "cachedInput": 0.22 }
+  },
+  "glm-4.5-air": {
+    "displayName": "GLM-4.5 Air",
+    "contextWindow": 128000,
+    "maxOutput": 98304,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.20, "output": 1.10, "cachedInput": 0.03 }
+  },
+  "glm-4.5-flash": {
+    "displayName": "GLM-4.5 Flash",
+    "contextWindow": 128000,
+    "maxOutput": 98304,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0, "output": 0 }
+  },
+  "glm-4.5-x": {
+    "displayName": "GLM-4.5 X",
+    "contextWindow": 128000,
+    "maxOutput": 98304,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 2.20, "output": 8.90, "cachedInput": 0.45 }
+  },
+  "glm-4.5": {
+    "displayName": "GLM-4.5",
+    "contextWindow": 128000,
+    "maxOutput": 98304,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.60, "output": 2.20, "cachedInput": 0.11 }
+  },
+  "glm-image": {
+    "displayName": "GLM Image",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
   },
   "glm-5.3-flash": {
     "displayName": "GLM-5.3 Flash",
     "contextWindow": 1000000,
     "maxOutput": 131072,
+    "temperature": 1,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": ["low", "high", "max"],
     "pricing": { "input": 0.075, "output": 0.25, "cachedInput": 0.015 }
@@ -725,20 +845,155 @@
     "pricing": { "input": 0, "output": 0 }
   },
 
+  "hy4-preview": {
+    "displayName": "Hy4 Preview",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "temperature": 0.9,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["high"],
+    "pricing": { "input": 0.834, "output": 2.501, "cachedInput": 0.042 }
+  },
+  "hy4": {
+    "displayName": "Hy4 Preview",
+    "contextWindow": 1048576,
+    "maxOutput": 65536,
+    "temperature": 0.9,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["high"],
+    "pricing": { "input": 0.834, "output": 2.501, "cachedInput": 0.042 }
+  },
+  "hy3-preview": {
+    "displayName": "Hy3 Preview",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "temperature": 0.9,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high"],
+    "pricing": { "input": 0.18, "output": 0.60 }
+  },
+  "hy3": {
+    "displayName": "Hy3",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "temperature": 0.9,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "high"],
+    "pricing": { "input": 0.132, "output": 0.528, "cachedInput": 0.033 }
+  },
+  "hy-mt2-pro": {
+    "displayName": "Hy-MT2 Pro",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.074, "output": 0.295 }
+  },
+  "hy-mt2-plus": {
+    "displayName": "Hy-MT2 Plus",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.074, "output": 0.295 }
+  },
+  "hy-mt2-lite": {
+    "displayName": "Hy-MT2 Lite",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.044, "output": 0.177 }
+  },
+  "hy-mt2-1.8b": {
+    "displayName": "Hy-MT2 1.8B",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.044, "output": 0.177 }
+  },
+  "hy-mt2-7b": {
+    "displayName": "Hy-MT2 7B",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.074, "output": 0.295 }
+  },
+  "hy-mt2-30b-a3b": {
+    "displayName": "Hy-MT2 30B-A3B",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.074, "output": 0.295 }
+  },
+  "hy-mt2": {
+    "displayName": "Hy-MT2",
+    "contextWindow": 8192,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
+  },
+  "hy-role": {
+    "displayName": "Hy-Role",
+    "contextWindow": 32768,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
+  },
+  "hunyuan-role-latest": {
+    "displayName": "Hy-Role Latest",
+    "contextWindow": 32768,
+    "maxOutput": 4096,
+    "capabilities": { "vision": false, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
+  },
+  "hy-vision-2.0-instruct": {
+    "displayName": "HY-Vision 2.0 Instruct",
+    "contextWindow": 44000,
+    "maxOutput": 16000,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
+  },
+  "hunyuan-t1-vision": {
+    "displayName": "HY-Vision 1.5 Thinking",
+    "contextWindow": 40000,
+    "maxOutput": 24000,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
+  },
+  "hy-image-v3": {
+    "displayName": "Hy Image 3.0",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
+  },
+
   "minimax-m3": {
     "displayName": "MiniMax M3",
     "contextWindow": 1048576,
     "maxOutput": 512000,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": [],
-    "pricing": { "input": 0.30, "output": 1.20 }
+    "pricing": { "input": 0.30, "output": 1.20, "cachedInput": 0.06 }
+  },
+  "minimax-m2.7-highspeed": {
+    "displayName": "MiniMax M2.7 Highspeed",
+    "contextWindow": 204800,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.60, "output": 2.40, "cachedInput": 0.06 }
   },
   "minimax-m2.7": {
     "displayName": "MiniMax M2.7",
     "contextWindow": 204800,
     "maxOutput": 131072,
-    "capabilities": { "vision": false, "functionCalling": true, "reasoning": false, "streaming": true, "webSearch": false },
-    "pricing": { "input": 0.28, "output": 1.20 }
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": [],
+    "pricing": { "input": 0.30, "output": 1.20, "cachedInput": 0.06 }
   },
   "minimax-01": {
     "displayName": "MiniMax-01",
@@ -762,7 +1017,7 @@
     "maxOutput": 131072,
     "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "reasoningEfforts": [],
-    "pricing": { "input": 0.15, "output": 0.47, "cachedInput": 0.016 }
+    "pricing": { "input": 0.16, "output": 0.47, "cachedInput": 0.016 }
   },
   "qwen3.8-27b": {
     "displayName": "Qwen3.8 27B",
@@ -811,6 +1066,20 @@
     "maxOutput": 32768,
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
     "pricing": { "input": 0.10, "output": 0.30 }
+  },
+  "qwen3.5-plus": {
+    "displayName": "Qwen3.5 Plus",
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
+  },
+  "qwen3.5-flash": {
+    "displayName": "Qwen3.5 Flash",
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": []
   },
   "qwen3.7-max": {
     "displayName": "Qwen3.7 Max",
@@ -1046,27 +1315,179 @@
     "pricing": { "input": 0.10, "output": 0.32 }
   },
 
+  "doubao-seed-2.1-pro": {
+    "displayName": "Doubao Seed 2.1 Pro",
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.90, "output": 4.50, "cachedInput": 0.18 }
+  },
+  "seed-2.1-pro": {
+    "displayName": "Doubao Seed 2.1 Pro",
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.90, "output": 4.50, "cachedInput": 0.18 }
+  },
+  "doubao-seed-2.1-turbo": {
+    "displayName": "Doubao Seed 2.1 Turbo",
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.50, "output": 2.50 }
+  },
+  "seed-2.1-turbo": {
+    "displayName": "Doubao Seed 2.1 Turbo",
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.50, "output": 2.50 }
+  },
+  "doubao-seed-evolving": {
+    "displayName": "Doubao Seed Evolving",
+    "contextWindow": 262144,
+    "maxOutput": 262144,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.90, "output": 4.50, "cachedInput": 0.18 }
+  },
   "doubao-seed-2.0-pro": {
     "displayName": "Doubao Seed 2.0 Pro",
-    "contextWindow": 256000,
-    "maxOutput": 128000,
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.50, "output": 3.00 }
+  },
+  "seed-2.0-pro": {
+    "displayName": "Doubao Seed 2.0 Pro",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.50, "output": 3.00 }
+  },
+  "doubao-seed-2.0-code": {
+    "displayName": "Doubao Seed 2.0 Code",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
     "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
-    "reasoningEfforts": [],
-    "pricing": { "input": 3.20, "output": 16.00 }
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.50, "output": 3.00 }
+  },
+  "seed-2.0-code": {
+    "displayName": "Doubao Seed 2.0 Code",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": false, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.50, "output": 3.00 }
   },
   "doubao-seed-2.0-lite": {
     "displayName": "Doubao Seed 2.0 Lite",
-    "contextWindow": 256000,
-    "maxOutput": 128000,
-    "capabilities": { "vision": false, "functionCalling": true, "reasoning": false, "streaming": true, "webSearch": false },
-    "pricing": { "input": 0.60, "output": 3.60 }
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.25, "output": 2.00 }
+  },
+  "seed-2.0-lite": {
+    "displayName": "Doubao Seed 2.0 Lite",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.25, "output": 2.00 }
   },
   "doubao-seed-2.0-mini": {
     "displayName": "Doubao Seed 2.0 Mini",
-    "contextWindow": 256000,
-    "maxOutput": 128000,
-    "capabilities": { "vision": false, "functionCalling": true, "reasoning": false, "streaming": true, "webSearch": false },
-    "pricing": { "input": 0.20, "output": 2.00 }
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.10, "output": 0.40 }
+  },
+  "seed-2.0-mini": {
+    "displayName": "Doubao Seed 2.0 Mini",
+    "contextWindow": 262144,
+    "maxOutput": 131072,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.10, "output": 0.40 }
+  },
+  "doubao-seed-1.8": {
+    "displayName": "Doubao Seed 1.8",
+    "contextWindow": 262144,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.25, "output": 2.00 }
+  },
+  "doubao-seed-1.6-flash": {
+    "displayName": "Doubao Seed 1.6 Flash",
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.075, "output": 0.30 }
+  },
+  "seed-1.6-flash": {
+    "displayName": "Doubao Seed 1.6 Flash",
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.075, "output": 0.30 }
+  },
+  "doubao-seed-1.6": {
+    "displayName": "Doubao Seed 1.6",
+    "contextWindow": 262144,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.25, "output": 2.00 }
+  },
+  "seed-1.6": {
+    "displayName": "Doubao Seed 1.6",
+    "contextWindow": 262144,
+    "maxOutput": 65536,
+    "capabilities": { "vision": true, "functionCalling": true, "reasoning": true, "streaming": true, "webSearch": false },
+    "reasoningEfforts": ["low", "medium", "high"],
+    "pricing": { "input": 0.25, "output": 2.00 }
+  },
+  "doubao-seedream-5.0-pro": {
+    "displayName": "Doubao Seedream 5.0 Pro",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
+  },
+  "seedream-5.0-pro": {
+    "displayName": "Doubao Seedream 5.0 Pro",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
+  },
+  "doubao-seedream-5.0-lite": {
+    "displayName": "Doubao Seedream 5.0 Lite",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
+  },
+  "seedream-5.0-lite": {
+    "displayName": "Doubao Seedream 5.0 Lite",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
+  },
+  "seedream-4.5": {
+    "displayName": "Doubao Seedream 4.5",
+    "contextWindow": 0,
+    "maxOutput": 0,
+    "capabilities": { "vision": true, "functionCalling": false, "reasoning": false, "streaming": false, "webSearch": false, "imageGeneration": true }
   },
 
   "flux.2-pro": {

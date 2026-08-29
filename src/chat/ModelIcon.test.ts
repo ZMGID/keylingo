@@ -13,7 +13,7 @@ describe('ModelIcon model→brand mapping', () => {
       'gpt-4o', 'o3-mini', 'claude-3-5-sonnet', 'gemini-2.0-flash', 'gemma-2',
       'deepseek-chat', 'qwen-max', 'grok-3', 'kimi-k2', 'moonshot-v1-8k',
       'glm-4', 'mistral-large', 'llama-3.1-70b', 'yi-large', 'doubao-pro',
-      'ernie-4.0', 'minimax-abab6', 'mimo-v2.5-pro', 'command-r', 'phi-3-medium', 'step-1v',
+      'ernie-4.0', 'minimax-abab6', 'hy3', 'hy4-preview', 'doubao-seed-2.1-pro', 'seed-2.0-code', 'mimo-v2.5-pro', 'command-r', 'phi-3-medium', 'step-1v',
     ]
     for (const id of cases) {
       expect(matchGlyph(id), `${id} should resolve a brand`).not.toBeNull()
@@ -69,6 +69,16 @@ describe('ProviderIcon provider→brand mapping', () => {
     expect(matchGlyph('glm-4')).not.toBe(PROVIDER_BRANDS.ChatGLM)
     expect(matchGlyph('ox-alpha')).toBe(PROVIDER_BRANDS.Zhipu)
     expect(matchGlyph('stealth/ox-alpha')).toBe(PROVIDER_BRANDS.Zhipu)
+    expect(matchGlyph('hy3')).toBe(PROVIDER_BRANDS.Hunyuan)
+    expect(matchGlyph('hy4-preview')).toBe(PROVIDER_BRANDS.Hunyuan)
+    expect(matchGlyph('tencent/hy4-preview')).toBe(PROVIDER_BRANDS.Hunyuan)
+    expect(matchGlyph('hy-mt2-pro')).toBe(PROVIDER_BRANDS.Hunyuan)
+    expect(matchGlyph('hunyuan-role-latest')).toBe(PROVIDER_BRANDS.Hunyuan)
+    expect(matchGlyph('doubao-seed-2.1-pro')).toBe(PROVIDER_BRANDS.Doubao)
+    expect(matchGlyph('seed-2.0-code')).toBe(PROVIDER_BRANDS.Doubao)
+    expect(matchGlyph('bytedance-seed/seed-2.1-turbo')).toBe(PROVIDER_BRANDS.Doubao)
+    expect(matchGlyph('seedream-5.0-pro')).toBe(PROVIDER_BRANDS.Doubao)
+    expect(matchGlyph('hyperbolic-llama')).not.toBe(PROVIDER_BRANDS.Hunyuan)
     expect(matchGlyph('kimi-k2')).toBe(PROVIDER_BRANDS.Kimi)
     expect(matchGlyph('kimi-k2')).not.toBe(PROVIDER_BRANDS.Moonshot)
     expect(matchGlyph('moonshot-v1-8k')).toBe(PROVIDER_BRANDS.Moonshot)

@@ -935,6 +935,61 @@ mod tests {
             db_display_name("stealth/ox-alpha").as_deref(),
             Some("Ox Alpha")
         );
+        assert_eq!(
+            db_display_name("hy4-preview").as_deref(),
+            Some("Hy4 Preview")
+        );
+        assert_eq!(db_display_name("hy4").as_deref(), Some("Hy4 Preview"));
+        assert_eq!(
+            db_display_name("tencent/hy4-preview").as_deref(),
+            Some("Hy4 Preview")
+        );
+        assert_eq!(db_display_name("hy3").as_deref(), Some("Hy3"));
+        assert_eq!(
+            db_display_name("hy3-preview").as_deref(),
+            Some("Hy3 Preview")
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(None, "hy3"),
+            vec!["low", "high"]
+        );
+        assert_eq!(
+            reasoning_efforts_for_model(None, "hy4-preview"),
+            vec!["high"]
+        );
+        assert_eq!(
+            db_display_name("doubao-seed-2.1-pro").as_deref(),
+            Some("Doubao Seed 2.1 Pro")
+        );
+        assert_eq!(
+            db_display_name("doubao-seed-2-1-pro-260628").as_deref(),
+            Some("Doubao Seed 2.1 Pro")
+        );
+        assert_eq!(
+            db_display_name("bytedance-seed/seed-2.0-code").as_deref(),
+            Some("Doubao Seed 2.0 Code")
+        );
+        assert_eq!(
+            db_display_name("doubao-seed-2.0-pro").as_deref(),
+            Some("Doubao Seed 2.0 Pro")
+        );
+        assert_eq!(db_display_name("glm-4.7").as_deref(), Some("GLM-4.7"));
+        assert_eq!(
+            db_display_name("glm-4.7-flash").as_deref(),
+            Some("GLM-4.7 Flash")
+        );
+        assert_eq!(
+            db_display_name("glm-4.5-airx").as_deref(),
+            Some("GLM-4.5 AirX")
+        );
+        assert_eq!(
+            db_display_name("deepseek-v4-flash-vision-exp").as_deref(),
+            Some("DeepSeek V4 Flash Vision Exp")
+        );
+        assert_eq!(
+            db_display_name("qwen3.5-plus").as_deref(),
+            Some("Qwen3.5 Plus")
+        );
 
         // 包含匹配路径：带 tag 的变体（`gemma4:31b`）靠前缀/包含吃到 `gemma4`
         assert_eq!(db_display_name("gemma4:31b").as_deref(), Some("Gemma 4"));
@@ -1387,7 +1442,7 @@ mod tests {
     fn chat_max_output_uses_builtin_model_database_defaults() {
         assert_eq!(
             chat_max_output_tokens_for_model(None, "deepseek-v4-flash"),
-            Some(131_072)
+            Some(384_000)
         );
         assert_eq!(
             chat_max_output_tokens_for_model(None, "kimi-k3"),
