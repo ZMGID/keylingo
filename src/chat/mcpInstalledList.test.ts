@@ -81,11 +81,35 @@ describe('webSearchLoadedMcps', () => {
     ).toEqual([])
   })
 
-  it('surfaces Exa MCP only when that provider is selected', () => {
+  it('surfaces Exa MCP when it is the search provider', () => {
     const loaded = webSearchLoadedMcps(
       webSearch({ provider: 'exa_mcp', exaMcpUrl: 'https://mcp.exa.ai/mcp' }),
     )
     expect(loaded[0]?.id).toBe(EXA_MCP_ID)
+  })
+
+  it('surfaces Exa MCP when it is the fetch provider only', () => {
+    const loaded = webSearchLoadedMcps(
+      webSearch({
+        provider: 'tavily',
+        fetchProvider: 'exa_mcp',
+        exaMcpUrl: 'https://mcp.exa.ai/mcp',
+      }),
+    )
+    expect(loaded[0]?.id).toBe(EXA_MCP_ID)
+    expect(loaded[0]?.enabled).toBe(true)
+  })
+
+  it('surfaces TinyFish when it is the fetch provider only', () => {
+    const loaded = webSearchLoadedMcps(
+      webSearch({
+        provider: 'exa',
+        fetchProvider: 'tinyfish_mcp',
+        tinyfishMcpUrl: 'https://agent.tinyfish.ai/mcp',
+      }),
+    )
+    expect(loaded[0]?.id).toBe(TINYFISH_MCP_ID)
+    expect(loaded[0]?.enabled).toBe(true)
   })
 })
 

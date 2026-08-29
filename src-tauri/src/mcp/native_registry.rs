@@ -506,6 +506,32 @@ fn call_web_search(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
 
 fn call_web_fetch(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     Box::pin(async move {
+        let url = ctx
+            .arguments
+            .get("url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or_default();
+        if url.starts_with("https://") && crate::mcp::registry::web_fetch_configured(ctx.settings) {
+            let retry_attempts = if ctx.settings.retry_enabled {
+                ctx.settings.retry_attempts as usize
+            } else {
+                1
+            };
+            if let Ok(page) = crate::web_search::fetch_web(
+                ctx.state,
+                &ctx.settings.lens.web_search,
+                url,
+                retry_attempts,
+                Some(ctx.app),
+            )
+            .await
+            {
+                if !page.text.trim().is_empty() {
+                    return Ok(text_tool_result(crate::web_search::format_web_fetch(&page)));
+                }
+            }
+        }
         let content = crate::native_tools::web_fetch(&ctx.state.http, ctx.arguments).await?;
         Ok(text_tool_result(content))
     })

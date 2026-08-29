@@ -865,8 +865,11 @@ fn tinyfish_mcp_configured(settings: &crate::settings::Settings) -> bool {
     })
 }
 
-pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> bool {
-    match settings.lens.web_search.provider {
+pub(crate) fn web_search_provider_configured(
+    settings: &crate::settings::Settings,
+    provider: WebSearchProvider,
+) -> bool {
+    match provider {
         WebSearchProvider::Tavily => !settings.lens.web_search.tavily_api_key.trim().is_empty(),
         WebSearchProvider::Exa => !settings.lens.web_search.exa_api_key.trim().is_empty(),
         WebSearchProvider::ExaMcp => !settings.lens.web_search.exa_mcp_url.trim().is_empty(),
@@ -883,6 +886,15 @@ pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> boo
         WebSearchProvider::Kimi => !settings.lens.web_search.kimi_api_key.trim().is_empty(),
         WebSearchProvider::Unknown => false,
     }
+}
+
+pub(crate) fn web_search_configured(settings: &crate::settings::Settings) -> bool {
+    web_search_provider_configured(settings, settings.lens.web_search.provider)
+}
+
+pub(crate) fn web_fetch_configured(settings: &crate::settings::Settings) -> bool {
+    crate::web_search::resolved_fetch_provider(&settings.lens.web_search)
+        .is_some_and(|provider| web_search_provider_configured(settings, provider))
 }
 
 async fn call_mixer_tool(

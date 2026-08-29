@@ -1,9 +1,35 @@
 import type { WebSearchConfig, WebSearchProviderId } from '../api/tauri'
 
-/** 当前选中的搜索源是否已具备调用条件（有 key / 实例地址）。 */
-export function isWebSearchConfigured(webSearch: WebSearchConfig | undefined): boolean {
+const FETCH_PROVIDERS: ReadonlySet<WebSearchProviderId> = new Set([
+  'tavily',
+  'exa',
+  'exa_mcp',
+  'ollama',
+  'serper',
+  'tinyfish',
+  'tinyfish_mcp',
+  'kimi',
+])
+
+export function providerSupportsFetch(provider: WebSearchProviderId): boolean {
+  return FETCH_PROVIDERS.has(provider)
+}
+
+/** Effective fetch vendor. `null` → direct/Jina fallback. */
+export function resolvedFetchProvider(
+  webSearch: WebSearchConfig | undefined,
+): WebSearchProviderId | null {
+  if (!webSearch) return null
+  const candidate = webSearch.fetchProvider ?? webSearch.provider
+  return providerSupportsFetch(candidate) ? candidate : null
+}
+
+export function isProviderConfigured(
+  webSearch: WebSearchConfig | undefined,
+  provider: WebSearchProviderId,
+): boolean {
   if (!webSearch) return false
-  switch (webSearch.provider) {
+  switch (provider) {
     case 'tavily':
       return webSearch.tavilyApiKey.trim() !== ''
     case 'exa':
@@ -36,6 +62,12 @@ export function isWebSearchConfigured(webSearch: WebSearchConfig | undefined): b
     default:
       return false
   }
+}
+
+/** 当前选中的搜索源是否已具备调用条件（有 key / 实例地址）。 */
+export function isWebSearchConfigured(webSearch: WebSearchConfig | undefined): boolean {
+  if (!webSearch) return false
+  return isProviderConfigured(webSearch, webSearch.provider)
 }
 
 export function webSearchKeyField(

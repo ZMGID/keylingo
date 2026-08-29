@@ -724,8 +724,7 @@ pub fn native_web_fetch_tool() -> ChatToolDefinition {
     ChatToolDefinition {
         id: "native__web_fetch".to_string(),
         name: "web_fetch".to_string(),
-        description: "Fetch readable text from an HTTPS URL (HTML is stripped to plain text)."
-            .to_string(),
+        description: "Fetch readable text from an HTTPS URL. Uses the configured fetch provider's extract API when available (independent of the search provider: Tavily, Exa, Ollama, TinyFish, Serper, Kimi); otherwise fetches the page directly (HTML stripped to plain text, with a hosted reader fallback).".to_string(),
         source: "native".to_string(),
         server_id: None,
         server_name: Some("Kivio".to_string()),

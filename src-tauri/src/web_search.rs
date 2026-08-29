@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+mod fetch;
+
 use crate::{
     api::{send_with_retry, with_standard_request_timeout},
     settings::{ChatMcpServer, ConnectorAuth, LensWebSearchConfig, WebSearchProvider},
     state::AppState,
+};
+
+pub use fetch::{
+    fetch_web, format_web_fetch, provider_supports_fetch, resolved_fetch_provider, WebFetchPage,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -396,14 +402,8 @@ async fn search_ollama(
         .collect())
 }
 
-/// Exa MCP 搜索：调用 Exa 官方 MCP 服务器（默认 https://mcp.exa.ai/mcp）的
-/// `web_search_exa` 工具，复用通用的 Streamable HTTP MCP 客户端。API Key 走
-/// `?exaApiKey=` 查询参数（Exa MCP 的约定），无 key 也可低配额试用。
-async fn search_exa_mcp(
-    state: &AppState,
-    config: &LensWebSearchConfig,
-    query: &str,
-) -> Result<Vec<WebSearchResult>, String> {
+/// 一次性合成 Exa MCP server（api key 在 URL 里），不进连接池。
+fn exa_mcp_server(config: &LensWebSearchConfig) -> Result<ChatMcpServer, String> {
     let base = config.exa_mcp_url.trim();
     if base.is_empty() {
         return Err("Exa MCP endpoint is not configured".to_string());
@@ -416,15 +416,25 @@ async fn search_exa_mcp(
     } else {
         format!("{base}?exaApiKey={api_key}")
     };
-
-    let server = ChatMcpServer {
+    Ok(ChatMcpServer {
         id: "exa-mcp".to_string(),
         name: "Exa MCP".to_string(),
         enabled: true,
         transport: "streamable_http".to_string(),
         url,
         ..ChatMcpServer::default()
-    };
+    })
+}
+
+/// Exa MCP 搜索：调用 Exa 官方 MCP 服务器（默认 https://mcp.exa.ai/mcp）的
+/// `web_search_exa` 工具，复用通用的 Streamable HTTP MCP 客户端。API Key 走
+/// `?exaApiKey=` 查询参数（Exa MCP 的约定），无 key 也可低配额试用。
+async fn search_exa_mcp(
+    state: &AppState,
+    config: &LensWebSearchConfig,
+    query: &str,
+) -> Result<Vec<WebSearchResult>, String> {
+    let server = exa_mcp_server(config)?;
     // 一次性连接，不进 MCP 连接池：这个 server 是临时合成的（api key 就在 URL 里），
     // 不该被当成用户配置的常驻服务器缓存起来。
     let max_results = config.max_results.clamp(1, 10);

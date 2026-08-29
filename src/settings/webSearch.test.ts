@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { WebSearchConfig } from '../api/tauri'
-import { isWebSearchConfigured, webSearchKeyField } from './webSearch'
+import {
+  isProviderConfigured,
+  isWebSearchConfigured,
+  providerSupportsFetch,
+  resolvedFetchProvider,
+  webSearchKeyField,
+} from './webSearch'
 
 function config(overrides: Partial<WebSearchConfig> = {}): WebSearchConfig {
   return {
@@ -56,5 +62,41 @@ describe('webSearchKeyField', () => {
     expect(webSearchKeyField('deepseek')).toBe('deepseekApiKey')
     expect(webSearchKeyField('grok')).toBe('grokApiKey')
     expect(webSearchKeyField('kimi')).toBe('kimiApiKey')
+  })
+})
+
+describe('resolvedFetchProvider', () => {
+  it('follows the search provider when it has an extract API', () => {
+    expect(resolvedFetchProvider(config({ provider: 'exa' }))).toBe('exa')
+    expect(providerSupportsFetch('exa')).toBe(true)
+  })
+
+  it('returns null when search has no extract API and fetch is not overridden', () => {
+    expect(resolvedFetchProvider(config({ provider: 'brave' }))).toBeNull()
+    expect(providerSupportsFetch('brave')).toBe(false)
+  })
+
+  it('uses an explicit fetch provider independent of search', () => {
+    expect(resolvedFetchProvider(config({
+      provider: 'exa',
+      fetchProvider: 'tavily',
+    }))).toBe('tavily')
+    expect(resolvedFetchProvider(config({
+      provider: 'brave',
+      fetchProvider: 'tavily',
+    }))).toBe('tavily')
+  })
+})
+
+describe('isProviderConfigured', () => {
+  it('checks the given vendor even when it is not the search default', () => {
+    expect(isProviderConfigured(
+      config({ provider: 'exa', tavilyApiKey: 'tvly' }),
+      'tavily',
+    )).toBe(true)
+    expect(isProviderConfigured(
+      config({ provider: 'exa', tavilyApiKey: 'tvly' }),
+      'exa',
+    )).toBe(false)
   })
 })

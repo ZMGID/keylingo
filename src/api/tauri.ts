@@ -1023,6 +1023,8 @@ export type WebSearchMcpAuth = NonNullable<ChatMcpServer['auth']>
 export type WebSearchConfig = {
   enabled: boolean
   provider: WebSearchProviderId
+  /** Independent `web_fetch` provider. Omit/`null` follows `provider`. */
+  fetchProvider?: WebSearchProviderId | null
   tavilyApiKey: string
   tavilyBaseUrl?: string
   exaApiKey: string

@@ -1,4 +1,4 @@
-import type { ChatMcpServer, WebSearchConfig, WebSearchMcpAuth } from '../api/tauri'
+import type { ChatMcpServer, WebSearchConfig, WebSearchMcpAuth, WebSearchProviderId } from '../api/tauri'
 import { isPluginManagedServer } from '../settings/connectorCatalog'
 
 export const TINYFISH_MCP_ID = 'tinyfish-mcp'
@@ -46,8 +46,15 @@ function bearerHeaders(auth: WebSearchMcpAuth | null | undefined): Record<string
   return { Authorization: value }
 }
 
+function usesWebSearchProvider(
+  webSearch: WebSearchConfig,
+  provider: WebSearchProviderId,
+): boolean {
+  return webSearch.provider === provider || webSearch.fetchProvider === provider
+}
+
 function tinyfishMcpLoaded(webSearch: WebSearchConfig): boolean {
-  if (webSearch.provider === 'tinyfish_mcp') return true
+  if (usesWebSearchProvider(webSearch, 'tinyfish_mcp')) return true
   const auth = webSearch.tinyfishMcpAuth
   return Boolean(auth?.accessToken?.trim() || auth?.refreshToken?.trim())
 }
@@ -65,7 +72,7 @@ export function webSearchLoadedMcps(webSearch: WebSearchConfig | undefined): Cha
         id: TINYFISH_MCP_ID,
         name: 'TinyFish',
         url,
-        enabled: webSearch.provider === 'tinyfish_mcp',
+        enabled: usesWebSearchProvider(webSearch, 'tinyfish_mcp'),
         headers: bearerHeaders(auth),
         auth,
       }),
@@ -73,7 +80,7 @@ export function webSearchLoadedMcps(webSearch: WebSearchConfig | undefined): Cha
   }
 
   const exaUrl = (webSearch.exaMcpUrl ?? '').trim()
-  if (webSearch.provider === 'exa_mcp' && exaUrl) {
+  if (usesWebSearchProvider(webSearch, 'exa_mcp') && exaUrl) {
     out.push(
       httpMcpServer({
         id: EXA_MCP_ID,
