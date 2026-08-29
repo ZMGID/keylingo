@@ -9,12 +9,16 @@ import { useChatRouting } from './useChatRouting'
  *   2. 挂载即执行一次 + 订阅 hashchange 的时序
  *   3. 「已是当前会话则跳过重载」这条防双读逻辑
  */
-function setup(initialHash = '#chat', opts?: { onOpenPluginsSettings?: () => void }) {
+function setup(initialHash = '#chat', opts?: {
+  onOpenPluginsSettings?: () => void
+  onOpenSessionsSettings?: () => void
+}) {
   window.location.hash = initialHash
   const onViewChange = vi.fn()
   const onLoadConversation = vi.fn()
   const onResetConversation = vi.fn()
   const onOpenPluginsSettings = opts?.onOpenPluginsSettings ?? vi.fn()
+  const onOpenSessionsSettings = opts?.onOpenSessionsSettings ?? vi.fn()
 
   const rendered = renderHook(() => {
     const currentConversationIdRef = useRef<string | null>(null)
@@ -24,6 +28,7 @@ function setup(initialHash = '#chat', opts?: { onOpenPluginsSettings?: () => voi
       onResetConversation,
       currentConversationIdRef,
       onOpenPluginsSettings,
+      onOpenSessionsSettings,
     })
     return { routing, currentConversationIdRef }
   })
@@ -34,6 +39,7 @@ function setup(initialHash = '#chat', opts?: { onOpenPluginsSettings?: () => voi
     onLoadConversation,
     onResetConversation,
     onOpenPluginsSettings,
+    onOpenSessionsSettings,
   }
 }
 
@@ -70,7 +76,7 @@ describe('useChatRouting 分支顺序', () => {
     ['#chat/mcp', 'mcp'],
     ['#chat/knowledge', 'knowledge'],
     ['#chat/notes', 'notes'],
-    ['#chat/sessions', 'sessions'],
+    ['#chat/automations', 'automations'],
     ['#chat/onboarding', 'onboarding'],
   ]
 
@@ -83,9 +89,22 @@ describe('useChatRouting 分支顺序', () => {
     })
   }
 
+  it('#chat/automations/id → view=automations，不当作会话加载', () => {
+    const { onViewChange, onLoadConversation } = setup('#chat/automations/auto-1')
+    expect(onViewChange).toHaveBeenCalledWith('automations')
+    expect(onLoadConversation).not.toHaveBeenCalled()
+  })
+
   it('#chat/plugins → 走设置插件重定向，不当作会话加载', () => {
     const { onViewChange, onLoadConversation, onOpenPluginsSettings } = setup('#chat/plugins')
     expect(onOpenPluginsSettings).toHaveBeenCalled()
+    expect(onViewChange).not.toHaveBeenCalled()
+    expect(onLoadConversation).not.toHaveBeenCalled()
+  })
+
+  it('#chat/sessions → 走设置对话库重定向，不当作会话加载', () => {
+    const { onViewChange, onLoadConversation, onOpenSessionsSettings } = setup('#chat/sessions')
+    expect(onOpenSessionsSettings).toHaveBeenCalled()
     expect(onViewChange).not.toHaveBeenCalled()
     expect(onLoadConversation).not.toHaveBeenCalled()
   })
@@ -157,10 +176,10 @@ describe('useChatRouting sync*Route', () => {
       [r.syncOnboardingRoute, '#chat/onboarding'],
       [r.syncAssistantCenterRoute, '#chat/assistants'],
       [r.syncSkillCenterRoute, '#chat/skill'],
-      [r.syncSessionCenterRoute, '#chat/sessions'],
       [r.syncMcpCenterRoute, '#chat/mcp'],
       [r.syncKnowledgeCenterRoute, '#chat/knowledge'],
       [r.syncNotesRoute, '#chat/notes'],
+      [r.syncAutomationsRoute, '#chat/automations'],
     ]
     for (const [sync, expected] of cases) {
       act(() => { sync() })

@@ -86,6 +86,8 @@ type ShelfId = ConversationLibraryShelf
 
 interface SessionCenterProps {
   lang: Lang
+  /** 嵌在设置页里时隐藏与设置标题重复的 h1 */
+  embedded?: boolean
   currentConversationId?: string
   generatingConversationIds?: ReadonlySet<string>
   onSelectConversation: (id: string, conversation?: ConversationSearchHit) => void
@@ -102,8 +104,11 @@ interface LibraryState {
   error: string
 }
 
+export type { SessionCenterProps }
+
 export function SessionCenter({
   lang,
+  embedded = false,
   currentConversationId,
   generatingConversationIds = new Set(),
   onSelectConversation,
@@ -646,22 +651,32 @@ export function SessionCenter({
       ref={rootRef}
       className="assistant-center-root flex h-full min-h-0 flex-col text-neutral-900 dark:text-neutral-100"
     >
-      <div className={`shrink-0 ${compactPad ? 'px-3 pb-2.5 pt-4' : 'px-6 pb-3 pt-5'}`}>
+      <div className={`shrink-0 ${compactPad ? 'px-3 pb-2.5 pt-4' : 'px-6 pb-3 pt-5'} ${embedded ? '!pt-1' : ''}`}>
         <div className="mx-auto flex w-full max-w-[1200px] items-center justify-between gap-3">
-          <h1
-            className={`flex min-w-0 items-center gap-2 font-semibold tracking-tight text-neutral-950 dark:text-neutral-50 ${
-              compactPad ? 'text-[18px]' : 'gap-2.5 text-[22px]'
-            }`}
-          >
-            <MessagesSquare size={compactPad ? 17 : 20} className="shrink-0 text-neutral-500" />
-            <span className="truncate">{t.chatNavSessions}</span>
-          </h1>
+          {embedded ? (
+            <span className="text-[12px] tabular-nums text-neutral-400">
+              {state.loading
+                ? t.chatLoading
+                : t.chatLibCount.replace('{n}', String(state.total))}
+            </span>
+          ) : (
+            <h1
+              className={`flex min-w-0 items-center gap-2 font-semibold tracking-tight text-neutral-950 dark:text-neutral-50 ${
+                compactPad ? 'text-[18px]' : 'gap-2.5 text-[22px]'
+              }`}
+            >
+              <MessagesSquare size={compactPad ? 17 : 20} className="shrink-0 text-neutral-500" />
+              <span className="truncate">{t.chatNavSessions}</span>
+            </h1>
+          )}
           <div className="flex shrink-0 items-center gap-2">
+            {!embedded && (
             <span className="hidden text-[12px] tabular-nums text-neutral-400 sm:inline">
               {state.loading
                 ? t.chatLoading
                 : t.chatLibCount.replace('{n}', String(state.total))}
             </span>
+            )}
             <IconButton size="md" label={t.chatSessionRefresh} onClick={() => void loadPage({ append: false })} disabled={state.loading || busy}>
               <RefreshCw size={15} className={state.loading ? 'animate-spin' : ''} />
             </IconButton>

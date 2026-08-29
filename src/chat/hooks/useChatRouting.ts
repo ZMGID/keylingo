@@ -4,6 +4,7 @@ import {
   getRouteConversationId,
   hashPath,
   isChatAssistantCenterPath,
+  isChatAutomationsPath,
   isChatKnowledgeCenterPath,
   isChatMcpCenterPath,
   isChatNotesPath,
@@ -17,7 +18,7 @@ import {
 
 type ChatView =
   | 'conversation' | 'settings' | 'assistants' | 'skill'
-  | 'mcp' | 'knowledge' | 'notes' | 'sessions' | 'onboarding'
+  | 'mcp' | 'knowledge' | 'notes' | 'automations' | 'onboarding'
 
 interface UseChatRoutingParams {
   onViewChange: (view: ChatView) => void
@@ -29,6 +30,8 @@ interface UseChatRoutingParams {
   currentConversationIdRef: React.MutableRefObject<string | null>
   /** 旧 `#chat/plugins` 入口：插件已迁入设置，重定向到设置 → 插件。 */
   onOpenPluginsSettings?: () => void
+  /** 旧 `#chat/sessions` 入口：对话库已迁入设置，重定向到设置 → 对话库。 */
+  onOpenSessionsSettings?: () => void
 }
 
 /**
@@ -45,6 +48,7 @@ export function useChatRouting({
   onResetConversation,
   currentConversationIdRef,
   onOpenPluginsSettings,
+  onOpenSessionsSettings,
 }: UseChatRoutingParams) {
   const syncConversationRoute = useCallback((conversationId: string | null) => {
     setHash(conversationHash(conversationId))
@@ -54,10 +58,10 @@ export function useChatRouting({
   const syncOnboardingRoute = useCallback(() => setHash('#chat/onboarding'), [])
   const syncAssistantCenterRoute = useCallback(() => setHash('#chat/assistants'), [])
   const syncSkillCenterRoute = useCallback(() => setHash('#chat/skill'), [])
-  const syncSessionCenterRoute = useCallback(() => setHash('#chat/sessions'), [])
   const syncMcpCenterRoute = useCallback(() => setHash('#chat/mcp'), [])
   const syncKnowledgeCenterRoute = useCallback(() => setHash('#chat/knowledge'), [])
   const syncNotesRoute = useCallback(() => setHash('#chat/notes'), [])
+  const syncAutomationsRoute = useCallback(() => setHash('#chat/automations'), [])
 
   useEffect(() => {
     const loadFromRoute = () => {
@@ -90,8 +94,13 @@ export function useChatRouting({
         onViewChange('notes')
         return
       }
+      if (isChatAutomationsPath(path)) {
+        onViewChange('automations')
+        return
+      }
+      // 对话库已迁入设置；旧链接 `#chat/sessions` 重定向
       if (isChatSessionCenterPath(path)) {
-        onViewChange('sessions')
+        onOpenSessionsSettings?.()
         return
       }
       // 插件已迁入设置；旧链接 `#chat/plugins` 重定向
@@ -118,6 +127,7 @@ export function useChatRouting({
     currentConversationIdRef,
     onLoadConversation,
     onOpenPluginsSettings,
+    onOpenSessionsSettings,
     onResetConversation,
     onViewChange,
   ])
@@ -128,9 +138,9 @@ export function useChatRouting({
     syncOnboardingRoute,
     syncAssistantCenterRoute,
     syncSkillCenterRoute,
-    syncSessionCenterRoute,
     syncMcpCenterRoute,
     syncKnowledgeCenterRoute,
     syncNotesRoute,
+    syncAutomationsRoute,
   }
 }

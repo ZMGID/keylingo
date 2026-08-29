@@ -7,9 +7,11 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import {
   conversationHash,
+  getRouteAutomationId,
   getRouteConversationId,
   hashPath,
   isChatAssistantCenterPath,
+  isChatAutomationsPath,
   isChatKnowledgeCenterPath,
   isChatMcpCenterPath,
   isChatNotesPath,
@@ -34,6 +36,7 @@ describe('chatRoutes 判定', () => {
       ['chat/skill', isChatSkillCenterPath],
       ['chat/plugins', isChatPluginCenterPath],
       ['chat/sessions', isChatSessionCenterPath],
+      ['chat/automations', isChatAutomationsPath],
       ['chat/mcp', isChatMcpCenterPath],
       ['chat/knowledge', isChatKnowledgeCenterPath],
       ['chat/notes', isChatNotesPath],
@@ -65,7 +68,7 @@ describe('chatRoutes 判定', () => {
     const convPath = 'chat/abc-123'
     for (const predicate of [
       isChatSettingsPath, isChatAssistantCenterPath, isChatSkillCenterPath,
-      isChatPluginCenterPath, isChatSessionCenterPath, isChatMcpCenterPath,
+      isChatPluginCenterPath, isChatSessionCenterPath, isChatAutomationsPath, isChatMcpCenterPath,
       isChatKnowledgeCenterPath, isChatNotesPath, isChatOnboardingRoute, isChatPopoutRoute,
     ]) {
       expect(predicate(convPath)).toBe(false)
@@ -109,7 +112,7 @@ describe('getRouteConversationId', () => {
   it('排除清单里的中心页返回 null', () => {
     for (const seg of [
       'settings', 'assistants', 'skill', 'knowledge', 'onboarding',
-      'mcp', 'notes', 'plugins', 'sessions', 'popout',
+      'mcp', 'notes', 'plugins', 'sessions', 'automations', 'popout',
     ]) {
       withHash(`#chat/${seg}`)
       expect(getRouteConversationId()).toBeNull()
@@ -119,6 +122,23 @@ describe('getRouteConversationId', () => {
   it('popout 路由不当成主窗会话 id', () => {
     withHash('#chat/popout/conv_abc')
     expect(getRouteConversationId()).toBeNull()
+  })
+})
+
+describe('getRouteAutomationId', () => {
+  it('列表页返回 null', () => {
+    withHash('#chat/automations')
+    expect(getRouteAutomationId()).toBeNull()
+  })
+
+  it('编辑页返回解码后的 id', () => {
+    withHash('#chat/automations/auto-1')
+    expect(getRouteAutomationId()).toBe('auto-1')
+  })
+
+  it('多层路径返回 null', () => {
+    withHash('#chat/automations/a/b')
+    expect(getRouteAutomationId()).toBeNull()
   })
 })
 

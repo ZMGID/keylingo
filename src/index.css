@@ -3880,6 +3880,21 @@ button.chat-composer-status-item:hover {
   border: 2px solid var(--bg);
 }
 
+.kv-content--wide {
+  --settings-content-max: 1200px;
+}
+.kv-scroll.kv-scroll--fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+.kv-scroll.kv-scroll--fill > * {
+  flex: 1;
+  min-height: 0;
+}
+
 @container settings-shell (max-width: 560px) {
   .kv-content.settings-embedded-main {
     --settings-content-gutter: 16px;

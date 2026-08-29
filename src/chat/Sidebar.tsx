@@ -8,12 +8,12 @@ import {
   Layers,
   LayoutGrid,
   MoreHorizontal,
-  MessagesSquare,
   NotebookPen,
   Plus,
   Search,
   Settings,
   SquarePen,
+  Workflow,
 } from 'lucide-react'
 import type { ChatAssistant, ChatProject, ChatSet, ConversationListItem, ConversationSearchHit } from './types'
 import { HighlightText } from './searchHighlight'
@@ -55,7 +55,7 @@ function resolveChatUserProfile(
 
 const modLabel = isMac ? '⌘' : 'Ctrl'
 
-export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'sessions'
+export type ExtensionsNavItem = 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'automations'
 
 /**
  * 点击会话时要同步切换的侧栏导航上下文。
@@ -78,7 +78,7 @@ const extensionSubItems: Array<{
   { id: 'mcp', label: () => 'MCP', icon: McpIcon },
   { id: 'knowledge', label: (t) => t.chatNavKnowledge, icon: KnowledgeIcon },
   { id: 'notes', label: (t) => t.chatNavNotes, icon: (props) => <NotebookPen size={props.size} className={props.className} strokeWidth={1.75} /> },
-  { id: 'sessions', label: (t) => t.chatNavSessions, icon: (props) => <MessagesSquare size={props.size} className={props.className} strokeWidth={1.75} /> },
+  { id: 'automations', label: (t) => t.chatNavAutomations, icon: (props) => <Workflow size={props.size} className={props.className} strokeWidth={1.75} /> },
 ]
 
 const PROJECT_PREVIEW_LIMIT = 5

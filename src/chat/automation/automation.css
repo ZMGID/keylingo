@@ -1,0 +1,393 @@
+/* 必须在 @xyflow/react/dist/style.css 之后导入，才能盖过 xyflow 默认透明节点。
+   token 用聊天窗全局量（--theme-surface* / --text / --bg-input），
+   不要用只在设置页存在的 --bg / --border，否则卡片会变成全透明。 */
+
+.kv-automation-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  background: var(--theme-surface-soft);
+  --text-muted: #737373;
+  --accent-ring: rgba(47, 111, 240, 0.32);
+  --bg: var(--theme-surface);
+  --border: var(--theme-surface-border);
+  --border-strong: var(--theme-surface-border-strong);
+  --bg-input-subtle: var(--theme-surface-muted);
+}
+
+.dark .kv-automation-editor {
+  --text-muted: #a1a1aa;
+  --bg: #262629;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: #3a3a40;
+  --bg-input-subtle: #2c2c30;
+}
+
+.kv-automation-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--theme-surface-border);
+  background: var(--theme-surface);
+}
+
+.dark .kv-automation-editor-bar {
+  background: #262629;
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.kv-automation-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.kv-automation-enable {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #737373;
+  white-space: nowrap;
+}
+
+.dark .kv-automation-enable {
+  color: #a1a1aa;
+}
+
+.kv-automation-add-wrap {
+  position: relative;
+}
+
+.kv-automation-editor-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.kv-automation-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--theme-surface-muted);
+}
+
+.dark .kv-automation-canvas {
+  background: #1f1f22;
+}
+
+.kv-automation-canvas .react-flow {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  --xy-background-color: transparent;
+  --xy-background-pattern-dots-color: #c4c4c8;
+  --xy-edge-stroke: #a3a3a3;
+  --xy-node-background-color: #ffffff;
+}
+
+.dark .kv-automation-canvas .react-flow {
+  --xy-background-pattern-dots-color: #4a4a50;
+  --xy-edge-stroke: #5c5c64;
+  --xy-node-background-color: #2a2a2d;
+}
+
+.kv-automation-canvas .react-flow__node {
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  width: auto !important;
+}
+
+.kv-automation-canvas .react-flow__edge-path {
+  stroke: var(--xy-edge-stroke);
+  stroke-width: 1.75;
+}
+
+.kv-automation-canvas .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--theme-surface-border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  background: #ffffff;
+}
+
+.dark .kv-automation-canvas .react-flow__controls {
+  border-color: #3a3a40;
+  background: #2a2a2d;
+}
+
+.kv-automation-canvas .react-flow__controls-button {
+  width: 28px;
+  height: 28px;
+  border-bottom-color: var(--theme-surface-border);
+  background: transparent;
+  fill: #52525b;
+}
+
+.dark .kv-automation-canvas .react-flow__controls-button {
+  border-bottom-color: #3a3a40;
+  fill: #a1a1aa;
+}
+
+.kv-automation-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+  color: #737373;
+  font-size: 13px;
+}
+
+.kv-automation-empty > button {
+  pointer-events: auto;
+}
+
+.kv-automation-picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 300px;
+  overflow: hidden;
+  border: 1px solid var(--theme-surface-border);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
+}
+
+.dark .kv-automation-picker {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: #2a2a2d;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.kv-automation-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #737373;
+}
+
+.kv-automation-picker-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0 6px 8px;
+}
+
+.kv-automation-picker-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kv-automation-picker-item:hover {
+  background: var(--theme-surface-hover);
+}
+
+.dark .kv-automation-picker-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.kv-automation-picker-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--theme-surface-muted);
+  color: #404040;
+}
+
+.dark .kv-automation-picker-icon {
+  background: rgba(255, 255, 255, 0.06);
+  color: #d4d4d8;
+}
+
+.kv-automation-picker-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kv-automation-picker-title {
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.kv-automation-picker-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #737373;
+}
+
+.dark .kv-automation-picker-hint {
+  color: #a1a1aa;
+}
+
+.kv-automation-inspector {
+  width: 300px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 16px 18px 24px;
+  border-left: 1px solid var(--theme-surface-border);
+  background: var(--theme-surface);
+}
+
+.dark .kv-automation-inspector {
+  border-left-color: rgba(255, 255, 255, 0.08);
+  background: #262629;
+}
+
+.kv-automation-inspector-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.kv-automation-inspector-icon,
+.kv-automation-node-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--theme-surface-muted);
+  color: #404040;
+}
+
+.dark .kv-automation-inspector-icon,
+.dark .kv-automation-node-icon {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e4e4e7;
+}
+
+.kv-automation-inspector-kicker {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #a3a3a3;
+}
+
+.kv-automation-inspector-title {
+  margin: 1px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.kv-automation-inspector-copy,
+.kv-automation-inspector-note {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #737373;
+}
+
+.dark .kv-automation-inspector-copy,
+.dark .kv-automation-inspector-note {
+  color: #a1a1aa;
+}
+
+.kv-automation-inspector-note {
+  margin-top: 12px;
+}
+
+.kv-automation-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kv-automation-time .kv-input {
+  width: 64px;
+}
+
+.kv-automation-node {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 188px;
+  max-width: 240px;
+  padding: 10px 12px;
+  border: 1px solid var(--theme-surface-border-strong);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 6px 16px -8px rgba(0, 0, 0, 0.12);
+}
+
+.dark .kv-automation-node {
+  border-color: #3a3a40;
+  background: #2a2a2d;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.kv-automation-node.is-selected {
+  border-color: var(--text);
+  box-shadow:
+    0 0 0 1px var(--text),
+    0 6px 16px -8px rgba(0, 0, 0, 0.16);
+}
+
+.kv-automation-node-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kv-automation-node-kind {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #a3a3a3;
+}
+
+.kv-automation-node-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.kv-automation-canvas .kv-automation-handle.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  background: #52525b;
+}
+
+.dark .kv-automation-canvas .kv-automation-handle.react-flow__handle {
+  border-color: #2a2a2d;
+  background: #d4d4d8;
+}

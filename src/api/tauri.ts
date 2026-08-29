@@ -18,6 +18,7 @@ import type {
   ChatRunEventEnvelope,
   ChatSegmentPayload as GeneratedChatSegmentPayload,
 } from '../generated/chatProtocol'
+import type { Automation, AutomationMeta } from '../chat/automation/types'
 
 // ========== 类型定义 ==========
 
@@ -1982,6 +1983,15 @@ export const api = {
   notesOpenFolder: () => invoke<string>('notes_open_folder'),
   /** 笔记目录的绝对路径，用于订阅 workspace:activity 自动刷新。 */
   notesDirPath: () => invoke<string>('notes_dir_path'),
+
+  /** 扩展 → 自动化。图存在 `{app_data}/automations/`，类型归 `src/chat/automation/types.ts`。 */
+  automationList: () => invoke<AutomationMeta[]>('automation_list'),
+  automationGet: (id: string) => invoke<Automation>('automation_get', { id }),
+  automationSave: (automation: Automation) =>
+    invoke<Automation>('automation_save', { automation }),
+  automationDelete: (id: string) => invoke<void>('automation_delete', { id }),
+  automationSetEnabled: (id: string, enabled: boolean) =>
+    invoke<Automation>('automation_set_enabled', { id, enabled }),
 
   // 窗口控制
   /** 给当前（chat）窗口上 Mica，返回材质是否真的生效。Win10 没有 Mica 时为 false —— 这条

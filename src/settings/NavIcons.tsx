@@ -179,6 +179,16 @@ export function ConnectorsIcon(props: IconProps) {
   )
 }
 
+// 对话库：两枚叠放的对话气泡
+export function SessionsIcon(props: IconProps) {
+  return (
+    <svg {...svgProps(props)}>
+      <path d="M5 15.5 V8.5 A2.5 2.5 0 0 1 7.5 6 H14 A2.5 2.5 0 0 1 16.5 8.5 V12 A2.5 2.5 0 0 1 14 14.5 H9 L5 17 Z" />
+      <path d="M10 17.2 H16.5 L20 19.5 V16.8 V13.2 A2.2 2.2 0 0 0 17.8 11" />
+    </svg>
+  )
+}
+
 // 插件：拼图块（与扩展中心里原 Puzzle 语义一致）
 export function PluginsIcon(props: IconProps) {
   return (

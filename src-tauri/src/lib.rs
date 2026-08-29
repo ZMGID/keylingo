@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod api;
 pub mod app_data;
+pub mod automation;
 pub mod capture_geometry;
 pub mod chat;
 pub mod commands;
@@ -714,6 +715,11 @@ pub fn run() {
             notes::notes_folder_delete,
             notes::notes_open_folder,
             notes::notes_dir_path,
+            automation::commands::automation_list,
+            automation::commands::automation_get,
+            automation::commands::automation_save,
+            automation::commands::automation_delete,
+            automation::commands::automation_set_enabled,
             skills::chat_skills_list,
             skills::chat_skills_read,
             skills::chat_skills_import,

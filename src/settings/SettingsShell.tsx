@@ -31,9 +31,10 @@ import { rebaseDraftAgainstCache } from './rebaseSettingsDraft'
 import { i18n } from './i18n'
 import {
   GeneralIcon, HotkeysIcon, TranslateIcon, LensIcon, ChatIcon, MemoryIcon, MixerIcon,
-  AgentIcon, WebSearchIcon, ConnectorsIcon, PluginsIcon, UsageIcon, ProvidersIcon, AboutIcon, HooksIcon,
+  AgentIcon, WebSearchIcon, ConnectorsIcon, PluginsIcon, SessionsIcon, UsageIcon, ProvidersIcon, AboutIcon, HooksIcon,
 } from './NavIcons'
 import { PluginCenter } from '../chat/PluginCenter'
+import { SessionCenter, type SessionCenterProps } from '../chat/SessionCenter'
 import { buildHotkey, formatHotkeyError, getPlatform, isProviderEnabled, resolveSettingsSaveEcho, stableStringify } from './utils'
 import { type ProviderPreset } from './providerPresets'
 import { ProviderModelsPicker } from './ProviderModelsPicker'
@@ -70,7 +71,7 @@ import { ConnectorsPanel } from './ConnectorsPanel'
 import { WebSearchPanel } from './WebSearchPanel'
 import { defaultChatTools } from './chatToolsShared'
 
-export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'hooks' | 'webSearch' | 'connectors' | 'plugins' | 'usage' | 'providers' | 'about'
+export type SettingsTab = 'general' | 'hotkeys' | 'translate' | 'lens' | 'chat' | 'memory' | 'mixer' | 'externalAgents' | 'hooks' | 'webSearch' | 'connectors' | 'plugins' | 'sessions' | 'usage' | 'providers' | 'about'
 
 type SettingsData = SettingsType
 // UI 字号：以 px 展示、以整体缩放（zoom）实现。CSS 全是 px 硬编码，做不了真正的 rem 基准字号，
@@ -89,6 +90,15 @@ export interface SettingsShellProps {
   hideNav?: boolean
   /** 插件页「让 AI 代装」：由 Chat 宿主开新对话并发送 install brief */
   onRequestPluginAiInstall?: (pluginId: string) => void | Promise<void>
+  /** 对话库（原扩展中心页）嵌在设置里，选中一条对话时由 Chat 宿主切回去 */
+  sessionLibrary?: {
+    currentConversationId?: string
+    generatingConversationIds?: ReadonlySet<string>
+    onSelectConversation: SessionCenterProps['onSelectConversation']
+    onConversationDeleted?: SessionCenterProps['onConversationDeleted']
+    onForceDropConversation?: SessionCenterProps['onForceDropConversation']
+    onConversationsChanged?: SessionCenterProps['onConversationsChanged']
+  }
 }
 
 export interface SettingsShellHandle {
@@ -236,7 +246,7 @@ function resolveDefaultModelsAfterModelRemoval(
  * 设置面板主组件（standalone / embedded 双宿主）
  */
 export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>(function SettingsShell(
-  { variant, onClose, onSettingsChange, onReady, reserveTrafficLightSpace = false, initialTab, hideNav = false, onRequestPluginAiInstall },
+  { variant, onClose, onSettingsChange, onReady, reserveTrafficLightSpace = false, initialTab, hideNav = false, onRequestPluginAiInstall, sessionLibrary },
   ref,
 ) {
   const [settings, setSettings] = useState<SettingsData | null>(null)
@@ -1714,6 +1724,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     { id: 'hooks' as const, label: t.tabHooks, icon: HooksIcon },
     { id: 'connectors' as const, label: t.tabConnectors, icon: ConnectorsIcon },
     { id: 'plugins' as const, label: t.tabPlugins, icon: PluginsIcon },
+    { id: 'sessions' as const, label: t.tabSessions, icon: SessionsIcon },
     { id: 'webSearch' as const, label: t.tabWebSearch, icon: WebSearchIcon },
     { id: 'usage' as const, label: lang === 'zh' ? '用量统计' : 'Usage', icon: UsageIcon },
     // 关于固定在分类列表最末
@@ -1775,6 +1786,10 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
       subtitle: lang === 'zh'
         ? '检测本机能力插件（OfficeCLI / Cua Driver / ego lite）；启用后自动注入 Skill / MCP。'
         : 'Detect local capability plugins (OfficeCLI / Cua Driver / ego lite); enable to inject Skills / MCP.',
+    },
+    sessions: {
+      title: t.tabSessions,
+      subtitle: t.chatSessionSubtitle,
     },
     webSearch: {
       title: t.tabWebSearch,
@@ -1865,7 +1880,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
     )
 
   const settingsMain = (
-        <main className={`kv-content ${variant === 'embedded' ? 'settings-embedded-main' : ''}`}>
+        <main className={`kv-content ${variant === 'embedded' ? 'settings-embedded-main' : ''}${activeTab === 'sessions' ? ' kv-content--wide' : ''}`}>
           <header
             className={`kv-page-header ${variant === 'embedded' ? 'settings-embedded-header' : ''}`}
             onMouseDown={handleSettingsDragMouseDown}
@@ -1879,7 +1894,7 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
 
           <div
             key={activeTab}
-            className={`kv-scroll settings-section-enter ${variant === 'embedded' ? 'settings-embedded-scroll' : ''}`}
+            className={`kv-scroll settings-section-enter ${variant === 'embedded' ? 'settings-embedded-scroll' : ''}${activeTab === 'sessions' ? ' kv-scroll--fill' : ''}`}
           >
             {/* ===== 基础设置标签页 ===== */}
             {activeTab === 'general' && (
@@ -2130,6 +2145,19 @@ export const SettingsShell = forwardRef<SettingsShellHandle, SettingsShellProps>
             {activeTab === 'plugins' && (
               <PluginCenter
                 onRequestAiInstall={onRequestPluginAiInstall}
+              />
+            )}
+
+            {activeTab === 'sessions' && sessionLibrary && (
+              <SessionCenter
+                lang={lang}
+                embedded
+                currentConversationId={sessionLibrary.currentConversationId}
+                generatingConversationIds={sessionLibrary.generatingConversationIds}
+                onSelectConversation={sessionLibrary.onSelectConversation}
+                onConversationDeleted={sessionLibrary.onConversationDeleted}
+                onForceDropConversation={sessionLibrary.onForceDropConversation}
+                onConversationsChanged={sessionLibrary.onConversationsChanged}
               />
             )}
 

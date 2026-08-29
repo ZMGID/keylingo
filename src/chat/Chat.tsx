@@ -22,6 +22,7 @@ import {
   isChatOnboardingRoute,
   isChatPluginCenterPath,
   isChatSessionCenterPath,
+  isChatAutomationsPath,
   isChatSettingsPath,
   isChatSkillCenterPath,
   conversationHash,
@@ -98,7 +99,7 @@ import { getSettingsCached, refreshSettings, saveSettingsCached, subscribeSettin
 import { setExclusiveConversationIds } from '../api/chatProtocol'
 import { isPluginManagedServer, preservePluginManagedServers } from '../settings/connectorCatalog'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
-import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
+import type { SettingsShellHandle, SettingsShellProps, SettingsTab } from '../settings/SettingsShell'
 import { i18n, LangContext, type Lang } from '../settings/i18n'
 import { estimateTokens } from '../utils/tokens'
 import {
@@ -215,15 +216,15 @@ const KnowledgeCenter = lazy(() => import('./KnowledgeCenter').then((module) => 
   default: module.KnowledgeCenter,
 })))
 
-const SessionCenter = lazy(() => import('./SessionCenter').then((module) => ({
-  default: module.SessionCenter,
-})))
-
 const NotesCenter = lazy(() => import('./NotesCenter').then((module) => ({
   default: module.NotesCenter,
 })))
 
-type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'sessions' | 'onboarding'
+const AutomationCenter = lazy(() => import('./automation/AutomationCenter').then((module) => ({
+  default: module.AutomationCenter,
+})))
+
+type ChatView = 'conversation' | 'settings' | 'assistants' | 'skill' | 'mcp' | 'knowledge' | 'notes' | 'automations' | 'onboarding'
 
 interface ChatProps {
   onSettingsChange: () => void
@@ -281,6 +282,7 @@ const ChatSettingsPane = memo(function ChatSettingsPane({
   onSettingsChange,
   onReady,
   onRequestPluginAiInstall,
+  sessionLibrary,
   onRender,
 }: {
   settingsRef: Ref<SettingsShellHandle>
@@ -292,6 +294,7 @@ const ChatSettingsPane = memo(function ChatSettingsPane({
   onSettingsChange: () => void
   onReady: () => void
   onRequestPluginAiInstall: (pluginId: string) => void | Promise<void>
+  sessionLibrary: NonNullable<SettingsShellProps['sessionLibrary']>
   onRender: ProfilerOnRenderCallback
 }) {
   return (
@@ -311,6 +314,7 @@ const ChatSettingsPane = memo(function ChatSettingsPane({
             onSettingsChange={onSettingsChange}
             onReady={onReady}
             onRequestPluginAiInstall={onRequestPluginAiInstall}
+            sessionLibrary={sessionLibrary}
           />
         </Profiler>
       </SettingsEnterPane>
@@ -626,7 +630,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (isChatMcpCenterPath(path)) return 'mcp'
     if (isChatKnowledgeCenterPath(path)) return 'knowledge'
     if (isChatNotesPath(path)) return 'notes'
-    if (isChatSessionCenterPath(path)) return 'sessions'
+    if (isChatAutomationsPath(path)) return 'automations'
+    // 旧 `#chat/sessions`：对话库已迁设置
+    if (isChatSessionCenterPath(path)) return 'settings'
     // 旧 `#chat/plugins`：插件已迁设置，首屏落到设置页
     if (isChatPluginCenterPath(path)) return 'settings'
     return 'conversation'
@@ -717,9 +723,12 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   )
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<string[]>([])
-  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>(() =>
-    isChatPluginCenterPath(hashPath()) ? 'plugins' : 'chat',
-  )
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>(() => {
+    const path = hashPath()
+    if (isChatPluginCenterPath(path)) return 'plugins'
+    if (isChatSessionCenterPath(path)) return 'sessions'
+    return 'chat'
+  })
   const [uiLang, setUiLang] = useState<Lang>('zh')
   const [extensionsNavItem, setExtensionsNavItem] = useState<ExtensionsNavItem | null>(null)
   const [enabledTools, setEnabledTools] = useState<ChatToolDefinition[]>([])
@@ -1420,22 +1429,29 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setHash('#chat/settings')
   }, [])
 
+  const openEmbeddedSettingsForSessions = useCallback(() => {
+    setSettingsInitialTab('sessions')
+    setChatView('settings')
+    setHash('#chat/settings')
+  }, [])
+
   const {
     syncConversationRoute,
     syncSettingsRoute,
     syncOnboardingRoute,
     syncAssistantCenterRoute,
     syncSkillCenterRoute,
-    syncSessionCenterRoute,
     syncMcpCenterRoute,
     syncKnowledgeCenterRoute,
     syncNotesRoute,
+    syncAutomationsRoute,
   } = useChatRouting({
     onViewChange: setChatView,
     onLoadConversation: handleRouteLoadConversation,
     onResetConversation: handleRouteResetConversation,
     currentConversationIdRef,
     onOpenPluginsSettings: openEmbeddedSettingsForPlugins,
+    onOpenSessionsSettings: openEmbeddedSettingsForSessions,
   })
 
   const handleOnboardingExit = useCallback(() => {
@@ -1546,7 +1562,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       void import('./McpCenter')
       void import('./KnowledgeCenter')
       void import('./NotesCenter')
-      void import('./SessionCenter')
+      void import('./automation/AutomationCenter')
       void import('./MessageList')
     }, 400)
   }, [])
@@ -1571,11 +1587,6 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     syncSkillCenterRoute()
   }, [syncSkillCenterRoute])
 
-  const openSessionCenter = useCallback(() => {
-    setChatView('sessions')
-    syncSessionCenterRoute()
-  }, [syncSessionCenterRoute])
-
   const openMcpCenter = useCallback(() => {
     setChatView('mcp')
     syncMcpCenterRoute()
@@ -1590,6 +1601,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     setChatView('notes')
     syncNotesRoute()
   }, [syncNotesRoute])
+
+  const openAutomationsCenter = useCallback(() => {
+    setChatView('automations')
+    syncAutomationsRoute()
+  }, [syncAutomationsRoute])
 
   const openExtensionsItem = useCallback((item: ExtensionsNavItem) => {
     setExtensionsNavItem(item)
@@ -1613,11 +1629,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       openNotesCenter()
       return
     }
-    if (item === 'sessions') {
-      openSessionCenter()
+    if (item === 'automations') {
+      openAutomationsCenter()
       return
     }
-  }, [openAssistantCenter, openSkillCenter, openMcpCenter, openKnowledgeCenter, openNotesCenter, openSessionCenter])
+  }, [openAssistantCenter, openSkillCenter, openMcpCenter, openKnowledgeCenter, openNotesCenter, openAutomationsCenter])
 
   const extensionsActive = useMemo<ExtensionsNavItem | null>(() => {
     if (chatView === 'assistants') return 'assistants'
@@ -1625,7 +1641,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (chatView === 'mcp') return 'mcp'
     if (chatView === 'knowledge') return 'knowledge'
     if (chatView === 'notes') return 'notes'
-    if (chatView === 'sessions') return 'sessions'
+    if (chatView === 'automations') return 'automations'
     return null
   }, [chatView])
 
@@ -5286,6 +5302,14 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
             onSettingsChange={handleSettingsChange}
             onReady={emitContentReady}
             onRequestPluginAiInstall={handleRequestPluginAiInstall}
+            sessionLibrary={{
+              currentConversationId: currentConversation?.id,
+              generatingConversationIds,
+              onSelectConversation: handleSidebarSelectConversation,
+              onConversationDeleted: handleSidebarConversationDeleted,
+              onForceDropConversation: handleSidebarForceDropConversation,
+              onConversationsChanged: refreshSidebar,
+            }}
             onRender={onChatPerfProfiler}
           />
         ) : chatView === 'assistants' ? (
@@ -5332,19 +5356,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
               <NotesCenter />
             </Suspense>
           </div>
-        ) : chatView === 'sessions' ? (
+        ) : chatView === 'automations' ? (
           <div key="center" className={centerPageClass}>
             {centerPageTopStrip}
             <Suspense fallback={null}>
-              <SessionCenter
-                lang={uiLang}
-                currentConversationId={currentConversation?.id}
-                generatingConversationIds={generatingConversationIds}
-                onSelectConversation={handleSidebarSelectConversation}
-                onConversationDeleted={handleSidebarConversationDeleted}
-                onForceDropConversation={handleSidebarForceDropConversation}
-                onConversationsChanged={refreshSidebar}
-              />
+              <AutomationCenter />
             </Suspense>
           </div>
         ) : conversationOccupied ? (
