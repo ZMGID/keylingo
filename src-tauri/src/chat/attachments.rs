@@ -985,7 +985,7 @@ pub(crate) fn title_source_for_user_message(content: &str, attachments: &[Attach
         .collect::<Vec<_>>()
         .join(", ");
     if names.is_empty() {
-        "新对话".to_string()
+        String::new()
     } else {
         format!("附件: {names}")
     }
@@ -1173,6 +1173,11 @@ mod tests {
         );
 
         assert_eq!(title, "附件: notes.pdf");
+    }
+
+    #[test]
+    fn title_source_is_empty_without_content_or_attachments() {
+        assert_eq!(title_source_for_user_message("  \n  ", &[]), "");
     }
 
     #[test]

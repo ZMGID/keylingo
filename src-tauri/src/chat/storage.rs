@@ -1029,7 +1029,9 @@ fn match_conversation_for_search(
     item: ConversationListItem,
     needle: &str,
 ) -> Option<ConversationSearchHit> {
-    if item.title.to_lowercase().contains(needle) {
+    if item.title.to_lowercase().contains(needle)
+        && !crate::chat::commands::title::is_placeholder_title(&item.title)
+    {
         return Some(ConversationSearchHit {
             match_field: "title".into(),
             match_message_id: None,

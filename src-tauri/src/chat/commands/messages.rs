@@ -15,7 +15,7 @@ use super::context::{
     compute_context_state, emit_chat_context_state, try_auto_compress_context_after_update,
 };
 use super::interaction::emit_chat_plan_state;
-use super::title::{generate_title, resolve_conversation_title};
+use super::title::{generate_title, is_placeholder_title, resolve_conversation_title};
 use super::{
     AgentPlanState, ChatMessage, ChatMessageSegment, ChatMessageSegmentKind,
     ChatMessageSegmentPhase, Conversation, ToolCallRecord, ToolCallStatus,
@@ -261,9 +261,9 @@ pub(crate) async fn push_assistant_message(
     message.degraded = degraded;
     let stored_content = message.content.clone();
 
-    // 标题还是"自动生成的样子"吗——`"新对话"`，或者等于第一句用户消息的启发式结果。
+    // 标题还是自动生成的样子吗——占位「新对话」，或者等于第一句用户消息的启发式结果。
     // 用户手动重命名过的标题不会等于启发式结果，所以据此判断不会覆盖用户的命名。
-    let title_looks_auto = conversation.title == "新对话"
+    let title_looks_auto = is_placeholder_title(&conversation.title)
         || title_from_first_user.is_some_and(|first| conversation.title == generate_title(first));
     let is_external =
         conversation.agent_runtime.kind == crate::chat::types::AgentRuntimeKind::External;
@@ -282,7 +282,7 @@ pub(crate) async fn push_assistant_message(
     let generated_title = if external_cli_title.is_some() {
         external_cli_title
     } else if let Some(user_content) = title_from_first_user {
-        // 外部对话放宽首轮门槛：它的标题可能已经被兜底成"第一句用户消息"，
+        // 首轮发送后标题可能已经落成「第一句用户消息」截断（不再是占位「新对话」），
         // 卡在 `== "新对话"` 上的话，标题模型这一步压根不会触发。
         // 工具型首轮会在生成中落 assistant 草稿快照，不能用 messages.len() == 1
         // 判断首轮，否则只要首轮用了工具就会永远跳过标题请求。
@@ -292,12 +292,7 @@ pub(crate) async fn push_assistant_message(
             .filter(|message| message.role == "user")
             .count()
             == 1;
-        let wants_generation = is_first_user_turn
-            && if is_external {
-                title_looks_auto
-            } else {
-                conversation.title == "新对话"
-            };
+        let wants_generation = is_first_user_turn && title_looks_auto;
         if wants_generation {
             // 被取消的首条回复不值得花一次模型调用生成标题（标题生成是一次
             // 带 30s 超时的 LLM 请求，会显著拖慢"停止"后 invoke 的返回 / 输入框解锁）。
@@ -333,7 +328,7 @@ pub(crate) async fn push_assistant_message(
         .mutate(app, &conversation_id, |latest| {
             upsert_assistant_message(latest, message);
             if let Some(title) = generated_title {
-                let title_is_still_auto = latest.title == "新对话"
+                let title_is_still_auto = is_placeholder_title(&latest.title)
                     || first_user
                         .as_deref()
                         .is_some_and(|first| latest.title == generate_title(first));

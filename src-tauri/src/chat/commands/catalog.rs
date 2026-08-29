@@ -407,7 +407,7 @@ pub(crate) async fn create_chat_conversation_internal(
             let conversation = Conversation {
                 id: format!("conv_{}", Uuid::new_v4()),
                 revision: 0,
-                title: "新对话".to_string(),
+                title: super::title::PLACEHOLDER_CONVERSATION_TITLE.to_string(),
                 provider_id,
                 model,
                 messages: vec![],

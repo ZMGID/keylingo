@@ -41,7 +41,7 @@ import type { ChatUserProfile } from './types'
 import { UserAvatar } from './UserAvatar'
 import { i18n, useT, type I18n, type Lang } from '../settings/i18n'
 import { conversationMarkdownFilename } from './conversationExport'
-import { isProvisionalTitle } from './conversationTitle'
+import { displayConversationTitle, isPlaceholderTitle, isProvisionalTitle } from './conversationTitle'
 import { SwapTitle } from './SwapTitle'
 
 function resolveChatUserProfile(
@@ -132,7 +132,7 @@ function partitionPinnedFirst(
 function conversationMatchesSearch(conversation: ConversationListItem, query: string): boolean {
   if (!query) return true
   return (
-    conversation.title.toLowerCase().includes(query) ||
+    displayConversationTitle(conversation.title, conversation.preview).toLowerCase().includes(query) ||
     conversation.preview.toLowerCase().includes(query)
   )
 }
@@ -492,11 +492,19 @@ function SearchDialog({
           {results.length > 0 ? (
             results.map((conversation, index) => {
               const active = conversation.id === currentConversationId
+              const listedTitle =
+                displayConversationTitle(conversation.title, conversation.preview)
+                || t.chatLibUntitled
               const projectLabel = conversationProjectLabel(conversation, projects)
               const setId = conversation.set_id ?? conversation.setId ?? null
               const setLabel = setId ? sets.find((s) => s.id === setId)?.name ?? '' : ''
               const snippet = (conversation.match_snippet ?? conversation.matchSnippet ?? '').trim()
-              const showSnippet = Boolean(normalizedQuery && snippet && snippet !== conversation.title)
+              const showSnippet = Boolean(
+                normalizedQuery
+                && snippet
+                && snippet !== listedTitle
+                && !isPlaceholderTitle(snippet),
+              )
               return (
                 <button
                   key={conversation.id}
@@ -515,30 +523,30 @@ function SearchDialog({
                     <div className="flex min-w-0 items-center gap-2">
                       {normalizedQuery ? (
                         <HighlightText
-                          text={conversation.title || t.chatLibUntitled}
+                          text={listedTitle}
                           query={normalizedQuery}
-                          className={`min-w-0 flex-1 truncate text-[13px] ${
+                          className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
                             active
-                              ? 'font-semibold text-neutral-950 dark:text-neutral-50'
-                              : 'font-medium text-neutral-800 dark:text-neutral-200'
+                              ? 'text-neutral-950 dark:text-neutral-50'
+                              : 'text-neutral-800 dark:text-neutral-200'
                           }${
                             generatingConversationIds.has(conversation.id)
-                            && isProvisionalTitle(conversation.title, conversation.preview)
+                            && isProvisionalTitle(listedTitle, conversation.preview)
                               ? ' kv-title-provisional'
                               : ''
                           }`}
                         />
                       ) : (
                         <SwapTitle
-                          text={conversation.title}
-                          title={conversation.title}
-                          className={`min-w-0 flex-1 truncate text-[13px] ${
+                          text={listedTitle}
+                          title={listedTitle}
+                          className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
                             active
-                              ? 'font-semibold text-neutral-950 dark:text-neutral-50'
-                              : 'font-medium text-neutral-800 dark:text-neutral-200'
+                              ? 'text-neutral-950 dark:text-neutral-50'
+                              : 'text-neutral-800 dark:text-neutral-200'
                           }${
                             generatingConversationIds.has(conversation.id)
-                            && isProvisionalTitle(conversation.title, conversation.preview)
+                            && isProvisionalTitle(listedTitle, conversation.preview)
                               ? ' kv-title-provisional'
                               : ''
                           }`}
@@ -1133,7 +1141,7 @@ export const Sidebar = memo(function Sidebar({
       // 真实条目仍是占位标题「新对话」说明它落后于乐观条目（乐观条目持有刚持久化的最新数据）：
       // 首轮完成后、refetch 落地前，真实列表里这条还是旧快照 —— 直接切过去会让标题动效
       // 先倒退成「新对话」再跳成生成标题，且行实例销毁重建导致 SwapTitle 过渡不触发。
-      return real.title === '新对话'
+      return isPlaceholderTitle(real.title)
     }).map((item) => overlayOptimisticConversation(item, realById.get(item.id)))
     if (visibleOptimisticConversations.length === 0) return applyPinOverrides(active, pinOverrides)
     const optimisticIds = new Set(visibleOptimisticConversations.map((item) => item.id))
@@ -1234,12 +1242,16 @@ export const Sidebar = memo(function Sidebar({
         : conversationDrag.draggingId
           ? {
               drag: conversationDrag,
-              label: visibleConversations.find((c) => c.id === conversationDrag.draggingId)?.title,
+              label: (() => {
+                const conv = visibleConversations.find((c) => c.id === conversationDrag.draggingId)
+                if (!conv) return undefined
+                return displayConversationTitle(conv.title, conv.preview) || t.chatLibUntitled
+              })(),
             }
           : null
     if (!active?.label || !active.drag.ghostPos) return null
     return { label: active.label, ...active.drag.ghostPos }
-  }, [conversationDrag, projectDrag, projects, setDrag, sets, visibleConversations])
+  }, [conversationDrag, projectDrag, projects, setDrag, sets, t.chatLibUntitled, visibleConversations])
 
   const setConversationMap = useMemo(() => {
     const map = new Map<string, ConversationListItem[]>()

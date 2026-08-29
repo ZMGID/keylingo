@@ -3,7 +3,12 @@ import { Archive, Pin } from 'lucide-react'
 import type { ChatProject, ChatSet, ConversationListItem } from './types'
 import { i18n, type I18n, type Lang } from '../settings/i18n'
 import { chatApi, normalizeAgentRuntime } from './api'
-import { isProvisionalTitle } from './conversationTitle'
+import {
+  displayConversationTitle,
+  FORK_TITLE_SUFFIX,
+  isPlaceholderTitle,
+  isProvisionalTitle,
+} from './conversationTitle'
 import { SwapTitle } from './SwapTitle'
 import {
   ConversationContextMenu,
@@ -225,16 +230,18 @@ export const ConversationList = memo(function ConversationList({
 
   const startRename = (conv: ConversationListItem) => {
     setRenamingId(conv.id)
-    setRenameDraft(conv.title)
+    setRenameDraft(displayConversationTitle(conv.title, conv.preview))
     setMenuState(null)
   }
 
   const commitRename = async (conversationId: string) => {
     const nextTitle = renameDraft.trim()
     setRenamingId(null)
-    if (!nextTitle) return
+    if (!nextTitle || isPlaceholderTitle(nextTitle)) return
     const conv = conversations.find((c) => c.id === conversationId)
     if (!conv || conv.title === nextTitle) return
+    const listed = displayConversationTitle(conv.title, conv.preview)
+    if (isPlaceholderTitle(conv.title) && nextTitle === listed) return
     await onRenameConversation(conversationId, nextTitle)
   }
 
@@ -274,12 +281,12 @@ export const ConversationList = memo(function ConversationList({
           // 分支对话：把「（分支）」后缀从可截断的标题里拆出，做成不缩的固定标签，
           // 避免侧栏窄宽时被省略号吃掉（forked_from 字段判定，不依赖标题文字）。
           const isFork = Boolean(conv.forked_from ?? conv.forkedFrom)
-          // 后端写进标题的后缀恒为中文（存量数据也是），所以剥离用常量、显示用 t。
-          const FORK_SUFFIX = '（分支）'
+          const listedTitle = displayConversationTitle(conv.title, conv.preview)
           const displayTitle =
-            isFork && conv.title.endsWith(FORK_SUFFIX)
-              ? conv.title.slice(0, -FORK_SUFFIX.length)
-              : conv.title
+            isFork && listedTitle.endsWith(FORK_TITLE_SUFFIX)
+              ? listedTitle.slice(0, -FORK_TITLE_SUFFIX.length)
+              : listedTitle
+          const visibleTitle = displayTitle || t.chatLibUntitled
           const isDragging = reorder?.draggingId === conv.id
           const updatedAt = conv.updated_at ?? 0
           const compactAge = formatCompactAge(updatedAt, nowSec)
@@ -321,13 +328,12 @@ export const ConversationList = memo(function ConversationList({
                       compact
                         ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
                         : 'px-3 py-2 text-[13px]'
-                    } ${
+                    } font-medium ${
                       active
-                        ? 'font-semibold text-neutral-900 dark:text-neutral-100'
-                        : compact
-                          ? 'font-medium text-neutral-700 dark:text-neutral-300'
-                          : 'text-neutral-700 dark:text-neutral-300'
+                        ? 'text-neutral-900 dark:text-neutral-100'
+                        : 'text-neutral-700 dark:text-neutral-300'
                     }`}
+                    placeholder={t.chatLibUntitled}
                   />
                 </div>
               </div>
@@ -372,27 +378,25 @@ export const ConversationList = memo(function ConversationList({
                   e.stopPropagation()
                   startRename(conv)
                 }}
-                className={`min-w-0 flex-1 text-left transition-colors ${
+                className={`min-w-0 flex-1 text-left font-medium transition-colors ${
                   compact
                     ? `${indent ? 'pl-8' : 'pl-2.5'} pr-2 py-1 text-[13px] leading-5`
                     : 'px-3 py-2 text-[13px]'
                 } ${
                   active
-                    ? 'font-semibold text-neutral-900 dark:text-neutral-100'
-                    : compact
-                      ? 'font-medium text-neutral-700 dark:text-neutral-300'
-                      : 'text-neutral-700 dark:text-neutral-300'
+                    ? 'text-neutral-900 dark:text-neutral-100'
+                    : 'text-neutral-700 dark:text-neutral-300'
                 }`}
                 title={
                   isGenerating || isTitleGenerating
-                    ? t.chatTitleGenerating.replace('{title}', conv.title)
-                    : conv.title
+                    ? t.chatTitleGenerating.replace('{title}', visibleTitle)
+                    : visibleTitle
                 }
               >
                 <span className="flex min-w-0 items-center gap-1.5">
                   {/* 模型标题替换乐观截断标题时打字机逐字打出；生成中的临时标题置灰 */}
                   <SwapTitle
-                    text={displayTitle}
+                    text={visibleTitle}
                     className={`block min-w-0 flex-1 truncate${
                       isTitleGenerating
                       || (isGenerating && isProvisionalTitle(displayTitle, conv.preview))
@@ -508,7 +512,11 @@ export const ConversationList = memo(function ConversationList({
           nativeSessionId={menuNativeSessionId}
           nativeSessionLoading={menuNativeSessionLoading}
           onRegenerateTitle={() => void onRegenerateConversationTitle(menuConversation.id)}
-          onExport={() => void onExportConversation(menuConversation.id, menuConversation.title)}
+          onExport={() => void onExportConversation(
+            menuConversation.id,
+            displayConversationTitle(menuConversation.title, menuConversation.preview)
+              || t.chatLibUntitled,
+          )}
           onMoveToProject={(projectId) => void onMoveConversationToProject(menuConversation.id, projectId)}
           onMoveToSet={(setId) => void onMoveConversationToSet(menuConversation.id, setId)}
           onOpenInPopout={onOpenInPopout ? () => void onOpenInPopout(menuConversation.id) : undefined}

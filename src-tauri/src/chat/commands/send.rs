@@ -19,6 +19,7 @@ use super::context::{
 };
 use super::fan_out::run_reply_fan_out;
 use super::reply_runtime::{resolve_reply_arms, ChatSendReservation, CHAT_REPLY_BUSY_ERROR};
+use super::title::{generate_title, is_placeholder_title};
 use super::tooling::try_apply_skill_slash_trigger;
 
 /// 发送消息
@@ -151,8 +152,34 @@ pub(crate) async fn chat_send_message(
 
     conversation.messages.push(user_message.clone());
     conversation.updated_at = chrono::Local::now().timestamp();
+    let provisional_title = {
+        let candidate = generate_title(&title_source);
+        if is_placeholder_title(&conversation.title)
+            && !candidate.is_empty()
+            && !is_placeholder_title(&candidate)
+        {
+            Some(candidate)
+        } else {
+            None
+        }
+    };
     conversation = crate::chat::repository::repository(&app)
-        .append_message(&app, &conversation_id, user_message.clone())
+        .mutate(&app, &conversation_id, {
+            let user_message = user_message.clone();
+            let provisional_title = provisional_title.clone();
+            move |latest| {
+                if latest.messages.iter().any(|item| item.id == user_message.id) {
+                    return Err(format!("message already exists: {}", user_message.id));
+                }
+                latest.messages.push(user_message);
+                if let Some(title) = provisional_title {
+                    if is_placeholder_title(&latest.title) {
+                        latest.title = title;
+                    }
+                }
+                Ok(())
+            }
+        })
         .await
         .map_err(crate::chat::repository::repository_error)?;
 
@@ -202,6 +229,7 @@ pub(crate) async fn chat_send_message(
                                 &state,
                                 &mut conversation,
                                 &user_message.id,
+                                provisional_title.as_deref(),
                             )
                             .await?;
                             strip_transcripts_for_frontend(&mut conversation);

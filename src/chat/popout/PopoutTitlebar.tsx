@@ -3,6 +3,7 @@ import { ModelSelector } from '../ModelSelector'
 import { PermissionPicker } from '../PermissionPicker'
 import { ExternalModelSelector, RuntimePicker } from '../RuntimePicker'
 import { ThinkingLevelSelector } from '../ThinkingLevelSelector'
+import { conversationTitleSource, displayConversationTitle } from '../conversationTitle'
 import { chatTitlebarMacInsetClass, chatTitlebarRowClass, usesNativeTitlebar } from '../platform'
 import type { AgentRuntimeConfig, Conversation, ThinkingLevel } from '../types'
 
@@ -29,7 +30,12 @@ function TitlebarPills({
   onThinkingLevelChange,
   onApprovalPolicyChange,
 }: PopoutTitlebarProps) {
-  const title = conversation?.title?.trim() || 'Kivio'
+  const firstUser = conversation?.messages?.find((message) => message.role === 'user')
+  const titleFallback = conversationTitleSource(
+    firstUser?.content ?? '',
+    firstUser?.attachments?.map((attachment) => attachment.name) ?? [],
+  )
+  const title = displayConversationTitle(conversation?.title, titleFallback) || 'Kivio'
   const providerId = conversation?.provider_id ?? ''
   const model = conversation?.model ?? ''
   const locked = Boolean(conversation && (conversation.messages?.length ?? 0) > 0)

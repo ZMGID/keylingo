@@ -132,6 +132,7 @@ import {
   isConversationInFlight,
   type ConversationStreamSnapshot,
 } from './conversationRuns'
+import { isPlaceholderTitle, optimisticConversationTitle } from './conversationTitle'
 import {
   getCoarse as getStreamCoarse,
   patchSnapshot as patchStreamSnapshot,
@@ -529,19 +530,14 @@ function conversationUsesModel(
   return conversation.provider_id === providerId && conversation.model === model
 }
 
-function optimisticConversationTitle(content: string): string {
-  const compact = content.replace(/\s+/g, ' ').trim()
-  if (!compact) return '新对话'
-  return compact.length > 30 ? `${compact.slice(0, 30)}...` : compact
-}
-
 function optimisticConversationListItem(
   conversation: Conversation,
   content: string,
+  attachmentNames: readonly string[] = [],
 ): ConversationListItem {
   const preview = content.replace(/\s+/g, ' ').trim()
-  const title = conversation.title === '新对话'
-    ? optimisticConversationTitle(content)
+  const title = isPlaceholderTitle(conversation.title)
+    ? optimisticConversationTitle(content, attachmentNames)
     : conversation.title
   return {
     id: conversation.id,
@@ -596,7 +592,10 @@ function settleOptimisticConversationListItem(
           item.id === conversationId
             ? optimisticConversationListItem(
                 keptConversation,
-                conversationLastMessageContent(keptConversation),
+                keptConversation.messages.find((message) => message.role === 'user')?.content
+                  ?? conversationLastMessageContent(keptConversation),
+                keptConversation.messages.find((message) => message.role === 'user')
+                  ?.attachments?.map((attachment) => attachment.name) ?? [],
               )
             : item,
         )
@@ -3173,7 +3172,11 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
       return false
     }
     setOptimisticSidebarConversations((items) => [
-      optimisticConversationListItem(conversation, trimmed),
+      optimisticConversationListItem(
+        conversation,
+        trimmed,
+        attachments.map((attachment) => attachment.name),
+      ),
       ...items.filter((item) => item.id !== conversationId),
     ])
 

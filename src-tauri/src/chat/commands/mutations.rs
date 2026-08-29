@@ -926,7 +926,9 @@ pub(crate) async fn chat_update_conversation(
     let mut conversation = crate::chat::repository::repository(&app)
         .mutate(&app, &conversation_id, |conversation| {
             if let Some(t) = title {
-                conversation.title = t;
+                if !super::title::is_placeholder_title(&t) {
+                    conversation.title = t;
+                }
             }
             if let Some(p) = pinned {
                 conversation.pinned = p;

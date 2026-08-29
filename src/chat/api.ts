@@ -1,5 +1,6 @@
 // Chat API 调用封装
 import { invoke } from '@tauri-apps/api/core'
+import { isPlaceholderTitle, optimisticConversationTitle } from './conversationTitle'
 import { estimateTokens } from '../utils/tokens'
 import { isExecutableAgentPlanText } from './agentPlan'
 import { isTauriRuntime } from './utils'
@@ -753,8 +754,12 @@ const mockChatApi = {
         }
       }
     }
-    if (conversation.title === '新对话') {
-      conversation.title = content.length > 30 ? `${content.slice(0, 30)}...` : content
+    if (isPlaceholderTitle(conversation.title)) {
+      const nextTitle = optimisticConversationTitle(
+        content,
+        attachments.map((attachment) => attachment.name),
+      )
+      if (nextTitle) conversation.title = nextTitle
     }
     conversation.updated_at = now
     const contextState = estimateMockContext(conversation)
