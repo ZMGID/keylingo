@@ -39,6 +39,7 @@ const liveDuringSync = new Map<string, ChatRunEventEnvelope[]>()
 const conversationRevisions = new Map<string, number>()
 const syncRetryAttempts = new Map<string, number>()
 const syncRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const exclusiveConversationIds = new Set<string>()
 let nativeListener: Promise<void> | null = null
 let subscribeConversationId: string | null = null
 let subscribeGeneration = 0
@@ -54,6 +55,14 @@ export function configureChatProtocolFilter(conversationId: string | null) {
   if (nativeListener) {
     nativeListener = null
     void ensureListener()
+  }
+}
+
+/** 主窗 All 订阅者：这些对话的高频帧被独占路由跳过，seq 缺口不要当丢包去 sync。 */
+export function setExclusiveConversationIds(ids: Iterable<string>) {
+  exclusiveConversationIds.clear()
+  for (const id of ids) {
+    if (id) exclusiveConversationIds.add(id)
   }
 }
 
@@ -91,6 +100,18 @@ function isTerminal(
   return event.type === 'run_completed'
     || event.type === 'run_failed'
     || event.type === 'run_cancelled'
+}
+
+/** 独占路由仍会发给主窗 All 的低频边沿。它们和被跳过的 token 共用 seq，不能当缺口去 sync。 */
+function isExclusiveSparseLifecycle(type: ChatRunEventEnvelope['type']): boolean {
+  return type === 'run_started'
+    || type === 'run_completed'
+    || type === 'run_failed'
+    || type === 'run_cancelled'
+    || type === 'session_consent_requested'
+    || type === 'tool_approval_requested'
+    || type === 'tool_approval_withdrawn'
+    || type === 'user_prompt_requested'
 }
 
 function advanceTerminalRevision(event: ChatRunEventEnvelope) {
@@ -138,6 +159,17 @@ function applyRunEvent(event: ChatRunEventEnvelope) {
   }
   if (event.seq <= state.lastSeq) return
   if (state.terminal) return
+  // 主窗 All：弹出窗独占时 token 不进这条 Channel，run_started 之后直接到审批/终态。
+  // 把中间 seq 当缺口会 chat_sync_state 把整段流再拉回主窗，独占路由白做。
+  // 弹出窗（订了 Conversation）仍应把缺口当丢包，走 sync。
+  if (
+    event.seq > state.lastSeq + 1
+    && !subscribeConversationId
+    && exclusiveConversationIds.has(event.conversationId)
+    && isExclusiveSparseLifecycle(event.type)
+  ) {
+    state.lastSeq = event.seq - 1
+  }
   if (event.seq > state.lastSeq + 1) {
     if (state.pending.size >= MAX_PENDING_EVENTS) {
       // 缺口补不上时 pending 会把整个回答（几千个 delta）攒进内存且永不派发。
@@ -343,11 +375,25 @@ function handleLiveEvent(payload: unknown) {
 function hookChannelResetListener() {
   if (channelResetHooked) return
   channelResetHooked = true
-  void import('@tauri-apps/api/event').then(({ listen }) => listen(CHAT_PROTOCOL_CHANNEL_RESET_EVENT, () => {
-    void resubscribeChatProtocol()
-  })).catch(() => {
+  // 必须绑当前 WebView：全局 listen 会收到其它窗口的 emit_to（见 App.tsx chat-open-request）。
+  void import('@tauri-apps/api/window').then(({ getCurrentWindow }) => (
+    getCurrentWindow().listen(CHAT_PROTOCOL_CHANNEL_RESET_EVENT, () => {
+      void resubscribeChatProtocol()
+    })
+  )).catch(() => {
     channelResetHooked = false
   })
+}
+
+function conversationIdsToResync(): string[] {
+  if (subscribeConversationId) return [subscribeConversationId]
+  const ids = new Set<string>()
+  for (const state of runs.values()) {
+    if (state.terminal) continue
+    if (exclusiveConversationIds.has(state.conversationId) && state.pending.size === 0) continue
+    if (state.pending.size > 0 || state.lastSeq > 1) ids.add(state.conversationId)
+  }
+  return [...ids]
 }
 
 async function startListener() {
@@ -384,9 +430,7 @@ export async function resubscribeChatProtocol() {
     subscribeGeneration += 1
     nativeListener = null
     await ensureListener()
-    const ids = new Set(conversationRevisions.keys())
-    if (subscribeConversationId) ids.add(subscribeConversationId)
-    await Promise.all([...ids].map((id) => syncChatProtocol(id)))
+    await Promise.all(conversationIdsToResync().map((id) => syncChatProtocol(id)))
   } finally {
     resubscribeInFlight = false
   }
@@ -495,6 +539,7 @@ export const chatProtocolTesting = {
     syncing.clear()
     liveDuringSync.clear()
     conversationRevisions.clear()
+    exclusiveConversationIds.clear()
     syncRetryAttempts.clear()
     for (const timer of syncRetryTimers.values()) clearTimeout(timer)
     syncRetryTimers.clear()
@@ -525,4 +570,5 @@ export const chatProtocolTesting = {
   },
   isContinuousReplay,
   isSemanticallyValidSnapshot,
+  conversationIdsToResync,
 }

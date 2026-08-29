@@ -215,24 +215,18 @@ pub fn run() {
                 }
             }
             tauri::WindowEvent::Destroyed => {
-                // macOS：Dock 图标身份由 Chat / 弹出窗撑起。全部销毁后切回 Accessory。
-                #[cfg(target_os = "macos")]
-                {
-                    if crate::chat::popout::is_popout_label(window.label()) {
-                        crate::chat::popout::on_popout_destroyed(
-                            window.app_handle(),
-                            window.label(),
-                        );
-                    }
-                    if window.label() == "chat"
-                        || crate::chat::popout::is_popout_label(window.label())
-                    {
-                        crate::chat::popout::sync_macos_activation_policy(window.app_handle());
-                    }
+                let label = window.label();
+                if crate::chat::popout::is_popout_label(label) {
+                    crate::chat::popout::on_popout_destroyed(window.app_handle(), label);
+                } else if label == "chat" {
+                    crate::chat::protocol::unsubscribe_label(
+                        &window.app_handle().state::<AppState>(),
+                        "chat",
+                    );
                 }
-                #[cfg(not(target_os = "macos"))]
-                if crate::chat::popout::is_popout_label(window.label()) {
-                    crate::chat::popout::on_popout_destroyed(window.app_handle(), window.label());
+                #[cfg(target_os = "macos")]
+                if label == "chat" || crate::chat::popout::is_popout_label(label) {
+                    crate::chat::popout::sync_macos_activation_policy(window.app_handle());
                 }
             }
             _ => {}

@@ -10,6 +10,8 @@ use ts_rs::TS;
 use crate::state::AppState;
 
 pub const CHAT_PROTOCOL_VERSION: u32 = 1;
+/// 旧全局事件名。debug probe 改为进程内 sink，不再 `app.emit` 到每个 WebView。
+#[allow(dead_code)]
 pub const CHAT_PROTOCOL_EVENT: &str = "chat-protocol";
 /// Channel 投递失败但窗口还在时，请该 WebView 重建通道并 `chat_sync_state`。
 pub const CHAT_PROTOCOL_CHANNEL_RESET_EVENT: &str = "chat-protocol-channel-reset";
@@ -23,6 +25,36 @@ const MAX_COMPLETED_RUNS: usize = 32;
 const DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(25);
 /// 单条合帧缓冲的尺寸上限：SSE 偶发的大块（整段贴文）不该在缓冲里再攒一份。
 const DELTA_COALESCE_MAX_BYTES: usize = 8 * 1024;
+
+#[cfg(debug_assertions)]
+type ProtocolDebugSink = std::sync::Arc<dyn Fn(&ChatProtocolEvent) + Send + Sync>;
+
+#[cfg(debug_assertions)]
+static PROTOCOL_DEBUG_SINK: std::sync::OnceLock<std::sync::Mutex<Option<ProtocolDebugSink>>> =
+    std::sync::OnceLock::new();
+
+/// Probe 注册进程内回调，避免 `app.emit` 把每条 token 广播进所有 WebView。
+#[cfg(debug_assertions)]
+pub fn set_protocol_debug_sink(sink: Option<ProtocolDebugSink>) {
+    *PROTOCOL_DEBUG_SINK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = sink;
+}
+
+#[cfg(debug_assertions)]
+fn notify_protocol_debug_sink(event: &ChatProtocolEvent) {
+    let Some(slot) = PROTOCOL_DEBUG_SINK.get() else {
+        return;
+    };
+    let sink = slot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(sink) = sink {
+        sink(event);
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1633,9 +1665,7 @@ fn upsert_segment(
 /// debug 构建额外广播到全局事件总线,喂 chat probe(probe.rs 靠 `app.listen` 收实时载荷)。
 fn emit_protocol(app: &AppHandle, event: ChatProtocolEvent) {
     #[cfg(debug_assertions)]
-    if let Err(error) = app.emit(CHAT_PROTOCOL_EVENT, &event) {
-        eprintln!("Failed to emit {CHAT_PROTOCOL_EVENT}: {error}");
-    }
+    notify_protocol_debug_sink(&event);
     let conversation_id = event.conversation_id().to_string();
     let high_frequency = event.is_high_frequency();
     let state = app.state::<AppState>();

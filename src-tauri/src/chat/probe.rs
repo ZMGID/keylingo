@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::chat::types::{ConversationContextState, ToolCallStatus};
 use crate::state::AppState;
@@ -289,40 +289,29 @@ async fn handle_probe_request(app: &AppHandle, req: ProbeRequest) -> ProbeResult
     }
 
     let started = Instant::now();
-    // 订阅生成过程中的实时占用推送。用 Rust 侧的事件订阅（`app.listen`）而不是给生产代码
-    // 加旁路：`emit_chat_context_usage_live` 发的就是聊天窗口收的同一条 protocol update，
-    // 这里收到什么前端就收到什么。整段是 probe 侧代码，生产路径零改动。
+    // 实时占用走进程内 sink，避免 `app.emit` 把每条 protocol 事件广播进所有 WebView。
     let live_ticks: std::sync::Arc<std::sync::Mutex<Vec<ProbeLiveUsageTick>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let tick_sink = live_ticks.clone();
-    let tick_listener = app.listen(crate::chat::protocol::CHAT_PROTOCOL_EVENT, move |event| {
-        let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
+    crate::chat::protocol::set_protocol_debug_sink(Some(std::sync::Arc::new(move |event| {
+        let crate::chat::protocol::ChatProtocolEvent::Run(envelope) = event else {
             return;
         };
-        // 只收实时载荷；轮末的权威快照（`contextState`）走 result 里的 `contextState`。
-        if payload.get("type").and_then(|value| value.as_str()) != Some("context_usage_updated") {
-            return;
-        }
-        let Some(usage) = payload.get("usage") else {
+        let crate::chat::protocol::ChatRunEvent::ContextUsageUpdated { usage } = &envelope.event
+        else {
             return;
         };
-        let used = usage
-            .get("usedTokens")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
         tick_sink
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .push(ProbeLiveUsageTick {
-                used_tokens: used,
-                context_window_tokens: usage
-                    .get("contextWindowTokens")
-                    .and_then(|value| value.as_u64()),
+                used_tokens: usage.used_tokens,
+                context_window_tokens: usage.context_window_tokens,
             });
-    });
+    })));
     let run = crate::chat::commands::run_chat_probe(app, &state, &req);
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, run).await;
-    app.unlisten(tick_listener);
+    crate::chat::protocol::set_protocol_debug_sink(None);
     let live_usage_ticks =
         std::mem::take(&mut *live_ticks.lock().unwrap_or_else(|err| err.into_inner()));
     let duration_ms = started.elapsed().as_millis() as u64;

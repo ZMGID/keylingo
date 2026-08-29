@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { X } from 'lucide-react'
 import { getSettingsCached, subscribeSettings } from '../../api/settingsCache'
 import { configureChatProtocolFilter } from '../../api/chatProtocol'
 import { ApprovalCard } from '../ApprovalCard'
@@ -6,7 +7,8 @@ import { AskUserBlock } from '../AskUserBlock'
 import { InputBar } from '../InputBar'
 import { ChatTitlebar } from '../ChatTitlebar'
 import { usesNativeTitlebar } from '../platform'
-import { LangContext, type Lang } from '../../settings/i18n'
+import { IconButton } from '../../components/Button'
+import { i18n, LangContext, type Lang } from '../../settings/i18n'
 import {
   isEnterPlanApproval,
   isPlanApproval,
@@ -138,6 +140,26 @@ function ChatPopoutBody({
       {session.streamError && (
         <div className="shrink-0 px-4 pt-2 text-center text-[12px] text-red-600 dark:text-red-400">
           {session.streamError}
+        </div>
+      )}
+      {session.hookWarning && (
+        <div className="flex items-start gap-2 px-4 pt-2">
+          <div className="flex min-w-0 flex-1 items-start gap-2 rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] leading-4 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200">
+            <span className="min-w-0 flex-1">
+              {i18n[lang].chatHookFailed
+                .replace('{name}', session.hookWarning.hookName || session.hookWarning.event)
+                .replace('{event}', session.hookWarning.event)}
+              {` — ${session.hookWarning.message}`}
+            </span>
+            <IconButton
+              size="xs"
+              variant="ghost"
+              label={i18n[lang].chatHookDismiss}
+              onClick={session.dismissHookWarning}
+            >
+              <X size={12} />
+            </IconButton>
+          </div>
         </div>
       )}
       <Suspense fallback={<MessageListLoading />}>

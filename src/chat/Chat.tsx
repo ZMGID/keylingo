@@ -95,6 +95,7 @@ import {
   type ChatUserPromptPayload,
 } from '../api/tauri'
 import { getSettingsCached, refreshSettings, saveSettingsCached, subscribeSettings } from '../api/settingsCache'
+import { setExclusiveConversationIds } from '../api/chatProtocol'
 import { isPluginManagedServer, preservePluginManagedServers } from '../settings/connectorCatalog'
 import { OnboardingShell } from '../onboarding/OnboardingShell'
 import type { SettingsShellHandle, SettingsTab } from '../settings/SettingsShell'
@@ -667,6 +668,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   const [generatingConversationIds, setGeneratingConversationIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   )
+  const poppedGeneratingRunsRef = useRef<Map<string, Set<string>>>(new Map())
   const [popoutConversationIds, setPopoutConversationIds] = useState<ReadonlySet<string>>(() => new Set())
   const [popoutNotice, setPopoutNotice] = useState<string | null>(null)
   const popoutConversationIdsRef = useRef<ReadonlySet<string>>(new Set())
@@ -676,6 +678,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     const next = ids instanceof Set ? ids as Set<string> : new Set(ids)
     popoutConversationIdsRef.current = next
     popoutsListedRef.current = true
+    setExclusiveConversationIds(next)
     setPopoutConversationIds(next)
   }, [])
   const addPopoutId = useCallback((conversationId: string) => {
@@ -683,6 +686,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     const next = new Set(popoutConversationIdsRef.current)
     next.add(conversationId)
     popoutConversationIdsRef.current = next
+    setExclusiveConversationIds(next)
     setPopoutConversationIds(next)
   }, [])
   const ensurePopoutIds = useCallback(async () => {
@@ -691,6 +695,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     const next = new Set(ids)
     popoutConversationIdsRef.current = next
     popoutsListedRef.current = true
+    setExclusiveConversationIds(next)
     setPopoutConversationIds(next)
     return next
   }, [])
@@ -1769,6 +1774,9 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
   useTauriEvent(api.onConversationPopoutsChanged, (payload) => {
     const previous = popoutConversationIdsRef.current
     const next = new Set(payload.conversationIds)
+    for (const id of previous) {
+      if (!next.has(id)) poppedGeneratingRunsRef.current.delete(id)
+    }
     replacePopoutIds(next)
     const currentId = currentConversationIdRef.current
     if (!currentId) return
@@ -1779,7 +1787,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
     if (previous.has(currentId) && !next.has(currentId)) {
       void reloadConversation(currentId, { force: true, loadPoppedOut: true })
     }
-  }, [occupyConversationInMain, reloadConversation, replacePopoutIds])
+  }, [replacePopoutIds, occupyConversationInMain, reloadConversation])
 
   useEffect(() => {
     if (!popoutNotice) return
@@ -1994,10 +2002,21 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
 
   useTauriEvent(api.onChatStream, (payload) => {
       if (popoutConversationIdsRef.current.has(payload.conversationId)) {
-        if (payload.type === 'run_started') {
+        if (payload.type === 'run_started' && payload.runId) {
+          let runs = poppedGeneratingRunsRef.current.get(payload.conversationId)
+          if (!runs) {
+            runs = new Set()
+            poppedGeneratingRunsRef.current.set(payload.conversationId, runs)
+          }
+          runs.add(payload.runId)
           markConversationInFlight(payload.conversationId)
         } else if (isStreamTerminal(payload)) {
-          clearConversationInFlight(payload.conversationId)
+          const runs = poppedGeneratingRunsRef.current.get(payload.conversationId)
+          if (runs && payload.runId) runs.delete(payload.runId)
+          if (!runs || runs.size === 0) {
+            poppedGeneratingRunsRef.current.delete(payload.conversationId)
+            clearConversationInFlight(payload.conversationId)
+          }
         }
         return
       }
@@ -2199,7 +2218,7 @@ export default function Chat({ onSettingsChange, onContentReady }: ChatProps) {
         }
         void finishStreamingRun(terminalPayload)
       }
-  }, [ensureStreamSnapshot, finishStreamingRun, markConversationInFlight, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
+  }, [clearConversationInFlight, ensureStreamSnapshot, finishStreamingRun, markConversationInFlight, showStreamSnapshotIfCurrent, syncGeneratingConversationIds])
 
   useTauriEvent(api.onChatContext, (payload) => {
     const currentConversationId = currentConversationIdRef.current

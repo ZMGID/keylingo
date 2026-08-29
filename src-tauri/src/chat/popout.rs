@@ -148,6 +148,8 @@ pub async fn chat_open_conversation_popout(
     if !valid_popout_conversation_id(&conversation_id) {
         return Err(format!("Invalid conversation id: {conversation_id}"));
     }
+    let state = app.state::<AppState>();
+    let _create_guard = state.chat_popout_create_lock.lock().await;
     let label = popout_label(&conversation_id);
     if let Some(window) = app.get_webview_window(&label) {
         reveal_popout(&app, &window);

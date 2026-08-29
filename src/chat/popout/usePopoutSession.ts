@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/tauri'
-import { resubscribeChatProtocol, syncChatProtocol } from '../../api/chatProtocol'
+import { syncChatProtocol } from '../../api/chatProtocol'
 import { getSettingsCached, refreshSettings, saveSettingsCached } from '../../api/settingsCache'
 import {
   agentRuntimesEqual,
@@ -25,6 +25,16 @@ import {
 } from '../streamApply'
 import { createEmptyStreamSnapshot, type ConversationStreamSnapshot } from '../conversationRuns'
 import {
+  beginGroup,
+  endGroup,
+  ensureGroupColumn,
+  flushGroups,
+  getActiveGroup,
+  hasActiveGroup,
+  restoreGroupArm,
+  touchGroup,
+} from '../groupStreamingStore'
+import {
   reset as resetStreamStore,
   setCoarse as setStreamCoarse,
   setSnapshot as setStreamSnapshot,
@@ -37,6 +47,7 @@ import type {
   ChatSessionConsentPayload,
   ChatToolConfirmPayload,
   ChatUserPromptPayload,
+  ChatHookPayload,
 } from '../../api/tauri'
 import type { Lang } from '../../settings/i18n'
 
@@ -47,6 +58,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
   const [pendingToolConfirm, setPendingToolConfirm] = useState<ChatToolConfirmPayload | null>(null)
   const [pendingSessionConsent, setPendingSessionConsent] = useState<ChatSessionConsentPayload | null>(null)
   const [pendingUserPrompt, setPendingUserPrompt] = useState<ChatUserPromptPayload | null>(null)
+  const [hookWarning, setHookWarning] = useState<ChatHookPayload | null>(null)
   const [toolConfirmError, setToolConfirmError] = useState('')
   const [sessionConsentError, setSessionConsentError] = useState('')
   const [toolConfirmSubmitting, setToolConfirmSubmitting] = useState(false)
@@ -59,7 +71,8 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
   const inFlightRef = useRef(false)
   const pendingDoneRef = useRef<(() => Promise<void>) | null>(null)
   const restoredRunIdsRef = useRef(new Set<string>())
-  const lastProtocolAtRef = useRef(0)
+  const pendingToolConfirmsRef = useRef<ChatToolConfirmPayload[]>([])
+  const pendingUserPromptsRef = useRef<ChatUserPromptPayload[]>([])
   const streamCoarse = useStreamCoarse()
 
   const applySnapshot = useCallback((snapshot: ConversationStreamSnapshot) => {
@@ -98,6 +111,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     return () => {
       cancelled = true
       cancelPendingFrame()
+      endGroup(conversationId)
       resetStreamStore()
     }
   }, [cancelPendingFrame, conversationId])
@@ -122,20 +136,69 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
 
   useTauriEvent(api.onChatStream, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
-    lastProtocolAtRef.current = Date.now()
     const terminal = isStreamTerminal(payload)
     if (payload.type === 'run_started') {
+      setHookWarning(null)
+      if (payload.recovery) {
+        restoreGroupArm(
+          payload.conversationId,
+          payload.recovery.groupId,
+          payload.recovery.groupSize,
+          payload.recovery.armIndex,
+          payload.messageId,
+          payload.recovery.providerId,
+          payload.recovery.model,
+        )
+      }
+      if (!inFlightRef.current) restoredRunIdsRef.current.add(payload.runId)
+      inFlightRef.current = true
+      setPendingSessionConsent(null)
+      if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+        const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+        if (column) {
+          Object.assign(column, createEmptyStreamSnapshot(), {
+            runId: payload.runId,
+            messageId: payload.messageId,
+            streaming: true,
+            startedAt: Date.now(),
+          })
+          touchGroup(payload.conversationId)
+        }
+        setStreamCoarse({ streaming: true, streamError: '', cancelling: false })
+        return
+      }
       const restored = createEmptyStreamSnapshot()
       restored.runId = payload.runId
       restored.messageId = payload.messageId
       restored.streaming = true
       restored.startedAt = Date.now()
       snapshotRef.current = restored
-      if (!inFlightRef.current) restoredRunIdsRef.current.add(payload.runId)
-      inFlightRef.current = true
+      pendingToolConfirmsRef.current = []
+      pendingUserPromptsRef.current = []
       setPendingToolConfirm(null)
-      setPendingSessionConsent(null)
       showStreamSnapshotIfCurrent(payload.conversationId, restored)
+      return
+    }
+    if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+      const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+      if (!column) return
+      const segment = streamPayloadToSegment(payload)
+      if (streamTextDelta(payload) || streamReasoningDelta(payload)) column.statusNote = null
+      applyStreamDeltaToSnapshot(column, payload, segment)
+      if (terminal) {
+        finalizeReasoningDurationOnDone(column)
+        column.streaming = false
+        flushGroups(payload.conversationId)
+        restoredRunIdsRef.current.delete(payload.runId)
+        const group = getActiveGroup(payload.conversationId)
+        if (group?.columns.every((item) => !item.streaming)) {
+          endGroup(payload.conversationId)
+          if (restoredRunIdsRef.current.size > 0 || !inFlightRef.current) void finishRun()
+          else pendingDoneRef.current = finishRun
+        }
+      } else {
+        touchGroup(payload.conversationId)
+      }
       return
     }
     if (!snapshotRef.current && !inFlightRef.current) {
@@ -165,19 +228,15 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     }
   }, [finishRun, showStreamSnapshotIfCurrent])
 
-  useEffect(() => {
-    if (!streamCoarse.streaming) return
-    const timer = window.setInterval(() => {
-      if (Date.now() - lastProtocolAtRef.current < 3000) return
-      lastProtocolAtRef.current = Date.now()
-      void resubscribeChatProtocol().catch(() => {})
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [conversationId, streamCoarse.streaming])
-
   useTauriEvent(api.onChatTool, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
-    lastProtocolAtRef.current = Date.now()
+    if (hasActiveGroup(payload.conversationId) && payload.messageId) {
+      const column = ensureGroupColumn(payload.conversationId, payload.messageId)
+      if (!column) return
+      applyToolRecordToSnapshot(column, toolEventToRecord(payload))
+      touchGroup(payload.conversationId)
+      return
+    }
     const snapshot = snapshotRef.current ?? createEmptyStreamSnapshot()
     snapshotRef.current = snapshot
     applyToolRecordToSnapshot(snapshot, toolEventToRecord(payload))
@@ -185,8 +244,23 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
   }, [showStreamSnapshotIfCurrent])
 
   useTauriEvent(api.onChatSubagent, (payload) => {
+    if (payload.parentConversationId !== conversationIdRef.current) return
+    if (hasActiveGroup(payload.parentConversationId)) {
+      const group = getActiveGroup(payload.parentConversationId)
+      const column = group?.columns.find((item) => (
+        payload.parentRunId ? item.runId === payload.parentRunId : true
+      ))
+      if (!column) return
+      const index = findSubagentToolIndex(column.toolCalls, payload)
+      if (index < 0) return
+      column.toolCalls = column.toolCalls.map((tool, i) => (
+        i === index ? mergeSubagentProgress(tool, payload) : tool
+      ))
+      touchGroup(payload.parentConversationId)
+      return
+    }
     const snapshot = snapshotRef.current
-    if (!snapshot || payload.parentConversationId !== conversationIdRef.current) return
+    if (!snapshot) return
     const index = findSubagentToolIndex(snapshot.toolCalls, payload)
     if (index < 0) return
     snapshot.toolCalls = snapshot.toolCalls.map((tool, i) => (
@@ -197,13 +271,19 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
 
   useTauriEvent(api.onChatToolConfirm, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
-    setPendingToolConfirm(payload)
+    const queue = pendingToolConfirmsRef.current
+    if (!queue.some((item) => item.toolCallId === payload.toolCallId)) queue.push(payload)
+    setPendingToolConfirm(queue[0] ?? null)
     setToolConfirmError('')
   }, [])
 
   useTauriEvent(api.onChatToolConfirmWithdraw, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
-    setPendingToolConfirm((current) => current?.toolCallId === payload.toolCallId ? null : current)
+    const rest = pendingToolConfirmsRef.current.filter((item) => item.toolCallId !== payload.toolCallId)
+    pendingToolConfirmsRef.current = rest
+    setPendingToolConfirm((current) => (
+      current?.toolCallId === payload.toolCallId ? rest[0] ?? null : current
+    ))
   }, [])
 
   useTauriEvent(api.onChatSessionConsent, (payload) => {
@@ -214,12 +294,27 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
 
   useTauriEvent(api.onChatUserPrompt, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
-    setPendingUserPrompt(payload)
+    const queue = pendingUserPromptsRef.current
+    if (!queue.some((item) => item.toolCallId === payload.toolCallId)) queue.push(payload)
+    setPendingUserPrompt(queue[0] ?? null)
+  }, [])
+
+  useTauriEvent(api.onChatHook, (payload) => {
+    if (payload.conversationId !== conversationIdRef.current) return
+    setHookWarning(payload)
   }, [])
 
   useTauriEvent(api.onChatStatusNote, (payload) => {
     if (payload.conversationId !== conversationIdRef.current) return
-    lastProtocolAtRef.current = Date.now()
+    if (hasActiveGroup(payload.conversationId)) {
+      const group = getActiveGroup(payload.conversationId)
+      if (!group) return
+      for (const column of group.columns) {
+        if (column.streaming) column.statusNote = payload.note
+      }
+      touchGroup(payload.conversationId)
+      return
+    }
     const snapshot = snapshotRef.current
     if (!snapshot) return
     snapshot.statusNote = payload.note
@@ -252,7 +347,17 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     const conv = conversation
     if (!conv) return false
     inFlightRef.current = true
-    lastProtocolAtRef.current = Date.now()
+    setHookWarning(null)
+    const replyArms = conv.reply_models ?? conv.replyModels ?? []
+    const convPlanMode =
+      conv.agent_plan_state?.mode ?? conv.agentPlanState?.mode ?? 'act'
+    if (replyArms.length >= 2 && convPlanMode === 'act') {
+      beginGroup(
+        conversationId,
+        `grp-local-${Date.now()}`,
+        replyArms.map((ref) => ({ providerId: ref.provider_id, model: ref.model })),
+      )
+    }
     setPendingUserMessage({
       id: `pending_${Date.now()}`,
       role: 'user',
@@ -286,6 +391,7 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
       })
     } finally {
       inFlightRef.current = false
+      endGroup(conversationId)
       const delayed = pendingDoneRef.current
       pendingDoneRef.current = null
       if (persisted || !delayed) settlePreview()
@@ -315,7 +421,9 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     setToolConfirmError('')
     try {
       await api.chatConfirmToolCall(prompt.toolCallId, approved, always, permissionMode)
-      setPendingToolConfirm(null)
+      const rest = pendingToolConfirmsRef.current.filter((item) => item.toolCallId !== prompt.toolCallId)
+      pendingToolConfirmsRef.current = rest
+      setPendingToolConfirm(rest[0] ?? null)
     } catch (error) {
       setToolConfirmError(typeof error === 'string' ? error : (error as Error).message || '提交审批失败')
     } finally {
@@ -436,7 +544,16 @@ export function usePopoutSession(conversationId: string, lang: Lang) {
     sessionConsentSubmitting,
     resolveToolConfirm,
     resolveSessionConsent,
-    dismissUserPrompt: () => setPendingUserPrompt(null),
+    dismissUserPrompt: () => {
+      const current = pendingUserPrompt
+      const rest = pendingUserPromptsRef.current.filter((item) => (
+        current ? item.toolCallId !== current.toolCallId : true
+      ))
+      pendingUserPromptsRef.current = rest
+      setPendingUserPrompt(rest[0] ?? null)
+    },
+    hookWarning,
+    dismissHookWarning: () => setHookWarning(null),
     handleModelChange,
     handleThinkingLevelChange,
     handleRuntimeChange,

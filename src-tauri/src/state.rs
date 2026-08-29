@@ -159,6 +159,8 @@ pub struct AppState {
     /// 高频事件是否跳过主窗 All，看的是活着的 `Conversation` 订阅者，不用这个集合
     /// （窗口已建但通道订成 All / 已死时按窗口集合跳过会把 token 投进黑洞）。
     pub chat_popout_conversations: Mutex<HashSet<String>>,
+    /// 串行化弹出窗创建，避免两个 async open 都看到 < MAX 再各建一个。
+    pub chat_popout_create_lock: tokio::sync::Mutex<()>,
     /// 等待用户确认的敏感 Chat tool 调用（key = tool_call_id）。
     pub pending_chat_tool_approvals: Mutex<HashMap<String, PendingToolApproval>>,
     /// 本对话已按工具名授予的「总是允许」集合：`(conversation_id, 小写工具名)`。
@@ -397,6 +399,7 @@ impl AppState {
             chat_protocol: Mutex::new(crate::chat::protocol::ChatProtocolHub::default()),
             chat_protocol_subscribers: Mutex::new(HashMap::new()),
             chat_popout_conversations: Mutex::new(HashSet::new()),
+            chat_popout_create_lock: tokio::sync::Mutex::new(()),
             pending_chat_tool_approvals: Mutex::new(HashMap::new()),
             chat_tool_always_allow: Mutex::new(HashSet::new()),
             chat_session_consent: Mutex::new(HashSet::new()),
