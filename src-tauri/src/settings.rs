@@ -1106,6 +1106,9 @@ pub struct ChatNativeToolsConfig {
     pub run_command: bool,
     #[serde(default = "default_true")]
     pub knowledge_search: bool,
+    /// Agent tools to list / create / edit / run automations.
+    #[serde(default = "default_true")]
+    pub automation: bool,
     /// Default root for ordinary (non-project) conversation workbenches.
     /// Missing legacy configs deserialize to an empty string so sanitize can
     /// migrate `workspace_roots[0]` before falling back to the platform default.
@@ -1126,6 +1129,7 @@ impl ChatNativeToolsConfig {
             || self.edit_file
             || self.run_command
             || self.knowledge_search
+            || self.automation
     }
 }
 
@@ -1146,6 +1150,7 @@ impl Default for ChatNativeToolsConfig {
             edit_file: true,
             run_command: true,
             knowledge_search: true,
+            automation: true,
             working_directory: default_chat_working_directory(),
             workspace_roots: Vec::new(),
         }

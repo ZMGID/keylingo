@@ -139,6 +139,7 @@ function originLabel(t: I18n, origin: string) {
   if (origin === 'manual') return t.chatAutomationTriggerManual
   if (origin === 'schedule') return t.chatAutomationTriggerSchedule
   if (origin === 'hotkey') return t.chatAutomationTriggerHotkey
+  if (origin === 'agent') return t.chatAutomationTriggerAgent
   return origin
 }
 

@@ -37,6 +37,15 @@ describe('agentTools', () => {
     expect(isAutomationOptInTool(memory)).toBe(false)
   })
 
+  it('strips automation_* tools from both always-on and opt-in lists', () => {
+    const list = tool({ id: 'native__automation_list', name: 'automation_list' })
+    const run = tool({ id: 'native__automation_run', name: 'automation_run', sensitive: true })
+    expect(isAutomationAlwaysOnTool(list)).toBe(false)
+    expect(isAutomationOptInTool(list)).toBe(false)
+    expect(isAutomationAlwaysOnTool(run)).toBe(false)
+    expect(isAutomationOptInTool(run)).toBe(false)
+  })
+
   it('treats MCP readOnlyHint tools as always-on', () => {
     const ro = tool({
       id: 'mcp__notion__search',

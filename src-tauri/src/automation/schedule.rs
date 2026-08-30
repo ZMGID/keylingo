@@ -110,7 +110,7 @@ fn tick_once(app: &AppHandle) {
                 let app = app.clone();
                 let id = meta.id.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(err) = runner::enqueue(app, id, RunOrigin::Schedule, None) {
+                    if let Err(err) = runner::enqueue(app, id, RunOrigin::Schedule, None, None) {
                         eprintln!("automation schedule: {err}");
                     }
                 });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { isTauriRuntime } from '../../api/tauri'
+import { api, isTauriRuntime } from '../../api/tauri'
 import { useT } from '../../settings/i18n'
 import { getRouteAutomationId, setHash } from '../chatRoutes'
 import { automationApi } from './api'
@@ -15,8 +15,12 @@ export function AutomationCenter() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState<Automation | null>(null)
+  const [canvasEpoch, setCanvasEpoch] = useState(0)
+  const [remoteHint, setRemoteHint] = useState('')
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const editingRef = useRef<Automation | null>(null)
+  const lastSelfUpdatedAtRef = useRef('')
+  const selfSaveInFlightRef = useRef(0)
   editingRef.current = editing
 
   const loadList = useCallback(async () => {
@@ -39,11 +43,64 @@ export function AutomationCenter() {
     void loadList()
   }, [loadList])
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    void api.onAutomationChanged((event) => {
+      if (cancelled) return
+      void loadList()
+      const current = editingRef.current
+      if (!current || event.id !== current.id) return
+      if (event.kind === 'deleted') {
+        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+        setRemoteHint('')
+        setEditing(null)
+        setHash('#chat/automations')
+        return
+      }
+      if (selfSaveInFlightRef.current > 0) return
+      if (event.updatedAt && event.updatedAt === lastSelfUpdatedAtRef.current) return
+      if (saveTimerRef.current) {
+        setRemoteHint(t.chatAutomationRemoteUpdate)
+        return
+      }
+      void automationApi.get(current.id).then((fresh) => {
+        if (cancelled) return
+        if (editingRef.current?.id !== fresh.id) return
+        if (saveTimerRef.current || selfSaveInFlightRef.current > 0) {
+          setRemoteHint(t.chatAutomationRemoteUpdate)
+          return
+        }
+        if (
+          fresh.updatedAt === lastSelfUpdatedAtRef.current
+          || fresh.updatedAt === editingRef.current.updatedAt
+        ) {
+          return
+        }
+        lastSelfUpdatedAtRef.current = fresh.updatedAt
+        setRemoteHint('')
+        setEditing(fresh)
+        setCanvasEpoch((n) => n + 1)
+      }).catch(() => {})
+    }).then((fn) => {
+      if (cancelled) fn()
+      else unlisten = fn
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [loadList, t])
+
   const openId = useCallback(async (id: string) => {
     if (editingRef.current?.id === id) return
     setError('')
     try {
       const automation = await automationApi.get(id)
+      lastSelfUpdatedAtRef.current = automation.updatedAt
+      setRemoteHint('')
+      setCanvasEpoch(0)
       setEditing(automation)
       setHash(`#chat/automations/${encodeURIComponent(id)}`)
     } catch (err) {
@@ -62,6 +119,7 @@ export function AutomationCenter() {
             setError(err instanceof Error ? err.message : String(err))
           })
         }
+        setRemoteHint('')
         setEditing(null)
         return
       }
@@ -77,9 +135,11 @@ export function AutomationCenter() {
     if (!isTauriRuntime()) return
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
     saveTimerRef.current = window.setTimeout(() => {
+      selfSaveInFlightRef.current += 1
       void automationApi
         .save(next)
         .then((saved) => {
+          lastSelfUpdatedAtRef.current = saved.updatedAt
           setEditing((current) => (
             current && current.id === saved.id
               ? { ...current, updatedAt: saved.updatedAt }
@@ -90,6 +150,9 @@ export function AutomationCenter() {
         .catch((err) => {
           setError(err instanceof Error ? err.message : String(err))
         })
+        .finally(() => {
+          selfSaveInFlightRef.current = Math.max(0, selfSaveInFlightRef.current - 1)
+        })
     }, 400)
   }, [loadList])
 
@@ -98,6 +161,9 @@ export function AutomationCenter() {
     blank.name = t.chatAutomationUntitled
     try {
       const saved = isTauriRuntime() ? await automationApi.save(blank) : blank
+      lastSelfUpdatedAtRef.current = saved.updatedAt
+      setRemoteHint('')
+      setCanvasEpoch(0)
       setEditing(saved)
       setHash(`#chat/automations/${encodeURIComponent(saved.id)}`)
       void loadList()
@@ -115,6 +181,9 @@ export function AutomationCenter() {
       })
       if (typeof picked !== 'string') return
       const imported = await automationApi.importFromFile(picked)
+      lastSelfUpdatedAtRef.current = imported.updatedAt
+      setRemoteHint('')
+      setCanvasEpoch(0)
       setEditing(imported)
       setHash(`#chat/automations/${encodeURIComponent(imported.id)}`)
       void loadList()
@@ -128,6 +197,7 @@ export function AutomationCenter() {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
     const current = editingRef.current
     const finish = () => {
+      setRemoteHint('')
       setEditing(null)
       setHash('#chat/automations')
       void loadList()
@@ -145,8 +215,11 @@ export function AutomationCenter() {
         {error ? (
           <p className="shrink-0 px-6 py-2 text-[13px] text-red-600 dark:text-red-400">{error}</p>
         ) : null}
+        {remoteHint ? (
+          <p className="shrink-0 px-6 py-2 text-[13px] text-amber-700 dark:text-amber-400">{remoteHint}</p>
+        ) : null}
         <AutomationEditor
-          key={editing.id}
+          key={`${editing.id}:${canvasEpoch}`}
           automation={editing}
           onChange={persist}
           onBack={backToList}
@@ -154,12 +227,18 @@ export function AutomationCenter() {
             if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
             const current = editingRef.current
             if (current && isTauriRuntime()) {
-              const saved = await automationApi.save(current)
-              setEditing((existing) => (
-                existing && existing.id === saved.id
-                  ? { ...existing, updatedAt: saved.updatedAt }
-                  : existing
-              ))
+              selfSaveInFlightRef.current += 1
+              try {
+                const saved = await automationApi.save(current)
+                lastSelfUpdatedAtRef.current = saved.updatedAt
+                setEditing((existing) => (
+                  existing && existing.id === saved.id
+                    ? { ...existing, updatedAt: saved.updatedAt }
+                    : existing
+                ))
+              } finally {
+                selfSaveInFlightRef.current = Math.max(0, selfSaveInFlightRef.current - 1)
+              }
             }
           }}
         />

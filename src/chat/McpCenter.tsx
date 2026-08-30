@@ -108,6 +108,7 @@ export function McpCenter() {
     { key: 'skillRuntime', label: t.chatMcpNativeSkillRuntime, defaultOn: true },
     { key: 'webSearch', label: t.chatMcpNativeWebSearch },
     { key: 'webFetch', label: t.chatMcpNativeWebFetch },
+    { key: 'automation', label: t.chatMcpNativeAutomation, defaultOn: true },
   ]
 
   const loadSettings = useCallback(async () => {

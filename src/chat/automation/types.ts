@@ -170,7 +170,13 @@ export interface AutomationMeta {
   updatedAt: string
 }
 
-export type AutomationRunOrigin = 'manual' | 'schedule' | 'hotkey'
+export type AutomationRunOrigin = 'manual' | 'schedule' | 'hotkey' | 'agent'
+
+export interface AutomationChangedEvent {
+  kind: string
+  id: string
+  updatedAt?: string | null
+}
 
 export interface AutomationRunEvent {
   kind: 'run_started' | 'node_started' | 'node_finished' | 'run_finished'

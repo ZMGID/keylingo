@@ -32,6 +32,7 @@ pub fn enqueue(
     id: String,
     origin: RunOrigin,
     until_node_id: Option<String>,
+    input: Option<NodeOutput>,
 ) -> Result<AutomationRunStarted, String> {
     let automation = storage::get(&app, &id)?;
     if origin.is_production() && !automation.enabled {
@@ -60,7 +61,15 @@ pub fn enqueue(
     let app_run = app.clone();
     let run_id_spawn = run_id.clone();
     tauri::async_runtime::spawn(async move {
-        let status = execute_graph(&app_run, automation, origin, until_node_id, &run_id_spawn).await;
+        let status = execute_graph(
+            &app_run,
+            automation,
+            origin,
+            until_node_id,
+            &run_id_spawn,
+            input,
+        )
+        .await;
         let state = app_run.state::<AppState>();
         state
             .automation_active_runs
@@ -122,6 +131,7 @@ async fn execute_graph(
     origin: RunOrigin,
     until_node_id: Option<String>,
     run_id: &str,
+    input: Option<NodeOutput>,
 ) -> Result<(), String> {
     let started_at = now_iso();
     let mut record = AutomationRun {
@@ -141,10 +151,7 @@ async fn execute_graph(
         return finish_run(app, record, "error", Some("no trigger node".into()));
     };
 
-    let mut incoming = NodeOutput::with_json(
-        origin.as_str(),
-        json!({ "origin": origin.as_str(), "at": started_at }),
-    );
+    let mut incoming = seed_incoming(origin, &started_at, input);
     let mut queue = VecDeque::from([(trigger.id.clone(), incoming.clone())]);
     let mut visited = HashSet::new();
     let mut hit_until = until_node_id.is_none();
@@ -260,13 +267,7 @@ async fn execute_node(
         return Ok((prev.clone(), handle));
     }
     match node.node_type.as_str() {
-        t if t.starts_with("trigger.") => Ok((
-            NodeOutput::with_json(
-                origin.as_str(),
-                json!({ "origin": origin.as_str(), "trigger": t }),
-            ),
-            None,
-        )),
+        t if t.starts_with("trigger.") => Ok((trigger_output(origin, t, prev), None)),
         t if t.starts_with("agent.") => Ok((prev.clone(), None)),
         "action.agent" => {
             let mut spec = compose_agent_spec(automation, node);
@@ -623,7 +624,7 @@ fn eval_switch(node: &FlowNode, prev: &NodeOutput) -> String {
 
 fn start_trigger(automation: &Automation, origin: RunOrigin) -> Option<&FlowNode> {
     let wanted = match origin {
-        RunOrigin::Manual => "trigger.manual",
+        RunOrigin::Manual | RunOrigin::Agent => "trigger.manual",
         RunOrigin::Schedule => "trigger.schedule",
         RunOrigin::Hotkey => "trigger.hotkey",
     };
@@ -744,10 +745,46 @@ pub(crate) fn next_node_ids(automation: &Automation, from: &str, handle: Option<
 }
 
 fn is_slot_edge(edge: &FlowEdge) -> bool {
-    matches!(
-        edge.target_handle.as_deref(),
-        Some("runtime" | "context" | "tool" | "skill")
-    )
+    crate::automation::types::is_slot_target_handle(edge.target_handle.as_deref())
+}
+
+pub(crate) fn seed_incoming(
+    origin: RunOrigin,
+    started_at: &str,
+    input: Option<NodeOutput>,
+) -> NodeOutput {
+    match input {
+        Some(payload) => NodeOutput::with_json(
+            payload.text,
+            json!({
+                "origin": origin.as_str(),
+                "at": started_at,
+                "input": payload.json,
+            }),
+        ),
+        None => NodeOutput::with_json(
+            origin.as_str(),
+            json!({ "origin": origin.as_str(), "at": started_at }),
+        ),
+    }
+}
+
+pub(crate) fn trigger_output(origin: RunOrigin, trigger: &str, prev: &NodeOutput) -> NodeOutput {
+    let mut json = if prev.json.is_object() {
+        prev.json.clone()
+    } else {
+        json!({})
+    };
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("origin".into(), json!(origin.as_str()));
+        obj.insert("trigger".into(), json!(trigger));
+    }
+    let text = if prev.text.is_empty() {
+        origin.as_str().to_string()
+    } else {
+        prev.text.clone()
+    };
+    NodeOutput::with_json(text, json)
 }
 
 fn json_string_list(value: Option<&Value>) -> Vec<String> {
@@ -1093,6 +1130,10 @@ mod tests {
             Some("m")
         );
         assert_eq!(
+            start_trigger(&automation, RunOrigin::Agent).map(|n| n.id.as_str()),
+            Some("m")
+        );
+        assert_eq!(
             start_trigger(&automation, RunOrigin::Schedule).map(|n| n.id.as_str()),
             Some("s")
         );
@@ -1130,5 +1171,27 @@ mod tests {
         let err = command_node_output("false", "/tmp", 1, "", "nope");
         assert_eq!(err.text, "nope");
         assert_eq!(err.json["exitCode"], 1);
+    }
+
+    #[test]
+    fn seed_incoming_nests_agent_payload() {
+        let input = NodeOutput::with_json("hello", json!({ "q": "hello" }));
+        let seeded = seed_incoming(RunOrigin::Agent, "t0", Some(input));
+        assert_eq!(seeded.text, "hello");
+        assert_eq!(seeded.json["origin"], "agent");
+        assert_eq!(seeded.json["input"]["q"], "hello");
+        let trigger = trigger_output(RunOrigin::Agent, "trigger.manual", &seeded);
+        assert_eq!(trigger.text, "hello");
+        assert_eq!(trigger.json["trigger"], "trigger.manual");
+        assert_eq!(trigger.json["input"]["q"], "hello");
+    }
+
+    #[test]
+    fn trigger_output_keeps_origin_text_without_input() {
+        let prev = seed_incoming(RunOrigin::Manual, "t0", None);
+        let trigger = trigger_output(RunOrigin::Manual, "trigger.manual", &prev);
+        assert_eq!(trigger.text, "manual");
+        assert_eq!(trigger.json["origin"], "manual");
+        assert!(trigger.json.get("input").is_none());
     }
 }

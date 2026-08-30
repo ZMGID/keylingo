@@ -5,6 +5,7 @@ use chrono::{SecondsFormat, Utc};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+use super::events;
 use super::types::{is_allowed_node_type, Automation, AutomationMeta, SCHEMA_VERSION};
 
 pub(crate) fn automations_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -105,6 +106,7 @@ pub(crate) fn save(app: &AppHandle, mut automation: Automation) -> Result<Automa
     automation.updated_at = now_iso();
     validate_graph(&automation)?;
     write_atomic(&file_path(app, &automation.id)?, &automation)?;
+    events::changed(app, "saved", &automation.id, Some(automation.updated_at.clone()));
     Ok(automation)
 }
 
@@ -113,6 +115,7 @@ pub(crate) fn delete(app: &AppHandle, id: &str) -> Result<(), String> {
     if path.exists() {
         fs::remove_file(&path).map_err(|err| format!("delete automation failed: {err}"))?;
     }
+    events::changed(app, "deleted", id, None);
     Ok(())
 }
 

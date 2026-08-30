@@ -11,6 +11,7 @@ vi.mock('../api/tauri', () => ({
     get openLocalFile() {
       return vi.fn(() => Promise.resolve())
     },
+    onAutomationRun: () => Promise.resolve(() => {}),
   },
   isTauriRuntime: () => true,
 }))
@@ -223,6 +224,36 @@ describe('ToolCallBlock', () => {
     expect(screen.getByText('Question')).toBeInTheDocument()
     expect(screen.getByText('Advice')).toBeInTheDocument()
     expect(screen.getByText('这样做')).toBeInTheDocument()
+  })
+
+  it('renders an automation_run record as a live progress card', async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCallBlock
+        toolCall={buildToolCall({
+          toolName: 'automation_run',
+          source: 'native',
+          status: 'running',
+          arguments: { id: 'auto-1' },
+          structured_content: {
+            type: 'automation_run',
+            automationId: 'auto-1',
+            runId: 'run-9',
+            name: '日报',
+            nodes: [
+              { nodeId: 't1', nodeType: 'trigger.schedule', status: 'success' },
+              { nodeId: 'a1', nodeType: 'action.agent', status: 'running' },
+            ],
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText('AUTOMATION')).toBeInTheDocument()
+    expect(screen.getByText('日报')).toBeInTheDocument()
+    expect(screen.getByText('正在执行: action.agent')).toBeInTheDocument()
+    expect(screen.getByText('action.agent')).toBeInTheDocument()
+    expect(screen.getByText('打开工作流')).toBeInTheDocument()
+    await user.click(screen.getByText('打开工作流'))
   })
 
   it('renders a knowledge_search record as a KNOWLEDGE consult card with query and hits', async () => {

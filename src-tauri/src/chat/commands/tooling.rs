@@ -203,6 +203,7 @@ fn chat_mode_allows_tool(
         "web_search" | "search_web" => config.web_search,
         "web_fetch" => config.web_fetch,
         "knowledge_search" => config.knowledge_search,
+        "automation_list" | "automation_get" | "automation_runs" => true,
         "memory_read" | "memory_search" => config.memory_tools,
         _ => false,
     }

@@ -1,8 +1,9 @@
 use tauri::{AppHandle, Emitter};
 
-use super::types::AutomationRunEvent;
+use super::types::{AutomationChangedEvent, AutomationRunEvent};
 
 pub const EVENT: &str = "automation-run";
+pub const CHANGED: &str = "automation-changed";
 
 pub fn emit(app: &AppHandle, event: AutomationRunEvent) {
     if let Err(err) = app.emit(EVENT, &event) {
@@ -82,4 +83,17 @@ pub fn run_finished(
             error,
         },
     );
+}
+
+pub fn changed(app: &AppHandle, kind: &str, id: &str, updated_at: Option<String>) {
+    if let Err(err) = app.emit(
+        CHANGED,
+        &AutomationChangedEvent {
+            kind: kind.into(),
+            id: id.into(),
+            updated_at,
+        },
+    ) {
+        eprintln!("automation-changed emit failed: {err}");
+    }
 }

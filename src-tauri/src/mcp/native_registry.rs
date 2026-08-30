@@ -37,13 +37,15 @@ use crate::state::AppState;
 
 use super::registry::NativeToolContext;
 use super::types::{
-    native_advisor_tool, native_bash_output_tool, native_edit_file_tool, native_glob_files_tool,
-    native_kill_background_tool, native_knowledge_search_tool, native_list_dir_tool,
-    native_memory_modify_tool, native_memory_read_tool, native_memory_search_tool,
-    native_present_artifacts_tool, native_read_file_tool, native_run_command_tool,
-    native_save_assistant_tool, native_search_files_tool, native_web_fetch_tool,
-    native_web_search_tool, native_write_file_tool, ChatToolArtifact, ChatToolDefinition,
-    McpToolCallResult,
+    native_advisor_tool, native_automation_delete_tool, native_automation_get_tool,
+    native_automation_list_tool, native_automation_run_tool, native_automation_runs_tool,
+    native_automation_set_enabled_tool, native_automation_upsert_tool, native_bash_output_tool,
+    native_edit_file_tool, native_glob_files_tool, native_kill_background_tool,
+    native_knowledge_search_tool, native_list_dir_tool, native_memory_modify_tool,
+    native_memory_read_tool, native_memory_search_tool, native_present_artifacts_tool,
+    native_read_file_tool, native_run_command_tool, native_save_assistant_tool,
+    native_search_files_tool, native_web_fetch_tool, native_web_search_tool,
+    native_write_file_tool, ChatToolArtifact, ChatToolDefinition, McpToolCallResult,
 };
 
 /// Gate signature mirrors `list_native_builtin_tool_defs(native,
@@ -147,6 +149,76 @@ pub static NATIVE_TOOLS: &[NativeToolEntry] = &[
         read_only: true,
         requires_session_consent: false,
         call: NativeToolCall::Async(call_knowledge_search),
+    },
+    NativeToolEntry {
+        name: "automation_list",
+        def: native_automation_list_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: true,
+        bypasses_approval: false,
+        read_only: true,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_list),
+    },
+    NativeToolEntry {
+        name: "automation_get",
+        def: native_automation_get_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: true,
+        bypasses_approval: false,
+        read_only: true,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_get),
+    },
+    NativeToolEntry {
+        name: "automation_upsert",
+        def: native_automation_upsert_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: false,
+        bypasses_approval: false,
+        read_only: false,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_upsert),
+    },
+    NativeToolEntry {
+        name: "automation_set_enabled",
+        def: native_automation_set_enabled_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: false,
+        bypasses_approval: false,
+        read_only: false,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_set_enabled),
+    },
+    NativeToolEntry {
+        name: "automation_run",
+        def: native_automation_run_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: false,
+        bypasses_approval: false,
+        read_only: false,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_run),
+    },
+    NativeToolEntry {
+        name: "automation_runs",
+        def: native_automation_runs_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: true,
+        bypasses_approval: false,
+        read_only: true,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_runs),
+    },
+    NativeToolEntry {
+        name: "automation_delete",
+        def: native_automation_delete_tool,
+        enabled: |native, _, _| native.automation,
+        parallel_safe: false,
+        bypasses_approval: false,
+        read_only: false,
+        requires_session_consent: false,
+        call: NativeToolCall::Async(call_automation_delete),
     },
     NativeToolEntry {
         name: "advisor",
@@ -667,6 +739,39 @@ fn call_knowledge_search(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
     })
 }
 
+fn call_automation_list(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move { crate::automation::tools::list(ctx.app) })
+}
+
+fn call_automation_get(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move { crate::automation::tools::get(ctx.app, ctx.arguments) })
+}
+
+fn call_automation_upsert(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move { crate::automation::tools::upsert(ctx.app, ctx.arguments) })
+}
+
+fn call_automation_set_enabled(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move { crate::automation::tools::set_enabled(ctx.app, ctx.arguments) })
+}
+
+fn call_automation_run(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move {
+        let generation = ctx
+            .native_ctx
+            .map(|n| (n.conversation_id.as_str(), n.generation));
+        crate::automation::tools::run(ctx.app, ctx.arguments, generation).await
+    })
+}
+
+fn call_automation_runs(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move { crate::automation::tools::runs(ctx.app, ctx.arguments) })
+}
+
+fn call_automation_delete(ctx: NativeCallCtx<'_>) -> NativeToolFuture<'_> {
+    Box::pin(async move { crate::automation::tools::delete(ctx.app, ctx.arguments) })
+}
+
 /// Advisor consultation (executor-advisor pattern). Runs a single-shot chat
 /// completion against the model configured in `default_models.advisor` and
 /// returns its guidance text. No tools, no recursion. If the advisor model is
@@ -988,6 +1093,13 @@ mod tests {
         "web_search",
         "web_fetch",
         "knowledge_search",
+        "automation_list",
+        "automation_get",
+        "automation_upsert",
+        "automation_set_enabled",
+        "automation_run",
+        "automation_runs",
+        "automation_delete",
         "advisor",
         "read",
         "ls",
@@ -1069,6 +1181,9 @@ mod tests {
                 "web_search",
                 "web_fetch",
                 "knowledge_search",
+                "automation_list",
+                "automation_get",
+                "automation_runs",
                 "advisor",
                 "read",
                 "ls",
@@ -1121,6 +1236,9 @@ mod tests {
                 "web_search",
                 "web_fetch",
                 "knowledge_search",
+                "automation_list",
+                "automation_get",
+                "automation_runs",
                 "advisor",
                 "read",
                 "ls",
@@ -1146,6 +1264,7 @@ mod tests {
             edit_file: true,
             run_command: true,
             knowledge_search: true,
+            automation: true,
             working_directory: String::new(),
             workspace_roots: Vec::new(),
         };
@@ -1194,6 +1313,7 @@ mod tests {
             edit_file: false,
             run_command: false,
             knowledge_search: false,
+            automation: false,
             working_directory: String::new(),
             workspace_roots: Vec::new(),
         };
@@ -1225,6 +1345,22 @@ mod tests {
             ["write", "present_artifacts"]
         );
 
+        let mut automation_only = off.clone();
+        automation_only.automation = true;
+        assert_eq!(
+            names(&automation_only, false, false),
+            [
+                "automation_list",
+                "automation_get",
+                "automation_upsert",
+                "automation_set_enabled",
+                "automation_run",
+                "automation_runs",
+                "automation_delete",
+                "present_artifacts",
+            ]
+        );
+
         // memory gate is independent of native toggles.
         assert_eq!(
             names(&off, false, true),
@@ -1246,6 +1382,7 @@ mod tests {
             edit_file: true,
             run_command: true,
             knowledge_search: true,
+            automation: true,
             working_directory: String::new(),
             workspace_roots: Vec::new(),
         };
@@ -1255,6 +1392,13 @@ mod tests {
                 "web_search",
                 "web_fetch",
                 "knowledge_search",
+                "automation_list",
+                "automation_get",
+                "automation_upsert",
+                "automation_set_enabled",
+                "automation_run",
+                "automation_runs",
+                "automation_delete",
                 "read",
                 "grep",
                 "glob",

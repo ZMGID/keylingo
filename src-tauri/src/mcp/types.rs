@@ -745,6 +745,145 @@ pub fn native_web_fetch_tool() -> ChatToolDefinition {
     }
 }
 
+fn native_automation_tool(
+    name: &str,
+    description: &str,
+    input_schema: serde_json::Value,
+    sensitive: bool,
+) -> ChatToolDefinition {
+    ChatToolDefinition {
+        id: format!("native__{name}"),
+        name: name.to_string(),
+        description: description.to_string(),
+        source: "native".to_string(),
+        server_id: None,
+        server_name: Some("Kivio".to_string()),
+        input_schema,
+        sensitive,
+        annotations: None,
+        output_schema: None,
+    }
+}
+
+pub fn native_automation_list_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_list",
+        "List Kivio automations (id, name, enabled, trigger type). Call this once to avoid duplicates, then create with automation_upsert. Do not discover node types by trial.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        false,
+    )
+}
+
+pub fn native_automation_get_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_get",
+        "Get the full graph JSON for one automation by id (nodes, edges, viewport).",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Automation id from automation_list." }
+            },
+            "required": ["id"]
+        }),
+        false,
+    )
+}
+
+pub fn native_automation_upsert_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_upsert",
+        "Create or replace a Kivio automation graph in ONE call. Omit id to create. Omit node positions to auto-layout. Activate the `automation` skill first for node types and examples. Do not glob the repo and do not dry_run-probe types. Validation errors return allowedNodeTypes and schemaHint.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "automation": {
+                    "type": "object",
+                    "description": "Complete graph: {name, enabled, nodes:[{id, type, data}], edges:[{id, source, target, sourceHandle?, targetHandle?}]}. schemaVersion is set by Kivio. Allowed node types are in the `automation` skill."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Validate a COMPLETE candidate graph without saving. Never use this to discover node types."
+                }
+            },
+            "required": ["automation"]
+        }),
+        true,
+    )
+}
+
+pub fn native_automation_set_enabled_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_set_enabled",
+        "Enable or disable an automation. Enabled graphs honor schedule and hotkey triggers.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "enabled": { "type": "boolean" }
+            },
+            "required": ["id", "enabled"]
+        }),
+        true,
+    )
+}
+
+pub fn native_automation_run_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_run",
+        "Run an automation and wait for it to finish. Optional input is exposed to later nodes as {{output}} / {{json.input.*}}. Returns per-node status plus the last step's output. If it is still running after timeout_seconds, returns runId so you can poll with automation_runs.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Automation id to run." },
+                "input": {
+                    "description": "Optional payload: a string, or { text, json }. Downstream nodes read it via {{output}} and {{json.input.*}}."
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "How long to wait (default 600, max 1800). On timeout the run continues in the background."
+                }
+            },
+            "required": ["id"]
+        }),
+        true,
+    )
+}
+
+pub fn native_automation_runs_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_runs",
+        "List recent runs for an automation, or fetch one run's per-node details when run_id is set.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "run_id": { "type": "string", "description": "Optional run id from automation_run." }
+            },
+            "required": ["id"]
+        }),
+        false,
+    )
+}
+
+pub fn native_automation_delete_tool() -> ChatToolDefinition {
+    native_automation_tool(
+        "automation_delete",
+        "Delete an automation and its run history. This cannot be undone.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            },
+            "required": ["id"]
+        }),
+        true,
+    )
+}
+
 /// `knowledge_search` — retrieve passages from the user's knowledge bases
 /// (RAG). Read-only. Returns passages each tagged with a `[n]` citation marker.
 pub fn native_knowledge_search_tool() -> ChatToolDefinition {
@@ -949,6 +1088,30 @@ mod tests {
     #[test]
     fn builtin_skill_tools_are_not_marked_sensitive() {
         assert!(!native_skill_activate_tool().sensitive);
+    }
+
+    #[test]
+    fn automation_upsert_tool_description_stays_short() {
+        let def = native_automation_upsert_tool();
+        assert!(
+            def.description.contains("`automation` skill"),
+            "{}",
+            def.description
+        );
+        assert!(
+            !def.description.contains("Allowed node types"),
+            "schema belongs in the skill and validation errors, not the always-on tool"
+        );
+        assert!(
+            !def.description.contains("Minimal example"),
+            "{}",
+            def.description
+        );
+        assert!(
+            def.description.len() < 500,
+            "upsert description grew to {} chars",
+            def.description.len()
+        );
     }
 
     #[test]

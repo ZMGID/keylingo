@@ -8,7 +8,7 @@ use super::types::{
     RunOrigin,
 };
 
-fn refresh_hotkeys(app: &AppHandle) {
+pub(crate) fn refresh_hotkeys(app: &AppHandle) {
     if let Err(err) = crate::shortcuts::register_hotkeys(app) {
         let _ = app.emit("hotkey-warning", err);
     }
@@ -80,7 +80,7 @@ pub fn automation_run(
     id: String,
     until_node_id: Option<String>,
 ) -> Result<AutomationRunStarted, String> {
-    runner::enqueue(app, id, RunOrigin::Manual, until_node_id)
+    runner::enqueue(app, id, RunOrigin::Manual, until_node_id, None)
 }
 
 #[tauri::command]

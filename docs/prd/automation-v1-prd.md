@@ -101,3 +101,17 @@
 4. 定时触发失败的 run，能从历史点开看到挂在哪个节点、错误是什么。
 5. 后端拒绝一切非法图（悬空边、双 trigger、环、多入边），前端能定位标红。
 6. 文档层面：本文件第 2 节的 8 条边界写进 `automation/mod.rs` 头注释的精简版。
+
+---
+
+## 5. Agent 操作面（工具 + 运行回传）
+
+Chat 内置 agent 通过宿主无关层 `automation/tools.rs` 操作自动化（7 个 native 工具：`list` / `get` / `upsert` / `set_enabled` / `run` / `runs` / `delete`）。`upsert` 强制走 `validate.rs`（error 拒绝、warning 放行）；画布手动保存仍是所见即所得。`automation_run` 阻塞等待，可选 `input` 合入 trigger 输出（`{{output}}` / `{{json.input.*}}`），超时返回 `run_id` 而不当失败；用户停止生成时 `runner::cancel` 级联。进度卡片复用 `structured_content.type = "automation_run"` + 现有 `automation-run` 事件，不加 chat-protocol 事件、不加新 segment。工作流内 `action.agent` 默认剥离全部 `automation_*`，防递归。
+
+### 明确不做（本阶段）
+
+- 给外部 CLI 暴露的 MCP server：只预留 `tools.rs` 这一层，不写 server 代码。
+- n8n 式 partial diff 更新。
+- webhook 触发器。
+- 跨工作流调用节点。
+- `HookDef` 扩展 `automation_run_start/end`（P2）。

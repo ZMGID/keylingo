@@ -979,6 +979,15 @@ fn native_tools_prompt(available_builtin_tools: &[String], _has_workbench: bool)
             "A stronger advisor model is available via the advisor tool. Consult it when you are stuck, have failed the same approach repeatedly, or face a significant design/architecture decision — pass a specific question plus the relevant context. Do not call it for routine steps you can handle yourself.".to_string(),
         );
     }
+    if has("automation_upsert") {
+        bullets.push(
+            "Creating or editing automations: activate the `automation` skill, then submit one complete graph with automation_upsert. Do not glob the workspace to learn the format and do not dry_run-probe node types one at a time — types and examples are in that skill; validation errors return schemaHint.".to_string(),
+        );
+    } else if has("automation_list") {
+        bullets.push(
+            "You can inspect automations with automation_list / automation_get / automation_runs. Creating or editing graphs requires Kivio Agent (automation_upsert).".to_string(),
+        );
+    }
     if has_write || has_edit || has_bash {
         bullets.push(
             "Before changing code, read neighboring files and existing conventions — mimic the current style, naming, and the libraries/frameworks already in use; never assume a library is available without confirming the project already uses it. Do not add code comments unless asked. After code changes, verify when you can (run existing tests, lint/typecheck); never git commit/push unless the user explicitly asks. Reference code locations as `file_path:line_number`. When several independent lookups or commands are needed, call multiple tools in parallel in one message instead of serially.".to_string(),
@@ -1562,6 +1571,22 @@ mod tests {
         assert!(!prompt.contains("Touch files"), "{prompt}");
         assert!(!prompt.contains("npm run dev"), "{prompt}");
         assert!(!prompt.contains("Skill script"), "{prompt}");
+    }
+
+    #[test]
+    fn native_tools_prompt_warns_against_probing_automations() {
+        let names = vec![
+            "automation_list".to_string(),
+            "automation_upsert".to_string(),
+        ];
+        let prompt = native_tools_prompt(&names, false).expect("prompt");
+        assert!(prompt.contains("automation_upsert"), "{prompt}");
+        assert!(prompt.contains("dry_run-probe"), "{prompt}");
+        assert!(prompt.contains("`automation` skill"), "{prompt}");
+        assert!(
+            !prompt.contains("on the automation_upsert tool"),
+            "schema lives in the skill, not the always-on tool description: {prompt}"
+        );
     }
 
     #[test]

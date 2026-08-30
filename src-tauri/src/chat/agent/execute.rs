@@ -827,6 +827,9 @@ fn effective_tool_timeout_ms(
     if tool.source == "native" && tool.name == crate::chat::sub_agent::AGENT_TOOL_NAME {
         return crate::chat::sub_agent::SUB_AGENT_TOOL_TIMEOUT_MS.max(default_timeout_ms);
     }
+    if tool.source == "native" && tool.name == "automation_run" {
+        return crate::automation::tools::run_timeout_ms(arguments).max(default_timeout_ms);
+    }
     // MCP 与其它工具一样走设置里的「工具超时」，不单独封顶。
     default_timeout_ms
 }
@@ -1589,6 +1592,18 @@ mod tests {
         assert_eq!(
             effective_tool_timeout_ms(&settings, &tool, &arguments),
             crate::chat::sub_agent::SUB_AGENT_TOOL_TIMEOUT_MS + 1
+        );
+    }
+
+    #[test]
+    fn automation_run_uses_requested_timeout_plus_buffer() {
+        let mut settings = Settings::default();
+        settings.chat_tools.tool_timeout_ms = 60_000;
+        let tool = crate::mcp::types::native_automation_run_tool();
+        let arguments = serde_json::json!({ "id": "a1", "timeout_seconds": 120 });
+        assert_eq!(
+            effective_tool_timeout_ms(&settings, &tool, &arguments),
+            125_000
         );
     }
 

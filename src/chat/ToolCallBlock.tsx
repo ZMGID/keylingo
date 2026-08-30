@@ -26,6 +26,7 @@ import {
   Search,
   SquareTerminal,
   Trash2,
+  Workflow,
   Wrench,
   XCircle,
 } from 'lucide-react'
@@ -43,6 +44,8 @@ import { AskUserBlock } from './AskUserBlock'
 import { ChatMarkdown } from './ChatMarkdown'
 import { WebSearchIcon } from '../settings/NavIcons'
 import { api } from '../api/tauri'
+import { useT } from '../settings/i18n'
+import { setHash } from './chatRoutes'
 
 export interface ToolCallBlockProps {
   toolCall: ToolCallRecord
@@ -196,6 +199,14 @@ function toolGlyph(toolCall: ToolCallRecord): LucideIcon | ComponentType<{ size?
       return Bot
     case 'ask_user':
       return MessageCircleQuestion
+    case 'automation_run':
+    case 'automation_list':
+    case 'automation_get':
+    case 'automation_upsert':
+    case 'automation_set_enabled':
+    case 'automation_runs':
+    case 'automation_delete':
+      return Workflow
     default:
       break
   }
@@ -478,6 +489,7 @@ function ConsultCard({
   identityChips,
   metricChips,
   statusLine,
+  defaultOpen = false,
   children,
 }: {
   label: string
@@ -485,9 +497,10 @@ function ConsultCard({
   identityChips?: ReactNode
   metricChips?: ReactNode
   statusLine?: string
+  defaultOpen?: boolean
   children?: ReactNode
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(defaultOpen)
   const hasBody = Boolean(children)
   const running = status === 'running'
   return (
@@ -690,6 +703,191 @@ function AdvisorCard({ toolCall }: ToolCallBlockProps) {
       )}
     </ConsultCard>
   )
+}
+
+interface AutomationRunNodeView {
+  nodeId: string
+  nodeType: string
+  status: string
+  output?: string
+  error?: string
+}
+
+function structuredAutomationRun(toolCall: ToolCallRecord): {
+  automationId: string
+  runId: string
+  name: string
+  status?: string
+  nodes: AutomationRunNodeView[]
+} | null {
+  const structured = objectValue(toolCall.structured_content ?? toolCall.structuredContent)
+  if (!structured || structured.type !== 'automation_run') return null
+  const nodes = Array.isArray(structured.nodes)
+    ? structured.nodes.flatMap((item) => {
+        const node = objectValue(item)
+        if (!node) return []
+        const nodeId = stringValue(node.nodeId ?? node.node_id)
+        if (!nodeId) return []
+        return [{
+          nodeId,
+          nodeType: stringValue(node.nodeType ?? node.node_type),
+          status: stringValue(node.status) || 'running',
+          output: stringValue(node.output) || undefined,
+          error: stringValue(node.error) || undefined,
+        }]
+      })
+    : []
+  return {
+    automationId: stringValue(structured.automationId ?? structured.automation_id),
+    runId: stringValue(structured.runId ?? structured.run_id),
+    name: stringValue(structured.name),
+    status: stringValue(structured.status) || undefined,
+    nodes,
+  }
+}
+
+function isAutomationRunRecord(toolCall: ToolCallRecord): boolean {
+  if (structuredAutomationRun(toolCall)) return true
+  return toolRawName(toolCall) === 'automation_run'
+}
+
+function AutomationRunCard({ toolCall }: ToolCallBlockProps) {
+  const t = useT()
+  const status = normalizeToolCallStatus(toolCall.status)
+  const view = useMemo(() => structuredAutomationRun(toolCall), [toolCall])
+  const args = useMemo(() => parsedArguments(toolCall), [toolCall])
+  const automationId = view?.automationId || stringValue(args?.id)
+  const name = view?.name || stringValue(args?.name)
+  const [liveRunId, setLiveRunId] = useState(view?.runId ?? '')
+  const [liveNodes, setLiveNodes] = useState<AutomationRunNodeView[]>(view?.nodes ?? [])
+  const [liveStep, setLiveStep] = useState('')
+
+  useEffect(() => {
+    if (view?.runId) setLiveRunId(view.runId)
+    if (view?.nodes?.length) setLiveNodes(view.nodes)
+  }, [view])
+
+  useEffect(() => {
+    if (!automationId) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    void api.onAutomationRun((event) => {
+      if (event.automationId !== automationId) return
+      if (liveRunId && event.runId !== liveRunId) return
+      if (!liveRunId && event.runId) setLiveRunId(event.runId)
+      if (event.kind === 'node_started' && event.nodeId) {
+        setLiveStep(event.nodeId)
+        setLiveNodes((current) => upsertLiveNode(current, event.nodeId!, 'running'))
+      }
+      if (event.kind === 'node_finished' && event.nodeId) {
+        setLiveNodes((current) => upsertLiveNode(
+          current,
+          event.nodeId!,
+          event.status || 'success',
+          event.output,
+          event.error,
+        ))
+      }
+      if (event.kind === 'run_finished') {
+        setLiveStep('')
+      }
+    }).then((fn) => {
+      if (cancelled) fn()
+      else unlisten = fn
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [automationId, liveRunId])
+
+  const nodes = liveNodes.length ? liveNodes : (view?.nodes ?? [])
+  const current = nodes.find((node) => node.status === 'running')
+  const runningLabel = current
+    ? `${t.chatAutomationExecuting}: ${current.nodeType || current.nodeId}`
+    : liveStep
+      ? `${t.chatAutomationExecuting}: ${liveStep}`
+      : `${t.chatAutomationStatusRunning}…`
+  const statusLine = status === 'running'
+    ? runningLabel
+    : status === 'error'
+      ? (toolCall.error ? compactToolError(toolCall.error) : t.chatAutomationStatusError)
+      : status === 'cancelled'
+        ? t.chatAutomationCancelled
+        : ''
+  const error = toolCall.error ? compactToolError(toolCall.error) : ''
+  const result = status !== 'running' && status !== 'pending' ? getResultPreview(toolCall) : ''
+
+  return (
+    <ConsultCard
+      label="AUTOMATION"
+      status={status}
+      defaultOpen={status === 'running' || nodes.length > 0}
+      identityChips={
+        <>
+          {name ? <CardChip>{name}</CardChip> : null}
+          {automationId && !name ? <CardChip>{compactText(automationId, 18)}</CardChip> : null}
+        </>
+      }
+      statusLine={statusLine}
+    >
+      {nodes.length > 0 && (
+        <div className="space-y-0.5 font-mono text-[10.5px] text-neutral-500 dark:text-neutral-400">
+          {nodes.map((node) => (
+            <div key={node.nodeId} className="flex min-w-0 items-center gap-1.5">
+              <span className="shrink-0">
+                {node.status === 'success' ? '✓' : node.status === 'error' ? '✗' : node.status === 'running' ? '…' : '·'}
+              </span>
+              <span className="min-w-0 truncate">{node.nodeType || node.nodeId}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {status !== 'running' && result && (
+        <CardSection label="Result">
+          <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
+            {compactText(result, 800)}
+          </div>
+        </CardSection>
+      )}
+      {error && status !== 'running' && (
+        <div className="whitespace-pre-wrap break-words text-neutral-500 dark:text-neutral-400">
+          {error}
+        </div>
+      )}
+      {automationId ? (
+        <button
+          type="button"
+          className="text-[12px] text-neutral-600 underline-offset-2 hover:underline dark:text-neutral-300"
+          data-tauri-drag-region="false"
+          onClick={() => setHash(`#chat/automations/${encodeURIComponent(automationId)}`)}
+        >
+          {t.chatAutomationOpenWorkflow}
+        </button>
+      ) : null}
+    </ConsultCard>
+  )
+}
+
+function upsertLiveNode(
+  nodes: AutomationRunNodeView[],
+  nodeId: string,
+  status: string,
+  output?: string | null,
+  error?: string | null,
+): AutomationRunNodeView[] {
+  const next = nodes.map((node) => (
+    node.nodeId === nodeId
+      ? {
+          ...node,
+          status,
+          output: output ?? node.output,
+          error: error ?? node.error,
+        }
+      : node
+  ))
+  if (next.some((node) => node.nodeId === nodeId)) return next
+  return [...next, { nodeId, nodeType: nodeId, status, output: output ?? undefined, error: error ?? undefined }]
 }
 
 function normalizeFileMutationFile(value: unknown): FileMutationFile | null {
@@ -1254,6 +1452,13 @@ function getToolName(toolCall: ToolCallRecord): string {
   }
   if (raw === 'web_fetch') return 'Fetch'
   if (raw === 'knowledge_search') return 'Knowledge search'
+  if (raw === 'automation_run') return 'Run automation'
+  if (raw === 'automation_list') return 'List automations'
+  if (raw === 'automation_get') return 'Get automation'
+  if (raw === 'automation_upsert') return 'Save automation'
+  if (raw === 'automation_set_enabled') return 'Toggle automation'
+  if (raw === 'automation_runs') return 'Automation runs'
+  if (raw === 'automation_delete') return 'Delete automation'
   if (raw === 'mixer_vision') return 'Vision'
   if (raw === 'mixer_generate_image') return 'Generate image'
   if (raw === 'todo_write' || raw === 'todo_update') return 'Update todos'
@@ -1344,6 +1549,19 @@ function getToolTarget(toolCall: ToolCallRecord): string {
       case 'web_search':
       case 'knowledge_search':
         return compactText(firstString(args?.query), 140)
+      case 'automation_run':
+      case 'automation_get':
+      case 'automation_set_enabled':
+      case 'automation_runs':
+      case 'automation_delete':
+        return compactText(firstString(args?.id, args?.name), 140)
+      case 'automation_upsert': {
+        const graph = args?.automation
+        const name = graph && typeof graph === 'object' && !Array.isArray(graph)
+          ? firstString((graph as Record<string, unknown>).name)
+          : ''
+        return compactText(name || firstString(args?.id), 140)
+      }
       case 'todo_write': {
         const counts = formatTodoCounts(
           structuredTodoState(toolCall)?.items ?? normalizeTodoItems(args?.todos),
@@ -1719,6 +1937,9 @@ function ToolCallBlockComponent(props: ToolCallBlockProps) {
   }
   if (isAdvisorRecord(props.toolCall)) {
     return <AdvisorCard {...props} />
+  }
+  if (isAutomationRunRecord(props.toolCall)) {
+    return <AutomationRunCard {...props} />
   }
   if (isKnowledgeSearchRecord(props.toolCall)) {
     return <KnowledgeCard {...props} />

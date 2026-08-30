@@ -266,7 +266,7 @@ async fn run_builtin_agent_node(
         );
     }
     apply_agent_tool_whitelist(&mut tools, &spec.tool_ids)?;
-    strip_automation_memory_tools(&mut tools);
+    strip_workflow_forbidden_tools(&mut tools);
     if !is_chat {
         ensure_skill_activate_tool(&mut tools);
     }
@@ -426,7 +426,7 @@ fn apply_agent_tool_whitelist(
     // slot can load bodies and the model can still `read` / search. `toolIds`
     // only opts in write/side-effect tools. Memory never mounts.
     tools.retain(|tool| {
-        if is_memory_tool(tool) {
+        if is_memory_tool(tool) || is_automation_control_tool(tool) {
             return false;
         }
         if is_always_on_automation_tool(tool) {
@@ -449,8 +449,14 @@ fn is_skill_activate_tool(tool: &ChatToolDefinition) -> bool {
     tool.source == "skill" || tool.name == "skill"
 }
 
+fn is_automation_control_tool(tool: &ChatToolDefinition) -> bool {
+    tool.name.starts_with("automation_") || tool.id.contains("automation_")
+}
+
 fn is_always_on_automation_tool(tool: &ChatToolDefinition) -> bool {
-    !is_memory_tool(tool) && (is_skill_activate_tool(tool) || tool.is_read_only_tool())
+    !is_memory_tool(tool)
+        && !is_automation_control_tool(tool)
+        && (is_skill_activate_tool(tool) || tool.is_read_only_tool())
 }
 
 fn ensure_skill_activate_tool(tools: &mut Vec<ChatToolDefinition>) {
@@ -460,8 +466,8 @@ fn ensure_skill_activate_tool(tools: &mut Vec<ChatToolDefinition>) {
     tools.push(crate::mcp::types::native_skill_activate_tool());
 }
 
-fn strip_automation_memory_tools(tools: &mut Vec<ChatToolDefinition>) {
-    tools.retain(|tool| !is_memory_tool(tool));
+fn strip_workflow_forbidden_tools(tools: &mut Vec<ChatToolDefinition>) {
+    tools.retain(|tool| !is_memory_tool(tool) && !is_automation_control_tool(tool));
 }
 
 fn extra_skill_bodies(
@@ -765,7 +771,20 @@ mod tests {
         ];
         apply_agent_tool_whitelist(&mut tools, &["native__read".into(), "native__memory_read".into()])
             .unwrap();
-        strip_automation_memory_tools(&mut tools);
+        strip_workflow_forbidden_tools(&mut tools);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "read");
+    }
+
+    #[test]
+    fn automation_control_tools_are_stripped_even_when_read_only() {
+        let mut tools = vec![
+            tool("native__read", "read"),
+            tool("native__automation_list", "automation_list"),
+            tool("native__automation_run", "automation_run"),
+        ];
+        apply_agent_tool_whitelist(&mut tools, &["automation_run".into()]).unwrap();
+        strip_workflow_forbidden_tools(&mut tools);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "read");
     }

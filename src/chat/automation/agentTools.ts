@@ -21,6 +21,13 @@ export function isMemoryTool(tool: { name?: string, id?: string }): boolean {
   return name.startsWith('memory_') || id.includes('memory_')
 }
 
+/** Workflow agents must not list/create/run automations (recursion). */
+export function isAutomationControlTool(tool: { name?: string, id?: string }): boolean {
+  const name = (tool.name || '').toLowerCase()
+  const id = (tool.id || '').toLowerCase()
+  return name.startsWith('automation_') || id.includes('automation_')
+}
+
 export function isSkillActivateTool(tool: { source?: string, name?: string }): boolean {
   return tool.source === 'skill' || tool.name === 'skill'
 }
@@ -32,7 +39,7 @@ function annotationBool(annotations: unknown, key: string): boolean | undefined 
 }
 
 export function isAutomationAlwaysOnTool(tool: ChatToolDefinition): boolean {
-  if (isMemoryTool(tool)) return false
+  if (isMemoryTool(tool) || isAutomationControlTool(tool)) return false
   if (isSkillActivateTool(tool)) return true
   if (tool.source === 'mcp') {
     return annotationBool(tool.annotations, 'readOnlyHint') === true
@@ -45,7 +52,7 @@ export function isAutomationAlwaysOnTool(tool: ChatToolDefinition): boolean {
 
 /** Write / side-effect tools the Tool slot can opt into. Skill + read-only are not in this list. */
 export function isAutomationOptInTool(tool: ChatToolDefinition): boolean {
-  return !isMemoryTool(tool) && !isAutomationAlwaysOnTool(tool)
+  return !isMemoryTool(tool) && !isAutomationControlTool(tool) && !isAutomationAlwaysOnTool(tool)
 }
 
 export function pruneAlwaysOnToolIds(toolIds: string[], tools: ChatToolDefinition[]): string[] {

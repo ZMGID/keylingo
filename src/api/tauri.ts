@@ -18,7 +18,7 @@ import type {
   ChatRunEventEnvelope,
   ChatSegmentPayload as GeneratedChatSegmentPayload,
 } from '../generated/chatProtocol'
-import type { Automation, AutomationMeta, AutomationRunEvent, AutomationRunStarted, AutomationRunSummary } from '../chat/automation/types'
+import type { Automation, AutomationChangedEvent, AutomationMeta, AutomationRunEvent, AutomationRunStarted, AutomationRunSummary } from '../chat/automation/types'
 
 // ========== 类型定义 ==========
 
@@ -420,6 +420,7 @@ export type ChatNativeToolsConfig = {
   editFile?: boolean
   runCommand?: boolean
   knowledgeSearch?: boolean
+  automation?: boolean
   workingDirectory?: string
   /** Legacy settings compatibility only. */
   workspaceRoots?: string[]
@@ -451,6 +452,7 @@ export function defaultNativeTools(): ChatNativeToolsConfig {
     editFile: true,
     runCommand: true,
     knowledgeSearch: true,
+    automation: true,
     workingDirectory: '',
     workspaceRoots: [],
   }
@@ -2001,6 +2003,8 @@ export const api = {
   automationRunsList: (id: string) => invoke<AutomationRunSummary[]>('automation_runs_list', { id }),
   onAutomationRun: (listener: (payload: AutomationRunEvent) => void) =>
     on<AutomationRunEvent>('automation-run', listener),
+  onAutomationChanged: (listener: (payload: AutomationChangedEvent) => void) =>
+    on<AutomationChangedEvent>('automation-changed', listener),
 
   // 窗口控制
   /** 给当前（chat）窗口上 Mica，返回材质是否真的生效。Win10 没有 Mica 时为 false —— 这条
