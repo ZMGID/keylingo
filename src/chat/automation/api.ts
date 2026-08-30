@@ -15,6 +15,8 @@ export const automationApi = {
   run: (id: string, untilNodeId?: string) => api.automationRun(id, untilNodeId),
   cancel: (id: string) => api.automationCancel(id),
   listRuns: (id: string) => api.automationRunsList(id),
+  exportToFile: (id: string, path: string) => api.automationExport(id, path),
+  importFromFile: (path: string) => api.automationImport(path),
 }
 
 export type { Automation, AutomationMeta, AutomationRunStarted, AutomationRunSummary }

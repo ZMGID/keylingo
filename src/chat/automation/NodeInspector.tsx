@@ -4,7 +4,9 @@ import { Button } from '../../components/Button'
 import { FieldBlock, Select, Toggle } from '../../settings/components'
 import { useT } from '../../settings/i18n'
 import { catalogEntry } from './nodeCatalog'
-import { isTriggerType, type FlowNode, type IfOp } from './types'
+import { AgentInspector } from './AgentInspector'
+import { slotForNodeType } from './agentModel'
+import { isAttachmentType, isTriggerType, type FlowNode, type IfOp } from './types'
 
 function InspectorSection({ title, children }: { title: string, children: ReactNode }) {
   return (
@@ -32,17 +34,17 @@ export function NodeInspector({
   const entry = catalogEntry(node.type)
   const Icon = entry?.icon
   const patchData = (data: FlowNode['data']) => onChange({ ...node, data })
+  const slot = slotForNodeType(node.type)
   const kind = isTriggerType(node.type)
     ? t.chatAutomationKindTrigger
     : node.type === 'logic.if'
       ? t.chatAutomationKindLogic
-      : t.chatAutomationKindAction
-  const usesTemplates = node.type === 'action.agent'
-    || node.type === 'action.notify'
-    || node.type === 'action.http'
+      : slot
+        ? t.chatAutomationKindSlot
+        : t.chatAutomationKindAction
+  const usesTemplates = node.type === 'action.notify' || node.type === 'action.http'
   const hasParams = node.type === 'trigger.schedule'
     || node.type === 'trigger.hotkey'
-    || node.type === 'action.agent'
     || node.type === 'action.notify'
     || node.type === 'action.http'
     || node.type === 'logic.if'
@@ -63,6 +65,23 @@ export function NodeInspector({
 
       {entry ? (
         <p className="kv-automation-inspector-lead">{entry.hint(t)}</p>
+      ) : null}
+
+      <InspectorSection title={t.chatAutomationNodeName}>
+        <input
+          className="kv-input"
+          value={node.data.label}
+          placeholder={entry?.label(t) ?? ''}
+          onChange={(event) => patchData({ ...node.data, label: event.target.value })}
+        />
+      </InspectorSection>
+
+      {node.type === 'action.agent' ? (
+        <p className="kv-automation-inspector-note">{t.chatAutomationAgentSlotsHint}</p>
+      ) : null}
+
+      {slot ? (
+        <AgentInspector node={node} onChange={onChange} slot={slot} />
       ) : null}
 
       {hasParams ? (
@@ -163,23 +182,6 @@ export function NodeInspector({
                 placeholder="Control+Shift+A"
                 onChange={(event) =>
                   patchData({ ...node.data, hotkey: { accelerator: event.target.value } })
-                }
-              />
-            </FieldBlock>
-          ) : null}
-
-          {node.type === 'action.agent' ? (
-            <FieldBlock label={t.chatAutomationNodePrompt}>
-              <textarea
-                className="kv-textarea"
-                rows={8}
-                value={node.data.agent?.prompt ?? ''}
-                placeholder={t.chatAutomationNodePromptPlaceholder}
-                onChange={(event) =>
-                  patchData({
-                    ...node.data,
-                    agent: { prompt: event.target.value, skillId: node.data.agent?.skillId ?? null },
-                  })
                 }
               />
             </FieldBlock>
@@ -327,7 +329,7 @@ export function NodeInspector({
             ariaLabel={t.chatAutomationNodeActive}
           />
         </div>
-        {onExecuteStep ? (
+        {onExecuteStep && !isAttachmentType(node.type) ? (
           <Button size="sm" onClick={onExecuteStep} disabled={running}>
             <Play size={14} />
             {t.chatAutomationExecuteStep}

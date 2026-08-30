@@ -122,6 +122,31 @@ pub(crate) fn set_enabled(app: &AppHandle, id: &str, enabled: bool) -> Result<Au
     save(app, automation)
 }
 
+pub(crate) fn export_to_file(app: &AppHandle, id: &str, dest: &str) -> Result<(), String> {
+    let automation = get(app, id)?;
+    let json = serde_json::to_string_pretty(&automation).map_err(|err| err.to_string())?;
+    fs::write(dest, json).map_err(|err| format!("write export failed: {err}"))?;
+    Ok(())
+}
+
+/// 导入永远生成新 id 并强制未启用：既避免 id 撞车覆盖已有图，
+/// 也避免「导入即注册」别人文件里的热键/定时触发器。
+pub(crate) fn import_from_file(app: &AppHandle, src: &str) -> Result<Automation, String> {
+    let raw = fs::read_to_string(src).map_err(|err| format!("read import failed: {err}"))?;
+    let mut automation: Automation =
+        serde_json::from_str(&raw).map_err(|err| format!("parse import failed: {err}"))?;
+    if automation.schema_version != SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported automation schemaVersion {}",
+            automation.schema_version
+        ));
+    }
+    automation.id = Uuid::new_v4().to_string();
+    automation.enabled = false;
+    automation.created_at = String::new();
+    save(app, automation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_id;

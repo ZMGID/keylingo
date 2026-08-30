@@ -337,8 +337,7 @@
   gap: 12px;
 }
 
-.kv-automation-inspector-icon,
-.kv-automation-node-icon {
+.kv-automation-inspector-icon {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -350,8 +349,7 @@
   color: #404040;
 }
 
-.dark .kv-automation-inspector-icon,
-.dark .kv-automation-node-icon {
+.dark .kv-automation-inspector-icon {
   background: rgba(255, 255, 255, 0.08);
   color: #e4e4e7;
 }
@@ -615,56 +613,433 @@
   width: 64px;
 }
 
+/* ── n8n 式节点：图标方卡 + 悬挂在卡片下方的标签 ─────────────────
+   节点边界 = 卡片本体（104×80，与 graph.ts 的 FLOW_NODE_WIDTH 对齐）；
+   caption 绝对定位在卡片下方，不参与 xyflow 的节点测量。 */
+
 .kv-automation-node {
+  position: relative;
+  width: 104px;
+  height: 80px;
+}
+
+.kv-automation-node-card {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  width: 220px;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
   box-sizing: border-box;
-  padding: 10px 14px;
   border: 1px solid var(--theme-surface-border-strong);
   border-radius: 12px;
   background: #ffffff;
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.05),
     0 6px 16px -8px rgba(0, 0, 0, 0.12);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
-.dark .kv-automation-node {
+.dark .kv-automation-node-card {
   border-color: #3a3a40;
   background: #2a2a2d;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
-.kv-automation-node.is-selected {
+/* 触发器：左侧大圆角的「D」形，对齐 n8n 的 trigger 轮廓 */
+.kv-automation-node.is-trigger .kv-automation-node-card {
+  border-radius: 40px 12px 12px 40px;
+}
+
+/* Agent：宽卡，菱形口在底边，标签和 + 挂在卡片外面（对齐 n8n AI Agent） */
+.kv-automation-node.is-agent {
+  width: 280px;
+}
+
+.kv-automation-node.is-agent .kv-automation-node-caption {
+  top: calc(100% + 48px);
+}
+
+.kv-automation-node.is-attach {
+  width: 72px;
+  height: 72px;
+}
+
+.kv-automation-node.is-attach .kv-automation-node-card {
+  border-radius: 50%;
+}
+
+.kv-automation-slots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 3;
+  display: flex;
+  pointer-events: none;
+}
+
+.kv-automation-slot {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 8px;
+  color: #737373;
+}
+
+.kv-automation-slot-handle {
+  width: 10px !important;
+  height: 10px !important;
+  border: 1.5px solid #52525b !important;
+  border-radius: 1px !important;
+  background: #ffffff !important;
+  transform: translate(-50%, 50%) rotate(45deg) !important;
+}
+
+.kv-automation-slot-handle.is-source {
+  transform: translate(-50%, -50%) rotate(45deg) !important;
+}
+
+.dark .kv-automation-slot-handle {
+  border-color: #d4d4d8 !important;
+  background: #2a2a2d !important;
+}
+
+.kv-automation-slot-handle.is-filled,
+.kv-automation-node.is-attach.is-selected .kv-automation-slot-handle {
+  background: #2f6ff0 !important;
+  border-color: #2f6ff0 !important;
+}
+
+.kv-automation-slot-handle.is-missing {
+  border-color: #dc2626 !important;
+  background: #ffffff !important;
+}
+
+.dark .kv-automation-slot-handle.is-missing {
+  background: #2a2a2d !important;
+}
+
+.kv-automation-slot-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  color: #737373;
+}
+
+.dark .kv-automation-slot-label {
+  color: #a1a1aa;
+}
+
+.kv-automation-slot-req {
+  margin-left: 1px;
+  color: #dc2626;
+}
+
+.kv-automation-slot-add {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 6px;
+  padding: 0;
+  border: 1px solid var(--theme-surface-border-strong);
+  border-radius: 4px;
+  background: var(--theme-surface);
+  color: #737373;
+  cursor: pointer;
+}
+
+.kv-automation-slot-add:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.react-flow__edge.kv-automation-edge-slot .react-flow__edge-path {
+  stroke-dasharray: 5 4;
+}
+
+.kv-automation-runtime-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kv-automation-runtime-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--theme-surface-border-strong);
+  border-radius: 8px;
+  background: var(--theme-surface-muted);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.kv-automation-runtime-chip.is-active {
+  border-color: var(--text);
+  background: var(--theme-surface);
+}
+
+.kv-automation-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.kv-automation-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.kv-automation-check:hover {
+  background: var(--theme-surface-muted);
+}
+
+.kv-automation-check input {
+  margin-top: 2px;
+}
+
+.kv-automation-check-title {
+  display: block;
+  font-weight: 550;
+}
+
+.kv-automation-check-hint {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #737373;
+}
+
+.kv-automation-inspector-section.is-focused {
+  outline: 1px solid var(--accent-ring);
+  outline-offset: 6px;
+  border-radius: 8px;
+}
+
+.kv-automation-node.is-selected .kv-automation-node-card {
   border-color: var(--text);
   box-shadow:
     0 0 0 1px var(--text),
     0 6px 16px -8px rgba(0, 0, 0, 0.16);
 }
 
-.kv-automation-node.is-running {
+.kv-automation-node.is-running .kv-automation-node-card {
   border-color: #2f6ff0;
   box-shadow: 0 0 0 2px rgba(47, 111, 240, 0.35);
 }
 
-.kv-automation-node.is-success {
+.kv-automation-node.is-success .kv-automation-node-card {
   border-color: #16a34a;
 }
 
-.kv-automation-node.is-error {
+.kv-automation-node.is-error .kv-automation-node-card {
   border-color: #dc2626;
 }
 
-.kv-automation-node.is-disabled {
+.kv-automation-node.is-skipped .kv-automation-node-card {
+  border-style: dashed;
+}
+
+.kv-automation-node.is-disabled .kv-automation-node-card,
+.kv-automation-node.is-disabled .kv-automation-node-caption {
   opacity: 0.55;
 }
 
-.kv-automation-node.is-logic {
-  width: 220px;
+.kv-automation-node-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #404040;
 }
 
+.dark .kv-automation-node-icon {
+  color: #e4e4e7;
+}
+
+.kv-automation-node.is-trigger .kv-automation-node-icon {
+  color: #059669;
+}
+
+.kv-automation-node.is-logic .kv-automation-node-icon {
+  color: #d97706;
+}
+
+/* 卡片下方的名称 + 摘要 */
+.kv-automation-node-caption {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  width: 180px;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+}
+
+.kv-automation-node-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.kv-automation-node-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #737373;
+}
+
+.dark .kv-automation-node-sub {
+  color: #a1a1aa;
+}
+
+/* 右上角运行状态角标 */
+.kv-automation-node-status {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: 2px solid var(--theme-surface-muted);
+  border-radius: 999px;
+  color: #ffffff;
+}
+
+.dark .kv-automation-node-status {
+  border-color: #1f1f22;
+}
+
+.kv-automation-node-status.is-running {
+  background: #2f6ff0;
+}
+
+.kv-automation-node-status.is-success {
+  background: #16a34a;
+}
+
+.kv-automation-node-status.is-error {
+  background: #dc2626;
+}
+
+.kv-automation-node-status.is-skipped {
+  background: #9ca3af;
+}
+
+.kv-automation-spin {
+  animation: kv-automation-spin 1s linear infinite;
+}
+
+@keyframes kv-automation-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* hover 工具条：跑到这步 / 停用 / 删除（对齐 n8n 节点 hover 操作） */
+.kv-automation-node-toolbar {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  z-index: 6;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--theme-surface-border-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  transform: translateX(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.dark .kv-automation-node-toolbar {
+  border-color: #3a3a40;
+  background: #2a2a2d;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.kv-automation-node:hover .kv-automation-node-toolbar,
+.kv-automation-node.is-selected .kv-automation-node-toolbar,
+.kv-automation-node-toolbar:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.kv-automation-node-tool {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #52525b;
+  cursor: pointer;
+}
+
+.kv-automation-node-tool:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+
+.dark .kv-automation-node-tool {
+  color: #a1a1aa;
+}
+
+.dark .kv-automation-node-tool:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e4e4e7;
+}
+
+.kv-automation-node-tool.is-danger:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+}
+
+.kv-automation-node-tool:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* IF 分支标注 */
 .kv-automation-branch {
   position: absolute;
   right: -6px;
@@ -674,50 +1049,27 @@
   text-transform: uppercase;
   color: #737373;
   transform: translateX(100%);
-  padding-left: 8px;
+  padding-left: 10px;
   pointer-events: none;
 }
 
 .kv-automation-branch.true {
-  top: 18%;
+  top: 16%;
 }
 
 .kv-automation-branch.false {
-  top: 58%;
-}
-
-.kv-automation-node-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.kv-automation-node-kind {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #a3a3a3;
+  top: 56%;
 }
 
 .kv-automation-canvas .kv-automation-handle--true {
-  top: 32% !important;
+  top: 30% !important;
 }
 
 .kv-automation-canvas .kv-automation-handle--false {
-  top: 68% !important;
+  top: 70% !important;
 }
 
-.kv-automation-node-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-
+/* 端口：输出是圆点、输入是小圆角矩形（对齐 n8n 的 dot / rectangle 语法） */
 .kv-automation-canvas .kv-automation-handle.react-flow__handle {
   position: absolute;
   z-index: 5;
@@ -730,6 +1082,12 @@
 .dark .kv-automation-canvas .kv-automation-handle.react-flow__handle {
   border-color: #2a2a2d;
   background: #d4d4d8;
+}
+
+.kv-automation-canvas .kv-automation-handle--in.react-flow__handle {
+  width: 7px;
+  height: 16px;
+  border-radius: 4px;
 }
 
 .kv-automation-canvas .react-flow__handle-left {
@@ -766,11 +1124,11 @@
 }
 
 .kv-automation-node-plus.true {
-  top: 32%;
+  top: 30%;
 }
 
 .kv-automation-node-plus.false {
-  top: 68%;
+  top: 70%;
 }
 
 .kv-automation-node:hover .kv-automation-node-plus,
@@ -783,4 +1141,65 @@
   border-color: #3a3a40;
   background: #2a2a2d;
   color: #e4e4e7;
+}
+
+/* ── 连线中点的插入 / 删除浮层 ───────────────── */
+
+.kv-automation-edge-actions {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--theme-surface-border-strong);
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.dark .kv-automation-edge-actions {
+  border-color: #3a3a40;
+  background: #2a2a2d;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.kv-automation-edge-actions.is-visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.kv-automation-edge-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #52525b;
+  cursor: pointer;
+}
+
+.kv-automation-edge-actions button:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+
+.dark .kv-automation-edge-actions button {
+  color: #a1a1aa;
+}
+
+.dark .kv-automation-edge-actions button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e4e4e7;
+}
+
+.kv-automation-edge-actions button.is-danger:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
 }

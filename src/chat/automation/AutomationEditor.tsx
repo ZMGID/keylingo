@@ -4,19 +4,23 @@ import {
   BackgroundVariant,
   ConnectionLineType,
   Controls,
+  MarkerType,
   ReactFlow,
   ReactFlowProvider,
   addEdge,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Connection,
   type Edge,
   type OnConnect,
+  type OnConnectEnd,
   type Viewport,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import './automation.css'
-import { ArrowLeft, Play, Plus, Square } from 'lucide-react'
+import { save as saveDialog } from '@tauri-apps/plugin-dialog'
+import { ArrowLeft, Download, Play, Plus, Square } from 'lucide-react'
 import { api, isTauriRuntime } from '../../api/tauri'
 import { Button } from '../../components/Button'
 import { Toggle } from '../../settings/components'
@@ -29,18 +33,30 @@ import {
   connectNodes,
   createFlowNode,
   nextNodePosition,
+  pickAppendSource,
   triggerNode,
 } from './graph'
-import { type NodeCatalogEntry } from './nodeCatalog'
+import { SLOT_CATALOG, type NodeCatalogEntry } from './nodeCatalog'
 import {
-  FlowNode,
-  NodeChromeContext,
+  AGENT_SLOTS,
+  connectSlotEdge,
+  explodeInlineAgents,
+  isSlotEdge,
+  resolveSlotConnection,
+  slotAttachPosition,
+} from './agentModel'
+import { ActionEdge } from './nodes/ActionEdge'
+import {
+  CanvasChromeContext,
   NodeRunStatusContext,
-  type AutomationRfNode,
-  type NodeChrome,
-} from './nodes/FlowNode'
+  type CanvasChrome,
+} from './nodes/chrome'
+import { FlowNode, type AutomationRfNode } from './nodes/FlowNode'
 import {
+  isAttachmentType,
+  isIfType,
   isTriggerType,
+  type AgentSlot,
   type Automation,
   type AutomationNodeType,
   type AutomationRunEvent,
@@ -57,7 +73,45 @@ const nodeTypes = {
   'action.notify': FlowNode,
   'action.http': FlowNode,
   'logic.if': FlowNode,
+  'agent.runtime': FlowNode,
+  'agent.context': FlowNode,
+  'agent.tool': FlowNode,
+  'agent.skill': FlowNode,
 }
+
+const edgeTypes = { action: ActionEdge }
+
+const EDGE_MARKER = { type: MarkerType.ArrowClosed, width: 16, height: 16 }
+
+/** 所有边都经这里补齐渲染属性（自定义边类型 + 箭头）；persist 时会被剥掉，不落盘。 */
+function withEdgeChrome(edge: {
+  id: string
+  source: string
+  target: string
+  sourceHandle?: string | null
+  targetHandle?: string | null
+}): Edge {
+  const slot = isSlotEdge(edge)
+  return {
+    id: edge.id,
+    type: 'action',
+    source: edge.source,
+    target: edge.target,
+    sourceHandle: edge.sourceHandle ?? undefined,
+    targetHandle: edge.targetHandle ?? undefined,
+    className: slot ? 'kv-automation-edge-slot' : undefined,
+    data: slot ? { slot: true } : undefined,
+    markerEnd: slot ? undefined : EDGE_MARKER,
+    style: slot
+      ? { strokeDasharray: '5 4', strokeWidth: 1.5 }
+      : { strokeWidth: 1.75 },
+  }
+}
+
+/** 加节点的来源意图：节点右侧 + / 拖线到空白（after），或连线中点的插入（edge）。 */
+type AddIntent =
+  | { kind: 'after', nodeId: string, handle?: string, at?: { x: number, y: number } }
+  | { kind: 'edge', edgeId: string }
 
 function toRfNodes(nodes: FlowNodeModel[]): AutomationRfNode[] {
   return nodes.map((node) => ({
@@ -69,13 +123,7 @@ function toRfNodes(nodes: FlowNodeModel[]): AutomationRfNode[] {
 }
 
 function toRfEdges(automation: Automation): Edge[] {
-  return automation.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    sourceHandle: edge.sourceHandle ?? undefined,
-    targetHandle: edge.targetHandle ?? undefined,
-  }))
+  return automation.edges.map(withEdgeChrome)
 }
 
 function persist(
@@ -129,11 +177,12 @@ function EditorInner({
   const [nodeOutput, setNodeOutput] = useState<Record<string, string>>({})
   const [runs, setRuns] = useState<AutomationRunSummary[]>([])
   const viewportRef = useRef<Viewport>(automation.viewport)
-  const addAfterRef = useRef<{ nodeId: string, handle?: string } | null>(null)
+  const pendingAddRef = useRef<AddIntent | null>(null)
   const nodesRef = useRef(nodes)
   const edgesRef = useRef(edges)
   nodesRef.current = nodes
   edgesRef.current = edges
+  const { screenToFlowPosition } = useReactFlow()
 
   const selected = useMemo((): FlowNodeModel | null => {
     const rf = nodes.find((node) => node.id === selectedId)
@@ -161,6 +210,16 @@ function EditorInner({
   }, [loadRuns])
 
   useEffect(() => {
+    const exploded = explodeInlineAgents(automation.nodes, automation.edges)
+    if (!exploded.changed) return
+    setNodes(toRfNodes(exploded.nodes))
+    setEdges(exploded.edges.map(withEdgeChrome))
+    onChange({ ...automation, nodes: exploded.nodes, edges: exploded.edges })
+    // Only rewrite when this automation is first opened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [automation.id])
+
+  useEffect(() => {
     if (!isTauriRuntime()) return
     let cancelled = false
     let unlisten: (() => void) | undefined
@@ -176,7 +235,11 @@ function EditorInner({
         setNodeStatus((current) => ({ ...current, [event.nodeId!]: 'running' }))
       }
       if (event.kind === 'node_finished' && event.nodeId) {
-        const status: NodeRunStatus = event.status === 'error' ? 'error' : 'success'
+        const status: NodeRunStatus = event.status === 'error'
+          ? 'error'
+          : event.status === 'skipped' || event.status === 'cancelled'
+            ? 'skipped'
+            : 'success'
         setNodeStatus((current) => ({ ...current, [event.nodeId!]: status }))
         if (event.output) {
           setNodeOutput((current) => ({ ...current, [event.nodeId!]: event.output! }))
@@ -208,11 +271,25 @@ function EditorInner({
     const currentNodes = nodesRef.current
     const currentEdges = edgesRef.current
     const model = persist(automation, currentNodes, currentEdges, viewportRef.current)
-    if (!canConnect(connection.source, connection.target, model.nodes, model.edges, connection.sourceHandle)) {
+    const from = model.nodes.find((node) => node.id === connection.source)
+    const slot = from ? resolveSlotConnection(from.type, connection.targetHandle) : null
+    if (!canConnect(
+      connection.source,
+      connection.target,
+      model.nodes,
+      model.edges,
+      connection.sourceHandle,
+      slot ?? connection.targetHandle,
+    )) {
       return
     }
-    const edge = connectNodes(connection.source, connection.target, connection.sourceHandle)
-    const nextEdges = addEdge({ ...connection, id: edge.id }, currentEdges)
+    const edge = connectNodes(
+      connection.source,
+      connection.target,
+      slot ? 'slot' : connection.sourceHandle,
+      slot ?? connection.targetHandle,
+    )
+    const nextEdges = addEdge(withEdgeChrome({ ...edge, targetHandle: connection.targetHandle }), currentEdges)
     setEdges(nextEdges)
     commit(currentNodes, nextEdges)
   }, [automation, commit, setEdges])
@@ -226,6 +303,7 @@ function EditorInner({
       model.nodes,
       model.edges,
       connection.sourceHandle,
+      connection.targetHandle,
     )
   }, [automation, edges, nodes])
 
@@ -235,15 +313,56 @@ function EditorInner({
     const model = persist(automation, currentNodes, currentEdges, viewportRef.current)
     if (entry.kind === 'trigger' && triggerNode(model)) {
       setPicker(null)
-      addAfterRef.current = null
+      pendingAddRef.current = null
       return
     }
-    const after = addAfterRef.current
-    addAfterRef.current = null
+    let intent = pendingAddRef.current
+    pendingAddRef.current = null
+
+    // 从连线中点插入：拆旧边，新节点接到中间。
+    if (intent?.kind === 'edge') {
+      const edgeId = intent.edgeId
+      const splitEdge = model.edges.find((item) => item.id === edgeId)
+      if (splitEdge) {
+        const src = model.nodes.find((item) => item.id === splitEdge.source)
+        const tgt = model.nodes.find((item) => item.id === splitEdge.target)
+        const at = src && tgt
+          ? { x: (src.position.x + tgt.position.x) / 2, y: (src.position.y + tgt.position.y) / 2 }
+          : nextNodePosition(model.nodes)
+        const node = createFlowNode(entry.type, entry.defaultData(t), at)
+        const nextNodes: AutomationRfNode[] = [...currentNodes, {
+          id: node.id,
+          type: node.type,
+          position: node.position,
+          data: node.data,
+        }]
+        const kept = currentEdges.filter((item) => item.id !== splitEdge.id)
+        const nextEdges: Edge[] = [
+          ...kept,
+          withEdgeChrome(connectNodes(splitEdge.source, node.id, splitEdge.sourceHandle)),
+          withEdgeChrome(connectNodes(node.id, splitEdge.target, isIfType(node.type) ? 'true' : undefined)),
+        ]
+        setNodes(nextNodes)
+        setEdges(nextEdges)
+        setSelectedId(node.id)
+        setPicker(null)
+        commit(nextNodes, nextEdges)
+        return
+      }
+      intent = null
+    }
+
+    // 底部胶囊「添加节点」没有显式来源时，自动接到还能出边的尾节点（对齐 n8n 的线性搭积木）。
+    if (!intent && entry.kind !== 'trigger') {
+      const tail = pickAppendSource(model.nodes, model.edges, selectedId)
+      if (tail) intent = { kind: 'after', nodeId: tail.nodeId, handle: tail.handle }
+    }
+
+    const after = intent?.kind === 'after' ? intent : null
     const node = createFlowNode(
       entry.type,
       entry.defaultData(t),
-      nextNodePosition(model.nodes, after?.nodeId, after?.handle),
+      after?.at ?? nextNodePosition(model.nodes, after?.nodeId, after?.handle),
     )
     const nextNodes: AutomationRfNode[] = [...currentNodes, {
       id: node.id,
@@ -251,11 +370,16 @@ function EditorInner({
       position: node.position,
       data: node.data,
     }]
+    let nextEdges = currentEdges
+    if (after && canConnect(after.nodeId, node.id, [...model.nodes, node], model.edges, after.handle)) {
+      nextEdges = [...currentEdges, withEdgeChrome(connectNodes(after.nodeId, node.id, after.handle))]
+      setEdges(nextEdges)
+    }
     setNodes(nextNodes)
     setSelectedId(node.id)
     setPicker(null)
-    commit(nextNodes, currentEdges)
-  }, [automation, commit, setNodes, t])
+    commit(nextNodes, nextEdges)
+  }, [automation, commit, selectedId, setEdges, setNodes, t])
 
   const patchSelected = useCallback((next: FlowNodeModel) => {
     const nextNodes = nodesRef.current.map((node) =>
@@ -265,22 +389,39 @@ function EditorInner({
     commit(nextNodes, edgesRef.current)
   }, [commit, setNodes])
 
-  const nodeChrome = useMemo((): NodeChrome => {
-    const occupied = new Map<string, Set<string>>()
-    for (const edge of edges) {
-      const handles = occupied.get(edge.source) ?? new Set<string>()
-      handles.add(edge.sourceHandle ?? '')
-      occupied.set(edge.source, handles)
+  const deleteNode = useCallback((nodeId: string) => {
+    const drop = new Set<string>([nodeId])
+    const target = nodesRef.current.find((node) => node.id === nodeId)
+    if (target?.type === 'action.agent') {
+      for (const edge of edgesRef.current) {
+        if (edge.target === nodeId && isSlotEdge(edge)) drop.add(edge.source)
+      }
     }
-    return {
-      occupied,
-      onAddNext: (nodeId, sourceHandle) => {
-        addAfterRef.current = { nodeId, handle: sourceHandle }
-        setSelectedId(nodeId)
-        setPicker('action')
-      },
-    }
-  }, [edges])
+    const nextNodes = nodesRef.current.filter((node) => !drop.has(node.id))
+    const nextEdges = edgesRef.current.filter(
+      (edge) => !drop.has(edge.source) && !drop.has(edge.target),
+    )
+    setNodes(nextNodes)
+    setEdges(nextEdges)
+    setSelectedId((current) => (current && drop.has(current) ? null : current))
+    commit(nextNodes, nextEdges)
+  }, [commit, setEdges, setNodes])
+
+  const toggleNodeDisabled = useCallback((nodeId: string) => {
+    const nextNodes = nodesRef.current.map((node) =>
+      node.id === nodeId
+        ? { ...node, data: { ...node.data, disabled: !node.data.disabled } }
+        : node,
+    )
+    setNodes(nextNodes)
+    commit(nextNodes, edgesRef.current)
+  }, [commit, setNodes])
+
+  const deleteEdge = useCallback((edgeId: string) => {
+    const nextEdges = edgesRef.current.filter((edge) => edge.id !== edgeId)
+    setEdges(nextEdges)
+    commit(nodesRef.current, nextEdges)
+  }, [commit, setEdges])
 
   const runGraph = useCallback(async (untilNodeId?: string) => {
     if (!isTauriRuntime()) return
@@ -301,6 +442,107 @@ function EditorInner({
       setRunError(err instanceof Error ? err.message : String(err))
     }
   }, [automation.id])
+
+  const addAgentSlot = useCallback((agentId: string, slot: AgentSlot) => {
+    const agent = nodesRef.current.find((node) => node.id === agentId)
+    if (!agent) return
+    const model = persist(automation, nodesRef.current, edgesRef.current, viewportRef.current)
+    const siblings = model.edges.filter((edge) =>
+      edge.target === agentId && edge.targetHandle === slot
+    ).length
+    const entry = SLOT_CATALOG[slot]
+    const node = createFlowNode(
+      entry.type,
+      entry.defaultData(t),
+      slotAttachPosition(agent.position, slot, siblings),
+    )
+    if (!canConnect(node.id, agentId, [...model.nodes, node], model.edges, 'slot', slot)) return
+    const nextNodes: AutomationRfNode[] = [...nodesRef.current, {
+      id: node.id,
+      type: node.type,
+      position: node.position,
+      data: node.data,
+    }]
+    const nextEdges = [...edgesRef.current, withEdgeChrome(connectSlotEdge(node.id, agentId, slot))]
+    setNodes(nextNodes)
+    setEdges(nextEdges)
+    setSelectedId(node.id)
+    commit(nextNodes, nextEdges)
+  }, [automation, commit, setEdges, setNodes, t])
+
+  const canvasChrome = useMemo((): CanvasChrome => {
+    const occupied = new Map<string, Set<string>>()
+    const occupiedSlots = new Map<string, Set<AgentSlot>>()
+    for (const edge of edges) {
+      if (isSlotEdge(edge)) {
+        const slots = occupiedSlots.get(edge.target) ?? new Set<AgentSlot>()
+        if (AGENT_SLOTS.includes(edge.targetHandle as AgentSlot)) {
+          slots.add(edge.targetHandle as AgentSlot)
+        }
+        occupiedSlots.set(edge.target, slots)
+        continue
+      }
+      const handles = occupied.get(edge.source) ?? new Set<string>()
+      handles.add(edge.sourceHandle ?? '')
+      occupied.set(edge.source, handles)
+    }
+    return {
+      occupied,
+      occupiedSlots,
+      running,
+      onAddNext: (nodeId, sourceHandle) => {
+        pendingAddRef.current = { kind: 'after', nodeId, handle: sourceHandle }
+        setSelectedId(nodeId)
+        setPicker('action')
+      },
+      onRunTo: (nodeId) => void runGraph(nodeId),
+      onToggleDisabled: toggleNodeDisabled,
+      onDeleteNode: deleteNode,
+      onInsertOnEdge: (edgeId) => {
+        pendingAddRef.current = { kind: 'edge', edgeId }
+        setPicker('action')
+      },
+      onDeleteEdge: deleteEdge,
+      onAddAgentSlot: addAgentSlot,
+    }
+  }, [addAgentSlot, deleteEdge, deleteNode, edges, runGraph, running, toggleNodeDisabled])
+
+  // n8n 签名交互：从输出口拖线放到空白处，弹出节点选择器并在落点接上新节点。
+  const onConnectEnd: OnConnectEnd = useCallback((event, connectionState) => {
+    if (connectionState.isValid) return
+    if (connectionState.toNode) return
+    const fromNode = connectionState.fromNode
+    if (!fromNode || connectionState.fromHandle?.type !== 'source') return
+    if (isAttachmentType(fromNode.type ?? '')) return
+    const point = 'changedTouches' in event
+      ? event.changedTouches[0]
+      : event
+    pendingAddRef.current = {
+      kind: 'after',
+      nodeId: fromNode.id,
+      handle: connectionState.fromHandle?.id ?? undefined,
+      at: screenToFlowPosition({ x: point.clientX, y: point.clientY }),
+    }
+    setSelectedId(fromNode.id)
+    setPicker('action')
+  }, [screenToFlowPosition])
+
+  const exportJson = useCallback(async () => {
+    if (!isTauriRuntime()) return
+    try {
+      await onFlushSave()
+      const base = (automation.name.trim() || 'automation').replace(/[\\/:*?"<>|]/g, '-')
+      const path = await saveDialog({
+        defaultPath: `${base}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      })
+      if (!path) return
+      await automationApi.exportToFile(automation.id, path)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      window.alert(`${t.chatAutomationExportFailed}${message}`)
+    }
+  }, [automation.id, automation.name, onFlushSave, t])
 
   const defaultViewport = useMemo(
     () => ({ x: automation.viewport.x, y: automation.viewport.y, zoom: automation.viewport.zoom || 1 }),
@@ -332,7 +574,7 @@ function EditorInner({
   }
 
   const openPicker = (kind: 'trigger' | 'action') => {
-    addAfterRef.current = null
+    pendingAddRef.current = null
     setPicker((current) => (current === kind ? null : kind))
   }
 
@@ -356,31 +598,47 @@ function EditorInner({
             ))
           }
         />
+        {isTauriRuntime() ? (
+          <Button variant="ghost" size="sm" onClick={() => void exportJson()}>
+            <Download size={14} />
+            {t.chatAutomationExport}
+          </Button>
+        ) : null}
       </header>
       {runError ? (
         <p className="kv-automation-run-error">{runError}</p>
       ) : null}
       <div className="kv-automation-editor-body">
         <div className="kv-automation-canvas">
-          <NodeChromeContext.Provider value={nodeChrome}>
+          <CanvasChromeContext.Provider value={canvasChrome}>
           <NodeRunStatusContext.Provider value={nodeStatus}>
             <ReactFlow
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onConnectEnd={onConnectEnd}
               isValidConnection={isValidConnection}
-              onNodeClick={(_, node) => setSelectedId(node.id)}
+              onNodeClick={(_, node) => {
+                setSelectedId(node.id)
+              }}
               onPaneClick={() => {
                 setSelectedId(null)
                 setPicker(null)
-                addAfterRef.current = null
+                pendingAddRef.current = null
               }}
               onNodeDragStop={() => commit(nodesRef.current, edgesRef.current)}
               onNodesDelete={(deleted) => {
                 const ids = new Set(deleted.map((node) => node.id))
+                for (const node of deleted) {
+                  if (node.type !== 'action.agent') continue
+                  for (const edge of edgesRef.current) {
+                    if (edge.target === node.id && isSlotEdge(edge)) ids.add(edge.source)
+                  }
+                }
                 const nextNodes = nodesRef.current.filter((node) => !ids.has(node.id))
                 const nextEdges = edgesRef.current.filter(
                   (edge) => !ids.has(edge.source) && !ids.has(edge.target),
@@ -407,7 +665,11 @@ function EditorInner({
               snapGrid={[24, 24]}
               deleteKeyCode={['Backspace', 'Delete']}
               connectionLineType={ConnectionLineType.Bezier}
-              defaultEdgeOptions={{ type: 'default', style: { strokeWidth: 1.75 } }}
+              defaultEdgeOptions={{
+                type: 'action',
+                style: { strokeWidth: 1.75 },
+                markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+              }}
               edgesReconnectable={false}
               reconnectRadius={0}
               proOptions={{ hideAttribution: true }}
@@ -417,7 +679,7 @@ function EditorInner({
               <Controls showInteractive={false} />
             </ReactFlow>
           </NodeRunStatusContext.Provider>
-          </NodeChromeContext.Provider>
+          </CanvasChromeContext.Provider>
           <div className="kv-automation-capsule-wrap">
             <div className="kv-automation-capsule">
               <div className="kv-automation-enable">
@@ -465,7 +727,7 @@ function EditorInner({
                 kind={picker}
                 onPick={addFromCatalog}
                 onCancel={() => {
-                  addAfterRef.current = null
+                  pendingAddRef.current = null
                   setPicker(null)
                 }}
               />

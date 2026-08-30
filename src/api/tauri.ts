@@ -1995,6 +1995,9 @@ export const api = {
   automationRun: (id: string, untilNodeId?: string) =>
     invoke<AutomationRunStarted>('automation_run', { id, untilNodeId: untilNodeId ?? null }),
   automationCancel: (id: string) => invoke<void>('automation_cancel', { id }),
+  automationExport: (id: string, path: string) =>
+    invoke<void>('automation_export', { id, path }),
+  automationImport: (path: string) => invoke<Automation>('automation_import', { path }),
   automationRunsList: (id: string) => invoke<AutomationRunSummary[]>('automation_runs_list', { id }),
   onAutomationRun: (listener: (payload: AutomationRunEvent) => void) =>
     on<AutomationRunEvent>('automation-run', listener),

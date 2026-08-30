@@ -1,6 +1,6 @@
 import { Button, IconButton } from '../../components/Button'
 import { Toggle } from '../../settings/components'
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Upload } from 'lucide-react'
 import { useT } from '../../settings/i18n'
 import { catalogEntry } from './nodeCatalog'
 import type { AutomationMeta } from './types'
@@ -15,6 +15,7 @@ export function AutomationList({
   loading,
   error,
   onCreate,
+  onImport,
   onOpen,
   onToggle,
   onDelete,
@@ -23,6 +24,7 @@ export function AutomationList({
   loading: boolean
   error: string
   onCreate: () => void
+  onImport: () => void
   onOpen: (id: string) => void
   onToggle: (id: string, enabled: boolean) => void
   onDelete: (id: string) => void
@@ -40,10 +42,16 @@ export function AutomationList({
               {t.chatAutomationSubtitle}
             </p>
           </div>
-          <Button size="sm" onClick={onCreate}>
-            <Plus size={14} />
-            {t.chatAutomationNew}
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={onImport}>
+              <Upload size={14} />
+              {t.chatAutomationImport}
+            </Button>
+            <Button size="sm" onClick={onCreate}>
+              <Plus size={14} />
+              {t.chatAutomationNew}
+            </Button>
+          </div>
         </div>
       </div>
       <div className="mx-auto flex min-h-0 w-full max-w-[880px] flex-1 flex-col px-6 pb-6">

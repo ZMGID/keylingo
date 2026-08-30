@@ -1,8 +1,11 @@
-//! Isolated `run_agent_loop` host for `action.agent` nodes.
-//! Auto-approves tools (unattended schedule/hotkey cannot prompt). Does not
-//! write a chat conversation.
+//! Isolated `run_agent_loop` / external-CLI host for `action.agent` nodes.
+//! Auto-approves tools (unattended schedule/hotkey cannot prompt). Built-in
+//! and Chat runs do not write a sidebar conversation (`auto_{id}` workspace
+//! only). External CLI needs a `conv_` session, so it uses an archived
+//! `conv_auto_{id}` conversation that stays off the default sidebar.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -10,12 +13,15 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use crate::chat::agent::{
-    run_agent_loop, AgentHost, AgentHostFuture, AgentRunConfig, ToolExecutionContext, ToolExecutor,
+    run_agent_loop, AgentHost, AgentHostFuture, AgentRunConfig, AgentRunEntry, ToolExecutionContext, ToolExecutor,
     ToolExecutorFuture,
 };
 use crate::chat::agent::prepare::{available_builtin_tool_names, build_chat_system_prompt};
 use crate::chat::ask_user::{AskUserPromptPayload, AskUserResponseResult};
-use crate::chat::types::{ChatMessageSegment, ToolCallRecord, WebSearchMode};
+use crate::chat::types::{
+    AgentPlanState, AgentRuntimeConfig, AgentRuntimeKind, AgentTodoState, ChatMessage,
+    ChatMessageSegment, Conversation, ConversationContextState, ToolCallRecord, WebSearchMode,
+};
 use crate::mcp::ChatToolDefinition;
 use crate::skills;
 use crate::state::AppState;
@@ -143,18 +149,98 @@ pub(crate) async fn run_agent_node(
     app: &AppHandle,
     automation_id: &str,
     run_id: &str,
-    prompt: &str,
-    skill_id: Option<&str>,
+    node_id: &str,
+    spec_json: &serde_json::Value,
 ) -> Result<NodeOutput, String> {
-    let prompt = prompt.trim();
+    let spec = AgentSpec::from_json(spec_json);
+    let prompt = spec.prompt.trim();
     if prompt.is_empty() {
         return Err("Agent prompt is empty".to_string());
     }
+    if spec.runtime_kind == AgentRuntimeKind::External {
+        return run_external_agent_node(app, automation_id, run_id, node_id, &spec).await;
+    }
+    run_builtin_agent_node(app, automation_id, run_id, prompt, &spec).await
+}
+
+struct AgentSpec {
+    prompt: String,
+    runtime_kind: AgentRuntimeKind,
+    external_agent_id: Option<String>,
+    external_model: Option<String>,
+    provider_id: Option<String>,
+    model: Option<String>,
+    tool_ids: Vec<String>,
+    skill_ids: Vec<String>,
+}
+
+impl AgentSpec {
+    fn from_json(value: &serde_json::Value) -> Self {
+        let str_field = |key: &str| {
+            value
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let mut skill_ids = json_string_list(value.get("skillIds"));
+        if let Some(legacy) = str_field("skillId") {
+            if !skill_ids.iter().any(|id| id == &legacy) {
+                skill_ids.insert(0, legacy);
+            }
+        }
+        let runtime_kind = match str_field("runtimeKind").as_deref() {
+            Some("chat") => AgentRuntimeKind::Chat,
+            Some("external") => AgentRuntimeKind::External,
+            _ => AgentRuntimeKind::Builtin,
+        };
+        Self {
+            prompt: value
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            runtime_kind,
+            external_agent_id: str_field("externalAgentId"),
+            external_model: str_field("externalModel"),
+            provider_id: str_field("providerId"),
+            model: str_field("model"),
+            tool_ids: json_string_list(value.get("toolIds")),
+            skill_ids,
+        }
+    }
+}
+
+fn json_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(serde_json::Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for item in items {
+        let Some(id) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if seen.insert(id.to_string()) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
+async fn run_builtin_agent_node(
+    app: &AppHandle,
+    automation_id: &str,
+    run_id: &str,
+    prompt: &str,
+    spec: &AgentSpec,
+) -> Result<NodeOutput, String> {
 
     let state = app.state::<AppState>();
     let state: &AppState = &state;
     let settings = state.settings_read().clone();
-    let (provider_id, model) = settings.effective_chat_model();
+    let (provider_id, model) = resolve_kivio_model(&settings, spec)?;
     let provider = settings
         .get_provider(&provider_id)
         .filter(|p| p.enabled && !p.api_keys.is_empty())
@@ -170,7 +256,16 @@ pub(crate) async fn run_agent_node(
     let message_id = format!("auto-msg-{run_id}");
 
     let catalog = crate::mcp::registry::list_enabled_tool_catalog(app, state).await;
-    let tools = catalog.tools;
+    let mut tools = catalog.tools;
+    let is_chat = spec.runtime_kind == AgentRuntimeKind::Chat;
+    if is_chat {
+        crate::chat::commands::apply_chat_mode_tool_filter(
+            &mut tools,
+            true,
+            &settings.chat.chat_mode,
+        );
+    }
+    apply_agent_tool_whitelist(&mut tools, &spec.tool_ids)?;
     let builtin_names = available_builtin_tool_names(&tools);
 
     let workdir = workspace::workbench_dir(
@@ -186,7 +281,8 @@ pub(crate) async fn run_agent_node(
         workdir.as_deref(),
     )
     .unwrap_or_default();
-    let active_skill_detail = skill_id.and_then(|id| {
+    let active_skill_id = spec.skill_ids.first().map(|id| id.as_str());
+    let active_skill_detail = active_skill_id.and_then(|id| {
         skills::read_skill_detail_in(
             app,
             &settings.chat_tools.skill_scan_paths,
@@ -211,7 +307,7 @@ pub(crate) async fn run_agent_node(
     let obsidian_vault_path = (!settings.obsidian_vault_path.trim().is_empty())
         .then_some(settings.obsidian_vault_path.as_str());
     let additional_directories: [crate::chat::types::AdditionalDirectory; 0] = [];
-    let system_prompt = build_chat_system_prompt(
+    let mut system_prompt = build_chat_system_prompt(
         &language,
         false,
         true,
@@ -219,12 +315,12 @@ pub(crate) async fn run_agent_node(
         &effective_chat_tools,
         tools_available,
         &builtin_names,
-        skill_id,
+        active_skill_id,
         active_skill_detail.as_ref(),
         None,
         None,
         &custom_system_prompt,
-        false,
+        is_chat,
         None,
         None,
         None,
@@ -235,6 +331,15 @@ pub(crate) async fn run_agent_node(
         obsidian_vault_path,
         &additional_directories,
     );
+    if let Some(extra) = extra_skill_bodies(
+        app,
+        &settings.chat_tools.skill_scan_paths,
+        workdir.as_deref(),
+        &spec.skill_ids,
+    ) {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&extra);
+    }
 
     let runtime_messages = vec![
         serde_json::json!({ "role": "system", "content": system_prompt }),
@@ -299,5 +404,278 @@ pub(crate) async fn run_agent_node(
         }
         Err(err) if err == "cancelled" => Err("cancelled".to_string()),
         Err(err) => Err(err),
+    }
+}
+
+fn resolve_kivio_model(
+    settings: &crate::settings::Settings,
+    spec: &AgentSpec,
+) -> Result<(String, String), String> {
+    match (&spec.provider_id, &spec.model) {
+        (Some(provider_id), Some(model)) => Ok((provider_id.clone(), model.clone())),
+        (None, None) => Ok(settings.effective_chat_model()),
+        _ => Err("Agent model is incomplete: set both provider and model, or leave both empty".into()),
+    }
+}
+
+fn apply_agent_tool_whitelist(
+    tools: &mut Vec<ChatToolDefinition>,
+    ids: &[String],
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    tools.retain(|tool| {
+        ids.iter()
+            .any(|entry| crate::chat::agent::filter::entry_matches(tool, entry))
+    });
+    if tools.is_empty() {
+        return Err("None of the selected tools are currently available".into());
+    }
+    Ok(())
+}
+
+fn extra_skill_bodies(
+    app: &AppHandle,
+    scan_paths: &[String],
+    workdir: Option<&Path>,
+    skill_ids: &[String],
+) -> Option<String> {
+    if skill_ids.len() <= 1 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for id in skill_ids.iter().skip(1) {
+        let Ok(detail) = skills::read_skill_detail_in(app, scan_paths, id, workdir) else {
+            continue;
+        };
+        let name = if detail.meta.name.trim().is_empty() {
+            id.as_str()
+        } else {
+            detail.meta.name.as_str()
+        };
+        let body = detail.body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        parts.push(format!("## Skill: {name}\n\n{body}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Additional mounted skills (read-only context):\n\n{}",
+            parts.join("\n\n")
+        ))
+    }
+}
+
+fn workflow_user_message(content: String) -> ChatMessage {
+    ChatMessage {
+        id: format!("msg_{}", uuid::Uuid::new_v4()),
+        role: "user".to_string(),
+        content,
+        attachments: Vec::new(),
+        reasoning: None,
+        artifacts: Vec::new(),
+        tool_calls: Vec::new(),
+        segments: Vec::new(),
+        agent_plan: None,
+        api_messages: Vec::new(),
+        model_messages: Vec::new(),
+        active_skill_id: None,
+        run_entry: None,
+        stream_outcome: None,
+        usage: None,
+        anchor_usage: None,
+        group_id: None,
+        provider_id: None,
+        model: None,
+        timestamp: chrono::Local::now().timestamp(),
+        degraded: None,
+    }
+}
+
+async fn run_external_agent_node(
+    app: &AppHandle,
+    automation_id: &str,
+    _run_id: &str,
+    node_id: &str,
+    spec: &AgentSpec,
+) -> Result<NodeOutput, String> {
+    let agent_id = spec
+        .external_agent_id
+        .as_deref()
+        .ok_or_else(|| "Select an external CLI on the Agent runtime slot".to_string())?;
+    let mut prompt = spec.prompt.clone();
+    let settings = app.state::<AppState>().settings_read().clone();
+    let workdir = workspace::workbench_dir(
+        &settings.chat_tools.native_tools.working_directory,
+        automation_id,
+    );
+    if let Some(extra) = extra_skill_bodies(
+        app,
+        &settings.chat_tools.skill_scan_paths,
+        workdir.as_deref(),
+        &spec.skill_ids,
+    ) {
+        prompt = format!("{extra}\n\n{prompt}");
+    }
+
+    let mut conversation =
+        load_or_create_external_conversation(app, automation_id, node_id, spec, agent_id).await?;
+    let user_message = workflow_user_message(prompt.clone());
+    conversation = crate::chat::repository::repository(app)
+        .mutate(app, &conversation.id, {
+            let user_message = user_message.clone();
+            move |latest| {
+                latest.messages.push(user_message);
+                Ok(())
+            }
+        })
+        .await
+        .map_err(crate::chat::repository::repository_error)?;
+
+    let state = app.state::<AppState>();
+    crate::external_agents::run_external_cli_reply(
+        app,
+        &state,
+        &mut conversation,
+        None,
+        &prompt,
+        &[],
+        &[],
+        spec.skill_ids.first().map(|id| id.as_str()),
+        AgentRunEntry::Send,
+    )
+    .await?;
+
+    let text = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        Err("Agent returned an empty response".to_string())
+    } else {
+        Ok(NodeOutput::from_text(text))
+    }
+}
+
+async fn load_or_create_external_conversation(
+    app: &AppHandle,
+    automation_id: &str,
+    node_id: &str,
+    spec: &AgentSpec,
+    agent_id: &str,
+) -> Result<Conversation, String> {
+    let id = workspace::external_conversation_id(automation_id, node_id);
+    let repo = crate::chat::repository::repository(app);
+    let runtime = AgentRuntimeConfig {
+        kind: AgentRuntimeKind::External,
+        external_agent_id: Some(agent_id.to_string()),
+        external_model: spec.external_model.clone(),
+        external_reasoning: None,
+        external_sandbox: None,
+        external_agent_preset: None,
+    };
+    let active_skill_id = spec.skill_ids.first().cloned();
+    if repo.get(app, &id).await.is_ok() {
+        return repo
+            .mutate(app, &id, {
+                let runtime = runtime.clone();
+                let active_skill_id = active_skill_id.clone();
+                move |latest| {
+                    latest.archived = true;
+                    latest.agent_runtime = runtime;
+                    latest.active_skill_id = active_skill_id;
+                    Ok(())
+                }
+            })
+            .await
+            .map_err(crate::chat::repository::repository_error);
+    }
+
+    let now = chrono::Local::now().timestamp();
+    let conversation = Conversation {
+        id,
+        revision: 0,
+        title: format!("Automation {automation_id}"),
+        provider_id: String::new(),
+        model: String::new(),
+        messages: Vec::new(),
+        active_skill_id,
+        assistant_id: None,
+        assistant_snapshot: None,
+        created_at: now,
+        updated_at: now,
+        pinned: false,
+        archived: true,
+        folder: None,
+        project_id: None,
+        set_id: None,
+        context_state: ConversationContextState::default(),
+        agent_todo_state: AgentTodoState::default(),
+        agent_plan_state: AgentPlanState::default(),
+        knowledge_base_ids: Vec::new(),
+        force_knowledge_search: false,
+        additional_directories: Vec::new(),
+        thinking_level: None,
+        web_search_mode: None,
+        reply_models: Vec::new(),
+        group_selections: std::collections::HashMap::new(),
+        forked_from: None,
+        agent_runtime: runtime,
+    };
+    repo.create(app, conversation)
+        .await
+        .map_err(crate::chat::repository::repository_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn spec_defaults_to_builtin_and_merges_legacy_skill() {
+        let spec = AgentSpec::from_json(&json!({
+            "prompt": "  hello  ",
+            "skillId": "pdf",
+            "skillIds": ["docx", "pdf"],
+        }));
+        assert_eq!(spec.runtime_kind, AgentRuntimeKind::Builtin);
+        assert_eq!(spec.prompt, "  hello  ");
+        assert_eq!(spec.skill_ids, vec!["docx", "pdf"]);
+        assert!(spec.tool_ids.is_empty());
+    }
+
+    #[test]
+    fn spec_parses_external_runtime_and_tool_whitelist() {
+        let spec = AgentSpec::from_json(&json!({
+            "runtimeKind": "external",
+            "externalAgentId": "claude",
+            "externalModel": "sonnet",
+            "toolIds": ["read", "read", "", "glob"],
+            "skillIds": ["pdf"],
+        }));
+        assert_eq!(spec.runtime_kind, AgentRuntimeKind::External);
+        assert_eq!(spec.external_agent_id.as_deref(), Some("claude"));
+        assert_eq!(spec.external_model.as_deref(), Some("sonnet"));
+        assert_eq!(spec.tool_ids, vec!["read", "glob"]);
+    }
+
+    #[test]
+    fn spec_parses_chat_runtime_and_model_override() {
+        let spec = AgentSpec::from_json(&json!({
+            "runtimeKind": "chat",
+            "providerId": "openai",
+            "model": "gpt-4.1",
+        }));
+        assert_eq!(spec.runtime_kind, AgentRuntimeKind::Chat);
+        assert_eq!(spec.provider_id.as_deref(), Some("openai"));
+        assert_eq!(spec.model.as_deref(), Some("gpt-4.1"));
     }
 }

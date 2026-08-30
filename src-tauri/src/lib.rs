@@ -723,6 +723,8 @@ pub fn run() {
             automation::commands::automation_set_enabled,
             automation::commands::automation_run,
             automation::commands::automation_cancel,
+            automation::commands::automation_export,
+            automation::commands::automation_import,
             automation::commands::automation_runs_list,
             automation::commands::automation_run_get,
             skills::chat_skills_list,

@@ -10,6 +10,10 @@ pub const ALLOWED_NODE_TYPES: &[&str] = &[
     "action.notify",
     "action.http",
     "logic.if",
+    "agent.runtime",
+    "agent.context",
+    "agent.tool",
+    "agent.skill",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

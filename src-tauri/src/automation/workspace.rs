@@ -10,6 +10,27 @@ pub fn conversation_id(automation_id: &str) -> String {
     format!("auto_{automation_id}")
 }
 
+/// Persisted (archived) conversation used only when an Agent node runs an
+/// external CLI — `run_external_cli_reply` needs a `conv_` id and a native
+/// session file. Marked archived so it never appears in the sidebar.
+/// Keyed by automation + node so two Agent steps don't share a CLI session.
+pub fn external_conversation_id(automation_id: &str, node_id: &str) -> String {
+    let auto = sanitize_conv_part(automation_id);
+    let node = sanitize_conv_part(node_id);
+    if node.is_empty() {
+        format!("conv_auto_{auto}")
+    } else {
+        format!("conv_auto_{auto}_{node}")
+    }
+}
+
+fn sanitize_conv_part(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
 pub fn workspace_for_conversation(
     working_directory: &str,
     conversation_id: &str,
@@ -44,4 +65,20 @@ pub fn workbench_dir(working_directory: &str, automation_id: &str) -> Option<Pat
     let dir = PathBuf::from(root).join("automations").join(automation_id);
     let _ = fs::create_dir_all(&dir);
     Some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_conversation_id_is_per_node_and_conv_prefixed() {
+        let id = external_conversation_id("auto-1", "n-2");
+        assert_eq!(id, "conv_auto_auto-1_n-2");
+        assert!(id.starts_with("conv_"));
+        assert_eq!(
+            external_conversation_id("bad/id", "x y"),
+            "conv_auto_badid_xy"
+        );
+    }
 }

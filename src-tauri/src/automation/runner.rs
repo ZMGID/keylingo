@@ -15,8 +15,8 @@ use super::interpolate::{eval_if, interpolate, node_disabled};
 use super::notify;
 use super::storage;
 use super::types::{
-    Automation, AutomationRun, AutomationRunNode, AutomationRunStarted, FlowNode, NodeOutput,
-    RunOrigin,
+    Automation, AutomationRun, AutomationRunNode, AutomationRunStarted, FlowEdge, FlowNode,
+    NodeOutput, RunOrigin,
 };
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -89,6 +89,17 @@ pub fn cancel(app: &AppHandle, id: &str) -> Result<(), String> {
         .unwrap_or_else(|e| e.into_inner())
         .insert(run_id);
     state.cancel_chat_generation(&super::workspace::conversation_id(id));
+    state.cancel_chat_generation(&super::workspace::external_conversation_id(id, ""));
+    if let Ok(automation) = storage::get(app, id) {
+        for node in automation.nodes {
+            if node.node_type == "action.agent" {
+                state.cancel_chat_generation(&super::workspace::external_conversation_id(
+                    id,
+                    &node.id,
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -149,7 +160,7 @@ async fn execute_graph(
         };
 
         events::node_started(app, &automation.id, run_id, &node.id);
-        let result = execute_node(app, &automation.id, run_id, node, &prev, origin).await;
+        let result = execute_node(app, &automation, run_id, node, &prev, origin).await;
         let handle_hint = match result {
             Ok((output, next_handle)) => {
                 let preview = clip(&output.text, 2000);
@@ -230,12 +241,13 @@ fn finish_run(
 
 async fn execute_node(
     app: &AppHandle,
-    automation_id: &str,
+    automation: &Automation,
     run_id: &str,
     node: &FlowNode,
     prev: &NodeOutput,
     origin: RunOrigin,
 ) -> Result<(NodeOutput, Option<String>), String> {
+    let automation_id = automation.id.as_str();
     if node_disabled(&node.data) {
         let handle = if node.node_type == "logic.if" {
             Some("true".to_string())
@@ -252,22 +264,16 @@ async fn execute_node(
             ),
             None,
         )),
+        t if t.starts_with("agent.") => Ok((prev.clone(), None)),
         "action.agent" => {
-            let prompt = node
-                .data
-                .get("agent")
-                .and_then(|v| v.get("prompt"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let skill_id = node
-                .data
-                .get("agent")
-                .and_then(|v| v.get("skillId"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let prompt = interpolate(prompt, prev);
-            let output = agent::run_agent_node(app, automation_id, run_id, &prompt, skill_id).await?;
+            let mut spec = compose_agent_spec(automation, node);
+            if let Some(prompt) = spec.get("prompt").and_then(|v| v.as_str()) {
+                let interpolated = interpolate(prompt, prev);
+                if let Some(obj) = spec.as_object_mut() {
+                    obj.insert("prompt".into(), json!(interpolated));
+                }
+            }
+            let output = agent::run_agent_node(app, automation_id, run_id, &node.id, &spec).await?;
             Ok((output, None))
         }
         "action.notify" => {
@@ -419,12 +425,122 @@ pub(crate) fn next_node_ids(automation: &Automation, from: &str, handle: Option<
         .edges
         .iter()
         .filter(|edge| edge.source == from)
+        .filter(|edge| !is_slot_edge(edge))
         .filter(|edge| match handle {
             Some(wanted) => edge.source_handle.as_deref().unwrap_or("true") == wanted,
             None => true,
         })
         .map(|edge| edge.target.clone())
         .collect()
+}
+
+fn is_slot_edge(edge: &FlowEdge) -> bool {
+    matches!(
+        edge.target_handle.as_deref(),
+        Some("runtime" | "context" | "tool" | "skill")
+    )
+}
+
+fn json_string_list(value: Option<&Value>) -> Vec<String> {
+    let Some(Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for item in items {
+        if let Some(id) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if !ids.iter().any(|existing| existing == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn merge_agent_object(spec: &mut serde_json::Map<String, Value>, part: &Value, keys: &[&str]) {
+    let Some(obj) = part.as_object() else {
+        return;
+    };
+    for key in keys {
+        if let Some(value) = obj.get(*key) {
+            spec.insert((*key).to_string(), value.clone());
+        }
+    }
+}
+
+fn compose_agent_spec(automation: &Automation, node: &FlowNode) -> Value {
+    let mut spec = node
+        .data
+        .get("agent")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !spec.is_object() {
+        spec = json!({});
+    }
+    let mut tool_ids = Vec::new();
+    let mut skill_ids = Vec::new();
+    let mut saw_tools = false;
+    let mut saw_skills = false;
+    for edge in &automation.edges {
+        if edge.target != node.id || !is_slot_edge(edge) {
+            continue;
+        }
+        let Some(src) = automation.nodes.iter().find(|item| item.id == edge.source) else {
+            continue;
+        };
+        let part = src.data.get("agent").cloned().unwrap_or(json!({}));
+        let obj = spec.as_object_mut().expect("object");
+        match edge.target_handle.as_deref() {
+            Some("runtime") => merge_agent_object(
+                obj,
+                &part,
+                &[
+                    "runtimeKind",
+                    "externalAgentId",
+                    "externalModel",
+                    "providerId",
+                    "model",
+                ],
+            ),
+            Some("context") => merge_agent_object(obj, &part, &["prompt"]),
+            Some("tool") => {
+                saw_tools = true;
+                for id in json_string_list(part.get("toolIds")) {
+                    if !tool_ids.iter().any(|existing| existing == &id) {
+                        tool_ids.push(id);
+                    }
+                }
+            }
+            Some("skill") => {
+                saw_skills = true;
+                let mut ids = json_string_list(part.get("skillIds"));
+                if let Some(legacy) = part
+                    .get("skillId")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    if !ids.iter().any(|id| id == legacy) {
+                        ids.insert(0, legacy.to_string());
+                    }
+                }
+                for id in ids {
+                    if !skill_ids.iter().any(|existing| existing == &id) {
+                        skill_ids.push(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(obj) = spec.as_object_mut() {
+        if saw_tools {
+            obj.insert("toolIds".into(), json!(tool_ids));
+        }
+        if saw_skills {
+            obj.insert("skillIds".into(), json!(skill_ids));
+        }
+    }
+    spec
 }
 
 fn now_iso() -> String {
@@ -519,5 +635,75 @@ mod tests {
             next_node_ids(&automation, "t", None),
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+
+    #[test]
+    fn slot_edges_do_not_advance_the_main_flow() {
+        let automation = Automation {
+            schema_version: SCHEMA_VERSION,
+            id: "a".into(),
+            name: "t".into(),
+            enabled: false,
+            nodes: vec![
+                node("t", "trigger.manual"),
+                node("a", "action.agent"),
+                node("r", "agent.runtime"),
+            ],
+            edges: vec![
+                edge("t", "a", None),
+                FlowEdge {
+                    id: "e-r-a".into(),
+                    source: "r".into(),
+                    target: "a".into(),
+                    source_handle: Some("slot".into()),
+                    target_handle: Some("runtime".into()),
+                },
+            ],
+            viewport: Viewport::default(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert_eq!(next_node_ids(&automation, "t", None), vec!["a".to_string()]);
+        assert_eq!(next_node_ids(&automation, "r", None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn compose_agent_reads_plugged_slot_nodes() {
+        let mut agent = node("a", "action.agent");
+        agent.data = json!({ "agent": { "prompt": "legacy" } });
+        let mut runtime = node("r", "agent.runtime");
+        runtime.data = json!({ "agent": { "runtimeKind": "chat", "model": "m", "providerId": "p" } });
+        let mut context = node("c", "agent.context");
+        context.data = json!({ "agent": { "prompt": "hello {{output}}" } });
+        let automation = Automation {
+            schema_version: SCHEMA_VERSION,
+            id: "a".into(),
+            name: "t".into(),
+            enabled: false,
+            nodes: vec![agent, runtime, context],
+            edges: vec![
+                FlowEdge {
+                    id: "e1".into(),
+                    source: "r".into(),
+                    target: "a".into(),
+                    source_handle: Some("slot".into()),
+                    target_handle: Some("runtime".into()),
+                },
+                FlowEdge {
+                    id: "e2".into(),
+                    source: "c".into(),
+                    target: "a".into(),
+                    source_handle: Some("slot".into()),
+                    target_handle: Some("context".into()),
+                },
+            ],
+            viewport: Viewport::default(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let spec = compose_agent_spec(&automation, &automation.nodes[0]);
+        assert_eq!(spec["runtimeKind"], "chat");
+        assert_eq!(spec["prompt"], "hello {{output}}");
+        assert_eq!(spec["model"], "m");
     }
 }

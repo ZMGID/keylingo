@@ -8,6 +8,10 @@ export type AutomationNodeType =
   | 'action.notify'
   | 'action.http'
   | 'logic.if'
+  | 'agent.runtime'
+  | 'agent.context'
+  | 'agent.tool'
+  | 'agent.skill'
 
 export type ScheduleKind = 'daily' | 'weekdays' | 'interval'
 
@@ -22,9 +26,22 @@ export interface HotkeyData {
   accelerator: string
 }
 
+export type AgentRuntimeKind = 'builtin' | 'chat' | 'external'
+
+export type AgentSlot = 'runtime' | 'context' | 'tool' | 'skill'
+
 export interface AgentData {
   prompt: string
-  skillId: string | null
+  /** @deprecated 读时并入 skillIds；写新图请用 skillIds。 */
+  skillId?: string | null
+  runtimeKind?: AgentRuntimeKind
+  externalAgentId?: string | null
+  externalModel?: string | null
+  providerId?: string | null
+  model?: string | null
+  /** 非空 = 白名单；空 = 当前启用的全部工具（与旧行为一致）。 */
+  toolIds?: string[]
+  skillIds?: string[]
 }
 
 export interface NotifyData {
@@ -129,6 +146,10 @@ export function isActionType(type: string): type is AutomationNodeType {
 
 export function isStepType(type: string): boolean {
   return type.startsWith('action.') || type.startsWith('logic.')
+}
+
+export function isAttachmentType(type: string): boolean {
+  return type.startsWith('agent.')
 }
 
 export function isIfType(type: string): boolean {

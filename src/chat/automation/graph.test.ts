@@ -113,4 +113,18 @@ describe('automation graph', () => {
       [connectNodes('t', 'a'), connectNodes('a', 'n')],
     )).toEqual({ nodeId: 'n' })
   })
+
+  it('slot nodes plug into Agent without taking the main-flow input', () => {
+    const trigger = { ...node('t', 'trigger.manual'), id: 't' }
+    const agent = { ...node('a', 'action.agent', 200), id: 'a' }
+    const runtime = createFlowNode('agent.runtime', { label: 'r' }, { x: 200, y: 200 })
+    runtime.id = 'r'
+    const nodes = [trigger, agent, runtime]
+    expect(canConnect('t', 'a', nodes, [])).toBe(true)
+    expect(canConnect('r', 'a', nodes, [connectNodes('t', 'a')], 'slot', 'runtime')).toBe(true)
+    expect(canConnect('r', 'a', nodes, [connectNodes('t', 'a')], 'slot', 'context')).toBe(false)
+    const plugged = [connectNodes('t', 'a'), connectNodes('r', 'a', 'slot', 'runtime')]
+    expect(canConnect('r', 'a', nodes, plugged, 'slot', 'runtime')).toBe(false)
+    expect(pickAppendSource(nodes, plugged)).toEqual({ nodeId: 'a' })
+  })
 })

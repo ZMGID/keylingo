@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { isTauriRuntime } from '../../api/tauri'
 import { useT } from '../../settings/i18n'
 import { getRouteAutomationId, setHash } from '../chatRoutes'
@@ -105,6 +106,24 @@ export function AutomationCenter() {
     }
   }, [loadList, t])
 
+  const importFromFile = useCallback(async () => {
+    if (!isTauriRuntime()) return
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      })
+      if (typeof picked !== 'string') return
+      const imported = await automationApi.importFromFile(picked)
+      setEditing(imported)
+      setHash(`#chat/automations/${encodeURIComponent(imported.id)}`)
+      void loadList()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(`${t.chatAutomationImportFailed}${message}`)
+    }
+  }, [loadList, t])
+
   const backToList = useCallback(() => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
     const current = editingRef.current
@@ -154,6 +173,7 @@ export function AutomationCenter() {
       loading={loading}
       error={error}
       onCreate={() => void create()}
+      onImport={() => void importFromFile()}
       onOpen={(id) => void openId(id)}
       onToggle={(id, enabled) => {
         void automationApi.setEnabled(id, enabled).then(loadList).catch((err) => {

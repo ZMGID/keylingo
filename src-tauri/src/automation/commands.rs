@@ -89,6 +89,17 @@ pub fn automation_cancel(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn automation_export(app: AppHandle, id: String, path: String) -> Result<(), String> {
+    storage::export_to_file(&app, &id, &path)
+}
+
+#[tauri::command]
+pub fn automation_import(app: AppHandle, path: String) -> Result<Automation, String> {
+    // 导入产物必然 enabled=false，无需刷新热键。
+    storage::import_from_file(&app, &path)
+}
+
+#[tauri::command]
 pub fn automation_runs_list(app: AppHandle, id: String) -> Result<Vec<AutomationRunSummary>, String> {
     history::list(&app, &id)
 }
