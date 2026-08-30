@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use crate::native_tools::{read_file, run_command, write_file, NativeToolWorkspace};
+use crate::native_tools::{
+    read_file, run_captured_command, write_file, NativeToolWorkspace, TOOL_OUTPUT_MAX_BYTES,
+};
+use crate::settings::{CHAT_TOOL_MAX_TIMEOUT_MS, CHAT_TOOL_MIN_TIMEOUT_MS};
 use crate::state::AppState;
 
 use super::agent;
@@ -134,11 +137,7 @@ async fn execute_graph(
     let _ = history::write_run(app, &record);
     events::run_started(app, &automation.id, run_id);
 
-    let Some(trigger) = automation
-        .nodes
-        .iter()
-        .find(|node| node.node_type.starts_with("trigger."))
-    else {
+    let Some(trigger) = start_trigger(&automation, origin) else {
         return finish_run(app, record, "error", Some("no trigger node".into()));
     };
 
@@ -186,10 +185,12 @@ async fn execute_graph(
                 next_handle
             }
             Err(err) => {
+                let cancelled = err == "cancelled" || is_cancelled(app, run_id);
+                let status = if cancelled { "cancelled" } else { "error" };
                 record.nodes.push(AutomationRunNode {
                     node_id: node.id.clone(),
                     node_type: node.node_type.clone(),
-                    status: "error".into(),
+                    status: status.into(),
                     output: None,
                     error: Some(err.clone()),
                 });
@@ -198,11 +199,11 @@ async fn execute_graph(
                     &automation.id,
                     run_id,
                     &node.id,
-                    "error",
+                    status,
                     None,
                     Some(err.clone()),
                 );
-                return finish_run(app, record, "error", Some(err));
+                return finish_run(app, record, status, Some(err));
             }
         };
 
@@ -251,10 +252,10 @@ async fn execute_node(
 ) -> Result<(NodeOutput, Option<String>), String> {
     let automation_id = automation.id.as_str();
     if node_disabled(&node.data) {
-        let handle = if node.node_type == "logic.if" {
-            Some("true".to_string())
-        } else {
-            None
+        let handle = match node.node_type.as_str() {
+            "logic.if" => Some("true".to_string()),
+            "logic.switch" => Some("default".to_string()),
+            _ => None,
         };
         return Ok((prev.clone(), handle));
     }
@@ -328,6 +329,16 @@ async fn execute_node(
                 Some(handle.to_string()),
             ))
         }
+        "logic.switch" => {
+            let handle = eval_switch(node, prev);
+            Ok((
+                NodeOutput::with_json(
+                    handle.clone(),
+                    json!({ "result": handle.clone() }),
+                ),
+                Some(handle),
+            ))
+        }
         "action.set" => {
             let fields = node
                 .data
@@ -343,7 +354,10 @@ async fn execute_node(
         }
         "action.clipboard" => Ok((execute_clipboard(node, prev)?, None)),
         "action.file" => Ok((execute_file(app, automation_id, node, prev)?, None)),
-        "action.command" => Ok((execute_command(app, automation_id, node, prev).await?, None)),
+        "action.command" => Ok((
+            execute_command(app, automation_id, run_id, node, prev).await?,
+            None,
+        )),
         other => Err(format!("unsupported node type: {other}")),
     }
 }
@@ -361,12 +375,20 @@ fn build_set_output(fields: &Value, prev: &NodeOutput) -> NodeOutput {
                 continue;
             }
             let value = item.get("value").and_then(Value::as_str).unwrap_or("");
-            map.insert(key.to_string(), json!(interpolate(value, prev)));
+            map.insert(key.to_string(), parse_set_value(&interpolate(value, prev)));
         }
     }
     let object = Value::Object(map);
     let text = serde_json::to_string_pretty(&object).unwrap_or_else(|_| "{}".to_string());
     NodeOutput::with_json(text, object)
+}
+
+fn parse_set_value(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Value::String(raw.to_string());
+    }
+    serde_json::from_str(trimmed).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 async fn execute_delay(app: &AppHandle, run_id: &str, node: &FlowNode) -> Result<(), String> {
@@ -400,7 +422,7 @@ fn execute_clipboard(node: &FlowNode, prev: &NodeOutput) -> Result<NodeOutput, S
     let mut board = arboard::Clipboard::new().map_err(|err| err.to_string())?;
     if op == "read" {
         let text = board.get_text().map_err(|err| err.to_string())?;
-        return Ok(NodeOutput::from_text(text));
+        return Ok(NodeOutput::from_text(clip(&text, TOOL_OUTPUT_MAX_BYTES)));
     }
     let text = interpolate(
         clipboard.get("text").and_then(Value::as_str).unwrap_or(""),
@@ -419,7 +441,19 @@ fn execute_file(
     let file = node.data.get("file").cloned().unwrap_or(Value::Null);
     let op = file.get("op").and_then(Value::as_str).unwrap_or("write");
     let path = interpolate(file.get("path").and_then(Value::as_str).unwrap_or(""), prev);
-    let workspace = node_workspace(app, automation_id);
+    let working_directory = app
+        .state::<AppState>()
+        .settings_read()
+        .chat_tools
+        .native_tools
+        .working_directory
+        .clone();
+    let Some(base) = workspace::workbench_dir(&working_directory, automation_id) else {
+        return Err("set a working directory in Settings before using the File node".to_string());
+    };
+    let confined = workspace::confine_file_path(&base, &path)?;
+    let path = confined.to_string_lossy().to_string();
+    let workspace = NativeToolWorkspace::conversation(base);
     if op == "read" {
         let result = read_file(&workspace, &json!({ "path": path }))?;
         return Ok(NodeOutput::from_text(result.content));
@@ -438,35 +472,26 @@ fn execute_file(
 async fn execute_command(
     app: &AppHandle,
     automation_id: &str,
+    run_id: &str,
     node: &FlowNode,
     prev: &NodeOutput,
 ) -> Result<NodeOutput, String> {
-    let cmd = interpolate(
-        node.data
-            .get("command")
-            .and_then(|v| v.get("command"))
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        prev,
-    );
+    let spec = node.data.get("command").cloned().unwrap_or(Value::Null);
+    let cmd = interpolate(spec.get("command").and_then(Value::as_str).unwrap_or(""), prev);
     if cmd.trim().is_empty() {
         return Err("command is empty".to_string());
     }
-    let workspace = node_workspace(app, automation_id);
-    let state = app.state::<AppState>();
-    let conv_id = workspace::conversation_id(automation_id);
-    let output = run_command(
-        &workspace,
-        30_000,
-        &json!({ "command": cmd }),
-        Some(&*state),
-        Some(&conv_id),
-    )
-    .await?;
-    Ok(NodeOutput::from_text(output))
-}
-
-fn node_workspace(app: &AppHandle, automation_id: &str) -> NativeToolWorkspace {
+    let continue_on_fail = spec
+        .get("continueOnFail")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let timeout_ms = spec
+        .get("timeoutSeconds")
+        .and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok())))
+        .unwrap_or(30)
+        .saturating_mul(1000)
+        .clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS);
+    let cwd_raw = interpolate(spec.get("cwd").and_then(Value::as_str).unwrap_or(""), prev);
     let working_directory = app
         .state::<AppState>()
         .settings_read()
@@ -474,10 +499,144 @@ fn node_workspace(app: &AppHandle, automation_id: &str) -> NativeToolWorkspace {
         .native_tools
         .working_directory
         .clone();
-    match workspace::workbench_dir(&working_directory, automation_id) {
-        Some(dir) => NativeToolWorkspace::conversation(dir),
-        None => NativeToolWorkspace::standalone(),
+    let cwd = command_cwd(&working_directory, automation_id, cwd_raw.trim())?;
+    let state = app.state::<AppState>();
+    let captured = tokio::select! {
+        result = run_captured_command(&cmd, cwd.clone(), timeout_ms, Some(&*state)) => result?,
+        _ = wait_until_cancelled(app, run_id) => return Err("cancelled".to_string()),
+    };
+    let stdout = clip(&captured.stdout, TOOL_OUTPUT_MAX_BYTES);
+    let stderr = clip(&captured.stderr, TOOL_OUTPUT_MAX_BYTES);
+    if captured.exit_code != 0 && !continue_on_fail {
+        let mut err = format!("exit {}", captured.exit_code);
+        if !stderr.is_empty() {
+            err.push('\n');
+            err.push_str(&stderr);
+        } else if !stdout.is_empty() {
+            err.push('\n');
+            err.push_str(&stdout);
+        }
+        return Err(err);
     }
+    Ok(command_node_output(
+        &cmd,
+        &cwd.to_string_lossy(),
+        captured.exit_code,
+        &stdout,
+        &stderr,
+    ))
+}
+
+fn command_cwd(
+    working_directory: &str,
+    automation_id: &str,
+    cwd: &str,
+) -> Result<std::path::PathBuf, String> {
+    let Some(base) = workspace::workbench_dir(working_directory, automation_id) else {
+        if cwd.is_empty() {
+            return crate::native_tools::user_home_dir();
+        }
+        return Err(
+            "set a working directory in Settings before using a custom command cwd".to_string(),
+        );
+    };
+    if cwd.is_empty() {
+        return Ok(base);
+    }
+    let confined = workspace::confine_file_path(&base, cwd)?;
+    if !confined.is_dir() {
+        return Err(format!(
+            "Working directory is not a directory: {}",
+            confined.display()
+        ));
+    }
+    Ok(confined)
+}
+
+fn command_node_output(
+    command: &str,
+    cwd: &str,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> NodeOutput {
+    let text = if !stdout.is_empty() {
+        stdout.to_string()
+    } else if !stderr.is_empty() {
+        stderr.to_string()
+    } else {
+        String::new()
+    };
+    NodeOutput::with_json(
+        text,
+        json!({
+            "command": command,
+            "cwd": cwd,
+            "exitCode": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        }),
+    )
+}
+
+async fn wait_until_cancelled(app: &AppHandle, run_id: &str) {
+    loop {
+        if is_cancelled(app, run_id) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn eval_switch(node: &FlowNode, prev: &NodeOutput) -> String {
+    let Some(cases) = node
+        .data
+        .get("switch")
+        .and_then(|v| v.get("cases"))
+        .and_then(Value::as_array)
+    else {
+        return "default".to_string();
+    };
+    for case in cases {
+        let id = case
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(id) = id else {
+            continue;
+        };
+        let op = case
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("contains");
+        let expected = interpolate(
+            case.get("value").and_then(Value::as_str).unwrap_or(""),
+            prev,
+        );
+        if eval_if(op, &expected, &prev.text) {
+            return id.to_string();
+        }
+    }
+    "default".to_string()
+}
+
+fn start_trigger(automation: &Automation, origin: RunOrigin) -> Option<&FlowNode> {
+    let wanted = match origin {
+        RunOrigin::Manual => "trigger.manual",
+        RunOrigin::Schedule => "trigger.schedule",
+        RunOrigin::Hotkey => "trigger.hotkey",
+    };
+    automation
+        .nodes
+        .iter()
+        .find(|node| node.node_type == wanted)
+        .or_else(|| {
+            automation
+                .nodes
+                .iter()
+                .find(|node| node.node_type.starts_with("trigger."))
+        })
 }
 
 async fn execute_http(
@@ -689,6 +848,16 @@ fn compose_agent_spec(automation: &Automation, node: &FlowNode) -> Value {
         if saw_skills {
             obj.insert("skillIds".into(), json!(skill_ids));
         }
+        match obj.get("runtimeKind").and_then(Value::as_str) {
+            Some("external") => {
+                obj.insert("providerId".into(), Value::Null);
+                obj.insert("model".into(), Value::Null);
+            }
+            _ => {
+                obj.insert("externalAgentId".into(), Value::Null);
+                obj.insert("externalModel".into(), Value::Null);
+            }
+        }
     }
     spec
 }
@@ -855,6 +1024,8 @@ mod tests {
         assert_eq!(spec["runtimeKind"], "chat");
         assert_eq!(spec["prompt"], "hello {{output}}");
         assert_eq!(spec["model"], "m");
+        assert!(spec.get("externalAgentId").unwrap().is_null());
+        assert!(spec.get("externalModel").unwrap().is_null());
     }
 
     #[test]
@@ -874,10 +1045,90 @@ mod tests {
     }
 
     #[test]
+    fn set_parses_json_literals_and_keeps_plain_text() {
+        let prev = NodeOutput::with_json("x", json!({ "status": 200, "ok": true }));
+        let out = build_set_output(
+            &json!([
+                { "key": "n", "value": "{{json.status}}" },
+                { "key": "flag", "value": "{{json.ok}}" },
+                { "key": "note", "value": "plain" },
+            ]),
+            &prev,
+        );
+        assert_eq!(out.json["n"], 200);
+        assert_eq!(out.json["flag"], true);
+        assert_eq!(out.json["note"], "plain");
+    }
+
+    #[test]
     fn set_empty_fields_outputs_empty_object() {
         let prev = NodeOutput::from_text("x");
         let out = build_set_output(&json!([]), &prev);
         assert_eq!(out.json, json!({}));
         assert_eq!(out.text, "{}");
+    }
+
+    fn graph(nodes: Vec<FlowNode>) -> Automation {
+        Automation {
+            schema_version: SCHEMA_VERSION,
+            id: "a".into(),
+            name: "t".into(),
+            enabled: false,
+            nodes,
+            edges: vec![],
+            viewport: Viewport::default(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn start_trigger_matches_run_origin() {
+        let automation = graph(vec![
+            node("s", "trigger.schedule"),
+            node("m", "trigger.manual"),
+        ]);
+        assert_eq!(
+            start_trigger(&automation, RunOrigin::Manual).map(|n| n.id.as_str()),
+            Some("m")
+        );
+        assert_eq!(
+            start_trigger(&automation, RunOrigin::Schedule).map(|n| n.id.as_str()),
+            Some("s")
+        );
+        assert_eq!(
+            start_trigger(&automation, RunOrigin::Hotkey).map(|n| n.id.as_str()),
+            Some("s")
+        );
+    }
+
+    #[test]
+    fn switch_picks_first_matching_case_else_default() {
+        let mut sw = node("s", "logic.switch");
+        sw.data = json!({
+            "switch": {
+                "cases": [
+                    { "id": "ok", "op": "contains", "value": "pass" },
+                    { "id": "fail", "op": "equals", "value": "error" }
+                ]
+            }
+        });
+        assert_eq!(
+            eval_switch(&sw, &NodeOutput::from_text("looks like pass")),
+            "ok"
+        );
+        assert_eq!(eval_switch(&sw, &NodeOutput::from_text("error")), "fail");
+        assert_eq!(eval_switch(&sw, &NodeOutput::from_text("other")), "default");
+    }
+
+    #[test]
+    fn command_output_prefers_stdout_and_keeps_json() {
+        let out = command_node_output("echo hi", "/tmp", 0, "hi\n", "");
+        assert_eq!(out.text, "hi\n");
+        assert_eq!(out.json["exitCode"], 0);
+        assert_eq!(out.json["stdout"], "hi\n");
+        let err = command_node_output("false", "/tmp", 1, "", "nope");
+        assert_eq!(err.text, "nope");
+        assert_eq!(err.json["exitCode"], 1);
     }
 }

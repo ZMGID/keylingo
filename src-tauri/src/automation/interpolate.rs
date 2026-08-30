@@ -3,7 +3,9 @@ use serde_json::Value;
 use super::types::NodeOutput;
 
 pub fn interpolate(template: &str, prev: &NodeOutput) -> String {
-    let mut out = template.replace("{{output}}", &prev.text);
+    // Replace {{json.*}} on the template first so text from {{output}} is not
+    // scanned for more placeholders.
+    let mut out = template.to_string();
     let mut search_from = 0;
     while let Some(start) = out[search_from..].find("{{json.") {
         let abs = search_from + start;
@@ -21,7 +23,7 @@ pub fn interpolate(template: &str, prev: &NodeOutput) -> String {
         out.replace_range(abs..replace_end, &replacement);
         search_from = abs + replacement.len();
     }
-    out
+    out.replace("{{output}}", &prev.text)
 }
 
 fn lookup_json(value: &Value, path: &str) -> Option<String> {
@@ -62,6 +64,19 @@ mod tests {
         assert_eq!(interpolate("got {{output}}", &prev), "got hello world");
         assert_eq!(interpolate("{{json.status}}", &prev), "200");
         assert_eq!(interpolate("flag={{json.nested.ok}}", &prev), "flag=true");
+    }
+
+    #[test]
+    fn does_not_rescan_placeholders_inside_output_text() {
+        let prev = NodeOutput::with_json(
+            "see {{json.status}}",
+            json!({ "status": 200 }),
+        );
+        assert_eq!(interpolate("{{output}}", &prev), "see {{json.status}}");
+        assert_eq!(
+            interpolate("{{output}} / {{json.status}}", &prev),
+            "see {{json.status}} / 200"
+        );
     }
 
     #[test]

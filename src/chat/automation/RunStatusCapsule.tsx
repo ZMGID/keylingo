@@ -58,7 +58,7 @@ export function RunStatusCapsule({
       {open ? (
         <div
           id={listId}
-          className="kv-automation-run-popover"
+          className="kv-automation-run-popover custom-scrollbar"
           role="dialog"
           aria-label={t.chatAutomationExecutions}
         >

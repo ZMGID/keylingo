@@ -105,17 +105,6 @@ export function withRuntimeKind(
   }
 }
 
-/** Empty whitelist means "all currently enabled tools". If the user re-selects
- *  every listed tool, fold back to that empty default so the node stays stable
- *  when new tools appear later. */
-export function collapseToolIds(selected: string[], allIds: string[]): string[] {
-  if (allIds.length === 0) return selected
-  if (selected.length === allIds.length && allIds.every((id) => selected.includes(id))) {
-    return []
-  }
-  return selected
-}
-
 export function isAgentSlotFilled(slot: AgentSlot, agent: NormalizedAgent): boolean {
   switch (slot) {
     case 'runtime':

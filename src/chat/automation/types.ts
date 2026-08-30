@@ -12,6 +12,7 @@ export type AutomationNodeType =
   | 'action.file'
   | 'action.command'
   | 'logic.if'
+  | 'logic.switch'
   | 'logic.delay'
   | 'agent.runtime'
   | 'agent.context'
@@ -44,7 +45,7 @@ export interface AgentData {
   externalModel?: string | null
   providerId?: string | null
   model?: string | null
-  /** 非空 = 白名单；空 = 当前启用的全部工具（与旧行为一致）。 */
+  /** 非空 = 额外挂载写入/执行类工具；空 = 只挂只读工具 + skill 加载器，不挂记忆。 */
   toolIds?: string[]
   skillIds?: string[]
 }
@@ -66,6 +67,18 @@ export interface IfData {
   op: IfOp
   value: string
 }
+
+export interface SwitchCase {
+  id: string
+  op: IfOp
+  value: string
+}
+
+export interface SwitchData {
+  cases: SwitchCase[]
+}
+
+export const MAX_SWITCH_CASES = 4
 
 export interface SetField {
   key: string
@@ -97,6 +110,9 @@ export interface FileData {
 
 export interface CommandData {
   command: string
+  cwd?: string
+  timeoutSeconds?: number
+  continueOnFail?: boolean
 }
 
 export type NodeRunStatus = 'running' | 'success' | 'error' | 'skipped'
@@ -110,6 +126,7 @@ export interface FlowNodeData {
   notify?: NotifyData
   http?: HttpData
   if?: IfData
+  switch?: SwitchData
   set?: SetData
   delay?: DelayData
   clipboard?: ClipboardData
@@ -196,4 +213,19 @@ export function isAttachmentType(type: string): boolean {
 
 export function isIfType(type: string): boolean {
   return type === 'logic.if'
+}
+
+export function isSwitchType(type: string): boolean {
+  return type === 'logic.switch'
+}
+
+export function branchHandles(type: string, data?: FlowNodeData): string[] | null {
+  if (isIfType(type)) return ['true', 'false']
+  if (isSwitchType(type)) {
+    const ids = (data?.switch?.cases ?? [])
+      .map((item) => item.id.trim())
+      .filter(Boolean)
+    return [...ids, 'default']
+  }
+  return null
 }

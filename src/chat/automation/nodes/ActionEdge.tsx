@@ -1,6 +1,7 @@
 import { useContext, useState } from 'react'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from '@xyflow/react'
 import { Plus, X } from 'lucide-react'
+import { IconButton } from '../../../components/Button'
 import { useT } from '../../../settings/i18n'
 import { CanvasChromeContext } from './chrome'
 
@@ -42,30 +43,30 @@ export function ActionEdge({
           onMouseLeave={() => setHovered(false)}
         >
           {slot ? null : (
-            <button
-              type="button"
-              aria-label={t.chatAutomationInsertNode}
-              title={t.chatAutomationInsertNode}
+            <IconButton
+              size="xs"
+              shape="circle"
+              label={t.chatAutomationInsertNode}
               onClick={(event) => {
                 event.stopPropagation()
                 chrome.onInsertOnEdge(id)
               }}
             >
               <Plus size={11} strokeWidth={2.25} />
-            </button>
+            </IconButton>
           )}
-          <button
-            type="button"
-            className="is-danger"
-            aria-label={t.chatAutomationDeleteEdge}
-            title={t.chatAutomationDeleteEdge}
+          <IconButton
+            size="xs"
+            shape="circle"
+            variant="danger"
+            label={t.chatAutomationDeleteEdge}
             onClick={(event) => {
               event.stopPropagation()
               chrome.onDeleteEdge(id)
             }}
           >
             <X size={11} strokeWidth={2.25} />
-          </button>
+          </IconButton>
         </div>
       </EdgeLabelRenderer>
     </g>

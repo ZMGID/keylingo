@@ -9,11 +9,14 @@ import { slotForNodeType } from './agentModel'
 import {
   isAttachmentType,
   isTriggerType,
+  MAX_SWITCH_CASES,
   type ClipboardOp,
+  type CommandData,
   type FileOp,
   type FlowNode,
   type IfOp,
   type SetField,
+  type SwitchCase,
 } from './types'
 
 function InspectorSection({ title, children }: { title: string, children: ReactNode }) {
@@ -56,11 +59,14 @@ export function NodeInspector({
     || node.type === 'action.clipboard'
     || node.type === 'action.file'
     || node.type === 'action.command'
+    || node.type === 'logic.if'
+    || node.type === 'logic.switch'
   const hasParams = node.type === 'trigger.schedule'
     || node.type === 'trigger.hotkey'
     || node.type === 'action.notify'
     || node.type === 'action.http'
     || node.type === 'logic.if'
+    || node.type === 'logic.switch'
     || node.type === 'action.set'
     || node.type === 'logic.delay'
     || node.type === 'action.clipboard'
@@ -70,9 +76,27 @@ export function NodeInspector({
     ? node.data.set.fields
     : [{ key: '', value: '' }]
   const patchSetFields = (fields: SetField[]) => patchData({ ...node.data, set: { fields } })
+  const command: CommandData = {
+    command: node.data.command?.command ?? '',
+    cwd: node.data.command?.cwd ?? '',
+    timeoutSeconds: node.data.command?.timeoutSeconds ?? 30,
+    continueOnFail: node.data.command?.continueOnFail ?? false,
+  }
+  const patchCommand = (next: Partial<CommandData>) =>
+    patchData({ ...node.data, command: { ...command, ...next } })
+  const switchCases: SwitchCase[] = node.data.switch?.cases?.length
+    ? node.data.switch.cases
+    : [{ id: '1', op: 'equals', value: '' }]
+  const patchSwitchCases = (cases: SwitchCase[]) =>
+    patchData({ ...node.data, switch: { cases } })
+  const ifOpOptions = [
+    { value: 'contains', label: t.chatAutomationIfContains },
+    { value: 'equals', label: t.chatAutomationIfEquals },
+    { value: 'notEmpty', label: t.chatAutomationIfNotEmpty },
+  ]
 
   return (
-    <aside className="kv-automation-inspector">
+    <aside className="kv-automation-inspector custom-scrollbar">
       <header className="kv-automation-inspector-head">
         {Icon ? (
           <span className="kv-automation-inspector-icon" aria-hidden>
@@ -212,7 +236,7 @@ export function NodeInspector({
           {node.type === 'action.notify' ? (
             <FieldBlock label={t.chatAutomationNotifyBody}>
               <textarea
-                className="kv-textarea"
+                className="kv-textarea custom-scrollbar"
                 rows={4}
                 value={node.data.notify?.body ?? ''}
                 placeholder={t.chatAutomationNotifyPlaceholder}
@@ -260,7 +284,7 @@ export function NodeInspector({
               </FieldBlock>
               <FieldBlock label={t.chatAutomationHttpHeaders}>
                 <textarea
-                  className="kv-textarea"
+                  className="kv-textarea custom-scrollbar"
                   rows={3}
                   value={node.data.http?.headers ?? ''}
                   placeholder={'Authorization: Bearer …\nAccept: application/json'}
@@ -280,7 +304,7 @@ export function NodeInspector({
               {(node.data.http?.method ?? 'GET') !== 'GET' ? (
                 <FieldBlock label={t.chatAutomationHttpBody}>
                   <textarea
-                    className="kv-textarea"
+                    className="kv-textarea custom-scrollbar"
                     rows={4}
                     value={node.data.http?.body ?? ''}
                     placeholder='{"text":"{{output}}"}'
@@ -312,11 +336,7 @@ export function NodeInspector({
                       if: { op: op as IfOp, value: node.data.if?.value ?? '' },
                     })
                   }
-                  options={[
-                    { value: 'contains', label: t.chatAutomationIfContains },
-                    { value: 'equals', label: t.chatAutomationIfEquals },
-                    { value: 'notEmpty', label: t.chatAutomationIfNotEmpty },
-                  ]}
+                  options={ifOpOptions}
                 />
               </FieldBlock>
               {(node.data.if?.op ?? 'contains') !== 'notEmpty' ? (
@@ -334,6 +354,62 @@ export function NodeInspector({
                 </FieldBlock>
               ) : null}
             </>
+          ) : null}
+
+          {node.type === 'logic.switch' ? (
+            <FieldBlock label={t.chatAutomationSwitchCases}>
+              <div className="flex flex-col gap-3">
+                {switchCases.map((item, index) => (
+                  <div key={item.id} className="flex flex-col gap-2">
+                    <div className="kv-automation-inspector-kicker">{t.chatAutomationSwitchCase} {item.id}</div>
+                    <Select
+                      value={item.op}
+                      onChange={(op) =>
+                        patchSwitchCases(switchCases.map((row, i) =>
+                          i === index ? { ...row, op: op as IfOp } : row,
+                        ))
+                      }
+                      options={ifOpOptions}
+                    />
+                    {item.op !== 'notEmpty' ? (
+                      <input
+                        className="kv-input"
+                        value={item.value}
+                        placeholder={t.chatAutomationIfValue}
+                        onChange={(event) =>
+                          patchSwitchCases(switchCases.map((row, i) =>
+                            i === index ? { ...row, value: event.target.value } : row,
+                          ))
+                        }
+                      />
+                    ) : null}
+                    {switchCases.length > 1 ? (
+                      <button
+                        type="button"
+                        className="kv-automation-inspector-note cursor-pointer border-0 bg-transparent p-0 text-left"
+                        onClick={() => patchSwitchCases(switchCases.filter((_, i) => i !== index))}
+                      >
+                        {t.chatDelete}
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+                {switchCases.length < MAX_SWITCH_CASES ? (
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const used = new Set(switchCases.map((row) => row.id))
+                      let n = 1
+                      while (used.has(String(n))) n += 1
+                      patchSwitchCases([...switchCases, { id: String(n), op: 'equals', value: '' }])
+                    }}
+                  >
+                    {t.chatAutomationSwitchAddCase}
+                  </Button>
+                ) : null}
+                <p className="kv-automation-inspector-note">{t.chatAutomationSwitchDefaultHint}</p>
+              </div>
+            </FieldBlock>
           ) : null}
 
           {node.type === 'action.set' ? (
@@ -422,7 +498,7 @@ export function NodeInspector({
               {(node.data.clipboard?.op ?? 'copy') === 'copy' ? (
                 <FieldBlock label={t.chatAutomationClipboardText}>
                   <textarea
-                    className="kv-textarea"
+                    className="kv-textarea custom-scrollbar"
                     rows={4}
                     value={node.data.clipboard?.text ?? ''}
                     onChange={(event) =>
@@ -480,7 +556,7 @@ export function NodeInspector({
               {(node.data.file?.op ?? 'write') === 'write' ? (
                 <FieldBlock label={t.chatAutomationFileContent}>
                   <textarea
-                    className="kv-textarea"
+                    className="kv-textarea custom-scrollbar"
                     rows={4}
                     value={node.data.file?.content ?? ''}
                     onChange={(event) =>
@@ -500,16 +576,48 @@ export function NodeInspector({
           ) : null}
 
           {node.type === 'action.command' ? (
-            <FieldBlock label={t.chatAutomationCommand}>
-              <textarea
-                className="kv-textarea"
-                rows={4}
-                value={node.data.command?.command ?? ''}
-                onChange={(event) =>
-                  patchData({ ...node.data, command: { command: event.target.value } })
-                }
-              />
-            </FieldBlock>
+            <>
+              <p className="kv-automation-inspector-note">{t.chatAutomationCommandRunHint}</p>
+              <FieldBlock label={t.chatAutomationCommand}>
+                <textarea
+                  className="kv-textarea custom-scrollbar"
+                  rows={5}
+                  placeholder={t.chatAutomationCommandPlaceholder}
+                  value={command.command}
+                  onChange={(event) => patchCommand({ command: event.target.value })}
+                />
+              </FieldBlock>
+              <FieldBlock label={t.chatAutomationCommandCwd}>
+                <input
+                  className="kv-input"
+                  placeholder={t.chatAutomationCommandCwdPlaceholder}
+                  value={command.cwd ?? ''}
+                  onChange={(event) => patchCommand({ cwd: event.target.value })}
+                />
+              </FieldBlock>
+              <FieldBlock label={t.chatAutomationCommandTimeout}>
+                <input
+                  className="kv-input"
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={command.timeoutSeconds ?? 30}
+                  onChange={(event) =>
+                    patchCommand({
+                      timeoutSeconds: Math.min(300, Math.max(1, Number(event.target.value) || 30)),
+                    })
+                  }
+                />
+              </FieldBlock>
+              <div className="kv-automation-inspector-toggle">
+                <span>{t.chatAutomationCommandContinueOnFail}</span>
+                <Toggle
+                  checked={command.continueOnFail ?? false}
+                  onChange={(continueOnFail) => patchCommand({ continueOnFail })}
+                  ariaLabel={t.chatAutomationCommandContinueOnFail}
+                />
+              </div>
+            </>
           ) : null}
 
           {usesTemplates ? (
@@ -536,7 +644,7 @@ export function NodeInspector({
         {lastOutput ? (
           <div className="kv-automation-output">
             <div className="kv-automation-inspector-kicker">{t.chatAutomationLastOutput}</div>
-            <pre>{lastOutput}</pre>
+            <pre className="custom-scrollbar">{lastOutput}</pre>
           </div>
         ) : null}
       </InspectorSection>

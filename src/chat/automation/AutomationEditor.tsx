@@ -33,9 +33,10 @@ import {
   canConnect,
   connectNodes,
   createFlowNode,
+  flowEdgeFromConnection,
   nextNodePosition,
+  nextTriggerPosition,
   pickAppendSource,
-  triggerNode,
 } from './graph'
 import { SLOT_CATALOG, type NodeCatalogEntry } from './nodeCatalog'
 import {
@@ -55,8 +56,8 @@ import {
 import { FlowNode, type AutomationRfNode } from './nodes/FlowNode'
 import {
   isAttachmentType,
-  isIfType,
   isTriggerType,
+  branchHandles,
   type AgentSlot,
   type Automation,
   type AutomationNodeType,
@@ -78,6 +79,7 @@ const nodeTypes = {
   'action.file': FlowNode,
   'action.command': FlowNode,
   'logic.if': FlowNode,
+  'logic.switch': FlowNode,
   'logic.delay': FlowNode,
   'agent.runtime': FlowNode,
   'agent.context': FlowNode,
@@ -181,6 +183,7 @@ function EditorInner({
   const [nodeOutput, setNodeOutput] = useState<Record<string, string>>({})
   const [runs, setRuns] = useState<AutomationRunSummary[]>([])
   const [liveStartedAt, setLiveStartedAt] = useState<string | null>(null)
+  const liveStartedAtRef = useRef<string | null>(null)
   const viewportRef = useRef<Viewport>(automation.viewport)
   const pendingAddRef = useRef<AddIntent | null>(null)
   const nodesRef = useRef(nodes)
@@ -231,8 +234,10 @@ function EditorInner({
     void api.onAutomationRun((event: AutomationRunEvent) => {
       if (event.automationId !== automation.id) return
       if (event.kind === 'run_started') {
+        const startedAt = new Date().toISOString()
+        liveStartedAtRef.current = startedAt
         setRunning(true)
-        setLiveStartedAt(new Date().toISOString())
+        setLiveStartedAt(startedAt)
         setRunError('')
         setNodeStatus({})
         setNodeOutput({})
@@ -250,13 +255,25 @@ function EditorInner({
         if (event.output) {
           setNodeOutput((current) => ({ ...current, [event.nodeId!]: event.output! }))
         }
-        if (event.error) setRunError(event.error)
+        if (event.error && event.status === 'error') setRunError(event.error)
       }
       if (event.kind === 'run_finished') {
+        const status = event.status ?? 'success'
+        setRuns((current) => [
+          {
+            id: event.runId,
+            origin: 'manual',
+            status,
+            startedAt: liveStartedAtRef.current ?? new Date().toISOString(),
+            error: event.error ?? null,
+          },
+          ...current.filter((run) => run.id !== event.runId),
+        ])
+        liveStartedAtRef.current = null
         setRunning(false)
         setLiveStartedAt(null)
-        if (event.status === 'error' && event.error) setRunError(event.error)
-        if (event.status === 'cancelled') setRunError('')
+        if (status === 'error' && event.error) setRunError(event.error)
+        else setRunError('')
         void loadRuns()
       }
     }).then((fn) => {
@@ -290,13 +307,14 @@ function EditorInner({
     )) {
       return
     }
-    const edge = connectNodes(
+    const edge = flowEdgeFromConnection(
+      from?.type ?? '',
       connection.source,
       connection.target,
-      slot ? 'slot' : connection.sourceHandle,
-      slot ?? connection.targetHandle,
+      connection.sourceHandle,
+      connection.targetHandle,
     )
-    const nextEdges = addEdge(withEdgeChrome({ ...edge, targetHandle: connection.targetHandle }), currentEdges)
+    const nextEdges = addEdge(withEdgeChrome(edge), currentEdges)
     setEdges(nextEdges)
     commit(currentNodes, nextEdges)
   }, [automation, commit, setEdges])
@@ -318,9 +336,25 @@ function EditorInner({
     const currentNodes = nodesRef.current
     const currentEdges = edgesRef.current
     const model = persist(automation, currentNodes, currentEdges, viewportRef.current)
-    if (entry.kind === 'trigger' && triggerNode(model)) {
+    if (entry.kind === 'trigger') {
+      if (model.nodes.some((node) => node.type === entry.type)) {
+        setPicker(null)
+        pendingAddRef.current = null
+        return
+      }
+      const node = createFlowNode(entry.type, entry.defaultData(t), nextTriggerPosition(model.nodes))
+      const nextNodes: AutomationRfNode[] = [...currentNodes, {
+        id: node.id,
+        type: node.type,
+        position: node.position,
+        data: node.data,
+      }]
+      setNodes(nextNodes)
+      setEdges(currentEdges)
+      setSelectedId(node.id)
       setPicker(null)
       pendingAddRef.current = null
+      commit(nextNodes, currentEdges)
       return
     }
     let intent = pendingAddRef.current
@@ -347,7 +381,7 @@ function EditorInner({
         const nextEdges: Edge[] = [
           ...kept,
           withEdgeChrome(connectNodes(splitEdge.source, node.id, splitEdge.sourceHandle)),
-          withEdgeChrome(connectNodes(node.id, splitEdge.target, isIfType(node.type) ? 'true' : undefined)),
+          withEdgeChrome(connectNodes(node.id, splitEdge.target, branchHandles(node.type, node.data)?.[0])),
         ]
         setNodes(nextNodes)
         setEdges(nextEdges)
@@ -360,7 +394,7 @@ function EditorInner({
     }
 
     // 底部胶囊「添加节点」没有显式来源时，自动接到还能出边的尾节点（对齐 n8n 的线性搭积木）。
-    if (!intent && entry.kind !== 'trigger') {
+    if (!intent) {
       const tail = pickAppendSource(model.nodes, model.edges, selectedId)
       if (tail) intent = { kind: 'after', nodeId: tail.nodeId, handle: tail.handle }
     }
@@ -722,6 +756,7 @@ function EditorInner({
           {picker || !selected ? (
             <AddNodePicker
               kind={picker ?? (hasTrigger ? 'action' : 'trigger')}
+              presentTypes={nodes.map((node) => node.type ?? '')}
               onPick={addFromCatalog}
               onCancel={picker && selected ? () => {
                 pendingAddRef.current = null

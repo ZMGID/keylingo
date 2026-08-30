@@ -277,30 +277,20 @@ pub(crate) fn build_shell_command(command: &str) -> Command {
     }
 }
 
-pub async fn run_command(
-    workspace: &NativeToolWorkspace,
-    default_timeout_ms: u64,
-    arguments: &Value,
-    state: Option<&AppState>,
-    conversation_id: Option<&str>,
-) -> Result<String, String> {
-    let command = arguments
-        .get("command")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "run_command requires command".to_string())?;
+#[derive(Debug, Clone)]
+pub struct CapturedCommand {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
 
+fn deny_unsafe_command(command: &str, allow_host_python_package_install: bool) -> Result<(), String> {
     let lowered = command.to_ascii_lowercase();
     for denied in COMMAND_DENYLIST {
         if lowered.contains(denied) {
             return Err("command is blocked by safety policy".to_string());
         }
     }
-    let allow_host_python_package_install = arguments
-        .get("allow_host_python_package_install")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
     if !allow_host_python_package_install {
         for denied in HOST_PYTHON_PACKAGE_INSTALL_PATTERNS {
             if lowered.contains(denied) {
@@ -325,6 +315,56 @@ pub async fn run_command(
             );
         }
     }
+    Ok(())
+}
+
+/// Foreground shell run that always returns stdout/stderr/exit, including non-zero.
+/// Automation's Command node uses this so `continueOnFail` can still emit structured JSON.
+pub async fn run_captured_command(
+    command: &str,
+    cwd: PathBuf,
+    timeout_ms: u64,
+    state: Option<&AppState>,
+) -> Result<CapturedCommand, String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("command is empty".to_string());
+    }
+    deny_unsafe_command(command, false)?;
+    if !cwd.is_dir() {
+        return Err(format!(
+            "Working directory is not a directory: {}",
+            cwd.display()
+        ));
+    }
+    let timeout_ms = timeout_ms.clamp(CHAT_TOOL_MIN_TIMEOUT_MS, CHAT_TOOL_MAX_TIMEOUT_MS);
+    let output = run_shell_command(command, cwd, timeout_ms, state).await?;
+    Ok(CapturedCommand {
+        exit_code: output.status_code.unwrap_or(-1),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+pub async fn run_command(
+    workspace: &NativeToolWorkspace,
+    default_timeout_ms: u64,
+    arguments: &Value,
+    state: Option<&AppState>,
+    conversation_id: Option<&str>,
+) -> Result<String, String> {
+    let command = arguments
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "run_command requires command".to_string())?;
+
+    let allow_host_python_package_install = arguments
+        .get("allow_host_python_package_install")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    deny_unsafe_command(command, allow_host_python_package_install)?;
 
     let explicit_cwd = arguments
         .get("cwd")

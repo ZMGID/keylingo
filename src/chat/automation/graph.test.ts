@@ -5,6 +5,7 @@ import {
   canConnect,
   connectNodes,
   createFlowNode,
+  flowEdgeFromConnection,
   layoutFlow,
   pickAppendSource,
   topologicalOrder,
@@ -28,6 +29,23 @@ describe('automation graph', () => {
     expect(canConnect('a', 'n', nodes, edges)).toBe(true)
     expect(canConnect('n', 'a', nodes, [...edges, connectNodes('a', 'n')])).toBe(false)
     expect(canConnect('t', 'a', nodes, edges)).toBe(false)
+  })
+
+  it('Switch 每个出口只能连一条边', () => {
+    const trigger = { ...node('t', 'trigger.manual'), id: 't' }
+    const sw = createFlowNode('logic.switch', {
+      label: 's',
+      switch: { cases: [{ id: '1', op: 'equals', value: 'a' }] },
+    }, { x: 200, y: 0 })
+    sw.id = 's'
+    const a = { ...node('a', 'action.notify', 400), id: 'a' }
+    const b = { ...node('b', 'action.notify', 400), id: 'b' }
+    const nodes = [trigger, sw, a, b]
+    const after = [connectNodes('t', 's')]
+    expect(canConnect('s', 'a', nodes, after, '1')).toBe(true)
+    const withOne = [...after, connectNodes('s', 'a', '1')]
+    expect(canConnect('s', 'a', nodes, withOne, '1')).toBe(false)
+    expect(canConnect('s', 'b', nodes, withOne, 'default')).toBe(true)
   })
 
   it('If 节点允许 true/false 两个出口', () => {
@@ -100,6 +118,18 @@ describe('automation graph', () => {
     expect(yes.position.x).toBe(no.position.x)
   })
 
+  it('多个触发器可以接到同一步', () => {
+    const manual = { ...node('m', 'trigger.manual'), id: 'm' }
+    const schedule = createFlowNode('trigger.schedule', { label: 's' }, { x: 0, y: FLOW_NODE_GAP_Y })
+    schedule.id = 's'
+    const agent = { ...node('a', 'action.agent', 200), id: 'a' }
+    const notify = { ...node('n', 'action.notify', 400), id: 'n' }
+    const nodes = [manual, schedule, agent, notify]
+    expect(canConnect('m', 'a', nodes, [])).toBe(true)
+    expect(canConnect('s', 'a', nodes, [connectNodes('m', 'a')])).toBe(true)
+    expect(canConnect('s', 'n', nodes, [connectNodes('a', 'n')])).toBe(false)
+  })
+
   it('添加下一步接到还能出边的节点', () => {
     const trigger = { ...node('t', 'trigger.manual'), id: 't' }
     const agent = { ...node('a', 'action.agent'), id: 'a' }
@@ -122,9 +152,14 @@ describe('automation graph', () => {
     const nodes = [trigger, agent, runtime]
     expect(canConnect('t', 'a', nodes, [])).toBe(true)
     expect(canConnect('r', 'a', nodes, [connectNodes('t', 'a')], 'slot', 'runtime')).toBe(true)
+    expect(canConnect('r', 'a', nodes, [connectNodes('t', 'a')], 'slot')).toBe(true)
     expect(canConnect('r', 'a', nodes, [connectNodes('t', 'a')], 'slot', 'context')).toBe(false)
     const plugged = [connectNodes('t', 'a'), connectNodes('r', 'a', 'slot', 'runtime')]
     expect(canConnect('r', 'a', nodes, plugged, 'slot', 'runtime')).toBe(false)
     expect(pickAppendSource(nodes, plugged)).toEqual({ nodeId: 'a' })
+    const remapped = flowEdgeFromConnection('agent.runtime', 'r', 'a', 'slot', null)
+    expect(remapped.targetHandle).toBe('runtime')
+    expect(remapped.sourceHandle).toBe('slot')
+    expect(canConnect('t', 'a', nodes, [remapped])).toBe(true)
   })
 })

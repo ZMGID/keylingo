@@ -216,6 +216,47 @@
   margin: 12px -6px 0;
 }
 
+.kv-automation-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: #737373;
+}
+
+.kv-automation-picker-search .kv-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.kv-automation-picker-group + .kv-automation-picker-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--theme-surface-border);
+}
+
+.kv-automation-picker-group-head {
+  padding: 4px 10px 8px;
+}
+
+.kv-automation-picker-group-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.kv-automation-picker-group-head p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #737373;
+}
+
+.dark .kv-automation-picker-group-head p {
+  color: #a1a1aa;
+}
+
 .kv-automation-picker-heading {
   min-width: 0;
   flex: 1;
@@ -1085,44 +1126,6 @@
   pointer-events: auto;
 }
 
-.kv-automation-node-tool {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #52525b;
-  cursor: pointer;
-}
-
-.kv-automation-node-tool:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--text);
-}
-
-.dark .kv-automation-node-tool {
-  color: #a1a1aa;
-}
-
-.dark .kv-automation-node-tool:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #e4e4e7;
-}
-
-.kv-automation-node-tool.is-danger:hover {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
-}
-
-.kv-automation-node-tool:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 /* IF 分支标注 */
 .kv-automation-branch {
   position: absolute;
@@ -1132,25 +1135,9 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: #737373;
-  transform: translateX(100%);
+  transform: translate(100%, -50%);
   padding-left: 10px;
   pointer-events: none;
-}
-
-.kv-automation-branch.true {
-  top: 16%;
-}
-
-.kv-automation-branch.false {
-  top: 56%;
-}
-
-.kv-automation-canvas .kv-automation-handle--true {
-  top: 30% !important;
-}
-
-.kv-automation-canvas .kv-automation-handle--false {
-  top: 70% !important;
 }
 
 /* 端口：输出是圆点、输入是小圆角矩形（对齐 n8n 的 dot / rectangle 语法） */
@@ -1207,14 +1194,6 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 
-.kv-automation-node-plus.true {
-  top: 30%;
-}
-
-.kv-automation-node-plus.false {
-  top: 70%;
-}
-
 .kv-automation-node:hover .kv-automation-node-plus,
 .kv-automation-node.is-selected .kv-automation-node-plus,
 .kv-automation-node-plus:focus-visible {
@@ -1253,37 +1232,4 @@
 .kv-automation-edge-actions.is-visible {
   opacity: 1;
   pointer-events: all;
-}
-
-.kv-automation-edge-actions button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: #52525b;
-  cursor: pointer;
-}
-
-.kv-automation-edge-actions button:hover {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--text);
-}
-
-.dark .kv-automation-edge-actions button {
-  color: #a1a1aa;
-}
-
-.dark .kv-automation-edge-actions button:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #e4e4e7;
-}
-
-.kv-automation-edge-actions button.is-danger:hover {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
 }

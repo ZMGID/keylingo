@@ -1,5 +1,5 @@
-import { AUTOMATION_SCHEMA_VERSION, isAttachmentType, isIfType, isStepType, isTriggerType, type Automation, type AutomationNodeType, type FlowEdge, type FlowNode, type FlowNodeData } from './types'
-import { AGENT_SLOTS, FLOW_AGENT_WIDTH, isSlotEdge, resolveSlotConnection, slotAllowsMany } from './agentModel'
+import { AUTOMATION_SCHEMA_VERSION, branchHandles, isAttachmentType, isStepType, isTriggerType, type Automation, type AutomationNodeType, type FlowEdge, type FlowNode, type FlowNodeData } from './types'
+import { AGENT_SLOTS, FLOW_AGENT_WIDTH, connectSlotEdge, isSlotEdge, resolveSlotConnection, slotAllowsMany } from './agentModel'
 
 /* n8n 式节点：卡片本体 104×80，文字标签悬挂在卡片下方（不占节点边界）。
    GAP_Y 要给下方标签留出高度，否则 IF 分叉的两支会叠字。 */
@@ -8,6 +8,15 @@ export { FLOW_AGENT_WIDTH }
 export const FLOW_NODE_GAP_X = 88
 export const FLOW_NODE_GAP_Y = 136
 export const FLOW_ORIGIN = { x: 72, y: 144 }
+
+function branchYOffset(handles: string[], handle: string): number {
+  const idx = handles.indexOf(handle)
+  if (idx < 0) return 0
+  if (handles.length === 2 && handles[0] === 'true') {
+    return idx === 0 ? -FLOW_NODE_GAP_Y : FLOW_NODE_GAP_Y
+  }
+  return (idx - (handles.length - 1) / 2) * FLOW_NODE_GAP_Y
+}
 
 export function nodeCardWidth(type?: string): number {
   if (type === 'action.agent') return FLOW_AGENT_WIDTH
@@ -51,11 +60,21 @@ export function nextNodePosition(
   if (nodes.length === 0) return { ...FLOW_ORIGIN }
   const from = (fromId && nodes.find((node) => node.id === fromId))
     || nodes.reduce((best, node) => (node.position.x >= best.position.x ? node : best))
-  const yOff = sourceHandle === 'false' ? FLOW_NODE_GAP_Y : sourceHandle === 'true' ? -FLOW_NODE_GAP_Y : 0
+  const handles = branchHandles(from.type, from.data)
+  const yOff = handles && sourceHandle ? branchYOffset(handles, sourceHandle) : 0
   return {
     x: from.position.x + nodeCardWidth(from.type) + FLOW_NODE_GAP_X,
     y: from.position.y + yOff,
   }
+}
+
+export function nextTriggerPosition(nodes: FlowNode[]): { x: number; y: number } {
+  const triggers = nodes.filter((node) => isTriggerType(node.type))
+  if (triggers.length === 0) return { ...FLOW_ORIGIN }
+  const lowest = triggers.reduce((best, node) => (
+    node.position.y >= best.position.y ? node : best
+  ))
+  return { x: FLOW_ORIGIN.x, y: lowest.position.y + FLOW_NODE_GAP_Y }
 }
 
 export function pickAppendSource(
@@ -66,13 +85,13 @@ export function pickAppendSource(
   const tryNode = (id: string): { nodeId: string, handle?: string } | null => {
     const node = nodes.find((item) => item.id === id)
     if (!node || isAttachmentType(node.type)) return null
-    if (isIfType(node.type)) {
+    const handles = branchHandles(node.type, node.data)
+    if (handles) {
       const used = edges
         .filter((edge) => edge.source === id && !isSlotEdge(edge))
-        .map((edge) => edge.sourceHandle || 'true')
-      if (!used.includes('true')) return { nodeId: id, handle: 'true' }
-      if (!used.includes('false')) return { nodeId: id, handle: 'false' }
-      return null
+        .map((edge) => edge.sourceHandle || handles[0])
+      const free = handles.find((handle) => !used.includes(handle))
+      return free ? { nodeId: id, handle: free } : null
     }
     if (edges.some((edge) => edge.source === id && !isSlotEdge(edge))) return null
     return { nodeId: id }
@@ -90,7 +109,7 @@ export function pickAppendSource(
 }
 
 export function layoutFlow<
-  N extends { id: string, type?: string, position: { x: number, y: number } },
+  N extends { id: string, type?: string, position: { x: number, y: number }, data?: FlowNodeData },
 >(
   nodes: N[],
   edges: { source: string, target: string, sourceHandle?: string | null, targetHandle?: string | null }[],
@@ -113,11 +132,13 @@ export function layoutFlow<
     if (!node) return
     const outs = outgoing.get(id) ?? []
     const nextX = x + nodeCardWidth(node.type) + FLOW_NODE_GAP_X
-    if (isIfType(node.type ?? '')) {
-      const yes = outs.find((edge) => (edge.sourceHandle || 'true') === 'true')
-      const no = outs.find((edge) => edge.sourceHandle === 'false')
-      if (yes) walk(yes.target, nextX, y - FLOW_NODE_GAP_Y)
-      if (no) walk(no.target, nextX, y + FLOW_NODE_GAP_Y)
+    const handles = branchHandles(node.type ?? '', node.data)
+    if (handles) {
+      handles.forEach((handle) => {
+        const edge = outs.find((item) => (item.sourceHandle || handles[0]) === handle)
+        if (!edge) return
+        walk(edge.target, nextX, y + branchYOffset(handles, handle))
+      })
       return
     }
     for (const edge of outs) walk(edge.target, nextX, y)
@@ -161,7 +182,14 @@ export function canConnect(
   if (isAttachmentType(from.type) || isAttachmentType(to.type)) return false
   if (isTriggerType(to.type)) return false
   if (!isStepType(to.type)) return false
-  if (edges.some((edge) => edge.target === target && !isSlotEdge(edge))) return false
+  const incoming = edges.filter((edge) => edge.target === target && !isSlotEdge(edge))
+  if (incoming.length > 0) {
+    const joinTriggers = isTriggerType(from.type) && incoming.every((edge) => {
+      const src = nodes.find((node) => node.id === edge.source)
+      return src ? isTriggerType(src.type) : false
+    })
+    if (!joinTriggers) return false
+  }
   const same = edges.some((edge) =>
     edge.source === source
     && edge.target === target
@@ -169,10 +197,11 @@ export function canConnect(
     && !isSlotEdge(edge),
   )
   if (same) return false
-  if (isIfType(from.type)) {
-    const handle = sourceHandle === 'false' ? 'false' : 'true'
+  const handles = branchHandles(from.type, from.data)
+  if (handles) {
+    const handle = sourceHandle && handles.includes(sourceHandle) ? sourceHandle : handles[0]
     if (edges.some((edge) =>
-      edge.source === source && !isSlotEdge(edge) && (edge.sourceHandle || 'true') === handle
+      edge.source === source && !isSlotEdge(edge) && (edge.sourceHandle || handles[0]) === handle
     )) {
       return false
     }
@@ -194,6 +223,19 @@ export function connectNodes(
     sourceHandle: sourceHandle ?? undefined,
     targetHandle: targetHandle ?? undefined,
   }
+}
+
+/** Satellite → Agent always lands on the matching slot, even if the drop missed the diamond. */
+export function flowEdgeFromConnection(
+  fromType: string,
+  source: string,
+  target: string,
+  sourceHandle?: string | null,
+  targetHandle?: string | null,
+): FlowEdge {
+  const slot = resolveSlotConnection(fromType, targetHandle)
+  if (slot) return connectSlotEdge(source, target, slot)
+  return connectNodes(source, target, sourceHandle, targetHandle)
 }
 
 export function triggerNode(automation: Automation): FlowNode | undefined {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { collapseToolIds, composeAgent, explodeInlineAgents, isAgentSlotFilled, normalizeAgent, toAgentData, agentSelectedModel } from './agentModel'
+import { composeAgent, explodeInlineAgents, isAgentSlotFilled, normalizeAgent, toAgentData, agentSelectedModel } from './agentModel'
 
 describe('normalizeAgent', () => {
   it('defaults to builtin Kivio Agent with an empty prompt', () => {
@@ -72,12 +72,6 @@ describe('normalizeAgent', () => {
     expect(isAgentSlotFilled('runtime', hangingCli)).toBe(false)
   })
 
-  it('collapses a full selection back to the empty (all-tools) whitelist', () => {
-    expect(collapseToolIds(['a', 'b'], ['a', 'b'])).toEqual([])
-    expect(collapseToolIds(['a'], ['a', 'b'])).toEqual(['a'])
-    expect(collapseToolIds(['a', 'b'], [])).toEqual(['a', 'b'])
-  })
-
   it('composes plugged slot nodes over inline agent data', () => {
     const nodes = [
       { id: 'a', type: 'action.agent', data: { label: 'A', agent: { prompt: 'old' } } },
@@ -91,6 +85,7 @@ describe('normalizeAgent', () => {
     const agent = composeAgent('a', nodes, edges)
     expect(agent.runtimeKind).toBe('chat')
     expect(agent.prompt).toBe('new')
+    expect(agent.toolIds).toEqual([])
   })
 
   it('explodes inline agent config into slot nodes once', () => {

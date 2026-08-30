@@ -1,6 +1,7 @@
-import { useContext } from 'react'
+import { Fragment, useContext, type CSSProperties } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import { Check, Loader2, Minus, Play, Plus, Power, Trash2, X } from 'lucide-react'
+import { IconButton } from '../../../components/Button'
 import { useT } from '../../../settings/i18n'
 import { catalogEntry, nodeSummary } from '../nodeCatalog'
 import {
@@ -9,7 +10,7 @@ import {
   isAgentSlotRequired,
   slotAllowsMany,
 } from '../agentModel'
-import { isAttachmentType, isIfType, isTriggerType, type AutomationNodeType, type FlowNodeData, type NodeRunStatus } from '../types'
+import { isAttachmentType, isIfType, isSwitchType, isTriggerType, branchHandles, type AutomationNodeType, type FlowNodeData, type NodeRunStatus } from '../types'
 import { CanvasChromeContext, NodeRunStatusContext } from './chrome'
 
 export type AutomationRfNode = Node<FlowNodeData, AutomationNodeType>
@@ -17,15 +18,18 @@ export type AutomationRfNode = Node<FlowNodeData, AutomationNodeType>
 function AddNextButton({
   onClick,
   branch,
+  style,
 }: {
   onClick: () => void
-  branch?: 'true' | 'false'
+  branch?: string
+  style?: CSSProperties
 }) {
   const t = useT()
   return (
     <button
       type="button"
       className={`kv-automation-node-plus nodrag nopan${branch ? ` ${branch}` : ''}`}
+      style={style}
       aria-label={t.chatAutomationAddStep}
       onClick={(event) => {
         event.stopPropagation()
@@ -53,11 +57,11 @@ function ToolbarButton({
   children: React.ReactNode
 }) {
   return (
-    <button
-      type="button"
-      className={`kv-automation-node-tool${danger ? ' is-danger' : ''}`}
-      aria-label={label}
-      title={label}
+    <IconButton
+      size="xs"
+      variant={danger ? 'danger' : 'default'}
+      label={label}
+      className="nodrag nopan"
       disabled={disabled}
       onClick={(event) => {
         event.stopPropagation()
@@ -67,7 +71,7 @@ function ToolbarButton({
       onMouseDown={(event) => event.stopPropagation()}
     >
       {children}
-    </button>
+    </IconButton>
   )
 }
 
@@ -160,7 +164,8 @@ function StatusBadge({ status }: { status: NodeRunStatus }) {
 export function FlowNode({ id, data, selected, type }: NodeProps<AutomationRfNode>) {
   const t = useT()
   const trigger = isTriggerType(type ?? '')
-  const branching = isIfType(type ?? '')
+  const branching = isIfType(type ?? '') || isSwitchType(type ?? '')
+  const handles = branchHandles(type ?? '', data)
   const attach = isAttachmentType(type ?? '')
   const agent = type === 'action.agent'
   const entry = catalogEntry(type ?? '')
@@ -223,31 +228,36 @@ export function FlowNode({ id, data, selected, type }: NodeProps<AutomationRfNod
           </span>
         ) : null}
         {status ? <StatusBadge status={status} /> : null}
-        {branching ? (
-          <>
-            <Handle
-              type="source"
-              id="true"
-              position={Position.Right}
-              className="kv-automation-handle kv-automation-handle--true"
-              style={{ top: '30%' }}
-            />
-            <Handle
-              type="source"
-              id="false"
-              position={Position.Right}
-              className="kv-automation-handle kv-automation-handle--false"
-              style={{ top: '70%' }}
-            />
-            <span className="kv-automation-branch true">{t.chatAutomationIfTrue}</span>
-            <span className="kv-automation-branch false">{t.chatAutomationIfFalse}</span>
-            {!taken?.has('true') ? (
-              <AddNextButton branch="true" onClick={() => chrome.onAddNext(id, 'true')} />
-            ) : null}
-            {!taken?.has('false') ? (
-              <AddNextButton branch="false" onClick={() => chrome.onAddNext(id, 'false')} />
-            ) : null}
-          </>
+        {handles ? (
+          handles.map((handle, index) => {
+            const top = `${((index + 1) / (handles.length + 1)) * 100}%`
+            const label = handle === 'true'
+              ? t.chatAutomationIfTrue
+              : handle === 'false'
+                ? t.chatAutomationIfFalse
+                : handle === 'default'
+                  ? t.chatAutomationSwitchDefault
+                  : handle
+            return (
+              <Fragment key={handle}>
+                <Handle
+                  type="source"
+                  id={handle}
+                  position={Position.Right}
+                  className={`kv-automation-handle kv-automation-handle--${handle}`}
+                  style={{ top }}
+                />
+                <span className="kv-automation-branch" style={{ top }}>{label}</span>
+                {!taken?.has(handle) ? (
+                  <AddNextButton
+                    branch={handle}
+                    style={{ top }}
+                    onClick={() => chrome.onAddNext(id, handle)}
+                  />
+                ) : null}
+              </Fragment>
+            )
+          })
         ) : attach ? null : (
           <>
             <Handle type="source" position={Position.Right} className="kv-automation-handle" />

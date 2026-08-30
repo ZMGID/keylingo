@@ -6,7 +6,8 @@ import { isProviderEnabled, type SelectOption } from '../../settings/utils'
 import { useT } from '../../settings/i18n'
 import { chatApi, type DetectedExternalAgent } from '../api'
 import { AgentIcon } from '../AgentIcon'
-import { normalizeAgent, toAgentData, collapseToolIds, withRuntimeKind, type NormalizedAgent } from './agentModel'
+import { normalizeAgent, toAgentData, withRuntimeKind, type NormalizedAgent } from './agentModel'
+import { isAutomationOptInTool, pruneAlwaysOnToolIds } from './agentTools'
 import type { AgentSlot, FlowNode } from './types'
 
 function Section({
@@ -158,16 +159,26 @@ export function AgentInspector({
     [agent.externalModel, cliCurrentModel, cliModels, t.chatRuntimeAutoCliDefault],
   )
 
-  const allToolIds = useMemo(
-    () => tools.map((tool) => tool.id || tool.name).filter(Boolean),
+  const toolIdsKey = agent.toolIds.join('\0')
+  useEffect(() => {
+    if (slot !== 'tool' || tools.length === 0) return
+    const current = toolIdsKey ? toolIdsKey.split('\0') : []
+    const next = pruneAlwaysOnToolIds(current, tools)
+    if (next.length === current.length && next.every((id, i) => id === current[i])) return
+    patch({ ...agent, toolIds: next })
+  // Only rewrite when the stored whitelist or catalog changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slot, tools, toolIdsKey])
+
+  const visibleTools = useMemo(
+    () => tools.filter(isAutomationOptInTool),
     [tools],
   )
   const toggleTool = (id: string) => {
-    const current = agent.toolIds.length === 0 ? allToolIds : agent.toolIds
-    const next = current.includes(id)
-      ? current.filter((item) => item !== id)
-      : [...current, id]
-    patch({ ...agent, toolIds: collapseToolIds(next, allToolIds) })
+    const next = agent.toolIds.includes(id)
+      ? agent.toolIds.filter((item) => item !== id)
+      : [...agent.toolIds, id]
+    patch({ ...agent, toolIds: next })
   }
   const toggleSkill = (id: string) => {
     const next = agent.skillIds.includes(id)
@@ -266,7 +277,7 @@ export function AgentInspector({
         focused={false}
       >
         <textarea
-          className="kv-textarea"
+          className="kv-textarea custom-scrollbar"
           rows={7}
           value={agent.prompt}
           placeholder={t.chatAutomationNodePromptPlaceholder}
@@ -288,16 +299,16 @@ export function AgentInspector({
             : t.chatAutomationAgentToolsHint}
         </p>
         {agent.runtimeKind !== 'external' ? (
-          <div className="kv-automation-check-list">
-            {tools.length === 0 ? (
+          <div className="kv-automation-check-list custom-scrollbar">
+            {visibleTools.length === 0 ? (
               <p className="kv-automation-inspector-note">{t.chatAutomationAgentToolsEmpty}</p>
-            ) : tools.map((tool) => {
+            ) : visibleTools.map((tool) => {
               const id = tool.id || tool.name
               return (
                 <label key={id} className="kv-automation-check">
                   <input
                     type="checkbox"
-                    checked={agent.toolIds.length === 0 || agent.toolIds.includes(id)}
+                    checked={agent.toolIds.includes(id)}
                     onChange={() => toggleTool(id)}
                   />
                   <span>
@@ -321,7 +332,7 @@ export function AgentInspector({
         focused={false}
       >
         <p className="kv-automation-inspector-note">{t.chatAutomationAgentSkillsHint}</p>
-        <div className="kv-automation-check-list">
+        <div className="kv-automation-check-list custom-scrollbar">
           {skills.length === 0 ? (
             <p className="kv-automation-inspector-note">{t.chatAutomationAgentSkillsEmpty}</p>
           ) : skills.map((skill) => (

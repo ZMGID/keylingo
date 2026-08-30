@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::native_tools::NativeToolWorkspace;
 
@@ -67,6 +67,34 @@ pub fn workbench_dir(working_directory: &str, automation_id: &str) -> Option<Pat
     Some(dir)
 }
 
+/// Relative paths only; `~`, absolute, and `..` that leave `base` are rejected.
+pub fn confine_file_path(base: &Path, raw: &str) -> Result<PathBuf, String> {
+    const ERR: &str = "file path must stay inside this automation's workspace";
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("file path is empty".to_string());
+    }
+    if trimmed.starts_with('~') {
+        return Err(ERR.to_string());
+    }
+    let path = Path::new(trimmed);
+    let mut depth = 0i32;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return Err(ERR.to_string()),
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(ERR.to_string());
+                }
+            }
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+        }
+    }
+    Ok(base.join(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +107,24 @@ mod tests {
         assert_eq!(
             external_conversation_id("bad/id", "x y"),
             "conv_auto_badid_xy"
+        );
+    }
+
+    #[test]
+    fn confine_file_path_rejects_escape() {
+        let base = PathBuf::from("/tmp/auto");
+        assert!(confine_file_path(&base, "").is_err());
+        assert!(confine_file_path(&base, "~/secret").is_err());
+        assert!(confine_file_path(&base, "/etc/passwd").is_err());
+        assert!(confine_file_path(&base, "..\\ssh\\id_rsa").is_err());
+        assert!(confine_file_path(&base, "foo/../../etc/passwd").is_err());
+        assert_eq!(
+            confine_file_path(&base, "out/note.txt").unwrap(),
+            base.join("out/note.txt")
+        );
+        assert_eq!(
+            confine_file_path(&base, "a/../b.txt").unwrap(),
+            base.join("a/../b.txt")
         );
     }
 }

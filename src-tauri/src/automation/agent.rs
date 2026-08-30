@@ -266,6 +266,10 @@ async fn run_builtin_agent_node(
         );
     }
     apply_agent_tool_whitelist(&mut tools, &spec.tool_ids)?;
+    strip_automation_memory_tools(&mut tools);
+    if !is_chat {
+        ensure_skill_activate_tool(&mut tools);
+    }
     let builtin_names = available_builtin_tool_names(&tools);
 
     let workdir = workspace::workbench_dir(
@@ -294,11 +298,7 @@ async fn run_builtin_agent_node(
 
     let mut effective_chat_tools = settings.chat_tools.clone();
     effective_chat_tools.approval_policy = "auto".to_string();
-    let tools_available = crate::chat::agent::prepare::chat_tools_capable(
-        &effective_chat_tools,
-        settings.chat_memory.enabled,
-        settings.image_generation_model().is_some(),
-    );
+    let tools_available = !tools.is_empty();
     let language = settings
         .settings_language
         .clone()
@@ -422,17 +422,46 @@ fn apply_agent_tool_whitelist(
     tools: &mut Vec<ChatToolDefinition>,
     ids: &[String],
 ) -> Result<(), String> {
-    if ids.is_empty() {
-        return Ok(());
-    }
+    // Read-only tools and the `skill` loader are always mounted so the Skill
+    // slot can load bodies and the model can still `read` / search. `toolIds`
+    // only opts in write/side-effect tools. Memory never mounts.
     tools.retain(|tool| {
+        if is_memory_tool(tool) {
+            return false;
+        }
+        if is_always_on_automation_tool(tool) {
+            return true;
+        }
         ids.iter()
             .any(|entry| crate::chat::agent::filter::entry_matches(tool, entry))
     });
-    if tools.is_empty() {
+    if !ids.is_empty() && tools.is_empty() {
         return Err("None of the selected tools are currently available".into());
     }
     Ok(())
+}
+
+fn is_memory_tool(tool: &ChatToolDefinition) -> bool {
+    tool.name.starts_with("memory_") || tool.id.contains("memory_")
+}
+
+fn is_skill_activate_tool(tool: &ChatToolDefinition) -> bool {
+    tool.source == "skill" || tool.name == "skill"
+}
+
+fn is_always_on_automation_tool(tool: &ChatToolDefinition) -> bool {
+    !is_memory_tool(tool) && (is_skill_activate_tool(tool) || tool.is_read_only_tool())
+}
+
+fn ensure_skill_activate_tool(tools: &mut Vec<ChatToolDefinition>) {
+    if tools.iter().any(is_skill_activate_tool) {
+        return;
+    }
+    tools.push(crate::mcp::types::native_skill_activate_tool());
+}
+
+fn strip_automation_memory_tools(tools: &mut Vec<ChatToolDefinition>) {
+    tools.retain(|tool| !is_memory_tool(tool));
 }
 
 fn extra_skill_bodies(
@@ -677,5 +706,77 @@ mod tests {
         assert_eq!(spec.runtime_kind, AgentRuntimeKind::Chat);
         assert_eq!(spec.provider_id.as_deref(), Some("openai"));
         assert_eq!(spec.model.as_deref(), Some("gpt-4.1"));
+    }
+
+    fn tool(id: &str, name: &str) -> ChatToolDefinition {
+        ChatToolDefinition {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            source: "native".into(),
+            server_id: None,
+            server_name: None,
+            input_schema: json!({}),
+            sensitive: false,
+            annotations: None,
+            output_schema: None,
+        }
+    }
+
+    fn skill_tool() -> ChatToolDefinition {
+        let mut tool = tool("skill__activate", "skill");
+        tool.source = "skill".into();
+        tool
+    }
+
+    #[test]
+    fn empty_tool_ids_keeps_read_only_and_skill() {
+        let mut tools = vec![
+            tool("native__read", "read"),
+            tool("native__run_command", "bash"),
+            tool("native__memory_read", "memory_read"),
+            skill_tool(),
+        ];
+        apply_agent_tool_whitelist(&mut tools, &[]).unwrap();
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read", "skill"]);
+    }
+
+    #[test]
+    fn write_tools_are_opt_in_on_top_of_read_only() {
+        let mut tools = vec![
+            tool("native__read", "read"),
+            tool("native__run_command", "bash"),
+            tool("native__write_file", "write"),
+            skill_tool(),
+        ];
+        apply_agent_tool_whitelist(&mut tools, &["bash".into()]).unwrap();
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read", "bash", "skill"]);
+    }
+
+    #[test]
+    fn memory_tools_are_stripped_even_when_selected() {
+        let mut tools = vec![
+            tool("native__read", "read"),
+            tool("native__memory_read", "memory_read"),
+            tool("native__memory_search", "memory_search"),
+            tool("native__memory_modify", "memory_modify"),
+        ];
+        apply_agent_tool_whitelist(&mut tools, &["native__read".into(), "native__memory_read".into()])
+            .unwrap();
+        strip_automation_memory_tools(&mut tools);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "read");
+    }
+
+    #[test]
+    fn ensure_skill_activate_tool_appends_when_missing() {
+        let mut tools = vec![tool("native__read", "read")];
+        ensure_skill_activate_tool(&mut tools);
+        assert!(tools.iter().any(is_skill_activate_tool));
+        let count = tools.len();
+        ensure_skill_activate_tool(&mut tools);
+        assert_eq!(tools.len(), count);
     }
 }

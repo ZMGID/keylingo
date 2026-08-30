@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { Bell, Bot, Clipboard, Clock, FileText, FolderOpen, GitBranch, Globe, Keyboard, MousePointerClick, Sparkles, SquarePen, Terminal, Timer, Wrench } from 'lucide-react'
+import { Bell, Bot, Clipboard, Clock, FileText, FolderOpen, GitBranch, Globe, Keyboard, MousePointerClick, Sparkles, Split, SquarePen, Terminal, Timer, Wrench } from 'lucide-react'
 import { agentSelectedModel, normalizeAgent } from './agentModel'
 import type { I18n } from '../../settings/i18n'
 import type { AgentSlot, AutomationNodeType, FlowNodeData } from './types'
@@ -76,6 +76,10 @@ export function nodeSummary(type: string, data: FlowNodeData, t: I18n): string {
           : t.chatAutomationIfContains
       return cond.op === 'notEmpty' ? op : `${op} ${clip(cond.value, 18)}`
     }
+    case 'logic.switch': {
+      const n = data.switch?.cases?.length ?? 0
+      return n ? `${n}` : ''
+    }
     default:
       return ''
   }
@@ -123,7 +127,18 @@ export const TRIGGER_CATALOG: NodeCatalogEntry[] = [
   },
 ]
 
-export const ACTION_CATALOG: NodeCatalogEntry[] = [
+export const CORE_CATALOG: NodeCatalogEntry[] = [
+  {
+    type: 'action.command',
+    kind: 'action',
+    icon: Terminal,
+    label: (t) => t.chatAutomationActionCommand,
+    hint: (t) => t.chatAutomationActionCommandHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionCommand,
+      command: { command: '', cwd: '', timeoutSeconds: 30, continueOnFail: false },
+    }),
+  },
   {
     type: 'action.agent',
     kind: 'action',
@@ -157,14 +172,14 @@ export const ACTION_CATALOG: NodeCatalogEntry[] = [
     }),
   },
   {
-    type: 'logic.delay',
+    type: 'action.file',
     kind: 'action',
-    icon: Timer,
-    label: (t) => t.chatAutomationActionDelay,
-    hint: (t) => t.chatAutomationActionDelayHint,
+    icon: FolderOpen,
+    label: (t) => t.chatAutomationActionFile,
+    hint: (t) => t.chatAutomationActionFileHint,
     defaultData: (t) => ({
-      label: t.chatAutomationActionDelay,
-      delay: { seconds: 5 },
+      label: t.chatAutomationActionFile,
+      file: { op: 'write', path: 'output.txt', content: '{{output}}' },
     }),
   },
   {
@@ -179,27 +194,19 @@ export const ACTION_CATALOG: NodeCatalogEntry[] = [
     }),
   },
   {
-    type: 'action.file',
+    type: 'action.notify',
     kind: 'action',
-    icon: FolderOpen,
-    label: (t) => t.chatAutomationActionFile,
-    hint: (t) => t.chatAutomationActionFileHint,
+    icon: Bell,
+    label: (t) => t.chatAutomationActionNotify,
+    hint: (t) => t.chatAutomationActionNotifyHint,
     defaultData: (t) => ({
-      label: t.chatAutomationActionFile,
-      file: { op: 'write', path: 'output.txt', content: '{{output}}' },
+      label: t.chatAutomationActionNotify,
+      notify: { body: '{{output}}' },
     }),
   },
-  {
-    type: 'action.command',
-    kind: 'action',
-    icon: Terminal,
-    label: (t) => t.chatAutomationActionCommand,
-    hint: (t) => t.chatAutomationActionCommandHint,
-    defaultData: (t) => ({
-      label: t.chatAutomationActionCommand,
-      command: { command: '' },
-    }),
-  },
+]
+
+export const FLOW_CATALOG: NodeCatalogEntry[] = [
   {
     type: 'logic.if',
     kind: 'action',
@@ -212,17 +219,82 @@ export const ACTION_CATALOG: NodeCatalogEntry[] = [
     }),
   },
   {
-    type: 'action.notify',
+    type: 'logic.switch',
     kind: 'action',
-    icon: Bell,
-    label: (t) => t.chatAutomationActionNotify,
-    hint: (t) => t.chatAutomationActionNotifyHint,
+    icon: Split,
+    label: (t) => t.chatAutomationActionSwitch,
+    hint: (t) => t.chatAutomationActionSwitchHint,
     defaultData: (t) => ({
-      label: t.chatAutomationActionNotify,
-      notify: { body: '{{output}}' },
+      label: t.chatAutomationActionSwitch,
+      switch: {
+        cases: [
+          { id: '1', op: 'equals', value: '' },
+          { id: '2', op: 'equals', value: '' },
+        ],
+      },
+    }),
+  },
+  {
+    type: 'logic.delay',
+    kind: 'action',
+    icon: Timer,
+    label: (t) => t.chatAutomationActionDelay,
+    hint: (t) => t.chatAutomationActionDelayHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionDelay,
+      delay: { seconds: 5 },
     }),
   },
 ]
+
+export const ACTION_CATALOG: NodeCatalogEntry[] = [...CORE_CATALOG, ...FLOW_CATALOG]
+
+export type CatalogGroupId = 'core' | 'flow' | 'trigger'
+
+export interface CatalogGroup {
+  id: CatalogGroupId
+  title: (t: I18n) => string
+  hint: (t: I18n) => string
+  entries: NodeCatalogEntry[]
+}
+
+export function catalogGroups(
+  kind: 'trigger' | 'action',
+  presentTypes: string[],
+): CatalogGroup[] {
+  if (kind === 'trigger') {
+    return [{
+      id: 'trigger',
+      title: (t) => t.chatAutomationKindTrigger,
+      hint: (t) => t.chatAutomationEmptyCanvas,
+      entries: TRIGGER_CATALOG,
+    }]
+  }
+  const extraTriggers = TRIGGER_CATALOG.filter((entry) => !presentTypes.includes(entry.type))
+  const groups: CatalogGroup[] = [
+    {
+      id: 'core',
+      title: (t) => t.chatAutomationGroupCore,
+      hint: (t) => t.chatAutomationGroupCoreHint,
+      entries: CORE_CATALOG,
+    },
+    {
+      id: 'flow',
+      title: (t) => t.chatAutomationGroupFlow,
+      hint: (t) => t.chatAutomationGroupFlowHint,
+      entries: FLOW_CATALOG,
+    },
+  ]
+  if (extraTriggers.length) {
+    groups.push({
+      id: 'trigger',
+      title: (t) => t.chatAutomationAddAnotherTrigger,
+      hint: (t) => t.chatAutomationAddAnotherTriggerHint,
+      entries: extraTriggers,
+    })
+  }
+  return groups
+}
 
 export const SLOT_CATALOG: Record<AgentSlot, NodeCatalogEntry> = {
   runtime: {

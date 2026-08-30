@@ -14,6 +14,7 @@ pub const ALLOWED_NODE_TYPES: &[&str] = &[
     "action.file",
     "action.command",
     "logic.if",
+    "logic.switch",
     "logic.delay",
     "agent.runtime",
     "agent.context",
