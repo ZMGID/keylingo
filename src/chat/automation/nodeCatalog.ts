@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { Bell, Bot, Clock, FileText, GitBranch, Globe, Keyboard, MousePointerClick, Sparkles, Wrench } from 'lucide-react'
+import { Bell, Bot, Clipboard, Clock, FileText, FolderOpen, GitBranch, Globe, Keyboard, MousePointerClick, Sparkles, SquarePen, Terminal, Timer, Wrench } from 'lucide-react'
 import { agentSelectedModel, normalizeAgent } from './agentModel'
 import type { I18n } from '../../settings/i18n'
 import type { AgentSlot, AutomationNodeType, FlowNodeData } from './types'
@@ -40,6 +40,21 @@ export function nodeSummary(type: string, data: FlowNodeData, t: I18n): string {
       return normalizeAgent(data.agent).skillIds.join(', ')
     case 'action.notify':
       return clip(data.notify?.body ?? '')
+    case 'action.set': {
+      const fields = data.set?.fields ?? []
+      const keys = fields.map((field) => field.key.trim()).filter(Boolean)
+      return keys.length ? keys.join(', ') : ''
+    }
+    case 'logic.delay':
+      return data.delay ? `${data.delay.seconds}s` : ''
+    case 'action.clipboard':
+      return data.clipboard?.op === 'read' ? t.chatAutomationClipboardRead : t.chatAutomationClipboardCopy
+    case 'action.file':
+      return [data.file?.op === 'write' ? t.chatAutomationFileWrite : t.chatAutomationFileRead, clip(data.file?.path ?? '', 20)]
+        .filter((item) => item && item.trim())
+        .join(' ')
+    case 'action.command':
+      return clip(data.command?.command ?? '')
     case 'action.http': {
       const http = data.http
       if (!http?.url?.trim()) return http?.method ?? ''
@@ -128,6 +143,61 @@ export const ACTION_CATALOG: NodeCatalogEntry[] = [
     defaultData: (t) => ({
       label: t.chatAutomationActionHttp,
       http: { method: 'GET', url: '', headers: '', body: '' },
+    }),
+  },
+  {
+    type: 'action.set',
+    kind: 'action',
+    icon: SquarePen,
+    label: (t) => t.chatAutomationActionSet,
+    hint: (t) => t.chatAutomationActionSetHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionSet,
+      set: { fields: [{ key: 'text', value: '{{output}}' }] },
+    }),
+  },
+  {
+    type: 'logic.delay',
+    kind: 'action',
+    icon: Timer,
+    label: (t) => t.chatAutomationActionDelay,
+    hint: (t) => t.chatAutomationActionDelayHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionDelay,
+      delay: { seconds: 5 },
+    }),
+  },
+  {
+    type: 'action.clipboard',
+    kind: 'action',
+    icon: Clipboard,
+    label: (t) => t.chatAutomationActionClipboard,
+    hint: (t) => t.chatAutomationActionClipboardHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionClipboard,
+      clipboard: { op: 'copy', text: '{{output}}' },
+    }),
+  },
+  {
+    type: 'action.file',
+    kind: 'action',
+    icon: FolderOpen,
+    label: (t) => t.chatAutomationActionFile,
+    hint: (t) => t.chatAutomationActionFileHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionFile,
+      file: { op: 'write', path: 'output.txt', content: '{{output}}' },
+    }),
+  },
+  {
+    type: 'action.command',
+    kind: 'action',
+    icon: Terminal,
+    label: (t) => t.chatAutomationActionCommand,
+    hint: (t) => t.chatAutomationActionCommandHint,
+    defaultData: (t) => ({
+      label: t.chatAutomationActionCommand,
+      command: { command: '' },
     }),
   },
   {

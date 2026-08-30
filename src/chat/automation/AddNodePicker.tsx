@@ -10,19 +10,25 @@ export function AddNodePicker({
 }: {
   kind: 'trigger' | 'action'
   onPick: (entry: NodeCatalogEntry) => void
-  onCancel: () => void
+  onCancel?: () => void
 }) {
   const t = useT()
   const entries = kind === 'trigger' ? TRIGGER_CATALOG : ACTION_CATALOG
   const title = kind === 'trigger' ? t.chatAutomationAddTrigger : t.chatAutomationAddStep
+  const kicker = kind === 'trigger' ? t.chatAutomationKindTrigger : t.chatAutomationKindAction
   return (
-    <div className="kv-automation-picker" role="dialog" aria-label={title}>
-      <div className="kv-automation-picker-head">
-        <span>{title}</span>
-        <IconButton size="sm" variant="ghost" label={t.cancel} onClick={onCancel}>
-          <X size={14} />
-        </IconButton>
-      </div>
+    <aside className="kv-automation-inspector kv-automation-picker" aria-label={title}>
+      <header className="kv-automation-inspector-head">
+        <div className="kv-automation-picker-heading">
+          <div className="kv-automation-inspector-kicker">{kicker}</div>
+          <h2 className="kv-automation-inspector-title">{title}</h2>
+        </div>
+        {onCancel ? (
+          <IconButton size="sm" variant="ghost" label={t.cancel} onClick={onCancel}>
+            <X size={14} />
+          </IconButton>
+        ) : null}
+      </header>
       <div className="kv-automation-picker-list">
         {entries.map((entry) => {
           const Icon = entry.icon
@@ -44,6 +50,6 @@ export function AddNodePicker({
           )
         })}
       </div>
-    </div>
+    </aside>
   )
 }

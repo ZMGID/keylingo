@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+use crate::native_tools::{read_file, run_command, write_file, NativeToolWorkspace};
 use crate::state::AppState;
 
 use super::agent;
@@ -18,6 +19,7 @@ use super::types::{
     Automation, AutomationRun, AutomationRunNode, AutomationRunStarted, FlowEdge, FlowNode,
     NodeOutput, RunOrigin,
 };
+use super::workspace;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_BODY_MAX: usize = 50 * 1024;
@@ -88,15 +90,15 @@ pub fn cancel(app: &AppHandle, id: &str) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(run_id);
-    state.cancel_chat_generation(&super::workspace::conversation_id(id));
-    state.cancel_chat_generation(&super::workspace::external_conversation_id(id, ""));
-    if let Ok(automation) = storage::get(app, id) {
-        for node in automation.nodes {
-            if node.node_type == "action.agent" {
-                state.cancel_chat_generation(&super::workspace::external_conversation_id(
-                    id,
-                    &node.id,
-                ));
+        state.cancel_chat_generation(&workspace::conversation_id(id));
+        state.cancel_chat_generation(&workspace::external_conversation_id(id, ""));
+        if let Ok(automation) = storage::get(app, id) {
+            for node in automation.nodes {
+                if node.node_type == "action.agent" {
+                    state.cancel_chat_generation(&workspace::external_conversation_id(
+                        id,
+                        &node.id,
+                    ));
             }
         }
     }
@@ -326,7 +328,155 @@ async fn execute_node(
                 Some(handle.to_string()),
             ))
         }
+        "action.set" => {
+            let fields = node
+                .data
+                .get("set")
+                .and_then(|v| v.get("fields"))
+                .cloned()
+                .unwrap_or(json!([]));
+            Ok((build_set_output(&fields, prev), None))
+        }
+        "logic.delay" => {
+            execute_delay(app, run_id, node).await?;
+            Ok((prev.clone(), None))
+        }
+        "action.clipboard" => Ok((execute_clipboard(node, prev)?, None)),
+        "action.file" => Ok((execute_file(app, automation_id, node, prev)?, None)),
+        "action.command" => Ok((execute_command(app, automation_id, node, prev).await?, None)),
         other => Err(format!("unsupported node type: {other}")),
+    }
+}
+
+fn build_set_output(fields: &Value, prev: &NodeOutput) -> NodeOutput {
+    let mut map = serde_json::Map::new();
+    if let Some(items) = fields.as_array() {
+        for item in items {
+            let key = item
+                .get("key")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if key.is_empty() {
+                continue;
+            }
+            let value = item.get("value").and_then(Value::as_str).unwrap_or("");
+            map.insert(key.to_string(), json!(interpolate(value, prev)));
+        }
+    }
+    let object = Value::Object(map);
+    let text = serde_json::to_string_pretty(&object).unwrap_or_else(|_| "{}".to_string());
+    NodeOutput::with_json(text, object)
+}
+
+async fn execute_delay(app: &AppHandle, run_id: &str, node: &FlowNode) -> Result<(), String> {
+    let seconds = node
+        .data
+        .get("delay")
+        .and_then(|v| v.get("seconds"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok())))
+        .unwrap_or(1)
+        .clamp(1, 600);
+    let sleep = tokio::time::sleep(Duration::from_secs(seconds));
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if is_cancelled(app, run_id) {
+                    return Err("cancelled".to_string());
+                }
+            }
+        }
+    }
+}
+
+fn execute_clipboard(node: &FlowNode, prev: &NodeOutput) -> Result<NodeOutput, String> {
+    let clipboard = node.data.get("clipboard").cloned().unwrap_or(Value::Null);
+    let op = clipboard
+        .get("op")
+        .and_then(Value::as_str)
+        .unwrap_or("copy");
+    let mut board = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    if op == "read" {
+        let text = board.get_text().map_err(|err| err.to_string())?;
+        return Ok(NodeOutput::from_text(text));
+    }
+    let text = interpolate(
+        clipboard.get("text").and_then(Value::as_str).unwrap_or(""),
+        prev,
+    );
+    board.set_text(&text).map_err(|err| err.to_string())?;
+    Ok(NodeOutput::from_text(text))
+}
+
+fn execute_file(
+    app: &AppHandle,
+    automation_id: &str,
+    node: &FlowNode,
+    prev: &NodeOutput,
+) -> Result<NodeOutput, String> {
+    let file = node.data.get("file").cloned().unwrap_or(Value::Null);
+    let op = file.get("op").and_then(Value::as_str).unwrap_or("write");
+    let path = interpolate(file.get("path").and_then(Value::as_str).unwrap_or(""), prev);
+    let workspace = node_workspace(app, automation_id);
+    if op == "read" {
+        let result = read_file(&workspace, &json!({ "path": path }))?;
+        return Ok(NodeOutput::from_text(result.content));
+    }
+    let content = interpolate(
+        file.get("content").and_then(Value::as_str).unwrap_or(""),
+        prev,
+    );
+    write_file(&workspace, &json!({ "path": path, "content": content }))?;
+    Ok(NodeOutput::with_json(
+        path.clone(),
+        json!({ "path": path, "op": "write" }),
+    ))
+}
+
+async fn execute_command(
+    app: &AppHandle,
+    automation_id: &str,
+    node: &FlowNode,
+    prev: &NodeOutput,
+) -> Result<NodeOutput, String> {
+    let cmd = interpolate(
+        node.data
+            .get("command")
+            .and_then(|v| v.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        prev,
+    );
+    if cmd.trim().is_empty() {
+        return Err("command is empty".to_string());
+    }
+    let workspace = node_workspace(app, automation_id);
+    let state = app.state::<AppState>();
+    let conv_id = workspace::conversation_id(automation_id);
+    let output = run_command(
+        &workspace,
+        30_000,
+        &json!({ "command": cmd }),
+        Some(&*state),
+        Some(&conv_id),
+    )
+    .await?;
+    Ok(NodeOutput::from_text(output))
+}
+
+fn node_workspace(app: &AppHandle, automation_id: &str) -> NativeToolWorkspace {
+    let working_directory = app
+        .state::<AppState>()
+        .settings_read()
+        .chat_tools
+        .native_tools
+        .working_directory
+        .clone();
+    match workspace::workbench_dir(&working_directory, automation_id) {
+        Some(dir) => NativeToolWorkspace::conversation(dir),
+        None => NativeToolWorkspace::standalone(),
     }
 }
 
@@ -705,5 +855,29 @@ mod tests {
         assert_eq!(spec["runtimeKind"], "chat");
         assert_eq!(spec["prompt"], "hello {{output}}");
         assert_eq!(spec["model"], "m");
+    }
+
+    #[test]
+    fn set_interpolates_output_into_fields() {
+        let prev = NodeOutput::from_text("hello");
+        let out = build_set_output(
+            &json!([
+                { "key": "msg", "value": "got {{output}}" },
+                { "key": "", "value": "skip" },
+                { "key": "  ", "value": "also skip" },
+            ]),
+            &prev,
+        );
+        assert_eq!(out.json["msg"], "got hello");
+        assert!(out.json.get("").is_none());
+        assert!(out.text.contains("got hello"));
+    }
+
+    #[test]
+    fn set_empty_fields_outputs_empty_object() {
+        let prev = NodeOutput::from_text("x");
+        let out = build_set_output(&json!([]), &prev);
+        assert_eq!(out.json, json!({}));
+        assert_eq!(out.text, "{}");
     }
 }

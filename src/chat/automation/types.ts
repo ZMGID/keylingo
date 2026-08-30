@@ -7,7 +7,12 @@ export type AutomationNodeType =
   | 'action.agent'
   | 'action.notify'
   | 'action.http'
+  | 'action.set'
+  | 'action.clipboard'
+  | 'action.file'
+  | 'action.command'
   | 'logic.if'
+  | 'logic.delay'
   | 'agent.runtime'
   | 'agent.context'
   | 'agent.tool'
@@ -62,6 +67,38 @@ export interface IfData {
   value: string
 }
 
+export interface SetField {
+  key: string
+  value: string
+}
+
+export interface SetData {
+  fields: SetField[]
+}
+
+export interface DelayData {
+  seconds: number
+}
+
+export type ClipboardOp = 'copy' | 'read'
+
+export interface ClipboardData {
+  op: ClipboardOp
+  text: string
+}
+
+export type FileOp = 'read' | 'write'
+
+export interface FileData {
+  op: FileOp
+  path: string
+  content: string
+}
+
+export interface CommandData {
+  command: string
+}
+
 export type NodeRunStatus = 'running' | 'success' | 'error' | 'skipped'
 
 export interface FlowNodeData {
@@ -73,6 +110,11 @@ export interface FlowNodeData {
   notify?: NotifyData
   http?: HttpData
   if?: IfData
+  set?: SetData
+  delay?: DelayData
+  clipboard?: ClipboardData
+  file?: FileData
+  command?: CommandData
   [key: string]: unknown
 }
 

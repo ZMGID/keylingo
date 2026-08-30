@@ -6,7 +6,15 @@ import { useT } from '../../settings/i18n'
 import { catalogEntry } from './nodeCatalog'
 import { AgentInspector } from './AgentInspector'
 import { slotForNodeType } from './agentModel'
-import { isAttachmentType, isTriggerType, type FlowNode, type IfOp } from './types'
+import {
+  isAttachmentType,
+  isTriggerType,
+  type ClipboardOp,
+  type FileOp,
+  type FlowNode,
+  type IfOp,
+  type SetField,
+} from './types'
 
 function InspectorSection({ title, children }: { title: string, children: ReactNode }) {
   return (
@@ -37,17 +45,31 @@ export function NodeInspector({
   const slot = slotForNodeType(node.type)
   const kind = isTriggerType(node.type)
     ? t.chatAutomationKindTrigger
-    : node.type === 'logic.if'
+    : String(node.type).startsWith('logic.')
       ? t.chatAutomationKindLogic
       : slot
         ? t.chatAutomationKindSlot
         : t.chatAutomationKindAction
-  const usesTemplates = node.type === 'action.notify' || node.type === 'action.http'
+  const usesTemplates = node.type === 'action.notify'
+    || node.type === 'action.http'
+    || node.type === 'action.set'
+    || node.type === 'action.clipboard'
+    || node.type === 'action.file'
+    || node.type === 'action.command'
   const hasParams = node.type === 'trigger.schedule'
     || node.type === 'trigger.hotkey'
     || node.type === 'action.notify'
     || node.type === 'action.http'
     || node.type === 'logic.if'
+    || node.type === 'action.set'
+    || node.type === 'logic.delay'
+    || node.type === 'action.clipboard'
+    || node.type === 'action.file'
+    || node.type === 'action.command'
+  const setFields: SetField[] = node.data.set?.fields?.length
+    ? node.data.set.fields
+    : [{ key: '', value: '' }]
+  const patchSetFields = (fields: SetField[]) => patchData({ ...node.data, set: { fields } })
 
   return (
     <aside className="kv-automation-inspector">
@@ -312,6 +334,182 @@ export function NodeInspector({
                 </FieldBlock>
               ) : null}
             </>
+          ) : null}
+
+          {node.type === 'action.set' ? (
+            <FieldBlock label={t.chatAutomationSetFields}>
+              <div className="flex flex-col gap-3">
+                {setFields.map((field, index) => (
+                  <div key={index} className="flex flex-col gap-2">
+                    <input
+                      className="kv-input"
+                      value={field.key}
+                      placeholder={t.chatAutomationSetKey}
+                      onChange={(event) =>
+                        patchSetFields(setFields.map((item, i) =>
+                          i === index ? { ...item, key: event.target.value } : item,
+                        ))
+                      }
+                    />
+                    <input
+                      className="kv-input"
+                      value={field.value}
+                      placeholder={t.chatAutomationSetValue}
+                      onChange={(event) =>
+                        patchSetFields(setFields.map((item, i) =>
+                          i === index ? { ...item, value: event.target.value } : item,
+                        ))
+                      }
+                    />
+                    {setFields.length > 1 ? (
+                      <button
+                        type="button"
+                        className="kv-automation-inspector-note cursor-pointer border-0 bg-transparent p-0 text-left"
+                        onClick={() => patchSetFields(setFields.filter((_, i) => i !== index))}
+                      >
+                        {t.chatDelete}
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+                <Button size="sm" onClick={() => patchSetFields([...setFields, { key: '', value: '' }])}>
+                  {t.chatAutomationSetAdd}
+                </Button>
+              </div>
+            </FieldBlock>
+          ) : null}
+
+          {node.type === 'logic.delay' ? (
+            <FieldBlock label={t.chatAutomationDelaySeconds}>
+              <input
+                className="kv-input"
+                type="number"
+                min={1}
+                max={600}
+                value={node.data.delay?.seconds ?? 5}
+                onChange={(event) =>
+                  patchData({
+                    ...node.data,
+                    delay: {
+                      seconds: Math.min(600, Math.max(1, Number(event.target.value) || 1)),
+                    },
+                  })
+                }
+              />
+            </FieldBlock>
+          ) : null}
+
+          {node.type === 'action.clipboard' ? (
+            <>
+              <FieldBlock label={t.chatAutomationClipboardOp}>
+                <Select
+                  value={node.data.clipboard?.op ?? 'copy'}
+                  onChange={(op) =>
+                    patchData({
+                      ...node.data,
+                      clipboard: {
+                        op: op as ClipboardOp,
+                        text: node.data.clipboard?.text ?? '',
+                      },
+                    })
+                  }
+                  options={[
+                    { value: 'copy', label: t.chatAutomationClipboardCopy },
+                    { value: 'read', label: t.chatAutomationClipboardRead },
+                  ]}
+                />
+              </FieldBlock>
+              {(node.data.clipboard?.op ?? 'copy') === 'copy' ? (
+                <FieldBlock label={t.chatAutomationClipboardText}>
+                  <textarea
+                    className="kv-textarea"
+                    rows={4}
+                    value={node.data.clipboard?.text ?? ''}
+                    onChange={(event) =>
+                      patchData({
+                        ...node.data,
+                        clipboard: {
+                          op: node.data.clipboard?.op ?? 'copy',
+                          text: event.target.value,
+                        },
+                      })
+                    }
+                  />
+                </FieldBlock>
+              ) : null}
+            </>
+          ) : null}
+
+          {node.type === 'action.file' ? (
+            <>
+              <FieldBlock label={t.chatAutomationFileOp}>
+                <Select
+                  value={node.data.file?.op ?? 'write'}
+                  onChange={(op) =>
+                    patchData({
+                      ...node.data,
+                      file: {
+                        op: op as FileOp,
+                        path: node.data.file?.path ?? '',
+                        content: node.data.file?.content ?? '',
+                      },
+                    })
+                  }
+                  options={[
+                    { value: 'read', label: t.chatAutomationFileRead },
+                    { value: 'write', label: t.chatAutomationFileWrite },
+                  ]}
+                />
+              </FieldBlock>
+              <FieldBlock label={t.chatAutomationFilePath}>
+                <input
+                  className="kv-input"
+                  value={node.data.file?.path ?? ''}
+                  onChange={(event) =>
+                    patchData({
+                      ...node.data,
+                      file: {
+                        op: node.data.file?.op ?? 'write',
+                        path: event.target.value,
+                        content: node.data.file?.content ?? '',
+                      },
+                    })
+                  }
+                />
+              </FieldBlock>
+              {(node.data.file?.op ?? 'write') === 'write' ? (
+                <FieldBlock label={t.chatAutomationFileContent}>
+                  <textarea
+                    className="kv-textarea"
+                    rows={4}
+                    value={node.data.file?.content ?? ''}
+                    onChange={(event) =>
+                      patchData({
+                        ...node.data,
+                        file: {
+                          op: node.data.file?.op ?? 'write',
+                          path: node.data.file?.path ?? '',
+                          content: event.target.value,
+                        },
+                      })
+                    }
+                  />
+                </FieldBlock>
+              ) : null}
+            </>
+          ) : null}
+
+          {node.type === 'action.command' ? (
+            <FieldBlock label={t.chatAutomationCommand}>
+              <textarea
+                className="kv-textarea"
+                rows={4}
+                value={node.data.command?.command ?? ''}
+                onChange={(event) =>
+                  patchData({ ...node.data, command: { command: event.target.value } })
+                }
+              />
+            </FieldBlock>
           ) : null}
 
           {usesTemplates ? (

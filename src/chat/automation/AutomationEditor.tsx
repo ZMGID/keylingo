@@ -28,6 +28,7 @@ import { useT } from '../../settings/i18n'
 import { AddNodePicker } from './AddNodePicker'
 import { automationApi } from './api'
 import { NodeInspector } from './NodeInspector'
+import { RunStatusCapsule } from './RunStatusCapsule'
 import {
   canConnect,
   connectNodes,
@@ -72,7 +73,12 @@ const nodeTypes = {
   'action.agent': FlowNode,
   'action.notify': FlowNode,
   'action.http': FlowNode,
+  'action.set': FlowNode,
+  'action.clipboard': FlowNode,
+  'action.file': FlowNode,
+  'action.command': FlowNode,
   'logic.if': FlowNode,
+  'logic.delay': FlowNode,
   'agent.runtime': FlowNode,
   'agent.context': FlowNode,
   'agent.tool': FlowNode,
@@ -168,14 +174,13 @@ function EditorInner({
   const [selectedId, setSelectedId] = useState<string | null>(
     automation.nodes[0]?.id ?? null,
   )
-  const [picker, setPicker] = useState<'trigger' | 'action' | null>(
-    automation.nodes.length === 0 ? 'trigger' : null,
-  )
+  const [picker, setPicker] = useState<'trigger' | 'action' | null>(null)
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState('')
   const [nodeStatus, setNodeStatus] = useState<Record<string, NodeRunStatus>>({})
   const [nodeOutput, setNodeOutput] = useState<Record<string, string>>({})
   const [runs, setRuns] = useState<AutomationRunSummary[]>([])
+  const [liveStartedAt, setLiveStartedAt] = useState<string | null>(null)
   const viewportRef = useRef<Viewport>(automation.viewport)
   const pendingAddRef = useRef<AddIntent | null>(null)
   const nodesRef = useRef(nodes)
@@ -227,6 +232,7 @@ function EditorInner({
       if (event.automationId !== automation.id) return
       if (event.kind === 'run_started') {
         setRunning(true)
+        setLiveStartedAt(new Date().toISOString())
         setRunError('')
         setNodeStatus({})
         setNodeOutput({})
@@ -248,8 +254,9 @@ function EditorInner({
       }
       if (event.kind === 'run_finished') {
         setRunning(false)
+        setLiveStartedAt(null)
         if (event.status === 'error' && event.error) setRunError(event.error)
-        if (event.status === 'cancelled') setRunError(t.chatAutomationCancelled)
+        if (event.status === 'cancelled') setRunError('')
         void loadRuns()
       }
     }).then((fn) => {
@@ -260,7 +267,7 @@ function EditorInner({
       cancelled = true
       unlisten?.()
     }
-  }, [automation.id, loadRuns, t])
+  }, [automation.id, loadRuns])
 
   const commit = useCallback((nextNodes: AutomationRfNode[], nextEdges: Edge[]) => {
     onChange(persist(automation, nextNodes, nextEdges, viewportRef.current))
@@ -549,30 +556,6 @@ function EditorInner({
     [automation.viewport.x, automation.viewport.y, automation.viewport.zoom],
   )
 
-  const originLabel = (origin: string) => {
-    if (origin === 'manual') return t.chatAutomationTriggerManual
-    if (origin === 'schedule') return t.chatAutomationTriggerSchedule
-    if (origin === 'hotkey') return t.chatAutomationTriggerHotkey
-    return origin
-  }
-  const statusLabel = (status: string) => {
-    if (status === 'success') return t.chatAutomationStatusSuccess
-    if (status === 'error') return t.chatAutomationStatusError
-    if (status === 'running') return t.chatAutomationStatusRunning
-    if (status === 'cancelled') return t.chatAutomationCancelled
-    return status
-  }
-  const formatRunTime = (iso: string) => {
-    const date = new Date(iso)
-    if (Number.isNaN(date.getTime())) return iso.replace('T', ' ').replace('Z', '')
-    return date.toLocaleString(undefined, {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  }
-
   const openPicker = (kind: 'trigger' | 'action') => {
     pendingAddRef.current = null
     setPicker((current) => (current === kind ? null : kind))
@@ -605,9 +588,6 @@ function EditorInner({
           </Button>
         ) : null}
       </header>
-      {runError ? (
-        <p className="kv-automation-run-error">{runError}</p>
-      ) : null}
       <div className="kv-automation-editor-body">
         <div className="kv-automation-canvas">
           <CanvasChromeContext.Provider value={canvasChrome}>
@@ -624,6 +604,8 @@ function EditorInner({
               isValidConnection={isValidConnection}
               onNodeClick={(_, node) => {
                 setSelectedId(node.id)
+                setPicker(null)
+                pendingAddRef.current = null
               }}
               onPaneClick={() => {
                 setSelectedId(null)
@@ -722,25 +704,31 @@ function EditorInner({
                 {hasTrigger ? t.chatAutomationAddStep : t.chatAutomationAddTrigger}
               </Button>
             </div>
-            {picker ? (
-              <AddNodePicker
-                kind={picker}
-                onPick={addFromCatalog}
-                onCancel={() => {
-                  pendingAddRef.current = null
-                  setPicker(null)
-                }}
-              />
-            ) : null}
           </div>
-          {nodes.length === 0 && picker !== 'trigger' ? (
+          {nodes.length === 0 ? (
             <div className="kv-automation-empty">
               <p>{t.chatAutomationEmptyCanvas}</p>
             </div>
           ) : null}
+          <RunStatusCapsule
+            running={running}
+            runs={runs}
+            error={runError}
+            liveStartedAt={liveStartedAt}
+            resetKey={automation.id}
+          />
         </div>
         <div className="kv-automation-side">
-          {selected ? (
+          {picker || !selected ? (
+            <AddNodePicker
+              kind={picker ?? (hasTrigger ? 'action' : 'trigger')}
+              onPick={addFromCatalog}
+              onCancel={picker && selected ? () => {
+                pendingAddRef.current = null
+                setPicker(null)
+              } : undefined}
+            />
+          ) : (
             <NodeInspector
               node={selected}
               onChange={(next) => {
@@ -751,27 +739,7 @@ function EditorInner({
               running={running}
               lastOutput={nodeOutput[selected.id]}
             />
-          ) : (
-            <aside className="kv-automation-inspector">
-              <p className="kv-automation-inspector-empty">{t.chatAutomationInspectorEmpty}</p>
-            </aside>
           )}
-          <div className="kv-automation-runs">
-            <div className="kv-automation-runs-head">{t.chatAutomationExecutions}</div>
-            {runs.length === 0 ? (
-              <p className="kv-automation-inspector-note">{t.chatAutomationExecutionsEmpty}</p>
-            ) : (
-              <ul>
-                {runs.slice(0, 12).map((run) => (
-                  <li key={run.id} className={`is-${run.status}`}>
-                    <span className="kv-automation-run-status">{statusLabel(run.status)}</span>
-                    <span className="kv-automation-run-origin">{originLabel(run.origin)}</span>
-                    <time>{formatRunTime(run.startedAt)}</time>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
         </div>
       </div>
     </div>
