@@ -264,9 +264,9 @@ function applyPose(mood: BlobMood, mt: number, now: number, ctx: PoseCtx, rand: 
 function nextGaze(mood: BlobMood, rand: (a: number, b: number) => number, sign: () => number) {
   if (mood === 'idle') {
     if (rand(0, 1) < 0.28) {
-      return { x: sign() * rand(0.35, 0.85) * 12, y: rand(-0.4, 0.4) * 8, hold: [900, 1800] }
+      return { x: sign() * rand(0.35, 0.85) * 12, y: rand(-0.4, 0.4) * 8, hold: [900, 1800] as [number, number] }
     }
-    return { x: 0, y: 0, hold: [2500, 5500] }
+    return { x: 0, y: 0, hold: [2500, 5500] as [number, number] }
   }
   if (mood === 'think') return { x: sign() * rand(0.5, 1) * 16, y: -rand(0.4, 1) * 10, hold: [1500, 2800] as [number, number] }
   if (mood === 'search') return { x: sign() * rand(0.7, 1) * 16, y: rand(-1, 1) * 10, hold: [550, 1150] as [number, number] }
@@ -333,7 +333,6 @@ export class KivioBlobSim {
   private eyeTo = 0
   private eyeIdx = 0
   private t0 = 0
-  private stateAt = 0
   private last = 0
   private eyeUntil = 0
   private blinkUntil = 0
@@ -354,7 +353,6 @@ export class KivioBlobSim {
   setMood(mood: BlobMood, now = 0) {
     const changed = mood !== this.mood || !this.inited
     this.mood = mood
-    this.stateAt = now
     const list = PLAY[mood]
     this.eyeIdx = 0
     if (changed) this.morphTo(list[0])

@@ -98,6 +98,21 @@ if (typeof window !== 'undefined') {
 
   window.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver
 
+  // KivioBlob2（流式蓝点）用 IntersectionObserver 做可见性节流；jsdom 没有实现。
+  // 测试里不需要真实交叉信息，静默 stub 即可（不回调 = 视为不可见，动画不启动）。
+  if (typeof window.IntersectionObserver === 'undefined') {
+    class IntersectionObserverMock {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords() {
+        return []
+      }
+    }
+    window.IntersectionObserver =
+      IntersectionObserverMock as unknown as typeof IntersectionObserver
+  }
+
   // Virtualizer 读取视口高度走 clientHeight；jsdom 默认 0，给个非零值。
   Object.defineProperty(window.HTMLElement.prototype, 'clientHeight', {
     configurable: true,
